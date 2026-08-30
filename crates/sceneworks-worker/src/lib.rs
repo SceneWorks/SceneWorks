@@ -163,6 +163,12 @@ mod engines;
 // on the lanes that link no engines at all.
 pub mod engine_capability_facts;
 mod gpu;
+// The three-fact producer for imported checkpoints (sc-21484, epic 11037). Not cfg-gated: the
+// source binding and source codec are stated on every platform, and the dense-only capability arm
+// is the answer for macOS/MLX, CPU and the non-candle builds — a fact set that only existed where
+// the candle lane is linked would leave exactly the hosts that take the dense fallback unable to
+// say so.
+mod checkpoint_weight_facts_host;
 pub mod memory_route_registry;
 use gpu::*;
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
@@ -374,6 +380,11 @@ mod sdxl_edit_pid_gpu_smoke;
 // dense diffusers snapshot — the worker-lane validation backing the off-Mac candle routing wire.
 #[cfg(all(test, not(target_os = "macos"), feature = "backend-candle"))]
 mod flux2_dev_gpu_smoke;
+// Real-weight end-to-end worker smoke for a LINKED imported Krea 2 Turbo NVFP4 checkpoint
+// (sc-21716). It drives model_import + image_generate through the checkpoint-plan route and asserts
+// the resulting asset carries the engine's measured mixed/native checkpointWeightFacts receipt.
+#[cfg(all(test, not(target_os = "macos"), feature = "backend-candle"))]
+mod imported_nvfp4_gpu_smoke;
 // Real-weight GPU smoke for the candle Anima 2B lane (epic 10512, sc-10625 — the hardware-gated
 // acceptance extracted from sc-10525). Test-only + candle-only; drives `crate::inference_runtime::load("anima_base" |
 // "anima_aesthetic" | "anima_turbo")` against the dense bf16 circlestone-labs/Anima split_files

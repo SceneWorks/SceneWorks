@@ -21,6 +21,11 @@ const WORKER_MANIFEST = path.resolve(
 );
 const INFERENCE_GIT = "https://github.com/SceneWorks/inference";
 
+// Git reports repository paths without a leading `./`, so `.` is a stable, serializable name for
+// the root Cargo manifest that can never act as a match-all path prefix. An empty string is unsafe:
+// it disappears from the line-oriented inventory and is a prefix of every repository path.
+export const ROOT_CRATE_PREFIX = ".";
+
 /** The single inference revision the worker's Cargo manifest pins. Throws if it is not unique. */
 export function pinnedRevision(manifestPath = WORKER_MANIFEST) {
   const pins = new Set(
@@ -190,32 +195,6 @@ export function scan(repo, revision = pinnedRevision()) {
   return candidates.sort((a, b) => a.path.localeCompare(b.path));
 }
 
-const manifestDeclaresPackage = (source) => /^\s*\[package\]\s*(?:#.*)?$/m.test(source);
-
-/**
- * Derive crate prefixes from one git-tree inventory.
- *
- * A root `Cargo.toml` can be either a package manifest or a virtual workspace manifest. The latter
- * owns no Rust sources: repository-level shared modules may sit outside a member directory and be
- * included by member crates with `#[path]`. Treating those files as an empty-prefix root crate
- * invents a package that Cargo itself does not see. A real root package remains unsupported because
- * the path-prefix coverage format has no unambiguous non-empty spelling for it.
- */
-export function cratePrefixesForTree(files, rootManifest = "") {
-  const rootIsPackage = files.includes("Cargo.toml") && manifestDeclaresPackage(rootManifest);
-  const crateDirs = files
-    .filter((file) => file === "Cargo.toml" || file.endsWith("/Cargo.toml"))
-    .map((file) => (file === "Cargo.toml" ? "" : file.slice(0, -"/Cargo.toml".length)))
-    .filter((dir) => dir !== "" || rootIsPackage)
-    .sort((a, b) => b.length - a.length);
-  const owning = new Set();
-  for (const file of files.filter(productionRustPath)) {
-    const owner = crateDirs.find((dir) => dir === "" || file.startsWith(`${dir}/`));
-    if (owner !== undefined) owning.add(owner);
-  }
-  return owning;
-}
-
 /**
  * Every crate prefix in `revision` that owns at least one production `.rs` file.
  *
@@ -232,26 +211,24 @@ export function scanCrates(repo, revision = pinnedRevision()) {
   const files = execFileSync("git", ["-C", repo, "ls-tree", "-r", "--name-only", revision], {
     encoding: "utf8",
   }).trim().split("\n");
-  const rootManifest = files.includes("Cargo.toml")
-    ? execFileSync("git", ["-C", repo, "show", `${revision}:Cargo.toml`], { encoding: "utf8" })
-    : "";
-  const owning = cratePrefixesForTree(files, rootManifest);
-  // A root-level `Cargo.toml` that directly owns top-level production `.rs` files yields the
-  // EMPTY-STRING prefix. `serializeCrates` would render it as a blank line and `parseCrates` drops
-  // blank lines, so the crate would vanish from the inventory. That fails on count/hash rather than
-  // failing open, but with a message that points nowhere. Reject it here instead, where the cause is
-  // legible: the coverage guard classifies by prefix, and "" is a prefix of everything.
-  if (owning.has("")) {
-    throw new Error(
-      `${revision}: the repository ROOT Cargo.toml directly owns production Rust files, which yields an empty crate prefix. ` +
-        "The crate-coverage guard classifies by prefix and \"\" matches every path, so it cannot be classified. " +
-        "Move the root crate's sources under a named crate directory, or teach scanCrates an explicit label for it.",
-    );
+  const crateDirs = files
+    .filter((file) => file === "Cargo.toml" || file.endsWith("/Cargo.toml"))
+    .map((file) => (file === "Cargo.toml" ? "" : file.slice(0, -"/Cargo.toml".length)))
+    .sort((a, b) => b.length - a.length);
+  const owning = new Set();
+  for (const file of files.filter(productionRustPath)) {
+    const owner = crateDirs.find((dir) => dir === "" || file.startsWith(`${dir}/`));
+    if (owner !== undefined) owning.add(owner || ROOT_CRATE_PREFIX);
   }
   return [...owning].sort((a, b) => a.localeCompare(b));
 }
 
 export function serializeCrates(crates) {
+  if (crates.some((crate) => !crate)) {
+    throw new Error(
+      `empty crate prefix is unsafe; use ${JSON.stringify(ROOT_CRATE_PREFIX)} for the root Cargo manifest`,
+    );
+  }
   return [
     "# Production-Rust crate prefixes in the pinned inference revision (scan-inference-provenance.mjs).",
     "# Every prefix here must be classified in config/inference-third-party-source.json — either by a",

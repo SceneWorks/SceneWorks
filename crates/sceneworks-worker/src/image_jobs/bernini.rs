@@ -401,7 +401,7 @@ pub(super) fn bernini_adapter_resident_bytes(
             .filter(|adapter| {
                 adapter
                     .moe_expert
-                    .map_or(true, |target| target == expert)
+                    .is_none_or(|target| target == expert)
             })
             .cloned()
             .collect();

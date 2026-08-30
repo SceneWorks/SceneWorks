@@ -1,3 +1,6 @@
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
+
 import { describe, expect, it } from "vitest";
 import {
   BBOX_MAX,
@@ -25,7 +28,10 @@ import {
   verifyCaption,
   verifyRaw,
 } from "./ideogramCaption.js";
-import styleInjectionFixturesRaw from "../../../documents/ideogram-style-injection.fixtures.json?raw";
+const styleInjectionFixturesRaw = readFileSync(
+  resolve(process.cwd(), "../..", "documents/ideogram-style-injection.fixtures.json"),
+  "utf8",
+);
 
 // The validated reference render's caption, byte-identical to the engine's
 // `mlx-gen-ideogram/tests/common/mod.rs` CAPTION_JSON — which is itself

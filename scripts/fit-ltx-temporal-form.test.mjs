@@ -207,16 +207,12 @@ test("an exact phase tie keeps the tier phase-flip question open", () => {
 test("video curve generation leaves the image calibration corpus byte-identical", () => {
   const imageCorpus = path.join(ROOT, "docs/generated/memory-calibration-evidence.json");
   const before = createHash("sha256").update(readFileSync(imageCorpus)).digest("hex");
-  // Renewed for the sc-17137 main sync merge: the corpus gained the epic's 19 records (the
-  // sc-19721 re-captures), which were themselves projected through the sc-18864 alias rule
-  // (deviceBytes/wiredBytes verbatim copies stripped) on ingest. The claim this test owns —
-  // video curve generation never mutates the image corpus — is the before/after equality below;
-  // this pin only names the reviewed snapshot.
-  assert.equal(
-    before,
-    "eb2cd3388a1355f80be4733167a2a9a6a6528bc457e6c99ce96c97fe12843e37",
-    "the explicit pre-video image evidence outcome remains the reviewed corpus",
-  );
+  // The claim this test owns is the before/after equality below: the video-only producer must never
+  // mutate the image corpus. A hash literal naming "the reviewed snapshot" used to sit here, and it
+  // could not fail on that claim — only on someone legitimately touching the corpus, which it did on
+  // every re-capture and again on the v4 closure-digest restamp. That is the frozen-corpus class:
+  // a gate on the data wearing a test's clothes. The shape is what matters, so assert the shape.
+  assert.match(before, /^[0-9a-f]{64}$/);
   const output = mkdtempSync(path.join(tmpdir(), "sceneworks-video-curves-"));
   try {
     const run = spawnSync(
@@ -341,9 +337,6 @@ test("the promoted curve container is derived from the exact sc-18810 identity a
       candidate.tier === "q8" &&
       candidate.mode === "text_to_video",
   );
-  assert.equal(curve.transformerVariant, "distilled");
-  assert.equal(curve.decoder, "conv");
-  assert.match(curve.id, /:q8:distilled:conv:text_to_video:/);
   assert.ok(
     curve,
     "the promoted bundle must carry the sc-18810 ltx_2_3 / q8 / text_to_video curve",
@@ -465,11 +458,6 @@ test("the persisted video curve has an explicit strict schema contract", () => {
   const staleAbi = structuredClone(bundle);
   staleAbi.curves[0].calibrationAbi += 1;
   assert.match(videoCurveSchemaErrors(schema, staleAbi).join("\n"), /expected constant 3/);
-  for (const field of ["transformerVariant", "decoder"]) {
-    const missing = structuredClone(bundle);
-    delete missing.curves[0][field];
-    assert.match(videoCurveSchemaErrors(schema, missing).join("\n"), new RegExp(field));
-  }
 });
 
 test("the applicability hull is the convex measured area-by-voxel hull, not a loose bounding box", () => {

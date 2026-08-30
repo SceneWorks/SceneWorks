@@ -1769,6 +1769,12 @@ fn create_app_with_state_mode(
             post(model_library::relocate_model_library),
         )
         .route("/api/v1/models", get(list_models))
+        // The curated managed NVFP4 variants (sc-11043, epic 11037). A STATIC sibling of
+        // `/api/v1/models/:model_id` for the same reason the library routes are.
+        .route(
+            "/api/v1/models/managed-variants",
+            get(checkpoint_library::list_managed_variants),
+        )
         // Linked checkpoint libraries (epic 20398, sc-20635). A STATIC sibling of
         // `/api/v1/models/:model_id`, exactly like `/api/v1/models/import`, so a library
         // operation is never mistaken for a model id.
@@ -3212,7 +3218,7 @@ fn redact_selected_text_encoder_paths(value: &mut String, spellings: &[PrivatePa
                     })
                 && original
                     .get(index + spelling.value.len())
-                    .map_or(true, |next| {
+                    .is_none_or(|next| {
                         if spelling.directory {
                             matches!(next, b'/' | b'\\')
                                 || next.is_ascii_whitespace()
@@ -3237,7 +3243,7 @@ fn redact_selected_text_encoder_paths(value: &mut String, spellings: &[PrivatePa
                         } else if *next == b'.' {
                             original
                                 .get(index + spelling.value.len() + 1)
-                                .map_or(true, |after| {
+                                .is_none_or(|after| {
                                     after.is_ascii_whitespace()
                                         || matches!(
                                             after,

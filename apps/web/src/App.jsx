@@ -22,7 +22,7 @@ import { AccessGate } from "./components/AccessGate.jsx";
 import { Logo } from "./components/Logo.jsx";
 import { StatusDot } from "./components/StatusDot.jsx";
 import { FullscreenPreview, assetSeed } from "./components/assetPanels.jsx";
-import { fallbackModels, isLibraryAsset, terminalStatuses } from "./constants.js";
+import { isLibraryAsset, terminalStatuses } from "./constants.js";
 import { isEditorJob } from "./jobTypes.js";
 import { LibraryScreen } from "./screens/LibraryScreen.jsx";
 import { editModelForAsset, workflowModelType } from "./presetUtils.js";
@@ -52,7 +52,7 @@ import { useJobEvents } from "./hooks/useJobEvents.js";
 import { AppStaticContext, AppLiveContext } from "./context/AppContext.js";
 import { ScreenActiveContext } from "./context/ScreenActiveContext.js";
 import { DEFAULT_MAC_CAPABILITIES } from "./macGating.js";
-import { generationModelsForType, videoModelUsable } from "./modelEligibility.js";
+import { generationModelsForType } from "./modelEligibility.js";
 import { isAccentId } from "./accents.js";
 import { writeDefaultGenerationQuality } from "./generationQuality.js";
 import { persistNavigationPreferences, putUiPreferences } from "./uiPreferences.js";
@@ -574,6 +574,11 @@ export function App() {
   const [macCapabilitiesAuthoritative, setMacCapabilitiesAuthoritative] = useState(false);
   const [macCapabilitiesError, setMacCapabilitiesError] = useState("");
   const [macCapabilitiesLoading, setMacCapabilitiesLoading] = useState(false);
+  // The generation pickers must not treat the hand-authored fallback catalog as proof that a
+  // model is present on this machine. Until GET /models completes its install/availability sweep,
+  // keep the studios in an explicit initializing state instead (the request may legitimately take
+  // tens of seconds on a cold start). A settled refresh keeps the last authoritative catalog live.
+  const [modelCatalogStatus, setModelCatalogStatus] = useState("idle");
   const [trainingTargets, setTrainingTargets] = useState({ schemaVersion: 1, targets: [] });
   const [trainingPresets, setTrainingPresets] = useState({ schemaVersion: 1, presets: [] });
   const [trainingTargetsError, setTrainingTargetsError] = useState("");
@@ -1002,6 +1007,7 @@ export function App() {
   // restoring stale platform facts after a newer request has started.
   const macCapabilitiesRequestRef = useRef(0);
   const refreshModelsRef = useRef(null);
+  const modelCatalogRequestRef = useRef(0);
   const refreshModelAndLorasRef = useRef(null);
   const refreshTrainingTargetsRef = useRef(null);
   const refreshTrainingPresetsRef = useRef(null);
@@ -1354,20 +1360,13 @@ export function App() {
   // loaders are sc-10668+), so they must not be offered as a generation target.
   // Manifest models never set `usable`, so they are unaffected.
   const imageModels = useMemo(() => {
-    const items = generationModelsForType(models, "image");
-    return items.length || models.length ? items : fallbackModels.filter((model) => model.type === "image");
+    return generationModelsForType(models, "image");
   }, [models]);
-  const videoModels = useMemo(() => {
-    const items = generationModelsForType(models, "video");
-    return items.length || models.length
-      ? items
-      : fallbackModels.filter((model) => videoModelUsable(model, macCapabilities));
-  }, [models, macCapabilities]);
-  // Audio models (epic 13400) — same live-catalog-then-fallback split as image/video, consumed by
-  // the Audio Studio (C0/C1). Per-mode eligibility comes from audioModelServesMode.
+  const videoModels = useMemo(() => generationModelsForType(models, "video"), [models]);
+  // Audio models (epic 13400) are resolved from the authoritative live catalog and consumed by
+  // Audio Studio (C0/C1). Per-mode eligibility comes from audioModelServesMode.
   const audioModels = useMemo(() => {
-    const items = generationModelsForType(models, "audio");
-    return items.length || models.length ? items : fallbackModels.filter((model) => model.type === "audio");
+    return generationModelsForType(models, "audio");
   }, [models]);
   const selectedAsset = useMemo(
     () => assets.find((asset) => asset.id === selectedAssetId) ?? assets[0] ?? null,
@@ -2049,13 +2048,28 @@ export function App() {
   }
 
   async function refreshModels({ signal } = {}) {
+    const requestId = ++modelCatalogRequestRef.current;
+    // Do not blank an already-authoritative catalog during an SSE/manual refresh. This state is
+    // specifically the cold-start boundary where no availability answer exists yet.
+    setModelCatalogStatus((current) => (current === "ready" ? current : "loading"));
     try {
       const items = await apiFetch("/api/v1/models", token, { signal });
+      if (requestId !== modelCatalogRequestRef.current) {
+        return refreshFailure("stale");
+      }
       setModels(items);
+      setModelCatalogStatus("ready");
       domainErrors.models("");
       return refreshSuccess(items);
     } catch (err) {
-      if (isAbortError(err)) return refreshFailure("aborted", err);
+      if (requestId !== modelCatalogRequestRef.current) {
+        return refreshFailure("stale", err);
+      }
+      if (isAbortError(err)) {
+        setModelCatalogStatus((current) => (current === "loading" ? "idle" : current));
+        return refreshFailure("aborted", err);
+      }
+      setModelCatalogStatus((current) => (current === "loading" ? "error" : current));
       domainErrors.models(err.message);
       return refreshFailure("error", err);
     }
@@ -3583,6 +3597,7 @@ export function App() {
     videoModels,
     audioModels,
     models,
+    modelCatalogStatus,
     // Mac UI gating (sc-3486)
     macCapabilities,
     macCapabilitiesAuthoritative,
@@ -3704,7 +3719,7 @@ export function App() {
     recentVideoAssets, recentAudioAssets, studioLaunch,
     editorLaunch, clearEditorLaunch, sendAssetToImageEditor, sendAssetToImageEdit,
     rememberLocalGenerationJob, personTracks, createPersonDetectionJob,
-    createPersonTrackJob, saveTrackCorrections, imageModels, videoModels, audioModels, models, macCapabilities,
+    createPersonTrackJob, saveTrackCorrections, imageModels, videoModels, audioModels, models, modelCatalogStatus, macCapabilities,
     macCapabilitiesAuthoritative, macCapabilitiesError, macCapabilitiesLoading,
     refreshMacCapabilities,
     loras, deleteLora, updateLora, fetchLoraEmbeddedTags, deleteModel, deleteModelVariant, createModelDownloadJob, createLoraDownloadJob, createModelConvertJob,

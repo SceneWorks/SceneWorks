@@ -25,6 +25,23 @@ enum GenEvent {
         expected_prompt: String,
         report: gen_core::PromptEnhancementReport,
     },
+    /// The re-assembled three checkpoint facts of THIS load (sc-11045): the runtime handle only
+    /// answers `Generator::checkpoint_weight_facts()` after a materialization, which is strictly
+    /// after the route stamped its pre-load raw settings, so the producing lane rebuilds the fact
+    /// set on the blocking thread once the engine's receipt exists and sends the finished receipt
+    /// object here. Job-scoped rather than per-image: the consumer keeps the latest value
+    /// (publication is last-write-wins engine-side too) and applies it to every subsequent asset
+    /// write, replacing the pre-load `no-runtime-receipt` stamp. Lanes that hold no handle simply
+    /// never produce this variant.
+    //
+    // The producers today are the candle imported-Krea and checkpoint-plan lanes (the routes whose
+    // runtime handles answer `checkpoint_weight_facts()` at this pin), so builds without those
+    // lanes construct nothing here while the consumer arm still compiles everywhere.
+    #[cfg_attr(
+        not(all(not(target_os = "macos"), feature = "backend-candle")),
+        allow(dead_code)
+    )]
+    CheckpointWeightFacts { facts: Value },
     Image {
         index: usize,
         seed: i64,

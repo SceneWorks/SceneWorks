@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import {
   AssetThumbnail,
   assetCanRenderAsAudio,
@@ -422,6 +422,8 @@ function MediaSourcePickerModal({
   const [tab, setTab] = useState("assets");
   const [query, setQuery] = useState("");
   const [selectedIds, setSelectedIds] = useState(() => normalizeSelection(initialSelectedIds, assets, multiple));
+  const selectedIdsRef = useRef(normalizeSelection(initialSelectedIds, assets, multiple));
+  const selectionVersionRef = useRef(0);
   const [characterId, setCharacterId] = useState(characters[0]?.id ?? "");
   const [dragActive, setDragActive] = useState(false);
   const [uploading, setUploading] = useState(false);
@@ -429,8 +431,19 @@ function MediaSourcePickerModal({
   const mediaLabel = mediaKind === "video" ? "video" : "image";
 
   useEffect(() => {
-    setSelectedIds((ids) => normalizeSelection(ids, assets, multiple));
+    setSelectedIds((ids) => {
+      const nextIds = normalizeSelection(ids, assets, multiple);
+      selectedIdsRef.current = nextIds;
+      return nextIds;
+    });
   }, [assets, multiple]);
+
+  function updateSelectedIds(updater) {
+    const nextIds = updater(selectedIdsRef.current);
+    selectedIdsRef.current = nextIds;
+    setSelectedIds(nextIds);
+    return nextIds;
+  }
 
   useEffect(() => {
     if (characterId && characters.some((character) => character.id === characterId)) {
@@ -482,6 +495,7 @@ function MediaSourcePickerModal({
     }
     setUploading(true);
     setUploadError("");
+    const selectionVersion = selectionVersionRef.current;
     try {
       const outcomes = await Promise.allSettled(
         (multiple ? selectedFiles : selectedFiles.slice(0, 1)).map((file) =>
@@ -492,9 +506,17 @@ function MediaSourcePickerModal({
         .filter((outcome) => outcome.status === "fulfilled" && outcome.value?.id && assetMatchesMediaKind(outcome.value, mediaKind))
         .map((outcome) => outcome.value.id);
       const failureCount = outcomes.length - importedIds.length;
-      const nextIds = multiple ? [...new Set([...selectedIds, ...importedIds])] : importedIds.slice(0, 1);
+      // Uploads settle later than card clicks. Merge into the latest selection rather than
+      // the render-time `selectedIds` captured when the upload began. A manual single-select
+      // made while the import was pending wins over the import's automatic selection.
+      const nextIds = updateSelectedIds((currentIds) =>
+        multiple
+          ? [...new Set([...currentIds, ...importedIds])]
+          : selectionVersion === selectionVersionRef.current
+            ? importedIds.slice(0, 1)
+            : currentIds,
+      );
       if (failureCount) {
-        setSelectedIds(nextIds);
         setUploadError(
           importedIds.length
             ? `Imported ${importedIds.length} ${mediaLabel}${importedIds.length === 1 ? "" : "s"}; ${failureCount} failed.`
@@ -526,7 +548,8 @@ function MediaSourcePickerModal({
 
   function renderAssetGrid(emptyLabel) {
     function toggleAsset(asset) {
-      setSelectedIds((ids) => {
+      selectionVersionRef.current += 1;
+      updateSelectedIds((ids) => {
         if (multiple) {
           return ids.includes(asset.id) ? ids.filter((id) => id !== asset.id) : [...ids, asset.id];
         }
@@ -599,7 +622,7 @@ function MediaSourcePickerModal({
           onFiles={handleUpload}
         />
       ) : null}
-      {tab === "upload" && uploadError ? <p className="inline-warning">{uploadError}</p> : null}
+      {uploadError ? <p className="inline-warning">{uploadError}</p> : null}
 
       {tab === "character" ? (
         <div className="dataset-add-character">
@@ -710,6 +733,8 @@ export function AssetPickerModal({
   const [category, setCategory] = useState("all");
   const [query, setQuery] = useState("");
   const [selectedIds, setSelectedIds] = useState(() => normalizeSelection(initialSelectedIds, assets, multiple));
+  const selectedIdsRef = useRef(normalizeSelection(initialSelectedIds, assets, multiple));
+  const selectionVersionRef = useRef(0);
   const [dragActive, setDragActive] = useState(false);
   const [uploading, setUploading] = useState(false);
   const [uploadError, setUploadError] = useState("");
@@ -717,8 +742,19 @@ export function AssetPickerModal({
   const mediaLabel = mediaKind ?? "file";
 
   useEffect(() => {
-    setSelectedIds((ids) => normalizeSelection(ids, assets, multiple));
+    setSelectedIds((ids) => {
+      const nextIds = normalizeSelection(ids, assets, multiple);
+      selectedIdsRef.current = nextIds;
+      return nextIds;
+    });
   }, [assets, multiple]);
+
+  function updateSelectedIds(updater) {
+    const nextIds = updater(selectedIdsRef.current);
+    selectedIdsRef.current = nextIds;
+    setSelectedIds(nextIds);
+    return nextIds;
+  }
 
   // Mirrors MediaSourcePickerModal's upload path: import each file with `select: false` (a
   // field-scoped picker must not hijack the app-wide Library selection), keep only imports of
@@ -734,6 +770,7 @@ export function AssetPickerModal({
     }
     setUploading(true);
     setUploadError("");
+    const selectionVersion = selectionVersionRef.current;
     try {
       const outcomes = await Promise.allSettled(
         (multiple ? selectedFiles : selectedFiles.slice(0, 1)).map((file) =>
@@ -749,9 +786,14 @@ export function AssetPickerModal({
         )
         .map((outcome) => outcome.value.id);
       const failureCount = outcomes.length - importedIds.length;
-      const nextIds = multiple ? [...new Set([...selectedIds, ...importedIds])] : importedIds.slice(0, 1);
+      const nextIds = updateSelectedIds((currentIds) =>
+        multiple
+          ? [...new Set([...currentIds, ...importedIds])]
+          : selectionVersion === selectionVersionRef.current
+            ? importedIds.slice(0, 1)
+            : currentIds,
+      );
       if (failureCount) {
-        setSelectedIds(nextIds);
         setUploadError(
           importedIds.length
             ? `Imported ${importedIds.length} ${mediaLabel} file${importedIds.length === 1 ? "" : "s"}; ${failureCount} failed.`
@@ -790,7 +832,8 @@ export function AssetPickerModal({
   }, [assets, activeCategory, query, searchIndex]);
 
   function toggleAsset(asset) {
-    setSelectedIds((ids) => {
+    selectionVersionRef.current += 1;
+    updateSelectedIds((ids) => {
       if (multiple) {
         return ids.includes(asset.id) ? ids.filter((id) => id !== asset.id) : [...ids, asset.id];
       }

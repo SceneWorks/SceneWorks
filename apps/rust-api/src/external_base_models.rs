@@ -743,7 +743,7 @@ mod tests {
         let mut bytes = Vec::new();
         bytes.extend_from_slice(&(header_bytes.len() as u64).to_le_bytes());
         bytes.extend_from_slice(&header_bytes);
-        bytes.extend(std::iter::repeat(0_u8).take(entries.len() * 4));
+        bytes.extend(std::iter::repeat_n(0_u8, entries.len() * 4));
         std::fs::write(path, bytes).expect("write safetensors");
     }
 

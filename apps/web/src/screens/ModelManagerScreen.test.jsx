@@ -1639,11 +1639,11 @@ describe("ModelManagerScreen quant-tier download panel (sc-8509)", () => {
     expect(labels[0]).toContain("bf16");
     expect(labels[2]).toContain("Q4");
     // Sizes render the ON-DISK footprint (req #1: footprint.diskSizeBytes), not the smaller
-    // compressed downloadSizeBytes. bf16 disk = 24 GB (download 20 GB), q4 disk = 4 GB (download 3 GB).
-    expect(container.textContent).toContain("24.0 GB");
-    expect(container.textContent).toContain("4.0 GB");
-    expect(container.textContent).not.toContain("20.0 GB");
-    expect(container.textContent).not.toContain("3.0 GB");
+    // compressed downloadSizeBytes. bf16 disk = 24 GiB (download 20 GiB), q4 disk = 4 GiB (download 3 GiB).
+    expect(container.textContent).toContain("24.0 GiB");
+    expect(container.textContent).toContain("4.0 GiB");
+    expect(container.textContent).not.toContain("20.0 GiB");
+    expect(container.textContent).not.toContain("3.0 GiB");
     // The installed tier reports installed; the others report not installed.
     const q8Row = rows.find((row) => row.querySelector(".model-tier-label").textContent.includes("Q8"));
     expect(q8Row.querySelector(".status-badge").textContent).toBe("installed");

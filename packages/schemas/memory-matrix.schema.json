@@ -539,7 +539,8 @@
   ],
   "properties": {
     "schemaVersion": {
-      "description": "2 (SC-15812): backend-scoped story ownership. 3 (sc-16268): removed per-cell evidenceRevision. 4 (SC-15969): added rung-4 survey rows. 5 (SC-16060): split implementation and memory-characterization claims. 6 (SC-15823): adds Runtime verified so base-only runtime activation cannot masquerade as Full Verified, and publishes complete/runtime-complete calibration counts. 7 (sc-18099): `cells` is the planned-or-evidenced SUBSET of the catalog cross-product rather than the cross-product itself; `coverage`, `models[].axes` and `manifestScopes` added and required; `summary` gained publishedCells/elidedCells/elidedByState/publicationPredicate; `modelSlices` entries may be empty; `rung4SurveyRows` absorbed the family-level summary/blockStacks/findings that `cells[].rung4Survey` no longer carries; `cells[].evidence` replaced declaredCalibration/loadability with a `manifestScope` key into `manifestScopes`; `calibrationRuns[].record` is a projection of the evidence-bundle row. 8 (sc-18815): the model universe is MODALITY-AWARE rather than `type === \"image\"`. `summary.imageModels` was REMOVED and replaced by `catalogEntries` + `catalogEntriesByModality` \u2014 not additive, because a reader indexing `imageModels` now gets `undefined` rather than a wrong number, which is the point; `models[]` gained required `modality` and `resolvedRoutes` and its count moved 53 -> 63; `models[].backends` and `owningModelStories` may be EMPTY (an entry the routing catalog routes nowhere); `cells[].owningModelStory` may be `null` (video cells have no per-entry owner); `cells[].rung4Survey` gained a required `surveyed` discriminator and its three verdict fields became nullable; `rung4SurveyRows[].familyStory` may be a family NAME rather than a story id; `summary` gained `unroutedEntries`, `videoMlxStagedStaticCoverage`(+`Denominator`) and `rung4Survey.pendingFamilyBackends`. 9 (SC-18783): LTX-2.5 planned pipeline identity and evidence summaries carry transformerVariant and decoder axes.",
+      "description": "2 (SC-15812): backend-scoped story ownership. 3 (sc-16268): removed per-cell evidenceRevision. 4 (SC-15969): added rung-4 survey rows. 5 (SC-16060): split implementation and memory-characterization claims. 6 (SC-15823): adds Runtime verified so base-only runtime activation cannot masquerade as Full Verified, and publishes complete/runtime-complete calibration counts. 7 (sc-18099): `cells` is the planned-or-evidenced SUBSET of the catalog cross-product rather than the cross-product itself; `coverage`, `models[].axes` and `manifestScopes` added and required; `summary` gained publishedCells/elidedCells/elidedByState/publicationPredicate; `modelSlices` entries may be empty; `rung4SurveyRows` absorbed the family-level summary/blockStacks/findings that `cells[].rung4Survey` no longer carries; `cells[].evidence` replaced declaredCalibration/loadability with a `manifestScope` key into `manifestScopes`; `calibrationRuns[].record` is a projection of the evidence-bundle row. 8 (sc-18815): the model universe is MODALITY-AWARE rather than `type === \"image\"`. `summary.imageModels` was REMOVED and replaced by `catalogEntries` + `catalogEntriesByModality` \u2014 not additive, because a reader indexing `imageModels` now gets `undefined` rather than a wrong number, which is the point; `models[]` gained required `modality` and `resolvedRoutes` and its count moved 53 -> 63; `models[].backends` and `owningModelStories` may be EMPTY (an entry the routing catalog routes nowhere); `cells[].owningModelStory` may be `null` (video cells have no per-entry owner); `cells[].rung4Survey` gained a required `surveyed` discriminator and its three verdict fields became nullable; `rung4SurveyRows[].familyStory` may be a family NAME rather than a story id; `summary` gained `unroutedEntries`, `videoMlxStagedStaticCoverage`(+`Denominator`) and `rung4Survey.pendingFamilyBackends`. 9 (sc-21715): `summary.calibrationRunsByStatus` PARTITIONS the evidence bundle rather than counting two of its statuses — it gained required `gated` and `negativeComplete` keys, so its values sum to `summary.calibrationRuns` (which has always counted every record, whatever its status) by construction. A version-8 reader that took `complete + runtimeComplete` as the bundle size is wrong the moment a non-certifying receipt is admitted.",
+      "$comment": "10 (SC-18783): LTX-2.5 planned pipeline identities and evidence summaries carry transformerVariant and decoder axes.",
       "const": 10
     },
     "generatedFrom": {
@@ -595,6 +596,7 @@
         "videoMlxStagedStaticCoverage",
         "videoMlxStagedStaticCoverageDenominator",
         "fullModels",
+        "calibrationRuns",
         "calibrationRunsByStatus",
         "rung4Survey"
       ],
@@ -662,13 +664,21 @@
           "type": "string",
           "minLength": 1
         },
+        "calibrationRuns": {
+          "description": "sc-21715. EVERY record in docs/generated/memory-calibration-evidence.json, whatever its status — not the certifying subset. It answers \"how many receipts exist\"; the top-level `calibrationRuns.length` answers \"how many bound to a published coordinate\", and `calibrationRunsByStatus` splits this total by what each receipt certifies. The three are deliberately different numbers: a `gated` capture and an out-of-matrix receipt each move some of them and not others, and collapsing them would hide exactly that.",
+          "type": "integer",
+          "minimum": 0
+        },
         "calibrationRunsByStatus": {
+          "description": "sc-21715. A PARTITION of the evidence bundle by record status: one key per member of the bundle schema's `$defs.record.properties.status` enum, so the values sum to `calibrationRuns`. Until version 9 this held only the two certifying statuses, which equalled the bundle size only while the corpus contained nothing else.",
           "type": "object",
           "additionalProperties": false,
-          "required": ["complete", "runtimeComplete"],
+          "required": ["complete", "runtimeComplete", "gated", "negativeComplete"],
           "properties": {
             "complete": { "type": "integer", "minimum": 0 },
-            "runtimeComplete": { "type": "integer", "minimum": 0 }
+            "runtimeComplete": { "type": "integer", "minimum": 0 },
+            "gated": { "type": "integer", "minimum": 0 },
+            "negativeComplete": { "type": "integer", "minimum": 0 }
           }
         },
         "rung4Survey": {

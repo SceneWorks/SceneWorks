@@ -411,6 +411,32 @@ function prefillDisposition(key) {
   return ADVANCED_PREFILL[key]?.prefill ?? PREFILL_NONE;
 }
 
+// Shared workflows cross a trust boundary before they reach the number-backed controls in a
+// studio. Keep the list beside the prefill registry: these are the control values that may safely
+// be coerced to a finite number, while every other scalar retains its own meaning and shape.
+const NUMERIC_ADVANCED_PREFILL_KEYS = new Set([
+  "schedulerShift",
+  "steps",
+  "guidanceScale",
+  "ipAdapterScale",
+  "controlnetConditioningScale",
+  "trueCfgScale",
+  "strength",
+  "textStyleGain",
+  "controlScale",
+]);
+
+function sharedRecipeNumber(value) {
+  if (
+    (typeof value !== "number" && typeof value !== "string") ||
+    (typeof value === "string" && value.trim() === "")
+  ) {
+    return null;
+  }
+  const number = Number(value);
+  return Number.isFinite(number) ? number : null;
+}
+
 // ---- The adapter --------------------------------------------------------------------------
 
 // The seed of THIS image, as the launch's `replaySeed`.
@@ -454,7 +480,15 @@ export function recipeFromWorkflowShare(
   const rawSettings = {};
   for (const [key, value] of Object.entries(share.advanced ?? {})) {
     if (value !== null && value !== undefined && prefillDisposition(key) !== PREFILL_NONE) {
-      rawSettings[key] = value;
+      if (NUMERIC_ADVANCED_PREFILL_KEYS.has(key)) {
+        const number = sharedRecipeNumber(value);
+        if (number === null) {
+          continue;
+        }
+        rawSettings[key] = number;
+      } else {
+        rawSettings[key] = value;
+      }
     }
   }
   if (!styleIdResolved(report)) {

@@ -265,9 +265,11 @@ Ordered because SceneWorks consumes inference by exact commit:
    branch, `node scripts/bump-inference.mjs --sha <inference-main-sha40>`,
    regenerate only what current CI on the PR requires, merge through the feature
    branch. Then run any SceneWorks stories that were waiting on the new engine.
-5. **The epic's one measurement campaign**, if the epic calls for one,
-   immediately after the bump (the bump stales the records; bump-then-capture is
-   the only ordering that yields current evidence).
+5. **The epic's one measurement campaign**, if the epic calls for one, after the
+   implementation is stable. The pin recorded by a receipt is capture
+   provenance; moving the pin does not invalidate that receipt and never, by
+   itself, authorizes or requires another campaign. Re-capture only for a real
+   measurement-contract or provider-behavior change, or on explicit request.
 6. Open one PR from the SceneWorks feature branch to `main`. Body: epic link and
    story list, final inference pin and the inference `main` PR, migrations and
    compatibility decisions, known limitations. The PR itself runs `nax-worker`

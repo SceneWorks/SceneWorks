@@ -16,8 +16,14 @@ use tempfile::TempDir;
 
 use sceneworks_core::checkpoint_import::{ManagedProvenanceV1, SourceLocatorV1};
 use sceneworks_core::checkpoint_ingest::{
-    active_staging_ids, sanitize_provenance_url, sweep_staging, ManagedIngest, ManagedIngestError,
+    sanitize_provenance_url, sweep_staging, ManagedIngest, ManagedIngestError,
 };
+// Its only consumer is `the_active_staging_set_keeps_a_live_transfer_and_releases_a_crash_orphan`,
+// which is `#[cfg(unix)]` for the mtime backdating that separates a live transfer from an orphan.
+// Ungated, the import is dead on Windows and `cargo clippy --all-targets -- -D warnings` fails
+// there — a break no CI lane sees, because no lane runs clippy on Windows.
+#[cfg(unix)]
+use sceneworks_core::checkpoint_ingest::active_staging_ids;
 use sceneworks_core::checkpoint_plan_store::{
     linked_checkpoint_id, managed_checkpoint_id, CheckpointPlanError, CheckpointPlanStore,
     BINDINGS_DIR, PLANS_DIR,
@@ -177,18 +183,18 @@ struct FailingReader {
 impl Read for FailingReader {
     fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
         if self.position >= self.fail_after {
-            // `ErrorKind::StorageFull` is stable only since 1.83 and the workspace MSRV is 1.80,
-            // so the ENOSPC message is carried rather than the kind. The ingest treats every
-            // transfer error the same way, and the assertion is on the message.
-            return Err(io::Error::other("No space left on device (ENOSPC)"));
+            return Err(io::Error::new(
+                io::ErrorKind::StorageFull,
+                "No space left on device (ENOSPC)",
+            ));
         }
         let take = buffer.len().min(self.fail_after - self.position);
         let take = take.min(self.bytes.len() - self.position);
         if take == 0 {
-            // `ErrorKind::StorageFull` is stable only since 1.83 and the workspace MSRV is 1.80,
-            // so the ENOSPC message is carried rather than the kind. The ingest treats every
-            // transfer error the same way, and the assertion is on the message.
-            return Err(io::Error::other("No space left on device (ENOSPC)"));
+            return Err(io::Error::new(
+                io::ErrorKind::StorageFull,
+                "No space left on device (ENOSPC)",
+            ));
         }
         buffer[..take].copy_from_slice(&self.bytes[self.position..self.position + take]);
         self.position += take;

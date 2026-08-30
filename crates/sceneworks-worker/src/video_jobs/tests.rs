@@ -6947,6 +6947,41 @@ fn video_route_replace_person_dispatches_by_model() {
     assert_eq!(resolve_video_route(&unknown, &settings), VideoRoute::Stub);
 }
 
+/// VACE-Fun has no procedural fallback: its capability check is run before project/output planning,
+/// and rejects modes that the real provider does not implement.
+#[test]
+fn vace_fun_capability_refuses_before_output_planning() {
+    let settings = Settings::from_env();
+    let unsupported = request(json!({
+        "projectId": "p", "model": "wan_2_2_vace_fun_14b", "mode": "text_to_video",
+    }));
+    let error = validate_vace_fun_capability(&unsupported, &settings)
+        .expect_err("unsupported VACE-Fun modes must not reach procedural video output");
+    assert!(
+        error.to_string().contains("supports only replace_person"),
+        "the refusal must state the unavailable capability: {error}"
+    );
+
+    let source = include_str!("mod.rs");
+    let handler = source
+        .split_once("pub(crate) async fn run_video_generate_job(")
+        .expect("video handler")
+        .1
+        .split_once("let backend = backend_label")
+        .expect("route setup boundary")
+        .0;
+    let validation = handler
+        .find("validate_vace_fun_capability(&request, settings)?;")
+        .expect("VACE-Fun capability gate");
+    let output_plan = handler
+        .find("let plan = VideoPlan::new(&request, &project_path);")
+        .expect("video output plan");
+    assert!(
+        validation < output_plan,
+        "VACE-Fun must be refused before the output plan can create an asset directory"
+    );
+}
+
 // sc-8828 (F-026): the candle sibling — `resolve_candle_video_route`. Locks the `backend_candle_enabled`
 // gate (off → Stub, so routing is unchanged until parity) + the mode/model dispatch.
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
@@ -6965,6 +7000,19 @@ fn candle_video_route_gates_on_backend_flag_then_mode() {
             .expect("route resolution must not fail for this fixture"),
         CandleVideoRoute::Stub,
     );
+    let disabled_vace_fun = request(json!({
+        "projectId": "p", "model": "wan_2_2_vace_fun_14b", "mode": "replace_person",
+    }));
+    let error = resolve_candle_video_route(&disabled_vace_fun, &settings)
+        .expect_err("VACE-Fun must not reach the procedural stub when Candle is disabled");
+    match error {
+        WorkerError::InvalidPayload(message) => assert!(
+            message.contains("enabled native Candle backend")
+                && message.contains("no real VACE-Fun backend is available"),
+            "the unavailable-capability error must name the real cause: {message}"
+        ),
+        other => panic!("expected typed VACE-Fun capability refusal, got {other:?}"),
+    }
     let disabled_eros = request(json!({
         "projectId": "p", "model": "ltx_2_3_eros", "mode": "text_to_video",
     }));
@@ -7085,11 +7133,11 @@ fn candle_vace_fun_dispatch_is_dedicated_to_person_replace() {
         let unsupported = request(json!({
             "projectId": "p", "model": "wan_2_2_vace_fun_14b", "mode": mode,
         }));
-        assert_eq!(
-            resolve_candle_video_route(&unsupported, &settings)
-                .expect("route resolution must not fail for this fixture"),
-            CandleVideoRoute::Stub,
-            "VACE-Fun {mode} must not cross-route to a base or single-expert VACE engine",
+        let error = resolve_candle_video_route(&unsupported, &settings)
+            .expect_err("VACE-Fun {mode} must fail rather than reach a stub or different engine");
+        assert!(
+            error.to_string().contains("supports only replace_person"),
+            "VACE-Fun {mode} must state its unavailable capability: {error}"
         );
         assert!(
             runtime_descriptor_engine_ids("wan_2_2_vace_fun_14b", mode).is_empty(),

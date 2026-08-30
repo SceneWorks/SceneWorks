@@ -666,12 +666,10 @@ node scripts/memory-calibration-harness.mjs run \
 > **No `--resume` here, and RUN `plan` FIRST.** This recipe used to pass
 > `--resume docs/generated/memory-calibration-evidence.json`, which silently no-ops the most common
 > reason to be reading this runbook. `--resume` suppresses cases that were already ATTEMPTED, judged
-> on repository identity with the closure digest deliberately stripped from both sides — so a record
-> staled by an inference pin bump still counts as attempted, and `run --resume` captures nothing
-> while exiting 0. Measured on sc-19721: `plan --resume` returned 0 of the 7 fixtures the bump had
-> just demoted; without it, all 7 resolved, for 19 cases. Both CI lanes omit `--resume` from `run`.
-> Always `plan` both ways before holding an exclusive GPU window — the diff between the two fixture
-> lists IS your re-capture set. See
+> on repository identity with the closure digest deliberately stripped from both sides. Omit it only
+> when a real measurement-contract or provider-behavior change, or an explicit request, requires
+> re-running an attempted case. A pin change alone is provenance movement and does not justify a
+> re-capture. Always inspect the plan before holding an exclusive GPU window. See
 > [memory-calibration-harness.md](memory-calibration-harness.md) for the mechanism.
 
 Then schema-check the raw bundle before doing anything else:
@@ -709,9 +707,9 @@ Flag notes, all from `memory-calibration-harness.mjs:1186-1233`:
   probe all match. **That is its ONLY correct use: resuming an interrupted sweep of the same
   revision.** Suppression is blind to the closure digest in both directions
   (`operationallyAttemptedLogicalIds`), by design — it decides whether to re-run a multi-hour
-  capture, not whether the evidence is current. So it must never be used to re-capture evidence a
-  pin bump staled: those records still read as attempted. For a re-capture, omit it on `run` and
-  pass it on `ingest`, where it means the merge BASE instead.
+  capture, not whether the evidence remains applicable. For a genuinely required re-capture, omit
+  it on `run` and pass it on `ingest`, where it means the merge BASE instead. Pin movement alone is
+  not such a requirement.
 
 ### 6b. Through the guarded dispatch
 
@@ -767,11 +765,19 @@ runs `assess-reuse` and **asserts the verdict is `unable_to_amortize`** before c
 ```bash
 gh workflow run windows-candle.yml --ref main \
   -f run_five_rung_reference=true \
-  -f provision_krea_snapshot=false \
+  -f provision_snapshot=false \
   -f inference_revision=<exact adapter INFERENCE_PIN> \
-  -f krea_repository=SceneWorks/krea-2-turbo-mlx \
-  -f krea_revision=<exact 40-hex artifact revision>
+  -f provision_repository=SceneWorks/krea-2-turbo-mlx \
+  -f provision_revision=<exact 40-hex artifact revision>
 ```
+
+🔴 **These are the post-sc-18677 input names.** Provisioning was generalized away from the
+hardcoded Krea reference and the inputs were **renamed, not duplicated**:
+`provision_krea_snapshot` → `provision_snapshot`, `krea_repository` → `provision_repository`,
+`krea_revision` → `provision_revision` (windows-candle.yml, `workflow_dispatch` header). The old
+spellings are silently ignored rather than rejected, and because an omitted `workflow_dispatch`
+input takes its **default**, a dispatch using them still runs — against whatever the defaults say.
+Verified against the real dispatch in sc-11045 (run 33000590976).
 
 Captures fixture `fresh-five-rung-krea-q4-1024-seed16402-step2` **twice** — once `--fresh-per-case`,
 once `--batch-rungs` — schema-checks both and runs `compare-reuse` between them.

@@ -150,10 +150,10 @@ node scripts/memory-calibration-harness.mjs plan \
   --resume docs/generated/memory-calibration-evidence.json
 ```
 
-`plan --resume` answers "what has NEVER been attempted". For a RE-capture — evidence that exists but
-has been staled by a pin bump — drop `--resume`, or it will report nothing outstanding and you will
-hold a GPU window for a no-op. Run it both ways and diff the fixture lists; the difference IS the set
-of cells whose records exist but are no longer current.
+`plan --resume` answers "what has NEVER been attempted". For an explicitly required re-capture after
+a real measurement-contract or provider-behavior change, drop `--resume`, or it will report nothing
+outstanding and you will hold a GPU window for a no-op. A pin change alone is provenance movement,
+not a reason to re-capture.
 
 ### ALWAYS `plan` BEFORE HOLDING A CAPTURE WINDOW
 
@@ -170,15 +170,10 @@ produces NOTHING while exiting 0.**
 `--resume` skips cases that were already attempted, and "already attempted" is decided on repository
 IDENTITY with the closure digest deliberately stripped from both sides
 (`memory-calibration-harness.mjs`, `operationallyAttemptedLogicalIds`). The code says why: that check
-decides whether to re-run a multi-hour capture, not whether the evidence is current — currency is
-`evidenceSemantics`, which reads the digest and fails closed. The consequence is exact and
-counter-intuitive: **a record staled by an inference pin bump still counts as already attempted**, so
-`run --resume` no-ops precisely when a pin bump is what made the re-capture necessary.
-
-Measured on sc-19721: with `--resume`, `plan` returned 0 of the 7 fixtures whose cells the pin bump
-had just demoted; without it, all 7 resolved, for 19 cases. `.github/workflows/macos-mlx.yml`'s Qwen
-arm has always omitted `--resume` from `run` for this reason — the workflow was right and this
-document was wrong.
+decides whether to re-run a multi-hour capture, not whether the evidence remains applicable — that
+is decided from the provider-specific measurement contract and compile closure. `run --resume`
+therefore no-ops for any already-attempted record. Omit it only when a real change or an explicit
+request requires re-running those cases; never omit it merely because the repository pin moved.
 
 Run an authoritative provider adapter:
 
@@ -488,8 +483,7 @@ enumerates candidate tile, overlap, attention-chunk, and transformer-window comb
 Matrix ingestion binds a record to one cell and independently checks complete status, quality,
 executed range, calibration fingerprint, exact runtime strategy parameters, width/height/batch/frame
 geometry envelope, artifact revision/variant, and resolved loadability. A gated record remains
-`gated` even when its SHAs match. A complete authoritative record is `current` only when its clean
-inference SHA matches the exact workspace pin; SceneWorks invalidation is owned by the provider ABI
-fingerprint checked by `calibrationBinding`. The captured SceneWorks revision and matrix source-tree
-digest remain provenance, not a second invalidation gate. Exact records never promote an aggregate
-geometry or parameter envelope.
+`gated` even when its SHAs match. Applicability is owned by the provider ABI fingerprint and
+provider-specific compile-closure digest checked by `calibrationBinding`; the captured inference,
+SceneWorks, and matrix source revisions remain provenance, not invalidation gates. Exact records
+never promote an aggregate geometry or parameter envelope.

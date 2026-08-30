@@ -601,9 +601,14 @@ pub(crate) async fn submit_full_finetune_job(
         config["advanced"]["mixedPrecision"] = full_config["mixedPrecision"].clone();
         config["advanced"]["gradientCheckpointing"] = full_config["gradientCheckpointing"].clone();
     }
-    // The full-tune memory envelope scales with the training resolution; keep the submit gate
-    // out of the way so this test is about registration, not about the gate (which sc-14056 pins).
-    config["resolution"] = json!(256);
+    // The full-tune memory envelope scales with the training resolution. Use the target's
+    // smallest advertised resolution so this test remains about registration while still
+    // exercising a request the shared target-limit boundary accepts.
+    config["resolution"] = target["limits"]["resolutions"]
+        .as_array()
+        .and_then(|resolutions| resolutions.first())
+        .cloned()
+        .expect("Mage-Flow advertises at least one training resolution");
 
     let (status, job) = request(
         app.clone(),

@@ -65,7 +65,7 @@ import {
   stagedResidencyIsAvailable,
   strategyStatus,
 } from "./generate-memory-matrix.mjs";
-import { logicalCaseId, recordId } from "./memory-calibration-harness.mjs";
+import { logicalCaseId, RECORD_STATUSES, recordId } from "./memory-calibration-harness.mjs";
 import { recordsNeedingDigest } from "./backfill-closure-digests.mjs";
 import { stripJsoncComments } from "./lib/jsonc.mjs";
 import { stripInertLines } from "./lib/source-revision.mjs";
@@ -2697,7 +2697,7 @@ test("a structurally-N/A rung 1 satisfies the provider's own rung-4 edge vacuous
   }
 });
 
-test("the rung-4 prerequisite records cover every advertised lane, exactly and currently", async () => {
+test("the rung-4 prerequisite records cover every advertised lane and retain provenance", async () => {
   const matrix = await buildMatrix({ publish: false });
   // The IMAGE half of the universe, matching the fence's own scope: the derivation script walks
   // the 20 image families, and the video lanes sc-18815 admitted fall back to the direct
@@ -2712,9 +2712,7 @@ test("the rung-4 prerequisite records cover every advertised lane, exactly and c
   const parse = (mutate) => {
     const records = JSON.parse(JSON.stringify(base));
     mutate(records);
-    return parseRung4ContractPrerequisites(JSON.stringify(records), {
-      pin: records.inferenceRevision,
-    });
+    return parseRung4ContractPrerequisites(JSON.stringify(records));
   };
   const cover = (mutate) =>
     assertRung4PrerequisiteRecordsCoverEveryFamily(parse(mutate), matrix.models);
@@ -2745,10 +2743,10 @@ test("the rung-4 prerequisite records cover every advertised lane, exactly and c
   );
   assert.throws(
     () =>
-      parseRung4ContractPrerequisites(JSON.stringify(base), {
-        pin: "0".repeat(40),
+      parse((records) => {
+        records.inferenceRevision = "not-a-full-revision";
       }),
-    /is keyed to .* but Cargo pins/,
+    /must record the full inference revision/,
   );
   assert.throws(
     () =>
@@ -3334,8 +3332,14 @@ test("an out-of-matrix record has to date the tree its evidence resolves in (sc-
   // sc-19751/sc-19758 removed elsewhere. The load-bearing assertion is `notEqual(revision, pin)`
   // below; all this needs to establish is that a pin was really parsed, so a regex that stopped
   // matching cannot turn that comparison into `undefined !== "79f02e..."` and pass vacuously.
-  const pin = /rev = "([0-9a-f]{40})"/.exec(cargo)?.[1];
-  assert.match(pin ?? "", /^[0-9a-f]{40}$/, "current inference pin must be parseable");
+  const pin = cargo.match(
+    /candle-kernels\s*=\s*\{[^}]*?github\.com\/SceneWorks\/inference[^}]*?rev\s*=\s*"([0-9a-f]{40})"/,
+  )?.[1];
+  assert.match(
+    pin ?? "",
+    /^[0-9a-f]{40}$/,
+    "the test must resolve the current full inference pin before comparing survey revisions",
+  );
 
   // The two backends now resolve at DIFFERENT revisions, per field's own definition: sc-18662's
   // streamed-request measurement re-surveyed the MLX record against the story branch, while the
@@ -3770,6 +3774,32 @@ test("a survey edit rotates the source fingerprint", async () => {
   assert.equal(edited.generatedFrom.sources.rung4Survey.path, SOURCE_PATHS.rung4Survey);
 });
 
+test("the published status tally's key set is the bundle schema's status enum (sc-21715)", async () => {
+  // The generator derives `summary.calibrationRunsByStatus` from `RECORD_STATUSES`, so a status
+  // added to the bundle schema appears in the object automatically — but the matrix schema pins the
+  // key set with `additionalProperties: false` and a fixed `required`, so the artifact would then
+  // fail validation with an opaque "additional properties not allowed". Connecting the two is what
+  // turns that into a legible failure here, the same way the rung-4 vocabularies are connected
+  // below. Both `required` and `properties` are checked: either alone would let a key be admitted
+  // and not demanded, or demanded and not admitted.
+  const schema = JSON.parse(
+    await readFile(new URL("../packages/schemas/memory-matrix.schema.json", import.meta.url), "utf8"),
+  );
+  const tally = schema.properties.summary.properties.calibrationRunsByStatus;
+  const expected = RECORD_STATUSES.map((status) =>
+    status.replace(/_([a-z])/g, (_, letter) => letter.toUpperCase()),
+  );
+  assert.deepEqual([...tally.required].sort(), [...expected].sort());
+  assert.deepEqual(Object.keys(tally.properties).sort(), [...expected].sort());
+  assert.equal(tally.additionalProperties, false);
+  // ...and the artifact carries exactly that key set, so the schema and the writer cannot agree
+  // with each other while the shipped document holds something else.
+  const matrix = JSON.parse(
+    await readFile(new URL("../docs/generated/memory-matrix.json", import.meta.url), "utf8"),
+  );
+  assert.deepEqual(Object.keys(matrix.summary.calibrationRunsByStatus).sort(), [...expected].sort());
+});
+
 test("the survey vocabulary, the generator's enums and the published schema agree", async () => {
   // Three copies of the same vocabulary — the survey file documents it, the generator validates
   // against it, the schema constrains the artifact. Nothing connected them, so a value added to one
@@ -4175,14 +4205,13 @@ test("request-peak tier overrides fail closed", async () => {
 const KREA_CONTROL_CELL =
   "krea_2_turbo:krea_2_turbo_control:mlx:q4:text_to_image:control:bounded_decode";
 
-/// The shipped bundle re-stamped onto the current inference pin. Every shipped record is
-/// `historical` — its inference revision predates the pin — so promotion, which is a property of
-/// CURRENT evidence, has to be asserted against a re-stamped fixture rather than the shipped bundle.
+/// The shipped bundle re-stamped onto the current provider compile closure. Promotion, which is a
+/// property of applicable evidence, is asserted against this synthetic fixture rather than relying
+/// on whichever provider closures happen to match the shipped bundle today.
 ///
 /// `select` chooses which records are re-stamped, defaulting to Krea. It exists because the Qwen
-/// rung-4 records ingested by sc-16353 were current at the `8ffa211a` pin and stopped being current
-/// the moment sc-16962 moved it to `d4802320` — the fail-closed rule working as designed, and the
-/// reason the two families are re-stamped separately: the geometry tests below depend on ONLY the
+/// rung-4 records ingested by sc-16353 carry an older provider closure. The two families are
+/// re-stamped separately because the geometry tests below depend on ONLY the
 /// Krea cell moving relative to the shipped matrix, and [`qwenRung4OnCurrentPin`] must move exactly
 /// the two retained q8 cells rather than every Qwen record in the bundle.
 async function currentEvidenceFixture({
@@ -4233,8 +4262,8 @@ async function currentEvidenceFixture({
   return JSON.stringify(parsed);
 }
 
-/// The inverse of [`currentEvidenceFixture`]: the shipped records re-stamped onto a SUPERSEDED
-/// inference revision.
+/// The inverse of [`currentEvidenceFixture`]: the shipped records re-stamped onto a superseded
+/// provider compile closure.
 ///
 /// Before sc-16915 the shipped bundle was entirely historical, so "historical evidence does not
 /// promote" could be asserted by simply reading the shipped matrix. Now that the evidence is
@@ -4497,13 +4526,9 @@ test("current evidence promotes a cell to Verified, and historical evidence does
     mutate(next.providers);
     return JSON.stringify(next, null, 2);
   };
-  // sc-19542: the rung-4 prerequisite records are keyed to the pin the same way the closures are, so
-  // a moved-pin fixture has to re-key both or generation fails on the stale-config guard before it
-  // reaches the currency question this test is about.
-  const prerequisitesOnMovedPin = JSON.stringify({
-    ...(await prerequisitesFixture()),
-    inferenceRevision: movedPin,
-  });
+  // The rung-4 prerequisite record intentionally stays at the revision where its provider graph was
+  // inspected. Re-keying it here would hide the regression where an ordinary pin move turns that
+  // historical evidence into a live freshness gate.
 
   const pinOnlyQwen = await buildMatrix({
     publish: false,
@@ -4511,7 +4536,6 @@ test("current evidence promotes a cell to Verified, and historical evidence does
       calibrationEvidence: qwenOnCurrentPin,
       manifest: qwenManifestOnCurrentPin,
       cargo: withPin(movedPin),
-      rung4ContractPrerequisites: prerequisitesOnMovedPin,
       inferenceClosures: withClosures(() => {}),
       ...movedMemoryContractSources,
     },
@@ -4528,7 +4552,6 @@ test("current evidence promotes a cell to Verified, and historical evidence does
       calibrationEvidence: qwenOnCurrentPin,
       manifest: qwenManifestOnCurrentPin,
       cargo: withPin(movedPin),
-      rung4ContractPrerequisites: prerequisitesOnMovedPin,
       inferenceClosures: withClosures((providers) => {
         providers["mlx:z_image_turbo"].digest = "f".repeat(64);
       }),
@@ -4547,7 +4570,6 @@ test("current evidence promotes a cell to Verified, and historical evidence does
       calibrationEvidence: qwenOnCurrentPin,
       manifest: qwenManifestOnCurrentPin,
       cargo: withPin(movedPin),
-      rung4ContractPrerequisites: prerequisitesOnMovedPin,
       inferenceClosures: withClosures((providers) => {
         providers["mlx:qwen_image"].digest = "e".repeat(64);
       }),
@@ -4597,7 +4619,7 @@ test("current evidence promotes a cell to Verified, and historical evidence does
   assert.equal(
     demotedCell.state,
     "Implemented/unverified",
-    "records re-dated onto a superseded pin must stop verifying their cell",
+    "records carrying a superseded provider closure must stop verifying their cell",
   );
   assert.equal(
     demotedCell.evidence.currentEnvironmentVerification.length,
@@ -4612,6 +4634,37 @@ test("current evidence promotes a cell to Verified, and historical evidence does
     )
     .map((cell) => cell.id);
   assert.deepEqual(movedIds, [KREA_CONTROL_CELL]);
+});
+
+test("a pin bump alone builds the matrix and demotes nothing", async () => {
+  // THE REGRESSION THIS FILE MOST NEEDS. `validatedInferenceClosures` used to throw when the closure
+  // table's `inferenceRevision` was not the live Cargo pin, so moving the pin did not merely demote —
+  // it made the generator, and every test in this file, fail outright. And because the only way to
+  // clear it was to re-derive the table, and re-deriving rotated every digest at once, the throw was
+  // the forcing function that turned "the pin moved" into "re-measure everything".
+  //
+  // The table's revision is the revision its digests were derived at. Moving the pin without
+  // re-deriving must therefore build, and produce a byte-identical matrix: no digest moved, so no
+  // record's currency moved either.
+  const cargo = await readFile(new URL(`../${SOURCE_PATHS.cargo}`, import.meta.url), "utf8");
+  const bumped = cargo.replace(
+    /(github\.com\/SceneWorks\/inference[^}]*?rev\s*=\s*")[0-9a-f]{40}(")/g,
+    `$1${"a".repeat(40)}$2`,
+  );
+  assert.notEqual(bumped, cargo, "the pin rewrite must actually change the manifest");
+
+  const shipped = await buildMatrix({ publish: false });
+  const afterBump = await buildMatrix({ publish: false, sourceOverrides: { cargo: bumped } });
+  assert.deepEqual(
+    afterBump.cells.map((cell) => [cell.id, cell.state]),
+    shipped.cells.map((cell) => [cell.id, cell.state]),
+    "a pin bump on its own must not move a single cell's state",
+  );
+  assert.equal(
+    afterBump.summary.currentCalibrationRuns,
+    shipped.summary.currentCalibrationRuns,
+    "a pin bump on its own must not demote a single calibration run",
+  );
 });
 
 test("Verified never implies geometry coverage — one point certifies one point (sc-16060)", async () => {
@@ -4795,8 +4848,15 @@ test("publication keeps every planned, measured, bound and cited coordinate — 
     );
   }
 
-  // Six of the seven arms must actually carry cells of their own. An arm that admitted nothing would
-  // be a dead clause, and the predicate would then mean something narrower than it says.
+  // Every arm that does not depend on the live corpus must actually carry cells of its own. An arm
+  // that admitted nothing would be a dead clause, and the predicate would then mean something
+  // narrower than it says.
+  //
+  // `current evidence` is deliberately NOT in this list. Its population is a function of the live
+  // provider closures and may be empty after a real relevant closure change. Requiring it to be
+  // non-empty made an unrelated `gen-core` edit invalidate measurements, which is precisely the
+  // coupling the closure-scoping regression tests forbid. The arm is still guarded below by the
+  // invariants that hold whether or not it is empty.
   for (const [name, arm] of [
     ["planned", (cell) => planned.has(cell.id)],
     ["bound to a record", (cell) => calibrationRunCellIds.has(cell.id)],
@@ -4808,27 +4868,30 @@ test("publication keeps every planned, measured, bound and cited coordinate — 
     assert.ok(resolved.cells.some(arm), `the "${name}" arm admits no coordinate at all`);
   }
 
-  // The seventh arm, `currentEnvironmentVerification`, admits NOTHING at the sc-20523 pin: it moved
-  // every provider closure past every retained capture — SC-18218's and sc-19721's FLUX.2 cohorts,
-  // the Qwen ladder re-capture, and SC-19753's Z-Image rungs alike — so every capture is historical
-  // until the bump-time re-capture. Two facts keep this assertion useful:
+  // WHICH coordinates carry current evidence is a property of the corpus and the live closures, not
+  // of the publication predicate — so it is derived here rather than pinned to a roster. Pinning the
+  // exact id could not fail on a bug and was guaranteed to fail on the next closure change or
+  // re-capture; that is the frozen-corpus class, repaired rather than hand-updated to the next id.
   //
-  //   1. It is exact: NO row may survive the closure change as current — a record silently keeping
-  //      currency across a pin bump is the failure this pins.
-  //   2. It is SUBSUMED. A current run is an eligible run, and `memoryCharacterization` counts every
-  //      eligible run's geometry, so a cell carrying current evidence is `point` or `fitted` and the
-  //      measured arm already admits it. The arm therefore cannot uniquely admit or elide anything.
-  //
-  // Asserted as an exact set so a recapture flips this test rather than silently passing, and
-  // the field's presence is asserted separately so a rename cannot make the arm quietly vanish.
-  assert.deepEqual(
-    resolved.cells
-      .filter((cell) => cell.evidence.currentEnvironmentVerification.length > 0)
-      .map((cell) => cell.id)
-      .sort(),
-    [],
-    "no retained capture may carry current evidence at a pin whose closures have moved past it; a historical row surviving as current is the failure this pins",
+  // What still has to hold, and does whether the arm is empty or full: a cell carries current
+  // evidence exactly when it cites a calibration record the live closures still call current.
+  const currentRecordIds = new Set(
+    resolved.calibrationRuns
+      .filter((run) => run.semantics === "current")
+      .map((run) => run.record.id),
   );
+  for (const cell of resolved.cells) {
+    for (const item of cell.evidence.currentEnvironmentVerification) {
+      const recordId = String(item.source).split("#")[1];
+      assert.ok(
+        currentRecordIds.has(recordId),
+        `${cell.id} cites ${item.source}, which is not current for its provider closure`,
+      );
+    }
+  }
+  // Subsumption, which is what makes an empty arm harmless: a current run is an eligible run, and
+  // `memoryCharacterization` counts every eligible run's geometry, so a cell carrying current
+  // evidence is already admitted by the measured arm.
   assert.ok(
     resolved.cells.every((cell) => Array.isArray(cell.evidence.currentEnvironmentVerification)),
     "the arm's field must exist on every cell, or a rename would silently retire it",
@@ -4960,13 +5023,29 @@ test("the published summary re-derives from the evidence bundle and the closure 
     await readFile(new URL("config/inference-provider-closures.json", root)),
   );
 
-  const tally = { complete: 0, runtimeComplete: 0 };
+  // sc-21715. Recomputed over EVERY status the bundle schema admits, not over a transcribed pair.
+  // This assertion used to read `complete + runtimeComplete` and agreed with the writer's
+  // `records.length` only because the corpus had never held anything else; the first `gated` receipt
+  // — the sc-11045 five-rung, kept outside the bundle for exactly this reason — made the two
+  // disagree. The keys are derived here rather than imported from the generator so a wrong
+  // snake_case -> camelCase mapping cannot agree with itself on both sides.
+  const statusKey = (status) => status.replace(/_([a-z])/g, (_, letter) => letter.toUpperCase());
+  const tally = Object.fromEntries(RECORD_STATUSES.map((status) => [statusKey(status), 0]));
   for (const record of evidence.records) {
-    if (record.status === "complete") tally.complete += 1;
-    if (record.status === "runtime_complete") tally.runtimeComplete += 1;
+    assert.ok(
+      Object.hasOwn(tally, statusKey(record.status)),
+      `${record.id}: status ${record.status} is outside the schema's status enum`,
+    );
+    tally[statusKey(record.status)] += 1;
   }
   assert.deepEqual(matrix.summary.calibrationRunsByStatus, tally);
-  assert.equal(matrix.summary.calibrationRuns, tally.complete + tally.runtimeComplete);
+  // The whole is the bundle, and the parts partition it. Asserting BOTH is the point: either alone
+  // is satisfied by a writer that drops a non-certifying receipt from one of the two numbers.
+  assert.equal(matrix.summary.calibrationRuns, evidence.records.length);
+  assert.equal(
+    Object.values(tally).reduce((total, count) => total + count, 0),
+    matrix.summary.calibrationRuns,
+  );
 
   // `binding.eligible` is the generator's own coordinate match; everything else here is recomputed.
   const eligibleByRecord = new Map(
@@ -5322,6 +5401,86 @@ test("MiniMax-H3 has one legal measured-spanning grid per implemented tier/rung 
     /declares engaged rungs/,
     "the generator must reject an impossible declared engaged rung before terminal capture",
   );
+});
+
+test("a gated receipt keeps the summary and its recomputation in agreement (sc-21715)", async () => {
+  // The regression this story owns. `summary.calibrationRuns` counts the BUNDLE and
+  // `calibrationRunsByStatus` partitions it; before sc-21715 the tally named only the two certifying
+  // statuses, so the first non-certifying receipt made the writer say N while the sc-17774
+  // recomputation said N-1. Synthetic rather than the shipped sc-11045 five-rung capture, so the
+  // proof does not depend on that evidence file still being in the tree — and so it survives the
+  // capture being promoted.
+  const bundle = JSON.parse(
+    await readFile(new URL("../docs/generated/memory-calibration-evidence.json", import.meta.url), "utf8"),
+  );
+  const donor = bundle.records.find(
+    (record) => record.status === "complete" && record.sourceProvenance === undefined,
+  );
+  assert.ok(donor, "the shipped bundle must carry a plain complete record to re-status");
+  // `status` is deliberately OUTSIDE `recordId`'s identity, so flipping it alone would collide with
+  // the donor's id. Perturb `hardware`, which is in the identity and which `calibrationBinding` never
+  // reads: the clone keeps the donor's coordinate and still binds.
+  const gated = JSON.parse(JSON.stringify(donor));
+  gated.status = "gated";
+  gated.hardware = { ...gated.hardware, osVersion: `${gated.hardware.osVersion}-sc21715` };
+  gated.logicalCaseId = logicalCaseId(gated);
+  gated.id = recordId(gated);
+  assert.notEqual(gated.id, donor.id, "the synthetic receipt must be a distinct record");
+
+  const withGated = JSON.parse(JSON.stringify(bundle));
+  withGated.records.push(gated);
+  const matrix = await buildMatrix({
+    publish: false,
+    sourceOverrides: { calibrationEvidence: JSON.stringify(withGated) },
+  });
+  const baseline = await buildMatrix({ publish: false });
+  assert.equal(
+    baseline.summary.calibrationRunsByStatus.gated,
+    0,
+    "the shipped corpus must still be gated-free, or this proves nothing about the first one",
+  );
+
+  // Exactly the two assertions the sc-17774 test makes, against a corpus that now holds a receipt
+  // certifying nothing.
+  const statusKey = (status) => status.replace(/_([a-z])/g, (_, letter) => letter.toUpperCase());
+  const tally = Object.fromEntries(RECORD_STATUSES.map((status) => [statusKey(status), 0]));
+  for (const record of withGated.records) tally[statusKey(record.status)] += 1;
+  assert.deepEqual(matrix.summary.calibrationRunsByStatus, tally);
+  assert.equal(matrix.summary.calibrationRuns, withGated.records.length);
+  assert.equal(
+    Object.values(tally).reduce((total, count) => total + count, 0),
+    matrix.summary.calibrationRuns,
+  );
+
+  // ...and the receipt is NAMED, not merely counted. `gated` moves by one while both certifying
+  // buckets stand still, so the extra record can never be read as a new certifying run — which a
+  // fix that only corrected the total would have left indistinguishable.
+  assert.equal(matrix.summary.calibrationRunsByStatus.gated, 1);
+  assert.equal(
+    matrix.summary.calibrationRunsByStatus.complete,
+    baseline.summary.calibrationRunsByStatus.complete,
+  );
+  assert.equal(
+    matrix.summary.calibrationRunsByStatus.runtimeComplete,
+    baseline.summary.calibrationRunsByStatus.runtimeComplete,
+  );
+
+  // The receipt binds to a coordinate and certifies nothing there: that ineligibility is what keeps
+  // `currentCalibrationRuns` from moving, and it is the property the counts above must not obscure.
+  const bound = matrix.calibrationRuns.find((run) => run.record.id === gated.id);
+  assert.ok(bound, "a gated receipt still binds to its coordinate");
+  assert.equal(bound.semantics, "gated");
+  // The donor binds ELIGIBLY, and the clone differs from it only in `status` (plus the `hardware`
+  // perturbation that rotates the id). Pinning the donor's empty reason set and the clone's exact
+  // one-reason set is what makes `gated` the cause: an already-ineligible donor would satisfy
+  // `eligible === false` while proving nothing, which is the drift a `.includes()` cannot see.
+  const donorBound = matrix.calibrationRuns.find((run) => run.record.id === donor.id);
+  assert.ok(donorBound, "the donor must still bind");
+  assert.deepEqual(donorBound.binding.reasons, []);
+  assert.equal(donorBound.binding.eligible, true);
+  assert.equal(bound.binding.eligible, false);
+  assert.deepEqual(bound.binding.reasons, ["record-not-complete"]);
+  assert.equal(matrix.summary.currentCalibrationRuns, baseline.summary.currentCalibrationRuns);
 });
 
 test("an out-of-matrix family's RECEIPT is unbound rather than fatal (sc-18663)", async () => {

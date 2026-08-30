@@ -2020,13 +2020,14 @@ def test_krea_2_turbo_candle_vram_tiers_match_measured_peaks():
             "measured",
         )
     } == {
-        # sc-17097 re-measured every curve under gen_core::MEMORY_CALIBRATION_ABI 3 on the CUDA box.
+        # sc-17097 re-measured every curve under gen_core::MEMORY_CALIBRATION_ABI 3 on the CUDA box;
+        # sc-21714 then re-certified the shipped q4/1024 binding at the current inference pin.
         # The stamp is only allowed to move as the RESULT of that measurement, never on its own.
         "calibrationAbi": 3,
         "loadShape": "deferred_materialization",
         "calibrationFingerprint": "krea-turbo-cuda-phase-curves-v1",
         "sceneWorksRevision": "sc-15449-contract-v1",
-        "inferenceRevision": "a4f409ae8ce73eda2ee8117b89b5f479666606b8",
+        "inferenceRevision": "3775a5f80a07a38071c7859f6ac565bcab5d1c7b",
         "measured": True,
     }
     assert turbo_fit["strategyParameters"] == {
@@ -2057,6 +2058,7 @@ def test_krea_2_turbo_candle_vram_tiers_match_measured_peaks():
         "sc-15205",
         "sc-15206",
         "sc-17097",
+        "sc-21714",
     ]
     assert {
         (record["tier"], record["width"], record["height"])

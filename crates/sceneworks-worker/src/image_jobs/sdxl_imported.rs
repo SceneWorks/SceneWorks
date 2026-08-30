@@ -329,9 +329,6 @@ async fn stage_sdxl_component_file(
     file: &str,
     destination: &Path,
 ) -> WorkerResult<()> {
-    if destination.is_file() {
-        return Ok(());
-    }
     let client = crate::downloads::streaming_download_client();
     let context = crate::downloads::DownloadContext {
         api,
@@ -341,7 +338,7 @@ async fn stage_sdxl_component_file(
         cancel_message: "SDXL generation canceled while staging shared components.",
         fresh_download: false,
     };
-    crate::downloads::ensure_hf_cached_file(
+    crate::downloads::ensure_hf_cached_file_atomically(
         &context,
         repo,
         revision,
@@ -430,10 +427,27 @@ fn mirror_cached_sdxl_component_file(
     file: &str,
     destination_dir: &Path,
 ) -> WorkerResult<()> {
+    mirror_cached_sdxl_component_file_with_copy(
+        settings,
+        checkpoint_id,
+        repo,
+        revision,
+        file,
+        destination_dir,
+        |source, staging| std::fs::copy(source, staging).map(|_| ()),
+    )
+}
+
+fn mirror_cached_sdxl_component_file_with_copy(
+    settings: &Settings,
+    checkpoint_id: &str,
+    repo: &str,
+    revision: &str,
+    file: &str,
+    destination_dir: &Path,
+    copy_source: impl FnOnce(&Path, &Path) -> std::io::Result<()>,
+) -> WorkerResult<()> {
     let destination = destination_dir.join(file);
-    if destination.is_file() {
-        return Ok(());
-    }
     let staging_failed = |path: &Path, error: std::io::Error| {
         WorkerError::Engine(format!(
             "Checkpoint plan source preparation failed: {} ({error})",
@@ -450,18 +464,86 @@ fn mirror_cached_sdxl_component_file(
                  model-agnostic CLIP tokenizer vocabulary comes from outside it."
             ))
         })?;
+
+    // Resolve first so a missing app-managed source reports the existing actionable
+    // diagnostic without creating cache state. From this point through validation
+    // and publication, one target-scoped lock serializes every process and every
+    // async task in a worker. A PID-only staging name is not task-unique: concurrent
+    // jobs in one process could otherwise copy into the same inode and let one job
+    // publish it while the other was still writing (sc-21689 review).
+    let _target_lock = crate::downloads::DownloadLock::acquire(&destination)?;
+    if destination.is_file()
+        && sdxl_component_files_match(&cached, &destination)
+            .map_err(|error| staging_failed(&destination, error))?
+    {
+        return Ok(());
+    }
     std::fs::create_dir_all(destination_dir)
         .map_err(|error| staging_failed(destination_dir, error))?;
-    // Copy to a pid-keyed sibling and rename, so two concurrent jobs can never observe a
-    // half-written vocabulary at the destination path.
-    let staging = destination_dir.join(format!("{file}.{}.partial", std::process::id()));
-    std::fs::copy(&cached, &staging)
-        .and_then(|_| std::fs::rename(&staging, &destination))
+    // Keep task-local staging collision-free even though the lock is the primary
+    // correctness boundary. This also makes stale scratch from a killed worker
+    // incapable of becoming a later task's live write target.
+    let staging = destination_dir.join(format!("{file}.{}.partial", Uuid::new_v4().simple()));
+    copy_source(&cached, &staging)
+        // Windows' FlushFileBuffers requires a write-capable handle. File::open is
+        // read-only there and returns AccessDenied from sync_all even though the
+        // copy itself succeeded.
+        .and_then(|_| std::fs::OpenOptions::new().write(true).open(&staging))
+        .and_then(|file| file.sync_all())
+        .and_then(|_| {
+            sdxl_component_files_match(&cached, &staging).and_then(|matches| {
+                if matches {
+                    Ok(())
+                } else {
+                    Err(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        "staged component does not match its pinned cache source",
+                    ))
+                }
+            })
+        })
+        .and_then(|_| promote_cached_sdxl_component(&staging, &destination))
         .map_err(|error| {
             let _ = std::fs::remove_file(&staging);
             staging_failed(&destination, error)
         })?;
     Ok(())
+}
+
+fn promote_cached_sdxl_component(staging: &Path, destination: &Path) -> std::io::Result<()> {
+    // Readers see either the prior complete component or the newly copied one. The
+    // tempfile's safe platform implementation atomically replaces an existing
+    // destination on both Unix and Windows. Never unlink the visible destination
+    // before the staged file takes its place.
+    tempfile::TempPath::try_from_path(staging)?.persist(destination)
+        .map_err(|error| error.error)
+}
+
+/// Compare the staged copy with its resolved pinned-HF source without buffering a
+/// component in memory. This protects cache-only restart paths: a torn or corrupt
+/// destination is copied again instead of being accepted just because it exists.
+fn sdxl_component_files_match(source: &Path, destination: &Path) -> std::io::Result<bool> {
+    use std::io::Read;
+
+    if std::fs::metadata(source)?.len() != std::fs::metadata(destination)?.len() {
+        return Ok(false);
+    }
+    let mut source = std::fs::File::open(source)?;
+    let mut destination = std::fs::File::open(destination)?;
+    let mut source_buffer = [0_u8; 64 * 1024];
+    let mut destination_buffer = [0_u8; 64 * 1024];
+    loop {
+        let source_read = source.read(&mut source_buffer)?;
+        let destination_read = destination.read(&mut destination_buffer)?;
+        if source_read != destination_read
+            || source_buffer[..source_read] != destination_buffer[..destination_read]
+        {
+            return Ok(false);
+        }
+        if source_read == 0 {
+            return Ok(true);
+        }
+    }
 }
 
 /// Where each SDXL component id's bytes come from: `(component id, repo, revision, file, subdir)`.

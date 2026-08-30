@@ -5521,7 +5521,9 @@ fn validate_ltx_geometry(width: u32, height: u32, frames: u32) -> Result<LtxGeom
             ltx_declared_resolutions()
         ));
     }
-    if width % LTX_DIMENSION_MULTIPLE != 0 || height % LTX_DIMENSION_MULTIPLE != 0 {
+    if !width.is_multiple_of(LTX_DIMENSION_MULTIPLE)
+        || !height.is_multiple_of(LTX_DIMENSION_MULTIPLE)
+    {
         return Err(format!(
             "MLX LTX-2.3 calibration requires geometry divisible by {LTX_DIMENSION_MULTIPLE}, got {width}x{height}"
         ));
@@ -9331,9 +9333,7 @@ fn validate_minimax_geometry(
             )
         })?;
     let stride = mlx_gen_minimax_h3::SPATIAL_STRIDE;
-    // `%` rather than the engine's own `is_multiple_of`: that method is stable since 1.87 and this
-    // workspace's MSRV is 1.80, so clippy's `incompatible_msrv` refuses it here.
-    if width % stride != 0 || height % stride != 0 {
+    if !width.is_multiple_of(stride) || !height.is_multiple_of(stride) {
         return Err(format!(
             "{MINIMAX_LABEL} requires geometry divisible by the {stride}px stride, got {width}x{height}"
         ));

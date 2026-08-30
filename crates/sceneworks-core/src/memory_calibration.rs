@@ -1819,7 +1819,7 @@ fn validate_source_inputs_against_record(
         let exact_overlay_source = session
             .target
             .as_ref()
-            .map_or(true, |target| target.overlay == record.target.overlay)
+            .is_none_or(|target| target.overlay == record.target.overlay)
             && matches!(
                 claim,
                 SourceClaim::Quality | SourceClaim::Loadability | SourceClaim::Overlay
@@ -2020,7 +2020,7 @@ fn validate_runtime_complete(record: &EvidenceRecord) -> Result<(), String> {
     let sole_case = record.sweep.cases.first();
     if !record.sweep.range_verified
         || record.sweep.cases.len() != 1
-        || sole_case.map_or(true, |case| {
+        || sole_case.is_none_or(|case| {
             case.result != SweepResult::Passed || case.parameters != record.strategy.parameters
         })
     {
@@ -2108,7 +2108,7 @@ fn validate_runtime_complete(record: &EvidenceRecord) -> Result<(), String> {
             .get(&name)
             .ok_or_else(|| format!("{} is missing scenario {name:?}", record.id))?;
         if scenario.result != ScenarioResult::NotRun
-            || scenario.reason.as_deref().map_or(true, str::is_empty)
+            || scenario.reason.as_deref().is_none_or(str::is_empty)
         {
             return Err(format!(
                 "{} scenario {name:?} must remain explicitly not_run",
@@ -2125,7 +2125,7 @@ fn validate_runtime_complete(record: &EvidenceRecord) -> Result<(), String> {
     }
     let overlay = scenarios[&ScenarioName::Overlay];
     if overlay.result != ScenarioResult::NotApplicable
-        || overlay.reason.as_deref().map_or(true, str::is_empty)
+        || overlay.reason.as_deref().is_none_or(str::is_empty)
     {
         return Err(format!(
             "{} runtime-complete evidence must be base-only",
@@ -2413,7 +2413,7 @@ fn validate_complete(record: &EvidenceRecord) -> Result<(), String> {
         && scenarios[&ScenarioName::Overlay]
             .reason
             .as_deref()
-            .map_or(true, str::is_empty)
+            .is_none_or(str::is_empty)
     {
         return Err(format!(
             "{} overlay not_applicable requires a reason",
@@ -3324,9 +3324,9 @@ mod tests {
     #[test]
     fn packaged_bundle_uses_the_current_schema_before_entry_calibration_fans_out() {
         // SC-15817 migrates the packaged protocol before the per-entry calibration stories run.
-        // Existing MLX measurements remain available as history under their truthful load shapes;
-        // their old inference revisions cannot become a current fit. SC-15510 adds four eager and
-        // one deferred current-pin Z-Image records without rewriting that historical provenance.
+        // Existing MLX measurements remain available under their truthful load shapes and source
+        // provenance. SC-15510 adds four eager and one deferred Z-Image records without rewriting
+        // the earlier capture provenance.
         // SC-15823 then adds ten base-only runtime-complete FLUX.1 records (eight eager, two
         // deferred) without promoting them to Full completion. SC-15833 adds five deferred FLUX.2
         // runtime records and seven physical sessions without replacing any prior source receipt.
@@ -3334,7 +3334,7 @@ mod tests {
         // 768/1024 geometries.
         // SC-18353 adds thirteen physical MLX source sessions for the exact deferred Qwen bf16/q4
         // captures, without replacing the historical Qwen evidence they supersede for admission.
-        // SC-19753 adds five current-pin Z-Image q4 records, one for each ladder rung, while
+        // SC-19753 adds five Z-Image q4 records, one for each ladder rung, while
         // retaining the five historical Z-Image captures as provenance.
         // SC-16915 re-collects the MLX qwen_image and krea_2_turbo_control evidence at pin
         // a4f409ae under ABI 3, adding seventeen records (14 eager, 3 deferred) and leaving the
@@ -3478,8 +3478,8 @@ mod tests {
                 ("bf16", StrategyRung::BoundedTransformerResidency),
             ),
         ]);
-        // Beyond the frozen history above sits the CURRENT re-capture set (first populated by
-        // sc-19721 at inference 75d66db5, after the pin bump staled every Qwen cell). That set is
+        // Beyond the frozen history above sits the newer verification cohort (first populated by
+        // sc-19721 at inference 75d66db5 after relevant provider-closure changes). That set is
         // deliberately NOT pinned by id/tier/rung: its ids change at every legitimate re-capture,
         // so an exact map here is a frozen-corpus gate on the one corpus that is SUPPOSED to move
         // (it was hand-bumped five times on this epic alone). The frozen sets stay pinned — they
@@ -3516,7 +3516,7 @@ mod tests {
             .collect::<Vec<_>>();
         assert!(
             !recapture_sessions.is_empty(),
-            "the bundle must carry current-pin re-capture evidence beyond the frozen history"
+            "the bundle must carry a newer verification cohort beyond the frozen history"
         );
         // One campaign lands under ONE story directory of its own, and each receipt is the
         // session's own log. The story id is PARSED, not pinned: the next campaign (a new story)
@@ -3604,8 +3604,8 @@ mod tests {
             1,
             "one re-capture campaign = one story directory, got {recapture_stories:?}"
         );
-        // Coverage SHAPE, not population: to re-verify what a pin bump stales the campaign must
-        // span the tier ladder (bf16 plus at least one quantized tier) and more than one rung.
+        // Coverage SHAPE, not population: a verification cohort must span the tier ladder (bf16
+        // plus at least one quantized tier) and more than one rung.
         assert!(
             recapture_tiers.contains("bf16") && recapture_tiers.len() >= 2,
             "re-capture must cover bf16 plus a quantized tier, got {recapture_tiers:?}"
@@ -3696,9 +3696,28 @@ mod tests {
             runtime_complete_count > 0,
             "the bundle must carry runtime-complete records"
         );
+        // sc-21715: the partition runs over ALL FOUR `RecordStatus` variants, not over the two
+        // certifying ones. This used to read `records.len() == complete + runtime_complete` — the
+        // same identity `summary.calibrationRunsByStatus` published as a two-key tally, and true
+        // only while the corpus had never carried a `gated` or `negative_complete` receipt.
+        // Admitting one (the sc-11045 five-rung capture is exactly such a receipt) would have
+        // reddened this line with nothing actually wrong. Both certifying populations must still
+        // be non-empty — asserted above; what the partition asserts is that no record falls
+        // outside the four, so a fifth variant cannot be added without landing here.
+        let gated_count = bundle
+            .records
+            .iter()
+            .filter(|record| record.status == RecordStatus::Gated)
+            .count();
+        let negative_complete_count = bundle
+            .records
+            .iter()
+            .filter(|record| record.status == RecordStatus::NegativeComplete)
+            .count();
         assert_eq!(
             bundle.records.len(),
-            complete_count + runtime_complete_count
+            complete_count + runtime_complete_count + gated_count + negative_complete_count,
+            "every record must carry one of the four RecordStatus variants"
         );
         // Same partition posture for the load shapes: both exist, and together they are the whole
         // bundle — a record with any third shape (or none) breaks the identity.

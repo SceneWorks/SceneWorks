@@ -450,6 +450,8 @@ describe("SettingsScreen remote access (desktop)", () => {
       lanCandidates: ["192.168.1.50"],
       url: "http://192.168.1.50:8787",
       defaultPort: 8787,
+      minimumPasswordLength: 12,
+      passwordPolicy: "unicode-white-space-scalar-count-v1",
       platform: "macos",
     };
     invoke = vi.fn(async (command, args) => {
@@ -510,10 +512,12 @@ describe("SettingsScreen remote access (desktop)", () => {
     await render();
     await changeField(
       container.querySelector('[aria-label="Remote access password"]'),
-      "lan-pass",
+      "  lan-password  ",
     );
     await click(buttonByText(container, "Save"));
-    expect(invoke).toHaveBeenCalledWith("set_remote_access_password", { password: "lan-pass" });
+    expect(invoke).toHaveBeenCalledWith("set_remote_access_password", {
+      password: "lan-password",
+    });
     // Re-rendered with passwordSet → the toggle is now allowed.
     expect(remoteToggle().disabled).toBe(false);
     await click(remoteToggle());
@@ -521,6 +525,61 @@ describe("SettingsScreen remote access (desktop)", () => {
     // …and flipping it back disables it.
     await click(remoteToggle());
     expect(invoke).toHaveBeenCalledWith("set_remote_access", { enabled: false, port: 8787 });
+  });
+
+  it("uses the native minimum and rejects a short trimmed password before invoking Tauri", async () => {
+    await render();
+    expect(container.textContent).toContain("Use at least 12 characters.");
+    await changeField(
+      container.querySelector('[aria-label="Remote access password"]'),
+      "  short-pass  ",
+    );
+    const save = buttonByText(container, "Save");
+    expect(save.disabled).toBe(true);
+    await click(save);
+    expect(invoke.mock.calls.filter(([command]) => command === "set_remote_access_password"))
+      .toHaveLength(0);
+  });
+
+  it("treats U+0085 as boundary whitespace exactly like the native policy", async () => {
+    await render();
+    await changeField(
+      container.querySelector('[aria-label="Remote access password"]'),
+      `\u0085${"1".repeat(11)}`,
+    );
+    const save = buttonByText(container, "Save");
+    expect(save.disabled).toBe(true);
+    await click(save);
+    expect(invoke.mock.calls.filter(([command]) => command === "set_remote_access_password"))
+      .toHaveLength(0);
+  });
+
+  it("does not trim U+FEFF and submits the exact native-compliant value", async () => {
+    await render();
+    const password = `\uFEFF${"1".repeat(11)}`;
+    await changeField(
+      container.querySelector('[aria-label="Remote access password"]'),
+      password,
+    );
+    const save = buttonByText(container, "Save");
+    expect(save.disabled).toBe(false);
+    await click(save);
+    expect(invoke).toHaveBeenCalledWith("set_remote_access_password", { password });
+  });
+
+  it("counts Unicode scalars and submits the same explicitly normalized password", async () => {
+    await render();
+    const normalized = "🔐".repeat(12);
+    await changeField(
+      container.querySelector('[aria-label="Remote access password"]'),
+      `\u0085${normalized}\u3000`,
+    );
+    const save = buttonByText(container, "Save");
+    expect(save.disabled).toBe(false);
+    await click(save);
+    expect(invoke).toHaveBeenCalledWith("set_remote_access_password", {
+      password: normalized,
+    });
   });
 });
 
@@ -532,9 +591,11 @@ describe("SettingsScreen GPU memory (desktop macOS)", () => {
   let invoke;
   let SettingsScreen;
   const GIB = 1024 * 1024 * 1024;
+  let telemetry;
 
   beforeEach(async () => {
     global.IS_REACT_ACT_ENVIRONMENT = true;
+    telemetry = { activeBytes: 20 * GIB, peakBytes: 40 * GIB, cacheBytes: 2 * GIB, limitBytes: 64 * GIB };
     invoke = vi.fn(async (command) => {
       switch (command) {
         case "get_app_settings":
@@ -546,7 +607,7 @@ describe("SettingsScreen GPU memory (desktop macOS)", () => {
         case "get_remote_access":
           return null;
         case "get_gpu_telemetry":
-          return { activeBytes: 20 * GIB, peakBytes: 40 * GIB, cacheBytes: 2 * GIB, limitBytes: 64 * GIB };
+          return telemetry;
         case "set_gpu_memory_limit":
           return { gpuMemoryLimitFraction: 0.5 };
         default:
@@ -585,16 +646,27 @@ describe("SettingsScreen GPU memory (desktop macOS)", () => {
     await render();
     expect(invoke).toHaveBeenCalledWith("get_gpu_telemetry", undefined);
     expect(container.textContent).toContain("Live MLX memory");
-    expect(container.textContent).toContain("20.0 GB");
-    expect(container.textContent).toContain("40.0 GB");
-    expect(container.textContent).toContain("64 GB");
+    expect(container.textContent).toContain("20.0 GiB");
+    expect(container.textContent).toContain("40.0 GiB");
+    expect(container.textContent).toContain("64 GiB");
+  });
+
+  it("marks missing telemetry fields unavailable while preserving a reported zero", async () => {
+    telemetry = { activeBytes: 0, limitBytes: 0 };
+    await render();
+    expect(container.textContent).toContain("0.0 GiB");
+    expect(container.textContent).toContain("0 GiB");
+    expect(container.textContent).toContain("Unavailable");
+    const rows = [...container.querySelectorAll(".settings-kv")];
+    expect(rows.find((row) => row.textContent.includes("Active"))?.textContent).toContain("0.0 GiB");
+    expect(rows.find((row) => row.textContent.includes("Peak"))?.textContent).toContain("Unavailable");
   });
 
   it("summarises this machine from the detected GPU and the worker registry", async () => {
     await render();
     expect(container.textContent).toContain("Engine");
     expect(container.textContent).toContain("Unified memory");
-    expect(container.textContent).toContain("128 GB");
+    expect(container.textContent).toContain("128 GiB");
   });
 
   it("applies the GPU memory target live, without restarting the worker", async () => {

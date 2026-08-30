@@ -3,35 +3,35 @@
   "generatedBy": "cargo run -p sceneworks-core --bin dump-backend-capability-matrix",
   "summary": {
     "modelCount": 95,
-    "importedFamilyCount": 3,
-    "cellCount": 943,
+    "importedFamilyCount": 4,
+    "cellCount": 947,
     "mlxOnlyCellCount": 45,
-    "candleOnlyCellCount": 47,
+    "candleOnlyCellCount": 51,
     "exceptionCount": 10
   },
   "sources": {
-    "apiContractEntry": "b2abc4cdd660559675f68f7fe54515121994dbeaf04030d31d5ead80d811dece",
+    "apiContractEntry": "fcd52ee7c04534dad262d796612092237da0823b4d0f6ed8f4b255c33955c702",
     "apiDto": "f7942944e603a00c57afc147dc6899cad2722200341a852814f7bf4c4305a8a3",
-    "apiGeneration": "316ce33f5624d9652cb87df71461fb201af5b280007a4b40bcbcd5f7997cce33",
+    "apiGeneration": "64f2213e6eb720e4acbfd417547d6a472c7685674b9f123908c327d153a8d199",
     "apiValidation": "b9f21500465791d78015f258623acbf946333746147c65ffd477605c0c9ce43e",
-    "baseWeightImports": "4566b74afa2b721ecf3ab0af55ce0d95287c5e34d92932269a4db2cd413fe182",
-    "descriptorAudioFacts": "e10ad3fb5850fd24be486c2d13661216602f3551b6e8f7c8afc32f2c843debeb",
+    "baseWeightImports": "7ea040d63eb6d684ed3403777d38e862da1e56b58779e1ed9fb8a7d17c8a5dd2",
+    "descriptorAudioFacts": "4f17eb3141f89e454baf2a752d168af9574540ee3ab059c31102d41e46a987e6",
     "descriptorCandleFacts": "d2bae6fb85f51a7df9ee36a1b2fead74a31221e53cad6298bf1e9c9708100b28",
     "descriptorCandleRuntime": "0cac6c60f712a0b1c7c0375cdc2bc38746798f8e29e341c4851a61285e852dc8",
     "descriptorMlxFacts": "729ee5b2feddfea5721543fc8e5c95c2babe45b4cd279c0ab13ebc888dd4de02",
     "descriptorMlxRuntime": "dc70bce7222298c489bc6b61a024bbb6606d8eaf95d891b178e52be828042dc4",
     "descriptorPreviewFacts": "5c923b58907e633d22e2c8a6446479d2ec56abab10d738244b2f244bf197a05d",
     "exceptionRegister": "8ff35696469e9265dd3a42b9dc6fbe324842d6be2381295d3de83b558477efc6",
-    "manifest": "1fb9882cf0c8bb0cc9ae7b5c85a36d9814f733e77b33e3dc8cdabb0058019e70",
-    "modelImportDefaults": "7b93079be78b6228a066b0a368b24c71c8abffe748742882c053be033e3d7cba",
-    "routerCandle": "e6273f677afdf999c383a16f686e98a3d1032a426c05efa697486fd1cc46d544",
-    "routerCatalog": "0100ef471747520d90f9b23f8aeb0ba961412f3455a8424cc80759be4d017ce7",
+    "manifest": "b030eafe73bd4deedb02566f79c0e95f96d8dda8755dc94e02951be810ef08a4",
+    "modelImportDefaults": "d8c158e20ffeac282c8887696c4f96e05ceca1636bde9896e71d7faf10c3e3d3",
+    "routerCandle": "bfaf6d3e6a7fdd26c6309b3b6c1854e24c54f5053d29d198b6d6928db3df5cfc",
+    "routerCatalog": "ad7e85c2ef8d6c115ee2bc9d28109a0ab5129e70c57197cf7e1f1b8339673f09",
     "routerGaps": "885a73b08cd2d598d656adb15d69a2ea0a78faa0437fc3ba0e25d5f5245efcb2",
     "routerMlx": "66228de54a60d71f655e2e31ac7ead5ba67627d4baebf6ecd6206d38fcfa42ea",
-    "scheduler": "7df1d511eb93f428fd4d2289019b4629ed16672797023182a6a5119421f6d803",
-    "trainingCatalog": "a543b0bfbaa8e3282e295ac8beb07e8288da2629ff105600b787d9c557a575dc",
-    "webAudioStudio": "9b0e0c85ee0117b122e1f7968198f37bcf864c1efcbd405fa45570e63b6f9b16",
-    "webFallbackCatalog": "fd1bb16453bce60062ca5bc6e94984473f446c8ae76589fe6bd5ae7d26c173b3",
+    "scheduler": "c8e4c0664aa6c791eae2a5e67ce12259c8420c74070b3318e299c33a1a813806",
+    "trainingCatalog": "1c78847209ffbc12498b189761963043ba4e5d01ae69e6e031a709d9f0e523de",
+    "webAudioStudio": "1fa9058bcd9a279b22559a4ae68216b0a674d130369ce694760997f4021470c6",
+    "webFallbackCatalog": "1f5e7760c507f41acdafd04e2c3f96d2204ef78461c17f1841594c41ccae5d0e",
     "webImageAdvanced": "b18fa5be38f71fa65b88e8e7eef48e96f44d6031196dcfc4d434d27438f8516d",
     "webImageRequest": "07833b54289d0c457ebb05b9db06e32b0221bc8c2d5d7eb1f4ae04124b0a60e3",
     "webMacGating": "4fdb497f1044f3827e3ba051c6386018f76f731dc49159ce87b72f82796f1b3e",
@@ -41,32 +41,32 @@
     "webSimpleJobs": "bba715b793b6fbe6a644d4db31172e3a8a3fc9c8d93fede22767a2989b09dd27",
     "webSimpleVideo": "6404756ee8ed4d3d9139969f977933e72c82e11b02297d664eb97703acab6885",
     "webUpscaleEngines": "31f3e26fbd009954126a324ea37dc9e2e1a9fa89955620c50794fb2df1ec40d4",
-    "webVideoStudio": "5c94106264834dd9a687cd90770ed0514c26c38f1a96138a2bd10e6297bb0e0a",
+    "webVideoStudio": "131894a47faf53b61821cb36ff23d146c36ad51d5792e426525fc30d9ef0c4cd",
     "webVideoUpscale": "2efa76213ce9b6e6e2b958e0aadd77f2f0f91b70c1d25d11e083b3d627472daa",
     "webVideoValidation": "7645b8408a865971c7a66dec86c523221c994f94da41c6ffb1b17e5e550f7656",
     "workerAudioDispatch": "aeb30734a088abddc46610baa3c5bf9c78830ac4f6291e7a8b0616147a715926",
-    "workerDispatch": "16ffd14c115ffca0e81698ed06de043c14bf78630e2572862f3674f9345ae337",
-    "workerEngineTable": "1343d7ade97fc8e1f2d1d307bc15298fe08212cbd6621a9fe797190f41bc3707",
+    "workerDispatch": "7169d28d3da74b7d8e902199404d1ef91b578f20be914a647395d7ac34f25f30",
+    "workerEngineTable": "61a1de2beb3e1b6d91d07ba44e206e45ae4b201ea6afa650b3fd469cb921289e",
     "workerGpuCapabilities": "46bed541b0f722bdbe73e28fcd31039ef66b0f3dd491bb1880a6f38d4cb7de0f",
-    "workerImageDispatch": "fe87843a3ccde35ffc1b712b4ad42c093eadc368149e2d342eb3a828127f90f9",
-    "workerImageKreaImported": "55eba28b5d83e9304707651274428a8ff5a217b641f87e624d4587ec6d966714",
+    "workerImageDispatch": "a834e1c144dfb4c5b762e2b294fe82989d559b848ab9c9220406a7be01ba599d",
+    "workerImageKreaImported": "a135f3821548c4b9ca01f4c626a18ff324167116b142a5f729b0160c3c317d3b",
     "workerImageMageFinetuned": "6e09c17ae055289c8ba3aeafdb6faba00561a97219f8cf2d7bd94b84c6740c54",
     "workerImagePulid": "7809ccd7ef6059a09b976ec7f00ff3d1a95f120050b9f343a9aabc4b0ebac199",
     "workerImagePulidCandle": "ef37dd61757bd6a35cf2da1255527d3a557ebc93ca91a7a9b49e69d687610359",
-    "workerImageQwenEditCandle": "52f13c259f11d2ecd7f1cb118ec3e024f435e171b8ad6d5336dc5580f9ca6e8c",
-    "workerImageSdxlImported": "4a2e183ed402c6b28b9ad9f2869bdcb8811ea5ae263e4a1ea049ba3b413aa222",
-    "workerTrainingDispatch": "371c8f993aaeb929cf09c42d28c120cb88d8f25eab7016e2fa0658d3745b4824",
+    "workerImageQwenEditCandle": "ec7f1f1fb625e6177e8aa55179fc6f8286a6bbbfe74e8e0caf774955b30b3d91",
+    "workerImageSdxlImported": "cefdeb14f5977f963a77ffb8662509580739c06985b815eb2afe83652dd6e3e1",
+    "workerTrainingDispatch": "8ef905e05e13b104e84c0d576e6d0496c49c69383194651d13320353552365f7",
     "workerUtilityDispatch": "017142f8ac644fa2d275e35b94827af4f60644340956dfb84576d7e940737f0d",
     "workerVideoBernini": "bbadb80fbdf709d4f9262f2679c42fe3ac6389d042e2ec57bae086df9539c206",
-    "workerVideoCandle": "4142c5429f8bf602485f6fb0f946a2cf7184d5c82d3c40a9116160cad4ed1c14",
-    "workerVideoDispatch": "b035b1d43b47cbc64190a956bd2ef13db16e8cdac7918ccd6b77ba9072e0445b",
+    "workerVideoCandle": "bad81f9be04b98f1df95f1bb97e4332c1c89fb401f8647dee2ec3bb129b07c57",
+    "workerVideoDispatch": "49128e0bc2b57f0186a1dc1d83b3c296453844247dab50c47e6a0813c107957b",
     "workerVideoKreaRealtime": "590b65273e5d87c350feec0f677ee05295aa05835cac12348e2f5520fc1724e7",
-    "workerVideoLtx": "f068dfa17bd7975117853e33a6ac6158d6e545cafb1ef4236444786980da4b5f",
+    "workerVideoLtx": "361a66a2d61d91d6c294a072070133da09240cdf60e03d8d07d83bf59eae6731",
     "workerVideoMochi": "5a0868693b1cbf1c08a6acfc5151c3e3542d812b7cec6f73bfa53d701883dcbc",
     "workerVideoScail2": "b1c0f7d3e934afd7d9f612a497db768283c5b2a1a1bdd964a5db6213c98b9682",
     "workerVideoSeedvr2": "6b3f135483af0b81e835549264579f0f1fd59022e2686700e3ee931c554bd434",
     "workerVideoSvd": "eb2a97a5cd66c7459394ff75e53624154f754932ed1d8b6e1011a3bfdb3a0250",
-    "workerVideoVace": "466e9a6a9fc26d3ee3bb185685278c1ac8b38b4325fd6e430c1447a397f52462",
+    "workerVideoVace": "ac0ccbab8225051ab23a1e08c3c6a97b61c98e5cd75d12eb62a03c4e5460f2ba",
     "workerVideoWan": "92d45f09eec151466de568b5d36a2f3c0875e316102622649e532f3d7700491f"
   },
   "models": [
@@ -6650,6 +6650,46 @@
     }
   ],
   "importedFamilies": [
+    {
+      "family": "flux2",
+      "syntheticModelId": "sc18481_import_probe_flux2",
+      "manifestOperations": [
+        "text_to_image"
+      ],
+      "evaluatedOperations": [
+        "text_to_image"
+      ],
+      "operationAndMode": [
+        {
+          "capability": "text_to_image",
+          "mlx": false,
+          "candle": true,
+          "preservedCandleOnly": true
+        }
+      ],
+      "conditioningShape": [],
+      "userAdapters": [
+        {
+          "capability": "lora",
+          "mlx": false,
+          "candle": true,
+          "preservedCandleOnly": true
+        },
+        {
+          "capability": "lokr",
+          "mlx": false,
+          "candle": true,
+          "preservedCandleOnly": true
+        }
+      ],
+      "precisionTier": [],
+      "guidanceMethod": [],
+      "preview": {
+        "capability": "live_preview",
+        "mlx": false,
+        "candle": true
+      }
+    },
     {
       "family": "krea_2",
       "syntheticModelId": "sc18481_import_probe_krea_2",

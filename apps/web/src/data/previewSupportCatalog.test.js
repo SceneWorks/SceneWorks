@@ -1,3 +1,6 @@
+import { readFileSync, readdirSync } from "node:fs";
+import { resolve } from "node:path";
+
 import { describe, expect, it } from "vitest";
 
 import {
@@ -12,50 +15,55 @@ import {
   PREVIEW_SUPPORT_GENERATOR,
 } from "./previewSupportDerivation.js";
 import previewSupport from "./previewSupport.json";
-// Raw source text (Vite `?raw`) so the guard derives from the same bytes the generator reads. Both
-// live outside the web root — see the server.fs.allow entries in vite.config.js (mirrors the
-// style.txt / builtin.styles.jsonc pair).
-import enginesSource from "../../../../crates/sceneworks-worker/src/engines.rs?raw";
-import qwenEditCandleSource from "../../../../crates/sceneworks-worker/src/image_jobs/qwen_edit_candle.rs?raw";
-import pulidMlxSource from "../../../../crates/sceneworks-worker/src/image_jobs/pulid.rs?raw";
-import pulidCandleSource from "../../../../crates/sceneworks-worker/src/image_jobs/pulid_candle.rs?raw";
-import previewSupportManifestRaw from "../../../../config/manifests/builtin.preview-support.jsonc?raw";
+function readRepositoryFile(relativePath) {
+  return readFileSync(resolve(process.cwd(), "../..", relativePath), "utf8");
+}
+
+function readCapabilityFacts(relativeDirectory) {
+  const directory = resolve(process.cwd(), "../..", relativeDirectory);
+  return readdirSync(directory, { withFileTypes: true })
+    .filter((entry) => entry.isFile() && /^capabilities\..+\.json$/.test(entry.name))
+    .map((entry) => ({ name: entry.name, facts: JSON.parse(readFileSync(`${directory}/${entry.name}`, "utf8")) }))
+    .sort((left, right) => (left.name < right.name ? -1 : left.name > right.name ? 1 : 0));
+}
+
+// This drift guard reads the generator's exact repository inputs in its
+// non-listening Node test process, never via a Vite server's /@fs endpoint.
+const enginesSource = readRepositoryFile("crates/sceneworks-worker/src/engines.rs");
+const qwenEditCandleSource = readRepositoryFile(
+  "crates/sceneworks-worker/src/image_jobs/qwen_edit_candle.rs",
+);
+const pulidMlxSource = readRepositoryFile("crates/sceneworks-worker/src/image_jobs/pulid.rs");
+const pulidCandleSource = readRepositoryFile("crates/sceneworks-worker/src/image_jobs/pulid_candle.rs");
+const previewSupportManifestRaw = readRepositoryFile(
+  "config/manifests/builtin.preview-support.jsonc",
+);
 // The inference pin itself. `verifyEngineCapabilityFacts` in scripts/bump-inference.mjs compares the
 // facts files against it, but that script runs only when someone bumps THROUGH it — CI never invokes
 // it. So a pin edited by hand would leave the whole catalog advertising the PREVIOUS revision's
 // truth with nothing red. `check-license-coverage.mjs` had already learned this (it compares
 // `audit.inferenceRevision` to the live pin set AND runs in the parity lane); this is the same
 // assertion for the same class of artifact, on a guard that runs on every PR.
-import workerCargoToml from "../../../../crates/sceneworks-worker/Cargo.toml?raw";
+const workerCargoToml = readRepositoryFile("crates/sceneworks-worker/Cargo.toml");
 // The DECLARED backend set (sc-17119). Every other input below is discovered from the facts
 // directory, and a directory listing cannot see a file that was never written — which is why
 // `capabilities.mlx.json` was absent for four consecutive pins with the whole suite green.
-import factsDeclarationSource from "../../../../crates/sceneworks-worker/src/engine_capability_facts.rs?raw";
+const factsDeclarationSource = readRepositoryFile(
+  "crates/sceneworks-worker/src/engine_capability_facts.rs",
+);
 import { fallbackModels } from "../constants.js";
 
 // DISCOVERED, never listed. The generator globs this directory so a newly dumped backend is picked
 // up with no edit; a guard that hardcodes `capabilities.candle.json` would then fail the moment the
 // macOS lane lands `capabilities.mlx.json` — i.e. it would punish exactly the follow-up the design
 // is waiting on. Everything below is derived per-backend from whatever is on disk.
-const factsModules = import.meta.glob(
-  "../../../../config/engine-capabilities/capabilities.*.json",
-  { eager: true, query: "?raw", import: "default" },
-);
-const factsEntries = Object.entries(factsModules)
-  .map(([path, raw]) => ({ name: path.slice(path.lastIndexOf("/") + 1), facts: JSON.parse(raw) }))
-  .sort((left, right) => (left.name < right.name ? -1 : left.name > right.name ? 1 : 0));
+const factsEntries = readCapabilityFacts("config/engine-capabilities/");
 const factsFiles = factsEntries.map((entry) => entry.facts);
 
 // The AUDIO registry's dumps (sc-17593), one directory down. The glob above is single-level, so the
 // two sets cannot bleed into each other — which matters because they share backend names ("candle"
 // is the audio backend on every platform) while their engine-id namespaces are independent.
-const audioFactsModules = import.meta.glob(
-  "../../../../config/engine-capabilities/audio/capabilities.*.json",
-  { eager: true, query: "?raw", import: "default" },
-);
-const audioFactsEntries = Object.entries(audioFactsModules)
-  .map(([path, raw]) => ({ name: path.slice(path.lastIndexOf("/") + 1), facts: JSON.parse(raw) }))
-  .sort((left, right) => (left.name < right.name ? -1 : left.name > right.name ? 1 : 0));
+const audioFactsEntries = readCapabilityFacts("config/engine-capabilities/audio/");
 const audioFactsFiles = audioFactsEntries.map((entry) => entry.facts);
 
 const rows = parseEngineModelTable(enginesSource);

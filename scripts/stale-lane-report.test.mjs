@@ -604,37 +604,56 @@ test("the human report names the ranked lanes, the widening, and its provenance"
   assert.ok(text.includes(MARGIN_SOURCE));
 });
 
-test("the report is graded against a closure table keyed to the live pin", async (t) => {
-  // Same predicate the matrix generator uses (`validatedInferenceClosures`), reached through the
-  // same pin resolver the closure-digest derivation uses. A report that graded currency against a
-  // table keyed to an older pin would name the wrong lanes.
+test("a closure table derived at an older pin still grades, but a malformed one does not", async (t) => {
+  // Same predicate the matrix generator uses (`validatedInferenceClosures`), exercised THROUGH the
+  // report's own loader.
   //
-  // sc-18252: the first version of this test only compared the two files to each other and never
-  // called the report, so replacing the `validatedInferenceClosures` call inside `loadSources` with
-  // a raw `closures.providers` read kept every test green (mutation-verified). The gate must be
-  // exercised THROUGH the report's own loader: copy the real sources into a scratch root, re-key
-  // the closure table to a different revision, and the load itself must refuse.
-  const cargo = await readFile(path.join(ROOT, "Cargo.toml"), "utf8");
+  // The table's `inferenceRevision` is the revision its digests were DERIVED at, not an assertion
+  // about the live pin, so a table derived at an older pin must still load. Requiring the two to be
+  // equal made re-deriving mandatory on every pin bump, and because `core-llm` and `gen-core` are in
+  // every provider's closure a re-derivation moves every digest at once: on f32fce06 -> 857f2454 all
+  // 17 lanes demoted, solely because `core-llm` gained a `starvector` module. Grading currency
+  // against the digests themselves is the point of the report; the pin is not an input to it.
+  //
+  // sc-18252: the first version of this test only compared two files to each other and never called
+  // the report, so replacing the `validatedInferenceClosures` call inside `loadSources` with a raw
+  // `closures.providers` read kept every test green (mutation-verified). The refusals below are
+  // therefore driven through `loadSources`, and each one is a property a raw `.providers` read would
+  // NOT have: a malformed revision, an unusable digest, and an empty provider table.
   const closures = JSON.parse(
     await readFile(path.join(ROOT, "config", "inference-provider-closures.json"), "utf8"),
   );
-  assert.equal(closures.inferenceRevision, inferencePinFromCargo(cargo));
-  assert.throws(
-    () => inferencePinFromCargo("[dependencies]\nserde = \"1\"\n"),
-    /could not resolve the pinned SceneWorks\/inference revision/,
-  );
-
   const scratch = await mkdtemp(path.join(os.tmpdir(), "stale-lane-pin-"));
   t.after(() => rm(scratch, { recursive: true, force: true }));
   for (const relative of Object.values(SOURCE_PATHS)) {
     await mkdir(path.dirname(path.join(scratch, relative)), { recursive: true });
     await copyFile(path.join(ROOT, relative), path.join(scratch, relative));
   }
-  // The untampered copy loads and builds — so the refusal below is the re-keying, nothing else.
+  const writeClosures = (value) =>
+    writeFile(path.join(scratch, SOURCE_PATHS.closures), JSON.stringify(value, null, 2));
+
+  // The untampered copy loads and builds — so every refusal below is the tampering, nothing else.
   buildStaleLaneReport(await loadSources(scratch));
-  const rekeyed = { ...closures, inferenceRevision: "f".repeat(40) };
-  await writeFile(path.join(scratch, SOURCE_PATHS.closures), JSON.stringify(rekeyed, null, 2));
-  await assert.rejects(loadSources(scratch), /is keyed to ffffffff but Cargo pins/);
+
+  // THE REGRESSION GUARD. A table derived at a different revision than Cargo pins is legal, and it
+  // grades exactly the same lanes: the digests did not move, so neither did anyone's currency.
+  const before = buildStaleLaneReport(await loadSources(scratch));
+  await writeClosures({ ...closures, inferenceRevision: "f".repeat(40) });
+  const after = buildStaleLaneReport(await loadSources(scratch));
+  assert.deepEqual(after.lanes, before.lanes, "re-keying the table must not move a single lane");
+
+  await writeClosures({ ...closures, inferenceRevision: "not-a-revision" });
+  await assert.rejects(loadSources(scratch), /must record the full inference revision/);
+
+  const [firstLane] = Object.keys(closures.providers);
+  await writeClosures({
+    ...closures,
+    providers: { ...closures.providers, [firstLane]: { ...closures.providers[firstLane], digest: "nope" } },
+  });
+  await assert.rejects(loadSources(scratch), /has no usable digest/);
+
+  await writeClosures({ ...closures, providers: {} });
+  await assert.rejects(loadSources(scratch), /declares no providers/);
 });
 
 test("capturability is parsed from the dispatch arms — literals, consts, and no test scaffolding", () => {

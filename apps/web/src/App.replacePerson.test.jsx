@@ -29,6 +29,17 @@ describe("SceneWorks app shell", () => {
       if (path.endsWith("/projects")) {
         return Promise.resolve(response([{ id: "project-default", name: "Default Project" }]));
       }
+      if (path.endsWith("/models")) {
+        return Promise.resolve(response([{
+          id: "ltx_2_3",
+          name: "LTX-2.3",
+          type: "video",
+          capabilities: ["replace_person", "image_to_video", "text_to_video"],
+          installState: "installed",
+          defaults: { duration: 4, fps: 24, resolution: "1280x720", quality: "balanced" },
+          limits: { durations: [4], fps: [24], resolutions: ["1280x720"] },
+        }]));
+      }
       return Promise.resolve(response([]));
     });
   });

@@ -2121,6 +2121,70 @@ async fn create_training_job_rejects_unknown_target_and_missing_dataset() {
     assert_eq!(error["detail"], "Training dataset not found");
 }
 
+/// The target catalog is client-visible capability metadata, but the API must
+/// enforce it before it looks up or mutates a dataset. Every row changes one
+/// field only and uses a missing dataset as a tripwire: a target-limit error
+/// proves the shared request boundary ran before any training allocation.
+#[tokio::test]
+async fn create_training_job_returns_typed_target_capability_errors_before_allocation() {
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    let (_, project) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/projects",
+        json!({ "name": "Training limit boundary" }),
+    )
+    .await;
+    let project_id = project["id"].as_str().expect("project id");
+    let (_, registry) = request(app.clone(), "GET", "/api/v1/training/targets", Value::Null).await;
+    let target = registry["targets"]
+        .as_array()
+        .expect("target list")
+        .iter()
+        .find(|target| target["id"] == "z_image_turbo_lora")
+        .expect("Z-Image target");
+    let target_id = target["id"].as_str().expect("target id");
+
+    for (field, value, expected_kind) in [
+        ("rank", json!(3), "below_minimum"),
+        ("rank", json!(129), "above_maximum"),
+        ("alpha", json!(0), "below_minimum"),
+        ("alpha", json!(129), "above_maximum"),
+        ("steps", json!(199), "below_minimum"),
+        ("steps", json!(6001), "above_maximum"),
+        ("batchSize", json!(0), "below_minimum"),
+        ("batchSize", json!(5), "above_maximum"),
+        ("resolution", json!(511), "unsupported_numeric_value"),
+        ("resolution", json!(1025), "unsupported_numeric_value"),
+        ("optimizer", json!("not-advertised"), "unsupported_value"),
+    ] {
+        let mut config = target["defaults"].clone();
+        config[field] = value.clone();
+        let (status, error) = request(
+            app.clone(),
+            "POST",
+            &format!("/api/v1/projects/{project_id}/training/jobs"),
+            json!({
+                "targetId": target_id,
+                "datasetId": "ds_missing",
+                "config": config,
+                "outputName": "Rejected before allocation",
+                "dryRun": true
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{field}={value}");
+        assert_eq!(error["code"], "training_target_limit", "{field}={value}");
+        assert_eq!(error["context"]["field"], field, "{field}={value}");
+        assert_eq!(error["context"]["kind"], expected_kind, "{field}={value}");
+    }
+
+    let (status, jobs) = request(app, "GET", "/api/v1/jobs?status=queued", Value::Null).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(jobs.as_array().expect("queued job list").is_empty());
+}
+
 #[tokio::test]
 async fn create_training_job_queues_real_run_when_not_dry_run() {
     let _env = isolate_hf_cache(); // hermetic: resolve the seeded base under the tempdir, never a dev's real HF cache (sc-13834/sc-13860)

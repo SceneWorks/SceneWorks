@@ -619,6 +619,20 @@ pub(crate) async fn run_image_generate_job(
     )
     .await?;
 
+    // Everything from here to the terminal post is covered by a region heartbeat.
+    //
+    // The routes below each run a pre-load admission pass — provider footprint queries, the tier
+    // ladder's residency probes, decode-quality binding — before they open a generation stream, and
+    // only the stream has a heartbeat of its own (its `select!` interval arm, sc-4276). The pass
+    // between the two posted nothing: on a 33 GB Krea bundle it measured 95 s, and the 90 s stale
+    // sweep marked the job `interrupted` under a healthy worker, which then died on its next
+    // progress POST with `409 ... is already interrupted`.
+    //
+    // Scoped at the dispatch seam rather than inside one route on purpose. Every arm below has the
+    // same pass and would otherwise each have to remember its own pump; overlapping the stream's
+    // interval arm costs nothing, because a heartbeat is an idempotent `last_seen_at` stamp.
+    let preload_heartbeat = crate::progress::HeartbeatPump::start(api, settings, &job.id);
+
     let mut asset_writes: Vec<Value> = Vec::with_capacity(plan.image_count as usize);
 
     // Real in-process MLX inference on macOS for engine-backed models; otherwise the
@@ -975,6 +989,13 @@ pub(crate) async fn run_image_generate_job(
                     &mut asset_writes,
                 )
                 .await?;
+            }
+            ImageRoute::FluxIpAdapterPoseReject => {
+                return Err(WorkerError::InvalidPayload(
+                    "FLUX.1 IP-Adapter reference conditioning cannot be combined with strict pose control; \
+                     this backend has separate IP-Adapter and ControlNet providers, so refusing rather \
+                     than silently dropping either requested conditioning".to_owned(),
+                ));
             }
             ImageRoute::PoseControlBaseMissing => {
                 // A strict-pose job on a WIRED MLX pose family (`WIRED_MLX_POSE_FAMILIES`) whose control
@@ -1483,6 +1504,13 @@ pub(crate) async fn run_image_generate_job(
                         WIRED_CANDLE_POSE_FAMILIES.join(", ")
                     )));
                 }
+                CandleImageRoute::FluxIpAdapterPoseReject => {
+                    return Err(WorkerError::InvalidPayload(
+                        "FLUX.1 IP-Adapter reference conditioning cannot be combined with strict pose control; \
+                         this backend has separate IP-Adapter and ControlNet providers, so refusing rather \
+                         than silently dropping either requested conditioning".to_owned(),
+                    ));
+                }
                 // No-silent-T2I (sc-11171, F-008): a strict-pose job on a WIRED candle pose family whose
                 // control base snapshot is NOT installed (the family's `…_control_available` weight-gate
                 // failed, so it fell through to here). The scheduler routed it to candle weight-blind
@@ -1594,6 +1622,20 @@ pub(crate) async fn run_image_generate_job(
         )
         .await?;
     }
+
+    // Explicitly, and BEFORE the terminal post. A pump tick that lands after the job completes is
+    // a no-op on the job row (the heartbeat's job update is scoped to the owning worker), but it
+    // would still write `busy` + this job id back onto the WORKER row — racing the loop's own Idle
+    // heartbeat and briefly advertising a worker that is free as occupied.
+    //
+    // NARROWS that race rather than closing it: `Drop` aborts the pump task, which cannot recall a
+    // POST already on the wire. One in-flight request can still land after the terminal write. The
+    // loop's next Idle heartbeat (one progress interval, ≤15s) corrects the worker row, and the job
+    // row was never at risk, so the residue is a worker that reads busy for at most that interval.
+    // Closing it outright would need the pump to await its in-flight request, which would put a
+    // network round-trip in front of every job's terminal post to fix a self-correcting cosmetic
+    // window.
+    drop(preload_heartbeat);
 
     update_job(
         api,
@@ -2477,10 +2519,34 @@ pub(crate) fn write_image_asset(
     height: u32,
     pixels: Vec<u8>,
     adapter: &str,
-    raw_settings: JsonObject,
+    mut raw_settings: JsonObject,
     project_path: &Path,
 ) -> WorkerResult<JsonObject> {
     let request = &plan.request;
+    // The three checkpoint facts (sc-21484, epic 11037), stamped here because EVERY generated image
+    // asset funnels through this one function — so the source codec a checkpoint stores, the host's
+    // native-execution capability, and what the load actually materialized reach the receipt from
+    // every lane rather than only the two that happen to build them themselves.
+    //
+    // A lane that already assembled its own set keeps it: `krea_imported` resolves the DiT path and
+    // can therefore tie the facts to a source BINDING, which is strictly more than this site can
+    // state. Never overwrite a richer fact set with a poorer one.
+    //
+    // Nothing is inserted at all when the model carries no verified source classification. That
+    // absence is the honest answer for a builtin turnkey tier and a diffusers-tree import, and it
+    // is the one a consumer must handle anyway — filling it from `advanced.quantTier` would put the
+    // requested TIER into a field that means the stored CODEC.
+    if !raw_settings.contains_key(crate::checkpoint_weight_facts_host::FACTS_RAW_SETTINGS_KEY) {
+        crate::checkpoint_weight_facts_host::insert_facts_into_raw_settings(
+            &mut raw_settings,
+            crate::checkpoint_weight_facts_host::imported_checkpoint_facts(
+                &request.model_manifest_entry,
+                None,
+                crate::checkpoint_weight_facts_host::materialization_from_runtime(None),
+            )
+            .as_ref(),
+        );
+    }
     let rgb_image = image::RgbImage::from_raw(width, height, pixels)
         .ok_or_else(|| WorkerError::InvalidPayload("image buffer size mismatch".to_owned()))?;
 

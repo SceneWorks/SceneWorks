@@ -171,7 +171,7 @@ pub(super) fn prepare_qwen_comfyui_sources(
         "qwen-image",
         gen_core::ImportedModelSource::ComfyUiTree,
     );
-    if descriptor.as_ref().map_or(true, |descriptor| {
+    if descriptor.as_ref().is_none_or(|descriptor| {
         super::imported_model_quant(request, descriptor, "ComfyUI Qwen-Image").is_err()
     }) {
         return Ok(None);
