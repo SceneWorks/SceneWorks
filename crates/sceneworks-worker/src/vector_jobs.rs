@@ -360,7 +360,8 @@ impl MultimodalVectorProviderAdapter for NativeStarVectorProvider {
         let spec = TextLoadSpec::dense(self.weights_dir.to_string_lossy().into_owned());
         let requirements = ModelRequirements::from_request(&typed_request.text_request);
         let expected_provider_id = self.inference_provider_id.to_owned();
-        let expected_tier = self.identity.tier;
+        let identity = self.identity;
+        let expected_tier = identity.tier;
         let backend = self.backend;
         let cancel = cancel.clone();
         let load_context = format!(
@@ -400,10 +401,10 @@ impl MultimodalVectorProviderAdapter for NativeStarVectorProvider {
                         generated_bytes: output.generated_bytes,
                         latency_seconds: started.elapsed().as_secs_f64(),
                         provider_id: expected_provider_id.clone(),
-                        model_id: self.identity.model_id,
-                        model_repository: self.identity.repository,
-                        model_revision: self.identity.revision,
-                        backend: self.backend,
+                        model_id: identity.model_id,
+                        model_repository: identity.repository,
+                        model_revision: identity.revision,
+                        backend,
                     };
                     let source = validate_native_starvector_generation(output, events)?;
                     Ok((source, terminal))
