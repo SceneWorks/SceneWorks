@@ -220,6 +220,12 @@ the refinement adapter on dev sessions. `--provider <plan-provider-name>` option
 provider block; use it to run the current Krea v1 production point separately from non-promotable v2 candidates.
 `--fixture <fixture-name>` selects every provider block sharing that fixture, which is the intended
 way to execute a multi-rung reference ladder as one reproducible capture.
+`--ltx25-partition <substring[,substring...]>` (valid only with `--model ltx_2_5`) runs the plan rows
+whose names contain any listed substring — a validated non-empty SUBSET of the canonical campaign, so
+the 84-case grid can be split across capture hosts (e.g. `-distilled-` on one Mac, `-dev-` on the
+other) and the per-host evidence bundles merged at ingestion. The checked-in plan remains the sole
+authority: a partition may never select a case outside it, and the full-set equality check still
+applies to unpartitioned runs.
 `--fresh-per-case` overrides scheduling for an oracle capture; `--batch-rungs` forces one target's
 rungs into an experimental batch. Compare the two bundles with the committed larger-of tolerance
 (256 MiB absolute or 5% relative for every phase/metric):
