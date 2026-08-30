@@ -1,10 +1,11 @@
 import assert from "node:assert/strict";
+import { EventEmitter } from "node:events";
 import { readFile } from "node:fs/promises";
 import path from "node:path";
 import test from "node:test";
 import { pathToFileURL } from "node:url";
 import { isExecutedModule } from "./starvector-terminal-cli.mjs";
-import { sourceInstallEnvironment, sourceInstallRequests } from "./starvector-terminal-source-install.mjs";
+import { sourceInstallEnvironment, sourceInstallRequests, stopSourceChildren, windowsTaskkillArguments } from "./starvector-terminal-source-install.mjs";
 
 test("terminal CLIs compare platform paths through canonical file URLs", () => {
   const executable = path.resolve("scripts/starvector-terminal-source-install.mjs");
@@ -34,6 +35,70 @@ test("source preparation clears terminal/offline inheritance and isolates both p
   assert.equal(env.HF_HUB_CACHE, path.join(hfHome, "hub"));
   assert.equal(env.SCENEWORKS_GPU_ID, "cpu");
   for (const name of ["HF_HUB_OFFLINE", "TRANSFORMERS_OFFLINE", "SCENEWORKS_TERMINAL_CAMPAIGN", "SCENEWORKS_TERMINAL_NO_JOB_DOWNLOADS"]) assert.equal(env[name], undefined);
+});
+
+test("source preparation escalates stubborn Windows children through taskkill", async () => {
+  const signals = [];
+  const child = Object.assign(new EventEmitter(), {
+    exitCode: null,
+    signalCode: null,
+    pid: 4242,
+    kill(signal) { signals.push(signal); return true; },
+  });
+  const taskkill = async (pid) => {
+    assert.equal(pid, 4242);
+    child.signalCode = "SIGKILL";
+    child.emit("exit", null, "SIGKILL");
+  };
+  await stopSourceChildren([child], { platform: "win32", taskkill, timeoutMs: 1 });
+  assert.deepEqual(signals, ["SIGTERM"]);
+  assert.deepEqual(windowsTaskkillArguments(4242), ["/PID", "4242", "/T", "/F"]);
+});
+
+test("source preparation escalates stubborn POSIX children through SIGKILL", async () => {
+  const signals = [];
+  const child = Object.assign(new EventEmitter(), {
+    exitCode: null,
+    signalCode: null,
+    pid: 4243,
+    kill(signal) {
+      signals.push(signal);
+      if (signal === "SIGKILL") {
+        this.signalCode = signal;
+        this.emit("exit", null, signal);
+      }
+      return true;
+    },
+  });
+  await stopSourceChildren([child], { platform: "linux", timeoutMs: 1 });
+  assert.deepEqual(signals, ["SIGTERM", "SIGKILL"]);
+});
+
+test("source preparation recognizes signal-terminated children as stopped", async () => {
+  const child = {
+    exitCode: null,
+    signalCode: "SIGTERM",
+    pid: 4244,
+    kill() { assert.fail("a signal-terminated child must not be killed again"); },
+  };
+  await stopSourceChildren([child], { timeoutMs: 1 });
+});
+
+test("source preparation remains bounded when taskkill itself hangs", async () => {
+  const child = Object.assign(new EventEmitter(), {
+    exitCode: null,
+    signalCode: null,
+    pid: 4245,
+    kill() { return true; },
+  });
+  await assert.rejects(
+    stopSourceChildren([child], {
+      platform: "win32",
+      taskkill: async () => new Promise(() => {}),
+      timeoutMs: 1,
+    }),
+    /did not stop \(pids: 4245\)/,
+  );
 });
 
 test("source workflow is preparation-only on both real-weight hosts", async () => {

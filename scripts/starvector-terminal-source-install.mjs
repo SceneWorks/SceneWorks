@@ -18,6 +18,7 @@ const IDENTITIES = [
 const TERMINAL = new Set(["completed", "failed", "canceled"]);
 const die = (message) => { throw new Error(`starvector terminal source install: ${message}`); };
 const delay = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds));
+const childIsRunning = (child) => child.exitCode === null && child.signalCode === null;
 
 export function sourceInstallRequests() {
   return [
@@ -62,7 +63,7 @@ async function responseJson(response, context) {
 
 async function waitHealthy(url, children) {
   for (let attempt = 0; attempt < 180; attempt += 1) {
-    if (children.some((child) => child.exitCode !== null)) die("source-built API or worker exited during startup");
+    if (children.some((child) => !childIsRunning(child))) die("source-built API or worker exited during startup");
     try {
       const response = await fetch(new URL("/api/v1/health", url));
       const body = await response.json();
@@ -81,7 +82,7 @@ async function installModel(url, request, children) {
   }), `Model Manager install ${request.modelId}`);
   if (typeof created?.id !== "string" || !created.id) die(`Model Manager install ${request.modelId} returned no job id`);
   for (let attempt = 0; attempt < 10800; attempt += 1) {
-    if (children.some((child) => child.exitCode !== null)) die(`source-built API or worker exited while installing ${request.modelId}`);
+    if (children.some((child) => !childIsRunning(child))) die(`source-built API or worker exited while installing ${request.modelId}`);
     const job = await responseJson(await fetch(new URL(`/api/v1/jobs/${created.id}`, url)), `Model Manager job ${created.id}`);
     if (TERMINAL.has(job.status)) {
       if (job.status !== "completed") die(`${request.modelId} ended ${job.status}: ${job.error ?? job.message ?? "no error detail"}`);
@@ -92,10 +93,74 @@ async function installModel(url, request, children) {
   die(`timed out waiting for Model Manager install ${request.modelId}`);
 }
 
-async function stop(children) {
-  for (const child of [...children].reverse()) if (child.exitCode === null) child.kill("SIGTERM");
-  for (let attempt = 0; attempt < 100 && children.some((child) => child.exitCode === null); attempt += 1) await delay(100);
-  if (children.some((child) => child.exitCode === null)) die("source-built API or worker did not stop");
+export function windowsTaskkillArguments(pid) {
+  if (!Number.isSafeInteger(pid) || pid <= 0) die("cannot terminate a Windows child without a valid process id");
+  return ["/PID", String(pid), "/T", "/F"];
+}
+
+async function runWindowsTaskkill(pid, timeoutMs) {
+  await new Promise((resolve) => {
+    const killer = spawn("taskkill.exe", windowsTaskkillArguments(pid), { stdio: "inherit", windowsHide: true });
+    let settled = false;
+    const finish = () => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve();
+    };
+    const timer = setTimeout(() => {
+      try { killer.kill("SIGKILL"); } catch { /* the helper may already have exited */ }
+      finish();
+    }, timeoutMs);
+    killer.once("error", finish);
+    killer.once("exit", finish);
+  });
+}
+
+async function waitForChildExit(child, timeoutMs) {
+  if (!childIsRunning(child)) return true;
+  return new Promise((resolve) => {
+    let timer;
+    const finish = (exited) => {
+      clearTimeout(timer);
+      child.removeListener("exit", onExit);
+      resolve(exited);
+    };
+    const onExit = () => finish(true);
+    child.once("exit", onExit);
+    timer = setTimeout(() => finish(false), timeoutMs);
+    if (!childIsRunning(child)) finish(true);
+  });
+}
+
+export async function stopSourceChildren(children, {
+  platform = process.platform,
+  taskkill = runWindowsTaskkill,
+  timeoutMs = 10000,
+} = {}) {
+  const graceful = [...children].reverse().filter(childIsRunning);
+  const gracefulExits = graceful.map((child) => waitForChildExit(child, timeoutMs));
+  for (const child of graceful) {
+    try { child.kill("SIGTERM"); } catch { /* escalate below */ }
+  }
+  await Promise.all(gracefulExits);
+
+  const stubborn = [...children].reverse().filter(childIsRunning);
+  const forcedExits = stubborn.map((child) => waitForChildExit(child, timeoutMs));
+  if (platform === "win32") {
+    await Promise.all(stubborn.map((child) => Promise.race([
+      taskkill(child.pid, timeoutMs),
+      delay(timeoutMs),
+    ])));
+  }
+  else {
+    for (const child of stubborn) {
+      try { child.kill("SIGKILL"); } catch { /* report the live child below */ }
+    }
+  }
+  await Promise.all(forcedExits);
+  const livePids = children.filter(childIsRunning).map((child) => child.pid ?? "unknown");
+  if (livePids.length > 0) die(`source-built API or worker did not stop (pids: ${livePids.join(", ")})`);
 }
 
 export async function installSourceClosure({ root, stateRoot, url }) {
@@ -115,7 +180,7 @@ export async function installSourceClosure({ root, stateRoot, url }) {
     const record = { schema_version: 1, preparation_only: true, model_execution: false, campaign_evidence: false, data_dir: dataDir, hf_home: hfHome, prompt_revision: PROMPT_REVISION, jobs, health, completed_at: new Date().toISOString() };
     await writeFile(path.join(stateRoot, "source-closure.json"), `${JSON.stringify(record, null, 2)}\n`);
     return record;
-  } finally { await stop(children); }
+  } finally { await stopSourceChildren(children); }
 }
 
 if (isExecutedModule(import.meta.url)) {
