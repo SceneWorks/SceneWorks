@@ -43,8 +43,8 @@ async function tree(root, symlinkBoundary = root) {
   return { entries, aggregate_sha256: sha(JSON.stringify(entries)) };
 }
 
-async function copyTree(source, destination) {
-  const sourceIdentity = await tree(source), existing = await lstat(destination).catch(() => null);
+async function copyTree(source, destination, symlinkBoundary = source) {
+  const sourceIdentity = await tree(source, symlinkBoundary), existing = await lstat(destination).catch(() => null);
   if (existing) {
     if (!existing.isDirectory() || existing.isSymbolicLink()) die(`destination is not a regular directory: ${destination}`);
     const destinationIdentity = await tree(destination);
@@ -152,7 +152,7 @@ export async function assemblePreflight(source, destination, revision) {
   await copyTree(source, destination); return index;
 }
 
-export async function assembleWeights({ hostRoot, serviceAppData, serviceHfHome, promptRaster, promptProvider, promptModel, promptRevision }) {
+export async function assembleWeights({ hostRoot, serviceAppData, serviceHfHome, promptProvider, promptModel, promptRevision }) {
   if (promptProvider !== "candle_flux" || promptModel !== "flux_schnell") die("terminal prompt raster must use the Windows Candle FLUX schnell route");
   const weightsRoot = path.join(hostRoot, "weights");
   const models = {};
@@ -170,10 +170,11 @@ export async function assembleWeights({ hostRoot, serviceAppData, serviceHfHome,
     { repo: "SceneWorks/flux1-schnell-mlx", revision: promptRevision, modelId: "flux_schnell", variant: "q4" },
   ]);
   const promptSnapshot = serviceSnapshots.get(`SceneWorks/flux1-schnell-mlx@${promptRevision}`), promptRuntime = path.join(promptSnapshot, "q4");
-  const promptSourceIdentity = await tree(promptRaster), promptRuntimeIdentity = await tree(promptRuntime, serviceHfHome);
-  if (JSON.stringify(promptSourceIdentity) !== JSON.stringify(promptRuntimeIdentity)) die("prompt raster source does not match the receipt-backed FLUX q4 runtime directory");
   const promptDestination = path.join(weightsRoot, "models", "prompt-raster");
-  const promptIdentity = await copyTree(promptRaster, promptDestination);
+  // Inventory and copy the exact q4 directory the product loader will resolve
+  // from the receipt-backed offline HF closure. A second operator-supplied copy
+  // could drift while still carrying the right revision label.
+  const promptIdentity = await copyTree(promptRuntime, promptDestination, serviceHfHome);
   const promptInventory = Buffer.from(`${JSON.stringify(promptIdentity, null, 2)}\n`);
   const promptInventoryPath = "inventories/prompt-raster-inventory-v1.json";
   await writeExact(path.join(weightsRoot, ...promptInventoryPath.split("/")), promptInventory);
@@ -202,9 +203,9 @@ async function main(argv) {
   if (command === "download" && args.length === 3) return downloadExact(args[0], args[1], args[2]);
   if (command === "checkout" && args.length === 3) return installCheckout(args[0], args[1], args[2]);
   if (command === "preflight" && args.length === 3) return assemblePreflight(args[0], args[1], args[2]);
-  if (command === "weights" && args.length === 7) return assembleWeights({ hostRoot: args[0], serviceAppData: args[1], serviceHfHome: args[2], promptRaster: args[3], promptProvider: args[4], promptModel: args[5], promptRevision: args[6] });
+  if (command === "weights" && args.length === 6) return assembleWeights({ hostRoot: args[0], serviceAppData: args[1], serviceHfHome: args[2], promptProvider: args[3], promptModel: args[4], promptRevision: args[5] });
   if (command === "metrics" && args.length === 4) return assembleMetrics({ sceneWorksRoot: args[0], metricsRoot: args[1], python: args[2], clipRevision: args[3] });
-  die("usage: download <url> <path> <sha256> | checkout <source> <destination> <sha> | preflight <source> <destination> <sha> | weights <host-root> <app-data-source> <hf-source> <prompt-source> <provider> <model> <revision> | metrics <sceneworks-root> <metrics-root> <python> <clip-revision>");
+  die("usage: download <url> <path> <sha256> | checkout <source> <destination> <sha> | preflight <source> <destination> <sha> | weights <host-root> <app-data-source> <hf-source> <provider> <model> <revision> | metrics <sceneworks-root> <metrics-root> <python> <clip-revision>");
 }
 
 if (process.argv[1] && path.resolve(process.argv[1]) === new URL(import.meta.url).pathname) main(process.argv.slice(2)).catch((error) => { console.error(error.message); process.exitCode = 1; });

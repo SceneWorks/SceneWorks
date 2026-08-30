@@ -24,20 +24,12 @@ on:
         description: Absolute macOS source for the complete offline HF cache.
         required: true
         type: string
-      mac_prompt_raster_source:
-        description: Absolute macOS source for the receipt-backed FLUX schnell q4 runtime directory.
-        required: true
-        type: string
       windows_app_data_source:
         description: Absolute Windows source for existing SceneWorks-produced install receipts/app data.
         required: true
         type: string
       windows_hf_home_source:
         description: Absolute Windows source for the complete offline HF cache.
-        required: true
-        type: string
-      windows_prompt_raster_source:
-        description: Absolute Windows source for the receipt-backed FLUX schnell q4 runtime directory.
         required: true
         type: string
 
@@ -66,7 +58,6 @@ jobs:
       STARVECTOR_INFERENCE_REVISION: ${{ inputs.inference_revision }}
       STARVECTOR_APP_DATA_SOURCE: ${{ inputs.mac_app_data_source }}
       STARVECTOR_HF_HOME_SOURCE: ${{ inputs.mac_hf_home_source }}
-      STARVECTOR_PROMPT_RASTER_SOURCE: ${{ inputs.mac_prompt_raster_source }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -92,7 +83,7 @@ jobs:
           node scripts/starvector-terminal-provision.mjs preflight "$RUNNER_TEMP/starvector-preflight" "$STARVECTOR_TERMINAL_ROOT/inference-preflight" "$STARVECTOR_INFERENCE_REVISION"
       - name: Assemble durable model and product-service closure
         run: |
-          node scripts/starvector-terminal-provision.mjs weights "$STARVECTOR_TERMINAL_ROOT" "$STARVECTOR_APP_DATA_SOURCE" "$STARVECTOR_HF_HOME_SOURCE" "$STARVECTOR_PROMPT_RASTER_SOURCE" "$STARVECTOR_PROMPT_PROVIDER" "$STARVECTOR_PROMPT_MODEL" "$STARVECTOR_PROMPT_REVISION"
+          node scripts/starvector-terminal-provision.mjs weights "$STARVECTOR_TERMINAL_ROOT" "$STARVECTOR_APP_DATA_SOURCE" "$STARVECTOR_HF_HOME_SOURCE" "$STARVECTOR_PROMPT_PROVIDER" "$STARVECTOR_PROMPT_MODEL" "$STARVECTOR_PROMPT_REVISION"
       - name: Provision pinned metric runtime and official checkpoints
         run: |
           test -x "$STARVECTOR_TERMINAL_ROOT/metrics/bin/python" || python3 -m venv "$STARVECTOR_TERMINAL_ROOT/metrics"
@@ -134,7 +125,6 @@ jobs:
       STARVECTOR_INFERENCE_REVISION: ${{ inputs.inference_revision }}
       STARVECTOR_APP_DATA_SOURCE: ${{ inputs.windows_app_data_source }}
       STARVECTOR_HF_HOME_SOURCE: ${{ inputs.windows_hf_home_source }}
-      STARVECTOR_PROMPT_RASTER_SOURCE: ${{ inputs.windows_prompt_raster_source }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -159,7 +149,7 @@ jobs:
         run: |
           node scripts/starvector-terminal-provision.mjs checkout "$env:GITHUB_WORKSPACE\inference-source" "$env:STARVECTOR_TERMINAL_ROOT\inference" $env:STARVECTOR_INFERENCE_REVISION
           node scripts/starvector-terminal-provision.mjs preflight "$env:RUNNER_TEMP\starvector-preflight" "$env:STARVECTOR_TERMINAL_ROOT\inference-preflight" $env:STARVECTOR_INFERENCE_REVISION
-          node scripts/starvector-terminal-provision.mjs weights $env:STARVECTOR_TERMINAL_ROOT $env:STARVECTOR_APP_DATA_SOURCE $env:STARVECTOR_HF_HOME_SOURCE $env:STARVECTOR_PROMPT_RASTER_SOURCE $env:STARVECTOR_PROMPT_PROVIDER $env:STARVECTOR_PROMPT_MODEL $env:STARVECTOR_PROMPT_REVISION
+          node scripts/starvector-terminal-provision.mjs weights $env:STARVECTOR_TERMINAL_ROOT $env:STARVECTOR_APP_DATA_SOURCE $env:STARVECTOR_HF_HOME_SOURCE $env:STARVECTOR_PROMPT_PROVIDER $env:STARVECTOR_PROMPT_MODEL $env:STARVECTOR_PROMPT_REVISION
       - name: Provision pinned metric runtime and official checkpoints
         shell: pwsh
         run: |
