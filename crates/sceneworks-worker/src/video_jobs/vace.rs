@@ -5,6 +5,56 @@
 use super::ltx::resolve_clip_media_path;
 #[allow(unused_imports)]
 use super::prelude::*;
+
+/// VACE-Fun is not a generic Wan fallback: its only supported product route is the dedicated
+/// dual-expert `replace_person` engine. Keep this validation ahead of project/output setup so a
+/// worker that cannot run that engine cannot leave a successful-looking procedural asset behind.
+pub(super) fn validate_vace_fun_capability(
+    request: &VideoRequest,
+    settings: &Settings,
+) -> WorkerResult<()> {
+    if request.model != "wan_2_2_vace_fun_14b" {
+        return Ok(());
+    }
+    if request.mode != "replace_person" {
+        return Err(WorkerError::InvalidPayload(format!(
+            "wan_2_2_vace_fun_14b supports only replace_person; no real VACE-Fun backend can run {}.",
+            request.mode
+        )));
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        let _ = settings;
+        Ok(())
+    }
+
+    #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+    {
+        if settings.backend_candle_enabled {
+            Ok(())
+        } else {
+            Err(WorkerError::InvalidPayload(
+                "wan_2_2_vace_fun_14b replace_person requires the enabled native Candle backend; \
+                 no real VACE-Fun backend is available on this worker."
+                    .to_owned(),
+            ))
+        }
+    }
+
+    #[cfg(not(any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    )))]
+    {
+        let _ = settings;
+        Err(WorkerError::InvalidPayload(
+            "wan_2_2_vace_fun_14b replace_person requires the native MLX worker on macOS or an \
+             enabled Candle backend; no real VACE-Fun backend is available on this worker."
+                .to_owned(),
+        ))
+    }
+}
 #[cfg(any(
     target_os = "macos",
     all(not(target_os = "macos"), feature = "backend-candle")

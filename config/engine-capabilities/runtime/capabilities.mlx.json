@@ -1,7 +1,7 @@
 {
   "schemaVersion": 2,
   "generatedFrom": {
-    "inferenceRevision": "1caa6863673c0a6be33115506b059e25238d2011",
+    "inferenceRevision": "3775a5f80a07a38071c7859f6ac565bcab5d1c7b",
     "dumper": "cargo run -p sceneworks-worker --bin dump-engine-capabilities"
   },
   "modelMappings": {
@@ -405,6 +405,7 @@
       "lens_turbo",
       "lens",
       "ltx_2_3",
+      "ltx_2_5",
       "mage_flow",
       "mage_flow_base",
       "mage_flow_turbo",
@@ -1636,6 +1637,38 @@
         "supported_guidance_methods": []
       },
       {
+        "id": "ltx_2_5",
+        "family": "ltx",
+        "backend": "mlx",
+        "modality": "video",
+        "conditioning": [
+          "reference",
+          "multiReference",
+          "keyframe",
+          "videoClip",
+          "controlClip"
+        ],
+        "supports_lora": true,
+        "supports_lokr": false,
+        "supported_quants": [],
+        "supports_preview": false,
+        "supports_prompt_enhancement": true,
+        "samplers": [
+          "euler",
+          "euler_ancestral",
+          "heun",
+          "dpmpp_2m",
+          "dpmpp_sde",
+          "uni_pc",
+          "lcm",
+          "ddim",
+          "er_sde",
+          "dpmpp_2m_sde"
+        ],
+        "schedulers": [],
+        "supported_guidance_methods": []
+      },
+      {
         "id": "mage_flow",
         "family": "mage_flow",
         "backend": "mlx",
@@ -2679,6 +2712,7 @@
       "krea_2_raw",
       "lens",
       "ltx_2_3",
+      "ltx_2_5",
       "mage_flow_base",
       "sd3_5_large",
       "sd3_5_medium",
@@ -2751,6 +2785,16 @@
       },
       {
         "id": "ltx_2_3",
+        "family": "ltx",
+        "backend": "mlx",
+        "modality": "video",
+        "supports_lora": true,
+        "supports_lokr": false,
+        "supports_control": false,
+        "supports_full_finetune": false
+      },
+      {
+        "id": "ltx_2_5",
         "family": "ltx",
         "backend": "mlx",
         "modality": "video",

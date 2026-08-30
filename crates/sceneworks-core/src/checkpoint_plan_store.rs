@@ -259,6 +259,17 @@ pub struct SourceBindingsV1 {
     pub stamps: BTreeMap<String, SourceStampV1>,
 }
 
+/// Deterministic fault-injection boundary for the verification-to-publication seam.
+///
+/// This is not an execution hook. It exists so the plan-store regression fixture can replace a
+/// same-size source after its bytes have been hashed but before the stamp that could be persisted
+/// is sampled.
+#[doc(hidden)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CheckpointPlanVerificationEventV1 {
+    LayerHashComplete,
+}
+
 /// A freshly compiled and persisted checkpoint.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CompiledCheckpointV1 {
@@ -1024,6 +1035,56 @@ fn locator_kind(locator: &SourceLocatorV1) -> &'static str {
     }
 }
 
+fn layer_fingerprint(layer: &ImportLayerV1) -> &str {
+    match &layer.source {
+        SourceLocatorV1::Linked { fingerprint, .. } => fingerprint,
+        SourceLocatorV1::Managed { sha256, .. } => sha256,
+    }
+}
+
+fn layer_relative_path(layer: &ImportLayerV1) -> &str {
+    match &layer.source {
+        SourceLocatorV1::Linked { relative_path, .. }
+        | SourceLocatorV1::Managed { relative_path, .. } => relative_path,
+    }
+}
+
+/// Hash one source while pinning the stamp that can later skip a hash to those bytes.
+///
+/// A source replaced after hashing but before the final stamp sample must be rejected: persisting
+/// the replacement's stamp would make a later resolve trust bytes never checked against the plan.
+/// The pre-hash stamp is safe to persist only when the post-hash stamp is identical.
+fn verify_source_and_capture_stamp(
+    checkpoint_id: &str,
+    relative_path: &str,
+    path: &Path,
+    expected_sha256: &str,
+    before: SourceStampV1,
+    after_hash: impl FnOnce(),
+) -> Result<SourceStampV1, CheckpointPlanError> {
+    let hashed = sha256_file(path).map_err(|error| io_error(path, error))?;
+    after_hash();
+    let after = SourceStampV1::of(path).map_err(|error| io_error(path, error))?;
+    if before == after && hashed == expected_sha256 {
+        return Ok(before);
+    }
+
+    // If the stamp changed after an otherwise matching hash, report the bytes now named by the
+    // path. This second hash is diagnostic only; no observation from a rejected verification is
+    // ever persisted or refreshed.
+    let actual_sha256 = if hashed == expected_sha256 {
+        sha256_file(path).map_err(|error| io_error(path, error))?
+    } else {
+        hashed
+    };
+    Err(CheckpointPlanError::SourceDrifted {
+        checkpoint_id: checkpoint_id.to_owned(),
+        relative_path: relative_path.to_owned(),
+        expected_sha256: expected_sha256.to_owned(),
+        actual_sha256,
+    })
+}
+
 fn sha256_file(path: &Path) -> std::io::Result<String> {
     let mut file = fs::File::open(path)?;
     let mut hasher = Sha256::new();
@@ -1647,6 +1708,18 @@ impl CheckpointPlanStore {
         root_id: &str,
         relative_path: &str,
     ) -> Result<CompiledCheckpointV1, CheckpointPlanError> {
+        self.compile_linked_with_hook(root_id, relative_path, |_| {})
+    }
+
+    /// Test-only equivalent of [`Self::compile_linked`] with a deterministic boundary after a
+    /// layer has been hashed and before its persisted source stamp is sampled.
+    #[doc(hidden)]
+    pub fn compile_linked_with_hook(
+        &self,
+        root_id: &str,
+        relative_path: &str,
+        mut hook: impl FnMut(CheckpointPlanVerificationEventV1),
+    ) -> Result<CompiledCheckpointV1, CheckpointPlanError> {
         let root_path = self.resolve_root(root_id)?;
         validate_portable_relative_path(relative_path)?;
         let checkpoint_id = linked_checkpoint_id(root_id, relative_path);
@@ -1660,7 +1733,7 @@ impl CheckpointPlanStore {
             relative_path: relative_path.to_owned(),
             reason,
         })?;
-        self.compile(&request, &root_path, "linked")
+        self.compile_with_hook(&request, &root_path, "linked", &mut hook)
     }
 
     /// Inspect `<installs>/<install_id>/<relative_path>` as an application-owned checkpoint and
@@ -1712,6 +1785,16 @@ impl CheckpointPlanStore {
         root_path: &Path,
         expected_kind: &'static str,
     ) -> Result<CompiledCheckpointV1, CheckpointPlanError> {
+        self.compile_with_hook(request, root_path, expected_kind, &mut |_| {})
+    }
+
+    fn compile_with_hook(
+        &self,
+        request: &CheckpointInspectionRequestV1,
+        root_path: &Path,
+        expected_kind: &'static str,
+        hook: &mut dyn FnMut(CheckpointPlanVerificationEventV1),
+    ) -> Result<CompiledCheckpointV1, CheckpointPlanError> {
         let checkpoint_id = request.checkpoint_id.clone();
         let inspection = inspect_checkpoint(request);
         let errors: Vec<CheckpointDiagnosticV1> = inspection
@@ -1754,7 +1837,10 @@ impl CheckpointPlanStore {
             })?;
         record.validate_loaded_plan(&plan)?;
 
-        // Stamps first: they describe the bytes the inspector just hashed.
+        // A persisted stamp is a cache key for a later resolve, so it must be bound to the bytes
+        // the plan names. Sampling a new stamp after inspection would let a same-size replacement
+        // between those operations bypass the next resolve's hash. Re-hash under a stable
+        // before/after stamp and persist that stable stamp instead.
         let mut stamps = BTreeMap::new();
         for layer in &plan.layers {
             if locator_kind(&layer.source) != expected_kind {
@@ -1765,7 +1851,17 @@ impl CheckpointPlanStore {
                 });
             }
             let path = self.layer_path(&checkpoint_id, root_path, layer)?;
-            let stamp = SourceStampV1::of(&path).map_err(|error| io_error(&path, error))?;
+            let before = SourceStampV1::of(&path).map_err(|error| io_error(&path, error))?;
+            let fingerprint = layer_fingerprint(layer);
+            let relative_path = layer_relative_path(layer);
+            let stamp = verify_source_and_capture_stamp(
+                &checkpoint_id,
+                relative_path,
+                &path,
+                fingerprint,
+                before,
+                || hook(CheckpointPlanVerificationEventV1::LayerHashComplete),
+            )?;
             stamps.insert(layer.layer_id.clone(), stamp);
         }
         let bindings = SourceBindingsV1 {
@@ -2019,19 +2115,21 @@ impl CheckpointPlanStore {
             let stamp_matches = bindings.stamps.get(&layer.layer_id) == Some(&current);
             let rehashed = !stamp_matches;
             if rehashed {
-                let actual = sha256_file(&path).map_err(|error| io_error(&path, error))?;
-                if &actual != fingerprint {
-                    return Err(CheckpointPlanError::SourceDrifted {
-                        checkpoint_id: checkpoint_id.to_owned(),
-                        relative_path: relative_path.clone(),
-                        expected_sha256: fingerprint.clone(),
-                        actual_sha256: actual,
-                    });
-                }
                 // Same bytes, new entry (touched, re-copied, relinked): refresh the stamp so the
-                // next resolve is cheap again.
-                let after = SourceStampV1::of(&path).map_err(|error| io_error(&path, error))?;
-                bindings.stamps.insert(layer.layer_id.clone(), after);
+                // next resolve is cheap again. The refreshed stamp is retained only if it stayed
+                // stable around the exact-byte verification; otherwise it could bless a source
+                // replacement that happened between the hash and stamp sampling.
+                let verified_stamp = verify_source_and_capture_stamp(
+                    checkpoint_id,
+                    relative_path,
+                    &path,
+                    fingerprint,
+                    current,
+                    || {},
+                )?;
+                bindings
+                    .stamps
+                    .insert(layer.layer_id.clone(), verified_stamp);
                 refreshed = true;
             }
             layers.push(ResolvedLayerV1 {

@@ -126,8 +126,8 @@ describe("SceneWorks app shell", () => {
     await settle();
 
     expect(container.textContent).toContain("Fixture GPU 0");
-    expect(container.textContent).toContain("20.0 GB");
-    expect(container.textContent).toContain("4.0 GB / 24.0 GB");
+    expect(container.textContent).toContain("20.0 GiB");
+    expect(container.textContent).toContain("4.0 GiB / 24.0 GiB");
     expect(container.textContent).toContain("12%");
     expect(container.textContent).not.toContain("CPU utility worker");
     expect(container.textContent).not.toContain("Placeholder GPU");
@@ -989,7 +989,7 @@ describe("SceneWorks app shell", () => {
       root.render(withAppContext({ ...queueProps, visibleWorkers: [worker] }, <QueueScreen />));
     });
 
-    expect(container.textContent).toContain("20.0 GB");
+    expect(container.textContent).toContain("20.0 GiB");
     expect(container.textContent).toContain("12%");
 
     await act(async () => {
@@ -1009,9 +1009,9 @@ describe("SceneWorks app shell", () => {
       );
     });
 
-    expect(container.textContent).toContain("12.0 GB / 24.0 GB");
+    expect(container.textContent).toContain("12.0 GiB / 24.0 GiB");
     expect(container.textContent).toContain("67%");
-    expect(container.textContent).not.toContain("20.0 GB");
+    expect(container.textContent).not.toContain("20.0 GiB");
   });
 
 });

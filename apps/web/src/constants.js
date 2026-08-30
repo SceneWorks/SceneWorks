@@ -914,17 +914,13 @@ const seededFallbackModels = [
       resolutions: ["1536x672", "672x1536", "1344x768", "768x1344", "1024x768", "768x1024", "768x768", "576x320", "320x576"],
     },
     ui: {
-      // Licence-required attribution (MiniMax H3 Community License §IV.2, sc-17227). It must be in
-      // the MIRROR too: the generation surfaces render whichever catalog is in hand, and the
-      // fallback one is what they get before /api/v1/models lands — a licence obligation that is
-      // discharged only once the network answers is not discharged (sc-17161).
+      // Licence-required attribution (MiniMax H3 Community License §IV.2, sc-17227). Keep it in
+      // the hand-authored mirror as a parity invariant even though generation surfaces now wait for
+      // the authoritative /api/v1/models response before offering a model (sc-17161).
       attribution: "Powered by MiniMax H3",
-      // sc-17162 — the withheld-component disclosure has to survive into the MIRROR for the same
-      // reason the attribution does. `ModelManagerScreen` renders `ui.description` from whichever
-      // catalog is in hand, so a description that only warns about H3-Context-IR / H3-Regenerate-2K
-      // / dense attention once /api/v1/models answers leaves the pre-network card advertising a
-      // model that does more than these weights do. Condensed against the manifest's prose, but it
-      // carries the same four load-bearing claims, and
+      // sc-17162 — keep the withheld-component disclosure in the MIRROR as well so its descriptive
+      // metadata stays in lockstep with the generated manifest. Condensed against the manifest's
+      // prose, but it carries the same four load-bearing claims, and
       // `minimaxH3CatalogCopy.test.js` pins the mirror to the manifest claim-by-claim.
       description: "MiniMax-H3 joint video + synchronized stereo audio, with first/last-frame conditioning. No guidance scale and no negative prompt. Open weights, not the hosted Hailuo product: H3-Context-IR and H3-Regenerate-2K are unreleased, so prompt adherence differs from the API and 2K is not reachable from these weights; sparse-attention inference is unreleased too, so attention runs dense and the shortest clip at 1344x768 is about a two-hour render. Fourteen fixed lengths between 5.17s and 14.38s — 15s is refused rather than shortened — and no still-image mode.",
       durationHint: "Fourteen clip lengths only, 5.17s-14.38s at 24fps, and 15s is refused rather than shortened to 14.38s. Cost is canvas-driven — 5.17s at 576x320 is ~14 minutes, the same clip at 1344x768 is ~2 hours.",

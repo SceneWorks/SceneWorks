@@ -18,6 +18,10 @@ export const HARNESS_VERSION = "sceneworks-memory-v5";
 // sc-18864 bumped the RECORD SHAPE (per-phase `deviceBytes`/`wiredBytes` removed) without changing
 // the measuring instrument, so the bundle schema version moves and the harness version does not.
 export const SCHEMA_VERSION = 5;
+// sc-21715: the record-status universe, READ from the bundle schema rather than transcribed here, so
+// a status added there cannot leave a downstream tally silently partial. Every consumer that
+// partitions a bundle by status (`summary.calibrationRunsByStatus`) derives its keys from this list.
+export const RECORD_STATUSES = Object.freeze([...CALIBRATION_SCHEMA.$defs.record.properties.status.enum]);
 export const REQUIRED_SCENARIOS = [
   "exact_fit", "unknown_budget", "stale_evidence", "warm_repeat",
   "cancel", "error", "loadability", "overlay",
@@ -722,7 +726,9 @@ export function validateRecord(record) {
   object(record, "record");
   text(record.id, "record.id");
   text(record.logicalCaseId, `${record.id}.logicalCaseId`);
-  if (!["complete", "runtime_complete", "gated", "negative_complete"].includes(record.status)) {
+  // sc-21715: read from the schema (`RECORD_STATUSES`) rather than transcribed, so this check and
+  // every downstream tally admit exactly the same set.
+  if (!RECORD_STATUSES.includes(record.status)) {
     fail(`${record.id}: invalid status`);
   }
   if (!["authoritative", "candidate", "fixture"].includes(record.evidenceScope)) {
@@ -957,6 +963,34 @@ async function resolveReceiptPath(relativePath, roots) {
   fail(`missing immutable source receipt ${relativePath}`);
 }
 
+/**
+ * A `repositories` block with the DERIVED closure digest removed, for comparing a record against the
+ * immutable receipts it was reconstructed from.
+ *
+ * `repositories.inference.closureDigest` is a pure function of the `revision` beside it and the
+ * `CLOSURE_DIGEST_VERSION` in force, so it carries no capture fact the revision does not already
+ * pin. Comparing it against a receipt made the receipts assert an ALGORITHM rather than a capture,
+ * which is what made a digest-version bump unrepresentable: `--restamp` legitimately re-derives
+ * every record's digest at its own revision, and the equality then read that re-derivation as
+ * tampering. Everything the receipt actually witnesses — revision, dirtiness, hardware, capture
+ * time, and every measurement — is still compared exactly. Whether a digest is the RIGHT function of
+ * its revision is a separate question, answered by `backfill-closure-digests.mjs --verify`, which
+ * re-derives all 109 against a real inference clone rather than trusting a stored copy.
+ */
+function capturedProvenance(repositories) {
+  return {
+    ...repositories,
+    inference: Object.fromEntries(
+      Object.entries(repositories?.inference ?? {}).filter(([key]) => key !== "closureDigest"),
+    ),
+  };
+}
+
+/** A record compared on everything the immutable receipts witness. See [`capturedProvenance`]. */
+function recordAsWitnessed(record) {
+  return { ...record, repositories: capturedProvenance(record.repositories) };
+}
+
 export async function validateSourceSessionFiles(
   bundle,
   extraRoot = null,
@@ -1019,8 +1053,8 @@ export async function validateSourceSessionFiles(
       overlay: request.planned.target.overlay,
       rung: request.planned.strategy.rung,
     };
-    if (!equal(request.repositories, record.repositories)
-        || !equal(session.repositories, record.repositories)
+    if (!equal(capturedProvenance(request.repositories), capturedProvenance(record.repositories))
+        || !equal(capturedProvenance(session.repositories), capturedProvenance(record.repositories))
         || !equal(request.hardware, record.hardware)
         || !equal(session.hardware, record.hardware)
         || session.capturedAt !== record.capturedAt
@@ -1076,7 +1110,7 @@ export async function validateSourceSessionFiles(
       fail(`${session.id}: physical MLX session id does not match its provider response digest`);
     }
     const reconstructedRecord = recordFromPhysicalMlxResponse(providerResponse, request, session);
-    if (!equal(reconstructedRecord, record)) {
+    if (!equal(recordAsWitnessed(reconstructedRecord), recordAsWitnessed(record))) {
       fail(`${session.id}: provider response measurements do not match the evidence record`);
     }
   }

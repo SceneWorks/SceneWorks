@@ -949,7 +949,7 @@ pub(crate) fn image_job_body(args: &GenerateImageArgs) -> Result<Value, String> 
         && args
             .reference_asset_ids
             .as_deref()
-            .map_or(true, |ids| ids.is_empty())
+            .is_none_or(|ids| ids.is_empty())
     {
         return Err(
             "edit_image mode requires a sourceAssetId (or referenceAssetIds for a \
@@ -1147,7 +1147,7 @@ pub(crate) fn video_job_body(args: &SubmitVideoJobArgs) -> Result<Value, String>
             if args
                 .reference_asset_ids
                 .as_deref()
-                .map_or(true, <[String]>::is_empty)
+                .is_none_or(<[String]>::is_empty)
             {
                 return Err(
                     "reference_video_to_video mode requires at least one referenceAssetIds entry"
@@ -1185,7 +1185,7 @@ pub(crate) fn video_job_body(args: &SubmitVideoJobArgs) -> Result<Value, String>
             if args
                 .reference_asset_ids
                 .as_deref()
-                .map_or(true, <[String]>::is_empty)
+                .is_none_or(<[String]>::is_empty)
             {
                 return Err("ads2v mode requires at least one referenceAssetIds entry".to_owned());
             }
@@ -1203,7 +1203,7 @@ pub(crate) fn video_job_body(args: &SubmitVideoJobArgs) -> Result<Value, String>
             if args
                 .reference_asset_ids
                 .as_deref()
-                .map_or(true, <[String]>::is_empty)
+                .is_none_or(<[String]>::is_empty)
                 && args.source_asset_id.is_none()
             {
                 return Err(

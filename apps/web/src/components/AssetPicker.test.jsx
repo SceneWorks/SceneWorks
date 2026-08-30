@@ -368,6 +368,55 @@ describe("VideoSourcePickerField video-only sources", () => {
     await click([...document.body.querySelectorAll("button")].find((button) => button.textContent === "Use Selection"));
     expect(onChange).toHaveBeenCalledWith(["plain-image", "uploaded-image-1"]);
   });
+
+  it("keeps a selection made while a source-image upload is pending", async () => {
+    let resolveFirst;
+    let rejectSecond;
+    const importAsset = vi
+      .fn()
+      .mockImplementationOnce(() => new Promise((resolve) => { resolveFirst = resolve; }))
+      .mockImplementationOnce(() => new Promise((_, reject) => { rejectSecond = reject; }));
+    const onChange = vi.fn();
+    await act(async () => {
+      root.render(
+        <ImageEditSourcePickerField
+          assets={assets}
+          characters={characters}
+          importAsset={importAsset}
+          label="Reference images"
+          multiple
+          onChange={onChange}
+          projectId="p1"
+          values={[]}
+        />,
+      );
+    });
+
+    await click(container.querySelector('button[aria-haspopup="dialog"]'));
+    await click(tab("File Upload"));
+    const input = document.body.querySelector('input[type="file"]');
+    const files = [
+      new File(["upload"], "upload-1.png", { type: "image/png" }),
+      new File(["upload"], "upload-2.png", { type: "image/png" }),
+    ];
+    Object.defineProperty(input, "files", { configurable: true, value: files });
+    await act(async () => input.dispatchEvent(new Event("change", { bubbles: true })));
+
+    // Switch back and select a pre-existing card before the deferred importer settles.
+    await click(tab("Assets"));
+    await click(document.body.querySelector('.asset-picker-grid [role="option"]'));
+    await act(async () => {
+      // Settle out of order: a partial failure must not overwrite the concurrent pick
+      // or masquerade as a complete success.
+      rejectSecond(new Error("upload-2 failed"));
+      resolveFirst({ id: "uploaded-late", type: "image", projectId: "p1" });
+    });
+
+    expect(onChange).not.toHaveBeenCalled();
+    expect(document.body.textContent).toContain("Imported 1 image; 1 failed.");
+    await click([...document.body.querySelectorAll("button")].find((button) => button.textContent === "Use Selection"));
+    expect(onChange).toHaveBeenCalledWith(["plain-image", "uploaded-late"]);
+  });
 });
 
 // sc-17137 review, item 2. `AssetPickerModal` grew an upload/dropzone import path so a picker
@@ -479,6 +528,21 @@ describe("AssetPickerField audio import (VideoStudio reference audio)", () => {
     expect(importAsset).toHaveBeenCalledWith(file, { select: false, throwOnError: true });
     expect(onChange).toHaveBeenCalledWith(["voice-1", "uploaded-audio"]);
     expect(document.body.querySelector('[role="dialog"]')).toBeFalsy();
+  });
+
+  it("keeps a selection made while an asset-picker upload is pending", async () => {
+    let resolveImport;
+    const importAsset = vi.fn(() => new Promise((resolve) => { resolveImport = resolve; }));
+    const onChange = vi.fn();
+    const input = await openPicker({ importAsset, onChange, values: [] });
+    const file = new File(["audio"], "take.wav", { type: "audio/wav" });
+
+    Object.defineProperty(input, "files", { configurable: true, value: [file] });
+    await act(async () => input.dispatchEvent(new Event("change", { bubbles: true })));
+    await click(document.body.querySelector('.asset-picker-grid [role="option"]'));
+    await act(async () => resolveImport(importedAudioAsset("uploaded-late")));
+
+    expect(onChange).toHaveBeenCalledWith(["voice-1", "uploaded-late"]);
   });
 
   it("imports a DROPPED audio file through the same path", async () => {

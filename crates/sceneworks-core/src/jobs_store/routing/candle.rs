@@ -1644,7 +1644,7 @@ fn sana_has_unsupported_quant_carrier(payload: &Map<String, Value>) -> bool {
     value
         .as_i64()
         .or_else(|| value.as_str().and_then(|bits| bits.trim().parse().ok()))
-        .map_or(true, |bits| bits > 0)
+        .is_none_or(|bits| bits > 0)
 }
 
 /// Ideogram 4 img2img / Remix + mask inpaint / outpaint edit candle-routing conditions (sc-6598, epic

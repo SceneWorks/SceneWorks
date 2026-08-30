@@ -139,23 +139,46 @@ export function summarizeBatchProgress(items, jobs, observedJobs) {
   return summary;
 }
 
-// Progress for a prompt-batch run (sc-9980). Unlike summarizeBatchProgress, this fan-out
-// enqueues incrementally — a structured-caption model auto-expands each resolved prompt
-// before posting, so enqueueing can be slow. An item with no jobId and no `error` is
-// therefore PENDING submission (NOT failed); `error: true` marks a submission that threw.
-// `active` = queued + running (jobs that Cancel can still stop).
-export function summarizeBatchRun(items, jobs, observedJobs) {
-  const summary = { total: items?.length ?? 0, pending: 0, queued: 0, running: 0, completed: 0, failed: 0 };
-  for (const item of items ?? []) {
-    if (item.error) {
-      summary.failed += 1;
-      continue;
+// Move terminal active jobs into the bounded prompt-batch totals. The active-id list is
+// deliberately small (the Studio applies backpressure before it grows without bound), while
+// completed and failed are scalar counters. Returns the original run when nothing settled.
+export function settlePromptBatchRun(run, jobs, observedJobs) {
+  if (!run?.activeJobIds?.length) return run;
+  let completed = run.completed ?? 0;
+  let failed = run.failed ?? 0;
+  const activeJobIds = [];
+  for (const jobId of run.activeJobIds) {
+    const status = batchItemStatus(jobId, jobs, observedJobs);
+    if (status === "completed") {
+      completed += 1;
+      observedJobs?.delete(jobId);
+    } else if (status === "failed") {
+      failed += 1;
+      observedJobs?.delete(jobId);
+    } else {
+      activeJobIds.push(jobId);
     }
-    if (!item.jobId) {
-      summary.pending += 1;
-      continue;
-    }
-    summary[batchItemStatus(item.jobId, jobs, observedJobs)] += 1;
+  }
+  if (activeJobIds.length === run.activeJobIds.length) return run;
+  return { ...run, completed, failed, activeJobIds };
+}
+
+// Progress for a prompt-batch run (sc-9980). It holds scalar totals plus only the bounded
+// currently-active job ids, never one entry per resolved prompt. `submitted` includes posts
+// that failed before returning a job id; `pending` is the not-yet-submitted suffix.
+export function summarizeBatchRun(run, jobs, observedJobs) {
+  const total = Math.max(run?.total ?? 0, 0);
+  const submitted = Math.min(Math.max(run?.submitted ?? 0, 0), total);
+  const summary = {
+    total,
+    pending: total - submitted,
+    queued: 0,
+    running: 0,
+    completed: run?.completed ?? 0,
+    failed: run?.failed ?? 0,
+  };
+  for (const jobId of run?.activeJobIds ?? []) {
+    summary[batchItemStatus(jobId, jobs, observedJobs)] += 1;
   }
   summary.done = summary.completed + summary.failed;
   summary.active = summary.queued + summary.running;

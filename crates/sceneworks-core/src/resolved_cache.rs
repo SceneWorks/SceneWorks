@@ -21,8 +21,8 @@ pub use retention::{
 
 use crate::model_artifacts::{
     ActiveArtifactLease, ArtifactAvailability, ArtifactCompleteness, ArtifactIdentity,
-    ArtifactLocation, ArtifactProvenance, ModelArtifactResolver, PromotionCandidate,
-    ResolvedBundleClosure, ResolvedBundleMember, ResolvedModelArtifact,
+    ArtifactLocation, ArtifactProvenance, ClosureFileStat, ModelArtifactResolver,
+    PromotionCandidate, ResolvedBundleClosure, ResolvedBundleMember, ResolvedModelArtifact,
     MODEL_ARTIFACT_CONTRACT_VERSION,
 };
 use fs2::FileExt;
@@ -43,6 +43,17 @@ pub const RESOLVED_CACHE_MAX_BYTES_ENV: &str = "SCENEWORKS_RESOLVED_CACHE_MAX_BY
 pub const RESOLVED_CACHE_INACTIVITY_SECONDS_ENV: &str =
     "SCENEWORKS_RESOLVED_CACHE_INACTIVITY_SECONDS";
 pub const RESOLVED_CACHE_STORE_VERSION: u32 = 1;
+/// How long a recorded content verdict ([`ClosureContentReceipt`]) may stand before the load
+/// boundary re-reads the bundle regardless of its stat identity. 24 hours.
+///
+/// The bound exists for the failure the stat identity cannot see: bytes that change with no
+/// filesystem write behind them. A working session re-uses one verdict throughout and never pays
+/// the hash twice; a bundle left in the cache is re-proved daily, so decay surfaces as a refusal
+/// and a fall back to the source tier instead of being served indefinitely.
+///
+/// Cheap enough to be worth it now that the hash runs on the hardware SHA-2 backend: the largest
+/// bundle here is 33 GB, which is ~11s once a day rather than ~61s per job.
+pub const CONTENT_RECEIPT_MAX_AGE_SECONDS: u64 = 24 * 60 * 60;
 /// The journal version a DERIVED entry is written at (sc-20635).
 ///
 /// `production` and `derivedFrom` widen the metadata document, and `ResolvedCacheMetadata` is
@@ -383,6 +394,52 @@ pub struct ResolvedCacheMetadata {
     pub session_id: Option<String>,
     pub recovery_status: RecoveryStatus,
     pub source_volume: SourceVolumeObservation,
+}
+
+/// A recorded verdict from the load boundary: at `verified_at`, every file in the closure was read
+/// and matched its recorded SHA-256, while the closure looked exactly like `files` on disk.
+///
+/// The verdict is only redeemable while that second half still holds. `files` is therefore not
+/// bookkeeping — it is the entire precondition, and it is compared in full (membership included, so
+/// an added or removed closure file invalidates the receipt just as a rewritten one does).
+///
+/// ## Why this is a sidecar and not a metadata field
+///
+/// [`ResolvedCacheMetadata`] is `deny_unknown_fields`, and the journal keeps only two slots. Adding
+/// a field there would mean that after two acquisitions BOTH slots carry it — and an older build,
+/// which is exactly the build a rollback runs, would then find zero readable slots and report
+/// `BOTH_METADATA_SLOTS_CORRUPT` for every entry it had been serving happily. Corrupt is the one
+/// classification manual removal is allowed to clear, so a downgrade would invite deleting (and
+/// re-copying) an otherwise perfect cache: here, 139 GB of it.
+///
+/// A sidecar file keeps the journal byte-identical to what every existing build already writes, so
+/// a downgrade sees a store it fully understands and simply ignores one extra file. It also fails
+/// safe in every direction a sidecar can fail: unreadable, unparseable, forward-versioned, or
+/// belonging to another entry all mean "no verdict", which is precisely the pre-receipt behaviour of
+/// re-reading the bytes.
+///
+/// ## Why the verdict expires
+///
+/// Stat identity detects a WRITE. It cannot detect bytes that changed without one — bit rot, a
+/// failing cable or enclosure, a drive rewriting a sector under it. Before receipts, every job
+/// re-read the bundle, so that class was caught on the next generation by accident rather than by
+/// design. A verdict with no expiry would replace "caught on the next job" with "never caught
+/// again", because the sidecar outlives restarts and nothing else on the load path reads the bytes.
+///
+/// That is not a hypothetical here: the cache exists to front a model library that can live on
+/// external USB media, which is exactly where silent decay is the plausible failure and a mtime-
+/// restoring writer is not. So a verdict is redeemable only for [`CONTENT_RECEIPT_MAX_AGE_SECONDS`]
+/// — long enough that a working session never re-hashes, short enough that a rotting bundle is
+/// re-proved and refused rather than served forever.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ClosureContentReceipt {
+    pub schema_version: u32,
+    /// The entry this verdict was recorded for. The file already lives in a digest-keyed directory,
+    /// so this is defence in depth against a receipt that was copied rather than written here.
+    pub cache_key: String,
+    pub verified_at: u64,
+    pub files: Vec<ClosureFileStat>,
 }
 
 impl ResolvedCacheMetadata {
@@ -1051,6 +1108,10 @@ impl ResolvedCacheStore {
             recovery_status: RecoveryStatus::Clean,
             source_volume: self.compare_source_volume(source_configured_path)?,
         };
+        // A reservation is about to (re)write this entry's bundle, so any verdict recorded for the
+        // bytes that were there is void. Removing it here rather than trusting the stat comparison
+        // to notice keeps the receipt's lifetime tied to the bundle's, and costs one unlink.
+        self.remove_content_receipt(&digest)?;
         if let Ok(existing) = self.read_metadata_locked(&digest) {
             metadata.created_at = existing.created_at;
             metadata.artifact_pinned = existing.artifact_pinned;
@@ -1110,9 +1171,9 @@ impl ResolvedCacheStore {
     }
 
     /// Full runtime listing: complete entries are validated on identity, shape, confinement, file
-    /// presence and sizes (not content — see [`EntryListing`]), and any entry that fails fails the
-    /// whole listing. Recovery, staging cleanup and byte accounting depend on that fail-fast
-    /// semantics, so it is the internal default.
+    /// presence and sizes (not content — see [`EntryListing`]). A malformed app-owned entry is
+    /// reported as corrupt without hiding unrelated entries; recovery and retention can then
+    /// handle that one entry without disabling the whole cache.
     pub fn enumerate(&self) -> Result<Vec<ResolvedCacheEntrySummary>, ResolvedCacheError> {
         self.list(EntryListing::Runtime)
     }
@@ -1133,27 +1194,26 @@ impl ResolvedCacheStore {
         let mut entries = Vec::new();
         for item in std::fs::read_dir(self.inner.root.join("entries"))? {
             let item = item?;
-            if !item.file_type()?.is_dir() {
-                return Err(ResolvedCacheError::new(format!(
-                    "unmanaged resolved-cache entry {}",
-                    item.path().display()
-                )));
-            }
-            let digest = item
+            let Some(digest) = item
                 .file_name()
                 .to_str()
                 .filter(|value| is_lower_hex_64(value))
-                .ok_or_else(|| ResolvedCacheError::new("invalid resolved-cache entry name"))?
-                .to_owned();
+                .map(str::to_owned)
+            else {
+                tracing::debug!(entry = %item.path().display(), "ignoring foreign resolved-cache entry");
+                continue;
+            };
+            if !item.file_type()?.is_dir() {
+                tracing::debug!(entry = %item.path().display(), "ignoring foreign resolved-cache entry");
+                continue;
+            }
             // The exclusive metadata lock is scoped to the journal READ; the entry is then judged
-            // unlocked (sc-19712). `EntryListing::Runtime` validates at full strength, so holding
-            // the lock across that judgement put a whole-bundle re-hash underneath it — and
-            // `valid_local_artifacts`, the availability read behind every job submission, takes
-            // the same per-entry lock. Measured: with the worker mid-checkpoint, one submission
-            // took 33.2 s and the next had not returned after ~11 minutes, with the API at 0 % CPU
-            // parked on `flock` and the worker at 99 % CPU hashing. Nothing is read twice here —
-            // the judgement is made against the value the read returned, and every caller that
-            // ACTS on a summary (`recover`, retention) re-proves it under fresh locks first.
+            // unlocked (sc-19712). Listings validate only paths and sizes, but keeping even that
+            // judgement outside the lock prevents `valid_local_artifacts`, the availability read
+            // behind every job submission, from parking behind a maintenance sweep. Nothing is
+            // read twice here — the judgement is made against the value the read returned, and
+            // every caller that ACTS on a summary (`recover`, retention) re-proves it under fresh
+            // locks first.
             let journal = {
                 let _metadata_lock = self.lock_metadata(&digest)?;
                 self.read_metadata_unlocked(&digest)
@@ -1178,7 +1238,6 @@ impl ResolvedCacheStore {
                             state: metadata.state.clone(),
                             metadata: Some(*metadata),
                         },
-                        Err(error) if listing == EntryListing::Runtime => return Err(error),
                         Err(_) => corrupt(&digest),
                     }
                 }
@@ -1271,6 +1330,12 @@ impl ResolvedCacheStore {
         // bf16 4.5-minute verify that outlasted the stale-worker sweep). The property is pinned by
         // `the_local_tier_scan_skips_content_hashing_while_the_lease_boundary_still_refuses_altered_bytes`
         // and the single-pass cost by `the_load_boundary_hashes_the_closure_exactly_once`.
+        //
+        // The pass is now receipt-gated (see `validate_complete_metadata`): it still refuses an
+        // altered bundle, but it re-reads the bytes only when the closure's stat identity differs
+        // from the one the last successful verification recorded. It reads and stamps that verdict
+        // under the `metadata_lock` held above — the same lock the usage stamp below is written
+        // under — so a verdict is never recorded without the lock that made it true.
         validate_complete_metadata(self, &metadata)?;
         let artifact = Arc::new(metadata.artifact.clone());
         let runtime_lease = resolver
@@ -1315,6 +1380,23 @@ impl ResolvedCacheStore {
                     had_invalid_slot,
                 }) => {
                     let mut changed = false;
+                    // The opening listing found a structurally damaged Complete entry. Persist a
+                    // per-entry observation so it remains visible for manual recovery, but do
+                    // not let this one residue prevent recovery of the rest of the cache. This
+                    // stays paths-and-sizes only: `acquire_complete` is still the sole strict
+                    // digest boundary before any artifact reaches a runtime.
+                    if summary.state == ResolvedCacheEntryState::Corrupt
+                        && metadata.state == ResolvedCacheEntryState::Complete
+                        && validate_complete_metadata_inner(
+                            self,
+                            &metadata,
+                            ContentVerification::PathsAndSizesOnly,
+                        )
+                        .is_err()
+                    {
+                        self.write_corrupt_marker(&digest)?;
+                        continue;
+                    }
                     if had_invalid_slot {
                         // FULL STRENGTH before the pin (sc-21534, same defense as the receipt
                         // resurrection below): this branch re-pins a Complete entry recovered
@@ -1768,6 +1850,44 @@ impl ResolvedCacheStore {
         })?;
         envelope.validate()?;
         Ok(envelope.metadata)
+    }
+
+    fn content_receipt_path(&self, digest: &str) -> PathBuf {
+        self.inner
+            .root
+            .join("entries")
+            .join(digest)
+            .join("content.verification.json")
+    }
+
+    /// The recorded content verdict for this entry, or `None` for every reason there might not be
+    /// one.
+    ///
+    /// Deliberately infallible-by-collapse: absent, unreadable, unparseable, written by a newer
+    /// build, or carrying another entry's key all return `None`. Each of those means the caller
+    /// re-reads the closure, which is both the safe answer and the behaviour that predates
+    /// receipts — so there is no failure here worth propagating to a load.
+    fn read_content_receipt(&self, digest: &str, cache_key: &str) -> Option<ClosureContentReceipt> {
+        let body = std::fs::read(self.content_receipt_path(digest)).ok()?;
+        let receipt: ClosureContentReceipt = serde_json::from_slice(&body).ok()?;
+        (receipt.schema_version == RESOLVED_CACHE_STORE_VERSION && receipt.cache_key == cache_key)
+            .then_some(receipt)
+    }
+
+    fn write_content_receipt(
+        &self,
+        digest: &str,
+        receipt: &ClosureContentReceipt,
+    ) -> Result<(), ResolvedCacheError> {
+        atomic_write_json(&self.content_receipt_path(digest), receipt)
+    }
+
+    fn remove_content_receipt(&self, digest: &str) -> Result<(), ResolvedCacheError> {
+        match std::fs::remove_file(self.content_receipt_path(digest)) {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(error.into()),
+        }
     }
 
     fn write_corrupt_marker(&self, digest: &str) -> Result<(), ResolvedCacheError> {
@@ -2675,20 +2795,114 @@ fn validate_metadata_shape_with(
     Ok(())
 }
 
+/// Full-strength validation of a complete entry, with the content re-read gated on a receipt.
+///
+/// sc-21534 established that this is the ONE boundary that must refuse a content-altered bundle,
+/// and it earned that by re-hashing the whole closure. The cost of asking, though, was paid on
+/// every acquisition rather than every change: a 19 GB bundle measured ~61 s of SHA-256 between
+/// "Worker claimed job" and "Preparing N image(s)", on a bundle whose bytes had not moved since the
+/// last job asked the same question and got the same answer.
+///
+/// So the answer is now recorded. A successful content pass stamps the closure's stat identity
+/// (`ClosureFileStat` — bundle-relative path, size, mtime, per file) into the entry's
+/// [`ClosureContentReceipt`] sidecar, and a later acquisition that observes the SAME identity is
+/// entitled to the recorded verdict without re-reading the bytes. Anything else — a receipt that is
+/// absent or unreadable, a file whose size or mtime moved, a closure whose membership changed —
+/// falls straight back to the full re-hash and re-stamps.
+///
+/// What is NOT weakened: the paths-and-sizes pass still runs unconditionally on both branches, so
+/// presence, sizes, confinement, closure shape, artifact identity and `verified_bytes` are proven
+/// at every acquisition exactly as before. The receipt only ever elides re-reading bytes that no
+/// filesystem operation has touched. A write to a bundle file cannot leave both size and mtime
+/// unchanged by accident, which is the drift this boundary exists to catch (see `ClosureFileStat`
+/// for what this does and does not claim).
+///
+/// Every caller holds the entry's metadata lock, which is what makes the read-decide-write below a
+/// single transition rather than three racing ones. Entries that predate receipts simply have none:
+/// their first acquisition after upgrade hashes once, as today, and stamps.
+/// Whether a recorded verdict has stood longer than [`CONTENT_RECEIPT_MAX_AGE_SECONDS`].
+///
+/// Fails CLOSED in both odd directions. A receipt stamped in the future — a clock that moved
+/// backwards, or a bundle copied in from another machine — has no meaningful age, so it expires
+/// rather than being honoured indefinitely; the cost is one re-hash.
+fn receipt_expired(receipt: &ClosureContentReceipt) -> Result<bool, ResolvedCacheError> {
+    let now = now_seconds()?;
+    let Some(age) = now.checked_sub(receipt.verified_at) else {
+        return Ok(true);
+    };
+    Ok(age >= CONTENT_RECEIPT_MAX_AGE_SECONDS)
+}
+
 fn validate_complete_metadata(
     store: &ResolvedCacheStore,
     metadata: &ResolvedCacheMetadata,
 ) -> Result<(), ResolvedCacheError> {
-    validate_complete_metadata_inner(store, metadata, ContentVerification::RehashEveryFile)
+    let digest = cache_key_digest(&metadata.cache_key)?;
+    let bundle = store.bundle_path(&metadata.cache_key)?;
+    // Observed BEFORE the decision, so the same observation is what the receipt is judged against
+    // and what a fresh receipt would record. A stat failure here is not diagnosed: it means the
+    // closure is not intact, and `validate_complete_metadata_inner` below says so precisely.
+    let before = metadata
+        .artifact
+        .closure
+        .stat_identity_at_root(&bundle)
+        .ok();
+    let recorded = store.read_content_receipt(&digest, &metadata.cache_key);
+    if let (Some(recorded), Some(before)) = (&recorded, &before) {
+        if &recorded.files == before && !receipt_expired(recorded)? {
+            return validate_complete_metadata_inner(
+                store,
+                metadata,
+                ContentVerification::PathsAndSizesOnly,
+            );
+        }
+    }
+
+    // Retract first. A verdict that no longer describes the bundle must not survive the pass that
+    // is about to re-decide it — least of all if that pass fails and leaves this entry to be read
+    // again by something that would have trusted the stale answer.
+    store.remove_content_receipt(&digest)?;
+    validate_complete_metadata_inner(store, metadata, ContentVerification::RehashEveryFile)?;
+
+    // Re-observe AFTER the read and require both observations to agree before recording a verdict
+    // — the same before/after guard `bind_or_probe_validated` uses around a library probe and
+    // `trusted_imported_model_hash` uses around a checkpoint hash. Without it a file rewritten
+    // mid-pass could have its POST-write stat identity stamped as "these bytes were verified",
+    // which is precisely the claim the receipt must never make falsely.
+    let Some(before) = before else {
+        // The closure hashed clean but could not be stat-ed as a whole. Nothing to record; the next
+        // acquisition re-hashes, which is exactly the behaviour before receipts existed.
+        return Ok(());
+    };
+    let after = metadata
+        .artifact
+        .closure
+        .stat_identity_at_root(&bundle)
+        .map_err(|error| ResolvedCacheError::new(error.to_string()))?;
+    if before != after {
+        return Err(ResolvedCacheError::new(
+            "cache bundle changed while its contents were being verified",
+        ));
+    }
+    store.write_content_receipt(
+        &digest,
+        &ClosureContentReceipt {
+            schema_version: RESOLVED_CACHE_STORE_VERSION,
+            cache_key: metadata.cache_key.clone(),
+            verified_at: now_seconds()?,
+            files: after,
+        },
+    )
 }
 
-/// How a whole-store listing treats complete entries. `Runtime` is the strict internal listing
-/// (recovery, staging cleanup, byte accounting); `Inspect` is the read-only status listing. Both
+/// How a whole-store listing treats complete entries. `Runtime` is the internal listing used by
+/// recovery, staging cleanup and byte accounting; `Inspect` is the read-only status listing. Both
 /// validate on paths and sizes only (sc-21534: recovery re-hashed every complete entry in the
 /// cache at startup, the same whole-cache cost sc-19712 F-3 removed from job submission; byte
 /// accounting needs sizes, and every caller that ACTS on a summary re-proves it under fresh
-/// locks). They differ in failure semantics: a `Runtime` listing fails on the first invalid
-/// entry, an `Inspect` listing degrades that entry to `Corrupt` and keeps going.
+/// locks). An invalid managed entry degrades to `Corrupt` in either mode so it cannot hide valid
+/// entries or stop their recovery/retention; load acquisition re-hashes whenever the recorded
+/// verdict does not still describe the bundle (see [`validate_complete_metadata`]).
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum EntryListing {
     Runtime,
@@ -2706,8 +2920,12 @@ impl EntryListing {
 /// How thoroughly a complete entry's own bundle bytes are re-verified.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum ContentVerification {
-    /// Re-reads and re-hashes every bundle file. Required before handing an artifact to a runtime
-    /// load, and the cost is proportional to the bundle size.
+    /// Re-reads and re-hashes every bundle file. The cost is proportional to the bundle size.
+    ///
+    /// The load boundary selects this mode whenever it cannot redeem a recorded verdict — see
+    /// [`validate_complete_metadata`] and [`ClosureContentReceipt`] — which is the case on a first
+    /// acquisition, after any change to the closure's stat identity, and once a standing verdict
+    /// passes [`CONTENT_RECEIPT_MAX_AGE_SECONDS`]. It is no longer entered on *every* acquisition.
     RehashEveryFile,
     /// Validates identity, shape, confinement, file presence and sizes, but does not re-hash file
     /// contents. Used by every path that is *reading* rather than loading: journal slot selection,
@@ -2717,11 +2935,18 @@ enum ContentVerification {
     /// model loads.
     ///
     /// This mode is safe on a read path only because it is never the last word: the load boundary
-    /// ([`ResolvedCacheStore::acquire_complete`]) re-verifies at [`Self::RehashEveryFile`] under
-    /// the entry's locks before any bytes reach a runtime, and every boundary that stamps
-    /// `Complete` content (`record_complete`, `publish_staged`, `recover`'s receipt resurrection)
-    /// proves the bytes itself immediately before writing. Do not weaken the load boundary — it
-    /// is what this mode leans on.
+    /// ([`ResolvedCacheStore::acquire_complete`]) is the one place that proves content, and every
+    /// boundary that stamps `Complete` content (`record_complete`, `publish_staged`, `recover`'s
+    /// receipt resurrection) proves the bytes itself immediately before writing. Do not weaken the
+    /// load boundary — it is what this mode leans on.
+    ///
+    /// What the load boundary now guarantees, precisely, because it is no longer "re-hash every
+    /// time": every acquisition runs THIS mode's checks, and it re-reads the bytes unless a
+    /// recorded verdict covers them — same closure, same per-file size and mtime, taken less than
+    /// [`CONTENT_RECEIPT_MAX_AGE_SECONDS`] ago. So an alteration that moves any of that is still
+    /// refused on the next load, and one that moves none of it is still caught, but within the
+    /// max-age rather than on the very next job. Widening that window, or dropping the age bound,
+    /// is what "weakening the load boundary" would now mean.
     PathsAndSizesOnly,
 }
 

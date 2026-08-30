@@ -1591,7 +1591,7 @@ fn validate_source_inputs_against_record(
         let exact_overlay_source = session
             .target
             .as_ref()
-            .map_or(true, |target| target.overlay == record.target.overlay)
+            .is_none_or(|target| target.overlay == record.target.overlay)
             && matches!(
                 claim,
                 SourceClaim::Quality | SourceClaim::Loadability | SourceClaim::Overlay
@@ -1781,7 +1781,7 @@ fn validate_runtime_complete(record: &EvidenceRecord) -> Result<(), String> {
     let sole_case = record.sweep.cases.first();
     if !record.sweep.range_verified
         || record.sweep.cases.len() != 1
-        || sole_case.map_or(true, |case| {
+        || sole_case.is_none_or(|case| {
             case.result != SweepResult::Passed || case.parameters != record.strategy.parameters
         })
     {
@@ -1869,7 +1869,7 @@ fn validate_runtime_complete(record: &EvidenceRecord) -> Result<(), String> {
             .get(&name)
             .ok_or_else(|| format!("{} is missing scenario {name:?}", record.id))?;
         if scenario.result != ScenarioResult::NotRun
-            || scenario.reason.as_deref().map_or(true, str::is_empty)
+            || scenario.reason.as_deref().is_none_or(str::is_empty)
         {
             return Err(format!(
                 "{} scenario {name:?} must remain explicitly not_run",
@@ -1886,7 +1886,7 @@ fn validate_runtime_complete(record: &EvidenceRecord) -> Result<(), String> {
     }
     let overlay = scenarios[&ScenarioName::Overlay];
     if overlay.result != ScenarioResult::NotApplicable
-        || overlay.reason.as_deref().map_or(true, str::is_empty)
+        || overlay.reason.as_deref().is_none_or(str::is_empty)
     {
         return Err(format!(
             "{} runtime-complete evidence must be base-only",
@@ -2174,7 +2174,7 @@ fn validate_complete(record: &EvidenceRecord) -> Result<(), String> {
         && scenarios[&ScenarioName::Overlay]
             .reason
             .as_deref()
-            .map_or(true, str::is_empty)
+            .is_none_or(str::is_empty)
     {
         return Err(format!(
             "{} overlay not_applicable requires a reason",
@@ -3307,9 +3307,28 @@ mod tests {
             runtime_complete_count > 0,
             "the bundle must carry runtime-complete records"
         );
+        // sc-21715: the partition runs over ALL FOUR `RecordStatus` variants, not over the two
+        // certifying ones. This used to read `records.len() == complete + runtime_complete` — the
+        // same identity `summary.calibrationRunsByStatus` published as a two-key tally, and true
+        // only while the corpus had never carried a `gated` or `negative_complete` receipt.
+        // Admitting one (the sc-11045 five-rung capture is exactly such a receipt) would have
+        // reddened this line with nothing actually wrong. Both certifying populations must still
+        // be non-empty — asserted above; what the partition asserts is that no record falls
+        // outside the four, so a fifth variant cannot be added without landing here.
+        let gated_count = bundle
+            .records
+            .iter()
+            .filter(|record| record.status == RecordStatus::Gated)
+            .count();
+        let negative_complete_count = bundle
+            .records
+            .iter()
+            .filter(|record| record.status == RecordStatus::NegativeComplete)
+            .count();
         assert_eq!(
             bundle.records.len(),
-            complete_count + runtime_complete_count
+            complete_count + runtime_complete_count + gated_count + negative_complete_count,
+            "every record must carry one of the four RecordStatus variants"
         );
         // Same partition posture for the load shapes: both exist, and together they are the whole
         // bundle — a record with any third shape (or none) breaks the identity.

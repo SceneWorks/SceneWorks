@@ -18,11 +18,13 @@ pub(crate) async fn list_recipe_presets(
         query.include_archived.unwrap_or(false),
         query.scope.as_deref(),
         |preset| {
-            query.model.as_deref().map_or(true, |model| {
-                preset.get("model").and_then(Value::as_str) == Some(model)
-            }) && query.workflow.as_deref().map_or(true, |workflow| {
-                preset.get("workflow").and_then(Value::as_str) == Some(workflow)
-            })
+            query
+                .model
+                .as_deref()
+                .is_none_or(|model| preset.get("model").and_then(Value::as_str) == Some(model))
+                && query.workflow.as_deref().is_none_or(|workflow| {
+                    preset.get("workflow").and_then(Value::as_str) == Some(workflow)
+                })
         },
     );
     Ok(Json(presets))

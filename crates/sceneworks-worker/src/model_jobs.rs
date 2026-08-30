@@ -3344,7 +3344,7 @@ fn receipt_weights_dir_from_marker(
                 snapshot.is_dir() && files.iter().all(|file| snapshot.join(file).is_file())
             })
             .filter(|snapshot| {
-                recorded_revision.map_or(true, |revision| {
+                recorded_revision.is_none_or(|revision| {
                     snapshot.file_name().and_then(|name| name.to_str()) == Some(revision)
                 })
             })
@@ -4674,6 +4674,34 @@ async fn stable_model_file_sha256(
     Ok((hash, after))
 }
 
+/// The `(importSourceShape, importQuantFormat)` pair a single checkpoint file's safetensors header
+/// proves, or `None` when it proves nothing a manifest entry may claim (sc-11045, epic 11037).
+///
+/// The managed import branch derives the same pair inline, because it can do more: it holds staged
+/// bytes it is about to install, so it REFUSES an unsupported triple and a bare `mage-flow` file
+/// outright. A linked import has already compiled a verified plan over the user's own file and must
+/// not retroactively refuse it, so an unrecognized header stamps nothing here rather than failing
+/// the job. What must not differ is the PAIR — two copies of one rule disagreeing about what a
+/// checkpoint is stored as is the sc-13542 resolver-drift class, and
+/// `linked_classification_tests::the_linked_classifier_matches_the_managed_branchs_mapping` pins
+/// them together.
+///
+/// A component that is not a whole model (a text encoder, a VAE) yields `None`: it is not
+/// registerable as an imported model at all, so it has no source shape to advertise.
+pub(crate) fn base_weight_manifest_classification(
+    path: &Path,
+) -> Option<(&'static str, &'static str)> {
+    let BaseWeightDetection::Recognized(verdict) = detect_base_weight_file(path).ok()? else {
+        return None;
+    };
+    let source = match verdict.component {
+        ComponentRole::Transformer => "transformer_file",
+        ComponentRole::Checkpoint => "fused_checkpoint",
+        ComponentRole::TextEncoder | ComponentRole::Vae => return None,
+    };
+    Some((source, verdict.quant.as_str()))
+}
+
 /// The manifest entry a compiled linked checkpoint becomes (epic 20398, sc-20635).
 ///
 /// This is the stamp that makes a linked checkpoint REACHABLE. `importPlan.checkpointId` is the
@@ -4686,9 +4714,28 @@ async fn stable_model_file_sha256(
 /// A plan-backed entry carries NO `paths.model`. The plan-driven route resolves the plan's own
 /// layers through the plan store; writing an install path here would both be a lie (nothing was
 /// installed) and hand the entry to a bespoke lane as well, breaking the single-claim invariant.
+///
+/// # The header classification rides too (sc-11045, epic 11037)
+///
+/// `classification` is the `(importSourceShape, importQuantFormat)` pair
+/// [`base_weight_manifest_classification`] proved from the linked file's own safetensors header —
+/// the SAME detector the managed branch runs, over the same bytes.
+///
+/// It was managed-only, and that made a LINKED copy of an NVFP4 checkpoint invisible to every E8
+/// surface even though the bytes are identical: `imported_entry_source_codec` answered `None`, so
+/// admission's native claim was false, the catalog emitted no `runtimeQuantTiers` (the provider
+/// surface early-returns without an `importSourceShape`), the asset receipt and the
+/// `generation_metrics` row carried no source codec, and — worst — the worker's dispatch guard
+/// `krea_imported_native_nvfp4` was false, so `imported_model_quant` would happily hand `Quant::Q4`
+/// to packed E2M1 bytes. E8 is a property of the CHECKPOINT, not of who owns the copy, so the
+/// classification is stamped in both ownership modes.
+///
+/// `None` stamps nothing. A header that proves no base-weight verdict is not a reason to invent
+/// one, and an absent key is what every consumer already handles.
 pub(crate) fn linked_checkpoint_manifest_entry(
     mut entry: JsonObject,
     compiled: &sceneworks_core::checkpoint_plan_store::CompiledCheckpointV1,
+    classification: Option<(&str, &str)>,
 ) -> JsonObject {
     entry
         .entry("family")
@@ -4701,6 +4748,16 @@ pub(crate) fn linked_checkpoint_manifest_entry(
             "semanticDigest": compiled.record.plan.semantic_digest,
         }),
     );
+    if let Some((source_shape, quant_format)) = classification {
+        entry.insert(
+            "importSourceShape".to_owned(),
+            Value::String(source_shape.to_owned()),
+        );
+        entry.insert(
+            "importQuantFormat".to_owned(),
+            Value::String(quant_format.to_owned()),
+        );
+    }
     // A linked checkpoint is referenced in place; nothing was copied into an app-owned install
     // directory, so any inherited install path would name a directory that does not exist.
     if let Some(paths) = entry.get_mut("paths").and_then(Value::as_object_mut) {
@@ -4747,6 +4804,18 @@ async fn run_linked_checkpoint_import_job(
     .await?;
     let store =
         sceneworks_core::checkpoint_plan_store::CheckpointPlanStore::open(&settings.data_dir);
+    // The absolute path of the linked file, resolved through the APPROVED root — the same
+    // confinement `compile_linked` applies, never a path built from the payload. It is what the
+    // header classification below reads; a root that no longer resolves simply yields no
+    // classification (the compile below produces the typed refusal for that case).
+    let linked_file = store
+        .resolve_root(root_id)
+        .ok()
+        .zip(
+            sceneworks_core::checkpoint_plan_store::portable_relative_path_parts(relative_path)
+                .ok(),
+        )
+        .map(|(root, parts)| root.join(parts));
     let root_id = root_id.to_owned();
     let relative_path = relative_path.to_owned();
     // Full-content compile streams every byte through SHA-256, so it runs off the async runtime.
@@ -4783,7 +4852,18 @@ async fn run_linked_checkpoint_import_job(
         .and_then(Value::as_object)
         .cloned()
     {
-        let manifest_entry = linked_checkpoint_manifest_entry(manifest_entry, &compiled);
+        // The SAME header classification the managed branch runs, over the user's own file. Reading
+        // a safetensors header is a bounded seek-and-parse, but it is still blocking I/O.
+        let classification = match linked_file {
+            Some(path) => {
+                tokio::task::spawn_blocking(move || base_weight_manifest_classification(&path))
+                    .await
+                    .unwrap_or(None)
+            }
+            None => None,
+        };
+        let manifest_entry =
+            linked_checkpoint_manifest_entry(manifest_entry, &compiled, classification);
         let manifest_path = model_manifest_target(settings, &job.payload)?;
         upsert_manifest_entry(&manifest_path, "models", manifest_entry).await?;
     }
@@ -5329,6 +5409,35 @@ pub(crate) async fn run_model_import_job(
         crate::paths::normalize_existing_or_absolute(&install.install_path).ok(),
         Some(target_dir.clone())
     );
+    // A CURATED managed NVFP4 variant confirms against its registration (sc-11045, epic 11037).
+    //
+    // `ManagedCheckpointVariantV1::confirm_installed` compares the committed install id, checkpoint
+    // id, path, digest and — the reason it exists — the registered `size_bytes` against the file on
+    // disk. It had no production caller at all, which made the registered size the decorative
+    // number its own doc comment says it must not be: it is what a client renders as "how much will
+    // this download", and nothing compared it to anything.
+    //
+    // Post-commit rather than at finalize: this is the one verb that checks a COMMITTED install
+    // against the registration as a whole, and the digest verification inside `finalize` has
+    // already refused substituted bytes by the time it runs. A failure here is a registration
+    // defect (a stale or invented size), so it fails the job with the diagnostic rather than
+    // recording a curated identity the registry does not actually describe. Non-variant imports —
+    // every ordinary user import — have no registration and skip it entirely.
+    if let Some(variant) =
+        sceneworks_core::managed_checkpoint_variants::managed_nvfp4_variant(&install.install_id)
+    {
+        if let Err(error) = variant.confirm_installed(&install) {
+            return fail_job(
+                api,
+                &job.id,
+                "Model import failed.",
+                Some(format!(
+                    "The installed bytes do not match the managed variant's registration: {error}"
+                )),
+            )
+            .await;
+        }
+    }
     if !install.duplicate_checkpoint_ids().is_empty() {
         // Reported, never acted on: a user may legitimately keep both a linked library copy and a
         // managed one, so neither is deleted and the import still succeeds (AC2).
@@ -7877,6 +7986,310 @@ mod co_requisite_tests {
                 "{model_id}: the error must name the missing `vocoder` component + its repo BEFORE engine \
                  load, got: {message}"
             );
+        }
+    }
+}
+
+/// The linked half of E8: a LINKED copy of an NVFP4 checkpoint is exposed exactly as a managed one
+/// (sc-11045, epic 11037).
+///
+/// Ungated on purpose. The stamp and the resolvers that read it are platform-independent — the
+/// backend-specific dispatch half lives in `image_jobs::tests` — and this is the layer where "the
+/// same bytes, owned differently, are the same checkpoint" is decided.
+#[cfg(test)]
+mod linked_classification_tests {
+    use super::*;
+    use sceneworks_core::checkpoint_weight_facts::NVFP4_CODEC_ID;
+    use std::path::PathBuf;
+
+    fn write_header_file(
+        path: &Path,
+        metadata: Value,
+        entries: &[(String, &'static str, Vec<u64>)],
+    ) {
+        let mut header = serde_json::Map::new();
+        header.insert("__metadata__".to_owned(), metadata);
+        let mut offset = 0_u64;
+        for (name, dtype, shape) in entries {
+            let width = match *dtype {
+                "F32" => 4,
+                "BF16" | "F16" => 2,
+                _ => 1,
+            };
+            let bytes = shape.iter().product::<u64>().max(1) * width;
+            header.insert(
+                name.clone(),
+                json!({"dtype": dtype, "shape": shape, "data_offsets": [offset, offset + bytes]}),
+            );
+            offset += bytes;
+        }
+        let encoded = serde_json::to_vec(&Value::Object(header)).unwrap();
+        let mut bytes = (encoded.len() as u64).to_le_bytes().to_vec();
+        bytes.extend(encoded);
+        bytes.resize(bytes.len() + offset as usize, 0x5a);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, bytes).unwrap();
+    }
+
+    /// A single-file NVFP4 transformer whose header carries everything the classifier proves: the
+    /// `_quantization_metadata` layer map, and one complete packed triplet per projection.
+    fn write_nvfp4_transformer(path: &Path) {
+        let layers = 6;
+        let mut declared = serde_json::Map::new();
+        for index in 0..layers {
+            declared.insert(
+                format!("blocks.{index}.attn.wq"),
+                json!({"format": "nvfp4", "group_size": 16}),
+            );
+        }
+        let mut entries: Vec<(String, &'static str, Vec<u64>)> = vec![(
+            "model.diffusion_model.txtfusion.projector.weight".to_owned(),
+            "BF16",
+            vec![128, 128],
+        )];
+        for index in 0..layers {
+            let base = format!("blocks.{index}.attn.wq");
+            entries.push((format!("{base}.weight"), "U8", vec![128, 32]));
+            entries.push((format!("{base}.weight_scale"), "F8_E4M3", vec![128, 4]));
+            entries.push((format!("{base}.weight_scale_2"), "F32", vec![]));
+        }
+        write_header_file(
+            path,
+            json!({
+                "format": "pt",
+                "_quantization_metadata": serde_json::to_string(&json!({"layers": declared}))
+                    .unwrap(),
+            }),
+            &entries,
+        );
+    }
+
+    /// The same family surface, stored DENSE — the control row.
+    fn write_dense_transformer(path: &Path) {
+        write_header_file(
+            path,
+            json!({ "format": "pt" }),
+            &[
+                (
+                    "model.diffusion_model.txtfusion.projector.weight".to_owned(),
+                    "BF16",
+                    vec![128, 128],
+                ),
+                (
+                    "model.diffusion_model.blocks.0.attn.wq.weight".to_owned(),
+                    "BF16",
+                    vec![128, 128],
+                ),
+                (
+                    "model.diffusion_model.first.weight".to_owned(),
+                    "BF16",
+                    vec![128, 128],
+                ),
+            ],
+        )
+    }
+
+    struct LinkedFixture {
+        _data: tempfile::TempDir,
+        _library: tempfile::TempDir,
+        store: CheckpointPlanStore,
+        library_dir: PathBuf,
+        root_id: String,
+    }
+
+    fn linked_fixture(label: &str) -> LinkedFixture {
+        let data = tempfile::Builder::new()
+            .prefix(&format!("linked-e8-{label}-data-{}-", std::process::id()))
+            .tempdir()
+            .unwrap();
+        let library = tempfile::Builder::new()
+            .prefix(&format!("linked-e8-{label}-lib-{}-", std::process::id()))
+            .tempdir()
+            .unwrap();
+        let library_dir = std::fs::canonicalize(library.path()).unwrap();
+        let store = CheckpointPlanStore::open(data.path());
+        let root_id = store.approve_root(&library_dir).unwrap().root_id;
+        LinkedFixture {
+            _data: data,
+            _library: library,
+            store,
+            library_dir,
+            root_id,
+        }
+    }
+
+    /// The queued entry the API hands the worker, before any stamp.
+    fn queued_entry(root_id: &str, relative_path: &str) -> JsonObject {
+        json!({
+            "id": "linked_kreamania_nvfp4",
+            "name": "kreamania nvfp4",
+            "type": "image",
+            "catalogScope": "user",
+            "source": {
+                "provider": "linked-library",
+                "rootId": root_id,
+                "relativePath": relative_path,
+            },
+        })
+        .as_object()
+        .unwrap()
+        .clone()
+    }
+
+    /// A LINKED NVFP4 checkpoint resolves to the `nvfp4-v1` SOURCE CODEC, exactly as a managed copy
+    /// of the identical bytes does.
+    ///
+    /// This is the one fact every E8 surface reads: admission's native claim, the catalog's
+    /// `runtimeQuantTiers`, the telemetry `source_codec`, the asset receipt's facts object, and the
+    /// worker's dispatch guard. Before the stamp it answered `None` for a linked entry, so all five
+    /// were silently absent for a checkpoint that is stored packed.
+    ///
+    /// Failing mutation (run): delete the `if let Some((source_shape, quant_format)) =
+    /// classification` block in `linked_checkpoint_manifest_entry`.
+    #[test]
+    fn a_linked_nvfp4_checkpoint_is_stamped_and_resolves_to_the_nvfp4_source_codec() {
+        let fx = linked_fixture("codec");
+        let relative = "kreamania_nvfp4.safetensors";
+        let file = fx.library_dir.join(relative);
+        write_nvfp4_transformer(&file);
+        let compiled = fx.store.compile_linked(&fx.root_id, relative).unwrap();
+
+        let classification = base_weight_manifest_classification(&file);
+        assert_eq!(
+            classification,
+            Some(("transformer_file", "nvfp4")),
+            "the header proves a packed single-file transformer"
+        );
+
+        let entry = linked_checkpoint_manifest_entry(
+            queued_entry(&fx.root_id, relative),
+            &compiled,
+            classification,
+        );
+
+        assert_eq!(
+            entry.get("importQuantFormat").and_then(Value::as_str),
+            Some("nvfp4")
+        );
+        assert_eq!(
+            entry.get("importSourceShape").and_then(Value::as_str),
+            Some("transformer_file"),
+            "without a source shape the catalog's provider surface early-returns and emits no \
+             runtimeQuantTiers at all"
+        );
+        assert_eq!(
+            sceneworks_core::jobs_store::imported_entry_source_codec(&entry),
+            Some(NVFP4_CODEC_ID),
+            "the linked entry answers the SAME source-codec question a managed one does"
+        );
+        // The linked invariants sc-20635 established are untouched.
+        assert_eq!(
+            sceneworks_core::jobs_store::checkpoint_plan_checkpoint_id(&entry),
+            Some(compiled.checkpoint_id.as_str())
+        );
+        assert!(
+            sceneworks_core::jobs_store::imported_entry_loadable_path(&entry).is_none(),
+            "a linked entry still owns no installed bytes, so no bespoke lane can claim it"
+        );
+    }
+
+    /// A DENSE linked checkpoint is stamped with its own classification and never with NVFP4 —
+    /// the stamp is a reading of the header, not a constant.
+    #[test]
+    fn a_linked_dense_checkpoint_is_not_stamped_nvfp4() {
+        let fx = linked_fixture("dense");
+        let relative = "kreamania_dense.safetensors";
+        let file = fx.library_dir.join(relative);
+        write_dense_transformer(&file);
+        let compiled = fx.store.compile_linked(&fx.root_id, relative).unwrap();
+
+        let classification = base_weight_manifest_classification(&file);
+        assert_eq!(classification, Some(("transformer_file", "bf16")));
+        let entry = linked_checkpoint_manifest_entry(
+            queued_entry(&fx.root_id, relative),
+            &compiled,
+            classification,
+        );
+        assert_eq!(
+            sceneworks_core::jobs_store::imported_entry_source_codec(&entry),
+            Some("dense-bf16-v1")
+        );
+    }
+
+    /// A header that proves nothing stamps nothing — an absent key, never an invented one.
+    ///
+    /// Two halves, because the plan store refuses to COMPILE a file it cannot assign a component
+    /// role and a family, so the unclassifiable file never reaches the stamp in production. The
+    /// reachable shape is a file that compiles while the base-weight detector still declines it, so
+    /// the classifier's `None` and the stamp's handling of `None` are pinned separately.
+    #[test]
+    fn an_unclassifiable_linked_file_stamps_neither_key() {
+        let dir = tempfile::tempdir().unwrap();
+        let mystery = dir.path().join("mystery.safetensors");
+        write_header_file(
+            &mystery,
+            json!({ "format": "pt" }),
+            &[("some.random.weight".to_owned(), "F32", vec![4, 4])],
+        );
+        assert_eq!(
+            base_weight_manifest_classification(&mystery),
+            None,
+            "a header with no base-weight evidence proves no classification"
+        );
+
+        let fx = linked_fixture("unknown");
+        let relative = "kreamania_dense.safetensors";
+        write_dense_transformer(&fx.library_dir.join(relative));
+        let compiled = fx.store.compile_linked(&fx.root_id, relative).unwrap();
+        let entry =
+            linked_checkpoint_manifest_entry(queued_entry(&fx.root_id, relative), &compiled, None);
+        assert!(entry.get("importQuantFormat").is_none());
+        assert!(entry.get("importSourceShape").is_none());
+        assert_eq!(
+            sceneworks_core::jobs_store::imported_entry_source_codec(&entry),
+            None
+        );
+        // ...and the plan stamp is unaffected, so an unclassified linked entry is still selectable.
+        assert_eq!(
+            sceneworks_core::jobs_store::checkpoint_plan_checkpoint_id(&entry),
+            Some(compiled.checkpoint_id.as_str())
+        );
+    }
+
+    /// The linked classifier and the managed branch's inline mapping answer the same pair for one
+    /// file. Two copies of one rule that can disagree about what a checkpoint is stored as is the
+    /// sc-13542 resolver-drift class; this is the witness that they do not.
+    ///
+    /// The managed mapping is restated here from `run_model_import_job` (it is inlined inside a
+    /// `fail_job`-returning `match` and cannot be called from a test), so this compares the two
+    /// TRANSCRIPTIONS. A future edit to either that changes the pair turns it red.
+    #[test]
+    fn the_linked_classifier_matches_the_managed_branchs_mapping() {
+        let dir = tempfile::tempdir().unwrap();
+        for (label, write) in [
+            ("nvfp4", write_nvfp4_transformer as fn(&Path)),
+            ("dense", write_dense_transformer as fn(&Path)),
+        ] {
+            let file = dir.path().join(format!("{label}.safetensors"));
+            write(&file);
+            let detection = detect_base_weight_file(&file).expect("the header parses");
+            let managed = match detection {
+                BaseWeightDetection::Recognized(verdict) => {
+                    let source = match verdict.component {
+                        ComponentRole::Transformer => Some("transformer_file"),
+                        ComponentRole::Checkpoint => Some("fused_checkpoint"),
+                        ComponentRole::TextEncoder | ComponentRole::Vae => None,
+                    };
+                    source.map(|source| (source, verdict.quant.as_str()))
+                }
+                BaseWeightDetection::Unrecognized { .. } => None,
+            };
+            assert_eq!(
+                base_weight_manifest_classification(&file),
+                managed,
+                "{label}: the linked and managed classifications must not drift"
+            );
+            assert!(managed.is_some(), "{label}: fixture check — it classifies");
         }
     }
 }

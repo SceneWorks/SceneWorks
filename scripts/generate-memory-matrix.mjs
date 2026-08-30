@@ -12,6 +12,7 @@ import { canonicalSourceText, semanticSourceBody } from "./lib/source-revision.m
 import { routedLanes } from "./check-tier-integrity.mjs";
 import {
   evidenceSemantics,
+  RECORD_STATUSES,
   validateBundle as validateCalibrationBundle,
 } from "./memory-calibration-harness.mjs";
 import {
@@ -828,6 +829,14 @@ function isTemporalVideoCell(cell, modality) {
     (Array.isArray(envelope.fps) && envelope.fps.length > 0) ||
     Number.isFinite(envelope.defaultFps)
   );
+}
+
+// sc-21715. The matrix spells keys in camelCase and the bundle spells statuses in snake_case, so the
+// tally's key set is a pure function of `RECORD_STATUSES` rather than a second list that can drift
+// from it. Deliberately NOT exported: the sc-17774 test re-derives these keys itself, and a shared
+// helper would let a wrong mapping agree with itself on both sides.
+function calibrationStatusKey(status) {
+  return status.replace(/_([a-z])/g, (_, letter) => letter.toUpperCase());
 }
 
 export function calibrationBinding(
@@ -3010,8 +3019,10 @@ export function rung4ContractAdmits(record, context) {
  *
  * Two things are checked here, and each is a way the record could be WRONG rather than merely absent:
  *
- * - **Keyed to the live pin.** The edges are a fact about one inference revision. A record keyed to
- *   an older pin would report a graph nobody re-derived, so it is a hard error and never a fallback.
+ * - **Revision-provenanced.** The edges are a fact about the inference revision that was inspected,
+ *   so the record must carry a full revision. That revision is deliberately not required to match
+ *   Cargo's live pin: doing so turns historical inspection evidence into a per-pin gate and forces
+ *   provenance-only restamps without proving that any provider graph changed.
  * - **Every edge is one this gate can evaluate.** An edge whose kind has no evaluator, or that cites
  *   no provider file, throws rather than being skipped over by `every()`.
  *
@@ -3020,13 +3031,12 @@ export function rung4ContractAdmits(record, context) {
  * family that is missing from BOTH should be reported as an unsurveyed family rather than as an
  * unrecorded one.
  */
-export function parseRung4ContractPrerequisites(body, { pin }) {
+export function parseRung4ContractPrerequisites(body) {
   const parsed = JSON.parse(body);
-  if (parsed.inferenceRevision !== pin) {
+  if (!/^[0-9a-f]{40}$/.test(parsed.inferenceRevision ?? "")) {
     throw new Error(
-      `config/rung4-contract-prerequisites.json is keyed to ` +
-        `${parsed.inferenceRevision?.slice(0, 9) ?? "(unset)"} but Cargo pins ${pin.slice(0, 9)}. ` +
-        "Re-run: node scripts/rung4-contract-prerequisites.mjs --repo <inference> --write",
+      "config/rung4-contract-prerequisites.json must record the full inference revision " +
+        "that was inspected",
     );
   }
   const records = new Map();
@@ -3193,7 +3203,7 @@ function declaredEvidence(model, backend, tier) {
 
 
 /**
- * The live per-provider compile-closure digests, gated against the Cargo pin (sc-17774).
+ * The live per-provider compile-closure digests (sc-17774).
  *
  * This REPLACES `compatibilityAuthorizes`, which was the only escape from pin-identity invalidation
  * and was hardcoded to a single frozen `flux2_dev` audit object carrying one hand-verified
@@ -3201,20 +3211,25 @@ function declaredEvidence(model, backend, tier) {
  * one provider, so it was spent the moment the pin moved one commit further, and it generalised to
  * nothing. Every provider now gets the same relief from a derived digest, with no hand audit.
  *
- * The config is derived offline so a reviewer sees a digest change in the diff rather than having it
- * conjured at check time. That makes a stale config the obvious failure mode, so it is a hard error
- * rather than a fallback: a config keyed to an older pin would report currency for closures nobody
- * re-derived. Whether the digests are REAL is a separate question, graded in CI — `check.yml`
- * re-derives them against a shallow fetch of the pinned inference revision, which is possible
- * because SceneWorks/inference is public.
+ * `inferenceRevision` is CAPTURE PROVENANCE — the revision these digests were derived at — and is
+ * deliberately NOT required to equal Cargo's live pin. Requiring equality is pin identity one level
+ * up: it cannot fail on a bad digest, only on an unbumped one, so its whole effect was to make
+ * re-deriving the config MANDATORY on every pin bump. Re-deriving is what rotates the digests, and
+ * because `core-llm` and `gen-core` sit in every provider's closure a rotation is all-or-nothing —
+ * so the throw turned "the pin moved" into "every provider's measurements are historical", which is
+ * exactly the coupling this module exists to remove. Measured on the f32fce06 -> 857f2454 bump:
+ * 17 of 17 providers demoted, every one attributable solely to `core-llm`, whose entire diff was
+ * `pub mod starvector;` plus its re-exports — a new model that cannot move an existing model's
+ * peak by a byte. Same reasoning, same shape as the sibling fix in
+ * `parseRung4ContractPrerequisites`; a stale-vs-live comparison belongs to whoever re-derives the
+ * config, not to every consumer that reads it.
  */
-export function validatedInferenceClosures(body, pin) {
+export function validatedInferenceClosures(body) {
   const closures = JSON.parse(body);
-  if (closures.inferenceRevision !== pin) {
+  if (!/^[0-9a-f]{40}$/.test(closures.inferenceRevision ?? "")) {
     throw new Error(
-      `${"config/inference-provider-closures.json"} is keyed to ` +
-        `${closures.inferenceRevision?.slice(0, 8) ?? "(unset)"} but Cargo pins ${pin.slice(0, 8)}. ` +
-        "Re-run: node scripts/inference-closure-digest.mjs --repo <inference> --write",
+      "config/inference-provider-closures.json must record the full inference revision its " +
+        "digests were derived at",
     );
   }
   const digests = new Map();
@@ -4470,17 +4485,13 @@ export async function buildMatrix({ sourceOverrides = {}, cellFilter = null, pub
   assertMinimaxH3CalibrationPlan(calibrationPlan);
   // sc-17774: per-provider compile-closure digests, gated against the Cargo pin. `closureIsCurrent`
   // wants the Map; `evidenceSemantics` takes a plain object so the harness needs no Map plumbing.
-  const inferenceClosureDigests = validatedInferenceClosures(
-    bodies.inferenceClosures,
-    inferencePin(cargoBody),
-  );
+  const inferenceClosureDigests = validatedInferenceClosures(bodies.inferenceClosures);
   const closureDigestsByProvider = Object.fromEntries(inferenceClosureDigests);
   const rung4Survey = parseRung4Survey(bodies.rung4Survey, { familyGroups: familyGroup });
   // sc-19542: the rung-4 arm's declared prerequisite graph, per (family, backend). Coverage is
   // fenced against the survey's own key set, so the two cannot drift apart.
   const rung4ContractPrerequisites = parseRung4ContractPrerequisites(
     bodies.rung4ContractPrerequisites,
-    { pin: inferencePin(cargoBody) },
   );
   const manifest = JSON.parse(stripJsoncComments(manifestBody));
   // Comments and formatting are not part of any of these sources' contracts. Hash each source's
@@ -5020,6 +5031,30 @@ export async function buildMatrix({ sourceOverrides = {}, cellFilter = null, pub
     );
   const mlxStagedModels = stagedByModality("image");
   const mlxStagedVideoModels = stagedByModality("video");
+  // sc-21715. The status tally PARTITIONS the bundle: one key per member of `RECORD_STATUSES`, which
+  // is read from the bundle schema, so a status added there appears here rather than falling outside
+  // every published count. Before this it was a hand-written pair (`complete`, `runtimeComplete`) and
+  // `summary.calibrationRuns` was `records.length`, which are the same number only while the corpus
+  // happens to hold nothing else — true for all 108 shipped records and false the moment a `gated`
+  // capture is admitted (the sc-11045 five-rung is exactly that, held outside the bundle for this
+  // reason). The two counts disagreed silently; now the parts sum to the whole by construction and
+  // the assertion below fails generation if they ever do not.
+  const calibrationRunsByStatus = Object.fromEntries(
+    RECORD_STATUSES.map((status) => [
+      calibrationStatusKey(status),
+      calibrationBundle.records.filter((record) => record.status === status).length,
+    ]),
+  );
+  const talliedCalibrationRuns = Object.values(calibrationRunsByStatus).reduce(
+    (total, count) => total + count,
+    0,
+  );
+  if (talliedCalibrationRuns !== calibrationBundle.records.length) {
+    throw new Error(
+      `calibrationRunsByStatus does not partition the bundle: tallied ${talliedCalibrationRuns} of ` +
+        `${calibrationBundle.records.length} records`,
+    );
+  }
   const matrix = {
     // 2 (SC-15812): `models[].owningFamilyStory`/`owningModelStory` were both RENAMED (now plural)
     // and RETYPED (integer -> backend->id object). A reader written against 1 gets `undefined` for
@@ -5069,7 +5104,13 @@ export async function buildMatrix({ sourceOverrides = {}, cellFilter = null, pub
     // `videoMlxStagedStaticCoverage`(+Denominator) and `rung4Survey.pendingFamilyBackends`. A
     // version-7 reader that took `owningModelStory` as an integer, or `imageModels` as the entry
     // count, is wrong on both — hence a version, not an additive bump.
-    schemaVersion: 8,
+    //
+    // 9 (sc-21715): `summary.calibrationRunsByStatus` PARTITIONS the bundle instead of counting two
+    // of its statuses. It gained required `gated` and `negativeComplete` keys, so its values now sum
+    // to `summary.calibrationRuns` (which has always counted every record) by construction. A
+    // version-8 reader that took `complete + runtimeComplete` as the bundle size is wrong as soon as
+    // a non-certifying receipt is admitted — the disagreement this version exists to end.
+    schemaVersion: 9,
     generatedFrom: {
       sceneWorksRevision,
       inferenceRevision: pin,
@@ -5195,13 +5236,13 @@ export async function buildMatrix({ sourceOverrides = {}, cellFilter = null, pub
         .map(([id, entry]) => ({ id, ...entry }))
         .sort((left, right) => left.id.localeCompare(right.id)),
       fullModels: 0,
+      // sc-21715: EVERY record in the evidence bundle, whatever its status — not the certifying
+      // subset. It answers "how many receipts exist", and `matrix.calibrationRuns.length` answers
+      // "how many bound to a published coordinate"; `calibrationRunsByStatus` splits this total into
+      // what each receipt certifies. A `gated` or `negative_complete` receipt is therefore counted
+      // here and named there, never invisible in both.
       calibrationRuns: calibrationBundle.records.length,
-      calibrationRunsByStatus: {
-        complete: calibrationBundle.records.filter((record) => record.status === "complete").length,
-        runtimeComplete: calibrationBundle.records.filter(
-          (record) => record.status === "runtime_complete",
-        ).length,
-      },
+      calibrationRunsByStatus,
       currentCalibrationRuns: cells.reduce(
         (count, cell) => count + cell.evidence.currentEnvironmentVerification.length,
         0,
@@ -5325,8 +5366,13 @@ export function renderMarkdown(matrix) {
     })`,
     `- MLX staged-residency static coverage: image ${matrix.summary.mlxStagedStaticCoverage}/${matrix.summary.mlxStagedStaticCoverageDenominator}, video ${matrix.summary.videoMlxStagedStaticCoverage}/${matrix.summary.videoMlxStagedStaticCoverageDenominator}`,
     `- Full models: ${matrix.summary.fullModels}`,
+    `- Calibration records in the evidence bundle: ${matrix.summary.calibrationRuns}`,
     `- Full complete calibration records: ${matrix.summary.calibrationRunsByStatus.complete}`,
     `- Base-only runtime-complete calibration records: ${matrix.summary.calibrationRunsByStatus.runtimeComplete}`,
+    // sc-21715: rendered even at zero. A gated capture that certifies nothing is still a capture that
+    // happened, and a line that only appears once the count moves cannot be read as "none yet".
+    `- Gated calibration records (captured, certifying nothing): ${matrix.summary.calibrationRunsByStatus.gated}`,
+    `- Negative-complete calibration records: ${matrix.summary.calibrationRunsByStatus.negativeComplete}`,
     "",
     `sc-18099: \`cells\` is a SUBSET. ${matrix.summary.publicationPredicate} The counts on this page, \`summary\`, and the per-(entry, backend, rung) \`coverage\` census in the JSON artifact are all derived from every resolved coordinate, published or not, and \`models[].axes\` publishes the axes those coordinates span so an unmeasured lane stays distinguishable from an absent one.`,
     "",

@@ -638,6 +638,12 @@ pub(crate) async fn run_image_detail_job(
     )
     .await?;
 
+    // The detail twin of the image dispatch seam's region heartbeat. This route's consumer interval
+    // arm does not start until the stream below is built, so the source decode and the tile/spec
+    // admission in between are on the same unheartbeated footing the generate path was. Dropped
+    // before the terminal post.
+    let preload_heartbeat = crate::progress::HeartbeatPump::start(api, settings, &job.id);
+
     let source = engine_image_to_rgb(load_reference_image(
         &settings.data_dir,
         &request.project_id,
@@ -911,6 +917,8 @@ pub(crate) async fn run_image_detail_job(
         },
         detail_memory_receipt.as_ref(),
     );
+    // Before the terminal post, so a late tick cannot re-advertise a finished worker as busy.
+    drop(preload_heartbeat);
     update_job(
         api,
         &job.id,

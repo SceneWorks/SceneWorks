@@ -527,8 +527,9 @@ pub(super) async fn generate_candle_qwen_control_stream(
     if !adapters.is_empty() {
         base_spec = base_spec.with_adapters(adapters.clone());
     }
-    let selected_spec =
+    let attached_selected_spec =
         attach_manifest_text_encoder(base_spec, QWEN_CONTROL_ENGINE_ID, request, settings)?;
+    let selected_spec = attached_selected_spec.into_load_spec();
 
     let provider = QwenStrictControl {
         qwen_base,
