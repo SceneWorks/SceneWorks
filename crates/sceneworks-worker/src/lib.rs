@@ -1036,6 +1036,42 @@ fn emit_event(event: &str, payload: Value) {
     emit_event_value(Level::INFO, value);
 }
 
+/// Stack reserved for the outermost worker future.
+///
+/// The worker dispatch future contains every platform-compiled job handler. Windows executable
+/// main threads have a smaller default stack than macOS/Linux, so polling that future directly
+/// from `#[tokio::main]` can overflow before a claimed job reaches its first network transfer.
+/// Keep this explicit rather than relying on a linker-specific `/STACK` flag or Tokio's runtime
+/// worker-thread setting, neither of which changes the stack used by `Runtime::block_on`.
+pub const WORKER_ENTRY_STACK_BYTES: usize = 8 * 1024 * 1024;
+pub const WORKER_ENTRY_THREAD_NAME: &str = "sceneworks-worker-entry";
+
+/// Construct the Tokio runtime and the complete worker future on a named, explicitly sized thread.
+///
+/// `worker` is invoked inside the new thread so its future is never constructed on the process
+/// main thread. Both shipped worker entry binaries use this seam.
+pub fn run_on_worker_entry_thread<F, Fut>(worker: F) -> WorkerResult<()>
+where
+    F: FnOnce() -> Fut + Send + 'static,
+    Fut: std::future::Future<Output = WorkerResult<()>> + 'static,
+{
+    let worker = std::thread::Builder::new()
+        .name(WORKER_ENTRY_THREAD_NAME.to_owned())
+        .stack_size(WORKER_ENTRY_STACK_BYTES)
+        .spawn(move || {
+            let runtime = tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .build()
+                .map_err(WorkerError::Io)?;
+            runtime.block_on(worker())
+        })
+        .map_err(WorkerError::Io)?;
+    match worker.join() {
+        Ok(result) => result,
+        Err(payload) => std::panic::resume_unwind(payload),
+    }
+}
+
 pub async fn run() -> WorkerResult<()> {
     // Install the tracing backbone before anything emits (covers both the
     // standalone `sceneworks-rust-worker` binary and the API's GPU-worker path,

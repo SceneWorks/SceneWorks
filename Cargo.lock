@@ -6890,7 +6890,6 @@ name = "sceneworks-rust-worker"
 version = "0.8.7"
 dependencies = [
  "sceneworks-worker",
- "tokio",
 ]
 
 [[package]]
