@@ -8,6 +8,7 @@ import { copyFile, lstat, mkdir, readFile, readdir, realpath, rename, rm, writeF
 import { promisify } from "node:util";
 import path from "node:path";
 import { inventory } from "./starvector-terminal-producer.mjs";
+import { isExecutedModule } from "./starvector-terminal-cli.mjs";
 
 const execFile = promisify(execFileCallback);
 const SHA256 = /^[a-f0-9]{64}$/;
@@ -71,7 +72,7 @@ function huggingFaceSnapshot(hfHome, repo, revision) {
   return path.join(hfHome, "hub", `models--${parts.join("--")}`, "snapshots", revision);
 }
 
-async function validateServiceReceipts(appDataRoot, hfHomeRoot, identities) {
+export async function validateServiceReceipts(appDataRoot, hfHomeRoot, identities) {
   const receipts = [];
   for (const name of await readdir(appDataRoot, { recursive: true })) {
     if (path.basename(name) !== ".sceneworks-download-complete.json") continue;
@@ -208,4 +209,4 @@ async function main(argv) {
   die("usage: download <url> <path> <sha256> | checkout <source> <destination> <sha> | preflight <source> <destination> <sha> | weights <host-root> <app-data-source> <hf-source> <provider> <model> <revision> | metrics <sceneworks-root> <metrics-root> <python> <clip-revision>");
 }
 
-if (process.argv[1] && path.resolve(process.argv[1]) === new URL(import.meta.url).pathname) main(process.argv.slice(2)).catch((error) => { console.error(error.message); process.exitCode = 1; });
+if (isExecutedModule(import.meta.url)) main(process.argv.slice(2)).catch((error) => { console.error(error.message); process.exitCode = 1; });

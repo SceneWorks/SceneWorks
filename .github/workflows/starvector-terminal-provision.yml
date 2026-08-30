@@ -32,6 +32,32 @@ on:
         description: Absolute Windows source for the complete offline HF cache.
         required: true
         type: string
+  workflow_call:
+    inputs:
+      inference_revision:
+        required: true
+        type: string
+      inference_preflight_run_id:
+        required: true
+        type: string
+      inference_preflight_artifact:
+        required: true
+        type: string
+      mac_app_data_source:
+        required: true
+        type: string
+      mac_hf_home_source:
+        required: true
+        type: string
+      windows_app_data_source:
+        required: true
+        type: string
+      windows_hf_home_source:
+        required: true
+        type: string
+    secrets:
+      INFERENCE_READ_TOKEN:
+        required: true
 
 permissions:
   contents: read

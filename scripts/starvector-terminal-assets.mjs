@@ -4,6 +4,7 @@
 import { createHash } from "node:crypto";
 import { lstat, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
+import { isExecutedModule } from "./starvector-terminal-cli.mjs";
 
 const sha = (value) => createHash("sha256").update(value).digest("hex");
 const die = (message) => { throw new Error(`starvector terminal assets: ${message}`); };
@@ -17,4 +18,4 @@ export async function importTupleAssets({ assetsRoot, apiUrl, tuple, output }) {
   for (const row of index.rows) { const input = await localPng(assetsRoot, row.input_png_path, row.png_sha256), form = new FormData(); form.append("file", new Blob([input.bytes], { type: "image/png" }), `${row.case_index}.png`); const imported = await request(new URL(`/api/v1/projects/${project.id}/assets`, apiUrl), { method: "POST", body: form }); if (!imported.id) die("product API import did not return an asset id"); assets.push({ case_index: row.case_index, asset_id: imported.id, input_png_sha256: row.png_sha256, input_png_bytes: input.size }); }
   const binding = { project_id: project.id, tuple, assets, aggregate_sha256: sha(JSON.stringify(assets)) }; await writeFile(output, JSON.stringify(binding, null, 2) + "\n"); return binding;
 }
-if (import.meta.url === `file://${process.argv[1]}`) { const [assetsRoot, apiUrl, tuple, output] = process.argv.slice(2); importTupleAssets({ assetsRoot, apiUrl, tuple, output }).catch((error) => { console.error(error.message); process.exitCode = 1; }); }
+if (isExecutedModule(import.meta.url)) { const [assetsRoot, apiUrl, tuple, output] = process.argv.slice(2); importTupleAssets({ assetsRoot, apiUrl, tuple, output }).catch((error) => { console.error(error.message); process.exitCode = 1; }); }

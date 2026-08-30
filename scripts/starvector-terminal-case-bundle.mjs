@@ -5,10 +5,11 @@ import { createHash } from "node:crypto";
 import { lstat, mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
+import { isExecutedModule } from "./starvector-terminal-cli.mjs";
 
 const sha = (value) => createHash("sha256").update(value).digest("hex");
 const die = (message) => { throw new Error(`starvector terminal bundle: ${message}`); };
-const REV = "669f749b428ed65acfdfee917bcf601b8cf6db1c";
+const REV = "c6eb6d8e9545193eac844f6fea2db79e4d14bf2a";
 const json = async (file) => JSON.parse(await readFile(file, "utf8"));
 
 async function bindLocalFile(root, relative, expected, label) {
@@ -59,4 +60,4 @@ export async function materializeBundle({ corpusPath, assetsRoot, output, perman
   const bundle = { schema_version: 1, inference_revision: REV, corpus_sha256, row_identity_sha256: rowHash, tuples, hostile_sanitizer, prompt_composition: index.prompt_composition };
   await mkdir(path.dirname(output), { recursive: true }); const bytes = JSON.stringify(bundle, null, 2) + "\n"; await writeFile(output, bytes); await writeFile(`${output}.sha256`, sha(bytes) + "\n"); return bundle;
 }
-if (import.meta.url === `file://${process.argv[1]}`) { const [corpusPath, assetsRoot, output, permanentPin, bindingPath] = process.argv.slice(2); materializeBundle({ corpusPath, assetsRoot, output, permanentPin, bindingPath }).catch((error) => { console.error(error.message); process.exitCode = 1; }); }
+if (isExecutedModule(import.meta.url)) { const [corpusPath, assetsRoot, output, permanentPin, bindingPath] = process.argv.slice(2); materializeBundle({ corpusPath, assetsRoot, output, permanentPin, bindingPath }).catch((error) => { console.error(error.message); process.exitCode = 1; }); }

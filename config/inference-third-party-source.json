@@ -1,7 +1,7 @@
 {
-  "_comment": "Exact audit of production include_str!/include_bytes! sites and known hand-ports in the pinned inference revision. The digest is checked by check-license-coverage.mjs; any inference pin change forces a new audit. Tests/fixtures are outside this production inventory. Pin 669f749b advances inference main through the StarVector accelerator-catalog admission correction (PR #896) after the StarVector feature merge (PR #894). The exact scanner records 667 provenance candidates and 97 production-Rust crate prefixes at this pin, both unchanged from the previous audited pin; the generated candidate and crate-prefix inventories are byte-identical, so this audit advance changes only their exact revision binding. Current report-only licensing findings, including unclassified Minimax-H3 and repository-root audit entries, must be read from the checker output; this summary does not freeze their counts or treat them as exceptions.",
-  "inferenceRevision": "669f749b428ed65acfdfee917bcf601b8cf6db1c",
-  "auditDigest": "8d1aa1e151d3404e4d2ca3969b45f843c6734a9dada0e7f8eb0583f7ff6f1173",
+  "_comment": "Exact audit of production include_str!/include_bytes! sites and known hand-ports in the pinned inference revision. The digest is checked by check-license-coverage.mjs; any inference pin change forces a new audit. Tests/fixtures are outside this production inventory. Pin c6eb6d8e advances inference main through the StarVector terminal preflight closure (PR #898). The exact scanner records 667 provenance candidates and 97 production-Rust crate prefixes at this pin. The newly visible MiniMax-H3 architecture reimplementations, the Candle CUDA diagnostic build script, and the manifest-only repository-root workspace are explicitly classified below from the pinned source and history. Current report-only licensing findings must be read from the checker output; this summary does not freeze their counts or treat them as exceptions.",
+  "inferenceRevision": "c6eb6d8e9545193eac844f6fea2db79e4d14bf2a",
+  "auditDigest": "1dfd54203c06a80dfc38f33a4cf66b848c9a24084884ab607168474904f6dbf9",
   "artifacts": [
     {
       "id": "cmudict",
@@ -17,12 +17,12 @@
   "provenanceScan": {
     "scanner": "scripts/scan-inference-provenance.mjs",
     "candidateList": "config/inference-provenance-candidates.tsv",
-    "revision": "669f749b428ed65acfdfee917bcf601b8cf6db1c",
+    "revision": "c6eb6d8e9545193eac844f6fea2db79e4d14bf2a",
     "pathFilter": "production .rs; exclude tests, testdata, benches, examples, and _vendor path segments",
     "markerRegex": "faithful ... port(s), ported from, port(s) of, vendor(s)/vendored, transcribed, copied ... verbatim, adapted from, mirror(s|ed|ing) ... <port-object>, derived from ... <port-object>, reimplemented/reimplementation from|of, translated/transliterated from, from the reference (not reference-), original implementation|repo(sitory), based on ... <port-object>, follow(s|ing) ... <port-object>, reimplements ... <port-object>, rewrite of ... <port-object>, model(l)ed after ... <port-object>, ported to ... from, 1:1 with ... <port-object>, line-for-line ... <port-object> (case-insensitive; <port-object> = reference(not followed by -)|upstream|python|pytorch|torch|diffusers|comfy(ui)|transformers|implementation). `original` is NOT a bare port-object and `followed` is excluded: both produced verified false positives on first-party prose (sc-15191 review).",
     "normalization": "matched marker text lowercased, internal whitespace collapsed, sorted, newline joined",
     "matchedFiles": 667,
-    "populationSha256": "ac6a0976399f1263030b7b34dbd433926fb64d00856cc35d30efc3990a920385"
+    "populationSha256": "b9ac6f2097c430e9ad3579aa7d20475f8bdf38275cce7e157cecfeb55652bdf8"
   },
   "portedSourceAreas": [
     {
@@ -140,9 +140,12 @@
     {
       "id": "architecture:crates/media/candle-gen/candle-gen",
       "pathPrefix": "crates/media/candle-gen/candle-gen/src/",
+      "paths": [
+        "crates/media/candle-gen/candle-gen/build.rs"
+      ],
       "provenance": "Marker-bearing production Rust source within this concrete crate prefix describes an architectural, backend, or formula port.",
       "disposition": "architecture-reimplementation-existing-terms",
-      "evidence": "Applicable upstream model/provider terms for this concrete crate are already mapped in the About manifest; the candidate inventory pins the exact source blob and normalized provenance markers."
+      "evidence": "Applicable upstream model/provider terms for this concrete crate are already mapped in the About manifest; the candidate inventory pins the exact source blob and normalized provenance markers. The exact build.rs path is SceneWorks' sc-19545 fail-open parser for the repository's vendored CUDA -gencode flags, not copied upstream source."
     },
     {
       "id": "architecture:crates/media/candle-gen/candle-gen-anima",
@@ -259,6 +262,13 @@
       "provenance": "Marker-bearing production Rust source within this concrete crate prefix describes an architectural, backend, or formula port.",
       "disposition": "architecture-reimplementation-existing-terms",
       "evidence": "Applicable upstream model/provider terms for this concrete crate are already mapped in the About manifest; the candidate inventory pins the exact source blob and normalized provenance markers."
+    },
+    {
+      "id": "architecture:crates/media/candle-gen/candle-gen-minimax-h3",
+      "pathPrefix": "crates/media/candle-gen/candle-gen-minimax-h3/src/",
+      "provenance": "SceneWorks' native Candle/CUDA implementation reconstructs the published MiniMax-H3 video VAE, audio VAE, Qwen3-VL conditioner, joint DiT, scheduler, and adapter behavior from the reference architecture and checkpoint contracts; it does not vendor upstream expressive source.",
+      "disposition": "architecture-reimplementation-existing-terms",
+      "evidence": "The pinned crate history begins with explicit SceneWorks port slices sc-17154 and sc-17155 and then backend-parity wideners. The crate headers distinguish its Apache-2.0 implementation code from MiniMax-H3 model terms and the Qwen3-VL exception; both upstream term families are already mapped in the About manifest. The candidate inventory pins every marker-bearing file and normalized provenance marker."
     },
     {
       "id": "architecture:crates/media/candle-gen/candle-gen-mochi",
@@ -499,6 +509,13 @@
       "provenance": "Marker-bearing production Rust source within this concrete crate prefix describes an architectural, backend, or formula port.",
       "disposition": "architecture-reimplementation-existing-terms",
       "evidence": "Applicable upstream model/provider terms for this concrete crate are already mapped in the About manifest; the candidate inventory pins the exact source blob and normalized provenance markers."
+    },
+    {
+      "id": "architecture:crates/media/mlx-gen/mlx-gen-minimax-h3",
+      "pathPrefix": "crates/media/mlx-gen/mlx-gen-minimax-h3/src/",
+      "provenance": "SceneWorks' native MLX implementation reconstructs the published MiniMax-H3 video VAE, audio VAE, Qwen3-VL conditioner, joint DiT, scheduler, and adapter behavior from the reference architecture and checkpoint contracts; it does not vendor upstream expressive source.",
+      "disposition": "architecture-reimplementation-existing-terms",
+      "evidence": "The pinned crate history begins with explicit SceneWorks port slices sc-17140 through sc-17147 and then parity, conditioning, quantization, and residency wideners. The crate headers distinguish its Apache-2.0 implementation code from MiniMax-H3 model terms and the Qwen3-VL exception; both upstream term families are already mapped in the About manifest. The candidate inventory pins every marker-bearing file and normalized provenance marker."
     },
     {
       "id": "architecture:crates/media/mlx-gen/mlx-gen-pid",
@@ -830,12 +847,17 @@
   "crateCoverage": {
     "scanner": "scripts/scan-inference-provenance.mjs",
     "crateList": "config/inference-crate-prefixes.txt",
-    "revision": "669f749b428ed65acfdfee917bcf601b8cf6db1c",
+    "revision": "c6eb6d8e9545193eac844f6fea2db79e4d14bf2a",
     "rule": "Every production-Rust crate prefix in the pinned revision must be covered by a portedSourceAreas entry OR carry an explicit crateDispositions decision. Anything else FAILS check-license-coverage.mjs.",
     "cratePrefixes": 97,
     "cratePopulationSha256": "993023a1f5832a7402f3c6aaf5989122b8d12436d69b5fd840be84ba90b329f2"
   },
   "crateDispositions": [
+    {
+      "prefix": ".",
+      "disposition": "first-party-original",
+      "evidence": "The repository root is a virtual Cargo workspace manifest only: the pinned root owns no production Rust source file and merely enumerates SceneWorks crates, shared dependency pins, and build profiles. The scanner uses the exact '.' label for this manifest boundary; no upstream implementation is present at the root."
+    },
     {
       "prefix": "crates/audio/candle-audio",
       "disposition": "architecture-reimplementation-existing-terms",

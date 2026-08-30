@@ -7,6 +7,7 @@ import { promisify } from "node:util";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 import { INFERENCE_REVISION, readPlanAndLock } from "./starvector-terminal-campaign.mjs";
+import { isExecutedModule } from "./starvector-terminal-cli.mjs";
 
 const execFile = promisify(execFileCallback);
 const sha = (bytes) => createHash("sha256").update(bytes).digest("hex");
@@ -337,7 +338,7 @@ export async function sealReceipt({ sceneWorksRoot, planPath, inferenceRoot, evi
   return receipt;
 }
 
-if (import.meta.url === `file://${process.argv[1]}`) {
+if (isExecutedModule(import.meta.url)) {
   const [mode, ...args] = process.argv.slice(2); const fail = (error) => { console.error(error.message); process.exitCode = 1; };
   if (mode === "run") { const [sceneWorksRoot, planPath, inferenceRoot, weightsRoot, metricsRoot, leaseRoot, leaseHelper, output, tuple, campaignRunId, permanentPin, command] = args; executeTuple({ sceneWorksRoot, planPath, inferenceRoot, weightsRoot, metricsRoot, leaseRoot, leaseHelper, output, tuple, campaignRunId, permanentPin, command }).catch(fail); }
   else if (mode === "seal") { const [sceneWorksRoot, planPath, inferenceRoot, evidenceRoot, output, campaignRunId, permanentPin] = args; sealReceipt({ sceneWorksRoot, planPath, inferenceRoot, evidenceRoot, output, campaignRunId, permanentPin }).catch(fail); }

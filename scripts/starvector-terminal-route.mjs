@@ -7,6 +7,8 @@ import { execFile as execFileCallback } from "node:child_process";
 import { appendFile, lstat, mkdir, readFile, stat, writeFile } from "node:fs/promises";
 import { promisify } from "node:util";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
+import { isExecutedModule } from "./starvector-terminal-cli.mjs";
 
 const execFile = promisify(execFileCallback);
 const die = (message) => { throw new Error(`starvector terminal route: ${message}`); };
@@ -317,7 +319,7 @@ async function main() {
   const runtime = await liveRuntime(output, tuple, events);
   const runtimePath = path.join(output, "runtime.json"); await writeFile(runtimePath, JSON.stringify(runtime, null, 2) + "\n");
   const transcriptSha = sha(await readFile(transcript));
-  const metricScript = path.join(path.dirname(new URL(import.meta.url).pathname), "starvector-terminal-metrics.py"); await stat(metricScript);
+  const metricScript = path.join(path.dirname(fileURLToPath(import.meta.url)), "starvector-terminal-metrics.py"); await stat(metricScript);
   await execFile(python, [metricScript, "measure", "--bundle", bundlePath, "--events", eventsPath, "--runtime", runtimePath, "--output", path.join(output, "metrics.json"), "--tuple", tuple, "--transcript-sha256", transcriptSha], { env: { ...process.env, STARVECTOR_TERMINAL_NO_JOB_DOWNLOADS: "1" } });
   const metrics = await json(path.join(output, "metrics.json"));
   if (metrics?.tuple !== tuple || metrics.route_transcript_sha256 !== transcriptSha || !Array.isArray(metrics.image_quality_facts)) die("source-owned metric script did not emit bound per-case facts");
@@ -340,4 +342,4 @@ async function main() {
   }
   await stat(path.join(output, "raw-results.json"));
 }
-if (import.meta.url === `file://${process.argv[1]}`) main().catch((error) => { console.error(error.message); process.exitCode = 1; });
+if (isExecutedModule(import.meta.url)) main().catch((error) => { console.error(error.message); process.exitCode = 1; });

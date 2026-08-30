@@ -7,6 +7,7 @@ import { execFile as execFileCallback, spawn } from "node:child_process";
 import { copyFile, lstat, mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { promisify } from "node:util";
 import path from "node:path";
+import { isExecutedModule } from "./starvector-terminal-cli.mjs";
 
 const execFile = promisify(execFileCallback);
 const sha = (value) => createHash("sha256").update(value).digest("hex");
@@ -125,6 +126,6 @@ export async function stopProductService(output) {
   await writeFile(path.join(output, "product-service-stopped.json"), JSON.stringify({ api_pid: record.api_pid, worker_pid: record.worker_pid, stopped_at: new Date().toISOString() }, null, 2) + "\n");
   await rm(stateRoot, { recursive: true, force: true });
 }
-if (import.meta.url === `file://${process.argv[1]}`) {
+if (isExecutedModule(import.meta.url)) {
   const [command, ...args] = process.argv.slice(2); const run = command === "start" ? startProductService({ root: args[0], output: args[1], permanentPin: args[2], url: args[3], weightsRoot: args[4] }) : command === "stop" ? stopProductService(args[0]) : Promise.reject(new Error("usage: start <root> <output> <pin> <url> <weights-root> | stop <output>")); run.catch((error) => { console.error(error.message); process.exitCode = 1; });
 }

@@ -1,11 +1,12 @@
 #!/usr/bin/env node
 import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
+import { isExecutedModule } from "./starvector-terminal-cli.mjs";
 
 const sha = (value) => createHash("sha256").update(value).digest("hex");
 export const TUPLES = ["mlx:1b", "mlx:8b", "candle-cuda:1b", "candle-cuda:8b"];
 export const COUNTS = { image_quality: 120, deterministic_parity: 20, hostile_sanitizer: 200, prompt_composition: 60 };
-export const INFERENCE_REVISION = "669f749b428ed65acfdfee917bcf601b8cf6db1c";
+export const INFERENCE_REVISION = "c6eb6d8e9545193eac844f6fea2db79e4d14bf2a";
 export const LPIPS_LINEAR_SHA256 = "df73285e35b22355a2df87cdb6b70b343713b667eddbda73e1977e0c860835c0";
 export const ALEXNET_SHA256 = "7be5be791159472b1fbf3c69796f7cb30dca7ad8466c2df70058c37116cdee02";
 
@@ -39,7 +40,7 @@ export async function readPlanAndLock(planPath) {
   return { plan, lock: validateMetricsLock(JSON.parse(lockBytes)), metrics_lock_sha256: sha(lockBytes) };
 }
 
-if (import.meta.url === `file://${process.argv[1]}`) {
+if (isExecutedModule(import.meta.url)) {
   try {
     const { plan, metrics_lock_sha256 } = await readPlanAndLock(process.argv[2] ?? "release/starvector-terminal-campaign-v1.json");
     console.log(JSON.stringify({ inference_revision: plan.inference_contract.revision, tuples: plan.tuples, metrics_lock_sha256 }));

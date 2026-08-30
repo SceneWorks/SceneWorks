@@ -11,6 +11,14 @@ on:
         description: One externally recorded campaign identity shared by all four tuples.
         required: true
         type: string
+  workflow_call:
+    inputs:
+      permanent_pin:
+        required: true
+        type: string
+      campaign_run_id:
+        required: true
+        type: string
 
 permissions:
   contents: read
