@@ -25,7 +25,7 @@ on:
         required: true
         type: string
       mac_prompt_raster_source:
-        description: Absolute macOS source for the pinned FLUX schnell snapshot.
+        description: Absolute macOS source for the receipt-backed FLUX schnell q4 runtime directory.
         required: true
         type: string
       windows_app_data_source:
@@ -37,7 +37,7 @@ on:
         required: true
         type: string
       windows_prompt_raster_source:
-        description: Absolute Windows source for the pinned FLUX schnell snapshot.
+        description: Absolute Windows source for the receipt-backed FLUX schnell q4 runtime directory.
         required: true
         type: string
 

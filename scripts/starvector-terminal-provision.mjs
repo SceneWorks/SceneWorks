@@ -4,7 +4,7 @@
 // service, invokes a model, writes an install receipt, or claims a campaign.
 import { createHash } from "node:crypto";
 import { execFile as execFileCallback } from "node:child_process";
-import { copyFile, lstat, mkdir, readFile, readdir, rename, rm, writeFile } from "node:fs/promises";
+import { copyFile, lstat, mkdir, readFile, readdir, realpath, rename, rm, writeFile } from "node:fs/promises";
 import { promisify } from "node:util";
 import path from "node:path";
 import { inventory } from "./starvector-terminal-producer.mjs";
@@ -16,15 +16,27 @@ const sha = (value) => createHash("sha256").update(value).digest("hex");
 const die = (message) => { throw new Error(`starvector terminal provision: ${message}`); };
 const json = async (file) => JSON.parse(await readFile(file, "utf8"));
 
-async function tree(root) {
+async function sourceFile(root, rootReal, file) {
+  const info = await lstat(file);
+  if (info.isFile()) return info;
+  if (!info.isSymbolicLink()) die(`source trees reject non-regular entry ${file}`);
+  const target = await realpath(file), relative = path.relative(rootReal, target);
+  if (!relative || relative === ".." || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) die(`source tree symlink escapes ${root}: ${file}`);
+  const targetInfo = await lstat(target);
+  if (!targetInfo.isFile()) die(`source tree symlink is not a regular file: ${file}`);
+  return targetInfo;
+}
+
+async function tree(root, symlinkBoundary = root) {
   const entries = [];
   const rootInfo = await lstat(root).catch(() => null);
   if (!rootInfo?.isDirectory() || rootInfo.isSymbolicLink()) die(`regular source directory required: ${root}`);
+  const boundaryReal = await realpath(symlinkBoundary);
   for (const name of await readdir(root, { recursive: true })) {
     const file = path.join(root, name), info = await lstat(file);
-    if (info.isSymbolicLink()) die(`source trees reject symlink ${file}`);
-    if (!info.isDirectory() && !info.isFile()) die(`source trees reject non-regular entry ${file}`);
-    if (info.isFile()) entries.push({ path: name.split(path.sep).join("/"), byte_size: info.size, sha256: sha(await readFile(file)) });
+    if (info.isDirectory()) continue;
+    const regular = await sourceFile(symlinkBoundary, boundaryReal, file);
+    entries.push({ path: name.split(path.sep).join("/"), byte_size: regular.size, sha256: sha(await readFile(file)) });
   }
   entries.sort((left, right) => left.path < right.path ? -1 : left.path > right.path ? 1 : 0);
   if (entries.length === 0) die(`source tree is empty: ${root}`);
@@ -53,24 +65,37 @@ async function copyTree(source, destination) {
   return sourceIdentity;
 }
 
-async function validateServiceReceipts(root, identity) {
+function huggingFaceSnapshot(hfHome, repo, revision) {
+  const parts = repo.split("/");
+  if (parts.length !== 2 || parts.some((part) => !/^[A-Za-z0-9._-]+$/.test(part) || part === "." || part === "..") || !REVISION.test(revision)) die(`unsafe Hugging Face receipt identity ${repo}@${revision}`);
+  return path.join(hfHome, "hub", `models--${parts.join("--")}`, "snapshots", revision);
+}
+
+async function validateServiceReceipts(appDataRoot, hfHomeRoot, identities) {
   const receipts = [];
-  for (const name of await readdir(root, { recursive: true })) {
+  for (const name of await readdir(appDataRoot, { recursive: true })) {
     if (path.basename(name) !== ".sceneworks-download-complete.json") continue;
-    const file = path.join(root, name), info = await lstat(file);
+    const file = path.join(appDataRoot, name), info = await lstat(file);
     if (!info.isFile() || info.isSymbolicLink()) die(`service install receipt is not a regular file: ${file}`);
     let value; try { value = JSON.parse(await readFile(file, "utf8")); } catch { die(`service install receipt is not valid JSON: ${file}`); }
-    receipts.push(...[value, ...(Array.isArray(value?.receipts) ? value.receipts : [])].map((receipt) => ({ receipt, directory: path.dirname(file) })));
+    receipts.push(...[value, ...(Array.isArray(value?.receipts) ? value.receipts : [])]);
   }
-  for (const [repo, revision] of identity) {
-    const matches = receipts.filter(({ receipt }) => receipt?.schemaVersion === 2 && receipt.repo === repo && receipt.snapshotRevision === revision && Array.isArray(receipt.resolvedFiles) && receipt.resolvedFiles.length > 0);
+  const snapshots = new Map(), hfHomeReal = await realpath(hfHomeRoot);
+  for (const identity of identities) {
+    const { repo, revision, modelId, variant } = identity;
+    const matches = receipts.filter((receipt) => receipt?.schemaVersion === 2 && receipt.repo === repo && receipt.snapshotRevision === revision && (!modelId || receipt.modelId === modelId) && (!variant || receipt.variant === variant) && Array.isArray(receipt.resolvedFiles) && receipt.resolvedFiles.length > 0);
     if (matches.length === 0) die(`service app-data closure lacks a source-produced receipt for ${repo}@${revision}`);
-    for (const { receipt, directory } of matches) for (const relative of receipt.resolvedFiles) {
+    const snapshot = huggingFaceSnapshot(hfHomeRoot, repo, revision);
+    for (const receipt of matches) for (const relative of receipt.resolvedFiles) {
       if (typeof relative !== "string" || !relative || path.isAbsolute(relative) || path.win32.isAbsolute(relative) || relative.split(/[\\/]/).includes("..")) die(`service install receipt contains unsafe resolved file for ${repo}@${revision}`);
-      const file = path.join(directory, ...relative.split(/[\\/]/)), info = await lstat(file).catch(() => null);
-      if (!info?.isFile() || info.isSymbolicLink() || info.size === 0) die(`service app-data closure lacks resolved file ${relative} for ${repo}@${revision}`);
+      const file = path.join(snapshot, ...relative.split(/[\\/]/)), info = await lstat(file).catch(() => null);
+      if (!info) die(`service HF closure lacks resolved file ${relative} for ${repo}@${revision}`);
+      const regular = await sourceFile(hfHomeRoot, hfHomeReal, file);
+      if (regular.size === 0) die(`service HF closure has empty resolved file ${relative} for ${repo}@${revision}`);
     }
+    snapshots.set(`${repo}@${revision}`, snapshot);
   }
+  return snapshots;
 }
 
 async function writeExact(file, bytes) {
@@ -128,6 +153,7 @@ export async function assemblePreflight(source, destination, revision) {
 }
 
 export async function assembleWeights({ hostRoot, serviceAppData, serviceHfHome, promptRaster, promptProvider, promptModel, promptRevision }) {
+  if (promptProvider !== "candle_flux" || promptModel !== "flux_schnell") die("terminal prompt raster must use the Windows Candle FLUX schnell route");
   const weightsRoot = path.join(hostRoot, "weights");
   const models = {};
   for (const [key, relativePath, revision] of [
@@ -138,13 +164,20 @@ export async function assembleWeights({ hostRoot, serviceAppData, serviceHfHome,
     if (identity.entries.length === 0) die(`${key} snapshot is empty`);
     models[key] = { relative_path: relativePath, revision, inventory_sha256: identity.aggregate_sha256 };
   }
+  const serviceSnapshots = await validateServiceReceipts(serviceAppData, serviceHfHome, [
+    { repo: "starvector/starvector-1b-im2svg", revision: "380ab95d25a8e9ab1dc825debe238b4953ae13b9", modelId: "starvector_1b" },
+    { repo: "starvector/starvector-8b-im2svg", revision: "518beea8dcb5f7a37c5911e92d1d62a76beee7f9", modelId: "starvector_8b" },
+    { repo: "SceneWorks/flux1-schnell-mlx", revision: promptRevision, modelId: "flux_schnell", variant: "q4" },
+  ]);
+  const promptSnapshot = serviceSnapshots.get(`SceneWorks/flux1-schnell-mlx@${promptRevision}`), promptRuntime = path.join(promptSnapshot, "q4");
+  const promptSourceIdentity = await tree(promptRaster), promptRuntimeIdentity = await tree(promptRuntime, serviceHfHome);
+  if (JSON.stringify(promptSourceIdentity) !== JSON.stringify(promptRuntimeIdentity)) die("prompt raster source does not match the receipt-backed FLUX q4 runtime directory");
   const promptDestination = path.join(weightsRoot, "models", "prompt-raster");
   const promptIdentity = await copyTree(promptRaster, promptDestination);
   const promptInventory = Buffer.from(`${JSON.stringify(promptIdentity, null, 2)}\n`);
   const promptInventoryPath = "inventories/prompt-raster-inventory-v1.json";
   await writeExact(path.join(weightsRoot, ...promptInventoryPath.split("/")), promptInventory);
   const appDestination = path.join(weightsRoot, "service-closure", "app-data"), hfDestination = path.join(weightsRoot, "service-closure", "hf-home");
-  await validateServiceReceipts(serviceAppData, [["starvector/starvector-1b-im2svg", "380ab95d25a8e9ab1dc825debe238b4953ae13b9"], ["starvector/starvector-8b-im2svg", "518beea8dcb5f7a37c5911e92d1d62a76beee7f9"], ["SceneWorks/flux1-schnell-mlx", promptRevision]]);
   const appIdentity = await copyTree(serviceAppData, appDestination), hfIdentity = await copyTree(serviceHfHome, hfDestination);
   const manifest = { schema_version: 1, models, prompt_raster: { provider_id: promptProvider, model: promptModel, revision: promptRevision, relative_path: "models/prompt-raster", inventory_path: promptInventoryPath, inventory_sha256: sha(promptInventory) }, terminal_service_closure: { app_data_relative_path: "service-closure/app-data", app_data_sha256: appIdentity.aggregate_sha256, hf_home_relative_path: "service-closure/hf-home", hf_home_sha256: hfIdentity.aggregate_sha256 } };
   await writeExact(path.join(weightsRoot, "starvector-terminal-weights-v1.json"), Buffer.from(`${JSON.stringify(manifest, null, 2)}\n`));

@@ -51,22 +51,35 @@ test("preflight assembly requires and copies exactly two inventories plus four h
 
 test("weights assembly inventories fixed model roots and copies only source-produced service state", async () => {
   const root = await mkdtemp(path.join(tmpdir(), "starvector-provision-weights-")), hostRoot = path.join(root, "host"), sources = path.join(root, "sources");
-  for (const [relative, file] of [["host/weights/models/starvector-1b", "one.bin"], ["host/weights/models/starvector-8b", "eight.bin"], ["sources/prompt", "prompt.bin"], ["sources/hf", "blob.bin"]]) { await mkdir(path.join(root, relative), { recursive: true }); await writeFile(path.join(root, relative, file), `${relative}-${file}`); }
+  for (const [relative, file] of [["host/weights/models/starvector-1b", "one.bin"], ["host/weights/models/starvector-8b", "eight.bin"]]) { await mkdir(path.join(root, relative), { recursive: true }); await writeFile(path.join(root, relative, file), `${relative}-${file}`); }
   await mkdir(path.join(sources, "app", "models", "receipt"), { recursive: true });
-  const receipt = (repo, snapshotRevision) => ({ schemaVersion: 2, repo, snapshotRevision, resolvedFiles: ["weights.bin"] });
-  await writeFile(path.join(sources, "app", "models", "receipt", "weights.bin"), "weights");
-  const validReceipts = { ...receipt("SceneWorks/flux1-schnell-mlx", "revision"), receipts: [receipt("starvector/starvector-1b-im2svg", "380ab95d25a8e9ab1dc825debe238b4953ae13b9"), receipt("starvector/starvector-8b-im2svg", "518beea8dcb5f7a37c5911e92d1d62a76beee7f9"), receipt("SceneWorks/flux1-schnell-mlx", "revision")] };
+  const revisions = { one: "380ab95d25a8e9ab1dc825debe238b4953ae13b9", eight: "518beea8dcb5f7a37c5911e92d1d62a76beee7f9", flux: "a".repeat(40) };
+  const snapshot = (repo, revision) => path.join(sources, "hf", "hub", `models--${repo.replace("/", "--")}`, "snapshots", revision);
+  for (const [repo, revision] of [["starvector/starvector-1b-im2svg", revisions.one], ["starvector/starvector-8b-im2svg", revisions.eight]]) { const dir = snapshot(repo, revision); await mkdir(dir, { recursive: true }); await writeFile(path.join(dir, "weights.bin"), `${repo}-weights`); }
+  const fluxSnapshot = snapshot("SceneWorks/flux1-schnell-mlx", revisions.flux), fluxBlob = path.join(sources, "hf", "hub", "models--SceneWorks--flux1-schnell-mlx", "blobs", "flux");
+  await mkdir(path.join(fluxSnapshot, "q4"), { recursive: true }); await mkdir(path.dirname(fluxBlob), { recursive: true }); await writeFile(fluxBlob, "flux-q4"); await symlink(path.relative(path.join(fluxSnapshot, "q4"), fluxBlob), path.join(fluxSnapshot, "q4", "weights.bin"));
+  await mkdir(path.join(sources, "prompt"), { recursive: true }); await writeFile(path.join(sources, "prompt", "weights.bin"), "flux-q4");
+  const receipt = (repo, modelId, snapshotRevision, extra = {}) => ({ schemaVersion: 2, repo, modelId, snapshotRevision, resolvedFiles: ["weights.bin"], ...extra });
+  const fluxReceipt = receipt("SceneWorks/flux1-schnell-mlx", "flux_schnell", revisions.flux, { variant: "q4", resolvedTier: "q4", resolvedFiles: ["q4/weights.bin"] });
+  const validReceipts = { ...fluxReceipt, receipts: [receipt("starvector/starvector-1b-im2svg", "starvector_1b", revisions.one), receipt("starvector/starvector-8b-im2svg", "starvector_8b", revisions.eight), fluxReceipt] };
   await writeFile(path.join(sources, "app", "models", "receipt", ".sceneworks-download-complete.json"), JSON.stringify(validReceipts));
-  const manifest = await assembleWeights({ hostRoot, serviceAppData: path.join(sources, "app"), serviceHfHome: path.join(sources, "hf"), promptRaster: path.join(sources, "prompt"), promptProvider: "provider", promptModel: "model", promptRevision: "revision" });
+  const manifest = await assembleWeights({ hostRoot, serviceAppData: path.join(sources, "app"), serviceHfHome: path.join(sources, "hf"), promptRaster: path.join(sources, "prompt"), promptProvider: "candle_flux", promptModel: "flux_schnell", promptRevision: revisions.flux });
   assert.deepEqual(Object.keys(manifest.models).sort(), ["starvector-1b", "starvector-8b"]);
-  assert.equal(manifest.prompt_raster.provider_id, "provider");
+  assert.equal(manifest.prompt_raster.provider_id, "candle_flux");
   assert.match(manifest.terminal_service_closure.app_data_sha256, /^[a-f0-9]{64}$/);
-  await assembleWeights({ hostRoot, serviceAppData: path.join(sources, "app"), serviceHfHome: path.join(sources, "hf"), promptRaster: path.join(sources, "prompt"), promptProvider: "provider", promptModel: "model", promptRevision: "revision" });
-  await writeFile(path.join(sources, "app", "models", "receipt", ".sceneworks-download-complete.json"), JSON.stringify({ ...receipt("SceneWorks/flux1-schnell-mlx", "revision"), receipts: [receipt("starvector/starvector-1b-im2svg", "380ab95d25a8e9ab1dc825debe238b4953ae13b9"), receipt("starvector/starvector-8b-im2svg", "518beea8dcb5f7a37c5911e92d1d62a76beee7f9"), { ...receipt("SceneWorks/flux1-schnell-mlx", "revision"), resolvedFiles: ["missing.bin"] }] }));
-  await assert.rejects(() => assembleWeights({ hostRoot, serviceAppData: path.join(sources, "app"), serviceHfHome: path.join(sources, "hf"), promptRaster: path.join(sources, "prompt"), promptProvider: "provider", promptModel: "model", promptRevision: "revision" }), /lacks resolved file/);
+  await assembleWeights({ hostRoot, serviceAppData: path.join(sources, "app"), serviceHfHome: path.join(sources, "hf"), promptRaster: path.join(sources, "prompt"), promptProvider: "candle_flux", promptModel: "flux_schnell", promptRevision: revisions.flux });
+  const missing = structuredClone(validReceipts); missing.receipts[2].resolvedFiles = ["q4/missing.bin"]; missing.resolvedFiles = ["q4/missing.bin"];
+  await writeFile(path.join(sources, "app", "models", "receipt", ".sceneworks-download-complete.json"), JSON.stringify(missing));
+  await assert.rejects(() => assembleWeights({ hostRoot, serviceAppData: path.join(sources, "app"), serviceHfHome: path.join(sources, "hf"), promptRaster: path.join(sources, "prompt"), promptProvider: "candle_flux", promptModel: "flux_schnell", promptRevision: revisions.flux }), /HF closure lacks resolved file/);
+  const wrongVariant = structuredClone(validReceipts); wrongVariant.variant = "q8"; wrongVariant.receipts[2].variant = "q8";
+  await writeFile(path.join(sources, "app", "models", "receipt", ".sceneworks-download-complete.json"), JSON.stringify(wrongVariant));
+  await assert.rejects(() => assembleWeights({ hostRoot, serviceAppData: path.join(sources, "app"), serviceHfHome: path.join(sources, "hf"), promptRaster: path.join(sources, "prompt"), promptProvider: "candle_flux", promptModel: "flux_schnell", promptRevision: revisions.flux }), /lacks a source-produced receipt/);
   await writeFile(path.join(sources, "app", "models", "receipt", ".sceneworks-download-complete.json"), JSON.stringify(validReceipts));
-  await symlink(path.join(sources, "hf", "blob.bin"), path.join(sources, "hf", "linked.bin"));
-  await assert.rejects(() => assembleWeights({ hostRoot, serviceAppData: path.join(sources, "app"), serviceHfHome: path.join(sources, "hf"), promptRaster: path.join(sources, "prompt"), promptProvider: "provider", promptModel: "model", promptRevision: "revision" }), /symlink/);
+  await writeFile(path.join(sources, "prompt", "weights.bin"), "disconnected");
+  await assert.rejects(() => assembleWeights({ hostRoot, serviceAppData: path.join(sources, "app"), serviceHfHome: path.join(sources, "hf"), promptRaster: path.join(sources, "prompt"), promptProvider: "candle_flux", promptModel: "flux_schnell", promptRevision: revisions.flux }), /does not match/);
+  await writeFile(path.join(sources, "prompt", "weights.bin"), "flux-q4");
+  const outside = path.join(root, "outside.bin"); await writeFile(outside, "outside"); await symlink(outside, path.join(sources, "hf", "escape.bin"));
+  await assert.rejects(() => assembleWeights({ hostRoot, serviceAppData: path.join(sources, "app"), serviceHfHome: path.join(sources, "hf"), promptRaster: path.join(sources, "prompt"), promptProvider: "candle_flux", promptModel: "flux_schnell", promptRevision: revisions.flux }), /symlink escapes/);
 });
 
 test("exact downloader is idempotent and refuses existing drift without network access", async () => {
