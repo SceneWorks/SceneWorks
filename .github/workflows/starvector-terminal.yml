@@ -1,25 +1,141 @@
 name: StarVector terminal campaign
+
 on:
   workflow_dispatch:
     inputs:
       permanent_pin:
-        description: Exact permanent-pin authority
+        description: Exact permanent-pin authority; this campaign refuses an empty value.
         required: true
         type: string
+      campaign_run_id:
+        description: One externally recorded campaign identity shared by all four tuples.
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  actions: read
+
+# This is deliberately dispatch-only and is the one post-pin campaign profile. The
+# cross-repository lease in the controller is the authoritative host-local guard;
+# this GitHub concurrency guard only prevents two controller jobs in this repository.
+concurrency:
+  group: starvector-terminal-${{ inputs.permanent_pin }}
+  cancel-in-progress: false
+
+env:
+  STARVECTOR_TERMINAL_INFERENCE_ROOT: /opt/sceneworks-terminal/inference
+  STARVECTOR_TERMINAL_WEIGHTS_ROOT: /opt/sceneworks-terminal/weights
+  STARVECTOR_TERMINAL_METRICS_ROOT: /opt/sceneworks-terminal/metrics
+  STARVECTOR_TERMINAL_PRODUCT_ROUTE_COMMAND: /opt/sceneworks-terminal/bin/vector-generate-route
+
 jobs:
   mlx-1b:
-    if: ${{ github.event.inputs.permanent_pin != '' }}
-    runs-on: [self-hosted, macos, real-weights]
-    steps: [{uses: actions/checkout@v4}, {run: node scripts/starvector-terminal-campaign.mjs release/starvector-terminal-campaign-v1.json}]
+    runs-on: [self-hosted, macOS, ARM64, real-weights]
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Validate immutable dispatch plan and pre-provisioned controller inputs
+        run: |
+          node scripts/starvector-terminal-campaign.mjs release/starvector-terminal-campaign-v1.json
+          test -x "$STARVECTOR_TERMINAL_PRODUCT_ROUTE_COMMAND"
+          test -f "$STARVECTOR_TERMINAL_INFERENCE_ROOT/release/starvector-terminal-receipt-v1.schema.json"
+          test -f "$STARVECTOR_TERMINAL_WEIGHTS_ROOT/starvector-terminal-weights-v1.json"
+          test -f "$STARVECTOR_TERMINAL_METRICS_ROOT/starvector-terminal-metrics-environment-v1.json"
+      - name: Run production vector_generate route for MLX 1B
+        run: |
+          node scripts/starvector-terminal-producer.mjs run release/starvector-terminal-campaign-v1.json "$STARVECTOR_TERMINAL_INFERENCE_ROOT" "$STARVECTOR_TERMINAL_WEIGHTS_ROOT" "$STARVECTOR_TERMINAL_METRICS_ROOT" "$RUNNER_TEMP/starvector-terminal.lease" "$RUNNER_TEMP/starvector-terminal/mlx-1b" mlx:1b "${{ inputs.campaign_run_id }}" "${{ inputs.permanent_pin }}" "$STARVECTOR_TERMINAL_PRODUCT_ROUTE_COMMAND"
+      - name: Upload MLX 1B raw evidence even on failure
+        if: ${{ always() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: starvector-terminal-mlx-1b-${{ inputs.campaign_run_id }}
+          path: ${{ runner.temp }}/starvector-terminal/mlx-1b
+          if-no-files-found: warn
+
   mlx-8b:
     needs: mlx-1b
-    runs-on: [self-hosted, macos, real-weights]
-    steps: [{uses: actions/checkout@v4}, {run: echo 'controller supplies pre-provisioned exact snapshot only'}]
+    runs-on: [self-hosted, macOS, ARM64, real-weights]
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Run production vector_generate route for MLX 8B
+        run: |
+          node scripts/starvector-terminal-producer.mjs run release/starvector-terminal-campaign-v1.json "$STARVECTOR_TERMINAL_INFERENCE_ROOT" "$STARVECTOR_TERMINAL_WEIGHTS_ROOT" "$STARVECTOR_TERMINAL_METRICS_ROOT" "$RUNNER_TEMP/starvector-terminal.lease" "$RUNNER_TEMP/starvector-terminal/mlx-8b" mlx:8b "${{ inputs.campaign_run_id }}" "${{ inputs.permanent_pin }}" "$STARVECTOR_TERMINAL_PRODUCT_ROUTE_COMMAND"
+      - name: Upload MLX 8B raw evidence even on failure
+        if: ${{ always() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: starvector-terminal-mlx-8b-${{ inputs.campaign_run_id }}
+          path: ${{ runner.temp }}/starvector-terminal/mlx-8b
+          if-no-files-found: warn
+
   cuda-1b:
     needs: mlx-8b
-    runs-on: [self-hosted, windows, cuda, real-weights]
-    steps: [{uses: actions/checkout@v4}, {shell: bash, run: echo 'controller supplies pre-provisioned exact snapshot only'}]
+    runs-on: [self-hosted, Windows, X64, cuda, real-weights]
+    timeout-minutes: 180
+    env:
+      STARVECTOR_TERMINAL_INFERENCE_ROOT: D:\\sceneworks-terminal\\inference
+      STARVECTOR_TERMINAL_WEIGHTS_ROOT: D:\\sceneworks-terminal\\weights
+      STARVECTOR_TERMINAL_METRICS_ROOT: D:\\sceneworks-terminal\\metrics
+      STARVECTOR_TERMINAL_PRODUCT_ROUTE_COMMAND: D:\\sceneworks-terminal\\bin\\vector-generate-route.exe
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Run production vector_generate route for CUDA 1B
+        shell: pwsh
+        run: |
+          node scripts/starvector-terminal-producer.mjs run release/starvector-terminal-campaign-v1.json $env:STARVECTOR_TERMINAL_INFERENCE_ROOT $env:STARVECTOR_TERMINAL_WEIGHTS_ROOT $env:STARVECTOR_TERMINAL_METRICS_ROOT "$env:RUNNER_TEMP\\starvector-terminal.lease" "$env:RUNNER_TEMP\\starvector-terminal\\cuda-1b" candle-cuda:1b "${{ inputs.campaign_run_id }}" "${{ inputs.permanent_pin }}" $env:STARVECTOR_TERMINAL_PRODUCT_ROUTE_COMMAND
+      - name: Upload CUDA 1B raw evidence even on failure
+        if: ${{ always() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: starvector-terminal-cuda-1b-${{ inputs.campaign_run_id }}
+          path: ${{ runner.temp }}\starvector-terminal\cuda-1b
+          if-no-files-found: warn
+
   cuda-8b:
     needs: cuda-1b
-    runs-on: [self-hosted, windows, cuda, real-weights]
-    steps: [{uses: actions/checkout@v4}, {shell: bash, run: echo 'controller uploads receipt/artifacts even on failure'}]
+    runs-on: [self-hosted, Windows, X64, cuda, real-weights]
+    timeout-minutes: 180
+    env:
+      STARVECTOR_TERMINAL_INFERENCE_ROOT: D:\\sceneworks-terminal\\inference
+      STARVECTOR_TERMINAL_WEIGHTS_ROOT: D:\\sceneworks-terminal\\weights
+      STARVECTOR_TERMINAL_METRICS_ROOT: D:\\sceneworks-terminal\\metrics
+      STARVECTOR_TERMINAL_PRODUCT_ROUTE_COMMAND: D:\\sceneworks-terminal\\bin\\vector-generate-route.exe
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Run production vector_generate route and shared hostile/prompt suites for CUDA 8B
+        shell: pwsh
+        run: |
+          node scripts/starvector-terminal-producer.mjs run release/starvector-terminal-campaign-v1.json $env:STARVECTOR_TERMINAL_INFERENCE_ROOT $env:STARVECTOR_TERMINAL_WEIGHTS_ROOT $env:STARVECTOR_TERMINAL_METRICS_ROOT "$env:RUNNER_TEMP\\starvector-terminal.lease" "$env:RUNNER_TEMP\\starvector-terminal\\cuda-8b" candle-cuda:8b "${{ inputs.campaign_run_id }}" "${{ inputs.permanent_pin }}" $env:STARVECTOR_TERMINAL_PRODUCT_ROUTE_COMMAND
+      - name: Upload CUDA 8B raw evidence and terminal suites even on failure
+        if: ${{ always() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: starvector-terminal-cuda-8b-${{ inputs.campaign_run_id }}
+          path: ${{ runner.temp }}\starvector-terminal\cuda-8b
+          if-no-files-found: warn
+
+  seal-receipt:
+    if: ${{ always() }}
+    needs: [mlx-1b, mlx-8b, cuda-1b, cuda-8b]
+    runs-on: [self-hosted, macOS, ARM64]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Download every raw tuple artifact
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          pattern: starvector-terminal-*-${{ inputs.campaign_run_id }}
+          path: ${{ runner.temp }}/starvector-terminal-evidence
+      - name: Seal receipt only when all raw evidence is present and valid
+        run: |
+          node scripts/starvector-terminal-producer.mjs seal release/starvector-terminal-campaign-v1.json "$STARVECTOR_TERMINAL_INFERENCE_ROOT" "$RUNNER_TEMP/starvector-terminal-evidence" "$RUNNER_TEMP/starvector-terminal-receipt" "${{ inputs.campaign_run_id }}" "${{ inputs.permanent_pin }}"
+      - name: Upload combined evidence even on failure
+        if: ${{ always() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: starvector-terminal-receipt-${{ inputs.campaign_run_id }}
+          path: |
+            ${{ runner.temp }}/starvector-terminal-evidence
+            ${{ runner.temp }}/starvector-terminal-receipt
+          if-no-files-found: warn
