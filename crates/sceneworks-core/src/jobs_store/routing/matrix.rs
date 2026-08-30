@@ -1065,12 +1065,15 @@ fn validate_runtime_pair(
     // `previewSupportDerivation.js` and `bump-inference.mjs` on exactly this reasoning — "a
     // capability dump goes stale when a provider gains or loses a capability, a property of the
     // dump's CONTENT, not when the revision label attached to it moves" — but did not reach this
-    // Rust sibling. Nothing is weakened by dropping it: the three checks below compare the actual
+    // Rust sibling. Nothing is weakened by dropping it: the checks below compare the actual
     // mappings and descriptor populations, so a real divergence between the halves still fails here
     // regardless of what revision either was stamped at.
     if mlx.model_mappings != candle.model_mappings {
         return Err("matching-platform production model mappings differ".to_owned());
     }
+    // Training target ids are shared product coordinates, but mapped engine ids are native
+    // backend implementation details. LTX 2.5 is deliberately `ltx_2_5` on MLX and
+    // `ltx_2_5_distilled` on Candle, so compare target populations rather than values.
     for facts in [mlx, candle] {
         for (target, engine) in &facts.trainer_mappings {
             if target.trim().is_empty() || engine.trim().is_empty() {
@@ -5110,7 +5113,7 @@ mod tests {
         // operation matrix must evaluate that complete runnable shape, not rebuild a bare payload
         // that both production routers correctly reject. SC-18902's failed exact-head CUDA render
         // withdrew Eros from every Candle lane; the newer advanced routes must not restore it.
-        for model_id in ["ltx_2_3", "ltx_2_3_eros"] {
+        for model_id in ["ltx_2_3", "ltx_2_3_eros", "ltx_2_5"] {
             let row = matrix.models.iter().find(|row| row.id == model_id).unwrap();
             for mode in ["extend_clip", "video_bridge", "replace_person"] {
                 let cell = row
@@ -5120,10 +5123,10 @@ mod tests {
                     .unwrap_or_else(|| panic!("{model_id}/{mode} is represented"));
                 assert_eq!(
                     (cell.mlx, cell.candle),
-                    (Some(true), Some(model_id == "ltx_2_3")),
+                    (Some(true), Some(model_id != "ltx_2_3_eros")),
                     "{model_id}/{mode} uses the complete IC-LoRA probe while honoring the Eros withdrawal"
                 );
-                if model_id == "ltx_2_3" {
+                if model_id != "ltx_2_3_eros" {
                     assert!(cell.parity_obligation.is_none());
                 }
             }
@@ -5977,6 +5980,29 @@ mod tests {
             .unwrap()
             .engine_ids = vec!["wan2_2_t2v_14b".to_owned()];
         assert!(validate_runtime_pair(&wrong_video_shape, &candle).is_err());
+    }
+
+    #[test]
+    fn trainer_mappings_allow_native_engine_ids_and_fail_closed() {
+        let mlx = runtime_facts(MLX_RUNTIME_FACTS, "mlx").unwrap();
+        let candle = runtime_facts(CANDLE_RUNTIME_FACTS, "candle").unwrap();
+        let target = "ltx_2_5_video_lora";
+
+        assert_ne!(
+            mlx.trainer_mappings.get(target),
+            candle.trainer_mappings.get(target),
+            "the regression requires distinct native LTX 2.5 trainer engines"
+        );
+        validate_runtime_pair(&mlx, &candle).unwrap();
+        assert!(trainer_supports(&mlx, target, "lora"));
+        assert!(trainer_supports(&candle, target, "lora"));
+
+        let mut missing_target = candle.clone();
+        missing_target.trainer_mappings.remove(target);
+        assert_eq!(
+            validate_runtime_pair(&mlx, &missing_target).unwrap_err(),
+            "matching-platform production training targets differ (MLX only: [\"ltx_2_5_video_lora\"]; Candle only: [])"
+        );
     }
 
     #[test]

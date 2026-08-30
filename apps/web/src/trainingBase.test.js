@@ -20,13 +20,15 @@ describe("trainingBaseTier", () => {
     expect(trainingBaseTier(krea)).toBe("bf16");
   });
 
-  it("uses LTX's packed q4 QLoRA tier instead of its dense bf16 inference tier", () => {
-    const ltx = {
-      ...base([v("q4", "installed"), v("q8", "missing"), v("bf16", "missing")]),
-      id: "ltx_2_3",
-    };
-    expect(trainingBaseTier(ltx)).toBe("q4");
-    expect(trainingBaseState(ltx)).toBe("installed");
+  it("uses each LTX generation's packed q4 QLoRA tier instead of its dense bf16 inference tier", () => {
+    for (const id of ["ltx_2_3", "ltx_2_5"]) {
+      const ltx = {
+        ...base([v("q4", "installed"), v("q8", "missing"), v("bf16", "missing")]),
+        id,
+      };
+      expect(trainingBaseTier(ltx)).toBe("q4");
+      expect(trainingBaseState(ltx)).toBe("installed");
+    }
   });
 
   it("returns undefined for a non-matrix base (z-image / sdxl — trains on its default tier)", () => {

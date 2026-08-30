@@ -42,6 +42,15 @@ function runChecker(args = []) {
   return { status: result.status, output: `${result.stdout ?? ""}${result.stderr ?? ""}` };
 }
 
+test("the audit comment never restates the mutable inference pin", () => {
+  const audit = JSON.parse(readFileSync(AUDIT, "utf8"));
+  assert.doesNotMatch(
+    audit._comment ?? "",
+    /\b[0-9a-f]{40}\b/i,
+    "inferenceRevision is the sole pin authority; reviewer prose must stay revision-neutral",
+  );
+});
+
 test("a pin bump alone does not fail the build", () => {
   const { status, output } = withPinSkew(() => runChecker());
   assert.equal(status, 0, `an inference pin bump must not fail CI (sc-19751):\n${output}`);

@@ -1371,6 +1371,10 @@ test("memory adapters bind every emitted overlay verdict to the requested target
     candle.indexOf("fn run_five_rung_reference("),
     candle.indexOf("fn run(request:"),
   );
+  const candleLtx25 = candle.slice(
+    candle.indexOf("fn run_ltx25_capture("),
+    candle.indexOf("const FIVE_RUNG_FIXTURE_PREFIX"),
+  );
 
   assert.match(
     krea,
@@ -1404,11 +1408,20 @@ test("memory adapters bind every emitted overlay verdict to the requested target
     "the Candle batch must validate every target before its one model load",
   );
   // The inline Krea arm emits a complete receipt after SC-21714; only the two pre-execution and
-  // five-rung paths remain gated. Pin the complete arm's target-derived overlay settlement too.
-  assert.equal(candle.match(/protocol::plain_gated_fragment\(/g)?.length, 2);
+  // five-rung paths remain gated. LTX-2.5 adds its own pre-execution fragment.
+  assert.equal(candle.match(/protocol::plain_gated_fragment\(/g)?.length, 3);
   assert.match(
     candle,
     /settle_plain_overlay_scenario\(request, &mut fragment, KREA_PLAIN_EXECUTION_PATH\)\?/,
+  );
+  assert.match(
+    candleLtx25,
+    /validate_plain_overlay_target\(request, LTX25_EXECUTION_PATH\)\?/,
+  );
+  assert.ok(
+    candleLtx25.indexOf("validate_plain_overlay_target") <
+      candleLtx25.indexOf("runtime_cuda::catalog()"),
+    "LTX-2.5 must reject a mismatched overlay before provider work",
   );
   assert.doesNotMatch(candle, /protocol::gated_fragment\(/);
 });

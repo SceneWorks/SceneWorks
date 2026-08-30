@@ -472,18 +472,43 @@ mod tests {
     #[test]
     fn composition_is_available_without_loading_weights() {
         let media_count = super::media().generators().len();
-        let text_count = super::text().registrations().len();
+
+        // The admitted text-LLM roster is an inference-pin fact: assert the exact id set rather
+        // than a bare count so the next roster move names itself in the failure output.
+        #[cfg(any(
+            target_os = "macos",
+            all(not(target_os = "macos"), feature = "backend-candle")
+        ))]
+        let text_ids: Vec<String> = {
+            let mut ids: Vec<String> = super::text()
+                .registrations()
+                .map(|registration| (registration.descriptor)().id)
+                .collect();
+            ids.sort();
+            ids
+        };
 
         #[cfg(target_os = "macos")]
         {
             assert!(media_count > 50);
-            assert_eq!(text_count, 2);
+            assert_eq!(
+                text_ids,
+                [
+                    "mlx-joycaption",
+                    "mlx-llama",
+                    "mlx-starvector-1b",
+                    "mlx-starvector-8b",
+                ]
+            );
         }
 
         #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
         {
             assert!(media_count > 40);
-            assert_eq!(text_count, 2);
+            assert_eq!(
+                text_ids,
+                ["candle-llama", "candle-llava", "candle-starvector-1b"]
+            );
         }
 
         #[cfg(not(any(
@@ -492,7 +517,7 @@ mod tests {
         )))]
         {
             assert_eq!(media_count, 0);
-            assert_eq!(text_count, 0);
+            assert_eq!(super::text().registrations().len(), 0);
         }
     }
 }

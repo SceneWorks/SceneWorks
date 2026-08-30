@@ -19434,6 +19434,167 @@
       }
     },
     {
+      "id": "ltx_2_5",
+      // The 2.5 workflow is a high-control opt-in; LTX-2.3 remains the recommended/default LTX route.
+      "recommended": false,
+      "autoDownload": false,
+      "name": "LTX-2.5",
+      "family": "ltx-video",
+      "type": "video",
+      "adapter": "ltx_video",
+      "capabilities": ["image_to_video", "text_to_video", "first_last_frame", "extend_clip", "video_bridge", "replace_person"],
+      // Neither packed transformer exposes generic request-level guidance: distilled guidance is
+      // baked in, while dev uses the fixed multimodal guider parameters from its checkpoint row.
+      // The default distilled variant also has no negative branch. Video Studio reopens only the
+      // negative prompt when the user explicitly selects dev; guidance stays provider-owned.
+      "video": { "supportsGuidance": false, "supportsNegativePrompt": false },
+      // One rehost, two transformer identities. Every selected quant tier downloads both nested
+      // variants and the worker selects exactly one root. Sizes are measured from the finalized
+      // public bundle and every runtime resolver binds the immutable verified revision below.
+      "downloads": [
+        {
+          "provider": "huggingface",
+          "repo": "SceneWorks/ltx-2.5-mlx",
+          "revision": "081658ce6886cacba20817ce0359bbefef706ff2",
+          "coRequisite": true,
+          "files": ["enhancer/*"],
+          "platforms": ["macos"],
+          "estimatedSizeBytes": 23951748129
+        },
+        {
+          "provider": "huggingface",
+          "repo": "SceneWorks/ltx-2.5-mlx",
+          "revision": "081658ce6886cacba20817ce0359bbefef706ff2",
+          "coRequisite": true,
+          "files": ["distilled_lora/ltx-2.5-22b-distilled-lora-450-bf16.safetensors"],
+          "platforms": ["macos", "windows", "linux"],
+          "estimatedSizeBytes": 8899889568
+        },
+        {
+          "provider": "huggingface",
+          "repo": "SceneWorks/ltx-2.5-mlx",
+          "revision": "081658ce6886cacba20817ce0359bbefef706ff2",
+          "variant": "q4",
+          "default": true,
+          "files": ["distilled/q4/*", "dev/q4/*"],
+          "platforms": ["macos", "windows", "linux"],
+          // Exact published-directory bytes for both transformer identities selected by this row.
+          "estimatedSizeBytes": 82001054462,
+          "footprint": { "diskSizeBytes": 82001054462, "residentMemoryBytes": null, "peakMemoryBytes": null }
+        },
+        {
+          "provider": "huggingface",
+          "repo": "SceneWorks/ltx-2.5-mlx",
+          "revision": "081658ce6886cacba20817ce0359bbefef706ff2",
+          "variant": "q8",
+          "files": ["distilled/q8/*", "dev/q8/*"],
+          // q8 is a first-class Candle tier alongside MLX: the CUDA hosts consume the same split
+          // q8 bundle from this rehost, so the row carries the full platform set like q4/bf16.
+          "platforms": ["macos", "windows", "linux"],
+          "estimatedSizeBytes": 83672150720,
+          "footprint": { "diskSizeBytes": 83672150720, "residentMemoryBytes": null, "peakMemoryBytes": null }
+        },
+        {
+          "provider": "huggingface",
+          "repo": "SceneWorks/ltx-2.5-mlx",
+          "revision": "081658ce6886cacba20817ce0359bbefef706ff2",
+          "variant": "bf16",
+          "files": ["distilled/bf16/*", "dev/bf16/*"],
+          "platforms": ["macos", "windows", "linux"],
+          "estimatedSizeBytes": 145561765732,
+          "footprint": { "diskSizeBytes": 145561765732, "residentMemoryBytes": null, "peakMemoryBytes": null }
+        }
+      ],
+      "paths": { "model": "${HF_CACHE}/SceneWorks/ltx-2.5-mlx" },
+      "resources": {
+        "distilledLora": {
+          "repo": "SceneWorks/ltx-2.5-mlx",
+          "file": "distilled_lora/ltx-2.5-22b-distilled-lora-450-bf16.safetensors"
+        }
+      },
+      "defaults": {
+        "duration": 6,
+        "fps": 25,
+        "resolution": "768x512",
+        "quality": "balanced",
+        "steps": 8
+      },
+      "limits": {
+        "durations": [4, 6, 8, 10, 12, 15],
+        "recommendedMaxDuration": 10,
+        "hardMaxDuration": 15,
+        "fps": [24, 25, 30],
+        "steps": [8, 30],
+        "resolutions": ["768x512", "512x768", "640x640", "1280x704", "704x1280"],
+        "requiresDimensionsMultipleOf": 64,
+        "samplers": ["default", "euler", "euler_ancestral", "heun", "dpmpp_2m", "dpmpp_sde", "uni_pc", "lcm", "ddim"]
+      },
+      "loraCompatibility": { "families": ["ltx-video"], "types": ["style", "motion", "character", "enhance"] },
+      "mlx": {
+        "minMemoryGb": 31,
+        "repo": "SceneWorks/ltx-2.5-mlx",
+        "autoDistillLora": { "stage1Strength": 0.0, "stage2Strength": 1.0 },
+        // SC-18800: the pinned `ltx_2_5` contract exposes the ordinary conv-VAE tiler, both
+        // attention-score budgets, and the adapter-free 48-block AvDiT window. The dev transformer
+        // always installs the required stage-two refinement LoRA, so it deliberately does not
+        // inherit the adapter-free rung-4 claim. Missing is not structural non-applicability: no
+        // structural exemptions are declared for any other coordinate.
+        "memoryStrategyCapabilities": {
+          "bounded_decode": {
+            "parameters": { "decodeTileEdge": 192, "decodeOverlap": 64 },
+            "overlays": ["none", "lora"]
+          },
+          "bounded_attention": {
+            "parameters": { "attentionChunkSize": 16777216 },
+            "overlays": ["none", "lora"]
+          },
+          "bounded_transformer_residency": {
+            "parameters": { "transformerWindowSize": 1, "transformerWindowComponent": "Dit" },
+            "overlays": ["none"]
+          }
+        }
+      },
+      "candle": {
+        // SC-18800: Candle's ordinary ConvVAE route consumes the selected decode edge/overlap, while
+        // the optional DiffVAE route rejects those parameters and keeps its own automatic budget.
+        // Bounded attention and the adapter-free AvDiT window are independently selectable. Staged
+        // residency remains Missing rather than being mislabeled as StructurallyNotApplicable.
+        "memoryStrategyCapabilities": {
+          "bounded_decode": {
+            "parameters": { "decodeTileEdge": 192, "decodeOverlap": 64 },
+            "overlays": ["none", "lora"],
+            "tiers": ["q4", "q8", "bf16"]
+          },
+          "bounded_attention": {
+            "parameters": { "attentionChunkSize": 16777216 },
+            "overlays": ["none", "lora"],
+            "tiers": ["q4", "q8", "bf16"]
+          },
+          "bounded_transformer_residency": {
+            "parameters": { "transformerWindowSize": 1, "transformerWindowComponent": "Dit" },
+            "overlays": ["none"],
+            "tiers": ["q4", "q8", "bf16"]
+          }
+        }
+      },
+      "ui": {
+        "label": "LTX-2.5",
+        "description": "Text and image video with the distilled default or the 30-step guided dev transformer.",
+        "recommendedFor": ["image_to_video", "text_to_video", "first_last_frame", "extend_clip", "video_bridge", "replace_person"],
+        "durationHint": "Distilled is the default. Dev runs the guided 30-step recipe and its bundled stage-two refinement.",
+        "promptGuide": {
+          "title": "LTX-2.5 Gemma 4 Prompt Guide",
+          "path": "/prompt-guides/ltx-2-5.md",
+          "sources": [
+            { "label": "Lightricks LTX-2.5 model card", "url": "https://huggingface.co/Lightricks/LTX-2.5" },
+            { "label": "Lightricks LTX-2.5 Diffusers model card", "url": "https://huggingface.co/Lightricks/LTX-2.5-Diffusers" },
+            { "label": "Lightricks Gemma 4 text-to-video prompt contract", "url": "https://github.com/Lightricks/LTX-2/blob/fd4ded7f2d88d3da713abcdd4ad41ecc4a9314ca/packages/ltx-core/src/ltx_core/text_encoders/gemma/encoders/prompts/gemma4_t2v_system_prompt.txt" },
+            { "label": "Lightricks Gemma 4 image-to-video prompt contract", "url": "https://github.com/Lightricks/LTX-2/blob/fd4ded7f2d88d3da713abcdd4ad41ecc4a9314ca/packages/ltx-core/src/ltx_core/text_encoders/gemma/encoders/prompts/gemma4_i2v_system_prompt.txt" }
+          ]
+        }
+      }
+    },
+    {
       "id": "ltx_2_3",
       // Recommended headline video model, but ~146 GB — keep it badged yet unchecked in
       // the wizard so the big download is a deliberate opt-in.

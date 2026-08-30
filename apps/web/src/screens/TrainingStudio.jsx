@@ -313,6 +313,7 @@ export function TrainingStudio({ mode = "training" } = {}) {
     setTrainingDatasetItemQualityAck,
     createTrainingDataset,
     uploadTrainingDatasetItem,
+    uploadLtxPreparedBundle,
     updateTrainingDataset,
     batchRenameTrainingDataset,
     deleteTrainingDataset,
@@ -1487,6 +1488,25 @@ export function TrainingStudio({ mode = "training" } = {}) {
     }
   }
 
+  async function uploadPreparedBundle(member, file) {
+    const itemId = resolveSavedItemId(activeDataset, member);
+    if (!activeDataset?.id || !itemId || typeof uploadLtxPreparedBundle !== "function") {
+      throw new Error("Save this dataset item before uploading its prepared bundle.");
+    }
+    setDatasetError("");
+    setDatasetMessage("");
+    try {
+      const dataset = await uploadLtxPreparedBundle(activeDataset.id, itemId, file);
+      setActiveDataset(dataset);
+      setSelectedAssetIds(normalizeDatasetAssetIds(dataset, assets));
+      setDatasetMessage(`Prepared LTX bundle attached to ${member.displayName ?? imageAssetName(member)}.`);
+      return dataset;
+    } catch (error) {
+      setDatasetError(error.message);
+      throw error;
+    }
+  }
+
   async function importParquetDataset(settings) {
     setDatasetError("");
     setDatasetMessage("");
@@ -1872,7 +1892,7 @@ export function TrainingStudio({ mode = "training" } = {}) {
                 }}
                 config={{
                   imageAssets, characters, associatedCharacterId, setActiveView,
-                  importingAssets, gpuOptions,
+                  importingAssets, gpuOptions, onUploadPreparedBundle: uploadPreparedBundle,
                 }}
               />
             ) : (

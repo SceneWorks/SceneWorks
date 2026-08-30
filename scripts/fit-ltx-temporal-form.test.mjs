@@ -288,7 +288,7 @@ test("the promoted curve container is derived from the exact sc-18810 identity a
     readFileSync(path.join(ROOT, "docs/generated/ltx-temporal-form-fit-sc-18810.json"), "utf8"),
   );
   const bundle = buildVideoMemoryCurveBundle(report, DATASET.records, MANIFEST, DATASET_SOURCES);
-  assert.equal(bundle.schemaVersion, 4);
+  assert.equal(bundle.schemaVersion, 5);
   // sc-20799: the fps24 group is under-sampled (one distinct geometry), so the fit drops it — but
   // the drop must be DECLARED, not silent. Assert the shape of the declaration, not a record count.
   assert.ok(Array.isArray(bundle.unmodeledRecords));
@@ -435,7 +435,7 @@ test("the persisted video curve has an explicit strict schema contract", () => {
     readFileSync(path.join(ROOT, "docs/generated/video-memory-curves.json"), "utf8"),
   );
   assert.equal(schema.$schema, "https://json-schema.org/draft/2020-12/schema");
-  assert.equal(schema.properties.schemaVersion.const, 4);
+  assert.equal(schema.properties.schemaVersion.const, 5);
   assert.equal(schema.properties.generatedBy.const, "scripts/fit-ltx-temporal-form.mjs");
   assert.equal(
     schema.properties.sourceFit.pattern,

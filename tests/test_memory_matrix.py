@@ -43,6 +43,12 @@ def matrix_validator():
     return jsonschema.Draft202012Validator(schema, registry=registry)
 
 
+def test_pipeline_characterization_schema_is_defined_at_its_ref_target():
+    schema = json.loads(SCHEMA.read_text(encoding="utf-8"))
+    assert "pipelineCharacterization" in schema["$defs"]
+    assert "pipelineCharacterization" not in schema["properties"]
+
+
 def test_generated_memory_matrix_is_schema_valid():
     matrix_validator().validate(load_matrix())
 
@@ -50,26 +56,26 @@ def test_generated_memory_matrix_is_schema_valid():
 def test_matrix_accounts_for_all_models_and_pinned_mlx_staged_coverage():
     matrix = load_matrix()
     # sc-18815: the universe is modality-aware, so the census is too. `imageModels` was REMOVED
-    # rather than left holding the whole-universe total under a one-modality name — a field called
-    # `imageModels` reading 63 is worse than the image-only universe it replaced.
+    # rather than left holding the whole-universe total under a one-modality name. Derive the
+    # populations from the published rows so adding a catalog entry cannot stale a pinned count.
     assert "imageModels" not in matrix["summary"]
-    assert matrix["summary"]["catalogEntries"] == 63
-    assert matrix["summary"]["catalogEntriesByModality"] == {"image": 53, "video": 10}
     image_ids = {model["id"] for model in matrix["models"] if model["modality"] == "image"}
     video_ids = {model["id"] for model in matrix["models"] if model["modality"] == "video"}
-    assert len(image_ids) == 53
-    assert len(video_ids) == 10
+    assert matrix["summary"]["catalogEntries"] == len(matrix["models"])
+    assert matrix["summary"]["catalogEntriesByModality"] == {
+        "image": len(image_ids),
+        "video": len(video_ids),
+    }
     # SC-18218 closes FLUX.2-dev to its measured Resident-only provider contract, so its former
     # generic staged-route claim is intentionally absent from this census.
     # sc-18815 keeps this as exactly the IMAGE-lane claim its denominator says it is. The separate
-    # video census consumes the provider-owned staged-residency contracts at the frozen b4 pin;
-    # only SVD remains without an MLX staged implementation. The image-lane numerator is asserted
-    # structurally against the census below rather than as a pinned population (the SC-18218
-    # shape-over-population ruling); the denominators are the modality totals asserted above.
-    assert matrix["summary"]["mlxStagedStaticCoverageDenominator"] == 53
-    assert matrix["summary"]["videoMlxStagedStaticCoverage"] == 9
-    assert matrix["summary"]["videoMlxStagedStaticCoverageDenominator"] == 10
-    assert len(matrix["models"]) == len(matrix["modelSlices"]) == 63
+    # video census consumes the provider-owned staged-residency contracts. Both numerators are
+    # asserted structurally rather than as pinned populations (the SC-18218
+    # shape-over-population ruling); the denominators are the modality totals derived above.
+    assert matrix["summary"]["mlxStagedStaticCoverageDenominator"] == len(image_ids)
+    assert 0 < matrix["summary"]["videoMlxStagedStaticCoverage"] < len(video_ids)
+    assert matrix["summary"]["videoMlxStagedStaticCoverageDenominator"] == len(video_ids)
+    assert len(matrix["models"]) == len(matrix["modelSlices"])
     assert {model["id"] for model in matrix["models"]} == set(matrix["modelSlices"])
     # SC-18218 closes FLUX.2-dev to its measured Resident-only provider contract, so its former
     # generic staged-route claim is intentionally absent from this census — the coverage number is
@@ -334,30 +340,6 @@ def test_calibration_evidence_is_schema_valid_and_matrix_ingested():
         "calibrationRuns"
     ]
 
-    # `current` vs `historical` is decided against the shipped inference pin plus exact audited
-    # compatibility. SC-15833 certifies the Candle FLUX.2 closure across an exact window -- captured
-    # at 5ffd, compatible through `audited_live_revision` -- so only its five records may authorize
-    # the later runtime, and only while that revision is still the live pin. The audit is a WINDOW,
-    # not a permanent grant: once the pin moves past it those five join every other retained record
-    # as historical, which is the fail-closed rule SC-15833's own "refuses to authorize capture
-    # promotion against a newer live inference pin" test asserts directly.
-    #
-    # Derived from the live pin rather than hardcoded, so a bump does not make this test wrong; it
-    # degrades to `{"historical"}` on its own and comes back when the window is re-audited. sc-17524
-    # did exactly that for a4f409ae -- `Cargo.lock` and `candle-gen` both moved, and the
-    # compiled measurement binary was byte-identical at both ends. Only a measurement re-opens this
-    # window; editing the constant below does not.
-    audited_live_revision = "a4f409ae8ce73eda2ee8117b89b5f479666606b8"
-    worker_manifest = (
-        ROOT / "crates" / "sceneworks-worker" / "Cargo.toml"
-    ).read_text(encoding="utf-8")
-    live_pin_match = re.search(
-        r'github\.com/SceneWorks/inference"[^}\n]*\brev\s*=\s*"([0-9a-f]{40})"',
-        worker_manifest,
-    )
-    assert live_pin_match, "could not read the pinned inference revision from the worker manifest"
-    within_audited_window = live_pin_match.group(1) == audited_live_revision
-    expected_flux2_semantics = {"current"} if within_audited_window else {"historical"}
     full_runs = [
         run for run in matrix["calibrationRuns"] if run["record"]["status"] == "complete"
     ]
@@ -368,10 +350,8 @@ def test_calibration_evidence_is_schema_valid_and_matrix_ingested():
     ]
     # Currency is the provider's COMPILE CLOSURE, not the pin (sc-17774): a record is current
     # exactly when the digest it captured is still the live digest for ITS provider lane. Derived
-    # here, once, the same way the generator derives it, and legitimately EMPTY in the window
-    # between a pin bump and its re-capture — which is where the sc-17137 main sync leaves the
-    # corpus (both the SC-18218 captures and sc-19721's 75d66db5 re-captures predate the sc-20523
-    # pin's closures).
+    # here, once, the same way the generator derives it. Pin movement alone changes none of these
+    # comparisons.
     live_closures = json.loads(
         (ROOT / "config/inference-provider-closures.json").read_text(encoding="utf-8")
     )["providers"]
@@ -394,8 +374,8 @@ def test_calibration_evidence_is_schema_valid_and_matrix_ingested():
     # is a gate on measurement wearing a test's clothes — the frozen-corpus class, rewritten to
     # shape here rather than hand-updated to the next id (which would only re-freeze it).
     #
-    # An empty `current_full_runs` is legitimate and deliberately allowed: it is exactly the window
-    # between a pin bump and its re-capture, which the currency derivation above already documents.
+    # An empty `current_full_runs` is legitimate and deliberately allowed when every captured
+    # provider closure has genuinely changed since its measurement.
     current_full_runs = [run for run in full_runs if run["semantics"] == "current"]
     assert {run["semantics"] for run in full_runs} <= {"current", "historical"}
     assert {run["record"]["id"] for run in current_full_runs} == {
@@ -423,9 +403,9 @@ def test_calibration_evidence_is_schema_valid_and_matrix_ingested():
         "imc-bfb890dff959eaf09183": "staged_residency",
         "imc-f5c3d06f30ebf3723f13": "bounded_transformer_residency",
     }
-    # The four MLX FLUX.2 production coordinates. A pin bump stales the current rows and the
-    # re-capture adds one new record per pair while the historical rows stay, so the POPULATION
-    # grows at every bump — which is why the rows are held to this SHAPE rather than pinned by id:
+    # The four MLX FLUX.2 production coordinates. A provider-closure change can make prior rows
+    # historical; a later verification adds one new record per pair while the earlier rows stay.
+    # That is why the rows are held to this SHAPE rather than pinned by id:
     # exactly one CURRENT row per pair (current = captured at the live closure), and retained
     # historical rows covering the same pairs. A ragged shape still means a partial or duplicated
     # ingest.
@@ -440,7 +420,11 @@ def test_calibration_evidence_is_schema_valid_and_matrix_ingested():
         run["record"]["id"]: run["record"]["strategy"]["rung"]
         for run in candle_flux2_runtime
     } == expected_candle_flux2_runtime
-    assert {run["semantics"] for run in candle_flux2_runtime} == expected_flux2_semantics
+    assert all(
+        (run["semantics"] == "current")
+        == (run["record"]["id"] in current_by_closure)
+        for run in candle_flux2_runtime
+    )
     assert {
         run["record"]["repositories"]["inference"]["revision"]
         for run in candle_flux2_runtime
@@ -471,9 +455,9 @@ def test_calibration_evidence_is_schema_valid_and_matrix_ingested():
         (run["record"]["target"]["tier"], run["record"]["target"]["geometry"]["width"])
         for run in mlx_flux2_by_semantics["current"]
     }
-    # When any rows ARE current they must be exactly one per production pair; between a pin bump
-    # and its re-capture the current half is legitimately empty and the retained history still has
-    # to span every pair.
+    # When any rows ARE current they must be exactly one per production pair. If the relevant
+    # provider closure changed, the current half may be empty and retained history must still span
+    # every pair.
     if mlx_flux2_by_semantics["current"]:
         assert current_pairs == expected_mlx_flux2_pairs
         assert len(mlx_flux2_by_semantics["current"]) == len(expected_mlx_flux2_pairs)
@@ -577,8 +561,8 @@ def test_calibration_evidence_is_schema_valid_and_matrix_ingested():
     assert len(runtime_complete_runs) == len(flux2_runtime) + len(
         historical_flux1_runtime
     )
-    # SC-18306 moves the pin beyond the MLX FLUX.2 capture closure as well as the older FLUX.1
-    # captures. The Candle FLUX.2 window independently becomes current only at its audited pin.
+    # These retained runtime-complete cohorts no longer match their providers' live compile
+    # closures. Their inference revisions remain provenance and are not the deciding term.
     assert {run["semantics"] for run in runtime_complete_runs} == {"historical"}
     assert all(run["binding"]["eligible"] for run in runtime_complete_runs)
     current_eligible = [
@@ -586,34 +570,6 @@ def test_calibration_evidence_is_schema_valid_and_matrix_ingested():
         for run in matrix["calibrationRuns"]
         if run["semantics"] == "current" and run["binding"]["eligible"]
     ]
-    # Independent sources of "current", kept separate so one lane cannot mask another:
-    #
-    #   - SC-18353 records measured at the live pin;
-    #   - records whose captured provider closure still matches the live provider closure
-    #     (SC-18237's two Qwen q8 rows);
-    #   - the audited FLUX.2 window, current only while its audited revision IS the live pin.
-    measured_at_live_pin = {
-        record["id"]
-        for record in calibration["records"]
-        if record["repositories"]["inference"]["revision"] == live_pin_match.group(1)
-    }
-    # This set is derived from the PIN, which sc-17774 retired as the currency term in favour of
-    # the provider's compile closure. The two coincided while nothing had moved; they no longer
-    # do, but one direction survives every bump: a record captured at the live pin was compiled
-    # from the live closure, so live-pin evidence is always a SUBSET of closure-current evidence.
-    # (Not pinned by id: the live-pin set turns over wholesale at every re-capture — and it is
-    # legitimately EMPTY in the window between a pin bump and its re-capture, so its emptiness is
-    # not asserted either; every id in the corpus is already shape-checked above.)
-    assert measured_at_live_pin <= current_by_closure
-    # Measured at the live pin means CURRENT, without exception — a record may not be measured here
-    # and dated elsewhere. Stated as a subset so the implication survives the set being empty: with
-    # nothing measured at the live pin there is nothing to classify, and the moment a record does
-    # appear there it must be `current` or this fails.
-    assert {
-        run["semantics"]
-        for run in matrix["calibrationRuns"]
-        if run["record"]["id"] in measured_at_live_pin
-    } <= {"current"}
     # Current is necessary but not sufficient for eligible: a record must also BIND a declared cell.
     # sc-16915 swept seven decode tile edges and the manifest binds only the production point
     # (512/64), so the six off-point edges are current-but-ineligible by design — they widen the
@@ -665,12 +621,9 @@ def test_calibration_evidence_is_schema_valid_and_matrix_ingested():
         )
     assert {run["record"]["id"] for run in current_eligible} == (
         current_by_closure - unbound_decode_edges
-    ) | (
-        set(expected_candle_flux2_runtime) if within_audited_window else set()
     )
-    # The four records that WERE runtime-current before the pin moved are still present and still
-    # bind cleanly — superseded by revision, not rejected. Anything else would mean the bump damaged
-    # the bundle rather than re-dating it.
+    # The four earlier runtime records remain present and bind cleanly even when their provider
+    # closures no longer match. A pin change alone must not alter this classification.
     superseded_rung4 = [
         run
         for run in matrix["calibrationRuns"]
