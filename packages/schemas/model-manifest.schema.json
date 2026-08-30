@@ -17,8 +17,132 @@
           "enum": [
             "provider_not_linked",
             "unsupported_platform",
-            "pending_terminal_inference_pin"
+            "pending_terminal_inference_pin",
+            "pending_terminal_candidate"
           ]
+        }
+      }
+    },
+    "vectorTerminalProductionClosure": {
+      "type": "object",
+      "required": ["schemaVersion", "sha256", "entries"],
+      "additionalProperties": false,
+      "properties": {
+        "schemaVersion": { "const": 1 },
+        "sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$",
+          "description": "SHA-256 of recursively key-sorted whitespace-free JSON {entries}."
+        },
+        "entries": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "type": "object",
+            "required": ["path", "byteSize", "sha256"],
+            "additionalProperties": false,
+            "properties": {
+              "path": {
+                "type": "string",
+                "pattern": "^(?!/)(?!.*(?:^|/)\\.{1,2}(?:/|$))(?!.*//)(?!config/manifests/builtin\\.models\\.jsonc$)[^\\\\]+$",
+                "description": "Repository-relative, POSIX-normalized regular-file path. The builtin catalog is excluded to prevent recursive self-hashing."
+              },
+              "byteSize": { "type": "integer", "minimum": 0 },
+              "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
+            }
+          }
+        }
+      }
+    },
+    "vectorTerminalMlxDevice": {
+      "type": "object",
+      "required": ["deviceClass", "totalBytes"],
+      "additionalProperties": false,
+      "properties": {
+        "deviceClass": { "const": "apple_unified_memory" },
+        "totalBytes": { "type": "integer", "minimum": 1 }
+      }
+    },
+    "vectorTerminalCandleDevice": {
+      "type": "object",
+      "required": ["deviceClass", "deviceName", "totalBytes"],
+      "additionalProperties": false,
+      "properties": {
+        "deviceClass": { "const": "nvidia_dedicated_vram" },
+        "deviceName": { "type": "string", "minLength": 1 },
+        "totalBytes": { "type": "integer", "minimum": 1 }
+      }
+    },
+    "vectorTerminalCandidate": {
+      "type": "object",
+      "required": ["schemaVersion", "inferenceRevision", "corpusSha256", "model", "providers", "productionClosure", "supportedDevices"],
+      "additionalProperties": false,
+      "properties": {
+        "schemaVersion": { "const": 1 },
+        "inferenceRevision": {
+          "oneOf": [
+            { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+            { "type": "null" }
+          ],
+          "description": "Final inference-main merge commit, or null only while the terminal candidate remains fail-closed."
+        },
+        "corpusSha256": {
+          "oneOf": [
+            { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+            { "type": "null" }
+          ],
+          "description": "Validator-produced canonical terminal corpus digest, or null only before the permanent-pin campaign."
+        },
+        "model": {
+          "type": "object",
+          "required": ["repository", "revision", "files"],
+          "additionalProperties": false,
+          "properties": {
+            "repository": { "type": "string", "minLength": 1 },
+            "revision": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+            "files": {
+              "type": "array",
+              "minItems": 1,
+              "uniqueItems": true,
+              "items": { "type": "string", "minLength": 1 }
+            }
+          }
+        },
+        "providers": {
+          "type": "object",
+          "required": ["mlx", "candle"],
+          "additionalProperties": false,
+          "properties": {
+            "mlx": { "type": "string", "minLength": 1 },
+            "candle": { "type": "string", "minLength": 1 }
+          }
+        },
+        "productionClosure": {
+          "oneOf": [
+            { "$ref": "#/$defs/vectorTerminalProductionClosure" },
+            { "type": "null" }
+          ],
+          "description": "Current-tree production closure, or null only until all permanent-pin source is frozen."
+        },
+        "supportedDevices": {
+          "type": "object",
+          "required": ["mlx", "candle"],
+          "additionalProperties": false,
+          "properties": {
+            "mlx": {
+              "oneOf": [
+                { "type": "array", "minItems": 1, "uniqueItems": true, "items": { "$ref": "#/$defs/vectorTerminalMlxDevice" } },
+                { "type": "null" }
+              ]
+            },
+            "candle": {
+              "oneOf": [
+                { "type": "array", "minItems": 1, "uniqueItems": true, "items": { "$ref": "#/$defs/vectorTerminalCandleDevice" } },
+                { "type": "null" }
+              ]
+            }
+          }
         }
       }
     },
@@ -721,6 +845,24 @@
                 }
               }
             }
+          },
+          {
+            "$comment": "SC-22261: StarVector-8B is never an untracked catalog-only exception. Its strict terminal candidate may contain only the explicit nullable pre-campaign inputs and remains runtime fail-closed until complete.",
+            "if": {
+              "required": ["id"],
+              "properties": { "id": { "const": "starvector_8b" } }
+            },
+            "then": {
+              "required": ["vector"],
+              "properties": {
+                "vector": {
+                  "required": ["deviceAdmission"],
+                  "properties": {
+                    "deviceAdmission": { "required": ["terminalCandidate"] }
+                  }
+                }
+              }
+            }
           }
         ],
         "properties": {
@@ -765,7 +907,8 @@
                       "mlx": { "const": "apple_unified_memory" },
                       "candle": { "const": "nvidia_dedicated_vram" }
                     }
-                  }
+                  },
+                  "terminalCandidate": { "$ref": "#/$defs/vectorTerminalCandidate" }
                 }
               },
               "providers": {

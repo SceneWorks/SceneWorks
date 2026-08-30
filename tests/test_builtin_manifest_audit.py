@@ -795,6 +795,67 @@ def test_builtin_models_manifest_satisfies_authoring_schema():
     )
 
 
+def test_starvector_terminal_candidate_schema_is_closed_and_mutation_resistant():
+    """SC-22261: only the three explicit not-yet-produced terminal inputs may be null."""
+    manifest = _load_builtin_models_manifest()
+    schema = _load_schema(SCHEMA_PATH)
+    validator = jsonschema.Draft202012Validator(schema)
+    model = next(model for model in manifest["models"] if model["id"] == "starvector_8b")
+    candidate = model["vector"]["deviceAdmission"]["terminalCandidate"]
+    assert candidate["inferenceRevision"] is None
+    assert candidate["corpusSha256"] is None
+    assert candidate["productionClosure"] is None
+    assert candidate["supportedDevices"]["mlx"] == [
+        {"deviceClass": "apple_unified_memory", "totalBytes": 137438953472}
+    ]
+    assert candidate["supportedDevices"]["candle"] == [
+        {
+            "deviceClass": "nvidia_dedicated_vram",
+            "deviceName": "NVIDIA RTX PRO 6000 Blackwell Max-Q Workstation Edition",
+            "totalBytes": 102641958912,
+        }
+    ]
+
+    def rejected(mutate):
+        changed = copy.deepcopy(model)
+        mutate(changed["vector"]["deviceAdmission"]["terminalCandidate"])
+        return list(validator.iter_errors({"schemaVersion": 1, "models": [changed]}))
+
+    mutations = [
+        lambda value: value.clear(),
+        lambda value: value.update({"exception": "permanent"}),
+        lambda value: value.update({"inferenceRevision": "a" * 39}),
+        lambda value: value["model"].update({"revision": "floating-main"}),
+        lambda value: value["providers"].update({"other": "cloud-starvector"}),
+        lambda value: value.update(
+            {
+                "productionClosure": {
+                    "schemaVersion": 1,
+                    "sha256": "a" * 64,
+                    "entries": [
+                        {"path": "../Cargo.toml", "byteSize": 1, "sha256": "b" * 64}
+                    ],
+                }
+            }
+        ),
+        lambda value: value["supportedDevices"].update(
+            {
+                "candle": [
+                    {"deviceClass": "nvidia_dedicated_vram", "totalBytes": 1}
+                ]
+            }
+        ),
+    ]
+    for mutate in mutations:
+        assert rejected(mutate), "terminal candidate mutation must be rejected by the schema"
+
+    without_candidate = copy.deepcopy(model)
+    del without_candidate["vector"]["deviceAdmission"]["terminalCandidate"]
+    assert list(
+        validator.iter_errors({"schemaVersion": 1, "models": [without_candidate]})
+    ), "starvector_8b may not remove its terminal candidate contract"
+
+
 def test_memory_request_provider_mode_schema_admits_public_character_image():
     """SC-20798: provider-owned Character routes keep their public typed coordinate."""
     schema = _load_schema(SCHEMA_PATH)
