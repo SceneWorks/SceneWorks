@@ -44,7 +44,7 @@ env:
 jobs:
   mlx-1b:
     runs-on: [self-hosted, macOS, ARM64, rw-starvector]
-    timeout-minutes: 180
+    timeout-minutes: 720
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Validate immutable dispatch plan and pre-provisioned controller inputs
@@ -78,7 +78,7 @@ jobs:
   mlx-8b:
     needs: mlx-1b
     runs-on: [self-hosted, macOS, ARM64, rw-starvector]
-    timeout-minutes: 180
+    timeout-minutes: 720
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Run production vector_generate route for MLX 8B
@@ -103,7 +103,7 @@ jobs:
   cuda-1b:
     needs: mlx-8b
     runs-on: [self-hosted, Windows, X64, cuda, real-weights]
-    timeout-minutes: 180
+    timeout-minutes: 720
     env:
       STARVECTOR_TERMINAL_INFERENCE_ROOT: D:\\sceneworks-terminal\\inference
       STARVECTOR_TERMINAL_INFERENCE_PREFLIGHT: D:\\sceneworks-terminal\\inference-preflight\\starvector-terminal-preflight.json
@@ -143,7 +143,7 @@ jobs:
   cuda-8b:
     needs: cuda-1b
     runs-on: [self-hosted, Windows, X64, cuda, real-weights]
-    timeout-minutes: 180
+    timeout-minutes: 720
     env:
       STARVECTOR_TERMINAL_INFERENCE_ROOT: D:\\sceneworks-terminal\\inference
       STARVECTOR_TERMINAL_INFERENCE_PREFLIGHT: D:\\sceneworks-terminal\\inference-preflight\\starvector-terminal-preflight.json

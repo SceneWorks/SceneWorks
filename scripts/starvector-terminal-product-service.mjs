@@ -4,7 +4,7 @@
 // Cargo inference pin, binaries and health response are all recorded together.
 import { createHash } from "node:crypto";
 import { execFile as execFileCallback, spawn } from "node:child_process";
-import { copyFile, lstat, mkdir, readFile, readdir, writeFile } from "node:fs/promises";
+import { copyFile, lstat, mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { promisify } from "node:util";
 import path from "node:path";
 
@@ -18,6 +18,9 @@ export function productServiceBuildArgs(platform = process.platform) {
 }
 export function productServiceBackendEnv(platform = process.platform) {
   return platform === "win32" ? { SCENEWORKS_BACKEND_CANDLE_ENABLED: "true" } : {};
+}
+export function productServiceStateRoot(output) {
+  return path.join(path.dirname(output), `${path.basename(output)}-product-service-state`);
 }
 async function git(root, args) { return (await execFile("git", ["-C", root, ...args])).stdout.trim(); }
 async function serviceIdentity(root, permanentPin) {
@@ -83,8 +86,9 @@ export async function startProductService({ root, output, permanentPin, url, wei
   // rejects any model acquisition at job time.
   await execFile("cargo", productServiceBuildArgs(), { cwd: root });
   const binary = path.join(root, "target", "debug", process.platform === "win32" ? "sceneworks-rust-api.exe" : "sceneworks-rust-api");
-  const common = { cwd: root, detached: true, stdio: ["ignore", "pipe", "pipe"] }, parsed = new URL(url), apiPort = parsed.port, stateRoot = path.join(output, "product-service-state");
+  const common = { cwd: root, detached: true, stdio: ["ignore", "pipe", "pipe"] }, parsed = new URL(url), apiPort = parsed.port, stateRoot = productServiceStateRoot(output);
   if (parsed.hostname !== "127.0.0.1" || !apiPort) die("product service must bind an explicit loopback host/port");
+  if (await lstat(stateRoot).catch((error) => error.code === "ENOENT" ? null : Promise.reject(error))) die("temporary product service state already exists");
   await mkdir(path.join(stateRoot, "data"), { recursive: true }); await mkdir(path.join(stateRoot, "config"), { recursive: true });
   const weights = await materializeOfflineWeights(weightsRoot, stateRoot);
   const hfHome = path.join(stateRoot, "hf");
@@ -100,6 +104,8 @@ export async function startProductService({ root, output, permanentPin, url, wei
 }
 export async function stopProductService(output) {
   const record = JSON.parse(await readFile(path.join(output, "product-service-provenance.json"), "utf8"));
+  const stateRoot = path.resolve(output, record.state_root);
+  if (stateRoot !== path.resolve(productServiceStateRoot(output))) die("product service state path escaped its tuple temporary root");
   for (const pid of [record.worker_pid, record.api_pid]) { if (!Number.isInteger(pid) || pid < 1) die("invalid product service PID"); try { process.kill(pid, "SIGTERM"); } catch (error) { if (error.code !== "ESRCH") throw error; } }
   for (let attempt = 0; attempt < 50; attempt += 1) {
     let alive = false;
@@ -117,6 +123,7 @@ export async function stopProductService(output) {
     if (String(error.message).includes("port remains occupied")) throw error;
   }
   await writeFile(path.join(output, "product-service-stopped.json"), JSON.stringify({ api_pid: record.api_pid, worker_pid: record.worker_pid, stopped_at: new Date().toISOString() }, null, 2) + "\n");
+  await rm(stateRoot, { recursive: true, force: true });
 }
 if (import.meta.url === `file://${process.argv[1]}`) {
   const [command, ...args] = process.argv.slice(2); const run = command === "start" ? startProductService({ root: args[0], output: args[1], permanentPin: args[2], url: args[3], weightsRoot: args[4] }) : command === "stop" ? stopProductService(args[0]) : Promise.reject(new Error("usage: start <root> <output> <pin> <url> <weights-root> | stop <output>")); run.catch((error) => { console.error(error.message); process.exitCode = 1; });
