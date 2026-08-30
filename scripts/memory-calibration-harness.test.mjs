@@ -3743,6 +3743,43 @@ test("--model rejects unknown values and incompatible backend selections", async
   );
 });
 
+test("--ltx25-partition runs a validated subset of the canonical campaign", async () => {
+  const plan = JSON.parse(
+    await readFile(new URL("../config/memory-calibration-plan.json", import.meta.url)),
+  );
+  const cleanRepo = await cleanFixtureRepo();
+  const base = {
+    closureDigestFor: stubClosureDigest,
+    config: plan,
+    providerCommand: ["must-not-run"],
+    sceneWorksRepo: cleanRepo,
+    inferenceRepo: cleanRepo,
+    model: "ltx_2_5",
+    executeProvider: async () => assert.fail("partition selection must fail before provider probe"),
+  };
+  // A real subset passes canonical validation and proceeds to the next requirement
+  // (the snapshot root), instead of failing the full-set equality.
+  await assert.rejects(
+    runProviderPlan({ ...base, ltx25Partition: "-distilled-" }),
+    /requires --ltx25-snapshot-root for per-case artifact binding/,
+  );
+  // The comma form unions substrings and still validates as a subset.
+  await assert.rejects(
+    runProviderPlan({ ...base, ltx25Partition: "-q4-dev-,-q8-dev-" }),
+    /requires --ltx25-snapshot-root for per-case artifact binding/,
+  );
+  // A partition naming nothing in the plan fails closed.
+  await assert.rejects(
+    runProviderPlan({ ...base, ltx25Partition: "no-such-case" }),
+    /selected no ltx_2_5 plan providers/,
+  );
+  // The flag is meaningless outside the LTX-2.5 campaign.
+  await assert.rejects(
+    runProviderPlan({ ...base, model: undefined, backend: "mlx", ltx25Partition: "-distilled-" }),
+    /--ltx25-partition requires --model ltx_2_5/,
+  );
+});
+
 test("the CLI refuses missing or repeated --model values before reading capture inputs", async () => {
   const harness = fileURLToPath(new URL("./memory-calibration-harness.mjs", import.meta.url));
   await assert.rejects(

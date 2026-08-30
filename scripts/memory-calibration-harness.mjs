@@ -1615,13 +1615,27 @@ function expectedLtx25LogicalCaseIds() {
   return canonicalLtx25LogicalCaseIds;
 }
 
-function validateCanonicalLtx25Selection(plannedCases) {
+function validateCanonicalLtx25Selection(plannedCases, partitioned = false) {
   const actual = plannedCases.map((planned) => planned.logicalCaseId).sort();
   const expected = expectedLtx25LogicalCaseIds();
-  if (new Set(actual).size !== actual.length || !equal(actual, expected)) {
+  if (new Set(actual).size !== actual.length) {
+    fail("--model ltx_2_5 selected duplicate logical case identities");
+  }
+  if (partitioned) {
+    // A partition may run any non-empty SUBSET of the canonical campaign (so the grid can be
+    // split across capture hosts), but never a case outside it: the repo's checked-in plan
+    // stays the sole authority on what the campaign is.
+    const canonical = new Set(expected);
+    const foreign = actual.filter((id) => !canonical.has(id));
+    if (foreign.length) {
+      fail(`--ltx25-partition selected cases outside the canonical MLX campaign: ${foreign.join(", ")}`);
+    }
+    return;
+  }
+  if (!equal(actual, expected)) {
     fail(
       "--model ltx_2_5 must select the exact canonical MLX campaign declared by "
-        + "config/memory-calibration-plan.json",
+        + "config/memory-calibration-plan.json (pass --ltx25-partition to run a named subset)",
     );
   }
 }
@@ -2011,7 +2025,7 @@ function execute(command, args, input, { env } = {}) {
 export async function runProviderPlan({
   config, providerCommand, sceneWorksRepo, inferenceRepo, resume, backend, model, providerName, fixture,
   onProviderInvocation, onProviderCheckpoint, forceFreshPerCase = false, forceBatchRungs = false,
-  rawLogDir = null, sourcePathPrefix = null, ltx25SnapshotRoot = null,
+  rawLogDir = null, sourcePathPrefix = null, ltx25SnapshotRoot = null, ltx25Partition = null,
   // sc-17774: injectable so the runner's own tests can drive synthetic repositories, which have no
   // inference crate layout to derive a real closure from. Production always uses the default.
   closureDigestFor = null,
@@ -2116,6 +2130,16 @@ export async function runProviderPlan({
   if (model && selectedConfig.providers.length === 0) {
     fail(`provider run selected no plan provider for model ${JSON.stringify(model)}`);
   }
+  if (ltx25Partition != null) {
+    if (model !== "ltx_2_5") fail("--ltx25-partition requires --model ltx_2_5");
+    const needles = String(ltx25Partition).split(",").map((needle) => needle.trim()).filter(Boolean);
+    if (!needles.length) fail("--ltx25-partition must name at least one plan-name substring");
+    selectedConfig.providers = selectedConfig.providers.filter((provider) =>
+      needles.some((needle) => provider.name.includes(needle)));
+    if (!selectedConfig.providers.length) {
+      fail(`--ltx25-partition ${JSON.stringify(ltx25Partition)} selected no ltx_2_5 plan providers`);
+    }
+  }
   if (forceFreshPerCase && forceBatchRungs) fail("cannot force both fresh and batched provider execution");
   const applyExecutionPolicy = (plannedCases) => plannedCases.map((planned) => {
     if (forceFreshPerCase) {
@@ -2150,7 +2174,7 @@ export async function runProviderPlan({
     ? expanded.filter((planned) => planned.backend === selectedBackend)
     : expanded;
   const exactLtx25Selection = model === "ltx_2_5";
-  if (exactLtx25Selection) validateCanonicalLtx25Selection(allSelectedCases);
+  if (exactLtx25Selection) validateCanonicalLtx25Selection(allSelectedCases, ltx25Partition != null);
   if (ltx25SnapshotRoot && !exactLtx25Selection) {
     fail("--ltx25-snapshot-root requires --model ltx_2_5");
   }
@@ -2600,6 +2624,7 @@ async function main() {
   if (command === "run") {
     const model = singleValue("--model");
     const ltx25SnapshotRoot = singleValue("--ltx25-snapshot-root");
+    const ltx25Partition = singleValue("--ltx25-partition");
     const outputPath = value("--output");
     const output = await runProviderPlan({
       config: await readJson(value("--config")),
@@ -2616,6 +2641,7 @@ async function main() {
       rawLogDir: value("--raw-log-dir") ? path.resolve(value("--raw-log-dir")) : null,
       sourcePathPrefix: value("--source-path-prefix"),
       ltx25SnapshotRoot,
+      ltx25Partition,
       onProviderCheckpoint: (checkpoint) => atomicWrite(outputPath, checkpoint),
     });
     return void await atomicWrite(outputPath, output);
