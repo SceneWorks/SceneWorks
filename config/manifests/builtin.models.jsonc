@@ -25387,7 +25387,7 @@
             },
             "productionClosure": {
               "schemaVersion": 1,
-              "sha256": "31a0691685a2db895214d8c5fcc5ff9d52894aceeac31706e13b27c097dd6a59",
+              "sha256": "8707e9df94e06ec9f0019e8b96ce28a0fc4c25de6dcb9ea08f132beff3ea09f2",
               "entries": [
                 {
                   "path": ".github/workflows/starvector-terminal.yml",
@@ -25426,8 +25426,8 @@
                 },
                 {
                   "path": "crates/sceneworks-worker/src/inference_runtime.rs",
-                  "byteSize": 19267,
-                  "sha256": "4de3383ba1d99ab3d6f786e4103a95701b00888f69850cd303d41c668b7d8c28"
+                  "byteSize": 19261,
+                  "sha256": "1716191c6bc7827f96e92fa74538d04507ff2cacf9406439662499bfce23b2d6"
                 },
                 {
                   "path": "crates/sceneworks-worker/src/lib.rs",
