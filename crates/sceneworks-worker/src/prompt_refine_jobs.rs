@@ -864,11 +864,6 @@ pub(crate) fn build_image_describe_messages(style: DescribeStyle, multi: bool) -
 /// preserving, rather than lean on the provider's ceiling because that ceiling is both too high for
 /// dense attention AND hardcoded from `Qwen35ImageProcessor::default()` (provider.rs ignores the
 /// model's `preprocessor_config.json`) — fixing that upstream is tracked separately.
-#[cfg(any(
-    test,
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
 const VISION_REFERENCE_MAX_PIXELS: u64 = 1_048_576; // 1024² — safe for the dense ViT attention
 
 /// Shrink `image` (aspect-preserving) so its pixel count does not exceed `max_pixels`; an image already

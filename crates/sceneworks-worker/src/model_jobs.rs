@@ -2401,7 +2401,6 @@ pub(crate) type ResolvedArtifactIdentity = sceneworks_core::model_artifacts::Art
 pub(crate) type ResolvedArtifactProvenance = sceneworks_core::model_artifacts::ArtifactProvenance;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-#[cfg(any(target_os = "macos", feature = "backend-candle", test))]
 pub(crate) struct ResolvedWeights {
     pub(crate) path: PathBuf,
     pub(crate) provenance: Option<ResolvedArtifactProvenance>,
@@ -2422,7 +2421,6 @@ struct AppManagedArtifactReceipt {
     tree_stamp: String,
 }
 
-#[cfg(any(target_os = "macos", feature = "backend-candle", test))]
 pub(crate) fn resolved_artifact_fingerprint(
     repository: &str,
     revision: &str,
@@ -3307,14 +3305,12 @@ pub(crate) fn huggingface_receipt_weights(
 /// A receipt whose stamp is PRESENT but does NOT match is untouched: that is real drift and must
 /// keep failing closed.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[cfg(any(target_os = "macos", feature = "backend-candle", test))]
 pub(crate) enum ProvenanceRepair {
     Allow,
     Skip,
 }
 
 /// Stamp an unstamped receipt in place and return the baseline that was established.
-#[cfg(any(target_os = "macos", feature = "backend-candle", test))]
 fn establish_receipt_tree_stamp(
     marker: &Path,
     receipt: &Value,
@@ -3371,7 +3367,6 @@ fn establish_receipt_tree_stamp(
     Ok(stamp)
 }
 
-#[cfg(any(target_os = "macos", feature = "backend-candle", test))]
 fn receipt_weights_dir_from_marker(
     data_dir: &Path,
     marker: &Path,

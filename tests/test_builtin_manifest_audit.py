@@ -802,10 +802,10 @@ def test_starvector_terminal_candidate_schema_is_closed_and_mutation_resistant()
     validator = jsonschema.Draft202012Validator(schema)
     model = next(model for model in manifest["models"] if model["id"] == "starvector_8b")
     candidate = model["vector"]["deviceAdmission"]["terminalCandidate"]
-    assert candidate["inferenceRevision"] == "669f749b428ed65acfdfee917bcf601b8cf6db1c"
+    assert candidate["inferenceRevision"] == "c6eb6d8e9545193eac844f6fea2db79e4d14bf2a"
     assert candidate["corpusSha256"] == "757370c4eed38a52a29ac80c258fdedd7e437ab891637bcb1c916aa608bf32b5"
-    assert candidate["productionClosure"]["sha256"] == "5110c04e4075f155bb9ec0fc7c609cf2c604ffddf93b82de960cb6a758ae3aab"
-    assert len(candidate["productionClosure"]["entries"]) == 26
+    assert candidate["productionClosure"]["sha256"] == "006e321aa15fae04c1faf4d891f5b4e6bf187686a7c99a2bdb8d5089a125cf48"
+    assert len(candidate["productionClosure"]["entries"]) == 27
     assert model["vector"]["providers"] == {
         "mlx": {"id": "mlx-starvector-8b", "available": True},
         "candle": {"id": "candle-starvector-8b", "available": True},

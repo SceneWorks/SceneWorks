@@ -178,7 +178,7 @@ const DERIVED_DISPOSITION_PROVIDER_FAILED = "provider-failed-empty";
 const REQUEST_MEMORY_STRATEGY_KEYS = [
   "requestMemoryPresent", "stageResidency", "strategy", "streamTransformerBlocks",
 ];
-const CURRENT_DOWNLOAD_EVIDENCE_SHA256 = "6b44ace4816056daf97ed5741d27c7b563e1f4e8cb215b0a9a1af129e9adbaba";
+const CURRENT_DOWNLOAD_EVIDENCE_SHA256 = "ea13e58af852c9f6fdb8a092f489d420f4fd4853e116f018f85e59c82fd0837b";
 const LEGACY_DOWNLOAD_EVIDENCE_SHA256 = "9eda09eeacb9386167ca4a080b4805b9c7dd3cd5134ca037ce342ad434b17e0b";
 const SCAIL2_REFERENCE_DELTA_FLOOR = 1e-6;
 
