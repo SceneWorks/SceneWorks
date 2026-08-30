@@ -6,7 +6,7 @@
 
 use std::{
     env,
-    fs::{self, File, OpenOptions},
+    fs::{self, OpenOptions},
     io::{self, Read, Write},
     path::Path,
     process,
@@ -34,6 +34,8 @@ fn main() {
         .unwrap_or_else(|error| fail(format!("create lease root: {error}")));
     let mut file = OpenOptions::new()
         .create(true)
+        // Preserve the current owner bytes until the exclusive lock succeeds.
+        .truncate(false)
         .read(true)
         .write(true)
         .open(path)

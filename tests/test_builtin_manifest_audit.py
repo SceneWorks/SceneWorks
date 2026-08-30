@@ -804,7 +804,7 @@ def test_starvector_terminal_candidate_schema_is_closed_and_mutation_resistant()
     candidate = model["vector"]["deviceAdmission"]["terminalCandidate"]
     assert candidate["inferenceRevision"] == "35b9c14f54401308d54b7cb7a7c5af10c469c2d4"
     assert candidate["corpusSha256"] == "757370c4eed38a52a29ac80c258fdedd7e437ab891637bcb1c916aa608bf32b5"
-    assert candidate["productionClosure"]["sha256"] == "b2fc171ce8fde223924436b173bbf1e119baffc64c9698edc9784a8b583a3954"
+    assert candidate["productionClosure"]["sha256"] == "5110c04e4075f155bb9ec0fc7c609cf2c604ffddf93b82de960cb6a758ae3aab"
     assert len(candidate["productionClosure"]["entries"]) == 26
     assert model["vector"]["providers"] == {
         "mlx": {"id": "mlx-starvector-8b", "available": True},

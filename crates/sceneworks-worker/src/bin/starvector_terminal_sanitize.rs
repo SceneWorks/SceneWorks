@@ -1,7 +1,10 @@
 //! Post-pin SC-22261 hostile-corpus runner for the production SVG sanitizer.
 //! The binary delegates every decision to `vector_jobs`; it adds no sanitizer.
 
-use std::{env, path::PathBuf};
+use std::{
+    env,
+    path::{Path, PathBuf},
+};
 
 use sceneworks_worker::{terminal_sanitize_svg_bytes, terminal_write_sanitized_pair};
 use serde_json::json;
@@ -11,7 +14,7 @@ fn hash(bytes: &[u8]) -> String {
     format!("{:x}", Sha256::digest(bytes))
 }
 
-async fn sanitize_file(input: &PathBuf, output: &PathBuf) -> Result<serde_json::Value, String> {
+async fn sanitize_file(input: &Path, output: &Path) -> Result<serde_json::Value, String> {
     let bytes = tokio::fs::read(input)
         .await
         .map_err(|error| format!("read {}: {error}", input.display()))?;
@@ -19,7 +22,7 @@ async fn sanitize_file(input: &PathBuf, output: &PathBuf) -> Result<serde_json::
         Err(error) => Ok(
             json!({"outcome":"rejected","error_code":error,"canonical_svg_sha256":null,"preview_png_sha256":null,"published_paths":[],"staging_residue":[],"result_contains_inline_svg":false}),
         ),
-        Ok(value) => match terminal_write_sanitized_pair(&value, &output).await {
+        Ok(value) => match terminal_write_sanitized_pair(&value, output).await {
             Err(error) => Err(format!("publish {}: {error}", output.display())),
             Ok((svg, preview)) => {
                 let svg_bytes = tokio::fs::read(&svg)
