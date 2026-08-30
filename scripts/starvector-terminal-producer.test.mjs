@@ -6,7 +6,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { pathToFileURL } from "node:url";
-import { claimCampaignMarker, claimTupleMarker, inventory, sealReceipt, verifyInferenceCheckout, verifyPermanentPin } from "./starvector-terminal-producer.mjs";
+import { claimCampaignMarker, claimTupleMarker, inventory, sealReceipt, validateInferencePreflight, verifyInferenceCheckout, verifyPermanentPin } from "./starvector-terminal-producer.mjs";
 
 // CI supplies an exact pinned inference checkout; the local default preserves
 // the focused fixture without embedding a developer-specific worktree path.
@@ -55,6 +55,18 @@ test("preflight requires the exact clean inference checkout and current Cargo pe
   await verifyInferenceCheckout(inferenceRoot); await verifyPermanentPin(sceneWorksRoot, permanentPin);
   await assert.rejects(() => verifyPermanentPin(sceneWorksRoot, "0".repeat(40)), /terminal inference revision/);
   await removePinnedInference(inferenceRoot); inferenceRoot = inferenceRepository;
+});
+
+test("inference preflight requires every exact inventory and native-hook artifact", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "starvector-preflight-"));
+  const file = async (name) => { await writeFile(path.join(root, name), "artifact"); return { path: name, sha256: digest }; };
+  const index = { workflow_run_id: "run", workflow_run_attempt: 1, head_sha: permanentPin, inventory_artifacts: [{ tier: "1b", ...(await file("one")) }, { tier: "8b", ...(await file("eight")) }], hook_logs: [] };
+  for (const key of ["mlx:1b", "mlx:8b", "candle-cuda:1b", "candle-cuda:8b"]) { const [backend, tier] = key.split(":"); index.hook_logs.push({ backend, tier, ...(await file(key.replace(":", "-"))) }); }
+  const source = path.join(root, "preflight.json"); await writeFile(source, JSON.stringify(index));
+  const previous = process.env.STARVECTOR_TERMINAL_INFERENCE_PREFLIGHT; process.env.STARVECTOR_TERMINAL_INFERENCE_PREFLIGHT = source;
+  const verified = await validateInferencePreflight(root, permanentPin); assert.equal(Object.keys(verified.sources).length, 6);
+  index.hook_logs.pop(); await writeFile(source, JSON.stringify(index)); await assert.rejects(() => validateInferencePreflight(root, permanentPin), /identity is invalid/);
+  if (previous === undefined) delete process.env.STARVECTOR_TERMINAL_INFERENCE_PREFLIGHT; else process.env.STARVECTOR_TERMINAL_INFERENCE_PREFLIGHT = previous;
 });
 
 test("persistent permanent-pin campaign marker refuses a second campaign identity", async () => {
