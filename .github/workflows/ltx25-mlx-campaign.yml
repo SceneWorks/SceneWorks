@@ -1,0 +1,129 @@
+name: LTX-2.5 MLX calibration campaign (partition launcher)
+
+# Launches one partition of the canonical LTX-2.5 MLX calibration campaign on a
+# weights-labeled macOS runner and DETACHES it (SC-18791). The job itself is short:
+# it verifies the pinned snapshot, builds the adapter into a persistent work root,
+# seeds resume state, and hands the long-running harness off to the host with an
+# empty RUNNER_TRACKING_ID so the runner's post-job cleanup leaves it alive.
+# Evidence stays on the host at <work_root>/evidence and is merged at ingestion.
+
+on:
+  workflow_dispatch:
+    inputs:
+      partition:
+        description: "--ltx25-partition plan-name substrings (comma-joined)"
+        type: string
+        required: true
+        default: "-dev-"
+      hf_cache_root:
+        description: "Absolute hf cache root holding models--SceneWorks--ltx-2.5-mlx"
+        type: string
+        required: true
+      work_root:
+        description: "Absolute persistent work root for checkouts, adapter, and evidence"
+        type: string
+        required: true
+        default: "/Users/michael/sc18791-terminal"
+      wait_minutes:
+        description: "Minutes to wait for the snapshot download to complete before failing"
+        type: string
+        required: true
+        default: "360"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ltx25-mlx-campaign-launcher
+  cancel-in-progress: false
+
+jobs:
+  launch:
+    name: Launch detached campaign partition
+    runs-on: [self-hosted, macOS, ARM64, nax, weights]
+    timeout-minutes: 480
+    env:
+      LTX25_REV: 081658ce6886cacba20817ce0359bbefef706ff2
+      INFERENCE_REV: 21d17666f691a59358f2147517ac11cb34aa6f0b
+      HF_CACHE_ROOT: ${{ inputs.hf_cache_root }}
+      WORK_ROOT: ${{ inputs.work_root }}
+      PARTITION: ${{ inputs.partition }}
+      WAIT_MINUTES: ${{ inputs.wait_minutes }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Refuse a host that is already measuring
+        run: |
+          echo "runner: $RUNNER_NAME on $(hostname)"
+          if pgrep -f "memory-calibration-harness.mjs run" > /dev/null; then
+            echo "::error::a calibration harness is already running on this host; this launcher must land on the idle weights Mac"
+            exit 1
+          fi
+      - name: Wait for the pinned snapshot download to complete
+        run: |
+          SNAP="$HF_CACHE_ROOT/models--SceneWorks--ltx-2.5-mlx/snapshots/$LTX25_REV"
+          REPO_DIR="$HF_CACHE_ROOT/models--SceneWorks--ltx-2.5-mlx"
+          for i in $(seq 1 $((WAIT_MINUTES / 2))); do
+            if [ -d "$SNAP" ] \
+               && ! ls "$REPO_DIR"/blobs/*.incomplete > /dev/null 2>&1 \
+               && [ -d "$SNAP/enhancer" ] && [ -d "$SNAP/distilled/q4" ] && [ -d "$SNAP/dev/bf16" ] \
+               && [ -f "$SNAP/distilled_lora/ltx-2.5-22b-distilled-lora-450-bf16.safetensors" ]; then
+              echo "snapshot complete at $SNAP"; exit 0
+            fi
+            sleep 120
+          done
+          echo "::error::snapshot did not complete within $WAIT_MINUTES minutes"; exit 1
+      - name: Materialize persistent checkouts
+        run: |
+          mkdir -p "$WORK_ROOT"
+          if [ ! -d "$WORK_ROOT/SceneWorks/.git" ]; then
+            git clone --branch "${GITHUB_REF_NAME}" "https://github.com/${GITHUB_REPOSITORY}.git" "$WORK_ROOT/SceneWorks"
+          fi
+          git -C "$WORK_ROOT/SceneWorks" fetch origin "$GITHUB_SHA"
+          git -C "$WORK_ROOT/SceneWorks" checkout -q "$GITHUB_SHA"
+          if [ ! -d "$WORK_ROOT/inference/.git" ]; then
+            git clone https://github.com/SceneWorks/inference.git "$WORK_ROOT/inference"
+          fi
+          git -C "$WORK_ROOT/inference" fetch origin main
+          git -C "$WORK_ROOT/inference" checkout -q "$INFERENCE_REV"
+          [ -z "$(git -C "$WORK_ROOT/SceneWorks" status --porcelain)" ] || { echo "::error::SceneWorks work checkout dirty"; exit 1; }
+          [ -z "$(git -C "$WORK_ROOT/inference" status --porcelain)" ] || { echo "::error::inference work checkout dirty"; exit 1; }
+      - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable branch
+        with:
+          toolchain: "1.97.1"
+      - name: Build the MLX memory adapter once
+        run: |
+          cd "$WORK_ROOT/SceneWorks"
+          cargo build --release -p sceneworks-memory-adapter --bin memory-mlx-adapter
+          test -x target/release/memory-mlx-adapter
+      - name: Seed resume state and launch detached
+        run: |
+          EV="$WORK_ROOT/evidence"
+          mkdir -p "$EV/raw"
+          if [ ! -f "$EV/ltx25-mlx-evidence-partition.json" ]; then
+            cp "$GITHUB_WORKSPACE/docs/calibration/sc-18791/ltx25-mlx-evidence.seed.json" "$EV/ltx25-mlx-evidence-partition.json"
+          fi
+          cd "$WORK_ROOT/SceneWorks"
+          RUNNER_TRACKING_ID="" \
+          SCENEWORKS_MEMORY_CAPTURE_DIR="$EV/raw" \
+          SCENEWORKS_MEMORY_SOURCE_PATH_PREFIX="docs/calibration/sc-18791/e4d37922-b971699f" \
+          nohup node scripts/memory-calibration-harness.mjs run \
+            --config config/memory-calibration-plan.json \
+            --backend mlx --model ltx_2_5 \
+            --ltx25-partition "$PARTITION" \
+            --ltx25-snapshot-root "$HF_CACHE_ROOT/models--SceneWorks--ltx-2.5-mlx/snapshots/$LTX25_REV" \
+            --provider-command "[\"$WORK_ROOT/SceneWorks/target/release/memory-mlx-adapter\"]" \
+            --sceneworks-repo "$WORK_ROOT/SceneWorks" \
+            --inference-repo "$WORK_ROOT/inference" \
+            --resume "$EV/ltx25-mlx-evidence-partition.json" \
+            --output "$EV/ltx25-mlx-evidence-partition.json" \
+            --raw-log-dir "$EV/raw" \
+            --source-path-prefix docs/calibration/sc-18791/e4d37922-b971699f \
+            > "$EV/harness-partition.log" 2>&1 &
+          HARNESS_PID=$!
+          echo "launched harness pid $HARNESS_PID (partition $PARTITION)"
+          sleep 120
+          if ! ps -p "$HARNESS_PID" > /dev/null; then
+            echo "::error::harness exited during startup"; tail -40 "$EV/harness-partition.log"; exit 1
+          fi
+          echo "harness alive after startup; log: $EV/harness-partition.log"
+          tail -5 "$EV/harness-partition.log" || true
