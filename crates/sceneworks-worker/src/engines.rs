@@ -1454,7 +1454,7 @@ mod tests {
                 .and_then(serde_json::Value::as_array);
             let Some(active) = mlx_model(id) else {
                 assert!(
-                    manifest_floors.map_or(true, Vec::is_empty),
+                    manifest_floors.is_none_or(Vec::is_empty),
                     "{id}: precisionFloors require an active provider descriptor"
                 );
                 continue;
@@ -2306,6 +2306,7 @@ mod tests {
             load: stub_textllm_load,
             can_load: stub_textllm_can_load,
             weightless_vision: None,
+            weightless_audio: None,
         };
 
     // A candle-backed stub `Trainer` (backend "candle") registered under an id that IS in TRAINER_IDS

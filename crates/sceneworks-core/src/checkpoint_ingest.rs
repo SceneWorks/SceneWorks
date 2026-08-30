@@ -594,9 +594,7 @@ pub fn active_staging_ids(store: &CheckpointPlanStore, within: Duration) -> Vec<
         let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
             continue;
         };
-        // `map_or(true, ..)` not `is_none_or`: the latter is stable only since 1.82 and the
-        // workspace MSRV is 1.80 (the candle clippy config catches it).
-        if newest_mtime(&entry.path()).map_or(true, |mtime| mtime > cutoff) {
+        if newest_mtime(&entry.path()).is_none_or(|mtime| mtime > cutoff) {
             active.push(name);
         }
     }

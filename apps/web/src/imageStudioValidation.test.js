@@ -332,6 +332,17 @@ describe("imageBatchValidation", () => {
     );
   });
 
+  it("stops a streaming budget preflight after the first actionable overage", () => {
+    function* prompts() {
+      yield "x".repeat(PROMPT_MAX_CHARS + 1);
+      throw new Error("the preflight must not retain or inspect later violations");
+    }
+
+    expect(batchPromptBudgetOverages(prompts(), 1)).toEqual([
+      { item: 1, length: 4001, max: 4000, remaining: -1, over: true },
+    ]);
+  });
+
   it("catches a batch item whose short raw prompt only exceeds the cap after style composition", () => {
     const rawPrompt = "a fox";
     const composedPrompt = composeStyledPrompt({

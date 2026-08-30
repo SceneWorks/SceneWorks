@@ -1,4 +1,4 @@
-import React, { useRef } from "react";
+import React, { useCallback, useEffect, useRef } from "react";
 import { Icon } from "../Icons.jsx";
 import { trackItems } from "../../timeline.js";
 import {
@@ -81,6 +81,7 @@ export function Timeline({
   onSelectMarker,
 }) {
   const laneRef = useRef(null);
+  const rulerDragRef = useRef(null);
   const tracks = timeline?.tracks ?? [];
   const overlayTrack = tracks.find((t) => t.id === OVERLAY_TRACK_ID || t.kind === "overlay") ?? null;
   const mainTrack = tracks.find((t) => t.id === MAIN_TRACK_ID || t.kind === "video") ?? null;
@@ -122,11 +123,26 @@ export function Timeline({
     }
   }
 
+  const stopRulerDrag = useCallback(() => {
+    const drag = rulerDragRef.current;
+    if (!drag) {
+      return;
+    }
+    window.removeEventListener("mousemove", drag.onMove);
+    window.removeEventListener("mouseup", drag.onUp);
+    rulerDragRef.current = null;
+  }, []);
+
+  // The drag outlives the ruler element, so its window listeners must also be
+  // owned by the component rather than only by its mouseup handler.
+  useEffect(() => stopRulerDrag, [stopRulerDrag]);
+
   function handleRulerMouseDown(event) {
     const el = laneRef.current;
     if (!el || duration <= 0) {
       return;
     }
+    stopRulerDrag();
     const rect = el.getBoundingClientRect();
     const toSeconds = (clientX) => {
       const ratio = Math.min(1, Math.max(0, (clientX - rect.left) / rect.width));
@@ -134,10 +150,8 @@ export function Timeline({
     };
     onScrub?.(toSeconds(event.clientX));
     const onMove = (moveEvent) => onScrub?.(toSeconds(moveEvent.clientX));
-    const onUp = () => {
-      window.removeEventListener("mousemove", onMove);
-      window.removeEventListener("mouseup", onUp);
-    };
+    const onUp = () => stopRulerDrag();
+    rulerDragRef.current = { onMove, onUp };
     window.addEventListener("mousemove", onMove);
     window.addEventListener("mouseup", onUp);
   }

@@ -131,6 +131,41 @@ describe("recipeFromWorkflowShare", () => {
     expect(recipe.rawAdapterSettings.sampler).toBe("euler");
   });
 
+  it("drops invalid numeric controls and restores finite values as numbers", () => {
+    const recipe = recipeFromWorkflowShare(
+      share({
+        advanced: {
+          schedulerShift: "2.5",
+          steps: 0,
+          guidanceScale: -1.25,
+          ipAdapterScale: "not a number",
+          controlnetConditioningScale: Infinity,
+          trueCfgScale: "NaN",
+          strength: "",
+          textStyleGain: {},
+          controlScale: [],
+        },
+      }),
+      report(),
+    );
+
+    expect(recipe.rawAdapterSettings).toMatchObject({
+      schedulerShift: 2.5,
+      steps: 0,
+      guidanceScale: -1.25,
+    });
+    for (const key of [
+      "ipAdapterScale",
+      "controlnetConditioningScale",
+      "trueCfgScale",
+      "strength",
+      "textStyleGain",
+      "controlScale",
+    ]) {
+      expect(recipe.rawAdapterSettings).not.toHaveProperty(key);
+    }
+  });
+
   it("always asks for ONE image, whatever batch the shared file came out of", () => {
     // The envelope's seed identifies one image; `count` came from the batch the run requested.
     // Replaying both would reproduce the shared image as the first of a 4-image batch.

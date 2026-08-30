@@ -257,9 +257,9 @@ pub(crate) fn code_without_comments_or_literals(source: &str) -> String {
                     output.push(b'b');
                 }
                 output.push(b'r');
-                output.extend(std::iter::repeat(b'#').take(hashes));
+                output.extend(std::iter::repeat_n(b'#', hashes));
                 output.extend_from_slice(b"\"\"");
-                output.extend(std::iter::repeat(b'#').take(hashes));
+                output.extend(std::iter::repeat_n(b'#', hashes));
                 index = end.min(bytes.len());
                 continue;
             }
@@ -596,6 +596,23 @@ const RECORDED_FAMILY_ALLOW_LISTS: &[(&str, &str, &str)] = &[
          which families satisfy it; this is only where the app installed that tier.",
     ),
     (
+        "src/external_library_runtime.rs",
+        "PLAN_BACKED_RESIDENT_BASE_MODELS",
+        "Catalog data, not family truth, and the same split the two plan tables above record: \
+         `CheckpointAdapterRegistration::base_compatibility` declares the base-snapshot dependency \
+         and which families satisfy it, but carries no builtin catalog MODEL ID or tier — and an id \
+         plus a tier is exactly what building the base's requirement closure through \
+         `selected_requirements_for_model` needs. NOT DERIVABLE here for a second reason the plan \
+         tables do not have: this one lives in the pre-loader guard, which compiles on EVERY build, \
+         while the adapter registry is cfg-gated to macOS-or-candle (see IMPORT_SUPPORTED_FAMILIES) \
+         — a derived list would be empty on the candle-off build and silently return every imported \
+         checkpoint to the source library. Pinned in BOTH directions against \
+         CHECKPOINT_PLAN_RESIDENT_BASE_TIERS + CHECKPOINT_PLAN_FAMILY_COMPONENT_RESOLVERS, and \
+         against each family resolver's own repo/tier constants, by \
+         `the_guard_resident_base_table_mirrors_the_checkpoint_plan_family_tables`, so a family \
+         added to the plan tables cannot skip this one and this one cannot drift off them.",
+    ),
+    (
         "src/mlx_fit_gate.rs",
         "RESIDENT_ONLY_AUDIT_FAMILIES",
         "Not an import gate and not production: a `#[cfg(test)]`, macOS-only SCOPE for the \
@@ -612,7 +629,8 @@ const RECORDED_FAMILY_ALLOW_LISTS: &[(&str, &str, &str)] = &[
          endpoint — depends on `sceneworks-gen-core`. The registry is also cfg-gated to \
          macOS-or-candle: on the candle-off build `inference_runtime::media()` is EMPTY, so a \
          derived list would refuse every import there. And the registry binds at least six families \
-         against this list's three, so deriving would silently WIDEN what import accepts.",
+         against this list's four (`flux2`, `krea_2`, `mage-flow`, `sdxl`), so deriving would \
+         silently WIDEN what import accepts.",
     ),
     (
         "../sceneworks-core/src/checkpoint_inspector.rs",
@@ -660,6 +678,13 @@ const LIVE_FAMILY_TABLES: &[(&str, &str)] = &[
         "../sceneworks-core/src/checkpoint_inspector.rs",
         "MULTI_EXPERT_FAMILIES",
     ),
+    // `PLAN_BACKED_RESIDENT_BASE_MODELS` (sc-22329) is deliberately NOT here. This list is for
+    // constants whose body names ONLY families; that one also carries builtin catalog model ids
+    // and tiers, so the token scan reads `"krea_2_turbo"` as a family and demands the vocabulary
+    // carry a family that does not exist. Its family membership is pinned instead — in both
+    // directions, against the two plan tables — by
+    // `the_guard_resident_base_table_mirrors_the_checkpoint_plan_family_tables`, and those tables
+    // ARE swept for the vocabulary through the recorded inventory.
 ];
 
 /// Every `const NAME: TYPE = &[ .. ];` (or `= [ .. ]`) in `code`, as

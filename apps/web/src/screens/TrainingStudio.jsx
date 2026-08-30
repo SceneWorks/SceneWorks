@@ -3,6 +3,7 @@ import { useAppContext } from "../context/AppContext.js";
 import { ModelAvailabilityGate } from "../components/ModelAvailabilityGate.jsx";
 import { DEFAULT_MAC_CAPABILITIES, macTrainingKernelBlocked } from "../macGating.js";
 import { API_BASE_URL, isAbortError } from "../api.js";
+import { errorMessage } from "../errorMessage.js";
 import { assetCanRenderAsImage } from "../components/assetMedia.jsx";
 import { Icon } from "../components/Icons.jsx";
 import { WorkerProgressCard } from "../components/WorkerProgressCard.jsx";
@@ -330,6 +331,7 @@ export function TrainingStudio({ mode = "training" } = {}) {
     setActiveView,
     studioLaunch,
     models = [],
+    modelCatalogStatus = "ready",
     createModelDownloadJob,
     macCapabilities = DEFAULT_MAC_CAPABILITIES,
     registerProjectSwitchGuard,
@@ -366,6 +368,10 @@ export function TrainingStudio({ mode = "training" } = {}) {
   // double-click can't fire two DELETEs before `deletingDataset` disables the button.
   const deleteDatasetGuardRef = useRef(false);
   const openDatasetRef = useRef(null);
+  // Every open owns a monotonic generation. A refresh reload is allowed to commit only
+  // if the draft it started from is still current after its second await.
+  const datasetLoadGenerationRef = useRef(0);
+  const datasetDraftRevisionRef = useRef(0);
   const handledParquetImportJobsRef = useRef(new Set());
   const [selectedAssetIds, setSelectedAssetIds] = useState([]);
   // Dataset Doctor readiness report (sc-6534), fetched server-side over the saved
@@ -486,6 +492,16 @@ export function TrainingStudio({ mode = "training" } = {}) {
       selectedAssetIds.length !== originalAssetIds.length ||
       selectedAssetIds.some((id, index) => id !== originalAssetIds[index]) ||
       captionsDirty);
+  // Refresh awaits the catalog request. Read the current draft state after that
+  // await so a rename begun while refresh is in flight is never overwritten by
+  // the freshly loaded dataset object.
+  const dirtyRef = useRef(dirty);
+  dirtyRef.current = dirty;
+  const activeDatasetIdRef = useRef(activeDataset?.id ?? "");
+  activeDatasetIdRef.current = activeDataset?.id ?? "";
+  useEffect(() => {
+    datasetDraftRevisionRef.current += 1;
+  }, [activeDataset?.id, draftName, selectedAssetIds, associatedCharacterId, captionDraftById]);
   const completedParquetImport = useMemo(
     () =>
       jobs.find(
@@ -958,16 +974,22 @@ export function TrainingStudio({ mode = "training" } = {}) {
     return registerProjectSwitchGuard(() => confirmDiscardUnsavedDraft());
   }, [datasetLibraryMode, registerProjectSwitchGuard]);
 
-  async function openDataset(datasetId) {
+  async function openDataset(
+    datasetId,
+    { preserveCurrentDraft = false, expectedDraftRevision, canCommit } = {},
+  ) {
     // Opening a DIFFERENT dataset re-seeds the whole editor; confirm before discarding an
     // unsaved draft (sc-11970). Re-opening the SAME dataset (internal reloads after a save)
-    // never prompts — the ids match and the draft is already persisted.
+    // never prompts — the ids match and the draft is already persisted. A declined request
+    // must not take load ownership: an already-pending reload still owns busyDatasetId and
+    // must be able to clear it when it settles.
     if (datasetId && datasetId !== activeDataset?.id) {
       const proceed = await confirmDiscardUnsavedDraft();
       if (!proceed) {
         return;
       }
     }
+    const loadGeneration = ++datasetLoadGenerationRef.current;
     if (!datasetId) {
       setActiveDataset(null);
       setDraftName("");
@@ -980,7 +1002,22 @@ export function TrainingStudio({ mode = "training" } = {}) {
     setDatasetError("");
     setDatasetMessage("");
     try {
+      const draftRevision = expectedDraftRevision ?? datasetDraftRevisionRef.current;
       const dataset = await loadDataset(datasetId);
+      // A refresh has already checked its first await. Check again at the actual
+      // state commit: a rename, membership/caption edit, or a different open while
+      // this load was pending must win over stale fetched data.
+      if (
+        loadGeneration !== datasetLoadGenerationRef.current ||
+        (canCommit && !canCommit()) ||
+        (preserveCurrentDraft && (
+          activeDatasetIdRef.current !== datasetId ||
+          dirtyRef.current ||
+          datasetDraftRevisionRef.current !== draftRevision
+        ))
+      ) {
+        return null;
+      }
       setActiveDataset(dataset);
       setDraftName(dataset?.name ?? "");
       setSelectedAssetIds(normalizeDatasetAssetIds(dataset, assets));
@@ -991,17 +1028,22 @@ export function TrainingStudio({ mode = "training" } = {}) {
       setDatasetError(err.message);
       return null;
     } finally {
-      setBusyDatasetId("");
+      if (loadGeneration === datasetLoadGenerationRef.current) setBusyDatasetId("");
     }
   }
   openDatasetRef.current = openDataset;
 
   async function onRefreshDatasets() {
+    const refreshDatasetId = activeDatasetIdRef.current;
     await refreshTrainingDatasets(activeProject?.id);
-    if (!activeDataset?.id || dirty) {
+    if (
+      !refreshDatasetId ||
+      activeDatasetIdRef.current !== refreshDatasetId ||
+      dirtyRef.current
+    ) {
       return;
     }
-    await openDataset(activeDataset.id);
+    await openDataset(refreshDatasetId, { preserveCurrentDraft: true });
   }
 
   // Permanently delete the OPEN dataset — the backend wipes its on-disk root (images,
@@ -1064,14 +1106,25 @@ export function TrainingStudio({ mode = "training" } = {}) {
     }
     const jobId = completedParquetImportId;
     const datasetId = activeDataset.id;
+    const draftRevision = datasetDraftRevisionRef.current;
     const handledJobs = handledParquetImportJobsRef.current;
     handledJobs.add(jobId);
     let canceled = false;
     let settled = false;
+    const canCommit = () => (
+      !canceled &&
+      activeDatasetIdRef.current === datasetId &&
+      datasetDraftRevisionRef.current === draftRevision
+    );
     void (async () => {
       try {
         await refreshTrainingDatasets(activeProject?.id);
-        const dataset = await openDatasetRef.current?.(datasetId);
+        if (!canCommit()) return;
+        const dataset = await openDatasetRef.current?.(datasetId, {
+          preserveCurrentDraft: true,
+          expectedDraftRevision: draftRevision,
+          canCommit,
+        });
         if (canceled || !dataset) return;
         const imported = completedParquetImportCount;
         setDatasetMessage(
@@ -1456,7 +1509,7 @@ export function TrainingStudio({ mode = "training" } = {}) {
       );
       return job;
     } catch (err) {
-      setDatasetError(err.message);
+      setDatasetError(errorMessage(err, "Could not start the Parquet import."));
       throw err;
     }
   }
@@ -1763,6 +1816,7 @@ export function TrainingStudio({ mode = "training" } = {}) {
   return (
     <ModelAvailabilityGate
       ready={trainingReady}
+      initializing={modelCatalogStatus === "idle" || modelCatalogStatus === "loading"}
       title="Training needs a trainable base model"
       description="LoRA training needs a downloaded base model (e.g. Z-Image-Turbo or SDXL). Download one to get started."
       offers={trainingOffers}

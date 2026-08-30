@@ -621,6 +621,15 @@ pub fn model_capabilities_for_type_and_family(model_type: &str, family: &str) ->
         ("image", "lens") => vec!["text_to_image"],
         ("image", "sensenova-u1") => vec!["text_to_image", "edit_image", "vqa", "interleave"],
         ("image", "flux") => vec!["text_to_image"],
+        // FLUX.2 (sc-11043, epic 11037): imported single-file Klein checkpoints, which reach a
+        // loader only as NVFP4 through the shared codec. Text-to-image ONLY, and deliberately
+        // narrower than the builtin `flux2_klein_9b` entry's edit/reference/character surface: the
+        // native-NVFP4 admission gate serves the proven generate surface alone, because edit,
+        // pose, and multi-phase lanes introduce companion modules that have not been validated
+        // against packed E2M1 weights. Advertising more here would offer operations the router
+        // refuses. Only imported/user flux2 models are affected; the builtin entries declare their
+        // own `capabilities`.
+        ("image", "flux2") => vec!["text_to_image"],
         ("image", "chroma") => vec!["text_to_image"],
         ("image", "kolors") => vec!["text_to_image", "character_image"],
         ("image", "sdxl") => vec!["text_to_image"],

@@ -289,8 +289,8 @@ function distinctResolutions(crate) {
 
 // `config/inference-third-party-source.json` is ALSO keyed to the pin: check-license-coverage.mjs
 // fails closed when its `inferenceRevision` / `provenanceScan.revision` / `crateCoverage.revision` do
-// not equal the pinned rev. Unlike the memory matrix this cannot be regenerated blindly — a bump that
-// brings a NEW crate or a new embedded third-party source needs a human classification decision, and
+// not equal the pinned rev. This cannot be regenerated blindly — a bump that brings a NEW crate or a
+// new embedded third-party source needs a human classification decision, and
 // the rescan needs a local inference clone (`--repo`) that this script does not otherwise require. So
 // run the guard and let its own remediation text (which names the exact scanner invocations) speak; the
 // point is that a stale audit surfaces HERE, at bump time, instead of in parity CI ten minutes later.
@@ -346,6 +346,18 @@ function verifyLicenseAudit(io = {}) {
         drift
           .map(([field, written, computed]) => `  ${field}: wrote ${written}, checker computes ${computed}`)
           .join("\n"),
+    );
+  }
+  if (!Array.isArray(derived.auditSummaryErrors)) {
+    throw new Error(
+      "the license checker did not return auditSummaryErrors; the bump cannot verify the human audit summary.",
+    );
+  }
+  if (derived.auditSummaryErrors.length > 0) {
+    throw new Error(
+      "the inference source/license audit human _comment is stale after deriveLicenseAudit() ran. " +
+        "Review the pin advance and update the summary without copying historical finding counts.\n" +
+        derived.auditSummaryErrors.map((error) => `  ${error}`).join("\n"),
     );
   }
 }
@@ -552,39 +564,19 @@ function reportCrossLaneWork(sha) {
   }
 }
 
-// `docs/generated/memory-matrix.{json,md}` is DERIVED from the inference pin: the generator stamps
-// `inferenceRevision` on the document (`generatedFrom`; sc-16268 removed the per-cell copy that
-// used to duplicate it into every row), and each cell's derived `calibrationFingerprint` includes
-// the inference pin alongside the provider ABI and semantic cell identity. So a pin bump makes the checked-in artifact stale by construction, and
-// `tests/test_memory_matrix.py`
-// (parity CI) fails with "generated memory matrix is stale". Regenerating here keeps everything derived
-// from the pin moving in ONE commit, the same reason the lockfile regen lives in this script rather than
-// in the caller's hands.
-function regenerateMemoryMatrix() {
-  console.log("$ node scripts/generate-memory-matrix.mjs");
-  execFileSync("node", ["scripts/generate-memory-matrix.mjs"], {
-    cwd: repoRoot,
-    stdio: "inherit",
-  });
-}
-
-// sc-18100 deleted `scripts/calibration-cost-model.mjs` and its two committed artifacts, which used
-// to be regenerated here as the second step of the matrix cascade. The memory matrix now has no
-// generated consumer, so the regen above is the whole of that cascade.
-
 // Every checked-in file under `config/engine-capabilities/` records the producing revision and the
 // preview flags plus the rich `runtime/` descriptor/trainer/provider and worker-capability surfaces
 // read off the LINKED registries (sc-16965, epic 16948). A pin change alone does not invalidate that
 // content (e14171984); the revision label is retained as provenance and reported when it differs.
 //
-// Like the licence audit, and unlike the memory matrix, this CANNOT be regenerated blindly from
-// here: the dumper needs a lane that actually links engines (macOS for mlx,
+// Like the licence audit, this CANNOT be regenerated blindly from here: the dumper needs a lane that
+// actually links engines (macOS for mlx,
 // `--features backend-candle` off-Mac for candle), which a bump does not otherwise require and
 // which no single host can supply for both backends. So verify structural completeness and native
 // content shape, report revision-label drift, and let the remediation text name the exact invocation.
 //
-// Downstream cascade, same shape as the memory-matrix regen above: re-dumping a facts file
-// makes `config/manifests/builtin.preview-support.jsonc` + `apps/web/src/data/previewSupport.json`
+// Downstream cascade: re-dumping a facts file makes `config/manifests/builtin.preview-support.jsonc`
+// + `apps/web/src/data/previewSupport.json`
 // stale, and `apps/web/src/data/previewSupportCatalog.test.js` (web vitest, every PR) fails until
 // `npm run gen:preview-support` is re-run.
 // `root` is a parameter purely so `--self-test` can drive this against fixture trees. It is the one
@@ -1340,6 +1332,7 @@ source = "git+${INFERENCE_GIT}?rev=${SHA}#${CURRENT_COMMIT}"
   // The fake deriver mirrors the real one where it matters: its digest is a function of the record on
   // disk, so a restamp taken before the population facts land is visibly the wrong digest.
   const AUDIT_FIXTURE = {
+    _comment: `Pin ${PREVIOUS_PIN.slice(0, 8)} records 600 provenance candidates and 90 production-Rust crate prefixes.`,
     inferenceRevision: PREVIOUS_PIN,
     auditDigest: "0".repeat(64),
     includeSites: [{ source: "a", included: "b", disposition: "artifact" }],
@@ -1358,13 +1351,33 @@ source = "git+${INFERENCE_GIT}?rev=${SHA}#${CURRENT_COMMIT}"
   };
   let stored = structuredClone(AUDIT_FIXTURE);
   const auditWrites = [];
-  const fakeDerive = () => ({
-    provenanceMatchedFiles: 626,
-    provenancePopulationSha256: "3".repeat(64),
-    cratePrefixes: 94,
-    cratePopulationSha256: "4".repeat(64),
-    auditDigest: `digest-of:${stored.provenanceScan.matchedFiles}:${stored.crateCoverage.cratePrefixes}`,
-  });
+  const fakeDerive = (audit = stored) => {
+    const summary = audit._comment ?? "";
+    const summaryErrors = [];
+    if (!summary.includes(audit.inferenceRevision.slice(0, 8))) {
+      summaryErrors.push(
+        `inference source audit _comment does not name current pin ${audit.inferenceRevision.slice(0, 8)}.`,
+      );
+    }
+    if (!summary.includes(`${audit.provenanceScan.matchedFiles} provenance candidates`)) {
+      summaryErrors.push(
+        `inference source audit _comment does not name current population ${audit.provenanceScan.matchedFiles} provenance candidates.`,
+      );
+    }
+    if (!summary.includes(`${audit.crateCoverage.cratePrefixes} production-Rust crate prefixes`)) {
+      summaryErrors.push(
+        `inference source audit _comment does not name current population ${audit.crateCoverage.cratePrefixes} production-Rust crate prefixes.`,
+      );
+    }
+    return {
+      provenanceMatchedFiles: 626,
+      provenancePopulationSha256: "3".repeat(64),
+      cratePrefixes: 94,
+      cratePopulationSha256: "4".repeat(64),
+      auditDigest: `digest-of:${audit.provenanceScan.matchedFiles}:${audit.crateCoverage.cratePrefixes}`,
+      auditSummaryErrors: summaryErrors,
+    };
+  };
   deriveLicenseAudit(SHA, "/self-test/inference", {
     scan: () => "",
     derive: fakeDerive,
@@ -1403,7 +1416,7 @@ source = "git+${INFERENCE_GIT}?rev=${SHA}#${CURRENT_COMMIT}"
     try {
       verifyLicenseAudit({
         report: () => {},
-        derive: fakeDerive,
+        derive: () => fakeDerive(audit),
         readAudit: () => audit,
         log: () => {},
       });
@@ -1412,6 +1425,18 @@ source = "git+${INFERENCE_GIT}?rev=${SHA}#${CURRENT_COMMIT}"
       return error.message;
     }
   };
+  const staleSummary = verifyDrift((audit) => audit);
+  check(
+    "a restamped audit with stale human prose refuses and names the current pin and population",
+    !!staleSummary &&
+      /human _comment is stale/.test(staleSummary) &&
+      new RegExp(SHA.slice(0, 8)).test(staleSummary) &&
+      /626 provenance candidates/.test(staleSummary) &&
+      /94 production-Rust crate prefixes/.test(staleSummary),
+  );
+  stored._comment =
+    `Pin ${SHA.slice(0, 8)} records 626 provenance candidates and 94 production-Rust crate prefixes; ` +
+    `the prior pin was ${PREVIOUS_PIN.slice(0, 8)}.`;
   check("a fully restamped audit passes verification", verifyDrift((audit) => audit) === null);
   const skippedCount = verifyDrift((audit) => {
     audit.provenanceScan.matchedFiles = 600;
@@ -1559,7 +1584,8 @@ function main() {
   }
   reconcileCargoLock(sha, cargoPinsAlreadyInManifests);
   verifyNoSkew();
-  regenerateMemoryMatrix();
+  // Historical measurement and inspection artifacts are deliberately not regenerated on a pin
+  // bump. Their recorded revisions remain provenance; measurement campaigns run once at epic end.
   deriveLicenseAudit(sha, repo);
   verifyLicenseAudit();
   // Beside the licence re-scan for the same reason: both are pin-keyed artifacts that need an input

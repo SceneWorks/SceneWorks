@@ -226,6 +226,7 @@ export function VideoStudio() {
     updateAssetStatus,
     videoModels,
     models = [],
+    modelCatalogStatus = "ready",
     macCapabilities = DEFAULT_MAC_CAPABILITIES,
     preferencesHydrated,
   } = useAppContext();
@@ -777,6 +778,7 @@ export function VideoStudio() {
     autoTier,
     useGenerationQuality: true,
     reseedOnModelChange: true,
+    preferencesHydrated,
   });
   const availableTierKey = availableTiers.join(",");
   const recipeTierTargetModel = recipeTierRequest
@@ -1909,6 +1911,7 @@ export function VideoStudio() {
   return (
     <ModelAvailabilityGate
       ready={modelReady}
+      initializing={modelCatalogStatus === "idle" || modelCatalogStatus === "loading"}
       title="Video Studio needs a video model"
       description="Download a recommended video model to start generating."
       offers={modelOffers}

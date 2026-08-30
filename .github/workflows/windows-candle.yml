@@ -158,7 +158,7 @@ on:
   workflow_dispatch:
     inputs:
       run_five_rung_reference:
-        description: "Capture the SC-16402 Krea fresh-process five-rung reference"
+        description: "Capture the Krea five-rung diagnostic and q4/1024 certifying exact request"
         required: false
         type: boolean
         default: false
@@ -311,6 +311,12 @@ jobs:
   candle-worker:
     # Same-repo only — never execute untrusted fork code on the self-hosted runner.
     if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
+    # The real-weight listeners share one physical GPU. Serialize only manual jobs that mutate or
+    # measure that shared state with the imported-NVFP4 smoke's fixed group; ordinary compile/test
+    # runs retain a unique group and therefore the full four-listener pool.
+    concurrency:
+      group: windows-candle-gpu-${{ github.event_name == 'workflow_dispatch' && (inputs.provision_snapshot || inputs.run_five_rung_reference || inputs.run_ltx_eros_acceptance || inputs.run_epic_20738_terminal_cuda) && 'real-weights' || github.run_id }}
+      cancel-in-progress: false
     # A provisioning or five-rung dispatch additionally requires `real-weights`; ordinary PR and
     # push runs keep the full `cuda` pool (sc-18677). This mirrors macos-mlx.yml:450 exactly, which
     # adds `weights` for `run_memory_calibration || run_five_rung_reference` and is the convention
@@ -334,19 +340,23 @@ jobs:
     # default (sc-10420). This lane is the SOLE self-hosted cuda box and
     # serializes main-push runs (github.sha concurrency), so a wedge here holds
     # that box and starves every queued PR/main run on it until the cap fires
-    # (sc-13603). Well above the healthy ~11-14 min build+test+clippy — a cold
-    # candle-kernels (nvcc) rebuild still fits comfortably.
+    # (sc-13603). The ordinary lane now carries the exhaustive worker suite,
+    # sidecar build, memory-adapter checks, Clippy, and fresh capability dump.
+    # SC-21707 measured a healthy warm PR run at 39m19s, then an exact-main push
+    # reached capability verification only after 44m19s and was killed by the old
+    # 45m cap. Sixty minutes keeps the runner bounded while preserving enough
+    # variance headroom to finish every required gate on a slower CUDA runner.
     #
     # Provisioning now keys the 240m budget on its OWN input rather than on the five-rung
     # conjunction (sc-18677): a provision-only dispatch is a supported mode, and H3's
     # component set is 144.051 GB (210.332 GB once transformer_ref joins in sc-17149) against
     # Krea q4's ~14 GB, so it is the branch that most
     # needs the long budget. Krea's two dispatch shapes keep their exact previous values --
-    # five-rung + provision 240, five-rung alone 120, everything else 45.
+    # five-rung + provision 240, five-rung alone 120, everything else 60.
     # The LTX Eros acceptance capture (sc-18902, from main) keeps its own six-hour ceiling.
     # The strictly serial 19-cell epic-20738 terminal campaign gets a job-level twelve-hour
     # ceiling; no individual step receives a timeout above GitHub's 360-minute step limit.
-    timeout-minutes: ${{ github.event_name == 'workflow_dispatch' && inputs.run_ltx_eros_acceptance && 360 || github.event_name == 'workflow_dispatch' && inputs.run_epic_20738_terminal_cuda && 720 || github.event_name == 'workflow_dispatch' && inputs.provision_snapshot && 240 || github.event_name == 'workflow_dispatch' && inputs.run_five_rung_reference && 120 || 45 }}
+    timeout-minutes: ${{ github.event_name == 'workflow_dispatch' && inputs.run_ltx_eros_acceptance && 360 || github.event_name == 'workflow_dispatch' && inputs.run_epic_20738_terminal_cuda && 720 || github.event_name == 'workflow_dispatch' && inputs.provision_snapshot && 240 || github.event_name == 'workflow_dispatch' && inputs.run_five_rung_reference && 120 || 60 }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Refuse combined manual measurement profiles
@@ -811,7 +821,7 @@ jobs:
           token: ${{ secrets.SCENEWORKS_INFERENCE_READ_TOKEN || github.token }}
           path: .calibration/inference
           persist-credentials: false
-      - name: Build and run the authoritative Candle five-rung reference
+      - name: Build and run the Candle Krea diagnostic and certifying captures
         if: ${{ github.event_name == 'workflow_dispatch' && inputs.run_five_rung_reference }}
         shell: cmd
         env:
@@ -819,6 +829,9 @@ jobs:
           # renamed alongside the dispatch inputs; see the workflow_dispatch header.
           SCENEWORKS_KREA_REPOSITORY: ${{ inputs.provision_repository }}
           SCENEWORKS_KREA_REVISION: ${{ inputs.provision_revision }}
+          # SC-21714 certifies on the second physical Blackwell card. Candle still sees logical
+          # cuda:0, while the adapter's nvidia-smi probe records physical device 1.
+          CUDA_VISIBLE_DEVICES: "1"
         run: |
           call "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvars64.bat"
           set NVCC_CCBIN=%VCToolsInstallDir%bin\Hostx64\x64
@@ -826,19 +839,22 @@ jobs:
           cargo build --release --locked -p sceneworks-memory-adapter --features candle --bin memory-candle-adapter
           node scripts\memory-calibration-harness.mjs run --config config\memory-calibration-plan.json --backend candle --fixture fresh-five-rung-krea-q4-1024-seed16402-step2 --fresh-per-case --provider-command "[\"target/release/memory-candle-adapter.exe\"]" --sceneworks-repo "%GITHUB_WORKSPACE%" --inference-repo "%GITHUB_WORKSPACE%\.calibration\inference" --output "%RUNNER_TEMP%\sc-16059-candle-fresh.json"
           node scripts\memory-calibration-harness.mjs run --config config\memory-calibration-plan.json --backend candle --fixture fresh-five-rung-krea-q4-1024-seed16402-step2 --batch-rungs --provider-command "[\"target/release/memory-candle-adapter.exe\"]" --sceneworks-repo "%GITHUB_WORKSPACE%" --inference-repo "%GITHUB_WORKSPACE%\.calibration\inference" --output "%RUNNER_TEMP%\sc-16059-candle-reused.json"
+          node scripts\memory-calibration-harness.mjs run --config config\memory-calibration-plan.json --backend candle --fixture krea-q4-1024-seed42 --fresh-per-case --provider-command "[\"target/release/memory-candle-adapter.exe\"]" --sceneworks-repo "%GITHUB_WORKSPACE%" --inference-repo "%GITHUB_WORKSPACE%\.calibration\inference" --output "%RUNNER_TEMP%\sc-21714-candle-certifying.json"
           node scripts\memory-calibration-harness.mjs check --input "%RUNNER_TEMP%\sc-16059-candle-fresh.json"
           node scripts\memory-calibration-harness.mjs check --input "%RUNNER_TEMP%\sc-16059-candle-reused.json"
+          node scripts\memory-calibration-harness.mjs check --input "%RUNNER_TEMP%\sc-21714-candle-certifying.json"
           node scripts\memory-calibration-harness.mjs compare-reuse --fresh "%RUNNER_TEMP%\sc-16059-candle-fresh.json" --reused "%RUNNER_TEMP%\sc-16059-candle-reused.json" --output "%RUNNER_TEMP%\sc-16059-candle-reuse-comparison.json"
           node -e "const a=require(process.argv[1]); console.log(JSON.stringify(a,null,2)); if(!['amortizable','unable_to_amortize'].includes(a.verdict)) throw new Error('unexpected Candle reuse verdict: '+a.verdict)" "%RUNNER_TEMP%\sc-16059-candle-reuse-comparison.json"
-      - name: Upload raw schema-checked Candle five-rung reference
+      - name: Upload raw schema-checked Candle Krea evidence
         if: ${{ success() && github.event_name == 'workflow_dispatch' && inputs.run_five_rung_reference }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: sc-16059-candle-reuse-${{ github.run_id }}
+          name: sc-21714-krea-certifying-${{ github.run_id }}
           path: |
             ${{ runner.temp }}/sc-16059-candle-fresh.json
             ${{ runner.temp }}/sc-16059-candle-reused.json
             ${{ runner.temp }}/sc-16059-candle-reuse-comparison.json
+            ${{ runner.temp }}/sc-21714-candle-certifying.json
           if-no-files-found: error
       - name: Clippy (candle worker)
         if: ${{ !(github.event_name == 'workflow_dispatch' && inputs.provision_snapshot && !inputs.run_five_rung_reference) }}
@@ -1363,3 +1379,46 @@ jobs:
           if ($notSuccessful.Count -gt 0) {
             throw "epic-20738 terminal evidence failed after upload: $($outcomes -join ', ')"
           }
+
+  imported-nvfp4-worker-smoke:
+    # Real weights are required for this one executable acceptance (sc-21716). Keep it separate
+    # from candle-worker so ordinary compile/test traffic retains the full four-runner CUDA pool;
+    # the dependency orders this run, and the fixed group excludes other runs that use real weights.
+    needs: candle-worker
+    if: ${{ github.event_name == 'push' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository) }}
+    concurrency:
+      group: windows-candle-gpu-real-weights
+      cancel-in-progress: false
+    runs-on: [self-hosted, Windows, X64, cuda, real-weights]
+    timeout-minutes: 120
+    env:
+      CUDA_COMPUTE_CAP: "120"
+      CARGO_NET_OFFLINE: "true"
+      HF_HUB_CACHE: 'E:\huggingface\hub'
+      HF_HUB_OFFLINE: "1"
+      TRANSFORMERS_OFFLINE: "1"
+      SCENEWORKS_IMPORTED_NVFP4_CHECKPOINT: 'E:\huggingface\hub\models--Comfy-Org--Krea-2\snapshots\952f49d49653cb42e7d6cf7cbfad74738073ec7d\diffusion_models\krea2_turbo_nvfp4.safetensors'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: ./.github/actions/prepare-rust-runner
+      - name: Disable unstable sccache wrapper for the imported NVFP4 smoke
+        shell: powershell
+        run: |
+          Add-Content -Path $env:GITHUB_ENV -Value 'RUSTC_WRAPPER='
+          Remove-Item Env:RUSTC_WRAPPER -ErrorAction SilentlyContinue
+      - name: Isolate Cargo dependency checkout for the imported NVFP4 smoke
+        shell: powershell
+        run: |
+          $jobCargoHome = Join-Path $env:RUNNER_TEMP 'cargo-home-nvfp4-smoke'
+          New-Item -ItemType Directory -Force -Path $jobCargoHome | Out-Null
+          Add-Content -Path $env:GITHUB_ENV -Value "CARGO_HOME=$jobCargoHome"
+      - name: Fetch the pinned inference release for the imported NVFP4 smoke
+        env:
+          CARGO_NET_OFFLINE: "false"
+        run: cargo fetch --locked
+      - name: Run the imported NVFP4 worker smoke
+        shell: cmd
+        run: |
+          call "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvars64.bat"
+          set NVCC_CCBIN=%VCToolsInstallDir%bin\Hostx64\x64
+          cargo test -p sceneworks-worker --features backend-candle --release imported_nvfp4_worker_gpu_smoke -- --ignored --nocapture --test-threads=1

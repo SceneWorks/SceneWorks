@@ -172,7 +172,7 @@
       },
       "repositories": {
         "inference": {
-          "closureDigest": "41f6cc256c94ced33cec6344d10b6a550ee39ff72dbed30b77346f7810ea69f1",
+          "closureDigest": "e33aa802f2793a5e2d6d97c00513b7652c8022414ebeeb4d6eea25f98cb85f93",
           "dirty": false,
           "revision": "dfd76b5aef62b2082ed4b18a8eebd2e3e2e07cfb"
         },
@@ -383,7 +383,7 @@
       },
       "repositories": {
         "inference": {
-          "closureDigest": "54a7b45b03eb8301e6e85fd1d67558d007ebe5031eb491fe25e95b8f081f4374",
+          "closureDigest": "e864802763ba3cef4b64225477333013aafbdc909b7acec595ffd85985c88250",
           "dirty": false,
           "revision": "fbb00d6b4147bd220fe324050534708c12fb022d"
         },
@@ -629,7 +629,7 @@
       },
       "repositories": {
         "inference": {
-          "closureDigest": "96849569eab9281dd23dca0910b6a58308e329f5bfb481337723a76ce26067f6",
+          "closureDigest": "95b7d434a942f0c13edfa03f263c659c3575f8320c21598ecb796982ad923d85",
           "dirty": false,
           "revision": "75d66db50543ac288deb278853d0f0b432f92c5c"
         },
@@ -828,7 +828,7 @@
       },
       "repositories": {
         "inference": {
-          "closureDigest": "d355971eb9ecdf2fc80da02703c4de32c42223300636d8386296350551c2f1b8",
+          "closureDigest": "7889221b06356a3ac8b0762efe9f485b2c9998f75d396c1f2c385d3f539bf02a",
           "dirty": false,
           "revision": "fbb00d6b4147bd220fe324050534708c12fb022d"
         },
@@ -1030,7 +1030,7 @@
       },
       "repositories": {
         "inference": {
-          "closureDigest": "3241b636113e3687dee4ffb6070ecc99e4ab48a66e343f303c3f7048a436cdad",
+          "closureDigest": "43e90d2a117e7d834f115fa0152de67ace7f96c845fd8ec88a63bb2ea8e05e66",
           "dirty": false,
           "revision": "5f973a73bf00307240afd81d2778ba9d89349e51"
         },
@@ -1154,6 +1154,326 @@
         "modelId": "flux_schnell",
         "overlay": "none",
         "provider": "flux1_schnell",
+        "tier": "q4"
+      }
+    },
+    {
+      "artifact": {
+        "repository": "SceneWorks/krea-2-turbo-mlx",
+        "resolvedRevision": "d009674080cc1bccf2b629d834c34bf5eccdb723",
+        "variant": "q4"
+      },
+      "backend": "candle",
+      "calibrationFingerprint": "krea-turbo-cuda-phase-curves-v1",
+      "capturedAt": "2026-08-28T21:59:42Z",
+      "diagnostics": {
+        "adapter": "memory-candle-adapter:krea-turbo-certifying",
+        "blockers": [],
+        "execution": "executed",
+        "measurements": [
+          {
+            "name": "preLoadDeviceUsed",
+            "unit": "bytes",
+            "value": 1045430272
+          },
+          {
+            "name": "loadDevicePeakDelta",
+            "unit": "bytes",
+            "value": 512753664
+          },
+          {
+            "name": "conditioningDevicePeakDelta",
+            "unit": "bytes",
+            "value": 3828350976
+          },
+          {
+            "name": "denoiseDevicePeakDelta",
+            "unit": "bytes",
+            "value": 3998220288
+          },
+          {
+            "name": "decodeDevicePeakDelta",
+            "unit": "bytes",
+            "value": 3832545280
+          },
+          {
+            "name": "overallDevicePeakDelta",
+            "unit": "bytes",
+            "value": 3998220288
+          },
+          {
+            "name": "allocatorCounterAliasesDeviceDelta",
+            "unit": "boolean",
+            "value": 1
+          },
+          {
+            "name": "wiredCounterAliasesDiscreteDeviceDelta",
+            "unit": "boolean",
+            "value": 1
+          },
+          {
+            "name": "cudaCachingAllocatorPresent",
+            "unit": "boolean",
+            "value": 0
+          },
+          {
+            "name": "phaseCancelInjections",
+            "unit": "count",
+            "value": 3
+          },
+          {
+            "name": "phaseErrorInjections",
+            "unit": "count",
+            "value": 3
+          },
+          {
+            "name": "postFaultWarmFollowUps",
+            "unit": "count",
+            "value": 6
+          },
+          {
+            "name": "maximumPostFaultDeviceGrowth",
+            "unit": "bytes",
+            "value": 0
+          },
+          {
+            "name": "postFaultDeviceGrowthTolerance",
+            "unit": "bytes",
+            "value": 67108864
+          },
+          {
+            "name": "abaResidentRepeatMaximumErrorPer255",
+            "unit": "count",
+            "value": 0
+          },
+          {
+            "name": "abaResidentRepeatMeanErrorMicroUnits",
+            "unit": "count",
+            "value": 0
+          },
+          {
+            "name": "abaBoundedMaximumErrorPer255",
+            "unit": "count",
+            "value": 5
+          },
+          {
+            "name": "abaBoundedMeanErrorMicroUnits",
+            "unit": "count",
+            "value": 66
+          },
+          {
+            "name": "maximumRecoveryMaximumErrorPer255",
+            "unit": "count",
+            "value": 0
+          },
+          {
+            "name": "maximumRecoveryMeanErrorMicroUnits",
+            "unit": "count",
+            "value": 0
+          },
+          {
+            "name": "negativeMutationMaximumErrorPer255",
+            "unit": "count",
+            "value": 194
+          },
+          {
+            "name": "negativeMutationMeanErrorMicroUnits",
+            "unit": "count",
+            "value": 265028
+          }
+        ]
+      },
+      "evidenceScope": "authoritative",
+      "fixture": "krea-q4-1024-seed42",
+      "hardware": {
+        "computeCapability": "12.0",
+        "deviceId": "1",
+        "driverVersion": "596.36",
+        "memoryBytes": 102641958912,
+        "name": "NVIDIA RTX PRO 6000 Blackwell Max-Q Workstation Edition",
+        "probe": "C:\\WINDOWS\\System32\\nvidia-smi.exe selected through CUDA_VISIBLE_DEVICES",
+        "runtimeVersion": "12.9"
+      },
+      "harnessVersion": "sceneworks-memory-v5",
+      "id": "imc-06fbd2ff6dcba95f8555",
+      "loadShape": "deferred_materialization",
+      "loadability": {
+        "resolvedPathFingerprint": "SceneWorks/krea-2-turbo-mlx@d009674080cc1bccf2b629d834c34bf5eccdb723:q4",
+        "result": "passed"
+      },
+      "logicalCaseId": "implan-4a68fe7972c6b7064fb1",
+      "negativeMutation": {
+        "maximumError": 0.7607843137254902,
+        "meanError": 0.26502825919988654,
+        "measured": true,
+        "parameters": {
+          "attentionChunkSize": 134217728,
+          "decodeOverlap": 128,
+          "decodeTileEdge": 512,
+          "transformerWindowSize": 1
+        },
+        "result": "failed_as_expected"
+      },
+      "observedMemory": {
+        "conditioning": {
+          "activeBytes": 3828350976,
+          "allocatorBytes": 3828350976,
+          "reclaimableBytes": 0
+        },
+        "decode": {
+          "activeBytes": 3832545280,
+          "allocatorBytes": 3832545280,
+          "reclaimableBytes": 0
+        },
+        "denoise": {
+          "activeBytes": 3998220288,
+          "allocatorBytes": 3998220288,
+          "reclaimableBytes": 0
+        },
+        "overall": {
+          "activeBytes": 3998220288,
+          "allocatorBytes": 3998220288,
+          "reclaimableBytes": 0
+        }
+      },
+      "predictedPeakBytes": {
+        "conditioning": 3828350976,
+        "decode": 3832545280,
+        "denoise": 3998220288,
+        "overall": 3998220288
+      },
+      "quality": {
+        "contract": "identical artifact, prompt, seed, geometry, steps and tier; production bounded-transformer tuple versus resident A-B-A control",
+        "identicalInputs": true,
+        "maximumError": 0.0196078431372549,
+        "maximumErrorThreshold": 1,
+        "meanError": 0.00006592195797586676,
+        "meanErrorThreshold": 0.01681,
+        "result": "passed"
+      },
+      "repositories": {
+        "inference": {
+          "closureDigest": "c61e73a5912e2e5114b1a262042ca92ea212955bc3bf63b0deb87ddffd81d175",
+          "dirty": false,
+          "revision": "3775a5f80a07a38071c7859f6ac565bcab5d1c7b"
+        },
+        "sceneWorks": {
+          "dirty": false,
+          "matrixSourceRevision": "source-tree:e4df49683ea84d0f86e111457b8eb2b5f05675f01a5c9a5cba91d55e6b83e99b",
+          "revision": "ebc2a29789ac78ff4bdc263fec65db012a0b3f4f"
+        }
+      },
+      "scenarios": [
+        {
+          "effectiveBudgetBytes": 3998220288,
+          "name": "exact_fit",
+          "predictedBytes": 3998220288,
+          "result": "passed"
+        },
+        {
+          "name": "unknown_budget",
+          "result": "passed"
+        },
+        {
+          "name": "stale_evidence",
+          "result": "passed"
+        },
+        {
+          "name": "warm_repeat",
+          "result": "passed"
+        },
+        {
+          "cleanupVerified": true,
+          "name": "cancel",
+          "reason": "conditioning, denoise, and decode cancellation returned typed cancellation; retained memory stayed within 64 MiB and every warm recovery passed the approved parity envelope",
+          "result": "passed",
+          "warmFollowUpPassed": true
+        },
+        {
+          "cleanupVerified": true,
+          "name": "error",
+          "reason": "conditioning, denoise, and decode injected errors fired at physical boundaries; retained memory stayed within 64 MiB and every warm recovery passed the approved parity envelope",
+          "result": "passed",
+          "warmFollowUpPassed": true
+        },
+        {
+          "name": "loadability",
+          "result": "passed"
+        },
+        {
+          "name": "overlay",
+          "reason": "the calibration target declares overlay \"none\"; the Candle Krea base-only text-to-image path executes no overlay, so this record has no second resident network to measure",
+          "result": "not_applicable"
+        }
+      ],
+      "status": "complete",
+      "strategy": {
+        "engagedRungs": [
+          "resident",
+          "staged_residency",
+          "bounded_decode",
+          "bounded_attention",
+          "bounded_transformer_residency"
+        ],
+        "parameters": {
+          "attentionChunkSize": 134217728,
+          "decodeOverlap": 128,
+          "decodeTileEdge": 512,
+          "transformerWindowSize": 1
+        },
+        "rung": "bounded_transformer_residency"
+      },
+      "sweep": {
+        "axes": [
+          {
+            "parameter": "decodeTileEdge",
+            "testedValues": [
+              512
+            ]
+          },
+          {
+            "parameter": "decodeOverlap",
+            "testedValues": [
+              128
+            ]
+          },
+          {
+            "parameter": "attentionChunkSize",
+            "testedValues": [
+              134217728
+            ]
+          },
+          {
+            "parameter": "transformerWindowSize",
+            "testedValues": [
+              1
+            ]
+          }
+        ],
+        "cases": [
+          {
+            "parameters": {
+              "attentionChunkSize": 134217728,
+              "decodeOverlap": 128,
+              "decodeTileEdge": 512,
+              "transformerWindowSize": 1
+            },
+            "result": "passed"
+          }
+        ],
+        "rangeVerified": true
+      },
+      "target": {
+        "geometry": {
+          "batch": 1,
+          "frames": 1,
+          "height": 1024,
+          "width": 1024
+        },
+        "mode": "text_to_image",
+        "modelId": "krea_2_turbo",
+        "overlay": "none",
+        "provider": "krea_2_turbo",
         "tier": "q4"
       }
     },
@@ -1305,7 +1625,7 @@
       },
       "repositories": {
         "inference": {
-          "closureDigest": "9930aa538259f7c576c13e3241e872a6486b049fe62b423e5dca3b3fe56f7bae",
+          "closureDigest": "dfd475f85833379b60c9982cd1b823d8ed0fc92da0d47f86d0f212adbe9d6ffc",
           "dirty": false,
           "revision": "014134e3035ad7e4eca5c2ed7bded2375dc3c071"
         },
@@ -1543,7 +1863,7 @@
       },
       "repositories": {
         "inference": {
-          "closureDigest": "3064f6753543f0b26f0dbb2c41221a0ec04422fa7f21fda881a80d2017d2a325",
+          "closureDigest": "01eb67cd1b15062f180127723b1925b9649effe78f317dbcbda14b1d51bfeb84",
           "dirty": false,
           "revision": "96b13b6630132410a29ae1bcdf4d8738db7af28a"
         },
@@ -1798,7 +2118,7 @@
       },
       "repositories": {
         "inference": {
-          "closureDigest": "9930aa538259f7c576c13e3241e872a6486b049fe62b423e5dca3b3fe56f7bae",
+          "closureDigest": "dfd475f85833379b60c9982cd1b823d8ed0fc92da0d47f86d0f212adbe9d6ffc",
           "dirty": false,
           "revision": "014134e3035ad7e4eca5c2ed7bded2375dc3c071"
         },
@@ -2009,7 +2329,7 @@
       },
       "repositories": {
         "inference": {
-          "closureDigest": "3b59da7a8fca3c5fd42171678cbe9d169bf047d8d521030288f2c003e62fcc59",
+          "closureDigest": "8317e58a0b058aa48b005f8e665e4e80be7e13ffdcb6c62caa9fe60e319b24df",
           "dirty": false,
           "revision": "8ffa211aca4f71b37aa874c197360c9d7c1e89be"
         },
@@ -2289,7 +2609,7 @@
       },
       "repositories": {
         "inference": {
-          "closureDigest": "41f6cc256c94ced33cec6344d10b6a550ee39ff72dbed30b77346f7810ea69f1",
+          "closureDigest": "e33aa802f2793a5e2d6d97c00513b7652c8022414ebeeb4d6eea25f98cb85f93",
           "dirty": false,
           "revision": "dfd76b5aef62b2082ed4b18a8eebd2e3e2e07cfb"
         },
@@ -2481,7 +2801,7 @@
       },
       "repositories": {
         "inference": {
-          "closureDigest": "54a7b45b03eb8301e6e85fd1d67558d007ebe5031eb491fe25e95b8f081f4374",
+          "closureDigest": "e864802763ba3cef4b64225477333013aafbdc909b7acec595ffd85985c88250",
           "dirty": false,
           "revision": "fbb00d6b4147bd220fe324050534708c12fb022d"
         },
@@ -2752,7 +3072,7 @@
       },
       "repositories": {
         "inference": {
-          "closureDigest": "41f6cc256c94ced33cec6344d10b6a550ee39ff72dbed30b77346f7810ea69f1",
+          "closureDigest": "e33aa802f2793a5e2d6d97c00513b7652c8022414ebeeb4d6eea25f98cb85f93",
           "dirty": false,
           "revision": "dfd76b5aef62b2082ed4b18a8eebd2e3e2e07cfb"
         },
@@ -2942,7 +3262,7 @@
       },
       "repositories": {
         "inference": {
-          "closureDigest": "fc7f6cd8ff9543881609ca0c408685e197ddf8c2b6e8738a216799e26d0ac66e",
+          "closureDigest": "ed86c0fdc3eee4d38bb2659f122e515b0b473dba44ce76999ad85bbf83c204ec",
           "dirty": false,
           "revision": "1244b82ff81882cfdd4801f3a5d59355e77c67eb"
         },
@@ -3191,7 +3511,7 @@
       },
       "repositories": {
         "inference": {
-          "closureDigest": "9930aa538259f7c576c13e3241e872a6486b049fe62b423e5dca3b3fe56f7bae",
+          "closureDigest": "dfd475f85833379b60c9982cd1b823d8ed0fc92da0d47f86d0f212adbe9d6ffc",
           "dirty": false,
           "revision": "014134e3035ad7e4eca5c2ed7bded2375dc3c071"
         },
@@ -3442,7 +3762,7 @@
       },
       "repositories": {
         "inference": {
-          "closureDigest": "96849569eab9281dd23dca0910b6a58308e329f5bfb481337723a76ce26067f6",
+          "closureDigest": "95b7d434a942f0c13edfa03f263c659c3575f8320c21598ecb796982ad923d85",
           "dirty": false,
           "revision": "75d66db50543ac288deb278853d0f0b432f92c5c"
         },
@@ -3661,7 +3981,7 @@
       },
       "repositories": {
         "inference": {
-          "closureDigest": "54a7b45b03eb8301e6e85fd1d67558d007ebe5031eb491fe25e95b8f081f4374",
+          "closureDigest": "e864802763ba3cef4b64225477333013aafbdc909b7acec595ffd85985c88250",
           "dirty": false,
           "revision": "fbb00d6b4147bd220fe324050534708c12fb022d"
         },
@@ -3888,7 +4208,7 @@
       },
       "repositories": {
         "inference": {
-          "closureDigest": "d355971eb9ecdf2fc80da02703c4de32c42223300636d8386296350551c2f1b8",
+          "closureDigest": "7889221b06356a3ac8b0762efe9f485b2c9998f75d396c1f2c385d3f539bf02a",
           "dirty": false,
           "revision": "fbb00d6b4147bd220fe324050534708c12fb022d"
         },
@@ -4104,7 +4424,7 @@
       },
       "repositories": {
         "inference": {
-          "closureDigest": "54a7b45b03eb8301e6e85fd1d67558d007ebe5031eb491fe25e95b8f081f4374",
+          "closureDigest": "e864802763ba3cef4b64225477333013aafbdc909b7acec595ffd85985c88250",
           "dirty": false,
           "revision": "fbb00d6b4147bd220fe324050534708c12fb022d"
         },
@@ -4322,7 +4642,7 @@
       },
       "repositories": {
         "inference": {
-          "closureDigest": "54a7b45b03eb8301e6e85fd1d67558d007ebe5031eb491fe25e95b8f081f4374",
+          "closureDigest": "e864802763ba3cef4b64225477333013aafbdc909b7acec595ffd85985c88250",
           "dirty": false,
           "revision": "fbb00d6b4147bd220fe324050534708c12fb022d"
         },
@@ -4571,7 +4891,7 @@
       },
       "repositories": {
         "inference": {
-          "closureDigest": "96849569eab9281dd23dca0910b6a58308e329f5bfb481337723a76ce26067f6",
+          "closureDigest": "95b7d434a942f0c13edfa03f263c659c3575f8320c21598ecb796982ad923d85",
           "dirty": false,
           "revision": "75d66db50543ac288deb278853d0f0b432f92c5c"
         },
@@ -4821,7 +5141,7 @@
       },
       "repositories": {
         "inference": {
-          "closureDigest": "9930aa538259f7c576c13e3241e872a6486b049fe62b423e5dca3b3fe56f7bae",
+          "closureDigest": "dfd475f85833379b60c9982cd1b823d8ed0fc92da0d47f86d0f212adbe9d6ffc",
           "dirty": false,
           "revision": "014134e3035ad7e4eca5c2ed7bded2375dc3c071"
         },
@@ -5072,7 +5392,7 @@
       },
       "repositories": {
         "inference": {
-          "closureDigest": "96849569eab9281dd23dca0910b6a58308e329f5bfb481337723a76ce26067f6",
+          "closureDigest": "95b7d434a942f0c13edfa03f263c659c3575f8320c21598ecb796982ad923d85",
           "dirty": false,
           "revision": "75d66db50543ac288deb278853d0f0b432f92c5c"
         },
@@ -5278,7 +5598,7 @@
       },
       "repositories": {
         "inference": {
-          "closureDigest": "3241b636113e3687dee4ffb6070ecc99e4ab48a66e343f303c3f7048a436cdad",
+          "closureDigest": "43e90d2a117e7d834f115fa0152de67ace7f96c845fd8ec88a63bb2ea8e05e66",
           "dirty": false,
           "revision": "5f973a73bf00307240afd81d2778ba9d89349e51"
         },
@@ -5524,7 +5844,7 @@
       },
       "repositories": {
         "inference": {
-          "closureDigest": "6f6cebb6ba86dd630bc0d3fea9da8960ea0f4acf3bbeba28cb4d3665d3b0d1c6",
+          "closureDigest": "ad81098618472cca74f3c81a83734814aa141974ec1a3e930da877984558412a",
           "dirty": false,
           "revision": "75d66db50543ac288deb278853d0f0b432f92c5c"
         },
@@ -5716,7 +6036,7 @@
       },
       "repositories": {
         "inference": {
-          "closureDigest": "3b59da7a8fca3c5fd42171678cbe9d169bf047d8d521030288f2c003e62fcc59",
+          "closureDigest": "8317e58a0b058aa48b005f8e665e4e80be7e13ffdcb6c62caa9fe60e319b24df",
           "dirty": false,
           "revision": "8ffa211aca4f71b37aa874c197360c9d7c1e89be"
         },
@@ -5981,7 +6301,7 @@
       },
       "repositories": {
         "inference": {
-          "closureDigest": "96849569eab9281dd23dca0910b6a58308e329f5bfb481337723a76ce26067f6",
+          "closureDigest": "95b7d434a942f0c13edfa03f263c659c3575f8320c21598ecb796982ad923d85",
           "dirty": false,
           "revision": "75d66db50543ac288deb278853d0f0b432f92c5c"
         },
@@ -6212,7 +6532,7 @@
       },
       "repositories": {
         "inference": {
-          "closureDigest": "9930aa538259f7c576c13e3241e872a6486b049fe62b423e5dca3b3fe56f7bae",
+          "closureDigest": "dfd475f85833379b60c9982cd1b823d8ed0fc92da0d47f86d0f212adbe9d6ffc",
           "dirty": false,
           "revision": "014134e3035ad7e4eca5c2ed7bded2375dc3c071"
         },
@@ -6419,7 +6739,7 @@
       },
       "repositories": {
         "inference": {
-          "closureDigest": "1b3162fefab861e5191839e2e033f8c39f97a0f20b192484c60e724da88823eb",
+          "closureDigest": "906a1b8b6fed68ebac66d63cb4b94bfa86a1cb3bf51ccc3eddbfcc9cd575a7ca",
           "dirty": false,
           "revision": "7fbcb4a2e1513f3be945d9e980b412617c04e9e7"
         },
@@ -6663,7 +6983,7 @@
       },
       "repositories": {
         "inference": {
-          "closureDigest": "6f6cebb6ba86dd630bc0d3fea9da8960ea0f4acf3bbeba28cb4d3665d3b0d1c6",
+          "closureDigest": "ad81098618472cca74f3c81a83734814aa141974ec1a3e930da877984558412a",
           "dirty": false,
           "revision": "75d66db50543ac288deb278853d0f0b432f92c5c"
         },
@@ -6893,7 +7213,7 @@
       },
       "repositories": {
         "inference": {
-          "closureDigest": "96849569eab9281dd23dca0910b6a58308e329f5bfb481337723a76ce26067f6",
+          "closureDigest": "95b7d434a942f0c13edfa03f263c659c3575f8320c21598ecb796982ad923d85",
           "dirty": false,
           "revision": "75d66db50543ac288deb278853d0f0b432f92c5c"
         },
@@ -7104,7 +7424,7 @@
       },
       "repositories": {
         "inference": {
-          "closureDigest": "9930aa538259f7c576c13e3241e872a6486b049fe62b423e5dca3b3fe56f7bae",
+          "closureDigest": "dfd475f85833379b60c9982cd1b823d8ed0fc92da0d47f86d0f212adbe9d6ffc",
           "dirty": false,
           "revision": "40fa7583a01974617e2a7275052d6d446688c956"
         },
@@ -7321,7 +7641,7 @@
       },
       "repositories": {
         "inference": {
-          "closureDigest": "fc7f6cd8ff9543881609ca0c408685e197ddf8c2b6e8738a216799e26d0ac66e",
+          "closureDigest": "ed86c0fdc3eee4d38bb2659f122e515b0b473dba44ce76999ad85bbf83c204ec",
           "dirty": false,
           "revision": "1244b82ff81882cfdd4801f3a5d59355e77c67eb"
         },
@@ -7572,7 +7892,7 @@
       },
       "repositories": {
         "inference": {
-          "closureDigest": "9930aa538259f7c576c13e3241e872a6486b049fe62b423e5dca3b3fe56f7bae",
+          "closureDigest": "dfd475f85833379b60c9982cd1b823d8ed0fc92da0d47f86d0f212adbe9d6ffc",
           "dirty": false,
           "revision": "014134e3035ad7e4eca5c2ed7bded2375dc3c071"
         },
@@ -7797,7 +8117,7 @@
       },
       "repositories": {
         "inference": {
-          "closureDigest": "fc7f6cd8ff9543881609ca0c408685e197ddf8c2b6e8738a216799e26d0ac66e",
+          "closureDigest": "ed86c0fdc3eee4d38bb2659f122e515b0b473dba44ce76999ad85bbf83c204ec",
           "dirty": false,
           "revision": "1244b82ff81882cfdd4801f3a5d59355e77c67eb"
         },
@@ -8053,7 +8373,7 @@
       },
       "repositories": {
         "inference": {
-          "closureDigest": "41f6cc256c94ced33cec6344d10b6a550ee39ff72dbed30b77346f7810ea69f1",
+          "closureDigest": "e33aa802f2793a5e2d6d97c00513b7652c8022414ebeeb4d6eea25f98cb85f93",
           "dirty": false,
           "revision": "dfd76b5aef62b2082ed4b18a8eebd2e3e2e07cfb"
         },
@@ -8273,7 +8593,7 @@
       },
       "repositories": {
         "inference": {
-          "closureDigest": "54a7b45b03eb8301e6e85fd1d67558d007ebe5031eb491fe25e95b8f081f4374",
+          "closureDigest": "e864802763ba3cef4b64225477333013aafbdc909b7acec595ffd85985c88250",
           "dirty": false,
           "revision": "fbb00d6b4147bd220fe324050534708c12fb022d"
         },
@@ -8491,7 +8811,7 @@
       },
       "repositories": {
         "inference": {
-          "closureDigest": "3064f6753543f0b26f0dbb2c41221a0ec04422fa7f21fda881a80d2017d2a325",
+          "closureDigest": "01eb67cd1b15062f180127723b1925b9649effe78f317dbcbda14b1d51bfeb84",
           "dirty": false,
           "revision": "96b13b6630132410a29ae1bcdf4d8738db7af28a"
         },
@@ -8706,7 +9026,7 @@
       },
       "repositories": {
         "inference": {
-          "closureDigest": "54a7b45b03eb8301e6e85fd1d67558d007ebe5031eb491fe25e95b8f081f4374",
+          "closureDigest": "e864802763ba3cef4b64225477333013aafbdc909b7acec595ffd85985c88250",
           "dirty": false,
           "revision": "fbb00d6b4147bd220fe324050534708c12fb022d"
         },
@@ -8916,7 +9236,7 @@
       },
       "repositories": {
         "inference": {
-          "closureDigest": "1b3162fefab861e5191839e2e033f8c39f97a0f20b192484c60e724da88823eb",
+          "closureDigest": "906a1b8b6fed68ebac66d63cb4b94bfa86a1cb3bf51ccc3eddbfcc9cd575a7ca",
           "dirty": false,
           "revision": "7fbcb4a2e1513f3be945d9e980b412617c04e9e7"
         },
@@ -9121,7 +9441,7 @@
       },
       "repositories": {
         "inference": {
-          "closureDigest": "28e1ee17ae14150cf7d82c4179f13193d1e474d27bca1faeee85dab1b7ad5b5f",
+          "closureDigest": "cb3acbe8e2a5aa7ca6f174b2edf18d1970ac8cce55d5cd5c4095c6b1400b315b",
           "dirty": false,
           "revision": "5f973a73bf00307240afd81d2778ba9d89349e51"
         },
@@ -9330,7 +9650,7 @@
       },
       "repositories": {
         "inference": {
-          "closureDigest": "28e1ee17ae14150cf7d82c4179f13193d1e474d27bca1faeee85dab1b7ad5b5f",
+          "closureDigest": "cb3acbe8e2a5aa7ca6f174b2edf18d1970ac8cce55d5cd5c4095c6b1400b315b",
           "dirty": false,
           "revision": "5f973a73bf00307240afd81d2778ba9d89349e51"
         },
@@ -9522,7 +9842,7 @@
       },
       "repositories": {
         "inference": {
-          "closureDigest": "1b3162fefab861e5191839e2e033f8c39f97a0f20b192484c60e724da88823eb",
+          "closureDigest": "906a1b8b6fed68ebac66d63cb4b94bfa86a1cb3bf51ccc3eddbfcc9cd575a7ca",
           "dirty": false,
           "revision": "7fbcb4a2e1513f3be945d9e980b412617c04e9e7"
         },
@@ -9793,7 +10113,7 @@
       },
       "repositories": {
         "inference": {
-          "closureDigest": "5b9092c67e0f7954999491b3ff4ec5880da6c6c12411aa09d04eea5df663f1cc",
+          "closureDigest": "ef40d33b29c572593e8db362f74b65fce65249f9c98b1a7c93beafbf3dddbe02",
           "dirty": false,
           "revision": "d48023204cd3a4f3f8eb060f79803dccaddcb482"
         },
@@ -9983,7 +10303,7 @@
       },
       "repositories": {
         "inference": {
-          "closureDigest": "fc7f6cd8ff9543881609ca0c408685e197ddf8c2b6e8738a216799e26d0ac66e",
+          "closureDigest": "ed86c0fdc3eee4d38bb2659f122e515b0b473dba44ce76999ad85bbf83c204ec",
           "dirty": false,
           "revision": "1244b82ff81882cfdd4801f3a5d59355e77c67eb"
         },
@@ -10246,7 +10566,7 @@
       },
       "repositories": {
         "inference": {
-          "closureDigest": "355749219c38b37af5054df047b0f44b65ecd8f822fc258243eee9d09c1d0247",
+          "closureDigest": "743a9cfae988552032ea8268fba38375ae2700be95a35990b193f7fd47a2b3c1",
           "dirty": false,
           "revision": "10831e4ca5b8bf780319a8ee7f21427175075448"
         },
@@ -10436,7 +10756,7 @@
       },
       "repositories": {
         "inference": {
-          "closureDigest": "1b3162fefab861e5191839e2e033f8c39f97a0f20b192484c60e724da88823eb",
+          "closureDigest": "906a1b8b6fed68ebac66d63cb4b94bfa86a1cb3bf51ccc3eddbfcc9cd575a7ca",
           "dirty": false,
           "revision": "7fbcb4a2e1513f3be945d9e980b412617c04e9e7"
         },
@@ -10645,7 +10965,7 @@
       },
       "repositories": {
         "inference": {
-          "closureDigest": "fc7f6cd8ff9543881609ca0c408685e197ddf8c2b6e8738a216799e26d0ac66e",
+          "closureDigest": "ed86c0fdc3eee4d38bb2659f122e515b0b473dba44ce76999ad85bbf83c204ec",
           "dirty": false,
           "revision": "1244b82ff81882cfdd4801f3a5d59355e77c67eb"
         },
@@ -10862,7 +11182,7 @@
       },
       "repositories": {
         "inference": {
-          "closureDigest": "fc7f6cd8ff9543881609ca0c408685e197ddf8c2b6e8738a216799e26d0ac66e",
+          "closureDigest": "ed86c0fdc3eee4d38bb2659f122e515b0b473dba44ce76999ad85bbf83c204ec",
           "dirty": false,
           "revision": "1244b82ff81882cfdd4801f3a5d59355e77c67eb"
         },
@@ -11068,7 +11388,7 @@
       },
       "repositories": {
         "inference": {
-          "closureDigest": "54a7b45b03eb8301e6e85fd1d67558d007ebe5031eb491fe25e95b8f081f4374",
+          "closureDigest": "e864802763ba3cef4b64225477333013aafbdc909b7acec595ffd85985c88250",
           "dirty": false,
           "revision": "fbb00d6b4147bd220fe324050534708c12fb022d"
         },
@@ -11323,7 +11643,7 @@
       },
       "repositories": {
         "inference": {
-          "closureDigest": "5b9092c67e0f7954999491b3ff4ec5880da6c6c12411aa09d04eea5df663f1cc",
+          "closureDigest": "ef40d33b29c572593e8db362f74b65fce65249f9c98b1a7c93beafbf3dddbe02",
           "dirty": false,
           "revision": "d48023204cd3a4f3f8eb060f79803dccaddcb482"
         },
@@ -11596,7 +11916,7 @@
       },
       "repositories": {
         "inference": {
-          "closureDigest": "5b9092c67e0f7954999491b3ff4ec5880da6c6c12411aa09d04eea5df663f1cc",
+          "closureDigest": "ef40d33b29c572593e8db362f74b65fce65249f9c98b1a7c93beafbf3dddbe02",
           "dirty": false,
           "revision": "d48023204cd3a4f3f8eb060f79803dccaddcb482"
         },
@@ -11788,7 +12108,7 @@
       },
       "repositories": {
         "inference": {
-          "closureDigest": "1b3162fefab861e5191839e2e033f8c39f97a0f20b192484c60e724da88823eb",
+          "closureDigest": "906a1b8b6fed68ebac66d63cb4b94bfa86a1cb3bf51ccc3eddbfcc9cd575a7ca",
           "dirty": false,
           "revision": "7fbcb4a2e1513f3be945d9e980b412617c04e9e7"
         },
@@ -11998,7 +12318,7 @@
       },
       "repositories": {
         "inference": {
-          "closureDigest": "54a7b45b03eb8301e6e85fd1d67558d007ebe5031eb491fe25e95b8f081f4374",
+          "closureDigest": "e864802763ba3cef4b64225477333013aafbdc909b7acec595ffd85985c88250",
           "dirty": false,
           "revision": "fbb00d6b4147bd220fe324050534708c12fb022d"
         },
@@ -12256,7 +12576,7 @@
       },
       "repositories": {
         "inference": {
-          "closureDigest": "9930aa538259f7c576c13e3241e872a6486b049fe62b423e5dca3b3fe56f7bae",
+          "closureDigest": "dfd475f85833379b60c9982cd1b823d8ed0fc92da0d47f86d0f212adbe9d6ffc",
           "dirty": false,
           "revision": "014134e3035ad7e4eca5c2ed7bded2375dc3c071"
         },
@@ -12466,7 +12786,7 @@
       },
       "repositories": {
         "inference": {
-          "closureDigest": "1b3162fefab861e5191839e2e033f8c39f97a0f20b192484c60e724da88823eb",
+          "closureDigest": "906a1b8b6fed68ebac66d63cb4b94bfa86a1cb3bf51ccc3eddbfcc9cd575a7ca",
           "dirty": false,
           "revision": "7fbcb4a2e1513f3be945d9e980b412617c04e9e7"
         },
@@ -12677,7 +12997,7 @@
       },
       "repositories": {
         "inference": {
-          "closureDigest": "3b59da7a8fca3c5fd42171678cbe9d169bf047d8d521030288f2c003e62fcc59",
+          "closureDigest": "8317e58a0b058aa48b005f8e665e4e80be7e13ffdcb6c62caa9fe60e319b24df",
           "dirty": false,
           "revision": "8ffa211aca4f71b37aa874c197360c9d7c1e89be"
         },
@@ -12906,7 +13226,7 @@
       },
       "repositories": {
         "inference": {
-          "closureDigest": "3b59da7a8fca3c5fd42171678cbe9d169bf047d8d521030288f2c003e62fcc59",
+          "closureDigest": "8317e58a0b058aa48b005f8e665e4e80be7e13ffdcb6c62caa9fe60e319b24df",
           "dirty": false,
           "revision": "8ffa211aca4f71b37aa874c197360c9d7c1e89be"
         },
@@ -13178,7 +13498,7 @@
       },
       "repositories": {
         "inference": {
-          "closureDigest": "6f6cebb6ba86dd630bc0d3fea9da8960ea0f4acf3bbeba28cb4d3665d3b0d1c6",
+          "closureDigest": "ad81098618472cca74f3c81a83734814aa141974ec1a3e930da877984558412a",
           "dirty": false,
           "revision": "75d66db50543ac288deb278853d0f0b432f92c5c"
         },
@@ -13408,7 +13728,7 @@
       },
       "repositories": {
         "inference": {
-          "closureDigest": "9930aa538259f7c576c13e3241e872a6486b049fe62b423e5dca3b3fe56f7bae",
+          "closureDigest": "dfd475f85833379b60c9982cd1b823d8ed0fc92da0d47f86d0f212adbe9d6ffc",
           "dirty": false,
           "revision": "014134e3035ad7e4eca5c2ed7bded2375dc3c071"
         },
@@ -13617,7 +13937,7 @@
       },
       "repositories": {
         "inference": {
-          "closureDigest": "fc7f6cd8ff9543881609ca0c408685e197ddf8c2b6e8738a216799e26d0ac66e",
+          "closureDigest": "ed86c0fdc3eee4d38bb2659f122e515b0b473dba44ce76999ad85bbf83c204ec",
           "dirty": false,
           "revision": "1244b82ff81882cfdd4801f3a5d59355e77c67eb"
         },
@@ -13863,7 +14183,7 @@
       },
       "repositories": {
         "inference": {
-          "closureDigest": "9930aa538259f7c576c13e3241e872a6486b049fe62b423e5dca3b3fe56f7bae",
+          "closureDigest": "dfd475f85833379b60c9982cd1b823d8ed0fc92da0d47f86d0f212adbe9d6ffc",
           "dirty": false,
           "revision": "014134e3035ad7e4eca5c2ed7bded2375dc3c071"
         },
@@ -14040,7 +14360,7 @@
       },
       "repositories": {
         "inference": {
-          "closureDigest": "3241b636113e3687dee4ffb6070ecc99e4ab48a66e343f303c3f7048a436cdad",
+          "closureDigest": "43e90d2a117e7d834f115fa0152de67ace7f96c845fd8ec88a63bb2ea8e05e66",
           "dirty": false,
           "revision": "5f973a73bf00307240afd81d2778ba9d89349e51"
         },
@@ -14294,7 +14614,7 @@
       },
       "repositories": {
         "inference": {
-          "closureDigest": "9930aa538259f7c576c13e3241e872a6486b049fe62b423e5dca3b3fe56f7bae",
+          "closureDigest": "dfd475f85833379b60c9982cd1b823d8ed0fc92da0d47f86d0f212adbe9d6ffc",
           "dirty": false,
           "revision": "014134e3035ad7e4eca5c2ed7bded2375dc3c071"
         },
@@ -14553,7 +14873,7 @@
       },
       "repositories": {
         "inference": {
-          "closureDigest": "96849569eab9281dd23dca0910b6a58308e329f5bfb481337723a76ce26067f6",
+          "closureDigest": "95b7d434a942f0c13edfa03f263c659c3575f8320c21598ecb796982ad923d85",
           "dirty": false,
           "revision": "75d66db50543ac288deb278853d0f0b432f92c5c"
         },
@@ -14735,7 +15055,7 @@
       },
       "repositories": {
         "inference": {
-          "closureDigest": "d5c3c9abd4e31920a0e0c0c0a5ad538f1fd10b860ed06d6910db8d3ab1b1d5e4",
+          "closureDigest": "2131811138c4ca7a52333749c7989923f41690d043b3e69b4340f21d9e0051c4",
           "dirty": false,
           "revision": "5ffd7612e7de4e76b6db00a7148ed3d9c15b4c0d"
         },
@@ -15007,7 +15327,7 @@
       },
       "repositories": {
         "inference": {
-          "closureDigest": "355749219c38b37af5054df047b0f44b65ecd8f822fc258243eee9d09c1d0247",
+          "closureDigest": "743a9cfae988552032ea8268fba38375ae2700be95a35990b193f7fd47a2b3c1",
           "dirty": false,
           "revision": "10831e4ca5b8bf780319a8ee7f21427175075448"
         },
@@ -15193,7 +15513,7 @@
       },
       "repositories": {
         "inference": {
-          "closureDigest": "fc7f6cd8ff9543881609ca0c408685e197ddf8c2b6e8738a216799e26d0ac66e",
+          "closureDigest": "ed86c0fdc3eee4d38bb2659f122e515b0b473dba44ce76999ad85bbf83c204ec",
           "dirty": false,
           "revision": "1244b82ff81882cfdd4801f3a5d59355e77c67eb"
         },
@@ -15369,7 +15689,7 @@
       },
       "repositories": {
         "inference": {
-          "closureDigest": "28e1ee17ae14150cf7d82c4179f13193d1e474d27bca1faeee85dab1b7ad5b5f",
+          "closureDigest": "cb3acbe8e2a5aa7ca6f174b2edf18d1970ac8cce55d5cd5c4095c6b1400b315b",
           "dirty": false,
           "revision": "5f973a73bf00307240afd81d2778ba9d89349e51"
         },
@@ -15604,7 +15924,7 @@
       },
       "repositories": {
         "inference": {
-          "closureDigest": "54a7b45b03eb8301e6e85fd1d67558d007ebe5031eb491fe25e95b8f081f4374",
+          "closureDigest": "e864802763ba3cef4b64225477333013aafbdc909b7acec595ffd85985c88250",
           "dirty": false,
           "revision": "fbb00d6b4147bd220fe324050534708c12fb022d"
         },
@@ -15834,7 +16154,7 @@
       },
       "repositories": {
         "inference": {
-          "closureDigest": "9930aa538259f7c576c13e3241e872a6486b049fe62b423e5dca3b3fe56f7bae",
+          "closureDigest": "dfd475f85833379b60c9982cd1b823d8ed0fc92da0d47f86d0f212adbe9d6ffc",
           "dirty": false,
           "revision": "40fa7583a01974617e2a7275052d6d446688c956"
         },
@@ -16064,7 +16384,7 @@
       },
       "repositories": {
         "inference": {
-          "closureDigest": "54a7b45b03eb8301e6e85fd1d67558d007ebe5031eb491fe25e95b8f081f4374",
+          "closureDigest": "e864802763ba3cef4b64225477333013aafbdc909b7acec595ffd85985c88250",
           "dirty": false,
           "revision": "fbb00d6b4147bd220fe324050534708c12fb022d"
         },
@@ -16359,7 +16679,7 @@
       },
       "repositories": {
         "inference": {
-          "closureDigest": "5b9092c67e0f7954999491b3ff4ec5880da6c6c12411aa09d04eea5df663f1cc",
+          "closureDigest": "ef40d33b29c572593e8db362f74b65fce65249f9c98b1a7c93beafbf3dddbe02",
           "dirty": false,
           "revision": "d48023204cd3a4f3f8eb060f79803dccaddcb482"
         },
@@ -16585,7 +16905,7 @@
       },
       "repositories": {
         "inference": {
-          "closureDigest": "54a7b45b03eb8301e6e85fd1d67558d007ebe5031eb491fe25e95b8f081f4374",
+          "closureDigest": "e864802763ba3cef4b64225477333013aafbdc909b7acec595ffd85985c88250",
           "dirty": false,
           "revision": "fbb00d6b4147bd220fe324050534708c12fb022d"
         },
@@ -16815,7 +17135,7 @@
       },
       "repositories": {
         "inference": {
-          "closureDigest": "9930aa538259f7c576c13e3241e872a6486b049fe62b423e5dca3b3fe56f7bae",
+          "closureDigest": "dfd475f85833379b60c9982cd1b823d8ed0fc92da0d47f86d0f212adbe9d6ffc",
           "dirty": false,
           "revision": "014134e3035ad7e4eca5c2ed7bded2375dc3c071"
         },
@@ -17074,7 +17394,7 @@
       },
       "repositories": {
         "inference": {
-          "closureDigest": "9930aa538259f7c576c13e3241e872a6486b049fe62b423e5dca3b3fe56f7bae",
+          "closureDigest": "dfd475f85833379b60c9982cd1b823d8ed0fc92da0d47f86d0f212adbe9d6ffc",
           "dirty": false,
           "revision": "014134e3035ad7e4eca5c2ed7bded2375dc3c071"
         },
@@ -17256,7 +17576,7 @@
       },
       "repositories": {
         "inference": {
-          "closureDigest": "d5c3c9abd4e31920a0e0c0c0a5ad538f1fd10b860ed06d6910db8d3ab1b1d5e4",
+          "closureDigest": "2131811138c4ca7a52333749c7989923f41690d043b3e69b4340f21d9e0051c4",
           "dirty": false,
           "revision": "5ffd7612e7de4e76b6db00a7148ed3d9c15b4c0d"
         },
@@ -17486,7 +17806,7 @@
       },
       "repositories": {
         "inference": {
-          "closureDigest": "96849569eab9281dd23dca0910b6a58308e329f5bfb481337723a76ce26067f6",
+          "closureDigest": "95b7d434a942f0c13edfa03f263c659c3575f8320c21598ecb796982ad923d85",
           "dirty": false,
           "revision": "75d66db50543ac288deb278853d0f0b432f92c5c"
         },
@@ -17686,7 +18006,7 @@
       },
       "repositories": {
         "inference": {
-          "closureDigest": "d5c3c9abd4e31920a0e0c0c0a5ad538f1fd10b860ed06d6910db8d3ab1b1d5e4",
+          "closureDigest": "2131811138c4ca7a52333749c7989923f41690d043b3e69b4340f21d9e0051c4",
           "dirty": false,
           "revision": "5ffd7612e7de4e76b6db00a7148ed3d9c15b4c0d"
         },
@@ -17949,7 +18269,7 @@
       },
       "repositories": {
         "inference": {
-          "closureDigest": "355749219c38b37af5054df047b0f44b65ecd8f822fc258243eee9d09c1d0247",
+          "closureDigest": "743a9cfae988552032ea8268fba38375ae2700be95a35990b193f7fd47a2b3c1",
           "dirty": false,
           "revision": "10831e4ca5b8bf780319a8ee7f21427175075448"
         },
@@ -18126,7 +18446,7 @@
       },
       "repositories": {
         "inference": {
-          "closureDigest": "28e1ee17ae14150cf7d82c4179f13193d1e474d27bca1faeee85dab1b7ad5b5f",
+          "closureDigest": "cb3acbe8e2a5aa7ca6f174b2edf18d1970ac8cce55d5cd5c4095c6b1400b315b",
           "dirty": false,
           "revision": "5f973a73bf00307240afd81d2778ba9d89349e51"
         },
@@ -18291,7 +18611,7 @@
       },
       "repositories": {
         "inference": {
-          "closureDigest": "d5c3c9abd4e31920a0e0c0c0a5ad538f1fd10b860ed06d6910db8d3ab1b1d5e4",
+          "closureDigest": "2131811138c4ca7a52333749c7989923f41690d043b3e69b4340f21d9e0051c4",
           "dirty": false,
           "revision": "5ffd7612e7de4e76b6db00a7148ed3d9c15b4c0d"
         },
@@ -18522,7 +18842,7 @@
       },
       "repositories": {
         "inference": {
-          "closureDigest": "96849569eab9281dd23dca0910b6a58308e329f5bfb481337723a76ce26067f6",
+          "closureDigest": "95b7d434a942f0c13edfa03f263c659c3575f8320c21598ecb796982ad923d85",
           "dirty": false,
           "revision": "75d66db50543ac288deb278853d0f0b432f92c5c"
         },
@@ -18753,7 +19073,7 @@
       },
       "repositories": {
         "inference": {
-          "closureDigest": "1b3162fefab861e5191839e2e033f8c39f97a0f20b192484c60e724da88823eb",
+          "closureDigest": "906a1b8b6fed68ebac66d63cb4b94bfa86a1cb3bf51ccc3eddbfcc9cd575a7ca",
           "dirty": false,
           "revision": "7fbcb4a2e1513f3be945d9e980b412617c04e9e7"
         },
@@ -19021,7 +19341,7 @@
       },
       "repositories": {
         "inference": {
-          "closureDigest": "96849569eab9281dd23dca0910b6a58308e329f5bfb481337723a76ce26067f6",
+          "closureDigest": "95b7d434a942f0c13edfa03f263c659c3575f8320c21598ecb796982ad923d85",
           "dirty": false,
           "revision": "75d66db50543ac288deb278853d0f0b432f92c5c"
         },
@@ -19233,7 +19553,7 @@
       },
       "repositories": {
         "inference": {
-          "closureDigest": "54a7b45b03eb8301e6e85fd1d67558d007ebe5031eb491fe25e95b8f081f4374",
+          "closureDigest": "e864802763ba3cef4b64225477333013aafbdc909b7acec595ffd85985c88250",
           "dirty": false,
           "revision": "fbb00d6b4147bd220fe324050534708c12fb022d"
         },
@@ -19461,7 +19781,7 @@
       },
       "repositories": {
         "inference": {
-          "closureDigest": "1b3162fefab861e5191839e2e033f8c39f97a0f20b192484c60e724da88823eb",
+          "closureDigest": "906a1b8b6fed68ebac66d63cb4b94bfa86a1cb3bf51ccc3eddbfcc9cd575a7ca",
           "dirty": false,
           "revision": "7fbcb4a2e1513f3be945d9e980b412617c04e9e7"
         },
@@ -19657,7 +19977,7 @@
       },
       "repositories": {
         "inference": {
-          "closureDigest": "3241b636113e3687dee4ffb6070ecc99e4ab48a66e343f303c3f7048a436cdad",
+          "closureDigest": "43e90d2a117e7d834f115fa0152de67ace7f96c845fd8ec88a63bb2ea8e05e66",
           "dirty": false,
           "revision": "5f973a73bf00307240afd81d2778ba9d89349e51"
         },
@@ -19892,7 +20212,7 @@
       },
       "repositories": {
         "inference": {
-          "closureDigest": "96849569eab9281dd23dca0910b6a58308e329f5bfb481337723a76ce26067f6",
+          "closureDigest": "95b7d434a942f0c13edfa03f263c659c3575f8320c21598ecb796982ad923d85",
           "dirty": false,
           "revision": "75d66db50543ac288deb278853d0f0b432f92c5c"
         },
@@ -20118,7 +20438,7 @@
       },
       "repositories": {
         "inference": {
-          "closureDigest": "1b3162fefab861e5191839e2e033f8c39f97a0f20b192484c60e724da88823eb",
+          "closureDigest": "906a1b8b6fed68ebac66d63cb4b94bfa86a1cb3bf51ccc3eddbfcc9cd575a7ca",
           "dirty": false,
           "revision": "7fbcb4a2e1513f3be945d9e980b412617c04e9e7"
         },
@@ -20361,7 +20681,7 @@
       },
       "repositories": {
         "inference": {
-          "closureDigest": "6f6cebb6ba86dd630bc0d3fea9da8960ea0f4acf3bbeba28cb4d3665d3b0d1c6",
+          "closureDigest": "ad81098618472cca74f3c81a83734814aa141974ec1a3e930da877984558412a",
           "dirty": false,
           "revision": "75d66db50543ac288deb278853d0f0b432f92c5c"
         },
@@ -20552,7 +20872,7 @@
       },
       "repositories": {
         "inference": {
-          "closureDigest": "fc7f6cd8ff9543881609ca0c408685e197ddf8c2b6e8738a216799e26d0ac66e",
+          "closureDigest": "ed86c0fdc3eee4d38bb2659f122e515b0b473dba44ce76999ad85bbf83c204ec",
           "dirty": false,
           "revision": "1244b82ff81882cfdd4801f3a5d59355e77c67eb"
         },
@@ -20821,7 +21141,7 @@
       },
       "repositories": {
         "inference": {
-          "closureDigest": "96849569eab9281dd23dca0910b6a58308e329f5bfb481337723a76ce26067f6",
+          "closureDigest": "95b7d434a942f0c13edfa03f263c659c3575f8320c21598ecb796982ad923d85",
           "dirty": false,
           "revision": "75d66db50543ac288deb278853d0f0b432f92c5c"
         },
@@ -21027,7 +21347,7 @@
       },
       "repositories": {
         "inference": {
-          "closureDigest": "28e1ee17ae14150cf7d82c4179f13193d1e474d27bca1faeee85dab1b7ad5b5f",
+          "closureDigest": "cb3acbe8e2a5aa7ca6f174b2edf18d1970ac8cce55d5cd5c4095c6b1400b315b",
           "dirty": false,
           "revision": "5f973a73bf00307240afd81d2778ba9d89349e51"
         },
@@ -21227,7 +21547,7 @@
       },
       "repositories": {
         "inference": {
-          "closureDigest": "3241b636113e3687dee4ffb6070ecc99e4ab48a66e343f303c3f7048a436cdad",
+          "closureDigest": "43e90d2a117e7d834f115fa0152de67ace7f96c845fd8ec88a63bb2ea8e05e66",
           "dirty": false,
           "revision": "5f973a73bf00307240afd81d2778ba9d89349e51"
         },
@@ -21489,7 +21809,7 @@
       },
       "repositories": {
         "inference": {
-          "closureDigest": "96849569eab9281dd23dca0910b6a58308e329f5bfb481337723a76ce26067f6",
+          "closureDigest": "95b7d434a942f0c13edfa03f263c659c3575f8320c21598ecb796982ad923d85",
           "dirty": false,
           "revision": "75d66db50543ac288deb278853d0f0b432f92c5c"
         },
@@ -21765,7 +22085,7 @@
       },
       "repositories": {
         "inference": {
-          "closureDigest": "5b9092c67e0f7954999491b3ff4ec5880da6c6c12411aa09d04eea5df663f1cc",
+          "closureDigest": "ef40d33b29c572593e8db362f74b65fce65249f9c98b1a7c93beafbf3dddbe02",
           "dirty": false,
           "revision": "d48023204cd3a4f3f8eb060f79803dccaddcb482"
         },
@@ -21985,7 +22305,7 @@
       },
       "repositories": {
         "inference": {
-          "closureDigest": "1b3162fefab861e5191839e2e033f8c39f97a0f20b192484c60e724da88823eb",
+          "closureDigest": "906a1b8b6fed68ebac66d63cb4b94bfa86a1cb3bf51ccc3eddbfcc9cd575a7ca",
           "dirty": false,
           "revision": "7fbcb4a2e1513f3be945d9e980b412617c04e9e7"
         },
@@ -22231,7 +22551,7 @@
       },
       "repositories": {
         "inference": {
-          "closureDigest": "9930aa538259f7c576c13e3241e872a6486b049fe62b423e5dca3b3fe56f7bae",
+          "closureDigest": "dfd475f85833379b60c9982cd1b823d8ed0fc92da0d47f86d0f212adbe9d6ffc",
           "dirty": false,
           "revision": "014134e3035ad7e4eca5c2ed7bded2375dc3c071"
         },
@@ -22462,7 +22782,7 @@
       },
       "repositories": {
         "inference": {
-          "closureDigest": "96849569eab9281dd23dca0910b6a58308e329f5bfb481337723a76ce26067f6",
+          "closureDigest": "95b7d434a942f0c13edfa03f263c659c3575f8320c21598ecb796982ad923d85",
           "dirty": false,
           "revision": "75d66db50543ac288deb278853d0f0b432f92c5c"
         },
@@ -22672,7 +22992,7 @@
       },
       "repositories": {
         "inference": {
-          "closureDigest": "54a7b45b03eb8301e6e85fd1d67558d007ebe5031eb491fe25e95b8f081f4374",
+          "closureDigest": "e864802763ba3cef4b64225477333013aafbdc909b7acec595ffd85985c88250",
           "dirty": false,
           "revision": "fbb00d6b4147bd220fe324050534708c12fb022d"
         },
@@ -22881,7 +23201,7 @@
       },
       "repositories": {
         "inference": {
-          "closureDigest": "54a7b45b03eb8301e6e85fd1d67558d007ebe5031eb491fe25e95b8f081f4374",
+          "closureDigest": "e864802763ba3cef4b64225477333013aafbdc909b7acec595ffd85985c88250",
           "dirty": false,
           "revision": "fbb00d6b4147bd220fe324050534708c12fb022d"
         },
@@ -23157,7 +23477,7 @@
       },
       "repositories": {
         "inference": {
-          "closureDigest": "41f6cc256c94ced33cec6344d10b6a550ee39ff72dbed30b77346f7810ea69f1",
+          "closureDigest": "e33aa802f2793a5e2d6d97c00513b7652c8022414ebeeb4d6eea25f98cb85f93",
           "dirty": false,
           "revision": "dfd76b5aef62b2082ed4b18a8eebd2e3e2e07cfb"
         },
@@ -23440,7 +23760,7 @@
       },
       "repositories": {
         "inference": {
-          "closureDigest": "355749219c38b37af5054df047b0f44b65ecd8f822fc258243eee9d09c1d0247",
+          "closureDigest": "743a9cfae988552032ea8268fba38375ae2700be95a35990b193f7fd47a2b3c1",
           "dirty": false,
           "revision": "10831e4ca5b8bf780319a8ee7f21427175075448"
         },
@@ -23670,7 +23990,7 @@
       },
       "repositories": {
         "inference": {
-          "closureDigest": "96849569eab9281dd23dca0910b6a58308e329f5bfb481337723a76ce26067f6",
+          "closureDigest": "95b7d434a942f0c13edfa03f263c659c3575f8320c21598ecb796982ad923d85",
           "dirty": false,
           "revision": "75d66db50543ac288deb278853d0f0b432f92c5c"
         },
@@ -23852,7 +24172,7 @@
       },
       "repositories": {
         "inference": {
-          "closureDigest": "d5c3c9abd4e31920a0e0c0c0a5ad538f1fd10b860ed06d6910db8d3ab1b1d5e4",
+          "closureDigest": "2131811138c4ca7a52333749c7989923f41690d043b3e69b4340f21d9e0051c4",
           "dirty": false,
           "revision": "5ffd7612e7de4e76b6db00a7148ed3d9c15b4c0d"
         },
@@ -24080,7 +24400,7 @@
       },
       "repositories": {
         "inference": {
-          "closureDigest": "fc7f6cd8ff9543881609ca0c408685e197ddf8c2b6e8738a216799e26d0ac66e",
+          "closureDigest": "ed86c0fdc3eee4d38bb2659f122e515b0b473dba44ce76999ad85bbf83c204ec",
           "dirty": false,
           "revision": "1244b82ff81882cfdd4801f3a5d59355e77c67eb"
         },
@@ -24288,7 +24608,7 @@
       },
       "repositories": {
         "inference": {
-          "closureDigest": "fc7f6cd8ff9543881609ca0c408685e197ddf8c2b6e8738a216799e26d0ac66e",
+          "closureDigest": "ed86c0fdc3eee4d38bb2659f122e515b0b473dba44ce76999ad85bbf83c204ec",
           "dirty": false,
           "revision": "1244b82ff81882cfdd4801f3a5d59355e77c67eb"
         },
@@ -24497,7 +24817,7 @@
       },
       "repositories": {
         "inference": {
-          "closureDigest": "1b3162fefab861e5191839e2e033f8c39f97a0f20b192484c60e724da88823eb",
+          "closureDigest": "906a1b8b6fed68ebac66d63cb4b94bfa86a1cb3bf51ccc3eddbfcc9cd575a7ca",
           "dirty": false,
           "revision": "7fbcb4a2e1513f3be945d9e980b412617c04e9e7"
         },

@@ -1,7 +1,7 @@
 {
-  "_comment": "Exact audit of production include_str!/include_bytes! sites and known hand-ports in the pinned inference revision. The digest is checked by check-license-coverage.mjs; any inference pin change forces a new audit. Tests/fixtures are outside this production inventory. Pin b646a6f8 advances inference main through the merged epic-20738 feature train. Relative to the prior c6abde8f audit, the exact scanner finds 650 provenance candidates (up one) and the same 96 production-Rust crate prefixes. The one added candidate is crates/media/candle-gen/candle-gen-sdxl/src/control_provider.rs, covered by the existing SDXL architecture disposition; no path was removed. The normalized marker changed only for the adjacent candle-gen-sdxl/src/lib.rs registration and documentation in the same source area, 15 other existing rows differ only in git_blob_sha1, and no source-area assignment changed. The pre-existing two unclassified MiniMax-H3 crate prefixes and eighteen ported-source candidates remain the same 20 report-only compliance worklist items under sc-19751. No LICENSE file or production include_str!/include_bytes! inventory changed.",
-  "inferenceRevision": "624fed20c1969b851b60265e3b9dac951068c1f5",
-  "auditDigest": "2846f4c35aabc50a77ebe918cb8cd0caf8143f7c4fb226eb213e5ac6c81c53d2",
+  "_comment": "Exact audit of production include_str!/include_bytes! sites and known hand-ports in the pinned inference revision. The digest is checked by check-license-coverage.mjs; any inference pin change forces a new audit. Tests/fixtures are outside this production inventory. Pin f32fce06 advances inference main with the ArtifactSeal content-digest memo (gen-core, PR #869) and the LTX 2.5 terminal quant campaign work (PRs #865/#868). The exact scanner records 667 provenance candidates and 97 production-Rust crate prefixes at this pin \u2014 both unchanged from the previous pin; the only candidate movement is two candle-gen-ltx marker hashes (src/lib.rs, src/transformer.rs). Current report-only licensing findings must be read from the checker output; this summary does not freeze their counts.",
+  "inferenceRevision": "f32fce06804e21eec86d488c8ba320eaf4cbfe11",
+  "auditDigest": "b5e539c263948508477977d398de636eac8ec82de0805753cf4a08a6d65ffeb4",
   "artifacts": [
     {
       "id": "cmudict",
@@ -17,12 +17,12 @@
   "provenanceScan": {
     "scanner": "scripts/scan-inference-provenance.mjs",
     "candidateList": "config/inference-provenance-candidates.tsv",
-    "revision": "624fed20c1969b851b60265e3b9dac951068c1f5",
+    "revision": "f32fce06804e21eec86d488c8ba320eaf4cbfe11",
     "pathFilter": "production .rs; exclude tests, testdata, benches, examples, and _vendor path segments",
     "markerRegex": "faithful ... port(s), ported from, port(s) of, vendor(s)/vendored, transcribed, copied ... verbatim, adapted from, mirror(s|ed|ing) ... <port-object>, derived from ... <port-object>, reimplemented/reimplementation from|of, translated/transliterated from, from the reference (not reference-), original implementation|repo(sitory), based on ... <port-object>, follow(s|ing) ... <port-object>, reimplements ... <port-object>, rewrite of ... <port-object>, model(l)ed after ... <port-object>, ported to ... from, 1:1 with ... <port-object>, line-for-line ... <port-object> (case-insensitive; <port-object> = reference(not followed by -)|upstream|python|pytorch|torch|diffusers|comfy(ui)|transformers|implementation). `original` is NOT a bare port-object and `followed` is excluded: both produced verified false positives on first-party prose (sc-15191 review).",
     "normalization": "matched marker text lowercased, internal whitespace collapsed, sorted, newline joined",
-    "matchedFiles": 651,
-    "populationSha256": "be8809253603c76c8c0bfe5cafc63a07be03af0805d597fdc7ac6990e2acc65c"
+    "matchedFiles": 667,
+    "populationSha256": "f7c730b767a9eb8097223e99871d9e7a339c3a3001c5d77a9e79a1b091737d05"
   },
   "portedSourceAreas": [
     {
@@ -661,7 +661,7 @@
         "crates/media/candle-gen/candle-gen-joycaption/src/prompt.rs",
         "crates/media/mlx-gen/src/caption/joycaption.rs"
       ],
-      "provenance": "BOTH JoyCaption prompt modules — the Candle lane's and its MLX twin — reproduce the caption-type taxonomy, prompt template bodies and name options from fpgaminer/joycaption's gradio-app/app.py (CAPTION_TYPE_MAP, NAME_OPTION), Apache-2.0. sc-15443 added byte-identical Apache Sec. 4(b) modification notices to both, which made them marker-bearing and is why they enter the inventory at this revision. Near-verbatim reproduced CONTENT, not an architectural port, so both carry the upstream licence rather than a crate-prefix architecture disposition. The MLX twin is named here rather than left to the `architecture:crates/media/mlx-gen` prefix area: sc-15191 left it to that prefix on the explicit ground that it carried no marker sentence and so could never enter the inventory, and sc-15443 retired that premise. The two files normalize to the same marker sha256, so splitting them across areas would have the inventory assert that identical notices carry different obligations.",
+      "provenance": "BOTH JoyCaption prompt modules \u2014 the Candle lane's and its MLX twin \u2014 reproduce the caption-type taxonomy, prompt template bodies and name options from fpgaminer/joycaption's gradio-app/app.py (CAPTION_TYPE_MAP, NAME_OPTION), Apache-2.0. sc-15443 added byte-identical Apache Sec. 4(b) modification notices to both, which made them marker-bearing and is why they enter the inventory at this revision. Near-verbatim reproduced CONTENT, not an architectural port, so both carry the upstream licence rather than a crate-prefix architecture disposition. The MLX twin is named here rather than left to the `architecture:crates/media/mlx-gen` prefix area: sc-15191 left it to that prefix on the explicit ground that it carried no marker sentence and so could never enter the inventory, and sc-15443 retired that premise. The two files normalize to the same marker sha256, so splitting them across areas would have the inventory assert that identical notices carry different obligations.",
       "disposition": "about-license",
       "component": "joycaption-source"
     },
@@ -830,10 +830,10 @@
   "crateCoverage": {
     "scanner": "scripts/scan-inference-provenance.mjs",
     "crateList": "config/inference-crate-prefixes.txt",
-    "revision": "624fed20c1969b851b60265e3b9dac951068c1f5",
+    "revision": "f32fce06804e21eec86d488c8ba320eaf4cbfe11",
     "rule": "Every production-Rust crate prefix in the pinned revision must be covered by a portedSourceAreas entry OR carry an explicit crateDispositions decision. Anything else FAILS check-license-coverage.mjs.",
-    "cratePrefixes": 96,
-    "cratePopulationSha256": "ab6f0f6f4c71a93339973ba3054d40b651b8db7f96ed219d5d152c3c624c49fc"
+    "cratePrefixes": 97,
+    "cratePopulationSha256": "993023a1f5832a7402f3c6aaf5989122b8d12436d69b5fd840be84ba90b329f2"
   },
   "crateDispositions": [
     {
@@ -849,12 +849,12 @@
     {
       "prefix": "crates/audio/candle-audio-clap",
       "disposition": "architecture-reimplementation-existing-terms",
-      "evidence": "LAION CLAP (`laion/clap-htsat-unfused`) audio+text embedder — an architecture reimplementation of the CLAP towers and projection in candle (sc-12851). Its headers describe it as a port in prose the marker vocabulary does not match, so it is classified here explicitly; the CLAP model terms are mapped in the About manifest."
+      "evidence": "LAION CLAP (`laion/clap-htsat-unfused`) audio+text embedder \u2014 an architecture reimplementation of the CLAP towers and projection in candle (sc-12851). Its headers describe it as a port in prose the marker vocabulary does not match, so it is classified here explicitly; the CLAP model terms are mapped in the About manifest."
     },
     {
       "prefix": "crates/bundles/runtime-catalog",
       "disposition": "first-party-original",
-      "evidence": "SceneWorks bundle composition contract — validates that a platform bundle's registries belong to the declared backend. Tensor-neutral, no upstream source."
+      "evidence": "SceneWorks bundle composition contract \u2014 validates that a platform bundle's registries belong to the declared backend. Tensor-neutral, no upstream source."
     },
     {
       "prefix": "crates/bundles/runtime-cpu",
@@ -879,7 +879,7 @@
     {
       "prefix": "crates/contracts/gen-core-testkit",
       "disposition": "first-party-original",
-      "evidence": "SceneWorks-authored conformance harness for the gen-core provider contracts (epic 3720). Tensor-free; the `derived from` phrasing in its docs describes test data derived from a seed/descriptor, not upstream source — which is why the marker vocabulary deliberately anchors `derived from` to a port object."
+      "evidence": "SceneWorks-authored conformance harness for the gen-core provider contracts (epic 3720). Tensor-free; the `derived from` phrasing in its docs describes test data derived from a seed/descriptor, not upstream source \u2014 which is why the marker vocabulary deliberately anchors `derived from` to a port object."
     },
     {
       "prefix": "crates/llm/mlx-llm/server",
@@ -895,12 +895,12 @@
       "prefix": "crates/media/candle-gen/candle-gen-joycaption",
       "disposition": "upstream-content-existing-terms",
       "component": "joycaption-source",
-      "evidence": "NOT first-party: `src/prompt.rs` REPRODUCES upstream JoyCaption content, and that content IS licensed — Apache-2.0. Provenance chain re-verified 2026-07-27: the model card at https://huggingface.co/fancyfeast/llama-joycaption-beta-one-hf-llava (rev ebf414ea497a020da0f82df3913e5b6cb8e9663a) declares no `license:` in cardData but links https://github.com/fpgaminer/joycaption as the project source; that repository carries a root LICENSE = Apache License 2.0 (GitHub API `license.spdx_id: Apache-2.0`, and the fetched text carries the real copyright line `Copyright 2024 fpgaminer@bitcoin-mining.com`, not the unfilled template). The reproduced content lives in that repo at `gradio-app/app.py`, git blob d50843fab9dbe0a4389d1be33de7aae0260c85ff at commit 8445b2e55db7856d522e44ae84e7415fcf3413f6 (826 lines; `CAPTION_TYPE_MAP` at line 194, `NAME_OPTION` at line 256) — byte-identical to the same map the `fancyfeast/joy-caption-beta-one` Space serves at revision d0a1b8c39494884aa6ad4ff768189076ad054794. The 12 `CAPTION_TYPES` keys and the `PROMPT_TEMPLATES` bodies are upstream's `CAPTION_TYPE_MAP`, same entries in the same order, near-verbatim (punctuation normalized: em-dash to hyphen, curly to straight quotes, backticks dropped, `(if any)` to `, if any,`); the sole substantive SceneWorks MODIFICATION is in the Straightforward body, which folds upstream's `Note any watermarks, signatures, or compression artifacts.` into its `Never mention...` clause. `JOY_NAME_OPTION` is character-for-character upstream's `NAME_OPTION`. `CAPTION_LENGTHS` is upstream's length dropdown minus `very long`. `build_prompt` reproduces upstream's index-0/1/2 template selection, extra-option join, and {name}/{length}/{word_count} substitution with the `{NAME}` placeholder. `SYSTEM_PROMPT` is verbatim from the model card usage example. First-party here is only the capability bounds, the trigger-word post-processing, and the gen-core contract adaptation. Apache-2.0 §4 obligations: (a) the license text ships — the verbatim upstream LICENSE, copyright line included, is mapped as the `joycaption-source` About component (apps/desktop/licenses/joycaption-source/Apache-2.0.txt); (b) attribution is retained in that component (publisher fpgaminer, homepage github.com/fpgaminer/joycaption); (c) upstream ships NO NOTICE file, so §4(d) does not apply; (d) MODIFICATION MARKING was owed in the inference repo and is now SATISFIED — sc-15443 (inference `478d127f`) gave `src/prompt.rs` and the MLX sibling `crates/media/mlx-gen/src/caption/joycaption.rs` byte-identical module-header attribution/modification notices; it was tracked separately because inference is a separate repository (sc-15191 follow-up). Those notices are what make both files marker-bearing, so both are now named directly in this component's `paths` rather than the MLX sibling being covered indirectly via the `architecture:crates/media/mlx-gen` area. SEPARATE QUESTION, still open: the JoyCaption model WEIGHTS declare no license of their own — that remains in check-license-coverage.mjs's UNDETERMINED list and is NOT settled by this entry."
+      "evidence": "NOT first-party: `src/prompt.rs` REPRODUCES upstream JoyCaption content, and that content IS licensed \u2014 Apache-2.0. Provenance chain re-verified 2026-07-27: the model card at https://huggingface.co/fancyfeast/llama-joycaption-beta-one-hf-llava (rev ebf414ea497a020da0f82df3913e5b6cb8e9663a) declares no `license:` in cardData but links https://github.com/fpgaminer/joycaption as the project source; that repository carries a root LICENSE = Apache License 2.0 (GitHub API `license.spdx_id: Apache-2.0`, and the fetched text carries the real copyright line `Copyright 2024 fpgaminer@bitcoin-mining.com`, not the unfilled template). The reproduced content lives in that repo at `gradio-app/app.py`, git blob d50843fab9dbe0a4389d1be33de7aae0260c85ff at commit 8445b2e55db7856d522e44ae84e7415fcf3413f6 (826 lines; `CAPTION_TYPE_MAP` at line 194, `NAME_OPTION` at line 256) \u2014 byte-identical to the same map the `fancyfeast/joy-caption-beta-one` Space serves at revision d0a1b8c39494884aa6ad4ff768189076ad054794. The 12 `CAPTION_TYPES` keys and the `PROMPT_TEMPLATES` bodies are upstream's `CAPTION_TYPE_MAP`, same entries in the same order, near-verbatim (punctuation normalized: em-dash to hyphen, curly to straight quotes, backticks dropped, `(if any)` to `, if any,`); the sole substantive SceneWorks MODIFICATION is in the Straightforward body, which folds upstream's `Note any watermarks, signatures, or compression artifacts.` into its `Never mention...` clause. `JOY_NAME_OPTION` is character-for-character upstream's `NAME_OPTION`. `CAPTION_LENGTHS` is upstream's length dropdown minus `very long`. `build_prompt` reproduces upstream's index-0/1/2 template selection, extra-option join, and {name}/{length}/{word_count} substitution with the `{NAME}` placeholder. `SYSTEM_PROMPT` is verbatim from the model card usage example. First-party here is only the capability bounds, the trigger-word post-processing, and the gen-core contract adaptation. Apache-2.0 \u00a74 obligations: (a) the license text ships \u2014 the verbatim upstream LICENSE, copyright line included, is mapped as the `joycaption-source` About component (apps/desktop/licenses/joycaption-source/Apache-2.0.txt); (b) attribution is retained in that component (publisher fpgaminer, homepage github.com/fpgaminer/joycaption); (c) upstream ships NO NOTICE file, so \u00a74(d) does not apply; (d) MODIFICATION MARKING was owed in the inference repo and is now SATISFIED \u2014 sc-15443 (inference `478d127f`) gave `src/prompt.rs` and the MLX sibling `crates/media/mlx-gen/src/caption/joycaption.rs` byte-identical module-header attribution/modification notices; it was tracked separately because inference is a separate repository (sc-15191 follow-up). Those notices are what make both files marker-bearing, so both are now named directly in this component's `paths` rather than the MLX sibling being covered indirectly via the `architecture:crates/media/mlx-gen` area. SEPARATE QUESTION, still open: the JoyCaption model WEIGHTS declare no license of their own \u2014 that remains in check-license-coverage.mjs's UNDETERMINED list and is NOT settled by this entry."
     },
     {
       "prefix": "crates/media/candle-gen/candle-gen-mage",
       "disposition": "architecture-reimplementation-existing-terms",
-      "evidence": "Candle/CUDA Mage-Flow provider — the sibling of the already-audited `architecture:crates/media/mlx-gen/mlx-gen-mage` area, reimplementing the same NR-MMDiT / MSRoPE / one-step-VAE surfaces. It carries no marker sentence, so without this entry the Candle half of a port whose MLX half IS audited would be invisible; upstream Mage terms are mapped in the About manifest."
+      "evidence": "Candle/CUDA Mage-Flow provider \u2014 the sibling of the already-audited `architecture:crates/media/mlx-gen/mlx-gen-mage` area, reimplementing the same NR-MMDiT / MSRoPE / one-step-VAE surfaces. It carries no marker sentence, so without this entry the Candle half of a port whose MLX half IS audited would be invisible; upstream Mage terms are mapped in the About manifest."
     },
     {
       "prefix": "crates/media/mlx-gen/mlx-gen-catalog",
@@ -910,12 +910,12 @@
     {
       "prefix": "crates/media/mlx-gen/mlx-gen-clip",
       "disposition": "architecture-reimplementation-existing-terms",
-      "evidence": "OpenAI CLIP ViT-L/14 image embedder (`openai/clip-vit-large-patch14`): the transformer body and preprocessing are reused from the audited `architecture:crates/media/mlx-gen/mlx-gen-sdxl` area, and this crate adds the projection head — an architecture reimplementation with no copied source. CLIP's upstream terms are tracked with the model entry."
+      "evidence": "OpenAI CLIP ViT-L/14 image embedder (`openai/clip-vit-large-patch14`): the transformer body and preprocessing are reused from the audited `architecture:crates/media/mlx-gen/mlx-gen-sdxl` area, and this crate adds the projection head \u2014 an architecture reimplementation with no copied source. CLIP's upstream terms are tracked with the model entry."
     },
     {
       "prefix": "crates/media/mlx-gen/mlx-gen-joycaption",
       "disposition": "first-party-original",
-      "evidence": "Thin consumer seam (story 7265): descriptor, provider registration, and gen-core contract adaptation only — `src/lib.rs` and `src/model.rs`, no `prompt.rs`. Re-verified at the pinned revision (sc-15191 review): this crate contains NO upstream JoyCaption strings; it calls `mlx_gen::caption::joycaption::{capabilities, build_prompt}`. The upstream-derived prompt map for the MLX lane lives in `crates/media/mlx-gen/src/caption/joycaption.rs` — the SAME reproduced `CAPTION_TYPE_MAP` content audited on the `crates/media/candle-gen/candle-gen-joycaption` entry — and that path is covered by the `joycaption-source` ported-source area (which names it directly since sc-15443 made it marker-bearing), not by this disposition. The JoyCaption model implementation lives in mlx-llm's `mlx-joycaption` provider, outside this repository."
+      "evidence": "Thin consumer seam (story 7265): descriptor, provider registration, and gen-core contract adaptation only \u2014 `src/lib.rs` and `src/model.rs`, no `prompt.rs`. Re-verified at the pinned revision (sc-15191 review): this crate contains NO upstream JoyCaption strings; it calls `mlx_gen::caption::joycaption::{capabilities, build_prompt}`. The upstream-derived prompt map for the MLX lane lives in `crates/media/mlx-gen/src/caption/joycaption.rs` \u2014 the SAME reproduced `CAPTION_TYPE_MAP` content audited on the `crates/media/candle-gen/candle-gen-joycaption` entry \u2014 and that path is covered by the `joycaption-source` ported-source area (which names it directly since sc-15443 made it marker-bearing), not by this disposition. The JoyCaption model implementation lives in mlx-llm's `mlx-joycaption` provider, outside this repository."
     }
   ]
 }

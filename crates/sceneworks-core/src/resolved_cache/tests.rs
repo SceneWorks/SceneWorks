@@ -295,6 +295,267 @@ fn the_load_boundary_hashes_the_closure_exactly_once() {
     );
 }
 
+/// The load boundary hashes once per CHANGE, not once per load — and still refuses a bundle that
+/// changed.
+///
+/// Hashing exactly once per acquisition (pinned above) still charged every job the full read: a
+/// 19 GB bundle measured ~61 s of SHA-256 between the claim and "Preparing N image(s)", re-proving
+/// bytes that had not moved since the previous job proved them. The verdict is now recorded
+/// alongside the closure's stat identity and reused while that identity holds.
+///
+/// All three properties are asserted together on purpose. "Reuses the verdict" and "still refuses
+/// altered bytes" are the two halves of the same tradeoff, and a test that pinned only the first
+/// would stay green if the receipt were reused unconditionally — which is precisely the defect
+/// worth guarding against.
+#[test]
+fn a_recorded_verdict_is_reused_while_the_closure_is_untouched_and_dropped_when_it_changes() {
+    let scratch = TempDir::new().unwrap();
+    let source = scratch.path().join("source");
+    let data = scratch.path().join("data");
+    std::fs::create_dir(&source).unwrap();
+    let store = ResolvedCacheStore::open(&data).unwrap();
+    let candidate = hub_layout_candidate(&source, REVISION_A);
+    let materializer = ResolvedCacheMaterializer::new(store.clone());
+    let published = match materializer
+        .materialize(
+            &candidate,
+            &source,
+            "fixture:model",
+            &MaterializationCancellation::default(),
+        )
+        .unwrap()
+    {
+        MaterializationOutcome::Published(metadata) => *metadata,
+        other => panic!("fixture bundle was not published: {other:?}"),
+    };
+    let hashed_files = published
+        .artifact
+        .closure
+        .members
+        .iter()
+        .flat_map(|member| member.files.iter())
+        .filter(|file| file.sha256.is_some())
+        .count() as u64;
+    assert!(
+        hashed_files >= 1,
+        "the fixture must record content digests or the counts below are vacuous"
+    );
+
+    let registry = ActiveArtifactLeaseRegistry::default();
+    let resolver = resolver(&source, registry.clone());
+
+    // A freshly published entry carries no verdict, so the first acquisition pays the full read.
+    let (lease, first) = crate::model_artifacts::observe_content_hashes(|| {
+        store.acquire_complete(&candidate.cache_key, &resolver, "runtime:image:model")
+    });
+    assert_eq!(
+        first, hashed_files,
+        "the first acquisition of a bundle with no recorded verdict must read every file"
+    );
+    drop(
+        lease
+            .unwrap()
+            .expect("the first acquisition must issue a lease"),
+    );
+
+    // Nothing has touched the bundle, so the recorded verdict still describes it.
+    let (lease, second) = crate::model_artifacts::observe_content_hashes(|| {
+        store.acquire_complete(&candidate.cache_key, &resolver, "runtime:image:model")
+    });
+    assert!(
+        lease.unwrap().is_some(),
+        "reusing the recorded verdict must still issue the lease"
+    );
+    assert_eq!(
+        second, 0,
+        "a bundle whose stat identity is unchanged must not be re-read — this is the whole cost \
+         the receipt exists to remove"
+    );
+
+    // Same length, different bytes: paths-and-sizes alone cannot see this, so only the receipt
+    // being invalidated by the changed mtime routes it back to the full read that refuses it.
+    let bundle_file = store
+        .bundle_path(&candidate.cache_key)
+        .unwrap()
+        .join(&candidate.artifact.closure.members[0].destination)
+        .join("weights.bin");
+    assert_eq!(std::fs::read(&bundle_file).unwrap(), b"model-weights");
+    std::fs::write(&bundle_file, b"MODEL-WEIGHTS").unwrap();
+    // Stamped explicitly rather than relying on the write: a filesystem with coarse timestamp
+    // granularity could otherwise reproduce the previous mtime and make this assertion a clock
+    // race rather than a contract.
+    std::fs::File::options()
+        .write(true)
+        .open(&bundle_file)
+        .unwrap()
+        .set_modified(std::time::SystemTime::now() + std::time::Duration::from_secs(60))
+        .unwrap();
+
+    let (refused, third) = crate::model_artifacts::observe_content_hashes(|| {
+        store.acquire_complete(&candidate.cache_key, &resolver, "runtime:image:model")
+    });
+    assert!(
+        refused.is_err(),
+        "a bundle altered after its verdict was recorded must still be refused at the load boundary"
+    );
+    assert_eq!(
+        third, hashed_files,
+        "a stat identity that moved must send the closure back through the full read, not reuse \
+         the verdict recorded for the bytes it replaced"
+    );
+}
+
+/// A standing verdict expires, so decay with no filesystem write behind it cannot hide forever.
+///
+/// Stat identity detects a WRITE. Bit rot, a failing enclosure, a drive rewriting a sector — none
+/// of those move size or mtime, so the receipt would keep matching and the bytes would never be
+/// read again. Before receipts every job re-read the bundle, which caught that class by accident;
+/// the max-age is what keeps catching it on purpose. This matters because the cache fronts a model
+/// library that can live on external USB media, where silent decay is the plausible failure and a
+/// timestamp-restoring writer is not.
+///
+/// The receipt is aged by rewriting `verifiedAt` rather than by waiting, so this asserts the
+/// contract rather than sleeping through it.
+#[test]
+fn a_standing_verdict_expires_and_sends_the_closure_back_through_the_full_read() {
+    let scratch = TempDir::new().unwrap();
+    let source = scratch.path().join("source");
+    let data = scratch.path().join("data");
+    std::fs::create_dir(&source).unwrap();
+    let store = ResolvedCacheStore::open(&data).unwrap();
+    let candidate = hub_layout_candidate(&source, REVISION_A);
+    let materializer = ResolvedCacheMaterializer::new(store.clone());
+    let published = match materializer
+        .materialize(
+            &candidate,
+            &source,
+            "fixture:model",
+            &MaterializationCancellation::default(),
+        )
+        .unwrap()
+    {
+        MaterializationOutcome::Published(metadata) => *metadata,
+        other => panic!("fixture bundle was not published: {other:?}"),
+    };
+    let hashed_files = published
+        .artifact
+        .closure
+        .members
+        .iter()
+        .flat_map(|member| member.files.iter())
+        .filter(|file| file.sha256.is_some())
+        .count() as u64;
+
+    let resolver = resolver(&source, ActiveArtifactLeaseRegistry::default());
+    drop(
+        store
+            .acquire_complete(&candidate.cache_key, &resolver, "runtime:image:model")
+            .unwrap()
+            .expect("the fixture entry must be acquirable"),
+    );
+
+    // Backdate the standing verdict past the bound. Nothing about the bundle changes, so only the
+    // age can send this back through the read.
+    let sidecar = store
+        .entry_path(&candidate.cache_key)
+        .unwrap()
+        .join("content.verification.json");
+    let mut receipt: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&sidecar).unwrap()).unwrap();
+    let verified_at = receipt["verifiedAt"].as_u64().expect("a recorded verdict");
+    receipt["verifiedAt"] =
+        serde_json::json!(verified_at.saturating_sub(CONTENT_RECEIPT_MAX_AGE_SECONDS + 1));
+    std::fs::write(&sidecar, serde_json::to_vec(&receipt).unwrap()).unwrap();
+
+    let (lease, hashes) = crate::model_artifacts::observe_content_hashes(|| {
+        store.acquire_complete(&candidate.cache_key, &resolver, "runtime:image:model")
+    });
+    assert!(
+        lease.unwrap().is_some(),
+        "an expired verdict re-proves the bundle; it does not refuse an intact one"
+    );
+    assert_eq!(
+        hashes, hashed_files,
+        "a verdict older than the max age must not be redeemed — the bytes are read again"
+    );
+
+    // And the re-proof stands on its own: the refreshed verdict is redeemable immediately.
+    let (lease, after_refresh) = crate::model_artifacts::observe_content_hashes(|| {
+        store.acquire_complete(&candidate.cache_key, &resolver, "runtime:image:model")
+    });
+    assert!(lease.unwrap().is_some());
+    assert_eq!(
+        after_refresh, 0,
+        "re-proving must stamp a fresh verdict, not leave the entry hashing on every acquisition"
+    );
+}
+
+/// The recorded verdict must stay OUT of the metadata journal, so a downgrade still reads the store.
+///
+/// `ResolvedCacheMetadata` is `deny_unknown_fields` and the journal keeps two slots. A receipt field
+/// on it would therefore be invisible for one acquisition and fatal after two: both slots would
+/// carry a key the previous build rejects, every entry would read as `BOTH_METADATA_SLOTS_CORRUPT`,
+/// and corrupt is the classification manual removal is allowed to clear — so rolling a release back
+/// would invite deleting and re-copying a cache that was never damaged.
+///
+/// Asserted on the raw journal bytes rather than through a round-trip, because a round-trip in this
+/// process uses this build's struct and so cannot see the field the OTHER build would choke on.
+#[test]
+fn the_recorded_verdict_lives_outside_the_metadata_journal() {
+    let scratch = TempDir::new().unwrap();
+    let source = scratch.path().join("source");
+    let data = scratch.path().join("data");
+    std::fs::create_dir(&source).unwrap();
+    let store = ResolvedCacheStore::open(&data).unwrap();
+    let candidate = hub_layout_candidate(&source, REVISION_A);
+    let materializer = ResolvedCacheMaterializer::new(store.clone());
+    match materializer
+        .materialize(
+            &candidate,
+            &source,
+            "fixture:model",
+            &MaterializationCancellation::default(),
+        )
+        .unwrap()
+    {
+        MaterializationOutcome::Published(_) => {}
+        other => panic!("fixture bundle was not published: {other:?}"),
+    }
+
+    let resolver = resolver(&source, ActiveArtifactLeaseRegistry::default());
+    // Twice: one acquisition could leave the older slot innocent, which is exactly the shape that
+    // would let this regression ship looking harmless.
+    for _ in 0..2 {
+        drop(
+            store
+                .acquire_complete(&candidate.cache_key, &resolver, "runtime:image:model")
+                .unwrap()
+                .expect("the fixture entry must be acquirable"),
+        );
+    }
+
+    let entry = store.entry_path(&candidate.cache_key).unwrap();
+    let sidecar = entry.join("content.verification.json");
+    let recorded = std::fs::read_to_string(&sidecar)
+        .expect("a successful acquisition must record its verdict somewhere");
+    assert!(
+        recorded.contains("verifiedAt"),
+        "the sidecar must be where the verdict actually lands"
+    );
+
+    for slot in 0..=1 {
+        let path = entry.join(format!("metadata.{slot}.json"));
+        let Ok(journal) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        assert!(
+            !journal.contains("verifiedAt") && !journal.contains("contentVerification"),
+            "metadata.{slot}.json carries the content verdict; a build without that field \
+             rejects the whole journal and reports a healthy entry as corrupt"
+        );
+    }
+}
+
 /// A submission's availability read must not park behind the sweep's expensive verification
 /// (sc-19712, the coupled residue).
 ///
@@ -960,7 +1221,10 @@ fn complete_validation_rejects_a_post_publication_bundle_swap_everywhere() {
     assert!(store
         .acquire_complete(&candidate.cache_key, &resolver, "runtime:image:model")
         .is_err());
-    assert!(store.enumerate().is_err());
+    assert_eq!(
+        store.enumerate().unwrap()[0].state,
+        ResolvedCacheEntryState::Corrupt
+    );
     let digest = cache_key_digest(&candidate.cache_key).unwrap();
     let _lock = store.lock_metadata(&digest).unwrap();
     assert_eq!(
@@ -1038,7 +1302,10 @@ fn complete_validation_rejects_a_post_publication_directory_junction_everywhere(
     assert!(store
         .acquire_complete(&candidate.cache_key, &resolver, "runtime:image:model")
         .is_err());
-    assert!(store.enumerate().is_err());
+    assert_eq!(
+        store.enumerate().unwrap()[0].state,
+        ResolvedCacheEntryState::Corrupt
+    );
     let digest = cache_key_digest(&candidate.cache_key).unwrap();
     let metadata_lock = store.lock_metadata(&digest).unwrap();
     assert_eq!(
@@ -1303,6 +1570,100 @@ fn incomplete_complete_entry_is_never_available_or_reconstructed() {
     assert_eq!(std::fs::read(bundle_file).unwrap(), b"short");
 }
 
+/// A managed cache may outlive manual filesystem changes. Foreign residue must not make the
+/// cache unusable, while a damaged managed entry must remain visible for recovery without
+/// withholding valid entries from cache reads or retention.
+#[test]
+fn foreign_entries_and_damaged_complete_entries_are_isolated_per_entry() {
+    let scratch = TempDir::new().unwrap();
+    let store = ResolvedCacheStore::open(&scratch.path().join("data")).unwrap();
+    let source = scratch.path().join("source");
+    std::fs::create_dir(&source).unwrap();
+    let damaged = source_candidate(&source, REVISION_A);
+    let valid = source_candidate(&source, REVISION_B);
+    make_complete(&store, &damaged, &source);
+    make_complete(&store, &valid, &source);
+
+    // Not an app-owned digest directory. Enumeration and retention must leave it untouched.
+    let foreign = store.root().join("entries").join("foreign-import.bin");
+    std::fs::write(&foreign, b"not a resolved-cache entry").unwrap();
+
+    // This is a real app-owned entry whose journal says Complete, but its bundle is no longer
+    // structurally valid. It must be shown as corrupt rather than poisoning the valid entry.
+    let damaged_file = store
+        .bundle_path(&damaged.cache_key)
+        .unwrap()
+        .join("weights.bin");
+    std::fs::write(&damaged_file, b"short").unwrap();
+
+    let summaries = store.enumerate().unwrap();
+    assert_eq!(summaries.len(), 2, "foreign residue is not a cache entry");
+    assert_eq!(
+        summaries
+            .iter()
+            .find(|summary| summary.cache_key == damaged.cache_key)
+            .unwrap()
+            .state,
+        ResolvedCacheEntryState::Corrupt
+    );
+    assert_eq!(
+        summaries
+            .iter()
+            .find(|summary| summary.cache_key == valid.cache_key)
+            .unwrap()
+            .state,
+        ResolvedCacheEntryState::Complete
+    );
+    assert!(
+        store.lookup_complete(&valid.cache_key).unwrap().is_some(),
+        "the damaged entry does not disable valid cache reads"
+    );
+
+    let recovered = store.recover().unwrap();
+    assert_eq!(
+        recovered
+            .iter()
+            .find(|summary| summary.cache_key == damaged.cache_key)
+            .unwrap()
+            .state,
+        ResolvedCacheEntryState::Corrupt
+    );
+    assert!(
+        store
+            .entry_path(&damaged.cache_key)
+            .unwrap()
+            .join("corrupt.marker.json")
+            .is_file(),
+        "recovery persists the damaged entry's isolated corruption state"
+    );
+
+    let report = store
+        .enforce_retention(
+            &ResolvedCachePolicy {
+                enabled: true,
+                max_bytes: 1,
+                inactivity_seconds: u64::MAX,
+            },
+            0,
+        )
+        .unwrap();
+    assert!(
+        report.failed.is_empty(),
+        "foreign and damaged entries do not abort retention"
+    );
+    assert!(report
+        .evicted
+        .iter()
+        .any(|entry| entry.cache_key == valid.cache_key));
+    assert!(report.retained.iter().any(|entry| {
+        entry.cache_key == damaged.cache_key && entry.hold == RetentionHold::RecoveryCandidate
+    }));
+    assert!(
+        foreign.is_file(),
+        "the cache never adopts or deletes foreign residue"
+    );
+}
+
 /// Publication's pre-rename walk must never reopen staged files by path: the reopen is the
 /// TOCTOU window (a parent junction swap between validation and reopen flushes the wrong file)
 /// and a write-capable reopen cannot even be assumed possible (read-only staged content,
@@ -1334,7 +1695,7 @@ fn publish_walk_accepts_read_only_staged_files_without_reopening_them() {
 }
 
 #[test]
-fn checked_enumeration_rejects_overflow() {
+fn checked_enumeration_ignores_corrupt_entries() {
     let scratch = TempDir::new().unwrap();
     let store = ResolvedCacheStore::open(&scratch.path().join("data")).unwrap();
     let source_a = scratch.path().join("source-a");
@@ -1350,7 +1711,7 @@ fn checked_enumeration_rejects_overflow() {
         metadata.verified_bytes = bytes;
         store.write_metadata_unlocked(&digest, &metadata).unwrap();
     }
-    assert!(store.checked_verified_bytes().is_err());
+    assert_eq!(store.checked_verified_bytes().unwrap(), 0);
 }
 
 #[test]

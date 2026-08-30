@@ -27,8 +27,11 @@
 // seconds and needs no toolchain, no GPU and no weights. It does need an inference clone, which a
 // SceneWorks checkout does not contain — so digests are derived at pin-bump time and checked into
 // `config/inference-provider-closures.json`, where a reviewer sees the change in the diff instead of
-// it being conjured at check time. The consumers compare against that file and hard-error when its
-// recorded revision is not the live Cargo pin; a stale config is never a silent pass.
+// it being conjured at check time. Consumers compare against that file's DIGESTS. Its recorded
+// `inferenceRevision` is the revision those digests were derived at, and consumers deliberately do
+// NOT require it to equal the live Cargo pin: that equality could not fail on a wrong digest, only
+// on an unbumped one, so its whole effect was to make re-deriving mandatory on every pin bump — and
+// re-deriving is what rotated every digest at once. See `UNIVERSAL_CRATES`.
 //
 // Checked in is NOT the same as unverified, and the distinction is load-bearing. An earlier draft of
 // this comment said CI "does not have" an inference clone, citing the framing at
@@ -46,11 +49,16 @@
 //     this closure enabling a feature on a dependency INSIDE it moves no byte here. That gap is
 //     owned by the resolved-feature witness (sc-17606) and is NOT closed by this module. Narrowing
 //     the unit makes that witness strictly more load-bearing, exactly as sc-17776 predicted.
-//   - Crate-mates. Providers sharing a crate share its digest: a `qwen_image_edit` edit moves
-//     `qwen_image`. That is deliberate. Rust compiles a crate as one unit with cross-module
-//     inlining, so file-level scoping inside a crate would be a false green, and sc-17776 measured
-//     that only a behaviour witness can absolve this class soundly. The over-trigger is real and
-//     narrowed from "the whole repository" to "one crate plus what it links".
+//   - Crate-mates. Providers sharing a NON-universal crate share its digest: a `qwen_image_edit`
+//     edit moves `qwen_image`. That is deliberate. Rust compiles a crate as one unit with
+//     cross-module inlining, so file-level scoping inside a crate would be a false green, and
+//     sc-17776 measured that only a behaviour witness can absolve this class soundly. The
+//     over-trigger is real, and narrowed from "the whole repository" to "one crate plus what it
+//     links", then by v4 to exclude the crates EVERY provider links (see `UNIVERSAL_CRATES`).
+//     The residue is real and known: on the f32fce06 -> 857f2454 bump, adding StarVector to the
+//     shared `candle-llm`/`mlx-llm` model hosts still demotes the 3 providers that link them. Those
+//     crates are not universal and do host text encoders whose memory behaviour matters, so they
+//     stay in. Absolving THAT class needs the behaviour witness, not a wider exclusion list.
 //   - Realised VRAM behaviour. This is a code-identity unit. It answers "did the code the
 //     measurements ran change?", never "did the measured quantity change?".
 
@@ -65,7 +73,9 @@ import { canonicalSourceText, stripInertLines } from "./lib/source-revision.mjs"
 // scripts are hashed. A v2 digest and a v3 digest answer different questions, so they must never be
 // compared — the version is inside the hashed text precisely so a missed regeneration reads
 // `historical` (re-capture demanded) instead of silently `current`.
-export const CLOSURE_DIGEST_VERSION = "inference-closure-digest v3";
+//
+// v4 NARROWS it, for the first time. See `UNIVERSAL_CRATES`.
+export const CLOSURE_DIGEST_VERSION = "inference-closure-digest v4";
 
 /**
  * Languages whose whole-line comments are stripped before hashing.
@@ -87,6 +97,34 @@ const LINE_COMMENT_MARKER = Object.freeze({ ".rs": "//", ".toml": "#" });
 
 /** Workspace files that change codegen for every crate, so they belong in every closure. */
 const WORKSPACE_INPUTS = ["rust-toolchain.toml", ".cargo/config.toml"];
+
+/**
+ * Crates every provider links, whose content is therefore NOT part of per-provider currency (v4).
+ *
+ * A term that appears in all 17 closures cannot discriminate between them: when it moves, every
+ * lane moves together, which turns a per-provider digest back into the repository-wide pin identity
+ * sc-17774 existed to remove. That is not hypothetical. Measured on the f32fce06 -> 857f2454 bump,
+ * 17 of 17 providers demoted and every one was attributable solely to `core-llm` — whose entire diff
+ * was a new `starvector.rs` plus `pub mod starvector;` and its re-exports. Adding a NEW model
+ * invalidated the measured memory of every EXISTING model. The 2026-08-29 `gen-core` case is the
+ * same shape: memoizing a SHA-256 digest cannot move any model's peak, and it demoted everything.
+ *
+ * These crates are still WALKED (they set `[crates]` and `[locked]`, so a dependency or structural
+ * change still registers) and their content digest is published as `sharedContractDigest` so a
+ * reviewer can see when the shared contract moved. It is recorded, not compared.
+ *
+ * What still guards a real gen-core memory-contract change, independently of this digest:
+ *   - `conformance_errors()` requires `calibration.load_shape == contract.load_shape`, and
+ *     `select_strategy` refuses every candidate on a non-conformant contract with
+ *     `Unverified(Invalid)` BEFORE grading any of them (`memory_strategy.rs`).
+ *   - `calibrationFingerprint`, a second and independent axis over the SceneWorks-side strategy
+ *     parameters, which this digest never fed.
+ *
+ * Listed explicitly rather than derived as "in every closure": deriving it would make the set depend
+ * on the provider roster, so onboarding one provider that skips a crate would silently re-admit that
+ * crate for everyone and rotate every digest at once.
+ */
+const UNIVERSAL_CRATES = Object.freeze(["crates/contracts/core-llm", "crates/contracts/gen-core"]);
 
 function git(repo, args, { maxBuffer = 64 * 1024 * 1024 } = {}) {
   return execFileSync("git", ["-C", repo, ...args], { encoding: "utf8", maxBuffer });
@@ -413,13 +451,20 @@ export function rootManifestSlices(body) {
  * reported all six providers moving; the check that caught it is
  * `a closure digest is independent of the revision it was read at` in the test file.
  */
-export function closureText({ provider, crateDir, crates, files, locked, rootSlices, workspace }) {
+export function closureText({
+  provider, crateDir, crates, files, locked, rootSlices, workspace, universalCrates = [],
+}) {
   const lines = [
     `# ${CLOSURE_DIGEST_VERSION}`,
     `# provider: ${provider}`,
     `# crate: ${crateDir}`,
     "[crates]",
     ...crates,
+    // Named, never hashed by content (v4). Listing them keeps the exclusion visible in the diffable
+    // text and makes ADDING or DROPPING one a digest change, because that is a structural move; it
+    // is only their file contents that stop counting.
+    "[universal-crates]",
+    ...universalCrates,
     "[source]",
     ...files.map(([file, oid]) => `${oid} ${file}`),
     "[workspace]",
@@ -486,16 +531,36 @@ export function providerClosureDigest({
   // A crate directory can be the PARENT of its siblings (`crates/media/mlx-gen` hosts
   // `mlx-gen-qwen-image`), so a bare prefix match would sweep unrelated crates into the closure and
   // resurrect the cross-model coupling this module exists to remove. Match each crate's own `src/`.
+  const ownedBy = (list) => (file) =>
+    list.some((crate) => file === `${crate}/Cargo.toml` || file.startsWith(`${crate}/src/`));
+  // v4: the universal crates are walked like any other — they still contribute to `[crates]` and
+  // `[locked]` — but their file contents are digested SEPARATELY and never enter `[source]`. See
+  // `UNIVERSAL_CRATES` for why a term present in every closure cannot carry per-provider currency.
+  const universalCrates = crates.filter((crate) => UNIVERSAL_CRATES.includes(crate));
+  const currencyCrates = crates.filter((crate) => !UNIVERSAL_CRATES.includes(crate));
+  const isUniversal = ownedBy(universalCrates);
   const owned = (file) =>
-    buildScripts.has(file) ||
-    crates.some((crate) => file === `${crate}/Cargo.toml` || file.startsWith(`${crate}/src/`));
+    (buildScripts.has(file) && !isUniversal(file)) || ownedBy(currencyCrates)(file);
   const owned_files = [...resolvedBlobs].filter(([file]) => owned(file)).sort(([a], [b]) => a.localeCompare(b));
   if (!owned_files.length) throw new Error(`closure for ${provider} matched no source files at ${revision}`);
-  const wanted = [...owned_files, ...WORKSPACE_INPUTS.map((file) => [file, resolvedBlobs.get(file)])]
+  const universal_files = [...resolvedBlobs]
+    .filter(([file]) => isUniversal(file) || (buildScripts.has(file) && isUniversal(file)))
+    .sort(([a], [b]) => a.localeCompare(b));
+  const wanted = [
+    ...owned_files,
+    ...universal_files,
+    ...WORKSPACE_INPUTS.map((file) => [file, resolvedBlobs.get(file)]),
+  ]
     .filter(([file, oid]) => oid && LINE_COMMENT_MARKER[path.extname(file)])
     .map(([, oid]) => oid);
   const bodies = (readBodies ?? ((oids) => readBlobs(repo, oids)))(wanted);
   const files = owned_files.map(([file, oid]) => [file, fileContentHash(file, oid, bodies.get(oid))]);
+  const sharedContractDigest = sha256(
+    [
+      `# ${CLOSURE_DIGEST_VERSION}`,
+      ...universal_files.map(([file, oid]) => `${fileContentHash(file, oid, bodies.get(oid))} ${file}`),
+    ].join("\n"),
+  );
 
   const workspace = WORKSPACE_INPUTS.filter((file) => resolvedBlobs.has(file))
     .map((file) => [file, fileContentHash(file, resolvedBlobs.get(file), bodies.get(resolvedBlobs.get(file)))]);
@@ -516,14 +581,18 @@ export function providerClosureDigest({
     locked,
     rootSlices,
     workspace,
+    universalCrates,
   });
   return {
     provider,
     crate: crateDir,
     revision,
     digest: sha256(text),
+    sharedContractDigest,
     crates,
+    universalCrates,
     sourceFileCount: files.length,
+    sharedContractFileCount: universal_files.length,
     lockedPackageCount: locked.length,
     text,
   };
@@ -616,8 +685,14 @@ export function buildClosureConfig({ repo, revision, declared, runGit = git }) {
     providers[provider] = {
       crate: entry.crate,
       digest: entry.digest,
+      // Recorded, never compared (v4). Publishing it keeps "the shared contract moved" reviewable in
+      // the diff, which is the reason the old whole-closure digest was defended — without letting it
+      // demote every lane at once. See `UNIVERSAL_CRATES`.
+      sharedContractDigest: entry.sharedContractDigest,
       closureCrates: entry.crates,
+      universalCrates: entry.universalCrates,
       sourceFileCount: entry.sourceFileCount,
+      sharedContractFileCount: entry.sharedContractFileCount,
       lockedPackageCount: entry.lockedPackageCount,
     };
   }

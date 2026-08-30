@@ -378,7 +378,7 @@ pub(super) fn has_malformed_optional_nested_number(
         None | Some(Value::Null) => false,
         Some(Value::Object(object)) => match object.get(number_key) {
             None | Some(Value::Null) => false,
-            Some(Value::Number(value)) => value.as_f64().map_or(true, |value| !value.is_finite()),
+            Some(Value::Number(value)) => value.as_f64().is_none_or(|value| !value.is_finite()),
             Some(Value::String(value)) => value
                 .trim()
                 .parse::<f64>()
