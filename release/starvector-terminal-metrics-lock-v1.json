@@ -3,5 +3,5 @@
   "canvas": { "width": 512, "height": 512, "background": "white", "colorspace": "srgb8" },
   "ssim": { "implementation": "skimage.metrics.structural_similarity", "data_range": 255, "channel_axis": 2, "gaussian_weights": true, "sigma": 1.5, "use_sample_covariance": false },
   "lpips": { "implementation": "richzhang/lpips", "constructor": "LPIPS(net='alex', version='0.1')", "eval_mode": true, "input_rgb_range": "[-1,1]", "linear_weights_sha256": "df73285e35b22355a2df87cdb6b70b343713b667eddbda73e1977e0c860835c0", "alexnet_weights_sha256": "7be5be791159472b1fbf3c69796f7cb30dca7ad8466c2df70058c37116cdee02" },
-  "required_packages": ["scikit-image", "lpips", "torch", "torchvision"]
+  "required_packages": [{"name":"scikit-image","version":"0.25.2"},{"name":"lpips","version":"0.1.4"},{"name":"torch","version":"2.7.0"},{"name":"torchvision","version":"0.22.0"}]
 }

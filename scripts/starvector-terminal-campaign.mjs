@@ -17,7 +17,7 @@ export function validateMetricsLock(lock) {
   if (s?.implementation !== "skimage.metrics.structural_similarity" || s.data_range !== 255 || s.channel_axis !== 2 || s.gaussian_weights !== true || s.sigma !== 1.5 || s.use_sample_covariance !== false) fail("SSIM identity must be exact scikit-image RGB settings");
   const l = lock.lpips;
   if (l?.implementation !== "richzhang/lpips" || l.constructor !== "LPIPS(net='alex', version='0.1')" || l.eval_mode !== true || l.input_rgb_range !== "[-1,1]" || l.linear_weights_sha256 !== LPIPS_LINEAR_SHA256 || l.alexnet_weights_sha256 !== ALEXNET_SHA256) fail("LPIPS identity or weights are not pinned");
-  if (JSON.stringify(lock.required_packages) !== JSON.stringify(["scikit-image", "lpips", "torch", "torchvision"])) fail("metric package closure changed");
+  if (JSON.stringify(lock.required_packages) !== JSON.stringify([{ name: "scikit-image", version: "0.25.2" }, { name: "lpips", version: "0.1.4" }, { name: "torch", version: "2.7.0" }, { name: "torchvision", version: "0.22.0" }])) fail("metric package closure changed");
   return lock;
 }
 
