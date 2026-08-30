@@ -8,7 +8,7 @@ import { pathToFileURL } from "node:url";
 
 const sha = (value) => createHash("sha256").update(value).digest("hex");
 const die = (message) => { throw new Error(`starvector terminal bundle: ${message}`); };
-const REV = "65778fb790fa631597fd2739921a669b275d4429";
+const REV = "35b9c14f54401308d54b7cb7a7c5af10c469c2d4";
 const json = async (file) => JSON.parse(await readFile(file, "utf8"));
 
 async function bindLocalFile(root, relative, expected, label) {

@@ -783,8 +783,8 @@ fn builtin_starvector_manifests_are_exact_native_image_to_svg_closures() {
             "518beea8dcb5f7a37c5911e92d1d62a76beee7f9",
             15_015_835_105u64,
             15_014_294_040u64,
-            false,
-            Some("pending_terminal_candidate"),
+            true,
+            None,
             json!([
                 "README.md",
                 "added_tokens.json",
@@ -855,6 +855,43 @@ fn builtin_starvector_manifests_are_exact_native_image_to_svg_closures() {
             model["vector"]["deviceAdmission"]["staticWeightFloorBytes"],
             static_floor_bytes
         );
+        if id == "starvector_8b" {
+            let candidate = &model["vector"]["deviceAdmission"]["terminalCandidate"];
+            assert_eq!(
+                candidate["inferenceRevision"],
+                "35b9c14f54401308d54b7cb7a7c5af10c469c2d4"
+            );
+            assert_eq!(
+                candidate["corpusSha256"],
+                "757370c4eed38a52a29ac80c258fdedd7e437ab891637bcb1c916aa608bf32b5"
+            );
+            assert_eq!(
+                candidate["productionClosure"]["sha256"],
+                "b2fc171ce8fde223924436b173bbf1e119baffc64c9698edc9784a8b583a3954"
+            );
+            assert_eq!(
+                candidate["productionClosure"]["entries"]
+                    .as_array()
+                    .expect("production closure entries")
+                    .len(),
+                26
+            );
+            assert_eq!(
+                candidate["supportedDevices"]["mlx"],
+                json!([{
+                    "deviceClass": "apple_unified_memory",
+                    "totalBytes": 137_438_953_472u64
+                }])
+            );
+            assert_eq!(
+                candidate["supportedDevices"]["candle"],
+                json!([{
+                    "deviceClass": "nvidia_dedicated_vram",
+                    "deviceName": "NVIDIA RTX PRO 6000 Blackwell Max-Q Workstation Edition",
+                    "totalBytes": 102_641_958_912u64
+                }])
+            );
+        }
 
         let download = &model["downloads"][0];
         assert_eq!(

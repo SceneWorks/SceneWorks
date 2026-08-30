@@ -796,15 +796,20 @@ def test_builtin_models_manifest_satisfies_authoring_schema():
 
 
 def test_starvector_terminal_candidate_schema_is_closed_and_mutation_resistant():
-    """SC-22261: only the three explicit not-yet-produced terminal inputs may be null."""
+    """SC-22261: the permanent-pin terminal candidate is exact and mutation resistant."""
     manifest = _load_builtin_models_manifest()
     schema = _load_schema(SCHEMA_PATH)
     validator = jsonschema.Draft202012Validator(schema)
     model = next(model for model in manifest["models"] if model["id"] == "starvector_8b")
     candidate = model["vector"]["deviceAdmission"]["terminalCandidate"]
-    assert candidate["inferenceRevision"] is None
-    assert candidate["corpusSha256"] is None
-    assert candidate["productionClosure"] is None
+    assert candidate["inferenceRevision"] == "35b9c14f54401308d54b7cb7a7c5af10c469c2d4"
+    assert candidate["corpusSha256"] == "757370c4eed38a52a29ac80c258fdedd7e437ab891637bcb1c916aa608bf32b5"
+    assert candidate["productionClosure"]["sha256"] == "b2fc171ce8fde223924436b173bbf1e119baffc64c9698edc9784a8b583a3954"
+    assert len(candidate["productionClosure"]["entries"]) == 26
+    assert model["vector"]["providers"] == {
+        "mlx": {"id": "mlx-starvector-8b", "available": True},
+        "candle": {"id": "candle-starvector-8b", "available": True},
+    }
     assert candidate["supportedDevices"]["mlx"] == [
         {"deviceClass": "apple_unified_memory", "totalBytes": 137438953472}
     ]
