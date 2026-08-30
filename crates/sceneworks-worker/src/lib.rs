@@ -237,6 +237,10 @@ mod image_jobs;
 use image_jobs::*;
 mod vector_jobs;
 use vector_jobs::*;
+#[doc(hidden)]
+pub use vector_jobs::{
+    terminal_sanitize_svg_bytes, terminal_write_sanitized_pair, TerminalSanitizedSvg,
+};
 // Ideogram 4 mandatory JSON-caption conditioning + placeholder detect-and-recover (epic 4725,
 // sc-6501). Pure prompt-guard + post-render heuristic, compiled cross-platform so its unit tests run
 // on the Linux parity lane. sc-6610: its functions are called only from the macOS MLX generate path

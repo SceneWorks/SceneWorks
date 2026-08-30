@@ -886,6 +886,58 @@ struct CanonicalSvg {
     height: u32,
 }
 
+/// Process-local terminal-campaign view of the already-authoritative sanitizer.
+/// This is intentionally doc-hidden and is not part of the HTTP/API surface.
+#[doc(hidden)]
+pub struct TerminalSanitizedSvg {
+    pub canonical_svg: String,
+    pub width: u32,
+    pub height: u32,
+}
+
+/// Delegate raw UTF-8 bytes to the production SVG sanitizer without a model.
+#[doc(hidden)]
+pub fn terminal_sanitize_svg_bytes(input: &[u8]) -> Result<TerminalSanitizedSvg, String> {
+    let canonical = sanitize_svg_bytes(input).map_err(|error| error.to_string())?;
+    Ok(TerminalSanitizedSvg {
+        canonical_svg: canonical.svg,
+        width: canonical.width,
+        height: canonical.height,
+    })
+}
+
+/// Atomically publish the canonical SVG and preview pair for an inert result.
+#[doc(hidden)]
+pub async fn terminal_write_sanitized_pair(
+    value: &TerminalSanitizedSvg,
+    destination: &Path,
+) -> Result<(PathBuf, PathBuf), String> {
+    let parent = destination
+        .parent()
+        .ok_or_else(|| "terminal sanitizer destination has no parent".to_owned())?;
+    let staging = parent.join(format!(
+        ".terminal-sanitize-{}.tmp",
+        uuid::Uuid::new_v4().simple()
+    ));
+    let result: WorkerResult<(PathBuf, PathBuf)> = async {
+        tokio::fs::create_dir_all(&staging).await?;
+        let svg = staging.join("canonical.svg");
+        let preview = staging.join("preview.png");
+        tokio::fs::write(&svg, value.canonical_svg.as_bytes()).await?;
+        render_preview(&value.canonical_svg, value.width, value.height, &preview).await?;
+        tokio::fs::rename(&staging, destination).await?;
+        Ok((
+            destination.join("canonical.svg"),
+            destination.join("preview.png"),
+        ))
+    }
+    .await;
+    if result.is_err() {
+        let _ = tokio::fs::remove_dir_all(&staging).await;
+    }
+    result.map_err(|error| error.to_string())
+}
+
 #[derive(Default)]
 struct SanitizerBudget {
     attributes: usize,
@@ -1991,6 +2043,39 @@ mod tests {
         assert!(
             preview.get_pixel(0, 0)[0] > 200,
             "preview rendered the red rectangle"
+        );
+    }
+
+    #[tokio::test]
+    async fn terminal_seam_delegates_to_sanitizer_and_publishes_only_the_pair() {
+        assert!(terminal_sanitize_svg_bytes(&[0xff]).is_err());
+        let value = terminal_sanitize_svg_bytes(
+            b"<svg width=\"12\" height=\"8\" xmlns=\"http://www.w3.org/2000/svg\"><rect width=\"12\" height=\"8\" fill=\"#00ff00\"/></svg>",
+        )
+        .expect("valid inert SVG");
+        let temp = tempfile::tempdir().expect("temp dir");
+        let destination = temp.path().join("published");
+        let (svg, preview) = terminal_write_sanitized_pair(&value, &destination)
+            .await
+            .expect("atomic terminal publication");
+        assert_eq!(
+            svg.file_name().and_then(|name| name.to_str()),
+            Some("canonical.svg")
+        );
+        assert_eq!(
+            preview.file_name().and_then(|name| name.to_str()),
+            Some("preview.png")
+        );
+        assert!(svg.is_file() && preview.is_file());
+        assert!(
+            std::fs::read_dir(temp.path())
+                .expect("read temp")
+                .all(|entry| !entry
+                    .expect("entry")
+                    .file_name()
+                    .to_string_lossy()
+                    .contains(".tmp")),
+            "terminal publication leaves no staging residue"
         );
     }
 }
