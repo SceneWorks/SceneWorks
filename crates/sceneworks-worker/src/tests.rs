@@ -127,10 +127,12 @@ include!("tests/temp_fixture_guard.rs");
 
 #[test]
 fn worker_entry_thread_has_an_explicit_runtime_and_large_stack_contract() {
-    assert!(
-        super::WORKER_ENTRY_STACK_BYTES >= 8 * 1024 * 1024,
-        "worker entry stack must stay at least 8 MiB"
-    );
+    const {
+        assert!(
+            super::WORKER_ENTRY_STACK_BYTES >= 8 * 1024 * 1024,
+            "worker entry stack must stay at least 8 MiB"
+        );
+    }
     let observed = Arc::new(std::sync::Mutex::new(None));
     let observed_from_worker = observed.clone();
     super::run_on_worker_entry_thread(move || async move {
