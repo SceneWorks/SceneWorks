@@ -7,8 +7,8 @@
 //! network/resource loader), and published as an SVG+PNG directory rename.
 
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
-use std::time::Duration;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use gen_core::core_llm::{
     Content, ImageRef, LoadSpec as TextLoadSpec, Message, ModelRequirements, Role, Sampling,
@@ -20,6 +20,7 @@ use quick_xml::{Reader, XmlVersion};
 use resvg::usvg;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
 
 use super::*;
 
@@ -43,6 +44,80 @@ const VECTOR_SANITIZER_VERSION: &str = "sceneworks-inert-svg-v1";
 const VECTOR_RENDERER_VERSION: &str = "resvg-0.45";
 const CANCEL_MESSAGE: &str = "Vector generation canceled before publication.";
 const STARVECTOR_ADAPTER_ID: &str = "starvector";
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    format!("{:x}", Sha256::digest(bytes))
+}
+
+fn terminal_result(
+    terminal: &TerminalProviderOutcome,
+    canonical: Option<(&Path, &[u8])>,
+    preview: Option<(&Path, &[u8])>,
+    transcript: Option<(&Path, &[u8])>,
+) -> Value {
+    json!({
+        "accepted": terminal.publishable(),
+        "finishReason": terminal.finish_reason,
+        "generatedTokens": terminal.generated_tokens,
+        "generatedBytes": terminal.generated_bytes,
+        "latencySeconds": terminal.latency_seconds,
+        "providerId": terminal.provider_id,
+        "modelId": terminal.model_id,
+        "modelRepository": terminal.model_repository,
+        "modelRevision": terminal.model_revision,
+        "backend": terminal.backend,
+        "providerTranscriptPath": transcript.map(|(path, _)| path.to_string_lossy().into_owned()),
+        "providerTranscriptSha256": transcript.map(|(_, bytes)| sha256_hex(bytes)),
+        "canonicalSvgPath": canonical.map(|(path, _)| path.to_string_lossy().into_owned()),
+        "canonicalSvgSha256": canonical.map(|(_, bytes)| sha256_hex(bytes)),
+        "previewPngPath": preview.map(|(path, _)| path.to_string_lossy().into_owned()),
+        "previewPngSha256": preview.map(|(_, bytes)| sha256_hex(bytes)),
+        "resultContainsInlineSvg": false,
+    })
+}
+
+fn terminal_transcript_bytes(terminal: &TerminalProviderOutcome) -> WorkerResult<Vec<u8>> {
+    serde_json::to_vec(&json!({
+        "providerId": terminal.provider_id,
+        "modelId": terminal.model_id,
+        "modelRepository": terminal.model_repository,
+        "modelRevision": terminal.model_revision,
+        "backend": terminal.backend,
+        "finishReason": terminal.finish_reason,
+        "generatedTokens": terminal.generated_tokens,
+        "generatedBytes": terminal.generated_bytes,
+        "latencySeconds": terminal.latency_seconds,
+    }))
+    .map_err(|error| {
+        WorkerError::Engine(format!("serialize StarVector terminal transcript: {error}"))
+    })
+}
+
+fn add_source_raster_evidence(
+    mut value: Value,
+    source_raster: Option<(&Path, &[u8])>,
+) -> WorkerResult<Value> {
+    let object = value.as_object_mut().ok_or_else(|| {
+        WorkerError::Engine("StarVector terminal evidence must be a JSON object".to_owned())
+    })?;
+    match source_raster {
+        Some((path, bytes)) => {
+            object.insert(
+                "sourceRasterPath".to_owned(),
+                Value::String(path.to_string_lossy().into_owned()),
+            );
+            object.insert(
+                "sourceRasterSha256".to_owned(),
+                Value::String(sha256_hex(bytes)),
+            );
+        }
+        None => {
+            object.insert("sourceRasterPath".to_owned(), Value::Null);
+            object.insert("sourceRasterSha256".to_owned(), Value::Null);
+        }
+    }
+    Ok(value)
+}
 
 #[derive(Clone, Copy)]
 struct StarVectorModelIdentity {
@@ -156,6 +231,31 @@ pub(crate) trait MultimodalVectorProviderAdapter: Send + Sync {
         cancel: &gen_core::CancelFlag,
         on_source: &mut dyn FnMut(&str, u32) -> WorkerResult<()>,
     ) -> WorkerResult<()>;
+
+    /// Native StarVector providers record their typed terminal outcome here.  The normal worker
+    /// path deliberately does not depend on it; the post-pin campaign alone requests it.
+    fn terminal_outcome(&self) -> Option<TerminalProviderOutcome> {
+        None
+    }
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct TerminalProviderOutcome {
+    finish_reason: &'static str,
+    generated_tokens: u32,
+    generated_bytes: usize,
+    latency_seconds: f64,
+    provider_id: String,
+    model_id: &'static str,
+    model_repository: &'static str,
+    model_revision: &'static str,
+    backend: &'static str,
+}
+
+impl TerminalProviderOutcome {
+    fn publishable(&self) -> bool {
+        matches!(self.finish_reason, "complete_root" | "eos")
+    }
 }
 
 #[derive(Clone)]
@@ -164,6 +264,7 @@ struct NativeStarVectorProvider {
     backend: &'static str,
     inference_provider_id: &'static str,
     weights_dir: PathBuf,
+    terminal_outcome: Arc<Mutex<Option<TerminalProviderOutcome>>>,
 }
 
 impl NativeStarVectorProvider {
@@ -227,6 +328,7 @@ impl NativeStarVectorProvider {
             backend,
             inference_provider_id,
             weights_dir,
+            terminal_outcome: Arc::new(Mutex::new(None)),
         })
     }
 }
@@ -265,6 +367,7 @@ impl MultimodalVectorProviderAdapter for NativeStarVectorProvider {
             "{backend} StarVector provider {} load failed",
             self.inference_provider_id
         );
+        let started = Instant::now();
         let generation = mirror_vector_cancel(cancel, text_cancel, || {
             tokio::runtime::Handle::current().block_on(crate::refine_model_cache::with_cached_refiner(
                 spec,
@@ -291,14 +394,45 @@ impl MultimodalVectorProviderAdapter for NativeStarVectorProvider {
                     let output = provider
                         .generate_svg(&typed_request, &mut |event| events.push(event))
                         .map_err(classify_starvector_error)?;
-                    validate_native_starvector_generation(output, events)
+                    let terminal = TerminalProviderOutcome {
+                        finish_reason: terminal_finish_reason(output.finish_reason),
+                        generated_tokens: output.generated_tokens,
+                        generated_bytes: output.generated_bytes,
+                        latency_seconds: started.elapsed().as_secs_f64(),
+                        provider_id: expected_provider_id.clone(),
+                        model_id: self.identity.model_id,
+                        model_repository: self.identity.repository,
+                        model_revision: self.identity.revision,
+                        backend: self.backend,
+                    };
+                    let source = validate_native_starvector_generation(output, events)?;
+                    Ok((source, terminal))
                 },
             ))
         })?;
-        for (text, index) in generation {
+        let (source, terminal) = generation;
+        *self.terminal_outcome.lock().map_err(|_| {
+            WorkerError::Engine("StarVector terminal outcome lock poisoned".to_owned())
+        })? = Some(terminal);
+        for (text, index) in source {
             on_source(&text, index)?;
         }
         Ok(())
+    }
+
+    fn terminal_outcome(&self) -> Option<TerminalProviderOutcome> {
+        self.terminal_outcome.lock().ok()?.clone()
+    }
+}
+
+const fn terminal_finish_reason(reason: StarVectorFinishReason) -> &'static str {
+    match reason {
+        StarVectorFinishReason::CompleteRoot => "complete_root",
+        StarVectorFinishReason::Eos => "eos",
+        StarVectorFinishReason::TokenLimit => "token_limit",
+        StarVectorFinishReason::ByteLimit => "byte_limit",
+        StarVectorFinishReason::WallTimeLimit => "wall_time_limit",
+        StarVectorFinishReason::Cancelled => "cancelled",
     }
 }
 
@@ -524,17 +658,13 @@ fn validate_native_starvector_generation(
             }
             Ok(source)
         }
-        StarVectorFinishReason::Cancelled => Err(WorkerError::Canceled(CANCEL_MESSAGE.to_owned())),
-        StarVectorFinishReason::TokenLimit => Err(WorkerError::Engine(
-            "native StarVector stopped at the token limit; no partial SVG was published".to_owned(),
-        )),
-        StarVectorFinishReason::ByteLimit => Err(WorkerError::Engine(
-            "native StarVector stopped at the byte limit; no partial SVG was published".to_owned(),
-        )),
-        StarVectorFinishReason::WallTimeLimit => Err(WorkerError::Engine(
-            "native StarVector stopped at the wall-time limit; no partial SVG was published"
-                .to_owned(),
-        )),
+        // The provider's typed terminal outcome is retained by the native adapter.  Normal job
+        // execution turns this into the same failure/cancellation outcome as before; the sealed
+        // terminal campaign can instead record the non-publishable result with no attachments.
+        StarVectorFinishReason::Cancelled
+        | StarVectorFinishReason::TokenLimit
+        | StarVectorFinishReason::ByteLimit
+        | StarVectorFinishReason::WallTimeLimit => Ok(Vec::new()),
     }
 }
 
@@ -559,11 +689,16 @@ fn manifest_declares_mode(payload: &VectorJobPayload) -> bool {
         })
 }
 
+struct CollectedSvgSource {
+    source: Option<String>,
+    terminal: Option<TerminalProviderOutcome>,
+}
+
 fn collect_svg_source(
     provider: &dyn MultimodalVectorProviderAdapter,
     request: &VectorProviderRequest,
     cancel: &gen_core::CancelFlag,
-) -> WorkerResult<String> {
+) -> WorkerResult<CollectedSvgSource> {
     if request.model.trim().is_empty() {
         return Err(WorkerError::InvalidPayload(
             "vector model id is empty".to_owned(),
@@ -632,12 +767,42 @@ fn collect_svg_source(
     if cancel.is_cancelled() {
         return Err(WorkerError::Canceled(CANCEL_MESSAGE.to_owned()));
     }
+    let terminal = provider.terminal_outcome();
+    if let Some(terminal) = &terminal {
+        if !terminal.publishable() {
+            if std::env::var("SCENEWORKS_TERMINAL_CAMPAIGN").as_deref() == Ok("1") {
+                return Ok(CollectedSvgSource {
+                    source: None,
+                    terminal: Some(terminal.clone()),
+                });
+            }
+            return match terminal.finish_reason {
+                "cancelled" => Err(WorkerError::Canceled(CANCEL_MESSAGE.to_owned())),
+                "token_limit" => Err(WorkerError::Engine(
+                    "native StarVector stopped at the token limit; no partial SVG was published"
+                        .to_owned(),
+                )),
+                "byte_limit" => Err(WorkerError::Engine(
+                    "native StarVector stopped at the byte limit; no partial SVG was published"
+                        .to_owned(),
+                )),
+                "wall_time_limit" => Err(WorkerError::Engine(
+                    "native StarVector stopped at the wall-time limit; no partial SVG was published"
+                        .to_owned(),
+                )),
+                _ => Err(WorkerError::Engine("unknown StarVector terminal outcome".to_owned())),
+            };
+        }
+    }
     if source.trim().is_empty() {
         return Err(WorkerError::Engine(
             "vector provider returned no SVG source".to_owned(),
         ));
     }
-    Ok(source)
+    Ok(CollectedSvgSource {
+        source: Some(source),
+        terminal,
+    })
 }
 
 pub(crate) async fn run_vector_job(
@@ -756,7 +921,7 @@ pub(crate) async fn run_vector_job_with_provider(
             &blocking_cancel,
         )
     });
-    let source = run_blocking_with_heartbeat(
+    let collected = run_blocking_with_heartbeat(
         api,
         settings,
         &job.id,
@@ -767,6 +932,58 @@ pub(crate) async fn run_vector_job_with_provider(
         task,
     )
     .await?;
+    let source_raster = match request.source_path.as_deref() {
+        Some(path) => Some((path.to_owned(), tokio::fs::read(path).await?)),
+        None => None,
+    };
+
+    if collected.source.is_none() {
+        let terminal = collected.terminal.ok_or_else(|| {
+            WorkerError::Engine("non-publishable vector result lacks terminal evidence".to_owned())
+        })?;
+        let evidence_dir = project_path.join(".terminal-evidence").join(&job.id);
+        let staging = evidence_dir.with_extension("tmp");
+        let transcript_path = evidence_dir.join("provider-terminal.json");
+        let transcript = terminal_transcript_bytes(&terminal)?;
+        let evidence_write: WorkerResult<()> = async {
+            tokio::fs::create_dir_all(&staging).await?;
+            tokio::fs::write(staging.join("provider-terminal.json"), &transcript).await?;
+            tokio::fs::rename(&staging, &evidence_dir).await?;
+            Ok(())
+        }
+        .await;
+        if evidence_write.is_err() {
+            let _ = tokio::fs::remove_dir_all(&staging).await;
+        }
+        evidence_write?;
+        let result = json!({
+            "terminalEvidence": add_source_raster_evidence(
+                terminal_result(&terminal, None, None, Some((&transcript_path, &transcript))),
+                source_raster.as_ref().map(|(path, bytes)| (path.as_path(), bytes.as_slice())),
+            )?,
+        })
+        .as_object()
+        .cloned()
+        .expect("terminal evidence result is an object");
+        update_job(
+            api,
+            &job.id,
+            progress_payload(
+                JobStatus::Completed,
+                ProgressStage::Completed,
+                1.0,
+                "Native vector provider reached a bounded terminal outcome without publication.",
+                None,
+                Some(result),
+                None,
+            ),
+        )
+        .await?;
+        return Ok(());
+    }
+    let source = collected
+        .source
+        .expect("checked non-empty publishable vector source");
 
     update_job(
         api,
@@ -796,6 +1013,7 @@ pub(crate) async fn run_vector_job_with_provider(
     let published = base.join(&asset_id);
     let svg_path = staging.join("vector.svg");
     let preview_path = staging.join("preview.png");
+    let transcript_path = staging.join("provider-terminal.json");
 
     let publish_result: WorkerResult<()> = async {
         tokio::fs::create_dir_all(&staging).await?;
@@ -807,6 +1025,9 @@ pub(crate) async fn run_vector_job_with_provider(
             &preview_path,
         )
         .await?;
+        if let Some(terminal) = &collected.terminal {
+            tokio::fs::write(&transcript_path, terminal_transcript_bytes(terminal)?).await?;
+        }
         check_cancel(api, &job.id, CANCEL_MESSAGE).await?;
         tokio::fs::rename(&staging, &published).await?;
         Ok(())
@@ -816,6 +1037,33 @@ pub(crate) async fn run_vector_job_with_provider(
         let _ = tokio::fs::remove_dir_all(&staging).await;
     }
     publish_result?;
+
+    let terminal_evidence = if std::env::var("SCENEWORKS_TERMINAL_CAMPAIGN").as_deref() == Ok("1") {
+        let terminal = collected.terminal.as_ref().ok_or_else(|| {
+            WorkerError::Engine(
+                "terminal campaign native result lacks provider terminal evidence".to_owned(),
+            )
+        })?;
+        let canonical_disk_path = published.join("vector.svg");
+        let preview_disk_path = published.join("preview.png");
+        let transcript_disk_path = published.join("provider-terminal.json");
+        let canonical_bytes = tokio::fs::read(&canonical_disk_path).await?;
+        let preview_bytes = tokio::fs::read(&preview_disk_path).await?;
+        let transcript_bytes = tokio::fs::read(&transcript_disk_path).await?;
+        Some(add_source_raster_evidence(
+            terminal_result(
+                terminal,
+                Some((&canonical_disk_path, &canonical_bytes)),
+                Some((&preview_disk_path, &preview_bytes)),
+                Some((&transcript_disk_path, &transcript_bytes)),
+            ),
+            source_raster
+                .as_ref()
+                .map(|(path, bytes)| (path.as_path(), bytes.as_slice())),
+        )?)
+    } else {
+        None
+    };
 
     let media_path = format!("assets/images/{generation_set_id}/{asset_id}/vector.svg");
     let preview_path = format!("assets/images/{generation_set_id}/{asset_id}/preview.png");
@@ -843,7 +1091,7 @@ pub(crate) async fn run_vector_job_with_provider(
         "normalizedHeight": canonical.height,
         "preview": { "path": preview_path, "mimeType": "image/png", "width": canonical.width, "height": canonical.height },
     });
-    let result = json!({
+    let mut result = json!({
         "generationSetId": generation_set_id,
         "expectedCount": 1,
         "adapter": provider.provider_id(),
@@ -862,6 +1110,9 @@ pub(crate) async fn run_vector_job_with_provider(
     .as_object()
     .cloned()
     .expect("vector result is an object");
+    if let Some(terminal_evidence) = terminal_evidence {
+        result.insert("terminalEvidence".to_owned(), terminal_evidence);
+    }
     update_job(
         api,
         &job.id,
@@ -1828,18 +2079,45 @@ mod tests {
             StarVectorFinishReason::WallTimeLimit,
         ] {
             let (output, events) = terminal_fixture(reason, "<svg>", None);
-            let error = validate_native_starvector_generation(output, events)
-                .expect_err("bounded partial output must not publish");
             assert!(
-                matches!(error, WorkerError::Engine(detail) if detail.contains("no partial SVG was published"))
+                validate_native_starvector_generation(output, events)
+                    .expect("typed bounded outcome")
+                    .is_empty(),
+                "bounded partial output must never reach publication"
             );
         }
 
         let (output, events) = terminal_fixture(StarVectorFinishReason::Cancelled, "<svg>", None);
-        assert!(matches!(
-            validate_native_starvector_generation(output, events),
-            Err(WorkerError::Canceled(_))
-        ));
+        assert!(validate_native_starvector_generation(output, events)
+            .expect("typed cancellation outcome")
+            .is_empty());
+        assert_eq!(
+            terminal_finish_reason(StarVectorFinishReason::TokenLimit),
+            "token_limit"
+        );
+    }
+
+    #[test]
+    fn terminal_evidence_never_advertises_files_for_a_bounded_outcome() {
+        let terminal = TerminalProviderOutcome {
+            finish_reason: "token_limit",
+            generated_tokens: 7,
+            generated_bytes: 23,
+            latency_seconds: 0.01,
+            provider_id: "mlx-starvector-1b".to_owned(),
+            model_id: "starvector_1b",
+            model_repository: "starvector/starvector-1b-im2svg",
+            model_revision: "380ab95d25a8e9ab1dc825debe238b4953ae13b9",
+            backend: "mlx",
+        };
+        let result = terminal_result(&terminal, None, None, None);
+        assert_eq!(result["accepted"], false);
+        assert_eq!(result["finishReason"], "token_limit");
+        assert_eq!(result["providerTranscriptSha256"], Value::Null);
+        assert!(result["canonicalSvgPath"].is_null());
+        assert!(result["previewPngPath"].is_null());
+        assert!(result["providerTranscriptPath"].is_null());
+        assert_eq!(result["resultContainsInlineSvg"], false);
     }
 
     #[test]
@@ -1882,7 +2160,11 @@ mod tests {
         // sanitize, render, or rename, so neither member of the asset pair can exist.
         let temp = tempfile::tempdir().expect("temp dir");
         let published = temp.path().join("asset");
-        if let Ok(source) = output {
+        if let Ok(CollectedSvgSource {
+            source: Some(source),
+            ..
+        }) = output
+        {
             std::fs::create_dir_all(&published).expect("publication dir");
             std::fs::write(published.join("vector.svg"), source).expect("source writes");
         }
