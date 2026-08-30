@@ -21,7 +21,7 @@ fn ltx_prepared_bundle_bytes(schema: &str) -> Vec<u8> {
         }
     }))
     .unwrap();
-    while header.len() % 8 != 0 {
+    while !header.len().is_multiple_of(8) {
         header.push(b' ');
     }
     let mut bytes = Vec::with_capacity(8 + header.len() + 1024);
