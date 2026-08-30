@@ -454,11 +454,12 @@ fn validate_terminal_candidate(
             ))
         };
     };
-    if !is_lower_hex(inference_revision, 40)
-        || inference_revision != crate::catalog_semantic_jobs::INFERENCE_RUNTIME_REVISION
-    {
+    // Capture provenance remains mandatory and machine-readable, but it is not an evidence-currency
+    // term. A later inference pin alone cannot invalidate this measured terminal candidate; the
+    // corpus, immutable model identity, provider identities, and production closure below own that.
+    if !is_lower_hex(inference_revision, 40) {
         return Err(TerminalCandidateError::Invalid(
-            "terminal inferenceRevision does not match the linked inference runtime",
+            "terminal inferenceRevision is malformed",
         ));
     }
     let Some(corpus_sha256) = candidate.get("corpusSha256").and_then(Value::as_str) else {
@@ -830,13 +831,31 @@ mod tests {
     }
 
     #[test]
+    fn eight_b_candidate_inference_revision_is_provenance_not_currency() {
+        let mut model = complete_eight_b_model();
+        model["vector"]["deviceAdmission"]["terminalCandidate"]["inferenceRevision"] =
+            json!("0".repeat(40));
+
+        for (backend, total_bytes) in [
+            (VectorBackend::Mlx, 137_438_953_472),
+            (VectorBackend::Candle, 51_539_607_552),
+        ] {
+            assert_eq!(
+                vector_admission_refusal(&model, backend, Some(&facts(backend, total_bytes))),
+                None,
+                "a well-formed capture revision must not invalidate unchanged terminal evidence"
+            );
+        }
+    }
+
+    #[test]
     fn eight_b_candidate_identity_and_closure_mutations_fail_closed() {
         let exact = complete_eight_b_model();
         let mlx = facts(VectorBackend::Mlx, 137_438_953_472);
         for mutate in [
             |value: &mut Value| {
                 value["vector"]["deviceAdmission"]["terminalCandidate"]["inferenceRevision"] =
-                    json!("0".repeat(40));
+                    json!("main");
             },
             |value: &mut Value| {
                 value["vector"]["deviceAdmission"]["terminalCandidate"]["model"]["repository"] =
