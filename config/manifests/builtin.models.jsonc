@@ -25387,7 +25387,7 @@
             },
             "productionClosure": {
               "schemaVersion": 1,
-              "sha256": "6a8197ed2285342175833e9c20c4296ce47a3324ada6db5702b35bad6cdcd08a",
+              "sha256": "b514dd6876ebba96b55e42d5c1814bb3280fbca24def13bfcb300c4d4dc39fb7",
               "entries": [
                 {
                   "path": ".github/workflows/starvector-terminal.yml",
@@ -25396,13 +25396,18 @@
                 },
                 {
                   "path": "Cargo.lock",
-                  "byteSize": 248776,
-                  "sha256": "005490160610c5c4eddf915bcba2a52b5bca8ce56fffd3dd2bd8677aa3911221"
+                  "byteSize": 248766,
+                  "sha256": "281ef455f7e030fa815a6060275a3dd155c5b10f538960f962ccde119ec4a2b5"
                 },
                 {
                   "path": "Cargo.toml",
                   "byteSize": 8688,
                   "sha256": "f5a7d810f30aefd8d75adbeee8e07762fb5bd957bb270b4853d6346cc54a96f8"
+                },
+                {
+                  "path": "apps/rust-api/src/main.rs",
+                  "byteSize": 2152,
+                  "sha256": "096a7e0f29c61beaf1ab71a950db365ab4ca202f1a572dde9212fc4683a385ca"
                 },
                 {
                   "path": "crates/sceneworks-worker/Cargo.toml",
@@ -25431,8 +25436,8 @@
                 },
                 {
                   "path": "crates/sceneworks-worker/src/lib.rs",
-                  "byteSize": 144421,
-                  "sha256": "ba3b31838cd243086fc02529b11786f9e22cbc3c8225baf3aa5477afa76a2795"
+                  "byteSize": 146088,
+                  "sha256": "bedf5c216ab6530c1745052703c97a95c40a1d535e1bb749154b5a95e657383e"
                 },
                 {
                   "path": "crates/sceneworks-worker/src/model_jobs.rs",
@@ -25481,8 +25486,8 @@
                 },
                 {
                   "path": "scripts/starvector-production-closure.mjs",
-                  "byteSize": 8166,
-                  "sha256": "8eb7028bddf02ece7575a5a0710d36a5d6b48be39e973057eb2cb70907549e8e"
+                  "byteSize": 8197,
+                  "sha256": "f31baa4b9bc4573476198c47c7d4098a7933edfe8ba830cf2e1b04623a981dc6"
                 },
                 {
                   "path": "scripts/starvector-terminal-assets.mjs",

@@ -1,5 +1,4 @@
-#[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
+fn main() -> Result<(), Box<dyn std::error::Error>> {
     // The desktop app launches this same binary a second time as a standalone
     // GPU worker — the Apple-Silicon MLX worker (sc-3289) — by setting
     // SCENEWORKS_WORKER_ONLY=1. The binary already links the mlx-gen engine, so
@@ -25,7 +24,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
     if std::env::var("SCENEWORKS_WORKER_ONLY").is_ok_and(|value| value.trim() == "1") {
-        return sceneworks_rust_api::run_worker().await;
+        return sceneworks_worker::run_on_worker_entry_thread(|| async {
+            sceneworks_rust_api::run_worker()
+                .await
+                .map_err(|error| sceneworks_worker::WorkerError::Engine(error.to_string()))
+        })
+        .map_err(Into::into);
     }
-    sceneworks_rust_api::run().await
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()?
+        .block_on(sceneworks_rust_api::run())
 }

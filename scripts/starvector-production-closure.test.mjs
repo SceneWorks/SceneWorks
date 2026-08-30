@@ -9,6 +9,7 @@ import {
   checkManifestProductionClosure,
   checkProductionClosure,
   closureSha256,
+  PRODUCTION_CLOSURE_PATHS,
   stableJson,
   validateProductionClosureShape,
 } from "./starvector-production-closure.mjs";
@@ -64,6 +65,16 @@ test("shape and tree checks detect every closure mutation", async () => {
 
 test("live manifest seals the exact frozen-tree production closure", async () => {
   const closure = await checkManifestProductionClosure();
-  assert.equal(closure.sha256, "6a8197ed2285342175833e9c20c4296ce47a3324ada6db5702b35bad6cdcd08a");
-  assert.equal(closure.entries.length, 27);
+  assert.equal(closure.sha256, "b514dd6876ebba96b55e42d5c1814bb3280fbca24def13bfcb300c4d4dc39fb7");
+  assert.equal(closure.entries.length, 28);
+});
+
+test("the sealed campaign worker and standalone worker keep the large-stack entry seam", async () => {
+  assert.ok(PRODUCTION_CLOSURE_PATHS.includes("apps/rust-api/src/main.rs"));
+  const [apiMain, workerMain] = await Promise.all([
+    readFile("apps/rust-api/src/main.rs", "utf8"),
+    readFile("apps/rust-worker/src/main.rs", "utf8"),
+  ]);
+  assert.match(apiMain, /SCENEWORKS_WORKER_ONLY[\s\S]+run_on_worker_entry_thread/);
+  assert.match(workerMain, /run_on_worker_entry_thread\(sceneworks_worker::run\)/);
 });
