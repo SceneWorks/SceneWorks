@@ -3222,7 +3222,6 @@ pub(crate) fn huggingface_receipt_weights_dir(
 /// [`huggingface_receipt_weights_dir`], whose legacy compatibility path may return an unproven
 /// receipt: native providers whose architecture contract is revision-pinned must never load that
 /// compatibility fallback or infer identity from a directory name.
-#[cfg(any(target_os = "macos", feature = "backend-candle", test))]
 pub(crate) fn huggingface_receipt_weights_dir_at_revision(
     data_dir: &Path,
     repo: &str,
@@ -3246,7 +3245,6 @@ pub(crate) fn huggingface_receipt_weights_dir_at_revision(
     )
 }
 
-#[cfg(any(target_os = "macos", feature = "backend-candle", test))]
 pub(crate) fn huggingface_receipt_weights(
     data_dir: &Path,
     repo: &str,

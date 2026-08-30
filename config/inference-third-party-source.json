@@ -1,7 +1,7 @@
 {
-  "_comment": "Exact audit of production include_str!/include_bytes! sites and known hand-ports in the pinned inference revision. The digest is checked by check-license-coverage.mjs; any inference pin change forces a new audit. Tests/fixtures are outside this production inventory. Pin 35b9c14f advances inference main through the StarVector feature merge (PR #894) after the LTX 2.5 terminal campaign merge (PR #893). The exact scanner records 667 provenance candidates and 97 production-Rust crate prefixes at this pin, both unchanged from the previous audited pin; only three mlx-gen-ltx git blob identities moved (adapters.rs, model.rs, transformer.rs), while their normalized provenance-marker hashes and classified areas are unchanged. Current report-only licensing findings, including unclassified Minimax-H3 and repository-root audit entries, must be read from the checker output; this summary does not freeze their counts or treat them as exceptions.",
-  "inferenceRevision": "35b9c14f54401308d54b7cb7a7c5af10c469c2d4",
-  "auditDigest": "40b700caafd84782da1f8c4bd0fc9f7ddf0e516de1708f491578707977db34a5",
+  "_comment": "Exact audit of production include_str!/include_bytes! sites and known hand-ports in the pinned inference revision. The digest is checked by check-license-coverage.mjs; any inference pin change forces a new audit. Tests/fixtures are outside this production inventory. Pin 669f749b advances inference main through the StarVector accelerator-catalog admission correction (PR #896) after the StarVector feature merge (PR #894). The exact scanner records 667 provenance candidates and 97 production-Rust crate prefixes at this pin, both unchanged from the previous audited pin; the generated candidate and crate-prefix inventories are byte-identical, so this audit advance changes only their exact revision binding. Current report-only licensing findings, including unclassified Minimax-H3 and repository-root audit entries, must be read from the checker output; this summary does not freeze their counts or treat them as exceptions.",
+  "inferenceRevision": "669f749b428ed65acfdfee917bcf601b8cf6db1c",
+  "auditDigest": "8d1aa1e151d3404e4d2ca3969b45f843c6734a9dada0e7f8eb0583f7ff6f1173",
   "artifacts": [
     {
       "id": "cmudict",
@@ -17,7 +17,7 @@
   "provenanceScan": {
     "scanner": "scripts/scan-inference-provenance.mjs",
     "candidateList": "config/inference-provenance-candidates.tsv",
-    "revision": "35b9c14f54401308d54b7cb7a7c5af10c469c2d4",
+    "revision": "669f749b428ed65acfdfee917bcf601b8cf6db1c",
     "pathFilter": "production .rs; exclude tests, testdata, benches, examples, and _vendor path segments",
     "markerRegex": "faithful ... port(s), ported from, port(s) of, vendor(s)/vendored, transcribed, copied ... verbatim, adapted from, mirror(s|ed|ing) ... <port-object>, derived from ... <port-object>, reimplemented/reimplementation from|of, translated/transliterated from, from the reference (not reference-), original implementation|repo(sitory), based on ... <port-object>, follow(s|ing) ... <port-object>, reimplements ... <port-object>, rewrite of ... <port-object>, model(l)ed after ... <port-object>, ported to ... from, 1:1 with ... <port-object>, line-for-line ... <port-object> (case-insensitive; <port-object> = reference(not followed by -)|upstream|python|pytorch|torch|diffusers|comfy(ui)|transformers|implementation). `original` is NOT a bare port-object and `followed` is excluded: both produced verified false positives on first-party prose (sc-15191 review).",
     "normalization": "matched marker text lowercased, internal whitespace collapsed, sorted, newline joined",
@@ -830,7 +830,7 @@
   "crateCoverage": {
     "scanner": "scripts/scan-inference-provenance.mjs",
     "crateList": "config/inference-crate-prefixes.txt",
-    "revision": "35b9c14f54401308d54b7cb7a7c5af10c469c2d4",
+    "revision": "669f749b428ed65acfdfee917bcf601b8cf6db1c",
     "rule": "Every production-Rust crate prefix in the pinned revision must be covered by a portedSourceAreas entry OR carry an explicit crateDispositions decision. Anything else FAILS check-license-coverage.mjs.",
     "cratePrefixes": 97,
     "cratePopulationSha256": "993023a1f5832a7402f3c6aaf5989122b8d12436d69b5fd840be84ba90b329f2"

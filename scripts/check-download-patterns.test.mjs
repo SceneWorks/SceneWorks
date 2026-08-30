@@ -171,16 +171,17 @@ test("the committed evidence grades the real catalog clean", async () => {
 // keys. SC-21306 adds two exact historical rows for the audited artifact importer; they are not
 // manifest claims and are guarded separately against absence, identity drift, and file-census drift.
 // 100 -> 101 on sc-22256: StarVector-1B adds one exact upstream image-to-SVG snapshot.
-test("all 101 current and two frozen legacy download keys use immutable commit SHAs", async () => {
+// 101 -> 102 on sc-22261: the terminal slice admits the exact StarVector-8B snapshot.
+test("all 102 current and two frozen legacy download keys use immutable commit SHAs", async () => {
   const { claims, evidence } = await realInputs();
   const immutableRevision = /^[0-9a-f]{40}$/u;
   const keys = new Set(claims.map((claim) => claimKey(claim.repo, claim.revision)));
 
-  assert.equal(keys.size, 101, "update the 101/101 disclosure when the real key census changes");
+  assert.equal(keys.size, 102, "update the 102/102 disclosure when the real key census changes");
   assert.equal(
     evidence.repos.length,
-    103,
-    "the evidence census must be the 101 current claims plus two frozen importer authorities",
+    104,
+    "the evidence census must be the 102 current claims plus two frozen importer authorities",
   );
   for (const claim of claims) {
     assert.match(
