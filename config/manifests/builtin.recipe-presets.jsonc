@@ -1,5 +1,0 @@
-{
-  "$schema": "../../packages/schemas/recipe-preset.schema.json",
-  "schemaVersion": 1,
-  "presets": []
-}

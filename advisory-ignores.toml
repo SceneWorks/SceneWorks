@@ -1,4 +1,0 @@
-version = 1
-# Exceptions are temporary: expires must be a future TOML date no more than 90 days away.
-# Each [[ignore]] also requires advisory, reason, reachability, and owner fields.
-ignore = []

@@ -1,5 +1,0 @@
-﻿ARTIFACT_JSON {"role":"adapter","path":"C:\\Users\\Michael\\AppData\\Local\\Temp\\sc16170-z-image-rank1-lora.safetensors","bytes":31008,"sha256":"cd248717d74f77dce1964680ce7764c45c3648571d09d11ff550b59862bc7072","repository":"sc16170-rank1-lora","resolvedRevision":"sha256:cd248717d74f77dce1964680ce7764c45c3648571d09d11ff550b59862bc7072","variant":"rank1","fileCount":1}
-FILE_JSON {"path":"sc16170-z-image-rank1-lora.safetensors","bytes":31008,"sha256":"cd248717d74f77dce1964680ce7764c45c3648571d09d11ff550b59862bc7072"}
-CAPTURED_AT 2026-08-02T02:51:03.4829702Z
-SCENEWORKS_BASELINE e87abd092f2e83452c0e527d69f85fc4d6465242
-INFERENCE_REVISION 65833f24409bce33c418499c2029bee76d842740
