@@ -527,11 +527,9 @@ mod tests {
                     .map(String::as_str)
                     .collect::<Vec<_>>()
             );
-            let expected_platforms = if tier == "q8" {
-                serde_json::json!(["macos"])
-            } else {
-                serde_json::json!(["macos", "windows", "linux"])
-            };
+            // Every tier — q4, q8, bf16 — ships on every platform: the candle lane consumes the
+            // same split bundle as MLX, so q8 carries no macOS-only exclusion.
+            let expected_platforms = serde_json::json!(["macos", "windows", "linux"]);
             assert_eq!(
                 row["platforms"].as_array().expect("tier has platforms"),
                 expected_platforms.as_array().expect("expected platforms")
@@ -628,12 +626,12 @@ mod tests {
                     "bounded_decode": {
                         "parameters": { "decodeTileEdge": 192, "decodeOverlap": 64 },
                         "overlays": ["none", "lora"],
-                        "tiers": ["q4", "bf16"]
+                        "tiers": ["q4", "q8", "bf16"]
                     },
                     "bounded_attention": {
                         "parameters": { "attentionChunkSize": 16_777_216 },
                         "overlays": ["none", "lora"],
-                        "tiers": ["q4", "bf16"]
+                        "tiers": ["q4", "q8", "bf16"]
                     },
                     "bounded_transformer_residency": {
                         "parameters": {
@@ -641,7 +639,7 @@ mod tests {
                             "transformerWindowComponent": "Dit"
                         },
                         "overlays": ["none"],
-                        "tiers": ["q4", "bf16"]
+                        "tiers": ["q4", "q8", "bf16"]
                     }
                 }
             })

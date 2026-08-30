@@ -971,6 +971,17 @@ impl TrainingDatasetStore {
     }
 }
 
+/// The sanity window a prepared bundle's declared `fps` must sit in.
+///
+/// "Finite and positive" alone is not enough: a subnormal like `5e-324` clears it, and then
+/// `output_frames / fps * 25.0` is `inf`, whose `floor` no longer fits a `u64` — the rounding in
+/// [`python_round`] overflow-panics in debug builds on an *uploaded* header. No real capture
+/// declares a rate outside this window, so the header is refused as invalid rather than trusted
+/// into the arithmetic.
+const PREPARED_MIN_FPS: f64 = 0.01;
+const PREPARED_MAX_FPS: f64 = 1000.0;
+const PREPARED_FPS_ERROR: &str = "metadata fps must be a finite number in 0.01..=1000";
+
 /// Header-only admission check for uploaded prepared examples. Runtime-specific validators still
 /// validate the selected workflow and all referenced condition tensors at dry-run/execute time.
 fn validate_ltx_prepared_bundle_header(path: &Path) -> ProjectStoreResult<()> {
@@ -1019,18 +1030,25 @@ fn validate_ltx_prepared_bundle_header(path: &Path) -> ProjectStoreResult<()> {
         .and_then(Value::as_str)
         .ok_or_else(|| invalid_prepared_bundle("metadata fps is required"))?
         .parse::<f64>()
-        .map_err(|_| invalid_prepared_bundle("metadata fps must be a finite positive number"))?;
-    if !fps.is_finite() || fps <= 0.0 {
-        return Err(invalid_prepared_bundle(
-            "metadata fps must be a finite positive number",
-        ));
+        .map_err(|_| invalid_prepared_bundle(PREPARED_FPS_ERROR))?;
+    if !fps.is_finite() || !(PREPARED_MIN_FPS..=PREPARED_MAX_FPS).contains(&fps) {
+        return Err(invalid_prepared_bundle(PREPARED_FPS_ERROR));
     }
     let output_frames = video_shape[2]
         .checked_sub(1)
         .and_then(|value| value.checked_mul(8))
         .and_then(|value| value.checked_add(1))
         .ok_or_else(|| invalid_prepared_bundle("videoShape duration overflows"))?;
-    let expected_audio_frames = python_round(output_frames as f64 / fps * 25.0) as usize;
+    // `python_round` floors then adds 1, so a non-finite ratio reaches `floor as u64 + 1` and
+    // overflow-panics in debug. Nothing downstream can rescue that, so the ratio is checked here
+    // rather than defended inside the rounding helper.
+    let audio_frame_ratio = output_frames as f64 / fps * 25.0;
+    if !audio_frame_ratio.is_finite() {
+        return Err(invalid_prepared_bundle(
+            "videoShape duration and fps do not describe a representable audio length",
+        ));
+    }
+    let expected_audio_frames = python_round(audio_frame_ratio) as usize;
     if audio_shape[2] != expected_audio_frames {
         return Err(invalid_prepared_bundle(&format!(
             "audioShape duration must contain {expected_audio_frames} latent frames for videoShape/fps"
@@ -3058,6 +3076,49 @@ mod tests {
             fs::write(&path, bytes).unwrap();
             assert!(validate_ltx_prepared_bundle_header(&path).is_err());
         }
+    }
+
+    /// A "finite and positive" fps is not a *usable* fps. `5e-324` is a subnormal that clears both
+    /// checks, and then `output_frames / fps * 25.0` is `inf` — `python_round` floors it and adds
+    /// 1, which overflow-panics in debug on an uploaded, attacker-shaped header. The window fails
+    /// the header closed instead, and a plain 25 still admits.
+    #[test]
+    fn prepared_bundle_rejects_a_degenerate_fps_instead_of_panicking() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = dir.path().join("fps.safetensors");
+        for degenerate in ["5e-324", "0.001", "1e9", "0", "-25", "NaN", "inf"] {
+            write_prepared_bundle_with_fps(&path, degenerate);
+            let error = validate_ltx_prepared_bundle_header(&path)
+                .unwrap_err()
+                .to_string();
+            assert!(
+                error.contains("metadata fps must be a finite number in 0.01..=1000"),
+                "fps {degenerate} produced {error}"
+            );
+        }
+        write_prepared_bundle_with_fps(&path, "25");
+        validate_ltx_prepared_bundle_header(&path).expect("a real fps still admits");
+    }
+
+    fn write_prepared_bundle_with_fps(path: &Path, fps: &str) {
+        let mut header = serde_json::to_vec(&json!({
+            "__metadata__": {
+                "schemaVersion": "ltx-prepared-v1",
+                "videoShape": "[1,128,1,1,1]",
+                "audioShape": "[1,8,1,16]",
+                "fps": fps
+            },
+            "video_latents": {"dtype":"F32","shape":[1,128,1,1,1],"data_offsets":[0,512]},
+            "audio_latents": {"dtype":"F32","shape":[1,8,1,16],"data_offsets":[512,1024]}
+        }))
+        .unwrap();
+        while !header.len().is_multiple_of(8) {
+            header.push(b' ');
+        }
+        let mut bytes = (header.len() as u64).to_le_bytes().to_vec();
+        bytes.extend_from_slice(&header);
+        bytes.resize(bytes.len() + 1024, 0);
+        fs::write(path, bytes).unwrap();
     }
 
     /// sc-11202 / F-026: the training path's project.db openers were raw

@@ -11,6 +11,12 @@ use serde::de::DeserializeOwned;
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::{Map, Value};
 
+/// Schema v6 (epic 18755) adds the LTX-2.5 target axes — `target.transformerVariant`,
+/// `target.decoder`, and typed `quality.audio` — to the record and source-session shapes. The
+/// additions are purely additive, but every shape here is `deny_unknown_fields`, so a v5 *reader*
+/// rejects a v6 document outright; the version bump is what keeps that rejection legible instead
+/// of surfacing as an unknown-field parse error.
+///
 /// Schema v5 (sc-18864) REMOVES the per-phase `deviceBytes` and `wiredBytes` counters. Both
 /// adapters emitted them as verbatim copies of `allocatorBytes`, so a v4 record could — and every
 /// committed MLX record did — assert wired residency above the probed wired ceiling as a pure
@@ -1360,12 +1366,13 @@ fn physical_mlx_rgb_metadata(output: &SourceOutput) -> Result<(String, u32, u32)
     let stem = file_name
         .strip_suffix(".rgb")
         .ok_or_else(|| format!("physical MLX {role} receipt must end in .rgb"))?;
-    if stem.len() < 27 || !has_prefixed_hex(&stem[..27], "implan-", 20) {
-        return Err(format!(
-            "physical MLX {role} receipt must begin with its logical case id"
-        ));
-    }
-    let logical_case_id = stem[..27].to_owned();
+    // `get(..27)` rather than `&stem[..27]`: the path is untrusted bundle text, and a multibyte
+    // byte 27 would panic the slice instead of failing the receipt closed.
+    let logical_case_id = stem
+        .get(..27)
+        .filter(|prefix| has_prefixed_hex(prefix, "implan-", 20))
+        .ok_or_else(|| format!("physical MLX {role} receipt must begin with its logical case id"))?
+        .to_owned();
     let remainder = stem[27..]
         .strip_prefix(&format!("-{role}-"))
         .ok_or_else(|| format!("physical MLX {role} receipt path has the wrong role"))?;
@@ -1408,12 +1415,13 @@ fn physical_mlx_av_metadata(output: &SourceOutput) -> Result<(String, u32, u32, 
     let stem = file_name
         .strip_suffix(".avbin")
         .ok_or_else(|| format!("physical MLX {role} receipt must end in .avbin"))?;
-    if stem.len() < 27 || !has_prefixed_hex(&stem[..27], "implan-", 20) {
-        return Err(format!(
-            "physical MLX {role} receipt must begin with its logical case id"
-        ));
-    }
-    let logical_case_id = stem[..27].to_owned();
+    // `get(..27)` rather than `&stem[..27]`: see the RGB sibling — an untrusted multibyte path
+    // must fail the receipt, not panic the reader.
+    let logical_case_id = stem
+        .get(..27)
+        .filter(|prefix| has_prefixed_hex(prefix, "implan-", 20))
+        .ok_or_else(|| format!("physical MLX {role} receipt must begin with its logical case id"))?
+        .to_owned();
     let remainder = stem[27..]
         .strip_prefix(&format!("-{role}-"))
         .ok_or_else(|| format!("physical MLX {role} receipt path has the wrong role"))?;
@@ -1436,7 +1444,11 @@ fn physical_mlx_av_metadata(output: &SourceOutput) -> Result<(String, u32, u32, 
     let frames = frames
         .parse::<u32>()
         .map_err(|_| format!("physical MLX {role} receipt frame count is invalid"))?;
-    if width == 0 || height == 0 || frames == 0 || output.bytes == Some(0) {
+    // An A/V payload's size is not geometry-derivable (the audio track's length is not implied by
+    // width/height/frames), so unlike the RGB sibling there is no exactness check — but the
+    // receipt still has to CARRY a size. `bytes == Some(0)` alone let a `null` through, which is
+    // an incomplete receipt claiming to attest a rendered clip.
+    if width == 0 || height == 0 || frames == 0 || output.bytes.is_none_or(|bytes| bytes == 0) {
         return Err(format!(
             "physical MLX {role} receipt dimensions are invalid"
         ));
@@ -1623,7 +1635,12 @@ fn validate_derivation(
                     requires_qwen_mlx_provenance,
                 )?;
             }
-            if record.target.model_id.starts_with("ltx_") {
+            // `ltx_2_5` EXACTLY, not the `ltx_` family: the axes this demands
+            // (`transformerVariant`, `decoder`) are only *required* by `validate_record` for
+            // `ltx_2_5`, so a family-wide gate here would make a future `ltx_2_3` record with a
+            // physical derivation permanently unloadable — it could never satisfy axes the record
+            // schema does not ask it to carry.
+            if record.target.model_id == "ltx_2_5" {
                 let target = session.target.as_ref().ok_or_else(|| {
                     format!(
                         "{} LTX derivation source {id} has no target identity",

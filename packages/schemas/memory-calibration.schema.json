@@ -12,14 +12,14 @@
   },
   "allOf": [
     {
-      "$comment": "JSON Schema cannot correlate sourceSessionIds with array members, so an LTX derivation bundle fail-closes by requiring every carried source session to have a complete typed target. The JS and Rust validators then enforce that every referenced session is present and exactly matches.",
+      "$comment": "JSON Schema cannot correlate sourceSessionIds with array members, and a source session carries no modelId, so an LTX derivation bundle fail-closes by requiring that at least one carried source session has a complete typed LTX target. It deliberately does NOT impose that shape on every session: a bundle mixes LTX sessions with non-LTX ones that can never carry transformerVariant/decoder. The JS and Rust validators then enforce that every session an LTX derivation actually references is present and exactly matches.",
       "if": {
         "properties": {
           "records": {
             "contains": {
               "properties": {
                 "target": {
-                  "properties": { "modelId": { "pattern": "^ltx_" } },
+                  "properties": { "modelId": { "pattern": "^ltx_2_5$" } },
                   "required": ["modelId"]
                 },
                 "derivation": { "type": "object" }
@@ -35,7 +35,8 @@
         "properties": {
           "sourceSessions": {
             "minItems": 1,
-            "items": {
+            "contains": {
+              "type": "object",
               "required": ["target"],
               "properties": {
                 "target": { "required": ["transformerVariant", "decoder"] }
@@ -436,7 +437,7 @@
           "if": {
             "properties": {
               "target": {
-                "properties": { "modelId": { "pattern": "^ltx_" } },
+                "properties": { "modelId": { "pattern": "^ltx_2_5$" } },
                 "required": ["modelId"]
               },
               "derivation": { "type": "object" }

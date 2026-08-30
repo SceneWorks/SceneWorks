@@ -140,7 +140,7 @@ fn target_string<'a>(
 fn validate_geometry(width: u32, height: u32, frames: u32) -> Result<Geometry, String> {
     const BASE: &[(u32, u32)] = &[(768, 512), (512, 768), (640, 640), (1280, 704), (704, 1280)];
     const MAX: &[(u32, u32)] = &[(1280, 704), (704, 1280)];
-    if width % 64 != 0 || height % 64 != 0 {
+    if !width.is_multiple_of(64) || !height.is_multiple_of(64) {
         return Err(format!(
             "{LABEL} requires width and height divisible by 64, got {width}x{height}"
         ));

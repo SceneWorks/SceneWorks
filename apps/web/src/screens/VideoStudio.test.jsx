@@ -1605,7 +1605,7 @@ describe("VideoStudio MLX quant-tier picker (sc-12165)", () => {
     expect(context.createVideoJob.mock.calls[0][0].advanced).not.toHaveProperty("quantization");
   });
 
-  it("routes the exact LTX-2.5 variant and measured q4/bf16 tiers through Candle", async () => {
+  it("routes the exact LTX-2.5 variant and the full q4/q8/bf16 ladder through Candle", async () => {
     const ltx25 = {
       ...tieredVideoModel(["q4", "q8", "bf16"]),
       id: "ltx_2_5",
@@ -1619,7 +1619,13 @@ describe("VideoStudio MLX quant-tier picker (sc-12165)", () => {
     await render(context);
 
     expect(tierPicker()).toBeTruthy();
-    expect([...tierPicker().options].map((option) => option.value)).toEqual(["q4", "bf16"]);
+    // q8 is a first-class Candle tier; `nvfp4` from the fixture matrix must still stay out.
+    expect([...tierPicker().options].map((option) => option.value)).toEqual(["q4", "q8", "bf16"]);
+    setSelect(tierPicker(), "q8");
+    await act(async () => {});
+    await click(buttonWithText(container, "Render clip"));
+    expect(context.createVideoJob.mock.calls[0][0].advanced).toMatchObject({ mlxQuantize: 8 });
+    context.createVideoJob.mockClear();
     setSelect(tierPicker(), "bf16");
     await openAdvanced();
     expect(

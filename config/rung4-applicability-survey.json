@@ -3023,7 +3023,7 @@
           "implementationScopes": [
             {
               "entries": ["ltx_2_5"],
-              "tiers": ["q4", "bf16"],
+              "tiers": ["q4", "q8", "bf16"],
               "modes": ["image_to_video", "text_to_video", "first_last_frame", "extend_clip", "video_bridge", "replace_person"],
               "overlays": ["none"],
               "strategyParameters": {
@@ -3032,7 +3032,7 @@
               }
             }
           ],
-          "summary": "The same uniform 48-block AvDiT. LTX-2.5's adapter-free BF16/Q4 split route drives the shared block-window primitive; Q8 remains unadvertised pending SC-18783 evidence. Its ordinary ConvVAE route also consumes a selected decode edge/overlap, while the optional DiffVAE route and staged residency remain Missing for those respective controls. LTX-2.3 and every adapter-bearing coordinate, including LTX-2.5 dev's required refinement adapter, remain outside the rung-4 implementation scope.",
+          "summary": "The same uniform 48-block AvDiT. LTX-2.5's adapter-free BF16/Q4/Q8 split route drives the shared block-window primitive; Q8 is a first-class advertised Candle tier, symmetric with MLX. Its ordinary ConvVAE route also consumes a selected decode edge/overlap, while the optional DiffVAE route and staged residency remain Missing for those respective controls. LTX-2.3 and every adapter-bearing coordinate, including LTX-2.5 dev's required refinement adapter, remain outside the rung-4 implementation scope.",
           "blockStacks": [
             {
               "name": "transformer_blocks (AvDiT — joint video + audio + cross-modal)",
@@ -3072,7 +3072,7 @@
             "What is held alongside the trunk during denoise is what most limits rung 4's reach on this backend: `Components` keeps the ~24 GB Gemma encoder, the video VAE and the audio decoder + vocoder alive through the whole block loop (`lib.rs:79-97`), none of which is needed until after it. Rung 4 bounds the 48 blocks; on Candle it cannot bound the majority of what is resident while they run. Not inventoried in `blockStacks` because none of it is transformer trunk weight — recorded here per this survey's own convention for encoder and decode-side residents.",
             "LTX-2.3's budgeted VAE decode remains its existing automatic path. LTX-2.5 independently wires the selected edge/overlap through `selected_decode_cap` into the ConvVAE's `decode_budgeted_with_spatial_cap`; its optional DiffVAE retains an automatic chunked route and explicitly rejects those parameters. The static declaration therefore describes the ordinary ConvVAE load, not a claim that the alternate decoder accepts the same control.",
             "LTX-2.3 retains its existing fixed attention guard. LTX-2.5 separately publishes selectable score-element budgets [67108864,16777216] on its ordinary attention path, so the implemented declaration is provider- and entry-specific rather than a family inference.",
-            "Rung 4 remains absent for LTX-2.3. LTX-2.5's BF16/Q4 split route instead drives gen_core::block_window over the 48-block AvDiT for deferred, directory-backed, adapter-free loads, with published windows [1,2,4,8,16]. Candle Q8 remains outside the registered memory surface pending SC-18783 evidence.",
+            "Rung 4 remains absent for LTX-2.3. LTX-2.5's BF16/Q4/Q8 split route instead drives gen_core::block_window over the 48-block AvDiT for deferred, directory-backed, adapter-free loads, with published windows [1,2,4,8,16]. Candle Q8 sits inside the registered memory surface on the same terms as Q4.",
             "Candle adapters are forward-time residuals, but the shipped LTX-2.5 block stream refuses adapter-bearing loads rather than replaying them per window. Its rung-4 scope is therefore no-overlay only, including exclusion of the dev transformer's required refinement adapter.",
             "On the DISTILLED LoRA specifically: there is no fold to undo on this backend because `ltx_2_3_eros` no longer routes to Candle (sc-18902). Exact-head CUDA baseline run 31766800005 proved that sending its undistilled dense checkpoint through Candle's single distilled denoise pass produces unresolved noise with no prompt subject. The published cond_safe recipe cannot be transferred honestly: it is two-pass on MLX and only 768/3,320 keys match Candle's narrower adapter surface (`transformer_blocks.N.attn{1,2}.{to_q,to_k,to_v,to_out.0}` only, `adapters.rs:49-60`). Base LTX and its user LoRAs remain compatible with the Candle forward-time residual mechanism described above.",
             "SC-18902 keeps `ltx_2_3_eros` MLX-only after its failed Candle baseline. The new Candle rung-4 claim is not a resurrection of that route: it is scoped solely to `ltx_2_5`, and only to the adapter-free split-provider coordinates named above."

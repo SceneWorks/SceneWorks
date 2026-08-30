@@ -748,12 +748,26 @@ fn normalize_ltx25_generation_controls(
     job_payload: &mut JsonObject,
     model_manifest_entry: &Value,
 ) -> Result<bool, ApiError> {
-    const KEYS: [&str; 5] = [
+    const KEYS: [&str; 6] = [
         "vaeDecoder",
         "autoDuration",
         "autoDurationMinSeconds",
         "autoDurationMaxSeconds",
         "temporalUpsampleRounds",
+        // `transformerVariant` is read only by `ltx25_transformer_variant`, on the 2.5 arm. It
+        // belongs in this list for the same reason `vaeDecoder` does: on any other family it is a
+        // control the UI shows and nothing reads.
+        "transformerVariant",
+    ];
+    /// The legacy LTX guider knobs. LTX-2.5 has no reader for any of them — distilled guidance is
+    /// baked in and the dev checkpoint uses its fixed native video/audio guider parameters — so
+    /// they are inert in exactly the way `guidanceScale` is, and get the same refusal rather than
+    /// being accepted and silently dropped.
+    const DEAD_GUIDANCE_KEYS: [&str; 4] = [
+        "guidanceScale",
+        "videoCfgGuidanceScale",
+        "videoStgGuidanceScale",
+        "videoRescaleScale",
     ];
     let advanced = job_payload
         .get("advanced")
@@ -764,17 +778,20 @@ fn normalize_ltx25_generation_controls(
     if model_id != "ltx_2_5" {
         if carries_ltx25_control {
             return Err(ApiError::bad_request(format!(
-                "LTX-2.5 decoder, auto-duration, and temporal-upsample controls are not supported by {model_id}"
+                "LTX-2.5 transformer-variant, decoder, auto-duration, and temporal-upsample controls are not supported by {model_id}"
             )));
         }
         return Ok(false);
     }
 
-    if advanced.contains_key("guidanceScale") {
-        return Err(ApiError::bad_request(
-            "LTX-2.5 does not accept advanced.guidanceScale; distilled guidance is baked in and \
-             the dev checkpoint uses its fixed native video/audio guider parameters",
-        ));
+    if let Some(key) = DEAD_GUIDANCE_KEYS
+        .iter()
+        .find(|key| advanced.contains_key(**key))
+    {
+        return Err(ApiError::bad_request(format!(
+            "LTX-2.5 does not accept advanced.{key}; distilled guidance is baked in and \
+             the dev checkpoint uses its fixed native video/audio guider parameters"
+        )));
     }
 
     requested_ltx25_vae_decoder(&advanced).map_err(ApiError::bad_request)?;
@@ -915,6 +932,53 @@ mod ltx25_generation_control_tests {
         assert!(
             normalize_ltx25_generation_controls("ltx_2_5", &mut dead_guidance, &entry()).is_err()
         );
+    }
+
+    /// The legacy LTX guider knobs are as inert on 2.5 as `guidanceScale` — nothing in the worker
+    /// reads any of them on the 2.5 arm — so accepting them would leave the studio showing a
+    /// control that silently does nothing, the exact outcome this routine exists to prevent.
+    #[test]
+    fn ltx25_refuses_the_legacy_guider_keys_the_way_it_refuses_guidance_scale() {
+        for key in [
+            "guidanceScale",
+            "videoCfgGuidanceScale",
+            "videoStgGuidanceScale",
+            "videoRescaleScale",
+        ] {
+            let mut inert = payload(json!({ "advanced": { key: 4.2 } }));
+            let error = normalize_ltx25_generation_controls("ltx_2_5", &mut inert, &entry())
+                .expect_err("an inert guider knob must be refused, not accepted");
+            assert_eq!(error.status, StatusCode::BAD_REQUEST);
+            assert!(
+                error.detail.contains(key),
+                "{key} refusal should name the key: {}",
+                error.detail
+            );
+        }
+    }
+
+    /// `transformerVariant` is read only on the 2.5 arm, so it is a 2.5-only control: refused
+    /// elsewhere (like `vaeDecoder`) and accepted here.
+    #[test]
+    fn transformer_variant_is_an_ltx25_only_control() {
+        let mut wrong_model = payload(json!({
+            "advanced": { "transformerVariant": "dev" }
+        }));
+        assert!(normalize_ltx25_generation_controls(
+            "ltx_2_3",
+            &mut wrong_model,
+            &json!({ "id": "ltx_2_3" })
+        )
+        .is_err());
+
+        let mut on_25 = payload(json!({
+            "advanced": { "transformerVariant": "dev" }
+        }));
+        assert!(
+            !normalize_ltx25_generation_controls("ltx_2_5", &mut on_25, &entry())
+                .expect("2.5 accepts its own transformer variant")
+        );
+        assert_eq!(on_25["advanced"]["transformerVariant"], "dev");
     }
 }
 

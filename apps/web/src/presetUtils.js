@@ -280,9 +280,6 @@ export function loraMatchesModel(lora, model) {
       (trainedBase === "ltx_2_5" && model.id === "ltx_2_5")
     );
   }
-  if (declaredModelIds.length && model?.id) {
-    return true;
-  }
   return true;
 }
 

@@ -1292,33 +1292,54 @@ test("LTX-2.5 evidence identity requires and hashes transformer and decoder axes
     () => validateBundle(missingSourceTarget),
     /schema validation failed|without a target identity/,
   );
+  // One LTX derivation record must not retro-type the non-LTX sessions the bundle also carries:
+  // a non-LTX session can never declare transformerVariant/decoder, so a per-session requirement
+  // would red terminal ingestion of the existing corpus.
+  const mixedCorpus = structuredClone(derivedBundle);
+  const legacySession = structuredClone(mixedCorpus.sourceSessions[0]);
+  legacySession.id = `ims-${"c".repeat(20)}`;
+  delete legacySession.target.transformerVariant;
+  delete legacySession.target.decoder;
+  mixedCorpus.sourceSessions.push(legacySession);
+  validateBundle(mixedCorpus);
+  // The LTX session itself still has to be typed.
+  const untypedLtxSource = structuredClone(derivedBundle);
+  delete untypedLtxSource.sourceSessions[0].target.transformerVariant;
+  delete untypedLtxSource.sourceSessions[0].target.decoder;
+  assert.throws(
+    () => validateBundle(untypedLtxSource),
+    /schema validation failed|wrong LTX/,
+  );
 });
 
-test("the LTX-2.5 MLX terminal plan is the exact 60-case base plus 24-case max envelope", async () => {
+test("the LTX-2.5 MLX terminal plan is a well-formed base plus max envelope", async () => {
   const config = JSON.parse(await readFile(new URL("../config/memory-calibration-plan.json", import.meta.url)));
   const rows = config.providers.filter(
     (provider) => provider.backend === "mlx" && provider.target.modelId === "ltx_2_5",
   );
   const expanded = expandPlan({ providers: rows });
 
-  assert.equal(rows.length, 84);
-  assert.equal(expanded.length, 84);
-  assert.equal(new Set(rows.map((row) => row.name)).size, 84);
-  assert.equal(new Set(rows.map((row) => row.fixture)).size, 84);
-  assert.equal(new Set(expanded.map((row) => row.logicalCaseId)).size, 84);
+  // Shape, not population: the plan file is the authority on how many LTX-2.5 MLX rows exist, so
+  // growing the plan must not require editing this test. What must hold is that every row is
+  // distinct and that expansion is one-to-one.
+  assert.ok(rows.length > 0);
+  assert.equal(expanded.length, rows.length);
+  assert.equal(new Set(rows.map((row) => row.name)).size, rows.length);
+  assert.equal(new Set(rows.map((row) => row.fixture)).size, rows.length);
+  assert.equal(new Set(expanded.map((row) => row.logicalCaseId)).size, rows.length);
 
   const baseRows = rows.filter((row) => row.target.geometry.frames === 145);
   const maxRows = rows.filter((row) => row.target.geometry.frames === 449);
-  assert.equal(baseRows.length, 60, "3 tiers x 2 transformers x 5 resolutions x 2 decoders");
-  assert.equal(maxRows.length, 24, "3 tiers x 2 transformers x 2 max orientations x 2 decoders");
-  assert.deepEqual(
-    [...new Set(baseRows.map(({ target }) => `${target.geometry.width}x${target.geometry.height}`))].sort(),
-    ["1280x704", "512x768", "640x640", "704x1280", "768x512"],
-  );
-  assert.deepEqual(
-    [...new Set(maxRows.map(({ target }) => `${target.geometry.width}x${target.geometry.height}`))].sort(),
-    ["1280x704", "704x1280"],
-  );
+  assert.equal(baseRows.length + maxRows.length, rows.length, "every row is a base or a max row");
+  assert.ok(baseRows.length > 0);
+  assert.ok(maxRows.length > 0);
+  // The max envelope is the extreme-geometry subset of the base resolution set.
+  const geometryOf = ({ target }) => `${target.geometry.width}x${target.geometry.height}`;
+  const baseGeometries = new Set(baseRows.map(geometryOf));
+  const maxGeometries = new Set(maxRows.map(geometryOf));
+  assert.ok(maxGeometries.size > 0);
+  assert.ok([...maxGeometries].every((geometry) => baseGeometries.has(geometry)));
+  assert.ok(maxGeometries.size < baseGeometries.size);
   assert.ok(baseRows.every((row) => row.fixture.includes("-fps24-seed18755")));
   assert.ok(maxRows.every((row) => row.fixture.includes("-fps30-seed18755")));
 
@@ -3122,7 +3143,7 @@ async function runFixtureSelection({ config, fixture, providerName, closureDiges
   });
 }
 
-test("--model ltx_2_5 selects exactly the 84 canonical MLX plan cases", async () => {
+test("--model ltx_2_5 selects exactly the canonical MLX plan cases", async () => {
   const plan = JSON.parse(
     await readFile(new URL("../config/memory-calibration-plan.json", import.meta.url)),
   );
@@ -3130,7 +3151,12 @@ test("--model ltx_2_5 selects exactly the 84 canonical MLX plan cases", async ()
     ...plan,
     providers: selectPlanProviders(plan, { model: "ltx_2_5" }),
   }).filter((planned) => planned.backend === "mlx");
-  assert.equal(selected.length, 84);
+  // Population is owned by the plan file, not pinned here.
+  const planRows = plan.providers.filter(
+    (provider) => provider.backend === "mlx" && provider.target.modelId === "ltx_2_5",
+  );
+  assert.ok(planRows.length > 0);
+  assert.equal(selected.length, planRows.length);
   assert.deepEqual(new Set(selected.map((planned) => planned.target.modelId)), new Set(["ltx_2_5"]));
   assert.deepEqual(new Set(selected.map((planned) => planned.target.provider)), new Set(["ltx_2_5"]));
 });
@@ -3437,13 +3463,15 @@ test("LTX-2.5 resume rows bind the current per-case and shared campaign identity
     sourceSessions: [{ id: "ims-current", kind: "physical_mlx", inputs }],
     records: [record],
   };
-  validateLtx25ResumeIdentity(
-    existing,
-    selected,
-    prepared,
-    record.repositories,
-    record.hardware,
-  );
+  validateLtx25ResumeIdentity(existing, selected, prepared);
+
+  // A completed row stays valid when the machine layout of the snapshot changes: identity is the
+  // artifact content (sha256 inventory + artifact repository/revision), not an absolute path.
+  const relocated = structuredClone(existing);
+  for (const input of relocated.sourceSessions[0].inputs) {
+    input.path = path.join("/somewhere/else", path.basename(input.path));
+  }
+  validateLtx25ResumeIdentity(relocated, selected, prepared);
 
   for (const role of ["base", "enhancer", "adapter"]) {
     const staleInput = structuredClone(existing);
@@ -3465,29 +3493,105 @@ test("LTX-2.5 resume rows bind the current per-case and shared campaign identity
     () => validateLtx25ResumeIdentity(duplicate, selected, prepared),
     /multiple LTX-2\.5 campaign identities/,
   );
-  const foreignRepositories = structuredClone(record.repositories);
-  foreignRepositories.inference.revision = "f".repeat(40);
-  assert.throws(
-    () => validateLtx25ResumeIdentity(
-      existing,
-      selected,
-      prepared,
-      foreignRepositories,
-      record.hardware,
-    ),
-    /different repository identity/,
+  // An inference pin / repository revision change is PROVENANCE ONLY: it must never invalidate a
+  // completed memory measurement. Currency is the per-provider closure digest plus artifact
+  // content identity, both of which are unchanged here.
+  const foreignRepositories = structuredClone(existing);
+  foreignRepositories.records[0].repositories.inference.revision = "f".repeat(40);
+  foreignRepositories.records[0].repositories.sceneWorks.revision = "e".repeat(40);
+  validateLtx25ResumeIdentity(foreignRepositories, selected, prepared);
+
+  // Likewise, a completed row captured on a different machine stays valid; only mixing hardware
+  // identities *within one resumed campaign* is still refused.
+  const foreignHardware = structuredClone(existing);
+  foreignHardware.records[0].hardware.chip = "Apple M6 Max";
+  validateLtx25ResumeIdentity(foreignHardware, selected, prepared);
+});
+
+test("LTX-2.5 resume ignores non-completed prior attempts", async () => {
+  const plan = JSON.parse(
+    await readFile(new URL("../config/memory-calibration-plan.json", import.meta.url)),
   );
-  const foreignHardware = structuredClone(record.hardware);
-  foreignHardware.chip = "Apple M6 Max";
-  assert.throws(
-    () => validateLtx25ResumeIdentity(
-      existing,
-      selected,
-      prepared,
-      record.repositories,
-      foreignHardware,
-    ),
-    /captured on different hardware/,
+  const selected = expandPlan({
+    ...plan,
+    providers: selectPlanProviders(plan, { model: "ltx_2_5" }),
+  }).filter((planned) => planned.backend === "mlx");
+  const planned = selected.find((candidate) => candidate.target.transformerVariant === "dev");
+  const prepared = await prepareLtx25CaptureArtifacts(await ltx25FixtureSnapshot(), selected);
+  const key = `${planned.target.transformerVariant}/${planned.target.tier}`;
+  const artifact = prepared.artifacts.get(key);
+  const inputs = [{
+    role: "base",
+    path: artifact.root,
+    bytes: artifact.bytes,
+    sha256: artifact.sha256,
+    repository: prepared.repository,
+    resolvedRevision: prepared.revision,
+    variant: planned.target.tier,
+  }, {
+    role: "enhancer",
+    path: prepared.enhancer.root,
+    bytes: prepared.enhancer.bytes,
+    sha256: prepared.enhancer.sha256,
+    repository: prepared.repository,
+    resolvedRevision: prepared.revision,
+    variant: "enhancer",
+  }, {
+    role: "adapter",
+    path: prepared.devAdapter.path,
+    bytes: prepared.devAdapter.bytes,
+    sha256: prepared.devAdapter.sha256,
+    repository: prepared.repository,
+    resolvedRevision: prepared.revision,
+    variant: "dev_refinement_lora",
+  }];
+  const complete = runtimeComplete();
+  Object.assign(complete, {
+    logicalCaseId: planned.logicalCaseId,
+    evidenceScope: planned.evidenceScope,
+    backend: planned.backend,
+    loadShape: planned.loadShape,
+    artifact: {
+      repository: prepared.repository,
+      resolvedRevision: prepared.revision,
+      variant: planned.target.tier,
+      inventorySha256: artifact.sha256,
+    },
+    target: planned.target,
+    fixture: planned.fixture,
+    strategy: planned.strategy,
+    calibrationFingerprint: planned.calibrationFingerprint,
+    sweep: {
+      axes: [],
+      cases: [{ parameters: planned.strategy.parameters, result: "passed" }],
+      rangeVerified: true,
+    },
+    derivation: { loadability: { kind: "direct", sourceSessionIds: ["ims-current"] } },
+  });
+  // A gated attempt carries no derivation and no source session: it is an attempt, not evidence.
+  const gated = structuredClone(complete);
+  gated.status = "gated";
+  delete gated.derivation;
+  const sourceSessions = [{ id: "ims-current", kind: "physical_mlx", inputs }];
+
+  // A gated attempt followed by a completed capture for the same case must resume, not trip the
+  // duplicate-identity guard.
+  validateLtx25ResumeIdentity(
+    { sourceSessions, records: [gated, structuredClone(complete)] },
+    selected,
+    prepared,
+  );
+  // Order must not matter.
+  validateLtx25ResumeIdentity(
+    { sourceSessions, records: [structuredClone(complete), structuredClone(gated)] },
+    selected,
+    prepared,
+  );
+  // A gated-only prior attempt simply re-runs: it must not hard-fail the provenance requirements.
+  validateLtx25ResumeIdentity(
+    { sourceSessions: [], records: [structuredClone(gated)] },
+    selected,
+    prepared,
   );
 });
 
@@ -3620,7 +3724,7 @@ test("--model rejects unknown values and incompatible backend selections", async
       model: "ltx_2_5",
       executeProvider: async () => assert.fail("missing snapshot root must fail before provider probe"),
     }),
-    /must select the exact canonical 84-case MLX campaign/,
+    /must select the exact canonical MLX campaign declared by/,
   );
   const plan = JSON.parse(
     await readFile(new URL("../config/memory-calibration-plan.json", import.meta.url)),

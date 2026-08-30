@@ -215,6 +215,12 @@ pub struct VideoRequest {
     /// Whether the job payload named `duration`. LTX-2.5's duration predictor is opt-in and an
     /// explicit duration always wins, including for legacy/replayed jobs that bypass the API's
     /// enqueue-time normalization.
+    ///
+    /// "Named" means exactly what [`resolve_duration`] means by it — the predicate reads through
+    /// the same parse, so a numeric **string** (`"7.5"`) counts and a value core cannot read
+    /// (`null`, garbage, non-finite) does not. Anything looser desynchronizes the flag from
+    /// [`Self::duration`]: the field would say the caller chose a length while the resolver had
+    /// silently fallen back to the model default.
     pub duration_was_explicit: bool,
     /// Frames per second, clamped to 1..=60 (Python `safe_int`).
     ///
@@ -313,7 +319,7 @@ impl VideoRequest {
             negative_prompt: nonempty_string_or(payload, "negativePrompt", ""),
             model: payload_model_id(payload),
             duration: resolve_duration(payload.get("duration"), &model_manifest_entry),
-            duration_was_explicit: payload.get("duration").and_then(Value::as_f64).is_some(),
+            duration_was_explicit: parse_safe_float(payload.get("duration")).is_some(),
             fps: resolve_fps(payload.get("fps"), &model_manifest_entry),
             width,
             height,
@@ -1408,6 +1414,13 @@ fn floor_to_multiple(value: u32, multiple: u32) -> u32 {
 /// when absent/unparseable — the `safe_float` contract. Video-specific (image has no
 /// float payload field), so it stays local rather than moving into `payload_util`.
 fn safe_float(value: Option<&Value>, default: f32, min: f32, max: f32) -> f32 {
+    parse_safe_float(value).unwrap_or(default).clamp(min, max)
+}
+
+/// The *parse* half of [`safe_float`], split out so "did the caller name a readable value?" is
+/// answered by the same code that resolves it. `Some` exactly when [`safe_float`] would use the
+/// caller's value instead of the default: a JSON number **or** a numeric string (`"7.5"`), finite.
+fn parse_safe_float(value: Option<&Value>) -> Option<f32> {
     value
         .and_then(|value| {
             value
@@ -1416,8 +1429,6 @@ fn safe_float(value: Option<&Value>, default: f32, min: f32, max: f32) -> f32 {
         })
         .map(|value| value as f32)
         .filter(|value| value.is_finite())
-        .unwrap_or(default)
-        .clamp(min, max)
 }
 
 // ======================================================================================
@@ -2098,6 +2109,38 @@ mod tests {
         })));
         assert_eq!(request.duration, 7.5);
         assert!(request.duration_was_explicit);
+    }
+
+    /// The flag must mean the same thing `resolve_duration` means: a numeric **string** is a
+    /// length the caller named (the `safe_float` contract), so the flag has to agree with the
+    /// value the parse actually resolved. Reading `as_f64` alone said "not explicit" while
+    /// `duration` carried the caller's 7.5 — LTX-2.5 would then re-predict a duration the caller
+    /// had chosen.
+    #[test]
+    fn a_string_duration_is_explicit_and_resolves_to_its_value() {
+        let request = VideoRequest::from_payload(&payload(json!({
+            "projectId": "proj_1",
+            "duration": " 7.5 "
+        })));
+        assert_eq!(request.duration, 7.5);
+        assert!(request.duration_was_explicit);
+    }
+
+    /// The other direction: a value the parse cannot read falls back to the default, so the flag
+    /// must say the caller named nothing. `null` / garbage / non-finite all take the fallback.
+    #[test]
+    fn an_unreadable_duration_is_not_explicit() {
+        for unreadable in [json!(null), json!("banana"), json!("NaN"), json!("inf")] {
+            let request = VideoRequest::from_payload(&payload(json!({
+                "projectId": "proj_1",
+                "duration": unreadable
+            })));
+            assert_eq!(request.duration, 6.0, "{unreadable} should fall back");
+            assert!(
+                !request.duration_was_explicit,
+                "{unreadable} is not a duration the caller named"
+            );
+        }
     }
 
     /// The worker's video admission funnel reads the catalog model id **before** the request is

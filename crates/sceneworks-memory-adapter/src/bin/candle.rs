@@ -1267,7 +1267,12 @@ fn ltx25_official_dev_adapter(revision: &str) -> Result<AdapterSpec, String> {
             path.display()
         ));
     }
-    Ok(AdapterSpec::new(path, 1.0, AdapterKind::Lora).with_pass_scales(vec![0.0, 1.0]))
+    // The base scale MUST be the stage-one scale (0.0), not 1.0: production's
+    // `resolve_ltx_distill_adapter` builds `AdapterSpec::new(path, stage1, ..)` with the manifest's
+    // required `[0, 1]` contract, and the MLX capture arm does the same. gen_core's
+    // `adapter_stack_identity` digests the scale bits into the admission overlay, so capturing at
+    // 1.0 would mint evidence under an overlay identity no production request can ever present.
+    Ok(AdapterSpec::new(path, 0.0, AdapterKind::Lora).with_pass_scales(vec![0.0, 1.0]))
 }
 
 struct Ltx25LoadPlan {
@@ -1337,9 +1342,9 @@ fn ltx25_load_spec(
 }
 
 /// Execute a real selected LTX-2.5 provider path while leaving promotion decisions outside this
-/// apparatus. The published `q8` tier is refused by the weight-free parser before this function;
-/// Candle's distinct INT8-ConvRot/NVFP4 evaluation selectors need an inference-owned producer and
-/// are never aliased to an ordinary bundle tier here.
+/// apparatus. The full published ladder — `q4`, `q8`, `bf16` — is executable here, symmetric with
+/// the MLX arm. Candle's distinct NVFP4 evaluation selectors still need an inference-owned
+/// producer and are never aliased to an ordinary bundle tier here.
 fn run_ltx25_capture(request: &Value) -> Result<Value, String> {
     protocol::validate_plain_overlay_target(request, LTX25_EXECUTION_PATH)?;
     let target = protocol::ltx25_candle_target(request)?;

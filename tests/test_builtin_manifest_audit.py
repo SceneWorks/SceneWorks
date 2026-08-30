@@ -213,8 +213,8 @@ def test_ltx25_builtin_manifest_uses_published_tier_sizes_and_geometry():
     for tier, measured_bytes in expected_bytes.items():
         row = tiers[tier]
         assert row["files"] == [f"distilled/{tier}/*", f"dev/{tier}/*"]
-        expected_platforms = ["macos"] if tier == "q8" else ["macos", "windows", "linux"]
-        assert row["platforms"] == expected_platforms
+        # q8 is a first-class candle tier, so every tier row ships on every platform.
+        assert row["platforms"] == ["macos", "windows", "linux"]
         assert row["estimatedSizeBytes"] == measured_bytes
         assert row["footprint"]["diskSizeBytes"] == measured_bytes
         assert row["footprint"]["residentMemoryBytes"] is None
@@ -263,12 +263,12 @@ def test_ltx25_builtin_manifest_declares_the_exact_backend_memory_ladders():
             "bounded_decode": {
                 "parameters": {"decodeTileEdge": 192, "decodeOverlap": 64},
                 "overlays": ["none", "lora"],
-                "tiers": ["q4", "bf16"],
+                "tiers": ["q4", "q8", "bf16"],
             },
             "bounded_attention": {
                 "parameters": {"attentionChunkSize": 16_777_216},
                 "overlays": ["none", "lora"],
-                "tiers": ["q4", "bf16"],
+                "tiers": ["q4", "q8", "bf16"],
             },
             "bounded_transformer_residency": {
                 "parameters": {
@@ -276,7 +276,7 @@ def test_ltx25_builtin_manifest_declares_the_exact_backend_memory_ladders():
                     "transformerWindowComponent": "Dit",
                 },
                 "overlays": ["none"],
-                "tiers": ["q4", "bf16"],
+                "tiers": ["q4", "q8", "bf16"],
             },
         }
     }

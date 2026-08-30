@@ -1018,10 +1018,11 @@ pub(crate) fn video_request_candle_eligible(model: &str, payload: &Map<String, V
         return false;
     }
     // `advanced.mlxQuantize` is a tier select for the published Wan matrices and LTX's packed
-    // Candle turnkeys. LTX-2.3 intentionally has no dense/bf16 Candle tier. LTX-2.5 currently
-    // routes only q4/bf16: its q8 selector means production INT8-ConvRot, and inference keeps that
-    // route fail-closed until terminal evidence is promoted into its allowlist. Other video
-    // providers remain dense and fail closed for positive tier requests.
+    // Candle turnkeys. LTX-2.3 intentionally has no dense/bf16 Candle tier. LTX-2.5 routes its
+    // full q4/q8/bf16 ladder: q8 is a first-class promoted Candle tier, symmetric with the MLX
+    // lane — production q8 means the hosted packed `q8/` split bundle (INT8-ConvRot stays a
+    // measurement-only selector on the inference side) — with no residual exclusion or parity
+    // obligation. Other video providers remain dense and fail closed for positive tier requests.
     if (candle_request_wants_quant(payload) || matches!(model, "ltx_2_3" | "ltx_2_5"))
         && !candle_video_tier_select_eligible(model, payload)
     {
@@ -1061,7 +1062,10 @@ fn candle_ltx_product_tier_eligible(model: &str, mode: &str, payload: &Map<Strin
     matches!(
         (model, candle_ltx_requested_tier(payload)),
         ("ltx_2_3", Some(CandleLtxTier::Q4 | CandleLtxTier::Q8))
-            | ("ltx_2_5", Some(CandleLtxTier::Bf16 | CandleLtxTier::Q4))
+            | (
+                "ltx_2_5",
+                Some(CandleLtxTier::Bf16 | CandleLtxTier::Q4 | CandleLtxTier::Q8)
+            )
     ) && matches!(
         mode,
         "text_to_video"

@@ -353,10 +353,10 @@ fn candle_ltx_bundle_tier_across_revisions(root: &Path, tier: CandleLtxTier) -> 
 
 /// Resolve the exact packed LTX tier selected by the request. LTX-2.5's provider binds
 /// `LoadSpec::quantize` to the physical split-bundle tier and rejects a mismatch, so q4 carries its
-/// exact numeric identity while dense bf16 carries `None`. Its published q8 bytes are MLX-affine;
-/// Candle's `Quant::Q8` names the separately measured INT8-ConvRot contract, so q8 fails closed
-/// until SC-18777 accepts a CUDA mode. LTX-2.3 keeps its legacy `None` marker. Eros has no Candle
-/// route after SC-18902 acceptance.
+/// exact numeric identity while dense bf16 carries `None`. q8 is a first-class promoted Candle
+/// tier symmetric with MLX: it resolves the published `q8/` split bundle and carries its exact
+/// `Quant::Q8` identity. LTX-2.3 keeps its legacy `None` marker. Eros has no Candle route after
+/// SC-18902 acceptance.
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 pub(super) fn candle_ltx_tier_subdir(
     root: &Path,
@@ -378,9 +378,7 @@ pub(super) fn candle_ltx_tier_subdir(
         let variant = ltx25_transformer_variant(request).ok()?;
         let (tier, quant) = match tier {
             CandleLtxTier::Q4 => ("q4", Some(Quant::Q4)),
-            // `Quant::Q8` names the separately measured INT8-ConvRot contract in the provider;
-            // the local MLX-affine q8 tier remains macOS-only until SC-18777 accepts a CUDA mode.
-            CandleLtxTier::Q8 => return None,
+            CandleLtxTier::Q8 => ("q8", Some(Quant::Q8)),
             CandleLtxTier::Bf16 => ("bf16", None),
         };
         let dir = root.join(variant.component_dir()).join(tier);
@@ -1232,7 +1230,7 @@ pub(super) async fn generate_candle_video_using(
     if is_ltx && ltx_tier.is_none() {
         return Err(WorkerError::InvalidPayload(format!(
             "{} requires a complete Candle LTX packed tier matching advanced.mlxQuantize \
-             (LTX-2.3: q4/q8; LTX-2.5: q4/bf16 until SC-18777 accepts another CUDA tier) from an approved immutable bundle revision; \
+             (LTX-2.3: q4/q8; LTX-2.5: q4/q8/bf16) from an approved immutable bundle revision; \
              repair this model in Model Manager",
             request.model
         )));
@@ -1424,11 +1422,21 @@ pub(super) async fn generate_candle_video_using(
         let (steps, guidance) = wan_sampling(engine_id, request);
         (steps, guidance, non_empty_negative_prompt(request))
     };
+    // Explicit fitted-memory axes. These MUST be named here rather than inherited from the
+    // `..VideoGenInput::default()` tail below: the default is `None`/`None`, which admission reads
+    // as "no declared pipeline shape" and which therefore can never match curve evidence. Derived
+    // by the SAME shared helper the MLX arm uses (`super::ltx::ltx_memory_axes`).
+    let (memory_transformer_variant, memory_decoder) = super::ltx::ltx_memory_axes(
+        request,
+        ltx25_options.is_some_and(|options| options.use_diffusion_decoder),
+    )?;
     let input = VideoGenInput {
         sampler: None,
         scheduler: None,
         engine_id,
         model_dir,
+        memory_transformer_variant,
+        memory_decoder,
         // Wan quant-matrix tier marker (sc-10027): `Some(Q4/Q8)` when a packed candle tier subdir was
         // resolved, else `None` (bf16 tier / dense repo / ltx). A no-op on the candle wan load (the
         // packed-detect seam reads the tier's baked-in quant), carried for the LoadSpec + asset record.

@@ -9,7 +9,7 @@ use std::io::{self, Read};
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-pub const INFERENCE_PIN: &str = "d27c9fcd6b6bb52dc7db6e674216cf57d7e0ed4e";
+pub const INFERENCE_PIN: &str = "21d17666f691a59358f2147517ac11cb34aa6f0b";
 pub const QWEN_REPOSITORY: &str = "SceneWorks/qwen-image-mlx";
 pub const FLUX2_REPOSITORY: &str = "SceneWorks/flux2-dev-mlx";
 pub const KREA_REPOSITORY: &str = "SceneWorks/krea-2-turbo-mlx";
@@ -141,13 +141,9 @@ pub fn ltx25_candle_target(request: &Value) -> Result<Ltx25CandleTarget, String>
         );
     }
     let tier = match string("tier")? {
-        tier @ ("bf16" | "q4") => tier.to_owned(),
-        "q8" => {
-            return Err(
-                "LTX-2.5 Candle target tier \"q8\" names the published MLX-affine packed bundle, but Candle Quant::Q8 selects the separate INT8-ConvRot evaluation contract. Ordinary q8 is not executable Candle evidence; implement the inference-owned SC-18777 measurement receipt producer and use its explicit advanced selector before planning this row"
-                    .to_owned(),
-            )
-        }
+        // q8 is a first-class Candle tier, symmetric with the MLX arm: the promoted candle
+        // descriptor advertises Q4+Q8, so an ordinary q8 row is executable Candle evidence.
+        tier @ ("bf16" | "q4" | "q8") => tier.to_owned(),
         tier => return Err(format!("unsupported LTX-2.5 Candle numeric tier {tier:?}")),
     };
     let transformer_variant = match string("transformerVariant")? {
@@ -947,15 +943,24 @@ mod tests {
     }
 
     #[test]
-    fn ltx25_candle_rejects_published_q8_before_it_can_alias_int8_convrot() {
+    fn ltx25_candle_admits_q8_as_a_first_class_tier_and_still_fails_closed_off_ladder() {
         let mut request = ltx25_request();
         request["planned"]["target"]["tier"] = json!("q8");
         request["planned"]["fixture"] = json!("ltx-2-5-candle-q8-768x512-f145-fps24-seed18755");
-        let error = ltx25_candle_target(&request).unwrap_err();
-        assert!(error.contains("published MLX-affine packed bundle"));
-        assert!(error.contains("Candle Quant::Q8"));
-        assert!(error.contains("INT8-ConvRot evaluation contract"));
-        assert!(error.contains("SC-18777 measurement receipt producer"));
+        let target = ltx25_candle_target(&request).unwrap();
+        assert_eq!(target.tier, "q8");
+        assert_eq!(
+            target.transformer_variant,
+            Ltx25TransformerVariant::Distilled
+        );
+
+        // The ladder is still exactly q4/q8/bf16 — a non-published tier stays fail-closed.
+        let mut off_ladder = ltx25_request();
+        off_ladder["planned"]["target"]["tier"] = json!("q6");
+        off_ladder["planned"]["fixture"] = json!("ltx-2-5-candle-q6-768x512-f145-fps24-seed18755");
+        assert!(ltx25_candle_target(&off_ladder)
+            .unwrap_err()
+            .contains("unsupported LTX-2.5 Candle numeric tier"));
     }
 
     #[test]

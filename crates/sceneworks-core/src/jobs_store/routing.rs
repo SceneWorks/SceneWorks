@@ -439,7 +439,7 @@ mod tests {
     }
 
     #[test]
-    fn ltx_2_5_candle_admission_rejects_unpromoted_q8_across_base_and_advanced_modes() {
+    fn ltx_2_5_candle_admission_admits_the_full_q4_q8_bf16_ladder_across_base_and_advanced_modes() {
         let modes = [
             "text_to_video",
             "image_to_video",
@@ -449,7 +449,15 @@ mod tests {
             "replace_person",
         ];
         for mode in modes {
-            for tier in [json!(4), json!("4"), json!(0), json!("0"), json!(-1)] {
+            for tier in [
+                json!(4),
+                json!("4"),
+                json!(8),
+                json!("8"),
+                json!(0),
+                json!("0"),
+                json!(-1),
+            ] {
                 let mut job = canonical_video_route_probe("ltx_2_5", mode).unwrap();
                 job.payload
                     .insert("advanced".to_owned(), json!({ "mlxQuantize": tier }));
@@ -461,17 +469,19 @@ mod tests {
                     .push(json!({ "id": "style" }));
                 assert!(
                     candle::video_job_is_candle_eligible(&job),
-                    "LTX-2.5 must preserve q4/bf16 tier {tier} with a user LoRA in {mode}"
+                    "LTX-2.5 must route q4/q8/bf16 tier {tier} with a user LoRA in {mode}"
                 );
             }
 
+            // q8 is first-class: it must route without a LoRA on the bare probe too, exactly like
+            // the MLX lane, with no residual promotion gate.
             for tier in [json!(8), json!("8")] {
                 let mut job = canonical_video_route_probe("ltx_2_5", mode).unwrap();
                 job.payload
                     .insert("advanced".to_owned(), json!({ "mlxQuantize": tier }));
                 assert!(
-                    !candle::video_job_is_candle_eligible(&job),
-                    "LTX-2.5 q8 must remain unrouted until inference promotes terminal evidence: {mode} {tier}"
+                    candle::video_job_is_candle_eligible(&job),
+                    "LTX-2.5 q8 is a promoted candle tier and must route: {mode} {tier}"
                 );
             }
         }
@@ -481,7 +491,7 @@ mod tests {
             ltx25.insert("advanced".to_owned(), json!({ "mlxQuantize": tier }));
             assert!(
                 !candle::video_request_candle_eligible("ltx_2_5", &ltx25),
-                "LTX-2.5 must fail closed outside q4/bf16: {tier}"
+                "LTX-2.5 must fail closed outside q4/q8/bf16: {tier}"
             );
 
             let mut ltx23 = catalog::video_mode_probe_payload("ltx_2_3", "text_to_video");

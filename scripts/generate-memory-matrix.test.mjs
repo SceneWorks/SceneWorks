@@ -5942,15 +5942,14 @@ test("LTX-2.5 selects every routed platform and exposes only its declared memory
     assertUniformState("mlx", "bounded_decode", overlay, "Implemented/unverified");
     assertUniformState("mlx", "bounded_attention", overlay, "Implemented/unverified");
     assertUniformState("candle", "staged_residency", overlay, "Missing");
-    assertUniformState("candle", "bounded_decode", overlay, "Implemented/unverified", ["bf16", "q4"]);
-    assertUniformState("candle", "bounded_attention", overlay, "Implemented/unverified", ["bf16", "q4"]);
-    assertUniformState("candle", "bounded_decode", overlay, "Missing", ["q8"]);
-    assertUniformState("candle", "bounded_attention", overlay, "Missing", ["q8"]);
+    // q8 is a first-class Candle tier: the Candle ladder is uniform across bf16/q4/q8, symmetric
+    // with MLX above, with no tier carved out.
+    assertUniformState("candle", "bounded_decode", overlay, "Implemented/unverified");
+    assertUniformState("candle", "bounded_attention", overlay, "Implemented/unverified");
   }
   assertUniformState("mlx", "bounded_transformer_residency", "none", "Implemented/unverified");
   assertUniformState("mlx", "bounded_transformer_residency", "lora", "Missing");
-  assertUniformState("candle", "bounded_transformer_residency", "none", "Implemented/unverified", ["bf16", "q4"]);
-  assertUniformState("candle", "bounded_transformer_residency", "none", "Missing", ["q8"]);
+  assertUniformState("candle", "bounded_transformer_residency", "none", "Implemented/unverified");
   assertUniformState("candle", "bounded_transformer_residency", "lora", "Missing");
 });
 

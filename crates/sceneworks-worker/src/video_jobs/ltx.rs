@@ -73,6 +73,58 @@ pub(super) fn ltx25_transformer_variant(
     }
 }
 
+/// The explicit fitted-memory pipeline axes both video lanes stamp onto their `VideoGenInput`.
+///
+/// Admission's curve lookup requires BOTH axes to be `Some` — `curve_evidence_covers_request` and
+/// `fitted_or_floor_phase_peaks` bail out on either `None` — while `VideoGenInput::default()`
+/// leaves both `None`. A lane that lets them fall out of its struct literal's `..default()` tail
+/// therefore declares "no pipeline shape", can never match measured curve evidence, and silently
+/// degrades admission to the weights floor. That is exactly what the candle arm did for `ltx_2_5`
+/// while the MLX arm derived them, so the derivation lives HERE, once: two lanes deriving the same
+/// axes separately is what let one of them forget.
+///
+/// Keyed on the SceneWorks model id rather than a lane-specific engine id, since the two lanes name
+/// the same checkpoints differently (`ltx_2_5` vs `ltx_2_5_distilled`). A non-LTX model carries no
+/// LTX-2.5 axes and stays `None` — the candle arm shares one `VideoGenInput` literal with Wan,
+/// Mochi and SVD. LTX-2.3 has no transformer-variant axis at all and is recorded as the distilled
+/// shape, which is what the MLX arm has always done.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+pub(super) fn ltx_memory_axes(
+    request: &VideoRequest,
+    use_diffusion_decoder: bool,
+) -> WorkerResult<(
+    Option<sceneworks_core::memory_calibration::Ltx25TransformerVariant>,
+    Option<sceneworks_core::memory_calibration::Ltx25Decoder>,
+)> {
+    if !matches!(
+        request.model.as_str(),
+        "ltx_2_3" | "ltx_2_3_eros" | "ltx_2_5"
+    ) {
+        return Ok((None, None));
+    }
+    let variant = if request.model == "ltx_2_5" {
+        match ltx25_transformer_variant(request)? {
+            Ltx25TransformerVariant::Dev => {
+                sceneworks_core::memory_calibration::Ltx25TransformerVariant::Dev
+            }
+            Ltx25TransformerVariant::Distilled => {
+                sceneworks_core::memory_calibration::Ltx25TransformerVariant::Distilled
+            }
+        }
+    } else {
+        sceneworks_core::memory_calibration::Ltx25TransformerVariant::Distilled
+    };
+    let decoder = if use_diffusion_decoder {
+        sceneworks_core::memory_calibration::Ltx25Decoder::DiffVae
+    } else {
+        sceneworks_core::memory_calibration::Ltx25Decoder::Conv
+    };
+    Ok((Some(variant), Some(decoder)))
+}
+
 /// Provider-bound LTX-2.5 controls after model scoping, type validation, and explicit-duration
 /// precedence. The planning frame count is conservative when the duration head owns the real count
 /// so admission never sizes the request below the user's selected maximum.
@@ -95,17 +147,23 @@ pub(super) struct Ltx25GenerationOptions {
 pub(super) fn ltx25_generation_options(
     request: &VideoRequest,
 ) -> WorkerResult<Ltx25GenerationOptions> {
-    const KEYS: [&str; 5] = [
+    // Every LTX-2.5-only `advanced` key. `transformerVariant` belongs here for the same reason as
+    // its siblings: `ltx25_transformer_variant` is only ever consulted for `ltx_2_5`, so without
+    // this entry a non-2.5 request carrying it selected nothing and was silently ignored while the
+    // adjacent 2.5-only knobs failed closed.
+    const KEYS: [&str; 6] = [
         "vaeDecoder",
         "autoDuration",
         "autoDurationMinSeconds",
         "autoDurationMaxSeconds",
         "temporalUpsampleRounds",
+        "transformerVariant",
     ];
     if request.model != "ltx_2_5" {
         if KEYS.iter().any(|key| request.advanced.contains_key(*key)) {
             return Err(WorkerError::InvalidPayload(format!(
-                "LTX-2.5 decoder, auto-duration, and temporal-upsample controls are not supported by {}",
+                "LTX-2.5 transformer-variant, decoder, auto-duration, and temporal-upsample \
+                 controls are not supported by {}",
                 request.model
             )));
         }
@@ -1082,10 +1140,24 @@ pub(super) fn resolve_ltx_distill_adapter(
         .get("useDistillLora")
         .and_then(Value::as_bool)
         .unwrap_or(true);
-    if !enabled && request.model != "ltx_2_5" {
+    let ltx25_dev = ltx25_variant == Some(Ltx25TransformerVariant::Dev);
+    // The knob is only rejected where honoring it would contradict required behavior — on LTX-2.5
+    // dev, whose raw stage-one transformer has no built-in refinement and needs the bundled adapter
+    // for stage two. (The 2.5 distilled variant returned above with no adapter in either case, so
+    // `false` there already matches what actually happens and stays accepted.) Ignoring it silently
+    // here was the same class of defect as an ignored `distillStage*Strength` override, which the
+    // sibling check below rejects outright.
+    if !enabled {
+        if ltx25_dev {
+            return Err(WorkerError::InvalidPayload(
+                "The LTX-2.5 dev pipeline requires its bundled stage-two refinement adapter; \
+                 advanced.useDistillLora cannot be false. Select the distilled transformer variant \
+                 instead if you do not want a refinement pass."
+                    .to_owned(),
+            ));
+        }
         return Ok(None);
     }
-    let ltx25_dev = ltx25_variant == Some(Ltx25TransformerVariant::Dev);
     let manifest_stage1 = auto
         .get("stage1Strength")
         .and_then(Value::as_f64)
@@ -1139,15 +1211,31 @@ pub(super) fn resolve_ltx_distill_adapter(
         })?;
     // The LoRA is a download co-requisite (sc-9696), so it is expected in the HF cache. Fail with an
     // actionable message if it is absent rather than silently degrading the output to noise.
-    let path = huggingface_snapshot_dir(&settings.data_dir, repo)
-        .map(|dir| dir.join(file))
-        .filter(|candidate| candidate.is_file())
-        .ok_or_else(|| {
-            WorkerError::InvalidPayload(format!(
-                "The required distill LoRA for this model is not installed ({repo}/{file}). \
-                 Re-download the model to fetch its co-requisite distill LoRA."
-            ))
-        })?;
+    //
+    // LTX-2.5's refinement LoRA ships inside the SAME `LTX25_BUNDLE_REPO` snapshot as the checkpoint
+    // bundle, which every other resolver binds at the immutable `LTX25_BUNDLE_REVISION` (the MLX
+    // `resolve_ltx_model_dir` and the candle snapshot arm both do). Resolving it through the
+    // UNPINNED `huggingface_snapshot_dir` would let a mutable `refs/main` or a larger cached sibling
+    // snapshot hand the transformer's stage-two pass a different adapter than the pinned bundle the
+    // rest of the load came from. Non-2.5 models (10Eros) keep the unpinned co-requisite lookup:
+    // their LoRA lives in its own repo with no bundle revision to agree with.
+    let path = if request.model == "ltx_2_5" {
+        crate::model_jobs::huggingface_pinned_snapshot_dir(
+            &settings.data_dir,
+            repo,
+            LTX25_BUNDLE_REVISION,
+        )
+    } else {
+        huggingface_snapshot_dir(&settings.data_dir, repo)
+    }
+    .map(|dir| dir.join(file))
+    .filter(|candidate| candidate.is_file())
+    .ok_or_else(|| {
+        WorkerError::InvalidPayload(format!(
+            "The required distill LoRA for this model is not installed ({repo}/{file}). \
+             Re-download the model to fetch its co-requisite distill LoRA."
+        ))
+    })?;
     let kind = classify_adapter(&path)?;
     Ok(Some(
         AdapterSpec::new(path, stage1, kind).with_pass_scales(vec![stage1, stage2]),
@@ -1886,19 +1974,10 @@ pub(super) async fn generate_ltx(
         .then(|| ltx25_transformer_variant(request))
         .transpose()?;
     let ltx25_dev = ltx25_variant == Some(Ltx25TransformerVariant::Dev);
-    let memory_transformer_variant = Some(match ltx25_variant {
-        Some(Ltx25TransformerVariant::Dev) => {
-            sceneworks_core::memory_calibration::Ltx25TransformerVariant::Dev
-        }
-        Some(Ltx25TransformerVariant::Distilled) | None => {
-            sceneworks_core::memory_calibration::Ltx25TransformerVariant::Distilled
-        }
-    });
-    let memory_decoder = Some(if ltx25_options.use_diffusion_decoder {
-        sceneworks_core::memory_calibration::Ltx25Decoder::DiffVae
-    } else {
-        sceneworks_core::memory_calibration::Ltx25Decoder::Conv
-    });
+    // Shared with the candle arm so the two lanes cannot describe the same request's pipeline shape
+    // differently — see [`ltx_memory_axes`].
+    let (memory_transformer_variant, memory_decoder) =
+        ltx_memory_axes(request, ltx25_options.use_diffusion_decoder)?;
     let input = VideoGenInput {
         sampler: None,
         scheduler: None,

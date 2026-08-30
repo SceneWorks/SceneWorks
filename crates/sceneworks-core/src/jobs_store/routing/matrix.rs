@@ -6001,7 +6001,7 @@ mod tests {
         missing_target.trainer_mappings.remove(target);
         assert_eq!(
             validate_runtime_pair(&mlx, &missing_target).unwrap_err(),
-            "matching-platform production trainer mappings differ"
+            "matching-platform production training targets differ (MLX only: [\"ltx_2_5_video_lora\"]; Candle only: [])"
         );
     }
 

@@ -19488,7 +19488,9 @@
           "revision": "081658ce6886cacba20817ce0359bbefef706ff2",
           "variant": "q8",
           "files": ["distilled/q8/*", "dev/q8/*"],
-          "platforms": ["macos"],
+          // q8 is a first-class Candle tier alongside MLX: the CUDA hosts consume the same split
+          // q8 bundle from this rehost, so the row carries the full platform set like q4/bf16.
+          "platforms": ["macos", "windows", "linux"],
           "estimatedSizeBytes": 83672150720,
           "footprint": { "diskSizeBytes": 83672150720, "residentMemoryBytes": null, "peakMemoryBytes": null }
         },
@@ -19561,17 +19563,17 @@
           "bounded_decode": {
             "parameters": { "decodeTileEdge": 192, "decodeOverlap": 64 },
             "overlays": ["none", "lora"],
-            "tiers": ["q4", "bf16"]
+            "tiers": ["q4", "q8", "bf16"]
           },
           "bounded_attention": {
             "parameters": { "attentionChunkSize": 16777216 },
             "overlays": ["none", "lora"],
-            "tiers": ["q4", "bf16"]
+            "tiers": ["q4", "q8", "bf16"]
           },
           "bounded_transformer_residency": {
             "parameters": { "transformerWindowSize": 1, "transformerWindowComponent": "Dit" },
             "overlays": ["none"],
-            "tiers": ["q4", "bf16"]
+            "tiers": ["q4", "q8", "bf16"]
           }
         }
       },

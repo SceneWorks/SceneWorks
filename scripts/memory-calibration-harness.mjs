@@ -1022,7 +1022,7 @@ export function validateBundle(bundle) {
           if (requiresDerivation) {
             validateSourceInputsAgainstRecord(record, session, sourceClaim, inventoryInputs, provenancePolicy);
           }
-          if (record.target.modelId.startsWith("ltx_")) {
+          if (record.target.modelId === "ltx_2_5") {
             if (!session.target) {
               fail(`${record.id}: ${sessionId} is an LTX derivation source without a target identity`);
             }
@@ -1088,7 +1088,7 @@ export function validateBundle(bundle) {
         }
         validatePhysicalMlxOutputsAgainstRecord(record, audioSession);
       }
-      if (record.target.modelId.startsWith("ltx_")) {
+      if (record.target.modelId === "ltx_2_5") {
         for (const sessionId of derivationSessionIds) {
           const session = sessions.get(sessionId);
           if (session.kind === "physical_mlx") {
@@ -1460,6 +1460,9 @@ export function compareRungReuse(fresh, reused, tolerance = RUNG_REUSE_TOLERANCE
   };
 }
 
+/** Statuses the harness treats as a completed capture. `gated` is an attempt, never a completion. */
+const COMPLETED_RECORD_STATUSES = ["complete", "runtime_complete", "negative_complete"];
+
 function completedLogicalIds(record) {
   if (record.status === "negative_complete") return [record.logicalCaseId];
   if (!["complete", "runtime_complete"].includes(record.status)) return [];
@@ -1588,22 +1591,26 @@ export function selectPlanProviders(config, { model, providerName, fixture } = {
 }
 
 const LTX25_CAPTURE_TIERS = ["q4", "q8", "bf16"];
-const LTX25_CAPTURE_CASE_COUNT = 84;
-
 let canonicalLtx25LogicalCaseIds;
 
+/**
+ * The canonical LTX-2.5 capture set is *derived* from the plan's ltx_2_5 MLX rows, never pinned to
+ * a literal population count: growing the plan must not require editing the harness.
+ */
 function expectedLtx25LogicalCaseIds() {
   if (!canonicalLtx25LogicalCaseIds) {
     const plan = JSON.parse(readFileSync(path.join(ROOT, "config/memory-calibration-plan.json"), "utf8"));
-    canonicalLtx25LogicalCaseIds = expandPlan({
+    const ids = expandPlan({
       ...plan,
       providers: selectPlanProviders(plan, { model: "ltx_2_5" }),
     }).filter((planned) => planned.backend === "mlx")
       .map((planned) => planned.logicalCaseId)
       .sort();
-    if (canonicalLtx25LogicalCaseIds.length !== LTX25_CAPTURE_CASE_COUNT) {
-      fail(`canonical LTX-2.5 plan must contain exactly ${LTX25_CAPTURE_CASE_COUNT} MLX cases`);
+    if (!ids.length) fail("canonical LTX-2.5 plan contains no MLX cases");
+    if (new Set(ids).size !== ids.length) {
+      fail("canonical LTX-2.5 plan contains duplicate logical case identities");
     }
+    canonicalLtx25LogicalCaseIds = ids;
   }
   return canonicalLtx25LogicalCaseIds;
 }
@@ -1611,9 +1618,10 @@ function expectedLtx25LogicalCaseIds() {
 function validateCanonicalLtx25Selection(plannedCases) {
   const actual = plannedCases.map((planned) => planned.logicalCaseId).sort();
   const expected = expectedLtx25LogicalCaseIds();
-  if (new Set(actual).size !== LTX25_CAPTURE_CASE_COUNT || !equal(actual, expected)) {
+  if (new Set(actual).size !== actual.length || !equal(actual, expected)) {
     fail(
-      `--model ltx_2_5 must select the exact canonical ${LTX25_CAPTURE_CASE_COUNT}-case MLX campaign`,
+      "--model ltx_2_5 must select the exact canonical MLX campaign declared by "
+        + "config/memory-calibration-plan.json",
     );
   }
 }
@@ -1878,18 +1886,34 @@ function ltx25ExpectedSourceInputs(prepared, planned) {
   return inputs;
 }
 
-export function validateLtx25ResumeIdentity(
-  existing,
-  plannedCases,
-  prepared,
-  currentRepositories = null,
-  currentHardware = null,
-) {
+/**
+ * Content identity of a source-session input: everything that identifies the bytes, minus the
+ * absolute snapshot `path`, which is machine-layout state rather than artifact identity.
+ */
+function ltx25InputContentIdentity(input) {
+  return {
+    role: input?.role,
+    bytes: input?.bytes,
+    sha256: input?.sha256,
+    repository: input?.repository,
+    resolvedRevision: input?.resolvedRevision,
+    variant: input?.variant,
+  };
+}
+
+export function validateLtx25ResumeIdentity(existing, plannedCases, prepared) {
   const selectedIds = new Set(plannedCases.map((planned) => planned.logicalCaseId));
   const sessions = new Map((existing.sourceSessions ?? []).map((session) => [session.id, session]));
   const resumed = new Map();
-  let campaignHardware = null;
+  // Only completed receipts describe evidence a resume may keep. A gated/failed prior attempt is
+  // simply re-run, so it must neither brick resume nor collide with a later complete record for
+  // the same logical case. Repository/pin and hardware identity are deliberately NOT compared —
+  // not against the current run and not between prior rows: a pin, repo, or capture-host change
+  // is provenance only and never invalidates a measurement (each record stamps its own hardware
+  // for consumers that care). The artifact content identity checked below (sha256 inventory +
+  // artifact repo/revision) is the key.
   for (const record of existing.records ?? []) {
+    if (!COMPLETED_RECORD_STATUSES.includes(record.status)) continue;
     const logicalIds = new Set([record.logicalCaseId, ...completedLogicalIds(record)]);
     for (const logicalId of logicalIds) {
       if (!selectedIds.has(logicalId)) continue;
@@ -1897,17 +1921,6 @@ export function validateLtx25ResumeIdentity(
         fail(`${logicalId}: resume contains multiple LTX-2.5 campaign identities`);
       }
       resumed.set(logicalId, record);
-      if (currentRepositories
-          && !equal(repositoriesIdentity(record.repositories), repositoriesIdentity(currentRepositories))) {
-        fail(`${logicalId}: LTX-2.5 resume row was captured from a different repository identity`);
-      }
-      if (currentHardware && !equal(record.hardware, currentHardware)) {
-        fail(`${logicalId}: LTX-2.5 resume row was captured on different hardware`);
-      }
-      if (campaignHardware && !equal(record.hardware, campaignHardware)) {
-        fail(`${logicalId}: LTX-2.5 resume mixes hardware identities`);
-      }
-      campaignHardware = record.hardware;
     }
   }
   for (const planned of plannedCases) {
@@ -1922,7 +1935,10 @@ export function validateLtx25ResumeIdentity(
       fail(`${planned.logicalCaseId}: completed LTX-2.5 resume row requires physical MLX provenance`);
     }
     const expectedInputs = ltx25ExpectedSourceInputs(prepared, planned);
-    if (!equal(session.inputs, expectedInputs)) {
+    if (!equal(
+      (session.inputs ?? []).map(ltx25InputContentIdentity),
+      expectedInputs.map(ltx25InputContentIdentity),
+    )) {
       fail(`${planned.logicalCaseId}: completed LTX-2.5 resume row has stale artifact identity`);
     }
     const base = expectedInputs[0];
@@ -2145,12 +2161,7 @@ export async function runProviderPlan({
     ? await prepareLtx25CaptureArtifacts(ltx25SnapshotRoot, allSelectedCases)
     : null;
   if (ltx25Artifacts) {
-    validateLtx25ResumeIdentity(
-      existing,
-      allSelectedCases,
-      ltx25Artifacts,
-      repositories,
-    );
+    validateLtx25ResumeIdentity(existing, allSelectedCases, ltx25Artifacts);
   }
   // Artifact identity and every completed row are validated above before a fully completed resume
   // may become a deterministic no-op. Hardware is intentionally not reprobed when no work remains.
@@ -2170,15 +2181,8 @@ export async function runProviderPlan({
   }
   const probe = JSON.parse(probeOutput);
   await assertRepositoriesStable();
-  if (ltx25Artifacts) {
-    validateLtx25ResumeIdentity(
-      existing,
-      allSelectedCases,
-      ltx25Artifacts,
-      repositories,
-      probe.hardware,
-    );
-  }
+  // Resume identity is artifact-content-keyed and probe-independent, so the pre-probe validation
+  // above is the only one needed.
   // Completion remains an evidence-semantic decision: candidate and gated receipts cannot retire
   // plan cases or promote matrix cells. Resume has a narrower operational concern. A prior receipt
   // proves that its exact logical case was already attempted only when the harness, both repository

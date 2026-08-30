@@ -480,7 +480,9 @@ function sampleValueFor(key) {
     case "transformerVariant":
       return "dev";
     case "vaeDecoder":
-      return "diffvae";
+      // The wire contract is "conv" | "diffusion" (crates/sceneworks-core/src/video_request.rs
+      // `requested_ltx25_vae_decoder`); "diffvae" is the calibration-plan spelling, not this one.
+      return "diffusion";
     case "autoDurationMinSeconds":
       return 3;
     case "autoDurationMaxSeconds":
