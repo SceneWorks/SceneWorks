@@ -4,7 +4,7 @@
 // canonical evidence.
 import { createHash } from "node:crypto";
 import { execFile as execFileCallback } from "node:child_process";
-import { appendFile, mkdir, readFile, stat, writeFile } from "node:fs/promises";
+import { appendFile, lstat, mkdir, readFile, stat, writeFile } from "node:fs/promises";
 import { promisify } from "node:util";
 import path from "node:path";
 
@@ -53,7 +53,14 @@ export async function submitAndPoll(baseUrl, record, transcript, fetchOptions = 
   for (let attempt = 0; attempt < 7200; attempt += 1) {
     const job = await request(new URL(`/api/v1/jobs/${created.id}`, baseUrl), { headers: fetchOptions.headers });
     await appendFile(transcript, JSON.stringify({ phase: "polled", case_id: record.case_id, job }) + "\n");
-    if (terminal.has(job.status)) return job;
+    if (terminal.has(job.status)) {
+      for (let metricAttempt = 0; metricAttempt < 60; metricAttempt += 1) {
+        const metrics = await request(new URL(`/api/v1/jobs/${created.id}/metrics`, baseUrl), { headers: fetchOptions.headers });
+        if (metrics && typeof metrics === "object") return { ...job, terminalMetrics: metrics };
+        await new Promise((resolve) => setTimeout(resolve, 500));
+      }
+      die(`vector_generate job ${created.id} completed without worker metrics`);
+    }
     await new Promise((resolve) => setTimeout(resolve, 1000));
   }
   die(`vector_generate job ${created.id} did not finish within two hours`);
@@ -75,11 +82,16 @@ async function runLifecycle(baseUrl, records, transcript, fetchOptions) {
     if (!["load", "unload", "reload", "memory_reported"].includes(record.operation)) die("lifecycle record has unknown operation");
     if (record.operation === "unload") {
       const result = await request(new URL("/api/v1/worker/restart", baseUrl), { method: "POST", headers: fetchOptions.headers });
-      await appendFile(transcript, JSON.stringify({ phase: "worker_restart_requested", case_id: record.case_id, operation: "unload", result }) + "\n"); observed.push({ case_id: record.case_id, job: { terminal_evidence: { operation: "unload", succeeded: result?.accepted === true || result?.status === "accepted" } } }); continue;
+      const succeeded = result?.accepted === true || result?.status === "accepted";
+      await appendFile(transcript, JSON.stringify({ phase: "worker_restart_requested", case_id: record.case_id, operation: "unload", result, succeeded }) + "\n");
+      if (!succeeded) die("worker restart did not acknowledge unload lifecycle operation");
+      observed.push({ case_id: record.case_id, operation: "unload", observation: result }); continue;
     }
-    const job = await submitAndPoll(baseUrl, record, transcript, fetchOptions); const value = job?.terminal_evidence;
-    if (record.operation === "memory_reported" && !value?.memory_reported) die("product worker did not report memory for lifecycle observation");
-    observed.push({ case_id: record.case_id, job: { ...job, terminal_evidence: { ...value, operation: record.operation, succeeded: true } } });
+    const job = await submitAndPoll(baseUrl, record, transcript, fetchOptions);
+    const value = job?.result?.terminalEvidence ?? job?.terminalEvidence;
+    if (!value || value.accepted !== true || !["complete_root", "eos"].includes(value.finishReason)) die(`product worker did not complete lifecycle ${record.operation}`);
+    if (record.operation === "memory_reported" && (!job.terminalMetrics || typeof job.terminalMetrics.peakMemoryBytes !== "number")) die("product worker did not report memory for lifecycle observation");
+    observed.push({ case_id: record.case_id, operation: record.operation, job });
   }
   return observed;
 }
@@ -94,6 +106,11 @@ async function runHostileSanitizer(records, output, transcript) {
     const input = await readFile(record.input_path); if (sha(input) !== record.input_sha256) die("hostile raw payload drifted");
     const destination = path.join(output, "hostile", String(record.case_index));
     const response = await execFile(binary, ["run", record.input_path, destination]); const observed = JSON.parse(response.stdout);
+    await materializeArtifact(output, `hostile/${record.case_index}/input`, record.input_path, record.input_sha256);
+    if (observed.outcome === "sanitized_inert") {
+      await materializeArtifact(output, `hostile/${record.case_index}/canonical`, path.join(destination, "canonical.svg"), observed.canonical_svg_sha256);
+      await materializeArtifact(output, `hostile/${record.case_index}/preview`, path.join(destination, "preview.png"), observed.preview_png_sha256);
+    } else if (observed.outcome !== "rejected") die("production sanitizer returned an unknown hostile disposition");
     await appendFile(transcript, JSON.stringify({ phase: "production_sanitizer", case_id: record.case_id, input_sha256: record.input_sha256, observed }) + "\n");
     results.push({ case_id: record.case_id, suite: "hostile_sanitizer", job: { terminal_evidence: observed } });
   }
@@ -112,7 +129,8 @@ async function submitPromptWorkflow(baseUrl, record, transcript, fetchOptions) {
 }
 
 const evidence = (event, label) => {
-  const value = event?.job?.terminal_evidence;
+  const job = event?.job;
+  const value = job?.result?.terminalEvidence ?? job?.terminalEvidence;
   if (!value || typeof value !== "object") die(`${label} product job did not expose typed terminal evidence`);
   return value;
 };
@@ -120,26 +138,121 @@ const sourceFor = (index) => {
   const sources = [["starvector/svg-stack-simple", "1d2a96a17cc0c4c1f337b7631adc8c5885bc72ea"], ["starvector/svg-icons-simple", "e1918a27ba6649e856e5db0710d8a6c7046762c1"], ["starvector/svg-emoji-simple", "fa75b3617872ae57e6f3cb450aee65dbccbd69e0"], ["starvector/svg-fonts-simple", "453c739ea13ad2685127f721c333f14d99485299"]];
   const [dataset, revision] = sources[Math.floor(index / 30)]; return { dataset, revision, row_index: index % 30 };
 };
+async function materializeArtifact(evidenceRoot, relative, source, expected) {
+  if (!source || !/^[a-f0-9]{64}$/.test(expected) || path.isAbsolute(relative) || relative.split("/").includes("..")) die(`unsafe canonical artifact ${relative}`);
+  const input = await lstat(source); if (!input.isFile() || input.isSymbolicLink()) die(`canonical source is not a regular file: ${source}`);
+  const bytes = await readFile(source); if (sha(bytes) !== expected) die(`canonical source hash mismatch: ${relative}`);
+  const destination = path.join(evidenceRoot, ...relative.split("/")); await mkdir(path.dirname(destination), { recursive: true }); await writeFile(destination, bytes);
+  const copied = await lstat(destination); if (!copied.isFile() || copied.isSymbolicLink() || sha(await readFile(destination)) !== expected) die(`canonical copy hash mismatch: ${relative}`);
+}
+
+async function materializeRunArtifacts(output, tuple, entry, events, run) {
+  for (const [index, record] of run.image_quality.cases.entries()) {
+    const request = entry.image_quality[index], event = events.image_quality[index], item = evidence(event, `quality artifact ${index}`), prefix = `runs/${tuple}/cases/${index}`;
+    await materializeArtifact(output, `${prefix}/source_svg_sha256`, request.source_svg, record.source_svg_sha256);
+    // This deliberately comes from the worker result, not from the immutable
+    // bundle.  The bundle says what may be submitted; terminal evidence proves
+    // which project-owned raster the worker actually consumed.
+    await materializeArtifact(output, `${prefix}/input_png_sha256`, item.sourceRasterPath, record.input_png_sha256);
+    await materializeArtifact(output, `${prefix}/provider_transcript_sha256`, item.providerTranscriptPath, record.provider_transcript_sha256);
+    if (record.accepted) {
+      await materializeArtifact(output, `${prefix}/canonical`, item.canonicalSvgPath, record.canonical_svg_sha256);
+      await materializeArtifact(output, `${prefix}/preview`, item.previewPngPath, record.preview_png_sha256);
+    }
+  }
+  for (const [index, record] of run.deterministic_parity.cases.entries()) {
+    const event = events.deterministic_parity[index], first = evidence({ job: event.first }, `parity artifact first ${index}`), second = evidence({ job: event.second }, `parity artifact second ${index}`), prefix = `runs/${tuple}/parity/${index}`;
+    await materializeArtifact(output, `${prefix}/first`, first.previewPngPath, record.first_preview_png_sha256);
+    await materializeArtifact(output, `${prefix}/second`, second.previewPngPath, record.second_preview_png_sha256);
+  }
+}
+async function materializePromptArtifacts(output, bundle, events, suites) {
+  for (const [index, record] of suites.prompt_composition.cases.entries()) {
+    const source = bundle.prompt_composition[index], event = events.prompt_composition[index], item = evidence(event, `prompt artifact ${index}`), promptFile = path.join(output, "prompt-inputs", `${index}.txt`), prefix = `prompt/${index}`;
+    await mkdir(path.dirname(promptFile), { recursive: true }); await writeFile(promptFile, source.prompt);
+    await materializeArtifact(output, `${prefix}/prompt_sha256`, promptFile, record.prompt_sha256);
+    await materializeArtifact(output, `${prefix}/raster_png_sha256`, item.sourceRasterPath, record.raster_png_sha256);
+    await materializeArtifact(output, `${prefix}/vector_provider_transcript_sha256`, item.providerTranscriptPath, record.vector_provider_transcript_sha256);
+    if (record.accepted) {
+      await materializeArtifact(output, `${prefix}/canonical`, item.canonicalSvgPath, record.canonical_svg_sha256);
+      await materializeArtifact(output, `${prefix}/preview`, item.previewPngPath, record.preview_png_sha256);
+    }
+  }
+}
 export function assembleRun(tuple, entry, events, metricFacts, parityFacts = []) {
-  const facts = new Map(metricFacts.map((fact) => [fact.case_id, fact]));
+  const metricResult = Array.isArray(metricFacts) ? { image_quality_facts: metricFacts, deterministic_parity_facts: parityFacts } : metricFacts;
+  const facts = new Map(metricResult.image_quality_facts.map((fact) => [fact.case_id, fact]));
   if (facts.size !== 120) die("metric script did not emit 120 unique raw quality facts");
   const imageCases = events.image_quality.map((event, case_index) => {
     const item = evidence(event, `quality ${case_index}`), fact = facts.get(event.case_id); if (!fact) die(`missing metric fact ${event.case_id}`);
-    const accepted = item.accepted === true, finish = item.finish_reason;
-    if (!finishReasons.has(finish) || typeof item.latency_seconds !== "number" || item.latency_seconds < 0) die("invalid typed quality outcome");
+    const accepted = item.accepted === true, finish = item.finishReason;
+    if (!finishReasons.has(finish) || typeof item.latencySeconds !== "number" || item.latencySeconds < 0) die("invalid typed quality outcome");
     if (accepted && !["complete_root", "eos"].includes(finish)) die("accepted quality case has non-complete finish");
-    return { case_index, source: sourceFor(case_index), source_svg_sha256: entry.image_quality[case_index].source_svg_sha256, input_png_sha256: entry.image_quality[case_index].input_png_sha256, provider_transcript_sha256: item.provider_transcript_sha256, finish_reason: finish, canonical_svg_sha256: accepted ? item.canonical_svg_sha256 : null, preview_png_sha256: accepted ? item.preview_png_sha256 : null, accepted, ssim: accepted ? fact.ssim : null, lpips: accepted ? fact.lpips : null, latency_seconds: item.latency_seconds };
+    if (item.sourceRasterSha256 !== entry.image_quality[case_index].input_png_sha256 || typeof item.sourceRasterPath !== "string") die("worker terminal evidence does not bind the submitted project raster");
+    return { case_index, source: sourceFor(case_index), source_svg_sha256: entry.image_quality[case_index].source_svg_sha256, input_png_sha256: entry.image_quality[case_index].input_png_sha256, provider_transcript_sha256: item.providerTranscriptSha256, finish_reason: finish, canonical_svg_sha256: accepted ? item.canonicalSvgSha256 : null, preview_png_sha256: accepted ? item.previewPngSha256 : null, accepted, ssim: accepted ? fact.ssim : null, lpips: accepted ? fact.lpips : null, latency_seconds: item.latencySeconds };
   });
-  const parityMetrics = new Map(parityFacts.map((fact) => [fact.case_id, fact]));
+  const parityMetrics = new Map(metricResult.deterministic_parity_facts.map((fact) => [fact.case_id, fact]));
   if (parityMetrics.size !== 20) die("metric script did not emit 20 unique deterministic parity facts");
-  const parity = events.deterministic_parity.map((event, case_index) => { const first = evidence({ job: event.first }, `parity first ${case_index}`), second = evidence({ job: event.second }, `parity second ${case_index}`), fact = parityMetrics.get(event.case_id); if (!Number.isInteger(event.seed) || typeof first.preview_png_sha256 !== "string" || typeof second.preview_png_sha256 !== "string" || typeof fact?.rendered_ssim !== "number") die("invalid deterministic parity event"); return { case_index, seed: event.seed, first_preview_png_sha256: first.preview_png_sha256, second_preview_png_sha256: second.preview_png_sha256, rendered_ssim: fact.rendered_ssim }; });
-  const lifecycle = Object.fromEntries(events.lifecycle.map((event) => [evidence(event, "lifecycle").operation, evidence(event, "lifecycle").succeeded === true]));
-  const limits = Object.fromEntries(events.limits.map((event) => { const item = evidence(event, "limit"); const map = { complete_root: "complete_root", eos: "eos", token_limit: "token", byte_limit: "byte", wall_time_limit: "wall_time", cancelled: "cancellation" }; return [map[item.finish_reason], item.observed === true]; }));
+  const parity = events.deterministic_parity.map((event, case_index) => { const first = evidence({ job: event.first }, `parity first ${case_index}`), second = evidence({ job: event.second }, `parity second ${case_index}`), fact = parityMetrics.get(event.case_id); if (!Number.isInteger(event.seed) || typeof first.previewPngSha256 !== "string" || typeof second.previewPngSha256 !== "string" || typeof fact?.rendered_ssim !== "number") die("invalid deterministic parity event"); return { case_index, seed: event.seed, first_preview_png_sha256: first.previewPngSha256, second_preview_png_sha256: second.previewPngSha256, rendered_ssim: fact.rendered_ssim }; });
+  const lifecycle = Object.fromEntries(events.lifecycle.map((event) => {
+    if (event.operation === "unload") return ["unload", event.observation?.accepted === true || event.observation?.status === "accepted"];
+    const item = evidence(event, "lifecycle");
+    return [event.operation, item.accepted === true && ["complete_root", "eos"].includes(item.finishReason) && (event.operation !== "memory_reported" || typeof event.job.terminalMetrics?.peakMemoryBytes === "number")];
+  }));
+  const limits = Object.fromEntries(events.limits.map((event, index) => { const item = evidence(event, "limit"), expected = entry.limits[index]?.finish_reason; const map = { complete_root: "complete_root", eos: "eos", token_limit: "token", byte_limit: "byte", wall_time_limit: "wall_time", cancelled: "cancellation" }; const unpublished = ["token_limit", "byte_limit", "wall_time_limit", "cancelled"].includes(item.finishReason) ? item.canonicalSvgPath === null && item.previewPngPath === null : true; return [map[expected], item.finishReason === expected && unpublished]; }));
   for (const key of ["load", "unload", "reload", "memory_reported"]) if (lifecycle[key] !== true) die(`missing lifecycle ${key}`);
   for (const key of ["complete_root", "eos", "token", "byte", "wall_time", "cancellation"]) if (limits[key] !== true) die(`missing bounded outcome ${key}`);
-  const identity = entry.run_identity, hardware = entry.hardware;
-  if (!identity || !hardware || !identity.model || typeof identity.provider_id !== "string") die("bundle lacks observed provider/hardware identity");
-  return { backend: tuple.split(":")[0], provider_id: identity.provider_id, tier: tuple.split(":")[1], device: identity.device, model: identity.model, hardware, image_quality: { cases: imageCases }, deterministic_parity: { case_count: 20, cases: parity }, lifecycle: { load: true, unload: true, reload: true, memory_reported: true }, limits, lifecycle_memory_transcript_sha256: identity.lifecycle_memory_transcript_sha256 };
+  const identity = evidence(events.image_quality[0], "run identity"), hardware = metricResult.runtime?.hardware;
+  if (!identity?.modelId || !identity?.modelRepository || !identity?.modelRevision || !identity?.providerId || !hardware || !metricResult.runtime?.inventory_sha256 || !metricResult.runtime?.lifecycle_memory_transcript_sha256) die("run lacks observed provider/model/hardware identity");
+  const [backend, tier] = tuple.split(":"), expectedNativeBackend = backend === "candle-cuda" ? "candle" : "mlx";
+  const expectedModel = tier === "1b" ? "starvector_1b" : "starvector_8b";
+  if (identity.backend !== expectedNativeBackend || identity.modelId !== expectedModel) die("terminal evidence backend/model does not match this tuple");
+  return { backend, provider_id: identity.providerId, tier, device: hardware.accelerator?.name, model: { key: tier === "1b" ? "starvector-1b-im2svg" : "starvector-8b-im2svg", repository: identity.modelRepository, revision: identity.modelRevision, inventory_sha256: metricResult.runtime.inventory_sha256 }, hardware, image_quality: { cases: imageCases }, deterministic_parity: { case_count: 20, cases: parity }, lifecycle: { load: true, unload: true, reload: true, memory_reported: true }, limits, lifecycle_memory_transcript_sha256: metricResult.runtime.lifecycle_memory_transcript_sha256 };
+}
+
+async function shell(command, args) {
+  const result = await execFile(command, args, { maxBuffer: 1024 * 1024 });
+  return result.stdout.trim();
+}
+function positiveInteger(value, label) { if (!Number.isInteger(value) || value < 1) die(`runtime probe ${label} is not a positive integer`); return value; }
+async function liveRuntime(output, tuple, events) {
+  const service = await json(path.join(output, "product-service-provenance.json"));
+  if (!Number.isInteger(service.api_pid) || !Number.isInteger(service.worker_pid)) die("runtime probe lacks source-built API/worker PIDs");
+  const metricRecords = [...events.image_quality, ...events.lifecycle.filter((entry) => entry.job).map((entry) => ({ job: entry.job }))];
+  const observed = metricRecords
+    .map((entry) => entry.job?.terminalMetrics?.peakMemoryBytes).filter((value) => Number.isInteger(value) && value > 0);
+  if (!observed.length) die("runtime probe lacks worker-owned peak memory observations");
+  const os = process.platform, arch = process.arch, peakProcess = Math.max(...observed);
+  let hardware;
+  if (os === "darwin") {
+    const total = positiveInteger(Number(await shell("sysctl", ["-n", "hw.memsize"])), "macOS total memory");
+    const vm = await shell("vm_stat", []), page = Number((vm.match(/page size of (\d+) bytes/) ?? [])[1]);
+    const free = [...vm.matchAll(/Pages (?:free|inactive|speculative):\s+(\d+)\./g)].reduce((sum, match) => sum + Number(match[1]), 0) * page;
+    positiveInteger(free, "macOS available memory");
+    hardware = { runner_name: process.env.RUNNER_NAME ?? "macos-self-hosted", os: "macOS", arch, system_memory_total_bytes: total, baseline_available_bytes: free, peak_process_rss_bytes: peakProcess, accelerator: { name: "Apple unified memory", uuid: null, driver_runtime: "MLX", total_bytes: total, baseline_free_bytes: free, peak_used_bytes: peakProcess } };
+  } else if (os === "win32") {
+    const raw = await shell("nvidia-smi", ["--query-gpu=uuid,name,driver_version,memory.total,memory.free,memory.used", "--format=csv,noheader,nounits"]);
+    const values = raw.split(/\r?\n/).filter(Boolean); if (values.length !== 1) die("CUDA runtime probe must observe exactly one selected GPU");
+    const [uuid, name, driver, totalMiB, freeMiB, usedMiB] = values[0].split(",").map((item) => item.trim());
+    const total = positiveInteger(Number(totalMiB) * 1024 * 1024, "CUDA total memory"), free = positiveInteger(Number(freeMiB) * 1024 * 1024, "CUDA free memory"), used = positiveInteger(Number(usedMiB) * 1024 * 1024, "CUDA used memory");
+    const system = JSON.parse(await shell("powershell", ["-NoProfile", "-Command", "@{ total=(Get-CimInstance Win32_ComputerSystem).TotalPhysicalMemory; free=(Get-CimInstance Win32_OperatingSystem).FreePhysicalMemory*1KB } | ConvertTo-Json -Compress"]));
+    const acceleratorPeaks = metricRecords.map((entry) => entry.job?.terminalMetrics?.peakAcceleratorBytes).filter((value) => Number.isInteger(value) && value > 0);
+    if (!acceleratorPeaks.length) die("CUDA runtime probe lacks worker-owned peak accelerator memory observations");
+    hardware = { runner_name: process.env.RUNNER_NAME ?? "windows-self-hosted", os: "Windows", arch, system_memory_total_bytes: positiveInteger(system.total, "Windows total memory"), baseline_available_bytes: positiveInteger(system.free, "Windows available memory"), peak_process_rss_bytes: peakProcess, accelerator: { name, uuid, driver_runtime: `CUDA/${driver}`, total_bytes: total, baseline_free_bytes: free, peak_used_bytes: Math.max(used, ...acceleratorPeaks) } };
+  } else die(`unsupported terminal campaign runtime platform ${os}`);
+  const probePath = path.join(output, "runtime-probe.json"), lifecyclePath = path.join(output, "lifecycle-memory.json");
+  await writeFile(lifecyclePath, JSON.stringify({ tuple, observed_at: new Date().toISOString(), lifecycle: events.lifecycle, quality_memory_bytes: observed }, null, 2) + "\n");
+  await writeFile(probePath, JSON.stringify({ tuple, observed_at: new Date().toISOString(), service, hardware }, null, 2) + "\n");
+  hardware.accelerator.raw_probe_sha256 = sha(await readFile(probePath));
+  // The raw probe must contain exactly the hardware facts used by the receipt;
+  // rewrite after binding its self-hash would be circular, so keep its digest
+  // alongside the raw bytes in the caller and never synthesize this value.
+  const runtime = { hardware, inventory_sha256: tuple.endsWith(":1b") ? service.models?.["starvector-1b"]?.inventory_sha256 : service.models?.["starvector-8b"]?.inventory_sha256, raw_probe_path: probePath, lifecycle_memory_transcript_path: lifecyclePath, lifecycle_memory_transcript_sha256: sha(await readFile(lifecyclePath)) };
+  if (!/^[a-f0-9]{64}$/.test(runtime.inventory_sha256 ?? "")) die("runtime probe lacks validated model inventory identity");
+  // Avoid a self-referential raw-probe hash: the canonical observation is the
+  // bytes captured above and its digest is the only value admitted into the run.
+  runtime.hardware.accelerator.raw_probe_sha256 = sha(await readFile(probePath));
+  return runtime;
 }
 export function assembleSuites(bundle, events, metrics) {
   if (!metrics.terminal_suites || !events.hostile_sanitizer || !events.prompt_composition) die("final tuple lacks source-owned hostile/prompt suite evidence");
@@ -167,14 +280,23 @@ async function main() {
     for (const record of bundle.prompt_composition) { const workflow = await submitPromptWorkflow(baseUrl, record, transcript, bundle.fetch ?? {}); events.prompt_composition.push({ case_id: record.case_id, suite: "prompt_composition", job: workflow, workflow }); }
   }
   const eventsPath = path.join(output, "route-events.json"); await writeFile(eventsPath, JSON.stringify(events, null, 2) + "\n");
+  const runtime = await liveRuntime(output, tuple, events);
+  const runtimePath = path.join(output, "runtime.json"); await writeFile(runtimePath, JSON.stringify(runtime, null, 2) + "\n");
   const transcriptSha = sha(await readFile(transcript));
   const metricScript = path.join(path.dirname(new URL(import.meta.url).pathname), "starvector-terminal-metrics.py"); await stat(metricScript);
-  await execFile(python, [metricScript, "measure", "--bundle", bundlePath, "--events", eventsPath, "--output", path.join(output, "metrics.json"), "--tuple", tuple, "--transcript-sha256", transcriptSha], { env: { ...process.env, STARVECTOR_TERMINAL_NO_JOB_DOWNLOADS: "1" } });
+  await execFile(python, [metricScript, "measure", "--bundle", bundlePath, "--events", eventsPath, "--runtime", runtimePath, "--output", path.join(output, "metrics.json"), "--tuple", tuple, "--transcript-sha256", transcriptSha], { env: { ...process.env, STARVECTOR_TERMINAL_NO_JOB_DOWNLOADS: "1" } });
   const metrics = await json(path.join(output, "metrics.json"));
   if (metrics?.tuple !== tuple || metrics.route_transcript_sha256 !== transcriptSha || !Array.isArray(metrics.image_quality_facts)) die("source-owned metric script did not emit bound per-case facts");
-  const run = assembleRun(tuple, cases, events, metrics.image_quality_facts, metrics.deterministic_parity_facts);
+  const run = assembleRun(tuple, cases, events, metrics);
+  await materializeRunArtifacts(output, tuple, cases, events, run);
+  await materializeArtifact(output, `runs/${tuple}/hardware/raw-probe`, runtime.raw_probe_path, run.hardware.accelerator.raw_probe_sha256);
+  await materializeArtifact(output, `runs/${tuple}/lifecycle-memory`, runtime.lifecycle_memory_transcript_path, run.lifecycle_memory_transcript_sha256);
   await writeFile(path.join(output, "raw-results.json"), JSON.stringify({ tuple, run }, null, 2) + "\n");
-  if (tuple === "candle-cuda:8b") await writeFile(path.join(output, "terminal-suites.json"), JSON.stringify(assembleSuites(bundle, events, metrics), null, 2) + "\n");
+  if (tuple === "candle-cuda:8b") {
+    const suites = assembleSuites(bundle, events, metrics);
+    await materializePromptArtifacts(output, bundle, events, suites);
+    await writeFile(path.join(output, "terminal-suites.json"), JSON.stringify(suites, null, 2) + "\n");
+  }
   await stat(path.join(output, "raw-results.json"));
 }
 if (import.meta.url === `file://${process.argv[1]}`) main().catch((error) => { console.error(error.message); process.exitCode = 1; });

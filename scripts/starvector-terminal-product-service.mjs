@@ -4,7 +4,7 @@
 // Cargo inference pin, binaries and health response are all recorded together.
 import { createHash } from "node:crypto";
 import { execFile as execFileCallback, spawn } from "node:child_process";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { copyFile, lstat, mkdir, readFile, readdir, writeFile } from "node:fs/promises";
 import { promisify } from "node:util";
 import path from "node:path";
 
@@ -26,8 +26,49 @@ async function waitHealthy(url) {
   }
   die("source-built API did not become ready");
 }
-export async function startProductService({ root, output, permanentPin, url }) {
-  if (!root || !output || !permanentPin || !url || !url.startsWith("http://127.0.0.1:")) die("local current-tree root/output/pin/API URL required");
+async function copyRegularTree(source, destination) {
+  const info = await lstat(source);
+  if (info.isSymbolicLink()) die(`weights closure rejects symlink ${source}`);
+  if (info.isDirectory()) {
+    await mkdir(destination, { recursive: true });
+    for (const name of await readdir(source)) await copyRegularTree(path.join(source, name), path.join(destination, name));
+    return;
+  }
+  if (!info.isFile()) die(`weights closure rejects non-regular file ${source}`);
+  await mkdir(path.dirname(destination), { recursive: true });
+  await copyFile(source, destination);
+  if (sha(await readFile(source)) !== sha(await readFile(destination))) die(`weights closure copy hash drifted: ${source}`);
+}
+
+async function materializeOfflineWeights(weightsRoot, stateRoot) {
+  const manifest = JSON.parse(await readFile(path.join(weightsRoot, "starvector-terminal-weights-v1.json"), "utf8"));
+  const closure = manifest.terminal_service_closure;
+  if (!closure || typeof closure.app_data_relative_path !== "string" || typeof closure.hf_home_relative_path !== "string" || !/^[a-f0-9]{64}$/.test(closure.app_data_sha256) || !/^[a-f0-9]{64}$/.test(closure.hf_home_sha256)) die("weights manifest lacks exact app receipt/HF offline closure");
+  for (const relative of [closure.app_data_relative_path, closure.hf_home_relative_path]) if (path.isAbsolute(relative) || relative.split(/[\\/]/).includes("..")) die("weights closure path is unsafe");
+  const appSource = path.join(weightsRoot, ...closure.app_data_relative_path.split(/[\\/]/));
+  const hfSource = path.join(weightsRoot, ...closure.hf_home_relative_path.split(/[\\/]/));
+  await copyRegularTree(appSource, path.join(stateRoot, "data"));
+  await copyRegularTree(hfSource, path.join(stateRoot, "hf"));
+  const hashTree = async (root) => {
+    const rows = [];
+    for (const name of await readdir(root, { recursive: true })) { const file = path.join(root, name), info = await lstat(file); if (info.isSymbolicLink()) die(`weights closure copy contains symlink ${name}`); if (info.isFile()) rows.push([name.split(path.sep).join("/"), info.size, sha(await readFile(file))]); }
+    rows.sort((a, b) => a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0); return sha(JSON.stringify(rows));
+  };
+  if (await hashTree(path.join(stateRoot, "data")) !== closure.app_data_sha256 || await hashTree(path.join(stateRoot, "hf")) !== closure.hf_home_sha256) die("materialized receipt/HF closure hash mismatch");
+  const models = {};
+  for (const [key, model] of Object.entries(manifest.models ?? {})) {
+    if (!model?.relative_path || !model?.inventory_sha256) die("weights manifest model inventory is incomplete");
+    // This is the same manifest validated by the controller before execution;
+    // retain only the measured snapshot identity, never a corpus-supplied run
+    // identity, in the source-built service record.
+    models[key] = { revision: model.revision, inventory_sha256: model.inventory_sha256 };
+  }
+  if (Object.keys(models).length !== 2) die("weights manifest must close both StarVector snapshots");
+  return { app_data_sha256: closure.app_data_sha256, hf_home_sha256: closure.hf_home_sha256, models };
+}
+
+export async function startProductService({ root, output, permanentPin, url, weightsRoot }) {
+  if (!root || !output || !weightsRoot || !permanentPin || !url || !url.startsWith("http://127.0.0.1:")) die("local current-tree root/output/offline weights/pin/API URL required");
   const identity = await serviceIdentity(root, permanentPin); await mkdir(output, { recursive: true });
   // `cargo build` is source ownership: no prebuilt or /opt sidecar can satisfy
   // this contract.  It never downloads model weights; the controller separately
@@ -37,11 +78,14 @@ export async function startProductService({ root, output, permanentPin, url }) {
   const common = { cwd: root, detached: true, stdio: ["ignore", "pipe", "pipe"] }, parsed = new URL(url), apiPort = parsed.port, stateRoot = path.join(output, "product-service-state");
   if (parsed.hostname !== "127.0.0.1" || !apiPort) die("product service must bind an explicit loopback host/port");
   await mkdir(path.join(stateRoot, "data"), { recursive: true }); await mkdir(path.join(stateRoot, "config"), { recursive: true });
-  const serviceEnv = { ...process.env, SCENEWORKS_TERMINAL_CAMPAIGN: "1", SCENEWORKS_API_HOST: "127.0.0.1", SCENEWORKS_API_PORT: apiPort, SCENEWORKS_API_URL: url, SCENEWORKS_DATA_DIR: path.join(stateRoot, "data"), SCENEWORKS_CONFIG_DIR: path.join(stateRoot, "config"), SCENEWORKS_JOBS_DB_PATH: path.join(stateRoot, "data", "cache", "jobs.db"), SCENEWORKS_GPU_ID: process.env.STARVECTOR_TERMINAL_GPU_ID ?? "auto" };
+  const weights = await materializeOfflineWeights(weightsRoot, stateRoot);
+  const hfHome = path.join(stateRoot, "hf");
+  const serviceEnv = { ...process.env, SCENEWORKS_TERMINAL_CAMPAIGN: "1", SCENEWORKS_API_HOST: "127.0.0.1", SCENEWORKS_API_PORT: apiPort, SCENEWORKS_API_URL: url, SCENEWORKS_DATA_DIR: path.join(stateRoot, "data"), SCENEWORKS_CONFIG_DIR: path.join(stateRoot, "config"), SCENEWORKS_JOBS_DB_PATH: path.join(stateRoot, "data", "cache", "jobs.db"), SCENEWORKS_GPU_ID: process.env.STARVECTOR_TERMINAL_GPU_ID ?? "auto", HF_HOME: hfHome, HUGGINGFACE_HUB_CACHE: path.join(hfHome, "hub"), HF_HUB_OFFLINE: "1", TRANSFORMERS_OFFLINE: "1" };
+  for (const inherited of ["TRANSFORMERS_CACHE", "HF_DATASETS_CACHE", "HF_ENDPOINT"]) delete serviceEnv[inherited];
   const api = spawn(binary, [], { ...common, env: serviceEnv });
   const worker = spawn(binary, [], { ...common, env: { ...serviceEnv, SCENEWORKS_WORKER_ONLY: "1" } });
   const stdout = [], stderr = []; for (const child of [api, worker]) { child.stdout.on("data", (chunk) => stdout.push(chunk)); child.stderr.on("data", (chunk) => stderr.push(chunk)); child.unref(); }
-  const health = await waitHealthy(url); if (api.exitCode !== null || worker.exitCode !== null || api.pid === undefined || worker.pid === undefined) die("source-built API or worker exited during readiness"); const record = { ...identity, api_url: url, api_host: "127.0.0.1", api_port: Number(apiPort), state_root: path.relative(output, stateRoot), api_binary: path.relative(root, binary), worker_binary: path.relative(root, binary), api_binary_sha256: sha(await readFile(binary)), api_pid: api.pid, worker_pid: worker.pid, health, started_at: new Date().toISOString() };
+  const health = await waitHealthy(url); if (api.exitCode !== null || worker.exitCode !== null || api.pid === undefined || worker.pid === undefined) die("source-built API or worker exited during readiness"); const record = { ...identity, ...weights, api_url: url, api_host: "127.0.0.1", api_port: Number(apiPort), state_root: path.relative(output, stateRoot), api_binary: path.relative(root, binary), worker_binary: path.relative(root, binary), api_binary_sha256: sha(await readFile(binary)), api_pid: api.pid, worker_pid: worker.pid, health, offline: { hf_home: path.relative(output, hfHome), hf_hub_offline: serviceEnv.HF_HUB_OFFLINE, transformers_offline: serviceEnv.TRANSFORMERS_OFFLINE }, started_at: new Date().toISOString() };
   await writeFile(path.join(output, "product-service-provenance.json"), JSON.stringify(record, null, 2) + "\n");
   await writeFile(path.join(output, "product-service-logs.sha256"), sha(Buffer.concat([...stdout, ...stderr])) + "\n");
   return record;
@@ -67,5 +111,5 @@ export async function stopProductService(output) {
   await writeFile(path.join(output, "product-service-stopped.json"), JSON.stringify({ api_pid: record.api_pid, worker_pid: record.worker_pid, stopped_at: new Date().toISOString() }, null, 2) + "\n");
 }
 if (import.meta.url === `file://${process.argv[1]}`) {
-  const [command, ...args] = process.argv.slice(2); const run = command === "start" ? startProductService({ root: args[0], output: args[1], permanentPin: args[2], url: args[3] }) : command === "stop" ? stopProductService(args[0]) : Promise.reject(new Error("usage: start <root> <output> <pin> <url> | stop <output>")); run.catch((error) => { console.error(error.message); process.exitCode = 1; });
+  const [command, ...args] = process.argv.slice(2); const run = command === "start" ? startProductService({ root: args[0], output: args[1], permanentPin: args[2], url: args[3], weightsRoot: args[4] }) : command === "stop" ? stopProductService(args[0]) : Promise.reject(new Error("usage: start <root> <output> <pin> <url> <weights-root> | stop <output>")); run.catch((error) => { console.error(error.message); process.exitCode = 1; });
 }

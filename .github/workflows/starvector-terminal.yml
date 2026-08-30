@@ -55,7 +55,7 @@ jobs:
       - name: Run production vector_generate route for MLX 1B
         run: |
           export STARVECTOR_TERMINAL_CASE_BUNDLE="$RUNNER_TEMP/starvector-terminal/mlx-1b/case-bundle.json"
-          node scripts/starvector-terminal-product-service.mjs start "$GITHUB_WORKSPACE" "$RUNNER_TEMP/starvector-terminal/mlx-1b" "${{ inputs.permanent_pin }}" "$STARVECTOR_TERMINAL_API_URL"
+          node scripts/starvector-terminal-product-service.mjs start "$GITHUB_WORKSPACE" "$RUNNER_TEMP/starvector-terminal/mlx-1b" "${{ inputs.permanent_pin }}" "$STARVECTOR_TERMINAL_API_URL" "$STARVECTOR_TERMINAL_WEIGHTS_ROOT"
           node scripts/starvector-terminal-assets.mjs "$STARVECTOR_TERMINAL_CORPUS_ASSETS_ROOT" "$STARVECTOR_TERMINAL_API_URL" mlx:1b "$RUNNER_TEMP/starvector-terminal/mlx-1b/imported-assets.json"
           node scripts/starvector-terminal-case-bundle.mjs "$STARVECTOR_TERMINAL_INFERENCE_ROOT/release/starvector-terminal-corpus-v1.json" "$STARVECTOR_TERMINAL_CORPUS_ASSETS_ROOT" "$STARVECTOR_TERMINAL_CASE_BUNDLE" "${{ inputs.permanent_pin }}" "$RUNNER_TEMP/starvector-terminal/mlx-1b/imported-assets.json"
           node scripts/starvector-terminal-producer.mjs run "$GITHUB_WORKSPACE" release/starvector-terminal-campaign-v1.json "$STARVECTOR_TERMINAL_INFERENCE_ROOT" "$STARVECTOR_TERMINAL_WEIGHTS_ROOT" "$STARVECTOR_TERMINAL_METRICS_ROOT" "$STARVECTOR_TERMINAL_LEASE_ROOT" "$STARVECTOR_TERMINAL_LEASE_HELPER" "$RUNNER_TEMP/starvector-terminal/mlx-1b" mlx:1b "${{ inputs.campaign_run_id }}" "${{ inputs.permanent_pin }}" "$STARVECTOR_TERMINAL_PRODUCT_ROUTE_COMMAND"
@@ -80,7 +80,7 @@ jobs:
         run: |
           cargo build --release --locked -p sceneworks-worker --bin starvector_terminal_lease --bin starvector_terminal_sanitize
           export STARVECTOR_TERMINAL_CASE_BUNDLE="$RUNNER_TEMP/starvector-terminal/mlx-8b/case-bundle.json"
-          node scripts/starvector-terminal-product-service.mjs start "$GITHUB_WORKSPACE" "$RUNNER_TEMP/starvector-terminal/mlx-8b" "${{ inputs.permanent_pin }}" "$STARVECTOR_TERMINAL_API_URL"
+          node scripts/starvector-terminal-product-service.mjs start "$GITHUB_WORKSPACE" "$RUNNER_TEMP/starvector-terminal/mlx-8b" "${{ inputs.permanent_pin }}" "$STARVECTOR_TERMINAL_API_URL" "$STARVECTOR_TERMINAL_WEIGHTS_ROOT"
           node scripts/starvector-terminal-assets.mjs "$STARVECTOR_TERMINAL_CORPUS_ASSETS_ROOT" "$STARVECTOR_TERMINAL_API_URL" mlx:8b "$RUNNER_TEMP/starvector-terminal/mlx-8b/imported-assets.json"
           node scripts/starvector-terminal-case-bundle.mjs "$STARVECTOR_TERMINAL_INFERENCE_ROOT/release/starvector-terminal-corpus-v1.json" "$STARVECTOR_TERMINAL_CORPUS_ASSETS_ROOT" "$STARVECTOR_TERMINAL_CASE_BUNDLE" "${{ inputs.permanent_pin }}" "$RUNNER_TEMP/starvector-terminal/mlx-8b/imported-assets.json"
           node scripts/starvector-terminal-producer.mjs run "$GITHUB_WORKSPACE" release/starvector-terminal-campaign-v1.json "$STARVECTOR_TERMINAL_INFERENCE_ROOT" "$STARVECTOR_TERMINAL_WEIGHTS_ROOT" "$STARVECTOR_TERMINAL_METRICS_ROOT" "$STARVECTOR_TERMINAL_LEASE_ROOT" "$STARVECTOR_TERMINAL_LEASE_HELPER" "$RUNNER_TEMP/starvector-terminal/mlx-8b" mlx:8b "${{ inputs.campaign_run_id }}" "${{ inputs.permanent_pin }}" "$STARVECTOR_TERMINAL_PRODUCT_ROUTE_COMMAND"
@@ -118,7 +118,7 @@ jobs:
         run: |
           cargo build --release --locked -p sceneworks-worker --bin starvector_terminal_lease --bin starvector_terminal_sanitize
           $env:STARVECTOR_TERMINAL_CASE_BUNDLE = "$env:RUNNER_TEMP\\starvector-terminal\\cuda-1b\\case-bundle.json"
-          node scripts/starvector-terminal-product-service.mjs start $env:GITHUB_WORKSPACE "$env:RUNNER_TEMP\\starvector-terminal\\cuda-1b" "${{ inputs.permanent_pin }}" $env:STARVECTOR_TERMINAL_API_URL
+          node scripts/starvector-terminal-product-service.mjs start $env:GITHUB_WORKSPACE "$env:RUNNER_TEMP\\starvector-terminal\\cuda-1b" "${{ inputs.permanent_pin }}" $env:STARVECTOR_TERMINAL_API_URL $env:STARVECTOR_TERMINAL_WEIGHTS_ROOT
           node scripts/starvector-terminal-assets.mjs $env:STARVECTOR_TERMINAL_CORPUS_ASSETS_ROOT $env:STARVECTOR_TERMINAL_API_URL candle-cuda:1b "$env:RUNNER_TEMP\\starvector-terminal\\cuda-1b\\imported-assets.json"
           node scripts/starvector-terminal-case-bundle.mjs "$env:STARVECTOR_TERMINAL_INFERENCE_ROOT\\release\\starvector-terminal-corpus-v1.json" $env:STARVECTOR_TERMINAL_CORPUS_ASSETS_ROOT $env:STARVECTOR_TERMINAL_CASE_BUNDLE "${{ inputs.permanent_pin }}" "$env:RUNNER_TEMP\\starvector-terminal\\cuda-1b\\imported-assets.json"
           node scripts/starvector-terminal-producer.mjs run $env:GITHUB_WORKSPACE release/starvector-terminal-campaign-v1.json $env:STARVECTOR_TERMINAL_INFERENCE_ROOT $env:STARVECTOR_TERMINAL_WEIGHTS_ROOT $env:STARVECTOR_TERMINAL_METRICS_ROOT $env:STARVECTOR_TERMINAL_LEASE_ROOT $env:STARVECTOR_TERMINAL_LEASE_HELPER "$env:RUNNER_TEMP\\starvector-terminal\\cuda-1b" candle-cuda:1b "${{ inputs.campaign_run_id }}" "${{ inputs.permanent_pin }}" $env:STARVECTOR_TERMINAL_PRODUCT_ROUTE_COMMAND
@@ -157,7 +157,7 @@ jobs:
         run: |
           cargo build --release --locked -p sceneworks-worker --bin starvector_terminal_lease --bin starvector_terminal_sanitize
           $env:STARVECTOR_TERMINAL_CASE_BUNDLE = "$env:RUNNER_TEMP\\starvector-terminal\\cuda-8b\\case-bundle.json"
-          node scripts/starvector-terminal-product-service.mjs start $env:GITHUB_WORKSPACE "$env:RUNNER_TEMP\\starvector-terminal\\cuda-8b" "${{ inputs.permanent_pin }}" $env:STARVECTOR_TERMINAL_API_URL
+          node scripts/starvector-terminal-product-service.mjs start $env:GITHUB_WORKSPACE "$env:RUNNER_TEMP\\starvector-terminal\\cuda-8b" "${{ inputs.permanent_pin }}" $env:STARVECTOR_TERMINAL_API_URL $env:STARVECTOR_TERMINAL_WEIGHTS_ROOT
           node scripts/starvector-terminal-assets.mjs $env:STARVECTOR_TERMINAL_CORPUS_ASSETS_ROOT $env:STARVECTOR_TERMINAL_API_URL candle-cuda:8b "$env:RUNNER_TEMP\\starvector-terminal\\cuda-8b\\imported-assets.json"
           node scripts/starvector-terminal-case-bundle.mjs "$env:STARVECTOR_TERMINAL_INFERENCE_ROOT\\release\\starvector-terminal-corpus-v1.json" $env:STARVECTOR_TERMINAL_CORPUS_ASSETS_ROOT $env:STARVECTOR_TERMINAL_CASE_BUNDLE "${{ inputs.permanent_pin }}" "$env:RUNNER_TEMP\\starvector-terminal\\cuda-8b\\imported-assets.json"
           node scripts/starvector-terminal-producer.mjs run $env:GITHUB_WORKSPACE release/starvector-terminal-campaign-v1.json $env:STARVECTOR_TERMINAL_INFERENCE_ROOT $env:STARVECTOR_TERMINAL_WEIGHTS_ROOT $env:STARVECTOR_TERMINAL_METRICS_ROOT $env:STARVECTOR_TERMINAL_LEASE_ROOT $env:STARVECTOR_TERMINAL_LEASE_HELPER "$env:RUNNER_TEMP\\starvector-terminal\\cuda-8b" candle-cuda:8b "${{ inputs.campaign_run_id }}" "${{ inputs.permanent_pin }}" $env:STARVECTOR_TERMINAL_PRODUCT_ROUTE_COMMAND

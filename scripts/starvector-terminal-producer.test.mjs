@@ -8,7 +8,9 @@ import test from "node:test";
 import { pathToFileURL } from "node:url";
 import { claimCampaignMarker, claimTupleMarker, inventory, sealReceipt, verifyInferenceCheckout, verifyPermanentPin } from "./starvector-terminal-producer.mjs";
 
-const inferenceRepository = "/Users/michael/.codex/worktrees/epic-19699/sc-22261-inference-integration";
+// CI supplies an exact pinned inference checkout; the local default preserves
+// the focused fixture without embedding a developer-specific worktree path.
+const inferenceRepository = process.env.STARVECTOR_TERMINAL_INFERENCE_TEST_ROOT ?? path.resolve("../sc-22261-inference-integration");
 let inferenceRoot = inferenceRepository;
 const sha = (value) => createHash("sha256").update(value).digest("hex");
 const digest = sha("artifact");

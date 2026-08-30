@@ -33,7 +33,7 @@ export async function inventory(root) {
 async function git(root, args) { return (await execFile("git", ["-C", root, ...args])).stdout.trim(); }
 export async function verifyInferenceCheckout(inferenceRoot) {
   if (!inferenceRoot) die("pinned inference checkout required");
-  if (await git(inferenceRoot, ["rev-parse", "HEAD"]) !== INFERENCE_REVISION) die("inference checkout is not the exact PR #891 revision");
+  if (await git(inferenceRoot, ["rev-parse", "HEAD"]) !== INFERENCE_REVISION) die("inference checkout is not the exact terminal-contract revision");
   if (await git(inferenceRoot, ["status", "--porcelain"])) die("inference checkout must be clean");
   for (const item of ["release/starvector-terminal-receipt-v1.schema.json", "release/starvector-terminal-corpus-v1.json", "scripts/release/starvector_terminal_evidence.mjs"]) try { await stat(path.join(inferenceRoot, item)); } catch { die(`missing pinned inference contract ${item}`); }
   return path.join(inferenceRoot, "scripts/release/starvector_terminal_evidence.mjs");
@@ -111,7 +111,7 @@ export async function validateMetricsEnvironment(metricsRoot, metricsLockSha) {
   if (!SHA256.test(environment.metric_transcript_sha256)) die("metric transcript identity missing");
   const clip = environment.clip;
   if (!clip?.model || !clip.checkpoint?.path || !SHA256.test(clip.checkpoint.sha256) || sha(await readFile(path.join(metricsRoot, clip.checkpoint.path))) !== clip.checkpoint.sha256) die("pre-provisioned OpenCLIP checkpoint is missing or mismatched");
-  return environment;
+  return { ...environment, root: metricsRoot };
 }
 
 export async function validateWeightsEnvironment(weightsRoot, revisions) {
@@ -169,7 +169,9 @@ export async function executeTuple({ sceneWorksRoot, planPath, inferenceRoot, we
     await claimTupleMarker(leaseRoot, permanentPin, campaignRunId, tuple);
     await writeFile(path.join(output, "preflight-provenance.json"), JSON.stringify({ inference_revision: INFERENCE_REVISION, permanent_pin: permanentPin, service: pre.service, route: pre.route, metric_transcript_sha256: pre.metrics.metric_transcript_sha256, model_revisions: pre.plan.model_snapshot_revisions }, null, 2) + "\n");
     try {
-      const commandResult = await execFile(command, [], { env: { ...process.env, STARVECTOR_TERMINAL_RUN_ID: campaignRunId, STARVECTOR_TERMINAL_TUPLE: tuple, STARVECTOR_TERMINAL_OUTPUT: output, STARVECTOR_TERMINAL_PERMANENT_PIN: permanentPin, STARVECTOR_TERMINAL_ROUTE_CLOSURE_SHA256: pre.route.sha256 }, maxBuffer: 1024 * 1024 });
+      const linear = pre.metrics.weights.lpips_linear, alexnet = pre.metrics.weights.alexnet;
+      const metricEnvironment = path.join(metricsRoot, "starvector-terminal-metrics-environment-v1.json");
+      const commandResult = await execFile(command, [], { env: { ...process.env, STARVECTOR_TERMINAL_RUN_ID: campaignRunId, STARVECTOR_TERMINAL_TUPLE: tuple, STARVECTOR_TERMINAL_OUTPUT: output, STARVECTOR_TERMINAL_PERMANENT_PIN: permanentPin, STARVECTOR_TERMINAL_ROUTE_CLOSURE_SHA256: pre.route.sha256, STARVECTOR_TERMINAL_METRICS_ENVIRONMENT: metricEnvironment, STARVECTOR_TERMINAL_LPIPS_LINEAR: path.join(metricsRoot, linear.path), STARVECTOR_TERMINAL_LPIPS_LINEAR_SHA256: linear.sha256, STARVECTOR_TERMINAL_ALEXNET: path.join(metricsRoot, alexnet.path), STARVECTOR_TERMINAL_ALEXNET_SHA256: alexnet.sha256, TORCH_HOME: path.dirname(path.dirname(path.join(metricsRoot, alexnet.path))), HF_HUB_OFFLINE: "1", TRANSFORMERS_OFFLINE: "1" }, maxBuffer: 1024 * 1024 });
       await writeFile(path.join(output, "route-command-transcript.json"), JSON.stringify({ stdout: commandResult.stdout, stderr: commandResult.stderr }, null, 2) + "\n");
     } catch (error) {
       await writeFile(path.join(output, "route-command-transcript.json"), JSON.stringify({ stdout: error.stdout ?? "", stderr: error.stderr ?? "", error: String(error.message ?? error) }, null, 2) + "\n");
