@@ -25352,6 +25352,56 @@
           "deviceClasses": {
             "mlx": "apple_unified_memory",
             "candle": "nvidia_dedicated_vram"
+          },
+          // The immutable identities plus the measured 128 GiB MLX and MICHAEL-TRX50 CUDA device
+          // facts are already known. The three nulls are deliberate terminal inputs, not waivers:
+          // the final inference-main merge, canonical corpus validation, and frozen source closure
+          // do not exist yet. Both providers remain fail-closed until every field is sealed and the
+          // same-run receipt re-verifies these checked-in device facts live.
+          "terminalCandidate": {
+            "schemaVersion": 1,
+            "inferenceRevision": null,
+            "corpusSha256": null,
+            "model": {
+              "repository": "starvector/starvector-8b-im2svg",
+              "revision": "518beea8dcb5f7a37c5911e92d1d62a76beee7f9",
+              "files": [
+                "README.md",
+                "added_tokens.json",
+                "config.json",
+                "merges.txt",
+                "model-00001-of-00004.safetensors",
+                "model-00002-of-00004.safetensors",
+                "model-00003-of-00004.safetensors",
+                "model-00004-of-00004.safetensors",
+                "model.safetensors.index.json",
+                "preprocessor_config.json",
+                "processor_config.json",
+                "special_tokens_map.json",
+                "tokenizer_config.json",
+                "vocab.json"
+              ]
+            },
+            "providers": {
+              "mlx": "mlx-starvector-8b",
+              "candle": "candle-starvector-8b"
+            },
+            "productionClosure": null,
+            "supportedDevices": {
+              "mlx": [
+                {
+                  "deviceClass": "apple_unified_memory",
+                  "totalBytes": 137438953472
+                }
+              ],
+              "candle": [
+                {
+                  "deviceClass": "nvidia_dedicated_vram",
+                  "deviceName": "NVIDIA RTX PRO 6000 Blackwell Max-Q Workstation Edition",
+                  "totalBytes": 102641958912
+                }
+              ]
+            }
           }
         },
         "providers": {
