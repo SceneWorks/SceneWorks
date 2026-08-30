@@ -268,9 +268,9 @@ fn mlx_gpu_advertises_generation_capabilities_only() {
     assert!(capabilities
         .iter()
         .any(|capability| capability.as_str() == "video_generate"));
-    // The catalog/install surface lands before the one permanent feature-train inference pin.
-    // Neither mode is claimable until the terminal story wires the native provider.
-    assert!(!capabilities
+    // The terminal integration wires the native image-to-SVG provider. Text-to-SVG stays
+    // unavailable because neither StarVector model exposes that mode.
+    assert!(capabilities
         .iter()
         .any(|capability| capability.as_str() == "vector_image_to_svg"));
     assert!(!capabilities
@@ -342,6 +342,7 @@ fn mlx_gpu_capability_set_matches_expected_full_set() {
         WorkerCapability::ImageDetail,
         WorkerCapability::ImageVqa,
         WorkerCapability::ImageInterleave,
+        WorkerCapability::VectorImageToSvg,
         WorkerCapability::VideoExtend,
         WorkerCapability::VideoBridge,
         WorkerCapability::PersonReplace,

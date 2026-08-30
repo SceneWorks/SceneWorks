@@ -477,13 +477,15 @@ mod tests {
         #[cfg(target_os = "macos")]
         {
             assert!(media_count > 50);
-            assert_eq!(text_count, 2);
+            // The two LLM registrations plus the native StarVector image-to-SVG generator.
+            assert_eq!(text_count, 3);
         }
 
         #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
         {
             assert!(media_count > 40);
-            assert_eq!(text_count, 2);
+            // The two LLM registrations plus the native StarVector image-to-SVG generator.
+            assert_eq!(text_count, 3);
         }
 
         #[cfg(not(any(
