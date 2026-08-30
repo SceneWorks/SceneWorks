@@ -171,13 +171,13 @@ jobs:
           name: ${{ inputs.inference_preflight_artifact }}
           path: ${{ runner.temp }}\starvector-preflight
       - name: Publish exact inference, preflight, and model closure
-        shell: pwsh
+        shell: powershell
         run: |
           node scripts/starvector-terminal-provision.mjs checkout "$env:GITHUB_WORKSPACE\inference-source" "$env:STARVECTOR_TERMINAL_ROOT\inference" $env:STARVECTOR_INFERENCE_REVISION
           node scripts/starvector-terminal-provision.mjs preflight "$env:RUNNER_TEMP\starvector-preflight" "$env:STARVECTOR_TERMINAL_ROOT\inference-preflight" $env:STARVECTOR_INFERENCE_REVISION
           node scripts/starvector-terminal-provision.mjs weights $env:STARVECTOR_TERMINAL_ROOT $env:STARVECTOR_APP_DATA_SOURCE $env:STARVECTOR_HF_HOME_SOURCE $env:STARVECTOR_PROMPT_PROVIDER $env:STARVECTOR_PROMPT_MODEL $env:STARVECTOR_PROMPT_REVISION
       - name: Provision pinned metric runtime and official checkpoints
-        shell: pwsh
+        shell: powershell
         run: |
           if (-not (Test-Path "$env:STARVECTOR_TERMINAL_ROOT\metrics\Scripts\python.exe")) { py -3.11 -m venv "$env:STARVECTOR_TERMINAL_ROOT\metrics" }
           & "$env:STARVECTOR_TERMINAL_ROOT\metrics\Scripts\python.exe" -m pip install --disable-pip-version-check numpy==2.2.6 scikit-image==0.25.2 lpips==0.1.4 torch==2.7.0 torchvision==0.22.0 Pillow==11.3.0 open-clip-torch==3.1.0
@@ -186,7 +186,7 @@ jobs:
           node scripts/starvector-terminal-provision.mjs download https://huggingface.co/laion/CLIP-ViT-B-32-laion2B-s34B-b79K/resolve/1a25a446712ba5ee05982a381eed697ef9b435cf/open_clip_pytorch_model.bin "$env:STARVECTOR_TERMINAL_ROOT\metrics\checkpoints\open_clip_pytorch_model.bin" 1bd3c7172de5b207ceac554f5ab5266166f3b9baccc9af5989bc801016d080ad
           node scripts/starvector-terminal-provision.mjs metrics "$env:GITHUB_WORKSPACE\sceneworks" "$env:STARVECTOR_TERMINAL_ROOT\metrics" "$env:STARVECTOR_TERMINAL_ROOT\metrics\Scripts\python.exe" $env:STARVECTOR_CLIP_REVISION
       - name: Materialize the exact pinned 120-row corpus
-        shell: pwsh
+        shell: powershell
         run: |
           New-Item -ItemType Directory -Force "$env:RUNNER_TEMP\starvector-parquet" | Out-Null
           node scripts/starvector-terminal-provision.mjs download https://huggingface.co/datasets/starvector/svg-stack-simple/resolve/1d2a96a17cc0c4c1f337b7631adc8c5885bc72ea/data/test-00000-of-00001.parquet "$env:RUNNER_TEMP\starvector-parquet\source-0.parquet" ed6b73f3c92277e81b244c6ab3071d0831c4820178aed072182246bab402b004
@@ -199,7 +199,7 @@ jobs:
           }
       - name: Read-only readiness validation
         if: ${{ always() }}
-        shell: pwsh
+        shell: powershell
         run: node scripts/starvector-terminal-readiness.mjs "$env:GITHUB_WORKSPACE\sceneworks" release/starvector-terminal-campaign-v1.json "$env:STARVECTOR_TERMINAL_ROOT\inference" "$env:STARVECTOR_TERMINAL_ROOT\weights" "$env:STARVECTOR_TERMINAL_ROOT\metrics" "$env:STARVECTOR_TERMINAL_ROOT\metrics\Scripts\python.exe" "$env:STARVECTOR_TERMINAL_ROOT\corpora\starvector-terminal-v1" "$env:RUNNER_TEMP\starvector-terminal-provision\windows.json"
       - name: Upload Windows provisioning readiness even on failure
         if: ${{ always() }}

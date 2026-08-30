@@ -41,10 +41,10 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Build the current-tree product service
-        shell: pwsh
+        shell: powershell
         run: cargo build --locked -p sceneworks-rust-api
       - name: Install exact closure through Model Manager
-        shell: pwsh
+        shell: powershell
         run: node scripts/starvector-terminal-source-install.mjs $env:GITHUB_WORKSPACE $env:STARVECTOR_SOURCE_ROOT $env:STARVECTOR_SOURCE_API_URL
       - name: Upload source-closure record even on failure
         if: ${{ always() }}
