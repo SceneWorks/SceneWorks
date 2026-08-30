@@ -1,0 +1,9 @@
+{
+  "schema_version": 1,
+  "inference_contract": {"repository":"SceneWorks/inference","revision":"c6eb6d8e9545193eac844f6fea2db79e4d14bf2a","receipt_schema":"release/starvector-terminal-receipt-v1.schema.json","corpus":"release/starvector-terminal-corpus-v1.json"},
+  "tuples":["mlx:1b","mlx:8b","candle-cuda:1b","candle-cuda:8b"],
+  "counts":{"image_quality":120,"deterministic_parity":20,"hostile_sanitizer":200,"prompt_composition":60},
+  "model_snapshot_revisions":{"starvector-1b":"380ab95d25a8e9ab1dc825debe238b4953ae13b9","starvector-8b":"518beea8dcb5f7a37c5911e92d1d62a76beee7f9"},
+  "metrics_lock":"release/starvector-terminal-metrics-lock-v1.json",
+  "policy":{"dispatch_only":true,"no_job_time_downloads":true,"single_permanent_pin_run":true,"upload_on_failure":true,"fail_closed":true}
+}

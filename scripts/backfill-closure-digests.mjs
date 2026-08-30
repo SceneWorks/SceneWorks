@@ -276,8 +276,9 @@ function enclosingBackend(lines, index, anchor) {
  * invalidation mechanisms — survey sc-17775 §9.4) are stamped here too, since sc-17989 gave them
  * the `provider`/`inferenceRevision` keys the locator pairs on.
  *
- * Returns `stamped` (bindings whose digest was written or rewritten), `skipped` (an
- * `inferenceRevision` this cannot pair with a provider or a backend), `orphans` (an
+ * Returns `stamped` (bindings whose digest was written or rewritten), `skipped` (a would-be
+ * closure binding carrying a provider or digest that cannot be paired with the other binding
+ * fields), `orphans` (an
  * `inferenceClosureDigest` no located binding reached — a digest that has fallen out of the gate,
  * which is what losing an `inferenceRevision` or even just its trailing comma looks like), and
  * `located`.
@@ -319,8 +320,14 @@ export function stampManifest(body, digestFor) {
 
       const revision = match[1];
       const spans = enclosingSpans(lines, index, start, end);
+      const found = findInSpans(lines, spans, DIGEST_KEY);
       const provider = findInSpans(lines, spans, PROVIDER_KEY)?.value ?? null;
       if (!provider) {
+        // `inferenceRevision` is also a legitimate provenance field outside memory-fit closure
+        // bindings (for example StarVector's terminal-candidate identity). With neither a provider
+        // nor an inferenceClosureDigest in the same object, it is outside this stamper's population.
+        // A digest without a provider remains a hard error below and in the orphan scan.
+        if (!found) continue;
         skipped.push(`line ${index + 1}: ${revision.slice(0, 8)} has no provider in its object`);
         continue;
       }
@@ -332,7 +339,6 @@ export function stampManifest(body, digestFor) {
       }
 
       const key = `${backend}:${provider}`;
-      const found = findInSpans(lines, spans, DIGEST_KEY);
       if (found) {
         const seen = `${found.line}:${found.column}`;
         if (claimed.has(seen)) {

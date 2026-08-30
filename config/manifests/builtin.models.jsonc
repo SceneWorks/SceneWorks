@@ -25267,9 +25267,21 @@
         "maxNewTokens": 4000,
         "maxSvgBytes": 262144,
         "maxWallTimeMs": 120000,
+        // Exact immutable safetensor lower bound: 4,995,740,600 + 146,964,720 bytes. This is not a
+        // runtime-peak measurement and deliberately adds no invented activation fudge factor.
+        "deviceAdmission": {
+          "schemaVersion": 1,
+          "basis": "exact_safetensors_bytes",
+          "measured": false,
+          "staticWeightFloorBytes": 5142705320,
+          "deviceClasses": {
+            "mlx": "apple_unified_memory",
+            "candle": "nvidia_dedicated_vram"
+          }
+        },
         "providers": {
-          "mlx": { "id": "mlx-starvector-1b", "available": false, "reason": "pending_terminal_inference_pin" },
-          "candle": { "id": "candle-starvector-1b", "available": false, "reason": "pending_terminal_inference_pin" }
+          "mlx": { "id": "mlx-starvector-1b", "available": true },
+          "candle": { "id": "candle-starvector-1b", "available": true }
         }
       },
       "downloads": [
@@ -25305,13 +25317,280 @@
       "licenseUrl": "https://huggingface.co/starvector/starvector-1b-im2svg/tree/380ab95d25a8e9ab1dc825debe238b4953ae13b9",
       "ui": {
         "label": "StarVector-1B",
-        "description": "Image-to-SVG vectorization from the exact StarVector-1B snapshot. Model Manager can install the immutable files now; native MLX and Candle dispatch remains unavailable until the terminal feature-train inference pin.",
+        "description": "Image-to-SVG vectorization from the exact StarVector-1B snapshot through the native MLX and Candle providers. This checkpoint does not expose direct text-to-SVG.",
         "recommendedFor": ["image_to_svg"],
         "promptGuide": {
           "title": "StarVector-1B Vectorization Guide",
           "path": "/prompt-guides/starvector-1b.md",
           "sources": [
             { "label": "StarVector-1B image-to-SVG model card", "url": "https://huggingface.co/starvector/starvector-1b-im2svg/tree/380ab95d25a8e9ab1dc825debe238b4953ae13b9" }
+          ]
+        }
+      }
+    },
+    {
+      "id": "starvector_8b",
+      "name": "StarVector-8B",
+      "family": "starvector",
+      "type": "vector",
+      "adapter": "starvector",
+      "recommended": false,
+      "autoDownload": false,
+      "capabilities": ["image_to_svg"],
+      "vector": {
+        "acceptsTextGuidance": false,
+        "maxNewTokens": 4000,
+        "maxSvgBytes": 262144,
+        "maxWallTimeMs": 120000,
+        // Exact immutable safetensor lower bound from the four shards consumed by both native
+        // providers: 4,889,586,776 + 4,946,285,040 + 4,999,851,312 + 178,570,912 bytes.
+        "deviceAdmission": {
+          "schemaVersion": 1,
+          "basis": "exact_safetensors_bytes",
+          "measured": false,
+          "staticWeightFloorBytes": 15014294040,
+          "deviceClasses": {
+            "mlx": "apple_unified_memory",
+            "candle": "nvidia_dedicated_vram"
+          },
+          // The final inference-main merge, semantic corpus identity, model snapshot, production
+          // source closure, and measured 128 GiB MLX / MICHAEL-TRX50 CUDA identities are sealed as
+          // one terminal candidate. Admission remains exact-device and fail-closed; the terminal
+          // campaign must re-verify these checked-in facts live in its same-run receipt.
+          "terminalCandidate": {
+            "schemaVersion": 1,
+            "inferenceRevision": "c6eb6d8e9545193eac844f6fea2db79e4d14bf2a",
+            "corpusSha256": "757370c4eed38a52a29ac80c258fdedd7e437ab891637bcb1c916aa608bf32b5",
+            "model": {
+              "repository": "starvector/starvector-8b-im2svg",
+              "revision": "518beea8dcb5f7a37c5911e92d1d62a76beee7f9",
+              "files": [
+                "README.md",
+                "added_tokens.json",
+                "config.json",
+                "merges.txt",
+                "model-00001-of-00004.safetensors",
+                "model-00002-of-00004.safetensors",
+                "model-00003-of-00004.safetensors",
+                "model-00004-of-00004.safetensors",
+                "model.safetensors.index.json",
+                "preprocessor_config.json",
+                "processor_config.json",
+                "special_tokens_map.json",
+                "tokenizer_config.json",
+                "vocab.json"
+              ]
+            },
+            "providers": {
+              "mlx": "mlx-starvector-8b",
+              "candle": "candle-starvector-8b"
+            },
+            "productionClosure": {
+              "schemaVersion": 1,
+              "sha256": "006e321aa15fae04c1faf4d891f5b4e6bf187686a7c99a2bdb8d5089a125cf48",
+              "entries": [
+                {
+                  "path": ".github/workflows/starvector-terminal.yml",
+                  "byteSize": 16029,
+                  "sha256": "e8d74b88a446e30441605b037a426ae2e68b416b1b35b1ca518b976158fa01df"
+                },
+                {
+                  "path": "Cargo.lock",
+                  "byteSize": 248776,
+                  "sha256": "005490160610c5c4eddf915bcba2a52b5bca8ce56fffd3dd2bd8677aa3911221"
+                },
+                {
+                  "path": "Cargo.toml",
+                  "byteSize": 8688,
+                  "sha256": "f5a7d810f30aefd8d75adbeee8e07762fb5bd957bb270b4853d6346cc54a96f8"
+                },
+                {
+                  "path": "crates/sceneworks-worker/Cargo.toml",
+                  "byteSize": 8305,
+                  "sha256": "4406a72282e33b155033872719d9d2deaf9c044bc02422ac558938201333fff3"
+                },
+                {
+                  "path": "crates/sceneworks-worker/src/bin/starvector_terminal_lease.rs",
+                  "byteSize": 2344,
+                  "sha256": "c712f938a66de37447a28fae61d3c8ccbec62dd13c62cadf657d971b080d294e"
+                },
+                {
+                  "path": "crates/sceneworks-worker/src/bin/starvector_terminal_sanitize.rs",
+                  "byteSize": 3940,
+                  "sha256": "fc64b6e3baf8c1c95568df87dffd1e2cb54c97cba8ed8f9f3dfe30fa92103ac6"
+                },
+                {
+                  "path": "crates/sceneworks-worker/src/engines.rs",
+                  "byteSize": 138583,
+                  "sha256": "ee1b9298c4a564f98aef398a9042b603aa4381ac6970ec5645ecd4da41bc43fc"
+                },
+                {
+                  "path": "crates/sceneworks-worker/src/inference_runtime.rs",
+                  "byteSize": 19261,
+                  "sha256": "1716191c6bc7827f96e92fa74538d04507ff2cacf9406439662499bfce23b2d6"
+                },
+                {
+                  "path": "crates/sceneworks-worker/src/lib.rs",
+                  "byteSize": 144421,
+                  "sha256": "ba3b31838cd243086fc02529b11786f9e22cbc3c8225baf3aa5477afa76a2795"
+                },
+                {
+                  "path": "crates/sceneworks-worker/src/model_jobs.rs",
+                  "byteSize": 369790,
+                  "sha256": "0faffe6b396a8f803b9893a46a65423820b931d9f816d7cccb718d9262f20ef4"
+                },
+                {
+                  "path": "crates/sceneworks-worker/src/prompt_refine_jobs.rs",
+                  "byteSize": 182291,
+                  "sha256": "ee803bd120f09a6a5bd6e410e6272e7074fb34dcf5b5a3b89656bbbd3466d971"
+                },
+                {
+                  "path": "crates/sceneworks-worker/src/refine_model_cache.rs",
+                  "byteSize": 20479,
+                  "sha256": "400d40eee9d547a36b3d47cbee012a7fccdbb6d28d82fcbaa1ef6248904f0a83"
+                },
+                {
+                  "path": "crates/sceneworks-worker/src/vector_admission.rs",
+                  "byteSize": 34652,
+                  "sha256": "8cdac81ed1e9ebedf589cb868a84fa04ef5e58edd0656ebd02a5a44cb5c7acb7"
+                },
+                {
+                  "path": "crates/sceneworks-worker/src/vector_jobs.rs",
+                  "byteSize": 89695,
+                  "sha256": "640c2bcc9f6c4cd8e8ee5802737b2eff2cbaac38eba96ef16b8bcfe319e3352c"
+                },
+                {
+                  "path": "package.json",
+                  "byteSize": 6826,
+                  "sha256": "e477763f44ab9665ecf75fd254cd113fbc868e1eb59e016d725c33e4a957777d"
+                },
+                {
+                  "path": "packages/schemas/model-manifest.schema.json",
+                  "byteSize": 130323,
+                  "sha256": "9f83388b15f9a50ce77456ba7139282a7d6df8f197790dbe5215d43b20cbdf3e"
+                },
+                {
+                  "path": "release/starvector-terminal-campaign-v1.json",
+                  "byteSize": 800,
+                  "sha256": "cf2d78b51d5382e1b238f310d79d057f58f6a13cdf4821d52aa2a813aada60fe"
+                },
+                {
+                  "path": "release/starvector-terminal-metrics-lock-v1.json",
+                  "byteSize": 1177,
+                  "sha256": "8ab96cf63a6846aadd351d43cd50c91de747b694cc5b450a29a699a2c843f115"
+                },
+                {
+                  "path": "scripts/starvector-production-closure.mjs",
+                  "byteSize": 8166,
+                  "sha256": "8eb7028bddf02ece7575a5a0710d36a5d6b48be39e973057eb2cb70907549e8e"
+                },
+                {
+                  "path": "scripts/starvector-terminal-assets.mjs",
+                  "byteSize": 2815,
+                  "sha256": "cf3cd2fa243c594e4c630a744af24c0496b6843f6defb8702cdc4c8ca02fc765"
+                },
+                {
+                  "path": "scripts/starvector-terminal-campaign.mjs",
+                  "byteSize": 4289,
+                  "sha256": "768a706dbc133cd91eb0caed0d08f21ea0a0127c3e47ec7bf215a20702574cae"
+                },
+                {
+                  "path": "scripts/starvector-terminal-case-bundle.mjs",
+                  "byteSize": 6654,
+                  "sha256": "c583009dfa691f81a7c73f64b67cb8d041199e9fe0b7ae86f817b9cb42fd8282"
+                },
+                {
+                  "path": "scripts/starvector-terminal-cli.mjs",
+                  "byteSize": 458,
+                  "sha256": "b81966b6a6c9b7ac16c8101dca2635adfff269b57a4e40b908691763c0842674"
+                },
+                {
+                  "path": "scripts/starvector-terminal-metrics.py",
+                  "byteSize": 14785,
+                  "sha256": "55844dfc5f196e861eb20582ffcc7dcbe181ab74156dd388ded0cd76c9e9857f"
+                },
+                {
+                  "path": "scripts/starvector-terminal-producer.mjs",
+                  "byteSize": 31260,
+                  "sha256": "5024708739d3dc63e22ebe9fa00cfa07c128b586808f929e75fd06170d128344"
+                },
+                {
+                  "path": "scripts/starvector-terminal-product-service.mjs",
+                  "byteSize": 11118,
+                  "sha256": "9fa87bc71386d26d25172af936592abef1aa7b3f2d970ecabee718cb7165e112"
+                },
+                {
+                  "path": "scripts/starvector-terminal-route.mjs",
+                  "byteSize": 37610,
+                  "sha256": "1d8d1366325a07fb2e00022251673eaee00600aa9ac6569bb524cc6f725bbe60"
+                }
+              ]
+            },
+            "supportedDevices": {
+              "mlx": [
+                {
+                  "deviceClass": "apple_unified_memory",
+                  "totalBytes": 137438953472
+                }
+              ],
+              "candle": [
+                {
+                  "deviceClass": "nvidia_dedicated_vram",
+                  "deviceName": "NVIDIA RTX PRO 6000 Blackwell Max-Q Workstation Edition",
+                  "totalBytes": 102641958912
+                }
+              ]
+            }
+          }
+        },
+        "providers": {
+          "mlx": { "id": "mlx-starvector-8b", "available": true },
+          "candle": { "id": "candle-starvector-8b", "available": true }
+        }
+      },
+      "downloads": [
+        {
+          "provider": "huggingface",
+          "repo": "starvector/starvector-8b-im2svg",
+          "revision": "518beea8dcb5f7a37c5911e92d1d62a76beee7f9",
+          // Exact native runtime closure from inference's starvector-terminal profile. The snapshot
+          // has no tokenizer.json; native tokenization uses the pinned vocab/merges/config files.
+          // README.md is retained as the immutable Apache/provenance document; remote Python stays
+          // excluded.
+          "files": [
+            "README.md",
+            "added_tokens.json",
+            "config.json",
+            "merges.txt",
+            "model-00001-of-00004.safetensors",
+            "model-00002-of-00004.safetensors",
+            "model-00003-of-00004.safetensors",
+            "model-00004-of-00004.safetensors",
+            "model.safetensors.index.json",
+            "preprocessor_config.json",
+            "processor_config.json",
+            "special_tokens_map.json",
+            "tokenizer_config.json",
+            "vocab.json"
+          ],
+          "platforms": ["macos", "windows", "linux"],
+          "estimatedSizeBytes": 15015835105,
+          "footprint": { "diskSizeBytes": 15015835105 }
+        }
+      ],
+      "paths": {
+        "model": "${HF_CACHE}/starvector/starvector-8b-im2svg"
+      },
+      "licenseUrl": "https://huggingface.co/starvector/starvector-8b-im2svg/tree/518beea8dcb5f7a37c5911e92d1d62a76beee7f9",
+      "ui": {
+        "label": "StarVector-8B",
+        "description": "Install the exact higher-capacity StarVector-8B image-to-SVG snapshot now. Native MLX and Candle dispatch remains disabled until its permanent-pin terminal candidate is accepted; this checkpoint does not expose direct text-to-SVG.",
+        "recommendedFor": ["image_to_svg"],
+        "promptGuide": {
+          "title": "StarVector-8B Vectorization Guide",
+          "path": "/prompt-guides/starvector-8b.md",
+          "sources": [
+            { "label": "StarVector-8B image-to-SVG model card", "url": "https://huggingface.co/starvector/starvector-8b-im2svg/tree/518beea8dcb5f7a37c5911e92d1d62a76beee7f9" }
           ]
         }
       }

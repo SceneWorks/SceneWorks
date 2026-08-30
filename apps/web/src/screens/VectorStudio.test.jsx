@@ -38,7 +38,10 @@ function vectorModel(overrides = {}) {
     capabilities: ["image_to_svg"],
     installState: "installed",
     cacheState: "complete",
-    vector: { providers: { mlx: { id: "mlx-starvector", available: true }, candle: { id: "candle-starvector", available: true } } },
+    vector: {
+      acceptsTextGuidance: false,
+      providers: { mlx: { id: "mlx-starvector", available: true }, candle: { id: "candle-starvector", available: true } },
+    },
     downloads: [{ revision: VECTOR_REVISION }],
     ...overrides,
   };
@@ -96,20 +99,21 @@ describe("Create from Prompt disclosure", () => {
     delete global.IS_REACT_ACT_ENVIRONMENT;
   });
 
-  async function render(models, createVectorPromptWorkflow = vi.fn(async () => ({}))) {
+  async function render(models, createVectorPromptWorkflow = vi.fn(async () => ({})), overrides = {}) {
     await act(async () => {
       root.render(
         <AppContext.Provider value={{
           activeProject: { id: "p1", name: "Vectors" },
-          assets: [],
+          assets: overrides.assets ?? [],
           jobs: [],
           models,
           macCapabilities: { platform: "macos" },
           macCapabilitiesAuthoritative: true,
-          createVectorJob: vi.fn(),
+          createVectorJob: overrides.createVectorJob ?? vi.fn(),
           createVectorPromptWorkflow,
           createModelDownloadJob: vi.fn(),
           setActiveView: vi.fn(),
+          studioLaunch: overrides.studioLaunch,
         }}>
           <VectorStudio />
         </AppContext.Provider>,
@@ -121,6 +125,66 @@ describe("Create from Prompt disclosure", () => {
   it("does not expose the workflow tab until both stages are eligible", async () => {
     await render([vectorModel()]);
     expect(container.textContent).not.toContain("Create from Prompt");
+  });
+
+  it("keeps the installed 8B tier out of conversion until its terminal candidate exists", async () => {
+    await render([
+      vectorModel(),
+      vectorModel({
+        id: "starvector_8b",
+        name: "StarVector-8B",
+        vector: { providers: {
+          mlx: { id: "mlx-starvector-8b", available: false, reason: "pending_terminal_candidate" },
+          candle: { id: "candle-starvector-8b", available: false, reason: "pending_terminal_candidate" },
+        } },
+      }),
+    ]);
+    expect(container.querySelector('[aria-label="Conversion model"]')).toBeNull();
+    expect(container.textContent).not.toContain("Text to SVG");
+  });
+
+  it("discloses the typed 8B terminal-candidate refusal when it is the only installed tier", async () => {
+    await render([
+      vectorModel({
+        id: "starvector_8b",
+        name: "StarVector-8B",
+        vector: { providers: {
+          mlx: { id: "mlx-starvector-8b", available: false, reason: "pending_terminal_candidate" },
+          candle: { id: "candle-starvector-8b", available: false, reason: "pending_terminal_candidate" },
+        } },
+      }),
+    ]);
+    expect(container.textContent).toContain("dispatch stays disabled until its permanent-pin terminal candidate is accepted");
+    expect(container.querySelector('[aria-label="Optional vector guidance"]')).toBeNull();
+  });
+
+  it("never collects or sends text guidance for direct 1B image-only requests", async () => {
+    const createVectorJob = vi.fn(async () => ({}));
+    const source = {
+      id: "source-png",
+      projectId: "p1",
+      type: "image",
+      file: { mimeType: "image/png" },
+      status: {},
+    };
+    await render(
+      [vectorModel()],
+      undefined,
+      {
+        assets: [source],
+        createVectorJob,
+        studioLaunch: { view: "VectorStudio", assetId: source.id },
+      },
+    );
+    expect(container.querySelector('[aria-label="Optional vector guidance"]')).toBeNull();
+
+    const form = container.querySelector("form");
+    await act(async () => form.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true })));
+    expect(createVectorJob).toHaveBeenLastCalledWith(expect.objectContaining({
+      mode: "image_to_svg",
+      model: "starvector_1b",
+      prompt: "",
+    }));
   });
 
   it("fails closed while current-backend capability facts are not authoritative", async () => {

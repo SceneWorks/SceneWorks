@@ -1,0 +1,55 @@
+name: StarVector terminal source closure
+
+on:
+  workflow_dispatch:
+  workflow_call:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: starvector-terminal-source-closure
+  cancel-in-progress: false
+
+jobs:
+  source-macos:
+    runs-on: [self-hosted, macOS, ARM64, rw-starvector]
+    timeout-minutes: 720
+    env:
+      STARVECTOR_SOURCE_ROOT: /Users/Shared/SceneWorks/starvector-terminal-source
+      STARVECTOR_SOURCE_API_URL: http://127.0.0.1:17831
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Build the current-tree product service
+        run: cargo build --locked -p sceneworks-rust-api
+      - name: Install exact closure through Model Manager
+        run: node scripts/starvector-terminal-source-install.mjs "$GITHUB_WORKSPACE" "$STARVECTOR_SOURCE_ROOT" "$STARVECTOR_SOURCE_API_URL"
+      - name: Upload source-closure record even on failure
+        if: ${{ always() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: starvector-terminal-source-macos-${{ github.run_id }}-${{ github.run_attempt }}
+          path: /Users/Shared/SceneWorks/starvector-terminal-source/source-closure.json
+          if-no-files-found: warn
+
+  source-windows:
+    runs-on: [self-hosted, Windows, X64, cuda, real-weights]
+    timeout-minutes: 720
+    env:
+      STARVECTOR_SOURCE_ROOT: D:\sceneworks-terminal-source
+      STARVECTOR_SOURCE_API_URL: http://127.0.0.1:17832
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Build the current-tree product service
+        shell: pwsh
+        run: cargo build --locked -p sceneworks-rust-api
+      - name: Install exact closure through Model Manager
+        shell: pwsh
+        run: node scripts/starvector-terminal-source-install.mjs $env:GITHUB_WORKSPACE $env:STARVECTOR_SOURCE_ROOT $env:STARVECTOR_SOURCE_API_URL
+      - name: Upload source-closure record even on failure
+        if: ${{ always() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: starvector-terminal-source-windows-${{ github.run_id }}-${{ github.run_attempt }}
+          path: D:\sceneworks-terminal-source\source-closure.json
+          if-no-files-found: warn

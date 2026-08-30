@@ -78,13 +78,18 @@ export function VectorStudio() {
   const [negativePrompt, setNegativePrompt] = useState("");
   const [rasterModelId, setRasterModelId] = useState("");
   const [vectorModelId, setVectorModelId] = useState("");
+  const [conversionModelId, setConversionModelId] = useState("");
   const [replayRevisions, setReplayRevisions] = useState(null);
   const sources = useMemo(() => vectorSourceAssets(assets, activeProject?.id), [assets, activeProject?.id]);
   const vectorModels = models.filter((model) => model.type === "vector");
   // Select the declaration before provider availability: an installed StarVector
   // whose provider reports pending_terminal_inference_pin must surface that typed
   // state, rather than being misclassified as an unsupported mode.
-  const conversionModel = vectorModels.find((item) => item.capabilities?.includes("image_to_svg"));
+  const conversionModels = vectorModels.filter((item) => item.capabilities?.includes("image_to_svg"));
+  const readyConversionModels = conversionModels.filter((item) => vectorModelAvailability(item, "image_to_svg", macCapabilities).available);
+  const conversionModel = readyConversionModels.find((item) => item.id === conversionModelId)
+    ?? readyConversionModels[0]
+    ?? conversionModels[0];
   const conversionAvailability = vectorModelAvailability(conversionModel, "image_to_svg", macCapabilities);
   const offers = downloadOffersFor(vectorModels, (item, caps) => vectorModelServesMode(item, "image_to_svg", caps), macCapabilities);
   const rasterWorkflowModels = models.filter((model) => rasterPromptModelAvailability(model, macCapabilities).available);
@@ -97,6 +102,12 @@ export function VectorStudio() {
     if (!rasterModelId && rasterWorkflowModels[0]) setRasterModelId(rasterWorkflowModels[0].id);
     if (!vectorModelId && vectorWorkflowModels[0]) setVectorModelId(vectorWorkflowModels[0].id);
   }, [rasterModelId, rasterWorkflowModels, vectorModelId, vectorWorkflowModels]);
+
+  useEffect(() => {
+    if (conversionModel && conversionModel.id !== conversionModelId && !readyConversionModels.some((model) => model.id === conversionModelId)) {
+      setConversionModelId(conversionModel.id);
+    }
+  }, [conversionModel, conversionModelId, readyConversionModels]);
 
   useEffect(() => {
     if (studioLaunch?.view !== "VectorStudio") return;
@@ -136,11 +147,19 @@ export function VectorStudio() {
       return;
     }
     if (!canConvert) return;
-    await createVectorJob({ mode: "image_to_svg", sourceAssetId, model: conversionModel.id, prompt: prompt.trim() || undefined, detailBudget: VECTOR_DETAIL_PRESETS[detail] });
+    await createVectorJob({
+      mode: "image_to_svg",
+      sourceAssetId,
+      model: conversionModel.id,
+      prompt: conversionModel.vector?.acceptsTextGuidance === true ? prompt.trim() : "",
+      detailBudget: VECTOR_DETAIL_PRESETS[detail],
+    });
   };
   const unavailableCopy = conversionAvailability.reason === "pending_terminal_inference_pin"
     ? "StarVector is installed, but this machine is waiting for the terminal inference pin. Conversion will become available automatically when it is claimable."
-    : "Install StarVector-1B from Model Manager to convert project raster images.";
+    : conversionAvailability.reason === "pending_terminal_candidate"
+      ? "StarVector-8B is installed, but dispatch stays disabled until its permanent-pin terminal candidate is accepted."
+      : "Install a supported StarVector image-to-SVG checkpoint from Model Manager to convert project raster images.";
   const chooseRasterModel = (event) => {
     setRasterModelId(event.target.value);
     setReplayRevisions(null);
@@ -168,10 +187,11 @@ export function VectorStudio() {
           <button disabled={!canCreateFromPrompt} type="submit">Create SVG</button>
         </form>
       ) : (
-        <ModelAvailabilityGate ready={conversionAvailability.available} title="StarVector-1B is unavailable" description={unavailableCopy} offers={offers} onDownload={createModelDownloadJob} onOpenModels={() => setActiveView("Models")}>
+        <ModelAvailabilityGate ready={conversionAvailability.available} title="StarVector is unavailable" description={unavailableCopy} offers={offers} onDownload={createModelDownloadJob} onOpenModels={() => setActiveView("Models")}>
           <form className="work-panel" onSubmit={submit}>
+            {readyConversionModels.length > 1 ? <label>Vector model<select aria-label="Conversion model" onChange={(event) => setConversionModelId(event.target.value)} value={conversionModel.id}>{readyConversionModels.map((model) => <option key={model.id} value={model.id}>{model.name ?? model.id}</option>)}</select></label> : null}
             <AssetPickerField assets={sources} label="Project raster image" onChange={setSourceAssetId} value={sourceAssetId} />
-            <label>Optional guidance<input aria-label="Optional vector guidance" onChange={(event) => setPrompt(event.target.value)} placeholder="Preserve bold silhouettes" value={prompt} /></label>
+            {conversionModel.vector?.acceptsTextGuidance === true ? <label>Optional guidance<input aria-label="Optional vector guidance" onChange={(event) => setPrompt(event.target.value)} placeholder="Preserve bold silhouettes" value={prompt} /></label> : null}
             <label>Detail<select aria-label="Vector detail" onChange={(event) => setDetail(event.target.value)} value={detail}>{Object.entries(VECTOR_DETAIL_PRESETS).map(([key, preset]) => <option key={key} value={key}>{preset.label}</option>)}</select></label>
             <button disabled={!canConvert} type="submit">Convert to SVG</button>
           </form>

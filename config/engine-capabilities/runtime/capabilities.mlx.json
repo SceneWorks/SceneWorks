@@ -1,7 +1,7 @@
 {
   "schemaVersion": 2,
   "generatedFrom": {
-    "inferenceRevision": "3775a5f80a07a38071c7859f6ac565bcab5d1c7b",
+    "inferenceRevision": "669f749b428ed65acfdfee917bcf601b8cf6db1c",
     "dumper": "cargo run -p sceneworks-worker --bin dump-engine-capabilities"
   },
   "modelMappings": {
@@ -364,6 +364,7 @@
     "pose_detect",
     "prompt_refine",
     "training_caption",
+    "vector_image_to_svg",
     "video_bridge",
     "video_extend",
     "video_generate",
@@ -2895,7 +2896,9 @@
     ],
     "text_llm_ids": [
       "mlx-llama",
-      "mlx-joycaption"
+      "mlx-joycaption",
+      "mlx-starvector-1b",
+      "mlx-starvector-8b"
     ],
     "snapshot_preparer_backends": [
       "mlx"

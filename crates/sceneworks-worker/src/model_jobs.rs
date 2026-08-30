@@ -2401,7 +2401,6 @@ pub(crate) type ResolvedArtifactIdentity = sceneworks_core::model_artifacts::Art
 pub(crate) type ResolvedArtifactProvenance = sceneworks_core::model_artifacts::ArtifactProvenance;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-#[cfg(any(target_os = "macos", feature = "backend-candle", test))]
 pub(crate) struct ResolvedWeights {
     pub(crate) path: PathBuf,
     pub(crate) provenance: Option<ResolvedArtifactProvenance>,
@@ -2422,7 +2421,6 @@ struct AppManagedArtifactReceipt {
     tree_stamp: String,
 }
 
-#[cfg(any(target_os = "macos", feature = "backend-candle", test))]
 pub(crate) fn resolved_artifact_fingerprint(
     repository: &str,
     revision: &str,
@@ -3079,6 +3077,67 @@ mod artifact_provenance_tests {
         );
     }
 
+    #[test]
+    fn exact_revision_handoff_rejects_crossed_or_unproven_receipts() {
+        let data = tempfile::tempdir().expect("data dir");
+        let hub = data.path().join("hub");
+        let _env =
+            crate::test_env::EnvVars::set(&[("HF_HUB_CACHE", hub.to_str().expect("hub path"))]);
+        let repo = "starvector/exact";
+        let revision = "0123456789abcdef0123456789abcdef01234567";
+        let snapshot = huggingface_repo_cache_path(data.path(), repo)
+            .expect("cache")
+            .join("snapshots")
+            .join(revision);
+        std::fs::create_dir_all(&snapshot).expect("snapshot");
+        std::fs::write(snapshot.join("model.safetensors"), b"exact weights").expect("weights");
+        write_hf_receipt(
+            data.path(),
+            repo,
+            "starvector-exact",
+            revision,
+            "default",
+            None,
+            &["model.safetensors"],
+        );
+
+        assert_eq!(
+            huggingface_receipt_weights_dir_at_revision(
+                data.path(),
+                repo,
+                revision,
+                Some("starvector-exact"),
+                None,
+            ),
+            Some(snapshot.clone())
+        );
+        assert_eq!(
+            huggingface_receipt_weights_dir_at_revision(
+                data.path(),
+                repo,
+                "different-revision",
+                Some("starvector-exact"),
+                None,
+            ),
+            None,
+            "a receipt for another immutable revision must never cross the native load boundary"
+        );
+
+        std::fs::write(snapshot.join("model.safetensors"), b"mutated weights")
+            .expect("mutate weights");
+        assert_eq!(
+            huggingface_receipt_weights_dir_at_revision(
+                data.path(),
+                repo,
+                revision,
+                Some("starvector-exact"),
+                None,
+            ),
+            None,
+            "an exact path without valid receipt provenance is not loadable"
+        );
+    }
+
     #[cfg(unix)]
     #[test]
     fn hf_tree_stamp_detects_in_place_blob_mutation_beneath_unchanged_snapshot_symlink() {
@@ -3156,7 +3215,34 @@ pub(crate) fn huggingface_receipt_weights_dir(
     )
 }
 
-#[cfg(any(target_os = "macos", feature = "backend-candle", test))]
+/// Resolve a receipt-backed snapshot only when its worker-owned provenance proves the exact
+/// immutable revision the caller requested. This is stricter than
+/// [`huggingface_receipt_weights_dir`], whose legacy compatibility path may return an unproven
+/// receipt: native providers whose architecture contract is revision-pinned must never load that
+/// compatibility fallback or infer identity from a directory name.
+pub(crate) fn huggingface_receipt_weights_dir_at_revision(
+    data_dir: &Path,
+    repo: &str,
+    revision: &str,
+    model_id: Option<&str>,
+    variant: Option<&str>,
+) -> Option<PathBuf> {
+    let resolved =
+        huggingface_receipt_weights(data_dir, repo, model_id, variant, ProvenanceRepair::Skip)?;
+    let identity = &resolved.provenance.as_ref()?.identity;
+    if identity.repository != repo || identity.revision != revision {
+        return None;
+    }
+    let library = sceneworks_core::hf_home::model_source_library(data_dir);
+    Some(
+        sceneworks_core::model_artifacts::local_preference::redirect_source_library_path(
+            library.root(),
+            &resolved.path,
+        )
+        .unwrap_or(resolved.path),
+    )
+}
+
 pub(crate) fn huggingface_receipt_weights(
     data_dir: &Path,
     repo: &str,
@@ -3219,14 +3305,12 @@ pub(crate) fn huggingface_receipt_weights(
 /// A receipt whose stamp is PRESENT but does NOT match is untouched: that is real drift and must
 /// keep failing closed.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[cfg(any(target_os = "macos", feature = "backend-candle", test))]
 pub(crate) enum ProvenanceRepair {
     Allow,
     Skip,
 }
 
 /// Stamp an unstamped receipt in place and return the baseline that was established.
-#[cfg(any(target_os = "macos", feature = "backend-candle", test))]
 fn establish_receipt_tree_stamp(
     marker: &Path,
     receipt: &Value,
@@ -3283,7 +3367,6 @@ fn establish_receipt_tree_stamp(
     Ok(stamp)
 }
 
-#[cfg(any(target_os = "macos", feature = "backend-candle", test))]
 fn receipt_weights_dir_from_marker(
     data_dir: &Path,
     marker: &Path,

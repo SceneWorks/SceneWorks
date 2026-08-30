@@ -73,6 +73,21 @@ describe("modelEligibility predicates", () => {
       reason: "pending_terminal_inference_pin",
       backend: "candle",
     });
+
+    const eightB = {
+      ...model,
+      id: "starvector_8b",
+      vector: { providers: {
+        mlx: { id: "mlx-starvector-8b", available: false, reason: "pending_terminal_candidate" },
+        candle: { id: "candle-starvector-8b", available: false, reason: "pending_terminal_candidate" },
+      } },
+    };
+    expect(vectorModelAvailability(eightB, "image_to_svg", { platform: "win32" })).toMatchObject({
+      available: false,
+      backend: "candle",
+      reason: "pending_terminal_candidate",
+    });
+    expect(vectorModelServesMode(eightB, "text_to_svg", { platform: "win32" })).toBe(false);
   });
 
   it("imageModelUsable matches image models serving a mode, rejects other types", () => {

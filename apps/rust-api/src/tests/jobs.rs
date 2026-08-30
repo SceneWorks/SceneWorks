@@ -751,65 +751,209 @@ async fn vector_route_reports_typed_unavailable_backend_before_enqueue() {
 }
 
 #[test]
-fn builtin_starvector_manifest_is_the_exact_native_image_to_svg_closure() {
-    let model = crate::models::embedded_builtin_catalog_entry(|entry| {
-        entry.get("id").and_then(Value::as_str) == Some("starvector_1b")
-    })
-    .expect("embedded manifest parses")
-    .expect("StarVector entry exists");
-    assert_eq!(model["type"], "vector");
-    assert_eq!(model["capabilities"], json!(["image_to_svg"]));
-    assert_eq!(model["adapter"], "starvector");
-    assert_eq!(
-        model["vector"]["providers"]["mlx"]["id"],
-        "mlx-starvector-1b"
-    );
-    assert_eq!(
-        model["vector"]["providers"]["candle"]["id"],
-        "candle-starvector-1b"
-    );
-    for backend in ["mlx", "candle"] {
-        assert_eq!(model["vector"]["providers"][backend]["available"], false);
+fn builtin_starvector_manifests_are_exact_native_image_to_svg_closures() {
+    let cases = [
+        (
+            "starvector_1b",
+            "1b",
+            "380ab95d25a8e9ab1dc825debe238b4953ae13b9",
+            5_147_481_592u64,
+            5_142_705_320u64,
+            true,
+            None,
+            json!([
+                "README.md",
+                "added_tokens.json",
+                "config.json",
+                "merges.txt",
+                "model-00001-of-00002.safetensors",
+                "model-00002-of-00002.safetensors",
+                "model.safetensors.index.json",
+                "preprocessor_config.json",
+                "processor_config.json",
+                "special_tokens_map.json",
+                "tokenizer.json",
+                "tokenizer_config.json",
+                "vocab.json"
+            ]),
+        ),
+        (
+            "starvector_8b",
+            "8b",
+            "518beea8dcb5f7a37c5911e92d1d62a76beee7f9",
+            15_015_835_105u64,
+            15_014_294_040u64,
+            true,
+            None,
+            json!([
+                "README.md",
+                "added_tokens.json",
+                "config.json",
+                "merges.txt",
+                "model-00001-of-00004.safetensors",
+                "model-00002-of-00004.safetensors",
+                "model-00003-of-00004.safetensors",
+                "model-00004-of-00004.safetensors",
+                "model.safetensors.index.json",
+                "preprocessor_config.json",
+                "processor_config.json",
+                "special_tokens_map.json",
+                "tokenizer_config.json",
+                "vocab.json"
+            ]),
+        ),
+    ];
+
+    for (
+        id,
+        tier,
+        revision,
+        closure_bytes,
+        static_floor_bytes,
+        provider_available,
+        provider_reason,
+        files,
+    ) in cases
+    {
+        let model = crate::models::embedded_builtin_catalog_entry(|entry| {
+            entry.get("id").and_then(Value::as_str) == Some(id)
+        })
+        .expect("embedded manifest parses")
+        .unwrap_or_else(|| panic!("{id} entry exists"));
+        assert_eq!(model["type"], "vector");
+        assert_eq!(model["capabilities"], json!(["image_to_svg"]));
+        assert_eq!(model["adapter"], "starvector");
+        assert_eq!(model["vector"]["acceptsTextGuidance"], false);
+        assert!(model["capabilities"]
+            .as_array()
+            .expect("capabilities")
+            .iter()
+            .all(|capability| capability != "text_to_svg"));
+        for backend in ["mlx", "candle"] {
+            assert_eq!(
+                model["vector"]["providers"][backend]["id"],
+                format!("{backend}-starvector-{tier}")
+            );
+            assert_eq!(
+                model["vector"]["providers"][backend]["available"],
+                provider_available
+            );
+            assert_eq!(
+                model["vector"]["providers"][backend]
+                    .get("reason")
+                    .and_then(Value::as_str),
+                provider_reason
+            );
+        }
+        assert_eq!(model["vector"]["deviceAdmission"]["schemaVersion"], 1);
         assert_eq!(
-            model["vector"]["providers"][backend]["reason"],
-            "pending_terminal_inference_pin"
+            model["vector"]["deviceAdmission"]["basis"],
+            "exact_safetensors_bytes"
+        );
+        assert_eq!(model["vector"]["deviceAdmission"]["measured"], false);
+        assert_eq!(
+            model["vector"]["deviceAdmission"]["staticWeightFloorBytes"],
+            static_floor_bytes
+        );
+        if id == "starvector_8b" {
+            let candidate = &model["vector"]["deviceAdmission"]["terminalCandidate"];
+            assert_eq!(
+                candidate["inferenceRevision"],
+                "c6eb6d8e9545193eac844f6fea2db79e4d14bf2a"
+            );
+            assert_eq!(
+                candidate["corpusSha256"],
+                "757370c4eed38a52a29ac80c258fdedd7e437ab891637bcb1c916aa608bf32b5"
+            );
+            assert_eq!(
+                candidate["productionClosure"]["sha256"],
+                "006e321aa15fae04c1faf4d891f5b4e6bf187686a7c99a2bdb8d5089a125cf48"
+            );
+            assert_eq!(
+                candidate["productionClosure"]["entries"]
+                    .as_array()
+                    .expect("production closure entries")
+                    .len(),
+                27
+            );
+            assert_eq!(
+                candidate["supportedDevices"]["mlx"],
+                json!([{
+                    "deviceClass": "apple_unified_memory",
+                    "totalBytes": 137_438_953_472u64
+                }])
+            );
+            assert_eq!(
+                candidate["supportedDevices"]["candle"],
+                json!([{
+                    "deviceClass": "nvidia_dedicated_vram",
+                    "deviceName": "NVIDIA RTX PRO 6000 Blackwell Max-Q Workstation Edition",
+                    "totalBytes": 102_641_958_912u64
+                }])
+            );
+        }
+
+        let download = &model["downloads"][0];
+        assert_eq!(
+            download["repo"],
+            format!("starvector/starvector-{tier}-im2svg")
+        );
+        assert_eq!(download["revision"], revision);
+        assert_eq!(download["estimatedSizeBytes"], closure_bytes);
+        assert_eq!(download["footprint"]["diskSizeBytes"], closure_bytes);
+        assert_eq!(download["files"], files);
+        assert!(download["files"]
+            .as_array()
+            .expect("files")
+            .iter()
+            .all(|file| !file.as_str().unwrap_or_default().ends_with(".py")));
+        assert_eq!(
+            model["licenseUrl"],
+            format!("https://huggingface.co/starvector/starvector-{tier}-im2svg/tree/{revision}")
+        );
+        assert!(download["files"]
+            .as_array()
+            .expect("files")
+            .contains(&json!("README.md")));
+        assert_eq!(
+            model["ui"]["promptGuide"]["path"],
+            format!("/prompt-guides/starvector-{tier}.md")
         );
     }
-    let download = &model["downloads"][0];
-    assert_eq!(download["repo"], "starvector/starvector-1b-im2svg");
-    assert_eq!(
-        download["revision"],
-        "380ab95d25a8e9ab1dc825debe238b4953ae13b9"
-    );
-    assert_eq!(download["estimatedSizeBytes"], 5_147_481_592u64);
-    assert_eq!(download["footprint"]["diskSizeBytes"], 5_147_481_592u64);
-    assert_eq!(
-        download["files"],
-        json!([
-            "README.md",
-            "added_tokens.json",
-            "config.json",
-            "merges.txt",
-            "model-00001-of-00002.safetensors",
-            "model-00002-of-00002.safetensors",
-            "model.safetensors.index.json",
-            "preprocessor_config.json",
-            "processor_config.json",
-            "special_tokens_map.json",
-            "tokenizer.json",
-            "tokenizer_config.json",
-            "vocab.json"
-        ])
-    );
-    assert!(download["files"]
+}
+
+#[test]
+fn builtin_starvector_license_provenance_covers_both_immutable_model_cards() {
+    let licenses: Value =
+        serde_json::from_str(include_str!("../../../desktop/licenses/manifest.json"))
+            .expect("desktop license manifest parses");
+    let component = licenses["components"]
         .as_array()
-        .expect("files")
+        .expect("license components")
         .iter()
-        .all(|file| !file.as_str().unwrap_or_default().ends_with(".py")));
+        .find(|component| component["id"] == "starvector-1b")
+        .expect("StarVector license component");
     assert_eq!(
-        model["licenseUrl"],
-        "https://huggingface.co/starvector/starvector-1b-im2svg/tree/380ab95d25a8e9ab1dc825debe238b4953ae13b9"
+        component["models"],
+        json!(["starvector_1b", "starvector_8b"])
     );
+    assert_eq!(component["license"], "Apache-2.0");
+    let usage = component["usage"].as_str().expect("usage");
+    for revision in [
+        "380ab95d25a8e9ab1dc825debe238b4953ae13b9",
+        "518beea8dcb5f7a37c5911e92d1d62a76beee7f9",
+    ] {
+        assert!(usage.contains(revision));
+    }
+    assert!(usage.contains("model card"));
+    assert!(usage.contains("never executes"));
+    assert!(usage.contains("no separate NOTICE"));
+
+    let provenance = include_str!("../../../desktop/licenses/starvector-1b/README.md");
+    assert!(provenance.contains("starvector/starvector-1b-im2svg@380ab95"));
+    assert!(provenance.contains("starvector/starvector-8b-im2svg@518beea"));
+    assert!(provenance.contains("model card"));
+    assert!(provenance.contains("excludes both repositories' Python modules"));
 }
 
 #[tokio::test]
