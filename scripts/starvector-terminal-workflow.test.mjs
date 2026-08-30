@@ -49,11 +49,14 @@ test("terminal workflow has no install or model download step", () => {
 test("readiness workflow is an identity-only dispatch on both campaign hosts", () => {
   assert.match(readiness, /^\s+workflow_dispatch:/m);
   assert.doesNotMatch(readiness, /^\s+(push|pull_request|schedule):/m);
-  assert.match(readiness, /runs-on: \[self-hosted, macOS, ARM64, real-weights\]/);
+  assert.match(readiness, /runs-on: \[self-hosted, macOS, ARM64, rw-starvector\]/);
+  assert.equal((workflow.match(/runs-on: \[self-hosted, macOS, ARM64, rw-starvector\]/g) ?? []).length, 3);
   assert.match(readiness, /runs-on: \[self-hosted, Windows, X64, cuda, real-weights\]/);
   assert.equal((readiness.match(/starvector-terminal-readiness\.mjs/g) ?? []).length, 2);
   assert.equal((readiness.match(/if: \$\{\{ always\(\) \}\}/g) ?? []).length, 2);
-  assert.match(readiness, /STARVECTOR_TERMINAL_INFERENCE_ROOT: \/opt\/sceneworks-terminal\/inference/);
+  assert.match(readiness, /STARVECTOR_TERMINAL_INFERENCE_ROOT: \/Users\/Shared\/SceneWorks\/starvector-terminal\/inference/);
+  assert.match(workflow, /STARVECTOR_TERMINAL_INFERENCE_ROOT: \/Users\/Shared\/SceneWorks\/starvector-terminal\/inference/);
+  assert.doesNotMatch(`${workflow}\n${readiness}`, /\/opt\/sceneworks-terminal/);
   assert.match(readiness, /STARVECTOR_TERMINAL_INFERENCE_PREFLIGHT: D:\\\\sceneworks-terminal\\\\inference-preflight\\\\starvector-terminal-preflight\.json/);
   assert.doesNotMatch(readiness, /campaign_run_id|permanent_pin|concurrency:/);
 });
@@ -93,9 +96,9 @@ test("readiness binds all 120 source assets and every suite identity to the pinn
   const sources = Array.from({ length: 4 }, (_, index) => ({ dataset: `dataset-${index}`, revision: String(index + 1).repeat(40), row_identity_sha256: "" }));
   const rows = Array.from({ length: 120 }, (_, case_index) => ({ case_index, dataset: sources[Math.floor(case_index / 30)].dataset, revision: sources[Math.floor(case_index / 30)].revision, row_index: case_index % 30, filename: `${case_index}.svg`, svg_path: "source.svg", svg_sha256: hash("svg"), input_png_path: "input.png", png_sha256: hash("input"), reference_png: "reference.png", reference_png_sha256: hash("reference") }));
   const record = (row) => JSON.stringify({ dataset: row.dataset, revision: row.revision, row_index: row.row_index, filename: row.filename, svg_sha256: row.svg_sha256 });
-  sources.forEach((source, index) => { source.row_identity_sha256 = hash(rows.slice(index * 30, index * 30 + 30).map(record).join("\n")); });
-  const rowIdentity = hash(rows.map(record).join("\n"));
-  const parityIdentity = hash(sources.flatMap((_, index) => rows.slice(index * 30, index * 30 + 5)).map(record).join("\n"));
+  sources.forEach((source, index) => { source.row_identity_sha256 = hash(`${rows.slice(index * 30, index * 30 + 30).map(record).join("\n")}\n`); });
+  const rowIdentity = hash(`${rows.map(record).join("\n")}\n`);
+  const parityIdentity = hash(`${sources.flatMap((_, index) => rows.slice(index * 30, index * 30 + 5)).map(record).join("\n")}\n`);
   const prompts = Array.from({ length: 60 }, (_, case_index) => { const prompt = `prompt-${case_index}`; return { case_index, case_id: `prompt-v1-${case_index}`, prompt, prompt_sha256: hash(prompt), raster_model: "raster", vector_model: "starvector_8b", expected_raster_revision: "raster-revision", expected_vector_revision: "vector-revision" }; });
   const corpus = { upstream_image_quality_cases: { row_identity_sha256: rowIdentity, sources }, deterministic_parity_cases: { row_identity_sha256: parityIdentity }, sceneworks_owned_suites: { prompt_composition: { content_identity_sha256: hash(prompts.map((entry) => entry.prompt_sha256).join("\n")) } } };
   await writeFile(path.join(inference, "release", "corpus.json"), JSON.stringify(corpus));
