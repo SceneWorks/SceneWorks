@@ -46,7 +46,9 @@ permissions:
   actions: read
 
 env:
-  STARVECTOR_PROMPT_PROVIDER: flux_diffusers
+  # The prompt suite runs only in the Candle/CUDA tuple. Seal the provider
+  # label written by that product route, not the catalog's asset adapter.
+  STARVECTOR_PROMPT_PROVIDER: candle_flux
   STARVECTOR_PROMPT_MODEL: flux_schnell
   STARVECTOR_PROMPT_REVISION: bba3ae01dfd94089f173c05edd4e1a4c551f2599
   STARVECTOR_CLIP_REVISION: 1a25a446712ba5ee05982a381eed697ef9b435cf

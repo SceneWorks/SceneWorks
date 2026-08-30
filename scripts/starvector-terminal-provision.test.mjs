@@ -27,6 +27,8 @@ test("provision workflow is dispatch-only and never runs a model, service, campa
   assert.doesNotMatch(workflow, /starvector-terminal-product-service|starvector-terminal-producer\.mjs\s+(?:run|seal)|starvector_terminal_lease|campaign_run_id|vector_generate/i);
   assert.equal((workflow.match(/starvector-terminal-readiness\.mjs/g) ?? []).length, 2);
   assert.equal((workflow.match(/Upload .* provisioning readiness even on failure/g) ?? []).length, 2);
+  assert.match(workflow, /STARVECTOR_PROMPT_PROVIDER: candle_flux/);
+  assert.doesNotMatch(workflow, /STARVECTOR_PROMPT_PROVIDER: flux_diffusers/);
 });
 
 test("preflight assembly requires and copies exactly two inventories plus four hooks", async () => {
