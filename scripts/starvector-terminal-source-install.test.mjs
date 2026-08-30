@@ -44,6 +44,17 @@ test("source workflow is preparation-only on both real-weight hosts", async () =
   assert.doesNotMatch(workflow, /starvector-terminal-(?:producer|campaign|route)\.mjs|vector_generate|campaign_run_id/i);
 });
 
+test("Windows terminal workflows use the in-box PowerShell host", async () => {
+  const workflows = await Promise.all([
+    "source",
+    "provision",
+    "readiness",
+    "",
+  ].map((suffix) => readFile(new URL(`../.github/workflows/starvector-terminal${suffix ? `-${suffix}` : ""}.yml`, import.meta.url), "utf8")));
+  for (const workflow of workflows) assert.doesNotMatch(workflow, /shell: pwsh/);
+  assert.equal(workflows.reduce((count, workflow) => count + (workflow.match(/shell: powershell/g) ?? []).length, 0), 11);
+});
+
 test("existing default-branch workflow bridges every pre-merge terminal operation", async () => {
   const bridge = await readFile(new URL("../.github/workflows/server-candle-linux.yml", import.meta.url), "utf8");
   for (const operation of ["source", "provision", "readiness", "campaign"]) {

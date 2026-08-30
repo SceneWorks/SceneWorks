@@ -128,7 +128,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Run production vector_generate route for CUDA 1B
-        shell: pwsh
+        shell: powershell
         run: |
           cargo build --release --locked -p sceneworks-worker --bin starvector_terminal_lease --bin starvector_terminal_sanitize
           $env:STARVECTOR_TERMINAL_CASE_BUNDLE = "$env:RUNNER_TEMP\\starvector-terminal\\cuda-1b\\case-bundle.json"
@@ -145,7 +145,7 @@ jobs:
           if-no-files-found: warn
       - name: Stop CUDA 1B source-built service
         if: ${{ always() }}
-        shell: pwsh
+        shell: powershell
         run: node scripts/starvector-terminal-product-service.mjs stop "$env:RUNNER_TEMP\starvector-terminal\cuda-1b"
 
   cuda-8b:
@@ -168,7 +168,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Run production vector_generate route and shared hostile/prompt suites for CUDA 8B
-        shell: pwsh
+        shell: powershell
         run: |
           cargo build --release --locked -p sceneworks-worker --bin starvector_terminal_lease --bin starvector_terminal_sanitize
           $env:STARVECTOR_TERMINAL_CASE_BUNDLE = "$env:RUNNER_TEMP\\starvector-terminal\\cuda-8b\\case-bundle.json"
@@ -185,7 +185,7 @@ jobs:
           if-no-files-found: warn
       - name: Stop CUDA 8B source-built service
         if: ${{ always() }}
-        shell: pwsh
+        shell: powershell
         run: node scripts/starvector-terminal-product-service.mjs stop "$env:RUNNER_TEMP\starvector-terminal\cuda-8b"
 
   seal-receipt:

@@ -25387,12 +25387,12 @@
             },
             "productionClosure": {
               "schemaVersion": 1,
-              "sha256": "006e321aa15fae04c1faf4d891f5b4e6bf187686a7c99a2bdb8d5089a125cf48",
+              "sha256": "6a8197ed2285342175833e9c20c4296ce47a3324ada6db5702b35bad6cdcd08a",
               "entries": [
                 {
                   "path": ".github/workflows/starvector-terminal.yml",
-                  "byteSize": 16029,
-                  "sha256": "e8d74b88a446e30441605b037a426ae2e68b416b1b35b1ca518b976158fa01df"
+                  "byteSize": 16053,
+                  "sha256": "36a59f5032557b9a60baabb38c85f6aa9d9d3a623001e6cd881f95419b4a4547"
                 },
                 {
                   "path": "Cargo.lock",
