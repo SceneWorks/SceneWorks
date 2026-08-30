@@ -43,6 +43,13 @@ kernel-maintained current and lifetime-peak physical footprints through
 `footprint -p`. MLX values are
 inputs because the producer owns the MLX session and must sample active,
 cached, and peak allocator counters at the defined phase boundaries. The
+typed event stream uses high-water snapshots, not additive phase totals:
+immutable dense concat reports only the old-plus-incoming transient overhead
+above its retained merged successor, sequential token/layer events reconcile
+by their maximum, and the persistent successor is counted once. A
+`product-cache_release` event with lifetime `released` records exact released
+K+V ownership. It is required lifecycle evidence and is excluded from both
+workspace attribution and full-cache-temporary detection.
 comparison refuses mismatched source/model/toolchain/hardware/power/thermal
 identity, matrix, contract, or geometry and reports KV reduction,
 decode-steady/lifetime-peak process-footprint deltas, and throughput ratio.

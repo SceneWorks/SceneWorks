@@ -144,6 +144,18 @@ function positiveInteger(value, name) {
   return value;
 }
 
+function checkedSum(values, name) {
+  const total = values.reduce((sum, value) => sum + BigInt(value), 0n);
+  if (total > BigInt(Number.MAX_SAFE_INTEGER)) fail(`${name} overflows safe integer accounting`);
+  return Number(total);
+}
+
+function checkedProduct(values, name) {
+  const total = values.reduce((product, value) => product * BigInt(value), 1n);
+  if (total > BigInt(Number.MAX_SAFE_INTEGER)) fail(`${name} overflows safe integer accounting`);
+  return Number(total);
+}
+
 function positiveNumber(value, name) {
   if (finite(value, name) <= 0) fail(`${name} must be positive`);
   return value;
@@ -296,8 +308,12 @@ function validateAllocationEvent(event, index) {
   if (!["cache", "attention-workspace", "weights", "output"].includes(event.role)) {
     fail(`${name}.role is unsupported`);
   }
-  if (!["persistent", "transient"].includes(event.lifetime)) {
+  if (!["persistent", "transient", "released"].includes(event.lifetime)) {
     fail(`${name}.lifetime is unsupported`);
+  }
+  if (event.lifetime === "released"
+    && (event.role !== "cache" || event.kind !== "product-cache_release")) {
+    fail(`${name} is not a cache release lifecycle event`);
   }
   if (!PHASES.includes(event.phase)) fail(`${name}.phase is unsupported`);
   isoTimestamp(event.timestamp, `${name}.timestamp`);
@@ -307,9 +323,8 @@ function validateAllocationEvent(event, index) {
 export function detectFullCacheTemporary(events, denseBytes) {
   if (!Array.isArray(events) || events.length === 0) fail("typed allocation events are required");
   positiveInteger(denseBytes, "denseTheoreticalKvBytes");
-  const thresholdBytes = Math.max(1, Math.floor(denseBytes * 0.9));
+  const thresholdBytes = Number((BigInt(denseBytes) * 9n + 9n) / 10n);
   const witnesses = [];
-  const transientCacheBytesByPhase = new Map();
   events.forEach((event, index) => {
     validateAllocationEvent(event, index);
     const relevantRole = event.role === "cache" || event.role === "attention-workspace" || event.role === "output";
@@ -319,35 +334,41 @@ export function detectFullCacheTemporary(events, denseBytes) {
       witnesses.push(event);
     }
     if (event.lifetime === "transient" && relevantRole) {
-      transientCacheBytesByPhase.set(
-        event.phase,
-        (transientCacheBytesByPhase.get(event.phase) ?? 0) + event.bytes,
-      );
+      if (event.bytes >= thresholdBytes) witnesses.push(event);
     }
   });
-  for (const [phase, bytes] of transientCacheBytesByPhase) {
-    if (bytes >= thresholdBytes) witnesses.push({ phase, bytes, aggregate: true });
-  }
   return { detected: witnesses.length > 0, thresholdBytes, witnesses };
 }
 
-function maxRoleBytesByPhase(events, role, lifetime) {
-  const totals = new Map();
-  for (const event of events) {
-    if (event.role !== role || event.lifetime !== lifetime) continue;
-    totals.set(event.phase, (totals.get(event.phase) ?? 0) + event.bytes);
-  }
-  return Math.max(0, ...totals.values());
+function maxRoleBytes(events, role, lifetime) {
+  return Math.max(0, ...events
+    .filter((event) => event.role === role && event.lifetime === lifetime)
+    .map((event) => event.bytes));
 }
 
-function maxClassifiedTransientBytesByPhase(events) {
-  const totals = new Map();
+function maxClassifiedTransientBytes(events) {
+  return Math.max(0, ...events
+    .filter((event) => event.lifetime === "transient"
+      && ["cache", "attention-workspace", "output"].includes(event.role))
+    .map((event) => event.bytes));
+}
+
+function validateCacheRelease(events) {
+  let liveCache;
+  let releases = 0;
   for (const event of events) {
-    if (event.lifetime !== "transient"
-      || !["cache", "attention-workspace", "output"].includes(event.role)) continue;
-    totals.set(event.phase, (totals.get(event.phase) ?? 0) + event.bytes);
+    if (event.role === "cache" && event.lifetime === "persistent") {
+      liveCache = event.bytes;
+    } else if (event.lifetime === "released") {
+      if (liveCache !== event.bytes) fail("cache release bytes do not match retained KV ownership");
+      liveCache = undefined;
+      releases += 1;
+      if (!Number.isSafeInteger(releases)) fail("cache release event count overflow");
+    }
   }
-  return Math.max(0, ...totals.values());
+  if (releases === 0 || liveCache !== undefined) {
+    fail("persistent KV ownership was not explicitly released");
+  }
 }
 
 function validatePhaseSample(sample, index, expectedPid) {
@@ -575,28 +596,36 @@ export function validateReceipt(receipt, { verifyHash = true } = {}) {
   if (!Array.isArray(receipt.memory.allocationEvents) || receipt.memory.allocationEvents.length === 0) {
     fail("memory allocation events are required");
   }
+  receipt.memory.allocationEvents.forEach(validateAllocationEvent);
+  validateCacheRelease(receipt.memory.allocationEvents);
   if (receipt.mode === "compressed" && detectFullCacheTemporary(
     receipt.memory.allocationEvents,
     receipt.memory.denseTheoreticalKvBytes,
   ).detected) fail("full-cache temporary detected");
-  if (maxRoleBytesByPhase(receipt.memory.allocationEvents, "cache", "persistent")
+  if (maxRoleBytes(receipt.memory.allocationEvents, "cache", "persistent")
       !== receipt.memory.persistentKvBytes
-    || maxRoleBytesByPhase(receipt.memory.allocationEvents, "weights", "persistent")
+    || maxRoleBytes(receipt.memory.allocationEvents, "weights", "persistent")
       !== receipt.memory.modelWeightsBytes
-    || maxClassifiedTransientBytesByPhase(receipt.memory.allocationEvents)
+    || maxClassifiedTransientBytes(receipt.memory.allocationEvents)
       !== receipt.memory.transientWorkspaceBytes) {
     fail("typed allocation events do not reconcile with memory attribution totals");
   }
   const weightsLoaded = receipt.memory.phaseSamples[1];
   const prefillPeak = receipt.memory.phaseSamples[2];
   const decodeSteady = receipt.memory.phaseSamples[4];
+  const prefillAttributedBytes = checkedSum([
+    receipt.memory.modelWeightsBytes,
+    receipt.memory.persistentKvBytes,
+    receipt.memory.transientWorkspaceBytes,
+  ], "prefill attributed memory");
+  const decodeAttributedBytes = checkedSum([
+    receipt.memory.modelWeightsBytes,
+    receipt.memory.persistentKvBytes,
+  ], "decode attributed memory");
   if (weightsLoaded.mlx.activeBytes < receipt.memory.modelWeightsBytes
-    || prefillPeak.mlx.activeBytes < receipt.memory.modelWeightsBytes
-      + receipt.memory.persistentKvBytes + receipt.memory.transientWorkspaceBytes
-    || prefillPeak.mlx.peakBytes < receipt.memory.modelWeightsBytes
-      + receipt.memory.persistentKvBytes + receipt.memory.transientWorkspaceBytes
-    || decodeSteady.mlx.activeBytes < receipt.memory.modelWeightsBytes
-      + receipt.memory.persistentKvBytes) {
+    || prefillPeak.mlx.activeBytes < prefillAttributedBytes
+    || prefillPeak.mlx.peakBytes < prefillAttributedBytes
+    || decodeSteady.mlx.activeBytes < decodeAttributedBytes) {
     fail("MLX live/peak memory does not contain the attributed weights, KV, and workspace bytes");
   }
 
@@ -608,9 +637,15 @@ export function validateReceipt(receipt, { verifyHash = true } = {}) {
   for (const field of ["expectedDenseKvBytes", "observedPersistentKvBytes", "toleranceBytes"]) {
     nonnegativeInteger(receipt.memory.reconciliation[field], `memory.reconciliation.${field}`);
   }
-  const expectedDenseKvBytes = receipt.geometry.batch * receipt.geometry.layers
-    * receipt.geometry.kvHeads * receipt.geometry.capacity * receipt.geometry.headDimension
-    * receipt.geometry.elementBytes * 2;
+  const expectedDenseKvBytes = checkedProduct([
+    receipt.geometry.batch,
+    receipt.geometry.layers,
+    receipt.geometry.kvHeads,
+    receipt.geometry.capacity,
+    receipt.geometry.headDimension,
+    receipt.geometry.elementBytes,
+    2,
+  ], "dense KV byte attribution");
   if (receipt.memory.denseTheoreticalKvBytes !== expectedDenseKvBytes
     || receipt.memory.reconciliation.expectedDenseKvBytes !== expectedDenseKvBytes
     || receipt.memory.reconciliation.observedPersistentKvBytes !== receipt.memory.persistentKvBytes) {
@@ -969,6 +1004,7 @@ export function renderReceiptMarkdown(receipt) {
   const fallbackLifecycle = LIFECYCLE
     .filter((field) => !receipt.lifecycle[field])
     .map((field) => `${field}: ${receipt.lifecycle[`${field}FallbackReason`]}`);
+  const releasedCacheBytes = maxRoleBytes(receipt.memory.allocationEvents, "cache", "released");
   return `# ${receipt.mode === "dense" ? "Dense" : "Compressed"} KV receipt\n\n`
     + `- Run: ${receipt.runId}\n`
     + `- Mode: ${receipt.mode}\n`
@@ -978,6 +1014,7 @@ export function renderReceiptMarkdown(receipt) {
     + `- Inference: ${receipt.provenance.inferenceRevision}\n`
     + `- Matrix: ${Object.values(receipt.matrix).join(" / ")}\n`
     + `- Persistent KV bytes: ${receipt.memory.persistentKvBytes}\n`
+    + `- Released cache ownership bytes: ${releasedCacheBytes}\n`
     + `- Theoretical dense KV bytes: ${receipt.memory.denseTheoreticalKvBytes}\n`
     + `- Process footprint peak bytes: ${peak}\n`
     + `- Decode throughput: ${receipt.timings.decodeTokensPerSecond} tok/s\n`
