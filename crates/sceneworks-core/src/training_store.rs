@@ -1132,7 +1132,7 @@ fn validate_prepared_tensor_header(name: &str, value: &Value) -> ProjectStoreRes
     if shape.is_empty()
         || shape
             .iter()
-            .any(|axis| axis.as_u64().map_or(true, |axis| axis == 0))
+            .any(|axis| axis.as_u64().is_none_or(|axis| axis == 0))
     {
         return Err(invalid_prepared_bundle(&format!(
             "tensor {name} shape must contain positive integer axes"
@@ -1205,7 +1205,7 @@ fn require_prepared_float_tensor(
 fn python_round(value: f64) -> u64 {
     let floor = value.floor();
     let fraction = value - floor;
-    if fraction < 0.5 || (fraction == 0.5 && floor as u64 % 2 == 0) {
+    if fraction < 0.5 || (fraction == 0.5 && (floor as u64).is_multiple_of(2)) {
         floor.max(0.0) as u64
     } else {
         floor.max(0.0) as u64 + 1
@@ -2904,7 +2904,7 @@ mod tests {
             }
         }))
         .unwrap();
-        while header.len() % 8 != 0 {
+        while !header.len().is_multiple_of(8) {
             header.push(b' ');
         }
         let mut bytes = Vec::with_capacity(8 + header.len() + 1024);

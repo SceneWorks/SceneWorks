@@ -1,7 +1,7 @@
 {
   "schemaVersion": 2,
   "generatedFrom": {
-    "inferenceRevision": "43c6cc8333511ffa33aea6ff2e917411ba7c724a",
+    "inferenceRevision": "d27c9fcd6b6bb52dc7db6e674216cf57d7e0ed4e",
     "dumper": "cargo run -p sceneworks-worker --bin dump-engine-capabilities"
   },
   "modelMappings": {
@@ -2938,7 +2938,9 @@
     ],
     "text_llm_ids": [
       "mlx-llama",
-      "mlx-joycaption"
+      "mlx-joycaption",
+      "mlx-starvector-1b",
+      "mlx-starvector-8b"
     ],
     "snapshot_preparer_backends": [
       "mlx"
