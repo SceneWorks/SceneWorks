@@ -1313,18 +1313,19 @@
     {
       "id": "starvector-1b",
       "models": [
-        "starvector_1b"
+        "starvector_1b",
+        "starvector_8b"
       ],
-      "name": "StarVector-1B image-to-SVG model",
+      "name": "StarVector image-to-SVG models (1B and 8B)",
       "publisher": "StarVector authors",
       "license": "Apache-2.0",
-      "homepage": "https://huggingface.co/starvector/starvector-1b-im2svg/tree/380ab95d25a8e9ab1dc825debe238b4953ae13b9",
+      "homepage": "https://huggingface.co/starvector",
       "platforms": [
         "macos",
         "windows",
         "linux"
       ],
-      "usage": "Image-to-SVG vectorization from the immutable 380ab95d25a8e9ab1dc825debe238b4953ae13b9 snapshot. SceneWorks downloads only the declared model, tokenizer, configuration, processor metadata, and model-card files; it excludes and never executes the repository's remote Python modules. The model card declares Apache-2.0 and the repository ships no separate NOTICE file at this revision.",
+      "usage": "Image-to-SVG vectorization from the immutable StarVector-1B 380ab95d25a8e9ab1dc825debe238b4953ae13b9 and StarVector-8B 518beea8dcb5f7a37c5911e92d1d62a76beee7f9 snapshots. SceneWorks downloads each immutable model card plus the exact native model, tokenizer, configuration and processor closures declared by the paired inference contract; it excludes and never executes either repository's remote Python module. Both model cards declare Apache-2.0 and neither repository ships a separate NOTICE file at these revisions.",
       "documents": [
         {
           "label": "Apache License 2.0",

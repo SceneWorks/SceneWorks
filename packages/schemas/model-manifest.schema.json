@@ -739,6 +739,35 @@
               "maxNewTokens": { "type": "integer", "minimum": 1 },
               "maxSvgBytes": { "type": "integer", "minimum": 1 },
               "maxWallTimeMs": { "type": "integer", "minimum": 1 },
+              "deviceAdmission": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["schemaVersion", "basis", "measured", "staticWeightFloorBytes", "deviceClasses"],
+                "properties": {
+                  "schemaVersion": { "const": 1 },
+                  "basis": { "const": "exact_safetensors_bytes" },
+                  "measured": {
+                    "const": false,
+                    "description": "The static safetensors lower bound is source-derived, not a measured runtime peak. Terminal measurement evidence must use its own calibrated contract rather than relabel this floor."
+                  },
+                  "staticWeightFloorBytes": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "x-sceneworks-contract": "binding",
+                    "x-sceneworks-readers": [{ "path": "crates/sceneworks-worker/src/vector_admission.rs", "anchor": "staticWeightFloorBytes" }],
+                    "description": "Exact byte sum of the safetensor shards loaded by the immutable native StarVector snapshot. This is an honest impossible-load floor only; it does not estimate activations or allocator overhead."
+                  },
+                  "deviceClasses": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["mlx", "candle"],
+                    "properties": {
+                      "mlx": { "const": "apple_unified_memory" },
+                      "candle": { "const": "nvidia_dedicated_vram" }
+                    }
+                  }
+                }
+              },
               "providers": {
                 "type": "object",
                 "additionalProperties": false,

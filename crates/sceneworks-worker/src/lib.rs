@@ -174,6 +174,11 @@ use gpu::*;
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 mod candle_memory_strategy;
 mod fit_gate;
+// StarVector's cross-backend pre-load device admission. Unlike the image-only CUDA gate below,
+// vectors run through MLX on macOS and Candle/CUDA off-Mac, so this small reader is intentionally
+// all-targets. It consumes the exact unmeasured static weights floor and fails 8B closed until the
+// permanent-pin terminal candidate exists; terminal peaks and quality remain merge evidence.
+mod vector_admission;
 // Margin constants derived from repeat-capture variance in the calibration evidence (sc-18094,
 // epic 18093). Consumed by the stale-closure widening (sc-18095) and estimate-backed admission
 // (sc-18096/18097) follow-ups; pinned to `scripts/derive-ladder-margins.mjs` by

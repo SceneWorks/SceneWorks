@@ -25267,9 +25267,21 @@
         "maxNewTokens": 4000,
         "maxSvgBytes": 262144,
         "maxWallTimeMs": 120000,
+        // Exact immutable safetensor lower bound: 4,995,740,600 + 146,964,720 bytes. This is not a
+        // runtime-peak measurement and deliberately adds no invented activation fudge factor.
+        "deviceAdmission": {
+          "schemaVersion": 1,
+          "basis": "exact_safetensors_bytes",
+          "measured": false,
+          "staticWeightFloorBytes": 5142705320,
+          "deviceClasses": {
+            "mlx": "apple_unified_memory",
+            "candle": "nvidia_dedicated_vram"
+          }
+        },
         "providers": {
-          "mlx": { "id": "mlx-starvector-1b", "available": false, "reason": "pending_terminal_inference_pin" },
-          "candle": { "id": "candle-starvector-1b", "available": false, "reason": "pending_terminal_inference_pin" }
+          "mlx": { "id": "mlx-starvector-1b", "available": true },
+          "candle": { "id": "candle-starvector-1b", "available": true }
         }
       },
       "downloads": [
@@ -25305,13 +25317,91 @@
       "licenseUrl": "https://huggingface.co/starvector/starvector-1b-im2svg/tree/380ab95d25a8e9ab1dc825debe238b4953ae13b9",
       "ui": {
         "label": "StarVector-1B",
-        "description": "Image-to-SVG vectorization from the exact StarVector-1B snapshot. Model Manager can install the immutable files now; native MLX and Candle dispatch remains unavailable until the terminal feature-train inference pin.",
+        "description": "Image-to-SVG vectorization from the exact StarVector-1B snapshot through the native MLX and Candle providers. This checkpoint does not expose direct text-to-SVG.",
         "recommendedFor": ["image_to_svg"],
         "promptGuide": {
           "title": "StarVector-1B Vectorization Guide",
           "path": "/prompt-guides/starvector-1b.md",
           "sources": [
             { "label": "StarVector-1B image-to-SVG model card", "url": "https://huggingface.co/starvector/starvector-1b-im2svg/tree/380ab95d25a8e9ab1dc825debe238b4953ae13b9" }
+          ]
+        }
+      }
+    },
+    {
+      "id": "starvector_8b",
+      "name": "StarVector-8B",
+      "family": "starvector",
+      "type": "vector",
+      "adapter": "starvector",
+      "recommended": false,
+      "autoDownload": false,
+      "capabilities": ["image_to_svg"],
+      "vector": {
+        "acceptsTextGuidance": false,
+        "maxNewTokens": 4000,
+        "maxSvgBytes": 262144,
+        "maxWallTimeMs": 120000,
+        // Exact immutable safetensor lower bound from the four shards consumed by both native
+        // providers: 4,889,586,776 + 4,946,285,040 + 4,999,851,312 + 178,570,912 bytes.
+        "deviceAdmission": {
+          "schemaVersion": 1,
+          "basis": "exact_safetensors_bytes",
+          "measured": false,
+          "staticWeightFloorBytes": 15014294040,
+          "deviceClasses": {
+            "mlx": "apple_unified_memory",
+            "candle": "nvidia_dedicated_vram"
+          }
+        },
+        "providers": {
+          "mlx": { "id": "mlx-starvector-8b", "available": false, "reason": "pending_terminal_candidate" },
+          "candle": { "id": "candle-starvector-8b", "available": false, "reason": "pending_terminal_candidate" }
+        }
+      },
+      "downloads": [
+        {
+          "provider": "huggingface",
+          "repo": "starvector/starvector-8b-im2svg",
+          "revision": "518beea8dcb5f7a37c5911e92d1d62a76beee7f9",
+          // Exact native runtime closure from inference's starvector-terminal profile. The snapshot
+          // has no tokenizer.json; native tokenization uses the pinned vocab/merges/config files.
+          // README.md is retained as the immutable Apache/provenance document; remote Python stays
+          // excluded.
+          "files": [
+            "README.md",
+            "added_tokens.json",
+            "config.json",
+            "merges.txt",
+            "model-00001-of-00004.safetensors",
+            "model-00002-of-00004.safetensors",
+            "model-00003-of-00004.safetensors",
+            "model-00004-of-00004.safetensors",
+            "model.safetensors.index.json",
+            "preprocessor_config.json",
+            "processor_config.json",
+            "special_tokens_map.json",
+            "tokenizer_config.json",
+            "vocab.json"
+          ],
+          "platforms": ["macos", "windows", "linux"],
+          "estimatedSizeBytes": 15015835105,
+          "footprint": { "diskSizeBytes": 15015835105 }
+        }
+      ],
+      "paths": {
+        "model": "${HF_CACHE}/starvector/starvector-8b-im2svg"
+      },
+      "licenseUrl": "https://huggingface.co/starvector/starvector-8b-im2svg/tree/518beea8dcb5f7a37c5911e92d1d62a76beee7f9",
+      "ui": {
+        "label": "StarVector-8B",
+        "description": "Install the exact higher-capacity StarVector-8B image-to-SVG snapshot now. Native MLX and Candle dispatch remains disabled until its permanent-pin terminal candidate is accepted; this checkpoint does not expose direct text-to-SVG.",
+        "recommendedFor": ["image_to_svg"],
+        "promptGuide": {
+          "title": "StarVector-8B Vectorization Guide",
+          "path": "/prompt-guides/starvector-8b.md",
+          "sources": [
+            { "label": "StarVector-8B image-to-SVG model card", "url": "https://huggingface.co/starvector/starvector-8b-im2svg/tree/518beea8dcb5f7a37c5911e92d1d62a76beee7f9" }
           ]
         }
       }
