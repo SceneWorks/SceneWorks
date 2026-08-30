@@ -7,6 +7,7 @@ import path from "node:path";
 import test from "node:test";
 import { promisify } from "node:util";
 import { validateCorpusAssets, validateTerminalServiceClosure } from "./starvector-terminal-readiness.mjs";
+import { productServiceBackendEnv, productServiceBuildArgs } from "./starvector-terminal-product-service.mjs";
 
 const workflow = await readFile(".github/workflows/starvector-terminal.yml", "utf8");
 const readiness = await readFile(".github/workflows/starvector-terminal-readiness.yml", "utf8");
@@ -44,6 +45,13 @@ test("terminal workflow has no install or model download step", () => {
   assert.match(workflow, /STARVECTOR_TERMINAL_NO_JOB_DOWNLOADS: "1"/);
   assert.match(workflow, /cross-repository lease/);
   assert.match(workflow, /starvector-terminal-metrics-environment-v1\.json/);
+});
+
+test("source-built product service enables the native backend for each campaign host", () => {
+  assert.deepEqual(productServiceBuildArgs("darwin"), ["build", "--locked", "-p", "sceneworks-rust-api"]);
+  assert.deepEqual(productServiceBackendEnv("darwin"), {});
+  assert.deepEqual(productServiceBuildArgs("win32"), ["build", "--locked", "-p", "sceneworks-rust-api", "--features", "backend-candle"]);
+  assert.deepEqual(productServiceBackendEnv("win32"), { SCENEWORKS_BACKEND_CANDLE_ENABLED: "true" });
 });
 
 test("readiness workflow is an identity-only dispatch on both campaign hosts", () => {

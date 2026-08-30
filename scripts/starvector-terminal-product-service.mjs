@@ -11,6 +11,14 @@ import path from "node:path";
 const execFile = promisify(execFileCallback);
 const sha = (value) => createHash("sha256").update(value).digest("hex");
 const die = (value) => { throw new Error(`starvector terminal service: ${value}`); };
+export function productServiceBuildArgs(platform = process.platform) {
+  const args = ["build", "--locked", "-p", "sceneworks-rust-api"];
+  if (platform === "win32") args.push("--features", "backend-candle");
+  return args;
+}
+export function productServiceBackendEnv(platform = process.platform) {
+  return platform === "win32" ? { SCENEWORKS_BACKEND_CANDLE_ENABLED: "true" } : {};
+}
 async function git(root, args) { return (await execFile("git", ["-C", root, ...args])).stdout.trim(); }
 async function serviceIdentity(root, permanentPin) {
   if (await git(root, ["status", "--porcelain"])) die("current-tree product service checkout must be clean");
@@ -73,14 +81,14 @@ export async function startProductService({ root, output, permanentPin, url, wei
   // `cargo build` is source ownership: no prebuilt or /opt sidecar can satisfy
   // this contract.  It never downloads model weights; the controller separately
   // rejects any model acquisition at job time.
-  await execFile("cargo", ["build", "--locked", "-p", "sceneworks-rust-api"], { cwd: root });
+  await execFile("cargo", productServiceBuildArgs(), { cwd: root });
   const binary = path.join(root, "target", "debug", process.platform === "win32" ? "sceneworks-rust-api.exe" : "sceneworks-rust-api");
   const common = { cwd: root, detached: true, stdio: ["ignore", "pipe", "pipe"] }, parsed = new URL(url), apiPort = parsed.port, stateRoot = path.join(output, "product-service-state");
   if (parsed.hostname !== "127.0.0.1" || !apiPort) die("product service must bind an explicit loopback host/port");
   await mkdir(path.join(stateRoot, "data"), { recursive: true }); await mkdir(path.join(stateRoot, "config"), { recursive: true });
   const weights = await materializeOfflineWeights(weightsRoot, stateRoot);
   const hfHome = path.join(stateRoot, "hf");
-  const serviceEnv = { ...process.env, SCENEWORKS_TERMINAL_CAMPAIGN: "1", SCENEWORKS_API_HOST: "127.0.0.1", SCENEWORKS_API_PORT: apiPort, SCENEWORKS_API_URL: url, SCENEWORKS_DATA_DIR: path.join(stateRoot, "data"), SCENEWORKS_CONFIG_DIR: path.join(stateRoot, "config"), SCENEWORKS_JOBS_DB_PATH: path.join(stateRoot, "data", "cache", "jobs.db"), SCENEWORKS_GPU_ID: process.env.STARVECTOR_TERMINAL_GPU_ID ?? "auto", HF_HOME: hfHome, HUGGINGFACE_HUB_CACHE: path.join(hfHome, "hub"), HF_HUB_OFFLINE: "1", TRANSFORMERS_OFFLINE: "1" };
+  const serviceEnv = { ...process.env, ...productServiceBackendEnv(), SCENEWORKS_TERMINAL_CAMPAIGN: "1", SCENEWORKS_API_HOST: "127.0.0.1", SCENEWORKS_API_PORT: apiPort, SCENEWORKS_API_URL: url, SCENEWORKS_DATA_DIR: path.join(stateRoot, "data"), SCENEWORKS_CONFIG_DIR: path.join(stateRoot, "config"), SCENEWORKS_JOBS_DB_PATH: path.join(stateRoot, "data", "cache", "jobs.db"), SCENEWORKS_GPU_ID: process.env.STARVECTOR_TERMINAL_GPU_ID ?? "auto", HF_HOME: hfHome, HUGGINGFACE_HUB_CACHE: path.join(hfHome, "hub"), HF_HUB_OFFLINE: "1", TRANSFORMERS_OFFLINE: "1" };
   for (const inherited of ["TRANSFORMERS_CACHE", "HF_DATASETS_CACHE", "HF_ENDPOINT"]) delete serviceEnv[inherited];
   const api = spawn(binary, [], { ...common, env: serviceEnv });
   const worker = spawn(binary, [], { ...common, env: { ...serviceEnv, SCENEWORKS_WORKER_ONLY: "1" } });
