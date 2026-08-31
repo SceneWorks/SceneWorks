@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { execFileSync } from "node:child_process";
-import { mkdtemp, mkdir, symlink, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -14,7 +14,7 @@ const inferenceRepository = process.env.STARVECTOR_TERMINAL_INFERENCE_TEST_ROOT 
 let inferenceRoot = inferenceRepository;
 const sha = (value) => createHash("sha256").update(value).digest("hex");
 const digest = sha("artifact");
-const inferenceRevision = "c6eb6d8e9545193eac844f6fea2db79e4d14bf2a";
+const inferenceRevision = "53a0ef89525e1d1f7202d4932e9cccc4388e9229";
 const permanentPin = inferenceRevision;
 const sources = [["starvector/svg-stack-simple", "1d2a96a17cc0c4c1f337b7631adc8c5885bc72ea"], ["starvector/svg-icons-simple", "e1918a27ba6649e856e5db0710d8a6c7046762c1"], ["starvector/svg-emoji-simple", "fa75b3617872ae57e6f3cb450aee65dbccbd69e0"], ["starvector/svg-fonts-simple", "453c739ea13ad2685127f721c333f14d99485299"]];
 const models = { "1b": ["starvector-1b-im2svg", "starvector/starvector-1b-im2svg", "380ab95d25a8e9ab1dc825debe238b4953ae13b9"], "8b": ["starvector-8b-im2svg", "starvector/starvector-8b-im2svg", "518beea8dcb5f7a37c5911e92d1d62a76beee7f9"] };
@@ -28,6 +28,12 @@ async function golden(root, sceneWorksRoot) { const validator = await import(pat
 async function fakeSceneWorks(root) { await mkdir(path.join(root, "scripts"), { recursive: true }); await writeFile(path.join(root, "Cargo.toml"), `[workspace]\n[workspace.dependencies]\ncandle-kernels = { git = "https://github.com/SceneWorks/inference", rev = "${inferenceRevision}" }\n`); await writeFile(path.join(root, "scripts", "starvector-terminal-route.mjs"), "export {};\n"); await writeFile(path.join(root, "scripts", "starvector-terminal-metrics.py"), "# fixture\n"); execFileSync("git", ["init", "-q"], { cwd: root }); execFileSync("git", ["config", "user.email", "fixture@example.invalid"], { cwd: root }); execFileSync("git", ["config", "user.name", "fixture"], { cwd: root }); execFileSync("git", ["add", "Cargo.toml", "scripts"], { cwd: root }); execFileSync("git", ["commit", "-qm", "fixture"], { cwd: root }); return root; }
 async function pinnedInferenceCheckout(root) { const checkout = path.join(root, "pinned-inference"); execFileSync("git", ["-C", inferenceRepository, "worktree", "add", "--detach", "-q", checkout, inferenceRevision]); return checkout; }
 async function removePinnedInference(checkout) { execFileSync("git", ["-C", inferenceRepository, "worktree", "remove", "--force", checkout]); }
+
+test("required CI fetches the exact terminal inference revision", async () => {
+  const workflow = await readFile(".github/workflows/check.yml", "utf8");
+  assert.ok(workflow.includes(`git -C "$inference_root" fetch --depth=1 origin ${inferenceRevision}`));
+  assert.ok(workflow.includes(`test "$(git -C "$inference_root" rev-parse HEAD)" = ${inferenceRevision}`));
+});
 
 test("exact pinned validator accepts sealed golden receipt and rejects every gate mutation", async () => {
   const root = await mkdtemp(path.join(tmpdir(), "starvector-terminal-")); inferenceRoot = await pinnedInferenceCheckout(root); const sceneWorksRoot = await fakeSceneWorks(path.join(root, "sceneworks")); const evidence = path.join(root, "evidence"), output = path.join(root, "output"); await mkdir(evidence); const { validator, corpus } = await golden(evidence, sceneWorksRoot);

@@ -1,7 +1,7 @@
 {
   "_comment": "Per-provider inference compile-closure digests (sc-17774). Calibration currency compares a record's captured closureDigest against the entry here for the SAME provider, so a change to one model's code path can no longer demote another's. Regenerate on every inference pin bump: node scripts/inference-closure-digest.mjs --repo <inference> --write. Derivation, and what this unit deliberately does NOT see, are documented in scripts/inference-closure-digest.mjs.",
   "digestVersion": "inference-closure-digest v4",
-  "inferenceRevision": "c6eb6d8e9545193eac844f6fea2db79e4d14bf2a",
+  "inferenceRevision": "53a0ef89525e1d1f7202d4932e9cccc4388e9229",
   "providers": {
     "candle:flux1_dev": {
       "crate": "crates/media/candle-gen/candle-gen-flux",
@@ -47,7 +47,7 @@
     },
     "candle:flux2_dev": {
       "crate": "crates/media/candle-gen/candle-gen-flux2",
-      "digest": "549573dd75f99c139d2b2c8a3df3fdd13ff73e0aa26ab438e72cf51bf0443171",
+      "digest": "1ca002ecb4b34afb81052fe321eac22f5fef8e2598b719bc61484319beb0144b",
       "sharedContractDigest": "3baae7dea3d8637882846865f3591a45fb5f37ba4056a8630231fcdfd990ee1c",
       "closureCrates": [
         "crates/contracts/core-llm",
@@ -156,7 +156,7 @@
     },
     "mlx:flux2_dev": {
       "crate": "crates/media/mlx-gen/mlx-gen-flux2",
-      "digest": "14f128f151dcbd456511c6d240c4f7046a09b2cf7f5ce60d0071e36b1e9e8e61",
+      "digest": "9d267c1c88d5eac51357f4797747a2f2c1b2cb092c53915d88dd2d959f550c9d",
       "sharedContractDigest": "3baae7dea3d8637882846865f3591a45fb5f37ba4056a8630231fcdfd990ee1c",
       "closureCrates": [
         "crates/contracts/core-llm",
@@ -222,7 +222,7 @@
     },
     "mlx:ltx_2_3": {
       "crate": "crates/media/mlx-gen/mlx-gen-ltx",
-      "digest": "43e537bea6d1f77b942ad5d4da7f0d26d8a8568da3571872758d1fae0a1831db",
+      "digest": "3c39a0c8ed5e2b3d6880ccd8aa8132597a96623b8317b3c8c006705dcacf2655",
       "sharedContractDigest": "3baae7dea3d8637882846865f3591a45fb5f37ba4056a8630231fcdfd990ee1c",
       "closureCrates": [
         "crates/contracts/core-llm",
