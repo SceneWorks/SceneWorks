@@ -4,8 +4,10 @@ import {
   applyColorKeyToRgba,
   applyMaskSelectionToRgba,
   colorKeyAlphaMultipliers,
+  colorKeySelectionMaskRgba,
   documentPointToLayerPoint,
 } from "./colorKeyMath.js";
+import { invertAlpha, maskAlphaFromRgba } from "../../maskRefine.js";
 
 const pixels = (entries) => new Uint8ClampedArray(entries.flatMap(([r, g, b, a = 255]) => [r, g, b, a]));
 
@@ -27,6 +29,27 @@ describe("color-key alpha selection (sc-22462)", () => {
     ]);
     const { rgba } = applyColorKeyToRgba(source, 4, 1, { x: 0, y: 0, tolerance: 6, softness: 0, global: true });
     expect([...rgba.filter((_, index) => index % 4 === 3)]).toEqual([0, 255, 0, 255]);
+  });
+
+  it("turns a global non-contiguous key into the shared mask and applies its refinement", () => {
+    const source = pixels([
+      [30, 180, 90], [30, 80, 220], [30, 180, 90],
+    ]);
+    const maskRgba = colorKeySelectionMaskRgba(source, 3, 1, {
+      x: 0,
+      y: 0,
+      tolerance: 6,
+      softness: 0,
+      global: true,
+    });
+    const keyed = maskAlphaFromRgba(maskRgba);
+    expect([...keyed]).toEqual([255, 0, 255]);
+
+    // Invert is one of the same refinement operations exposed for SAM3. Its
+    // output, not the original key, is what the common alpha seam commits.
+    const refined = invertAlpha(keyed);
+    const result = applyMaskSelectionToRgba(source, refined, false);
+    expect([...result.filter((_, index) => index % 4 === 3)]).toEqual([255, 0, 255]);
   });
 
   it("uses a soft perceptual edge and never resurrects existing transparency", () => {

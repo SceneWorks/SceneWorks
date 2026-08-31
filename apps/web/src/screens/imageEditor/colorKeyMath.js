@@ -141,6 +141,23 @@ export function applyColorKeyToRgba(rgba, width, height, options) {
   return { rgba: applyAlphaMultipliersInPlace(output, multipliers), multipliers };
 }
 
+// Convert the key into the editor's shared white-selected/black-unselected mask
+// representation. Color key therefore enters the same brush/erase/refinement
+// seam as SAM3 instead of maintaining a separate preview/apply implementation.
+export function colorKeySelectionMaskRgba(rgba, width, height, options) {
+  const multipliers = colorKeyAlphaMultipliers(rgba, width, height, options);
+  const mask = new Uint8ClampedArray(Math.max(0, width * height) * 4);
+  for (let index = 0; index < multipliers.length; index += 1) {
+    const selected = 255 - multipliers[index];
+    const offset = index * 4;
+    mask[offset] = selected;
+    mask[offset + 1] = selected;
+    mask[offset + 2] = selected;
+    mask[offset + 3] = 255;
+  }
+  return mask;
+}
+
 // Convert document coordinates into the active layer's source pixel space. This
 // inverts the same translate/rotate/scale transform used by the canvas compositor.
 export function documentPointToLayerPoint(point, transform = {}) {
