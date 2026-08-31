@@ -59,9 +59,10 @@ describe("ImageEditorToolPanel memo boundary", () => {
 });
 
 describe("ImageEditorToolPanel color-key cutout", () => {
-  it("offers connected/global selection, adjustable perceptual edge controls, and one apply action", async () => {
+  it("offers connected/global selection, shared refinement, and one apply action", async () => {
     const setColorKeyGlobal = vi.fn();
-    const applyColorKey = vi.fn();
+    const applyMaskCutout = vi.fn();
+    const refineMask = vi.fn();
     await act(async () => root.render(
       <ImageEditorToolPanel
         panelKey="cutout"
@@ -74,8 +75,26 @@ describe("ImageEditorToolPanel color-key cutout", () => {
           setColorKeySeed: vi.fn(),
           setColorKeySoftness: vi.fn(),
           setColorKeyTolerance: vi.fn(),
-          applyColorKey,
+          applyMaskCutout,
+          clearMask: vi.fn(),
+          cutoutKeepSelected: false,
+          maskBaseImage: {},
+          maskBrush: 40,
+          maskErase: false,
+          maskHasContent: () => false,
+          maskLines: [],
+          maskMode: true,
+          maskRefineRadius: 6,
+          maskSource: "colorKey",
+          maskSubTool: "brush",
+          refineMask,
           setTool: vi.fn(),
+          setCutoutKeepSelected: vi.fn(),
+          setMaskBrush: vi.fn(),
+          setMaskErase: vi.fn(),
+          setMaskMode: vi.fn(),
+          setMaskRefineRadius: vi.fn(),
+          setMaskSubTool: vi.fn(),
         }}
       />,
     ));
@@ -84,13 +103,16 @@ describe("ImageEditorToolPanel color-key cutout", () => {
     await act(async () => {
       [...container.querySelectorAll("button")].find((button) => button.textContent === "Global")
         .dispatchEvent(new MouseEvent("click", { bubbles: true }));
+      [...container.querySelectorAll("button")].find((button) => button.textContent === "Invert")
+        .dispatchEvent(new MouseEvent("click", { bubbles: true }));
       [...container.querySelectorAll("button")].find((button) => button.textContent === "Apply cutout")
         .dispatchEvent(new MouseEvent("click", { bubbles: true }));
     });
     expect(setColorKeyGlobal).toHaveBeenCalledWith(true);
     expect(container.querySelector("input[aria-label='Color-key tolerance']").value).toBe("12");
     expect(container.querySelector("input[aria-label='Color-key softness']").value).toBe("8");
-    expect(applyColorKey).toHaveBeenCalledTimes(1);
+    expect(refineMask).toHaveBeenCalledWith("invert");
+    expect(applyMaskCutout).toHaveBeenCalledTimes(1);
   });
 
   it("keeps color key actionable when SAM3 is unavailable", async () => {
@@ -106,7 +128,8 @@ describe("ImageEditorToolPanel color-key cutout", () => {
           setColorKeySeed: vi.fn(),
           setColorKeySoftness: vi.fn(),
           setColorKeyTolerance: vi.fn(),
-          applyColorKey: vi.fn(),
+          applyMaskCutout: vi.fn(),
+          clearMask: vi.fn(),
           smartSelectSupported: false,
           setTool: vi.fn(),
         }}
@@ -114,8 +137,43 @@ describe("ImageEditorToolPanel color-key cutout", () => {
     ));
     expect(container.textContent).toContain("SAM3 object selection is unavailable on this worker");
     expect(container.textContent).toContain("Color key remains available above");
-    expect([...container.querySelectorAll("button")].find((button) => button.textContent === "Apply cutout")).toBeTruthy();
+    expect([...container.querySelectorAll("button")].find((button) => button.textContent === "Global")).toBeTruthy();
+    expect(container.querySelector("input[aria-label='Color-key tolerance']")).toBeTruthy();
     expect(container.textContent).not.toContain("Smart select");
+  });
+
+  it("offers an actionable SAM3 install when the worker supports segmentation but the model is missing", async () => {
+    const requestSmartSelectDownload = vi.fn();
+    await act(async () => root.render(
+      <ImageEditorToolPanel
+        panelKey="cutout"
+        scope={{
+          applyMaskCutout: vi.fn(),
+          clearMask: vi.fn(),
+          colorKeyGlobal: false,
+          colorKeySeed: null,
+          colorKeySoftness: 8,
+          colorKeyTolerance: 12,
+          requestSmartSelectDownload,
+          setColorKeyGlobal: vi.fn(),
+          setColorKeySeed: vi.fn(),
+          setColorKeySoftness: vi.fn(),
+          setColorKeyTolerance: vi.fn(),
+          setTool: vi.fn(),
+          smartSelectCapabilitySupported: true,
+          smartSelectDownloadRequested: false,
+          smartSelectModel: { id: "sam3_person_segment", installState: "missing" },
+          smartSelectSupported: false,
+        }}
+      />,
+    ));
+    expect(container.textContent).toContain("supported on this worker but is not installed");
+    await act(async () => {
+      [...container.querySelectorAll("button")].find((button) => button.textContent === "Install SAM3")
+        .dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+    expect(requestSmartSelectDownload).toHaveBeenCalledTimes(1);
+    expect(container.textContent).toContain("Color key");
   });
 
   it("offers SAM3 keep/remove selection cutouts independently of AI Edit", async () => {
@@ -129,6 +187,7 @@ describe("ImageEditorToolPanel color-key cutout", () => {
         scope={{
           aiOp: null,
           applyMaskCutout,
+          clearMask: vi.fn(),
           colorKeyGlobal: false,
           colorKeySeed: null,
           colorKeySoftness: 8,
@@ -141,6 +200,7 @@ describe("ImageEditorToolPanel color-key cutout", () => {
           maskLines: [],
           maskMode: true,
           maskRefineRadius: 6,
+          maskSource: "smartSelect",
           maskSubTool: "select",
           refineMask: vi.fn(),
           setColorKeyGlobal: vi.fn(),
@@ -163,7 +223,7 @@ describe("ImageEditorToolPanel color-key cutout", () => {
         .dispatchEvent(new MouseEvent("click", { bubbles: true }));
       [...container.querySelectorAll("button")].find((button) => button.textContent === "Remove selected")
         .dispatchEvent(new MouseEvent("click", { bubbles: true }));
-      [...container.querySelectorAll("button")].find((button) => button.textContent === "Apply selection cutout")
+      [...container.querySelectorAll("button")].find((button) => button.textContent === "Apply cutout")
         .dispatchEvent(new MouseEvent("click", { bubbles: true }));
     });
     expect(setMaskMode).toHaveBeenCalledWith(true);

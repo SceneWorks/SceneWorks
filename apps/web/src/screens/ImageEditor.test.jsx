@@ -38,6 +38,9 @@ import {
   tileControlNetModel,
   tileControlNetInstalled,
   TILE_CONTROLNET_MODEL_ID,
+  sam3SegmentInstalled,
+  sam3SegmentModel,
+  SAM3_SEGMENT_MODEL_ID,
   rectToBbox,
   bboxToRect,
   isValidHexColor,
@@ -1860,6 +1863,15 @@ describe("reference conditioning (sc-6107)", () => {
 });
 
 describe("inpaint mask", () => {
+  it("requires the SAM3 utility model to be installed, not merely present in the catalog", () => {
+    const missing = { id: SAM3_SEGMENT_MODEL_ID, type: "utility", installState: "missing" };
+    expect(sam3SegmentModel([missing])).toBe(missing);
+    expect(sam3SegmentInstalled([missing])).toBe(false);
+    expect(sam3SegmentInstalled([{ ...missing, installState: "incomplete" }])).toBe(false);
+    expect(sam3SegmentInstalled([{ ...missing, installState: "installed" }])).toBe(true);
+    expect(sam3SegmentInstalled([])).toBe(false);
+  });
+
   it("flags only models tagged image_inpaint as mask-capable", () => {
     expect(modelIsInpaintCapable({ capabilities: ["edit_image", "image_inpaint"] })).toBe(true);
     expect(modelIsInpaintCapable({ capabilities: ["edit_image"] })).toBe(false);
