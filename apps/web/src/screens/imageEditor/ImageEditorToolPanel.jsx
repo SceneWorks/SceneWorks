@@ -571,7 +571,7 @@ export const ImageEditorBoxesPanel = React.memo(function ImageEditorBoxesPanel({
 
 export const ImageEditorToolPanel = React.memo(function ImageEditorToolPanel({ panelKey, scope }) {
   renderObserverForTests?.();
-  const { COLOR_ADJUSTMENTS, CROP_RATIOS, CurveEditor, StudioUpdateBadge, StudioUpdateNotice, UPSCALE_ENGINE_DESC, activeGradeIsIdentity, activeLayerOf, actualSize, aiOp, applyColorGrade, applyCrop, availableUpscaleEngines, cancelCrop, channelStroke, chooseRatio, colorAdjust, colorChannel, colorMode, createModelDownloadJob, cropRect, curves, detailCnScale, detailModel, detailModels, detailStrength, endTransformGesture, fitToView, flipActiveLayer, histogramRef, identityTransform, layerCount, levels, onTransformSlider, ratioKey, requestTileControlNetDownload, resetActiveColorMode, resetActiveLayerTransform, resetAdjust, rotated, runDetail, runUpscale, selectedDetailModel, setActiveTransform, setAdjustValue, setColorChannel, setColorMode, setCropDim, setCurves, setDetailCnScale, setDetailModel, setDetailStrength, setLevelsValue, setStraighten, setTool, setUpscaleEngine, setUpscaleFactor, setUpscaleSoftness, straighten, tileControlNet, tileControlNetDownloadRequested, tileControlNetReady, toggleRotate, updateOptionLabel, upscaleEngine, upscaleEngineHasSoftness, upscaleFactor, upscaleFactorsForEngine, upscaleSoftness, working } = scope;
+  const { COLOR_ADJUSTMENTS, CROP_RATIOS, CurveEditor, StudioUpdateBadge, StudioUpdateNotice, UPSCALE_ENGINE_DESC, activeGradeIsIdentity, activeLayerOf, actualSize, aiOp, applyColorGrade, applyColorKey, applyCrop, availableUpscaleEngines, cancelCrop, channelStroke, chooseRatio, colorAdjust, colorChannel, colorKeyGlobal, colorKeySeed, colorKeySoftness, colorKeyTolerance, colorMode, createModelDownloadJob, cropRect, curves, detailCnScale, detailModel, detailModels, detailStrength, endTransformGesture, fitToView, flipActiveLayer, histogramRef, identityTransform, layerCount, levels, onTransformSlider, ratioKey, requestTileControlNetDownload, resetActiveColorMode, resetActiveLayerTransform, resetAdjust, rotated, runDetail, runUpscale, selectedDetailModel, setActiveTransform, setAdjustValue, setColorChannel, setColorKeyGlobal, setColorKeySeed, setColorKeySoftness, setColorKeyTolerance, setColorMode, setCropDim, setCurves, setDetailCnScale, setDetailModel, setDetailStrength, setLevelsValue, setStraighten, setTool, setUpscaleEngine, setUpscaleFactor, setUpscaleSoftness, straighten, tileControlNet, tileControlNetDownloadRequested, tileControlNetReady, toggleRotate, updateOptionLabel, upscaleEngine, upscaleEngineHasSoftness, upscaleFactor, upscaleFactorsForEngine, upscaleSoftness, working } = scope;
   const renderPanel = (key) => {
     switch (key) {
       case "move":
@@ -1091,6 +1091,80 @@ export const ImageEditorToolPanel = React.memo(function ImageEditorToolPanel({ p
                 type="button"
               >
                 Apply grade
+              </button>
+            </div>
+          </>
+        );
+      case "cutout":
+        return (
+          <>
+            <div className="ie-section">
+              <div className="ie-sec-title">Color key</div>
+              <p className="ie-note">
+                Click a background pixel on the active layer. The checkerboard shows the alpha preview without changing the image until you apply it.
+              </p>
+              <div className="ie-readout">
+                <span className="ie-readout-k">Sample</span>
+                <span className="ie-readout-v">
+                  {colorKeySeed ? `${colorKeySeed.x}, ${colorKeySeed.y}` : "Click canvas"}
+                </span>
+              </div>
+            </div>
+            <div className="ie-section">
+              <div className="ie-sec-title">Selection</div>
+              <div className="ie-seg two" style={{ width: "100%" }}>
+                <button className="ie-seg-btn" data-active={!colorKeyGlobal} onClick={() => setColorKeyGlobal(false)} type="button">
+                  Connected
+                </button>
+                <button className="ie-seg-btn" data-active={colorKeyGlobal} onClick={() => setColorKeyGlobal(true)} type="button">
+                  Global
+                </button>
+              </div>
+              <p className="ie-note">
+                Connected preserves separate same-color subject areas. Global removes every matching pixel on this layer.
+              </p>
+            </div>
+            <div className="ie-section">
+              <div className="ie-field">
+                <div className="ie-field-top">
+                  <span className="ie-field-label">Tolerance</span>
+                  <span className="ie-field-val">{colorKeyTolerance}</span>
+                </div>
+                <input
+                  aria-label="Color-key tolerance"
+                  className="ie-range"
+                  max={100}
+                  min={0}
+                  onChange={(event) => setColorKeyTolerance(Number(event.target.value))}
+                  step={1}
+                  type="range"
+                  value={colorKeyTolerance}
+                />
+              </div>
+              <div className="ie-field">
+                <div className="ie-field-top">
+                  <span className="ie-field-label">Softness</span>
+                  <span className="ie-field-val">{colorKeySoftness}</span>
+                </div>
+                <input
+                  aria-label="Color-key softness"
+                  className="ie-range"
+                  max={100}
+                  min={0}
+                  onChange={(event) => setColorKeySoftness(Number(event.target.value))}
+                  step={1}
+                  type="range"
+                  value={colorKeySoftness}
+                />
+              </div>
+              <p className="ie-note">Matching uses perceptual color distance; softness feathers the alpha edge.</p>
+            </div>
+            <div className="ie-section">
+              <button className="ie-btn block primary" disabled={!colorKeySeed} onClick={applyColorKey} type="button">
+                Apply cutout
+              </button>
+              <button className="ie-btn block" onClick={() => { setColorKeySeed(null); setTool("move"); }} type="button">
+                Cancel
               </button>
             </div>
           </>

@@ -703,6 +703,12 @@ describe("editor download plan", () => {
     });
   });
 
+  it("treats an alpha-only active-layer replacement as an edited PNG export", () => {
+    const cutoutBlob = { id: "color-key-alpha", size: 4096 };
+    const cutout = doc({ installedBlob: original.blob }, { blob: cutoutBlob });
+    expect(plan(cutout)).toMatchObject({ mode: "raster", carriesWorkflow: false, hadWorkflow: true });
+  });
+
   // The AC's headline case: open a generated image, change nothing, Download. Before this story
   // that produced a re-encode with the recipe gone and nothing said about it.
   it("never re-rasterizes an unmodified generated image", () => {

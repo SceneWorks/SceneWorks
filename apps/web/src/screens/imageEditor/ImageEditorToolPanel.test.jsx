@@ -58,6 +58,42 @@ describe("ImageEditorToolPanel memo boundary", () => {
   });
 });
 
+describe("ImageEditorToolPanel color-key cutout", () => {
+  it("offers connected/global selection, adjustable perceptual edge controls, and one apply action", async () => {
+    const setColorKeyGlobal = vi.fn();
+    const applyColorKey = vi.fn();
+    await act(async () => root.render(
+      <ImageEditorToolPanel
+        panelKey="cutout"
+        scope={{
+          colorKeyGlobal: false,
+          colorKeySeed: { x: 7, y: 9 },
+          colorKeySoftness: 8,
+          colorKeyTolerance: 12,
+          setColorKeyGlobal,
+          setColorKeySeed: vi.fn(),
+          setColorKeySoftness: vi.fn(),
+          setColorKeyTolerance: vi.fn(),
+          applyColorKey,
+          setTool: vi.fn(),
+        }}
+      />,
+    ));
+    expect(container.textContent).toContain("Click a background pixel on the active layer");
+    expect(container.textContent).toContain("Connected preserves separate same-color subject areas");
+    await act(async () => {
+      [...container.querySelectorAll("button")].find((button) => button.textContent === "Global")
+        .dispatchEvent(new MouseEvent("click", { bubbles: true }));
+      [...container.querySelectorAll("button")].find((button) => button.textContent === "Apply cutout")
+        .dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+    expect(setColorKeyGlobal).toHaveBeenCalledWith(true);
+    expect(container.querySelector("input[aria-label='Color-key tolerance']").value).toBe("12");
+    expect(container.querySelector("input[aria-label='Color-key softness']").value).toBe("8");
+    expect(applyColorKey).toHaveBeenCalledTimes(1);
+  });
+});
+
 describe("ImageEditorEditPanel quick edit instructions", () => {
   const model = { id: "z_image_edit", name: "Z-Image-Edit" };
 
