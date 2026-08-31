@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
-import { Stage, Layer, Image as KonvaImage, Line, Rect, Transformer } from "react-konva";
+import { Stage, Layer, Group, Image as KonvaImage, Line, Rect, Transformer } from "react-konva";
 import { apiFetch, inspectWorkflowFile, isAbortError } from "../api.js";
 import { terminalStatuses } from "../jobTypes.js";
 import { useAppContext } from "../context/AppContext.js";
@@ -72,6 +72,7 @@ import {
 import { useColorGradeTool } from "./imageEditor/useColorGradeTool.js";
 import { useBoxesTool } from "./imageEditor/useBoxesTool.js";
 import { useMaskTool } from "./imageEditor/useMaskTool.js";
+import { maskAlphaFromRgba } from "../maskRefine.js";
 import {
   COLOR_ADJUSTMENTS,
   IDENTITY_COLOR_ADJUST,
@@ -114,6 +115,7 @@ import {
 } from "./imageEditor/maskShared.js";
 import {
   applyColorKeyToRgba,
+  applyMaskSelectionToRgba,
   documentPointToLayerPoint,
 } from "./imageEditor/colorKeyMath.js";
 import {
@@ -1008,6 +1010,19 @@ function colorKeyCanvasForImage(image, seed, options) {
   return canvas;
 }
 
+function maskCutoutCanvasForImage(image, maskCanvas, keepSelected) {
+  const canvas = document.createElement("canvas");
+  canvas.width = image.naturalWidth;
+  canvas.height = image.naturalHeight;
+  const ctx = canvas.getContext("2d");
+  ctx.drawImage(image, 0, 0);
+  const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+  const mask = maskCanvas.getContext("2d").getImageData(0, 0, canvas.width, canvas.height);
+  imageData.data.set(applyMaskSelectionToRgba(imageData.data, maskAlphaFromRgba(mask.data), keepSelected));
+  ctx.putImageData(imageData, 0, 0);
+  return canvas;
+}
+
 function canvasToPngBlob(canvas) {
   return new Promise((resolve, reject) => {
     canvas.toBlob((blob) => (blob ? resolve(blob) : reject(new Error("Could not encode the cutout."))), "image/png");
@@ -1246,6 +1261,7 @@ export function ImageEditor() {
   const [colorKeyTolerance, setColorKeyTolerance] = useState(12);
   const [colorKeySoftness, setColorKeySoftness] = useState(8);
   const [colorKeyGlobal, setColorKeyGlobal] = useState(false);
+  const [cutoutKeepSelected, setCutoutKeepSelected] = useState(true);
   const [ratioKey, setRatioKey] = useState("free");
   const [rotated, setRotated] = useState(false);
   const [cropRect, setCropRect] = useState(null); // image-pixel coords, or null
@@ -1577,11 +1593,12 @@ export function ImageEditor() {
     working,
     tool,
     canMask,
+    smartSelectSupported,
     aiOp,
     activeProject,
     requestedGpu,
     runAiOp: runAiOpBridge,
-    stagePointToImage: stagePointToImageBridge,
+    stagePointToImage: stagePointToActiveLayerImage,
     blobToImage,
     setTool,
   });
@@ -1609,9 +1626,25 @@ export function ImageEditor() {
     selectPointerUp,
     cancelSelectDrag,
     rasterizeMaskToFile,
+    rasterizeMaskToCanvas,
     refineMask,
     resetMaskState,
   } = maskTool;
+
+  // SAM3 cutout preview is an offscreen alpha composition, just like color key:
+  // refinement remains editable and no document/history mutation occurs until Apply.
+  const maskCutoutPreview = useMemo(() => {
+    const layer = activeLayerOf(working);
+    if (tool !== "cutout" || !maskMode || !layer?.image || (!maskHasContent(maskLines) && !maskBaseImage)) return null;
+    try {
+      return {
+        layerId: layer.id,
+        image: maskCutoutCanvasForImage(layer.image, rasterizeMaskToCanvas(), cutoutKeepSelected),
+      };
+    } catch {
+      return null;
+    }
+  }, [working, tool, maskMode, maskLines, maskBaseImage, rasterizeMaskToCanvas, cutoutKeepSelected]);
 
   // Memoize the image-renderable subset (sc-8939): the Image Editor re-renders on every
   // pointermove of a brush stroke / box drag, and re-filtering the full catalog each time
@@ -2301,6 +2334,34 @@ export function ImageEditor() {
     }
   }, [colorKeySeed, colorKeyTolerance, colorKeySoftness, colorKeyGlobal, checkpoint, replaceLayerImage]);
 
+  // Commit the currently refined SAM3 mask to the active layer only. The mask is
+  // converted to an alpha multiplier, so keep/remove choices both preserve an
+  // already-transparent source pixel and produce one undoable bitmap replacement.
+  const applyMaskCutout = useCallback(async () => {
+    const work = workingRef.current;
+    const layer = activeLayerOf(work);
+    if (!layer?.image || (!maskHasContent(maskLines) && !maskBaseImage)) return;
+    const sourceBlob = layer.blob;
+    try {
+      const canvas = maskCutoutCanvasForImage(layer.image, rasterizeMaskToCanvas(), cutoutKeepSelected);
+      const blob = await canvasToPngBlob(canvas);
+      const { image, objectUrl } = await blobToImage(blob);
+      const current = layerById(workingRef.current, layer.id);
+      if (!current || current.blob !== sourceBlob) {
+        URL.revokeObjectURL(objectUrl);
+        return;
+      }
+      checkpoint();
+      replaceLayerImage(layer.id, image, objectUrl, blob);
+      setEdits((prev) => [...prev, { op: "sam3Cutout", mode: cutoutKeepSelected ? "keepSelected" : "removeSelected" }]);
+      setDirty(true);
+      clearMask();
+      setTool("move");
+    } catch (err) {
+      setStatus({ loading: false, error: err.message || "Could not apply the SAM3 cutout." });
+    }
+  }, [maskLines, maskBaseImage, rasterizeMaskToCanvas, cutoutKeepSelected, checkpoint, replaceLayerImage, clearMask]);
+
   // A document-level AI op (upscale / outpaint / box-keyed edit) flattens the stack
   // into one base layer; warn before discarding a multi-layer stack.
   const confirmFlatten = useCallback(() => {
@@ -2656,12 +2717,29 @@ export function ImageEditor() {
   }
   stagePointToImageRef.current = stagePointToImage;
 
+  // SAM3 receives a scratch image of the active layer, not the composited
+  // document. Convert the visible-stage drag through that layer's transform so
+  // the worker box and the editable mask use the bitmap's own pixel coordinates.
+  function stagePointToActiveLayerImage(event) {
+    const point = stagePointToImage(event);
+    const layer = activeLayerOf(workingRef.current);
+    if (!point || !layer?.image) return null;
+    const local = documentPointToLayerPoint(point, layer.transform);
+    if (!local) return null;
+    return {
+      x: clamp(local.x, 0, layer.image.naturalWidth),
+      y: clamp(local.y, 0, layer.image.naturalHeight),
+    };
+  }
+
   // The canvas reports document coordinates, while each layer can be translated,
   // rotated, or scaled. Invert the active layer transform before sampling its
   // source bitmap so the eyedropper and the eventual alpha write address the
   // same pixels.
   function colorKeyPointerDown(event) {
-    if (tool !== "cutout") return;
+    // When cutout is in SAM3 mask mode the canvas gesture belongs to the brush/
+    // selection box, not to the color-key eyedropper.
+    if (tool !== "cutout" || maskMode) return;
     const layer = activeLayerOf(workingRef.current);
     const point = stagePointToImage(event);
     if (!layer?.image || !point) return;
@@ -3215,7 +3293,9 @@ export function ImageEditor() {
     upscale: "Pick an engine and factor, then run",
     detail: "Tune detail & structure, then enhance",
     color: "Grade with adjust, levels or curves",
-    cutout: colorKeySeed ? "Adjust the key, then apply the alpha cutout" : "Click the background color to preview a cutout",
+    cutout: maskMode
+      ? (maskSubTool === "select" ? "Drag a box to select an object with SAM3" : "Paint to refine the SAM3 selection")
+      : (colorKeySeed ? "Adjust the key, then apply the alpha cutout" : "Click the background color to preview a cutout"),
     edit: maskMode ? "Paint or box-select the region to edit" : "Describe the edit on the right",
     boxes: "Drag to draw a region, then describe it",
   }[tool];
@@ -3256,6 +3336,7 @@ export function ImageEditor() {
     aiOp,
     applyColorGrade,
     applyColorKey,
+    applyMaskCutout,
     applyCrop,
     assetUrl,
     availableUpscaleEngines,
@@ -3280,6 +3361,7 @@ export function ImageEditor() {
     createLoraDownloadJob,
     createModelDownloadJob,
     cropRect,
+    cutoutKeepSelected,
     curves,
     deleteBox,
     detailCnScale,
@@ -3350,6 +3432,7 @@ export function ImageEditor() {
     setColorMode,
     setCropDim,
     setCurves,
+    setCutoutKeepSelected,
     setDetailCnScale,
     setDetailModel,
     setDetailStrength,
@@ -3811,7 +3894,9 @@ export function ImageEditor() {
                     key={layer.id}
                     globalCompositeOperation={layer.blendMode}
                     height={layer.image.naturalHeight}
-                    image={isActive && colorKeyPreview?.layerId === layer.id ? colorKeyPreview.image : layer.image}
+                    image={isActive && maskCutoutPreview?.layerId === layer.id
+                      ? maskCutoutPreview.image
+                      : (isActive && colorKeyPreview?.layerId === layer.id ? colorKeyPreview.image : layer.image)}
                     name="editor-image"
                     opacity={layer.opacity}
                     rotation={t.rotation}
@@ -3886,40 +3971,57 @@ export function ImageEditor() {
                 </>
               ) : null}
             </Layer>
-            {canMask && (maskLines.length || maskOverlay) ? (
+            {maskMode && (maskLines.length || maskOverlay) ? (
               // Isolated layer so the eraser's destination-out clears only the mask
               // overlay, never the image beneath it. The smart-select base (sc-3751)
               // renders first, with the brush strokes (and their erases) composited on top.
+              // The group mirrors the active layer transform: the mask's coordinates
+              // are the staged active bitmap's coordinates, never document coordinates.
               <Layer listening={false}>
-                {maskOverlay ? (
-                  <KonvaImage height={working.height} image={maskOverlay} width={working.width} x={0} y={0} />
-                ) : null}
-                {maskLines.map((line, index) => (
-                  <Line
-                    globalCompositeOperation={line.erase ? "destination-out" : "source-over"}
-                    key={index}
-                    lineCap="round"
-                    lineJoin="round"
-                    points={line.points}
-                    stroke="rgba(255,40,120,0.5)"
-                    strokeWidth={line.size}
-                  />
-                ))}
+                {(() => {
+                  const active = activeLayerOf(working);
+                  const t = active?.transform ?? identityTransform();
+                  return (
+                    <Group rotation={t.rotation} scaleX={t.scaleX} scaleY={t.scaleY} x={t.x} y={t.y}>
+                      {maskOverlay ? (
+                        <KonvaImage height={maskOverlay.height} image={maskOverlay} width={maskOverlay.width} x={0} y={0} />
+                      ) : null}
+                      {maskLines.map((line, index) => (
+                        <Line
+                          globalCompositeOperation={line.erase ? "destination-out" : "source-over"}
+                          key={index}
+                          lineCap="round"
+                          lineJoin="round"
+                          points={line.points}
+                          stroke="rgba(255,40,120,0.5)"
+                          strokeWidth={line.size}
+                        />
+                      ))}
+                    </Group>
+                  );
+                })()}
               </Layer>
             ) : null}
-            {tool === "edit" && maskMode && maskSubTool === "select" && selectDraft ? (
+            {(tool === "edit" || tool === "cutout") && maskMode && maskSubTool === "select" && selectDraft ? (
               // Live smart-select box preview (sc-3751), image-pixel coords like the crop rect.
               <Layer listening={false}>
-                <Rect
-                  dash={[8, 6]}
-                  fill="rgba(255,40,120,0.12)"
-                  height={selectDraft.height}
-                  stroke="rgba(255,40,120,0.9)"
-                  strokeWidth={2 / view.scale}
-                  width={selectDraft.width}
-                  x={selectDraft.x}
-                  y={selectDraft.y}
-                />
+                {(() => {
+                  const t = activeLayerOf(working)?.transform ?? identityTransform();
+                  return (
+                    <Group rotation={t.rotation} scaleX={t.scaleX} scaleY={t.scaleY} x={t.x} y={t.y}>
+                      <Rect
+                        dash={[8, 6]}
+                        fill="rgba(255,40,120,0.12)"
+                        height={selectDraft.height}
+                        stroke="rgba(255,40,120,0.9)"
+                        strokeWidth={2 / view.scale}
+                        width={selectDraft.width}
+                        x={selectDraft.x}
+                        y={selectDraft.y}
+                      />
+                    </Group>
+                  );
+                })()}
               </Layer>
             ) : null}
             {tool === "boxes" ? (

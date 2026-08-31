@@ -571,7 +571,7 @@ export const ImageEditorBoxesPanel = React.memo(function ImageEditorBoxesPanel({
 
 export const ImageEditorToolPanel = React.memo(function ImageEditorToolPanel({ panelKey, scope }) {
   renderObserverForTests?.();
-  const { COLOR_ADJUSTMENTS, CROP_RATIOS, CurveEditor, StudioUpdateBadge, StudioUpdateNotice, UPSCALE_ENGINE_DESC, activeGradeIsIdentity, activeLayerOf, actualSize, aiOp, applyColorGrade, applyColorKey, applyCrop, availableUpscaleEngines, cancelCrop, channelStroke, chooseRatio, colorAdjust, colorChannel, colorKeyGlobal, colorKeySeed, colorKeySoftness, colorKeyTolerance, colorMode, createModelDownloadJob, cropRect, curves, detailCnScale, detailModel, detailModels, detailStrength, endTransformGesture, fitToView, flipActiveLayer, histogramRef, identityTransform, layerCount, levels, onTransformSlider, ratioKey, requestTileControlNetDownload, resetActiveColorMode, resetActiveLayerTransform, resetAdjust, rotated, runDetail, runUpscale, selectedDetailModel, setActiveTransform, setAdjustValue, setColorChannel, setColorKeyGlobal, setColorKeySeed, setColorKeySoftness, setColorKeyTolerance, setColorMode, setCropDim, setCurves, setDetailCnScale, setDetailModel, setDetailStrength, setLevelsValue, setStraighten, setTool, setUpscaleEngine, setUpscaleFactor, setUpscaleSoftness, straighten, tileControlNet, tileControlNetDownloadRequested, tileControlNetReady, toggleRotate, updateOptionLabel, upscaleEngine, upscaleEngineHasSoftness, upscaleFactor, upscaleFactorsForEngine, upscaleSoftness, working } = scope;
+  const { COLOR_ADJUSTMENTS, CROP_RATIOS, CurveEditor, StudioUpdateBadge, StudioUpdateNotice, UPSCALE_ENGINE_DESC, activeGradeIsIdentity, activeLayerOf, actualSize, aiOp, applyColorGrade, applyColorKey, applyCrop, applyMaskCutout, availableUpscaleEngines, cancelCrop, channelStroke, chooseRatio, colorAdjust, colorChannel, colorKeyGlobal, colorKeySeed, colorKeySoftness, colorKeyTolerance, colorMode, createModelDownloadJob, cropRect, curves, cutoutKeepSelected, detailCnScale, detailModel, detailModels, detailStrength, endTransformGesture, fitToView, flipActiveLayer, histogramRef, identityTransform, layerCount, levels, maskBaseImage, maskBrush, maskErase, maskHasContent, maskLines, maskMode, maskRefineRadius, maskSubTool, onTransformSlider, ratioKey, refineMask, requestTileControlNetDownload, resetActiveColorMode, resetActiveLayerTransform, resetAdjust, rotated, runDetail, runUpscale, selectedDetailModel, setActiveTransform, setAdjustValue, setColorChannel, setColorKeyGlobal, setColorKeySeed, setColorKeySoftness, setColorKeyTolerance, setColorMode, setCropDim, setCurves, setCutoutKeepSelected, setDetailCnScale, setDetailModel, setDetailStrength, setLevelsValue, setMaskBrush, setMaskErase, setMaskMode, setMaskRefineRadius, setMaskSubTool, setStraighten, setTool, setUpscaleEngine, setUpscaleFactor, setUpscaleSoftness, smartSelectSupported, straighten, tileControlNet, tileControlNetDownloadRequested, tileControlNetReady, toggleRotate, updateOptionLabel, upscaleEngine, upscaleEngineHasSoftness, upscaleFactor, upscaleFactorsForEngine, upscaleSoftness, working } = scope;
   const renderPanel = (key) => {
     switch (key) {
       case "move":
@@ -1158,6 +1158,106 @@ export const ImageEditorToolPanel = React.memo(function ImageEditorToolPanel({ p
                 />
               </div>
               <p className="ie-note">Matching uses perceptual color distance; softness feathers the alpha edge.</p>
+            </div>
+            <div className="ie-section">
+              <div className="ie-sec-title">SAM3 object selection</div>
+              {smartSelectSupported ? (
+                <>
+                  <p className="ie-note">Draw a box around an object on the active layer. SAM3 selection works without choosing an AI Edit model.</p>
+                  <div className="ie-seg two" style={{ width: "100%" }}>
+                    <button
+                      className="ie-seg-btn"
+                      data-active={maskMode && maskSubTool === "select"}
+                      disabled={aiOp?.label === "smart select"}
+                      onClick={() => {
+                        setColorKeySeed(null);
+                        setMaskMode(true);
+                        setMaskSubTool("select");
+                        setMaskErase(false);
+                      }}
+                      type="button"
+                    >
+                      {aiOp?.label === "smart select" ? "Segmenting…" : "Smart select"}
+                    </button>
+                    <button
+                      className="ie-seg-btn"
+                      data-active={maskMode && maskSubTool === "brush"}
+                      onClick={() => {
+                        setMaskMode(true);
+                        setMaskSubTool("brush");
+                      }}
+                      type="button"
+                    >
+                      Refine brush
+                    </button>
+                  </div>
+                  {maskMode && maskSubTool === "select" ? (
+                    <p className="ie-note">Drag a box around an object on the canvas — SAM3 auto-masks it.</p>
+                  ) : null}
+                  {maskMode && maskSubTool === "brush" ? (
+                    <>
+                      <div className="ie-field">
+                        <div className="ie-field-top">
+                          <span className="ie-field-label">Brush size</span>
+                          <span className="ie-field-val">{maskBrush} px</span>
+                        </div>
+                        <input
+                          aria-label="SAM3 refine brush size"
+                          className="ie-range"
+                          max={300}
+                          min={5}
+                          onChange={(event) => setMaskBrush(Number(event.target.value))}
+                          step={1}
+                          type="range"
+                          value={maskBrush}
+                        />
+                      </div>
+                      <button className="ie-btn block" data-active={maskErase} onClick={() => setMaskErase((on) => !on)} type="button">
+                        Eraser
+                      </button>
+                    </>
+                  ) : null}
+                  {maskMode ? (
+                    <>
+                      <div className="ie-field" style={{ marginTop: "10px", marginBottom: "8px" }}>
+                        <div className="ie-field-top">
+                          <span className="ie-field-label">Refine radius</span>
+                          <span className="ie-field-val">{maskRefineRadius}px</span>
+                        </div>
+                        <input
+                          aria-label="SAM3 refine radius"
+                          className="ie-range"
+                          max={40}
+                          min={1}
+                          onChange={(event) => setMaskRefineRadius(Number(event.target.value))}
+                          step={1}
+                          type="range"
+                          value={maskRefineRadius}
+                        />
+                      </div>
+                      <div className="ie-chip-row">
+                        <button className="ie-chip" disabled={!maskHasContent(maskLines) && !maskBaseImage} onClick={() => refineMask("feather")} type="button">Feather</button>
+                        <button className="ie-chip" disabled={!maskHasContent(maskLines) && !maskBaseImage} onClick={() => refineMask("grow")} type="button">Grow</button>
+                        <button className="ie-chip" disabled={!maskHasContent(maskLines) && !maskBaseImage} onClick={() => refineMask("shrink")} type="button">Shrink</button>
+                        <button className="ie-chip" onClick={() => refineMask("invert")} type="button">Invert</button>
+                      </div>
+                    </>
+                  ) : null}
+                  {maskMode && (maskHasContent(maskLines) || maskBaseImage) ? (
+                    <>
+                      <div className="ie-seg two" style={{ marginTop: "10px", width: "100%" }}>
+                        <button className="ie-seg-btn" data-active={cutoutKeepSelected} onClick={() => setCutoutKeepSelected(true)} type="button">Keep selected</button>
+                        <button className="ie-seg-btn" data-active={!cutoutKeepSelected} onClick={() => setCutoutKeepSelected(false)} type="button">Remove selected</button>
+                      </div>
+                      <button className="ie-btn block primary" onClick={applyMaskCutout} style={{ marginTop: "10px" }} type="button">
+                        Apply selection cutout
+                      </button>
+                    </>
+                  ) : null}
+                </>
+              ) : (
+                <p className="ie-note">SAM3 object selection is unavailable on this worker. Color key remains available above; choose a worker with image segmentation support to use Smart Select.</p>
+              )}
             </div>
             <div className="ie-section">
               <button className="ie-btn block primary" disabled={!colorKeySeed} onClick={applyColorKey} type="button">

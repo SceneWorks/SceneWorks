@@ -124,6 +124,17 @@ export function applyAlphaMultipliersInPlace(rgba, multipliers) {
   return rgba;
 }
 
+// Apply the editable SAM3 mask as alpha to a source bitmap. `keepSelected` uses
+// the white selection directly; remove-selected reverses it. Both paths use the
+// same alpha-multiplier seam as color key so existing transparency is preserved.
+export function applyMaskSelectionToRgba(rgba, maskAlpha, keepSelected) {
+  const multipliers = new Uint8ClampedArray(maskAlpha.length);
+  for (let index = 0; index < maskAlpha.length; index += 1) {
+    multipliers[index] = keepSelected ? maskAlpha[index] : 255 - maskAlpha[index];
+  }
+  return applyAlphaMultipliersInPlace(new Uint8ClampedArray(rgba), multipliers);
+}
+
 export function applyColorKeyToRgba(rgba, width, height, options) {
   const output = new Uint8ClampedArray(rgba);
   const multipliers = colorKeyAlphaMultipliers(output, width, height, options);

@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   applyAlphaMultipliersInPlace,
   applyColorKeyToRgba,
+  applyMaskSelectionToRgba,
   colorKeyAlphaMultipliers,
   documentPointToLayerPoint,
 } from "./colorKeyMath.js";
@@ -38,6 +39,18 @@ describe("color-key alpha selection (sc-22462)", () => {
     expect(result[3]).toBe(0);
     expect(result[7]).toBeLessThan(200);
     expect(result[11]).toBe(255);
+  });
+
+  it("applies a SAM3 selection as keep-selected or remove-selected alpha without resurrecting transparency", () => {
+    const source = pixels([[1, 2, 3, 255], [4, 5, 6, 120], [7, 8, 9, 0]]);
+    // First and last pixels are selected. The already-transparent last source pixel
+    // remains transparent in both modes, proving selection alpha is composed.
+    const mask = new Uint8ClampedArray([255, 0, 255]);
+    const kept = applyMaskSelectionToRgba(source, mask, true);
+    const removed = applyMaskSelectionToRgba(source, mask, false);
+    expect([...kept.filter((_, index) => index % 4 === 3)]).toEqual([255, 0, 0]);
+    expect([...removed.filter((_, index) => index % 4 === 3)]).toEqual([0, 120, 0]);
+    expect([...kept.slice(0, 3)]).toEqual([1, 2, 3]);
   });
 
   it("maps an eyedropper click through the active layer transform", () => {

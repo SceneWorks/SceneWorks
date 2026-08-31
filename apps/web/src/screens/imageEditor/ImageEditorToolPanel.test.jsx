@@ -92,6 +92,85 @@ describe("ImageEditorToolPanel color-key cutout", () => {
     expect(container.querySelector("input[aria-label='Color-key softness']").value).toBe("8");
     expect(applyColorKey).toHaveBeenCalledTimes(1);
   });
+
+  it("keeps color key actionable when SAM3 is unavailable", async () => {
+    await act(async () => root.render(
+      <ImageEditorToolPanel
+        panelKey="cutout"
+        scope={{
+          colorKeyGlobal: false,
+          colorKeySeed: { x: 7, y: 9 },
+          colorKeySoftness: 8,
+          colorKeyTolerance: 12,
+          setColorKeyGlobal: vi.fn(),
+          setColorKeySeed: vi.fn(),
+          setColorKeySoftness: vi.fn(),
+          setColorKeyTolerance: vi.fn(),
+          applyColorKey: vi.fn(),
+          smartSelectSupported: false,
+          setTool: vi.fn(),
+        }}
+      />,
+    ));
+    expect(container.textContent).toContain("SAM3 object selection is unavailable on this worker");
+    expect(container.textContent).toContain("Color key remains available above");
+    expect([...container.querySelectorAll("button")].find((button) => button.textContent === "Apply cutout")).toBeTruthy();
+    expect(container.textContent).not.toContain("Smart select");
+  });
+
+  it("offers SAM3 keep/remove selection cutouts independently of AI Edit", async () => {
+    const setMaskMode = vi.fn();
+    const setMaskSubTool = vi.fn();
+    const setCutoutKeepSelected = vi.fn();
+    const applyMaskCutout = vi.fn();
+    await act(async () => root.render(
+      <ImageEditorToolPanel
+        panelKey="cutout"
+        scope={{
+          aiOp: null,
+          applyMaskCutout,
+          colorKeyGlobal: false,
+          colorKeySeed: null,
+          colorKeySoftness: 8,
+          colorKeyTolerance: 12,
+          cutoutKeepSelected: true,
+          maskBaseImage: {},
+          maskBrush: 40,
+          maskErase: false,
+          maskHasContent: () => false,
+          maskLines: [],
+          maskMode: true,
+          maskRefineRadius: 6,
+          maskSubTool: "select",
+          refineMask: vi.fn(),
+          setColorKeyGlobal: vi.fn(),
+          setColorKeySeed: vi.fn(),
+          setColorKeySoftness: vi.fn(),
+          setColorKeyTolerance: vi.fn(),
+          setCutoutKeepSelected,
+          setMaskBrush: vi.fn(),
+          setMaskErase: vi.fn(),
+          setMaskMode,
+          setMaskRefineRadius: vi.fn(),
+          setMaskSubTool,
+          smartSelectSupported: true,
+        }}
+      />,
+    ));
+    expect(container.textContent).toContain("works without choosing an AI Edit model");
+    await act(async () => {
+      [...container.querySelectorAll("button")].find((button) => button.textContent === "Smart select")
+        .dispatchEvent(new MouseEvent("click", { bubbles: true }));
+      [...container.querySelectorAll("button")].find((button) => button.textContent === "Remove selected")
+        .dispatchEvent(new MouseEvent("click", { bubbles: true }));
+      [...container.querySelectorAll("button")].find((button) => button.textContent === "Apply selection cutout")
+        .dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+    expect(setMaskMode).toHaveBeenCalledWith(true);
+    expect(setMaskSubTool).toHaveBeenCalledWith("select");
+    expect(setCutoutKeepSelected).toHaveBeenCalledWith(false);
+    expect(applyMaskCutout).toHaveBeenCalledTimes(1);
+  });
 });
 
 describe("ImageEditorEditPanel quick edit instructions", () => {

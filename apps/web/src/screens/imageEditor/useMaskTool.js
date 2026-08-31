@@ -44,6 +44,7 @@ export function useMaskTool({
   working,
   tool,
   canMask,
+  smartSelectSupported,
   aiOp,
   activeProject,
   requestedGpu,
@@ -52,6 +53,8 @@ export function useMaskTool({
   blobToImage,
   setTool,
 }) {
+  const maskWidth = working?.layers?.find((layer) => layer.id === working.activeLayerId)?.image?.naturalWidth ?? working?.width ?? 0;
+  const maskHeight = working?.layers?.find((layer) => layer.id === working.activeLayerId)?.image?.naturalHeight ?? working?.height ?? 0;
   // Inpaint mask (sc-2436): freehand brush strokes in image-pixel coords, rasterized
   // to a mask asset on Run for inpaint-capable models. `maskMode` is the paint sub-mode
   // of the AI Edit tool (Stage panning is suspended while it's on).
@@ -92,10 +95,10 @@ export function useMaskTool({
     [],
   );
 
-  // Leave paint mode (restoring Stage panning) when the edit tool is closed or the
-  // model can't inpaint — otherwise the canvas would stay in a paint state with no UI.
+  // Leave paint mode when neither AI Edit's inpaint path nor Cutout owns it. SAM3
+  // cutout intentionally does not depend on an inpaint-capable edit model.
   useEffect(() => {
-    if (maskMode && (tool !== "edit" || !canMask)) setMaskMode(false);
+    if (maskMode && !((tool === "edit" && canMask) || tool === "cutout")) setMaskMode(false);
   }, [tool, canMask, maskMode]);
 
   // Reset the per-bitmap mask state (called by the editor's resetEditorOverlays). Mirrors
@@ -164,7 +167,7 @@ export function useMaskTool({
     setSelectDraft(null);
     // Discard a click / sub-minimum smudge; otherwise run segmentation over the box.
     if (!draft || draft.width < MIN_BOX_PX || draft.height < MIN_BOX_PX) return;
-    const rect = clampRectToCanvas(draft, working.width, working.height);
+    const rect = clampRectToCanvas(draft, maskWidth, maskHeight);
     runSmartSelect(rect);
   }
 
@@ -186,8 +189,8 @@ export function useMaskTool({
   // refine ops (sc-6110). White = edit region; erased holes flatten to black (=keep).
   function rasterizeMaskToCanvas() {
     const scratch = document.createElement("canvas");
-    scratch.width = working.width;
-    scratch.height = working.height;
+    scratch.width = maskWidth;
+    scratch.height = maskHeight;
     const sctx = scratch.getContext("2d");
     // Smart-select base first (sc-3751): the white-on-black SAM3 mask underlays the brush strokes,
     // so paint strokes add to it and erase strokes (destination-out) carve it back. Its opaque
@@ -214,8 +217,8 @@ export function useMaskTool({
     }
     // Flatten onto black so erased/holes read as black (= keep).
     const out = document.createElement("canvas");
-    out.width = working.width;
-    out.height = working.height;
+    out.width = maskWidth;
+    out.height = maskHeight;
     const octx = out.getContext("2d");
     octx.fillStyle = "#000000";
     octx.fillRect(0, 0, out.width, out.height);
@@ -240,12 +243,12 @@ export function useMaskTool({
   // Drawn scaled to the working dims defensively (the mask is produced at the working size).
   function loadMaskBase(image) {
     const base = document.createElement("canvas");
-    base.width = working.width;
-    base.height = working.height;
-    base.getContext("2d").drawImage(image, 0, 0, working.width, working.height);
+    base.width = maskWidth;
+    base.height = maskHeight;
+    base.getContext("2d").drawImage(image, 0, 0, maskWidth, maskHeight);
     const overlay = document.createElement("canvas");
-    overlay.width = working.width;
-    overlay.height = working.height;
+    overlay.width = maskWidth;
+    overlay.height = maskHeight;
     const octx = overlay.getContext("2d");
     octx.drawImage(base, 0, 0);
     const data = octx.getImageData(0, 0, overlay.width, overlay.height);
@@ -260,8 +263,8 @@ export function useMaskTool({
   // are now baked into the canvas). Mirrors loadMaskBase but from a canvas.
   function applyRefinedMask(maskCanvas) {
     const overlay = document.createElement("canvas");
-    overlay.width = working.width;
-    overlay.height = working.height;
+    overlay.width = maskWidth;
+    overlay.height = maskHeight;
     const octx = overlay.getContext("2d");
     octx.drawImage(maskCanvas, 0, 0);
     const data = octx.getImageData(0, 0, overlay.width, overlay.height);
@@ -299,7 +302,7 @@ export function useMaskTool({
   // It does NOT replace the working image (onComplete owns the result), so the session is unchanged
   // except for the mask layer; the brush/eraser then refines it before Inpaint.
   function runSmartSelect(rect) {
-    if (!working || aiOp || !canMask) return;
+    if (!working || aiOp || !smartSelectSupported) return;
     const requestGeneration = smartSelectLoaderRef.current.invalidate();
     const box = rectToSegmentBox(rect);
     runAiOp({
@@ -354,6 +357,7 @@ export function useMaskTool({
     selectPointerUp,
     cancelSelectDrag,
     rasterizeMaskToFile,
+    rasterizeMaskToCanvas,
     refineMask,
     resetMaskState,
   };
