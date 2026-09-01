@@ -92,6 +92,13 @@ export const PIN_PATH = "crates/sceneworks-worker/Cargo.toml";
  */
 export const PACKAGED_SOURCES_PATH = "crates/sceneworks-core/src/memory_anchor.rs";
 
+/**
+ * The per-model loader closures (sc-22511). Not read by this generator — an anchor's currency key
+ * is carried forward from the store's own previous content (see `loaderClosureDigestFor`) — but
+ * named here because it is the other half of the pair and the file the key is compared against.
+ */
+export const ANCHOR_LOADER_CLOSURES_PATH = "config/anchor-loader-closures.json";
+
 /** The three phase peaks an anchor is made of. Absent any one of them, the record cannot anchor. */
 const PHASE_MEASUREMENTS = {
   conditioning: "conditioningActivePeak",
@@ -303,10 +310,50 @@ const anchorId = (candidate) =>
     candidate.recordId,
   ].join(":");
 
+/**
+ * The anchor's CURRENCY KEY — CARRIED FORWARD from the checked-in store, deliberately.
+ *
+ * This is the one field the generator does not re-derive, and the reason is the whole point of the
+ * key (sc-22511, E9). `source.loaderClosureDigest` records what the model's loader looked like AT
+ * THE MEASUREMENT. Currency is that recorded value compared against the digest at the CURRENT pin,
+ * so the recorded half has to stay frozen at the measurement's own revision. Both other ways of
+ * filling it are wrong, in opposite directions:
+ *
+ *   * re-deriving it at the PIN would make every anchor eternally current — a value compared with
+ *     itself, reporting "fine" straight through any loader change, and a pin bump would silently
+ *     rewrite the evidence's own provenance;
+ *   * re-deriving it at the MEASUREMENT revision here would need a clone carrying every historical
+ *     revision the store cites, making this generator's output depend on the host — the exact
+ *     host-dependence `buildAnchorStore` exists to avoid (see `inferenceRoot`).
+ *
+ * So it is derived ONCE, out of band, by `node scripts/anchor-loader-closure.mjs --repo <clone>
+ * --stamp-anchors`, which digests each anchor at its own record's revision; from then on this
+ * generator carries it. A pin bump therefore does NOT make this file stale — the anchors simply
+ * stop being current, which is the designed outcome and not an error.
+ *
+ * A NEW anchor (evidence this store has never carried) has nothing to carry forward and FAILS
+ * loudly. Borrowing the pin's digest there would mark a freshly extracted anchor current against a
+ * loader it was never measured against — the false green this key exists to prevent.
+ */
+export function loaderClosureDigestFor(previousStore, anchorId) {
+  const recorded = (previousStore?.anchors ?? []).find((anchor) => anchor.id === anchorId)?.source
+    ?.loaderClosureDigest;
+  if (typeof recorded !== "string" || !/^[0-9a-f]{64}$/.test(recorded)) {
+    throw new Error(
+      `anchor ${anchorId} has no recorded loader-closure digest in ${STORE_PATH}. A newly ` +
+        "extracted anchor must have its currency key derived at ITS OWN measurement revision: " +
+        "node scripts/anchor-loader-closure.mjs --repo <inference clone> --stamp-anchors",
+    );
+  }
+  return recorded;
+}
+
 /** Serialise one candidate into the store's anchor shape (field order is the file's field order). */
-function anchorRow(candidate, catalogCell) {
+function anchorRow(candidate, catalogCell, previousStore) {
+  const id = anchorId(candidate);
+  const loaderClosureDigest = loaderClosureDigestFor(previousStore, id);
   return {
-    id: anchorId(candidate),
+    id,
     modelId: candidate.modelId,
     modelFamily: catalogCell.modelFamily,
     route: candidate.route,
@@ -328,6 +375,7 @@ function anchorRow(candidate, catalogCell) {
       sha256: candidate.sourceSha256,
       recordId: candidate.recordId,
       calibrationFingerprint: candidate.calibrationFingerprint,
+      loaderClosureDigest,
     },
     geometry: {
       width: candidate.geometry.width,
@@ -670,6 +718,9 @@ export async function buildAnchorStore({
   const manifest = JSON.parse(stripJsoncComments(manifestBody));
   const manifestSha256 = sha256(manifestBody);
   const pin = inferencePin(await readFile(path.join(root, PIN_PATH), "utf8"));
+  // The store's own previous content, read for ONE field: each anchor's frozen currency key. See
+  // `loaderClosureDigestFor` for why that field is carried rather than re-derived.
+  const previousStore = JSON.parse(await readFile(path.join(root, STORE_PATH), "utf8"));
 
   // The fitted video curves name the corpora the video lane's identities were measured from. They
   // are not a separate reader: the assertion is that corpus discovery already reached them, so a
@@ -721,7 +772,7 @@ export async function buildAnchorStore({
   for (const [key, candidates] of byIdentity) {
     const chosen = selectRepresentative(candidates);
     const cell = catalogByCell.get(cellKey(chosen.modelId, chosen.backend, chosen.tier));
-    extracted.set(key, anchorRow(chosen, cell));
+    extracted.set(key, anchorRow(chosen, cell, previousStore));
   }
 
   // 2. Every emitted anchor must cite a corpus the Rust loader compiles in. A sibling story's
