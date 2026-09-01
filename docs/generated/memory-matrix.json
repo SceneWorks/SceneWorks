@@ -1,11 +1,11 @@
 {
   "schemaVersion": 11,
   "generatedFrom": {
-    "sceneWorksRevision": "source-tree:72949fce7b69d1da6c962ee6b8adcff76973e384fd57715b04d7c0ad3212412b",
+    "sceneWorksRevision": "source-tree:f3e84486294634b7234c63cdf4393767f47fee644ab93ca87e7eb80c84a1b439",
     "sources": {
       "manifest": {
         "path": "config/manifests/builtin.models.jsonc",
-        "sha256": "638b8b9faf93f66f7e432679ef7ae8211cd28796f561581a57e06be3bdb7c9e3"
+        "sha256": "2738a6258adc3ef06d4916d965b55afdaa2c0d01b90a339476f0efbede29de92"
       },
       "routingCatalog": {
         "path": "crates/sceneworks-core/src/jobs_store/routing/catalog.rs",
@@ -69,7 +69,7 @@
       },
       "anchorStore": {
         "path": "config/memory-anchors.json",
-        "sha256": "c13a3d5cfcc71911553b0280e69c5e17737ce6e9697746a9c2aba09533873f8a"
+        "sha256": "004a7ccc44c589f9110e3c2fa6dc81ef27aeacf7df59424af85a2d2d308f1bf4"
       },
       "anchorLoaderClosures": {
         "path": "config/anchor-loader-closures.json",
@@ -130,11 +130,11 @@
       "video": 11
     },
     "cells": 9305,
-    "publishedCells": 696,
-    "elidedCells": 8609,
+    "publishedCells": 702,
+    "elidedCells": 8603,
     "elidedByState": {
-      "Implemented": 4155,
-      "Missing": 4454
+      "Implemented": 4182,
+      "Missing": 4421
     },
     "publicationPredicate": "A coordinate is published when it carries a claim a per-lane census cannot: a measured memory anchor covers its (model, tier, backend lane), or it is structurally exempt. A bare `Implemented` or `Missing` state is a property of the whole lane, replicated across every tier x mode x overlay, and is counted in `summary.elidedByState` and the per-(entry, backend, rung) `coverage` census instead of restated thousands of times.",
     "mlxStagedStaticCoverage": 47,
@@ -5451,9 +5451,29 @@
       "coordinates": 36,
       "published": 0,
       "elided": 36,
-      "implemented": 0,
+      "implemented": 18,
       "states": {
-        "Missing": 36
+        "Implemented": 18,
+        "Missing": 18
+      },
+      "implementedBy": {
+        "tier": {
+          "bf16": 6,
+          "q4": 6,
+          "q8": 6
+        },
+        "mode": {
+          "ads2v": 3,
+          "multi_video_to_video": 3,
+          "reference_to_video": 3,
+          "reference_video_to_video": 3,
+          "text_to_video": 3,
+          "video_to_video": 3
+        },
+        "overlay": {
+          "lora": 0,
+          "none": 18
+        }
       }
     },
     {
@@ -8950,25 +8970,9 @@
       "coordinates": 12,
       "published": 0,
       "elided": 12,
-      "implemented": 9,
+      "implemented": 12,
       "states": {
-        "Implemented": 9,
-        "Missing": 3
-      },
-      "implementedBy": {
-        "tier": {
-          "bf16": 3,
-          "q4": 3,
-          "q8": 3
-        },
-        "mode": {
-          "edit_image": 3,
-          "text_to_image": 6
-        },
-        "overlay": {
-          "lora": 6,
-          "none": 3
-        }
+        "Implemented": 12
       }
     },
     {
@@ -9058,12 +9062,13 @@
       "backend": "candle",
       "rung": "bounded_transformer_residency",
       "coordinates": 18,
-      "published": 0,
-      "elided": 18,
+      "published": 6,
+      "elided": 12,
       "implemented": 3,
       "states": {
         "Implemented": 3,
-        "Missing": 15
+        "Missing": 9,
+        "Structurally N/A": 6
       },
       "implementedBy": {
         "tier": {
@@ -9089,25 +9094,25 @@
       "coordinates": 18,
       "published": 0,
       "elided": 18,
-      "implemented": 6,
+      "implemented": 9,
       "states": {
-        "Implemented": 6,
-        "Missing": 12
+        "Implemented": 9,
+        "Missing": 9
       },
       "implementedBy": {
         "tier": {
-          "bf16": 2,
-          "q4": 2,
-          "q8": 2
+          "bf16": 3,
+          "q4": 3,
+          "q8": 3
         },
         "mode": {
           "edit_image": 6,
-          "text_to_image": 0
+          "text_to_image": 3
         },
         "overlay": {
           "control": 3,
           "lora": 0,
-          "none": 3
+          "none": 6
         }
       }
     },
@@ -9205,25 +9210,25 @@
       "coordinates": 18,
       "published": 0,
       "elided": 18,
-      "implemented": 9,
+      "implemented": 12,
       "states": {
-        "Implemented": 9,
-        "Missing": 9
+        "Implemented": 12,
+        "Missing": 6
       },
       "implementedBy": {
         "tier": {
-          "bf16": 3,
-          "q4": 3,
-          "q8": 3
+          "bf16": 4,
+          "q4": 4,
+          "q8": 4
         },
         "mode": {
-          "edit_image": 3,
+          "edit_image": 6,
           "text_to_image": 6
         },
         "overlay": {
           "control": 0,
           "lora": 6,
-          "none": 3
+          "none": 6
         }
       }
     },
@@ -16607,6 +16612,354 @@
             "source": "config/memory-anchors.json#flux2_dev:mlx:q8:base:base:sc-18218-flux2-dev-t2i-resident-evidence-v1:imc-421a1bb45e9c2f5d916c"
           }
         ]
+      }
+    },
+    {
+      "id": "krea_2_turbo:krea_2_turbo:candle:bf16:text_to_image:control:bounded_transformer_residency",
+      "modelId": "krea_2_turbo",
+      "resolvedRoute": "krea_2_turbo",
+      "provider": "krea_2_turbo",
+      "backend": "candle",
+      "tier": "bf16",
+      "mode": "text_to_image",
+      "overlay": "control",
+      "rung": "bounded_transformer_residency",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "1024x1024",
+          "896x896",
+          "768x768",
+          "768x1024",
+          "1024x768",
+          "1280x720",
+          "720x1280",
+          "1216x832",
+          "832x1216",
+          "1152x896",
+          "896x1152",
+          "1536x1536",
+          "2048x1152",
+          "1152x2048",
+          "2048x1408",
+          "1408x2048",
+          "2048x2048"
+        ]
+      },
+      "strategyParameters": {},
+      "implementation": "structurally-na",
+      "anchor": null,
+      "derivationDefined": false,
+      "state": "Structurally N/A",
+      "owningFamilyStory": 15829,
+      "owningModelStory": 15913,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "crates/sceneworks-worker/src/image_jobs/base.rs#allow_streamed_blocks"
+          }
+        ],
+        "structural": [
+          {
+            "source": "crates/sceneworks-worker/src/image_jobs/base.rs#allow_streamed_blocks",
+            "reason": "load-time adapters are incompatible with streamed transformer blocks"
+          },
+          {
+            "source": "inference:crates/media/candle-gen/candle-gen-krea/src/pipeline.rs",
+            "reason": "`load_dit` returns a hard error when `stream_blocks` is set together with a load-time LoRA/LoKr spec or a merged diff-patch overlay, so a streamed render cannot serve an overlay request at all."
+          }
+        ],
+        "anchor": []
+      }
+    },
+    {
+      "id": "krea_2_turbo:krea_2_turbo:candle:bf16:text_to_image:lora:bounded_transformer_residency",
+      "modelId": "krea_2_turbo",
+      "resolvedRoute": "krea_2_turbo",
+      "provider": "krea_2_turbo",
+      "backend": "candle",
+      "tier": "bf16",
+      "mode": "text_to_image",
+      "overlay": "lora",
+      "rung": "bounded_transformer_residency",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "1024x1024",
+          "896x896",
+          "768x768",
+          "768x1024",
+          "1024x768",
+          "1280x720",
+          "720x1280",
+          "1216x832",
+          "832x1216",
+          "1152x896",
+          "896x1152",
+          "1536x1536",
+          "2048x1152",
+          "1152x2048",
+          "2048x1408",
+          "1408x2048",
+          "2048x2048"
+        ]
+      },
+      "strategyParameters": {},
+      "implementation": "structurally-na",
+      "anchor": null,
+      "derivationDefined": false,
+      "state": "Structurally N/A",
+      "owningFamilyStory": 15829,
+      "owningModelStory": 15913,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "crates/sceneworks-worker/src/image_jobs/base.rs#allow_streamed_blocks"
+          }
+        ],
+        "structural": [
+          {
+            "source": "crates/sceneworks-worker/src/image_jobs/base.rs#allow_streamed_blocks",
+            "reason": "load-time adapters are incompatible with streamed transformer blocks"
+          },
+          {
+            "source": "inference:crates/media/candle-gen/candle-gen-krea/src/pipeline.rs",
+            "reason": "`load_dit` returns a hard error when `stream_blocks` is set together with a load-time LoRA/LoKr spec or a merged diff-patch overlay, so a streamed render cannot serve an overlay request at all."
+          }
+        ],
+        "anchor": []
+      }
+    },
+    {
+      "id": "krea_2_turbo:krea_2_turbo:candle:q4:text_to_image:control:bounded_transformer_residency",
+      "modelId": "krea_2_turbo",
+      "resolvedRoute": "krea_2_turbo",
+      "provider": "krea_2_turbo",
+      "backend": "candle",
+      "tier": "q4",
+      "mode": "text_to_image",
+      "overlay": "control",
+      "rung": "bounded_transformer_residency",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "1024x1024",
+          "896x896",
+          "768x768",
+          "768x1024",
+          "1024x768",
+          "1280x720",
+          "720x1280",
+          "1216x832",
+          "832x1216",
+          "1152x896",
+          "896x1152",
+          "1536x1536",
+          "2048x1152",
+          "1152x2048",
+          "2048x1408",
+          "1408x2048",
+          "2048x2048"
+        ]
+      },
+      "strategyParameters": {},
+      "implementation": "structurally-na",
+      "anchor": null,
+      "derivationDefined": false,
+      "state": "Structurally N/A",
+      "owningFamilyStory": 15829,
+      "owningModelStory": 15913,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "crates/sceneworks-worker/src/image_jobs/base.rs#allow_streamed_blocks"
+          }
+        ],
+        "structural": [
+          {
+            "source": "crates/sceneworks-worker/src/image_jobs/base.rs#allow_streamed_blocks",
+            "reason": "load-time adapters are incompatible with streamed transformer blocks"
+          },
+          {
+            "source": "inference:crates/media/candle-gen/candle-gen-krea/src/pipeline.rs",
+            "reason": "`load_dit` returns a hard error when `stream_blocks` is set together with a load-time LoRA/LoKr spec or a merged diff-patch overlay, so a streamed render cannot serve an overlay request at all."
+          }
+        ],
+        "anchor": []
+      }
+    },
+    {
+      "id": "krea_2_turbo:krea_2_turbo:candle:q4:text_to_image:lora:bounded_transformer_residency",
+      "modelId": "krea_2_turbo",
+      "resolvedRoute": "krea_2_turbo",
+      "provider": "krea_2_turbo",
+      "backend": "candle",
+      "tier": "q4",
+      "mode": "text_to_image",
+      "overlay": "lora",
+      "rung": "bounded_transformer_residency",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "1024x1024",
+          "896x896",
+          "768x768",
+          "768x1024",
+          "1024x768",
+          "1280x720",
+          "720x1280",
+          "1216x832",
+          "832x1216",
+          "1152x896",
+          "896x1152",
+          "1536x1536",
+          "2048x1152",
+          "1152x2048",
+          "2048x1408",
+          "1408x2048",
+          "2048x2048"
+        ]
+      },
+      "strategyParameters": {},
+      "implementation": "structurally-na",
+      "anchor": null,
+      "derivationDefined": false,
+      "state": "Structurally N/A",
+      "owningFamilyStory": 15829,
+      "owningModelStory": 15913,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "crates/sceneworks-worker/src/image_jobs/base.rs#allow_streamed_blocks"
+          }
+        ],
+        "structural": [
+          {
+            "source": "crates/sceneworks-worker/src/image_jobs/base.rs#allow_streamed_blocks",
+            "reason": "load-time adapters are incompatible with streamed transformer blocks"
+          },
+          {
+            "source": "inference:crates/media/candle-gen/candle-gen-krea/src/pipeline.rs",
+            "reason": "`load_dit` returns a hard error when `stream_blocks` is set together with a load-time LoRA/LoKr spec or a merged diff-patch overlay, so a streamed render cannot serve an overlay request at all."
+          }
+        ],
+        "anchor": []
+      }
+    },
+    {
+      "id": "krea_2_turbo:krea_2_turbo:candle:q8:text_to_image:control:bounded_transformer_residency",
+      "modelId": "krea_2_turbo",
+      "resolvedRoute": "krea_2_turbo",
+      "provider": "krea_2_turbo",
+      "backend": "candle",
+      "tier": "q8",
+      "mode": "text_to_image",
+      "overlay": "control",
+      "rung": "bounded_transformer_residency",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "1024x1024",
+          "896x896",
+          "768x768",
+          "768x1024",
+          "1024x768",
+          "1280x720",
+          "720x1280",
+          "1216x832",
+          "832x1216",
+          "1152x896",
+          "896x1152",
+          "1536x1536",
+          "2048x1152",
+          "1152x2048",
+          "2048x1408",
+          "1408x2048",
+          "2048x2048"
+        ]
+      },
+      "strategyParameters": {},
+      "implementation": "structurally-na",
+      "anchor": null,
+      "derivationDefined": false,
+      "state": "Structurally N/A",
+      "owningFamilyStory": 15829,
+      "owningModelStory": 15913,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "crates/sceneworks-worker/src/image_jobs/base.rs#allow_streamed_blocks"
+          }
+        ],
+        "structural": [
+          {
+            "source": "crates/sceneworks-worker/src/image_jobs/base.rs#allow_streamed_blocks",
+            "reason": "load-time adapters are incompatible with streamed transformer blocks"
+          },
+          {
+            "source": "inference:crates/media/candle-gen/candle-gen-krea/src/pipeline.rs",
+            "reason": "`load_dit` returns a hard error when `stream_blocks` is set together with a load-time LoRA/LoKr spec or a merged diff-patch overlay, so a streamed render cannot serve an overlay request at all."
+          }
+        ],
+        "anchor": []
+      }
+    },
+    {
+      "id": "krea_2_turbo:krea_2_turbo:candle:q8:text_to_image:lora:bounded_transformer_residency",
+      "modelId": "krea_2_turbo",
+      "resolvedRoute": "krea_2_turbo",
+      "provider": "krea_2_turbo",
+      "backend": "candle",
+      "tier": "q8",
+      "mode": "text_to_image",
+      "overlay": "lora",
+      "rung": "bounded_transformer_residency",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "1024x1024",
+          "896x896",
+          "768x768",
+          "768x1024",
+          "1024x768",
+          "1280x720",
+          "720x1280",
+          "1216x832",
+          "832x1216",
+          "1152x896",
+          "896x1152",
+          "1536x1536",
+          "2048x1152",
+          "1152x2048",
+          "2048x1408",
+          "1408x2048",
+          "2048x2048"
+        ]
+      },
+      "strategyParameters": {},
+      "implementation": "structurally-na",
+      "anchor": null,
+      "derivationDefined": false,
+      "state": "Structurally N/A",
+      "owningFamilyStory": 15829,
+      "owningModelStory": 15913,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "crates/sceneworks-worker/src/image_jobs/base.rs#allow_streamed_blocks"
+          }
+        ],
+        "structural": [
+          {
+            "source": "crates/sceneworks-worker/src/image_jobs/base.rs#allow_streamed_blocks",
+            "reason": "load-time adapters are incompatible with streamed transformer blocks"
+          },
+          {
+            "source": "inference:crates/media/candle-gen/candle-gen-krea/src/pipeline.rs",
+            "reason": "`load_dit` returns a hard error when `stream_blocks` is set together with a load-time LoRA/LoKr spec or a merged diff-patch overlay, so a streamed render cannot serve an overlay request at all."
+          }
+        ],
+        "anchor": []
       }
     },
     {
@@ -49726,7 +50079,14 @@
     "instantid_realvisxl": [],
     "kolors": [],
     "krea_2_raw": [],
-    "krea_2_turbo": [],
+    "krea_2_turbo": [
+      "krea_2_turbo:krea_2_turbo:candle:bf16:text_to_image:control:bounded_transformer_residency",
+      "krea_2_turbo:krea_2_turbo:candle:bf16:text_to_image:lora:bounded_transformer_residency",
+      "krea_2_turbo:krea_2_turbo:candle:q4:text_to_image:control:bounded_transformer_residency",
+      "krea_2_turbo:krea_2_turbo:candle:q4:text_to_image:lora:bounded_transformer_residency",
+      "krea_2_turbo:krea_2_turbo:candle:q8:text_to_image:control:bounded_transformer_residency",
+      "krea_2_turbo:krea_2_turbo:candle:q8:text_to_image:lora:bounded_transformer_residency"
+    ],
     "krea_realtime_14b": [],
     "lens": [],
     "lens_turbo": [],

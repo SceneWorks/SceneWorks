@@ -1419,8 +1419,18 @@ compare:
 | `report:stale-lanes` totals | `8 stale, 0 current` — **unchanged** | `7 stale, 1 current` |
 | the lane on the stale list | still ranked **#2**, `5/5` bindings `0/5` records, `status=partially-stale` | **gone** — listed under `CURRENT (no widening applied)` |
 | shipped stale bindings | 33 | 28 |
-| `summary.currentCalibrationRuns` | 5 | 5 |
-| `z_image_turbo` mlx cell states | `Implemented/unverified: 90`, **`Verified: 0`** | `Implemented/unverified: 85`, **`Verified: 5`** |
+| `summary.currentCalibrationRuns` (deleted — see below) | 5 | 5 |
+| `z_image_turbo` mlx cell states (pre-collapse vocabulary) | `Implemented/unverified: 90`, **`Verified: 0`** | `Implemented/unverified: 85`, **`Verified: 5`** |
+
+> **sc-22513 (epic 22505, E5).** The last two rows are recorded as they were measured, in the
+> vocabulary of the pre-collapse artifact. Both surfaces are gone: `summary.currentCalibrationRuns`
+> and the root `calibrationRuns` array were deleted with the promotion machinery, and no cell state
+> is `Verified` or `Implemented/unverified` any more. A cell's state is now a pure function of
+> `implementation`, `anchor` and `derivationDefined` — `Missing / Structurally N/A / Implemented /
+> Anchored / Anchored/underived` — and an anchor's currency is REPORTED beside it
+> (`cells[].anchor.current`, `summary.staleAnchors`) rather than promoting it. The rows above are
+> still the load-bearing evidence for the §7d lesson: the evidence half alone moves nothing the
+> runtime reads. §10 step 1 below is written against the surviving surface.
 
 The evidence-only path produces `current` records that promote **nothing**. The report does not clear
 the lane; it reports `status=partially-stale` with `captured=066ff9c6a26e,5b9092c67e0f` — the two
@@ -1460,13 +1470,23 @@ candle:flux1_dev historical 5  candle:flux1_schnell historical 5
 candle:flux2_dev historical 5  mlx:z_image_turbo historical 5
 ```
 
-`matrix.summary.currentCalibrationRuns` is `0`. Several tests **pin that as an exact set**, not as an
-upper bound, so a capture that lands a `current` lane turns them red. This is the tests being right
-about yesterday, not your measurement being wrong — but it means **a measurement PR is never
-docs-only**, and you must plan to update the affected ones in the same commit.
+Several tests **pin that as an exact set**, not as an upper bound, so a capture that lands a
+`current` lane turns them red. This is the tests being right about yesterday, not your measurement
+being wrong — but it means **a measurement PR is never docs-only**, and you must plan to update the
+affected ones in the same commit.
+
+> **sc-22513.** The matrix no longer carries a `calibrationRuns` array or a
+> `summary.currentCalibrationRuns` count — the retained corpus above is validation data for the
+> derivation, not a matrix input. What the matrix now reports about currency is per ANCHOR:
+> `summary.staleAnchors` over `summary.anchors`, and `current` on each `anchors[]` row and each
+> `cells[].anchor`. It moves no state (sc-22511), so landing a current lane can no longer flip a
+> cell — but the pins below and `npm run report:stale-lanes` still move, and the artifact still has
+> to be regenerated (§8) in the same commit.
 
 **Which tests red is lane-dependent and step-dependent.** The table below is the measured result of
-simulating an `mlx:z_image_turbo` capture on `origin/main`, both ways (§7d):
+simulating an `mlx:z_image_turbo` capture on `origin/main` before the E5 collapse, both ways (§7d).
+Its rows name assertions that lived on the deleted promotion machinery; treat it as the SHAPE of the
+blast radius, and enumerate your own by running the suites named under it:
 
 | test | assertion | evidence half only | + §7d bindings |
 | --- | --- | --- | --- |
@@ -1508,7 +1528,7 @@ python3.12 -m venv /abs/path/OUTSIDE/the/repo/venv
 /abs/path/OUTSIDE/the/repo/venv/bin/python -m pytest -q tests/test_memory_matrix.py
 ```
 
-Verified on `origin/main` today: `9 passed in 19.16s`. Note the bare `python3.12` on this host has no
+Verified on this branch (sc-22513): `11 passed in 2.69s`. Note the bare `python3.12` on this host has no
 `pytest` — the venv is not optional.
 
 How to handle a red: **relax the pin to the new truth, do not delete the assertion.** The comment
@@ -1522,17 +1542,22 @@ moved and why.
 
 Four checks. Do all four; the first three are cheap.
 
-**1. The new record reads as `current` for its lane.**
+**1. The lane's anchor reads as `current`.**
+
+The matrix no longer publishes per-record rows, so ask the anchor inventory instead of the deleted
+`calibrationRuns` array (sc-22513). `npm run report:stale-lanes` answers the same question per lane
+and is the shorter route; this reads the artifact directly:
 
 ```bash
 node -e 'const m=require("./docs/generated/memory-matrix.json");
-  const c={}; for (const r of m.calibrationRuns) {
-    const k=`${r.record.backend}:${r.record.target.provider} ${r.semantics}`; c[k]=(c[k]||0)+1; }
-  console.log(c); console.log("currentCalibrationRuns:", m.summary.currentCalibrationRuns)'
+  const c={}; for (const a of m.anchors) {
+    const k=`${a.backend}:${a.provider} ${a.current ? "current" : "stale"}`; c[k]=(c[k]||0)+1; }
+  console.log(c);
+  console.log("anchors:", m.summary.anchors, "stale:", m.summary.staleAnchors)'
 ```
 
-Your lane must now appear as `current`, and `currentCalibrationRuns` must have risen by the number of
-records you landed. But **that alone is not success** — it is true on the evidence-only path too
+Your lane's anchor must now read `current`, and `summary.staleAnchors` must have fallen by one per
+lane you re-extracted. But **that alone is not success** — it is true on the evidence-only path too
 (§7d). All three of these must hold:
 
 ```bash
@@ -1543,26 +1568,33 @@ npm run report:stale-lanes    # your lane must have LEFT the stale list, and the
 ```bash
 node -e 'const m=require("./docs/generated/memory-matrix.json");
   const z=m.cells.filter(c=>c.modelId==="<modelId>"&&c.backend==="<backend>");
-  const s={}; for(const c of z) s[c.state]=(s[c.state]||0)+1; console.log(s)'
-# the measured rungs must now be Verified, not Implemented/unverified
+  const s={};
+  for(const c of z){
+    const currency=c.anchor?(c.anchor.current?"current":"stale"):"no-anchor";
+    const k=`${c.state} (${currency})`; s[k]=(s[k]||0)+1;
+  }
+  console.log(s)'
+# the measured rungs must read `Anchored` (or `Anchored/underived` where the lane has no wired
+# derivation) with `anchor.current: true` — NOT `Implemented`, which means no anchor reached them
 ```
 
-Measured on the `mlx:z_image_turbo` simulation: the corrected procedure gives
-`7 stale, 1 current`, the lane absent from the table, `28` (not 33) stale bindings, and
-`{ 'Implemented/unverified': 85, Verified: 5 }`. The evidence-only path gives `8 stale, 0 current`,
-the lane still ranked #2 as `5/5` bindings `0/5` records, and `Verified: 0`.
+Measured on the `mlx:z_image_turbo` simulation, in the pre-collapse vocabulary: the corrected
+procedure gives `7 stale, 1 current`, the lane absent from the table, `28` (not 33) stale bindings,
+and the five measured cells promoted. The evidence-only path gives `8 stale, 0 current`, the lane
+still ranked #2 as `5/5` bindings `0/5` records, and no cell promoted. Post-sc-22513 the same split
+shows up as `anchor.current` rather than as a state change.
 
 Failure modes:
 
-- **Records stay `historical`** — the captured digest does not match the live one for the lane:
+- **The anchor stays stale** — the captured digest does not match the live one for the lane:
   usually the inference checkout was not at the pin (§5), or the closure table was regenerated after
   the capture.
 - **Records are `current` but the lane is still listed, as `partially-stale`** — you did §7a-7c and
   skipped §7d. Go back and move the manifest bindings.
-- **Records are `current`, the lane is clear, but no cell is `Verified`** — the binding moved but does
-  not match the record on fingerprint, geometry, parameters, artifact revision or `engagedRungs`;
-  `calibrationBinding` requires an exact ordered match. Compare the binding object against the record
-  field by field.
+- **The lane is clear but its cells read `Implemented`, with `anchor: null`** — the record landed but
+  `scripts/extract-memory-anchors.mjs` did not derive an anchor from it, so nothing in
+  `config/memory-anchors.json` covers that (model, tier, backend lane). Re-run the extractor and
+  check the lane appears in the store rather than in `analyticOnly`.
 
 **2. `verify_model_snapshot` binds the fixture to real weights** — §4. Re-run it after the capture,
 with `--inventory-output`, and cite the `inventory_sha256` in the PR. Where the lane's artifact has no

@@ -6809,6 +6809,20 @@
         "minMemoryGb": 48,
         "quantize": 8,
         "repo": "SceneWorks/krea-2-turbo-mlx",
+        // sc-22513: re-homed from the deleted rung-4 applicability survey (family 15517, mlx),
+        // which declared rung 4 implemented for `krea_2_turbo` and `krea_2_raw` on the `none` and
+        // `lora` overlays with a window of 1. The provider contract below already covers the
+        // text_to_image slice and the Turbo-edit lora slice; this declaration is what carries the
+        // remaining `edit_image` x `none` coordinates the survey owned. Verified against the pinned
+        // capability dump: every `sequential` surface of `krea_2_turbo` lists
+        // `bounded_transformer_residency` as implemented
+        // (config/engine-capabilities/capabilities.mlx.json#memoryContracts/krea_2_turbo).
+        "memoryStrategyCapabilities": {
+          "bounded_transformer_residency": {
+            "parameters": { "transformerWindowSize": 1 },
+            "overlays": ["none", "lora"]
+          }
+        },
         // SC-18451: the declaration itself owns exact Turbo and Turbo-edit reachability. The
         // pinned provider predicate, not the legacy supportsSequentialOffload mirror, validates the
         // resolved tier, Dir source, low-rank/PiD composition, reference shape, and deferred loader.
@@ -6965,6 +6979,29 @@
       // byte-identical. minMemoryGb 32 covers the common q4 resident lane with headroom.
       "candle": {
         "minMemoryGb": 32,
+        // sc-22513: re-homed from the deleted rung-4 applicability survey (family 15517, candle
+        // `overlayIncompatible`). Krea folds diff-patch/LoRA deltas into the base weights at load
+        // and a streamed block is rebuilt from the snapshot, so an overlay request can never be
+        // served by the streamed path. `modes` scopes this to the text_to_image slice the survey
+        // scoped it to: on `edit_image` the Candle streaming path does not exist at all, so those
+        // coordinates stay Missing for the ordinary reason rather than reading as a structural
+        // exemption from a path that was never built.
+        "memoryStrategyStructuralExemptions": {
+          "bounded_transformer_residency": {
+            "modes": ["text_to_image"],
+            "overlays": ["control", "lora"],
+            "evidence": [
+              {
+                "source": "crates/sceneworks-worker/src/image_jobs/base.rs#allow_streamed_blocks",
+                "reason": "load-time adapters are incompatible with streamed transformer blocks"
+              },
+              {
+                "source": "inference:crates/media/candle-gen/candle-gen-krea/src/pipeline.rs",
+                "reason": "`load_dit` returns a hard error when `stream_blocks` is set together with a load-time LoRA/LoKr spec or a merged diff-patch overlay, so a streamed render cannot serve an overlay request at all."
+              }
+            ]
+          }
+        },
         // SC-18462: Turbo edit is a distinct registered runtime provider. Native Turbo generation
         // retains its established path; only this exact route-local declaration can authorize the
         // request-scoped staged-residency contract.
@@ -8301,6 +8338,18 @@
         "minMemoryGb": 48,
         "quantize": 8,
         "repo": "SceneWorks/krea-2-raw-mlx",
+        // sc-22513: re-homed from the deleted rung-4 applicability survey (family 15517, mlx) —
+        // the same shared-primitive declaration Turbo carries; see the note on
+        // `models/krea_2_turbo/mlx/memoryStrategyCapabilities`. Verified against the pinned
+        // capability dump: every `sequential` surface of `krea_2_raw` lists
+        // `bounded_transformer_residency` as implemented
+        // (config/engine-capabilities/capabilities.mlx.json#memoryContracts/krea_2_raw).
+        "memoryStrategyCapabilities": {
+          "bounded_transformer_residency": {
+            "parameters": { "transformerWindowSize": 1 },
+            "overlays": ["none", "lora"]
+          }
+        },
         // SC-18452: the exact Raw provider owns this declaration. True CFG is internal to
         // `krea_2_raw` (paired conditional/unconditional carries at batch 1), not a synthetic route
         // mode. Plain, reference-latent img2img, PiD, low-rank, and low-rank+PiD generation use the
@@ -21091,6 +21140,21 @@
         "minMemoryGb": 64,
         "repo": "SceneWorks/bernini-mlx",
         "quantize": 4,
+        // sc-22513: re-homed from the deleted rung-4 applicability survey (family 15528, mlx).
+        // The MLX Bernini engine streams a single 80-block global window across the two 40-block
+        // Wan expert stacks; the block stream refuses adapter-bearing loads, so only the no-overlay
+        // routes are claimed. Verified against the pinned capability dump: every
+        // `deferred_materialization` surface of `bernini` lists `bounded_transformer_residency`
+        // as implemented (config/engine-capabilities/capabilities.mlx.json#memoryContracts/bernini).
+        "memoryStrategyCapabilities": {
+          "bounded_transformer_residency": {
+            "parameters": {
+              "transformerWindowSize": 10,
+              "transformerWindowComponent": "Dit"
+            },
+            "overlays": ["none"]
+          }
+        },
         "limits": {
           "samplers": ["default"],
           "schedulers": ["default"]

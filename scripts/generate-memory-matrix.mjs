@@ -1535,8 +1535,17 @@ export function implementationVerdict({
       parameters: JSON.parse(parameters[0]),
     };
   }
+  // `modes` and `tiers` are OPTIONAL narrowings, absent meaning "every mode"/"every tier" — the
+  // same shape `memoryStrategyCapabilities` uses below. A structural exemption that cannot be
+  // narrowed by mode would have to claim the rung is inapplicable on modes whose streaming path was
+  // never built at all, which reads as "surveyed and exempted" rather than "not implemented"
+  // (sc-22513).
   const staticExemption = declaredModel[backend]?.memoryStrategyStructuralExemptions?.[rung];
-  if (staticExemption?.overlays?.includes(overlay)) {
+  if (
+    staticExemption?.overlays?.includes(overlay) &&
+    (!staticExemption.modes || staticExemption.modes.includes(mode)) &&
+    (!staticExemption.tiers || staticExemption.tiers.includes(tier))
+  ) {
     return {
       implementation: "structurally-na",
       source: staticExemption.evidence[0].source,
@@ -1612,10 +1621,21 @@ export function implementationVerdict({
       bounded_attention: "chunkedAttention",
       bounded_transformer_residency: "streamedBlocks",
     }[rung];
-    if (manifestRung && model.candle.turboFit.phaseCurvesByTier[tier][manifestRung]) {
+    // `resident` is the ONE rung this block prices without a phase curve — its formula is
+    // `vramGbByTier + cudaHeadroom`, and `phaseCurvesByTier` carries no `resident` key on any tier —
+    // so it is declared by `strategyParameters.resident` alone. Every other rung must carry its own
+    // curve for this tier, or the block is not declaring it (sc-22513: requiring a curve for
+    // `resident` too silently unimplemented Krea Turbo's Candle resident rung on all three tiers).
+    const declaresRung =
+      manifestRung === "resident"
+        ? model.candle.turboFit.strategyParameters?.resident !== undefined
+        : Boolean(model.candle.turboFit.phaseCurvesByTier[tier][manifestRung]);
+    if (manifestRung && declaresRung) {
       return {
         implementation: "implemented",
-        source: "crates/sceneworks-worker/src/vram_gate.rs#krea_turbo_fit",
+        // The DATA read here is the manifest's own `turboFit` block, not the worker's gate: cite
+        // where the declaration lives (sc-22513).
+        source: `config/manifests/builtin.models.jsonc#models/${model.id}/candle/turboFit`,
         parameters: {
           manifestRung,
           formula:
@@ -2646,6 +2666,8 @@ export function renderMarkdown(matrix) {
     "",
     "sc-18815: the `Modality` column exists because the universe is no longer one modality. Video entries carry no per-entry ownership story — epic 18803 does not slice video that way, so `Model story` is `—` rather than a story id that could not close the cell.",
     "",
+    "sc-22513: an `Anchored` / `Anchored/underived` rollup carries `(stale)` when EVERY anchor backing that (entry, backend) is non-current. It is a currency REPORT, not a state — the lane still serves its measured numbers behind the widened margin — but without it a lane whose evidence has all staled reads identically to one measured at the live loader closure. A lane with even one current anchor is unmarked.",
+    "",
     "| Catalog entry | Modality | Backend | Route | Family story | Model story | Staged residency |",
     "| --- | --- | --- | --- | --- | ---: | --- |",
   ];
@@ -2675,8 +2697,22 @@ export function renderMarkdown(matrix) {
         !staged &&
         row.coordinates > 0 &&
         (row.states["Structurally N/A"] ?? 0) === row.coordinates;
+      // sc-22513: `Anchored` in this rollup is a claim that a MEASURED anchor prices the lane, and
+      // 7 of the 10 shipped anchors are non-current. Printing the state with no currency signal let
+      // a lane whose every backing anchor has staled read exactly like one measured at the live
+      // closure. The marker is a REPORT, like `anchor.current` on the cell — it does not change the
+      // state, and a lane with even one current anchor is not marked.
+      const laneAnchors = matrix.anchors.filter(
+        (anchor) => anchor.modelId === model.id && anchor.backend === backend,
+      );
+      const allAnchorsStale = laneAnchors.length > 0 && laneAnchors.every((anchor) => !anchor.current);
+      const stagedColumn = staged
+        ? `${stagedState}${stagedState.startsWith("Anchored") && allAnchorsStale ? " (stale)" : ""}`
+        : structuralOnly
+          ? "Structurally N/A"
+          : "Missing";
       lines.push(
-        `| \`${model.id}\` | ${model.modality} | ${backend} | \`${model.resolvedRoutes[backend]}\` (${model.routeKind}) | SC-${model.owningFamilyStories[backend]} | ${model.owningModelStories[backend] === null ? "—" : `SC-${model.owningModelStories[backend]}`} | ${staged ? stagedState : structuralOnly ? "Structurally N/A" : "Missing"} |`,
+        `| \`${model.id}\` | ${model.modality} | ${backend} | \`${model.resolvedRoutes[backend]}\` (${model.routeKind}) | SC-${model.owningFamilyStories[backend]} | ${model.owningModelStories[backend] === null ? "—" : `SC-${model.owningModelStories[backend]}`} | ${stagedColumn} |`,
       );
     }
   }

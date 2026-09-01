@@ -700,3 +700,70 @@ def test_matrix_schema_rejects_a_malformed_collapsed_cell():
     rejected_document(
         lambda doc: doc["claims"]["state"].__setitem__("geometrySensitive", True)
     )
+
+
+def implementation_axis(state):
+    """Project a cell state onto the IMPLEMENTATION axis.
+
+    `Implemented`, `Anchored` and `Anchored/underived` all assert the same thing about the code —
+    the rung exists on this route — and differ only in whether an anchor prices it. Collapsing them
+    is what makes this census a claim about implementation alone, so an anchor landing or staling
+    can never move it.
+    """
+    if state == "Missing":
+        return "missing"
+    if state == "Structurally N/A":
+        return "structurally-na"
+    assert state in {"Implemented", "Anchored", "Anchored/underived"}, state
+    return "implemented"
+
+
+def test_the_implementation_axis_census_is_pinned_per_model_backend_rung():
+    """sc-22513: the per-(modelId, backend, rung) census of implemented / structurally-N/A / missing
+    coordinates, pinned against a fixture NO script regenerates.
+
+    Why it exists: the collapse dropped the rung-4 applicability survey out of the generator's read
+    set, and that silently moved the implementation axis on nine lanes — a real MLX rung-4 ladder
+    became Missing on Bernini and Krea, six real structural exemptions on Krea's Candle lane became
+    Missing, and four Candle lanes newly claimed Implemented. None of it was visible in a review of
+    the generator diff. This census is derived from `coverage[].states`, which counts EVERY resolved
+    coordinate (published and elided), so an implementation-axis move cannot hide behind elision.
+
+    What it pins is a claim about CODE and CATALOG — does this route implement this rung — read off
+    the provider contracts, the manifest declarations and the routing tables. It deliberately pins
+    no measurement, no anchor and no currency: `implementation_axis` folds the three implemented
+    states together precisely so anchor movement cannot red it.
+
+    Changing a count is legitimate; changing it SILENTLY is not. Update the fixture in the same
+    commit that changes the declaration, and say in the commit body which lanes moved and why.
+    """
+    matrix = load_matrix()
+    census = {}
+    for row in matrix["coverage"]:
+        tally = {"implemented": 0, "structurally-na": 0, "missing": 0}
+        for state, count in row["states"].items():
+            tally[implementation_axis(state)] += count
+        key = f"{row['modelId']}:{row['backend']}:{row['rung']}"
+        assert key not in census, key
+        census[key] = [tally["implemented"], tally["structurally-na"], tally["missing"]]
+
+    pinned = json.loads(
+        (ROOT / "tests/fixtures/memory-matrix-implementation-census.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert census.keys() == pinned.keys(), {
+        "unpinned lanes": sorted(census.keys() - pinned.keys()),
+        "vanished lanes": sorted(pinned.keys() - census.keys()),
+    }
+    moved = {
+        key: {"pinned": pinned[key], "generated": census[key]}
+        for key in sorted(census)
+        if census[key] != pinned[key]
+    }
+    assert not moved, moved
+    # The census is a partition of the resolved coordinates, so it also has to add up.
+    for row in matrix["coverage"]:
+        key = f"{row['modelId']}:{row['backend']}:{row['rung']}"
+        assert sum(pinned[key]) == row["coordinates"], key
+        assert pinned[key][0] == row["implemented"], key

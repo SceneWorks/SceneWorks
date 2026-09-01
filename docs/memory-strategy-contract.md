@@ -73,7 +73,7 @@ and must not be used as evidence staleness.
 still hold those concepts. The generated matrix does not: a cell's `state` is now a pure function of
 `(implementation, anchor present, derivation defined)` over `config/memory-anchors.json` and the
 routing catalog, its vocabulary is
-`Missing / Structurally N/A / Implemented / Anchored / Anchored-underived`, and the calibration plan,
+`Missing / Structurally N/A / Implemented / Anchored / Anchored/underived`, and the calibration plan,
 the evidence bundle, the provider closure ledger, the rung-4 survey artifacts and the Cargo pin have
 all left `SOURCE_PATHS`. Read `docs/generated/memory-matrix.md` for what the artifact claims today.
 

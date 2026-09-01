@@ -1,6 +1,6 @@
 
 import assert from "node:assert/strict";
-import { readFile, writeFile } from "node:fs/promises";
+import { readFile } from "node:fs/promises";
 import test from "node:test";
 
 import { stripJsoncComments } from "./lib/jsonc.mjs";
@@ -1449,6 +1449,66 @@ test("the staged column tells structural truth apart from undelivered work (sc-2
   assert.match(row("svd", "candle"), /Missing/);
 });
 
+test("an Anchored rollup carries (stale) exactly when every anchor behind it is stale (sc-22513)", async () => {
+  const matrix = await buildMatrix();
+  const row = (markdown, id, backend) =>
+    markdown
+      .split("\n")
+      .find((line) => line.startsWith(`| \`${id}\` |`) && line.includes(`| ${backend} |`));
+  const anchored = matrix.models.flatMap((model) =>
+    model.backends
+      .filter((backend) =>
+        matrix.anchors.some((anchor) => anchor.modelId === model.id && anchor.backend === backend),
+      )
+      .map((backend) => [model.id, backend]),
+  );
+  assert.ok(anchored.length > 0, "no anchored lane — the fixture would be vacuous");
+  const anchoredRollups = anchored.filter(([id, backend]) =>
+    /\| Anchored/.test(row(renderMarkdown(matrix), id, backend)),
+  );
+  assert.ok(anchoredRollups.length > 0, "no lane rolls up as Anchored — the marker is unreachable");
+
+  const withCurrency = (current) => ({
+    ...matrix,
+    anchors: matrix.anchors.map((anchor) => ({ ...anchor, current })),
+  });
+  // Every anchor stale -> every Anchored rollup marked. Every anchor current -> none marked. The
+  // marker is therefore driven by currency and by nothing else about the lane.
+  const allStale = renderMarkdown(withCurrency(false));
+  const allCurrent = renderMarkdown(withCurrency(true));
+  for (const [id, backend] of anchoredRollups) {
+    assert.match(row(allStale, id, backend), /Anchored[^|]*\(stale\)/, `${id}:${backend} stale`);
+    assert.doesNotMatch(row(allCurrent, id, backend), /\(stale\)/, `${id}:${backend} current`);
+  }
+  // ONE current anchor on a lane is enough to clear its marker — the claim is "every anchor behind
+  // it", not "any".
+  const [id, backend] = anchoredRollups[0];
+  const firstOfLane = matrix.anchors.find(
+    (anchor) => anchor.modelId === id && anchor.backend === backend,
+  );
+  const mixed = renderMarkdown({
+    ...matrix,
+    anchors: matrix.anchors.map((anchor) => ({
+      ...anchor,
+      current: anchor.id === firstOfLane.id,
+    })),
+  });
+  assert.doesNotMatch(row(mixed, id, backend), /\(stale\)/);
+  // A lane the marker must never reach: no anchor behind it at all.
+  const unanchored = matrix.models
+    .flatMap((model) => model.backends.map((backend) => [model.id, backend]))
+    .find(
+      ([candidateId, candidateBackend]) =>
+        !matrix.anchors.some(
+          (anchor) => anchor.modelId === candidateId && anchor.backend === candidateBackend,
+        ),
+    );
+  assert.doesNotMatch(row(allStale, unanchored[0], unanchored[1]), /\(stale\)/);
+  // The shipped artifact agrees with the renderer.
+  const shipped = await readFile(new URL("../docs/generated/memory-matrix.md", import.meta.url), "utf8");
+  assert.equal(shipped, renderMarkdown(matrix));
+});
+
 // ── sc-22513: the collapse ─────────────────────────────────────────────────────────────────────
 
 test("the cell state is a pure function of (implementation, anchor, derivation) and nothing else", () => {
@@ -1522,6 +1582,66 @@ test("every generated cell's state re-derives from its own three published facts
     [...produced].sort(),
     ["Anchored", "Anchored/underived", "Implemented", "Missing", "Structurally N/A"],
   );
+
+  // THE NEGATIVE CASE. Everything above is a within-one-build check, and a fourth input that
+  // happened to be CONSTANT across this build — a campaign flag, a plan row, a hardcoded per-lane
+  // adjustment — would keep the mapping single-valued and slip straight through it. So move one of
+  // the three facts and require the cells that ACTUALLY moved state to be exactly the cells
+  // `cellState` PREDICTS should move from their own before/after triples. A cell that moved without
+  // its triple predicting it is reading a fourth input; a cell whose triple predicts a move and
+  // stayed put is not a function of its triple at all. (The predicted set is a strict subset of the
+  // cells whose triple moved: dropping an anchor changes `anchorPresent` on `Missing` cells too, and
+  // `cellState` is deliberately insensitive to the anchor there.)
+  const store = JSON.parse(
+    await readFile(new URL(`../${SOURCE_PATHS.anchorStore}`, import.meta.url), "utf8"),
+  );
+  const target = matrix.cells.find((cell) => cell.anchor !== null);
+  assert.ok(target, "no anchored cell to flip — the negative case would be vacuous");
+  const flipped = {
+    ...store,
+    anchors: store.anchors.filter(
+      (anchor) =>
+        !(
+          anchor.modelId === target.modelId &&
+          anchor.backend === target.backend &&
+          anchor.tier === target.tier
+        ),
+    ),
+  };
+  const after = await buildMatrix({
+    publish: false,
+    sourceOverrides: { anchorStore: JSON.stringify(flipped) },
+  });
+  const tripleOf = (cell) => ({
+    implementation: cell.implementation,
+    anchorPresent: cell.anchor !== null,
+    derivationDefined: cell.derivationDefined,
+  });
+  const before = new Map(matrix.cells.map((cell) => [cell.id, cell]));
+  assert.equal(after.cells.length, matrix.cells.length);
+  const movedState = after.cells
+    .filter((cell) => cell.state !== before.get(cell.id).state)
+    .map((cell) => cell.id)
+    .sort();
+  const movedTriple = after.cells.filter(
+    (cell) => JSON.stringify(tripleOf(cell)) !== JSON.stringify(tripleOf(before.get(cell.id))),
+  );
+  const predicted = movedTriple
+    .filter((cell) => cellState(tripleOf(cell)) !== cellState(tripleOf(before.get(cell.id))))
+    .map((cell) => cell.id)
+    .sort();
+  assert.ok(movedTriple.length > 0, "the flip must actually move a fact triple");
+  assert.ok(predicted.length > 0, "the flip must actually predict a state move");
+  assert.deepEqual(movedState, predicted);
+  // And the mapping stays single-valued across BOTH builds together, so the flip did not introduce a
+  // second state for a triple the baseline already produced.
+  for (const cell of after.cells) {
+    const key = JSON.stringify(tripleOf(cell));
+    byFacts.set(key, (byFacts.get(key) ?? new Set()).add(cell.state));
+  }
+  for (const [key, states] of byFacts) {
+    assert.equal(states.size, 1, `${key} produced ${[...states].join(" and ")}`);
+  }
 });
 
 test("anchor CURRENCY is reported and cannot move a state (sc-22511, sc-22513)", async () => {
@@ -1756,36 +1876,10 @@ test("the fingerprint covers exactly the anchor and catalog sources, and the art
   ]) {
     assert.ok(!generator.includes(`"${removed}"`), `${removed} is still named by the generator`);
   }
-});
-
-test("a change to a REMOVED source produces no matrix diff at all (sc-22513)", async () => {
-  // The AC, taken literally: edit `config/memory-calibration-plan.json` — the campaign artifact that
-  // used to decide which coordinates were published and which records could promote them — and
-  // regenerate. Not one byte of the document may move, revision included.
-  //
-  // Mutated ON DISK rather than through `sourceOverrides`, because an override keyed by a name the
-  // map no longer has would be silently ignored and the test would pass without touching anything.
-  const planUrl = new URL(`../${"config/memory-calibration-plan.json"}`, import.meta.url);
-  const original = await readFile(planUrl, "utf8");
-  const baseline = JSON.stringify(await buildMatrix());
-  const parsed = JSON.parse(original);
-  const mutated = JSON.stringify(
-    {
-      ...parsed,
-      providers: parsed.providers.slice(1).map((entry) => ({ ...entry, name: `${entry.name}-moved` })),
-      sc22513Probe: "this file is no longer a matrix input",
-    },
-    null,
-    2,
-  );
-  try {
-    await writeFile(planUrl, `${mutated}\n`);
-    assert.notEqual(await readFile(planUrl, "utf8"), original, "the probe must really have edited the file");
-    assert.equal(JSON.stringify(await buildMatrix()), baseline);
-  } finally {
-    await writeFile(planUrl, original);
-  }
-  assert.equal(await readFile(planUrl, "utf8"), original);
+  // The mutate-regenerate-restore half of this claim lives in
+  // `scripts/matrix-removed-sources.test.mjs`, which `npm run check` runs in its own SERIAL
+  // `node --test` segment: it edits shared repo artifacts on disk, and several sibling suites hash
+  // those same bytes, so running it in the parallel pool would make them flake.
 });
 
 test("the out-of-matrix subtraction may not outlive its reason (sc-18663, sc-22513)", () => {
