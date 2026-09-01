@@ -1000,7 +1000,12 @@ export function validateFixtureArtifact(artifact, fixture, sourceRow) {
       fail(`fixture artifact ${fixture}.parityErrors must contain finite values`);
     }
   } else {
-    for (const field of ["matches", "total"]) positiveInteger(artifact.evidence[field], `fixture artifact ${fixture}.${field}`);
+    // A dense candidate and its higher-precision model reference may legitimately disagree on
+    // every item. The artifact is raw characterization evidence, so zero matches is valid shape;
+    // compressed receipts are still rejected by validateReceipt when the derived agreement falls
+    // below the frozen acceptance threshold. The denominator must remain positive.
+    nonnegativeInteger(artifact.evidence.matches, `fixture artifact ${fixture}.matches`);
+    positiveInteger(artifact.evidence.total, `fixture artifact ${fixture}.total`);
     if (artifact.evidence.matches > artifact.evidence.total) fail(`fixture artifact ${fixture} matches exceed total`);
   }
 }
