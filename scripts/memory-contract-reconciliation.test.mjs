@@ -116,16 +116,12 @@ function fixture() {
         owningFamilyStory: 200,
       },
     ],
+    // sc-22514: the anchor plan, keyed `<modelId>:<tier>:<backend>`, one entry per cell.
     calibrationPlan: {
-      providers: ["mlx", "candle"].map((backend) => ({
-        name: `${backend}-alpha`,
-        backend,
-        target: {
-          provider: `${backend}_alpha`,
-          modelId: `${backend}_model`,
-          mode: "text_to_image",
-        },
-      })),
+      anchors: Object.fromEntries(["mlx", "candle"].map((backend) => [
+        `${backend}_model:q4:${backend}`,
+        { provider: `${backend}_alpha`, mode: "text_to_image" },
+      ])),
     },
     closures: {
       providers: {
@@ -289,7 +285,7 @@ test("runtimeProvider is the exact composed provider identity", () => {
   candleFacts.memoryContracts[0].id = "candle_control";
   candleFacts.memoryRouteWitnesses[0].provider = "candle_control";
   input.cells[1].provider = "candle_control";
-  input.calibrationPlan.providers[1].target.provider = "candle_control";
+  input.calibrationPlan.anchors["candle_model:q4:candle"].provider = "candle_control";
   input.closures.providers["candle:candle_control"] = input.closures.providers["candle:candle_alpha"];
   delete input.closures.providers["candle:candle_alpha"];
   assert.equal(reconcileMemoryContracts(input).mismatches, 0);
@@ -323,7 +319,7 @@ test("route facts are independent of syntax-equivalent Rust source", () => {
 
 test("plan and closure to engine is mutation-proven green-red-green", () => {
   detectsMismatch(
-    (input) => input.calibrationPlan.providers[0].target.provider = "renamed_provider",
+    (input) => input.calibrationPlan.anchors["mlx_model:q4:mlx"].provider = "renamed_provider",
   );
   detectsMismatch(
     (input) => {

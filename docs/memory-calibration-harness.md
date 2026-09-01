@@ -3,14 +3,31 @@
 > **Measuring a lane? Start with [calibration-runbook.md](calibration-runbook.md)** (sc-18103) — the
 > parameterized, copy-paste procedure from "I want `<backend>:<provider>` measured" to "PR open with
 > the record ingested". This page is the *reference* it draws on: identities, schema semantics,
-> resume, provider protocol, truth status.
+> the anchor plan format, provider protocol, truth status.
 
 `scripts/memory-calibration-harness.mjs` is the executable, versioned evidence runner for
-MLX/Metal and Candle/CUDA. It owns plan expansion, repository resolution, provider execution,
-validation, resume, atomic writes, and generated-matrix ingestion. It does not change runtime memory
-selection policy. Runtime ingestion evaluates the bundled JSON Schema recursively before semantic
-checks, so `check`, `run`, `ingest`, and matrix generation reject the same closed record structures
-as the Draft 2020-12 validation suite.
+MLX/Metal and Candle/CUDA. It owns repository resolution, provider execution, validation and atomic
+writes. It does not change runtime memory selection policy. Runtime ingestion evaluates the bundled
+JSON Schema recursively before semantic checks, so `check`, `capture`, `ingest`, and matrix
+generation reject the same closed record structures as the Draft 2020-12 validation suite.
+
+**One anchor per (model, quant tier, backend lane) is the whole measurement obligation** (epic
+22505, sc-22514). `config/memory-calibration-plan.json` is an ANCHOR plan: an object keyed
+`<modelId>:<tier>:<backend>`, one entry each, validated against
+`packages/schemas/memory-anchor-plan.schema.json`. A second measurement of one cell, a geometry or
+parameter sweep, a rung grid, a negative case and a batch group are not merely rejected — the format
+cannot express them. Everything the grid used to measure is now DERIVED from the anchor by
+`crates/sceneworks-core/src/memory_anchor.rs`.
+
+Capturing is a two-step, and the second step is cheap and CPU-only:
+
+1. `capture` — one command, one render, one record, written as a `{records: [...]}` bundle under
+   `docs/calibration/<story>/`.
+2. `node scripts/extract-memory-anchors.mjs` then `node scripts/anchor-loader-closure.mjs
+   --stamp-anchors` — re-derive `config/memory-anchors.json` from the committed corpora (the store is
+   a pure function of them) and stamp each anchor's loader-closure currency key.
+
+There is no campaign, no resume, no reuse assessment and no currency ceremony in between.
 
 ## Truth status
 
@@ -45,68 +62,53 @@ provider at once. The runner stamps the digest at capture time from the inferenc
 already given; `evidenceSemantics` fails loudly rather than falling back if a record lacks one, since
 a silent fallback would restore the old policy invisibly.
 
-The runner derives **one digest per authoritative lane it is about to capture**, keyed on each
-selected plan entry's own `<backend>:<target.provider>` — never on `--provider`, which names a plan
-entry (`candle-krea-q4-fresh-reference-resident`), not a lane. A run that selects several lanes
-(`--backend candle` with no `--fixture`) stamps each record with its own lane's digest. A selection
-that is entirely `fixture`/`candidate` scope derives nothing: those records can never be `current`,
-so they need neither a declarations entry nor an inference crate layout. Derivation happens **before
-the first capture invocation**, so an undeclared lane fails in seconds rather than after a multi-hour
-GPU sweep. Every authoritative lane in `config/memory-calibration-plan.json` must therefore have an
-entry in `config/inference-provider-closures.json`; `memory-calibration-harness.test.mjs` asserts
-that, and that every `--fixture` a checked-in capture workflow names still exists in the plan.
+The runner derives the digest for the ONE lane it is capturing, keyed on the anchor's own
+`<backend>:<provider>`. A non-authoritative (`fixture`/`candidate`) anchor derives nothing: such a
+record can never be `current`, so it needs neither a declarations entry nor an inference crate
+layout. Derivation happens **before the provider render**, so a declaration problem surfaces in
+seconds rather than after a multi-hour capture. An UNDECLARED lane is still captured (sc-22512); its
+record simply carries no currency term and therefore reads `historical`.
+`memory-calibration-harness.test.mjs` asserts that every `--anchor` a checked-in capture workflow
+names is still declared by the plan.
 
 Full rule, what the digest covers, what it deliberately does not see, and the pin-bump procedure:
 [calibration-invalidation-sc-17774.md](calibration-invalidation-sc-17774.md).
 
-## Identities and resume
+## Identities
 
-Logical plan IDs contain provider intent only: evidence scope, backend, route, tier/mode/overlay,
-geometry, selected rung, the provider-declared ordered set of actually engaged rungs, exact
-parameters, fingerprint, fixture, and negative-case status. Placeholders never enter identity.
-Resolved record IDs additionally contain both probed Git SHAs and dirty states, the
-generated matrix source-tree digest, exact hardware, artifact repository/resolved revision, and
-harness version. The source-tree digest is the matrix comparison domain; the Git SHA remains
-independent provenance. `evidenceScope` is present in both IDs, so fixture results cannot suppress
-authoritative runs.
+Logical case IDs contain anchor intent only: evidence scope, backend, route, tier/mode/overlay,
+geometry, the anchor composition, fingerprint and fixture. Placeholders never enter identity.
+Resolved record IDs additionally contain both probed Git SHAs and dirty states, the generated matrix
+source-tree digest, exact hardware, artifact repository/resolved revision, and harness version. The
+source-tree digest is the matrix comparison domain; the Git SHA remains independent provenance.
+`evidenceScope` is present in both IDs, so fixture results cannot suppress authoritative ones.
 
-Only schema-valid `complete` records suppress their executed **passed** positive cases; a failed
-case embedded in a positive sweep never consumes its negative plan entry. A measured
-`negative_complete` record suppresses only its expected-failure case and cannot become current
-matrix evidence. Merge is commutative and
-stable-sorted. Different content with the same resolved identity is rejected instead of using
-arrival order or timestamp. Writes use a same-directory temporary file and rename.
+The ANCHOR COMPOSITION is not planned — it is fixed per backend lane by the harness
+(`ANCHOR_STRATEGY`), mirroring `isDerivable` in `scripts/extract-memory-anchors.mjs`: MLX anchors the
+`resident` composition, candle anchors the shallow optimized one (`staged_residency` engaged and
+nothing deeper), which is the only composition the candle image law can price. Planning the rung
+would let a capture spend hours producing a render the extractor then refuses.
 
-Provider resume also tracks attempted work, independently of evidence completion. A gated or
-candidate record suppresses a repeated operational attempt only when its logical case, harness
-version, repository receipts (including source-tree and dirty state), and hardware probe exactly
-match the new run. Stale or foreign-provenance records remain scheduled. This lets a checkpointed
-GPU sweep continue after failure without treating its non-authoritative records as complete or
-eligible for runtime promotion.
+Each capture writes its own bundle. Two captures are two files, and the extractor walks every
+retained corpus, so there is nothing to merge and no arrival order to resolve. Writes use a
+same-directory temporary file and rename.
 
 ## Provider protocol
 
-`run` executes the provider command, supplied as a JSON argv array. It sends one JSON request on
+`capture` executes the provider command, supplied as a JSON argv array. It sends one JSON request on
 stdin and expects one JSON response on stdout:
 
 1. `{ "action": "probe" }` → `{ "hardware": ... }`
 2. `{ "action": "run", "planned": ..., "repositories": ..., "hardware": ... }` → record fragment
-3. `{ "action": "run_batch", "planned": [...], ... }` → `{ "modelLoads": 1, "fragments": [...] }`
-4. `{ "action": "assess_batch", "planned": [...] }` → an explicit reuse-eligibility verdict
 
-`modelLoadPolicy: "batch_rungs"` plus a shared `modelLoadGroup` schedules pending cases for one
-target, backend, and fixture in canonical rung order. When multiple parameter points are pending for
-one rung, the runner selects one for the batch; a returned complete sweep can then retire the others.
-The adapter must attest exactly one model load, and every fragment preserves its existing logical and
-resolved identity. After every response the runner recomputes completed logical cases before choosing
-another provider invocation. If candidate or gated evidence leaves only part of the original rung
-cohort pending, the runner executes those remaining parameter points individually instead of sending
-an invalid partial `run_batch`. The CLI atomically checkpoints the accumulated schema-valid bundle
-after every successful provider response, so a later failure does not discard earlier captures.
+That is the whole protocol for an anchor capture: exactly two invocations, in that order. The
+`planned` payload still carries `expectedResult: "passed"`, `negative: false`,
+`modelLoadPolicy: "fresh_per_case"` and `modelLoadGroup: null` — the adapters read them — but they
+are CONSTANTS the harness attaches, not plan fields, so no plan can ask for anything else.
 
 The runner resolves both repositories using `git rev-parse HEAD` and `git status --porcelain`, reads
 the generated matrix source-tree identity, and probes them again after hardware probing and after
-every provider case. Any mid-run HEAD, dirty-state, or source-identity change rejects the capture.
+the provider render. Any mid-run HEAD, dirty-state, or source-identity change rejects the capture.
 The provider probe must return:
 
 - Candle: selected CUDA device ID/name, compute capability, driver, runtime, total bytes, and probe
@@ -141,130 +143,76 @@ plan declares the shape a rung is expected to select and the runner cross-checks
 planned value is never written onto a fragment: a receipt may only testify to its own run (sc-16482).
 An adapter that omits the field, or attests a shape the plan did not declare, fails the capture.
 
-Plan without hardware placeholders:
+List the anchor obligation (cheap, CPU-only — it reads the plan and computes identities):
 
 ```text
 node scripts/memory-calibration-harness.mjs plan \
-  --config config/memory-calibration-plan.json \
-  --output .tmp/memory-plan.json \
-  --resume docs/generated/memory-calibration-evidence.json
+  --plan config/memory-calibration-plan.json \
+  --output .tmp/memory-anchors-planned.json
 ```
 
-`plan --resume` answers "what has NEVER been attempted". For an explicitly required re-capture after
-a real measurement-contract or provider-behavior change, drop `--resume`, or it will report nothing
-outstanding and you will hold a GPU window for a no-op. A pin change alone is provenance movement,
-not a reason to re-capture.
+`.tmp/` is gitignored on purpose (see the dirty-state warning above).
 
-### ALWAYS `plan` BEFORE HOLDING A CAPTURE WINDOW
-
-`plan` is the only cheap way to learn what `run` will actually execute, and the answer is routinely
-not what you expect. Read the case count out of its output and confirm the fixtures you intend to
-capture are in it. A GPU window is exclusive — MLX Metal is not thread-safe — so discovering there
-that the runner has nothing to do costs the whole slot.
-
-### `run` takes NO `--resume`. `--resume` belongs on `ingest`.
-
-**This recipe used to pass `--resume` to `run`, and that is a trap severe enough to name: it
-produces NOTHING while exiting 0.**
-
-`--resume` skips cases that were already attempted, and "already attempted" is decided on repository
-IDENTITY with the closure digest deliberately stripped from both sides
-(`memory-calibration-harness.mjs`, `operationallyAttemptedLogicalIds`). The code says why: that check
-decides whether to re-run a multi-hour capture, not whether the evidence remains applicable — that
-is decided from the provider-specific measurement contract and compile closure. `run --resume`
-therefore no-ops for any already-attempted record. Omit it only when a real change or an explicit
-request requires re-running those cases; never omit it merely because the repository pin moved.
-
-Run an authoritative provider adapter:
+Capture ONE anchor:
 
 ```text
-node scripts/memory-calibration-harness.mjs run \
-  --config config/memory-calibration-plan.json \
-  --backend mlx \
-  --fixture qwen-image-bf16-seed15511-step2 \
-  --fresh-per-case \
+node scripts/memory-calibration-harness.mjs capture \
+  --plan config/memory-calibration-plan.json \
+  --anchor qwen_image:bf16:mlx \
   --provider-command '["/absolute/path/to/memory-provider-adapter"]' \
   --sceneworks-repo /absolute/path/to/SceneWorks \
   --inference-repo /absolute/path/to/inference \
-  --output /absolute/path/OUTSIDE/the/repo/authoritative-memory-evidence.json
+  --output /absolute/path/OUTSIDE/the/repo/qwen-image-bf16-mlx-anchor.json
 ```
 
-Use `--resume` only to make a capture RESUMABLE after an interrupted run of the same revision, never
-to re-capture staled evidence. Discard or bypass the prior bundle for that.
+`--anchor` names one `<modelId>:<tier>:<backend>` key the plan declares; an unknown or malformed key
+fails in milliseconds, before the adapter starts. The command probes hardware once, renders once, and
+writes a bundle with EXACTLY one record. To capture two anchors, run it twice — there is no resume,
+because there is no accumulating campaign state to resume into.
 
-The model-wide LTX-2.5 capture replaces the example's `--fixture` with both of these flags:
+Physical MLX provenance adds the raw-log pair (both flags or neither), which must point OUTSIDE both
+checkouts:
 
 ```text
-  --model ltx_2_5 \
-  --ltx25-snapshot-root /absolute/cache/models--SceneWorks--ltx-2.5-mlx/snapshots/081658ce6886cacba20817ce0359bbefef706ff2 \
+  --raw-log-dir /absolute/path/OUTSIDE/the/repo/raw \
+  --source-path-prefix docs/calibration/sc-XXXXX \
 ```
 
-One provider process probes one backend-specific hardware shape, so `--backend mlx|candle` is
-required when the config contains both backends. Omitting it from a mixed plan fails before starting
-the adapter. `--model <modelId>` optionally selects every plan row with that exact canonical
-`target.modelId`; for example, `--backend mlx --model ltx_2_5` selects exactly the 84 checked-in
-LTX-2.5 rows. Unknown model IDs and model/backend, model/provider, or model/fixture combinations with
-no rows fail before capture. The model selector scopes new provider executions only: `--resume`
-remains a lossless merge base, its other-model records are retained in deterministic identity order,
-and they cannot suppress a selected model's distinct logical cases. `ingest` therefore keeps its
-existing deterministic merge semantics; a resume that already completes every selected case returns
-that merge base without probing hardware or invoking the provider. For the LTX-2.5 model selector,
-`--ltx25-snapshot-root` is mandatory and valid only with `--backend mlx --model ltx_2_5`. The harness
-requires the canonical public repository/revision suffix, checks the shared enhancer and dev adapter,
-checks every selected `<transformerVariant>/<tier>` layout, hashes each selected nested root once,
-hashes the enhancer root once, and hashes the dev adapter file once when dev rows remain. It then
-replaces inherited tier and shared-component inventory variables per provider invocation while
-preserving the capture-directory and raw-provenance environment. The MLX adapter requires those
-inventories before constructing the provider and records the enhancer on every source session plus
-the refinement adapter on dev sessions. `--provider <plan-provider-name>` optionally selects one named
-provider block; use it to run the current Krea v1 production point separately from non-promotable v2 candidates.
-`--fixture <fixture-name>` selects every provider block sharing that fixture, which is the intended
-way to execute a multi-rung reference ladder as one reproducible capture.
-`--ltx25-partition <substring[,substring...]>` (valid only with `--model ltx_2_5`) runs the plan rows
-whose names contain any listed substring — a validated non-empty SUBSET of the canonical campaign, so
-the 84-case grid can be split across capture hosts (e.g. `-distilled-` on one Mac, `-dev-` on the
-other) and the per-host evidence bundles merged at ingestion. The checked-in plan remains the sole
-authority: a partition may never select a case outside it, and the full-set equality check still
-applies to unpartitioned runs.
-`--fresh-per-case` overrides scheduling for an oracle capture; `--batch-rungs` forces one target's
-rungs into an experimental batch. Compare the two bundles with the committed larger-of tolerance
-(256 MiB absolute or 5% relative for every phase/metric):
+An `ltx_2_5` anchor additionally requires `--ltx25-snapshot-root`, the canonical public
+repository/revision snapshot path. The harness checks the snapshot suffix, the shared enhancer, the
+dev refinement adapter and the anchor's own `<transformerVariant>/<tier>` layout, hashes each once,
+and re-hashes them around every provider invocation so a mutation during the render is caught. It
+then injects the tier and shared-component inventory variables the MLX adapter requires, preserving
+the capture-directory and raw-provenance environment.
 
-```text
-node scripts/memory-calibration-harness.mjs compare-reuse \
-  --fresh .tmp/fresh.json --reused .tmp/reused.json \
-  --output .tmp/reuse-comparison.json
-```
-
-When a backend cannot truthfully execute a batch, record that before measurement:
-
-```text
-node scripts/memory-calibration-harness.mjs assess-reuse \
-  --config config/memory-calibration-plan.json \
-  --backend mlx --fixture <five-rung-fixture> \
-  --provider-command '["/absolute/path/to/memory-provider-adapter"]' \
-  --output .tmp/reuse-assessment.json
-```
-
-Validate or merge captured output. **`ingest` is where `--resume` belongs** — here it is the merge
-BASE (the bundle the new records are folded into), which is a different job from `run`'s
-skip-what-was-attempted meaning. Pass `--source-root` alongside `--input` whenever the capture wrote
-raw logs, or the physical source-session derivation cannot be validated:
+Validate a captured bundle, and normalize an externally captured session file. Pass `--source-root`
+alongside `--input` whenever the capture wrote raw logs, or the physical source-session derivation
+cannot be validated:
 
 ```text
 node scripts/memory-calibration-harness.mjs check \
-  --input /absolute/path/OUTSIDE/the/repo/authoritative-memory-evidence.json \
+  --input /absolute/path/OUTSIDE/the/repo/qwen-image-bf16-mlx-anchor.json \
   --source-root /absolute/path/OUTSIDE/the/repo/raw
 
 node scripts/memory-calibration-harness.mjs ingest \
-  --input /absolute/path/OUTSIDE/the/repo/authoritative-memory-evidence.json \
+  --input /absolute/path/OUTSIDE/the/repo/qwen-image-bf16-mlx-anchor.json \
   --source-root /absolute/path/OUTSIDE/the/repo/raw \
-  --resume docs/generated/memory-calibration-evidence.json \
-  --output /absolute/path/OUTSIDE/the/repo/merged-memory-evidence.json
+  --output /absolute/path/OUTSIDE/the/repo/validated-anchor.json
 ```
 
-Chain several fixtures by feeding each `ingest`'s `--output` in as the next one's `--resume`, then
-copy the final bundle over `docs/generated/memory-calibration-evidence.json`.
+Then commit the bundle (and any raw receipts) under `docs/calibration/<story>/` and run the
+two-step's second half:
+
+```text
+node scripts/extract-memory-anchors.mjs
+node scripts/anchor-loader-closure.mjs --stamp-anchors
+```
+
+`extract-memory-anchors.mjs` only ANCHORS from a corpus named in `PACKAGED_MEMORY_ANCHOR_SOURCES`
+(`crates/sceneworks-core/src/memory_anchor.rs`); an unpackaged corpus contributes envelope evidence
+to an analytic-only row instead. Add the new file there when the lane's derivation law is fitted to
+it.
+
 
 SceneWorks now contains two real provider-protocol executables. They compile against the same exact
 inference revision as the worker and never convert partial measurements into complete evidence:
@@ -475,14 +423,11 @@ Those raw tests must be parameterized/adapted to the JSON protocol so phase sync
 hardware probing, lifecycle injection, and record emission occur in the provider process. A raw
 green test log is not ingestible evidence.
 
-The Qwen plan has fifteen authoritative records. BF16 retains the complete eleven-record ladder:
-resident, staged residency, seven overlap-64 decode edges (`768, 640, 512, 448, 384, 320, 256`),
-bounded attention, and window-1 transformer residency. Q4 and Q8 each add the exact whole-request
-bounded-attention versus window-1 transformer-residency pair required by SC-16353. BF16 uses seed
-15511; the two packed tiers use seed 16353 so their rung-3/rung-4 comparison shares the existing
-fully-resident and window-domain attribution fixture. Every record executes its own deterministic
-broad-bias mutation and may claim only its exact returned strategy tuple. The Krea plan likewise
-enumerates candidate tile, overlap, attention-chunk, and transformer-window combinations explicitly.
+sc-22514 retired the per-tier rung ladders those adapters used to be driven through. The plan now
+declares ONE anchor per (model, tier, lane) — `qwen_image:bf16:mlx`, `qwen_image:q4:mlx`,
+`qwen_image:q8:mlx` and so on — and the ladder positions the ladder used to measure are derived from
+the anchor instead. Each record still executes its own deterministic broad-bias mutation and may
+claim only its exact returned strategy tuple.
 
 ## Matrix promotion
 

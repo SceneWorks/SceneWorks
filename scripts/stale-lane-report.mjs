@@ -406,16 +406,19 @@ export function adapterCapturableProviders(source, label) {
   return [...gates.reduce((acc, gate) => new Set([...acc].filter((id) => gate.has(id))))].sort();
 }
 
-/** Per-lane calibration-plan coverage: `Map<lane, { entries, authoritative }>`. */
+/**
+ * Per-lane anchor-plan coverage: `Map<lane, { entries, authoritative }>`.
+ *
+ * sc-22514: the plan is now one anchor per `<modelId>:<tier>:<backend>` key, so an entry count IS
+ * a cell count rather than a grid-row count.
+ */
 export function planLaneCoverage(plan) {
   const byLane = new Map();
-  for (const entry of plan.providers ?? []) {
-    const backend = entry.backend;
-    const provider = entry.target?.provider;
-    if (typeof backend !== "string" || typeof provider !== "string") {
-      throw new Error(
-        `calibration-plan entry ${JSON.stringify(entry.name ?? "(unnamed)")} names no backend/provider lane`,
-      );
+  for (const [key, entry] of Object.entries(plan.anchors ?? {})) {
+    const backend = key.split(":")[2];
+    const provider = entry.provider;
+    if (typeof backend !== "string" || !backend || typeof provider !== "string") {
+      throw new Error(`anchor-plan entry ${JSON.stringify(key)} names no backend/provider lane`);
     }
     const lane = laneOf(backend, provider);
     if (!byLane.has(lane)) byLane.set(lane, { entries: 0, authoritative: 0 });

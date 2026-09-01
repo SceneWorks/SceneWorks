@@ -89,8 +89,16 @@ ${arms.join("\n")}
 ${extra}`;
 }
 
-function planEntry(backend, provider, evidenceScope = "authoritative") {
-  return { name: `${backend}-${provider}-${evidenceScope}`, backend, evidenceScope, target: { provider } };
+/**
+ * One ANCHOR plan entry (sc-22514): `<modelId>:<tier>:<backend>` keyed, one per cell. A lane can
+ * still carry several entries — one per tier — which is what the per-lane counts below add up.
+ */
+function planEntry(backend, provider, evidenceScope = "authoritative", tier = "q4") {
+  return [`${provider}_model:${tier}:${backend}`, { provider, evidenceScope }];
+}
+
+function anchorPlan(...entries) {
+  return { anchors: Object.fromEntries(entries) };
 }
 
 /**
@@ -105,7 +113,7 @@ function fixtureFrom({
   models,
   records,
   lanes,
-  plan = { providers: [] },
+  plan = { anchors: {} },
   // Every provider the fixtures declare has an arm BY DEFAULT, so pre-sc-18212 expectations (an
   // unmeasured lane is "pending capture") keep holding; capturability tests override these.
   adapterSources = { mlx: adapterSource(["alpha"]), candle: adapterSource(["beta", "gamma"]) },
@@ -225,7 +233,7 @@ test("recommended MLX T2I coverage detects a missing whole contract and every ap
     models: [model],
     records: [],
     lanes: [["mlx:alpha", LIVE_MLX]],
-    plan: { providers: [planEntry("mlx", "alpha")] },
+    plan: anchorPlan(planEntry("mlx", "alpha")),
     adapterSources: { mlx: adapterSource(["alpha"]), candle: adapterSource(["beta"]) },
   });
   assert.deepEqual(buildStaleLaneReport(complete).flagshipApparatusCoverage.missingLanes, []);
@@ -254,7 +262,7 @@ test("recommended MLX T2I coverage detects a missing whole contract and every ap
   ]);
 
   const withoutDeclaration = { ...complete, liveDigests: new Map(), declarations: {} };
-  const withoutPlan = { ...complete, plan: { providers: [] } };
+  const withoutPlan = { ...complete, plan: { anchors: {} } };
   const withoutArm = {
     ...complete,
     adapterSources: { ...complete.adapterSources, mlx: adapterSource(["other"]) },
@@ -735,7 +743,10 @@ test("a declared, planned lane with no adapter arm is uncapturable, never pendin
   // its arm — proving the categorization is derived from the dispatch, not from a hand list.
   const fixture = twoLaneFixture({
     extraLanes: [["candle:gamma", digest("d")]],
-    plan: { providers: [planEntry("candle", "gamma"), planEntry("candle", "gamma", "candidate")] },
+    plan: anchorPlan(
+      planEntry("candle", "gamma"),
+      planEntry("candle", "gamma", "candidate", "q8"),
+    ),
   });
   const armed = buildStaleLaneReport(fixture);
   assert.deepEqual(armed.unmeasuredLanes.map((lane) => lane.lane), ["candle:gamma"]);
@@ -760,12 +771,10 @@ test("a planned lane the closure table never declared joins the universe, with i
   // candle:qwen_image (planned, undeclared, arm exists) were invisible to the report entirely.
   const report = buildStaleLaneReport(
     twoLaneFixture({
-      plan: {
-        providers: [
-          planEntry("candle", "delta", "candidate"),
-          planEntry("candle", "gamma", "candidate"),
-        ],
-      },
+      plan: anchorPlan(
+        planEntry("candle", "delta", "candidate"),
+        planEntry("candle", "gamma", "candidate"),
+      ),
     }),
   );
   assert.deepEqual(
@@ -810,16 +819,14 @@ test("the human report separates pending capture from uncapturable, and prints t
       ["candle:delta", digest("e")],
       ["candle:theta", digest("f")],
     ],
-    plan: {
-      providers: [
-        planEntry("candle", "gamma"),
-        planEntry("candle", "delta"),
-        planEntry("candle", "epsilon", "candidate"),
-        // Undeclared AND armless: the report must name both missing prerequisites, not imply that
-        // adding an adapter arm alone would make the lane measurable.
-        planEntry("candle", "zeta", "candidate"),
-      ],
-    },
+    plan: anchorPlan(
+      planEntry("candle", "gamma"),
+      planEntry("candle", "delta"),
+      planEntry("candle", "epsilon", "candidate"),
+      // Undeclared AND armless: the report must name both missing prerequisites, not imply that
+      // adding an adapter arm alone would make the lane measurable.
+      planEntry("candle", "zeta", "candidate"),
+    ),
     // No "beta" arm: the stale candle:beta lane doubles as the measured-but-armless case, so the
     // ranked table's CAPTURE column shows both values at once.
     adapterSources: { mlx: adapterSource(["alpha"]), candle: adapterSource(["gamma", "epsilon"]) },

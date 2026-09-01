@@ -397,12 +397,13 @@ export function routeEligibilityFromEngineFacts(engineFacts) {
 
 function planRows(plan) {
   const rows = [];
-  for (const entry of plan.providers ?? []) {
-    const backend = entry.backend;
-    const provider = entry.target?.provider;
-    const mode = entry.target?.mode;
-    if (!backend || !provider || !mode) throw new Error(`calibration plan entry ${entry.name ?? "(unnamed)"} is under-keyed`);
-    rows.push({ backend, provider, mode, modelId: entry.target?.modelId ?? null });
+  // sc-22514: one anchor per `<modelId>:<tier>:<backend>` key replaced the provider grid.
+  for (const [key, entry] of Object.entries(plan.anchors ?? {})) {
+    const [modelId, , backend] = key.split(":");
+    const provider = entry.provider;
+    const mode = entry.mode;
+    if (!backend || !provider || !mode) throw new Error(`anchor plan entry ${key} is under-keyed`);
+    rows.push({ backend, provider, mode, modelId: modelId ?? null });
   }
   return [...new Map(rows.map((row) => [JSON.stringify(row), row])).values()];
 }
