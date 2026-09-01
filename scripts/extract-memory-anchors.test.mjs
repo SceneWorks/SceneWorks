@@ -20,6 +20,7 @@ import {
   envelopeEvidence,
   identityKey,
   inferencePin,
+  isDerivable,
   inferenceProviderConstants,
   loaderClosureDigestFor,
   locateInferenceCheckout,
@@ -53,21 +54,41 @@ before(async () => {
 
 test("every catalog model x tier x lane is classified, with nothing unclassified", () => {
   const anchored = new Set(
-    store.anchors.map((anchor) => cellKey(anchor.modelId, anchor.backend, anchor.tier)),
+    store.anchors.map((anchor) =>
+      cellKey(anchor.modelId, anchor.backend, anchor.tier),
+    ),
   );
   const analytic = new Set(
-    store.analyticOnly.map((entry) => cellKey(entry.modelId, entry.backend, entry.tier)),
+    store.analyticOnly.map((entry) =>
+      cellKey(entry.modelId, entry.backend, entry.tier),
+    ),
   );
-  const catalog = new Set(cells.map((cell) => cellKey(cell.modelId, cell.backend, cell.tier)));
+  const catalog = new Set(
+    cells.map((cell) => cellKey(cell.modelId, cell.backend, cell.tier)),
+  );
 
-  const unclassified = [...catalog].filter((cell) => !anchored.has(cell) && !analytic.has(cell));
-  assert.deepEqual(unclassified, [], "every catalog cell must carry a classification");
+  const unclassified = [...catalog].filter(
+    (cell) => !anchored.has(cell) && !analytic.has(cell),
+  );
+  assert.deepEqual(
+    unclassified,
+    [],
+    "every catalog cell must carry a classification",
+  );
 
-  const both = [...catalog].filter((cell) => anchored.has(cell) && analytic.has(cell));
+  const both = [...catalog].filter(
+    (cell) => anchored.has(cell) && analytic.has(cell),
+  );
   assert.deepEqual(both, [], "a cell is classified exactly once, never twice");
 
-  const foreign = [...anchored, ...analytic].filter((cell) => !catalog.has(cell));
-  assert.deepEqual(foreign, [], "the store must not carry a row the routing catalog cannot reach");
+  const foreign = [...anchored, ...analytic].filter(
+    (cell) => !catalog.has(cell),
+  );
+  assert.deepEqual(
+    foreign,
+    [],
+    "the store must not carry a row the routing catalog cannot reach",
+  );
 });
 
 test("the classification is shaped like the catalog, not like one corpus", () => {
@@ -88,8 +109,14 @@ test("the classification is shaped like the catalog, not like one corpus", () =>
     assert.ok(["candle", "mlx"].includes(lane), `unknown backend lane ${lane}`);
   }
   for (const entry of store.analyticOnly) {
-    assert.ok(ANALYTIC_BASES.includes(entry.basis), `${entry.id}: unknown basis ${entry.basis}`);
-    assert.ok(entry.reason.trim().length > 0, `${entry.id}: a classification must state why`);
+    assert.ok(
+      ANALYTIC_BASES.includes(entry.basis),
+      `${entry.id}: unknown basis ${entry.basis}`,
+    );
+    assert.ok(
+      entry.reason.trim().length > 0,
+      `${entry.id}: a classification must state why`,
+    );
     assert.equal(
       entry.evidence === null,
       entry.basis === "no_retained_evidence",
@@ -104,7 +131,9 @@ test("the classification is shaped like the catalog, not like one corpus", () =>
         `${anchor.id}: an anchor carries a measured ${phase} peak`,
       );
     }
-    assert.ok(anchor.source.path.length > 0 && anchor.source.sha256.length === 64);
+    assert.ok(
+      anchor.source.path.length > 0 && anchor.source.sha256.length === 64,
+    );
   }
 });
 
@@ -224,7 +253,9 @@ test("the store is a pure function of the committed evidence, not of iteration o
         // One citing a corpus this run walks, one citing evidence it never sees: neither is
         // re-derivable from the committed tree, so neither may reach the store.
         handWritten("hand:inserted", {}),
-        handWritten("hand:outside-the-corpora", { path: "docs/proving/sc-22509-candle.json" }),
+        handWritten("hand:outside-the-corpora", {
+          path: "docs/proving/sc-22509-candle.json",
+        }),
       ],
       analyticOnly: [],
     },
@@ -243,9 +274,17 @@ test("the store is a pure function of the committed evidence, not of iteration o
     "the default resolution reads no inference checkout, so the output is host-independent",
   );
   const ids = store.anchors.map((anchor) => anchor.id);
-  assert.deepEqual(ids, [...ids].sort(), "anchors are emitted in a stable sorted order");
+  assert.deepEqual(
+    ids,
+    [...ids].sort(),
+    "anchors are emitted in a stable sorted order",
+  );
   const analyticIds = store.analyticOnly.map((entry) => entry.id);
-  assert.deepEqual(analyticIds, [...analyticIds].sort(), "analytic rows are emitted sorted");
+  assert.deepEqual(
+    analyticIds,
+    [...analyticIds].sort(),
+    "analytic rows are emitted sorted",
+  );
 });
 
 // ---------------------------------------------------------------------------------------------
@@ -276,14 +315,24 @@ test("an anchor citing evidence outside the compiled-in list is refused, not emi
   const packaged = new Set(["docs/generated/memory-calibration-evidence.json"]);
   assert.doesNotThrow(() =>
     assertPackagedSources(
-      [{ id: "ok", source: { path: "docs/generated/memory-calibration-evidence.json" } }],
+      [
+        {
+          id: "ok",
+          source: { path: "docs/generated/memory-calibration-evidence.json" },
+        },
+      ],
       packaged,
     ),
   );
   assert.throws(
     () =>
       assertPackagedSources(
-        [{ id: "foreign:concurrent-story", source: { path: "docs/proving/sc-22509-candle.json" } }],
+        [
+          {
+            id: "foreign:concurrent-story",
+            source: { path: "docs/proving/sc-22509-candle.json" },
+          },
+        ],
         packaged,
       ),
     /docs\/proving\/sc-22509-candle\.json/,
@@ -315,14 +364,24 @@ test("an overlay render does not anchor the base cell", () => {
   // krea's q4 MLX evidence is control-branch-only, under its own `*_control` provider: it measures
   // a different resident set, so it may bound the cell but never anchor it.
   for (const anchor of store.anchors) {
-    assert.equal(anchor.overlay, null, `${anchor.id}: an overlay render must not anchor a cell`);
+    assert.equal(
+      anchor.overlay,
+      null,
+      `${anchor.id}: an overlay render must not anchor a cell`,
+    );
   }
   // SHAPE, not census: if the overlay-only evidence ever leaves the corpus there is nothing to
   // assert about, and failing here would red a measurement's retirement rather than a defect.
-  const overlayEvidenced = store.analyticOnly.filter((entry) => entry.evidence?.values?.overlay);
+  const overlayEvidenced = store.analyticOnly.filter(
+    (entry) => entry.evidence?.values?.overlay,
+  );
   for (const entry of overlayEvidenced) {
     assert.equal(entry.basis, "measured_envelope");
-    assert.match(entry.reason, /overlay/, `${entry.id}: the row must say why it is not anchored`);
+    assert.match(
+      entry.reason,
+      /overlay/,
+      `${entry.id}: the row must say why it is not anchored`,
+    );
   }
 });
 
@@ -340,18 +399,33 @@ test("a clean render outranks an overlay render of the same cell, whatever its e
     {
       path: "docs/generated/example.json",
       sha256: "a".repeat(64),
-      records: [render("overlay", 900, "control:1"), render("clean", 100, "none")],
+      records: [
+        render("overlay", 900, "control:1"),
+        render("clean", 100, "none"),
+      ],
     },
   ];
   const chosen = envelopeEvidence(corpora, cell);
-  assert.equal(chosen.recordId, "clean", "the smaller CLEAN envelope wins over a larger overlay");
-  assert.equal(chosen.values.overlay, undefined, "a clean row cites no overlay");
+  assert.equal(
+    chosen.recordId,
+    "clean",
+    "the smaller CLEAN envelope wins over a larger overlay",
+  );
+  assert.equal(
+    chosen.values.overlay,
+    undefined,
+    "a clean row cites no overlay",
+  );
 
   const overlayOnly = envelopeEvidence(
     [{ ...corpora[0], records: [render("overlay", 900, "control:1")] }],
     cell,
   );
-  assert.equal(overlayOnly.recordId, "overlay", "overlay evidence is still cited when it is all");
+  assert.equal(
+    overlayOnly.recordId,
+    "overlay",
+    "overlay evidence is still cited when it is all",
+  );
   assert.equal(overlayOnly.values.overlay, "control:1");
 });
 
@@ -404,22 +478,114 @@ test("the representative is the largest envelope, tie-broken by path then record
     sourcePath,
   });
   assert.equal(
-    selectRepresentative([make("b", 1, "a.json"), make("a", 2, "z.json")]).recordId,
+    selectRepresentative([make("b", 1, "a.json"), make("a", 2, "z.json")])
+      .recordId,
     "a",
   );
   assert.equal(
-    selectRepresentative([make("b", 2, "z.json"), make("a", 2, "a.json")]).recordId,
+    selectRepresentative([make("b", 2, "z.json"), make("a", 2, "a.json")])
+      .recordId,
     "a",
   );
   assert.equal(
-    selectRepresentative([make("b", 2, "a.json"), make("a", 2, "a.json")]).recordId,
+    selectRepresentative([make("b", 2, "a.json"), make("a", 2, "a.json")])
+      .recordId,
     "a",
   );
   // Total: the same candidates in any order select the same record.
-  const candidates = [make("b", 2, "a.json"), make("a", 2, "a.json"), make("c", 1, "a.json")];
+  const candidates = [
+    make("b", 2, "a.json"),
+    make("a", 2, "a.json"),
+    make("c", 1, "a.json"),
+  ];
   assert.equal(
     selectRepresentative([...candidates].reverse()).recordId,
     selectRepresentative(candidates).recordId,
+  );
+});
+
+test("derivability outranks envelope, so a cell is never anchored by a render its law refuses", () => {
+  const candle = (id, envelope, regime) => ({
+    backend: "candle",
+    transformerVariant: null,
+    decoder: null,
+    geometry: { width: 1024, height: 1024, frames: 1, fps: null },
+    measuredRegime: {
+      decodeTiled: false,
+      transformerWindowed: false,
+      staged: false,
+      attentionChunked: false,
+      ...regime,
+    },
+    overallAllocatorEnvelopeBytes: envelope,
+    recordId: id,
+    sourcePath: "docs/generated/example.json",
+  });
+  // The shape of the retained Krea corpus: the LARGEST envelope is the resident-only capture, which
+  // is the one composition `derive_image_phase_peaks` refuses. Envelope-first would anchor the cell
+  // from a row rejected on every lookup.
+  const resident = candle("resident", 25_171_066_880, {});
+  const staged = candle("staged", 22_352_494_592, { staged: true });
+  assert.equal(
+    isDerivable(resident),
+    false,
+    "a resident candle composition is not derivable",
+  );
+  assert.equal(isDerivable(staged), true, "the shallow staged composition is");
+  assert.equal(selectRepresentative([resident, staged]).recordId, "staged");
+  assert.equal(selectRepresentative([staged, resident]).recordId, "staged");
+
+  // Every deeper rung is refused too: the anchor must be the SHALLOWEST optimized composition.
+  for (const deeper of [
+    "decodeTiled",
+    "attentionChunked",
+    "transformerWindowed",
+  ]) {
+    assert.equal(
+      isDerivable(candle("deeper", 1, { staged: true, [deeper]: true })),
+      false,
+      `${deeper} is deeper than the law prices`,
+    );
+  }
+  // The MLX video law rejects no composition outright — its regime guards are anchor-vs-request —
+  // so this rule must not silently withdraw MLX rows.
+  assert.equal(isDerivable({ backend: "mlx", measuredRegime: {} }), true);
+});
+
+test("a corpus outside the compiled-in evidence list contributes evidence but never an anchor", async () => {
+  const store = await buildAnchorStore({ matrix });
+  const packaged = packagedAnchorSources(
+    await readFile(path.join(ROOT, PACKAGED_SOURCES_PATH), "utf8"),
+  );
+  for (const anchor of store.anchors) {
+    assert.ok(
+      packaged.has(anchor.source.path),
+      `${anchor.id} cites an unpackaged corpus`,
+    );
+  }
+  // `docs/generated/qwen-candle-five-rung-sc-15817.json` is walked and phase-decomposed, so it
+  // WOULD anchor `qwen_image:candle:q4` on shape alone. It is deliberately not packaged: the
+  // candle per-pixel coefficients are Krea empirics, so anchoring another model from it would
+  // reprice that model with borrowed slopes. It must classify as analytic-only instead.
+  assert.equal(
+    store.anchors.some(
+      (anchor) =>
+        anchor.modelId === "qwen_image" && anchor.backend === "candle",
+    ),
+    false,
+    "an unpackaged corpus must not anchor its cell",
+  );
+  const qwen = store.analyticOnly.find(
+    (row) => row.id === "analytic:qwen_image:candle:q4",
+  );
+  assert.equal(
+    qwen.basis,
+    "measured_envelope",
+    "its envelope is still retained as evidence",
+  );
+  assert.equal(
+    qwen.evidence.path,
+    "docs/generated/qwen-candle-five-rung-sc-15817.json",
   );
 });
 
@@ -427,7 +593,11 @@ test("an axis-free record keys on a spelling no stated axis can produce", () => 
   const axisFree = anchorCandidate(record(), corpus);
   const stated = anchorCandidate(
     record({
-      target: { ...record().target, transformerVariant: "dev", decoder: "conv" },
+      target: {
+        ...record().target,
+        transformerVariant: "dev",
+        decoder: "conv",
+      },
     }),
     corpus,
   );
@@ -440,21 +610,39 @@ test("only measured manifest tier tables become evidence", () => {
     models: [
       {
         id: "example",
-        candle: { measured: true, vramGbByTier: { q4: 18.4 }, sequentialPeakGb: { q4: 5.7 } },
+        candle: {
+          measured: true,
+          vramGbByTier: { q4: 18.4 },
+          sequentialPeakGb: { q4: 5.7 },
+        },
         mlx: { measured: false, vramGbByTier: { q4: 18.4 } },
       },
     ],
   };
   const cell = { modelId: "example", backend: "candle", tier: "q4" };
-  const evidence = manifestTierEvidence(manifest, "manifest.jsonc", "b".repeat(64), cell);
-  assert.deepEqual(evidence.values, { vramGbByTier: "18.4", sequentialPeakGb: "5.7" });
+  const evidence = manifestTierEvidence(
+    manifest,
+    "manifest.jsonc",
+    "b".repeat(64),
+    cell,
+  );
+  assert.deepEqual(evidence.values, {
+    vramGbByTier: "18.4",
+    sequentialPeakGb: "5.7",
+  });
   assert.equal(
-    manifestTierEvidence(manifest, "manifest.jsonc", "b".repeat(64), { ...cell, backend: "mlx" }),
+    manifestTierEvidence(manifest, "manifest.jsonc", "b".repeat(64), {
+      ...cell,
+      backend: "mlx",
+    }),
     null,
     "an unmeasured declaration is not evidence",
   );
   assert.equal(
-    manifestTierEvidence(manifest, "manifest.jsonc", "b".repeat(64), { ...cell, tier: "bf16" }),
+    manifestTierEvidence(manifest, "manifest.jsonc", "b".repeat(64), {
+      ...cell,
+      tier: "bf16",
+    }),
     null,
     "a tier the table does not declare is not evidence",
   );
@@ -487,7 +675,10 @@ test("a catalog cell that cannot name its family or route fails by name, not by 
     modality: "image",
   };
   assert.deepEqual(
-    (await catalogCells({ models: [model] })).map((cell) => [cell.modelFamily, cell.route]),
+    (await catalogCells({ models: [model] })).map((cell) => [
+      cell.modelFamily,
+      cell.route,
+    ]),
     [["example-family", "example_route"]],
   );
   await assert.rejects(
@@ -510,10 +701,26 @@ test("provider constants are read from the longest-prefix crate, at the cited re
   // Drives the checkout limb against a directory SHAPED like the pinned inference tree, so the
   // opt-in path is exercised without a real cargo checkout of it.
   const checkout = await mkdtemp(path.join(os.tmpdir(), "anchor-inference-"));
-  await writeProviderCrate(checkout, "mlx-gen-flux", "pub const FLUX_BYTES: u64 = 1;\n");
-  await writeProviderCrate(checkout, "mlx-gen-flux2", "pub const FLUX2_BYTES: u64 = 2_000;\n");
-  await writeProviderCrate(checkout, "mlx-gen-z", "pub const SHORT_PREFIX_BYTES: u64 = 4;\n");
-  await writeProviderCrate(checkout, "mlx-gen-z-image", "pub const Z_BYTES: u64 = 3;\n");
+  await writeProviderCrate(
+    checkout,
+    "mlx-gen-flux",
+    "pub const FLUX_BYTES: u64 = 1;\n",
+  );
+  await writeProviderCrate(
+    checkout,
+    "mlx-gen-flux2",
+    "pub const FLUX2_BYTES: u64 = 2_000;\n",
+  );
+  await writeProviderCrate(
+    checkout,
+    "mlx-gen-z",
+    "pub const SHORT_PREFIX_BYTES: u64 = 4;\n",
+  );
+  await writeProviderCrate(
+    checkout,
+    "mlx-gen-z-image",
+    "pub const Z_BYTES: u64 = 3;\n",
+  );
   await writeProviderCrate(checkout, "mlx-gen-empty", "pub fn nothing() {}\n");
   const revision = "d".repeat(40);
   const constants = await inferenceProviderConstants(
@@ -522,7 +729,10 @@ test("provider constants are read from the longest-prefix crate, at the cited re
     new Set(["flux2_dev", "z_image_turbo", "empty", "unmatched_model"]),
   );
 
-  assert.deepEqual([...constants.keys()].sort(), ["flux2_dev", "z_image_turbo"]);
+  assert.deepEqual([...constants.keys()].sort(), [
+    "flux2_dev",
+    "z_image_turbo",
+  ]);
   const flux2 = constants.get("flux2_dev");
   assert.deepEqual(
     flux2.values,
@@ -530,18 +740,30 @@ test("provider constants are read from the longest-prefix crate, at the cited re
     "`flux2_dev` matches mlx-gen-flux2, not the shorter mlx-gen-flux prefix",
   );
   assert.equal(flux2.repo, "SceneWorks/inference");
-  assert.equal(flux2.revision, revision, "a foreign citation names the revision it was read at");
-  assert.equal(flux2.path, "crates/media/mlx-gen/mlx-gen-flux2/src/memory_strategy.rs");
+  assert.equal(
+    flux2.revision,
+    revision,
+    "a foreign citation names the revision it was read at",
+  );
+  assert.equal(
+    flux2.path,
+    "crates/media/mlx-gen/mlx-gen-flux2/src/memory_strategy.rs",
+  );
   assert.match(flux2.sha256, /^[0-9a-f]{64}$/);
   assert.deepEqual(
     constants.get("z_image_turbo").values,
     { Z_BYTES: "3" },
     "`z_image_turbo` matches mlx-gen-z-image, though mlx-gen-z is also a legal prefix of it",
   );
-  assert.equal(constants.get("empty"), undefined, "a crate with no constants contributes nothing");
+  assert.equal(
+    constants.get("empty"),
+    undefined,
+    "a crate with no constants contributes nothing",
+  );
 
   assert.equal(
-    (await inferenceProviderConstants(null, revision, new Set(["flux2_dev"]))).size,
+    (await inferenceProviderConstants(null, revision, new Set(["flux2_dev"])))
+      .size,
     0,
     "with no checkout the limb reads nothing at all — the default for every generation",
   );
@@ -551,11 +773,18 @@ test("the pinned checkout is located by the pin's own short hash, or not at all"
   const home = await mkdtemp(path.join(os.tmpdir(), "anchor-home-"));
   const revision = "0123456789abcdef0123456789abcdef01234567";
   const checkouts = path.join(home, ".cargo/git/checkouts");
-  await mkdir(path.join(checkouts, "inference-9f0e1d2c", revision.slice(0, 7)), {
+  await mkdir(
+    path.join(checkouts, "inference-9f0e1d2c", revision.slice(0, 7)),
+    {
+      recursive: true,
+    },
+  );
+  await mkdir(path.join(checkouts, "inference-9f0e1d2c", "badc0de"), {
     recursive: true,
   });
-  await mkdir(path.join(checkouts, "inference-9f0e1d2c", "badc0de"), { recursive: true });
-  await mkdir(path.join(checkouts, "mlx-rs-1a2b3c4d", revision.slice(0, 7)), { recursive: true });
+  await mkdir(path.join(checkouts, "mlx-rs-1a2b3c4d", revision.slice(0, 7)), {
+    recursive: true,
+  });
 
   assert.equal(
     await locateInferenceCheckout(revision, home),
@@ -567,13 +796,20 @@ test("the pinned checkout is located by the pin's own short hash, or not at all"
     null,
     "a host holding some other revision resolves to nothing rather than to the wrong tree",
   );
-  assert.equal(await locateInferenceCheckout(revision, path.join(home, "absent")), null);
+  assert.equal(
+    await locateInferenceCheckout(revision, path.join(home, "absent")),
+    null,
+  );
 });
 
 test("the inference pin is read from the inference remote alone", () => {
   const cargo = [
-    'candle-gen = { git = "https://github.com/SceneWorks/inference", rev = "' + "a".repeat(40) + '" }',
-    'mlx-rs = { git = "https://github.com/michaeltrefry/mlx-rs", rev = "' + "b".repeat(40) + '" }',
+    'candle-gen = { git = "https://github.com/SceneWorks/inference", rev = "' +
+      "a".repeat(40) +
+      '" }',
+    'mlx-rs = { git = "https://github.com/michaeltrefry/mlx-rs", rev = "' +
+      "b".repeat(40) +
+      '" }',
   ].join("\n");
   assert.equal(inferencePin(cargo), "a".repeat(40));
   assert.throws(

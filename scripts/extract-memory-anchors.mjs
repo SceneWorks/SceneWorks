@@ -12,10 +12,12 @@
  *
  * The store has exactly two kinds of row and no third state:
  *
- * * `anchors` — a cell whose retained corpus contains a render with the three phase peaks
- *   (`conditioningActivePeak` / `denoiseActivePeak` / `decodeActivePeak`) and an overall allocator
- *   envelope. Byte-exact source provenance is recorded and re-checked by `memory_anchor.rs`
- *   against the compiled-in evidence, so the store cannot drift from the corpus it cites.
+ * * `anchors` — a cell whose retained corpus contains a render with the three phase peaks (named
+ *   per backend lane: see `PHASE_MEASUREMENTS`) and an overall allocator envelope, in a
+ *   composition the lane's derivation law can actually price (`isDerivable`), from a corpus the
+ *   Rust loader compiles in. Byte-exact source provenance is recorded and re-checked by
+ *   `memory_anchor.rs` against the compiled-in evidence, so the store cannot drift from the corpus
+ *   it cites.
  * * `analyticOnly` — a cell with no such render. It is NOT a gap: the row names WHY (`basis`) and
  *   carries whatever weaker evidence does exist, so "nobody measured this" is distinguishable from
  *   "this was measured and the record was dropped".
@@ -52,10 +54,17 @@
  * evidence behind it in this tree, and preserving it would make a withdrawn anchor immortal and
  * make `--check` unable to see the difference. A concurrently landed anchor (sc-22509's candle
  * proving models) survives a re-run the only way an anchor can be trusted to: its corpus is
- * committed under a walked root, so the re-run derives it again. `assertPackagedSources` enforces
- * the other half of that contract — every emitted anchor cites a file compiled into
- * `PACKAGED_MEMORY_ANCHOR_SOURCES`, so a store this script writes is always one the Rust loader
- * accepts.
+ * committed under a walked root AND named in `PACKAGED_MEMORY_ANCHOR_SOURCES`, so the re-run
+ * derives it again. `assertPackagedSources` enforces the other half of that contract — every
+ * emitted anchor cites a file compiled into that list, so a store this script writes is always one
+ * the Rust loader accepts.
+ *
+ * PACKAGING IS THE OPT-IN. Walking a corpus is not the same as anchoring from it: only a corpus
+ * named in `PACKAGED_MEMORY_ANCHOR_SOURCES` may anchor a cell, and an unpackaged one contributes
+ * envelope evidence to an analytic-only row instead (silently — a story may commit a corpus long
+ * before anyone fits a law to it). The reason is that a derivation prices a cell with coefficients
+ * fitted on ONE model's empirics, so anchoring a new model's cell the day its corpus lands would
+ * reprice its admission with borrowed slopes.
  *
  * Usage: node scripts/extract-memory-anchors.mjs [--check] [--inference-root <dir>|auto]
  */
@@ -90,7 +99,8 @@ export const PIN_PATH = "crates/sceneworks-worker/Cargo.toml";
  * loader hard-rejects any other path — so the generator reads the SAME list rather than trusting
  * the two halves to stay aligned by convention.
  */
-export const PACKAGED_SOURCES_PATH = "crates/sceneworks-core/src/memory_anchor.rs";
+export const PACKAGED_SOURCES_PATH =
+  "crates/sceneworks-core/src/memory_anchor.rs";
 
 /**
  * The per-model loader closures (sc-22511). Not read by this generator — an anchor's currency key
@@ -99,11 +109,25 @@ export const PACKAGED_SOURCES_PATH = "crates/sceneworks-core/src/memory_anchor.r
  */
 export const ANCHOR_LOADER_CLOSURES_PATH = "config/anchor-loader-closures.json";
 
-/** The three phase peaks an anchor is made of. Absent any one of them, the record cannot anchor. */
+/**
+ * The three phase peaks an anchor is made of, keyed by BACKEND LANE. Absent any one of them, the
+ * record cannot anchor. The two lanes name the same three peaks differently — the MLX adapter
+ * reports unified ACTIVE peaks, the candle adapter reports discrete-device peak DELTAS — and the
+ * names are chosen by the record's own `backend` rather than by probing for whichever is present,
+ * exactly as `memory_anchor::validate_anchor` chooses them. A record captured on one lane therefore
+ * cannot satisfy an anchor declared on the other, in the generator and in the loader alike.
+ */
 const PHASE_MEASUREMENTS = {
-  conditioning: "conditioningActivePeak",
-  denoise: "denoiseActivePeak",
-  decode: "decodeActivePeak",
+  mlx: {
+    conditioning: "conditioningActivePeak",
+    denoise: "denoiseActivePeak",
+    decode: "decodeActivePeak",
+  },
+  candle: {
+    conditioning: "conditioningDevicePeakDelta",
+    denoise: "denoiseDevicePeakDelta",
+    decode: "decodeDevicePeakDelta",
+  },
 };
 
 /**
@@ -139,7 +163,10 @@ async function listCorpusFiles(root) {
     }
     for (const entry of entries) {
       if (!entry.isFile() || !entry.name.endsWith(".json")) continue;
-      const absolute = path.join(entry.parentPath ?? entry.path ?? base, entry.name);
+      const absolute = path.join(
+        entry.parentPath ?? entry.path ?? base,
+        entry.name,
+      );
       found.push(toPosix(path.relative(root, absolute)));
     }
   }
@@ -167,8 +194,13 @@ export async function loadCorpora(root = ROOT, files = null) {
     } catch {
       continue;
     }
-    if (!parsed || typeof parsed !== "object" || !Array.isArray(parsed.records)) continue;
-    corpora.push({ path: relative, sha256: sha256(body), records: parsed.records });
+    if (!parsed || typeof parsed !== "object" || !Array.isArray(parsed.records))
+      continue;
+    corpora.push({
+      path: relative,
+      sha256: sha256(body),
+      records: parsed.records,
+    });
   }
   return corpora;
 }
@@ -190,7 +222,8 @@ const envelopeOf = (record) => {
   return Number.isInteger(bytes) && bytes > 0 ? bytes : null;
 };
 
-export const cellKey = (modelId, backend, tier) => `${modelId}:${backend}:${tier}`;
+export const cellKey = (modelId, backend, tier) =>
+  `${modelId}:${backend}:${tier}`;
 
 /**
  * The anchor identity cell: `(model, tier, backend lane, transformer variant, decoder)` — the same
@@ -220,7 +253,7 @@ export function anchorCandidate(record, corpus) {
   if (typeof recordId !== "string") return null;
   const measured = measurementsOf(record);
   const phases = {};
-  for (const [phase, name] of Object.entries(PHASE_MEASUREMENTS)) {
+  for (const [phase, name] of Object.entries(PHASE_MEASUREMENTS[backend])) {
     const value = measured.get(name);
     if (!Number.isInteger(value) || value <= 0) return null;
     phases[phase] = value;
@@ -231,15 +264,24 @@ export function anchorCandidate(record, corpus) {
   const width = geometry.width;
   const height = geometry.height;
   const frames = geometry.frames;
-  if (!Number.isInteger(width) || !Number.isInteger(height) || !Number.isInteger(frames)) {
+  if (
+    !Number.isInteger(width) ||
+    !Number.isInteger(height) ||
+    !Number.isInteger(frames)
+  ) {
     return null;
   }
   if (width <= 0 || height <= 0 || frames <= 0) return null;
   const loadShape = record.loadShape;
-  if (loadShape !== "eager_materialization" && loadShape !== "deferred_materialization") {
+  if (
+    loadShape !== "eager_materialization" &&
+    loadShape !== "deferred_materialization"
+  ) {
     return null;
   }
-  const engaged = Array.isArray(record.strategy?.engagedRungs) ? record.strategy.engagedRungs : [];
+  const engaged = Array.isArray(record.strategy?.engagedRungs)
+    ? record.strategy.engagedRungs
+    : [];
   const fps = measured.get("outputFps");
   const provider = typeof target.provider === "string" ? target.provider : null;
   if (provider === null) return null;
@@ -254,17 +296,33 @@ export function anchorCandidate(record, corpus) {
     // this must not invent a different one.
     route: typeof target.route === "string" ? target.route : provider,
     transformerVariant:
-      typeof target.transformerVariant === "string" ? target.transformerVariant : null,
+      typeof target.transformerVariant === "string"
+        ? target.transformerVariant
+        : null,
     decoder: typeof target.decoder === "string" ? target.decoder : null,
-    overlay: target.overlay === "none" || target.overlay === undefined ? null : target.overlay,
-    referenceCount: Number.isInteger(target.referenceCount) ? target.referenceCount : 0,
+    overlay:
+      target.overlay === "none" || target.overlay === undefined
+        ? null
+        : target.overlay,
+    referenceCount: Number.isInteger(target.referenceCount)
+      ? target.referenceCount
+      : 0,
     loadShape,
+    // All FOUR declared rungs, not just the two the video law reads: `staged` decides whether the
+    // text encoder was still co-resident through conditioning and `attentionChunked` decides the
+    // denoise intercept, both of which the candle image law (sc-22509) reads.
+    // `AnchorMeasuredRegime` is `deny_unknown_fields` with four non-optional members, so a store
+    // emitting fewer would not load at all.
     measuredRegime: {
       decodeTiled: engaged.includes("bounded_decode"),
       transformerWindowed: engaged.includes("bounded_transformer_residency"),
+      staged: engaged.includes("staged_residency"),
+      attentionChunked: engaged.includes("bounded_attention"),
     },
     calibrationFingerprint:
-      typeof record.calibrationFingerprint === "string" ? record.calibrationFingerprint : null,
+      typeof record.calibrationFingerprint === "string"
+        ? record.calibrationFingerprint
+        : null,
     geometry: {
       width,
       height,
@@ -280,22 +338,81 @@ export function anchorCandidate(record, corpus) {
 }
 
 /**
- * The representative render for one identity cell, chosen mechanically: the LARGEST measured
- * allocator envelope, tie-broken by (source path, record id). The largest envelope is the most
- * binding retained observation of that cell, and every tie-break term is a stable string, so the
- * choice cannot move with corpus iteration order.
+ * Whether the lane's derivation law can price ANY request from a record in this composition.
+ *
+ * This mirrors the anchor-local guards in `crates/sceneworks-core/src/memory_anchor.rs`, and it is
+ * deliberately only the anchor-local half. Guards that compare the anchor to the REQUEST being
+ * graded (the video law's "an anchor measured in a bounded regime refuses the unbounded request")
+ * are not derivability questions: such an anchor still prices every correspondingly-bounded
+ * request, so it is a usable row. What is filtered here is a record no request at all could be
+ * priced from — an anchor the law rejects outright, which would be an unreachable store row.
+ *
+ * * `mlx` mirrors `MemoryAnchor::derive_video_phase_peaks`, which rejects no composition
+ *   outright: its regime guards are all anchor-vs-request, so a record in ANY composition prices
+ *   the correspondingly-bounded requests. Its one anchor-local guard — pipeline axes must be
+ *   stated — is deliberately NOT a filter here: since sc-22510 an axis-free row is how a cell
+ *   measured without pipeline axes is CLASSIFIED, and withdrawing those rows would narrow the
+ *   catalog coverage that story established rather than fix anything.
+ * * `candle` mirrors `MemoryAnchor::derive_image_phase_peaks`: that law prices exactly the SHALLOW
+ *   optimized composition — `staged_residency` engaged and nothing deeper — on a still, with no
+ *   pipeline axes. Every deeper rung exists to make a phase smaller, so the shallow anchor upper
+ *   bounds them; a resident composition holds the text encoder through denoise and decode and is
+ *   strictly LARGER, the direction the anchor cannot cover, so the law refuses it. Anchoring the
+ *   cell from a resident render would therefore emit a row the law rejects on every lookup.
+ *
+ * An unknown lane has no law to mirror and gets no opinion.
+ */
+export function isDerivable(candidate) {
+  const regime = candidate.measuredRegime;
+  if (candidate.backend === "mlx") {
+    return true;
+  }
+  if (candidate.backend === "candle") {
+    return (
+      candidate.transformerVariant === null &&
+      candidate.decoder === null &&
+      candidate.geometry?.frames === 1 &&
+      regime?.staged === true &&
+      regime?.decodeTiled === false &&
+      regime?.attentionChunked === false &&
+      regime?.transformerWindowed === false
+    );
+  }
+  return true;
+}
+
+/**
+ * The representative render for one identity cell, chosen mechanically: DERIVABILITY first (a
+ * record whose composition the lane's law can actually price outranks one it cannot, however much
+ * larger the latter's envelope is — see [`isDerivable`]), then the LARGEST measured allocator
+ * envelope, tie-broken by (source path, record id). The largest envelope is the most binding
+ * retained observation of that cell, and every tie-break term is a stable string, so the choice
+ * cannot move with corpus iteration order.
+ *
+ * Ordering the two terms the other way would let a cell be anchored by a render the law rejects,
+ * which reads as coverage and admits nothing: krea's resident-only capture is the largest envelope
+ * its corpus retains AND the one composition `derive_image_phase_peaks` refuses.
  */
 export function selectRepresentative(candidates) {
   return candidates.reduce((best, candidate) => {
     if (best === null) return candidate;
-    if (candidate.overallAllocatorEnvelopeBytes !== best.overallAllocatorEnvelopeBytes) {
-      return candidate.overallAllocatorEnvelopeBytes > best.overallAllocatorEnvelopeBytes
+    const candidateDerivable = isDerivable(candidate);
+    if (candidateDerivable !== isDerivable(best))
+      return candidateDerivable ? candidate : best;
+    if (
+      candidate.overallAllocatorEnvelopeBytes !==
+      best.overallAllocatorEnvelopeBytes
+    ) {
+      return candidate.overallAllocatorEnvelopeBytes >
+        best.overallAllocatorEnvelopeBytes
         ? candidate
         : best;
     }
     const byPath = compareText(candidate.sourcePath, best.sourcePath);
     if (byPath !== 0) return byPath < 0 ? candidate : best;
-    return compareText(candidate.recordId, best.recordId) < 0 ? candidate : best;
+    return compareText(candidate.recordId, best.recordId) < 0
+      ? candidate
+      : best;
   }, null);
 }
 
@@ -369,6 +486,8 @@ function anchorRow(candidate, catalogCell, previousStore) {
     measuredRegime: {
       decodeTiled: candidate.measuredRegime.decodeTiled,
       transformerWindowed: candidate.measuredRegime.transformerWindowed,
+      staged: candidate.measuredRegime.staged,
+      attentionChunked: candidate.measuredRegime.attentionChunked,
     },
     source: {
       path: candidate.sourcePath,
@@ -456,14 +575,19 @@ export function envelopeEvidence(corpora, cell) {
   for (const corpus of corpora) {
     for (const record of corpus.records) {
       if (record?.backend !== cell.backend) continue;
-      if (record?.target?.modelId !== cell.modelId || record?.target?.tier !== cell.tier) continue;
+      if (
+        record?.target?.modelId !== cell.modelId ||
+        record?.target?.tier !== cell.tier
+      )
+        continue;
       const envelope = envelopeOf(record);
       if (envelope === null || typeof record.id !== "string") continue;
       // The overlay and provider of the cited render are carried, not elided: an envelope measured
       // under a control overlay is evidence ABOUT a different resident set, and a reader has to be
       // able to see that from the row.
       const overlay =
-        typeof record.target?.overlay === "string" && record.target.overlay !== "none"
+        typeof record.target?.overlay === "string" &&
+        record.target.overlay !== "none"
           ? record.target.overlay
           : null;
       const values = {
@@ -490,17 +614,26 @@ export function envelopeEvidence(corpora, cell) {
 
 /** Larger envelope wins; ties broken by (source path, record id), both stable strings. */
 function preferEnvelope(best, candidate) {
-  if (best === null || candidate.envelopeBytes > best.envelopeBytes) return candidate;
+  if (best === null || candidate.envelopeBytes > best.envelopeBytes)
+    return candidate;
   if (candidate.envelopeBytes < best.envelopeBytes) return best;
   const byPath = compareText(candidate.path, best.path);
-  if (byPath < 0 || (byPath === 0 && compareText(candidate.recordId, best.recordId) < 0)) {
+  if (
+    byPath < 0 ||
+    (byPath === 0 && compareText(candidate.recordId, best.recordId) < 0)
+  ) {
     return candidate;
   }
   return best;
 }
 
 /** `measured: true` tier tables in the catalog manifest — a declared envelope, per tier. */
-export function manifestTierEvidence(manifest, manifestPath, manifestSha256, cell) {
+export function manifestTierEvidence(
+  manifest,
+  manifestPath,
+  manifestSha256,
+  cell,
+) {
   const model = manifest.models?.find((entry) => entry.id === cell.modelId);
   const block = model?.[cell.backend];
   if (!block || block.measured !== true) return null;
@@ -548,7 +681,9 @@ export function inferencePin(cargoToml) {
  * one would be writing an artifact the consumer cannot load.
  */
 export function packagedAnchorSources(source) {
-  const start = source.indexOf("PACKAGED_MEMORY_ANCHOR_SOURCES: &[(&str, &str)] = &[");
+  const start = source.indexOf(
+    "PACKAGED_MEMORY_ANCHOR_SOURCES: &[(&str, &str)] = &[",
+  );
   const end = start === -1 ? -1 : source.indexOf("\n];", start);
   if (start === -1 || end === -1) {
     throw new Error(
@@ -560,7 +695,9 @@ export function packagedAnchorSources(source) {
     ...source.slice(start, end).matchAll(/\(\s*"([^"]+)",\s*include_str!/g),
   ].map((match) => match[1]);
   if (paths.length === 0) {
-    throw new Error(`${PACKAGED_SOURCES_PATH} declares an empty PACKAGED_MEMORY_ANCHOR_SOURCES`);
+    throw new Error(
+      `${PACKAGED_SOURCES_PATH} declares an empty PACKAGED_MEMORY_ANCHOR_SOURCES`,
+    );
   }
   return new Set(paths);
 }
@@ -589,8 +726,12 @@ export function assertPackagedSources(anchors, packaged) {
  */
 export function providerByteConstants(source) {
   const values = {};
-  for (const match of source.matchAll(/^pub const ([A-Z0-9_]*BYTES): u64 = ([0-9_]+);/gm)) {
-    values[match[1]] = String(Number.parseInt(match[2].replaceAll("_", ""), 10));
+  for (const match of source.matchAll(
+    /^pub const ([A-Z0-9_]*BYTES): u64 = ([0-9_]+);/gm,
+  )) {
+    values[match[1]] = String(
+      Number.parseInt(match[2].replaceAll("_", ""), 10),
+    );
   }
   return values;
 }
@@ -613,7 +754,9 @@ export async function locateInferenceCheckout(revision, home = os.homedir()) {
     if (!entry.isDirectory() || !entry.name.startsWith("inference-")) continue;
     let revisions;
     try {
-      revisions = await readdir(path.join(base, entry.name), { withFileTypes: true });
+      revisions = await readdir(path.join(base, entry.name), {
+        withFileTypes: true,
+      });
     } catch {
       continue;
     }
@@ -642,7 +785,10 @@ async function mlxProviderCrates(checkoutRoot) {
       key: entry.name.slice("mlx-gen-".length).replaceAll("-", "_"),
       source: path.join(base, entry.name, "src/memory_strategy.rs"),
     }))
-    .sort((left, right) => right.key.length - left.key.length || compareText(left.key, right.key));
+    .sort(
+      (left, right) =>
+        right.key.length - left.key.length || compareText(left.key, right.key),
+    );
 }
 
 /**
@@ -651,7 +797,11 @@ async function mlxProviderCrates(checkoutRoot) {
  * `mlx-gen-flux2`, `z_image_turbo` -> `mlx-gen-z-image`), which is how the routing catalog's model
  * ids relate to the engine crates.
  */
-export async function inferenceProviderConstants(checkoutRoot, revision, modelIds) {
+export async function inferenceProviderConstants(
+  checkoutRoot,
+  revision,
+  modelIds,
+) {
   if (checkoutRoot === null) return new Map();
   const crates = await mlxProviderCrates(checkoutRoot);
   const byRoute = new Map();
@@ -681,7 +831,8 @@ export async function inferenceProviderConstants(checkoutRoot, revision, modelId
   return byRoute;
 }
 
-const analyticId = (cell) => `analytic:${cellKey(cell.modelId, cell.backend, cell.tier)}`;
+const analyticId = (cell) =>
+  `analytic:${cellKey(cell.modelId, cell.backend, cell.tier)}`;
 
 const REASONS = {
   measured_envelope:
@@ -725,7 +876,9 @@ export async function buildAnchorStore({
   // The fitted video curves name the corpora the video lane's identities were measured from. They
   // are not a separate reader: the assertion is that corpus discovery already reached them, so a
   // renamed or dropped sweep fails here instead of silently narrowing the anchor population.
-  const curves = JSON.parse(await readFile(path.join(root, VIDEO_CURVES_PATH), "utf8"));
+  const curves = JSON.parse(
+    await readFile(path.join(root, VIDEO_CURVES_PATH), "utf8"),
+  );
   const curveSources = new Set();
   for (const curve of curves.curves ?? []) {
     for (const source of curve.evidence?.sources ?? []) {
@@ -733,7 +886,9 @@ export async function buildAnchorStore({
     }
   }
   const discovered = new Set(corpora.map((corpus) => corpus.path));
-  const missing = [...curveSources].filter((source) => !discovered.has(source)).sort(compareText);
+  const missing = [...curveSources]
+    .filter((source) => !discovered.has(source))
+    .sort(compareText);
   if (missing.length > 0) {
     throw new Error(
       `${VIDEO_CURVES_PATH} cites record corpora that corpus discovery did not reach: ${missing.join(", ")}`,
@@ -745,8 +900,23 @@ export async function buildAnchorStore({
   );
 
   // 1. Anchors from the retained corpora, one per identity cell, catalog-scoped.
+  //
+  // ANCHOR candidacy is restricted to corpora the Rust loader compiles in
+  // (`PACKAGED_MEMORY_ANCHOR_SOURCES`). A corpus outside that list is still walked and still
+  // contributes envelope evidence to an analytic-only row — it is retained evidence either way —
+  // but it may not ANCHOR a cell. Packaging a corpus is the deliberate act that makes its cell
+  // derivable, because a derivation prices a cell with coefficients fitted on ONE model's
+  // empirics: `CANDLE_*_PER_PIXEL_BYTES` are Krea measurements, not architecture facts, so
+  // anchoring another model's cell from a newly committed corpus would silently reprice its
+  // admission with borrowed slopes. Skipping is deliberate rather than fatal — a story may commit
+  // a corpus long before anyone fits a law to it — and `assertPackagedSources` below remains the
+  // guard that no EMITTED anchor cites an unpackaged path.
+  const packagedSources = packagedAnchorSources(
+    await readFile(path.join(root, PACKAGED_SOURCES_PATH), "utf8"),
+  );
   const byIdentity = new Map();
   for (const corpus of corpora) {
+    if (!packagedSources.has(corpus.path)) continue;
     for (const record of corpus.records) {
       const candidate = anchorCandidate(record, corpus);
       if (candidate === null) continue;
@@ -771,7 +941,14 @@ export async function buildAnchorStore({
   const extracted = new Map();
   for (const [key, candidates] of byIdentity) {
     const chosen = selectRepresentative(candidates);
-    const cell = catalogByCell.get(cellKey(chosen.modelId, chosen.backend, chosen.tier));
+    // A cell whose every retained render is in a composition the lane's law refuses is NOT
+    // anchored: the row would be rejected on every lookup, so it would read as coverage while
+    // admitting nothing. It falls through to the analytic-only pass below, where its largest
+    // envelope is cited as `measured_envelope` — the honest classification for it.
+    if (!isDerivable(chosen)) continue;
+    const cell = catalogByCell.get(
+      cellKey(chosen.modelId, chosen.backend, chosen.tier),
+    );
     extracted.set(key, anchorRow(chosen, cell, previousStore));
   }
 
@@ -779,13 +956,14 @@ export async function buildAnchorStore({
   //    anchors reach this store the same way these did — its corpus lands under a walked root and
   //    in `PACKAGED_MEMORY_ANCHOR_SOURCES`, and the regeneration derives them — so the two halves
   //    are checked against each other here rather than assumed to agree.
-  const anchors = [...extracted.values()].sort((left, right) => compareText(left.id, right.id));
-  assertPackagedSources(
-    anchors,
-    packagedAnchorSources(await readFile(path.join(root, PACKAGED_SOURCES_PATH), "utf8")),
+  const anchors = [...extracted.values()].sort((left, right) =>
+    compareText(left.id, right.id),
   );
+  assertPackagedSources(anchors, packagedSources);
   const anchoredCells = new Set(
-    anchors.map((anchor) => cellKey(anchor.modelId, anchor.backend, anchor.tier)),
+    anchors.map((anchor) =>
+      cellKey(anchor.modelId, anchor.backend, anchor.tier),
+    ),
   );
 
   // 3. Provider constants at the PIN — OPT-IN. A default run reads no checkout, so this limb
@@ -794,8 +972,15 @@ export async function buildAnchorStore({
   const mlxModelIds = new Set(
     cells.filter((cell) => cell.backend === "mlx").map((cell) => cell.modelId),
   );
-  const checkout = inferenceRoot === "auto" ? await locateInferenceCheckout(pin) : inferenceRoot;
-  const providerConstants = await inferenceProviderConstants(checkout, pin, mlxModelIds);
+  const checkout =
+    inferenceRoot === "auto"
+      ? await locateInferenceCheckout(pin)
+      : inferenceRoot;
+  const providerConstants = await inferenceProviderConstants(
+    checkout,
+    pin,
+    mlxModelIds,
+  );
 
   // 4. Every remaining catalog cell is classified explicitly. There is no unclassified state.
   const analyticOnly = [];
@@ -803,8 +988,16 @@ export async function buildAnchorStore({
     const key = cellKey(cell.modelId, cell.backend, cell.tier);
     if (anchoredCells.has(key)) continue;
     const envelope = envelopeEvidence(corpora, cell);
-    const provider = cell.backend === "mlx" ? (providerConstants.get(cell.modelId) ?? null) : null;
-    const declared = manifestTierEvidence(manifest, MANIFEST_PATH, manifestSha256, cell);
+    const provider =
+      cell.backend === "mlx"
+        ? (providerConstants.get(cell.modelId) ?? null)
+        : null;
+    const declared = manifestTierEvidence(
+      manifest,
+      MANIFEST_PATH,
+      manifestSha256,
+      cell,
+    );
     const [basis, evidence] =
       envelope !== null
         ? ["measured_envelope", envelope]
@@ -854,7 +1047,9 @@ async function main() {
   if (args.includes("--check")) {
     const existing = await readFile(target, "utf8");
     if (existing !== serialised) {
-      process.stderr.write(`${STORE_PATH} is stale — re-run scripts/extract-memory-anchors.mjs\n`);
+      process.stderr.write(
+        `${STORE_PATH} is stale — re-run scripts/extract-memory-anchors.mjs\n`,
+      );
       process.exitCode = 1;
       return;
     }
@@ -871,6 +1066,9 @@ async function main() {
   );
 }
 
-if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+if (
+  process.argv[1] &&
+  path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)
+) {
   await main();
 }
