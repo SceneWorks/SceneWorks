@@ -67,6 +67,16 @@ containing `"` also stays hashed, since the generators' parsers read double-quot
 `scripts/lib/source-revision.mjs`). Exact raw-source history remains available in version control
 and must not be used as evidence staleness.
 
+**The MATRIX no longer speaks this vocabulary (sc-22513, epic 22505 E5).** Everything above about
+`Verified`, `Implemented/unverified`, calibration fingerprints, engaged compositions and
+`CALIBRATION_ABI_VERSIONS` describes the RUNTIME selector and the retained evidence corpora, which
+still hold those concepts. The generated matrix does not: a cell's `state` is now a pure function of
+`(implementation, anchor present, derivation defined)` over `config/memory-anchors.json` and the
+routing catalog, its vocabulary is
+`Missing / Structurally N/A / Implemented / Anchored / Anchored/underived`, and the calibration plan,
+the evidence bundle, the provider closure ledger, the rung-4 survey artifacts and the Cargo pin have
+all left `SOURCE_PATHS`. Read `docs/generated/memory-matrix.md` for what the artifact claims today.
+
 **Provenance is stamped once, not per row (sc-16268).** The revision pair belongs to the document,
 so it lives in `generatedFrom` and nowhere else. Cells carry no `evidenceRevision`: it held the same
 constant in all ~7,360 rows, which turned every fingerprint rotation into a ~14,700-line rewrite of a
