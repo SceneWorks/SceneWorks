@@ -4457,6 +4457,9 @@ pub(crate) async fn run_lora_import_job(
             .await;
         }
     };
+    if let Some(detail) = ltx_import_base_model_error(resolved_family.as_deref(), &job.payload) {
+        return fail_job(api, &job.id, "LoRA import failed.", Some(detail)).await;
+    }
 
     write_lora_install_marker(&target_dir, &job.payload, &job.id).await?;
     if let Some(manifest_entry) = job
@@ -4513,6 +4516,51 @@ pub(crate) async fn run_lora_import_job(
     )
     .await?;
     Ok(())
+}
+
+fn ltx_import_base_model_error(
+    resolved_family: Option<&str>,
+    payload: &JsonObject,
+) -> Option<String> {
+    if resolved_family != Some("ltx-video") {
+        return None;
+    }
+    let recorded = optional_payload_string(payload, "baseModel").or_else(|| {
+        payload
+            .get("manifestEntry")
+            .and_then(Value::as_object)
+            .and_then(|entry| entry.get("baseModel"))
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|base| !base.is_empty())
+    });
+    match recorded {
+        None => Some(
+            "LTX LoRA imports require an exact base model. Re-import in Model Manager, choose the \
+             ltx-video family, and select LTX-2.3 or LTX-2.5 before queueing."
+                .to_owned(),
+        ),
+        Some("ltx_2_3" | "ltx_2_3_eros" | "ltx_2_5") => None,
+        Some(other) => Some(format!(
+            "LTX LoRA imports require baseModel ltx_2_3, ltx_2_3_eros, or ltx_2_5; got {other}."
+        )),
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn ltx_import_base_model_gate_rejects_only_unstamped_ltx() {
+    let unstamped = JsonObject::new();
+    assert!(ltx_import_base_model_error(Some("ltx-video"), &unstamped)
+        .is_some_and(|detail| detail.contains("require an exact base model")));
+    assert!(ltx_import_base_model_error(Some("wan-video"), &unstamped).is_none());
+
+    let mut stamped = JsonObject::new();
+    stamped.insert("baseModel".to_owned(), json!("ltx_2_5"));
+    assert!(ltx_import_base_model_error(Some("ltx-video"), &stamped).is_none());
+    stamped.insert("baseModel".to_owned(), json!("wan_2_2"));
+    assert!(ltx_import_base_model_error(Some("ltx-video"), &stamped)
+        .is_some_and(|detail| detail.contains("got wan_2_2")));
 }
 
 /// A single `expectedSha256` cannot identify both files in a paired Wan MoE upload. Reject that

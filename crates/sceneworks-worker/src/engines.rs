@@ -759,6 +759,8 @@ pub(crate) const VIDEO_ENGINE_IDS: &[&str] = &[
     // `ltx_2_3`); listed here so the registry-derived `video_generate` advertisement
     // ([`registry_capabilities`]) picks up the candle LTX descriptor too (sc-5097).
     "ltx_2_3_distilled",
+    "ltx_2_5",
+    "ltx_2_5_distilled",
     "svd_xt",
     // Mochi 1 (epic 1788 / sc-11991). ONE id covers BOTH backends — unlike LTX above, `mlx-gen-mochi`
     // and `candle-gen-mochi` both register `MODEL_ID = "mochi_1"`, so a single row is correct and a
@@ -1360,6 +1362,7 @@ mod tests {
             "wan_2_2_vace_fun_14b" => &["wan2_2_vace_fun_14b"],
             "svd" => &["svd_xt"],
             "ltx_2_3" => &["ltx_2_3", "ltx_2_3_distilled"],
+            "ltx_2_5" => &["ltx_2_5", "ltx_2_5_distilled"],
             "ltx_2_3_eros" => &["ltx_2_3"],
             // Mochi 1 (sc-11991): the sceneworks id IS the engine id, and BOTH backends register it,
             // so one entry resolves the descriptor on either lane.

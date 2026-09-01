@@ -492,6 +492,7 @@ pub fn builtin_training_targets() -> TrainingTargetRegistry {
             sd3_medium_lora_target(),
             anima_base_lora_target(),
             ltx_video_lora_target(),
+            ltx_2_5_video_lora_target(),
             wan_lora_target(),
             wan_t2v_14b_lora_target(),
             wan_i2v_14b_lora_target(),
@@ -1977,17 +1978,124 @@ fn sd3_medium_lora_target() -> TrainingTarget {
 /// `ui.datasetModality`. The output registers as an `ltx-video` family LoRA the
 /// MLX LTX video adapter loads at inference.
 fn ltx_video_lora_target() -> TrainingTarget {
+    ltx_lora_target(
+        "ltx_video_lora",
+        "LTX-2.3 Video LoRA",
+        "ltx_2_3",
+        "SceneWorks/ltx-2.3-mlx",
+        "Train an LTX-2.3 video LoRA from still images. Apple Silicon (native MLX) or Windows/Linux NVIDIA (candle/CUDA).",
+    )
+}
+
+/// Native Rust LoRA training for LTX-2.5. This is intentionally a distinct target and recorded
+/// base model: 2.5 removes the 2.3 feed-forward bias targets and its engine loader requires explicit
+/// rank/alpha metadata, so family equality alone is not an adapter compatibility claim.
+fn ltx_2_5_video_lora_target() -> TrainingTarget {
+    ltx_lora_target(
+        "ltx_2_5_video_lora",
+        "LTX-2.5 Video LoRA",
+        "ltx_2_5",
+        "SceneWorks/ltx-2.5-mlx",
+        "Train the full LTX-2.5 video/audio LoRA workflow surface from native preprocessed datasets. Apple Silicon uses MLX; Windows/Linux NVIDIA uses candle/CUDA.",
+    )
+}
+
+fn ltx_lora_target(
+    id: &str,
+    name: &str,
+    base_model: &str,
+    base_model_repo: &str,
+    description: &str,
+) -> TrainingTarget {
+    let is_ltx_2_5 = base_model == "ltx_2_5";
+    let sample_steps = if is_ltx_2_5 { 30 } else { 20 };
+    let mut advanced = object(json!({
+        "mixedPrecision": if is_ltx_2_5 { "f32" } else { "bf16" },
+        "cacheLatents": true,
+        "networkType": "lora",
+        "lrScheduler": "constant",
+        "numFrames": 1,
+        "loraTargetModules": ["to_q", "to_k", "to_v", "to_out.0"],
+        "sampleEvery": 250,
+        "sampleSteps": sample_steps,
+        "qualityPreset": "balanced",
+        "outputScope": "project",
+        "requestedGpu": "auto"
+    }));
+    if is_ltx_2_5 {
+        advanced.insert("ltxWorkflow".to_owned(), json!("t2v_lora"));
+        advanced.insert(
+            "ltxVideo".to_owned(),
+            json!({ "isGenerated": true, "conditions": [] }),
+        );
+        advanced.insert(
+            "ltxAudio".to_owned(),
+            json!({ "isGenerated": true, "conditions": [] }),
+        );
+        advanced.insert(
+            "ltxValidation".to_owned(),
+            json!({
+                "width": 960,
+                "height": 544,
+                "frames": 89,
+                "fps": 24,
+                "steps": 30,
+                "videoCfgScale": 3.0,
+                "audioCfgScale": 7.0,
+                "videoStgScale": 1.0,
+                "audioStgScale": 1.0,
+                "stgBlocks": [28],
+                "guidanceRescale": 0.7,
+                "videoModalityGuidanceScale": 3.0,
+                "audioModalityGuidanceScale": 3.0,
+                "generateAudio": true
+            }),
+        );
+    }
+    let mut limits = object(json!({
+        "rank": [4, 128],
+        "alpha": [1, 128],
+        "steps": [200, 4000],
+        "resolutions": [512, 768, 1024],
+        "batchSize": [1, 2],
+        "networkTypes": ["lora"],
+        "lrSchedulers": ["constant", "linear", "cosine"],
+        "outputScopes": ["project", "global"]
+    }));
+    if is_ltx_2_5 {
+        limits.insert("preparedBundleSchema".to_owned(), json!("ltx-prepared-v1"));
+        limits.insert(
+            "ltxWorkflows".to_owned(),
+            json!([
+                "i2v_lora",
+                "t2v_lora",
+                "v2a_lora",
+                "a2v_lora",
+                "t2a_lora",
+                "video_extend_lora",
+                "video_inpainting_lora",
+                "video_outpainting_lora",
+                "video_suffix_lora",
+                "audio_extend_lora",
+                "audio_inpainting_lora",
+                "audio_suffix_lora",
+                "av2av_ic_lora",
+                "v2v_ic_lora",
+                "a2a_ic_lora"
+            ]),
+        );
+    }
     TrainingTarget {
-        id: "ltx_video_lora".to_owned(),
-        name: "LTX-2.3 Video LoRA".to_owned(),
+        id: id.to_owned(),
+        name: name.to_owned(),
         modality: TrainingModality::Video,
         output_kind: TrainingOutputKind::Lora,
         family: "ltx-video".to_owned(),
-        base_model: "ltx_2_3".to_owned(),
-        // Mirrors the generation load path (sc-5608): the turnkey SceneWorks LTX-2.3 bundle,
-        // replacing the third-party mirror. Both native kernels load its packed q4 tier from
-        // `base_model_path` and its sibling Gemma encoder.
-        base_model_repo: Some("SceneWorks/ltx-2.3-mlx".to_owned()),
+        base_model: base_model.to_owned(),
+        // Mirrors the generation load paths: each SceneWorks turnkey provides the packed q4
+        // training identity. 2.3 resolves its sibling Gemma-3 encoder; 2.5's dev tier self-contains
+        // Gemma-4.
+        base_model_repo: Some(base_model_repo.to_owned()),
         kernel: "ltx_mlx_lora".to_owned(),
         defaults: TrainingConfig {
             rank: 32,
@@ -2002,40 +2110,15 @@ fn ltx_video_lora_target() -> TrainingTarget {
             // Both native engines implement AdamW directly; bitsandbytes never applies here.
             optimizer: "adamw".to_owned(),
             trigger_word: None,
-            advanced: object(json!({
-                "mixedPrecision": "bf16",
-                "cacheLatents": true,
-                "networkType": "lora",
-                // Learning-rate scheduler (see the Z-Image target). Both engines honor the same
-                // `constant`/`linear`/`cosine` set.
-                "lrScheduler": "constant",
-                // Still-image training: each item encodes to a single latent frame.
-                "numFrames": 1,
-                "loraTargetModules": ["to_q", "to_k", "to_v", "to_out.0"],
-                "sampleEvery": 250,
-                "qualityPreset": "balanced",
-                "outputScope": "project",
-                "requestedGpu": "auto"
-            })),
+            advanced,
             extra: ExtraFields::new(),
         },
-        limits: object(json!({
-            "rank": [4, 128],
-            "alpha": [1, 128],
-            "steps": [200, 4000],
-            "resolutions": [512, 768, 1024],
-            "batchSize": [1, 2],
-            // MLX backend: the LoKr inference path (Kronecker merge) is out of
-            // scope for epic 2193 v1, so this target stays `lora`-only.
-            "networkTypes": ["lora"],
-            "lrSchedulers": ["constant", "linear", "cosine"],
-            "outputScopes": ["project", "global"]
-        })),
+        limits,
         ui: object(json!({
-            "label": "LTX-2.3 Video LoRA",
-            "description": "Train an LTX-2.3 video LoRA from still images. Apple Silicon (native MLX) or Windows/Linux NVIDIA (candle/CUDA).",
+            "label": name,
+            "description": description,
             "recommendedFor": ["character", "style"],
-            "datasetModality": "image"
+            "datasetModality": if is_ltx_2_5 { "video" } else { "image" }
         })),
         extra: ExtraFields::new(),
     }
@@ -2767,7 +2850,8 @@ pub fn build_training_plan(
                 height: item.height,
                 // Preserve model-specific per-example inputs. The worker forwards non-path
                 // metadata losslessly and resolves any path-bearing fields under the dataset root
-                // before handing the request to the native trainer.
+                // before handing the request to the native trainer. LTX-2.5 uses
+                // `ltxPreparedBundlePath` for preprocessed video/audio latents and conditioning.
                 extra: item.extra.clone(),
                 // ControlNet training: resolve the per-item control-conditioning sidecar the same
                 // way as the target image (relative → absolute under the dataset root). `None` for

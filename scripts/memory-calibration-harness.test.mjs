@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFile, spawn } from "node:child_process";
-import { mkdir, mkdtemp, readFile, readdir, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, readdir, realpath, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -9,10 +9,14 @@ import { createHash } from "node:crypto";
 import { fileURLToPath } from "node:url";
 
 import {
-  HARNESS_VERSION, RUNG_REUSE_TOLERANCE, SCHEMA_VERSION, assessProviderReuse, atomicWrite, canonicalJson,
+  HARNESS_VERSION, LTX25_CAPTURE_REPOSITORY, LTX25_CAPTURE_REVISION, RUNG_REUSE_TOLERANCE,
+  SCHEMA_VERSION, assessProviderReuse, atomicWrite, canonicalJson,
   projectPhaseMetricsToSchemaV5,
   compareRungReuse, evidenceSemantics, expandPlan, logicalCaseId, mergeBundles, recordId,
-  physicalMlxSessionId, runProviderPlan, validateBundle, validateRecord, validateSourceSessionFiles,
+  ltx25ProviderEnvironment, parsePhysicalMlxAvContent, physicalMlxSessionId,
+  prepareLtx25CaptureArtifacts, runProviderPlan, validateBundle, validateRecord, selectPlanProviders,
+  validateLtx25ResumeIdentity, validatePhysicalMlxAvContentsAgainstRecord,
+  validateSourceSessionFiles,
 } from "./memory-calibration-harness.mjs";
 import {
   calibrationBinding,
@@ -56,10 +60,154 @@ async function cleanFixtureRepo() {
   return root;
 }
 
+async function ltx25FixtureSnapshot({
+  omitRoot,
+  symlinkedEnhancer = false,
+  escapedEnhancer = false,
+  symlinkedDevAdapter = false,
+} = {}) {
+  const cache = await mkdtemp(path.join(tmpdir(), "memory-ltx25-cache-"));
+  const snapshot = path.join(
+    cache,
+    "models--SceneWorks--ltx-2.5-mlx",
+    "snapshots",
+    LTX25_CAPTURE_REVISION,
+  );
+  await mkdir(path.join(snapshot, "enhancer"), { recursive: true });
+  const enhancerFile = path.join(snapshot, "enhancer", "model.safetensors");
+  if (symlinkedEnhancer || escapedEnhancer) {
+    const target = escapedEnhancer
+      ? path.join(cache, "escaped-enhancer.safetensors")
+      : path.join(cache, "models--SceneWorks--ltx-2.5-mlx", "blobs", "enhancer-blob");
+    await mkdir(path.dirname(target), { recursive: true });
+    await writeFile(target, "enhancer");
+    await symlink(path.relative(path.dirname(enhancerFile), target), enhancerFile);
+  } else {
+    await writeFile(enhancerFile, "enhancer");
+  }
+  await mkdir(path.join(snapshot, "distilled_lora"), { recursive: true });
+  const adapterFile = path.join(
+    snapshot,
+    "distilled_lora",
+    "ltx-2.5-22b-distilled-lora-450-bf16.safetensors",
+  );
+  if (symlinkedDevAdapter) {
+    const adapterBlob = path.join(
+      cache,
+      "models--SceneWorks--ltx-2.5-mlx",
+      "blobs",
+      "adapter-blob",
+    );
+    await mkdir(path.dirname(adapterBlob), { recursive: true });
+    await writeFile(adapterBlob, "adapter");
+    await symlink(path.relative(path.dirname(adapterFile), adapterBlob), adapterFile);
+  } else {
+    await writeFile(adapterFile, "adapter");
+  }
+  for (const variant of ["distilled", "dev"]) {
+    for (const tier of ["q4", "q8", "bf16"]) {
+      if (`${variant}/${tier}` === omitRoot) continue;
+      const root = path.join(snapshot, variant, tier);
+      await mkdir(root, { recursive: true });
+      await writeFile(path.join(root, "split_model.json"), JSON.stringify({ variant, tier }));
+      await writeFile(path.join(root, "transformer.safetensors"), `${variant}:${tier}:transformer`);
+      await writeFile(path.join(root, "vae_decoder.safetensors"), `${variant}:${tier}:conv`);
+      await writeFile(path.join(root, "vae_diffusion_decoder.safetensors"), `${variant}:${tier}:diffvae`);
+    }
+  }
+  return realpath(snapshot);
+}
+
 const phase = (value) => ({
   activeBytes: value,
   allocatorBytes: value + 10,
   reclaimableBytes: 10,
+});
+
+const audioQuality = (overrides = {}) => ({
+  result: "passed",
+  sampleRateHz: 24000,
+  channels: 2,
+  sampleCount: 48000,
+  selectedPcmSha256: "a".repeat(64),
+  referencePcmSha256: "b".repeat(64),
+  maximumAbsoluteError: 0.001,
+  meanAbsoluteError: 0.0001,
+  rootMeanSquareError: 0.0002,
+  maximumAbsoluteErrorThreshold: 0.01,
+  meanAbsoluteErrorThreshold: 0.01,
+  rootMeanSquareErrorThreshold: 0.01,
+  ...overrides,
+});
+
+function canonicalAvFixture() {
+  const magic = Buffer.from("SCENEWORKS_AV1\0", "ascii");
+  const frame = Buffer.from([1, 2, 3, 4, 5, 6]);
+  const pcm = Buffer.alloc(16);
+  [0.25, -0.25, 0.5, -0.5].forEach((value, index) => pcm.writeFloatLE(value, index * 4));
+  const bytes = Buffer.alloc(magic.length + 4 * 5 + 2 + 8 + 4 + 4 + 8 + frame.length + pcm.length);
+  let offset = 0;
+  magic.copy(bytes, offset); offset += magic.length;
+  for (const value of [2, 1, 1, 24, 24000]) {
+    bytes.writeUInt32LE(value, offset); offset += 4;
+  }
+  bytes.writeUInt16LE(2, offset); offset += 2;
+  bytes.writeBigUInt64LE(4n, offset); offset += 8;
+  bytes.writeUInt32LE(2, offset); offset += 4;
+  bytes.writeUInt32LE(1, offset); offset += 4;
+  bytes.writeBigUInt64LE(BigInt(frame.length), offset); offset += 8;
+  frame.copy(bytes, offset); offset += frame.length;
+  pcm.copy(bytes, offset);
+  return { bytes, pcm };
+}
+
+test("canonical A/V parser binds the complete header, frame payload, and PCM bytes", () => {
+  const { bytes, pcm } = canonicalAvFixture();
+  const content = parsePhysicalMlxAvContent(bytes);
+  assert.deepEqual(content, {
+    width: 2,
+    height: 1,
+    frames: 1,
+    fps: 24,
+    sampleRateHz: 24000,
+    channels: 2,
+    sampleCount: 4,
+    pcmSha256: createHash("sha256").update(pcm).digest("hex"),
+  });
+  const wrongMagic = Buffer.from(bytes);
+  wrongMagic[0] ^= 0xff;
+  assert.throws(() => parsePhysicalMlxAvContent(wrongMagic), /canonical SCENEWORKS_AV1 header/);
+  const wrongFrameLength = Buffer.from(bytes);
+  wrongFrameLength.writeBigUInt64LE(5n, Buffer.from("SCENEWORKS_AV1\0").length + 4 * 5 + 2 + 8 + 8);
+  assert.throws(() => parsePhysicalMlxAvContent(wrongFrameLength), /canonical RGB geometry/);
+  assert.throws(() => parsePhysicalMlxAvContent(bytes.subarray(0, -1)), /PCM payload length/);
+
+  const record = {
+    id: "imc-audio-content-binding",
+    target: { geometry: { width: 2, height: 1, frames: 1 } },
+    diagnostics: { measurements: [{ name: "outputFps", value: 24 }] },
+    quality: {
+      audio: audioQuality({
+        sampleCount: 4,
+        selectedPcmSha256: content.pcmSha256,
+        referencePcmSha256: content.pcmSha256,
+      }),
+    },
+  };
+  const avContents = new Map([["selected_av", content], ["reference_av", content]]);
+  validatePhysicalMlxAvContentsAgainstRecord(record, avContents, record.id);
+  const mismatchedMetadata = structuredClone(record);
+  mismatchedMetadata.quality.audio.sampleRateHz = 48000;
+  assert.throws(
+    () => validatePhysicalMlxAvContentsAgainstRecord(mismatchedMetadata, avContents, record.id),
+    /A\/V header differs from measured video\/audio identity/,
+  );
+  const mismatchedPcm = structuredClone(record);
+  mismatchedPcm.quality.audio.selectedPcmSha256 = "0".repeat(64);
+  assert.throws(
+    () => validatePhysicalMlxAvContentsAgainstRecord(mismatchedPcm, avContents, record.id),
+    /A\/V PCM hashes differ from quality.audio/,
+  );
 });
 
 function complete(overrides = {}) {
@@ -973,16 +1121,18 @@ test("frame-aware matrix binding requires an exact planned temporal capture (sc-
   );
 });
 
-test("the exact evidence-plan matcher covers every capture-identity axis (sc-18817)", () => {
+test("the exact evidence-plan matcher covers every capture-identity axis including LTX-2.5 pipeline choices", () => {
   const record = complete({
     backend: "mlx",
     loadShape: "deferred_materialization",
     target: {
-      modelId: "ltx_2_3",
-      provider: "ltx_2_3",
+      modelId: "ltx_2_5",
+      provider: "ltx_2_5",
       tier: "q8",
       mode: "text_to_video",
       overlay: "none",
+      transformerVariant: "distilled",
+      decoder: "conv",
       geometry: { width: 768, height: 512, batch: 1, frames: 241 },
     },
     strategy: {
@@ -1007,6 +1157,8 @@ test("the exact evidence-plan matcher covers every capture-identity axis (sc-188
     ["tier", (candidate) => { candidate.target.tier = "q4"; }],
     ["mode", (candidate) => { candidate.target.mode = "image_to_video"; }],
     ["overlay", (candidate) => { candidate.target.overlay = "lora"; }],
+    ["transformer variant", (candidate) => { candidate.target.transformerVariant = "dev"; }],
+    ["decoder", (candidate) => { candidate.target.decoder = "diffvae"; }],
     ["rung", (candidate) => { candidate.rung = "resident"; }],
     ["width", (candidate) => { candidate.target.geometry.width = 1280; }],
     ["height", (candidate) => { candidate.target.geometry.height = 704; }],
@@ -1026,6 +1178,230 @@ test("the exact evidence-plan matcher covers every capture-identity axis (sc-188
       false,
       `${axis} mismatch must reject the plan entry`,
     );
+  }
+});
+
+test("LTX-2.5 evidence identity requires and hashes transformer and decoder axes", () => {
+  const base = complete({
+    target: {
+      modelId: "ltx_2_5",
+      provider: "ltx_2_5_distilled",
+      tier: "q4",
+      mode: "text_to_video",
+      overlay: "none",
+      transformerVariant: "distilled",
+      decoder: "conv",
+      geometry: { width: 768, height: 512, batch: 1, frames: 145 },
+    },
+  });
+  assert.equal(validateRecord(base), base);
+  validateBundle({ schemaVersion: SCHEMA_VERSION, harnessVersion: HARNESS_VERSION, records: [base] });
+
+  const identities = new Set();
+  for (const transformerVariant of ["distilled", "dev"]) {
+    for (const decoder of ["conv", "diffvae"]) {
+      identities.add(logicalCaseId({
+        ...base,
+        target: { ...base.target, transformerVariant, decoder },
+      }));
+    }
+  }
+  assert.equal(identities.size, 4, "each transformer/decoder pair must have a distinct logical id");
+
+  for (const field of ["transformerVariant", "decoder"]) {
+    const missing = structuredClone(base);
+    delete missing.target[field];
+    missing.logicalCaseId = logicalCaseId(missing);
+    missing.id = recordId(missing);
+    assert.throws(
+      () => validateBundle({ schemaVersion: SCHEMA_VERSION, harnessVersion: HARNESS_VERSION, records: [missing] }),
+      /schema validation failed/,
+      `${field} is required by the persisted schema`,
+    );
+    assert.throws(() => validateRecord(missing), /must identify|must identify transformerVariant and decoder/);
+  }
+
+  const sessionId = `ims-${"7".repeat(20)}`;
+  const direct = { kind: "direct", sourceSessionIds: [sessionId] };
+  const derived = structuredClone(base);
+  derived.derivation = {
+    memory: direct, quality: direct, negativeMutation: direct,
+    lifecycle: direct, loadability: direct, overlay: direct,
+    justification: "exact LTX pipeline capture",
+  };
+  const source = {
+    id: sessionId,
+    kind: "unit_test",
+    command: "exact LTX fixture",
+    sourcePath: "docs/calibration/sc-test/ltx-exact.log",
+    capturedAt: derived.capturedAt,
+    repositories: structuredClone(derived.repositories),
+    hardware: { probe: "fixture", memoryBytes: derived.hardware.memoryBytes },
+    target: {
+      tier: derived.target.tier,
+      mode: derived.target.mode,
+      overlay: derived.target.overlay,
+      transformerVariant: derived.target.transformerVariant,
+      decoder: derived.target.decoder,
+      rung: derived.strategy.rung,
+    },
+    stdoutSha256: "8".repeat(64),
+    inputs: [{
+      role: "base", path: "/fixture/q4", bytes: 1, sha256: "9".repeat(64),
+      repository: derived.artifact.repository,
+      resolvedRevision: derived.artifact.resolvedRevision,
+      variant: derived.target.tier,
+    }],
+    outputs: [{ path: "fixture.json", sha256: "a".repeat(64) }],
+    claims: ["memory", "quality", "negative_mutation", "lifecycle", "loadability", "overlay"],
+    result: "passed",
+  };
+  const derivedBundle = {
+    schemaVersion: SCHEMA_VERSION,
+    harnessVersion: HARNESS_VERSION,
+    sourceSessions: [source],
+    records: [derived],
+  };
+  validateBundle(derivedBundle);
+  const nonPhysicalAudio = structuredClone(derivedBundle);
+  nonPhysicalAudio.records[0].quality.audio = audioQuality();
+  assert.throws(
+    () => validateBundle(nonPhysicalAudio),
+    /schema validation|physical.*A\/V source session|source must be physical_mlx/,
+    "typed audio cannot be sourced from a non-physical derived record",
+  );
+  const failedAudio = structuredClone(derived);
+  failedAudio.quality.audio = audioQuality({ result: "failed" });
+  assert.throws(() => validateRecord(failedAudio), /audio quality did not pass/);
+  const overThresholdAudio = structuredClone(derived);
+  overThresholdAudio.quality.audio = audioQuality({ maximumAbsoluteError: 0.02 });
+  assert.throws(() => validateRecord(overThresholdAudio), /audio quality threshold exceeded/);
+  for (const field of ["tier", "mode", "overlay", "rung", "transformerVariant", "decoder"]) {
+    const crossed = structuredClone(derivedBundle);
+    crossed.sourceSessions[0].target[field] = "wrong";
+    if (field === "tier") crossed.sourceSessions[0].inputs[0].variant = "wrong";
+    assert.throws(
+      () => validateBundle(crossed),
+      /wrong LTX|schema validation failed/,
+      `${field} cannot cross LTX derivation identities`,
+    );
+  }
+  const missingSourceTarget = structuredClone(derivedBundle);
+  delete missingSourceTarget.sourceSessions[0].target;
+  assert.throws(
+    () => validateBundle(missingSourceTarget),
+    /schema validation failed|without a target identity/,
+  );
+  // One LTX derivation record must not retro-type the non-LTX sessions the bundle also carries:
+  // a non-LTX session can never declare transformerVariant/decoder, so a per-session requirement
+  // would red terminal ingestion of the existing corpus.
+  const mixedCorpus = structuredClone(derivedBundle);
+  const legacySession = structuredClone(mixedCorpus.sourceSessions[0]);
+  legacySession.id = `ims-${"c".repeat(20)}`;
+  delete legacySession.target.transformerVariant;
+  delete legacySession.target.decoder;
+  mixedCorpus.sourceSessions.push(legacySession);
+  validateBundle(mixedCorpus);
+  // The LTX session itself still has to be typed.
+  const untypedLtxSource = structuredClone(derivedBundle);
+  delete untypedLtxSource.sourceSessions[0].target.transformerVariant;
+  delete untypedLtxSource.sourceSessions[0].target.decoder;
+  assert.throws(
+    () => validateBundle(untypedLtxSource),
+    /schema validation failed|wrong LTX/,
+  );
+});
+
+test("the LTX-2.5 MLX terminal plan is a well-formed base plus max envelope", async () => {
+  const config = JSON.parse(await readFile(new URL("../config/memory-calibration-plan.json", import.meta.url)));
+  const rows = config.providers.filter(
+    (provider) => provider.backend === "mlx" && provider.target.modelId === "ltx_2_5",
+  );
+  const expanded = expandPlan({ providers: rows });
+
+  // Shape, not population: the plan file is the authority on how many LTX-2.5 MLX rows exist, so
+  // growing the plan must not require editing this test. What must hold is that every row is
+  // distinct and that expansion is one-to-one.
+  assert.ok(rows.length > 0);
+  assert.equal(expanded.length, rows.length);
+  assert.equal(new Set(rows.map((row) => row.name)).size, rows.length);
+  assert.equal(new Set(rows.map((row) => row.fixture)).size, rows.length);
+  assert.equal(new Set(expanded.map((row) => row.logicalCaseId)).size, rows.length);
+
+  const baseRows = rows.filter((row) => row.target.geometry.frames === 145);
+  const maxRows = rows.filter((row) => row.target.geometry.frames === 449);
+  assert.equal(baseRows.length + maxRows.length, rows.length, "every row is a base or a max row");
+  assert.ok(baseRows.length > 0);
+  assert.ok(maxRows.length > 0);
+  // The max envelope is the extreme-geometry subset of the base resolution set.
+  const geometryOf = ({ target }) => `${target.geometry.width}x${target.geometry.height}`;
+  const baseGeometries = new Set(baseRows.map(geometryOf));
+  const maxGeometries = new Set(maxRows.map(geometryOf));
+  assert.ok(maxGeometries.size > 0);
+  assert.ok([...maxGeometries].every((geometry) => baseGeometries.has(geometry)));
+  assert.ok(maxGeometries.size < baseGeometries.size);
+  assert.ok(baseRows.every((row) => row.fixture.includes("-fps24-seed18755")));
+  assert.ok(maxRows.every((row) => row.fixture.includes("-fps30-seed18755")));
+
+  for (const row of rows) {
+    assert.ok(["q4", "q8", "bf16"].includes(row.target.tier));
+    assert.ok(["distilled", "dev"].includes(row.target.transformerVariant));
+    assert.ok(["conv", "diffvae"].includes(row.target.decoder));
+    assert.equal(row.target.mode, "text_to_video");
+    assert.equal(row.target.overlay, "none");
+    assert.equal(row.cases.length, 1);
+    assert.equal(row.cases[0].expectedResult, "passed");
+    if (row.target.decoder === "conv") {
+      assert.ok(row.engagedRungs.includes("bounded_decode"));
+      assert.equal(row.cases[0].parameters.decodeTileEdge, 192);
+      assert.equal(row.cases[0].parameters.decodeOverlap, 64);
+    } else {
+      assert.ok(!row.engagedRungs.includes("bounded_decode"));
+      assert.equal(row.cases[0].parameters.decodeTileEdge, undefined);
+      assert.equal(row.cases[0].parameters.decodeOverlap, undefined);
+    }
+    if (row.target.transformerVariant === "distilled") {
+      assert.equal(row.loadShape, "deferred_materialization");
+      assert.equal(row.rung, "bounded_transformer_residency");
+      assert.ok(row.engagedRungs.includes("bounded_transformer_residency"));
+    } else {
+      assert.equal(row.loadShape, "eager_materialization");
+      assert.equal(row.rung, "bounded_attention");
+      assert.ok(!row.engagedRungs.includes("bounded_transformer_residency"));
+    }
+    const expectedComposition = {
+      "distilled/conv": [
+        "resident",
+        "staged_residency",
+        "bounded_decode",
+        "bounded_attention",
+        "bounded_transformer_residency",
+      ],
+      "distilled/diffvae": [
+        "resident",
+        "staged_residency",
+        "bounded_attention",
+        "bounded_transformer_residency",
+      ],
+      "dev/conv": [
+        "resident",
+        "staged_residency",
+        "bounded_decode",
+        "bounded_attention",
+      ],
+      "dev/diffvae": ["resident", "staged_residency", "bounded_attention"],
+    }[`${row.target.transformerVariant}/${row.target.decoder}`];
+    assert.deepEqual(
+      row.engagedRungs,
+      expectedComposition,
+      `${row.target.transformerVariant}/${row.target.decoder} must preserve the provider's exact layered composition`,
+    );
+  }
+
+  for (const field of ["transformerVariant", "decoder"]) {
+    const missing = structuredClone(rows[0]);
+    delete missing.target[field];
+    assert.throws(() => expandPlan({ providers: [missing] }), new RegExp(field));
   }
 });
 
@@ -1905,6 +2281,55 @@ test("physical MLX capture binds raw provider stdout, exact inventory, and persi
   }
   assert.equal(validateBundle(authoritative), authoritative);
 
+  const av = structuredClone(authoritative);
+  const avRecord = av.records[0];
+  avRecord.quality.audio = audioQuality();
+  for (const output of av.sourceSessions[0].outputs.filter(({ role }) => role !== "request")) {
+    output.role = output.role === "selected_rgb" ? "selected_av" : "reference_av";
+    output.path = `${sourcePathPrefix}/${avRecord.logicalCaseId}-${output.role}-1024x1024-f1-${output.sha256}.avbin`;
+  }
+  assert.equal(validateBundle(av), av, "typed A/V receipts round-trip through schema and JS validation");
+  const ltxAv = structuredClone(av);
+  const ltxAvRecord = ltxAv.records[0];
+  delete ltxAvRecord.sourceProvenance;
+  ltxAvRecord.target.modelId = "ltx_2_5";
+  ltxAvRecord.target.provider = "ltx_2_5";
+  ltxAvRecord.target.transformerVariant = "distilled";
+  ltxAvRecord.target.decoder = "conv";
+  const priorAvLogicalCaseId = ltxAvRecord.logicalCaseId;
+  ltxAvRecord.logicalCaseId = logicalCaseId(ltxAvRecord);
+  ltxAvRecord.id = recordId(ltxAvRecord);
+  ltxAv.sourceSessions[0].target.transformerVariant = "distilled";
+  ltxAv.sourceSessions[0].target.decoder = "conv";
+  for (const output of ltxAv.sourceSessions[0].outputs.filter(({ role }) => role !== "request")) {
+    output.path = output.path.replace(priorAvLogicalCaseId, ltxAvRecord.logicalCaseId);
+  }
+  assert.equal(validateBundle(ltxAv), ltxAv, "LTX A/V provenance binds the complete typed source target");
+  const mismatchedAudioSource = structuredClone(ltxAv);
+  const nonPhysicalSession = structuredClone(mismatchedAudioSource.sourceSessions[0]);
+  nonPhysicalSession.id = `ims-${"f".repeat(20)}`;
+  nonPhysicalSession.kind = "unit_test";
+  nonPhysicalSession.sourcePath = "docs/calibration/sc-test/mismatched-audio-source.log";
+  mismatchedAudioSource.sourceSessions.push(nonPhysicalSession);
+  mismatchedAudioSource.records[0].derivation.quality.sourceSessionIds = [nonPhysicalSession.id];
+  assert.throws(
+    () => validateBundle(mismatchedAudioSource),
+    /typed audio quality source must be physical_mlx/,
+    "an unrelated physical A/V session cannot cover a non-physical quality derivation",
+  );
+  const crossedAv = structuredClone(av);
+  crossedAv.sourceSessions[0].outputs[2].role = "reference_rgb";
+  assert.throws(() => validateBundle(crossedAv), /schema validation|selected\/reference RGB or A\/V pair/);
+  const badAudioHash = structuredClone(av);
+  badAudioHash.records[0].quality.audio.selectedPcmSha256 = "not-a-digest";
+  assert.throws(() => validateBundle(badAudioHash), /schema validation|lowercase SHA-256/);
+  const failedAudio = structuredClone(av);
+  failedAudio.records[0].quality.audio.result = "failed";
+  assert.throws(() => validateBundle(failedAudio), /schema validation|audio quality did not pass/);
+  const overThresholdAudio = structuredClone(av);
+  overThresholdAudio.records[0].quality.audio.maximumAbsoluteError = 0.02;
+  assert.throws(() => validateBundle(overThresholdAudio), /audio quality threshold exceeded/);
+
   const missingDerivation = structuredClone(authoritative);
   delete missingDerivation.records[0].derivation;
   assert.throws(() => validateBundle(missingDerivation), /missing source-session derivation/);
@@ -2717,6 +3142,710 @@ async function runFixtureSelection({ config, fixture, providerName, closureDiges
     providerName,
   });
 }
+
+test("--model ltx_2_5 selects exactly the canonical MLX plan cases", async () => {
+  const plan = JSON.parse(
+    await readFile(new URL("../config/memory-calibration-plan.json", import.meta.url)),
+  );
+  const selected = expandPlan({
+    ...plan,
+    providers: selectPlanProviders(plan, { model: "ltx_2_5" }),
+  }).filter((planned) => planned.backend === "mlx");
+  // Population is owned by the plan file, not pinned here.
+  const planRows = plan.providers.filter(
+    (provider) => provider.backend === "mlx" && provider.target.modelId === "ltx_2_5",
+  );
+  assert.ok(planRows.length > 0);
+  assert.equal(selected.length, planRows.length);
+  assert.deepEqual(new Set(selected.map((planned) => planned.target.modelId)), new Set(["ltx_2_5"]));
+  assert.deepEqual(new Set(selected.map((planned) => planned.target.provider)), new Set(["ltx_2_5"]));
+});
+
+test("the LTX-2.5 snapshot driver binds all six nested roots to exact per-root inventories", async () => {
+  const downloadEvidence = JSON.parse(
+    await readFile(new URL("../config/download-pattern-evidence.json", import.meta.url)),
+  );
+  const authority = downloadEvidence.repos.find((entry) => entry.repo === LTX25_CAPTURE_REPOSITORY);
+  assert.equal(authority.revision, LTX25_CAPTURE_REVISION);
+  assert.equal(authority.resolvedSha, LTX25_CAPTURE_REVISION);
+  assert.equal(authority.gated, false);
+  const plan = JSON.parse(
+    await readFile(new URL("../config/memory-calibration-plan.json", import.meta.url)),
+  );
+  const selected = expandPlan({
+    ...plan,
+    providers: selectPlanProviders(plan, { model: "ltx_2_5" }),
+  }).filter((planned) => planned.backend === "mlx");
+  const snapshot = await ltx25FixtureSnapshot();
+  const prepared = await prepareLtx25CaptureArtifacts(snapshot, selected);
+  assert.equal(prepared.repository, LTX25_CAPTURE_REPOSITORY);
+  assert.equal(prepared.revision, LTX25_CAPTURE_REVISION);
+  assert.equal(prepared.enhancer.root, path.join(snapshot, "enhancer"));
+  assert.ok(prepared.enhancer.bytes > 0);
+  assert.match(prepared.enhancer.sha256, /^[0-9a-f]{64}$/);
+  assert.equal(
+    prepared.devAdapter.path,
+    path.join(snapshot, "distilled_lora", "ltx-2.5-22b-distilled-lora-450-bf16.safetensors"),
+  );
+  assert.ok(prepared.devAdapter.bytes > 0);
+  assert.match(prepared.devAdapter.sha256, /^[0-9a-f]{64}$/);
+  assert.deepEqual(
+    [...prepared.artifacts.keys()],
+    ["dev/bf16", "dev/q4", "dev/q8", "distilled/bf16", "distilled/q4", "distilled/q8"],
+  );
+  for (const [key, artifact] of prepared.artifacts) {
+    const planned = selected.find((candidate) =>
+      `${candidate.target.transformerVariant}/${candidate.target.tier}` === key);
+    const environment = ltx25ProviderEnvironment(prepared, planned, {
+      SCENEWORKS_LTX25_ROOT: "/stale/root",
+      SCENEWORKS_MEMORY_MODEL_BYTES: "1",
+      SCENEWORKS_MEMORY_MODEL_INVENTORY_SHA256: "0".repeat(64),
+      SCENEWORKS_MEMORY_CAPTURE_DIR: "/capture/raw",
+      SCENEWORKS_MEMORY_SOURCE_PATH_PREFIX: "docs/calibration/sc-18783-terminal",
+    });
+    assert.equal(environment.SCENEWORKS_LTX25_REPOSITORY, LTX25_CAPTURE_REPOSITORY);
+    assert.equal(environment.SCENEWORKS_LTX25_REVISION, LTX25_CAPTURE_REVISION);
+    assert.equal(environment.SCENEWORKS_LTX25_ROOT, artifact.root);
+    assert.equal(environment.SCENEWORKS_MEMORY_MODEL_BYTES, String(artifact.bytes));
+    assert.equal(environment.SCENEWORKS_MEMORY_MODEL_INVENTORY_SHA256, artifact.sha256);
+    assert.equal(
+      environment.SCENEWORKS_LTX25_ENHANCER_BYTES,
+      String(prepared.enhancer.bytes),
+    );
+    assert.equal(
+      environment.SCENEWORKS_LTX25_ENHANCER_INVENTORY_SHA256,
+      prepared.enhancer.sha256,
+    );
+    if (planned.target.transformerVariant === "dev") {
+      assert.equal(
+        environment.SCENEWORKS_LTX25_DEV_ADAPTER_BYTES,
+        String(prepared.devAdapter.bytes),
+      );
+      assert.equal(
+        environment.SCENEWORKS_LTX25_DEV_ADAPTER_SHA256,
+        prepared.devAdapter.sha256,
+      );
+    } else {
+      assert.equal(environment.SCENEWORKS_LTX25_DEV_ADAPTER_BYTES, undefined);
+      assert.equal(environment.SCENEWORKS_LTX25_DEV_ADAPTER_SHA256, undefined);
+    }
+    assert.equal(environment.SCENEWORKS_MEMORY_CAPTURE_DIR, "/capture/raw");
+    assert.equal(
+      environment.SCENEWORKS_MEMORY_SOURCE_PATH_PREFIX,
+      "docs/calibration/sc-18783-terminal",
+    );
+  }
+
+  await writeFile(path.join(snapshot, "enhancer", "model.safetensors"), "enhancer-mutated");
+  await writeFile(prepared.devAdapter.path, "adapter-mutated");
+  const mutated = await prepareLtx25CaptureArtifacts(snapshot, selected);
+  assert.notEqual(
+    mutated.enhancer.sha256,
+    prepared.enhancer.sha256,
+    "mutating shared enhancer bytes must change the sealed receipt identity",
+  );
+  assert.notEqual(
+    mutated.devAdapter.sha256,
+    prepared.devAdapter.sha256,
+    "mutating the dev refinement file must change the sealed receipt identity",
+  );
+  assert.deepEqual(
+    [...mutated.artifacts].map(([key, artifact]) => [key, artifact.sha256]),
+    [...prepared.artifacts].map(([key, artifact]) => [key, artifact.sha256]),
+    "shared-artifact mutation must not be hidden inside a tier-root inventory",
+  );
+
+  const wrongRevision = path.join(path.dirname(snapshot), "a".repeat(40));
+  await mkdir(wrongRevision, { recursive: true });
+  await assert.rejects(
+    prepareLtx25CaptureArtifacts(wrongRevision, selected),
+    new RegExp(
+      `must be models--SceneWorks--ltx-2\\.5-mlx/snapshots/${LTX25_CAPTURE_REVISION}`,
+    ),
+  );
+  const missingLayout = await ltx25FixtureSnapshot({ omitRoot: "dev/q8" });
+  await assert.rejects(
+    prepareLtx25CaptureArtifacts(missingLayout, selected),
+    /nested artifact root dev\/q8 is missing/,
+  );
+  const normalHfSymlinks = await ltx25FixtureSnapshot({
+    symlinkedEnhancer: true,
+    symlinkedDevAdapter: true,
+  });
+  assert.match(
+    (await prepareLtx25CaptureArtifacts(normalHfSymlinks, selected)).enhancer.sha256,
+    /^[0-9a-f]{64}$/,
+  );
+  const escapedHfSymlink = await ltx25FixtureSnapshot({ escapedEnhancer: true });
+  await assert.rejects(
+    prepareLtx25CaptureArtifacts(escapedHfSymlink, selected),
+    /escaped its trusted root/,
+  );
+});
+
+test("the LTX-2.5 model driver injects the selected root only after the hardware probe", async () => {
+  const plan = JSON.parse(
+    await readFile(new URL("../config/memory-calibration-plan.json", import.meta.url)),
+  );
+  const snapshot = await ltx25FixtureSnapshot();
+  const cleanRepo = await cleanFixtureRepo();
+  let capturedEnvironment;
+  let capturedPlanned;
+  await assert.rejects(
+    runProviderPlan({
+      closureDigestFor: stubClosureDigest,
+      config: plan,
+      providerCommand: ["fixture-ltx25-provider"],
+      sceneWorksRepo: cleanRepo,
+      inferenceRepo: cleanRepo,
+      model: "ltx_2_5",
+      ltx25SnapshotRoot: snapshot,
+      executeProvider: async (_command, _args, input, options) => {
+        const request = JSON.parse(input);
+        if (request.action === "probe") {
+          assert.equal(options.env.SCENEWORKS_LTX25_REPOSITORY, LTX25_CAPTURE_REPOSITORY);
+          assert.equal(options.env.SCENEWORKS_LTX25_REVISION, LTX25_CAPTURE_REVISION);
+          assert.equal(options.env.SCENEWORKS_LTX25_ROOT, undefined);
+          assert.equal(options.env.SCENEWORKS_MEMORY_MODEL_BYTES, undefined);
+          assert.equal(options.env.SCENEWORKS_LTX25_ENHANCER_BYTES, undefined);
+          assert.equal(options.env.SCENEWORKS_LTX25_DEV_ADAPTER_BYTES, undefined);
+          return JSON.stringify({
+            hardware: {
+              probe: "fixture MLX probe",
+              memoryBytes: 137438953472,
+              model: "Mac17,6",
+              chip: "Apple M5 Max",
+              osVersion: "26.5.2",
+              metalDevice: "Apple M5 Max",
+              mlxMemoryLimitBytes: 130567005798,
+              wiredLimitBytes: 87044670532,
+            },
+          });
+        }
+        capturedPlanned = request.planned;
+        capturedEnvironment = options.env;
+        throw new Error("stop after LTX-2.5 invocation environment capture");
+      },
+    }),
+    /stop after LTX-2\.5 invocation environment capture/,
+  );
+  const key = `${capturedPlanned.target.transformerVariant}/${capturedPlanned.target.tier}`;
+  assert.equal(capturedEnvironment.SCENEWORKS_LTX25_ROOT, path.join(snapshot, ...key.split("/")));
+  assert.ok(Number(capturedEnvironment.SCENEWORKS_MEMORY_MODEL_BYTES) > 0);
+  assert.match(capturedEnvironment.SCENEWORKS_MEMORY_MODEL_INVENTORY_SHA256, /^[0-9a-f]{64}$/);
+  assert.ok(Number(capturedEnvironment.SCENEWORKS_LTX25_ENHANCER_BYTES) > 0);
+  assert.match(capturedEnvironment.SCENEWORKS_LTX25_ENHANCER_INVENTORY_SHA256, /^[0-9a-f]{64}$/);
+  if (capturedPlanned.target.transformerVariant === "dev") {
+    assert.ok(Number(capturedEnvironment.SCENEWORKS_LTX25_DEV_ADAPTER_BYTES) > 0);
+    assert.match(capturedEnvironment.SCENEWORKS_LTX25_DEV_ADAPTER_SHA256, /^[0-9a-f]{64}$/);
+  } else {
+    assert.equal(capturedEnvironment.SCENEWORKS_LTX25_DEV_ADAPTER_BYTES, undefined);
+    assert.equal(capturedEnvironment.SCENEWORKS_LTX25_DEV_ADAPTER_SHA256, undefined);
+  }
+});
+
+test("every LTX-2.5 provider invocation rehashes the nested and shared artifacts", async () => {
+  const plan = JSON.parse(
+    await readFile(new URL("../config/memory-calibration-plan.json", import.meta.url)),
+  );
+  const cleanRepo = await cleanFixtureRepo();
+  for (const [mutation, expected] of [
+    ["base", /artifact inventory changed during provider execution/],
+    ["enhancer", /enhancer changed after campaign preparation/],
+    ["devAdapter", /devAdapter changed after campaign preparation/],
+  ]) {
+    const snapshot = await ltx25FixtureSnapshot();
+    await assert.rejects(
+      runProviderPlan({
+        closureDigestFor: stubClosureDigest,
+        config: plan,
+        providerCommand: ["fixture-ltx25-provider"],
+        sceneWorksRepo: cleanRepo,
+        inferenceRepo: cleanRepo,
+        model: "ltx_2_5",
+        ltx25SnapshotRoot: snapshot,
+        executeProvider: async (_command, _args, input, options) => {
+          const request = JSON.parse(input);
+          if (request.action === "probe") {
+            return JSON.stringify({
+              hardware: {
+                probe: "fixture MLX probe",
+                memoryBytes: 137438953472,
+                model: "Mac17,6",
+                chip: "Apple M5 Max",
+                osVersion: "26.5.2",
+                metalDevice: "Apple M5 Max",
+                mlxMemoryLimitBytes: 130567005798,
+                wiredLimitBytes: 87044670532,
+              },
+            });
+          }
+          const file = mutation === "base"
+            ? path.join(options.env.SCENEWORKS_LTX25_ROOT, "transformer.safetensors")
+            : mutation === "enhancer"
+              ? path.join(snapshot, "enhancer", "model.safetensors")
+              : path.join(
+                  snapshot,
+                  "distilled_lora",
+                  "ltx-2.5-22b-distilled-lora-450-bf16.safetensors",
+                );
+          await writeFile(file, `${mutation}-mutated`);
+          throw new Error("provider failed after mutating an input");
+        },
+      }),
+      expected,
+    );
+  }
+});
+
+test("LTX-2.5 resume rows bind the current per-case and shared campaign identity", async () => {
+  const plan = JSON.parse(
+    await readFile(new URL("../config/memory-calibration-plan.json", import.meta.url)),
+  );
+  const selected = expandPlan({
+    ...plan,
+    providers: selectPlanProviders(plan, { model: "ltx_2_5" }),
+  }).filter((planned) => planned.backend === "mlx");
+  const planned = selected.find((candidate) => candidate.target.transformerVariant === "dev");
+  const prepared = await prepareLtx25CaptureArtifacts(await ltx25FixtureSnapshot(), selected);
+  const key = `${planned.target.transformerVariant}/${planned.target.tier}`;
+  const artifact = prepared.artifacts.get(key);
+  const inputs = [{
+    role: "base",
+    path: artifact.root,
+    bytes: artifact.bytes,
+    sha256: artifact.sha256,
+    repository: prepared.repository,
+    resolvedRevision: prepared.revision,
+    variant: planned.target.tier,
+  }, {
+    role: "enhancer",
+    path: prepared.enhancer.root,
+    bytes: prepared.enhancer.bytes,
+    sha256: prepared.enhancer.sha256,
+    repository: prepared.repository,
+    resolvedRevision: prepared.revision,
+    variant: "enhancer",
+  }, {
+    role: "adapter",
+    path: prepared.devAdapter.path,
+    bytes: prepared.devAdapter.bytes,
+    sha256: prepared.devAdapter.sha256,
+    repository: prepared.repository,
+    resolvedRevision: prepared.revision,
+    variant: "dev_refinement_lora",
+  }];
+  const record = runtimeComplete();
+  Object.assign(record, {
+    logicalCaseId: planned.logicalCaseId,
+    evidenceScope: planned.evidenceScope,
+    backend: planned.backend,
+    loadShape: planned.loadShape,
+    artifact: {
+      repository: prepared.repository,
+      resolvedRevision: prepared.revision,
+      variant: planned.target.tier,
+      inventorySha256: artifact.sha256,
+    },
+    target: planned.target,
+    fixture: planned.fixture,
+    strategy: planned.strategy,
+    calibrationFingerprint: planned.calibrationFingerprint,
+    sweep: {
+      axes: [],
+      cases: [{ parameters: planned.strategy.parameters, result: "passed" }],
+      rangeVerified: true,
+    },
+    derivation: { loadability: { kind: "direct", sourceSessionIds: ["ims-current"] } },
+  });
+  assert.equal(logicalCaseId(record), planned.logicalCaseId);
+  const existing = {
+    sourceSessions: [{ id: "ims-current", kind: "physical_mlx", inputs }],
+    records: [record],
+  };
+  validateLtx25ResumeIdentity(existing, selected, prepared);
+
+  // A completed row stays valid when the machine layout of the snapshot changes: identity is the
+  // artifact content (sha256 inventory + artifact repository/revision), not an absolute path.
+  const relocated = structuredClone(existing);
+  for (const input of relocated.sourceSessions[0].inputs) {
+    input.path = path.join("/somewhere/else", path.basename(input.path));
+  }
+  validateLtx25ResumeIdentity(relocated, selected, prepared);
+
+  for (const role of ["base", "enhancer", "adapter"]) {
+    const staleInput = structuredClone(existing);
+    staleInput.sourceSessions[0].inputs.find((input) => input.role === role).sha256 = "0".repeat(64);
+    assert.throws(
+      () => validateLtx25ResumeIdentity(staleInput, selected, prepared),
+      /stale artifact identity/,
+    );
+  }
+  const staleRecord = structuredClone(existing);
+  staleRecord.records[0].artifact.resolvedRevision = "0".repeat(40);
+  assert.throws(
+    () => validateLtx25ResumeIdentity(staleRecord, selected, prepared),
+    /resume artifact disagrees with current campaign/,
+  );
+  const duplicate = structuredClone(existing);
+  duplicate.records.push(structuredClone(duplicate.records[0]));
+  assert.throws(
+    () => validateLtx25ResumeIdentity(duplicate, selected, prepared),
+    /multiple LTX-2\.5 campaign identities/,
+  );
+  // An inference pin / repository revision change is PROVENANCE ONLY: it must never invalidate a
+  // completed memory measurement. Currency is the per-provider closure digest plus artifact
+  // content identity, both of which are unchanged here.
+  const foreignRepositories = structuredClone(existing);
+  foreignRepositories.records[0].repositories.inference.revision = "f".repeat(40);
+  foreignRepositories.records[0].repositories.sceneWorks.revision = "e".repeat(40);
+  validateLtx25ResumeIdentity(foreignRepositories, selected, prepared);
+
+  // Likewise, a completed row captured on a different machine stays valid; only mixing hardware
+  // identities *within one resumed campaign* is still refused.
+  const foreignHardware = structuredClone(existing);
+  foreignHardware.records[0].hardware.chip = "Apple M6 Max";
+  validateLtx25ResumeIdentity(foreignHardware, selected, prepared);
+});
+
+test("LTX-2.5 resume ignores non-completed prior attempts", async () => {
+  const plan = JSON.parse(
+    await readFile(new URL("../config/memory-calibration-plan.json", import.meta.url)),
+  );
+  const selected = expandPlan({
+    ...plan,
+    providers: selectPlanProviders(plan, { model: "ltx_2_5" }),
+  }).filter((planned) => planned.backend === "mlx");
+  const planned = selected.find((candidate) => candidate.target.transformerVariant === "dev");
+  const prepared = await prepareLtx25CaptureArtifacts(await ltx25FixtureSnapshot(), selected);
+  const key = `${planned.target.transformerVariant}/${planned.target.tier}`;
+  const artifact = prepared.artifacts.get(key);
+  const inputs = [{
+    role: "base",
+    path: artifact.root,
+    bytes: artifact.bytes,
+    sha256: artifact.sha256,
+    repository: prepared.repository,
+    resolvedRevision: prepared.revision,
+    variant: planned.target.tier,
+  }, {
+    role: "enhancer",
+    path: prepared.enhancer.root,
+    bytes: prepared.enhancer.bytes,
+    sha256: prepared.enhancer.sha256,
+    repository: prepared.repository,
+    resolvedRevision: prepared.revision,
+    variant: "enhancer",
+  }, {
+    role: "adapter",
+    path: prepared.devAdapter.path,
+    bytes: prepared.devAdapter.bytes,
+    sha256: prepared.devAdapter.sha256,
+    repository: prepared.repository,
+    resolvedRevision: prepared.revision,
+    variant: "dev_refinement_lora",
+  }];
+  const complete = runtimeComplete();
+  Object.assign(complete, {
+    logicalCaseId: planned.logicalCaseId,
+    evidenceScope: planned.evidenceScope,
+    backend: planned.backend,
+    loadShape: planned.loadShape,
+    artifact: {
+      repository: prepared.repository,
+      resolvedRevision: prepared.revision,
+      variant: planned.target.tier,
+      inventorySha256: artifact.sha256,
+    },
+    target: planned.target,
+    fixture: planned.fixture,
+    strategy: planned.strategy,
+    calibrationFingerprint: planned.calibrationFingerprint,
+    sweep: {
+      axes: [],
+      cases: [{ parameters: planned.strategy.parameters, result: "passed" }],
+      rangeVerified: true,
+    },
+    derivation: { loadability: { kind: "direct", sourceSessionIds: ["ims-current"] } },
+  });
+  // A gated attempt carries no derivation and no source session: it is an attempt, not evidence.
+  const gated = structuredClone(complete);
+  gated.status = "gated";
+  delete gated.derivation;
+  const sourceSessions = [{ id: "ims-current", kind: "physical_mlx", inputs }];
+
+  // A gated attempt followed by a completed capture for the same case must resume, not trip the
+  // duplicate-identity guard.
+  validateLtx25ResumeIdentity(
+    { sourceSessions, records: [gated, structuredClone(complete)] },
+    selected,
+    prepared,
+  );
+  // Order must not matter.
+  validateLtx25ResumeIdentity(
+    { sourceSessions, records: [structuredClone(complete), structuredClone(gated)] },
+    selected,
+    prepared,
+  );
+  // A gated-only prior attempt simply re-runs: it must not hard-fail the provenance requirements.
+  validateLtx25ResumeIdentity(
+    { sourceSessions: [], records: [structuredClone(gated)] },
+    selected,
+    prepared,
+  );
+});
+
+test("a fully completed LTX-2.5 resume cannot no-op before provenance validation", async () => {
+  const plan = JSON.parse(
+    await readFile(new URL("../config/memory-calibration-plan.json", import.meta.url)),
+  );
+  const selected = expandPlan({
+    ...plan,
+    providers: selectPlanProviders(plan, { model: "ltx_2_5" }),
+  }).filter((planned) => planned.backend === "mlx");
+  const snapshot = await ltx25FixtureSnapshot();
+  const prepared = await prepareLtx25CaptureArtifacts(snapshot, selected);
+  const cleanRepo = await cleanFixtureRepo();
+  const revision = (await execFileAsync("git", ["-C", cleanRepo, "rev-parse", "HEAD"])).stdout.trim();
+  const matrixSourceRevision = JSON.parse(
+    await readFile(path.join(cleanRepo, "docs/generated/memory-matrix.json")),
+  ).generatedFrom.sceneWorksRevision;
+  const repositories = {
+    sceneWorks: { revision, dirty: false, matrixSourceRevision },
+    inference: { revision, dirty: false, closureDigest: "a".repeat(64) },
+  };
+  const hardware = {
+    probe: "fixture MLX probe",
+    memoryBytes: 137438953472,
+    model: "Mac17,6",
+    chip: "Apple M5 Max",
+    osVersion: "26.5.2",
+    metalDevice: "Apple M5 Max",
+    mlxMemoryLimitBytes: 130567005798,
+    wiredLimitBytes: 87044670532,
+  };
+  const records = selected.map((planned) => {
+    const key = `${planned.target.transformerVariant}/${planned.target.tier}`;
+    const artifact = prepared.artifacts.get(key);
+    const record = runtimeComplete();
+    Object.assign(record, {
+      evidenceScope: planned.evidenceScope,
+      backend: planned.backend,
+      loadShape: planned.loadShape,
+      repositories,
+      hardware,
+      artifact: {
+        repository: prepared.repository,
+        resolvedRevision: prepared.revision,
+        variant: planned.target.tier,
+        inventorySha256: artifact.sha256,
+      },
+      target: planned.target,
+      fixture: planned.fixture,
+      strategy: planned.strategy,
+      sweep: {
+        axes: [],
+        cases: [{ parameters: planned.strategy.parameters, result: "passed" }],
+        rangeVerified: true,
+      },
+      calibrationFingerprint: planned.calibrationFingerprint,
+    });
+    record.logicalCaseId = logicalCaseId(record);
+    record.id = recordId(record);
+    assert.equal(record.logicalCaseId, planned.logicalCaseId);
+    return record;
+  });
+  const resume = {
+    schemaVersion: SCHEMA_VERSION,
+    harnessVersion: HARNESS_VERSION,
+    sourceSessions: [],
+    records,
+  };
+  validateBundle(resume);
+  await assert.rejects(
+    runProviderPlan({
+      closureDigestFor: stubClosureDigest,
+      config: plan,
+      providerCommand: ["must-not-run"],
+      sceneWorksRepo: cleanRepo,
+      inferenceRepo: cleanRepo,
+      model: "ltx_2_5",
+      ltx25SnapshotRoot: snapshot,
+      resume,
+      executeProvider: async () => assert.fail("completed resume must not probe or execute"),
+    }),
+    /completed LTX-2\.5 resume row requires one exact source session/,
+  );
+});
+
+test("--model rejects unknown values and incompatible backend selections", async () => {
+  const ltxProvider = laneProvider({
+    backend: "mlx", provider: "ltx_2_5", fixture: "cap-ltx25", modelId: "ltx_2_5",
+  });
+  const config = {
+    providers: [{
+      ...ltxProvider,
+      target: {
+        ...ltxProvider.target,
+        transformerVariant: "distilled",
+        decoder: "conv",
+      },
+    }],
+  };
+  assert.throws(
+    () => selectPlanProviders(config, { model: "ltx-2.5" }),
+    /unknown --model "ltx-2\.5"; available modelIds: ltx_2_5/,
+  );
+
+  const cleanRepo = await cleanFixtureRepo();
+  await assert.rejects(
+    runProviderPlan({
+      closureDigestFor: stubClosureDigest,
+      config,
+      providerCommand: [
+        process.execPath,
+        fileURLToPath(new URL("./fixtures/memory-provider-fixture.mjs", import.meta.url)),
+      ],
+      sceneWorksRepo: cleanRepo,
+      inferenceRepo: cleanRepo,
+      backend: "candle",
+      model: "ltx_2_5",
+    }),
+    /exact canonical MLX campaign and cannot select another backend/,
+  );
+  await assert.rejects(
+    runProviderPlan({
+      closureDigestFor: stubClosureDigest,
+      config,
+      providerCommand: ["must-not-run"],
+      sceneWorksRepo: cleanRepo,
+      inferenceRepo: cleanRepo,
+      backend: "mlx",
+      model: "ltx_2_5",
+      executeProvider: async () => assert.fail("missing snapshot root must fail before provider probe"),
+    }),
+    /must select the exact canonical MLX campaign declared by/,
+  );
+  const plan = JSON.parse(
+    await readFile(new URL("../config/memory-calibration-plan.json", import.meta.url)),
+  );
+  await assert.rejects(
+    runProviderPlan({
+      closureDigestFor: stubClosureDigest,
+      config: plan,
+      providerCommand: ["must-not-run"],
+      sceneWorksRepo: cleanRepo,
+      inferenceRepo: cleanRepo,
+      model: "ltx_2_5",
+      executeProvider: async () => assert.fail("missing snapshot root must fail before provider probe"),
+    }),
+    /requires --ltx25-snapshot-root for per-case artifact binding/,
+  );
+});
+
+test("--ltx25-partition runs a validated subset of the canonical campaign", async () => {
+  const plan = JSON.parse(
+    await readFile(new URL("../config/memory-calibration-plan.json", import.meta.url)),
+  );
+  const cleanRepo = await cleanFixtureRepo();
+  const base = {
+    closureDigestFor: stubClosureDigest,
+    config: plan,
+    providerCommand: ["must-not-run"],
+    sceneWorksRepo: cleanRepo,
+    inferenceRepo: cleanRepo,
+    model: "ltx_2_5",
+    executeProvider: async () => assert.fail("partition selection must fail before provider probe"),
+  };
+  // A real subset passes canonical validation and proceeds to the next requirement
+  // (the snapshot root), instead of failing the full-set equality.
+  await assert.rejects(
+    runProviderPlan({ ...base, ltx25Partition: "-distilled-" }),
+    /requires --ltx25-snapshot-root for per-case artifact binding/,
+  );
+  // The comma form unions substrings and still validates as a subset.
+  await assert.rejects(
+    runProviderPlan({ ...base, ltx25Partition: "-q4-dev-,-q8-dev-" }),
+    /requires --ltx25-snapshot-root for per-case artifact binding/,
+  );
+  // A partition naming nothing in the plan fails closed.
+  await assert.rejects(
+    runProviderPlan({ ...base, ltx25Partition: "no-such-case" }),
+    /selected no ltx_2_5 plan providers/,
+  );
+  // The flag is meaningless outside the LTX-2.5 campaign.
+  await assert.rejects(
+    runProviderPlan({ ...base, model: undefined, backend: "mlx", ltx25Partition: "-distilled-" }),
+    /--ltx25-partition requires --model ltx_2_5/,
+  );
+});
+
+test("the CLI refuses missing or repeated --model values before reading capture inputs", async () => {
+  const harness = fileURLToPath(new URL("./memory-calibration-harness.mjs", import.meta.url));
+  await assert.rejects(
+    execFileAsync(process.execPath, [harness, "run", "--model"]),
+    /--model requires one value/,
+  );
+  await assert.rejects(
+    execFileAsync(process.execPath, [harness, "run", "--model", "ltx_2_5", "--model", "qwen_image"]),
+    /--model may be supplied only once/,
+  );
+  await assert.rejects(
+    execFileAsync(process.execPath, [harness, "run", "--ltx25-snapshot-root"]),
+    /--ltx25-snapshot-root requires one value/,
+  );
+});
+
+test("a model-filtered resume invokes only that model and retains the deterministic merge base", async () => {
+  const cleanRepo = await cleanFixtureRepo();
+  const config = {
+    providers: [
+      laneProvider({ backend: "candle", provider: "krea_2_turbo", fixture: "cap-a", modelId: "model_a" }),
+      laneProvider({ backend: "candle", provider: "flux2_dev", fixture: "cap-b", modelId: "model_b" }),
+    ],
+  };
+  const providerCommand = [
+    process.execPath,
+    fileURLToPath(new URL("./fixtures/memory-provider-fixture.mjs", import.meta.url)),
+  ];
+  const run = (model, resume, invocations = [], executeProvider) => runProviderPlan({
+    closureDigestFor: stubClosureDigest,
+    config,
+    providerCommand,
+    sceneWorksRepo: cleanRepo,
+    inferenceRepo: cleanRepo,
+    backend: "candle",
+    model,
+    resume,
+    onProviderInvocation: (invocation) => invocations.push(invocation),
+    executeProvider,
+  });
+
+  const modelB = await run("model_b");
+  const invocations = [];
+  const resumed = await run("model_a", modelB, invocations);
+  assert.equal(invocations.length, 1);
+  assert.ok(invocations[0].cases.every((planned) => planned.target.modelId === "model_a"));
+  assert.deepEqual(
+    resumed.records.map((record) => record.target.modelId).sort(),
+    ["model_a", "model_b"],
+    "the selector scopes execution while resume remains the lossless ingest merge base",
+  );
+  assert.deepEqual(
+    resumed.records.map((record) => record.id),
+    [...resumed.records.map((record) => record.id)].sort(),
+    "model-filtered checkpoints retain deterministic identity order",
+  );
+  const completedInvocations = [];
+  const completedResume = await run(
+    "model_a",
+    resumed,
+    completedInvocations,
+    async () => assert.fail("a completed model resume must not probe the provider"),
+  );
+  assert.deepEqual(completedInvocations, [], "a fully completed model resume must not probe or invoke the provider");
+  assert.deepEqual(completedResume, resumed, "a fully completed model resume returns its merge base byte-for-byte");
+});
 
 test("a --fixture-only capture run keys its closure digest by lane, not by plan-entry name", async () => {
   // This is the checked-in workflow invocation shape verbatim: `--backend … --fixture … ` and no

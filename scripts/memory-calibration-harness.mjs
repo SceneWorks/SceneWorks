@@ -2,13 +2,14 @@
 
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
-import { mkdir, readFile, realpath, rename, writeFile } from "node:fs/promises";
+import { mkdir, readFile, readdir, realpath, rename, stat, writeFile } from "node:fs/promises";
 import { createReadStream, readFileSync } from "node:fs";
 import path from "node:path";
 import process from "node:process";
 import { fileURLToPath } from "node:url";
 
 import { providerClosureDigest } from "./inference-closure-digest.mjs";
+import { hashArtifactInventory } from "./hash-artifact-inventory.mjs";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const CALIBRATION_SCHEMA = JSON.parse(
@@ -17,7 +18,7 @@ const CALIBRATION_SCHEMA = JSON.parse(
 export const HARNESS_VERSION = "sceneworks-memory-v5";
 // sc-18864 bumped the RECORD SHAPE (per-phase `deviceBytes`/`wiredBytes` removed) without changing
 // the measuring instrument, so the bundle schema version moves and the harness version does not.
-export const SCHEMA_VERSION = 5;
+export const SCHEMA_VERSION = 6;
 // sc-21715: the record-status universe, READ from the bundle schema rather than transcribed here, so
 // a status added there cannot leave a downstream tally silently partial. Every consumer that
 // partitions a bundle by status (`summary.calibrationRunsByStatus`) derives its keys from this list.
@@ -34,6 +35,13 @@ const RUNG_SET = new Set(RUNGS);
 /// Persisted spellings of `gen_core::LoadShape`. Eager and deferred measurements are not
 /// interchangeable, so this is a receipt axis rather than a fingerprint naming convention.
 export const LOAD_SHAPES = ["eager_materialization", "deferred_materialization"];
+export const LTX25_TRANSFORMER_VARIANTS = ["distilled", "dev"];
+export const LTX25_DECODERS = ["conv", "diffvae"];
+// The public authority is intentionally fixed here as well as in the native adapter: the harness
+// must reject a merely SHA-shaped snapshot before it hashes hundreds of GiB or starts Metal work.
+// The focused selector test binds these literals back to config/download-pattern-evidence.json.
+export const LTX25_CAPTURE_REPOSITORY = "SceneWorks/ltx-2.5-mlx";
+export const LTX25_CAPTURE_REVISION = "081658ce6886cacba20817ce0359bbefef706ff2";
 export const RUNG_REUSE_TOLERANCE = Object.freeze({
   absoluteBytes: 256 * 1024 * 1024,
   relative: 0.05,
@@ -41,10 +49,24 @@ export const RUNG_REUSE_TOLERANCE = Object.freeze({
 const PHYSICAL_MLX_SESSION_OUTPUT_ROLES = Object.freeze([
   "request", "selected_rgb", "reference_rgb",
 ]);
+const PHYSICAL_MLX_AV_SESSION_OUTPUT_ROLES = Object.freeze([
+  "request", "selected_av", "reference_av",
+]);
 const PHYSICAL_MLX_PROVIDER_OUTPUT_ROLES = Object.freeze([
   "selected_rgb", "reference_rgb",
 ]);
+const PHYSICAL_MLX_AV_PROVIDER_OUTPUT_ROLES = Object.freeze([
+  "selected_av", "reference_av",
+]);
 const PHYSICAL_MLX_RGB_BASENAME = /^(implan-[0-9a-f]{20})-(selected_rgb|reference_rgb)-([1-9][0-9]*)x([1-9][0-9]*)-([0-9a-f]{64})\.rgb$/;
+const PHYSICAL_MLX_AV_BASENAME = /^(implan-[0-9a-f]{20})-(selected_av|reference_av)-([1-9][0-9]*)x([1-9][0-9]*)-f([1-9][0-9]*)-([0-9a-f]{64})\.avbin$/;
+
+function physicalMlxExpectedRoles(outputs, includeRequest) {
+  const hasAv = outputs?.some((output) => output?.role === "selected_av" || output?.role === "reference_av");
+  return hasAv
+    ? (includeRequest ? PHYSICAL_MLX_AV_SESSION_OUTPUT_ROLES : PHYSICAL_MLX_AV_PROVIDER_OUTPUT_ROLES)
+    : (includeRequest ? PHYSICAL_MLX_SESSION_OUTPUT_ROLES : PHYSICAL_MLX_PROVIDER_OUTPUT_ROLES);
+}
 
 function stable(value) {
   if (Array.isArray(value)) return value.map(stable);
@@ -98,6 +120,67 @@ function physicalMlxRgbMetadata(output, label) {
   return { logicalCaseId: match[1], width, height };
 }
 
+function physicalMlxAvMetadata(output, label) {
+  const match = path.posix.basename(output.path).match(PHYSICAL_MLX_AV_BASENAME);
+  if (!match || match[2] !== output.role) {
+    fail(`${label} path must bind its logical case, A/V role, geometry, frames, and content digest`);
+  }
+  if (output.sha256 !== match[6]) {
+    fail(`${label} SHA-256 must match its content-addressed filename`);
+  }
+  return {
+    logicalCaseId: match[1],
+    width: Number(match[3]),
+    height: Number(match[4]),
+    frames: Number(match[5]),
+  };
+}
+
+export function parsePhysicalMlxAvContent(bytes, label = "physical MLX A/V output") {
+  const magic = Buffer.from("SCENEWORKS_AV1\0", "ascii");
+  if (bytes.length < 45 || !bytes.subarray(0, magic.length).equals(magic)) {
+    fail(`${label} must begin with the canonical SCENEWORKS_AV1 header`);
+  }
+  let offset = magic.length;
+  const width = bytes.readUInt32LE(offset); offset += 4;
+  const height = bytes.readUInt32LE(offset); offset += 4;
+  const frames = bytes.readUInt32LE(offset); offset += 4;
+  const fps = bytes.readUInt32LE(offset); offset += 4;
+  const sampleRateHz = bytes.readUInt32LE(offset); offset += 4;
+  const channels = bytes.readUInt16LE(offset); offset += 2;
+  const sampleCount = Number(bytes.readBigUInt64LE(offset)); offset += 8;
+  if (![width, height, frames, fps, sampleRateHz, channels, sampleCount]
+      .every((value) => Number.isSafeInteger(value) && value > 0)) {
+    fail(`${label} canonical A/V header contains a zero or unsafe dimension`);
+  }
+  for (let frame = 0; frame < frames; frame += 1) {
+    if (offset + 16 > bytes.length) fail(`${label} frame ${frame} header is truncated`);
+    const frameWidth = bytes.readUInt32LE(offset); offset += 4;
+    const frameHeight = bytes.readUInt32LE(offset); offset += 4;
+    const pixelLength = Number(bytes.readBigUInt64LE(offset)); offset += 8;
+    const expected = frameWidth * frameHeight * 3;
+    if (frameWidth !== width || frameHeight !== height || !Number.isSafeInteger(expected)
+        || pixelLength !== expected || offset + pixelLength > bytes.length) {
+      fail(`${label} frame ${frame} does not match the canonical RGB geometry`);
+    }
+    offset += pixelLength;
+  }
+  const pcmBytes = sampleCount * 4;
+  if (!Number.isSafeInteger(pcmBytes) || offset + pcmBytes !== bytes.length) {
+    fail(`${label} PCM payload length does not match sampleCount`);
+  }
+  return {
+    width, height, frames, fps, sampleRateHz, channels, sampleCount,
+    pcmSha256: createHash("sha256").update(bytes.subarray(offset)).digest("hex"),
+  };
+}
+
+function physicalMlxOutputMetadata(output, label) {
+  return output.role === "selected_av" || output.role === "reference_av"
+    ? physicalMlxAvMetadata(output, label)
+    : physicalMlxRgbMetadata(output, label);
+}
+
 function validatePhysicalMlxSessionReceipts(session) {
   const sourceDirectory = path.posix.dirname(session.sourcePath);
   if (session.sourcePath !== `${sourceDirectory}/${session.id}.log`) {
@@ -111,18 +194,77 @@ function validatePhysicalMlxSessionReceipts(session) {
     if (path.posix.dirname(output.path) !== sourceDirectory) {
       fail(`${session.id}: physical MLX RGB receipts must share the source directory`);
     }
-    physicalMlxRgbMetadata(output, `${session.id}.${output.role}`);
+    physicalMlxOutputMetadata(output, `${session.id}.${output.role}`);
   }
 }
 
 function validatePhysicalMlxOutputsAgainstRecord(record, session) {
   for (const output of session.outputs.filter((candidate) => candidate.role !== "request")) {
-    const metadata = physicalMlxRgbMetadata(output, `${session.id}.${output.role}`);
+    const metadata = physicalMlxOutputMetadata(output, `${session.id}.${output.role}`);
     if (metadata.logicalCaseId !== record.logicalCaseId
         || metadata.width !== record.target.geometry.width
-        || metadata.height !== record.target.geometry.height) {
-      fail(`${record.id}: physical MLX RGB receipt does not match the measured logical case geometry`);
+        || metadata.height !== record.target.geometry.height
+        || (metadata.frames !== undefined && metadata.frames !== record.target.geometry.frames)) {
+      fail(`${record.id}: physical MLX output receipt does not match the measured logical case geometry`);
     }
+  }
+  const hasAv = session.outputs.some((output) => output.role === "selected_av");
+  if (hasAv !== (record.quality.audio !== undefined)) {
+    fail(`${record.id}: physical MLX A/V receipts and typed audio quality must be present together`);
+  }
+  if (hasAv) validateAudioQuality(record);
+}
+
+function validateAudioQuality(record) {
+  const audio = record.quality.audio;
+  object(audio, `${record.id}.quality.audio`);
+  if (audio.result !== "passed") fail(`${record.id}: A/V audio quality did not pass`);
+  for (const field of ["sampleRateHz", "channels", "sampleCount"]) {
+    if (!Number.isSafeInteger(audio[field]) || audio[field] <= 0) {
+      fail(`${record.id}.quality.audio.${field} must be a positive safe integer`);
+    }
+  }
+  for (const field of ["selectedPcmSha256", "referencePcmSha256"]) {
+    if (!/^[0-9a-f]{64}$/.test(audio[field])) {
+      fail(`${record.id}.quality.audio.${field} must be a lowercase SHA-256 digest`);
+    }
+  }
+  for (const metric of [
+    "maximumAbsoluteError", "meanAbsoluteError", "rootMeanSquareError",
+    "maximumAbsoluteErrorThreshold", "meanAbsoluteErrorThreshold",
+    "rootMeanSquareErrorThreshold",
+  ]) number(audio[metric], `${record.id}.quality.audio.${metric}`);
+  if (audio.maximumAbsoluteError > audio.maximumAbsoluteErrorThreshold
+      || audio.meanAbsoluteError > audio.meanAbsoluteErrorThreshold
+      || audio.rootMeanSquareError > audio.rootMeanSquareErrorThreshold) {
+    fail(`${record.id}: audio quality threshold exceeded`);
+  }
+}
+
+export function validatePhysicalMlxAvContentsAgainstRecord(record, avContents, label) {
+  if (avContents.size === 0) return;
+  validateAudioQuality(record);
+  const selected = avContents.get("selected_av");
+  const reference = avContents.get("reference_av");
+  const audio = record.quality.audio;
+  const outputFps = record.diagnostics?.measurements?.find(
+    (measurement) => measurement.name === "outputFps",
+  )?.value;
+  for (const content of [selected, reference]) {
+    if (!content
+        || content.width !== record.target.geometry.width
+        || content.height !== record.target.geometry.height
+        || content.frames !== record.target.geometry.frames
+        || content.fps !== outputFps
+        || content.sampleRateHz !== audio.sampleRateHz
+        || content.channels !== audio.channels
+        || content.sampleCount !== audio.sampleCount) {
+      fail(`${label}: canonical A/V header differs from measured video/audio identity`);
+    }
+  }
+  if (selected.pcmSha256 !== audio.selectedPcmSha256
+      || reference.pcmSha256 !== audio.referencePcmSha256) {
+    fail(`${label}: canonical A/V PCM hashes differ from quality.audio`);
   }
 }
 
@@ -747,6 +889,20 @@ export function validateRecord(record) {
   }
   object(record.target, `${record.id}.target`);
   for (const key of ["modelId", "provider", "tier", "mode", "overlay"]) text(record.target[key], `${record.id}.target.${key}`);
+  if (record.target.modelId === "ltx_2_5") {
+    if (!LTX25_TRANSFORMER_VARIANTS.includes(record.target.transformerVariant)) {
+      fail(
+        `${record.id}.target.transformerVariant must identify an LTX-2.5 transformer ` +
+          `(${LTX25_TRANSFORMER_VARIANTS.join("|")})`,
+      );
+    }
+    if (!LTX25_DECODERS.includes(record.target.decoder)) {
+      fail(
+        `${record.id}.target.decoder must identify an LTX-2.5 decoder ` +
+          `(${LTX25_DECODERS.join("|")})`,
+      );
+    }
+  }
   for (const key of ["width", "height", "batch", "frames"]) number(record.target.geometry[key], `${record.id}.target.geometry.${key}`, true);
   object(record.strategy, `${record.id}.strategy`);
   if (!RUNG_SET.has(record.strategy.rung)) fail(`${record.id}: invalid rung`);
@@ -761,6 +917,7 @@ export function validateRecord(record) {
   if (record.id !== recordId(record)) fail(`${record.id}: deterministic identity mismatch`);
   object(record.loadability, `${record.id}.loadability`);
   object(record.quality, `${record.id}.quality`);
+  if (record.quality.audio !== undefined) validateAudioQuality(record);
   if (!Array.isArray(record.scenarios)) fail(`${record.id}: scenarios must be an array`);
   validateDiagnosticCeilingAgreesWithTypedField(record);
   if (record.status === "complete") validateComplete(record);
@@ -785,7 +942,7 @@ export function validateBundle(bundle) {
     if (session.kind === "physical_mlx") {
       validateExactOutputReceipts(
         session.outputs,
-        PHYSICAL_MLX_SESSION_OUTPUT_ROLES,
+        physicalMlxExpectedRoles(session.outputs, true),
         `${session.id}.outputs`,
       );
       validatePhysicalMlxSessionReceipts(session);
@@ -842,10 +999,14 @@ export function validateBundle(bundle) {
       ? "z_image"
       : requiresQwenMlxDerivation ? "qwen_image" : null;
     const requiresDerivation = provenancePolicy !== null;
+    const requiresAudioDerivation = record.quality.audio !== undefined;
     if (requiresQwenMlxDerivation && !record.artifact.inventorySha256) {
       fail(`${record.id}: authoritative Qwen MLX evidence requires an exact artifact inventory`);
     }
     if (requiresDerivation && !record.derivation) fail(`${record.id}: missing source-session derivation`);
+    if (requiresAudioDerivation && !record.derivation) {
+      fail(`${record.id}: typed audio quality requires physical source-session derivation`);
+    }
     if (record.derivation) {
       const derivationSessionIds = new Set();
       for (const [claim, reference] of Object.entries(record.derivation).filter(([key]) => key !== "justification")) {
@@ -860,6 +1021,23 @@ export function validateBundle(bundle) {
           }
           if (requiresDerivation) {
             validateSourceInputsAgainstRecord(record, session, sourceClaim, inventoryInputs, provenancePolicy);
+          }
+          if (record.target.modelId === "ltx_2_5") {
+            if (!session.target) {
+              fail(`${record.id}: ${sessionId} is an LTX derivation source without a target identity`);
+            }
+            for (const [sourceField, recordField] of [
+              ["tier", record.target.tier],
+              ["mode", record.target.mode],
+              ["overlay", record.target.overlay],
+              ["rung", record.strategy.rung],
+              ["transformerVariant", record.target.transformerVariant],
+              ["decoder", record.target.decoder],
+            ]) {
+              if (session.target[sourceField] !== recordField) {
+                fail(`${record.id}: ${sessionId} has the wrong LTX ${sourceField} identity`);
+              }
+            }
           }
           if (["memory", "quality", "overlay"].includes(claim)
               && session.target && session.target.tier !== record.target.tier) {
@@ -898,6 +1076,25 @@ export function validateBundle(bundle) {
       if (requiresQwenMlxDerivation) {
         const [sessionId] = derivationSessionIds;
         validatePhysicalMlxOutputsAgainstRecord(record, sessions.get(sessionId));
+      }
+      if (requiresAudioDerivation) {
+        const audioSourceIds = record.derivation.quality.sourceSessionIds;
+        if (audioSourceIds.length !== 1) {
+          fail(`${record.id}: typed audio quality must bind exactly one physical A/V source session`);
+        }
+        const audioSession = sessions.get(audioSourceIds[0]);
+        if (audioSession?.kind !== "physical_mlx") {
+          fail(`${record.id}: typed audio quality source must be physical_mlx`);
+        }
+        validatePhysicalMlxOutputsAgainstRecord(record, audioSession);
+      }
+      if (record.target.modelId === "ltx_2_5") {
+        for (const sessionId of derivationSessionIds) {
+          const session = sessions.get(sessionId);
+          if (session.kind === "physical_mlx") {
+            validatePhysicalMlxOutputsAgainstRecord(record, session);
+          }
+        }
       }
     }
   }
@@ -1018,6 +1215,7 @@ export async function validateSourceSessionFiles(
     }
     const record = boundRecords[0];
     const requestOutput = session.outputs.find((output) => output.role === "request");
+    const avContents = new Map();
     for (const output of session.outputs) {
       const outputFile = await resolveReceiptPath(output.path, roots);
       const outputBytes = await readFile(outputFile);
@@ -1025,7 +1223,14 @@ export async function validateSourceSessionFiles(
           || outputBytes.length !== output.bytes) {
         fail(`${session.id}: output ${output.path} no longer matches its SHA-256 receipt`);
       }
+      if (output.role === "selected_av" || output.role === "reference_av") {
+        avContents.set(
+          output.role,
+          parsePhysicalMlxAvContent(outputBytes, `${session.id}.${output.role}`),
+        );
+      }
     }
+    validatePhysicalMlxAvContentsAgainstRecord(record, avContents, session.id);
     const requestBytes = await readFile(await resolveReceiptPath(requestOutput.path, roots));
     let request;
     try {
@@ -1051,6 +1256,10 @@ export async function validateSourceSessionFiles(
       tier: request.planned.target.tier,
       mode: request.planned.target.mode,
       overlay: request.planned.target.overlay,
+      ...(request.planned.target.transformerVariant
+        ? { transformerVariant: request.planned.target.transformerVariant }
+        : {}),
+      ...(request.planned.target.decoder ? { decoder: request.planned.target.decoder } : {}),
       rung: request.planned.strategy.rung,
     };
     if (!equal(capturedProvenance(request.repositories), capturedProvenance(record.repositories))
@@ -1077,11 +1286,11 @@ export async function validateSourceSessionFiles(
     }
     validateExactOutputReceipts(
       providerResponse?.sourceCapture?.outputs,
-      PHYSICAL_MLX_PROVIDER_OUTPUT_ROLES,
+      physicalMlxExpectedRoles(providerResponse?.sourceCapture?.outputs, false),
       `${session.id}.providerResponse.sourceCapture.outputs`,
     );
     for (const providerOutput of providerResponse.sourceCapture.outputs) {
-      physicalMlxRgbMetadata(
+      physicalMlxOutputMetadata(
         providerOutput,
         `${session.id}.providerResponse.sourceCapture.outputs[${providerOutput.role}]`,
       );
@@ -1251,6 +1460,9 @@ export function compareRungReuse(fresh, reused, tolerance = RUNG_REUSE_TOLERANCE
   };
 }
 
+/** Statuses the harness treats as a completed capture. `gated` is an attempt, never a completion. */
+const COMPLETED_RECORD_STATUSES = ["complete", "runtime_complete", "negative_complete"];
+
 function completedLogicalIds(record) {
   if (record.status === "negative_complete") return [record.logicalCaseId];
   if (!["complete", "runtime_complete"].includes(record.status)) return [];
@@ -1303,6 +1515,20 @@ export function expandPlan(config, completed = []) {
   );
   const cases = [];
   for (const provider of config.providers) {
+    if (provider.target?.modelId === "ltx_2_5") {
+      if (!LTX25_TRANSFORMER_VARIANTS.includes(provider.target.transformerVariant)) {
+        fail(
+          `${provider.name ?? provider.target.provider}: LTX-2.5 plan target requires ` +
+            `transformerVariant=${LTX25_TRANSFORMER_VARIANTS.join("|")}`,
+        );
+      }
+      if (!LTX25_DECODERS.includes(provider.target.decoder)) {
+        fail(
+          `${provider.name ?? provider.target.provider}: LTX-2.5 plan target requires ` +
+            `decoder=${LTX25_DECODERS.join("|")}`,
+        );
+      }
+    }
     if (!["eager_materialization", "deferred_materialization"].includes(provider.loadShape)) {
       fail(`${provider.name ?? provider.target.provider}: plan provider requires an explicit loadShape`);
     }
@@ -1341,6 +1567,404 @@ export function expandPlan(config, completed = []) {
   return cases.sort((a, b) => a.logicalCaseId.localeCompare(b.logicalCaseId));
 }
 
+export function selectPlanProviders(config, { model, providerName, fixture } = {}) {
+  object(config, "plan config");
+  if (!Array.isArray(config.providers)) fail("plan config.providers must be an array");
+  if (model !== undefined) {
+    if (typeof model !== "string" || !model || model.trim() !== model) {
+      fail("--model must be one exact, non-empty modelId");
+    }
+    const modelIds = [...new Set(config.providers
+      .map((provider) => provider.target?.modelId)
+      .filter((modelId) => typeof modelId === "string" && modelId.length > 0))]
+      .sort();
+    if (!modelIds.includes(model)) {
+      fail(`unknown --model ${JSON.stringify(model)}; available modelIds: ${modelIds.join(", ") || "none"}`);
+    }
+  }
+  return config.providers.filter(
+    (provider) =>
+      (!model || provider.target?.modelId === model) &&
+      (!providerName || provider.name === providerName) &&
+      (!fixture || provider.fixture === fixture),
+  );
+}
+
+const LTX25_CAPTURE_TIERS = ["q4", "q8", "bf16"];
+let canonicalLtx25LogicalCaseIds;
+
+/**
+ * The canonical LTX-2.5 capture set is *derived* from the plan's ltx_2_5 MLX rows, never pinned to
+ * a literal population count: growing the plan must not require editing the harness.
+ */
+function expectedLtx25LogicalCaseIds() {
+  if (!canonicalLtx25LogicalCaseIds) {
+    const plan = JSON.parse(readFileSync(path.join(ROOT, "config/memory-calibration-plan.json"), "utf8"));
+    const ids = expandPlan({
+      ...plan,
+      providers: selectPlanProviders(plan, { model: "ltx_2_5" }),
+    }).filter((planned) => planned.backend === "mlx")
+      .map((planned) => planned.logicalCaseId)
+      .sort();
+    if (!ids.length) fail("canonical LTX-2.5 plan contains no MLX cases");
+    if (new Set(ids).size !== ids.length) {
+      fail("canonical LTX-2.5 plan contains duplicate logical case identities");
+    }
+    canonicalLtx25LogicalCaseIds = ids;
+  }
+  return canonicalLtx25LogicalCaseIds;
+}
+
+function validateCanonicalLtx25Selection(plannedCases, partitioned = false) {
+  const actual = plannedCases.map((planned) => planned.logicalCaseId).sort();
+  const expected = expectedLtx25LogicalCaseIds();
+  if (new Set(actual).size !== actual.length) {
+    fail("--model ltx_2_5 selected duplicate logical case identities");
+  }
+  if (partitioned) {
+    // A partition may run any non-empty SUBSET of the canonical campaign (so the grid can be
+    // split across capture hosts), but never a case outside it: the repo's checked-in plan
+    // stays the sole authority on what the campaign is.
+    const canonical = new Set(expected);
+    const foreign = actual.filter((id) => !canonical.has(id));
+    if (foreign.length) {
+      fail(`--ltx25-partition selected cases outside the canonical MLX campaign: ${foreign.join(", ")}`);
+    }
+    return;
+  }
+  if (!equal(actual, expected)) {
+    fail(
+      "--model ltx_2_5 must select the exact canonical MLX campaign declared by "
+        + "config/memory-calibration-plan.json (pass --ltx25-partition to run a named subset)",
+    );
+  }
+}
+
+function ltx25ArtifactKey(planned) {
+  const variant = planned?.target?.transformerVariant;
+  const tier = planned?.target?.tier;
+  if (!LTX25_TRANSFORMER_VARIANTS.includes(variant) || !LTX25_CAPTURE_TIERS.includes(tier)) {
+    fail(`LTX-2.5 capture target requires transformerVariant=${
+      LTX25_TRANSFORMER_VARIANTS.join("|")
+    } and tier=${LTX25_CAPTURE_TIERS.join("|")}`);
+  }
+  return `${variant}/${tier}`;
+}
+
+async function requireLtx25File(file, label) {
+  let metadata;
+  try {
+    metadata = await stat(file);
+  } catch (error) {
+    fail(`${label} is missing at ${file}: ${error.message}`);
+  }
+  if (!metadata.isFile() || metadata.size < 1) fail(`${label} must be one non-empty file at ${file}`);
+  return metadata;
+}
+
+async function hashLtx25File(file, label, trustedRoot) {
+  const metadata = await requireLtx25File(file, label);
+  const physical = await realpath(file);
+  const boundary = await realpath(trustedRoot);
+  const relation = path.relative(boundary, physical);
+  if (!relation || relation.startsWith("..") || path.isAbsolute(relation)) {
+    fail(`${label} escaped the repository cache boundary at ${file}`);
+  }
+  const hash = createHash("sha256");
+  let bytes = 0;
+  try {
+    for await (const chunk of createReadStream(physical)) {
+      bytes += chunk.length;
+      hash.update(chunk);
+    }
+  } catch (error) {
+    fail(`hash ${label} at ${file}: ${error.message}`);
+  }
+  if (bytes !== metadata.size) fail(`${label} changed size while it was being hashed at ${file}`);
+  return { path: file, bytes, sha256: hash.digest("hex") };
+}
+
+export async function prepareLtx25CaptureArtifacts(
+  snapshotRoot,
+  plannedCases,
+  inventoryFor = hashArtifactInventory,
+) {
+  if (typeof snapshotRoot !== "string" || !snapshotRoot || !path.isAbsolute(snapshotRoot)) {
+    fail("--ltx25-snapshot-root must be one absolute path");
+  }
+  if (!Array.isArray(plannedCases) || plannedCases.length === 0) {
+    fail("LTX-2.5 snapshot preparation requires at least one selected case");
+  }
+  if (plannedCases.some((planned) =>
+    planned.backend !== "mlx" ||
+    planned.target?.modelId !== "ltx_2_5" ||
+    planned.target?.provider !== "ltx_2_5")) {
+    fail("--ltx25-snapshot-root is valid only for the mlx:ltx_2_5 plan");
+  }
+
+  const requested = path.resolve(snapshotRoot);
+  let resolved;
+  try {
+    resolved = await realpath(requested);
+  } catch (error) {
+    fail(`cannot canonicalize --ltx25-snapshot-root ${requested}: ${error.message}`);
+  }
+  if (resolved !== requested) {
+    fail(`--ltx25-snapshot-root must be the canonical snapshot path, got ${requested} -> ${resolved}`);
+  }
+  const snapshotsDirectory = path.dirname(resolved);
+  const repositoryDirectory = path.dirname(snapshotsDirectory);
+  const expectedRepositoryDirectory = `models--${LTX25_CAPTURE_REPOSITORY.replaceAll("/", "--")}`;
+  if (
+    path.basename(resolved) !== LTX25_CAPTURE_REVISION ||
+    path.basename(snapshotsDirectory) !== "snapshots" ||
+    path.basename(repositoryDirectory) !== expectedRepositoryDirectory
+  ) {
+    fail(
+      `--ltx25-snapshot-root must be ${expectedRepositoryDirectory}/snapshots/${LTX25_CAPTURE_REVISION}`,
+    );
+  }
+
+  const enhancer = path.join(resolved, "enhancer");
+  let enhancerEntries;
+  try {
+    enhancerEntries = await readdir(enhancer);
+  } catch (error) {
+    fail(`LTX-2.5 enhancer directory is missing at ${enhancer}: ${error.message}`);
+  }
+  if (enhancerEntries.length === 0) fail(`LTX-2.5 enhancer directory is empty at ${enhancer}`);
+  const canonicalEnhancer = await realpath(enhancer);
+  if (canonicalEnhancer !== enhancer) fail(`LTX-2.5 enhancer root must be canonical: ${enhancer}`);
+  let enhancerInventory;
+  try {
+    enhancerInventory = await inventoryFor(enhancer, { trustedRoot: repositoryDirectory });
+  } catch (error) {
+    fail(`hash LTX-2.5 enhancer artifact inventory: ${error.message}`);
+  }
+  if (!Number.isSafeInteger(enhancerInventory.bytes) || enhancerInventory.bytes <= 0 ||
+      !/^[0-9a-f]{64}$/.test(enhancerInventory.sha256)) {
+    fail("LTX-2.5 enhancer artifact inventory is malformed");
+  }
+  const enhancerArtifact = {
+    root: enhancer,
+    bytes: enhancerInventory.bytes,
+    sha256: enhancerInventory.sha256,
+  };
+  const needsDevAdapter = plannedCases.some(
+    (planned) => planned.target.transformerVariant === "dev",
+  );
+  const devAdapter = needsDevAdapter
+    ? await hashLtx25File(
+        path.join(resolved, "distilled_lora", "ltx-2.5-22b-distilled-lora-450-bf16.safetensors"),
+        "LTX-2.5 dev refinement adapter",
+        repositoryDirectory,
+      )
+    : null;
+
+  const artifacts = new Map();
+  const keys = [...new Set(plannedCases.map(ltx25ArtifactKey))].sort();
+  for (const key of keys) {
+    const root = path.join(resolved, ...key.split("/"));
+    let canonicalRoot;
+    try {
+      canonicalRoot = await realpath(root);
+    } catch (error) {
+      fail(`LTX-2.5 nested artifact root ${key} is missing at ${root}: ${error.message}`);
+    }
+    if (canonicalRoot !== root) fail(`LTX-2.5 nested artifact root ${key} must be canonical: ${root}`);
+    await requireLtx25File(path.join(root, "split_model.json"), `LTX-2.5 ${key} split manifest`);
+    const matching = plannedCases.filter((planned) => ltx25ArtifactKey(planned) === key);
+    if (matching.some((planned) => planned.target.decoder === "conv")) {
+      await requireLtx25File(path.join(root, "vae_decoder.safetensors"), `LTX-2.5 ${key} ConvVAE decoder`);
+    }
+    if (matching.some((planned) => planned.target.decoder === "diffvae")) {
+      await requireLtx25File(
+        path.join(root, "vae_diffusion_decoder.safetensors"),
+        `LTX-2.5 ${key} DiffVAE decoder`,
+      );
+    }
+    let inventory;
+    try {
+      inventory = await inventoryFor(root, { trustedRoot: repositoryDirectory });
+    } catch (error) {
+      fail(`hash LTX-2.5 ${key} artifact inventory: ${error.message}`);
+    }
+    if (!Number.isSafeInteger(inventory.bytes) || inventory.bytes <= 0 ||
+        !/^[0-9a-f]{64}$/.test(inventory.sha256)) {
+      fail(`LTX-2.5 ${key} artifact inventory is malformed`);
+    }
+    artifacts.set(key, { root, bytes: inventory.bytes, sha256: inventory.sha256 });
+  }
+  return {
+    snapshotRoot: resolved,
+    repository: LTX25_CAPTURE_REPOSITORY,
+    revision: LTX25_CAPTURE_REVISION,
+    enhancer: enhancerArtifact,
+    devAdapter,
+    artifacts,
+  };
+}
+
+async function assertLtx25ArtifactsStable(sealed, plannedCases, inventoryFor = hashArtifactInventory) {
+  const observed = await prepareLtx25CaptureArtifacts(
+    sealed.snapshotRoot,
+    plannedCases,
+    inventoryFor,
+  );
+  for (const field of ["snapshotRoot", "repository", "revision", "enhancer"]) {
+    if (!equal(observed[field], sealed[field])) {
+      fail(`LTX-2.5 ${field} changed after campaign preparation`);
+    }
+  }
+  if (sealed.devAdapter) {
+    const observedDevAdapter = observed.devAdapter ?? await hashLtx25File(
+      sealed.devAdapter.path,
+      "LTX-2.5 dev refinement adapter",
+      path.dirname(path.dirname(sealed.snapshotRoot)),
+    );
+    if (!equal(observedDevAdapter, sealed.devAdapter)) {
+      fail("LTX-2.5 devAdapter changed after campaign preparation");
+    }
+  }
+  for (const key of new Set(plannedCases.map(ltx25ArtifactKey))) {
+    if (!equal(observed.artifacts.get(key), sealed.artifacts.get(key))) {
+      fail(`LTX-2.5 ${key} artifact inventory changed during provider execution`);
+    }
+  }
+}
+
+export function ltx25ProviderEnvironment(prepared, planned, baseEnvironment = process.env) {
+  const environment = { ...baseEnvironment };
+  for (const name of [
+    "SCENEWORKS_LTX25_ROOT",
+    "SCENEWORKS_MEMORY_MODEL_BYTES",
+    "SCENEWORKS_MEMORY_MODEL_INVENTORY_SHA256",
+    "SCENEWORKS_LTX25_ENHANCER_BYTES",
+    "SCENEWORKS_LTX25_ENHANCER_INVENTORY_SHA256",
+    "SCENEWORKS_LTX25_DEV_ADAPTER_BYTES",
+    "SCENEWORKS_LTX25_DEV_ADAPTER_SHA256",
+  ]) delete environment[name];
+  environment.SCENEWORKS_LTX25_REPOSITORY = prepared.repository;
+  environment.SCENEWORKS_LTX25_REVISION = prepared.revision;
+  if (planned) {
+    const key = ltx25ArtifactKey(planned);
+    const artifact = prepared.artifacts.get(key);
+    if (!artifact) fail(`LTX-2.5 prepared snapshot has no inventory for ${key}`);
+    environment.SCENEWORKS_LTX25_ROOT = artifact.root;
+    environment.SCENEWORKS_MEMORY_MODEL_BYTES = String(artifact.bytes);
+    environment.SCENEWORKS_MEMORY_MODEL_INVENTORY_SHA256 = artifact.sha256;
+    environment.SCENEWORKS_LTX25_ENHANCER_BYTES = String(prepared.enhancer.bytes);
+    environment.SCENEWORKS_LTX25_ENHANCER_INVENTORY_SHA256 = prepared.enhancer.sha256;
+    if (planned.target.transformerVariant === "dev") {
+      if (!prepared.devAdapter) fail("LTX-2.5 prepared snapshot has no dev adapter inventory");
+      environment.SCENEWORKS_LTX25_DEV_ADAPTER_BYTES = String(prepared.devAdapter.bytes);
+      environment.SCENEWORKS_LTX25_DEV_ADAPTER_SHA256 = prepared.devAdapter.sha256;
+    }
+  }
+  return environment;
+}
+
+function ltx25ExpectedSourceInputs(prepared, planned) {
+  const key = ltx25ArtifactKey(planned);
+  const artifact = prepared.artifacts.get(key);
+  if (!artifact) fail(`LTX-2.5 prepared snapshot has no inventory for ${key}`);
+  const inputs = [{
+    role: "base",
+    path: artifact.root,
+    bytes: artifact.bytes,
+    sha256: artifact.sha256,
+    repository: prepared.repository,
+    resolvedRevision: prepared.revision,
+    variant: planned.target.tier,
+  }, {
+    role: "enhancer",
+    path: prepared.enhancer.root,
+    bytes: prepared.enhancer.bytes,
+    sha256: prepared.enhancer.sha256,
+    repository: prepared.repository,
+    resolvedRevision: prepared.revision,
+    variant: "enhancer",
+  }];
+  if (planned.target.transformerVariant === "dev") {
+    if (!prepared.devAdapter) fail("LTX-2.5 prepared snapshot has no dev adapter inventory");
+    inputs.push({
+      role: "adapter",
+      path: prepared.devAdapter.path,
+      bytes: prepared.devAdapter.bytes,
+      sha256: prepared.devAdapter.sha256,
+      repository: prepared.repository,
+      resolvedRevision: prepared.revision,
+      variant: "dev_refinement_lora",
+    });
+  }
+  return inputs;
+}
+
+/**
+ * Content identity of a source-session input: everything that identifies the bytes, minus the
+ * absolute snapshot `path`, which is machine-layout state rather than artifact identity.
+ */
+function ltx25InputContentIdentity(input) {
+  return {
+    role: input?.role,
+    bytes: input?.bytes,
+    sha256: input?.sha256,
+    repository: input?.repository,
+    resolvedRevision: input?.resolvedRevision,
+    variant: input?.variant,
+  };
+}
+
+export function validateLtx25ResumeIdentity(existing, plannedCases, prepared) {
+  const selectedIds = new Set(plannedCases.map((planned) => planned.logicalCaseId));
+  const sessions = new Map((existing.sourceSessions ?? []).map((session) => [session.id, session]));
+  const resumed = new Map();
+  // Only completed receipts describe evidence a resume may keep. A gated/failed prior attempt is
+  // simply re-run, so it must neither brick resume nor collide with a later complete record for
+  // the same logical case. Repository/pin and hardware identity are deliberately NOT compared —
+  // not against the current run and not between prior rows: a pin, repo, or capture-host change
+  // is provenance only and never invalidates a measurement (each record stamps its own hardware
+  // for consumers that care). The artifact content identity checked below (sha256 inventory +
+  // artifact repo/revision) is the key.
+  for (const record of existing.records ?? []) {
+    if (!COMPLETED_RECORD_STATUSES.includes(record.status)) continue;
+    const logicalIds = new Set([record.logicalCaseId, ...completedLogicalIds(record)]);
+    for (const logicalId of logicalIds) {
+      if (!selectedIds.has(logicalId)) continue;
+      if (resumed.has(logicalId)) {
+        fail(`${logicalId}: resume contains multiple LTX-2.5 campaign identities`);
+      }
+      resumed.set(logicalId, record);
+    }
+  }
+  for (const planned of plannedCases) {
+    const record = resumed.get(planned.logicalCaseId);
+    if (!record) continue;
+    const sourceSessionIds = record.derivation?.loadability?.sourceSessionIds;
+    if (!Array.isArray(sourceSessionIds) || sourceSessionIds.length !== 1) {
+      fail(`${planned.logicalCaseId}: completed LTX-2.5 resume row requires one exact source session`);
+    }
+    const session = sessions.get(sourceSessionIds[0]);
+    if (session?.kind !== "physical_mlx") {
+      fail(`${planned.logicalCaseId}: completed LTX-2.5 resume row requires physical MLX provenance`);
+    }
+    const expectedInputs = ltx25ExpectedSourceInputs(prepared, planned);
+    if (!equal(
+      (session.inputs ?? []).map(ltx25InputContentIdentity),
+      expectedInputs.map(ltx25InputContentIdentity),
+    )) {
+      fail(`${planned.logicalCaseId}: completed LTX-2.5 resume row has stale artifact identity`);
+    }
+    const base = expectedInputs[0];
+    if (record.artifact?.repository !== base.repository
+        || record.artifact?.resolvedRevision !== base.resolvedRevision
+        || record.artifact?.variant !== base.variant
+        || record.artifact?.inventorySha256 !== base.sha256) {
+      fail(`${planned.logicalCaseId}: completed LTX-2.5 resume artifact disagrees with current campaign`);
+    }
+  }
+}
+
 export async function assessProviderReuse({ config, providerCommand, backend, fixture }) {
   if (!Array.isArray(providerCommand) || !providerCommand.length) fail("provider command must be a JSON argv array");
   const planned = expandPlan(config).filter(
@@ -1365,12 +1989,13 @@ export async function assessProviderReuse({ config, providerCommand, backend, fi
   };
 }
 
-function execute(command, args, input) {
+function execute(command, args, input, { env } = {}) {
   return new Promise((resolve, reject) => {
     const hasInput = input !== undefined;
     const child = spawn(command, args, {
       stdio: [hasInput ? "pipe" : "ignore", "pipe", "pipe"],
       windowsHide: true,
+      ...(env ? { env } : {}),
     });
     let stdout = "";
     let stderr = "";
@@ -1398,9 +2023,9 @@ function execute(command, args, input) {
 }
 
 export async function runProviderPlan({
-  config, providerCommand, sceneWorksRepo, inferenceRepo, resume, backend, providerName, fixture,
+  config, providerCommand, sceneWorksRepo, inferenceRepo, resume, backend, model, providerName, fixture,
   onProviderInvocation, onProviderCheckpoint, forceFreshPerCase = false, forceBatchRungs = false,
-  rawLogDir = null, sourcePathPrefix = null,
+  rawLogDir = null, sourcePathPrefix = null, ltx25SnapshotRoot = null, ltx25Partition = null,
   // sc-17774: injectable so the runner's own tests can drive synthetic repositories, which have no
   // inference crate layout to derive a real closure from. Production always uses the default.
   closureDigestFor = null,
@@ -1490,15 +2115,30 @@ export async function runProviderPlan({
     : { schemaVersion: SCHEMA_VERSION, harnessVersion: HARNESS_VERSION, sourceSessions: [], records: [] };
   const selectedConfig = {
     ...config,
-    providers: config.providers.filter(
-      (provider) => (!providerName || provider.name === providerName) && (!fixture || provider.fixture === fixture),
-    ),
+    providers: selectPlanProviders(config, { model, providerName, fixture }),
   };
   if (providerName && selectedConfig.providers.length === 0) {
-    fail(`provider run selected no plan provider named ${providerName}`);
+    fail(`provider run selected no plan provider named ${providerName}${
+      model ? ` for model ${JSON.stringify(model)}` : ""
+    }`);
   }
   if (fixture && selectedConfig.providers.length === 0) {
-    fail(`provider run selected no plan provider with fixture ${fixture}`);
+    fail(`provider run selected no plan provider with fixture ${fixture}${
+      model ? ` for model ${JSON.stringify(model)}` : ""
+    }`);
+  }
+  if (model && selectedConfig.providers.length === 0) {
+    fail(`provider run selected no plan provider for model ${JSON.stringify(model)}`);
+  }
+  if (ltx25Partition != null) {
+    if (model !== "ltx_2_5") fail("--ltx25-partition requires --model ltx_2_5");
+    const needles = String(ltx25Partition).split(",").map((needle) => needle.trim()).filter(Boolean);
+    if (!needles.length) fail("--ltx25-partition must name at least one plan-name substring");
+    selectedConfig.providers = selectedConfig.providers.filter((provider) =>
+      needles.some((needle) => provider.name.includes(needle)));
+    if (!selectedConfig.providers.length) {
+      fail(`--ltx25-partition ${JSON.stringify(ltx25Partition)} selected no ltx_2_5 plan providers`);
+    }
   }
   if (forceFreshPerCase && forceBatchRungs) fail("cannot force both fresh and batched provider execution");
   const applyExecutionPolicy = (plannedCases) => plannedCases.map((planned) => {
@@ -1514,18 +2154,59 @@ export async function runProviderPlan({
   });
   const allExpanded = applyExecutionPolicy(expandPlan(selectedConfig));
   const expanded = applyExecutionPolicy(expandPlan(selectedConfig, existing.records));
-  const selectedCases = backend ? expanded.filter((planned) => planned.backend === backend) : expanded;
-  if (selectedCases.length === 0) fail(`provider run selected no ${backend ?? "remaining"} cases`);
-  const backends = new Set(selectedCases.map((planned) => planned.backend));
+  if (model === "ltx_2_5" && backend && backend !== "mlx") {
+    fail("--model ltx_2_5 is the exact canonical MLX campaign and cannot select another backend");
+  }
+  const selectedBackend = backend ?? (model === "ltx_2_5" ? "mlx" : undefined);
+  const allSelectedCases = selectedBackend
+    ? allExpanded.filter((planned) => planned.backend === selectedBackend)
+    : allExpanded;
+  if (allSelectedCases.length === 0) {
+    fail(`provider run selected no ${selectedBackend ?? "remaining"} cases${
+      model ? ` for model ${JSON.stringify(model)}` : ""
+    }`);
+  }
+  const backends = new Set(allSelectedCases.map((planned) => planned.backend));
   if (backends.size !== 1) {
     fail(`provider run must select exactly one backend; pass --backend mlx|candle (selected: ${[...backends].join(", ")})`);
   }
-  const probe = JSON.parse(await executeProvider(
-    providerCommand[0],
-    providerCommand.slice(1),
-    canonicalJson({ action: "probe", repositories }),
-  ));
+  const selectedCases = selectedBackend
+    ? expanded.filter((planned) => planned.backend === selectedBackend)
+    : expanded;
+  const exactLtx25Selection = model === "ltx_2_5";
+  if (exactLtx25Selection) validateCanonicalLtx25Selection(allSelectedCases, ltx25Partition != null);
+  if (ltx25SnapshotRoot && !exactLtx25Selection) {
+    fail("--ltx25-snapshot-root requires --model ltx_2_5");
+  }
+  if (exactLtx25Selection && !ltx25SnapshotRoot) {
+    fail("--model ltx_2_5 requires --ltx25-snapshot-root for per-case artifact binding");
+  }
+  const ltx25Artifacts = exactLtx25Selection
+    ? await prepareLtx25CaptureArtifacts(ltx25SnapshotRoot, allSelectedCases)
+    : null;
+  if (ltx25Artifacts) {
+    validateLtx25ResumeIdentity(existing, allSelectedCases, ltx25Artifacts);
+  }
+  // Artifact identity and every completed row are validated above before a fully completed resume
+  // may become a deterministic no-op. Hardware is intentionally not reprobed when no work remains.
+  if (selectedCases.length === 0) return existing;
+  let probeOutput;
+  try {
+    probeOutput = await executeProvider(
+      providerCommand[0],
+      providerCommand.slice(1),
+      canonicalJson({ action: "probe", repositories }),
+      ltx25Artifacts ? { env: ltx25ProviderEnvironment(ltx25Artifacts) } : undefined,
+    );
+  } finally {
+    if (ltx25Artifacts) {
+      await assertLtx25ArtifactsStable(ltx25Artifacts, allSelectedCases);
+    }
+  }
+  const probe = JSON.parse(probeOutput);
   await assertRepositoriesStable();
+  // Resume identity is artifact-content-keyed and probe-independent, so the pre-probe validation
+  // above is the only one needed.
   // Completion remains an evidence-semantic decision: candidate and gated receipts cannot retire
   // plan cases or promote matrix cells. Resume has a narrower operational concern. A prior receipt
   // proves that its exact logical case was already attempted only when the harness, both repository
@@ -1600,7 +2281,6 @@ export async function runProviderPlan({
       fail(`${first.modelLoadGroup}: a rung batch may contain only one pending case per rung`);
     }
     const action = invocation.length > 1 ? "run_batch" : "run";
-    onProviderInvocation?.({ action, cases: invocation });
     const providerRequest = canonicalJson({
       action,
       ...(action === "run" ? { planned: first } : { planned: invocation }),
@@ -1608,11 +2288,25 @@ export async function runProviderPlan({
       repositoryPaths: { sceneWorks: sceneWorksRepo, inference: inferenceRepo },
       hardware: probe.hardware,
     });
-    const providerOutput = await executeProvider(
-      providerCommand[0],
-      providerCommand.slice(1),
-      providerRequest,
-    );
+    if (ltx25Artifacts) {
+      const artifactKey = ltx25ArtifactKey(first);
+      if (invocation.some((planned) => ltx25ArtifactKey(planned) !== artifactKey)) {
+        fail(`LTX-2.5 provider invocation crosses nested artifact roots at ${artifactKey}`);
+      }
+      await assertLtx25ArtifactsStable(ltx25Artifacts, invocation);
+    }
+    onProviderInvocation?.({ action, cases: invocation });
+    let providerOutput;
+    try {
+      providerOutput = await executeProvider(
+        providerCommand[0],
+        providerCommand.slice(1),
+        providerRequest,
+        ltx25Artifacts ? { env: ltx25ProviderEnvironment(ltx25Artifacts, first) } : undefined,
+      );
+    } finally {
+      if (ltx25Artifacts) await assertLtx25ArtifactsStable(ltx25Artifacts, invocation);
+    }
     await assertRepositoriesStable();
     const response = JSON.parse(providerOutput);
     const fragments = action === "run_batch" ? response.fragments : [response];
@@ -1686,9 +2380,15 @@ export async function runProviderPlan({
         if (!Array.isArray(sourceCapture.inputs) || sourceCapture.inputs.length === 0) {
           fail(`${planned.logicalCaseId}: physical MLX source capture requires exact inputs`);
         }
+        if (ltx25Artifacts && !equal(
+          sourceCapture.inputs,
+          ltx25ExpectedSourceInputs(ltx25Artifacts, planned),
+        )) {
+          fail(`${planned.logicalCaseId}: LTX-2.5 source inputs do not match the sealed campaign inventories`);
+        }
         validateExactOutputReceipts(
           sourceCapture.outputs,
-          PHYSICAL_MLX_PROVIDER_OUTPUT_ROLES,
+          physicalMlxExpectedRoles(sourceCapture.outputs, false),
           `${planned.logicalCaseId}.sourceCapture.outputs`,
         );
         if (!Array.isArray(sourceCapture.claims) || sourceCapture.claims.length === 0) {
@@ -1726,18 +2426,20 @@ export async function runProviderPlan({
           sha256: createHash("sha256").update(providerRequest).digest("hex"),
           bytes: Buffer.byteLength(providerRequest),
         }];
+        const avContents = new Map();
         for (const output of sourceCapture.outputs) {
           object(output, `${planned.logicalCaseId}.sourceCapture.outputs[]`);
           text(output.role, `${planned.logicalCaseId}.sourceCapture.outputs[].role`);
           text(output.path, `${planned.logicalCaseId}.sourceCapture.outputs[].path`);
           text(output.localPath, `${planned.logicalCaseId}.sourceCapture.outputs[].localPath`);
-          const metadata = physicalMlxRgbMetadata(
+          const metadata = physicalMlxOutputMetadata(
             output,
             `${planned.logicalCaseId}.sourceCapture.outputs[${output.role}]`,
           );
           if (metadata.logicalCaseId !== planned.logicalCaseId
               || metadata.width !== planned.target.geometry.width
-              || metadata.height !== planned.target.geometry.height) {
+              || metadata.height !== planned.target.geometry.height
+              || (metadata.frames !== undefined && metadata.frames !== planned.target.geometry.frames)) {
             fail(`${planned.logicalCaseId}: physical MLX provider output has the wrong logical case geometry`);
           }
           const outputRelative = path.posix.relative(sourcePathPrefix, output.path);
@@ -1757,6 +2459,22 @@ export async function runProviderPlan({
           if (actualSha256 !== output.sha256 || bytes.length !== output.bytes) {
             fail(`${planned.logicalCaseId}: physical MLX provider output differs from its provider attestation`);
           }
+          if (output.role === "selected_av" || output.role === "reference_av") {
+            const content = parsePhysicalMlxAvContent(
+              bytes,
+              `${planned.logicalCaseId}.sourceCapture.outputs[${output.role}]`,
+            );
+            const outputFps = record.diagnostics?.measurements?.find(
+              (measurement) => measurement.name === "outputFps",
+            )?.value;
+            if (content.width !== planned.target.geometry.width
+                || content.height !== planned.target.geometry.height
+                || content.frames !== planned.target.geometry.frames
+                || content.fps !== outputFps) {
+              fail(`${planned.logicalCaseId}: canonical A/V header differs from measured geometry/FPS`);
+            }
+            avContents.set(output.role, content);
+          }
           outputs.push({
             role: output.role,
             path: output.path,
@@ -1764,9 +2482,10 @@ export async function runProviderPlan({
             bytes: output.bytes,
           });
         }
+        validatePhysicalMlxAvContentsAgainstRecord(record, avContents, planned.logicalCaseId);
         validateExactOutputReceipts(
           outputs,
-          PHYSICAL_MLX_SESSION_OUTPUT_ROLES,
+          physicalMlxExpectedRoles(outputs, true),
           `${sessionId}.outputs`,
         );
         record.derivation = physicalMlxDerivation(sessionId);
@@ -1782,6 +2501,10 @@ export async function runProviderPlan({
             tier: planned.target.tier,
             mode: planned.target.mode,
             overlay: planned.target.overlay,
+            ...(planned.target.transformerVariant
+              ? { transformerVariant: planned.target.transformerVariant }
+              : {}),
+            ...(planned.target.decoder ? { decoder: planned.target.decoder } : {}),
             rung: planned.strategy.rung,
           },
           stdoutSha256,
@@ -1848,6 +2571,14 @@ async function main() {
     const index = args.indexOf(flag);
     return index < 0 ? undefined : args[index + 1];
   };
+  const singleValue = (flag) => {
+    const indexes = args.flatMap((arg, index) => arg === flag ? [index] : []);
+    if (indexes.length > 1) fail(`${flag} may be supplied only once`);
+    if (indexes.length === 0) return undefined;
+    const selected = args[indexes[0] + 1];
+    if (!selected || selected.startsWith("--")) fail(`${flag} requires one value`);
+    return selected;
+  };
   if (command === "check") {
     const closureDigests = await liveInferenceClosureDigests();
     return void await validateSourceSessionFiles(
@@ -1891,6 +2622,9 @@ async function main() {
     }));
   }
   if (command === "run") {
+    const model = singleValue("--model");
+    const ltx25SnapshotRoot = singleValue("--ltx25-snapshot-root");
+    const ltx25Partition = singleValue("--ltx25-partition");
     const outputPath = value("--output");
     const output = await runProviderPlan({
       config: await readJson(value("--config")),
@@ -1899,12 +2633,15 @@ async function main() {
       inferenceRepo: path.resolve(value("--inference-repo")),
       resume: value("--resume") ? await readJson(value("--resume")) : undefined,
       backend: value("--backend"),
+      model,
       providerName: value("--provider"),
       fixture: value("--fixture"),
       forceFreshPerCase: args.includes("--fresh-per-case"),
       forceBatchRungs: args.includes("--batch-rungs"),
       rawLogDir: value("--raw-log-dir") ? path.resolve(value("--raw-log-dir")) : null,
       sourcePathPrefix: value("--source-path-prefix"),
+      ltx25SnapshotRoot,
+      ltx25Partition,
       onProviderCheckpoint: (checkpoint) => atomicWrite(outputPath, checkpoint),
     });
     return void await atomicWrite(outputPath, output);

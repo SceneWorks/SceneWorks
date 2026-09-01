@@ -159,7 +159,7 @@ pub fn canonical_video_route_probe(model: &str, mode: &str) -> Result<JobSnapsho
     // Native LTX clip append/control is structurally available only with its in-context adapter.
     // Capability facts must probe the complete runnable shape; omitting this mandatory input makes
     // both backends falsely report extend/bridge/replacement as unsupported.
-    if matches!(model, "ltx_2_3" | "ltx_2_3_eros")
+    if matches!(model, "ltx_2_3" | "ltx_2_3_eros" | "ltx_2_5")
         && matches!(mode, "extend_clip" | "video_bridge" | "replace_person")
     {
         payload.insert(
@@ -416,7 +416,7 @@ mod tests {
 
     #[test]
     fn canonical_ltx_clip_probes_include_the_required_ic_lora_and_honor_eros_withdrawal() {
-        for model in ["ltx_2_3", "ltx_2_3_eros"] {
+        for model in ["ltx_2_3", "ltx_2_3_eros", "ltx_2_5"] {
             for mode in ["extend_clip", "video_bridge", "replace_person"] {
                 let job = canonical_video_route_probe(model, mode).unwrap();
                 let loras = job.payload["loras"].as_array().unwrap();
@@ -424,8 +424,8 @@ mod tests {
                 assert!(video_backend_mode_supported("mlx", model, mode).unwrap());
                 assert_eq!(
                     video_backend_mode_supported("candle", model, mode).unwrap(),
-                    model == "ltx_2_3",
-                    "Candle must admit base LTX and reject withdrawn Eros for {mode}"
+                    model != "ltx_2_3_eros",
+                    "Candle must admit supported LTX products and reject withdrawn Eros for {mode}"
                 );
             }
             for mode in ["text_to_video", "image_to_video", "first_last_frame"] {
@@ -435,6 +435,80 @@ mod tests {
                     .get("loras")
                     .is_none());
             }
+        }
+    }
+
+    #[test]
+    fn ltx_2_5_candle_admission_admits_the_full_q4_q8_bf16_ladder_across_base_and_advanced_modes() {
+        let modes = [
+            "text_to_video",
+            "image_to_video",
+            "first_last_frame",
+            "extend_clip",
+            "video_bridge",
+            "replace_person",
+        ];
+        for mode in modes {
+            for tier in [
+                json!(4),
+                json!("4"),
+                json!(8),
+                json!("8"),
+                json!(0),
+                json!("0"),
+                json!(-1),
+            ] {
+                let mut job = canonical_video_route_probe("ltx_2_5", mode).unwrap();
+                job.payload
+                    .insert("advanced".to_owned(), json!({ "mlxQuantize": tier }));
+                job.payload
+                    .entry("loras".to_owned())
+                    .or_insert_with(|| json!([]))
+                    .as_array_mut()
+                    .unwrap()
+                    .push(json!({ "id": "style" }));
+                assert!(
+                    candle::video_job_is_candle_eligible(&job),
+                    "LTX-2.5 must route q4/q8/bf16 tier {tier} with a user LoRA in {mode}"
+                );
+            }
+
+            // q8 is first-class: it must route without a LoRA on the bare probe too, exactly like
+            // the MLX lane, with no residual promotion gate.
+            for tier in [json!(8), json!("8")] {
+                let mut job = canonical_video_route_probe("ltx_2_5", mode).unwrap();
+                job.payload
+                    .insert("advanced".to_owned(), json!({ "mlxQuantize": tier }));
+                assert!(
+                    candle::video_job_is_candle_eligible(&job),
+                    "LTX-2.5 q8 is a promoted candle tier and must route: {mode} {tier}"
+                );
+            }
+        }
+
+        for tier in [json!(3), json!(16), json!("bf16")] {
+            let mut ltx25 = catalog::video_mode_probe_payload("ltx_2_5", "text_to_video");
+            ltx25.insert("advanced".to_owned(), json!({ "mlxQuantize": tier }));
+            assert!(
+                !candle::video_request_candle_eligible("ltx_2_5", &ltx25),
+                "LTX-2.5 must fail closed outside q4/q8/bf16: {tier}"
+            );
+
+            let mut ltx23 = catalog::video_mode_probe_payload("ltx_2_3", "text_to_video");
+            ltx23.insert("advanced".to_owned(), json!({ "mlxQuantize": tier }));
+            assert!(
+                !candle::video_request_candle_eligible("ltx_2_3", &ltx23),
+                "LTX-2.3 must not inherit LTX-2.5's bf16 tier: {tier}"
+            );
+        }
+
+        for tier in [json!(4), json!(8), json!("8")] {
+            let mut ltx23 = catalog::video_mode_probe_payload("ltx_2_3", "text_to_video");
+            ltx23.insert("advanced".to_owned(), json!({ "mlxQuantize": tier }));
+            assert!(
+                candle::video_request_candle_eligible("ltx_2_3", &ltx23),
+                "LTX-2.3 packed tier behavior must remain unchanged: {tier}"
+            );
         }
     }
 }

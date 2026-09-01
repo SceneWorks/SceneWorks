@@ -257,8 +257,28 @@ export function loraMatchesModel(lora, model) {
   // model actually having an id: with no model selected there is nothing to compare against, and
   // the permissive branch above already covers that case.
   const declaredModelIds = loraModelIds(lora);
-  if (declaredModelIds.length && model?.id) {
-    return declaredModelIds.includes(model.id);
+  if (declaredModelIds.length && model?.id && !declaredModelIds.includes(model.id)) {
+    return false;
+  }
+  // LTX-2.3 and LTX-2.5 deliberately keep one architecture family for routing, but their adapter
+  // contracts are not interchangeable. Training/import outputs record `baseModel`; mirror the API
+  // gate so a 2.3 output is never offered in the 2.5 picker (or vice versa), and fail closed for an
+  // unstamped family-only adapter on 2.5. Eros is the same 2.3 backbone.
+  const trainedBase = lora?.baseModel ?? lora?.base_model;
+  if (
+    families.includes("ltx-video") &&
+    model?.id === "ltx_2_5" &&
+    !trainedBase &&
+    !declaredModelIds.length
+  ) {
+    return false;
+  }
+  if (families.includes("ltx-video") && trainedBase && model?.id) {
+    const ltx23 = new Set(["ltx_2_3", "ltx_2_3_eros"]);
+    return (
+      (ltx23.has(trainedBase) && ltx23.has(model.id)) ||
+      (trainedBase === "ltx_2_5" && model.id === "ltx_2_5")
+    );
   }
   return true;
 }

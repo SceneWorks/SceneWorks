@@ -14,7 +14,7 @@
     "curves"
   ],
   "properties": {
-    "schemaVersion": { "const": 4 },
+    "schemaVersion": { "const": 5 },
     "generatedBy": { "const": "scripts/fit-ltx-temporal-form.mjs" },
     "sourceFit": {
       "type": "string",
@@ -77,6 +77,8 @@
         "provider",
         "backend",
         "tier",
+        "transformerVariant",
+        "decoder",
         "mode",
         "referenceShape",
         "referenceCount",
@@ -101,6 +103,8 @@
         "provider": { "type": "string", "minLength": 1 },
         "backend": { "enum": ["mlx", "candle"] },
         "tier": { "type": "string", "minLength": 1 },
+        "transformerVariant": { "enum": ["distilled", "dev"] },
+        "decoder": { "enum": ["conv", "diffvae"] },
         "mode": { "type": "string", "minLength": 1 },
         "referenceShape": { "type": "string", "minLength": 1 },
         "referenceCount": { "type": "integer", "minimum": 0 },

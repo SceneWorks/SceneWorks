@@ -155,6 +155,18 @@ export function datasetSaveValidation({ name, selectedAssetIds }, { health } = {
   return issues;
 }
 
+function datasetItemExtras(item) {
+  if (!item) return {};
+  const extra = { ...item };
+  for (const key of [
+    "id", "assetId", "path", "displayName", "caption", "controlImagePath", "width", "height",
+    "contentHash", "tier0Scalars", "qualityAck", "addedAt",
+  ]) {
+    delete extra[key];
+  }
+  return extra;
+}
+
 export function datasetPayload({ activeDataset, assetsById, associatedCharacterId, captionDraftById = {}, name, selectedAssetIds }) {
   const itemsByAssetId = new Map(
     (activeDataset?.items ?? []).map((item, index) => [datasetItemSelectionKey(activeDataset, item, index), item]),
@@ -189,6 +201,9 @@ export function datasetPayload({ activeDataset, assetsById, associatedCharacterI
         }
         const source = asset.datasetOwned || asset.datasetOnly ? { path: asset.file?.path } : { assetId: asset.id };
         return {
+          ...datasetItemExtras(previous),
+          ...(previous?.id ? { id: previous.id } : {}),
+          ...(previous?.controlImagePath ? { controlImagePath: previous.controlImagePath } : {}),
           ...source,
           displayName: asset.displayName ?? imageAssetName(asset),
           caption,

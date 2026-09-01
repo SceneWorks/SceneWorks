@@ -414,6 +414,12 @@ smuggled under a scalar key.
 | `motion` | `Scalar` | **Video.** Camera-motion preset off a closed menu (`static`, `slow push-in`, `handheld`). It conditions the generation. |
 | `ltxPipeline` | `Scalar` | **Video.** LTX pipeline selector. It picks which denoise path runs, so two values give two different clips from one prompt. |
 | `distilledVariant` | `Scalar` | **Video.** LTX distilled-checkpoint variant. A different checkpoint is a different model for replay purposes. |
+| `transformerVariant` | `Scalar` | **Video.** LTX 2.5 transformer choice (`distilled` / `dev`). It changes the checkpoint, schedule, guidance and refinement recipe. |
+| `vaeDecoder` | `Scalar` | **Video.** LTX 2.5 Conv-versus-DiffVAE decoder choice. It changes the reconstruction path and rendered detail. |
+| `autoDuration` | `Scalar` | **Video.** LTX 2.5 duration-head opt-in. It decides whether the prompt or an explicit duration supplies the frame count. |
+| `autoDurationMinSeconds` | `Scalar` | **Video.** Authored lower bound for LTX 2.5 duration prediction. It constrains the resulting clip length. |
+| `autoDurationMaxSeconds` | `Scalar` | **Video.** Authored upper bound for LTX 2.5 duration prediction. It constrains the resulting clip length. |
+| `temporalUpsampleRounds` | `Scalar` | **Video.** LTX 2.5 temporal-refinement count. Each round changes the output frame count and motion. |
 | `textEncoderModel` | `Scalar` | **Video.** The text-encoder pick — it changes what the model *sees* of the prompt. A catalog-global slug, not a local id. |
 | `lightning` | `Scalar` | **Video.** Wan2.2 A14B fast-4-step toggle. It swaps in a distilled recipe and overrides the step count. |
 | `videoCfgGuidanceScale` | `Scalar` | **Video.** LTX native CFG scale — the video lane's `guidanceScale`. |

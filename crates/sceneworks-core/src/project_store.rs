@@ -959,6 +959,22 @@ impl ProjectStore {
         TrainingDatasetStore::new(project_path).update_dataset(project_id, dataset_id, input)
     }
 
+    pub fn install_ltx_prepared_bundle(
+        &self,
+        project_id: &str,
+        dataset_id: &str,
+        item_id: &str,
+        source_path: &Path,
+    ) -> ProjectStoreResult<TrainingDataset> {
+        let (project_path, _project_guard) = self.lock_project(project_id)?;
+        TrainingDatasetStore::new(project_path).install_ltx_prepared_bundle(
+            project_id,
+            dataset_id,
+            item_id,
+            source_path,
+        )
+    }
+
     /// Persist freshly-extracted Tier-0 scalars onto dataset items as the readiness cache (sc-6533).
     /// Locked like any dataset mutation; a metadata-only write (no version/`updated_at` bump).
     pub fn cache_dataset_tier0_scalars(
@@ -5282,6 +5298,22 @@ fn normalize_image_upload(
             workflow,
         });
     }
+    if kind.png_transcode_is_lossy() {
+        // Scene-linear HDR (sc-18790). Storing the PNG and discarding the source is right for every
+        // other transcoded format — their pixels survive the conversion — but here it would throw
+        // away the float latitude the file exists for, leaving a tone-mapped proxy and no way back.
+        // So the original bytes are stored; the browser-renderable PNG is produced on demand by the
+        // `?thumbnail=` derivative route, which already falls back to `transcode_to_png` when the
+        // `image` crate cannot decode a source. Download therefore serves the original.
+        let (extension, mime) = kind.canonical();
+        return Ok(NormalizedUpload {
+            source_path: source_path.to_path_buf(),
+            content_type: mime.to_owned(),
+            extension: format!(".{extension}"),
+            transcoded_temp: None,
+            workflow,
+        });
+    }
     let temp_png = work_dir.join(format!("upload-transcode-{}.png", random_hex(8)?));
     crate::media_convert::transcode_to_png(source_path, &temp_png).map_err(|error| {
         let _ = fs::remove_file(&temp_png);
@@ -6098,6 +6130,9 @@ fn guess_mime_from_filename(filename: &str) -> Option<String> {
                 Some("heif") => Some("image/heif".to_owned()),
                 Some("avif") => Some("image/avif".to_owned()),
                 Some("tif" | "tiff") => Some("image/tiff".to_owned()),
+                // OpenEXR (sc-18790). `image/x-exr` is inert and starts with `image/`, which
+                // is what admits it to SAFE_UPLOAD_EXTENSIONS and to the `?thumbnail=` route.
+                Some("exr") => Some("image/x-exr".to_owned()),
                 _ => None,
             }
         })
@@ -6122,8 +6157,9 @@ fn guess_mime_from_filename(filename: &str) -> Option<String> {
 /// never reaches the filesystem, so it never needs to be on this list.
 const SAFE_UPLOAD_EXTENSIONS: &[&str] = &[
     // Raster images (SVG deliberately omitted — it is script-capable).
-    "png", "jpg", "jpeg", "webp", "gif", "bmp", "tif", "tiff", "avif", "heic",
-    "heif", // Video.
+    "png", "jpg", "jpeg", "webp", "gif", "bmp", "tif", "tiff", "avif", "heic", "heif",
+    // Scene-linear HDR frames (sc-18790) — stored as-is, previewed as a derivative.
+    "exr", // Video.
     "mp4", "m4v", "mov", "webm", "mkv", "avi", "ogv", "mpeg", "mpg", "wmv", "flv", "3gp",
     "3g2", // Audio: the single canonical stored form.
     "wav",

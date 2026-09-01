@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import { apiFetch } from "./api.js";
-import { assetUrl } from "./components/assetMedia.jsx";
+import { assetDisplayUrl } from "./components/assetMedia.jsx";
 import { useAppStatic } from "./context/AppContext.js";
 
 // The reserved global project that holds user-created pose assets (epic 2282). Mirrors
@@ -92,7 +92,8 @@ export function loadBuiltinPoses() {
 
 // Map a reserved-project type:"pose" asset into a pose record the picker understands.
 // The asset's `pose` field carries keypoints/hands/face/category; the rendered skeleton
-// preview is resolved through the shared `assetUrl` helper. Built by the DWPose detector
+// preview is resolved through the shared `assetDisplayUrl` helper (the tone-mapped
+// derivative for an HDR source, the original otherwise). Built by the DWPose detector
 // + Create tab (sc-2285/sc-2287).
 export function poseAssetToRecord(asset) {
   const pose = asset?.pose ?? {};
@@ -100,8 +101,8 @@ export function poseAssetToRecord(asset) {
   // prefix (split-origin / Vite dev), the correct /api/v1/projects/:id/files/ route,
   // and the short-lived media ticket in remote-auth mode (sc-8810/sc-8859). The raw
   // asset already carries `url` + `projectId` + `file.path` (asset_index injects `url`),
-  // which is exactly the shape assetUrl consumes; `""` when unresolvable.
-  const previewUrl = assetUrl(asset) || undefined;
+  // which is exactly the shape assetDisplayUrl consumes; `""` when unresolvable.
+  const previewUrl = assetDisplayUrl(asset) || undefined;
   return {
     id: asset.id,
     label: asset.displayName || asset.id,

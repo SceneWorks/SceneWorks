@@ -150,10 +150,10 @@ node scripts/memory-calibration-harness.mjs plan \
   --resume docs/generated/memory-calibration-evidence.json
 ```
 
-`plan --resume` answers "what has NEVER been attempted". For a RE-capture — evidence that exists but
-has been staled by a pin bump — drop `--resume`, or it will report nothing outstanding and you will
-hold a GPU window for a no-op. Run it both ways and diff the fixture lists; the difference IS the set
-of cells whose records exist but are no longer current.
+`plan --resume` answers "what has NEVER been attempted". For an explicitly required re-capture after
+a real measurement-contract or provider-behavior change, drop `--resume`, or it will report nothing
+outstanding and you will hold a GPU window for a no-op. A pin change alone is provenance movement,
+not a reason to re-capture.
 
 ### ALWAYS `plan` BEFORE HOLDING A CAPTURE WINDOW
 
@@ -170,15 +170,10 @@ produces NOTHING while exiting 0.**
 `--resume` skips cases that were already attempted, and "already attempted" is decided on repository
 IDENTITY with the closure digest deliberately stripped from both sides
 (`memory-calibration-harness.mjs`, `operationallyAttemptedLogicalIds`). The code says why: that check
-decides whether to re-run a multi-hour capture, not whether the evidence is current — currency is
-`evidenceSemantics`, which reads the digest and fails closed. The consequence is exact and
-counter-intuitive: **a record staled by an inference pin bump still counts as already attempted**, so
-`run --resume` no-ops precisely when a pin bump is what made the re-capture necessary.
-
-Measured on sc-19721: with `--resume`, `plan` returned 0 of the 7 fixtures whose cells the pin bump
-had just demoted; without it, all 7 resolved, for 19 cases. `.github/workflows/macos-mlx.yml`'s Qwen
-arm has always omitted `--resume` from `run` for this reason — the workflow was right and this
-document was wrong.
+decides whether to re-run a multi-hour capture, not whether the evidence remains applicable — that
+is decided from the provider-specific measurement contract and compile closure. `run --resume`
+therefore no-ops for any already-attempted record. Omit it only when a real change or an explicit
+request requires re-running those cases; never omit it merely because the repository pin moved.
 
 Run an authoritative provider adapter:
 
@@ -197,12 +192,40 @@ node scripts/memory-calibration-harness.mjs run \
 Use `--resume` only to make a capture RESUMABLE after an interrupted run of the same revision, never
 to re-capture staled evidence. Discard or bypass the prior bundle for that.
 
+The model-wide LTX-2.5 capture replaces the example's `--fixture` with both of these flags:
+
+```text
+  --model ltx_2_5 \
+  --ltx25-snapshot-root /absolute/cache/models--SceneWorks--ltx-2.5-mlx/snapshots/081658ce6886cacba20817ce0359bbefef706ff2 \
+```
+
 One provider process probes one backend-specific hardware shape, so `--backend mlx|candle` is
 required when the config contains both backends. Omitting it from a mixed plan fails before starting
-the adapter. `--provider <plan-provider-name>` optionally selects one named provider block; use it
-to run the current Krea v1 production point separately from non-promotable v2 candidates.
+the adapter. `--model <modelId>` optionally selects every plan row with that exact canonical
+`target.modelId`; for example, `--backend mlx --model ltx_2_5` selects exactly the 84 checked-in
+LTX-2.5 rows. Unknown model IDs and model/backend, model/provider, or model/fixture combinations with
+no rows fail before capture. The model selector scopes new provider executions only: `--resume`
+remains a lossless merge base, its other-model records are retained in deterministic identity order,
+and they cannot suppress a selected model's distinct logical cases. `ingest` therefore keeps its
+existing deterministic merge semantics; a resume that already completes every selected case returns
+that merge base without probing hardware or invoking the provider. For the LTX-2.5 model selector,
+`--ltx25-snapshot-root` is mandatory and valid only with `--backend mlx --model ltx_2_5`. The harness
+requires the canonical public repository/revision suffix, checks the shared enhancer and dev adapter,
+checks every selected `<transformerVariant>/<tier>` layout, hashes each selected nested root once,
+hashes the enhancer root once, and hashes the dev adapter file once when dev rows remain. It then
+replaces inherited tier and shared-component inventory variables per provider invocation while
+preserving the capture-directory and raw-provenance environment. The MLX adapter requires those
+inventories before constructing the provider and records the enhancer on every source session plus
+the refinement adapter on dev sessions. `--provider <plan-provider-name>` optionally selects one named
+provider block; use it to run the current Krea v1 production point separately from non-promotable v2 candidates.
 `--fixture <fixture-name>` selects every provider block sharing that fixture, which is the intended
 way to execute a multi-rung reference ladder as one reproducible capture.
+`--ltx25-partition <substring[,substring...]>` (valid only with `--model ltx_2_5`) runs the plan rows
+whose names contain any listed substring — a validated non-empty SUBSET of the canonical campaign, so
+the 84-case grid can be split across capture hosts (e.g. `-distilled-` on one Mac, `-dev-` on the
+other) and the per-host evidence bundles merged at ingestion. The checked-in plan remains the sole
+authority: a partition may never select a case outside it, and the full-set equality check still
+applies to unpartitioned runs.
 `--fresh-per-case` overrides scheduling for an oracle capture; `--batch-rungs` forces one target's
 rungs into an experimental batch. Compare the two bundles with the committed larger-of tolerance
 (256 MiB absolute or 5% relative for every phase/metric):
@@ -466,8 +489,7 @@ enumerates candidate tile, overlap, attention-chunk, and transformer-window comb
 Matrix ingestion binds a record to one cell and independently checks complete status, quality,
 executed range, calibration fingerprint, exact runtime strategy parameters, width/height/batch/frame
 geometry envelope, artifact revision/variant, and resolved loadability. A gated record remains
-`gated` even when its SHAs match. A complete authoritative record is `current` only when its clean
-inference SHA matches the exact workspace pin; SceneWorks invalidation is owned by the provider ABI
-fingerprint checked by `calibrationBinding`. The captured SceneWorks revision and matrix source-tree
-digest remain provenance, not a second invalidation gate. Exact records never promote an aggregate
-geometry or parameter envelope.
+`gated` even when its SHAs match. Applicability is owned by the provider ABI fingerprint and
+provider-specific compile-closure digest checked by `calibrationBinding`; the captured inference,
+SceneWorks, and matrix source revisions remain provenance, not invalidation gates. Exact records
+never promote an aggregate geometry or parameter envelope.

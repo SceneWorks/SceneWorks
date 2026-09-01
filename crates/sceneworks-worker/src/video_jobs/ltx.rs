@@ -24,11 +24,248 @@ use super::wan::{generate_video, VideoGenInput};
 #[cfg(target_os = "macos")]
 pub(super) const LTX_ADAPTER: &str = "mlx_ltx";
 
+/// LTX-2.5 has two independently packed transformer components under the
+/// single SceneWorks rehost.  The selector is part of the request contract, not
+/// a display-only model label: absent requests retain the shipped distilled
+/// default and every explicit value is fail-closed.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum Ltx25TransformerVariant {
+    Distilled,
+    Dev,
+}
+
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+impl Ltx25TransformerVariant {
+    pub(super) const fn component_dir(self) -> &'static str {
+        match self {
+            Self::Distilled => "distilled",
+            Self::Dev => "dev",
+        }
+    }
+}
+
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+pub(super) fn ltx25_transformer_variant(
+    request: &VideoRequest,
+) -> WorkerResult<Ltx25TransformerVariant> {
+    match request.advanced.get("transformerVariant") {
+        None => Ok(Ltx25TransformerVariant::Distilled),
+        Some(Value::String(value)) if value == "distilled" => {
+            Ok(Ltx25TransformerVariant::Distilled)
+        }
+        Some(Value::String(value)) if value == "dev" => Ok(Ltx25TransformerVariant::Dev),
+        Some(Value::String(value)) => Err(WorkerError::InvalidPayload(format!(
+            "unsupported LTX-2.5 transformerVariant {value:?}; choose \"distilled\" or \"dev\""
+        ))),
+        Some(_) => Err(WorkerError::InvalidPayload(
+            "advanced.transformerVariant must be \"distilled\" or \"dev\" when present".to_owned(),
+        )),
+    }
+}
+
+/// The explicit fitted-memory pipeline axes both video lanes stamp onto their `VideoGenInput`.
+///
+/// Admission's curve lookup requires BOTH axes to be `Some` — `curve_evidence_covers_request` and
+/// `fitted_or_floor_phase_peaks` bail out on either `None` — while `VideoGenInput::default()`
+/// leaves both `None`. A lane that lets them fall out of its struct literal's `..default()` tail
+/// therefore declares "no pipeline shape", can never match measured curve evidence, and silently
+/// degrades admission to the weights floor. That is exactly what the candle arm did for `ltx_2_5`
+/// while the MLX arm derived them, so the derivation lives HERE, once: two lanes deriving the same
+/// axes separately is what let one of them forget.
+///
+/// Keyed on the SceneWorks model id rather than a lane-specific engine id, since the two lanes name
+/// the same checkpoints differently (`ltx_2_5` vs `ltx_2_5_distilled`). A non-LTX model carries no
+/// LTX-2.5 axes and stays `None` — the candle arm shares one `VideoGenInput` literal with Wan,
+/// Mochi and SVD. LTX-2.3 has no transformer-variant axis at all and is recorded as the distilled
+/// shape, which is what the MLX arm has always done.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+pub(super) fn ltx_memory_axes(
+    request: &VideoRequest,
+    use_diffusion_decoder: bool,
+) -> WorkerResult<(
+    Option<sceneworks_core::memory_calibration::Ltx25TransformerVariant>,
+    Option<sceneworks_core::memory_calibration::Ltx25Decoder>,
+)> {
+    if !matches!(
+        request.model.as_str(),
+        "ltx_2_3" | "ltx_2_3_eros" | "ltx_2_5"
+    ) {
+        return Ok((None, None));
+    }
+    let variant = if request.model == "ltx_2_5" {
+        match ltx25_transformer_variant(request)? {
+            Ltx25TransformerVariant::Dev => {
+                sceneworks_core::memory_calibration::Ltx25TransformerVariant::Dev
+            }
+            Ltx25TransformerVariant::Distilled => {
+                sceneworks_core::memory_calibration::Ltx25TransformerVariant::Distilled
+            }
+        }
+    } else {
+        sceneworks_core::memory_calibration::Ltx25TransformerVariant::Distilled
+    };
+    let decoder = if use_diffusion_decoder {
+        sceneworks_core::memory_calibration::Ltx25Decoder::DiffVae
+    } else {
+        sceneworks_core::memory_calibration::Ltx25Decoder::Conv
+    };
+    Ok((Some(variant), Some(decoder)))
+}
+
+/// Provider-bound LTX-2.5 controls after model scoping, type validation, and explicit-duration
+/// precedence. The planning frame count is conservative when the duration head owns the real count
+/// so admission never sizes the request below the user's selected maximum.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(super) struct Ltx25GenerationOptions {
+    pub(super) planning_frames: u32,
+    pub(super) auto_duration: Option<gen_core::duration_head::AutoDurationRange>,
+    pub(super) temporal_upsample_rounds: Option<u32>,
+    pub(super) use_diffusion_decoder: bool,
+}
+
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+pub(super) fn ltx25_generation_options(
+    request: &VideoRequest,
+) -> WorkerResult<Ltx25GenerationOptions> {
+    // Every LTX-2.5-only `advanced` key. `transformerVariant` belongs here for the same reason as
+    // its siblings: `ltx25_transformer_variant` is only ever consulted for `ltx_2_5`, so without
+    // this entry a non-2.5 request carrying it selected nothing and was silently ignored while the
+    // adjacent 2.5-only knobs failed closed.
+    const KEYS: [&str; 6] = [
+        "vaeDecoder",
+        "autoDuration",
+        "autoDurationMinSeconds",
+        "autoDurationMaxSeconds",
+        "temporalUpsampleRounds",
+        "transformerVariant",
+    ];
+    if request.model != "ltx_2_5" {
+        if KEYS.iter().any(|key| request.advanced.contains_key(*key)) {
+            return Err(WorkerError::InvalidPayload(format!(
+                "LTX-2.5 transformer-variant, decoder, auto-duration, and temporal-upsample \
+                 controls are not supported by {}",
+                request.model
+            )));
+        }
+        return Ok(Ltx25GenerationOptions {
+            planning_frames: ltx_frame_count(request.raw_frame_count()),
+            auto_duration: None,
+            temporal_upsample_rounds: None,
+            use_diffusion_decoder: false,
+        });
+    }
+
+    if request.advanced.contains_key("guidanceScale") {
+        return Err(WorkerError::InvalidPayload(
+            "LTX-2.5 does not accept advanced.guidanceScale; distilled guidance is baked in and \
+             the dev checkpoint uses its fixed native video/audio guider parameters"
+                .to_owned(),
+        ));
+    }
+
+    let decoder = sceneworks_core::video_request::requested_ltx25_vae_decoder(&request.advanced)
+        .map_err(WorkerError::InvalidPayload)?;
+    let temporal_upsample_rounds =
+        sceneworks_core::video_request::requested_temporal_upsample_rounds(&request.advanced)
+            .map_err(WorkerError::InvalidPayload)?;
+
+    // The API removes these keys when an explicit duration is present. This duplicate precedence
+    // is intentional: replayed jobs and any future non-HTTP producer must reach the same contract.
+    let auto_range = if request.duration_was_explicit {
+        match request.advanced.get("autoDuration") {
+            Some(Value::Bool(_)) | None => None,
+            Some(_) => {
+                return Err(WorkerError::InvalidPayload(
+                    "advanced.autoDuration must be a boolean when present".to_owned(),
+                ))
+            }
+        }
+    } else {
+        sceneworks_core::video_request::requested_auto_duration(&request.advanced)
+            .map_err(WorkerError::InvalidPayload)?
+    };
+    if let Some(range) = auto_range {
+        if range.min_seconds < 1.0 || range.max_seconds > 30.0 {
+            return Err(WorkerError::InvalidPayload(
+                "advanced auto-duration min/max seconds must stay between 1 and 30".to_owned(),
+            ));
+        }
+        if let Some(message) = sceneworks_core::video_request::duration_limit_error(
+            &request.model,
+            range.min_seconds,
+            &request.model_manifest_entry,
+        )
+        .or_else(|| {
+            sceneworks_core::video_request::duration_limit_error(
+                &request.model,
+                range.max_seconds,
+                &request.model_manifest_entry,
+            )
+        }) {
+            return Err(WorkerError::InvalidPayload(format!(
+                "Auto-duration range is outside the model's supported duration window. {message}"
+            )));
+        }
+    }
+    let auto_duration = auto_range
+        .map(|range| {
+            gen_core::duration_head::AutoDurationRange::new(range.min_seconds, range.max_seconds)
+        })
+        .transpose()
+        .map_err(|error| WorkerError::InvalidPayload(error.to_string()))?;
+    let planning_frames = auto_range.map_or_else(
+        || ltx_frame_count(request.raw_frame_count()),
+        |range| {
+            // Round the maximum UP and then align UP to the next 8k+1 rung. This value is for
+            // admission only; gen-core resolves and snaps the predictor's actual value itself.
+            let raw = (range.max_seconds * request.fps as f32).ceil().max(1.0) as u32;
+            let remainder = raw.saturating_sub(1) % 8;
+            if remainder == 0 {
+                raw
+            } else {
+                raw.saturating_add(8 - remainder)
+            }
+        },
+    );
+    Ok(Ltx25GenerationOptions {
+        planning_frames,
+        auto_duration,
+        temporal_upsample_rounds: (temporal_upsample_rounds > 0)
+            .then_some(temporal_upsample_rounds),
+        use_diffusion_decoder: decoder
+            == sceneworks_core::video_request::LTX25_VAE_DECODER_DIFFUSION,
+    })
+}
+
 /// SceneWorks LTX model id → mlx-gen registry id (one engine model serves both), or
 /// `None` if not an LTX family id.
 #[cfg(target_os = "macos")]
 pub(super) fn ltx_engine_id(model: &str) -> Option<&'static str> {
-    matches!(model, "ltx_2_3" | "ltx_2_3_eros").then_some("ltx_2_3")
+    match model {
+        "ltx_2_3" | "ltx_2_3_eros" => Some("ltx_2_3"),
+        "ltx_2_5" => Some("ltx_2_5"),
+        _ => None,
+    }
 }
 
 /// Whether the linked LTX engine can serve this request now (resolvable weights).
@@ -46,6 +283,23 @@ pub(super) fn ltx_available(request: &VideoRequest, settings: &Settings) -> bool
     all(not(target_os = "macos"), feature = "backend-candle")
 ))]
 pub(super) const LTX_BUNDLE_REPO: &str = "SceneWorks/ltx-2.3-mlx";
+/// The LTX-2.5 rehost contains shared Gemma-4/enhancer components plus nested
+/// `distilled/{q4,q8,bf16}` and `dev/{q4,q8,bf16}` packed transformer roots.
+/// A publishing revision and measured byte receipts are deliberately owned by
+/// SC-18780; this source contract does not manufacture either fact.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+pub(super) const LTX25_BUNDLE_REPO: &str = "SceneWorks/ltx-2.5-mlx";
+/// Immutable revision of the finalized public LTX-2.5 bundle. The installer, MLX resolver and
+/// Candle resolver all bind this same snapshot so a mutable `refs/main` or a larger cached sibling
+/// can never replace the published artifact at runtime.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+pub(super) const LTX25_BUNDLE_REVISION: &str = "081658ce6886cacba20817ce0359bbefef706ff2";
 /// Pinned revision for the fixed [`LTX_BUNDLE_REPO`] (sc-9879, F-077 follow-up). The bundle repo is a
 /// hard-coded const (no manifest/payload override reaches the on-demand `q8/*` + `bf16/*` fetches), so
 /// pulling the mutable `main` branch would let an upstream re-push silently swap a checkpoint we load.
@@ -89,6 +343,39 @@ pub(super) fn ltx_dir_is_complete(dir: &Path) -> bool {
     ]
     .iter()
     .all(|file| dir.join(file).is_file())
+}
+
+/// Files the ordinary LTX-2.5 split provider can reach from one selected tier. The 2.5 converter
+/// deliberately does not emit the legacy `upsampler.safetensors`/`quantize_config.json` markers
+/// used by 2.3, so sharing [`ltx_dir_is_complete`] would reject every published 2.5 tier.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+pub(super) const LTX25_TIER_REQUIRED_FILES: &[&str] = &[
+    "split_model.json",
+    "transformer.safetensors",
+    "connector.safetensors",
+    "text_encoder.safetensors",
+    "vae_decoder.safetensors",
+    "vae_encoder.safetensors",
+    "diffusion_vae_encoder.safetensors",
+    "vae_diffusion_decoder.safetensors",
+    "audio_vae.safetensors",
+    "vocoder.safetensors",
+    "spatial_upsampler.safetensors",
+    "temporal_upsampler.safetensors",
+    "duration_head.safetensors",
+];
+
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+pub(super) fn ltx25_dir_is_complete(dir: &Path) -> bool {
+    LTX25_TIER_REQUIRED_FILES
+        .iter()
+        .all(|file| dir.join(file).is_file())
 }
 
 /// Whether `dir` is a complete Gemma-3 text-encoder snapshot the LTX engine can load: parseable,
@@ -207,6 +494,32 @@ pub(super) fn resolve_ltx_model_dir(
     settings: &Settings,
     request: &VideoRequest,
 ) -> WorkerResult<PathBuf> {
+    if request.model == "ltx_2_5" {
+        let variant = ltx25_transformer_variant(request)?;
+        let tier = ltx_bundle_tier_order(request)
+            .first()
+            .expect("LTX tier order is non-empty");
+        let root = crate::model_jobs::huggingface_pinned_snapshot_dir(
+            &settings.data_dir,
+            LTX25_BUNDLE_REPO,
+            LTX25_BUNDLE_REVISION,
+        )
+        .ok_or_else(|| {
+            WorkerError::InvalidPayload(format!(
+                "LTX-2.5 bundle revision {LTX25_BUNDLE_REVISION} not found; install \
+                     {LTX25_BUNDLE_REPO} with {} / {tier} first",
+                variant.component_dir(),
+            ))
+        })?;
+        let dir = root.join(variant.component_dir()).join(tier);
+        return ltx25_dir_is_complete(&dir).then_some(dir).ok_or_else(|| {
+            WorkerError::InvalidPayload(format!(
+                "LTX-2.5 {} packed {tier} component is incomplete in {}; reinstall that exact variant",
+                variant.component_dir(),
+                root.display()
+            ))
+        });
+    }
     let eros = request.model == "ltx_2_3_eros";
     let env = if eros {
         "SCENEWORKS_MLX_LTX_EROS_DIR"
@@ -542,6 +855,27 @@ pub(super) fn resolve_selected_ltx_text_encoder(
     Ok((use_alternate, dir))
 }
 
+/// Resolve the prompt-enhancer choice for one concrete LTX generation model. LTX-2.5 has a
+/// self-contained Gemma-4 generation encoder and exactly one separately staged stock enhancer; it
+/// must never inherit LTX-2.3's optional amoral Gemma-3 selection through the shared adapter id.
+#[cfg(target_os = "macos")]
+pub(super) fn resolve_ltx_text_encoder_for_model(
+    model: &str,
+    advanced: &JsonObject,
+    staged_alternate: Option<PathBuf>,
+) -> WorkerResult<(bool, Option<PathBuf>)> {
+    if model == "ltx_2_5" {
+        if selected_ltx_text_encoder(advanced)? != LtxTextEncoderSelection::Default {
+            return Err(WorkerError::InvalidPayload(
+                "LTX-2.5 does not support alternate textEncoderModel or uncensored enhancer selections; use its tier-local Gemma-4 encoder and stock prompt enhancer"
+                    .to_owned(),
+            ));
+        }
+        return Ok((false, None));
+    }
+    resolve_selected_ltx_text_encoder(advanced, staged_alternate)
+}
+
 /// On-demand fetch of the bundle's `q8/` subdir (sc-5679). The macOS default download is lean
 /// (`q4/` + `gemma/`); when a job opts into Q8 ([`ltx_wants_q8`]) and the bundle's `q8/` isn't already
 /// complete, pull just `q8/*` from [`LTX_BUNDLE_REPO`] into the HF cache so [`resolve_ltx_model_dir`]
@@ -564,7 +898,7 @@ pub(super) async fn ensure_ltx_q8_present(
     job: &JobSnapshot,
     request: &VideoRequest,
 ) -> WorkerResult<()> {
-    if request.model == "ltx_2_3_eros" || !ltx_wants_q8(request) {
+    if request.model != "ltx_2_3" || !ltx_wants_q8(request) {
         return Ok(());
     }
     let Some(root) = huggingface_snapshot_dir(&settings.data_dir, LTX_BUNDLE_REPO) else {
@@ -600,7 +934,7 @@ pub(super) async fn ensure_ltx_bf16_present(
     job: &JobSnapshot,
     request: &VideoRequest,
 ) -> WorkerResult<()> {
-    if request.model == "ltx_2_3_eros" || !ltx_wants_bf16(request) {
+    if request.model != "ltx_2_3" || !ltx_wants_bf16(request) {
         return Ok(());
     }
     let Some(root) = huggingface_snapshot_dir(&settings.data_dir, LTX_BUNDLE_REPO) else {
@@ -754,10 +1088,11 @@ pub(super) fn resolve_ltx_user_adapters(
 /// The LoRA is the `coRequisite` `resources.distilledLora` (the cond_safe variant, sc-9696), so it
 /// installs alongside the checkpoint and is resolved from the HF cache here. Strengths come from
 /// `mlx.autoDistillLora` (`stage1Strength` full first pass / `stage2Strength` reduced spatial-upscale
-/// pass — TenStrip's guidance for rank<=72 cond_safe LoRAs), overridable via
-/// `advanced.distillStage1Strength` / `distillStage2Strength`, and applied as
+/// pass — TenStrip's guidance for rank<=72 cond_safe LoRAs), and applied as
 /// `pass_scales = [stage1, stage2]` (the engine's LTX per-pass feature, sc-2687). Declared-but-missing
 /// fails with an actionable error rather than silently producing noise.
+/// LTX-2.5 dev is deliberately stricter: its raw stage-one transformer requires the manifest's exact
+/// `[0, 1]` stage contract and refuses request-level scale overrides.
 ///
 /// Ported from the deleted Python `MlxVideoAdapter` (b821d74e): the injection was lost when video
 /// generation moved to the Rust worker in the sc-3037 cutover, which is why 10Eros regressed to noise.
@@ -769,6 +1104,15 @@ pub(super) fn resolve_ltx_distill_adapter(
     settings: &Settings,
     request: &VideoRequest,
 ) -> WorkerResult<Option<AdapterSpec>> {
+    // LTX-2.5's distilled checkpoint already contains the refinement.  Its dev
+    // checkpoint, by contrast, needs the bundled adapter only for stage two;
+    // never let an absent selector double-apply it to the default path.
+    let ltx25_variant = (request.model == "ltx_2_5")
+        .then(|| ltx25_transformer_variant(request))
+        .transpose()?;
+    if ltx25_variant == Some(Ltx25TransformerVariant::Distilled) {
+        return Ok(None);
+    }
     let Some(auto) = request
         .model_manifest_entry
         .get("autoDistillLora")
@@ -781,6 +1125,13 @@ pub(super) fn resolve_ltx_distill_adapter(
         })
         .and_then(Value::as_object)
     else {
+        if ltx25_variant == Some(Ltx25TransformerVariant::Dev) {
+            return Err(WorkerError::InvalidPayload(
+                "LTX-2.5 dev requires mlx.autoDistillLora with pass scales [0, 1]; the built-in \
+                 stage-two refinement contract is missing from the manifest."
+                    .to_owned(),
+            ));
+        }
         return Ok(None);
     };
     // Opt-out knob (default on): the distill LoRA is a required runtime component for these models.
@@ -789,23 +1140,55 @@ pub(super) fn resolve_ltx_distill_adapter(
         .get("useDistillLora")
         .and_then(Value::as_bool)
         .unwrap_or(true);
+    let ltx25_dev = ltx25_variant == Some(Ltx25TransformerVariant::Dev);
+    // The knob is only rejected where honoring it would contradict required behavior — on LTX-2.5
+    // dev, whose raw stage-one transformer has no built-in refinement and needs the bundled adapter
+    // for stage two. (The 2.5 distilled variant returned above with no adapter in either case, so
+    // `false` there already matches what actually happens and stays accepted.) Ignoring it silently
+    // here was the same class of defect as an ignored `distillStage*Strength` override, which the
+    // sibling check below rejects outright.
     if !enabled {
+        if ltx25_dev {
+            return Err(WorkerError::InvalidPayload(
+                "The LTX-2.5 dev pipeline requires its bundled stage-two refinement adapter; \
+                 advanced.useDistillLora cannot be false. Select the distilled transformer variant \
+                 instead if you do not want a refinement pass."
+                    .to_owned(),
+            ));
+        }
         return Ok(None);
     }
-    let stage1 = advanced::f32(
-        &request.advanced,
-        "distillStage1Strength",
-        auto.get("stage1Strength")
-            .and_then(Value::as_f64)
-            .unwrap_or(1.0) as f32,
-    );
-    let stage2 = advanced::f32(
-        &request.advanced,
-        "distillStage2Strength",
-        auto.get("stage2Strength")
-            .and_then(Value::as_f64)
-            .unwrap_or(0.4) as f32,
-    );
+    let manifest_stage1 = auto
+        .get("stage1Strength")
+        .and_then(Value::as_f64)
+        .unwrap_or(1.0) as f32;
+    let manifest_stage2 = auto
+        .get("stage2Strength")
+        .and_then(Value::as_f64)
+        .unwrap_or(0.4) as f32;
+    let (stage1, stage2) = if ltx25_dev {
+        if request.advanced.contains_key("distillStage1Strength")
+            || request.advanced.contains_key("distillStage2Strength")
+        {
+            return Err(WorkerError::InvalidPayload(
+                "LTX-2.5 dev fixes the bundled refinement adapter to pass scales [0, 1]; \
+                 distillStage1Strength and distillStage2Strength cannot be overridden."
+                    .to_owned(),
+            ));
+        }
+        if manifest_stage1 != 0.0 || manifest_stage2 != 1.0 {
+            return Err(WorkerError::InvalidPayload(format!(
+                "LTX-2.5 dev requires mlx.autoDistillLora pass scales [0, 1], found \
+                 [{manifest_stage1}, {manifest_stage2}]."
+            )));
+        }
+        (manifest_stage1, manifest_stage2)
+    } else {
+        (
+            advanced::f32(&request.advanced, "distillStage1Strength", manifest_stage1),
+            advanced::f32(&request.advanced, "distillStage2Strength", manifest_stage2),
+        )
+    };
     // The distill LoRA repo/file live in `resources.distilledLora` (the recommended cond_safe variant).
     let (repo, file) = request
         .model_manifest_entry
@@ -828,15 +1211,31 @@ pub(super) fn resolve_ltx_distill_adapter(
         })?;
     // The LoRA is a download co-requisite (sc-9696), so it is expected in the HF cache. Fail with an
     // actionable message if it is absent rather than silently degrading the output to noise.
-    let path = huggingface_snapshot_dir(&settings.data_dir, repo)
-        .map(|dir| dir.join(file))
-        .filter(|candidate| candidate.is_file())
-        .ok_or_else(|| {
-            WorkerError::InvalidPayload(format!(
-                "The required distill LoRA for this model is not installed ({repo}/{file}). \
-                 Re-download the model to fetch its co-requisite distill LoRA."
-            ))
-        })?;
+    //
+    // LTX-2.5's refinement LoRA ships inside the SAME `LTX25_BUNDLE_REPO` snapshot as the checkpoint
+    // bundle, which every other resolver binds at the immutable `LTX25_BUNDLE_REVISION` (the MLX
+    // `resolve_ltx_model_dir` and the candle snapshot arm both do). Resolving it through the
+    // UNPINNED `huggingface_snapshot_dir` would let a mutable `refs/main` or a larger cached sibling
+    // snapshot hand the transformer's stage-two pass a different adapter than the pinned bundle the
+    // rest of the load came from. Non-2.5 models (10Eros) keep the unpinned co-requisite lookup:
+    // their LoRA lives in its own repo with no bundle revision to agree with.
+    let path = if request.model == "ltx_2_5" {
+        crate::model_jobs::huggingface_pinned_snapshot_dir(
+            &settings.data_dir,
+            repo,
+            LTX25_BUNDLE_REVISION,
+        )
+    } else {
+        huggingface_snapshot_dir(&settings.data_dir, repo)
+    }
+    .map(|dir| dir.join(file))
+    .filter(|candidate| candidate.is_file())
+    .ok_or_else(|| {
+        WorkerError::InvalidPayload(format!(
+            "The required distill LoRA for this model is not installed ({repo}/{file}). \
+             Re-download the model to fetch its co-requisite distill LoRA."
+        ))
+    })?;
     let kind = classify_adapter(&path)?;
     Ok(Some(
         AdapterSpec::new(path, stage1, kind).with_pass_scales(vec![stage1, stage2]),
@@ -1508,7 +1907,8 @@ pub(super) async fn generate_ltx(
 ) -> WorkerResult<(DecodedVideo, Option<Value>)> {
     // Validate and resolve an explicit encoder choice before any clip decoding, model download, or
     // engine setup. A bad request must remain a cheap, actionable InvalidPayload.
-    let (use_uncensored_enhancer, uncensored_enhancer_dir) = resolve_selected_ltx_text_encoder(
+    let (use_uncensored_enhancer, uncensored_enhancer_dir) = resolve_ltx_text_encoder_for_model(
+        &request.model,
         &request.advanced,
         resolve_ltx_uncensored_enhancer_dir(&settings.data_dir),
     )?;
@@ -1524,6 +1924,7 @@ pub(super) async fn generate_ltx(
         .get("enhanceTemperature")
         .and_then(|v| v.as_f64())
         .map(|v| v as f32);
+    let ltx25_options = ltx25_generation_options(request)?;
     // extend_clip / video_bridge build in-context VideoClip conditioning from decoded source
     // clips (async ffmpeg extraction); every other mode resolves keyframe/reference conditioning
     // synchronously from images.
@@ -1558,30 +1959,48 @@ pub(super) async fn generate_ltx(
     // the base model, which bundles gemma with its checkpoint). Self-heals installs that predate this.
     ensure_ltx_gemma_present(api, settings, job, request).await?;
     let model_dir = resolve_ltx_model_dir(settings, request)?;
-    // Thread the Gemma-3 text encoder onto the LoadSpec (sc-8827, was `$LTX_GEMMA_DIR`). Base: the
-    // SceneWorks bundle subdir's sibling `gemma/`. Eros: the separately-provisioned gemma
-    // ([`ensure_ltx_gemma_present`]) — a `models/mlx/gemma` sibling or the bundle snapshot's `gemma/`.
-    // `None` ⇒ the engine falls back to the HF-cache gemma snapshot.
-    let text_encoder_dir = if request.model == "ltx_2_3_eros" {
+    // Thread the Gemma-3 text encoder onto the 2.3 LoadSpec (sc-8827, was `$LTX_GEMMA_DIR`).
+    // LTX-2.5 deliberately leaves this slot empty: its self-contained Gemma-4 encoder is the
+    // `text_encoder` component inside the selected tier, resolved from `split_model.json` by the
+    // engine. The separate `enhancer/` directory is the stock prompt enhancer, not this slot.
+    let text_encoder_dir = if request.model == "ltx_2_5" {
+        None
+    } else if request.model == "ltx_2_3_eros" {
         resolve_ltx_eros_gemma_dir(settings, &model_dir)
     } else {
         resolve_bundled_ltx_gemma_dir(&model_dir)
     };
+    let ltx25_variant = (request.model == "ltx_2_5")
+        .then(|| ltx25_transformer_variant(request))
+        .transpose()?;
+    let ltx25_dev = ltx25_variant == Some(Ltx25TransformerVariant::Dev);
+    // Shared with the candle arm so the two lanes cannot describe the same request's pipeline shape
+    // differently — see [`ltx_memory_axes`].
+    let (memory_transformer_variant, memory_decoder) =
+        ltx_memory_axes(request, ltx25_options.use_diffusion_decoder)?;
     let input = VideoGenInput {
         sampler: None,
         scheduler: None,
         engine_id,
         model_dir,
         quant: None,
+        memory_transformer_variant,
+        memory_decoder,
         adapters: resolve_ltx_adapters(settings, request)?,
         conditioning,
         prompt: request.prompt.clone(),
-        negative_prompt: None,
+        negative_prompt: ltx25_dev.then(|| request.negative_prompt.clone()),
         width: request.width,
         height: request.height,
-        frames: ltx_frame_count(request.raw_frame_count()),
+        frames: ltx25_options.planning_frames,
         fps: request.fps,
-        steps: None,
+        auto_duration: ltx25_options.auto_duration,
+        temporal_upsample_rounds: ltx25_options.temporal_upsample_rounds,
+        use_diffusion_decoder: ltx25_options.use_diffusion_decoder,
+        // The dev checkpoint's SC-18759 schedule is a fixed 30-transition contract. Its video and
+        // audio CFG/STG/rescale/modality scales are likewise checkpoint-native, not the generic
+        // request guidance axis; `ltx25_generation_options` rejects a forged override above.
+        steps: ltx25_dev.then_some(30),
         guidance: None,
         seed: resolve_video_seed(request) as u64,
         control_scale: None,

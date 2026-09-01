@@ -120,6 +120,18 @@
           "type": "string",
           "minLength": 1
         },
+        "transformerVariant": {
+          "enum": [
+            "distilled",
+            "dev"
+          ]
+        },
+        "decoder": {
+          "enum": [
+            "conv",
+            "diffvae"
+          ]
+        },
         "geometry": {
           "type": "string",
           "description": "sc-18812. Same key vocabulary as `memoryCharacterization.measuredGeometries`, produced by the same `measuredGeometryKey`: `WxH` is one output frame, `WxHxfF` is F of them. Both forms are admitted here because an evidence record supporting a temporal curve must be able to STATE its frame count - a record forced into `WxH` would be characterized as a one-frame design point nobody measured.",
@@ -474,6 +486,39 @@
           "type": ["integer", "null"]
         }
       }
+    },
+    "pipelineCharacterization": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["transformerVariant", "decoder", "memoryCharacterization"],
+      "properties": {
+        "transformerVariant": { "enum": ["distilled", "dev"] },
+        "decoder": { "enum": ["conv", "diffvae"] },
+        "memoryCharacterization": {
+          "type": "object",
+          "required": ["status", "measuredGeometries", "coveredPixelBound"],
+          "additionalProperties": false,
+          "properties": {
+            "status": { "enum": ["unmeasured", "point", "fitted"] },
+            "measuredGeometries": {
+              "type": "array",
+              "uniqueItems": true,
+              "items": {
+                "type": "string",
+                "pattern": "^[1-9][0-9]*x[1-9][0-9]*(xf[1-9][0-9]*)?$"
+              }
+            },
+            "coveredPixelBound": {
+              "type": ["integer", "null"],
+              "exclusiveMinimum": 0
+            },
+            "coveredFrameBound": {
+              "type": ["integer", "null"],
+              "exclusiveMinimum": 0
+            }
+          }
+        }
+      }
     }
   },
   "required": [
@@ -495,7 +540,8 @@
   "properties": {
     "schemaVersion": {
       "description": "2 (SC-15812): backend-scoped story ownership. 3 (sc-16268): removed per-cell evidenceRevision. 4 (SC-15969): added rung-4 survey rows. 5 (SC-16060): split implementation and memory-characterization claims. 6 (SC-15823): adds Runtime verified so base-only runtime activation cannot masquerade as Full Verified, and publishes complete/runtime-complete calibration counts. 7 (sc-18099): `cells` is the planned-or-evidenced SUBSET of the catalog cross-product rather than the cross-product itself; `coverage`, `models[].axes` and `manifestScopes` added and required; `summary` gained publishedCells/elidedCells/elidedByState/publicationPredicate; `modelSlices` entries may be empty; `rung4SurveyRows` absorbed the family-level summary/blockStacks/findings that `cells[].rung4Survey` no longer carries; `cells[].evidence` replaced declaredCalibration/loadability with a `manifestScope` key into `manifestScopes`; `calibrationRuns[].record` is a projection of the evidence-bundle row. 8 (sc-18815): the model universe is MODALITY-AWARE rather than `type === \"image\"`. `summary.imageModels` was REMOVED and replaced by `catalogEntries` + `catalogEntriesByModality` \u2014 not additive, because a reader indexing `imageModels` now gets `undefined` rather than a wrong number, which is the point; `models[]` gained required `modality` and `resolvedRoutes` and its count moved 53 -> 63; `models[].backends` and `owningModelStories` may be EMPTY (an entry the routing catalog routes nowhere); `cells[].owningModelStory` may be `null` (video cells have no per-entry owner); `cells[].rung4Survey` gained a required `surveyed` discriminator and its three verdict fields became nullable; `rung4SurveyRows[].familyStory` may be a family NAME rather than a story id; `summary` gained `unroutedEntries`, `videoMlxStagedStaticCoverage`(+`Denominator`) and `rung4Survey.pendingFamilyBackends`. 9 (sc-21715): `summary.calibrationRunsByStatus` PARTITIONS the evidence bundle rather than counting two of its statuses — it gained required `gated` and `negativeComplete` keys, so its values sum to `summary.calibrationRuns` (which has always counted every record, whatever its status) by construction. A version-8 reader that took `complete + runtimeComplete` as the bundle size is wrong the moment a non-certifying receipt is admitted.",
-      "const": 9
+      "$comment": "10 (SC-18783): LTX-2.5 planned pipeline identities and evidence summaries carry transformerVariant and decoder axes.",
+      "const": 10
     },
     "generatedFrom": {
       "type": "object"
@@ -721,8 +767,7 @@
     },
     "models": {
       "type": "array",
-      "minItems": 63,
-      "maxItems": 63,
+      "minItems": 1,
       "items": {
         "type": "object",
         "additionalProperties": false,
@@ -1012,6 +1057,39 @@
           },
           "engagedRungs": {
             "$ref": "#/$defs/engagedRungs"
+          },
+          "plannedPipelineIdentities": {
+            "type": "array",
+            "minItems": 1,
+            "uniqueItems": true,
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "transformerVariant",
+                "decoder"
+              ],
+              "properties": {
+                "transformerVariant": {
+                  "enum": [
+                    "distilled",
+                    "dev"
+                  ]
+                },
+                "decoder": {
+                  "enum": [
+                    "conv",
+                    "diffvae"
+                  ]
+                }
+              }
+            }
+          },
+          "pipelineCharacterizations": {
+            "type": "array",
+            "minItems": 1,
+            "uniqueItems": true,
+            "items": { "$ref": "#/$defs/pipelineCharacterization" }
           },
           "state": {
             "enum": [

@@ -134,15 +134,29 @@ function humanizedNumberMenu(menu) {
 }
 
 const ltxVideoModelId = "ltx_2_3";
-const ltxIcLoraModelIds = new Set([ltxVideoModelId, "ltx_2_3_eros"]);
+const ltx25VideoModelId = "ltx_2_5";
+const LTX25_AUTO_DURATION_MIN_SECONDS = 4;
+const LTX25_AUTO_DURATION_MAX_SECONDS = 15;
+const LTX25_TEMPORAL_UPSAMPLE_MAX_ROUNDS = 2;
+const ltxIcLoraModelIds = new Set([ltxVideoModelId, "ltx_2_3_eros", ltx25VideoModelId]);
 // Keep this list to native Candle engines that publish a real Model Manager variant matrix. The
 // picker only enables entries whose individual install is complete (`installedTiers`); in particular,
 // adding SCAIL-2 here never fabricates q4/q8 for a dense-only or partial local snapshot.
-const candleTierModelIds = new Set(["wan_2_2", "wan_2_2_t2v_14b", "wan_2_2_i2v_14b", "scail2_14b"]);
+const candleTierModelIds = new Set([
+  "wan_2_2",
+  "wan_2_2_t2v_14b",
+  "wan_2_2_i2v_14b",
+  "scail2_14b",
+  ltx25VideoModelId,
+]);
 // sc-20969 terminal acceptance admits exactly SCAIL-2's shipped q4/q8/bf16 Candle packages. Keep
 // this execution allowlist literal and local so an unrelated future catalog tier cannot become
 // runnable merely by appearing in the manifest. MLX continues to use the complete installed tier set.
 const SCAIL2_CANDLE_PRODUCT_TIERS = Object.freeze(["q4", "q8", "bf16"]);
+// LTX-2.5 ships its full q4/q8/bf16 ladder on Candle, symmetric with MLX. Keep this execution
+// allowlist literal and local so an unrelated future catalog tier cannot become runnable merely by
+// appearing in the manifest.
+const LTX25_CANDLE_PRODUCT_TIERS = Object.freeze(["q4", "q8", "bf16"]);
 const legacyDefaultTextEncoderId = "default";
 const amoralTextEncoderId = "ltx_amoral_gemma_3_12b";
 const ltxIcLoraRequiredModes = new Set(["extend_clip", "video_bridge", "replace_person"]);
@@ -150,10 +164,16 @@ const TIER_SCREEN = "video";
 const MAX_SCAIL2_REFERENCE_CHARACTERS = 6;
 
 function videoExecutionTierModel(model, backend) {
-  if (backend !== "candle" || model?.id !== SCAIL2_MODEL_ID) {
+  const acceptedTiers =
+    model?.id === SCAIL2_MODEL_ID
+      ? SCAIL2_CANDLE_PRODUCT_TIERS
+      : model?.id === ltx25VideoModelId
+        ? LTX25_CANDLE_PRODUCT_TIERS
+        : null;
+  if (backend !== "candle" || acceptedTiers === null) {
     return model;
   }
-  const accepted = (tier) => SCAIL2_CANDLE_PRODUCT_TIERS.includes(tier);
+  const accepted = (tier) => acceptedTiers.includes(tier);
   return {
     ...model,
     variants: Array.isArray(model.variants)
@@ -169,6 +189,21 @@ function videoExecutionTierModel(model, backend) {
       ? model.mlxTierStates.filter((state) => accepted(state?.tier))
       : model.mlxTierStates,
   };
+}
+
+function clampLtx25AutoDurationSeconds(value, fallback) {
+  const seconds = Number(value);
+  if (!Number.isFinite(seconds)) return fallback;
+  return Math.min(
+    LTX25_AUTO_DURATION_MAX_SECONDS,
+    Math.max(LTX25_AUTO_DURATION_MIN_SECONDS, Math.round(seconds)),
+  );
+}
+
+function clampLtx25TemporalUpsampleRounds(value) {
+  const rounds = Number(value);
+  if (!Number.isFinite(rounds)) return 0;
+  return Math.min(LTX25_TEMPORAL_UPSAMPLE_MAX_ROUNDS, Math.max(0, Math.round(rounds)));
 }
 
 function unavailableRecipeTierMessage(model, backend, tier) {
@@ -275,6 +310,26 @@ export function VideoStudio() {
   const [quality, setQuality] = useState(saved.quality ?? "balanced");
   const [ltxPipeline, setLtxPipeline] = useState(saved.ltxPipeline ?? "auto");
   const [distilledVariant, setDistilledVariant] = useState(saved.distilledVariant ?? "1.1");
+  const [transformerVariant, setTransformerVariant] = useState(saved.transformerVariant ?? "distilled");
+  const [vaeDecoder, setVaeDecoder] = useState(
+    saved.vaeDecoder === "diffusion" ? "diffusion" : "conv",
+  );
+  const [autoDuration, setAutoDuration] = useState(saved.autoDuration === true);
+  const [autoDurationMinSeconds, setAutoDurationMinSeconds] = useState(() =>
+    clampLtx25AutoDurationSeconds(
+      saved.autoDurationMinSeconds,
+      LTX25_AUTO_DURATION_MIN_SECONDS,
+    ),
+  );
+  const [autoDurationMaxSeconds, setAutoDurationMaxSeconds] = useState(() =>
+    clampLtx25AutoDurationSeconds(
+      saved.autoDurationMaxSeconds,
+      LTX25_AUTO_DURATION_MAX_SECONDS,
+    ),
+  );
+  const [temporalUpsampleRounds, setTemporalUpsampleRounds] = useState(() =>
+    clampLtx25TemporalUpsampleRounds(saved.temporalUpsampleRounds),
+  );
   const [precision, setPrecision] = useState(saved.precision ?? "fp8");
   const [enhancePrompt, setEnhancePrompt] = useState(saved.enhancePrompt ?? false);
   const [textEncoderSelection, setTextEncoderSelection] = useState({
@@ -293,7 +348,13 @@ export function VideoStudio() {
   // installed tier the current model would normally seed.
   const [recipeTierRequest, setRecipeTierRequest] = useState(null);
   const [advancedOpen, setAdvancedOpen] = useState(saved.advancedOpen ?? false);
-  const [model, setModel] = useState(saved.model ?? videoModels[0]?.id ?? ltxVideoModelId);
+  // LTX-2.3 remains the default video route. LTX-2.5 is deliberately opt-in even though its
+  // catalog entry can arrive first (the manifest groups the shared LTX family together).
+  const defaultVideoModelId =
+    videoModels.find((item) => item.id === ltxVideoModelId)?.id ??
+    videoModels[0]?.id ??
+    ltxVideoModelId;
+  const [model, setModel] = useState(saved.model ?? defaultVideoModelId);
   // Every USER model picker must retire replay-only state. Automatic catalog/mode/recipe snaps use
   // the raw state setter below and preserve the replay while its target model becomes active.
   const setUserModel = useCallback((nextModel) => {
@@ -329,6 +390,8 @@ export function VideoStudio() {
     }
   }, [macVideoModels, model]);
   const selectedModel = videoModels.find((item) => item.id === model) ?? videoModels[0];
+  const ltx25Dev = model === ltx25VideoModelId && transformerVariant === "dev";
+  const ltx25AutoDurationEnabled = model === ltx25VideoModelId && autoDuration;
   // Multi-reference SCAIL-2 needs a reference/mask pair per character. Keep this source-ready UI
   // behind the descriptor-derived manifest flag: the currently pinned engine descriptor does not
   // advertise the paired contract yet, so a normal catalog remains on the existing single picker
@@ -338,7 +401,20 @@ export function VideoStudio() {
   // Runtime-curated selector surface (sc-13800). The API emits only complete encoders the worker can
   // resolve; Video Studio stays adapter-agnostic and future models can expose the same shape.
   const textEncoderOptions = selectedModel?.textEncoderOptions ?? [];
-  const supportsTextEncoderSelection = textEncoderOptions.length > 0;
+  // LTX-2.5's tier-local Gemma-4 generation encoder is not selectable. Runtime option discovery
+  // is shared by the `ltx_video` adapter and can therefore carry LTX-2.3's Gemma-3/amoral choices
+  // onto this catalog entry; exposing them would produce a request the 2.5 provider rejects.
+  const supportsTextEncoderSelection =
+    model !== ltx25VideoModelId && textEncoderOptions.length > 0;
+  // The separately downloaded stock Gemma-4 enhancer is an MLX-only 2.5 capability. Keep the
+  // simple opt-in checkbox while omitting the unrelated 2.3 encoder picker; off-Mac the Candle
+  // provider has no prompt-enhancement input, so the control and payload both disappear. Require
+  // a positive host identity: before capabilities load, showing a backend-specific control would
+  // risk briefly offering it to an off-Mac client.
+  const supportsStockPromptEnhancement =
+    model === ltx25VideoModelId && ["macos", "darwin"].includes(macCapabilities?.platform);
+  const supportsPromptEnhancement =
+    supportsTextEncoderSelection || supportsStockPromptEnhancement;
   const defaultTextEncoderId =
     textEncoderOptions.find((option) => option.isDefault)?.id ??
     textEncoderOptions[0]?.id ??
@@ -552,8 +628,14 @@ export function VideoStudio() {
   // inertness is TRANSIENT (turn Lightning off and the control works again). A missing axis is
   // permanent for the model, so a forever-dead input is just clutter — Audio Studio hides these two
   // for the same reason (`showGuidance` / `showNegative`).
+  // LTX-2.5 keeps guidance provider-owned on both packed variants. Only negative conditioning is
+  // variant-specific: the distilled default has no negative branch, while dev consumes one through
+  // its fixed native multimodal guider. Other catalog entries retain absent-means-true above.
   const supportsGuidance = selectedModel?.video?.supportsGuidance !== false;
-  const supportsNegativePrompt = selectedModel?.video?.supportsNegativePrompt !== false;
+  const supportsNegativePrompt =
+    model === ltx25VideoModelId
+      ? ltx25Dev
+      : selectedModel?.video?.supportsNegativePrompt !== false;
   // `limits.steps` — the exact set of step counts the model can render (sc-19502). Distilled models
   // bake their sigma waypoints into training: LTX-2.3 runs 8 and nothing else, and BOTH backends now
   // refuse anything off the menu, so an unpinned Steps box here would let the user type a number the
@@ -566,7 +648,14 @@ export function VideoStudio() {
   // control?" with nothing, and leaving it editable would be the silently-ignored knob this story
   // exists to remove.
   const stepsMenu = stepsMenuFromModel(selectedModel);
-  const stepsPinnedValue = stepsMenu?.length === 1 ? stepsMenu[0] : null;
+  const stepsPinnedValue =
+    model === ltx25VideoModelId
+      ? ltx25Dev
+        ? 30
+        : 8
+      : stepsMenu?.length === 1
+        ? stepsMenu[0]
+        : null;
   const stepsPinned = stepsPinnedValue !== null;
   // A menu with MORE than one entry is a CHOICE, not a pin — but the gate refuses off-menu counts
   // exactly as hard there, so a free-text box would be the same "UI looser than the gate" desync in
@@ -576,7 +665,14 @@ export function VideoStudio() {
   // `humanized_number_menu` in crates/sceneworks-core/src/video_request.rs, `stepsMenuFromModel`,
   // `checkInMenu` in PresetManagerScreen, gen-core's `supported_steps`) and leaving this one
   // singleton-only would make the studio the single seam that silently reopens the defect.
-  const stepsChoice = stepsMenu !== null && stepsMenu.length > 1 ? stepsMenu : null;
+  const stepsChoice =
+    model !== ltx25VideoModelId && stepsMenu !== null && stepsMenu.length > 1
+      ? stepsMenu
+      : null;
+  // The generic LTX-2.3 guider knobs map to MultiModalGuiderParams. LTX-2.5 has its own sealed
+  // distilled/dev sampling contracts, so retaining or emitting these values there would be inert.
+  const showsLegacyLtxGuidanceControls =
+    selectedModel?.adapter === "ltx_video" && model !== ltx25VideoModelId;
   // Whether the override currently held is something the selected model can actually render. A
   // number typed against a PREVIOUS model survives the switch (the same staleness `stepsPinned`
   // suppresses), and a `<select>` whose `value` matches no `<option>` displays its first one — which
@@ -1194,6 +1290,24 @@ export function VideoStudio() {
     setMotion(rawSettings.motion ?? DEFAULT_MOTION);
     setLtxPipeline(rawSettings.ltxPipeline ?? "auto");
     setDistilledVariant(rawSettings.distilledVariant ?? "1.1");
+    setTransformerVariant(rawSettings.transformerVariant ?? "distilled");
+    setVaeDecoder(rawSettings.vaeDecoder === "diffusion" ? "diffusion" : "conv");
+    setAutoDuration(rawSettings.autoDuration === true);
+    setAutoDurationMinSeconds(
+      clampLtx25AutoDurationSeconds(
+        rawSettings.autoDurationMinSeconds,
+        LTX25_AUTO_DURATION_MIN_SECONDS,
+      ),
+    );
+    setAutoDurationMaxSeconds(
+      clampLtx25AutoDurationSeconds(
+        rawSettings.autoDurationMaxSeconds,
+        LTX25_AUTO_DURATION_MAX_SECONDS,
+      ),
+    );
+    setTemporalUpsampleRounds(
+      clampLtx25TemporalUpsampleRounds(rawSettings.temporalUpsampleRounds),
+    );
     setPrecision(rawSettings.precision ?? "fp8");
     setEnhancePrompt(rawSettings.enhancePrompt === true);
     setTextEncoderModel(
@@ -1314,6 +1428,12 @@ export function VideoStudio() {
       ["quantization", setQuantization],
       ["ltxPipeline", setLtxPipeline],
       ["distilledVariant", setDistilledVariant],
+      ["transformerVariant", setTransformerVariant],
+      ["vaeDecoder", setVaeDecoder],
+      ["autoDuration", setAutoDuration],
+      ["autoDurationMinSeconds", setAutoDurationMinSeconds],
+      ["autoDurationMaxSeconds", setAutoDurationMaxSeconds],
+      ["temporalUpsampleRounds", setTemporalUpsampleRounds],
       ["enhancePrompt", setEnhancePrompt],
       ["textEncoderModel", setTextEncoderModel],
       ["motion", setMotion],
@@ -1345,13 +1465,26 @@ export function VideoStudio() {
       quantization,
       ltxPipeline,
       distilledVariant,
-      ...(supportsTextEncoderSelection
-        ? { enhancePrompt, textEncoderModel: selectedTextEncoderModel }
+      transformerVariant,
+      ...(model === ltx25VideoModelId
+        ? {
+            vaeDecoder,
+            autoDuration,
+            autoDurationMinSeconds,
+            autoDurationMaxSeconds,
+            temporalUpsampleRounds,
+          }
         : {}),
+      ...(supportsPromptEnhancement ? { enhancePrompt } : {}),
+      ...(supportsTextEncoderSelection ? { textEncoderModel: selectedTextEncoderModel } : {}),
       motion,
-      videoCfgGuidanceScale: finiteNumberOrUndefined(ltxVideoCfg),
-      videoStgGuidanceScale: finiteNumberOrUndefined(ltxVideoStg),
-      videoRescaleScale: finiteNumberOrUndefined(ltxVideoRescale),
+      ...(showsLegacyLtxGuidanceControls
+        ? {
+            videoCfgGuidanceScale: finiteNumberOrUndefined(ltxVideoCfg),
+            videoStgGuidanceScale: finiteNumberOrUndefined(ltxVideoStg),
+            videoRescaleScale: finiteNumberOrUndefined(ltxVideoRescale),
+          }
+        : {}),
     }),
   });
 
@@ -1363,6 +1496,12 @@ export function VideoStudio() {
     quality,
     ltxPipeline,
     distilledVariant,
+    transformerVariant,
+    vaeDecoder,
+    autoDuration,
+    autoDurationMinSeconds,
+    autoDurationMaxSeconds,
+    temporalUpsampleRounds,
     precision,
     enhancePrompt,
     textEncoderModel,
@@ -1740,7 +1879,10 @@ export function VideoStudio() {
         // (and the worker discards anyway) would be a ghost input on the recipe.
         negativePrompt: supportsNegativePrompt ? (stackActive ? composedStack.negativePrompt : negativePrompt) : "",
         model,
-        duration: Number(duration),
+        // The duration head chooses a legal duration only when the user explicitly opts in. Do not
+        // send the visible manual-picker value alongside it: provider precedence is intentionally
+        // represented by absence, so an explicit duration always wins by switching this toggle off.
+        ...(ltx25AutoDurationEnabled ? {} : { duration: Number(duration) }),
         fps: Number(fps),
         width: stackResolution?.width ?? width,
         height: stackResolution?.height ?? height,
@@ -1819,7 +1961,17 @@ export function VideoStudio() {
           // stay byte-identical.
           ...(styleApplied ? { styleId, stylePrompt: stylePromptBase } : {}),
           ...(model === ltxVideoModelId ? { ltxPipeline, distilledVariant, precision } : {}),
-          ...(supportsTextEncoderSelection && enhancePrompt
+          ...(model === ltx25VideoModelId
+            ? {
+                transformerVariant,
+                vaeDecoder,
+                autoDuration,
+                autoDurationMinSeconds,
+                autoDurationMaxSeconds,
+                temporalUpsampleRounds,
+              }
+            : {}),
+          ...(supportsPromptEnhancement && enhancePrompt
             ? { enhancePrompt: true }
             : {}),
           ...(supportsTextEncoderSelection &&
@@ -1873,13 +2025,13 @@ export function VideoStudio() {
           // LTX native guidance knobs (epic 1753 sc-1769). Only emitted for
           // the LTX adapter — the worker would silently ignore them on other
           // adapters but keeping the payload tight avoids surprise overrides.
-          ...(selectedModel?.adapter === "ltx_video" && ltxVideoCfg !== "" && Number.isFinite(Number(ltxVideoCfg))
+          ...(showsLegacyLtxGuidanceControls && ltxVideoCfg !== "" && Number.isFinite(Number(ltxVideoCfg))
             ? { videoCfgGuidanceScale: Number(ltxVideoCfg) }
             : {}),
-          ...(selectedModel?.adapter === "ltx_video" && ltxVideoStg !== "" && Number.isFinite(Number(ltxVideoStg))
+          ...(showsLegacyLtxGuidanceControls && ltxVideoStg !== "" && Number.isFinite(Number(ltxVideoStg))
             ? { videoStgGuidanceScale: Number(ltxVideoStg) }
             : {}),
-          ...(selectedModel?.adapter === "ltx_video" && ltxVideoRescale !== "" && Number.isFinite(Number(ltxVideoRescale))
+          ...(showsLegacyLtxGuidanceControls && ltxVideoRescale !== "" && Number.isFinite(Number(ltxVideoRescale))
             ? { videoRescaleScale: Number(ltxVideoRescale) }
             : {}),
           // Clip-conditioning strengths (sc-3522, sc-3755; sc-8445 for Krea Realtime v2v). The
@@ -2307,7 +2459,15 @@ export function VideoStudio() {
                     slider would emit durations the engine refuses (15.0s among them, which its own
                     docs advertise and which sits between the last rung and the next). The label
                     carries the frame count because that is what the lattice is counting. */}
-                <select onChange={(event) => setDuration(Number(event.target.value))} value={duration}>
+                <select
+                  onChange={(event) => {
+                    setDuration(Number(event.target.value));
+                    // A manual selection is an explicit duration request. Disable duration-head
+                    // selection immediately so the visible value and the submitted payload agree.
+                    if (model === ltx25VideoModelId) setAutoDuration(false);
+                  }}
+                  value={duration}
+                >
                   {durationOptions.map((value) => (
                     <option key={value} value={value}>
                       {formatDurationOption(value, fps)}
@@ -2505,7 +2665,111 @@ export function VideoStudio() {
                   </label>
                 </>
               ) : null}
-              {supportsTextEncoderSelection ? (
+              {model === ltx25VideoModelId ? (
+                <>
+                  <label>
+                    Transformer
+                    <select
+                      aria-label="LTX-2.5 transformer"
+                      onChange={(event) => setTransformerVariant(event.target.value)}
+                      value={transformerVariant}
+                    >
+                      <option value="distilled">Distilled (default, 8 steps)</option>
+                      <option value="dev">Dev (guided, 30 steps)</option>
+                    </select>
+                    <p className="helper-copy">
+                      {ltx25Dev
+                        ? "Dev uses the guided 30-step transformer and the bundled stage-two distilled refinement."
+                        : "Distilled is the default packed transformer and does not apply the refinement adapter twice."}
+                    </p>
+                  </label>
+                  <label>
+                    VAE decoder
+                    <select
+                      aria-label="LTX-2.5 VAE decoder"
+                      onChange={(event) => setVaeDecoder(event.target.value)}
+                      value={vaeDecoder}
+                    >
+                      <option value="conv">Conv VAE (default, faster)</option>
+                      <option value="diffusion">DiffVAE (higher fidelity, slower)</option>
+                    </select>
+                    <p className="helper-copy">
+                      Conv is the fast default. DiffVAE performs a separate diffusion decode for
+                      finer faces, textures, and on-screen detail.
+                    </p>
+                  </label>
+                  <div className="lightning-toggle">
+                    <label className="checkline">
+                      <input
+                        aria-label="LTX-2.5 auto duration"
+                        checked={autoDuration}
+                        onChange={(event) => setAutoDuration(event.target.checked)}
+                        type="checkbox"
+                      />
+                      Choose duration from the prompt
+                    </label>
+                    <p className="helper-copy">
+                      Uses LTX-2.5's optional duration head. Choose a manual duration above to
+                      turn this off and send that explicit duration instead.
+                    </p>
+                  </div>
+                  <label>
+                    Auto duration minimum (seconds)
+                    <input
+                      aria-label="LTX-2.5 auto duration minimum"
+                      disabled={!autoDuration}
+                      max={LTX25_AUTO_DURATION_MAX_SECONDS}
+                      min={LTX25_AUTO_DURATION_MIN_SECONDS}
+                      onChange={(event) => {
+                        const next = clampLtx25AutoDurationSeconds(
+                          event.target.value,
+                          LTX25_AUTO_DURATION_MIN_SECONDS,
+                        );
+                        setAutoDurationMinSeconds(next);
+                        setAutoDurationMaxSeconds((current) => Math.max(current, next));
+                      }}
+                      step="1"
+                      type="number"
+                      value={autoDurationMinSeconds}
+                    />
+                  </label>
+                  <label>
+                    Auto duration maximum (seconds)
+                    <input
+                      aria-label="LTX-2.5 auto duration maximum"
+                      disabled={!autoDuration}
+                      max={LTX25_AUTO_DURATION_MAX_SECONDS}
+                      min={LTX25_AUTO_DURATION_MIN_SECONDS}
+                      onChange={(event) => {
+                        const next = clampLtx25AutoDurationSeconds(
+                          event.target.value,
+                          LTX25_AUTO_DURATION_MAX_SECONDS,
+                        );
+                        setAutoDurationMaxSeconds(next);
+                        setAutoDurationMinSeconds((current) => Math.min(current, next));
+                      }}
+                      step="1"
+                      type="number"
+                      value={autoDurationMaxSeconds}
+                    />
+                  </label>
+                  <label>
+                    Temporal upsampling
+                    <select
+                      aria-label="LTX-2.5 temporal upsampling"
+                      onChange={(event) =>
+                        setTemporalUpsampleRounds(clampLtx25TemporalUpsampleRounds(event.target.value))
+                      }
+                      value={temporalUpsampleRounds}
+                    >
+                      <option value={0}>Off (default)</option>
+                      <option value={1}>1 round (2× frames)</option>
+                      <option value={2}>2 rounds (4× frames)</option>
+                    </select>
+                  </label>
+                </>
+              ) : null}
+              {supportsPromptEnhancement ? (
                 <>
                   <div className="lightning-toggle">
                     <label className="checkline">
@@ -2517,41 +2781,47 @@ export function VideoStudio() {
                       Enhance prompt before generation
                     </label>
                     <p className="helper-copy">
-                      Rewrites the prompt with the selected text encoder before the model encodes it.
+                      {supportsStockPromptEnhancement
+                        ? "Rewrites the prompt with LTX-2.5's separately downloaded stock Gemma-4 enhancer."
+                        : "Rewrites the prompt with the selected text encoder before the model encodes it."}
                     </p>
                   </div>
-                  <label>
-                    Text encoder model
-                    <select
-                      aria-label="Text encoder model"
-                      disabled={!enhancePrompt}
-                      onChange={(event) => setTextEncoderModel(event.target.value)}
-                      value={selectedTextEncoderModel}
-                    >
-                      {textEncoderOptions.map((option) => (
-                        <option key={option.id} value={option.id}>
-                          {option.label}
-                        </option>
-                      ))}
-                      {!selectedTextEncoderAvailable &&
-                      selectedTextEncoderModel !== defaultTextEncoderId ? (
-                        <option disabled value={selectedTextEncoderModel}>
-                          Previously selected encoder (not staged)
-                        </option>
-                      ) : null}
-                    </select>
-                  </label>
-                  <p className="helper-copy">
-                    {!selectedTextEncoderAvailable &&
-                    selectedTextEncoderModel !== defaultTextEncoderId
-                      ? "The recorded encoder is not staged on this worker. Choose the shipped default or stage the alternate before rendering."
-                      : textEncoderOptions.length > 1
-                        ? "Only complete encoders already staged for this worker are listed."
-                        : "The shipped encoder is the default. Complete operator-staged alternates appear here after Models is refreshed."}
-                  </p>
+                  {supportsTextEncoderSelection ? (
+                    <>
+                      <label>
+                        Text encoder model
+                        <select
+                          aria-label="Text encoder model"
+                          disabled={!enhancePrompt}
+                          onChange={(event) => setTextEncoderModel(event.target.value)}
+                          value={selectedTextEncoderModel}
+                        >
+                          {textEncoderOptions.map((option) => (
+                            <option key={option.id} value={option.id}>
+                              {option.label}
+                            </option>
+                          ))}
+                          {!selectedTextEncoderAvailable &&
+                          selectedTextEncoderModel !== defaultTextEncoderId ? (
+                            <option disabled value={selectedTextEncoderModel}>
+                              Previously selected encoder (not staged)
+                            </option>
+                          ) : null}
+                        </select>
+                      </label>
+                      <p className="helper-copy">
+                        {!selectedTextEncoderAvailable &&
+                        selectedTextEncoderModel !== defaultTextEncoderId
+                          ? "The recorded encoder is not staged on this worker. Choose the shipped default or stage the alternate before rendering."
+                          : textEncoderOptions.length > 1
+                            ? "Only complete encoders already staged for this worker are listed."
+                            : "The shipped encoder is the default. Complete operator-staged alternates appear here after Models is refreshed."}
+                      </p>
+                    </>
+                  ) : null}
                 </>
               ) : null}
-              {selectedModel?.adapter === "ltx_video" ? (
+              {showsLegacyLtxGuidanceControls ? (
                 <>
                   <label>
                     Video CFG
@@ -2710,7 +2980,7 @@ export function VideoStudio() {
               ) : null}
               <label>
                 Steps
-                {stepsChoice ? (
+                {stepsChoice && !ltx25Dev ? (
                   <select
                     disabled={lightningActive}
                     onChange={(event) => setStepsOverride(event.target.value)}

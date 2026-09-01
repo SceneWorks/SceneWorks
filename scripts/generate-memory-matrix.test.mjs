@@ -21,10 +21,13 @@ import {
   backendScopes,
   buildMatrix,
   buildStoryBackendScope,
+  calibrationBinding,
   catalogFamilyBackends,
   isImplemented,
   isPublishableCell,
   memoryCharacterization,
+  pipelineMemoryCharacterizations,
+  recordsCoverEveryPipelineIdentity,
   parseCandleBespokeStagedLanes,
   renderMarkdown,
   OUT_OF_MATRIX_CELL_STATES,
@@ -478,7 +481,7 @@ test("provenance is stamped once on the document, never per row", async () => {
   // sc-16268: the per-row copy was one constant repeated ~7,360 times, which turned every
   // fingerprint rotation into a ~14,700-line rewrite of a file that can only be regenerated.
   const matrix = await buildMatrix({ publish: false });
-  assert.equal(matrix.schemaVersion, 9);
+  assert.equal(matrix.schemaVersion, 10);
   assert.match(matrix.generatedFrom.sceneWorksRevision, /^source-tree:[0-9a-f]{64}$/);
   assert.ok(matrix.cells.length > 1000);
   assert.equal(
@@ -504,7 +507,7 @@ test("catalog-relative inventory guard rejects whole-scope loss without freezing
       cellFilter: (cell) => cell.backend !== "candle" || cell.modelId === "instantid_realvisxl",
       sourceOverrides: {
         calibrationEvidence: JSON.stringify({
-          schemaVersion: 5,
+          schemaVersion: 6,
           harnessVersion: "sceneworks-memory-v5",
           records: [],
         }),
@@ -4202,14 +4205,13 @@ test("request-peak tier overrides fail closed", async () => {
 const KREA_CONTROL_CELL =
   "krea_2_turbo:krea_2_turbo_control:mlx:q4:text_to_image:control:bounded_decode";
 
-/// The shipped bundle re-stamped onto the current inference pin. Every shipped record is
-/// `historical` — its inference revision predates the pin — so promotion, which is a property of
-/// CURRENT evidence, has to be asserted against a re-stamped fixture rather than the shipped bundle.
+/// The shipped bundle re-stamped onto the current provider compile closure. Promotion, which is a
+/// property of applicable evidence, is asserted against this synthetic fixture rather than relying
+/// on whichever provider closures happen to match the shipped bundle today.
 ///
 /// `select` chooses which records are re-stamped, defaulting to Krea. It exists because the Qwen
-/// rung-4 records ingested by sc-16353 were current at the `8ffa211a` pin and stopped being current
-/// the moment sc-16962 moved it to `d4802320` — the fail-closed rule working as designed, and the
-/// reason the two families are re-stamped separately: the geometry tests below depend on ONLY the
+/// rung-4 records ingested by sc-16353 carry an older provider closure. The two families are
+/// re-stamped separately because the geometry tests below depend on ONLY the
 /// Krea cell moving relative to the shipped matrix, and [`qwenRung4OnCurrentPin`] must move exactly
 /// the two retained q8 cells rather than every Qwen record in the bundle.
 async function currentEvidenceFixture({
@@ -4260,8 +4262,8 @@ async function currentEvidenceFixture({
   return JSON.stringify(parsed);
 }
 
-/// The inverse of [`currentEvidenceFixture`]: the shipped records re-stamped onto a SUPERSEDED
-/// inference revision.
+/// The inverse of [`currentEvidenceFixture`]: the shipped records re-stamped onto a superseded
+/// provider compile closure.
 ///
 /// Before sc-16915 the shipped bundle was entirely historical, so "historical evidence does not
 /// promote" could be asserted by simply reading the shipped matrix. Now that the evidence is
@@ -4617,7 +4619,7 @@ test("current evidence promotes a cell to Verified, and historical evidence does
   assert.equal(
     demotedCell.state,
     "Implemented/unverified",
-    "records re-dated onto a superseded pin must stop verifying their cell",
+    "records carrying a superseded provider closure must stop verifying their cell",
   );
   assert.equal(
     demotedCell.evidence.currentEnvironmentVerification.length,
@@ -4851,11 +4853,10 @@ test("publication keeps every planned, measured, bound and cited coordinate — 
   // narrower than it says.
   //
   // `current evidence` is deliberately NOT in this list. Its population is a function of the live
-  // provider closures, so it is legitimately EMPTY between a pin bump and the re-capture that
-  // follows — the same window the currency derivation documents. Requiring it to be non-empty made
-  // a routine bump red: it fired on a `gen-core` bump that memoized a SHA-256 digest, which cannot
-  // move any model's memory footprint and so cannot invalidate a memory measurement. The arm is
-  // still guarded below, by the invariants that hold whether or not it is empty.
+  // provider closures and may be empty after a real relevant closure change. Requiring it to be
+  // non-empty made an unrelated `gen-core` edit invalidate measurements, which is precisely the
+  // coupling the closure-scoping regression tests forbid. The arm is still guarded below by the
+  // invariants that hold whether or not it is empty.
   for (const [name, arm] of [
     ["planned", (cell) => planned.has(cell.id)],
     ["bound to a record", (cell) => calibrationRunCellIds.has(cell.id)],
@@ -5799,14 +5800,14 @@ test("the universe is modality-aware, and every video entry is IN it (sc-18815)"
     .models.filter((model) => model.type === "video" && !outOfMatrixEntries.has(model.id))
     .map((model) => model.id)
     .sort();
-  assert.equal(manifestVideo.length, 10);
+  assert.equal(manifestVideo.length, 11);
 
   const matrix = await buildMatrix({ publish: false });
   const inMatrix = matrix.models.filter((model) => model.modality === "video").map((model) => model.id);
   assert.deepEqual(inMatrix.sort(), manifestVideo, "every manifest video entry is in the universe");
   assert.equal(matrix.models.filter((model) => model.modality === "image").length, 53);
   assert.equal(matrix.summary.catalogEntries, matrix.models.length);
-  assert.deepEqual(matrix.summary.catalogEntriesByModality, { image: 53, video: 10 });
+  assert.deepEqual(matrix.summary.catalogEntriesByModality, { image: 53, video: 11 });
 
   // Cells exist for every routed video lane, on every rung — the "per-rung coverage rows" the story
   // asks for — and their states are the ordinary vocabulary, not a video-specific one.
@@ -5832,7 +5833,7 @@ test("the universe is modality-aware, and every video entry is IN it (sc-18815)"
 });
 
 test("video providers are per BACKEND, derived from the worker's own route resolvers (sc-18815)", async () => {
-  // LTX is `ltx_2_3` on MLX and `ltx_2_3_distilled` on candle. A single scalar route would be wrong
+  // Each LTX generation has distinct MLX and Candle providers. A single scalar route would be wrong
   // on one backend, and a wrong provider is not cosmetic — it is the key calibration evidence, the
   // calibration plan and the per-provider closure digests all bind on. `mlx:ltx_2_3` is the exact
   // key sc-18808 committed to `config/inference-provider-closures.json`.
@@ -5852,12 +5853,205 @@ test("video providers are per BACKEND, derived from the worker's own route resol
   );
   assert.deepEqual([...providers].sort(), ["candle:ltx_2_3_distilled", "mlx:ltx_2_3"]);
 
+  const ltx25 = matrix.models.find((model) => model.id === "ltx_2_5");
+  assert.equal(ltx25.familyGroup, "ltx-video");
+  assert.deepEqual(ltx25.resolvedRoutes, { mlx: "ltx_2_5", candle: "ltx_2_5_distilled" });
+  const ltx25Providers = new Set(
+    matrix.cells
+      .filter((cell) => cell.modelId === "ltx_2_5")
+      .map((cell) => `${cell.backend}:${cell.provider}`),
+  );
+  assert.deepEqual([...ltx25Providers].sort(), ["candle:ltx_2_5_distilled", "mlx:ltx_2_5"]);
+
   const closures = JSON.parse(
     await readFile(new URL("../config/inference-provider-closures.json", import.meta.url), "utf8"),
   );
+  for (const provider of ["mlx:ltx_2_3", "mlx:ltx_2_5", "candle:ltx_2_5_distilled"]) {
+    assert.ok(
+      closures.providers[provider],
+      `the provider ${provider} that a cell binds on must be named by the closure table`,
+    );
+  }
+});
+
+test("LTX-2.5 selects every routed platform and exposes only its declared memory ladder (sc-18800)", async () => {
+  const matrix = await buildMatrix({ publish: false });
+  const cells = matrix.cells.filter((cell) => cell.modelId === "ltx_2_5");
+
+  assert.equal(cells.length, 360, "2 backends x 3 tiers x 6 modes x 2 overlays x 5 rungs");
+  assert.deepEqual([...new Set(cells.map((cell) => cell.backend))].sort(), ["candle", "mlx"]);
+  assert.deepEqual([...new Set(cells.map((cell) => cell.tier))].sort(), ["bf16", "q4", "q8"]);
+  assert.deepEqual(
+    [...new Set(cells.map((cell) => cell.mode))].sort(),
+    [
+      "extend_clip",
+      "first_last_frame",
+      "image_to_video",
+      "replace_person",
+      "text_to_video",
+      "video_bridge",
+    ],
+  );
+  assert.deepEqual([...new Set(cells.map((cell) => cell.overlay))].sort(), ["lora", "none"]);
+  assert.ok(cells.every((cell) => cell.memoryCharacterization.status === "unmeasured"));
+
+  const plannedPipelines = cells.filter((cell) => cell.plannedPipelineIdentities);
+  assert.equal(plannedPipelines.length, 7, "six MLX tier/rung cells plus one Candle cell are planned");
+  assert.ok(plannedPipelines.every((cell) =>
+    cell.pipelineCharacterizations.length === cell.plannedPipelineIdentities.length
+      && cell.pipelineCharacterizations.every(
+        (entry) => entry.memoryCharacterization.status === "unmeasured",
+      )));
+  const mlxDev = plannedPipelines.filter(
+    (cell) => cell.backend === "mlx" && cell.rung === "bounded_attention",
+  );
+  assert.equal(mlxDev.length, 3);
+  assert.ok(mlxDev.every((cell) => {
+    assert.deepEqual(cell.plannedPipelineIdentities, [
+      { transformerVariant: "dev", decoder: "conv" },
+      { transformerVariant: "dev", decoder: "diffvae" },
+    ]);
+    return !cell.engagedRungs.includes("bounded_decode");
+  }), "the aggregate dev cell publishes only rungs common to conv and DiffVAE");
+  const mlxDistilled = plannedPipelines.filter(
+    (cell) => cell.backend === "mlx" && cell.rung === "bounded_transformer_residency",
+  );
+  assert.equal(mlxDistilled.length, 3);
+  assert.ok(mlxDistilled.every((cell) => {
+    assert.deepEqual(cell.plannedPipelineIdentities, [
+      { transformerVariant: "distilled", decoder: "conv" },
+      { transformerVariant: "distilled", decoder: "diffvae" },
+    ]);
+    return !cell.engagedRungs.includes("bounded_decode");
+  }), "the aggregate distilled cell publishes only rungs common to conv and DiffVAE");
+  assert.deepEqual(
+    plannedPipelines.find((cell) => cell.backend === "candle").plannedPipelineIdentities,
+    [{ transformerVariant: "distilled", decoder: "conv" }],
+  );
+
+  const assertUniformState = (backend, rung, overlay, expected, tiers = ["bf16", "q4", "q8"]) => {
+    const selected = cells.filter(
+      (cell) => cell.backend === backend && cell.rung === rung && cell.overlay === overlay &&
+        tiers.includes(cell.tier),
+    );
+    assert.equal(selected.length, tiers.length * 6, `${backend}:${rung}:${overlay} must cover the selected tiers and every mode`);
+    assert.deepEqual([...new Set(selected.map((cell) => cell.state))], [expected]);
+  };
+
+  for (const overlay of ["none", "lora"]) {
+    assertUniformState("mlx", "bounded_decode", overlay, "Implemented/unverified");
+    assertUniformState("mlx", "bounded_attention", overlay, "Implemented/unverified");
+    assertUniformState("candle", "staged_residency", overlay, "Missing");
+    // q8 is a first-class Candle tier: the Candle ladder is uniform across bf16/q4/q8, symmetric
+    // with MLX above, with no tier carved out.
+    assertUniformState("candle", "bounded_decode", overlay, "Implemented/unverified");
+    assertUniformState("candle", "bounded_attention", overlay, "Implemented/unverified");
+  }
+  assertUniformState("mlx", "bounded_transformer_residency", "none", "Implemented/unverified");
+  assertUniformState("mlx", "bounded_transformer_residency", "lora", "Missing");
+  assertUniformState("candle", "bounded_transformer_residency", "none", "Implemented/unverified");
+  assertUniformState("candle", "bounded_transformer_residency", "lora", "Missing");
+});
+
+test("pipeline identities cannot verify or fit one another by aggregation", () => {
+  const identities = [
+    { transformerVariant: "distilled", decoder: "conv" },
+    { transformerVariant: "distilled", decoder: "diffvae" },
+  ];
+  const record = (decoder, width, height, frames) => ({
+    target: {
+      transformerVariant: "distilled",
+      decoder,
+      geometry: { width, height, frames, batch: 1 },
+    },
+  });
+  const convOnly = [record("conv", 768, 512, 145)];
+  assert.equal(recordsCoverEveryPipelineIdentity(convOnly, identities), false);
+
+  const mixed = [
+    ...convOnly,
+    record("conv", 1280, 704, 145),
+    record("diffvae", 1920, 1080, 449),
+  ];
+  assert.equal(
+    memoryCharacterization(
+      mixed.map((entry) => measuredGeometryKey(entry.target.geometry)),
+      { declaresTemporalCurve: true },
+    ).status,
+    "fitted",
+    "the old aggregate would combine crossed pipelines into a fitted surface",
+  );
+  assert.deepEqual(
+    pipelineMemoryCharacterizations(mixed, identities, { declaresTemporalCurve: true })
+      .map((entry) => [entry.decoder, entry.memoryCharacterization.status]),
+    [["conv", "point"], ["diffvae", "point"]],
+  );
+  assert.equal(recordsCoverEveryPipelineIdentity(mixed, identities), true);
+});
+
+test("LTX-2.5 evidence binds to its exact pipeline plan rather than the aggregate cell", () => {
+  const entry = {
+    backend: "mlx",
+    loadShape: "deferred_materialization",
+    target: {
+      modelId: "ltx_2_5",
+      provider: "ltx_2_5",
+      tier: "q4",
+      mode: "text_to_video",
+      overlay: "none",
+      transformerVariant: "distilled",
+      decoder: "conv",
+      geometry: { width: 768, height: 512, batch: 1, frames: 145 },
+    },
+    rung: "bounded_transformer_residency",
+    engagedRungs: [
+      "resident",
+      "staged_residency",
+      "bounded_decode",
+      "bounded_attention",
+      "bounded_transformer_residency",
+    ],
+    calibrationFingerprint: "ltx-test-v1",
+    cases: [{
+      expectedResult: "passed",
+      parameters: {
+        decodeTileEdge: 192,
+        decodeOverlap: 64,
+        attentionChunkSize: 16777216,
+        transformerWindowSize: 1,
+        transformerWindowComponent: "dit",
+      },
+    }],
+  };
+  const record = {
+    status: "complete",
+    backend: "mlx",
+    loadShape: entry.loadShape,
+    target: structuredClone(entry.target),
+    strategy: { rung: entry.rung, engagedRungs: entry.engagedRungs, parameters: entry.cases[0].parameters },
+    calibrationFingerprint: entry.calibrationFingerprint,
+    quality: { result: "passed" },
+    sweep: { rangeVerified: true },
+    artifact: { repository: "SceneWorks/ltx-2.5-mlx", resolvedRevision: "abc", variant: "q4" },
+    loadability: { result: "passed", resolvedPathFingerprint: "sha256:path" },
+  };
+  const aggregateCell = {
+    calibrationFingerprint: entry.calibrationFingerprint,
+    engagedRungs: ["resident", "staged_residency", "bounded_attention", "bounded_transformer_residency"],
+    strategyParameters: { attentionChunkSize: 16777216, transformerWindowSize: 1, transformerWindowComponent: "Dit" },
+    geometryEnvelope: { resolutions: ["768x512"], durations: [6], fps: [24] },
+    evidence: { loadability: [{ repository: record.artifact.repository, revision: "abc", variant: "q4" }] },
+  };
+
+  assert.deepEqual(
+    calibrationBinding(record, aggregateCell, { exactPlanEntries: [entry], modality: "video" }),
+    { eligible: true, reasons: [] },
+  );
+  const wrongParameters = structuredClone(record);
+  wrongParameters.strategy.parameters.decodeTileEdge = 256;
   assert.ok(
-    closures.providers["mlx:ltx_2_3"],
-    "the provider a cell binds on must be the one the closure table already names",
+    calibrationBinding(wrongParameters, aggregateCell, { exactPlanEntries: [entry], modality: "video" })
+      .reasons.includes("strategy-parameters-mismatch"),
   );
 });
 
@@ -5997,37 +6191,45 @@ test("MiniMax-H3 Candle dispatch exposes the authorized base and Ref2VA routes",
   );
 });
 
-test("a routed backend with no *_engine_id arm fails HERE, naming the resolver (sc-18815)", async () => {
-  // The review mutation. Deleting `ltx_2_3` from `ltx_engine_id`'s arm used to let generation SUCCEED:
-  // `resolvedRoutes.mlx` went `null`, the scalar fell back to `video.mlx ?? video.candle`, and all 180
-  // MLX cells were stamped `ltx_2_3_distilled` — CANDLE's provider on an MLX cell, which is the exact
-  // substitution this resolver exists to prevent. The only thing that noticed was JSON-schema
-  // validation two lanes downstream, reporting `None is not of type 'string'` and naming neither the
-  // resolver nor the cause. It has to fail at the resolver, with the owing function named.
+test("a routed backend with no *_engine_id arm fails HERE, naming the resolver (sc-18815, sc-18801)", async () => {
+  // The review mutation. Deleting the new LTX-2.5 identity from `ltx_engine_id` used to let
+  // generation SUCCEED: `resolvedRoutes.mlx` went `null`, the scalar fell back to
+  // `video.mlx ?? video.candle`, and MLX cells were stamped with CANDLE's provider. This multi-record
+  // fixture proves each exact arm is independently required rather than accepting a blanket LTX
+  // mapping. It has to fail at the resolver, with the owning function named.
   const ltx = await readFile(new URL(`../${SOURCE_PATHS.videoRouteLtx}`, import.meta.url), "utf8");
-  const withoutMlxArm = ltx.replace(
-    'matches!(model, "ltx_2_3" | "ltx_2_3_eros")',
-    'matches!(model, "ltx_2_3_eros")',
-  );
-  assert.notEqual(withoutMlxArm, ltx, "the mutation must actually change ltx.rs");
-
-  await assert.rejects(
-    () => buildMatrix({ publish: false, sourceOverrides: { videoRouteLtx: withoutMlxArm } }),
-    /ltx_2_3: the routing catalog routes mlx, but no mlx provider resolved — expected an arm in ltx_engine_id/,
-  );
-
-  // The named resolver is per BACKEND, not one generic complaint: the same entry losing its candle
-  // arm must point at `candle_video_engine_id` instead.
   const candle = await readFile(new URL(`../${SOURCE_PATHS.videoRouteCandle}`, import.meta.url), "utf8");
-  const withoutCandleArm = candle.replace(
-    '"ltx_2_3" => Some("ltx_2_3_distilled")',
-    '"ltx_2_3_missing" => Some("ltx_2_3_distilled")',
-  );
-  assert.notEqual(withoutCandleArm, candle, "the mutation must actually change candle.rs");
-  await assert.rejects(
-    () => buildMatrix({ publish: false, sourceOverrides: { videoRouteCandle: withoutCandleArm } }),
-    /ltx_2_3: the routing catalog routes candle, but no candle provider resolved — expected an arm in candle_video_engine_id/,
-  );
+  const routeMutations = [
+    {
+      model: "ltx_2_5",
+      mlxFrom: '"ltx_2_5" => Some("ltx_2_5")',
+      mlxTo: '"ltx_2_5_missing" => Some("ltx_2_5")',
+      candleFrom: '"ltx_2_5" => Some("ltx_2_5_distilled")',
+      candleTo: '"ltx_2_5_missing" => Some("ltx_2_5_distilled")',
+    },
+  ];
+
+  for (const mutation of routeMutations) {
+    const withoutMlxArm = ltx.replace(mutation.mlxFrom, mutation.mlxTo);
+    assert.notEqual(withoutMlxArm, ltx, `${mutation.model}: mutation must change ltx.rs`);
+    await assert.rejects(
+      () => buildMatrix({ publish: false, sourceOverrides: { videoRouteLtx: withoutMlxArm } }),
+      new RegExp(
+        `${mutation.model}: the routing catalog routes mlx, but no mlx provider resolved — expected an arm in ltx_engine_id`,
+      ),
+    );
+
+    // The named resolver is per BACKEND, not one generic complaint: losing the Candle arm must
+    // point at `candle_video_engine_id` rather than hiding behind the surviving MLX declaration.
+    const withoutCandleArm = candle.replace(mutation.candleFrom, mutation.candleTo);
+    assert.notEqual(withoutCandleArm, candle, `${mutation.model}: mutation must change candle.rs`);
+    await assert.rejects(
+      () => buildMatrix({ publish: false, sourceOverrides: { videoRouteCandle: withoutCandleArm } }),
+      new RegExp(
+        `${mutation.model}: the routing catalog routes candle, but no candle provider resolved — expected an arm in candle_video_engine_id`,
+      ),
+    );
+  }
 });
 
 test("the union-only MLX fallback is an allowlist, not a shape (sc-18815)", async () => {
@@ -6143,7 +6345,7 @@ test("video cells name no per-entry story, and their family owner is the real on
   // SC-15812's defect reached from the other direction, so it is checked with the same force.
   const matrix = await buildMatrix({ publish: false });
   const video = matrix.models.filter((model) => model.modality === "video");
-  assert.ok(video.length === 10);
+  assert.equal(video.length, 11);
   for (const model of video) {
     for (const backend of model.backends) {
       assert.equal(model.owningModelStories[backend], null);

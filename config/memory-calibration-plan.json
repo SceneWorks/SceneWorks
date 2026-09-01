@@ -9070,6 +9070,3408 @@
           "expectedResult": "passed"
         }
       ]
+    },
+    {
+      "name": "mlx-ltx-2-5-q4-distilled-conv-bounded_transformer_residency-768x512-f145",
+      "evidenceScope": "authoritative",
+      "backend": "mlx",
+      "loadShape": "deferred_materialization",
+      "target": {
+        "provider": "ltx_2_5",
+        "modelId": "ltx_2_5",
+        "tier": "q4",
+        "mode": "text_to_video",
+        "overlay": "none",
+        "transformerVariant": "distilled",
+        "decoder": "conv",
+        "geometry": {
+          "width": 768,
+          "height": 512,
+          "batch": 1,
+          "frames": 145
+        }
+      },
+      "rung": "bounded_transformer_residency",
+      "engagedRungs": [
+        "resident",
+        "staged_residency",
+        "bounded_decode",
+        "bounded_attention",
+        "bounded_transformer_residency"
+      ],
+      "calibrationFingerprint": "sc-18797-ltx-2-5-mlx-ladder-v1",
+      "fixture": "ltx-2-5-mlx-q4-distilled-conv-768x512-f145-fps24-seed18755",
+      "cases": [
+        {
+          "parameters": {
+            "decodeTileEdge": 192,
+            "decodeOverlap": 64,
+            "attentionChunkSize": 16777216,
+            "transformerWindowSize": 1,
+            "transformerWindowComponent": "dit"
+          },
+          "expectedResult": "passed"
+        }
+      ]
+    },
+    {
+      "name": "mlx-ltx-2-5-q4-distilled-conv-bounded_transformer_residency-512x768-f145",
+      "evidenceScope": "authoritative",
+      "backend": "mlx",
+      "loadShape": "deferred_materialization",
+      "target": {
+        "provider": "ltx_2_5",
+        "modelId": "ltx_2_5",
+        "tier": "q4",
+        "mode": "text_to_video",
+        "overlay": "none",
+        "transformerVariant": "distilled",
+        "decoder": "conv",
+        "geometry": {
+          "width": 512,
+          "height": 768,
+          "batch": 1,
+          "frames": 145
+        }
+      },
+      "rung": "bounded_transformer_residency",
+      "engagedRungs": [
+        "resident",
+        "staged_residency",
+        "bounded_decode",
+        "bounded_attention",
+        "bounded_transformer_residency"
+      ],
+      "calibrationFingerprint": "sc-18797-ltx-2-5-mlx-ladder-v1",
+      "fixture": "ltx-2-5-mlx-q4-distilled-conv-512x768-f145-fps24-seed18755",
+      "cases": [
+        {
+          "parameters": {
+            "decodeTileEdge": 192,
+            "decodeOverlap": 64,
+            "attentionChunkSize": 16777216,
+            "transformerWindowSize": 1,
+            "transformerWindowComponent": "dit"
+          },
+          "expectedResult": "passed"
+        }
+      ]
+    },
+    {
+      "name": "mlx-ltx-2-5-q4-distilled-conv-bounded_transformer_residency-640x640-f145",
+      "evidenceScope": "authoritative",
+      "backend": "mlx",
+      "loadShape": "deferred_materialization",
+      "target": {
+        "provider": "ltx_2_5",
+        "modelId": "ltx_2_5",
+        "tier": "q4",
+        "mode": "text_to_video",
+        "overlay": "none",
+        "transformerVariant": "distilled",
+        "decoder": "conv",
+        "geometry": {
+          "width": 640,
+          "height": 640,
+          "batch": 1,
+          "frames": 145
+        }
+      },
+      "rung": "bounded_transformer_residency",
+      "engagedRungs": [
+        "resident",
+        "staged_residency",
+        "bounded_decode",
+        "bounded_attention",
+        "bounded_transformer_residency"
+      ],
+      "calibrationFingerprint": "sc-18797-ltx-2-5-mlx-ladder-v1",
+      "fixture": "ltx-2-5-mlx-q4-distilled-conv-640x640-f145-fps24-seed18755",
+      "cases": [
+        {
+          "parameters": {
+            "decodeTileEdge": 192,
+            "decodeOverlap": 64,
+            "attentionChunkSize": 16777216,
+            "transformerWindowSize": 1,
+            "transformerWindowComponent": "dit"
+          },
+          "expectedResult": "passed"
+        }
+      ]
+    },
+    {
+      "name": "mlx-ltx-2-5-q4-distilled-conv-bounded_transformer_residency-1280x704-f145",
+      "evidenceScope": "authoritative",
+      "backend": "mlx",
+      "loadShape": "deferred_materialization",
+      "target": {
+        "provider": "ltx_2_5",
+        "modelId": "ltx_2_5",
+        "tier": "q4",
+        "mode": "text_to_video",
+        "overlay": "none",
+        "transformerVariant": "distilled",
+        "decoder": "conv",
+        "geometry": {
+          "width": 1280,
+          "height": 704,
+          "batch": 1,
+          "frames": 145
+        }
+      },
+      "rung": "bounded_transformer_residency",
+      "engagedRungs": [
+        "resident",
+        "staged_residency",
+        "bounded_decode",
+        "bounded_attention",
+        "bounded_transformer_residency"
+      ],
+      "calibrationFingerprint": "sc-18797-ltx-2-5-mlx-ladder-v1",
+      "fixture": "ltx-2-5-mlx-q4-distilled-conv-1280x704-f145-fps24-seed18755",
+      "cases": [
+        {
+          "parameters": {
+            "decodeTileEdge": 192,
+            "decodeOverlap": 64,
+            "attentionChunkSize": 16777216,
+            "transformerWindowSize": 1,
+            "transformerWindowComponent": "dit"
+          },
+          "expectedResult": "passed"
+        }
+      ]
+    },
+    {
+      "name": "mlx-ltx-2-5-q4-distilled-conv-bounded_transformer_residency-704x1280-f145",
+      "evidenceScope": "authoritative",
+      "backend": "mlx",
+      "loadShape": "deferred_materialization",
+      "target": {
+        "provider": "ltx_2_5",
+        "modelId": "ltx_2_5",
+        "tier": "q4",
+        "mode": "text_to_video",
+        "overlay": "none",
+        "transformerVariant": "distilled",
+        "decoder": "conv",
+        "geometry": {
+          "width": 704,
+          "height": 1280,
+          "batch": 1,
+          "frames": 145
+        }
+      },
+      "rung": "bounded_transformer_residency",
+      "engagedRungs": [
+        "resident",
+        "staged_residency",
+        "bounded_decode",
+        "bounded_attention",
+        "bounded_transformer_residency"
+      ],
+      "calibrationFingerprint": "sc-18797-ltx-2-5-mlx-ladder-v1",
+      "fixture": "ltx-2-5-mlx-q4-distilled-conv-704x1280-f145-fps24-seed18755",
+      "cases": [
+        {
+          "parameters": {
+            "decodeTileEdge": 192,
+            "decodeOverlap": 64,
+            "attentionChunkSize": 16777216,
+            "transformerWindowSize": 1,
+            "transformerWindowComponent": "dit"
+          },
+          "expectedResult": "passed"
+        }
+      ]
+    },
+    {
+      "name": "mlx-ltx-2-5-q4-distilled-conv-bounded_transformer_residency-1280x704-f449",
+      "evidenceScope": "authoritative",
+      "backend": "mlx",
+      "loadShape": "deferred_materialization",
+      "target": {
+        "provider": "ltx_2_5",
+        "modelId": "ltx_2_5",
+        "tier": "q4",
+        "mode": "text_to_video",
+        "overlay": "none",
+        "transformerVariant": "distilled",
+        "decoder": "conv",
+        "geometry": {
+          "width": 1280,
+          "height": 704,
+          "batch": 1,
+          "frames": 449
+        }
+      },
+      "rung": "bounded_transformer_residency",
+      "engagedRungs": [
+        "resident",
+        "staged_residency",
+        "bounded_decode",
+        "bounded_attention",
+        "bounded_transformer_residency"
+      ],
+      "calibrationFingerprint": "sc-18797-ltx-2-5-mlx-ladder-v1",
+      "fixture": "ltx-2-5-mlx-q4-distilled-conv-1280x704-f449-fps30-seed18755",
+      "cases": [
+        {
+          "parameters": {
+            "decodeTileEdge": 192,
+            "decodeOverlap": 64,
+            "attentionChunkSize": 16777216,
+            "transformerWindowSize": 1,
+            "transformerWindowComponent": "dit"
+          },
+          "expectedResult": "passed"
+        }
+      ]
+    },
+    {
+      "name": "mlx-ltx-2-5-q4-distilled-conv-bounded_transformer_residency-704x1280-f449",
+      "evidenceScope": "authoritative",
+      "backend": "mlx",
+      "loadShape": "deferred_materialization",
+      "target": {
+        "provider": "ltx_2_5",
+        "modelId": "ltx_2_5",
+        "tier": "q4",
+        "mode": "text_to_video",
+        "overlay": "none",
+        "transformerVariant": "distilled",
+        "decoder": "conv",
+        "geometry": {
+          "width": 704,
+          "height": 1280,
+          "batch": 1,
+          "frames": 449
+        }
+      },
+      "rung": "bounded_transformer_residency",
+      "engagedRungs": [
+        "resident",
+        "staged_residency",
+        "bounded_decode",
+        "bounded_attention",
+        "bounded_transformer_residency"
+      ],
+      "calibrationFingerprint": "sc-18797-ltx-2-5-mlx-ladder-v1",
+      "fixture": "ltx-2-5-mlx-q4-distilled-conv-704x1280-f449-fps30-seed18755",
+      "cases": [
+        {
+          "parameters": {
+            "decodeTileEdge": 192,
+            "decodeOverlap": 64,
+            "attentionChunkSize": 16777216,
+            "transformerWindowSize": 1,
+            "transformerWindowComponent": "dit"
+          },
+          "expectedResult": "passed"
+        }
+      ]
+    },
+    {
+      "name": "mlx-ltx-2-5-q4-distilled-diffvae-bounded_transformer_residency-768x512-f145",
+      "evidenceScope": "authoritative",
+      "backend": "mlx",
+      "loadShape": "deferred_materialization",
+      "target": {
+        "provider": "ltx_2_5",
+        "modelId": "ltx_2_5",
+        "tier": "q4",
+        "mode": "text_to_video",
+        "overlay": "none",
+        "transformerVariant": "distilled",
+        "decoder": "diffvae",
+        "geometry": {
+          "width": 768,
+          "height": 512,
+          "batch": 1,
+          "frames": 145
+        }
+      },
+      "rung": "bounded_transformer_residency",
+      "engagedRungs": [
+        "resident",
+        "staged_residency",
+        "bounded_attention",
+        "bounded_transformer_residency"
+      ],
+      "calibrationFingerprint": "sc-18797-ltx-2-5-mlx-ladder-v1",
+      "fixture": "ltx-2-5-mlx-q4-distilled-diffvae-768x512-f145-fps24-seed18755",
+      "cases": [
+        {
+          "parameters": {
+            "attentionChunkSize": 16777216,
+            "transformerWindowSize": 1,
+            "transformerWindowComponent": "dit"
+          },
+          "expectedResult": "passed"
+        }
+      ]
+    },
+    {
+      "name": "mlx-ltx-2-5-q4-distilled-diffvae-bounded_transformer_residency-512x768-f145",
+      "evidenceScope": "authoritative",
+      "backend": "mlx",
+      "loadShape": "deferred_materialization",
+      "target": {
+        "provider": "ltx_2_5",
+        "modelId": "ltx_2_5",
+        "tier": "q4",
+        "mode": "text_to_video",
+        "overlay": "none",
+        "transformerVariant": "distilled",
+        "decoder": "diffvae",
+        "geometry": {
+          "width": 512,
+          "height": 768,
+          "batch": 1,
+          "frames": 145
+        }
+      },
+      "rung": "bounded_transformer_residency",
+      "engagedRungs": [
+        "resident",
+        "staged_residency",
+        "bounded_attention",
+        "bounded_transformer_residency"
+      ],
+      "calibrationFingerprint": "sc-18797-ltx-2-5-mlx-ladder-v1",
+      "fixture": "ltx-2-5-mlx-q4-distilled-diffvae-512x768-f145-fps24-seed18755",
+      "cases": [
+        {
+          "parameters": {
+            "attentionChunkSize": 16777216,
+            "transformerWindowSize": 1,
+            "transformerWindowComponent": "dit"
+          },
+          "expectedResult": "passed"
+        }
+      ]
+    },
+    {
+      "name": "mlx-ltx-2-5-q4-distilled-diffvae-bounded_transformer_residency-640x640-f145",
+      "evidenceScope": "authoritative",
+      "backend": "mlx",
+      "loadShape": "deferred_materialization",
+      "target": {
+        "provider": "ltx_2_5",
+        "modelId": "ltx_2_5",
+        "tier": "q4",
+        "mode": "text_to_video",
+        "overlay": "none",
+        "transformerVariant": "distilled",
+        "decoder": "diffvae",
+        "geometry": {
+          "width": 640,
+          "height": 640,
+          "batch": 1,
+          "frames": 145
+        }
+      },
+      "rung": "bounded_transformer_residency",
+      "engagedRungs": [
+        "resident",
+        "staged_residency",
+        "bounded_attention",
+        "bounded_transformer_residency"
+      ],
+      "calibrationFingerprint": "sc-18797-ltx-2-5-mlx-ladder-v1",
+      "fixture": "ltx-2-5-mlx-q4-distilled-diffvae-640x640-f145-fps24-seed18755",
+      "cases": [
+        {
+          "parameters": {
+            "attentionChunkSize": 16777216,
+            "transformerWindowSize": 1,
+            "transformerWindowComponent": "dit"
+          },
+          "expectedResult": "passed"
+        }
+      ]
+    },
+    {
+      "name": "mlx-ltx-2-5-q4-distilled-diffvae-bounded_transformer_residency-1280x704-f145",
+      "evidenceScope": "authoritative",
+      "backend": "mlx",
+      "loadShape": "deferred_materialization",
+      "target": {
+        "provider": "ltx_2_5",
+        "modelId": "ltx_2_5",
+        "tier": "q4",
+        "mode": "text_to_video",
+        "overlay": "none",
+        "transformerVariant": "distilled",
+        "decoder": "diffvae",
+        "geometry": {
+          "width": 1280,
+          "height": 704,
+          "batch": 1,
+          "frames": 145
+        }
+      },
+      "rung": "bounded_transformer_residency",
+      "engagedRungs": [
+        "resident",
+        "staged_residency",
+        "bounded_attention",
+        "bounded_transformer_residency"
+      ],
+      "calibrationFingerprint": "sc-18797-ltx-2-5-mlx-ladder-v1",
+      "fixture": "ltx-2-5-mlx-q4-distilled-diffvae-1280x704-f145-fps24-seed18755",
+      "cases": [
+        {
+          "parameters": {
+            "attentionChunkSize": 16777216,
+            "transformerWindowSize": 1,
+            "transformerWindowComponent": "dit"
+          },
+          "expectedResult": "passed"
+        }
+      ]
+    },
+    {
+      "name": "mlx-ltx-2-5-q4-distilled-diffvae-bounded_transformer_residency-704x1280-f145",
+      "evidenceScope": "authoritative",
+      "backend": "mlx",
+      "loadShape": "deferred_materialization",
+      "target": {
+        "provider": "ltx_2_5",
+        "modelId": "ltx_2_5",
+        "tier": "q4",
+        "mode": "text_to_video",
+        "overlay": "none",
+        "transformerVariant": "distilled",
+        "decoder": "diffvae",
+        "geometry": {
+          "width": 704,
+          "height": 1280,
+          "batch": 1,
+          "frames": 145
+        }
+      },
+      "rung": "bounded_transformer_residency",
+      "engagedRungs": [
+        "resident",
+        "staged_residency",
+        "bounded_attention",
+        "bounded_transformer_residency"
+      ],
+      "calibrationFingerprint": "sc-18797-ltx-2-5-mlx-ladder-v1",
+      "fixture": "ltx-2-5-mlx-q4-distilled-diffvae-704x1280-f145-fps24-seed18755",
+      "cases": [
+        {
+          "parameters": {
+            "attentionChunkSize": 16777216,
+            "transformerWindowSize": 1,
+            "transformerWindowComponent": "dit"
+          },
+          "expectedResult": "passed"
+        }
+      ]
+    },
+    {
+      "name": "mlx-ltx-2-5-q4-distilled-diffvae-bounded_transformer_residency-1280x704-f449",
+      "evidenceScope": "authoritative",
+      "backend": "mlx",
+      "loadShape": "deferred_materialization",
+      "target": {
+        "provider": "ltx_2_5",
+        "modelId": "ltx_2_5",
+        "tier": "q4",
+        "mode": "text_to_video",
+        "overlay": "none",
+        "transformerVariant": "distilled",
+        "decoder": "diffvae",
+        "geometry": {
+          "width": 1280,
+          "height": 704,
+          "batch": 1,
+          "frames": 449
+        }
+      },
+      "rung": "bounded_transformer_residency",
+      "engagedRungs": [
+        "resident",
+        "staged_residency",
+        "bounded_attention",
+        "bounded_transformer_residency"
+      ],
+      "calibrationFingerprint": "sc-18797-ltx-2-5-mlx-ladder-v1",
+      "fixture": "ltx-2-5-mlx-q4-distilled-diffvae-1280x704-f449-fps30-seed18755",
+      "cases": [
+        {
+          "parameters": {
+            "attentionChunkSize": 16777216,
+            "transformerWindowSize": 1,
+            "transformerWindowComponent": "dit"
+          },
+          "expectedResult": "passed"
+        }
+      ]
+    },
+    {
+      "name": "mlx-ltx-2-5-q4-distilled-diffvae-bounded_transformer_residency-704x1280-f449",
+      "evidenceScope": "authoritative",
+      "backend": "mlx",
+      "loadShape": "deferred_materialization",
+      "target": {
+        "provider": "ltx_2_5",
+        "modelId": "ltx_2_5",
+        "tier": "q4",
+        "mode": "text_to_video",
+        "overlay": "none",
+        "transformerVariant": "distilled",
+        "decoder": "diffvae",
+        "geometry": {
+          "width": 704,
+          "height": 1280,
+          "batch": 1,
+          "frames": 449
+        }
+      },
+      "rung": "bounded_transformer_residency",
+      "engagedRungs": [
+        "resident",
+        "staged_residency",
+        "bounded_attention",
+        "bounded_transformer_residency"
+      ],
+      "calibrationFingerprint": "sc-18797-ltx-2-5-mlx-ladder-v1",
+      "fixture": "ltx-2-5-mlx-q4-distilled-diffvae-704x1280-f449-fps30-seed18755",
+      "cases": [
+        {
+          "parameters": {
+            "attentionChunkSize": 16777216,
+            "transformerWindowSize": 1,
+            "transformerWindowComponent": "dit"
+          },
+          "expectedResult": "passed"
+        }
+      ]
+    },
+    {
+      "name": "mlx-ltx-2-5-q4-dev-conv-bounded_attention-768x512-f145",
+      "evidenceScope": "authoritative",
+      "backend": "mlx",
+      "loadShape": "eager_materialization",
+      "target": {
+        "provider": "ltx_2_5",
+        "modelId": "ltx_2_5",
+        "tier": "q4",
+        "mode": "text_to_video",
+        "overlay": "none",
+        "transformerVariant": "dev",
+        "decoder": "conv",
+        "geometry": {
+          "width": 768,
+          "height": 512,
+          "batch": 1,
+          "frames": 145
+        }
+      },
+      "rung": "bounded_attention",
+      "engagedRungs": [
+        "resident",
+        "staged_residency",
+        "bounded_decode",
+        "bounded_attention"
+      ],
+      "calibrationFingerprint": "sc-18797-ltx-2-5-mlx-ladder-v1",
+      "fixture": "ltx-2-5-mlx-q4-dev-conv-768x512-f145-fps24-seed18755",
+      "cases": [
+        {
+          "parameters": {
+            "decodeTileEdge": 192,
+            "decodeOverlap": 64,
+            "attentionChunkSize": 16777216
+          },
+          "expectedResult": "passed"
+        }
+      ]
+    },
+    {
+      "name": "mlx-ltx-2-5-q4-dev-conv-bounded_attention-512x768-f145",
+      "evidenceScope": "authoritative",
+      "backend": "mlx",
+      "loadShape": "eager_materialization",
+      "target": {
+        "provider": "ltx_2_5",
+        "modelId": "ltx_2_5",
+        "tier": "q4",
+        "mode": "text_to_video",
+        "overlay": "none",
+        "transformerVariant": "dev",
+        "decoder": "conv",
+        "geometry": {
+          "width": 512,
+          "height": 768,
+          "batch": 1,
+          "frames": 145
+        }
+      },
+      "rung": "bounded_attention",
+      "engagedRungs": [
+        "resident",
+        "staged_residency",
+        "bounded_decode",
+        "bounded_attention"
+      ],
+      "calibrationFingerprint": "sc-18797-ltx-2-5-mlx-ladder-v1",
+      "fixture": "ltx-2-5-mlx-q4-dev-conv-512x768-f145-fps24-seed18755",
+      "cases": [
+        {
+          "parameters": {
+            "decodeTileEdge": 192,
+            "decodeOverlap": 64,
+            "attentionChunkSize": 16777216
+          },
+          "expectedResult": "passed"
+        }
+      ]
+    },
+    {
+      "name": "mlx-ltx-2-5-q4-dev-conv-bounded_attention-640x640-f145",
+      "evidenceScope": "authoritative",
+      "backend": "mlx",
+      "loadShape": "eager_materialization",
+      "target": {
+        "provider": "ltx_2_5",
+        "modelId": "ltx_2_5",
+        "tier": "q4",
+        "mode": "text_to_video",
+        "overlay": "none",
+        "transformerVariant": "dev",
+        "decoder": "conv",
+        "geometry": {
+          "width": 640,
+          "height": 640,
+          "batch": 1,
+          "frames": 145
+        }
+      },
+      "rung": "bounded_attention",
+      "engagedRungs": [
+        "resident",
+        "staged_residency",
+        "bounded_decode",
+        "bounded_attention"
+      ],
+      "calibrationFingerprint": "sc-18797-ltx-2-5-mlx-ladder-v1",
+      "fixture": "ltx-2-5-mlx-q4-dev-conv-640x640-f145-fps24-seed18755",
+      "cases": [
+        {
+          "parameters": {
+            "decodeTileEdge": 192,
+            "decodeOverlap": 64,
+            "attentionChunkSize": 16777216
+          },
+          "expectedResult": "passed"
+        }
+      ]
+    },
+    {
+      "name": "mlx-ltx-2-5-q4-dev-conv-bounded_attention-1280x704-f145",
+      "evidenceScope": "authoritative",
+      "backend": "mlx",
+      "loadShape": "eager_materialization",
+      "target": {
+        "provider": "ltx_2_5",
+        "modelId": "ltx_2_5",
+        "tier": "q4",
+        "mode": "text_to_video",
+        "overlay": "none",
+        "transformerVariant": "dev",
+        "decoder": "conv",
+        "geometry": {
+          "width": 1280,
+          "height": 704,
+          "batch": 1,
+          "frames": 145
+        }
+      },
+      "rung": "bounded_attention",
+      "engagedRungs": [
+        "resident",
+        "staged_residency",
+        "bounded_decode",
+        "bounded_attention"
+      ],
+      "calibrationFingerprint": "sc-18797-ltx-2-5-mlx-ladder-v1",
+      "fixture": "ltx-2-5-mlx-q4-dev-conv-1280x704-f145-fps24-seed18755",
+      "cases": [
+        {
+          "parameters": {
+            "decodeTileEdge": 192,
+            "decodeOverlap": 64,
+            "attentionChunkSize": 16777216
+          },
+          "expectedResult": "passed"
+        }
+      ]
+    },
+    {
+      "name": "mlx-ltx-2-5-q4-dev-conv-bounded_attention-704x1280-f145",
+      "evidenceScope": "authoritative",
+      "backend": "mlx",
+      "loadShape": "eager_materialization",
+      "target": {
+        "provider": "ltx_2_5",
+        "modelId": "ltx_2_5",
+        "tier": "q4",
+        "mode": "text_to_video",
+        "overlay": "none",
+        "transformerVariant": "dev",
+        "decoder": "conv",
+        "geometry": {
+          "width": 704,
+          "height": 1280,
+          "batch": 1,
+          "frames": 145
+        }
+      },
+      "rung": "bounded_attention",
+      "engagedRungs": [
+        "resident",
+        "staged_residency",
+        "bounded_decode",
+        "bounded_attention"
+      ],
+      "calibrationFingerprint": "sc-18797-ltx-2-5-mlx-ladder-v1",
+      "fixture": "ltx-2-5-mlx-q4-dev-conv-704x1280-f145-fps24-seed18755",
+      "cases": [
+        {
+          "parameters": {
+            "decodeTileEdge": 192,
+            "decodeOverlap": 64,
+            "attentionChunkSize": 16777216
+          },
+          "expectedResult": "passed"
+        }
+      ]
+    },
+    {
+      "name": "mlx-ltx-2-5-q4-dev-conv-bounded_attention-1280x704-f449",
+      "evidenceScope": "authoritative",
+      "backend": "mlx",
+      "loadShape": "eager_materialization",
+      "target": {
+        "provider": "ltx_2_5",
+        "modelId": "ltx_2_5",
+        "tier": "q4",
+        "mode": "text_to_video",
+        "overlay": "none",
+        "transformerVariant": "dev",
+        "decoder": "conv",
+        "geometry": {
+          "width": 1280,
+          "height": 704,
+          "batch": 1,
+          "frames": 449
+        }
+      },
+      "rung": "bounded_attention",
+      "engagedRungs": [
+        "resident",
+        "staged_residency",
+        "bounded_decode",
+        "bounded_attention"
+      ],
+      "calibrationFingerprint": "sc-18797-ltx-2-5-mlx-ladder-v1",
+      "fixture": "ltx-2-5-mlx-q4-dev-conv-1280x704-f449-fps30-seed18755",
+      "cases": [
+        {
+          "parameters": {
+            "decodeTileEdge": 192,
+            "decodeOverlap": 64,
+            "attentionChunkSize": 16777216
+          },
+          "expectedResult": "passed"
+        }
+      ]
+    },
+    {
+      "name": "mlx-ltx-2-5-q4-dev-conv-bounded_attention-704x1280-f449",
+      "evidenceScope": "authoritative",
+      "backend": "mlx",
+      "loadShape": "eager_materialization",
+      "target": {
+        "provider": "ltx_2_5",
+        "modelId": "ltx_2_5",
+        "tier": "q4",
+        "mode": "text_to_video",
+        "overlay": "none",
+        "transformerVariant": "dev",
+        "decoder": "conv",
+        "geometry": {
+          "width": 704,
+          "height": 1280,
+          "batch": 1,
+          "frames": 449
+        }
+      },
+      "rung": "bounded_attention",
+      "engagedRungs": [
+        "resident",
+        "staged_residency",
+        "bounded_decode",
+        "bounded_attention"
+      ],
+      "calibrationFingerprint": "sc-18797-ltx-2-5-mlx-ladder-v1",
+      "fixture": "ltx-2-5-mlx-q4-dev-conv-704x1280-f449-fps30-seed18755",
+      "cases": [
+        {
+          "parameters": {
+            "decodeTileEdge": 192,
+            "decodeOverlap": 64,
+            "attentionChunkSize": 16777216
+          },
+          "expectedResult": "passed"
+        }
+      ]
+    },
+    {
+      "name": "mlx-ltx-2-5-q4-dev-diffvae-bounded_attention-768x512-f145",
+      "evidenceScope": "authoritative",
+      "backend": "mlx",
+      "loadShape": "eager_materialization",
+      "target": {
+        "provider": "ltx_2_5",
+        "modelId": "ltx_2_5",
+        "tier": "q4",
+        "mode": "text_to_video",
+        "overlay": "none",
+        "transformerVariant": "dev",
+        "decoder": "diffvae",
+        "geometry": {
+          "width": 768,
+          "height": 512,
+          "batch": 1,
+          "frames": 145
+        }
+      },
+      "rung": "bounded_attention",
+      "engagedRungs": [
+        "resident",
+        "staged_residency",
+        "bounded_attention"
+      ],
+      "calibrationFingerprint": "sc-18797-ltx-2-5-mlx-ladder-v1",
+      "fixture": "ltx-2-5-mlx-q4-dev-diffvae-768x512-f145-fps24-seed18755",
+      "cases": [
+        {
+          "parameters": {
+            "attentionChunkSize": 16777216
+          },
+          "expectedResult": "passed"
+        }
+      ]
+    },
+    {
+      "name": "mlx-ltx-2-5-q4-dev-diffvae-bounded_attention-512x768-f145",
+      "evidenceScope": "authoritative",
+      "backend": "mlx",
+      "loadShape": "eager_materialization",
+      "target": {
+        "provider": "ltx_2_5",
+        "modelId": "ltx_2_5",
+        "tier": "q4",
+        "mode": "text_to_video",
+        "overlay": "none",
+        "transformerVariant": "dev",
+        "decoder": "diffvae",
+        "geometry": {
+          "width": 512,
+          "height": 768,
+          "batch": 1,
+          "frames": 145
+        }
+      },
+      "rung": "bounded_attention",
+      "engagedRungs": [
+        "resident",
+        "staged_residency",
+        "bounded_attention"
+      ],
+      "calibrationFingerprint": "sc-18797-ltx-2-5-mlx-ladder-v1",
+      "fixture": "ltx-2-5-mlx-q4-dev-diffvae-512x768-f145-fps24-seed18755",
+      "cases": [
+        {
+          "parameters": {
+            "attentionChunkSize": 16777216
+          },
+          "expectedResult": "passed"
+        }
+      ]
+    },
+    {
+      "name": "mlx-ltx-2-5-q4-dev-diffvae-bounded_attention-640x640-f145",
+      "evidenceScope": "authoritative",
+      "backend": "mlx",
+      "loadShape": "eager_materialization",
+      "target": {
+        "provider": "ltx_2_5",
+        "modelId": "ltx_2_5",
+        "tier": "q4",
+        "mode": "text_to_video",
+        "overlay": "none",
+        "transformerVariant": "dev",
+        "decoder": "diffvae",
+        "geometry": {
+          "width": 640,
+          "height": 640,
+          "batch": 1,
+          "frames": 145
+        }
+      },
+      "rung": "bounded_attention",
+      "engagedRungs": [
+        "resident",
+        "staged_residency",
+        "bounded_attention"
+      ],
+      "calibrationFingerprint": "sc-18797-ltx-2-5-mlx-ladder-v1",
+      "fixture": "ltx-2-5-mlx-q4-dev-diffvae-640x640-f145-fps24-seed18755",
+      "cases": [
+        {
+          "parameters": {
+            "attentionChunkSize": 16777216
+          },
+          "expectedResult": "passed"
+        }
+      ]
+    },
+    {
+      "name": "mlx-ltx-2-5-q4-dev-diffvae-bounded_attention-1280x704-f145",
+      "evidenceScope": "authoritative",
+      "backend": "mlx",
+      "loadShape": "eager_materialization",
+      "target": {
+        "provider": "ltx_2_5",
+        "modelId": "ltx_2_5",
+        "tier": "q4",
+        "mode": "text_to_video",
+        "overlay": "none",
+        "transformerVariant": "dev",
+        "decoder": "diffvae",
+        "geometry": {
+          "width": 1280,
+          "height": 704,
+          "batch": 1,
+          "frames": 145
+        }
+      },
+      "rung": "bounded_attention",
+      "engagedRungs": [
+        "resident",
+        "staged_residency",
+        "bounded_attention"
+      ],
+      "calibrationFingerprint": "sc-18797-ltx-2-5-mlx-ladder-v1",
+      "fixture": "ltx-2-5-mlx-q4-dev-diffvae-1280x704-f145-fps24-seed18755",
+      "cases": [
+        {
+          "parameters": {
+            "attentionChunkSize": 16777216
+          },
+          "expectedResult": "passed"
+        }
+      ]
+    },
+    {
+      "name": "mlx-ltx-2-5-q4-dev-diffvae-bounded_attention-704x1280-f145",
+      "evidenceScope": "authoritative",
+      "backend": "mlx",
+      "loadShape": "eager_materialization",
+      "target": {
+        "provider": "ltx_2_5",
+        "modelId": "ltx_2_5",
+        "tier": "q4",
+        "mode": "text_to_video",
+        "overlay": "none",
+        "transformerVariant": "dev",
+        "decoder": "diffvae",
+        "geometry": {
+          "width": 704,
+          "height": 1280,
+          "batch": 1,
+          "frames": 145
+        }
+      },
+      "rung": "bounded_attention",
+      "engagedRungs": [
+        "resident",
+        "staged_residency",
+        "bounded_attention"
+      ],
+      "calibrationFingerprint": "sc-18797-ltx-2-5-mlx-ladder-v1",
+      "fixture": "ltx-2-5-mlx-q4-dev-diffvae-704x1280-f145-fps24-seed18755",
+      "cases": [
+        {
+          "parameters": {
+            "attentionChunkSize": 16777216
+          },
+          "expectedResult": "passed"
+        }
+      ]
+    },
+    {
+      "name": "mlx-ltx-2-5-q4-dev-diffvae-bounded_attention-1280x704-f449",
+      "evidenceScope": "authoritative",
+      "backend": "mlx",
+      "loadShape": "eager_materialization",
+      "target": {
+        "provider": "ltx_2_5",
+        "modelId": "ltx_2_5",
+        "tier": "q4",
+        "mode": "text_to_video",
+        "overlay": "none",
+        "transformerVariant": "dev",
+        "decoder": "diffvae",
+        "geometry": {
+          "width": 1280,
+          "height": 704,
+          "batch": 1,
+          "frames": 449
+        }
+      },
+      "rung": "bounded_attention",
+      "engagedRungs": [
+        "resident",
+        "staged_residency",
+        "bounded_attention"
+      ],
+      "calibrationFingerprint": "sc-18797-ltx-2-5-mlx-ladder-v1",
+      "fixture": "ltx-2-5-mlx-q4-dev-diffvae-1280x704-f449-fps30-seed18755",
+      "cases": [
+        {
+          "parameters": {
+            "attentionChunkSize": 16777216
+          },
+          "expectedResult": "passed"
+        }
+      ]
+    },
+    {
+      "name": "mlx-ltx-2-5-q4-dev-diffvae-bounded_attention-704x1280-f449",
+      "evidenceScope": "authoritative",
+      "backend": "mlx",
+      "loadShape": "eager_materialization",
+      "target": {
+        "provider": "ltx_2_5",
+        "modelId": "ltx_2_5",
+        "tier": "q4",
+        "mode": "text_to_video",
+        "overlay": "none",
+        "transformerVariant": "dev",
+        "decoder": "diffvae",
+        "geometry": {
+          "width": 704,
+          "height": 1280,
+          "batch": 1,
+          "frames": 449
+        }
+      },
+      "rung": "bounded_attention",
+      "engagedRungs": [
+        "resident",
+        "staged_residency",
+        "bounded_attention"
+      ],
+      "calibrationFingerprint": "sc-18797-ltx-2-5-mlx-ladder-v1",
+      "fixture": "ltx-2-5-mlx-q4-dev-diffvae-704x1280-f449-fps30-seed18755",
+      "cases": [
+        {
+          "parameters": {
+            "attentionChunkSize": 16777216
+          },
+          "expectedResult": "passed"
+        }
+      ]
+    },
+    {
+      "name": "mlx-ltx-2-5-q8-distilled-conv-bounded_transformer_residency-768x512-f145",
+      "evidenceScope": "authoritative",
+      "backend": "mlx",
+      "loadShape": "deferred_materialization",
+      "target": {
+        "provider": "ltx_2_5",
+        "modelId": "ltx_2_5",
+        "tier": "q8",
+        "mode": "text_to_video",
+        "overlay": "none",
+        "transformerVariant": "distilled",
+        "decoder": "conv",
+        "geometry": {
+          "width": 768,
+          "height": 512,
+          "batch": 1,
+          "frames": 145
+        }
+      },
+      "rung": "bounded_transformer_residency",
+      "engagedRungs": [
+        "resident",
+        "staged_residency",
+        "bounded_decode",
+        "bounded_attention",
+        "bounded_transformer_residency"
+      ],
+      "calibrationFingerprint": "sc-18797-ltx-2-5-mlx-ladder-v1",
+      "fixture": "ltx-2-5-mlx-q8-distilled-conv-768x512-f145-fps24-seed18755",
+      "cases": [
+        {
+          "parameters": {
+            "decodeTileEdge": 192,
+            "decodeOverlap": 64,
+            "attentionChunkSize": 16777216,
+            "transformerWindowSize": 1,
+            "transformerWindowComponent": "dit"
+          },
+          "expectedResult": "passed"
+        }
+      ]
+    },
+    {
+      "name": "mlx-ltx-2-5-q8-distilled-conv-bounded_transformer_residency-512x768-f145",
+      "evidenceScope": "authoritative",
+      "backend": "mlx",
+      "loadShape": "deferred_materialization",
+      "target": {
+        "provider": "ltx_2_5",
+        "modelId": "ltx_2_5",
+        "tier": "q8",
+        "mode": "text_to_video",
+        "overlay": "none",
+        "transformerVariant": "distilled",
+        "decoder": "conv",
+        "geometry": {
+          "width": 512,
+          "height": 768,
+          "batch": 1,
+          "frames": 145
+        }
+      },
+      "rung": "bounded_transformer_residency",
+      "engagedRungs": [
+        "resident",
+        "staged_residency",
+        "bounded_decode",
+        "bounded_attention",
+        "bounded_transformer_residency"
+      ],
+      "calibrationFingerprint": "sc-18797-ltx-2-5-mlx-ladder-v1",
+      "fixture": "ltx-2-5-mlx-q8-distilled-conv-512x768-f145-fps24-seed18755",
+      "cases": [
+        {
+          "parameters": {
+            "decodeTileEdge": 192,
+            "decodeOverlap": 64,
+            "attentionChunkSize": 16777216,
+            "transformerWindowSize": 1,
+            "transformerWindowComponent": "dit"
+          },
+          "expectedResult": "passed"
+        }
+      ]
+    },
+    {
+      "name": "mlx-ltx-2-5-q8-distilled-conv-bounded_transformer_residency-640x640-f145",
+      "evidenceScope": "authoritative",
+      "backend": "mlx",
+      "loadShape": "deferred_materialization",
+      "target": {
+        "provider": "ltx_2_5",
+        "modelId": "ltx_2_5",
+        "tier": "q8",
+        "mode": "text_to_video",
+        "overlay": "none",
+        "transformerVariant": "distilled",
+        "decoder": "conv",
+        "geometry": {
+          "width": 640,
+          "height": 640,
+          "batch": 1,
+          "frames": 145
+        }
+      },
+      "rung": "bounded_transformer_residency",
+      "engagedRungs": [
+        "resident",
+        "staged_residency",
+        "bounded_decode",
+        "bounded_attention",
+        "bounded_transformer_residency"
+      ],
+      "calibrationFingerprint": "sc-18797-ltx-2-5-mlx-ladder-v1",
+      "fixture": "ltx-2-5-mlx-q8-distilled-conv-640x640-f145-fps24-seed18755",
+      "cases": [
+        {
+          "parameters": {
+            "decodeTileEdge": 192,
+            "decodeOverlap": 64,
+            "attentionChunkSize": 16777216,
+            "transformerWindowSize": 1,
+            "transformerWindowComponent": "dit"
+          },
+          "expectedResult": "passed"
+        }
+      ]
+    },
+    {
+      "name": "mlx-ltx-2-5-q8-distilled-conv-bounded_transformer_residency-1280x704-f145",
+      "evidenceScope": "authoritative",
+      "backend": "mlx",
+      "loadShape": "deferred_materialization",
+      "target": {
+        "provider": "ltx_2_5",
+        "modelId": "ltx_2_5",
+        "tier": "q8",
+        "mode": "text_to_video",
+        "overlay": "none",
+        "transformerVariant": "distilled",
+        "decoder": "conv",
+        "geometry": {
+          "width": 1280,
+          "height": 704,
+          "batch": 1,
+          "frames": 145
+        }
+      },
+      "rung": "bounded_transformer_residency",
+      "engagedRungs": [
+        "resident",
+        "staged_residency",
+        "bounded_decode",
+        "bounded_attention",
+        "bounded_transformer_residency"
+      ],
+      "calibrationFingerprint": "sc-18797-ltx-2-5-mlx-ladder-v1",
+      "fixture": "ltx-2-5-mlx-q8-distilled-conv-1280x704-f145-fps24-seed18755",
+      "cases": [
+        {
+          "parameters": {
+            "decodeTileEdge": 192,
+            "decodeOverlap": 64,
+            "attentionChunkSize": 16777216,
+            "transformerWindowSize": 1,
+            "transformerWindowComponent": "dit"
+          },
+          "expectedResult": "passed"
+        }
+      ]
+    },
+    {
+      "name": "mlx-ltx-2-5-q8-distilled-conv-bounded_transformer_residency-704x1280-f145",
+      "evidenceScope": "authoritative",
+      "backend": "mlx",
+      "loadShape": "deferred_materialization",
+      "target": {
+        "provider": "ltx_2_5",
+        "modelId": "ltx_2_5",
+        "tier": "q8",
+        "mode": "text_to_video",
+        "overlay": "none",
+        "transformerVariant": "distilled",
+        "decoder": "conv",
+        "geometry": {
+          "width": 704,
+          "height": 1280,
+          "batch": 1,
+          "frames": 145
+        }
+      },
+      "rung": "bounded_transformer_residency",
+      "engagedRungs": [
+        "resident",
+        "staged_residency",
+        "bounded_decode",
+        "bounded_attention",
+        "bounded_transformer_residency"
+      ],
+      "calibrationFingerprint": "sc-18797-ltx-2-5-mlx-ladder-v1",
+      "fixture": "ltx-2-5-mlx-q8-distilled-conv-704x1280-f145-fps24-seed18755",
+      "cases": [
+        {
+          "parameters": {
+            "decodeTileEdge": 192,
+            "decodeOverlap": 64,
+            "attentionChunkSize": 16777216,
+            "transformerWindowSize": 1,
+            "transformerWindowComponent": "dit"
+          },
+          "expectedResult": "passed"
+        }
+      ]
+    },
+    {
+      "name": "mlx-ltx-2-5-q8-distilled-conv-bounded_transformer_residency-1280x704-f449",
+      "evidenceScope": "authoritative",
+      "backend": "mlx",
+      "loadShape": "deferred_materialization",
+      "target": {
+        "provider": "ltx_2_5",
+        "modelId": "ltx_2_5",
+        "tier": "q8",
+        "mode": "text_to_video",
+        "overlay": "none",
+        "transformerVariant": "distilled",
+        "decoder": "conv",
+        "geometry": {
+          "width": 1280,
+          "height": 704,
+          "batch": 1,
+          "frames": 449
+        }
+      },
+      "rung": "bounded_transformer_residency",
+      "engagedRungs": [
+        "resident",
+        "staged_residency",
+        "bounded_decode",
+        "bounded_attention",
+        "bounded_transformer_residency"
+      ],
+      "calibrationFingerprint": "sc-18797-ltx-2-5-mlx-ladder-v1",
+      "fixture": "ltx-2-5-mlx-q8-distilled-conv-1280x704-f449-fps30-seed18755",
+      "cases": [
+        {
+          "parameters": {
+            "decodeTileEdge": 192,
+            "decodeOverlap": 64,
+            "attentionChunkSize": 16777216,
+            "transformerWindowSize": 1,
+            "transformerWindowComponent": "dit"
+          },
+          "expectedResult": "passed"
+        }
+      ]
+    },
+    {
+      "name": "mlx-ltx-2-5-q8-distilled-conv-bounded_transformer_residency-704x1280-f449",
+      "evidenceScope": "authoritative",
+      "backend": "mlx",
+      "loadShape": "deferred_materialization",
+      "target": {
+        "provider": "ltx_2_5",
+        "modelId": "ltx_2_5",
+        "tier": "q8",
+        "mode": "text_to_video",
+        "overlay": "none",
+        "transformerVariant": "distilled",
+        "decoder": "conv",
+        "geometry": {
+          "width": 704,
+          "height": 1280,
+          "batch": 1,
+          "frames": 449
+        }
+      },
+      "rung": "bounded_transformer_residency",
+      "engagedRungs": [
+        "resident",
+        "staged_residency",
+        "bounded_decode",
+        "bounded_attention",
+        "bounded_transformer_residency"
+      ],
+      "calibrationFingerprint": "sc-18797-ltx-2-5-mlx-ladder-v1",
+      "fixture": "ltx-2-5-mlx-q8-distilled-conv-704x1280-f449-fps30-seed18755",
+      "cases": [
+        {
+          "parameters": {
+            "decodeTileEdge": 192,
+            "decodeOverlap": 64,
+            "attentionChunkSize": 16777216,
+            "transformerWindowSize": 1,
+            "transformerWindowComponent": "dit"
+          },
+          "expectedResult": "passed"
+        }
+      ]
+    },
+    {
+      "name": "mlx-ltx-2-5-q8-distilled-diffvae-bounded_transformer_residency-768x512-f145",
+      "evidenceScope": "authoritative",
+      "backend": "mlx",
+      "loadShape": "deferred_materialization",
+      "target": {
+        "provider": "ltx_2_5",
+        "modelId": "ltx_2_5",
+        "tier": "q8",
+        "mode": "text_to_video",
+        "overlay": "none",
+        "transformerVariant": "distilled",
+        "decoder": "diffvae",
+        "geometry": {
+          "width": 768,
+          "height": 512,
+          "batch": 1,
+          "frames": 145
+        }
+      },
+      "rung": "bounded_transformer_residency",
+      "engagedRungs": [
+        "resident",
+        "staged_residency",
+        "bounded_attention",
+        "bounded_transformer_residency"
+      ],
+      "calibrationFingerprint": "sc-18797-ltx-2-5-mlx-ladder-v1",
+      "fixture": "ltx-2-5-mlx-q8-distilled-diffvae-768x512-f145-fps24-seed18755",
+      "cases": [
+        {
+          "parameters": {
+            "attentionChunkSize": 16777216,
+            "transformerWindowSize": 1,
+            "transformerWindowComponent": "dit"
+          },
+          "expectedResult": "passed"
+        }
+      ]
+    },
+    {
+      "name": "mlx-ltx-2-5-q8-distilled-diffvae-bounded_transformer_residency-512x768-f145",
+      "evidenceScope": "authoritative",
+      "backend": "mlx",
+      "loadShape": "deferred_materialization",
+      "target": {
+        "provider": "ltx_2_5",
+        "modelId": "ltx_2_5",
+        "tier": "q8",
+        "mode": "text_to_video",
+        "overlay": "none",
+        "transformerVariant": "distilled",
+        "decoder": "diffvae",
+        "geometry": {
+          "width": 512,
+          "height": 768,
+          "batch": 1,
+          "frames": 145
+        }
+      },
+      "rung": "bounded_transformer_residency",
+      "engagedRungs": [
+        "resident",
+        "staged_residency",
+        "bounded_attention",
+        "bounded_transformer_residency"
+      ],
+      "calibrationFingerprint": "sc-18797-ltx-2-5-mlx-ladder-v1",
+      "fixture": "ltx-2-5-mlx-q8-distilled-diffvae-512x768-f145-fps24-seed18755",
+      "cases": [
+        {
+          "parameters": {
+            "attentionChunkSize": 16777216,
+            "transformerWindowSize": 1,
+            "transformerWindowComponent": "dit"
+          },
+          "expectedResult": "passed"
+        }
+      ]
+    },
+    {
+      "name": "mlx-ltx-2-5-q8-distilled-diffvae-bounded_transformer_residency-640x640-f145",
+      "evidenceScope": "authoritative",
+      "backend": "mlx",
+      "loadShape": "deferred_materialization",
+      "target": {
+        "provider": "ltx_2_5",
+        "modelId": "ltx_2_5",
+        "tier": "q8",
+        "mode": "text_to_video",
+        "overlay": "none",
+        "transformerVariant": "distilled",
+        "decoder": "diffvae",
+        "geometry": {
+          "width": 640,
+          "height": 640,
+          "batch": 1,
+          "frames": 145
+        }
+      },
+      "rung": "bounded_transformer_residency",
+      "engagedRungs": [
+        "resident",
+        "staged_residency",
+        "bounded_attention",
+        "bounded_transformer_residency"
+      ],
+      "calibrationFingerprint": "sc-18797-ltx-2-5-mlx-ladder-v1",
+      "fixture": "ltx-2-5-mlx-q8-distilled-diffvae-640x640-f145-fps24-seed18755",
+      "cases": [
+        {
+          "parameters": {
+            "attentionChunkSize": 16777216,
+            "transformerWindowSize": 1,
+            "transformerWindowComponent": "dit"
+          },
+          "expectedResult": "passed"
+        }
+      ]
+    },
+    {
+      "name": "mlx-ltx-2-5-q8-distilled-diffvae-bounded_transformer_residency-1280x704-f145",
+      "evidenceScope": "authoritative",
+      "backend": "mlx",
+      "loadShape": "deferred_materialization",
+      "target": {
+        "provider": "ltx_2_5",
+        "modelId": "ltx_2_5",
+        "tier": "q8",
+        "mode": "text_to_video",
+        "overlay": "none",
+        "transformerVariant": "distilled",
+        "decoder": "diffvae",
+        "geometry": {
+          "width": 1280,
+          "height": 704,
+          "batch": 1,
+          "frames": 145
+        }
+      },
+      "rung": "bounded_transformer_residency",
+      "engagedRungs": [
+        "resident",
+        "staged_residency",
+        "bounded_attention",
+        "bounded_transformer_residency"
+      ],
+      "calibrationFingerprint": "sc-18797-ltx-2-5-mlx-ladder-v1",
+      "fixture": "ltx-2-5-mlx-q8-distilled-diffvae-1280x704-f145-fps24-seed18755",
+      "cases": [
+        {
+          "parameters": {
+            "attentionChunkSize": 16777216,
+            "transformerWindowSize": 1,
+            "transformerWindowComponent": "dit"
+          },
+          "expectedResult": "passed"
+        }
+      ]
+    },
+    {
+      "name": "mlx-ltx-2-5-q8-distilled-diffvae-bounded_transformer_residency-704x1280-f145",
+      "evidenceScope": "authoritative",
+      "backend": "mlx",
+      "loadShape": "deferred_materialization",
+      "target": {
+        "provider": "ltx_2_5",
+        "modelId": "ltx_2_5",
+        "tier": "q8",
+        "mode": "text_to_video",
+        "overlay": "none",
+        "transformerVariant": "distilled",
+        "decoder": "diffvae",
+        "geometry": {
+          "width": 704,
+          "height": 1280,
+          "batch": 1,
+          "frames": 145
+        }
+      },
+      "rung": "bounded_transformer_residency",
+      "engagedRungs": [
+        "resident",
+        "staged_residency",
+        "bounded_attention",
+        "bounded_transformer_residency"
+      ],
+      "calibrationFingerprint": "sc-18797-ltx-2-5-mlx-ladder-v1",
+      "fixture": "ltx-2-5-mlx-q8-distilled-diffvae-704x1280-f145-fps24-seed18755",
+      "cases": [
+        {
+          "parameters": {
+            "attentionChunkSize": 16777216,
+            "transformerWindowSize": 1,
+            "transformerWindowComponent": "dit"
+          },
+          "expectedResult": "passed"
+        }
+      ]
+    },
+    {
+      "name": "mlx-ltx-2-5-q8-distilled-diffvae-bounded_transformer_residency-1280x704-f449",
+      "evidenceScope": "authoritative",
+      "backend": "mlx",
+      "loadShape": "deferred_materialization",
+      "target": {
+        "provider": "ltx_2_5",
+        "modelId": "ltx_2_5",
+        "tier": "q8",
+        "mode": "text_to_video",
+        "overlay": "none",
+        "transformerVariant": "distilled",
+        "decoder": "diffvae",
+        "geometry": {
+          "width": 1280,
+          "height": 704,
+          "batch": 1,
+          "frames": 449
+        }
+      },
+      "rung": "bounded_transformer_residency",
+      "engagedRungs": [
+        "resident",
+        "staged_residency",
+        "bounded_attention",
+        "bounded_transformer_residency"
+      ],
+      "calibrationFingerprint": "sc-18797-ltx-2-5-mlx-ladder-v1",
+      "fixture": "ltx-2-5-mlx-q8-distilled-diffvae-1280x704-f449-fps30-seed18755",
+      "cases": [
+        {
+          "parameters": {
+            "attentionChunkSize": 16777216,
+            "transformerWindowSize": 1,
+            "transformerWindowComponent": "dit"
+          },
+          "expectedResult": "passed"
+        }
+      ]
+    },
+    {
+      "name": "mlx-ltx-2-5-q8-distilled-diffvae-bounded_transformer_residency-704x1280-f449",
+      "evidenceScope": "authoritative",
+      "backend": "mlx",
+      "loadShape": "deferred_materialization",
+      "target": {
+        "provider": "ltx_2_5",
+        "modelId": "ltx_2_5",
+        "tier": "q8",
+        "mode": "text_to_video",
+        "overlay": "none",
+        "transformerVariant": "distilled",
+        "decoder": "diffvae",
+        "geometry": {
+          "width": 704,
+          "height": 1280,
+          "batch": 1,
+          "frames": 449
+        }
+      },
+      "rung": "bounded_transformer_residency",
+      "engagedRungs": [
+        "resident",
+        "staged_residency",
+        "bounded_attention",
+        "bounded_transformer_residency"
+      ],
+      "calibrationFingerprint": "sc-18797-ltx-2-5-mlx-ladder-v1",
+      "fixture": "ltx-2-5-mlx-q8-distilled-diffvae-704x1280-f449-fps30-seed18755",
+      "cases": [
+        {
+          "parameters": {
+            "attentionChunkSize": 16777216,
+            "transformerWindowSize": 1,
+            "transformerWindowComponent": "dit"
+          },
+          "expectedResult": "passed"
+        }
+      ]
+    },
+    {
+      "name": "mlx-ltx-2-5-q8-dev-conv-bounded_attention-768x512-f145",
+      "evidenceScope": "authoritative",
+      "backend": "mlx",
+      "loadShape": "eager_materialization",
+      "target": {
+        "provider": "ltx_2_5",
+        "modelId": "ltx_2_5",
+        "tier": "q8",
+        "mode": "text_to_video",
+        "overlay": "none",
+        "transformerVariant": "dev",
+        "decoder": "conv",
+        "geometry": {
+          "width": 768,
+          "height": 512,
+          "batch": 1,
+          "frames": 145
+        }
+      },
+      "rung": "bounded_attention",
+      "engagedRungs": [
+        "resident",
+        "staged_residency",
+        "bounded_decode",
+        "bounded_attention"
+      ],
+      "calibrationFingerprint": "sc-18797-ltx-2-5-mlx-ladder-v1",
+      "fixture": "ltx-2-5-mlx-q8-dev-conv-768x512-f145-fps24-seed18755",
+      "cases": [
+        {
+          "parameters": {
+            "decodeTileEdge": 192,
+            "decodeOverlap": 64,
+            "attentionChunkSize": 16777216
+          },
+          "expectedResult": "passed"
+        }
+      ]
+    },
+    {
+      "name": "mlx-ltx-2-5-q8-dev-conv-bounded_attention-512x768-f145",
+      "evidenceScope": "authoritative",
+      "backend": "mlx",
+      "loadShape": "eager_materialization",
+      "target": {
+        "provider": "ltx_2_5",
+        "modelId": "ltx_2_5",
+        "tier": "q8",
+        "mode": "text_to_video",
+        "overlay": "none",
+        "transformerVariant": "dev",
+        "decoder": "conv",
+        "geometry": {
+          "width": 512,
+          "height": 768,
+          "batch": 1,
+          "frames": 145
+        }
+      },
+      "rung": "bounded_attention",
+      "engagedRungs": [
+        "resident",
+        "staged_residency",
+        "bounded_decode",
+        "bounded_attention"
+      ],
+      "calibrationFingerprint": "sc-18797-ltx-2-5-mlx-ladder-v1",
+      "fixture": "ltx-2-5-mlx-q8-dev-conv-512x768-f145-fps24-seed18755",
+      "cases": [
+        {
+          "parameters": {
+            "decodeTileEdge": 192,
+            "decodeOverlap": 64,
+            "attentionChunkSize": 16777216
+          },
+          "expectedResult": "passed"
+        }
+      ]
+    },
+    {
+      "name": "mlx-ltx-2-5-q8-dev-conv-bounded_attention-640x640-f145",
+      "evidenceScope": "authoritative",
+      "backend": "mlx",
+      "loadShape": "eager_materialization",
+      "target": {
+        "provider": "ltx_2_5",
+        "modelId": "ltx_2_5",
+        "tier": "q8",
+        "mode": "text_to_video",
+        "overlay": "none",
+        "transformerVariant": "dev",
+        "decoder": "conv",
+        "geometry": {
+          "width": 640,
+          "height": 640,
+          "batch": 1,
+          "frames": 145
+        }
+      },
+      "rung": "bounded_attention",
+      "engagedRungs": [
+        "resident",
+        "staged_residency",
+        "bounded_decode",
+        "bounded_attention"
+      ],
+      "calibrationFingerprint": "sc-18797-ltx-2-5-mlx-ladder-v1",
+      "fixture": "ltx-2-5-mlx-q8-dev-conv-640x640-f145-fps24-seed18755",
+      "cases": [
+        {
+          "parameters": {
+            "decodeTileEdge": 192,
+            "decodeOverlap": 64,
+            "attentionChunkSize": 16777216
+          },
+          "expectedResult": "passed"
+        }
+      ]
+    },
+    {
+      "name": "mlx-ltx-2-5-q8-dev-conv-bounded_attention-1280x704-f145",
+      "evidenceScope": "authoritative",
+      "backend": "mlx",
+      "loadShape": "eager_materialization",
+      "target": {
+        "provider": "ltx_2_5",
+        "modelId": "ltx_2_5",
+        "tier": "q8",
+        "mode": "text_to_video",
+        "overlay": "none",
+        "transformerVariant": "dev",
+        "decoder": "conv",
+        "geometry": {
+          "width": 1280,
+          "height": 704,
+          "batch": 1,
+          "frames": 145
+        }
+      },
+      "rung": "bounded_attention",
+      "engagedRungs": [
+        "resident",
+        "staged_residency",
+        "bounded_decode",
+        "bounded_attention"
+      ],
+      "calibrationFingerprint": "sc-18797-ltx-2-5-mlx-ladder-v1",
+      "fixture": "ltx-2-5-mlx-q8-dev-conv-1280x704-f145-fps24-seed18755",
+      "cases": [
+        {
+          "parameters": {
+            "decodeTileEdge": 192,
+            "decodeOverlap": 64,
+            "attentionChunkSize": 16777216
+          },
+          "expectedResult": "passed"
+        }
+      ]
+    },
+    {
+      "name": "mlx-ltx-2-5-q8-dev-conv-bounded_attention-704x1280-f145",
+      "evidenceScope": "authoritative",
+      "backend": "mlx",
+      "loadShape": "eager_materialization",
+      "target": {
+        "provider": "ltx_2_5",
+        "modelId": "ltx_2_5",
+        "tier": "q8",
+        "mode": "text_to_video",
+        "overlay": "none",
+        "transformerVariant": "dev",
+        "decoder": "conv",
+        "geometry": {
+          "width": 704,
+          "height": 1280,
+          "batch": 1,
+          "frames": 145
+        }
+      },
+      "rung": "bounded_attention",
+      "engagedRungs": [
+        "resident",
+        "staged_residency",
+        "bounded_decode",
+        "bounded_attention"
+      ],
+      "calibrationFingerprint": "sc-18797-ltx-2-5-mlx-ladder-v1",
+      "fixture": "ltx-2-5-mlx-q8-dev-conv-704x1280-f145-fps24-seed18755",
+      "cases": [
+        {
+          "parameters": {
+            "decodeTileEdge": 192,
+            "decodeOverlap": 64,
+            "attentionChunkSize": 16777216
+          },
+          "expectedResult": "passed"
+        }
+      ]
+    },
+    {
+      "name": "mlx-ltx-2-5-q8-dev-conv-bounded_attention-1280x704-f449",
+      "evidenceScope": "authoritative",
+      "backend": "mlx",
+      "loadShape": "eager_materialization",
+      "target": {
+        "provider": "ltx_2_5",
+        "modelId": "ltx_2_5",
+        "tier": "q8",
+        "mode": "text_to_video",
+        "overlay": "none",
+        "transformerVariant": "dev",
+        "decoder": "conv",
+        "geometry": {
+          "width": 1280,
+          "height": 704,
+          "batch": 1,
+          "frames": 449
+        }
+      },
+      "rung": "bounded_attention",
+      "engagedRungs": [
+        "resident",
+        "staged_residency",
+        "bounded_decode",
+        "bounded_attention"
+      ],
+      "calibrationFingerprint": "sc-18797-ltx-2-5-mlx-ladder-v1",
+      "fixture": "ltx-2-5-mlx-q8-dev-conv-1280x704-f449-fps30-seed18755",
+      "cases": [
+        {
+          "parameters": {
+            "decodeTileEdge": 192,
+            "decodeOverlap": 64,
+            "attentionChunkSize": 16777216
+          },
+          "expectedResult": "passed"
+        }
+      ]
+    },
+    {
+      "name": "mlx-ltx-2-5-q8-dev-conv-bounded_attention-704x1280-f449",
+      "evidenceScope": "authoritative",
+      "backend": "mlx",
+      "loadShape": "eager_materialization",
+      "target": {
+        "provider": "ltx_2_5",
+        "modelId": "ltx_2_5",
+        "tier": "q8",
+        "mode": "text_to_video",
+        "overlay": "none",
+        "transformerVariant": "dev",
+        "decoder": "conv",
+        "geometry": {
+          "width": 704,
+          "height": 1280,
+          "batch": 1,
+          "frames": 449
+        }
+      },
+      "rung": "bounded_attention",
+      "engagedRungs": [
+        "resident",
+        "staged_residency",
+        "bounded_decode",
+        "bounded_attention"
+      ],
+      "calibrationFingerprint": "sc-18797-ltx-2-5-mlx-ladder-v1",
+      "fixture": "ltx-2-5-mlx-q8-dev-conv-704x1280-f449-fps30-seed18755",
+      "cases": [
+        {
+          "parameters": {
+            "decodeTileEdge": 192,
+            "decodeOverlap": 64,
+            "attentionChunkSize": 16777216
+          },
+          "expectedResult": "passed"
+        }
+      ]
+    },
+    {
+      "name": "mlx-ltx-2-5-q8-dev-diffvae-bounded_attention-768x512-f145",
+      "evidenceScope": "authoritative",
+      "backend": "mlx",
+      "loadShape": "eager_materialization",
+      "target": {
+        "provider": "ltx_2_5",
+        "modelId": "ltx_2_5",
+        "tier": "q8",
+        "mode": "text_to_video",
+        "overlay": "none",
+        "transformerVariant": "dev",
+        "decoder": "diffvae",
+        "geometry": {
+          "width": 768,
+          "height": 512,
+          "batch": 1,
+          "frames": 145
+        }
+      },
+      "rung": "bounded_attention",
+      "engagedRungs": [
+        "resident",
+        "staged_residency",
+        "bounded_attention"
+      ],
+      "calibrationFingerprint": "sc-18797-ltx-2-5-mlx-ladder-v1",
+      "fixture": "ltx-2-5-mlx-q8-dev-diffvae-768x512-f145-fps24-seed18755",
+      "cases": [
+        {
+          "parameters": {
+            "attentionChunkSize": 16777216
+          },
+          "expectedResult": "passed"
+        }
+      ]
+    },
+    {
+      "name": "mlx-ltx-2-5-q8-dev-diffvae-bounded_attention-512x768-f145",
+      "evidenceScope": "authoritative",
+      "backend": "mlx",
+      "loadShape": "eager_materialization",
+      "target": {
+        "provider": "ltx_2_5",
+        "modelId": "ltx_2_5",
+        "tier": "q8",
+        "mode": "text_to_video",
+        "overlay": "none",
+        "transformerVariant": "dev",
+        "decoder": "diffvae",
+        "geometry": {
+          "width": 512,
+          "height": 768,
+          "batch": 1,
+          "frames": 145
+        }
+      },
+      "rung": "bounded_attention",
+      "engagedRungs": [
+        "resident",
+        "staged_residency",
+        "bounded_attention"
+      ],
+      "calibrationFingerprint": "sc-18797-ltx-2-5-mlx-ladder-v1",
+      "fixture": "ltx-2-5-mlx-q8-dev-diffvae-512x768-f145-fps24-seed18755",
+      "cases": [
+        {
+          "parameters": {
+            "attentionChunkSize": 16777216
+          },
+          "expectedResult": "passed"
+        }
+      ]
+    },
+    {
+      "name": "mlx-ltx-2-5-q8-dev-diffvae-bounded_attention-640x640-f145",
+      "evidenceScope": "authoritative",
+      "backend": "mlx",
+      "loadShape": "eager_materialization",
+      "target": {
+        "provider": "ltx_2_5",
+        "modelId": "ltx_2_5",
+        "tier": "q8",
+        "mode": "text_to_video",
+        "overlay": "none",
+        "transformerVariant": "dev",
+        "decoder": "diffvae",
+        "geometry": {
+          "width": 640,
+          "height": 640,
+          "batch": 1,
+          "frames": 145
+        }
+      },
+      "rung": "bounded_attention",
+      "engagedRungs": [
+        "resident",
+        "staged_residency",
+        "bounded_attention"
+      ],
+      "calibrationFingerprint": "sc-18797-ltx-2-5-mlx-ladder-v1",
+      "fixture": "ltx-2-5-mlx-q8-dev-diffvae-640x640-f145-fps24-seed18755",
+      "cases": [
+        {
+          "parameters": {
+            "attentionChunkSize": 16777216
+          },
+          "expectedResult": "passed"
+        }
+      ]
+    },
+    {
+      "name": "mlx-ltx-2-5-q8-dev-diffvae-bounded_attention-1280x704-f145",
+      "evidenceScope": "authoritative",
+      "backend": "mlx",
+      "loadShape": "eager_materialization",
+      "target": {
+        "provider": "ltx_2_5",
+        "modelId": "ltx_2_5",
+        "tier": "q8",
+        "mode": "text_to_video",
+        "overlay": "none",
+        "transformerVariant": "dev",
+        "decoder": "diffvae",
+        "geometry": {
+          "width": 1280,
+          "height": 704,
+          "batch": 1,
+          "frames": 145
+        }
+      },
+      "rung": "bounded_attention",
+      "engagedRungs": [
+        "resident",
+        "staged_residency",
+        "bounded_attention"
+      ],
+      "calibrationFingerprint": "sc-18797-ltx-2-5-mlx-ladder-v1",
+      "fixture": "ltx-2-5-mlx-q8-dev-diffvae-1280x704-f145-fps24-seed18755",
+      "cases": [
+        {
+          "parameters": {
+            "attentionChunkSize": 16777216
+          },
+          "expectedResult": "passed"
+        }
+      ]
+    },
+    {
+      "name": "mlx-ltx-2-5-q8-dev-diffvae-bounded_attention-704x1280-f145",
+      "evidenceScope": "authoritative",
+      "backend": "mlx",
+      "loadShape": "eager_materialization",
+      "target": {
+        "provider": "ltx_2_5",
+        "modelId": "ltx_2_5",
+        "tier": "q8",
+        "mode": "text_to_video",
+        "overlay": "none",
+        "transformerVariant": "dev",
+        "decoder": "diffvae",
+        "geometry": {
+          "width": 704,
+          "height": 1280,
+          "batch": 1,
+          "frames": 145
+        }
+      },
+      "rung": "bounded_attention",
+      "engagedRungs": [
+        "resident",
+        "staged_residency",
+        "bounded_attention"
+      ],
+      "calibrationFingerprint": "sc-18797-ltx-2-5-mlx-ladder-v1",
+      "fixture": "ltx-2-5-mlx-q8-dev-diffvae-704x1280-f145-fps24-seed18755",
+      "cases": [
+        {
+          "parameters": {
+            "attentionChunkSize": 16777216
+          },
+          "expectedResult": "passed"
+        }
+      ]
+    },
+    {
+      "name": "mlx-ltx-2-5-q8-dev-diffvae-bounded_attention-1280x704-f449",
+      "evidenceScope": "authoritative",
+      "backend": "mlx",
+      "loadShape": "eager_materialization",
+      "target": {
+        "provider": "ltx_2_5",
+        "modelId": "ltx_2_5",
+        "tier": "q8",
+        "mode": "text_to_video",
+        "overlay": "none",
+        "transformerVariant": "dev",
+        "decoder": "diffvae",
+        "geometry": {
+          "width": 1280,
+          "height": 704,
+          "batch": 1,
+          "frames": 449
+        }
+      },
+      "rung": "bounded_attention",
+      "engagedRungs": [
+        "resident",
+        "staged_residency",
+        "bounded_attention"
+      ],
+      "calibrationFingerprint": "sc-18797-ltx-2-5-mlx-ladder-v1",
+      "fixture": "ltx-2-5-mlx-q8-dev-diffvae-1280x704-f449-fps30-seed18755",
+      "cases": [
+        {
+          "parameters": {
+            "attentionChunkSize": 16777216
+          },
+          "expectedResult": "passed"
+        }
+      ]
+    },
+    {
+      "name": "mlx-ltx-2-5-q8-dev-diffvae-bounded_attention-704x1280-f449",
+      "evidenceScope": "authoritative",
+      "backend": "mlx",
+      "loadShape": "eager_materialization",
+      "target": {
+        "provider": "ltx_2_5",
+        "modelId": "ltx_2_5",
+        "tier": "q8",
+        "mode": "text_to_video",
+        "overlay": "none",
+        "transformerVariant": "dev",
+        "decoder": "diffvae",
+        "geometry": {
+          "width": 704,
+          "height": 1280,
+          "batch": 1,
+          "frames": 449
+        }
+      },
+      "rung": "bounded_attention",
+      "engagedRungs": [
+        "resident",
+        "staged_residency",
+        "bounded_attention"
+      ],
+      "calibrationFingerprint": "sc-18797-ltx-2-5-mlx-ladder-v1",
+      "fixture": "ltx-2-5-mlx-q8-dev-diffvae-704x1280-f449-fps30-seed18755",
+      "cases": [
+        {
+          "parameters": {
+            "attentionChunkSize": 16777216
+          },
+          "expectedResult": "passed"
+        }
+      ]
+    },
+    {
+      "name": "mlx-ltx-2-5-bf16-distilled-conv-bounded_transformer_residency-768x512-f145",
+      "evidenceScope": "authoritative",
+      "backend": "mlx",
+      "loadShape": "deferred_materialization",
+      "target": {
+        "provider": "ltx_2_5",
+        "modelId": "ltx_2_5",
+        "tier": "bf16",
+        "mode": "text_to_video",
+        "overlay": "none",
+        "transformerVariant": "distilled",
+        "decoder": "conv",
+        "geometry": {
+          "width": 768,
+          "height": 512,
+          "batch": 1,
+          "frames": 145
+        }
+      },
+      "rung": "bounded_transformer_residency",
+      "engagedRungs": [
+        "resident",
+        "staged_residency",
+        "bounded_decode",
+        "bounded_attention",
+        "bounded_transformer_residency"
+      ],
+      "calibrationFingerprint": "sc-18797-ltx-2-5-mlx-ladder-v1",
+      "fixture": "ltx-2-5-mlx-bf16-distilled-conv-768x512-f145-fps24-seed18755",
+      "cases": [
+        {
+          "parameters": {
+            "decodeTileEdge": 192,
+            "decodeOverlap": 64,
+            "attentionChunkSize": 16777216,
+            "transformerWindowSize": 1,
+            "transformerWindowComponent": "dit"
+          },
+          "expectedResult": "passed"
+        }
+      ]
+    },
+    {
+      "name": "mlx-ltx-2-5-bf16-distilled-conv-bounded_transformer_residency-512x768-f145",
+      "evidenceScope": "authoritative",
+      "backend": "mlx",
+      "loadShape": "deferred_materialization",
+      "target": {
+        "provider": "ltx_2_5",
+        "modelId": "ltx_2_5",
+        "tier": "bf16",
+        "mode": "text_to_video",
+        "overlay": "none",
+        "transformerVariant": "distilled",
+        "decoder": "conv",
+        "geometry": {
+          "width": 512,
+          "height": 768,
+          "batch": 1,
+          "frames": 145
+        }
+      },
+      "rung": "bounded_transformer_residency",
+      "engagedRungs": [
+        "resident",
+        "staged_residency",
+        "bounded_decode",
+        "bounded_attention",
+        "bounded_transformer_residency"
+      ],
+      "calibrationFingerprint": "sc-18797-ltx-2-5-mlx-ladder-v1",
+      "fixture": "ltx-2-5-mlx-bf16-distilled-conv-512x768-f145-fps24-seed18755",
+      "cases": [
+        {
+          "parameters": {
+            "decodeTileEdge": 192,
+            "decodeOverlap": 64,
+            "attentionChunkSize": 16777216,
+            "transformerWindowSize": 1,
+            "transformerWindowComponent": "dit"
+          },
+          "expectedResult": "passed"
+        }
+      ]
+    },
+    {
+      "name": "mlx-ltx-2-5-bf16-distilled-conv-bounded_transformer_residency-640x640-f145",
+      "evidenceScope": "authoritative",
+      "backend": "mlx",
+      "loadShape": "deferred_materialization",
+      "target": {
+        "provider": "ltx_2_5",
+        "modelId": "ltx_2_5",
+        "tier": "bf16",
+        "mode": "text_to_video",
+        "overlay": "none",
+        "transformerVariant": "distilled",
+        "decoder": "conv",
+        "geometry": {
+          "width": 640,
+          "height": 640,
+          "batch": 1,
+          "frames": 145
+        }
+      },
+      "rung": "bounded_transformer_residency",
+      "engagedRungs": [
+        "resident",
+        "staged_residency",
+        "bounded_decode",
+        "bounded_attention",
+        "bounded_transformer_residency"
+      ],
+      "calibrationFingerprint": "sc-18797-ltx-2-5-mlx-ladder-v1",
+      "fixture": "ltx-2-5-mlx-bf16-distilled-conv-640x640-f145-fps24-seed18755",
+      "cases": [
+        {
+          "parameters": {
+            "decodeTileEdge": 192,
+            "decodeOverlap": 64,
+            "attentionChunkSize": 16777216,
+            "transformerWindowSize": 1,
+            "transformerWindowComponent": "dit"
+          },
+          "expectedResult": "passed"
+        }
+      ]
+    },
+    {
+      "name": "mlx-ltx-2-5-bf16-distilled-conv-bounded_transformer_residency-1280x704-f145",
+      "evidenceScope": "authoritative",
+      "backend": "mlx",
+      "loadShape": "deferred_materialization",
+      "target": {
+        "provider": "ltx_2_5",
+        "modelId": "ltx_2_5",
+        "tier": "bf16",
+        "mode": "text_to_video",
+        "overlay": "none",
+        "transformerVariant": "distilled",
+        "decoder": "conv",
+        "geometry": {
+          "width": 1280,
+          "height": 704,
+          "batch": 1,
+          "frames": 145
+        }
+      },
+      "rung": "bounded_transformer_residency",
+      "engagedRungs": [
+        "resident",
+        "staged_residency",
+        "bounded_decode",
+        "bounded_attention",
+        "bounded_transformer_residency"
+      ],
+      "calibrationFingerprint": "sc-18797-ltx-2-5-mlx-ladder-v1",
+      "fixture": "ltx-2-5-mlx-bf16-distilled-conv-1280x704-f145-fps24-seed18755",
+      "cases": [
+        {
+          "parameters": {
+            "decodeTileEdge": 192,
+            "decodeOverlap": 64,
+            "attentionChunkSize": 16777216,
+            "transformerWindowSize": 1,
+            "transformerWindowComponent": "dit"
+          },
+          "expectedResult": "passed"
+        }
+      ]
+    },
+    {
+      "name": "mlx-ltx-2-5-bf16-distilled-conv-bounded_transformer_residency-704x1280-f145",
+      "evidenceScope": "authoritative",
+      "backend": "mlx",
+      "loadShape": "deferred_materialization",
+      "target": {
+        "provider": "ltx_2_5",
+        "modelId": "ltx_2_5",
+        "tier": "bf16",
+        "mode": "text_to_video",
+        "overlay": "none",
+        "transformerVariant": "distilled",
+        "decoder": "conv",
+        "geometry": {
+          "width": 704,
+          "height": 1280,
+          "batch": 1,
+          "frames": 145
+        }
+      },
+      "rung": "bounded_transformer_residency",
+      "engagedRungs": [
+        "resident",
+        "staged_residency",
+        "bounded_decode",
+        "bounded_attention",
+        "bounded_transformer_residency"
+      ],
+      "calibrationFingerprint": "sc-18797-ltx-2-5-mlx-ladder-v1",
+      "fixture": "ltx-2-5-mlx-bf16-distilled-conv-704x1280-f145-fps24-seed18755",
+      "cases": [
+        {
+          "parameters": {
+            "decodeTileEdge": 192,
+            "decodeOverlap": 64,
+            "attentionChunkSize": 16777216,
+            "transformerWindowSize": 1,
+            "transformerWindowComponent": "dit"
+          },
+          "expectedResult": "passed"
+        }
+      ]
+    },
+    {
+      "name": "mlx-ltx-2-5-bf16-distilled-conv-bounded_transformer_residency-1280x704-f449",
+      "evidenceScope": "authoritative",
+      "backend": "mlx",
+      "loadShape": "deferred_materialization",
+      "target": {
+        "provider": "ltx_2_5",
+        "modelId": "ltx_2_5",
+        "tier": "bf16",
+        "mode": "text_to_video",
+        "overlay": "none",
+        "transformerVariant": "distilled",
+        "decoder": "conv",
+        "geometry": {
+          "width": 1280,
+          "height": 704,
+          "batch": 1,
+          "frames": 449
+        }
+      },
+      "rung": "bounded_transformer_residency",
+      "engagedRungs": [
+        "resident",
+        "staged_residency",
+        "bounded_decode",
+        "bounded_attention",
+        "bounded_transformer_residency"
+      ],
+      "calibrationFingerprint": "sc-18797-ltx-2-5-mlx-ladder-v1",
+      "fixture": "ltx-2-5-mlx-bf16-distilled-conv-1280x704-f449-fps30-seed18755",
+      "cases": [
+        {
+          "parameters": {
+            "decodeTileEdge": 192,
+            "decodeOverlap": 64,
+            "attentionChunkSize": 16777216,
+            "transformerWindowSize": 1,
+            "transformerWindowComponent": "dit"
+          },
+          "expectedResult": "passed"
+        }
+      ]
+    },
+    {
+      "name": "mlx-ltx-2-5-bf16-distilled-conv-bounded_transformer_residency-704x1280-f449",
+      "evidenceScope": "authoritative",
+      "backend": "mlx",
+      "loadShape": "deferred_materialization",
+      "target": {
+        "provider": "ltx_2_5",
+        "modelId": "ltx_2_5",
+        "tier": "bf16",
+        "mode": "text_to_video",
+        "overlay": "none",
+        "transformerVariant": "distilled",
+        "decoder": "conv",
+        "geometry": {
+          "width": 704,
+          "height": 1280,
+          "batch": 1,
+          "frames": 449
+        }
+      },
+      "rung": "bounded_transformer_residency",
+      "engagedRungs": [
+        "resident",
+        "staged_residency",
+        "bounded_decode",
+        "bounded_attention",
+        "bounded_transformer_residency"
+      ],
+      "calibrationFingerprint": "sc-18797-ltx-2-5-mlx-ladder-v1",
+      "fixture": "ltx-2-5-mlx-bf16-distilled-conv-704x1280-f449-fps30-seed18755",
+      "cases": [
+        {
+          "parameters": {
+            "decodeTileEdge": 192,
+            "decodeOverlap": 64,
+            "attentionChunkSize": 16777216,
+            "transformerWindowSize": 1,
+            "transformerWindowComponent": "dit"
+          },
+          "expectedResult": "passed"
+        }
+      ]
+    },
+    {
+      "name": "mlx-ltx-2-5-bf16-distilled-diffvae-bounded_transformer_residency-768x512-f145",
+      "evidenceScope": "authoritative",
+      "backend": "mlx",
+      "loadShape": "deferred_materialization",
+      "target": {
+        "provider": "ltx_2_5",
+        "modelId": "ltx_2_5",
+        "tier": "bf16",
+        "mode": "text_to_video",
+        "overlay": "none",
+        "transformerVariant": "distilled",
+        "decoder": "diffvae",
+        "geometry": {
+          "width": 768,
+          "height": 512,
+          "batch": 1,
+          "frames": 145
+        }
+      },
+      "rung": "bounded_transformer_residency",
+      "engagedRungs": [
+        "resident",
+        "staged_residency",
+        "bounded_attention",
+        "bounded_transformer_residency"
+      ],
+      "calibrationFingerprint": "sc-18797-ltx-2-5-mlx-ladder-v1",
+      "fixture": "ltx-2-5-mlx-bf16-distilled-diffvae-768x512-f145-fps24-seed18755",
+      "cases": [
+        {
+          "parameters": {
+            "attentionChunkSize": 16777216,
+            "transformerWindowSize": 1,
+            "transformerWindowComponent": "dit"
+          },
+          "expectedResult": "passed"
+        }
+      ]
+    },
+    {
+      "name": "mlx-ltx-2-5-bf16-distilled-diffvae-bounded_transformer_residency-512x768-f145",
+      "evidenceScope": "authoritative",
+      "backend": "mlx",
+      "loadShape": "deferred_materialization",
+      "target": {
+        "provider": "ltx_2_5",
+        "modelId": "ltx_2_5",
+        "tier": "bf16",
+        "mode": "text_to_video",
+        "overlay": "none",
+        "transformerVariant": "distilled",
+        "decoder": "diffvae",
+        "geometry": {
+          "width": 512,
+          "height": 768,
+          "batch": 1,
+          "frames": 145
+        }
+      },
+      "rung": "bounded_transformer_residency",
+      "engagedRungs": [
+        "resident",
+        "staged_residency",
+        "bounded_attention",
+        "bounded_transformer_residency"
+      ],
+      "calibrationFingerprint": "sc-18797-ltx-2-5-mlx-ladder-v1",
+      "fixture": "ltx-2-5-mlx-bf16-distilled-diffvae-512x768-f145-fps24-seed18755",
+      "cases": [
+        {
+          "parameters": {
+            "attentionChunkSize": 16777216,
+            "transformerWindowSize": 1,
+            "transformerWindowComponent": "dit"
+          },
+          "expectedResult": "passed"
+        }
+      ]
+    },
+    {
+      "name": "mlx-ltx-2-5-bf16-distilled-diffvae-bounded_transformer_residency-640x640-f145",
+      "evidenceScope": "authoritative",
+      "backend": "mlx",
+      "loadShape": "deferred_materialization",
+      "target": {
+        "provider": "ltx_2_5",
+        "modelId": "ltx_2_5",
+        "tier": "bf16",
+        "mode": "text_to_video",
+        "overlay": "none",
+        "transformerVariant": "distilled",
+        "decoder": "diffvae",
+        "geometry": {
+          "width": 640,
+          "height": 640,
+          "batch": 1,
+          "frames": 145
+        }
+      },
+      "rung": "bounded_transformer_residency",
+      "engagedRungs": [
+        "resident",
+        "staged_residency",
+        "bounded_attention",
+        "bounded_transformer_residency"
+      ],
+      "calibrationFingerprint": "sc-18797-ltx-2-5-mlx-ladder-v1",
+      "fixture": "ltx-2-5-mlx-bf16-distilled-diffvae-640x640-f145-fps24-seed18755",
+      "cases": [
+        {
+          "parameters": {
+            "attentionChunkSize": 16777216,
+            "transformerWindowSize": 1,
+            "transformerWindowComponent": "dit"
+          },
+          "expectedResult": "passed"
+        }
+      ]
+    },
+    {
+      "name": "mlx-ltx-2-5-bf16-distilled-diffvae-bounded_transformer_residency-1280x704-f145",
+      "evidenceScope": "authoritative",
+      "backend": "mlx",
+      "loadShape": "deferred_materialization",
+      "target": {
+        "provider": "ltx_2_5",
+        "modelId": "ltx_2_5",
+        "tier": "bf16",
+        "mode": "text_to_video",
+        "overlay": "none",
+        "transformerVariant": "distilled",
+        "decoder": "diffvae",
+        "geometry": {
+          "width": 1280,
+          "height": 704,
+          "batch": 1,
+          "frames": 145
+        }
+      },
+      "rung": "bounded_transformer_residency",
+      "engagedRungs": [
+        "resident",
+        "staged_residency",
+        "bounded_attention",
+        "bounded_transformer_residency"
+      ],
+      "calibrationFingerprint": "sc-18797-ltx-2-5-mlx-ladder-v1",
+      "fixture": "ltx-2-5-mlx-bf16-distilled-diffvae-1280x704-f145-fps24-seed18755",
+      "cases": [
+        {
+          "parameters": {
+            "attentionChunkSize": 16777216,
+            "transformerWindowSize": 1,
+            "transformerWindowComponent": "dit"
+          },
+          "expectedResult": "passed"
+        }
+      ]
+    },
+    {
+      "name": "mlx-ltx-2-5-bf16-distilled-diffvae-bounded_transformer_residency-704x1280-f145",
+      "evidenceScope": "authoritative",
+      "backend": "mlx",
+      "loadShape": "deferred_materialization",
+      "target": {
+        "provider": "ltx_2_5",
+        "modelId": "ltx_2_5",
+        "tier": "bf16",
+        "mode": "text_to_video",
+        "overlay": "none",
+        "transformerVariant": "distilled",
+        "decoder": "diffvae",
+        "geometry": {
+          "width": 704,
+          "height": 1280,
+          "batch": 1,
+          "frames": 145
+        }
+      },
+      "rung": "bounded_transformer_residency",
+      "engagedRungs": [
+        "resident",
+        "staged_residency",
+        "bounded_attention",
+        "bounded_transformer_residency"
+      ],
+      "calibrationFingerprint": "sc-18797-ltx-2-5-mlx-ladder-v1",
+      "fixture": "ltx-2-5-mlx-bf16-distilled-diffvae-704x1280-f145-fps24-seed18755",
+      "cases": [
+        {
+          "parameters": {
+            "attentionChunkSize": 16777216,
+            "transformerWindowSize": 1,
+            "transformerWindowComponent": "dit"
+          },
+          "expectedResult": "passed"
+        }
+      ]
+    },
+    {
+      "name": "mlx-ltx-2-5-bf16-distilled-diffvae-bounded_transformer_residency-1280x704-f449",
+      "evidenceScope": "authoritative",
+      "backend": "mlx",
+      "loadShape": "deferred_materialization",
+      "target": {
+        "provider": "ltx_2_5",
+        "modelId": "ltx_2_5",
+        "tier": "bf16",
+        "mode": "text_to_video",
+        "overlay": "none",
+        "transformerVariant": "distilled",
+        "decoder": "diffvae",
+        "geometry": {
+          "width": 1280,
+          "height": 704,
+          "batch": 1,
+          "frames": 449
+        }
+      },
+      "rung": "bounded_transformer_residency",
+      "engagedRungs": [
+        "resident",
+        "staged_residency",
+        "bounded_attention",
+        "bounded_transformer_residency"
+      ],
+      "calibrationFingerprint": "sc-18797-ltx-2-5-mlx-ladder-v1",
+      "fixture": "ltx-2-5-mlx-bf16-distilled-diffvae-1280x704-f449-fps30-seed18755",
+      "cases": [
+        {
+          "parameters": {
+            "attentionChunkSize": 16777216,
+            "transformerWindowSize": 1,
+            "transformerWindowComponent": "dit"
+          },
+          "expectedResult": "passed"
+        }
+      ]
+    },
+    {
+      "name": "mlx-ltx-2-5-bf16-distilled-diffvae-bounded_transformer_residency-704x1280-f449",
+      "evidenceScope": "authoritative",
+      "backend": "mlx",
+      "loadShape": "deferred_materialization",
+      "target": {
+        "provider": "ltx_2_5",
+        "modelId": "ltx_2_5",
+        "tier": "bf16",
+        "mode": "text_to_video",
+        "overlay": "none",
+        "transformerVariant": "distilled",
+        "decoder": "diffvae",
+        "geometry": {
+          "width": 704,
+          "height": 1280,
+          "batch": 1,
+          "frames": 449
+        }
+      },
+      "rung": "bounded_transformer_residency",
+      "engagedRungs": [
+        "resident",
+        "staged_residency",
+        "bounded_attention",
+        "bounded_transformer_residency"
+      ],
+      "calibrationFingerprint": "sc-18797-ltx-2-5-mlx-ladder-v1",
+      "fixture": "ltx-2-5-mlx-bf16-distilled-diffvae-704x1280-f449-fps30-seed18755",
+      "cases": [
+        {
+          "parameters": {
+            "attentionChunkSize": 16777216,
+            "transformerWindowSize": 1,
+            "transformerWindowComponent": "dit"
+          },
+          "expectedResult": "passed"
+        }
+      ]
+    },
+    {
+      "name": "mlx-ltx-2-5-bf16-dev-conv-bounded_attention-768x512-f145",
+      "evidenceScope": "authoritative",
+      "backend": "mlx",
+      "loadShape": "eager_materialization",
+      "target": {
+        "provider": "ltx_2_5",
+        "modelId": "ltx_2_5",
+        "tier": "bf16",
+        "mode": "text_to_video",
+        "overlay": "none",
+        "transformerVariant": "dev",
+        "decoder": "conv",
+        "geometry": {
+          "width": 768,
+          "height": 512,
+          "batch": 1,
+          "frames": 145
+        }
+      },
+      "rung": "bounded_attention",
+      "engagedRungs": [
+        "resident",
+        "staged_residency",
+        "bounded_decode",
+        "bounded_attention"
+      ],
+      "calibrationFingerprint": "sc-18797-ltx-2-5-mlx-ladder-v1",
+      "fixture": "ltx-2-5-mlx-bf16-dev-conv-768x512-f145-fps24-seed18755",
+      "cases": [
+        {
+          "parameters": {
+            "decodeTileEdge": 192,
+            "decodeOverlap": 64,
+            "attentionChunkSize": 16777216
+          },
+          "expectedResult": "passed"
+        }
+      ]
+    },
+    {
+      "name": "mlx-ltx-2-5-bf16-dev-conv-bounded_attention-512x768-f145",
+      "evidenceScope": "authoritative",
+      "backend": "mlx",
+      "loadShape": "eager_materialization",
+      "target": {
+        "provider": "ltx_2_5",
+        "modelId": "ltx_2_5",
+        "tier": "bf16",
+        "mode": "text_to_video",
+        "overlay": "none",
+        "transformerVariant": "dev",
+        "decoder": "conv",
+        "geometry": {
+          "width": 512,
+          "height": 768,
+          "batch": 1,
+          "frames": 145
+        }
+      },
+      "rung": "bounded_attention",
+      "engagedRungs": [
+        "resident",
+        "staged_residency",
+        "bounded_decode",
+        "bounded_attention"
+      ],
+      "calibrationFingerprint": "sc-18797-ltx-2-5-mlx-ladder-v1",
+      "fixture": "ltx-2-5-mlx-bf16-dev-conv-512x768-f145-fps24-seed18755",
+      "cases": [
+        {
+          "parameters": {
+            "decodeTileEdge": 192,
+            "decodeOverlap": 64,
+            "attentionChunkSize": 16777216
+          },
+          "expectedResult": "passed"
+        }
+      ]
+    },
+    {
+      "name": "mlx-ltx-2-5-bf16-dev-conv-bounded_attention-640x640-f145",
+      "evidenceScope": "authoritative",
+      "backend": "mlx",
+      "loadShape": "eager_materialization",
+      "target": {
+        "provider": "ltx_2_5",
+        "modelId": "ltx_2_5",
+        "tier": "bf16",
+        "mode": "text_to_video",
+        "overlay": "none",
+        "transformerVariant": "dev",
+        "decoder": "conv",
+        "geometry": {
+          "width": 640,
+          "height": 640,
+          "batch": 1,
+          "frames": 145
+        }
+      },
+      "rung": "bounded_attention",
+      "engagedRungs": [
+        "resident",
+        "staged_residency",
+        "bounded_decode",
+        "bounded_attention"
+      ],
+      "calibrationFingerprint": "sc-18797-ltx-2-5-mlx-ladder-v1",
+      "fixture": "ltx-2-5-mlx-bf16-dev-conv-640x640-f145-fps24-seed18755",
+      "cases": [
+        {
+          "parameters": {
+            "decodeTileEdge": 192,
+            "decodeOverlap": 64,
+            "attentionChunkSize": 16777216
+          },
+          "expectedResult": "passed"
+        }
+      ]
+    },
+    {
+      "name": "mlx-ltx-2-5-bf16-dev-conv-bounded_attention-1280x704-f145",
+      "evidenceScope": "authoritative",
+      "backend": "mlx",
+      "loadShape": "eager_materialization",
+      "target": {
+        "provider": "ltx_2_5",
+        "modelId": "ltx_2_5",
+        "tier": "bf16",
+        "mode": "text_to_video",
+        "overlay": "none",
+        "transformerVariant": "dev",
+        "decoder": "conv",
+        "geometry": {
+          "width": 1280,
+          "height": 704,
+          "batch": 1,
+          "frames": 145
+        }
+      },
+      "rung": "bounded_attention",
+      "engagedRungs": [
+        "resident",
+        "staged_residency",
+        "bounded_decode",
+        "bounded_attention"
+      ],
+      "calibrationFingerprint": "sc-18797-ltx-2-5-mlx-ladder-v1",
+      "fixture": "ltx-2-5-mlx-bf16-dev-conv-1280x704-f145-fps24-seed18755",
+      "cases": [
+        {
+          "parameters": {
+            "decodeTileEdge": 192,
+            "decodeOverlap": 64,
+            "attentionChunkSize": 16777216
+          },
+          "expectedResult": "passed"
+        }
+      ]
+    },
+    {
+      "name": "mlx-ltx-2-5-bf16-dev-conv-bounded_attention-704x1280-f145",
+      "evidenceScope": "authoritative",
+      "backend": "mlx",
+      "loadShape": "eager_materialization",
+      "target": {
+        "provider": "ltx_2_5",
+        "modelId": "ltx_2_5",
+        "tier": "bf16",
+        "mode": "text_to_video",
+        "overlay": "none",
+        "transformerVariant": "dev",
+        "decoder": "conv",
+        "geometry": {
+          "width": 704,
+          "height": 1280,
+          "batch": 1,
+          "frames": 145
+        }
+      },
+      "rung": "bounded_attention",
+      "engagedRungs": [
+        "resident",
+        "staged_residency",
+        "bounded_decode",
+        "bounded_attention"
+      ],
+      "calibrationFingerprint": "sc-18797-ltx-2-5-mlx-ladder-v1",
+      "fixture": "ltx-2-5-mlx-bf16-dev-conv-704x1280-f145-fps24-seed18755",
+      "cases": [
+        {
+          "parameters": {
+            "decodeTileEdge": 192,
+            "decodeOverlap": 64,
+            "attentionChunkSize": 16777216
+          },
+          "expectedResult": "passed"
+        }
+      ]
+    },
+    {
+      "name": "mlx-ltx-2-5-bf16-dev-conv-bounded_attention-1280x704-f449",
+      "evidenceScope": "authoritative",
+      "backend": "mlx",
+      "loadShape": "eager_materialization",
+      "target": {
+        "provider": "ltx_2_5",
+        "modelId": "ltx_2_5",
+        "tier": "bf16",
+        "mode": "text_to_video",
+        "overlay": "none",
+        "transformerVariant": "dev",
+        "decoder": "conv",
+        "geometry": {
+          "width": 1280,
+          "height": 704,
+          "batch": 1,
+          "frames": 449
+        }
+      },
+      "rung": "bounded_attention",
+      "engagedRungs": [
+        "resident",
+        "staged_residency",
+        "bounded_decode",
+        "bounded_attention"
+      ],
+      "calibrationFingerprint": "sc-18797-ltx-2-5-mlx-ladder-v1",
+      "fixture": "ltx-2-5-mlx-bf16-dev-conv-1280x704-f449-fps30-seed18755",
+      "cases": [
+        {
+          "parameters": {
+            "decodeTileEdge": 192,
+            "decodeOverlap": 64,
+            "attentionChunkSize": 16777216
+          },
+          "expectedResult": "passed"
+        }
+      ]
+    },
+    {
+      "name": "mlx-ltx-2-5-bf16-dev-conv-bounded_attention-704x1280-f449",
+      "evidenceScope": "authoritative",
+      "backend": "mlx",
+      "loadShape": "eager_materialization",
+      "target": {
+        "provider": "ltx_2_5",
+        "modelId": "ltx_2_5",
+        "tier": "bf16",
+        "mode": "text_to_video",
+        "overlay": "none",
+        "transformerVariant": "dev",
+        "decoder": "conv",
+        "geometry": {
+          "width": 704,
+          "height": 1280,
+          "batch": 1,
+          "frames": 449
+        }
+      },
+      "rung": "bounded_attention",
+      "engagedRungs": [
+        "resident",
+        "staged_residency",
+        "bounded_decode",
+        "bounded_attention"
+      ],
+      "calibrationFingerprint": "sc-18797-ltx-2-5-mlx-ladder-v1",
+      "fixture": "ltx-2-5-mlx-bf16-dev-conv-704x1280-f449-fps30-seed18755",
+      "cases": [
+        {
+          "parameters": {
+            "decodeTileEdge": 192,
+            "decodeOverlap": 64,
+            "attentionChunkSize": 16777216
+          },
+          "expectedResult": "passed"
+        }
+      ]
+    },
+    {
+      "name": "mlx-ltx-2-5-bf16-dev-diffvae-bounded_attention-768x512-f145",
+      "evidenceScope": "authoritative",
+      "backend": "mlx",
+      "loadShape": "eager_materialization",
+      "target": {
+        "provider": "ltx_2_5",
+        "modelId": "ltx_2_5",
+        "tier": "bf16",
+        "mode": "text_to_video",
+        "overlay": "none",
+        "transformerVariant": "dev",
+        "decoder": "diffvae",
+        "geometry": {
+          "width": 768,
+          "height": 512,
+          "batch": 1,
+          "frames": 145
+        }
+      },
+      "rung": "bounded_attention",
+      "engagedRungs": [
+        "resident",
+        "staged_residency",
+        "bounded_attention"
+      ],
+      "calibrationFingerprint": "sc-18797-ltx-2-5-mlx-ladder-v1",
+      "fixture": "ltx-2-5-mlx-bf16-dev-diffvae-768x512-f145-fps24-seed18755",
+      "cases": [
+        {
+          "parameters": {
+            "attentionChunkSize": 16777216
+          },
+          "expectedResult": "passed"
+        }
+      ]
+    },
+    {
+      "name": "mlx-ltx-2-5-bf16-dev-diffvae-bounded_attention-512x768-f145",
+      "evidenceScope": "authoritative",
+      "backend": "mlx",
+      "loadShape": "eager_materialization",
+      "target": {
+        "provider": "ltx_2_5",
+        "modelId": "ltx_2_5",
+        "tier": "bf16",
+        "mode": "text_to_video",
+        "overlay": "none",
+        "transformerVariant": "dev",
+        "decoder": "diffvae",
+        "geometry": {
+          "width": 512,
+          "height": 768,
+          "batch": 1,
+          "frames": 145
+        }
+      },
+      "rung": "bounded_attention",
+      "engagedRungs": [
+        "resident",
+        "staged_residency",
+        "bounded_attention"
+      ],
+      "calibrationFingerprint": "sc-18797-ltx-2-5-mlx-ladder-v1",
+      "fixture": "ltx-2-5-mlx-bf16-dev-diffvae-512x768-f145-fps24-seed18755",
+      "cases": [
+        {
+          "parameters": {
+            "attentionChunkSize": 16777216
+          },
+          "expectedResult": "passed"
+        }
+      ]
+    },
+    {
+      "name": "mlx-ltx-2-5-bf16-dev-diffvae-bounded_attention-640x640-f145",
+      "evidenceScope": "authoritative",
+      "backend": "mlx",
+      "loadShape": "eager_materialization",
+      "target": {
+        "provider": "ltx_2_5",
+        "modelId": "ltx_2_5",
+        "tier": "bf16",
+        "mode": "text_to_video",
+        "overlay": "none",
+        "transformerVariant": "dev",
+        "decoder": "diffvae",
+        "geometry": {
+          "width": 640,
+          "height": 640,
+          "batch": 1,
+          "frames": 145
+        }
+      },
+      "rung": "bounded_attention",
+      "engagedRungs": [
+        "resident",
+        "staged_residency",
+        "bounded_attention"
+      ],
+      "calibrationFingerprint": "sc-18797-ltx-2-5-mlx-ladder-v1",
+      "fixture": "ltx-2-5-mlx-bf16-dev-diffvae-640x640-f145-fps24-seed18755",
+      "cases": [
+        {
+          "parameters": {
+            "attentionChunkSize": 16777216
+          },
+          "expectedResult": "passed"
+        }
+      ]
+    },
+    {
+      "name": "mlx-ltx-2-5-bf16-dev-diffvae-bounded_attention-1280x704-f145",
+      "evidenceScope": "authoritative",
+      "backend": "mlx",
+      "loadShape": "eager_materialization",
+      "target": {
+        "provider": "ltx_2_5",
+        "modelId": "ltx_2_5",
+        "tier": "bf16",
+        "mode": "text_to_video",
+        "overlay": "none",
+        "transformerVariant": "dev",
+        "decoder": "diffvae",
+        "geometry": {
+          "width": 1280,
+          "height": 704,
+          "batch": 1,
+          "frames": 145
+        }
+      },
+      "rung": "bounded_attention",
+      "engagedRungs": [
+        "resident",
+        "staged_residency",
+        "bounded_attention"
+      ],
+      "calibrationFingerprint": "sc-18797-ltx-2-5-mlx-ladder-v1",
+      "fixture": "ltx-2-5-mlx-bf16-dev-diffvae-1280x704-f145-fps24-seed18755",
+      "cases": [
+        {
+          "parameters": {
+            "attentionChunkSize": 16777216
+          },
+          "expectedResult": "passed"
+        }
+      ]
+    },
+    {
+      "name": "mlx-ltx-2-5-bf16-dev-diffvae-bounded_attention-704x1280-f145",
+      "evidenceScope": "authoritative",
+      "backend": "mlx",
+      "loadShape": "eager_materialization",
+      "target": {
+        "provider": "ltx_2_5",
+        "modelId": "ltx_2_5",
+        "tier": "bf16",
+        "mode": "text_to_video",
+        "overlay": "none",
+        "transformerVariant": "dev",
+        "decoder": "diffvae",
+        "geometry": {
+          "width": 704,
+          "height": 1280,
+          "batch": 1,
+          "frames": 145
+        }
+      },
+      "rung": "bounded_attention",
+      "engagedRungs": [
+        "resident",
+        "staged_residency",
+        "bounded_attention"
+      ],
+      "calibrationFingerprint": "sc-18797-ltx-2-5-mlx-ladder-v1",
+      "fixture": "ltx-2-5-mlx-bf16-dev-diffvae-704x1280-f145-fps24-seed18755",
+      "cases": [
+        {
+          "parameters": {
+            "attentionChunkSize": 16777216
+          },
+          "expectedResult": "passed"
+        }
+      ]
+    },
+    {
+      "name": "mlx-ltx-2-5-bf16-dev-diffvae-bounded_attention-1280x704-f449",
+      "evidenceScope": "authoritative",
+      "backend": "mlx",
+      "loadShape": "eager_materialization",
+      "target": {
+        "provider": "ltx_2_5",
+        "modelId": "ltx_2_5",
+        "tier": "bf16",
+        "mode": "text_to_video",
+        "overlay": "none",
+        "transformerVariant": "dev",
+        "decoder": "diffvae",
+        "geometry": {
+          "width": 1280,
+          "height": 704,
+          "batch": 1,
+          "frames": 449
+        }
+      },
+      "rung": "bounded_attention",
+      "engagedRungs": [
+        "resident",
+        "staged_residency",
+        "bounded_attention"
+      ],
+      "calibrationFingerprint": "sc-18797-ltx-2-5-mlx-ladder-v1",
+      "fixture": "ltx-2-5-mlx-bf16-dev-diffvae-1280x704-f449-fps30-seed18755",
+      "cases": [
+        {
+          "parameters": {
+            "attentionChunkSize": 16777216
+          },
+          "expectedResult": "passed"
+        }
+      ]
+    },
+    {
+      "name": "mlx-ltx-2-5-bf16-dev-diffvae-bounded_attention-704x1280-f449",
+      "evidenceScope": "authoritative",
+      "backend": "mlx",
+      "loadShape": "eager_materialization",
+      "target": {
+        "provider": "ltx_2_5",
+        "modelId": "ltx_2_5",
+        "tier": "bf16",
+        "mode": "text_to_video",
+        "overlay": "none",
+        "transformerVariant": "dev",
+        "decoder": "diffvae",
+        "geometry": {
+          "width": 704,
+          "height": 1280,
+          "batch": 1,
+          "frames": 449
+        }
+      },
+      "rung": "bounded_attention",
+      "engagedRungs": [
+        "resident",
+        "staged_residency",
+        "bounded_attention"
+      ],
+      "calibrationFingerprint": "sc-18797-ltx-2-5-mlx-ladder-v1",
+      "fixture": "ltx-2-5-mlx-bf16-dev-diffvae-704x1280-f449-fps30-seed18755",
+      "cases": [
+        {
+          "parameters": {
+            "attentionChunkSize": 16777216
+          },
+          "expectedResult": "passed"
+        }
+      ]
+    },
+    {
+      "name": "candle-ltx-2-5-q4-bounded_transformer_residency-768x512-f145",
+      "evidenceScope": "authoritative",
+      "backend": "candle",
+      "loadShape": "deferred_materialization",
+      "target": {
+        "provider": "ltx_2_5_distilled",
+        "modelId": "ltx_2_5",
+        "tier": "q4",
+        "mode": "text_to_video",
+        "overlay": "none",
+        "transformerVariant": "distilled",
+        "decoder": "conv",
+        "geometry": {
+          "width": 768,
+          "height": 512,
+          "batch": 1,
+          "frames": 145
+        }
+      },
+      "rung": "bounded_transformer_residency",
+      "engagedRungs": [
+        "resident",
+        "bounded_decode",
+        "bounded_attention",
+        "bounded_transformer_residency"
+      ],
+      "calibrationFingerprint": "sc-18797-ltx-2-5-candle-ladder-v1",
+      "fixture": "ltx-2-5-candle-q4-768x512-f145-fps24-seed18755",
+      "cases": [
+        {
+          "parameters": {
+            "decodeTileEdge": 192,
+            "decodeOverlap": 64,
+            "attentionChunkSize": 16777216,
+            "transformerWindowSize": 1,
+            "transformerWindowComponent": "dit"
+          },
+          "expectedResult": "passed"
+        }
+      ]
     }
   ]
 }

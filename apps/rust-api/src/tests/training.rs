@@ -1,6 +1,118 @@
 //! rust-api training tests (split from tests.rs, sc-11217 F-030).
 use super::support::*;
 
+fn ltx_prepared_bundle_bytes(schema: &str) -> Vec<u8> {
+    let mut header = serde_json::to_vec(&json!({
+        "__metadata__": {
+            "schemaVersion": schema,
+            "videoShape": "[1,128,1,1,1]",
+            "audioShape": "[1,8,1,16]",
+            "fps": "25"
+        },
+        "video_latents": {
+            "dtype": "F32",
+            "shape": [1,128,1,1,1],
+            "data_offsets": [0,512]
+        },
+        "audio_latents": {
+            "dtype": "F32",
+            "shape": [1,8,1,16],
+            "data_offsets": [512,1024]
+        }
+    }))
+    .unwrap();
+    while !header.len().is_multiple_of(8) {
+        header.push(b' ');
+    }
+    let mut bytes = Vec::with_capacity(8 + header.len() + 1024);
+    bytes.extend_from_slice(&(header.len() as u64).to_le_bytes());
+    bytes.extend_from_slice(&header);
+    bytes.resize(bytes.len() + 1024, 0);
+    bytes
+}
+
+fn ltx_workflow_options(name: &str) -> (Option<Value>, Option<Value>) {
+    let generated = || json!({ "isGenerated": true, "conditions": [] });
+    let frozen = || json!({ "isGenerated": false, "conditions": [] });
+    let conditioned = |conditions: Value| json!({ "isGenerated": true, "conditions": conditions });
+    match name {
+        "i2v_lora" => (
+            Some(conditioned(
+                json!([{"type":"firstFrame","probability":0.5}]),
+            )),
+            Some(generated()),
+        ),
+        "t2v_lora" => (Some(generated()), Some(generated())),
+        "v2a_lora" => (Some(frozen()), Some(generated())),
+        "a2v_lora" => (Some(generated()), Some(frozen())),
+        "t2a_lora" => (None, Some(generated())),
+        "video_extend_lora" => (
+            Some(conditioned(
+                json!([{"type":"prefix","probability":1.0,"temporalBoundary":8}]),
+            )),
+            Some(generated()),
+        ),
+        "video_inpainting_lora" => (
+            Some(conditioned(
+                json!([{"type":"mask","probability":1.0,"tensorKey":"video_mask"}]),
+            )),
+            None,
+        ),
+        "video_outpainting_lora" => (
+            Some(conditioned(
+                json!([{"type":"spatialCrop","probability":1.0,"spatialRegion":[0,0,288,576]}]),
+            )),
+            None,
+        ),
+        "video_suffix_lora" => (
+            Some(conditioned(
+                json!([{"type":"suffix","probability":1.0,"temporalBoundary":8}]),
+            )),
+            Some(generated()),
+        ),
+        "audio_extend_lora" => (
+            None,
+            Some(conditioned(
+                json!([{"type":"prefix","probability":1.0,"temporalBoundary":8}]),
+            )),
+        ),
+        "audio_inpainting_lora" => (
+            None,
+            Some(conditioned(
+                json!([{"type":"mask","probability":1.0,"tensorKey":"audio_mask"}]),
+            )),
+        ),
+        "audio_suffix_lora" => (
+            None,
+            Some(conditioned(
+                json!([{"type":"suffix","probability":1.0,"temporalBoundary":8}]),
+            )),
+        ),
+        "av2av_ic_lora" => (
+            Some(conditioned(
+                json!([{"type":"reference","probability":1.0,"tensorKey":"video_reference"}]),
+            )),
+            Some(conditioned(
+                json!([{"type":"reference","probability":1.0,"tensorKey":"audio_reference"}]),
+            )),
+        ),
+        "v2v_ic_lora" => (
+            Some(conditioned(json!([
+                {"type":"reference","probability":1.0,"tensorKey":"video_reference"},
+                {"type":"firstFrame","probability":0.2}
+            ]))),
+            None,
+        ),
+        "a2a_ic_lora" => (
+            None,
+            Some(conditioned(
+                json!([{"type":"reference","probability":1.0,"tensorKey":"audio_reference"}]),
+            )),
+        ),
+        _ => panic!("unknown workflow fixture {name}"),
+    }
+}
+
 #[test]
 fn platform_effective_training_catalog_preserves_mlx_defaults_and_seeds_candle_limits() {
     let mlx = crate::training::effective_training_targets_for_candle(false);
@@ -882,6 +994,175 @@ async fn training_dataset_uploads_are_dataset_owned_not_assets() {
             .len(),
         0
     );
+}
+
+#[tokio::test]
+async fn ltx_prepared_upload_saves_reopens_and_rejects_wrong_schema() {
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    let (_, project) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/projects",
+        json!({ "name": "LTX prepared project" }),
+    )
+    .await;
+    let project_id = project["id"].as_str().unwrap();
+    let (status, upload) = request_multipart_upload(
+        app.clone(),
+        &format!("/api/v1/projects/{project_id}/training/uploads"),
+        "item.png",
+        "image/png",
+        b"dataset-only-png",
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let (status, dataset) = request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/projects/{project_id}/training/datasets"),
+        json!({
+            "name": "Prepared",
+            "items": [{
+                "path": upload["file"]["path"],
+                "displayName": "item.png",
+                "controlImagePath": "controls/item.png"
+            }]
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{dataset}");
+    let dataset_id = dataset["id"].as_str().unwrap();
+    let item_id = dataset["items"][0]["id"].as_str().unwrap();
+    let endpoint = format!(
+        "/api/v1/projects/{project_id}/training/datasets/{dataset_id}/items/{item_id}/ltx-prepared-bundle"
+    );
+
+    let (status, updated) = request_multipart_upload(
+        app.clone(),
+        &endpoint,
+        "prepared.safetensors",
+        "application/octet-stream",
+        &ltx_prepared_bundle_bytes("ltx-prepared-v1"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{updated}");
+    assert_eq!(
+        updated["items"][0]["ltxPreparedBundlePath"],
+        json!(format!("prepared/{item_id}.safetensors"))
+    );
+    assert!(updated["items"][0]["ltxPreparedBundleSize"]
+        .as_u64()
+        .is_some());
+    assert_eq!(
+        updated["items"][0]["ltxPreparedBundleSha256"]
+            .as_str()
+            .map(str::len),
+        Some(64)
+    );
+    let mut saved_item = updated["items"][0].clone();
+    saved_item["path"] = json!(format!(
+        "training/datasets/{dataset_id}/images/{}.png",
+        item_id
+    ));
+    let (status, updated) = request(
+        app.clone(),
+        "PATCH",
+        &format!("/api/v1/projects/{project_id}/training/datasets/{dataset_id}"),
+        json!({ "items": [saved_item] }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{updated}");
+    assert_eq!(updated["items"][0]["controlImagePath"], "controls/item.png");
+    assert_eq!(
+        updated["items"][0]["ltxPreparedBundleSha256"]
+            .as_str()
+            .map(str::len),
+        Some(64)
+    );
+    let (status, reopened) = request(
+        app.clone(),
+        "GET",
+        &format!("/api/v1/projects/{project_id}/training/datasets/{dataset_id}"),
+        Value::Null,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{reopened}");
+    assert_eq!(
+        reopened["items"][0]["ltxPreparedBundlePath"],
+        updated["items"][0]["ltxPreparedBundlePath"]
+    );
+    assert_eq!(
+        reopened["items"][0]["controlImagePath"],
+        "controls/item.png"
+    );
+
+    let (_, registry) = request(app.clone(), "GET", "/api/v1/training/targets", Value::Null).await;
+    let target = registry["targets"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|target| target["id"] == "ltx_2_5_video_lora")
+        .expect("LTX-2.5 target");
+    let workflows = target["limits"]["ltxWorkflows"].as_array().unwrap();
+    assert_eq!(workflows.len(), 15);
+    for workflow in workflows {
+        let workflow = workflow.as_str().unwrap();
+        let (video, audio) = ltx_workflow_options(workflow);
+        let mut config = target["defaults"].clone();
+        let advanced = config["advanced"].as_object_mut().unwrap();
+        advanced.insert("ltxWorkflow".to_owned(), json!(workflow));
+        match video {
+            Some(value) => {
+                advanced.insert("ltxVideo".to_owned(), value);
+            }
+            None => {
+                advanced.remove("ltxVideo");
+            }
+        }
+        match audio {
+            Some(value) => {
+                advanced.insert("ltxAudio".to_owned(), value);
+            }
+            None => {
+                advanced.remove("ltxAudio");
+            }
+        }
+        let (status, job) = request(
+            app.clone(),
+            "POST",
+            &format!("/api/v1/projects/{project_id}/training/jobs"),
+            json!({
+                "targetId": "ltx_2_5_video_lora",
+                "datasetId": dataset_id,
+                "config": config,
+                "outputName": format!("LTX {workflow}"),
+                "dryRun": true
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "{workflow}: {job}");
+        assert_eq!(
+            job["payload"]["plan"]["config"]["advanced"]["ltxWorkflow"],
+            workflow
+        );
+        assert_eq!(
+            job["payload"]["plan"]["dataset"]["items"][0]["ltxPreparedBundlePath"],
+            updated["items"][0]["ltxPreparedBundlePath"],
+            "{workflow} forwards the prepared item extra"
+        );
+    }
+
+    let (status, error) = request_multipart_upload(
+        app,
+        &endpoint,
+        "wrong.safetensors",
+        "application/octet-stream",
+        &ltx_prepared_bundle_bytes("wrong"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{error}");
+    assert!(error.to_string().contains("ltx-prepared-v1"));
 }
 
 #[tokio::test]
@@ -3652,6 +3933,64 @@ fn ltx_training_resolves_and_requires_the_turnkey_q4_tier() {
         training_base_model_status(&data_dir, &target),
         TrainingBaseStatus::TrainingTierMissing,
         "a torn Gemma co-requisite must block the real run before the worker claims it"
+    );
+    let message = training_base_unavailable_message(
+        TrainingBaseStatus::TrainingTierMissing,
+        &target.base_model,
+    )
+    .expect("missing tier blocks");
+    assert!(message.contains("packed q4"), "{message}");
+}
+
+#[test]
+fn ltx25_training_resolves_and_requires_the_nested_dev_q4_tier() {
+    let _env = isolate_hf_cache();
+    let temp = tempfile::tempdir().expect("tempdir");
+    let data_dir = temp.path().join("data");
+    let target = crate::builtin_training_targets()
+        .targets
+        .into_iter()
+        .find(|target| target.id == "ltx_2_5_video_lora")
+        .expect("LTX-2.5 training target");
+    let repo = target.base_model_repo.as_deref().expect("turnkey repo");
+    let repo_root = huggingface_repo_cache_path(&data_dir, repo).expect("repo cache path");
+    let revision = "ltx25-q4-training";
+    let snapshot = repo_root.join("snapshots").join(revision);
+    let q4 = snapshot.join("dev").join("q4");
+    std::fs::create_dir_all(&q4).expect("nested q4 tier");
+    for file in [
+        "split_model.json",
+        "transformer.safetensors",
+        "connector.safetensors",
+        "text_encoder.safetensors",
+        "vae_decoder.safetensors",
+        "vae_encoder.safetensors",
+        "diffusion_vae_encoder.safetensors",
+        "vae_diffusion_decoder.safetensors",
+        "audio_vae.safetensors",
+        "vocoder.safetensors",
+        "spatial_upsampler.safetensors",
+        "temporal_upsampler.safetensors",
+        "duration_head.safetensors",
+    ] {
+        std::fs::write(q4.join(file), "x").expect("q4 training component");
+    }
+    std::fs::create_dir_all(repo_root.join("refs")).expect("refs");
+    std::fs::write(repo_root.join("refs").join("main"), revision).expect("refs/main");
+
+    assert_eq!(
+        training_base_model_status(&data_dir, &target),
+        TrainingBaseStatus::Ready
+    );
+    assert_eq!(
+        resolve_base_model_path(&target, &data_dir),
+        q4.display().to_string()
+    );
+
+    std::fs::remove_file(q4.join("text_encoder.safetensors")).expect("tear 2.5 tier");
+    assert_eq!(
+        training_base_model_status(&data_dir, &target),
+        TrainingBaseStatus::TrainingTierMissing
     );
     let message = training_base_unavailable_message(
         TrainingBaseStatus::TrainingTierMissing,
