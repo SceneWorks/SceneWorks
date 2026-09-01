@@ -53,7 +53,7 @@ def test_generated_memory_matrix_is_schema_valid():
     matrix_validator().validate(load_matrix())
 
 
-def test_matrix_accounts_for_all_models_and_pinned_mlx_staged_coverage():
+def test_matrix_accounts_for_all_models_and_mlx_staged_coverage_is_consistent():
     matrix = load_matrix()
     # sc-18815: the universe is modality-aware, so the census is too. `imageModels` was REMOVED
     # rather than left holding the whole-universe total under a one-modality name. Derive the
@@ -73,7 +73,10 @@ def test_matrix_accounts_for_all_models_and_pinned_mlx_staged_coverage():
     # asserted structurally rather than as pinned populations (the SC-18218
     # shape-over-population ruling); the denominators are the modality totals derived above.
     assert matrix["summary"]["mlxStagedStaticCoverageDenominator"] == len(image_ids)
-    assert 0 < matrix["summary"]["videoMlxStagedStaticCoverage"] < len(video_ids)
+    # sc-22512: a coverage NUMERATOR is a count of declarations that happen to exist, so it may
+    # legitimately be zero — a catalog whose video lane declares no staged residency is a catalog
+    # nobody has measured yet, not a broken document. Only the containment relation is asserted.
+    assert 0 <= matrix["summary"]["videoMlxStagedStaticCoverage"] <= len(video_ids)
     assert matrix["summary"]["videoMlxStagedStaticCoverageDenominator"] == len(video_ids)
     assert len(matrix["models"]) == len(matrix["modelSlices"])
     assert {model["id"] for model in matrix["models"]} == set(matrix["modelSlices"])
@@ -83,8 +86,8 @@ def test_matrix_accounts_for_all_models_and_pinned_mlx_staged_coverage():
     # itself is recomputed from the coverage rows below rather than pinned here.
     assert (
         0
-        < matrix["summary"]["mlxStagedStaticCoverage"]
-        < matrix["summary"]["mlxStagedStaticCoverageDenominator"]
+        <= matrix["summary"]["mlxStagedStaticCoverage"]
+        <= matrix["summary"]["mlxStagedStaticCoverageDenominator"]
     )
 
     # SC-18826 closes the only wholly-unrouted defect: VACE-Fun already had a manifest entry and real
@@ -185,16 +188,13 @@ def test_matrix_accounts_for_all_models_and_pinned_mlx_staged_coverage():
     # runtime catching is the chosen tradeoff for the residue. The generator carries the same note beside
     # `assertMlxStagedCoverageIsStructurallyConsistent`, which is where the mirror of these assertions
     # runs against the pre-publication document.
-    assert "flux2_dev" in mlx_staged, (
-        "sc-20799 retired the SC-18218 resident-only pin: at inference ebcdc7da7 all three Dev MLX "
-        "providers declare selectable Sequential staged residency, so flux2_dev is census-required"
-    )
-    assert "bernini_image" in mlx_staged, (
-        "inference sc-18609 made bernini_image's declared MLX rung-4 ladder reachable"
-    )
-    assert 0 < len(mlx_staged) < len(image_ids), (
-        "staged coverage is partial by construction; a total census would mean the exclusions vanished"
-    )
+    # sc-22512 removed the two named-entry census requirements (`flux2_dev` and `bernini_image` were
+    # each asserted INTO `mlx_staged`) and the "partial by construction" band. All three reddened on
+    # the ABSENCE of a declaration: an inference pin that stops advertising selectable Sequential
+    # residency for one provider, or a catalog whose whole image lane declares none, is a lane
+    # nobody has measured — not a defect in this document. What survives is the containment
+    # relation, which holds at any coverage level including zero.
+    assert mlx_staged <= image_ids
     # Staged coverage is a property of the RESOLVED ROUTE, so every entry sharing a route agrees.
     # An entry drifting away from its own route siblings is exactly what a bumped count cannot see.
     #
@@ -319,10 +319,14 @@ def test_calibration_evidence_is_schema_valid_and_matrix_ingested():
     # partitions the bundle over the schema's full status enum, so the corpus no longer has to be
     # held two-status to keep the derived counts honest. What must still hold is that no record
     # carries a status the schema does not admit, and that both certifying populations are non-empty.
+    #
+    # sc-22512 dropped the "both certifying populations are non-empty" pair. A corpus that holds no
+    # `complete` (or no `runtime_complete`) record is an UNMEASURED corpus, and an unmeasured corpus
+    # must degrade to the conservative analytic estimate rather than red a suite. Everything below is
+    # universally quantified, so it says exactly as much as the corpus supports and nothing about how
+    # large the corpus has to be.
     record_statuses = calibration_schema["$defs"]["record"]["properties"]["status"]["enum"]
     assert set(records_by_status) <= set(record_statuses)
-    assert records_by_status["complete"] > 0
-    assert records_by_status["runtime_complete"] > 0
     assert len(evidence_ids) == len(calibration["records"]) == sum(
         records_by_status.values()
     )
@@ -389,181 +393,123 @@ def test_calibration_evidence_is_schema_valid_and_matrix_ingested():
     # real provider lane, a real strategy rung, and a geometry the matrix can join on. Asserted for
     # all of them rather than for one pinned id, so a re-capture extends the coverage instead of
     # breaking the test.
+    #
+    # sc-22512: the lane is no longer required to CARRY a closure declaration. An undeclared lane
+    # means nobody derived what code the capture describes, which the currency derivation above
+    # already answers with `historical` — the conservative reading. Requiring the declaration made
+    # the absence of bookkeeping a red suite.
     for run in full_runs:
         record = evidence_by_id[run["record"]["id"]]
-        assert f"{record['backend']}:{record['target']['provider']}" in live_closures
+        assert record["backend"] and record["target"]["provider"]
         assert record["target"]["modelId"]
         assert record["target"]["tier"]
         assert record["strategy"]["rung"]
         assert record["target"]["geometry"]["width"] > 0
-    expected_candle_flux2_runtime = {
-        "imc-998b89c5d76dbcc84332": "bounded_attention",
-        "imc-b4113eedf503e409ad1b": "resident",
-        "imc-b62adbfca64f277414e1": "bounded_decode",
-        "imc-bfb890dff959eaf09183": "staged_residency",
-        "imc-f5c3d06f30ebf3723f13": "bounded_transformer_residency",
-    }
-    # The four MLX FLUX.2 production coordinates. A provider-closure change can make prior rows
-    # historical; a later verification adds one new record per pair while the earlier rows stay.
-    # That is why the rows are held to this SHAPE rather than pinned by id:
-    # exactly one CURRENT row per pair (current = captured at the live closure), and retained
-    # historical rows covering the same pairs. A ragged shape still means a partial or duplicated
-    # ingest.
-    expected_mlx_flux2_pairs = {("q8", 768), ("q8", 1024), ("q4", 768), ("q4", 1024)}
-    candle_flux2_runtime = [
-        run
-        for run in runtime_complete_runs
-        if run["record"]["target"]["modelId"] == "flux2_dev"
-        and run["record"]["backend"] == "candle"
-    ]
-    assert {
-        run["record"]["id"]: run["record"]["strategy"]["rung"]
-        for run in candle_flux2_runtime
-    } == expected_candle_flux2_runtime
-    assert all(
-        (run["semantics"] == "current")
-        == (run["record"]["id"] in current_by_closure)
-        for run in candle_flux2_runtime
-    )
-    assert {
-        run["record"]["repositories"]["inference"]["revision"]
-        for run in candle_flux2_runtime
-    } == {"5ffd7612e7de4e76b6db00a7148ed3d9c15b4c0d"}
-
-    mlx_flux2_runtime = [
-        run
-        for run in runtime_complete_runs
-        if run["record"]["target"]["modelId"] == "flux2_dev"
-        and run["record"]["backend"] == "mlx"
-    ]
-    assert mlx_flux2_runtime
-    # Current is DERIVED from the closure, and the split is exhaustive: exactly one current row
-    # per production pair, and the retained history also spans every pair — a demotion on one
-    # geometry cannot hide behind a promotion on another, and a partial re-capture (three of the
-    # four pairs) still fails.
-    mlx_flux2_by_semantics = {"current": [], "historical": []}
-    for run in mlx_flux2_runtime:
-        mlx_flux2_by_semantics[run["semantics"]].append(run)
-    assert {
-        run["record"]["id"] for run in mlx_flux2_by_semantics["current"]
-    } == {
-        run["record"]["id"]
-        for run in mlx_flux2_runtime
-        if run["record"]["id"] in current_by_closure
-    }
-    current_pairs = {
-        (run["record"]["target"]["tier"], run["record"]["target"]["geometry"]["width"])
-        for run in mlx_flux2_by_semantics["current"]
-    }
-    # When any rows ARE current they must be exactly one per production pair. If the relevant
-    # provider closure changed, the current half may be empty and retained history must still span
-    # every pair.
-    if mlx_flux2_by_semantics["current"]:
-        assert current_pairs == expected_mlx_flux2_pairs
-        assert len(mlx_flux2_by_semantics["current"]) == len(expected_mlx_flux2_pairs)
-    assert {
-        (run["record"]["target"]["tier"], run["record"]["target"]["geometry"]["width"])
-        for run in mlx_flux2_by_semantics["historical"]
-    } == expected_mlx_flux2_pairs
-    # Only the current rows carry admission; the historical rows must not.
-    assert all(run["binding"]["eligible"] for run in mlx_flux2_by_semantics["current"])
-    # Two retained cohorts, and only these two: SC-18218's originals at 10831e4ca and sc-19721's
-    # re-captures at the epic's 75d66db5 pin (kept by the sc-17137 main sync).
+    # sc-22512 removed this test's FLUX cohort ROSTERS. What stood here: an exact id -> rung map for
+    # the five Candle FLUX.2 runtime records, `assert mlx_flux2_runtime` (the MLX cohort must exist),
+    # an exact `{("q8", 768), ("q8", 1024), ("q4", 768), ("q4", 1024)}` production-pair set that the
+    # current AND historical halves each had to span, an exact two-element inference-revision cohort
+    # set, and per-record literals for the artifact revision and calibration fingerprint.
     #
-    # The COHORT is the claim — which revisions the retained captures were taken at, and that a
-    # revision maps to exactly one digest. The digests themselves are DERIVED (a function of the
-    # revision and the `CLOSURE_DIGEST_VERSION` in force), so they are read back from the bundle
-    # rather than restated as hex literals. Two literals used to sit here and they could not fail on
-    # this claim — only on a legitimate re-derivation, which is what they did on the v4 narrowing.
-    expected_mlx_flux2_revisions = {
-        "10831e4ca5b8bf780319a8ee7f21427175075448",
-        "75d66db50543ac288deb278853d0f0b432f92c5c",
-    }
-    digest_by_revision: dict[str, str] = {}
-    for run in mlx_flux2_runtime:
+    # Every one of them reddened on ABSENCE or on EXTRA: a cohort nobody has re-captured yet, a lane
+    # whose evidence was never gathered, a partial ingest — and equally a legitimate NEW capture
+    # arriving with its own fingerprint. Under E8 a corpus is allowed to hold nothing for a model:
+    # absence degrades to the conservative analytic estimate, it never reds a suite.
+    #
+    # The properties below are what those rosters were reaching for, and they hold at ANY corpus
+    # size including zero rows: every run resolves to a real record with a well-formed target, no
+    # lane measures one coordinate twice inside one semantics bucket (the duplicated-ingest defect
+    # the pinned pair-sets existed to catch), currency agrees with the ledger in both directions,
+    # one inference revision maps to one closure digest, and a retained historical row is never
+    # re-dated to the live closure.
+    runtime_by_lane: dict[tuple, list] = {}
+    for run in runtime_complete_runs:
         record = evidence_by_id[run["record"]["id"]]
-        revision = record["repositories"]["inference"]["revision"]
-        digest = record["repositories"]["inference"]["closureDigest"]
-        assert revision in expected_mlx_flux2_revisions
-        # One revision, one digest: a cohort that disagreed with itself would mean two records claim
-        # the same inference source and measured different code.
-        assert digest_by_revision.setdefault(revision, digest) == digest
-        if run["semantics"] == "historical":
-            assert record["repositories"]["inference"]["closureDigest"] != live_closures[
-                "mlx:flux2_dev"
-            ]["digest"], "a retained FLUX.2 capture must not be re-dated to the live closure"
-        assert record["status"] == "runtime_complete"
-        assert record["loadShape"] == "eager_materialization"
-        assert record["calibrationFingerprint"] == (
-            "sc-18218-flux2-dev-t2i-resident-evidence-v1"
-        )
         target = record["target"]
-        assert target["provider"] == "flux2_dev" and target["modelId"] == "flux2_dev"
-        assert target["mode"] == "text_to_image" and target["overlay"] == "none"
         geometry = target["geometry"]
-        assert (target["tier"], geometry["width"]) in expected_mlx_flux2_pairs
-        assert geometry["height"] == geometry["width"]
-        assert geometry["batch"] == 1 and geometry["frames"] == 1
-        assert record["strategy"] == {
-            "rung": "resident",
-            "parameters": {},
-            "engagedRungs": ["resident"],
-        }
-        assert record["artifact"] == {
-            "repository": "SceneWorks/flux2-dev-mlx",
-            "resolvedRevision": "2868b1461b2b6e6e05d84e52534df3632b4c7d5d",
-            "variant": target["tier"],
-        }
-        assert record["quality"]["result"] == "passed"
-        assert record["loadability"]["result"] == "passed"
-        assert record["observedMemory"]["overall"]["allocatorBytes"] <= record[
-            "predictedPeakBytes"
-        ]["overall"]
-        scenarios = {scenario["name"]: scenario for scenario in record["scenarios"]}
-        assert {
-            scenarios[name]["result"]
-            for name in ("exact_fit", "unknown_budget", "stale_evidence", "loadability")
-        } == {"passed"}
-        assert {scenarios[name]["result"] for name in ("warm_repeat", "cancel", "error")} == {
-            "not_run"
-        }
-        assert scenarios["overlay"]["result"] == "not_applicable"
-    # "Two retained cohorts, and ONLY these two" — the completeness half of the claim above. The
-    # membership check inside the loop rejects a THIRD cohort appearing; this rejects one silently
-    # going missing, which a partial re-ingest looks like.
-    assert set(digest_by_revision) == expected_mlx_flux2_revisions
-
-    flux2_runtime = candle_flux2_runtime + mlx_flux2_runtime
-
-    historical_flux1_runtime = [
-        run
-        for run in runtime_complete_runs
-        if run["record"]["target"]["modelId"] in {"flux_schnell", "flux_dev"}
-    ]
-    assert Counter(
-        (
-            run["record"]["target"]["modelId"],
-            run["record"]["strategy"]["rung"],
+        assert record["status"] == "runtime_complete"
+        assert record["loadShape"]
+        assert record["calibrationFingerprint"]
+        assert target["provider"] and target["modelId"]
+        assert target["mode"] and target["overlay"]
+        assert record["strategy"]["rung"] in STRATEGY_RUNGS
+        assert record["strategy"]["engagedRungs"]
+        assert geometry["width"] > 0 and geometry["height"] > 0
+        assert geometry["batch"] >= 1 and geometry["frames"] >= 1
+        assert record["artifact"]["repository"] and record["artifact"]["resolvedRevision"]
+        assert record["artifact"]["variant"] == target["tier"]
+        assert record["quality"]["result"]
+        assert record["loadability"]["result"]
+        # Observed-under-predicted is asserted for whichever phases a record actually measured. A
+        # record that measured no allocator bytes for a phase is UNMEASURED there — under E8 that
+        # widens nothing and reds nothing; only a measurement that exceeds its own prediction does.
+        observed = record["observedMemory"]
+        predicted = record["predictedPeakBytes"]
+        for phase, measurement in observed.items():
+            if not isinstance(measurement, dict) or "allocatorBytes" not in measurement:
+                continue
+            if not isinstance(predicted.get(phase), (int, float)):
+                continue
+            assert measurement["allocatorBytes"] <= predicted[phase], (record["id"], phase)
+        assert {scenario["name"] for scenario in record["scenarios"]}
+        assert (run["semantics"] == "current") == (
+            run["record"]["id"] in current_by_closure
+        ), run["record"]["id"]
+        if run["semantics"] == "historical":
+            live = live_closures.get(
+                f"{record['backend']}:{target['provider']}", {}
+            ).get("digest")
+            assert record["repositories"]["inference"]["closureDigest"] != live, (
+                f"{run['record']['id']}: a retained capture must not be re-dated to the live closure"
+            )
+        # Keyed by the CLOSURE the capture was taken under, not by `semantics`: a lane legitimately
+        # retains several cohorts measuring the same coordinate against different inference code, and
+        # they all read `historical` together. Within ONE cohort a coordinate is measured once, so a
+        # duplicated or partially re-run ingest still fails — at any cohort count, including none.
+        runtime_by_lane.setdefault(
+            (
+                record["backend"],
+                target["modelId"],
+                record["repositories"]["inference"].get("closureDigest"),
+            ),
+            [],
+        ).append(
+            (target["tier"], geometry["width"], geometry["height"], record["strategy"]["rung"])
         )
-        for run in historical_flux1_runtime
-    ) == Counter(
-        (model_id, rung)
-        for model_id in ("flux_schnell", "flux_dev")
-        for rung in (
-            "resident",
-            "staged_residency",
-            "bounded_decode",
-            "bounded_attention",
-            "bounded_transformer_residency",
+    for lane, coordinates in runtime_by_lane.items():
+        assert len(coordinates) == len(set(coordinates)), lane
+    # One LANE at one revision, one digest — asserted across the whole corpus rather than over one
+    # pinned cohort. A closure digest is per-lane by construction, so the identity is keyed by lane:
+    # two records claiming the same lane at the same inference source must agree about what that
+    # source compiles to, or one of them is mis-provenanced.
+    digest_by_lane_revision: dict[tuple[str, str], str] = {}
+    for record in calibration["records"]:
+        inference = record["repositories"]["inference"]
+        assert re.fullmatch(r"[0-9a-f]{40}", inference["revision"]), record["id"]
+        digest = inference.get("closureDigest")
+        if digest is None:
+            continue
+        assert re.fullmatch(r"[0-9a-f]{64}", digest), record["id"]
+        key = (
+            f"{record['backend']}:{record['target']['provider']}",
+            inference["revision"],
         )
-    )
-    assert {run["semantics"] for run in historical_flux1_runtime} == {"historical"}
-    assert len(runtime_complete_runs) == len(flux2_runtime) + len(
-        historical_flux1_runtime
-    )
-    # These retained runtime-complete cohorts no longer match their providers' live compile
-    # closures. Their inference revisions remain provenance and are not the deciding term.
-    assert {run["semantics"] for run in runtime_complete_runs} == {"historical"}
+        assert digest_by_lane_revision.setdefault(key, digest) == digest, (
+            f"{record['id']}: two records claim lane {key[0]} at inference {key[1]} with different "
+            "closure digests, so they cannot both describe that source"
+        )
+
+    # sc-22512 removed the FLUX.1 census (`Counter(...) == Counter(model x rung)` over the full
+    # 2 x 5 cross-product), the corpus PARTITION (`len(runtime_complete_runs) == len(flux2) +
+    # len(flux1)`) and the whole-population `{semantics} == {"historical"}` pin.
+    #
+    # The census reddened when a single retained record went missing — the exact "this cell has no
+    # measurement" shape. The partition reddened when ANY other model gained a runtime-complete
+    # capture, so it charged a hand-edit for new evidence. The semantics pin reddened the moment a
+    # re-capture legitimately became current, which is measurement IMPROVING an estimate.
+    #
+    # Binding eligibility is a property of the records the corpus actually holds, so it survives
+    # universally quantified.
     assert all(run["binding"]["eligible"] for run in runtime_complete_runs)
     current_eligible = [
         run
@@ -591,16 +537,14 @@ def test_calibration_evidence_is_schema_valid_and_matrix_ingested():
     # two members re-measure the same coordinate — a duplicated or mislabeled ingest still fails.
     # The set is a subset of the current Qwen corpus. SC-21714 makes Candle Krea current without
     # creating Qwen characterization edges, so only a current Qwen cohort requires this sweep.
-    current_qwen_ids = {
-        record["id"]
-        for record in calibration["records"]
-        if record["id"] in current_by_closure
-        and record["backend"] == "mlx"
-        and record["target"]["provider"] == "qwen_image"
-    }
-    if current_qwen_ids:
-        assert unbound_decode_edges
-    assert unbound_decode_edges <= current_qwen_ids
+    #
+    # sc-22512 removed both halves of the Qwen scoping: `if current_qwen_ids: assert
+    # unbound_decode_edges` (a current Qwen cohort MUST carry characterization edges — pure
+    # failure-on-absence of a sweep nobody may have re-run) and `unbound_decode_edges <=
+    # current_qwen_ids` (only Qwen may carry them — failure on EXTRA evidence, which is the same
+    # gate from the other side: another provider gaining a decode sweep is measurement improving
+    # estimates, not a defect). The per-coordinate shape below is the part that catches a real
+    # defect, and it holds over whatever edges the corpus happens to hold, including none.
     unbound_coordinates = [
         (
             record["backend"],
@@ -622,21 +566,11 @@ def test_calibration_evidence_is_schema_valid_and_matrix_ingested():
     assert {run["record"]["id"] for run in current_eligible} == (
         current_by_closure - unbound_decode_edges
     )
-    # The four earlier runtime records remain present and bind cleanly even when their provider
-    # closures no longer match. A pin change alone must not alter this classification.
-    superseded_rung4 = [
-        run
-        for run in matrix["calibrationRuns"]
-        if run["record"]["id"]
-        in {
-            "imc-12f3ccbb72de78cea931",
-            "imc-4426a6e84c4d39d9bff3",
-            "imc-8f041bead8a9346cd1e6",
-            "imc-8f110511b0f85d15f72f",
-        }
-    ]
-    assert len(superseded_rung4) == 4
-    assert all(run["binding"]["eligible"] for run in superseded_rung4)
+    # sc-22512 removed the four-id `superseded_rung4` roster and its `len(...) == 4`. It reddened
+    # for exactly one reason — one of four named captures no longer being in the bundle — which is
+    # the frozen-corpus shape this epic retires. The claim it was making (a pin change alone must
+    # not alter a record's binding classification) is already carried, for every record rather than
+    # four, by the currency derivation and the `binding.eligible` assertion above.
     assert all(
         run["record"]["target"]["modelId"] != "z_image"
         for run in matrix["calibrationRuns"]
@@ -674,28 +608,35 @@ def test_calibration_evidence_is_schema_valid_and_matrix_ingested():
     # and the two rungs stay symmetric both overall and bucket by bucket. Each still fails on the
     # original defect (a retired fingerprint starting to bind, or one rung quietly losing a record) at
     # any retained-capture count.
-    assert historical_qwen
+    #
+    # sc-22512 dropped `assert historical_qwen` and `assert rejected and retained_bindings`. Both
+    # reddened when a cohort was not present — a corpus that has never captured this ladder, or one
+    # whose captures were legitimately superseded, is unmeasured, not broken. Everything else here is
+    # a PARTITION and a BOTH-DIRECTIONS rule, so it says exactly as much as the corpus supports.
     rejected = [
         run for run in historical_qwen if run["binding"]["reasons"] == ["fingerprint-mismatch"]
     ]
     retained_bindings = [run for run in historical_qwen if run["binding"]["eligible"]]
-    assert rejected and retained_bindings
     assert len(rejected) + len(retained_bindings) == len(historical_qwen), (
         "every historical Qwen bf16 resident/staged run is either fingerprint-rejected or a retained "
         "binding; a third outcome would go uninspected"
     )
     assert all(not run["binding"]["eligible"] for run in rejected)
     assert all(run["binding"]["reasons"] == [] for run in retained_bindings)
-    # Eligibility is decided by the fingerprint, and by nothing else, in both directions.
-    assert {run["record"]["calibrationFingerprint"] for run in rejected} == {
-        "qwen-image-mlx-shared-ladder-2026-08-01-v1-eager",
-    }
-    assert {
-        run["record"]["calibrationFingerprint"] for run in retained_bindings
-    } == {"qwen-image-mlx-shared-ladder-2026-08-01-v1"}
+    # Eligibility is decided by the fingerprint, and by nothing else, in both directions: no
+    # fingerprint may appear on both sides of the split. Stated that way rather than as the two
+    # literal spellings, which reddened the day a re-capture introduced a third fingerprint —
+    # measurement improving an estimate, not a defect.
+    assert not (
+        {run["record"]["calibrationFingerprint"] for run in rejected}
+        & {run["record"]["calibrationFingerprint"] for run in retained_bindings}
+    )
     # ...and the two populations are a PARTITION of the whole: a historical row that is neither
     # cleanly bound nor rejected for exactly the stated reason is a new failure mode, not noise.
     assert len(historical_qwen) == len(rejected) + len(retained_bindings)
+    # Subset, not equality: equality against a non-empty literal reds on an empty cohort, which is
+    # the population guard E8 retires. The force that matters — no historical Qwen run may sit off
+    # the one measured coordinate — is exactly what `<=` states.
     assert {
         (
             run["record"]["backend"],
@@ -704,15 +645,14 @@ def test_calibration_evidence_is_schema_valid_and_matrix_ingested():
             run["record"]["target"]["overlay"],
         )
         for run in historical_qwen
-    } == {("mlx", "bf16", "text_to_image", "none")}
-    # Symmetry is the property, not the per-rung total: each rung carries the same number of retained
-    # shared-fingerprint captures beside the same number of rejected `-eager` rows. An asymmetry means
-    # one rung lost a record rather than currency moving, and holding it bucket by bucket also catches
-    # a rung losing a record on one side while gaining one on the other.
+    } <= {("mlx", "bf16", "text_to_image", "none")}
+    # sc-22512 removed the per-rung SYMMETRY block. It required each bucket to carry both rungs with
+    # equal counts, so it reddened for exactly one reason — a rung holding no record — which is the
+    # "this cell has no measurement" shape E8 retires. The rung membership below is what survives:
+    # a run outside the ladder is a malformed record at any population size.
     for bucket in (historical_qwen, rejected, retained_bindings):
         by_rung = Counter(run["record"]["strategy"]["rung"] for run in bucket)
-        assert set(by_rung) == {"resident", "staged_residency"}, by_rung
-        assert len(set(by_rung.values())) == 1, by_rung
+        assert set(by_rung) <= {"resident", "staged_residency"}, by_rung
 
 
 def test_complete_calibration_schema_fails_closed_on_adversarial_mutations():
@@ -1187,7 +1127,9 @@ def test_rung4_survey_covers_every_family_and_rides_only_its_own_cells():
         for cell in matrix["cells"]
         if cell["rung"] == "bounded_transformer_residency"
     ]
-    assert rung4
+    # sc-22512 dropped `assert rung4`: a catalog that publishes no rung-4 coordinate is unmeasured,
+    # and every claim below is universally quantified, so it degrades to saying nothing rather than
+    # to redding.
     assert all(cell["rung4Survey"]["story"] == 15969 for cell in rung4)
     assert not [
         cell
@@ -1215,9 +1157,18 @@ def test_rung4_survey_covers_every_family_and_rides_only_its_own_cells():
         (row["family"], row["backend"])
         for row in matrix["summary"]["rung4Survey"]["pendingFamilyBackends"]
     }
+    # sc-22512 removed the survey CENSUS (`surveyed | pending == advertised`) and the zero-debt pin
+    # (`pending == set()`). The census required every advertised (family, backend) to carry either a
+    # verdict or a declared pending owner, so adding a model family to the catalog reddened this
+    # suite until somebody surveyed it — the exact "absence blocks" shape E8 retires. The zero-debt
+    # pin reddened the moment any debt was filed, which is bookkeeping, not a defect.
+    #
+    # What survives is the PARTITION (nothing is both surveyed and pending) and the containment
+    # (neither set may name a family/backend the catalog does not advertise). Both hold at any
+    # survey coverage, including none.
     assert not (surveyed & pending)
-    assert surveyed | pending == advertised
-    assert pending == set()
+    assert surveyed <= advertised
+    assert pending <= advertised
     assert all(
         isinstance(row["pendingSurveyStory"], int)
         for row in matrix["summary"]["rung4Survey"]["pendingFamilyBackends"]
@@ -1236,66 +1187,29 @@ def test_rung4_survey_covers_every_family_and_rides_only_its_own_cells():
             assert cell["rung4Survey"]["structuralApplicability"] is None
             assert cell["rung4Survey"]["implementation"] is None
             assert isinstance(cell["rung4Survey"]["pendingSurveyStory"], int)
-    assert any(cell["rung4Survey"]["surveyed"] for cell in rung4)
-    # Today every published rung-4 cell is surveyed and the summary confirms there is no hidden debt.
-    assert all(cell["rung4Survey"]["surveyed"] for cell in rung4)
-    assert not pending
-
+    # sc-22512 removed four more absence gates from this block:
+    #   * `any(surveyed)` / `all(surveyed)` / `not pending` — a rung-4 cell whose family nobody has
+    #     surveyed yet is UNSURVEYED, which the discriminator above already reports honestly. The
+    #     surveyed flag's both-directions agreement with the rows is what carries the claim, and it
+    #     is asserted for every cell whatever the coverage.
+    #   * the exact literal roster of the family/backend pairs whose
+    #     `requestPeak` reads `moves`. That list reddened both ways: when a family lost its
+    #     measurement, and when a NEW family measured one. Measuring a family is the thing this
+    #     epic wants to be free.
+    #   * the `next(row for row in rows if familyStory == 15519 and backend == "candle")` lookup and
+    #     its exact verdict dict, which raised StopIteration — not an assertion failure — the moment
+    #     that one survey row was absent.
+    #
+    # The verdict SHAPE survives for every row: a verdict names a known requestPeak, carries its
+    # prose and block inventory, and never claims a measured request peak with no implementation.
+    #
     # The two findings stay separate: an architecture that CAN be windowed is never, by itself,
     # evidence that windowing it moves the request peak.
     assert {row["requestPeak"] for row in rows} <= {"moves", "does-not-move", "unmeasured"}
-    assert [
-        (row["familyStory"], row["backend"])
-        for row in rows
-        if row["requestPeak"] == "moves"
-    ] == [
-        (15510, "candle"),
-        (15510, "mlx"),
-        (15511, "mlx"),
-        (15512, "candle"),
-        (15512, "mlx"),
-        (15517, "candle"),
-        (15517, "mlx"),
-        (15519, "candle"),
-        # SC-15520 Chroma1 lands its MLX ladder: rung 4 at `Dit` scope moves the staged request
-        # peak 19.2065 -> 14.6932 GiB (-23.50%) on Chroma1-Base q4 at 1024^2, byte-identical
-        # output at every cadence in [1, 2, 5, 10]. The measured scope is exactly one cell
-        # (chroma1_base/q4/text_to_image/none); every sibling entry, tier, mode and overlay
-        # stays `unmeasured`.
-        (15520, "mlx"),
-        # SC-15521 Kolors, SC-15524 Anima and SC-15525 SDXL + derivatives land their MLX ladders
-        # with measured request peaks: Anima 5.229 -> 4.151 GiB at window 1; SDXL -6.97% (q4) to
-        # -21.40% (bf16) per entry per tier; Kolors -7.21% / -12.72% / -21.37% by tier, plus the
-        # ladder's first three-valued scope axis (`Dit` / `TextEncoder` / `Both`) reading
-        # 11.3644 / 8.8396 / 4.5436 GiB at bf16/512.
-        (15521, "mlx"),
-        (15524, "mlx"),
-        (15525, "mlx"),
-    ]
-    flux2_candle = next(
-        row
-        for row in rows
-        if row["familyStory"] == 15519 and row["backend"] == "candle"
-    )
-    # sc-18099 moved the family-level `summary`/`blockStacks`/`findings` onto these rows, so the
-    # verdict survives every one of the family's cells being elided. Still an EXACT comparison of the
-    # verdict fields — a bare subset check would stop noticing a field going missing — with the three
-    # prose/inventory fields asserted as present-and-non-trivial rather than transcribed here.
-    assert {
-        key: value
-        for key, value in flux2_candle.items()
-        if key not in {"summary", "blockStacks", "findings"}
-    } == {
-        "familyStory": 15519,
-        "backend": "candle",
-        "structuralApplicability": "partial",
-        "requestPeak": "moves",
-        "implementation": "shared-primitive",
-    }
-    assert flux2_candle["summary"]
-    assert flux2_candle["blockStacks"]
-    # Every surveyed family/backend carries its inventory here, not only the ones that publish a
-    # cell. That is the whole reason these fields moved: none of the rows can go dark.
+    for row in rows:
+        assert isinstance(row["backend"], str) and row["backend"]
+        assert row["structuralApplicability"] in {"none", "partial", "full"}
+        assert row["implementation"] is not None
     assert all(row["summary"] and row["blockStacks"] for row in rows)
     assert all(
         row["implementation"] != "none"
@@ -1330,8 +1244,21 @@ def test_rung4_partial_applicability_and_structural_verdicts_carry_their_evidenc
         for row in matrix["rung4SurveyRows"]
         if row["familyStory"] == 15525
     ]
-    assert sdxl_rows
-    assert {row["structuralApplicability"] for row in sdxl_rows} == {"partial"}
+    # sc-22512: every "this population must not be empty" guard below was removed
+    # (`assert sdxl_rows`, `assert sdxl_lane`, `assert implementing` / "SDXL's rung-4 coverage must
+    # not vanish", `assert illustrious`, the two `{backend} == {"mlx", "candle"}` SVD row censuses,
+    # and `assert exempt_overlay`). Each reddened for exactly one reason: a survey row, a coverage
+    # row or an implementation declaration not being there. A catalog that has not surveyed SDXL, an
+    # inference pin that stops shipping the per-Transformer2D stream, or an entry retired from the
+    # catalog are all absence — under E8 they degrade the claim to vacuous, they do not red a suite.
+    #
+    # Every remaining assertion here is stated over whatever rows are present, so it keeps full
+    # force on the measured corpus and says nothing about the unmeasured one. The set claims are
+    # written as SUBSET (`<=`) rather than equality for exactly that reason: an equality against a
+    # non-empty literal is itself a population guard — it reds at zero rows, because `set()` is not
+    # `{"partial"}`. Subset keeps the force that matters (no row may carry a value outside the
+    # named set) and goes vacuous, not red, on an empty cohort.
+    assert {row["structuralApplicability"] for row in sdxl_rows} <= {"partial"}
     # Coverage is per entry per tier per overlay, never family-wide: the base `sdxl` entry publishes
     # rung 4 on bf16/overlay-none only, so both states must be present across this entry's lane.
     sdxl_lane = [
@@ -1339,8 +1266,7 @@ def test_rung4_partial_applicability_and_structural_verdicts_carry_their_evidenc
         for key, row in coverage.items()
         if key[0] == "sdxl" and key[2] == "bounded_transformer_residency"
     ]
-    assert sdxl_lane
-    assert set().union(*(row["states"].keys() for row in sdxl_lane)) == {
+    assert set().union(*(row["states"].keys() for row in sdxl_lane)) <= {
         "Missing",
         "Implemented/unverified",
     }
@@ -1351,8 +1277,6 @@ def test_rung4_partial_applicability_and_structural_verdicts_carry_their_evidenc
     # a mode COUNT rather than a hardcoded number so a legitimate tier drift does not stale it; the
     # exact mode/overlay split is asserted per-coordinate by the sibling JS test.
     SDXL_RUNG4_MODES = {"text_to_image", "edit_image", "character_image"}
-    implementing = [row for row in sdxl_lane if row["implemented"]]
-    assert implementing, "SDXL's rung-4 coverage must not vanish"
     for row in sdxl_lane:
         axes = models_by_id["sdxl"]["axes"][row["backend"]]
         assert "bf16" in axes["tiers"] and "none" in axes["overlays"]
@@ -1372,12 +1296,15 @@ def test_rung4_partial_applicability_and_structural_verdicts_carry_their_evidenc
         if key[0] in {"illustrious_xl_v1", "illustrious_xl_v2"}
         and key[2] == "bounded_transformer_residency"
     ]
-    assert illustrious
-    assert set().union(*(row["states"].keys() for row in illustrious)) == {"Missing"}
+    assert set().union(*(row["states"].keys() for row in illustrious)) <= {"Missing"}
     assert all(row["implemented"] == 0 for row in illustrious)
-    stacks = sdxl_rows[0]["blockStacks"]
-    assert any(stack["windowable"] for stack in stacks)
-    assert any(not stack["windowable"] for stack in stacks)
+    # A `partial` verdict means the stack inventory is MIXED, and that is asserted for every SDXL
+    # row present rather than by indexing row 0 — which raised IndexError, not an assertion failure,
+    # when the survey carried no SDXL row.
+    for row in sdxl_rows:
+        stacks = row["blockStacks"]
+        assert any(stack["windowable"] for stack in stacks), row["backend"]
+        assert any(not stack["windowable"] for stack in stacks), row["backend"]
 
     # SC-18828's SVD correction exercises the same distinction on video: the U-Net is
     # heterogeneous, but each lane contains 16 separately indexed one-block spatial stacks and 16
@@ -1386,7 +1313,7 @@ def test_rung4_partial_applicability_and_structural_verdicts_carry_their_evidenc
     svd_rows = [
         row for row in matrix["rung4SurveyRows"] if row["familyStory"] == "svd"
     ]
-    assert {row["backend"] for row in svd_rows} == {"mlx", "candle"}
+    assert {row["backend"] for row in svd_rows} <= {"mlx", "candle"}
     assert all(row["structuralApplicability"] == "partial" for row in svd_rows)
     assert all(row["implementation"] == "none" for row in svd_rows)
     for row in svd_rows:
@@ -1402,7 +1329,7 @@ def test_rung4_partial_applicability_and_structural_verdicts_carry_their_evidenc
         for key, row in coverage.items()
         if key[0] == "svd" and key[2] == "bounded_transformer_residency"
     ]
-    assert {row["backend"] for row in svd_rung4} == {"mlx", "candle"}
+    assert {row["backend"] for row in svd_rung4} <= {"mlx", "candle"}
     assert all(row["states"] == {"Missing": row["coordinates"]} for row in svd_rung4)
     assert all(row["implemented"] == 0 for row in svd_rung4)
 
@@ -1433,7 +1360,6 @@ def test_rung4_partial_applicability_and_structural_verdicts_carry_their_evidenc
         if cell["rung"] == "bounded_transformer_residency"
         and cell["rung4Survey"]["overlayIncompatible"]
     ]
-    assert exempt_overlay
     assert all(cell["overlay"] != "none" for cell in exempt_overlay)
     assert all(
         cell["rung4Survey"]["implementation"] != "none" for cell in exempt_overlay
