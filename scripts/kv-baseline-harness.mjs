@@ -12,6 +12,7 @@ import { fileURLToPath } from "node:url";
 export const SCHEMA_VERSION = 3;
 export const HARNESS_VERSION = "sc-20671-kv-baseline-v3";
 export const CONTRACT_PATH = "config/kv-baseline-quality-contract.json";
+export const POST_RELEASE_PHYS_FOOTPRINT_TOLERANCE_BYTES = 512 * 1024 * 1024;
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const CONTRACT_FILE = path.join(ROOT, CONTRACT_PATH);
@@ -54,7 +55,7 @@ export const FIT_BOUNDARY_MIN_CONTEXT_BPS = 9_000;
 const SCENEWORKS_REPOSITORY = "github.com/SceneWorks/SceneWorks";
 const INFERENCE_REPOSITORY = "github.com/SceneWorks/inference";
 const PMETAL_MLX_REPOSITORY = "https://github.com/michaeltrefry/mlx-rs";
-// Mirrored from inference commit dd88feb598f5ee50e0e14c894d9e81644c809c5b.  These are
+// Mirrored from inference commit e8e57e81f45e029ff1eea0e1120a47c86d3f88b5.  These are
 // receipt identities, never caller-selectable model aliases or local paths.
 export const SC20671_MODEL_CONTRACTS = Object.freeze({
   llama: Object.freeze({
@@ -710,7 +711,12 @@ export function validateReceipt(receipt, { verifyHash = true } = {}) {
   for (const field of ["physFootprintToleranceBytes", "mlxActiveToleranceBytes", "mlxCacheToleranceBytes"]) {
     nonnegativeInteger(receipt.memory.release[field], `memory.release.${field}`);
   }
-  const start = receipt.memory.phaseSamples[0];
+  if (receipt.memory.release.physFootprintToleranceBytes !== POST_RELEASE_PHYS_FOOTPRINT_TOLERANCE_BYTES
+    || receipt.memory.release.mlxActiveToleranceBytes !== 0
+    || receipt.memory.release.mlxCacheToleranceBytes !== 0) {
+    fail("memory.release differs from the frozen release tolerances");
+  }
+  const start = receipt.memory.phaseSamples.find((sample) => sample.phase === "weights-loaded");
   const released = receipt.memory.phaseSamples.at(-1);
   if (released.physFootprintBytes > start.physFootprintBytes + receipt.memory.release.physFootprintToleranceBytes
     || released.mlx.activeBytes > start.mlx.activeBytes + receipt.memory.release.mlxActiveToleranceBytes

@@ -49,7 +49,11 @@ above its retained merged successor, sequential token/layer events reconcile
 by their maximum, and the persistent successor is counted once. A
 `product-cache_release` event with lifetime `released` records exact released
 K+V ownership. It is required lifecycle evidence and is excluded from both
-workspace attribution and full-cache-temporary detection.
+workspace attribution and full-cache-temporary detection. Post-run release is
+measured against the loaded-model boundary: MLX active and allocator-cache
+tolerances are exactly zero, while a frozen 512 MiB Darwin-footprint allowance
+bounds process-resident Metal/JIT runtime pages that MLX does not report as live
+tensors or allocator cache.
 comparison refuses mismatched source/model/toolchain/hardware/power/thermal
 identity, matrix, contract, or geometry and reports KV reduction,
 decode-steady/lifetime-peak process-footprint deltas, and throughput ratio.
@@ -70,7 +74,7 @@ directory and atomically renames one aggregate directory containing
 sidecar, duplicate coordinate, or reused cold PID leaves no campaign directory.
 
 Before the parent or a worker loads a snapshot, inference commit
-`dd88feb598f5ee50e0e14c894d9e81644c809c5b` seals these exact model identities and the
+`e8e57e81f45e029ff1eea0e1120a47c86d3f88b5` seals these exact model identities and the
 candidate-only materialized-weight residency boundary used by the receipt producer.
 SceneWorks mirrors the same rule when it validates a portable receipt: a local
 snapshot path is not an identity, and `modelId`/`referenceModelId` must contain
