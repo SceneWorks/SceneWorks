@@ -2,6 +2,117 @@
   "schemaVersion": 1,
   "anchors": [
     {
+      "id": "flux2_dev:mlx:q4:base:base:sc-18218-flux2-dev-t2i-resident-evidence-v1:imc-b6537074420d51413b38",
+      "modelId": "flux2_dev",
+      "modelFamily": "flux2-dev",
+      "route": "flux2_dev",
+      "provider": "flux2_dev",
+      "backend": "mlx",
+      "tier": "q4",
+      "transformerVariant": null,
+      "decoder": null,
+      "mode": "text_to_image",
+      "overlay": null,
+      "referenceCount": 0,
+      "loadShape": "eager_materialization",
+      "measuredRegime": {
+        "decodeTiled": false,
+        "transformerWindowed": false
+      },
+      "source": {
+        "path": "docs/generated/memory-calibration-evidence.json",
+        "sha256": "e9e9f7ce079b0b8f2c615bd03b88f15f320881ba302b160390047c5505805cef",
+        "recordId": "imc-b6537074420d51413b38",
+        "calibrationFingerprint": "sc-18218-flux2-dev-t2i-resident-evidence-v1"
+      },
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "frames": 1,
+        "fps": null
+      },
+      "phaseActivePeakBytes": {
+        "conditioning": 1255456,
+        "denoise": 32226149968,
+        "decode": 43181584080
+      },
+      "overallAllocatorEnvelopeBytes": 88797205692
+    },
+    {
+      "id": "flux2_dev:mlx:q8:base:base:sc-18218-flux2-dev-t2i-resident-evidence-v1:imc-421a1bb45e9c2f5d916c",
+      "modelId": "flux2_dev",
+      "modelFamily": "flux2-dev",
+      "route": "flux2_dev",
+      "provider": "flux2_dev",
+      "backend": "mlx",
+      "tier": "q8",
+      "transformerVariant": null,
+      "decoder": null,
+      "mode": "text_to_image",
+      "overlay": null,
+      "referenceCount": 0,
+      "loadShape": "eager_materialization",
+      "measuredRegime": {
+        "decodeTiled": false,
+        "transformerWindowed": false
+      },
+      "source": {
+        "path": "docs/generated/memory-calibration-evidence.json",
+        "sha256": "e9e9f7ce079b0b8f2c615bd03b88f15f320881ba302b160390047c5505805cef",
+        "recordId": "imc-421a1bb45e9c2f5d916c",
+        "calibrationFingerprint": "sc-18218-flux2-dev-t2i-resident-evidence-v1"
+      },
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "frames": 1,
+        "fps": null
+      },
+      "phaseActivePeakBytes": {
+        "conditioning": 1255456,
+        "denoise": 57009505872,
+        "decode": 67965431504
+      },
+      "overallAllocatorEnvelopeBytes": 113150645436
+    },
+    {
+      "id": "ltx_2_3:mlx:q8:base:base:sc-18808-ltx-2-3-mlx-t2v-staged-capture-v1:imc-5aff3e74b46b30fb797c",
+      "modelId": "ltx_2_3",
+      "modelFamily": "ltx-video",
+      "route": "ltx_2_3",
+      "provider": "ltx_2_3",
+      "backend": "mlx",
+      "tier": "q8",
+      "transformerVariant": null,
+      "decoder": null,
+      "mode": "text_to_video",
+      "overlay": null,
+      "referenceCount": 0,
+      "loadShape": "eager_materialization",
+      "measuredRegime": {
+        "decodeTiled": false,
+        "transformerWindowed": false
+      },
+      "source": {
+        "path": "docs/generated/ltx-mlx-geometry-sweep-sc-18810.json",
+        "sha256": "5dc147628fb5ca955c4584e23aacb8e9acc81bc0c3a5aba0aa5b3b1fe584702d",
+        "recordId": "imc-5aff3e74b46b30fb797c",
+        "calibrationFingerprint": "sc-18808-ltx-2-3-mlx-t2v-staged-capture-v1"
+      },
+      "geometry": {
+        "width": 704,
+        "height": 1280,
+        "frames": 177,
+        "fps": 30
+      },
+      "phaseActivePeakBytes": {
+        "conditioning": 35678641896,
+        "denoise": 43473686612,
+        "decode": 54153098156
+      },
+      "overallAllocatorEnvelopeBytes": 159636259044
+    },
+    {
       "id": "ltx_2_5:mlx:bf16:dev:diffvae:sc-18797-ltx-2-5-mlx-ladder-v1:imc-9c4c5fe8356bcc4f139f",
       "modelId": "ltx_2_5",
       "modelFamily": "ltx-video",
@@ -113,7 +224,7 @@
       "overallAllocatorEnvelopeBytes": 66789535288
     },
     {
-      "id": "ltx_2_5:mlx:q4:dev:diffvae:sc-18797-ltx-2-5-mlx-ladder-v1:imc-50fbdda27ed3159a6ca1",
+      "id": "ltx_2_5:mlx:q4:dev:diffvae:sc-18797-ltx-2-5-mlx-ladder-v1:imc-17b5e196f5563098afb3",
       "modelId": "ltx_2_5",
       "modelFamily": "ltx-video",
       "route": "ltx_2_5",
@@ -133,21 +244,21 @@
       "source": {
         "path": "docs/calibration/sc-18791/ltx25-mlx-evidence.seed.json",
         "sha256": "6038f39e21feaa5fcde9490c7a0791a2906bff6695386f734c013569de77b725",
-        "recordId": "imc-50fbdda27ed3159a6ca1",
+        "recordId": "imc-17b5e196f5563098afb3",
         "calibrationFingerprint": "sc-18797-ltx-2-5-mlx-ladder-v1"
       },
       "geometry": {
-        "width": 768,
-        "height": 512,
+        "width": 512,
+        "height": 768,
         "frames": 145,
         "fps": 24
       },
       "phaseActivePeakBytes": {
         "conditioning": 13166818976,
-        "denoise": 23765841366,
-        "decode": 60013908200
+        "denoise": 23765824982,
+        "decode": 60013920904
       },
-      "overallAllocatorEnvelopeBytes": 62401296566
+      "overallAllocatorEnvelopeBytes": 62416251478
     },
     {
       "id": "ltx_2_5:mlx:q8:dev:conv:sc-18797-ltx-2-5-mlx-ladder-v1:imc-beaa0f2aacf0832ea28a",
@@ -222,6 +333,4544 @@
         "decode": 64847765684
       },
       "overallAllocatorEnvelopeBytes": 69260977594
+    },
+    {
+      "id": "qwen_image:mlx:bf16:base:base:qwen-image-mlx-shared-ladder-2026-08-01-v1-eager:imc-d314058df6e188459f3b",
+      "modelId": "qwen_image",
+      "modelFamily": "qwen-image",
+      "route": "qwen_image",
+      "provider": "qwen_image",
+      "backend": "mlx",
+      "tier": "bf16",
+      "transformerVariant": null,
+      "decoder": null,
+      "mode": "text_to_image",
+      "overlay": null,
+      "referenceCount": 0,
+      "loadShape": "eager_materialization",
+      "measuredRegime": {
+        "decodeTiled": false,
+        "transformerWindowed": false
+      },
+      "source": {
+        "path": "docs/generated/memory-calibration-evidence.json",
+        "sha256": "e9e9f7ce079b0b8f2c615bd03b88f15f320881ba302b160390047c5505805cef",
+        "recordId": "imc-d314058df6e188459f3b",
+        "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1-eager"
+      },
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "frames": 1,
+        "fps": null
+      },
+      "phaseActivePeakBytes": {
+        "conditioning": 43908,
+        "denoise": 57110329232,
+        "decode": 63204334376
+      },
+      "overallAllocatorEnvelopeBytes": 69654771776
+    },
+    {
+      "id": "qwen_image:mlx:q4:base:base:qwen-image-mlx-shared-ladder-2026-08-01-v1:imc-12f3ccbb72de78cea931",
+      "modelId": "qwen_image",
+      "modelFamily": "qwen-image",
+      "route": "qwen_image",
+      "provider": "qwen_image",
+      "backend": "mlx",
+      "tier": "q4",
+      "transformerVariant": null,
+      "decoder": null,
+      "mode": "text_to_image",
+      "overlay": null,
+      "referenceCount": 0,
+      "loadShape": "eager_materialization",
+      "measuredRegime": {
+        "decodeTiled": true,
+        "transformerWindowed": false
+      },
+      "source": {
+        "path": "docs/generated/memory-calibration-evidence.json",
+        "sha256": "e9e9f7ce079b0b8f2c615bd03b88f15f320881ba302b160390047c5505805cef",
+        "recordId": "imc-12f3ccbb72de78cea931",
+        "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1"
+      },
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "frames": 1,
+        "fps": null
+      },
+      "phaseActivePeakBytes": {
+        "conditioning": 43908,
+        "denoise": 27422986300,
+        "decode": 30034038832
+      },
+      "overallAllocatorEnvelopeBytes": 33921472156
+    },
+    {
+      "id": "qwen_image:mlx:q8:base:base:qwen-image-mlx-shared-ladder-2026-08-01-v1:imc-8f110511b0f85d15f72f",
+      "modelId": "qwen_image",
+      "modelFamily": "qwen-image",
+      "route": "qwen_image",
+      "provider": "qwen_image",
+      "backend": "mlx",
+      "tier": "q8",
+      "transformerVariant": null,
+      "decoder": null,
+      "mode": "text_to_image",
+      "overlay": null,
+      "referenceCount": 0,
+      "loadShape": "eager_materialization",
+      "measuredRegime": {
+        "decodeTiled": true,
+        "transformerWindowed": false
+      },
+      "source": {
+        "path": "docs/generated/memory-calibration-evidence.json",
+        "sha256": "e9e9f7ce079b0b8f2c615bd03b88f15f320881ba302b160390047c5505805cef",
+        "recordId": "imc-8f110511b0f85d15f72f",
+        "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1"
+      },
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "frames": 1,
+        "fps": null
+      },
+      "phaseActivePeakBytes": {
+        "conditioning": 43908,
+        "denoise": 37540957244,
+        "decode": 40204028976
+      },
+      "overallAllocatorEnvelopeBytes": 44091560604
+    },
+    {
+      "id": "z_image_turbo:mlx:q4:base:base:z-image-mlx-independent-materialization-v4:imc-1fc616bea135da2281b8",
+      "modelId": "z_image_turbo",
+      "modelFamily": "z-image",
+      "route": "z_image_turbo",
+      "provider": "z_image_turbo",
+      "backend": "mlx",
+      "tier": "q4",
+      "transformerVariant": null,
+      "decoder": null,
+      "mode": "text_to_image",
+      "overlay": null,
+      "referenceCount": 0,
+      "loadShape": "eager_materialization",
+      "measuredRegime": {
+        "decodeTiled": false,
+        "transformerWindowed": false
+      },
+      "source": {
+        "path": "docs/generated/memory-calibration-evidence.json",
+        "sha256": "e9e9f7ce079b0b8f2c615bd03b88f15f320881ba302b160390047c5505805cef",
+        "recordId": "imc-1fc616bea135da2281b8",
+        "calibrationFingerprint": "z-image-mlx-independent-materialization-v4"
+      },
+      "geometry": {
+        "width": 768,
+        "height": 768,
+        "frames": 1,
+        "fps": null
+      },
+      "phaseActivePeakBytes": {
+        "conditioning": 2266383344,
+        "denoise": 7353533076,
+        "decode": 14309852368
+      },
+      "overallAllocatorEnvelopeBytes": 19138127416
+    }
+  ],
+  "analyticOnly": [
+    {
+      "id": "analytic:anima_aesthetic:candle:default",
+      "modelId": "anima_aesthetic",
+      "modelFamily": "anima",
+      "route": "anima_aesthetic",
+      "backend": "candle",
+      "tier": "default",
+      "basis": "no_retained_evidence",
+      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
+      "evidence": null
+    },
+    {
+      "id": "analytic:anima_aesthetic:mlx:bf16",
+      "modelId": "anima_aesthetic",
+      "modelFamily": "anima",
+      "route": "anima_aesthetic",
+      "backend": "mlx",
+      "tier": "bf16",
+      "basis": "no_retained_evidence",
+      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
+      "evidence": null
+    },
+    {
+      "id": "analytic:anima_aesthetic:mlx:q4",
+      "modelId": "anima_aesthetic",
+      "modelFamily": "anima",
+      "route": "anima_aesthetic",
+      "backend": "mlx",
+      "tier": "q4",
+      "basis": "no_retained_evidence",
+      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
+      "evidence": null
+    },
+    {
+      "id": "analytic:anima_aesthetic:mlx:q8",
+      "modelId": "anima_aesthetic",
+      "modelFamily": "anima",
+      "route": "anima_aesthetic",
+      "backend": "mlx",
+      "tier": "q8",
+      "basis": "no_retained_evidence",
+      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
+      "evidence": null
+    },
+    {
+      "id": "analytic:anima_base:candle:default",
+      "modelId": "anima_base",
+      "modelFamily": "anima",
+      "route": "anima_base",
+      "backend": "candle",
+      "tier": "default",
+      "basis": "no_retained_evidence",
+      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
+      "evidence": null
+    },
+    {
+      "id": "analytic:anima_base:mlx:bf16",
+      "modelId": "anima_base",
+      "modelFamily": "anima",
+      "route": "anima_base",
+      "backend": "mlx",
+      "tier": "bf16",
+      "basis": "no_retained_evidence",
+      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
+      "evidence": null
+    },
+    {
+      "id": "analytic:anima_base:mlx:q4",
+      "modelId": "anima_base",
+      "modelFamily": "anima",
+      "route": "anima_base",
+      "backend": "mlx",
+      "tier": "q4",
+      "basis": "no_retained_evidence",
+      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
+      "evidence": null
+    },
+    {
+      "id": "analytic:anima_base:mlx:q8",
+      "modelId": "anima_base",
+      "modelFamily": "anima",
+      "route": "anima_base",
+      "backend": "mlx",
+      "tier": "q8",
+      "basis": "no_retained_evidence",
+      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
+      "evidence": null
+    },
+    {
+      "id": "analytic:anima_turbo:candle:default",
+      "modelId": "anima_turbo",
+      "modelFamily": "anima",
+      "route": "anima_turbo",
+      "backend": "candle",
+      "tier": "default",
+      "basis": "no_retained_evidence",
+      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
+      "evidence": null
+    },
+    {
+      "id": "analytic:anima_turbo:mlx:bf16",
+      "modelId": "anima_turbo",
+      "modelFamily": "anima",
+      "route": "anima_turbo",
+      "backend": "mlx",
+      "tier": "bf16",
+      "basis": "no_retained_evidence",
+      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
+      "evidence": null
+    },
+    {
+      "id": "analytic:anima_turbo:mlx:q4",
+      "modelId": "anima_turbo",
+      "modelFamily": "anima",
+      "route": "anima_turbo",
+      "backend": "mlx",
+      "tier": "q4",
+      "basis": "no_retained_evidence",
+      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
+      "evidence": null
+    },
+    {
+      "id": "analytic:anima_turbo:mlx:q8",
+      "modelId": "anima_turbo",
+      "modelFamily": "anima",
+      "route": "anima_turbo",
+      "backend": "mlx",
+      "tier": "q8",
+      "basis": "no_retained_evidence",
+      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
+      "evidence": null
+    },
+    {
+      "id": "analytic:bernini:candle:bf16",
+      "modelId": "bernini",
+      "modelFamily": "bernini",
+      "route": "bernini",
+      "backend": "candle",
+      "tier": "bf16",
+      "basis": "no_retained_evidence",
+      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
+      "evidence": null
+    },
+    {
+      "id": "analytic:bernini:candle:q4",
+      "modelId": "bernini",
+      "modelFamily": "bernini",
+      "route": "bernini",
+      "backend": "candle",
+      "tier": "q4",
+      "basis": "no_retained_evidence",
+      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
+      "evidence": null
+    },
+    {
+      "id": "analytic:bernini:candle:q8",
+      "modelId": "bernini",
+      "modelFamily": "bernini",
+      "route": "bernini",
+      "backend": "candle",
+      "tier": "q8",
+      "basis": "no_retained_evidence",
+      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
+      "evidence": null
+    },
+    {
+      "id": "analytic:bernini:mlx:bf16",
+      "modelId": "bernini",
+      "modelFamily": "bernini",
+      "route": "bernini",
+      "backend": "mlx",
+      "tier": "bf16",
+      "basis": "no_retained_evidence",
+      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
+      "evidence": null
+    },
+    {
+      "id": "analytic:bernini:mlx:q4",
+      "modelId": "bernini",
+      "modelFamily": "bernini",
+      "route": "bernini",
+      "backend": "mlx",
+      "tier": "q4",
+      "basis": "no_retained_evidence",
+      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
+      "evidence": null
+    },
+    {
+      "id": "analytic:bernini:mlx:q8",
+      "modelId": "bernini",
+      "modelFamily": "bernini",
+      "route": "bernini",
+      "backend": "mlx",
+      "tier": "q8",
+      "basis": "no_retained_evidence",
+      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
+      "evidence": null
+    },
+    {
+      "id": "analytic:bernini_image:candle:bf16",
+      "modelId": "bernini_image",
+      "modelFamily": "bernini",
+      "route": "bernini",
+      "backend": "candle",
+      "tier": "bf16",
+      "basis": "no_retained_evidence",
+      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
+      "evidence": null
+    },
+    {
+      "id": "analytic:bernini_image:candle:q4",
+      "modelId": "bernini_image",
+      "modelFamily": "bernini",
+      "route": "bernini",
+      "backend": "candle",
+      "tier": "q4",
+      "basis": "no_retained_evidence",
+      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
+      "evidence": null
+    },
+    {
+      "id": "analytic:bernini_image:candle:q8",
+      "modelId": "bernini_image",
+      "modelFamily": "bernini",
+      "route": "bernini",
+      "backend": "candle",
+      "tier": "q8",
+      "basis": "no_retained_evidence",
+      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
+      "evidence": null
+    },
+    {
+      "id": "analytic:bernini_image:mlx:bf16",
+      "modelId": "bernini_image",
+      "modelFamily": "bernini",
+      "route": "bernini",
+      "backend": "mlx",
+      "tier": "bf16",
+      "basis": "no_retained_evidence",
+      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
+      "evidence": null
+    },
+    {
+      "id": "analytic:bernini_image:mlx:q4",
+      "modelId": "bernini_image",
+      "modelFamily": "bernini",
+      "route": "bernini",
+      "backend": "mlx",
+      "tier": "q4",
+      "basis": "no_retained_evidence",
+      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
+      "evidence": null
+    },
+    {
+      "id": "analytic:bernini_image:mlx:q8",
+      "modelId": "bernini_image",
+      "modelFamily": "bernini",
+      "route": "bernini",
+      "backend": "mlx",
+      "tier": "q8",
+      "basis": "no_retained_evidence",
+      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
+      "evidence": null
+    },
+    {
+      "id": "analytic:boogu_image:candle:bf16",
+      "modelId": "boogu_image",
+      "modelFamily": "boogu",
+      "route": "boogu_image",
+      "backend": "candle",
+      "tier": "bf16",
+      "basis": "manifest_tier_declaration",
+      "reason": "no retained render for this cell; the catalog manifest declares a measured per-tier envelope, which is a whole-render figure with no phase decomposition",
+      "evidence": {
+        "repo": null,
+        "revision": null,
+        "path": "config/manifests/builtin.models.jsonc#models/boogu_image/candle",
+        "sha256": "af38bc1ec14d7a3a83cae88250d28780a2d6aa1d44786d381e2248e025ff88c6",
+        "recordId": null,
+        "envelopeBytes": null,
+        "values": {
+          "vramGbByTier": "54.4"
+        }
+      }
+    },
+    {
+      "id": "analytic:boogu_image:candle:q4",
+      "modelId": "boogu_image",
+      "modelFamily": "boogu",
+      "route": "boogu_image",
+      "backend": "candle",
+      "tier": "q4",
+      "basis": "manifest_tier_declaration",
+      "reason": "no retained render for this cell; the catalog manifest declares a measured per-tier envelope, which is a whole-render figure with no phase decomposition",
+      "evidence": {
+        "repo": null,
+        "revision": null,
+        "path": "config/manifests/builtin.models.jsonc#models/boogu_image/candle",
+        "sha256": "af38bc1ec14d7a3a83cae88250d28780a2d6aa1d44786d381e2248e025ff88c6",
+        "recordId": null,
+        "envelopeBytes": null,
+        "values": {
+          "vramGbByTier": "31.7"
+        }
+      }
+    },
+    {
+      "id": "analytic:boogu_image:candle:q8",
+      "modelId": "boogu_image",
+      "modelFamily": "boogu",
+      "route": "boogu_image",
+      "backend": "candle",
+      "tier": "q8",
+      "basis": "manifest_tier_declaration",
+      "reason": "no retained render for this cell; the catalog manifest declares a measured per-tier envelope, which is a whole-render figure with no phase decomposition",
+      "evidence": {
+        "repo": null,
+        "revision": null,
+        "path": "config/manifests/builtin.models.jsonc#models/boogu_image/candle",
+        "sha256": "af38bc1ec14d7a3a83cae88250d28780a2d6aa1d44786d381e2248e025ff88c6",
+        "recordId": null,
+        "envelopeBytes": null,
+        "values": {
+          "vramGbByTier": "42"
+        }
+      }
+    },
+    {
+      "id": "analytic:boogu_image:mlx:q8",
+      "modelId": "boogu_image",
+      "modelFamily": "boogu",
+      "route": "boogu_image",
+      "backend": "mlx",
+      "tier": "q8",
+      "basis": "no_retained_evidence",
+      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
+      "evidence": null
+    },
+    {
+      "id": "analytic:boogu_image_edit:candle:default",
+      "modelId": "boogu_image_edit",
+      "modelFamily": "boogu",
+      "route": "boogu_image_edit",
+      "backend": "candle",
+      "tier": "default",
+      "basis": "no_retained_evidence",
+      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
+      "evidence": null
+    },
+    {
+      "id": "analytic:boogu_image_edit:mlx:q8",
+      "modelId": "boogu_image_edit",
+      "modelFamily": "boogu",
+      "route": "boogu_image_edit",
+      "backend": "mlx",
+      "tier": "q8",
+      "basis": "no_retained_evidence",
+      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
+      "evidence": null
+    },
+    {
+      "id": "analytic:boogu_image_turbo:candle:bf16",
+      "modelId": "boogu_image_turbo",
+      "modelFamily": "boogu",
+      "route": "boogu_image_turbo",
+      "backend": "candle",
+      "tier": "bf16",
+      "basis": "manifest_tier_declaration",
+      "reason": "no retained render for this cell; the catalog manifest declares a measured per-tier envelope, which is a whole-render figure with no phase decomposition",
+      "evidence": {
+        "repo": null,
+        "revision": null,
+        "path": "config/manifests/builtin.models.jsonc#models/boogu_image_turbo/candle",
+        "sha256": "af38bc1ec14d7a3a83cae88250d28780a2d6aa1d44786d381e2248e025ff88c6",
+        "recordId": null,
+        "envelopeBytes": null,
+        "values": {
+          "vramGbByTier": "54.5"
+        }
+      }
+    },
+    {
+      "id": "analytic:boogu_image_turbo:candle:q4",
+      "modelId": "boogu_image_turbo",
+      "modelFamily": "boogu",
+      "route": "boogu_image_turbo",
+      "backend": "candle",
+      "tier": "q4",
+      "basis": "manifest_tier_declaration",
+      "reason": "no retained render for this cell; the catalog manifest declares a measured per-tier envelope, which is a whole-render figure with no phase decomposition",
+      "evidence": {
+        "repo": null,
+        "revision": null,
+        "path": "config/manifests/builtin.models.jsonc#models/boogu_image_turbo/candle",
+        "sha256": "af38bc1ec14d7a3a83cae88250d28780a2d6aa1d44786d381e2248e025ff88c6",
+        "recordId": null,
+        "envelopeBytes": null,
+        "values": {
+          "vramGbByTier": "31.6"
+        }
+      }
+    },
+    {
+      "id": "analytic:boogu_image_turbo:candle:q8",
+      "modelId": "boogu_image_turbo",
+      "modelFamily": "boogu",
+      "route": "boogu_image_turbo",
+      "backend": "candle",
+      "tier": "q8",
+      "basis": "manifest_tier_declaration",
+      "reason": "no retained render for this cell; the catalog manifest declares a measured per-tier envelope, which is a whole-render figure with no phase decomposition",
+      "evidence": {
+        "repo": null,
+        "revision": null,
+        "path": "config/manifests/builtin.models.jsonc#models/boogu_image_turbo/candle",
+        "sha256": "af38bc1ec14d7a3a83cae88250d28780a2d6aa1d44786d381e2248e025ff88c6",
+        "recordId": null,
+        "envelopeBytes": null,
+        "values": {
+          "vramGbByTier": "42.1"
+        }
+      }
+    },
+    {
+      "id": "analytic:boogu_image_turbo:mlx:q8",
+      "modelId": "boogu_image_turbo",
+      "modelFamily": "boogu",
+      "route": "boogu_image_turbo",
+      "backend": "mlx",
+      "tier": "q8",
+      "basis": "no_retained_evidence",
+      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
+      "evidence": null
+    },
+    {
+      "id": "analytic:chroma1_base:candle:bf16",
+      "modelId": "chroma1_base",
+      "modelFamily": "chroma",
+      "route": "chroma1_base",
+      "backend": "candle",
+      "tier": "bf16",
+      "basis": "no_retained_evidence",
+      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
+      "evidence": null
+    },
+    {
+      "id": "analytic:chroma1_base:candle:q4",
+      "modelId": "chroma1_base",
+      "modelFamily": "chroma",
+      "route": "chroma1_base",
+      "backend": "candle",
+      "tier": "q4",
+      "basis": "no_retained_evidence",
+      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
+      "evidence": null
+    },
+    {
+      "id": "analytic:chroma1_base:candle:q8",
+      "modelId": "chroma1_base",
+      "modelFamily": "chroma",
+      "route": "chroma1_base",
+      "backend": "candle",
+      "tier": "q8",
+      "basis": "no_retained_evidence",
+      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
+      "evidence": null
+    },
+    {
+      "id": "analytic:chroma1_base:mlx:bf16",
+      "modelId": "chroma1_base",
+      "modelFamily": "chroma",
+      "route": "chroma1_base",
+      "backend": "mlx",
+      "tier": "bf16",
+      "basis": "no_retained_evidence",
+      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
+      "evidence": null
+    },
+    {
+      "id": "analytic:chroma1_base:mlx:q4",
+      "modelId": "chroma1_base",
+      "modelFamily": "chroma",
+      "route": "chroma1_base",
+      "backend": "mlx",
+      "tier": "q4",
+      "basis": "no_retained_evidence",
+      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
+      "evidence": null
+    },
+    {
+      "id": "analytic:chroma1_base:mlx:q8",
+      "modelId": "chroma1_base",
+      "modelFamily": "chroma",
+      "route": "chroma1_base",
+      "backend": "mlx",
+      "tier": "q8",
+      "basis": "no_retained_evidence",
+      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
+      "evidence": null
+    },
+    {
+      "id": "analytic:chroma1_flash:candle:bf16",
+      "modelId": "chroma1_flash",
+      "modelFamily": "chroma",
+      "route": "chroma1_flash",
+      "backend": "candle",
+      "tier": "bf16",
+      "basis": "no_retained_evidence",
+      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
+      "evidence": null
+    },
+    {
+      "id": "analytic:chroma1_flash:candle:q4",
+      "modelId": "chroma1_flash",
+      "modelFamily": "chroma",
+      "route": "chroma1_flash",
+      "backend": "candle",
+      "tier": "q4",
+      "basis": "no_retained_evidence",
+      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
+      "evidence": null
+    },
+    {
+      "id": "analytic:chroma1_flash:candle:q8",
+      "modelId": "chroma1_flash",
+      "modelFamily": "chroma",
+      "route": "chroma1_flash",
+      "backend": "candle",
+      "tier": "q8",
+      "basis": "no_retained_evidence",
+      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
+      "evidence": null
+    },
+    {
+      "id": "analytic:chroma1_flash:mlx:bf16",
+      "modelId": "chroma1_flash",
+      "modelFamily": "chroma",
+      "route": "chroma1_flash",
+      "backend": "mlx",
+      "tier": "bf16",
+      "basis": "no_retained_evidence",
+      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
+      "evidence": null
+    },
+    {
+      "id": "analytic:chroma1_flash:mlx:q4",
+      "modelId": "chroma1_flash",
+      "modelFamily": "chroma",
+      "route": "chroma1_flash",
+      "backend": "mlx",
+      "tier": "q4",
+      "basis": "no_retained_evidence",
+      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
+      "evidence": null
+    },
+    {
+      "id": "analytic:chroma1_flash:mlx:q8",
+      "modelId": "chroma1_flash",
+      "modelFamily": "chroma",
+      "route": "chroma1_flash",
+      "backend": "mlx",
+      "tier": "q8",
+      "basis": "no_retained_evidence",
+      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
+      "evidence": null
+    },
+    {
+      "id": "analytic:chroma1_hd:candle:bf16",
+      "modelId": "chroma1_hd",
+      "modelFamily": "chroma",
+      "route": "chroma1_hd",
+      "backend": "candle",
+      "tier": "bf16",
+      "basis": "no_retained_evidence",
+      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
+      "evidence": null
+    },
+    {
+      "id": "analytic:chroma1_hd:candle:q4",
+      "modelId": "chroma1_hd",
+      "modelFamily": "chroma",
+      "route": "chroma1_hd",
+      "backend": "candle",
+      "tier": "q4",
+      "basis": "no_retained_evidence",
+      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
+      "evidence": null
+    },
+    {
+      "id": "analytic:chroma1_hd:candle:q8",
+      "modelId": "chroma1_hd",
+      "modelFamily": "chroma",
+      "route": "chroma1_hd",
+      "backend": "candle",
+      "tier": "q8",
+      "basis": "no_retained_evidence",
+      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
+      "evidence": null
+    },
+    {
+      "id": "analytic:chroma1_hd:mlx:bf16",
+      "modelId": "chroma1_hd",
+      "modelFamily": "chroma",
+      "route": "chroma1_hd",
+      "backend": "mlx",
+      "tier": "bf16",
+      "basis": "no_retained_evidence",
+      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
+      "evidence": null
+    },
+    {
+      "id": "analytic:chroma1_hd:mlx:q4",
+      "modelId": "chroma1_hd",
+      "modelFamily": "chroma",
+      "route": "chroma1_hd",
+      "backend": "mlx",
+      "tier": "q4",
+      "basis": "no_retained_evidence",
+      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
+      "evidence": null
+    },
+    {
+      "id": "analytic:chroma1_hd:mlx:q8",
+      "modelId": "chroma1_hd",
+      "modelFamily": "chroma",
+      "route": "chroma1_hd",
+      "backend": "mlx",
+      "tier": "q8",
+      "basis": "no_retained_evidence",
+      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
+      "evidence": null
+    },
+    {
+      "id": "analytic:flux2_dev:candle:q4",
+      "modelId": "flux2_dev",
+      "modelFamily": "flux2-dev",
+      "route": "flux2_dev",
+      "backend": "candle",
+      "tier": "q4",
+      "basis": "no_retained_evidence",
+      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
+      "evidence": null
+    },
+    {
+      "id": "analytic:flux2_dev:candle:q8",
+      "modelId": "flux2_dev",
+      "modelFamily": "flux2-dev",
+      "route": "flux2_dev",
+      "backend": "candle",
+      "tier": "q8",
+      "basis": "no_retained_evidence",
+      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
+      "evidence": null
+    },
+    {
+      "id": "analytic:flux2_dev:mlx:bf16",
+      "modelId": "flux2_dev",
+      "modelFamily": "flux2-dev",
+      "route": "flux2_dev",
+      "backend": "mlx",
+      "tier": "bf16",
+      "basis": "no_retained_evidence",
+      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
+      "evidence": null
+    },
+    {
+      "id": "analytic:flux2_klein_9b:candle:bf16",
+      "modelId": "flux2_klein_9b",
+      "modelFamily": "flux2-klein",
+      "route": "flux2_klein_9b",
+      "backend": "candle",
+      "tier": "bf16",
+      "basis": "manifest_tier_declaration",
+      "reason": "no retained render for this cell; the catalog manifest declares a measured per-tier envelope, which is a whole-render figure with no phase decomposition",
+      "evidence": {
+        "repo": null,
+        "revision": null,
+        "path": "config/manifests/builtin.models.jsonc#models/flux2_klein_9b/candle",
+        "sha256": "af38bc1ec14d7a3a83cae88250d28780a2d6aa1d44786d381e2248e025ff88c6",
+        "recordId": null,
+        "envelopeBytes": null,
+        "values": {
+          "vramGbByTier": "75.5",
+          "sequentialPeakGb": "53.3"
+        }
+      }
+    },
+    {
+      "id": "analytic:flux2_klein_9b:candle:q4",
+      "modelId": "flux2_klein_9b",
+      "modelFamily": "flux2-klein",
+      "route": "flux2_klein_9b",
+      "backend": "candle",
+      "tier": "q4",
+      "basis": "manifest_tier_declaration",
+      "reason": "no retained render for this cell; the catalog manifest declares a measured per-tier envelope, which is a whole-render figure with no phase decomposition",
+      "evidence": {
+        "repo": null,
+        "revision": null,
+        "path": "config/manifests/builtin.models.jsonc#models/flux2_klein_9b/candle",
+        "sha256": "af38bc1ec14d7a3a83cae88250d28780a2d6aa1d44786d381e2248e025ff88c6",
+        "recordId": null,
+        "envelopeBytes": null,
+        "values": {
+          "vramGbByTier": "46.2",
+          "sequentialPeakGb": "24.2"
+        }
+      }
+    },
+    {
+      "id": "analytic:flux2_klein_9b:candle:q8",
+      "modelId": "flux2_klein_9b",
+      "modelFamily": "flux2-klein",
+      "route": "flux2_klein_9b",
+      "backend": "candle",
+      "tier": "q8",
+      "basis": "manifest_tier_declaration",
+      "reason": "no retained render for this cell; the catalog manifest declares a measured per-tier envelope, which is a whole-render figure with no phase decomposition",
+      "evidence": {
+        "repo": null,
+        "revision": null,
+        "path": "config/manifests/builtin.models.jsonc#models/flux2_klein_9b/candle",
+        "sha256": "af38bc1ec14d7a3a83cae88250d28780a2d6aa1d44786d381e2248e025ff88c6",
+        "recordId": null,
+        "envelopeBytes": null,
+        "values": {
+          "vramGbByTier": "50.6",
+          "sequentialPeakGb": "28.7"
+        }
+      }
+    },
+    {
+      "id": "analytic:flux2_klein_9b:mlx:bf16",
+      "modelId": "flux2_klein_9b",
+      "modelFamily": "flux2-klein",
+      "route": "flux2_klein_9b",
+      "backend": "mlx",
+      "tier": "bf16",
+      "basis": "no_retained_evidence",
+      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
+      "evidence": null
+    },
+    {
+      "id": "analytic:flux2_klein_9b:mlx:q4",
+      "modelId": "flux2_klein_9b",
+      "modelFamily": "flux2-klein",
+      "route": "flux2_klein_9b",
+      "backend": "mlx",
+      "tier": "q4",
+      "basis": "no_retained_evidence",
+      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
+      "evidence": null
+    },
+    {
+      "id": "analytic:flux2_klein_9b:mlx:q8",
+      "modelId": "flux2_klein_9b",
+      "modelFamily": "flux2-klein",
+      "route": "flux2_klein_9b",
+      "backend": "mlx",
+      "tier": "q8",
+      "basis": "no_retained_evidence",
+      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
+      "evidence": null
+    },
+    {
+      "id": "analytic:flux2_klein_9b_kv:candle:bf16",
+      "modelId": "flux2_klein_9b_kv",
+      "modelFamily": "flux2-klein",
+      "route": "flux2_klein_9b",
+      "backend": "candle",
+      "tier": "bf16",
+      "basis": "no_retained_evidence",
+      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
+      "evidence": null
+    },
+    {
+      "id": "analytic:flux2_klein_9b_kv:candle:q4",
+      "modelId": "flux2_klein_9b_kv",
+      "modelFamily": "flux2-klein",
+      "route": "flux2_klein_9b",
+      "backend": "candle",
+      "tier": "q4",
+      "basis": "no_retained_evidence",
+      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
+      "evidence": null
+    },
+    {
+      "id": "analytic:flux2_klein_9b_kv:candle:q8",
+      "modelId": "flux2_klein_9b_kv",
+      "modelFamily": "flux2-klein",
+      "route": "flux2_klein_9b",
+      "backend": "candle",
+      "tier": "q8",
+      "basis": "no_retained_evidence",
+      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
+      "evidence": null
+    },
+    {
+      "id": "analytic:flux2_klein_9b_kv:mlx:bf16",
+      "modelId": "flux2_klein_9b_kv",
+      "modelFamily": "flux2-klein",
+      "route": "flux2_klein_9b",
+      "backend": "mlx",
+      "tier": "bf16",
+      "basis": "no_retained_evidence",
+      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
+      "evidence": null
+    },
+    {
+      "id": "analytic:flux2_klein_9b_kv:mlx:q4",
+      "modelId": "flux2_klein_9b_kv",
+      "modelFamily": "flux2-klein",
+      "route": "flux2_klein_9b",
+      "backend": "mlx",
+      "tier": "q4",
+      "basis": "no_retained_evidence",
+      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
+      "evidence": null
+    },
+    {
+      "id": "analytic:flux2_klein_9b_kv:mlx:q8",
+      "modelId": "flux2_klein_9b_kv",
+      "modelFamily": "flux2-klein",
+      "route": "flux2_klein_9b",
+      "backend": "mlx",
+      "tier": "q8",
+      "basis": "no_retained_evidence",
+      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
+      "evidence": null
+    },
+    {
+      "id": "analytic:flux2_klein_9b_true_v2:candle:default",
+      "modelId": "flux2_klein_9b_true_v2",
+      "modelFamily": "flux2-klein",
+      "route": "flux2_klein_9b",
+      "backend": "candle",
+      "tier": "default",
+      "basis": "no_retained_evidence",
+      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
+      "evidence": null
+    },
+    {
+      "id": "analytic:flux2_klein_9b_true_v2:mlx:bf16",
+      "modelId": "flux2_klein_9b_true_v2",
+      "modelFamily": "flux2-klein",
+      "route": "flux2_klein_9b",
+      "backend": "mlx",
+      "tier": "bf16",
+      "basis": "no_retained_evidence",
+      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
+      "evidence": null
+    },
+    {
+      "id": "analytic:flux_dev:candle:q4",
+      "modelId": "flux_dev",
+      "modelFamily": "flux",
+      "route": "flux1_dev",
+      "backend": "candle",
+      "tier": "q4",
+      "basis": "measured_envelope",
+      "reason": "the retained corpus measures this cell's overall allocator envelope but carries no per-phase decomposition, so it bounds admission without anchoring the derivation",
+      "evidence": {
+        "repo": null,
+        "revision": null,
+        "path": "docs/generated/memory-calibration-evidence.json",
+        "sha256": "e9e9f7ce079b0b8f2c615bd03b88f15f320881ba302b160390047c5505805cef",
+        "recordId": "imc-674e1b40640dbf345cce",
+        "envelopeBytes": 17651074970,
+        "values": {
+          "provider": "flux1_dev"
+        }
+      }
+    },
+    {
+      "id": "analytic:flux_dev:candle:q8",
+      "modelId": "flux_dev",
+      "modelFamily": "flux",
+      "route": "flux1_dev",
+      "backend": "candle",
+      "tier": "q8",
+      "basis": "manifest_tier_declaration",
+      "reason": "no retained render for this cell; the catalog manifest declares a measured per-tier envelope, which is a whole-render figure with no phase decomposition",
+      "evidence": {
+        "repo": null,
+        "revision": null,
+        "path": "config/manifests/builtin.models.jsonc#models/flux_dev/candle",
+        "sha256": "af38bc1ec14d7a3a83cae88250d28780a2d6aa1d44786d381e2248e025ff88c6",
+        "recordId": null,
+        "envelopeBytes": null,
+        "values": {
+          "vramGbByTier": "31.8",
+          "sequentialPeakGb": "26.4"
+        }
+      }
+    },
+    {
+      "id": "analytic:flux_dev:mlx:bf16",
+      "modelId": "flux_dev",
+      "modelFamily": "flux",
+      "route": "flux1_dev",
+      "backend": "mlx",
+      "tier": "bf16",
+      "basis": "no_retained_evidence",
+      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
+      "evidence": null
+    },
+    {
+      "id": "analytic:flux_dev:mlx:q4",
+      "modelId": "flux_dev",
+      "modelFamily": "flux",
+      "route": "flux1_dev",
+      "backend": "mlx",
+      "tier": "q4",
+      "basis": "no_retained_evidence",
+      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
+      "evidence": null
+    },
+    {
+      "id": "analytic:flux_dev:mlx:q8",
+      "modelId": "flux_dev",
+      "modelFamily": "flux",
+      "route": "flux1_dev",
+      "backend": "mlx",
+      "tier": "q8",
+      "basis": "no_retained_evidence",
+      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
+      "evidence": null
+    },
+    {
+      "id": "analytic:flux_schnell:candle:q4",
+      "modelId": "flux_schnell",
+      "modelFamily": "flux",
+      "route": "flux1_schnell",
+      "backend": "candle",
+      "tier": "q4",
+      "basis": "measured_envelope",
+      "reason": "the retained corpus measures this cell's overall allocator envelope but carries no per-phase decomposition, so it bounds admission without anchoring the derivation",
+      "evidence": {
+        "repo": null,
+        "revision": null,
+        "path": "docs/generated/memory-calibration-evidence.json",
+        "sha256": "e9e9f7ce079b0b8f2c615bd03b88f15f320881ba302b160390047c5505805cef",
+        "recordId": "imc-3e535b3422a162b35758",
+        "envelopeBytes": 17642573594,
+        "values": {
+          "provider": "flux1_schnell"
+        }
+      }
+    },
+    {
+      "id": "analytic:flux_schnell:candle:q8",
+      "modelId": "flux_schnell",
+      "modelFamily": "flux",
+      "route": "flux1_schnell",
+      "backend": "candle",
+      "tier": "q8",
+      "basis": "no_retained_evidence",
+      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
+      "evidence": null
+    },
+    {
+      "id": "analytic:flux_schnell:mlx:bf16",
+      "modelId": "flux_schnell",
+      "modelFamily": "flux",
+      "route": "flux1_schnell",
+      "backend": "mlx",
+      "tier": "bf16",
+      "basis": "no_retained_evidence",
+      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
+      "evidence": null
+    },
+    {
+      "id": "analytic:flux_schnell:mlx:q4",
+      "modelId": "flux_schnell",
+      "modelFamily": "flux",
+      "route": "flux1_schnell",
+      "backend": "mlx",
+      "tier": "q4",
+      "basis": "no_retained_evidence",
+      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
+      "evidence": null
+    },
+    {
+      "id": "analytic:flux_schnell:mlx:q8",
+      "modelId": "flux_schnell",
+      "modelFamily": "flux",
+      "route": "flux1_schnell",
+      "backend": "mlx",
+      "tier": "q8",
+      "basis": "no_retained_evidence",
+      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
+      "evidence": null
+    },
+    {
+      "id": "analytic:ideogram_4:candle:bf16",
+      "modelId": "ideogram_4",
+      "modelFamily": "ideogram",
+      "route": "ideogram_4",
+      "backend": "candle",
+      "tier": "bf16",
+      "basis": "manifest_tier_declaration",
+      "reason": "no retained render for this cell; the catalog manifest declares a measured per-tier envelope, which is a whole-render figure with no phase decomposition",
+      "evidence": {
+        "repo": null,
+        "revision": null,
+        "path": "config/manifests/builtin.models.jsonc#models/ideogram_4/candle",
+        "sha256": "af38bc1ec14d7a3a83cae88250d28780a2d6aa1d44786d381e2248e025ff88c6",
+        "recordId": null,
+        "envelopeBytes": null,
+        "values": {
+          "vramGbByTier": "74.1",
+          "sequentialPeakGb": "67"
+        }
+      }
+    },
+    {
+      "id": "analytic:ideogram_4:candle:q4",
+      "modelId": "ideogram_4",
+      "modelFamily": "ideogram",
+      "route": "ideogram_4",
+      "backend": "candle",
+      "tier": "q4",
+      "basis": "manifest_tier_declaration",
+      "reason": "no retained render for this cell; the catalog manifest declares a measured per-tier envelope, which is a whole-render figure with no phase decomposition",
+      "evidence": {
+        "repo": null,
+        "revision": null,
+        "path": "config/manifests/builtin.models.jsonc#models/ideogram_4/candle",
+        "sha256": "af38bc1ec14d7a3a83cae88250d28780a2d6aa1d44786d381e2248e025ff88c6",
+        "recordId": null,
+        "envelopeBytes": null,
+        "values": {
+          "vramGbByTier": "38.5",
+          "sequentialPeakGb": "34"
+        }
+      }
+    },
+    {
+      "id": "analytic:ideogram_4:candle:q8",
+      "modelId": "ideogram_4",
+      "modelFamily": "ideogram",
+      "route": "ideogram_4",
+      "backend": "candle",
+      "tier": "q8",
+      "basis": "manifest_tier_declaration",
+      "reason": "no retained render for this cell; the catalog manifest declares a measured per-tier envelope, which is a whole-render figure with no phase decomposition",
+      "evidence": {
+        "repo": null,
+        "revision": null,
+        "path": "config/manifests/builtin.models.jsonc#models/ideogram_4/candle",
+        "sha256": "af38bc1ec14d7a3a83cae88250d28780a2d6aa1d44786d381e2248e025ff88c6",
+        "recordId": null,
+        "envelopeBytes": null,
+        "values": {
+          "vramGbByTier": "55.3",
+          "sequentialPeakGb": "50"
+        }
+      }
+    },
+    {
+      "id": "analytic:ideogram_4:mlx:bf16",
+      "modelId": "ideogram_4",
+      "modelFamily": "ideogram",
+      "route": "ideogram_4",
+      "backend": "mlx",
+      "tier": "bf16",
+      "basis": "no_retained_evidence",
+      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
+      "evidence": null
+    },
+    {
+      "id": "analytic:ideogram_4:mlx:q4",
+      "modelId": "ideogram_4",
+      "modelFamily": "ideogram",
+      "route": "ideogram_4",
+      "backend": "mlx",
+      "tier": "q4",
+      "basis": "no_retained_evidence",
+      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
+      "evidence": null
+    },
+    {
+      "id": "analytic:ideogram_4:mlx:q8",
+      "modelId": "ideogram_4",
+      "modelFamily": "ideogram",
+      "route": "ideogram_4",
+      "backend": "mlx",
+      "tier": "q8",
+      "basis": "no_retained_evidence",
+      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
+      "evidence": null
+    },
+    {
+      "id": "analytic:ideogram_4_turbo:candle:bf16",
+      "modelId": "ideogram_4_turbo",
+      "modelFamily": "ideogram",
+      "route": "ideogram_4_turbo",
+      "backend": "candle",
+      "tier": "bf16",
+      "basis": "manifest_tier_declaration",
+      "reason": "no retained render for this cell; the catalog manifest declares a measured per-tier envelope, which is a whole-render figure with no phase decomposition",
+      "evidence": {
+        "repo": null,
+        "revision": null,
+        "path": "config/manifests/builtin.models.jsonc#models/ideogram_4_turbo/candle",
+        "sha256": "af38bc1ec14d7a3a83cae88250d28780a2d6aa1d44786d381e2248e025ff88c6",
+        "recordId": null,
+        "envelopeBytes": null,
+        "values": {
+          "vramGbByTier": "56.3",
+          "sequentialPeakGb": "51"
+        }
+      }
+    },
+    {
+      "id": "analytic:ideogram_4_turbo:candle:q4",
+      "modelId": "ideogram_4_turbo",
+      "modelFamily": "ideogram",
+      "route": "ideogram_4_turbo",
+      "backend": "candle",
+      "tier": "q4",
+      "basis": "manifest_tier_declaration",
+      "reason": "no retained render for this cell; the catalog manifest declares a measured per-tier envelope, which is a whole-render figure with no phase decomposition",
+      "evidence": {
+        "repo": null,
+        "revision": null,
+        "path": "config/manifests/builtin.models.jsonc#models/ideogram_4_turbo/candle",
+        "sha256": "af38bc1ec14d7a3a83cae88250d28780a2d6aa1d44786d381e2248e025ff88c6",
+        "recordId": null,
+        "envelopeBytes": null,
+        "values": {
+          "vramGbByTier": "33.5",
+          "sequentialPeakGb": "29"
+        }
+      }
+    },
+    {
+      "id": "analytic:ideogram_4_turbo:candle:q8",
+      "modelId": "ideogram_4_turbo",
+      "modelFamily": "ideogram",
+      "route": "ideogram_4_turbo",
+      "backend": "candle",
+      "tier": "q8",
+      "basis": "manifest_tier_declaration",
+      "reason": "no retained render for this cell; the catalog manifest declares a measured per-tier envelope, which is a whole-render figure with no phase decomposition",
+      "evidence": {
+        "repo": null,
+        "revision": null,
+        "path": "config/manifests/builtin.models.jsonc#models/ideogram_4_turbo/candle",
+        "sha256": "af38bc1ec14d7a3a83cae88250d28780a2d6aa1d44786d381e2248e025ff88c6",
+        "recordId": null,
+        "envelopeBytes": null,
+        "values": {
+          "vramGbByTier": "43.9",
+          "sequentialPeakGb": "39"
+        }
+      }
+    },
+    {
+      "id": "analytic:ideogram_4_turbo:mlx:bf16",
+      "modelId": "ideogram_4_turbo",
+      "modelFamily": "ideogram",
+      "route": "ideogram_4_turbo",
+      "backend": "mlx",
+      "tier": "bf16",
+      "basis": "no_retained_evidence",
+      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
+      "evidence": null
+    },
+    {
+      "id": "analytic:ideogram_4_turbo:mlx:q4",
+      "modelId": "ideogram_4_turbo",
+      "modelFamily": "ideogram",
+      "route": "ideogram_4_turbo",
+      "backend": "mlx",
+      "tier": "q4",
+      "basis": "no_retained_evidence",
+      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
+      "evidence": null
+    },
+    {
+      "id": "analytic:ideogram_4_turbo:mlx:q8",
+      "modelId": "ideogram_4_turbo",
+      "modelFamily": "ideogram",
+      "route": "ideogram_4_turbo",
+      "backend": "mlx",
+      "tier": "q8",
+      "basis": "no_retained_evidence",
+      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
+      "evidence": null
+    },
+    {
+      "id": "analytic:illustrious_xl_v1:candle:bf16",
+      "modelId": "illustrious_xl_v1",
+      "modelFamily": "sdxl",
+      "route": "sdxl",
+      "backend": "candle",
+      "tier": "bf16",
+      "basis": "no_retained_evidence",
+      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
+      "evidence": null
+    },
+    {
+      "id": "analytic:illustrious_xl_v1:candle:q4",
+      "modelId": "illustrious_xl_v1",
+      "modelFamily": "sdxl",
+      "route": "sdxl",
+      "backend": "candle",
+      "tier": "q4",
+      "basis": "no_retained_evidence",
+      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
+      "evidence": null
+    },
+    {
+      "id": "analytic:illustrious_xl_v1:candle:q8",
+      "modelId": "illustrious_xl_v1",
+      "modelFamily": "sdxl",
+      "route": "sdxl",
+      "backend": "candle",
+      "tier": "q8",
+      "basis": "no_retained_evidence",
+      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
+      "evidence": null
+    },
+    {
+      "id": "analytic:illustrious_xl_v1:mlx:bf16",
+      "modelId": "illustrious_xl_v1",
+      "modelFamily": "sdxl",
+      "route": "sdxl",
+      "backend": "mlx",
+      "tier": "bf16",
+      "basis": "no_retained_evidence",
+      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
+      "evidence": null
+    },
+    {
+      "id": "analytic:illustrious_xl_v1:mlx:q4",
+      "modelId": "illustrious_xl_v1",
+      "modelFamily": "sdxl",
+      "route": "sdxl",
+      "backend": "mlx",
+      "tier": "q4",
+      "basis": "no_retained_evidence",
+      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
+      "evidence": null
+    },
+    {
+      "id": "analytic:illustrious_xl_v1:mlx:q8",
+      "modelId": "illustrious_xl_v1",
+      "modelFamily": "sdxl",
+      "route": "sdxl",
+      "backend": "mlx",
+      "tier": "q8",
+      "basis": "no_retained_evidence",
+      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
+      "evidence": null
+    },
+    {
+      "id": "analytic:illustrious_xl_v2:candle:bf16",
+      "modelId": "illustrious_xl_v2",
+      "modelFamily": "sdxl",
+      "route": "sdxl",
+      "backend": "candle",
+      "tier": "bf16",
+      "basis": "no_retained_evidence",
+      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
+      "evidence": null
+    },
+    {
+      "id": "analytic:illustrious_xl_v2:candle:q4",
+      "modelId": "illustrious_xl_v2",
+      "modelFamily": "sdxl",
+      "route": "sdxl",
+      "backend": "candle",
+      "tier": "q4",
+      "basis": "no_retained_evidence",
+      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
+      "evidence": null
+    },
+    {
+      "id": "analytic:illustrious_xl_v2:candle:q8",
+      "modelId": "illustrious_xl_v2",
+      "modelFamily": "sdxl",
+      "route": "sdxl",
+      "backend": "candle",
+      "tier": "q8",
+      "basis": "no_retained_evidence",
+      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
+      "evidence": null
+    },
+    {
+      "id": "analytic:illustrious_xl_v2:mlx:bf16",
+      "modelId": "illustrious_xl_v2",
+      "modelFamily": "sdxl",
+      "route": "sdxl",
+      "backend": "mlx",
+      "tier": "bf16",
+      "basis": "no_retained_evidence",
+      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
+      "evidence": null
+    },
+    {
+      "id": "analytic:illustrious_xl_v2:mlx:q4",
+      "modelId": "illustrious_xl_v2",
+      "modelFamily": "sdxl",
+      "route": "sdxl",
+      "backend": "mlx",
+      "tier": "q4",
+      "basis": "no_retained_evidence",
+      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
+      "evidence": null
+    },
+    {
+      "id": "analytic:illustrious_xl_v2:mlx:q8",
+      "modelId": "illustrious_xl_v2",
+      "modelFamily": "sdxl",
+      "route": "sdxl",
+      "backend": "mlx",
+      "tier": "q8",
+      "basis": "no_retained_evidence",
+      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
+      "evidence": null
+    },
+    {
+      "id": "analytic:instantid_realvisxl:candle:bf16",
+      "modelId": "instantid_realvisxl",
+      "modelFamily": "sdxl",
+      "route": "instantid",
+      "backend": "candle",
+      "tier": "bf16",
+      "basis": "no_retained_evidence",
+      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
+      "evidence": null
+    },
+    {
+      "id": "analytic:instantid_realvisxl:mlx:bf16",
+      "modelId": "instantid_realvisxl",
+      "modelFamily": "sdxl",
+      "route": "instantid",
+      "backend": "mlx",
+      "tier": "bf16",
+      "basis": "no_retained_evidence",
+      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
+      "evidence": null
+    },
+    {
+      "id": "analytic:instantid_realvisxl:mlx:q4",
+      "modelId": "instantid_realvisxl",
+      "modelFamily": "sdxl",
+      "route": "instantid",
+      "backend": "mlx",
+      "tier": "q4",
+      "basis": "no_retained_evidence",
+      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
+      "evidence": null
+    },
+    {
+      "id": "analytic:instantid_realvisxl:mlx:q8",
+      "modelId": "instantid_realvisxl",
+      "modelFamily": "sdxl",
+      "route": "instantid",
+      "backend": "mlx",
+      "tier": "q8",
+      "basis": "no_retained_evidence",
+      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
+      "evidence": null
+    },
+    {
+      "id": "analytic:kolors:candle:bf16",
+      "modelId": "kolors",
+      "modelFamily": "kolors",
+      "route": "kolors",
+      "backend": "candle",
+      "tier": "bf16",
+      "basis": "manifest_tier_declaration",
+      "reason": "no retained render for this cell; the catalog manifest declares a measured per-tier envelope, which is a whole-render figure with no phase decomposition",
+      "evidence": {
+        "repo": null,
+        "revision": null,
+        "path": "config/manifests/builtin.models.jsonc#models/kolors/candle",
+        "sha256": "af38bc1ec14d7a3a83cae88250d28780a2d6aa1d44786d381e2248e025ff88c6",
+        "recordId": null,
+        "envelopeBytes": null,
+        "values": {
+          "vramGbByTier": "63.7"
+        }
+      }
+    },
+    {
+      "id": "analytic:kolors:candle:q4",
+      "modelId": "kolors",
+      "modelFamily": "kolors",
+      "route": "kolors",
+      "backend": "candle",
+      "tier": "q4",
+      "basis": "manifest_tier_declaration",
+      "reason": "no retained render for this cell; the catalog manifest declares a measured per-tier envelope, which is a whole-render figure with no phase decomposition",
+      "evidence": {
+        "repo": null,
+        "revision": null,
+        "path": "config/manifests/builtin.models.jsonc#models/kolors/candle",
+        "sha256": "af38bc1ec14d7a3a83cae88250d28780a2d6aa1d44786d381e2248e025ff88c6",
+        "recordId": null,
+        "envelopeBytes": null,
+        "values": {
+          "vramGbByTier": "26.7"
+        }
+      }
+    },
+    {
+      "id": "analytic:kolors:candle:q8",
+      "modelId": "kolors",
+      "modelFamily": "kolors",
+      "route": "kolors",
+      "backend": "candle",
+      "tier": "q8",
+      "basis": "manifest_tier_declaration",
+      "reason": "no retained render for this cell; the catalog manifest declares a measured per-tier envelope, which is a whole-render figure with no phase decomposition",
+      "evidence": {
+        "repo": null,
+        "revision": null,
+        "path": "config/manifests/builtin.models.jsonc#models/kolors/candle",
+        "sha256": "af38bc1ec14d7a3a83cae88250d28780a2d6aa1d44786d381e2248e025ff88c6",
+        "recordId": null,
+        "envelopeBytes": null,
+        "values": {
+          "vramGbByTier": "30.4"
+        }
+      }
+    },
+    {
+      "id": "analytic:kolors:mlx:bf16",
+      "modelId": "kolors",
+      "modelFamily": "kolors",
+      "route": "kolors",
+      "backend": "mlx",
+      "tier": "bf16",
+      "basis": "no_retained_evidence",
+      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
+      "evidence": null
+    },
+    {
+      "id": "analytic:kolors:mlx:q4",
+      "modelId": "kolors",
+      "modelFamily": "kolors",
+      "route": "kolors",
+      "backend": "mlx",
+      "tier": "q4",
+      "basis": "no_retained_evidence",
+      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
+      "evidence": null
+    },
+    {
+      "id": "analytic:kolors:mlx:q8",
+      "modelId": "kolors",
+      "modelFamily": "kolors",
+      "route": "kolors",
+      "backend": "mlx",
+      "tier": "q8",
+      "basis": "no_retained_evidence",
+      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
+      "evidence": null
+    },
+    {
+      "id": "analytic:krea_2_raw:candle:bf16",
+      "modelId": "krea_2_raw",
+      "modelFamily": "krea_2",
+      "route": "krea_2_raw",
+      "backend": "candle",
+      "tier": "bf16",
+      "basis": "no_retained_evidence",
+      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
+      "evidence": null
+    },
+    {
+      "id": "analytic:krea_2_raw:candle:q4",
+      "modelId": "krea_2_raw",
+      "modelFamily": "krea_2",
+      "route": "krea_2_raw",
+      "backend": "candle",
+      "tier": "q4",
+      "basis": "no_retained_evidence",
+      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
+      "evidence": null
+    },
+    {
+      "id": "analytic:krea_2_raw:candle:q8",
+      "modelId": "krea_2_raw",
+      "modelFamily": "krea_2",
+      "route": "krea_2_raw",
+      "backend": "candle",
+      "tier": "q8",
+      "basis": "no_retained_evidence",
+      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
+      "evidence": null
+    },
+    {
+      "id": "analytic:krea_2_raw:mlx:bf16",
+      "modelId": "krea_2_raw",
+      "modelFamily": "krea_2",
+      "route": "krea_2_raw",
+      "backend": "mlx",
+      "tier": "bf16",
+      "basis": "no_retained_evidence",
+      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
+      "evidence": null
+    },
+    {
+      "id": "analytic:krea_2_raw:mlx:q4",
+      "modelId": "krea_2_raw",
+      "modelFamily": "krea_2",
+      "route": "krea_2_raw",
+      "backend": "mlx",
+      "tier": "q4",
+      "basis": "no_retained_evidence",
+      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
+      "evidence": null
+    },
+    {
+      "id": "analytic:krea_2_raw:mlx:q8",
+      "modelId": "krea_2_raw",
+      "modelFamily": "krea_2",
+      "route": "krea_2_raw",
+      "backend": "mlx",
+      "tier": "q8",
+      "basis": "no_retained_evidence",
+      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
+      "evidence": null
+    },
+    {
+      "id": "analytic:krea_2_turbo:candle:bf16",
+      "modelId": "krea_2_turbo",
+      "modelFamily": "krea_2",
+      "route": "krea_2_turbo",
+      "backend": "candle",
+      "tier": "bf16",
+      "basis": "manifest_tier_declaration",
+      "reason": "no retained render for this cell; the catalog manifest declares a measured per-tier envelope, which is a whole-render figure with no phase decomposition",
+      "evidence": {
+        "repo": null,
+        "revision": null,
+        "path": "config/manifests/builtin.models.jsonc#models/krea_2_turbo/candle",
+        "sha256": "af38bc1ec14d7a3a83cae88250d28780a2d6aa1d44786d381e2248e025ff88c6",
+        "recordId": null,
+        "envelopeBytes": null,
+        "values": {
+          "vramGbByTier": "47.2",
+          "sequentialPeakGb": "39.4"
+        }
+      }
+    },
+    {
+      "id": "analytic:krea_2_turbo:candle:q4",
+      "modelId": "krea_2_turbo",
+      "modelFamily": "krea_2",
+      "route": "krea_2_turbo",
+      "backend": "candle",
+      "tier": "q4",
+      "basis": "measured_envelope",
+      "reason": "the retained corpus measures this cell's overall allocator envelope but carries no per-phase decomposition, so it bounds admission without anchoring the derivation",
+      "evidence": {
+        "repo": null,
+        "revision": null,
+        "path": "docs/generated/krea-candle-five-rung-sc-11045.json",
+        "sha256": "a890d20e0236702535c6701d22ce8db7aa87ed42820490901bdc003c232fc18b",
+        "recordId": "imc-509754af068769903e2a",
+        "envelopeBytes": 25171066880,
+        "values": {
+          "provider": "krea_2_turbo"
+        }
+      }
+    },
+    {
+      "id": "analytic:krea_2_turbo:candle:q8",
+      "modelId": "krea_2_turbo",
+      "modelFamily": "krea_2",
+      "route": "krea_2_turbo",
+      "backend": "candle",
+      "tier": "q8",
+      "basis": "manifest_tier_declaration",
+      "reason": "no retained render for this cell; the catalog manifest declares a measured per-tier envelope, which is a whole-render figure with no phase decomposition",
+      "evidence": {
+        "repo": null,
+        "revision": null,
+        "path": "config/manifests/builtin.models.jsonc#models/krea_2_turbo/candle",
+        "sha256": "af38bc1ec14d7a3a83cae88250d28780a2d6aa1d44786d381e2248e025ff88c6",
+        "recordId": null,
+        "envelopeBytes": null,
+        "values": {
+          "vramGbByTier": "35.2",
+          "sequentialPeakGb": "29.4"
+        }
+      }
+    },
+    {
+      "id": "analytic:krea_2_turbo:mlx:bf16",
+      "modelId": "krea_2_turbo",
+      "modelFamily": "krea_2",
+      "route": "krea_2_turbo",
+      "backend": "mlx",
+      "tier": "bf16",
+      "basis": "no_retained_evidence",
+      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
+      "evidence": null
+    },
+    {
+      "id": "analytic:krea_2_turbo:mlx:q4",
+      "modelId": "krea_2_turbo",
+      "modelFamily": "krea_2",
+      "route": "krea_2_turbo",
+      "backend": "mlx",
+      "tier": "q4",
+      "basis": "measured_envelope",
+      "reason": "the only retained render for this cell ran under the 'control:1' overlay on provider 'krea_2_turbo_control', which measures a different resident set, so it bounds the envelope without anchoring this cell",
+      "evidence": {
+        "repo": null,
+        "revision": null,
+        "path": "docs/generated/memory-calibration-evidence.json",
+        "sha256": "e9e9f7ce079b0b8f2c615bd03b88f15f320881ba302b160390047c5505805cef",
+        "recordId": "imc-2cd840a85ce33b4f22a9",
+        "envelopeBytes": 39417727840,
+        "values": {
+          "provider": "krea_2_turbo_control",
+          "overlay": "control:1"
+        }
+      }
+    },
+    {
+      "id": "analytic:krea_2_turbo:mlx:q8",
+      "modelId": "krea_2_turbo",
+      "modelFamily": "krea_2",
+      "route": "krea_2_turbo",
+      "backend": "mlx",
+      "tier": "q8",
+      "basis": "no_retained_evidence",
+      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
+      "evidence": null
+    },
+    {
+      "id": "analytic:krea_realtime_14b:mlx:bf16",
+      "modelId": "krea_realtime_14b",
+      "modelFamily": "krea-realtime",
+      "route": "krea_realtime_14b",
+      "backend": "mlx",
+      "tier": "bf16",
+      "basis": "no_retained_evidence",
+      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
+      "evidence": null
+    },
+    {
+      "id": "analytic:krea_realtime_14b:mlx:q4",
+      "modelId": "krea_realtime_14b",
+      "modelFamily": "krea-realtime",
+      "route": "krea_realtime_14b",
+      "backend": "mlx",
+      "tier": "q4",
+      "basis": "no_retained_evidence",
+      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
+      "evidence": null
+    },
+    {
+      "id": "analytic:krea_realtime_14b:mlx:q8",
+      "modelId": "krea_realtime_14b",
+      "modelFamily": "krea-realtime",
+      "route": "krea_realtime_14b",
+      "backend": "mlx",
+      "tier": "q8",
+      "basis": "no_retained_evidence",
+      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
+      "evidence": null
+    },
+    {
+      "id": "analytic:lens:candle:bf16",
+      "modelId": "lens",
+      "modelFamily": "lens",
+      "route": "lens",
+      "backend": "candle",
+      "tier": "bf16",
+      "basis": "no_retained_evidence",
+      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
+      "evidence": null
+    },
+    {
+      "id": "analytic:lens:candle:q4",
+      "modelId": "lens",
+      "modelFamily": "lens",
+      "route": "lens",
+      "backend": "candle",
+      "tier": "q4",
+      "basis": "no_retained_evidence",
+      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
+      "evidence": null
+    },
+    {
+      "id": "analytic:lens:candle:q8",
+      "modelId": "lens",
+      "modelFamily": "lens",
+      "route": "lens",
+      "backend": "candle",
+      "tier": "q8",
+      "basis": "no_retained_evidence",
+      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
+      "evidence": null
+    },
+    {
+      "id": "analytic:lens:mlx:bf16",
+      "modelId": "lens",
+      "modelFamily": "lens",
+      "route": "lens",
+      "backend": "mlx",
+      "tier": "bf16",
+      "basis": "no_retained_evidence",
+      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
+      "evidence": null
+    },
+    {
+      "id": "analytic:lens:mlx:q4",
+      "modelId": "lens",
+      "modelFamily": "lens",
+      "route": "lens",
+      "backend": "mlx",
+      "tier": "q4",
+      "basis": "no_retained_evidence",
+      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
+      "evidence": null
+    },
+    {
+      "id": "analytic:lens:mlx:q8",
+      "modelId": "lens",
+      "modelFamily": "lens",
+      "route": "lens",
+      "backend": "mlx",
+      "tier": "q8",
+      "basis": "no_retained_evidence",
+      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
+      "evidence": null
+    },
+    {
+      "id": "analytic:lens_turbo:candle:bf16",
+      "modelId": "lens_turbo",
+      "modelFamily": "lens",
+      "route": "lens_turbo",
+      "backend": "candle",
+      "tier": "bf16",
+      "basis": "no_retained_evidence",
+      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
+      "evidence": null
+    },
+    {
+      "id": "analytic:lens_turbo:candle:q4",
+      "modelId": "lens_turbo",
+      "modelFamily": "lens",
+      "route": "lens_turbo",
+      "backend": "candle",
+      "tier": "q4",
+      "basis": "no_retained_evidence",
+      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
+      "evidence": null
+    },
+    {
+      "id": "analytic:lens_turbo:candle:q8",
+      "modelId": "lens_turbo",
+      "modelFamily": "lens",
+      "route": "lens_turbo",
+      "backend": "candle",
+      "tier": "q8",
+      "basis": "no_retained_evidence",
+      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
+      "evidence": null
+    },
+    {
+      "id": "analytic:lens_turbo:mlx:bf16",
+      "modelId": "lens_turbo",
+      "modelFamily": "lens",
+      "route": "lens_turbo",
+      "backend": "mlx",
+      "tier": "bf16",
+      "basis": "no_retained_evidence",
+      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
+      "evidence": null
+    },
+    {
+      "id": "analytic:lens_turbo:mlx:q4",
+      "modelId": "lens_turbo",
+      "modelFamily": "lens",
+      "route": "lens_turbo",
+      "backend": "mlx",
+      "tier": "q4",
+      "basis": "no_retained_evidence",
+      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
+      "evidence": null
+    },
+    {
+      "id": "analytic:lens_turbo:mlx:q8",
+      "modelId": "lens_turbo",
+      "modelFamily": "lens",
+      "route": "lens_turbo",
+      "backend": "mlx",
+      "tier": "q8",
+      "basis": "no_retained_evidence",
+      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
+      "evidence": null
+    },
+    {
+      "id": "analytic:ltx_2_3:candle:bf16",
+      "modelId": "ltx_2_3",
+      "modelFamily": "ltx-video",
+      "route": "ltx_2_3_distilled",
+      "backend": "candle",
+      "tier": "bf16",
+      "basis": "no_retained_evidence",
+      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
+      "evidence": null
+    },
+    {
+      "id": "analytic:ltx_2_3:candle:q4",
+      "modelId": "ltx_2_3",
+      "modelFamily": "ltx-video",
+      "route": "ltx_2_3_distilled",
+      "backend": "candle",
+      "tier": "q4",
+      "basis": "no_retained_evidence",
+      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
+      "evidence": null
+    },
+    {
+      "id": "analytic:ltx_2_3:candle:q8",
+      "modelId": "ltx_2_3",
+      "modelFamily": "ltx-video",
+      "route": "ltx_2_3_distilled",
+      "backend": "candle",
+      "tier": "q8",
+      "basis": "no_retained_evidence",
+      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
+      "evidence": null
+    },
+    {
+      "id": "analytic:ltx_2_3:mlx:bf16",
+      "modelId": "ltx_2_3",
+      "modelFamily": "ltx-video",
+      "route": "ltx_2_3",
+      "backend": "mlx",
+      "tier": "bf16",
+      "basis": "no_retained_evidence",
+      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
+      "evidence": null
+    },
+    {
+      "id": "analytic:ltx_2_3:mlx:q4",
+      "modelId": "ltx_2_3",
+      "modelFamily": "ltx-video",
+      "route": "ltx_2_3",
+      "backend": "mlx",
+      "tier": "q4",
+      "basis": "no_retained_evidence",
+      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
+      "evidence": null
+    },
+    {
+      "id": "analytic:ltx_2_3_eros:mlx:default",
+      "modelId": "ltx_2_3_eros",
+      "modelFamily": "ltx-video",
+      "route": "ltx_2_3",
+      "backend": "mlx",
+      "tier": "default",
+      "basis": "no_retained_evidence",
+      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
+      "evidence": null
+    },
+    {
+      "id": "analytic:ltx_2_5:candle:bf16",
+      "modelId": "ltx_2_5",
+      "modelFamily": "ltx-video",
+      "route": "ltx_2_5_distilled",
+      "backend": "candle",
+      "tier": "bf16",
+      "basis": "no_retained_evidence",
+      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
+      "evidence": null
+    },
+    {
+      "id": "analytic:ltx_2_5:candle:q4",
+      "modelId": "ltx_2_5",
+      "modelFamily": "ltx-video",
+      "route": "ltx_2_5_distilled",
+      "backend": "candle",
+      "tier": "q4",
+      "basis": "no_retained_evidence",
+      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
+      "evidence": null
+    },
+    {
+      "id": "analytic:ltx_2_5:candle:q8",
+      "modelId": "ltx_2_5",
+      "modelFamily": "ltx-video",
+      "route": "ltx_2_5_distilled",
+      "backend": "candle",
+      "tier": "q8",
+      "basis": "no_retained_evidence",
+      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
+      "evidence": null
+    },
+    {
+      "id": "analytic:mage_flow:candle:bf16",
+      "modelId": "mage_flow",
+      "modelFamily": "mage-flow",
+      "route": "mage_flow",
+      "backend": "candle",
+      "tier": "bf16",
+      "basis": "no_retained_evidence",
+      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
+      "evidence": null
+    },
+    {
+      "id": "analytic:mage_flow:candle:q4",
+      "modelId": "mage_flow",
+      "modelFamily": "mage-flow",
+      "route": "mage_flow",
+      "backend": "candle",
+      "tier": "q4",
+      "basis": "no_retained_evidence",
+      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
+      "evidence": null
+    },
+    {
+      "id": "analytic:mage_flow:candle:q8",
+      "modelId": "mage_flow",
+      "modelFamily": "mage-flow",
+      "route": "mage_flow",
+      "backend": "candle",
+      "tier": "q8",
+      "basis": "no_retained_evidence",
+      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
+      "evidence": null
+    },
+    {
+      "id": "analytic:mage_flow:mlx:bf16",
+      "modelId": "mage_flow",
+      "modelFamily": "mage-flow",
+      "route": "mage_flow",
+      "backend": "mlx",
+      "tier": "bf16",
+      "basis": "no_retained_evidence",
+      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
+      "evidence": null
+    },
+    {
+      "id": "analytic:mage_flow:mlx:q4",
+      "modelId": "mage_flow",
+      "modelFamily": "mage-flow",
+      "route": "mage_flow",
+      "backend": "mlx",
+      "tier": "q4",
+      "basis": "no_retained_evidence",
+      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
+      "evidence": null
+    },
+    {
+      "id": "analytic:mage_flow:mlx:q8",
+      "modelId": "mage_flow",
+      "modelFamily": "mage-flow",
+      "route": "mage_flow",
+      "backend": "mlx",
+      "tier": "q8",
+      "basis": "no_retained_evidence",
+      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
+      "evidence": null
+    },
+    {
+      "id": "analytic:mage_flow_base:candle:bf16",
+      "modelId": "mage_flow_base",
+      "modelFamily": "mage-flow",
+      "route": "mage_flow_base",
+      "backend": "candle",
+      "tier": "bf16",
+      "basis": "no_retained_evidence",
+      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
+      "evidence": null
+    },
+    {
+      "id": "analytic:mage_flow_base:candle:q4",
+      "modelId": "mage_flow_base",
+      "modelFamily": "mage-flow",
+      "route": "mage_flow_base",
+      "backend": "candle",
+      "tier": "q4",
+      "basis": "no_retained_evidence",
+      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
+      "evidence": null
+    },
+    {
+      "id": "analytic:mage_flow_base:candle:q8",
+      "modelId": "mage_flow_base",
+      "modelFamily": "mage-flow",
+      "route": "mage_flow_base",
+      "backend": "candle",
+      "tier": "q8",
+      "basis": "no_retained_evidence",
+      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
+      "evidence": null
+    },
+    {
+      "id": "analytic:mage_flow_base:mlx:bf16",
+      "modelId": "mage_flow_base",
+      "modelFamily": "mage-flow",
+      "route": "mage_flow_base",
+      "backend": "mlx",
+      "tier": "bf16",
+      "basis": "no_retained_evidence",
+      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
+      "evidence": null
+    },
+    {
+      "id": "analytic:mage_flow_base:mlx:q4",
+      "modelId": "mage_flow_base",
+      "modelFamily": "mage-flow",
+      "route": "mage_flow_base",
+      "backend": "mlx",
+      "tier": "q4",
+      "basis": "no_retained_evidence",
+      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
+      "evidence": null
+    },
+    {
+      "id": "analytic:mage_flow_base:mlx:q8",
+      "modelId": "mage_flow_base",
+      "modelFamily": "mage-flow",
+      "route": "mage_flow_base",
+      "backend": "mlx",
+      "tier": "q8",
+      "basis": "no_retained_evidence",
+      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
+      "evidence": null
+    },
+    {
+      "id": "analytic:mage_flow_edit:candle:bf16",
+      "modelId": "mage_flow_edit",
+      "modelFamily": "mage-flow",
+      "route": "mage_flow_edit",
+      "backend": "candle",
+      "tier": "bf16",
+      "basis": "no_retained_evidence",
+      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
+      "evidence": null
+    },
+    {
+      "id": "analytic:mage_flow_edit:candle:q4",
+      "modelId": "mage_flow_edit",
+      "modelFamily": "mage-flow",
+      "route": "mage_flow_edit",
+      "backend": "candle",
+      "tier": "q4",
+      "basis": "no_retained_evidence",
+      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
+      "evidence": null
+    },
+    {
+      "id": "analytic:mage_flow_edit:candle:q8",
+      "modelId": "mage_flow_edit",
+      "modelFamily": "mage-flow",
+      "route": "mage_flow_edit",
+      "backend": "candle",
+      "tier": "q8",
+      "basis": "no_retained_evidence",
+      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
+      "evidence": null
+    },
+    {
+      "id": "analytic:mage_flow_edit:mlx:bf16",
+      "modelId": "mage_flow_edit",
+      "modelFamily": "mage-flow",
+      "route": "mage_flow_edit",
+      "backend": "mlx",
+      "tier": "bf16",
+      "basis": "no_retained_evidence",
+      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
+      "evidence": null
+    },
+    {
+      "id": "analytic:mage_flow_edit:mlx:q4",
+      "modelId": "mage_flow_edit",
+      "modelFamily": "mage-flow",
+      "route": "mage_flow_edit",
+      "backend": "mlx",
+      "tier": "q4",
+      "basis": "no_retained_evidence",
+      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
+      "evidence": null
+    },
+    {
+      "id": "analytic:mage_flow_edit:mlx:q8",
+      "modelId": "mage_flow_edit",
+      "modelFamily": "mage-flow",
+      "route": "mage_flow_edit",
+      "backend": "mlx",
+      "tier": "q8",
+      "basis": "no_retained_evidence",
+      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
+      "evidence": null
+    },
+    {
+      "id": "analytic:mage_flow_edit_base:candle:bf16",
+      "modelId": "mage_flow_edit_base",
+      "modelFamily": "mage-flow",
+      "route": "mage_flow_edit_base",
+      "backend": "candle",
+      "tier": "bf16",
+      "basis": "no_retained_evidence",
+      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
+      "evidence": null
+    },
+    {
+      "id": "analytic:mage_flow_edit_base:candle:q4",
+      "modelId": "mage_flow_edit_base",
+      "modelFamily": "mage-flow",
+      "route": "mage_flow_edit_base",
+      "backend": "candle",
+      "tier": "q4",
+      "basis": "no_retained_evidence",
+      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
+      "evidence": null
+    },
+    {
+      "id": "analytic:mage_flow_edit_base:candle:q8",
+      "modelId": "mage_flow_edit_base",
+      "modelFamily": "mage-flow",
+      "route": "mage_flow_edit_base",
+      "backend": "candle",
+      "tier": "q8",
+      "basis": "no_retained_evidence",
+      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
+      "evidence": null
+    },
+    {
+      "id": "analytic:mage_flow_edit_base:mlx:bf16",
+      "modelId": "mage_flow_edit_base",
+      "modelFamily": "mage-flow",
+      "route": "mage_flow_edit_base",
+      "backend": "mlx",
+      "tier": "bf16",
+      "basis": "no_retained_evidence",
+      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
+      "evidence": null
+    },
+    {
+      "id": "analytic:mage_flow_edit_base:mlx:q4",
+      "modelId": "mage_flow_edit_base",
+      "modelFamily": "mage-flow",
+      "route": "mage_flow_edit_base",
+      "backend": "mlx",
+      "tier": "q4",
+      "basis": "no_retained_evidence",
+      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
+      "evidence": null
+    },
+    {
+      "id": "analytic:mage_flow_edit_base:mlx:q8",
+      "modelId": "mage_flow_edit_base",
+      "modelFamily": "mage-flow",
+      "route": "mage_flow_edit_base",
+      "backend": "mlx",
+      "tier": "q8",
+      "basis": "no_retained_evidence",
+      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
+      "evidence": null
+    },
+    {
+      "id": "analytic:mage_flow_edit_turbo:candle:bf16",
+      "modelId": "mage_flow_edit_turbo",
+      "modelFamily": "mage-flow",
+      "route": "mage_flow_edit_turbo",
+      "backend": "candle",
+      "tier": "bf16",
+      "basis": "no_retained_evidence",
+      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
+      "evidence": null
+    },
+    {
+      "id": "analytic:mage_flow_edit_turbo:candle:q4",
+      "modelId": "mage_flow_edit_turbo",
+      "modelFamily": "mage-flow",
+      "route": "mage_flow_edit_turbo",
+      "backend": "candle",
+      "tier": "q4",
+      "basis": "no_retained_evidence",
+      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
+      "evidence": null
+    },
+    {
+      "id": "analytic:mage_flow_edit_turbo:candle:q8",
+      "modelId": "mage_flow_edit_turbo",
+      "modelFamily": "mage-flow",
+      "route": "mage_flow_edit_turbo",
+      "backend": "candle",
+      "tier": "q8",
+      "basis": "no_retained_evidence",
+      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
+      "evidence": null
+    },
+    {
+      "id": "analytic:mage_flow_edit_turbo:mlx:bf16",
+      "modelId": "mage_flow_edit_turbo",
+      "modelFamily": "mage-flow",
+      "route": "mage_flow_edit_turbo",
+      "backend": "mlx",
+      "tier": "bf16",
+      "basis": "no_retained_evidence",
+      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
+      "evidence": null
+    },
+    {
+      "id": "analytic:mage_flow_edit_turbo:mlx:q4",
+      "modelId": "mage_flow_edit_turbo",
+      "modelFamily": "mage-flow",
+      "route": "mage_flow_edit_turbo",
+      "backend": "mlx",
+      "tier": "q4",
+      "basis": "no_retained_evidence",
+      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
+      "evidence": null
+    },
+    {
+      "id": "analytic:mage_flow_edit_turbo:mlx:q8",
+      "modelId": "mage_flow_edit_turbo",
+      "modelFamily": "mage-flow",
+      "route": "mage_flow_edit_turbo",
+      "backend": "mlx",
+      "tier": "q8",
+      "basis": "no_retained_evidence",
+      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
+      "evidence": null
+    },
+    {
+      "id": "analytic:mage_flow_turbo:candle:bf16",
+      "modelId": "mage_flow_turbo",
+      "modelFamily": "mage-flow",
+      "route": "mage_flow_turbo",
+      "backend": "candle",
+      "tier": "bf16",
+      "basis": "no_retained_evidence",
+      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
+      "evidence": null
+    },
+    {
+      "id": "analytic:mage_flow_turbo:candle:q4",
+      "modelId": "mage_flow_turbo",
+      "modelFamily": "mage-flow",
+      "route": "mage_flow_turbo",
+      "backend": "candle",
+      "tier": "q4",
+      "basis": "no_retained_evidence",
+      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
+      "evidence": null
+    },
+    {
+      "id": "analytic:mage_flow_turbo:candle:q8",
+      "modelId": "mage_flow_turbo",
+      "modelFamily": "mage-flow",
+      "route": "mage_flow_turbo",
+      "backend": "candle",
+      "tier": "q8",
+      "basis": "no_retained_evidence",
+      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
+      "evidence": null
+    },
+    {
+      "id": "analytic:mage_flow_turbo:mlx:bf16",
+      "modelId": "mage_flow_turbo",
+      "modelFamily": "mage-flow",
+      "route": "mage_flow_turbo",
+      "backend": "mlx",
+      "tier": "bf16",
+      "basis": "no_retained_evidence",
+      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
+      "evidence": null
+    },
+    {
+      "id": "analytic:mage_flow_turbo:mlx:q4",
+      "modelId": "mage_flow_turbo",
+      "modelFamily": "mage-flow",
+      "route": "mage_flow_turbo",
+      "backend": "mlx",
+      "tier": "q4",
+      "basis": "no_retained_evidence",
+      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
+      "evidence": null
+    },
+    {
+      "id": "analytic:mage_flow_turbo:mlx:q8",
+      "modelId": "mage_flow_turbo",
+      "modelFamily": "mage-flow",
+      "route": "mage_flow_turbo",
+      "backend": "mlx",
+      "tier": "q8",
+      "basis": "no_retained_evidence",
+      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
+      "evidence": null
+    },
+    {
+      "id": "analytic:pulid_flux_dev:candle:bf16",
+      "modelId": "pulid_flux_dev",
+      "modelFamily": "flux",
+      "route": "pulid_flux",
+      "backend": "candle",
+      "tier": "bf16",
+      "basis": "no_retained_evidence",
+      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
+      "evidence": null
+    },
+    {
+      "id": "analytic:pulid_flux_dev:candle:q4",
+      "modelId": "pulid_flux_dev",
+      "modelFamily": "flux",
+      "route": "pulid_flux",
+      "backend": "candle",
+      "tier": "q4",
+      "basis": "no_retained_evidence",
+      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
+      "evidence": null
+    },
+    {
+      "id": "analytic:pulid_flux_dev:candle:q8",
+      "modelId": "pulid_flux_dev",
+      "modelFamily": "flux",
+      "route": "pulid_flux",
+      "backend": "candle",
+      "tier": "q8",
+      "basis": "no_retained_evidence",
+      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
+      "evidence": null
+    },
+    {
+      "id": "analytic:pulid_flux_dev:mlx:bf16",
+      "modelId": "pulid_flux_dev",
+      "modelFamily": "flux",
+      "route": "pulid_flux",
+      "backend": "mlx",
+      "tier": "bf16",
+      "basis": "no_retained_evidence",
+      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
+      "evidence": null
+    },
+    {
+      "id": "analytic:pulid_flux_dev:mlx:q4",
+      "modelId": "pulid_flux_dev",
+      "modelFamily": "flux",
+      "route": "pulid_flux",
+      "backend": "mlx",
+      "tier": "q4",
+      "basis": "no_retained_evidence",
+      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
+      "evidence": null
+    },
+    {
+      "id": "analytic:pulid_flux_dev:mlx:q8",
+      "modelId": "pulid_flux_dev",
+      "modelFamily": "flux",
+      "route": "pulid_flux",
+      "backend": "mlx",
+      "tier": "q8",
+      "basis": "no_retained_evidence",
+      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
+      "evidence": null
+    },
+    {
+      "id": "analytic:qwen_image:candle:bf16",
+      "modelId": "qwen_image",
+      "modelFamily": "qwen-image",
+      "route": "qwen_image",
+      "backend": "candle",
+      "tier": "bf16",
+      "basis": "manifest_tier_declaration",
+      "reason": "no retained render for this cell; the catalog manifest declares a measured per-tier envelope, which is a whole-render figure with no phase decomposition",
+      "evidence": {
+        "repo": null,
+        "revision": null,
+        "path": "config/manifests/builtin.models.jsonc#models/qwen_image/candle",
+        "sha256": "af38bc1ec14d7a3a83cae88250d28780a2d6aa1d44786d381e2248e025ff88c6",
+        "recordId": null,
+        "envelopeBytes": null,
+        "values": {
+          "vramGbByTier": "82.5",
+          "sequentialPeakGb": "71.7"
+        }
+      }
+    },
+    {
+      "id": "analytic:qwen_image:candle:q4",
+      "modelId": "qwen_image",
+      "modelFamily": "qwen-image",
+      "route": "qwen_image",
+      "backend": "candle",
+      "tier": "q4",
+      "basis": "measured_envelope",
+      "reason": "the retained corpus measures this cell's overall allocator envelope but carries no per-phase decomposition, so it bounds admission without anchoring the derivation",
+      "evidence": {
+        "repo": null,
+        "revision": null,
+        "path": "docs/generated/qwen-candle-five-rung-sc-15817.json",
+        "sha256": "c3a47c9b085f5c75b3ee0cbe2ac55c7c20d7225be9b71abac6310488dfc7034f",
+        "recordId": "imc-c02e430ca15bb29cf327",
+        "envelopeBytes": 55604936704,
+        "values": {
+          "provider": "qwen_image"
+        }
+      }
+    },
+    {
+      "id": "analytic:qwen_image:candle:q8",
+      "modelId": "qwen_image",
+      "modelFamily": "qwen-image",
+      "route": "qwen_image",
+      "backend": "candle",
+      "tier": "q8",
+      "basis": "manifest_tier_declaration",
+      "reason": "no retained render for this cell; the catalog manifest declares a measured per-tier envelope, which is a whole-render figure with no phase decomposition",
+      "evidence": {
+        "repo": null,
+        "revision": null,
+        "path": "config/manifests/builtin.models.jsonc#models/qwen_image/candle",
+        "sha256": "af38bc1ec14d7a3a83cae88250d28780a2d6aa1d44786d381e2248e025ff88c6",
+        "recordId": null,
+        "envelopeBytes": null,
+        "values": {
+          "vramGbByTier": "65.3",
+          "sequentialPeakGb": "38.7"
+        }
+      }
+    },
+    {
+      "id": "analytic:qwen_image_edit_2511:candle:bf16",
+      "modelId": "qwen_image_edit_2511",
+      "modelFamily": "qwen-image",
+      "route": "qwen_image_edit",
+      "backend": "candle",
+      "tier": "bf16",
+      "basis": "manifest_tier_declaration",
+      "reason": "no retained render for this cell; the catalog manifest declares a measured per-tier envelope, which is a whole-render figure with no phase decomposition",
+      "evidence": {
+        "repo": null,
+        "revision": null,
+        "path": "config/manifests/builtin.models.jsonc#models/qwen_image_edit_2511/candle",
+        "sha256": "af38bc1ec14d7a3a83cae88250d28780a2d6aa1d44786d381e2248e025ff88c6",
+        "recordId": null,
+        "envelopeBytes": null,
+        "values": {
+          "vramGbByTier": "81.7",
+          "sequentialPeakGb": "52.2"
+        }
+      }
+    },
+    {
+      "id": "analytic:qwen_image_edit_2511:candle:q4",
+      "modelId": "qwen_image_edit_2511",
+      "modelFamily": "qwen-image",
+      "route": "qwen_image_edit",
+      "backend": "candle",
+      "tier": "q4",
+      "basis": "manifest_tier_declaration",
+      "reason": "no retained render for this cell; the catalog manifest declares a measured per-tier envelope, which is a whole-render figure with no phase decomposition",
+      "evidence": {
+        "repo": null,
+        "revision": null,
+        "path": "config/manifests/builtin.models.jsonc#models/qwen_image_edit_2511/candle",
+        "sha256": "af38bc1ec14d7a3a83cae88250d28780a2d6aa1d44786d381e2248e025ff88c6",
+        "recordId": null,
+        "envelopeBytes": null,
+        "values": {
+          "vramGbByTier": "56.7",
+          "sequentialPeakGb": "36.9"
+        }
+      }
+    },
+    {
+      "id": "analytic:qwen_image_edit_2511:candle:q8",
+      "modelId": "qwen_image_edit_2511",
+      "modelFamily": "qwen-image",
+      "route": "qwen_image_edit",
+      "backend": "candle",
+      "tier": "q8",
+      "basis": "manifest_tier_declaration",
+      "reason": "no retained render for this cell; the catalog manifest declares a measured per-tier envelope, which is a whole-render figure with no phase decomposition",
+      "evidence": {
+        "repo": null,
+        "revision": null,
+        "path": "config/manifests/builtin.models.jsonc#models/qwen_image_edit_2511/candle",
+        "sha256": "af38bc1ec14d7a3a83cae88250d28780a2d6aa1d44786d381e2248e025ff88c6",
+        "recordId": null,
+        "envelopeBytes": null,
+        "values": {
+          "vramGbByTier": "69",
+          "sequentialPeakGb": "39.3"
+        }
+      }
+    },
+    {
+      "id": "analytic:qwen_image_edit_2511:mlx:bf16",
+      "modelId": "qwen_image_edit_2511",
+      "modelFamily": "qwen-image",
+      "route": "qwen_image_edit",
+      "backend": "mlx",
+      "tier": "bf16",
+      "basis": "no_retained_evidence",
+      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
+      "evidence": null
+    },
+    {
+      "id": "analytic:qwen_image_edit_2511:mlx:q4",
+      "modelId": "qwen_image_edit_2511",
+      "modelFamily": "qwen-image",
+      "route": "qwen_image_edit",
+      "backend": "mlx",
+      "tier": "q4",
+      "basis": "no_retained_evidence",
+      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
+      "evidence": null
+    },
+    {
+      "id": "analytic:qwen_image_edit_2511:mlx:q8",
+      "modelId": "qwen_image_edit_2511",
+      "modelFamily": "qwen-image",
+      "route": "qwen_image_edit",
+      "backend": "mlx",
+      "tier": "q8",
+      "basis": "no_retained_evidence",
+      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
+      "evidence": null
+    },
+    {
+      "id": "analytic:qwen_image_edit_2511_lightning:candle:bf16",
+      "modelId": "qwen_image_edit_2511_lightning",
+      "modelFamily": "qwen-image",
+      "route": "qwen_image_edit",
+      "backend": "candle",
+      "tier": "bf16",
+      "basis": "manifest_tier_declaration",
+      "reason": "no retained render for this cell; the catalog manifest declares a measured per-tier envelope, which is a whole-render figure with no phase decomposition",
+      "evidence": {
+        "repo": null,
+        "revision": null,
+        "path": "config/manifests/builtin.models.jsonc#models/qwen_image_edit_2511_lightning/candle",
+        "sha256": "af38bc1ec14d7a3a83cae88250d28780a2d6aa1d44786d381e2248e025ff88c6",
+        "recordId": null,
+        "envelopeBytes": null,
+        "values": {
+          "vramGbByTier": "87.4",
+          "sequentialPeakGb": "53.2"
+        }
+      }
+    },
+    {
+      "id": "analytic:qwen_image_edit_2511_lightning:candle:q4",
+      "modelId": "qwen_image_edit_2511_lightning",
+      "modelFamily": "qwen-image",
+      "route": "qwen_image_edit",
+      "backend": "candle",
+      "tier": "q4",
+      "basis": "manifest_tier_declaration",
+      "reason": "no retained render for this cell; the catalog manifest declares a measured per-tier envelope, which is a whole-render figure with no phase decomposition",
+      "evidence": {
+        "repo": null,
+        "revision": null,
+        "path": "config/manifests/builtin.models.jsonc#models/qwen_image_edit_2511_lightning/candle",
+        "sha256": "af38bc1ec14d7a3a83cae88250d28780a2d6aa1d44786d381e2248e025ff88c6",
+        "recordId": null,
+        "envelopeBytes": null,
+        "values": {
+          "vramGbByTier": "57",
+          "sequentialPeakGb": "33.1"
+        }
+      }
+    },
+    {
+      "id": "analytic:qwen_image_edit_2511_lightning:candle:q8",
+      "modelId": "qwen_image_edit_2511_lightning",
+      "modelFamily": "qwen-image",
+      "route": "qwen_image_edit",
+      "backend": "candle",
+      "tier": "q8",
+      "basis": "manifest_tier_declaration",
+      "reason": "no retained render for this cell; the catalog manifest declares a measured per-tier envelope, which is a whole-render figure with no phase decomposition",
+      "evidence": {
+        "repo": null,
+        "revision": null,
+        "path": "config/manifests/builtin.models.jsonc#models/qwen_image_edit_2511_lightning/candle",
+        "sha256": "af38bc1ec14d7a3a83cae88250d28780a2d6aa1d44786d381e2248e025ff88c6",
+        "recordId": null,
+        "envelopeBytes": null,
+        "values": {
+          "vramGbByTier": "65.8",
+          "sequentialPeakGb": "39.3"
+        }
+      }
+    },
+    {
+      "id": "analytic:qwen_image_edit_2511_lightning:mlx:bf16",
+      "modelId": "qwen_image_edit_2511_lightning",
+      "modelFamily": "qwen-image",
+      "route": "qwen_image_edit",
+      "backend": "mlx",
+      "tier": "bf16",
+      "basis": "no_retained_evidence",
+      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
+      "evidence": null
+    },
+    {
+      "id": "analytic:qwen_image_edit_2511_lightning:mlx:q4",
+      "modelId": "qwen_image_edit_2511_lightning",
+      "modelFamily": "qwen-image",
+      "route": "qwen_image_edit",
+      "backend": "mlx",
+      "tier": "q4",
+      "basis": "no_retained_evidence",
+      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
+      "evidence": null
+    },
+    {
+      "id": "analytic:qwen_image_edit_2511_lightning:mlx:q8",
+      "modelId": "qwen_image_edit_2511_lightning",
+      "modelFamily": "qwen-image",
+      "route": "qwen_image_edit",
+      "backend": "mlx",
+      "tier": "q8",
+      "basis": "no_retained_evidence",
+      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
+      "evidence": null
+    },
+    {
+      "id": "analytic:realvisxl:candle:bf16",
+      "modelId": "realvisxl",
+      "modelFamily": "sdxl",
+      "route": "sdxl",
+      "backend": "candle",
+      "tier": "bf16",
+      "basis": "no_retained_evidence",
+      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
+      "evidence": null
+    },
+    {
+      "id": "analytic:realvisxl:candle:q4",
+      "modelId": "realvisxl",
+      "modelFamily": "sdxl",
+      "route": "sdxl",
+      "backend": "candle",
+      "tier": "q4",
+      "basis": "no_retained_evidence",
+      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
+      "evidence": null
+    },
+    {
+      "id": "analytic:realvisxl:candle:q8",
+      "modelId": "realvisxl",
+      "modelFamily": "sdxl",
+      "route": "sdxl",
+      "backend": "candle",
+      "tier": "q8",
+      "basis": "no_retained_evidence",
+      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
+      "evidence": null
+    },
+    {
+      "id": "analytic:realvisxl:mlx:bf16",
+      "modelId": "realvisxl",
+      "modelFamily": "sdxl",
+      "route": "sdxl",
+      "backend": "mlx",
+      "tier": "bf16",
+      "basis": "no_retained_evidence",
+      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
+      "evidence": null
+    },
+    {
+      "id": "analytic:realvisxl:mlx:q4",
+      "modelId": "realvisxl",
+      "modelFamily": "sdxl",
+      "route": "sdxl",
+      "backend": "mlx",
+      "tier": "q4",
+      "basis": "no_retained_evidence",
+      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
+      "evidence": null
+    },
+    {
+      "id": "analytic:realvisxl:mlx:q8",
+      "modelId": "realvisxl",
+      "modelFamily": "sdxl",
+      "route": "sdxl",
+      "backend": "mlx",
+      "tier": "q8",
+      "basis": "no_retained_evidence",
+      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
+      "evidence": null
+    },
+    {
+      "id": "analytic:realvisxl_lightning:candle:bf16",
+      "modelId": "realvisxl_lightning",
+      "modelFamily": "sdxl",
+      "route": "sdxl",
+      "backend": "candle",
+      "tier": "bf16",
+      "basis": "no_retained_evidence",
+      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
+      "evidence": null
+    },
+    {
+      "id": "analytic:realvisxl_lightning:candle:q4",
+      "modelId": "realvisxl_lightning",
+      "modelFamily": "sdxl",
+      "route": "sdxl",
+      "backend": "candle",
+      "tier": "q4",
+      "basis": "no_retained_evidence",
+      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
+      "evidence": null
+    },
+    {
+      "id": "analytic:realvisxl_lightning:candle:q8",
+      "modelId": "realvisxl_lightning",
+      "modelFamily": "sdxl",
+      "route": "sdxl",
+      "backend": "candle",
+      "tier": "q8",
+      "basis": "no_retained_evidence",
+      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
+      "evidence": null
+    },
+    {
+      "id": "analytic:realvisxl_lightning:mlx:bf16",
+      "modelId": "realvisxl_lightning",
+      "modelFamily": "sdxl",
+      "route": "sdxl",
+      "backend": "mlx",
+      "tier": "bf16",
+      "basis": "no_retained_evidence",
+      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
+      "evidence": null
+    },
+    {
+      "id": "analytic:realvisxl_lightning:mlx:q4",
+      "modelId": "realvisxl_lightning",
+      "modelFamily": "sdxl",
+      "route": "sdxl",
+      "backend": "mlx",
+      "tier": "q4",
+      "basis": "no_retained_evidence",
+      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
+      "evidence": null
+    },
+    {
+      "id": "analytic:realvisxl_lightning:mlx:q8",
+      "modelId": "realvisxl_lightning",
+      "modelFamily": "sdxl",
+      "route": "sdxl",
+      "backend": "mlx",
+      "tier": "q8",
+      "basis": "no_retained_evidence",
+      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
+      "evidence": null
+    },
+    {
+      "id": "analytic:sana_1600m:candle:bf16",
+      "modelId": "sana_1600m",
+      "modelFamily": "sana",
+      "route": "sana_1600m",
+      "backend": "candle",
+      "tier": "bf16",
+      "basis": "no_retained_evidence",
+      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
+      "evidence": null
+    },
+    {
+      "id": "analytic:sana_1600m:candle:q4",
+      "modelId": "sana_1600m",
+      "modelFamily": "sana",
+      "route": "sana_1600m",
+      "backend": "candle",
+      "tier": "q4",
+      "basis": "no_retained_evidence",
+      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
+      "evidence": null
+    },
+    {
+      "id": "analytic:sana_1600m:candle:q8",
+      "modelId": "sana_1600m",
+      "modelFamily": "sana",
+      "route": "sana_1600m",
+      "backend": "candle",
+      "tier": "q8",
+      "basis": "no_retained_evidence",
+      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
+      "evidence": null
+    },
+    {
+      "id": "analytic:sana_1600m:mlx:bf16",
+      "modelId": "sana_1600m",
+      "modelFamily": "sana",
+      "route": "sana_1600m",
+      "backend": "mlx",
+      "tier": "bf16",
+      "basis": "no_retained_evidence",
+      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
+      "evidence": null
+    },
+    {
+      "id": "analytic:sana_1600m:mlx:q4",
+      "modelId": "sana_1600m",
+      "modelFamily": "sana",
+      "route": "sana_1600m",
+      "backend": "mlx",
+      "tier": "q4",
+      "basis": "no_retained_evidence",
+      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
+      "evidence": null
+    },
+    {
+      "id": "analytic:sana_1600m:mlx:q8",
+      "modelId": "sana_1600m",
+      "modelFamily": "sana",
+      "route": "sana_1600m",
+      "backend": "mlx",
+      "tier": "q8",
+      "basis": "no_retained_evidence",
+      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
+      "evidence": null
+    },
+    {
+      "id": "analytic:sana_sprint_1600m:candle:bf16",
+      "modelId": "sana_sprint_1600m",
+      "modelFamily": "sana",
+      "route": "sana_sprint_1600m",
+      "backend": "candle",
+      "tier": "bf16",
+      "basis": "no_retained_evidence",
+      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
+      "evidence": null
+    },
+    {
+      "id": "analytic:sana_sprint_1600m:candle:q4",
+      "modelId": "sana_sprint_1600m",
+      "modelFamily": "sana",
+      "route": "sana_sprint_1600m",
+      "backend": "candle",
+      "tier": "q4",
+      "basis": "no_retained_evidence",
+      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
+      "evidence": null
+    },
+    {
+      "id": "analytic:sana_sprint_1600m:candle:q8",
+      "modelId": "sana_sprint_1600m",
+      "modelFamily": "sana",
+      "route": "sana_sprint_1600m",
+      "backend": "candle",
+      "tier": "q8",
+      "basis": "no_retained_evidence",
+      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
+      "evidence": null
+    },
+    {
+      "id": "analytic:sana_sprint_1600m:mlx:bf16",
+      "modelId": "sana_sprint_1600m",
+      "modelFamily": "sana",
+      "route": "sana_sprint_1600m",
+      "backend": "mlx",
+      "tier": "bf16",
+      "basis": "no_retained_evidence",
+      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
+      "evidence": null
+    },
+    {
+      "id": "analytic:sana_sprint_1600m:mlx:q4",
+      "modelId": "sana_sprint_1600m",
+      "modelFamily": "sana",
+      "route": "sana_sprint_1600m",
+      "backend": "mlx",
+      "tier": "q4",
+      "basis": "no_retained_evidence",
+      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
+      "evidence": null
+    },
+    {
+      "id": "analytic:sana_sprint_1600m:mlx:q8",
+      "modelId": "sana_sprint_1600m",
+      "modelFamily": "sana",
+      "route": "sana_sprint_1600m",
+      "backend": "mlx",
+      "tier": "q8",
+      "basis": "no_retained_evidence",
+      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
+      "evidence": null
+    },
+    {
+      "id": "analytic:scail2_14b:candle:bf16",
+      "modelId": "scail2_14b",
+      "modelFamily": "scail2",
+      "route": "scail2_14b",
+      "backend": "candle",
+      "tier": "bf16",
+      "basis": "manifest_tier_declaration",
+      "reason": "no retained render for this cell; the catalog manifest declares a measured per-tier envelope, which is a whole-render figure with no phase decomposition",
+      "evidence": {
+        "repo": null,
+        "revision": null,
+        "path": "config/manifests/builtin.models.jsonc#models/scail2_14b/candle",
+        "sha256": "af38bc1ec14d7a3a83cae88250d28780a2d6aa1d44786d381e2248e025ff88c6",
+        "recordId": null,
+        "envelopeBytes": null,
+        "values": {
+          "vramGbByTier": "102.115"
+        }
+      }
+    },
+    {
+      "id": "analytic:scail2_14b:candle:q4",
+      "modelId": "scail2_14b",
+      "modelFamily": "scail2",
+      "route": "scail2_14b",
+      "backend": "candle",
+      "tier": "q4",
+      "basis": "manifest_tier_declaration",
+      "reason": "no retained render for this cell; the catalog manifest declares a measured per-tier envelope, which is a whole-render figure with no phase decomposition",
+      "evidence": {
+        "repo": null,
+        "revision": null,
+        "path": "config/manifests/builtin.models.jsonc#models/scail2_14b/candle",
+        "sha256": "af38bc1ec14d7a3a83cae88250d28780a2d6aa1d44786d381e2248e025ff88c6",
+        "recordId": null,
+        "envelopeBytes": null,
+        "values": {
+          "vramGbByTier": "61.26"
+        }
+      }
+    },
+    {
+      "id": "analytic:scail2_14b:candle:q8",
+      "modelId": "scail2_14b",
+      "modelFamily": "scail2",
+      "route": "scail2_14b",
+      "backend": "candle",
+      "tier": "q8",
+      "basis": "manifest_tier_declaration",
+      "reason": "no retained render for this cell; the catalog manifest declares a measured per-tier envelope, which is a whole-render figure with no phase decomposition",
+      "evidence": {
+        "repo": null,
+        "revision": null,
+        "path": "config/manifests/builtin.models.jsonc#models/scail2_14b/candle",
+        "sha256": "af38bc1ec14d7a3a83cae88250d28780a2d6aa1d44786d381e2248e025ff88c6",
+        "recordId": null,
+        "envelopeBytes": null,
+        "values": {
+          "vramGbByTier": "64.928"
+        }
+      }
+    },
+    {
+      "id": "analytic:scail2_14b:mlx:bf16",
+      "modelId": "scail2_14b",
+      "modelFamily": "scail2",
+      "route": "scail2_14b",
+      "backend": "mlx",
+      "tier": "bf16",
+      "basis": "no_retained_evidence",
+      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
+      "evidence": null
+    },
+    {
+      "id": "analytic:scail2_14b:mlx:q4",
+      "modelId": "scail2_14b",
+      "modelFamily": "scail2",
+      "route": "scail2_14b",
+      "backend": "mlx",
+      "tier": "q4",
+      "basis": "no_retained_evidence",
+      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
+      "evidence": null
+    },
+    {
+      "id": "analytic:scail2_14b:mlx:q8",
+      "modelId": "scail2_14b",
+      "modelFamily": "scail2",
+      "route": "scail2_14b",
+      "backend": "mlx",
+      "tier": "q8",
+      "basis": "no_retained_evidence",
+      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
+      "evidence": null
+    },
+    {
+      "id": "analytic:sd3_5_large:candle:bf16",
+      "modelId": "sd3_5_large",
+      "modelFamily": "sd3",
+      "route": "sd3_5_large",
+      "backend": "candle",
+      "tier": "bf16",
+      "basis": "manifest_tier_declaration",
+      "reason": "no retained render for this cell; the catalog manifest declares a measured per-tier envelope, which is a whole-render figure with no phase decomposition",
+      "evidence": {
+        "repo": null,
+        "revision": null,
+        "path": "config/manifests/builtin.models.jsonc#models/sd3_5_large/candle",
+        "sha256": "af38bc1ec14d7a3a83cae88250d28780a2d6aa1d44786d381e2248e025ff88c6",
+        "recordId": null,
+        "envelopeBytes": null,
+        "values": {
+          "vramGbByTier": "41.3"
+        }
+      }
+    },
+    {
+      "id": "analytic:sd3_5_large:candle:q4",
+      "modelId": "sd3_5_large",
+      "modelFamily": "sd3",
+      "route": "sd3_5_large",
+      "backend": "candle",
+      "tier": "q4",
+      "basis": "manifest_tier_declaration",
+      "reason": "no retained render for this cell; the catalog manifest declares a measured per-tier envelope, which is a whole-render figure with no phase decomposition",
+      "evidence": {
+        "repo": null,
+        "revision": null,
+        "path": "config/manifests/builtin.models.jsonc#models/sd3_5_large/candle",
+        "sha256": "af38bc1ec14d7a3a83cae88250d28780a2d6aa1d44786d381e2248e025ff88c6",
+        "recordId": null,
+        "envelopeBytes": null,
+        "values": {
+          "vramGbByTier": "33.9"
+        }
+      }
+    },
+    {
+      "id": "analytic:sd3_5_large:mlx:bf16",
+      "modelId": "sd3_5_large",
+      "modelFamily": "sd3",
+      "route": "sd3_5_large",
+      "backend": "mlx",
+      "tier": "bf16",
+      "basis": "no_retained_evidence",
+      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
+      "evidence": null
+    },
+    {
+      "id": "analytic:sd3_5_large:mlx:q4",
+      "modelId": "sd3_5_large",
+      "modelFamily": "sd3",
+      "route": "sd3_5_large",
+      "backend": "mlx",
+      "tier": "q4",
+      "basis": "no_retained_evidence",
+      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
+      "evidence": null
+    },
+    {
+      "id": "analytic:sd3_5_large:mlx:q8",
+      "modelId": "sd3_5_large",
+      "modelFamily": "sd3",
+      "route": "sd3_5_large",
+      "backend": "mlx",
+      "tier": "q8",
+      "basis": "no_retained_evidence",
+      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
+      "evidence": null
+    },
+    {
+      "id": "analytic:sd3_5_large_turbo:candle:bf16",
+      "modelId": "sd3_5_large_turbo",
+      "modelFamily": "sd3",
+      "route": "sd3_5_large_turbo",
+      "backend": "candle",
+      "tier": "bf16",
+      "basis": "no_retained_evidence",
+      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
+      "evidence": null
+    },
+    {
+      "id": "analytic:sd3_5_large_turbo:candle:q4",
+      "modelId": "sd3_5_large_turbo",
+      "modelFamily": "sd3",
+      "route": "sd3_5_large_turbo",
+      "backend": "candle",
+      "tier": "q4",
+      "basis": "no_retained_evidence",
+      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
+      "evidence": null
+    },
+    {
+      "id": "analytic:sd3_5_large_turbo:mlx:bf16",
+      "modelId": "sd3_5_large_turbo",
+      "modelFamily": "sd3",
+      "route": "sd3_5_large_turbo",
+      "backend": "mlx",
+      "tier": "bf16",
+      "basis": "no_retained_evidence",
+      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
+      "evidence": null
+    },
+    {
+      "id": "analytic:sd3_5_large_turbo:mlx:q4",
+      "modelId": "sd3_5_large_turbo",
+      "modelFamily": "sd3",
+      "route": "sd3_5_large_turbo",
+      "backend": "mlx",
+      "tier": "q4",
+      "basis": "no_retained_evidence",
+      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
+      "evidence": null
+    },
+    {
+      "id": "analytic:sd3_5_large_turbo:mlx:q8",
+      "modelId": "sd3_5_large_turbo",
+      "modelFamily": "sd3",
+      "route": "sd3_5_large_turbo",
+      "backend": "mlx",
+      "tier": "q8",
+      "basis": "no_retained_evidence",
+      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
+      "evidence": null
+    },
+    {
+      "id": "analytic:sd3_5_medium:candle:bf16",
+      "modelId": "sd3_5_medium",
+      "modelFamily": "sd3",
+      "route": "sd3_5_medium",
+      "backend": "candle",
+      "tier": "bf16",
+      "basis": "no_retained_evidence",
+      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
+      "evidence": null
+    },
+    {
+      "id": "analytic:sd3_5_medium:candle:q4",
+      "modelId": "sd3_5_medium",
+      "modelFamily": "sd3",
+      "route": "sd3_5_medium",
+      "backend": "candle",
+      "tier": "q4",
+      "basis": "no_retained_evidence",
+      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
+      "evidence": null
+    },
+    {
+      "id": "analytic:sd3_5_medium:mlx:bf16",
+      "modelId": "sd3_5_medium",
+      "modelFamily": "sd3",
+      "route": "sd3_5_medium",
+      "backend": "mlx",
+      "tier": "bf16",
+      "basis": "no_retained_evidence",
+      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
+      "evidence": null
+    },
+    {
+      "id": "analytic:sd3_5_medium:mlx:q4",
+      "modelId": "sd3_5_medium",
+      "modelFamily": "sd3",
+      "route": "sd3_5_medium",
+      "backend": "mlx",
+      "tier": "q4",
+      "basis": "no_retained_evidence",
+      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
+      "evidence": null
+    },
+    {
+      "id": "analytic:sd3_5_medium:mlx:q8",
+      "modelId": "sd3_5_medium",
+      "modelFamily": "sd3",
+      "route": "sd3_5_medium",
+      "backend": "mlx",
+      "tier": "q8",
+      "basis": "no_retained_evidence",
+      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
+      "evidence": null
+    },
+    {
+      "id": "analytic:sdxl:candle:bf16",
+      "modelId": "sdxl",
+      "modelFamily": "sdxl",
+      "route": "sdxl",
+      "backend": "candle",
+      "tier": "bf16",
+      "basis": "no_retained_evidence",
+      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
+      "evidence": null
+    },
+    {
+      "id": "analytic:sdxl:candle:q4",
+      "modelId": "sdxl",
+      "modelFamily": "sdxl",
+      "route": "sdxl",
+      "backend": "candle",
+      "tier": "q4",
+      "basis": "no_retained_evidence",
+      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
+      "evidence": null
+    },
+    {
+      "id": "analytic:sdxl:candle:q8",
+      "modelId": "sdxl",
+      "modelFamily": "sdxl",
+      "route": "sdxl",
+      "backend": "candle",
+      "tier": "q8",
+      "basis": "no_retained_evidence",
+      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
+      "evidence": null
+    },
+    {
+      "id": "analytic:sdxl:mlx:bf16",
+      "modelId": "sdxl",
+      "modelFamily": "sdxl",
+      "route": "sdxl",
+      "backend": "mlx",
+      "tier": "bf16",
+      "basis": "no_retained_evidence",
+      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
+      "evidence": null
+    },
+    {
+      "id": "analytic:sdxl:mlx:q4",
+      "modelId": "sdxl",
+      "modelFamily": "sdxl",
+      "route": "sdxl",
+      "backend": "mlx",
+      "tier": "q4",
+      "basis": "no_retained_evidence",
+      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
+      "evidence": null
+    },
+    {
+      "id": "analytic:sdxl:mlx:q8",
+      "modelId": "sdxl",
+      "modelFamily": "sdxl",
+      "route": "sdxl",
+      "backend": "mlx",
+      "tier": "q8",
+      "basis": "no_retained_evidence",
+      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
+      "evidence": null
+    },
+    {
+      "id": "analytic:sensenova_u1_8b:candle:bf16",
+      "modelId": "sensenova_u1_8b",
+      "modelFamily": "sensenova-u1",
+      "route": "sensenova_u1_8b",
+      "backend": "candle",
+      "tier": "bf16",
+      "basis": "manifest_tier_declaration",
+      "reason": "no retained render for this cell; the catalog manifest declares a measured per-tier envelope, which is a whole-render figure with no phase decomposition",
+      "evidence": {
+        "repo": null,
+        "revision": null,
+        "path": "config/manifests/builtin.models.jsonc#models/sensenova_u1_8b/candle",
+        "sha256": "af38bc1ec14d7a3a83cae88250d28780a2d6aa1d44786d381e2248e025ff88c6",
+        "recordId": null,
+        "envelopeBytes": null,
+        "values": {
+          "vramGbByTier": "36.7"
+        }
+      }
+    },
+    {
+      "id": "analytic:sensenova_u1_8b:candle:q4",
+      "modelId": "sensenova_u1_8b",
+      "modelFamily": "sensenova-u1",
+      "route": "sensenova_u1_8b",
+      "backend": "candle",
+      "tier": "q4",
+      "basis": "manifest_tier_declaration",
+      "reason": "no retained render for this cell; the catalog manifest declares a measured per-tier envelope, which is a whole-render figure with no phase decomposition",
+      "evidence": {
+        "repo": null,
+        "revision": null,
+        "path": "config/manifests/builtin.models.jsonc#models/sensenova_u1_8b/candle",
+        "sha256": "af38bc1ec14d7a3a83cae88250d28780a2d6aa1d44786d381e2248e025ff88c6",
+        "recordId": null,
+        "envelopeBytes": null,
+        "values": {
+          "vramGbByTier": "14.8"
+        }
+      }
+    },
+    {
+      "id": "analytic:sensenova_u1_8b:candle:q8",
+      "modelId": "sensenova_u1_8b",
+      "modelFamily": "sensenova-u1",
+      "route": "sensenova_u1_8b",
+      "backend": "candle",
+      "tier": "q8",
+      "basis": "manifest_tier_declaration",
+      "reason": "no retained render for this cell; the catalog manifest declares a measured per-tier envelope, which is a whole-render figure with no phase decomposition",
+      "evidence": {
+        "repo": null,
+        "revision": null,
+        "path": "config/manifests/builtin.models.jsonc#models/sensenova_u1_8b/candle",
+        "sha256": "af38bc1ec14d7a3a83cae88250d28780a2d6aa1d44786d381e2248e025ff88c6",
+        "recordId": null,
+        "envelopeBytes": null,
+        "values": {
+          "vramGbByTier": "22.5"
+        }
+      }
+    },
+    {
+      "id": "analytic:sensenova_u1_8b:mlx:bf16",
+      "modelId": "sensenova_u1_8b",
+      "modelFamily": "sensenova-u1",
+      "route": "sensenova_u1_8b",
+      "backend": "mlx",
+      "tier": "bf16",
+      "basis": "no_retained_evidence",
+      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
+      "evidence": null
+    },
+    {
+      "id": "analytic:sensenova_u1_8b:mlx:q4",
+      "modelId": "sensenova_u1_8b",
+      "modelFamily": "sensenova-u1",
+      "route": "sensenova_u1_8b",
+      "backend": "mlx",
+      "tier": "q4",
+      "basis": "no_retained_evidence",
+      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
+      "evidence": null
+    },
+    {
+      "id": "analytic:sensenova_u1_8b:mlx:q8",
+      "modelId": "sensenova_u1_8b",
+      "modelFamily": "sensenova-u1",
+      "route": "sensenova_u1_8b",
+      "backend": "mlx",
+      "tier": "q8",
+      "basis": "no_retained_evidence",
+      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
+      "evidence": null
+    },
+    {
+      "id": "analytic:sensenova_u1_8b_fast:candle:bf16",
+      "modelId": "sensenova_u1_8b_fast",
+      "modelFamily": "sensenova-u1",
+      "route": "sensenova_u1_8b_fast",
+      "backend": "candle",
+      "tier": "bf16",
+      "basis": "manifest_tier_declaration",
+      "reason": "no retained render for this cell; the catalog manifest declares a measured per-tier envelope, which is a whole-render figure with no phase decomposition",
+      "evidence": {
+        "repo": null,
+        "revision": null,
+        "path": "config/manifests/builtin.models.jsonc#models/sensenova_u1_8b_fast/candle",
+        "sha256": "af38bc1ec14d7a3a83cae88250d28780a2d6aa1d44786d381e2248e025ff88c6",
+        "recordId": null,
+        "envelopeBytes": null,
+        "values": {
+          "vramGbByTier": "36.7"
+        }
+      }
+    },
+    {
+      "id": "analytic:sensenova_u1_8b_fast:candle:q4",
+      "modelId": "sensenova_u1_8b_fast",
+      "modelFamily": "sensenova-u1",
+      "route": "sensenova_u1_8b_fast",
+      "backend": "candle",
+      "tier": "q4",
+      "basis": "manifest_tier_declaration",
+      "reason": "no retained render for this cell; the catalog manifest declares a measured per-tier envelope, which is a whole-render figure with no phase decomposition",
+      "evidence": {
+        "repo": null,
+        "revision": null,
+        "path": "config/manifests/builtin.models.jsonc#models/sensenova_u1_8b_fast/candle",
+        "sha256": "af38bc1ec14d7a3a83cae88250d28780a2d6aa1d44786d381e2248e025ff88c6",
+        "recordId": null,
+        "envelopeBytes": null,
+        "values": {
+          "vramGbByTier": "14.8"
+        }
+      }
+    },
+    {
+      "id": "analytic:sensenova_u1_8b_fast:candle:q8",
+      "modelId": "sensenova_u1_8b_fast",
+      "modelFamily": "sensenova-u1",
+      "route": "sensenova_u1_8b_fast",
+      "backend": "candle",
+      "tier": "q8",
+      "basis": "manifest_tier_declaration",
+      "reason": "no retained render for this cell; the catalog manifest declares a measured per-tier envelope, which is a whole-render figure with no phase decomposition",
+      "evidence": {
+        "repo": null,
+        "revision": null,
+        "path": "config/manifests/builtin.models.jsonc#models/sensenova_u1_8b_fast/candle",
+        "sha256": "af38bc1ec14d7a3a83cae88250d28780a2d6aa1d44786d381e2248e025ff88c6",
+        "recordId": null,
+        "envelopeBytes": null,
+        "values": {
+          "vramGbByTier": "22.5"
+        }
+      }
+    },
+    {
+      "id": "analytic:sensenova_u1_8b_fast:mlx:bf16",
+      "modelId": "sensenova_u1_8b_fast",
+      "modelFamily": "sensenova-u1",
+      "route": "sensenova_u1_8b_fast",
+      "backend": "mlx",
+      "tier": "bf16",
+      "basis": "no_retained_evidence",
+      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
+      "evidence": null
+    },
+    {
+      "id": "analytic:sensenova_u1_8b_fast:mlx:q4",
+      "modelId": "sensenova_u1_8b_fast",
+      "modelFamily": "sensenova-u1",
+      "route": "sensenova_u1_8b_fast",
+      "backend": "mlx",
+      "tier": "q4",
+      "basis": "no_retained_evidence",
+      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
+      "evidence": null
+    },
+    {
+      "id": "analytic:sensenova_u1_8b_fast:mlx:q8",
+      "modelId": "sensenova_u1_8b_fast",
+      "modelFamily": "sensenova-u1",
+      "route": "sensenova_u1_8b_fast",
+      "backend": "mlx",
+      "tier": "q8",
+      "basis": "no_retained_evidence",
+      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
+      "evidence": null
+    },
+    {
+      "id": "analytic:sensenova_u1_8b_infographic_v2:candle:bf16",
+      "modelId": "sensenova_u1_8b_infographic_v2",
+      "modelFamily": "sensenova-u1",
+      "route": "sensenova_u1_8b",
+      "backend": "candle",
+      "tier": "bf16",
+      "basis": "manifest_tier_declaration",
+      "reason": "no retained render for this cell; the catalog manifest declares a measured per-tier envelope, which is a whole-render figure with no phase decomposition",
+      "evidence": {
+        "repo": null,
+        "revision": null,
+        "path": "config/manifests/builtin.models.jsonc#models/sensenova_u1_8b_infographic_v2/candle",
+        "sha256": "af38bc1ec14d7a3a83cae88250d28780a2d6aa1d44786d381e2248e025ff88c6",
+        "recordId": null,
+        "envelopeBytes": null,
+        "values": {
+          "vramGbByTier": "36.7"
+        }
+      }
+    },
+    {
+      "id": "analytic:sensenova_u1_8b_infographic_v2:candle:q4",
+      "modelId": "sensenova_u1_8b_infographic_v2",
+      "modelFamily": "sensenova-u1",
+      "route": "sensenova_u1_8b",
+      "backend": "candle",
+      "tier": "q4",
+      "basis": "manifest_tier_declaration",
+      "reason": "no retained render for this cell; the catalog manifest declares a measured per-tier envelope, which is a whole-render figure with no phase decomposition",
+      "evidence": {
+        "repo": null,
+        "revision": null,
+        "path": "config/manifests/builtin.models.jsonc#models/sensenova_u1_8b_infographic_v2/candle",
+        "sha256": "af38bc1ec14d7a3a83cae88250d28780a2d6aa1d44786d381e2248e025ff88c6",
+        "recordId": null,
+        "envelopeBytes": null,
+        "values": {
+          "vramGbByTier": "14.8"
+        }
+      }
+    },
+    {
+      "id": "analytic:sensenova_u1_8b_infographic_v2:candle:q8",
+      "modelId": "sensenova_u1_8b_infographic_v2",
+      "modelFamily": "sensenova-u1",
+      "route": "sensenova_u1_8b",
+      "backend": "candle",
+      "tier": "q8",
+      "basis": "manifest_tier_declaration",
+      "reason": "no retained render for this cell; the catalog manifest declares a measured per-tier envelope, which is a whole-render figure with no phase decomposition",
+      "evidence": {
+        "repo": null,
+        "revision": null,
+        "path": "config/manifests/builtin.models.jsonc#models/sensenova_u1_8b_infographic_v2/candle",
+        "sha256": "af38bc1ec14d7a3a83cae88250d28780a2d6aa1d44786d381e2248e025ff88c6",
+        "recordId": null,
+        "envelopeBytes": null,
+        "values": {
+          "vramGbByTier": "22.5"
+        }
+      }
+    },
+    {
+      "id": "analytic:sensenova_u1_8b_infographic_v2:mlx:bf16",
+      "modelId": "sensenova_u1_8b_infographic_v2",
+      "modelFamily": "sensenova-u1",
+      "route": "sensenova_u1_8b",
+      "backend": "mlx",
+      "tier": "bf16",
+      "basis": "no_retained_evidence",
+      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
+      "evidence": null
+    },
+    {
+      "id": "analytic:sensenova_u1_8b_infographic_v2:mlx:q4",
+      "modelId": "sensenova_u1_8b_infographic_v2",
+      "modelFamily": "sensenova-u1",
+      "route": "sensenova_u1_8b",
+      "backend": "mlx",
+      "tier": "q4",
+      "basis": "no_retained_evidence",
+      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
+      "evidence": null
+    },
+    {
+      "id": "analytic:sensenova_u1_8b_infographic_v2:mlx:q8",
+      "modelId": "sensenova_u1_8b_infographic_v2",
+      "modelFamily": "sensenova-u1",
+      "route": "sensenova_u1_8b",
+      "backend": "mlx",
+      "tier": "q8",
+      "basis": "no_retained_evidence",
+      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
+      "evidence": null
+    },
+    {
+      "id": "analytic:sensenova_u1_8b_infographic_v2_fast:candle:bf16",
+      "modelId": "sensenova_u1_8b_infographic_v2_fast",
+      "modelFamily": "sensenova-u1",
+      "route": "sensenova_u1_8b_fast",
+      "backend": "candle",
+      "tier": "bf16",
+      "basis": "manifest_tier_declaration",
+      "reason": "no retained render for this cell; the catalog manifest declares a measured per-tier envelope, which is a whole-render figure with no phase decomposition",
+      "evidence": {
+        "repo": null,
+        "revision": null,
+        "path": "config/manifests/builtin.models.jsonc#models/sensenova_u1_8b_infographic_v2_fast/candle",
+        "sha256": "af38bc1ec14d7a3a83cae88250d28780a2d6aa1d44786d381e2248e025ff88c6",
+        "recordId": null,
+        "envelopeBytes": null,
+        "values": {
+          "vramGbByTier": "36.7"
+        }
+      }
+    },
+    {
+      "id": "analytic:sensenova_u1_8b_infographic_v2_fast:candle:q4",
+      "modelId": "sensenova_u1_8b_infographic_v2_fast",
+      "modelFamily": "sensenova-u1",
+      "route": "sensenova_u1_8b_fast",
+      "backend": "candle",
+      "tier": "q4",
+      "basis": "manifest_tier_declaration",
+      "reason": "no retained render for this cell; the catalog manifest declares a measured per-tier envelope, which is a whole-render figure with no phase decomposition",
+      "evidence": {
+        "repo": null,
+        "revision": null,
+        "path": "config/manifests/builtin.models.jsonc#models/sensenova_u1_8b_infographic_v2_fast/candle",
+        "sha256": "af38bc1ec14d7a3a83cae88250d28780a2d6aa1d44786d381e2248e025ff88c6",
+        "recordId": null,
+        "envelopeBytes": null,
+        "values": {
+          "vramGbByTier": "14.8"
+        }
+      }
+    },
+    {
+      "id": "analytic:sensenova_u1_8b_infographic_v2_fast:candle:q8",
+      "modelId": "sensenova_u1_8b_infographic_v2_fast",
+      "modelFamily": "sensenova-u1",
+      "route": "sensenova_u1_8b_fast",
+      "backend": "candle",
+      "tier": "q8",
+      "basis": "manifest_tier_declaration",
+      "reason": "no retained render for this cell; the catalog manifest declares a measured per-tier envelope, which is a whole-render figure with no phase decomposition",
+      "evidence": {
+        "repo": null,
+        "revision": null,
+        "path": "config/manifests/builtin.models.jsonc#models/sensenova_u1_8b_infographic_v2_fast/candle",
+        "sha256": "af38bc1ec14d7a3a83cae88250d28780a2d6aa1d44786d381e2248e025ff88c6",
+        "recordId": null,
+        "envelopeBytes": null,
+        "values": {
+          "vramGbByTier": "22.5"
+        }
+      }
+    },
+    {
+      "id": "analytic:sensenova_u1_8b_infographic_v2_fast:mlx:bf16",
+      "modelId": "sensenova_u1_8b_infographic_v2_fast",
+      "modelFamily": "sensenova-u1",
+      "route": "sensenova_u1_8b_fast",
+      "backend": "mlx",
+      "tier": "bf16",
+      "basis": "no_retained_evidence",
+      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
+      "evidence": null
+    },
+    {
+      "id": "analytic:sensenova_u1_8b_infographic_v2_fast:mlx:q4",
+      "modelId": "sensenova_u1_8b_infographic_v2_fast",
+      "modelFamily": "sensenova-u1",
+      "route": "sensenova_u1_8b_fast",
+      "backend": "mlx",
+      "tier": "q4",
+      "basis": "no_retained_evidence",
+      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
+      "evidence": null
+    },
+    {
+      "id": "analytic:sensenova_u1_8b_infographic_v2_fast:mlx:q8",
+      "modelId": "sensenova_u1_8b_infographic_v2_fast",
+      "modelFamily": "sensenova-u1",
+      "route": "sensenova_u1_8b_fast",
+      "backend": "mlx",
+      "tier": "q8",
+      "basis": "no_retained_evidence",
+      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
+      "evidence": null
+    },
+    {
+      "id": "analytic:sensenova_u1_8b_infographic_v3:candle:bf16",
+      "modelId": "sensenova_u1_8b_infographic_v3",
+      "modelFamily": "sensenova-u1",
+      "route": "sensenova_u1_8b",
+      "backend": "candle",
+      "tier": "bf16",
+      "basis": "manifest_tier_declaration",
+      "reason": "no retained render for this cell; the catalog manifest declares a measured per-tier envelope, which is a whole-render figure with no phase decomposition",
+      "evidence": {
+        "repo": null,
+        "revision": null,
+        "path": "config/manifests/builtin.models.jsonc#models/sensenova_u1_8b_infographic_v3/candle",
+        "sha256": "af38bc1ec14d7a3a83cae88250d28780a2d6aa1d44786d381e2248e025ff88c6",
+        "recordId": null,
+        "envelopeBytes": null,
+        "values": {
+          "vramGbByTier": "36.7"
+        }
+      }
+    },
+    {
+      "id": "analytic:sensenova_u1_8b_infographic_v3:candle:q4",
+      "modelId": "sensenova_u1_8b_infographic_v3",
+      "modelFamily": "sensenova-u1",
+      "route": "sensenova_u1_8b",
+      "backend": "candle",
+      "tier": "q4",
+      "basis": "manifest_tier_declaration",
+      "reason": "no retained render for this cell; the catalog manifest declares a measured per-tier envelope, which is a whole-render figure with no phase decomposition",
+      "evidence": {
+        "repo": null,
+        "revision": null,
+        "path": "config/manifests/builtin.models.jsonc#models/sensenova_u1_8b_infographic_v3/candle",
+        "sha256": "af38bc1ec14d7a3a83cae88250d28780a2d6aa1d44786d381e2248e025ff88c6",
+        "recordId": null,
+        "envelopeBytes": null,
+        "values": {
+          "vramGbByTier": "14.8"
+        }
+      }
+    },
+    {
+      "id": "analytic:sensenova_u1_8b_infographic_v3:candle:q8",
+      "modelId": "sensenova_u1_8b_infographic_v3",
+      "modelFamily": "sensenova-u1",
+      "route": "sensenova_u1_8b",
+      "backend": "candle",
+      "tier": "q8",
+      "basis": "manifest_tier_declaration",
+      "reason": "no retained render for this cell; the catalog manifest declares a measured per-tier envelope, which is a whole-render figure with no phase decomposition",
+      "evidence": {
+        "repo": null,
+        "revision": null,
+        "path": "config/manifests/builtin.models.jsonc#models/sensenova_u1_8b_infographic_v3/candle",
+        "sha256": "af38bc1ec14d7a3a83cae88250d28780a2d6aa1d44786d381e2248e025ff88c6",
+        "recordId": null,
+        "envelopeBytes": null,
+        "values": {
+          "vramGbByTier": "22.5"
+        }
+      }
+    },
+    {
+      "id": "analytic:sensenova_u1_8b_infographic_v3:mlx:bf16",
+      "modelId": "sensenova_u1_8b_infographic_v3",
+      "modelFamily": "sensenova-u1",
+      "route": "sensenova_u1_8b",
+      "backend": "mlx",
+      "tier": "bf16",
+      "basis": "no_retained_evidence",
+      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
+      "evidence": null
+    },
+    {
+      "id": "analytic:sensenova_u1_8b_infographic_v3:mlx:q4",
+      "modelId": "sensenova_u1_8b_infographic_v3",
+      "modelFamily": "sensenova-u1",
+      "route": "sensenova_u1_8b",
+      "backend": "mlx",
+      "tier": "q4",
+      "basis": "no_retained_evidence",
+      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
+      "evidence": null
+    },
+    {
+      "id": "analytic:sensenova_u1_8b_infographic_v3:mlx:q8",
+      "modelId": "sensenova_u1_8b_infographic_v3",
+      "modelFamily": "sensenova-u1",
+      "route": "sensenova_u1_8b",
+      "backend": "mlx",
+      "tier": "q8",
+      "basis": "no_retained_evidence",
+      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
+      "evidence": null
+    },
+    {
+      "id": "analytic:sensenova_u1_8b_infographic_v3_fast:candle:bf16",
+      "modelId": "sensenova_u1_8b_infographic_v3_fast",
+      "modelFamily": "sensenova-u1",
+      "route": "sensenova_u1_8b_fast",
+      "backend": "candle",
+      "tier": "bf16",
+      "basis": "manifest_tier_declaration",
+      "reason": "no retained render for this cell; the catalog manifest declares a measured per-tier envelope, which is a whole-render figure with no phase decomposition",
+      "evidence": {
+        "repo": null,
+        "revision": null,
+        "path": "config/manifests/builtin.models.jsonc#models/sensenova_u1_8b_infographic_v3_fast/candle",
+        "sha256": "af38bc1ec14d7a3a83cae88250d28780a2d6aa1d44786d381e2248e025ff88c6",
+        "recordId": null,
+        "envelopeBytes": null,
+        "values": {
+          "vramGbByTier": "36.7"
+        }
+      }
+    },
+    {
+      "id": "analytic:sensenova_u1_8b_infographic_v3_fast:candle:q4",
+      "modelId": "sensenova_u1_8b_infographic_v3_fast",
+      "modelFamily": "sensenova-u1",
+      "route": "sensenova_u1_8b_fast",
+      "backend": "candle",
+      "tier": "q4",
+      "basis": "manifest_tier_declaration",
+      "reason": "no retained render for this cell; the catalog manifest declares a measured per-tier envelope, which is a whole-render figure with no phase decomposition",
+      "evidence": {
+        "repo": null,
+        "revision": null,
+        "path": "config/manifests/builtin.models.jsonc#models/sensenova_u1_8b_infographic_v3_fast/candle",
+        "sha256": "af38bc1ec14d7a3a83cae88250d28780a2d6aa1d44786d381e2248e025ff88c6",
+        "recordId": null,
+        "envelopeBytes": null,
+        "values": {
+          "vramGbByTier": "14.8"
+        }
+      }
+    },
+    {
+      "id": "analytic:sensenova_u1_8b_infographic_v3_fast:candle:q8",
+      "modelId": "sensenova_u1_8b_infographic_v3_fast",
+      "modelFamily": "sensenova-u1",
+      "route": "sensenova_u1_8b_fast",
+      "backend": "candle",
+      "tier": "q8",
+      "basis": "manifest_tier_declaration",
+      "reason": "no retained render for this cell; the catalog manifest declares a measured per-tier envelope, which is a whole-render figure with no phase decomposition",
+      "evidence": {
+        "repo": null,
+        "revision": null,
+        "path": "config/manifests/builtin.models.jsonc#models/sensenova_u1_8b_infographic_v3_fast/candle",
+        "sha256": "af38bc1ec14d7a3a83cae88250d28780a2d6aa1d44786d381e2248e025ff88c6",
+        "recordId": null,
+        "envelopeBytes": null,
+        "values": {
+          "vramGbByTier": "22.5"
+        }
+      }
+    },
+    {
+      "id": "analytic:sensenova_u1_8b_infographic_v3_fast:mlx:bf16",
+      "modelId": "sensenova_u1_8b_infographic_v3_fast",
+      "modelFamily": "sensenova-u1",
+      "route": "sensenova_u1_8b_fast",
+      "backend": "mlx",
+      "tier": "bf16",
+      "basis": "no_retained_evidence",
+      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
+      "evidence": null
+    },
+    {
+      "id": "analytic:sensenova_u1_8b_infographic_v3_fast:mlx:q4",
+      "modelId": "sensenova_u1_8b_infographic_v3_fast",
+      "modelFamily": "sensenova-u1",
+      "route": "sensenova_u1_8b_fast",
+      "backend": "mlx",
+      "tier": "q4",
+      "basis": "no_retained_evidence",
+      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
+      "evidence": null
+    },
+    {
+      "id": "analytic:sensenova_u1_8b_infographic_v3_fast:mlx:q8",
+      "modelId": "sensenova_u1_8b_infographic_v3_fast",
+      "modelFamily": "sensenova-u1",
+      "route": "sensenova_u1_8b_fast",
+      "backend": "mlx",
+      "tier": "q8",
+      "basis": "no_retained_evidence",
+      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
+      "evidence": null
+    },
+    {
+      "id": "analytic:svd:candle:default",
+      "modelId": "svd",
+      "modelFamily": "svd",
+      "route": "svd_xt",
+      "backend": "candle",
+      "tier": "default",
+      "basis": "no_retained_evidence",
+      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
+      "evidence": null
+    },
+    {
+      "id": "analytic:svd:mlx:default",
+      "modelId": "svd",
+      "modelFamily": "svd",
+      "route": "svd_xt",
+      "backend": "mlx",
+      "tier": "default",
+      "basis": "no_retained_evidence",
+      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
+      "evidence": null
+    },
+    {
+      "id": "analytic:wan_2_2:candle:bf16",
+      "modelId": "wan_2_2",
+      "modelFamily": "wan-video",
+      "route": "wan2_2_ti2v_5b",
+      "backend": "candle",
+      "tier": "bf16",
+      "basis": "manifest_tier_declaration",
+      "reason": "no retained render for this cell; the catalog manifest declares a measured per-tier envelope, which is a whole-render figure with no phase decomposition",
+      "evidence": {
+        "repo": null,
+        "revision": null,
+        "path": "config/manifests/builtin.models.jsonc#models/wan_2_2/candle",
+        "sha256": "af38bc1ec14d7a3a83cae88250d28780a2d6aa1d44786d381e2248e025ff88c6",
+        "recordId": null,
+        "envelopeBytes": null,
+        "values": {
+          "vramGbByTier": "14.5"
+        }
+      }
+    },
+    {
+      "id": "analytic:wan_2_2:candle:q4",
+      "modelId": "wan_2_2",
+      "modelFamily": "wan-video",
+      "route": "wan2_2_ti2v_5b",
+      "backend": "candle",
+      "tier": "q4",
+      "basis": "manifest_tier_declaration",
+      "reason": "no retained render for this cell; the catalog manifest declares a measured per-tier envelope, which is a whole-render figure with no phase decomposition",
+      "evidence": {
+        "repo": null,
+        "revision": null,
+        "path": "config/manifests/builtin.models.jsonc#models/wan_2_2/candle",
+        "sha256": "af38bc1ec14d7a3a83cae88250d28780a2d6aa1d44786d381e2248e025ff88c6",
+        "recordId": null,
+        "envelopeBytes": null,
+        "values": {
+          "vramGbByTier": "12.1"
+        }
+      }
+    },
+    {
+      "id": "analytic:wan_2_2:candle:q8",
+      "modelId": "wan_2_2",
+      "modelFamily": "wan-video",
+      "route": "wan2_2_ti2v_5b",
+      "backend": "candle",
+      "tier": "q8",
+      "basis": "manifest_tier_declaration",
+      "reason": "no retained render for this cell; the catalog manifest declares a measured per-tier envelope, which is a whole-render figure with no phase decomposition",
+      "evidence": {
+        "repo": null,
+        "revision": null,
+        "path": "config/manifests/builtin.models.jsonc#models/wan_2_2/candle",
+        "sha256": "af38bc1ec14d7a3a83cae88250d28780a2d6aa1d44786d381e2248e025ff88c6",
+        "recordId": null,
+        "envelopeBytes": null,
+        "values": {
+          "vramGbByTier": "12.1"
+        }
+      }
+    },
+    {
+      "id": "analytic:wan_2_2:mlx:bf16",
+      "modelId": "wan_2_2",
+      "modelFamily": "wan-video",
+      "route": "wan2_2_ti2v_5b",
+      "backend": "mlx",
+      "tier": "bf16",
+      "basis": "no_retained_evidence",
+      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
+      "evidence": null
+    },
+    {
+      "id": "analytic:wan_2_2:mlx:q4",
+      "modelId": "wan_2_2",
+      "modelFamily": "wan-video",
+      "route": "wan2_2_ti2v_5b",
+      "backend": "mlx",
+      "tier": "q4",
+      "basis": "no_retained_evidence",
+      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
+      "evidence": null
+    },
+    {
+      "id": "analytic:wan_2_2:mlx:q8",
+      "modelId": "wan_2_2",
+      "modelFamily": "wan-video",
+      "route": "wan2_2_ti2v_5b",
+      "backend": "mlx",
+      "tier": "q8",
+      "basis": "no_retained_evidence",
+      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
+      "evidence": null
+    },
+    {
+      "id": "analytic:wan_2_2_i2v_14b:candle:bf16",
+      "modelId": "wan_2_2_i2v_14b",
+      "modelFamily": "wan-video",
+      "route": "wan2_2_i2v_14b",
+      "backend": "candle",
+      "tier": "bf16",
+      "basis": "manifest_tier_declaration",
+      "reason": "no retained render for this cell; the catalog manifest declares a measured per-tier envelope, which is a whole-render figure with no phase decomposition",
+      "evidence": {
+        "repo": null,
+        "revision": null,
+        "path": "config/manifests/builtin.models.jsonc#models/wan_2_2_i2v_14b/candle",
+        "sha256": "af38bc1ec14d7a3a83cae88250d28780a2d6aa1d44786d381e2248e025ff88c6",
+        "recordId": null,
+        "envelopeBytes": null,
+        "values": {
+          "vramGbByTier": "38.62"
+        }
+      }
+    },
+    {
+      "id": "analytic:wan_2_2_i2v_14b:candle:q4",
+      "modelId": "wan_2_2_i2v_14b",
+      "modelFamily": "wan-video",
+      "route": "wan2_2_i2v_14b",
+      "backend": "candle",
+      "tier": "q4",
+      "basis": "manifest_tier_declaration",
+      "reason": "no retained render for this cell; the catalog manifest declares a measured per-tier envelope, which is a whole-render figure with no phase decomposition",
+      "evidence": {
+        "repo": null,
+        "revision": null,
+        "path": "config/manifests/builtin.models.jsonc#models/wan_2_2_i2v_14b/candle",
+        "sha256": "af38bc1ec14d7a3a83cae88250d28780a2d6aa1d44786d381e2248e025ff88c6",
+        "recordId": null,
+        "envelopeBytes": null,
+        "values": {
+          "vramGbByTier": "22.2"
+        }
+      }
+    },
+    {
+      "id": "analytic:wan_2_2_i2v_14b:candle:q8",
+      "modelId": "wan_2_2_i2v_14b",
+      "modelFamily": "wan-video",
+      "route": "wan2_2_i2v_14b",
+      "backend": "candle",
+      "tier": "q8",
+      "basis": "manifest_tier_declaration",
+      "reason": "no retained render for this cell; the catalog manifest declares a measured per-tier envelope, which is a whole-render figure with no phase decomposition",
+      "evidence": {
+        "repo": null,
+        "revision": null,
+        "path": "config/manifests/builtin.models.jsonc#models/wan_2_2_i2v_14b/candle",
+        "sha256": "af38bc1ec14d7a3a83cae88250d28780a2d6aa1d44786d381e2248e025ff88c6",
+        "recordId": null,
+        "envelopeBytes": null,
+        "values": {
+          "vramGbByTier": "28.02"
+        }
+      }
+    },
+    {
+      "id": "analytic:wan_2_2_i2v_14b:mlx:bf16",
+      "modelId": "wan_2_2_i2v_14b",
+      "modelFamily": "wan-video",
+      "route": "wan2_2_i2v_14b",
+      "backend": "mlx",
+      "tier": "bf16",
+      "basis": "no_retained_evidence",
+      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
+      "evidence": null
+    },
+    {
+      "id": "analytic:wan_2_2_i2v_14b:mlx:q4",
+      "modelId": "wan_2_2_i2v_14b",
+      "modelFamily": "wan-video",
+      "route": "wan2_2_i2v_14b",
+      "backend": "mlx",
+      "tier": "q4",
+      "basis": "no_retained_evidence",
+      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
+      "evidence": null
+    },
+    {
+      "id": "analytic:wan_2_2_i2v_14b:mlx:q8",
+      "modelId": "wan_2_2_i2v_14b",
+      "modelFamily": "wan-video",
+      "route": "wan2_2_i2v_14b",
+      "backend": "mlx",
+      "tier": "q8",
+      "basis": "no_retained_evidence",
+      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
+      "evidence": null
+    },
+    {
+      "id": "analytic:wan_2_2_t2v_14b:candle:bf16",
+      "modelId": "wan_2_2_t2v_14b",
+      "modelFamily": "wan-video",
+      "route": "wan2_2_t2v_14b",
+      "backend": "candle",
+      "tier": "bf16",
+      "basis": "manifest_tier_declaration",
+      "reason": "no retained render for this cell; the catalog manifest declares a measured per-tier envelope, which is a whole-render figure with no phase decomposition",
+      "evidence": {
+        "repo": null,
+        "revision": null,
+        "path": "config/manifests/builtin.models.jsonc#models/wan_2_2_t2v_14b/candle",
+        "sha256": "af38bc1ec14d7a3a83cae88250d28780a2d6aa1d44786d381e2248e025ff88c6",
+        "recordId": null,
+        "envelopeBytes": null,
+        "values": {
+          "vramGbByTier": "38.56"
+        }
+      }
+    },
+    {
+      "id": "analytic:wan_2_2_t2v_14b:candle:q4",
+      "modelId": "wan_2_2_t2v_14b",
+      "modelFamily": "wan-video",
+      "route": "wan2_2_t2v_14b",
+      "backend": "candle",
+      "tier": "q4",
+      "basis": "manifest_tier_declaration",
+      "reason": "no retained render for this cell; the catalog manifest declares a measured per-tier envelope, which is a whole-render figure with no phase decomposition",
+      "evidence": {
+        "repo": null,
+        "revision": null,
+        "path": "config/manifests/builtin.models.jsonc#models/wan_2_2_t2v_14b/candle",
+        "sha256": "af38bc1ec14d7a3a83cae88250d28780a2d6aa1d44786d381e2248e025ff88c6",
+        "recordId": null,
+        "envelopeBytes": null,
+        "values": {
+          "vramGbByTier": "22.13"
+        }
+      }
+    },
+    {
+      "id": "analytic:wan_2_2_t2v_14b:candle:q8",
+      "modelId": "wan_2_2_t2v_14b",
+      "modelFamily": "wan-video",
+      "route": "wan2_2_t2v_14b",
+      "backend": "candle",
+      "tier": "q8",
+      "basis": "manifest_tier_declaration",
+      "reason": "no retained render for this cell; the catalog manifest declares a measured per-tier envelope, which is a whole-render figure with no phase decomposition",
+      "evidence": {
+        "repo": null,
+        "revision": null,
+        "path": "config/manifests/builtin.models.jsonc#models/wan_2_2_t2v_14b/candle",
+        "sha256": "af38bc1ec14d7a3a83cae88250d28780a2d6aa1d44786d381e2248e025ff88c6",
+        "recordId": null,
+        "envelopeBytes": null,
+        "values": {
+          "vramGbByTier": "27.95"
+        }
+      }
+    },
+    {
+      "id": "analytic:wan_2_2_t2v_14b:mlx:bf16",
+      "modelId": "wan_2_2_t2v_14b",
+      "modelFamily": "wan-video",
+      "route": "wan2_2_t2v_14b",
+      "backend": "mlx",
+      "tier": "bf16",
+      "basis": "no_retained_evidence",
+      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
+      "evidence": null
+    },
+    {
+      "id": "analytic:wan_2_2_t2v_14b:mlx:q4",
+      "modelId": "wan_2_2_t2v_14b",
+      "modelFamily": "wan-video",
+      "route": "wan2_2_t2v_14b",
+      "backend": "mlx",
+      "tier": "q4",
+      "basis": "no_retained_evidence",
+      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
+      "evidence": null
+    },
+    {
+      "id": "analytic:wan_2_2_t2v_14b:mlx:q8",
+      "modelId": "wan_2_2_t2v_14b",
+      "modelFamily": "wan-video",
+      "route": "wan2_2_t2v_14b",
+      "backend": "mlx",
+      "tier": "q8",
+      "basis": "no_retained_evidence",
+      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
+      "evidence": null
+    },
+    {
+      "id": "analytic:wan_2_2_vace_fun_14b:mlx:default",
+      "modelId": "wan_2_2_vace_fun_14b",
+      "modelFamily": "wan-video",
+      "route": "wan2_2_vace_fun_14b",
+      "backend": "mlx",
+      "tier": "default",
+      "basis": "no_retained_evidence",
+      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
+      "evidence": null
+    },
+    {
+      "id": "analytic:z_image:candle:bf16",
+      "modelId": "z_image",
+      "modelFamily": "z-image",
+      "route": "z_image",
+      "backend": "candle",
+      "tier": "bf16",
+      "basis": "manifest_tier_declaration",
+      "reason": "no retained render for this cell; the catalog manifest declares a measured per-tier envelope, which is a whole-render figure with no phase decomposition",
+      "evidence": {
+        "repo": null,
+        "revision": null,
+        "path": "config/manifests/builtin.models.jsonc#models/z_image/candle",
+        "sha256": "af38bc1ec14d7a3a83cae88250d28780a2d6aa1d44786d381e2248e025ff88c6",
+        "recordId": null,
+        "envelopeBytes": null,
+        "values": {
+          "vramGbByTier": "40.7",
+          "sequentialPeakGb": "25.4"
+        }
+      }
+    },
+    {
+      "id": "analytic:z_image:candle:q4",
+      "modelId": "z_image",
+      "modelFamily": "z-image",
+      "route": "z_image",
+      "backend": "candle",
+      "tier": "q4",
+      "basis": "manifest_tier_declaration",
+      "reason": "no retained render for this cell; the catalog manifest declares a measured per-tier envelope, which is a whole-render figure with no phase decomposition",
+      "evidence": {
+        "repo": null,
+        "revision": null,
+        "path": "config/manifests/builtin.models.jsonc#models/z_image/candle",
+        "sha256": "af38bc1ec14d7a3a83cae88250d28780a2d6aa1d44786d381e2248e025ff88c6",
+        "recordId": null,
+        "envelopeBytes": null,
+        "values": {
+          "vramGbByTier": "27.2",
+          "sequentialPeakGb": "16.9"
+        }
+      }
+    },
+    {
+      "id": "analytic:z_image:candle:q8",
+      "modelId": "z_image",
+      "modelFamily": "z-image",
+      "route": "z_image",
+      "backend": "candle",
+      "tier": "q8",
+      "basis": "manifest_tier_declaration",
+      "reason": "no retained render for this cell; the catalog manifest declares a measured per-tier envelope, which is a whole-render figure with no phase decomposition",
+      "evidence": {
+        "repo": null,
+        "revision": null,
+        "path": "config/manifests/builtin.models.jsonc#models/z_image/candle",
+        "sha256": "af38bc1ec14d7a3a83cae88250d28780a2d6aa1d44786d381e2248e025ff88c6",
+        "recordId": null,
+        "envelopeBytes": null,
+        "values": {
+          "vramGbByTier": "32.1",
+          "sequentialPeakGb": "19.9"
+        }
+      }
+    },
+    {
+      "id": "analytic:z_image:mlx:bf16",
+      "modelId": "z_image",
+      "modelFamily": "z-image",
+      "route": "z_image",
+      "backend": "mlx",
+      "tier": "bf16",
+      "basis": "no_retained_evidence",
+      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
+      "evidence": null
+    },
+    {
+      "id": "analytic:z_image:mlx:q4",
+      "modelId": "z_image",
+      "modelFamily": "z-image",
+      "route": "z_image",
+      "backend": "mlx",
+      "tier": "q4",
+      "basis": "no_retained_evidence",
+      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
+      "evidence": null
+    },
+    {
+      "id": "analytic:z_image:mlx:q8",
+      "modelId": "z_image",
+      "modelFamily": "z-image",
+      "route": "z_image",
+      "backend": "mlx",
+      "tier": "q8",
+      "basis": "no_retained_evidence",
+      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
+      "evidence": null
+    },
+    {
+      "id": "analytic:z_image_edit:candle:bf16",
+      "modelId": "z_image_edit",
+      "modelFamily": "z-image",
+      "route": "z_image_turbo",
+      "backend": "candle",
+      "tier": "bf16",
+      "basis": "no_retained_evidence",
+      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
+      "evidence": null
+    },
+    {
+      "id": "analytic:z_image_edit:candle:q4",
+      "modelId": "z_image_edit",
+      "modelFamily": "z-image",
+      "route": "z_image_turbo",
+      "backend": "candle",
+      "tier": "q4",
+      "basis": "no_retained_evidence",
+      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
+      "evidence": null
+    },
+    {
+      "id": "analytic:z_image_edit:candle:q8",
+      "modelId": "z_image_edit",
+      "modelFamily": "z-image",
+      "route": "z_image_turbo",
+      "backend": "candle",
+      "tier": "q8",
+      "basis": "no_retained_evidence",
+      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
+      "evidence": null
+    },
+    {
+      "id": "analytic:z_image_edit:mlx:bf16",
+      "modelId": "z_image_edit",
+      "modelFamily": "z-image",
+      "route": "z_image_turbo",
+      "backend": "mlx",
+      "tier": "bf16",
+      "basis": "no_retained_evidence",
+      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
+      "evidence": null
+    },
+    {
+      "id": "analytic:z_image_edit:mlx:q4",
+      "modelId": "z_image_edit",
+      "modelFamily": "z-image",
+      "route": "z_image_turbo",
+      "backend": "mlx",
+      "tier": "q4",
+      "basis": "no_retained_evidence",
+      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
+      "evidence": null
+    },
+    {
+      "id": "analytic:z_image_edit:mlx:q8",
+      "modelId": "z_image_edit",
+      "modelFamily": "z-image",
+      "route": "z_image_turbo",
+      "backend": "mlx",
+      "tier": "q8",
+      "basis": "no_retained_evidence",
+      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
+      "evidence": null
+    },
+    {
+      "id": "analytic:z_image_turbo:candle:bf16",
+      "modelId": "z_image_turbo",
+      "modelFamily": "z-image",
+      "route": "z_image_turbo",
+      "backend": "candle",
+      "tier": "bf16",
+      "basis": "manifest_tier_declaration",
+      "reason": "no retained render for this cell; the catalog manifest declares a measured per-tier envelope, which is a whole-render figure with no phase decomposition",
+      "evidence": {
+        "repo": null,
+        "revision": null,
+        "path": "config/manifests/builtin.models.jsonc#models/z_image_turbo/candle",
+        "sha256": "af38bc1ec14d7a3a83cae88250d28780a2d6aa1d44786d381e2248e025ff88c6",
+        "recordId": null,
+        "envelopeBytes": null,
+        "values": {
+          "vramGbByTier": "32.2",
+          "sequentialPeakGb": "13.9"
+        }
+      }
+    },
+    {
+      "id": "analytic:z_image_turbo:candle:q4",
+      "modelId": "z_image_turbo",
+      "modelFamily": "z-image",
+      "route": "z_image_turbo",
+      "backend": "candle",
+      "tier": "q4",
+      "basis": "manifest_tier_declaration",
+      "reason": "no retained render for this cell; the catalog manifest declares a measured per-tier envelope, which is a whole-render figure with no phase decomposition",
+      "evidence": {
+        "repo": null,
+        "revision": null,
+        "path": "config/manifests/builtin.models.jsonc#models/z_image_turbo/candle",
+        "sha256": "af38bc1ec14d7a3a83cae88250d28780a2d6aa1d44786d381e2248e025ff88c6",
+        "recordId": null,
+        "envelopeBytes": null,
+        "values": {
+          "vramGbByTier": "18.4",
+          "sequentialPeakGb": "5.7"
+        }
+      }
+    },
+    {
+      "id": "analytic:z_image_turbo:candle:q8",
+      "modelId": "z_image_turbo",
+      "modelFamily": "z-image",
+      "route": "z_image_turbo",
+      "backend": "candle",
+      "tier": "q8",
+      "basis": "manifest_tier_declaration",
+      "reason": "no retained render for this cell; the catalog manifest declares a measured per-tier envelope, which is a whole-render figure with no phase decomposition",
+      "evidence": {
+        "repo": null,
+        "revision": null,
+        "path": "config/manifests/builtin.models.jsonc#models/z_image_turbo/candle",
+        "sha256": "af38bc1ec14d7a3a83cae88250d28780a2d6aa1d44786d381e2248e025ff88c6",
+        "recordId": null,
+        "envelopeBytes": null,
+        "values": {
+          "vramGbByTier": "24.2",
+          "sequentialPeakGb": "9.8"
+        }
+      }
+    },
+    {
+      "id": "analytic:z_image_turbo:mlx:bf16",
+      "modelId": "z_image_turbo",
+      "modelFamily": "z-image",
+      "route": "z_image_turbo",
+      "backend": "mlx",
+      "tier": "bf16",
+      "basis": "no_retained_evidence",
+      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
+      "evidence": null
+    },
+    {
+      "id": "analytic:z_image_turbo:mlx:q8",
+      "modelId": "z_image_turbo",
+      "modelFamily": "z-image",
+      "route": "z_image_turbo",
+      "backend": "mlx",
+      "tier": "q8",
+      "basis": "no_retained_evidence",
+      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
+      "evidence": null
     }
   ]
 }
