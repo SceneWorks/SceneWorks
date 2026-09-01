@@ -52,10 +52,16 @@ pub const PACKAGED_MEMORY_ANCHORS: &str = include_str!("../../../config/memory-a
 /// Immutable retained evidence the anchors were extracted from. Every anchor's `source.path` must
 /// name one of these files, whose bytes are compiled in so the handshake cannot be bypassed by
 /// editing the file on disk.
-const PACKAGED_MEMORY_ANCHOR_SOURCES: &[(&str, &str)] = &[(
-    "docs/calibration/sc-18791/ltx25-mlx-evidence.seed.json",
-    include_str!("../../../docs/calibration/sc-18791/ltx25-mlx-evidence.seed.json"),
-)];
+const PACKAGED_MEMORY_ANCHOR_SOURCES: &[(&str, &str)] = &[
+    (
+        "docs/calibration/sc-18791/ltx25-mlx-evidence.seed.json",
+        include_str!("../../../docs/calibration/sc-18791/ltx25-mlx-evidence.seed.json"),
+    ),
+    (
+        "docs/generated/krea-candle-five-rung-sc-11045.json",
+        include_str!("../../../docs/generated/krea-candle-five-rung-sc-11045.json"),
+    ),
+];
 
 // ---------------------------------------------------------------------------------------------
 // Architecture facts (LTX-2.5 pipeline geometry).
@@ -166,6 +172,73 @@ pub const ANCHOR_ALLOCATOR_ENVELOPE_MARGIN: f64 = 0.17;
 pub const ANCHOR_VALIDATION_TIGHTNESS_BUDGET: f64 = 0.25;
 
 // ---------------------------------------------------------------------------------------------
+// Candle (discrete-VRAM image lane) derivation coefficients — sc-22509, epic 22505.
+//
+// The candle image lane is a DIFFERENT allocator and a different workload shape from the MLX video
+// lane above, so it gets its own per-term coefficients rather than borrowing the LTX video ones:
+//
+// * There is no temporal axis. A still image has one latent frame, so every activation term scales
+//   in OUTPUT PIXELS (`width x height`) rather than in latent tokens x latent frames.
+// * There is no MLX-style reclaimable envelope. Every retained candle record measures
+//   `cudaCachingAllocatorPresent = 0` and `reclaimableBytes = 0`, with `observedMemory.overall`
+//   `allocatorBytes == activeBytes`: the CUDA lane hands pages back rather than retaining a cache
+//   across phase transitions. [`CANDLE_ANCHOR_CAPTURE_SPREAD_MARGIN`] therefore covers a different
+//   single term — capture-to-capture spread — and is named for it.
+//
+// PROVENANCE. The slopes below are the WITHIN-CELL measured deltas of the retained
+// `krea_2_turbo` / candle / q4 / `threeStage` (`resident` + `staged_residency`) evidence pair at
+// 768x768 and 1024x1024, published as `turboFit.evidenceRecords` in
+// `config/manifests/builtin.models.jsonc` and re-measured per rung in the compiled-in
+// `docs/generated/krea-candle-five-rung-sc-11045.json` capture the anchor itself is extracted from.
+//
+// The anchor sits at the TOP of the measured geometry range (1024x1024 is the largest measured
+// still), so the corpus falsifies these coefficients by DOWNWARD extrapolation: a slope set too
+// steep walks the estimate below the measured 768x768 peak. Each slope is therefore pinned below
+// the ceiling that keeps the margin-widened 768x768 derivation at or above the measured 768x768
+// peak, and at or above the physical growth term the architecture requires. `candle_anchor_
+// derivation_brackets_every_retained_candle_measurement` is the falsifier for all of it.
+// ---------------------------------------------------------------------------------------------
+
+/// Conditioning-phase bytes per output pixel on the candle image lane. Conditioning under staged
+/// residency holds the text encoder working set plus the initialized latent; only the latter sees
+/// the image geometry. The Qwen-Image VAE is x8 spatial with 16 latent channels, so one fp32 latent
+/// is `(w/8)(h/8) x 16 x 4 = 1` byte per output pixel; this is set at 4 B/px to cover up to four
+/// concurrently live copies of it. The retained within-cell measured slope is NEGATIVE (3.565 GiB
+/// at 768x768 against 3.44 GiB at 1024x1024 — the text working set is prompt-shaped, not
+/// image-shaped), so any non-negative coefficient sits above the measured trend.
+pub const CANDLE_COND_PER_PIXEL_BYTES: i128 = 4;
+
+/// Denoise-phase bytes per output pixel on the candle image lane: the DiT forward's live activation
+/// set over the packed image latent. Retained within-cell measured slope is 9,212 B/px
+/// (10.597 -> 14.533 GiB across 589,824 -> 1,048,576 px on `q4` / `threeStage`). Set at 9 KiB/px,
+/// which is above the measured slope for upward extrapolation and still below the 9,520 B/px
+/// ceiling at which the margin-widened 768x768 derivation would fall under the measured peak.
+pub const CANDLE_DENOISE_PER_PIXEL_BYTES: i128 = 9_216;
+
+/// Decode-phase bytes per output pixel on the candle image lane: the VAE decoder's concurrently
+/// live pixel-space working copies. Retained within-cell measured slope is 11,699 B/px
+/// (16.286 -> 21.285 GiB over the same geometry pair). Set at 12 KiB/px — above the measured slope,
+/// and below the 12,764 B/px ceiling that downward extrapolation to 768x768 imposes.
+pub const CANDLE_DECODE_PER_PIXEL_BYTES: i128 = 12_288;
+
+/// Multiplicative margin applied to every derived candle phase peak. It covers exactly ONE term:
+/// capture-to-capture spread of the same measured cell. The two retained candle captures of
+/// `q4` / `staged_residency` / 1024x1024 disagree by up to 3.33% (denoise 15.103 GB in the five-rung
+/// capture against 15.605 GB in the `turboFit` evidence record; decode 22.352 against 22.855 GB),
+/// and this is set above that. There is no MLX-style allocator-envelope term to cover here: the
+/// CUDA lane reports `reclaimableBytes = 0` and no caching allocator in every retained record.
+/// Coefficient uncertainty is priced inside the slopes above, not here.
+pub const CANDLE_ANCHOR_CAPTURE_SPREAD_MARGIN: f64 = 0.06;
+
+/// Validation-only tightness budget for the candle lane, the sibling of
+/// [`ANCHOR_VALIDATION_TIGHTNESS_BUDGET`]: the corpus validation test refuses a derived candle bound
+/// more than this fraction above the measured peak of the anchor's OWN composition, so the
+/// coefficients above cannot quietly widen into a vacuous always-passes bound. Deeper rung
+/// compositions are only required to be BRACKETED, never to be tight: the shallow-anchor argument
+/// (a deeper rung can only reduce a phase, never grow it) deliberately over-estimates them.
+pub const CANDLE_ANCHOR_VALIDATION_TIGHTNESS_BUDGET: f64 = 0.15;
+
+// ---------------------------------------------------------------------------------------------
 // Store schema.
 // ---------------------------------------------------------------------------------------------
 
@@ -217,7 +290,10 @@ pub struct AnchorGeometry {
     pub width: u32,
     pub height: u32,
     pub frames: u32,
-    pub fps: u32,
+    /// Output rate of the anchor render, bound to the source record's `outputFps` measurement. The
+    /// candle image lane emits a still and its records carry no such measurement, so this is
+    /// `None` there and the validator requires the measurement to be absent in exactly that case.
+    pub fps: Option<u32>,
 }
 
 /// The measured per-phase ACTIVE peak decomposition of the anchor render.
@@ -240,6 +316,13 @@ pub struct AnchorMeasuredRegime {
     pub decode_tiled: bool,
     /// `bounded_transformer_residency` was engaged for the anchor render.
     pub transformer_windowed: bool,
+    /// `staged_residency` was engaged for the anchor render. On the candle image lane this — not
+    /// the record's `loadShape` — is the axis that decides whether the text encoder was still
+    /// co-resident during conditioning, so it is load-bearing for
+    /// [`MemoryAnchor::derive_image_phase_peaks`] rather than informational.
+    pub staged: bool,
+    /// `bounded_attention` was engaged for the anchor render.
+    pub attention_chunked: bool,
 }
 
 /// One measured anchor: identity plus the peak decomposition of exactly one retained render.
@@ -261,9 +344,11 @@ pub struct MemoryAnchor {
     pub tier: String,
     /// LTX-2.5 pipeline identity — the same axes the fitted curves key on. The corpus has no
     /// dev-vs-distilled pair at a common regime, so a request on the other variant/decoder is not
-    /// derivable from this anchor.
-    pub transformer_variant: Ltx25TransformerVariant,
-    pub decoder: Ltx25Decoder,
+    /// derivable from this anchor. `None` on lanes whose pipeline has no such axis (the candle
+    /// image lane): the validator requires the source record to agree, so an LTX anchor cannot
+    /// silently drop them.
+    pub transformer_variant: Option<Ltx25TransformerVariant>,
+    pub decoder: Option<Ltx25Decoder>,
     pub mode: String,
     /// The anchor was measured overlay-free; a future overlay anchor is a new row, never a reuse.
     pub overlay: Option<String>,
@@ -297,6 +382,16 @@ pub const fn decoder_key(decoder: Ltx25Decoder) -> &'static str {
     }
 }
 
+/// `None` is a real cell coordinate ("this lane has no such axis"), not a wildcard, so it gets its
+/// own key spelling in the identity map and in the duplicate-anchor diagnostic.
+fn optional_transformer_variant_key(variant: Option<Ltx25TransformerVariant>) -> &'static str {
+    variant.map_or("-", transformer_variant_key)
+}
+
+fn optional_decoder_key(decoder: Option<Ltx25Decoder>) -> &'static str {
+    decoder.map_or("-", decoder_key)
+}
+
 /// Strict parse plus the invariants serde cannot express. No partial store is usable.
 pub fn load_memory_anchors(raw: &str) -> Result<MemoryAnchorStore, String> {
     let store: MemoryAnchorStore = serde_json::from_str(raw)
@@ -313,8 +408,8 @@ pub fn load_memory_anchors(raw: &str) -> Result<MemoryAnchorStore, String> {
             anchor.model_id.clone(),
             anchor.tier.clone(),
             anchor.backend,
-            transformer_variant_key(anchor.transformer_variant),
-            decoder_key(anchor.decoder),
+            optional_transformer_variant_key(anchor.transformer_variant),
+            optional_decoder_key(anchor.decoder),
         );
         if let Some(previous) = identities.insert(identity, &anchor.id) {
             return Err(format!(
@@ -324,8 +419,8 @@ pub fn load_memory_anchors(raw: &str) -> Result<MemoryAnchorStore, String> {
                 anchor.model_id,
                 anchor.tier,
                 anchor.backend.as_key(),
-                transformer_variant_key(anchor.transformer_variant),
-                decoder_key(anchor.decoder),
+                optional_transformer_variant_key(anchor.transformer_variant),
+                optional_decoder_key(anchor.decoder),
                 previous,
                 anchor.id
             ));
@@ -403,9 +498,14 @@ fn validate_anchor(anchor: &MemoryAnchor) -> Result<(), String> {
         || str_at(target, "mode").as_deref() != Some(anchor.mode.as_str())
         || str_at(target, "provider").as_deref() != Some(anchor.provider.as_str())
         || record_route.as_deref() != Some(anchor.route.as_str())
-        || str_at(target, "transformerVariant").as_deref()
-            != Some(transformer_variant_key(anchor.transformer_variant))
-        || str_at(target, "decoder").as_deref() != Some(decoder_key(anchor.decoder))
+        || str_at(target, "transformerVariant")
+            != anchor
+                .transformer_variant
+                .map(|variant| transformer_variant_key(variant).to_owned())
+        || str_at(target, "decoder")
+            != anchor
+                .decoder
+                .map(|decoder| decoder_key(decoder).to_owned())
         || str_at(record, "calibrationFingerprint").as_deref()
             != Some(anchor.source.calibration_fingerprint.as_str())
     {
@@ -433,6 +533,8 @@ fn validate_anchor(anchor: &MemoryAnchor) -> Result<(), String> {
     if anchor.measured_regime.decode_tiled != engaged.contains(&"bounded_decode")
         || anchor.measured_regime.transformer_windowed
             != engaged.contains(&"bounded_transformer_residency")
+        || anchor.measured_regime.staged != engaged.contains(&"staged_residency")
+        || anchor.measured_regime.attention_chunked != engaged.contains(&"bounded_attention")
     {
         return Err(format!(
             "memory anchor {} measured regime disagrees with the engaged rungs of its source \
@@ -472,19 +574,35 @@ fn validate_anchor(anchor: &MemoryAnchor) -> Result<(), String> {
         .and_then(|overall| overall.get("allocatorBytes"))
         .and_then(|bytes| bytes.as_u64());
     // Output rate is evidence identity, not decoration: bind it to the measured `outputFps` rather
-    // than leaving a serialized field nothing checks.
-    if measured.get("outputFps").copied() != Some(u64::from(anchor.geometry.fps)) {
+    // than leaving a serialized field nothing checks. A still-image lane record carries no
+    // `outputFps`, and the anchor must then carry no fps — absence has to agree in both directions
+    // or a video anchor could quietly drop the field.
+    if measured.get("outputFps").copied() != anchor.geometry.fps.map(u64::from) {
         return Err(format!(
-            "memory anchor {} fps {} disagrees with the outputFps measurement of its source \
+            "memory anchor {} fps {:?} disagrees with the outputFps measurement of its source \
              record {}",
             anchor.id, anchor.geometry.fps, anchor.source.record_id
         ));
     }
-    if measured.get("conditioningActivePeak").copied()
-        != Some(anchor.phase_active_peak_bytes.conditioning)
-        || measured.get("denoiseActivePeak").copied()
-            != Some(anchor.phase_active_peak_bytes.denoise)
-        || measured.get("decodeActivePeak").copied() != Some(anchor.phase_active_peak_bytes.decode)
+    // The two lanes name the same three phase peaks differently: the MLX adapter reports unified
+    // ACTIVE peaks, the candle adapter reports discrete-device peak DELTAS. The names are chosen by
+    // the anchor's backend rather than by probing for whichever is present, so a record captured on
+    // one lane cannot satisfy an anchor declared on the other.
+    let (conditioning_key, denoise_key, decode_key) = match anchor.backend {
+        AnchorBackend::Mlx => (
+            "conditioningActivePeak",
+            "denoiseActivePeak",
+            "decodeActivePeak",
+        ),
+        AnchorBackend::Candle => (
+            "conditioningDevicePeakDelta",
+            "denoiseDevicePeakDelta",
+            "decodeDevicePeakDelta",
+        ),
+    };
+    if measured.get(conditioning_key).copied() != Some(anchor.phase_active_peak_bytes.conditioning)
+        || measured.get(denoise_key).copied() != Some(anchor.phase_active_peak_bytes.denoise)
+        || measured.get(decode_key).copied() != Some(anchor.phase_active_peak_bytes.decode)
         || envelope != Some(anchor.overall_allocator_envelope_bytes)
     {
         return Err(format!(
@@ -522,8 +640,29 @@ impl MemoryAnchorStore {
             anchor.model_id == model_id
                 && anchor.backend == backend
                 && anchor.tier == tier
-                && anchor.transformer_variant == transformer_variant
-                && anchor.decoder == decoder
+                && anchor.transformer_variant == Some(transformer_variant)
+                && anchor.decoder == Some(decoder)
+        })
+    }
+
+    /// The unique anchor for one `(model, backend lane, tier)` coordinate on a lane whose pipeline
+    /// has no transformer-variant / decoder axis — the candle image lane (sc-22509).
+    ///
+    /// This is not a laxer spelling of [`Self::anchor_for`]: an anchor that DOES declare those axes
+    /// is a different cell and is deliberately not returned here, so a video anchor can never be
+    /// borrowed by an image request that simply omitted them.
+    pub fn image_anchor_for(
+        &self,
+        model_id: &str,
+        backend: AnchorBackend,
+        tier: &str,
+    ) -> Option<&MemoryAnchor> {
+        self.anchors.iter().find(|anchor| {
+            anchor.model_id == model_id
+                && anchor.backend == backend
+                && anchor.tier == tier
+                && anchor.transformer_variant.is_none()
+                && anchor.decoder.is_none()
         })
     }
 }
@@ -593,12 +732,29 @@ fn voxels(width: u32, height: u32, frames: u32) -> i128 {
 /// anchor far enough to go negative has left the law's domain, and a 0-byte peak would admit
 /// anything. `None` fails open to the caller's floor instead.
 fn widened(bytes: i128) -> Option<u64> {
+    widened_by(bytes, ANCHOR_ALLOCATOR_ENVELOPE_MARGIN)
+}
+
+fn widened_by(bytes: i128, margin: f64) -> Option<u64> {
     if bytes <= 0 {
         return None;
     }
     let bytes = u64::try_from(bytes).ok()?;
-    let widened = (bytes as f64 * (1.0 + ANCHOR_ALLOCATOR_ENVELOPE_MARGIN)).ceil();
+    let widened = (bytes as f64 * (1.0 + margin)).ceil();
     (widened.is_finite() && widened < u64::MAX as f64).then_some(widened as u64)
+}
+
+/// The workload axes the candle image derivation prices. There is no temporal axis and no
+/// per-phase rung flag: the anchor is the SHALLOWEST optimized composition the lane offers, and a
+/// deeper rung can only reduce a phase below it (that is what the rung is for), so one law prices
+/// every composition that contains the anchor's own.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AnchorImageDeriveRequest {
+    pub width: u32,
+    pub height: u32,
+    /// `staged_residency` engaged for the candidate being graded. A composition WITHOUT it runs the
+    /// text encoder co-resident through denoise and decode, which the staged anchor does not price.
+    pub staged_residency: bool,
 }
 
 impl MemoryAnchor {
@@ -627,6 +783,12 @@ impl MemoryAnchor {
         request: AnchorDeriveRequest,
     ) -> Option<AnchorDerivedPhases> {
         if request.width == 0 || request.height == 0 || request.frames == 0 {
+            return None;
+        }
+        // Every coefficient in this law is an LTX-2.5 pipeline fact keyed on the transformer
+        // variant and decoder. An anchor from a lane that has no such axes (the candle image
+        // anchors, sc-22509) is refused here rather than silently priced by video coefficients.
+        if self.transformer_variant.is_none() || self.decoder.is_none() {
             return None;
         }
         let anchor_deferred = self.load_shape == AnchorLoadShape::DeferredMaterialization;
@@ -671,6 +833,67 @@ impl MemoryAnchor {
             conditioning: widened(conditioning)?,
             denoise: widened(denoise)?,
             decode: widened(decode)?,
+        })
+    }
+
+    /// Derive the per-phase peak estimate for one requested still-image workload from this anchor
+    /// (sc-22509, epic 22505 — the candle image-lane sibling of
+    /// [`Self::derive_video_phase_peaks`]).
+    ///
+    /// Each phase is the anchor's measured intercept plus its own per-output-pixel term
+    /// ([`CANDLE_COND_PER_PIXEL_BYTES`], [`CANDLE_DENOISE_PER_PIXEL_BYTES`],
+    /// [`CANDLE_DECODE_PER_PIXEL_BYTES`]) applied to the pixel delta from the anchor geometry, then
+    /// widened by [`CANDLE_ANCHOR_CAPTURE_SPREAD_MARGIN`].
+    ///
+    /// IDENTITY GUARD: this law is the CUDA image lane's. A non-candle anchor, an anchor carrying
+    /// LTX pipeline axes, or an anchor whose measured geometry is not a still are all refused
+    /// rather than coerced.
+    ///
+    /// REGIME GUARD: the anchor must be the SHALLOW optimized composition — `staged_residency`
+    /// engaged and nothing deeper — and the graded candidate must also engage `staged_residency`.
+    /// That asymmetry is the whole argument for pricing four rungs from one anchor: every deeper
+    /// rung (`bounded_decode`, `bounded_attention`, `bounded_transformer_residency`) exists to make
+    /// a phase SMALLER, so the shallow anchor upper-bounds them, while a resident composition holds
+    /// the text encoder through denoise and decode and is strictly LARGER — the direction the
+    /// anchor cannot cover. A resident request therefore keeps its own resident estimate.
+    ///
+    /// Returns `None` on degenerate geometry, on a regime or identity the anchor cannot price, and
+    /// on any extrapolation that runs non-positive.
+    pub fn derive_image_phase_peaks(
+        &self,
+        request: AnchorImageDeriveRequest,
+    ) -> Option<AnchorDerivedPhases> {
+        if request.width == 0 || request.height == 0 {
+            return None;
+        }
+        if self.backend != AnchorBackend::Candle
+            || self.transformer_variant.is_some()
+            || self.decoder.is_some()
+            || self.geometry.frames != 1
+        {
+            return None;
+        }
+        if !self.measured_regime.staged
+            || self.measured_regime.decode_tiled
+            || self.measured_regime.attention_chunked
+            || self.measured_regime.transformer_windowed
+            || !request.staged_residency
+        {
+            return None;
+        }
+        let anchor_pixels = i128::from(self.geometry.width) * i128::from(self.geometry.height);
+        let pixels = i128::from(request.width) * i128::from(request.height);
+        let delta = pixels - anchor_pixels;
+        let conditioning = i128::from(self.phase_active_peak_bytes.conditioning)
+            + CANDLE_COND_PER_PIXEL_BYTES * delta;
+        let denoise = i128::from(self.phase_active_peak_bytes.denoise)
+            + CANDLE_DENOISE_PER_PIXEL_BYTES * delta;
+        let decode =
+            i128::from(self.phase_active_peak_bytes.decode) + CANDLE_DECODE_PER_PIXEL_BYTES * delta;
+        Some(AnchorDerivedPhases {
+            conditioning: widened_by(conditioning, CANDLE_ANCHOR_CAPTURE_SPREAD_MARGIN)?,
+            denoise: widened_by(denoise, CANDLE_ANCHOR_CAPTURE_SPREAD_MARGIN)?,
+            decode: widened_by(decode, CANDLE_ANCHOR_CAPTURE_SPREAD_MARGIN)?,
         })
     }
 }
@@ -815,8 +1038,9 @@ mod tests {
                     anchor.model_id == "ltx_2_5"
                         && anchor.backend == AnchorBackend::Mlx
                         && anchor.tier == *tier
-                        && transformer_variant_key(anchor.transformer_variant) == *variant_key
-                        && decoder_key(anchor.decoder) == *decoder_key_str
+                        && optional_transformer_variant_key(anchor.transformer_variant)
+                            == *variant_key
+                        && optional_decoder_key(anchor.decoder) == *decoder_key_str
                 })
                 .count();
             assert_eq!(
@@ -836,7 +1060,9 @@ mod tests {
             "the store must not carry an anchor for a pipeline cell the corpus never measured"
         );
         for anchor in &store().anchors {
-            assert_eq!(anchor.source.path, LTX25_CORPUS_PATH);
+            if anchor.model_id == "ltx_2_5" && anchor.backend == AnchorBackend::Mlx {
+                assert_eq!(anchor.source.path, LTX25_CORPUS_PATH);
+            }
         }
     }
 
@@ -943,12 +1169,64 @@ mod tests {
             load_memory_anchors(&doctored.to_string()).expect_err("load shape must bind to source");
         assert!(error.contains("load shape disagrees"), "{error}");
 
+        // Every regime flag is bound, not just the two the video law reads: `staged` decides the
+        // candle conditioning intercept and `attentionChunked` the denoise one.
+        for field in [
+            "decodeTiled",
+            "transformerWindowed",
+            "staged",
+            "attentionChunked",
+        ] {
+            let mut doctored: serde_json::Value =
+                serde_json::from_str(PACKAGED_MEMORY_ANCHORS).expect("packaged store parses");
+            let current = doctored["anchors"][0]["measuredRegime"][field]
+                .as_bool()
+                .unwrap_or_else(|| panic!("{field} is a declared regime flag"));
+            doctored["anchors"][0]["measuredRegime"][field] = serde_json::json!(!current);
+            let Err(error) = load_memory_anchors(&doctored.to_string()) else {
+                panic!("{field} must bind to the engaged rungs");
+            };
+            assert!(
+                error.contains("measured regime disagrees"),
+                "{field}: {error}"
+            );
+        }
+    }
+
+    /// The candle anchor's own bound fields: the phase peaks are read under the CANDLE measurement
+    /// names, and a still-image anchor may not invent an output rate.
+    #[test]
+    fn a_doctored_candle_anchor_measurement_binding_is_rejected() {
+        let index = store()
+            .anchors
+            .iter()
+            .position(|anchor| anchor.backend == AnchorBackend::Candle)
+            .expect("the packaged store carries a candle anchor");
         let mut doctored: serde_json::Value =
             serde_json::from_str(PACKAGED_MEMORY_ANCHORS).expect("packaged store parses");
-        doctored["anchors"][0]["measuredRegime"]["decodeTiled"] = serde_json::json!(true);
+        doctored["anchors"][index]["geometry"]["fps"] = serde_json::json!(24);
         let error = load_memory_anchors(&doctored.to_string())
-            .expect_err("measured regime must bind to the engaged rungs");
-        assert!(error.contains("measured regime disagrees"), "{error}");
+            .expect_err("a still-image anchor must not declare an fps its record never measured");
+        assert!(error.contains("disagrees with the outputFps"), "{error}");
+
+        let mut doctored: serde_json::Value =
+            serde_json::from_str(PACKAGED_MEMORY_ANCHORS).expect("packaged store parses");
+        let peak = doctored["anchors"][index]["phaseActivePeakBytes"]["denoise"]
+            .as_u64()
+            .expect("denoise peak");
+        doctored["anchors"][index]["phaseActivePeakBytes"]["denoise"] = serde_json::json!(peak + 1);
+        let error = load_memory_anchors(&doctored.to_string())
+            .expect_err("the candle phase peaks must bind to the device-delta measurements");
+        assert!(error.contains("peak bytes disagree"), "{error}");
+
+        // The lane's measurement names are chosen by the anchor's backend, so relabelling the
+        // anchor as MLX must fail rather than silently reading a different measurement set.
+        let mut doctored: serde_json::Value =
+            serde_json::from_str(PACKAGED_MEMORY_ANCHORS).expect("packaged store parses");
+        doctored["anchors"][index]["backend"] = serde_json::json!("mlx");
+        let error = load_memory_anchors(&doctored.to_string())
+            .expect_err("a relabelled lane must not resolve the other lane's measurements");
+        assert!(error.contains("disagree"), "{error}");
     }
 
     /// Identity fields that were previously stored-and-unchecked are bound to the source record.
@@ -977,6 +1255,15 @@ mod tests {
         doctored["anchors"][0]["geometry"]["fps"] = serde_json::json!(fps + 1);
         let error = load_memory_anchors(&doctored.to_string())
             .expect_err("fps must bind to the outputFps measurement");
+        assert!(error.contains("disagrees with the outputFps"), "{error}");
+
+        // Absence binds in the OTHER direction too: a video anchor may not drop the field its
+        // record measured, which is the only way the still-image `None` spelling stays honest.
+        let mut doctored: serde_json::Value =
+            serde_json::from_str(PACKAGED_MEMORY_ANCHORS).expect("packaged store parses");
+        doctored["anchors"][0]["geometry"]["fps"] = serde_json::Value::Null;
+        let error = load_memory_anchors(&doctored.to_string())
+            .expect_err("a measured outputFps may not be dropped from the anchor");
         assert!(error.contains("disagrees with the outputFps"), "{error}");
     }
 
@@ -1350,6 +1637,547 @@ mod tests {
                      by zero independent cells"
                 );
             }
+        }
+    }
+
+    // -------------------------------------------------------------------------------------
+    // Candle image lane (sc-22509).
+    // -------------------------------------------------------------------------------------
+
+    const KREA_CANDLE_CORPUS_PATH: &str = "docs/generated/krea-candle-five-rung-sc-11045.json";
+
+    /// One retained candle capture: the rung composition it executed and its three measured phase
+    /// peaks.
+    struct CandleCorpusRecord {
+        id: String,
+        engaged: Vec<String>,
+        width: u32,
+        height: u32,
+        conditioning: u64,
+        denoise: u64,
+        decode: u64,
+    }
+
+    fn krea_candle_corpus() -> Vec<CandleCorpusRecord> {
+        let raw = PACKAGED_MEMORY_ANCHOR_SOURCES
+            .iter()
+            .find(|(path, _)| *path == KREA_CANDLE_CORPUS_PATH)
+            .map(|(_, raw)| *raw)
+            .expect("the Krea candle retained corpus is compiled in");
+        let source: serde_json::Value =
+            serde_json::from_str(raw).expect("retained candle corpus parses");
+        source["records"]
+            .as_array()
+            .expect("candle corpus records")
+            .iter()
+            .filter(|record| {
+                record["target"]["modelId"].as_str() == Some("krea_2_turbo")
+                    && record["backend"].as_str() == Some("candle")
+            })
+            .map(|record| {
+                let geometry = &record["target"]["geometry"];
+                let measured: BTreeMap<&str, u64> = record["diagnostics"]["measurements"]
+                    .as_array()
+                    .expect("measurements")
+                    .iter()
+                    .filter_map(|entry| Some((entry["name"].as_str()?, entry["value"].as_u64()?)))
+                    .collect();
+                CandleCorpusRecord {
+                    id: record["id"].as_str().expect("record id").to_owned(),
+                    engaged: record["strategy"]["engagedRungs"]
+                        .as_array()
+                        .expect("engaged rungs")
+                        .iter()
+                        .filter_map(|rung| rung.as_str().map(str::to_owned))
+                        .collect(),
+                    width: geometry["width"].as_u64().expect("width") as u32,
+                    height: geometry["height"].as_u64().expect("height") as u32,
+                    conditioning: measured["conditioningDevicePeakDelta"],
+                    denoise: measured["denoiseDevicePeakDelta"],
+                    decode: measured["decodeDevicePeakDelta"],
+                }
+            })
+            .collect()
+    }
+
+    fn krea_candle_anchor() -> &'static MemoryAnchor {
+        store()
+            .image_anchor_for("krea_2_turbo", AnchorBackend::Candle, "q4")
+            .expect("the Krea candle q4 anchor is packaged")
+    }
+
+    #[test]
+    fn krea_candle_q4_carries_exactly_one_shallow_staged_anchor() {
+        let anchor = krea_candle_anchor();
+        // The candle image lane has no LTX pipeline axes, and its records carry no output rate.
+        // Both are `None` as a positive statement about the cell, not an omission.
+        assert_eq!(anchor.transformer_variant, None);
+        assert_eq!(anchor.decoder, None);
+        assert_eq!(anchor.geometry.fps, None);
+        assert_eq!(anchor.geometry.frames, 1);
+        assert_eq!(anchor.source.path, KREA_CANDLE_CORPUS_PATH);
+        // The shallow staged composition is what makes one anchor price four rungs.
+        assert_eq!(
+            anchor.measured_regime,
+            AnchorMeasuredRegime {
+                decode_tiled: false,
+                transformer_windowed: false,
+                staged: true,
+                attention_chunked: false,
+            }
+        );
+        assert_eq!(
+            store()
+                .anchors
+                .iter()
+                .filter(|candidate| candidate.model_id == "krea_2_turbo"
+                    && candidate.backend == AnchorBackend::Candle)
+                .count(),
+            1,
+            "the retained candle corpus measures exactly one (model, tier, lane) cell"
+        );
+        // A video lookup must not reach an image anchor and vice versa.
+        assert!(store()
+            .anchor_for(
+                "krea_2_turbo",
+                AnchorBackend::Candle,
+                "q4",
+                Ltx25TransformerVariant::Dev,
+                Ltx25Decoder::DiffVae,
+            )
+            .is_none());
+        assert!(store()
+            .image_anchor_for("ltx_2_5", AnchorBackend::Mlx, "bf16")
+            .is_none());
+    }
+
+    /// AC 1 (corpus half): the candle derivation brackets every retained candle measurement whose
+    /// composition contains the anchor's, and stays TIGHT on the anchor's own composition.
+    #[test]
+    fn candle_anchor_derivation_brackets_every_retained_candle_measurement() {
+        let anchor = krea_candle_anchor();
+        let corpus = krea_candle_corpus();
+        assert!(
+            corpus.len() >= 4,
+            "the retained candle corpus must span several rung compositions, found {}",
+            corpus.len()
+        );
+        let mut bracketed = 0usize;
+        for record in &corpus {
+            if !record.engaged.iter().any(|rung| rung == "staged_residency") {
+                continue;
+            }
+            let derived = anchor
+                .derive_image_phase_peaks(AnchorImageDeriveRequest {
+                    width: record.width,
+                    height: record.height,
+                    staged_residency: true,
+                })
+                .unwrap_or_else(|| panic!("{} must be derivable", record.id));
+            for (phase, derived_bytes, measured_bytes) in [
+                ("conditioning", derived.conditioning, record.conditioning),
+                ("denoise", derived.denoise, record.denoise),
+                ("decode", derived.decode, record.decode),
+            ] {
+                assert!(
+                    derived_bytes >= measured_bytes,
+                    "{} {phase}: derived {derived_bytes} under-predicts the measured \
+                     {measured_bytes}",
+                    record.id
+                );
+                // Tightness is required only of the anchor's OWN composition; a deeper rung is
+                // deliberately over-estimated by the shallow-anchor argument.
+                if record.engaged.len() == 2 {
+                    let ratio = derived_bytes as f64 / measured_bytes as f64;
+                    assert!(
+                        ratio <= 1.0 + CANDLE_ANCHOR_VALIDATION_TIGHTNESS_BUDGET,
+                        "{} {phase}: derived {derived_bytes} is {ratio:.4}x the measured \
+                         {measured_bytes}, above the tightness budget",
+                        record.id
+                    );
+                }
+            }
+            bracketed += 1;
+        }
+        assert!(
+            bracketed >= 4,
+            "at least four retained candle compositions must be bracketed, got {bracketed}"
+        );
+    }
+
+    /// The regime guard is load-bearing, not decorative: the retained RESIDENT capture is the
+    /// counterexample that proves reusing a staged anchor for a resident request would
+    /// under-predict — and by how much.
+    #[test]
+    fn a_resident_candle_composition_is_refused_because_the_staged_anchor_underpredicts_it() {
+        let anchor = krea_candle_anchor();
+        assert!(
+            anchor
+                .derive_image_phase_peaks(AnchorImageDeriveRequest {
+                    width: 1024,
+                    height: 1024,
+                    staged_residency: false,
+                })
+                .is_none(),
+            "a resident composition must not be priced from the staged anchor"
+        );
+        let resident = krea_candle_corpus()
+            .into_iter()
+            .find(|record| record.engaged == ["resident"])
+            .expect("the retained candle corpus carries a resident capture");
+        let staged = anchor
+            .derive_image_phase_peaks(AnchorImageDeriveRequest {
+                width: resident.width,
+                height: resident.height,
+                staged_residency: true,
+            })
+            .expect("the staged derivation at the anchor geometry");
+        assert!(
+            staged.conditioning < resident.conditioning,
+            "the resident conditioning peak {} must exceed the staged derivation {} — otherwise \
+             the guard guards nothing",
+            resident.conditioning,
+            staged.conditioning
+        );
+        assert!(
+            staged.decode < resident.decode,
+            "the resident decode peak {} must exceed the staged derivation {}",
+            resident.decode,
+            staged.decode
+        );
+    }
+
+    /// The other half of the regime guard: the ANCHOR must itself be the shallow staged capture.
+    /// A capture measured in a deeper bounded regime carries a smaller working set than the rungs
+    /// it would be asked to price, so it is refused rather than promoted into a law. The retained
+    /// deeper captures are the counterexamples that make the refusal necessary.
+    #[test]
+    fn a_deeper_measured_candle_regime_cannot_be_promoted_into_the_shallow_law() {
+        let request = AnchorImageDeriveRequest {
+            width: 1024,
+            height: 1024,
+            staged_residency: true,
+        };
+        let shallow = krea_candle_anchor()
+            .derive_image_phase_peaks(request)
+            .expect("the shallow staged anchor prices its own geometry");
+        for (label, regime, deeper_id) in [
+            (
+                "bounded_decode",
+                AnchorMeasuredRegime {
+                    decode_tiled: true,
+                    transformer_windowed: false,
+                    staged: true,
+                    attention_chunked: false,
+                },
+                "imc-25e4d186c7016141e988",
+            ),
+            (
+                "bounded_attention",
+                AnchorMeasuredRegime {
+                    decode_tiled: true,
+                    transformer_windowed: false,
+                    staged: true,
+                    attention_chunked: true,
+                },
+                "imc-3fc9bf23d8b351edaa57",
+            ),
+            (
+                "bounded_transformer_residency",
+                AnchorMeasuredRegime {
+                    decode_tiled: true,
+                    transformer_windowed: true,
+                    staged: true,
+                    attention_chunked: true,
+                },
+                "imc-89d319fe2aed72ae01bb",
+            ),
+        ] {
+            let mut mutated = krea_candle_anchor().clone();
+            mutated.measured_regime = regime;
+            assert!(
+                mutated.derive_image_phase_peaks(request).is_none(),
+                "an anchor measured under {label} must not price the shallow staged rung"
+            );
+            // …and the retained capture of that regime shows why: its denoise peak is genuinely
+            // smaller than the shallow law's, so reusing it as an intercept would under-predict.
+            let deeper = krea_candle_corpus()
+                .into_iter()
+                .find(|record| record.id == deeper_id)
+                .unwrap_or_else(|| panic!("the retained {label} capture"));
+            assert!(
+                deeper.denoise < shallow.denoise,
+                "{label}: the deeper capture's denoise {} must sit below the shallow derivation \
+                 {} for the guard to be load-bearing",
+                deeper.denoise,
+                shallow.denoise
+            );
+        }
+    }
+
+    #[test]
+    fn candle_derived_peaks_track_output_area_in_both_directions() {
+        let anchor = krea_candle_anchor();
+        let at = |width: u32, height: u32| {
+            anchor
+                .derive_image_phase_peaks(AnchorImageDeriveRequest {
+                    width,
+                    height,
+                    staged_residency: true,
+                })
+                .unwrap_or_else(|| panic!("{width}x{height} must be derivable"))
+        };
+        let small = at(512, 512);
+        let anchored = at(1024, 1024);
+        let large = at(1536, 1536);
+        assert!(small.peak_bytes() < anchored.peak_bytes());
+        assert!(anchored.peak_bytes() < large.peak_bytes());
+        // A never-measured non-square geometry is priced by area, not by aspect.
+        assert_eq!(at(1344, 768).peak_bytes(), at(768, 1344).peak_bytes());
+        // Every phase intercept dominates the whole slope span down to a 1-pixel image, so the
+        // downward extrapolation never runs non-positive for this anchor — the smallest derivable
+        // request still carries the resident decoder working set.
+        assert!(
+            at(1, 1).peak_bytes() > 0,
+            "the smallest image must still be priced above zero"
+        );
+        assert!(anchor
+            .derive_image_phase_peaks(AnchorImageDeriveRequest {
+                width: 0,
+                height: 512,
+                staged_residency: true,
+            })
+            .is_none());
+    }
+
+    #[test]
+    fn the_two_lane_laws_refuse_each_others_anchors() {
+        assert!(
+            krea_candle_anchor()
+                .derive_video_phase_peaks(plain_request(1024, 1024, 1))
+                .is_none(),
+            "the LTX video law must refuse an anchor with no pipeline axes"
+        );
+        let ltx = store()
+            .anchor_for(
+                "ltx_2_5",
+                AnchorBackend::Mlx,
+                "bf16",
+                Ltx25TransformerVariant::Dev,
+                Ltx25Decoder::DiffVae,
+            )
+            .expect("the LTX bf16 dev/diffvae anchor");
+        assert!(
+            ltx.derive_image_phase_peaks(AnchorImageDeriveRequest {
+                width: 1024,
+                height: 1024,
+                staged_residency: true,
+            })
+            .is_none(),
+            "the candle image law must refuse an MLX video anchor"
+        );
+        // The packaged LTX anchors are all attention-chunked, so the regime guard alone would
+        // refuse them and the IDENTITY half of the guard would go unexercised. Each identity
+        // condition is therefore mutated onto an otherwise-derivable candle anchor.
+        let image_request = AnchorImageDeriveRequest {
+            width: 1024,
+            height: 1024,
+            staged_residency: true,
+        };
+        assert!(
+            krea_candle_anchor()
+                .derive_image_phase_peaks(image_request)
+                .is_some(),
+            "the unmutated candle anchor must be derivable, or the mutations below prove nothing"
+        );
+        for (label, mutate) in [
+            (
+                "a video pipeline variant",
+                Box::new(|anchor: &mut MemoryAnchor| {
+                    anchor.transformer_variant = Some(Ltx25TransformerVariant::Dev);
+                }) as Box<dyn Fn(&mut MemoryAnchor)>,
+            ),
+            (
+                "a video decoder",
+                Box::new(|anchor: &mut MemoryAnchor| {
+                    anchor.decoder = Some(Ltx25Decoder::DiffVae);
+                }),
+            ),
+            (
+                "a multi-frame measured geometry",
+                Box::new(|anchor: &mut MemoryAnchor| anchor.geometry.frames = 145),
+            ),
+            (
+                "the other backend lane",
+                Box::new(|anchor: &mut MemoryAnchor| anchor.backend = AnchorBackend::Mlx),
+            ),
+        ] {
+            let mut mutated = krea_candle_anchor().clone();
+            mutate(&mut mutated);
+            assert!(
+                mutated.derive_image_phase_peaks(image_request).is_none(),
+                "the candle image law must refuse an anchor carrying {label}"
+            );
+        }
+    }
+
+    /// The `krea_2_turbo` catalog entry's `candle` block, from the embedded builtin manifest.
+    fn krea_candle_manifest_block() -> serde_json::Value {
+        let raw = crate::builtin_manifests::BUILTIN_MANIFESTS
+            .iter()
+            .find(|(name, _)| *name == "builtin.models.jsonc")
+            .map(|(_, contents)| *contents)
+            .expect("the builtin model manifest is embedded");
+        let manifest: serde_json::Value =
+            serde_json::from_str(&crate::jsonc::strip_jsonc_comments(raw))
+                .expect("the builtin model manifest parses");
+        manifest["models"]
+            .as_array()
+            .expect("models")
+            .iter()
+            .find(|model| model["id"].as_str() == Some("krea_2_turbo"))
+            .expect("the krea_2_turbo catalog entry")["candle"]
+            .clone()
+    }
+
+    /// AC 1 (manifest half): the derived-from-anchor estimates agree with the retained measured
+    /// candle rows this story displaces as the selector's source — the `turboFit.evidenceRecords`
+    /// per-phase captures at both measured geometries, and the `sequentialPeakGb` scalar the
+    /// estimate floor used to read.
+    #[test]
+    fn candle_derivation_agrees_with_the_retained_measured_manifest_rows() {
+        const GIB: f64 = 1_073_741_824.0;
+        let anchor = krea_candle_anchor();
+        let candle = krea_candle_manifest_block();
+        let derive = |width: u32, height: u32| {
+            anchor
+                .derive_image_phase_peaks(AnchorImageDeriveRequest {
+                    width,
+                    height,
+                    staged_residency: true,
+                })
+                .unwrap_or_else(|| panic!("{width}x{height} must be derivable"))
+        };
+
+        // Every retained q4 evidence record, at both measured geometries and all four measured
+        // compositions.
+        let records = candle["turboFit"]["evidenceRecords"]
+            .as_array()
+            .expect("turboFit evidence records");
+        let mut checked = 0usize;
+        for record in records {
+            if record["tier"].as_str() != Some("q4") {
+                continue;
+            }
+            let width = record["width"].as_u64().expect("width") as u32;
+            let height = record["height"].as_u64().expect("height") as u32;
+            let derived = derive(width, height);
+            for (composition, phases) in record["observedPhasesGb"]
+                .as_object()
+                .expect("observed phases")
+            {
+                for (phase, derived_bytes) in [
+                    ("text", derived.conditioning),
+                    ("denoise", derived.denoise),
+                    ("decode", derived.decode),
+                ] {
+                    let observed =
+                        (phases[phase].as_f64().expect("observed phase") * GIB).ceil() as u64;
+                    assert!(
+                        derived_bytes >= observed,
+                        "{width}x{height} {composition} {phase}: derived {derived_bytes} \
+                         under-predicts the retained manifest row {observed}"
+                    );
+                    // Tight only against the anchor's own composition; deeper rungs are
+                    // deliberately over-estimated.
+                    if composition == "threeStage" {
+                        let ratio = derived_bytes as f64 / observed as f64;
+                        assert!(
+                            ratio <= 1.0 + CANDLE_ANCHOR_VALIDATION_TIGHTNESS_BUDGET,
+                            "{width}x{height} threeStage {phase}: derived {derived_bytes} is \
+                             {ratio:.4}x the retained manifest row {observed}"
+                        );
+                    }
+                }
+                checked += 1;
+            }
+        }
+        assert!(
+            checked >= 8,
+            "both retained q4 geometries and all four compositions must be checked, got {checked}"
+        );
+
+        // The scalar row the estimate floor used to read, at the geometry it was measured at.
+        let measured_pixels = candle["vramMeasuredPixels"]
+            .as_u64()
+            .expect("vramMeasuredPixels");
+        let edge = (measured_pixels as f64).sqrt() as u32;
+        assert_eq!(u64::from(edge) * u64::from(edge), measured_pixels);
+        assert_eq!(anchor.geometry.width, edge);
+        let derived_peak = derive(edge, edge).peak_bytes();
+        let sequential_row =
+            (candle["sequentialPeakGb"]["q4"].as_f64().expect("row") * GIB).ceil() as u64;
+        assert!(
+            derived_peak >= sequential_row * 9 / 10 && derived_peak <= sequential_row * 11 / 10,
+            "at the measured geometry the derived staged peak {derived_peak} must agree with the \
+             retained sequentialPeakGb row {sequential_row} within 10%"
+        );
+
+        // Directional: the derivation prices the STAGED working set, so it must sit below the
+        // resident row. If it ever crossed, the anchor would be pricing the wrong lane.
+        let resident_row =
+            (candle["vramGbByTier"]["q4"].as_f64().expect("row") * GIB).ceil() as u64;
+        assert!(
+            derived_peak < resident_row,
+            "the derived staged peak {derived_peak} must stay below the retained resident row \
+             {resident_row}"
+        );
+    }
+
+    /// The candle slopes are pinned by DOWNWARD extrapolation: the anchor is the largest measured
+    /// geometry, so a slope set too steep walks the estimate below the smaller measured peak. This
+    /// pins each one against the ceiling that fact imposes, and against the physical growth term.
+    #[test]
+    fn every_candle_coefficient_sits_inside_the_window_the_retained_pair_allows() {
+        // Retained `krea_2_turbo` / candle / q4 / `threeStage` pair, `turboFit.evidenceRecords`.
+        const GIB: f64 = 1_073_741_824.0;
+        const SMALL_PIXELS: i128 = 768 * 768;
+        let anchor = krea_candle_anchor();
+        let anchor_pixels = i128::from(anchor.geometry.width) * i128::from(anchor.geometry.height);
+        let span = anchor_pixels - SMALL_PIXELS;
+        for (phase, intercept, small_measured_gib, coefficient) in [
+            (
+                "conditioning",
+                anchor.phase_active_peak_bytes.conditioning,
+                3.565,
+                CANDLE_COND_PER_PIXEL_BYTES,
+            ),
+            (
+                "denoise",
+                anchor.phase_active_peak_bytes.denoise,
+                10.597,
+                CANDLE_DENOISE_PER_PIXEL_BYTES,
+            ),
+            (
+                "decode",
+                anchor.phase_active_peak_bytes.decode,
+                16.286,
+                CANDLE_DECODE_PER_PIXEL_BYTES,
+            ),
+        ] {
+            assert!(
+                coefficient >= 0,
+                "{phase}: a negative per-pixel term would shrink the estimate as the image grows"
+            );
+            let small_measured = (small_measured_gib * GIB) as i128;
+            let ceiling = ((i128::from(intercept) as f64
+                - small_measured as f64 / (1.0 + CANDLE_ANCHOR_CAPTURE_SPREAD_MARGIN))
+                / span as f64) as i128;
+            assert!(
+                coefficient <= ceiling,
+                "{phase}: coefficient {coefficient} B/px exceeds the {ceiling} B/px ceiling at \
+                 which the margin-widened 768x768 derivation falls under the measured peak"
+            );
         }
     }
 }

@@ -17,7 +17,9 @@
       "loadShape": "eager_materialization",
       "measuredRegime": {
         "decodeTiled": false,
-        "transformerWindowed": false
+        "transformerWindowed": false,
+        "staged": true,
+        "attentionChunked": true
       },
       "source": {
         "path": "docs/calibration/sc-18791/ltx25-mlx-evidence.seed.json",
@@ -54,7 +56,9 @@
       "loadShape": "deferred_materialization",
       "measuredRegime": {
         "decodeTiled": true,
-        "transformerWindowed": true
+        "transformerWindowed": true,
+        "staged": true,
+        "attentionChunked": true
       },
       "source": {
         "path": "docs/calibration/sc-18791/ltx25-mlx-evidence.seed.json",
@@ -91,7 +95,9 @@
       "loadShape": "deferred_materialization",
       "measuredRegime": {
         "decodeTiled": false,
-        "transformerWindowed": true
+        "transformerWindowed": true,
+        "staged": true,
+        "attentionChunked": true
       },
       "source": {
         "path": "docs/calibration/sc-18791/ltx25-mlx-evidence.seed.json",
@@ -128,7 +134,9 @@
       "loadShape": "eager_materialization",
       "measuredRegime": {
         "decodeTiled": false,
-        "transformerWindowed": false
+        "transformerWindowed": false,
+        "staged": true,
+        "attentionChunked": true
       },
       "source": {
         "path": "docs/calibration/sc-18791/ltx25-mlx-evidence.seed.json",
@@ -165,7 +173,9 @@
       "loadShape": "eager_materialization",
       "measuredRegime": {
         "decodeTiled": true,
-        "transformerWindowed": false
+        "transformerWindowed": false,
+        "staged": true,
+        "attentionChunked": true
       },
       "source": {
         "path": "docs/calibration/sc-18791/ltx25-mlx-evidence.seed.json",
@@ -202,7 +212,9 @@
       "loadShape": "eager_materialization",
       "measuredRegime": {
         "decodeTiled": false,
-        "transformerWindowed": false
+        "transformerWindowed": false,
+        "staged": true,
+        "attentionChunked": true
       },
       "source": {
         "path": "docs/calibration/sc-18791/ltx25-mlx-evidence.seed.json",
@@ -222,6 +234,45 @@
         "decode": 64847765684
       },
       "overallAllocatorEnvelopeBytes": 69260977594
+    },
+    {
+      "id": "krea_2_turbo:candle:q4:-:-:krea-turbo-cuda-phase-curves-v1:imc-7f1a63e5459300aed47c",
+      "modelId": "krea_2_turbo",
+      "modelFamily": "krea_2",
+      "route": "krea_2_turbo",
+      "provider": "krea_2_turbo",
+      "backend": "candle",
+      "tier": "q4",
+      "transformerVariant": null,
+      "decoder": null,
+      "mode": "text_to_image",
+      "overlay": null,
+      "referenceCount": 0,
+      "loadShape": "deferred_materialization",
+      "measuredRegime": {
+        "decodeTiled": false,
+        "transformerWindowed": false,
+        "staged": true,
+        "attentionChunked": false
+      },
+      "source": {
+        "path": "docs/generated/krea-candle-five-rung-sc-11045.json",
+        "sha256": "a890d20e0236702535c6701d22ce8db7aa87ed42820490901bdc003c232fc18b",
+        "recordId": "imc-7f1a63e5459300aed47c",
+        "calibrationFingerprint": "krea-turbo-cuda-phase-curves-v1"
+      },
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "frames": 1,
+        "fps": null
+      },
+      "phaseActivePeakBytes": {
+        "conditioning": 3828350976,
+        "denoise": 15102640128,
+        "decode": 22352494592
+      },
+      "overallAllocatorEnvelopeBytes": 22352494592
     }
   ]
 }
