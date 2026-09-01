@@ -1241,8 +1241,14 @@ fn synthesize_estimate_floors(
     if is_receipt_priced(engine_id) && staged_floor_bytes >= resident_peak_bytes {
         return Vec::new();
     }
+    // NOTE (sc-22509): no PACKAGED anchor can match this lookup today. The store's only candle
+    // image anchor is `krea_2_turbo`, and that route is graded by `vram_gate::krea_turbo_fit_*`
+    // rather than by this shared-image ladder; every model that does reach here (`z_image*`,
+    // `flux*`, `chroma`, …) has a different `model_id` and no anchor row. The seam is wired and
+    // tested against an injected store so that the first shared-image anchor extracted by
+    // sc-22510's extractor is priced the moment it lands, with no second code change.
     let anchor = candle_image_anchor(
-        anchors, engine_id, model_id, contract, manifest, tier_key, mode, overlay, geometry,
+        anchors, engine_id, model_id, contract, tier_key, mode, overlay, geometry,
     );
     let mut synthesized = Vec::new();
     for strategy in MemoryStrategy::ALL {
@@ -1384,18 +1390,20 @@ fn synthesize_estimate_floors(
 /// The measured memory anchor for this candle image request, or `None` to keep the manifest-row
 /// floor (sc-22509, epic 22505).
 ///
-/// Identity is strict and fail-closed, the candle mirror of `video_admission`'s anchor lookup: the
-/// anchor was measured on ONE catalog model, route, provider, tier, mode and materialization shape,
-/// overlay-free and reference-free, under one calibration campaign. Anything else keeps the
-/// established floor. The measured GEOMETRY is deliberately NOT part of the guard — pricing a
-/// never-measured geometry from one anchor is the entire point of the derivation.
+/// Identity is strict and fail-closed, the candle mirror of `video_admission::anchor_currency_
+/// matches` and `vram_gate::krea_store_anchor`: the anchor was measured on ONE catalog model,
+/// route, provider, tier, mode and materialization shape, overlay-free and reference-free (checked
+/// on BOTH the request and the anchor row), under one calibration campaign whose ABI and
+/// fingerprint the loaded contract still declares. Anything else keeps the established floor. The
+/// measured GEOMETRY is deliberately NOT part of the guard — pricing a never-measured geometry from
+/// one anchor is the entire point of the derivation — and neither is `model_family`, which has no
+/// source in the record (see [`sceneworks_core::memory_anchor::MemoryAnchor::model_family`]).
 #[allow(clippy::too_many_arguments)]
 fn candle_image_anchor<'a>(
     anchors: Option<&'a sceneworks_core::memory_anchor::MemoryAnchorStore>,
     engine_id: &str,
     model_id: &str,
     contract: &gen_core::MemoryProviderContract,
-    manifest: &JsonObject<String, Value>,
     tier_key: &str,
     mode: &RequestModeBinding,
     overlay: Option<&str>,
@@ -1410,14 +1418,20 @@ fn candle_image_anchor<'a>(
         sceneworks_core::memory_anchor::AnchorBackend::Candle,
         tier_key,
     )?;
-    let family = manifest
-        .get("family")
-        .and_then(|family| family.as_str())
-        .unwrap_or_default();
-    if anchor.model_family != family
-        || anchor.route != engine_id
+    // `model_family` is deliberately NOT a conjunct (sc-22509 review): the source calibration
+    // record carries no family field, so the store's copy is catalog-derived and unvalidated, and
+    // keying on it would make an extractor's catalog read load-bearing for admission. `model_id` is
+    // bound to the record and already selects the cell.
+    //
+    // The ANCHOR side of the overlay/reference guard, mirroring `vram_gate::krea_store_anchor` and
+    // `video_admission::anchor_currency_matches`: the request being overlay-free is only half the
+    // question — an overlay-measured or reference-bearing anchor row must not be borrowed for an
+    // overlay-free request either.
+    if anchor.route != engine_id
         || anchor.provider != contract.provider_id
         || anchor.mode != mode.mode.as_key()
+        || anchor.overlay.is_some()
+        || anchor.reference_count != 0
     {
         return None;
     }
@@ -1435,9 +1449,13 @@ fn candle_image_anchor<'a>(
         return None;
     }
     // Currency: a campaign the provider no longer declares cannot keep an anchor derivation live
-    // any more than it can keep a measured record live.
+    // any more than it can keep a measured record live. Both halves of the identity, exactly as
+    // `video_admission::anchor_currency_matches` requires them — the ABI is what says the two
+    // fingerprints are even comparable quantities.
     let calibration = contract.calibration.as_ref()?;
-    (calibration.fingerprint == anchor.source.calibration_fingerprint).then_some(anchor)
+    (calibration.abi == gen_core::MEMORY_CALIBRATION_ABI
+        && calibration.fingerprint == anchor.source.calibration_fingerprint)
+        .then_some(anchor)
 }
 
 fn memory_for_selection(
@@ -5395,6 +5413,115 @@ mod tests {
                 anchors,
             )
         };
+
+        // Every identity conjunct of `candle_image_anchor`, mutated one at a time on this same
+        // hand-built store: each must knock the derivation back to the manifest-row floor. The
+        // unmutated arm below is the control that keeps these from being vacuous.
+        for (label, mutate) in [
+            (
+                "an overlay-measured anchor row",
+                Box::new(|anchor: &mut MemoryAnchor| anchor.overlay = Some("lora".to_owned()))
+                    as Box<dyn Fn(&mut MemoryAnchor)>,
+            ),
+            (
+                "a reference-bearing anchor row",
+                Box::new(|anchor: &mut MemoryAnchor| anchor.reference_count = 1),
+            ),
+            (
+                "another route",
+                Box::new(|anchor: &mut MemoryAnchor| anchor.route = "z_image".to_owned()),
+            ),
+            (
+                "another provider",
+                Box::new(|anchor: &mut MemoryAnchor| anchor.provider = "someone_else".to_owned()),
+            ),
+            (
+                "another mode",
+                Box::new(|anchor: &mut MemoryAnchor| anchor.mode = "edit_image".to_owned()),
+            ),
+            (
+                "another materialization shape",
+                Box::new(|anchor: &mut MemoryAnchor| {
+                    anchor.load_shape = AnchorLoadShape::DeferredMaterialization;
+                }),
+            ),
+            (
+                "a rotated calibration campaign",
+                Box::new(|anchor: &mut MemoryAnchor| {
+                    anchor.source.calibration_fingerprint = "anchor-seam-v2".to_owned();
+                }),
+            ),
+        ] {
+            let mut mutated = store.anchors[0].clone();
+            mutate(&mut mutated);
+            let mutated_store = MemoryAnchorStore {
+                schema_version: MEMORY_ANCHOR_SCHEMA_VERSION,
+                anchors: vec![mutated],
+            };
+            for (selection, evidence, basis) in floors(Some(&mutated_store)) {
+                assert_eq!(
+                    basis,
+                    crate::memory_strategy::CandidateBasis::EstimateFloor,
+                    "{label} must not be borrowed for this request ({:?})",
+                    selection.strategy
+                );
+                assert_eq!(evidence.predicted_peak_bytes, staged_floor_bytes);
+            }
+        }
+        // The ABI half of the currency conjunct lives on the CONTRACT, not the anchor.
+        {
+            let mut drifted = composition_probe_contract(true, true);
+            drifted.provider_id = "z_image_turbo".to_owned();
+            drifted.load_shape = gen_core::LoadShape::EagerMaterialization;
+            drifted.calibration = Some(gen_core::MemoryCalibrationIdentity {
+                abi: gen_core::MEMORY_CALIBRATION_ABI + 1,
+                fingerprint: "anchor-seam-v1".to_owned(),
+                load_shape: gen_core::LoadShape::EagerMaterialization,
+            });
+            let drifted_floors = synthesize_estimate_floors(
+                "z_image_turbo",
+                "z_image_turbo",
+                &drifted,
+                &manifest,
+                "q4",
+                numeric_tier("z_image_turbo", "q4").expect("q4 tier"),
+                &request_mode("z_image_turbo", "text_to_image"),
+                None,
+                geometry,
+                resident_peak_bytes,
+                0,
+                Z_IMAGE_REQUEST_EVIDENCE_REVISION,
+                Some(&store),
+            );
+            assert!(!drifted_floors.is_empty());
+            for (selection, _, basis) in &drifted_floors {
+                assert_eq!(
+                    *basis,
+                    crate::memory_strategy::CandidateBasis::EstimateFloor,
+                    "a calibration ABI the runtime no longer speaks must not keep the derivation \
+                     live ({:?})",
+                    selection.strategy
+                );
+            }
+        }
+        // …and `model_family` is deliberately NOT a conjunct: it has no source in the calibration
+        // record, so keying on it would make an unvalidated field load-bearing for admission.
+        {
+            let mut relabelled = store.anchors[0].clone();
+            relabelled.model_family = "not_the_catalog_family".to_owned();
+            let relabelled_store = MemoryAnchorStore {
+                schema_version: MEMORY_ANCHOR_SCHEMA_VERSION,
+                anchors: vec![relabelled],
+            };
+            for (_, evidence, basis) in floors(Some(&relabelled_store)) {
+                assert_eq!(
+                    basis,
+                    crate::memory_strategy::CandidateBasis::EstimateAnchorDerived,
+                    "model_family must not gate the derivation"
+                );
+                assert_eq!(evidence.predicted_peak_bytes, expected_derived);
+            }
+        }
 
         let anchored = floors(Some(&store));
         assert!(

@@ -178,7 +178,10 @@ pub const ANCHOR_VALIDATION_TIGHTNESS_BUDGET: f64 = 0.25;
 // lane above, so it gets its own per-term coefficients rather than borrowing the LTX video ones:
 //
 // * There is no temporal axis. A still image has one latent frame, so every activation term scales
-//   in OUTPUT PIXELS (`width x height`) rather than in latent tokens x latent frames.
+//   in OUTPUT PIXELS (`width x height`) rather than in latent tokens x latent frames. The law's
+//   domain is bounded BELOW at the smallest retained measured geometry
+//   ([`CANDLE_SMALLEST_RETAINED_PIXELS`]); a smaller request is priced at that geometry rather than
+//   extrapolated into a region the corpus never touched.
 // * There is no MLX-style reclaimable envelope. Every retained candle record measures
 //   `cudaCachingAllocatorPresent = 0` and `reclaimableBytes = 0`, with `observedMemory.overall`
 //   `allocatorBytes == activeBytes`: the CUDA lane hands pages back rather than retaining a cache
@@ -211,24 +214,55 @@ pub const CANDLE_COND_PER_PIXEL_BYTES: i128 = 4;
 /// Denoise-phase bytes per output pixel on the candle image lane: the DiT forward's live activation
 /// set over the packed image latent. Retained within-cell measured slope is 9,212 B/px
 /// (10.597 -> 14.533 GiB across 589,824 -> 1,048,576 px on `q4` / `threeStage`). Set at 9 KiB/px,
-/// which is above the measured slope for upward extrapolation and still below the 9,520 B/px
-/// ceiling at which the margin-widened 768x768 derivation would fall under the measured peak.
+/// which is above the measured slope for upward extrapolation and still below the 9,217 B/px
+/// ceiling at which the margin-widened 768x768 derivation would fall under the measured peak. That
+/// ceiling is the tightest of the three and is what pins
+/// [`CANDLE_ANCHOR_CAPTURE_SPREAD_MARGIN`]'s value; both are checked by
+/// `every_candle_coefficient_sits_inside_the_window_the_retained_pair_allows`.
 pub const CANDLE_DENOISE_PER_PIXEL_BYTES: i128 = 9_216;
 
 /// Decode-phase bytes per output pixel on the candle image lane: the VAE decoder's concurrently
 /// live pixel-space working copies. Retained within-cell measured slope is 11,699 B/px
 /// (16.286 -> 21.285 GiB over the same geometry pair). Set at 12 KiB/px — above the measured slope,
-/// and below the 12,764 B/px ceiling that downward extrapolation to 768x768 imposes.
+/// and below the 12,296 B/px ceiling that downward extrapolation to 768x768 imposes.
 pub const CANDLE_DECODE_PER_PIXEL_BYTES: i128 = 12_288;
 
-/// Multiplicative margin applied to every derived candle phase peak. It covers exactly ONE term:
-/// capture-to-capture spread of the same measured cell. The two retained candle captures of
-/// `q4` / `staged_residency` / 1024x1024 disagree by up to 3.33% (denoise 15.103 GB in the five-rung
-/// capture against 15.605 GB in the `turboFit` evidence record; decode 22.352 against 22.855 GB),
-/// and this is set above that. There is no MLX-style allocator-envelope term to cover here: the
-/// CUDA lane reports `reclaimableBytes = 0` and no caching allocator in every retained record.
-/// Coefficient uncertainty is priced inside the slopes above, not here.
-pub const CANDLE_ANCHOR_CAPTURE_SPREAD_MARGIN: f64 = 0.06;
+/// Smallest output area the retained candle corpus measures (768x768). Below it the derivation is
+/// CLAMPED to this geometry rather than extrapolated further down: the corpus never touched that
+/// region, and the linear slopes above — fitted across 768x768 -> 1024x1024 — walk the estimate below
+/// the resident weight set the staged path still holds long before a 1x1 request, which errs toward
+/// OOM. See [`MemoryAnchor::derive_image_phase_peaks`].
+pub const CANDLE_SMALLEST_RETAINED_PIXELS: i128 = 768 * 768;
+
+/// Multiplicative margin applied to every derived candle phase peak, at the widest point of the
+/// derivation's domain. There is no MLX-style allocator-envelope term to cover here (the CUDA lane
+/// reports `reclaimableBytes = 0` and no caching allocator in every retained record), and no blanket
+/// safety factor: the value is the sum of two measured terms and nothing else.
+///
+/// TERM 1 — same-cell cross-capture spread, 3.3243%. The two retained candle captures of
+/// `q4` / `staged_residency` / 1024x1024 disagree: denoise 15.1026 GB in the five-rung capture (the
+/// anchor's own source record) against 15.6047 GB in the `turboFit` evidence record, i.e. +3.3243%;
+/// decode 22.3525 against 22.8546 GB, i.e. +2.2463%. The anchor sits on the LOWER capture, so the
+/// derivation must carry the wider of the two, 3.3243%.
+///
+/// TERM 2 — the downward-extrapolation lever, x1.3888. Term 1 is an ABSOLUTE discrepancy in the
+/// anchor's INTERCEPT, but the margin multiplies the DERIVED value, which shrinks as the request
+/// geometry falls below the anchor. At the clamp floor ([`CANDLE_SMALLEST_RETAINED_PIXELS`], the
+/// widest point of the domain) the derived denoise base is
+/// `15_102_640_128 - 9_216 x 458_752 = 10_874_781_696` bytes, or 0.72006 of the intercept, so the
+/// same absolute discrepancy is `3.3243% / 0.72006 = 4.6168%` there. Decode's lever is weaker
+/// (0.74781), so denoise sets the value.
+///
+/// TERM 3 — the deliberate slope surplus, +0.0169%. [`CANDLE_DENOISE_PER_PIXEL_BYTES`] is pinned
+/// slightly ABOVE the measured 9,212 B/px slope so upward extrapolation stays conservative; that
+/// same choice subtracts an extra `(9_216 - 9_212) x 458_752 = 1.835 MB` at the clamp floor, which
+/// is 0.0169% of the base above.
+///
+/// `4.6168% + 0.0169% = 4.6337%`, rounded UP at the fourth decimal.
+/// `candle_anchor_derivation_brackets_every_retained_candle_measurement` and
+/// `candle_derivation_agrees_with_the_retained_measured_manifest_rows` are the falsifiers: the
+/// binding requirement is the 768x768 denoise row, which needs 4.6315%.
+pub const CANDLE_ANCHOR_CAPTURE_SPREAD_MARGIN: f64 = 0.0464;
 
 /// Validation-only tightness budget for the candle lane, the sibling of
 /// [`ANCHOR_VALIDATION_TIGHTNESS_BUDGET`]: the corpus validation test refuses a derived candle bound
@@ -331,6 +365,13 @@ pub struct AnchorMeasuredRegime {
 pub struct MemoryAnchor {
     pub id: String,
     pub model_id: String,
+    /// Catalog family of `model_id`, carried for diagnostics and for the anchor-extraction receipt.
+    ///
+    /// NOT an identity conjunct and NOT authoritative: the source calibration record carries no
+    /// family field, so this cannot be bound to the evidence the way every other identity axis is.
+    /// The CATALOG (`models[].family` in the builtin manifest) is the authority, and the extractor
+    /// populates this from it — an anchor lookup keys on `model_id` alone, which the record does
+    /// bind. Never re-derive a guard from this field.
     pub model_family: String,
     /// Resolved engine id. The retained LTX-2.5 corpus carries no `target.route`, so this binds
     /// against `target.provider` exactly as `video_memory_curves::source_route` does.
@@ -550,6 +591,25 @@ fn validate_anchor(anchor: &MemoryAnchor) -> Result<(), String> {
     {
         return Err(format!(
             "memory anchor {} geometry disagrees with its source record {}",
+            anchor.id, anchor.source.record_id
+        ));
+    }
+    // Overlay and reference shape are identity conjuncts of both anchor lookups (`krea_store_anchor`
+    // and `candle_image_anchor` refuse an overlaid or reference-bearing anchor), so they are bound
+    // to the record rather than stored and trusted. The corpora spell "no overlay" as the string
+    // `"none"`, and a record with no `referenceCount` measured a reference-free render.
+    let record_overlay = str_at(target, "overlay")
+        .filter(|overlay| overlay != "none")
+        .filter(|overlay| !overlay.is_empty());
+    let record_reference_count = geometry
+        .get("referenceCount")
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(0);
+    if record_overlay != anchor.overlay
+        || record_reference_count != u64::from(anchor.reference_count)
+    {
+        return Err(format!(
+            "memory anchor {} overlay/reference shape disagrees with its source record {}",
             anchor.id, anchor.source.record_id
         ));
     }
@@ -882,7 +942,15 @@ impl MemoryAnchor {
             return None;
         }
         let anchor_pixels = i128::from(self.geometry.width) * i128::from(self.geometry.height);
-        let pixels = i128::from(request.width) * i128::from(request.height);
+        // LOWER CLAMP. The slopes are fitted across 768x768 -> 1024x1024 and the anchor sits at the
+        // top of that range, so every smaller request is a DOWNWARD extrapolation. Continued below
+        // the smallest retained geometry it leaves the corpus entirely and drops each phase far
+        // under the resident weight set the staged path still holds (at 1x1 the derived decode is
+        // ~5 GiB below the measured 768x768 decode) — an under-estimate, i.e. erring toward OOM. A
+        // sub-768x768 request is therefore priced AT 768x768, which is the smallest bound the
+        // evidence actually supports.
+        let pixels = (i128::from(request.width) * i128::from(request.height))
+            .max(CANDLE_SMALLEST_RETAINED_PIXELS);
         let delta = pixels - anchor_pixels;
         let conditioning = i128::from(self.phase_active_peak_bytes.conditioning)
             + CANDLE_COND_PER_PIXEL_BYTES * delta;
@@ -1220,13 +1288,34 @@ mod tests {
         assert!(error.contains("peak bytes disagree"), "{error}");
 
         // The lane's measurement names are chosen by the anchor's backend, so relabelling the
-        // anchor as MLX must fail rather than silently reading a different measurement set.
+        // anchor as MLX must fail rather than silently reading a different measurement set. The
+        // record's own `backend` field is the FIRST conjunct that sees the relabel, so the exact
+        // error is the identity one — asserting merely "disagree" would also have accepted the
+        // peak-bytes failure and could not tell which guard fired.
         let mut doctored: serde_json::Value =
             serde_json::from_str(PACKAGED_MEMORY_ANCHORS).expect("packaged store parses");
         doctored["anchors"][index]["backend"] = serde_json::json!("mlx");
         let error = load_memory_anchors(&doctored.to_string())
             .expect_err("a relabelled lane must not resolve the other lane's measurements");
-        assert!(error.contains("disagree"), "{error}");
+        assert!(error.contains("identity disagrees"), "{error}");
+
+        // Overlay and reference shape are identity conjuncts of both anchor lookups, so they bind
+        // to the record too rather than being stored and trusted.
+        for (field, value) in [
+            ("overlay", serde_json::json!("identity")),
+            ("referenceCount", serde_json::json!(1)),
+        ] {
+            let mut doctored: serde_json::Value =
+                serde_json::from_str(PACKAGED_MEMORY_ANCHORS).expect("packaged store parses");
+            doctored["anchors"][index][field] = value;
+            let error = load_memory_anchors(&doctored.to_string())
+                .err()
+                .unwrap_or_else(|| panic!("{field} must bind to the source record"));
+            assert!(
+                error.contains("overlay/reference shape disagrees"),
+                "{field}: {error}"
+            );
+        }
     }
 
     /// Identity fields that were previously stored-and-unchecked are bound to the source record.
@@ -1785,17 +1874,12 @@ mod tests {
                      {measured_bytes}",
                     record.id
                 );
-                // Tightness is required only of the anchor's OWN composition; a deeper rung is
-                // deliberately over-estimated by the shallow-anchor argument.
-                if record.engaged.len() == 2 {
-                    let ratio = derived_bytes as f64 / measured_bytes as f64;
-                    assert!(
-                        ratio <= 1.0 + CANDLE_ANCHOR_VALIDATION_TIGHTNESS_BUDGET,
-                        "{} {phase}: derived {derived_bytes} is {ratio:.4}x the measured \
-                         {measured_bytes}, above the tightness budget",
-                        record.id
-                    );
-                }
+                // NO tightness assert here. Every record in this corpus was captured at the
+                // anchor's OWN geometry, so on the anchor's own composition the ratio is the
+                // margin by construction (1.0 + CANDLE_ANCHOR_CAPTURE_SPREAD_MARGIN) and on a
+                // deeper rung it is deliberately loose. Tightness is asserted where it can
+                // actually bite — across BOTH measured geometries — by
+                // `candle_derivation_agrees_with_the_retained_measured_manifest_rows`.
             }
             bracketed += 1;
         }
@@ -1927,20 +2011,34 @@ mod tests {
                 })
                 .unwrap_or_else(|| panic!("{width}x{height} must be derivable"))
         };
-        let small = at(512, 512);
+        let small = at(896, 896);
         let anchored = at(1024, 1024);
         let large = at(1536, 1536);
         assert!(small.peak_bytes() < anchored.peak_bytes());
         assert!(anchored.peak_bytes() < large.peak_bytes());
         // A never-measured non-square geometry is priced by area, not by aspect.
         assert_eq!(at(1344, 768).peak_bytes(), at(768, 1344).peak_bytes());
-        // Every phase intercept dominates the whole slope span down to a 1-pixel image, so the
-        // downward extrapolation never runs non-positive for this anchor — the smallest derivable
-        // request still carries the resident decoder working set.
-        assert!(
-            at(1, 1).peak_bytes() > 0,
-            "the smallest image must still be priced above zero"
+        // Below the smallest retained measured geometry the derivation CLAMPS instead of
+        // extrapolating on: every request under 768x768 is priced at exactly 768x768, phase for
+        // phase. Without the clamp the linear slopes walk the estimate below the working set the
+        // staged path still holds, in a region the corpus never touched.
+        let floor = at(768, 768);
+        assert_eq!(
+            CANDLE_SMALLEST_RETAINED_PIXELS,
+            768 * 768,
+            "the clamp floor is the smallest retained measured geometry"
         );
+        for (label, clamped) in [("1x1", at(1, 1)), ("512x512", at(512, 512))] {
+            assert_eq!(
+                clamped, floor,
+                "{label} must be priced at the 768x768 clamp floor, not extrapolated below it"
+            );
+        }
+        // …and the floor is a real bound, not a degenerate one: it still exceeds the 768x768
+        // measured decode peak of the retained manifest rows.
+        let measured_768 = krea_retained_768_three_stage();
+        assert!(floor.decode > measured_768.decode);
+        assert!(floor.denoise > measured_768.denoise);
         assert!(anchor
             .derive_image_phase_peaks(AnchorImageDeriveRequest {
                 width: 0,
@@ -2038,6 +2136,32 @@ mod tests {
             .find(|model| model["id"].as_str() == Some("krea_2_turbo"))
             .expect("the krea_2_turbo catalog entry")["candle"]
             .clone()
+    }
+
+    /// The retained `krea_2_turbo` / candle / q4 / `threeStage` measured row at 768x768 — the
+    /// SMALLEST retained geometry, and the one every downward-extrapolation bound is pinned
+    /// against. Read from the manifest rather than transcribed, so a manifest edit cannot leave a
+    /// stale literal validating a number the evidence no longer carries.
+    fn krea_retained_768_three_stage() -> AnchorDerivedPhases {
+        const GIB: f64 = 1_073_741_824.0;
+        let candle = krea_candle_manifest_block();
+        let row = candle["turboFit"]["evidenceRecords"]
+            .as_array()
+            .expect("turboFit evidence records")
+            .iter()
+            .find(|record| {
+                record["tier"].as_str() == Some("q4")
+                    && record["width"].as_u64() == Some(768)
+                    && record["height"].as_u64() == Some(768)
+            })
+            .expect("the retained 768x768 q4 evidence record")["observedPhasesGb"]["threeStage"]
+            .clone();
+        let gib = |key: &str| (row[key].as_f64().unwrap_or_else(|| panic!("{key}")) * GIB) as u64;
+        AnchorDerivedPhases {
+            conditioning: gib("text"),
+            denoise: gib("denoise"),
+            decode: gib("decode"),
+        }
     }
 
     /// AC 1 (manifest half): the derived-from-anchor estimates agree with the retained measured
@@ -2139,29 +2263,29 @@ mod tests {
     /// pins each one against the ceiling that fact imposes, and against the physical growth term.
     #[test]
     fn every_candle_coefficient_sits_inside_the_window_the_retained_pair_allows() {
-        // Retained `krea_2_turbo` / candle / q4 / `threeStage` pair, `turboFit.evidenceRecords`.
-        const GIB: f64 = 1_073_741_824.0;
-        const SMALL_PIXELS: i128 = 768 * 768;
+        // Retained `krea_2_turbo` / candle / q4 / `threeStage` pair, read from
+        // `turboFit.evidenceRecords` — never transcribed as literals.
         let anchor = krea_candle_anchor();
+        let measured_768 = krea_retained_768_three_stage();
         let anchor_pixels = i128::from(anchor.geometry.width) * i128::from(anchor.geometry.height);
-        let span = anchor_pixels - SMALL_PIXELS;
-        for (phase, intercept, small_measured_gib, coefficient) in [
+        let span = anchor_pixels - CANDLE_SMALLEST_RETAINED_PIXELS;
+        for (phase, intercept, small_measured, coefficient) in [
             (
                 "conditioning",
                 anchor.phase_active_peak_bytes.conditioning,
-                3.565,
+                measured_768.conditioning,
                 CANDLE_COND_PER_PIXEL_BYTES,
             ),
             (
                 "denoise",
                 anchor.phase_active_peak_bytes.denoise,
-                10.597,
+                measured_768.denoise,
                 CANDLE_DENOISE_PER_PIXEL_BYTES,
             ),
             (
                 "decode",
                 anchor.phase_active_peak_bytes.decode,
-                16.286,
+                measured_768.decode,
                 CANDLE_DECODE_PER_PIXEL_BYTES,
             ),
         ] {
@@ -2169,7 +2293,7 @@ mod tests {
                 coefficient >= 0,
                 "{phase}: a negative per-pixel term would shrink the estimate as the image grows"
             );
-            let small_measured = (small_measured_gib * GIB) as i128;
+            let small_measured = i128::from(small_measured);
             let ceiling = ((i128::from(intercept) as f64
                 - small_measured as f64 / (1.0 + CANDLE_ANCHOR_CAPTURE_SPREAD_MARGIN))
                 / span as f64) as i128;

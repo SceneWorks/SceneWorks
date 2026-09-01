@@ -1417,15 +1417,28 @@ pub(crate) fn krea_turbo_fit_with_runtime(
         MemoryStrategy::BoundedAttention,
         MemoryStrategy::BoundedTransformerResidency,
     ];
-    let mut evidence = vec![make_evidence(
-        resident_selection,
-        None,
-        resident_peak_gb,
-        None,
-        evidence_record,
-        geometry,
-    )];
-    let mut selections = vec![resident_selection];
+    // sc-22509 review (blocker): the resident rung is priced by `candle.vramGbByTier[tier]`, a
+    // SCALAR measured at `vramMeasuredPixels` that does not scale with geometry at all. Inside the
+    // measured hull that is the row the lane has always quoted; OUTSIDE it the row is simply not a
+    // price for the request, and the anchor cannot supply one either — the derivation refuses
+    // `staged_residency: false`, because the shallow staged anchor does not price a whole-model
+    // resident working set. So an out-of-envelope request emits NO resident candidate: a rung with
+    // no priced basis is honestly Missing, not `Measured` at a 1024x1024 number. Without this the
+    // hull-refusal bypass above would admit e.g. a 2048x2048 q4 request as `Resident` at 25.7 GiB
+    // on a 32 GB card, which previously returned `OutOfEnvelope`.
+    let mut evidence = Vec::new();
+    let mut selections = Vec::new();
+    if !out_of_envelope {
+        evidence.push(make_evidence(
+            resident_selection,
+            None,
+            resident_peak_gb,
+            None,
+            evidence_record,
+            geometry,
+        ));
+        selections.push(resident_selection);
+    }
     let mut measured = Vec::new();
     // sc-22509: rungs the manifest curves cannot price at this geometry, derived from the anchor.
     // They are candidates in their own right — never `Measured` — so they are collected apart from
@@ -1448,17 +1461,25 @@ pub(crate) fn krea_turbo_fit_with_runtime(
         );
         let Some(phases) = curve_phases else {
             // No measured curve reaches this cell. Derive it from the anchor for the exact rung
-            // composition the provider would execute; absent a derivable anchor the lane keeps its
-            // pre-sc-22509 behaviour and declines to answer at all.
-            let anchor = anchor?;
+            // composition the provider would execute. A rung the anchor cannot price — no anchor at
+            // all, or a composition running whole-model resident, which the shallow staged anchor
+            // does not cover — is SKIPPED, never propagated out of the function (sc-22509 review):
+            // `?` here would collapse every other rung's candidate and destroy the selector's own
+            // Missing/Reject verdict, turning a truthful `Unverified { OutOfEnvelope }` into a bare
+            // `None`.
+            let Some(anchor) = anchor else {
+                continue;
+            };
             let engaged = provider_contract.engaged_composition(strategy);
-            let derived = anchor.derive_image_phase_peaks(
+            let Some(derived) = anchor.derive_image_phase_peaks(
                 sceneworks_core::memory_anchor::AnchorImageDeriveRequest {
                     width,
                     height,
                     staged_residency: engaged.contains(&MemoryStrategy::StagedResidency),
                 },
-            )?;
+            ) else {
+                continue;
+            };
             let phases = KreaTurboPhasePeaks {
                 text_gb: derived.conditioning as f64 / BYTES_PER_GIB,
                 denoise_gb: derived.denoise as f64 / BYTES_PER_GIB,
@@ -6595,10 +6616,14 @@ mod tests {
         );
     }
 
-    /// The differential control for the test above: with the anchor unavailable for this request —
-    /// an adapter-bearing job, which the anchor render never carried — the SAME unmeasured geometry
-    /// under the SAME budget goes back to refusing for measurement absence. Without this the test
-    /// above could pass on a curve that quietly grew an envelope.
+    /// The differential control for the test above: with no usable anchor the SAME unmeasured
+    /// geometry under the SAME budget goes back to refusing for measurement absence. Without this
+    /// the test above could pass on a curve that quietly grew an envelope.
+    ///
+    /// The calibration-fingerprint arm is the CLEAN control — it moves exactly one axis. The
+    /// adapter arm is deliberately over-determined (`allow_streamed_blocks: false` also sets the
+    /// request overlay and drops a rung), so it is scoped to the coarser claim it can actually
+    /// support: adapter-bearing jobs stay off the anchor path entirely.
     #[test]
     fn without_a_usable_anchor_the_same_unmeasured_geometry_is_still_out_of_envelope() {
         let manifest = krea_fit_manifest_with_unfittable_resident();
@@ -6614,8 +6639,7 @@ mod tests {
             Some(KreaTurboFit::Unverified {
                 reason: gen_core::MemoryEvidenceVerdict::OutOfEnvelope,
             }),
-            "an adapter-bearing job has no overlay-free anchor to derive from and must keep the \
-             hull refusal"
+            "adapter-bearing jobs stay off the anchor path"
         );
 
         // The second control: a campaign the provider no longer declares cannot keep the
@@ -6629,6 +6653,73 @@ mod tests {
                 reason: gen_core::MemoryEvidenceVerdict::OutOfEnvelope,
             }),
             "an anchor from a rotated calibration campaign must not price a request"
+        );
+    }
+
+    /// sc-22509 review (blocker): the hull-refusal bypass is narrowed to ANCHOR-DERIVED rungs. The
+    /// resident rung is priced by `candle.vramGbByTier[tier]` — a scalar measured at 1024x1024 that
+    /// does not scale with geometry — and the anchor cannot re-price it (the derivation refuses a
+    /// whole-model-resident composition). So outside the measured hull the resident candidate is not
+    /// emitted at all.
+    ///
+    /// The card is sized BETWEEN the resident row (25.7 GiB + reserve) and the true 2048x2048 need,
+    /// which is the only band where the two answers differ: before the fix this request admitted
+    /// `Resident` at the 1024x1024 row; it must now refuse.
+    #[test]
+    fn an_out_of_envelope_request_does_not_admit_resident_on_the_geometry_free_row() {
+        let manifest = krea_fit_manifest();
+        let runtime = KreaRuntimeEvidenceContext::verified_for_test("q4");
+        let (width, height) = (2048u32, 2048u32);
+        let max_pixels = manifest["candle"]["turboFit"]["maxMeasuredPixels"]
+            .as_u64()
+            .expect("maxMeasuredPixels");
+        assert!(u64::from(width) * u64::from(height) > max_pixels);
+        let resident_row_gb = manifest["candle"]["vramGbByTier"]["q4"]
+            .as_f64()
+            .expect("the resident row");
+        let derived_peak_gb = krea_anchor_derived_peak_gb(width, height);
+        // A card that would host the geometry-free resident row and nothing near the real need.
+        let free_gb = resident_row_gb + HEADROOM_GB + 2.0;
+        assert!(
+            free_gb < derived_peak_gb,
+            "the card must sit between the resident row ({resident_row_gb}) and the true \
+             2048x2048 need ({derived_peak_gb}) for this test to discriminate"
+        );
+        let budget = Some(VramBudget {
+            free_gb,
+            total_gb: free_gb,
+        });
+        // CONTROL, or the assertion below is vacuous: at an IN-ENVELOPE geometry this same card and
+        // manifest DO admit on the geometry-free resident row. So the refusal that follows is about
+        // the row not pricing the request, not about the budget.
+        let control =
+            krea_turbo_fit_with_runtime(&manifest, "q4", 1024, 1024, budget, true, Some(&runtime));
+        assert!(
+            matches!(
+                control,
+                Some(KreaTurboFit::Resident { .. }) | Some(KreaTurboFit::Fits { .. })
+            ),
+            "the control arm must admit at this budget, or the refusal below proves nothing about \
+             the row rather than the card, got {control:?}"
+        );
+
+        let fit = krea_turbo_fit_with_runtime(
+            &manifest,
+            "q4",
+            width,
+            height,
+            budget,
+            true,
+            Some(&runtime),
+        );
+        assert!(
+            !matches!(
+                fit,
+                Some(KreaTurboFit::Resident { .. }) | Some(KreaTurboFit::Fits { .. })
+            ),
+            "an out-of-envelope request has no priced resident basis — the row is a 1024x1024 \
+             scalar and the anchor refuses to price a whole-model-resident composition — so it must \
+             not admit at all on a card this size, got {fit:?}"
         );
     }
 
