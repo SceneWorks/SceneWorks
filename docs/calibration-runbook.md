@@ -1315,6 +1315,70 @@ The key is `<backend>:<provider>`; a bare provider id is ambiguous (`krea_2_turb
 both backends with different crates). `buildClosureConfig` also asserts the provider is really
 declared in the crate you named, so a wrong crate fails rather than digesting the wrong tree.
 
+#### 7c-bis. The memory ANCHOR currency key — `anchor-loader-closure.mjs` (sc-22511)
+
+`config/anchor-loader-closures.json` is the second derived closure file, and it answers a narrower
+question than the one above: not "did this provider's crate change?" but "did the code that loads
+THIS model change?" — a file-level unit walked from the model's declared loader entry points. It is
+what `memory_anchor.rs` compares an anchor's recorded `source.loaderClosureDigest` against.
+
+It has the same seed-then-derive shape, and the same two invocations:
+
+```bash
+# 1. Hand-add ONLY the key and its entry points to config/anchor-loader-closures.json:
+#      "<modelId>:<backend>": { "entryPoints": ["crates/…/src/model.rs", …] }
+#    digest / closureFileCount / closureFiles are all derived. An entry point that never carries
+#    the model id as a string literal is REFUSED — a wrong entry point digests the wrong loader.
+#
+# 2. Derive every declared model's digest from a real clone.
+node scripts/anchor-loader-closure.mjs --repo <inference clone> --write
+
+# 3. Prove it took.
+node scripts/anchor-loader-closure.mjs --repo <inference clone> --check
+
+# One model's canonical closure text, for reading a diff rather than a digest:
+node scripts/anchor-loader-closure.mjs --repo <inference clone> --model ltx_2_5:mlx
+```
+
+Both default `--revision` to the pin in the workspace `Cargo.toml`, exactly as
+`inference-closure-digest.mjs` does.
+
+**The other half lives in the anchor store, and it is frozen.** Each anchor's
+`source.loaderClosureDigest` records what its model's loader looked like **at the revision that
+anchor was measured at** — not at the pin. Currency is the comparison of the two, so a recorded key
+derived at the pin would compare a value with itself and report "current" through every loader
+change there is. `extract-memory-anchors.mjs` therefore **carries that one field forward** instead
+of re-deriving it; it is seeded, once, out of band:
+
+```bash
+# Digest every packaged anchor at ITS OWN record's inference revision and write the keys in.
+# The clone must carry every cited revision (seven, today), not just the pin.
+node scripts/anchor-loader-closure.mjs --repo <inference clone> --stamp-anchors
+
+# Verify instead of write.
+node scripts/anchor-loader-closure.mjs --repo <inference clone> --stamp-anchors --check
+```
+
+Run it when a NEW anchor enters the store (the extractor fails loudly for an anchor with nothing to
+carry forward). **Do not run it after a pin bump** — that would rewrite the measurement's own
+provenance and mark every anchor current again. A pin bump is *supposed* to leave the moved models'
+anchors stale.
+
+A historical revision that predates a file today's declaration names (`mlx-gen-ltx`'s per-model
+`memory_strategy.rs` postdates the LTX-2.3 capture) narrows that anchor's entry-point list rather
+than failing. The list is part of the hashed text, so the digest cannot equal the pin's, and the
+anchor reads not-current — which is the truth about it.
+
+⚠ **`--check` is a derivation check, not a staleness gate, and it is deliberately wired into no CI
+job.** It asks "is the checked-in file what the walker derives at this revision?" — a question about
+whether someone hand-edited derived data. It does NOT ask "do the anchors still match", and nothing
+in CI may be made to. **A pin bump whose loader source genuinely moved is designed to leave anchors
+stale**: they demote to the conservative floor and the render still runs. Gating on that would
+rebuild the pin-bump-forces-re-measurement coupling this epic (E8) exists to remove. Run `--check`
+by hand after a `--write`, and after a pin bump run `--write` and commit whatever it produces — a
+run that changes nothing is the expected case, and a run that changes a digest is information, not a
+failure.
+
 ### 7d. 🔴 Move the lane's SHIPPED bindings — the half that actually changes the runtime
 
 **Do not skip this. Without it your capture promotes nothing.**

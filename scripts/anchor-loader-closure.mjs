@@ -25,15 +25,24 @@
 // WHAT IS IN THE UNIT
 //
 //   * every intra-crate module named by a `crate::` / `super::` / `self::` / in-scope-module path in
-//     a reached file, transitively — REFERENCED modules, not every `mod` a crate declares;
+//     a reached file, transitively. A leading `super` RUN is consumed whole, so
+//     `super::super::StepCoeffs` resolves two module levels up rather than dropping the edge;
+//   * every `mod x;` a reached file DECLARES, when that file was admitted as a whole module. Rust
+//     modules are reachable by method syntax with no named path anywhere, so an impl-only module is
+//     invisible to a path-driven walk; admitting declarations closes that hole. It over-includes a
+//     declared-but-uncalled module, and that over-inclusion stays inside a crate the loader already
+//     reached, so sibling-model separation is untouched. `#[path = "…"]` overrides are honoured;
 //   * every FIRST-PARTY CRATE a reached file names in a path (`mlx_gen::array::contiguous`,
 //     `use gen_core::…`), entered at the module the path names and walked the same way — so a shared
 //     crate the loader genuinely reaches IS in the unit, and one it does not is not;
 //   * a `pub use` re-export in a reached file, followed for the identifiers something actually asked
-//     that file for — which is how an item imported through a crate root's routing table is still
-//     attributed to the module that defines it, without the table dragging its whole crate along;
-//   * `include_str!` / `include_bytes!` targets, whose CONTENT is a compile input (they are hashed,
-//     never walked as code — an included file that happens to be Rust is data here).
+//     that file for — under the name the re-export PUBLISHES, so an aliased re-export
+//     (`pub use vocoder::{Generator as VocoderGenerator}`) is followed under its alias. This is how
+//     an item imported through a crate root's routing table is still attributed to the module that
+//     defines it, without the table dragging its whole crate along;
+//   * `include!` / `include_str!` / `include_bytes!` targets, whose CONTENT is a compile input (they
+//     are hashed, never walked as code — an included file that happens to be Rust is data here,
+//     because its text is parsed in the INCLUDING file's module scope, not the target's).
 //
 // Rust source is hashed SEMANTICALLY (`stripInertLines`, shared with the provider digest), so a
 // doc-only edit inside the loader does not stale an anchor. Anything the stripper does not
@@ -57,8 +66,16 @@
 //     and LTX-2.5 loaders, so a 2.3 edit THERE does stale 2.5.
 //   * Macro-generated references. A module reached only through a name a macro builds is invisible
 //     to a source-level walk, and would be missed. The walk is deliberately generous everywhere else
-//     (an unresolvable head is followed if it names any in-scope module or first-party crate) so the
-//     residue is small, but it is a real under-inclusion and not a proven-empty one.
+//     (an unresolvable head is followed if it names any in-scope module or first-party crate, and a
+//     whole-module file contributes every `mod` it declares) so the residue is small, but it is a
+//     real under-inclusion and not a proven-empty one.
+//   * A non-literal include target. `include!(concat!(env!("CARGO_MANIFEST_DIR"), "/…"))` — the
+//     spelling `mlx-gen-sam3/src/geometry.rs` uses — has no string literal to resolve at this level,
+//     so its content is not hashed. Every such site in the pinned tree today is inside
+//     `#[cfg(test)]`, which is stripped before any of this runs, so the residue is currently empty;
+//     a shipped one would be a real under-inclusion.
+//   * Inline `mod x { … }` bodies as separate units. They are already part of the file that
+//     declares them, so they are hashed with it; only `mod x;` FILE declarations resolve to a path.
 //   * Realised memory behaviour. Like every code-identity unit, this answers "did the loading code
 //     change?", never "did the measured peak change?".
 //
@@ -90,7 +107,7 @@ import { canonicalSourceText, stripInertLines } from "./lib/source-revision.mjs"
  * Hashed into the canonical text, so a unit change reads as a digest change rather than silently
  * comparing two different questions.
  */
-export const ANCHOR_LOADER_CLOSURE_VERSION = "anchor-loader-closure v1";
+export const ANCHOR_LOADER_CLOSURE_VERSION = "anchor-loader-closure v2";
 
 export const ANCHOR_LOADER_CONFIG_PATH = "config/anchor-loader-closures.json";
 
@@ -217,6 +234,11 @@ export function firstPartyCrates(tree, blobPaths) {
  * sibling's edit stale this model's anchors. Test code compiles into no shipped loader, so it is
  * neither walked nor hashed here.
  *
+ * The attribute match is BOUNDED — `test)` or `all(test`, never a bare `test` prefix. Without the
+ * boundary a `#[cfg(test_only_api)]` item (or any other cfg whose name merely starts with `test`)
+ * would be read as a test item and its shipped code silently dropped from the hash: a false green
+ * in the direction that matters, since the dropped code is loader code.
+ *
  * Brace-depth counting from the attribute, over source with string and character literals and line
  * comments removed first — a `{` inside `write!(f, "{{")` would otherwise leave the depth stuck
  * open. A `#[cfg(test)] mod tests;` file declaration (no braces) is dropped as the single line it is.
@@ -233,7 +255,7 @@ export function stripCfgTest(body) {
   const kept = [];
   for (let index = 0; index < lines.length; index += 1) {
     const line = lines[index];
-    if (!/^\s*#\[cfg\((?:test|all\(\s*test\b)/.test(line)) {
+    if (!/^\s*#\[cfg\((?:test\s*\)|all\(\s*test\b)/.test(line)) {
       kept.push(line);
       continue;
     }
@@ -278,11 +300,17 @@ export function stripCfgTest(body) {
 }
 
 /**
- * Expand one `use` path, brace groups and all, into full segment lists.
+ * Expand one `use` path, brace groups and all, into `{ segments, alias }` edges.
  *
  * `use a::b::{c, d::{e, f}, g as h};` is four distinct edges, and a walk that read the line with a
- * naive `::` split would see `d::e` as a top-level path and resolve it against the WRONG module. The
- * alias is dropped: `g as h` is still an edge to `a::b::g`.
+ * naive `::` split would see `d::e` as a top-level path and resolve it against the WRONG module.
+ *
+ * THE ALIAS IS CARRIED, NOT DROPPED, and that is load-bearing for `pub use`. A re-export is followed
+ * only for identifiers something actually asked the file for, and what a consumer asks for is the
+ * name the re-export PUBLISHES — the alias, when there is one. `mlx-gen-ltx/src/lib.rs` really does
+ * write `pub use vocoder::{Generator as VocoderGenerator, …}`; gating on the source segment
+ * (`Generator`) never matches a request for `VocoderGenerator`, so a module reachable only under its
+ * alias would drop out of the closure and edits there would leave anchors reading "current".
  */
 export function expandUsePath(text) {
   const out = [];
@@ -302,12 +330,16 @@ export function expandUsePath(text) {
     }
     parts.push(current);
     for (const part of parts) {
-      const trimmed = part.trim().replace(/\s+as\s+[A-Za-z_][A-Za-z0-9_]*$/, "");
+      const raw = part.trim();
+      if (!raw) continue;
+      const aliased = raw.match(/\s+as\s+([A-Za-z_][A-Za-z0-9_]*)$/);
+      const trimmed = aliased ? raw.slice(0, aliased.index) : raw;
+      const alias = aliased ? aliased[1] : null;
       if (!trimmed) continue;
       const brace = trimmed.indexOf("{");
       if (brace === -1) {
         const segments = [...prefix, ...trimmed.split("::")].map((s) => s.trim()).filter(Boolean);
-        if (segments.length) out.push(segments);
+        if (segments.length) out.push({ segments, alias });
         continue;
       }
       const head = trimmed
@@ -333,6 +365,11 @@ export function expandUsePath(text) {
  * identifiers something actually asked that file for. Everything else — code lines and the file's
  * OWN (private or `pub(crate)`) `use` imports — is followed unconditionally, because those are the
  * dependencies the file compiles and executes.
+ *
+ * `mod x;` declarations are reported separately as `mods`, carrying any `#[path = "…"]` override
+ * that precedes them. A declaration is not a reference — the walk admits them only for a file it
+ * already holds as a WHOLE module (see `loaderClosureFiles`), which is what makes impl-only modules
+ * (reached by method syntax and never by a named path) visible at all.
  */
 export function referencesIn(rawBody) {
   const body = stripCfgTest(rawBody);
@@ -340,11 +377,29 @@ export function referencesIn(rawBody) {
   const imports = [];
   const reexports = [];
   const includes = [];
+  const mods = [];
   const lines = body.split("\n");
+  /** The most recent `#[path = "…"]` attribute, consumed by the next `mod` declaration. */
+  let pathOverride = null;
   for (let index = 0; index < lines.length; index += 1) {
     const raw = lines[index];
     const line = raw.trim();
     if (line.startsWith("//")) continue;
+    // A trailing `// …` is not part of either declaration, and `mod x; // note` is legal Rust.
+    const bare = line.replace(/\s*\/\/.*$/, "").trim();
+    const pathAttr = bare.match(/^#\[\s*path\s*=\s*"([^"]+)"\s*\]$/);
+    if (pathAttr) {
+      pathOverride = pathAttr[1];
+      continue;
+    }
+    // `mod x;` — a file declaration. `mod x { … }` is inline and needs no file.
+    const modDecl = bare.match(/^(?:pub(?:\s*\([^)]*\))?\s+)?mod\s+([a-z_][A-Za-z0-9_]*)\s*;$/);
+    if (modDecl) {
+      mods.push({ name: modDecl[1], path: pathOverride });
+      pathOverride = null;
+      continue;
+    }
+    if (bare && !bare.startsWith("#[")) pathOverride = null;
     const use = line.match(/^(pub\s+)?use\s+([\s\S]*)$/);
     if (use) {
       // A `use` item may wrap across lines; join until the terminating `;`.
@@ -357,20 +412,25 @@ export function referencesIn(rawBody) {
       index = cursor;
       const paths = expandUsePath(text.slice(0, text.indexOf(";") === -1 ? undefined : text.indexOf(";")));
       if (use[1]) {
-        for (const segments of paths) reexports.push(segments);
+        for (const edge of paths) reexports.push(edge);
       } else {
-        for (const segments of paths) imports.push(segments);
+        for (const edge of paths) imports.push(edge.segments);
       }
       continue;
     }
     for (const match of raw.matchAll(/\b([A-Za-z_][A-Za-z0-9_]*)((?:::[A-Za-z_][A-Za-z0-9_]*)+)/g)) {
       code.push([match[1], ...match[2].split("::").slice(1)]);
     }
-    for (const match of raw.matchAll(/\binclude_(?:str|bytes)!\s*\(\s*"([^"]+)"/g)) {
+    // `include!` is hashed exactly like `include_str!`/`include_bytes!`: all three splice a file's
+    // CONTENT into this compilation unit, so all three are compile inputs. `include!` differs only
+    // in that what it splices is Rust — which is why it is still DATA here and never walked: the
+    // included text is parsed in this file's module scope, not the target's, so following it as a
+    // module would resolve its paths against the wrong directory.
+    for (const match of raw.matchAll(/\binclude(?:_str|_bytes)?!\s*\(\s*"([^"]+)"/g)) {
       includes.push(match[1]);
     }
   }
-  return { code, imports, reexports, includes };
+  return { code, imports, reexports, includes, mods };
 }
 
 const isModuleSegment = (segment) => /^[a-z_][a-z0-9_]*$/.test(segment);
@@ -450,13 +510,25 @@ export function loaderClosureFiles({ tree, entryPoints, crates }) {
       const dir = moduleDirOf(file);
       const parentDir = path.posix.dirname(dir);
       const wanted = requested.get(file) ?? new Set();
-      const { code, imports, reexports, includes } = referencesIn(bodies.get(file) ?? "");
+      const { code, imports, reexports, includes, mods } = referencesIn(bodies.get(file) ?? "");
 
       const follow = (segments) => {
         const [head, ...rest] = segments;
         if (head === "crate") return resolveFrom(crateRoot, rest, libRs);
         if (head === "self") return resolveFrom(dir, rest, file);
-        if (head === "super") return resolveFrom(parentDir, rest, null);
+        if (head === "super") {
+          // Consume the WHOLE leading `super` run, one parent directory each. Handling only the
+          // first `super` resolved `super::super::X` against this file's parent module and dropped
+          // the edge when nothing there matched — `gen-core/src/sampling/unified.rs` names
+          // `super::super::StepCoeffs` for real.
+          let up = parentDir;
+          let remainder = rest;
+          while (remainder[0] === "super") {
+            up = path.posix.dirname(up);
+            remainder = remainder.slice(1);
+          }
+          return resolveFrom(up, remainder, null);
+        }
         if (PATH_HEAD_KEYWORDS.has(head)) return false;
         // An in-scope module of this file's own module, then of the crate root.
         if (resolveFrom(dir, segments, null)) return true;
@@ -476,9 +548,24 @@ export function loaderClosureFiles({ tree, entryPoints, crates }) {
           if (isShippedSource(target) && tree.has(target)) requestData(target);
         }
       }
-      for (const segments of reexports) {
-        const exported = segments[segments.length - 1];
-        if (wanted.has("*") || wanted.has(exported) || exported === "*") follow(segments);
+      // A file held as a WHOLE module owns every module it declares, including the impl-only ones
+      // that no path ever names (reached by method syntax on a type defined elsewhere). Those are
+      // invisible to a path-driven walk, so they are admitted from the declaration itself. This
+      // over-includes — a declared module nothing calls is still hashed — but the over-inclusion
+      // stays INSIDE crates the loader already reached, so sibling-model separation is untouched.
+      if (wanted.has("*")) {
+        for (const decl of mods) {
+          const target = decl.path
+            ? path.posix.normalize(path.posix.join(path.posix.dirname(file), decl.path))
+            : moduleFile(tree, dir, decl.name);
+          if (target && tree.has(target)) request(target, "*");
+        }
+      }
+      for (const edge of reexports) {
+        // The name a consumer can ask for is the one the re-export PUBLISHES: the alias when there
+        // is one, the last source segment otherwise.
+        const exported = edge.alias ?? edge.segments[edge.segments.length - 1];
+        if (wanted.has("*") || wanted.has(exported) || exported === "*") follow(edge.segments);
       }
     }
   }
@@ -585,6 +672,93 @@ export function buildAnchorLoaderConfig({ repo, revision, declared }) {
   };
 }
 
+export const ANCHOR_STORE_PATH = "config/memory-anchors.json";
+
+/**
+ * Every packaged anchor's currency key, derived AT THE REVISION THAT ANCHOR WAS MEASURED AT.
+ *
+ * This is the half that makes currency mean anything, and it is the half that is easy to get
+ * silently wrong. An anchor's `source.loaderClosureDigest` records what the model's loader looked
+ * like WHEN THE MEASUREMENT WAS TAKEN. Currency is then the comparison of that recorded value
+ * against the digest at the CURRENT pin. Stamping the current pin's digest instead would make every
+ * anchor eternally current — the comparison would be a value against itself, and the whole key
+ * would report "fine" through any loader change at all.
+ *
+ * So each anchor is digested at its own record's `repositories.inference.revision`, read out of the
+ * retained evidence the anchor already cites. Seven distinct revisions across the packaged store
+ * today; a clone must carry all of them.
+ */
+export function anchorMeasurementRevision(anchor, corpus) {
+  const record = (corpus.records ?? []).find((entry) => entry.id === anchor.source?.recordId);
+  const revision = record?.repositories?.inference?.revision;
+  if (typeof revision !== "string" || !/^[0-9a-f]{40}$/.test(revision)) {
+    throw new Error(
+      `anchor ${anchor.id} cites record ${anchor.source?.recordId} in ${anchor.source?.path}, ` +
+        "which declares no inference revision — its currency key cannot be derived",
+    );
+  }
+  return revision;
+}
+
+/**
+ * `store` with every anchor's `source.loaderClosureDigest` re-derived at its own measurement
+ * revision. Returns the new store and a per-anchor report.
+ */
+export function stampAnchorStore({ repo, store, declared, corpora }) {
+  const byRevision = new Map();
+  for (const anchor of store.anchors) {
+    const corpus = corpora.get(anchor.source?.path);
+    if (!corpus) {
+      throw new Error(`anchor ${anchor.id} cites ${anchor.source?.path}, which was not read`);
+    }
+    const revision = anchorMeasurementRevision(anchor, corpus);
+    const model = `${anchor.modelId}:${anchor.backend}`;
+    if (!declared[model]) {
+      throw new Error(
+        `anchor ${anchor.id} has no loader-closure declaration for ${model} in ` +
+          `${ANCHOR_LOADER_CONFIG_PATH}`,
+      );
+    }
+    const bucket = byRevision.get(revision) ?? new Set();
+    bucket.add(model);
+    byRevision.set(revision, bucket);
+  }
+  // One tree read per revision, shared by every model measured at it.
+  const digests = new Map();
+  for (const [revision, models] of byRevision) {
+    const tree = gitTree(repo, revision);
+    // AN ENTRY POINT THAT DID NOT EXIST YET IS DROPPED, NOT AN ERROR. A historical revision can
+    // predate a file today's declaration names — `mlx-gen-ltx/src/memory_strategy.rs` postdates the
+    // LTX-2.3 capture — and that IS the difference the key should report: the entry-point list is
+    // part of the hashed text, so a closure derived over a smaller list cannot equal the pin's, and
+    // the anchor reads not-current. Which is the truth about it.
+    const historical = Object.fromEntries(
+      [...models].map((model) => [
+        model,
+        { entryPoints: declared[model].entryPoints.filter((file) => tree.has(file)) },
+      ]),
+    );
+    for (const [model, entry] of Object.entries(historical)) {
+      if (entry.entryPoints.length === 0) {
+        throw new Error(
+          `no declared entry point of ${model} exists at ${revision.slice(0, 8)} — its anchors ` +
+            "cannot be keyed to that measurement at all",
+        );
+      }
+    }
+    const perModel = anchorLoaderDigests({ repo, revision, declared: historical, tree });
+    for (const [model, entry] of perModel) digests.set(`${revision}|${model}`, entry.digest);
+  }
+  const report = [];
+  const anchors = store.anchors.map((anchor) => {
+    const revision = anchorMeasurementRevision(anchor, corpora.get(anchor.source.path));
+    const digest = digests.get(`${revision}|${anchor.modelId}:${anchor.backend}`);
+    report.push({ id: anchor.id, revision, digest, changed: digest !== anchor.source.loaderClosureDigest });
+    return { ...anchor, source: { ...anchor.source, loaderClosureDigest: digest } };
+  });
+  return { store: { ...store, anchors }, report };
+}
+
 function usage() {
   return [
     "usage: node scripts/anchor-loader-closure.mjs --repo <inference-checkout> [options]",
@@ -594,6 +768,11 @@ function usage() {
     "  --write            rewrite config/anchor-loader-closures.json",
     "  --check            fail if the checked-in config does not match the derivation",
     "  --model ID         print one model's canonical closure text and exit",
+    "  --stamp-anchors    re-derive every packaged anchor's currency key AT ITS OWN measurement",
+    "                     revision and write it into config/memory-anchors.json (add --check to",
+    "                     verify instead of write). The clone must carry every cited revision.",
+    "  --anchor-revisions print every revision the packaged anchors were measured at (needs no",
+    "                     --repo); this is the fetch list a shallow CI clone must satisfy",
     "",
     "With neither --write nor --check it prints the derived digests.",
   ].join("\n");
@@ -606,6 +785,25 @@ export async function main(argv = process.argv.slice(2)) {
     const index = argv.indexOf(flag);
     return index === -1 ? undefined : argv[index + 1];
   };
+
+  // Every revision the packaged anchors were measured at, one per line. Needs no clone: it is a
+  // read of the store and the corpora it cites, which is what makes it usable as the fetch list in
+  // CI. Deriving the list from the same store the stamping walks is what keeps the two from
+  // drifting into "CI fetched four of the seven revisions and the fifth silently skipped".
+  if (argv.includes("--anchor-revisions")) {
+    const store = JSON.parse(await readFile(path.join(root, ANCHOR_STORE_PATH), "utf8"));
+    const corpora = new Map();
+    const revisions = new Set();
+    for (const anchor of store.anchors) {
+      const cited = anchor.source?.path;
+      if (cited && !corpora.has(cited)) {
+        corpora.set(cited, JSON.parse(await readFile(path.join(root, cited), "utf8")));
+      }
+      revisions.add(anchorMeasurementRevision(anchor, corpora.get(cited)));
+    }
+    process.stdout.write(`${[...revisions].sort().join("\n")}\n`);
+    return 0;
+  }
 
   const repo = value("--repo");
   if (!repo) {
@@ -633,6 +831,44 @@ export async function main(argv = process.argv.slice(2)) {
       declared: { [one]: declared[one] },
     });
     process.stdout.write(digests.get(one).text);
+    return 0;
+  }
+
+  if (argv.includes("--stamp-anchors")) {
+    const storePath = path.join(root, ANCHOR_STORE_PATH);
+    const store = JSON.parse(await readFile(storePath, "utf8"));
+    const corpora = new Map();
+    for (const anchor of store.anchors) {
+      const cited = anchor.source?.path;
+      if (cited && !corpora.has(cited)) {
+        corpora.set(cited, JSON.parse(await readFile(path.join(root, cited), "utf8")));
+      }
+    }
+    const { store: stamped, report } = stampAnchorStore({
+      repo: path.resolve(repo),
+      store,
+      declared,
+      corpora,
+    });
+    for (const row of report) {
+      console.log(
+        `${row.changed ? "*" : " "} ${row.revision.slice(0, 8)} ${row.digest.slice(0, 16)} ${row.id}`,
+      );
+    }
+    const body = `${JSON.stringify(stamped, null, 2)}\n`;
+    if (argv.includes("--check")) {
+      if (body !== `${JSON.stringify(store, null, 2)}\n`) {
+        console.error(
+          `${ANCHOR_STORE_PATH} carries currency keys that are not the derivation at each anchor's ` +
+            "own measurement revision. Re-run with --stamp-anchors.",
+        );
+        return 1;
+      }
+      console.log(`${ANCHOR_STORE_PATH} currency keys match their measurement revisions`);
+      return 0;
+    }
+    await writeFile(storePath, body);
+    console.log(`stamped ${report.length} anchors in ${ANCHOR_STORE_PATH}`);
     return 0;
   }
 
