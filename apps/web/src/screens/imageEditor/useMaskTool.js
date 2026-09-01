@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
   maskAlphaFromRgba,
   writeMaskAlphaToRgba,
@@ -44,14 +44,21 @@ export function useMaskTool({
   working,
   tool,
   canMask,
+  smartSelectSupported,
   aiOp,
   activeProject,
   requestedGpu,
   runAiOp,
   stagePointToImage,
+  stagePointToActiveLayerImage,
+  getWorking,
   blobToImage,
   setTool,
 }) {
+  const activeLayer = working?.layers?.find((layer) => layer.id === working.activeLayerId) ?? null;
+  const maskCoordinateSpace = tool === "cutout" ? "layer" : "document";
+  const maskWidth = maskCoordinateSpace === "layer" ? activeLayer?.image?.naturalWidth ?? 0 : working?.width ?? 0;
+  const maskHeight = maskCoordinateSpace === "layer" ? activeLayer?.image?.naturalHeight ?? 0 : working?.height ?? 0;
   // Inpaint mask (sc-2436): freehand brush strokes in image-pixel coords, rasterized
   // to a mask asset on Run for inpaint-capable models. `maskMode` is the paint sub-mode
   // of the AI Edit tool (Stage panning is suspended while it's on).
@@ -72,10 +79,14 @@ export function useMaskTool({
   const [maskBaseImage, setMaskBaseImage] = useState(null); // HTMLImageElement | null
   const [maskOverlay, setMaskOverlay] = useState(null); // HTMLCanvasElement | null
   const [maskSubTool, setMaskSubTool] = useState("brush"); // "brush" | "select"
+  const [maskSource, setMaskSource] = useState(null); // "colorKey" | "smartSelect" | "brush" | null
+  const [maskTargetLayerId, setMaskTargetLayerId] = useState(null); // cutout selections only
   const [selectDraft, setSelectDraft] = useState(null); // live selection rect during a drag
   const selectDrawingRef = useRef(false);
   const selectStartRef = useRef(null);
   const smartSelectLoaderRef = useRef(null);
+  const pendingSmartSelectRef = useRef(null);
+  const maskContextToolRef = useRef(null);
   if (!smartSelectLoaderRef.current) {
     smartSelectLoaderRef.current = createLatestMaskAssetLoader({ assetUrlFor: assetUrl, blobToImage });
   }
@@ -88,24 +99,56 @@ export function useMaskTool({
   useEffect(
     () => () => {
       smartSelectLoaderRef.current.invalidate();
+      pendingSmartSelectRef.current = null;
     },
     [],
   );
 
-  // Leave paint mode (restoring Stage panning) when the edit tool is closed or the
-  // model can't inpaint — otherwise the canvas would stay in a paint state with no UI.
+  // Leave paint mode when neither AI Edit's inpaint path nor Cutout owns it. SAM3
+  // cutout intentionally does not depend on an inpaint-capable edit model.
   useEffect(() => {
-    if (maskMode && (tool !== "edit" || !canMask)) setMaskMode(false);
+    if (
+      maskMode &&
+      !pendingSmartSelectRef.current &&
+      !((tool === "edit" && canMask) || tool === "cutout")
+    ) setMaskMode(false);
   }, [tool, canMask, maskMode]);
+
+  // A cutout selection belongs to one source layer. Switching layers invalidates
+  // both an installed mask and a pending SAM3 asset load so neither can be
+  // previewed or committed onto a different layer.
+  useEffect(() => {
+    const activeLayerId = working?.activeLayerId ?? null;
+    const pending = pendingSmartSelectRef.current;
+    if (pending?.targetLayerId && pending.targetLayerId !== activeLayerId) {
+      smartSelectLoaderRef.current.invalidate();
+      pendingSmartSelectRef.current = null;
+    }
+    if (maskTargetLayerId && maskTargetLayerId !== activeLayerId) {
+      replaceMaskLines([]);
+      setMaskMode(false);
+      setMaskBaseImage(null);
+      setMaskOverlay(null);
+      setMaskSource(null);
+      setMaskTargetLayerId(null);
+      maskContextToolRef.current = null;
+      setSelectDraft(null);
+      selectDrawingRef.current = false;
+    }
+  }, [working?.activeLayerId, maskTargetLayerId]);
 
   // Reset the per-bitmap mask state (called by the editor's resetEditorOverlays). Mirrors
   // the exact mask-clearing lines from the inline resetEditorOverlays.
   function resetMaskState() {
     smartSelectLoaderRef.current.invalidate();
+    pendingSmartSelectRef.current = null;
     replaceMaskLines([]);
     setMaskMode(false);
     setMaskBaseImage(null);
     setMaskOverlay(null);
+    setMaskSource(null);
+    setMaskTargetLayerId(null);
+    maskContextToolRef.current = null;
     setMaskSubTool("brush");
     setSelectDraft(null);
     selectDrawingRef.current = false;
@@ -114,15 +157,17 @@ export function useMaskTool({
   // ── Inpaint mask brush (sc-2436) ──────────────────────────────────────────
   function maskPointerDown(event) {
     if (!maskMode || maskSubTool !== "brush" || !working) return;
-    const pt = stagePointToImage(event);
+    const pt = maskCoordinateSpace === "layer" ? stagePointToActiveLayerImage(event) : stagePointToImage(event);
     if (!pt) return;
+    if (maskCoordinateSpace === "layer") setMaskTargetLayerId(working.activeLayerId);
+    if (!maskSource) setMaskSource("brush");
     maskPaintingRef.current = true;
     replaceMaskLines([...maskLinesRef.current, { points: [pt.x, pt.y], size: maskBrush, erase: maskErase }]);
   }
 
   function maskPointerMove(event) {
     if (!maskMode || maskSubTool !== "brush" || !maskPaintingRef.current) return;
-    const pt = stagePointToImage(event);
+    const pt = maskCoordinateSpace === "layer" ? stagePointToActiveLayerImage(event) : stagePointToImage(event);
     if (!pt) return;
     replaceMaskLines(appendMaskStrokePoint(maskLinesRef.current, pt));
   }
@@ -131,19 +176,48 @@ export function useMaskTool({
     maskPaintingRef.current = false;
   }
 
-  function clearMask() {
+  const clearMask = useCallback(() => {
     smartSelectLoaderRef.current.invalidate();
-    replaceMaskLines([]);
+    pendingSmartSelectRef.current = null;
+    maskLinesRef.current = [];
+    setMaskLines([]);
     setMaskBaseImage(null);
     setMaskOverlay(null);
-  }
+    setMaskSource(null);
+    setMaskTargetLayerId(null);
+    maskContextToolRef.current = null;
+  }, []);
+
+  // Document-space AI masks and active-layer cutout masks are intentionally
+  // different coordinate systems. Never carry one across the tool boundary.
+  useEffect(() => {
+    if (maskMode && (tool === "edit" || tool === "cutout")) {
+      if (maskContextToolRef.current && maskContextToolRef.current !== tool) {
+        clearMask();
+        setMaskMode(false);
+        return;
+      }
+      maskContextToolRef.current = tool;
+    }
+    if (tool === "edit" && maskTargetLayerId) {
+      clearMask();
+      setMaskMode(false);
+    } else if (
+      tool === "cutout" &&
+      maskTargetLayerId === null &&
+      (maskBaseImage || maskLinesRef.current.length)
+    ) {
+      clearMask();
+      setMaskMode(false);
+    }
+  }, [tool, maskTargetLayerId, maskMode, maskBaseImage, clearMask]);
 
   // ── Smart-select box (sc-3751) ────────────────────────────────────────────
   // A box-drag sub-mode of the mask tool: drag a selection rect, then on release run the SAM3
   // `image_segment` job over it. Mirrors the sc-6090 box draw, but transient (one rect → one run).
   function selectPointerDown(event) {
     if (!maskMode || maskSubTool !== "select" || !working) return;
-    const pt = stagePointToImage(event);
+    const pt = maskCoordinateSpace === "layer" ? stagePointToActiveLayerImage(event) : stagePointToImage(event);
     if (!pt) return;
     selectDrawingRef.current = true;
     selectStartRef.current = pt;
@@ -152,7 +226,7 @@ export function useMaskTool({
 
   function selectPointerMove(event) {
     if (!selectDrawingRef.current) return;
-    const pt = stagePointToImage(event);
+    const pt = maskCoordinateSpace === "layer" ? stagePointToActiveLayerImage(event) : stagePointToImage(event);
     if (!pt) return;
     setSelectDraft(rectFromPoints(selectStartRef.current, pt));
   }
@@ -164,7 +238,7 @@ export function useMaskTool({
     setSelectDraft(null);
     // Discard a click / sub-minimum smudge; otherwise run segmentation over the box.
     if (!draft || draft.width < MIN_BOX_PX || draft.height < MIN_BOX_PX) return;
-    const rect = clampRectToCanvas(draft, working.width, working.height);
+    const rect = clampRectToCanvas(draft, maskWidth, maskHeight);
     runSmartSelect(rect);
   }
 
@@ -186,8 +260,8 @@ export function useMaskTool({
   // refine ops (sc-6110). White = edit region; erased holes flatten to black (=keep).
   function rasterizeMaskToCanvas() {
     const scratch = document.createElement("canvas");
-    scratch.width = working.width;
-    scratch.height = working.height;
+    scratch.width = maskWidth;
+    scratch.height = maskHeight;
     const sctx = scratch.getContext("2d");
     // Smart-select base first (sc-3751): the white-on-black SAM3 mask underlays the brush strokes,
     // so paint strokes add to it and erase strokes (destination-out) carve it back. Its opaque
@@ -214,8 +288,8 @@ export function useMaskTool({
     }
     // Flatten onto black so erased/holes read as black (= keep).
     const out = document.createElement("canvas");
-    out.width = working.width;
-    out.height = working.height;
+    out.width = maskWidth;
+    out.height = maskHeight;
     const octx = out.getContext("2d");
     octx.fillStyle = "#000000";
     octx.fillRect(0, 0, out.width, out.height);
@@ -238,14 +312,14 @@ export function useMaskTool({
   // Decode a worker mask (white-on-black PNG at working dims) into the editable mask base: a
   // white-on-black canvas for rasterizeMaskToFile + a pink-on-transparent overlay for the preview.
   // Drawn scaled to the working dims defensively (the mask is produced at the working size).
-  function loadMaskBase(image) {
+  const installMaskBaseCanvas = useCallback((maskCanvas, metadata = {}) => {
     const base = document.createElement("canvas");
-    base.width = working.width;
-    base.height = working.height;
-    base.getContext("2d").drawImage(image, 0, 0, working.width, working.height);
+    base.width = maskWidth;
+    base.height = maskHeight;
+    base.getContext("2d").drawImage(maskCanvas, 0, 0, maskWidth, maskHeight);
     const overlay = document.createElement("canvas");
-    overlay.width = working.width;
-    overlay.height = working.height;
+    overlay.width = maskWidth;
+    overlay.height = maskHeight;
     const octx = overlay.getContext("2d");
     octx.drawImage(base, 0, 0);
     const data = octx.getImageData(0, 0, overlay.width, overlay.height);
@@ -253,23 +327,20 @@ export function useMaskTool({
     octx.putImageData(data, 0, 0);
     setMaskBaseImage(base);
     setMaskOverlay(overlay);
+    replaceMaskLines([]);
+    if (Object.prototype.hasOwnProperty.call(metadata, "source")) setMaskSource(metadata.source);
+    if (Object.prototype.hasOwnProperty.call(metadata, "targetLayerId")) setMaskTargetLayerId(metadata.targetLayerId);
+  }, [maskHeight, maskWidth]);
+
+  function loadMaskBase(image, metadata) {
+    installMaskBaseCanvas(image, metadata);
   }
 
   // Install a refined white-on-black mask canvas as the new mask base (sc-6110): it
   // becomes the base + a fresh pink overlay, and the brush strokes are cleared (they
   // are now baked into the canvas). Mirrors loadMaskBase but from a canvas.
   function applyRefinedMask(maskCanvas) {
-    const overlay = document.createElement("canvas");
-    overlay.width = working.width;
-    overlay.height = working.height;
-    const octx = overlay.getContext("2d");
-    octx.drawImage(maskCanvas, 0, 0);
-    const data = octx.getImageData(0, 0, overlay.width, overlay.height);
-    tintMaskRgbaInPlace(data.data);
-    octx.putImageData(data, 0, 0);
-    setMaskBaseImage(maskCanvas);
-    setMaskOverlay(overlay);
-    replaceMaskLines([]);
+    installMaskBaseCanvas(maskCanvas);
   }
 
   // Mask refinement (sc-6110): flatten the current mask, run a pure pixel op
@@ -298,13 +369,18 @@ export function useMaskTool({
   // the job, and on completion load the returned binary mask as an editable base under the strokes.
   // It does NOT replace the working image (onComplete owns the result), so the session is unchanged
   // except for the mask layer; the brush/eraser then refines it before Inpaint.
-  function runSmartSelect(rect) {
-    if (!working || aiOp || !canMask) return;
+  async function runSmartSelect(rect) {
+    if (!working || aiOp || !smartSelectSupported) return;
+    const initiatingTool = tool;
+    const targetLayerId = initiatingTool === "cutout" ? working.activeLayerId : null;
+    const targetLayerBlob = targetLayerId ? activeLayer?.blob : null;
     const requestGeneration = smartSelectLoaderRef.current.invalidate();
+    pendingSmartSelectRef.current = { requestGeneration, initiatingTool, targetLayerId, targetLayerBlob };
     const box = rectToSegmentBox(rect);
-    runAiOp({
+    const started = await runAiOp({
       label: "smart select",
       endpoint: "/api/v1/jobs",
+      layerSource: initiatingTool === "cutout" ? "activeLayer" : "composite",
       buildBody: (scratch) =>
         buildSegmentJobBody({
           project: activeProject,
@@ -314,15 +390,33 @@ export function useMaskTool({
           displayName: working?.source?.name,
         }),
       onComplete: async (resultAsset) => {
+        const pending = pendingSmartSelectRef.current;
+        if (!pending || pending.requestGeneration !== requestGeneration) return;
+        const liveWorking = getWorking();
+        if (
+          targetLayerId &&
+          (liveWorking?.activeLayerId !== targetLayerId ||
+            liveWorking?.layers?.find((layer) => layer.id === targetLayerId)?.blob !== targetLayerBlob)
+        ) {
+          smartSelectLoaderRef.current.invalidate();
+          pendingSmartSelectRef.current = null;
+          return;
+        }
         await smartSelectLoaderRef.current.load(resultAsset, requestGeneration, (image) => {
-          loadMaskBase(image);
+          loadMaskBase(image, { source: "smartSelect", targetLayerId });
           // Return to the mask tool so the auto-mask can be refined with the brush/eraser.
-          setTool("edit");
+          setTool(initiatingTool);
           setMaskMode(true);
           setMaskSubTool("brush");
         });
+        if (pendingSmartSelectRef.current?.requestGeneration === requestGeneration) {
+          pendingSmartSelectRef.current = null;
+        }
       },
     });
+    if (!started && pendingSmartSelectRef.current?.requestGeneration === requestGeneration) {
+      pendingSmartSelectRef.current = null;
+    }
   }
 
   return {
@@ -335,6 +429,9 @@ export function useMaskTool({
     maskBaseImage,
     maskOverlay,
     maskSubTool,
+    maskSource,
+    maskTargetLayerId,
+    maskCoordinateSpace,
     selectDraft,
     // Setters used in render
     setMaskMode,
@@ -354,6 +451,9 @@ export function useMaskTool({
     selectPointerUp,
     cancelSelectDrag,
     rasterizeMaskToFile,
+    rasterizeMaskToCanvas,
+    installMaskBaseCanvas,
+    runSmartSelect,
     refineMask,
     resetMaskState,
   };
