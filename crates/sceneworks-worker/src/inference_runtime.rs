@@ -507,7 +507,12 @@ mod tests {
             assert!(media_count > 40);
             assert_eq!(
                 text_ids,
-                ["candle-llama", "candle-llava", "candle-starvector-1b"]
+                [
+                    "candle-llama",
+                    "candle-llava",
+                    "candle-starvector-1b",
+                    "candle-starvector-8b",
+                ]
             );
         }
 
