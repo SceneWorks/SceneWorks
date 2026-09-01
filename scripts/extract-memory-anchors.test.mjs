@@ -92,27 +92,22 @@ test("every catalog model x tier x lane is classified, with nothing unclassified
 });
 
 test("the classification is shaped like the catalog, not like one corpus", () => {
-  // Shape guards so the coverage assertion above cannot pass vacuously: both classifications are
-  // populated, both backend lanes appear, and more than one model is covered.
-  assert.ok(store.anchors.length > 0, "the migration must extract anchors");
-  assert.ok(
-    store.analyticOnly.length > 0,
-    "unanchorable cells must be declared, not omitted",
-  );
+  // SHAPE ONLY. Population counts ("anchors exist", "more than one model is anchored") were
+  // removed under sc-22512/E8: they red when a measurement is retired or a corpus shrinks, which
+  // is never a defect. What survives grades data that IS present — the lane spelling, and each
+  // row's basis/reason/evidence agreement.
   assert.equal(store.schemaVersion, MEMORY_ANCHOR_SCHEMA_VERSION);
   const lanes = new Set([
     ...store.anchors.map((anchor) => anchor.backend),
     ...store.analyticOnly.map((entry) => entry.backend),
   ]);
-  assert.deepEqual(
-    [...lanes].sort(),
-    ["candle", "mlx"],
-    "both backend lanes are classified",
-  );
-  assert.ok(
-    new Set(store.anchors.map((anchor) => anchor.modelId)).size > 1,
-    "anchors must cover more than one model",
-  );
+  // SUBSET, not an exact roster: `deepEqual(["candle","mlx"])` is a population gate wearing a
+  // shape gate's clothes — it reds when a lane's rows are all retired, which is absence. What is
+  // actually enforceable at any population size is that no row spells a lane the loader cannot
+  // route.
+  for (const lane of lanes) {
+    assert.ok(["candle", "mlx"].includes(lane), `unknown backend lane ${lane}`);
+  }
   for (const entry of store.analyticOnly) {
     assert.ok(
       ANALYTIC_BASES.includes(entry.basis),
@@ -140,6 +135,34 @@ test("the classification is shaped like the catalog, not like one corpus", () =>
       anchor.source.path.length > 0 && anchor.source.sha256.length === 64,
     );
   }
+});
+
+// sc-22512 / E8: absence is an INPUT to the classification, never a failure. A model no corpus, no
+// manifest tier table and no provider constant says anything about must still come out classified,
+// with a stated reason — and the extractor must not throw on the way there. Built entirely in-test
+// (nothing is committed) so this keeps asking its question no matter what the real corpus holds.
+test("a catalog model with zero evidence of any kind is classified, not refused", async () => {
+  const model = {
+    id: "sc22512_unmeasured_model",
+    backends: ["mlx"],
+    axes: { mlx: { tiers: ["q4"] } },
+    family: "sc22512-unmeasured-family",
+    familyGroup: null,
+    resolvedRoute: null,
+    resolvedRoutes: { mlx: "sc22512_unmeasured_route" },
+    modality: "image",
+  };
+  const built = await buildAnchorStore({ matrix: { models: [model] } });
+
+  assert.deepEqual(built.anchors, [], "no retained render covers this cell, so it anchors nothing");
+  assert.equal(built.analyticOnly.length, 1, "the cell is classified exactly once");
+  const [row] = built.analyticOnly;
+  assert.equal(row.modelId, model.id);
+  assert.equal(row.backend, "mlx");
+  assert.equal(row.tier, "q4");
+  assert.equal(row.basis, "no_retained_evidence", "total absence is an explicit basis, not a gap");
+  assert.equal(row.evidence, null, "a no-evidence row cites nothing");
+  assert.ok(row.reason.trim().length > 0, "the classification states why it is analytic-only");
 });
 
 test("the checked-in store is what the extractor produces", async () => {
@@ -196,24 +219,31 @@ test("the store is a pure function of the committed evidence, not of iteration o
   // strength of having been written once.
   // A hand-inserted row — the shape `--check` used to seed itself with — does not survive a
   // rebuild, whether it cites a walked corpus or one this run never sees.
-  const unanchored = cells.find(
-    (cell) =>
-      !store.anchors.some(
-        (anchor) =>
-          cellKey(anchor.modelId, anchor.backend, anchor.tier) ===
-          cellKey(cell.modelId, cell.backend, cell.tier),
-      ),
-  );
-  assert.ok(unanchored, "the catalog has a cell no anchor covers");
+  // A cell the rebuild will NOT re-derive an anchor for. Preferably a real unanchored catalog cell;
+  // if coverage is ever total, a coordinate outside the catalog serves the same purpose — either
+  // way the hand-written row must not survive. Asserting that an unanchored cell EXISTS would be an
+  // inverted absence gate: it reds the day coverage becomes complete (sc-22512/E8).
+  const unanchored =
+    cells.find(
+      (cell) =>
+        !store.anchors.some(
+          (anchor) =>
+            cellKey(anchor.modelId, anchor.backend, anchor.tier) ===
+            cellKey(cell.modelId, cell.backend, cell.tier),
+        ),
+    ) ?? { modelId: "sc22512_no_such_model", backend: "mlx", tier: "q4" };
+  // Likewise absence-tolerant: with an empty anchor set there is no row to copy the shape from, and
+  // an empty template still exercises the question ("does a written row survive a rebuild?").
+  const template = store.anchors[0] ?? { source: {} };
   const handWritten = (id, source) => ({
-    ...store.anchors[0],
+    ...template,
     id,
     modelId: unanchored.modelId,
     backend: unanchored.backend,
     tier: unanchored.tier,
     transformerVariant: null,
     decoder: null,
-    source: { ...store.anchors[0].source, ...source },
+    source: { ...template.source, ...source },
   });
   const seeded = await buildAnchorStore({
     matrix,

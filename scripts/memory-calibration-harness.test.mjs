@@ -936,33 +936,38 @@ test("current Qwen q4 and bf16 evidence cannot omit physical MLX provenance", as
   );
 });
 
-test("a record with no closure digest fails loudly instead of falling back to pin equality", () => {
-  // The fallback would be invisible in a green run and would silently restore the old policy.
+test("a record with no closure digest reads historical, never current and never a pin fallback", () => {
+  // sc-22512: this used to assert a THROW. Absence of a currency term is not a defect — under E8 it
+  // withholds an improvement instead of blocking. `historical` is the conservative answer, and the
+  // property that actually matters is preserved and asserted directly: it is not the pin-equality
+  // fallback this replaced. The lane digest below is deliberately UNEQUAL to anything the record
+  // carries, and the record's inference revision matches the run's, so a pin-equality regression
+  // would read `current` here and still fail this test.
   const record = complete({ evidenceScope: "authoritative" });
   delete record.repositories.inference.closureDigest;
-  assert.throws(
-    () =>
-      evidenceSemantics(record, {
-        sceneWorks: record.repositories.sceneWorks.matrixSourceRevision,
-        inference: record.repositories.inference.revision,
-        inferenceClosureDigests: {
-          [`${record.backend}:${record.target.provider}`]: "f".repeat(64),
-        },
-      }),
-    /closureDigest/,
+  assert.equal(
+    evidenceSemantics(record, {
+      sceneWorks: record.repositories.sceneWorks.matrixSourceRevision,
+      inference: record.repositories.inference.revision,
+      inferenceClosureDigests: {
+        [`${record.backend}:${record.target.provider}`]: "f".repeat(64),
+      },
+    }),
+    "historical",
   );
 });
 
-test("an undeclared provider fails loudly rather than being treated as current", () => {
+test("an undeclared provider reads historical rather than being treated as current", () => {
+  // sc-22512: the lane-declaration REFUSAL is gone; the "never current" half is what protected
+  // anything, and it is asserted here without making an undeclared lane red the suite.
   const record = complete({ evidenceScope: "authoritative" });
-  assert.throws(
-    () =>
-      evidenceSemantics(record, {
-        sceneWorks: record.repositories.sceneWorks.matrixSourceRevision,
-        inference: record.repositories.inference.revision,
-        inferenceClosureDigests: {},
-      }),
-    /inference-provider-closures\.json/,
+  assert.equal(
+    evidenceSemantics(record, {
+      sceneWorks: record.repositories.sceneWorks.matrixSourceRevision,
+      inference: record.repositories.inference.revision,
+      inferenceClosureDigests: {},
+    }),
+    "historical",
   );
 });
 
@@ -3933,32 +3938,36 @@ test("a selection with no authoritative entry derives no digest at all", async (
   assert.equal(result.records[0].repositories.inference.closureDigest, undefined);
 });
 
-test("an undeclared lane fails BEFORE the first capture, not after it", async () => {
-  // Eager derivation is the point: the hardware probe is cheap, but a 26 GB `run`/`run_batch` must
-  // not burn before the runner discovers it cannot stamp a currency term. This drives the REAL
-  // deriver (no `closureDigestFor`) against the real declarations file, and `onProviderInvocation`
-  // fires only for capture actions — so an empty list proves nothing was measured.
+test("an undeclared lane is CAPTURED without a currency term, never refused", async () => {
+  // sc-22512 inverted this test. It used to assert that an undeclared lane `rejects` BEFORE the
+  // first capture — which meant a lane nobody had declared could not be measured at all, so the
+  // absence of bookkeeping blocked the measurement that would have relieved it. That is the exact
+  // shape E8 retires.
+  //
+  // The capture now runs and the record carries NO closure digest, which is the conservative
+  // answer: `evidenceSemantics` reads such a record `historical`, so it can never certify a cell.
+  // This still drives the REAL deriver (no `closureDigestFor`) against the real declarations file,
+  // so it is the production path and not a stub.
   const cleanRepo = await cleanFixtureRepo();
   const invocations = [];
-  await assert.rejects(
-    runProviderPlan({
-      config: {
-        providers: [laneProvider({
-          backend: "candle", provider: "never_declared_provider", fixture: "cap-undeclared",
-        })],
-      },
-      providerCommand: [
-        process.execPath,
-        fileURLToPath(new URL("./fixtures/memory-provider-fixture.mjs", import.meta.url)),
-      ],
-      sceneWorksRepo: fileURLToPath(new URL("..", import.meta.url)),
-      inferenceRepo: cleanRepo,
-      fixture: "cap-undeclared",
-      onProviderInvocation: (invocation) => invocations.push(invocation),
-    }),
-    /lane "candle:never_declared_provider" has no entry in config\/inference-provider-closures\.json/,
-  );
-  assert.deepEqual(invocations, [], "no capture may run once the lane is known to be underivable");
+  const result = await runProviderPlan({
+    config: {
+      providers: [laneProvider({
+        backend: "candle", provider: "never_declared_provider", fixture: "cap-undeclared",
+      })],
+    },
+    providerCommand: [
+      process.execPath,
+      fileURLToPath(new URL("./fixtures/memory-provider-fixture.mjs", import.meta.url)),
+    ],
+    sceneWorksRepo: fileURLToPath(new URL("..", import.meta.url)),
+    inferenceRepo: cleanRepo,
+    fixture: "cap-undeclared",
+    onProviderInvocation: (invocation) => invocations.push(invocation),
+  });
+  assert.equal(result.records.length, 1);
+  assert.equal(result.records[0].repositories.inference.closureDigest, undefined);
+  assert.ok(invocations.length, "the undeclared lane must actually be measured, not skipped");
 });
 
 test("resume is not defeated by the per-lane digest a prior record carries", async () => {
@@ -4001,14 +4010,23 @@ test("resume is not defeated by the per-lane digest a prior record carries", asy
   assert.equal(resumed.records.length, 1);
 });
 
-test("every checked-in capture invocation selects a plan fixture on a DECLARED lane", async () => {
-  // The story's regression gate, driven off the real workflow files. Three ways this drifts: a
-  // workflow names a fixture the plan no longer has, its `--backend`/`--fixture` pair selects
-  // nothing, or the plan gains an authoritative lane nobody declared a crate for. Each one kills a
-  // capture job on a runner instead of here.
+// sc-22512 removed the DECLARED-LANE half of the test below: it required every authoritative
+// survivor's lane to carry a config/inference-provider-closures.json declaration, plus a converse
+// sweep that reddened `npm run check` for any authoritative plan lane no workflow had captured yet.
+// That is a lane-declaration gate in the strict sense E8 forbids — adding a model to the
+// calibration plan reddened CI until somebody hand-maintained a second file, and the failure was
+// about bookkeeping rather than about anything a capture would find. The harness no longer refuses
+// an undeclared lane either (see "an undeclared lane is CAPTURED without a currency term, never
+// refused" above): the capture runs and simply carries no currency term.
+//
+// What is kept is PRESENT-DATA agreement between two checked-in artifacts: the workflows say which
+// --backend/--fixture pairs the runners will invoke, and config/memory-calibration-plan.json says
+// which providers those pairs select. A workflow naming a fixture the plan no longer has, or a
+// pair that selects nothing, kills a capture job on a runner rather than here — and nothing about
+// that defect is a missing measurement, so it stays gated.
+test("every checked-in capture invocation selects a plan fixture", async () => {
   const root = new URL("../", import.meta.url);
   const plan = JSON.parse(await readFile(new URL("config/memory-calibration-plan.json", root)));
-  const closures = JSON.parse(await readFile(new URL("config/inference-provider-closures.json", root)));
   const workflows = await readdir(new URL(".github/workflows/", root));
 
   const selected = [];
@@ -4040,22 +4058,12 @@ test("every checked-in capture invocation selects a plan fixture on a DECLARED l
       }
     }
   }
-  assert.ok(selected.length >= 6, `expected the checked-in capture selections, found ${selected.length}`);
-
+  // No `selected.length >= 6` pin: that was a frozen population of checked-in capture invocations,
+  // and retiring a capture workflow is absence, not a defect. The loop is universally quantified
+  // over whatever invocations exist and goes vacuous rather than red if none do.
   for (const [label, backend, matches] of selected) {
-    // Exactly what `runProviderPlan` does: filter the plan, then key every authoritative survivor.
+    // Exactly what `runProviderPlan` does: filter the plan by backend, then by fixture.
     const entries = plan.providers.filter((provider) => provider.backend === backend && matches(provider.fixture));
     assert.ok(entries.length, `${label}: selects no plan provider on backend ${backend}`);
-    for (const entry of entries.filter((provider) => provider.evidenceScope === "authoritative")) {
-      const lane = `${entry.backend}:${entry.target.provider}`;
-      assert.ok(closures.providers[lane], `${label}: lane ${lane} has no closure declaration`);
-    }
   }
-
-  // And the converse, so a plan lane that no workflow captures yet still cannot be added undeclared.
-  const undeclared = [...new Set(plan.providers
-    .filter((provider) => provider.evidenceScope === "authoritative")
-    .map((provider) => `${provider.backend}:${provider.target.provider}`))]
-    .filter((lane) => !closures.providers[lane]);
-  assert.deepEqual(undeclared, [], "authoritative plan lanes with no closure declaration cannot be captured");
 });

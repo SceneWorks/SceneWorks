@@ -54,8 +54,12 @@ pub const PACKAGED_INFERENCE_PROVIDER_CLOSURES: &str =
 /// (`mlx-gen-krea`) and on candle (`candle-gen-krea`), which are different code paths that must
 /// never be compared against each other.
 ///
-/// `None` is a real answer and callers must fail closed on it rather than admitting: an undeclared
-/// lane means nobody derived what code its measurements were taken against.
+/// `None` is a real answer: the lane carries no currency term, so nobody derived what code its
+/// measurements were taken against and no measurement on it can ever read as CURRENT. Callers
+/// therefore fall back to the conservative analytic estimate — they must NOT treat `None` as
+/// grounds to refuse admission (sc-22512, epic requirement E8: absence never blocks; a measurement
+/// only ever improves an estimate). Runtime catching, not a build-time gate, is the failure posture
+/// for an estimate that turns out too low.
 pub fn packaged_closure_digest(backend: &str, provider: &str) -> Option<String> {
     serde_json::from_str::<Value>(PACKAGED_INFERENCE_PROVIDER_CLOSURES)
         .ok()?
