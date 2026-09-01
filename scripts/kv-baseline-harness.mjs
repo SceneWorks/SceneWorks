@@ -54,6 +54,18 @@ export const FIT_BOUNDARY_MIN_CONTEXT_BPS = 9_000;
 const SCENEWORKS_REPOSITORY = "github.com/SceneWorks/SceneWorks";
 const INFERENCE_REPOSITORY = "github.com/SceneWorks/inference";
 const PMETAL_MLX_REPOSITORY = "https://github.com/michaeltrefry/mlx-rs";
+// Mirrored from inference commit d5b33c6b3849dfecb2dd5ff2f97ff68a87c6cef0.  These are
+// receipt identities, never caller-selectable model aliases or local paths.
+export const SC20671_MODEL_CONTRACTS = Object.freeze({
+  llama: Object.freeze({
+    candidate: Object.freeze({ repository: "mlx-community/Llama-3.2-1B-Instruct-4bit", revision: "08231374eeacb049a0eade7922910865b8fce912", architecture: "LlamaForCausalLM", nativeContextTokens: 131_072 }),
+    reference: Object.freeze({ repository: "mlx-community/Llama-3.2-1B-Instruct-bf16", revision: "863c846a9ac6fad4e49e1743d52984dff262e953", architecture: "LlamaForCausalLM", nativeContextTokens: 131_072 }),
+  }),
+  qwen: Object.freeze({
+    candidate: Object.freeze({ repository: "mlx-community/Qwen3-1.7B-4bit", revision: "3b1b1768f8f8cf8351c712464f906e86c2b8269e", architecture: "Qwen3ForCausalLM", nativeContextTokens: 40_960 }),
+    reference: Object.freeze({ repository: "mlx-community/Qwen3-1.7B-bf16", revision: "9cd6692855d3e06772228e9a962b2606359b2d24", architecture: "Qwen3ForCausalLM", nativeContextTokens: 40_960 }),
+  }),
+});
 const TIMING_FIELDS = [
   "loadMs",
   "prefillMs",
@@ -121,6 +133,26 @@ function text(value, name) {
     fail(`${name} must be non-empty text`);
   }
   return value;
+}
+
+function expectedModelId(spec, inventory) {
+  return `${spec.repository}@${spec.revision};architecture=${spec.architecture};inventory=${inventory}`;
+}
+
+function validatePinnedModelContract(receipt) {
+  const contract = SC20671_MODEL_CONTRACTS[receipt.matrix.family];
+  if (!contract) fail("receipt model family has no sealed SC-20671 contract");
+  const { candidate, reference } = contract;
+  if (receipt.provenance.modelId !== expectedModelId(candidate, receipt.provenance.modelFileSha256)) {
+    fail(`candidate model identity does not match the sealed ${receipt.matrix.family} contract`);
+  }
+  if (receipt.provenance.referenceModelId
+      !== expectedModelId(reference, receipt.provenance.referenceModelSha256)) {
+    fail(`reference model identity does not match the sealed ${receipt.matrix.family} contract`);
+  }
+  if (receipt.geometry.contextWindowTokens !== candidate.nativeContextTokens) {
+    fail(`context window does not match the sealed ${receipt.matrix.family} contract`);
+  }
 }
 
 function finite(value, name) {
@@ -556,6 +588,7 @@ export function validateReceipt(receipt, { verifyHash = true } = {}) {
     || (receipt.matrix.requestMode === "supported-batch" && receipt.geometry.batch <= 1)) {
     fail("matrix requestMode disagrees with geometry.batch");
   }
+  validatePinnedModelContract(receipt);
 
   exactKeys(
     receipt.memory,

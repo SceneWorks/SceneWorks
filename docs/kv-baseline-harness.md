@@ -69,6 +69,20 @@ directory and atomically renames one aggregate directory containing
 `campaign.json` and its sidecar. A missing worker, non-product field, stale
 sidecar, duplicate coordinate, or reused cold PID leaves no campaign directory.
 
+Before the parent or a worker loads a snapshot, inference commit
+`d5b33c6b3849dfecb2dd5ff2f97ff68a87c6cef0` seals these exact model identities.
+SceneWorks mirrors the same rule when it validates a portable receipt: a local
+snapshot path is not an identity, and `modelId`/`referenceModelId` must contain
+the matching repository, immutable revision, architecture, and producer
+inventory digest. A mismatched revision, family, candidate/reference role, or
+native context fails receipt validation; no result may replace one arm with a
+caller-selected model.
+
+| family | candidate | higher-precision reference | native context |
+| --- | --- | --- | --- |
+| Llama | `mlx-community/Llama-3.2-1B-Instruct-4bit@08231374eeacb049a0eade7922910865b8fce912` | `mlx-community/Llama-3.2-1B-Instruct-bf16@863c846a9ac6fad4e49e1743d52984dff262e953` | 131,072 |
+| Qwen | `mlx-community/Qwen3-1.7B-4bit@3b1b1768f8f8cf8351c712464f906e86c2b8269e` | `mlx-community/Qwen3-1.7B-bf16@9cd6692855d3e06772228e9a962b2606359b2d24` | 40,960 |
+
 The producer deliberately fails closed if its numeric quality-reference hooks
 cannot supply all four checked-in quality fixtures. It must never substitute a
 synthetic zero-error or caller-authored quality result merely to publish a
