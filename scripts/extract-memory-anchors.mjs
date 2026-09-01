@@ -20,7 +20,7 @@
  *   carries whatever weaker evidence does exist, so "nobody measured this" is distinguishable from
  *   "this was measured and the record was dropped".
  *
- * Sources walked (all read-only, all repo-retained except the last):
+ * Sources walked (all read-only, all committed to THIS repo):
  *
  *   1. every `{records: [...]}` corpus under `docs/calibration/` and `docs/generated/` — the
  *      committed evidence bundle, the per-story receipt seeds and the geometry sweeps;
@@ -28,11 +28,16 @@
  *      record corpora the video lane's identities were measured from, which is how the LTX-2.3
  *      sweep is reached (its paths are asserted to be part of the discovered corpus set);
  *   3. `config/manifests/builtin.models.jsonc` — `measured: true` `vramGbByTier` /
- *      `sequentialPeakGb` tier tables, a per-tier declared envelope but not a phase decomposition;
- *   4. the pinned inference revision's per-provider `mlx-gen-<family>/src/memory_strategy.rs` measured
- *      byte constants, read from the cargo checkout OF THE PIN (never a working tree, never a
- *      different revision). When that checkout is absent the previously extracted values are
- *      carried forward from the existing store, so the output is identical either way.
+ *      `sequentialPeakGb` tier tables, a per-tier declared envelope but not a phase decomposition.
+ *
+ * A fourth source — the pinned inference revision's per-provider
+ * `mlx-gen-<family>/src/memory_strategy.rs` measured byte constants — is OPT-IN and off by default,
+ * because it lives outside this repo. A default run reads no cargo checkout at all, so the output
+ * is a function of the committed tree and nothing else: this Mac, a CI runner and a fresh clone all
+ * emit the same bytes. `--inference-root <dir>` reads one explicitly, and `--inference-root auto`
+ * locates the cargo checkout OF THE PIN (never a working tree, never a different revision). Neither
+ * is used to produce the checked-in store, and a run without them withdraws any row that only an
+ * opt-in run could have written, rather than carrying a host-local value forward invisibly.
  *
  * The catalog population is NOT re-invented here: it comes from `buildMatrix()` in
  * `scripts/generate-memory-matrix.mjs`, the same resolution the memory matrix publishes, so a
@@ -42,14 +47,17 @@
  * comparison, every selection rule is total, and re-running over the same corpora reproduces the
  * file byte-identically (`scripts/extract-memory-anchors.test.mjs`).
  *
- * IDEMPOTENCE / UNION: an anchor already in the store whose identity this run does not produce is
- * carried forward rather than dropped, so a concurrently landed anchor (sc-22509's candle proving
- * models) survives a re-run instead of being clobbered by it. Authority is scoped to the corpora
- * this run WALKED: a row citing one of them that the run did not re-produce was rejected on
- * purpose — an overlay render, a record that lost its phase peaks — and is withdrawn rather than
- * made immortal by the carry-forward.
+ * The store is a PURE FUNCTION of the committed evidence — the previous output is never an input.
+ * There is deliberately no carry-forward union: a row a regeneration does not re-derive has no
+ * evidence behind it in this tree, and preserving it would make a withdrawn anchor immortal and
+ * make `--check` unable to see the difference. A concurrently landed anchor (sc-22509's candle
+ * proving models) survives a re-run the only way an anchor can be trusted to: its corpus is
+ * committed under a walked root, so the re-run derives it again. `assertPackagedSources` enforces
+ * the other half of that contract — every emitted anchor cites a file compiled into
+ * `PACKAGED_MEMORY_ANCHOR_SOURCES`, so a store this script writes is always one the Rust loader
+ * accepts.
  *
- * Usage: node scripts/extract-memory-anchors.mjs [--check] [--inference-root <dir>]
+ * Usage: node scripts/extract-memory-anchors.mjs [--check] [--inference-root <dir>|auto]
  */
 import { createHash } from "node:crypto";
 import { readFile, writeFile, rename, readdir } from "node:fs/promises";
@@ -76,6 +84,13 @@ export const MANIFEST_PATH = "config/manifests/builtin.models.jsonc";
 
 /** Where the inference pin is declared; the extractor reads the mlx providers AT THIS REVISION. */
 export const PIN_PATH = "crates/sceneworks-worker/Cargo.toml";
+
+/**
+ * The Rust loader's compiled-in evidence list. An anchor may only cite a file named here — the
+ * loader hard-rejects any other path — so the generator reads the SAME list rather than trusting
+ * the two halves to stay aligned by convention.
+ */
+export const PACKAGED_SOURCES_PATH = "crates/sceneworks-core/src/memory_anchor.rs";
 
 /** The three phase peaks an anchor is made of. Absent any one of them, the record cannot anchor. */
 const PHASE_MEASUREMENTS = {
@@ -340,11 +355,28 @@ export async function catalogCells(matrix) {
     for (const backend of model.backends) {
       const axes = model.axes?.[backend];
       if (!axes) continue;
+      // Both fields are non-optional on the Rust side, under `deny_unknown_fields`. An undefined
+      // value is dropped by `JSON.stringify` rather than written as null, so a catalog entry that
+      // stops publishing one would fail on the CONSUMER as a serde "missing field" — name it here,
+      // against the model it came from, instead.
+      const modelFamily = model.family ?? model.familyGroup;
+      const route = model.resolvedRoutes?.[backend] ?? model.resolvedRoute;
+      for (const [field, value] of [
+        ["family/familyGroup", modelFamily],
+        [`resolvedRoutes.${backend}/resolvedRoute`, route],
+      ]) {
+        if (typeof value !== "string" || value.length === 0) {
+          throw new Error(
+            `${model.id} (${backend}): the routing catalog publishes ${JSON.stringify(value)} for ` +
+              `${field}, but every anchor-store row is required to carry it as a non-empty string`,
+          );
+        }
+      }
       for (const tier of axes.tiers) {
         cells.push({
           modelId: model.id,
-          modelFamily: model.family ?? model.familyGroup,
-          route: model.resolvedRoutes?.[backend] ?? model.resolvedRoute,
+          modelFamily,
+          route,
           modality: model.modality,
           backend,
           tier,
@@ -366,7 +398,13 @@ export async function catalogCells(matrix) {
  * driver-level figure repeated), so it bounds the envelope without anchoring the derivation.
  */
 export function envelopeEvidence(corpora, cell) {
+  // Two independent races, not one: a CLEAN render of this cell always outranks an overlay render
+  // of it, however much larger the overlay's envelope is, because the overlay measures a different
+  // resident set. Only when every retained render for the cell carries an overlay does the overlay
+  // race decide — which is also what makes the emitted `overlay` value mean "all of them", and lets
+  // the row's reason say so truthfully.
   let best = null;
+  let bestOverlay = null;
   for (const corpus of corpora) {
     for (const record of corpus.records) {
       if (record?.backend !== cell.backend) continue;
@@ -395,16 +433,20 @@ export function envelopeEvidence(corpora, cell) {
         envelopeBytes: envelope,
         values: Object.keys(values).length === 0 ? null : values,
       };
-      if (best === null || candidate.envelopeBytes > best.envelopeBytes) {
-        best = candidate;
-        continue;
-      }
-      if (candidate.envelopeBytes < best.envelopeBytes) continue;
-      const byPath = compareText(candidate.path, best.path);
-      if (byPath < 0 || (byPath === 0 && compareText(candidate.recordId, best.recordId) < 0)) {
-        best = candidate;
-      }
+      if (overlay === null) best = preferEnvelope(best, candidate);
+      else bestOverlay = preferEnvelope(bestOverlay, candidate);
     }
+  }
+  return best ?? bestOverlay;
+}
+
+/** Larger envelope wins; ties broken by (source path, record id), both stable strings. */
+function preferEnvelope(best, candidate) {
+  if (best === null || candidate.envelopeBytes > best.envelopeBytes) return candidate;
+  if (candidate.envelopeBytes < best.envelopeBytes) return best;
+  const byPath = compareText(candidate.path, best.path);
+  if (byPath < 0 || (byPath === 0 && compareText(candidate.recordId, best.recordId) < 0)) {
+    return candidate;
   }
   return best;
 }
@@ -449,6 +491,47 @@ export function inferencePin(cargoToml) {
     );
   }
   return unique[0];
+}
+
+/**
+ * The repo-relative paths in `PACKAGED_MEMORY_ANCHOR_SOURCES`, parsed out of the Rust module that
+ * declares it. This is the loader's whole domain for `anchor.source.path`: a store citing anything
+ * else is rejected by `validate_anchor` as "not a compiled retained-evidence file", so producing
+ * one would be writing an artifact the consumer cannot load.
+ */
+export function packagedAnchorSources(source) {
+  const start = source.indexOf("PACKAGED_MEMORY_ANCHOR_SOURCES: &[(&str, &str)] = &[");
+  const end = start === -1 ? -1 : source.indexOf("\n];", start);
+  if (start === -1 || end === -1) {
+    throw new Error(
+      `${PACKAGED_SOURCES_PATH} no longer declares PACKAGED_MEMORY_ANCHOR_SOURCES in the shape this ` +
+        "generator reads; the anchor store's source domain cannot be checked",
+    );
+  }
+  const paths = [
+    ...source.slice(start, end).matchAll(/\(\s*"([^"]+)",\s*include_str!/g),
+  ].map((match) => match[1]);
+  if (paths.length === 0) {
+    throw new Error(`${PACKAGED_SOURCES_PATH} declares an empty PACKAGED_MEMORY_ANCHOR_SOURCES`);
+  }
+  return new Set(paths);
+}
+
+/**
+ * Every anchor must cite a compiled-in corpus. The failure names the offending row and what to do,
+ * rather than surfacing two lanes later as a Rust load error on a committed artifact.
+ */
+export function assertPackagedSources(anchors, packaged) {
+  const foreign = anchors
+    .filter((anchor) => !packaged.has(anchor.source?.path))
+    .map((anchor) => `${anchor.id} -> ${anchor.source?.path}`)
+    .sort(compareText);
+  if (foreign.length > 0) {
+    throw new Error(
+      `anchors cite evidence that is not compiled into PACKAGED_MEMORY_ANCHOR_SOURCES ` +
+        `(${PACKAGED_SOURCES_PATH}), so the store would not load: ${foreign.join(", ")}`,
+    );
+  }
 }
 
 /**
@@ -568,15 +651,17 @@ const REASONS = {
 };
 
 /**
- * Build the complete store. `existingStore` supplies the two carry-forward rules: anchors this run
- * does not produce are preserved (union with concurrent work), and provider constants extracted at
- * the pin survive on a host with no cargo checkout of it.
+ * Build the complete store from the committed evidence. The previous output is NOT an input: there
+ * is no carry-forward, so `--check` and a regeneration ask the same question.
+ *
+ * `inferenceRoot` is the one optional input and it defaults to OFF (`null`): `"auto"` locates the
+ * cargo checkout of the pin on this host, a path reads that directory, and `null` reads no checkout
+ * at all, which is what the checked-in store is generated with.
  */
 export async function buildAnchorStore({
   root = ROOT,
   matrix = null,
-  existingStore = null,
-  inferenceRoot = undefined,
+  inferenceRoot = null,
 } = {}) {
   const resolvedMatrix = matrix ?? (await buildMatrix());
   const cells = await catalogCells(resolvedMatrix);
@@ -639,43 +724,27 @@ export async function buildAnchorStore({
     extracted.set(key, anchorRow(chosen, cell));
   }
 
-  // 2. Union with anchors already in the store that this run did not produce (sc-22509 lands its
-  //    candle proving-model anchors concurrently; a re-run must not delete them).
-  for (const anchor of existingStore?.anchors ?? []) {
-    const key = identityKey({
-      modelId: anchor.modelId,
-      backend: anchor.backend,
-      tier: anchor.tier,
-      transformerVariant: anchor.transformerVariant ?? null,
-      decoder: anchor.decoder ?? null,
-    });
-    if (extracted.has(key)) continue;
-    if (!catalogByCell.has(cellKey(anchor.modelId, anchor.backend, anchor.tier))) continue;
-    // Authority is scoped to the corpora this run WALKED. A row citing one of them that this run
-    // did not re-produce was rejected on purpose (an overlay render, a record that lost its phase
-    // peaks), and carrying it forward anyway would make a withdrawn anchor immortal. A row citing
-    // evidence outside those corpora is another story's, and is preserved untouched.
-    if (discovered.has(anchor.source?.path)) continue;
-    extracted.set(key, anchor);
-  }
+  // 2. Every emitted anchor must cite a corpus the Rust loader compiles in. A sibling story's
+  //    anchors reach this store the same way these did — its corpus lands under a walked root and
+  //    in `PACKAGED_MEMORY_ANCHOR_SOURCES`, and the regeneration derives them — so the two halves
+  //    are checked against each other here rather than assumed to agree.
   const anchors = [...extracted.values()].sort((left, right) => compareText(left.id, right.id));
+  assertPackagedSources(
+    anchors,
+    packagedAnchorSources(await readFile(path.join(root, PACKAGED_SOURCES_PATH), "utf8")),
+  );
   const anchoredCells = new Set(
     anchors.map((anchor) => cellKey(anchor.modelId, anchor.backend, anchor.tier)),
   );
 
-  // 3. Provider constants at the PIN, with carry-forward when this host has no checkout of it.
+  // 3. Provider constants at the PIN — OPT-IN. A default run reads no checkout, so this limb
+  //    contributes nothing and the output cannot differ between a host that has the pin's cargo
+  //    checkout and one that does not. Opting in is a deliberate, host-dependent act.
   const mlxModelIds = new Set(
     cells.filter((cell) => cell.backend === "mlx").map((cell) => cell.modelId),
   );
-  const checkout =
-    inferenceRoot === undefined ? await locateInferenceCheckout(pin) : inferenceRoot;
+  const checkout = inferenceRoot === "auto" ? await locateInferenceCheckout(pin) : inferenceRoot;
   const providerConstants = await inferenceProviderConstants(checkout, pin, mlxModelIds);
-  const carriedProviderEvidence = new Map();
-  for (const entry of existingStore?.analyticOnly ?? []) {
-    if (entry.basis === "provider_measured_constants" && entry.evidence) {
-      carriedProviderEvidence.set(cellKey(entry.modelId, entry.backend, entry.tier), entry.evidence);
-    }
-  }
 
   // 4. Every remaining catalog cell is classified explicitly. There is no unclassified state.
   const analyticOnly = [];
@@ -683,10 +752,7 @@ export async function buildAnchorStore({
     const key = cellKey(cell.modelId, cell.backend, cell.tier);
     if (anchoredCells.has(key)) continue;
     const envelope = envelopeEvidence(corpora, cell);
-    const provider =
-      cell.backend === "mlx"
-        ? (providerConstants.get(cell.modelId) ?? carriedProviderEvidence.get(key) ?? null)
-        : null;
+    const provider = cell.backend === "mlx" ? (providerConstants.get(cell.modelId) ?? null) : null;
     const declared = manifestTierEvidence(manifest, MANIFEST_PATH, manifestSha256, cell);
     const [basis, evidence] =
       envelope !== null
@@ -697,12 +763,14 @@ export async function buildAnchorStore({
             ? ["manifest_tier_declaration", declared]
             : ["no_retained_evidence", null];
     // An overlay render's envelope is evidence about a DIFFERENT resident set; say that in the row
-    // rather than letting it read as a missing phase decomposition.
+    // rather than letting it read as a missing phase decomposition. `envelopeEvidence` only ever
+    // returns an overlay record when NO clean render of the cell was retained, so the wording is
+    // entailed by the selection rule rather than asserted about one chosen record.
     const reason =
       basis === "measured_envelope" && evidence?.values?.overlay
-        ? `the only retained render for this cell ran under the '${evidence.values.overlay}' ` +
-          `overlay on provider '${evidence.values.provider ?? "unknown"}', which measures a ` +
-          "different resident set, so it bounds the envelope without anchoring this cell"
+        ? `every retained render for this cell ran under the '${evidence.values.overlay}' ` +
+          `overlay (the largest is on provider '${evidence.values.provider ?? "unknown"}'), which ` +
+          "measures a different resident set, so it bounds the envelope without anchoring this cell"
         : REASONS[basis];
     analyticOnly.push({
       id: analyticId(cell),
@@ -723,22 +791,13 @@ export async function buildAnchorStore({
 
 export const serialiseStore = (store) => `${JSON.stringify(store, null, 2)}\n`;
 
-async function readExistingStore(root) {
-  try {
-    return JSON.parse(await readFile(path.join(root, STORE_PATH), "utf8"));
-  } catch {
-    return null;
-  }
-}
-
 async function main() {
   const args = process.argv.slice(2);
   const rootFlag = args.indexOf("--inference-root");
-  const inferenceRoot = rootFlag === -1 ? undefined : (args[rootFlag + 1] ?? null);
-  const store = await buildAnchorStore({
-    existingStore: await readExistingStore(ROOT),
-    inferenceRoot,
-  });
+  // Off unless asked for, and `--check` gets the same resolution a generation gets: the check is
+  // "regenerate from the committed evidence and compare", with no seeding from the file under test.
+  const inferenceRoot = rootFlag === -1 ? null : (args[rootFlag + 1] ?? null);
+  const store = await buildAnchorStore({ inferenceRoot });
   const serialised = serialiseStore(store);
   const target = path.join(ROOT, STORE_PATH);
   if (args.includes("--check")) {

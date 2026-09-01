@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
-import { readFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
+import os from "node:os";
 import path from "node:path";
 import test, { before } from "node:test";
 import { fileURLToPath } from "node:url";
@@ -8,14 +9,20 @@ import { buildMatrix } from "./generate-memory-matrix.mjs";
 import {
   ANALYTIC_BASES,
   MEMORY_ANCHOR_SCHEMA_VERSION,
+  PACKAGED_SOURCES_PATH,
   STORE_PATH,
   anchorCandidate,
+  assertPackagedSources,
   buildAnchorStore,
   catalogCells,
   cellKey,
+  envelopeEvidence,
   identityKey,
   inferencePin,
+  inferenceProviderConstants,
+  locateInferenceCheckout,
   manifestTierEvidence,
+  packagedAnchorSources,
   providerByteConstants,
   selectRepresentative,
   serialiseStore,
@@ -23,15 +30,16 @@ import {
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 
-// `buildMatrix` resolves the whole catalog; resolve it once and share it, and pin the inference
-// checkout OFF so every assertion below is a property of the repo rather than of this host.
+// `buildMatrix` resolves the whole catalog; resolve it once and share it. Every build below uses
+// the DEFAULT resolution — the same one `main()` and `npm run check:memory-anchors` use — so these
+// assertions cover the shipped code path and are a property of the repo rather than of this host.
 let matrix;
 let store;
 let cells;
 
 before(async () => {
   matrix = await buildMatrix();
-  store = await buildAnchorStore({ matrix, inferenceRoot: null });
+  store = await buildAnchorStore({ matrix });
   cells = await catalogCells(matrix);
 });
 
@@ -110,95 +118,129 @@ test("the checked-in store is what the extractor produces", async () => {
 // ---------------------------------------------------------------------------------------------
 
 test("re-running over the same corpora reproduces the store byte-identically", async () => {
-  const first = serialiseStore(await buildAnchorStore({ matrix, inferenceRoot: null }));
-  const second = serialiseStore(await buildAnchorStore({ matrix, inferenceRoot: null }));
+  const first = serialiseStore(await buildAnchorStore({ matrix }));
+  const second = serialiseStore(await buildAnchorStore({ matrix }));
   assert.equal(first, second);
 });
 
-test("the store is a pure function of its inputs, not of iteration order", async () => {
-  // Feeding the run its own output must not move it: idempotence is what lets the extractor be
-  // re-run after a concurrent story lands an anchor.
-  const once = await buildAnchorStore({ matrix, inferenceRoot: null });
-  const twice = await buildAnchorStore({ matrix, existingStore: once, inferenceRoot: null });
-  assert.equal(serialiseStore(once), serialiseStore(twice));
+test("the store is a pure function of the committed evidence, not of iteration order", async () => {
+  // The previous output is not an input: there is no carry-forward, so `--check` (which rebuilds
+  // and compares) asks exactly the question a regeneration answers, and no row can survive on the
+  // strength of having been written once.
+  // A hand-inserted row — the shape `--check` used to seed itself with — does not survive a
+  // rebuild, whether it cites a walked corpus or one this run never sees.
+  const unanchored = cells.find(
+    (cell) =>
+      !store.anchors.some(
+        (anchor) =>
+          cellKey(anchor.modelId, anchor.backend, anchor.tier) ===
+          cellKey(cell.modelId, cell.backend, cell.tier),
+      ),
+  );
+  assert.ok(unanchored, "the catalog has a cell no anchor covers");
+  const handWritten = (id, source) => ({
+    ...store.anchors[0],
+    id,
+    modelId: unanchored.modelId,
+    backend: unanchored.backend,
+    tier: unanchored.tier,
+    transformerVariant: null,
+    decoder: null,
+    source: { ...store.anchors[0].source, ...source },
+  });
+  const seeded = await buildAnchorStore({
+    matrix,
+    existingStore: {
+      schemaVersion: 1,
+      anchors: [
+        // One citing a corpus this run walks, one citing evidence it never sees: neither is
+        // re-derivable from the committed tree, so neither may reach the store.
+        handWritten("hand:inserted", {}),
+        handWritten("hand:outside-the-corpora", { path: "docs/proving/sc-22509-candle.json" }),
+      ],
+      analyticOnly: [],
+    },
+  });
+  assert.deepEqual(
+    seeded.anchors.filter((anchor) => anchor.id.startsWith("hand:")),
+    [],
+    "no row survives a rebuild on the strength of having been written once",
+  );
+  assert.equal(serialiseStore(seeded), serialiseStore(store));
+
+  const explicitlyOff = await buildAnchorStore({ matrix, inferenceRoot: null });
+  assert.equal(
+    serialiseStore(store),
+    serialiseStore(explicitlyOff),
+    "the default resolution reads no inference checkout, so the output is host-independent",
+  );
   const ids = store.anchors.map((anchor) => anchor.id);
   assert.deepEqual(ids, [...ids].sort(), "anchors are emitted in a stable sorted order");
   const analyticIds = store.analyticOnly.map((entry) => entry.id);
   assert.deepEqual(analyticIds, [...analyticIds].sort(), "analytic rows are emitted sorted");
 });
 
-test("an anchor this run does not produce is carried forward, never clobbered", async () => {
-  // sc-22509 lands candle proving-model anchors concurrently; a re-extraction must union with
-  // them rather than delete every row it did not write itself.
-  const foreignCell = cells.find(
-    (cell) =>
-      cell.backend === "candle" &&
-      !store.anchors.some(
-        (anchor) => cellKey(anchor.modelId, anchor.backend, anchor.tier) === cellKey(cell.modelId, cell.backend, cell.tier),
-      ),
+// ---------------------------------------------------------------------------------------------
+// The anchor store and the Rust loader's compiled-in evidence list are two halves of one contract.
+// Nothing else cross-checks them: `validate_anchor` hard-rejects an anchor whose `source.path` is
+// absent from `PACKAGED_MEMORY_ANCHOR_SOURCES`, so a store citing anything else is unloadable.
+// This is also how a concurrent story's anchors (sc-22509) reach the store: its corpus lands under
+// a walked root AND in that list, and the regeneration derives its rows again.
+// ---------------------------------------------------------------------------------------------
+
+test("every anchor cites a corpus compiled into PACKAGED_MEMORY_ANCHOR_SOURCES", async () => {
+  const packaged = packagedAnchorSources(
+    await readFile(path.join(ROOT, PACKAGED_SOURCES_PATH), "utf8"),
   );
-  assert.ok(foreignCell, "the catalog has an unanchored candle cell to stand in for sc-22509");
-  const foreign = {
-    ...store.anchors[0],
-    id: "foreign:concurrent-story",
-    modelId: foreignCell.modelId,
-    backend: foreignCell.backend,
-    tier: foreignCell.tier,
-    transformerVariant: null,
-    decoder: null,
-    // Cites evidence OUTSIDE the corpora this run walks, which is what makes it another story's
-    // row rather than one this run withdrew.
-    source: { ...store.anchors[0].source, path: "docs/proving/sc-22509-candle.json" },
-  };
-  const merged = await buildAnchorStore({
-    matrix,
-    existingStore: { schemaVersion: 1, anchors: [foreign], analyticOnly: [] },
-    inferenceRoot: null,
-  });
-  assert.ok(
-    merged.anchors.some((anchor) => anchor.id === "foreign:concurrent-story"),
-    "a foreign anchor identity survives re-extraction",
-  );
-  assert.ok(
-    !merged.analyticOnly.some(
-      (entry) => cellKey(entry.modelId, entry.backend, entry.tier) === cellKey(foreignCell.modelId, foreignCell.backend, foreignCell.tier),
-    ),
-    "the cell the foreign anchor covers stops being analytic-only",
-  );
-  assert.equal(
-    merged.anchors.length + merged.analyticOnly.length,
-    store.anchors.length + store.analyticOnly.length,
-    "the union reclassifies a cell, it does not duplicate it",
+  assert.ok(packaged.size > 0, "the compiled-in evidence list must parse");
+  const foreign = store.anchors
+    .filter((anchor) => !packaged.has(anchor.source.path))
+    .map((anchor) => `${anchor.id} -> ${anchor.source.path}`);
+  assert.deepEqual(
+    foreign,
+    [],
+    `every anchor's source must be compiled in via ${PACKAGED_SOURCES_PATH}, or the Rust loader ` +
+      "rejects the store as citing a file that is not retained evidence",
   );
 });
 
-test("a row this run rejected is withdrawn, not made immortal by the carry-forward", async () => {
-  // The counterpart of the union rule: authority is scoped to the corpora the run walked, so a
-  // stale row citing one of them (an overlay render, a record that lost its phase peaks) does not
-  // survive by sitting in the previous output.
-  // A REAL catalog cell this run classifies as analytic-only, so the row is withdrawn by the
-  // authority rule rather than by the catalog filter.
-  const withdrawn = store.analyticOnly.find(
-    (entry) => entry.evidence?.values?.overlay || entry.basis === "measured_envelope",
+test("an anchor citing evidence outside the compiled-in list is refused, not emitted", () => {
+  const packaged = new Set(["docs/generated/memory-calibration-evidence.json"]);
+  assert.doesNotThrow(() =>
+    assertPackagedSources(
+      [{ id: "ok", source: { path: "docs/generated/memory-calibration-evidence.json" } }],
+      packaged,
+    ),
   );
-  assert.ok(withdrawn, "a catalog cell the run declines to anchor exists");
-  const stale = {
-    ...store.anchors[0],
-    id: "stale:withdrawn",
-    modelId: withdrawn.modelId,
-    backend: withdrawn.backend,
-    tier: withdrawn.tier,
-    transformerVariant: null,
-    decoder: null,
-    // Cites a corpus this run WALKED: the run saw that evidence and did not anchor from it.
-    source: { ...store.anchors[0].source, path: store.anchors[0].source.path },
-  };
-  const merged = await buildAnchorStore({
-    matrix,
-    existingStore: { schemaVersion: 1, anchors: [stale], analyticOnly: [] },
-    inferenceRoot: null,
-  });
-  assert.ok(!merged.anchors.some((anchor) => anchor.id === "stale:withdrawn"));
+  assert.throws(
+    () =>
+      assertPackagedSources(
+        [{ id: "foreign:concurrent-story", source: { path: "docs/proving/sc-22509-candle.json" } }],
+        packaged,
+      ),
+    /docs\/proving\/sc-22509-candle\.json/,
+    "a row whose corpus is not compiled in would not load, so it must not be written",
+  );
+});
+
+test("the compiled-in evidence list is parsed from its declaration, not guessed", () => {
+  const source = [
+    "const PACKAGED_MEMORY_ANCHOR_SOURCES: &[(&str, &str)] = &[",
+    '    ("docs/calibration/one.json", include_str!("../../../docs/calibration/one.json")),',
+    '    ("docs/generated/two.json", include_str!("../../../docs/generated/two.json")),',
+    "];",
+    "",
+    'const OTHER: &str = include_str!("../../../docs/generated/three.json");',
+  ].join("\n");
+  assert.deepEqual(
+    [...packagedAnchorSources(source)].sort(),
+    ["docs/calibration/one.json", "docs/generated/two.json"],
+    "an include_str! outside the list is not part of the anchors' source domain",
+  );
+  assert.throws(
+    () => packagedAnchorSources("const SOMETHING_ELSE: u32 = 1;"),
+    /no longer declares PACKAGED_MEMORY_ANCHOR_SOURCES/,
+  );
 });
 
 test("an overlay render does not anchor the base cell", () => {
@@ -207,17 +249,42 @@ test("an overlay render does not anchor the base cell", () => {
   for (const anchor of store.anchors) {
     assert.equal(anchor.overlay, null, `${anchor.id}: an overlay render must not anchor a cell`);
   }
-  const overlayEvidenced = store.analyticOnly.filter(
-    (entry) => entry.evidence?.values?.overlay,
-  );
-  assert.ok(
-    overlayEvidenced.length > 0,
-    "the overlay-only evidence must still be cited, not discarded",
-  );
+  // SHAPE, not census: if the overlay-only evidence ever leaves the corpus there is nothing to
+  // assert about, and failing here would red a measurement's retirement rather than a defect.
+  const overlayEvidenced = store.analyticOnly.filter((entry) => entry.evidence?.values?.overlay);
   for (const entry of overlayEvidenced) {
     assert.equal(entry.basis, "measured_envelope");
     assert.match(entry.reason, /overlay/, `${entry.id}: the row must say why it is not anchored`);
   }
+});
+
+test("a clean render outranks an overlay render of the same cell, whatever its envelope", () => {
+  // The rule anchors already follow, applied to the weaker evidence too: an overlay envelope is a
+  // measurement of a DIFFERENT resident set, so it may only speak for a cell nothing clean covers.
+  const cell = { modelId: "example", backend: "mlx", tier: "q4" };
+  const render = (id, allocatorBytes, overlay) => ({
+    id,
+    backend: "mlx",
+    observedMemory: { overall: { allocatorBytes } },
+    target: { modelId: "example", tier: "q4", provider: "example", overlay },
+  });
+  const corpora = [
+    {
+      path: "docs/generated/example.json",
+      sha256: "a".repeat(64),
+      records: [render("overlay", 900, "control:1"), render("clean", 100, "none")],
+    },
+  ];
+  const chosen = envelopeEvidence(corpora, cell);
+  assert.equal(chosen.recordId, "clean", "the smaller CLEAN envelope wins over a larger overlay");
+  assert.equal(chosen.values.overlay, undefined, "a clean row cites no overlay");
+
+  const overlayOnly = envelopeEvidence(
+    [{ ...corpora[0], records: [render("overlay", 900, "control:1")] }],
+    cell,
+  );
+  assert.equal(overlayOnly.recordId, "overlay", "overlay evidence is still cited when it is all");
+  assert.equal(overlayOnly.values.overlay, "control:1");
 });
 
 // ---------------------------------------------------------------------------------------------
@@ -336,6 +403,103 @@ test("only top-level provider constants are read as provider facts", () => {
     TEXT_ENCODER_BYTES: "66714912872",
     NOT_BYTES: "5",
   });
+});
+
+test("a catalog cell that cannot name its family or route fails by name, not by serde", async () => {
+  // Both fields are non-optional on the Rust side; `JSON.stringify` DROPS an undefined value, so an
+  // unguarded miss would ship a store whose only symptom is a "missing field" from the loader.
+  const model = {
+    id: "example",
+    backends: ["mlx"],
+    axes: { mlx: { tiers: ["q4"] } },
+    family: "example-family",
+    familyGroup: null,
+    resolvedRoute: null,
+    resolvedRoutes: { mlx: "example_route" },
+    modality: "image",
+  };
+  assert.deepEqual(
+    (await catalogCells({ models: [model] })).map((cell) => [cell.modelFamily, cell.route]),
+    [["example-family", "example_route"]],
+  );
+  await assert.rejects(
+    () => catalogCells({ models: [{ ...model, family: null }] }),
+    /example \(mlx\): the routing catalog publishes null for family\/familyGroup/,
+  );
+  await assert.rejects(
+    () => catalogCells({ models: [{ ...model, resolvedRoutes: {} }] }),
+    /example \(mlx\): the routing catalog publishes null for resolvedRoutes\.mlx\/resolvedRoute/,
+  );
+});
+
+const writeProviderCrate = async (root, crate, body) => {
+  const dir = path.join(root, "crates/media/mlx-gen", crate, "src");
+  await mkdir(dir, { recursive: true });
+  await writeFile(path.join(dir, "memory_strategy.rs"), body);
+};
+
+test("provider constants are read from the longest-prefix crate, at the cited revision", async () => {
+  // Drives the checkout limb against a directory SHAPED like the pinned inference tree, so the
+  // opt-in path is exercised without a real cargo checkout of it.
+  const checkout = await mkdtemp(path.join(os.tmpdir(), "anchor-inference-"));
+  await writeProviderCrate(checkout, "mlx-gen-flux", "pub const FLUX_BYTES: u64 = 1;\n");
+  await writeProviderCrate(checkout, "mlx-gen-flux2", "pub const FLUX2_BYTES: u64 = 2_000;\n");
+  await writeProviderCrate(checkout, "mlx-gen-z", "pub const SHORT_PREFIX_BYTES: u64 = 4;\n");
+  await writeProviderCrate(checkout, "mlx-gen-z-image", "pub const Z_BYTES: u64 = 3;\n");
+  await writeProviderCrate(checkout, "mlx-gen-empty", "pub fn nothing() {}\n");
+  const revision = "d".repeat(40);
+  const constants = await inferenceProviderConstants(
+    checkout,
+    revision,
+    new Set(["flux2_dev", "z_image_turbo", "empty", "unmatched_model"]),
+  );
+
+  assert.deepEqual([...constants.keys()].sort(), ["flux2_dev", "z_image_turbo"]);
+  const flux2 = constants.get("flux2_dev");
+  assert.deepEqual(
+    flux2.values,
+    { FLUX2_BYTES: "2000" },
+    "`flux2_dev` matches mlx-gen-flux2, not the shorter mlx-gen-flux prefix",
+  );
+  assert.equal(flux2.repo, "SceneWorks/inference");
+  assert.equal(flux2.revision, revision, "a foreign citation names the revision it was read at");
+  assert.equal(flux2.path, "crates/media/mlx-gen/mlx-gen-flux2/src/memory_strategy.rs");
+  assert.match(flux2.sha256, /^[0-9a-f]{64}$/);
+  assert.deepEqual(
+    constants.get("z_image_turbo").values,
+    { Z_BYTES: "3" },
+    "`z_image_turbo` matches mlx-gen-z-image, though mlx-gen-z is also a legal prefix of it",
+  );
+  assert.equal(constants.get("empty"), undefined, "a crate with no constants contributes nothing");
+
+  assert.equal(
+    (await inferenceProviderConstants(null, revision, new Set(["flux2_dev"]))).size,
+    0,
+    "with no checkout the limb reads nothing at all — the default for every generation",
+  );
+});
+
+test("the pinned checkout is located by the pin's own short hash, or not at all", async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), "anchor-home-"));
+  const revision = "0123456789abcdef0123456789abcdef01234567";
+  const checkouts = path.join(home, ".cargo/git/checkouts");
+  await mkdir(path.join(checkouts, "inference-9f0e1d2c", revision.slice(0, 7)), {
+    recursive: true,
+  });
+  await mkdir(path.join(checkouts, "inference-9f0e1d2c", "badc0de"), { recursive: true });
+  await mkdir(path.join(checkouts, "mlx-rs-1a2b3c4d", revision.slice(0, 7)), { recursive: true });
+
+  assert.equal(
+    await locateInferenceCheckout(revision, home),
+    path.join(checkouts, "inference-9f0e1d2c", revision.slice(0, 7)),
+    "only a directory whose name prefixes THIS revision, under an inference remote, answers",
+  );
+  assert.equal(
+    await locateInferenceCheckout("f".repeat(40), home),
+    null,
+    "a host holding some other revision resolves to nothing rather than to the wrong tree",
+  );
+  assert.equal(await locateInferenceCheckout(revision, path.join(home, "absent")), null);
 });
 
 test("the inference pin is read from the inference remote alone", () => {

@@ -2097,7 +2097,7 @@
       "backend": "mlx",
       "tier": "q4",
       "basis": "measured_envelope",
-      "reason": "the only retained render for this cell ran under the 'control:1' overlay on provider 'krea_2_turbo_control', which measures a different resident set, so it bounds the envelope without anchoring this cell",
+      "reason": "every retained render for this cell ran under the 'control:1' overlay (the largest is on provider 'krea_2_turbo_control'), which measures a different resident set, so it bounds the envelope without anchoring this cell",
       "evidence": {
         "repo": null,
         "revision": null,
