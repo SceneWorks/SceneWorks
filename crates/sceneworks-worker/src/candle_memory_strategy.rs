@@ -1387,6 +1387,12 @@ fn synthesize_estimate_floors(
     synthesized
 }
 
+/// Catalog models whose candle image admission the anchor derivation may price: the ones the
+/// lane's per-pixel coefficients were fitted on. See the COEFFICIENT SCOPE note in
+/// [`candle_image_anchor`] — adding a model here without fitting its slopes would price its
+/// renders with another model's empirics.
+const CANDLE_ANCHOR_COEFFICIENT_MODELS: &[&str] = &["krea_2_turbo"];
+
 /// The measured memory anchor for this candle image request, or `None` to keep the manifest-row
 /// floor (sc-22509, epic 22505).
 ///
@@ -1411,6 +1417,20 @@ fn candle_image_anchor<'a>(
 ) -> Option<&'a sceneworks_core::memory_anchor::MemoryAnchor> {
     // The anchors were measured overlay-free, reference-free and single-batch on a still image.
     if overlay.is_some() || geometry.reference_count != 0 || geometry.batch != 1 {
+        return None;
+    }
+    // COEFFICIENT SCOPE. `CANDLE_COND_PER_PIXEL_BYTES` and its two siblings are Krea Turbo
+    // empirics — slopes fitted across that model's retained 768x768 -> 1024x1024 pair — not
+    // architecture facts the way the LTX latent-geometry constants are. A store row for another
+    // model would therefore be priced with borrowed slopes, so this lane is scoped to the models
+    // whose coefficients it actually holds, the same way `vram_gate::krea_store_anchor` is.
+    //
+    // The store is catalog-wide since sc-22510, so this is load-bearing rather than defensive: a
+    // future candle corpus landing under a walked root and being packaged would otherwise start
+    // answering here on the day it was committed. GENERICIZING THIS REQUIRES PER-MODEL
+    // COEFFICIENTS — a fitted slope set per model, selected alongside the anchor — not the removal
+    // of this guard.
+    if !CANDLE_ANCHOR_COEFFICIENT_MODELS.contains(&model_id) {
         return None;
     }
     let anchor = anchors?.image_anchor_for(
@@ -5309,7 +5329,7 @@ mod tests {
             MEMORY_ANCHOR_SCHEMA_VERSION,
         };
         let manifest = json!({
-            "family": "z_image",
+            "family": "krea_2",
             "candle": {
                 "vramGbByTier": { "q4": 6.0 },
                 "sequentialPeakGb": { "q4": 2.5 },
@@ -5330,7 +5350,7 @@ mod tests {
         let staged_floor_bytes =
             ((2.5 + crate::vram_gate::HEADROOM_GB) * BYTES_PER_GIB).ceil() as u64;
         let mut contract = composition_probe_contract(true, true);
-        contract.provider_id = "z_image_turbo".to_owned();
+        contract.provider_id = "krea_2_turbo".to_owned();
         contract.load_shape = gen_core::LoadShape::EagerMaterialization;
         contract.calibration = Some(gen_core::MemoryCalibrationIdentity {
             abi: gen_core::MEMORY_CALIBRATION_ABI,
@@ -5341,11 +5361,11 @@ mod tests {
         // handshake (`load_memory_anchors`), which `sceneworks-core` owns and tests against the
         // retained evidence.
         let anchor = MemoryAnchor {
-            id: "z_image_turbo:candle:q4".to_owned(),
-            model_id: "z_image_turbo".to_owned(),
-            model_family: "z_image".to_owned(),
-            route: "z_image_turbo".to_owned(),
-            provider: "z_image_turbo".to_owned(),
+            id: "krea_2_turbo:candle:q4".to_owned(),
+            model_id: "krea_2_turbo".to_owned(),
+            model_family: "krea_2".to_owned(),
+            route: "krea_2_turbo".to_owned(),
+            provider: "krea_2_turbo".to_owned(),
             backend: AnchorBackend::Candle,
             tier: "q4".to_owned(),
             transformer_variant: None,
@@ -5395,16 +5415,19 @@ mod tests {
         let store = MemoryAnchorStore {
             schema_version: MEMORY_ANCHOR_SCHEMA_VERSION,
             anchors: vec![anchor],
+            // This fixture exercises the SELECTOR seam; the analytic-only half of the store
+            // (sc-22510) is not read by it.
+            analytic_only: Vec::new(),
         };
         let floors = |anchors: Option<&MemoryAnchorStore>| {
             synthesize_estimate_floors(
-                "z_image_turbo",
-                "z_image_turbo",
+                "krea_2_turbo",
+                "krea_2_turbo",
                 &contract,
                 &manifest,
                 "q4",
-                numeric_tier("z_image_turbo", "q4").expect("q4 tier"),
-                &request_mode("z_image_turbo", "text_to_image"),
+                numeric_tier("krea_2_turbo", "q4").expect("q4 tier"),
+                &request_mode("krea_2_turbo", "text_to_image"),
                 None,
                 geometry,
                 resident_peak_bytes,
@@ -5429,7 +5452,7 @@ mod tests {
             ),
             (
                 "another route",
-                Box::new(|anchor: &mut MemoryAnchor| anchor.route = "z_image".to_owned()),
+                Box::new(|anchor: &mut MemoryAnchor| anchor.route = "krea_2".to_owned()),
             ),
             (
                 "another provider",
@@ -5456,6 +5479,7 @@ mod tests {
             mutate(&mut mutated);
             let mutated_store = MemoryAnchorStore {
                 schema_version: MEMORY_ANCHOR_SCHEMA_VERSION,
+                analytic_only: Vec::new(),
                 anchors: vec![mutated],
             };
             for (selection, evidence, basis) in floors(Some(&mutated_store)) {
@@ -5471,7 +5495,7 @@ mod tests {
         // The ABI half of the currency conjunct lives on the CONTRACT, not the anchor.
         {
             let mut drifted = composition_probe_contract(true, true);
-            drifted.provider_id = "z_image_turbo".to_owned();
+            drifted.provider_id = "krea_2_turbo".to_owned();
             drifted.load_shape = gen_core::LoadShape::EagerMaterialization;
             drifted.calibration = Some(gen_core::MemoryCalibrationIdentity {
                 abi: gen_core::MEMORY_CALIBRATION_ABI + 1,
@@ -5479,13 +5503,13 @@ mod tests {
                 load_shape: gen_core::LoadShape::EagerMaterialization,
             });
             let drifted_floors = synthesize_estimate_floors(
-                "z_image_turbo",
-                "z_image_turbo",
+                "krea_2_turbo",
+                "krea_2_turbo",
                 &drifted,
                 &manifest,
                 "q4",
-                numeric_tier("z_image_turbo", "q4").expect("q4 tier"),
-                &request_mode("z_image_turbo", "text_to_image"),
+                numeric_tier("krea_2_turbo", "q4").expect("q4 tier"),
+                &request_mode("krea_2_turbo", "text_to_image"),
                 None,
                 geometry,
                 resident_peak_bytes,
@@ -5511,6 +5535,7 @@ mod tests {
             relabelled.model_family = "not_the_catalog_family".to_owned();
             let relabelled_store = MemoryAnchorStore {
                 schema_version: MEMORY_ANCHOR_SCHEMA_VERSION,
+                analytic_only: Vec::new(),
                 anchors: vec![relabelled],
             };
             for (_, evidence, basis) in floors(Some(&relabelled_store)) {
@@ -5520,6 +5545,46 @@ mod tests {
                     "model_family must not gate the derivation"
                 );
                 assert_eq!(evidence.predicted_peak_bytes, expected_derived);
+            }
+        }
+        // COEFFICIENT SCOPE (sc-22510 reconciliation): `model_id` DOES gate it. The store is
+        // catalog-wide, so a row for a model whose per-pixel slopes were never fitted must keep
+        // the manifest-row floor rather than be priced with Krea's empirics. The anchor row here
+        // is otherwise identical and passes every conjunct above.
+        {
+            let mut foreign = store.anchors[0].clone();
+            // Only the model/route move: the provider stays the contract's, so EVERY other
+            // conjunct of `candle_image_anchor` still passes and the coefficient scope is the one
+            // guard that can refuse this row.
+            foreign.model_id = "qwen_image".to_owned();
+            foreign.route = "qwen_image".to_owned();
+            let foreign_store = MemoryAnchorStore {
+                schema_version: MEMORY_ANCHOR_SCHEMA_VERSION,
+                analytic_only: Vec::new(),
+                anchors: vec![foreign],
+            };
+            let foreign_floors = synthesize_estimate_floors(
+                "qwen_image",
+                "qwen_image",
+                &contract,
+                &manifest,
+                "q4",
+                numeric_tier("krea_2_turbo", "q4").expect("q4 tier"),
+                &request_mode("krea_2_turbo", "text_to_image"),
+                None,
+                geometry,
+                resident_peak_bytes,
+                0,
+                Z_IMAGE_REQUEST_EVIDENCE_REVISION,
+                Some(&foreign_store),
+            );
+            for (selection, _, basis) in &foreign_floors {
+                assert_eq!(
+                    *basis,
+                    crate::memory_strategy::CandidateBasis::EstimateFloor,
+                    "a model outside the fitted coefficient set must not be anchor-priced ({:?})",
+                    selection.strategy
+                );
             }
         }
 

@@ -16,6 +16,20 @@
 //! Like `video_memory_curves`, this module deliberately has no `gen-core` dependency; worker lanes
 //! translate their own backend/rung/load-shape types at the edge.
 //!
+//! # Catalog coverage (sc-22510)
+//!
+//! The store spans the WHOLE routing catalog, image and video, both backend lanes, and it has
+//! exactly two kinds of row: a measured [`MemoryAnchor`], or an explicit [`AnalyticOnlyEntry`] for
+//! a `(model, tier, backend lane)` the retained evidence cannot anchor. There is no third state —
+//! an unclassified cell is a defect, not a silence — and a cell is classified exactly once.
+//! `scripts/extract-memory-anchors.mjs` writes both halves from the retained corpora; its test
+//! holds the catalog-coverage and determinism assertions, which need the routing catalog this
+//! crate cannot see.
+//!
+//! Because the store is no longer one corpus, the pipeline axes and the output rate are OPTIONAL:
+//! an image capture states no transformer variant, decoder or fps. Both are bound to the source
+//! record in BOTH directions, and an axis-free anchor answers no variant-keyed lookup.
+//!
 //! # Validated domain
 //!
 //! An anchor's identity cell is `(model, tier, backend lane, transformer variant, decoder)` — the
@@ -60,6 +74,14 @@ const PACKAGED_MEMORY_ANCHOR_SOURCES: &[(&str, &str)] = &[
     (
         "docs/generated/krea-candle-five-rung-sc-11045.json",
         include_str!("../../../docs/generated/krea-candle-five-rung-sc-11045.json"),
+    ),
+    (
+        "docs/generated/ltx-mlx-geometry-sweep-sc-18810.json",
+        include_str!("../../../docs/generated/ltx-mlx-geometry-sweep-sc-18810.json"),
+    ),
+    (
+        "docs/generated/memory-calibration-evidence.json",
+        include_str!("../../../docs/generated/memory-calibration-evidence.json"),
     ),
 ];
 
@@ -281,6 +303,69 @@ pub const CANDLE_ANCHOR_VALIDATION_TIGHTNESS_BUDGET: f64 = 0.15;
 pub struct MemoryAnchorStore {
     pub schema_version: u32,
     pub anchors: Vec<MemoryAnchor>,
+    /// Catalog cells the retained evidence cannot anchor (sc-22510). This is the store's SECOND
+    /// entry kind, not a comment: a `(model, tier, backend lane)` the corpus never measured with a
+    /// per-phase decomposition is derived from architecture facts alone, and saying so explicitly
+    /// is what makes "unmeasured" distinguishable from "missing row". `default` so a store written
+    /// before the migration still parses.
+    #[serde(default)]
+    pub analytic_only: Vec<AnalyticOnlyEntry>,
+}
+
+/// Why a cell is analytic-only, strongest evidence first. The variant names the BEST evidence that
+/// exists for the cell — never a phase decomposition, or it would be an anchor.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AnalyticOnlyBasis {
+    /// A retained render measures the cell's overall allocator envelope but no per-phase split.
+    MeasuredEnvelope,
+    /// The pinned MLX provider publishes measured component/stage byte constants.
+    ProviderMeasuredConstants,
+    /// The catalog manifest declares a `measured: true` per-tier envelope.
+    ManifestTierDeclaration,
+    /// Nothing measured covers the cell at all.
+    NoRetainedEvidence,
+}
+
+/// Provenance for an analytic-only classification.
+///
+/// Unlike [`AnchorSource`] this is NOT a byte-exact handshake against compiled-in evidence: an
+/// analytic-only row feeds no derivation, so it carries provenance a reader can follow rather than
+/// a digest the estimate depends on. Evidence living outside this repo (the pinned inference
+/// revision's provider constants) is named by `repo` + `revision` precisely because it cannot be
+/// compiled in and re-hashed here.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AnalyticOnlyEvidence {
+    /// `None` for this repository; otherwise the foreign repo the path is relative to.
+    pub repo: Option<String>,
+    /// The revision the foreign path was read at — required whenever `repo` is set, so a foreign
+    /// citation can never mean "whatever that repo holds now".
+    pub revision: Option<String>,
+    pub path: String,
+    pub sha256: String,
+    pub record_id: Option<String>,
+    pub envelope_bytes: Option<u64>,
+    /// Named scalars carried verbatim as text (declared GB, provider byte constants), so a value
+    /// cannot change meaning through float re-formatting between the generator and this parser.
+    pub values: Option<BTreeMap<String, String>>,
+}
+
+/// One catalog cell that is derived analytically rather than from a measured anchor.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AnalyticOnlyEntry {
+    pub id: String,
+    pub model_id: String,
+    pub model_family: String,
+    pub route: String,
+    pub backend: AnchorBackend,
+    pub tier: String,
+    pub basis: AnalyticOnlyBasis,
+    /// Human-readable statement of what is missing. Empty is refused: a classification with no
+    /// stated reason is a gap wearing a row's clothes.
+    pub reason: String,
+    pub evidence: Option<AnalyticOnlyEvidence>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -324,9 +409,9 @@ pub struct AnchorGeometry {
     pub width: u32,
     pub height: u32,
     pub frames: u32,
-    /// Output rate of the anchor render, bound to the source record's `outputFps` measurement. The
-    /// candle image lane emits a still and its records carry no such measurement, so this is
-    /// `None` there and the validator requires the measurement to be absent in exactly that case.
+    /// Output rate, bound to the record's `outputFps` measurement. `None` where the record states
+    /// none — every image capture, whose single frame has no rate — and the absence is checked in
+    /// BOTH directions so a missing rate cannot be silently invented or dropped.
     pub fps: Option<u32>,
 }
 
@@ -385,9 +470,11 @@ pub struct MemoryAnchor {
     pub tier: String,
     /// LTX-2.5 pipeline identity — the same axes the fitted curves key on. The corpus has no
     /// dev-vs-distilled pair at a common regime, so a request on the other variant/decoder is not
-    /// derivable from this anchor. `None` on lanes whose pipeline has no such axis (the candle
-    /// image lane): the validator requires the source record to agree, so an LTX anchor cannot
-    /// silently drop them.
+    /// derivable from this anchor.
+    ///
+    /// `None` where the source record states no pipeline axes at all (sc-22510): every image
+    /// capture, and the LTX-2.3 sweep. A `None` anchor answers no variant-keyed lookup — it is
+    /// not a wildcard — because a record that never named a variant cannot certify one.
     pub transformer_variant: Option<Ltx25TransformerVariant>,
     pub decoder: Option<Ltx25Decoder>,
     pub mode: String,
@@ -423,14 +510,34 @@ pub const fn decoder_key(decoder: Ltx25Decoder) -> &'static str {
     }
 }
 
-/// `None` is a real cell coordinate ("this lane has no such axis"), not a wildcard, so it gets its
-/// own key spelling in the identity map and in the duplicate-anchor diagnostic.
-fn optional_transformer_variant_key(variant: Option<Ltx25TransformerVariant>) -> &'static str {
-    variant.map_or("-", transformer_variant_key)
+/// Key spelling of an optional pipeline axis. A record that states no variant/decoder keys on
+/// `"-"`, which no stated axis spells, so the two can never collide in the identity map.
+fn optional_axis_key(value: Option<&str>) -> &str {
+    value.unwrap_or("-")
 }
 
-fn optional_decoder_key(decoder: Option<Ltx25Decoder>) -> &'static str {
-    decoder.map_or("-", decoder_key)
+fn variant_key_opt(variant: Option<Ltx25TransformerVariant>) -> &'static str {
+    match variant {
+        Some(variant) => transformer_variant_key(variant),
+        None => "-",
+    }
+}
+
+fn decoder_key_opt(decoder: Option<Ltx25Decoder>) -> &'static str {
+    match decoder {
+        Some(decoder) => decoder_key(decoder),
+        None => "-",
+    }
+}
+
+/// The `(model, tier, backend lane)` coverage cell — the unit the routing catalog enumerates and
+/// the unit every cell must be classified in exactly once, as either an anchor or analytic-only.
+fn coverage_cell(
+    model_id: &str,
+    tier: &str,
+    backend: AnchorBackend,
+) -> (String, String, AnchorBackend) {
+    (model_id.to_owned(), tier.to_owned(), backend)
 }
 
 /// Strict parse plus the invariants serde cannot express. No partial store is usable.
@@ -449,8 +556,8 @@ pub fn load_memory_anchors(raw: &str) -> Result<MemoryAnchorStore, String> {
             anchor.model_id.clone(),
             anchor.tier.clone(),
             anchor.backend,
-            optional_transformer_variant_key(anchor.transformer_variant),
-            optional_decoder_key(anchor.decoder),
+            variant_key_opt(anchor.transformer_variant),
+            decoder_key_opt(anchor.decoder),
         );
         if let Some(previous) = identities.insert(identity, &anchor.id) {
             return Err(format!(
@@ -460,15 +567,113 @@ pub fn load_memory_anchors(raw: &str) -> Result<MemoryAnchorStore, String> {
                 anchor.model_id,
                 anchor.tier,
                 anchor.backend.as_key(),
-                optional_transformer_variant_key(anchor.transformer_variant),
-                optional_decoder_key(anchor.decoder),
+                variant_key_opt(anchor.transformer_variant),
+                decoder_key_opt(anchor.decoder),
                 previous,
                 anchor.id
             ));
         }
         validate_anchor(anchor)?;
     }
+    validate_analytic_only(&store)?;
     Ok(store)
+}
+
+/// The analytic-only half of the store's invariants (sc-22510).
+///
+/// A cell is classified exactly once. An anchored cell may not ALSO be declared analytic-only —
+/// that would let a measured cell be quietly demoted to an architecture estimate while the anchor
+/// sat unused — and two analytic rows for one cell would let a reader draw either conclusion.
+fn validate_analytic_only(store: &MemoryAnchorStore) -> Result<(), String> {
+    let anchored: std::collections::BTreeSet<_> = store
+        .anchors
+        .iter()
+        .map(|anchor| coverage_cell(&anchor.model_id, &anchor.tier, anchor.backend))
+        .collect();
+    let mut seen = BTreeMap::new();
+    for entry in &store.analytic_only {
+        if entry.reason.trim().is_empty() {
+            return Err(format!(
+                "analytic-only entry {} states no reason — an unexplained classification is a gap",
+                entry.id
+            ));
+        }
+        let cell = coverage_cell(&entry.model_id, &entry.tier, entry.backend);
+        if anchored.contains(&cell) {
+            return Err(format!(
+                "analytic-only entry {} names ({}, {}, {}), which carries a measured anchor — a \
+                 cell is classified exactly once",
+                entry.id,
+                entry.model_id,
+                entry.tier,
+                entry.backend.as_key()
+            ));
+        }
+        if let Some(previous) = seen.insert(cell, &entry.id) {
+            return Err(format!(
+                "duplicate analytic-only entry for ({}, {}, {}): {} and {}",
+                entry.model_id,
+                entry.tier,
+                entry.backend.as_key(),
+                previous,
+                entry.id
+            ));
+        }
+        match (entry.basis, entry.evidence.as_ref()) {
+            (AnalyticOnlyBasis::NoRetainedEvidence, Some(_)) => {
+                return Err(format!(
+                    "analytic-only entry {} claims no retained evidence yet cites some",
+                    entry.id
+                ));
+            }
+            (AnalyticOnlyBasis::NoRetainedEvidence, None) => {}
+            (_, None) => {
+                return Err(format!(
+                    "analytic-only entry {} names an evidence basis but cites no evidence",
+                    entry.id
+                ));
+            }
+            (_, Some(evidence)) => validate_analytic_evidence(&entry.id, evidence)?,
+        }
+    }
+    Ok(())
+}
+
+fn validate_analytic_evidence(id: &str, evidence: &AnalyticOnlyEvidence) -> Result<(), String> {
+    if evidence.sha256.len() != 64 || !evidence.sha256.chars().all(|c| c.is_ascii_hexdigit()) {
+        return Err(format!(
+            "analytic-only entry {id} cites a malformed source digest"
+        ));
+    }
+    if evidence.repo.is_some() && evidence.revision.is_none() {
+        return Err(format!(
+            "analytic-only entry {id} cites a foreign repository without the revision it was read \
+             at — a citation that floats with someone else's default branch proves nothing"
+        ));
+    }
+    // A repo-local citation of a file that happens to be compiled in gets the same byte-exact
+    // handshake the anchors get; one that is not compiled in carries provenance only, which is all
+    // an analytic-only row is asked for (it feeds no derivation).
+    if evidence.repo.is_none() {
+        let path = evidence
+            .path
+            .split_once('#')
+            .map_or(evidence.path.as_str(), |(file, _)| file);
+        if let Some((_, raw)) = PACKAGED_MEMORY_ANCHOR_SOURCES
+            .iter()
+            .find(|(candidate, _)| *candidate == path)
+        {
+            let digest = format!("{:x}", Sha256::digest(raw.as_bytes()));
+            if digest != evidence.sha256 {
+                return Err(format!(
+                    "analytic-only entry {id} source digest mismatch for {path}: recorded {} \
+                     actual {digest}",
+                    evidence.sha256
+                ));
+            }
+        }
+    }
+    Ok(())
 }
 
 /// One anchor's extraction handshake against the compiled-in retained evidence.
@@ -539,14 +744,12 @@ fn validate_anchor(anchor: &MemoryAnchor) -> Result<(), String> {
         || str_at(target, "mode").as_deref() != Some(anchor.mode.as_str())
         || str_at(target, "provider").as_deref() != Some(anchor.provider.as_str())
         || record_route.as_deref() != Some(anchor.route.as_str())
-        || str_at(target, "transformerVariant")
-            != anchor
-                .transformer_variant
-                .map(|variant| transformer_variant_key(variant).to_owned())
-        || str_at(target, "decoder")
-            != anchor
-                .decoder
-                .map(|decoder| decoder_key(decoder).to_owned())
+        // Both directions: a record that states a pipeline axis must have it recorded, and one
+        // that states none must not acquire one in the store (sc-22510).
+        || optional_axis_key(str_at(target, "transformerVariant").as_deref())
+            != variant_key_opt(anchor.transformer_variant)
+        || optional_axis_key(str_at(target, "decoder").as_deref())
+            != decoder_key_opt(anchor.decoder)
         || str_at(record, "calibrationFingerprint").as_deref()
             != Some(anchor.source.calibration_fingerprint.as_str())
     {
@@ -700,6 +903,8 @@ impl MemoryAnchorStore {
             anchor.model_id == model_id
                 && anchor.backend == backend
                 && anchor.tier == tier
+                // An anchor whose record stated no pipeline axes (`None`) answers no variant-keyed
+                // lookup: it certifies neither variant, so it must not stand in for either.
                 && anchor.transformer_variant == Some(transformer_variant)
                 && anchor.decoder == Some(decoder)
         })
@@ -1058,6 +1263,18 @@ mod tests {
         packaged_memory_anchors().expect("the packaged anchor store loads")
     }
 
+    /// Index of an LTX-2.5 anchor in the packaged store. Since sc-22510 the store spans the whole
+    /// catalog, so the doctoring tests below cannot assume `anchors[0]` is a video row.
+    fn ltx25_anchor_index() -> usize {
+        store()
+            .anchors
+            .iter()
+            .position(|anchor| {
+                anchor.model_id == "ltx_2_5" && anchor.source.path == LTX25_CORPUS_PATH
+            })
+            .expect("the store carries an LTX-2.5 anchor")
+    }
+
     // -------------------------------------------------------------------------------------
     // AC 1 (store half): every LTX-2.5 MLX (tier, transformer variant, decoder) cell the
     // retained corpus measures carries exactly one anchor, and no cell it does not measure
@@ -1106,9 +1323,8 @@ mod tests {
                     anchor.model_id == "ltx_2_5"
                         && anchor.backend == AnchorBackend::Mlx
                         && anchor.tier == *tier
-                        && optional_transformer_variant_key(anchor.transformer_variant)
-                            == *variant_key
-                        && optional_decoder_key(anchor.decoder) == *decoder_key_str
+                        && variant_key_opt(anchor.transformer_variant) == *variant_key
+                        && decoder_key_opt(anchor.decoder) == *decoder_key_str
                 })
                 .count();
             assert_eq!(
@@ -1127,11 +1343,196 @@ mod tests {
             measured.len(),
             "the store must not carry an anchor for a pipeline cell the corpus never measured"
         );
-        for anchor in &store().anchors {
-            if anchor.model_id == "ltx_2_5" && anchor.backend == AnchorBackend::Mlx {
-                assert_eq!(anchor.source.path, LTX25_CORPUS_PATH);
+        // Scoped to LTX-2.5: since sc-22510 the store spans the whole routing catalog, so this
+        // asks that the LTX-2.5 rows still come from the LTX-2.5 corpus and nothing more.
+        for anchor in store()
+            .anchors
+            .iter()
+            .filter(|anchor| anchor.model_id == "ltx_2_5")
+        {
+            assert_eq!(anchor.source.path, LTX25_CORPUS_PATH);
+        }
+    }
+
+    // -------------------------------------------------------------------------------------
+    // sc-22510: the store is catalog-wide, and every row is one of exactly two kinds.
+    // -------------------------------------------------------------------------------------
+
+    /// The migration's shape, asserted without pinning a population: the store carries anchors on
+    /// both modalities' evidence (a video pipeline cell and an image cell with no pipeline axes),
+    /// and analytic-only rows for cells the corpus cannot anchor.
+    #[test]
+    fn the_store_spans_more_than_the_ltx_video_corpus() {
+        assert!(
+            store()
+                .anchors
+                .iter()
+                .any(|anchor| anchor.transformer_variant.is_some()),
+            "the store must keep at least one pipeline-keyed (video) anchor"
+        );
+        assert!(
+            store()
+                .anchors
+                .iter()
+                .any(|anchor| { anchor.transformer_variant.is_none() && anchor.decoder.is_none() }),
+            "the store must carry anchors extracted from corpora that state no pipeline axes"
+        );
+        assert!(
+            store()
+                .anchors
+                .iter()
+                .map(|anchor| anchor.model_id.as_str())
+                .collect::<std::collections::BTreeSet<_>>()
+                .len()
+                > 1,
+            "the migration covers more than one model"
+        );
+        assert!(
+            !store().analytic_only.is_empty(),
+            "cells the corpus cannot anchor must be declared analytic-only, never omitted"
+        );
+    }
+
+    /// An anchor whose source record stated NO pipeline axes must not answer a variant-keyed
+    /// lookup: it certifies neither variant, and standing in for one would price a request from a
+    /// render that never claimed to be it.
+    #[test]
+    fn an_axis_free_anchor_answers_no_variant_keyed_lookup() {
+        let axis_free = store()
+            .anchors
+            .iter()
+            .find(|anchor| anchor.transformer_variant.is_none())
+            .expect("an axis-free anchor exists");
+        for variant in [
+            Ltx25TransformerVariant::Dev,
+            Ltx25TransformerVariant::Distilled,
+        ] {
+            for decoder in [Ltx25Decoder::Conv, Ltx25Decoder::DiffVae] {
+                assert!(
+                    store()
+                        .anchor_for(
+                            &axis_free.model_id,
+                            axis_free.backend,
+                            &axis_free.tier,
+                            variant,
+                            decoder
+                        )
+                        .is_none(),
+                    "an axis-free anchor must not resolve for ({variant:?}, {decoder:?})"
+                );
             }
         }
+    }
+
+    /// A cell is classified exactly once. Declaring an anchored cell analytic-only would demote a
+    /// measured cell to an architecture estimate with the anchor sitting unused beside it.
+    #[test]
+    fn an_analytic_entry_for_an_anchored_cell_is_rejected() {
+        let mut doctored: serde_json::Value =
+            serde_json::from_str(PACKAGED_MEMORY_ANCHORS).expect("packaged store parses");
+        let anchor = doctored["anchors"][0].clone();
+        doctored["analyticOnly"]
+            .as_array_mut()
+            .expect("analytic-only rows")
+            .push(serde_json::json!({
+                "id": "analytic:collision",
+                "modelId": anchor["modelId"],
+                "modelFamily": anchor["modelFamily"],
+                "route": anchor["route"],
+                "backend": anchor["backend"],
+                "tier": anchor["tier"],
+                "basis": "no_retained_evidence",
+                "reason": "collides with a measured anchor",
+                "evidence": serde_json::Value::Null,
+            }));
+        let error = load_memory_anchors(&doctored.to_string())
+            .expect_err("an anchored cell may not also be analytic-only");
+        assert!(error.contains("classified exactly once"), "{error}");
+    }
+
+    #[test]
+    fn a_duplicate_or_unexplained_analytic_entry_is_rejected() {
+        let mut doctored: serde_json::Value =
+            serde_json::from_str(PACKAGED_MEMORY_ANCHORS).expect("packaged store parses");
+        let clone = doctored["analyticOnly"][0].clone();
+        doctored["analyticOnly"]
+            .as_array_mut()
+            .expect("analytic-only rows")
+            .push(clone);
+        let error = load_memory_anchors(&doctored.to_string())
+            .expect_err("a duplicated analytic cell must be rejected");
+        assert!(error.contains("duplicate analytic-only entry"), "{error}");
+
+        let mut doctored: serde_json::Value =
+            serde_json::from_str(PACKAGED_MEMORY_ANCHORS).expect("packaged store parses");
+        doctored["analyticOnly"][0]["reason"] = serde_json::json!("   ");
+        let error = load_memory_anchors(&doctored.to_string())
+            .expect_err("an unexplained classification must be rejected");
+        assert!(error.contains("states no reason"), "{error}");
+    }
+
+    /// The basis and the cited evidence must agree in both directions, and a foreign-repo citation
+    /// must name the revision it was read at.
+    #[test]
+    fn an_analytic_basis_that_disagrees_with_its_evidence_is_rejected() {
+        let evidenced = store()
+            .analytic_only
+            .iter()
+            .position(|entry| entry.evidence.is_some())
+            .expect("an evidenced analytic-only entry exists");
+        let unevidenced = store()
+            .analytic_only
+            .iter()
+            .position(|entry| entry.evidence.is_none())
+            .expect("an unevidenced analytic-only entry exists");
+
+        let mut doctored: serde_json::Value =
+            serde_json::from_str(PACKAGED_MEMORY_ANCHORS).expect("packaged store parses");
+        doctored["analyticOnly"][evidenced]["basis"] = serde_json::json!("no_retained_evidence");
+        let error = load_memory_anchors(&doctored.to_string())
+            .expect_err("claiming no evidence while citing some must be rejected");
+        assert!(error.contains("claims no retained evidence"), "{error}");
+
+        let mut doctored: serde_json::Value =
+            serde_json::from_str(PACKAGED_MEMORY_ANCHORS).expect("packaged store parses");
+        doctored["analyticOnly"][unevidenced]["basis"] = serde_json::json!("measured_envelope");
+        let error = load_memory_anchors(&doctored.to_string())
+            .expect_err("naming a basis with no evidence must be rejected");
+        assert!(error.contains("cites no evidence"), "{error}");
+
+        let mut doctored: serde_json::Value =
+            serde_json::from_str(PACKAGED_MEMORY_ANCHORS).expect("packaged store parses");
+        doctored["analyticOnly"][evidenced]["evidence"]["repo"] =
+            serde_json::json!("SceneWorks/inference");
+        doctored["analyticOnly"][evidenced]["evidence"]["revision"] = serde_json::Value::Null;
+        let error = load_memory_anchors(&doctored.to_string())
+            .expect_err("a foreign citation without a revision must be rejected");
+        assert!(error.contains("without the revision"), "{error}");
+    }
+
+    /// A repo-local analytic citation of a COMPILED-IN corpus gets the anchors' byte-exact
+    /// handshake: the store may not cite evidence it has drifted from.
+    #[test]
+    fn an_analytic_citation_of_a_compiled_source_binds_to_its_digest() {
+        // The store need not contain such a row: which cells are analytic-only, and what they cite,
+        // is a property of the retained corpus, and a measurement leaving it must not red this
+        // test. The assertion is about rows that ARE present.
+        let Some(index) = store().analytic_only.iter().position(|entry| {
+            entry.evidence.as_ref().is_some_and(|evidence| {
+                evidence.repo.is_none()
+                    && PACKAGED_MEMORY_ANCHOR_SOURCES
+                        .iter()
+                        .any(|(path, _)| *path == evidence.path)
+            })
+        }) else {
+            return;
+        };
+        let mut doctored: serde_json::Value =
+            serde_json::from_str(PACKAGED_MEMORY_ANCHORS).expect("packaged store parses");
+        doctored["analyticOnly"][index]["evidence"]["sha256"] = serde_json::json!("0".repeat(64));
+        let error = load_memory_anchors(&doctored.to_string())
+            .expect_err("a drifted analytic citation must be rejected");
+        assert!(error.contains("source digest mismatch"), "{error}");
     }
 
     /// The pipeline cell is part of the lookup key, not a post-filter: the corpus contains no
@@ -1230,9 +1631,10 @@ mod tests {
     /// binds `loadShape` and `measuredRegime` to the source record.
     #[test]
     fn a_doctored_load_shape_or_measured_regime_is_rejected() {
+        let ltx = ltx25_anchor_index();
         let mut doctored: serde_json::Value =
             serde_json::from_str(PACKAGED_MEMORY_ANCHORS).expect("packaged store parses");
-        doctored["anchors"][0]["loadShape"] = serde_json::json!("deferred_materialization");
+        doctored["anchors"][ltx]["loadShape"] = serde_json::json!("deferred_materialization");
         let error =
             load_memory_anchors(&doctored.to_string()).expect_err("load shape must bind to source");
         assert!(error.contains("load shape disagrees"), "{error}");
@@ -1247,10 +1649,10 @@ mod tests {
         ] {
             let mut doctored: serde_json::Value =
                 serde_json::from_str(PACKAGED_MEMORY_ANCHORS).expect("packaged store parses");
-            let current = doctored["anchors"][0]["measuredRegime"][field]
+            let current = doctored["anchors"][ltx]["measuredRegime"][field]
                 .as_bool()
                 .unwrap_or_else(|| panic!("{field} is a declared regime flag"));
-            doctored["anchors"][0]["measuredRegime"][field] = serde_json::json!(!current);
+            doctored["anchors"][ltx]["measuredRegime"][field] = serde_json::json!(!current);
             let Err(error) = load_memory_anchors(&doctored.to_string()) else {
                 panic!("{field} must bind to the engaged rungs");
             };
@@ -1321,6 +1723,7 @@ mod tests {
     /// Identity fields that were previously stored-and-unchecked are bound to the source record.
     #[test]
     fn a_doctored_pipeline_identity_provider_route_or_fps_is_rejected() {
+        let ltx = ltx25_anchor_index();
         for (field, value) in [
             ("transformerVariant", serde_json::json!("distilled")),
             ("decoder", serde_json::json!("conv")),
@@ -1329,7 +1732,7 @@ mod tests {
         ] {
             let mut doctored: serde_json::Value =
                 serde_json::from_str(PACKAGED_MEMORY_ANCHORS).expect("packaged store parses");
-            doctored["anchors"][0][field] = value;
+            doctored["anchors"][ltx][field] = value;
             let error = load_memory_anchors(&doctored.to_string())
                 .err()
                 .unwrap_or_else(|| panic!("{field} must bind to the source record"));
@@ -1338,29 +1741,71 @@ mod tests {
 
         let mut doctored: serde_json::Value =
             serde_json::from_str(PACKAGED_MEMORY_ANCHORS).expect("packaged store parses");
-        let fps = doctored["anchors"][0]["geometry"]["fps"]
+        let fps = doctored["anchors"][ltx]["geometry"]["fps"]
             .as_u64()
             .expect("fps");
-        doctored["anchors"][0]["geometry"]["fps"] = serde_json::json!(fps + 1);
+        doctored["anchors"][ltx]["geometry"]["fps"] = serde_json::json!(fps + 1);
         let error = load_memory_anchors(&doctored.to_string())
             .expect_err("fps must bind to the outputFps measurement");
         assert!(error.contains("disagrees with the outputFps"), "{error}");
 
-        // Absence binds in the OTHER direction too: a video anchor may not drop the field its
-        // record measured, which is the only way the still-image `None` spelling stays honest.
+        // sc-22510 made `fps` and the pipeline axes OPTIONAL, so both are checked in BOTH
+        // directions. These two cases exercise the direction a `is_some() && ...` guard would
+        // silently drop: a record that DID state a value, dropped to null in the store.
         let mut doctored: serde_json::Value =
             serde_json::from_str(PACKAGED_MEMORY_ANCHORS).expect("packaged store parses");
-        doctored["anchors"][0]["geometry"]["fps"] = serde_json::Value::Null;
+        doctored["anchors"][ltx]["geometry"]["fps"] = serde_json::Value::Null;
         let error = load_memory_anchors(&doctored.to_string())
-            .expect_err("a measured outputFps may not be dropped from the anchor");
+            .expect_err("dropping a measured output rate must be rejected");
         assert!(error.contains("disagrees with the outputFps"), "{error}");
+
+        for axis in ["transformerVariant", "decoder"] {
+            let mut doctored: serde_json::Value =
+                serde_json::from_str(PACKAGED_MEMORY_ANCHORS).expect("packaged store parses");
+            doctored["anchors"][ltx][axis] = serde_json::Value::Null;
+            let error = load_memory_anchors(&doctored.to_string())
+                .err()
+                .unwrap_or_else(|| panic!("dropping {axis} must be rejected"));
+            assert!(error.contains("identity disagrees"), "{axis}: {error}");
+        }
+
+        // And the other direction: a record that measured NO output rate — every image capture —
+        // must not acquire one in the store. Whether such an anchor exists depends on which
+        // captures the corpus retains, so this asks its question only when one is there rather than
+        // reding when the last rateless capture is retired.
+        if let Some(rateless) = store()
+            .anchors
+            .iter()
+            .position(|anchor| anchor.geometry.fps.is_none())
+        {
+            let mut doctored: serde_json::Value =
+                serde_json::from_str(PACKAGED_MEMORY_ANCHORS).expect("packaged store parses");
+            doctored["anchors"][rateless]["geometry"]["fps"] = serde_json::json!(24);
+            let error = load_memory_anchors(&doctored.to_string())
+                .expect_err("an invented output rate must be rejected");
+            assert!(error.contains("disagrees with the outputFps"), "{error}");
+        }
+
+        if let Some(axis_free) = store()
+            .anchors
+            .iter()
+            .position(|anchor| anchor.transformer_variant.is_none())
+        {
+            let mut doctored: serde_json::Value =
+                serde_json::from_str(PACKAGED_MEMORY_ANCHORS).expect("packaged store parses");
+            doctored["anchors"][axis_free]["transformerVariant"] = serde_json::json!("dev");
+            let error = load_memory_anchors(&doctored.to_string())
+                .expect_err("an invented pipeline variant must be rejected");
+            assert!(error.contains("identity disagrees"), "{error}");
+        }
     }
 
     #[test]
     fn a_duplicate_anchor_identity_is_rejected() {
+        let ltx = ltx25_anchor_index();
         let mut doctored: serde_json::Value =
             serde_json::from_str(PACKAGED_MEMORY_ANCHORS).expect("packaged store parses");
-        let clone = doctored["anchors"][0].clone();
+        let clone = doctored["anchors"][ltx].clone();
         doctored["anchors"]
             .as_array_mut()
             .expect("anchors")
@@ -1372,12 +1817,13 @@ mod tests {
 
     #[test]
     fn an_anchor_that_drifts_from_its_source_record_is_rejected() {
+        let ltx = ltx25_anchor_index();
         let mut doctored: serde_json::Value =
             serde_json::from_str(PACKAGED_MEMORY_ANCHORS).expect("packaged store parses");
-        let peak = doctored["anchors"][0]["phaseActivePeakBytes"]["conditioning"]
+        let peak = doctored["anchors"][ltx]["phaseActivePeakBytes"]["conditioning"]
             .as_u64()
             .expect("conditioning peak");
-        doctored["anchors"][0]["phaseActivePeakBytes"]["conditioning"] =
+        doctored["anchors"][ltx]["phaseActivePeakBytes"]["conditioning"] =
             serde_json::json!(peak + 1);
         let error = load_memory_anchors(&doctored.to_string())
             .expect_err("a store whose bytes drift from the retained evidence must be rejected");
@@ -1386,15 +1832,16 @@ mod tests {
 
     #[test]
     fn a_stale_source_digest_or_foreign_source_path_is_rejected() {
+        let ltx = ltx25_anchor_index();
         let mut doctored: serde_json::Value =
             serde_json::from_str(PACKAGED_MEMORY_ANCHORS).expect("packaged store parses");
-        doctored["anchors"][0]["source"]["sha256"] = serde_json::json!("0".repeat(64));
+        doctored["anchors"][ltx]["source"]["sha256"] = serde_json::json!("0".repeat(64));
         let error = load_memory_anchors(&doctored.to_string()).expect_err("digest must bind");
         assert!(error.contains("digest mismatch"), "{error}");
 
         let mut foreign: serde_json::Value =
             serde_json::from_str(PACKAGED_MEMORY_ANCHORS).expect("packaged store parses");
-        foreign["anchors"][0]["source"]["path"] = serde_json::json!("docs/nowhere.json");
+        foreign["anchors"][ltx]["source"]["path"] = serde_json::json!("docs/nowhere.json");
         let error = load_memory_anchors(&foreign.to_string()).expect_err("path must be compiled");
         assert!(
             error.contains("not a compiled retained-evidence file"),
