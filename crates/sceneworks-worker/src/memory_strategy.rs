@@ -2869,10 +2869,28 @@ mod tests {
         let expected_widened_bytes =
             (raw_peak_bytes as f64 * (1.0 + CANDLE_RECAPTURE_SPREAD)).ceil();
         assert_eq!(needed_gb, expected_widened_bytes / BYTES_PER_GIB);
-        // The candle estimate margin is strictly wider than the candle stale margin — pinned at
-        // COMPILE TIME by `ladder_margin_policy`'s invariant block — so grading an estimate with
-        // the stale margin would have produced a smaller needed_gb: this equality pins the
-        // ESTIMATE margin specifically.
+        // sc-22508 DELETED the claim that used to stand here — "the candle estimate margin is
+        // strictly wider than the candle stale margin, so this equality pins the ESTIMATE margin
+        // specifically". There is no longer an estimate margin distinct from a stale one: an
+        // undeclared floor and a stale measurement now resolve to the SAME
+        // `CANDLE_RECAPTURE_SPREAD`, and the equality above therefore discriminates nothing about
+        // WHICH allowance was charged.
+        //
+        // Assert the term instead — that is the axis that still carries information. This
+        // candidate declares no activation split, so the policy must charge it the whole-peak
+        // recapture spread; a wiring that reached the activation-envelope arm without a declared
+        // term would sail past the numeric equality above and fail here.
+        assert_eq!(
+            crate::ladder_margin_policy::admission_allowance(AdmissionSubject {
+                backend: MemoryBackend::Candle,
+                basis: CandidateBasis::EstimateFloor,
+                closure_is_stale: false,
+                unmodeled_activation_bytes: None,
+            })
+            .term
+            .as_key(),
+            "same_cell_recapture_spread"
+        );
     }
 
     /// Mutation check demanded by the story: prove the estimate widening is APPLIED. This

@@ -910,10 +910,13 @@ pub(crate) struct LadderVideoSelector<'a> {
     /// per-request knobs need the whole `MemorySelection`, and re-deriving it would be a second
     /// selection.
     selections: Vec<VideoSelectedCandidate>,
-    /// Unwidened resident candidate for every geometry core graded. The refusal guard consumes the
-    /// exact binding geometry's value, including any provider profile, instead of recomputing a
-    /// profile-blind weights floor after selection.
-    resident_floors: Vec<(VideoAdmissionGeometry, u64)>,
+    /// Unwidened resident candidate for every geometry core graded, paired with the ACTIVATION
+    /// term that candidate declared (sc-22508). The refusal guard consumes the exact binding
+    /// geometry's values, including any provider profile, instead of recomputing a profile-blind
+    /// weights floor — or a headroom constant — after selection. Carrying the declared term is what
+    /// keeps the guard's admitted ceiling identical to the one the selector graded even when the
+    /// peak came from a decode profile or a warm resident credit.
+    resident_floors: Vec<(VideoAdmissionGeometry, u64, Option<u64>)>,
 }
 
 #[derive(Clone, Debug)]
@@ -1452,8 +1455,34 @@ impl VideoStrategySelector for LadderVideoSelector<'_> {
                 ));
                 return VideoRungSelection::Undecidable;
             };
+            // sc-22508: the activation slice of the peak THIS ITERATION actually constructed, not
+            // the headroom the selector was handed.
+            //
+            // Both floor shapes reaching here decompose, and neither decomposes as `headroom`:
+            // `floor_phase_peaks` builds `estimate_floor_weights_bytes + headroom_bytes`, while
+            // `profiled_floor_phase_peaks` may raise that to the provider's own
+            // `checked_composed_peak`, whose activation slice is `profiled - weights` and can be
+            // multiples of the generic headroom (a 55 GiB profiled peak over 20 GiB of weights
+            // carries 35 GiB of activation, not 18). The peak is then reduced by
+            // `attributable_resident_bytes`, which credits already-resident WEIGHTS — so the
+            // counted-weights term shrinks and the activation term does not.
+            //
+            // Deriving it as `peak - counted_weights` gets both shapes right by construction and
+            // can never exceed the peak it grades, which a declared constant can (warm path, small
+            // floor). Fitted-curve and anchor-derived peaks are phase-resolved and carry no split.
+            let unmodeled_activation_bytes =
+                matches!(basis, CandidateBasis::EstimateFloor).then(|| {
+                    let counted_weights =
+                        crate::mlx_fit_gate::estimate_floor_weights_bytes(self.contract, &engaged)
+                            .saturating_sub(self.attributable_resident_bytes);
+                    predicted_peak_bytes.saturating_sub(counted_weights)
+                });
             if strategy == MemoryStrategy::Resident {
-                self.resident_floors.push((geometry, predicted_peak_bytes));
+                self.resident_floors.push((
+                    geometry,
+                    predicted_peak_bytes,
+                    unmodeled_activation_bytes,
+                ));
             }
             let evidence = crate::mlx_fit_gate::estimate_evidence(
                 self.contract,
@@ -1474,6 +1503,7 @@ impl VideoStrategySelector for LadderVideoSelector<'_> {
                 closure_digest,
                 curve_id,
                 profile_revision,
+                unmodeled_activation_bytes,
             ));
         }
         if synthesized.is_empty() {
@@ -1483,25 +1513,23 @@ impl VideoStrategySelector for LadderVideoSelector<'_> {
         let candidates = synthesized
             .iter()
             .map(
-                |(selection, evidence, _, basis, closure_digest, _, _)| Candidate {
+                |(selection, evidence, _, basis, closure_digest, _, _, activation)| Candidate {
                     selection: *selection,
                     evidence,
                     closure_digest,
                     basis: *basis,
-                    // sc-22508: only the weights+headroom floor decomposes into a counted term and
-                    // a flat activation allowance, and `floor_phase_peaks` built this peak as
-                    // exactly `estimate_floor_weights_bytes + headroom_bytes`. Fitted-curve and
-                    // anchor-derived peaks are phase-resolved and carry no such split.
+                    // sc-22508: derived at the peak's construction site above, for BOTH lanes.
                     //
-                    // MLX ONLY. The headroom term earns a doubling where the modelled allowance is
-                    // a guess AND an overshoot is fatal (the MLX allocator aborts the worker). On
-                    // candle an allocation failure is a recoverable `Err` and the corpus's
-                    // deterministic live-allocation accounting bounds the residual at 2%, so
-                    // charging a whole extra headroom there would be strictly MORE conservative
-                    // than the blanket policy this story retires — which E3 does not license.
-                    unmodeled_activation_bytes: (matches!(basis, CandidateBasis::EstimateFloor)
-                        && backend == MemoryBackend::Mlx)
-                        .then_some(self.headroom_bytes),
+                    // The declaration is not an MLX privilege. A candle floor decomposes exactly as
+                    // an MLX one does — `floor_phase_peaks` is lane-blind — and declaring the split
+                    // is what makes the allowance track the term instead of the peak. What differs
+                    // between the lanes is the FRACTION, and that difference lives where the
+                    // measurement lives: `ladder_margin_policy::floor_envelope_allowance` charges
+                    // MLX's measured allocator envelope (17%) and candle's deterministic accounting
+                    // residual (2%). Withholding the declaration here so candle fell back to a
+                    // whole-peak spread would have been choosing a margin by magnitude, which is
+                    // exactly what E3 retires.
+                    unmodeled_activation_bytes: *activation,
                 },
             )
             .collect::<Vec<_>>();
@@ -1544,7 +1572,7 @@ impl VideoStrategySelector for LadderVideoSelector<'_> {
                     curve_id = synthesized
                         .iter()
                         .find(|(candidate, ..)| candidate.strategy == selection.strategy)
-                        .and_then(|(_, _, _, _, _, curve_id, _)| *curve_id)
+                        .and_then(|(_, _, _, _, _, curve_id, _, _)| *curve_id)
                         .unwrap_or("none"),
                     needed_gb,
                     available_gb,
@@ -1889,9 +1917,11 @@ fn admit_video_generation_with_curves_and_profiles(
             geometry,
             ..
         } => {
-            let Some(resident_floor_bytes) = resident_floors
+            let Some((resident_floor_bytes, resident_floor_activation_bytes)) = resident_floors
                 .iter()
-                .find_map(|(graded, bytes)| (*graded == geometry).then_some(*bytes))
+                .find_map(|(graded, bytes, activation)| {
+                    (*graded == geometry).then_some((*bytes, *activation))
+                })
             else {
                 tracing::error!(
                     event = "video_memory_resident_floor_lost",
@@ -1913,13 +1943,13 @@ fn admit_video_generation_with_curves_and_profiles(
                 crate::memory_strategy::floor_admitted_peak_bytes(
                     contract.backend.backend_kind(),
                     resident_floor_bytes,
-                    // Mirrors the MLX-only headroom declaration on the floor candidates above, so
-                    // this guard compares against the SAME admitted ceiling the selector graded.
-                    if contract.backend.backend_kind() == MemoryBackend::Mlx {
-                        Some(request.headroom_bytes)
-                    } else {
-                        None
-                    },
+                    // The term the resident candidate ITSELF declared, carried out of the selector
+                    // rather than reconstructed here (sc-22508). Reconstructing it from
+                    // `request.headroom_bytes` was wrong for exactly the peaks that matter: a
+                    // provider decode profile raises the peak above weights+headroom, and a warm
+                    // resident credit lowers it, so the mirror and production could disagree on the
+                    // graded ceiling with nothing to catch it.
+                    resident_floor_activation_bytes,
                 ),
                 runtime.selector_budget().and_then(Budget::effective_gb),
             ) {
