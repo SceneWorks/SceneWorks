@@ -1,0 +1,20 @@
+{
+  "version": 2,
+  "thresholds": {
+    "parityMaxError": 0.0001,
+    "perplexityDelta": 0.01,
+    "greedyTokenAgreement": 0.999,
+    "structuredToolAgreement": 1,
+    "needleRetrieval": 1,
+    "multiTurnPromptCache": 1
+  },
+  "statistics": {
+    "repeats": 5,
+    "warmups": 2,
+    "confidenceInterval": "95% bootstrap",
+    "outlierPolicy": "report all samples; no silent deletion",
+    "variancePolicy": "all raw repeats retained; decode throughput coefficient of variation must stay within the frozen maximum",
+    "maxCoefficientOfVariation": 0.05
+  },
+  "fixtures": ["kernel-fp32-reference", "structured-tool-call", "long-context-needle", "multi-turn-prompt-cache"]
+}
