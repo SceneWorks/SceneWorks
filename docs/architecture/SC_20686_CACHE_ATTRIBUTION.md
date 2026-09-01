@@ -18,19 +18,19 @@ produces separate family decisions. No real-weight claim or Go/No-go is emitted 
 
 ## Campaign producer boundary
 
-The paired campaign producer is `inference/scripts/sc20686_campaign_adapter.py`. It is inert unless
-called with `--campaign`; normal generation has no observer or receipt overhead. At the mapped
-FLUX.2 Klein/Wan entrypoint, the producer receives the product-owned observer event stream and
-exact geometry/configuration, hashes the complete snapshot inventory, requires creation/reuse/
-invalidation/release and allocator/process phase samples, then atomically writes one canonical raw
-row plus its SHA-256 sidecar. It invokes the reducer with `--sidecar`, which verifies both hashes
-before any family decision. `--fake` uses the same path for weightless tests; it is not real-weight
-evidence. Missing events, geometry, identity, or explicit campaign mode fail closed.
+The paired campaign producer is `inference/scripts/sc20686_campaign_adapter.py` at inference commit
+`f9a0ab078b906cb0b46c56b24d16bfebb8ea5138`. It is inert unless called with `--campaign`; normal
+generation has no observer or receipt overhead. For every arm the adapter creates an adapter-owned
+private `events.jsonl` file and passes its path with `--sc20686-events`; provider stdout and stderr
+are sealed only as diagnostics and are never parsed as event evidence. The adapter rejects a missing,
+non-JSONL, or carriage-return-containing event stream before requiring product-owned metadata,
+creation/reuse/invalidation/release, allocator samples, and process samples, then atomically writes
+the canonical raw row and its SHA-256 sidecar. Missing geometry, identity, or explicit campaign mode
+also fails closed.
 
-The Rust providers expose the same observer seam through `sc20686_observer::install_jsonl`: the
-campaign launcher passes `--sc20686-campaign --sc20686-events -` to the selected provider entrypoint,
-which emits JSONL for generation start/end, cross-KV creation/read, invalidation, and release. The
-default observer remains `None`; changing self-attention is never emitted as a reusable event.
+The Rust entrypoints require a dedicated event file when campaign mode is selected, so provider
+progress output cannot corrupt the observer transcript. The default observer remains `None`, and
+self-attention is never emitted as a reusable event.
 
 ### FLUX.2 Klein route limitation
 
@@ -39,8 +39,9 @@ The supported reference-image route is `Flux2Edit::generate_inner` at
 then concatenated into the joint `[target, refs]` stream at `:630` and re-concatenated for every
 denoise prediction at `:685-686`. It does not create a persistent reference-image K/V cache; the
 existing `ContiguousKvCache` hook in `text_encoder.rs` is caption-upsample self-attention and is
-not valid evidence for this story. The reference opportunity is blocked until a product-owned
-persistent cross-attention K/V boundary exists.
+not valid evidence for this story. This is the evidence-based SC-20686 No-go boundary: no persistent
+reference-K/V productization or promotable FLUX cache is claimed unless a product-owned persistent
+cross-attention K/V boundary and reader are actually introduced and measured.
 
 ### Wan variant closure
 
@@ -59,11 +60,12 @@ peak without replacement transient; runtime-only opportunity ≥5% generation ti
 Real-weight generation receipts remain blocked until the appropriate FLUX.2 Klein and Wan assets are
 available on an uncontended runner. No measurement is fabricated by this source-only lane.
 
-### Wan producer API blocker
+### Wan producer context is wired
 
-Loaded Wan identity is owned by private `WanGenerator` fields (`root`, `descriptor`, and
-`dit_source`) at `candle-gen-wan/src/lib.rs:853-880`; exact configuration is held by private
-`Pipeline::{te_cfg,dit_cfg,vae_cfg,variant,root}` at `candle-gen-wan/src/wan14b.rs:146-163`.
-The current public observer accepts only a sink path and receives no generator, pipeline,
-request, or tensor metadata. A truthful producer therefore requires a campaign context threaded
-through this private API; caller-authored JSON/config is not evidence and remains rejected.
+The former Wan producer API blocker is superseded by the live runtime context in inference commit
+`f9a0ab078b906cb0b46c56b24d16bfebb8ea5138`. `sc20686_observer::activate_requested` now activates
+only after the product route has reached its snapshot-backed runtime, and
+`bind_cross_kv_geometry` threads the exact product-owned cross-K/V geometry into the observer before
+it emits metadata. The five registered Wan routes therefore emit lifecycle, allocator, and immutable
+identity facts from their real producer context; caller-authored JSON or configuration remains
+non-evidence and is rejected by the adapter and reducer.
