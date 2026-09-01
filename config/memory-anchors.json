@@ -23,7 +23,8 @@
         "path": "docs/calibration/sc-18791/ltx25-mlx-evidence.seed.json",
         "sha256": "6038f39e21feaa5fcde9490c7a0791a2906bff6695386f734c013569de77b725",
         "recordId": "imc-9c4c5fe8356bcc4f139f",
-        "calibrationFingerprint": "sc-18797-ltx-2-5-mlx-ladder-v1"
+        "calibrationFingerprint": "sc-18797-ltx-2-5-mlx-ladder-v1",
+        "loaderClosureDigest": "c51877752374937a6dc01f74c8e89c92c0be578ca150ad58e283fddec7257b0b"
       },
       "geometry": {
         "width": 704,
@@ -60,7 +61,8 @@
         "path": "docs/calibration/sc-18791/ltx25-mlx-evidence.seed.json",
         "sha256": "6038f39e21feaa5fcde9490c7a0791a2906bff6695386f734c013569de77b725",
         "recordId": "imc-4e1b3a02a6ced3434824",
-        "calibrationFingerprint": "sc-18797-ltx-2-5-mlx-ladder-v1"
+        "calibrationFingerprint": "sc-18797-ltx-2-5-mlx-ladder-v1",
+        "loaderClosureDigest": "c51877752374937a6dc01f74c8e89c92c0be578ca150ad58e283fddec7257b0b"
       },
       "geometry": {
         "width": 1280,
@@ -97,7 +99,8 @@
         "path": "docs/calibration/sc-18791/ltx25-mlx-evidence.seed.json",
         "sha256": "6038f39e21feaa5fcde9490c7a0791a2906bff6695386f734c013569de77b725",
         "recordId": "imc-6f2b28a41967fd486b50",
-        "calibrationFingerprint": "sc-18797-ltx-2-5-mlx-ladder-v1"
+        "calibrationFingerprint": "sc-18797-ltx-2-5-mlx-ladder-v1",
+        "loaderClosureDigest": "c51877752374937a6dc01f74c8e89c92c0be578ca150ad58e283fddec7257b0b"
       },
       "geometry": {
         "width": 1280,
@@ -134,7 +137,8 @@
         "path": "docs/calibration/sc-18791/ltx25-mlx-evidence.seed.json",
         "sha256": "6038f39e21feaa5fcde9490c7a0791a2906bff6695386f734c013569de77b725",
         "recordId": "imc-50fbdda27ed3159a6ca1",
-        "calibrationFingerprint": "sc-18797-ltx-2-5-mlx-ladder-v1"
+        "calibrationFingerprint": "sc-18797-ltx-2-5-mlx-ladder-v1",
+        "loaderClosureDigest": "c51877752374937a6dc01f74c8e89c92c0be578ca150ad58e283fddec7257b0b"
       },
       "geometry": {
         "width": 768,
@@ -171,7 +175,8 @@
         "path": "docs/calibration/sc-18791/ltx25-mlx-evidence.seed.json",
         "sha256": "6038f39e21feaa5fcde9490c7a0791a2906bff6695386f734c013569de77b725",
         "recordId": "imc-beaa0f2aacf0832ea28a",
-        "calibrationFingerprint": "sc-18797-ltx-2-5-mlx-ladder-v1"
+        "calibrationFingerprint": "sc-18797-ltx-2-5-mlx-ladder-v1",
+        "loaderClosureDigest": "c51877752374937a6dc01f74c8e89c92c0be578ca150ad58e283fddec7257b0b"
       },
       "geometry": {
         "width": 704,
@@ -208,7 +213,8 @@
         "path": "docs/calibration/sc-18791/ltx25-mlx-evidence.seed.json",
         "sha256": "6038f39e21feaa5fcde9490c7a0791a2906bff6695386f734c013569de77b725",
         "recordId": "imc-7f8186376a9a3143ebee",
-        "calibrationFingerprint": "sc-18797-ltx-2-5-mlx-ladder-v1"
+        "calibrationFingerprint": "sc-18797-ltx-2-5-mlx-ladder-v1",
+        "loaderClosureDigest": "c51877752374937a6dc01f74c8e89c92c0be578ca150ad58e283fddec7257b0b"
       },
       "geometry": {
         "width": 1280,

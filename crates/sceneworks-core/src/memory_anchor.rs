@@ -208,7 +208,22 @@ pub struct AnchorSource {
     pub sha256: String,
     /// The calibration record inside it this anchor was extracted from.
     pub record_id: String,
+    /// The calibration campaign that produced the record. PROVENANCE, not currency: since sc-22511
+    /// an anchor's currency is [`AnchorSource::loader_closure_digest`] and nothing else, so a new
+    /// campaign fingerprint no longer demotes evidence whose loader never moved. It stays bound to
+    /// the source record by [`validate_anchor`] so the anchor cannot misattribute its own origin.
     pub calibration_fingerprint: String,
+    /// THE CURRENCY KEY (sc-22511, epic 22505 E9): the digest of the model's OWN loader closure —
+    /// the source files that load and execute this model on this backend — at the revision the
+    /// anchor was measured at. Derived by `scripts/anchor-loader-closure.mjs`, whose module comment
+    /// owns the definition of the unit and what it deliberately does not see.
+    ///
+    /// The anchor is CURRENT while this still equals the digest declared for its
+    /// `(model, backend lane)` in [`PACKAGED_ANCHOR_LOADER_CLOSURES`]. Because the unit contains no
+    /// revision, no lock and no workspace input, a pin bump that leaves the loader's source
+    /// untouched leaves this equal — which is exactly the claim E9 makes: an anchor predating an
+    /// unrelated change stays authoritative.
+    pub loader_closure_digest: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -349,6 +364,15 @@ fn validate_anchor(anchor: &MemoryAnchor) -> Result<(), String> {
         || anchor.overall_allocator_envelope_bytes == 0
     {
         return Err(format!("memory anchor {} has a zero phase peak", anchor.id));
+    }
+    // Shape only. A MISMATCHED loader digest is a staleness verdict at admission, never a load
+    // failure: the store keeps carrying the evidence it measured, and the derivation declines to
+    // price with it until the digest agrees again.
+    if !is_sha256(&anchor.source.loader_closure_digest) {
+        return Err(format!(
+            "memory anchor {} loader closure digest {} is not a sha256",
+            anchor.id, anchor.source.loader_closure_digest
+        ));
     }
     let Some((_, source_raw)) = PACKAGED_MEMORY_ANCHOR_SOURCES
         .iter()
@@ -494,6 +518,131 @@ fn validate_anchor(anchor: &MemoryAnchor) -> Result<(), String> {
         ));
     }
     Ok(())
+}
+
+// ---------------------------------------------------------------------------------------------
+// Anchor currency: the model's own loader closure (sc-22511).
+// ---------------------------------------------------------------------------------------------
+
+/// The checked-in loader-closure declarations — the CURRENT value of every declared model's
+/// currency key. Derived at the pinned inference revision by `scripts/anchor-loader-closure.mjs`.
+pub const PACKAGED_ANCHOR_LOADER_CLOSURES: &str =
+    include_str!("../../../config/anchor-loader-closures.json");
+
+/// Must equal the `digestVersion` of the checked-in file. Two versions answer different questions,
+/// so a version bump reads as "no declaration" (fail closed to the floor) rather than silently
+/// comparing digests derived under different rules.
+pub const ANCHOR_LOADER_CLOSURE_VERSION: &str = "anchor-loader-closure v1";
+
+/// One `(model, backend lane)`'s declared loader closure.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AnchorLoaderClosure {
+    /// The loader entry points the closure is rooted at, repo-relative in the inference tree.
+    pub entry_points: Vec<String>,
+    /// The digest of the closure's source content. This is what an anchor is compared against.
+    pub digest: String,
+    pub closure_file_count: usize,
+    /// The resolved file list, checked in so a digest change is answerable — "what moved?" has to
+    /// be readable from the diff without re-deriving anything.
+    pub closure_files: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AnchorLoaderClosures {
+    #[serde(rename = "_comment", default)]
+    pub comment: String,
+    pub digest_version: String,
+    /// The revision the digests were DERIVED at. Provenance only — deliberately never compared,
+    /// for the same reason the digest does not hash it.
+    pub inference_revision: String,
+    /// Keyed `"<model id>:<backend lane>"`.
+    pub models: BTreeMap<String, AnchorLoaderClosure>,
+}
+
+/// The declaration key for one anchor coordinate.
+pub fn anchor_loader_closure_key(model_id: &str, backend: AnchorBackend) -> String {
+    format!("{model_id}:{}", backend.as_key())
+}
+
+impl AnchorLoaderClosures {
+    /// The current loader-closure digest for one `(model, backend lane)`, or `None` when the
+    /// coordinate is undeclared — which is fail-closed: an anchor whose loader nothing tracks
+    /// cannot be shown to be current, so it is not.
+    pub fn digest_for(&self, model_id: &str, backend: AnchorBackend) -> Option<&str> {
+        self.models
+            .get(&anchor_loader_closure_key(model_id, backend))
+            .map(|closure| closure.digest.as_str())
+    }
+}
+
+/// Strict parse plus the invariants serde cannot express.
+pub fn load_anchor_loader_closures(raw: &str) -> Result<AnchorLoaderClosures, String> {
+    let closures: AnchorLoaderClosures = serde_json::from_str(raw)
+        .map_err(|error| format!("anchor loader closures do not parse: {error}"))?;
+    if closures.digest_version != ANCHOR_LOADER_CLOSURE_VERSION {
+        return Err(format!(
+            "anchor loader closure digest version {} is not the supported \
+             {ANCHOR_LOADER_CLOSURE_VERSION}",
+            closures.digest_version
+        ));
+    }
+    for (key, closure) in &closures.models {
+        if closure.entry_points.is_empty() {
+            return Err(format!(
+                "anchor loader closure {key} declares no entry points"
+            ));
+        }
+        if !is_sha256(&closure.digest) {
+            return Err(format!(
+                "anchor loader closure {key} digest {} is not a sha256",
+                closure.digest
+            ));
+        }
+        if closure.closure_files.len() != closure.closure_file_count {
+            return Err(format!(
+                "anchor loader closure {key} lists {} files but declares {}",
+                closure.closure_files.len(),
+                closure.closure_file_count
+            ));
+        }
+        // An entry point outside the walked closure would mean the digest was derived from a
+        // different root than the one declared here.
+        for entry in &closure.entry_points {
+            if !closure.closure_files.contains(entry) {
+                return Err(format!(
+                    "anchor loader closure {key} roots at {entry}, which is not in its own closure"
+                ));
+            }
+        }
+    }
+    Ok(closures)
+}
+
+fn is_sha256(value: &str) -> bool {
+    value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
+/// The packaged declarations, parsed once. `None` demotes every anchor to the caller's floor.
+pub fn packaged_anchor_loader_closures() -> Option<&'static AnchorLoaderClosures> {
+    static PACKAGED: OnceLock<Option<AnchorLoaderClosures>> = OnceLock::new();
+    PACKAGED
+        .get_or_init(|| load_anchor_loader_closures(PACKAGED_ANCHOR_LOADER_CLOSURES).ok())
+        .as_ref()
+}
+
+impl MemoryAnchor {
+    /// Whether this anchor's evidence is CURRENT (sc-22511, E9).
+    ///
+    /// The one and only currency question: does the code that loads THIS model on THIS backend
+    /// still hash to what it hashed when the anchor was measured? Not the pin, not a sibling model,
+    /// not a shared crate the loader never reaches, not the calibration campaign that produced the
+    /// record — none of those can move this answer, by construction of the key.
+    pub fn is_current(&self, closures: &AnchorLoaderClosures) -> bool {
+        closures.digest_for(&self.model_id, self.backend)
+            == Some(self.source.loader_closure_digest.as_str())
+    }
 }
 
 /// The packaged store, parsed and validated once. `None` is fail-open: callers keep their
@@ -1024,6 +1173,172 @@ mod tests {
             error.contains("not a compiled retained-evidence file"),
             "{error}"
         );
+    }
+
+    // -------------------------------------------------------------------------------------
+    // Currency: the model's own loader closure (sc-22511, E9).
+    //
+    // The DERIVATION of the key — what a pin bump, a sibling edit and an unreached shared-crate
+    // edit do to it — is asked of the real pinned inference tree by
+    // `scripts/anchor-loader-closure.test.mjs`, which is where the walk lives. What is asked here
+    // is the COMPARISON: which anchors a rotated key stales, and which it leaves alone.
+    // -------------------------------------------------------------------------------------
+
+    fn packaged_closures() -> AnchorLoaderClosures {
+        load_anchor_loader_closures(PACKAGED_ANCHOR_LOADER_CLOSURES)
+            .expect("the packaged loader closures parse")
+    }
+
+    #[test]
+    fn every_packaged_anchor_declares_a_loader_closure_and_is_current() {
+        let store = load_memory_anchors(PACKAGED_MEMORY_ANCHORS).expect("packaged store loads");
+        let closures = packaged_closures();
+        assert!(!store.anchors.is_empty(), "the store must carry anchors");
+        for anchor in &store.anchors {
+            let key = anchor_loader_closure_key(&anchor.model_id, anchor.backend);
+            assert!(
+                closures.models.contains_key(&key),
+                "anchor {} has no loader-closure declaration for {key}",
+                anchor.id
+            );
+            assert!(
+                anchor.is_current(&closures),
+                "anchor {} is not current against the declared loader closure",
+                anchor.id
+            );
+        }
+    }
+
+    /// THE HEADLINE, comparison half: rotating one model's loader digest stales exactly that
+    /// model's anchors — a sibling model declared beside it keeps its own.
+    #[test]
+    fn a_rotated_loader_digest_stales_exactly_that_models_anchors() {
+        let store = load_memory_anchors(PACKAGED_MEMORY_ANCHORS).expect("packaged store loads");
+        let mut closures = packaged_closures();
+        // A sibling model, declared with its own digest, and an anchor that answers to it.
+        let sibling_key = anchor_loader_closure_key("ltx_2_3", AnchorBackend::Mlx);
+        let mut sibling_closure = closures
+            .models
+            .get(&anchor_loader_closure_key("ltx_2_5", AnchorBackend::Mlx))
+            .expect("ltx_2_5 mlx is declared")
+            .clone();
+        sibling_closure.digest = "b".repeat(64);
+        closures
+            .models
+            .insert(sibling_key.clone(), sibling_closure.clone());
+        let mut sibling_anchor = store.anchors[0].clone();
+        sibling_anchor.model_id = "ltx_2_3".to_owned();
+        sibling_anchor.source.loader_closure_digest = sibling_closure.digest.clone();
+
+        assert!(sibling_anchor.is_current(&closures));
+        for anchor in &store.anchors {
+            assert!(
+                anchor.is_current(&closures),
+                "anchor {} must start current",
+                anchor.id
+            );
+        }
+
+        // Rotate ONLY the sibling's key: every ltx_2_5 anchor stays authoritative.
+        let mut rotated_sibling = closures.clone();
+        rotated_sibling
+            .models
+            .get_mut(&sibling_key)
+            .expect("sibling declared")
+            .digest = "c".repeat(64);
+        assert!(
+            !sibling_anchor.is_current(&rotated_sibling),
+            "the sibling's own anchor must stale when ITS loader moves"
+        );
+        for anchor in &store.anchors {
+            assert!(
+                anchor.is_current(&rotated_sibling),
+                "anchor {} must survive a sibling model's loader edit",
+                anchor.id
+            );
+        }
+
+        // Rotate ONLY this model's key: every ltx_2_5 anchor stales, the sibling's does not.
+        let mut rotated_self = closures.clone();
+        rotated_self
+            .models
+            .get_mut(&anchor_loader_closure_key("ltx_2_5", AnchorBackend::Mlx))
+            .expect("ltx_2_5 declared")
+            .digest = "d".repeat(64);
+        assert!(sibling_anchor.is_current(&rotated_self));
+        for anchor in &store.anchors {
+            assert!(
+                !anchor.is_current(&rotated_self),
+                "anchor {} must stale when its OWN loader moves",
+                anchor.id
+            );
+        }
+    }
+
+    /// The same anchor on the other backend lane is a different loader and a different key.
+    #[test]
+    fn currency_is_keyed_per_backend_lane_and_fails_closed_when_undeclared() {
+        let store = load_memory_anchors(PACKAGED_MEMORY_ANCHORS).expect("packaged store loads");
+        let closures = packaged_closures();
+        let mut candle = store.anchors[0].clone();
+        candle.backend = AnchorBackend::Candle;
+        assert!(
+            !candle.is_current(&closures),
+            "an undeclared (model, lane) cannot be shown current, so it is not"
+        );
+    }
+
+    /// The campaign fingerprint is provenance, not currency: a re-fingerprinted campaign over the
+    /// same loader must not demote the anchor (E9).
+    #[test]
+    fn the_calibration_fingerprint_is_not_a_currency_term() {
+        let store = load_memory_anchors(PACKAGED_MEMORY_ANCHORS).expect("packaged store loads");
+        let closures = packaged_closures();
+        let mut refingerprinted = store.anchors[0].clone();
+        refingerprinted.source.calibration_fingerprint = "sc-99999-some-later-campaign".to_owned();
+        assert!(refingerprinted.is_current(&closures));
+    }
+
+    #[test]
+    fn a_loader_closure_file_that_does_not_parse_or_declare_is_refused() {
+        let mut version: serde_json::Value =
+            serde_json::from_str(PACKAGED_ANCHOR_LOADER_CLOSURES).expect("closures parse");
+        version["digestVersion"] = serde_json::json!("anchor-loader-closure v0");
+        let error = load_anchor_loader_closures(&version.to_string())
+            .expect_err("a version mismatch must be refused");
+        assert!(error.contains("digest version"), "{error}");
+
+        let mut digest: serde_json::Value =
+            serde_json::from_str(PACKAGED_ANCHOR_LOADER_CLOSURES).expect("closures parse");
+        digest["models"]["ltx_2_5:mlx"]["digest"] = serde_json::json!("not-a-digest");
+        let error = load_anchor_loader_closures(&digest.to_string())
+            .expect_err("a malformed digest must be refused");
+        assert!(error.contains("is not a sha256"), "{error}");
+
+        let mut rooted: serde_json::Value =
+            serde_json::from_str(PACKAGED_ANCHOR_LOADER_CLOSURES).expect("closures parse");
+        rooted["models"]["ltx_2_5:mlx"]["entryPoints"] =
+            serde_json::json!(["crates/media/mlx-gen/mlx-gen-wan/src/model.rs"]);
+        let error = load_anchor_loader_closures(&rooted.to_string())
+            .expect_err("an entry point outside its own closure must be refused");
+        assert!(error.contains("not in its own closure"), "{error}");
+
+        let mut counted: serde_json::Value =
+            serde_json::from_str(PACKAGED_ANCHOR_LOADER_CLOSURES).expect("closures parse");
+        counted["models"]["ltx_2_5:mlx"]["closureFileCount"] = serde_json::json!(1);
+        let error = load_anchor_loader_closures(&counted.to_string())
+            .expect_err("a file count that disagrees with the list must be refused");
+        assert!(error.contains("declares"), "{error}");
+    }
+
+    #[test]
+    fn an_anchor_whose_loader_digest_is_not_a_sha256_is_refused_at_load() {
+        let mut doctored: serde_json::Value =
+            serde_json::from_str(PACKAGED_MEMORY_ANCHORS).expect("packaged store parses");
+        doctored["anchors"][0]["source"]["loaderClosureDigest"] = serde_json::json!("nope");
+        let error =
+            load_memory_anchors(&doctored.to_string()).expect_err("the digest shape is checked");
+        assert!(error.contains("loader closure digest"), "{error}");
     }
 
     // -------------------------------------------------------------------------------------

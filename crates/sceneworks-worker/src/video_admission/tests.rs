@@ -3074,14 +3074,35 @@ fn an_unmeasured_pipeline_cell_falls_to_the_estimate_floor() {
     );
 }
 
+/// An anchor store whose anchors cite a loader closure that no longer matches the declaration —
+/// i.e. the model's own loader source moved since the measurement (sc-22511).
+fn staled_loader_anchor_store() -> sceneworks_core::memory_anchor::MemoryAnchorStore {
+    let mut doctored: serde_json::Value =
+        serde_json::from_str(sceneworks_core::memory_anchor::PACKAGED_MEMORY_ANCHORS)
+            .expect("packaged anchors parse");
+    for anchor in doctored["anchors"]
+        .as_array_mut()
+        .expect("the store carries anchors")
+    {
+        anchor["source"]["loaderClosureDigest"] = serde_json::json!("f".repeat(64));
+    }
+    sceneworks_core::memory_anchor::load_memory_anchors(&doctored.to_string())
+        .expect("a doctored currency digest is still a well-formed store")
+}
+
 /// Every identity/currency axis the anchor derivation binds, exercised one mutation at a time.
 ///
-/// `anchor_derived_phase_peaks` is called directly here because a foreign provider id or a moved
-/// calibration ABI also makes the CONTRACT undecidable to the shared selector, which would mask the
-/// anchor guard behind an unrelated (and equally safe) demotion. The end-to-end control below then
-/// proves one of these axes really does land on the phase-blind floor through `select`.
+/// `anchor_derived_phase_peaks` is called directly here because a foreign provider id also makes the
+/// CONTRACT undecidable to the shared selector, which would mask the anchor guard behind an
+/// unrelated (and equally safe) demotion. The end-to-end control below then proves one of these axes
+/// really does land on the phase-blind floor through `select`.
+///
+/// CURRENCY IS THE LOADER CLOSURE, AND ONLY THAT (sc-22511, E9). The calibration axes that used to
+/// appear in this list — an absent calibration identity, a moved ABI, a later campaign's
+/// fingerprint — are asserted in the OPPOSITE direction below: none of them may demote an anchor
+/// whose loader never moved.
 #[test]
-fn a_foreign_identity_or_staled_calibration_does_not_reach_the_anchor_derivation() {
+fn a_foreign_identity_or_a_moved_loader_closure_does_not_reach_the_anchor_derivation() {
     let baseline_contract = ltx25_fixture_contract(&[]);
     let derived = |identity: VideoRequestIdentity<'_>, contract: &MemoryProviderContract| {
         let selector = LadderVideoSelector::new(identity, contract, budget(128.0), 18 * GIB, 0);
@@ -3117,9 +3138,6 @@ fn a_foreign_identity_or_staled_calibration_does_not_reach_the_anchor_derivation
         ("absent pipeline identity", |identity| {
             identity.transformer_variant = None
         }),
-        ("moved calibration ABI", |identity| {
-            identity.calibration_abi = gen_core::MEMORY_CALIBRATION_ABI + 1
-        }),
     ] {
         let mut identity = ltx25_identity(crate::mlx_fit_gate::UNCALIBRATED_CLOSURE);
         mutate(&mut identity);
@@ -3144,40 +3162,78 @@ fn a_foreign_identity_or_staled_calibration_does_not_reach_the_anchor_derivation
         load_shape: LoadShape::EagerMaterialization,
     });
 
-    for (label, contract) in [
-        ("foreign provider", &foreign_provider),
-        ("no calibration identity", &absent_calibration),
-        ("staled calibration fingerprint", &foreign_fingerprint),
+    assert_eq!(
+        derived(
+            ltx25_identity(crate::mlx_fit_gate::UNCALIBRATED_CLOSURE),
+            &foreign_provider
+        ),
+        None,
+        "a foreign provider must not reach the anchor derivation"
+    );
+
+    // E9: the calibration axes are PROVENANCE. An absent calibration identity, a moved ABI and a
+    // later campaign's fingerprint all leave an anchor whose loader never moved authoritative.
+    for (label, contract, abi) in [
+        (
+            "no calibration identity",
+            &absent_calibration,
+            gen_core::MEMORY_CALIBRATION_ABI,
+        ),
+        (
+            "later campaign fingerprint",
+            &foreign_fingerprint,
+            gen_core::MEMORY_CALIBRATION_ABI,
+        ),
+        (
+            "moved calibration ABI",
+            &baseline_contract,
+            gen_core::MEMORY_CALIBRATION_ABI + 1,
+        ),
     ] {
-        assert_eq!(
-            derived(
-                ltx25_identity(crate::mlx_fit_gate::UNCALIBRATED_CLOSURE),
-                contract
-            ),
-            None,
-            "{label} must not reach the anchor derivation"
+        let mut identity = ltx25_identity(crate::mlx_fit_gate::UNCALIBRATED_CLOSURE);
+        identity.calibration_abi = abi;
+        assert!(
+            derived(identity, contract).is_some(),
+            "{label} must NOT demote an anchor whose loader closure is unchanged"
         );
     }
 
-    // End-to-end control: a staled fingerprint really does land on the phase-blind floor, and the
-    // production evidence gate stops claiming coverage for it.
-    let mut selector = LadderVideoSelector::new(
+    // THE currency axis: the model's own loader closure moved since the measurement.
+    let staled = staled_loader_anchor_store();
+    let selector = LadderVideoSelector::new(
         ltx25_identity(crate::mlx_fit_gate::UNCALIBRATED_CLOSURE),
-        &foreign_fingerprint,
+        &baseline_contract,
         budget(128.0),
         18 * GIB,
         0,
+    )
+    .with_anchor_store(Some(&staled));
+    assert_eq!(
+        anchor_derived_phase_peaks(&selector, ltx25_unmeasured_geometry(), &[])
+            .map(|(_, anchor_id)| anchor_id.to_owned()),
+        None,
+        "an anchor whose loader closure moved must not price a request"
     );
+
+    // End-to-end control: that demotion really does land on the phase-blind floor.
+    let mut selector = LadderVideoSelector::new(
+        ltx25_identity(crate::mlx_fit_gate::UNCALIBRATED_CLOSURE),
+        &baseline_contract,
+        budget(128.0),
+        18 * GIB,
+        0,
+    )
+    .with_anchor_store(Some(&staled));
     assert!(matches!(
         selector.select(ltx25_unmeasured_geometry()),
         VideoRungSelection::Selected { .. }
     ));
     assert_eq!(
         selector.selections[0].evidence_revision, "video-estimate-floor-v1",
-        "a staled calibration fingerprint must demote the anchor derivation to the floor"
+        "a moved loader closure must demote the anchor derivation to the floor"
     );
 
-    let generator = fixture_generator(Some(foreign_fingerprint));
+    // …and the evidence gate closes on exactly the same event, through the same seam.
     let mut request = inputs(89, budget(128.0), 18 * GIB);
     request.model_id = "ltx_2_5";
     request.route = "ltx_2_5";
@@ -3187,7 +3243,24 @@ fn a_foreign_identity_or_staled_calibration_does_not_reach_the_anchor_derivation
     request.height = 640;
     request.fps = 25;
     assert!(
-        !packaged_video_evidence_covers_request(&generator, &request),
-        "a staled calibration fingerprint must not keep the anchor evidence gate open"
+        anchor_evidence_covers_request(
+            sceneworks_core::memory_anchor::packaged_memory_anchors(),
+            &baseline_contract,
+            &request
+        ),
+        "the packaged anchors are current, so the gate must be open"
+    );
+    assert!(
+        !anchor_evidence_covers_request(Some(&staled), &baseline_contract, &request),
+        "a moved loader closure must not keep the anchor evidence gate open"
+    );
+    // The campaign fingerprint moving does not close it — E9 again, at the gate.
+    assert!(
+        anchor_evidence_covers_request(
+            sceneworks_core::memory_anchor::packaged_memory_anchors(),
+            &foreign_fingerprint,
+            &request
+        ),
+        "a later campaign fingerprint must not close the anchor evidence gate"
     );
 }
