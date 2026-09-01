@@ -1182,13 +1182,14 @@ struct VerifiedGeometryAlternative {
 /// closure-current binding, but a DIFFERENT geometry — the cell the request itself could not be
 /// admitted on.
 ///
-/// Closure-current is a deliberate restriction, not an oversight: `MLX_ESTIMATE_MARGIN` was
-/// derived to cover extrapolation error on top of same-closure re-capture variance
-/// (`crates/sceneworks-worker/src/ladder_margin_policy.rs`). A stale-closure record already carries
-/// its own corpus-derived drift allowance on the MEASURED path; stacking that drift under an
-/// extrapolation would spend the estimate margin twice, and no derivation covers the sum — so a
-/// stale record may keep serving its own cell behind the stale margin (sc-18095) but may not seed
-/// an extrapolated estimate.
+/// Closure-current is a deliberate restriction, not an oversight: a fitted-curve estimate is
+/// charged exactly ONE allowance — `AdmissionTerm::SameCellRecaptureSpread`, the measured
+/// capture-to-capture spread of the cell the curve was fitted through
+/// (`crates/sceneworks-worker/src/ladder_margin_policy.rs`). A stale-closure record carries that
+/// same recapture term on the MEASURED path for its own cell. Seeding an extrapolation from one
+/// would stack closure drift under the extrapolation while still paying for a single recapture,
+/// and no derivation covers the sum — so a stale record may keep serving its own cell (sc-18095)
+/// but may not seed an extrapolated estimate.
 ///
 /// Everything the extrapolation, the binding-phase constraint, and the loaded-provider identity
 /// gate need is captured here, so the synthesis step never re-reads the bundle.
@@ -1954,7 +1955,7 @@ fn evidence_admission_route(
                 };
                 let foreign_reserve_bytes =
                     envelope.foreign_reserve_for_host_bytes(budget.total_bytes);
-                let stale_peak_bytes = crate::memory_strategy::stale_widened_peak_bytes(
+                let stale_peak_bytes = crate::memory_strategy::stale_admitted_peak_bytes(
                     gen_core::MemoryBackend::Mlx,
                     envelope.peak_bytes,
                 );
@@ -2100,6 +2101,11 @@ struct SynthesizedEstimate {
     selection: MemorySelection,
     evidence: MemoryEvidence,
     basis: crate::memory_strategy::CandidateBasis,
+    /// The ACTIVATION slice of `evidence.predicted_peak_bytes`, declared by the arm that built the
+    /// peak (sc-22508). `Some` only on the weights+headroom floor arm, which composes the peak here
+    /// as `estimate_floor_weights_bytes + generic_headroom_bytes` and therefore knows the split;
+    /// the fitted-curve arm scales a measured envelope and has none to declare.
+    unmodeled_activation_bytes: Option<u64>,
     decode_quality: DecodeQualityRequestDecision,
 }
 
@@ -2790,6 +2796,7 @@ fn synthesize_estimate_ladder(
                             calibration_fingerprint,
                         ),
                         basis: CandidateBasis::EstimateFittedCurve,
+                        unmodeled_activation_bytes: None,
                         decode_quality: parameter_candidate.decode_quality.clone(),
                     })
                 });
@@ -2811,8 +2818,9 @@ fn synthesize_estimate_ladder(
             if contract.validate_selection(&selection).is_err() {
                 continue;
             }
+            let floor_activation_bytes = plan.generic_headroom_bytes(geometry);
             let predicted_peak_bytes = estimate_floor_weights_bytes(contract, &engaged)
-                .saturating_add(plan.generic_headroom_bytes(geometry));
+                .saturating_add(floor_activation_bytes);
             tracing::info!(
                 route = contract.provider_id,
                 backend = "mlx",
@@ -2834,6 +2842,8 @@ fn synthesize_estimate_ladder(
                     calibration_fingerprint,
                 ),
                 basis: CandidateBasis::EstimateFloor,
+                // Declared where the split is CONSTRUCTED, three lines above.
+                unmodeled_activation_bytes: Some(floor_activation_bytes),
                 decode_quality: parameter_candidate.decode_quality,
             };
             ladder
@@ -3468,6 +3478,14 @@ fn evaluate_request_with_budget_using_bundle(
     // `Measured`. Pushed at the same sites as `evidence` for the same fail-open reason as the
     // digests above.
     let mut candidate_bases: Vec<crate::memory_strategy::CandidateBasis> = Vec::new();
+    // Index-aligned ACTIVATION axis (sc-22508), pushed at the same sites for the same reason: only
+    // the site that CONSTRUCTED a peak knows whether it decomposes into counted weights and a flat
+    // activation term, and what that term is. A blanket declaration here was wrong for two peaks —
+    // a `mage_flow` route, whose peak is `providers::mage::memory::generation_peak_gb` and has no
+    // weights/headroom split at all, and any peak a generator rewrote through
+    // `predicted_memory_peak_from_base`. Both now carry `None` and take the policy's documented
+    // undeclared-floor arm instead of being charged a headroom they do not contain.
+    let mut candidate_activation_bytes: Vec<Option<u64>> = Vec::new();
     if admission.path == AdmissionPath::Evidence {
         // A covered cell is authorized only by its exact verified ladder. Letting the generic
         // resident estimate or caller-supplied evidence run first would turn Evidence telemetry
@@ -3491,7 +3509,7 @@ fn evaluate_request_with_budget_using_bundle(
             let graded_peak_bytes = if candidate.closure_digest == live_closure_digest {
                 exact.predicted_peak_bytes
             } else {
-                crate::memory_strategy::stale_widened_peak_bytes(
+                crate::memory_strategy::stale_admitted_peak_bytes(
                     gen_core::MemoryBackend::Mlx,
                     exact.predicted_peak_bytes,
                 )
@@ -3508,6 +3526,8 @@ fn evaluate_request_with_budget_using_bundle(
                 evidence.push(exact);
                 candidate_digests.push(candidate.closure_digest.as_str());
                 candidate_bases.push(crate::memory_strategy::CandidateBasis::Measured);
+                // A measured envelope is one observed number; it does not decompose.
+                candidate_activation_bytes.push(None);
             }
         }
         if evidence.is_empty() {
@@ -3556,6 +3576,7 @@ fn evaluate_request_with_budget_using_bundle(
         evidence.reserve(capacity);
         candidate_digests.reserve(capacity);
         candidate_bases.reserve(capacity);
+        candidate_activation_bytes.reserve(capacity);
         selections.push(resident_selection);
         evidence.push(&resident);
         candidate_digests.push(live_closure_digest.as_str());
@@ -3563,6 +3584,17 @@ fn evaluate_request_with_budget_using_bundle(
         // peak source is unchanged, but it is now graded behind the estimate margin like every
         // other unmeasured candidate instead of at its raw guess.
         candidate_bases.push(CandidateBasis::EstimateFloor);
+        // ...but its PEAK does not decompose here, so it declares no activation term (sc-22508).
+        // This candidate's peak is `predicted_memory_peak_from_base(contract_base_peak_bytes(
+        // request_total_peak_bytes(..)))` minus `attributable_resident_bytes`. Two of those three
+        // steps can destroy the weights+headroom shape: `request_total_peak_bytes` returns the
+        // `mage_flow` provider's own `generation_peak_gb` scalar on that route, and
+        // `predicted_memory_peak_from_base` is a gen-core trait method the loaded provider owns
+        // and may rewrite arbitrarily. Naming `generic_headroom_bytes` here would have declared a
+        // term the peak need not contain — on the mage route, a term the peak DEMONSTRABLY does
+        // not contain. `None` takes the policy's undeclared-floor arm, whose doc says the fix for
+        // a lane that wants better is to declare a real split, not to widen a number.
+        candidate_activation_bytes.push(None);
         selections.extend(additional_evidence.iter().map(|item| MemorySelection {
             strategy: item.key.strategy,
             parameters: item.key.parameters,
@@ -3575,11 +3607,13 @@ fn evaluate_request_with_budget_using_bundle(
                 .map(|_| live_closure_digest.as_str()),
         );
         candidate_bases.extend(additional_evidence.iter().map(|_| CandidateBasis::Measured));
+        candidate_activation_bytes.extend(additional_evidence.iter().map(|_| None));
         for estimate in synthesized_estimates {
             selections.push(estimate.selection);
             evidence.push(&estimate.evidence);
             candidate_digests.push(live_closure_digest.as_str());
             candidate_bases.push(estimate.basis);
+            candidate_activation_bytes.push(estimate.unmodeled_activation_bytes);
         }
     }
     // The digests are carried from the push sites rather than recovered by searching
@@ -3590,16 +3624,23 @@ fn evaluate_request_with_budget_using_bundle(
     // the evidence removes the failure mode instead of arguing it cannot happen.
     debug_assert_eq!(evidence.len(), candidate_digests.len());
     debug_assert_eq!(evidence.len(), candidate_bases.len());
+    debug_assert_eq!(evidence.len(), candidate_activation_bytes.len());
     let candidates = selections
         .iter()
         .zip(evidence)
         .zip(candidate_digests.iter().zip(&candidate_bases))
+        .zip(&candidate_activation_bytes)
         .map(
-            |((selection, evidence), (closure_digest, basis))| Candidate {
+            |(((selection, evidence), (closure_digest, basis)), activation)| Candidate {
                 selection: *selection,
                 evidence,
                 closure_digest,
                 basis: *basis,
+                // sc-22508: carried from the site that BUILT each peak (see
+                // `candidate_activation_bytes`), never inferred from the basis label here. A
+                // `CandidateBasis::EstimateFloor` label says how much evidence stands behind a
+                // number; it does not say the number is `weights + generic_headroom_bytes`.
+                unmodeled_activation_bytes: *activation,
             },
         )
         .collect::<Vec<_>>();
@@ -3811,7 +3852,7 @@ fn evaluate_request_with_budget_using_bundle(
         let graded_peak_bytes = if candidate.closure_digest == live_closure_digest {
             evidence.predicted_peak_bytes
         } else {
-            crate::memory_strategy::stale_widened_peak_bytes(
+            crate::memory_strategy::stale_admitted_peak_bytes(
                 gen_core::MemoryBackend::Mlx,
                 evidence.predicted_peak_bytes,
             )
@@ -5041,6 +5082,10 @@ fn generic_mlx_shared_observation(
         parameters: Default::default(),
         tier,
     };
+    let headroom_bytes = (headroom_gb * BYTES_PER_GIB)
+        .max(0.0)
+        .ceil()
+        .clamp(0.0, u64::MAX as f64) as u64;
     let evidence = MemoryEvidence {
         key: MemoryEvidenceKey {
             model_family: "generic_mlx_cold_load".into(),
@@ -5073,7 +5118,17 @@ fn generic_mlx_shared_observation(
         sceneworks_revision: "sc-15449-contract-v1".into(),
         inference_revision: "1c4354b4b22d7f2cf5c4ea5fe17a83ab6c655e82".into(),
         harness_version: String::new(),
-        predicted_peak_bytes: total_bytes,
+        // sc-22508: the peak is the WHOLE floor — resolved-spec weights plus the activation
+        // headroom — because the allowance declared below must be a slice of the peak it grades,
+        // not a second charge sitting outside it (`memory_strategy::Candidate
+        // ::unmodeled_activation_bytes`). Headroom used to live only in the budget's
+        // `reserved_headroom_gb`, which made the declaration an out-of-band charge.
+        //
+        // Moving it is exactly value-preserving, not a policy change: the comparison was
+        // `weights + 0.17*headroom <= total - headroom` and is now
+        // `(weights + headroom) + 0.17*headroom <= total`, the same inequality. `reserved_headroom_gb`
+        // is zeroed below so the term is counted once.
+        predicted_peak_bytes: total_bytes.saturating_add(headroom_bytes),
         observed_peak_bytes: None,
         parity: MemoryParityContract::Exact,
         parity_result: MemoryParityResult::NotRun,
@@ -5106,7 +5161,9 @@ fn generic_mlx_shared_observation(
             available_gb: budget.total_gb,
             reclaimable_gb: 0.0,
             total_gb: budget.total_gb,
-            reserved_headroom_gb: headroom_gb,
+            // Zero, because the headroom is now IN the candidate's peak (see the peak's comment).
+            // Leaving it here as well would charge the term twice.
+            reserved_headroom_gb: 0.0,
         }),
         &[Candidate {
             selection,
@@ -5114,6 +5171,10 @@ fn generic_mlx_shared_observation(
             closure_digest: UNCALIBRATED_CLOSURE,
             // The generic cold-load estimate is exactly a weights+headroom floor (sc-18096).
             basis: crate::memory_strategy::CandidateBasis::EstimateFloor,
+            // sc-22508: the headroom half of that floor is the only uncertain term; the weights
+            // half is the resolved load spec's counted bytes. This is a genuine slice of
+            // `predicted_peak_bytes` above, which is what the field's contract requires.
+            unmodeled_activation_bytes: Some(headroom_bytes),
         }],
     )
 }
@@ -8432,16 +8493,22 @@ mod tests {
     const FIXTURE_DEEP_ESTIMATE_FLOOR_GB: f64 = 6.0;
     const FIXTURE_SHALLOW_ESTIMATE_FLOOR_GB: f64 = 9.0;
 
-    /// The production widening an EstimateFloor candidate receives before the fit check.
+    /// The fixture's flat activation-headroom term (2 GiB fixed reserve + 4 GiB area at 1024²) —
+    /// the ONLY uncertain half of every floor above, and the term sc-22508's allowance is charged
+    /// against.
+    const FIXTURE_HEADROOM_GB: f64 = 6.0;
+
+    /// The production allowance an EstimateFloor candidate receives before the fit check.
     ///
-    /// Read from the shipped constant rather than a literal on purpose. `MLX_ESTIMATE_MARGIN` is
-    /// re-derived from the calibration corpus and moved 5% -> 50.4073% when the corpus grew 65 -> 89
-    /// records; every fixture below that had hardcoded a host budget against the 5% term silently
-    /// FLIPPED DIRECTION at that point (a "reaches the deep rung" test became a refusal test, for the
-    /// wrong reason). Sizing budgets through this function instead keeps each test's direction fixed
-    /// across any future re-derivation, so an accepted-floor change stays bookkeeping.
+    /// Computed through the policy rather than a literal on purpose. Before sc-22508 this was
+    /// `floor * (1 + MLX_ESTIMATE_MARGIN)`, and when that corpus-derived margin moved 5% ->
+    /// 50.4073% every fixture that had hardcoded a host budget against the 5% term silently FLIPPED
+    /// DIRECTION (a "reaches the deep rung" test became a refusal test, for the wrong reason).
+    /// Sizing budgets through this function keeps each test's direction fixed across any future
+    /// re-derivation.
     fn widened_estimate_gb(floor_gb: f64) -> f64 {
-        floor_gb * (1.0 + crate::ladder_margin_policy::MLX_ESTIMATE_MARGIN)
+        floor_gb
+            + FIXTURE_HEADROOM_GB * crate::ladder_margin_policy::FLOOR_ALLOCATOR_ENVELOPE_ALLOWANCE
     }
 
     /// A host budget that admits EXACTLY the deepest (rung-4) estimate floor and nothing shallower —
@@ -8773,11 +8840,12 @@ mod tests {
             REQUEST_EVIDENCE_REVISION
         );
 
-        // At 76 GiB the staged floor (99.27 widened) no longer fits, and the FITTED bounded-decode
-        // estimate extrapolated from the measured 896² cell (75.76 GiB widened) is selected — with
-        // the measured cell's own sweep parameters, which a floor synthesis (built from the
-        // smallest declared ranges and a 111.30 GiB widened peak) could not produce at this budget.
-        let fitted = evaluate(&generator, 76.0)
+        // At 65 GiB the staged floor no longer fits, and the FITTED bounded-decode estimate
+        // extrapolated from the measured 896² cell (50.37 GiB raw, 56.71 GiB at its same-cell
+        // recapture ceiling) is selected — with the measured cell's own sweep parameters, which a
+        // floor synthesis (built from the smallest declared ranges) could not produce at this
+        // budget.
+        let fitted = evaluate(&generator, 65.0)
             .expect("the fitted-curve estimate must admit where the floors cannot");
         assert_eq!(
             fitted.context.selection.strategy,
@@ -8794,7 +8862,7 @@ mod tests {
             "the fitted estimate must carry the measured basis' parameters"
         );
 
-        // Below every widened estimate the request still refuses — margins are load-bearing. No
+        // Below every admitted estimate the request still refuses — allowances are load-bearing. No
         // verified alternative fits 40 GiB (the 768² cell needs its captured foreign reserve too),
         // so none may be named.
         let message = evaluate(&generator, 40.0)
@@ -8869,7 +8937,7 @@ mod tests {
             "the mutated fingerprint must be conformance-CLEAN so this arm exercises the basis \
              identity gate, not format validation"
         );
-        let message = evaluate(&mismatched_generator, 76.0)
+        let message = evaluate(&mismatched_generator, 65.0)
             .expect_err("a fingerprint-drifted provider loses the measured basis and refuses")
             .to_string();
         assert!(
@@ -8907,7 +8975,7 @@ mod tests {
                 .expect("bounded decode capability")
                 .support = gen_core::MemoryStrategySupport::Missing;
         }
-        let message = evaluate(&unimplemented_generator, 76.0)
+        let message = evaluate(&unimplemented_generator, 65.0)
             .expect_err("an unimplemented rung is never estimate-admissible")
             .to_string();
         assert!(
@@ -8989,17 +9057,76 @@ mod tests {
         generator
     }
 
+    /// sc-22508 (review): the legacy RESIDENT BASELINE declares no weights/activation split, and
+    /// this pins that the selector grades it accordingly.
+    ///
+    /// Its peak is not built here as `weights + generic_headroom_bytes`. It arrives through
+    /// `request_total_peak_bytes` — which returns `providers::mage::memory::generation_peak_gb`, a
+    /// single provider scalar, on the `mage_flow` route — and then through the loaded generator's
+    /// `predicted_memory_peak_from_base`, a gen-core trait method that may rewrite it. Declaring
+    /// `generic_headroom_bytes` for it would charge 17% of a term the peak need not contain.
+    ///
+    /// The two ceilings differ, so the choice is observable: at a host between them, a baseline
+    /// that declared the headroom term would be admitted as Resident, while the undeclared-floor
+    /// arm the policy documents refuses it and the ladder walks down. Both bounds are computed
+    /// from the policy, so this stays a statement about WHICH arm is charged rather than about
+    /// today's fractions.
+    #[test]
+    fn the_legacy_resident_baseline_is_graded_without_a_declared_activation_split() {
+        let generator = full_ladder_generator();
+        let mut plan = fixture_plan();
+        plan.calibration = MlxCalibrationConfig::Absent;
+        let inputs = fixture_inputs(1024, 1024);
+        let baseline_peak_bytes = gib_to_bytes(FIXTURE_SHALLOW_ESTIMATE_FLOOR_GB);
+        let declared_ceiling_gb = widened_estimate_gb(FIXTURE_SHALLOW_ESTIMATE_FLOOR_GB);
+        let undeclared_ceiling_gb = crate::memory_strategy::peak_bytes_to_gb(
+            crate::memory_strategy::floor_admitted_peak_bytes(
+                gen_core::MemoryBackend::Mlx,
+                baseline_peak_bytes,
+                None,
+            ),
+        );
+        assert!(
+            declared_ceiling_gb < undeclared_ceiling_gb,
+            "the two arms must differ for this fixture to discriminate: \
+             declared {declared_ceiling_gb}, undeclared {undeclared_ceiling_gb}"
+        );
+        let host_gb = (declared_ceiling_gb + undeclared_ceiling_gb) / 2.0;
+        let evaluation = evaluate_request_with_budget(
+            &generator,
+            &plan,
+            &inputs,
+            MemoryCacheState::Cold,
+            OffloadPolicy::Resident,
+            fixture_budget(host_gb),
+            baseline_peak_bytes,
+            0,
+            &[],
+        )
+        .expect("the ladder must walk down rather than refuse");
+        assert_ne!(
+            evaluation.context.selection.strategy,
+            MemoryStrategy::Resident,
+            "the resident baseline must be graded on the undeclared-floor arm; declaring the \
+             generic headroom for it admits at {declared_ceiling_gb} GiB and selects Resident here"
+        );
+    }
+
     /// sc-18096 acceptance: an UNMEASURED provider (no calibration opt-in, no evidence bundle)
     /// under a small emulated unified-memory budget — the `SCENEWORKS_MLX_MEMORY_CAP_GB` scenario,
     /// driven through the same pure seam the cap feeds — selects a DEEP rung instead of refusing,
     /// and the selection translates to the right engine knobs.
     ///
-    /// Floor arithmetic (fixture facts: base 3 GiB all transformer, headroom 2 fixed + 4 area):
-    ///   resident        9 GiB modeled -> widened 13.54
-    ///   staged floor    3 + 6 = 9     -> widened 13.54
-    ///   decode floor    3 + 6 = 9     -> widened 13.54  (bounds transients, not weights)
-    ///   attention floor 3 + 6 = 9     -> widened 13.54
-    ///   rung 4 floor    0 + 6 = 6     -> widened  9.02  (windowed transformer leaves residency)
+    /// Floor arithmetic (fixture facts: base 3 GiB all transformer, headroom 2 fixed + 4 area).
+    /// sc-22508 charges each declared floor 17% of its ACTIVATION term (6 GiB) — not a percentage
+    /// of the whole floor — so every ceiling below is `floor + 1.02`, and the numbers here are the
+    /// ones `widened_estimate_gb` computes:
+    ///   staged floor    3 + 6 = 9     -> admitted 10.02
+    ///   decode floor    3 + 6 = 9     -> admitted 10.02  (bounds transients, not weights)
+    ///   attention floor 3 + 6 = 9     -> admitted 10.02
+    ///   rung 4 floor    0 + 6 = 6     -> admitted  7.02  (windowed transformer leaves residency)
+    /// The resident BASELINE declares no split (see the test above) and is graded on the
+    /// undeclared-floor arm instead: 9 * (1 + MLX_RECAPTURE_SPREAD) = 10.13.
     /// A 9.1 GiB budget therefore admits exactly one rung: BoundedTransformerResidency.
     #[test]
     fn unmeasured_provider_under_a_small_budget_selects_a_deep_estimate_rung() {
@@ -9066,25 +9193,26 @@ mod tests {
             REQUEST_EVIDENCE_REVISION
         );
 
-        // Mutation arm: at 9 GiB even the rung-4 widened floor (~9.02 GiB) overflows, and the
-        // refusal is the honest Reject quoting the widened requirement — proving the estimate
-        // margin is applied on this path (a zeroed margin would admit 6.0 <= 6.0).
+        // Mutation arm: at 7 GiB even the rung-4 admitted floor (6 GiB of pure activation headroom
+        // + its 17% allocator-envelope allowance = 7.02 GiB) overflows, and the refusal is the
+        // honest Reject quoting the admitted requirement — proving the per-term allowance is
+        // applied on this path (a zeroed allowance would admit 6.0 <= 7.0).
         let error = evaluate_request_with_budget(
             &generator,
             &plan,
             &inputs,
             MemoryCacheState::Cold,
             OffloadPolicy::Resident,
-            fixture_budget(9.0),
+            fixture_budget(7.0),
             gib_to_bytes(9.0),
             0,
             &[],
         )
-        .expect_err("below every widened estimate the request must refuse")
+        .expect_err("below every admitted estimate the request must refuse")
         .to_string();
         assert!(
-            error.contains("needs 9.02 GiB"),
-            "the refusal must quote the WIDENED rung-4 floor: {error}"
+            error.contains("needs 7.02 GiB"),
+            "the refusal must quote the ADMITTED rung-4 floor: {error}"
         );
     }
 
@@ -13706,10 +13834,20 @@ mod tests {
                 reference_count: 0,
             };
             let raw_incremental_peak = plan.generic_headroom_bytes(geometry);
-            let widened_incremental_peak = (raw_incremental_peak as f64
-                * (1.0 + crate::ladder_margin_policy::MLX_ESTIMATE_MARGIN))
-                .ceil()
-                .clamp(0.0, u64::MAX as f64) as u64;
+            // The counterfactual must be graded on the arm PRODUCTION uses for this candidate, not
+            // on the one the audit can see is true. This peak is the legacy RESIDENT BASELINE's
+            // (weights are credited as already resident, leaving the headroom term), and sc-22508
+            // gives that baseline no weights/activation declaration: its peak reaches the selector
+            // through `predicted_memory_peak_from_base`, and on `mage_flow` through the provider's
+            // own `generation_peak_gb`, neither of which is guaranteed to decompose. So the policy
+            // charges it the undeclared-floor arm — the whole-peak recapture spread — and passing
+            // `Some(raw_incremental_peak)` here would model a 17%-of-activation ceiling production
+            // never applies. That mismatch is what this assertion caught.
+            let widened_incremental_peak = crate::memory_strategy::floor_admitted_peak_bytes(
+                gen_core::MemoryBackend::Mlx,
+                raw_incremental_peak,
+                None,
+            );
             // These are precisely the cells for which no optimized product contract applies. Model
             // their legacy Resident fallback with the same compatibility contract production uses
             // when a provider has no applicable adopted cell, and bind its aggregate base fact to
@@ -13807,13 +13945,23 @@ mod tests {
             // have no estimate band left to flip. sc-20799 removed the fourth row the same way:
             // retiring `flux2_dev`'s `exhaustive` reading gave its T2I route a declared
             // `staged_residency` rung across bf16/q4/q8, so the bf16 cell is no longer
-            // Resident-only and has no band to flip. The three that remain have no ladder yet,
-            // which is what keeps this list a live audit rather than a formality.
-            vec![
-                ("flux2_dev", "flux2_dev_control", "q4", 64),
-                ("ideogram_4", "ideogram_4", "q8", 48),
-                ("ideogram_4_turbo", "ideogram_4_turbo", "q8", 48),
-            ],
+            // Resident-only and has no band to flip. sc-22508 narrowed the band itself and emptied
+            // the list.
+            //
+            // The blanket 50.41%-of-the-whole-peak widening is gone. What remains for the legacy
+            // RESIDENT BASELINE audited here is the policy's undeclared-floor arm — the same-cell
+            // recapture spread, 12.6% of the peak — because this candidate's peak reaches the
+            // selector through `predicted_memory_peak_from_base` (and, on `mage_flow`, through the
+            // provider's own `generation_peak_gb`) and is not guaranteed to decompose into counted
+            // weights plus an activation term. `flux2_dev` q4 at 64 GiB and both `ideogram_4` and
+            // `ideogram_4_turbo` q8 at 48 GiB now admit at every audited host size, so no cell has
+            // a band left to flip.
+            //
+            // An EMPTY list is a real audited result here, not a disabled check: the walk above
+            // still asserts coverage of every source-derived cell, and `admitted_now` is still
+            // compared against the production selector for each one. A future manifest or policy
+            // change that reopens a band reds this list rather than passing silently.
+            Vec::<(&str, &str, &str, u64)>::new(),
             "the source-bound resident-only audit changed; update the recorded result, \
              not only this expectation: {flips:?}"
         );
@@ -14197,13 +14345,32 @@ mod tests {
         // sc-18096 (scope addendum from sc-18095's review): the `StaleIdentity` pre-demotion in
         // `evidence_admission_route` is retired. A binding measured under a moved closure still
         // reaches `AdmissionPath::Evidence`; its candidate carries the digest it was MEASURED
-        // under, and `select_strategy` grades it behind `MLX_STALE_MEASURED_MARGIN`. This is the
-        // PRODUCTION-routing proof that the sc-18095 selector arm is reachable on the MLX lane —
-        // not merely a selector unit test.
+        // under, and `select_strategy` grades it at the stale-measured admitted ceiling
+        // (`AdmissionTerm::SameCellRecaptureSpread`). This is the PRODUCTION-routing proof that
+        // the sc-18095 selector arm is reachable on the MLX lane — not merely a selector unit test.
         //
         // Fixture arithmetic: the record's envelope peak is exactly 5 GiB with a 3 GiB captured
-        // foreign reserve, so the widened requirement is ~5 * 1.252 = 6.26 GiB against
-        // `total - reserve` of effective budget.
+        // foreign reserve, so the requirement is `stale_admitted_peak_bytes(Mlx, 5 GiB)` — the
+        // peak plus `MLX_RECAPTURE_SPREAD` of it — against `total - reserve` of effective budget.
+        // The two budgets below are derived from that call rather than restating its value.
+        let stale_requirement_gb = crate::memory_strategy::peak_bytes_to_gb(
+            crate::memory_strategy::stale_admitted_peak_bytes(
+                gen_core::MemoryBackend::Mlx,
+                gib_to_bytes(5.0),
+            ),
+        );
+        // The bracket the two end-to-end arms below depend on, stated where it can red: with the
+        // 3 GiB captured foreign reserve removed, the widened stale requirement must fit the
+        // 9.5 GiB host and must NOT fit the 8.5 GiB one. An allowance change that breaks either
+        // side fails here, naming the reason, instead of silently turning one arm hollow.
+        assert!(
+            stale_requirement_gb <= 9.5 - 3.0,
+            "the 9.5 GiB arm must admit: {stale_requirement_gb}"
+        );
+        assert!(
+            stale_requirement_gb > 8.5 - 3.0,
+            "the 8.5 GiB arm must refuse: {stale_requirement_gb}"
+        );
         let bundle = fixture_bundle();
         let generator = fixture_generator();
         let plan = fixture_plan();
@@ -14244,8 +14411,8 @@ mod tests {
         assert!(stale.lower_alternative.is_none());
 
         // End to end at 9.5 GiB: effective budget is 9.5 - 3 (captured foreign reserve) = 6.5 GiB,
-        // the widened 6.26 GiB fits, and the request keeps the exact verified rung INCLUDING its
-        // request-scoped process ceiling.
+        // the recapture-widened 5.63 GiB fits, and the request keeps the exact verified rung
+        // INCLUDING its request-scoped process ceiling.
         let admitted = evaluate_request_with_budget_using_bundle(
             &generator,
             &plan,
@@ -14271,11 +14438,11 @@ mod tests {
             "a stale exact cell still derives the request-scoped ceiling"
         );
 
-        // The margin is APPLIED, not just plumbed (production-path mutation check): at 9.1 GiB the
-        // effective budget is 6.1 GiB — the RAW 5 GiB peak fits, the widened 6.26 GiB does not. A
-        // gate that stopped widening stale admission would admit here and flip this arm. The
-        // refusal quotes the graded host requirement: widened 6.26 GiB + the 3 GiB captured
-        // foreign reserve = 9.26 GiB.
+        // The allowance is APPLIED, not just plumbed (production-path mutation check): at 8.5 GiB
+        // the effective budget is 5.5 GiB — the RAW 5 GiB peak fits, the recapture-widened 5.63 GiB
+        // does not. A gate that stopped widening stale admission would admit here and flip this
+        // arm. The refusal quotes the graded host requirement: widened 5.63 GiB + the 3 GiB
+        // captured foreign reserve = 8.63 GiB.
         let error = evaluate_request_with_budget_using_bundle(
             &generator,
             &plan,
@@ -14283,7 +14450,7 @@ mod tests {
             MemoryCacheState::Cold,
             OffloadPolicy::Resident,
             crate::execution_planner::WarmPolicyProposal::inert("fixture"),
-            fixture_budget(9.1),
+            fixture_budget(8.5),
             gib_to_bytes(4.0),
             0,
             &[],
@@ -14293,12 +14460,12 @@ mod tests {
         .expect_err("the raw peak fits 6.1 GiB but the WIDENED stale peak must not")
         .to_string();
         assert!(
-            error.contains("needs at least 9.26 GiB"),
+            error.contains("needs at least 8.63 GiB"),
             "the refusal must quote the widened stale host requirement: {error}"
         );
 
         // The control: the SAME request with the closure unmoved is graded at the raw peak, so the
-        // 9.1 GiB budget that refused above admits — proving the refusal was the stale widening.
+        // 8.5 GiB budget that refused above admits — proving the refusal was the stale widening.
         let current = evaluate_request_with_budget_using_bundle(
             &generator,
             &plan,
@@ -14306,7 +14473,7 @@ mod tests {
             MemoryCacheState::Cold,
             OffloadPolicy::Resident,
             crate::execution_planner::WarmPolicyProposal::inert("fixture"),
-            fixture_budget(9.1),
+            fixture_budget(8.5),
             gib_to_bytes(4.0),
             0,
             &[],
@@ -14686,7 +14853,7 @@ mod tests {
             "the true static boundary must agree that this candidate can fit below 48 GiB"
         );
         let live_reserve = envelope.foreign_reserve_for_host_bytes(live_host);
-        let stale_peak = crate::memory_strategy::stale_widened_peak_bytes(
+        let stale_peak = crate::memory_strategy::stale_admitted_peak_bytes(
             gen_core::MemoryBackend::Mlx,
             envelope.peak_bytes,
         );
@@ -15714,11 +15881,12 @@ mod tests {
         // sc-18096 repin. The mismatched record's 5 GiB raw peak fits the 10 GiB budget easily, so
         // ANY error here proves the record was excluded rather than authorizing the fit — the
         // fail-closed property this test owns. What changed: the bounded-decode rung now also
-        // carries a synthesized floor estimate (weights 6 GiB + headroom 6 GiB, widened to 18.05),
-        // so the refusal is the honest "no rung fits with margins" `Reject` quoting the floor's
-        // widened requirement instead of an `Unverified`/`FingerprintMismatch` refusal.
+        // carries a synthesized floor estimate (weights 6 GiB + headroom 6 GiB, admitted at
+        // 12 + 17% of the 6 GiB activation term = 13.02 under sc-22508), so the refusal is the
+        // honest "no rung fits with its allowance" `Reject` quoting the floor's admitted
+        // requirement instead of an `Unverified`/`FingerprintMismatch` refusal.
         assert!(
-            error.contains("needs 18.05 GiB"),
+            error.contains("needs 13.02 GiB"),
             "the mismatched record must not authorize the fit; the refusal must quote the \
              estimate floor instead: {error}"
         );
@@ -16970,21 +17138,39 @@ mod tests {
 
     #[test]
     fn generic_mlx_adopts_shared_selector_without_an_optimized_claim() {
+        let weights_bytes = 4 * 1024 * 1024 * 1024;
         let observation = generic_mlx_shared_observation(
-            4 * 1024 * 1024 * 1024,
+            weights_bytes,
             Some(MlxMemoryBudget { total_gb: 32.0 }),
             HEADROOM_GB,
         );
-        assert!(matches!(
-            observation,
-            crate::memory_strategy::Selection::Selected {
-                selection: gen_core::MemorySelection {
-                    strategy: gen_core::MemoryStrategy::Resident,
-                    ..
-                },
-                ..
-            }
-        ));
+        let crate::memory_strategy::Selection::Selected {
+            selection,
+            needed_gb,
+            ..
+        } = observation
+        else {
+            panic!("the generic cold-load floor must reach a selection: {observation:?}");
+        };
+        assert_eq!(selection.strategy, gen_core::MemoryStrategy::Resident);
+        // sc-22508: the declared activation term must be a SLICE OF THE GRADED PEAK, never a
+        // second charge sitting beside it. This route's headroom used to live only in the budget's
+        // `reserved_headroom_gb`, which made `unmodeled_activation_bytes` an out-of-band charge
+        // contradicting the field's contract. Pin that the graded peak now contains it: a peak
+        // rebuilt from the weights alone lands 18 GiB lower and reds here.
+        let headroom_bytes = (HEADROOM_GB * BYTES_PER_GIB).ceil() as u64;
+        assert_eq!(
+            needed_gb,
+            crate::memory_strategy::peak_bytes_to_gb(
+                crate::memory_strategy::floor_admitted_peak_bytes(
+                    gen_core::MemoryBackend::Mlx,
+                    weights_bytes + headroom_bytes,
+                    Some(headroom_bytes),
+                )
+            ),
+            "the floor's peak is weights + headroom, and its allowance is a fraction of the \
+             headroom term inside that peak"
+        );
     }
 
     /// The load-time weights floor (`weights_floor_load_admission`, formerly

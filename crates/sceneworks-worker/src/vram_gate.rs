@@ -1394,7 +1394,7 @@ pub(crate) fn krea_turbo_fit_with_runtime(
     // per-phase curves ARE the fitted model over this tier's measured cells, so an in-envelope
     // request geometry nobody measured gets an estimate candidate per optimized rung at the
     // curve-predicted peak, graded by the shared selector behind the candle ESTIMATE margin
-    // (`crate::ladder_margin_policy::CANDLE_ESTIMATE_MARGIN`). Where the exact request cell has a
+    // (`crate::ladder_margin_policy::CANDLE_RECAPTURE_SPREAD`). Where the exact request cell has a
     // verified record, the selector's measured-supersedes-estimate rule keeps admission
     // byte-for-byte unchanged.
     //
@@ -1567,6 +1567,7 @@ pub(crate) fn krea_turbo_fit_with_runtime(
             evidence,
             closure_digest: &measured_closure_digest,
             basis: memory_strategy::CandidateBasis::Measured,
+            unmodeled_activation_bytes: None,
         })
         .collect::<Vec<_>>();
     // Synthesized under (and anchored to) the live closure — there is nothing for currency to
@@ -1576,6 +1577,9 @@ pub(crate) fn krea_turbo_fit_with_runtime(
         evidence,
         closure_digest: &live_closure_digest,
         basis: memory_strategy::CandidateBasis::EstimateFittedCurve,
+        // A fitted per-phase curve carries no weights/activation split (sc-22508); its remaining
+        // uncertainty is the same-cell recapture spread the policy charges on the whole peak.
+        unmodeled_activation_bytes: None,
     }));
     let selection = memory_strategy::select_strategy(
         request,
@@ -3913,7 +3917,7 @@ mod tests {
             Some(KreaTurboFit::Reject { needed_gb, .. }) => {
                 let streamed_peak_gb = 9.0 + 2.0 * 0.802816;
                 let expected = streamed_peak_gb
-                    * (1.0 + crate::ladder_margin_policy::CANDLE_ESTIMATE_MARGIN)
+                    * (1.0 + crate::ladder_margin_policy::CANDLE_RECAPTURE_SPREAD)
                     + HEADROOM_GB;
                 assert!(
                     (needed_gb - expected).abs() < 1e-3,

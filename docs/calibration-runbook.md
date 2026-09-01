@@ -28,9 +28,10 @@ Companions, not prerequisites — you should not need to open either to finish a
 Measuring a lane **improves prediction**. It does not unlock anything.
 
 Since epic 18093 (sc-18095/18096/18097), a lane whose provider compile closure has moved keeps
-serving its measured numbers behind a **widened admission margin**, and unmeasured cells are admitted
-from **fitted estimates** behind a wider margin still
-(`crates/sceneworks-worker/src/ladder_margin_policy.rs`). Nothing in `npm run check`,
+serving its measured numbers behind a **per-term admission allowance**, and unmeasured cells are
+admitted from **fitted, anchor-derived, or floor estimates** behind whichever allowance names their
+remaining uncertainty (`crates/sceneworks-worker/src/ladder_margin_policy.rs`; sc-22508 replaced the
+single per-backend multiplier with one named term per basis). Nothing in `npm run check`,
 `npm run rust:check`, the pre-push hook or CI demands a re-capture — **there are zero staleness gates
 in CI**. So the payoff of a capture is narrower margins and better-grounded admission on that lane,
 not a ladder that was previously refused.
