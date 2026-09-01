@@ -24,7 +24,7 @@
  * `memory-calibration-harness.mjs#evidenceSemantics` and `generate-memory-matrix.mjs#closureIsCurrent`
  * key it. A record or manifest calibration binding is stale when the closure digest it was captured
  * under differs from the live digest for its own lane. The live table is loaded through
- * `validatedInferenceClosures`, the SAME predicate the matrix generator uses, so the report and the
+ * `validatedInferenceClosures` (which moved here from the matrix generator at sc-22513), so the report and the
  * matrix cannot disagree about which lanes are current.
  *
  * TWO POPULATIONS, KEPT SEPARATE
@@ -70,7 +70,6 @@ import { fileURLToPath } from "node:url";
 
 import { recordsNeedingDigest, stampManifest } from "./backfill-closure-digests.mjs";
 import { deriveMargins } from "./derive-ladder-margins.mjs";
-import { validatedInferenceClosures } from "./generate-memory-matrix.mjs";
 import { inferencePinFromCargo } from "./inference-closure-digest.mjs";
 import { stripJsoncComments } from "./lib/jsonc.mjs";
 
@@ -85,6 +84,34 @@ export const SOURCE_PATHS = Object.freeze({
   mlxAdapter: "crates/sceneworks-memory-adapter/src/bin/mlx.rs",
   candleAdapter: "crates/sceneworks-memory-adapter/src/bin/candle.rs",
 });
+
+/**
+ * The provider closure ledger, validated (sc-17774).
+ *
+ * Lived in `scripts/generate-memory-matrix.mjs` until sc-22513 collapsed the matrix onto the anchor
+ * store — the ledger is no longer a matrix input, and this report is its only remaining consumer, so
+ * the predicate moved here rather than being re-implemented or left exported from a module that does
+ * not use it. Unchanged in behaviour: it fails closed on a ledger with no revision, an unusable
+ * digest, or no providers at all.
+ */
+export function validatedInferenceClosures(body) {
+  const closures = JSON.parse(body);
+  if (!/^[0-9a-f]{40}$/.test(closures.inferenceRevision ?? "")) {
+    throw new Error(
+      "config/inference-provider-closures.json must record the full inference revision its " +
+        "digests were derived at",
+    );
+  }
+  const digests = new Map();
+  for (const [provider, entry] of Object.entries(closures.providers ?? {})) {
+    if (!/^[0-9a-f]{64}$/.test(entry.digest ?? "")) {
+      throw new Error(`inference closure entry for ${provider} has no usable digest`);
+    }
+    digests.set(provider, entry.digest);
+  }
+  if (!digests.size) throw new Error("config/inference-provider-closures.json declares no providers");
+  return digests;
+}
 
 /** Provenance for the margin column, printed so a reader can check it rather than trust it. */
 export const MARGIN_SOURCE =
