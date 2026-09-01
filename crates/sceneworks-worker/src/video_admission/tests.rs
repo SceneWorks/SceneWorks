@@ -3329,13 +3329,17 @@ fn a_model_with_zero_anchors_is_classified_gracefully_and_admitted_from_the_anal
         selector.selections[0].predicted_peak_bytes
     );
 
-    // The estimate is real: widened by the margin policy it admits, and half a GiB under it the
-    // very same request refuses. Derived from the policy constant, never a magic float.
-    let widened_gb =
-        crate::memory_strategy::peak_bytes_to_gb(crate::memory_strategy::widened_peak_bytes(
+    // The estimate is real: at its own predicted peak the request admits, and half a GiB under it
+    // the very same request refuses. Read off the selection the selector actually made rather than
+    // re-widened here — sc-22508 moved the margin into the derivation, so charging it again would
+    // double-count. Same derivation as the sibling anchor test above, never a magic float.
+    let widened_gb = crate::memory_strategy::peak_bytes_to_gb(
+        crate::memory_strategy::floor_admitted_peak_bytes(
+            gen_core::MemoryBackend::Mlx,
             selector.selections[0].predicted_peak_bytes,
-            crate::ladder_margin_policy::MLX_ESTIMATE_MARGIN,
-        ));
+            Some(FIXTURE_HEADROOM_GIB * GIB),
+        ),
+    );
     let mut fits = LadderVideoSelector::new(
         zero_anchor_identity(),
         &contract,
