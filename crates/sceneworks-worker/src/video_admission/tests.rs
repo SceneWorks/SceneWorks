@@ -2842,14 +2842,26 @@ fn same_rung_cap_binding_carries_cap_peak_but_actual_request_geometry() {
 // the derived estimate when it fits.
 // --------------------------------------------------------------------------------------------
 
+/// The calibration campaign the packaged LTX-2.5 anchors were extracted from. The anchor path
+/// requires the contract to still name it, exactly as the fitted path requires its own fingerprint.
+const LTX25_ANCHOR_FINGERPRINT: &str = "sc-18797-ltx-2-5-mlx-ladder-v1";
+
 /// A conformant LTX-2.5 contract on the MLX lane whose identity matches the packaged anchors.
 fn ltx25_fixture_contract(rungs: &[MemoryStrategy]) -> MemoryProviderContract {
     let mut contract = fixture_contract(20, 4, rungs);
     contract.provider_id = "ltx_2_5".to_owned();
+    contract.calibration = Some(MemoryCalibrationIdentity {
+        abi: gen_core::MEMORY_CALIBRATION_ABI,
+        fingerprint: LTX25_ANCHOR_FINGERPRINT.to_owned(),
+        load_shape: LoadShape::EagerMaterialization,
+    });
     assert!(contract.conformance_errors().is_empty());
     contract
 }
 
+/// The pipeline cell the packaged `q8` anchor was measured on. The corpus measures no
+/// `q8 distilled/*` cell at all, so `distilled` here is not an alternative — it is the
+/// unmeasured-cell control below.
 fn ltx25_identity(expected_closure_digest: &str) -> VideoRequestIdentity<'_> {
     VideoRequestIdentity {
         model_id: "ltx_2_5",
@@ -2862,8 +2874,8 @@ fn ltx25_identity(expected_closure_digest: &str) -> VideoRequestIdentity<'_> {
         overlay: None,
         lane: VideoLane::Mlx,
         tier: tier(),
-        transformer_variant: Some(Ltx25TransformerVariant::Distilled),
-        decoder: Some(Ltx25Decoder::Conv),
+        transformer_variant: Some(Ltx25TransformerVariant::Dev),
+        decoder: Some(Ltx25Decoder::DiffVae),
         calibration_abi: gen_core::MEMORY_CALIBRATION_ABI,
         expected_closure_digest,
     }
@@ -2890,8 +2902,10 @@ fn ltx25_expected_derived_peaks() -> sceneworks_core::memory_anchor::AnchorDeriv
             "ltx_2_5",
             sceneworks_core::memory_anchor::AnchorBackend::Mlx,
             "q8",
+            Ltx25TransformerVariant::Dev,
+            Ltx25Decoder::DiffVae,
         )
-        .expect("the q8 MLX anchor exists");
+        .expect("the q8 dev/diffvae MLX anchor exists");
     anchor
         .derive_video_phase_peaks(sceneworks_core::memory_anchor::AnchorDeriveRequest {
             width: 640,
@@ -2931,7 +2945,7 @@ fn an_unmeasured_ltx25_geometry_is_admitted_from_the_anchor_derived_estimate() {
     );
     assert_eq!(
         selector.selections[0].evidence_revision,
-        "ltx_2_5:mlx:q8:sc-18797-ltx-2-5-mlx-ladder-v1:imc-7f8186376a9a3143ebee"
+        "ltx_2_5:mlx:q8:dev:diffvae:sc-18797-ltx-2-5-mlx-ladder-v1:imc-7f8186376a9a3143ebee"
     );
 
     // Differential control: the SAME request without an anchor store falls back to the
@@ -2967,6 +2981,8 @@ fn the_production_funnel_admits_an_unmeasured_ltx25_geometry_from_the_anchor() {
     let mut request = inputs(89, budget(128.0), 18 * GIB);
     request.model_id = "ltx_2_5";
     request.route = "ltx_2_5";
+    request.transformer_variant = Some(Ltx25TransformerVariant::Dev);
+    request.decoder = Some(Ltx25Decoder::DiffVae);
     request.width = 640;
     request.height = 640;
     request.fps = 25;
@@ -2979,7 +2995,7 @@ fn the_production_funnel_admits_an_unmeasured_ltx25_geometry_from_the_anchor() {
     assert_eq!(context.predicted_peak_bytes, expected.peak_bytes());
     assert_eq!(
         context.evidence_revision,
-        "ltx_2_5:mlx:q8:sc-18797-ltx-2-5-mlx-ladder-v1:imc-7f8186376a9a3143ebee"
+        "ltx_2_5:mlx:q8:dev:diffvae:sc-18797-ltx-2-5-mlx-ladder-v1:imc-7f8186376a9a3143ebee"
     );
 
     // Control: the identical request under a model id with no anchor (and no fitted curve) is
@@ -2987,6 +3003,8 @@ fn the_production_funnel_admits_an_unmeasured_ltx25_geometry_from_the_anchor() {
     let mut uncovered = inputs(89, budget(128.0), 18 * GIB);
     uncovered.model_id = "ltx_2_5_nonexistent";
     uncovered.route = "ltx_2_5";
+    uncovered.transformer_variant = Some(Ltx25TransformerVariant::Dev);
+    uncovered.decoder = Some(Ltx25Decoder::DiffVae);
     uncovered.width = 640;
     uncovered.height = 640;
     uncovered.fps = 25;
@@ -3030,4 +3048,146 @@ fn the_anchor_derived_estimate_admits_when_it_fits_and_refuses_when_it_does_not(
         refused.select(ltx25_unmeasured_geometry()),
         VideoRungSelection::Reject { .. }
     ));
+}
+
+/// The retained corpus measures no `q8 distilled/conv` cell. A request on that pipeline must fall
+/// to the phase-blind floor rather than borrowing the `q8 dev/diffvae` anchor's measurements.
+#[test]
+fn an_unmeasured_pipeline_cell_falls_to_the_estimate_floor() {
+    let contract = ltx25_fixture_contract(&[]);
+    let mut identity = ltx25_identity(crate::mlx_fit_gate::UNCALIBRATED_CLOSURE);
+    identity.transformer_variant = Some(Ltx25TransformerVariant::Distilled);
+    identity.decoder = Some(Ltx25Decoder::Conv);
+
+    let mut selector = LadderVideoSelector::new(identity, &contract, budget(128.0), 18 * GIB, 0);
+    assert!(matches!(
+        selector.select(ltx25_unmeasured_geometry()),
+        VideoRungSelection::Selected { .. }
+    ));
+    assert_eq!(
+        selector.selections[0].evidence_revision, "video-estimate-floor-v1",
+        "a pipeline cell the corpus never measured must not be priced from another cell's anchor"
+    );
+    assert_ne!(
+        selector.selections[0].predicted_peak_bytes,
+        ltx25_expected_derived_peaks().peak_bytes()
+    );
+}
+
+/// Every identity/currency axis the anchor derivation binds, exercised one mutation at a time.
+///
+/// `anchor_derived_phase_peaks` is called directly here because a foreign provider id or a moved
+/// calibration ABI also makes the CONTRACT undecidable to the shared selector, which would mask the
+/// anchor guard behind an unrelated (and equally safe) demotion. The end-to-end control below then
+/// proves one of these axes really does land on the phase-blind floor through `select`.
+#[test]
+fn a_foreign_identity_or_staled_calibration_does_not_reach_the_anchor_derivation() {
+    let baseline_contract = ltx25_fixture_contract(&[]);
+    let derived = |identity: VideoRequestIdentity<'_>, contract: &MemoryProviderContract| {
+        let selector = LadderVideoSelector::new(identity, contract, budget(128.0), 18 * GIB, 0);
+        anchor_derived_phase_peaks(&selector, ltx25_unmeasured_geometry(), &[])
+            .map(|(_, anchor_id)| anchor_id.to_owned())
+    };
+
+    assert_eq!(
+        derived(
+            ltx25_identity(crate::mlx_fit_gate::UNCALIBRATED_CLOSURE),
+            &baseline_contract
+        )
+        .as_deref(),
+        Some("ltx_2_5:mlx:q8:dev:diffvae:sc-18797-ltx-2-5-mlx-ladder-v1:imc-7f8186376a9a3143ebee"),
+        "the conformant baseline must reach the anchor, or every mutation below proves nothing"
+    );
+
+    // Identity axes: family, mode, route, and pipeline cell.
+    for (label, mutate) in [
+        (
+            "foreign family",
+            (|identity: &mut VideoRequestIdentity<'static>| identity.model_family = "ltx-video-x")
+                as fn(&mut VideoRequestIdentity<'static>),
+        ),
+        ("foreign mode", |identity| identity.mode = "image_to_video"),
+        ("foreign route", |identity| identity.route = "ltx_2_5_eros"),
+        ("unmeasured variant", |identity| {
+            identity.transformer_variant = Some(Ltx25TransformerVariant::Distilled)
+        }),
+        ("unmeasured decoder", |identity| {
+            identity.decoder = Some(Ltx25Decoder::Conv)
+        }),
+        ("absent pipeline identity", |identity| {
+            identity.transformer_variant = None
+        }),
+        ("moved calibration ABI", |identity| {
+            identity.calibration_abi = gen_core::MEMORY_CALIBRATION_ABI + 1
+        }),
+    ] {
+        let mut identity = ltx25_identity(crate::mlx_fit_gate::UNCALIBRATED_CLOSURE);
+        mutate(&mut identity);
+        assert_eq!(
+            derived(identity, &baseline_contract),
+            None,
+            "{label} must not reach the anchor derivation"
+        );
+    }
+
+    // Contract axes: the provider that produced the measurement, and calibration currency.
+    let mut foreign_provider = ltx25_fixture_contract(&[]);
+    foreign_provider.provider_id = "ltx_2_5_community_rehost".to_owned();
+
+    let mut absent_calibration = ltx25_fixture_contract(&[]);
+    absent_calibration.calibration = None;
+
+    let mut foreign_fingerprint = ltx25_fixture_contract(&[]);
+    foreign_fingerprint.calibration = Some(MemoryCalibrationIdentity {
+        abi: gen_core::MEMORY_CALIBRATION_ABI,
+        fingerprint: "sc-99999-some-later-campaign-v1".to_owned(),
+        load_shape: LoadShape::EagerMaterialization,
+    });
+
+    for (label, contract) in [
+        ("foreign provider", &foreign_provider),
+        ("no calibration identity", &absent_calibration),
+        ("staled calibration fingerprint", &foreign_fingerprint),
+    ] {
+        assert_eq!(
+            derived(
+                ltx25_identity(crate::mlx_fit_gate::UNCALIBRATED_CLOSURE),
+                contract
+            ),
+            None,
+            "{label} must not reach the anchor derivation"
+        );
+    }
+
+    // End-to-end control: a staled fingerprint really does land on the phase-blind floor, and the
+    // production evidence gate stops claiming coverage for it.
+    let mut selector = LadderVideoSelector::new(
+        ltx25_identity(crate::mlx_fit_gate::UNCALIBRATED_CLOSURE),
+        &foreign_fingerprint,
+        budget(128.0),
+        18 * GIB,
+        0,
+    );
+    assert!(matches!(
+        selector.select(ltx25_unmeasured_geometry()),
+        VideoRungSelection::Selected { .. }
+    ));
+    assert_eq!(
+        selector.selections[0].evidence_revision, "video-estimate-floor-v1",
+        "a staled calibration fingerprint must demote the anchor derivation to the floor"
+    );
+
+    let generator = fixture_generator(Some(foreign_fingerprint));
+    let mut request = inputs(89, budget(128.0), 18 * GIB);
+    request.model_id = "ltx_2_5";
+    request.route = "ltx_2_5";
+    request.transformer_variant = Some(Ltx25TransformerVariant::Dev);
+    request.decoder = Some(Ltx25Decoder::DiffVae);
+    request.width = 640;
+    request.height = 640;
+    request.fps = 25;
+    assert!(
+        !packaged_video_evidence_covers_request(&generator, &request),
+        "a staled calibration fingerprint must not keep the anchor evidence gate open"
+    );
 }

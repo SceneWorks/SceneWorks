@@ -1172,14 +1172,40 @@ fn curve_decode_pass(decode_pass: VideoDecodePass) -> VideoCurveDecodePass {
     }
 }
 
-/// Derive per-phase peaks from the measured memory anchor for this `(model, tier, lane)`
-/// coordinate (sc-22507, epic 22505), for the exact regime of the candidate being graded.
+/// Whether the anchor's evidence is CURRENT for the contract being admitted.
+///
+/// The fitted-curve path demotes to the floor when the contract carries no calibration identity,
+/// when the calibration ABI moved, or when the fingerprint no longer names the measured closure.
+/// The anchor path must demote on exactly the same events: a pin bump or ABI change that stales the
+/// evidence cannot be allowed to leave the anchor derivation live while the fitted curve falls.
+///
+/// The fingerprint compared here is the calibration campaign's, which is what the anchor's source
+/// record carries. sc-22511 re-keys currency on the model's own loader closure; this helper is the
+/// single seam that changes when it does. Do not grow a second currency notion beside it.
+fn anchor_currency_matches(
+    selector: &LadderVideoSelector<'_>,
+    anchor: &sceneworks_core::memory_anchor::MemoryAnchor,
+) -> bool {
+    selector
+        .contract
+        .calibration
+        .as_ref()
+        .is_some_and(|calibration| {
+            calibration.abi == selector.identity.calibration_abi
+                && calibration.fingerprint == anchor.source.calibration_fingerprint
+        })
+}
+
+/// Derive per-phase peaks from the measured memory anchor for this
+/// `(model, tier, lane, transformer variant, decoder)` coordinate (sc-22507, epic 22505), for the
+/// exact regime of the candidate being graded.
 ///
 /// Deliberately NOT hull-restricted: the whole point of the anchor + analytic derivation is that
 /// a request at a `(geometry, frames)` never measured is priced from the anchor plus architecture
-/// facts instead of falling to the phase-blind floor. Identity stays strict — model, family,
-/// lane, tier, mode, overlay-free, reference-free — and the anchor store itself is validated
-/// against the retained evidence it was extracted from at load.
+/// facts instead of falling to the phase-blind floor. Identity stays strict — model, family, route,
+/// provider, lane, tier, pipeline variant/decoder, mode, overlay-free, reference-free, and current
+/// calibration — and the anchor store itself is validated against the retained evidence it was
+/// extracted from at load.
 fn anchor_derived_phase_peaks<'a>(
     selector: &LadderVideoSelector<'a>,
     geometry: VideoAdmissionGeometry,
@@ -1198,14 +1224,31 @@ fn anchor_derived_phase_peaks<'a>(
         VideoLane::Mlx => AnchorBackend::Mlx,
         VideoLane::Candle => AnchorBackend::Candle,
     };
+    // The pipeline cell is part of the lookup key, exactly as it is for the fitted curve: the
+    // retained corpus has no dev-vs-distilled pair at a common regime, so a request on another
+    // variant/decoder has no measured basis here and must fall to the floor.
     let anchor = store.anchor_for(
         identity.model_id,
         backend,
         crate::mlx_fit_gate::plan_tier_key(identity.tier),
+        identity.transformer_variant?,
+        identity.decoder?,
     )?;
-    if anchor.model_family != identity.model_family || anchor.mode != identity.mode {
+    if anchor.model_family != identity.model_family
+        || anchor.mode != identity.mode
+        || anchor.route != identity.route
+        || anchor.provider != selector.contract.provider_id
+        || !anchor_currency_matches(selector, anchor)
+    {
         return None;
     }
+    // `decode_tiled` is keyed on the ENGAGED RUNG, not on `geometry.decode_pass`, because the rung
+    // is what actually bounds the decoder's working set: the rung is the selected memory strategy
+    // the provider will execute, while `decode_pass` describes how the caller intends to walk the
+    // clip. A `VideoDecodePass::Tiled` request without the rung is therefore priced by the
+    // single-pass voxel law — an over-estimate, and the safe direction. The fitted path keys on
+    // both because its curves are measured per `(rung, decode_pass)` cell; the anchor derivation
+    // has one law per regime and only the rung selects between them.
     let derived = anchor.derive_video_phase_peaks(AnchorDeriveRequest {
         width: geometry.width,
         height: geometry.height,
@@ -1592,16 +1635,22 @@ pub(crate) fn packaged_video_evidence_covers_request(
         request,
     ) || anchor_evidence_covers_request(
         sceneworks_core::memory_anchor::packaged_memory_anchors(),
+        contract,
         request,
     )
 }
 
-/// Whether the packaged anchor store carries the measured anchor this request's `(model, tier,
-/// lane)` coordinate derives from (sc-22507). Coverage is identity-only — no geometry hull — so
-/// a never-measured `(geometry, frames)` request still reaches the ladder and its anchor-derived
-/// candidate instead of bypassing the gate.
+/// Whether the packaged anchor store carries the measured anchor this request's
+/// `(model, tier, lane, transformer variant, decoder)` coordinate derives from (sc-22507).
+/// Coverage is identity-only — no geometry hull — so a never-measured `(geometry, frames)` request
+/// still reaches the ladder and its anchor-derived candidate instead of bypassing the gate.
+///
+/// This mirrors [`anchor_derived_phase_peaks`]'s identity and currency guards exactly. A gate that
+/// admitted a request the derivation then refuses would only push it to the floor, but a gate that
+/// stayed open across a staled calibration would state the wrong thing about the evidence.
 fn anchor_evidence_covers_request(
     anchors: Option<&sceneworks_core::memory_anchor::MemoryAnchorStore>,
+    contract: &MemoryProviderContract,
     request: &VideoAdmissionInputs<'_>,
 ) -> bool {
     let Some(anchors) = anchors else {
@@ -1610,6 +1659,10 @@ fn anchor_evidence_covers_request(
     if request.overlay.is_some() || request.reference_count != 0 {
         return false;
     }
+    let (Some(transformer_variant), Some(decoder)) = (request.transformer_variant, request.decoder)
+    else {
+        return false;
+    };
     let backend = match request.lane {
         VideoLane::Mlx => sceneworks_core::memory_anchor::AnchorBackend::Mlx,
         VideoLane::Candle => sceneworks_core::memory_anchor::AnchorBackend::Candle,
@@ -1619,9 +1672,18 @@ fn anchor_evidence_covers_request(
             request.model_id,
             backend,
             crate::mlx_fit_gate::plan_tier_key(request.tier),
+            transformer_variant,
+            decoder,
         )
         .is_some_and(|anchor| {
-            anchor.model_family == request.model_family && anchor.mode == request.mode
+            anchor.model_family == request.model_family
+                && anchor.mode == request.mode
+                && anchor.route == request.route
+                && anchor.provider == contract.provider_id
+                && contract.calibration.as_ref().is_some_and(|calibration| {
+                    calibration.abi == gen_core::MEMORY_CALIBRATION_ABI
+                        && calibration.fingerprint == anchor.source.calibration_fingerprint
+                })
         })
 }
 
