@@ -74,7 +74,7 @@ directory and atomically renames one aggregate directory containing
 sidecar, duplicate coordinate, or reused cold PID leaves no campaign directory.
 
 Before the parent or a worker loads a snapshot, inference commit
-`52f534afd1d99e4d565df9a352c95de46f07c102` seals these exact model identities and the
+`c781c09d2789538d3cff459257274cbc22109b25` seals these exact model identities and the
 candidate-only materialized-weight residency boundary used by the receipt producer.
 SceneWorks mirrors the same rule when it validates a portable receipt: a local
 snapshot path is not an identity, and `modelId`/`referenceModelId` must contain
