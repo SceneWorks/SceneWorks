@@ -943,6 +943,63 @@ fn krea_rung_parameters(
 /// height, which is exactly how a geometry gets attested that was never asked for.
 const KREA_LANE_FRAMES: u32 = 1;
 
+/// The packaged measured memory anchor for one Krea Turbo candle tier (sc-22509, epic 22505), with
+/// every identity conjunct that can be answered without the loaded provider contract.
+///
+/// Fail-closed and deliberately narrow: the anchor was measured on ONE catalog model, route,
+/// provider and mode, overlay-free and reference-free, and its evidence must still be CURRENT.
+/// The remaining conjunct (materialization shape) is applied by the caller once the contract is
+/// available.
+///
+/// Currency is [`MemoryAnchor::is_current`] — the model's own loader-closure digest (sc-22511,
+/// epic 22505 E9) — and nothing else. It is deliberately NOT the calibration fingerprint or ABI:
+/// since sc-22511 those are PROVENANCE, bound to the source record by `validate_anchor` so the
+/// anchor cannot misattribute its origin, but powerless to demote evidence whose loader never
+/// moved. This is the same single seam `video_admission::anchor_currency_matches` grades on, so
+/// the two lanes cannot disagree about whether an anchor is live.
+/// The anchor store this lane reads. Production has exactly one — the packaged, validated store.
+///
+/// The `cfg(test)` override exists because currency is now the PACKAGED loader-closure declaration
+/// (sc-22511), which no argument can reach: whether the shipped Krea candle anchor is live is a
+/// property of the pin, not of the request. Tests that must grade the derivation ITSELF therefore
+/// inject a store stamped at the live declared digest — the same shape
+/// `candle_memory_strategy::synthesize_estimate_floors` already takes as a parameter, and the same
+/// test-seam precedent as `video_admission::admit_video_generation_with_curves`.
+fn krea_anchor_store() -> Option<&'static sceneworks_core::memory_anchor::MemoryAnchorStore> {
+    #[cfg(test)]
+    if let Some(store) = tests::injected_anchor_store() {
+        return Some(store);
+    }
+    sceneworks_core::memory_anchor::packaged_memory_anchors()
+}
+
+fn krea_store_anchor(
+    tier: &str,
+    allow_streamed_blocks: bool,
+) -> Option<&'static sceneworks_core::memory_anchor::MemoryAnchor> {
+    // A job carrying load-time adapters is exactly the case this lane keeps on its resident/staged
+    // paths, and the anchor render carried no overlay at all.
+    if !allow_streamed_blocks {
+        return None;
+    }
+    krea_anchor_store()
+        .and_then(|store| {
+            store.image_anchor_for(
+                "krea_2_turbo",
+                sceneworks_core::memory_anchor::AnchorBackend::Candle,
+                tier,
+            )
+        })
+        .filter(|anchor| {
+            anchor.route == "krea_2_turbo"
+                && anchor.provider == "krea_2_turbo"
+                && anchor.mode == "text_to_image"
+                && anchor.overlay.is_none()
+                && anchor.reference_count == 0
+                && crate::video_admission::anchor_currency_matches(anchor)
+        })
+}
+
 /// Select the least-cost measured Krea Turbo fit rung for this tier, geometry, and live budget.
 /// `allow_streamed_blocks` is false when the job carries load-time adapters: the provider preserves
 /// those jobs on its existing resident/staged paths rather than silently omitting their residuals.
@@ -991,7 +1048,14 @@ pub(crate) fn krea_turbo_fit_with_runtime(
         reference_count: 0,
     };
     let pixels = u64::from(width).checked_mul(u64::from(height))?;
-    if pixels > max_pixels {
+    // sc-22509 (epic 22505): a geometry the campaign never measured is no longer a refusal on its
+    // own. The measured memory ANCHOR for this `(model, tier, candle lane)` prices it analytically,
+    // so the hull only refuses when there is no anchor to derive from. The identity guards this
+    // lookup cannot answer yet (contract load shape, live calibration identity) are applied once
+    // `provider_contract` is resolved, and the hull refusal is re-asserted there if they fail.
+    let store_anchor = krea_store_anchor(tier, allow_streamed_blocks);
+    let out_of_envelope = pixels > max_pixels;
+    if out_of_envelope && store_anchor.is_none() {
         return Some(KreaTurboFit::Unverified {
             reason: MemoryEvidenceVerdict::OutOfEnvelope,
         });
@@ -1016,6 +1080,26 @@ pub(crate) fn krea_turbo_fit_with_runtime(
         },
         component_precision_floors: &[],
     };
+    // The remaining anchor identity conjunct, now that the loaded contract is available: the anchor
+    // was measured under one materialization shape, and eager and deferred are not interchangeable.
+    // Currency was already graded in `krea_store_anchor` on the loader closure and is deliberately
+    // not re-asked here against the calibration campaign (sc-22511: provenance, not currency).
+    let anchor = store_anchor.filter(|anchor| {
+        let anchor_load_shape = match anchor.load_shape {
+            sceneworks_core::memory_anchor::AnchorLoadShape::EagerMaterialization => {
+                gen_core::LoadShape::EagerMaterialization
+            }
+            sceneworks_core::memory_anchor::AnchorLoadShape::DeferredMaterialization => {
+                gen_core::LoadShape::DeferredMaterialization
+            }
+        };
+        anchor_load_shape == provider_contract.load_shape
+    });
+    if out_of_envelope && anchor.is_none() {
+        return Some(KreaTurboFit::Unverified {
+            reason: MemoryEvidenceVerdict::OutOfEnvelope,
+        });
+    }
     let measured_closure_digest = turbo_fit
         .get("inferenceClosureDigest")
         .and_then(Value::as_str)
@@ -1350,34 +1434,135 @@ pub(crate) fn krea_turbo_fit_with_runtime(
         MemoryStrategy::BoundedAttention,
         MemoryStrategy::BoundedTransformerResidency,
     ];
-    let mut evidence = vec![make_evidence(
-        resident_selection,
-        None,
-        resident_peak_gb,
-        None,
-        evidence_record,
-        geometry,
-    )];
-    let mut selections = vec![resident_selection];
+    // sc-22509 review (blocker): the resident rung is priced by `candle.vramGbByTier[tier]`, a
+    // SCALAR measured at `vramMeasuredPixels` that does not scale with geometry at all. Inside the
+    // measured hull that is the row the lane has always quoted; OUTSIDE it the row is simply not a
+    // price for the request, and the anchor cannot supply one either — the derivation refuses
+    // `staged_residency: false`, because the shallow staged anchor does not price a whole-model
+    // resident working set. So an out-of-envelope request emits NO resident candidate: a rung with
+    // no priced basis is honestly Missing, not `Measured` at a 1024x1024 number. Without this the
+    // hull-refusal bypass above would admit e.g. a 2048x2048 q4 request as `Resident` at 25.7 GiB
+    // on a 32 GB card, which previously returned `OutOfEnvelope`.
+    let mut evidence = Vec::new();
+    let mut selections = Vec::new();
+    if !out_of_envelope {
+        evidence.push(make_evidence(
+            resident_selection,
+            None,
+            resident_peak_gb,
+            None,
+            evidence_record,
+            geometry,
+        ));
+        selections.push(resident_selection);
+    }
     let mut measured = Vec::new();
+    // sc-22509: rungs the manifest curves cannot price at this geometry, derived from the anchor.
+    // They are candidates in their own right — never `Measured` — so they are collected apart from
+    // the curve-priced evidence above.
+    let mut anchor_derived: Vec<(MemorySelection, MemoryEvidence)> = Vec::new();
     for strategy in optimized_strategies {
-        let phases = krea_rung_phase_peaks(
-            manifest_entry,
-            tier,
-            strategy,
-            width,
-            height,
-            geometry.frames,
-        )?;
-        let phase_peak_gb = phases.peak_gb();
-        let needed_gb = phase_peak_gb + HEADROOM_GB;
         let parameters = krea_rung_parameters(turbo_fit, strategy)?;
         let selection = MemorySelection {
             strategy,
             parameters,
             tier: numeric_tier,
         };
-        measured.push((strategy, phases, needed_gb, selection));
+        let curve_phases = krea_rung_phase_peaks(
+            manifest_entry,
+            tier,
+            strategy,
+            width,
+            height,
+            geometry.frames,
+        );
+        let Some(phases) = curve_phases else {
+            // No measured curve reaches this cell. Derive it from the anchor for the exact rung
+            // composition the provider would execute. A rung the anchor cannot price — no anchor at
+            // all, or a composition running whole-model resident, which the shallow staged anchor
+            // does not cover — is SKIPPED, never propagated out of the function (sc-22509 review):
+            // `?` here would collapse every other rung's candidate and destroy the selector's own
+            // Missing/Reject verdict, turning a truthful `Unverified { OutOfEnvelope }` into a bare
+            // `None`.
+            let Some(anchor) = anchor else {
+                continue;
+            };
+            let engaged = provider_contract.engaged_composition(strategy);
+            let Some(derived) = anchor.derive_image_phase_peaks(
+                sceneworks_core::memory_anchor::AnchorImageDeriveRequest {
+                    width,
+                    height,
+                    staged_residency: engaged.contains(&MemoryStrategy::StagedResidency),
+                },
+            ) else {
+                continue;
+            };
+            let phases = KreaTurboPhasePeaks {
+                text_gb: derived.conditioning as f64 / BYTES_PER_GIB,
+                denoise_gb: derived.denoise as f64 / BYTES_PER_GIB,
+                decode_gb: derived.decode as f64 / BYTES_PER_GIB,
+            };
+            let predicted_peak_bytes = bytes(phases.peak_gb());
+            tracing::info!(
+                route = "krea_2_turbo",
+                backend = "candle",
+                ?strategy,
+                anchor = anchor.id.as_str(),
+                anchor_geometry = format!("{}x{}", anchor.geometry.width, anchor.geometry.height),
+                raw_peak_bytes = predicted_peak_bytes,
+                "synthesized anchor-derived estimate candidate for a geometry outside the \
+                 measured curve envelope"
+            );
+            measured.push((
+                strategy,
+                phases,
+                phases.peak_gb() + HEADROOM_GB,
+                selection,
+                true,
+            ));
+            anchor_derived.push((
+                selection,
+                MemoryEvidence {
+                    key: MemoryEvidenceKey {
+                        model_family: "krea_2_turbo".to_owned(),
+                        resolved_route: "krea_2_turbo".to_owned(),
+                        backend: gen_core::MemoryBackend::Candle,
+                        tier: numeric_tier,
+                        load_shape: provider_contract.load_shape,
+                        mode: gen_core::MemoryMode::TextToImage,
+                        reference_shape: gen_core::MemoryReferenceShape::None,
+                        overlay: None,
+                        geometry,
+                        frames_per_second: None,
+                        strategy,
+                        engaged_composition: engaged,
+                        parameters,
+                    },
+                    conformance: MemoryConformanceState::ImplementedUnverified,
+                    dimensions: MemoryEvidenceDimensions {
+                        static_implementation: MemoryEvidenceVerdict::Satisfied,
+                        declared_calibration: MemoryEvidenceVerdict::Missing,
+                        historical_verification: MemoryEvidenceVerdict::Missing,
+                        current_environment_verification: MemoryEvidenceVerdict::Missing,
+                        canonical_route_loadability: MemoryEvidenceVerdict::Unverified,
+                        exact_strategy_parameters: MemoryEvidenceVerdict::Satisfied,
+                    },
+                    calibration_abi,
+                    calibration_fingerprint: calibration_fingerprint.to_owned(),
+                    sceneworks_revision: scene_works_revision.to_owned(),
+                    inference_revision: inference_revision.to_owned(),
+                    harness_version: String::new(),
+                    predicted_peak_bytes,
+                    observed_peak_bytes: None,
+                    parity: MemoryParityContract::Exact,
+                    parity_result: MemoryParityResult::NotRun,
+                },
+            ));
+            continue;
+        };
+        let phase_peak_gb = phases.peak_gb();
+        let needed_gb = phase_peak_gb + HEADROOM_GB;
+        measured.push((strategy, phases, needed_gb, selection, false));
         evidence.push(make_evidence(
             selection,
             Some(krea_turbo_manifest_key(strategy)),
@@ -1419,7 +1604,12 @@ pub(crate) fn krea_turbo_fit_with_runtime(
     // always has a curve, and a floor from the resident row could never admit deeper than the
     // resident baseline it equals, so a suppressed rung honestly falls out of estimate admission.
     let mut estimates: Vec<(MemorySelection, MemoryEvidence)> = Vec::new();
-    for (strategy, phases, _, selection) in &measured {
+    for (strategy, phases, _, selection, from_anchor) in &measured {
+        if *from_anchor {
+            // Priced by the anchor derivation, not by the tier's curves: the fitted-estimate
+            // synthesis below has nothing to say about it and must not relabel it `fitted`.
+            continue;
+        }
         let manifest_rung = krea_turbo_manifest_key(*strategy);
         let record_is_eligible = |record: &Value, record_width: u32, record_height: u32| {
             let anchor_geometry = MemoryGeometry {
@@ -1581,6 +1771,23 @@ pub(crate) fn krea_turbo_fit_with_runtime(
         // uncertainty is the same-cell recapture spread the policy charges on the whole peak.
         unmodeled_activation_bytes: None,
     }));
+    // sc-22509: anchor-derived rungs, on the live closure for the same reason.
+    candidates.extend(
+        anchor_derived
+            .iter()
+            .map(|(selection, evidence)| Candidate {
+                selection: *selection,
+                evidence,
+                closure_digest: &live_closure_digest,
+                basis: memory_strategy::CandidateBasis::EstimateAnchorDerived,
+                // No weights/activation split (sc-22508), for the same reason the fitted-curve
+                // candidate above has none: the anchor derivation decomposes its peak by PHASE
+                // (conditioning/denoise/decode), not into counted weights plus an activation
+                // remainder. Only the manifest-row FLOOR declares that split, so the allowance is
+                // charged on the whole peak here.
+                unmodeled_activation_bytes: None,
+            }),
+    );
     let selection = memory_strategy::select_strategy(
         request,
         provider_contract,
@@ -1611,9 +1818,9 @@ pub(crate) fn krea_turbo_fit_with_runtime(
             needed_gb,
             ..
         } => {
-            let (_, phases, _, _) = measured
+            let (_, phases, _, _, _) = measured
                 .into_iter()
-                .find(|(_, _, _, selection)| selection.strategy == selected.strategy)?;
+                .find(|(_, _, _, selection, _)| selection.strategy == selected.strategy)?;
             let memory = gen_core::GenerationMemory {
                 tile_vae_decode: provider_contract
                     .engages(selected.strategy, MemoryStrategy::BoundedDecode),
@@ -1637,7 +1844,7 @@ pub(crate) fn krea_turbo_fit_with_runtime(
             })
         }
         Selection::Reject { needed_gb, .. } => {
-            let (_, phases, _, _) = measured.last().copied()?;
+            let (_, phases, _, _, _) = measured.last().copied()?;
             Some(KreaTurboFit::Reject {
                 phases,
                 needed_gb: needed_gb + HEADROOM_GB,
@@ -6341,5 +6548,339 @@ mod tests {
         );
         // Keep the hog alive to the end so the warm reading isn't reclaimed early.
         drop(hogs);
+    }
+
+    // -------------------------------------------------------------------------------------
+    // sc-22509 (epic 22505): anchor-derived admission on the candle lane.
+    // -------------------------------------------------------------------------------------
+
+    thread_local! {
+        static INJECTED_ANCHOR_STORE: std::cell::Cell<
+            Option<&'static sceneworks_core::memory_anchor::MemoryAnchorStore>,
+        > = const { std::cell::Cell::new(None) };
+    }
+
+    pub(super) fn injected_anchor_store(
+    ) -> Option<&'static sceneworks_core::memory_anchor::MemoryAnchorStore> {
+        INJECTED_ANCHOR_STORE.with(std::cell::Cell::get)
+    }
+
+    /// Run `body` with `store` standing in for the packaged anchor store. The store is leaked
+    /// because the lane hands out `&'static` anchors; a test-only leak of one small struct is the
+    /// price of not widening the production lifetime to satisfy a test.
+    fn with_injected_anchor_store<T>(
+        store: sceneworks_core::memory_anchor::MemoryAnchorStore,
+        body: impl FnOnce() -> T,
+    ) -> T {
+        let leaked: &'static _ = Box::leak(Box::new(store));
+        INJECTED_ANCHOR_STORE.with(|cell| cell.set(Some(leaked)));
+        let outcome = body();
+        INJECTED_ANCHOR_STORE.with(|cell| cell.set(None));
+        outcome
+    }
+
+    /// The packaged Krea candle q4 anchor, re-stamped at the loader-closure digest the pin
+    /// currently DECLARES, so it grades as current.
+    ///
+    /// The shipped anchor is deliberately left alone: at this pin it is stale — the Krea candle
+    /// loader moved between the anchor's measurement revision and the pinned revision — and
+    /// `packaged_anchor_currency_is_reported_not_gated` in `sceneworks-core` is what asserts that
+    /// honestly. Re-stamping HERE is not a fudge of that fact: it is how the derivation's own
+    /// behaviour is graded independently of whether today's pin happens to make the shipped row
+    /// live, which is a property of the pin and not of this code.
+    fn krea_live_anchor_store() -> sceneworks_core::memory_anchor::MemoryAnchorStore {
+        let store = sceneworks_core::memory_anchor::packaged_memory_anchors()
+            .expect("the packaged anchor store")
+            .clone();
+        let digest = sceneworks_core::memory_anchor::packaged_anchor_loader_closures()
+            .and_then(|closures| {
+                closures.digest_for(
+                    "krea_2_turbo",
+                    sceneworks_core::memory_anchor::AnchorBackend::Candle,
+                )
+            })
+            .expect("krea_2_turbo:candle must declare a loader closure")
+            .to_owned();
+        let anchors = store
+            .anchors
+            .into_iter()
+            .map(|mut anchor| {
+                if anchor.model_id == "krea_2_turbo"
+                    && anchor.backend == sceneworks_core::memory_anchor::AnchorBackend::Candle
+                {
+                    anchor.source.loader_closure_digest = digest.clone();
+                }
+                anchor
+            })
+            .collect();
+        sceneworks_core::memory_anchor::MemoryAnchorStore { anchors, ..store }
+    }
+
+    /// The derived peak for one geometry, straight from the packaged anchor — the same call the
+    /// gate makes, so the expectations below are not a second transcription of the coefficients.
+    fn krea_anchor_derived_peak_gb(width: u32, height: u32) -> f64 {
+        let anchor = sceneworks_core::memory_anchor::packaged_memory_anchors()
+            .and_then(|store| {
+                store.image_anchor_for(
+                    "krea_2_turbo",
+                    sceneworks_core::memory_anchor::AnchorBackend::Candle,
+                    "q4",
+                )
+            })
+            .expect("the packaged Krea candle q4 anchor");
+        let derived = anchor
+            .derive_image_phase_peaks(sceneworks_core::memory_anchor::AnchorImageDeriveRequest {
+                width,
+                height,
+                staged_residency: true,
+            })
+            .expect("the derivation prices this geometry");
+        derived.peak_bytes() as f64 / BYTES_PER_GIB
+    }
+
+    /// The fixture with a resident row too large to fit, so an admission can only come from an
+    /// optimized rung. Without this the selector answers `Resident` and the rung under test is
+    /// never exercised.
+    fn krea_fit_manifest_with_unfittable_resident() -> JsonObject {
+        let mut manifest = krea_fit_manifest();
+        manifest["candle"]["vramGbByTier"]["q4"] = json!(200.0);
+        manifest
+    }
+
+    /// AC 2: a geometry the campaign never measured — above `maxMeasuredPixels`, so there is no
+    /// curve and no record — admits on the derived estimate when it fits, instead of being refused
+    /// for measurement absence.
+    #[test]
+    fn an_unmeasured_krea_geometry_admits_on_the_anchor_derivation() {
+        let manifest = krea_fit_manifest_with_unfittable_resident();
+        let runtime = KreaRuntimeEvidenceContext::verified_for_test("q4");
+        let max_pixels = manifest["candle"]["turboFit"]["maxMeasuredPixels"]
+            .as_u64()
+            .expect("maxMeasuredPixels");
+        let (width, height) = (1280u32, 1280u32);
+        assert!(
+            u64::from(width) * u64::from(height) > max_pixels,
+            "the request geometry must sit outside the measured curve envelope"
+        );
+        let derived_peak_gb = krea_anchor_derived_peak_gb(width, height);
+        // Generous enough that the estimate margin the shared selector applies cannot be what
+        // decides the outcome, and far below the resident row.
+        let free_gb = derived_peak_gb * 1.25 + HEADROOM_GB;
+        let budget = Some(VramBudget {
+            free_gb,
+            total_gb: free_gb,
+        });
+        let fit = with_injected_anchor_store(krea_live_anchor_store(), || {
+            krea_turbo_fit_with_runtime(
+                &manifest,
+                "q4",
+                width,
+                height,
+                budget,
+                true,
+                Some(&runtime),
+            )
+        });
+        let Some(KreaTurboFit::Fits {
+            phases,
+            needed_gb,
+            estimate_scoped,
+            ..
+        }) = fit
+        else {
+            panic!("an unmeasured geometry must admit on the derived estimate, got {fit:?}");
+        };
+        assert!(
+            estimate_scoped,
+            "an anchor-derived admission is estimate-scoped, never measured evidence"
+        );
+        assert!(
+            (phases.peak_gb() - derived_peak_gb).abs() < 0.001,
+            "the admitted rung must be priced by the derivation ({derived_peak_gb} GiB), got \
+             {phases:?}"
+        );
+        assert!(
+            needed_gb >= derived_peak_gb + HEADROOM_GB
+                && needed_gb <= derived_peak_gb * 1.10 + HEADROOM_GB,
+            "the derived need must be the derived peak plus the standard reserve and at most the \
+             selector's estimate margin above it, got {needed_gb} against {derived_peak_gb}"
+        );
+    }
+
+    /// The differential control for the test above: with no usable anchor the SAME unmeasured
+    /// geometry under the SAME budget goes back to refusing for measurement absence. Without this
+    /// the test above could pass on a curve that quietly grew an envelope.
+    ///
+    /// The moved-loader-closure arm is the CLEAN control — it moves exactly one axis, the only
+    /// currency term there is since sc-22511. The adapter arm is deliberately over-determined
+    /// (`allow_streamed_blocks: false` also sets the request overlay and drops a rung), so it is
+    /// scoped to the coarser claim it can actually support: adapter-bearing jobs stay off the
+    /// anchor path entirely. The third arm is the SHIPPED state at this pin.
+    #[test]
+    fn without_a_usable_anchor_the_same_unmeasured_geometry_is_still_out_of_envelope() {
+        let manifest = krea_fit_manifest_with_unfittable_resident();
+        let runtime = KreaRuntimeEvidenceContext::verified_for_test("q4");
+        let derived_peak_gb = krea_anchor_derived_peak_gb(1280, 1280);
+        let free_gb = derived_peak_gb * 1.25 + HEADROOM_GB;
+        let budget = Some(VramBudget {
+            free_gb,
+            total_gb: free_gb,
+        });
+        assert_eq!(
+            with_injected_anchor_store(krea_live_anchor_store(), || {
+                krea_turbo_fit_with_runtime(
+                    &manifest,
+                    "q4",
+                    1280,
+                    1280,
+                    budget,
+                    false,
+                    Some(&runtime),
+                )
+            }),
+            Some(KreaTurboFit::Unverified {
+                reason: gen_core::MemoryEvidenceVerdict::OutOfEnvelope,
+            }),
+            "adapter-bearing jobs stay off the anchor path"
+        );
+
+        // The clean control: the model's own loader closure moved, so the evidence no longer
+        // describes the code that will run and the hull refusal stands.
+        let mut moved = krea_live_anchor_store();
+        for anchor in &mut moved.anchors {
+            if anchor.model_id == "krea_2_turbo"
+                && anchor.backend == sceneworks_core::memory_anchor::AnchorBackend::Candle
+            {
+                anchor.source.loader_closure_digest = "f".repeat(64);
+            }
+        }
+        assert_eq!(
+            with_injected_anchor_store(moved, || {
+                krea_turbo_fit_with_runtime(
+                    &manifest,
+                    "q4",
+                    1280,
+                    1280,
+                    budget,
+                    true,
+                    Some(&runtime),
+                )
+            }),
+            Some(KreaTurboFit::Unverified {
+                reason: gen_core::MemoryEvidenceVerdict::OutOfEnvelope,
+            }),
+            "an anchor whose loader closure moved must not price a request"
+        );
+
+        // The SHIPPED state, asserted rather than assumed: at this pin the packaged Krea candle
+        // anchor is stale — it was measured before the Krea candle loader moved — so production
+        // takes exactly this refusal today. Written against `krea_store_anchor` rather than a
+        // frozen verdict so a future pin that makes the row live turns this into a green
+        // observation of the OTHER branch instead of a red test nobody can act on.
+        let shipped_anchor_is_live = krea_store_anchor("q4", true).is_some();
+        assert_eq!(
+            krea_turbo_fit_with_runtime(&manifest, "q4", 1280, 1280, budget, true, Some(&runtime))
+                .is_some_and(|fit| matches!(fit, KreaTurboFit::Fits { .. })),
+            shipped_anchor_is_live,
+            "the shipped anchor prices this geometry exactly when its loader closure is current"
+        );
+    }
+
+    /// sc-22509 review (blocker): the hull-refusal bypass is narrowed to ANCHOR-DERIVED rungs. The
+    /// resident rung is priced by `candle.vramGbByTier[tier]` — a scalar measured at 1024x1024 that
+    /// does not scale with geometry — and the anchor cannot re-price it (the derivation refuses a
+    /// whole-model-resident composition). So outside the measured hull the resident candidate is not
+    /// emitted at all.
+    ///
+    /// The card is sized BETWEEN the resident row (25.7 GiB + reserve) and the true 2048x2048 need,
+    /// which is the only band where the two answers differ: before the fix this request admitted
+    /// `Resident` at the 1024x1024 row; it must now refuse.
+    #[test]
+    fn an_out_of_envelope_request_does_not_admit_resident_on_the_geometry_free_row() {
+        let manifest = krea_fit_manifest();
+        let runtime = KreaRuntimeEvidenceContext::verified_for_test("q4");
+        let (width, height) = (2048u32, 2048u32);
+        let max_pixels = manifest["candle"]["turboFit"]["maxMeasuredPixels"]
+            .as_u64()
+            .expect("maxMeasuredPixels");
+        assert!(u64::from(width) * u64::from(height) > max_pixels);
+        let resident_row_gb = manifest["candle"]["vramGbByTier"]["q4"]
+            .as_f64()
+            .expect("the resident row");
+        let derived_peak_gb = krea_anchor_derived_peak_gb(width, height);
+        // A card that would host the geometry-free resident row and nothing near the real need.
+        let free_gb = resident_row_gb + HEADROOM_GB + 2.0;
+        assert!(
+            free_gb < derived_peak_gb,
+            "the card must sit between the resident row ({resident_row_gb}) and the true \
+             2048x2048 need ({derived_peak_gb}) for this test to discriminate"
+        );
+        let budget = Some(VramBudget {
+            free_gb,
+            total_gb: free_gb,
+        });
+        // CONTROL, or the assertion below is vacuous: at an IN-ENVELOPE geometry this same card and
+        // manifest DO admit on the geometry-free resident row. So the refusal that follows is about
+        // the row not pricing the request, not about the budget.
+        let control =
+            krea_turbo_fit_with_runtime(&manifest, "q4", 1024, 1024, budget, true, Some(&runtime));
+        assert!(
+            matches!(
+                control,
+                Some(KreaTurboFit::Resident { .. }) | Some(KreaTurboFit::Fits { .. })
+            ),
+            "the control arm must admit at this budget, or the refusal below proves nothing about \
+             the row rather than the card, got {control:?}"
+        );
+
+        // Graded against a CURRENT anchor: the claim is that the anchor declines to re-price a
+        // whole-model-resident composition, which a stale (absent) anchor would satisfy vacuously.
+        let fit = with_injected_anchor_store(krea_live_anchor_store(), || {
+            krea_turbo_fit_with_runtime(
+                &manifest,
+                "q4",
+                width,
+                height,
+                budget,
+                true,
+                Some(&runtime),
+            )
+        });
+        assert!(
+            !matches!(
+                fit,
+                Some(KreaTurboFit::Resident { .. }) | Some(KreaTurboFit::Fits { .. })
+            ),
+            "an out-of-envelope request has no priced resident basis — the row is a 1024x1024 \
+             scalar and the anchor refuses to price a whole-model-resident composition — so it must \
+             not admit at all on a card this size, got {fit:?}"
+        );
+    }
+
+    /// A measured geometry keeps its measured admission: the anchor path is reached only where the
+    /// curves cannot answer, so in-envelope admission does not move onto the derivation.
+    #[test]
+    fn a_measured_krea_geometry_still_admits_on_its_measured_curve() {
+        let manifest = krea_fit_manifest_with_unfittable_resident();
+        let runtime = KreaRuntimeEvidenceContext::verified_for_test("q4");
+        let budget = Some(VramBudget {
+            free_gb: 64.0,
+            total_gb: 64.0,
+        });
+        // A CURRENT anchor is present throughout: the claim is that the curves answer FIRST, which
+        // is only tested if the derivation was actually available to be preferred.
+        let fit = with_injected_anchor_store(krea_live_anchor_store(), || {
+            krea_turbo_fit_with_runtime(&manifest, "q4", 1024, 1024, budget, true, Some(&runtime))
+        });
+        let Some(KreaTurboFit::Fits { phases, .. }) = fit else {
+            panic!("the measured geometry must still admit, got {fit:?}");
+        };
+        let derived_peak_gb = krea_anchor_derived_peak_gb(1024, 1024);
+        assert!(
+            (phases.peak_gb() - derived_peak_gb).abs() > 0.001,
+            "in-envelope admission must stay on the measured curve ({}), not fall through to the \
+             derivation ({derived_peak_gb})",
+            phases.peak_gb()
+        );
     }
 }

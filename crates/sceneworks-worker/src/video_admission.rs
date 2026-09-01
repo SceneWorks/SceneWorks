@@ -1195,10 +1195,15 @@ fn curve_decode_pass(decode_pass: VideoDecodePass) -> VideoCurveDecodePass {
 /// Fail-closed on a missing declaration or an unparsable/version-bumped closure file: an anchor
 /// whose loader nothing tracks cannot be shown to be current, so the caller keeps its floor.
 ///
-/// This is the SINGLE currency seam for anchors. [`anchor_evidence_covers_request`] calls it too —
-/// a second, inline copy of the comparison is how the pre-gate and the derivation would silently
-/// disagree about whether the evidence is live.
-fn anchor_currency_matches(anchor: &sceneworks_core::memory_anchor::MemoryAnchor) -> bool {
+/// This is the SINGLE currency seam for anchors, for EVERY lane. [`anchor_evidence_covers_request`]
+/// calls it, and since sc-22509 so do the candle image lane's two anchor lookups
+/// (`vram_gate::krea_store_anchor` and `candle_memory_strategy::candle_image_anchor`) — a second,
+/// inline copy of the comparison is how a pre-gate and a derivation would silently disagree about
+/// whether the evidence is live. It lives here rather than in the candle modules because this
+/// module is compiled unconditionally while both of those are `backend-candle`-gated.
+pub(crate) fn anchor_currency_matches(
+    anchor: &sceneworks_core::memory_anchor::MemoryAnchor,
+) -> bool {
     sceneworks_core::memory_anchor::packaged_anchor_loader_closures()
         .is_some_and(|closures| anchor.is_current(closures))
 }
