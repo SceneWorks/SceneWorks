@@ -74,7 +74,7 @@ directory and atomically renames one aggregate directory containing
 sidecar, duplicate coordinate, or reused cold PID leaves no campaign directory.
 
 Before the parent or a worker loads a snapshot, inference commit
-`2091d55ae1444b40eab1b6a9ec8ac25ceefbefaf` seals these exact model identities and the
+`488e091d60cad7ebe6db84efa97a9b0687395b80` seals these exact model identities and the
 candidate-only materialized-weight residency boundary used by the receipt producer.
 SceneWorks mirrors the same rule when it validates a portable receipt: a local
 snapshot path is not an identity, and `modelId`/`referenceModelId` must contain
@@ -91,4 +91,9 @@ caller-selected model.
 The producer deliberately fails closed if its numeric quality-reference hooks
 cannot supply all four checked-in quality fixtures. It must never substitute a
 synthetic zero-error or caller-authored quality result merely to publish a
-matrix; a successful real-model campaign remains the final SC-20671 gate.
+matrix. The kernel fixture is a real MLX dense-attention dispatch checked
+against a separately accumulated host-fp32 reference; 4-bit-versus-bf16 model
+perplexity and agreement are recorded as raw dense-baseline characterization,
+not mislabeled as kernel error. Frozen quality thresholds gate compressed
+receipts, where a regression is actionable; the dense campaign remains the
+immutable comparison baseline.

@@ -55,7 +55,7 @@ export const FIT_BOUNDARY_MIN_CONTEXT_BPS = 9_000;
 const SCENEWORKS_REPOSITORY = "github.com/SceneWorks/SceneWorks";
 const INFERENCE_REPOSITORY = "github.com/SceneWorks/inference";
 const PMETAL_MLX_REPOSITORY = "https://github.com/michaeltrefry/mlx-rs";
-// Mirrored from inference commit 2091d55ae1444b40eab1b6a9ec8ac25ceefbefaf.  These are
+// Mirrored from inference commit 488e091d60cad7ebe6db84efa97a9b0687395b80.  These are
 // receipt identities, never caller-selectable model aliases or local paths.
 export const SC20671_MODEL_CONTRACTS = Object.freeze({
   llama: Object.freeze({
@@ -791,13 +791,16 @@ export function validateReceipt(receipt, { verifyHash = true } = {}) {
   if (canonicalJson(receipt.quality.statistics) !== canonicalJson(CONTRACT.statistics)) {
     fail("quality statistics policy differs from the frozen contract");
   }
-  if (receipt.quality.parityMaxError > CONTRACT.thresholds.parityMaxError
-    || receipt.quality.perplexityDelta > CONTRACT.thresholds.perplexityDelta) {
+  if (receipt.mode === "compressed"
+    && (receipt.quality.parityMaxError > CONTRACT.thresholds.parityMaxError
+      || receipt.quality.perplexityDelta > CONTRACT.thresholds.perplexityDelta)) {
     fail("quality error exceeds the frozen maximum");
   }
-  for (const field of AGREEMENT_QUALITY_FIELDS) {
-    if (receipt.quality[field] < CONTRACT.thresholds[field]) {
-      fail(`quality.${field} is below the frozen minimum`);
+  if (receipt.mode === "compressed") {
+    for (const field of AGREEMENT_QUALITY_FIELDS) {
+      if (receipt.quality[field] < CONTRACT.thresholds[field]) {
+        fail(`quality.${field} is below the frozen minimum`);
+      }
     }
   }
   validateFixtureEvidence(receipt.quality.fixtureEvidence);
