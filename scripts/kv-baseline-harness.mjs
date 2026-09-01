@@ -55,7 +55,7 @@ export const FIT_BOUNDARY_MIN_CONTEXT_BPS = 9_000;
 const SCENEWORKS_REPOSITORY = "github.com/SceneWorks/SceneWorks";
 const INFERENCE_REPOSITORY = "github.com/SceneWorks/inference";
 const PMETAL_MLX_REPOSITORY = "https://github.com/michaeltrefry/mlx-rs";
-// Mirrored from inference commit e8e57e81f45e029ff1eea0e1120a47c86d3f88b5.  These are
+// Mirrored from inference commit 2091d55ae1444b40eab1b6a9ec8ac25ceefbefaf.  These are
 // receipt identities, never caller-selectable model aliases or local paths.
 export const SC20671_MODEL_CONTRACTS = Object.freeze({
   llama: Object.freeze({
