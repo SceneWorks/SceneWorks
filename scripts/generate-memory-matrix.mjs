@@ -621,13 +621,15 @@ export function assertMlxStagedCoverageIsStructurallyConsistent(matrix) {
   // lane nobody has measured — not a defect in this document. What survives is the containment
   // relation, which holds at any coverage level including zero. The mirror of this removal lives in
   // tests/test_memory_matrix.py.
-  const knownIds = new Set(matrix.models.map((model) => model.id));
-  const unknown = [...staged].filter((id) => !knownIds.has(id));
-  if (unknown.length) {
-    throw new Error(
-      `MLX staged census names entries absent from the matrix universe: ${unknown.sort().join(",")}`,
-    );
-  }
+  //
+  // The containment replacement that first stood here — "every staged id is an id the matrix
+  // universe knows" — was deleted rather than kept, because it could not fail: `staged` is derived
+  // by filtering `matrix.cells`, and every cell is generated FROM `matrix.models`, so the id set is
+  // a subset of the universe by construction. A check whose throw branch is unreachable reads as
+  // coverage while asserting nothing, which is worse than the absent gate it replaced. The live
+  // claim below — a claim two independent declarations can genuinely disagree on — is what carries
+  // this function.
+  //
   // The verdict is a property of the RESOLVED ROUTE, so entries sharing a route must agree. An entry
   // drifting away from its own siblings is exactly what a pinned total could not see.
   //
@@ -3817,15 +3819,15 @@ function validateMatrix(
   }
   // sc-22512: the two pinned modality populations (53 image / 11 video) were deleted. They reddened
   // on a catalog that GREW — an extra shipped model refused generation outright — which is the
-  // measurement-absence failure surface this story removes. What the pair was really claiming, that
-  // the modality split PARTITIONS the universe with no entry counted twice or lost, is restated here
-  // as a relation derived from the catalog itself; it holds at any population size, zero included.
-  if (ids.length + videoIds.length !== matrix.models.length) {
-    throw new Error(
-      `modality partition does not cover the universe: ${ids.length} image + ${videoIds.length} video != ${matrix.models.length} entries`,
-    );
-  }
-  if (new Set([...ids, ...videoIds]).size !== matrix.models.length) {
+  // measurement-absence failure surface this story removes.
+  //
+  // Their first replacement, `ids.length + videoIds.length === matrix.models.length`, was deleted
+  // again rather than kept: with `MATRIX_MODALITIES` exhausted by the unadmitted-modality throw
+  // directly above, the two filters partition `matrix.models` by arithmetic, so the branch could
+  // never be taken. It read as coverage while asserting nothing. The duplicate-id check below is
+  // the half of that pair that a real catalog CAN violate — two entries sharing an id — and it
+  // holds at any population size, zero included.
+  if (new Set([...ids, ...videoIds]).size !== ids.length + videoIds.length) {
     throw new Error("matrix carries duplicate model ids across the modality partition");
   }
   if (

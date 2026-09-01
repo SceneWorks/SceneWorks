@@ -80,7 +80,13 @@ test("the classification is shaped like the catalog, not like one corpus", () =>
     ...store.anchors.map((anchor) => anchor.backend),
     ...store.analyticOnly.map((entry) => entry.backend),
   ]);
-  assert.deepEqual([...lanes].sort(), ["candle", "mlx"], "both backend lanes are classified");
+  // SUBSET, not an exact roster: `deepEqual(["candle","mlx"])` is a population gate wearing a
+  // shape gate's clothes — it reds when a lane's rows are all retired, which is absence. What is
+  // actually enforceable at any population size is that no row spells a lane the loader cannot
+  // route.
+  for (const lane of lanes) {
+    assert.ok(["candle", "mlx"].includes(lane), `unknown backend lane ${lane}`);
+  }
   for (const entry of store.analyticOnly) {
     assert.ok(ANALYTIC_BASES.includes(entry.basis), `${entry.id}: unknown basis ${entry.basis}`);
     assert.ok(entry.reason.trim().length > 0, `${entry.id}: a classification must state why`);

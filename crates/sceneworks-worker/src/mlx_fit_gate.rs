@@ -7032,25 +7032,30 @@ mod tests {
         let manifest: Value =
             serde_json::from_str(&sceneworks_core::jsonc::strip_jsonc_comments(raw))
                 .expect("builtin.models.jsonc parses");
-        let entry = manifest
+        // sc-22512 (E8): the entry and its opt-in are LOOKED UP, not required. A catalog that has
+        // retired `krea_2_turbo`, or that ships it with no `mlx.calibrations` block, is a model
+        // nobody measured on this lane — there is nothing to grade currency against, so the harness
+        // withholds its question instead of reddening. The `calibrations.len() == 2` pin went with
+        // them for the same reason: it froze the shipped opt-in at the 768²/896² pose-control pair,
+        // so ADDING a third measured cell reddened the suite. Every agreement assertion below is
+        // universally quantified over whatever bindings are declared and keeps full force on them.
+        let Some(entry) = manifest
             .get("models")
             .and_then(Value::as_array)
             .expect("models array")
             .iter()
             .find(|model| model.get("id").and_then(Value::as_str) == Some("krea_2_turbo"))
             .and_then(Value::as_object)
-            .expect("krea_2_turbo manifest entry");
-        let calibrations = entry
+        else {
+            return;
+        };
+        let Some(calibrations) = entry
             .get("mlx")
             .and_then(|mlx| mlx.get("calibrations"))
             .and_then(Value::as_array)
-            .expect("krea_2_turbo declares mlx.calibrations");
-        assert_eq!(
-            calibrations.len(),
-            2,
-            "the shipped krea opt-in is the 768² and 896² pose-control pair"
-        );
-        // sc-22512: an absent opt-in leaves nothing to grade currency against — skip, never fail.
+        else {
+            return;
+        };
         let Some(declared) = shipped_mlx_declared_closure_digest("krea_2_turbo") else {
             return;
         };
@@ -7354,14 +7359,23 @@ mod tests {
         let manifest: Value =
             serde_json::from_str(&sceneworks_core::jsonc::strip_jsonc_comments(raw))
                 .expect("builtin model manifest parses");
-        let z_image = manifest["models"]
+        // sc-22512 (E8): the entry and its opt-in are LOOKED UP, not required. A catalog without
+        // `z_image_turbo`, or one shipping it with no exact MLX bindings, is a lane nobody measured
+        // — there is no accepted floor to admit — so the harness withholds its question. A PRESENT
+        // but malformed binding block still fails (`from_manifest`'s `Err`): that is contradictory
+        // data, not missing data. Everything below keeps full force on a declared opt-in.
+        let Some(z_image) = manifest["models"]
             .as_array()
             .and_then(|models| models.iter().find(|model| model["id"] == "z_image_turbo"))
             .and_then(Value::as_object)
-            .expect("shipped z_image_turbo manifest entry");
-        let bindings = MlxCalibrationBinding::from_manifest(z_image)
+        else {
+            return;
+        };
+        let Some(bindings) = MlxCalibrationBinding::from_manifest(z_image)
             .expect("Z-Image calibration bindings are valid")
-            .expect("Z-Image declares exact MLX calibration bindings");
+        else {
+            return;
+        };
 
         assert_eq!(bindings.len(), 5);
         // The digest the SHIPPED EVIDENCE says this ladder was measured under, read from the bundle
@@ -7370,7 +7384,11 @@ mod tests {
         // without any measurement moving, and a pinned literal turns that no-op into a red test.
         // Reading it back is also STRICTER — it catches the manifest binding drifting away from the
         // record it claims, which a literal cannot see.
-        let captured = packaged_bundle()
+        //
+        // Looked up rather than required, for the same reason: a bundle carrying no Z-Image record
+        // (or a record with no digest) is an unmeasured lane, and the whole remainder of this test
+        // is a claim ABOUT that measurement.
+        let Some(captured) = packaged_bundle()
             .records
             .into_iter()
             .find(|record| {
@@ -7380,7 +7398,9 @@ mod tests {
                         == "z-image-mlx-independent-materialization-v4"
             })
             .and_then(|record| record.repositories.inference.closure_digest)
-            .expect("the packaged bundle carries the current Z-Image ladder with its digest");
+        else {
+            return;
+        };
         let live = live_mlx_closure_digest("z_image_turbo");
         assert_ne!(
             captured, live,
@@ -8030,29 +8050,42 @@ mod tests {
     /// Uniformity across the model's bindings is asserted rather than assumed: a split opt-in would
     /// let one stale row hide behind a current one and make every comparison below ambiguous.
     ///
-    /// sc-22512 (E8): `None` when the model declares no `mlx.calibrations` opt-in at all, or when a
-    /// declared binding names no closure. Absence of an opt-in is a model nobody measured, which is
-    /// legal — callers SKIP the currency comparison rather than failing. A PRESENT but split or
-    /// malformed opt-in still fails: that is contradictory data, not missing data.
+    /// sc-22512 (E8): `None` ONLY when the model declares no `mlx.calibrations` opt-in at all, or
+    /// declares an empty one. Absence of an opt-in is a model nobody measured, which is legal —
+    /// callers SKIP the currency comparison rather than failing. A PRESENT but split or malformed
+    /// opt-in still fails: that is contradictory data, not missing data.
     fn shipped_mlx_declared_closure_digest(model_id: &str) -> Option<String> {
         let raw = include_str!("../../../config/manifests/builtin.models.jsonc");
         let manifest: Value =
             serde_json::from_str(&sceneworks_core::jsonc::strip_jsonc_comments(raw))
                 .expect("builtin model manifest parses");
-        let mut declared = manifest["models"]
+        let declared = manifest["models"]
             .as_array()
             .and_then(|models| models.iter().find(|model| model["id"] == model_id))
             .and_then(|model| model["mlx"]["calibrations"].as_array())?
+            .clone();
+        // Absence — no `mlx.calibrations` block, or an empty one — is a model nobody measured, and
+        // the callers legally skip. Anything PRESENT must be well formed: a binding that names no
+        // string closure is contradictory data, so it panics here rather than being mapped to
+        // `None` and dedup'd into a `[None]` that would sail through the uniformity check below and
+        // silently make every call site skip.
+        if declared.is_empty() {
+            return None;
+        }
+        let mut declared = declared
             .iter()
             .map(|binding| {
                 binding["inferenceClosureDigest"]
                     .as_str()
-                    .map(str::to_owned)
+                    .unwrap_or_else(|| {
+                        panic!(
+                            "{model_id} ships an mlx.calibrations binding with no string \
+                             inferenceClosureDigest: {binding}"
+                        )
+                    })
+                    .to_owned()
             })
-            .collect::<Vec<Option<String>>>();
-        if declared.is_empty() {
-            return None;
-        }
+            .collect::<Vec<String>>();
         declared.sort();
         declared.dedup();
         assert_eq!(
@@ -8060,7 +8093,7 @@ mod tests {
             1,
             "{model_id}'s shipped bindings must all name ONE captured closure"
         );
-        declared.remove(0)
+        Some(declared.remove(0))
     }
 
     /// [`fixture_closure_lookup`] with the Krea control lane pinned to the closure its PACKAGED
@@ -8174,7 +8207,9 @@ mod tests {
         }
     }
 
-    fn packaged_krea_plan() -> MlxRequestPlan {
+    /// `None` when the packaged bundle cannot supply this fixture — see the note beside the
+    /// selection below. The caller withholds its question rather than reddening.
+    fn packaged_krea_plan() -> Option<MlxRequestPlan> {
         let bundle = match sceneworks_core::memory_calibration::load_packaged_bundle()
             .expect("packaged bundle must parse")
         {
@@ -8226,12 +8261,29 @@ mod tests {
                     })
             })
             .collect::<Vec<_>>();
+        // PRESENT-data claim, kept: whatever cells the bundle carries at this one closure must be
+        // DISTINCT — two records for the same geometry and rung are a duplicated capture, which no
+        // measurement could resolve and which would make the refusal-naming fixture ambiguous.
+        let mut cells = records
+            .iter()
+            .map(|record| (record.target.geometry, record.strategy.rung))
+            .collect::<Vec<_>>();
+        let distinct = cells.len();
+        cells.dedup_by(|left, right| left == right);
         assert_eq!(
-            records.len(),
-            2,
-            "the packaged Krea contract has two exact cells at the closure the shipped \
-             mlx:krea_2_turbo_control opt-in declares"
+            cells.len(),
+            distinct,
+            "the packaged Krea cells at one closure must not duplicate a (geometry, rung)"
         );
+        // ABSENCE, converted (sc-22512): this fixture stands in for a two-cell measured ladder — it
+        // exists to prove a refusal NAMES the largest fitting exact cell, which needs two exact
+        // cells to choose between. A bundle that carries fewer is a lane nobody measured that far,
+        // so the fixture reports itself unbuildable and its caller withholds the question. The old
+        // `assert_eq!(records.len(), 2)` reddened on exactly that absence — and made the `.or_else`
+        // closure fallback above decorative, since the count fired first either way.
+        if records.len() != 2 {
+            return None;
+        }
         let first = records[0];
         let resolved_path_fingerprint =
             |record: &sceneworks_core::memory_calibration::EvidenceRecord| {
@@ -8297,7 +8349,7 @@ mod tests {
                 parameters: record.strategy.parameters.clone(),
             })
             .collect();
-        MlxRequestPlan {
+        Some(MlxRequestPlan {
             engine_id: "krea_2_turbo_control",
             model_id: "krea_2_turbo".to_owned(),
             tier: MemoryNumericTier {
@@ -8312,10 +8364,11 @@ mod tests {
             fixed_reserve_bytes: 0,
             calibration: MlxCalibrationConfig::Valid(MlxCalibrationSet { bindings, resolved }),
             load_shape_declaration_result: LoadShapeDeclarationResult::NotEvaluated,
-        }
+        })
     }
 
-    fn packaged_krea_generator() -> RequestGenerator {
+    /// `None` when the packaged bundle carries no Krea control record at the fixture's closure.
+    fn packaged_krea_generator() -> Option<RequestGenerator> {
         use gen_core::MemoryCalibrationIdentity;
 
         let mut generator = fixture_generator();
@@ -8339,17 +8392,16 @@ mod tests {
                 })
                 .and_then(|record| record.repositories.inference.closure_digest.clone())
         });
-        let record = packaged_bundle()
-            .records
-            .into_iter()
-            .find(|record| {
-                matches!(record.backend, CalibrationBackend::Mlx)
-                    && record.target.provider == "krea_2_turbo_control"
-                    && captured.as_deref().is_none_or(|captured| {
-                        record.repositories.inference.closure_digest.as_deref() == Some(captured)
-                    })
-            })
-            .expect("the packaged bundle carries a Krea control record at the declared closure");
+        // sc-22512 (E8): looked up, not required. A bundle carrying no Krea control record at this
+        // closure is a lane nobody measured; the fixture reports itself unbuildable and its caller
+        // withholds the question rather than the suite reddening on an absent measurement.
+        let record = packaged_bundle().records.into_iter().find(|record| {
+            matches!(record.backend, CalibrationBackend::Mlx)
+                && record.target.provider == "krea_2_turbo_control"
+                && captured.as_deref().is_none_or(|captured| {
+                    record.repositories.inference.closure_digest.as_deref() == Some(captured)
+                })
+        })?;
         contract.calibration = Some(MemoryCalibrationIdentity::new(
             record.calibration_fingerprint,
             match record.load_shape {
@@ -8365,7 +8417,7 @@ mod tests {
             .find(|capability| capability.strategy == MemoryStrategy::BoundedDecode)
             .expect("bounded decode capability");
         bounded_decode.parameters.decode_overlaps = vec![64];
-        generator
+        Some(generator)
     }
 
     fn fixture_inputs(width: u32, height: u32) -> MlxRequestInputs {
@@ -8782,7 +8834,12 @@ mod tests {
     fn packaged_krea_1024_admits_by_estimate_and_refuses_below_the_widened_margins() {
         use gen_core::MemoryCalibrationIdentity;
 
-        let plan = packaged_krea_plan();
+        // sc-22512 (E8): both fixtures are LOOKED UP. If the packaged bundle no longer supplies
+        // the two-cell Krea control ladder this test stands on, the question is withheld rather
+        // than the suite reddening on an absent measurement.
+        let Some(plan) = packaged_krea_plan() else {
+            return;
+        };
         // Realistic component facts so the floor arithmetic is meaningful: conditioning 8 GiB,
         // transformer 60 GiB, decoder 4 GiB. Floors at 1024² (headroom = 2 GiB fixture anchor):
         //   staged (rung 1)       max(8, 64) + 2 = 66 GiB  -> widened 99.27 GiB
@@ -8791,7 +8848,9 @@ mod tests {
         //                                                   curve instead)
         // Fitted bounded-decode estimate from the 896² record: envelope 38.563 GiB scaled by
         // 1024²/896² = 50.37 GiB, widened by the measured MLX estimate margin to 75.76 GiB.
-        let mut generator = packaged_krea_generator();
+        let Some(mut generator) = packaged_krea_generator() else {
+            return;
+        };
         {
             let facts = &mut generator
                 .contract
@@ -8915,7 +8974,9 @@ mod tests {
         // only thing standing between the drifted provider and the fitted candidate. The
         // unmutated generator ADMITS at 76 (the fitted arm above), so the refusal is exactly the
         // mutation's doing.
-        let mut mismatched_generator = packaged_krea_generator();
+        let Some(mut mismatched_generator) = packaged_krea_generator() else {
+            return;
+        };
         {
             let contract = mismatched_generator
                 .contract
@@ -8961,7 +9022,9 @@ mod tests {
 
         // Dropping the rung's Implemented support removes both the fitted candidate and its floor:
         // an unimplemented rung is never estimate-admissible.
-        let mut unimplemented_generator = packaged_krea_generator();
+        let Some(mut unimplemented_generator) = packaged_krea_generator() else {
+            return;
+        };
         {
             let contract = unimplemented_generator
                 .contract

@@ -4010,21 +4010,60 @@ test("resume is not defeated by the per-lane digest a prior record carries", asy
   assert.equal(resumed.records.length, 1);
 });
 
-// sc-22512 removed the test that stood here: "every checked-in capture invocation selects a plan
-// fixture on a DECLARED lane". It walked the checked-in workflows, resolved each capture
-// invocation's --backend/--fixture pair against config/memory-calibration-plan.json, and then
-// required every authoritative survivor's lane to carry a config/inference-provider-closures.json
-// declaration — including the converse sweep, which reddened `npm run check` for any authoritative
-// plan lane no workflow had captured yet.
+// sc-22512 removed the DECLARED-LANE half of the test below: it required every authoritative
+// survivor's lane to carry a config/inference-provider-closures.json declaration, plus a converse
+// sweep that reddened `npm run check` for any authoritative plan lane no workflow had captured yet.
+// That is a lane-declaration gate in the strict sense E8 forbids — adding a model to the
+// calibration plan reddened CI until somebody hand-maintained a second file, and the failure was
+// about bookkeeping rather than about anything a capture would find. The harness no longer refuses
+// an undeclared lane either (see "an undeclared lane is CAPTURED without a currency term, never
+// refused" above): the capture runs and simply carries no currency term.
 //
-// That is a lane-declaration gate in the strict sense E8 forbids: adding a model to the calibration
-// plan reddened CI until somebody hand-maintained a second file, and the failure was about
-// bookkeeping rather than about anything a capture would find. The harness no longer refuses an
-// undeclared lane either (see "an undeclared lane is CAPTURED without a currency term, never
-// refused" above) — the capture runs and simply carries no currency term, so the estimate it feeds
-// stays conservative instead of the job dying on a runner.
-//
-// The two failure modes the test ALSO caught — a workflow naming a fixture the plan no longer has,
-// and a --backend/--fixture pair selecting nothing — are selection defects rather than measurement
-// absence, and they still surface: `runProviderPlan` refuses an empty selection, which the fixture
-// selection tests above cover directly.
+// What is kept is PRESENT-DATA agreement between two checked-in artifacts: the workflows say which
+// --backend/--fixture pairs the runners will invoke, and config/memory-calibration-plan.json says
+// which providers those pairs select. A workflow naming a fixture the plan no longer has, or a
+// pair that selects nothing, kills a capture job on a runner rather than here — and nothing about
+// that defect is a missing measurement, so it stays gated.
+test("every checked-in capture invocation selects a plan fixture", async () => {
+  const root = new URL("../", import.meta.url);
+  const plan = JSON.parse(await readFile(new URL("config/memory-calibration-plan.json", root)));
+  const workflows = await readdir(new URL(".github/workflows/", root));
+
+  const selected = [];
+  for (const file of workflows.filter((name) => name.endsWith(".yml"))) {
+    const body = await readFile(new URL(`.github/workflows/${file}`, root), "utf8");
+    // `harness.mjs run` invocations only; `assess-reuse` and `check` never derive a digest. Windows
+    // packs the whole invocation onto one line, macOS uses backslash continuations.
+    for (const invocation of body.match(/memory-calibration-harness\.mjs\s+run\b[\s\S]*?--output\s+\S+/g) ?? []) {
+      const backend = invocation.match(/--backend\s+(\S+)/)?.[1];
+      const fixture = invocation.match(/--fixture\s+"?([^"\s\\]+)"?/)?.[1];
+      assert.ok(backend && fixture, `${file}: a capture invocation selects no --backend/--fixture`);
+      if (!fixture.includes("$")) {
+        selected.push([`${file} --fixture ${fixture}`, backend, (name) => name === fixture]);
+        continue;
+      }
+      // The Qwen invocation templates its fixture from `inputs.qwen_tier` and a seed chosen in the
+      // same shell block. Both come out of the workflow itself rather than being restated here, so a
+      // drift on either side is caught: every DECLARED tier option must reach a plan fixture, and
+      // that fixture's seed must be one the workflow can actually set.
+      const tiers = body.match(/qwen_tier:[\s\S]*?options:\s*((?:\s*-\s*\w+\n)+)/)?.[1];
+      // The seed is assigned upstream of the invocation in the same shell block, so it is read off
+      // the workflow rather than the sliced invocation.
+      const seeds = [...body.matchAll(/QWEN_SEED=(\d+)/g)].map((match) => match[1]);
+      assert.ok(tiers, `${file}: the templated fixture's tier input declares no options`);
+      assert.ok(seeds.length, `${file}: the templated fixture's seed is set nowhere in the workflow`);
+      for (const tier of tiers.match(/-\s*(\w+)/g).map((line) => line.replace(/-\s*/, ""))) {
+        const shape = new RegExp(`^${fixture.replace("${QWEN_TIER}", tier).replace("${QWEN_SEED}", `(?:${seeds.join("|")})`)}$`);
+        selected.push([`${file} --fixture ${fixture} (tier ${tier})`, backend, (name) => shape.test(name)]);
+      }
+    }
+  }
+  // No `selected.length >= 6` pin: that was a frozen population of checked-in capture invocations,
+  // and retiring a capture workflow is absence, not a defect. The loop is universally quantified
+  // over whatever invocations exist and goes vacuous rather than red if none do.
+  for (const [label, backend, matches] of selected) {
+    // Exactly what `runProviderPlan` does: filter the plan by backend, then by fixture.
+    const entries = plan.providers.filter((provider) => provider.backend === backend && matches(provider.fixture));
+    assert.ok(entries.length, `${label}: selects no plan provider on backend ${backend}`);
+  }
+});

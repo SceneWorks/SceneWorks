@@ -1777,7 +1777,15 @@ fn admit_video_generation_with_curves_and_profiles(
         //   * The surface is fine and simply nobody has measured this coordinate. That now abstains
         //     like every other lane: absence never blocks, it only withholds a sharper estimate, and
         //     runtime catching (E6) is the failure posture if the request turns out too large.
-        if bernini_memory_attempt(&request) && !bernini_surface_is_exact(&request, contract) {
+        //
+        // `contract.is_some()` is part of the predicate because `bernini_surface_is_exact` answers
+        // `false` for a MISSING contract — it has no declared surface to compare against — and a
+        // missing contract is absence, not an unsupported request. The very next branches below
+        // fail open for exactly that case; refusing here would have made this path contradict them.
+        if bernini_memory_attempt(&request)
+            && contract.is_some()
+            && !bernini_surface_is_exact(&request, contract)
+        {
             return VideoAdmissionOutcome {
                 refusal: Some(bernini_surface_refusal()),
                 ..VideoAdmissionOutcome::default()

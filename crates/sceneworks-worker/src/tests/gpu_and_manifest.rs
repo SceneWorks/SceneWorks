@@ -1853,6 +1853,106 @@ fn declared_candle_vram_rows_are_well_formed() {
     );
 }
 
+/// The INVERSE half of the row well-formedness check above, restored for sc-22512 after the first
+/// pass over-deleted it with the `EXPLICITLY_UNMEASURED` roster it lived inside.
+///
+/// The roster was the frozen part and is gone for good; the claim was not. This is a
+/// PRESENT-DATA contradiction, not an absence: a model whose live Candle image route hard-codes
+/// "no measurement exists for this entry" while the catalog publishes per-tier `vramGbByTier` rows
+/// for it is two shipped artifacts disagreeing. The route then prices the request from the
+/// conservative floor and silently ignores measurements the catalog already has — a production
+/// defect that no amount of E8 "absence never blocks" makes acceptable. A model with no rows and no
+/// unmeasured call site contributes nothing here, and adding a NEW unmeasured lane never reds.
+///
+/// Derived, with no hardcoded model or file roster: `src/image_jobs/` is enumerated from the
+/// directory itself, and the models are read off the two shapes an unmeasured reason takes at a
+/// live call site —
+///
+/// 1. a `"<id>" => CandleBaseEvidence::Ungateable(..)` dispatch arm, which names its model, and
+/// 2. a module that admits through `admit_candle_base_floor_with_resident_overlay(..)` — the
+///    floor-only helper, i.e. the whole lane is unmeasured — whose model is read from that
+///    module's own `request.model == "<id>"` eligibility guard.
+///
+/// Both rosters are re-derived on every run, so retiring a lane or a reason deletes its obligation
+/// automatically instead of staling a list.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+#[test]
+fn a_route_that_declares_a_model_unmeasured_contradicts_catalog_vram_rows_for_it() {
+    /// Every `"<literal>"` immediately preceding `marker` in `source`, one per occurrence.
+    fn ids_before(source: &str, marker: &str) -> Vec<String> {
+        source
+            .match_indices(marker)
+            .filter_map(|(at, _)| {
+                let head = &source[..at];
+                let close = head.rfind('"')?;
+                let open = head[..close].rfind('"')?;
+                Some(head[open + 1..close].to_owned())
+            })
+            .collect()
+    }
+
+    // The directory itself is the roster. `image_jobs.rs`'s `mod` lines are NOT enough: several
+    // lanes (bernini among them) are pulled in with `include!("image_jobs/<name>.rs")` instead, so
+    // a `mod`-only sweep silently skips exactly the floor-admitted lanes this check exists for.
+    // `tests.rs` is the one exclusion — it is the module's own test harness, and the call-site
+    // spellings it quotes in fixtures and assertions are not live routes.
+    let module_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/image_jobs");
+    let mut modules = std::fs::read_dir(&module_dir)
+        .unwrap_or_else(|error| panic!("read {}: {error}", module_dir.display()))
+        .map(|entry| entry.expect("image_jobs dir entry").path())
+        .filter(|path| {
+            path.extension().is_some_and(|extension| extension == "rs")
+                && path.file_name().is_some_and(|name| name != "tests.rs")
+        })
+        .collect::<Vec<_>>();
+    modules.sort();
+    let mut unmeasured: Vec<(String, String)> = Vec::new();
+    for path in modules {
+        let module = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .expect("module file name")
+            .to_owned();
+        let source = std::fs::read_to_string(&path)
+            .unwrap_or_else(|error| panic!("read {}: {error}", path.display()));
+        for id in ids_before(&source, " => CandleBaseEvidence::Ungateable(") {
+            unmeasured.push((id, format!("{module}: Ungateable evidence")));
+        }
+        if source.contains("admit_candle_base_floor_with_resident_overlay(") {
+            for id in source
+                .match_indices("request.model == \"")
+                .filter_map(|(at, marker)| {
+                    source[at + marker.len()..]
+                        .split_once('"')
+                        .map(|(id, _)| id.to_owned())
+                })
+            {
+                unmeasured.push((id, format!("{module}: floor-only admission")));
+            }
+        }
+    }
+    unmeasured.sort();
+    unmeasured.dedup();
+    // Not a population gate: this only proves the two SCANNERS still see the source shapes they
+    // parse. If every unmeasured lane is retired the derivation legitimately yields nothing, and
+    // the loop below is vacuous rather than red.
+    for (id, site) in &unmeasured {
+        let model = builtin_model_entry(id);
+        let rows = model
+            .get("candle")
+            .and_then(|candle| candle.get("vramGbByTier"))
+            .and_then(Value::as_object);
+        assert!(
+            rows.is_none_or(serde_json::Map::is_empty),
+            "{id}: {site} hard-codes an unmeasured reason, but the catalog publishes \
+             candle.vramGbByTier {:?}. The route would price this request from the floor and \
+             ignore measurements that exist — move the lane onto the evidenced admission path, or \
+             drop the rows.",
+            rows.map(|rows| rows.keys().collect::<Vec<_>>())
+        );
+    }
+}
+
 /// sc-7875 (SD3.5 S6, MLX-path validation boundary): the three SD3.5 builtin-manifest entries gate
 /// correctly at the catalog layer — `macOnly: false` (cross-platform now that the candle off-Mac lane
 /// is wired, sc-7880/epic 7982; availability is driven by the routing tables, not this flag),

@@ -105,8 +105,14 @@ test("rust ladder_margin_policy constants match the derivation output", async ()
 // their own inputs and so cannot be falsified by the corpus moving.
 test("the mlx hard floor never exceeds the demonstrated envelope headroom", async () => {
   const derived = deriveMargins(await loadEvidenceRecords(ROOT));
+  // Guarded exactly like the `canBind` relation below (`predictorEnvelopeGapRange` returns null
+  // when no record demonstrates an envelope gap): an mlx corpus that demonstrates none has not
+  // measured the thing this safety property is about, so the question is withheld rather than the
+  // suite throwing on `gap.max` of `null`. The property keeps full force whenever it is posable.
   const gap = derived.mlx.analysis.envelopeGap;
-  assert.ok(MLX_HARD_FLOOR <= gap.max, "mlx floor does not exceed the demonstrated envelope headroom");
+  if (gap) {
+    assert.ok(MLX_HARD_FLOOR <= gap.max, "mlx floor does not exceed the demonstrated envelope headroom");
+  }
 });
 
 // The issue-1 resolution (adversarial review of sc-18094): the non-binding exclusion is sound
