@@ -23,12 +23,16 @@ import { CONVERTER_TIER_OVERRIDES, contractIsLoraOnly } from "./lib/manifest-mem
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const OUTPUT_JSON = "docs/generated/memory-matrix.json";
 const OUTPUT_MD = "docs/generated/memory-matrix.md";
-const EXPECTED_IMAGE_COUNT = 53;
 // sc-18815: the modalities the matrix carries. `utility` and `audio` entries have no memory ladder —
 // no rungs, no fit gate, no strategy selector — so they are outside the universe by design rather
 // than by omission, and admitting one would need the same three things video needed here.
 const MATRIX_MODALITIES = new Set(["image", "video"]);
-const EXPECTED_VIDEO_COUNT = 11;
+// sc-22512 deleted `EXPECTED_IMAGE_COUNT = 53` and `EXPECTED_VIDEO_COUNT = 11`. They were frozen
+// catalog populations: adding one model to the shipped catalog reddened generation before anything
+// had a chance to say whether the new entry was well-formed. The population is now DERIVED from the
+// catalog's own enumeration, and the cross-table agreement between the manifest, the source-owned
+// `EXPECTED_IMAGE_IDS` roster and the generated ownership rows carries the whole structural claim —
+// that check reds on disagreement, which is present-and-contradictory data, at any population size.
 // SC-18218 removed FLUX.2-dev from the MLX staged-residency census when the then-pinned provider was
 // eager/resident-only; sc-20799 REVERSED that at pin ebcdc7da7, where all three Dev MLX providers
 // declare selectable Sequential staged residency, so flux2_dev is now census-required (the assertion
@@ -40,9 +44,17 @@ const EXPECTED_VIDEO_COUNT = 11;
 // and the number never said which entry moved. `assertMlxStagedCoverageIsStructurallyConsistent`
 // replaces it, and is DELIBERATELY WEAKER — the honest scope, so nobody reads more into it:
 //
-//   guarded — the two named lanes above by id; bespoke routes never claiming the generic ladder;
-//             per-route drift, where entries sharing a resolved route disagree with each other; and
-//             the census being neither empty nor the whole catalog.
+//   guarded — bespoke routes never claiming the generic ladder; per-route drift, where entries
+//             sharing a resolved route disagree with each other; and the census being contained in
+//             the image entries.
+//   NOT guarded, as of sc-22512 — which entries are IN the census, and how many. The two named-lane
+//             requirements (flux2_dev, bernini_image) and the "neither empty nor the whole catalog"
+//             band were removed: all three reddened on the ABSENCE of a static-residency
+//             declaration, which an inference pin that stops advertising one, or a catalog whose
+//             image lane declares none, produces without anything being wrong with this document.
+//             Measurement improves the estimate; its absence is the conservative reading, not a
+//             defect. The two ids above are kept as PROSE because the provenance is still worth
+//             reading, not as assertions.
 //   NOT guarded — uniform drift on a route nothing else shares. 35 of the 41 resolved routes are
 //             singletons (only sdxl, flux2_klein_9b, qwen_image_edit, sensenova_u1_8b,
 //             sensenova_u1_8b_fast and z_image_turbo group more than one entry), so a singleton lane
@@ -590,7 +602,7 @@ export function assertTwinCoverage(
 }
 
 // The MLX staged-residency census, checked as structure instead of an exact population (see the note
-// on EXPECTED_IMAGE_COUNT above). Runs inside `validateMatrix`, so `cells` is still the full resolved
+// beside `MATRIX_MODALITIES` above). Runs inside `validateMatrix`, so `cells` is still the full resolved
 // cross-product and `coverage` is not populated yet; the census-versus-published cross-check belongs to
 // tests/test_memory_matrix.py, which reads the artifact after the publication slim.
 export function assertMlxStagedCoverageIsStructurallyConsistent(matrix) {
@@ -602,20 +614,18 @@ export function assertMlxStagedCoverageIsStructurallyConsistent(matrix) {
       )
       .map((cell) => cell.modelId),
   );
-  if (!staged.has("flux2_dev")) {
+  // sc-22512 removed the two named-entry census requirements (`flux2_dev` and `bernini_image` were
+  // each asserted INTO the census) and the `0 < size < models` partial-coverage band. All three
+  // reddened on the ABSENCE of a declaration: an inference pin that stops advertising selectable
+  // Sequential residency for one provider, or a catalog whose whole image lane declares none, is a
+  // lane nobody has measured — not a defect in this document. What survives is the containment
+  // relation, which holds at any coverage level including zero. The mirror of this removal lives in
+  // tests/test_memory_matrix.py.
+  const knownIds = new Set(matrix.models.map((model) => model.id));
+  const unknown = [...staged].filter((id) => !knownIds.has(id));
+  if (unknown.length) {
     throw new Error(
-      "flux2_dev lost its MLX staged coverage; at pin ebcdc7da7 all three Dev providers declare " +
-        "selectable Sequential staged residency (sc-20799 retired the SC-18218 resident-only pin)",
-    );
-  }
-  if (!staged.has("bernini_image")) {
-    throw new Error(
-      "bernini_image lost its MLX staged coverage; inference sc-18609 made its declared rung-4 ladder reachable",
-    );
-  }
-  if (staged.size === 0 || staged.size >= matrix.models.length) {
-    throw new Error(
-      `MLX staged coverage is partial by construction, found ${staged.size}/${matrix.models.length}`,
+      `MLX staged census names entries absent from the matrix universe: ${unknown.sort().join(",")}`,
     );
   }
   // The verdict is a property of the RESOLVED ROUTE, so entries sharing a route must agree. An entry
@@ -3340,7 +3350,10 @@ export function validatedInferenceClosures(body) {
     }
     digests.set(provider, entry.digest);
   }
-  if (!digests.size) throw new Error("config/inference-provider-closures.json declares no providers");
+  // sc-22512: an EMPTY ledger no longer throws. A repo that declares no provider closures is an
+  // unmeasured repo, not a broken one — every binding then reads as not-current, which is the
+  // conservative estimate. The two throws above stay: they red on data that IS present and is
+  // malformed (no 40-hex derivation revision; an entry with no usable 64-hex digest).
   return digests;
 }
 
@@ -3349,19 +3362,14 @@ export function validatedInferenceClosures(body) {
  * inference pin happens to match. `binding.inferenceRevision` stays as capture provenance.
  */
 function closureIsCurrent(binding, { backend, provider, inferenceClosureDigests }) {
+  // sc-22512: both absence cases return `false` instead of throwing. An undeclared lane means nobody
+  // derived what code the measurement describes, and a binding with no recorded closure digest means
+  // nobody derived it for that capture — in both cases "not current" is exactly the right answer, so
+  // the binding reads historical and the cell falls back to the conservative analytic estimate.
+  // Throwing turned missing bookkeeping into a red generation.
   const live = inferenceClosureDigests.get(`${backend}:${provider}`);
-  if (!live) {
-    throw new Error(
-      `provider "${provider}" has a bound calibration but no entry in ` +
-        "config/inference-provider-closures.json. Declare its inference crate and regenerate.",
-    );
-  }
-  if (!binding.inferenceClosureDigest) {
-    throw new Error(
-      `a ${provider} calibration binding carries no inferenceClosureDigest. Run ` +
-        "node scripts/backfill-closure-digests.mjs --repo <inference> --write",
-    );
-  }
+  if (!live) return false;
+  if (!binding.inferenceClosureDigest) return false;
   return binding.inferenceClosureDigest === live;
 }
 
@@ -3807,11 +3815,18 @@ function validateMatrix(
       `matrix carries entries of unadmitted modalities: ${unknownModality.map((model) => `${model.id}(${model.modality})`).join(",")}`,
     );
   }
-  if (ids.length !== EXPECTED_IMAGE_COUNT) {
-    throw new Error(`expected exactly ${EXPECTED_IMAGE_COUNT} image entries, found ${ids.length}`);
+  // sc-22512: the two pinned modality populations (53 image / 11 video) were deleted. They reddened
+  // on a catalog that GREW — an extra shipped model refused generation outright — which is the
+  // measurement-absence failure surface this story removes. What the pair was really claiming, that
+  // the modality split PARTITIONS the universe with no entry counted twice or lost, is restated here
+  // as a relation derived from the catalog itself; it holds at any population size, zero included.
+  if (ids.length + videoIds.length !== matrix.models.length) {
+    throw new Error(
+      `modality partition does not cover the universe: ${ids.length} image + ${videoIds.length} video != ${matrix.models.length} entries`,
+    );
   }
-  if (videoIds.length !== EXPECTED_VIDEO_COUNT) {
-    throw new Error(`expected exactly ${EXPECTED_VIDEO_COUNT} video entries, found ${videoIds.length}`);
+  if (new Set([...ids, ...videoIds]).size !== matrix.models.length) {
+    throw new Error("matrix carries duplicate model ids across the modality partition");
   }
   if (
     new Set(expectedIds).size !== ids.length ||
@@ -5392,9 +5407,11 @@ export async function buildMatrix({ sourceOverrides = {}, cellFilter = null, pub
       // beside it rather than folded in, because they are different populations with different
       // evidence and one number covering both could not say which lane moved.
       mlxStagedStaticCoverage: mlxStagedModels.size,
-      mlxStagedStaticCoverageDenominator: EXPECTED_IMAGE_COUNT,
+      // sc-22512: derived from the catalog's own enumeration rather than from a pinned population,
+      // so the denominator tracks whatever the catalog ships.
+      mlxStagedStaticCoverageDenominator: models.filter((model) => model.modality === "image").length,
       videoMlxStagedStaticCoverage: mlxStagedVideoModels.size,
-      videoMlxStagedStaticCoverageDenominator: EXPECTED_VIDEO_COUNT,
+      videoMlxStagedStaticCoverageDenominator: models.filter((model) => model.modality === "video").length,
       // sc-18815: entries in the universe that the routing catalog routes nowhere, and therefore
       // resolve to zero coordinates. Published so a reader can tell them from entries that are
       // simply not in the catalog — see `UNROUTED_CATALOG_ENTRIES`.

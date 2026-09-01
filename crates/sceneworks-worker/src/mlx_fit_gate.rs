@@ -1133,12 +1133,17 @@ pub(crate) const UNCALIBRATED_CLOSURE: &str = "uncalibrated";
 
 /// Resolves the LIVE compile-closure digest for one `(backend, provider)` lane (sc-17774).
 ///
-/// Production passes `None` and the packaged `config/inference-provider-closures.json` answers. The
-/// unit tests inject one so their synthetic lane resolves, because the gate must keep failing closed
-/// on a lane nobody declared — an undeclared lane means nobody derived what code its measurements
-/// were taken against, and admitting it would be exactly the false green this epic removes.
-/// Declaring the fixture in the shipped config instead would put a permanent fiction in the one
-/// artifact that has to stay trustworthy.
+/// Production passes `None` and the packaged `config/inference-provider-closures.json` answers.
+///
+/// An undeclared lane is NOT a refusal (sc-22512, E8). It yields no currency term, so it resolves to
+/// [`UNCALIBRATED_CLOSURE`] and no measured candidate on that lane can ever be CERTIFIED; admission
+/// falls through to the conservative analytic estimate, which is exactly what
+/// `unmeasured_provider_under_a_small_budget_selects_a_deep_estimate_rung` and
+/// `uncalibrated_chroma_routes_authorize_exact_quality_backed_estimates` prove. The unit tests
+/// inject a lookup so their synthetic lane resolves to a KNOWN digest, which is what lets them
+/// exercise the currency comparison itself rather than the fall-through. Declaring the fixture in
+/// the shipped config instead would put a permanent fiction in the one artifact that has to stay
+/// trustworthy.
 type ClosureDigestLookup<'a> = &'a dyn Fn(&str, &str) -> Option<String>;
 
 #[derive(Clone, Debug)]
@@ -6140,33 +6145,49 @@ mod tests {
     /// q8 and the SC-18353 bf16/q4 ladder coordinates were captured under that exact
     /// materialization contract, while the old eager BF16/Q4 records remain historical corpus
     /// entries only.
-    /// This is deliberately mutation-sensitive: adding any eager binding, or reintroducing an
-    /// uncaptured tier, makes the production-shape assertion red.
+    /// This is deliberately mutation-sensitive: adding any eager binding makes the production-shape
+    /// assertion red. It is NOT sensitive to a binding being absent (sc-22512, E8) — a coordinate
+    /// nobody measured simply contributes nothing here and is priced analytically at admission.
     #[test]
     fn shipped_qwen_bindings_are_producible_by_the_production_deferred_route() {
         let raw = include_str!("../../../config/manifests/builtin.models.jsonc");
         let manifest: Value =
             serde_json::from_str(&sceneworks_core::jsonc::strip_jsonc_comments(raw))
                 .expect("builtin model manifest parses");
-        let qwen = manifest["models"]
+        let Some(qwen) = manifest["models"]
             .as_array()
             .and_then(|models| models.iter().find(|model| model["id"] == "qwen_image"))
             .and_then(Value::as_object)
-            .expect("shipped qwen_image manifest entry");
-        let bindings = MlxCalibrationBinding::from_manifest(qwen)
+        else {
+            return;
+        };
+        // A model that declares NO MLX calibration opt-in has no shipped bindings to shape-check.
+        let Some(bindings) = MlxCalibrationBinding::from_manifest(qwen)
             .expect("Qwen calibration bindings are valid")
-            .expect("Qwen declares exact MLX calibration bindings");
+        else {
+            return;
+        };
 
+        // sc-22512: no pinned binding COUNT and no lane-declaration gate. Both reddened purely
+        // because something was absent. What is asserted instead is the shape of whatever the
+        // manifest declares — a claim that holds at any binding count, zero included.
+        let mut coordinates = bindings
+            .iter()
+            .map(|binding| {
+                format!(
+                    "{}|{:?}|{}|{}|{:?}",
+                    binding.tier, binding.rung, binding.mode, binding.overlay, binding.geometry
+                )
+            })
+            .collect::<Vec<_>>();
+        coordinates.sort();
+        let declared_count = coordinates.len();
+        coordinates.dedup();
         assert_eq!(
-            bindings.len(),
-            9,
-            "the exact deferred q8, q4, and bf16 bindings"
-        );
-        assert!(
-            !live_mlx_closure_digest("qwen_image").is_empty(),
-            "qwen_image must be declared in config/inference-provider-closures.json; an undeclared \
-             lane resolves to the fail-closed empty expectation, which would make every currency \
-             comparison in this module discriminating for the wrong reason"
+            coordinates.len(),
+            declared_count,
+            "the shipped opt-in must not declare the same (tier, rung, mode, overlay, geometry) \
+             coordinate twice"
         );
         let declared = shipped_mlx_declared_closure_digest("qwen_image");
         assert!(bindings.iter().all(|binding| {
@@ -6182,39 +6203,37 @@ mod tests {
                         batch: 1,
                         frames: 1,
                     }
-                && binding.query.inference_closure_digest == declared
+                // A model with no declared closure has no currency term to be measured against
+                // (sc-22512): skip the comparison rather than red on its absence.
+                && declared
+                    .as_deref()
+                    .is_none_or(|digest| binding.query.inference_closure_digest == digest)
         }));
         assert!(bindings
             .iter()
             .all(|binding| { binding.query.load_shape == LoadShapeKey::DeferredMaterialization }));
 
-        let rungs_for = |tier: &str| {
+        // No tier names the same rung twice. Holds for any subset of the ladder, including none —
+        // which is the point: an absent rung is an unmeasured coordinate, never a failure.
+        for tier in bindings
+            .iter()
+            .map(|binding| binding.tier.as_str())
+            .collect::<std::collections::BTreeSet<_>>()
+        {
             let mut rungs = bindings
                 .iter()
                 .filter(|binding| binding.tier == tier)
                 .map(|binding| format!("{:?}", binding.rung))
                 .collect::<Vec<_>>();
             rungs.sort();
-            rungs
-        };
-        assert_eq!(
-            rungs_for("q8"),
-            ["BoundedAttention", "BoundedTransformerResidency"]
-        );
-        assert_eq!(
-            rungs_for("q4"),
-            ["BoundedAttention", "BoundedTransformerResidency"]
-        );
-        assert_eq!(
-            rungs_for("bf16"),
-            [
-                "BoundedAttention",
-                "BoundedDecode",
-                "BoundedTransformerResidency",
-                "Resident",
-                "StagedResidency",
-            ]
-        );
+            let declared_rungs = rungs.len();
+            rungs.dedup();
+            assert_eq!(
+                rungs.len(),
+                declared_rungs,
+                "{tier} declares the same rung twice"
+            );
+        }
     }
 
     /// sc-18408: the audited-model set is DERIVED from the manifest — every model declaring
@@ -6301,17 +6320,43 @@ mod tests {
             }
         }
 
-        // A FLOOR, not a ceiling: new `mlx.calibrations` declarations are audited automatically
-        // by the loop above. This guards the derivation itself — if the manifest loader ever
-        // broke and reported "no bindings" for everything, the loop would audit nothing and pass
-        // vacuously.
-        for known in ["qwen_image", "z_image_turbo", "krea_2_turbo", "flux2_dev"] {
-            assert!(
-                audited.iter().any(|id| id == known),
-                "{known} ships mlx.calibrations but the derived audit missed it — the manifest \
-                 loader stopped seeing its bindings"
-            );
-        }
+        // The anti-vacuity guard, derived instead of pinned (sc-22512).
+        //
+        // This used to name four models — `qwen_image`, `z_image_turbo`, `krea_2_turbo`,
+        // `flux2_dev` — and require each to appear in `audited`. That reddened whenever one of them
+        // stopped DECLARING an opt-in, which is a measurement/declaration absence and not a defect:
+        // retiring a calibration, or shipping a catalog that has not been captured yet, broke the
+        // build over bookkeeping.
+        //
+        // The real question — "did the manifest loader stop seeing bindings?" — is answered without
+        // any roster by comparing the audit against the manifest's OWN declaration set. Every entry
+        // that declares `mlx.calibrations` must have been audited, and nothing else may have been.
+        // That still fails loudly on a loader that reports "no bindings" for everything (the
+        // declarations are visible here but the audit is empty), and it holds at any number of
+        // declaring models, zero included.
+        let declaring = manifest["models"]
+            .as_array()
+            .expect("models array")
+            .iter()
+            .filter(|model| {
+                model
+                    .get("mlx")
+                    .and_then(|mlx| mlx.get("calibrations"))
+                    .and_then(Value::as_array)
+                    .is_some_and(|calibrations| !calibrations.is_empty())
+            })
+            .filter_map(|model| model.get("id").and_then(Value::as_str))
+            .map(str::to_owned)
+            .collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(
+            audited
+                .iter()
+                .cloned()
+                .collect::<std::collections::BTreeSet<_>>(),
+            declaring,
+            "the audited set must be exactly the entries declaring mlx.calibrations; a mismatch \
+             means the manifest loader and this audit disagree about what is declared"
+        );
     }
 
     #[test]
@@ -6699,12 +6744,22 @@ mod tests {
             .find(|model| model.get("id").and_then(Value::as_str) == Some("qwen_image"))
             .and_then(Value::as_object)
             .expect("qwen_image manifest entry");
-        let calibrations = entry
+        // sc-22512: an absent opt-in is not a failure — there is simply nothing to compare. The
+        // `.expect("qwen_image declares mlx.calibrations")` that stood here made the absence of a
+        // declaration panic before the graceful skip below could ever be reached.
+        let Some(calibrations) = entry
             .get("mlx")
             .and_then(|mlx| mlx.get("calibrations"))
             .and_then(Value::as_array)
-            .expect("qwen_image declares mlx.calibrations");
-        let declared = shipped_mlx_declared_closure_digest("qwen_image");
+        else {
+            return;
+        };
+        // sc-22512: with no declared opt-in there is nothing to compare currency against, so this
+        // test has no question to ask. Skipping is the E8 posture; failing would be a
+        // measurement-absence gate.
+        let Some(declared) = shipped_mlx_declared_closure_digest("qwen_image") else {
+            return;
+        };
         let live = live_mlx_closure_digest("qwen_image");
 
         let tier = "q8";
@@ -6934,7 +6989,10 @@ mod tests {
             2,
             "the shipped krea opt-in is the 768² and 896² pose-control pair"
         );
-        let declared = shipped_mlx_declared_closure_digest("krea_2_turbo");
+        // sc-22512: an absent opt-in leaves nothing to grade currency against — skip, never fail.
+        let Some(declared) = shipped_mlx_declared_closure_digest("krea_2_turbo") else {
+            return;
+        };
         let live = live_mlx_closure_digest("krea_2_turbo_control");
 
         for binding in calibrations {
@@ -7866,9 +7924,12 @@ mod tests {
     /// The closure digest the synthetic `fixture_provider` lane is measured under.
     ///
     /// `fixture_provider` is not a real inference crate, so it is deliberately NOT in
-    /// `config/inference-provider-closures.json` — the gate must keep refusing undeclared lanes.
-    /// These tests inject [`fixture_closure_lookup`] instead, which answers for the fixture lane and
-    /// defers to the packaged table for every real one.
+    /// `config/inference-provider-closures.json`. An undeclared lane is not refused (sc-22512, E8):
+    /// it simply carries no currency term, so no measured candidate on it is CERTIFIED and
+    /// admission falls through to the conservative estimate. These tests inject
+    /// [`fixture_closure_lookup`] instead — which answers for the fixture lane and defers to the
+    /// packaged table for every real one — so they exercise the currency comparison itself rather
+    /// than that fall-through.
     const FIXTURE_CLOSURE_DIGEST: &str =
         "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd";
 
@@ -7907,7 +7968,12 @@ mod tests {
     ///
     /// Uniformity across the model's bindings is asserted rather than assumed: a split opt-in would
     /// let one stale row hide behind a current one and make every comparison below ambiguous.
-    fn shipped_mlx_declared_closure_digest(model_id: &str) -> String {
+    ///
+    /// sc-22512 (E8): `None` when the model declares no `mlx.calibrations` opt-in at all, or when a
+    /// declared binding names no closure. Absence of an opt-in is a model nobody measured, which is
+    /// legal — callers SKIP the currency comparison rather than failing. A PRESENT but split or
+    /// malformed opt-in still fails: that is contradictory data, not missing data.
+    fn shipped_mlx_declared_closure_digest(model_id: &str) -> Option<String> {
         let raw = include_str!("../../../config/manifests/builtin.models.jsonc");
         let manifest: Value =
             serde_json::from_str(&sceneworks_core::jsonc::strip_jsonc_comments(raw))
@@ -7915,18 +7981,17 @@ mod tests {
         let mut declared = manifest["models"]
             .as_array()
             .and_then(|models| models.iter().find(|model| model["id"] == model_id))
-            .and_then(|model| model["mlx"]["calibrations"].as_array())
-            .unwrap_or_else(|| panic!("{model_id} declares mlx.calibrations"))
+            .and_then(|model| model["mlx"]["calibrations"].as_array())?
             .iter()
             .map(|binding| {
                 binding["inferenceClosureDigest"]
                     .as_str()
-                    .unwrap_or_else(|| {
-                        panic!("{model_id} calibration binding declares inferenceClosureDigest")
-                    })
-                    .to_owned()
+                    .map(str::to_owned)
             })
-            .collect::<Vec<_>>();
+            .collect::<Vec<Option<String>>>();
+        if declared.is_empty() {
+            return None;
+        }
         declared.sort();
         declared.dedup();
         assert_eq!(
@@ -7949,7 +8014,11 @@ mod tests {
     /// was ever measured under.
     fn packaged_krea_closure_lookup(backend: &str, provider: &str) -> Option<String> {
         if backend == "mlx" && provider == "krea_2_turbo_control" {
-            return Some(shipped_mlx_declared_closure_digest("krea_2_turbo"));
+            // sc-22512: an absent opt-in falls through to the ordinary lookup rather than
+            // panicking — a lane nobody declared simply carries no currency term.
+            if let Some(declared) = shipped_mlx_declared_closure_digest("krea_2_turbo") {
+                return Some(declared);
+            }
         }
         fixture_closure_lookup(backend, provider)
     }
@@ -8065,19 +8134,35 @@ mod tests {
         // move — and this fixture exists to exercise refusal NAMING, which needs two exact cells to
         // choose between. `packaged_krea_closure_lookup` feeds the same digest to the gate, and the
         // test asserts the live-closure refusal separately so the demotion is not merely bypassed.
-        let captured = shipped_mlx_declared_closure_digest("krea_2_turbo");
-        let records = bundle
-            .records
-            .iter()
-            .filter(|record| {
+        // sc-22512: the opt-in is the PREFERRED source of the closure to select on, not a required
+        // one. With no declared opt-in the fixture falls back to the closure of the LAST matching
+        // record in the bundle — still exactly one coherent capture, never a mix of two — so an
+        // absent declaration degrades the fixture's provenance rather than reddening the build.
+        let matches_krea_control_cell =
+            |record: &sceneworks_core::memory_calibration::EvidenceRecord| {
                 matches!(record.backend, CalibrationBackend::Mlx)
                     && record.target.model_id == "krea_2_turbo"
                     && record.target.provider == "krea_2_turbo_control"
                     && record.target.tier == "q4"
                     && record.target.mode == "text_to_image"
                     && record.target.overlay == "control:1"
-                    && record.repositories.inference.closure_digest.as_deref()
-                        == Some(captured.as_str())
+            };
+        let captured = shipped_mlx_declared_closure_digest("krea_2_turbo").or_else(|| {
+            bundle
+                .records
+                .iter()
+                .rev()
+                .find(|record| matches_krea_control_cell(record))
+                .and_then(|record| record.repositories.inference.closure_digest.clone())
+        });
+        let records = bundle
+            .records
+            .iter()
+            .filter(|record| {
+                matches_krea_control_cell(record)
+                    && captured.as_deref().is_none_or(|captured| {
+                        record.repositories.inference.closure_digest.as_deref() == Some(captured)
+                    })
             })
             .collect::<Vec<_>>();
         assert_eq!(
@@ -8180,15 +8265,28 @@ mod tests {
         // The previous literal `krea-control-mlx-v4-q4-pose-bounded-decode-512-64` outlived the
         // provider's move to the full-ladder identity, and a stale copy here fails the handshake
         // and reports the cell as `Missing` — which is how it presented before this was fixed.
-        let captured = shipped_mlx_declared_closure_digest("krea_2_turbo");
+        // sc-22512: the opt-in is preferred, not required — with none declared the fixture falls
+        // back to the last matching record's own closure rather than panicking.
+        let captured = shipped_mlx_declared_closure_digest("krea_2_turbo").or_else(|| {
+            packaged_bundle()
+                .records
+                .iter()
+                .rev()
+                .find(|record| {
+                    matches!(record.backend, CalibrationBackend::Mlx)
+                        && record.target.provider == "krea_2_turbo_control"
+                })
+                .and_then(|record| record.repositories.inference.closure_digest.clone())
+        });
         let record = packaged_bundle()
             .records
             .into_iter()
             .find(|record| {
                 matches!(record.backend, CalibrationBackend::Mlx)
                     && record.target.provider == "krea_2_turbo_control"
-                    && record.repositories.inference.closure_digest.as_deref()
-                        == Some(captured.as_str())
+                    && captured.as_deref().is_none_or(|captured| {
+                        record.repositories.inference.closure_digest.as_deref() == Some(captured)
+                    })
             })
             .expect("the packaged bundle carries a Krea control record at the declared closure");
         contract.calibration = Some(MemoryCalibrationIdentity::new(
@@ -8838,8 +8936,14 @@ mod tests {
             Some(&packaged_bundle()),
             Some(&fixture_closure_lookup),
         );
-        if shipped_mlx_declared_closure_digest("krea_2_turbo")
-            == live_mlx_closure_digest("krea_2_turbo_control")
+        // sc-22512: `None` (no shipped opt-in) is neither fork — there is no declared closure to
+        // grade the live one against, so this leg has nothing to assert and is skipped.
+        let declared_krea_closure = shipped_mlx_declared_closure_digest("krea_2_turbo");
+        if declared_krea_closure.is_none() {
+            return;
+        }
+        if declared_krea_closure.as_deref()
+            == Some(live_mlx_closure_digest("krea_2_turbo_control").as_str())
         {
             let admitted =
                 live.expect("at a current closure the fitted estimate admits the 60 GiB request");
@@ -12745,9 +12849,9 @@ mod tests {
                 disposition,
             });
         }
-        if classifications.is_empty() {
-            return Err("shipped manifest exposes no classified MLX image routes".to_owned());
-        }
+        // sc-22512 (E8): an empty classification set is a legal answer, not an error. Nothing to
+        // audit means nothing to audit; every check above still fires on a route that IS present
+        // and misclassified.
         Ok(classifications)
     }
 

@@ -1351,22 +1351,17 @@ export function evidenceSemantics(record, revisions) {
   // measurements against the other backend's code.
   const provider = `${record.backend}:${record.target.provider}`;
   const live = revisions.inferenceClosureDigests?.[provider];
-  // Fail closed and LOUDLY. Falling back to pin equality when a digest is missing would silently
-  // restore the policy this replaces, and the fallback would be invisible in a green run.
-  if (!captured) {
-    fail(
-      `${record.id}: no repositories.inference.closureDigest. Every complete record must carry the ` +
-        "provider closure digest it was captured under (sc-17774); re-run the backfill in " +
-        "scripts/backfill-closure-digests.mjs against an inference clone.",
-    );
-  }
-  if (!live) {
-    fail(
-      `${record.id}: provider "${provider}" has no entry in config/inference-provider-closures.json. ` +
-        "Declare its inference crate and regenerate: node scripts/inference-closure-digest.mjs " +
-        "--repo <inference> --write.",
-    );
-  }
+  // sc-22512: fail SAFE, not closed. Both of these used to `fail()` — a record carrying no captured
+  // digest, and a lane carrying no declaration — so the ABSENCE of currency bookkeeping reddened
+  // every consumer of this function, including `npm run check`. Under E8 absence never blocks: it
+  // only withholds an improvement.
+  //
+  // `historical` is that answer, and it is strictly conservative. It is NOT the pin-equality
+  // fallback this replaced (which would have let an unrelated commit decide currency, and could
+  // read `current`): a record with no currency term to compare simply cannot certify a cell, so the
+  // consumer falls back to the analytic estimate. The remedy is still to capture or declare — that
+  // is now an improvement to make rather than a gate to clear.
+  if (!captured || !live) return "historical";
   validateCurrentPhysicalMlxProvenance(record, revisions.inferenceClosureDigests);
   return captured === live ? "current" : "historical";
 }
@@ -2084,12 +2079,15 @@ export async function runProviderPlan({
         await readFile(path.join(sceneWorksRepo, "config/inference-provider-closures.json"), "utf8"),
       );
       const crateDir = declarations.providers?.[lane]?.crate;
-      if (!crateDir) {
-        fail(
-          `lane "${lane}" has no entry in config/inference-provider-closures.json. Declare its ` +
-            "inference crate before capturing evidence, or the record cannot carry a currency term.",
-        );
-      }
+      // sc-22512: an undeclared lane no longer REFUSES the capture. It used to `fail()` here, before
+      // the first provider invocation, so a lane nobody had declared could not be measured at all —
+      // absence of bookkeeping blocking the very measurement that would relieve it.
+      //
+      // Returning no digest is the conservative answer and matches what a fixture-scope capture
+      // already does: the record carries no currency term, so it can never read `current` and can
+      // never certify a cell. The measurement is still taken and still improves nothing it has not
+      // earned. Declaring the lane later promotes it.
+      if (!crateDir) return undefined;
       return providerClosureDigest({
         repo: inferenceRepo,
         revision,

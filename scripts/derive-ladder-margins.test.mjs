@@ -90,25 +90,19 @@ test("rust ladder_margin_policy constants match the derivation output", async ()
   assert.equal(Object.keys(constants).length, 6);
 });
 
-// Guards the honesty claims baked into the constants' doc comments. If evidence growth changes
-// any of these (candle gains repeat pairs, intra-record repeat measurements appear), the doc
-// comments and possibly the rule must be revisited rather than silently drifting.
-test("derivation corpus facts backing the doc comments still hold", async () => {
+// The one corpus-derived claim that is a SAFETY property rather than a census: the MLX hard floor
+// must not exceed the envelope headroom the shipped predictor actually demonstrates.
+//
+// sc-22512 / E8: the corpus-population and frozen-number pins that used to live here — mlx repeat
+// pairs exist, candle has exactly zero, floorBinds is false, intra-record repeats are zero, every
+// mlx record has a predicted overall peak, and the gap spans exactly 4.76%..5.58% — were removed.
+// Each of them reds when the corpus changes SIZE or CONTENT: a re-capture, a retirement, or a new
+// lane's first measurement, none of which is a defect. The derivation's behaviour under those
+// conditions is graded by the synthetic-fixture tests at the bottom of this file, which construct
+// their own inputs and so cannot be falsified by the corpus moving.
+test("the mlx hard floor never exceeds the demonstrated envelope headroom", async () => {
   const derived = deriveMargins(await loadEvidenceRecords(ROOT));
-
-  assert.ok(derived.mlx.analysis.repeatPairs > 0, "mlx repeat pairs exist");
-  assert.equal(derived.mlx.margins.floorBinds, false, "mlx variance now exceeds the hard floor");
-  assert.equal(derived.candle.analysis.repeatPairs, 0, "candle has zero repeat pairs (floor is the whole margin)");
-  assert.equal(derived.mlx.analysis.intraRecordRepeatMeasurements, 0);
-  assert.equal(derived.candle.analysis.intraRecordRepeatMeasurements, 0);
-
-  // The 5% MLX floor's citable anchor (MLX_HARD_FLOOR rationale 2): the shipped predictor's
-  // envelope gap really does span 4.76%..5.58% across all mlx records, and the floor never
-  // exceeds the demonstrated headroom. Computed by the script, pinned here — not prose.
   const gap = derived.mlx.analysis.envelopeGap;
-  assert.equal(gap.count, derived.mlx.analysis.recordCount, "every mlx record has a predicted overall peak");
-  assert.equal((gap.min * 100).toFixed(2), "4.76", "envelope gap lower bound matches the doc comments");
-  assert.equal((gap.max * 100).toFixed(2), "5.58", "envelope gap upper bound matches the doc comments");
   assert.ok(MLX_HARD_FLOOR <= gap.max, "mlx floor does not exceed the demonstrated envelope headroom");
 });
 
@@ -171,11 +165,14 @@ test("the estimate-admission binding-phase constraint is pinned on both sides an
   // Load-bearing on the committed corpus: widening the demonstrated per-phase re-capture spread
   // by the derivation's safety and estimate factors exceeds the shipped MLX estimate margin, so
   // the constraint is still required for phase extrapolation.
+  // sc-22512 / E8: the exact spread (17.1369%) and its fully widened value (68.55%) are no longer
+  // pinned — those are frozen-corpus numbers that red on any re-capture. The RELATION they were
+  // cited to support is what matters and is kept.
   const derived = deriveMargins(await loadEvidenceRecords(ROOT));
+  // `?? 0` so an mlx corpus with no can-bind phase spread at all falls back to the floor rather
+  // than throwing: the relation below still holds, and absence must not be a failure.
   const canBind = derived.mlx.analysis.maxCanBindPhaseSpread;
-  assert.equal((canBind.spread * 100).toFixed(4), "17.1369", "spread matches the number cited in both doc comments");
-  const fullyWidenedCanBind = Math.max(MLX_HARD_FLOOR, canBind.spread * 2) * 2;
-  assert.equal((fullyWidenedCanBind * 100).toFixed(2), "68.55", "fully widened spread matches the docs");
+  const fullyWidenedCanBind = Math.max(MLX_HARD_FLOOR, (canBind?.spread ?? 0) * 2) * 2;
   assert.ok(fullyWidenedCanBind > derived.mlx.margins.estimateMargin, "constraint is load-bearing");
 });
 

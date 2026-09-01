@@ -1089,39 +1089,56 @@ mod tests {
     // sc-22510: the store is catalog-wide, and every row is one of exactly two kinds.
     // -------------------------------------------------------------------------------------
 
-    /// The migration's shape, asserted without pinning a population: the store carries anchors on
-    /// both modalities' evidence (a video pipeline cell and an image cell with no pipeline axes),
-    /// and analytic-only rows for cells the corpus cannot anchor.
+    /// The store's shape, asserted without pinning any population.
+    ///
+    /// sc-22512: this deliberately does NOT require the store to declare any analytic-only row. A
+    /// cell nobody measured and nobody classified is priced from the conservative analytic estimate
+    /// at admission time; its absence from this file is never a build failure. What IS asserted is
+    /// the shape of the rows that ARE present, which holds at any store size including zero.
     #[test]
-    fn the_store_spans_more_than_the_ltx_video_corpus() {
-        assert!(
-            store()
-                .anchors
-                .iter()
-                .any(|anchor| anchor.transformer_variant.is_some()),
-            "the store must keep at least one pipeline-keyed (video) anchor"
-        );
-        assert!(
-            store()
-                .anchors
-                .iter()
-                .any(|anchor| { anchor.transformer_variant.is_none() && anchor.decoder.is_none() }),
-            "the store must carry anchors extracted from corpora that state no pipeline axes"
-        );
-        assert!(
-            store()
-                .anchors
-                .iter()
-                .map(|anchor| anchor.model_id.as_str())
-                .collect::<std::collections::BTreeSet<_>>()
-                .len()
-                > 1,
-            "the migration covers more than one model"
-        );
-        assert!(
-            !store().analytic_only.is_empty(),
-            "cells the corpus cannot anchor must be declared analytic-only, never omitted"
-        );
+    fn every_store_row_is_well_formed_whatever_the_store_holds() {
+        // sc-22512 removed the three population floors that stood here: "the store must keep at
+        // least one pipeline-keyed (video) anchor", "must carry anchors extracted from corpora that
+        // state no pipeline axes", and "the migration covers more than one model". Each reddened for
+        // exactly one reason — a MEASUREMENT not being in the store — so retiring a corpus, or
+        // shipping a catalog nobody has captured yet, broke the build over bookkeeping. Under E8 an
+        // unanchored cell is priced from the conservative analytic estimate at admission time; its
+        // absence here is never a failure.
+        //
+        // Every claim below is universally quantified, so it keeps full force over whatever rows the
+        // store holds and degrades to vacuous rather than to red when it holds none.
+        for anchor in &store().anchors {
+            assert!(
+                !anchor.model_id.trim().is_empty() && !anchor.tier.trim().is_empty(),
+                "an anchor must name the cell it prices"
+            );
+            // A pipeline-keyed anchor states BOTH axes or NEITHER. Half a key would answer a
+            // variant-keyed lookup it was never measured under.
+            assert_eq!(
+                anchor.transformer_variant.is_some(),
+                anchor.decoder.is_some(),
+                "{}: an anchor's pipeline axes are stated together or not at all",
+                anchor.id
+            );
+        }
+        // Shape, not population: every analytic-only row that IS present states a reason and does
+        // not collide with an anchored cell. Zero such rows is a legal store.
+        for entry in &store().analytic_only {
+            assert!(
+                !entry.reason.trim().is_empty(),
+                "{}: an analytic-only classification must state its reason",
+                entry.id
+            );
+            assert!(
+                !store().anchors.iter().any(|anchor| {
+                    anchor.model_id == entry.model_id
+                        && anchor.backend == entry.backend
+                        && anchor.tier == entry.tier
+                }),
+                "{}: a cell is classified exactly once — it is anchored and analytic-only",
+                entry.id
+            );
+        }
     }
 
     /// An anchor whose source record stated NO pipeline axes must not answer a variant-keyed
@@ -1183,6 +1200,15 @@ mod tests {
 
     #[test]
     fn a_duplicate_or_unexplained_analytic_entry_is_rejected() {
+        // sc-22512: this adversarial harness doctors a REAL row, so it can only ask its question
+        // when the corpus supplies one. It used to index `analyticOnly[0]` unconditionally and
+        // panicked on an empty list — a store with nothing classified reddened the suite, which is
+        // the measurement-absence failure this story removes. Skipping is the E8 posture: absence
+        // withholds the question, it never answers it with a failure. The loader rules themselves
+        // are unchanged and keep full force on every row the store does carry.
+        if store().analytic_only.is_empty() {
+            return;
+        }
         let mut doctored: serde_json::Value =
             serde_json::from_str(PACKAGED_MEMORY_ANCHORS).expect("packaged store parses");
         let clone = doctored["analyticOnly"][0].clone();
@@ -1206,16 +1232,23 @@ mod tests {
     /// must name the revision it was read at.
     #[test]
     fn an_analytic_basis_that_disagrees_with_its_evidence_is_rejected() {
-        let evidenced = store()
-            .analytic_only
-            .iter()
-            .position(|entry| entry.evidence.is_some())
-            .expect("an evidenced analytic-only entry exists");
-        let unevidenced = store()
-            .analytic_only
-            .iter()
-            .position(|entry| entry.evidence.is_none())
-            .expect("an unevidenced analytic-only entry exists");
+        // sc-22512: same posture as the harness above. Each leg doctors a row of a specific KIND,
+        // so it runs exactly when the corpus carries that kind and is skipped when it does not.
+        // The `.expect("an evidenced analytic-only entry exists")` pair that stood here made a
+        // corpus with nothing classified — or with only unevidenced classifications — red the
+        // suite, which is failure-on-absence rather than on anything malformed.
+        let (Some(evidenced), Some(unevidenced)) = (
+            store()
+                .analytic_only
+                .iter()
+                .position(|entry| entry.evidence.is_some()),
+            store()
+                .analytic_only
+                .iter()
+                .position(|entry| entry.evidence.is_none()),
+        ) else {
+            return;
+        };
 
         let mut doctored: serde_json::Value =
             serde_json::from_str(PACKAGED_MEMORY_ANCHORS).expect("packaged store parses");

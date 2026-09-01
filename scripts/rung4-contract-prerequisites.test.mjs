@@ -496,8 +496,6 @@ test("the records retain source provenance and cite where each edge came from", 
     "the edges must remain dated to the full inference revision they were derived from",
   );
 
-  let withEdge = 0;
-  let withoutEdge = 0;
   for (const [group, family] of Object.entries(parsed.families)) {
     for (const [backend, record] of Object.entries(family.backends)) {
       const at = `${group}:${backend}`;
@@ -525,14 +523,13 @@ test("the records retain source provenance and cite where each edge came from", 
           `${at}: an edge must cite a file inside the crate the record names, got ${edge.source}`,
         );
       }
-      if (record.additionalPrerequisites.length) withEdge += 1;
-      else withoutEdge += 1;
     }
   }
-  // Both partitions occupied. This is the fact that makes the gate different from the blanket proxy
-  // it replaced: if every provider appended the edge, consulting the record would be a longer way of
-  // writing the proxy, and if none did, the rung-1 predicate would reach no rung-4 cell at all.
-  assert.ok(withEdge > 0 && withoutEdge > 0, "the records must discriminate between providers");
+  // sc-22512 / E8: the "both partitions occupied" pin (`withEdge > 0 && withoutEdge > 0`) was
+  // removed. It reds purely on a population emptying — the day every provider declares the edge, or
+  // none does, which an inference pin can produce without a single record being wrong. The per-record
+  // grading above is untouched and still reds on every malformed or mis-provenanced edge that IS
+  // present.
 });
 
 test("the records file states the granularity its (family, backend) key cannot express", async () => {
@@ -545,17 +542,7 @@ test("the records file states the granularity its (family, backend) key cannot e
   // Named cases, not an adjective: both live examples have to be identifiable from the note.
   assert.match(parsed.granularity, /flux2|FLUX\.2/i);
   assert.match(parsed.granularity, /krea/i);
-  // And the two families that really do share a crate are still sharing it, so the note is about
-  // this record set rather than about a hypothetical one.
-  const crates = new Map();
-  for (const family of Object.values(parsed.families)) {
-    for (const [backend, record] of Object.entries(family.backends)) {
-      const key = `${record.crate}:${backend}`;
-      crates.set(key, (crates.get(key) ?? 0) + 1);
-    }
-  }
-  assert.ok(
-    [...crates.values()].some((count) => count > 1),
-    "no crate backs two families, so the note describes a limit this record set does not have",
-  );
+  // sc-22512 / E8: the "some crate must back two families" assertion was removed. It reds on a
+  // population emptying — a re-slice that gives each family its own crate leaves the note accurate
+  // and the record set healthy, yet failed the check. The note's CONTENT is still graded above.
 });

@@ -1789,62 +1789,57 @@ fn qwen_edit_candle_blocks_drive_the_fit_gate_and_reject() {
     );
 }
 
-/// sc-16093: every built-in model that a bespoke single-base Candle route can load either carries a
-/// live per-tier peak row or is pinned here as an explicit unmeasured exception. This is the data half
-/// of the source guard in `image_jobs/tests.rs`: deleting a handler call fails there; deleting a row
-/// that makes an evidenced call effective fails here. Adding evidence to an exception also fails so
-/// its call site cannot quietly keep bypassing newly available evidence.
+/// sc-16093, rewritten for sc-22512 (epic 22505, E8): the per-tier Candle VRAM rows that ARE
+/// declared are well-formed, and the Z-Image Edit route still reaches the generic provider path so
+/// the shared memory selector stays live.
+///
+/// What this deliberately no longer does: require any model to carry a `vramGbByTier` row at all,
+/// and maintain the `EXPLICITLY_UNMEASURED` allowlist that paired every unmeasured model with a
+/// prose reason at its call site. Both reddened purely because a MEASUREMENT was absent, and an
+/// absent measurement is never a failure — the route simply prices that request from the
+/// conservative analytic estimate, and runtime catching (E6) is the failure posture. A model with
+/// no measured VRAM row contributes nothing here.
+///
+/// What survives fires on data that IS present: a declared per-tier peak that is not a positive
+/// number is malformed, and an entry whose resolved default tier is not one it advertises is
+/// self-contradictory — it would price a request from a tier the catalog never states.
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 #[test]
-fn bespoke_candle_base_evidence_is_live_or_explicitly_unmeasured() {
-    // SC-20793 gave the four SDXL-family Candle bases their own per-tier rows and moved
-    // `sdxl_edit_candle.rs` off `admit_candle_base(.., CandleBaseEvidence::Ungateable(..))` onto
-    // `admit_sdxl_bespoke_memory`, which prices those rows. Both halves of the old exception are
-    // therefore gone: the catalog rows exist, and the recorded reason no longer appears at any
-    // live call site. They belong in `EVIDENCED`, which is what keeps the rows load-bearing.
-    const EVIDENCED: &[&str] = &[
-        "flux2_klein_9b",
-        "flux2_dev",
-        "z_image_turbo",
-        "krea_2_raw",
-        "krea_2_turbo",
-        "sdxl",
-        "realvisxl",
-        "illustrious_xl_v1",
-        "illustrious_xl_v2",
-    ];
-    const EXPLICITLY_UNMEASURED: &[(&str, &str, &str)] = &[
-        (
-            "flux2_klein_9b_true_v2",
-            "the local True V2 converted fine-tune has no CUDA calibration row",
-            include_str!("../image_jobs/flux2_edit_candle.rs"),
-        ),
-        (
-            "bernini_image",
-            "Bernini still-image tiers have not been CUDA-calibrated",
-            include_str!("../image_jobs/bernini.rs"),
-        ),
-    ];
-
-    let assert_resident_rows = |id: &str| {
-        let model = builtin_model_entry(id);
-        let tiers = model
+fn declared_candle_vram_rows_are_well_formed() {
+    for model in builtin_models_manifest() {
+        let id = model
+            .get("id")
+            .and_then(Value::as_str)
+            .unwrap_or("<no id>")
+            .to_owned();
+        let Some(tiers) = model
             .get("candle")
             .and_then(|candle| candle.get("vramGbByTier"))
             .and_then(Value::as_object)
-            .unwrap_or_else(|| panic!("{id}: bespoke Candle base route requires vramGbByTier"));
-        assert!(!tiers.is_empty(), "{id}: vramGbByTier must not be empty");
+        else {
+            continue;
+        };
+        if tiers.is_empty() {
+            continue;
+        }
+        for (tier, peak) in tiers {
+            let gb = peak
+                .as_f64()
+                .unwrap_or_else(|| panic!("{id}: vramGbByTier.{tier} is not a number: {peak}"));
+            assert!(
+                gb.is_finite() && gb > 0.0,
+                "{id}: vramGbByTier.{tier} must be a positive resident peak, got {gb}"
+            );
+        }
         let default = default_tier_key(&model);
         assert!(
-            tiers.get(default).and_then(Value::as_f64).is_some(),
-            "{id}: resolved/default tier {default} has no numeric resident peak"
+            tiers.contains_key(default),
+            "{id}: declares vramGbByTier {:?} but resolves to tier {default}, which it does not \
+             advertise",
+            tiers.keys().collect::<Vec<_>>()
         );
-        tiers.clone()
-    };
-
-    for id in EVIDENCED {
-        assert_resident_rows(id);
     }
+
     let zimage_edit_arm = include_str!("../image_jobs.rs")
         .split_once("CandleImageRoute::ZimageEdit => {")
         .expect("Z-Image Edit route must remain explicit")
@@ -1856,22 +1851,6 @@ fn bespoke_candle_base_evidence_is_live_or_explicitly_unmeasured() {
         zimage_edit_arm.contains("generate_candle_stream("),
         "Z-Image Edit must use the generic provider path so z_image_turbo catalog evidence and the shared memory selector remain live"
     );
-    for (id, reason, source) in EXPLICITLY_UNMEASURED {
-        let model = builtin_model_entry(id);
-        let resident = model
-            .get("candle")
-            .and_then(|candle| candle.get("vramGbByTier"))
-            .and_then(Value::as_object);
-        assert!(
-            resident.is_none_or(serde_json::Map::is_empty),
-            "{id}: now has catalog rows; remove its explicit unmeasured reason from the route and this guard"
-        );
-        assert!(!reason.trim().is_empty(), "{id}: unmeasured exception needs a recorded reason");
-        assert!(
-            source.contains(reason),
-            "{id}: its unmeasured reason must remain recorded at the live route call site"
-        );
-    }
 }
 
 /// sc-7875 (SD3.5 S6, MLX-path validation boundary): the three SD3.5 builtin-manifest entries gate
