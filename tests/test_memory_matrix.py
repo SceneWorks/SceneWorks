@@ -546,9 +546,21 @@ def test_anchor_currency_is_reported_beside_the_state_and_never_moves_it():
     # Both currency values must be represented among the anchored cells for this to have teeth; the
     # shipped store carries stale and current anchors alike.
     assert set(by_current) == {True, False}, sorted(by_current)
-    assert all(
-        states <= {"Anchored", "Anchored/underived"} for states in by_current.values()
-    ), by_current
+    # Every anchored cell's state must re-derive from the three facts WITHOUT a currency term. An
+    # anchor may land on a coordinate the architecture rules out (sc-22509 measured krea_2_turbo
+    # candle q4, whose streamed-blocks overlay coordinates are structurally exempt), so the
+    # allowed vocabulary is not `Anchored`/`Anchored/underived` alone — the point is that flipping
+    # `current` could not have produced any of these states.
+    for cell in anchored:
+        if cell["implementation"] == "missing":
+            expected = "Missing"
+        elif cell["implementation"] == "structurally-na":
+            expected = "Structurally N/A"
+        else:
+            expected = "Anchored" if cell["derivationDefined"] else "Anchored/underived"
+        assert cell["state"] == expected, cell["id"]
+    # Teeth: the anchored population must span more than one state, or the loop above is vacuous.
+    assert len({cell["state"] for cell in anchored}) > 1
     # A cell's reported currency is its inventory row's, not an independent claim: two copies of one
     # fact that can disagree is how a stale anchor reads as current on the cell that cites it.
     inventory = {row["id"]: row for row in matrix["anchors"]}

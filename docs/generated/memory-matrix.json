@@ -1,7 +1,7 @@
 {
   "schemaVersion": 11,
   "generatedFrom": {
-    "sceneWorksRevision": "source-tree:885a3cd77d64e995e1a82baa36de483f2eaeec9e0b60c36917cdfe630f609f66",
+    "sceneWorksRevision": "source-tree:f888fa3fe73a5ddc27fbd913b26ffafb726fe258b244af6245f3f7733fc9cd4a",
     "sources": {
       "manifest": {
         "path": "config/manifests/builtin.models.jsonc",
@@ -69,23 +69,23 @@
       },
       "anchorStore": {
         "path": "config/memory-anchors.json",
-        "sha256": "004a7ccc44c589f9110e3c2fa6dc81ef27aeacf7df59424af85a2d2d308f1bf4"
+        "sha256": "1a04354993a77d746f722fcf73b91323471a9f284a49f73bac1f97792fe4dcc2"
       },
       "anchorLoaderClosures": {
         "path": "config/anchor-loader-closures.json",
-        "sha256": "3fc5d997001f59825f948f78afccffc520b0214267c6597bbda3588af95adb61"
+        "sha256": "c4dcf03ccb5b7bdd08a54c24312109765cd06297b238fdc50a73040c3e4fadd6"
       },
       "anchorDerivation": {
         "path": "crates/sceneworks-core/src/memory_anchor.rs",
-        "sha256": "af494bdc6e5373271dd4c31b62efe3bebd768cb4dfc81d136acbc3f0a7d4a360"
+        "sha256": "ce0008173a5036cb6a5357b9bc003b1c0f08acc08c5309c57d70ad3f22bbde50"
       },
       "anchorAdmission": {
         "path": "crates/sceneworks-worker/src/video_admission.rs",
-        "sha256": "c492a0f64b9407fae7eea0c06ebca049b81b15cbeba5b7f0c98f892198339c6f"
+        "sha256": "22ece87a6c262928bb68a676b61c245bb8efab9b5de1704384d21a82d6e06e22"
       },
       "anchorExtractor": {
         "path": "scripts/extract-memory-anchors.mjs",
-        "sha256": "aee59458bfd75cc2d2234730f799ca5976501a11c5275a2bbf3fd422f0f39c57"
+        "sha256": "44cad9c3cc2a20c30db92ed0ce581883e8f507df415537bf66dd38866cc818ca"
       }
     }
   },
@@ -130,10 +130,10 @@
       "video": 11
     },
     "cells": 9305,
-    "publishedCells": 702,
-    "elidedCells": 8603,
+    "publishedCells": 710,
+    "elidedCells": 8595,
     "elidedByState": {
-      "Implemented": 4182,
+      "Implemented": 4174,
       "Missing": 4421
     },
     "publicationPredicate": "A coordinate is published when it carries a claim a per-lane census cannot: a measured memory anchor covers its (model, tier, backend lane), or it is structurally exempt. A bare `Implemented` or `Missing` state is a property of the whole lane, replicated across every tier x mode x overlay, and is counted in `summary.elidedByState` and the per-(entry, backend, rung) `coverage` census instead of restated thousands of times.",
@@ -154,10 +154,10 @@
         "reason": "no familyGroup arm and no video-route resolver row"
       }
     ],
-    "anchors": 10,
-    "analyticOnlyCells": 331,
-    "anchoredCells": 237,
-    "staleAnchors": 7,
+    "anchors": 11,
+    "analyticOnlyCells": 330,
+    "anchoredCells": 247,
+    "staleAnchors": 8,
     "fullModels": 0
   },
   "models": [
@@ -4695,6 +4695,23 @@
       "cells": 18
     },
     {
+      "id": "krea_2_turbo:candle:q4:base:base:krea-turbo-cuda-phase-curves-v1:imc-7f1a63e5459300aed47c",
+      "modelId": "krea_2_turbo",
+      "backend": "candle",
+      "tier": "q4",
+      "provider": "krea_2_turbo",
+      "mode": "text_to_image",
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "frames": 1,
+        "fps": null
+      },
+      "source": "docs/generated/krea-candle-five-rung-sc-11045.json",
+      "current": false,
+      "cells": 10
+    },
+    {
       "id": "ltx_2_3:mlx:q8:base:base:sc-18808-ltx-2-3-mlx-t2v-staged-capture-v1:imc-5aff3e74b46b30fb797c",
       "modelId": "ltx_2_3",
       "backend": "mlx",
@@ -9004,11 +9021,12 @@
       "backend": "candle",
       "rung": "bounded_attention",
       "coordinates": 18,
-      "published": 0,
-      "elided": 18,
+      "published": 1,
+      "elided": 17,
       "implemented": 3,
       "states": {
-        "Implemented": 3,
+        "Anchored/underived": 1,
+        "Implemented": 2,
         "Missing": 15
       },
       "implementedBy": {
@@ -9033,11 +9051,12 @@
       "backend": "candle",
       "rung": "bounded_decode",
       "coordinates": 18,
-      "published": 0,
-      "elided": 18,
+      "published": 1,
+      "elided": 17,
       "implemented": 3,
       "states": {
-        "Implemented": 3,
+        "Anchored/underived": 1,
+        "Implemented": 2,
         "Missing": 15
       },
       "implementedBy": {
@@ -9062,11 +9081,12 @@
       "backend": "candle",
       "rung": "bounded_transformer_residency",
       "coordinates": 18,
-      "published": 6,
-      "elided": 12,
+      "published": 7,
+      "elided": 11,
       "implemented": 3,
       "states": {
-        "Implemented": 3,
+        "Anchored/underived": 1,
+        "Implemented": 2,
         "Missing": 9,
         "Structurally N/A": 6
       },
@@ -9092,11 +9112,12 @@
       "backend": "candle",
       "rung": "resident",
       "coordinates": 18,
-      "published": 0,
-      "elided": 18,
+      "published": 3,
+      "elided": 15,
       "implemented": 9,
       "states": {
-        "Implemented": 9,
+        "Anchored/underived": 3,
+        "Implemented": 6,
         "Missing": 9
       },
       "implementedBy": {
@@ -9121,11 +9142,12 @@
       "backend": "candle",
       "rung": "staged_residency",
       "coordinates": 18,
-      "published": 0,
-      "elided": 18,
+      "published": 2,
+      "elided": 16,
       "implemented": 6,
       "states": {
-        "Implemented": 6,
+        "Anchored/underived": 2,
+        "Implemented": 4,
         "Missing": 12
       },
       "implementedBy": {
@@ -16615,6 +16637,66 @@
       }
     },
     {
+      "id": "krea_2_turbo:krea_2_turbo_edit:candle:q4:edit_image:lora:staged_residency",
+      "modelId": "krea_2_turbo",
+      "resolvedRoute": "krea_2_turbo_edit",
+      "provider": "krea_2_turbo_edit",
+      "backend": "candle",
+      "tier": "q4",
+      "mode": "edit_image",
+      "overlay": "lora",
+      "rung": "staged_residency",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "1024x1024",
+          "896x896",
+          "768x768",
+          "768x1024",
+          "1024x768",
+          "1280x720",
+          "720x1280",
+          "1216x832",
+          "832x1216",
+          "1152x896",
+          "896x1152",
+          "1536x1536",
+          "2048x1152",
+          "1152x2048",
+          "2048x1408",
+          "1408x2048",
+          "2048x2048"
+        ]
+      },
+      "strategyParameters": {
+        "publishedRanges": {}
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "krea_2_turbo:candle:q4:base:base:krea-turbo-cuda-phase-curves-v1:imc-7f1a63e5459300aed47c",
+        "tier": "q4",
+        "source": "config/memory-anchors.json#krea_2_turbo:candle:q4:base:base:krea-turbo-cuda-phase-curves-v1:imc-7f1a63e5459300aed47c",
+        "current": false
+      },
+      "derivationDefined": false,
+      "state": "Anchored/underived",
+      "owningFamilyStory": 15829,
+      "owningModelStory": 15913,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "inference:crates/media/candle-gen/candle-gen-krea/src/lib.rs"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#krea_2_turbo:candle:q4:base:base:krea-turbo-cuda-phase-curves-v1:imc-7f1a63e5459300aed47c"
+          }
+        ]
+      }
+    },
+    {
       "id": "krea_2_turbo:krea_2_turbo:candle:bf16:text_to_image:control:bounded_transformer_residency",
       "modelId": "krea_2_turbo",
       "resolvedRoute": "krea_2_turbo",
@@ -16731,6 +16813,122 @@
       }
     },
     {
+      "id": "krea_2_turbo:krea_2_turbo:candle:q4:edit_image:control:resident",
+      "modelId": "krea_2_turbo",
+      "resolvedRoute": "krea_2_turbo",
+      "provider": "krea_2_turbo",
+      "backend": "candle",
+      "tier": "q4",
+      "mode": "edit_image",
+      "overlay": "control",
+      "rung": "resident",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "1024x1024",
+          "896x896",
+          "768x768",
+          "768x1024",
+          "1024x768",
+          "1280x720",
+          "720x1280",
+          "1216x832",
+          "832x1216",
+          "1152x896",
+          "896x1152",
+          "1536x1536",
+          "2048x1152",
+          "1152x2048",
+          "2048x1408",
+          "1408x2048",
+          "2048x2048"
+        ]
+      },
+      "strategyParameters": {},
+      "implementation": "implemented",
+      "anchor": {
+        "id": "krea_2_turbo:candle:q4:base:base:krea-turbo-cuda-phase-curves-v1:imc-7f1a63e5459300aed47c",
+        "tier": "q4",
+        "source": "config/memory-anchors.json#krea_2_turbo:candle:q4:base:base:krea-turbo-cuda-phase-curves-v1:imc-7f1a63e5459300aed47c",
+        "current": false
+      },
+      "derivationDefined": false,
+      "state": "Anchored/underived",
+      "owningFamilyStory": 15829,
+      "owningModelStory": 15913,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "crates/sceneworks-worker/src/engines.rs#MODEL_TABLE"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#krea_2_turbo:candle:q4:base:base:krea-turbo-cuda-phase-curves-v1:imc-7f1a63e5459300aed47c"
+          }
+        ]
+      }
+    },
+    {
+      "id": "krea_2_turbo:krea_2_turbo:candle:q4:edit_image:none:resident",
+      "modelId": "krea_2_turbo",
+      "resolvedRoute": "krea_2_turbo",
+      "provider": "krea_2_turbo",
+      "backend": "candle",
+      "tier": "q4",
+      "mode": "edit_image",
+      "overlay": "none",
+      "rung": "resident",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "1024x1024",
+          "896x896",
+          "768x768",
+          "768x1024",
+          "1024x768",
+          "1280x720",
+          "720x1280",
+          "1216x832",
+          "832x1216",
+          "1152x896",
+          "896x1152",
+          "1536x1536",
+          "2048x1152",
+          "1152x2048",
+          "2048x1408",
+          "1408x2048",
+          "2048x2048"
+        ]
+      },
+      "strategyParameters": {},
+      "implementation": "implemented",
+      "anchor": {
+        "id": "krea_2_turbo:candle:q4:base:base:krea-turbo-cuda-phase-curves-v1:imc-7f1a63e5459300aed47c",
+        "tier": "q4",
+        "source": "config/memory-anchors.json#krea_2_turbo:candle:q4:base:base:krea-turbo-cuda-phase-curves-v1:imc-7f1a63e5459300aed47c",
+        "current": false
+      },
+      "derivationDefined": false,
+      "state": "Anchored/underived",
+      "owningFamilyStory": 15829,
+      "owningModelStory": 15913,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "crates/sceneworks-worker/src/engines.rs#MODEL_TABLE"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#krea_2_turbo:candle:q4:base:base:krea-turbo-cuda-phase-curves-v1:imc-7f1a63e5459300aed47c"
+          }
+        ]
+      }
+    },
+    {
       "id": "krea_2_turbo:krea_2_turbo:candle:q4:text_to_image:control:bounded_transformer_residency",
       "modelId": "krea_2_turbo",
       "resolvedRoute": "krea_2_turbo",
@@ -16764,7 +16962,12 @@
       },
       "strategyParameters": {},
       "implementation": "structurally-na",
-      "anchor": null,
+      "anchor": {
+        "id": "krea_2_turbo:candle:q4:base:base:krea-turbo-cuda-phase-curves-v1:imc-7f1a63e5459300aed47c",
+        "tier": "q4",
+        "source": "config/memory-anchors.json#krea_2_turbo:candle:q4:base:base:krea-turbo-cuda-phase-curves-v1:imc-7f1a63e5459300aed47c",
+        "current": false
+      },
       "derivationDefined": false,
       "state": "Structurally N/A",
       "owningFamilyStory": 15829,
@@ -16785,7 +16988,11 @@
             "reason": "`load_dit` returns a hard error when `stream_blocks` is set together with a load-time LoRA/LoKr spec or a merged diff-patch overlay, so a streamed render cannot serve an overlay request at all."
           }
         ],
-        "anchor": []
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#krea_2_turbo:candle:q4:base:base:krea-turbo-cuda-phase-curves-v1:imc-7f1a63e5459300aed47c"
+          }
+        ]
       }
     },
     {
@@ -16822,7 +17029,12 @@
       },
       "strategyParameters": {},
       "implementation": "structurally-na",
-      "anchor": null,
+      "anchor": {
+        "id": "krea_2_turbo:candle:q4:base:base:krea-turbo-cuda-phase-curves-v1:imc-7f1a63e5459300aed47c",
+        "tier": "q4",
+        "source": "config/memory-anchors.json#krea_2_turbo:candle:q4:base:base:krea-turbo-cuda-phase-curves-v1:imc-7f1a63e5459300aed47c",
+        "current": false
+      },
       "derivationDefined": false,
       "state": "Structurally N/A",
       "owningFamilyStory": 15829,
@@ -16843,7 +17055,325 @@
             "reason": "`load_dit` returns a hard error when `stream_blocks` is set together with a load-time LoRA/LoKr spec or a merged diff-patch overlay, so a streamed render cannot serve an overlay request at all."
           }
         ],
-        "anchor": []
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#krea_2_turbo:candle:q4:base:base:krea-turbo-cuda-phase-curves-v1:imc-7f1a63e5459300aed47c"
+          }
+        ]
+      }
+    },
+    {
+      "id": "krea_2_turbo:krea_2_turbo:candle:q4:text_to_image:none:bounded_attention",
+      "modelId": "krea_2_turbo",
+      "resolvedRoute": "krea_2_turbo",
+      "provider": "krea_2_turbo",
+      "backend": "candle",
+      "tier": "q4",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "rung": "bounded_attention",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "1024x1024",
+          "896x896",
+          "768x768",
+          "768x1024",
+          "1024x768",
+          "1280x720",
+          "720x1280",
+          "1216x832",
+          "832x1216",
+          "1152x896",
+          "896x1152",
+          "1536x1536",
+          "2048x1152",
+          "1152x2048",
+          "2048x1408",
+          "1408x2048",
+          "2048x2048"
+        ]
+      },
+      "strategyParameters": {
+        "manifestRung": "chunkedAttention",
+        "formula": "max(text,denoise,decode)+cudaHeadroom",
+        "decodeTileEdge": 512,
+        "decodeOverlap": 128,
+        "attentionChunkSize": 134217728
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "krea_2_turbo:candle:q4:base:base:krea-turbo-cuda-phase-curves-v1:imc-7f1a63e5459300aed47c",
+        "tier": "q4",
+        "source": "config/memory-anchors.json#krea_2_turbo:candle:q4:base:base:krea-turbo-cuda-phase-curves-v1:imc-7f1a63e5459300aed47c",
+        "current": false
+      },
+      "derivationDefined": false,
+      "state": "Anchored/underived",
+      "owningFamilyStory": 15829,
+      "owningModelStory": 15913,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "config/manifests/builtin.models.jsonc#models/krea_2_turbo/candle/turboFit"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#krea_2_turbo:candle:q4:base:base:krea-turbo-cuda-phase-curves-v1:imc-7f1a63e5459300aed47c"
+          }
+        ]
+      }
+    },
+    {
+      "id": "krea_2_turbo:krea_2_turbo:candle:q4:text_to_image:none:bounded_decode",
+      "modelId": "krea_2_turbo",
+      "resolvedRoute": "krea_2_turbo",
+      "provider": "krea_2_turbo",
+      "backend": "candle",
+      "tier": "q4",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "rung": "bounded_decode",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "1024x1024",
+          "896x896",
+          "768x768",
+          "768x1024",
+          "1024x768",
+          "1280x720",
+          "720x1280",
+          "1216x832",
+          "832x1216",
+          "1152x896",
+          "896x1152",
+          "1536x1536",
+          "2048x1152",
+          "1152x2048",
+          "2048x1408",
+          "1408x2048",
+          "2048x2048"
+        ]
+      },
+      "strategyParameters": {
+        "manifestRung": "tiledVae",
+        "formula": "max(text,denoise,decode)+cudaHeadroom",
+        "decodeTileEdge": 512,
+        "decodeOverlap": 128
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "krea_2_turbo:candle:q4:base:base:krea-turbo-cuda-phase-curves-v1:imc-7f1a63e5459300aed47c",
+        "tier": "q4",
+        "source": "config/memory-anchors.json#krea_2_turbo:candle:q4:base:base:krea-turbo-cuda-phase-curves-v1:imc-7f1a63e5459300aed47c",
+        "current": false
+      },
+      "derivationDefined": false,
+      "state": "Anchored/underived",
+      "owningFamilyStory": 15829,
+      "owningModelStory": 15913,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "config/manifests/builtin.models.jsonc#models/krea_2_turbo/candle/turboFit"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#krea_2_turbo:candle:q4:base:base:krea-turbo-cuda-phase-curves-v1:imc-7f1a63e5459300aed47c"
+          }
+        ]
+      }
+    },
+    {
+      "id": "krea_2_turbo:krea_2_turbo:candle:q4:text_to_image:none:bounded_transformer_residency",
+      "modelId": "krea_2_turbo",
+      "resolvedRoute": "krea_2_turbo",
+      "provider": "krea_2_turbo",
+      "backend": "candle",
+      "tier": "q4",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "rung": "bounded_transformer_residency",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "1024x1024",
+          "896x896",
+          "768x768",
+          "768x1024",
+          "1024x768",
+          "1280x720",
+          "720x1280",
+          "1216x832",
+          "832x1216",
+          "1152x896",
+          "896x1152",
+          "1536x1536",
+          "2048x1152",
+          "1152x2048",
+          "2048x1408",
+          "1408x2048",
+          "2048x2048"
+        ]
+      },
+      "strategyParameters": {
+        "manifestRung": "streamedBlocks",
+        "formula": "max(text,denoise,decode)+cudaHeadroom",
+        "decodeTileEdge": 512,
+        "decodeOverlap": 128,
+        "attentionChunkSize": 134217728,
+        "transformerWindowSize": 1
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "krea_2_turbo:candle:q4:base:base:krea-turbo-cuda-phase-curves-v1:imc-7f1a63e5459300aed47c",
+        "tier": "q4",
+        "source": "config/memory-anchors.json#krea_2_turbo:candle:q4:base:base:krea-turbo-cuda-phase-curves-v1:imc-7f1a63e5459300aed47c",
+        "current": false
+      },
+      "derivationDefined": false,
+      "state": "Anchored/underived",
+      "owningFamilyStory": 15829,
+      "owningModelStory": 15913,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "config/manifests/builtin.models.jsonc#models/krea_2_turbo/candle/turboFit"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#krea_2_turbo:candle:q4:base:base:krea-turbo-cuda-phase-curves-v1:imc-7f1a63e5459300aed47c"
+          }
+        ]
+      }
+    },
+    {
+      "id": "krea_2_turbo:krea_2_turbo:candle:q4:text_to_image:none:resident",
+      "modelId": "krea_2_turbo",
+      "resolvedRoute": "krea_2_turbo",
+      "provider": "krea_2_turbo",
+      "backend": "candle",
+      "tier": "q4",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "rung": "resident",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "1024x1024",
+          "896x896",
+          "768x768",
+          "768x1024",
+          "1024x768",
+          "1280x720",
+          "720x1280",
+          "1216x832",
+          "832x1216",
+          "1152x896",
+          "896x1152",
+          "1536x1536",
+          "2048x1152",
+          "1152x2048",
+          "2048x1408",
+          "1408x2048",
+          "2048x2048"
+        ]
+      },
+      "strategyParameters": {
+        "manifestRung": "resident",
+        "formula": "vramGbByTier+cudaHeadroom"
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "krea_2_turbo:candle:q4:base:base:krea-turbo-cuda-phase-curves-v1:imc-7f1a63e5459300aed47c",
+        "tier": "q4",
+        "source": "config/memory-anchors.json#krea_2_turbo:candle:q4:base:base:krea-turbo-cuda-phase-curves-v1:imc-7f1a63e5459300aed47c",
+        "current": false
+      },
+      "derivationDefined": false,
+      "state": "Anchored/underived",
+      "owningFamilyStory": 15829,
+      "owningModelStory": 15913,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "config/manifests/builtin.models.jsonc#models/krea_2_turbo/candle/turboFit"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#krea_2_turbo:candle:q4:base:base:krea-turbo-cuda-phase-curves-v1:imc-7f1a63e5459300aed47c"
+          }
+        ]
+      }
+    },
+    {
+      "id": "krea_2_turbo:krea_2_turbo:candle:q4:text_to_image:none:staged_residency",
+      "modelId": "krea_2_turbo",
+      "resolvedRoute": "krea_2_turbo",
+      "provider": "krea_2_turbo",
+      "backend": "candle",
+      "tier": "q4",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "rung": "staged_residency",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "1024x1024",
+          "896x896",
+          "768x768",
+          "768x1024",
+          "1024x768",
+          "1280x720",
+          "720x1280",
+          "1216x832",
+          "832x1216",
+          "1152x896",
+          "896x1152",
+          "1536x1536",
+          "2048x1152",
+          "1152x2048",
+          "2048x1408",
+          "1408x2048",
+          "2048x2048"
+        ]
+      },
+      "strategyParameters": {
+        "manifestRung": "threeStage",
+        "formula": "max(text,denoise,decode)+cudaHeadroom"
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "krea_2_turbo:candle:q4:base:base:krea-turbo-cuda-phase-curves-v1:imc-7f1a63e5459300aed47c",
+        "tier": "q4",
+        "source": "config/memory-anchors.json#krea_2_turbo:candle:q4:base:base:krea-turbo-cuda-phase-curves-v1:imc-7f1a63e5459300aed47c",
+        "current": false
+      },
+      "derivationDefined": false,
+      "state": "Anchored/underived",
+      "owningFamilyStory": 15829,
+      "owningModelStory": 15913,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "config/manifests/builtin.models.jsonc#models/krea_2_turbo/candle/turboFit"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#krea_2_turbo:candle:q4:base:base:krea-turbo-cuda-phase-curves-v1:imc-7f1a63e5459300aed47c"
+          }
+        ]
       }
     },
     {
@@ -50080,10 +50610,18 @@
     "kolors": [],
     "krea_2_raw": [],
     "krea_2_turbo": [
+      "krea_2_turbo:krea_2_turbo_edit:candle:q4:edit_image:lora:staged_residency",
       "krea_2_turbo:krea_2_turbo:candle:bf16:text_to_image:control:bounded_transformer_residency",
       "krea_2_turbo:krea_2_turbo:candle:bf16:text_to_image:lora:bounded_transformer_residency",
+      "krea_2_turbo:krea_2_turbo:candle:q4:edit_image:control:resident",
+      "krea_2_turbo:krea_2_turbo:candle:q4:edit_image:none:resident",
       "krea_2_turbo:krea_2_turbo:candle:q4:text_to_image:control:bounded_transformer_residency",
       "krea_2_turbo:krea_2_turbo:candle:q4:text_to_image:lora:bounded_transformer_residency",
+      "krea_2_turbo:krea_2_turbo:candle:q4:text_to_image:none:bounded_attention",
+      "krea_2_turbo:krea_2_turbo:candle:q4:text_to_image:none:bounded_decode",
+      "krea_2_turbo:krea_2_turbo:candle:q4:text_to_image:none:bounded_transformer_residency",
+      "krea_2_turbo:krea_2_turbo:candle:q4:text_to_image:none:resident",
+      "krea_2_turbo:krea_2_turbo:candle:q4:text_to_image:none:staged_residency",
       "krea_2_turbo:krea_2_turbo:candle:q8:text_to_image:control:bounded_transformer_residency",
       "krea_2_turbo:krea_2_turbo:candle:q8:text_to_image:lora:bounded_transformer_residency"
     ],
