@@ -1,7 +1,7 @@
 {
   "schemaVersion": 10,
   "generatedFrom": {
-    "sceneWorksRevision": "source-tree:c6fa1ac0e5b87bfbfbf3352c927ab1629f486b16260f22e76b86881faeb8318c",
+    "sceneWorksRevision": "source-tree:e0e88d45f170ec2f0bf53aa215009ceacf883dce7b84b46866d9e75b4a642fc3",
     "inferenceRevision": "703d10d916e80a5fedd88be318159cb0ff553184",
     "sources": {
       "manifest": {
@@ -102,7 +102,7 @@
       },
       "engineCapabilitiesCandle": {
         "path": "config/engine-capabilities/capabilities.candle.json",
-        "sha256": "d7e24cd2f21558cf9f4ec03ed85f2949a329015c856f81707afe7e9e42402444"
+        "sha256": "a53c9c4ca943831f11057af49b26a3ec32d06a5d8ad383f254935a937d828ede"
       },
       "cargo": {
         "path": "Cargo.toml",
@@ -201,9 +201,9 @@
     "memoryContractReconciliation": {
       "providers": 102,
       "bespokeWaivers": 1,
-      "mismatches": 335,
+      "mismatches": 338,
       "byLeg": {
-        "engine_manifest": 231,
+        "engine_manifest": 234,
         "survey_engine": 104
       }
     },
