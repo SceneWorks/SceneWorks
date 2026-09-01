@@ -54,12 +54,12 @@ export const FIT_BOUNDARY_MIN_CONTEXT_BPS = 9_000;
 const SCENEWORKS_REPOSITORY = "github.com/SceneWorks/SceneWorks";
 const INFERENCE_REPOSITORY = "github.com/SceneWorks/inference";
 const PMETAL_MLX_REPOSITORY = "https://github.com/michaeltrefry/mlx-rs";
-// Mirrored from inference commit d5b33c6b3849dfecb2dd5ff2f97ff68a87c6cef0.  These are
+// Mirrored from inference commit 8e6e6ad598ca79d40b252693b5f33e1116e40dca.  These are
 // receipt identities, never caller-selectable model aliases or local paths.
 export const SC20671_MODEL_CONTRACTS = Object.freeze({
   llama: Object.freeze({
-    candidate: Object.freeze({ repository: "mlx-community/Llama-3.2-1B-Instruct-4bit", revision: "08231374eeacb049a0eade7922910865b8fce912", architecture: "LlamaForCausalLM", nativeContextTokens: 131_072 }),
-    reference: Object.freeze({ repository: "mlx-community/Llama-3.2-1B-Instruct-bf16", revision: "863c846a9ac6fad4e49e1743d52984dff262e953", architecture: "LlamaForCausalLM", nativeContextTokens: 131_072 }),
+    candidate: Object.freeze({ repository: "mlx-community/Llama-3.2-3B-Instruct-4bit", revision: "7f0dc925e0d0afb0322d96f9255cfddf2ba5636e", architecture: "LlamaForCausalLM", nativeContextTokens: 131_072 }),
+    reference: Object.freeze({ repository: "mlx-community/Llama-3.2-3B-Instruct-bf16", revision: "6d88ba43024fef71b10e52e101c7cd4598322601", architecture: "LlamaForCausalLM", nativeContextTokens: 131_072 }),
   }),
   qwen: Object.freeze({
     candidate: Object.freeze({ repository: "mlx-community/Qwen3-1.7B-4bit", revision: "3b1b1768f8f8cf8351c712464f906e86c2b8269e", architecture: "Qwen3ForCausalLM", nativeContextTokens: 40_960 }),

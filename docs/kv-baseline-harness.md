@@ -70,7 +70,7 @@ directory and atomically renames one aggregate directory containing
 sidecar, duplicate coordinate, or reused cold PID leaves no campaign directory.
 
 Before the parent or a worker loads a snapshot, inference commit
-`d5b33c6b3849dfecb2dd5ff2f97ff68a87c6cef0` seals these exact model identities.
+`8e6e6ad598ca79d40b252693b5f33e1116e40dca` seals these exact model identities.
 SceneWorks mirrors the same rule when it validates a portable receipt: a local
 snapshot path is not an identity, and `modelId`/`referenceModelId` must contain
 the matching repository, immutable revision, architecture, and producer
@@ -80,7 +80,7 @@ caller-selected model.
 
 | family | candidate | higher-precision reference | native context |
 | --- | --- | --- | --- |
-| Llama | `mlx-community/Llama-3.2-1B-Instruct-4bit@08231374eeacb049a0eade7922910865b8fce912` | `mlx-community/Llama-3.2-1B-Instruct-bf16@863c846a9ac6fad4e49e1743d52984dff262e953` | 131,072 |
+| Llama | `mlx-community/Llama-3.2-3B-Instruct-4bit@7f0dc925e0d0afb0322d96f9255cfddf2ba5636e` | `mlx-community/Llama-3.2-3B-Instruct-bf16@6d88ba43024fef71b10e52e101c7cd4598322601` | 131,072 |
 | Qwen | `mlx-community/Qwen3-1.7B-4bit@3b1b1768f8f8cf8351c712464f906e86c2b8269e` | `mlx-community/Qwen3-1.7B-bf16@9cd6692855d3e06772228e9a962b2606359b2d24` | 40,960 |
 
 The producer deliberately fails closed if its numeric quality-reference hooks
