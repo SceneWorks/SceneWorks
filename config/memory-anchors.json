@@ -25,7 +25,8 @@
         "path": "docs/generated/memory-calibration-evidence.json",
         "sha256": "e9e9f7ce079b0b8f2c615bd03b88f15f320881ba302b160390047c5505805cef",
         "recordId": "imc-b6537074420d51413b38",
-        "calibrationFingerprint": "sc-18218-flux2-dev-t2i-resident-evidence-v1"
+        "calibrationFingerprint": "sc-18218-flux2-dev-t2i-resident-evidence-v1",
+        "loaderClosureDigest": "3326eaab4116261d4261c78e92c796dcdc132b7a81ef36ed512d7db2a3a5ee77"
       },
       "geometry": {
         "width": 1024,
@@ -64,7 +65,8 @@
         "path": "docs/generated/memory-calibration-evidence.json",
         "sha256": "e9e9f7ce079b0b8f2c615bd03b88f15f320881ba302b160390047c5505805cef",
         "recordId": "imc-421a1bb45e9c2f5d916c",
-        "calibrationFingerprint": "sc-18218-flux2-dev-t2i-resident-evidence-v1"
+        "calibrationFingerprint": "sc-18218-flux2-dev-t2i-resident-evidence-v1",
+        "loaderClosureDigest": "b71e8b3cd2c7b73a4a7606ed7c37d65d19c7d70dcd1bc14ecb7ad8d249b5c60a"
       },
       "geometry": {
         "width": 1024,
@@ -103,7 +105,8 @@
         "path": "docs/generated/krea-candle-five-rung-sc-11045.json",
         "sha256": "a890d20e0236702535c6701d22ce8db7aa87ed42820490901bdc003c232fc18b",
         "recordId": "imc-7f1a63e5459300aed47c",
-        "calibrationFingerprint": "krea-turbo-cuda-phase-curves-v1"
+        "calibrationFingerprint": "krea-turbo-cuda-phase-curves-v1",
+        "loaderClosureDigest": "9dc75dae4223a6bf1a4988f249d850cc810701f6d60eb517b98ebcb08473ef2c"
       },
       "geometry": {
         "width": 1024,
@@ -142,7 +145,8 @@
         "path": "docs/generated/ltx-mlx-geometry-sweep-sc-18810.json",
         "sha256": "5dc147628fb5ca955c4584e23aacb8e9acc81bc0c3a5aba0aa5b3b1fe584702d",
         "recordId": "imc-5aff3e74b46b30fb797c",
-        "calibrationFingerprint": "sc-18808-ltx-2-3-mlx-t2v-staged-capture-v1"
+        "calibrationFingerprint": "sc-18808-ltx-2-3-mlx-t2v-staged-capture-v1",
+        "loaderClosureDigest": "d222a8533557b354015248a90f254ff74b9497251c5f5555f377be77cb7e9af0"
       },
       "geometry": {
         "width": 704,
@@ -181,7 +185,8 @@
         "path": "docs/calibration/sc-18791/ltx25-mlx-evidence.seed.json",
         "sha256": "6038f39e21feaa5fcde9490c7a0791a2906bff6695386f734c013569de77b725",
         "recordId": "imc-9c4c5fe8356bcc4f139f",
-        "calibrationFingerprint": "sc-18797-ltx-2-5-mlx-ladder-v1"
+        "calibrationFingerprint": "sc-18797-ltx-2-5-mlx-ladder-v1",
+        "loaderClosureDigest": "1a052c97a7f1d6d00c314c17c981eb91f1fb2db1027acb4132eafaf1b345f0ea"
       },
       "geometry": {
         "width": 704,
@@ -220,7 +225,8 @@
         "path": "docs/calibration/sc-18791/ltx25-mlx-evidence.seed.json",
         "sha256": "6038f39e21feaa5fcde9490c7a0791a2906bff6695386f734c013569de77b725",
         "recordId": "imc-4e1b3a02a6ced3434824",
-        "calibrationFingerprint": "sc-18797-ltx-2-5-mlx-ladder-v1"
+        "calibrationFingerprint": "sc-18797-ltx-2-5-mlx-ladder-v1",
+        "loaderClosureDigest": "1a052c97a7f1d6d00c314c17c981eb91f1fb2db1027acb4132eafaf1b345f0ea"
       },
       "geometry": {
         "width": 1280,
@@ -259,7 +265,8 @@
         "path": "docs/calibration/sc-18791/ltx25-mlx-evidence.seed.json",
         "sha256": "6038f39e21feaa5fcde9490c7a0791a2906bff6695386f734c013569de77b725",
         "recordId": "imc-6f2b28a41967fd486b50",
-        "calibrationFingerprint": "sc-18797-ltx-2-5-mlx-ladder-v1"
+        "calibrationFingerprint": "sc-18797-ltx-2-5-mlx-ladder-v1",
+        "loaderClosureDigest": "1a052c97a7f1d6d00c314c17c981eb91f1fb2db1027acb4132eafaf1b345f0ea"
       },
       "geometry": {
         "width": 1280,
@@ -298,7 +305,8 @@
         "path": "docs/calibration/sc-18791/ltx25-mlx-evidence.seed.json",
         "sha256": "6038f39e21feaa5fcde9490c7a0791a2906bff6695386f734c013569de77b725",
         "recordId": "imc-17b5e196f5563098afb3",
-        "calibrationFingerprint": "sc-18797-ltx-2-5-mlx-ladder-v1"
+        "calibrationFingerprint": "sc-18797-ltx-2-5-mlx-ladder-v1",
+        "loaderClosureDigest": "1a052c97a7f1d6d00c314c17c981eb91f1fb2db1027acb4132eafaf1b345f0ea"
       },
       "geometry": {
         "width": 512,
@@ -337,7 +345,8 @@
         "path": "docs/calibration/sc-18791/ltx25-mlx-evidence.seed.json",
         "sha256": "6038f39e21feaa5fcde9490c7a0791a2906bff6695386f734c013569de77b725",
         "recordId": "imc-beaa0f2aacf0832ea28a",
-        "calibrationFingerprint": "sc-18797-ltx-2-5-mlx-ladder-v1"
+        "calibrationFingerprint": "sc-18797-ltx-2-5-mlx-ladder-v1",
+        "loaderClosureDigest": "1a052c97a7f1d6d00c314c17c981eb91f1fb2db1027acb4132eafaf1b345f0ea"
       },
       "geometry": {
         "width": 704,
@@ -376,7 +385,8 @@
         "path": "docs/calibration/sc-18791/ltx25-mlx-evidence.seed.json",
         "sha256": "6038f39e21feaa5fcde9490c7a0791a2906bff6695386f734c013569de77b725",
         "recordId": "imc-7f8186376a9a3143ebee",
-        "calibrationFingerprint": "sc-18797-ltx-2-5-mlx-ladder-v1"
+        "calibrationFingerprint": "sc-18797-ltx-2-5-mlx-ladder-v1",
+        "loaderClosureDigest": "1a052c97a7f1d6d00c314c17c981eb91f1fb2db1027acb4132eafaf1b345f0ea"
       },
       "geometry": {
         "width": 1280,
@@ -415,7 +425,8 @@
         "path": "docs/generated/memory-calibration-evidence.json",
         "sha256": "e9e9f7ce079b0b8f2c615bd03b88f15f320881ba302b160390047c5505805cef",
         "recordId": "imc-d314058df6e188459f3b",
-        "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1-eager"
+        "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1-eager",
+        "loaderClosureDigest": "6be4fdf7bfd948a62bb216200f62cc53d56a9cc1c7d1e497da90a0f7a76c2774"
       },
       "geometry": {
         "width": 1024,
@@ -454,7 +465,8 @@
         "path": "docs/generated/memory-calibration-evidence.json",
         "sha256": "e9e9f7ce079b0b8f2c615bd03b88f15f320881ba302b160390047c5505805cef",
         "recordId": "imc-12f3ccbb72de78cea931",
-        "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1"
+        "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1",
+        "loaderClosureDigest": "a4c2f95fa9a88b6a31fb6233e467506065a72510852a806bb0610644ca24e620"
       },
       "geometry": {
         "width": 1024,
@@ -493,7 +505,8 @@
         "path": "docs/generated/memory-calibration-evidence.json",
         "sha256": "e9e9f7ce079b0b8f2c615bd03b88f15f320881ba302b160390047c5505805cef",
         "recordId": "imc-8f110511b0f85d15f72f",
-        "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1"
+        "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1",
+        "loaderClosureDigest": "a4c2f95fa9a88b6a31fb6233e467506065a72510852a806bb0610644ca24e620"
       },
       "geometry": {
         "width": 1024,
@@ -532,7 +545,8 @@
         "path": "docs/generated/memory-calibration-evidence.json",
         "sha256": "e9e9f7ce079b0b8f2c615bd03b88f15f320881ba302b160390047c5505805cef",
         "recordId": "imc-1fc616bea135da2281b8",
-        "calibrationFingerprint": "z-image-mlx-independent-materialization-v4"
+        "calibrationFingerprint": "z-image-mlx-independent-materialization-v4",
+        "loaderClosureDigest": "bc087be1ffc8cd309029a9f57a169748caf4d84354bfd625ea01cd8b93b4180a"
       },
       "geometry": {
         "width": 768,

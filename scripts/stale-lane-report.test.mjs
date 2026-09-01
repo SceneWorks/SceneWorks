@@ -307,8 +307,8 @@ test("ranking weighs the margin, not just the count", () => {
   assert.equal(second.lane, "candle:beta");
   assert.equal(first.rank, 1);
   assert.equal(second.rank, 2);
-  assert.equal(first.impact.widenedAdmissionSurface, 3 * first.margin.staleMeasuredMargin);
-  assert.equal(second.impact.widenedAdmissionSurface, 5 * second.margin.staleMeasuredMargin);
+  assert.equal(first.impact.widenedAdmissionSurface, 3 * first.margin.recaptureSpread);
+  assert.equal(second.impact.widenedAdmissionSurface, 5 * second.margin.recaptureSpread);
   assert.ok(first.impact.widenedAdmissionSurface > second.impact.widenedAdmissionSurface);
 });
 
@@ -366,8 +366,7 @@ test("the margin column is the derivation's, not a literal in this script", asyn
   const report = buildStaleLaneReport(fixture);
   const derived = deriveMargins(fixture.records);
   for (const lane of report.staleLanes) {
-    assert.equal(lane.margin.staleMeasuredMargin, derived[lane.backend].margins.staleMeasuredMargin);
-    assert.equal(lane.margin.estimateMargin, derived[lane.backend].margins.estimateMargin);
+    assert.equal(lane.margin.recaptureSpread, derived[lane.backend].margins.recaptureSpread);
   }
   // No margin literal may be reintroduced here: a hardcoded copy is exactly how this column would
   // drift away from the runtime it claims to describe.
@@ -424,13 +423,12 @@ test("the real corpus reports the margins the worker actually applies", async ()
     rust[match[1]] = Number(match[2]);
   }
   const expected = {
-    mlx: { stale: rust.MLX_STALE_MEASURED_MARGIN, estimate: rust.MLX_ESTIMATE_MARGIN },
-    candle: { stale: rust.CANDLE_STALE_MEASURED_MARGIN, estimate: rust.CANDLE_ESTIMATE_MARGIN },
+    mlx: rust.MLX_RECAPTURE_SPREAD,
+    candle: rust.CANDLE_RECAPTURE_SPREAD,
   };
-  assert.ok(expected.mlx.stale > 0 && expected.candle.stale > 0, "the Rust policy constants parsed");
+  assert.ok(expected.mlx > 0 && expected.candle > 0, "the Rust policy constants parsed");
   for (const lane of [...report.staleLanes, ...report.currentLanes]) {
-    assert.equal(lane.margin.staleMeasuredMargin, expected[lane.backend].stale, lane.lane);
-    assert.equal(lane.margin.estimateMargin, expected[lane.backend].estimate, lane.lane);
+    assert.equal(lane.margin.recaptureSpread, expected[lane.backend], lane.lane);
   }
 });
 

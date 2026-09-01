@@ -7,7 +7,7 @@
 //! ESTIMATE-floor candidate —
 //! manifest `vramGbByTier`/`sequentialPeakGb` rows plus the standard headroom, never a promised
 //! unmeasured saving — graded by the shared selector behind the candle estimate margin
-//! (`crate::ladder_margin_policy::CANDLE_ESTIMATE_MARGIN`; CUDA OOM is a recoverable `Err`, so the
+//! (`crate::ladder_margin_policy::CANDLE_RECAPTURE_SPREAD`; CUDA OOM is a recoverable `Err`, so the
 //! margin is looser than MLX's). Any eligible measured candidate at the same rung supersedes the
 //! estimate, so measured-current admission is byte-for-byte unchanged; an UNCERTIFIED artifact
 //! gets no floors at all (the manifest rows describe the certified bytes, not an imported
@@ -1399,8 +1399,8 @@ const CANDLE_ANCHOR_COEFFICIENT_MODELS: &[&str] = &["krea_2_turbo"];
 /// Identity is strict and fail-closed, the candle mirror of `video_admission::anchor_currency_
 /// matches` and `vram_gate::krea_store_anchor`: the anchor was measured on ONE catalog model,
 /// route, provider, tier, mode and materialization shape, overlay-free and reference-free (checked
-/// on BOTH the request and the anchor row), under one calibration campaign whose ABI and
-/// fingerprint the loaded contract still declares. Anything else keeps the established floor. The
+/// on BOTH the request and the anchor row), and its loader closure must still be current
+/// (sc-22511). Anything else keeps the established floor. The
 /// measured GEOMETRY is deliberately NOT part of the guard — pricing a never-measured geometry from
 /// one anchor is the entire point of the derivation — and neither is `model_family`, which has no
 /// source in the record (see [`sceneworks_core::memory_anchor::MemoryAnchor::model_family`]).
@@ -1468,14 +1468,13 @@ fn candle_image_anchor<'a>(
     if anchor_load_shape != contract.load_shape {
         return None;
     }
-    // Currency: a campaign the provider no longer declares cannot keep an anchor derivation live
-    // any more than it can keep a measured record live. Both halves of the identity, exactly as
-    // `video_admission::anchor_currency_matches` requires them — the ABI is what says the two
-    // fingerprints are even comparable quantities.
-    let calibration = contract.calibration.as_ref()?;
-    (calibration.abi == gen_core::MEMORY_CALIBRATION_ABI
-        && calibration.fingerprint == anchor.source.calibration_fingerprint)
-        .then_some(anchor)
+    // Currency (sc-22511, epic 22505 E9): the model's OWN loader closure, and nothing else. The
+    // calibration ABI and fingerprint are deliberately NOT asked here — since sc-22511 they are
+    // provenance, bound to the source record by `validate_anchor` so the anchor cannot misattribute
+    // its origin, but a new campaign no longer demotes evidence whose loader never moved. This is
+    // the same seam `video_admission::anchor_currency_matches` and `vram_gate::krea_store_anchor`
+    // grade on, so no two lanes can disagree about whether an anchor is live.
+    crate::video_admission::anchor_currency_matches(anchor).then_some(anchor)
 }
 
 fn memory_for_selection(
@@ -2103,6 +2102,11 @@ fn evaluate_shared_image_inner(
                 evidence,
                 closure_digest,
                 basis: *basis,
+                // sc-22508: the candle floors here are manifest `sequentialPeakGb`/`vramGbByTier`
+                // rows, not a weights+headroom split this lane can decompose, so no activation term
+                // is declared and the selector charges the backend's whole-peak accounting residual
+                // (`CANDLE_RECAPTURE_SPREAD`). Declaring a split is sc-22509's anchor work.
+                unmodeled_activation_bytes: None,
             },
         )
         .collect::<Vec<_>>();
@@ -3093,7 +3097,7 @@ mod tests {
                 ((tier_resident_gb(tier) * BYTES_PER_GIB).ceil() as u64)
                     .max(facts.base_bytes.saturating_add(headroom_bytes)),
             );
-            let free_gb = staged_gb * (1.0 + crate::ladder_margin_policy::CANDLE_ESTIMATE_MARGIN)
+            let free_gb = staged_gb * (1.0 + crate::ladder_margin_policy::CANDLE_RECAPTURE_SPREAD)
                 + crate::vram_gate::HEADROOM_GB
                 + 0.5;
             assert!(
@@ -4407,7 +4411,7 @@ mod tests {
         // a margin re-derivation would silently move the window again.
         let staged_floor_gb = STAGED_ROW_GB + crate::vram_gate::HEADROOM_GB;
         let widened_staged_gb =
-            staged_floor_gb * (1.0 + crate::ladder_margin_policy::CANDLE_ESTIMATE_MARGIN);
+            staged_floor_gb * (1.0 + crate::ladder_margin_policy::CANDLE_RECAPTURE_SPREAD);
         let free_gb = widened_staged_gb + SELECTOR_RESERVE_GB + 0.3;
         assert!(
             free_gb - SELECTOR_RESERVE_GB < RESIDENT_PEAK_GB,
@@ -5360,6 +5364,17 @@ mod tests {
         // A hand-built store: this exercises the SELECTOR seam, not the store's own extraction
         // handshake (`load_memory_anchors`), which `sceneworks-core` owns and tests against the
         // retained evidence.
+        //
+        // Currency is the packaged loader closure since sc-22511, and `is_current` compares against
+        // the PACKAGED declarations rather than anything injectable — so the control arm's digest
+        // is READ from those declarations rather than frozen as a literal. A literal would be a
+        // pin-coupled golden that reds on the next inference bump for no behavioural reason, and
+        // would silently stop discriminating if the declaration were dropped.
+        let live_loader_closure_digest =
+            sceneworks_core::memory_anchor::packaged_anchor_loader_closures()
+                .and_then(|closures| closures.digest_for("krea_2_turbo", AnchorBackend::Candle))
+                .expect("krea_2_turbo:candle must declare a loader closure")
+                .to_owned();
         let anchor = MemoryAnchor {
             id: "krea_2_turbo:candle:q4".to_owned(),
             model_id: "krea_2_turbo".to_owned(),
@@ -5385,6 +5400,7 @@ mod tests {
                 sha256: String::new(),
                 record_id: String::new(),
                 calibration_fingerprint: "anchor-seam-v1".to_owned(),
+                loader_closure_digest: live_loader_closure_digest.clone(),
             },
             geometry: AnchorGeometry {
                 width: 1024,
@@ -5469,9 +5485,12 @@ mod tests {
                 }),
             ),
             (
-                "a rotated calibration campaign",
+                // THE currency conjunct since sc-22511: the model's own loader closure moved, so
+                // the evidence no longer describes the code that will run. A rotated CALIBRATION
+                // FINGERPRINT is deliberately absent from this list — see the arm below.
+                "a moved loader closure",
                 Box::new(|anchor: &mut MemoryAnchor| {
-                    anchor.source.calibration_fingerprint = "anchor-seam-v2".to_owned();
+                    anchor.source.loader_closure_digest = "f".repeat(64);
                 }),
             ),
         ] {
@@ -5492,8 +5511,29 @@ mod tests {
                 assert_eq!(evidence.predicted_peak_bytes, staged_floor_bytes);
             }
         }
-        // The ABI half of the currency conjunct lives on the CONTRACT, not the anchor.
+        // The INVERSE of the moved-closure arm, and the whole claim of sc-22511 (epic 22505 E9):
+        // the calibration campaign is PROVENANCE, not currency. A rotated fingerprint AND an ABI
+        // the runtime no longer speaks must both leave the derivation live, because neither one
+        // says anything about whether the code that loads this model has moved. Before sc-22511
+        // both of these demoted to the manifest-row floor; asserting the old behaviour here would
+        // re-key currency onto the campaign through the test suite.
         {
+            let mut rotated = store.anchors[0].clone();
+            rotated.source.calibration_fingerprint = "anchor-seam-v2".to_owned();
+            let rotated_store = MemoryAnchorStore {
+                schema_version: MEMORY_ANCHOR_SCHEMA_VERSION,
+                analytic_only: Vec::new(),
+                anchors: vec![rotated],
+            };
+            for (_, evidence, basis) in floors(Some(&rotated_store)) {
+                assert_eq!(
+                    basis,
+                    crate::memory_strategy::CandidateBasis::EstimateAnchorDerived,
+                    "a rotated calibration campaign is provenance and must not demote the anchor"
+                );
+                assert_eq!(evidence.predicted_peak_bytes, expected_derived);
+            }
+
             let mut drifted = composition_probe_contract(true, true);
             drifted.provider_id = "krea_2_turbo".to_owned();
             drifted.load_shape = gen_core::LoadShape::EagerMaterialization;
@@ -5521,9 +5561,8 @@ mod tests {
             for (selection, _, basis) in &drifted_floors {
                 assert_eq!(
                     *basis,
-                    crate::memory_strategy::CandidateBasis::EstimateFloor,
-                    "a calibration ABI the runtime no longer speaks must not keep the derivation \
-                     live ({:?})",
+                    crate::memory_strategy::CandidateBasis::EstimateAnchorDerived,
+                    "a calibration ABI is provenance too and must not demote the anchor ({:?})",
                     selection.strategy
                 );
             }
@@ -5650,7 +5689,7 @@ mod tests {
         // does not — recomputed from the policy margin, never a frozen literal.
         let staged_row_floor_gb = 2.5 + crate::vram_gate::HEADROOM_GB;
         let free_gb = staged_row_floor_gb
-            * (1.0 + crate::ladder_margin_policy::CANDLE_ESTIMATE_MARGIN)
+            * (1.0 + crate::ladder_margin_policy::CANDLE_RECAPTURE_SPREAD)
             + crate::vram_gate::HEADROOM_GB
             + 0.3;
         assert!(

@@ -910,10 +910,13 @@ pub(crate) struct LadderVideoSelector<'a> {
     /// per-request knobs need the whole `MemorySelection`, and re-deriving it would be a second
     /// selection.
     selections: Vec<VideoSelectedCandidate>,
-    /// Unwidened resident candidate for every geometry core graded. The refusal guard consumes the
-    /// exact binding geometry's value, including any provider profile, instead of recomputing a
-    /// profile-blind weights floor after selection.
-    resident_floors: Vec<(VideoAdmissionGeometry, u64)>,
+    /// Unwidened resident candidate for every geometry core graded, paired with the ACTIVATION
+    /// term that candidate declared (sc-22508). The refusal guard consumes the exact binding
+    /// geometry's values, including any provider profile, instead of recomputing a profile-blind
+    /// weights floor — or a headroom constant — after selection. Carrying the declared term is what
+    /// keeps the guard's admitted ceiling identical to the one the selector graded even when the
+    /// peak came from a decode profile or a warm resident credit.
+    resident_floors: Vec<(VideoAdmissionGeometry, u64, Option<u64>)>,
 }
 
 #[derive(Clone, Debug)]
@@ -1172,28 +1175,37 @@ fn curve_decode_pass(decode_pass: VideoDecodePass) -> VideoCurveDecodePass {
     }
 }
 
-/// Whether the anchor's evidence is CURRENT for the contract being admitted.
+/// Whether the anchor's evidence is CURRENT (sc-22511, epic 22505 E9).
 ///
-/// The fitted-curve path demotes to the floor when the contract carries no calibration identity,
-/// when the calibration ABI moved, or when the fingerprint no longer names the measured closure.
-/// The anchor path must demote on exactly the same events: a pin bump or ABI change that stales the
-/// evidence cannot be allowed to leave the anchor derivation live while the fitted curve falls.
+/// The one currency question an anchor answers to: does the code that LOADS THIS MODEL on THIS
+/// backend still hash to what it hashed when the anchor was measured? The key is the digest of that
+/// model's own loader closure (`scripts/anchor-loader-closure.mjs`, checked in at
+/// `config/anchor-loader-closures.json`), so none of these can demote an anchor any more:
 ///
-/// The fingerprint compared here is the calibration campaign's, which is what the anchor's source
-/// record carries. sc-22511 re-keys currency on the model's own loader closure; this helper is the
-/// single seam that changes when it does. Do not grow a second currency notion beside it.
-fn anchor_currency_matches(
-    selector: &LadderVideoSelector<'_>,
+///   * an inference PIN BUMP whose loader source is unchanged — the unit contains no revision, no
+///     `Cargo.lock` and no workspace codegen input;
+///   * a SIBLING model's edit — sibling crates are not in the closure, and a sibling model in the
+///     SAME crate is a different file;
+///   * a SHARED crate the loader never reaches — reachability is walked from the loader's entry
+///     points, not linked at crate granularity;
+///   * a new CALIBRATION CAMPAIGN — the fingerprint is provenance on the anchor's source record and
+///     is deliberately no longer a currency term. That is E9's point: the anchor's evidence is the
+///     retained render, not the campaign that scheduled it.
+///
+/// Fail-closed on a missing declaration or an unparsable/version-bumped closure file: an anchor
+/// whose loader nothing tracks cannot be shown to be current, so the caller keeps its floor.
+///
+/// This is the SINGLE currency seam for anchors, for EVERY lane. [`anchor_evidence_covers_request`]
+/// calls it, and since sc-22509 so do the candle image lane's two anchor lookups
+/// (`vram_gate::krea_store_anchor` and `candle_memory_strategy::candle_image_anchor`) — a second,
+/// inline copy of the comparison is how a pre-gate and a derivation would silently disagree about
+/// whether the evidence is live. It lives here rather than in the candle modules because this
+/// module is compiled unconditionally while both of those are `backend-candle`-gated.
+pub(crate) fn anchor_currency_matches(
     anchor: &sceneworks_core::memory_anchor::MemoryAnchor,
 ) -> bool {
-    selector
-        .contract
-        .calibration
-        .as_ref()
-        .is_some_and(|calibration| {
-            calibration.abi == selector.identity.calibration_abi
-                && calibration.fingerprint == anchor.source.calibration_fingerprint
-        })
+    sceneworks_core::memory_anchor::packaged_anchor_loader_closures()
+        .is_some_and(|closures| anchor.is_current(closures))
 }
 
 /// Derive per-phase peaks from the measured memory anchor for this
@@ -1203,9 +1215,9 @@ fn anchor_currency_matches(
 /// Deliberately NOT hull-restricted: the whole point of the anchor + analytic derivation is that
 /// a request at a `(geometry, frames)` never measured is priced from the anchor plus architecture
 /// facts instead of falling to the phase-blind floor. Identity stays strict — model, family, route,
-/// provider, lane, tier, pipeline variant/decoder, mode, overlay-free, reference-free, and current
-/// calibration — and the anchor store itself is validated against the retained evidence it was
-/// extracted from at load.
+/// provider, lane, tier, pipeline variant/decoder, mode, overlay-free, reference-free, and a
+/// current loader closure ([`anchor_currency_matches`]) — and the anchor store itself is validated
+/// against the retained evidence it was extracted from at load.
 fn anchor_derived_phase_peaks<'a>(
     selector: &LadderVideoSelector<'a>,
     geometry: VideoAdmissionGeometry,
@@ -1238,7 +1250,7 @@ fn anchor_derived_phase_peaks<'a>(
         || anchor.mode != identity.mode
         || anchor.route != identity.route
         || anchor.provider != selector.contract.provider_id
-        || !anchor_currency_matches(selector, anchor)
+        || !anchor_currency_matches(anchor)
     {
         return None;
     }
@@ -1452,8 +1464,34 @@ impl VideoStrategySelector for LadderVideoSelector<'_> {
                 ));
                 return VideoRungSelection::Undecidable;
             };
+            // sc-22508: the activation slice of the peak THIS ITERATION actually constructed, not
+            // the headroom the selector was handed.
+            //
+            // Both floor shapes reaching here decompose, and neither decomposes as `headroom`:
+            // `floor_phase_peaks` builds `estimate_floor_weights_bytes + headroom_bytes`, while
+            // `profiled_floor_phase_peaks` may raise that to the provider's own
+            // `checked_composed_peak`, whose activation slice is `profiled - weights` and can be
+            // multiples of the generic headroom (a 55 GiB profiled peak over 20 GiB of weights
+            // carries 35 GiB of activation, not 18). The peak is then reduced by
+            // `attributable_resident_bytes`, which credits already-resident WEIGHTS — so the
+            // counted-weights term shrinks and the activation term does not.
+            //
+            // Deriving it as `peak - counted_weights` gets both shapes right by construction and
+            // can never exceed the peak it grades, which a declared constant can (warm path, small
+            // floor). Fitted-curve and anchor-derived peaks are phase-resolved and carry no split.
+            let unmodeled_activation_bytes =
+                matches!(basis, CandidateBasis::EstimateFloor).then(|| {
+                    let counted_weights =
+                        crate::mlx_fit_gate::estimate_floor_weights_bytes(self.contract, &engaged)
+                            .saturating_sub(self.attributable_resident_bytes);
+                    predicted_peak_bytes.saturating_sub(counted_weights)
+                });
             if strategy == MemoryStrategy::Resident {
-                self.resident_floors.push((geometry, predicted_peak_bytes));
+                self.resident_floors.push((
+                    geometry,
+                    predicted_peak_bytes,
+                    unmodeled_activation_bytes,
+                ));
             }
             let evidence = crate::mlx_fit_gate::estimate_evidence(
                 self.contract,
@@ -1474,6 +1512,7 @@ impl VideoStrategySelector for LadderVideoSelector<'_> {
                 closure_digest,
                 curve_id,
                 profile_revision,
+                unmodeled_activation_bytes,
             ));
         }
         if synthesized.is_empty() {
@@ -1483,11 +1522,23 @@ impl VideoStrategySelector for LadderVideoSelector<'_> {
         let candidates = synthesized
             .iter()
             .map(
-                |(selection, evidence, _, basis, closure_digest, _, _)| Candidate {
+                |(selection, evidence, _, basis, closure_digest, _, _, activation)| Candidate {
                     selection: *selection,
                     evidence,
                     closure_digest,
                     basis: *basis,
+                    // sc-22508: derived at the peak's construction site above, for BOTH lanes.
+                    //
+                    // The declaration is not an MLX privilege. A candle floor decomposes exactly as
+                    // an MLX one does — `floor_phase_peaks` is lane-blind — and declaring the split
+                    // is what makes the allowance track the term instead of the peak. What differs
+                    // between the lanes is the FRACTION, and that difference lives where the
+                    // measurement lives: `ladder_margin_policy::floor_envelope_allowance` charges
+                    // MLX's measured allocator envelope (17%) and candle's deterministic accounting
+                    // residual (2%). Withholding the declaration here so candle fell back to a
+                    // whole-peak spread would have been choosing a margin by magnitude, which is
+                    // exactly what E3 retires.
+                    unmodeled_activation_bytes: *activation,
                 },
             )
             .collect::<Vec<_>>();
@@ -1530,7 +1581,7 @@ impl VideoStrategySelector for LadderVideoSelector<'_> {
                     curve_id = synthesized
                         .iter()
                         .find(|(candidate, ..)| candidate.strategy == selection.strategy)
-                        .and_then(|(_, _, _, _, _, curve_id, _)| *curve_id)
+                        .and_then(|(_, _, _, _, _, curve_id, _, _)| *curve_id)
                         .unwrap_or("none"),
                     needed_gb,
                     available_gb,
@@ -1647,7 +1698,7 @@ pub(crate) fn packaged_video_evidence_covers_request(
 ///
 /// This mirrors [`anchor_derived_phase_peaks`]'s identity and currency guards exactly. A gate that
 /// admitted a request the derivation then refuses would only push it to the floor, but a gate that
-/// stayed open across a staled calibration would state the wrong thing about the evidence.
+/// stayed open across a moved loader closure would state the wrong thing about the evidence.
 fn anchor_evidence_covers_request(
     anchors: Option<&sceneworks_core::memory_anchor::MemoryAnchorStore>,
     contract: &MemoryProviderContract,
@@ -1680,10 +1731,7 @@ fn anchor_evidence_covers_request(
                 && anchor.mode == request.mode
                 && anchor.route == request.route
                 && anchor.provider == contract.provider_id
-                && contract.calibration.as_ref().is_some_and(|calibration| {
-                    calibration.abi == gen_core::MEMORY_CALIBRATION_ABI
-                        && calibration.fingerprint == anchor.source.calibration_fingerprint
-                })
+                && anchor_currency_matches(anchor)
         })
 }
 
@@ -1875,9 +1923,11 @@ fn admit_video_generation_with_curves_and_profiles(
             geometry,
             ..
         } => {
-            let Some(resident_floor_bytes) = resident_floors
+            let Some((resident_floor_bytes, resident_floor_activation_bytes)) = resident_floors
                 .iter()
-                .find_map(|(graded, bytes)| (*graded == geometry).then_some(*bytes))
+                .find_map(|(graded, bytes, activation)| {
+                    (*graded == geometry).then_some((*bytes, *activation))
+                })
             else {
                 tracing::error!(
                     event = "video_memory_resident_floor_lost",
@@ -1896,7 +1946,17 @@ fn admit_video_generation_with_curves_and_profiles(
             if refusal_is_a_margin_artifact(
                 needed_gb,
                 resident_floor_bytes,
-                crate::memory_strategy::estimate_margin(contract.backend.backend_kind()),
+                crate::memory_strategy::floor_admitted_peak_bytes(
+                    contract.backend.backend_kind(),
+                    resident_floor_bytes,
+                    // The term the resident candidate ITSELF declared, carried out of the selector
+                    // rather than reconstructed here (sc-22508). Reconstructing it from
+                    // `request.headroom_bytes` was wrong for exactly the peaks that matter: a
+                    // provider decode profile raises the peak above weights+headroom, and a warm
+                    // resident credit lowers it, so the mirror and production could disagree on the
+                    // graded ceiling with nothing to catch it.
+                    resident_floor_activation_bytes,
+                ),
                 runtime.selector_budget().and_then(Budget::effective_gb),
             ) {
                 tracing::info!(
@@ -2320,17 +2380,16 @@ fn curve_evidence_covers_request(
 fn refusal_is_a_margin_artifact(
     needed_gb: f64,
     resident_floor_bytes: u64,
-    estimate_margin: f64,
+    admitted_floor_bytes: u64,
     available_gb: Option<f64>,
 ) -> bool {
     let Some(available_gb) = available_gb else {
         return false;
     };
-    // Widen with the SAME integer-byte helper `select_strategy` widened the candidate with, so the
-    // two sides of the comparison are produced by one conversion rather than two roundings.
-    let widened_floor_gb = crate::memory_strategy::peak_bytes_to_gb(
-        crate::memory_strategy::widened_peak_bytes(resident_floor_bytes, estimate_margin),
-    );
+    // The caller produces `admitted_floor_bytes` through the SAME policy function `select_strategy`
+    // graded the floor candidate with (sc-22508), so the two sides of the comparison are produced
+    // by one conversion rather than two roundings.
+    let widened_floor_gb = crate::memory_strategy::peak_bytes_to_gb(admitted_floor_bytes);
     let floor_gb = crate::memory_strategy::peak_bytes_to_gb(resident_floor_bytes);
     needed_gb <= widened_floor_gb && floor_gb <= available_gb
 }
