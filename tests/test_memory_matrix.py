@@ -47,7 +47,7 @@ def test_generated_memory_matrix_is_schema_valid():
     matrix_validator().validate(load_matrix())
 
 
-def test_matrix_accounts_for_all_models_and_pinned_mlx_staged_coverage():
+def test_matrix_accounts_for_all_models_and_mlx_staged_coverage_is_consistent():
     matrix = load_matrix()
     # sc-18815: the universe is modality-aware, so the census is too. `imageModels` was REMOVED
     # rather than left holding the whole-universe total under a one-modality name. Derive the
@@ -67,7 +67,10 @@ def test_matrix_accounts_for_all_models_and_pinned_mlx_staged_coverage():
     # asserted structurally rather than as pinned populations (the SC-18218
     # shape-over-population ruling); the denominators are the modality totals derived above.
     assert matrix["summary"]["mlxStagedStaticCoverageDenominator"] == len(image_ids)
-    assert 0 < matrix["summary"]["videoMlxStagedStaticCoverage"] < len(video_ids)
+    # sc-22512: a coverage NUMERATOR is a count of declarations that happen to exist, so it may
+    # legitimately be zero — a catalog whose video lane declares no staged residency is a catalog
+    # nobody has measured yet, not a broken document. Only the containment relation is asserted.
+    assert 0 <= matrix["summary"]["videoMlxStagedStaticCoverage"] <= len(video_ids)
     assert matrix["summary"]["videoMlxStagedStaticCoverageDenominator"] == len(video_ids)
     assert len(matrix["models"]) == len(matrix["modelSlices"])
     assert {model["id"] for model in matrix["models"]} == set(matrix["modelSlices"])
@@ -77,8 +80,8 @@ def test_matrix_accounts_for_all_models_and_pinned_mlx_staged_coverage():
     # itself is recomputed from the coverage rows below rather than pinned here.
     assert (
         0
-        < matrix["summary"]["mlxStagedStaticCoverage"]
-        < matrix["summary"]["mlxStagedStaticCoverageDenominator"]
+        <= matrix["summary"]["mlxStagedStaticCoverage"]
+        <= matrix["summary"]["mlxStagedStaticCoverageDenominator"]
     )
 
     # SC-18826 closes the only wholly-unrouted defect: VACE-Fun already had a manifest entry and real
@@ -179,16 +182,13 @@ def test_matrix_accounts_for_all_models_and_pinned_mlx_staged_coverage():
     # runtime catching is the chosen tradeoff for the residue. The generator carries the same note beside
     # `assertMlxStagedCoverageIsStructurallyConsistent`, which is where the mirror of these assertions
     # runs against the pre-publication document.
-    assert "flux2_dev" in mlx_staged, (
-        "sc-20799 retired the SC-18218 resident-only pin: at inference ebcdc7da7 all three Dev MLX "
-        "providers declare selectable Sequential staged residency, so flux2_dev is census-required"
-    )
-    assert "bernini_image" in mlx_staged, (
-        "inference sc-18609 made bernini_image's declared MLX rung-4 ladder reachable"
-    )
-    assert 0 < len(mlx_staged) < len(image_ids), (
-        "staged coverage is partial by construction; a total census would mean the exclusions vanished"
-    )
+    # sc-22512 removed the two named-entry census requirements (`flux2_dev` and `bernini_image` were
+    # each asserted INTO `mlx_staged`) and the "partial by construction" band. All three reddened on
+    # the ABSENCE of a declaration: an inference pin that stops advertising selectable Sequential
+    # residency for one provider, or a catalog whose whole image lane declares none, is a lane
+    # nobody has measured — not a defect in this document. What survives is the containment
+    # relation, which holds at any coverage level including zero.
+    assert mlx_staged <= image_ids
     # Staged coverage is a property of the RESOLVED ROUTE, so every entry sharing a route agrees.
     # An entry drifting away from its own route siblings is exactly what a bumped count cannot see.
     #

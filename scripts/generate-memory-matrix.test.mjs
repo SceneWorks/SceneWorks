@@ -283,17 +283,31 @@ test("ownership lookups resolve per backend and refuse to invent a twin", () => 
   assert.equal(familyStory("chroma1_hd", "candle"), 17410);
   assert.throws(() => modelStory("not_a_model", "mlx"), /no owning model story/);
 
-  // The routed image inventory is dual-backend throughout: 53 model twins across 20 families.
-  const candleModels = Object.values(MODEL_STORIES).filter((stories) => stories.candle);
-  const candleFamilies = Object.values(FAMILY_STORIES).filter((stories) => stories.candle);
-  assert.equal(candleModels.length, 53);
-  assert.equal(candleFamilies.length, 20);
+  // sc-22512 removed the pinned `candleModels.length === 53` / `candleFamilies.length === 20`. They
+  // were frozen catalog populations and carried nothing beyond the numbers: a catalog that grows,
+  // or one entry that ships mlx-only before its Candle lane exists, reddened them without anything
+  // being wrong with the rows present. The claim worth keeping — an entry advertising `candle` must
+  // have a real Candle twin, and an mlx-only entry must not carry one — belongs to
+  // `assertTwinCoverage`, which reds on that CONTRADICTION at any population size and is exercised
+  // by its own throw-mutation cases below.
 });
 
 test("the ownership tables scope every story to exactly one backend", () => {
-  // 53 model stories and 20 family stories per backend, all distinct.
+  // One scope entry per (story, backend) across both tables, all distinct.
+  //
+  // sc-22512 replaced the pinned `146` with that relation, derived from the tables themselves: the
+  // number was 2*(53+20) and reddened on any catalog growth, while the claim worth keeping is that
+  // no story id is shared between two owners — which the throw at the bottom of this test pins.
   const scope = buildStoryBackendScope();
-  assert.equal(scope.size, 146);
+  const scopedStoryIds = [
+    ...Object.values(MODEL_STORIES),
+    ...Object.values(FAMILY_STORIES),
+  ].flatMap((stories) => Object.values(stories));
+  assert.equal(
+    scope.size,
+    scopedStoryIds.length,
+    "every declared (story, backend) pair resolves to exactly one scope entry",
+  );
   assert.deepEqual(scope.get(15475), { backend: "mlx", role: "model story", owner: "boogu_image_turbo" });
   assert.deepEqual(scope.get(15827), {
     backend: "candle",
@@ -459,7 +473,19 @@ test("twin coverage reconciles against the catalog, not an absolute story count"
     id,
     backends: stories.candle ? ["mlx", "candle"] : ["mlx"],
   }));
-  assert.deepEqual(assertTwinCoverage(models), { dualModels: 53, dualFamilies: 20 });
+  // sc-22512: the pinned `{dualModels: 53, dualFamilies: 20}` is replaced by the same figures
+  // derived from the fixture the call was handed. The pinned pair reddened on a catalog that grew;
+  // the claim worth keeping is that `assertTwinCoverage` REPORTS the dual population it was given,
+  // which holds at any size including zero. The throw-mutation cases below are untouched — those
+  // red on a declaration that contradicts itself, not on one that is missing.
+  assert.deepEqual(assertTwinCoverage(models), {
+    dualModels: models.filter((model) => model.backends.includes("candle")).length,
+    dualFamilies: new Set(
+      models
+        .filter((model) => model.backends.includes("candle"))
+        .map((model) => familyGroup(model.id)),
+    ).size,
+  });
 
   // A dual model with a missing Candle twin must stop generation, not quietly reuse the MLX story.
   assert.throws(
@@ -494,7 +520,7 @@ test("twin coverage reconciles against the catalog, not an absolute story count"
   // Two dual models sharing one Candle twin would under-count the split silently.
   assert.throws(
     () => assertTwinCoverage(models, { ...MODEL_STORIES, boogu_image: { mlx: 15474, candle: 15910 } }),
-    /53 dual models map onto only 52 distinct Candle model twins/,
+    /^Error: (\d+) dual models map onto only (?!\1\b)\d+ distinct Candle model twins$/,
   );
 });
 
@@ -927,14 +953,25 @@ test("the universe is modality-aware, and every video entry is IN it (sc-18815)"
     .models.filter((model) => model.type === "video" && !outOfMatrixEntries.has(model.id))
     .map((model) => model.id)
     .sort();
-  assert.equal(manifestVideo.length, 11);
-
+  // sc-22512 removed the three pinned populations here (11 manifest video entries, 53 image
+  // entries, and the `{image: 53, video: 11}` summary breakdown). Every one of them reddened on a
+  // catalog that SHIPPED AN EXTRA MODEL — the exact case that story has to let through. The claim
+  // they were carrying is a partition, and it is stated below from the catalog's own enumeration:
+  // the manifest video ids and the universe's video ids are the same set (both directions), and the
+  // published breakdown is the recomputed truth about whatever the catalog contains.
   const matrix = await buildMatrix({ publish: false });
   const inMatrix = matrix.models.filter((model) => model.modality === "video").map((model) => model.id);
   assert.deepEqual(inMatrix.sort(), manifestVideo, "every manifest video entry is in the universe");
-  assert.equal(matrix.models.filter((model) => model.modality === "image").length, 53);
   assert.equal(matrix.summary.catalogEntries, matrix.models.length);
-  assert.deepEqual(matrix.summary.catalogEntriesByModality, { image: 53, video: 11 });
+  assert.deepEqual(matrix.summary.catalogEntriesByModality, {
+    image: matrix.models.filter((model) => model.modality === "image").length,
+    video: matrix.models.filter((model) => model.modality === "video").length,
+  });
+  assert.equal(
+    matrix.summary.catalogEntriesByModality.image + matrix.summary.catalogEntriesByModality.video,
+    matrix.summary.catalogEntries,
+    "image and video partition the catalog with nothing counted twice or lost",
+  );
 
   // Cells exist for every routed video lane, on every rung — the "per-rung coverage rows" the story
   // asks for — and their states are the ordinary vocabulary, not a video-specific one.
@@ -1188,8 +1225,21 @@ test("the VACE-Fun routing defect is closed and the wholly-unrouted guard stays 
   // The manifest and engine were always real. SC-18826 adds the missing MLX-only VideoModelCaps row,
   // so the old temporary exception must disappear and the route must now produce coordinates.
   const matrix = await buildMatrix({ publish: false });
-  assert.deepEqual(matrix.summary.unroutedEntries, []);
-  assert.deepEqual([...UNROUTED_CATALOG_ENTRIES], []);
+  // sc-22512 dropped the two "the debt register is empty" rosters (`unroutedEntries` and
+  // `UNROUTED_CATALOG_ENTRIES` both deepEqual `[]`). They pinned a frozen population of exceptions:
+  // adding a model that has no routing row yet reddened the suite instead of letting the entry ship
+  // as unrouted-and-declared. The mechanism that matters — an unrouted entry must be DECLARED, and
+  // an undeclared one still throws — is exercised by the fail-closed cases below and by
+  // `assertUnroutedEntriesAreDeclared`. What is asserted here instead is the both-directions
+  // agreement between the published register and the declared one, which holds at any size.
+  assert.deepEqual(
+    matrix.summary.unroutedEntries.map((entry) => entry.id).sort(),
+    [...UNROUTED_CATALOG_ENTRIES]
+      .filter(([id]) => matrix.models.some((model) => model.id === id))
+      .map(([id]) => id)
+      .sort(),
+    "the published unrouted register is exactly the declared one, restricted to the universe",
+  );
   const vace = matrix.models.find((model) => model.id === "wan_2_2_vace_fun_14b");
   assert.deepEqual(vace.backends, ["mlx"]);
   assert.ok(Object.keys(vace.axes).length > 0);
@@ -1250,7 +1300,8 @@ test("video cells name no per-entry story, and their family owner is the real on
   // SC-15812's defect reached from the other direction, so it is checked with the same force.
   const matrix = await buildMatrix({ publish: false });
   const video = matrix.models.filter((model) => model.modality === "video");
-  assert.equal(video.length, 11);
+  // sc-22512: the pinned `11` was a frozen catalog population and reddened on an added entry. The
+  // ownership rule below is universally quantified over the video lane, whatever its size.
   for (const model of video) {
     for (const backend of model.backends) {
       assert.equal(model.owningModelStories[backend], null);

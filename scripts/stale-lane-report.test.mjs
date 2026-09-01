@@ -388,7 +388,9 @@ test("the located binding population covers every closure digest the manifest ca
   const { manifest } = await loadSources();
   const located = manifestBindings({ manifestBody, manifest });
   const occurrences = digestOccurrences(manifestBody.split("\n")).length;
-  assert.ok(occurrences > 0, "the manifest carries closure digests at all");
+  // sc-22512 / E8: no `occurrences > 0` guard. "The manifest carries closure digests at all" reds
+  // on a lane's declaration being ABSENT, which measurement absence is allowed to be. The
+  // derivation below is the real question and holds at zero as well as at forty.
   assert.equal(located.length, occurrences, "every manifest closure digest is in the population");
   assert.ok(located.every((item) => /^(mlx|candle):.+/.test(item.lane)));
   assert.ok(located.every((item) => item.digest === null || /^[0-9a-f]{64}$/.test(item.digest)));
@@ -462,16 +464,13 @@ test("the real corpus report is internally consistent, whatever the corpus curre
       .map((lane) => lane.lane),
     "the real flagship omission list must be derived from the same three gates",
   );
-  assert.deepEqual(
-    report.flagshipApparatusCoverage.lanes.map((lane) => lane.lane),
-    ["mlx:krea_2_turbo", "mlx:sdxl", "mlx:z_image_turbo"],
-    "the bounded recommended MLX T2I census must stay manifest-derived and complete",
-  );
-  assert.deepEqual(
-    report.flagshipApparatusCoverage.missingLanes,
-    [],
-    "all three recommended MLX T2I lanes must have closure, plan, and adapter apparatus",
-  );
+  // sc-22512 / E8: the frozen ["mlx:krea_2_turbo","mlx:sdxl","mlx:z_image_turbo"] roster and the
+  // `missingLanes deepEqual []` completeness pin were removed. The first is an exact expected set —
+  // it reds when the recommended census gains or loses a member. The second reds when a lane has no
+  // closure declaration, no plan entry, or no capture arm; that is measurement apparatus being
+  // ABSENT, which E8 forbids CI from failing on. The derivation directly above (missingLanes is
+  // exactly the not-covered lanes, computed from the same three gates) is unchanged and still
+  // grades the data that IS present.
   // Declared+unmeasured+armless lanes live ONLY in `uncapturableLanes` (status "uncapturable");
   // measured armless lanes stay in the staleness partition and appear in `uncapturableLanes` as a
   // second, cross-cutting membership.
@@ -617,7 +616,12 @@ test("a closure table derived at an older pin still grades, but a malformed one 
   // the report, so replacing the `validatedInferenceClosures` call inside `loadSources` with a raw
   // `closures.providers` read kept every test green (mutation-verified). The refusals below are
   // therefore driven through `loadSources`, and each one is a property a raw `.providers` read would
-  // NOT have: a malformed revision, an unusable digest, and an empty provider table.
+  // NOT have: a malformed revision and an unusable digest — both MALFORMED-PRESENT data.
+  //
+  // sc-22512 / E8: the third refusal, an EMPTY provider table, is gone. A repo that declares no
+  // provider closures is an unmeasured repo, not a broken one; every binding then reads as
+  // not-current, which is the conservative estimate. `validatedInferenceClosures` no longer throws
+  // for it, so asserting the rejection here would have re-installed the gate from the test side.
   const closures = JSON.parse(
     await readFile(path.join(ROOT, "config", "inference-provider-closures.json"), "utf8"),
   );
@@ -650,8 +654,11 @@ test("a closure table derived at an older pin still grades, but a malformed one 
   });
   await assert.rejects(loadSources(scratch), /has no usable digest/);
 
+  // And the absence case is HANDLED, not refused: an empty provider table loads, and every lane
+  // simply grades as undeclared rather than the report failing to build.
   await writeClosures({ ...closures, providers: {} });
-  await assert.rejects(loadSources(scratch), /declares no providers/);
+  const empty = buildStaleLaneReport(await loadSources(scratch));
+  assert.equal(empty.totals.declaredLanes, 0, "no declarations is a report, not a refusal");
 });
 
 test("capturability is parsed from the dispatch arms — literals, consts, and no test scaffolding", () => {

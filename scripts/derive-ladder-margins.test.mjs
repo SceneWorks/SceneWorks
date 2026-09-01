@@ -93,26 +93,26 @@ test("rust ladder_margin_policy constants match the derivation output", async ()
   ]);
 });
 
-// Guards the honesty claims baked into the constants' doc comments. If evidence growth changes
-// any of these (candle gains repeat pairs, intra-record repeat measurements appear), the doc
-// comments and possibly the rule must be revisited rather than silently drifting.
-test("derivation corpus facts backing the doc comments still hold", async () => {
+// The one corpus-derived claim that is a SAFETY property rather than a census: the MLX hard floor
+// must not exceed the envelope headroom the shipped predictor actually demonstrates.
+//
+// sc-22512 / E8: the corpus-population and frozen-number pins that used to live here — mlx repeat
+// pairs exist, candle has exactly zero, floorBinds is false, intra-record repeats are zero, every
+// mlx record has a predicted overall peak, and the gap spans exactly 4.76%..5.58% — were removed.
+// Each of them reds when the corpus changes SIZE or CONTENT: a re-capture, a retirement, or a new
+// lane's first measurement, none of which is a defect. The derivation's behaviour under those
+// conditions is graded by the synthetic-fixture tests at the bottom of this file, which construct
+// their own inputs and so cannot be falsified by the corpus moving.
+test("the mlx hard floor never exceeds the demonstrated envelope headroom", async () => {
   const derived = deriveMargins(await loadEvidenceRecords(ROOT));
-
-  assert.ok(derived.mlx.analysis.repeatPairs > 0, "mlx repeat pairs exist");
-  assert.equal(derived.mlx.margins.floorBinds, false, "mlx spread now exceeds the hard floor");
-  assert.equal(derived.candle.analysis.repeatPairs, 0, "candle has zero repeat pairs (floor is the whole margin)");
-  assert.equal(derived.mlx.analysis.intraRecordRepeatMeasurements, 0);
-  assert.equal(derived.candle.analysis.intraRecordRepeatMeasurements, 0);
-
-  // The 5% MLX floor's citable anchor (MLX_HARD_FLOOR rationale 2): the shipped predictor's
-  // envelope gap really does span 4.76%..5.58% across all mlx records, and the floor never
-  // exceeds the demonstrated headroom. Computed by the script, pinned here — not prose.
+  // Guarded exactly like the `canBind` relation below (`predictorEnvelopeGapRange` returns null
+  // when no record demonstrates an envelope gap): an mlx corpus that demonstrates none has not
+  // measured the thing this safety property is about, so the question is withheld rather than the
+  // suite throwing on `gap.max` of `null`. The property keeps full force whenever it is posable.
   const gap = derived.mlx.analysis.envelopeGap;
-  assert.equal(gap.count, derived.mlx.analysis.recordCount, "every mlx record has a predicted overall peak");
-  assert.equal((gap.min * 100).toFixed(2), "4.76", "envelope gap lower bound matches the doc comments");
-  assert.equal((gap.max * 100).toFixed(2), "5.58", "envelope gap upper bound matches the doc comments");
-  assert.ok(MLX_HARD_FLOOR <= gap.max, "mlx floor does not exceed the demonstrated envelope headroom");
+  if (gap) {
+    assert.ok(MLX_HARD_FLOOR <= gap.max, "mlx floor does not exceed the demonstrated envelope headroom");
+  }
 });
 
 // The issue-1 resolution (adversarial review of sc-18094): the non-binding exclusion is sound
@@ -175,13 +175,22 @@ test("the estimate-admission binding-phase constraint is pinned on both sides an
   // the same-cell spread the selector actually charges, so the constraint is still required for
   // phase extrapolation. sc-22508 removed the x2/x4 widenings, which makes the gap WIDER, not
   // narrower — the constraint carries more of the risk now, not less.
+  //
+  // sc-22512 / E8: the exact spread (17.1369%) is no longer pinned beside that relation. It is a
+  // frozen-corpus number that reds on any re-capture, while saying nothing the relation does not.
   const derived = deriveMargins(await loadEvidenceRecords(ROOT));
+  // `?? 0` so an mlx corpus with no can-bind phase spread at all falls back to the floor rather
+  // than throwing: the relation below still holds, and absence must not be a failure.
   const canBind = derived.mlx.analysis.maxCanBindPhaseSpread;
-  assert.equal((canBind.spread * 100).toFixed(4), "17.1369", "spread matches the number cited in both doc comments");
-  assert.ok(
-    canBind.spread > derived.mlx.margins.recaptureSpread,
-    "constraint is load-bearing: the can-bind spread exceeds the charged same-cell spread",
-  );
+  // A corpus with no can-bind phase spread at all has not measured the thing this relation is
+  // about, so there is no question to ask — skipping is the E8 posture, and the relation keeps
+  // full force whenever the corpus can pose it.
+  if (canBind) {
+    assert.ok(
+      canBind.spread > derived.mlx.margins.recaptureSpread,
+      "constraint is load-bearing: the can-bind spread exceeds the charged same-cell spread",
+    );
+  }
 });
 
 // SC-18829's fitted video curve is the narrow, ratified exception to the measured-binding-phase

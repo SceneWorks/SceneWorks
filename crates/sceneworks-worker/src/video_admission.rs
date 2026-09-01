@@ -1761,9 +1761,33 @@ fn admit_video_generation_with_curves_and_profiles(
     }
     let contract = generator.memory_strategy_contract();
     if require_request_evidence && !packaged_video_evidence_covers_request(generator, &request) {
-        if bernini_memory_attempt(&request) {
+        // sc-22512 (epic 22505, E8): Bernini was the ONE lane that turned missing evidence into a
+        // refusal. Every other provider reaching this branch abstains — the gate declines to decide
+        // and the request proceeds — but a Bernini request on an uncalibrated coordinate was denied
+        // outright, so the absence of a measurement blocked the job rather than widening its
+        // estimate. That is precisely the surface this story removes.
+        //
+        // The two reasons the old refusal conflated are now separated, and only one survives:
+        //
+        //   * The request SURFACE is outside the supported domain (wrong mode, FPS, frame count,
+        //     geometry, tier, or a missing source/adapter receipt). That is a property of the
+        //     request itself, decidable without any measurement, and it still refuses — no amount
+        //     of calibration would make such a request runnable.
+        //
+        //   * The surface is fine and simply nobody has measured this coordinate. That now abstains
+        //     like every other lane: absence never blocks, it only withholds a sharper estimate, and
+        //     runtime catching (E6) is the failure posture if the request turns out too large.
+        //
+        // `contract.is_some()` is part of the predicate because `bernini_surface_is_exact` answers
+        // `false` for a MISSING contract — it has no declared surface to compare against — and a
+        // missing contract is absence, not an unsupported request. The very next branches below
+        // fail open for exactly that case; refusing here would have made this path contradict them.
+        if bernini_memory_attempt(&request)
+            && contract.is_some()
+            && !bernini_surface_is_exact(&request, contract)
+        {
             return VideoAdmissionOutcome {
-                refusal: Some(bernini_evidence_refusal(&request, contract)),
+                refusal: Some(bernini_surface_refusal()),
                 ..VideoAdmissionOutcome::default()
             };
         }
@@ -2256,26 +2280,15 @@ fn bernini_surface_is_exact(
         && overlay_is_exact
 }
 
-fn bernini_evidence_refusal(
-    request: &VideoAdmissionInputs<'_>,
-    contract: Option<&MemoryProviderContract>,
-) -> String {
-    if !bernini_surface_is_exact(request, contract) {
-        return "Bernini memory admission refused: exact surface requires V2V, R2V, RV2V, MV2V, or ADS2V [source VideoClip, reference VideoClip, ordered MultiReference 1-8 images]; FPS16, frames 45/61/77, one public geometry, supported tier, backend-specific source receipt, and the exact loaded adapter receipt".to_owned();
-    }
-    format!(
-        "Bernini {} memory admission refused: no current calibrated evidence matches route={}, lane={}, tier={:?}, geometry={}x{} frames={} references={} shape={} overlay={:?}",
-        request.mode,
-        request.route,
-        request.lane.as_key(),
-        request.tier.quant,
-        request.width,
-        request.height,
-        request.frames,
-        request.reference_count,
-        request.reference_shape,
-        request.overlay
-    )
+/// Why a Bernini request is outside the SUPPORTED SURFACE — never "why it is unmeasured".
+///
+/// sc-22512 deleted the second arm this function used to have, which formatted
+/// "no current calibrated evidence matches route=…, lane=…, tier=…" for a well-formed request on a
+/// coordinate nobody had captured. That message was the last place in video admission where the
+/// absence of a measurement produced a denial instead of an abstention (E8), and its only remaining
+/// caller now guards on `!bernini_surface_is_exact`, so the arm was also dead.
+fn bernini_surface_refusal() -> String {
+    "Bernini memory admission refused: exact surface requires V2V, R2V, RV2V, MV2V, or ADS2V [source VideoClip, reference VideoClip, ordered MultiReference 1-8 images]; FPS16, frames 45/61/77, one public geometry, supported tier, backend-specific source receipt, and the exact loaded adapter receipt".to_owned()
 }
 
 fn curve_evidence_covers_request(

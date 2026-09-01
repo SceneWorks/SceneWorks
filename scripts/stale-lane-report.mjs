@@ -109,7 +109,11 @@ export function validatedInferenceClosures(body) {
     }
     digests.set(provider, entry.digest);
   }
-  if (!digests.size) throw new Error("config/inference-provider-closures.json declares no providers");
+  // sc-22512: an EMPTY ledger no longer throws. A repo that declares no provider closures is an
+  // unmeasured repo, not a broken one — every binding then reads as not-current, which is the
+  // conservative estimate. The two throws above stay: they red on data that IS present and is
+  // malformed (no 40-hex derivation revision; an entry with no usable 64-hex digest). Carried across
+  // sc-22513, which moved this function here out of the memory-matrix generator.
   return digests;
 }
 

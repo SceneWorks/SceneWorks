@@ -1,8 +1,8 @@
 // sc-19751: prove the license coverage check REPORTS rather than gates.
 //
-// `check-license-coverage.mjs` runs its whole analysis at import time and exits, so unlike
-// `check-evidence-corpus.test.mjs` there are no pure functions to import — these drive the real
-// script as a subprocess.
+// `check-license-coverage.mjs` runs its whole analysis at import time and exits, so there are no
+// pure functions to import — these drive the real script as a subprocess. (The comparison here used
+// to name `check-evidence-corpus.test.mjs`, which sc-22512 removed along with its gate.)
 //
 // The mutation used throughout is the one that actually bit us: pointing the audited inventory at a
 // revision other than the Cargo pin, which is what EVERY inference pin bump did. Asserting on a
