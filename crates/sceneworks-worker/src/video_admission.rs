@@ -1175,28 +1175,32 @@ fn curve_decode_pass(decode_pass: VideoDecodePass) -> VideoCurveDecodePass {
     }
 }
 
-/// Whether the anchor's evidence is CURRENT for the contract being admitted.
+/// Whether the anchor's evidence is CURRENT (sc-22511, epic 22505 E9).
 ///
-/// The fitted-curve path demotes to the floor when the contract carries no calibration identity,
-/// when the calibration ABI moved, or when the fingerprint no longer names the measured closure.
-/// The anchor path must demote on exactly the same events: a pin bump or ABI change that stales the
-/// evidence cannot be allowed to leave the anchor derivation live while the fitted curve falls.
+/// The one currency question an anchor answers to: does the code that LOADS THIS MODEL on THIS
+/// backend still hash to what it hashed when the anchor was measured? The key is the digest of that
+/// model's own loader closure (`scripts/anchor-loader-closure.mjs`, checked in at
+/// `config/anchor-loader-closures.json`), so none of these can demote an anchor any more:
 ///
-/// The fingerprint compared here is the calibration campaign's, which is what the anchor's source
-/// record carries. sc-22511 re-keys currency on the model's own loader closure; this helper is the
-/// single seam that changes when it does. Do not grow a second currency notion beside it.
-fn anchor_currency_matches(
-    selector: &LadderVideoSelector<'_>,
-    anchor: &sceneworks_core::memory_anchor::MemoryAnchor,
-) -> bool {
-    selector
-        .contract
-        .calibration
-        .as_ref()
-        .is_some_and(|calibration| {
-            calibration.abi == selector.identity.calibration_abi
-                && calibration.fingerprint == anchor.source.calibration_fingerprint
-        })
+///   * an inference PIN BUMP whose loader source is unchanged — the unit contains no revision, no
+///     `Cargo.lock` and no workspace codegen input;
+///   * a SIBLING model's edit — sibling crates are not in the closure, and a sibling model in the
+///     SAME crate is a different file;
+///   * a SHARED crate the loader never reaches — reachability is walked from the loader's entry
+///     points, not linked at crate granularity;
+///   * a new CALIBRATION CAMPAIGN — the fingerprint is provenance on the anchor's source record and
+///     is deliberately no longer a currency term. That is E9's point: the anchor's evidence is the
+///     retained render, not the campaign that scheduled it.
+///
+/// Fail-closed on a missing declaration or an unparsable/version-bumped closure file: an anchor
+/// whose loader nothing tracks cannot be shown to be current, so the caller keeps its floor.
+///
+/// This is the SINGLE currency seam for anchors. [`anchor_evidence_covers_request`] calls it too —
+/// a second, inline copy of the comparison is how the pre-gate and the derivation would silently
+/// disagree about whether the evidence is live.
+fn anchor_currency_matches(anchor: &sceneworks_core::memory_anchor::MemoryAnchor) -> bool {
+    sceneworks_core::memory_anchor::packaged_anchor_loader_closures()
+        .is_some_and(|closures| anchor.is_current(closures))
 }
 
 /// Derive per-phase peaks from the measured memory anchor for this
@@ -1206,9 +1210,9 @@ fn anchor_currency_matches(
 /// Deliberately NOT hull-restricted: the whole point of the anchor + analytic derivation is that
 /// a request at a `(geometry, frames)` never measured is priced from the anchor plus architecture
 /// facts instead of falling to the phase-blind floor. Identity stays strict — model, family, route,
-/// provider, lane, tier, pipeline variant/decoder, mode, overlay-free, reference-free, and current
-/// calibration — and the anchor store itself is validated against the retained evidence it was
-/// extracted from at load.
+/// provider, lane, tier, pipeline variant/decoder, mode, overlay-free, reference-free, and a
+/// current loader closure ([`anchor_currency_matches`]) — and the anchor store itself is validated
+/// against the retained evidence it was extracted from at load.
 fn anchor_derived_phase_peaks<'a>(
     selector: &LadderVideoSelector<'a>,
     geometry: VideoAdmissionGeometry,
@@ -1241,7 +1245,7 @@ fn anchor_derived_phase_peaks<'a>(
         || anchor.mode != identity.mode
         || anchor.route != identity.route
         || anchor.provider != selector.contract.provider_id
-        || !anchor_currency_matches(selector, anchor)
+        || !anchor_currency_matches(anchor)
     {
         return None;
     }
@@ -1689,7 +1693,7 @@ pub(crate) fn packaged_video_evidence_covers_request(
 ///
 /// This mirrors [`anchor_derived_phase_peaks`]'s identity and currency guards exactly. A gate that
 /// admitted a request the derivation then refuses would only push it to the floor, but a gate that
-/// stayed open across a staled calibration would state the wrong thing about the evidence.
+/// stayed open across a moved loader closure would state the wrong thing about the evidence.
 fn anchor_evidence_covers_request(
     anchors: Option<&sceneworks_core::memory_anchor::MemoryAnchorStore>,
     contract: &MemoryProviderContract,
@@ -1722,10 +1726,7 @@ fn anchor_evidence_covers_request(
                 && anchor.mode == request.mode
                 && anchor.route == request.route
                 && anchor.provider == contract.provider_id
-                && contract.calibration.as_ref().is_some_and(|calibration| {
-                    calibration.abi == gen_core::MEMORY_CALIBRATION_ABI
-                        && calibration.fingerprint == anchor.source.calibration_fingerprint
-                })
+                && anchor_currency_matches(anchor)
         })
 }
 
