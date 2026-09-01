@@ -15,7 +15,7 @@ import { fileURLToPath } from "node:url";
 
 import { hashArtifactInventory } from "./hash-artifact-inventory.mjs";
 import {
-  canonicalJson, logicalCaseId, validateBundle,
+  canonicalJson, capturePlannedCase, logicalCaseId, validateBundle,
 } from "./memory-calibration-harness.mjs";
 
 const execFileAsync = promisify(execFile);
@@ -4392,7 +4392,7 @@ async function runCampaignEntryController({
     validateBundle: validateCampaignEntryBundle,
   };
   const config = JSON.parse(await readFile(path.join(ROOT, spec.plan), "utf8"));
-  spec.planEntry(config);
+  const { planned } = spec.planEntry(config);
   if (boundedSpec?.tier === "bf16") {
     await assertQ8ReleaseAuthorization(q8ReleaseAuthorization, q8AuditPath, {
       sceneWorksRevision, inferenceRevision,
@@ -4444,20 +4444,20 @@ async function runCampaignEntryController({
   try {
     await mkdir(runRoot, { recursive: true, mode: 0o700 });
     await assertRunRootEmpty(runRoot);
-    bundle = await runProviderPlan({
-      config,
+    bundle = await capturePlannedCase({
+      planned,
       providerCommand,
       sceneWorksRepo: ROOT,
       inferenceRepo,
-      backend: "mlx",
-      providerName: spec.provider,
       onProviderInvocation: ({ action, cases }) => {
         if (action !== "run" || cases.length !== 1
             || cases[0].logicalCaseId !== spec.logicalCaseId) {
           fail("contained LTX campaign attempted a batch or a foreign logical case");
         }
       },
-      // No checkpoint callback: no partial or pre-validation bundle may reach the output path.
+      // sc-22514: there is no checkpoint callback to pass any more — a capture is one render and
+      // writes one record at the end — which is the property this comment always wanted: no partial
+      // or pre-validation bundle can reach the output path.
       executeProvider: async (command, args, input) => {
         if (command !== providerCommand[0]
             || !isDeepStrictEqual(args, providerCommand.slice(1))) {
