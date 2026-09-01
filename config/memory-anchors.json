@@ -1,0 +1,92 @@
+{
+  "schemaVersion": 1,
+  "anchors": [
+    {
+      "id": "ltx_2_5:mlx:bf16:sc-18797-ltx-2-5-mlx-ladder-v1:imc-9c4c5fe8356bcc4f139f",
+      "modelId": "ltx_2_5",
+      "modelFamily": "ltx-video",
+      "backend": "mlx",
+      "tier": "bf16",
+      "mode": "text_to_video",
+      "overlay": null,
+      "referenceCount": 0,
+      "loadShape": "eager_materialization",
+      "source": {
+        "path": "docs/calibration/sc-18791/ltx25-mlx-evidence.seed.json",
+        "sha256": "6038f39e21feaa5fcde9490c7a0791a2906bff6695386f734c013569de77b725",
+        "recordId": "imc-9c4c5fe8356bcc4f139f",
+        "calibrationFingerprint": "sc-18797-ltx-2-5-mlx-ladder-v1"
+      },
+      "geometry": {
+        "width": 704,
+        "height": 1280,
+        "frames": 449,
+        "fps": 30
+      },
+      "phaseActivePeakBytes": {
+        "conditioning": 45472780950,
+        "denoise": 64442151098,
+        "decode": 79539453812
+      },
+      "overallAllocatorEnvelopeBytes": 92135650144
+    },
+    {
+      "id": "ltx_2_5:mlx:q4:sc-18797-ltx-2-5-mlx-ladder-v1:imc-50fbdda27ed3159a6ca1",
+      "modelId": "ltx_2_5",
+      "modelFamily": "ltx-video",
+      "backend": "mlx",
+      "tier": "q4",
+      "mode": "text_to_video",
+      "overlay": null,
+      "referenceCount": 0,
+      "loadShape": "eager_materialization",
+      "source": {
+        "path": "docs/calibration/sc-18791/ltx25-mlx-evidence.seed.json",
+        "sha256": "6038f39e21feaa5fcde9490c7a0791a2906bff6695386f734c013569de77b725",
+        "recordId": "imc-50fbdda27ed3159a6ca1",
+        "calibrationFingerprint": "sc-18797-ltx-2-5-mlx-ladder-v1"
+      },
+      "geometry": {
+        "width": 768,
+        "height": 512,
+        "frames": 145,
+        "fps": 24
+      },
+      "phaseActivePeakBytes": {
+        "conditioning": 13166818976,
+        "denoise": 23765841366,
+        "decode": 60013908200
+      },
+      "overallAllocatorEnvelopeBytes": 62401296566
+    },
+    {
+      "id": "ltx_2_5:mlx:q8:sc-18797-ltx-2-5-mlx-ladder-v1:imc-7f8186376a9a3143ebee",
+      "modelId": "ltx_2_5",
+      "modelFamily": "ltx-video",
+      "backend": "mlx",
+      "tier": "q8",
+      "mode": "text_to_video",
+      "overlay": null,
+      "referenceCount": 0,
+      "loadShape": "eager_materialization",
+      "source": {
+        "path": "docs/calibration/sc-18791/ltx25-mlx-evidence.seed.json",
+        "sha256": "6038f39e21feaa5fcde9490c7a0791a2906bff6695386f734c013569de77b725",
+        "recordId": "imc-7f8186376a9a3143ebee",
+        "calibrationFingerprint": "sc-18797-ltx-2-5-mlx-ladder-v1"
+      },
+      "geometry": {
+        "width": 1280,
+        "height": 704,
+        "frames": 145,
+        "fps": 24
+      },
+      "phaseActivePeakBytes": {
+        "conditioning": 23406395552,
+        "denoise": 35925328080,
+        "decode": 64847765684
+      },
+      "overallAllocatorEnvelopeBytes": 69260977594
+    }
+  ]
+}

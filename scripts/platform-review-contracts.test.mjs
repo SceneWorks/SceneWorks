@@ -1053,15 +1053,17 @@ test("Rust Docker dependency layers include every memory-strategy adapter target
 
 test("Rust Docker builders copy every production generated embed from sceneworks-core", async () => {
   const coreSources = await Promise.all(
-    ["memory_calibration.rs", "video_memory_curves.rs"].map((file) =>
-      source(`crates/sceneworks-core/src/${file}`),
+    ["memory_calibration.rs", "video_memory_curves.rs", "memory_anchor.rs"].map(
+      (file) => source(`crates/sceneworks-core/src/${file}`),
     ),
   );
   const generatedEmbeds = new Set(
     [
       ...coreSources
         .join("\n")
-        .matchAll(/include_str!\("\.\.\/\.\.\/\.\.\/(docs\/generated\/[^"\n]+)"\)/g),
+        .matchAll(
+          /include_str!\("\.\.\/\.\.\/\.\.\/(docs\/(?:generated|calibration)\/[^"\n]+)"\)/g,
+        ),
     ].map((match) => match[1]),
   );
   assert(generatedEmbeds.has("docs/generated/memory-calibration-evidence.json"));
@@ -1070,12 +1072,16 @@ test("Rust Docker builders copy every production generated embed from sceneworks
     [...generatedEmbeds].some((path) => path.startsWith("docs/generated/ltx-mlx-")),
     "the promoted video-memory curve must compile at least one immutable LTX evidence source",
   );
+  assert(
+    generatedEmbeds.has("docs/calibration/sc-18791/ltx25-mlx-evidence.seed.json"),
+    "the memory-anchor store must compile its retained LTX-2.5 evidence source (sc-22507)",
+  );
 
   const dockerfile = await source("docker/rust.Dockerfile");
   for (const path of generatedEmbeds) {
     const copy = path.startsWith("docs/generated/ltx-mlx-")
       ? "COPY docs/generated/ltx-mlx-*.json ./docs/generated/"
-      : `COPY ${path} ./docs/generated/`;
+      : `COPY ${path} ./${path.slice(0, path.lastIndexOf("/") + 1)}`;
     assert.equal(
       dockerfile.split(copy).length - 1,
       2,

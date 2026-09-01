@@ -264,6 +264,13 @@ pub enum CandidateBasis {
     /// Synthesized estimate extrapolated from a measured cell's per-phase peaks (sc-18096). The
     /// caller must have already honored the binding-phase constraint before submitting it.
     EstimateFittedCurve,
+    /// Synthesized estimate derived analytically from one measured memory anchor (sc-22507,
+    /// epic 22505): activation terms linear in latent tokens, decode in voxels, bounded regimes
+    /// substituted from declared rung parameters. Unlike [`Self::EstimateFittedCurve`] it is not
+    /// hull-restricted — admitting a never-measured `(geometry, frames)` cell is its purpose —
+    /// and like [`Self::EstimateFloor`] the per-cell binding-phase constraint does not apply:
+    /// the anchor measured all three phases and the derivation prices each per phase.
+    EstimateAnchorDerived,
     /// Synthesized estimate from the weights + headroom floor — no measured cell in its
     /// extrapolation basis, so the binding-phase constraint does not apply (see the scope
     /// sentence on the constraint's doc).
@@ -272,7 +279,10 @@ pub enum CandidateBasis {
 
 impl CandidateBasis {
     pub const fn is_estimate(self) -> bool {
-        matches!(self, Self::EstimateFittedCurve | Self::EstimateFloor)
+        matches!(
+            self,
+            Self::EstimateFittedCurve | Self::EstimateAnchorDerived | Self::EstimateFloor
+        )
     }
 
     /// Stable label for tracing/telemetry.
@@ -280,6 +290,7 @@ impl CandidateBasis {
         match self {
             Self::Measured => "measured",
             Self::EstimateFittedCurve => "fitted_curve",
+            Self::EstimateAnchorDerived => "anchor_derived",
             Self::EstimateFloor => "floor",
         }
     }

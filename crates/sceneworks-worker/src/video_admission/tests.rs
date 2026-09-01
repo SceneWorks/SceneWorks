@@ -2835,3 +2835,199 @@ fn same_rung_cap_binding_carries_cap_peak_but_actual_request_geometry() {
     );
     assert!(outcome.refusal.is_none());
 }
+
+// --------------------------------------------------------------------------------------------
+// sc-22507 (epic 22505): anchor + analytic derivation. One measured anchor per
+// (model, tier, lane) prices a never-measured (geometry, frames) cell; the selector admits from
+// the derived estimate when it fits.
+// --------------------------------------------------------------------------------------------
+
+/// A conformant LTX-2.5 contract on the MLX lane whose identity matches the packaged anchors.
+fn ltx25_fixture_contract(rungs: &[MemoryStrategy]) -> MemoryProviderContract {
+    let mut contract = fixture_contract(20, 4, rungs);
+    contract.provider_id = "ltx_2_5".to_owned();
+    assert!(contract.conformance_errors().is_empty());
+    contract
+}
+
+fn ltx25_identity(expected_closure_digest: &str) -> VideoRequestIdentity<'_> {
+    VideoRequestIdentity {
+        model_id: "ltx_2_5",
+        model_family: "ltx-video",
+        route: "ltx_2_5",
+        mode: "text_to_video",
+        reference_count: 0,
+        reference_shape: "none",
+        fps: 25,
+        overlay: None,
+        lane: VideoLane::Mlx,
+        tier: tier(),
+        transformer_variant: Some(Ltx25TransformerVariant::Distilled),
+        decoder: Some(Ltx25Decoder::Conv),
+        calibration_abi: gen_core::MEMORY_CALIBRATION_ABI,
+        expected_closure_digest,
+    }
+}
+
+/// The geometry deliberately absent from the retained corpus: 640x640 was measured only at
+/// f145, and no record at any geometry was measured at 89 frames.
+fn ltx25_unmeasured_geometry() -> VideoAdmissionGeometry {
+    VideoAdmissionGeometry {
+        width: 640,
+        height: 640,
+        frames: 89,
+        decode_pass_frames: 89,
+        batch: 1,
+        decode_pass: VideoDecodePass::SinglePass,
+        role: VideoGeometryRole::Requested,
+    }
+}
+
+fn ltx25_expected_derived_peaks() -> sceneworks_core::memory_anchor::AnchorDerivedPhases {
+    let anchor = sceneworks_core::memory_anchor::packaged_memory_anchors()
+        .expect("packaged anchors load")
+        .anchor_for(
+            "ltx_2_5",
+            sceneworks_core::memory_anchor::AnchorBackend::Mlx,
+            "q8",
+        )
+        .expect("the q8 MLX anchor exists");
+    anchor
+        .derive_video_phase_peaks(sceneworks_core::memory_anchor::AnchorDeriveRequest {
+            width: 640,
+            height: 640,
+            frames: 89,
+            decode_tiled: false,
+            transformer_windowed: false,
+            deferred_materialization: false,
+        })
+        .expect("the unmeasured geometry is derivable")
+}
+
+#[test]
+fn an_unmeasured_ltx25_geometry_is_admitted_from_the_anchor_derived_estimate() {
+    let contract = ltx25_fixture_contract(&[]);
+    let expected = ltx25_expected_derived_peaks();
+
+    let mut selector = LadderVideoSelector::new(
+        ltx25_identity(crate::mlx_fit_gate::UNCALIBRATED_CLOSURE),
+        &contract,
+        budget(128.0),
+        18 * GIB,
+        0,
+    );
+    let verdict = selector.select(ltx25_unmeasured_geometry());
+    let VideoRungSelection::Selected { rung, .. } = verdict else {
+        panic!("expected an anchor-derived selection, got {verdict:?}");
+    };
+    assert_eq!(rung, StrategyRung::Resident);
+    assert_eq!(selector.selections.len(), 1);
+    // The selected candidate carries the anchor derivation, not the weights+headroom floor: the
+    // raw predicted peak is exactly the core derivation's max phase, and the evidence revision
+    // names the anchor it came from.
+    assert_eq!(
+        selector.selections[0].predicted_peak_bytes,
+        expected.peak_bytes()
+    );
+    assert_eq!(
+        selector.selections[0].evidence_revision,
+        "ltx_2_5:mlx:q8:sc-18797-ltx-2-5-mlx-ladder-v1:imc-7f8186376a9a3143ebee"
+    );
+
+    // Differential control: the SAME request without an anchor store falls back to the
+    // phase-blind floor — a different peak and the floor's evidence label — proving the anchor
+    // path, not the floor, carried the admission above.
+    let mut floored = LadderVideoSelector::new(
+        ltx25_identity(crate::mlx_fit_gate::UNCALIBRATED_CLOSURE),
+        &contract,
+        budget(128.0),
+        18 * GIB,
+        0,
+    )
+    .with_anchor_store(None);
+    let floor_verdict = floored.select(ltx25_unmeasured_geometry());
+    assert!(matches!(floor_verdict, VideoRungSelection::Selected { .. }));
+    assert_ne!(
+        floored.selections[0].predicted_peak_bytes,
+        expected.peak_bytes()
+    );
+    assert_eq!(
+        floored.selections[0].evidence_revision,
+        "video-estimate-floor-v1"
+    );
+}
+
+#[test]
+fn the_production_funnel_admits_an_unmeasured_ltx25_geometry_from_the_anchor() {
+    // The production entry point requires packaged request evidence before probing. LTX-2.5 has
+    // no fitted curve, so this passes only because the packaged anchor store covers the request;
+    // the admitted context must then carry the anchor-derived peak end-to-end.
+    let generator = fixture_generator(Some(ltx25_fixture_contract(&[])));
+    let expected = ltx25_expected_derived_peaks();
+    let mut request = inputs(89, budget(128.0), 18 * GIB);
+    request.model_id = "ltx_2_5";
+    request.route = "ltx_2_5";
+    request.width = 640;
+    request.height = 640;
+    request.fps = 25;
+    let outcome = admit_video_generation(&generator, request);
+    assert!(outcome.refusal.is_none(), "{:?}", outcome.refusal);
+    let context = outcome
+        .context
+        .expect("the anchor-covered request must reach the ladder and select");
+    assert_eq!(context.selection.strategy, MemoryStrategy::Resident);
+    assert_eq!(context.predicted_peak_bytes, expected.peak_bytes());
+    assert_eq!(
+        context.evidence_revision,
+        "ltx_2_5:mlx:q8:sc-18797-ltx-2-5-mlx-ladder-v1:imc-7f8186376a9a3143ebee"
+    );
+
+    // Control: the identical request under a model id with no anchor (and no fitted curve) is
+    // not covered by packaged evidence, so the production gate stays failed open.
+    let mut uncovered = inputs(89, budget(128.0), 18 * GIB);
+    uncovered.model_id = "ltx_2_5_nonexistent";
+    uncovered.route = "ltx_2_5";
+    uncovered.width = 640;
+    uncovered.height = 640;
+    uncovered.fps = 25;
+    assert_eq!(
+        admit_video_generation(&generator, uncovered),
+        VideoAdmissionOutcome::default(),
+        "no packaged evidence must keep the historical fail-open behavior"
+    );
+}
+
+#[test]
+fn the_anchor_derived_estimate_admits_when_it_fits_and_refuses_when_it_does_not() {
+    let contract = ltx25_fixture_contract(&[]);
+    let expected = ltx25_expected_derived_peaks();
+    let widened_gb =
+        crate::memory_strategy::peak_bytes_to_gb(crate::memory_strategy::widened_peak_bytes(
+            expected.peak_bytes(),
+            crate::ladder_margin_policy::MLX_ESTIMATE_MARGIN,
+        ));
+
+    let mut fits = LadderVideoSelector::new(
+        ltx25_identity(crate::mlx_fit_gate::UNCALIBRATED_CLOSURE),
+        &contract,
+        budget(widened_gb + 0.5),
+        18 * GIB,
+        0,
+    );
+    assert!(matches!(
+        fits.select(ltx25_unmeasured_geometry()),
+        VideoRungSelection::Selected { .. }
+    ));
+
+    let mut refused = LadderVideoSelector::new(
+        ltx25_identity(crate::mlx_fit_gate::UNCALIBRATED_CLOSURE),
+        &contract,
+        budget(widened_gb - 0.5),
+        18 * GIB,
+        0,
+    );
+    assert!(matches!(
+        refused.select(ltx25_unmeasured_geometry()),
+        VideoRungSelection::Reject { .. }
+    ));
+}

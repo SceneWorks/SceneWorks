@@ -889,6 +889,10 @@ pub(crate) struct LadderVideoSelector<'a> {
     /// The shared backend-neutral fitted-curve container. `None` is a normal fail-open state: every
     /// rung retains its pre-existing weights-plus-headroom floor candidate.
     curves: Option<&'a VideoMemoryCurveBundle>,
+    /// Measured memory anchors (sc-22507, epic 22505). When the fitted curves miss, a matching
+    /// anchor derives a per-phase estimate for the requested geometry analytically — including a
+    /// `(geometry, frames)` cell that was never measured. `None` fails open to the floor.
+    anchors: Option<&'a sceneworks_core::memory_anchor::MemoryAnchorStore>,
     /// Backend bundle resolver for the provider's load-bearing decode working set. Tests default to
     /// `None` so focused curve/floor fixtures do not accidentally inherit a real provider profile.
     decode_profile: VideoDecodeProfileResolver,
@@ -955,6 +959,7 @@ impl<'a> LadderVideoSelector<'a> {
             budget,
             headroom_bytes,
             curves,
+            anchors: sceneworks_core::memory_anchor::packaged_memory_anchors(),
             decode_profile: no_video_decode_profile,
             attributable_resident_bytes,
             accounting_error: None,
@@ -962,6 +967,17 @@ impl<'a> LadderVideoSelector<'a> {
             selections: Vec::new(),
             resident_floors: Vec::new(),
         }
+    }
+
+    /// Replace the packaged anchor store (tests only): focused floor/curve fixtures must be able
+    /// to prove the anchor path carried — or did not carry — a selection.
+    #[cfg(test)]
+    fn with_anchor_store(
+        mut self,
+        anchors: Option<&'a sceneworks_core::memory_anchor::MemoryAnchorStore>,
+    ) -> Self {
+        self.anchors = anchors;
+        self
     }
 
     fn with_profiles(
@@ -1156,6 +1172,59 @@ fn curve_decode_pass(decode_pass: VideoDecodePass) -> VideoCurveDecodePass {
     }
 }
 
+/// Derive per-phase peaks from the measured memory anchor for this `(model, tier, lane)`
+/// coordinate (sc-22507, epic 22505), for the exact regime of the candidate being graded.
+///
+/// Deliberately NOT hull-restricted: the whole point of the anchor + analytic derivation is that
+/// a request at a `(geometry, frames)` never measured is priced from the anchor plus architecture
+/// facts instead of falling to the phase-blind floor. Identity stays strict — model, family,
+/// lane, tier, mode, overlay-free, reference-free — and the anchor store itself is validated
+/// against the retained evidence it was extracted from at load.
+fn anchor_derived_phase_peaks<'a>(
+    selector: &LadderVideoSelector<'a>,
+    geometry: VideoAdmissionGeometry,
+    engaged: &[MemoryStrategy],
+) -> Option<(PhasePeaks, &'a str)> {
+    use sceneworks_core::memory_anchor::{AnchorBackend, AnchorDeriveRequest};
+
+    let store = selector.anchors?;
+    let identity = &selector.identity;
+    // The anchors were measured overlay-free with zero references; a differently-conditioned
+    // surface must not borrow them.
+    if identity.overlay.is_some() || identity.reference_count != 0 {
+        return None;
+    }
+    let backend = match identity.lane {
+        VideoLane::Mlx => AnchorBackend::Mlx,
+        VideoLane::Candle => AnchorBackend::Candle,
+    };
+    let anchor = store.anchor_for(
+        identity.model_id,
+        backend,
+        crate::mlx_fit_gate::plan_tier_key(identity.tier),
+    )?;
+    if anchor.model_family != identity.model_family || anchor.mode != identity.mode {
+        return None;
+    }
+    let derived = anchor.derive_video_phase_peaks(AnchorDeriveRequest {
+        width: geometry.width,
+        height: geometry.height,
+        frames: geometry.estimate_frames(),
+        decode_tiled: engaged.contains(&MemoryStrategy::BoundedDecode),
+        transformer_windowed: engaged.contains(&MemoryStrategy::BoundedTransformerResidency),
+        deferred_materialization: selector.contract.load_shape
+            == gen_core::LoadShape::DeferredMaterialization,
+    })?;
+    Some((
+        PhasePeaks {
+            conditioning_bytes: derived.conditioning,
+            denoise_bytes: derived.denoise,
+            decode_bytes: derived.decode,
+        },
+        anchor.id.as_str(),
+    ))
+}
+
 /// Prefer the exact fitted per-phase curve for this cell; otherwise preserve the established
 /// weights-plus-headroom floor byte-for-byte. The lookup itself owns every fail-closed identity and
 /// geometry check, including lane/closure/load-shape/mode and the measured area-by-voxel hull.
@@ -1226,6 +1295,19 @@ fn fitted_or_floor_phase_peaks<'a>(
             CandidateBasis::EstimateFittedCurve,
             evaluation.closure_digest,
             Some(evaluation.curve_id),
+            None,
+        );
+    }
+    // Anchor + analytic derivation (sc-22507): between the exact fitted curve and the
+    // phase-blind floor. A never-measured (geometry, frames) cell is priced from the one
+    // measured anchor for this (model, tier, lane); the shared selector then applies its
+    // ordinary backend estimate margin, exactly as it does for fitted-curve candidates.
+    if let Some((derived, anchor_id)) = anchor_derived_phase_peaks(selector, geometry, engaged) {
+        return (
+            derived,
+            CandidateBasis::EstimateAnchorDerived,
+            selector.identity.expected_closure_digest,
+            Some(anchor_id),
             None,
         );
     }
@@ -1508,7 +1590,39 @@ pub(crate) fn packaged_video_evidence_covers_request(
         sceneworks_core::video_memory_curves::packaged_video_memory_curves(),
         contract,
         request,
+    ) || anchor_evidence_covers_request(
+        sceneworks_core::memory_anchor::packaged_memory_anchors(),
+        request,
     )
+}
+
+/// Whether the packaged anchor store carries the measured anchor this request's `(model, tier,
+/// lane)` coordinate derives from (sc-22507). Coverage is identity-only — no geometry hull — so
+/// a never-measured `(geometry, frames)` request still reaches the ladder and its anchor-derived
+/// candidate instead of bypassing the gate.
+fn anchor_evidence_covers_request(
+    anchors: Option<&sceneworks_core::memory_anchor::MemoryAnchorStore>,
+    request: &VideoAdmissionInputs<'_>,
+) -> bool {
+    let Some(anchors) = anchors else {
+        return false;
+    };
+    if request.overlay.is_some() || request.reference_count != 0 {
+        return false;
+    }
+    let backend = match request.lane {
+        VideoLane::Mlx => sceneworks_core::memory_anchor::AnchorBackend::Mlx,
+        VideoLane::Candle => sceneworks_core::memory_anchor::AnchorBackend::Candle,
+    };
+    anchors
+        .anchor_for(
+            request.model_id,
+            backend,
+            crate::mlx_fit_gate::plan_tier_key(request.tier),
+        )
+        .is_some_and(|anchor| {
+            anchor.model_family == request.model_family && anchor.mode == request.mode
+        })
 }
 
 /// Test seam for exact fixture contracts/curves. Production always calls
