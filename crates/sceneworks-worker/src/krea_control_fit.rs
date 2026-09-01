@@ -713,6 +713,7 @@ fn fit_ladder_for_tier(
             evidence,
             closure_digest: measured_closure_digest,
             basis: crate::memory_strategy::CandidateBasis::Measured,
+            unmodeled_activation_bytes: None,
         })
         .collect::<Vec<_>>();
     // A floor is a declaration under the LIVE closure — nothing there for currency to invalidate.
@@ -721,6 +722,9 @@ fn fit_ladder_for_tier(
         evidence,
         closure_digest: &live_closure_digest,
         basis: crate::memory_strategy::CandidateBasis::EstimateFloor,
+        // sc-22508: this control-lane floor is a manifest-row declaration, not a weights+headroom
+        // split, so it declares no activation term and takes the candle whole-peak residual.
+        unmodeled_activation_bytes: None,
     }));
     match crate::memory_strategy::select_strategy(
         request,
@@ -1179,7 +1183,7 @@ mod tests {
         // CONSTANT and could never fire); the outcome it pinned was a BestEffort fallback.
         // sc-18095 (epic 18093) turns that currency into a signal: a control ladder whose provider
         // closure moved keeps serving its measured rows, graded at the candle stale-measured
-        // margin (`crate::ladder_margin_policy::CANDLE_STALE_MEASURED_MARGIN`, 2%), instead of
+        // margin (`crate::ladder_margin_policy::CANDLE_RECAPTURE_SPREAD`, 2%), instead of
         // being demoted. Both digest sides are still read rather than frozen: `expected` is the
         // live digest for `candle:krea_2_turbo_control` from the packaged closure table, and the
         // candidate carries `candle.control.inferenceClosureDigest` from the manifest. This test
@@ -1667,7 +1671,7 @@ mod tests {
         let sequential = 30.0;
         let staged_floor = sequential - HEADROOM_GB;
         let resident_floor = peak - HEADROOM_GB;
-        let margin = crate::ladder_margin_policy::CANDLE_ESTIMATE_MARGIN;
+        let margin = crate::ladder_margin_policy::CANDLE_RECAPTURE_SPREAD;
         // An effective budget between the WIDENED staged floor and the resident floor: a rung
         // priced on the staged row admits here; one clamped to the resident row cannot. Recomputed
         // from the policy margin, never a frozen literal.

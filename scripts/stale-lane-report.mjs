@@ -54,7 +54,7 @@
  *
  * MARGIN: DERIVED, NEVER RESTATED
  *
- * The widening column is `staleMeasuredMargin` from `scripts/derive-ladder-margins.mjs`, computed
+ * The widening column is `recaptureSpread` from `scripts/derive-ladder-margins.mjs`, computed
  * over the same evidence corpus this report reads. That module's constants are pinned against
  * `crates/sceneworks-worker/src/ladder_margin_policy.rs` by `scripts/derive-ladder-margins.test.mjs`,
  * so the number printed here is the number the runtime applies, and a drift on either side reds that
@@ -88,7 +88,7 @@ export const SOURCE_PATHS = Object.freeze({
 
 /** Provenance for the margin column, printed so a reader can check it rather than trust it. */
 export const MARGIN_SOURCE =
-  "scripts/derive-ladder-margins.mjs#staleMeasuredMargin (pinned against " +
+  "scripts/derive-ladder-margins.mjs#recaptureSpread (pinned against " +
   "crates/sceneworks-worker/src/ladder_margin_policy.rs by scripts/derive-ladder-margins.test.mjs)";
 
 /**
@@ -599,8 +599,8 @@ export function buildStaleLaneReport({
     const backendMargins = margins[backend]?.margins ?? null;
     // A lane the derivation does not model gets no invented margin: the impact terms fall back to
     // the raw counts so the lane still ranks, and the null is visible in the output.
-    const staleMeasuredMargin = backendMargins?.staleMeasuredMargin ?? null;
-    const weight = staleMeasuredMargin ?? 1;
+    const recaptureSpread = backendMargins?.recaptureSpread ?? null;
+    const weight = recaptureSpread ?? 1;
     const measured = bindingTally.total + recordTally.total > 0;
     const staleCount = bindingTally.stale + recordTally.stale;
     lanes.push({
@@ -640,8 +640,7 @@ export function buildStaleLaneReport({
       },
       margin: backendMargins
         ? {
-            staleMeasuredMargin: backendMargins.staleMeasuredMargin,
-            estimateMargin: backendMargins.estimateMargin,
+            recaptureSpread: backendMargins.recaptureSpread,
             hardFloor: backendMargins.hardFloor,
             source: MARGIN_SOURCE,
           }
@@ -770,16 +769,15 @@ export function formatReport(report) {
   if (report.staleLanes.length === 0) {
     out.push("No stale lanes. Every captured lane's closure digest matches the live derivation.");
   } else {
-    out.push("STALE LANES, ranked by widened admission surface (stale bindings x margin), then evidence surface:");
+    out.push("STALE LANES, ranked by widened admission surface (stale bindings x recapture spread), then evidence surface:");
     out.push("");
-    const header = ["#", "LANE", "BINDINGS", "RECORDS", "MARGIN", "ESTIMATE", "IMPACT", "CAPTURE", "MODELS"];
+    const header = ["#", "LANE", "BINDINGS", "RECORDS", "RECAPTURE", "IMPACT", "CAPTURE", "MODELS"];
     const rows = report.staleLanes.map((lane) => [
       String(lane.rank),
       lane.lane,
       `${lane.bindings.stale}/${lane.bindings.total}`,
       `${lane.records.stale}/${lane.records.total}`,
-      percent(lane.margin?.staleMeasuredMargin ?? null),
-      percent(lane.margin?.estimateMargin ?? null),
+      percent(lane.margin?.recaptureSpread ?? null),
       lane.impact.widenedAdmissionSurface.toFixed(3),
       lane.capturable ? "yes" : "NO ARM",
       lane.models.join(", ") || "(none)",

@@ -1488,6 +1488,20 @@ impl VideoStrategySelector for LadderVideoSelector<'_> {
                     evidence,
                     closure_digest,
                     basis: *basis,
+                    // sc-22508: only the weights+headroom floor decomposes into a counted term and
+                    // a flat activation allowance, and `floor_phase_peaks` built this peak as
+                    // exactly `estimate_floor_weights_bytes + headroom_bytes`. Fitted-curve and
+                    // anchor-derived peaks are phase-resolved and carry no such split.
+                    //
+                    // MLX ONLY. The headroom term earns a doubling where the modelled allowance is
+                    // a guess AND an overshoot is fatal (the MLX allocator aborts the worker). On
+                    // candle an allocation failure is a recoverable `Err` and the corpus's
+                    // deterministic live-allocation accounting bounds the residual at 2%, so
+                    // charging a whole extra headroom there would be strictly MORE conservative
+                    // than the blanket policy this story retires — which E3 does not license.
+                    unmodeled_activation_bytes: (matches!(basis, CandidateBasis::EstimateFloor)
+                        && backend == MemoryBackend::Mlx)
+                        .then_some(self.headroom_bytes),
                 },
             )
             .collect::<Vec<_>>();
@@ -1896,7 +1910,17 @@ fn admit_video_generation_with_curves_and_profiles(
             if refusal_is_a_margin_artifact(
                 needed_gb,
                 resident_floor_bytes,
-                crate::memory_strategy::estimate_margin(contract.backend.backend_kind()),
+                crate::memory_strategy::floor_admitted_peak_bytes(
+                    contract.backend.backend_kind(),
+                    resident_floor_bytes,
+                    // Mirrors the MLX-only headroom declaration on the floor candidates above, so
+                    // this guard compares against the SAME admitted ceiling the selector graded.
+                    if contract.backend.backend_kind() == MemoryBackend::Mlx {
+                        Some(request.headroom_bytes)
+                    } else {
+                        None
+                    },
+                ),
                 runtime.selector_budget().and_then(Budget::effective_gb),
             ) {
                 tracing::info!(
@@ -2320,17 +2344,16 @@ fn curve_evidence_covers_request(
 fn refusal_is_a_margin_artifact(
     needed_gb: f64,
     resident_floor_bytes: u64,
-    estimate_margin: f64,
+    admitted_floor_bytes: u64,
     available_gb: Option<f64>,
 ) -> bool {
     let Some(available_gb) = available_gb else {
         return false;
     };
-    // Widen with the SAME integer-byte helper `select_strategy` widened the candidate with, so the
-    // two sides of the comparison are produced by one conversion rather than two roundings.
-    let widened_floor_gb = crate::memory_strategy::peak_bytes_to_gb(
-        crate::memory_strategy::widened_peak_bytes(resident_floor_bytes, estimate_margin),
-    );
+    // The caller produces `admitted_floor_bytes` through the SAME policy function `select_strategy`
+    // graded the floor candidate with (sc-22508), so the two sides of the comparison are produced
+    // by one conversion rather than two roundings.
+    let widened_floor_gb = crate::memory_strategy::peak_bytes_to_gb(admitted_floor_bytes);
     let floor_gb = crate::memory_strategy::peak_bytes_to_gb(resident_floor_bytes);
     needed_gb <= widened_floor_gb && floor_gb <= available_gb
 }

@@ -7,7 +7,7 @@
 //! ESTIMATE-floor candidate —
 //! manifest `vramGbByTier`/`sequentialPeakGb` rows plus the standard headroom, never a promised
 //! unmeasured saving — graded by the shared selector behind the candle estimate margin
-//! (`crate::ladder_margin_policy::CANDLE_ESTIMATE_MARGIN`; CUDA OOM is a recoverable `Err`, so the
+//! (`crate::ladder_margin_policy::CANDLE_RECAPTURE_SPREAD`; CUDA OOM is a recoverable `Err`, so the
 //! margin is looser than MLX's). Any eligible measured candidate at the same rung supersedes the
 //! estimate, so measured-current admission is byte-for-byte unchanged; an UNCERTIFIED artifact
 //! gets no floors at all (the manifest rows describe the certified bytes, not an imported
@@ -1938,6 +1938,11 @@ fn evaluate_shared_image_inner(
                 evidence,
                 closure_digest,
                 basis: *basis,
+                // sc-22508: the candle floors here are manifest `sequentialPeakGb`/`vramGbByTier`
+                // rows, not a weights+headroom split this lane can decompose, so no activation term
+                // is declared and the selector charges the backend's whole-peak accounting residual
+                // (`CANDLE_RECAPTURE_SPREAD`). Declaring a split is sc-22509's anchor work.
+                unmodeled_activation_bytes: None,
             },
         )
         .collect::<Vec<_>>();
@@ -2928,7 +2933,7 @@ mod tests {
                 ((tier_resident_gb(tier) * BYTES_PER_GIB).ceil() as u64)
                     .max(facts.base_bytes.saturating_add(headroom_bytes)),
             );
-            let free_gb = staged_gb * (1.0 + crate::ladder_margin_policy::CANDLE_ESTIMATE_MARGIN)
+            let free_gb = staged_gb * (1.0 + crate::ladder_margin_policy::CANDLE_RECAPTURE_SPREAD)
                 + crate::vram_gate::HEADROOM_GB
                 + 0.5;
             assert!(
@@ -4242,7 +4247,7 @@ mod tests {
         // a margin re-derivation would silently move the window again.
         let staged_floor_gb = STAGED_ROW_GB + crate::vram_gate::HEADROOM_GB;
         let widened_staged_gb =
-            staged_floor_gb * (1.0 + crate::ladder_margin_policy::CANDLE_ESTIMATE_MARGIN);
+            staged_floor_gb * (1.0 + crate::ladder_margin_policy::CANDLE_RECAPTURE_SPREAD);
         let free_gb = widened_staged_gb + SELECTOR_RESERVE_GB + 0.3;
         assert!(
             free_gb - SELECTOR_RESERVE_GB < RESIDENT_PEAK_GB,
@@ -5169,7 +5174,7 @@ mod tests {
         // does not — recomputed from the policy margin, never a frozen literal.
         let staged_row_floor_gb = 2.5 + crate::vram_gate::HEADROOM_GB;
         let free_gb = staged_row_floor_gb
-            * (1.0 + crate::ladder_margin_policy::CANDLE_ESTIMATE_MARGIN)
+            * (1.0 + crate::ladder_margin_policy::CANDLE_RECAPTURE_SPREAD)
             + crate::vram_gate::HEADROOM_GB
             + 0.3;
         assert!(
