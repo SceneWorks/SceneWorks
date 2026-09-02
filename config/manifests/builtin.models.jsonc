@@ -25612,7 +25612,7 @@
             },
             "productionClosure": {
               "schemaVersion": 1,
-              "sha256": "a5137734c24b3ceb35618e0cb8c88f2144e3347f406699f1ee3208021b134918",
+              "sha256": "6fb138ea73334d08f23259d73f6e038fcf4e3281c5274d7734a22a901e9ee50d",
               "entries": [
                 {
                   "path": ".github/workflows/starvector-terminal.yml",
@@ -25621,8 +25621,8 @@
                 },
                 {
                   "path": "Cargo.lock",
-                  "byteSize": 244822,
-                  "sha256": "aba7985ee9a4bc28a9bb668e1beaeb15099750197890bc49a6a66abdf47f4e6e"
+                  "byteSize": 248799,
+                  "sha256": "14d2d53611835a3994c7b6366306b011605df9a137abcf5d80c8a4120d4ae0d7"
                 },
                 {
                   "path": "Cargo.toml",
@@ -25636,8 +25636,8 @@
                 },
                 {
                   "path": "crates/sceneworks-worker/Cargo.toml",
-                  "byteSize": 8765,
-                  "sha256": "5189795d10a943e82c27b1194aa069ae01bdbb36d214e3bd85d0038a2b88f805"
+                  "byteSize": 8839,
+                  "sha256": "cd617372a7eaa3ee8311107b5c9f461e847550b2ecb1d97f19dab300b3a8932e"
                 },
                 {
                   "path": "crates/sceneworks-worker/src/bin/starvector_terminal_lease.rs",
