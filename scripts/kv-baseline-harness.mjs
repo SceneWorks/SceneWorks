@@ -202,6 +202,24 @@ function isoTimestamp(value, name) {
   return value;
 }
 
+function compareUtcTimestamps(left, right) {
+  const parse = (value) => {
+    const match = /^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})(?:\.(\d+))?Z$/.exec(value);
+    if (!match) fail("receipt timestamps must use UTC RFC3339 form");
+    return { wholeSeconds: match[1], fraction: match[2] || "" };
+  };
+  const lhs = parse(left);
+  const rhs = parse(right);
+  if (lhs.wholeSeconds !== rhs.wholeSeconds) {
+    return lhs.wholeSeconds < rhs.wholeSeconds ? -1 : 1;
+  }
+  const width = Math.max(lhs.fraction.length, rhs.fraction.length);
+  const leftFraction = lhs.fraction.padEnd(width, "0");
+  const rightFraction = rhs.fraction.padEnd(width, "0");
+  if (leftFraction === rightFraction) return 0;
+  return leftFraction < rightFraction ? -1 : 1;
+}
+
 function gitRevision(value, name) {
   if (typeof value !== "string" || !/^[0-9a-f]{40}$/.test(value)) {
     fail(`${name} must be an immutable 40-character git revision`);
@@ -608,13 +626,15 @@ export function validateReceipt(receipt, { verifyHash = true } = {}) {
     fail(`exactly ${PHASES.length} phase samples are required`);
   }
   let workerPid;
-  let priorTimestamp = -Infinity;
+  let priorTimestamp;
   let priorFootprintPeak = -Infinity;
   let priorMlxPeak = -Infinity;
   receipt.memory.phaseSamples.forEach((sample, index) => {
     workerPid = validatePhaseSample(sample, index, workerPid);
-    const timestamp = Date.parse(sample.timestamp);
-    if (timestamp <= priorTimestamp) fail("phase sample timestamps are not strictly increasing");
+    if (priorTimestamp !== undefined
+      && compareUtcTimestamps(sample.timestamp, priorTimestamp) <= 0) {
+      fail("phase sample timestamps are not strictly increasing");
+    }
     if (sample.physFootprintPeakBytes < priorFootprintPeak) {
       fail("phys_footprint_peak decreased within one worker process");
     }
@@ -624,14 +644,23 @@ export function validateReceipt(receipt, { verifyHash = true } = {}) {
     if (sample.physFootprintBytes < sample.mlx.activeBytes) {
       fail("process physical footprint is below MLX live tensor bytes");
     }
-    priorTimestamp = timestamp;
+    priorTimestamp = sample.timestamp;
     priorFootprintPeak = sample.physFootprintPeakBytes;
     priorMlxPeak = sample.mlx.peakBytes;
   });
   if (!Array.isArray(receipt.memory.allocationEvents) || receipt.memory.allocationEvents.length === 0) {
     fail("memory allocation events are required");
   }
-  receipt.memory.allocationEvents.forEach(validateAllocationEvent);
+  receipt.memory.allocationEvents.forEach((event) => {
+    validateAllocationEvent(event);
+    const phaseIndex = PHASES.indexOf(event.phase);
+    const phaseStart = receipt.memory.phaseSamples[phaseIndex].timestamp;
+    const nextPhase = receipt.memory.phaseSamples[phaseIndex + 1];
+    if (compareUtcTimestamps(event.timestamp, phaseStart) <= 0
+      || (nextPhase && compareUtcTimestamps(event.timestamp, nextPhase.timestamp) >= 0)) {
+      fail("allocation event timestamp is outside its declared phase");
+    }
+  });
   validateCacheRelease(receipt.memory.allocationEvents);
   if (receipt.mode === "compressed" && detectFullCacheTemporary(
     receipt.memory.allocationEvents,
@@ -645,6 +674,7 @@ export function validateReceipt(receipt, { verifyHash = true } = {}) {
       !== receipt.memory.transientWorkspaceBytes) {
     fail("typed allocation events do not reconcile with memory attribution totals");
   }
+  const processStart = receipt.memory.phaseSamples[0];
   const weightsLoaded = receipt.memory.phaseSamples[1];
   const prefillPeak = receipt.memory.phaseSamples[2];
   const decodeSteady = receipt.memory.phaseSamples[4];
@@ -665,35 +695,82 @@ export function validateReceipt(receipt, { verifyHash = true } = {}) {
   if (receipt.memory.prefillPeakWindow.resetPeakBytes !== 0) {
     fail("memory.prefillPeakWindow.resetPeakBytes must be zero");
   }
-  const prefillWindowStartedAt = Date.parse(receipt.memory.prefillPeakWindow.startedAt);
-  if (prefillWindowStartedAt <= Date.parse(weightsLoaded.timestamp)
-    || prefillWindowStartedAt >= Date.parse(prefillPeak.timestamp)) {
+  const prefillWindowStartedAt = receipt.memory.prefillPeakWindow.startedAt;
+  if (compareUtcTimestamps(prefillWindowStartedAt, weightsLoaded.timestamp) <= 0
+    || compareUtcTimestamps(prefillWindowStartedAt, prefillPeak.timestamp) >= 0) {
     fail("prefill peak window must start strictly after weights-loaded and before prefill-peak");
   }
   if (receipt.memory.prefillPeakWindow.baselineActiveBytes < weightsLoaded.mlx.activeBytes) {
     fail("prefill peak window baseline is below weights-loaded MLX active bytes");
   }
+  const phaseRoleBytes = (phase, role, lifetime) => Math.max(0, ...receipt.memory.allocationEvents
+    .filter((event) => event.phase === phase
+      && event.role === role
+      && event.lifetime === lifetime)
+    .map((event) => event.bytes));
+  const phaseTransientBytes = (phase) => Math.max(0, ...receipt.memory.allocationEvents
+    .filter((event) => event.phase === phase
+      && event.lifetime === "transient"
+      && ["cache", "attention-workspace", "output"].includes(event.role))
+    .map((event) => event.bytes));
+  const prefillPersistentKvBytes = phaseRoleBytes("prefill-peak", "cache", "persistent");
+  const decodePersistentKvBytes = phaseRoleBytes("decode-steady", "cache", "persistent");
+  if (prefillPersistentKvBytes === 0
+    || prefillPersistentKvBytes > receipt.memory.persistentKvBytes
+    || decodePersistentKvBytes !== receipt.memory.persistentKvBytes) {
+    fail("phase-local persistent KV snapshots do not reconcile");
+  }
+  const prefillTransientBytes = phaseTransientBytes("prefill-peak");
+  const decodeTransientBytes = phaseTransientBytes("decode-steady");
   const prefillActiveFloor = checkedSum([
     receipt.memory.prefillPeakWindow.baselineActiveBytes,
-    receipt.memory.persistentKvBytes,
+    prefillPersistentKvBytes,
   ], "prefill active memory floor");
   const prefillPeakFloor = checkedSum([
     prefillActiveFloor,
-    receipt.memory.transientWorkspaceBytes,
+    prefillTransientBytes,
   ], "prefill peak memory floor");
-  const decodeAttributedBytes = checkedSum([
-    receipt.memory.modelWeightsBytes,
-    receipt.memory.persistentKvBytes,
-  ], "decode attributed memory");
-  if (weightsLoaded.mlx.activeBytes < receipt.memory.modelWeightsBytes
-    || decodeSteady.mlx.activeBytes < decodeAttributedBytes) {
-    fail("MLX live/peak memory does not contain the attributed weights, KV, and workspace bytes");
+  const decodeActiveFloor = checkedSum([
+    receipt.memory.prefillPeakWindow.baselineActiveBytes,
+    decodePersistentKvBytes,
+  ], "decode active memory floor");
+  const decodePeakFloor = checkedSum([
+    decodeActiveFloor,
+    decodeTransientBytes,
+  ], "decode peak memory floor");
+  if (weightsLoaded.mlx.activeBytes < processStart.mlx.activeBytes
+    || weightsLoaded.mlx.activeBytes - processStart.mlx.activeBytes
+      < receipt.memory.modelWeightsBytes) {
+    fail("weights-loaded MLX active bytes do not contain the attributed model weights");
   }
   if (prefillPeak.mlx.activeBytes < prefillActiveFloor) {
     fail("prefill MLX active bytes do not contain the window baseline and persistent KV bytes");
   }
   if (prefillPeak.mlx.peakBytes < prefillPeakFloor) {
     fail("prefill MLX peak bytes do not contain the window baseline, persistent KV, and transient workspace bytes");
+  }
+  if (decodeSteady.mlx.activeBytes < decodeActiveFloor) {
+    fail("decode MLX active bytes do not contain the window baseline and persistent KV bytes");
+  }
+  if (decodeSteady.mlx.peakBytes < decodePeakFloor) {
+    fail("decode MLX peak bytes do not contain the window baseline, persistent KV, and transient workspace bytes");
+  }
+  for (const phase of PHASES.filter((name) => !["prefill-peak", "decode-steady"].includes(name))) {
+    const transient = phaseTransientBytes(phase);
+    if (transient === 0) continue;
+    const persistent = phaseRoleBytes(phase, "cache", "persistent");
+    if (persistent === 0) {
+      fail(`${phase} transient evidence has no phase-local persistent KV snapshot`);
+    }
+    const peakFloor = checkedSum([
+      receipt.memory.prefillPeakWindow.baselineActiveBytes,
+      persistent,
+      transient,
+    ], `${phase} peak memory floor`);
+    const sample = receipt.memory.phaseSamples[PHASES.indexOf(phase)];
+    if (sample.mlx.peakBytes < peakFloor) {
+      fail(`${phase} MLX peak bytes do not contain phase-local attributed allocations`);
+    }
   }
 
   exactKeys(
