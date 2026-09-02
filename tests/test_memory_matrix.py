@@ -338,44 +338,37 @@ def test_complete_calibration_schema_fails_closed_on_adversarial_mutations():
         check=True,
         capture_output=True,
     )
-    config = {
-        "providers": [
-            {
+    # sc-22514: the anchor plan format. One entry, keyed `<modelId>:<tier>:<backend>`; the
+    # composition and every constant the adapter reads are attached by the harness, not planned.
+    anchor_key = "krea_2_turbo:q4:candle"
+    plan = {
+        "schemaVersion": 1,
+        "anchors": {
+            anchor_key: {
+                "provider": "krea_2_turbo",
+                "mode": "text_to_image",
+                "overlay": "none",
+                "geometry": {"width": 1024, "height": 1024, "batch": 1, "frames": 1},
                 "evidenceScope": "fixture",
-                "backend": "candle",
                 "loadShape": "eager_materialization",
-                "target": {
-                    "provider": "krea_2_turbo",
-                    "modelId": "krea_2_turbo",
-                    "tier": "q4",
-                    "mode": "text_to_image",
-                    "overlay": "none",
-                    "geometry": {"width": 1024, "height": 1024, "batch": 1, "frames": 1},
-                },
-                "rung": "bounded_decode",
-                "engagedRungs": ["resident", "bounded_decode"],
                 "calibrationFingerprint": "fixture-formula-v2",
                 "fixture": "fixture-seed42",
-                "cases": [
-                    {
-                        "parameters": {"decodeTileEdge": 512, "decodeOverlap": 128},
-                        "expectedResult": "passed",
-                    }
-                ],
             }
-        ]
+        },
     }
-    config_path = tmp_path / "config.json"
+    plan_path = tmp_path / "plan.json"
     output_path = tmp_path / "evidence.json"
-    config_path.write_text(json.dumps(config), encoding="utf-8")
+    plan_path.write_text(json.dumps(plan), encoding="utf-8")
     provider = ROOT / "scripts/fixtures/memory-provider-fixture.mjs"
     subprocess.run(
         [
             "node",
             "scripts/memory-calibration-harness.mjs",
-            "run",
-            "--config",
-            str(config_path),
+            "capture",
+            "--plan",
+            str(plan_path),
+            "--anchor",
+            anchor_key,
             "--provider-command",
             json.dumps(["node", str(provider)]),
             "--sceneworks-repo",
@@ -412,7 +405,16 @@ def test_complete_calibration_schema_fails_closed_on_adversarial_mutations():
         lambda record: record["observedMemory"]["decode"].update(activeBytes=-1),
         lambda record: record["repositories"]["sceneWorks"].pop("matrixSourceRevision"),
         lambda record: record["sweep"].update(cases=[]),
-        lambda record: record["sweep"]["axes"].append(copy.deepcopy(record["sweep"]["axes"][0])),
+        # sc-22514: an ANCHOR sweeps nothing, so its truthful sweep is degenerate (no axes, one
+        # unparameterized passed case). The duplicate-axis mutation is therefore written out rather
+        # than cloned from an axis that no longer exists; the schema uniqueItems closure is what is
+        # under test either way.
+        lambda record: record["sweep"].update(
+            axes=[
+                {"parameter": "decodeTileEdge", "testedValues": [512]},
+                {"parameter": "decodeTileEdge", "testedValues": [512]},
+            ]
+        ),
         lambda record: record["sweep"]["cases"].append(copy.deepcopy(record["sweep"]["cases"][0])),
         lambda record: record["quality"].update(contract=""),
         lambda record: record["hardware"].update(unexpected="closed"),
@@ -440,9 +442,11 @@ def test_complete_calibration_schema_fails_closed_on_adversarial_mutations():
             [
                 "node",
                 "scripts/memory-calibration-harness.mjs",
-                "run",
-                "--config",
-                str(config_path),
+                "capture",
+                "--plan",
+                str(plan_path),
+                "--anchor",
+                anchor_key,
                 "--provider-command",
                 json.dumps(["node", str(mutating_provider)]),
                 "--sceneworks-repo",

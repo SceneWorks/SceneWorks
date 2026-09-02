@@ -1,7 +1,7 @@
 {
   "schemaVersion": 11,
   "generatedFrom": {
-    "sceneWorksRevision": "source-tree:f888fa3fe73a5ddc27fbd913b26ffafb726fe258b244af6245f3f7733fc9cd4a",
+    "sceneWorksRevision": "source-tree:3e485117a56aff283b8124955a0bfe729eb80b77bac40a6b42af9b67eae91a8e",
     "sources": {
       "manifest": {
         "path": "config/manifests/builtin.models.jsonc",
@@ -57,7 +57,7 @@
       },
       "mlxFitGate": {
         "path": "crates/sceneworks-worker/src/mlx_fit_gate.rs",
-        "sha256": "1fa5561b8cf62627553967bfbcbf8df5f41fc4892be9db9af84fa1193b1ea081"
+        "sha256": "d6a7a634b38bc214c0bfbe8d4aca22cbc5548be75ed09ccb10b6fa04f6ec1ebe"
       },
       "memoryRouteRegistry": {
         "path": "crates/sceneworks-worker/src/memory_route_registry.rs",

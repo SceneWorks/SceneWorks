@@ -2,8 +2,15 @@ import assert from "node:assert/strict";
 import { readFile, readdir } from "node:fs/promises";
 import test from "node:test";
 
-import { buildPlans as buildLtxPlans } from "./generate-ltx-sc18946-plan.mjs";
 import { stripJsoncComments } from "./lib/jsonc.mjs";
+
+// sc-22514 deleted the SC-18946 plan GENERATOR. Its three outputs stay as retained historical
+// capture plans, so the inventory below reads them directly.
+const LTX_CAMPAIGN_PLANS = [
+  "ltx-mlx-single-pass-sweep.json",
+  "ltx-mlx-rung2-sweep.json",
+  "ltx-mlx-host-risk-probes.json",
+];
 
 async function source(path) {
   return readFile(new URL(`../${path}`, import.meta.url), "utf8");
@@ -457,22 +464,23 @@ test("windows-candle keeps the five-rung guards while decoupling provisioning", 
   assert.match(stepBody(workflow, "Resolve snapshot provisioning parameters"), resolveGate);
 });
 
-test("windows-candle captures and schema-checks the SC-21714 certifying Krea record", async () => {
+test("windows-candle captures and schema-checks the SC-21714 Krea anchor record", async () => {
   const workflow = await source(".github/workflows/windows-candle.yml");
   const capture = stepBody(
     workflow,
-    "Build and run the Candle Krea diagnostic and certifying captures",
+    "Build and run the Candle Krea anchor capture",
   );
   assert.match(capture, /CUDA_VISIBLE_DEVICES: "1"/);
-  assert.match(capture, /--fixture krea-q4-1024-seed42 --fresh-per-case/);
-  assert.match(capture, /--output "%RUNNER_TEMP%\\sc-21714-candle-certifying\.json"/);
+  // sc-22514: ONE anchor, not a fixture ladder plus a batched reuse comparison.
+  assert.match(capture, /--anchor krea_2_turbo:q4:candle/);
+  assert.match(capture, /--output "%RUNNER_TEMP%\\sc-21714-candle-anchor\.json"/);
   assert.match(
     capture,
-    /memory-calibration-harness\.mjs check --input "%RUNNER_TEMP%\\sc-21714-candle-certifying\.json"/,
+    /memory-calibration-harness\.mjs check --input "%RUNNER_TEMP%\\sc-21714-candle-anchor\.json"/,
   );
-  const upload = stepBody(workflow, "Upload raw schema-checked Candle Krea evidence");
-  assert.match(upload, /name: sc-21714-krea-certifying-\$\{\{ github\.run_id \}\}/);
-  assert.match(upload, /\$\{\{ runner\.temp \}\}\/sc-21714-candle-certifying\.json/);
+  const upload = stepBody(workflow, "Upload the raw schema-checked Candle Krea anchor");
+  assert.match(upload, /name: sc-21714-krea-anchor-\$\{\{ github\.run_id \}\}/);
+  assert.match(upload, /\$\{\{ runner\.temp \}\}\/sc-21714-candle-anchor\.json/);
 
   const adapter = await source("crates/sceneworks-memory-adapter/src/bin/candle.rs");
   assert.match(adapter, /StableIdleConfig::new\(2\.0, 5, 64, 200\)/);
@@ -922,8 +930,6 @@ test("Windows CUDA runs the Candle adapter's platform-only unit tests", async ()
     /cargo test -p sceneworks-memory-adapter --features candle --bin/,
     "a --bin selector on the TEST step drops the lib target, where the shared protocol guards live",
   );
-  assert.match(workflow, /console\.log\(JSON\.stringify\(a,null,2\)\)/);
-  assert.match(workflow, /'amortizable','unable_to_amortize'/);
 });
 
 // The MLX twin of the pin above (sc-18250). The adapter crate sits outside the workspace
@@ -1307,11 +1313,9 @@ test("macOS memory-strategy calibration dispatch is opt-in and secret-scoped", a
   // keeps its `|| github.token` fallback.
   assert.doesNotMatch(workflow, /x-access-token:/);
   assert.doesNotMatch(workflow, /GIT_CONFIG_(?:COUNT|KEY_0|VALUE_0)/);
-  assert.match(workflow, /--backend mlx/);
-  assert.match(workflow, /QWEN_SEED=15511/);
-  assert.match(workflow, /QWEN_SEED=16353/);
-  assert.match(workflow, /--fixture "qwen-image-\$\{QWEN_TIER\}-seed\$\{QWEN_SEED\}-step2"/);
-  assert.match(workflow, /--fresh-per-case/);
+  // sc-22514: the anchor key carries the backend and the tier; there is no fixture or seed to
+  // template, and no per-case scheduling flag, because a capture is one anchor.
+  assert.match(workflow, /--anchor "qwen_image:\$\{QWEN_TIER\}:mlx"/);
   assert.match(workflow, /hash-artifact-inventory\.mjs/);
   assert.match(workflow, /--raw-log-dir "\$SCENEWORKS_MEMORY_CAPTURE_DIR"/);
   assert.match(workflow, /--source-path-prefix "\$SCENEWORKS_MEMORY_SOURCE_PATH_PREFIX"/);
@@ -2953,7 +2957,8 @@ test("the LTX real-weight safety canary cannot relax or masquerade as campaign e
     campaign.indexOf("refuse_unsafe_ltx_capture(") < campaign.indexOf("ltx_load_spec("),
     "the campaign must still refuse before model-path/provider/weights access",
   );
-  const campaignRows = Object.values(buildLtxPlans()).flatMap((plan) => plan.providers);
+  const campaignRows = (await Promise.all(LTX_CAMPAIGN_PLANS.map(async (name) =>
+    JSON.parse(await source(`docs/calibration/sc-18946/${name}`)).providers))).flat();
   assert.equal(campaignRows.length, 73, "SC-20430 must explicitly inventory 73 rows");
   const ratified = campaignRows.filter((row) => row._role === "bounded_carrier_entry");
   assert.equal(ratified.length, 3, "exactly one matched bounded carrier per tier may be ratified");
