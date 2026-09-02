@@ -4924,18 +4924,17 @@
       "route": "z_image_turbo",
       "backend": "candle",
       "tier": "bf16",
-      "basis": "manifest_tier_declaration",
-      "reason": "no retained render for this cell; the catalog manifest declares a measured per-tier envelope, which is a whole-render figure with no phase decomposition",
+      "basis": "measured_envelope",
+      "reason": "the retained corpus measures this cell's overall allocator envelope but carries no per-phase decomposition, so it bounds admission without anchoring the derivation",
       "evidence": {
         "repo": null,
         "revision": null,
-        "path": "config/manifests/builtin.models.jsonc#models/z_image_turbo/candle",
-        "sha256": "f3bffe3ae3745d704caffa309c5806c0712e4a2940cb9edba9fdcf0c4f2ce9f1",
-        "recordId": null,
-        "envelopeBytes": null,
+        "path": "docs/calibration/sc-15859/z-image-turbo-bf16-candle-anchor.json",
+        "sha256": "124f7d4f9988c1626d3e914edfa3faa620115f8775781e2456dc130f6c482e5b",
+        "recordId": "imc-3cd69f2fee9e91e83b58",
+        "envelopeBytes": 16545480704,
         "values": {
-          "vramGbByTier": "32.2",
-          "sequentialPeakGb": "13.9"
+          "provider": "z_image_turbo"
         }
       }
     },
@@ -4946,18 +4945,17 @@
       "route": "z_image_turbo",
       "backend": "candle",
       "tier": "q4",
-      "basis": "manifest_tier_declaration",
-      "reason": "no retained render for this cell; the catalog manifest declares a measured per-tier envelope, which is a whole-render figure with no phase decomposition",
+      "basis": "measured_envelope",
+      "reason": "the retained corpus measures this cell's overall allocator envelope but carries no per-phase decomposition, so it bounds admission without anchoring the derivation",
       "evidence": {
         "repo": null,
         "revision": null,
-        "path": "config/manifests/builtin.models.jsonc#models/z_image_turbo/candle",
-        "sha256": "f3bffe3ae3745d704caffa309c5806c0712e4a2940cb9edba9fdcf0c4f2ce9f1",
-        "recordId": null,
-        "envelopeBytes": null,
+        "path": "docs/calibration/sc-15859/z-image-turbo-q4-candle-anchor.json",
+        "sha256": "1732064045f417bb421de01e1379cf15a3322653e21e8515ff751d654b0a35d6",
+        "recordId": "imc-b8064416c974b5008509",
+        "envelopeBytes": 11741954048,
         "values": {
-          "vramGbByTier": "18.4",
-          "sequentialPeakGb": "5.7"
+          "provider": "z_image_turbo"
         }
       }
     },
@@ -4968,18 +4966,17 @@
       "route": "z_image_turbo",
       "backend": "candle",
       "tier": "q8",
-      "basis": "manifest_tier_declaration",
-      "reason": "no retained render for this cell; the catalog manifest declares a measured per-tier envelope, which is a whole-render figure with no phase decomposition",
+      "basis": "measured_envelope",
+      "reason": "the retained corpus measures this cell's overall allocator envelope but carries no per-phase decomposition, so it bounds admission without anchoring the derivation",
       "evidence": {
         "repo": null,
         "revision": null,
-        "path": "config/manifests/builtin.models.jsonc#models/z_image_turbo/candle",
-        "sha256": "f3bffe3ae3745d704caffa309c5806c0712e4a2940cb9edba9fdcf0c4f2ce9f1",
-        "recordId": null,
-        "envelopeBytes": null,
+        "path": "docs/calibration/sc-15859/z-image-turbo-q8-candle-anchor.json",
+        "sha256": "1291f34ddfbb84de15327a814121a9f622bbaf342e52c95296e6b5870ae93581",
+        "recordId": "imc-8cda4f70f78dd33f5330",
+        "envelopeBytes": 11237588992,
         "values": {
-          "vramGbByTier": "24.2",
-          "sequentialPeakGb": "9.8"
+          "provider": "z_image_turbo"
         }
       }
     },
