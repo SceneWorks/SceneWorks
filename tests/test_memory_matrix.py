@@ -552,11 +552,13 @@ def test_anchor_currency_is_reported_beside_the_state_and_never_moves_it():
     matrix = load_matrix()
     anchored = [cell for cell in matrix["cells"] if cell["anchor"] is not None]
     assert anchored
-    assert all(isinstance(cell["anchor"]["current"], bool) for cell in anchored)
-    # The checked-in store may legitimately be all-current, all-stale, or mixed as loader content
-    # evolves. Requiring a particular distribution would turn provenance drift into measurement
-    # invalidation. The generator regression suite synthetically flips the complete population so
-    # both currency values remain covered without recapturing any measurements.
+    by_current: dict[bool, set[str]] = {}
+    for cell in anchored:
+        by_current.setdefault(cell["anchor"]["current"], set()).add(cell["state"])
+    # The currency flag is a boolean report and nothing else. Which values the checked-in store
+    # carries is provenance at this pin, not a distribution this test may freeze. The assertions
+    # below therefore re-derive every state without a currency term.
+    assert by_current and set(by_current) <= {True, False}, sorted(by_current)
     # Every anchored cell's state must re-derive from the three facts WITHOUT a currency term. An
     # anchor may land on a coordinate the architecture rules out (sc-22509 measured krea_2_turbo
     # candle q4, whose streamed-blocks overlay coordinates are structurally exempt), so the

@@ -3174,11 +3174,10 @@ fn ltx25_unmeasured_geometry() -> VideoAdmissionGeometry {
     }
 }
 
-/// `None` when the packaged store carries no CURRENT q8 dev/diffvae MLX anchor for LTX-2.5
-/// (sc-22512, E8/E9): the anchor is LOOKED UP, not required. A corpus that never measured that cell
-/// or whose measured loader closure has since changed prices the request from the analytic floor,
-/// so callers withhold their anchor-specific question instead of reddening. A CURRENT anchor that
-/// cannot derive the geometry is still a contradiction and panics.
+/// `None` when the packaged store carries no q8 dev/diffvae MLX anchor for LTX-2.5 (sc-22512,
+/// E8/E9). Currency is deliberately not part of this helper: selector tests restamp the packaged
+/// store to the live content-derived closure and must retain their anchor-path coverage when a pin
+/// changes. Only the production-funnel test asks whether the packaged anchor itself is current.
 fn ltx25_expected_derived_peaks() -> Option<sceneworks_core::memory_anchor::AnchorDerivedPhases> {
     let anchor = sceneworks_core::memory_anchor::packaged_memory_anchors()
         .expect("packaged anchors load")
@@ -3189,10 +3188,6 @@ fn ltx25_expected_derived_peaks() -> Option<sceneworks_core::memory_anchor::Anch
             Ltx25TransformerVariant::Dev,
             Ltx25Decoder::DiffVae,
         )?;
-    let closures = sceneworks_core::memory_anchor::packaged_anchor_loader_closures()?;
-    if !anchor.is_current(closures) {
-        return None;
-    }
     Some(
         anchor
             .derive_video_phase_peaks(sceneworks_core::memory_anchor::AnchorDeriveRequest {
@@ -3213,6 +3208,7 @@ fn an_unmeasured_ltx25_geometry_is_admitted_from_the_anchor_derived_estimate() {
     let Some(expected) = ltx25_expected_derived_peaks() else {
         return;
     };
+    let anchors = current_loader_anchor_store();
 
     let mut selector = LadderVideoSelector::new(
         ltx25_identity(crate::mlx_fit_gate::UNCALIBRATED_CLOSURE),
@@ -3220,7 +3216,8 @@ fn an_unmeasured_ltx25_geometry_is_admitted_from_the_anchor_derived_estimate() {
         budget(128.0),
         18 * GIB,
         0,
-    );
+    )
+    .with_anchor_store(Some(&anchors));
     let verdict = selector.select(ltx25_unmeasured_geometry());
     let VideoRungSelection::Selected { rung, .. } = verdict else {
         panic!("expected an anchor-derived selection, got {verdict:?}");
@@ -3271,6 +3268,10 @@ fn the_production_funnel_admits_an_unmeasured_ltx25_geometry_from_the_anchor() {
     let Some(expected) = ltx25_expected_derived_peaks() else {
         return;
     };
+    // The funnel reads the PACKAGED store, so its question needs the packaged anchor current.
+    if !packaged_ltx25_anchor_is_current() {
+        return;
+    }
     let mut request = inputs(89, budget(128.0), 18 * GIB);
     request.model_id = "ltx_2_5";
     request.route = "ltx_2_5";
@@ -3318,6 +3319,7 @@ fn the_anchor_derived_estimate_admits_when_it_fits_and_refuses_when_it_does_not(
     // inside the coefficients, the allocator envelope in `ANCHOR_ALLOCATOR_ENVELOPE_MARGIN`), so
     // the selector adds nothing and the admitted ceiling IS the derived peak.
     let widened_gb = crate::memory_strategy::peak_bytes_to_gb(expected.peak_bytes());
+    let anchors = current_loader_anchor_store();
 
     let mut fits = LadderVideoSelector::new(
         ltx25_identity(crate::mlx_fit_gate::UNCALIBRATED_CLOSURE),
@@ -3325,7 +3327,8 @@ fn the_anchor_derived_estimate_admits_when_it_fits_and_refuses_when_it_does_not(
         budget(widened_gb + 0.5),
         18 * GIB,
         0,
-    );
+    )
+    .with_anchor_store(Some(&anchors));
     assert!(matches!(
         fits.select(ltx25_unmeasured_geometry()),
         VideoRungSelection::Selected { .. }
@@ -3337,7 +3340,8 @@ fn the_anchor_derived_estimate_admits_when_it_fits_and_refuses_when_it_does_not(
         budget(widened_gb - 0.5),
         18 * GIB,
         0,
-    );
+    )
+    .with_anchor_store(Some(&anchors));
     assert!(matches!(
         refused.select(ltx25_unmeasured_geometry()),
         VideoRungSelection::Reject { .. }
@@ -3594,6 +3598,64 @@ fn a_model_with_zero_anchors_is_classified_gracefully_and_admitted_from_the_anal
         "a model with zero anchors must not be refused at the production admission entry: \
          {outcome:?}"
     );
+}
+
+/// Whether the packaged `q8 dev/diffvae` LTX-2.5 MLX anchor is current against its declared
+/// loader closure. `false` is a DESIGNED state (sc-22511 E8/E9): a pin bump that moves the LTX-2.5
+/// loader — sc-22414's coherence guard did exactly that — stales the packaged anchor, admission
+/// demotes that cell to the analytic floor, and the render still runs. A test that needs the
+/// PACKAGED anchor to carry a selection reports and steps aside on `false` rather than rebuilding
+/// the pin-bump-forces-re-measurement gate one level down; a test that only needs AN anchor uses
+/// [`current_loader_anchor_store`] and keeps its coverage at every pin.
+fn packaged_ltx25_anchor_is_current() -> bool {
+    let (Some(packaged), Some(closures)) = (
+        sceneworks_core::memory_anchor::packaged_memory_anchors(),
+        sceneworks_core::memory_anchor::packaged_anchor_loader_closures(),
+    ) else {
+        return false;
+    };
+    let current = packaged
+        .anchors
+        .iter()
+        .filter(|anchor| anchor.model_id == "ltx_2_5")
+        .any(|anchor| anchor.is_current(closures));
+    if !current {
+        eprintln!(
+            "note: no packaged ltx_2_5 anchor is current against its declared loader closure — \
+             the production funnel correctly prices from the analytic floor. Re-stamp or \
+             re-measure; this is a designed state, not a failure."
+        );
+    }
+    current
+}
+
+/// The packaged store with every anchor's currency key restamped to the LIVE declaration for its
+/// `(model, backend)` — the inverse of [`staled_loader_anchor_store`]. Lets a selector test prove
+/// the anchor-derived path carries a selection regardless of whether the measurement behind the
+/// packaged anchor is current at this pin: the derivation under test is the same either way, and
+/// currency itself is asserted separately (`a_foreign_identity_or_a_moved_loader_closure_…`).
+fn current_loader_anchor_store() -> sceneworks_core::memory_anchor::MemoryAnchorStore {
+    let closures = sceneworks_core::memory_anchor::packaged_anchor_loader_closures()
+        .expect("the packaged loader closures load");
+    let mut restamped: serde_json::Value =
+        serde_json::from_str(sceneworks_core::memory_anchor::PACKAGED_MEMORY_ANCHORS)
+            .expect("packaged anchors parse");
+    for anchor in restamped["anchors"]
+        .as_array_mut()
+        .expect("the store carries anchors")
+    {
+        let model_id = anchor["modelId"].as_str().expect("anchor names its model");
+        let backend = match anchor["backend"].as_str() {
+            Some("mlx") => sceneworks_core::memory_anchor::AnchorBackend::Mlx,
+            Some("candle") => sceneworks_core::memory_anchor::AnchorBackend::Candle,
+            other => panic!("unexpected anchor backend {other:?}"),
+        };
+        if let Some(digest) = closures.digest_for(model_id, backend) {
+            anchor["source"]["loaderClosureDigest"] = serde_json::json!(digest);
+        }
+    }
+    sceneworks_core::memory_anchor::load_memory_anchors(&restamped.to_string())
+        .expect("a restamped currency digest is still a well-formed store")
 }
 
 /// An anchor store whose anchors cite a loader closure that no longer matches the declaration —

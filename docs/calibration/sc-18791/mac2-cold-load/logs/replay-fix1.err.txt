@@ -1,0 +1,1 @@
+memory-strategy provider adapter: LTX-2.5 warm repeat exceeded determinism envelope: max=1.000000, mean=0.160441, rms=0.215802

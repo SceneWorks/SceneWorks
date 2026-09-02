@@ -1702,45 +1702,51 @@ test("every generated cell's state re-derives from its own three published facts
 });
 
 test("anchor CURRENCY is reported and cannot move a state (sc-22511, sc-22513)", async () => {
-  const [store, closures] = await Promise.all(
-    [SOURCE_PATHS.anchorStore, SOURCE_PATHS.anchorLoaderClosures].map(async (source) =>
-      JSON.parse(await readFile(new URL(`../${source}`, import.meta.url), "utf8")),
-    ),
+  const closures = JSON.parse(
+    await readFile(new URL(`../${SOURCE_PATHS.anchorLoaderClosures}`, import.meta.url), "utf8"),
   );
-  // The checked-in receipts may all be historical at a newer reviewed pin. Make one closure current
-  // synthetically so this invariant continues to exercise an actual currency transition without
-  // treating pin-only currency drift as a request to recapture a measurement.
-  const target = store.anchors[0];
-  const targetKey = `${target.modelId}:${target.backend}`;
-  assert.ok(closures.models[targetKey], `missing closure entry for ${targetKey}`);
-  const currentized = {
-    ...closures,
-    models: {
-      ...closures.models,
-      [targetKey]: { ...closures.models[targetKey], digest: target.source.loaderClosureDigest },
-    },
+  // The baseline must carry CURRENT anchors for the mutation below to have teeth. Whether the
+  // checked-in store is current at this pin is provenance, not this test's claim, so restamp the
+  // existing store shape to the live content-derived closure keys before staling every anchor.
+  const store = JSON.parse(
+    await readFile(new URL(`../${SOURCE_PATHS.anchorStore}`, import.meta.url), "utf8"),
+  );
+  const current = {
+    ...store,
+    anchors: store.anchors.map((anchor) => ({
+      ...anchor,
+      source: {
+        ...anchor.source,
+        loaderClosureDigest:
+          closures.models[`${anchor.modelId}:${anchor.backend}`]?.digest ??
+          anchor.source.loaderClosureDigest,
+      },
+    })),
   };
   const baseline = await buildMatrix({
     publish: false,
-    sourceOverrides: { anchorLoaderClosures: JSON.stringify(currentized) },
+    sourceOverrides: { anchorStore: JSON.stringify(current) },
   });
   // Stale EVERY anchor's loader closure at once. Currency is a report, so the state of every cell
   // must be byte-identical; only the reported `current` flags may move.
   const staled = {
-    ...currentized,
+    ...closures,
     models: Object.fromEntries(
-      Object.entries(currentized.models).map(([key, entry]) => [key, { ...entry, digest: "0".repeat(64) }]),
+      Object.entries(closures.models).map(([key, entry]) => [key, { ...entry, digest: "0".repeat(64) }]),
     ),
   };
   const mutated = await buildMatrix({
     publish: false,
-    sourceOverrides: { anchorLoaderClosures: JSON.stringify(staled) },
+    sourceOverrides: {
+      anchorStore: JSON.stringify(current),
+      anchorLoaderClosures: JSON.stringify(staled),
+    },
   });
   assert.deepEqual(
     mutated.cells.map((cell) => [cell.id, cell.state]),
     baseline.cells.map((cell) => [cell.id, cell.state]),
   );
-  assert.ok(baseline.cells.some((cell) => cell.anchor?.current === true));
+  assert.ok(baseline.cells.filter((cell) => cell.anchor).every((cell) => cell.anchor.current === true));
   assert.ok(mutated.cells.filter((cell) => cell.anchor).every((cell) => cell.anchor.current === false));
   assert.equal(mutated.summary.staleAnchors, mutated.anchors.length);
 });
