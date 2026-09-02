@@ -595,7 +595,8 @@ export function validateReceipt(receipt, { verifyHash = true } = {}) {
     receipt.memory,
     [
       "modelWeightsBytes", "persistentKvBytes", "transientWorkspaceBytes",
-      "denseTheoreticalKvBytes", "phaseSamples", "allocationEvents", "reconciliation", "release",
+      "denseTheoreticalKvBytes", "phaseSamples", "prefillPeakWindow", "allocationEvents",
+      "reconciliation", "release",
     ],
     "memory",
   );
@@ -617,7 +618,7 @@ export function validateReceipt(receipt, { verifyHash = true } = {}) {
     if (sample.physFootprintPeakBytes < priorFootprintPeak) {
       fail("phys_footprint_peak decreased within one worker process");
     }
-    if (sample.mlx.peakBytes < priorMlxPeak) {
+    if (sample.mlx.peakBytes < priorMlxPeak && sample.phase !== "prefill-peak") {
       fail("MLX peak memory decreased without a declared reset boundary");
     }
     if (sample.physFootprintBytes < sample.mlx.activeBytes) {
@@ -647,20 +648,52 @@ export function validateReceipt(receipt, { verifyHash = true } = {}) {
   const weightsLoaded = receipt.memory.phaseSamples[1];
   const prefillPeak = receipt.memory.phaseSamples[2];
   const decodeSteady = receipt.memory.phaseSamples[4];
-  const prefillAttributedBytes = checkedSum([
-    receipt.memory.modelWeightsBytes,
+  exactKeys(
+    receipt.memory.prefillPeakWindow,
+    ["startedAt", "baselineActiveBytes", "resetPeakBytes"],
+    "memory.prefillPeakWindow",
+  );
+  isoTimestamp(receipt.memory.prefillPeakWindow.startedAt, "memory.prefillPeakWindow.startedAt");
+  positiveInteger(
+    receipt.memory.prefillPeakWindow.baselineActiveBytes,
+    "memory.prefillPeakWindow.baselineActiveBytes",
+  );
+  nonnegativeInteger(
+    receipt.memory.prefillPeakWindow.resetPeakBytes,
+    "memory.prefillPeakWindow.resetPeakBytes",
+  );
+  if (receipt.memory.prefillPeakWindow.resetPeakBytes !== 0) {
+    fail("memory.prefillPeakWindow.resetPeakBytes must be zero");
+  }
+  const prefillWindowStartedAt = Date.parse(receipt.memory.prefillPeakWindow.startedAt);
+  if (prefillWindowStartedAt <= Date.parse(weightsLoaded.timestamp)
+    || prefillWindowStartedAt >= Date.parse(prefillPeak.timestamp)) {
+    fail("prefill peak window must start strictly after weights-loaded and before prefill-peak");
+  }
+  if (receipt.memory.prefillPeakWindow.baselineActiveBytes < weightsLoaded.mlx.activeBytes) {
+    fail("prefill peak window baseline is below weights-loaded MLX active bytes");
+  }
+  const prefillActiveFloor = checkedSum([
+    receipt.memory.prefillPeakWindow.baselineActiveBytes,
     receipt.memory.persistentKvBytes,
+  ], "prefill active memory floor");
+  const prefillPeakFloor = checkedSum([
+    prefillActiveFloor,
     receipt.memory.transientWorkspaceBytes,
-  ], "prefill attributed memory");
+  ], "prefill peak memory floor");
   const decodeAttributedBytes = checkedSum([
     receipt.memory.modelWeightsBytes,
     receipt.memory.persistentKvBytes,
   ], "decode attributed memory");
   if (weightsLoaded.mlx.activeBytes < receipt.memory.modelWeightsBytes
-    || prefillPeak.mlx.activeBytes < prefillAttributedBytes
-    || prefillPeak.mlx.peakBytes < prefillAttributedBytes
     || decodeSteady.mlx.activeBytes < decodeAttributedBytes) {
     fail("MLX live/peak memory does not contain the attributed weights, KV, and workspace bytes");
+  }
+  if (prefillPeak.mlx.activeBytes < prefillActiveFloor) {
+    fail("prefill MLX active bytes do not contain the window baseline and persistent KV bytes");
+  }
+  if (prefillPeak.mlx.peakBytes < prefillPeakFloor) {
+    fail("prefill MLX peak bytes do not contain the window baseline, persistent KV, and transient workspace bytes");
   }
 
   exactKeys(
