@@ -126,6 +126,29 @@ export function canonicalJson(value) {
   return JSON.stringify(stable(value), null, 2);
 }
 
+function f64SemanticValue(value) {
+  const bytes = new ArrayBuffer(8);
+  const view = new DataView(bytes);
+  view.setFloat64(0, value, false);
+  return `f64:${view.getBigUint64(0, false).toString(16).padStart(16, "0")}`;
+}
+
+function numericNormalized(value) {
+  if (typeof value === "number" && Number.isFinite(value)) return f64SemanticValue(value);
+  if (Array.isArray(value)) return value.map(numericNormalized);
+  if (value && typeof value === "object") {
+    return Object.fromEntries(
+      Object.keys(value).sort().map((key) => [key, numericNormalized(value[key])]),
+    );
+  }
+  return value;
+}
+
+/** Cross-language semantic seal: every finite number is represented by its exact f64 bits. */
+export function numericSemanticSha256(value) {
+  return sha256(JSON.stringify(numericNormalized(value), null, 2));
+}
+
 export function sha256(value) {
   const input = typeof value === "string" || Buffer.isBuffer(value)
     ? value
@@ -625,7 +648,9 @@ export function validateReceipt(receipt, { verifyHash = true } = {}) {
   if (receipt.contractHash !== QUALITY_CONTRACT_HASH) fail("quality contract hash mismatch");
   if (verifyHash) {
     digest(receipt.receiptSha256, "receipt.receiptSha256");
-    if (receipt.receiptSha256 !== sha256(receiptCore(receipt))) fail("receiptSha256 mismatch");
+    if (receipt.receiptSha256 !== numericSemanticSha256(receiptCore(receipt))) {
+      fail("receiptSha256 mismatch");
+    }
   }
 
   exactKeys(
@@ -1058,11 +1083,11 @@ export function validateReceipt(receipt, { verifyHash = true } = {}) {
     fail("warmup session/cache-state evidence is inconsistent with the coordinate");
   }
   if (warmRequired) {
-    const expectedSuiteSha256 = sha256(canonicalJson({
+    const expectedSuiteSha256 = numericSemanticSha256({
       sessionId: receipt.warmup.sessionId,
       workerPid: receipt.warmup.workerPid,
       probeEvidence: receipt.timings.compileAttribution.probeEvidence,
-    }));
+    });
     if (receipt.warmup.suiteSha256 !== expectedSuiteSha256) {
       fail("warmup suite seal is not bound to compile probe operation evidence");
     }
@@ -1078,7 +1103,7 @@ export function buildReceipt(input) {
     contractHash: QUALITY_CONTRACT_HASH,
   };
   delete receipt.receiptSha256;
-  receipt.receiptSha256 = sha256(receipt);
+  receipt.receiptSha256 = numericSemanticSha256(receipt);
   return validateReceipt(receipt);
 }
 
