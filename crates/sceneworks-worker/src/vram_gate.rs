@@ -4064,10 +4064,13 @@ mod tests {
     ///
     /// Fixture arithmetic at 896² (0.802816 Mpx; fixture curves in [`krea_fit_manifest`]), all
     /// binding phases matching the 1024² anchor record's:
-    ///   threeStage  peak 15.817 (decode-bound) → widened ×1.04 ≈ 16.450
-    ///   tiledVae    peak 15.606 (denoise)      → ≈ 16.230
-    ///   chunkedAttention peak 13.606 (denoise) → ≈ 14.150
-    ///   streamedBlocks   peak 10.606 (decode)  → ≈ 11.030
+    ///   threeStage  peak 15.817 (decode-bound) → widened ×1.02 ≈ 16.133
+    ///   tiledVae    peak 15.606 (denoise)      → ≈ 15.918
+    ///   chunkedAttention peak 13.606 (denoise) → ≈ 13.878
+    ///   streamedBlocks   peak 10.606 (decode)  → ≈ 10.818
+    ///
+    /// The ×1.02 is `ladder_margin_policy::CANDLE_RECAPTURE_SPREAD`, the `SameCellRecaptureSpread`
+    /// allowance a fitted-curve candidate carries on the candle lane (sc-22508).
     #[test]
     fn krea_turbo_unmeasured_geometry_admits_by_fitted_estimate_and_refuses_below_margin() {
         let manifest = krea_fit_manifest();
@@ -4093,7 +4096,7 @@ mod tests {
             other => panic!("896² must admit by the staged fitted estimate, got {other:?}"),
         }
 
-        // 13.2 GiB free (11.2 effective): only the deep rung's widened estimate (~11.03) fits —
+        // 13.2 GiB free (11.2 effective): only the deep rung's widened estimate (~10.82) fits —
         // and the selection must carry the measured sweep parameters and translate to the engine
         // knobs the engaged composition names.
         match fit(13.2) {
@@ -4115,21 +4118,24 @@ mod tests {
             other => panic!("only the deep estimate rung fits 11.2 GiB effective, got {other:?}"),
         }
 
-        // Margin mutation arm: at 12.9 GiB free (10.9 effective) the RAW deep-rung peak (10.606)
-        // fits but the widened one (~11.03) does not — a selector whose estimate margin is zeroed
-        // admits here and flips this arm red. The refusal quotes the widened requirement plus the
-        // 2 GiB admission headroom, recomputed from the POLICY constant so a narrower margin
-        // cannot sneak in.
-        match fit(12.9) {
+        // Margin mutation arm: a budget strictly BETWEEN the RAW deep-rung requirement (10.606 + 2)
+        // and the allowance-widened one (~10.818 + 2) — the raw peak fits there and the widened one
+        // does not, so a selector whose allowance is zeroed admits here and flips this arm red. Both
+        // the window and the quoted refusal are recomputed from the POLICY constant, so neither a
+        // narrower allowance nor a re-derivation of the constant can leave this arm silently
+        // non-discriminating (a literal budget picked for the retired blanket margin did exactly
+        // that once the per-term policy landed).
+        let streamed_peak_gb = 9.0 + 2.0 * 0.802816;
+        let widened_needed_gb = streamed_peak_gb
+            * (1.0 + crate::ladder_margin_policy::CANDLE_RECAPTURE_SPREAD)
+            + HEADROOM_GB;
+        let raw_needed_gb = streamed_peak_gb + HEADROOM_GB;
+        match fit((raw_needed_gb + widened_needed_gb) / 2.0) {
             Some(KreaTurboFit::Reject { needed_gb, .. }) => {
-                let streamed_peak_gb = 9.0 + 2.0 * 0.802816;
-                let expected = streamed_peak_gb
-                    * (1.0 + crate::ladder_margin_policy::CANDLE_RECAPTURE_SPREAD)
-                    + HEADROOM_GB;
                 assert!(
-                    (needed_gb - expected).abs() < 1e-3,
-                    "the refusal must quote the margin-widened deep-rung estimate: needed \
-                     {needed_gb}, expected {expected}"
+                    (needed_gb - widened_needed_gb).abs() < 1e-3,
+                    "the refusal must quote the allowance-widened deep-rung estimate: needed \
+                     {needed_gb}, expected {widened_needed_gb}"
                 );
             }
             other => panic!("below every widened estimate the request must reject, got {other:?}"),
@@ -4811,7 +4817,7 @@ mod tests {
         };
 
         // q8 at 12 GiB free (10 GiB effective): the streamed-blocks fitted estimate (~5.01 GiB
-        // text-bound peak, widened ~5.21) is the only rung that fits, and it must carry the
+        // text-bound peak, widened ×1.02 ≈ 5.11) is the only rung that fits, and it must carry the
         // measured strategy parameters.
         match fit("q8", 12.0) {
             Some(KreaTurboFit::Fits {
@@ -4829,12 +4835,28 @@ mod tests {
             }
             other => panic!("q8 768² must admit by fitted estimate, got {other:?}"),
         }
-        // Margin mutation arm (q8): at 7.15 GiB free (5.15 effective) the RAW streamed peak
-        // (~5.01) fits but the widened one (~5.21) does not — a selector whose estimate margin is
-        // zeroed admits here and flips this arm red. Every rung carries an eligible estimate, so
-        // the refusal is the honest margins-based `Reject`, not `Unverified`.
+        // Margin mutation arm (q8): a budget strictly BETWEEN the RAW streamed requirement and its
+        // allowance-widened one — the raw peak fits there and the widened one does not, so a
+        // selector whose allowance is zeroed admits here and flips this arm red. Every rung carries
+        // an eligible estimate, so the refusal is the honest allowance-based `Reject`, not
+        // `Unverified`. The window is read off the shipped curve and the policy constant rather
+        // than written as a literal, which is what let the retired blanket margin's budget stop
+        // discriminating when the per-term policy narrowed the widening.
+        let q8_streamed_peak_gb = krea_rung_phase_peaks(
+            &manifest,
+            "q8",
+            MemoryStrategy::BoundedTransformerResidency,
+            768,
+            768,
+            1,
+        )
+        .expect("the shipped q8 streamed rung has a curve")
+        .peak_gb();
+        let q8_between_gb = q8_streamed_peak_gb
+            * (1.0 + crate::ladder_margin_policy::CANDLE_RECAPTURE_SPREAD / 2.0)
+            + HEADROOM_GB;
         assert!(
-            matches!(fit("q8", 7.15), Some(KreaTurboFit::Reject { .. })),
+            matches!(fit("q8", q8_between_gb), Some(KreaTurboFit::Reject { .. })),
             "below the widened deep-rung estimate the q8 768² request must reject"
         );
 
