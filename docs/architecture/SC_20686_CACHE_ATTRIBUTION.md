@@ -27,16 +27,22 @@ with `--campaign`; normal generation has no observer or receipt overhead.
 
 For every arm, the adapter creates a separate `sealed-run` directory, uses it as the child working
 directory, and passes absolute sibling paths ending in `sealed-run/events.jsonl` for
-`--sc20686-events` and `sealed-run/media` for `--out`. This keeps default or explicit images and
-video frames inside the exact child-run closure. The reducer rejects command evidence when the event
-and media paths do not share that isolated parent. Provider stdout and stderr are sealed only as
-diagnostics and are never parsed as event evidence.
+`--sc20686-events` and either `sealed-run/media.png` (FLUX) or `sealed-run/media` (Wan) for `--out`.
+This keeps default or explicit images and video frames inside the exact child-run closure. Before
+that private directory is deleted, every normal-arm output is copied into the final campaign
+bundle. A canonical per-run manifest seals its output kind, relative paths, byte counts, and exact
+content hashes; the row and aggregate receipts bind both the manifest hash and each media hash.
+Cancellation arms instead seal an `absent` manifest and fail if partial media remains. The reducer
+also rejects command evidence when the event and media paths do not share the isolated parent.
+Provider stdout and stderr remain diagnostics and are never parsed as event evidence.
 
 The adapter rejects a missing, non-JSONL, or carriage-return-containing event stream before
 requiring product-owned metadata, creation/reuse/invalidation/release, allocator samples, and
-process samples, then atomically writes the canonical raw row and its SHA-256 sidecar. Missing
-geometry, identity, exact source binding, product residency, or explicit campaign mode also fails
-closed.
+process samples, then atomically writes the canonical raw row and its SHA-256 sidecar. A cancellation
+row must contain its product-owned arm identity and exactly one `cancelled` terminal followed by
+metrics, invalidation, and release in product order. Every coordinate decision is explicitly bound
+to that verified cancellation arm. Missing geometry, identity, exact source binding, product
+residency, or explicit campaign mode also fails closed.
 
 ### Independent source and model provenance
 
@@ -64,7 +70,9 @@ request-scoped generation staging. The exact SceneWorks-equivalent map is:
 | `wan2_2_vace_fun_14b` | `sequential` |
 
 The manifest, adapter, entrypoints, observers, receipts, and reducer reject any other route/strategy
-pair rather than accepting evidence from a non-product memory shape.
+pair rather than accepting evidence from a non-product memory shape. The Wan 14B ComfyUI-expert
+entrypoint passes the same campaign policy through its explicit-residency external-expert loader;
+it cannot silently use that loader's ordinary resident default while sealing a sequential receipt.
 
 The Rust entrypoints require a dedicated event file when campaign mode is selected, so provider
 progress output cannot corrupt the observer transcript. The default observer remains `None`, and
