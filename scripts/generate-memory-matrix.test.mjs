@@ -1751,6 +1751,96 @@ test("anchor CURRENCY is reported and cannot move a state (sc-22511, sc-22513)",
   assert.equal(mutated.summary.staleAnchors, mutated.anchors.length);
 });
 
+test("pin provenance alone does not invalidate the matrix fingerprint", async () => {
+  const baseline = await buildMatrix();
+  const manifest = JSON.parse(
+    stripJsoncComments(
+      await readFile(new URL(`../${SOURCE_PATHS.manifest}`, import.meta.url), "utf8"),
+    ),
+  );
+  const starvector = manifest.models.find((model) => model.id === "starvector_8b");
+  const candidate = starvector?.vector?.deviceAdmission?.terminalCandidate;
+  assert.ok(candidate, "StarVector terminal candidate fixture is missing");
+  candidate.inferenceRevision = "f".repeat(40);
+  candidate.productionClosure.sha256 = "e".repeat(64);
+
+  const closures = JSON.parse(
+    await readFile(new URL(`../${SOURCE_PATHS.anchorLoaderClosures}`, import.meta.url), "utf8"),
+  );
+  closures.inferenceRevision = "d".repeat(40);
+  const provenanceOnly = await buildMatrix({
+    sourceOverrides: {
+      manifest: JSON.stringify(manifest),
+      anchorLoaderClosures: JSON.stringify(closures),
+    },
+  });
+  assert.equal(provenanceOnly.generatedFrom.sceneWorksRevision, baseline.generatedFrom.sceneWorksRevision);
+  assert.equal(
+    provenanceOnly.generatedFrom.sources.manifest.sha256,
+    baseline.generatedFrom.sources.manifest.sha256,
+  );
+  assert.equal(
+    provenanceOnly.generatedFrom.sources.anchorLoaderClosures.sha256,
+    baseline.generatedFrom.sources.anchorLoaderClosures.sha256,
+  );
+  assert.deepEqual(provenanceOnly.cells, baseline.cells);
+
+  const store = JSON.parse(
+    await readFile(new URL(`../${SOURCE_PATHS.anchorStore}`, import.meta.url), "utf8"),
+  );
+  for (const anchor of store.anchors) {
+    closures.models[`${anchor.modelId}:${anchor.backend}`].digest =
+      anchor.source.loaderClosureDigest;
+  }
+  const currentContract = await buildMatrix({
+    sourceOverrides: { anchorLoaderClosures: JSON.stringify(closures) },
+  });
+  const currentAnchor = currentContract.anchors.find((anchor) => anchor.current);
+  assert.ok(currentAnchor, "fixture could not make any recorded loader contract current");
+  const target = store.anchors.find((anchor) => anchor.id === currentAnchor.id);
+  const targetKey = `${target.modelId}:${target.backend}`;
+  closures.models[targetKey].digest = "0".repeat(64);
+  const contentChanged = await buildMatrix({
+    sourceOverrides: { anchorLoaderClosures: JSON.stringify(closures) },
+  });
+  assert.equal(
+    contentChanged.anchors.find((anchor) => anchor.id === target.id).current,
+    false,
+  );
+  assert.notEqual(
+    contentChanged.generatedFrom.sceneWorksRevision,
+    currentContract.generatedFrom.sceneWorksRevision,
+  );
+  assert.notEqual(
+    contentChanged.generatedFrom.sources.anchorLoaderClosures.sha256,
+    currentContract.generatedFrom.sources.anchorLoaderClosures.sha256,
+  );
+
+  const anchorStore = JSON.parse(
+    await readFile(new URL(`../${SOURCE_PATHS.anchorStore}`, import.meta.url), "utf8"),
+  );
+  const tierEvidence = anchorStore.analyticOnly.find(
+    (entry) => entry.basis === "manifest_tier_declaration",
+  );
+  assert.ok(tierEvidence, "fixture has no measured-tier analytic evidence");
+  tierEvidence.evidence.values = {
+    ...tierEvidence.evidence.values,
+    vramGbByTier: "54.525",
+  };
+  tierEvidence.evidence.sha256 = "c".repeat(64);
+  const measuredContentChanged = await buildMatrix({
+    sourceOverrides: { anchorStore: JSON.stringify(anchorStore) },
+  });
+  assert.notEqual(
+    measuredContentChanged.generatedFrom.sceneWorksRevision,
+    baseline.generatedFrom.sceneWorksRevision,
+  );
+  assert.notEqual(
+    measuredContentChanged.generatedFrom.sources.anchorStore.sha256,
+    baseline.generatedFrom.sources.anchorStore.sha256,
+  );
+});
+
 test("removing an anchor demotes exactly its own coordinates, and nothing else (sc-22513)", async () => {
   const baseline = await buildMatrix({ publish: false });
   const store = JSON.parse(
