@@ -113,7 +113,7 @@ function fixture() {
         owningFamilyStory: 100,
       },
     ],
-    calibrationPlan: { providers: [] },
+    calibrationPlan: { anchors: {} },
     closures: { providers: {} },
     survey: {
       families: {

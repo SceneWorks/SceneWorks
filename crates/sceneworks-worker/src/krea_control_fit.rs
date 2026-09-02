@@ -713,6 +713,7 @@ fn fit_ladder_for_tier(
             evidence,
             closure_digest: measured_closure_digest,
             basis: crate::memory_strategy::CandidateBasis::Measured,
+            unmodeled_activation_bytes: None,
         })
         .collect::<Vec<_>>();
     // A floor is a declaration under the LIVE closure — nothing there for currency to invalidate.
@@ -721,6 +722,9 @@ fn fit_ladder_for_tier(
         evidence,
         closure_digest: &live_closure_digest,
         basis: crate::memory_strategy::CandidateBasis::EstimateFloor,
+        // sc-22508: this control-lane floor is a manifest-row declaration, not a weights+headroom
+        // split, so it declares no activation term and takes the candle whole-peak residual.
+        unmodeled_activation_bytes: None,
     }));
     match crate::memory_strategy::select_strategy(
         request,
@@ -1179,7 +1183,7 @@ mod tests {
         // CONSTANT and could never fire); the outcome it pinned was a BestEffort fallback.
         // sc-18095 (epic 18093) turns that currency into a signal: a control ladder whose provider
         // closure moved keeps serving its measured rows, graded at the candle stale-measured
-        // margin (`crate::ladder_margin_policy::CANDLE_STALE_MEASURED_MARGIN`, 2%), instead of
+        // margin (`crate::ladder_margin_policy::CANDLE_RECAPTURE_SPREAD`, 2%), instead of
         // being demoted. Both digest sides are still read rather than frozen: `expected` is the
         // live digest for `candle:krea_2_turbo_control` from the packaged closure table, and the
         // candidate carries `candle.control.inferenceClosureDigest` from the manifest. This test
@@ -1667,7 +1671,7 @@ mod tests {
         let sequential = 30.0;
         let staged_floor = sequential - HEADROOM_GB;
         let resident_floor = peak - HEADROOM_GB;
-        let margin = crate::ladder_margin_policy::CANDLE_ESTIMATE_MARGIN;
+        let margin = crate::ladder_margin_policy::CANDLE_RECAPTURE_SPREAD;
         // An effective budget between the WIDENED staged floor and the resident floor: a rung
         // priced on the staged row admits here; one clamped to the resident row cannot. Recomputed
         // from the policy margin, never a frozen literal.
@@ -2220,8 +2224,8 @@ mod tests {
             "an estimate-scoped admit must never credit the reclaimable pool"
         );
 
-        // Constrained card: the staged floor's widened peak (26.0) fits a 28 GiB effective budget
-        // where the resident floor (32.136) does not.
+        // Constrained card: the staged floor's widened peak (25.0 × 1.02 = 25.5) fits a 28 GiB
+        // effective budget where the resident floor's (30.9 × 1.02 = 31.518) does not.
         assert_eq!(
             fit(30.0),
             KreaControlFit::Fits {
@@ -2232,11 +2236,21 @@ mod tests {
             }
         );
 
-        // Margin mutation arm: at 27.5 GiB free (25.5 effective) the RAW staged floor (25.0) fits
-        // but the widened one (26.0) does not — a zeroed estimate margin admits here and flips
-        // this red. The reported requirement carries the widening (26.0 + 2 headroom;
-        // float-tolerant, the widening rounds up in integer bytes).
-        assert_too_big(fit(27.5), 28.0, 27.5);
+        // Margin mutation arm: a budget strictly BETWEEN the raw staged floor's requirement and its
+        // allowance-widened one, so the raw floor fits and the widened one does not — a zeroed
+        // allowance admits here and flips this red. The window is recomputed from the policy
+        // (sc-22508: a manifest-row floor declares no weights/activation split, so it takes the
+        // candle whole-peak `SameCellRecaptureSpread` residual) rather than written as a literal
+        // picked for the retired blanket margin. The reported requirement carries the widening
+        // (float-tolerant: the widening rounds up in integer bytes).
+        let staged_floor_gb =
+            predicted_control_sequential_peak_gb(&m, tier).expect("staged row") - HEADROOM_GB;
+        let raw_needed_gb = staged_floor_gb + HEADROOM_GB;
+        let widened_needed_gb = staged_floor_gb
+            * (1.0 + crate::ladder_margin_policy::CANDLE_RECAPTURE_SPREAD)
+            + HEADROOM_GB;
+        let between_gb = (raw_needed_gb + widened_needed_gb) / 2.0;
+        assert_too_big(fit(between_gb), widened_needed_gb, between_gb);
 
         // The pre-18097 outcome for this cell was BestEffort at ANY budget — the starved card now
         // gets the honest refusal instead of an admit that could only OOM.
@@ -2294,13 +2308,24 @@ mod tests {
             reference_count: KREA_CONTROL_REFERENCE_COUNT,
         };
         let contract = registered_contract_for_tier(tier).expect("control contract");
+        // Between the raw staged floor's requirement and its allowance-widened one, recomputed from
+        // the policy (see the same window in
+        // `an_unmeasured_geometry_is_estimate_graded_with_recoverable_oom_margins`): the raw floor
+        // fits and the widened one does not, so the unmutated ladder rejects from its graded floors.
+        let staged_floor_gb = predicted_control_sequential_peak_gb(
+            &current_evidence(krea_manifest_with_chunking()),
+            tier,
+        )
+        .expect("staged row")
+            - HEADROOM_GB;
+        let between_gb = staged_floor_gb
+            * (1.0 + crate::ladder_margin_policy::CANDLE_RECAPTURE_SPREAD / 2.0)
+            + HEADROOM_GB;
         let fit = |manifest: &JsonObject, contract: &MemoryProviderContract| {
             fit_ladder_for_entry_with_runtime(
                 manifest,
                 tier,
-                // 27.5 GiB free (25.5 effective): the raw staged floor (25.0) fits, the widened one
-                // (26.0) does not — so the unmutated ladder rejects from its graded floors.
-                Some(budget(27.5)),
+                Some(budget(between_gb)),
                 0,
                 geometry_768,
                 Some(contract),
