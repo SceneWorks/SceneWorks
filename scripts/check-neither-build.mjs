@@ -84,7 +84,15 @@ function runDocker() {
     return 1;
   }
   // Named volumes prepopulate from the image on first use and then cache the toolchain, crate
-  // registry, and target dir across runs, so only the first invocation is cold.
+  // registry, GIT DEPENDENCY DATABASE, and target dir across runs, so only the first invocation is
+  // cold.
+  //
+  // `/usr/local/cargo/git` is not an optional extra here. Every one of this workspace's inference
+  // dependencies is a `git = "…/SceneWorks/inference"` pin, and that repository's bare database is
+  // ~900 MB. Without this volume it landed in the container's throwaway writable layer, so EVERY
+  // run re-cloned the whole thing over the network before compiling a line — observed at >45
+  // minutes and still fetching, which is long enough that the check reads as hung and gets skipped.
+  // Cached, the clone is paid once.
   const dockerArgs = [
     "run",
     "--rm",
@@ -96,6 +104,8 @@ function runDocker() {
     "sceneworks-neither-rustup:/usr/local/rustup",
     "-v",
     "sceneworks-neither-registry:/usr/local/cargo/registry",
+    "-v",
+    "sceneworks-neither-git:/usr/local/cargo/git",
     "-v",
     "sceneworks-neither-target:/workspace/target",
     RUST_IMAGE,

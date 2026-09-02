@@ -1,7 +1,44 @@
 import { describe, expect, it } from "vitest";
 
 import { summarize } from "../validation/issues.js";
-import { datasetSaveValidation, selectionAfterDuplicateRemoval } from "./datasetHelpers.js";
+import { datasetPayload, datasetSaveValidation, selectionAfterDuplicateRemoval } from "./datasetHelpers.js";
+
+it("preserves prepared bundle extras and stable item ids across dataset saves", () => {
+  const activeDataset = {
+    id: "ds1",
+    items: [{
+      id: "item_1",
+      path: "images/item_1.png",
+      displayName: "one",
+      ltxPreparedBundlePath: "prepared/item_1.safetensors",
+      ltxPreparedBundleSize: 1234,
+      ltxPreparedBundleSha256: "a".repeat(64),
+      futurePreparedMetadata: { revision: 2 },
+      controlImagePath: "controls/item_1.png",
+      caption: { text: "one", source: "manual", triggerWords: [] },
+    }],
+  };
+  const selection = "dataset-item:ds1:item_1";
+  const payload = datasetPayload({
+    activeDataset,
+    assetsById: new Map([[selection, {
+      id: selection,
+      datasetOwned: true,
+      displayName: "one",
+      file: { path: "training/datasets/ds1/images/item_1.png" },
+    }]]),
+    name: "Prepared",
+    selectedAssetIds: [selection],
+  });
+  expect(payload.items[0]).toMatchObject({
+    id: "item_1",
+    ltxPreparedBundlePath: "prepared/item_1.safetensors",
+    ltxPreparedBundleSize: 1234,
+    ltxPreparedBundleSha256: "a".repeat(64),
+    futurePreparedMetadata: { revision: 2 },
+    controlImagePath: "controls/item_1.png",
+  });
+});
 
 describe("selectionAfterDuplicateRemoval (sc-6539 one-tap dedupe mapping)", () => {
   // Mix of catalog-backed items (selection key = assetId) and a dataset-owned item (no assetId, so the

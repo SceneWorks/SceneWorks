@@ -67,6 +67,28 @@ containing `"` also stays hashed, since the generators' parsers read double-quot
 `scripts/lib/source-revision.mjs`). Exact raw-source history remains available in version control
 and must not be used as evidence staleness.
 
+**The MATRIX no longer speaks this vocabulary (sc-22513, epic 22505 E5).** Everything above about
+`Verified`, `Implemented/unverified`, calibration fingerprints, engaged compositions and
+`CALIBRATION_ABI_VERSIONS` describes the RUNTIME selector and the retained evidence corpora, which
+still hold those concepts. The generated matrix does not: a cell's `state` is now a pure function of
+`(implementation, anchor present, derivation defined, anchor derivable)` over
+`config/memory-anchors.json` and the routing catalog, its vocabulary is
+`Missing / Structurally N/A / Implemented / Anchored / Anchored/underived`, and the calibration plan,
+the evidence bundle, the provider closure ledger, the rung-4 survey artifacts and the Cargo pin have
+all left `SOURCE_PATHS`. Read `docs/generated/memory-matrix.md` for what the artifact claims today.
+
+**Fitted curves layer AHEAD of anchor derivation, and their absence costs nothing (epic 22505
+feature-end fix round, AT2/E5).** Where a retained fitted per-phase curve covers a request exactly
+— the video curve bundle, or a manifest's measured phase curves inside their hull — the admission
+path prices from the curve first and the anchor derivation is never consulted; the anchor law is
+the second layer, and the phase-blind floor the third. The curves are a PRECISION layer, not an
+obligation: they are validation-only in the specific sense that nothing anywhere requires them to
+be refreshed — a pin bump, a loader change or a catalog edit that stales or removes a curve simply
+drops that lane to the anchor derivation (or the floor), which admits on its own terms. No gate,
+check or campaign is owed to keep a curve current, and a lane that never had one is not missing
+anything: the anchor + analytic derivation is the complete, self-sufficient admission basis, and a
+curve on top of it only tightens estimates where one happens to be retained.
+
 **Provenance is stamped once, not per row (sc-16268).** The revision pair belongs to the document,
 so it lives in `generatedFrom` and nowhere else. Cells carry no `evidenceRevision`: it held the same
 constant in all ~7,360 rows, which turned every fingerprint rotation into a ~14,700-line rewrite of a
@@ -415,9 +437,20 @@ The state of the evidence, stated plainly:
   coverage. `bin/candle.rs` therefore **derives** its verdict from `planned.target.overlay` and **refuses**
   a non-`none` target outright, instead of emitting the fixed "ordinary Krea Turbo text-to-image
   calibration has no overlay" it used to emit on every run.
-- No adapter can execute an overlay render: doing so needs the control-branch load path and a control-map
-  fixture. The decision, and the exact thing that would unblock it, live in
-  `config/memory-calibration-plan.json` → `overlayCoverage`.
+- The **candle** adapter cannot execute an overlay render: doing so needs the control-branch load path
+  and a control-map fixture, and it has neither. The decision, and the exact thing that would unblock
+  it, used to be carried as an `overlayCoverage` block inside
+  `config/memory-calibration-plan.json`; sc-22514 collapsed that file to a pure anchor plan whose
+  schema is `additionalProperties: false` at every level, so a prose rationale can no longer live
+  there and is stated here instead. **The decision:** an overlay cell is not currently an anchor. The
+  anchor plan declares no `overlay != "none"` key on either lane, and `config/memory-anchors.json`
+  packages **zero** anchors with an overlay — which is the same fact the first bullet above states
+  from the cell side. **What would unblock one:** on MLX, the `krea_2_turbo_control` arm the adapter
+  already carries (exact q4 Krea base plus the pinned pose-control branch, every render conditioned on
+  a deterministic control map) plus an `overlay` anchor key in the plan pointing at it; on candle, the
+  control-branch load path and control-map fixture, neither of which exists — that is an
+  adapter-implementation task, diagnosed by
+  [docs/calibration-runbook.md](calibration-runbook.md) §2c/§2d, not a measurement one.
 
 **What this costs, stated plainly.** The candle conditioning admission gate
 (`crates/sceneworks-worker/src/conditioning_fit.rs`) has no measured overlay peak to gate on, so it gates
@@ -437,38 +470,31 @@ rather than collapsing into the no-signal `Unknown` that took the zero-adaptatio
 prices every hosted Krea tier, including INT8-ConvRot, so this verdict is a fail-safe for malformed
 catalog entries and future tiers rather than a known shipping hole.
 
-## Five-rung load reuse (SC-16059, oracle from SC-16402)
+## Reference anchor captures (SC-16059; collapsed to anchors by sc-22514)
 
-`config/memory-calibration-plan.json` contains two same-target reference ladders used for the
-fresh/reused decision:
+`config/memory-calibration-plan.json` declares one **anchor** per `<modelId>:<tier>:<backend>` cell.
+Two of them are the reference captures this section used to describe as five-rung ladders:
 
-- MLX/Metal: `z_image_turbo`, q4, 768×768 text-to-image, no overlay, seed 16402, two steps. All five
-  rungs use the provider's shape-independent content fingerprint. Rungs 0–3 require the typed
-  `eager_materialization` load shape and rung 4 requires `deferred_materialization`; the load-shape
-  receipt, not a suffix on the fingerprint, keeps those calibration populations distinct.
-- Candle/CUDA: `krea_2_turbo`, q4, 1024×1024 text-to-image, no overlay, seed 16402, two steps. The
-  provider-owned compositions for rungs 2–4 include staged residency because those controls execute
-  through Krea's physical three-stage loader; the plain staged rung uses its one-boundary residency
-  path.
+- MLX/Metal: `z_image_turbo:q4:mlx` — 768×768 text-to-image, no overlay, `eager_materialization`,
+  fingerprint `z-image-mlx-independent-materialization-v4`.
+- Candle/CUDA: `krea_2_turbo:q4:candle` — 768×768 text-to-image, no overlay,
+  `deferred_materialization`, fingerprint `krea-turbo-cuda-phase-curves-v1`. This is the capture
+  `.github/workflows/windows-candle.yml` runs on dispatch.
 
-The harness preserves a forced fresh-per-case oracle for both backends. Candle can execute its five
-cases as one diagnostic `run_batch` invocation; the adapter loads Krea once, returns five ordinary
-record fragments, and attests `modelLoads: 1`. A comparison passes only when every phase's active,
-allocator, device, wired, and reclaimable metric is within the larger of 256 MiB and 5% of its fresh
-value. The authoritative CUDA comparison returned `unable_to_amortize`, so the shipped plan keeps
-Candle fresh-per-case rather than changing the recorded peaks. MLX also remains fresh-per-case:
-rungs 0–3 require an eager load while rung 4 requires a deferred load, so one loaded Z-Image
-generator cannot preserve all five typed load-shape identities even though their content fingerprint
-is the same. `assess-reuse` reads both identities from the pinned provider contracts for the exact
-eager and deferred load specs and rejects any plan mismatch; it does not trust the plan's strings as
-capability evidence. The structured verdict records this backend as
-`unable_to_amortize`; it is not treated as a failed measurement or silently averaged.
+**The five-rung ladder and its load-reuse oracle are gone.** sc-22514 removed the machinery outright:
+there is no `run`, `assess-reuse`, `compare-reuse` or `--batch-rungs` arm, no `--fresh-per-case`
+flag and no fixture selector, because there is nothing to schedule — one anchor key is one capture is
+one record, and the rung composition is a per-lane CONSTANT the harness attaches (`resident` on MLX,
+`staged_residency` on candle; `ANCHOR_STRATEGY` in `scripts/memory-calibration-harness.mjs`). Every
+non-anchor rung and geometry is now derived analytically from the anchor by
+`crates/sceneworks-core/src/memory_anchor.rs` rather than measured. The historical five-rung records
+are retained as validation data for that derivation, not as inputs.
 
-Two denoise steps are load-bearing for phase measurement: providers with an explicit loading boundary
-close conditioning there, while resident providers use the first Step callback as a conservative
-conditioning envelope and measure the second step as a denoise-only interval. Decoding always starts a
-separate measured interval; no phase value is synthesized from another run or a static estimate.
-Run only from clean checkouts at the exact revisions being recorded:
+Two denoise steps remain load-bearing for phase measurement: providers with an explicit loading
+boundary close conditioning there, while resident providers use the first Step callback as a
+conservative conditioning envelope and measure the second step as a denoise-only interval. Decoding
+always starts a separate measured interval; no phase value is synthesized from another run or a
+static estimate. Run only from clean checkouts at the exact revisions being recorded:
 
 ```bash
 # Apple Silicon / Metal
@@ -476,46 +502,31 @@ SCENEWORKS_Z_IMAGE_REPOSITORY=SceneWorks/z-image-turbo-mlx \
 SCENEWORKS_Z_IMAGE_REVISION=bb2bc9893b3c49ae96c813350775f791a2e8bc80 \
 SCENEWORKS_Z_IMAGE_ROOT=/absolute/path/to/models--SceneWorks--z-image-turbo-mlx/snapshots/bb2bc9893b3c49ae96c813350775f791a2e8bc80/q4 \
 cargo build --release --locked -p sceneworks-memory-adapter --features mlx --bin memory-mlx-adapter
-node scripts/memory-calibration-harness.mjs run \
-  --config config/memory-calibration-plan.json --backend mlx \
-  --fixture fresh-five-rung-z-image-q4-768-seed16402-step2 \
-  --fresh-per-case \
+node scripts/memory-calibration-harness.mjs capture \
+  --anchor z_image_turbo:q4:mlx \
   --provider-command '["target/release/memory-mlx-adapter"]' \
   --sceneworks-repo "$PWD" --inference-repo /absolute/path/to/inference-pin \
-  --output /tmp/sc-16059-mlx-fresh.json
-node scripts/memory-calibration-harness.mjs assess-reuse \
-  --config config/memory-calibration-plan.json --backend mlx \
-  --fixture fresh-five-rung-z-image-q4-768-seed16402-step2 \
-  --provider-command '["target/release/memory-mlx-adapter"]' \
-  --output /tmp/sc-16059-mlx-reuse-assessment.json
+  --output /tmp/sc-16059-mlx-anchor.json
+```
 
+```powershell
 # Windows / NVIDIA CUDA (PowerShell; use target\release\memory-candle-adapter.exe)
 $env:SCENEWORKS_KREA_REPOSITORY='SceneWorks/krea-2-turbo-mlx'
 $env:SCENEWORKS_KREA_REVISION='d009674080cc1bccf2b629d834c34bf5eccdb723'
 $env:SCENEWORKS_KREA_ROOT='C:\absolute\path\to\models--SceneWorks--krea-2-turbo-mlx\snapshots\d009674080cc1bccf2b629d834c34bf5eccdb723\q4'
 cargo build --release --locked -p sceneworks-memory-adapter --features candle --bin memory-candle-adapter
-node scripts/memory-calibration-harness.mjs run --config config/memory-calibration-plan.json --backend candle `
-  --fixture fresh-five-rung-krea-q4-1024-seed16402-step2 `
-  --fresh-per-case `
+node scripts\memory-calibration-harness.mjs capture `
+  --anchor krea_2_turbo:q4:candle `
   --provider-command '["target/release/memory-candle-adapter.exe"]' `
   --sceneworks-repo $PWD --inference-repo C:\absolute\path\to\inference-pin `
-  --output $env:TEMP\sc-16059-candle-fresh.json
-node scripts/memory-calibration-harness.mjs run --config config/memory-calibration-plan.json --backend candle `
-  --fixture fresh-five-rung-krea-q4-1024-seed16402-step2 --batch-rungs `
-  --provider-command '["target/release/memory-candle-adapter.exe"]' `
-  --sceneworks-repo $PWD --inference-repo C:\absolute\path\to\inference-pin `
-  --output $env:TEMP\sc-16059-candle-reused.json
-node scripts/memory-calibration-harness.mjs compare-reuse `
-  --fresh $env:TEMP\sc-16059-candle-fresh.json `
-  --reused $env:TEMP\sc-16059-candle-reused.json `
-  --output $env:TEMP\sc-16059-candle-reuse-comparison.json
+  --output $env:TEMP\sc-16059-candle-anchor.json
 ```
 
-Validate either capture with `node scripts/memory-calibration-harness.mjs check --input <file>`.
-These authoritative records deliberately remain `gated`: they contain exact strategy identity and
-observed conditioning/denoise/decode/overall memory for the reuse oracle, but do not pretend that a
-single reference render also completed the promotion-quality sweep, negative mutation, or lifecycle
-fault suite. They therefore cannot become current calibration evidence or update the cost model.
+`--plan` defaults to `config/memory-calibration-plan.json`; pass it only to capture against a
+different plan file. Validate either capture with
+`node scripts/memory-calibration-harness.mjs check --input <file>`. A capture on an undeclared lane
+still writes a record, but derives no closure digest and can therefore never read `current` — see
+[docs/calibration-runbook.md](calibration-runbook.md) §2a.
 
 ## Lifecycle and telemetry
 

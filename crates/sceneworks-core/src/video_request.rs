@@ -39,6 +39,100 @@ const DEFAULT_REPLACEMENT_MODE: &str = "face_only";
 /// payload ceiling; callers must reject rather than silently discard a seventh character.
 pub const MAX_SCAIL2_REFERENCE_CHARACTERS: usize = 6;
 
+/// LTX-2.5's user-selectable decoder names on the Video Studio wire contract.
+pub const LTX25_VAE_DECODER_CONV: &str = "conv";
+pub const LTX25_VAE_DECODER_DIFFUSION: &str = "diffusion";
+
+/// LTX-2.5 exposes at most two temporal x2 refinement rounds.
+pub const LTX25_MAX_TEMPORAL_UPSAMPLE_ROUNDS: u32 = 2;
+
+/// Validated seconds window for LTX-2.5's opt-in duration predictor.
+///
+/// This lives in core rather than gen-core so the API can reject malformed requests before a job
+/// exists without taking a provider dependency. The worker converts it to gen-core's identically
+/// shaped `AutoDurationRange` only after the model-specific capability gate has passed.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct VideoAutoDurationRange {
+    pub min_seconds: f32,
+    pub max_seconds: f32,
+}
+
+/// Parse the Video Studio's scalar auto-duration keys. Omission and an explicit `false` are both
+/// off; opting in requires a finite, positive, ordered min/max window.
+pub fn requested_auto_duration(
+    advanced: &JsonObject,
+) -> Result<Option<VideoAutoDurationRange>, String> {
+    let Some(enabled) = advanced.get("autoDuration") else {
+        return Ok(None);
+    };
+    let Some(enabled) = enabled.as_bool() else {
+        return Err("advanced.autoDuration must be a boolean when present".to_owned());
+    };
+    if !enabled {
+        return Ok(None);
+    }
+    let number = |key: &str| {
+        advanced
+            .get(key)
+            .and_then(Value::as_f64)
+            .map(|value| value as f32)
+            .filter(|value| value.is_finite())
+            .ok_or_else(|| {
+                format!("advanced.{key} must be a finite number when auto-duration is enabled")
+            })
+    };
+    let min_seconds = number("autoDurationMinSeconds")?;
+    let max_seconds = number("autoDurationMaxSeconds")?;
+    if min_seconds <= 0.0 || max_seconds <= 0.0 {
+        return Err("advanced auto-duration min/max seconds must both be positive".to_owned());
+    }
+    if min_seconds > max_seconds {
+        return Err(format!(
+            "advanced.autoDurationMinSeconds {min_seconds} exceeds advanced.autoDurationMaxSeconds {max_seconds}"
+        ));
+    }
+    Ok(Some(VideoAutoDurationRange {
+        min_seconds,
+        max_seconds,
+    }))
+}
+
+/// Parse LTX-2.5's decoder selector. Omission is the fast Conv decoder product default.
+pub fn requested_ltx25_vae_decoder(advanced: &JsonObject) -> Result<&str, String> {
+    match advanced.get("vaeDecoder") {
+        None => Ok(LTX25_VAE_DECODER_CONV),
+        Some(Value::String(value))
+            if matches!(
+                value.as_str(),
+                LTX25_VAE_DECODER_CONV | LTX25_VAE_DECODER_DIFFUSION
+            ) =>
+        {
+            Ok(value)
+        }
+        Some(_) => {
+            Err("advanced.vaeDecoder must be \"conv\" or \"diffusion\" when present".to_owned())
+        }
+    }
+}
+
+/// Parse LTX-2.5's temporal-refinement count. Omission and zero are both off.
+pub fn requested_temporal_upsample_rounds(advanced: &JsonObject) -> Result<u32, String> {
+    let Some(value) = advanced.get("temporalUpsampleRounds") else {
+        return Ok(0);
+    };
+    let rounds = value.as_u64().ok_or_else(|| {
+        format!(
+            "advanced.temporalUpsampleRounds must be an integer from 0 to {LTX25_MAX_TEMPORAL_UPSAMPLE_ROUNDS}"
+        )
+    })?;
+    if rounds > u64::from(LTX25_MAX_TEMPORAL_UPSAMPLE_ROUNDS) {
+        return Err(format!(
+            "advanced.temporalUpsampleRounds must be from 0 to {LTX25_MAX_TEMPORAL_UPSAMPLE_ROUNDS}, got {rounds}"
+        ));
+    }
+    Ok(rounds as u32)
+}
+
 /// Whether a selected LoRA stack contains the LTX in-context conditioning adapter required by
 /// extend, bridge, and native replacement. Routing and execution share this predicate so a job
 /// cannot be claimed and then rejected by a stricter worker-side spelling of the contract.
@@ -118,6 +212,16 @@ pub struct VideoRequest {
     /// [`duration_limit_error`] at the API and worker gates rather than clamped here — see
     /// that function for why this parse is the wrong home for it (sc-12297).
     pub duration: f32,
+    /// Whether the job payload named `duration`. LTX-2.5's duration predictor is opt-in and an
+    /// explicit duration always wins, including for legacy/replayed jobs that bypass the API's
+    /// enqueue-time normalization.
+    ///
+    /// "Named" means exactly what [`resolve_duration`] means by it — the predicate reads through
+    /// the same parse, so a numeric **string** (`"7.5"`) counts and a value core cannot read
+    /// (`null`, garbage, non-finite) does not. Anything looser desynchronizes the flag from
+    /// [`Self::duration`]: the field would say the caller chose a length while the resolver had
+    /// silently fallen back to the model default.
+    pub duration_was_explicit: bool,
     /// Frames per second, clamped to 1..=60 (Python `safe_int`).
     ///
     /// An **omitted** fps resolves to the model's declared `defaults.fps` rather than the blanket
@@ -215,6 +319,7 @@ impl VideoRequest {
             negative_prompt: nonempty_string_or(payload, "negativePrompt", ""),
             model: payload_model_id(payload),
             duration: resolve_duration(payload.get("duration"), &model_manifest_entry),
+            duration_was_explicit: parse_safe_float(payload.get("duration")).is_some(),
             fps: resolve_fps(payload.get("fps"), &model_manifest_entry),
             width,
             height,
@@ -1309,6 +1414,13 @@ fn floor_to_multiple(value: u32, multiple: u32) -> u32 {
 /// when absent/unparseable — the `safe_float` contract. Video-specific (image has no
 /// float payload field), so it stays local rather than moving into `payload_util`.
 fn safe_float(value: Option<&Value>, default: f32, min: f32, max: f32) -> f32 {
+    parse_safe_float(value).unwrap_or(default).clamp(min, max)
+}
+
+/// The *parse* half of [`safe_float`], split out so "did the caller name a readable value?" is
+/// answered by the same code that resolves it. `Some` exactly when [`safe_float`] would use the
+/// caller's value instead of the default: a JSON number **or** a numeric string (`"7.5"`), finite.
+fn parse_safe_float(value: Option<&Value>) -> Option<f32> {
     value
         .and_then(|value| {
             value
@@ -1317,8 +1429,6 @@ fn safe_float(value: Option<&Value>, default: f32, min: f32, max: f32) -> f32 {
         })
         .map(|value| value as f32)
         .filter(|value| value.is_finite())
-        .unwrap_or(default)
-        .clamp(min, max)
 }
 
 // ======================================================================================
@@ -1886,6 +1996,71 @@ mod tests {
     }
 
     #[test]
+    fn ltx25_advanced_generation_controls_are_typed_and_fail_closed() {
+        assert_eq!(requested_auto_duration(&JsonObject::new()).unwrap(), None);
+        assert_eq!(
+            requested_auto_duration(&payload(json!({ "autoDuration": false }))).unwrap(),
+            None
+        );
+        assert_eq!(
+            requested_auto_duration(&payload(json!({
+                "autoDuration": true,
+                "autoDurationMinSeconds": 2,
+                "autoDurationMaxSeconds": 12.5
+            })))
+            .unwrap(),
+            Some(VideoAutoDurationRange {
+                min_seconds: 2.0,
+                max_seconds: 12.5,
+            })
+        );
+        for invalid in [
+            json!({ "autoDuration": "yes" }),
+            json!({ "autoDuration": true }),
+            json!({
+                "autoDuration": true,
+                "autoDurationMinSeconds": 8,
+                "autoDurationMaxSeconds": 4
+            }),
+            json!({
+                "autoDuration": true,
+                "autoDurationMinSeconds": 0,
+                "autoDurationMaxSeconds": 4
+            }),
+        ] {
+            assert!(requested_auto_duration(&payload(invalid)).is_err());
+        }
+
+        assert_eq!(
+            requested_ltx25_vae_decoder(&JsonObject::new()).unwrap(),
+            LTX25_VAE_DECODER_CONV
+        );
+        assert_eq!(
+            requested_ltx25_vae_decoder(&payload(json!({ "vaeDecoder": "diffusion" }))).unwrap(),
+            LTX25_VAE_DECODER_DIFFUSION
+        );
+        assert!(requested_ltx25_vae_decoder(&payload(json!({ "vaeDecoder": "fast" }))).is_err());
+
+        assert_eq!(
+            requested_temporal_upsample_rounds(&JsonObject::new()).unwrap(),
+            0
+        );
+        assert_eq!(
+            requested_temporal_upsample_rounds(&payload(json!({
+                "temporalUpsampleRounds": 2
+            })))
+            .unwrap(),
+            2
+        );
+        for invalid in [json!(3), json!(1.5), json!("1")] {
+            assert!(requested_temporal_upsample_rounds(&payload(json!({
+                "temporalUpsampleRounds": invalid
+            })))
+            .is_err());
+        }
+    }
+
+    #[test]
     fn ltx_ic_lora_predicate_accepts_metadata_and_canonical_markers_only() {
         for lora in [
             json!({ "icLora": true }),
@@ -1912,6 +2087,7 @@ mod tests {
         assert_eq!(request.mode, "image_to_video");
         assert_eq!(request.model, "ltx_2_3");
         assert_eq!(request.duration, 6.0);
+        assert!(!request.duration_was_explicit);
         assert_eq!(request.fps, 25);
         assert_eq!(request.width, 768);
         assert_eq!(request.height, 512);
@@ -1923,6 +2099,48 @@ mod tests {
         assert!(request.source_asset_id.is_none());
         // sc-6139: starting-image fit defaults to crop (never stretch), like images.
         assert_eq!(request.fit_mode, "crop");
+    }
+
+    #[test]
+    fn video_request_records_whether_duration_was_explicit() {
+        let request = VideoRequest::from_payload(&payload(json!({
+            "projectId": "proj_1",
+            "duration": 7.5
+        })));
+        assert_eq!(request.duration, 7.5);
+        assert!(request.duration_was_explicit);
+    }
+
+    /// The flag must mean the same thing `resolve_duration` means: a numeric **string** is a
+    /// length the caller named (the `safe_float` contract), so the flag has to agree with the
+    /// value the parse actually resolved. Reading `as_f64` alone said "not explicit" while
+    /// `duration` carried the caller's 7.5 — LTX-2.5 would then re-predict a duration the caller
+    /// had chosen.
+    #[test]
+    fn a_string_duration_is_explicit_and_resolves_to_its_value() {
+        let request = VideoRequest::from_payload(&payload(json!({
+            "projectId": "proj_1",
+            "duration": " 7.5 "
+        })));
+        assert_eq!(request.duration, 7.5);
+        assert!(request.duration_was_explicit);
+    }
+
+    /// The other direction: a value the parse cannot read falls back to the default, so the flag
+    /// must say the caller named nothing. `null` / garbage / non-finite all take the fallback.
+    #[test]
+    fn an_unreadable_duration_is_not_explicit() {
+        for unreadable in [json!(null), json!("banana"), json!("NaN"), json!("inf")] {
+            let request = VideoRequest::from_payload(&payload(json!({
+                "projectId": "proj_1",
+                "duration": unreadable
+            })));
+            assert_eq!(request.duration, 6.0, "{unreadable} should fall back");
+            assert!(
+                !request.duration_was_explicit,
+                "{unreadable} is not a duration the caller named"
+            );
+        }
     }
 
     /// The worker's video admission funnel reads the catalog model id **before** the request is
@@ -2167,7 +2385,7 @@ mod tests {
         // --- 64: ltx hard-errors below ÷64 (stage-1 runs at //2//32) and svd's UNet needs
         // VAE 8× × 8×. A declared 32 was too LOOSE — 736 is ÷32 but the engine rejects it.
         // 64 floors it onto the lattice the engine actually accepts.
-        for model in ["ltx_2_3", "ltx_2_3_eros", "svd"] {
+        for model in ["ltx_2_3", "ltx_2_3_eros", "ltx_2_5", "svd"] {
             let req = VideoRequest::from_payload(&payload(json!({
                 "projectId": "p", "model": model, "width": 1280, "height": 736,
                 "modelManifestEntry": { "limits": { "requiresDimensionsMultipleOf": 64 } }
@@ -2205,6 +2423,11 @@ mod tests {
             ),
             (
                 "ltx_2_3",
+                64,
+                vec![(768, 512), (512, 768), (640, 640), (1280, 704), (704, 1280)],
+            ),
+            (
+                "ltx_2_5",
                 64,
                 vec![(768, 512), (512, 768), (640, 640), (1280, 704), (704, 1280)],
             ),
@@ -2255,7 +2478,8 @@ mod tests {
     /// refit** (1280×720 → 1264×704, off every advertised bucket), and candle **hard-errored**
     /// — except candle's own 5B, which had no area check at all and ran to an opaque OOM. The
     /// values themselves were wrong too: the whole 14B family carried the TI2V-5B's 901,120.
-    /// * `ltx_2_3` / `ltx_2_3_eros` / `svd` / `mochi_1` — no `maxPixels`-expressible area cap in
+    /// * `ltx_2_3` / `ltx_2_3_eros` / `ltx_2_5` / `svd` / `mochi_1` — no
+    ///   `maxPixels`-expressible area cap in
     ///   either backend, so no cap is declared. Not literally "no checks": candle-LTX caps
     ///   **latent tokens** through `config::max_latent_tokens` (`t_lat·h_lat·w_lat > 131_072`), which
     ///   is proportional to `frames × w × h`. That is a frames×area constraint and therefore
@@ -2269,6 +2493,7 @@ mod tests {
     const ENGINE_GEOMETRY: &[(&str, Option<u32>, Option<u64>)] = &[
         ("ltx_2_3", Some(64), None),
         ("ltx_2_3_eros", Some(64), None),
+        ("ltx_2_5", Some(64), None),
         ("svd", Some(64), None),
         // The 5B keeps 901,120 — upstream gives `ti2v-5B` exactly `1280*704` / `704*1280`, and its
         // z48 VAE's 32-px grid is why 704, not 720, is its real 720p.
@@ -2444,6 +2669,7 @@ mod tests {
     const DURATION_LIMITS: &[(&str, f32)] = &[
         ("ltx_2_3", 15.0),
         ("ltx_2_3_eros", 15.0),
+        ("ltx_2_5", 15.0),
         ("svd", 4.0),
         ("wan_2_2", 8.0),
         ("wan_2_2_t2v_14b", 5.0),
@@ -2900,6 +3126,7 @@ mod tests {
     const DURATION_FLOORS: &[(&str, Option<f32>)] = &[
         ("ltx_2_3", None),
         ("ltx_2_3_eros", None),
+        ("ltx_2_5", None),
         ("svd", None),
         ("wan_2_2", None),
         ("wan_2_2_t2v_14b", None),
@@ -3104,6 +3331,8 @@ mod tests {
         // (sc-19502). A menu, not a floor — 30 is as unrenderable as 1.
         ("ltx_2_3", None, Some(&[8])),
         ("ltx_2_3_eros", None, Some(&[8])),
+        // LTX-2.5 ships both the 8-step CFG-free distilled recipe and the guided 30-step dev recipe.
+        ("ltx_2_5", None, Some(&[8, 30])),
         ("svd", None, None),
         ("wan_2_2", None, None),
         ("wan_2_2_t2v_14b", None, None),
@@ -4231,6 +4460,7 @@ mod tests {
     const FPS_MENUS: &[(&str, &[u32], u32)] = &[
         ("ltx_2_3", &[24, 25, 30], 25),
         ("ltx_2_3_eros", &[24, 25, 30], 25),
+        ("ltx_2_5", &[24, 25, 30], 25),
         ("svd", &[6, 7, 8, 10, 12, 25], 7),
         ("wan_2_2", &[16, 24], 24),
         ("wan_2_2_t2v_14b", &[16], 16),
@@ -4266,6 +4496,7 @@ mod tests {
     const DEFAULT_RESOLUTIONS: &[(&str, u32, u32)] = &[
         ("ltx_2_3", 768, 512),
         ("ltx_2_3_eros", 768, 512),
+        ("ltx_2_5", 768, 512),
         ("svd", 1024, 576),
         ("wan_2_2", 832, 480),
         // 720, not 704: sc-12308 (#1581) restored TRUE 720p to the A14B pair by lifting maxPixels
@@ -5204,9 +5435,9 @@ mod tests {
     /// count guard (`shipped_video_limits`, sc-12409) — and deliberately not a second hand-written
     /// id list beside it, which is what let `wan_2_2_vace_fun_14b` fall out of this module's
     /// coverage entirely (sc-18814 review).
-    /// 12 = the ten pre-17137 families plus the MiniMax-H3 pair (`minimax_h3`,
-    /// `minimax_h3_ref`) the epic's manifest entries added (sc-17158).
-    const EXPECTED_SHIPPED_VIDEO_COUNT: usize = 12;
+    /// 13 = the ten pre-17137 families plus the MiniMax-H3 pair (`minimax_h3`,
+    /// `minimax_h3_ref`) and LTX-2.5.
+    const EXPECTED_SHIPPED_VIDEO_COUNT: usize = 13;
 
     /// Every video model id plus its declared generation modes in the shipped manifest. Keeping the
     /// modes beside the id is load-bearing for the routing-surface check: probing arbitrary generic

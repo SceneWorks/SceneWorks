@@ -404,6 +404,17 @@ function deriveInferenceClosures(sha, repo) {
     { cwd: repoRoot, stdio: "inherit" },
   );
 
+  // The per-model ANCHOR loader closures (sc-22511) are derived at the pin too. Re-deriving them on
+  // a bump is expected to produce NO digest change in the ordinary case — the unit contains no
+  // revision — and the run exists precisely so that the case where it DOES change (the bump moved
+  // the model's own loader source) shows up in the diff as the staleness it is.
+  console.log("$ node scripts/anchor-loader-closure.mjs --write");
+  execFileSync(
+    "node",
+    ["scripts/anchor-loader-closure.mjs", "--repo", repo, "--revision", sha, "--write"],
+    { cwd: repoRoot, stdio: "inherit" },
+  );
+
   // The backfill re-derives each CAPTURED record at the revision it was captured at, so it needs
   // every one of those present — not just the pin. A shallow fetch of the pin alone dies with
   // "unknown revision" on the first historical one. `--revisions` reports exactly which, computed

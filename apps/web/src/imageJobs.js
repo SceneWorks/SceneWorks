@@ -28,6 +28,7 @@ export function detailCapableModels(imageModels) {
 // while this dependency is not, and the job would fail at run time with "tile ControlNet weights not
 // found". Look it up in the FULL catalog so the Detail panel can gate the run + offer a one-click install.
 export const TILE_CONTROLNET_MODEL_ID = "controlnet_tile_sdxl";
+export const SAM3_SEGMENT_MODEL_ID = "sam3_person_segment";
 
 export function tileControlNetModel(models) {
   return (models ?? []).find((model) => model.id === TILE_CONTROLNET_MODEL_ID) ?? null;
@@ -37,6 +38,17 @@ export function tileControlNetModel(models) {
 export function tileControlNetInstalled(models) {
   const model = tileControlNetModel(models);
   return Boolean(model) && model.installState !== "missing" && model.installState !== "incomplete";
+}
+
+// SAM3 segmentation is cache-only at job time. Platform capability alone is not
+// readiness: the utility checkpoint must already be complete in Model Manager.
+export function sam3SegmentModel(models) {
+  return (models ?? []).find((model) => model.id === SAM3_SEGMENT_MODEL_ID) ?? null;
+}
+
+export function sam3SegmentInstalled(models) {
+  const model = sam3SegmentModel(models);
+  return Boolean(model) && model.installState === "installed";
 }
 
 // The `POST /api/v1/image/jobs` body for a prompt edit (sc-2435). Reuses the existing

@@ -361,6 +361,24 @@ const SERIES = Object.freeze({
     ),
 });
 
+function ltxPipelineIdentity(target, recordId) {
+  if (["distilled", "dev"].includes(target.transformerVariant)
+      && ["conv", "diffvae"].includes(target.decoder)) {
+    return {
+      transformerVariant: target.transformerVariant,
+      decoder: target.decoder,
+    };
+  }
+  // The sealed SC-18810 corpus predates these fields and contains only the one historical
+  // LTX-2.3 implementation. Its catalog model id is itself an exact pipeline identity. Keep this
+  // compatibility narrow and model-keyed; never infer either axis from rung, load shape, tiling,
+  // adapter presence, or another execution parameter.
+  if (target.modelId === "ltx_2_3") {
+    return { transformerVariant: "distilled", decoder: "conv" };
+  }
+  throw new Error(`record ${recordId} has no explicit LTX transformer/decoder identity`);
+}
+
 export function pointsFrom(records, roleByFixture, manifest = null) {
   return records.map((record) => {
     const { width, height, frames } = record.target.geometry;
@@ -379,6 +397,7 @@ export function pointsFrom(records, roleByFixture, manifest = null) {
     if (manifest && typeof modelFamily !== "string") {
       throw new Error(`model ${record.target.modelId} is absent from builtin.models.jsonc`);
     }
+    const pipeline = ltxPipelineIdentity(record.target, record.id);
     return {
       recordId: record.id,
       fixture: record.fixture,
@@ -389,6 +408,8 @@ export function pointsFrom(records, roleByFixture, manifest = null) {
       provider: record.target.provider,
       backend: record.backend,
       tier: record.target.tier,
+      transformerVariant: pipeline.transformerVariant,
+      decoder: pipeline.decoder,
       mode: record.target.mode,
       referenceShape,
       referenceCount,
@@ -411,6 +432,8 @@ export function pointsFrom(records, roleByFixture, manifest = null) {
         record.target.provider,
         record.backend,
         record.target.tier,
+        pipeline.transformerVariant,
+        pipeline.decoder,
         record.target.mode,
         record.strategy.rung,
         record.loadShape,
@@ -454,6 +477,8 @@ function persistedObservation(point) {
     provider: point.provider,
     backend: point.backend,
     tier: point.tier,
+    transformerVariant: point.transformerVariant,
+    decoder: point.decoder,
     mode: point.mode,
     role: point.role,
     rung: point.rung,
@@ -774,6 +799,8 @@ function completeSelectorOfPoint(point) {
     provider: point.provider,
     backend: point.backend,
     tier: point.tier,
+    transformerVariant: point.transformerVariant,
+    decoder: point.decoder,
     mode: point.mode,
     referenceShape: point.referenceShape,
     referenceCount: point.referenceCount,
@@ -1356,6 +1383,7 @@ export function buildVideoMemoryCurveBundle(
     if (!Number.isInteger(referenceCount) || referenceCount < 0 || typeof referenceShape !== "string" || referenceShape.length === 0 || (referenceShape === "none") !== (referenceCount === 0) || !Number.isInteger(outputFps) || outputFps < 1) {
       throw new Error(`record ${record.id} has an incomplete reference/FPS evidence identity`);
     }
+    const pipeline = ltxPipelineIdentity(record.target, record.id);
     return {
       modelId: record.target.modelId,
       modelFamily: catalogModel.family,
@@ -1363,6 +1391,8 @@ export function buildVideoMemoryCurveBundle(
       provider: record.target.provider,
       backend: record.backend,
       tier: record.target.tier,
+      transformerVariant: pipeline.transformerVariant,
+      decoder: pipeline.decoder,
       mode: record.target.mode,
       referenceShape,
       referenceCount,
@@ -1415,6 +1445,8 @@ export function buildVideoMemoryCurveBundle(
       provider,
       backend,
       tier,
+      transformerVariant,
+      decoder,
       mode,
       referenceShape,
       referenceCount,
@@ -1539,13 +1571,15 @@ export function buildVideoMemoryCurveBundle(
     return [{
       // Keep the human-readable id bijective with the complete selector. Runtime also validates
       // every field independently; the id is not an authorization shortcut.
-      id: `${modelId}:${modelFamily}:${route}:${provider}:${backend}:${tier}:${mode}:ref${referenceShape}-${referenceCount}:fps${framesPerSecond.join("+")}:${overlay ?? "none"}:${rung}:${loadShape}:b${batch}:abi${calibrationAbi}:${decodePass}:${closureDigest.slice(0, 12)}:${calibrationFingerprint}`,
+      id: `${modelId}:${modelFamily}:${route}:${provider}:${backend}:${tier}:${transformerVariant}:${decoder}:${mode}:ref${referenceShape}-${referenceCount}:fps${framesPerSecond.join("+")}:${overlay ?? "none"}:${rung}:${loadShape}:b${batch}:abi${calibrationAbi}:${decodePass}:${closureDigest.slice(0, 12)}:${calibrationFingerprint}`,
       modelId,
       modelFamily,
       route,
       provider,
       backend,
       tier,
+      transformerVariant,
+      decoder,
       mode,
       referenceShape,
       referenceCount,
@@ -1572,7 +1606,7 @@ export function buildVideoMemoryCurveBundle(
   unmodeled.sort((left, right) => compareText(left.selectorKey, right.selectorKey));
 
   return {
-    schemaVersion: 4,
+    schemaVersion: 5,
     generatedBy: "scripts/fit-ltx-temporal-form.mjs",
     sourceFit,
     sourceCatalog,

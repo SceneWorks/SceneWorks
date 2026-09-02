@@ -892,6 +892,41 @@ fn training_plan_preserves_model_specific_item_options() {
 }
 
 #[test]
+fn ltx_2_5_plan_preserves_prepared_multimodal_bundle_input() {
+    let mut dataset = dataset_fixture();
+    dataset.items[0].extra.insert(
+        "ltxPreparedBundlePath".to_owned(),
+        serde_json::json!("prepared/item-0001.safetensors"),
+    );
+    let registry = builtin_training_targets();
+    let target = registry
+        .targets
+        .iter()
+        .find(|target| target.id == "ltx_2_5_video_lora")
+        .expect("LTX-2.5 target present");
+
+    let plan = build_training_plan(BuildTrainingPlan {
+        job_id: "job_ltx25",
+        target,
+        dataset: &dataset,
+        config: target.defaults.clone(),
+        preset: None,
+        lora_id: "lora_ltx25_new",
+        base_model_path: "/models/ltx25".to_owned(),
+        dataset_root: std::path::Path::new("/datasets/ltx25"),
+        output_dir: std::path::Path::new("/outputs/ltx25"),
+        file_name: "trained.safetensors".to_owned(),
+        created_at: "2026-08-27T00:00:00Z".to_owned(),
+    })
+    .expect("build LTX-2.5 plan");
+
+    assert_eq!(
+        plan.dataset.items[0].extra.get("ltxPreparedBundlePath"),
+        Some(&serde_json::json!("prepared/item-0001.safetensors"))
+    );
+}
+
+#[test]
 fn builtin_registry_exposes_wan_target() {
     let registry = builtin_training_targets();
     let target = registry

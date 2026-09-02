@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFile, spawn } from "node:child_process";
-import { mkdir, mkdtemp, readFile, readdir, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, readdir, realpath, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -9,16 +9,39 @@ import { createHash } from "node:crypto";
 import { fileURLToPath } from "node:url";
 
 import {
-  HARNESS_VERSION, RUNG_REUSE_TOLERANCE, SCHEMA_VERSION, assessProviderReuse, atomicWrite, canonicalJson,
+  ANCHOR_PLAN_SCHEMA, ANCHOR_STRATEGY, HARNESS_VERSION, LTX25_CAPTURE_REPOSITORY,
+  LTX25_CAPTURE_REVISION, SCHEMA_VERSION, atomicWrite, canonicalJson, captureAnchor,
   projectPhaseMetricsToSchemaV5,
-  compareRungReuse, evidenceSemantics, expandPlan, logicalCaseId, mergeBundles, recordId,
-  physicalMlxSessionId, runProviderPlan, validateBundle, validateRecord, validateSourceSessionFiles,
+  evidenceSemantics, logicalCaseId, parseAnchorKey, planAnchor, planAnchors, recordId,
+  ltx25ProviderEnvironment, parsePhysicalMlxAvContent, physicalMlxSessionId,
+  prepareLtx25CaptureArtifacts, validateBundle, validateRecord, validatePlan,
+  validatePhysicalMlxAvContentsAgainstRecord,
+  validateSourceSessionFiles,
 } from "./memory-calibration-harness.mjs";
-import {
-  calibrationBinding,
-  planEntryMatchesEvidenceRecord,
-  planEntryTargetsCoordinate,
-} from "./generate-memory-matrix.mjs";
+
+/**
+ * A one-anchor plan in the collapsed format (sc-22514). Every runner test drives exactly one
+ * anchor, because the format cannot express anything else.
+ */
+function anchorPlanFixture(key, overrides = {}) {
+  const { modelId } = parseAnchorKey(key);
+  return {
+    schemaVersion: 1,
+    anchors: {
+      [key]: {
+        provider: modelId,
+        mode: "text_to_image",
+        overlay: "none",
+        geometry: { width: 1024, height: 1024, batch: 1, frames: 1 },
+        evidenceScope: "fixture",
+        loadShape: "eager_materialization",
+        calibrationFingerprint: "fixture-formula-v2",
+        fixture: "fixture-seed42",
+        ...overrides,
+      },
+    },
+  };
+}
 
 // sc-17774: the runner stamps each record with the provider's inference compile-closure digest.
 // These tests drive synthetic repositories with no inference crate layout, so the derivation is
@@ -56,10 +79,154 @@ async function cleanFixtureRepo() {
   return root;
 }
 
+async function ltx25FixtureSnapshot({
+  omitRoot,
+  symlinkedEnhancer = false,
+  escapedEnhancer = false,
+  symlinkedDevAdapter = false,
+} = {}) {
+  const cache = await mkdtemp(path.join(tmpdir(), "memory-ltx25-cache-"));
+  const snapshot = path.join(
+    cache,
+    "models--SceneWorks--ltx-2.5-mlx",
+    "snapshots",
+    LTX25_CAPTURE_REVISION,
+  );
+  await mkdir(path.join(snapshot, "enhancer"), { recursive: true });
+  const enhancerFile = path.join(snapshot, "enhancer", "model.safetensors");
+  if (symlinkedEnhancer || escapedEnhancer) {
+    const target = escapedEnhancer
+      ? path.join(cache, "escaped-enhancer.safetensors")
+      : path.join(cache, "models--SceneWorks--ltx-2.5-mlx", "blobs", "enhancer-blob");
+    await mkdir(path.dirname(target), { recursive: true });
+    await writeFile(target, "enhancer");
+    await symlink(path.relative(path.dirname(enhancerFile), target), enhancerFile);
+  } else {
+    await writeFile(enhancerFile, "enhancer");
+  }
+  await mkdir(path.join(snapshot, "distilled_lora"), { recursive: true });
+  const adapterFile = path.join(
+    snapshot,
+    "distilled_lora",
+    "ltx-2.5-22b-distilled-lora-450-bf16.safetensors",
+  );
+  if (symlinkedDevAdapter) {
+    const adapterBlob = path.join(
+      cache,
+      "models--SceneWorks--ltx-2.5-mlx",
+      "blobs",
+      "adapter-blob",
+    );
+    await mkdir(path.dirname(adapterBlob), { recursive: true });
+    await writeFile(adapterBlob, "adapter");
+    await symlink(path.relative(path.dirname(adapterFile), adapterBlob), adapterFile);
+  } else {
+    await writeFile(adapterFile, "adapter");
+  }
+  for (const variant of ["distilled", "dev"]) {
+    for (const tier of ["q4", "q8", "bf16"]) {
+      if (`${variant}/${tier}` === omitRoot) continue;
+      const root = path.join(snapshot, variant, tier);
+      await mkdir(root, { recursive: true });
+      await writeFile(path.join(root, "split_model.json"), JSON.stringify({ variant, tier }));
+      await writeFile(path.join(root, "transformer.safetensors"), `${variant}:${tier}:transformer`);
+      await writeFile(path.join(root, "vae_decoder.safetensors"), `${variant}:${tier}:conv`);
+      await writeFile(path.join(root, "vae_diffusion_decoder.safetensors"), `${variant}:${tier}:diffvae`);
+    }
+  }
+  return realpath(snapshot);
+}
+
 const phase = (value) => ({
   activeBytes: value,
   allocatorBytes: value + 10,
   reclaimableBytes: 10,
+});
+
+const audioQuality = (overrides = {}) => ({
+  result: "passed",
+  sampleRateHz: 24000,
+  channels: 2,
+  sampleCount: 48000,
+  selectedPcmSha256: "a".repeat(64),
+  referencePcmSha256: "b".repeat(64),
+  maximumAbsoluteError: 0.001,
+  meanAbsoluteError: 0.0001,
+  rootMeanSquareError: 0.0002,
+  maximumAbsoluteErrorThreshold: 0.01,
+  meanAbsoluteErrorThreshold: 0.01,
+  rootMeanSquareErrorThreshold: 0.01,
+  ...overrides,
+});
+
+function canonicalAvFixture() {
+  const magic = Buffer.from("SCENEWORKS_AV1\0", "ascii");
+  const frame = Buffer.from([1, 2, 3, 4, 5, 6]);
+  const pcm = Buffer.alloc(16);
+  [0.25, -0.25, 0.5, -0.5].forEach((value, index) => pcm.writeFloatLE(value, index * 4));
+  const bytes = Buffer.alloc(magic.length + 4 * 5 + 2 + 8 + 4 + 4 + 8 + frame.length + pcm.length);
+  let offset = 0;
+  magic.copy(bytes, offset); offset += magic.length;
+  for (const value of [2, 1, 1, 24, 24000]) {
+    bytes.writeUInt32LE(value, offset); offset += 4;
+  }
+  bytes.writeUInt16LE(2, offset); offset += 2;
+  bytes.writeBigUInt64LE(4n, offset); offset += 8;
+  bytes.writeUInt32LE(2, offset); offset += 4;
+  bytes.writeUInt32LE(1, offset); offset += 4;
+  bytes.writeBigUInt64LE(BigInt(frame.length), offset); offset += 8;
+  frame.copy(bytes, offset); offset += frame.length;
+  pcm.copy(bytes, offset);
+  return { bytes, pcm };
+}
+
+test("canonical A/V parser binds the complete header, frame payload, and PCM bytes", () => {
+  const { bytes, pcm } = canonicalAvFixture();
+  const content = parsePhysicalMlxAvContent(bytes);
+  assert.deepEqual(content, {
+    width: 2,
+    height: 1,
+    frames: 1,
+    fps: 24,
+    sampleRateHz: 24000,
+    channels: 2,
+    sampleCount: 4,
+    pcmSha256: createHash("sha256").update(pcm).digest("hex"),
+  });
+  const wrongMagic = Buffer.from(bytes);
+  wrongMagic[0] ^= 0xff;
+  assert.throws(() => parsePhysicalMlxAvContent(wrongMagic), /canonical SCENEWORKS_AV1 header/);
+  const wrongFrameLength = Buffer.from(bytes);
+  wrongFrameLength.writeBigUInt64LE(5n, Buffer.from("SCENEWORKS_AV1\0").length + 4 * 5 + 2 + 8 + 8);
+  assert.throws(() => parsePhysicalMlxAvContent(wrongFrameLength), /canonical RGB geometry/);
+  assert.throws(() => parsePhysicalMlxAvContent(bytes.subarray(0, -1)), /PCM payload length/);
+
+  const record = {
+    id: "imc-audio-content-binding",
+    target: { geometry: { width: 2, height: 1, frames: 1 } },
+    diagnostics: { measurements: [{ name: "outputFps", value: 24 }] },
+    quality: {
+      audio: audioQuality({
+        sampleCount: 4,
+        selectedPcmSha256: content.pcmSha256,
+        referencePcmSha256: content.pcmSha256,
+      }),
+    },
+  };
+  const avContents = new Map([["selected_av", content], ["reference_av", content]]);
+  validatePhysicalMlxAvContentsAgainstRecord(record, avContents, record.id);
+  const mismatchedMetadata = structuredClone(record);
+  mismatchedMetadata.quality.audio.sampleRateHz = 48000;
+  assert.throws(
+    () => validatePhysicalMlxAvContentsAgainstRecord(mismatchedMetadata, avContents, record.id),
+    /A\/V header differs from measured video\/audio identity/,
+  );
+  const mismatchedPcm = structuredClone(record);
+  mismatchedPcm.quality.audio.selectedPcmSha256 = "0".repeat(64);
+  assert.throws(
+    () => validatePhysicalMlxAvContentsAgainstRecord(mismatchedPcm, avContents, record.id),
+    /A\/V PCM hashes differ from quality.audio/,
+  );
 });
 
 function complete(overrides = {}) {
@@ -621,51 +788,6 @@ test("a singleton production parameter domain is valid complete evidence", () =>
   }).records[0], record);
 });
 
-test("merge is commutative and rejects conflicting exact-identity captures", () => {
-  const first = complete();
-  const second = complete({
-    fixture: "fixture-seed43",
-    capturedAt: "2026-07-28T13:00:00Z",
-  });
-  second.logicalCaseId = logicalCaseId(second);
-  second.id = recordId(second);
-  const a = { schemaVersion: SCHEMA_VERSION, harnessVersion: HARNESS_VERSION, records: [first] };
-  const b = { schemaVersion: SCHEMA_VERSION, harnessVersion: HARNESS_VERSION, records: [second] };
-  assert.equal(canonicalJson(mergeBundles(a, b)), canonicalJson(mergeBundles(b, a)));
-  const conflict = structuredClone(first);
-  conflict.capturedAt = "2026-07-28T14:00:00Z";
-  assert.throws(
-    () => mergeBundles(a, { schemaVersion: SCHEMA_VERSION, harnessVersion: HARNESS_VERSION, records: [conflict] }),
-    /conflicting record/,
-  );
-});
-
-test("fresh and reused rung captures use a committed absolute-or-relative tolerance", () => {
-  const freshRecord = complete();
-  const reusedRecord = structuredClone(freshRecord);
-  const withinTolerance = RUNG_REUSE_TOLERANCE.absoluteBytes;
-  for (const phaseName of ["conditioning", "denoise", "decode", "overall"]) {
-    for (const metric of ["activeBytes", "allocatorBytes"]) {
-      reusedRecord.observedMemory[phaseName][metric] += withinTolerance;
-    }
-  }
-  const fresh = { schemaVersion: SCHEMA_VERSION, harnessVersion: HARNESS_VERSION, records: [freshRecord] };
-  const reused = { schemaVersion: SCHEMA_VERSION, harnessVersion: HARNESS_VERSION, records: [reusedRecord] };
-  assert.equal(compareRungReuse(fresh, reused).verdict, "amortizable");
-
-  reusedRecord.observedMemory.conditioning.activeBytes += 1;
-  reusedRecord.observedMemory.conditioning.allocatorBytes += 1;
-  assert.equal(compareRungReuse(fresh, reused).verdict, "unable_to_amortize");
-
-  const differentHardware = structuredClone(reusedRecord);
-  differentHardware.hardware.driverVersion = "different";
-  differentHardware.id = recordId(differentHardware);
-  assert.throws(
-    () => compareRungReuse(fresh, { ...reused, records: [differentHardware] }),
-    /comparison domain differs/,
-  );
-});
-
 test("gated and fixture semantics can never become current", () => {
   const fixture = complete();
   assert.equal(evidenceSemantics(fixture, {
@@ -788,611 +910,365 @@ test("current Qwen q4 and bf16 evidence cannot omit physical MLX provenance", as
   );
 });
 
-test("a record with no closure digest fails loudly instead of falling back to pin equality", () => {
-  // The fallback would be invisible in a green run and would silently restore the old policy.
+test("a record with no closure digest reads historical, never current and never a pin fallback", () => {
+  // sc-22512: this used to assert a THROW. Absence of a currency term is not a defect — under E8 it
+  // withholds an improvement instead of blocking. `historical` is the conservative answer, and the
+  // property that actually matters is preserved and asserted directly: it is not the pin-equality
+  // fallback this replaced. The lane digest below is deliberately UNEQUAL to anything the record
+  // carries, and the record's inference revision matches the run's, so a pin-equality regression
+  // would read `current` here and still fail this test.
   const record = complete({ evidenceScope: "authoritative" });
   delete record.repositories.inference.closureDigest;
-  assert.throws(
-    () =>
-      evidenceSemantics(record, {
-        sceneWorks: record.repositories.sceneWorks.matrixSourceRevision,
-        inference: record.repositories.inference.revision,
-        inferenceClosureDigests: {
-          [`${record.backend}:${record.target.provider}`]: "f".repeat(64),
-        },
-      }),
-    /closureDigest/,
-  );
-});
-
-test("an undeclared provider fails loudly rather than being treated as current", () => {
-  const record = complete({ evidenceScope: "authoritative" });
-  assert.throws(
-    () =>
-      evidenceSemantics(record, {
-        sceneWorks: record.repositories.sceneWorks.matrixSourceRevision,
-        inference: record.repositories.inference.revision,
-        inferenceClosureDigests: {},
-      }),
-    /inference-provider-closures\.json/,
-  );
-});
-
-test("matrix binding rejects batch and frame mismatches even when width and height match", () => {
-  const record = complete({ evidenceScope: "authoritative" });
-  const cell = {
-    calibrationFingerprint: record.calibrationFingerprint,
-    engagedRungs: record.strategy.engagedRungs,
-    strategyParameters: record.strategy.parameters,
-    geometryEnvelope: { resolutions: ["1024x1024"] },
-    evidence: {
-      loadability: [{
-        repository: record.artifact.repository,
-        revision: record.artifact.resolvedRevision,
-        variant: record.artifact.variant,
-      }],
-    },
-  };
-  assert.equal(calibrationBinding(record, cell).eligible, true);
-  const batch = structuredClone(record);
-  batch.target.geometry.batch = 2;
-  assert.ok(calibrationBinding(batch, cell).reasons.includes("batch-out-of-envelope"));
-  const frames = structuredClone(record);
-  frames.target.geometry.frames = 2;
-  assert.ok(calibrationBinding(frames, cell).reasons.includes("frames-out-of-envelope"));
-  const composition = structuredClone(record);
-  composition.strategy.engagedRungs = [
-    "resident",
-    "staged_residency",
-    "bounded_decode",
-  ];
-  assert.ok(calibrationBinding(composition, cell).reasons.includes("composition-mismatch"));
-});
-
-test("frame-aware matrix binding requires an exact planned temporal capture (sc-18817)", () => {
-  const record = complete({
-    backend: "mlx",
-    loadShape: "deferred_materialization",
-    artifact: {
-      repository: "SceneWorks/ltx-2.3-mlx",
-      resolvedRevision: "d".repeat(40),
-      variant: "q8",
-    },
-    target: {
-      modelId: "ltx_2_3",
-      provider: "ltx_2_3",
-      tier: "q8",
-      mode: "text_to_video",
-      overlay: "none",
-      geometry: { width: 768, height: 512, batch: 1, frames: 241 },
-    },
-    strategy: {
-      rung: "staged_residency",
-      engagedRungs: ["resident", "staged_residency"],
-      parameters: {},
-    },
-    calibrationFingerprint: "ltx-q8-temporal-fit-v1",
-  });
-  const cell = {
-    calibrationFingerprint: record.calibrationFingerprint,
-    engagedRungs: record.strategy.engagedRungs,
-    strategyParameters: record.strategy.parameters,
-    geometryEnvelope: {
-      resolutions: ["768x512", "1280x704"],
-      durations: [4, 6, 8, 10, 12, 15],
-      fps: [24, 25, 30],
-    },
-    evidence: {
-      loadability: [{
-        repository: record.artifact.repository,
-        revision: record.artifact.resolvedRevision,
-        variant: record.artifact.variant,
-      }],
-    },
-  };
-  const planEntry = {
-    name: "mlx-ltx-q8-staged-768x512-f241",
-    evidenceScope: "authoritative",
-    backend: record.backend,
-    loadShape: record.loadShape,
-    target: structuredClone(record.target),
-    rung: record.strategy.rung,
-    engagedRungs: [...record.strategy.engagedRungs],
-    calibrationFingerprint: record.calibrationFingerprint,
-    fixture: record.fixture,
-    cases: [{ parameters: {}, expectedResult: "passed" }],
-  };
-  const coordinate = {
-    modelId: record.target.modelId,
-    provider: record.target.provider,
-    backend: record.backend,
-    tier: record.target.tier,
-    mode: record.target.mode,
-    overlay: record.target.overlay,
-    rung: record.strategy.rung,
-  };
-
-  assert.equal(planEntryTargetsCoordinate(planEntry, coordinate), true);
-  const differentGeometry = structuredClone(planEntry);
-  differentGeometry.target.geometry = { width: 1280, height: 704, batch: 7, frames: 449 };
   assert.equal(
-    planEntryTargetsCoordinate(differentGeometry, coordinate),
-    true,
-    "coordinate planning remains geometry-independent",
-  );
-  assert.equal(planEntryMatchesEvidenceRecord(planEntry, record), true);
-  assert.deepEqual(
-    calibrationBinding(record, cell, {
-      exactPlanEntries: [planEntry],
-      modality: "video",
+    evidenceSemantics(record, {
+      sceneWorks: record.repositories.sceneWorks.matrixSourceRevision,
+      inference: record.repositories.inference.revision,
+      inferenceClosureDigests: {
+        [`${record.backend}:${record.target.provider}`]: "f".repeat(64),
+      },
     }),
-    { eligible: true, reasons: [] },
-    "an exact planned frame count binds on a temporal video cell",
-  );
-
-  assert.ok(
-    calibrationBinding(record, cell, { exactPlanEntries: [], modality: "video" })
-      .reasons.includes("capture-geometry-unplanned"),
-    "an otherwise valid multi-frame receipt cannot bind without an exact plan entry",
-  );
-
-  const outsideEnvelope = structuredClone(record);
-  outsideEnvelope.target.geometry.width = 640;
-  outsideEnvelope.target.geometry.height = 640;
-  const outsidePlan = structuredClone(planEntry);
-  outsidePlan.target.geometry = structuredClone(outsideEnvelope.target.geometry);
-  assert.equal(planEntryMatchesEvidenceRecord(outsidePlan, outsideEnvelope), true);
-  assert.ok(
-    calibrationBinding(outsideEnvelope, cell, {
-      exactPlanEntries: [outsidePlan],
-      modality: "video",
-    }).reasons.includes("geometry-out-of-envelope"),
-    "being explicitly planned does not override the manifest spatial envelope",
-  );
-
-  const wrongFrames = structuredClone(planEntry);
-  wrongFrames.target.geometry.frames = 121;
-  assert.equal(planEntryMatchesEvidenceRecord(wrongFrames, record), false);
-  assert.ok(
-    calibrationBinding(record, cell, {
-      exactPlanEntries: [wrongFrames],
-      modality: "video",
-    }).reasons.includes("capture-geometry-unplanned"),
-    "frame count is matched directly rather than inferred from duration or FPS",
-  );
-
-  const nonTemporalCell = structuredClone(cell);
-  delete nonTemporalCell.geometryEnvelope.durations;
-  delete nonTemporalCell.geometryEnvelope.fps;
-  assert.ok(
-    calibrationBinding(record, nonTemporalCell, {
-      exactPlanEntries: [planEntry],
-      modality: "video",
-    }).reasons.includes("frames-out-of-envelope"),
-    "an exact plan cannot make a non-temporal cell accept multi-frame evidence",
+    "historical",
   );
 });
 
-test("the exact evidence-plan matcher covers every capture-identity axis (sc-18817)", () => {
-  const record = complete({
-    backend: "mlx",
-    loadShape: "deferred_materialization",
+test("an undeclared provider reads historical rather than being treated as current", () => {
+  // sc-22512: the lane-declaration REFUSAL is gone; the "never current" half is what protected
+  // anything, and it is asserted here without making an undeclared lane red the suite.
+  const record = complete({ evidenceScope: "authoritative" });
+  assert.equal(
+    evidenceSemantics(record, {
+      sceneWorks: record.repositories.sceneWorks.matrixSourceRevision,
+      inference: record.repositories.inference.revision,
+      inferenceClosureDigests: {},
+    }),
+    "historical",
+  );
+});
+
+test("LTX-2.5 evidence identity requires and hashes transformer and decoder axes", () => {
+  const base = complete({
     target: {
-      modelId: "ltx_2_3",
-      provider: "ltx_2_3",
-      tier: "q8",
+      modelId: "ltx_2_5",
+      provider: "ltx_2_5_distilled",
+      tier: "q4",
       mode: "text_to_video",
       overlay: "none",
-      geometry: { width: 768, height: 512, batch: 1, frames: 241 },
+      transformerVariant: "distilled",
+      decoder: "conv",
+      geometry: { width: 768, height: 512, batch: 1, frames: 145 },
     },
-    strategy: {
-      rung: "staged_residency",
-      engagedRungs: ["resident", "staged_residency"],
-      parameters: {},
-    },
-    calibrationFingerprint: "ltx-q8-temporal-fit-v1",
   });
-  const entry = {
-    backend: record.backend,
-    loadShape: record.loadShape,
-    target: structuredClone(record.target),
-    rung: record.strategy.rung,
-    engagedRungs: [...record.strategy.engagedRungs],
-    calibrationFingerprint: record.calibrationFingerprint,
-  };
-  const mutations = [
-    ["backend", (candidate) => { candidate.backend = "candle"; }],
-    ["model", (candidate) => { candidate.target.modelId = "ltx_2_3_eros"; }],
-    ["provider", (candidate) => { candidate.target.provider = "ltx_2_3_distilled"; }],
-    ["tier", (candidate) => { candidate.target.tier = "q4"; }],
-    ["mode", (candidate) => { candidate.target.mode = "image_to_video"; }],
-    ["overlay", (candidate) => { candidate.target.overlay = "lora"; }],
-    ["rung", (candidate) => { candidate.rung = "resident"; }],
-    ["width", (candidate) => { candidate.target.geometry.width = 1280; }],
-    ["height", (candidate) => { candidate.target.geometry.height = 704; }],
-    ["batch", (candidate) => { candidate.target.geometry.batch = 2; }],
-    ["frames", (candidate) => { candidate.target.geometry.frames = 121; }],
-    ["load shape", (candidate) => { candidate.loadShape = "eager_materialization"; }],
-    ["fingerprint", (candidate) => { candidate.calibrationFingerprint = "foreign"; }],
-    ["engaged composition", (candidate) => { candidate.engagedRungs = ["resident"]; }],
-  ];
+  assert.equal(validateRecord(base), base);
+  validateBundle({ schemaVersion: SCHEMA_VERSION, harnessVersion: HARNESS_VERSION, records: [base] });
 
-  assert.equal(planEntryMatchesEvidenceRecord(entry, record), true);
-  for (const [axis, mutate] of mutations) {
-    const candidate = structuredClone(entry);
-    mutate(candidate);
-    assert.equal(
-      planEntryMatchesEvidenceRecord(candidate, record),
-      false,
-      `${axis} mismatch must reject the plan entry`,
-    );
+  const identities = new Set();
+  for (const transformerVariant of ["distilled", "dev"]) {
+    for (const decoder of ["conv", "diffvae"]) {
+      identities.add(logicalCaseId({
+        ...base,
+        target: { ...base.target, transformerVariant, decoder },
+      }));
+    }
   }
-});
+  assert.equal(identities.size, 4, "each transformer/decoder pair must have a distinct logical id");
 
-test("Qwen plan covers the BF16 ladder plus Q4/Q8 rung-3-versus-rung-4 pairs", async () => {
-  const config = JSON.parse(await readFile(new URL("../config/memory-calibration-plan.json", import.meta.url)));
-  const cases = expandPlan(config);
-  const qwen = cases.filter(
-    (item) => item.target.provider === "qwen_image" && item.backend === "mlx",
-  );
-  assert.equal(qwen.length, 15);
-  assert.ok(qwen.every((item) => item.expectedResult === "passed" && !item.negative));
-  assert.deepEqual(
-    [...new Set(qwen.map((item) => item.strategy.rung))].sort(),
-    ["resident", "staged_residency", "bounded_decode", "bounded_attention", "bounded_transformer_residency"].sort(),
-  );
-  assert.ok(
-    qwen.every(
-      (item) => item.calibrationFingerprint === "qwen-image-mlx-shared-ladder-2026-08-01-v1",
-    ),
-    "load shape is a separate evidence-key axis and must not be encoded in the provider fingerprint",
-  );
-  assert.ok(
-    qwen.every(
-      (item) => item.loadShape === "deferred_materialization"
-    ),
-    "every Qwen capture case must use the production deferred shape",
-  );
-  assert.ok(
-    qwen.every((item) =>
-      item.target.tier === "q8"
-        ? item.sourceProvenance === undefined
-        : item.sourceProvenance === "physical_mlx_v1"),
-    "new q4/bf16 captures must require physical MLX provenance without rewriting retained q8 evidence",
-  );
-  assert.deepEqual(
-    qwen
-      .filter((item) => item.strategy.rung === "bounded_decode")
-      .map((item) => item.strategy.parameters.decodeTileEdge)
-      .sort((left, right) => right - left),
-    [768, 640, 512, 448, 384, 320, 256],
-  );
-  for (const tier of ["q4", "q8"]) {
-    const packed = qwen.filter((item) => item.target.tier === tier);
-    assert.equal(packed.length, 2);
-    assert.deepEqual(
-      packed.map((item) => item.strategy.rung).sort(),
-      ["bounded_attention", "bounded_transformer_residency"],
+  for (const field of ["transformerVariant", "decoder"]) {
+    const missing = structuredClone(base);
+    delete missing.target[field];
+    missing.logicalCaseId = logicalCaseId(missing);
+    missing.id = recordId(missing);
+    assert.throws(
+      () => validateBundle({ schemaVersion: SCHEMA_VERSION, harnessVersion: HARNESS_VERSION, records: [missing] }),
+      /schema validation failed/,
+      `${field} is required by the persisted schema`,
     );
-    assert.ok(packed.every((item) => item.fixture === `qwen-image-${tier}-seed16353-step2`));
+    assert.throws(() => validateRecord(missing), /must identify|must identify transformerVariant and decoder/);
   }
-});
 
-test("FLUX.2-dev MLX plan is the reference-free T2I q4/q8 resident matrix", async () => {
-  const config = JSON.parse(
-    await readFile(new URL("../config/memory-calibration-plan.json", import.meta.url)),
-  );
-  const flux2 = expandPlan(config).filter(
-    (item) => item.backend === "mlx" && item.target.provider === "flux2_dev",
-  );
-
-  assert.equal(flux2.length, 4);
-  assert.deepEqual(
-    flux2.map((item) => [
-      item.target.tier,
-      item.target.geometry.width,
-      item.target.geometry.height,
-      item.strategy.rung,
-    ]).sort(),
-    [
-      ["q4", 768, 768, "resident"],
-      ["q4", 1024, 1024, "resident"],
-      ["q8", 768, 768, "resident"],
-      ["q8", 1024, 1024, "resident"],
-    ].sort(),
-  );
-  assert.ok(flux2.every((item) =>
-    item.evidenceScope === "authoritative" &&
-    item.loadShape === "eager_materialization" &&
-    item.target.modelId === "flux2_dev" &&
-    item.target.mode === "text_to_image" &&
-    item.target.overlay === "none" &&
-    item.target.geometry.batch === 1 &&
-    item.target.geometry.frames === 1 &&
-    item.strategy.engagedRungs.length === 1 &&
-    item.strategy.engagedRungs[0] === "resident" &&
-    Object.keys(item.strategy.parameters).length === 0 &&
-    item.calibrationFingerprint === "sc-18218-flux2-dev-t2i-resident-evidence-v1"
-  ));
-  assert.ok(flux2.every((item) =>
-    item.fixture ===
-      `flux2-dev-mlx-${item.target.tier}-${item.target.geometry.width}-seed18218-step2`
-  ));
-});
-
-test("plain MLX Krea plan covers q4, q8, and bf16 across the exact five-rung contract", async () => {
-  const config = JSON.parse(
-    await readFile(new URL("../config/memory-calibration-plan.json", import.meta.url)),
-  );
-  const expectedRungs = [
-    "resident",
-    "staged_residency",
-    "bounded_decode",
-    "bounded_attention",
-    "bounded_transformer_residency",
-  ];
-  const expectedCompositions = {
-    resident: ["resident"],
-    staged_residency: ["resident", "staged_residency"],
-    bounded_decode: ["resident", "bounded_decode"],
-    bounded_attention: ["resident", "bounded_decode", "bounded_attention"],
-    bounded_transformer_residency: [
-      "resident",
-      "staged_residency",
-      "bounded_decode",
-      "bounded_attention",
-      "bounded_transformer_residency",
-    ],
+  const sessionId = `ims-${"7".repeat(20)}`;
+  const direct = { kind: "direct", sourceSessionIds: [sessionId] };
+  const derived = structuredClone(base);
+  derived.derivation = {
+    memory: direct, quality: direct, negativeMutation: direct,
+    lifecycle: direct, loadability: direct, overlay: direct,
+    justification: "exact LTX pipeline capture",
   };
-  const assertPlan = (candidate) => {
-    const krea = expandPlan(candidate).filter(
-      (item) => item.backend === "mlx" && item.target.provider === "krea_2_turbo",
-    );
-    assert.equal(krea.length, 15, "three tiers must each publish exactly five planned rungs");
-    for (const [tier, edge] of [["q4", 768], ["q8", 1024], ["bf16", 1024]]) {
-      const cases = krea.filter((item) => item.target.tier === tier);
-      assert.deepEqual(cases.map((item) => item.strategy.rung).sort(), [...expectedRungs].sort());
-      assert.ok(cases.every((item) =>
-        item.evidenceScope === "authoritative" &&
-        item.loadShape === "deferred_materialization" &&
-        item.target.modelId === "krea_2_turbo" &&
-        item.target.mode === "text_to_image" &&
-        item.target.overlay === "none" &&
-        item.target.geometry.width === edge &&
-        item.target.geometry.height === edge &&
-        item.target.geometry.batch === 1 &&
-        item.target.geometry.frames === 1 &&
-        item.calibrationFingerprint ===
-          "krea-2-mlx-full-ladder-native-pid-attn64m-window1-2026-08-03-v3" &&
-        item.fixture === `krea-base-mlx-${tier}-${edge}-seed18377-step2` &&
-        JSON.stringify(item.strategy.engagedRungs) ===
-          JSON.stringify(expectedCompositions[item.strategy.rung])
-      ), `${tier} plain Krea entries must preserve the exact capture tuple and composition`);
-    }
-  };
-  assertPlan(config);
-
-  const missingTierRung = structuredClone(config);
-  missingTierRung.providers = missingTierRung.providers.filter(
-    (provider) => provider.name !== "mlx-krea-base-q8-bounded-transformer-1024",
-  );
-  assert.throws(() => assertPlan(missingTierRung), /exactly five/);
-
-  const wrongSurface = structuredClone(config);
-  wrongSurface.providers.find(
-    (provider) => provider.name === "mlx-krea-base-q4-resident-768",
-  ).target.overlay = "control:1";
-  assert.throws(() => assertPlan(wrongSurface), /plain Krea entries/);
-});
-
-test("plain MLX SDXL plan covers every shipped tier without inventing measured-Missing rungs", async () => {
-  const config = JSON.parse(
-    await readFile(new URL("../config/memory-calibration-plan.json", import.meta.url)),
-  );
-  const expectedRungs = ["resident", "staged_residency", "bounded_transformer_residency"];
-  const expectedCompositions = {
-    resident: ["resident"],
-    staged_residency: ["resident", "staged_residency"],
-    bounded_transformer_residency: [
-      "resident", "staged_residency", "bounded_transformer_residency",
-    ],
-  };
-  const assertPlan = (candidate) => {
-    const sdxl = expandPlan(candidate).filter(
-      (item) => item.backend === "mlx" && item.target.provider === "sdxl",
-    );
-    assert.equal(sdxl.length, 18, "three tiers must each publish two base rungs plus four window cases");
-    for (const [tier, edge] of [["q4", 768], ["q8", 1024], ["bf16", 1024]]) {
-      const cases = sdxl.filter((item) => item.target.tier === tier);
-      assert.equal(cases.length, 6, `${tier} must carry Resident, Staged, and four window cases`);
-      assert.deepEqual(
-        [...new Set(cases.map((item) => item.strategy.rung))].sort(),
-        [...expectedRungs].sort(),
-      );
-      assert.ok(cases.every((item) =>
-        item.evidenceScope === "authoritative" &&
-        item.loadShape === "deferred_materialization" &&
-        item.target.modelId === "sdxl" &&
-        item.target.mode === "text_to_image" &&
-        item.target.overlay === "none" &&
-        item.target.geometry.width === edge &&
-        item.target.geometry.height === edge &&
-        item.target.geometry.batch === 1 &&
-        item.target.geometry.frames === 1 &&
-        item.calibrationFingerprint === "sdxl-mlx-unet-shared-ladder-v3" &&
-        item.fixture === `sdxl-base-mlx-${tier}-${edge}-seed18379-step2` &&
-        JSON.stringify(item.strategy.engagedRungs) ===
-          JSON.stringify(expectedCompositions[item.strategy.rung]) &&
-        (item.strategy.rung !== "bounded_transformer_residency" ||
-          ([1, 2, 5, 10].includes(item.strategy.parameters.transformerWindowSize) &&
-            item.strategy.parameters.transformerWindowComponent === "dit"))
-      ), `${tier} SDXL entries must preserve the exact base T2I capture tuple`);
-      assert.deepEqual(
-        cases
-          .filter((item) => item.strategy.rung === "bounded_transformer_residency")
-          .map((item) => item.strategy.parameters.transformerWindowSize)
-          .sort((left, right) => left - right),
-        [1, 2, 5, 10],
-        `${tier} must schedule every provider-implemented SDXL cadence`,
-      );
-      assert.ok(
-        cases.every((item) => !["bounded_decode", "bounded_attention"].includes(item.strategy.rung)),
-        `${tier} must not plan measured-Missing SDXL rungs`,
-      );
-    }
-  };
-  assertPlan(config);
-
-  const missingRung = structuredClone(config);
-  missingRung.providers = missingRung.providers.filter(
-    (provider) => provider.name !== "mlx-sdxl-base-q8-bounded-transformer-window5-1024",
-  );
-  assert.throws(() => assertPlan(missingRung), /four window cases|every provider-implemented/);
-
-  const inventedRung = structuredClone(config);
-  inventedRung.providers.find(
-    (provider) => provider.name === "mlx-sdxl-base-q4-resident-768",
-  ).rung = "bounded_decode";
-  assert.throws(() => assertPlan(inventedRung));
-});
-
-test("shipped five-rung oracles stay fresh after backend reuse verdicts", async () => {
-  const config = JSON.parse(await readFile(new URL("../config/memory-calibration-plan.json", import.meta.url)));
-  const expectedRungs = [
-    "resident",
-    "staged_residency",
-    "bounded_decode",
-    "bounded_attention",
-    "bounded_transformer_residency",
-  ];
-  const assertLadder = (cases, backend, expectedTarget, expectedCompositions) => {
-    assert.equal(cases.length, 5, `${backend} must declare exactly five fresh-reference cases`);
-    assert.deepEqual(
-      cases.map((item) => item.strategy.rung).sort(),
-      [...expectedRungs].sort(),
-      `${backend} must declare every rung exactly once`,
-    );
-    assert.equal(
-      new Set(cases.map((item) => JSON.stringify(item.target))).size,
-      1,
-      `${backend} cases must keep one exact target tuple`,
-    );
-    assert.deepEqual(cases[0].target, expectedTarget);
-    for (const item of cases) {
-      assert.deepEqual(
-        item.strategy.engagedRungs,
-        expectedCompositions[item.strategy.rung],
-        `${backend} ${item.strategy.rung} composition`,
-      );
-    }
-  };
-  const assertPlan = (candidate) => {
-    const cases = expandPlan(candidate);
-    assertLadder(
-      cases.filter((item) => item.fixture === "fresh-five-rung-z-image-q4-768-seed16402-step2"),
-      "mlx",
-      {
-        provider: "z_image_turbo", modelId: "z_image_turbo", tier: "q4",
-        mode: "text_to_image", overlay: "none",
-        geometry: { width: 768, height: 768, batch: 1, frames: 1 },
-      },
-      {
-        resident: ["resident"],
-        staged_residency: ["resident", "staged_residency"],
-        bounded_decode: ["resident", "bounded_decode"],
-        bounded_attention: ["resident", "bounded_decode", "bounded_attention"],
-        bounded_transformer_residency: [
-          "resident", "bounded_decode", "bounded_attention", "bounded_transformer_residency",
-        ],
-      },
-    );
-    const mlx = cases.filter(
-      (item) => item.fixture === "fresh-five-rung-z-image-q4-768-seed16402-step2",
-    );
-    assert.ok(mlx.every((item) => item.modelLoadPolicy === "fresh_per_case"));
-    assert.deepEqual(
-      [...new Set(mlx.map((item) => item.calibrationFingerprint))],
-      ["z-image-mlx-independent-materialization-v4"],
-      "load shape is a typed receipt axis, not part of the provider content fingerprint",
-    );
-    assert.equal(mlx.filter((item) => item.loadShape === "eager_materialization").length, 4);
-    assert.equal(mlx.filter((item) => item.loadShape === "deferred_materialization").length, 1);
-    const candle = cases.filter(
-      (item) => item.fixture === "fresh-five-rung-krea-q4-1024-seed16402-step2",
-    );
-    assertLadder(
-      candle,
-      "candle",
-      {
-        provider: "krea_2_turbo", modelId: "krea_2_turbo", tier: "q4",
-        mode: "text_to_image", overlay: "none",
-        geometry: { width: 1024, height: 1024, batch: 1, frames: 1 },
-      },
-      {
-        resident: ["resident"],
-        staged_residency: ["resident", "staged_residency"],
-        bounded_decode: ["resident", "staged_residency", "bounded_decode"],
-        bounded_attention: ["resident", "staged_residency", "bounded_decode", "bounded_attention"],
-        bounded_transformer_residency: [
-          "resident", "staged_residency", "bounded_decode", "bounded_attention",
-          "bounded_transformer_residency",
-        ],
-      },
-    );
-    assert.ok(candle.every((item) => item.modelLoadPolicy === "fresh_per_case"));
-    assert.ok(candle.every((item) => item.modelLoadGroup === null));
-  };
-  assertPlan(config);
-
-  const missingRung = structuredClone(config);
-  missingRung.providers = missingRung.providers.filter(
-    (provider) => provider.name !== "mlx-z-image-q4-fresh-reference-bounded-attention",
-  );
-  assert.throws(() => assertPlan(missingRung), /exactly five/);
-
-  const wrongComposition = structuredClone(config);
-  wrongComposition.providers.find(
-    (provider) => provider.name === "candle-krea-q4-fresh-reference-bounded-transformer",
-  ).engagedRungs = ["resident", "bounded_decode", "bounded_attention", "bounded_transformer_residency"];
-  assert.throws(() => assertPlan(wrongComposition), /composition/);
-});
-
-test("Krea current v1 production truth is separate from non-promotable v2 candidates", async () => {
-  const config = JSON.parse(await readFile(new URL("../config/memory-calibration-plan.json", import.meta.url)));
-  const current = config.providers.find((provider) => provider.name === "candle-krea-production-current-v1");
-  assert.equal(current.evidenceScope, "authoritative");
-  assert.equal(current.calibrationFingerprint, "krea-turbo-cuda-phase-curves-v1");
-  assert.deepEqual(current.cases, [{
-    parameters: {
-      decodeTileEdge: 512,
-      decodeOverlap: 128,
-      attentionChunkSize: 134217728,
-      transformerWindowSize: 1,
+  const source = {
+    id: sessionId,
+    kind: "unit_test",
+    command: "exact LTX fixture",
+    sourcePath: "docs/calibration/sc-test/ltx-exact.log",
+    capturedAt: derived.capturedAt,
+    repositories: structuredClone(derived.repositories),
+    hardware: { probe: "fixture", memoryBytes: derived.hardware.memoryBytes },
+    target: {
+      tier: derived.target.tier,
+      mode: derived.target.mode,
+      overlay: derived.target.overlay,
+      transformerVariant: derived.target.transformerVariant,
+      decoder: derived.target.decoder,
+      rung: derived.strategy.rung,
     },
-    expectedResult: "passed",
-  }]);
-  const candidates = config.providers.find((provider) => provider.name === "candle-krea-v2-candidates");
-  assert.equal(candidates.evidenceScope, "candidate");
-  assert.equal(candidates.calibrationFingerprint, "krea-turbo-cuda-phase-curves-v2");
-  assert.equal(candidates.cases.length, 2);
+    stdoutSha256: "8".repeat(64),
+    inputs: [{
+      role: "base", path: "/fixture/q4", bytes: 1, sha256: "9".repeat(64),
+      repository: derived.artifact.repository,
+      resolvedRevision: derived.artifact.resolvedRevision,
+      variant: derived.target.tier,
+    }],
+    outputs: [{ path: "fixture.json", sha256: "a".repeat(64) }],
+    claims: ["memory", "quality", "negative_mutation", "lifecycle", "loadability", "overlay"],
+    result: "passed",
+  };
+  const derivedBundle = {
+    schemaVersion: SCHEMA_VERSION,
+    harnessVersion: HARNESS_VERSION,
+    sourceSessions: [source],
+    records: [derived],
+  };
+  validateBundle(derivedBundle);
+  const nonPhysicalAudio = structuredClone(derivedBundle);
+  nonPhysicalAudio.records[0].quality.audio = audioQuality();
+  assert.throws(
+    () => validateBundle(nonPhysicalAudio),
+    /schema validation|physical.*A\/V source session|source must be physical_mlx/,
+    "typed audio cannot be sourced from a non-physical derived record",
+  );
+  const failedAudio = structuredClone(derived);
+  failedAudio.quality.audio = audioQuality({ result: "failed" });
+  assert.throws(() => validateRecord(failedAudio), /audio quality did not pass/);
+  const overThresholdAudio = structuredClone(derived);
+  overThresholdAudio.quality.audio = audioQuality({ maximumAbsoluteError: 0.02 });
+  assert.throws(() => validateRecord(overThresholdAudio), /audio quality threshold exceeded/);
+  for (const field of ["tier", "mode", "overlay", "rung", "transformerVariant", "decoder"]) {
+    const crossed = structuredClone(derivedBundle);
+    crossed.sourceSessions[0].target[field] = "wrong";
+    if (field === "tier") crossed.sourceSessions[0].inputs[0].variant = "wrong";
+    assert.throws(
+      () => validateBundle(crossed),
+      /wrong LTX|schema validation failed/,
+      `${field} cannot cross LTX derivation identities`,
+    );
+  }
+  const missingSourceTarget = structuredClone(derivedBundle);
+  delete missingSourceTarget.sourceSessions[0].target;
+  assert.throws(
+    () => validateBundle(missingSourceTarget),
+    /schema validation failed|without a target identity/,
+  );
+  // One LTX derivation record must not retro-type the non-LTX sessions the bundle also carries:
+  // a non-LTX session can never declare transformerVariant/decoder, so a per-session requirement
+  // would red terminal ingestion of the existing corpus.
+  const mixedCorpus = structuredClone(derivedBundle);
+  const legacySession = structuredClone(mixedCorpus.sourceSessions[0]);
+  legacySession.id = `ims-${"c".repeat(20)}`;
+  delete legacySession.target.transformerVariant;
+  delete legacySession.target.decoder;
+  mixedCorpus.sourceSessions.push(legacySession);
+  validateBundle(mixedCorpus);
+  // The LTX session itself still has to be typed.
+  const untypedLtxSource = structuredClone(derivedBundle);
+  delete untypedLtxSource.sourceSessions[0].target.transformerVariant;
+  delete untypedLtxSource.sourceSessions[0].target.decoder;
+  assert.throws(
+    () => validateBundle(untypedLtxSource),
+    /schema validation failed|wrong LTX/,
+  );
 });
 
-test("provider execution requires one backend-specific hardware probe", async () => {
-  const config = JSON.parse(await readFile(new URL("../config/memory-calibration-plan.json", import.meta.url)));
+// -----------------------------------------------------------------------------------------------
+// sc-22514 / epic acceptance test 1: the PLAN FORMAT cannot express a second measurement of one
+// (model, tier, lane) cell, nor any sweep. This is a structural claim about
+// packages/memory-anchor-plan.schema.json, not a review convention, so it is asserted against the
+// schema itself and against the checked-in plan the capture commands read.
+// -----------------------------------------------------------------------------------------------
+test("the anchor plan schema cannot express a duplicate cell or any sweep", async () => {
+  const plan = JSON.parse(await readFile(new URL("../config/memory-calibration-plan.json", import.meta.url)));
+  assert.equal(validatePlan(plan), plan);
+
+  // 1. ONE anchor per (model, tier, lane), enforced by the anchor set being a JSON OBJECT keyed on
+  //    that triple. A duplicate key is not a rejected document; it is not a document at all.
+  assert.equal(ANCHOR_PLAN_SCHEMA.properties.anchors.type, "object");
+  assert.equal(
+    ANCHOR_PLAN_SCHEMA.properties.anchors.propertyNames.pattern,
+    "^[a-z][a-z0-9_]*:(q4|q8|bf16):(mlx|candle)$",
+  );
+  const keys = Object.keys(plan.anchors);
+  assert.equal(new Set(keys).size, keys.length);
+  for (const key of keys) {
+    assert.match(key, new RegExp(ANCHOR_PLAN_SCHEMA.properties.anchors.propertyNames.pattern));
+  }
+  assert.deepEqual(planAnchors(plan).map((planned) => planned.logicalCaseId).sort(),
+    [...new Set(planAnchors(plan).map((planned) => planned.logicalCaseId))].sort(),
+    "one anchor per cell means one logical case per cell");
+
+  // 2. A key outside the (model, tier, lane) vocabulary — the only way to write a second entry for
+  //    one cell — is rejected.
+  for (const key of ["krea_2_turbo:q4:mlx:second", "krea_2_turbo:q4", "krea_2_turbo:q4:cuda", "krea_2_turbo:fp8:mlx"]) {
+    const duplicate = structuredClone(plan);
+    duplicate.anchors[key] = structuredClone(plan.anchors["krea_2_turbo:q4:mlx"]);
+    assert.throws(() => validatePlan(duplicate), /anchor plan is invalid/, key);
+  }
+
+  // 2b. The key PATTERN only constrains the SHAPE of a model id, so a well-shaped INVENTED id was
+  //     the remaining escape hatch: `krea_2_turbo_b:q4:mlx`, a byte-for-byte copy of
+  //     `krea_2_turbo:q4:mlx`, is schema-valid and is a second measurement of one physical cell
+  //     wearing a new name. validatePlan closes it by requiring the model id to be a
+  //     docs/generated/memory-matrix.json `models[].id` or one of that file's own
+  //     `summary.outOfMatrixEntries` — a coherence check between two artifacts that are both
+  //     PRESENT in the tree, which never asks whether a cell has been measured.
+  for (const invented of ["krea_2_turbo_b:q4:mlx", "krea_2_turbo_2:q4:mlx", "not_a_model:q4:candle"]) {
+    const renamed = structuredClone(plan);
+    renamed.anchors[invented] = structuredClone(plan.anchors["krea_2_turbo:q4:mlx"]);
+    assert.throws(
+      () => validatePlan(renamed),
+      /is not a docs\/generated\/memory-matrix\.json model/,
+      invented,
+    );
+  }
+  // The allowlist half: an out-of-matrix model the matrix itself names is accepted, and today that
+  // is exactly the MiniMax-H3 pair — which is why the shipped plan's three `minimax_h3` anchors
+  // validate above even though `minimax_h3` is in no `models[]` row.
+  const matrix = JSON.parse(
+    await readFile(new URL("../docs/generated/memory-matrix.json", import.meta.url)),
+  );
+  const outOfMatrix = matrix.summary.outOfMatrixEntries.map((entry) => entry.id);
+  assert.ok(outOfMatrix.includes("minimax_h3"), "minimax_h3 is the out-of-matrix allowlist entry");
+  assert.ok(
+    Object.keys(plan.anchors).some((key) => key.startsWith("minimax_h3:")),
+    "the shipped plan exercises the out-of-matrix allowlist",
+  );
+  assert.equal(
+    matrix.models.some((model) => model.id === "minimax_h3"),
+    false,
+    "…and does so because minimax_h3 is genuinely absent from models[]",
+  );
+
+  // 3. Every sweep axis the grid plan used to carry is now unwritable.
+  for (const [field, value] of [
+    ["cases", [{ parameters: {}, expectedResult: "passed" }]],
+    ["parameters", { decodeTileEdge: 512 }],
+    ["rung", "bounded_decode"],
+    ["engagedRungs", ["resident", "bounded_decode"]],
+    ["expectedResult", "failed"],
+    ["negative", true],
+    ["warmRepeats", 3],
+    ["modelLoadGroup", "batch-1"],
+    ["temporal", [97, 121, 145]],
+    ["geometries", [{ width: 768, height: 768, batch: 1, frames: 1 }]],
+  ]) {
+    const swept = structuredClone(plan);
+    swept.anchors["krea_2_turbo:q4:mlx"][field] = value;
+    assert.throws(() => validatePlan(swept), /anchor plan is invalid/, field);
+  }
+
+  // 4. A geometry axis is one integer, so a list or a range is a type error rather than a sweep.
+  for (const value of [[768, 1024], { min: 768, max: 1024 }, "768"]) {
+    const swept = structuredClone(plan);
+    swept.anchors["krea_2_turbo:q4:mlx"].geometry.width = value;
+    assert.throws(() => validatePlan(swept), /anchor plan is invalid/);
+  }
+  const batched = structuredClone(plan);
+  batched.anchors["krea_2_turbo:q4:mlx"].geometry.batch = 2;
+  assert.throws(() => validatePlan(batched), /anchor plan is invalid/);
+});
+
+// sc-22514 / epic acceptance test 1, second half: ONE command captures ONE anchor and writes ONE
+// record, with no campaign, resume or currency ceremony — and the record it writes is one the
+// anchor extractor can consume.
+test("one capture command writes exactly one record in the extractor's bundle shape", async () => {
+  const cleanRepo = await cleanFixtureRepo();
+  const output = path.join(await mkdtemp(path.join(tmpdir(), "anchor-capture-")), "anchor.json");
+  const planPath = path.join(await mkdtemp(path.join(tmpdir(), "anchor-plan-")), "plan.json");
+  const key = "fixture_model:q4:candle";
+  await writeFile(planPath, JSON.stringify(anchorPlanFixture(key)));
+  await execFileAsync(process.execPath, [
+    fileURLToPath(new URL("./memory-calibration-harness.mjs", import.meta.url)),
+    "capture",
+    "--plan", planPath,
+    "--anchor", key,
+    "--provider-command", JSON.stringify([
+      process.execPath,
+      fileURLToPath(new URL("./fixtures/memory-provider-fixture.mjs", import.meta.url)),
+    ]),
+    "--sceneworks-repo", cleanRepo,
+    "--inference-repo", cleanRepo,
+    "--output", output,
+  ]);
+  const bundle = JSON.parse(await readFile(output, "utf8"));
+  assert.equal(bundle.schemaVersion, SCHEMA_VERSION);
+  assert.equal(bundle.harnessVersion, HARNESS_VERSION);
+  // EXACTLY one record. A second record in this file would mean the command captured more than the
+  // one anchor it was told to.
+  assert.equal(bundle.records.length, 1);
+  assert.equal(bundle.records[0].logicalCaseId, planAnchor(anchorPlanFixture(key), key).logicalCaseId);
+  assert.equal(bundle.records[0].target.modelId, "fixture_model");
+  assert.equal(bundle.records[0].target.tier, "q4");
+  assert.equal(bundle.records[0].backend, "candle");
+  assert.equal(bundle.records[0].strategy.rung, ANCHOR_STRATEGY.candle.rung);
+  assert.deepEqual(bundle.records[0].strategy.parameters, {});
+  // The `{records: [...]}` shape scripts/extract-memory-anchors.mjs walks, validated by the same
+  // bundle validator every retained corpus is held to.
+  assert.equal(validateBundle(bundle), bundle);
+
+  // Every WRITING arm names its destination, and omitting it is a usage error rather than the raw
+  // `TypeError` `path.resolve(undefined)` used to throw from inside `atomicWrite`. `capture` is
+  // additionally proven to refuse BEFORE the provider runs.
+  for (const argv of [
+    ["plan"],
+    ["ingest", "--input", output],
+    ["capture", "--plan", planPath, "--anchor", key,
+      "--provider-command", JSON.stringify(["node", "must-not-start.mjs"]),
+      "--sceneworks-repo", cleanRepo, "--inference-repo", cleanRepo],
+  ]) {
+    const failure = await execFileAsync(process.execPath, [
+      fileURLToPath(new URL("./memory-calibration-harness.mjs", import.meta.url)),
+      ...argv,
+    ]).then(() => null, (error) => error);
+    assert.ok(failure, `${argv[0]} must refuse without --output`);
+    assert.match(failure.stderr, /--output is required/, argv[0]);
+    assert.doesNotMatch(failure.stderr, /TypeError/, argv[0]);
+  }
+});
+
+test("a capture names one anchor the plan declares, before starting the provider", async () => {
+  const plan = JSON.parse(await readFile(new URL("../config/memory-calibration-plan.json", import.meta.url)));
   await assert.rejects(
-    runProviderPlan({
-    closureDigestFor: stubClosureDigest,
-      config,
+    captureAnchor({
+      closureDigestFor: stubClosureDigest,
+      plan,
+      anchorKey: "qwen_image:q4",
       providerCommand: [process.execPath, "must-not-start.mjs"],
       sceneWorksRepo: fileURLToPath(new URL("..", import.meta.url)),
       inferenceRepo: fileURLToPath(new URL("..", import.meta.url)),
     }),
-    /select exactly one backend/,
+    /must be <modelId>:<tier>:<backend>/,
+  );
+  await assert.rejects(
+    captureAnchor({
+      closureDigestFor: stubClosureDigest,
+      plan,
+      anchorKey: "qwen_image:q4:cuda",
+      providerCommand: [process.execPath, "must-not-start.mjs"],
+      sceneWorksRepo: fileURLToPath(new URL("..", import.meta.url)),
+      inferenceRepo: fileURLToPath(new URL("..", import.meta.url)),
+    }),
+    /must be <modelId>:<tier>:<backend>/,
+  );
+  await assert.rejects(
+    captureAnchor({
+      closureDigestFor: stubClosureDigest,
+      plan,
+      anchorKey: "not_a_model:q4:mlx",
+      providerCommand: [process.execPath, "must-not-start.mjs"],
+      sceneWorksRepo: fileURLToPath(new URL("..", import.meta.url)),
+      inferenceRepo: fileURLToPath(new URL("..", import.meta.url)),
+    }),
+    /unknown anchor "not_a_model:q4:mlx"/,
   );
 });
 
 test("a legacy Qwen completion cannot suppress a provenance-required recapture", async () => {
-  const config = JSON.parse(await readFile(new URL("../config/memory-calibration-plan.json", import.meta.url)));
   const record = qwenPositiveComplete();
   validateBundle({ schemaVersion: SCHEMA_VERSION, harnessVersion: HARNESS_VERSION, records: [record] });
   const provenanceRequired = structuredClone(record);
@@ -1403,21 +1279,6 @@ test("a legacy Qwen completion cannot suppress a provenance-required recapture",
     () => validateBundle({ schemaVersion: SCHEMA_VERSION, harnessVersion: HARNESS_VERSION, records: [provenanceRequired] }),
     /exact artifact inventory|missing source-session derivation/,
   );
-  const qwenRemaining = expandPlan(config, [record]).filter(
-    (item) => item.target.provider === "qwen_image" && item.backend === "mlx",
-  );
-  assert.equal(qwenRemaining.length, 15);
-  assert.equal(
-    qwenRemaining.some(
-      (item) =>
-        item.strategy.rung === "bounded_decode" &&
-        item.strategy.parameters.decodeTileEdge === 512 &&
-        item.strategy.parameters.decodeOverlap === 64,
-    ),
-    true,
-  );
-  assert.ok(qwenRemaining.some((item) => item.strategy.rung === "bounded_attention"));
-  assert.ok(qwenRemaining.some((item) => item.strategy.rung === "bounded_transformer_residency"));
 });
 
 test("runtime bundle validation matches schema closure for malformed gated and nested values", () => {
@@ -1671,23 +1532,8 @@ test("parameterless strategies use a truthful degenerate sweep instead of a fabr
   );
 });
 
-test("executable runner handles fragmented responses across provider processes", async () => {
-  const config = {
-    providers: [{
-      evidenceScope: "fixture",
-      backend: "candle",
-      loadShape: "eager_materialization",
-      target: complete().target,
-      rung: "bounded_decode",
-      engagedRungs: ["resident", "bounded_decode"],
-      calibrationFingerprint: "fixture-formula-v2",
-      fixture: "fixture-seed42",
-      cases: [
-        { parameters: { decodeTileEdge: 512, decodeOverlap: 128 }, expectedResult: "passed" },
-        { parameters: { decodeTileEdge: 384, decodeOverlap: 128 }, expectedResult: "passed" },
-      ],
-    }],
-  };
+test("executable runner handles a fragmented response and writes exactly one record", async () => {
+  const plan = anchorPlanFixture("fixture_model:q4:candle");
   const actions = [];
   const executeProvider = async (command, args, input) => {
     const request = JSON.parse(input);
@@ -1695,6 +1541,11 @@ test("executable runner handles fragmented responses across provider processes",
     if (request.action === "run") {
       assert.equal(typeof request.planned.logicalCaseId, "string");
       assert.equal(Object.hasOwn(request.planned, "_campaignEntry"), false);
+      assert.deepEqual(request.planned.strategy, {
+        rung: ANCHOR_STRATEGY.candle.rung,
+        engagedRungs: [...ANCHOR_STRATEGY.candle.engagedRungs],
+        parameters: {},
+      });
     }
     return new Promise((resolve, reject) => {
       const child = spawn(command, args, { stdio: ["pipe", "pipe", "pipe"] });
@@ -1709,9 +1560,10 @@ test("executable runner handles fragmented responses across provider processes",
       child.stdin.end(input);
     });
   };
-  const result = await runProviderPlan({
+  const result = await captureAnchor({
     closureDigestFor: stubClosureDigest,
-    config,
+    plan,
+    anchorKey: "fixture_model:q4:candle",
     providerCommand: [
       process.execPath,
       fileURLToPath(new URL("./fixtures/memory-provider-fragmented-fixture.mjs", import.meta.url)),
@@ -1720,48 +1572,36 @@ test("executable runner handles fragmented responses across provider processes",
     inferenceRepo: fileURLToPath(new URL("..", import.meta.url)),
     executeProvider,
   });
-  const clean = result.records.every((record) =>
-    !record.repositories.sceneWorks.dirty && !record.repositories.inference.dirty
-  );
-  assert.equal(result.records.length, clean ? 1 : 2);
-  assert.equal(expandPlan(config, result.records).length, clean ? 0 : 2);
+  // ONE command, ONE render, ONE record — the whole point of the collapse. A second record cannot
+  // appear because there is no second case to schedule and no batch to fragment.
+  assert.equal(result.records.length, 1);
   assert.equal(result.records[0].hardware.deviceId, "fixture:0");
   assert.match(result.records[0].repositories.sceneWorks.revision, /^[0-9a-f]{40}$/);
-  assert.deepEqual(actions, ["probe", "run", ...(clean ? [] : ["run"])]);
+  assert.deepEqual(actions, ["probe", "run"]);
 });
 
-function physicalMlxConfig() {
-  const target = {
-    ...complete().target,
+const PHYSICAL_MLX_ANCHOR = "fixture_mlx:q4:mlx";
+
+function physicalMlxPlan() {
+  const { geometry } = complete().target;
+  return anchorPlanFixture(PHYSICAL_MLX_ANCHOR, {
     provider: "fixture_mlx",
-    modelId: "fixture_mlx",
-  };
-  return {
-    providers: [{
-      evidenceScope: "fixture",
-      backend: "mlx",
-      loadShape: "eager_materialization",
-      target,
-      rung: "bounded_decode",
-      engagedRungs: ["resident", "bounded_decode"],
-      calibrationFingerprint: "fixture-formula-v2",
-      fixture: "physical-mlx-fixture",
-      cases: [{
-        parameters: { decodeTileEdge: 512, decodeOverlap: 128 },
-        expectedResult: "passed",
-      }],
-    }],
-  };
+    mode: complete().target.mode,
+    overlay: complete().target.overlay,
+    geometry,
+    fixture: "physical-mlx-fixture",
+  });
 }
 
 test("physical MLX capture binds raw provider stdout, exact inventory, and persisted outputs", async () => {
-  const config = physicalMlxConfig();
+  const plan = physicalMlxPlan();
   const cleanRepo = await cleanFixtureRepo();
   const rawLogDir = await mkdtemp(path.join(tmpdir(), "physical-mlx-receipts-"));
   const sourcePathPrefix = "docs/calibration/sc-test";
-  const result = await runProviderPlan({
+  const result = await captureAnchor({
     closureDigestFor: stubClosureDigest,
-    config,
+    plan,
+    anchorKey: PHYSICAL_MLX_ANCHOR,
     providerCommand: [
       process.execPath,
       fileURLToPath(new URL("./fixtures/memory-provider-fixture.mjs", import.meta.url)),
@@ -1905,6 +1745,55 @@ test("physical MLX capture binds raw provider stdout, exact inventory, and persi
   }
   assert.equal(validateBundle(authoritative), authoritative);
 
+  const av = structuredClone(authoritative);
+  const avRecord = av.records[0];
+  avRecord.quality.audio = audioQuality();
+  for (const output of av.sourceSessions[0].outputs.filter(({ role }) => role !== "request")) {
+    output.role = output.role === "selected_rgb" ? "selected_av" : "reference_av";
+    output.path = `${sourcePathPrefix}/${avRecord.logicalCaseId}-${output.role}-1024x1024-f1-${output.sha256}.avbin`;
+  }
+  assert.equal(validateBundle(av), av, "typed A/V receipts round-trip through schema and JS validation");
+  const ltxAv = structuredClone(av);
+  const ltxAvRecord = ltxAv.records[0];
+  delete ltxAvRecord.sourceProvenance;
+  ltxAvRecord.target.modelId = "ltx_2_5";
+  ltxAvRecord.target.provider = "ltx_2_5";
+  ltxAvRecord.target.transformerVariant = "distilled";
+  ltxAvRecord.target.decoder = "conv";
+  const priorAvLogicalCaseId = ltxAvRecord.logicalCaseId;
+  ltxAvRecord.logicalCaseId = logicalCaseId(ltxAvRecord);
+  ltxAvRecord.id = recordId(ltxAvRecord);
+  ltxAv.sourceSessions[0].target.transformerVariant = "distilled";
+  ltxAv.sourceSessions[0].target.decoder = "conv";
+  for (const output of ltxAv.sourceSessions[0].outputs.filter(({ role }) => role !== "request")) {
+    output.path = output.path.replace(priorAvLogicalCaseId, ltxAvRecord.logicalCaseId);
+  }
+  assert.equal(validateBundle(ltxAv), ltxAv, "LTX A/V provenance binds the complete typed source target");
+  const mismatchedAudioSource = structuredClone(ltxAv);
+  const nonPhysicalSession = structuredClone(mismatchedAudioSource.sourceSessions[0]);
+  nonPhysicalSession.id = `ims-${"f".repeat(20)}`;
+  nonPhysicalSession.kind = "unit_test";
+  nonPhysicalSession.sourcePath = "docs/calibration/sc-test/mismatched-audio-source.log";
+  mismatchedAudioSource.sourceSessions.push(nonPhysicalSession);
+  mismatchedAudioSource.records[0].derivation.quality.sourceSessionIds = [nonPhysicalSession.id];
+  assert.throws(
+    () => validateBundle(mismatchedAudioSource),
+    /typed audio quality source must be physical_mlx/,
+    "an unrelated physical A/V session cannot cover a non-physical quality derivation",
+  );
+  const crossedAv = structuredClone(av);
+  crossedAv.sourceSessions[0].outputs[2].role = "reference_rgb";
+  assert.throws(() => validateBundle(crossedAv), /schema validation|selected\/reference RGB or A\/V pair/);
+  const badAudioHash = structuredClone(av);
+  badAudioHash.records[0].quality.audio.selectedPcmSha256 = "not-a-digest";
+  assert.throws(() => validateBundle(badAudioHash), /schema validation|lowercase SHA-256/);
+  const failedAudio = structuredClone(av);
+  failedAudio.records[0].quality.audio.result = "failed";
+  assert.throws(() => validateBundle(failedAudio), /schema validation|audio quality did not pass/);
+  const overThresholdAudio = structuredClone(av);
+  overThresholdAudio.records[0].quality.audio.maximumAbsoluteError = 0.02;
+  assert.throws(() => validateBundle(overThresholdAudio), /audio quality threshold exceeded/);
+
   const missingDerivation = structuredClone(authoritative);
   delete missingDerivation.records[0].derivation;
   assert.throws(() => validateBundle(missingDerivation), /missing source-session derivation/);
@@ -1966,9 +1855,10 @@ test("physical MLX capture binds raw provider stdout, exact inventory, and persi
 
   const tamperedCaptureDir = await mkdtemp(path.join(tmpdir(), "physical-mlx-tamper-race-"));
   await assert.rejects(
-    runProviderPlan({
+    captureAnchor({
       closureDigestFor: stubClosureDigest,
-      config,
+      plan,
+      anchorKey: PHYSICAL_MLX_ANCHOR,
       providerCommand: [
         process.execPath,
         fileURLToPath(new URL("./fixtures/memory-provider-fixture.mjs", import.meta.url)),
@@ -1987,9 +1877,10 @@ test("physical MLX capture binds raw provider stdout, exact inventory, and persi
 
   await writeFile(path.join(rawLogDir, session.sourcePath), "tampered provider output");
   await assert.rejects(
-    runProviderPlan({
+    captureAnchor({
       closureDigestFor: stubClosureDigest,
-      config,
+      plan,
+      anchorKey: PHYSICAL_MLX_ANCHOR,
       providerCommand: [
         process.execPath,
         fileURLToPath(new URL("./fixtures/memory-provider-fixture.mjs", import.meta.url)),
@@ -2006,7 +1897,7 @@ test("physical MLX capture binds raw provider stdout, exact inventory, and persi
 });
 
 test("physical MLX receipts reject traversal prefixes and outputs outside the raw directory", async () => {
-  const config = physicalMlxConfig();
+  const plan = physicalMlxPlan();
   const cleanRepo = await cleanFixtureRepo();
   const rawLogDir = await mkdtemp(path.join(tmpdir(), "physical-mlx-receipts-"));
   const outsideDir = await mkdtemp(path.join(tmpdir(), "physical-mlx-outside-"));
@@ -2016,9 +1907,10 @@ test("physical MLX receipts reject traversal prefixes and outputs outside the ra
     rawLogDir,
   ];
   await assert.rejects(
-    runProviderPlan({
+    captureAnchor({
       closureDigestFor: stubClosureDigest,
-      config,
+      plan,
+      anchorKey: PHYSICAL_MLX_ANCHOR,
       providerCommand: [...fixtureCommand, "docs/calibration/../escape"],
       sceneWorksRepo: cleanRepo,
       inferenceRepo: cleanRepo,
@@ -2028,9 +1920,10 @@ test("physical MLX receipts reject traversal prefixes and outputs outside the ra
     /source path prefix must be a normalized path under docs\/calibration/,
   );
   await assert.rejects(
-    runProviderPlan({
+    captureAnchor({
       closureDigestFor: stubClosureDigest,
-      config,
+      plan,
+      anchorKey: PHYSICAL_MLX_ANCHOR,
       providerCommand: [...fixtureCommand, "docs/calibration/sc-test", outsideDir],
       sceneWorksRepo: cleanRepo,
       inferenceRepo: cleanRepo,
@@ -2040,9 +1933,10 @@ test("physical MLX receipts reject traversal prefixes and outputs outside the ra
     /physical MLX local output must stay under the raw log directory/,
   );
   await assert.rejects(
-    runProviderPlan({
+    captureAnchor({
       closureDigestFor: stubClosureDigest,
-      config,
+      plan,
+      anchorKey: PHYSICAL_MLX_ANCHOR,
       providerCommand: [
         process.execPath,
         fileURLToPath(new URL("./fixtures/memory-provider-fixture.mjs", import.meta.url)),
@@ -2056,443 +1950,12 @@ test("physical MLX receipts reject traversal prefixes and outputs outside the ra
   );
 });
 
-test("runner batches one target's five rungs into one attested model load", async () => {
-  const rungs = [
-    ["resident", ["resident"]],
-    ["staged_residency", ["resident", "staged_residency"]],
-    ["bounded_decode", ["resident", "bounded_decode"]],
-    ["bounded_attention", ["resident", "bounded_decode", "bounded_attention"]],
-    [
-      "bounded_transformer_residency",
-      ["resident", "bounded_decode", "bounded_attention", "bounded_transformer_residency"],
-    ],
-  ];
-  const config = {
-    providers: rungs.map(([rung, engagedRungs]) => ({
-      evidenceScope: "fixture",
-      backend: "candle",
-      loadShape: "eager_materialization",
-      target: complete().target,
-      rung,
-      engagedRungs,
-      calibrationFingerprint: "fixture-formula-v2",
-      fixture: "fixture-five-rungs",
-      modelLoadPolicy: "batch_rungs",
-      modelLoadGroup: "fixture-target",
-      cases: [
-        { parameters: { decodeTileEdge: 384, decodeOverlap: 128 }, expectedResult: "passed" },
-        { parameters: { decodeTileEdge: 512, decodeOverlap: 128 }, expectedResult: "passed" },
-      ],
-    })),
-  };
-  const invocations = [];
-  const cleanRepo = await cleanFixtureRepo();
-  const result = await runProviderPlan({
-    closureDigestFor: stubClosureDigest,
-    config,
-    providerCommand: [
-      process.execPath,
-      fileURLToPath(new URL("./fixtures/memory-provider-fixture.mjs", import.meta.url)),
-    ],
-    sceneWorksRepo: cleanRepo,
-    inferenceRepo: cleanRepo,
-    onProviderInvocation: (invocation) => invocations.push(invocation),
-  });
-  assert.equal(result.records.length, 5);
-  assert.deepEqual(invocations.map(({ action, cases }) => [action, cases.length]), [["run_batch", 5]]);
-  assert.equal(expandPlan(config, result.records).length, 0);
-});
-
-function qwenGatedBatchConfig() {
-  const target = {
-    ...complete().target,
-    modelId: "qwen_image",
-    provider: "qwen_image",
-  };
-  const shared = {
-    evidenceScope: "candidate",
-    backend: "candle",
-    loadShape: "deferred_materialization",
-    target,
-    calibrationFingerprint:
-      "qwen-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v1",
-    fixture: "qwen-image-candle-q4-seed15817-step2",
-  };
-  const decode = (decodeTileEdge) => ({ decodeTileEdge, decodeOverlap: 64 });
-  const attention = {
-    ...decode(512),
-    attentionChunkSize: 67_108_864,
-  };
-  return {
-    providers: [
-      {
-        ...shared,
-        rung: "resident",
-        engagedRungs: ["resident"],
-        cases: [{ parameters: {}, expectedResult: "passed" }],
-      },
-      {
-        ...shared,
-        rung: "staged_residency",
-        engagedRungs: ["resident", "staged_residency"],
-        cases: [{ parameters: {}, expectedResult: "passed" }],
-      },
-      {
-        ...shared,
-        rung: "bounded_decode",
-        engagedRungs: ["resident", "staged_residency", "bounded_decode"],
-        cases: [768, 640, 512, 448, 384, 320, 256].map((edge) => ({
-          parameters: decode(edge),
-          expectedResult: "passed",
-        })),
-      },
-      {
-        ...shared,
-        rung: "bounded_attention",
-        engagedRungs: ["resident", "staged_residency", "bounded_decode", "bounded_attention"],
-        cases: [{ parameters: attention, expectedResult: "passed" }],
-      },
-      {
-        ...shared,
-        rung: "bounded_transformer_residency",
-        engagedRungs: [
-          "resident", "staged_residency", "bounded_decode", "bounded_attention",
-          "bounded_transformer_residency",
-        ],
-        cases: [1, 2, 4, 8, 15, 30].map((transformerWindowSize) => ({
-          parameters: { ...attention, transformerWindowSize },
-          expectedResult: "passed",
-        })),
-      },
-    ],
-  };
-}
-
-test("gated Qwen batch persists the canonical five rungs then serializes all remaining sweep points", async () => {
-  const config = qwenGatedBatchConfig();
-  assert.equal(expandPlan(config).length, 16);
-
-  const invocations = [];
-  const checkpointSizes = [];
-  const cleanRepo = await cleanFixtureRepo();
-  const outputDir = await mkdtemp(path.join(tmpdir(), "memory-harness-output-"));
-  const output = path.join(outputDir, "evidence.json");
-  const result = await runProviderPlan({
-    closureDigestFor: stubClosureDigest,
-    config,
-    providerCommand: [
-      process.execPath,
-      fileURLToPath(new URL(
-        "./fixtures/memory-provider-gated-canonical-batch-fixture.mjs",
-        import.meta.url,
-      )),
-    ],
-    sceneWorksRepo: cleanRepo,
-    inferenceRepo: cleanRepo,
-    forceBatchRungs: true,
-    onProviderInvocation: (invocation) => invocations.push(invocation),
-    onProviderCheckpoint: async (checkpoint) => {
-      checkpointSizes.push(checkpoint.records.length);
-      await atomicWrite(output, checkpoint);
-      validateBundle(JSON.parse(await readFile(output, "utf8")));
-    },
-  });
-
-  assert.deepEqual(
-    invocations.map(({ action, cases }) => [action, cases.length]),
-    [["run_batch", 5], ...Array.from({ length: 11 }, () => ["run", 1])],
-  );
-  assert.deepEqual(checkpointSizes, Array.from({ length: 12 }, (_, index) => index + 5));
-  assert.equal(result.records.length, 16);
-  assert.ok(result.records.every((record) =>
-    record.status === "gated" && record.evidenceScope === "candidate"
-  ));
-  assert.deepEqual(
-    result.records.map((record) => record.logicalCaseId).sort(),
-    expandPlan(config).map((planned) => planned.logicalCaseId).sort(),
-  );
-  assert.equal(
-    expandPlan(config, result.records).length,
-    16,
-    "gated evidence must not falsely retire or promote planned calibration points",
-  );
-  assert.equal(validateBundle(JSON.parse(await readFile(output, "utf8"))).records.length, 16);
-  assert.deepEqual(await readdir(outputDir), ["evidence.json"]);
-});
-
-test("gated Qwen resume continues after failure without repeating provenance-matched attempts", async () => {
-  const config = qwenGatedBatchConfig();
-  const cleanRepo = await cleanFixtureRepo();
-  const outputDir = await mkdtemp(path.join(tmpdir(), "memory-harness-resume-"));
-  const output = path.join(outputDir, "evidence.json");
-  const state = path.join(outputDir, "provider-state.json");
-  const fixture = fileURLToPath(new URL(
-    "./fixtures/memory-provider-gated-canonical-batch-fixture.mjs",
-    import.meta.url,
-  ));
-  const firstInvocations = [];
-  await assert.rejects(
-    runProviderPlan({
-    closureDigestFor: stubClosureDigest,
-      config,
-      providerCommand: [process.execPath, fixture, state, "4"],
-      sceneWorksRepo: cleanRepo,
-      inferenceRepo: cleanRepo,
-      forceBatchRungs: true,
-      onProviderInvocation: (invocation) => firstInvocations.push(invocation),
-      onProviderCheckpoint: (checkpoint) => atomicWrite(output, checkpoint),
-    }),
-    /fixture fails after 4 successful invocations/,
-  );
-  assert.deepEqual(
-    firstInvocations.map(({ action, cases }) => [action, cases.length]),
-    [["run_batch", 5], ...Array.from({ length: 4 }, () => ["run", 1])],
-  );
-
-  const checkpoint = validateBundle(JSON.parse(await readFile(output, "utf8")));
-  assert.equal(checkpoint.records.length, 8);
-  const checkpointLogicalIds = new Set(checkpoint.records.map((record) => record.logicalCaseId));
-  const resumedInvocations = [];
-  const resumed = await runProviderPlan({
-    closureDigestFor: stubClosureDigest,
-    config,
-    providerCommand: [process.execPath, fixture, state],
-    sceneWorksRepo: cleanRepo,
-    inferenceRepo: cleanRepo,
-    resume: checkpoint,
-    forceBatchRungs: true,
-    onProviderInvocation: (invocation) => resumedInvocations.push(invocation),
-    onProviderCheckpoint: (nextCheckpoint) => atomicWrite(output, nextCheckpoint),
-  });
-
-  assert.deepEqual(
-    resumedInvocations.map(({ action, cases }) => [action, cases.length]),
-    Array.from({ length: 8 }, () => ["run", 1]),
-  );
-  const resumedLogicalIds = resumedInvocations.flatMap(({ cases }) =>
-    cases.map((planned) => planned.logicalCaseId)
-  );
-  assert.ok(resumedLogicalIds.every((logicalId) => !checkpointLogicalIds.has(logicalId)));
-  assert.equal(new Set([...checkpointLogicalIds, ...resumedLogicalIds]).size, 16);
-  assert.equal(resumed.records.length, 16);
-  assert.equal(new Set(resumed.records.map((record) => record.id)).size, 16);
-  assert.ok(resumed.records.every((record) => record.id === recordId(record)));
-  assert.equal(new Set(resumed.records.map((record) => record.capturedAt)).size, 12);
-  for (const prior of checkpoint.records) {
-    assert.deepEqual(resumed.records.find((record) => record.id === prior.id), prior);
-  }
-  assert.equal(
-    expandPlan(config, resumed.records).length,
-    16,
-    "operational attempt resume must not turn gated receipts into completion evidence",
-  );
-  assert.equal(validateBundle(JSON.parse(await readFile(output, "utf8"))).records.length, 16);
-  assert.ok((await readdir(outputDir)).every((name) => !name.includes(".tmp-")));
-});
-
-test("operational resume does not suppress an attempt from mismatched hardware provenance", async () => {
-  const config = { providers: [qwenGatedBatchConfig().providers[0]] };
-  const cleanRepo = await cleanFixtureRepo();
-  const fixtureCommand = [
-    process.execPath,
-    fileURLToPath(new URL(
-      "./fixtures/memory-provider-gated-canonical-batch-fixture.mjs",
-      import.meta.url,
-    )),
-  ];
-  const first = await runProviderPlan({
-    closureDigestFor: stubClosureDigest,
-    config,
-    providerCommand: fixtureCommand,
-    sceneWorksRepo: cleanRepo,
-    inferenceRepo: cleanRepo,
-  });
-  const stale = structuredClone(first);
-  stale.records[0].hardware.driverVersion = "stale-driver";
-  stale.records[0].id = recordId(stale.records[0]);
-  validateBundle(stale);
-
-  const invocations = [];
-  const resumed = await runProviderPlan({
-    closureDigestFor: stubClosureDigest,
-    config,
-    providerCommand: fixtureCommand,
-    sceneWorksRepo: cleanRepo,
-    inferenceRepo: cleanRepo,
-    resume: stale,
-    onProviderInvocation: (invocation) => invocations.push(invocation),
-  });
-  assert.deepEqual(invocations.map(({ action, cases }) => [action, cases.length]), [["run", 1]]);
-  assert.equal(resumed.records.length, 2);
-  assert.equal(new Set(resumed.records.map((record) => record.logicalCaseId)).size, 1);
-  assert.equal(new Set(resumed.records.map((record) => record.id)).size, 2);
-});
-
-test("runner flags provide explicit fresh and experimental batch controls", async () => {
-  const config = {
-    providers: ["resident", "bounded_decode"].map((rung) => ({
-      evidenceScope: "fixture",
-      backend: "candle",
-      loadShape: "eager_materialization",
-      target: complete().target,
-      rung,
-      engagedRungs: rung === "resident" ? ["resident"] : ["resident", "bounded_decode"],
-      calibrationFingerprint: "fixture-formula-v2",
-      fixture: "fixture-forced-rungs",
-      cases: [{ parameters: { decodeTileEdge: 512, decodeOverlap: 128 }, expectedResult: "passed" }],
-    })),
-  };
-  const fixtureCommand = [
-    process.execPath,
-    fileURLToPath(new URL("./fixtures/memory-provider-fixture.mjs", import.meta.url)),
-  ];
-  const freshInvocations = [];
-  await runProviderPlan({
-    closureDigestFor: stubClosureDigest,
-    config,
-    providerCommand: fixtureCommand,
-    sceneWorksRepo: fileURLToPath(new URL("..", import.meta.url)),
-    inferenceRepo: fileURLToPath(new URL("..", import.meta.url)),
-    forceFreshPerCase: true,
-    onProviderInvocation: (invocation) => freshInvocations.push(invocation),
-  });
-  assert.deepEqual(freshInvocations.map(({ action }) => action), ["run", "run"]);
-
-  const batchInvocations = [];
-  await runProviderPlan({
-    closureDigestFor: stubClosureDigest,
-    config,
-    providerCommand: fixtureCommand,
-    sceneWorksRepo: fileURLToPath(new URL("..", import.meta.url)),
-    inferenceRepo: fileURLToPath(new URL("..", import.meta.url)),
-    forceBatchRungs: true,
-    onProviderInvocation: (invocation) => batchInvocations.push(invocation),
-  });
-  assert.deepEqual(batchInvocations.map(({ action, cases }) => [action, cases.length]), [["run_batch", 2]]);
-});
-
-test("provider reuse assessment records whether a batch can be measured", async () => {
-  const config = {
-    providers: [{
-      evidenceScope: "fixture",
-      backend: "candle",
-      loadShape: "eager_materialization",
-      target: complete().target,
-      rung: "resident",
-      engagedRungs: ["resident"],
-      calibrationFingerprint: "fixture-formula-v2",
-      fixture: "fixture-assessment",
-      cases: [{ parameters: {}, expectedResult: "passed" }],
-    }],
-  };
-  const assessment = await assessProviderReuse({
-    config,
-    backend: "candle",
-    fixture: "fixture-assessment",
-    providerCommand: [
-      process.execPath,
-      fileURLToPath(new URL("./fixtures/memory-provider-fixture.mjs", import.meta.url)),
-    ],
-  });
-  assert.equal(assessment.verdict, "eligible_for_measurement");
-  assert.deepEqual(assessment.tolerance, RUNG_REUSE_TOLERANCE);
-});
-
-test("a completed sweep retires its other parameter points before another spawn", async () => {
-  const config = {
-    providers: [{
-      evidenceScope: "fixture",
-      backend: "candle",
-      loadShape: "eager_materialization",
-      target: complete().target,
-      rung: "bounded_decode",
-      engagedRungs: ["resident", "bounded_decode"],
-      calibrationFingerprint: "fixture-formula-v2",
-      fixture: "fixture-seed42",
-      cases: [
-        { parameters: { decodeTileEdge: 384, decodeOverlap: 128 }, expectedResult: "passed" },
-        { parameters: { decodeTileEdge: 512, decodeOverlap: 128 }, expectedResult: "passed" },
-      ],
-    }],
-  };
-  const invocations = [];
-  const cleanRepo = await cleanFixtureRepo();
-  const result = await runProviderPlan({
-    closureDigestFor: stubClosureDigest,
-    config,
-    providerCommand: [
-      process.execPath,
-      fileURLToPath(new URL("./fixtures/memory-provider-fixture.mjs", import.meta.url)),
-    ],
-    sceneWorksRepo: cleanRepo,
-    inferenceRepo: cleanRepo,
-    onProviderInvocation: (invocation) => invocations.push(invocation),
-  });
-  assert.equal(result.records.length, 1);
-  assert.deepEqual(invocations.map(({ action, cases }) => [action, cases.length]), [["run", 1]]);
-  assert.equal(expandPlan(config, result.records).length, 0);
-});
-
-test("provider execution can select every rung sharing one reproducible fixture", async () => {
-  const provider = {
-    evidenceScope: "fixture",
-    backend: "candle",
-    loadShape: "eager_materialization",
-    target: complete().target,
-    calibrationFingerprint: "fixture-formula-v2",
-    fixture: "fresh-five-rung-fixture",
-    cases: [{ parameters: { decodeTileEdge: 512, decodeOverlap: 128 }, expectedResult: "passed" }],
-  };
-  const config = {
-    providers: [
-      {
-        ...provider,
-        name: "selected",
-        rung: "bounded_decode",
-        engagedRungs: ["resident", "bounded_decode"],
-      },
-      {
-        ...provider,
-        name: "unrelated",
-        fixture: "different-fixture",
-        rung: "bounded_decode",
-        engagedRungs: ["resident", "bounded_decode"],
-      },
-    ],
-  };
-  const result = await runProviderPlan({
-    closureDigestFor: stubClosureDigest,
-    config,
-    fixture: "fresh-five-rung-fixture",
-    providerCommand: [
-      process.execPath,
-      fileURLToPath(new URL("./fixtures/memory-provider-fragmented-fixture.mjs", import.meta.url)),
-    ],
-    sceneWorksRepo: fileURLToPath(new URL("..", import.meta.url)),
-    inferenceRepo: fileURLToPath(new URL("..", import.meta.url)),
-  });
-  assert.equal(result.records.length, 1);
-  assert.equal(result.records[0].fixture, "fresh-five-rung-fixture");
-});
-
 test("provider early exit is rejected without an unhandled stdin EPIPE", async () => {
-  const config = {
-    providers: [{
-      evidenceScope: "fixture",
-      backend: "candle",
-      loadShape: "eager_materialization",
-      target: complete().target,
-      rung: "bounded_decode",
-      engagedRungs: ["resident", "bounded_decode"],
-      calibrationFingerprint: "fixture-formula-v2",
-      fixture: "fixture-seed42",
-      cases: [{ parameters: { decodeTileEdge: 512, decodeOverlap: 128 }, expectedResult: "passed" }],
-    }],
-  };
   await assert.rejects(
-    runProviderPlan({
-    closureDigestFor: stubClosureDigest,
-      config,
+    captureAnchor({
+      closureDigestFor: stubClosureDigest,
+      plan: anchorPlanFixture("fixture_model:q4:candle"),
+      anchorKey: "fixture_model:q4:candle",
       providerCommand: [
         process.execPath,
         fileURLToPath(new URL("./fixtures/memory-provider-early-exit-fixture.mjs", import.meta.url)),
@@ -2504,56 +1967,12 @@ test("provider early exit is rejected without an unhandled stdin EPIPE", async (
   );
 });
 
-test("expected-failure plan case produces a resumable negative record, never a complete positive", async () => {
-  const config = {
-    providers: [{
-      evidenceScope: "fixture",
-      backend: "candle",
-      loadShape: "eager_materialization",
-      target: complete().target,
-      rung: "bounded_decode",
-      engagedRungs: ["resident", "bounded_decode"],
-      calibrationFingerprint: "fixture-formula-v2",
-      fixture: "fixture-seed42",
-      cases: [{
-        parameters: { decodeTileEdge: 256, decodeOverlap: 32 },
-        expectedResult: "failed",
-        negative: true,
-      }],
-    }],
-  };
-  const result = await runProviderPlan({
-    closureDigestFor: stubClosureDigest,
-    config,
-    providerCommand: [
-      process.execPath,
-      fileURLToPath(new URL("./fixtures/memory-provider-fragmented-fixture.mjs", import.meta.url)),
-    ],
-    sceneWorksRepo: fileURLToPath(new URL("..", import.meta.url)),
-    inferenceRepo: fileURLToPath(new URL("..", import.meta.url)),
-  });
-  assert.equal(result.records[0].status, "negative_complete");
-  assert.equal(expandPlan(config, result.records).length, 0);
-});
-
-test("provider execution rejects an adapter-attested composition that differs from the plan", async () => {
-  const config = {
-    providers: [{
-      evidenceScope: "fixture",
-      backend: "candle",
-      loadShape: "eager_materialization",
-      target: complete().target,
-      rung: "bounded_decode",
-      engagedRungs: ["resident", "bounded_decode"],
-      calibrationFingerprint: "fixture-formula-v2",
-      fixture: "fixture-seed42",
-      cases: [{ parameters: { decodeTileEdge: 512, decodeOverlap: 128 }, expectedResult: "passed" }],
-    }],
-  };
+test("provider execution rejects an adapter-attested composition that differs from the anchor", async () => {
   await assert.rejects(
-    runProviderPlan({
-    closureDigestFor: stubClosureDigest,
-      config,
+    captureAnchor({
+      closureDigestFor: stubClosureDigest,
+      plan: anchorPlanFixture("fixture_model:q4:candle"),
+      anchorKey: "fixture_model:q4:candle",
       providerCommand: [
         process.execPath,
         fileURLToPath(new URL(
@@ -2564,7 +1983,7 @@ test("provider execution rejects an adapter-attested composition that differs fr
       sceneWorksRepo: fileURLToPath(new URL("..", import.meta.url)),
       inferenceRepo: fileURLToPath(new URL("..", import.meta.url)),
     }),
-    /adapter measured strategy does not match planned strategy/,
+    /adapter measured strategy does not match the anchor composition/,
   );
 });
 
@@ -2573,21 +1992,11 @@ test("the measured load shape is a receipt field, never copied from the plan", a
   // never asked, so the field recorded the plan's CLAIM rather than what the run did, and no
   // divergence was detectable. That is the same backfill sc-16482 forbids for historical receipts,
   // applied silently to new ones. These two properties pin the fix.
-  const provider = {
-    evidenceScope: "fixture",
-    backend: "candle",
-    target: complete().target,
-    rung: "bounded_decode",
-    engagedRungs: ["resident", "bounded_decode"],
-    calibrationFingerprint: "fixture-formula-v2",
-    loadShape: "eager_materialization",
-    fixture: "fixture-seed42",
-    cases: [{ parameters: { decodeTileEdge: 512, decodeOverlap: 128 }, expectedResult: "passed" }],
-  };
   const run = (fixture) =>
-    runProviderPlan({
-    closureDigestFor: stubClosureDigest,
-      config: { providers: [provider] },
+    captureAnchor({
+      closureDigestFor: stubClosureDigest,
+      plan: anchorPlanFixture("fixture_model:q4:candle"),
+      anchorKey: "fixture_model:q4:candle",
       providerCommand: [process.execPath, fileURLToPath(new URL(fixture, import.meta.url))],
       sceneWorksRepo: fileURLToPath(new URL("..", import.meta.url)),
       inferenceRepo: fileURLToPath(new URL("..", import.meta.url)),
@@ -2603,7 +2012,7 @@ test("the measured load shape is a receipt field, never copied from the plan", a
   //    become "whatever the plan said", which is the behaviour being removed.
   await assert.rejects(
     run("./fixtures/memory-provider-composition-mismatch-fixture.mjs"),
-    /adapter measured strategy does not match planned strategy|must attest a loadShape/,
+    /adapter measured strategy does not match the anchor composition|must attest a loadShape/,
   );
 
   // 3. The agreeing case records the ADAPTER's value. Identical to the plan's here by construction,
@@ -2687,44 +2096,278 @@ test("every committed source session binds immutable files whose bytes match the
 // currency term leaves you.
 // -----------------------------------------------------------------------------------------------
 
-/** An authoritative one-rung plan provider on a given lane, selected by its fixture. */
-function laneProvider({ backend, provider, fixture, modelId = provider }) {
+/** An authoritative anchor plan on a given lane. */
+function lanePlan({ backend, provider, fixture, modelId = provider, tier = "q4" }) {
+  const key = `${modelId}:${tier}:${backend}`;
   return {
-    evidenceScope: "authoritative",
-    backend,
-    loadShape: "eager_materialization",
-    target: { ...complete().target, modelId, provider },
-    rung: "resident",
-    engagedRungs: ["resident"],
-    calibrationFingerprint: `${provider}-formula-v1`,
-    fixture,
-    cases: [{ parameters: { decodeTileEdge: 512, decodeOverlap: 128 }, expectedResult: "passed" }],
+    key,
+    plan: {
+      schemaVersion: 1,
+      anchors: {
+        [key]: {
+          provider,
+          mode: complete().target.mode,
+          overlay: complete().target.overlay,
+          geometry: complete().target.geometry,
+          evidenceScope: "authoritative",
+          loadShape: "eager_materialization",
+          calibrationFingerprint: `${provider}-formula-v1`,
+          fixture,
+        },
+      },
+    },
   };
 }
 
-async function runFixtureSelection({ config, fixture, providerName, closureDigestFor }) {
+async function runLaneCapture({ plan, key, closureDigestFor, onProviderInvocation }) {
   const cleanRepo = await cleanFixtureRepo();
-  return runProviderPlan({
+  return captureAnchor({
     closureDigestFor,
-    config,
+    plan,
+    anchorKey: key,
     providerCommand: [
       process.execPath,
       fileURLToPath(new URL("./fixtures/memory-provider-fixture.mjs", import.meta.url)),
     ],
     sceneWorksRepo: cleanRepo,
     inferenceRepo: cleanRepo,
-    fixture,
-    providerName,
+    onProviderInvocation,
   });
 }
 
-test("a --fixture-only capture run keys its closure digest by lane, not by plan-entry name", async () => {
-  // This is the checked-in workflow invocation shape verbatim: `--backend … --fixture … ` and no
-  // `--provider`, so `providerName` is undefined.
+test("the LTX-2.5 snapshot driver binds the anchor's nested root to an exact inventory", async () => {
+  const downloadEvidence = JSON.parse(
+    await readFile(new URL("../config/download-pattern-evidence.json", import.meta.url)),
+  );
+  const authority = downloadEvidence.repos.find((entry) => entry.repo === LTX25_CAPTURE_REPOSITORY);
+  assert.equal(authority.revision, LTX25_CAPTURE_REVISION);
+  assert.equal(authority.resolvedSha, LTX25_CAPTURE_REVISION);
+  assert.equal(authority.gated, false);
+  const plan = JSON.parse(
+    await readFile(new URL("../config/memory-calibration-plan.json", import.meta.url)),
+  );
+  // sc-22514: the plan carries ONE ltx_2_5 anchor per tier and lane, so the sealed inventory is
+  // per-capture rather than a six-root campaign. Each MLX tier is prepared on its own here, which
+  // is exactly how a capture command prepares it.
+  const ltx25Keys = Object.keys(plan.anchors)
+    .filter((key) => key.startsWith("ltx_2_5:") && key.endsWith(":mlx"))
+    .sort();
+  assert.ok(ltx25Keys.length, "the plan must declare LTX-2.5 MLX anchors");
+  const snapshot = await ltx25FixtureSnapshot();
+  for (const key of ltx25Keys) {
+    const planned = planAnchor(plan, key);
+    const prepared = await prepareLtx25CaptureArtifacts(snapshot, [planned]);
+    assert.equal(prepared.repository, LTX25_CAPTURE_REPOSITORY);
+    assert.equal(prepared.revision, LTX25_CAPTURE_REVISION);
+    assert.equal(prepared.enhancer.root, path.join(snapshot, "enhancer"));
+    assert.ok(prepared.enhancer.bytes > 0);
+    assert.match(prepared.enhancer.sha256, /^[0-9a-f]{64}$/);
+    const artifactKey = `${planned.target.transformerVariant}/${planned.target.tier}`;
+    assert.deepEqual([...prepared.artifacts.keys()], [artifactKey]);
+    const artifact = prepared.artifacts.get(artifactKey);
+    const environment = ltx25ProviderEnvironment(prepared, planned, {
+      SCENEWORKS_LTX25_ROOT: "/stale/root",
+      SCENEWORKS_MEMORY_MODEL_BYTES: "1",
+      SCENEWORKS_MEMORY_MODEL_INVENTORY_SHA256: "0".repeat(64),
+      SCENEWORKS_MEMORY_CAPTURE_DIR: "/capture/raw",
+      SCENEWORKS_MEMORY_SOURCE_PATH_PREFIX: "docs/calibration/sc-18783-terminal",
+    });
+    assert.equal(environment.SCENEWORKS_LTX25_REPOSITORY, LTX25_CAPTURE_REPOSITORY);
+    assert.equal(environment.SCENEWORKS_LTX25_REVISION, LTX25_CAPTURE_REVISION);
+    assert.equal(environment.SCENEWORKS_LTX25_ROOT, artifact.root);
+    assert.equal(environment.SCENEWORKS_MEMORY_MODEL_BYTES, String(artifact.bytes));
+    assert.equal(environment.SCENEWORKS_MEMORY_MODEL_INVENTORY_SHA256, artifact.sha256);
+    assert.equal(environment.SCENEWORKS_LTX25_ENHANCER_BYTES, String(prepared.enhancer.bytes));
+    assert.equal(
+      environment.SCENEWORKS_LTX25_ENHANCER_INVENTORY_SHA256,
+      prepared.enhancer.sha256,
+    );
+    if (planned.target.transformerVariant === "dev") {
+      assert.equal(environment.SCENEWORKS_LTX25_DEV_ADAPTER_BYTES, String(prepared.devAdapter.bytes));
+      assert.equal(environment.SCENEWORKS_LTX25_DEV_ADAPTER_SHA256, prepared.devAdapter.sha256);
+    } else {
+      assert.equal(environment.SCENEWORKS_LTX25_DEV_ADAPTER_BYTES, undefined);
+      assert.equal(environment.SCENEWORKS_LTX25_DEV_ADAPTER_SHA256, undefined);
+    }
+    assert.equal(environment.SCENEWORKS_MEMORY_CAPTURE_DIR, "/capture/raw");
+    assert.equal(
+      environment.SCENEWORKS_MEMORY_SOURCE_PATH_PREFIX,
+      "docs/calibration/sc-18783-terminal",
+    );
+  }
+
+  const selected = ltx25Keys.map((key) => planAnchor(plan, key));
+  const prepared = await prepareLtx25CaptureArtifacts(snapshot, selected);
+  await writeFile(path.join(snapshot, "enhancer", "model.safetensors"), "enhancer-mutated");
+  await writeFile(prepared.devAdapter.path, "adapter-mutated");
+  const mutated = await prepareLtx25CaptureArtifacts(snapshot, selected);
+  assert.notEqual(
+    mutated.enhancer.sha256,
+    prepared.enhancer.sha256,
+    "mutating shared enhancer bytes must change the sealed receipt identity",
+  );
+  assert.notEqual(
+    mutated.devAdapter.sha256,
+    prepared.devAdapter.sha256,
+    "mutating the dev refinement file must change the sealed receipt identity",
+  );
+  assert.deepEqual(
+    [...mutated.artifacts].map(([key, artifact]) => [key, artifact.sha256]),
+    [...prepared.artifacts].map(([key, artifact]) => [key, artifact.sha256]),
+    "shared-artifact mutation must not be hidden inside a tier-root inventory",
+  );
+
+  const wrongRevision = path.join(path.dirname(snapshot), "a".repeat(40));
+  await mkdir(wrongRevision, { recursive: true });
+  await assert.rejects(
+    prepareLtx25CaptureArtifacts(wrongRevision, selected),
+    new RegExp(
+      `must be models--SceneWorks--ltx-2\\.5-mlx/snapshots/${LTX25_CAPTURE_REVISION}`,
+    ),
+  );
+  const missingLayout = await ltx25FixtureSnapshot({
+    omitRoot: `${selected[0].target.transformerVariant}/${selected[0].target.tier}`,
+  });
+  await assert.rejects(
+    prepareLtx25CaptureArtifacts(missingLayout, selected),
+    /nested artifact root [a-z0-9_]+\/[a-z0-9]+ is missing/,
+  );
+  const normalHfSymlinks = await ltx25FixtureSnapshot({
+    symlinkedEnhancer: true,
+    symlinkedDevAdapter: true,
+  });
+  assert.match(
+    (await prepareLtx25CaptureArtifacts(normalHfSymlinks, selected)).enhancer.sha256,
+    /^[0-9a-f]{64}$/,
+  );
+  const escapedHfSymlink = await ltx25FixtureSnapshot({ escapedEnhancer: true });
+  await assert.rejects(
+    prepareLtx25CaptureArtifacts(escapedHfSymlink, selected),
+    /escaped its trusted root/,
+  );
+});
+
+test("the LTX-2.5 anchor capture injects the selected root only after the hardware probe", async () => {
+  const plan = JSON.parse(
+    await readFile(new URL("../config/memory-calibration-plan.json", import.meta.url)),
+  );
+  const snapshot = await ltx25FixtureSnapshot();
+  const cleanRepo = await cleanFixtureRepo();
+  let capturedEnvironment;
+  let capturedPlanned;
+  await assert.rejects(
+    captureAnchor({
+      closureDigestFor: stubClosureDigest,
+      plan,
+      anchorKey: "ltx_2_5:q4:mlx",
+      providerCommand: ["fixture-ltx25-provider"],
+      sceneWorksRepo: cleanRepo,
+      inferenceRepo: cleanRepo,
+      ltx25SnapshotRoot: snapshot,
+      executeProvider: async (_command, _args, input, options) => {
+        const request = JSON.parse(input);
+        if (request.action === "probe") {
+          assert.equal(options.env.SCENEWORKS_LTX25_REPOSITORY, LTX25_CAPTURE_REPOSITORY);
+          assert.equal(options.env.SCENEWORKS_LTX25_REVISION, LTX25_CAPTURE_REVISION);
+          assert.equal(options.env.SCENEWORKS_LTX25_ROOT, undefined);
+          assert.equal(options.env.SCENEWORKS_MEMORY_MODEL_BYTES, undefined);
+          assert.equal(options.env.SCENEWORKS_LTX25_ENHANCER_BYTES, undefined);
+          assert.equal(options.env.SCENEWORKS_LTX25_DEV_ADAPTER_BYTES, undefined);
+          return JSON.stringify({
+            hardware: {
+              probe: "fixture MLX probe",
+              memoryBytes: 137438953472,
+              model: "Mac17,6",
+              chip: "Apple M5 Max",
+              osVersion: "26.5.2",
+              metalDevice: "Apple M5 Max",
+              mlxMemoryLimitBytes: 130567005798,
+              wiredLimitBytes: 87044670532,
+            },
+          });
+        }
+        capturedPlanned = request.planned;
+        capturedEnvironment = options.env;
+        throw new Error("stop after LTX-2.5 invocation environment capture");
+      },
+    }),
+    /stop after LTX-2\.5 invocation environment capture/,
+  );
+  const key = `${capturedPlanned.target.transformerVariant}/${capturedPlanned.target.tier}`;
+  assert.equal(capturedEnvironment.SCENEWORKS_LTX25_ROOT, path.join(snapshot, ...key.split("/")));
+  assert.ok(Number(capturedEnvironment.SCENEWORKS_MEMORY_MODEL_BYTES) > 0);
+  assert.match(capturedEnvironment.SCENEWORKS_MEMORY_MODEL_INVENTORY_SHA256, /^[0-9a-f]{64}$/);
+  assert.ok(Number(capturedEnvironment.SCENEWORKS_LTX25_ENHANCER_BYTES) > 0);
+  assert.match(capturedEnvironment.SCENEWORKS_LTX25_ENHANCER_INVENTORY_SHA256, /^[0-9a-f]{64}$/);
+  if (capturedPlanned.target.transformerVariant === "dev") {
+    assert.ok(Number(capturedEnvironment.SCENEWORKS_LTX25_DEV_ADAPTER_BYTES) > 0);
+    assert.match(capturedEnvironment.SCENEWORKS_LTX25_DEV_ADAPTER_SHA256, /^[0-9a-f]{64}$/);
+  } else {
+    assert.equal(capturedEnvironment.SCENEWORKS_LTX25_DEV_ADAPTER_BYTES, undefined);
+    assert.equal(capturedEnvironment.SCENEWORKS_LTX25_DEV_ADAPTER_SHA256, undefined);
+  }
+});
+
+test("every LTX-2.5 provider invocation rehashes the nested and shared artifacts", async () => {
+  const plan = JSON.parse(
+    await readFile(new URL("../config/memory-calibration-plan.json", import.meta.url)),
+  );
+  const cleanRepo = await cleanFixtureRepo();
+  for (const [mutation, expected] of [
+    ["base", /artifact inventory changed during provider execution/],
+    ["enhancer", /enhancer changed after campaign preparation/],
+    ["devAdapter", /devAdapter changed after campaign preparation/],
+  ]) {
+    const snapshot = await ltx25FixtureSnapshot();
+    await assert.rejects(
+      captureAnchor({
+        closureDigestFor: stubClosureDigest,
+        plan,
+        anchorKey: "ltx_2_5:q4:mlx",
+        providerCommand: ["fixture-ltx25-provider"],
+        sceneWorksRepo: cleanRepo,
+        inferenceRepo: cleanRepo,
+        ltx25SnapshotRoot: snapshot,
+        executeProvider: async (_command, _args, input, options) => {
+          const request = JSON.parse(input);
+          if (request.action === "probe") {
+            return JSON.stringify({
+              hardware: {
+                probe: "fixture MLX probe",
+                memoryBytes: 137438953472,
+                model: "Mac17,6",
+                chip: "Apple M5 Max",
+                osVersion: "26.5.2",
+                metalDevice: "Apple M5 Max",
+                mlxMemoryLimitBytes: 130567005798,
+                wiredLimitBytes: 87044670532,
+              },
+            });
+          }
+          const file = mutation === "base"
+            ? path.join(options.env.SCENEWORKS_LTX25_ROOT, "transformer.safetensors")
+            : mutation === "enhancer"
+              ? path.join(snapshot, "enhancer", "model.safetensors")
+              : path.join(
+                  snapshot,
+                  "distilled_lora",
+                  "ltx-2.5-22b-distilled-lora-450-bf16.safetensors",
+                );
+          await writeFile(file, `${mutation}-mutated`);
+          throw new Error("provider failed after mutating an input");
+        },
+      }),
+      expected,
+    );
+  }
+});
+
+test("an anchor capture keys its closure digest by lane, not by model", async () => {
   const asked = [];
-  const result = await runFixtureSelection({
-    config: { providers: [laneProvider({ backend: "candle", provider: "krea_2_turbo", fixture: "cap-krea" })] },
-    fixture: "cap-krea",
+  const { plan, key } = lanePlan({ backend: "candle", provider: "krea_2_turbo", fixture: "cap-krea" });
+  const result = await runLaneCapture({
+    plan,
+    key,
     closureDigestFor: async (lane) => {
       asked.push(lane);
       return createHash("sha256").update(`closure:${lane}`).digest("hex");
@@ -2741,11 +2384,8 @@ test("a --fixture-only capture run keys its closure digest by lane, not by plan-
 test("the stamped digest is the one evidenceSemantics compares, so the capture reads current", async () => {
   // The end-to-end property: a fresh capture of a lane whose declared digest is live must come back
   // `current`. If the runner keyed on anything but the lane, this is where it would read historical.
-  const result = await runFixtureSelection({
-    config: { providers: [laneProvider({ backend: "candle", provider: "krea_2_turbo", fixture: "cap-krea" })] },
-    fixture: "cap-krea",
-    closureDigestFor: stubClosureDigest,
-  });
+  const { plan, key } = lanePlan({ backend: "candle", provider: "krea_2_turbo", fixture: "cap-krea" });
+  const result = await runLaneCapture({ plan, key, closureDigestFor: stubClosureDigest });
   const record = result.records[0];
   const live = { "candle:krea_2_turbo": await stubClosureDigest("candle:krea_2_turbo") };
   assert.equal(
@@ -2768,165 +2408,121 @@ test("the stamped digest is the one evidenceSemantics compares, so the capture r
   );
 });
 
-test("a multi-lane capture stamps each record with ITS lane's digest", async () => {
-  // `--backend candle` with no `--fixture` selects every candle lane. One run-level digest would
-  // stamp both records with whichever lane happened to be first.
-  const config = {
-    providers: [
-      laneProvider({ backend: "candle", provider: "krea_2_turbo", fixture: "cap-multi" }),
-      laneProvider({ backend: "candle", provider: "flux2_dev", fixture: "cap-multi" }),
-    ],
-  };
-  const result = await runFixtureSelection({ config, fixture: "cap-multi", closureDigestFor: stubClosureDigest });
-  assert.equal(result.records.length, 2);
-  const byLane = new Map(result.records.map((record) =>
-    [`${record.backend}:${record.target.provider}`, record.repositories.inference.closureDigest]));
+test("each lane's anchor is stamped with ITS OWN lane digest", async () => {
+  // Two separate captures, because a capture is one anchor. One shared run-level digest would stamp
+  // both records with whichever lane happened to be captured first.
+  const digests = [];
+  for (const provider of ["krea_2_turbo", "flux2_dev"]) {
+    const { plan, key } = lanePlan({ backend: "candle", provider, fixture: "cap-multi" });
+    const result = await runLaneCapture({ plan, key, closureDigestFor: stubClosureDigest });
+    assert.equal(result.records.length, 1);
+    digests.push([
+      `${result.records[0].backend}:${result.records[0].target.provider}`,
+      result.records[0].repositories.inference.closureDigest,
+    ]);
+  }
+  const byLane = new Map(digests);
   assert.equal(byLane.get("candle:krea_2_turbo"), await stubClosureDigest("candle:krea_2_turbo"));
   assert.equal(byLane.get("candle:flux2_dev"), await stubClosureDigest("candle:flux2_dev"));
   assert.notEqual(byLane.get("candle:krea_2_turbo"), byLane.get("candle:flux2_dev"));
 });
 
-test("a selection with no authoritative entry derives no digest at all", async () => {
+test("a non-authoritative anchor derives no digest at all", async () => {
   // A fixture/candidate capture can never be `current`, so it must not need an inference crate
   // layout or a declarations file. The injected deriver throws to prove it is never reached.
-  const config = {
-    providers: [{
-      ...laneProvider({ backend: "candle", provider: "krea_2_turbo", fixture: "cap-fixture" }),
-      evidenceScope: "fixture",
-    }],
-  };
-  const result = await runFixtureSelection({
-    config,
-    fixture: "cap-fixture",
+  const { plan, key } = lanePlan({ backend: "candle", provider: "krea_2_turbo", fixture: "cap-fixture" });
+  plan.anchors[key].evidenceScope = "fixture";
+  const result = await runLaneCapture({
+    plan,
+    key,
     closureDigestFor: async () => assert.fail("a fixture-scope capture must not derive a closure digest"),
   });
   assert.equal(result.records.length, 1);
   assert.equal(result.records[0].repositories.inference.closureDigest, undefined);
 });
 
-test("an undeclared lane fails BEFORE the first capture, not after it", async () => {
-  // Eager derivation is the point: the hardware probe is cheap, but a 26 GB `run`/`run_batch` must
-  // not burn before the runner discovers it cannot stamp a currency term. This drives the REAL
-  // deriver (no `closureDigestFor`) against the real declarations file, and `onProviderInvocation`
-  // fires only for capture actions — so an empty list proves nothing was measured.
+test("an undeclared lane is CAPTURED without a currency term, never refused", async () => {
+  // sc-22512 inverted this test. It used to assert that an undeclared lane `rejects` BEFORE the
+  // first capture — which meant a lane nobody had declared could not be measured at all, so the
+  // absence of bookkeeping blocked the measurement that would have relieved it. That is the exact
+  // shape E8 retires.
+  //
+  // The capture now runs and the record carries NO closure digest, which is the conservative
+  // answer: `evidenceSemantics` reads such a record `historical`, so it can never certify a cell.
+  // This still drives the REAL deriver (no `closureDigestFor`) against the real declarations file,
+  // so it is the production path and not a stub.
   const cleanRepo = await cleanFixtureRepo();
   const invocations = [];
-  await assert.rejects(
-    runProviderPlan({
-      config: {
-        providers: [laneProvider({
-          backend: "candle", provider: "never_declared_provider", fixture: "cap-undeclared",
-        })],
-      },
-      providerCommand: [
-        process.execPath,
-        fileURLToPath(new URL("./fixtures/memory-provider-fixture.mjs", import.meta.url)),
-      ],
-      sceneWorksRepo: fileURLToPath(new URL("..", import.meta.url)),
-      inferenceRepo: cleanRepo,
-      fixture: "cap-undeclared",
-      onProviderInvocation: (invocation) => invocations.push(invocation),
-    }),
-    /lane "candle:never_declared_provider" has no entry in config\/inference-provider-closures\.json/,
-  );
-  assert.deepEqual(invocations, [], "no capture may run once the lane is known to be underivable");
-});
-
-test("resume is not defeated by the per-lane digest a prior record carries", async () => {
-  // A GATED authoritative record is the shape that actually reaches the operational-attempt check:
-  // `completedLogicalIds` returns nothing for it, so `expandPlan` does not suppress it and only
-  // `operationallyAttemptedLogicalIds` can stop it being measured again. It still carries a lane
-  // digest — stamping keys on evidenceScope, not status — while the run-level `repositories` now
-  // carries none. Comparing those two raw makes every prior record look foreign, and the cost of
-  // that is repeating a multi-hour, tens-of-GB GPU capture.
-  const cleanRepo = await cleanFixtureRepo();
-  const config = {
-    providers: [laneProvider({ backend: "candle", provider: "krea_2_turbo", fixture: "cap-resume" })],
-  };
-  const gated = fileURLToPath(
-    new URL("./fixtures/memory-provider-gated-canonical-batch-fixture.mjs", import.meta.url),
-  );
-  const run = (resume, onProviderInvocation) => runProviderPlan({
-    closureDigestFor: stubClosureDigest,
-    config,
-    providerCommand: [process.execPath, gated],
-    sceneWorksRepo: cleanRepo,
-    inferenceRepo: cleanRepo,
-    fixture: "cap-resume",
-    resume,
-    onProviderInvocation,
+  // The MODEL id is real (validatePlan requires one the memory matrix names); the LANE
+  // `candle:never_declared_provider` is what is undeclared, and the lane is what the digest is
+  // keyed on.
+  const { plan, key } = lanePlan({
+    backend: "candle", provider: "never_declared_provider", modelId: "krea_2_turbo",
+    fixture: "cap-undeclared",
   });
-
-  const first = await run(undefined);
-  assert.equal(first.records.length, 1);
-  assert.equal(first.records[0].status, "gated");
-  assert.equal(
-    first.records[0].repositories.inference.closureDigest,
-    await stubClosureDigest("candle:krea_2_turbo"),
-    "an authoritative capture stamps its lane digest even when the result is gated",
-  );
-
-  const invocations = [];
-  const resumed = await run(first, (invocation) => invocations.push(invocation));
-  assert.deepEqual(invocations, [], "a resumed capture must not repeat work it has already paid for");
-  assert.equal(resumed.records.length, 1);
+  const result = await captureAnchor({
+    plan,
+    anchorKey: key,
+    providerCommand: [
+      process.execPath,
+      fileURLToPath(new URL("./fixtures/memory-provider-fixture.mjs", import.meta.url)),
+    ],
+    sceneWorksRepo: fileURLToPath(new URL("..", import.meta.url)),
+    inferenceRepo: cleanRepo,
+    onProviderInvocation: (invocation) => invocations.push(invocation),
+  });
+  assert.equal(result.records.length, 1);
+  assert.equal(result.records[0].repositories.inference.closureDigest, undefined);
+  assert.ok(invocations.length, "the undeclared lane must actually be measured, not skipped");
 });
 
-test("every checked-in capture invocation selects a plan fixture on a DECLARED lane", async () => {
-  // The story's regression gate, driven off the real workflow files. Three ways this drifts: a
-  // workflow names a fixture the plan no longer has, its `--backend`/`--fixture` pair selects
-  // nothing, or the plan gains an authoritative lane nobody declared a crate for. Each one kills a
-  // capture job on a runner instead of here.
+// sc-22512 removed the DECLARED-LANE half of the test below: it required every authoritative
+// survivor's lane to carry a config/inference-provider-closures.json declaration, plus a converse
+// sweep that reddened `npm run check` for any authoritative plan lane no workflow had captured yet.
+// That is a lane-declaration gate in the strict sense E8 forbids — adding a model to the
+// calibration plan reddened CI until somebody hand-maintained a second file, and the failure was
+// about bookkeeping rather than about anything a capture would find. The harness no longer refuses
+// an undeclared lane either (see "an undeclared lane is CAPTURED without a currency term, never
+// refused" above): the capture runs and simply carries no currency term.
+//
+// What is kept is PRESENT-DATA agreement between two checked-in artifacts: the workflows say which
+// anchors the runners will capture, and config/memory-calibration-plan.json says which anchors
+// exist. A workflow naming an anchor the plan no longer declares kills a capture job on a runner
+// rather than here — and nothing about that defect is a missing measurement, so it stays gated.
+test("every checked-in capture invocation names a declared anchor", async () => {
   const root = new URL("../", import.meta.url);
-  const plan = JSON.parse(await readFile(new URL("config/memory-calibration-plan.json", root)));
-  const closures = JSON.parse(await readFile(new URL("config/inference-provider-closures.json", root)));
+  const plan = validatePlan(JSON.parse(await readFile(new URL("config/memory-calibration-plan.json", root))));
   const workflows = await readdir(new URL(".github/workflows/", root));
 
-  const selected = [];
+  const named = [];
   for (const file of workflows.filter((name) => name.endsWith(".yml"))) {
     const body = await readFile(new URL(`.github/workflows/${file}`, root), "utf8");
-    // `harness.mjs run` invocations only; `assess-reuse` and `check` never derive a digest. Windows
-    // packs the whole invocation onto one line, macOS uses backslash continuations.
-    for (const invocation of body.match(/memory-calibration-harness\.mjs\s+run\b[\s\S]*?--output\s+\S+/g) ?? []) {
-      const backend = invocation.match(/--backend\s+(\S+)/)?.[1];
-      const fixture = invocation.match(/--fixture\s+"?([^"\s\\]+)"?/)?.[1];
-      assert.ok(backend && fixture, `${file}: a capture invocation selects no --backend/--fixture`);
-      if (!fixture.includes("$")) {
-        selected.push([`${file} --fixture ${fixture}`, backend, (name) => name === fixture]);
+    // `harness.mjs capture` invocations only; `check` names no anchor. Windows packs the whole
+    // invocation onto one line, macOS uses backslash continuations.
+    for (const invocation of body.match(/memory-calibration-harness\.mjs\s+capture\b[\s\S]*?--output\s+\S+/g) ?? []) {
+      const anchor = invocation.match(/--anchor\s+"?([^"\s\\]+)"?/)?.[1];
+      assert.ok(anchor, `${file}: a capture invocation names no --anchor`);
+      if (!anchor.includes("$")) {
+        named.push([`${file} --anchor ${anchor}`, (key) => key === anchor]);
         continue;
       }
-      // The Qwen invocation templates its fixture from `inputs.qwen_tier` and a seed chosen in the
-      // same shell block. Both come out of the workflow itself rather than being restated here, so a
-      // drift on either side is caught: every DECLARED tier option must reach a plan fixture, and
-      // that fixture's seed must be one the workflow can actually set.
+      // The Qwen invocation templates its tier from `inputs.qwen_tier`. The options come out of the
+      // workflow itself rather than being restated here, so a drift on either side is caught:
+      // every DECLARED tier option must reach a declared anchor.
       const tiers = body.match(/qwen_tier:[\s\S]*?options:\s*((?:\s*-\s*\w+\n)+)/)?.[1];
-      // The seed is assigned upstream of the invocation in the same shell block, so it is read off
-      // the workflow rather than the sliced invocation.
-      const seeds = [...body.matchAll(/QWEN_SEED=(\d+)/g)].map((match) => match[1]);
-      assert.ok(tiers, `${file}: the templated fixture's tier input declares no options`);
-      assert.ok(seeds.length, `${file}: the templated fixture's seed is set nowhere in the workflow`);
+      assert.ok(tiers, `${file}: the templated anchor's tier input declares no options`);
       for (const tier of tiers.match(/-\s*(\w+)/g).map((line) => line.replace(/-\s*/, ""))) {
-        const shape = new RegExp(`^${fixture.replace("${QWEN_TIER}", tier).replace("${QWEN_SEED}", `(?:${seeds.join("|")})`)}$`);
-        selected.push([`${file} --fixture ${fixture} (tier ${tier})`, backend, (name) => shape.test(name)]);
+        const exact = anchor.replace("${QWEN_TIER}", tier);
+        named.push([`${file} --anchor ${anchor} (tier ${tier})`, (key) => key === exact]);
       }
     }
   }
-  assert.ok(selected.length >= 6, `expected the checked-in capture selections, found ${selected.length}`);
-
-  for (const [label, backend, matches] of selected) {
-    // Exactly what `runProviderPlan` does: filter the plan, then key every authoritative survivor.
-    const entries = plan.providers.filter((provider) => provider.backend === backend && matches(provider.fixture));
-    assert.ok(entries.length, `${label}: selects no plan provider on backend ${backend}`);
-    for (const entry of entries.filter((provider) => provider.evidenceScope === "authoritative")) {
-      const lane = `${entry.backend}:${entry.target.provider}`;
-      assert.ok(closures.providers[lane], `${label}: lane ${lane} has no closure declaration`);
-    }
+  // No population pin: retiring a capture workflow is absence, not a defect. The loop is
+  // universally quantified over whatever invocations exist and goes vacuous rather than red.
+  for (const [label, matches] of named) {
+    assert.ok(
+      Object.keys(plan.anchors).some(matches),
+      `${label}: names no anchor the plan declares`,
+    );
   }
-
-  // And the converse, so a plan lane that no workflow captures yet still cannot be added undeclared.
-  const undeclared = [...new Set(plan.providers
-    .filter((provider) => provider.evidenceScope === "authoritative")
-    .map((provider) => `${provider.backend}:${provider.target.provider}`))]
-    .filter((lane) => !closures.providers[lane]);
-  assert.deepEqual(undeclared, [], "authoritative plan lanes with no closure declaration cannot be captured");
 });

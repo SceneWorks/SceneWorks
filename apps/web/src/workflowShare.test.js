@@ -453,6 +453,7 @@ function sampleValueFor(key) {
     case "enhancePrompt":
     case "usePid":
     case "faceRestore":
+    case "autoDuration":
       return true;
     case "pidTarget":
       return "2k";
@@ -476,6 +477,18 @@ function sampleValueFor(key) {
       return "three_quarter";
     case "angleSet":
       return "turnaround_4";
+    case "transformerVariant":
+      return "dev";
+    case "vaeDecoder":
+      // The wire contract is "conv" | "diffusion" (crates/sceneworks-core/src/video_request.rs
+      // `requested_ltx25_vae_decoder`); "diffvae" is the calibration-plan spelling, not this one.
+      return "diffusion";
+    case "autoDurationMinSeconds":
+      return 3;
+    case "autoDurationMaxSeconds":
+      return 9;
+    case "temporalUpsampleRounds":
+      return 1;
     default:
       return 0.75;
   }
@@ -535,6 +548,9 @@ describe("ADVANCED_PREFILL is the source of truth for both the prefill and the p
         .sort(),
     ).toEqual([
       "angleSet",
+      "autoDuration",
+      "autoDurationMaxSeconds",
+      "autoDurationMinSeconds",
       "bridgeRightVideoConditioningStrength",
       "cnScale",
       "distilledVariant",
@@ -544,7 +560,10 @@ describe("ADVANCED_PREFILL is the source of truth for both the prefill and the p
       "motion",
       "structuredPrompt",
       "systemMessage",
+      "temporalUpsampleRounds",
       "timelineAction",
+      "transformerVariant",
+      "vaeDecoder",
       "videoCfgGuidanceScale",
       "videoConditioningStrength",
       "videoRescaleScale",

@@ -79,7 +79,7 @@ A story that changes both repositories uses the same story branch name in both.
 | `main` required checks | `web`, `parity`, `candle`, `build-windows`, `check-linux`, `check-macos`, `macOS build, lint and workspace tests (hosted)` | `CI gate` |
 | `main` up-to-date required | **no** (`strict: false`) | **no** (`strict: false` since 2026-08-23; it drifted back to `strict: true` twice — do not re-enable) |
 | `main` merge methods | merge / squash / rebase | merge commit only |
-| `feature/*` base policy | 20638194 — same 7 checks, `strict: false`, **merge commit only** | 20638200 — `CI gate`, `strict: false`, merge commit only |
+| `feature/*` base policy | **deleted 2026-09-01** — no required checks, direct pushes allowed | 20638200 — `CI gate`, `strict: false`, merge commit only |
 | `feature/*` deletion guard | 20638197 (deletion rule only, no bypass actors) | 20638201 (same) |
 | merge queue | **none** (removed 2026-08-11) | **none** (removed 2026-08-11) |
 
@@ -227,16 +227,21 @@ is on `main`. Never delete or rewrite it during the epic.
 
 ## 4. Keep long-running branches current
 
-Feature branches are never rebased or force-pushed. Merge `main` in through a PR
-(the ruleset requires one):
+Feature branches are never rebased or force-pushed. In **SceneWorks** a sync is a
+direct push, not a PR (2026-09-01, the feature base-policy ruleset is deleted):
 
 ```bash
 git fetch origin
-git switch -c sync/sc-<epic-id>-main-<date> origin/feature/sc-<epic-id>-<epic-slug>
-git merge origin/main
-git push -u origin sync/sc-<epic-id>-main-<date>
-gh pr create --base feature/sc-<epic-id>-<epic-slug> --head sync/sc-<epic-id>-main-<date>
+git switch -c sync-local origin/feature/sc-<epic-id>-<epic-slug>
+git merge origin/main            # resolve conflicts toward the epic's architecture
+git push origin HEAD:feature/sc-<epic-id>-<epic-slug>
 ```
+
+Push is free — the next PR that targets the branch (usually the terminal
+feature→`main` PR) validates the merged tree, so a sync PR spends a full CI
+round proving what that PR re-proves minutes later. Open a sync PR only when the
+conflict RESOLUTION genuinely needs review on its own. In **inference** the
+feature ruleset still requires a PR; use the old sync-PR shape there.
 
 Green required CI **is** the review of a sync PR; no adversarial review, no
 matrix rerun. Synchronize when a story actually depends on something that landed
@@ -251,7 +256,13 @@ pin for it.
 Ordered because SceneWorks consumes inference by exact commit:
 
 1. Freeze new story merges in both feature branches. Synchronize both from their
-   respective `main` (§4).
+   respective `main` (§4). Then **pre-flight the full lane matrix once** against
+   the SceneWorks feature head: the terminal feature→`main` PR runs every lane
+   unfiltered (the `changes / decide` gate short-circuits for `feature/*`→`main`
+   PRs), so opening it IS the pre-flight — expect lanes that path filtering
+   skipped all epic (candle-worker-class) to surface their failures here in one
+   parallel round, and fix them by direct push to the feature branch rather than
+   one serial PR per failure.
 2. **Feature-end review**, once, after the last code story merges: the full
    `feature/*` vs `main` diff in each repository against the epic's numbered
    requirements and acceptance tests, at the session model. Fix → re-review
@@ -265,9 +276,11 @@ Ordered because SceneWorks consumes inference by exact commit:
    branch, `node scripts/bump-inference.mjs --sha <inference-main-sha40>`,
    regenerate only what current CI on the PR requires, merge through the feature
    branch. Then run any SceneWorks stories that were waiting on the new engine.
-5. **The epic's one measurement campaign**, if the epic calls for one,
-   immediately after the bump (the bump stales the records; bump-then-capture is
-   the only ordering that yields current evidence).
+5. **The epic's one measurement campaign**, if the epic calls for one, after the
+   implementation is stable. The pin recorded by a receipt is capture
+   provenance; moving the pin does not invalidate that receipt and never, by
+   itself, authorizes or requires another campaign. Re-capture only for a real
+   measurement-contract or provider-behavior change, or on explicit request.
 6. Open one PR from the SceneWorks feature branch to `main`. Body: epic link and
    story list, final inference pin and the inference `main` PR, migrations and
    compatibility decisions, known limitations. The PR itself runs `nax-worker`

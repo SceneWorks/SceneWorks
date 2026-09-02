@@ -839,7 +839,7 @@ pub(crate) fn video_request_is_mlx_eligible(
             return false;
         }
     }
-    if matches!(model, "ltx_2_3" | "ltx_2_3_eros")
+    if matches!(model, "ltx_2_3" | "ltx_2_3_eros" | "ltx_2_5")
         && matches!(mode, "extend_clip" | "video_bridge" | "replace_person")
         && !payload
             .get("loras")
@@ -989,7 +989,7 @@ pub(crate) fn video_mode_is_mlx_eligible(model: &str, mode: &str) -> bool {
     }
     match mode {
         "text_to_video" | "image_to_video" => true,
-        "first_last_frame" => matches!(model, "ltx_2_3" | "ltx_2_3_eros" | "wan_2_2"),
+        "first_last_frame" => matches!(model, "ltx_2_3" | "ltx_2_3_eros" | "ltx_2_5" | "wan_2_2"),
         // extend_clip / video_bridge: LTX via the IC-LoRA multi-frame keyframe-append (sc-3522),
         // and Wan (`wan_2_2`) — the worker prefers native Wan-VACE ControlClip for genuine motion
         // continuity (sc-3812, tier C: real source frames pinned at the kept positions + a
@@ -997,7 +997,9 @@ pub(crate) fn video_mode_is_mlx_eligible(model: &str, mode: &str) -> bool {
         // (sc-3357) when the VACE snapshot is unprovisioned. Both run MLX-native, so `wan_2_2` is
         // eligible regardless of which the worker picks. The 14B Wan MoE engines have neither
         // path, so extend/bridge on them are refused and remain queued.
-        "extend_clip" | "video_bridge" => matches!(model, "ltx_2_3" | "ltx_2_3_eros" | "wan_2_2"),
+        "extend_clip" | "video_bridge" => {
+            matches!(model, "ltx_2_3" | "ltx_2_3_eros" | "ltx_2_5" | "wan_2_2")
+        }
         // replace_person → native Wan-VACE (sc-3521): the engine `wan_vace` provider serves it
         // regardless of the user-picked replace-capable model (ltx_2_3 / ltx_2_3_eros / wan_2_2,
         // the models that advertise the capability), so admit those.
@@ -1006,7 +1008,7 @@ pub(crate) fn video_mode_is_mlx_eligible(model: &str, mode: &str) -> bool {
         // sc-17159, but it is served by its OWN arm above rather than added here: it must NOT
         // inherit this arm's neighbours (`text_to_video | image_to_video`), which the generic arm
         // would otherwise hand it. (`scail2_14b` has its own arm for the same reason.)
-        "replace_person" => matches!(model, "ltx_2_3" | "ltx_2_3_eros" | "wan_2_2"),
+        "replace_person" => matches!(model, "ltx_2_3" | "ltx_2_3_eros" | "ltx_2_5" | "wan_2_2"),
         _ => false,
     }
 }

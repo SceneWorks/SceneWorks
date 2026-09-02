@@ -48,18 +48,17 @@ use crate::mlx_fit_gate::{MlxRequestInputs, MlxRequestPlan};
 // ---------------------------------------------------------------------------------------------
 // The margins, taken FROM the policy rather than restated (sc-18101 review #4).
 //
-// Every margin-shaped literal in this file is derived from these two constants: the arithmetic
-// (`1.0 + …`) and the tracing substrings (`estimate_margin={…}`) alike. Editing a policy constant
-// therefore changes what these scenarios assert, instead of leaving them asserting a margin nobody
-// ships. `margin_substrings_match_the_emitted_tracing` pins the one step the compiler cannot check:
-// that `{}`-formatting a constant reproduces the token `tracing` actually writes.
+// sc-22508 retired the blanket per-backend margins. What the selector now emits is a NAMED term
+// plus the bytes it charged, so these scenarios assert the term and the arithmetic
+// (`widened == raw + allowance_bytes`) instead of a single fraction.
+// `margin_substrings_match_the_emitted_tracing` pins the one step the compiler cannot check: that
+// `{}`-formatting a constant reproduces the token `tracing` actually writes.
 //
 // BASELINE-CHECKOUT PATCH: `crate::ladder_margin_policy` does not exist before sc-18094, so a
-// pre-epic checkout replaces exactly these two lines with `= 0.10;` and `= 0.05;`. Nothing else in
-// this file differs there.
+// pre-epic checkout replaces exactly this line with `= 0.05;`. Nothing else in this file differs
+// there.
 // ---------------------------------------------------------------------------------------------
-const ESTIMATE_MARGIN: f64 = crate::ladder_margin_policy::MLX_ESTIMATE_MARGIN;
-const STALE_MARGIN: f64 = crate::ladder_margin_policy::MLX_STALE_MEASURED_MARGIN;
+const STALE_MARGIN: f64 = crate::ladder_margin_policy::MLX_RECAPTURE_SPREAD;
 
 /// Where renders, selection logs, and the machine-readable evidence rows are written. Stable and
 /// outside the repo so a run's artifacts survive a `git clean` and can be diffed across commits.
@@ -472,21 +471,26 @@ fn c1_unmeasured_cell_engages_a_deep_rung_and_renders() {
         ),
         "criterion 1 requires the SELECTION to be estimate-scoped:\n{log}"
     );
-    let estimate_margin_field = format!("estimate_margin={ESTIMATE_MARGIN}");
+    // sc-22508: the image lane's estimate candidates are weights+headroom FLOORS, so the allowance
+    // the selector charges must be the headroom term — named in the event, not a blanket fraction.
+    let allowance_term_field = format!(
+        "allowance_term={}",
+        crate::ladder_margin_policy::AdmissionTerm::AllocatorEnvelopeOverActivation.as_key()
+    );
     assert!(
-        log.contains(&estimate_margin_field),
-        "criterion 1 requires the applied MLX estimate margin ({ESTIMATE_MARGIN}) in the logs:\n{log}"
+        log.contains(&allowance_term_field),
+        "criterion 1 requires the per-term allowance ({allowance_term_field}) in the logs:\n{log}"
     );
 
     // The admitted ceiling is the WIDENED peak, not `context.predicted_peak_bytes`.
     //
     // `mlx_fit_gate.rs:2404-2417` deliberately puts the estimate's RAW peak on the run context: the
-    // context carries the rung's incremental working-set demand, while the margin lives in the
+    // context carries the rung's incremental working-set demand, while the allowance lives in the
     // admission arithmetic (`memory_strategy::select_strategy` grades against
-    // `raw * (1 + estimate_margin)` and the refusal message quotes that widened number). Comparing
+    // `raw + allowance_bytes` and the refusal message quotes that widened number). Comparing
     // the observed peak against the raw context value would be checking the prediction WITHOUT its
-    // margin — a stricter test than the policy promises, and not the one the story specifies. Both
-    // numbers are recorded; the assertion is against the widened one.
+    // allowance — a stricter test than the policy promises, and not the one the story specifies.
+    // Both numbers are recorded; the assertion is against the widened one.
     let raw_peak_bytes = field_in_line(
         &log,
         "memory-strategy selection uses an estimate-backed candidate at the widened peak",
@@ -499,10 +503,16 @@ fn c1_unmeasured_cell_engages_a_deep_rung_and_renders() {
         "widened_peak_bytes=",
     )
     .expect("the selection event carries widened_peak_bytes");
+    let allowance_bytes = field_in_line(
+        &log,
+        "memory-strategy selection uses an estimate-backed candidate at the widened peak",
+        "allowance_bytes=",
+    )
+    .expect("the selection event carries allowance_bytes");
     assert_eq!(
         admitted_ceiling_bytes,
-        (raw_peak_bytes as f64 * (1.0 + ESTIMATE_MARGIN)).ceil() as u64,
-        "the admitted ceiling must be the raw estimate times the MLX estimate margin"
+        raw_peak_bytes + allowance_bytes,
+        "the admitted ceiling must be the raw estimate plus exactly the named per-term allowance"
     );
 
     let render_memory = evaluation.memory;
@@ -566,7 +576,8 @@ fn c1_unmeasured_cell_engages_a_deep_rung_and_renders() {
         "rawEstimateGib": gib(raw_peak_bytes),
         "admittedCeilingBytes": admitted_ceiling_bytes,
         "admittedCeilingGib": gib(admitted_ceiling_bytes),
-        "estimateMargin": ESTIMATE_MARGIN,
+        "allowanceTerm": crate::ladder_margin_policy::AdmissionTerm::AllocatorEnvelopeOverActivation.as_key(),
+        "allowanceFraction": crate::ladder_margin_policy::FLOOR_ALLOCATOR_ENVELOPE_ALLOWANCE,
         "contextPredictedPeakGib": gib(evaluation.context.predicted_peak_bytes),
         "observedPeakBytes": observed_peak_bytes,
         "observedPeakGib": gib(observed_peak_bytes),
@@ -952,7 +963,7 @@ fn c3_current_lane_enforces_exact_static_boundary() {
     );
     assert!(
         !log.contains("stale-closure")
-            && !log.contains("stale_margin=")
+            && !log.contains("allowance_term=same_cell_recapture_spread")
             && !log.contains("widened peak"),
         "criterion 3 requires current evidence to be graded at the raw peak without stale \
          widening:\n{log}"
@@ -1196,7 +1207,8 @@ fn c5_fitted_curve_estimate_is_synthesized_and_admitted() {
         "fittedRawPeakBytes": raw,
         "fittedRawPeakGib": gib(raw),
         "firstWidenedPeakBytes": widened,
-        "estimateMargin": ESTIMATE_MARGIN,
+        "allowanceTerm": crate::ladder_margin_policy::AdmissionTerm::AllocatorEnvelopeOverActivation.as_key(),
+        "allowanceFraction": crate::ladder_margin_policy::FLOOR_ALLOCATOR_ENVELOPE_ALLOWANCE,
         "tierDir": tier_dir.display().to_string(),
     }));
 }
@@ -1365,36 +1377,35 @@ fn load_shape_population_is_typed_and_manifest_derived() {
 /// The one margin coupling the compiler cannot check: that `{}`-formatting a policy constant
 /// reproduces the exact token `tracing` writes into the event.
 ///
-/// The scenarios above grep for `estimate_margin={ESTIMATE_MARGIN}`. `tracing` records an `f64`
-/// field with `Display`, so a rounded substring would never match the corpus-derived policy token,
-/// and a substring built from a literal would silently stop matching if the policy moved. Building
-/// it from the constant with `{}` is correct only as long as both sides agree, which is what this
-/// asserts.
+/// The scenarios above grep for `allowance_term=…` and for `{STALE_MARGIN}`. `tracing` records an
+/// `f64` field with `Display`, so a rounded substring would never match the corpus-derived policy
+/// token, and a substring built from a literal would silently stop matching if the policy moved.
+/// Building it from the constant with `{}` is correct only as long as both sides agree, which is
+/// what this asserts.
 #[test]
 fn margin_substrings_match_the_emitted_tracing() {
     use std::fmt::Write as _;
 
     // Reproduce exactly how `tracing`'s field formatter renders the value the gate passes it.
     let mut rendered = String::new();
-    write!(rendered, "{ESTIMATE_MARGIN}").expect("f64 formats");
-    assert_eq!(
-        rendered, "0.5040734033902377",
-        "MLX estimate margin token drifted"
-    );
-    rendered.clear();
     write!(rendered, "{STALE_MARGIN}").expect("f64 formats");
     assert_eq!(
-        rendered, "0.2520367016951188",
-        "MLX stale-measured margin token drifted"
+        rendered, "0.1260183508475594",
+        "MLX same-cell recapture spread token drifted"
     );
 
-    // And the constants really are the policy's, not a local copy that happens to agree.
-    assert_eq!(
-        ESTIMATE_MARGIN,
-        crate::ladder_margin_policy::MLX_ESTIMATE_MARGIN
-    );
+    // And the constant really is the policy's, not a local copy that happens to agree.
     assert_eq!(
         STALE_MARGIN,
-        crate::ladder_margin_policy::MLX_STALE_MEASURED_MARGIN
+        crate::ladder_margin_policy::MLX_RECAPTURE_SPREAD
+    );
+    // The term keys the scenarios grep for are the policy's own, not restated literals.
+    assert_eq!(
+        crate::ladder_margin_policy::AdmissionTerm::AllocatorEnvelopeOverActivation.as_key(),
+        "allocator_envelope_over_activation"
+    );
+    assert_eq!(
+        crate::ladder_margin_policy::AdmissionTerm::SameCellRecaptureSpread.as_key(),
+        "same_cell_recapture_spread"
     );
 }

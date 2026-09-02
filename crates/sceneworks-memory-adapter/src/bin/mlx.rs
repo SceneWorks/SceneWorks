@@ -29,6 +29,9 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Duration;
 
+#[path = "mlx_ltx25.rs"]
+mod mlx_ltx25;
+
 const EDGES: [u32; 7] = [768, 640, 512, 448, 384, 320, 256];
 const MAX_THRESHOLD: f64 = 3e-2;
 const MEAN_THRESHOLD: f64 = 3e-3;
@@ -110,6 +113,7 @@ const LTX_RMS_THRESHOLD: f64 = FLUX2_RMS_THRESHOLD;
 /// this one is the single arm allowed to accept a multi-frame geometry, and it pays for that by
 /// validating against LTX's OWN declared envelope instead of accepting any frame count at all.
 const LTX_PROVIDER: &str = "ltx_2_3";
+const LTX25_PROVIDER: &str = "ltx_2_5";
 const LTX_PLAIN_EXECUTION_PATH: &str = "the MLX LTX-2.3 base-only text-to-video path";
 /// How [`diagnostic_video_frames`] names this lane when it refuses a non-video output. Extracted
 /// verbatim from that function's own messages when the second video arm made the label a parameter
@@ -1068,6 +1072,7 @@ mod tests {
             "flux2_dev",
             // sc-18808: the video arm rides the same dispatch, so it is covered by the same proof.
             "ltx_2_3",
+            "ltx_2_5",
             // sc-18663: and the second video arm.
             "minimax_h3",
         ] {
@@ -1086,6 +1091,7 @@ mod tests {
         assert_eq!(KREA_PROVIDER, "krea_2_turbo_control");
         assert_eq!(FLUX2_PROVIDER, "flux2_dev");
         assert_eq!(LTX_PROVIDER, "ltx_2_3");
+        assert_eq!(LTX25_PROVIDER, "ltx_2_5");
         assert_eq!(MINIMAX_PROVIDER, "minimax_h3");
     }
 
@@ -10246,6 +10252,9 @@ fn run(request: &Value) -> Result<Value, String> {
         // sc-18808: the first VIDEO arm. Every arm above it refuses `geometry.frames != 1`; this one
         // validates against LTX's own resolution/temporal envelope instead.
         LTX_PROVIDER => run_ltx(request),
+        // SC-18783: LTX-2.5 is a separate provider contract. Its variant and decoder axes are
+        // validated inside the arm rather than being folded into the legacy 2.3 route.
+        LTX25_PROVIDER => mlx_ltx25::run(request),
         // sc-18663: the second video arm, and the first joint audio+video one. Same rule as LTX —
         // it accepts a multi-frame geometry only by validating against MiniMax-H3's own lattice,
         // stride and canvas budget, read off the pinned engine crate.

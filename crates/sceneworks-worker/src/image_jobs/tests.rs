@@ -26191,3 +26191,171 @@ fn candle_receipt_authority_is_family_agnostic_and_compared_after_cache_rebindin
          so it compares against the strategy this request actually executes"
     );
 }
+
+/// sc-22329 — the guard-side resident-base table and the checkpoint-plan family tables are two
+/// spellings of one fact ("this family's imported checkpoints pair with an installed base
+/// model"), kept in different files because the plan tables live behind the macOS/candle cfg
+/// while the pre-loader guard compiles everywhere. This pins them together, in both directions,
+/// and pins each row's identity to the constants the family's own resolver reads — so a family
+/// added to the plan tables without a guard row (its imported loads would silently bypass the
+/// resolved cache again), or a guard row whose base model/tier drifts from what the resolver
+/// actually opens, reds here by name.
+///
+/// Failing mutations (run): delete the `krea_2` row from
+/// `PLAN_BACKED_RESIDENT_BASE_MODELS` (set inequality); change its `base_model_id` to
+/// `"krea_2_raw"` (repo mismatch vs `KREA_IMPORTED_BASE_REPO`); change its `tier` to `"q4"`
+/// (tier mismatch vs `KREA_IMPORTED_BASE_TIER`).
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+#[test]
+fn the_guard_resident_base_table_mirrors_the_checkpoint_plan_family_tables() {
+    use crate::external_library_runtime::{ResidentBaseShape, PLAN_BACKED_RESIDENT_BASE_MODELS};
+    use std::collections::BTreeSet;
+
+    let plan_families: BTreeSet<&str> = CHECKPOINT_PLAN_RESIDENT_BASE_TIERS
+        .iter()
+        .map(|(family, _)| *family)
+        .chain(
+            CHECKPOINT_PLAN_FAMILY_COMPONENT_RESOLVERS
+                .iter()
+                .map(|(family, _)| *family),
+        )
+        .collect();
+    let guard_families: BTreeSet<&str> = PLAN_BACKED_RESIDENT_BASE_MODELS
+        .iter()
+        .map(|row| row.family)
+        .collect();
+    assert_eq!(
+        plan_families, guard_families,
+        "every family with a checkpoint-plan resident-base/component resolver needs a \
+         PLAN_BACKED_RESIDENT_BASE_MODELS row (and vice versa), or its imported checkpoints \
+         load their base from the source library while the resolved cache holds it"
+    );
+
+    // Every row must name a real builtin catalog entry whose closure survives on EVERY platform
+    // this app ships, and whose surviving rows are the shape the row declares. Judged through
+    // `selected_model_artifact_closure` — the same selection the guard runs — rather than by
+    // scanning the raw downloads: a row whose tier download is platform-restricted would pass a
+    // raw scan while yielding an EMPTY closure on the excluded hosts, leaving the row dead
+    // exactly where it matters.
+    for row in PLAN_BACKED_RESIDENT_BASE_MODELS {
+        let entry = crate::training_jobs::builtin_model_manifest_entry(row.base_model_id)
+            .unwrap_or_else(|| {
+                panic!(
+                    "resident-base row for family {:?} names {:?}, which is not a builtin model",
+                    row.family, row.base_model_id
+                )
+            });
+        for platform in ["macos", "windows", "linux"] {
+            let closure =
+                sceneworks_core::model_artifacts::artifact_selection::selected_model_artifact_closure(
+                    &entry,
+                    platform,
+                    Some(row.tier),
+                );
+            let downloads: Vec<&serde_json::Value> = closure["downloads"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .collect();
+            let matches_shape = |download: &&serde_json::Value| {
+                let co_requisite =
+                    sceneworks_core::model_artifacts::artifact_selection::is_co_requisite_download(
+                        download,
+                    );
+                match row.shape {
+                    // The route opens the base's own tier: its PRIMARY row must survive.
+                    ResidentBaseShape::FullTier => !co_requisite,
+                    // The route opens only declared components: a co-requisite row at this tier
+                    // must survive, and it is the only thing the guard's closure will name.
+                    ResidentBaseShape::ComponentsOnly => {
+                        co_requisite
+                            && download.get("required").and_then(serde_json::Value::as_str)
+                                != Some("soft")
+                    }
+                }
+            };
+            assert!(
+                downloads.iter().any(matches_shape),
+                "builtin entry {:?} yields no {:?} download at tier {:?} on {platform} — the \
+                 resident-base row for family {:?} would be dead there",
+                row.base_model_id,
+                row.shape,
+                row.tier,
+                row.family
+            );
+        }
+    }
+
+    // Identity pins against the family resolvers' own constants: the guard's synthetic closure
+    // must name the same repository/tier `resolve_krea_imported_base_tier` and
+    // `resolve_mage_finetuned_components` actually open.
+    let krea = PLAN_BACKED_RESIDENT_BASE_MODELS
+        .iter()
+        .find(|row| row.family == "krea_2")
+        .expect("krea_2 row");
+    let krea_entry = crate::training_jobs::builtin_model_manifest_entry(krea.base_model_id)
+        .expect("krea base entry");
+    assert_eq!(krea.tier, KREA_IMPORTED_BASE_TIER);
+    assert!(
+        krea_entry["downloads"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .any(|download| {
+                download.get("variant").and_then(serde_json::Value::as_str) == Some(krea.tier)
+                    && download.get("repo").and_then(serde_json::Value::as_str)
+                        == Some(KREA_IMPORTED_BASE_REPO)
+            }),
+        "the krea_2 guard row's base entry must download {KREA_IMPORTED_BASE_REPO} at tier \
+         {KREA_IMPORTED_BASE_TIER} — the repository the imported route's resolver reads"
+    );
+
+    let mage = PLAN_BACKED_RESIDENT_BASE_MODELS
+        .iter()
+        .find(|row| row.family == "mage-flow")
+        .expect("mage-flow row");
+    assert_eq!(mage.base_model_id, MAGE_FINETUNED_BASE_MODEL);
+    assert_eq!(mage.tier, MAGE_FINETUNED_COMPONENT_TIER);
+
+    // And the SHAPE is not free-form: it says which of the base entry's repositories the family's
+    // route opens, which is exactly what the family's presence in one plan table or the other
+    // already declares. A `base-snapshot` family resolves a whole tier DIRECTORY
+    // (`resolve_krea_imported_base_tier` → `WeightsSource::Dir`); a component-resolver family
+    // resolves named components out of a co-requisite repo and never opens the base's own primary
+    // (`resolve_mage_finetuned_components` → `resolve_co_requisites_for_tier`). Getting this
+    // backwards is silent: pass 3 is all-or-nothing across a model's pairs, so an over-wide
+    // closure stops the components being served instead of erroring.
+    for row in PLAN_BACKED_RESIDENT_BASE_MODELS {
+        let in_base_tiers = CHECKPOINT_PLAN_RESIDENT_BASE_TIERS
+            .iter()
+            .any(|(family, _)| *family == row.family);
+        let in_component_resolvers = CHECKPOINT_PLAN_FAMILY_COMPONENT_RESOLVERS
+            .iter()
+            .any(|(family, _)| *family == row.family);
+        let expected = if in_base_tiers {
+            ResidentBaseShape::FullTier
+        } else {
+            assert!(
+                in_component_resolvers,
+                "family {:?} is in neither plan table, which the set equality above should have \
+                 caught",
+                row.family
+            );
+            ResidentBaseShape::ComponentsOnly
+        };
+        assert_eq!(
+            row.shape,
+            expected,
+            "family {:?} is registered in {}, so its resident base is {expected:?}",
+            row.family,
+            if in_base_tiers {
+                "CHECKPOINT_PLAN_RESIDENT_BASE_TIERS"
+            } else {
+                "CHECKPOINT_PLAN_FAMILY_COMPONENT_RESOLVERS"
+            }
+        );
+    }
+}

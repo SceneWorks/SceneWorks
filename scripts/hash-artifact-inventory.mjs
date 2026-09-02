@@ -20,7 +20,20 @@ async function fileSha256(file, signal) {
   return hash.digest("hex");
 }
 
-async function inventoryFiles(root, relative = "", signal, excludeDirectories = new Set()) {
+function assertInsideTrustedRoot(resolvedTrustedRoot, resolved, label) {
+  const relation = path.relative(resolvedTrustedRoot, resolved);
+  if (!relation || relation.startsWith("..") || path.isAbsolute(relation)) {
+    throw new Error(`artifact inventory file escaped its trusted root: ${label}`);
+  }
+}
+
+async function inventoryFiles(
+  root,
+  relative = "",
+  signal,
+  excludeDirectories = new Set(),
+  resolvedTrustedRoot = null,
+) {
   signal?.throwIfAborted();
   const directory = path.join(root, relative);
   const entries = await readdir(directory, { withFileTypes: true });
@@ -30,15 +43,26 @@ async function inventoryFiles(root, relative = "", signal, excludeDirectories = 
     if (entry.isDirectory()) {
       const normalized = child.split(path.sep).join("/");
       if (!excludeDirectories.has(normalized)) {
-        files.push(...await inventoryFiles(root, child, signal, excludeDirectories));
+        files.push(...await inventoryFiles(
+          root,
+          child,
+          signal,
+          excludeDirectories,
+          resolvedTrustedRoot,
+        ));
       }
     } else if (entry.isFile() || entry.isSymbolicLink()) {
       const absolute = path.join(root, child);
-      const resolved = await stat(absolute);
+      const physical = await realpath(absolute);
+      if (resolvedTrustedRoot) assertInsideTrustedRoot(resolvedTrustedRoot, physical, child);
+      const resolved = await stat(physical);
+      if (!resolved.isFile()) {
+        throw new Error(`artifact inventory entry must resolve to a file: ${child}`);
+      }
       files.push({
         path: child.split(path.sep).join("/"),
         bytes: resolved.size,
-        sha256: await fileSha256(absolute, signal),
+        sha256: await fileSha256(physical, signal),
       });
     }
   }
@@ -101,7 +125,10 @@ export async function hashArtifactInventory(
       });
     }
   } else {
-    files = await inventoryFiles(absolute, "", signal, excluded);
+    const resolvedTrustedRoot = trustedRoot
+      ? await realpath(path.resolve(trustedRoot))
+      : null;
+    files = await inventoryFiles(absolute, "", signal, excluded, resolvedTrustedRoot);
   }
   if (files.length === 0) throw new Error(`artifact inventory is empty: ${absolute}`);
   const bytes = files.reduce((total, file) => total + file.bytes, 0);

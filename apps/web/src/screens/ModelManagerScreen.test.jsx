@@ -770,6 +770,25 @@ const WAN_MOE_MODEL = {
   ui: { description: "Wan A14B MoE video model." },
 };
 
+const LTX_MODELS = [
+  {
+    id: "ltx_2_3",
+    name: "LTX-2.3",
+    type: "video",
+    family: "ltx-video",
+    loraCompatibility: { families: ["ltx-video"] },
+    installState: "ready",
+  },
+  {
+    id: "ltx_2_5",
+    name: "LTX-2.5",
+    type: "video",
+    family: "ltx-video",
+    loraCompatibility: { families: ["ltx-video"] },
+    installState: "ready",
+  },
+];
+
 function setNativeValue(element, value) {
   const proto = element.tagName === "SELECT" ? window.HTMLSelectElement.prototype : window.HTMLInputElement.prototype;
   Object.getOwnPropertyDescriptor(proto, "value").set.call(element, value);
@@ -803,12 +822,12 @@ describe("ModelManagerScreen Wan A14B MoE LoRA import (sc-1991)", () => {
     vi.restoreAllMocks();
   });
 
-  async function render() {
+  async function render(models = [WAN_MOE_MODEL]) {
     const value = {
       activeProject: null,
       jobs: [],
       loras: [],
-      models: [WAN_MOE_MODEL],
+      models,
       presets: [],
       jobAction: () => {},
       setActiveView: () => {},
@@ -854,9 +873,13 @@ describe("ModelManagerScreen Wan A14B MoE LoRA import (sc-1991)", () => {
     });
   }
 
-  async function selectWanVideoFamily() {
+  async function selectFamily(family) {
     const familySelect = labelStartingWith("Family").querySelector("select");
-    await change(familySelect, "wan-video");
+    await change(familySelect, family);
+  }
+
+  async function selectWanVideoFamily() {
+    await selectFamily("wan-video");
   }
 
   it("defaults the LoRA import to Upload mode", async () => {
@@ -907,6 +930,43 @@ describe("ModelManagerScreen Wan A14B MoE LoRA import (sc-1991)", () => {
     const payload = createLoraImportJob.mock.calls[0][0];
     expect(payload.family).toBe("wan-video");
     expect(payload.baseModel).toBe("wan_2_2_t2v_14b");
+  });
+
+  it("requires and submits an LTX-family base without exposing Wan's paired-file slot", async () => {
+    await render([WAN_MOE_MODEL, ...LTX_MODELS]);
+    await selectFamily("ltx-video");
+
+    const baseModelLabel = labelStartingWith("Base model");
+    const baseSelect = baseModelLabel.querySelector("select");
+    expect([...baseSelect.options].map((option) => option.value)).toEqual([
+      "",
+      "ltx_2_3",
+      "ltx_2_5",
+    ]);
+    expect(baseModelLabel.textContent).not.toContain("Wan 2.2");
+    expect(labelStartingWith("Low-noise expert")).toBeUndefined();
+
+    await act(async () => {
+      [...loraForm().querySelectorAll("button")].find((button) => button.textContent === "URL").click();
+    });
+    await change(
+      labelStartingWith("Source URL").querySelector("input"),
+      "https://example.com/ltx-style.safetensors",
+    );
+    const queue = [...loraForm().querySelectorAll("button")].find(
+      (button) => button.textContent === "Queue Import",
+    );
+    expect(queue.disabled).toBe(true);
+
+    await change(baseSelect, "ltx_2_5");
+    expect(queue.disabled).toBe(false);
+    await act(async () => {
+      loraForm().dispatchEvent(new window.Event("submit", { bubbles: true, cancelable: true }));
+    });
+
+    const payload = createLoraImportJob.mock.calls.at(-1)[0];
+    expect(payload).toMatchObject({ family: "ltx-video", baseModel: "ltx_2_5" });
+    expect(payload.secondaryFile).toBeUndefined();
   });
 
   // Distilled variants whose model `family` differs from their LoRA-compatibility

@@ -9,12 +9,11 @@ import {
   BINDING_PHASE_ENVELOPE_SHARE,
   CANDLE_HARD_FLOOR,
   ESTIMATE_ADMISSION_REQUIRES_MEASURED_BINDING_PHASE,
-  ESTIMATE_WIDENING_MULTIPLIER,
   MLX_HARD_FLOOR,
   RESIDUAL_BOUNDED_MAX_OVER_PHASES_EXEMPT_FROM_BINDING_PHASE_PIN,
-  VARIANCE_SAFETY_MULTIPLIER,
   analyzeBackend,
   deriveBackendMargins,
+  deriveFloorEnvelopeAllowance,
   deriveMargins,
   loadEvidenceRecords,
 } from "./derive-ladder-margins.mjs";
@@ -39,8 +38,8 @@ function docCommentAbove(source, index) {
 async function rustConstants() {
   const source = await readFile(RUST_POLICY_PATH, "utf8");
   const constants = {};
-  for (const match of source.matchAll(/pub const ([A-Z0-9_]+): f64 = ([0-9.]+);/g)) {
-    constants[match[1]] = Number(match[2]);
+  for (const match of source.matchAll(/pub const ([A-Z0-9_]+): f64 = ([0-9._]+);/g)) {
+    constants[match[1]] = Number(match[2].replaceAll("_", ""));
   }
   return constants;
 }
@@ -78,38 +77,46 @@ test("rust ladder_margin_policy constants match the derivation output", async ()
   const derived = deriveMargins(await loadEvidenceRecords(ROOT));
   const constants = await rustConstants();
 
-  assert.equal(constants.LADDER_MARGIN_HARD_FLOOR_MLX, derived.mlx.margins.hardFloor);
-  assert.equal(constants.LADDER_MARGIN_HARD_FLOOR_CANDLE, derived.candle.margins.hardFloor);
-  assert.equal(constants.MLX_STALE_MEASURED_MARGIN, derived.mlx.margins.staleMeasuredMargin);
-  assert.equal(constants.MLX_ESTIMATE_MARGIN, derived.mlx.margins.estimateMargin);
-  assert.equal(constants.CANDLE_STALE_MEASURED_MARGIN, derived.candle.margins.staleMeasuredMargin);
-  assert.equal(constants.CANDLE_ESTIMATE_MARGIN, derived.candle.margins.estimateMargin);
+  assert.equal(constants.MLX_RECAPTURE_SPREAD, derived.mlx.margins.recaptureSpread);
+  assert.equal(constants.CANDLE_RECAPTURE_SPREAD, derived.candle.margins.recaptureSpread);
 
-  // Exactly the six derivation-coupled constants exist; a seventh margin constant added to the
-  // Rust module without extending this pin would otherwise ship unpinned.
-  assert.equal(Object.keys(constants).length, 6);
+  // The third f64 is corpus-derived ON THE BASE IT CHARGES (epic 22505 feature-end fix round,
+  // E3): the max over MLX records of envelope-above-active per byte of activation-above-weights,
+  // from `deriveFloorEnvelopeAllowance`. Pinned against the live derivation so corpus growth that
+  // widens the measured ratio reds here instead of silently under-charging.
+  const floorEnvelope = deriveFloorEnvelopeAllowance(await loadEvidenceRecords(ROOT));
+  assert.ok(floorEnvelope, "the corpus must measure an envelope-over-activation ratio");
+  assert.equal(constants.FLOOR_ALLOCATOR_ENVELOPE_ALLOWANCE, floorEnvelope.ratio);
+
+  // Exactly these three f64 constants exist; a fourth margin constant added to the Rust module
+  // without extending this pin would otherwise ship unpinned.
+  assert.deepEqual(Object.keys(constants).sort(), [
+    "CANDLE_RECAPTURE_SPREAD",
+    "FLOOR_ALLOCATOR_ENVELOPE_ALLOWANCE",
+    "MLX_RECAPTURE_SPREAD",
+  ]);
 });
 
-// Guards the honesty claims baked into the constants' doc comments. If evidence growth changes
-// any of these (candle gains repeat pairs, intra-record repeat measurements appear), the doc
-// comments and possibly the rule must be revisited rather than silently drifting.
-test("derivation corpus facts backing the doc comments still hold", async () => {
+// The one corpus-derived claim that is a SAFETY property rather than a census: the MLX hard floor
+// must not exceed the envelope headroom the shipped predictor actually demonstrates.
+//
+// sc-22512 / E8: the corpus-population and frozen-number pins that used to live here — mlx repeat
+// pairs exist, candle has exactly zero, floorBinds is false, intra-record repeats are zero, every
+// mlx record has a predicted overall peak, and the gap spans exactly 4.76%..5.58% — were removed.
+// Each of them reds when the corpus changes SIZE or CONTENT: a re-capture, a retirement, or a new
+// lane's first measurement, none of which is a defect. The derivation's behaviour under those
+// conditions is graded by the synthetic-fixture tests at the bottom of this file, which construct
+// their own inputs and so cannot be falsified by the corpus moving.
+test("the mlx hard floor never exceeds the demonstrated envelope headroom", async () => {
   const derived = deriveMargins(await loadEvidenceRecords(ROOT));
-
-  assert.ok(derived.mlx.analysis.repeatPairs > 0, "mlx repeat pairs exist");
-  assert.equal(derived.mlx.margins.floorBinds, false, "mlx variance now exceeds the hard floor");
-  assert.equal(derived.candle.analysis.repeatPairs, 0, "candle has zero repeat pairs (floor is the whole margin)");
-  assert.equal(derived.mlx.analysis.intraRecordRepeatMeasurements, 0);
-  assert.equal(derived.candle.analysis.intraRecordRepeatMeasurements, 0);
-
-  // The 5% MLX floor's citable anchor (MLX_HARD_FLOOR rationale 2): the shipped predictor's
-  // envelope gap really does span 4.76%..5.58% across all mlx records, and the floor never
-  // exceeds the demonstrated headroom. Computed by the script, pinned here — not prose.
+  // Guarded exactly like the `canBind` relation below (`predictorEnvelopeGapRange` returns null
+  // when no record demonstrates an envelope gap): an mlx corpus that demonstrates none has not
+  // measured the thing this safety property is about, so the question is withheld rather than the
+  // suite throwing on `gap.max` of `null`. The property keeps full force whenever it is posable.
   const gap = derived.mlx.analysis.envelopeGap;
-  assert.equal(gap.count, derived.mlx.analysis.recordCount, "every mlx record has a predicted overall peak");
-  assert.equal((gap.min * 100).toFixed(2), "4.76", "envelope gap lower bound matches the doc comments");
-  assert.equal((gap.max * 100).toFixed(2), "5.58", "envelope gap upper bound matches the doc comments");
-  assert.ok(MLX_HARD_FLOOR <= gap.max, "mlx floor does not exceed the demonstrated envelope headroom");
+  if (gap) {
+    assert.ok(MLX_HARD_FLOOR <= gap.max, "mlx floor does not exceed the demonstrated envelope headroom");
+  }
 });
 
 // The issue-1 resolution (adversarial review of sc-18094): the non-binding exclusion is sound
@@ -168,15 +175,26 @@ test("the estimate-admission binding-phase constraint is pinned on both sides an
     );
   }
 
-  // Load-bearing on the committed corpus: widening the demonstrated per-phase re-capture spread
-  // by the derivation's safety and estimate factors exceeds the shipped MLX estimate margin, so
-  // the constraint is still required for phase extrapolation.
+  // Load-bearing on the committed corpus: the demonstrated per-phase re-capture spread exceeds
+  // the same-cell spread the selector actually charges, so the constraint is still required for
+  // phase extrapolation. sc-22508 removed the x2/x4 widenings, which makes the gap WIDER, not
+  // narrower — the constraint carries more of the risk now, not less.
+  //
+  // sc-22512 / E8: the exact spread (17.1369%) is no longer pinned beside that relation. It is a
+  // frozen-corpus number that reds on any re-capture, while saying nothing the relation does not.
   const derived = deriveMargins(await loadEvidenceRecords(ROOT));
+  // `?? 0` so an mlx corpus with no can-bind phase spread at all falls back to the floor rather
+  // than throwing: the relation below still holds, and absence must not be a failure.
   const canBind = derived.mlx.analysis.maxCanBindPhaseSpread;
-  assert.equal((canBind.spread * 100).toFixed(4), "17.1369", "spread matches the number cited in both doc comments");
-  const fullyWidenedCanBind = Math.max(MLX_HARD_FLOOR, canBind.spread * 2) * 2;
-  assert.equal((fullyWidenedCanBind * 100).toFixed(2), "68.55", "fully widened spread matches the docs");
-  assert.ok(fullyWidenedCanBind > derived.mlx.margins.estimateMargin, "constraint is load-bearing");
+  // A corpus with no can-bind phase spread at all has not measured the thing this relation is
+  // about, so there is no question to ask — skipping is the E8 posture, and the relation keeps
+  // full force whenever the corpus can pose it.
+  if (canBind) {
+    assert.ok(
+      canBind.spread > derived.mlx.margins.recaptureSpread,
+      "constraint is load-bearing: the can-bind spread exceeds the charged same-cell spread",
+    );
+  }
 });
 
 // SC-18829's fitted video curve is the narrow, ratified exception to the measured-binding-phase
@@ -227,24 +245,25 @@ test("the residual-bounded max-over-phases exemption is structural and keeps mar
   }
 
   // SC-18829's claim is NON-REDUCTION: the video ratification may not shrink the image-lane
-  // margins. The exact MLX value is owned by the sc-18094 derivation pin above (0.5040734… on the
-  // merged 89-record corpus) — re-pinning it here would just freeze the corpus twice.
+  // allowances. The exact MLX value is owned by the derivation pin above — re-pinning it here
+  // would just freeze the corpus twice. (sc-22508 re-termed the allowances epic-wide; that is a
+  // policy change, not the video ratification silently reducing anything.)
   assert.ok(
-    derived.mlx.margins.estimateMargin >= 0.10,
-    "ratification does not reduce MLX margin",
+    derived.mlx.margins.recaptureSpread >= 0.10,
+    "ratification does not reduce the MLX recapture spread",
   );
-  assert.equal(derived.candle.margins.estimateMargin, 0.04, "ratification does not reduce candle margin");
+  assert.equal(derived.candle.margins.recaptureSpread, 0.02, "ratification does not reduce the candle spread");
   assert.match(runbook, /Admission-margin verdict \(SC-18829\): keep the ratified constants unchanged/);
   assert.match(runbook, /largest\s+adopted q8 `cross` residual is 0\.4438 GiB/);
   assert.match(runbook, /10% MLX estimate margin/);
   assert.match(runbook, /Candle has no\s+promoted temporal curve yet/);
 });
 
-// Mutation-proofs the VARIANCE path: with a synthetic repeat pair whose doubled spread exceeds
-// the floor, the derived margin must track the variance term, not the floor. Without this, a
-// derivation that always returned the floor would still pass the pin above.
-test("variance term overrides the floor when repeat spread is wide enough", () => {
-  const spread = 0.06; // x2 => 12%, above the 5% mlx floor
+// Mutation-proofs the VARIANCE path: with a synthetic repeat pair whose spread exceeds the floor,
+// the derived spread must track the measurement, not the floor. Without this, a derivation that
+// always returned the floor would still pass the pin above.
+test("the measured spread overrides the floor when repeat spread is wide enough", () => {
+  const spread = 0.06; // above the 5% mlx floor
   const analysis = analyzeBackend([
     syntheticRecord({ id: "syn-a", denoise: 10_000_000_000, decode: 9_000_000_000, overall: 10_500_000_000 }),
     syntheticRecord({
@@ -258,13 +277,13 @@ test("variance term overrides the floor when repeat spread is wide enough", () =
 
   assert.equal(analysis.repeatPairs, 1);
   assert.ok(!margins.floorBinds);
-  assert.ok(Math.abs(margins.staleMeasuredMargin - VARIANCE_SAFETY_MULTIPLIER * spread) < 1e-9);
   assert.ok(
-    Math.abs(margins.estimateMargin - ESTIMATE_WIDENING_MULTIPLIER * margins.staleMeasuredMargin) < 1e-9,
+    Math.abs(margins.recaptureSpread - spread) < 1e-9,
+    "the derivation is the measured spread itself — no safety or estimate multiplier survives",
   );
 });
 
-test("a backend with no repeat pairs falls back to the hard floor as the whole margin", () => {
+test("a backend with no repeat pairs falls back to the hard floor as the whole spread", () => {
   const analysis = analyzeBackend([
     syntheticRecord({ id: "syn-a", backend: "candle", denoise: 4e9, decode: 4e9, overall: 4e9 }),
     syntheticRecord({ id: "syn-b", backend: "candle", tier: "q8", denoise: 8e9, decode: 8e9, overall: 8e9 }),
@@ -274,8 +293,7 @@ test("a backend with no repeat pairs falls back to the hard floor as the whole m
   assert.equal(analysis.repeatPairs, 0);
   assert.equal(margins.maxBindingSpread, null);
   assert.ok(margins.floorBinds);
-  assert.equal(margins.staleMeasuredMargin, CANDLE_HARD_FLOOR);
-  assert.equal(margins.estimateMargin, ESTIMATE_WIDENING_MULTIPLIER * CANDLE_HARD_FLOOR);
+  assert.equal(margins.recaptureSpread, CANDLE_HARD_FLOOR);
 });
 
 // The two exclusion rules that keep the corpus's known artifacts out of the SAME-CELL variance

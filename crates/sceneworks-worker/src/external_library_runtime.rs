@@ -146,6 +146,22 @@ impl RuntimeSourceGuard {
                 // Imported/app-owned and explicitly configured external-root models are the only
                 // entries outside the HF-library contract; they must prove their confinement.
                 if entry_is_provably_non_hf_local(entry, settings)? {
+                    // sc-22329: a plan-backed imported checkpoint is the transformer only — its
+                    // resident base components (text encoder, VAE, tokenizer) load from the
+                    // family's installed base model, which this entry does not carry. Give the
+                    // base its own plan so it participates in local-tier selection exactly like an
+                    // HF-managed entry's closure; without one, no scope is installed and the base
+                    // streams from the source library on every cold load even while the resolved
+                    // cache holds it. Every degradation returns `None`, which is the pre-sc-22329
+                    // behavior (the route's own typed refusal still owns the not-installed case).
+                    if let Some(plan) = plan_backed_resident_base_plan(
+                        entry,
+                        settings,
+                        &configured_library,
+                        &local_artifacts,
+                    ) {
+                        plans.push(plan);
+                    }
                     continue;
                 }
                 return Err(WorkerError::InvalidPayload(format!(
@@ -175,6 +191,7 @@ impl RuntimeSourceGuard {
                 requirements: selected.requirements,
                 receipt_backed: selected.receipt_backed,
                 resolution,
+                resident_base: false,
             });
         }
 
@@ -199,10 +216,23 @@ impl RuntimeSourceGuard {
             }),
         );
 
+        // The job's CARRIED models decide admission; a resident base (sc-22329) may only ever ADD
+        // a local-tier serve. So the two are separated here — deduped against each other, carried
+        // first — and only the carried set runs the admitting loop below. A resolution a carried
+        // entry also produced keeps its carried (fatal) semantics: a resident-base plan must never
+        // be able to SUPPRESS a refusal a real carrier earned.
         let mut resolutions: Vec<ModelResolution> = Vec::new();
-        for plan in plans {
+        let mut resident_base_only: Vec<ModelResolution> = Vec::new();
+        for plan in plans.iter().filter(|plan| !plan.resident_base) {
             if !resolutions.contains(&plan.resolution) {
-                resolutions.push(plan.resolution);
+                resolutions.push(plan.resolution.clone());
+            }
+        }
+        for plan in plans.iter().filter(|plan| plan.resident_base) {
+            if !resolutions.contains(&plan.resolution)
+                && !resident_base_only.contains(&plan.resolution)
+            {
+                resident_base_only.push(plan.resolution.clone());
             }
         }
 
@@ -257,7 +287,18 @@ impl RuntimeSourceGuard {
                 }
             }
         }
+        // sc-22329 — a resident base is ADVISORY: it exists so the family's own resolver can be
+        // answered from a leased bundle, and its whole effect was already had by
+        // `select_local_tier` above. Nothing here may refuse, and no external session is opened
+        // for it. That is what keeps AC2 true: with the base uninstalled, torn, or its library
+        // disconnected, the guard admits exactly as it did before this table existed and the
+        // family route raises its own tagged `[checkpoint-plan:missing-component]` refusal — the
+        // string callers and tests key on. An invalid resolution is dropped rather than reported,
+        // for the same reason.
+        resident_base_only.retain(|resolution| resolution.validate().is_ok());
         emit_source_tiers(&resolutions);
+        emit_source_tiers(&resident_base_only);
+        resolutions.extend(resident_base_only);
         Ok(Self {
             resolutions,
             sessions,
@@ -353,6 +394,195 @@ struct EntryPlan {
     requirements: Vec<ExternalArtifactRequirement>,
     receipt_backed: bool,
     resolution: ModelResolution,
+    /// True for the synthetic resident-base plan (sc-22329) rather than a model the job CARRIES.
+    /// It may only ever add a local-tier serve: it never opens an external session and never
+    /// refuses admission. See the split above `let mut sessions`.
+    resident_base: bool,
+}
+
+/// WHICH repositories of a resident base model the family's route actually opens — and therefore
+/// the only ones whose coverage may decide whether the base is served locally.
+///
+/// This is not a preference. `select_local_tier` is all-or-nothing across a model's pairs, so a
+/// closure naming a repository the route never reads cannot merely cost a cache miss: it BLOCKS
+/// the pairs the route does read whenever the extra repository is uncached, and enqueues its
+/// bytes for promotion on top.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum ResidentBaseShape {
+    /// The route opens the base model's own tier directory — its primary download, with the
+    /// selected closure's co-requisites. `resolve_krea_imported_base_tier` reads
+    /// `<krea-2-turbo-mlx>/bf16/{transformer/config.json,text_encoder,vae,tokenizer}`, so the
+    /// primary repository at that tier IS what it needs.
+    FullTier,
+    /// The route opens only the base model's declared COMPONENT co-requisites at the tier, never
+    /// its primary. `resolve_mage_finetuned_components` rides `resolve_co_requisites_for_tier`
+    /// and reads `SceneWorks/Mage-Flow-Components-mlx` alone — the fine-tune supplies the
+    /// transformer, so `SceneWorks/Mage-Flow-Base`'s 8 GB primary is never opened.
+    ComponentsOnly,
+}
+
+/// One plan-backed imported family's resident base model: the builtin catalog entry whose
+/// installed components the family's imported checkpoints pair with, the tier those components
+/// resolve from, and which of that entry's repositories the family's route actually reads.
+pub(crate) struct PlanBackedResidentBase {
+    pub(crate) family: &'static str,
+    /// The `builtin.models.jsonc` id of the base model —
+    /// [`crate::training_jobs::builtin_model_manifest_entry`]'s key.
+    pub(crate) base_model_id: &'static str,
+    /// The tier the family's imported route resolves base components from. Fixed per family (the
+    /// dense-TE/VAE tier), NEVER the request's quant tier: `resolve_krea_imported_base_tier` and
+    /// `resolve_mage_finetuned_components` both pin `bf16` regardless of what tier the imported
+    /// transformer itself runs at.
+    pub(crate) tier: &'static str,
+    pub(crate) shape: ResidentBaseShape,
+}
+
+/// sc-22329 — the guard-side mirror of the checkpoint-plan family tables
+/// (`CHECKPOINT_PLAN_RESIDENT_BASE_TIERS` / `CHECKPOINT_PLAN_FAMILY_COMPONENT_RESOLVERS` in
+/// `image_jobs/checkpoint_plan.rs`): one row per family whose imported checkpoints load resident
+/// base components. Those tables map family → path resolver and live behind the macOS/candle cfg;
+/// this one maps family → installed base model identity and must compile on every build the guard
+/// does. `image_jobs/tests.rs` pins the two against each other, and pins each row's identity
+/// against the family's own resolver constants, so a family added to one table cannot silently
+/// miss the other.
+pub(crate) const PLAN_BACKED_RESIDENT_BASE_MODELS: &[PlanBackedResidentBase] = &[
+    PlanBackedResidentBase {
+        family: "krea_2",
+        base_model_id: "krea_2_turbo",
+        tier: "bf16",
+        shape: ResidentBaseShape::FullTier,
+    },
+    PlanBackedResidentBase {
+        family: "mage-flow",
+        base_model_id: "mage_flow_base",
+        tier: "bf16",
+        shape: ResidentBaseShape::ComponentsOnly,
+    },
+];
+
+/// The `(tier, shape, builtin catalog entry)` this build resolves a resident base for `family`
+/// through, or `None` when the family has no resident base.
+///
+/// The indirection exists for the tests: the production rows name REAL repositories, and a test
+/// that publishes a bundle for one of those would be visible to any concurrently running test
+/// resolving the same repository — `discover_snapshot`'s `unique_local_snapshot` fallback is
+/// repo-keyed and IGNORES the revision, so a unique fixture revision does not isolate it (see the
+/// fixture-identity note at the top of this file's test module).
+fn resident_base_row(family: &str) -> Option<(String, ResidentBaseShape, serde_json::Value)> {
+    #[cfg(test)]
+    if let Some(row) = tests::resident_base_override(family) {
+        return Some(row);
+    }
+    let row = PLAN_BACKED_RESIDENT_BASE_MODELS
+        .iter()
+        .find(|row| row.family == family)?;
+    let entry = crate::training_jobs::builtin_model_manifest_entry(row.base_model_id)?;
+    Some((row.tier.to_owned(), row.shape, entry))
+}
+
+/// The synthetic [`EntryPlan`] for a provably-non-HF-local entry's resident base model, or `None`
+/// when the entry has none (no declared family, a family without a resident base, or a base whose
+/// installed closure cannot be recovered) — in which case the guard behaves exactly as it did
+/// before sc-22329 and the family route's own typed refusal keeps owning the not-installed case.
+///
+/// The requirements are built by the same [`selected_requirements_for_closure`] machinery every
+/// HF-carried entry goes through — so receipt matching, coverage, leasing, disconnect typing, tier
+/// reporting and promotion intake all behave identically to a job that had carried the base model
+/// explicitly. What differs per family is only WHICH of the base entry's downloads that machinery
+/// is pointed at, which is [`ResidentBaseShape`]'s whole job: a closure naming a repository the
+/// route never opens would block the ones it does (pass 3 is all-or-nothing across a model's
+/// pairs) and enqueue bytes nothing reads for promotion.
+fn plan_backed_resident_base_plan(
+    entry: &serde_json::Value,
+    settings: &Settings,
+    configured_library: &Path,
+    local_artifacts: &[sceneworks_core::model_artifacts::ResolvedModelArtifact],
+) -> Option<EntryPlan> {
+    use sceneworks_core::model_artifacts::artifact_selection::{
+        model_co_requisite_downloads_for_variant, retain_downloads_for_os,
+        selected_requirements_for_closure,
+    };
+
+    let family = entry
+        .get("family")
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|family| !family.is_empty())?;
+    let (tier, shape, base_entry) = resident_base_row(family)?;
+    // This worker's OWN platform, and the family's fixed base tier — deliberately not the
+    // request's runtime variant (see [`PlanBackedResidentBase::tier`]).
+    let selected = match shape {
+        ResidentBaseShape::FullTier => selected_requirements_for_model(
+            &base_entry,
+            std::env::consts::OS,
+            Some(&tier),
+            &settings.data_dir,
+        ),
+        ResidentBaseShape::ComponentsOnly => {
+            let mut platform_entry = base_entry.clone();
+            retain_downloads_for_os(&mut platform_entry, std::env::consts::OS);
+            // The component rows the family's resolver reads, ONE per repository: the requirement
+            // files come from the install receipt's own `resolvedFiles`, so a second row for the
+            // same repository would only duplicate it. The declared globs are unioned onto the
+            // survivor because they still decide matching for a legacy variant-less receipt.
+            let mut rows: Vec<serde_json::Value> = Vec::new();
+            for download in model_co_requisite_downloads_for_variant(&platform_entry, Some(&tier))
+                .into_iter()
+                .filter(|download| {
+                    download.get("required").and_then(serde_json::Value::as_str) != Some("soft")
+                })
+            {
+                let repository = download
+                    .get("repo")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or_default()
+                    .to_owned();
+                let files = download.get("files").cloned().unwrap_or(json!([]));
+                match rows.iter_mut().find(|held| {
+                    held.get("repo").and_then(serde_json::Value::as_str) == Some(&repository)
+                }) {
+                    Some(held) => {
+                        if let (Some(held), Some(extra)) = (
+                            held.get_mut("files")
+                                .and_then(serde_json::Value::as_array_mut),
+                            files.as_array(),
+                        ) {
+                            held.extend(extra.iter().cloned());
+                        }
+                    }
+                    None => rows.push(download),
+                }
+            }
+            // Exactly one primary, which the closure contract requires — and it is produced by
+            // CLEARING `coRequisite` on the first row rather than by hand-marking a requirement,
+            // so the row travels the ordinary path. The synthetic entry deliberately carries NO
+            // `id`: `receipt_requirements_for_model` filters a PRIMARY row's receipts by
+            // `modelId`, and these components are installed by whichever sibling card the user
+            // actually downloaded (every Mage card declares the same Components rows), so keying
+            // on the base model's id would ignore a perfectly good install.
+            let first = rows.first_mut()?;
+            if let Some(object) = first.as_object_mut() {
+                object.remove("coRequisite");
+            }
+            selected_requirements_for_closure(&json!({ "downloads": rows }), &settings.data_dir)
+        }
+    };
+    if selected.requirements.is_empty() {
+        return None;
+    }
+    let resolution = resolve_model_availability(
+        &settings.data_dir,
+        configured_library,
+        &selected.requirements,
+        selected.receipt_backed,
+        local_artifacts,
+    );
+    Some(EntryPlan {
+        requirements: selected.requirements,
+        receipt_backed: selected.receipt_backed,
+        resolution,
+        resident_base: true,
+    })
 }
 
 /// Every VALID app-owned resolved artifact on this host, plus the entries rejected for a shape the
@@ -1001,6 +1231,53 @@ mod tests {
         .unwrap()
         .clone();
         (settings(data), library, payload)
+    }
+
+    // The resident-base rows this THREAD resolves, replacing the production table for the body of
+    // a test. Thread-local, so it cannot leak into a concurrently running test; see
+    // `super::resident_base_row` for why a test must not publish a bundle for a production
+    // repository.
+    thread_local! {
+        static RESIDENT_BASE_ROWS: std::cell::RefCell<
+            Vec<(String, String, super::ResidentBaseShape, Value)>,
+        > = const { std::cell::RefCell::new(Vec::new()) };
+    }
+
+    /// The override [`super::resident_base_row`] consults first.
+    pub(super) fn resident_base_override(
+        family: &str,
+    ) -> Option<(String, super::ResidentBaseShape, Value)> {
+        RESIDENT_BASE_ROWS.with(|rows| {
+            rows.borrow()
+                .iter()
+                .find(|(candidate, ..)| candidate == family)
+                .map(|(_, tier, shape, entry)| (tier.clone(), *shape, entry.clone()))
+        })
+    }
+
+    /// Point one family at a synthetic base entry for the body, then restore. RAII so a panicking
+    /// assertion cannot leave the override installed for the next test on this thread.
+    struct ResidentBaseRowGuard;
+
+    impl ResidentBaseRowGuard {
+        fn install(
+            family: &str,
+            tier: &str,
+            shape: super::ResidentBaseShape,
+            entry: Value,
+        ) -> Self {
+            RESIDENT_BASE_ROWS.with(|rows| {
+                rows.borrow_mut()
+                    .push((family.to_owned(), tier.to_owned(), shape, entry))
+            });
+            Self
+        }
+    }
+
+    impl Drop for ResidentBaseRowGuard {
+        fn drop(&mut self) {
+            RESIDENT_BASE_ROWS.with(|rows| rows.borrow_mut().clear());
+        }
     }
 
     /// Serialize every test that installs a local-tier preference scope. The scope is PROCESS-WIDE
@@ -2557,6 +2834,11 @@ mod tests {
     /// `paths.model` install dir PLUS a `source` PROVENANCE block carrying a data-dir-relative
     /// `path`, a `provider` literal, a `repo` that is null for a file import, and a `url`.
     fn imported_entry(data_dir: &Path, id: &str) -> Value {
+        imported_entry_with_family(data_dir, id, "krea_2")
+    }
+
+    /// [`imported_entry`] with the declared plan family chosen by the caller.
+    fn imported_entry_with_family(data_dir: &Path, id: &str, family: &str) -> Value {
         let relative = format!("models/imports/{id}");
         let install = data_dir.join(&relative);
         std::fs::create_dir_all(&install).unwrap();
@@ -2565,7 +2847,7 @@ mod tests {
             "id": id,
             "name": id,
             "type": "image",
-            "family": "krea_2",
+            "family": family,
             "downloads": [],
             "source": {
                 "provider": "local",
@@ -2625,6 +2907,369 @@ mod tests {
                 RuntimeSourceGuard::begin(&JobType::ImageGenerate, &payload, &settings)
                     .unwrap_or_else(|error| panic!("{id} must clear the guard: {error}"));
             }
+        });
+    }
+
+    /// sc-22329 fixtures: an installed resident base, and the imported entry that pairs with it.
+    ///
+    /// The family and its base entry are SYNTHETIC (`guardfx/` repositories, `e22329…` revisions),
+    /// installed through the thread-local row override rather than the production table. That is
+    /// required, not tidiness: `discover_snapshot`'s `unique_local_snapshot` fallback is keyed on
+    /// the REPOSITORY and ignores the revision, so a bundle published here for a real repository
+    /// would be a candidate answer for any concurrently running test that resolves that repository
+    /// against its own temp library — the exact cross-test bleed the note at the top of this
+    /// module exists to prevent, and one a unique revision does not close.
+    const REV_C: &str = "e22329cccccccccccccccccccccccccccccccccc";
+
+    /// An imported job whose declared family has a resident base, plus that base's install
+    /// receipts and source snapshot. `shape` picks which repository the family's route reads:
+    /// `FullTier` installs the base's own tier, `ComponentsOnly` a separate components repo whose
+    /// receipt carries NO `modelId` (the shape a sibling catalog card's download writes).
+    fn resident_base_fixture(
+        temp: &TempDir,
+        shape: super::ResidentBaseShape,
+    ) -> (Settings, PathBuf, JsonObject, &'static str, &'static str) {
+        let data = temp.path().join("data");
+        let library = temp.path().join("external-hf");
+        let (read_repo, file) = match shape {
+            super::ResidentBaseShape::FullTier => (
+                "guardfx/resident-base",
+                "bf16/text_encoder/model.safetensors",
+            ),
+            super::ResidentBaseShape::ComponentsOnly => (
+                "guardfx/resident-components",
+                "bf16/text_encoder/model.safetensors",
+            ),
+        };
+        seed_snapshot(&library, read_repo, REV_C, file);
+        write_receipts(
+            &data,
+            read_repo,
+            match shape {
+                // A primary row's receipts are filtered by `modelId`.
+                super::ResidentBaseShape::FullTier => json!([{
+                    "repo": read_repo, "modelId": "guardfx_base", "variant": "bf16",
+                    "resolvedFiles": [file], "snapshotRevision": REV_C }]),
+                // A co-requisite's are not — and must not be, because whichever sibling card the
+                // user downloaded wrote this one.
+                super::ResidentBaseShape::ComponentsOnly => json!([{
+                    "repo": read_repo, "variant": "bf16",
+                    "resolvedFiles": [file], "snapshotRevision": REV_C }]),
+            },
+        );
+        let settings = settings(data);
+        let payload = json!({
+            "model": "guardfx_import",
+            "modelManifestEntry":
+                imported_entry_with_family(&settings.data_dir, "guardfx_import", "guardfx-family"),
+        })
+        .as_object()
+        .unwrap()
+        .clone();
+        (settings, library, payload, read_repo, file)
+    }
+
+    /// The synthetic builtin catalog entry the override hands back for `guardfx-family`. Its
+    /// `ComponentsOnly` form mirrors the real Mage shape: a large primary the route never opens,
+    /// plus per-component co-requisite rows in a DIFFERENT repository, declared with globs and a
+    /// `subdir`, one row per component.
+    fn resident_base_entry(shape: super::ResidentBaseShape) -> Value {
+        match shape {
+            super::ResidentBaseShape::FullTier => json!({
+                "id": "guardfx_base",
+                "downloads": [
+                    { "provider": "huggingface", "repo": "guardfx/resident-base",
+                      "variant": "bf16", "files": ["bf16/*"] }
+                ],
+            }),
+            super::ResidentBaseShape::ComponentsOnly => json!({
+                "id": "guardfx_base",
+                "downloads": [
+                    { "provider": "huggingface", "repo": "guardfx/resident-primary",
+                      "variant": "bf16", "files": ["bf16/*"] },
+                    { "provider": "huggingface", "repo": "guardfx/resident-components",
+                      "variant": "bf16", "coRequisite": true,
+                      "files": ["bf16/text_encoder/*"], "subdir": "bf16/text_encoder" },
+                    { "provider": "huggingface", "repo": "guardfx/resident-components",
+                      "variant": "bf16", "coRequisite": true,
+                      "files": ["bf16/vae/*"], "subdir": "bf16/vae" }
+                ],
+            }),
+        }
+    }
+
+    /// sc-22329 — the story's headline outcome, at the guard seam: a plan-backed imported
+    /// checkpoint's resident BASE model participates in local-tier selection, so the shared
+    /// snapshot resolver its family route reads the base through
+    /// (`huggingface_snapshot_dir` → `resolve_huggingface_snapshot_dir`) answers with the leased
+    /// bundle instead of streaming the base off the source library on every cold load. The
+    /// imported entry itself carries no downloads, so before this the guard `continue`d past it
+    /// and no scope was ever installed.
+    ///
+    /// Run for BOTH resident-base shapes, because they reach the closure by different routes:
+    /// `FullTier` through the base entry's primary download, `ComponentsOnly` through its
+    /// component co-requisites alone.
+    #[test]
+    fn an_imported_checkpoints_resident_base_is_served_from_the_leased_bundle() {
+        for shape in [
+            super::ResidentBaseShape::FullTier,
+            super::ResidentBaseShape::ComponentsOnly,
+        ] {
+            let temp = TempDir::new().unwrap();
+            let (settings, library, payload, read_repo, file) = resident_base_fixture(&temp, shape);
+            with_local_cache(&library, || {
+                let _rows = ResidentBaseRowGuard::install(
+                    "guardfx-family",
+                    "bf16",
+                    shape,
+                    resident_base_entry(shape),
+                );
+                let artifact = publish_bundle(
+                    &settings.data_dir,
+                    &library,
+                    read_repo,
+                    REV_C,
+                    "bf16",
+                    &[file],
+                );
+                let safe = read_repo.replace('/', "--");
+                let bundle_snapshot = artifact
+                    .location
+                    .root()
+                    .join(format!("models--{safe}/snapshots/{REV_C}"));
+
+                // Control: before the guard, the base resolves to the source library — the exact
+                // path the story's 30-second cold loads were reading.
+                let source_snapshot =
+                    crate::model_jobs::huggingface_snapshot_dir(&settings.data_dir, read_repo)
+                        .expect("source snapshot");
+                assert!(source_snapshot.starts_with(&library), "{shape:?}");
+
+                let guard = RuntimeSourceGuard::begin(&JobType::ImageGenerate, &payload, &settings)
+                    .unwrap();
+                assert_eq!(guard.resolutions().len(), 1, "{shape:?}");
+                assert_eq!(
+                    guard.resolutions()[0].availability,
+                    ModelAvailability::LocalReady,
+                    "{shape:?}"
+                );
+                assert_eq!(
+                    crate::model_jobs::huggingface_snapshot_dir(&settings.data_dir, read_repo)
+                        .expect("leased local snapshot"),
+                    bundle_snapshot,
+                    "{shape:?}"
+                );
+                assert!(bundle_snapshot.join(file).is_file(), "{shape:?}");
+                guard.finish_success().unwrap();
+                assert_eq!(
+                    crate::model_jobs::huggingface_snapshot_dir(&settings.data_dir, read_repo),
+                    Some(source_snapshot),
+                    "{shape:?}"
+                );
+
+                // Mutation control: the identical payload with the declared family REMOVED must
+                // produce no plan at all — proving the served path above came from the family
+                // row, not from some other admission of the entry.
+                let mut no_family = payload.clone();
+                no_family
+                    .get_mut("modelManifestEntry")
+                    .unwrap()
+                    .as_object_mut()
+                    .unwrap()
+                    .remove("family");
+                let guard =
+                    RuntimeSourceGuard::begin(&JobType::ImageGenerate, &no_family, &settings)
+                        .unwrap();
+                assert!(guard.resolutions().is_empty(), "{shape:?}");
+                assert!(
+                    crate::model_jobs::huggingface_snapshot_dir(&settings.data_dir, read_repo)
+                        .expect("source snapshot without a family")
+                        .starts_with(&library),
+                    "{shape:?}"
+                );
+                guard.finish_success().unwrap();
+            });
+        }
+    }
+
+    /// sc-22329 — a `ComponentsOnly` family's closure must name ONLY the repository its resolver
+    /// reads. The base entry's own primary is large and never opened by an imported checkpoint
+    /// (the checkpoint IS the transformer), and naming it would be worse than useless: pass 3 is
+    /// all-or-nothing across a model's pairs, so an uncached primary would ALSO stop the
+    /// components pair from being served, and the primary's bytes would be queued for promotion.
+    ///
+    /// Failing mutation (run): give the `guardfx-family` row `ResidentBaseShape::FullTier` — the
+    /// primary joins the closure, nothing covers it, and the components stop being served.
+    #[test]
+    fn a_components_only_resident_base_ignores_the_base_models_own_primary() {
+        let temp = TempDir::new().unwrap();
+        let (settings, library, payload, read_repo, file) =
+            resident_base_fixture(&temp, super::ResidentBaseShape::ComponentsOnly);
+        // The primary exists in the library and is NOT cached — the ordinary state for a user who
+        // imported a fine-tune and never downloaded the base's own transformer.
+        seed_snapshot(
+            &library,
+            "guardfx/resident-primary",
+            REV_C,
+            "bf16/transformer/model.safetensors",
+        );
+        with_local_cache(&library, || {
+            let _rows = ResidentBaseRowGuard::install(
+                "guardfx-family",
+                "bf16",
+                super::ResidentBaseShape::ComponentsOnly,
+                resident_base_entry(super::ResidentBaseShape::ComponentsOnly),
+            );
+            publish_bundle(
+                &settings.data_dir,
+                &library,
+                read_repo,
+                REV_C,
+                "bf16",
+                &[file],
+            );
+            let guard =
+                RuntimeSourceGuard::begin(&JobType::ImageGenerate, &payload, &settings).unwrap();
+            assert_eq!(
+                guard.resolutions()[0].availability,
+                ModelAvailability::LocalReady,
+                "the components pair must serve even though the base's primary is uncached"
+            );
+            assert!(!crate::model_jobs::huggingface_snapshot_dir(
+                &settings.data_dir,
+                "guardfx/resident-primary"
+            )
+            .expect("the primary still resolves")
+            .starts_with(settings.data_dir.join("models").join("resolved")));
+            guard.finish_success().unwrap();
+        });
+    }
+
+    /// One resident-base degradation: a label, and the mutation that puts the installed base into
+    /// that state. The mutation takes only the source library — every case below is a change to
+    /// what the library holds, not to the app data dir.
+    type ResidentBaseDegradation = (&'static str, fn(&Path));
+
+    /// sc-22329 AC2 — a resident base may only ever ADD a local-tier serve. Each degradation here
+    /// is a state the guard must admit exactly as it did before the table existed, so the family
+    /// route's own tagged `[checkpoint-plan:missing-component]` refusal keeps owning it. Two of
+    /// these reach code that DOES refuse for a carried model, which is the whole point: an
+    /// advisory plan must not borrow that power.
+    #[test]
+    fn a_resident_base_never_refuses_admission() {
+        // (label, prepare) — each leaves the base in a state a carried model would fail on.
+        let cases: [ResidentBaseDegradation; 3] = [
+            // Not installed at all: no receipts, nothing in the library.
+            ("uninstalled", |_| {}),
+            // Installed and receipted, but the library holding it is gone. A CARRIED model in
+            // this state is `InstalledExternalUnavailable` and the guard refuses typed.
+            ("library disconnected", |library| {
+                std::fs::remove_dir_all(library).unwrap();
+            }),
+            // Installed, library present, but the snapshot's files are gone underneath it — the
+            // state that fails `ExternalSourceSession::begin` for a carried model.
+            ("components vanished", |library| {
+                let root = library.join("models--guardfx--resident-base");
+                std::fs::remove_dir_all(&root).unwrap();
+                std::fs::create_dir_all(root.join("snapshots")).unwrap();
+            }),
+        ];
+        for (label, prepare) in cases {
+            let temp = TempDir::new().unwrap();
+            let (settings, library, payload, ..) =
+                resident_base_fixture(&temp, super::ResidentBaseShape::FullTier);
+            with_local_cache(&library, || {
+                let _rows = ResidentBaseRowGuard::install(
+                    "guardfx-family",
+                    "bf16",
+                    super::ResidentBaseShape::FullTier,
+                    resident_base_entry(super::ResidentBaseShape::FullTier),
+                );
+                prepare(&library);
+                let guard = RuntimeSourceGuard::begin(&JobType::ImageGenerate, &payload, &settings)
+                    .unwrap_or_else(|error| {
+                        panic!("a resident base must never refuse admission ({label}): {error}")
+                    });
+                // Nothing was served locally, and nothing opened an external session for it.
+                assert!(
+                    guard.local_scope.is_none(),
+                    "{label} must install no local scope"
+                );
+                assert!(
+                    guard.sessions.is_empty(),
+                    "{label} must open no external source session"
+                );
+                guard.finish_success().unwrap();
+            });
+        }
+    }
+
+    /// The companion to the case above: a bundle that exists but does NOT cover the closure. The
+    /// base falls back to the source tier (pass 3), and admission still succeeds.
+    #[test]
+    fn a_resident_base_whose_bundle_does_not_cover_the_closure_falls_back_without_refusing() {
+        let temp = TempDir::new().unwrap();
+        let (settings, library, payload, read_repo, file) =
+            resident_base_fixture(&temp, super::ResidentBaseShape::FullTier);
+        // A SECOND installed file the receipt names, absent from the bundle published below.
+        write_receipts(
+            &settings.data_dir,
+            read_repo,
+            json!([{ "repo": read_repo, "modelId": "guardfx_base", "variant": "bf16",
+                     "resolvedFiles": [file, "bf16/vae/model.safetensors"],
+                     "snapshotRevision": REV_C }]),
+        );
+        seed_snapshot(&library, read_repo, REV_C, "bf16/vae/model.safetensors");
+        with_local_cache(&library, || {
+            let _rows = ResidentBaseRowGuard::install(
+                "guardfx-family",
+                "bf16",
+                super::ResidentBaseShape::FullTier,
+                resident_base_entry(super::ResidentBaseShape::FullTier),
+            );
+            publish_bundle(
+                &settings.data_dir,
+                &library,
+                read_repo,
+                REV_C,
+                "bf16",
+                &[file],
+            );
+            let guard =
+                RuntimeSourceGuard::begin(&JobType::ImageGenerate, &payload, &settings).unwrap();
+            assert!(
+                guard.local_scope.is_none(),
+                "partial coverage must not serve"
+            );
+            assert!(
+                crate::model_jobs::huggingface_snapshot_dir(&settings.data_dir, read_repo)
+                    .expect("source snapshot")
+                    .starts_with(&library),
+                "the base must read from the source tier when the bundle is short a file"
+            );
+            guard.finish_success().unwrap();
+        });
+    }
+
+    /// sc-22329 fail-open, through the PRODUCTION table rather than the override: a real imported
+    /// KreaMania entry whose `krea_2` base is not installed admits with no plan and no error.
+    #[test]
+    fn an_imported_entry_without_an_installed_base_admits_with_no_plan() {
+        let temp = TempDir::new().unwrap();
+        let settings = settings(temp.path().join("data"));
+        let library = temp.path().join("external-hf");
+        let payload = json!({
+            "model": "kreamania_v5",
+            "modelManifestEntry": imported_entry(&settings.data_dir, "kreamania_v5"),
+        })
+        .as_object()
+        .unwrap()
+        .clone();
+        with_local_cache(&library, || {
+            let guard =
+                RuntimeSourceGuard::begin(&JobType::ImageGenerate, &payload, &settings).unwrap();
+            assert!(guard.resolutions().is_empty());
+            guard.finish_success().unwrap();
         });
     }
 

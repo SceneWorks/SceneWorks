@@ -145,6 +145,31 @@ pub(crate) async fn upload_training_dataset_item(
     Err(ApiError::bad_request("Upload file field is required"))
 }
 
+pub(crate) async fn upload_ltx_prepared_bundle(
+    State(state): State<AppState>,
+    Path((project_id, dataset_id, item_id)): Path<(String, String, String)>,
+    mut multipart: Multipart,
+) -> Result<(StatusCode, Json<TrainingDataset>), ApiError> {
+    while let Some(field) = multipart
+        .next_field()
+        .await
+        .map_err(|error| ApiError::bad_request(error.to_string()))?
+    {
+        if field.name() != Some("file") {
+            continue;
+        }
+        let temp_path = write_upload_field_to_temp_file(&state, field).await?;
+        let source_path = temp_path.clone();
+        let dataset = project_call(state, move |store| {
+            store.install_ltx_prepared_bundle(&project_id, &dataset_id, &item_id, &source_path)
+        })
+        .await;
+        let _ = std::fs::remove_file(&temp_path);
+        return Ok((StatusCode::CREATED, Json(dataset?)));
+    }
+    Err(ApiError::bad_request("Upload file field is required"))
+}
+
 pub(crate) async fn get_training_dataset(
     State(state): State<AppState>,
     Path((project_id, dataset_id)): Path<(String, String)>,
@@ -2098,8 +2123,34 @@ fn ltx_q4_training_tier_present(snapshot: &FsPath) -> bool {
     sceneworks_core::safetensors::gemma_text_encoder_dir_is_complete(&snapshot.join("gemma"))
 }
 
+/// LTX-2.5 is also packed-Q4 training, but its undistilled training identity is nested under
+/// `dev/q4/` and self-contains its Gemma-4 text encoder. Pin the same complete component set
+/// the generation worker requires so a partial nested install cannot pass the training gate.
+fn ltx25_q4_training_tier_present(snapshot: &FsPath) -> bool {
+    let q4 = snapshot.join("dev").join("q4");
+    [
+        "split_model.json",
+        "transformer.safetensors",
+        "connector.safetensors",
+        "text_encoder.safetensors",
+        "vae_decoder.safetensors",
+        "vae_encoder.safetensors",
+        "diffusion_vae_encoder.safetensors",
+        "vae_diffusion_decoder.safetensors",
+        "audio_vae.safetensors",
+        "vocoder.safetensors",
+        "spatial_upsampler.safetensors",
+        "temporal_upsampler.safetensors",
+        "duration_head.safetensors",
+    ]
+    .iter()
+    .all(|file| q4.join(file).is_file())
+}
+
 fn training_tier_name(target: &TrainingTarget) -> &'static str {
-    if target.kernel == "ltx_mlx_lora" {
+    if target.base_model == "ltx_2_5" {
+        "dev/q4"
+    } else if target.kernel == "ltx_mlx_lora" {
         "q4"
     } else {
         "bf16"
@@ -2107,7 +2158,9 @@ fn training_tier_name(target: &TrainingTarget) -> &'static str {
 }
 
 fn training_tier_present(snapshot: &FsPath, target: &TrainingTarget) -> bool {
-    if target.kernel == "ltx_mlx_lora" {
+    if target.base_model == "ltx_2_5" {
+        ltx25_q4_training_tier_present(snapshot)
+    } else if target.kernel == "ltx_mlx_lora" {
         ltx_q4_training_tier_present(snapshot)
     } else {
         bf16_component_tree_present(&snapshot.join("bf16"))
@@ -2123,7 +2176,9 @@ fn tiered_turnkey_train_dir(
     snapshot: std::path::PathBuf,
     target: &TrainingTarget,
 ) -> std::path::PathBuf {
-    if snapshot_is_tiered_turnkey(&snapshot) {
+    // LTX-2.5 nests two transformer identities before the quant tier, so it does not match the
+    // root-level `bf16/q8/q4` turnkey shape tested below.
+    if target.base_model == "ltx_2_5" || snapshot_is_tiered_turnkey(&snapshot) {
         return snapshot.join(training_tier_name(target));
     }
     snapshot
@@ -2520,7 +2575,7 @@ pub(crate) fn training_base_model_status(
             // the run-gate would green-light training on a repo that has no dense weights to train. A
             // turnkey on disk without that tier is `TrainingTierMissing`, not `Missing`.
             if let Some(snapshot) = huggingface_snapshot_dirs(&cache_path).into_iter().next() {
-                if snapshot_is_tiered_turnkey(&snapshot) {
+                if target.base_model == "ltx_2_5" || snapshot_is_tiered_turnkey(&snapshot) {
                     return if training_tier_present(&snapshot, target) {
                         TrainingBaseStatus::Ready
                     } else {
@@ -2569,7 +2624,7 @@ pub(crate) fn training_base_unavailable_message(
     match status {
         TrainingBaseStatus::Ready => None,
         TrainingBaseStatus::TrainingTierMissing => {
-            let tier = if base_model == "ltx_2_3" {
+            let tier = if matches!(base_model, "ltx_2_3" | "ltx_2_5") {
                 "packed q4"
             } else {
                 "full-precision (bf16)"

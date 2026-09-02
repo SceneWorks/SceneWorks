@@ -5,10 +5,18 @@ import {
   configDraftFromTarget,
   configReseedDecision,
   configValidation,
+  ltx25WorkflowPlan,
   mergeCustomizedConfigDraft,
   timestepTypeOptionsForTarget,
   trainingConfigSnapshot,
 } from "./trainingConfig.js";
+
+const ltxWorkflows = [
+  "i2v_lora", "t2v_lora", "v2a_lora", "a2v_lora", "t2a_lora",
+  "video_extend_lora", "video_inpainting_lora", "video_outpainting_lora",
+  "video_suffix_lora", "audio_extend_lora", "audio_inpainting_lora",
+  "audio_suffix_lora", "av2av_ic_lora", "v2v_ic_lora", "a2a_ic_lora",
+];
 
 // sc-4199: configDraftFromTarget (target/preset → form draft) and
 // trainingConfigSnapshot (form draft → worker payload) were pure builders buried
@@ -243,6 +251,124 @@ describe("trainingConfigSnapshot", () => {
     });
     expect(snap.presetId).toBe("preset-1");
     expect(snap.presetVersion).toBe(5);
+  });
+});
+
+describe("LTX-2.5 advanced workflow contract", () => {
+  const ltxTarget = {
+    ...target,
+    id: "ltx_2_5_video_lora",
+    baseModel: "ltx_2_5",
+    defaults: {
+      ...target.defaults,
+      triggerWord: "subject",
+      advanced: {
+        ...target.defaults.advanced,
+        ltxWorkflow: "t2v_lora",
+        ltxVideo: { isGenerated: true, conditions: [] },
+        ltxAudio: { isGenerated: true, conditions: [] },
+      },
+    },
+    limits: { ...target.limits, ltxWorkflows },
+  };
+  const preparedDataset = {
+    ...dataset,
+    items: [{ id: "item_1", ltxPreparedBundlePath: "prepared/item_1.safetensors" }],
+  };
+
+  it.each(ltxWorkflows)("submits the canonical %s video/audio plan", (workflow) => {
+    const draft = configDraftFromTarget(ltxTarget, preparedDataset, ["auto"]);
+    const plan = ltx25WorkflowPlan(workflow);
+    const snapshot = trainingConfigSnapshot({
+      activeDataset: preparedDataset,
+      selectedTarget: ltxTarget,
+      configDraft: { ...draft, ltxWorkflow: workflow, ltxVideo: plan.video, ltxAudio: plan.audio },
+    });
+    expect(snapshot.config.advanced.ltxWorkflow).toBe(workflow);
+    expect(snapshot.config.advanced.ltxVideo).toEqual(plan.video ?? undefined);
+    expect(snapshot.config.advanced.ltxAudio).toEqual(plan.audio ?? undefined);
+    expect(snapshot.config.advanced.ltxValidation).toMatchObject({
+      width: 960,
+      height: 544,
+      frames: 89,
+      fps: 24,
+      steps: 30,
+      stgBlocks: [28],
+      generateAudio: true,
+    });
+  });
+
+  it("fails closed until every saved item has a prepared bundle", () => {
+    const draft = configDraftFromTarget(ltxTarget, preparedDataset, ["auto"]);
+    const issues = configValidation(draft, {
+      selectedTarget: ltxTarget,
+      activeDataset: { ...preparedDataset, items: [{ id: "item_1" }] },
+    });
+    expect(issues.some((entry) => entry.message.includes("prepared bundle"))).toBe(true);
+  });
+
+  it("round-trips and submits bounded non-default validation controls", () => {
+    const overrides = {
+      width: 1280,
+      height: 704,
+      frames: 97,
+      fps: 30,
+      steps: 45,
+      videoCfgScale: 0,
+      audioCfgScale: 9.5,
+      videoStgScale: 2,
+      audioStgScale: 0,
+      stgBlocks: [0],
+      guidanceRescale: 0,
+      videoModalityGuidanceScale: 4.25,
+      audioModalityGuidanceScale: 0,
+      generateAudio: false,
+    };
+    const targetWithOverrides = {
+      ...ltxTarget,
+      defaults: {
+        ...ltxTarget.defaults,
+        advanced: { ...ltxTarget.defaults.advanced, ltxValidation: overrides },
+      },
+    };
+    const draft = configDraftFromTarget(targetWithOverrides, preparedDataset, ["auto"]);
+    expect(draft.ltxValidation).toEqual(overrides);
+    expect(configValidation(draft, {
+      selectedTarget: targetWithOverrides,
+      activeDataset: preparedDataset,
+    }).filter((entry) => entry.field === "ltxValidation")).toEqual([]);
+    const submitted = trainingConfigSnapshot({
+      activeDataset: preparedDataset,
+      selectedTarget: targetWithOverrides,
+      configDraft: draft,
+    });
+    expect(submitted.config.advanced.ltxValidation).toEqual(overrides);
+  });
+
+  it.each([
+    ["width", 1000],
+    ["height", 16],
+    ["frames", 90],
+    ["frames", 265],
+    ["fps", 121],
+    ["steps", 0],
+    ["videoCfgScale", -0.1],
+    ["audioCfgScale", 21],
+    ["guidanceRescale", 1.1],
+    ["videoModalityGuidanceScale", Number.POSITIVE_INFINITY],
+    ["stgBlocks", []],
+    ["stgBlocks", [1, 2]],
+    ["stgBlocks", [48]],
+  ])("rejects invalid validation override %s=%j", (field, value) => {
+    const draft = configDraftFromTarget(ltxTarget, preparedDataset, ["auto"]);
+    const issues = configValidation({
+      ...draft,
+      ltxValidation: { ...draft.ltxValidation, [field]: value },
+    }, {
+      selectedTarget: ltxTarget,
+      activeDataset: preparedDataset,
+    });
+    expect(issues.some((entry) => entry.field === "ltxValidation")).toBe(true);
   });
 });
 

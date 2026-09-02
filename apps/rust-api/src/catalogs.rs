@@ -829,6 +829,8 @@ pub(crate) async fn materialize_catalog_results(
                     }),
                     width: Some(acquired.width),
                     height: Some(acquired.height),
+                    control_image_path: None,
+                    extra: Default::default(),
                 },
                 source_path: acquired.path,
                 expected_content_hash: acquired.content_hash,

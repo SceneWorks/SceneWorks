@@ -169,16 +169,67 @@ fn budget(total_gb: f64) -> Option<Budget> {
     })
 }
 
-/// A host budget derived FROM the margin policy: `peak_gib` GiB of estimate-backed floor widened
-/// by [`MLX_ESTIMATE_MARGIN`] (in integer bytes, exactly as `select_strategy` widens it), plus
-/// `slack_gb`. Fixtures use this to sit a budget in a window — admit every candidate whose widened
-/// peak is at or under this floor's, refuse every wider one — without hardcoding the margin's
-/// arithmetic into magic floats that rot when the corpus-derived constant moves (sc-18094).
-fn mlx_widened_gb(peak_gib: u64, slack_gb: f64) -> f64 {
-    crate::memory_strategy::peak_bytes_to_gb(crate::memory_strategy::widened_peak_bytes(
+/// The flat activation-headroom term every fixture below hands the selector (`inputs(.., 18 * GIB)`).
+/// sc-22508 charges a floor's allowance against THIS term alone, so the fixtures state it once.
+const FIXTURE_HEADROOM_GIB: u64 = 18;
+
+/// A host budget derived FROM the per-term policy: a `peak_gib` GiB estimate-backed FLOOR whose
+/// ACTIVATION term is `activation_gib` GiB, at the admitted ceiling `select_strategy` grades it at
+/// (in integer bytes, exactly as the selector computes it), plus `slack_gb`. Fixtures use this to
+/// sit a budget in a window — admit every candidate whose admitted peak is at or under this
+/// floor's, refuse every wider one — without hardcoding the policy's arithmetic into magic floats
+/// that rot when the allowance moves (sc-18094, re-termed by sc-22508).
+///
+/// The activation term is a PARAMETER, not the fixture headroom constant, because production
+/// derives it from the peak it built: a generic floor's activation is the headroom, but a provider
+/// decode profile raises the peak and its activation slice with it (`profiled - weights`).
+fn mlx_widened_floor_gb(peak_gib: u64, activation_gib: u64, slack_gb: f64) -> f64 {
+    crate::memory_strategy::peak_bytes_to_gb(crate::memory_strategy::floor_admitted_peak_bytes(
+        gen_core::MemoryBackend::Mlx,
         peak_gib * GIB,
-        crate::ladder_margin_policy::MLX_ESTIMATE_MARGIN,
+        Some(activation_gib * GIB),
     )) + slack_gb
+}
+
+/// [`mlx_widened_floor_gb`] for the common case: a GENERIC weights+headroom floor, whose activation
+/// term is exactly the fixture headroom every `inputs(.., 18 * GIB)` hands the selector.
+fn mlx_widened_gb(peak_gib: u64, slack_gb: f64) -> f64 {
+    mlx_widened_floor_gb(peak_gib, FIXTURE_HEADROOM_GIB, slack_gb)
+}
+
+/// The ADMITTED ceiling of the fitted staged candidate at one geometry, derived end to end from
+/// the same helpers production uses — the pattern
+/// `mutating_the_ratified_cross_coefficient_changes_selector_outcome` established, shared so every
+/// host window in this file moves with an allowance change instead of freezing a float
+/// (epic 22505 feature-end fix round: the floor allowance re-derivation moved every
+/// resident-floor-anchored window).
+fn fitted_staged_admitted_gb(
+    contract: &MemoryProviderContract,
+    curves: &VideoMemoryCurveBundle,
+    geometry: VideoAdmissionGeometry,
+) -> f64 {
+    let selector = selector_with_curves(contract, Some(curves), budget(0.0));
+    let engaged = contract.engaged_composition(MemoryStrategy::StagedResidency);
+    let (peaks, basis, ..) = fitted_or_floor_phase_peaks(
+        &selector,
+        geometry,
+        MemoryStrategy::StagedResidency,
+        &engaged,
+    );
+    assert_eq!(
+        basis,
+        CandidateBasis::EstimateFittedCurve,
+        "the window is only meaningful while the curve is what decides"
+    );
+    crate::memory_strategy::peak_bytes_to_gb(crate::memory_strategy::admitted_peak_bytes(
+        crate::ladder_margin_policy::AdmissionSubject {
+            backend: gen_core::MemoryBackend::Mlx,
+            basis,
+            closure_is_stale: false,
+            unmodeled_activation_bytes: None,
+        },
+        peaks.peak_bytes(),
+    ))
 }
 
 fn geometry(frames: u32, role: VideoGeometryRole) -> VideoAdmissionGeometry {
@@ -232,7 +283,7 @@ fn decoder_substitution_profile(
 /// `sceneworks-core`'s `EXPECTED_SHIPPED_VIDEO_COUNT` and `pinned_engine_geometry`'s
 /// `EXPECTED_VIDEO_IDS`. Adding a video model without updating it trips
 /// [`core_transcribes_the_pinned_vae_write_bounds`].
-const EXPECTED_SHIPPED_VIDEO_COUNT: usize = 12;
+const EXPECTED_SHIPPED_VIDEO_COUNT: usize = 13;
 
 /// Every video model id in the shipped manifest. The ONE list the transcription pin is driven
 /// from, so a newly shipped family cannot be transcribed in core and left unpinned here.
@@ -286,7 +337,7 @@ fn shipped_video_model_ids() -> Vec<String> {
 /// the citations and for what these tests do NOT pin (sc-19117).
 fn expected_vae_tiling(id: &str, lane: VideoLane) -> Option<VaeTiling> {
     match id {
-        "ltx_2_3" | "ltx_2_3_eros" => Some(VaeTiling::LTX),
+        "ltx_2_3" | "ltx_2_3_eros" | "ltx_2_5" => Some(VaeTiling::LTX),
         // The dense TI2V-5B is welded to the z48 vae22 (`mlx-gen-wan/src/pipeline.rs:235`).
         "wan_2_2" => Some(VaeTiling::WAN22),
         // The A14B grid and every Wan-derived renderer decode through the Wan2.1 z16 VAE.
@@ -441,6 +492,8 @@ fn select_once(
             overlay: None,
             lane: VideoLane::Mlx,
             tier: tier(),
+            transformer_variant: Some(Ltx25TransformerVariant::Distilled),
+            decoder: Some(Ltx25Decoder::Conv),
             calibration_abi: gen_core::MEMORY_CALIBRATION_ABI,
             expected_closure_digest: crate::mlx_fit_gate::UNCALIBRATED_CLOSURE,
         },
@@ -512,6 +565,8 @@ fn selector_with_curves<'a>(
             overlay: None,
             lane: VideoLane::Mlx,
             tier: tier(),
+            transformer_variant: Some(Ltx25TransformerVariant::Distilled),
+            decoder: Some(Ltx25Decoder::Conv),
             calibration_abi: gen_core::MEMORY_CALIBRATION_ABI,
             expected_closure_digest: FITTED_CURVE_CLOSURE,
         },
@@ -544,10 +599,12 @@ fn a_roomy_host_selects_the_resident_rung_through_the_shared_selector() {
 
 #[test]
 fn a_constrained_host_walks_down_the_ladder_instead_of_refusing() {
-    // 20 GiB of weights (4 conditioning + 16 transformer) + 18 GiB headroom = 38 GiB resident,
-    // widened by MLX_ESTIMATE_MARGIN to ~57.2. Staged drops the co-residency to max(4, 16) = 16,
-    // i.e. 34 GiB → ~51.1 widened. A host 0.5 GiB above the widened staged floor therefore
-    // refuses resident and admits staged: the ladder's whole point.
+    // 20 GiB of weights (4 conditioning + 16 transformer) + 18 GiB headroom = 38 GiB resident.
+    // Staged drops the co-residency to max(4, 16) = 16, i.e. a 34 GiB floor. sc-22508 admits each
+    // at its peak plus the allowance on its ACTIVATION term alone (both carry the same 18 GiB
+    // headroom), so the two admitted ceilings stay 4 GiB apart exactly as the raw floors are. A
+    // host 0.5 GiB above the admitted staged floor therefore refuses resident and admits staged:
+    // the ladder's whole point. Both ceilings come from `mlx_widened_gb`, so no number here rots.
     let host_gb = mlx_widened_gb(34, 0.5);
     assert!(host_gb < mlx_widened_gb(38, 0.0), "the window must exist");
     let contract = fixture_contract(20, 4, &[MemoryStrategy::StagedResidency]);
@@ -652,6 +709,8 @@ fn inputs<'a>(
         overlay: None,
         lane: VideoLane::Mlx,
         tier: tier(),
+        transformer_variant: Some(Ltx25TransformerVariant::Distilled),
+        decoder: Some(Ltx25Decoder::Conv),
         width: 1280,
         height: 704,
         frames,
@@ -699,8 +758,13 @@ fn a_generator_with_no_contract_leaves_the_request_untouched() {
     );
 }
 
+/// sc-22512 (epic 22505, E8) split the old
+/// `bernini_v2v_is_refused_for_missing_or_crossed_evidence` in two. Bernini was the ONE video lane
+/// that turned a MISSING measurement into a refusal, while every other provider abstains on the
+/// same branch. This test keeps the half that is decidable without any measurement — a request
+/// outside the supported surface — and the companion below asserts the half that changed.
 #[test]
-fn bernini_v2v_is_refused_for_missing_or_crossed_evidence() {
+fn bernini_v2v_is_refused_for_an_unsupported_request_surface() {
     let generator = fixture_generator(Some(fixture_contract(20, 4, &[MemoryStrategy::Resident])));
     let mut exact = inputs(45, budget(128.0), 0);
     exact.model_id = "bernini";
@@ -719,23 +783,6 @@ fn bernini_v2v_is_refused_for_missing_or_crossed_evidence() {
         .as_deref()
         .is_some_and(|message| message.contains("exact surface")));
 
-    let mut exact = inputs(45, budget(128.0), 0);
-    exact.model_id = "bernini";
-    exact.model_family = "bernini";
-    exact.route = "bernini";
-    exact.mode = "video_to_video";
-    exact.reference_count = 1;
-    exact.reference_shape = "video";
-    exact.width = 848;
-    exact.height = 480;
-    exact.fps = 16;
-    exact.overlay = Some("provider_video_mode:v2v");
-    let outcome = admit_video_generation(&generator, exact);
-    assert!(outcome
-        .refusal
-        .as_deref()
-        .is_some_and(|message| message.contains("no current calibrated evidence")));
-
     let mut crossed = inputs(45, budget(128.0), 0);
     crossed.model_id = "bernini";
     crossed.model_family = "bernini";
@@ -751,6 +798,67 @@ fn bernini_v2v_is_refused_for_missing_or_crossed_evidence() {
         .refusal
         .as_deref()
         .is_some_and(|message| message.contains("exact surface")));
+
+    // ...but a generator publishing NO contract fails open, even on the surface that refuses above.
+    // `bernini_surface_is_exact` answers `false` for a missing contract because there is no declared
+    // surface to compare against — that is absence, not an unsupported request, and every branch
+    // below the evidence check fails open for exactly this case. Without `contract.is_some()` in the
+    // predicate, this same request would be surface-refused and the gate would contradict itself.
+    let contractless = fixture_generator(None);
+    let mut exact = inputs(45, budget(128.0), 0);
+    exact.model_id = "bernini";
+    exact.model_family = "bernini";
+    exact.route = "bernini";
+    exact.mode = "video_to_video";
+    exact.reference_count = 1;
+    exact.reference_shape = "video";
+    exact.width = 848;
+    exact.height = 480;
+    exact.fps = 16;
+    exact.overlay = Some("provider_video_mode:no_audio");
+    let outcome = admit_video_generation(&contractless, exact);
+    assert_eq!(
+        outcome,
+        VideoAdmissionOutcome::default(),
+        "a Bernini request against a contractless generator must FAIL OPEN, not be surface-refused: \
+         {outcome:?}"
+    );
+}
+
+/// sc-22512 (epic 22505, E8): a WELL-FORMED Bernini request on a coordinate nobody has calibrated
+/// is no longer denied — the gate abstains, exactly as it already did for every other provider
+/// reaching the same branch.
+///
+/// This is the leg that changed. The request below is on Bernini's exact supported surface (V2V,
+/// FPS16, 45 frames, a public geometry, a supported tier, the `provider_video_mode:v2v` overlay
+/// receipt) and the packaged corpus carries no evidence covering it. That used to produce
+/// "Bernini video_to_video memory admission refused: no current calibrated evidence matches
+/// route=…", so the absence of a measurement blocked the job outright rather than widening its
+/// estimate. Absence never blocks; runtime catching (E6) is the failure posture.
+///
+/// The negative control is the sibling test above: an unsupported SURFACE still refuses, which is
+/// decidable without any measurement at all. Without that pairing this test would pass just as well
+/// against a gate that had been deleted outright.
+#[test]
+fn an_uncalibrated_but_well_formed_bernini_request_is_not_refused_for_missing_evidence() {
+    let generator = fixture_generator(Some(fixture_contract(20, 4, &[MemoryStrategy::Resident])));
+    let mut exact = inputs(45, budget(128.0), 0);
+    exact.model_id = "bernini";
+    exact.model_family = "bernini";
+    exact.route = "bernini";
+    exact.mode = "video_to_video";
+    exact.reference_count = 1;
+    exact.reference_shape = "video";
+    exact.width = 848;
+    exact.height = 480;
+    exact.fps = 16;
+    exact.overlay = Some("provider_video_mode:v2v");
+    let outcome = admit_video_generation(&generator, exact);
+    assert_eq!(
+        outcome,
+        VideoAdmissionOutcome::default(),
+        "an uncalibrated coordinate on the supported surface must ABSTAIN, not refuse: {outcome:?}"
+    );
 }
 
 #[test]
@@ -1186,7 +1294,7 @@ fn a_selected_optimized_rung_reaches_the_generation_request() {
         4,
         &[MemoryStrategy::StagedResidency],
     )));
-    // In the walk-down window: above the widened 34 GiB staged floor, below the widened 38 GiB
+    // In the walk-down window: above the ADMITTED 34 GiB staged floor, below the admitted 38 GiB
     // resident floor (see `a_constrained_host_walks_down_the_ladder_instead_of_refusing`).
     let outcome = admit_video_generation_with_curves(
         &generator,
@@ -1205,12 +1313,18 @@ fn provider_profiles_make_bounded_decode_a_reachable_production_fallback() {
         4,
         &[MemoryStrategy::BoundedDecode],
     )));
-    // The conservative resident profile is 20 + 35 = 55 GiB, which cannot fit (~82.7 widened by
-    // MLX_ESTIMATE_MARGIN). The exact bounded carrier retains the generic 20 + 18 = 38 GiB lower
-    // bound and fits a host 0.5 GiB above that floor's widened ceiling (~57.2). Without consuming
+    // The conservative resident profile is 20 GiB of weights + 35 GiB of profiled activation =
+    // 55 GiB, which cannot fit. The exact bounded carrier retains the generic 20 + 18 = 38 GiB
+    // lower bound and fits a host 0.5 GiB above that floor's admitted ceiling. Without consuming
     // the selected profile, Resident would win first.
+    //
+    // The profiled peak's activation term is `55 - 20`, NOT the 18 GiB generic headroom: sc-22508
+    // derives the term from the peak each candidate actually built.
     let host_gb = mlx_widened_gb(38, 0.5);
-    assert!(host_gb < mlx_widened_gb(55, 0.0), "the window must exist");
+    assert!(
+        host_gb < mlx_widened_floor_gb(55, 35, 0.0),
+        "the window must exist"
+    );
     let outcome = admit_video_generation_with_curves_and_profiles(
         &generator,
         inputs(241, budget(host_gb), 18 * GIB),
@@ -1252,9 +1366,11 @@ fn provider_profile_refusal_is_not_suppressed_by_the_smaller_generic_floor() {
     let refusal = outcome
         .refusal
         .expect("a provider profile that does not fit is a real refusal");
-    // The reported need is the 55 GiB profiled peak widened by MLX_ESTIMATE_MARGIN, exactly as
-    // the selector admits it.
-    let widened_profile = format!("needs about {:.1} GB", mlx_widened_gb(55, 0.0));
+    // The reported need is the 55 GiB profiled peak plus the allowance on ITS activation term —
+    // `55 - 20` GiB of profiled activation over 20 GiB of counted weights, not the 18 GiB generic
+    // headroom — exactly as the selector admits it. A production term derived from the generic
+    // headroom instead would under-report this by 17% of 17 GiB and reds here.
+    let widened_profile = format!("needs about {:.1} GB", mlx_widened_floor_gb(55, 35, 0.0));
     assert!(refusal.contains(&widened_profile), "{refusal}");
     assert!(outcome.memory.is_none());
     assert!(outcome.context.is_none());
@@ -1266,10 +1382,24 @@ fn provider_profile_composition_and_warm_residency_are_each_accounted_once() {
     contract.asset_facts.transformer_bytes = 12 * GIB;
     contract.asset_facts.decoder_bytes = 4 * GIB;
     let generator = fixture_generator(Some(contract));
-    let mut request = inputs(241, budget(30.0), 0);
+    // The host: 20 GiB already committed, plus the ADMITTED 6 GiB incremental floor. After the
+    // 20 GiB warm credit the counted-weights term is zero, so the whole 6 GiB residual is the
+    // floor's activation slice and carries the full allocator-envelope allowance — computed from
+    // the same helper production charges it with, so an allowance re-derivation moves this window
+    // instead of silently flipping the verdict (epic 22505 feature-end fix round).
+    let total_gb =
+        20.0 + crate::memory_strategy::peak_bytes_to_gb(
+            crate::memory_strategy::floor_admitted_peak_bytes(
+                gen_core::MemoryBackend::Mlx,
+                6 * GIB,
+                Some(6 * GIB),
+            ),
+        ) + 0.5;
+    let total_bytes = (total_gb * GIB as f64) as u64;
+    let mut request = inputs(241, budget(total_gb), 0);
     request.runtime = Some(VideoRuntimeMemoryState {
         budget: MemoryBudget {
-            total_bytes: 30 * GIB,
+            total_bytes,
             committed_bytes: 20 * GIB,
             reclaimable_bytes: 0,
             reserved_headroom_bytes: 0,
@@ -1368,7 +1498,10 @@ fn a_curve_cannot_be_relabelled_to_manufacture_bounded_decode_parameters() {
     let generator = fixture_generator(Some(contract));
     let mut curves = fixture_curve_bundle();
     curves.curves[0].rung = StrategyRung::BoundedDecode;
-    let mut request = inputs(121, budget(40.0), 0);
+    // A 40 GiB host with this fixture's 18 GiB activation headroom: the honest staged fallback is
+    // 40 weights + 18 headroom and the resident one 60 + 18, so no rung fits and the only way to
+    // "admit" would be to mint bounded-decode knobs from the relabelled staged curve.
+    let mut request = inputs(121, budget(40.0), FIXTURE_HEADROOM_GIB * GIB);
     request.expected_closure_digest = FITTED_CURVE_CLOSURE;
 
     let outcome = admit_video_generation_with_curves(&generator, request, Some(&curves));
@@ -1611,6 +1744,8 @@ fn a_request_above_the_cap_grades_the_cap_geometry_through_the_real_selector() {
             overlay: None,
             lane: VideoLane::Mlx,
             tier: tier(),
+            transformer_variant: Some(Ltx25TransformerVariant::Distilled),
+            decoder: Some(Ltx25Decoder::Conv),
             calibration_abi: gen_core::MEMORY_CALIBRATION_ABI,
             expected_closure_digest: crate::mlx_fit_gate::UNCALIBRATED_CLOSURE,
         },
@@ -1666,10 +1801,10 @@ fn a_request_above_the_cap_grades_the_cap_geometry_through_the_real_selector() {
 /// NOT manufacture a refusal the pre-existing load gate would not have made.
 #[test]
 fn a_refusal_inside_the_estimate_margin_band_is_suppressed() {
-    // 20 GiB weights + 18 GiB headroom = 38 GiB unwidened resident floor. Every implemented rung
-    // is `Missing` beyond resident, so the ladder has nowhere to go; at 39 GiB the unwidened floor
-    // FITS while its MLX_ESTIMATE_MARGIN-widened ceiling (~57.2) does not, which is exactly the
-    // band.
+    // 20 GiB weights + 18 GiB headroom = 38 GiB raw resident floor. Every implemented rung is
+    // `Missing` beyond resident, so the ladder has nowhere to go; at 39 GiB the raw floor FITS
+    // while its admitted ceiling — 38 plus 17% of the 18 GiB activation term, `mlx_widened_gb(38,
+    // 0.0)` — does not, which is exactly the band.
     let generator = fixture_generator(Some(fixture_contract(20, 4, &[])));
     let banded =
         admit_video_generation_with_curves(&generator, inputs(241, budget(39.0), 18 * GIB), None);
@@ -1701,72 +1836,98 @@ fn a_refusal_inside_the_estimate_margin_band_is_suppressed() {
 /// both the floor and above-floor outcomes end to end.
 #[test]
 fn a_rejection_whose_peak_exceeds_the_floor_beyond_the_margin_is_not_suppressed() {
-    const MARGIN: f64 = crate::ladder_margin_policy::MLX_ESTIMATE_MARGIN;
-    // ~38 GB weights+headroom resident floor (20 GiB weights + 18 GiB headroom).
+    // ~38 GB weights+headroom resident floor (20 GiB weights + 18 GiB headroom). sc-22508: the
+    // admitted ceiling adds the headroom TERM once, not a percentage of the whole 38 GiB.
     let floor_bytes = 38 * GIB;
+    let admitted_floor_bytes = crate::memory_strategy::floor_admitted_peak_bytes(
+        gen_core::MemoryBackend::Mlx,
+        floor_bytes,
+        Some(FIXTURE_HEADROOM_GIB * GIB),
+    );
     let floor_gb = crate::memory_strategy::peak_bytes_to_gb(floor_bytes);
-    let widened_floor_gb = crate::memory_strategy::peak_bytes_to_gb(
-        crate::memory_strategy::widened_peak_bytes(floor_bytes, MARGIN),
+    let widened_floor_gb = crate::memory_strategy::peak_bytes_to_gb(admitted_floor_bytes);
+    assert_eq!(
+        admitted_floor_bytes,
+        floor_bytes
+            + ((FIXTURE_HEADROOM_GIB * GIB) as f64
+                * crate::ladder_margin_policy::FLOOR_ALLOCATOR_ENVELOPE_ALLOWANCE)
+                .ceil() as u64,
+        "the floor's allowance is charged on its activation term, not on its counted weights"
     );
     // A host that comfortably holds the floor but not the fitted decode peak.
     let host_gb = 100.0;
     assert!(floor_gb < host_gb, "{floor_gb} vs {host_gb}");
 
-    // The fitted shape: the rejected peak is the DECODE peak, far above the floor.
-    let fitted_decode_reject_gb = 94.3 * (1.0 + MARGIN);
+    // The fitted shape: the rejected peak is the DECODE peak, far above the floor. Derived from
+    // the admitted floor plus explicit slack, so the "far above" claim stays true — and stays a
+    // claim about the ALLOWANCE boundary — if the allowance moves.
+    const DECODE_ABOVE_FLOOR_SLACK_GB: f64 = 78.0;
+    let fitted_decode_reject_gb = widened_floor_gb + DECODE_ABOVE_FLOOR_SLACK_GB;
     assert!(
         fitted_decode_reject_gb > host_gb,
         "the fixture must be a genuine rejection on this host: {fitted_decode_reject_gb} vs \
          {host_gb}"
     );
     assert!(
-        !refusal_is_a_margin_artifact(fitted_decode_reject_gb, floor_bytes, MARGIN, Some(host_gb),),
-        "a rejection whose peak exceeds the weights floor by more than the margin is REAL and \
+        !refusal_is_a_margin_artifact(
+            fitted_decode_reject_gb,
+            floor_bytes,
+            admitted_floor_bytes,
+            Some(host_gb),
+        ),
+        "a rejection whose peak exceeds the weights floor by more than the allowance is REAL and \
          must survive — suppressing it runs the job into an OOM"
     );
 
-    // The fallback shape, on the identical floor/host/margin: the rejected peak IS the widened
+    // The fallback shape, on the identical floor/host/allowance: the rejected peak IS the admitted
     // floor, so the suppression still applies. Without this the assertion above could be satisfied
     // by a guard that never suppresses anything.
     assert!(
-        refusal_is_a_margin_artifact(widened_floor_gb, floor_bytes, MARGIN, Some(host_gb)),
-        "a rejection at exactly the widened floor is the margin artifact this guard exists for"
+        refusal_is_a_margin_artifact(
+            widened_floor_gb,
+            floor_bytes,
+            admitted_floor_bytes,
+            Some(host_gb)
+        ),
+        "a rejection at exactly the admitted floor is the margin artifact this guard exists for"
     );
-    // And the boundary is where the doc says it is: one ULP past the widened floor survives.
+    // And the boundary is where the doc says it is: one ULP past the admitted floor survives.
     assert!(
         !refusal_is_a_margin_artifact(
             widened_floor_gb + f64::EPSILON * widened_floor_gb,
             floor_bytes,
-            MARGIN,
+            admitted_floor_bytes,
             Some(host_gb),
         ),
-        "the scope check is `<= widened floor`, so anything above it is out of scope"
+        "the scope check is `<= admitted floor`, so anything above it is out of scope"
     );
 }
 
 /// The second conjunct — the non-regression condition proper — is independent of the first.
 #[test]
 fn a_floor_that_does_not_fit_is_never_suppressed_and_no_budget_never_suppresses() {
-    const MARGIN: f64 = crate::ladder_margin_policy::MLX_ESTIMATE_MARGIN;
     let floor_bytes = 38 * GIB;
-    let floor_gb = crate::memory_strategy::peak_bytes_to_gb(floor_bytes);
-    let widened_floor_gb = crate::memory_strategy::peak_bytes_to_gb(
-        crate::memory_strategy::widened_peak_bytes(floor_bytes, MARGIN),
+    let admitted_floor_bytes = crate::memory_strategy::floor_admitted_peak_bytes(
+        gen_core::MemoryBackend::Mlx,
+        floor_bytes,
+        Some(FIXTURE_HEADROOM_GIB * GIB),
     );
+    let floor_gb = crate::memory_strategy::peak_bytes_to_gb(floor_bytes);
+    let widened_floor_gb = crate::memory_strategy::peak_bytes_to_gb(admitted_floor_bytes);
 
     // In scope (the peak IS the floor) but the floor itself does not fit: a real refusal the
     // pre-existing load gate would also have made.
     assert!(!refusal_is_a_margin_artifact(
         widened_floor_gb,
         floor_bytes,
-        MARGIN,
+        admitted_floor_bytes,
         Some(floor_gb - 1.0),
     ));
     // Exactly at the floor still fits — the comparison is `<=`, matching `mlx_fit_gate`'s.
     assert!(refusal_is_a_margin_artifact(
         widened_floor_gb,
         floor_bytes,
-        MARGIN,
+        admitted_floor_bytes,
         Some(floor_gb),
     ));
     // No budget signal: never suppress. `select_strategy` cannot even produce a `Reject` without
@@ -1774,7 +1935,7 @@ fn a_floor_that_does_not_fit_is_never_suppressed_and_no_budget_never_suppresses(
     assert!(!refusal_is_a_margin_artifact(
         widened_floor_gb,
         floor_bytes,
-        MARGIN,
+        admitted_floor_bytes,
         None,
     ));
 }
@@ -1848,6 +2009,8 @@ fn an_unrouted_family_never_reaches_the_shared_selector() {
             overlay: None,
             lane: VideoLane::Candle,
             tier: tier(),
+            transformer_variant: Some(Ltx25TransformerVariant::Distilled),
+            decoder: Some(Ltx25Decoder::Conv),
             calibration_abi: gen_core::MEMORY_CALIBRATION_ABI,
             expected_closure_digest: crate::mlx_fit_gate::UNCALIBRATED_CLOSURE,
         },
@@ -1967,6 +2130,8 @@ fn the_candle_lane_selects_end_to_end_against_a_candle_contract() {
             overlay: None,
             lane: VideoLane::Candle,
             tier: tier(),
+            transformer_variant: Some(Ltx25TransformerVariant::Distilled),
+            decoder: Some(Ltx25Decoder::Conv),
             calibration_abi: gen_core::MEMORY_CALIBRATION_ABI,
             expected_closure_digest: crate::mlx_fit_gate::UNCALIBRATED_CLOSURE,
         },
@@ -2004,6 +2169,8 @@ fn the_candle_lane_selects_end_to_end_against_a_candle_contract() {
                 overlay: None,
                 lane: VideoLane::Candle,
                 tier: tier(),
+                transformer_variant: Some(Ltx25TransformerVariant::Distilled),
+                decoder: Some(Ltx25Decoder::Conv),
                 calibration_abi: gen_core::MEMORY_CALIBRATION_ABI,
                 expected_closure_digest: crate::mlx_fit_gate::UNCALIBRATED_CLOSURE,
             },
@@ -2032,6 +2199,8 @@ fn the_candle_lane_selects_end_to_end_against_a_candle_contract() {
             overlay: None,
             lane: VideoLane::Candle,
             tier: tier(),
+            transformer_variant: Some(Ltx25TransformerVariant::Distilled),
+            decoder: Some(Ltx25Decoder::Conv),
             calibration_abi: gen_core::MEMORY_CALIBRATION_ABI,
             expected_closure_digest: crate::mlx_fit_gate::UNCALIBRATED_CLOSURE,
         },
@@ -2074,6 +2243,8 @@ fn each_lane_keys_its_evidence_to_its_own_backend() {
                 overlay: None,
                 lane,
                 tier: tier(),
+                transformer_variant: Some(Ltx25TransformerVariant::Distilled),
+                decoder: Some(Ltx25Decoder::Conv),
                 calibration_abi: gen_core::MEMORY_CALIBRATION_ABI,
                 expected_closure_digest: crate::mlx_fit_gate::UNCALIBRATED_CLOSURE,
             },
@@ -2102,10 +2273,11 @@ fn a_rung_whose_prerequisite_is_unmet_is_not_offered() {
         fixture_contract(20, 4, &[MemoryStrategy::BoundedTransformerResidency]),
         LoadShape::EagerMaterialization,
     );
-    // 20 GiB weights + 18 GiB headroom = 38 GiB resident (~57.2 widened by MLX_ESTIMATE_MARGIN);
-    // rung 4 sheds the whole 16 GiB transformer, so its floor is 22 GiB (~33.1 widened). A host
-    // 0.5 GiB above rung 4's widened floor can hold ONLY rung 4 — which is exactly why offering
-    // it here would be the harm.
+    // 20 GiB weights + 18 GiB headroom = a 38 GiB resident floor; rung 4 sheds the whole 16 GiB
+    // transformer, so its floor is 22 GiB. Both carry the same 18 GiB activation term, so the
+    // admitted ceilings (`mlx_widened_gb`) stay 16 GiB apart. A host 0.5 GiB above rung 4's
+    // admitted floor can hold ONLY rung 4 — which is exactly why offering it here would be the
+    // harm.
     let host_gb = mlx_widened_gb(22, 0.5);
     assert!(host_gb < mlx_widened_gb(38, 0.0), "the window must exist");
     let (verdict, selections) = select_once(
@@ -2258,11 +2430,30 @@ fn the_floor_is_phase_uniform_and_its_peak_is_the_unchanged_scalar() {
 fn fitted_frames_change_the_selected_outcome_inside_the_measured_hull() {
     let contract = fixture_contract(20, 4, &[MemoryStrategy::StagedResidency]);
     let curves = fixture_curve_bundle();
-    // 1 GiB under the widened 38 GiB resident floor: above the f121 fitted staged peak's
-    // MLX_ESTIMATE_MARGIN-widened ceiling (~53.2) and below both f145 rejection thresholds (the
-    // f145 fitted widened peak ~62.9 and the widened resident floor ~57.2), so the frame count is
-    // the only thing that changes between the two verdicts.
-    let host_gb = mlx_widened_gb(38, -1.0);
+    // The window, derived end to end from the same helpers production uses: the host sits between
+    // the f121 and f145 FITTED admitted ceilings (so the frame count is the only thing that
+    // changes between the two verdicts) and below the admitted resident floor (so resident never
+    // fits and cannot mask either verdict).
+    let f121_ceiling_gb = fitted_staged_admitted_gb(
+        &contract,
+        &curves,
+        geometry(121, VideoGeometryRole::Requested),
+    );
+    let f145_ceiling_gb = fitted_staged_admitted_gb(
+        &contract,
+        &curves,
+        geometry(145, VideoGeometryRole::Requested),
+    );
+    let host_gb = (f121_ceiling_gb + f145_ceiling_gb) / 2.0;
+    assert!(
+        f121_ceiling_gb < host_gb && host_gb < f145_ceiling_gb,
+        "the frame count must move the admitted ceiling across the host: f121 {f121_ceiling_gb}, \
+         host {host_gb}, f145 {f145_ceiling_gb}"
+    );
+    assert!(
+        host_gb < mlx_widened_gb(38, 0.0),
+        "the resident floor must not fit, or the frame count is not what decides"
+    );
 
     let at_121 = select_once_with_curves(
         &contract,
@@ -2315,7 +2506,7 @@ fn fitted_phase_laws_bind_by_exact_geometry_and_reduce_by_max() {
     assert_eq!(closure, FITTED_CURVE_CLOSURE);
     assert_eq!(
         curve_id,
-        Some("ltx_2_3:ltx-video:ltx_2_3:ltx_2_3:mlx:q8:text_to_video:refnone-0:fps30:none:staged_residency:eager_materialization:b1:abi3:single_pass:87a27d5dcab7:sc-18808-ltx-2-3-mlx-t2v-staged-capture-v1")
+        Some("ltx_2_3:ltx-video:ltx_2_3:ltx_2_3:mlx:q8:distilled:conv:text_to_video:refnone-0:fps30:none:staged_residency:eager_materialization:b1:abi3:single_pass:87a27d5dcab7:sc-18808-ltx-2-3-mlx-t2v-staged-capture-v1")
     );
     assert_eq!(small_peaks.binding_phase(), VideoBindingPhase::Conditioning);
     assert_eq!(small_peaks.peak_bytes(), small_peaks.conditioning_bytes);
@@ -2333,22 +2524,68 @@ fn fitted_phase_laws_bind_by_exact_geometry_and_reduce_by_max() {
 
 #[test]
 fn mutating_the_ratified_cross_coefficient_changes_selector_outcome() {
-    let contract = fixture_contract(20, 4, &[MemoryStrategy::StagedResidency]);
+    // A 40 GiB-weights contract, NOT the 20 GiB one the neighbouring tests use, and the choice is
+    // load-bearing: at 20 GiB the staged scalar floor is 16 + 18 = 34 GiB, whose admitted ceiling
+    // sits below the host this test needs, so the floor alone would admit and the curve
+    // coefficient could not be what flips the verdict. At 40 GiB the two scalar floors (resident
+    // 40 + 18, staged 36 + 18) are out of reach, leaving the fitted curve as the only decider.
+    // `staged_floor_ceiling_gb` below asserts that rather than assuming it.
+    let contract = fixture_contract(40, 4, &[MemoryStrategy::StagedResidency]);
     let original = fixture_curve_bundle();
     let geometry = geometry(145, VideoGeometryRole::Requested);
-    // 0.5 GiB under the widened 38 GiB resident floor (~57.2): the f145 fitted peak's
-    // MLX_ESTIMATE_MARGIN-widened ceiling (~62.9) rejects, while zeroing the decode cross term
-    // drops the widened peak to the denoise phase's (~55.9), which admits. Resident never fits, so
-    // the coefficient alone flips the verdict.
-    let host_gb = mlx_widened_gb(38, -0.5);
+    let mut mutated = original.clone();
+    mutated.curves[0].phases.decode.per_mpx_frame_gb = 0.0;
+
+    // The window, derived end to end from the policy rather than written down as a float: the host
+    // sits between the two FITTED admitted ceilings (the mutated one admits, the shipped one
+    // rejects) and below the lower of the two SCALAR floor ceilings (so neither floor can decide).
+    // Every bound comes from the same helpers production uses, so an allowance change moves the
+    // window with it instead of silently making one arm vacuous.
+    let fitted_ceiling_gb = |bundle: &VideoMemoryCurveBundle| -> f64 {
+        let selector = selector_with_curves(&contract, Some(bundle), budget(0.0));
+        let engaged = contract.engaged_composition(MemoryStrategy::StagedResidency);
+        let (peaks, basis, ..) = fitted_or_floor_phase_peaks(
+            &selector,
+            geometry,
+            MemoryStrategy::StagedResidency,
+            &engaged,
+        );
+        assert_eq!(
+            basis,
+            CandidateBasis::EstimateFittedCurve,
+            "the window is only meaningful while the curve is what decides"
+        );
+        crate::memory_strategy::peak_bytes_to_gb(crate::memory_strategy::admitted_peak_bytes(
+            crate::ladder_margin_policy::AdmissionSubject {
+                backend: gen_core::MemoryBackend::Mlx,
+                basis,
+                closure_is_stale: false,
+                unmodeled_activation_bytes: None,
+            },
+            peaks.peak_bytes(),
+        ))
+    };
+    let shipped_ceiling_gb = fitted_ceiling_gb(&original);
+    let mutated_ceiling_gb = fitted_ceiling_gb(&mutated);
+    let staged_floor_ceiling_gb = mlx_widened_gb(36 + FIXTURE_HEADROOM_GIB, 0.0);
+    let host_gb = (shipped_ceiling_gb + mutated_ceiling_gb) / 2.0;
+    assert!(
+        mutated_ceiling_gb < host_gb && host_gb < shipped_ceiling_gb,
+        "the coefficient must move the admitted ceiling across the host: \
+         mutated {mutated_ceiling_gb}, host {host_gb}, shipped {shipped_ceiling_gb}"
+    );
+    assert!(
+        host_gb < staged_floor_ceiling_gb,
+        "neither scalar floor may fit, or the curve is not what decides: host {host_gb}, \
+         staged floor ceiling {staged_floor_ceiling_gb}"
+    );
+
     let original_verdict = select_once_with_curves(&contract, &original, budget(host_gb), geometry);
     assert!(
         matches!(original_verdict, VideoRungSelection::Reject { .. }),
         "the generated decode cross coefficient must bind: {original_verdict:?}"
     );
 
-    let mut mutated = original.clone();
-    mutated.curves[0].phases.decode.per_mpx_frame_gb = 0.0;
     let mutated_verdict = select_once_with_curves(&contract, &mutated, budget(host_gb), geometry);
     assert!(
         matches!(
@@ -2367,20 +2604,30 @@ fn mutating_a_phase_residual_changes_the_admission_decision() {
     let contract = fixture_contract(20, 4, &[MemoryStrategy::StagedResidency]);
     let original = fixture_curve_bundle();
     let request = geometry(121, VideoGeometryRole::Requested);
-    // 1 GiB under the widened 38 GiB resident floor (~57.2): the f121 fitted peak's
-    // MLX_ESTIMATE_MARGIN-widened ceiling (~53.2) admits, while growing the decode residual by
-    // 12 GiB pushes it (~71.2) past the budget — and resident never fits, so the residual alone
-    // flips the verdict.
-    let host_gb = mlx_widened_gb(38, -1.0);
+    let mut grown = original.clone();
+    grown.curves[0].phases.decode.max_residual_gb += 12.0;
+    // The window, derived end to end from the helpers: the host sits between the shipped and the
+    // residual-grown FITTED admitted ceilings — so the residual alone flips the verdict — and
+    // below the admitted resident floor, so resident never fits.
+    let shipped_ceiling_gb = fitted_staged_admitted_gb(&contract, &original, request);
+    let grown_ceiling_gb = fitted_staged_admitted_gb(&contract, &grown, request);
+    let host_gb = (shipped_ceiling_gb + grown_ceiling_gb) / 2.0;
+    assert!(
+        shipped_ceiling_gb < host_gb && host_gb < grown_ceiling_gb,
+        "the residual must move the admitted ceiling across the host: shipped \
+         {shipped_ceiling_gb}, host {host_gb}, grown {grown_ceiling_gb}"
+    );
+    assert!(
+        host_gb < mlx_widened_gb(38, 0.0),
+        "the resident floor must not fit, or the residual is not what decides"
+    );
     let original_verdict = select_once_with_curves(&contract, &original, budget(host_gb), request);
     assert!(
         matches!(original_verdict, VideoRungSelection::Selected { .. }),
         "the shipped residual-bounded curve must fit the bracket: {original_verdict:?}"
     );
 
-    let mut mutated = original.clone();
-    mutated.curves[0].phases.decode.max_residual_gb += 12.0;
-    let mutated_verdict = select_once_with_curves(&contract, &mutated, budget(host_gb), request);
+    let mutated_verdict = select_once_with_curves(&contract, &grown, budget(host_gb), request);
     assert!(
         matches!(mutated_verdict, VideoRungSelection::Reject { .. }),
         "the residual is admission evidence, not report-only metadata: {mutated_verdict:?}"
@@ -2412,10 +2659,11 @@ fn historical_q8_curve_fixture_is_tier_exact_while_q4_and_bf16_keep_an_honest_fl
     }
 
     let generator = fixture_generator(Some(contract));
-    // 1 GiB under the widened 38 GiB resident floor: admits the q8 fitted f121 peak (~53.2
-    // widened by MLX_ESTIMATE_MARGIN) and the q4/bf16 staged floor (~51.1 widened) while resident
-    // stays refused, so every tier lands on the staged rung its basis assertion above describes.
-    let host_gb = mlx_widened_gb(38, -1.0);
+    // 0.7 GiB under the admitted 38 GiB resident floor (41.06): admits the q8 fitted f121 peak
+    // (~39.8 at the recapture ceiling) and the q4/bf16 staged floor (34 + 17% of its 18 GiB
+    // activation term = 37.06) while resident stays refused, so every tier lands on the staged
+    // rung its basis assertion above describes.
+    let host_gb = mlx_widened_gb(38, -0.7);
     for quant in [Some(Quant::Q8), Some(Quant::Q4), None] {
         for cache_state in [MemoryCacheState::Cold, MemoryCacheState::Warm] {
             let mut request = inputs(121, budget(host_gb), 18 * GIB);
@@ -2479,7 +2727,7 @@ fn checkpoint_bound_ltx_tiers_drive_curve_or_floor_safety_on_cold_and_warm_reque
 
         for cache_state in [MemoryCacheState::Cold, MemoryCacheState::Warm] {
             // Same staged-rung window as the historical-q8 test: admits the q8 fitted f121 peak
-            // and the q4/bf16 staged floor under MLX_ESTIMATE_MARGIN, refuses resident.
+            // and the q4/bf16 staged floor at its admitted ceiling, refuses resident.
             let mut request = inputs(121, budget(mlx_widened_gb(38, -1.0)), 18 * GIB);
             request.fps = 30;
             request.tier = resolved;
@@ -2526,9 +2774,9 @@ fn assert_curve_mismatch_falls_back(
     curves: &VideoMemoryCurveBundle,
     geometry: VideoAdmissionGeometry,
 ) {
-    // In the staged-floor window — above the widened 34 GiB staged floor (~51.1 under
-    // MLX_ESTIMATE_MARGIN), below the widened 38 GiB resident floor (~57.2) — so the floor
-    // decision being preserved is a real staged selection.
+    // In the staged-floor window — above the ADMITTED 34 GiB staged floor, below the admitted
+    // 38 GiB resident floor (both from `mlx_widened_gb`, which adds 17% of the shared 18 GiB
+    // activation term) — so the floor decision being preserved is a real staged selection.
     let host_gb = mlx_widened_gb(34, 0.5);
     let expected = {
         let mut selector = selector_with_curves(contract, None, budget(host_gb));
@@ -2607,6 +2855,26 @@ fn every_identity_or_envelope_mismatch_falls_back_to_the_unchanged_floor() {
     assert_curve_mismatch_falls_back("unsupported tier", &contract, &curves, inside);
 
     let mut curves = fixture_curve_bundle();
+    curves.curves[0].transformer_variant = Ltx25TransformerVariant::Dev;
+    assert_curve_mismatch_falls_back("crossed transformer pipeline", &contract, &curves, inside);
+
+    let mut curves = fixture_curve_bundle();
+    curves.curves[0].decoder = Ltx25Decoder::DiffVae;
+    assert_curve_mismatch_falls_back("crossed decoder pipeline", &contract, &curves, inside);
+
+    let curves = fixture_curve_bundle();
+    let mut selector =
+        selector_with_curves(&contract, Some(&curves), budget(mlx_widened_gb(34, 0.5)));
+    selector.identity.transformer_variant = Some(Ltx25TransformerVariant::Dev);
+    let crossed_request = selector.select(inside);
+    let mut no_curves = selector_with_curves(&contract, None, budget(mlx_widened_gb(34, 0.5)));
+    assert_eq!(
+        crossed_request,
+        no_curves.select(inside),
+        "runtime request identity must not borrow a fitted curve from another transformer pipeline",
+    );
+
+    let mut curves = fixture_curve_bundle();
     curves.curves[0].model_id = "ltx_2_3_eros".to_owned();
     assert_curve_mismatch_falls_back("unsupported model", &contract, &curves, inside);
 
@@ -2673,9 +2941,9 @@ fn the_single_pass_cap_geometry_can_bind_the_graded_set() {
         },
     ];
 
-    // In the staged-floor window: above the 34 GiB staged floor widened by MLX_ESTIMATE_MARGIN
-    // (~51.1), below the widened 38 GiB resident floor (~57.2) — and far below the fitted f297
-    // cap peak's widened ceiling (~124.7), which is what makes the cap row the binding refusal.
+    // In the staged-floor window: above the ADMITTED 34 GiB staged floor, below the admitted
+    // 38 GiB resident floor (both from `mlx_widened_gb`) — and far below the fitted f297 cap
+    // peak's admitted ceiling, which is what makes the cap row the binding refusal.
     let host_gb = mlx_widened_gb(34, 0.5);
     let requested = VideoAdmissionGeometry {
         decode_pass: VideoDecodePass::Tiled,
@@ -2719,7 +2987,13 @@ fn the_single_pass_cap_geometry_can_bind_the_graded_set() {
 
 #[test]
 fn same_rung_cap_binding_carries_cap_peak_but_actual_request_geometry() {
-    let contract = fixture_contract(90, 45, &[MemoryStrategy::StagedResidency]);
+    // 40/20 rather than the historical 90/45 (epic 22505 feature-end fix round): the floor
+    // allowance re-derivation raised every floor's admitted ceiling by ~3.1x its activation term,
+    // and at 90/45 the REQUESTED row's staged floor (63 GiB raw) would out-demand the fitted cap
+    // row and flip which row binds. At 32/16 the staged floor is 34 GiB raw, its admitted ceiling
+    // sits back under the cap's, and the cap row is again the binding one — the premise this test
+    // exists to exercise. The window assertions below check that ordering rather than assume it.
+    let contract = fixture_contract(32, 16, &[MemoryStrategy::StagedResidency]);
     let generator = fixture_generator(Some(contract.clone()));
     let mut curves = fixture_curve_bundle();
     // Structural fixture only: extend the copy to the 297-frame cap. Production remains bounded by
@@ -2751,29 +3025,72 @@ fn same_rung_cap_binding_carries_cap_peak_but_actual_request_geometry() {
         decode_pass: VideoDecodePass::SinglePass,
         role: VideoGeometryRole::SinglePassDecodeCap,
     };
-    let expected_peak = {
+    let (expected_peak, expected_basis) = {
         let selector = selector_with_curves(&contract, Some(&curves), budget(95.0));
         let engaged = contract.engaged_composition(MemoryStrategy::StagedResidency);
-        fitted_or_floor_phase_peaks(&selector, cap, MemoryStrategy::StagedResidency, &engaged)
-            .0
-            .peak_bytes()
+        let (peaks, basis, ..) =
+            fitted_or_floor_phase_peaks(&selector, cap, MemoryStrategy::StagedResidency, &engaged);
+        (peaks.peak_bytes(), basis)
     };
 
-    // 0.5 GiB above the cap's fitted peak widened by MLX_ESTIMATE_MARGIN, which is the larger of
-    // the two staged candidates (the requested f305 geometry sits outside the hull and takes the
-    // 45 GiB staged floor, ~67.7 widened) — and below the widened 90 GiB resident floor, so both
-    // geometries select STAGED and the same-rung tie is what is under test.
-    let host_gb =
-        crate::memory_strategy::peak_bytes_to_gb(crate::memory_strategy::widened_peak_bytes(
-            expected_peak,
-            crate::ladder_margin_policy::MLX_ESTIMATE_MARGIN,
-        )) + 0.5;
+    // The basis this window is built on. Asserted, not assumed: the whole window below is computed
+    // from the fitted-curve allowance, so a change that demoted this candidate to a floor would
+    // otherwise leave the test passing against arithmetic that no longer describes production.
+    assert_eq!(
+        expected_basis,
+        CandidateBasis::EstimateFittedCurve,
+        "the cap candidate must be the fitted curve for this window to mean anything"
+    );
+
+    // 0.5 GiB above the larger of the two staged candidates' admitted ceilings — the fitted cap
+    // row and the REQUESTED row (whose out-of-hull geometry falls to the staged floor, admitted
+    // behind the floor's activation-term allowance) — and below the admitted resident floor, so
+    // both geometries select STAGED and the same-rung tie is what is under test. sc-22508: each
+    // allowance is named by its candidate's own basis. This mirror declares the term production
+    // declares for that basis — `None` for a fitted curve, and for a floor the activation slice
+    // of the peak itself, exactly as `LadderVideoSelector::select` derives it.
+    let admitted_gb = |geometry: VideoAdmissionGeometry| -> f64 {
+        let selector = selector_with_curves(&contract, Some(&curves), budget(95.0));
+        let engaged = contract.engaged_composition(MemoryStrategy::StagedResidency);
+        let (peaks, basis, ..) = fitted_or_floor_phase_peaks(
+            &selector,
+            geometry,
+            MemoryStrategy::StagedResidency,
+            &engaged,
+        );
+        crate::memory_strategy::peak_bytes_to_gb(crate::memory_strategy::admitted_peak_bytes(
+            crate::ladder_margin_policy::AdmissionSubject {
+                backend: gen_core::MemoryBackend::Mlx,
+                basis,
+                closure_is_stale: false,
+                unmodeled_activation_bytes: matches!(basis, CandidateBasis::EstimateFloor).then(
+                    || {
+                        peaks.peak_bytes().saturating_sub(
+                            crate::mlx_fit_gate::estimate_floor_weights_bytes(&contract, &engaged),
+                        )
+                    },
+                ),
+            },
+            peaks.peak_bytes(),
+        ))
+    };
+    let requested_ceiling_gb = admitted_gb(geometry(305, VideoGeometryRole::Requested));
+    let cap_ceiling_gb = admitted_gb(cap);
     assert!(
-        host_gb < mlx_widened_gb(90, 0.0),
+        requested_ceiling_gb < cap_ceiling_gb,
+        "the cap row must be the binding (most demanding) staged candidate, or the same-rung tie \
+         below has nothing to retain: requested {requested_ceiling_gb}, cap {cap_ceiling_gb}"
+    );
+    let host_gb = cap_ceiling_gb.max(requested_ceiling_gb) + 0.5;
+    // The resident floor is 32 GiB of weights plus this request's 18 GiB headroom = 50 GiB raw,
+    // admitted behind the allowance on its 18 GiB activation term (`mlx_widened_gb`) — the
+    // allowance is a fraction of the activation term, not a second copy of it.
+    assert!(
+        host_gb < mlx_widened_gb(32 + FIXTURE_HEADROOM_GIB, 0.0),
         "the staged-not-resident window must exist: {host_gb}"
     );
 
-    let mut request = inputs(305, budget(host_gb), 0);
+    let mut request = inputs(305, budget(host_gb), FIXTURE_HEADROOM_GIB * GIB);
     request.fps = 30;
     request.expected_closure_digest = FITTED_CURVE_CLOSURE;
     let outcome = admit_video_generation_with_curves(&generator, request, Some(&curves));
@@ -2793,7 +3110,714 @@ fn same_rung_cap_binding_carries_cap_peak_but_actual_request_geometry() {
     assert_eq!(context.geometry.height, 704);
     assert_eq!(
         context.evidence_revision,
-        "ltx_2_3:ltx-video:ltx_2_3:ltx_2_3:mlx:q8:text_to_video:refnone-0:fps30:none:staged_residency:eager_materialization:b1:abi3:single_pass:87a27d5dcab7:sc-18808-ltx-2-3-mlx-t2v-staged-capture-v1"
+        "ltx_2_3:ltx-video:ltx_2_3:ltx_2_3:mlx:q8:distilled:conv:text_to_video:refnone-0:fps30:none:staged_residency:eager_materialization:b1:abi3:single_pass:87a27d5dcab7:sc-18808-ltx-2-3-mlx-t2v-staged-capture-v1"
     );
     assert!(outcome.refusal.is_none());
+}
+
+// --------------------------------------------------------------------------------------------
+// sc-22507 (epic 22505): anchor + analytic derivation. One measured anchor per
+// (model, tier, lane) prices a never-measured (geometry, frames) cell; the selector admits from
+// the derived estimate when it fits.
+// --------------------------------------------------------------------------------------------
+
+/// The calibration campaign the packaged LTX-2.5 anchors were extracted from. The anchor path
+/// requires the contract to still name it, exactly as the fitted path requires its own fingerprint.
+const LTX25_ANCHOR_FINGERPRINT: &str = "sc-18797-ltx-2-5-mlx-ladder-v1";
+
+/// A conformant LTX-2.5 contract on the MLX lane whose identity matches the packaged anchors.
+fn ltx25_fixture_contract(rungs: &[MemoryStrategy]) -> MemoryProviderContract {
+    let mut contract = fixture_contract(20, 4, rungs);
+    contract.provider_id = "ltx_2_5".to_owned();
+    contract.calibration = Some(MemoryCalibrationIdentity {
+        abi: gen_core::MEMORY_CALIBRATION_ABI,
+        fingerprint: LTX25_ANCHOR_FINGERPRINT.to_owned(),
+        load_shape: LoadShape::EagerMaterialization,
+    });
+    assert!(contract.conformance_errors().is_empty());
+    contract
+}
+
+/// The pipeline cell the packaged `q8` anchor was measured on. The corpus measures no
+/// `q8 distilled/*` cell at all, so `distilled` here is not an alternative — it is the
+/// unmeasured-cell control below.
+fn ltx25_identity(expected_closure_digest: &str) -> VideoRequestIdentity<'_> {
+    VideoRequestIdentity {
+        model_id: "ltx_2_5",
+        model_family: "ltx-video",
+        route: "ltx_2_5",
+        mode: "text_to_video",
+        reference_count: 0,
+        reference_shape: "none",
+        fps: 25,
+        overlay: None,
+        lane: VideoLane::Mlx,
+        tier: tier(),
+        transformer_variant: Some(Ltx25TransformerVariant::Dev),
+        decoder: Some(Ltx25Decoder::DiffVae),
+        calibration_abi: gen_core::MEMORY_CALIBRATION_ABI,
+        expected_closure_digest,
+    }
+}
+
+/// The geometry deliberately absent from the retained corpus: 640x640 was measured only at
+/// f145, and no record at any geometry was measured at 89 frames.
+fn ltx25_unmeasured_geometry() -> VideoAdmissionGeometry {
+    VideoAdmissionGeometry {
+        width: 640,
+        height: 640,
+        frames: 89,
+        decode_pass_frames: 89,
+        batch: 1,
+        decode_pass: VideoDecodePass::SinglePass,
+        role: VideoGeometryRole::Requested,
+    }
+}
+
+/// `None` when the packaged store carries no q8 dev/diffvae MLX anchor for LTX-2.5 (sc-22512, E8):
+/// the anchor is LOOKED UP, not required. A corpus that never measured that cell is absence — the
+/// request simply prices from the analytic floor — so callers withhold their question instead of
+/// reddening. A PRESENT anchor that cannot derive the geometry is still a contradiction and panics.
+fn ltx25_expected_derived_peaks() -> Option<sceneworks_core::memory_anchor::AnchorDerivedPhases> {
+    let anchor = sceneworks_core::memory_anchor::packaged_memory_anchors()
+        .expect("packaged anchors load")
+        .anchor_for(
+            "ltx_2_5",
+            sceneworks_core::memory_anchor::AnchorBackend::Mlx,
+            "q8",
+            Ltx25TransformerVariant::Dev,
+            Ltx25Decoder::DiffVae,
+        )?;
+    Some(
+        anchor
+            .derive_video_phase_peaks(sceneworks_core::memory_anchor::AnchorDeriveRequest {
+                width: 640,
+                height: 640,
+                frames: 89,
+                decode_tiled: false,
+                transformer_windowed: false,
+                deferred_materialization: false,
+            })
+            .expect("the unmeasured geometry is derivable"),
+    )
+}
+
+#[test]
+fn an_unmeasured_ltx25_geometry_is_admitted_from_the_anchor_derived_estimate() {
+    let contract = ltx25_fixture_contract(&[]);
+    let Some(expected) = ltx25_expected_derived_peaks() else {
+        return;
+    };
+
+    let mut selector = LadderVideoSelector::new(
+        ltx25_identity(crate::mlx_fit_gate::UNCALIBRATED_CLOSURE),
+        &contract,
+        budget(128.0),
+        18 * GIB,
+        0,
+    );
+    let verdict = selector.select(ltx25_unmeasured_geometry());
+    let VideoRungSelection::Selected { rung, .. } = verdict else {
+        panic!("expected an anchor-derived selection, got {verdict:?}");
+    };
+    assert_eq!(rung, StrategyRung::Resident);
+    assert_eq!(selector.selections.len(), 1);
+    // The selected candidate carries the anchor derivation, not the weights+headroom floor: the
+    // raw predicted peak is exactly the core derivation's max phase, and the evidence revision
+    // names the anchor it came from.
+    assert_eq!(
+        selector.selections[0].predicted_peak_bytes,
+        expected.peak_bytes()
+    );
+    assert_eq!(
+        selector.selections[0].evidence_revision,
+        "ltx_2_5:mlx:q8:dev:diffvae:sc-18797-ltx-2-5-mlx-ladder-v1:imc-7f8186376a9a3143ebee"
+    );
+
+    // Differential control: the SAME request without an anchor store falls back to the
+    // phase-blind floor — a different peak and the floor's evidence label — proving the anchor
+    // path, not the floor, carried the admission above.
+    let mut floored = LadderVideoSelector::new(
+        ltx25_identity(crate::mlx_fit_gate::UNCALIBRATED_CLOSURE),
+        &contract,
+        budget(128.0),
+        18 * GIB,
+        0,
+    )
+    .with_anchor_store(None);
+    let floor_verdict = floored.select(ltx25_unmeasured_geometry());
+    assert!(matches!(floor_verdict, VideoRungSelection::Selected { .. }));
+    assert_ne!(
+        floored.selections[0].predicted_peak_bytes,
+        expected.peak_bytes()
+    );
+    assert_eq!(
+        floored.selections[0].evidence_revision,
+        "video-estimate-floor-v1"
+    );
+}
+
+#[test]
+fn the_production_funnel_admits_an_unmeasured_ltx25_geometry_from_the_anchor() {
+    // The production entry point requires packaged request evidence before probing. LTX-2.5 has
+    // no fitted curve, so this passes only because the packaged anchor store covers the request;
+    // the admitted context must then carry the anchor-derived peak end-to-end.
+    let generator = fixture_generator(Some(ltx25_fixture_contract(&[])));
+    let Some(expected) = ltx25_expected_derived_peaks() else {
+        return;
+    };
+    let mut request = inputs(89, budget(128.0), 18 * GIB);
+    request.model_id = "ltx_2_5";
+    request.route = "ltx_2_5";
+    request.transformer_variant = Some(Ltx25TransformerVariant::Dev);
+    request.decoder = Some(Ltx25Decoder::DiffVae);
+    request.width = 640;
+    request.height = 640;
+    request.fps = 25;
+    let outcome = admit_video_generation(&generator, request);
+    assert!(outcome.refusal.is_none(), "{:?}", outcome.refusal);
+    let context = outcome
+        .context
+        .expect("the anchor-covered request must reach the ladder and select");
+    assert_eq!(context.selection.strategy, MemoryStrategy::Resident);
+    assert_eq!(context.predicted_peak_bytes, expected.peak_bytes());
+    assert_eq!(
+        context.evidence_revision,
+        "ltx_2_5:mlx:q8:dev:diffvae:sc-18797-ltx-2-5-mlx-ladder-v1:imc-7f8186376a9a3143ebee"
+    );
+
+    // Control: the identical request under a model id with no anchor (and no fitted curve) is
+    // not covered by packaged evidence, so the production gate stays failed open.
+    let mut uncovered = inputs(89, budget(128.0), 18 * GIB);
+    uncovered.model_id = "ltx_2_5_nonexistent";
+    uncovered.route = "ltx_2_5";
+    uncovered.transformer_variant = Some(Ltx25TransformerVariant::Dev);
+    uncovered.decoder = Some(Ltx25Decoder::DiffVae);
+    uncovered.width = 640;
+    uncovered.height = 640;
+    uncovered.fps = 25;
+    assert_eq!(
+        admit_video_generation(&generator, uncovered),
+        VideoAdmissionOutcome::default(),
+        "no packaged evidence must keep the historical fail-open behavior"
+    );
+}
+
+#[test]
+fn the_anchor_derived_estimate_admits_when_it_fits_and_refuses_when_it_does_not() {
+    let contract = ltx25_fixture_contract(&[]);
+    let Some(expected) = ltx25_expected_derived_peaks() else {
+        return;
+    };
+    // sc-22508: an anchor-derived peak is FULLY PRICED by the derivation (coefficient uncertainty
+    // inside the coefficients, the allocator envelope in `ANCHOR_ALLOCATOR_ENVELOPE_MARGIN`), so
+    // the selector adds nothing and the admitted ceiling IS the derived peak.
+    let widened_gb = crate::memory_strategy::peak_bytes_to_gb(expected.peak_bytes());
+
+    let mut fits = LadderVideoSelector::new(
+        ltx25_identity(crate::mlx_fit_gate::UNCALIBRATED_CLOSURE),
+        &contract,
+        budget(widened_gb + 0.5),
+        18 * GIB,
+        0,
+    );
+    assert!(matches!(
+        fits.select(ltx25_unmeasured_geometry()),
+        VideoRungSelection::Selected { .. }
+    ));
+
+    let mut refused = LadderVideoSelector::new(
+        ltx25_identity(crate::mlx_fit_gate::UNCALIBRATED_CLOSURE),
+        &contract,
+        budget(widened_gb - 0.5),
+        18 * GIB,
+        0,
+    );
+    assert!(matches!(
+        refused.select(ltx25_unmeasured_geometry()),
+        VideoRungSelection::Reject { .. }
+    ));
+}
+
+/// The retained corpus measures no `q8 distilled/conv` cell. Since the epic 22505 feature-end fix
+/// round (E2) that request no longer falls to the phase-blind floor: it derives from the
+/// `q8 dev/diffvae` SIBLING anchor plus the BOUND component deltas — the distillation LoRA's and
+/// the conv decoder's shipped file sizes — and the evidence revision names the sibling honestly.
+/// A store with the deltas stripped still falls to the floor: no bound size, no derivation.
+#[test]
+fn an_unmeasured_pipeline_cell_derives_from_the_sibling_anchor_plus_the_bound_deltas() {
+    let contract = ltx25_fixture_contract(&[]);
+    let cell_identity = || {
+        let mut identity = ltx25_identity(crate::mlx_fit_gate::UNCALIBRATED_CLOSURE);
+        identity.transformer_variant = Some(Ltx25TransformerVariant::Distilled);
+        identity.decoder = Some(Ltx25Decoder::Conv);
+        identity
+    };
+    let store = sceneworks_core::memory_anchor::packaged_memory_anchors()
+        .expect("the packaged anchor store loads");
+    let closures = sceneworks_core::memory_anchor::packaged_anchor_loader_closures()
+        .expect("the packaged loader closures load");
+    let geometry = ltx25_unmeasured_geometry();
+    let expected = store.derive_video_phase_peaks_for_cell(
+        "ltx_2_5",
+        sceneworks_core::memory_anchor::AnchorBackend::Mlx,
+        "q8",
+        Ltx25TransformerVariant::Distilled,
+        Ltx25Decoder::Conv,
+        sceneworks_core::memory_anchor::AnchorDeriveRequest {
+            width: geometry.width,
+            height: geometry.height,
+            frames: geometry.estimate_frames(),
+            decode_tiled: false,
+            transformer_windowed: false,
+            deferred_materialization: false,
+        },
+    );
+    let expected = expected.expect("the sibling+delta fall-through prices the unmeasured cell");
+    assert!(
+        expected.delta_bytes > 0,
+        "the derivation must cross an axis with a bound delta, or this test asks nothing"
+    );
+
+    let mut selector =
+        LadderVideoSelector::new(cell_identity(), &contract, budget(128.0), 18 * GIB, 0);
+    assert!(matches!(
+        selector.select(geometry),
+        VideoRungSelection::Selected { .. }
+    ));
+    if expected.anchor.is_current(closures) {
+        assert_eq!(
+            selector.selections[0].evidence_revision, expected.anchor.id,
+            "the unmeasured cell must be priced from the sibling anchor, named honestly"
+        );
+        assert_eq!(
+            selector.selections[0].predicted_peak_bytes,
+            expected.phases.peak_bytes(),
+            "the selected peak is the sibling+delta derivation, byte for byte"
+        );
+    } else {
+        // Currency is allowed to be false BY DESIGN (sc-22511): a stale sibling demotes the cell
+        // to the floor rather than pricing it, and that is the honest verdict at such a pin.
+        assert_eq!(
+            selector.selections[0].evidence_revision,
+            "video-estimate-floor-v1"
+        );
+    }
+
+    // The floor control: strip the component deltas and the fall-through refuses, so the request
+    // keeps the phase-blind floor rather than a guessed size.
+    let mut deltaless = store.clone();
+    deltaless.component_deltas.clear();
+    let mut selector =
+        LadderVideoSelector::new(cell_identity(), &contract, budget(128.0), 18 * GIB, 0);
+    selector.anchors = Some(&deltaless);
+    assert!(matches!(
+        selector.select(geometry),
+        VideoRungSelection::Selected { .. }
+    ));
+    assert_eq!(
+        selector.selections[0].evidence_revision, "video-estimate-floor-v1",
+        "an axis with no bound delta must fall to the floor"
+    );
+    if let Some(anchor_derived) = ltx25_expected_derived_peaks() {
+        assert_ne!(
+            selector.selections[0].predicted_peak_bytes,
+            anchor_derived.peak_bytes()
+        );
+    }
+}
+
+/// sc-22512 (epic 22505, AC1): a model the packaged anchor store has NO row for at all is not a
+/// failure anywhere in the pipeline.
+///
+/// Both halves are proved here. (a) The coverage machinery classifies the zero-anchor model
+/// GRACEFULLY: the packaged store loads and every lookup axis misses by returning `None`, never a
+/// panic or an `Err`. (b) The selector still ADMITS the request — `Selected`, carrying the
+/// conservative analytic estimate (`video-estimate-floor-v1`) at a peak that is provably NOT an
+/// anchor-derived one. Absence never blocks; a measurement only ever sharpens the estimate.
+///
+/// The zero-anchor MODEL is the subject, not a suppressed store: `with_anchor_store(None)` only
+/// proves the store-absent path, so it is asserted alongside as a control rather than instead of.
+/// The final leg proves the admission is a real budget-sensitive estimate and not a rubber stamp.
+#[test]
+fn a_model_with_zero_anchors_is_classified_gracefully_and_admitted_from_the_analytic_estimate() {
+    use sceneworks_core::memory_anchor::AnchorBackend;
+
+    /// A provider/model id the packaged store carries no row for, by construction.
+    const ZERO_ANCHOR_MODEL: &str = "sc22512_model_with_no_anchors";
+
+    // (a) Coverage: the store answers about an entirely unknown model without failing.
+    let store = sceneworks_core::memory_anchor::packaged_memory_anchors()
+        .expect("the packaged anchor store loads");
+    assert!(
+        !store
+            .anchors
+            .iter()
+            .any(|anchor| anchor.model_id == ZERO_ANCHOR_MODEL),
+        "the fixture must genuinely have zero anchors, else this test proves nothing"
+    );
+    for backend in [AnchorBackend::Mlx, AnchorBackend::Candle] {
+        for tier_key in ["bf16", "q8", "q4"] {
+            for variant in [
+                Ltx25TransformerVariant::Dev,
+                Ltx25TransformerVariant::Distilled,
+            ] {
+                for decoder in [Ltx25Decoder::Conv, Ltx25Decoder::DiffVae] {
+                    assert!(
+                        store
+                            .anchor_for(ZERO_ANCHOR_MODEL, backend, tier_key, variant, decoder)
+                            .is_none(),
+                        "a zero-anchor model must MISS gracefully on \
+                         ({backend:?}, {tier_key}, {variant:?}, {decoder:?})"
+                    );
+                }
+            }
+        }
+    }
+
+    // (b) Admission: the same model is selected from the conservative analytic estimate.
+    let mut contract = ltx25_fixture_contract(&[]);
+    contract.provider_id = ZERO_ANCHOR_MODEL.to_owned();
+    let zero_anchor_identity = || {
+        let mut identity = ltx25_identity(crate::mlx_fit_gate::UNCALIBRATED_CLOSURE);
+        // Model, route and provider move together: the request is coherently ABOUT a model the
+        // store has never heard of, not an LTX-2.5 request wearing a foreign model id (which the
+        // shared selector would exclude on the route/provider handshake, masking the question).
+        identity.model_id = ZERO_ANCHOR_MODEL;
+        identity.route = ZERO_ANCHOR_MODEL;
+        identity
+    };
+
+    let mut selector = LadderVideoSelector::new(
+        zero_anchor_identity(),
+        &contract,
+        budget(128.0),
+        18 * GIB,
+        0,
+    );
+    let verdict = selector.select(ltx25_unmeasured_geometry());
+    assert!(
+        matches!(verdict, VideoRungSelection::Selected { .. }),
+        "a model with zero anchors must be ADMITTED under the analytic estimate, got {verdict:?}"
+    );
+    assert_eq!(
+        selector.selections[0].evidence_revision, "video-estimate-floor-v1",
+        "the admission must come from the conservative analytic estimate"
+    );
+    if let Some(anchor_derived) = ltx25_expected_derived_peaks() {
+        assert_ne!(
+            selector.selections[0].predicted_peak_bytes,
+            anchor_derived.peak_bytes(),
+            "an anchor-derived peak here would mean the zero-anchor model borrowed another \
+             model's measurements"
+        );
+    }
+
+    // Control: suppressing the store entirely reaches the SAME estimate, so the admission above is
+    // the zero-anchor-model path and not an artefact of which store was consulted.
+    let mut store_absent = LadderVideoSelector::new(
+        zero_anchor_identity(),
+        &contract,
+        budget(128.0),
+        18 * GIB,
+        0,
+    )
+    .with_anchor_store(None);
+    assert!(matches!(
+        store_absent.select(ltx25_unmeasured_geometry()),
+        VideoRungSelection::Selected { .. }
+    ));
+    assert_eq!(
+        store_absent.selections[0].predicted_peak_bytes,
+        selector.selections[0].predicted_peak_bytes
+    );
+
+    // The estimate is real: at its own predicted peak the request admits, and half a GiB under it
+    // the very same request refuses. Read off the selection the selector actually made rather than
+    // re-widened here — sc-22508 moved the margin into the derivation, so charging it again would
+    // double-count. Same derivation as the sibling anchor test above, never a magic float.
+    let widened_gb = crate::memory_strategy::peak_bytes_to_gb(
+        crate::memory_strategy::floor_admitted_peak_bytes(
+            gen_core::MemoryBackend::Mlx,
+            selector.selections[0].predicted_peak_bytes,
+            Some(FIXTURE_HEADROOM_GIB * GIB),
+        ),
+    );
+    let mut fits = LadderVideoSelector::new(
+        zero_anchor_identity(),
+        &contract,
+        budget(widened_gb + 0.5),
+        18 * GIB,
+        0,
+    );
+    assert!(matches!(
+        fits.select(ltx25_unmeasured_geometry()),
+        VideoRungSelection::Selected { .. }
+    ));
+    let mut refused = LadderVideoSelector::new(
+        zero_anchor_identity(),
+        &contract,
+        budget(widened_gb - 0.5),
+        18 * GIB,
+        0,
+    );
+    assert!(
+        matches!(
+            refused.select(ltx25_unmeasured_geometry()),
+            VideoRungSelection::Reject { .. }
+        ),
+        "the analytic estimate must stay budget-sensitive, or the admission above is a rubber stamp"
+    );
+
+    // (c) The PRODUCTION entry path, not just the selector. Everything above drives
+    // `LadderVideoSelector` directly, which is one layer below what a real job calls, so on its own
+    // it could stay green while `admit_video_generation` refused the same zero-anchor request at an
+    // earlier branch. One leg through the production entry closes that gap: the same coherent
+    // zero-anchor request must produce NO refusal.
+    let mut zero_anchor_contract = ltx25_fixture_contract(&[]);
+    zero_anchor_contract.provider_id = ZERO_ANCHOR_MODEL.to_owned();
+    let generator = fixture_generator(Some(zero_anchor_contract));
+    let mut request = inputs(89, budget(128.0), 0);
+    request.model_id = ZERO_ANCHOR_MODEL;
+    request.model_family = ZERO_ANCHOR_MODEL;
+    request.route = ZERO_ANCHOR_MODEL;
+    request.width = 640;
+    request.height = 640;
+    let outcome = admit_video_generation(&generator, request);
+    assert_eq!(
+        outcome.refusal, None,
+        "a model with zero anchors must not be refused at the production admission entry: \
+         {outcome:?}"
+    );
+}
+
+/// An anchor store whose anchors cite a loader closure that no longer matches the declaration —
+/// i.e. the model's own loader source moved since the measurement (sc-22511).
+fn staled_loader_anchor_store() -> sceneworks_core::memory_anchor::MemoryAnchorStore {
+    let mut doctored: serde_json::Value =
+        serde_json::from_str(sceneworks_core::memory_anchor::PACKAGED_MEMORY_ANCHORS)
+            .expect("packaged anchors parse");
+    for anchor in doctored["anchors"]
+        .as_array_mut()
+        .expect("the store carries anchors")
+    {
+        anchor["source"]["loaderClosureDigest"] = serde_json::json!("f".repeat(64));
+    }
+    sceneworks_core::memory_anchor::load_memory_anchors(&doctored.to_string())
+        .expect("a doctored currency digest is still a well-formed store")
+}
+
+/// Every identity/currency axis the anchor derivation binds, exercised one mutation at a time.
+///
+/// `anchor_derived_phase_peaks` is called directly here because a foreign provider id also makes the
+/// CONTRACT undecidable to the shared selector, which would mask the anchor guard behind an
+/// unrelated (and equally safe) demotion. The end-to-end control below then proves one of these axes
+/// really does land on the phase-blind floor through `select`.
+///
+/// CURRENCY IS THE LOADER CLOSURE, AND ONLY THAT (sc-22511, E9). The calibration axes that used to
+/// appear in this list — an absent calibration identity, a moved ABI, a later campaign's
+/// fingerprint — are asserted in the OPPOSITE direction below: none of them may demote an anchor
+/// whose loader never moved.
+#[test]
+fn a_foreign_identity_or_a_moved_loader_closure_does_not_reach_the_anchor_derivation() {
+    let baseline_contract = ltx25_fixture_contract(&[]);
+    let derived = |identity: VideoRequestIdentity<'_>, contract: &MemoryProviderContract| {
+        let selector = LadderVideoSelector::new(identity, contract, budget(128.0), 18 * GIB, 0);
+        anchor_derived_phase_peaks(&selector, ltx25_unmeasured_geometry(), &[])
+            .map(|(_, anchor_id)| anchor_id.to_owned())
+    };
+
+    // THE BASELINE PRESUPPOSES A CURRENT ANCHOR, and currency is allowed to be false BY DESIGN
+    // (sc-22511 E8/E9): a pin bump that genuinely moves the LTX-2.5 loader stales this anchor,
+    // admission demotes that cell to the conservative floor, and the render still runs. That is not
+    // a defect in this test, and turning it into a red would rebuild the pin-bump-forces-
+    // re-measurement gate one level down. So the designed state is REPORTED and the mutation sweep
+    // — which asks what the derivation binds, and needs a reachable anchor to ask it — steps aside.
+    // A CURRENT anchor that still fails to reach the derivation is a real defect and still fails.
+    let baseline = derived(
+        ltx25_identity(crate::mlx_fit_gate::UNCALIBRATED_CLOSURE),
+        &baseline_contract,
+    );
+    let packaged = sceneworks_core::memory_anchor::packaged_memory_anchors()
+        .expect("the packaged anchor store loads");
+    let closures = sceneworks_core::memory_anchor::packaged_anchor_loader_closures()
+        .expect("the packaged loader closures load");
+    let ltx25_current = packaged
+        .anchors
+        .iter()
+        .filter(|anchor| anchor.model_id == "ltx_2_5")
+        .any(|anchor| anchor.is_current(closures));
+    if !ltx25_current {
+        eprintln!(
+            "note: no packaged ltx_2_5 anchor is current against its declared loader closure — \
+             the derivation is correctly unreachable and the identity sweep below has nothing to \
+             bind. Re-stamp or re-measure; this is a designed state, not a failure."
+        );
+        assert_eq!(
+            baseline, None,
+            "a stale anchor must not reach the derivation"
+        );
+        return;
+    }
+    assert_eq!(
+        baseline.as_deref(),
+        Some("ltx_2_5:mlx:q8:dev:diffvae:sc-18797-ltx-2-5-mlx-ladder-v1:imc-7f8186376a9a3143ebee"),
+        "the conformant baseline must reach the anchor, or every mutation below proves nothing"
+    );
+
+    // Identity axes: family, mode, route, and pipeline cell.
+    for (label, mutate) in [
+        (
+            "foreign family",
+            (|identity: &mut VideoRequestIdentity<'static>| identity.model_family = "ltx-video-x")
+                as fn(&mut VideoRequestIdentity<'static>),
+        ),
+        ("foreign mode", |identity| identity.mode = "image_to_video"),
+        ("foreign route", |identity| identity.route = "ltx_2_5_eros"),
+        // "unmeasured decoder" (dev/conv) is NOT an unmeasured cell: it carries its own exact
+        // anchor, whose TILED measured regime refuses this unbounded request — and an exact
+        // anchor's regime refusal deliberately does not fall through to a sibling (the measured
+        // cell's own evidence may not be bypassed by a delta).
+        ("unmeasured decoder", |identity| {
+            identity.decoder = Some(Ltx25Decoder::Conv)
+        }),
+        ("absent pipeline identity", |identity| {
+            identity.transformer_variant = None
+        }),
+    ] {
+        let mut identity = ltx25_identity(crate::mlx_fit_gate::UNCALIBRATED_CLOSURE);
+        mutate(&mut identity);
+        assert_eq!(
+            derived(identity, &baseline_contract),
+            None,
+            "{label} must not reach the anchor derivation"
+        );
+    }
+
+    // An UNMEASURED variant is no longer a refusal (epic 22505 feature-end fix round, E2): the
+    // cell derives from the dev/diffvae SIBLING anchor plus the bound distillation-LoRA delta,
+    // and the evidence names the sibling — never pretends to be a distilled measurement.
+    let mut unmeasured_variant = ltx25_identity(crate::mlx_fit_gate::UNCALIBRATED_CLOSURE);
+    unmeasured_variant.transformer_variant = Some(Ltx25TransformerVariant::Distilled);
+    assert_eq!(
+        derived(unmeasured_variant, &baseline_contract).as_deref(),
+        Some("ltx_2_5:mlx:q8:dev:diffvae:sc-18797-ltx-2-5-mlx-ladder-v1:imc-7f8186376a9a3143ebee"),
+        "the unmeasured variant must derive from its sibling anchor plus the bound delta"
+    );
+
+    // Contract axes: the provider that produced the measurement, and calibration currency.
+    let mut foreign_provider = ltx25_fixture_contract(&[]);
+    foreign_provider.provider_id = "ltx_2_5_community_rehost".to_owned();
+
+    let mut absent_calibration = ltx25_fixture_contract(&[]);
+    absent_calibration.calibration = None;
+
+    let mut foreign_fingerprint = ltx25_fixture_contract(&[]);
+    foreign_fingerprint.calibration = Some(MemoryCalibrationIdentity {
+        abi: gen_core::MEMORY_CALIBRATION_ABI,
+        fingerprint: "sc-99999-some-later-campaign-v1".to_owned(),
+        load_shape: LoadShape::EagerMaterialization,
+    });
+
+    assert_eq!(
+        derived(
+            ltx25_identity(crate::mlx_fit_gate::UNCALIBRATED_CLOSURE),
+            &foreign_provider
+        ),
+        None,
+        "a foreign provider must not reach the anchor derivation"
+    );
+
+    // E9: the calibration axes are PROVENANCE. An absent calibration identity, a moved ABI and a
+    // later campaign's fingerprint all leave an anchor whose loader never moved authoritative.
+    for (label, contract, abi) in [
+        (
+            "no calibration identity",
+            &absent_calibration,
+            gen_core::MEMORY_CALIBRATION_ABI,
+        ),
+        (
+            "later campaign fingerprint",
+            &foreign_fingerprint,
+            gen_core::MEMORY_CALIBRATION_ABI,
+        ),
+        (
+            "moved calibration ABI",
+            &baseline_contract,
+            gen_core::MEMORY_CALIBRATION_ABI + 1,
+        ),
+    ] {
+        let mut identity = ltx25_identity(crate::mlx_fit_gate::UNCALIBRATED_CLOSURE);
+        identity.calibration_abi = abi;
+        assert!(
+            derived(identity, contract).is_some(),
+            "{label} must NOT demote an anchor whose loader closure is unchanged"
+        );
+    }
+
+    // THE currency axis: the model's own loader closure moved since the measurement.
+    let staled = staled_loader_anchor_store();
+    let selector = LadderVideoSelector::new(
+        ltx25_identity(crate::mlx_fit_gate::UNCALIBRATED_CLOSURE),
+        &baseline_contract,
+        budget(128.0),
+        18 * GIB,
+        0,
+    )
+    .with_anchor_store(Some(&staled));
+    assert_eq!(
+        anchor_derived_phase_peaks(&selector, ltx25_unmeasured_geometry(), &[])
+            .map(|(_, anchor_id)| anchor_id.to_owned()),
+        None,
+        "an anchor whose loader closure moved must not price a request"
+    );
+
+    // End-to-end control: that demotion really does land on the phase-blind floor.
+    let mut selector = LadderVideoSelector::new(
+        ltx25_identity(crate::mlx_fit_gate::UNCALIBRATED_CLOSURE),
+        &baseline_contract,
+        budget(128.0),
+        18 * GIB,
+        0,
+    )
+    .with_anchor_store(Some(&staled));
+    assert!(matches!(
+        selector.select(ltx25_unmeasured_geometry()),
+        VideoRungSelection::Selected { .. }
+    ));
+    assert_eq!(
+        selector.selections[0].evidence_revision, "video-estimate-floor-v1",
+        "a moved loader closure must demote the anchor derivation to the floor"
+    );
+
+    // …and the evidence gate closes on exactly the same event, through the same seam.
+    let mut request = inputs(89, budget(128.0), 18 * GIB);
+    request.model_id = "ltx_2_5";
+    request.route = "ltx_2_5";
+    request.transformer_variant = Some(Ltx25TransformerVariant::Dev);
+    request.decoder = Some(Ltx25Decoder::DiffVae);
+    request.width = 640;
+    request.height = 640;
+    request.fps = 25;
+    assert!(
+        anchor_evidence_covers_request(
+            sceneworks_core::memory_anchor::packaged_memory_anchors(),
+            &baseline_contract,
+            &request
+        ),
+        "the packaged anchors are current, so the gate must be open"
+    );
+    assert!(
+        !anchor_evidence_covers_request(Some(&staled), &baseline_contract, &request),
+        "a moved loader closure must not keep the anchor evidence gate open"
+    );
+    // The campaign fingerprint moving does not close it — E9 again, at the gate.
+    assert!(
+        anchor_evidence_covers_request(
+            sceneworks_core::memory_anchor::packaged_memory_anchors(),
+            &foreign_fingerprint,
+            &request
+        ),
+        "a later campaign fingerprint must not close the anchor evidence gate"
+    );
 }

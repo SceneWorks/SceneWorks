@@ -40,18 +40,21 @@
  *                      capture noise; folding it into a variance estimate would produce a
  *                      nonsense margin, so it is excluded and counted separately.
  *
- * Margin rule (per backend):
+ * Derivation rule (per backend), as of sc-22508:
  *
- *   staleMeasuredMargin = max(hardFloor, VARIANCE_SAFETY_MULTIPLIER x maxBindingSpread)
- *   estimateMargin      = ESTIMATE_WIDENING_MULTIPLIER x staleMeasuredMargin
+ *   recaptureSpread = max(hardFloor, maxBindingSpread)
  *
- * The hard floor applies when variance data is thin — few or no repeat pairs — and, as of the
- * 65-record corpus, it binds for BOTH backends (see the floor rationale on each constant below).
+ * The measured quantity, and nothing on top of it. The epic-18093 rule multiplied this by 2 as a
+ * "safety" term and then by 2 again for estimates; neither multiplier named an uncertainty, and
+ * both were applied to a candidate's WHOLE peak. Epic 22505 E3 replaced that with per-term
+ * allowances in `crates/sceneworks-worker/src/ladder_margin_policy.rs`, where this number is the
+ * SAME-CELL RECAPTURE SPREAD and is charged only where the peak itself is the uncertain quantity.
  *
- * The estimate margin does NOT fold in the max CAN-BIND phase spread. The corpus demonstrates a
- * 17.1369% cross-fingerprint same-key denoise re-capture spread; folding it through the rule
- * shape above (x2 safety, floor, x2 widening) would yield a 68.5% MLX estimate margin —
- * unusable (and even the un-widened variance term alone is 34.3%). Instead
+ * The hard floor applies when variance data is thin — few or no repeat pairs.
+ *
+ * The spread does NOT fold in the max CAN-BIND phase spread (17.1369% on the current corpus). That
+ * belongs to a phase the candidate's own term does not cover, so pricing it as a fraction of the
+ * peak would be exactly the untethered widening E3 retires. Instead
  * ESTIMATE_ADMISSION_REQUIRES_MEASURED_BINDING_PHASE records the constraint that carries that
  * risk: estimate-backed admission (sc-18096/18097) must not admit a candidate whose predicted
  * binding phase differs from the measured cell's without re-deriving per-phase variance for
@@ -61,8 +64,7 @@
  * The constants this script derives are landed in
  * `crates/sceneworks-worker/src/ladder_margin_policy.rs`;
  * `scripts/derive-ladder-margins.test.mjs` pins the two against each other, so re-running this
- * derivation after the evidence grows will red that test the moment the variance term overtakes
- * a floor.
+ * derivation after the evidence grows will red that test the moment the measured spread moves.
  *
  * Run: `node scripts/derive-ladder-margins.mjs [--json]`
  */
@@ -76,8 +78,8 @@ const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 export const EVIDENCE_PATH = "docs/generated/memory-calibration-evidence.json";
 
 /**
- * Hard floor for MLX, and the whole MLX margin today (the observed variance term is 2.48%, under
- * the floor). Why 5% and not the observed 1.24% max binding spread:
+ * Hard floor for MLX, used only when repeat coverage is too thin to measure a spread (the current
+ * corpus measures 12.60%, above it). Why a 5% floor rather than zero:
  *
  *   1. FAILURE COST IS ASYMMETRIC AND FATAL. An MLX allocator overshoot aborts the worker
  *      process via the default MLX error handler — there is no recoverable Err on that lane —
@@ -95,9 +97,9 @@ export const EVIDENCE_PATH = "docs/generated/memory-calibration-evidence.json";
 export const MLX_HARD_FLOOR = 0.05;
 
 /**
- * Hard floor for candle, and — by the sc-18094 rule for a backend with ZERO repeat pairs — the
- * whole candle margin: all 15 candle records are unique keys, so there is no variance estimate
- * and none is invented. Why the floor is 2.5x smaller than MLX's:
+ * Hard floor for candle, and — for a backend with ZERO repeat pairs — the whole candle recapture
+ * spread: every candle record is a unique key, so there is no variance estimate and none is
+ * invented. Why the floor is 2.5x smaller than MLX's:
  *
  *   1. FAILURE COST IS RECOVERABLE. A CUDA/candle allocation failure surfaces as an Err the
  *      worker maps to a failed job; the process survives and the job can rerun.
@@ -107,20 +109,13 @@ export const MLX_HARD_FLOOR = 0.05;
  */
 export const CANDLE_HARD_FLOOR = 0.02;
 
-/**
- * Widening applied to the observed max binding spread before comparing with the floor. A max
- * over 39 pairs is an order statistic, not a bound; doubling it is the cheap protection against
- * the next capture landing just outside the sampled range.
- */
-export const VARIANCE_SAFETY_MULTIPLIER = 2;
-
-/**
- * Estimate-backed candidates (sc-18096/18097) carry model extrapolation error ON TOP of capture
- * variance — the estimator is projecting a cell nobody has measured — so their margin is double
- * the stale-measured margin, which only has to absorb re-capture noise on a cell that WAS
- * measured.
- */
-export const ESTIMATE_WIDENING_MULTIPLIER = 2;
+// sc-22508 (epic 22505) retired VARIANCE_SAFETY_MULTIPLIER and ESTIMATE_WIDENING_MULTIPLIER. Both
+// were blanket widenings applied to the whole peak, and neither named a term: the first doubled an
+// order statistic "in case the next capture lands outside the sampled range", the second doubled it
+// again for estimates. What this script derives now is the MEASURED quantity itself — the max
+// same-cell binding-phase spread — which the selector charges only against the term it belongs to
+// (`crates/sceneworks-worker/src/ladder_margin_policy.rs`). Risk outside the sampled range is
+// carried by runtime catching (E6), not by a standing multiple.
 
 /**
  * Constraint inherited by sc-18096/18097, mirrored by the Rust constant of the same name (the
@@ -306,20 +301,72 @@ export function analyzeBackend(records) {
   return analysis;
 }
 
-/** Apply the margin rule (see header) to one backend's analysis. */
+/**
+ * The SAME-CELL RECAPTURE SPREAD for one backend: the observed max binding-phase spread over the
+ * corpus's repeat pairs, floored at the backend's documented accounting residual for a backend with
+ * no repeat pairs. This is the whole derivation now — no safety multiplier, no estimate widening.
+ */
 export function deriveBackendMargins(analysis, hardFloor) {
   const maxBindingSpread = analysis.bindingSpreads[0]?.spread ?? null;
-  const varianceTerm =
-    maxBindingSpread === null ? null : VARIANCE_SAFETY_MULTIPLIER * maxBindingSpread;
-  const staleMeasuredMargin = Math.max(hardFloor, varianceTerm ?? 0);
+  const recaptureSpread = Math.max(hardFloor, maxBindingSpread ?? 0);
   return {
     hardFloor,
     maxBindingSpread,
-    varianceTerm,
-    floorBinds: (varianceTerm ?? 0) <= hardFloor,
-    staleMeasuredMargin,
-    estimateMargin: ESTIMATE_WIDENING_MULTIPLIER * staleMeasuredMargin,
+    floorBinds: (maxBindingSpread ?? 0) <= hardFloor,
+    recaptureSpread,
   };
+}
+
+/**
+ * The MLX floor's allocator-envelope allowance, re-derived ON THE BASE IT CHARGES (epic 22505
+ * feature-end fix round, E3). `ladder_margin_policy::FLOOR_ALLOCATOR_ENVELOPE_ALLOWANCE` is
+ * charged as a fraction of a weights+headroom floor's ACTIVATION term, so the honest fraction is
+ * the corpus maximum of
+ *
+ *     envelope_bytes / activation_bytes
+ *
+ * where, per MLX record that reports a steady-state residency
+ * (`lifecycleCleanPostCleanupActive` — the resident weight set after cleanup, i.e. the floor's
+ * counted-weights analogue):
+ *
+ *     envelope_bytes   = overall.allocatorBytes − overall.activeBytes
+ *                        (the allocator envelope retained ABOVE the modelled active peak — the
+ *                        exact uncertainty the allowance names), and
+ *     activation_bytes = overall.activeBytes − lifecycleCleanPostCleanupActive
+ *                        (the activation transient above the counted weights — the exact term the
+ *                        allowance is charged against).
+ *
+ * The previous constant (0.17) was the same envelope measured as a fraction of the whole BINDING
+ * ACTIVE PHASE — weights included — and then charged against the activation term alone, which
+ * under-charges by exactly the weights/activation ratio. On the retained image-MLX renders the
+ * envelope above active runs to ~3.1x the activation transient (flux2_dev q4 768x768), so that is
+ * what the fraction honestly is. Records with a non-positive activation term (a staged capture
+ * whose active peak IS the steady state) are skipped: they measure no transient for the envelope
+ * to ride on.
+ */
+export function deriveFloorEnvelopeAllowance(records) {
+  let best = null;
+  for (const record of records) {
+    if (record.backend !== "mlx") continue;
+    const measurements = new Map(
+      (record.diagnostics?.measurements ?? []).map((entry) => [entry.name, entry.value]),
+    );
+    const post = measurements.get("lifecycleCleanPostCleanupActive");
+    const overall = record.observedMemory?.overall ?? {};
+    const active = overall.activeBytes ?? null;
+    const allocator = overall.allocatorBytes ?? null;
+    if (!Number.isInteger(post) || !Number.isInteger(active) || !Number.isInteger(allocator)) {
+      continue;
+    }
+    const activation = active - post;
+    const envelope = allocator - active;
+    if (activation <= 0 || envelope < 0) continue;
+    const ratio = envelope / activation;
+    if (best === null || ratio > best.ratio) {
+      best = { ratio, recordId: record.id, envelope, activation };
+    }
+  }
+  return best;
 }
 
 export function deriveMargins(records) {
@@ -346,13 +393,20 @@ function formatPercent(fraction) {
 async function main() {
   const records = await loadEvidenceRecords();
   const derived = deriveMargins(records);
+  const floorEnvelope = deriveFloorEnvelopeAllowance(records);
 
   if (process.argv.includes("--json")) {
-    process.stdout.write(`${JSON.stringify(derived, null, 2)}\n`);
+    process.stdout.write(`${JSON.stringify({ ...derived, floorEnvelope }, null, 2)}\n`);
     return;
   }
+  if (floorEnvelope) {
+    process.stdout.write(
+      `MLX floor allocator-envelope allowance (max envelope/activation): ${floorEnvelope.ratio} ` +
+        `(${floorEnvelope.recordId}: ${floorEnvelope.envelope} envelope over ${floorEnvelope.activation} activation)\n`,
+    );
+  }
 
-  process.stdout.write(`sc-18094 ladder margin derivation — ${EVIDENCE_PATH} (${records.length} records)\n`);
+  process.stdout.write(`sc-18094/sc-22508 recapture-spread derivation — ${EVIDENCE_PATH} (${records.length} records)\n`);
   for (const [backend, { analysis, margins }] of Object.entries(derived)) {
     process.stdout.write(`\n[${backend}] ${analysis.recordCount} records, ${analysis.uniqueKeys} unique keys\n`);
     process.stdout.write(
@@ -374,10 +428,9 @@ async function main() {
     }
     if (analysis.maxCanBindPhaseSpread) {
       const cb = analysis.maxCanBindPhaseSpread;
-      const foldedIn = ESTIMATE_WIDENING_MULTIPLIER * Math.max(margins.hardFloor, VARIANCE_SAFETY_MULTIPLIER * cb.spread);
       process.stdout.write(
         `  max CAN-BIND phase spread (any phase, flips excluded): ${formatPercent(cb.spread)} (${cb.phase}/${cb.metric}, ${cb.recordIds.join(" vs ")})\n` +
-          `    folding it into the estimate margin would yield ${formatPercent(foldedIn)} — carried by the phase-extrapolation constraint instead (see header)\n`,
+          `    it belongs to a phase the candidate's own term does not cover — carried by the phase-extrapolation constraint, not by a wider allowance (see header)\n`,
       );
     }
     if (analysis.envelopeGap) {
@@ -387,10 +440,10 @@ async function main() {
       );
     }
     process.stdout.write(
-      `  variance term (x${VARIANCE_SAFETY_MULTIPLIER}): ${formatPercent(margins.varianceTerm)}   hard floor: ${formatPercent(margins.hardFloor)}   floor binds: ${margins.floorBinds}\n`,
+      `  hard floor: ${formatPercent(margins.hardFloor)}   floor binds: ${margins.floorBinds}\n`,
     );
     process.stdout.write(
-      `  => staleMeasuredMargin = ${formatPercent(margins.staleMeasuredMargin)}   estimateMargin = ${formatPercent(margins.estimateMargin)}\n`,
+      `  => recaptureSpread = ${formatPercent(margins.recaptureSpread)}\n`,
     );
   }
 }

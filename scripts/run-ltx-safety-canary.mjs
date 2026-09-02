@@ -15,7 +15,7 @@ import { fileURLToPath } from "node:url";
 
 import { hashArtifactInventory } from "./hash-artifact-inventory.mjs";
 import {
-  canonicalJson, expandPlan, runProviderPlan, validateBundle,
+  canonicalJson, capturePlannedCase, logicalCaseId, validateBundle,
 } from "./memory-calibration-harness.mjs";
 
 const execFileAsync = promisify(execFile);
@@ -645,6 +645,45 @@ export function boundedCarrierRequest(memoryBytes, textEncoderInventory) {
   };
 }
 
+/**
+ * The planned case for ONE frozen SC-18946 campaign row.
+ *
+ * sc-22514 collapsed `config/memory-calibration-plan.json` to one anchor per (model, tier, lane)
+ * and deleted `expandPlan`, which is what used to build this. The SC-18946 plans this canary reads
+ * are RETAINED HISTORICAL DATA in the pre-collapse grid shape, and the two frozen rows below are
+ * pinned by logical case id in the adapter and this runner alike, so the identity has to be
+ * derived the same way it always was — from `logicalCaseId` over the same spec. The four constants
+ * `expandPlan` used to attach are attached here for the same reason the harness still sends them:
+ * the adapter's request contract reads them.
+ */
+function plannedFromFrozenRow(provider) {
+  if (provider.cases?.length !== 1 || provider.cases[0].expectedResult !== "passed") {
+    fail("a frozen campaign row must be exactly one passing case");
+  }
+  const spec = {
+    evidenceScope: provider.evidenceScope,
+    backend: provider.backend,
+    loadShape: provider.loadShape,
+    target: provider.target,
+    strategy: {
+      rung: provider.rung,
+      engagedRungs: provider.engagedRungs,
+      parameters: provider.cases[0].parameters,
+    },
+    ...(provider.sourceProvenance ? { sourceProvenance: provider.sourceProvenance } : {}),
+    calibrationFingerprint: provider.calibrationFingerprint,
+    fixture: provider.fixture,
+    negative: false,
+  };
+  return {
+    logicalCaseId: logicalCaseId(spec),
+    ...spec,
+    expectedResult: "passed",
+    modelLoadPolicy: "fresh_per_case",
+    modelLoadGroup: null,
+  };
+}
+
 export function campaignEntryPlan(config) {
   const matches = config?.providers?.filter((provider) =>
     provider.name === CAMPAIGN_ENTRY_PROVIDER) ?? [];
@@ -679,14 +718,11 @@ export function campaignEntryPlan(config) {
   if (!isDeepStrictEqual(provider, exactProvider)) {
     fail("SC-20191 frozen campaign-entry provider changed");
   }
-  const planned = expandPlan({ providers: [provider] });
-  if (planned.length !== 1
-      || planned[0].logicalCaseId !== CAMPAIGN_ENTRY_LOGICAL_CASE_ID
-      || planned[0].modelLoadPolicy !== "fresh_per_case"
-      || planned[0].modelLoadGroup !== null) {
+  const planned = plannedFromFrozenRow(provider);
+  if (planned.logicalCaseId !== CAMPAIGN_ENTRY_LOGICAL_CASE_ID) {
     fail("SC-20191 campaign-entry logical identity changed");
   }
-  return { provider, planned: planned[0] };
+  return { provider, planned };
 }
 
 export function boundedCampaignEntryPlan(config, requested = "q4") {
@@ -723,14 +759,11 @@ export function boundedCampaignEntryPlan(config, requested = "q4") {
   if (!isDeepStrictEqual(provider, exactProvider)) {
     fail(`${spec.story} bounded campaign provider changed`);
   }
-  const planned = expandPlan({ providers: [provider] });
-  if (planned.length !== 1
-      || planned[0].logicalCaseId !== spec.logicalCaseId
-      || planned[0].modelLoadPolicy !== "fresh_per_case"
-      || planned[0].modelLoadGroup !== null) {
+  const planned = plannedFromFrozenRow(provider);
+  if (planned.logicalCaseId !== spec.logicalCaseId) {
     fail(`${spec.story} bounded campaign logical identity changed`);
   }
-  return { provider, planned: planned[0], spec };
+  return { provider, planned, spec };
 }
 
 export function validateCampaignEntryHarnessRequest(request, expectedPlanned, {
@@ -4359,7 +4392,7 @@ async function runCampaignEntryController({
     validateBundle: validateCampaignEntryBundle,
   };
   const config = JSON.parse(await readFile(path.join(ROOT, spec.plan), "utf8"));
-  spec.planEntry(config);
+  const { planned } = spec.planEntry(config);
   if (boundedSpec?.tier === "bf16") {
     await assertQ8ReleaseAuthorization(q8ReleaseAuthorization, q8AuditPath, {
       sceneWorksRevision, inferenceRevision,
@@ -4411,20 +4444,20 @@ async function runCampaignEntryController({
   try {
     await mkdir(runRoot, { recursive: true, mode: 0o700 });
     await assertRunRootEmpty(runRoot);
-    bundle = await runProviderPlan({
-      config,
+    bundle = await capturePlannedCase({
+      planned,
       providerCommand,
       sceneWorksRepo: ROOT,
       inferenceRepo,
-      backend: "mlx",
-      providerName: spec.provider,
       onProviderInvocation: ({ action, cases }) => {
         if (action !== "run" || cases.length !== 1
             || cases[0].logicalCaseId !== spec.logicalCaseId) {
           fail("contained LTX campaign attempted a batch or a foreign logical case");
         }
       },
-      // No checkpoint callback: no partial or pre-validation bundle may reach the output path.
+      // sc-22514: there is no checkpoint callback to pass any more — a capture is one render and
+      // writes one record at the end — which is the property this comment always wanted: no partial
+      // or pre-validation bundle can reach the output path.
       executeProvider: async (command, args, input) => {
         if (command !== providerCommand[0]
             || !isDeepStrictEqual(args, providerCommand.slice(1))) {

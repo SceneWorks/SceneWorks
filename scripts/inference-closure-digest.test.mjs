@@ -46,6 +46,9 @@ function workspace(overrides = {}) {
       "[workspace.dependencies]",
       'shared = { path = "crates/shared" }',
       'unused-elsewhere = { path = "crates/unused" }',
+      // A UNIVERSAL crate, at its real repository path so the production `UNIVERSAL_CRATES` constant
+      // is what these tests exercise — not a test-only injection that could drift from it.
+      'gen-core = { path = "crates/contracts/gen-core" }',
       "",
       "[profile.release]",
       "lto = true",
@@ -68,6 +71,7 @@ function workspace(overrides = {}) {
       'version = "0.0.0"',
       "dependencies = [",
       ' "shared",',
+      ' "gen-core",',
       ' "only-a-uses-me",',
       "]",
       "",
@@ -76,10 +80,15 @@ function workspace(overrides = {}) {
       'version = "0.0.0"',
       "dependencies = [",
       ' "shared",',
+      ' "gen-core",',
       "]",
       "",
       "[[package]]",
       'name = "shared"',
+      'version = "0.0.0"',
+      "",
+      "[[package]]",
+      'name = "gen-core"',
       'version = "0.0.0"',
       "",
       "[[package]]",
@@ -113,6 +122,9 @@ function workspace(overrides = {}) {
     "rust-toolchain.toml": '[toolchain]\nchannel = "1.96.0"\n',
     ".cargo/config.toml": "[build]\nrustflags = []\n",
 
+    "crates/contracts/gen-core/Cargo.toml": '[package]\nname = "gen-core"\n',
+    "crates/contracts/gen-core/src/lib.rs": "pub fn contract() {}\n",
+
     "crates/shared/Cargo.toml": '[package]\nname = "shared"\n',
     "crates/shared/src/lib.rs": "pub fn shared() {}\n",
     // An ORDINARY closure crate's build script — sc-17935 item 2 is "never hashed, for ANY crate",
@@ -128,6 +140,7 @@ function workspace(overrides = {}) {
       "",
       "[dependencies]",
       "shared = { workspace = true }",
+      "gen-core = { workspace = true }",
       'only-a-uses-me = "1"',
       "",
       "[dev-dependencies]",
@@ -145,6 +158,7 @@ function workspace(overrides = {}) {
       "",
       "[dependencies]",
       "shared = { workspace = true }",
+      "gen-core = { workspace = true }",
     ].join("\n"),
     "crates/b/src/lib.rs": 'pub const ID: &str = "provider_b";\n',
 
@@ -233,8 +247,15 @@ test("a provider's closure is its crate plus what it links, and nothing else", (
   const digests = digestsFor({ r1: workspace() });
   // `crates/vendor/patched` is linked, just not through a dependency edge — it replaces a package
   // the lock says `a` compiles. Nothing declares it as a `path =` dependency (sc-17935 item 1).
-  assert.deepEqual(digests.get("provider_a").crates, ["crates/a", "crates/shared", "crates/vendor/patched"]);
-  assert.deepEqual(digests.get("provider_b").crates, ["crates/b", "crates/shared"]);
+  // The universal crate IS walked and IS listed — v4 removes its CONTENT from the currency digest,
+  // not the crate from the closure. See `UNIVERSAL_CRATES`.
+  assert.deepEqual(digests.get("provider_a").crates, [
+    "crates/a", "crates/contracts/gen-core", "crates/shared", "crates/vendor/patched",
+  ]);
+  assert.deepEqual(digests.get("provider_b").crates, [
+    "crates/b", "crates/contracts/gen-core", "crates/shared",
+  ]);
+  assert.deepEqual(digests.get("provider_a").universalCrates, ["crates/contracts/gen-core"]);
 });
 
 test("a `workspace = true` dependency is resolved through the root manifest", () => {
@@ -299,7 +320,7 @@ test("tests/ and benches/ are outside the digested source", () => {
 test("the locked set is restricted to packages the closure reaches", () => {
   const lock = parseCargoLock(workspace()["Cargo.lock"]);
   const reached = lockedClosure(lock, ["a", "shared"]).map((entry) => entry.name);
-  assert.deepEqual(reached.sort(), ["a", "only-a-uses-me", "patched", "shared"]);
+  assert.deepEqual(reached.sort(), ["a", "gen-core", "only-a-uses-me", "patched", "shared"]);
   assert.ok(!reached.includes("nobody-uses-me"));
   assert.ok(!reached.includes("unreachable-patch"));
 });
@@ -349,6 +370,64 @@ test("a shared-crate change moves every provider that links it", () => {
   for (const provider of Object.keys(PROVIDERS)) {
     assert.notEqual(before.get(provider).digest, after.get(provider).digest, provider);
   }
+});
+
+test("THE v4 HEADLINE: a universal crate's source change moves NO provider's currency digest", () => {
+  // The defect this exists to prevent, and it is not hypothetical — it has come back eight times.
+  //
+  // `core-llm` and `gen-core` are in ALL 17 real closures, so under v3 any edit to either moved
+  // every provider at once, which is repository-wide pin identity wearing a per-provider digest's
+  // clothes. Measured on the real f32fce06 -> 857f2454 bump: 17 of 17 providers demoted, every one
+  // attributable solely to `core-llm`, whose entire diff was a new `starvector.rs` plus
+  // `pub mod starvector;` and its re-exports. Adding a NEW model invalidated the measured memory of
+  // every EXISTING model. Under v4 that same bump demotes 3, and each of those links a genuinely
+  // changed model crate.
+  const edited = workspace({
+    "crates/contracts/gen-core/src/lib.rs": "pub fn contract() { /* semantic edit */ }\n",
+  });
+  const before = digestsFor({ r1: workspace() });
+  const after = digestsFor({ r1: edited });
+  for (const provider of Object.keys(PROVIDERS)) {
+    assert.equal(
+      before.get(provider).digest,
+      after.get(provider).digest,
+      `${provider}: a universal crate cannot carry per-provider currency`,
+    );
+    // The signal is not lost, only separated: it is recorded where a reviewer sees it in the diff.
+    assert.notEqual(
+      before.get(provider).sharedContractDigest,
+      after.get(provider).sharedContractDigest,
+      `${provider}: the shared-contract change must still be visible`,
+    );
+  }
+});
+
+test("a universal crate's files never enter the digested source", () => {
+  // Mutation guard for the test above: if the exclusion were implemented by something that happened
+  // to hold on this fixture rather than by scoping `[source]`, this fails.
+  const text = providerClosureDigest({
+    repo: "/fake", revision: "r1", provider: "provider_a", crateDir: "crates/a",
+    readBodies: fakeBodies({ r1: workspace() }),
+    runGit: fakeGit({ r1: workspace() }),
+  }).text;
+  const source = text.split("[source]")[1].split("[workspace]")[0];
+  assert.ok(!source.includes("crates/contracts/gen-core"), source);
+  assert.ok(source.includes("crates/a/src/lib.rs"), source);
+  // Listed by name, so ADDING or DROPPING a universal crate is still a structural digest change —
+  // only its file contents stop counting.
+  assert.match(text, /\[universal-crates\]\ncrates\/contracts\/gen-core\n/);
+});
+
+test("dropping a universal crate from the closure still moves the digest", () => {
+  // The exclusion must not become a hole: a provider that STOPS linking the shared contract has
+  // genuinely changed shape, and that is a structural fact `[crates]`/`[universal-crates]` carry.
+  const edited = workspace({
+    "crates/b/Cargo.toml": '[package]\nname = "b"\n\n[dependencies]\nshared = { workspace = true }\n',
+  });
+  assert.notEqual(
+    digestsFor({ r1: workspace() }).get("provider_b").digest,
+    digestsFor({ r1: edited }).get("provider_b").digest,
+  );
 });
 
 test("a crate NO provider links cannot move any digest", () => {

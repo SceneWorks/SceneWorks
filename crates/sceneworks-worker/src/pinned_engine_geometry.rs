@@ -43,6 +43,7 @@ use runtime_macos as platform_runtime;
 // `media` feature). candle-gen-bernini / mlx-gen-bernini and the scail2 engines import this same
 // `MAX_AREA_14B` rather than declaring their own, so it is authoritative for the whole 14B family.
 // `SIZE_MULTIPLE_14B` is the same `pub const ... = 16` on both backends.
+use platform_runtime::providers::ltx::SIZE_MULTIPLE as LTX_SIZE_MULTIPLE;
 use platform_runtime::providers::wan::config::{MAX_AREA_14B, MAX_AREA_5B, SIZE_MULTIPLE_14B};
 use serde_json::Value;
 
@@ -68,6 +69,7 @@ use platform_runtime::providers::minimax_h3::pipeline::CANVAS_MAX_PIXELS;
 /// covering a model — the same tripwire the sibling
 /// [`shipped_manifest_matches_each_engines_real_geometry`] uses (`models.len() == …`).
 const EXPECTED_VIDEO_IDS: &[&str] = &[
+    "ltx_2_5",
     "ltx_2_3",
     "ltx_2_3_eros",
     "svd",
@@ -137,7 +139,9 @@ fn expected_max_pixels(id: &str) -> PinnedAreaCap {
         | "bernini"
         | "scail2_14b" => PinnedAreaCap::Pinned(MAX_AREA_14B as u64),
         "wan_2_2" => PinnedAreaCap::Pinned(MAX_AREA_5B as u64),
-        "ltx_2_3" | "ltx_2_3_eros" | "svd" | "krea_realtime_14b" => PinnedAreaCap::EngineHasNone,
+        "ltx_2_3" | "ltx_2_3_eros" | "ltx_2_5" | "svd" | "krea_realtime_14b" => {
+            PinnedAreaCap::EngineHasNone
+        }
         "minimax_h3" | "minimax_h3_ref" => PinnedAreaCap::Pinned(u64::from(CANVAS_MAX_PIXELS)),
         other => panic!(
             "video model {other:?} is not mapped to a pinned engine area cap — derive its \
@@ -155,7 +159,9 @@ fn expected_max_pixels(id: &str) -> PinnedAreaCap {
 /// The wan 14B grid-16 family renders on the `SIZE_MULTIPLE_14B = 16` lattice: the three A14B ids
 /// through their own engine, and `bernini` through a Wan2.2-T2V-A14B snapshot (patch 2 × vae 8).
 /// `scail2_14b` and the 5B declare no stride (their `None` means "engine stride == core's default
-/// floor"), and ltx / svd / mochi live in other engine crates — all deferred to sc-12587.
+/// floor"), and svd / mochi live in other engine crates — deferred to sc-12587. LTX-2.5 is tied
+/// here because SC-18782 requires its new manifest row to land against the provider's exported
+/// `SIZE_MULTIPLE`, rather than another hand-copied 64.
 ///
 /// **`krea_realtime_14b` (epic 8431 / sc-8444) is deliberately NOT tied here**, even though it
 /// renders on the same ÷16 lattice and its manifest declares 16. The tie would be a FICTION: the
@@ -177,6 +183,7 @@ fn expected_max_pixels(id: &str) -> PinnedAreaCap {
 /// engine-stride-equals-core-default assertion for the whole untied group at once.
 fn pinned_stride(id: &str) -> Option<u64> {
     match id {
+        "ltx_2_5" => Some(u64::from(LTX_SIZE_MULTIPLE)),
         "wan_2_2_t2v_14b" | "wan_2_2_i2v_14b" | "wan_2_2_vace_fun_14b" | "bernini" => {
             Some(SIZE_MULTIPLE_14B as u64)
         }

@@ -1093,6 +1093,14 @@ pub(crate) async fn queue_lora_import_job(
             &format!("source_path={local_source}"),
         )?;
     }
+    if payload
+        .family
+        .as_deref()
+        .is_some_and(|family| canonical_lora_family(family) == "ltx-video")
+    {
+        let models = model_catalog(&state).await?;
+        validate_ltx_import_base_model(&models, payload.base_model.as_deref())?;
+    }
     // Mint the id (see `derive_lora_id`): explicit caller id wins, else a
     // family-scoped `<family>_<slug>` so folders never collide across families.
     let lora_id = derive_lora_id(payload.lora_id.as_deref(), &name, payload.family.as_deref());
@@ -1574,9 +1582,18 @@ pub(crate) fn validate_lora_specs_for_model(
                 declared_model_ids.join(" or ")
             )));
         }
+        if families.iter().any(|family| family == "ltx-video")
+            && model_id == "ltx_2_5"
+            && declared_model_ids.is_empty()
+            && lora_base_model(lora).is_none()
+        {
+            return Err(ApiError::bad_request(format!(
+                "LoRA {lora_id} does not record which LTX base model it targets. LTX-2.5 cannot \
+                 safely load a family-only adapter; re-import it and choose LTX-2.5 as the base model."
+            )));
+        }
         // Base-model gating: for families where a matching family is insufficient
-        // (Wan 5B vs 14B both declare `wan-video` but have incompatible
-        // architectures — 48 vs 16 latent channels), a LoRA that records its
+        // (Wan 5B vs 14B, or LTX-2.3 vs LTX-2.5), a LoRA that records its
         // trained base model only loads on that exact model. LoRAs without a
         // recorded base model fall back to family gating (legacy/imported), so this
         // never tightens behavior for existing LoRAs.
@@ -1584,7 +1601,10 @@ pub(crate) fn validate_lora_specs_for_model(
         // Kept alongside the declared-partition gate above rather than merged into it: this one
         // reads what an adapter RECORDS about its own training, that one reads what a catalog
         // author DECLARES. An imported Wan LoRA has the former and no catalog entry at all.
-        if families.iter().any(|family| family == "wan-video") {
+        if families
+            .iter()
+            .any(|family| matches!(family.as_str(), "wan-video" | "ltx-video"))
+        {
             if let Some(base_model) = lora_base_model(lora) {
                 // Shared with the worker's own gate (sc-15017): exact-id equality, plus the
                 // extra-compatible arm that keeps the 5B-vs-14B split while letting a Wan-14B
@@ -1595,9 +1615,13 @@ pub(crate) fn validate_lora_specs_for_model(
                     model_id,
                     &base_model,
                 ) {
+                    let detail = if families.iter().any(|family| family == "ltx-video") {
+                        "LTX-2.3 and LTX-2.5 LoRAs are not interchangeable"
+                    } else {
+                        "Wan 5B and 14B LoRAs are not interchangeable"
+                    };
                     return Err(ApiError::bad_request(format!(
-                        "LoRA {lora_id} was trained for base model {base_model}, not {model_id}; \
-                         Wan 5B and 14B LoRAs are not interchangeable"
+                        "LoRA {lora_id} was trained for base model {base_model}, not {model_id}; {detail}"
                     )));
                 }
             }
@@ -1710,6 +1734,34 @@ pub(crate) fn lora_source_provider(payload: &LoraImportRequest) -> &'static str 
     } else {
         "local"
     }
+}
+
+fn validate_ltx_import_base_model(
+    models: &[Value],
+    base_model: Option<&str>,
+) -> Result<(), ApiError> {
+    let available: Vec<&str> = models
+        .iter()
+        .filter(|model| {
+            model
+                .get("family")
+                .and_then(Value::as_str)
+                .is_some_and(|family| canonical_lora_family(family) == "ltx-video")
+        })
+        .filter_map(|model| model.get("id").and_then(Value::as_str))
+        .collect();
+    let Some(base_model) = base_model.map(str::trim).filter(|base| !base.is_empty()) else {
+        return Err(ApiError::bad_request(
+            "LTX LoRA imports require a baseModel. Choose the exact LTX base model in Model Manager so LTX-2.3 and LTX-2.5 adapters cannot be mixed.",
+        ));
+    };
+    if !available.contains(&base_model) {
+        return Err(ApiError::bad_request(format!(
+            "Base model '{base_model}' is not an available LTX model. Choose one of: {}.",
+            available.join(", ")
+        )));
+    }
+    Ok(())
 }
 
 /// The `<stem>.high_noise.safetensors` / `<stem>.low_noise.safetensors` filenames
@@ -2231,6 +2283,7 @@ mod huggingface_receipt_tests {
 
     #[test]
     fn old_receipted_adapter_is_usable_stale_but_arbitrary_safetensors_is_not() {
+        let _env = isolate_hf_cache();
         let temp = tempfile::tempdir().unwrap();
         let data_dir = temp.path();
         let repo = "SceneWorks/krea-edit";
@@ -2282,6 +2335,7 @@ mod huggingface_receipt_tests {
 
     #[test]
     fn current_adapter_clears_update_available() {
+        let _env = isolate_hf_cache();
         let temp = tempfile::tempdir().unwrap();
         let data_dir = temp.path();
         let repo = "SceneWorks/krea-edit";
@@ -2335,6 +2389,21 @@ mod base_model_gating_tests {
         ]
     }
 
+    fn ltx_models() -> Vec<Value> {
+        vec![
+            json!({
+                "id": "ltx_2_3",
+                "family": "ltx-video",
+                "loraCompatibility": { "families": ["ltx-video"] }
+            }),
+            json!({
+                "id": "ltx_2_5",
+                "family": "ltx-video",
+                "loraCompatibility": { "families": ["ltx-video"] }
+            }),
+        ]
+    }
+
     #[test]
     fn rejects_wan_5b_lora_on_14b_model() {
         let models = wan_models();
@@ -2363,6 +2432,41 @@ mod base_model_gating_tests {
         let lora = json!({ "id": "legacy", "families": ["wan-video"] });
         validate_lora_specs_for_model(&models, &[], "wan_2_2_t2v_14b", &[lora], true, "LoRA")
             .expect("family-only LoRA must still pass");
+    }
+
+    #[test]
+    fn family_only_ltx_lora_remains_usable_on_2_3_but_fails_closed_on_2_5() {
+        let models = ltx_models();
+        let lora = json!({ "id": "legacy", "families": ["ltx-video"] });
+        validate_lora_specs_for_model(
+            &models,
+            &[],
+            "ltx_2_3",
+            std::slice::from_ref(&lora),
+            true,
+            "LoRA",
+        )
+        .expect("existing family-only LTX-2.3 LoRA remains usable");
+
+        let error = validate_lora_specs_for_model(&models, &[], "ltx_2_5", &[lora], true, "LoRA")
+            .expect_err("unstamped LTX adapter must fail closed on 2.5");
+        assert!(
+            format!("{error:?}").contains("does not record which LTX base model"),
+            "got: {error:?}"
+        );
+    }
+
+    #[test]
+    fn ltx_import_requires_an_available_ltx_base_model() {
+        let models = ltx_models();
+        let missing = validate_ltx_import_base_model(&models, None)
+            .expect_err("LTX import without a base stamp must be rejected");
+        assert!(format!("{missing:?}").contains("require a baseModel"));
+        validate_ltx_import_base_model(&models, Some("ltx_2_5"))
+            .expect("catalog LTX base is accepted");
+        let unrelated = validate_ltx_import_base_model(&models, Some("wan_2_2"))
+            .expect_err("unrelated model must not be stamped onto an LTX import");
+        assert!(format!("{unrelated:?}").contains("not an available LTX model"));
     }
 
     /// Minimal valid safetensors whose tensor keys make `detect_lora_family` report `wan-video`

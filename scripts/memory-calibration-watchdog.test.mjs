@@ -13,6 +13,15 @@ const execFileAsync = promisify(execFile);
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const WATCHDOG = path.join(ROOT, "scripts/memory-calibration-watchdog.py");
 
+// The wall-clock ceiling is a backstop behind the serialized attestation barriers, never
+// the property a test asserts. A flat budget quietly turns into a real deadline as the
+// parallel suite grows, so derive it the way the provider-phase test already does: the
+// startup window plus one aggregate telemetry window per barrier (payload, ACK, GO, DONE,
+// BYE and the spawn itself) and per advertised provider phase. The historical flat value
+// stays as a floor so runs configured with a tight telemetry timeout keep their slack.
+const ATTESTATION_HANDSHAKE_BARRIERS = 6;
+const MIN_MAX_RUNTIME_SECONDS = 2;
+
 async function fixture() {
   const root = await mkdtemp(path.join(tmpdir(), "sc19642-watchdog-"));
   const program = path.join(root, "tree.py");
@@ -141,7 +150,7 @@ function assertGone(pid) {
 async function runWithMockedProductionTelemetry(files, childCommand, options = {}) {
   const {
     telemetryTimeout = 0.5, actualHostMemory = 1000, requestedHostMemory = 1000,
-    childAttestationTimeout = 1, maxRuntimeSeconds = 2,
+    childAttestationTimeout = 1, maxRuntimeSeconds = null,
     requireProviderPhases = false,
     providerPhaseProfile = "campaign-entry",
     memoryFreePercent = 90, memoryFreeBytes = 900, swapFreeBytes = 900,
@@ -150,6 +159,23 @@ async function runWithMockedProductionTelemetry(files, childCommand, options = {
     environment = process.env,
   } = options;
   const pressureFailureAtPython = pressureFailureAt === null ? "None" : String(pressureFailureAt);
+  // The phase count comes from the watchdog's own profile table, so the derived deadline
+  // cannot drift from the protocol it bounds.
+  const providerPhaseProfilePython = requireProviderPhases
+    ? JSON.stringify(providerPhaseProfile) : "None";
+  const providerPhaseCountPython =
+    `len(module.PROVIDER_PHASE_PROFILES.get(${providerPhaseProfilePython}, ()))`;
+  const maxRuntimePython = maxRuntimeSeconds === null
+    ? `max(${MIN_MAX_RUNTIME_SECONDS}, ${childAttestationTimeout}`
+      + ` + (${providerPhaseCountPython} + ${ATTESTATION_HANDSHAKE_BARRIERS})`
+      + ` * ${telemetryTimeout})`
+    : String(maxRuntimeSeconds);
+  // Harness backstop only: it must stay clear of the watchdog's own derived deadline so a
+  // real hard stop, not this timeout, is always what a test observes. The longest phase
+  // profile today is ten phases; the bound is deliberately looser than that.
+  const harnessTimeoutMs = Math.max(10_000, Math.round(1_000 * (6 + (maxRuntimeSeconds
+    ?? Math.max(MIN_MAX_RUNTIME_SECONDS, childAttestationTimeout
+      + (16 + ATTESTATION_HANDSHAKE_BARRIERS) * telemetryTimeout)))));
   const launcher = `${files.program}.production-watchdog.py`;
   await writeFile(launcher, String.raw`import importlib.util, sys
 spec = importlib.util.spec_from_file_location("watchdog", ${JSON.stringify(WATCHDOG)})
@@ -171,7 +197,7 @@ module.DarwinHostPressureSampler.actual_host_memory_bytes = staticmethod(
     lambda timeout: ${actualHostMemory})
 sys.argv = [${JSON.stringify(WATCHDOG)},
     "--max-footprint-bytes", "100", "--max-runtime-seconds",
-    ${JSON.stringify(String(maxRuntimeSeconds))},
+    str(${maxRuntimePython}),
     "--host-memory-bytes", ${JSON.stringify(String(requestedHostMemory))},
     "--min-memory-free-bytes", "100",
     "--sample-interval", "0.02",
@@ -184,7 +210,7 @@ sys.argv = [${JSON.stringify(WATCHDOG)},
     "--", *${JSON.stringify(childCommand)}]
 raise SystemExit(module.guard(module.parse_args()))
 `);
-  return execFileAsync("python3", [launcher], { timeout: 10_000, env: environment });
+  return execFileAsync("python3", [launcher], { timeout: harnessTimeoutMs, env: environment });
 }
 
 test("physical-footprint hard stop terminates the responsive owned group with no residue", async () => {

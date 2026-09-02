@@ -31,14 +31,17 @@ if (request.action === "probe") {
     strategy: request.planned.strategy,
     loadShape: request.planned.loadShape,
     artifact: { repository: "SceneWorks/fixture", resolvedRevision: "cccccccccccccccccccccccccccccccccccccccc", variant: "q4" },
-    sweep: {
-      axes: [{ parameter: "decodeTileEdge", testedValues: [384, 512] }],
-      cases: [
-        { parameters: { ...p, decodeTileEdge: 384 }, result: "passed" },
-        { parameters: { ...p, decodeTileEdge: 512 }, result: "passed" }
-      ],
-      rangeVerified: true
-    },
+    // sc-22514: an ANCHOR runs one unparameterized composition, so the truthful sweep is degenerate.
+    sweep: Object.keys(p).length === 0
+      ? { axes: [], cases: [{ parameters: {}, result: "passed" }], rangeVerified: true }
+      : {
+          axes: [{ parameter: "decodeTileEdge", testedValues: [384, 512] }],
+          cases: [
+            { parameters: { ...p, decodeTileEdge: 384 }, result: "passed" },
+            { parameters: { ...p, decodeTileEdge: 512 }, result: "passed" }
+          ],
+          rangeVerified: true
+        },
     scenarios: [
       { name: "exact_fit", result: "passed", predictedBytes: 200, effectiveBudgetBytes: 200 },
       { name: "unknown_budget", result: "passed" },

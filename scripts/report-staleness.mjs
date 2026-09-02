@@ -200,7 +200,9 @@ function reportCalibrationEvidence() {
   console.log(`  ${plural(records.length, "record")} in the corpus.`);
   console.log(
     "  Per-record staleness is graded at runtime against each provider's calibration fingerprint and\n" +
-      "  ABI, not here — `node scripts/check-evidence-corpus.mjs` is the corpus's own integrity check.",
+      "  ABI, not here. sc-22512 retired the corpus-shrink gate that used to be named on this line:\n" +
+      "  a record leaving the corpus is an unmeasured cell, and an unmeasured cell falls back to the\n" +
+      "  conservative analytic estimate rather than failing anything.",
   );
 }
 

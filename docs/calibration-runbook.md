@@ -28,9 +28,10 @@ Companions, not prerequisites — you should not need to open either to finish a
 Measuring a lane **improves prediction**. It does not unlock anything.
 
 Since epic 18093 (sc-18095/18096/18097), a lane whose provider compile closure has moved keeps
-serving its measured numbers behind a **widened admission margin**, and unmeasured cells are admitted
-from **fitted estimates** behind a wider margin still
-(`crates/sceneworks-worker/src/ladder_margin_policy.rs`). Nothing in `npm run check`,
+serving its measured numbers behind a **per-term admission allowance**, and unmeasured cells are
+admitted from **fitted, anchor-derived, or floor estimates** behind whichever allowance names their
+remaining uncertainty (`crates/sceneworks-worker/src/ladder_margin_policy.rs`; sc-22508 replaced the
+single per-backend multiplier with one named term per basis). Nothing in `npm run check`,
 `npm run rust:check`, the pre-push hook or CI demands a re-capture — **there are zero staleness gates
 in CI**. So the payoff of a capture is narrower margins and better-grounded admission on that lane,
 not a ladder that was previously refused.
@@ -111,27 +112,48 @@ node -e 'const c=require("./config/inference-provider-closures.json");
   console.log(c.providers["<lane>"] ?? "NOT DECLARED")'
 ```
 
-If it prints `NOT DECLARED`, the capture will fail in seconds — the harness derives one closure
-digest per lane **before the first capture invocation** precisely so this does not surface after a
-multi-hour sweep. Add the lane per §7c first.
+If it prints `NOT DECLARED`, the capture **still runs and still writes a record** — sc-22512 made an
+undeclared lane a non-refusal. What you lose is currency: the harness derives the closure digest
+*after* the provider probe returns, and an undeclared lane derives none at all, so the record carries
+no currency term and can therefore never read `current` or certify a cell
+(`scripts/memory-calibration-harness.mjs`, `closureDigest` in `capturePlannedCase`). Add the lane per
+§7c **before** booking the host so the capture is promotable on the spot. Declaring it afterwards is
+recoverable without re-capturing — `node scripts/backfill-closure-digests.mjs --repo <inference-checkout>
+--write` stamps a record that carries no digest yet — but that is a repair, not the path this runbook
+walks.
 
-### 2b. The plan has entries for the lane, and you know its fixture
+### 2b. The plan declares an ANCHOR for the cell you want measured
 
-`--fixture` — not `--provider` — is how a multi-rung ladder is selected as one reproducible capture.
-Derive it from the plan rather than guessing:
+sc-22514 collapsed `config/memory-calibration-plan.json` to an ANCHOR plan: an object keyed
+`<modelId>:<tier>:<backend>` with exactly one entry per key. `--anchor` names that key. There is no
+fixture selector, no rung ladder and no partition — one key is one capture is one record. Read the
+declared keys for a lane rather than guessing:
 
 ```bash
 node -e 'const [backend,provider]=process.argv[1].split(":");
   const plan=require("./config/memory-calibration-plan.json");
-  const rows=plan.providers.filter(p=>p.backend===backend&&p.target.provider===provider);
-  if(!rows.length) throw new Error("no plan entries for "+process.argv[1]);
-  console.log([...new Set(rows.map(p=>`${p.evidenceScope}  ${p.fixture}`))].join("\n"))' <lane>
+  const rows=Object.entries(plan.anchors).filter(([k,a])=>k.endsWith(":"+backend)&&a.provider===provider);
+  if(!rows.length) throw new Error("no anchor declared for "+process.argv[1]);
+  console.log(rows.map(([k,a])=>`${k}  ${a.evidenceScope}  ${a.fixture}`).join("\n"))' <lane>
 ```
 
-Verified for `mlx:z_image_turbo` → `authoritative  fresh-five-rung-z-image-q4-768-seed16402-step2`.
+Verified for `mlx:z_image_turbo` → `z_image_turbo:q4:mlx  authoritative
+fresh-five-rung-z-image-q4-768-seed16402-step2`.
 
-Only `authoritative` scope can ever become `current`. A `fixture`/`candidate` selection derives no
+Only `authoritative` scope can ever become `current`. A `fixture`/`candidate` anchor derives no
 digest and can never be current evidence.
+
+🔴 **The anchor's `geometry` is a FREE PLAN CHOICE, not a restatement of the geometry the packaged
+anchor was captured at, and the two are allowed to disagree.** The packaged anchors in
+`config/memory-anchors.json` (surfaced as `anchors[].geometry` in `docs/generated/memory-matrix.json`)
+record where the *last* capture happened; the plan records where the *next* one should happen. Five
+cells disagree today on purpose — `krea_2_turbo:q4:candle`, `flux2_dev:q4:mlx`, `flux2_dev:q8:mlx`,
+`ltx_2_5:bf16:mlx` and `ltx_2_5:q8:mlx` all plan a smaller geometry than the packaged anchor carries
+— and re-capturing any of them **legitimately moves** the packaged geometry to the planned one.
+Nothing derives one from the other and nothing gates on their agreement, so do **not** "fix" a plan
+geometry to match a packaged anchor: editing the plan changes what the next capture measures, and
+that is a measurement decision. Read `crates/sceneworks-core/src/memory_anchor.rs` for how a
+non-anchor cell is derived from whatever geometry the anchor actually carries.
 
 ### 2c. A provider adapter covers the lane
 
@@ -606,10 +628,14 @@ at, not a build pin.
 
 ## 6. The capture
 
-`--output` and `--resume` should point **outside the repository**. `.tmp/` is gitignored today
+`--output` should point **outside the repository**. `.tmp/` is gitignored today
 (`.gitignore:298-301`, added deliberately for this), so it also works — but the failure mode when an
-ignore rule changes is a multi-hour sweep discarded at the end, and the CI lanes themselves write to
-`$RUNNER_TEMP`. Use a path outside the tree and the question does not arise.
+ignore rule changes is a multi-hour capture discarded at the end, and the CI lanes themselves write
+to `$RUNNER_TEMP`. Use a path outside the tree and the question does not arise.
+
+**One command captures one anchor and writes one record.** There is no campaign to schedule, no
+resume, no reuse assessment and no batch. Capturing a second cell means running the command a second
+time with a different `--anchor`, producing a second file.
 
 For physical MLX capture, the raw-log directory must also stay outside the checkout. Run
 `scripts/hash-artifact-inventory.mjs --root <exact-tier-root> --github-env <env-file>` once before
@@ -634,10 +660,11 @@ streams and hashes every artifact byte, including Hugging Face symlink targets.
 
 ### 6a. Locally on the host
 
-> Provenance: the adapter builds and `harness run` were **not** executed while writing this runbook —
-> a real capture is a multi-hour GPU sweep on dedicated hardware. Every flag below is transcribed
-> from `memory-calibration-harness.mjs:1186-1233` and from the two checked-in capture workflows,
-> which run exactly these commands. `harness check` WAS executed (on the committed bundle).
+> Provenance: the adapter builds and `harness capture` were **not** executed while writing this
+> runbook — a real capture is a multi-hour GPU render on dedicated hardware. Every flag below is
+> transcribed from `memory-calibration-harness.mjs` (`main`, the `capture` arm) and from the two
+> checked-in capture workflows, which run exactly these commands. `harness check` WAS executed (on
+> the committed bundle).
 
 ```bash
 # Apple silicon
@@ -650,55 +677,45 @@ cargo build --release --locked -p sceneworks-memory-adapter \
 ```
 
 ```bash
-node scripts/memory-calibration-harness.mjs run \
-  --config config/memory-calibration-plan.json \
-  --backend <backend> \
-  --fixture <fixture from §2b> \
-  --fresh-per-case \
+node scripts/memory-calibration-harness.mjs capture \
+  --plan config/memory-calibration-plan.json \
+  --anchor <key from §2b> \
   --provider-command '["/abs/path/to/target/release/memory-<backend>-adapter"]' \
   --sceneworks-repo /abs/path/to/SceneWorks \
   --inference-repo /abs/path/to/inference \
   --raw-log-dir /abs/path/OUTSIDE/the/repo/raw-receipts \
   --source-path-prefix docs/calibration/<story-or-campaign> \
-  --output /abs/path/OUTSIDE/the/repo/<lane>-evidence.json
+  --output /abs/path/OUTSIDE/the/repo/<anchor>-evidence.json
 ```
-
-> **No `--resume` here, and RUN `plan` FIRST.** This recipe used to pass
-> `--resume docs/generated/memory-calibration-evidence.json`, which silently no-ops the most common
-> reason to be reading this runbook. `--resume` suppresses cases that were already ATTEMPTED, judged
-> on repository identity with the closure digest deliberately stripped from both sides — so a record
-> staled by an inference pin bump still counts as attempted, and `run --resume` captures nothing
-> while exiting 0. Measured on sc-19721: `plan --resume` returned 0 of the 7 fixtures the bump had
-> just demoted; without it, all 7 resolved, for 19 cases. Both CI lanes omit `--resume` from `run`.
-> Always `plan` both ways before holding an exclusive GPU window — the diff between the two fixture
-> lists IS your re-capture set. See
-> [memory-calibration-harness.md](memory-calibration-harness.md) for the mechanism.
 
 Then schema-check the raw bundle before doing anything else:
 
 ```bash
 node scripts/memory-calibration-harness.mjs check \
-  --input /abs/path/OUTSIDE/the/repo/<lane>-evidence.json
+  --input /abs/path/OUTSIDE/the/repo/<anchor>-evidence.json \
+  --source-root /abs/path/OUTSIDE/the/repo/raw-receipts
 ```
 
-Flag notes, all from `memory-calibration-harness.mjs:1186-1233`:
+Flag notes, all from the `capture` arm of `main`:
 
-- `--backend` is **required** whenever the plan contains both backends; one provider process probes
-  one backend-specific hardware shape.
+- `--anchor` is the plan key `<modelId>:<tier>:<backend>`. An unknown or malformed key fails in
+  milliseconds, before the adapter is started. The backend comes out of the key, so there is no
+  `--backend`.
+- `--plan` defaults to `config/memory-calibration-plan.json`; pass it explicitly in a script.
 - `--provider-command` is a **JSON argv array**, quoted as one shell word.
-- `--fresh-per-case` forces one fresh process per case (the oracle shape both CI lanes use);
-  `--batch-rungs` forces one target's rungs into an experimental batch.
-- `--resume <bundle>` suppresses already-complete cases. The runner **atomically checkpoints the
-  accumulated schema-valid bundle after every successful provider response**, so an interrupted
-  sweep can be resumed by pointing `--resume` at the partial output and re-running. Only schema-valid
-  `complete` records suppress their executed passing cases; a gated or candidate record suppresses a
-  repeated *attempt* only when its logical case, harness version, repository receipts and hardware
-  probe all match. **That is its ONLY correct use: resuming an interrupted sweep of the same
-  revision.** Suppression is blind to the closure digest in both directions
-  (`operationallyAttemptedLogicalIds`), by design — it decides whether to re-run a multi-hour
-  capture, not whether the evidence is current. So it must never be used to re-capture evidence a
-  pin bump staled: those records still read as attempted. For a re-capture, omit it on `run` and
-  pass it on `ingest`, where it means the merge BASE instead.
+- `--raw-log-dir` and `--source-path-prefix` come as a PAIR or not at all, and the directory must sit
+  outside both checkouts.
+- An `ltx_2_5` anchor additionally requires
+  `--ltx25-snapshot-root /abs/cache/models--SceneWorks--ltx-2.5-mlx/snapshots/081658ce6886cacba20817ce0359bbefef706ff2`.
+  The harness validates that exact public repository/revision and the anchor's nested layout, hashes
+  its `<transformerVariant>/<tier>` root once, hashes the shared enhancer root once, hashes the dev
+  refinement adapter file once when the anchor is a dev variant, and sets their byte counts and
+  digests on the provider invocation. It re-hashes all of them around the invocation, so a mutation
+  during the render is caught rather than recorded. The adapter refuses a missing shared inventory
+  before provider construction.
+- The composition is NOT a flag. An anchor is the `resident` composition on MLX and the shallow
+  optimized one (`staged_residency`, nothing deeper) on candle, fixed by the harness to match what
+  `scripts/extract-memory-anchors.mjs` can actually price.
 
 ### 6b. Through the guarded dispatch
 
@@ -723,8 +740,7 @@ gh workflow run macos-mlx.yml --ref main \
 
 Validates the identities, resolves (without printing) the snapshot root, checks out inference at the
 exact revision into `.calibration/inference`, builds the release adapter, runs the harness with
-`--fresh-per-case` on fixture `qwen-image-<tier>-seed<15511|16353>-step2` (seed 15511 for `bf16`,
-16353 for the packed tiers — macos-mlx.yml:809-813), schema-checks the bundle and uploads it as
+`--anchor qwen_image:<tier>:mlx`, schema-checks the bundle and uploads it as
 `memory-mlx-evidence-<tier>-<run_id>`. That artifact contains the bundle plus the immutable raw log
 and selected/reference outputs in their repository-relative tree. Validate a downloaded artifact
 with `memory-calibration-harness.mjs check --input <bundle> --source-root <unpacked-raw-root>`, then
@@ -744,10 +760,8 @@ gh workflow run macos-mlx.yml --ref main \
   -f z_image_revision=<exact 40-hex artifact revision>
 ```
 
-No tier input — the fixture is fixed at `fresh-five-rung-z-image-q4-768-seed16402-step2`. It first
-runs `assess-reuse` and **asserts the verdict is `unable_to_amortize`** before capturing
-(macos-mlx.yml:841-848), then runs `--fresh-per-case` and uploads
-`sc-16059-mlx-reuse-{run_id}` containing the bundle and the assessment.
+No tier input — the anchor is fixed at `z_image_turbo:q4:mlx`. It captures that one anchor,
+schema-checks it, and uploads `sc-16059-mlx-anchor-{run_id}` containing the bundle.
 
 **`candle:krea_2_turbo`** — `run_five_rung_reference` on `windows-candle.yml` (:134-163, 460-476):
 
@@ -768,8 +782,7 @@ spellings are silently ignored rather than rejected, and because an omitted `wor
 input takes its **default**, a dispatch using them still runs — against whatever the defaults say.
 Verified against the real dispatch in sc-11045 (run 33000590976).
 
-Captures fixture `fresh-five-rung-krea-q4-1024-seed16402-step2` **twice** — once `--fresh-per-case`,
-once `--batch-rungs` — schema-checks both and runs `compare-reuse` between them.
+Captures the `krea_2_turbo:q4:candle` anchor once and schema-checks it.
 
 Retrieve any of them with `gh run download <run-id>`.
 
@@ -788,10 +801,11 @@ from a real capture rather than trusted forward.
   **3.85 s per invocation**. This is a hard **floor** and known not to cover the dominant cost: those
   records are `gated`, exercising the VAE decode seam only — no text-encoder or DiT load, no
   conditioning, no denoise, no lifecycle injection, no warm A→B→A.
-- **A five-rung lane is 5 certifying records** (one per cell), each a fresh model load under
-  `--fresh-per-case`. At the assumed 300 s that is ~25 minutes of provider time plus five cold model
-  loads; the floor anchor says the harness overhead itself is seconds. Budget hours, not minutes, and
-  do not promise a number — measure yours and report it.
+- **A lane is now ONE certifying record per (model, tier)** — sc-22514 replaced the five-rung ladder
+  with a single anchor, so the cost of a lane fell by roughly the length of the ladder. Each capture
+  is still one fresh cold model load; the floor anchor says the harness overhead itself is seconds.
+  Budget hours, not minutes, for a whole model's three tiers, and do not promise a number — measure
+  yours and report it.
 - **I/O is not the bottleneck**: warm-page-cache sequential reads of real safetensors shards on this
   Mac measured 11.3 GB/s and 12.3 GB/s, so a 20 GiB tier streams in under 2 s. Dequantisation, graph
   construction and denoise are unmeasured.
@@ -1203,32 +1217,40 @@ A capture has **two halves**, and both must land or the lane does not move. §7a
 `config/manifests/builtin.models.jsonc`. Doing only the first is the single most likely way to finish
 this runbook and change nothing the runtime reads — §7d quantifies exactly what that costs.
 
-### 7a. Merge into the committed bundle
+### 7a. Commit the bundle, then re-derive the anchor store
 
-> Provenance: written from `memory-calibration-harness.mjs:1197-1201`, not re-executed while writing
-> this runbook — `ingest` needs a real captured bundle as input.
+A capture writes its own `{records: [...]}` bundle. There is no merge step and no `--resume` merge
+base: `scripts/extract-memory-anchors.mjs` walks EVERY retained corpus under `docs/calibration/` and
+`docs/generated/`, so committing the file under `docs/calibration/<story>/` is what publishes it.
 
 ```bash
+# 1. validate (and normalize) the captured bundle
 node scripts/memory-calibration-harness.mjs ingest \
-  --input /abs/path/OUTSIDE/the/repo/<lane>-evidence.json \
-  --resume docs/generated/memory-calibration-evidence.json \
-  --output /abs/path/OUTSIDE/the/repo/merged.json
+  --input /abs/path/OUTSIDE/the/repo/<anchor>-evidence.json \
+  --source-root /abs/path/OUTSIDE/the/repo/raw-receipts \
+  --output docs/calibration/<story>/<anchor>-evidence.json
+
+# 2. copy the raw receipts' docs/calibration/... tree into the checkout beside it
+
+# 3. re-derive the anchor store and stamp its currency keys (CPU-only, seconds)
+node scripts/extract-memory-anchors.mjs
+node scripts/anchor-loader-closure.mjs --stamp-anchors
 ```
 
-Merge is commutative and stable-sorted; **different content under the same resolved identity is
-rejected** rather than resolved by arrival order. Copy `merged.json` over
-`docs/generated/memory-calibration-evidence.json` once it validates.
+An anchor is only DERIVED from a corpus named in `PACKAGED_MEMORY_ANCHOR_SOURCES`
+(`crates/sceneworks-core/src/memory_anchor.rs`) — the Rust loader hard-rejects any other path. A new
+corpus that is not named there contributes envelope evidence to an `analyticOnly` row instead, which
+is the correct default until the lane's derivation law is fitted to it. Add the file to that list in
+the same PR when it is meant to anchor.
 
 Record ids are content-derived and re-validated on read, so a capture at a new revision necessarily
 produces **new record ids**; a bundle whose ids do not re-derive fails with
-`<id>: deterministic identity mismatch` (`memory-calibration-harness.mjs:503`). Never hand-edit a
-record field and keep its id.
+`<id>: deterministic identity mismatch`. Never hand-edit a record field and keep its id.
 
 ### 7b. Confirm the closure digest is on every record
 
-The runner stamps it at capture time from the inference checkout it was given
-(memory-calibration-harness.mjs:927-957), one digest **per lane**, keyed on each plan entry's own
-`<backend>:<target.provider>`. Verify rather than assume — `evidenceSemantics` fails **loudly** if it
+The runner stamps it at capture time from the inference checkout it was given, keyed on the
+anchor's own `<backend>:<provider>` lane. Verify rather than assume — `evidenceSemantics` fails **loudly** if it
 is absent (memory-calibration-harness.mjs:656-662):
 
 ```
@@ -1304,6 +1326,70 @@ The key is `<backend>:<provider>`; a bare provider id is ambiguous (`krea_2_turb
 both backends with different crates). `buildClosureConfig` also asserts the provider is really
 declared in the crate you named, so a wrong crate fails rather than digesting the wrong tree.
 
+#### 7c-bis. The memory ANCHOR currency key — `anchor-loader-closure.mjs` (sc-22511)
+
+`config/anchor-loader-closures.json` is the second derived closure file, and it answers a narrower
+question than the one above: not "did this provider's crate change?" but "did the code that loads
+THIS model change?" — a file-level unit walked from the model's declared loader entry points. It is
+what `memory_anchor.rs` compares an anchor's recorded `source.loaderClosureDigest` against.
+
+It has the same seed-then-derive shape, and the same two invocations:
+
+```bash
+# 1. Hand-add ONLY the key and its entry points to config/anchor-loader-closures.json:
+#      "<modelId>:<backend>": { "entryPoints": ["crates/…/src/model.rs", …] }
+#    digest / closureFileCount / closureFiles are all derived. An entry point that never carries
+#    the model id as a string literal is REFUSED — a wrong entry point digests the wrong loader.
+#
+# 2. Derive every declared model's digest from a real clone.
+node scripts/anchor-loader-closure.mjs --repo <inference clone> --write
+
+# 3. Prove it took.
+node scripts/anchor-loader-closure.mjs --repo <inference clone> --check
+
+# One model's canonical closure text, for reading a diff rather than a digest:
+node scripts/anchor-loader-closure.mjs --repo <inference clone> --model ltx_2_5:mlx
+```
+
+Both default `--revision` to the pin in the workspace `Cargo.toml`, exactly as
+`inference-closure-digest.mjs` does.
+
+**The other half lives in the anchor store, and it is frozen.** Each anchor's
+`source.loaderClosureDigest` records what its model's loader looked like **at the revision that
+anchor was measured at** — not at the pin. Currency is the comparison of the two, so a recorded key
+derived at the pin would compare a value with itself and report "current" through every loader
+change there is. `extract-memory-anchors.mjs` therefore **carries that one field forward** instead
+of re-deriving it; it is seeded, once, out of band:
+
+```bash
+# Digest every packaged anchor at ITS OWN record's inference revision and write the keys in.
+# The clone must carry every cited revision (seven, today), not just the pin.
+node scripts/anchor-loader-closure.mjs --repo <inference clone> --stamp-anchors
+
+# Verify instead of write.
+node scripts/anchor-loader-closure.mjs --repo <inference clone> --stamp-anchors --check
+```
+
+Run it when a NEW anchor enters the store (the extractor fails loudly for an anchor with nothing to
+carry forward). **Do not run it after a pin bump** — that would rewrite the measurement's own
+provenance and mark every anchor current again. A pin bump is *supposed* to leave the moved models'
+anchors stale.
+
+A historical revision that predates a file today's declaration names (`mlx-gen-ltx`'s per-model
+`memory_strategy.rs` postdates the LTX-2.3 capture) narrows that anchor's entry-point list rather
+than failing. The list is part of the hashed text, so the digest cannot equal the pin's, and the
+anchor reads not-current — which is the truth about it.
+
+⚠ **`--check` is a derivation check, not a staleness gate, and it is deliberately wired into no CI
+job.** It asks "is the checked-in file what the walker derives at this revision?" — a question about
+whether someone hand-edited derived data. It does NOT ask "do the anchors still match", and nothing
+in CI may be made to. **A pin bump whose loader source genuinely moved is designed to leave anchors
+stale**: they demote to the conservative floor and the render still runs. Gating on that would
+rebuild the pin-bump-forces-re-measurement coupling this epic (E8) exists to remove. Run `--check`
+by hand after a `--write`, and after a pin bump run `--write` and commit whatever it produces — a
+run that changes nothing is the expected case, and a run that changes a digest is information, not a
+failure.
+
 ### 7d. 🔴 Move the lane's SHIPPED bindings — the half that actually changes the runtime
 
 **Do not skip this. Without it your capture promotes nothing.**
@@ -1343,8 +1429,18 @@ compare:
 | `report:stale-lanes` totals | `8 stale, 0 current` — **unchanged** | `7 stale, 1 current` |
 | the lane on the stale list | still ranked **#2**, `5/5` bindings `0/5` records, `status=partially-stale` | **gone** — listed under `CURRENT (no widening applied)` |
 | shipped stale bindings | 33 | 28 |
-| `summary.currentCalibrationRuns` | 5 | 5 |
-| `z_image_turbo` mlx cell states | `Implemented/unverified: 90`, **`Verified: 0`** | `Implemented/unverified: 85`, **`Verified: 5`** |
+| `summary.currentCalibrationRuns` (deleted — see below) | 5 | 5 |
+| `z_image_turbo` mlx cell states (pre-collapse vocabulary) | `Implemented/unverified: 90`, **`Verified: 0`** | `Implemented/unverified: 85`, **`Verified: 5`** |
+
+> **sc-22513 (epic 22505, E5).** The last two rows are recorded as they were measured, in the
+> vocabulary of the pre-collapse artifact. Both surfaces are gone: `summary.currentCalibrationRuns`
+> and the root `calibrationRuns` array were deleted with the promotion machinery, and no cell state
+> is `Verified` or `Implemented/unverified` any more. A cell's state is now a pure function of
+> `implementation`, `anchor` and `derivationDefined` — `Missing / Structurally N/A / Implemented /
+> Anchored / Anchored/underived` — and an anchor's currency is REPORTED beside it
+> (`cells[].anchor.current`, `summary.staleAnchors`) rather than promoting it. The rows above are
+> still the load-bearing evidence for the §7d lesson: the evidence half alone moves nothing the
+> runtime reads. §10 step 1 below is written against the surviving surface.
 
 The evidence-only path produces `current` records that promote **nothing**. The report does not clear
 the lane; it reports `status=partially-stale` with `captured=066ff9c6a26e,5b9092c67e0f` — the two
@@ -1384,13 +1480,23 @@ candle:flux1_dev historical 5  candle:flux1_schnell historical 5
 candle:flux2_dev historical 5  mlx:z_image_turbo historical 5
 ```
 
-`matrix.summary.currentCalibrationRuns` is `0`. Several tests **pin that as an exact set**, not as an
-upper bound, so a capture that lands a `current` lane turns them red. This is the tests being right
-about yesterday, not your measurement being wrong — but it means **a measurement PR is never
-docs-only**, and you must plan to update the affected ones in the same commit.
+Several tests **pin that as an exact set**, not as an upper bound, so a capture that lands a
+`current` lane turns them red. This is the tests being right about yesterday, not your measurement
+being wrong — but it means **a measurement PR is never docs-only**, and you must plan to update the
+affected ones in the same commit.
+
+> **sc-22513.** The matrix no longer carries a `calibrationRuns` array or a
+> `summary.currentCalibrationRuns` count — the retained corpus above is validation data for the
+> derivation, not a matrix input. What the matrix now reports about currency is per ANCHOR:
+> `summary.staleAnchors` over `summary.anchors`, and `current` on each `anchors[]` row and each
+> `cells[].anchor`. It moves no state (sc-22511), so landing a current lane can no longer flip a
+> cell — but the pins below and `npm run report:stale-lanes` still move, and the artifact still has
+> to be regenerated (§8) in the same commit.
 
 **Which tests red is lane-dependent and step-dependent.** The table below is the measured result of
-simulating an `mlx:z_image_turbo` capture on `origin/main`, both ways (§7d):
+simulating an `mlx:z_image_turbo` capture on `origin/main` before the E5 collapse, both ways (§7d).
+Its rows name assertions that lived on the deleted promotion machinery; treat it as the SHAPE of the
+blast radius, and enumerate your own by running the suites named under it:
 
 | test | assertion | evidence half only | + §7d bindings |
 | --- | --- | --- | --- |
@@ -1432,7 +1538,7 @@ python3.12 -m venv /abs/path/OUTSIDE/the/repo/venv
 /abs/path/OUTSIDE/the/repo/venv/bin/python -m pytest -q tests/test_memory_matrix.py
 ```
 
-Verified on `origin/main` today: `9 passed in 19.16s`. Note the bare `python3.12` on this host has no
+Verified on this branch (sc-22513): `11 passed in 2.69s`. Note the bare `python3.12` on this host has no
 `pytest` — the venv is not optional.
 
 How to handle a red: **relax the pin to the new truth, do not delete the assertion.** The comment
@@ -1446,17 +1552,22 @@ moved and why.
 
 Four checks. Do all four; the first three are cheap.
 
-**1. The new record reads as `current` for its lane.**
+**1. The lane's anchor reads as `current`.**
+
+The matrix no longer publishes per-record rows, so ask the anchor inventory instead of the deleted
+`calibrationRuns` array (sc-22513). `npm run report:stale-lanes` answers the same question per lane
+and is the shorter route; this reads the artifact directly:
 
 ```bash
 node -e 'const m=require("./docs/generated/memory-matrix.json");
-  const c={}; for (const r of m.calibrationRuns) {
-    const k=`${r.record.backend}:${r.record.target.provider} ${r.semantics}`; c[k]=(c[k]||0)+1; }
-  console.log(c); console.log("currentCalibrationRuns:", m.summary.currentCalibrationRuns)'
+  const c={}; for (const a of m.anchors) {
+    const k=`${a.backend}:${a.provider} ${a.current ? "current" : "stale"}`; c[k]=(c[k]||0)+1; }
+  console.log(c);
+  console.log("anchors:", m.summary.anchors, "stale:", m.summary.staleAnchors)'
 ```
 
-Your lane must now appear as `current`, and `currentCalibrationRuns` must have risen by the number of
-records you landed. But **that alone is not success** — it is true on the evidence-only path too
+Your lane's anchor must now read `current`, and `summary.staleAnchors` must have fallen by one per
+lane you re-extracted. But **that alone is not success** — it is true on the evidence-only path too
 (§7d). All three of these must hold:
 
 ```bash
@@ -1467,26 +1578,33 @@ npm run report:stale-lanes    # your lane must have LEFT the stale list, and the
 ```bash
 node -e 'const m=require("./docs/generated/memory-matrix.json");
   const z=m.cells.filter(c=>c.modelId==="<modelId>"&&c.backend==="<backend>");
-  const s={}; for(const c of z) s[c.state]=(s[c.state]||0)+1; console.log(s)'
-# the measured rungs must now be Verified, not Implemented/unverified
+  const s={};
+  for(const c of z){
+    const currency=c.anchor?(c.anchor.current?"current":"stale"):"no-anchor";
+    const k=`${c.state} (${currency})`; s[k]=(s[k]||0)+1;
+  }
+  console.log(s)'
+# the measured rungs must read `Anchored` (or `Anchored/underived` where the lane has no wired
+# derivation) with `anchor.current: true` — NOT `Implemented`, which means no anchor reached them
 ```
 
-Measured on the `mlx:z_image_turbo` simulation: the corrected procedure gives
-`7 stale, 1 current`, the lane absent from the table, `28` (not 33) stale bindings, and
-`{ 'Implemented/unverified': 85, Verified: 5 }`. The evidence-only path gives `8 stale, 0 current`,
-the lane still ranked #2 as `5/5` bindings `0/5` records, and `Verified: 0`.
+Measured on the `mlx:z_image_turbo` simulation, in the pre-collapse vocabulary: the corrected
+procedure gives `7 stale, 1 current`, the lane absent from the table, `28` (not 33) stale bindings,
+and the five measured cells promoted. The evidence-only path gives `8 stale, 0 current`, the lane
+still ranked #2 as `5/5` bindings `0/5` records, and no cell promoted. Post-sc-22513 the same split
+shows up as `anchor.current` rather than as a state change.
 
 Failure modes:
 
-- **Records stay `historical`** — the captured digest does not match the live one for the lane:
+- **The anchor stays stale** — the captured digest does not match the live one for the lane:
   usually the inference checkout was not at the pin (§5), or the closure table was regenerated after
   the capture.
 - **Records are `current` but the lane is still listed, as `partially-stale`** — you did §7a-7c and
   skipped §7d. Go back and move the manifest bindings.
-- **Records are `current`, the lane is clear, but no cell is `Verified`** — the binding moved but does
-  not match the record on fingerprint, geometry, parameters, artifact revision or `engagedRungs`;
-  `calibrationBinding` requires an exact ordered match. Compare the binding object against the record
-  field by field.
+- **The lane is clear but its cells read `Implemented`, with `anchor: null`** — the record landed but
+  `scripts/extract-memory-anchors.mjs` did not derive an anchor from it, so nothing in
+  `config/memory-anchors.json` covers that (model, tier, backend lane). Re-run the extractor and
+  check the lane appears in the store rather than in `analyticOnly`.
 
 **2. `verify_model_snapshot` binds the fixture to real weights** — §4. Re-run it after the capture,
 with `--inventory-output`, and cite the `inventory_sha256` in the PR. Where the lane's artifact has no

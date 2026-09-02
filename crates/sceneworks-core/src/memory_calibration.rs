@@ -11,6 +11,12 @@ use serde::de::DeserializeOwned;
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::{Map, Value};
 
+/// Schema v6 (epic 18755) adds the LTX-2.5 target axes — `target.transformerVariant`,
+/// `target.decoder`, and typed `quality.audio` — to the record and source-session shapes. The
+/// additions are purely additive, but every shape here is `deny_unknown_fields`, so a v5 *reader*
+/// rejects a v6 document outright; the version bump is what keeps that rejection legible instead
+/// of surfacing as an unknown-field parse error.
+///
 /// Schema v5 (sc-18864) REMOVES the per-phase `deviceBytes` and `wiredBytes` counters. Both
 /// adapters emitted them as verbatim copies of `allocatorBytes`, so a v4 record could — and every
 /// committed MLX record did — assert wired residency above the probed wired ceiling as a pure
@@ -18,7 +24,7 @@ use serde_json::{Map, Value};
 /// way to tell a measured field from an aliased one), so it loads as `BundleLoad::Stale`.
 ///
 /// Schema v4 added the required per-record `loadShape` axis; v3 and earlier are likewise stale.
-pub const MEMORY_CALIBRATION_SCHEMA_VERSION: u32 = 5;
+pub const MEMORY_CALIBRATION_SCHEMA_VERSION: u32 = 6;
 pub const MEMORY_CALIBRATION_HARNESS_VERSION: &str = "sceneworks-memory-v5";
 /// ABI paired by the manifest/query side of the reader.
 ///
@@ -48,8 +54,12 @@ pub const PACKAGED_INFERENCE_PROVIDER_CLOSURES: &str =
 /// (`mlx-gen-krea`) and on candle (`candle-gen-krea`), which are different code paths that must
 /// never be compared against each other.
 ///
-/// `None` is a real answer and callers must fail closed on it rather than admitting: an undeclared
-/// lane means nobody derived what code its measurements were taken against.
+/// `None` is a real answer: the lane carries no currency term, so nobody derived what code its
+/// measurements were taken against and no measurement on it can ever read as CURRENT. Callers
+/// therefore fall back to the conservative analytic estimate — they must NOT treat `None` as
+/// grounds to refuse admission (sc-22512, epic requirement E8: absence never blocks; a measurement
+/// only ever improves an estimate). Runtime catching, not a build-time gate, is the failure posture
+/// for an estimate that turns out too low.
 pub fn packaged_closure_digest(backend: &str, provider: &str) -> Option<String> {
     serde_json::from_str::<Value>(PACKAGED_INFERENCE_PROVIDER_CLOSURES)
         .ok()?
@@ -180,7 +190,24 @@ pub struct SourceTarget {
     pub tier: String,
     pub mode: String,
     pub overlay: String,
+    pub transformer_variant: Option<Ltx25TransformerVariant>,
+    pub decoder: Option<Ltx25Decoder>,
     pub rung: StrategyRung,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Ltx25TransformerVariant {
+    Distilled,
+    Dev,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Ltx25Decoder {
+    Conv,
+    #[serde(rename = "diffvae")]
+    DiffVae,
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]
@@ -198,6 +225,8 @@ pub enum SourceOutputRole {
     Request,
     SelectedRgb,
     ReferenceRgb,
+    SelectedAv,
+    ReferenceAv,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Deserialize)]
@@ -360,6 +389,12 @@ pub struct Target {
     pub tier: String,
     pub mode: String,
     pub overlay: String,
+    /// LTX-2.5's two transformer checkpoints are different memory workloads. Required for
+    /// `ltx_2_5` records; absent for older families whose target identity predates this axis.
+    pub transformer_variant: Option<Ltx25TransformerVariant>,
+    /// LTX-2.5's ConvVAE and DiffVAE have different decode paths and ladder compositions.
+    /// Required for `ltx_2_5` records; absent for unrelated families.
+    pub decoder: Option<Ltx25Decoder>,
     pub geometry: Geometry,
 }
 
@@ -607,6 +642,24 @@ pub struct Quality {
     pub maximum_error_threshold: Option<f64>,
     pub mean_error_threshold: Option<f64>,
     pub root_mean_square_error_threshold: Option<f64>,
+    pub audio: Option<AudioQuality>,
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AudioQuality {
+    pub result: QualityResult,
+    pub sample_rate_hz: u32,
+    pub channels: u16,
+    pub sample_count: u64,
+    pub selected_pcm_sha256: String,
+    pub reference_pcm_sha256: String,
+    pub maximum_absolute_error: f64,
+    pub mean_absolute_error: f64,
+    pub root_mean_square_error: f64,
+    pub maximum_absolute_error_threshold: f64,
+    pub mean_absolute_error_threshold: f64,
+    pub root_mean_square_error_threshold: f64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
@@ -806,6 +859,8 @@ pub struct EvidenceQuery {
     pub tier: String,
     pub mode: String,
     pub overlay: String,
+    pub transformer_variant: Option<Ltx25TransformerVariant>,
+    pub decoder: Option<Ltx25Decoder>,
     pub geometry: Geometry,
     pub rung: StrategyRung,
     pub parameters: Map<String, Value>,
@@ -864,6 +919,8 @@ impl EvidenceBundle {
                     && record.target.tier == query.tier
                     && record.target.mode == query.mode
                     && record.target.overlay == query.overlay
+                    && record.target.transformer_variant == query.transformer_variant
+                    && record.target.decoder == query.decoder
                     && record.strategy.rung == query.rung
             })
             .peekable();
@@ -1192,7 +1249,7 @@ fn validate_source_session(session: &SourceSession) -> Result<(), String> {
         .map(|(parent, _)| parent);
     if session.kind == SourceSessionKind::PhysicalMlx && session.outputs.len() != 3 {
         return Err(format!(
-            "{} physical MLX session requires exactly request, selected_rgb, and reference_rgb outputs",
+            "{} physical MLX session requires exactly request plus selected/reference RGB or A/V outputs",
             session.id
         ));
     }
@@ -1256,6 +1313,9 @@ fn validate_source_session(session: &SourceSession) -> Result<(), String> {
                 SourceOutputRole::SelectedRgb | SourceOutputRole::ReferenceRgb => {
                     physical_mlx_rgb_metadata(output)?;
                 }
+                SourceOutputRole::SelectedAv | SourceOutputRole::ReferenceAv => {
+                    physical_mlx_av_metadata(output)?;
+                }
             }
         }
         if !is_sha256(&output.sha256) {
@@ -1265,16 +1325,22 @@ fn validate_source_session(session: &SourceSession) -> Result<(), String> {
             ));
         }
     }
+    let rgb_roles = BTreeSet::from([
+        SourceOutputRole::Request,
+        SourceOutputRole::SelectedRgb,
+        SourceOutputRole::ReferenceRgb,
+    ]);
+    let av_roles = BTreeSet::from([
+        SourceOutputRole::Request,
+        SourceOutputRole::SelectedAv,
+        SourceOutputRole::ReferenceAv,
+    ]);
     if session.kind == SourceSessionKind::PhysicalMlx
-        && physical_output_roles
-            != BTreeSet::from([
-                SourceOutputRole::Request,
-                SourceOutputRole::SelectedRgb,
-                SourceOutputRole::ReferenceRgb,
-            ])
+        && physical_output_roles != rgb_roles
+        && physical_output_roles != av_roles
     {
         return Err(format!(
-            "{} physical MLX session must contain request, selected_rgb, and reference_rgb outputs",
+            "{} physical MLX session must contain request plus an exact selected/reference RGB or A/V pair",
             session.id
         ));
     }
@@ -1304,12 +1370,13 @@ fn physical_mlx_rgb_metadata(output: &SourceOutput) -> Result<(String, u32, u32)
     let stem = file_name
         .strip_suffix(".rgb")
         .ok_or_else(|| format!("physical MLX {role} receipt must end in .rgb"))?;
-    if stem.len() < 27 || !has_prefixed_hex(&stem[..27], "implan-", 20) {
-        return Err(format!(
-            "physical MLX {role} receipt must begin with its logical case id"
-        ));
-    }
-    let logical_case_id = stem[..27].to_owned();
+    // `get(..27)` rather than `&stem[..27]`: the path is untrusted bundle text, and a multibyte
+    // byte 27 would panic the slice instead of failing the receipt closed.
+    let logical_case_id = stem
+        .get(..27)
+        .filter(|prefix| has_prefixed_hex(prefix, "implan-", 20))
+        .ok_or_else(|| format!("physical MLX {role} receipt must begin with its logical case id"))?
+        .to_owned();
     let remainder = stem[27..]
         .strip_prefix(&format!("-{role}-"))
         .ok_or_else(|| format!("physical MLX {role} receipt path has the wrong role"))?;
@@ -1342,10 +1409,81 @@ fn physical_mlx_rgb_metadata(output: &SourceOutput) -> Result<(String, u32, u32)
     Ok((logical_case_id, width, height))
 }
 
+fn physical_mlx_av_metadata(output: &SourceOutput) -> Result<(String, u32, u32, u32), String> {
+    let role = match output.role {
+        Some(SourceOutputRole::SelectedAv) => "selected_av",
+        Some(SourceOutputRole::ReferenceAv) => "reference_av",
+        _ => return Err("physical MLX A/V receipt has a non-A/V role".to_owned()),
+    };
+    let file_name = output.path.rsplit('/').next().unwrap_or_default();
+    let stem = file_name
+        .strip_suffix(".avbin")
+        .ok_or_else(|| format!("physical MLX {role} receipt must end in .avbin"))?;
+    // `get(..27)` rather than `&stem[..27]`: see the RGB sibling — an untrusted multibyte path
+    // must fail the receipt, not panic the reader.
+    let logical_case_id = stem
+        .get(..27)
+        .filter(|prefix| has_prefixed_hex(prefix, "implan-", 20))
+        .ok_or_else(|| format!("physical MLX {role} receipt must begin with its logical case id"))?
+        .to_owned();
+    let remainder = stem[27..]
+        .strip_prefix(&format!("-{role}-"))
+        .ok_or_else(|| format!("physical MLX {role} receipt path has the wrong role"))?;
+    let (dimensions, framed_digest) = remainder
+        .split_once('-')
+        .ok_or_else(|| format!("physical MLX {role} receipt path is missing geometry"))?;
+    let (width, height) = dimensions
+        .split_once('x')
+        .ok_or_else(|| format!("physical MLX {role} receipt path is missing dimensions"))?;
+    let (frames, content_sha256) = framed_digest
+        .strip_prefix('f')
+        .and_then(|value| value.split_once('-'))
+        .ok_or_else(|| format!("physical MLX {role} receipt path is missing frames or digest"))?;
+    let width = width
+        .parse::<u32>()
+        .map_err(|_| format!("physical MLX {role} receipt width is invalid"))?;
+    let height = height
+        .parse::<u32>()
+        .map_err(|_| format!("physical MLX {role} receipt height is invalid"))?;
+    let frames = frames
+        .parse::<u32>()
+        .map_err(|_| format!("physical MLX {role} receipt frame count is invalid"))?;
+    // An A/V payload's size is not geometry-derivable (the audio track's length is not implied by
+    // width/height/frames), so unlike the RGB sibling there is no exactness check — but the
+    // receipt still has to CARRY a size. `bytes == Some(0)` alone let a `null` through, which is
+    // an incomplete receipt claiming to attest a rendered clip.
+    if width == 0 || height == 0 || frames == 0 || output.bytes.is_none_or(|bytes| bytes == 0) {
+        return Err(format!(
+            "physical MLX {role} receipt dimensions are invalid"
+        ));
+    }
+    if !is_sha256(content_sha256) || content_sha256 != output.sha256 {
+        return Err(format!(
+            "physical MLX {role} receipt digest does not match its content-addressed path"
+        ));
+    }
+    Ok((logical_case_id, width, height, frames))
+}
+
 fn validate_physical_mlx_outputs_against_record(
     record: &EvidenceRecord,
     session: &SourceSession,
 ) -> Result<(), String> {
+    let has_av = session.outputs.iter().any(|output| {
+        matches!(
+            output.role,
+            Some(SourceOutputRole::SelectedAv | SourceOutputRole::ReferenceAv)
+        )
+    });
+    if has_av != record.quality.audio.is_some() {
+        return Err(format!(
+            "{} physical MLX A/V receipts and typed audio quality must be present together",
+            record.id
+        ));
+    }
+    if let Some(audio) = &record.quality.audio {
+        validate_audio_quality(audio, &record.id)?;
+    }
     for output in &session.outputs {
         if matches!(
             output.role,
@@ -1362,6 +1500,49 @@ fn validate_physical_mlx_outputs_against_record(
                 ));
             }
         }
+        if matches!(
+            output.role,
+            Some(SourceOutputRole::SelectedAv | SourceOutputRole::ReferenceAv)
+        ) {
+            let (logical_case_id, width, height, frames) = physical_mlx_av_metadata(output)?;
+            if logical_case_id != record.logical_case_id
+                || width != record.target.geometry.width
+                || height != record.target.geometry.height
+                || frames != record.target.geometry.frames
+            {
+                return Err(format!(
+                    "{} physical MLX A/V receipt does not match its logical case geometry",
+                    record.id
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn validate_audio_quality(audio: &AudioQuality, id: &str) -> Result<(), String> {
+    let finite_nonnegative = [
+        audio.maximum_absolute_error,
+        audio.mean_absolute_error,
+        audio.root_mean_square_error,
+        audio.maximum_absolute_error_threshold,
+        audio.mean_absolute_error_threshold,
+        audio.root_mean_square_error_threshold,
+    ]
+    .into_iter()
+    .all(|value| value.is_finite() && value >= 0.0);
+    if audio.result != QualityResult::Passed
+        || audio.sample_rate_hz == 0
+        || audio.channels == 0
+        || audio.sample_count == 0
+        || !is_sha256(&audio.selected_pcm_sha256)
+        || !is_sha256(&audio.reference_pcm_sha256)
+        || !finite_nonnegative
+        || audio.maximum_absolute_error > audio.maximum_absolute_error_threshold
+        || audio.mean_absolute_error > audio.mean_absolute_error_threshold
+        || audio.root_mean_square_error > audio.root_mean_square_error_threshold
+    {
+        return Err(format!("{id} audio quality evidence is invalid"));
     }
     Ok(())
 }
@@ -1395,6 +1576,7 @@ fn validate_derivation(
     let requires_qwen_mlx_provenance = is_authoritative_qwen_mlx
         && record.source_provenance == Some(SourceProvenance::PhysicalMlxV1);
     let requires_provenance = requires_z_image_provenance || requires_qwen_mlx_provenance;
+    let requires_audio_derivation = record.quality.audio.is_some();
     if requires_qwen_mlx_provenance && record.artifact.inventory_sha256.is_none() {
         return Err(format!(
             "{} authoritative Qwen MLX evidence requires an exact artifact inventory",
@@ -1404,6 +1586,11 @@ fn validate_derivation(
     let Some(derivation) = &record.derivation else {
         return if requires_provenance {
             Err(format!("{} requires source-session derivation", record.id))
+        } else if requires_audio_derivation {
+            Err(format!(
+                "{} typed audio quality requires physical source-session derivation",
+                record.id
+            ))
         } else {
             Ok(())
         };
@@ -1451,6 +1638,36 @@ fn validate_derivation(
                     inventory_inputs,
                     requires_qwen_mlx_provenance,
                 )?;
+            }
+            // `ltx_2_5` EXACTLY, not the `ltx_` family: the axes this demands
+            // (`transformerVariant`, `decoder`) are only *required* by `validate_record` for
+            // `ltx_2_5`, so a family-wide gate here would make a future `ltx_2_3` record with a
+            // physical derivation permanently unloadable — it could never satisfy axes the record
+            // schema does not ask it to carry.
+            if record.target.model_id == "ltx_2_5" {
+                let target = session.target.as_ref().ok_or_else(|| {
+                    format!(
+                        "{} LTX derivation source {id} has no target identity",
+                        record.id
+                    )
+                })?;
+                let exact_identity = target.tier == record.target.tier
+                    && target.mode == record.target.mode
+                    && target.overlay == record.target.overlay
+                    && target.rung == record.strategy.rung
+                    && target.transformer_variant == record.target.transformer_variant
+                    && target.decoder == record.target.decoder;
+                if !exact_identity
+                    || target.transformer_variant.is_none()
+                    || target.decoder.is_none()
+                    || record.target.transformer_variant.is_none()
+                    || record.target.decoder.is_none()
+                {
+                    return Err(format!(
+                        "{} source {id} does not exactly match the complete LTX pipeline identity",
+                        record.id
+                    ));
+                }
             }
             if let Some(target) = &session.target {
                 if matches!(
@@ -1514,6 +1731,38 @@ fn validate_derivation(
             .get(session_id)
             .expect("physical MLX derivation session was resolved above");
         validate_physical_mlx_outputs_against_record(record, session)?;
+    }
+    if record.quality.audio.is_some() {
+        if derivation.quality.source_session_ids.len() != 1 {
+            return Err(format!(
+                "{} typed audio quality must bind exactly one physical A/V source session",
+                record.id
+            ));
+        }
+        let session_id = &derivation.quality.source_session_ids[0];
+        let session = sessions.get(session_id.as_str()).ok_or_else(|| {
+            format!(
+                "{} references missing source session {session_id}",
+                record.id
+            )
+        })?;
+        if session.kind != SourceSessionKind::PhysicalMlx {
+            return Err(format!(
+                "{} typed audio quality source must be physical_mlx",
+                record.id
+            ));
+        }
+        validate_physical_mlx_outputs_against_record(record, session)?;
+    }
+    if record.target.model_id.starts_with("ltx_") {
+        for session_id in derivation_session_ids {
+            let session = sessions
+                .get(session_id)
+                .expect("all derivation sessions were resolved above");
+            if session.kind == SourceSessionKind::PhysicalMlx {
+                validate_physical_mlx_outputs_against_record(record, session)?;
+            }
+        }
     }
     if !matches!(
         derivation.memory.kind,
@@ -1667,6 +1916,14 @@ fn validate_record(record: &EvidenceRecord) -> Result<(), String> {
     if !is_rfc3339_datetime(&record.captured_at) {
         return Err(format!("{} capturedAt is not RFC 3339", record.id));
     }
+    if record.target.model_id == "ltx_2_5"
+        && (record.target.transformer_variant.is_none() || record.target.decoder.is_none())
+    {
+        return Err(format!(
+            "{} LTX-2.5 target must identify transformerVariant and decoder",
+            record.id
+        ));
+    }
     if record
         .quality
         .contract
@@ -1685,6 +1942,9 @@ fn validate_record(record: &EvidenceRecord) -> Result<(), String> {
         .any(|value| value < 0.0)
     {
         return Err(format!("{} quality fields violate the schema", record.id));
+    }
+    if let Some(audio) = &record.quality.audio {
+        validate_audio_quality(audio, &record.id)?;
     }
     if record
         .artifact
@@ -2469,10 +2729,10 @@ mod tests {
     use super::{
         load_bundle, load_packaged_bundle, Backend, BundleLoad, BundleLoadError,
         CalibrationBinding, EvidenceBundle, EvidenceQuery, EvidenceVerdict, Geometry, LoadShapeKey,
-        MlxAdmissionEnvelope, ObservedMemory, PredictedPeakBytes, RecordStatus, RequiredNullable,
-        SourceSessionKind, StaleBundleReason, StaleEvidenceReason, StrategyRung,
-        MEMORY_CALIBRATION_ABI, MEMORY_CALIBRATION_SCHEMA_VERSION,
-        PACKAGED_MEMORY_CALIBRATION_EVIDENCE,
+        Ltx25Decoder, Ltx25TransformerVariant, MlxAdmissionEnvelope, ObservedMemory,
+        PredictedPeakBytes, RecordStatus, RequiredNullable, SourceSessionKind, StaleBundleReason,
+        StaleEvidenceReason, StrategyRung, MEMORY_CALIBRATION_ABI,
+        MEMORY_CALIBRATION_SCHEMA_VERSION, PACKAGED_MEMORY_CALIBRATION_EVIDENCE,
     };
 
     fn phase(value: u64) -> Value {
@@ -2721,6 +2981,154 @@ mod tests {
             SourceSessionKind::PhysicalMlx
         );
 
+        let mut av_document = document.clone();
+        av_document["records"][0]["quality"]["audio"] = json!({
+            "result": "passed",
+            "sampleRateHz": 24000,
+            "channels": 2,
+            "sampleCount": 48000,
+            "selectedPcmSha256": "a".repeat(64),
+            "referencePcmSha256": "b".repeat(64),
+            "maximumAbsoluteError": 0.001,
+            "meanAbsoluteError": 0.0001,
+            "rootMeanSquareError": 0.0002,
+            "maximumAbsoluteErrorThreshold": 0.01,
+            "meanAbsoluteErrorThreshold": 0.01,
+            "rootMeanSquareErrorThreshold": 0.01
+        });
+        for (index, role) in ["selected_av", "reference_av"].into_iter().enumerate() {
+            let output = &mut av_document["sourceSessions"][0]["outputs"][index + 1];
+            output["role"] = json!(role);
+            output["path"] = json!(format!(
+                "docs/calibration/sc-test/{logical_case_id}-{role}-1024x1024-f1-{}.avbin",
+                output["sha256"].as_str().expect("output digest")
+            ));
+            output["bytes"] = json!(16);
+        }
+        assert!(matches!(
+            load_bundle(&av_document.to_string()),
+            Ok(BundleLoad::Ready(_))
+        ));
+        let mut crossed_av = av_document.clone();
+        crossed_av["sourceSessions"][0]["outputs"][2]["role"] = json!("reference_rgb");
+        assert!(matches!(
+            load_bundle(&crossed_av.to_string()),
+            Err(BundleLoadError::Invalid(_))
+        ));
+        let mut failed_audio = av_document.clone();
+        failed_audio["records"][0]["quality"]["audio"]["maximumAbsoluteError"] = json!(0.02);
+        assert!(matches!(
+            load_bundle(&failed_audio.to_string()),
+            Err(BundleLoadError::Invalid(message)) if message.contains("audio quality")
+        ));
+        let mut failed_audio_result = av_document.clone();
+        failed_audio_result["records"][0]["quality"]["audio"]["result"] = json!("failed");
+        assert!(matches!(
+            load_bundle(&failed_audio_result.to_string()),
+            Err(BundleLoadError::Invalid(message)) if message.contains("audio quality")
+        ));
+        let mut missing_audio_derivation = av_document.clone();
+        missing_audio_derivation["records"][0]
+            .as_object_mut()
+            .expect("record")
+            .remove("sourceProvenance");
+        missing_audio_derivation["records"][0]
+            .as_object_mut()
+            .expect("record")
+            .remove("derivation");
+        assert!(matches!(
+            load_bundle(&missing_audio_derivation.to_string()),
+            Err(BundleLoadError::Invalid(message))
+                if message.contains("typed audio quality requires physical source-session derivation")
+        ));
+        let mut non_physical_audio_source = av_document.clone();
+        non_physical_audio_source["records"][0]
+            .as_object_mut()
+            .expect("record")
+            .remove("sourceProvenance");
+        non_physical_audio_source["sourceSessions"][0]["kind"] = json!("unit_test");
+        assert!(matches!(
+            load_bundle(&non_physical_audio_source.to_string()),
+            Err(BundleLoadError::Invalid(message))
+                if message.contains("typed audio quality source must be physical_mlx")
+        ));
+        let mut mismatched_audio_source = av_document.clone();
+        mismatched_audio_source["records"][0]
+            .as_object_mut()
+            .expect("record")
+            .remove("sourceProvenance");
+        let mismatched_session_id = format!("ims-{}", "f".repeat(20));
+        let mut mismatched_session = mismatched_audio_source["sourceSessions"][0].clone();
+        mismatched_session["id"] = json!(mismatched_session_id.clone());
+        mismatched_session["kind"] = json!("unit_test");
+        mismatched_session["sourcePath"] =
+            json!("docs/calibration/sc-test/mismatched-audio-source.log");
+        mismatched_audio_source["sourceSessions"]
+            .as_array_mut()
+            .expect("source sessions")
+            .push(mismatched_session);
+        mismatched_audio_source["records"][0]["derivation"]["quality"]["sourceSessionIds"] =
+            json!([mismatched_session_id]);
+        assert!(matches!(
+            load_bundle(&mismatched_audio_source.to_string()),
+            Err(BundleLoadError::Invalid(message))
+                if message.contains("typed audio quality source must be physical_mlx")
+        ));
+
+        let mut ltx_document = document.clone();
+        let ltx_record = &mut ltx_document["records"][0];
+        ltx_record
+            .as_object_mut()
+            .expect("record")
+            .remove("sourceProvenance");
+        ltx_record["target"]["modelId"] = json!("ltx_2_5");
+        ltx_record["target"]["provider"] = json!("ltx_2_5");
+        ltx_record["target"]["transformerVariant"] = json!("distilled");
+        ltx_record["target"]["decoder"] = json!("conv");
+        ltx_document["sourceSessions"][0]["target"] = json!({
+            "tier": "q4",
+            "mode": "text_to_image",
+            "overlay": "none",
+            "transformerVariant": "distilled",
+            "decoder": "conv",
+            "rung": "bounded_decode"
+        });
+        assert!(matches!(
+            load_bundle(&ltx_document.to_string()),
+            Ok(BundleLoad::Ready(_))
+        ));
+        for (field, value) in [
+            ("tier", "q8"),
+            ("mode", "image_to_video"),
+            ("overlay", "crossed"),
+            ("rung", "resident"),
+            ("transformerVariant", "dev"),
+            ("decoder", "diffvae"),
+        ] {
+            let mut crossed = ltx_document.clone();
+            crossed["sourceSessions"][0]["target"][field] = json!(value);
+            if field == "tier" {
+                crossed["sourceSessions"][0]["inputs"][0]["variant"] = json!(value);
+            }
+            assert!(
+                matches!(
+                    load_bundle(&crossed.to_string()),
+                    Err(BundleLoadError::Invalid(message))
+                        if message.contains("complete LTX pipeline identity")
+                ),
+                "LTX source target field {field} must match exactly"
+            );
+        }
+        let mut missing_ltx_target = ltx_document.clone();
+        missing_ltx_target["sourceSessions"][0]
+            .as_object_mut()
+            .expect("source session")
+            .remove("target");
+        assert!(matches!(
+            load_bundle(&missing_ltx_target.to_string()),
+            Err(BundleLoadError::Invalid(message)) if message.contains("has no target identity")
+        ));
+
         let mut missing_receipts = document.clone();
         missing_receipts["sourceSessions"][0]["outputs"] = json!([]);
         assert!(matches!(
@@ -2905,6 +3313,8 @@ mod tests {
             tier: "q4".to_owned(),
             mode: "text_to_image".to_owned(),
             overlay: "none".to_owned(),
+            transformer_variant: None,
+            decoder: None,
             geometry: Geometry {
                 width: 1024,
                 height: 1024,
@@ -2935,9 +3345,9 @@ mod tests {
     #[test]
     fn packaged_bundle_uses_the_current_schema_before_entry_calibration_fans_out() {
         // SC-15817 migrates the packaged protocol before the per-entry calibration stories run.
-        // Existing MLX measurements remain available as history under their truthful load shapes;
-        // their old inference revisions cannot become a current fit. SC-15510 adds four eager and
-        // one deferred current-pin Z-Image records without rewriting that historical provenance.
+        // Existing MLX measurements remain available under their truthful load shapes and source
+        // provenance. SC-15510 adds four eager and one deferred Z-Image records without rewriting
+        // the earlier capture provenance.
         // SC-15823 then adds ten base-only runtime-complete FLUX.1 records (eight eager, two
         // deferred) without promoting them to Full completion. SC-15833 adds five deferred FLUX.2
         // runtime records and seven physical sessions without replacing any prior source receipt.
@@ -2945,7 +3355,7 @@ mod tests {
         // 768/1024 geometries.
         // SC-18353 adds thirteen physical MLX source sessions for the exact deferred Qwen bf16/q4
         // captures, without replacing the historical Qwen evidence they supersede for admission.
-        // SC-19753 adds five current-pin Z-Image q4 records, one for each ladder rung, while
+        // SC-19753 adds five Z-Image q4 records, one for each ladder rung, while
         // retaining the five historical Z-Image captures as provenance.
         // SC-16915 re-collects the MLX qwen_image and krea_2_turbo_control evidence at pin
         // a4f409ae under ABI 3, adding seventeen records (14 eager, 3 deferred) and leaving the
@@ -3089,8 +3499,8 @@ mod tests {
                 ("bf16", StrategyRung::BoundedTransformerResidency),
             ),
         ]);
-        // Beyond the frozen history above sits the CURRENT re-capture set (first populated by
-        // sc-19721 at inference 75d66db5, after the pin bump staled every Qwen cell). That set is
+        // Beyond the frozen history above sits the newer verification cohort (first populated by
+        // sc-19721 at inference 75d66db5 after relevant provider-closure changes). That set is
         // deliberately NOT pinned by id/tier/rung: its ids change at every legitimate re-capture,
         // so an exact map here is a frozen-corpus gate on the one corpus that is SUPPOSED to move
         // (it was hand-bumped five times on this epic alone). The frozen sets stay pinned — they
@@ -3127,7 +3537,7 @@ mod tests {
             .collect::<Vec<_>>();
         assert!(
             !recapture_sessions.is_empty(),
-            "the bundle must carry current-pin re-capture evidence beyond the frozen history"
+            "the bundle must carry a newer verification cohort beyond the frozen history"
         );
         // One campaign lands under ONE story directory of its own, and each receipt is the
         // session's own log. The story id is PARSED, not pinned: the next campaign (a new story)
@@ -3215,8 +3625,8 @@ mod tests {
             1,
             "one re-capture campaign = one story directory, got {recapture_stories:?}"
         );
-        // Coverage SHAPE, not population: to re-verify what a pin bump stales the campaign must
-        // span the tier ladder (bf16 plus at least one quantized tier) and more than one rung.
+        // Coverage SHAPE, not population: a verification cohort must span the tier ladder (bf16
+        // plus at least one quantized tier) and more than one rung.
         assert!(
             recapture_tiers.contains("bf16") && recapture_tiers.len() >= 2,
             "re-capture must cover bf16 plus a quantized tier, got {recapture_tiers:?}"
@@ -3658,7 +4068,7 @@ mod tests {
             BundleLoad::Stale(StaleBundleReason::SchemaVersion { found: Some(2) })
         );
         assert_eq!(
-            load_bundle(r#"{"schemaVersion":5,"harnessVersion":"old","records":[]}"#)
+            load_bundle(r#"{"schemaVersion":6,"harnessVersion":"old","records":[]}"#)
                 .expect("harness drift is not a parse failure"),
             BundleLoad::Stale(StaleBundleReason::HarnessVersion {
                 found: Some("old".to_owned())
@@ -3724,6 +4134,81 @@ mod tests {
             Err(BundleLoadError::Json(_))
         ));
         assert!(matches!(load_bundle("{"), Err(BundleLoadError::Json(_))));
+    }
+
+    #[test]
+    fn ltx25_records_require_typed_transformer_and_decoder_identity() {
+        let mut ltx = complete_record();
+        ltx["target"]["modelId"] = json!("ltx_2_5");
+        ltx["target"]["provider"] = json!("ltx_2_5");
+        ltx["target"]["transformerVariant"] = json!("distilled");
+        ltx["target"]["decoder"] = json!("diffvae");
+
+        let loaded = match load_bundle(&bundle(ltx.clone())).expect("typed LTX-2.5 record parses") {
+            BundleLoad::Ready(bundle) => bundle,
+            BundleLoad::Stale(reason) => panic!("typed LTX-2.5 record is current: {reason:?}"),
+        };
+        assert_eq!(
+            loaded.records[0].target.transformer_variant,
+            Some(Ltx25TransformerVariant::Distilled)
+        );
+        assert_eq!(
+            loaded.records[0].target.decoder,
+            Some(Ltx25Decoder::DiffVae)
+        );
+
+        for field in ["transformerVariant", "decoder"] {
+            let mut missing = ltx.clone();
+            missing["target"]
+                .as_object_mut()
+                .expect("target object")
+                .remove(field);
+            assert!(
+                matches!(
+                    load_bundle(&bundle(missing)),
+                    Err(BundleLoadError::Invalid(message))
+                        if message.contains("must identify transformerVariant and decoder")
+                ),
+                "{field} must be required for LTX-2.5"
+            );
+        }
+
+        let mut invalid = ltx;
+        invalid["target"]["decoder"] = json!("native");
+        assert!(matches!(
+            load_bundle(&bundle(invalid)),
+            Err(BundleLoadError::Json(_))
+        ));
+    }
+
+    #[test]
+    fn ltx25_queries_match_the_typed_pipeline_identity() {
+        let mut ltx = complete_record();
+        ltx["target"]["modelId"] = json!("ltx_2_5");
+        ltx["target"]["provider"] = json!("ltx_2_5");
+        ltx["target"]["transformerVariant"] = json!("distilled");
+        ltx["target"]["decoder"] = json!("conv");
+        let bundle = match load_bundle(&bundle(ltx)).expect("typed LTX-2.5 record parses") {
+            BundleLoad::Ready(bundle) => bundle,
+            BundleLoad::Stale(reason) => panic!("typed LTX-2.5 record is current: {reason:?}"),
+        };
+        let mut query = exact_query();
+        query.model_id = "ltx_2_5".to_owned();
+        query.provider = "ltx_2_5".to_owned();
+        query.transformer_variant = Some(Ltx25TransformerVariant::Distilled);
+        query.decoder = Some(Ltx25Decoder::Conv);
+        assert!(matches!(
+            bundle.evidence_for(&query),
+            EvidenceVerdict::Verified(_)
+        ));
+
+        query.decoder = Some(Ltx25Decoder::DiffVae);
+        assert_eq!(bundle.evidence_for(&query), EvidenceVerdict::Unknown);
+        query.decoder = None;
+        assert_eq!(bundle.evidence_for(&query), EvidenceVerdict::Unknown);
+        query.decoder = Some(Ltx25Decoder::Conv);
+        query.transformer_variant = Some(Ltx25TransformerVariant::Dev);
+        assert_eq!(bundle.evidence_for(&query), EvidenceVerdict::Unknown);
     }
 
     #[test]

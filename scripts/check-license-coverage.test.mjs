@@ -1,8 +1,8 @@
 // sc-19751: prove the license coverage check REPORTS rather than gates.
 //
-// `check-license-coverage.mjs` runs its whole analysis at import time and exits, so unlike
-// `check-evidence-corpus.test.mjs` there are no pure functions to import — these drive the real
-// script as a subprocess.
+// `check-license-coverage.mjs` runs its whole analysis at import time and exits, so there are no
+// pure functions to import — these drive the real script as a subprocess. (The comparison here used
+// to name `check-evidence-corpus.test.mjs`, which sc-22512 removed along with its gate.)
 //
 // The mutation used throughout is the one that actually bit us: pointing the audited inventory at a
 // revision other than the Cargo pin, which is what EVERY inference pin bump did. Asserting on a
@@ -41,6 +41,15 @@ function runChecker(args = []) {
   if (result.error) throw result.error;
   return { status: result.status, output: `${result.stdout ?? ""}${result.stderr ?? ""}` };
 }
+
+test("the audit comment never restates the mutable inference pin", () => {
+  const audit = JSON.parse(readFileSync(AUDIT, "utf8"));
+  assert.doesNotMatch(
+    audit._comment ?? "",
+    /\b[0-9a-f]{40}\b/i,
+    "inferenceRevision is the sole pin authority; reviewer prose must stay revision-neutral",
+  );
+});
 
 test("a pin bump alone does not fail the build", () => {
   const { status, output } = withPinSkew(() => runChecker());

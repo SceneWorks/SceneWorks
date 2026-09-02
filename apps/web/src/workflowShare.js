@@ -288,7 +288,7 @@ export const ADVANCED_PREFILL = {
   // restores the opaque authored id even when this install no longer lists it; Image Studio keeps
   // that unavailable choice visible and the API then fails closed until it is restored or changed.
   textEncoderModel: { label: "Text encoder", prefill: PREFILL_CONTROL },
-  // The five that travel and land nowhere. Each names why, because "not restored" without a
+  // The settings that travel and land nowhere. Each names why, because "not restored" without a
   // reason reads like a bug.
   poses: {
     label: "Poses",
@@ -315,7 +315,7 @@ export const ADVANCED_PREFILL = {
     detail: "A Document Studio interleave setting. Image Studio has no control for it.",
   },
   // The VIDEO arm (sc-15956). Every one of these travels in a shared MP4 and lands nowhere HERE,
-  // for one reason that covers all eleven: this registry drives Image Studio, and a video recipe
+  // for one shared reason: this registry drives Image Studio, and a video recipe
   // replays in Video Studio. That is a different panel and a different story, so the honest thing
   // for this one to say is that the setting arrived and this studio has no control for it —
   // exactly what the four rows above say about the Detail, Character and Document lanes.
@@ -337,6 +337,36 @@ export const ADVANCED_PREFILL = {
     label: "Distilled variant",
     prefill: PREFILL_NONE,
     detail: "A Video Studio setting: which distilled LTX checkpoint the clip was made with.",
+  },
+  transformerVariant: {
+    label: "Transformer variant",
+    prefill: PREFILL_NONE,
+    detail: "A Video Studio setting: which LTX 2.5 transformer recipe made the clip.",
+  },
+  vaeDecoder: {
+    label: "VAE decoder",
+    prefill: PREFILL_NONE,
+    detail: "A Video Studio setting: which LTX 2.5 reconstruction path made the clip.",
+  },
+  autoDuration: {
+    label: "Automatic duration",
+    prefill: PREFILL_NONE,
+    detail: "A Video Studio setting: whether LTX 2.5 predicted the clip duration.",
+  },
+  autoDurationMinSeconds: {
+    label: "Minimum automatic duration",
+    prefill: PREFILL_NONE,
+    detail: "A Video Studio setting: the lower bound for LTX 2.5 duration prediction.",
+  },
+  autoDurationMaxSeconds: {
+    label: "Maximum automatic duration",
+    prefill: PREFILL_NONE,
+    detail: "A Video Studio setting: the upper bound for LTX 2.5 duration prediction.",
+  },
+  temporalUpsampleRounds: {
+    label: "Temporal refinement",
+    prefill: PREFILL_NONE,
+    detail: "A Video Studio setting: how many LTX 2.5 temporal-refinement rounds ran.",
   },
   lightning: {
     label: "Lightning steps",

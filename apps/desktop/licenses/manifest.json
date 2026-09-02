@@ -152,6 +152,40 @@
       ]
     },
     {
+      "id": "ltx-2.5",
+      "models": [
+        "ltx_2_5"
+      ],
+      "name": "LTX-2.5 + Gemma-4-12B",
+      "publisher": "Lightricks (LTX-2.5) · Google (Gemma-4)",
+      "license": "LTX-2.x Community License (2026-08-11) · Apache-2.0 + Gemma Prohibited Use Policy",
+      "homepage": "https://huggingface.co/Lightricks/LTX-2.5",
+      "platforms": [
+        "macos",
+        "windows",
+        "linux"
+      ],
+      "usage": "Text/image-to-video model with audio. SceneWorks downloads on first use a bundle re-hosted at SceneWorks/ltx-2.5-mlx (consumed by MLX on Apple Silicon and by native candle generation/training on Windows and Linux NVIDIA, the same cross-platform layout SceneWorks/ltx-2.3-mlx already uses), containing the LTX-2.5 video weights under the LTX-2.x Community License Agreement (License date: August 11, 2026 — a distinct, later agreement from the January 5, 2026 text that governs LTX-2.3; see NOTICE.txt for the diff) plus a Gemma-4-12B text encoder. Unlike LTX-2.3's Gemma-3 encoder, Google licenses Gemma 4 model weights under the Apache License 2.0; its separate Gemma Prohibited Use Policy still applies as an acceptable-use layer on top of that permissive grant. Re-hosting strips Hugging Face's extra_gated_* click-through metadata only — it does not remove or alter any of these terms, all of which apply in full; see NOTICE.txt.",
+      "documents": [
+        {
+          "label": "LTX-2.x Community License Agreement (2026-08-11)",
+          "key": "ltx-2.5-license"
+        },
+        {
+          "label": "Apache License 2.0 (Gemma 4)",
+          "key": "ltx-2.5-gemma-apache"
+        },
+        {
+          "label": "Gemma Prohibited Use Policy",
+          "key": "ltx-2.5-gemma-prohibited-use"
+        },
+        {
+          "label": "License provenance & sourcing notice",
+          "key": "ltx-2.5-notice"
+        }
+      ]
+    },
+    {
       "id": "ltx-2.3-ic-loras",
       "models": [],
       "name": "LTX-2.3 IC-LoRA HDR and LipDub",

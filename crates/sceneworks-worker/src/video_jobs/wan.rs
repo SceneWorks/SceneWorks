@@ -1290,6 +1290,11 @@ pub(super) struct VideoGenInput {
     pub(super) engine_id: &'static str,
     pub(super) model_dir: PathBuf,
     pub(super) quant: Option<Quant>,
+    /// Explicit fitted-memory pipeline axes. `None` is not inferred from execution knobs and
+    /// therefore cannot match an LTX curve.
+    pub(super) memory_transformer_variant:
+        Option<sceneworks_core::memory_calibration::Ltx25TransformerVariant>,
+    pub(super) memory_decoder: Option<sceneworks_core::memory_calibration::Ltx25Decoder>,
     pub(super) adapters: Vec<AdapterSpec>,
     pub(super) conditioning: Vec<Conditioning>,
     pub(super) prompt: String,
@@ -1298,6 +1303,13 @@ pub(super) struct VideoGenInput {
     pub(super) height: u32,
     pub(super) frames: u32,
     pub(super) fps: u32,
+    /// LTX-2.5's opt-in duration predictor. `Some` makes the provider own the frame count, while
+    /// `frames` remains the conservative max-window planning count used by admission.
+    pub(super) auto_duration: Option<gen_core::duration_head::AutoDurationRange>,
+    /// LTX-2.5 DFR temporal x2 refinement rounds. `None`/0 is the established plain pipeline.
+    pub(super) temporal_upsample_rounds: Option<u32>,
+    /// Stage the tier's alternate diffusion decoder instead of the default Conv VAE.
+    pub(super) use_diffusion_decoder: bool,
     pub(super) steps: Option<u32>,
     pub(super) guidance: Option<f32>,
     /// Flow-matching scheduler shift (`req.scheduler_shift`); `None` ⇒ the engine default. Set by the
@@ -1405,6 +1417,8 @@ impl Default for VideoGenInput {
             engine_id: "",
             model_dir: PathBuf::new(),
             quant: None,
+            memory_transformer_variant: None,
+            memory_decoder: None,
             adapters: Vec::new(),
             conditioning: Vec::new(),
             prompt: String::new(),
@@ -1413,6 +1427,9 @@ impl Default for VideoGenInput {
             height: 0,
             frames: 0,
             fps: 0,
+            auto_duration: None,
+            temporal_upsample_rounds: None,
+            use_diffusion_decoder: false,
             steps: None,
             guidance: None,
             scheduler_shift: None,
@@ -1457,11 +1474,16 @@ pub(super) fn video_load_spec(input: &VideoGenInput) -> LoadSpec {
     // Never downgrade a Sequential policy selected by the candle A14B route.
     spec.offload_policy = input.offload_policy;
     // Named model components (epic 13657). Video providers advertise no `required_components`, so
-    // the map is empty by default. Three OPTIONAL components ride it:
+    // the map is empty by default. Four OPTIONAL components ride it:
     //
     // * LTX-2.3's `uncensored_enhancer` (sc-2845 / sc-13664): when a `useUncensoredEnhancer` job
     //   resolved the amoral 4-bit Gemma snapshot, stage it here so the provider loads it on demand
     //   instead of the deleted `$LTX_UNCENSORED_GEMMA_DIR` / HF-cache scan.
+    // * LTX-2.5's stock `enhancer` (sc-18764/sc-18780): the selected weights root is nested at
+    //   `<snapshot>/<variant>/<tier>`, while the separately licensed offline enhancer is the
+    //   snapshot-level `<snapshot>/enhancer`. Stage the exact sibling root so the provider never
+    //   falls back to the nonexistent `<tier>/enhancer`. Candle does not advertise this MLX-only
+    //   capability, so its distinct engine id deliberately receives no component.
     // * MiniMax-H3's tiered DiT (`"transformer"`, sc-19508): its quantized partitions live in a
     //   different repo from its shared components, and `weights` can only name one root.
     // * MiniMax-H3's per-tier PACKED text encoder (`"text_encoder"`, sc-19120 / sc-19506): the
@@ -1472,13 +1494,26 @@ pub(super) fn video_load_spec(input: &VideoGenInput) -> LoadSpec {
     //   the whole engine crate, so staging there would resolve nothing and hard-error inside
     //   the engine at the `config.json` probe.
     //
+    // * LTX-2.5's alternate DiffVAE (`"diffusion_video_vae"`): the provider deliberately selects
+    //   it only when this explicit component is staged; omission keeps the faster Conv decoder.
+    //
     // All absent ⇒ empty map, the video load path unchanged. They are collected rather than
-    // branched so adding a fourth cannot silently drop one.
+    // branched so adding another cannot silently drop one.
+    let ltx25_stock_enhancer = (input.engine_id == "ltx_2_5")
+        .then(|| {
+            input
+                .model_dir
+                .parent()
+                .and_then(Path::parent)
+                .map(|root| root.join("enhancer"))
+        })
+        .flatten();
     spec.components = [
         input
             .uncensored_enhancer_dir
             .clone()
             .map(|dir| ("uncensored_enhancer".to_owned(), WeightsSource::Dir(dir))),
+        ltx25_stock_enhancer.map(|dir| ("enhancer".to_owned(), WeightsSource::Dir(dir))),
         input
             .dit_component_dir
             .clone()
@@ -1487,10 +1522,27 @@ pub(super) fn video_load_spec(input: &VideoGenInput) -> LoadSpec {
             .text_encoder_component_dir
             .clone()
             .map(|dir| ("text_encoder".to_owned(), WeightsSource::Dir(dir))),
+        input.use_diffusion_decoder.then(|| {
+            (
+                "diffusion_video_vae".to_owned(),
+                WeightsSource::File(input.model_dir.join("vae_diffusion_decoder.safetensors")),
+            )
+        }),
     ]
     .into_iter()
     .flatten()
     .collect::<BTreeMap<_, _>>();
+    // LTX-2.5's split checkpoints can stage the Gemma encoder and DiT sequentially on every load.
+    // Adapter-free loads also satisfy the providers' exact rung-4 prerequisite: their 48-block
+    // transformer source can be reopened under the shared deferred-materialization contract.
+    // Dev always carries its required refinement adapter, and user adapter loads do too; keeping
+    // those eager prevents a block rebuild from silently dropping forward-time residuals.
+    if matches!(input.engine_id, "ltx_2_5" | "ltx_2_5_distilled") {
+        spec.offload_policy = OffloadPolicy::Sequential;
+        if spec.adapters.is_empty() {
+            spec = spec.with_load_shape(gen_core::LoadShape::DeferredMaterialization);
+        }
+    }
     spec
 }
 
@@ -1550,6 +1602,19 @@ pub(super) fn video_admission_overlay(
     if let Some(video_mode) = input.video_mode.as_deref() {
         overlays.push(format!("provider_video_mode:{video_mode}"));
     }
+    if input.use_diffusion_decoder {
+        overlays.push("decoder:diffusion_vae".to_owned());
+    }
+    if let Some(range) = input.auto_duration {
+        overlays.push(format!(
+            "auto_duration:min:{:08x}:max:{:08x}",
+            range.min_seconds.to_bits(),
+            range.max_seconds.to_bits()
+        ));
+    }
+    if let Some(rounds) = input.temporal_upsample_rounds.filter(|rounds| *rounds > 0) {
+        overlays.push(format!("temporal_upsample_rounds:{rounds}"));
+    }
     if input.engine_id == "bernini" && matches!(input.video_mode.as_deref(), Some("r2v" | "rv2v")) {
         overlays.push(
             crate::video_admission::bernini_r2v_reference_receipt(
@@ -1600,7 +1665,10 @@ pub(super) fn video_admission_overlay(
         );
     } else if mode == "replace_person"
         && !input.conditioning.is_empty()
-        && !matches!(input.engine_id, "ltx_2_3" | "ltx_2_3_distilled")
+        && !matches!(
+            input.engine_id,
+            "ltx_2_3" | "ltx_2_3_distilled" | "ltx_2_5" | "ltx_2_5_distilled"
+        )
     {
         overlays.push(
             crate::video_admission::wan_vace_replace_person_receipt(
@@ -1622,7 +1690,10 @@ pub(super) fn video_admission_overlay(
             .map_err(WorkerError::InvalidPayload)?,
         );
     }
-    if matches!(input.engine_id, "ltx_2_3" | "ltx_2_3_distilled") {
+    if matches!(
+        input.engine_id,
+        "ltx_2_3" | "ltx_2_3_distilled" | "ltx_2_5" | "ltx_2_5_distilled"
+    ) {
         let mut references = input.conditioning.iter().filter_map(|conditioning| {
             let Conditioning::Reference { image, strength } = conditioning else {
                 return None;
@@ -1864,7 +1935,10 @@ pub(super) fn video_admission_reference_shape(
     {
         return "ads2v";
     }
-    if matches!(model_id, "ltx_2_3" | "ltx_2_3_distilled") {
+    if matches!(
+        model_id,
+        "ltx_2_3" | "ltx_2_3_distilled" | "ltx_2_5" | "ltx_2_5_distilled"
+    ) {
         return match mode {
             "image_to_video" => "image",
             "first_last_frame" => "keyframe",
@@ -1933,7 +2007,10 @@ pub(super) fn video_admission_reference_count(
     mode: &str,
     conditioning: &[Conditioning],
 ) -> u32 {
-    if matches!(model_id, "ltx_2_3" | "ltx_2_3_distilled") {
+    if matches!(
+        model_id,
+        "ltx_2_3" | "ltx_2_3_distilled" | "ltx_2_5" | "ltx_2_5_distilled"
+    ) {
         return u32::try_from(
             conditioning
                 .iter()
@@ -2039,8 +2116,12 @@ pub(super) fn run_loaded_video_generation(
         negative_prompt: input.negative_prompt,
         width: input.width,
         height: input.height,
-        frames: Some(input.frames),
+        // An explicit frame count wins over auto-duration in gen-core. Leave it absent only for an
+        // opted-in LTX-2.5 request so the duration head is actually reached.
+        frames: input.auto_duration.is_none().then_some(input.frames),
         fps: Some(input.fps),
+        auto_duration: input.auto_duration,
+        temporal_upsample_rounds: input.temporal_upsample_rounds,
         steps: input.steps,
         guidance: input.guidance,
         scheduler_shift: input.scheduler_shift,
@@ -2644,6 +2725,8 @@ pub(super) async fn generate_video_using(
                     overlay: admission_overlay.as_deref(),
                     lane: crate::video_admission::LANE,
                     tier: admission_tier,
+                    transformer_variant: input.memory_transformer_variant,
+                    decoder: input.memory_decoder,
                     width: admission_geometry.0,
                     height: admission_geometry.1,
                     frames: admission_geometry.2,

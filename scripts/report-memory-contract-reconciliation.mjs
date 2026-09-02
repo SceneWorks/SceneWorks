@@ -31,14 +31,17 @@
 // capability dumps. That lives here, not in a test, because a blocking fixed-point invariant would be
 // a new gate. See `manifestFixedPoint` below.
 
-import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { planProjection, projectManifestBody } from "./lib/manifest-memory-declarations.mjs";
 import { stripJsoncComments } from "./lib/jsonc.mjs";
-import { reconciliationMismatchKey } from "./lib/memory-contract-reconciliation.mjs";
+import {
+  reconcileMemoryContracts,
+  reconciliationMismatchKey,
+} from "./lib/memory-contract-reconciliation.mjs";
+import { buildMatrix } from "./generate-memory-matrix.mjs";
 import { triageMemoryContractMismatches } from "./lib/memory-contract-triage.mjs";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -129,16 +132,26 @@ function fixedPointLine() {
       "  the derived artifacts. Findings below may reflect the old projection.";
 }
 
-// The reconciliation needs the same assembled inputs the matrix generator builds (cells, calibration
-// plan, survey), so the report asks the generator for them rather than reassembling — one code path,
-// one answer. `--emit-reconciliation` prints the reconciliation result as JSON and nothing else.
-function loadReconciliation() {
-  const raw = execFileSync(
-    process.execPath,
-    [path.join(ROOT, "scripts/generate-memory-matrix.mjs"), "--emit-reconciliation"],
-    { cwd: ROOT, encoding: "utf8", maxBuffer: 256 * 1024 * 1024 },
-  );
-  return JSON.parse(raw);
+// The reconciliation needs the matrix's resolved coordinates, plus the calibration plan, the
+// provider closure ledger and the rung-4 survey. sc-22513 collapsed the matrix onto the anchor
+// store, so the last three are no longer matrix inputs and the generator no longer carries this
+// report: it asks the generator for the CELLS — the one thing only the generator can assemble — and
+// reads the report's own three inputs here. That keeps the enumeration alive without putting a
+// campaign artifact back into the matrix's fingerprint, which is exactly what E5 removed.
+async function loadReconciliation() {
+  const read = (relative) => readFileSync(path.join(ROOT, relative), "utf8");
+  const { cells } = await buildMatrix({ publish: false });
+  return reconcileMemoryContracts({
+    pin: null,
+    engineFacts: ["mlx", "candle"].map((backend) =>
+      JSON.parse(read(`config/engine-capabilities/capabilities.${backend}.json`)),
+    ),
+    manifest: JSON.parse(stripJsoncComments(read("config/manifests/builtin.models.jsonc"))),
+    cells,
+    calibrationPlan: JSON.parse(read("config/memory-calibration-plan.json")),
+    closures: JSON.parse(read("config/inference-provider-closures.json")),
+    survey: JSON.parse(read("config/rung4-applicability-survey.json")),
+  });
 }
 
 // `process.exit()` is deliberately ABSENT from this file (sc-20246).
@@ -149,10 +162,10 @@ function loadReconciliation() {
 // whole — a difference that quietly corrupts any consumer that pipes. Every path below RETURNS from
 // `main` instead, so node exits naturally once the stream has flushed. `main` never throws, so the
 // implicit exit code is 0, which is the always-exit-0 contract this report is built on.
-function main() {
+async function main() {
   let result;
   try {
-    result = loadReconciliation();
+    result = await loadReconciliation();
   } catch (error) {
     // Even the report refuses to fail. If the inputs cannot be assembled at all, say so and exit 0 —
     // this script is a worklist, and an unavailable worklist is not a build failure.
@@ -288,4 +301,4 @@ function main() {
   console.log("\nDone. Exit 0 always.");
 }
 
-main();
+await main();
