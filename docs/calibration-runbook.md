@@ -163,7 +163,7 @@ ids they cover today:
 | binary | providers covered | how it dispatches an unknown provider |
 | --- | --- | --- |
 | `memory-mlx-adapter` | `qwen_image`, `z_image_turbo`, `krea_2_turbo`, `sdxl`, `krea_2_turbo_control`, `flux2_dev` (SDXL exposes only Resident, Staged, and bounded-transformer residency; its decode/attention rungs are measured `Missing`. FLUX.2-dev is **resident rung only**.) | `mlx.rs` `run` — `MLX five-rung calibration does not implement provider "<id>"`; `validate_z_image_batch` (`assess_batch`) — `…five-rung batch assessment does not implement provider "<id>"` (cited by function name; the line numbers this table used to carry went stale the first time the file grew) |
-| `memory-candle-adapter` | `qwen_image`, `krea_2_turbo` | `candle.rs:540-548` — `Candle five-rung calibration does not implement provider "<id>"` |
+| `memory-candle-adapter` | `qwen_image`, `krea_2_turbo`, `z_image_turbo` (sc-15859; five-rung reference path only, no inline arm) | `plain_execution_path` / `still_calibration_label` / `load_five_rung_generator` — `Candle five-rung calibration does not implement provider "<id>"` |
 
 Since sc-18212 the stale-lane report answers this gate for you: its `CAPTURE` column and
 "DECLARED/PLANNED BUT UNCAPTURABLE" section are derived by parsing these dispatch matches
@@ -565,6 +565,11 @@ SCENEWORKS_MLX_WIRED_LIMIT_BYTES=<explicit wired-ceiling override>
 SCENEWORKS_KREA_REPOSITORY=SceneWorks/krea-2-turbo-mlx
 SCENEWORKS_KREA_REVISION=<exact artifact revision>
 SCENEWORKS_KREA_ROOT=/abs/path/.../snapshots/<rev>/q4
+
+# memory-candle-adapter — z_image_turbo   (sc-15859; same artifact family as the MLX arm)
+SCENEWORKS_Z_IMAGE_REPOSITORY=SceneWorks/z-image-turbo-mlx   # fixed; validated against Z_IMAGE_REPOSITORY
+SCENEWORKS_Z_IMAGE_REVISION=<exact artifact revision>
+SCENEWORKS_Z_IMAGE_ROOT=/abs/path/.../snapshots/<rev>/<tier>  # bf16 | q4 | q8, derived from the plan target
 ```
 
 All three of each family are **required** (`protocol::required_env`) — a missing one fails before

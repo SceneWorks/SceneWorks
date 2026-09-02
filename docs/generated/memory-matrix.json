@@ -1,11 +1,11 @@
 {
   "schemaVersion": 11,
   "generatedFrom": {
-    "sceneWorksRevision": "source-tree:9213a503b9e364b63d52744677341e0730acf80aee7138bb618e71f18063b4d4",
+    "sceneWorksRevision": "source-tree:b1e2c5c014ac00a58c336f9c60da61d5d1cc9e540e7e2d9d4f1944cdf75f836f",
     "sources": {
       "manifest": {
         "path": "config/manifests/builtin.models.jsonc",
-        "sha256": "081ba31a393cbef626b7c780a5930304abe7e778c7f3897e3cbfddb3a380964c"
+        "sha256": "143917605dcc2fec938dac52bc87939f6b99a13cb460d794a6a04d3e3c3699ef"
       },
       "routingCatalog": {
         "path": "crates/sceneworks-core/src/jobs_store/routing/catalog.rs",
@@ -69,11 +69,11 @@
       },
       "anchorStore": {
         "path": "config/memory-anchors.json",
-        "sha256": "a2955c25bda6803d645c71c8390bb63f6810a71ed46f835d682dad34ae0473f2"
+        "sha256": "86a802fbe34fcd4262faddbd3c08ee2ae253eeaa49b2a422536af79ec2126f5e"
       },
       "anchorLoaderClosures": {
         "path": "config/anchor-loader-closures.json",
-        "sha256": "32494809c5feb328ced2e4e0871592e2ba6fd1a5e5790cf0108204dd64af39bc"
+        "sha256": "48ca2c6924d6ab7477e6600a09f263a7736b2850e8881661db1de4994a95d470"
       },
       "anchorDerivation": {
         "path": "crates/sceneworks-core/src/memory_anchor.rs",
@@ -93,7 +93,7 @@
       },
       "anchorExtractor": {
         "path": "scripts/extract-memory-anchors.mjs",
-        "sha256": "70e4ab33b9d53738bc9dd6067503de52ebfb79d3d5dc52b558f5540184e2cfaf"
+        "sha256": "2b051216e780387c971a2fd7f9592b4f5e02b0ad5d113f2f1288e5412c01e690"
       }
     }
   },
