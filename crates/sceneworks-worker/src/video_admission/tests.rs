@@ -3174,10 +3174,11 @@ fn ltx25_unmeasured_geometry() -> VideoAdmissionGeometry {
     }
 }
 
-/// `None` when the packaged store carries no q8 dev/diffvae MLX anchor for LTX-2.5 (sc-22512, E8):
-/// the anchor is LOOKED UP, not required. A corpus that never measured that cell is absence — the
-/// request simply prices from the analytic floor — so callers withhold their question instead of
-/// reddening. A PRESENT anchor that cannot derive the geometry is still a contradiction and panics.
+/// `None` when the packaged store carries no CURRENT q8 dev/diffvae MLX anchor for LTX-2.5
+/// (sc-22512, E8/E9): the anchor is LOOKED UP, not required. A corpus that never measured that cell
+/// or whose measured loader closure has since changed prices the request from the analytic floor,
+/// so callers withhold their anchor-specific question instead of reddening. A CURRENT anchor that
+/// cannot derive the geometry is still a contradiction and panics.
 fn ltx25_expected_derived_peaks() -> Option<sceneworks_core::memory_anchor::AnchorDerivedPhases> {
     let anchor = sceneworks_core::memory_anchor::packaged_memory_anchors()
         .expect("packaged anchors load")
@@ -3188,6 +3189,10 @@ fn ltx25_expected_derived_peaks() -> Option<sceneworks_core::memory_anchor::Anch
             Ltx25TransformerVariant::Dev,
             Ltx25Decoder::DiffVae,
         )?;
+    let closures = sceneworks_core::memory_anchor::packaged_anchor_loader_closures()?;
+    if !anchor.is_current(closures) {
+        return None;
+    }
     Some(
         anchor
             .derive_video_phase_peaks(sceneworks_core::memory_anchor::AnchorDeriveRequest {
