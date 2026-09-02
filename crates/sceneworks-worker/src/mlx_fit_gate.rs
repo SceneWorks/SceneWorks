@@ -5258,10 +5258,14 @@ fn generic_mlx_shared_observation(
         // ::unmodeled_activation_bytes`). Headroom used to live only in the budget's
         // `reserved_headroom_gb`, which made the declaration an out-of-band charge.
         //
-        // Moving it is exactly value-preserving, not a policy change: the comparison was
-        // `weights + 0.17*headroom <= total - headroom` and is now
-        // `(weights + headroom) + 0.17*headroom <= total`, the same inequality. `reserved_headroom_gb`
-        // is zeroed below so the term is counted once.
+        // Moving it is exactly value-preserving, not a policy change: writing the MLX allowance as
+        // A (`ladder_margin_policy::FLOOR_ALLOCATOR_ENVELOPE_ALLOWANCE`), the comparison was
+        // `weights + A*headroom <= total - headroom` and is now
+        // `(weights + headroom) + A*headroom <= total`, the same inequality for ANY A —
+        // which is the point of writing it symbolically: the identity is independent of whatever
+        // the corpus derives A to be, and the earlier prose that spelled it `0.17` went stale the
+        // moment that derivation moved. `reserved_headroom_gb` is zeroed below so headroom is
+        // counted once.
         predicted_peak_bytes: total_bytes.saturating_add(headroom_bytes),
         observed_peak_bytes: None,
         parity: MemoryParityContract::Exact,
@@ -8737,9 +8741,15 @@ mod tests {
     }
 
     /// A host budget that admits EXACTLY the deepest (rung-4) estimate floor and nothing shallower —
-    /// the midpoint of the widened window, so it cannot sit on either boundary. At the current margin
-    /// this is ~11.3 GiB (rung 4 widens to 9.02, everything shallower to 13.54); at the old 5% term
-    /// it would have been ~7.9 GiB, which is why these fixtures read 8.0.
+    /// the midpoint of the widened window, so it cannot sit on either boundary.
+    ///
+    /// Both bounds are computed from `FLOOR_ALLOCATOR_ENVELOPE_ALLOWANCE` through
+    /// [`widened_estimate_gb`], never transcribed. Transcribed window numbers are exactly what went
+    /// stale here before: this comment used to quote a GiB window read off a superseded allowance,
+    /// and a reader checking the fixtures against it would have been checking them against a value
+    /// the policy no longer carries. The window's position moves with any re-derivation of the
+    /// allowance; the assertion below is what keeps its ORDERING — the only property these
+    /// fixtures depend on — honest at whatever value the corpus derives.
     fn budget_admitting_only_the_deepest_estimate_rung() -> MemoryBudget {
         let deepest = widened_estimate_gb(FIXTURE_DEEP_ESTIMATE_FLOOR_GB);
         // The shallow bound is now the LOWER of the shallow floors and the resident baseline's
@@ -9330,7 +9340,8 @@ mod tests {
     /// `request_total_peak_bytes` — which returns `providers::mage::memory::generation_peak_gb`, a
     /// single provider scalar, on the `mage_flow` route — and then through the loaded generator's
     /// `predicted_memory_peak_from_base`, a gen-core trait method that may rewrite it. Declaring
-    /// `generic_headroom_bytes` for it would charge 17% of a term the peak need not contain.
+    /// `generic_headroom_bytes` for it would charge `FLOOR_ALLOCATOR_ENVELOPE_ALLOWANCE` of a term
+    /// the peak need not contain.
     ///
     /// The two ceilings differ, so the choice is observable: at a host between them, a baseline
     /// that declared the headroom term would be admitted as Resident, while the undeclared-floor
@@ -9469,9 +9480,11 @@ mod tests {
         );
 
         // Mutation arm: at 7 GiB even the rung-4 admitted floor (6 GiB of pure activation headroom
-        // + its 17% allocator-envelope allowance = 7.02 GiB) overflows, and the refusal is the
-        // honest Reject quoting the admitted requirement — proving the per-term allowance is
-        // applied on this path (a zeroed allowance would admit 6.0 <= 7.0).
+        // widened by `FLOOR_ALLOCATOR_ENVELOPE_ALLOWANCE`) overflows, and the refusal is the honest
+        // Reject quoting the admitted requirement — proving the per-term allowance is applied on
+        // this path (a zeroed allowance would admit 6.0 <= 7.0). The budget is sized through the
+        // policy rather than against a transcribed widened figure, which is what went stale here
+        // when the allowance was re-derived.
         let error = evaluate_request_with_budget(
             &generator,
             &plan,
@@ -14458,7 +14471,8 @@ mod tests {
             // through `predicted_memory_peak_from_base`, and on `mage_flow` through the provider's
             // own `generation_peak_gb`, neither of which is guaranteed to decompose. So the policy
             // charges it the undeclared-floor arm — the whole-peak recapture spread — and passing
-            // `Some(raw_incremental_peak)` here would model a 17%-of-activation ceiling production
+            // `Some(raw_incremental_peak)` here would model an allowance-of-activation ceiling
+            // (`FLOOR_ALLOCATOR_ENVELOPE_ALLOWANCE` against the headroom term) that production
             // never applies. That mismatch is what this assertion caught.
             let widened_incremental_peak = crate::memory_strategy::floor_admitted_peak_bytes(
                 gen_core::MemoryBackend::Mlx,

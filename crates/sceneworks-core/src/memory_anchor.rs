@@ -401,8 +401,21 @@ pub const MLX_IMAGE_VALIDATION_TIGHTNESS_BUDGET: f64 = 0.02;
 // conservative:
 //
 //   * the delta ADDS the full file size of every component the TARGET cell materializes and the
-//     sibling's cell does not (the distilled variant's distillation LoRA, the dev variant's
-//     stage-two enhancer, the target decoder's weight files);
+//     sibling's cell does not. What each variant materializes is read off the ENGINE, not off the
+//     variant's name: `mlx_ltx25.rs::configured_spec` pushes `DEV_ADAPTER` (the distillation LoRA)
+//     only under `variant == Dev`, and `video_jobs/ltx.rs::resolve_ltx_distill_adapter` returns
+//     `None` for LTX-2.5 Distilled because the distilled checkpoint already carries the
+//     refinement. So the DEV row prices the LoRA, the DISTILLED row crosses nothing, and the stock
+//     `enhancer/` directory — inserted into `spec.components` for BOTH variants — cancels out of
+//     both. [`LTX25_VARIANT_DELTA_COMPONENTS`] mirrors that materialization and
+//     `ltx25_variant_delta_matches_the_engine_materialization` cross-checks the store against it;
+//     the decoder rows price the target decoder's weight files;
+//   * a legitimately EMPTY crossing is carried as an explicit zero-byte row, not as a missing row.
+//     The two say different things to [`MemoryAnchorStore::derive_video_phase_peaks_for_cell`]: a
+//     missing row means "this axis is unpriced, refuse the sibling", a zero row means "crossing
+//     this axis costs nothing", and collapsing them would make an honestly-free crossing
+//     unreachable. A zero row still recomputes: it must name no files AND declare zero bytes, so a
+//     nonzero row cannot be zeroed into one (its `files` would still sum nonzero);
 //   * it subtracts NOTHING for components the sibling has and the target lacks. Subtracting
 //     would assume the sibling's component was fully resident inside the phase peak being
 //     re-priced — an assumption the retained evidence cannot certify (the MLX allocator retains
@@ -423,10 +436,18 @@ pub const MLX_IMAGE_VALIDATION_TIGHTNESS_BUDGET: f64 = 0.02;
 /// comment), so a derived off-anchor bound legitimately over-estimates by up to the component's
 /// whole size where the true peak holds only part of it. The budget keeps the bound falsifiable
 /// (the leave-one-out validation refuses a runaway estimate) without demanding a tightness the
-/// conservative rule cannot deliver. The binding retained case is the bf16 distilled/diffvae
-/// 768x512 capture, whose decode intercept carries the whole distillation-LoRA delta and lands
-/// 26.0% over its measured envelope.
-pub const ANCHOR_DELTA_VALIDATION_TIGHTNESS_BUDGET: f64 = 0.35;
+/// conservative rule cannot deliver.
+///
+/// RE-DERIVED at the feature-end fix round, after the variant deltas were re-keyed onto what each
+/// variant actually materializes (the earlier 0.35 was sized by a binding case that inherited a
+/// misattributed 8.9 GB distillation-LoRA add on the distilled row — a component the distilled
+/// target never loads). With the corrected table the binding retained case is the bf16
+/// distilled/conv 1280x704 capture `imc-4e1b3a02a6ced3434824`, derived from its dev/diffvae
+/// sibling across a zero variant crossing plus the 0.81 GB conv-decoder crossing, landing 21.83%
+/// over its measured envelope. The budget is that figure rounded up to the next whole point.
+/// `the_delta_tightness_budget_is_the_binding_leave_one_out_overshoot_rounded_up` recomputes it
+/// and refuses more than a point of slack, so this cannot drift back into a number nothing binds.
+pub const ANCHOR_DELTA_VALIDATION_TIGHTNESS_BUDGET: f64 = 0.22;
 
 /// Shipped weights file inventories the component deltas cite, compiled in for the same reason
 /// the retained corpora are: a delta's byte value must be recomputable from bytes this build
@@ -436,6 +457,27 @@ pub const PACKAGED_WEIGHTS_FILE_INVENTORIES: &[(&str, &str)] = &[(
     "config/ltx25-weights-file-inventory.json",
     include_str!("../../../config/ltx25-weights-file-inventory.json"),
 )];
+
+/// What each LTX-2.5 transformer variant materializes beyond the components its sibling ALSO
+/// loads, keyed by the component's top-level directory in the shipped bundle.
+///
+/// This is a MIRROR of the engine, held here because `sceneworks-core` cannot depend on the worker
+/// or the capture arm, and because a variant delta keyed on anything other than the engine's real
+/// materialization is silently wrong in the OOM direction. The two authorities:
+///
+///   * `crates/sceneworks-memory-adapter/src/bin/mlx_ltx25.rs::configured_spec` pushes
+///     `DEV_ADAPTER` — the `distilled_lora/` file — onto `spec.adapters` only under
+///     `variant == TransformerVariant::Dev`, and inserts the `enhancer` component for BOTH
+///     variants (so the enhancer cancels and is not listed here for either);
+///   * `crates/sceneworks-worker/src/video_jobs/ltx.rs::resolve_ltx_distill_adapter` returns
+///     `None` for `Ltx25TransformerVariant::Distilled`, whose checkpoint already carries the
+///     refinement, and resolves the manifest's `distilledLora` co-requisite for dev.
+///
+/// `ltx25_variant_delta_components_mirror_the_engine_source` cross-checks this table against those
+/// two source files, and `ltx25_variant_delta_matches_the_engine_materialization` checks the
+/// shipped delta rows against this table — so re-inverting the mapping reds, in either place.
+pub const LTX25_VARIANT_DELTA_COMPONENTS: &[(&str, &[&str])] =
+    &[("dev", &["distilled_lora"]), ("distilled", &[])];
 
 /// The pipeline axis a component delta re-prices.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -1173,8 +1215,15 @@ fn validate_component_deltas(store: &MemoryAnchorStore) -> Result<(), String> {
                 delta.id
             ));
         }
-        if delta.files.is_empty() {
-            return Err(format!("component delta {} names no files", delta.id));
+        // A row that names no files is the ZERO delta: the target crosses no component the sibling
+        // lacks. It is a real claim, not a hole, so it is representable — but only as a genuine
+        // zero. Declaring bytes without files is the doctoring case and still fails.
+        if delta.files.is_empty() && delta.bytes != 0 {
+            return Err(format!(
+                "component delta {} declares {} bytes but names no files — only a zero-byte \
+                 crossing may name none",
+                delta.id, delta.bytes
+            ));
         }
         let Some((_, raw)) = PACKAGED_WEIGHTS_FILE_INVENTORIES
             .iter()
@@ -1213,9 +1262,21 @@ fn validate_component_deltas(store: &MemoryAnchorStore) -> Result<(), String> {
                         delta.id, file, delta.source.path
                     )
                 })?;
+            // Keeps the zero-row rule above airtight: a row that names files must sum positive,
+            // so "no files" stays the ONLY way a delta reaches zero.
+            if size == 0 {
+                return Err(format!(
+                    "component delta {} sums {} which the inventory {} sizes at zero",
+                    delta.id, file, delta.source.path
+                ));
+            }
             total = total.saturating_add(size);
         }
-        if total == 0 || total != delta.bytes {
+        // `total == 0` is NOT rejected on its own: with no files it is the honest zero crossing
+        // (guarded above), and a row that names files cannot reach zero (guarded just above).
+        // What is rejected is a declared byte count the cited files do not entail — which is what
+        // a zeroed, inflated or re-pointed row looks like.
+        if total != delta.bytes {
             return Err(format!(
                 "component delta {} declares {} bytes but its cited files sum to {total} — the \
                  delta must equal the shipped file sizes it names",
@@ -1793,7 +1854,9 @@ pub struct AnchorMlxImageDeriveRequest {
 
 /// One priced cell from [`MemoryAnchorStore::derive_video_phase_peaks_for_cell`]: the derived
 /// phases, the anchor that priced them, and the component-delta bytes the sibling fall-through
-/// added (zero on the exact-cell path).
+/// added. Zero means one of two things and the caller can tell them apart from `anchor`: the
+/// exact-cell path took no sibling at all, or every axis this derivation crossed is priced at a
+/// legitimate zero (see [`LTX25_VARIANT_DELTA_COMPONENTS`]).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct AnchorCellDerivation<'a> {
     pub phases: AnchorDerivedPhases,
@@ -1836,8 +1899,11 @@ impl MemoryAnchorStore {
     /// anchored terms.
     ///
     /// Sibling choice is deterministic: the fewest differing axes win, then the lexicographically
-    /// smallest anchor id. A sibling differing on an axis with no bound delta is skipped — the
-    /// caller keeps its floor, never a guessed size.
+    /// smallest anchor id. A sibling differing on an axis with NO bound delta row is skipped — the
+    /// caller keeps its floor, never a guessed size. That is distinct from a row bound at ZERO
+    /// bytes, which is a priced crossing that happens to cost nothing and is taken normally: the
+    /// distilled variant materializes no component its dev sibling lacks, and refusing that
+    /// crossing would discard a derivation the evidence fully supports.
     pub fn derive_video_phase_peaks_for_cell(
         &self,
         model_id: &str,
@@ -1936,6 +2002,7 @@ impl MemoryAnchorStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::BTreeSet;
 
     const LTX25_CORPUS_PATH: &str = "docs/calibration/sc-18791/ltx25-mlx-evidence.seed.json";
 
@@ -4193,8 +4260,124 @@ mod tests {
     /// E2's headline: an unmeasured (variant, decoder) cell of an anchored (model, tier, lane)
     /// derives from the sibling anchor plus the bound file-size delta — and the delta is APPLIED,
     /// byte for byte, so zeroing it reds this test.
+    ///
+    /// The crossing exercised is DEV-from-distilled, because that is the direction the corrected
+    /// table prices above zero (the dev recipe materializes the distillation LoRA the distilled
+    /// checkpoint already contains — see [`LTX25_VARIANT_DELTA_COMPONENTS`]). The mirrored
+    /// distilled-from-dev crossing is a legitimate zero and is asserted by
+    /// `a_zero_crossing_derives_the_sibling_estimate_unchanged_rather_than_refusing`.
     #[test]
     fn an_unmeasured_variant_cell_derives_from_the_sibling_anchor_plus_the_bound_delta() {
+        // Removing the bf16 dev anchors makes bf16 dev/diffvae an unmeasured cell whose only
+        // one-axis sibling is bf16 distilled/diffvae — i.e. exactly the DEV-from-distilled variant
+        // crossing, with no decoder crossing mixed in. The request runs the deferred and windowed
+        // rungs the retained distilled measurement ran (an anchor never prices a request looser
+        // than its own regime) and leaves decode untiled, so the decode phase is priced from that
+        // anchor's measured intercept and the add has somewhere to land.
+        let request = AnchorDeriveRequest {
+            transformer_windowed: true,
+            deferred_materialization: true,
+            ..plain_request(1280, 704, 145)
+        };
+        let mut doctored = store().clone();
+        doctored.anchors.retain(|anchor| {
+            !(anchor.model_id == "ltx_2_5"
+                && anchor.tier == "bf16"
+                && anchor.transformer_variant == Some(Ltx25TransformerVariant::Dev))
+        });
+        assert!(doctored
+            .anchor_for(
+                "ltx_2_5",
+                AnchorBackend::Mlx,
+                "bf16",
+                Ltx25TransformerVariant::Dev,
+                Ltx25Decoder::DiffVae
+            )
+            .is_none());
+        let derived = doctored
+            .derive_video_phase_peaks_for_cell(
+                "ltx_2_5",
+                AnchorBackend::Mlx,
+                "bf16",
+                Ltx25TransformerVariant::Dev,
+                Ltx25Decoder::DiffVae,
+                request,
+            )
+            .expect("the unmeasured variant cell derives from its sibling");
+        let sibling = doctored
+            .anchor_for(
+                "ltx_2_5",
+                AnchorBackend::Mlx,
+                "bf16",
+                Ltx25TransformerVariant::Distilled,
+                Ltx25Decoder::DiffVae,
+            )
+            .expect("the sibling anchor");
+        assert_eq!(derived.anchor.id, sibling.id);
+        let delta = store()
+            .component_delta_for(
+                "ltx_2_5",
+                AnchorBackend::Mlx,
+                "bf16",
+                ComponentDeltaAxis::TransformerVariant,
+                "dev",
+            )
+            .expect("the dev variant delta is bound");
+        assert_eq!(derived.delta_bytes, delta.bytes);
+        // The delta names the distillation LoRA the DEV recipe materializes on top of the shared
+        // transformer, and its bytes are the shipped file's size — not a tuned number.
+        assert_eq!(
+            delta.files,
+            vec!["distilled_lora/ltx-2.5-22b-distilled-lora-450-bf16.safetensors".to_owned()]
+        );
+        assert!(delta.bytes > 0);
+        let raw = sibling
+            .derive_video_phase_estimates_raw(request)
+            .expect("the sibling prices the request");
+        let expect = |estimate: RawPhaseEstimate| {
+            if estimate.anchored {
+                widened(estimate.bytes + i128::from(delta.bytes)).expect("widens")
+            } else {
+                widened(estimate.bytes).expect("widens")
+            }
+        };
+        assert_eq!(derived.phases.conditioning, expect(raw.conditioning));
+        assert_eq!(derived.phases.denoise, expect(raw.denoise));
+        assert_eq!(derived.phases.decode, expect(raw.decode));
+        // The conservative direction: the delta ADDS — every intercept-priced phase of the derived
+        // cell sits strictly above the sibling's own derivation.
+        let plain = sibling
+            .derive_video_phase_peaks(request)
+            .expect("the sibling's own derivation");
+        let mut lifted = 0_usize;
+        for (anchored, derived_bytes, plain_bytes) in [
+            (
+                raw.conditioning.anchored,
+                derived.phases.conditioning,
+                plain.conditioning,
+            ),
+            (raw.denoise.anchored, derived.phases.denoise, plain.denoise),
+            (raw.decode.anchored, derived.phases.decode, plain.decode),
+        ] {
+            if anchored {
+                assert!(derived_bytes > plain_bytes);
+                lifted += 1;
+            } else {
+                assert_eq!(derived_bytes, plain_bytes);
+            }
+        }
+        assert!(lifted > 0, "the crossing must lift at least one phase");
+    }
+
+    /// The mirrored crossing: DISTILLED-from-dev crosses no component, so the fall-through must
+    /// return the sibling's own estimate unchanged — NOT refuse the cell.
+    ///
+    /// This is the whole point of representing a zero delta instead of rejecting one. Before the
+    /// feature-end correction the distilled row carried the dev recipe's LoRA, which made this
+    /// cell's bound 8.9 GB wider than the evidence entails while the mirrored dev cell was 8.9 GB
+    /// too narrow — the OOM direction.
+    #[test]
+    fn a_zero_crossing_derives_the_sibling_estimate_unchanged_rather_than_refusing() {
         // q8 distilled/diffvae carries no anchor; q8 dev/diffvae is its variant sibling.
         assert!(store()
             .anchor_for(
@@ -4215,7 +4398,7 @@ mod tests {
                 Ltx25Decoder::DiffVae,
                 request,
             )
-            .expect("the unmeasured variant cell derives from its sibling");
+            .expect("a zero crossing still derives — a zero delta is priced, not missing");
         let sibling = store()
             .anchor_for(
                 "ltx_2_5",
@@ -4234,31 +4417,16 @@ mod tests {
                 ComponentDeltaAxis::TransformerVariant,
                 "distilled",
             )
-            .expect("the distilled variant delta is bound");
-        assert_eq!(derived.delta_bytes, delta.bytes);
-        // The delta names the distillation LoRA the distilled recipe materializes, and its bytes
-        // are the shipped file's size — not a tuned number.
-        assert_eq!(
-            delta.files,
-            vec!["distilled_lora/ltx-2.5-22b-distilled-lora-450-bf16.safetensors".to_owned()]
-        );
-        let raw = sibling
-            .derive_video_phase_estimates_raw(request)
-            .expect("the sibling prices the request");
-        let expect = |estimate: RawPhaseEstimate| {
-            widened(estimate.bytes + i128::from(delta.bytes)).expect("widens")
-        };
-        assert_eq!(derived.phases.conditioning, expect(raw.conditioning));
-        assert_eq!(derived.phases.denoise, expect(raw.denoise));
-        assert_eq!(derived.phases.decode, expect(raw.decode));
-        // The conservative direction: the delta ADDS — the derived cell sits strictly above the
-        // sibling's own derivation, in every phase.
+            .expect("the distilled variant delta is bound — as an explicit zero");
+        assert_eq!(delta.bytes, 0);
+        assert!(delta.files.is_empty());
+        assert_eq!(derived.delta_bytes, 0);
         let plain = sibling
             .derive_video_phase_peaks(request)
             .expect("the sibling's own derivation");
-        assert!(derived.phases.conditioning > plain.conditioning);
-        assert!(derived.phases.denoise > plain.denoise);
-        assert!(derived.phases.decode > plain.decode);
+        assert_eq!(derived.phases.conditioning, plain.conditioning);
+        assert_eq!(derived.phases.denoise, plain.denoise);
+        assert_eq!(derived.phases.decode, plain.decode);
     }
 
     /// The fall-through prefers the exact anchor, then the fewest differing axes, then the
@@ -4327,8 +4495,18 @@ mod tests {
 
     /// Leave-one-out validation against the retained records that DO exist for cells the
     /// fall-through can reach: with the bf16 distilled anchors removed, every retained bf16
-    /// distilled record (diffvae via the variant delta; conv via variant + decoder deltas) must
-    /// be bracketed by the sibling-plus-delta derivation within the delta budget.
+    /// distilled record must be bracketed by the sibling-plus-delta derivation within the delta
+    /// budget — diffvae via the variant crossing (a priced ZERO under the corrected table, since
+    /// distilled materializes nothing its dev sibling lacks), conv via that plus the decoder
+    /// crossing.
+    ///
+    /// The mirrored direction — dev records derived from distilled siblings, which crosses the
+    /// 8.9 GB LoRA — is NOT reachable from the retained corpus and is deliberately not faked here:
+    /// every retained bf16 distilled measurement engages `bounded_transformer_residency` while
+    /// neither bf16 dev record does, and `derive_video_phase_estimates_raw` refuses to price a
+    /// non-windowed request from a windowed anchor. The direction is covered instead by
+    /// `an_unmeasured_variant_cell_derives_from_the_sibling_anchor_plus_the_bound_delta` (byte-for
+    /// -byte application) and by the engine-agreement tests (which key the table itself).
     #[test]
     fn leave_one_out_sibling_delta_derivations_bracket_the_retained_distilled_records() {
         let mut doctored = store().clone();
@@ -4352,6 +4530,7 @@ mod tests {
                 .any(|record| record.decoder == Ltx25Decoder::Conv),
             "the distilled/conv records are part of the validation set"
         );
+        let mut crossed_a_nonzero_delta = false;
         for record in distilled {
             let derived = doctored
                 .derive_video_phase_peaks_for_cell(
@@ -4370,15 +4549,52 @@ mod tests {
                     },
                 )
                 .unwrap_or_else(|| panic!("{} derives via a sibling", record.id));
-            assert!(
-                derived.delta_bytes > 0,
-                "{}: the leave-one-out derivation must actually cross an axis",
+            assert_ne!(
+                derived.anchor.transformer_variant,
+                Some(Ltx25TransformerVariant::Distilled),
+                "{}: the leave-one-out derivation must come from the surviving variant",
                 record.id
             );
-            // Where the derivation reuses a measured intercept, the crossed-axis delta must be
-            // APPLIED to it — a zeroed delta reds here. Architecture-bounded phases take no add
-            // (the bounds are cell-blind by their documented provenance), so the check names the
-            // intercept-priced phases of this record's regime.
+            // The delta the fall-through applied must be EXACTLY what the shipped table prices for
+            // this crossing — never an invented add, never a dropped one. Zero is a real answer
+            // here, not a skipped axis: the distilled target crosses no component its dev sibling
+            // lacks, so the variant term contributes nothing and only a decoder crossing lifts it.
+            let mut expected = 0_u64;
+            if derived.anchor.transformer_variant != Some(record.transformer_variant) {
+                expected += doctored
+                    .component_delta_for(
+                        "ltx_2_5",
+                        AnchorBackend::Mlx,
+                        &record.tier,
+                        ComponentDeltaAxis::TransformerVariant,
+                        transformer_variant_key(record.transformer_variant),
+                    )
+                    .unwrap_or_else(|| panic!("{}: the variant crossing is priced", record.id))
+                    .bytes;
+            }
+            if derived.anchor.decoder != Some(record.decoder) {
+                expected += doctored
+                    .component_delta_for(
+                        "ltx_2_5",
+                        AnchorBackend::Mlx,
+                        &record.tier,
+                        ComponentDeltaAxis::Decoder,
+                        decoder_key(record.decoder),
+                    )
+                    .unwrap_or_else(|| panic!("{}: the decoder crossing is priced", record.id))
+                    .bytes;
+            }
+            assert_eq!(
+                derived.delta_bytes, expected,
+                "{}: the applied delta must equal the shipped table's price for the crossing",
+                record.id
+            );
+            crossed_a_nonzero_delta |= derived.delta_bytes > 0;
+            // Where the derivation reuses a measured intercept, a NONZERO crossed-axis delta must
+            // be APPLIED to it — a zeroed delta reds here — and a ZERO one must leave it exactly
+            // alone. Architecture-bounded phases take no add (the bounds are cell-blind by their
+            // documented provenance), so the check names the intercept-priced phases of this
+            // record's regime.
             let sibling_raw = derived
                 .anchor
                 .derive_video_phase_estimates_raw(AnchorDeriveRequest {
@@ -4411,12 +4627,22 @@ mod tests {
                 ),
             ] {
                 if anchored {
-                    assert!(
-                        derived_bytes > widened(sibling_raw).expect("widens"),
-                        "{} {phase}: the crossed-axis delta must be applied to the sibling's \
-                         measured intercept",
-                        record.id
-                    );
+                    let undelta = widened(sibling_raw).expect("widens");
+                    if derived.delta_bytes > 0 {
+                        assert!(
+                            derived_bytes > undelta,
+                            "{} {phase}: the crossed-axis delta must be applied to the sibling's \
+                             measured intercept",
+                            record.id
+                        );
+                    } else {
+                        assert_eq!(
+                            derived_bytes, undelta,
+                            "{} {phase}: a zero crossing must add nothing to the sibling's \
+                             measured intercept",
+                            record.id
+                        );
+                    }
                 }
             }
             for (phase, derived_bytes, measured_bytes) in [
@@ -4447,11 +4673,236 @@ mod tests {
                 .ceil() as u64;
             assert!(
                 upper <= cap,
-                "{}: derived bound {upper} exceeds the delta tightness cap {cap} over envelope {}",
+                "{}: derived bound {upper} exceeds the delta tightness cap {cap} over envelope {} \
+                 (overshoot {:.4})",
                 record.id,
-                record.overall_envelope
+                record.overall_envelope,
+                (upper as f64) / (record.overall_envelope as f64) - 1.0
             );
         }
+        // The budget is a claim about DELTA-priced bounds, so the leave-one-out set has to carry
+        // at least one crossing the table prices above zero. Without this the suite could pass on
+        // zero crossings alone and never interrogate the add at all.
+        assert!(
+            crossed_a_nonzero_delta,
+            "the leave-one-out set must include a crossing the delta table prices above zero"
+        );
+    }
+
+    /// The delta budget is DERIVED, not chosen: it is the smallest round figure that clears every
+    /// leave-one-out overshoot the corrected table produces, and it must stay meaningfully tight —
+    /// a budget far above the binding case would stop refusing runaway estimates, which is the
+    /// only job it has. Recomputed at the feature-end fix round, after the variant deltas were
+    /// re-keyed onto the engine's real materialization.
+    #[test]
+    fn the_delta_tightness_budget_is_the_binding_leave_one_out_overshoot_rounded_up() {
+        let mut doctored = store().clone();
+        doctored.anchors.retain(|anchor| {
+            !(anchor.model_id == "ltx_2_5"
+                && anchor.transformer_variant == Some(Ltx25TransformerVariant::Distilled))
+        });
+        let mut worst = 0.0_f64;
+        let mut worst_id = String::new();
+        for record in retained_corpus()
+            .iter()
+            .filter(|record| record.transformer_variant == Ltx25TransformerVariant::Distilled)
+        {
+            let Some(derived) = doctored.derive_video_phase_peaks_for_cell(
+                "ltx_2_5",
+                AnchorBackend::Mlx,
+                &record.tier,
+                record.transformer_variant,
+                record.decoder,
+                AnchorDeriveRequest {
+                    width: record.width,
+                    height: record.height,
+                    frames: record.frames,
+                    decode_tiled: record.decode_tiled,
+                    transformer_windowed: record.transformer_windowed,
+                    deferred_materialization: record.deferred,
+                },
+            ) else {
+                continue;
+            };
+            let overshoot =
+                (derived.phases.peak_bytes() as f64) / (record.overall_envelope as f64) - 1.0;
+            if overshoot > worst {
+                worst = overshoot;
+                worst_id = record.id.clone();
+            }
+        }
+        assert!(
+            worst > 0.0,
+            "the leave-one-out set must produce a measurable overshoot to size the budget from"
+        );
+        assert!(
+            ANCHOR_DELTA_VALIDATION_TIGHTNESS_BUDGET >= worst,
+            "the budget {ANCHOR_DELTA_VALIDATION_TIGHTNESS_BUDGET} is under the binding \
+             leave-one-out overshoot {worst:.4} ({worst_id})"
+        );
+        // Tight: no more than one percentage point of round-up slack above the binding case. This
+        // is what stops the budget from quietly re-widening the next time a delta moves.
+        assert!(
+            ANCHOR_DELTA_VALIDATION_TIGHTNESS_BUDGET <= worst + 0.01,
+            "the budget {ANCHOR_DELTA_VALIDATION_TIGHTNESS_BUDGET} is more than a point above the \
+             binding leave-one-out overshoot {worst:.4} ({worst_id}) — re-derive it"
+        );
+    }
+
+    /// The shipped variant-delta rows are keyed on what each variant MATERIALIZES.
+    ///
+    /// This is the test the first cut of the table did not have, and its absence is why the
+    /// mapping shipped inverted: the delta rows were keyed on the variant's NAME (the "distilled"
+    /// row got the distillation LoRA) rather than on the engine's load spec, which adds that LoRA
+    /// for DEV. Re-inverting [`LTX25_VARIANT_DELTA_COMPONENTS`] or the extractor's `variantRows`
+    /// reds here.
+    #[test]
+    fn ltx25_variant_delta_matches_the_engine_materialization() {
+        let expected: BTreeMap<&str, BTreeSet<&str>> = LTX25_VARIANT_DELTA_COMPONENTS
+            .iter()
+            .map(|(variant, components)| (*variant, components.iter().copied().collect()))
+            .collect();
+        let mut seen: BTreeMap<&str, BTreeSet<&str>> = BTreeMap::new();
+        let mut tiers: BTreeSet<&str> = BTreeSet::new();
+        for delta in store()
+            .component_deltas
+            .iter()
+            .filter(|delta| delta.model_id == "ltx_2_5")
+            .filter(|delta| delta.axis == ComponentDeltaAxis::TransformerVariant)
+        {
+            tiers.insert(delta.tier.as_str());
+            // The component a row crosses is its file's top-level directory in the bundle.
+            let components: BTreeSet<&str> = delta
+                .files
+                .iter()
+                .map(|file| {
+                    file.split('/')
+                        .next()
+                        .expect("an inventory path has a leading segment")
+                })
+                .collect();
+            let previous = seen.insert(delta.to.as_str(), components.clone());
+            if let Some(previous) = previous {
+                assert_eq!(
+                    previous, components,
+                    "{}: every tier must cross the same components for a variant",
+                    delta.id
+                );
+            }
+        }
+        assert_eq!(
+            seen, expected,
+            "the shipped variant deltas must cross exactly what the engine materializes"
+        );
+        // Every tier carries a row for BOTH variants — including the zero one, so the fall-through
+        // can cross the variant axis in either direction rather than refusing half of it.
+        assert!(!tiers.is_empty(), "the store must price the variant axis");
+        for tier in &tiers {
+            for (variant, _) in LTX25_VARIANT_DELTA_COMPONENTS {
+                assert!(
+                    store()
+                        .component_delta_for(
+                            "ltx_2_5",
+                            AnchorBackend::Mlx,
+                            tier,
+                            ComponentDeltaAxis::TransformerVariant,
+                            variant,
+                        )
+                        .is_some(),
+                    "{tier}/{variant}: a missing row means \"unpriced axis\", which is a \
+                     different claim from a zero crossing"
+                );
+            }
+        }
+    }
+
+    /// The cross-check behind [`LTX25_VARIANT_DELTA_COMPONENTS`]: the mirror must still describe
+    /// what the two engine sources actually do. `sceneworks-core` cannot depend on the worker or
+    /// the capture arm, so the agreement is asserted against their SOURCE TEXT — an engine edit
+    /// that moves the adapter to the other variant, or makes the enhancer variant-conditional,
+    /// reds here instead of silently invalidating every variant delta.
+    #[test]
+    fn ltx25_variant_delta_components_mirror_the_engine_source() {
+        const CAPTURE_ARM: &str =
+            include_str!("../../sceneworks-memory-adapter/src/bin/mlx_ltx25.rs");
+        const WORKER: &str = include_str!("../../sceneworks-worker/src/video_jobs/ltx.rs");
+
+        // 1. The capture arm's adapter constant names the component the dev row prices.
+        let adapter_decl = CAPTURE_ARM
+            .lines()
+            .find(|line| line.trim_start().starts_with("const DEV_ADAPTER: &str ="))
+            .expect("the capture arm declares DEV_ADAPTER");
+        let adapter_path = adapter_decl
+            .split('"')
+            .nth(1)
+            .expect("DEV_ADAPTER is a string literal");
+        let adapter_component = adapter_path
+            .split('/')
+            .next()
+            .expect("DEV_ADAPTER is a bundle-relative path");
+        let dev_components: BTreeSet<&str> = LTX25_VARIANT_DELTA_COMPONENTS
+            .iter()
+            .find(|(variant, _)| *variant == "dev")
+            .map(|(_, components)| components.iter().copied().collect())
+            .expect("the mirror describes dev");
+        assert_eq!(
+            dev_components,
+            BTreeSet::from([adapter_component]),
+            "the dev row must cross exactly the component DEV_ADAPTER names"
+        );
+
+        // 2. That adapter is pushed under the DEV arm — the nearest variant test above the push.
+        let push = CAPTURE_ARM
+            .find("spec.adapters.push(")
+            .expect("the capture arm pushes the adapter");
+        let gate = CAPTURE_ARM[..push]
+            .rfind("if target.variant == TransformerVariant::")
+            .expect("the push is gated on the transformer variant");
+        assert!(
+            CAPTURE_ARM[gate..push].contains("TransformerVariant::Dev"),
+            "the capture arm must push DEV_ADAPTER under the Dev arm, not the Distilled one"
+        );
+
+        // 3. The enhancer is inserted BEFORE any variant test, i.e. for both variants — which is
+        //    why it cancels out of every variant delta and appears in neither row.
+        let spec_fn = CAPTURE_ARM
+            .find("fn configured_spec(")
+            .expect("the capture arm builds the load spec");
+        let enhancer = CAPTURE_ARM[spec_fn..]
+            .find("\"enhancer\".to_owned()")
+            .expect("configured_spec inserts the enhancer component");
+        let first_variant_test = CAPTURE_ARM[spec_fn..]
+            .find("if target.variant == TransformerVariant::")
+            .expect("configured_spec tests the variant");
+        assert!(
+            enhancer < first_variant_test,
+            "the enhancer must be inserted unconditionally; a variant-conditional enhancer would \
+             belong in a variant delta row"
+        );
+        for (_, components) in LTX25_VARIANT_DELTA_COMPONENTS {
+            assert!(
+                !components.contains(&"enhancer"),
+                "the enhancer is resident in both variants and cancels out of the deltas"
+            );
+        }
+
+        // 4. The production worker agrees: LTX-2.5 Distilled resolves NO adapter.
+        let refusal = WORKER
+            .find("if ltx25_variant == Some(Ltx25TransformerVariant::Distilled) {")
+            .expect("the worker refuses the distill adapter for LTX-2.5 distilled");
+        assert!(
+            WORKER[refusal..refusal + 200].contains("return Ok(None);"),
+            "the worker's distilled arm must return no adapter"
+        );
+        let distilled_components: BTreeSet<&str> = LTX25_VARIANT_DELTA_COMPONENTS
+            .iter()
+            .find(|(variant, _)| *variant == "distilled")
+            .map(|(_, components)| components.iter().copied().collect())
+            .expect("the mirror describes distilled");
+        assert!(
+            distilled_components.is_empty(),
+            "distilled materializes nothing its dev sibling lacks, so its row crosses nothing"
+        );
     }
 
     /// The delta rows are BOUND to the shipped inventory: a zeroed, inflated, re-pointed,
@@ -4508,6 +4959,34 @@ mod tests {
         let error = load_memory_anchors(&unknown.to_string())
             .expect_err("an unknown file must be rejected");
         assert!(error.contains("does not size"), "{error}");
+
+        // The zero row is representable but not a loophole: dropping a real row's files while
+        // keeping its bytes must fail, and so must giving the honest zero row a byte count.
+        let mut unfiled = base.clone();
+        unfiled["componentDeltas"][0]["files"] = serde_json::json!([]);
+        let error = load_memory_anchors(&unfiled.to_string())
+            .expect_err("bytes without files must be rejected");
+        assert!(error.contains("names no files"), "{error}");
+
+        let zero_index = base["componentDeltas"]
+            .as_array()
+            .expect("rows")
+            .iter()
+            .position(|row| {
+                row["files"]
+                    .as_array()
+                    .is_some_and(|files| files.is_empty())
+            })
+            .expect("the packaged store carries an explicit zero crossing");
+        assert_eq!(
+            base["componentDeltas"][zero_index]["bytes"].as_u64(),
+            Some(0)
+        );
+        let mut paid_zero = base.clone();
+        paid_zero["componentDeltas"][zero_index]["bytes"] = serde_json::json!(1);
+        let error = load_memory_anchors(&paid_zero.to_string())
+            .expect_err("a priced zero crossing must be rejected");
+        assert!(error.contains("names no files"), "{error}");
 
         let mut duplicated = base.clone();
         let clone = duplicated["componentDeltas"][0].clone();

@@ -89,6 +89,37 @@ pub const CANDLE_RECAPTURE_SPREAD: f64 = 0.02;
 /// anchor-derived candidate outranks it wherever an anchor is current — so the honest charge
 /// costs admission nothing on any anchored lane.
 ///
+/// WHAT THE POPULATION ACTUALLY LOOKS LIKE (recorded here so the next reader does not have to
+/// re-derive it to know what this number is a maximum OF — regenerate with
+/// `node scripts/derive-ladder-margins.mjs`):
+///
+///   * 18 MLX records qualify, from exactly two models. `flux2_dev` supplies 8 of them in a tight
+///     cluster spanning 2.9847-3.1042, and its top of that cluster IS this constant — so the
+///     maximum is set by a model family, not by one outlier that a single retirement would move.
+///   * The distribution is BIMODAL, not a spread around a centre: the `z_image_turbo` records sit
+///     an order of magnitude lower (0.5560-1.1885 across its six loaded eager captures, plus two
+///     near-zero eager captures at 0.0184/0.0261 and two staged captures at exactly 0.0, where the
+///     staged loader leaves no retained envelope above the active peak to measure). Charging every
+///     MLX floor the flux2_dev maximum is therefore a deliberate worst-case choice across two
+///     populations that do not overlap, not an average anybody's render sits near.
+///   * NO VIDEO RECORD ENTERS THE POPULATION, and the reason is a missing MEASUREMENT rather than
+///     a missing render. `deriveFloorEnvelopeAllowance` needs `lifecycleCleanPostCleanupActive` to
+///     separate the activation transient from the resident weight set; the derivation's evidence
+///     file (`docs/generated/memory-calibration-evidence.json`) carries only image-model MLX
+///     records, and the retained video corpus that does exist — the 11-record LTX-2.5 seed under
+///     `docs/calibration/sc-18791/` — reports that measurement on none of its records. (The two
+///     image models that are excluded, `qwen_image` and `krea_2_turbo`, are excluded for exactly
+///     the same reason.) So this allowance is measured on image renders and charged to every MLX
+///     floor, video ones included.
+///
+/// THE EVIDENCE FOR A PER-LANE SPLIT IS THEREFORE ALREADY HERE, and this is the place to start if
+/// one is wanted: the bimodality above is a per-model split within a single lane, and the video
+/// lane has no measurement at all rather than a different one. Splitting today would mean either
+/// inventing a video fraction from image evidence or charging video the image maximum under a
+/// second name — neither of which is a measurement. The unblocking step is a video capture that
+/// reports `lifecycleCleanPostCleanupActive`; until one exists, the single worst-case allowance is
+/// the honest shape, and it is safe because the floor is the LAST-RESORT basis.
+///
 /// NOT COVERED, deliberately: whether one flat headroom number is the right ACTIVE model for this
 /// geometry at all. That residual is unmeasured, and epic 22505 E6 makes runtime catching its
 /// failure posture rather than a standing multiple of an already-modelled allowance.

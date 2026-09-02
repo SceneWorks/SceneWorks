@@ -22,6 +22,7 @@ import {
   inferencePin,
   isDerivable,
   inferenceProviderConstants,
+  LTX25_VARIANT_COMPONENTS,
   LTX25_WEIGHTS_INVENTORY_PATH,
   ltx25ComponentDeltas,
   phaseAllocatorEnvelopes,
@@ -933,17 +934,35 @@ test("the LTX-2.5 component deltas are priced from the committed weights invento
       row.files.reduce((total, file) => total + inventory.files[file], 0),
       `${row.id}: bytes must be the sum of the shipped files it names`,
     );
-    assert.ok(row.bytes > 0);
+    // A row is either a priced crossing (files, positive bytes) or an explicit ZERO crossing (no
+    // files, no bytes). Bytes without files is the doctoring shape and never emitted.
+    assert.equal(row.bytes > 0, row.files.length > 0, `${row.id}: bytes and files must agree`);
     assert.equal(row.source.path, LTX25_WEIGHTS_INVENTORY_PATH);
   }
-  // The variant deltas name the adapter/refiner components, verbatim from the inventory.
+  // The variant deltas are keyed on what the ENGINE materializes, not on the variant's name: the
+  // capture arm pushes the distillation LoRA under the Dev arm and the production worker resolves
+  // no adapter for LTX-2.5 distilled, so DEV prices the LoRA and DISTILLED crosses nothing. The
+  // stock enhancer is inserted for both variants, so it appears in neither row.
   const byId = new Map(rows.map((row) => [row.id, row]));
-  assert.deepEqual(byId.get("ltx_2_5:mlx:q4:transformer_variant:distilled").files, [
+  assert.deepEqual(byId.get("ltx_2_5:mlx:q4:transformer_variant:dev").files, [
     "distilled_lora/ltx-2.5-22b-distilled-lora-450-bf16.safetensors",
   ]);
-  assert.deepEqual(byId.get("ltx_2_5:mlx:q4:transformer_variant:dev").files, [
-    "enhancer/model.safetensors",
-  ]);
+  assert.deepEqual(byId.get("ltx_2_5:mlx:q4:transformer_variant:distilled").files, []);
+  assert.equal(byId.get("ltx_2_5:mlx:q4:transformer_variant:distilled").bytes, 0);
+  for (const row of rows) {
+    assert.ok(
+      !row.files.some((file) => file.startsWith("enhancer/")),
+      `${row.id}: the enhancer is resident in both variants and crosses nothing`,
+    );
+  }
+  // The table the rows are keyed on is the mirror the Rust cross-check compares to the engine.
+  assert.deepEqual(
+    LTX25_VARIANT_COMPONENTS.map(({ to, components }) => [to, components]),
+    [
+      ["dev", ["distilled_lora"]],
+      ["distilled", []],
+    ],
+  );
   // The decoder deltas take the WIDER variant's files, so one row upper-bounds both variants.
   const convQ4 = byId.get("ltx_2_5:mlx:q4:decoder:conv");
   assert.equal(convQ4.files.length, 1);

@@ -19725,3 +19725,33 @@ fn a_plan_backed_video_request_of_a_family_with_no_video_lane_refuses_by_name() 
         "the refusal must name the checkpoint and the family: {message}"
     );
 }
+
+/// The committed LTX-2.5 weights file inventory records per-file sizes of ONE artifact revision,
+/// and every component-delta row in `config/memory-anchors.json` is recomputed from it. That only
+/// holds while the inventory describes the revision the product actually ships, so the two are
+/// bound here: a pin bump that moves [`LTX25_BUNDLE_REVISION`] without regenerating the inventory
+/// reds this test instead of leaving the drift to a grep sweep.
+///
+/// Shape, not population: it asserts the two agree and pins neither value.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+#[test]
+fn the_ltx25_weights_inventory_describes_the_shipped_bundle_revision() {
+    const INVENTORY: &str = include_str!("../../../../config/ltx25-weights-file-inventory.json");
+    let inventory: serde_json::Value =
+        serde_json::from_str(INVENTORY).expect("the weights inventory parses");
+    assert_eq!(
+        inventory["repo"].as_str(),
+        Some(LTX25_BUNDLE_REPO),
+        "the inventory must describe the shipped LTX-2.5 bundle repository"
+    );
+    assert_eq!(
+        inventory["revision"].as_str(),
+        Some(LTX25_BUNDLE_REVISION),
+        "config/ltx25-weights-file-inventory.json is pinned to a different revision than the \
+         shipped bundle — regenerate it for the new pin, or the component deltas price files from \
+         a revision the product does not load"
+    );
+}

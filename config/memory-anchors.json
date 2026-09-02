@@ -5047,9 +5047,9 @@
       "tier": "bf16",
       "axis": "transformer_variant",
       "to": "dev",
-      "bytes": 23919549408,
+      "bytes": 8899889568,
       "files": [
-        "enhancer/model.safetensors"
+        "distilled_lora/ltx-2.5-22b-distilled-lora-450-bf16.safetensors"
       ],
       "source": {
         "path": "config/ltx25-weights-file-inventory.json",
@@ -5063,10 +5063,8 @@
       "tier": "bf16",
       "axis": "transformer_variant",
       "to": "distilled",
-      "bytes": 8899889568,
-      "files": [
-        "distilled_lora/ltx-2.5-22b-distilled-lora-450-bf16.safetensors"
-      ],
+      "bytes": 0,
+      "files": [],
       "source": {
         "path": "config/ltx25-weights-file-inventory.json",
         "sha256": "2d7e66ec2d659a843a306b3fb5577bd7de1356207e69c5ee44594f07fc1b5384"
@@ -5112,9 +5110,9 @@
       "tier": "q4",
       "axis": "transformer_variant",
       "to": "dev",
-      "bytes": 23919549408,
+      "bytes": 8899889568,
       "files": [
-        "enhancer/model.safetensors"
+        "distilled_lora/ltx-2.5-22b-distilled-lora-450-bf16.safetensors"
       ],
       "source": {
         "path": "config/ltx25-weights-file-inventory.json",
@@ -5128,10 +5126,8 @@
       "tier": "q4",
       "axis": "transformer_variant",
       "to": "distilled",
-      "bytes": 8899889568,
-      "files": [
-        "distilled_lora/ltx-2.5-22b-distilled-lora-450-bf16.safetensors"
-      ],
+      "bytes": 0,
+      "files": [],
       "source": {
         "path": "config/ltx25-weights-file-inventory.json",
         "sha256": "2d7e66ec2d659a843a306b3fb5577bd7de1356207e69c5ee44594f07fc1b5384"
@@ -5177,9 +5173,9 @@
       "tier": "q8",
       "axis": "transformer_variant",
       "to": "dev",
-      "bytes": 23919549408,
+      "bytes": 8899889568,
       "files": [
-        "enhancer/model.safetensors"
+        "distilled_lora/ltx-2.5-22b-distilled-lora-450-bf16.safetensors"
       ],
       "source": {
         "path": "config/ltx25-weights-file-inventory.json",
@@ -5193,10 +5189,8 @@
       "tier": "q8",
       "axis": "transformer_variant",
       "to": "distilled",
-      "bytes": 8899889568,
-      "files": [
-        "distilled_lora/ltx-2.5-22b-distilled-lora-450-bf16.safetensors"
-      ],
+      "bytes": 0,
+      "files": [],
       "source": {
         "path": "config/ltx25-weights-file-inventory.json",
         "sha256": "2d7e66ec2d659a843a306b3fb5577bd7de1356207e69c5ee44594f07fc1b5384"

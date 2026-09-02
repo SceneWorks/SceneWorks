@@ -961,15 +961,36 @@ const analyticId = (cell) =>
 // row's bytes from that inventory by digest, so nothing here is a trusted literal.
 //
 // Direction is conservative by construction: a row prices only the component the TARGET cell
-// materializes and a sibling might lack (the distilled variant's distillation LoRA, the dev
-// variant's stage-two enhancer weights, the target decoder's weight files, at the widest variant
-// where the file exists per variant). Nothing is ever subtracted for sibling-only components —
-// see the matching section comment in `crates/sceneworks-core/src/memory_anchor.rs`.
+// materializes and a sibling might lack (the DEV variant's distillation LoRA, the target decoder's
+// weight files, at the widest variant where the file exists per variant). Nothing is ever
+// subtracted for sibling-only components, and a variant that crosses nothing gets an explicit ZERO
+// row rather than no row — see the matching section comment in
+// `crates/sceneworks-core/src/memory_anchor.rs`.
 // ─────────────────────────────────────────────────────────────────────────────────────────────
 
 export const LTX25_WEIGHTS_INVENTORY_PATH = "config/ltx25-weights-file-inventory.json";
 
 const LTX25_VARIANTS = ["dev", "distilled"];
+
+/**
+ * What each LTX-2.5 transformer variant MATERIALIZES beyond the components its sibling also loads,
+ * mirrored from the engine rather than from the variant's name:
+ *
+ *   * `crates/sceneworks-memory-adapter/src/bin/mlx_ltx25.rs::configured_spec` pushes `DEV_ADAPTER`
+ *     (the distillation LoRA) onto `spec.adapters` under `variant == TransformerVariant::Dev`, and
+ *     inserts `enhancer` into `spec.components` for BOTH variants.
+ *   * `crates/sceneworks-worker/src/video_jobs/ltx.rs::resolve_ltx_distill_adapter` returns `None`
+ *     for `Ltx25TransformerVariant::Distilled` — the distilled checkpoint already contains the
+ *     refinement — and resolves the manifest's `distilledLora` co-requisite for dev.
+ *
+ * So dev crosses one component and distilled crosses none. Component names are engine-side keys,
+ * not inventory paths; `ltx25ComponentDeltas` resolves each to the shipped file. Held as data so
+ * the Rust cross-check has one thing to compare against instead of a shape hidden in a loop.
+ */
+export const LTX25_VARIANT_COMPONENTS = [
+  { to: "dev", components: ["distilled_lora"] },
+  { to: "distilled", components: [] },
+];
 
 /** The single inventory file under `prefix` matching `suffix`, or a loud failure. */
 function inventoryFile(files, prefix, suffix) {
@@ -1005,28 +1026,45 @@ function widestDecoderFiles(files, tier, decoderFiles) {
  * The LTX-2.5 MLX component-delta rows for the catalog's tiers, priced from the committed weights
  * inventory. Per tier and per axis:
  *
- *   * `transformer_variant -> distilled`: the distillation LoRA the distilled recipe materializes
- *     on top of the shared transformer (`mlx.autoDistillLora` in the manifest applies it at
- *     stage-2 strength 1.0). One bf16 file, tier-independent by construction of the artifact.
- *   * `transformer_variant -> dev`: the dev recipe's bundled stage-two enhancer weights (the
- *     manifest ships `enhancer/*` as a dev co-requisite; its UI copy names the "bundled
- *     stage-two refinement").
+ *   * `transformer_variant -> dev`: the distillation LoRA. The ENGINE is the authority here, not
+ *     the recipe's name: `mlx_ltx25.rs` pushes `DEV_ADAPTER`
+ *     (`distilled_lora/ltx-2.5-22b-distilled-lora-450-bf16.safetensors`) onto the load spec only
+ *     when `variant == Dev`, and `video_jobs/ltx.rs::resolve_ltx_distill_adapter` returns `None`
+ *     for LTX-2.5 Distilled because the distilled checkpoint already contains the refinement. So
+ *     DEV is the variant that materializes the extra file, and dev is the row that prices it.
+ *   * `transformer_variant -> distilled`: NOTHING is crossed. The distilled recipe materializes no
+ *     component the dev sibling lacks, so the row is a legitimate ZERO — it exists so the
+ *     fall-through can cross the variant axis toward distilled at all (a missing row means
+ *     "unpriced axis, refuse", which is a different claim from "priced at zero"). The stock
+ *     `enhancer/` directory is deliberately NOT here: `configured_spec` inserts it into
+ *     `spec.components` unconditionally for BOTH variants, so it is resident in either measured
+ *     envelope and cancels out of every variant delta. Pricing it into the dev row (as the first
+ *     cut did) both mis-attributed it and, mirrored, under-estimated dev-from-distilled by the
+ *     8.9 GB LoRA — the OOM direction.
  *   * `decoder -> conv` / `decoder -> diffvae`: the target decoder's per-tier weight files, taken
  *     at the WIDER of the two variant subdirectories so one row upper-bounds both variants.
+ *
+ * `LTX25_VARIANT_COMPONENTS` is the mirror of the engine's materialization the rows are keyed on;
+ * `ltx25_variant_delta_matches_the_engine_materialization` in `memory_anchor.rs` cross-checks it
+ * against the engine constants, and re-inverting the mapping reds that test.
  */
 export function ltx25ComponentDeltas(inventoryBody, tiers) {
   const inventory = JSON.parse(inventoryBody);
   const files = inventory.files ?? {};
   const inventorySha256 = sha256(inventoryBody);
   const source = { path: LTX25_WEIGHTS_INVENTORY_PATH, sha256: inventorySha256 };
-  const distilledLora = inventoryFile(files, "distilled_lora/", ".safetensors");
-  const enhancer = inventoryFile(files, "enhancer/", ".safetensors");
   const rows = [];
+  // A component name IS its top-level directory in the bundle, which is what the Rust cross-check
+  // compares against; resolving it here (rather than hard-coding the file) keeps the mapping
+  // single-sourced in `LTX25_VARIANT_COMPONENTS` and fails loudly if a named component stops
+  // shipping exactly one file.
+  const variantRows = LTX25_VARIANT_COMPONENTS.map(({ to, components }) => ({
+    to,
+    files: components.map((component) =>
+      inventoryFile(files, `${component}/`, ".safetensors"),
+    ),
+  }));
   for (const tier of [...tiers].sort(compareText)) {
-    const variantRows = [
-      { to: "distilled", files: [distilledLora] },
-      { to: "dev", files: [enhancer] },
-    ];
     for (const { to, files: components } of variantRows) {
       const bytes = components.reduce((total, file) => total + files[file], 0);
       rows.push({
