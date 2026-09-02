@@ -859,7 +859,7 @@ fn builtin_starvector_manifests_are_exact_native_image_to_svg_closures() {
             let candidate = &model["vector"]["deviceAdmission"]["terminalCandidate"];
             assert_eq!(
                 candidate["inferenceRevision"],
-                "8b560e461ccae796da93f288b119fec358884475"
+                "5a28cdd71f7f4343c0a758566afc6f9eb82d0afc"
             );
             assert_eq!(
                 candidate["corpusSha256"],
