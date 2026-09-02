@@ -266,12 +266,19 @@ test("a pin bump with unchanged loader source leaves the key unchanged", { skip 
       .filter((file) => pinTree.contentId(file) !== measuredTree.contentId(file))
       .map((file) => [file, bodies.get(file)]),
   );
-  assert.ok(Object.keys(held).length > 0, "this pin moved at least one loader file");
   const bumped = keyAt(PIN, held);
   assert.deepEqual(bumped.files, measured.files, "the held closure walks to the same files");
   assert.equal(bumped.digest, measured.digest);
-  // Teeth: without the overlay, the real loader-content change still rotates the key.
-  assert.notEqual(keyAt(PIN).digest, measured.digest);
+
+  // Teeth independent of what happened between these two concrete revisions: changing bytes in
+  // a loader file must rotate the key even when the real pin bump happened to be revision-only.
+  const current = keyAt(PIN);
+  const loader = current.files.find((file) => file.endsWith(".rs"));
+  assert.ok(loader, "the loader closure contains Rust source");
+  const editedLoader = keyAt(PIN, {
+    [loader]: edited(pinTree, loader, "pub const SC_22511_LOADER_CONTENT_EDIT: u64 = 1;"),
+  });
+  assert.notEqual(editedLoader.digest, current.digest);
 });
 
 test("a sibling model's edit leaves the key unchanged", { skip }, () => {
