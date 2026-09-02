@@ -1236,16 +1236,40 @@ fn anchor_derived_phase_peaks<'a>(
         VideoLane::Mlx => AnchorBackend::Mlx,
         VideoLane::Candle => AnchorBackend::Candle,
     };
-    // The pipeline cell is part of the lookup key, exactly as it is for the fitted curve: the
-    // retained corpus has no dev-vs-distilled pair at a common regime, so a request on another
-    // variant/decoder has no measured basis here and must fall to the floor.
-    let anchor = store.anchor_for(
+    // The pipeline cell stays part of the lookup key, exactly as it is for the fitted curve — but
+    // since the epic 22505 feature-end fix round (E2) an unmeasured (variant, decoder) cell no
+    // longer falls straight to the floor: `derive_video_phase_peaks_for_cell` prices it from a
+    // SIBLING anchor of the same (model, tier, lane) plus the bound component deltas (the
+    // variant's adapter/refiner file sizes, the decoder's weight file sizes, from the shipped
+    // inventory), and refuses — floor again — whenever an axis has no bound delta.
+    //
+    // `decode_tiled` is keyed on the ENGAGED RUNG, not on `geometry.decode_pass`, because the rung
+    // is what actually bounds the decoder's working set: the rung is the selected memory strategy
+    // the provider will execute, while `decode_pass` describes how the caller intends to walk the
+    // clip. A `VideoDecodePass::Tiled` request without the rung is therefore priced by the
+    // single-pass voxel law — an over-estimate, and the safe direction. The fitted path keys on
+    // both because its curves are measured per `(rung, decode_pass)` cell; the anchor derivation
+    // has one law per regime and only the rung selects between them.
+    let derivation = store.derive_video_phase_peaks_for_cell(
         identity.model_id,
         backend,
         crate::mlx_fit_gate::plan_tier_key(identity.tier),
         identity.transformer_variant?,
         identity.decoder?,
+        AnchorDeriveRequest {
+            width: geometry.width,
+            height: geometry.height,
+            frames: geometry.estimate_frames(),
+            decode_tiled: engaged.contains(&MemoryStrategy::BoundedDecode),
+            transformer_windowed: engaged.contains(&MemoryStrategy::BoundedTransformerResidency),
+            deferred_materialization: selector.contract.load_shape
+                == gen_core::LoadShape::DeferredMaterialization,
+        },
     )?;
+    // The identity conjuncts are graded on the anchor the derivation actually priced from — the
+    // exact anchor, or the sibling the delta path crossed to — so a sibling can no more launder a
+    // foreign provider/route/currency than the exact anchor could.
+    let anchor = derivation.anchor;
     if anchor.model_family != identity.model_family
         || anchor.mode != identity.mode
         || anchor.route != identity.route
@@ -1254,22 +1278,7 @@ fn anchor_derived_phase_peaks<'a>(
     {
         return None;
     }
-    // `decode_tiled` is keyed on the ENGAGED RUNG, not on `geometry.decode_pass`, because the rung
-    // is what actually bounds the decoder's working set: the rung is the selected memory strategy
-    // the provider will execute, while `decode_pass` describes how the caller intends to walk the
-    // clip. A `VideoDecodePass::Tiled` request without the rung is therefore priced by the
-    // single-pass voxel law — an over-estimate, and the safe direction. The fitted path keys on
-    // both because its curves are measured per `(rung, decode_pass)` cell; the anchor derivation
-    // has one law per regime and only the rung selects between them.
-    let derived = anchor.derive_video_phase_peaks(AnchorDeriveRequest {
-        width: geometry.width,
-        height: geometry.height,
-        frames: geometry.estimate_frames(),
-        decode_tiled: engaged.contains(&MemoryStrategy::BoundedDecode),
-        transformer_windowed: engaged.contains(&MemoryStrategy::BoundedTransformerResidency),
-        deferred_materialization: selector.contract.load_shape
-            == gen_core::LoadShape::DeferredMaterialization,
-    })?;
+    let derived = derivation.phases;
     Some((
         PhasePeaks {
             conditioning_bytes: derived.conditioning,

@@ -5413,7 +5413,9 @@ mod tests {
                 denoise: 3_000_000_000,
                 decode: 4_000_000_000,
             },
+            phase_allocator_envelope_bytes: None,
             overall_allocator_envelope_bytes: 4_000_000_000,
+            underived_reason: None,
         };
         let expected_derived = anchor
             .derive_image_phase_peaks(AnchorImageDeriveRequest {
@@ -5434,6 +5436,7 @@ mod tests {
             // This fixture exercises the SELECTOR seam; the analytic-only half of the store
             // (sc-22510) is not read by it.
             analytic_only: Vec::new(),
+            component_deltas: Vec::new(),
         };
         let floors = |anchors: Option<&MemoryAnchorStore>| {
             synthesize_estimate_floors(
@@ -5499,6 +5502,7 @@ mod tests {
             let mutated_store = MemoryAnchorStore {
                 schema_version: MEMORY_ANCHOR_SCHEMA_VERSION,
                 analytic_only: Vec::new(),
+                component_deltas: Vec::new(),
                 anchors: vec![mutated],
             };
             for (selection, evidence, basis) in floors(Some(&mutated_store)) {
@@ -5523,6 +5527,7 @@ mod tests {
             let rotated_store = MemoryAnchorStore {
                 schema_version: MEMORY_ANCHOR_SCHEMA_VERSION,
                 analytic_only: Vec::new(),
+                component_deltas: Vec::new(),
                 anchors: vec![rotated],
             };
             for (_, evidence, basis) in floors(Some(&rotated_store)) {
@@ -5575,6 +5580,7 @@ mod tests {
             let relabelled_store = MemoryAnchorStore {
                 schema_version: MEMORY_ANCHOR_SCHEMA_VERSION,
                 analytic_only: Vec::new(),
+                component_deltas: Vec::new(),
                 anchors: vec![relabelled],
             };
             for (_, evidence, basis) in floors(Some(&relabelled_store)) {
@@ -5600,6 +5606,7 @@ mod tests {
             let foreign_store = MemoryAnchorStore {
                 schema_version: MEMORY_ANCHOR_SCHEMA_VERSION,
                 analytic_only: Vec::new(),
+                component_deltas: Vec::new(),
                 anchors: vec![foreign],
             };
             let foreign_floors = synthesize_estimate_floors(

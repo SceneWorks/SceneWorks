@@ -295,6 +295,186 @@ pub const CANDLE_ANCHOR_CAPTURE_SPREAD_MARGIN: f64 = 0.0464;
 pub const CANDLE_ANCHOR_VALIDATION_TIGHTNESS_BUDGET: f64 = 0.15;
 
 // ---------------------------------------------------------------------------------------------
+// MLX (unified-memory) image lane derivation coefficients — epic 22505 feature-end fix round
+// (E2/E7): the sibling of the candle image law above, for the six image-MLX anchors
+// (flux2_dev q4/q8, qwen_image q4/q8/bf16, z_image_turbo q4).
+//
+// The MLX image lane differs from BOTH siblings in one measured way that shapes the whole law:
+// the MLX allocator RETAINS CACHE ACROSS PHASE TRANSITIONS, and on an eager resident image render
+// that retention is not a modest envelope above the binding phase — the retained flux2_dev
+// captures show an overall allocator envelope up to 2.06x the largest phase ACTIVE peak (88.80 GB
+// against a 43.18 GB decode active at q4/1024x1024). A per-phase law over ACTIVE peaks widened by
+// a multiplicative margin therefore cannot honestly price admission here: the margin would have to
+// be ~105% at one cell and ~43% at another, i.e. a number named after nothing. What IS linear in
+// output pixels, per the retained within-cell pairs, is each phase's ALLOCATOR level — the active
+// peak plus the cache retained from earlier phases, which is the quantity MLX admission must cover
+// (the unified-memory budget is consumed by the allocator, not by the active set). So this law
+// prices per-phase ALLOCATOR envelopes, read from the anchor's
+// [`MemoryAnchor::phase_allocator_envelope_bytes`] (bound byte-exactly to the source record's
+// `observedMemory.<phase>.allocatorBytes`), and its peak-over-phases IS the admission envelope —
+// the decode-phase allocator level equals `observedMemory.overall.allocatorBytes` in every
+// retained image-MLX record.
+//
+// PROVENANCE. The slopes are the within-cell measured allocator deltas of the retained
+// `flux2_dev` MLX pairs at 768x768 -> 1024x1024 (eager, resident, no bounded rungs) in
+// `docs/generated/memory-calibration-evidence.json`, at BOTH anchored tiers (q4 and q8) — the
+// only image-MLX cells whose retained records vary geometry at all. Both anchors sit at the TOP
+// of the measured range (1024x1024), so the corpus falsifies the coefficients by DOWNWARD
+// extrapolation exactly as it does the candle law's: a slope set too steep walks the margin-
+// widened 768x768 derivation below the measured 768x768 peak, and
+// `every_mlx_image_coefficient_sits_inside_the_window_the_retained_pairs_allow` pins each one
+// inside that window.
+//
+// PER-MODEL SCOPE. Coefficients fitted on flux2_dev's spread price flux2_dev's anchors and
+// nothing else. qwen_image (all three tiers) and z_image_turbo retain records at a SINGLE
+// geometry each (1024x1024 and 768x768 respectively), so no within-cell slope exists for them and
+// none is borrowed: their anchors carry [`MemoryAnchor::underived_reason`] and this law refuses
+// them — they validate their own measured point (the store handshake) and price nothing beyond
+// it. That scoping is per-model by construction (the extractor computes it from each model's own
+// retained geometry spread), never a blanket switch.
+// ---------------------------------------------------------------------------------------------
+
+/// Conditioning-phase allocator bytes per output pixel on the MLX image lane, expressed as ONE
+/// BYTE PER THIS MANY PIXELS because the measured slope is far below a byte per pixel: the flux2
+/// conditioning peak is the text-embedding working set (~1.2 MB), and its measured within-cell
+/// allocator slope is 16,384 bytes over 458,752 px = 0.0357 B/px at both tiers. 1/16 B/px
+/// (0.0625) sits above that slope for upward extrapolation and below the 0.0638 B/px ceiling at
+/// which the margin-widened 768x768 derivation would fall under the measured 768x768 conditioning
+/// allocator level.
+pub const MLX_IMAGE_COND_ALLOC_PIXELS_PER_BYTE: i128 = 16;
+
+/// Denoise-phase allocator bytes per output pixel on the MLX image lane: the DiT forward's live
+/// activation growth (measured ACTIVE slope 2,259.9 B/px at both tiers) plus the allocator cache
+/// retained across the phase. Measured within-cell allocator slopes: 7,514.4 and 7,738.7 B/px
+/// (q8 pairs), 7,675.8 and 8,304.7 B/px (q4 pairs, the larger against the anchor's own capture).
+/// Set at 8.25 KiB/px — above the highest measured slope, and below the 9,136 B/px ceiling the
+/// q8 768x768 downward extrapolation imposes.
+pub const MLX_IMAGE_DENOISE_ALLOC_PER_PIXEL_BYTES: i128 = 8_448;
+
+/// Decode-phase allocator bytes per output pixel on the MLX image lane. The decode-phase
+/// allocator level is the overall admission envelope (decode runs last and the pool still holds
+/// the denoise-phase cache), so this is also the envelope's growth rate. Measured within-cell
+/// slopes: 55,346.4 and 55,568.4 B/px (q8), 55,657.2 and 56,283.8 B/px (q4, the larger against
+/// the anchor's own capture). Set at 55 KiB/px (56,320) — above the highest measured slope, and
+/// below the 57,553 B/px ceiling the q8 768x768 downward extrapolation imposes.
+pub const MLX_IMAGE_DECODE_ALLOC_PER_PIXEL_BYTES: i128 = 56_320;
+
+/// Smallest output area the retained image-MLX corpus measures for the derivable models
+/// (flux2_dev at 768x768). Below it the derivation CLAMPS to this geometry rather than
+/// extrapolating on, for exactly the candle law's reason ([`CANDLE_SMALLEST_RETAINED_PIXELS`]):
+/// the slopes are fitted across 768x768 -> 1024x1024 and walking further down leaves the corpus
+/// entirely, in the under-estimate (OOM) direction.
+pub const MLX_IMAGE_SMALLEST_RETAINED_PIXELS: i128 = 768 * 768;
+
+/// Multiplicative margin applied to every derived MLX image phase allocator level. The allocator
+/// envelope itself is NOT covered here — it is the derived quantity (see the section comment) —
+/// so this margin covers exactly the RESIDUAL dispersion of that envelope that the upper-bounded
+/// slopes cannot, i.e. the two measured terms left after each coefficient is pinned at or above
+/// the highest within-cell slope:
+///
+/// * TERM 1 — cross-tier slope dispersion under downward extrapolation. The coefficients are
+///   pinned above the q4 slopes (the steeper pair); at q8/768x768 the measured slopes are
+///   shallower, so subtracting the pinned slope undershoots the measured level by 0.5301%
+///   (denoise) and 0.3949% (decode).
+/// * TERM 2 — the conditioning slope quantization. 1/16 B/px over the 458,752 px clamp span
+///   subtracts 28,672 bytes where the corpus measured 16,384, leaving the 768x768 conditioning
+///   derivation 1.0000% under its measured level — the binding requirement.
+///
+/// Set at 1.05%, above the 1.0000% binding term with rounding headroom.
+/// `mlx_image_derivation_brackets_every_retained_flux2_measurement` is the falsifier.
+pub const MLX_IMAGE_ALLOCATOR_RESIDUAL_MARGIN: f64 = 0.0105;
+
+/// Validation-only tightness budget for the MLX image lane, the sibling of
+/// [`ANCHOR_VALIDATION_TIGHTNESS_BUDGET`]: the corpus validation refuses a derived admission
+/// bound more than this fraction above the record's measured overall allocator envelope, so the
+/// coefficients and margin cannot quietly widen into a vacuous always-passes bound. 2% covers the
+/// margin (1.05%) plus the observed same-cell capture spread of the 1024x1024 envelopes (0.33%).
+pub const MLX_IMAGE_VALIDATION_TIGHTNESS_BUDGET: f64 = 0.02;
+
+// ---------------------------------------------------------------------------------------------
+// Variant/decoder component deltas — epic 22505 feature-end fix round (E2).
+//
+// An unmeasured `(transformer variant, decoder)` cell of an anchored `(model, tier, lane)` is
+// priced from a SIBLING anchor of the same `(model, tier, lane)` plus deltas computed from the
+// shipped weights file inventory: the variant's adapter/refiner file sizes and the decoder's
+// weight file sizes, exactly as E2 states. The rule is deliberately one-directional and
+// conservative:
+//
+//   * the delta ADDS the full file size of every component the TARGET cell materializes and the
+//     sibling's cell does not (the distilled variant's distillation LoRA, the dev variant's
+//     stage-two enhancer, the target decoder's weight files);
+//   * it subtracts NOTHING for components the sibling has and the target lacks. Subtracting
+//     would assume the sibling's component was fully resident inside the phase peak being
+//     re-priced — an assumption the retained evidence cannot certify (the MLX allocator retains
+//     cache across phases, so a sibling-only component's bytes may or may not sit under the
+//     measured level), and getting it wrong under-estimates, which is the OOM direction. Adding
+//     only ever over-estimates.
+//
+// The byte values are BOUND, not trusted: every [`ComponentDelta`] row cites the shipped
+// inventory file ([`PACKAGED_WEIGHTS_FILE_INVENTORIES`]) by digest and names the exact files it
+// sums, and `validate_component_delta` recomputes the sum from the compiled-in inventory — a
+// doctored or zeroed delta fails the load, and the zero-delta mutation reds
+// `an_unmeasured_variant_cell_derives_from_the_sibling_anchor_plus_the_bound_delta`.
+// ---------------------------------------------------------------------------------------------
+
+/// Validation-only tightness budget for the sibling+delta fall-through, WIDER than
+/// [`ANCHOR_VALIDATION_TIGHTNESS_BUDGET`] by design: the delta rule adds the FULL shipped file
+/// size of every crossed component to every phase (the conservative direction — see the section
+/// comment), so a derived off-anchor bound legitimately over-estimates by up to the component's
+/// whole size where the true peak holds only part of it. The budget keeps the bound falsifiable
+/// (the leave-one-out validation refuses a runaway estimate) without demanding a tightness the
+/// conservative rule cannot deliver. The binding retained case is the bf16 distilled/diffvae
+/// 768x512 capture, whose decode intercept carries the whole distillation-LoRA delta and lands
+/// 26.0% over its measured envelope.
+pub const ANCHOR_DELTA_VALIDATION_TIGHTNESS_BUDGET: f64 = 0.35;
+
+/// Shipped weights file inventories the component deltas cite, compiled in for the same reason
+/// the retained corpora are: a delta's byte value must be recomputable from bytes this build
+/// carries, not from whatever the file on disk currently says. The inventory records per-file
+/// sizes of a pinned artifact revision (immutable content, so the sizes cannot drift).
+pub const PACKAGED_WEIGHTS_FILE_INVENTORIES: &[(&str, &str)] = &[(
+    "config/ltx25-weights-file-inventory.json",
+    include_str!("../../../config/ltx25-weights-file-inventory.json"),
+)];
+
+/// The pipeline axis a component delta re-prices.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ComponentDeltaAxis {
+    TransformerVariant,
+    Decoder,
+}
+
+/// Where a delta's byte value comes from: a shipped inventory file, cited by digest.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ComponentDeltaSource {
+    /// Repo-relative path of the inventory; must be a compiled-in inventory.
+    pub path: String,
+    /// SHA-256 of that file's bytes at extraction time.
+    pub sha256: String,
+}
+
+/// One `(model, lane, tier, axis, target value)` component delta: the bytes added when deriving a
+/// cell whose `axis` equals `to` from a sibling anchor whose `axis` differs.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ComponentDelta {
+    pub id: String,
+    pub model_id: String,
+    pub backend: AnchorBackend,
+    pub tier: String,
+    pub axis: ComponentDeltaAxis,
+    /// The target cell's value on `axis` (store-key spelling, e.g. `distilled` / `conv`).
+    pub to: String,
+    /// The summed size of `files`, recomputed from the cited inventory at load.
+    pub bytes: u64,
+    /// The inventory paths summed into `bytes` — the component's shipped weight files.
+    pub files: Vec<String>,
+    pub source: ComponentDeltaSource,
+}
+
+// ---------------------------------------------------------------------------------------------
 // Store schema.
 // ---------------------------------------------------------------------------------------------
 
@@ -310,6 +490,12 @@ pub struct MemoryAnchorStore {
     /// before the migration still parses.
     #[serde(default)]
     pub analytic_only: Vec<AnalyticOnlyEntry>,
+    /// Variant/decoder component deltas (epic 22505 E2, feature-end fix round): the bound byte
+    /// costs the sibling-anchor fall-through of
+    /// [`MemoryAnchorStore::derive_video_phase_peaks_for_cell`] adds for an unmeasured pipeline
+    /// cell. `default` so a store written before the migration still parses.
+    #[serde(default)]
+    pub component_deltas: Vec<ComponentDelta>,
 }
 
 /// Why a cell is analytic-only, strongest evidence first. The variant names the BEST evidence that
@@ -505,8 +691,25 @@ pub struct MemoryAnchor {
     pub source: AnchorSource,
     pub geometry: AnchorGeometry,
     pub phase_active_peak_bytes: AnchorPhaseBytes,
+    /// The measured per-phase ALLOCATOR levels of the anchor render (active + retained cache at
+    /// each phase's peak), bound byte-exactly to the source record's
+    /// `observedMemory.<phase>.allocatorBytes` in BOTH directions: a record that reports all
+    /// three phase allocator levels must have them here, and an anchor may not invent them.
+    /// This is the quantity the MLX image law derives ([`MemoryAnchor::derive_mlx_image_phase_peaks`])
+    /// — see that section's comment for why actives cannot price that lane. `None` where the
+    /// source record reports no complete per-phase allocator decomposition.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub phase_allocator_envelope_bytes: Option<AnchorPhaseBytes>,
     /// The measured overall allocator envelope of the anchor render (active + reclaimable).
     pub overall_allocator_envelope_bytes: u64,
+    /// `Some` when this anchor VALIDATES its measured point but no lane law may derive from it,
+    /// with the stated reason (epic 22505 feature-end fix round, per-model scoping). Every
+    /// derivation law refuses an anchor carrying this field; the memory matrix publishes the cell
+    /// as `Anchored/underived`. Written by the extractor from the model's own retained evidence
+    /// (e.g. a single measured geometry supports no per-pixel coefficient), never a blanket
+    /// switch.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub underived_reason: Option<String>,
 }
 
 /// Store-key spelling of the LTX-2.5 transformer variant, matching the retained evidence.
@@ -591,6 +794,7 @@ pub fn load_memory_anchors(raw: &str) -> Result<MemoryAnchorStore, String> {
         validate_anchor(anchor)?;
     }
     validate_analytic_only(&store)?;
+    validate_component_deltas(&store)?;
     Ok(store)
 }
 
@@ -898,6 +1102,127 @@ fn validate_anchor(anchor: &MemoryAnchor) -> Result<(), String> {
             anchor.id, anchor.source.record_id
         ));
     }
+    // Per-phase ALLOCATOR levels (epic 22505 feature-end fix round): bound in BOTH directions to
+    // `observedMemory.<phase>.allocatorBytes`, so a record that reports the decomposition must
+    // carry it and an anchor cannot invent or doctor one. The MLX image law derives from these.
+    let phase_allocator = |phase: &str| {
+        record
+            .get("observedMemory")
+            .and_then(|memory| memory.get(phase))
+            .and_then(|entry| entry.get("allocatorBytes"))
+            .and_then(serde_json::Value::as_u64)
+            .filter(|&bytes| bytes > 0)
+    };
+    let record_allocators = match (
+        phase_allocator("conditioning"),
+        phase_allocator("denoise"),
+        phase_allocator("decode"),
+    ) {
+        (Some(conditioning), Some(denoise), Some(decode)) => Some(AnchorPhaseBytes {
+            conditioning,
+            denoise,
+            decode,
+        }),
+        _ => None,
+    };
+    if record_allocators != anchor.phase_allocator_envelope_bytes {
+        return Err(format!(
+            "memory anchor {} phase allocator envelopes disagree with the observedMemory of its \
+             source record {} — the field is bound in both directions",
+            anchor.id, anchor.source.record_id
+        ));
+    }
+    if anchor
+        .underived_reason
+        .as_ref()
+        .is_some_and(|reason| reason.trim().is_empty())
+    {
+        return Err(format!(
+            "memory anchor {} declares itself underived without a reason — an unexplained \
+             refusal is a gap wearing a field's clothes",
+            anchor.id
+        ));
+    }
+    Ok(())
+}
+
+/// The component-delta half of the store's invariants (epic 22505 E2, feature-end fix round).
+///
+/// Every delta's byte value is RECOMPUTED from the compiled-in weights file inventory it cites, so
+/// the store cannot carry a delta the shipped inventory does not entail — a zeroed, inflated or
+/// re-pointed row fails the load rather than silently re-pricing a cell.
+fn validate_component_deltas(store: &MemoryAnchorStore) -> Result<(), String> {
+    let mut seen = BTreeMap::new();
+    for delta in &store.component_deltas {
+        let key = (
+            delta.model_id.clone(),
+            delta.backend,
+            delta.tier.clone(),
+            delta.axis,
+            delta.to.clone(),
+        );
+        if let Some(previous) = seen.insert(key, &delta.id) {
+            return Err(format!(
+                "duplicate component delta for ({}, {}, {}, {:?}, {}): {} and {}",
+                delta.model_id,
+                delta.backend.as_key(),
+                delta.tier,
+                delta.axis,
+                delta.to,
+                previous,
+                delta.id
+            ));
+        }
+        if delta.files.is_empty() {
+            return Err(format!("component delta {} names no files", delta.id));
+        }
+        let Some((_, raw)) = PACKAGED_WEIGHTS_FILE_INVENTORIES
+            .iter()
+            .find(|(path, _)| *path == delta.source.path)
+        else {
+            return Err(format!(
+                "component delta {} cites {} which is not a compiled weights file inventory",
+                delta.id, delta.source.path
+            ));
+        };
+        let digest = format!("{:x}", Sha256::digest(raw.as_bytes()));
+        if digest != delta.source.sha256 {
+            return Err(format!(
+                "component delta {} inventory digest mismatch for {}: recorded {} actual {digest}",
+                delta.id, delta.source.path, delta.source.sha256
+            ));
+        }
+        let inventory: serde_json::Value = serde_json::from_str(raw).map_err(|error| {
+            format!(
+                "weights inventory {} does not parse: {error}",
+                delta.source.path
+            )
+        })?;
+        let files = inventory
+            .get("files")
+            .and_then(|files| files.as_object())
+            .ok_or_else(|| format!("weights inventory {} has no files map", delta.source.path))?;
+        let mut total: u64 = 0;
+        for file in &delta.files {
+            let size = files
+                .get(file)
+                .and_then(serde_json::Value::as_u64)
+                .ok_or_else(|| {
+                    format!(
+                        "component delta {} sums {} which the inventory {} does not size",
+                        delta.id, file, delta.source.path
+                    )
+                })?;
+            total = total.saturating_add(size);
+        }
+        if total == 0 || total != delta.bytes {
+            return Err(format!(
+                "component delta {} declares {} bytes but its cited files sum to {total} — the \
+                 delta must equal the shipped file sizes it names",
+                delta.id, delta.bytes
+            ));
+        }
+    }
     Ok(())
 }
 
@@ -1125,6 +1450,23 @@ impl AnchorDerivedPhases {
     }
 }
 
+/// One phase's raw (pre-margin) video estimate: the bytes, and whether they reuse the anchor's
+/// OWN measured intercept (`anchored`) rather than a cell-blind architecture bound — the flag the
+/// sibling+delta fall-through keys its adds on (see `derive_video_phase_estimates_raw`).
+#[derive(Debug, Clone, Copy)]
+struct RawPhaseEstimate {
+    bytes: i128,
+    anchored: bool,
+}
+
+/// The three raw phase estimates of one video derivation.
+#[derive(Debug, Clone, Copy)]
+struct RawVideoPhaseEstimates {
+    conditioning: RawPhaseEstimate,
+    denoise: RawPhaseEstimate,
+    decode: RawPhaseEstimate,
+}
+
 /// Latent token count: spatial patches x latent temporal depth (ceil mappings so an off-lattice
 /// request rounds up, never down).
 fn latent_tokens(width: u32, height: u32, frames: u32) -> i128 {
@@ -1196,7 +1538,34 @@ impl MemoryAnchor {
         &self,
         request: AnchorDeriveRequest,
     ) -> Option<AnchorDerivedPhases> {
+        let raw = self.derive_video_phase_estimates_raw(request)?;
+        Some(AnchorDerivedPhases {
+            conditioning: widened(raw.conditioning.bytes)?,
+            denoise: widened(raw.denoise.bytes)?,
+            decode: widened(raw.decode.bytes)?,
+        })
+    }
+
+    /// The video law's raw (pre-margin) per-phase estimates, shared by the exact-cell path above
+    /// and the sibling+delta fall-through ([`MemoryAnchorStore::derive_video_phase_peaks_for_cell`],
+    /// which adds its component delta BEFORE the shared margin is applied). Each phase carries an
+    /// `anchored` flag: `true` when the estimate reuses the anchor's OWN measured intercept (and
+    /// therefore embeds the anchor cell's component set — the part a crossed-axis delta must
+    /// re-price), `false` when it is an architecture bound
+    /// ([`COND_DEFERRED_BOUND_BYTES`] / [`DENOISE_WINDOWED_BASE_BYTES`] /
+    /// [`decode_tiled_bound_bytes`]), which is cell-blind by construction and documented to
+    /// upper-bound every variant/decoder already.
+    fn derive_video_phase_estimates_raw(
+        &self,
+        request: AnchorDeriveRequest,
+    ) -> Option<RawVideoPhaseEstimates> {
         if request.width == 0 || request.height == 0 || request.frames == 0 {
+            return None;
+        }
+        // An anchor marked underived validates its measured point and prices nothing (epic 22505
+        // feature-end fix round): every lane law carries this refusal so the store's statement and
+        // the runtime behaviour cannot disagree.
+        if self.underived_reason.is_some() {
             return None;
         }
         // Every coefficient in this law is an LTX-2.5 pipeline fact keyed on the transformer
@@ -1225,28 +1594,41 @@ impl MemoryAnchor {
         let tokens = latent_tokens(request.width, request.height, request.frames);
         let voxels = voxels(request.width, request.height, request.frames);
 
+        let phase = |bytes: i128, anchored: bool| RawPhaseEstimate { bytes, anchored };
         let conditioning = if request.deferred_materialization {
-            i128::from(COND_DEFERRED_BOUND_BYTES)
+            phase(i128::from(COND_DEFERRED_BOUND_BYTES), false)
         } else {
-            i128::from(self.phase_active_peak_bytes.conditioning)
-                + COND_PER_TOKEN_BYTES * (tokens - anchor_tokens)
+            phase(
+                i128::from(self.phase_active_peak_bytes.conditioning)
+                    + COND_PER_TOKEN_BYTES * (tokens - anchor_tokens),
+                true,
+            )
         };
         let denoise = if request.transformer_windowed {
-            i128::from(DENOISE_WINDOWED_BASE_BYTES) + DENOISE_PER_TOKEN_BYTES * tokens
+            phase(
+                i128::from(DENOISE_WINDOWED_BASE_BYTES) + DENOISE_PER_TOKEN_BYTES * tokens,
+                false,
+            )
         } else {
-            i128::from(self.phase_active_peak_bytes.denoise)
-                + DENOISE_PER_TOKEN_BYTES * (tokens - anchor_tokens)
+            phase(
+                i128::from(self.phase_active_peak_bytes.denoise)
+                    + DENOISE_PER_TOKEN_BYTES * (tokens - anchor_tokens),
+                true,
+            )
         };
         let decode = if request.decode_tiled {
-            decode_tiled_bound_bytes(voxels)
+            phase(decode_tiled_bound_bytes(voxels), false)
         } else {
-            i128::from(self.phase_active_peak_bytes.decode)
-                + DECODE_PER_VOXEL_BYTES * (voxels - anchor_voxels)
+            phase(
+                i128::from(self.phase_active_peak_bytes.decode)
+                    + DECODE_PER_VOXEL_BYTES * (voxels - anchor_voxels),
+                true,
+            )
         };
-        Some(AnchorDerivedPhases {
-            conditioning: widened(conditioning)?,
-            denoise: widened(denoise)?,
-            decode: widened(decode)?,
+        Some(RawVideoPhaseEstimates {
+            conditioning,
+            denoise,
+            decode,
         })
     }
 
@@ -1278,6 +1660,10 @@ impl MemoryAnchor {
         request: AnchorImageDeriveRequest,
     ) -> Option<AnchorDerivedPhases> {
         if request.width == 0 || request.height == 0 {
+            return None;
+        }
+        // See `derive_video_phase_estimates_raw`: an underived anchor prices nothing on any lane.
+        if self.underived_reason.is_some() {
             return None;
         }
         if self.backend != AnchorBackend::Candle
@@ -1317,6 +1703,233 @@ impl MemoryAnchor {
             denoise: widened_by(denoise, CANDLE_ANCHOR_CAPTURE_SPREAD_MARGIN)?,
             decode: widened_by(decode, CANDLE_ANCHOR_CAPTURE_SPREAD_MARGIN)?,
         })
+    }
+
+    /// Derive the per-phase ALLOCATOR levels for one requested still-image workload on the MLX
+    /// unified-memory lane (epic 22505 feature-end fix round, E2/E7 — the MLX sibling of
+    /// [`Self::derive_image_phase_peaks`]). See the coefficient section's comment for why this
+    /// lane prices phase ALLOCATOR envelopes rather than actives; the returned
+    /// [`AnchorDerivedPhases::peak_bytes`] is therefore directly the admission envelope, and the
+    /// selector adds NOTHING on top (the worker's ladder margin policy treats
+    /// `EstimateAnchorDerived` as fully priced).
+    ///
+    /// IDENTITY GUARD: this law is the MLX image lane's. A non-MLX anchor, an anchor carrying LTX
+    /// pipeline axes, a multi-frame anchor, or an anchor whose record reports no per-phase
+    /// allocator decomposition are refused rather than coerced. An anchor carrying
+    /// [`MemoryAnchor::underived_reason`] is refused for the reason it states.
+    ///
+    /// REGIME GUARD: the anchor must be the fully UNBOUNDED eager resident composition — no rung
+    /// engaged, eager materialization. That is the WIDEST composition the lane executes, so it
+    /// upper-bounds every optimized composition of the same cell (each rung exists to make a
+    /// phase smaller) and one law prices the whole ladder. This is the mirror image of the candle
+    /// law's staged-anchor asymmetry: there the shallow OPTIMIZED anchor could not price the
+    /// larger resident composition; here the resident anchor prices everything because nothing is
+    /// larger than it.
+    ///
+    /// Returns `None` on degenerate geometry and on any identity/regime the anchor cannot price.
+    pub fn derive_mlx_image_phase_peaks(
+        &self,
+        request: AnchorMlxImageDeriveRequest,
+    ) -> Option<AnchorDerivedPhases> {
+        if request.width == 0 || request.height == 0 {
+            return None;
+        }
+        if self.underived_reason.is_some() {
+            return None;
+        }
+        if self.backend != AnchorBackend::Mlx
+            || self.transformer_variant.is_some()
+            || self.decoder.is_some()
+            || self.geometry.frames != 1
+        {
+            return None;
+        }
+        if self.load_shape != AnchorLoadShape::EagerMaterialization
+            || self.measured_regime.staged
+            || self.measured_regime.decode_tiled
+            || self.measured_regime.attention_chunked
+            || self.measured_regime.transformer_windowed
+        {
+            return None;
+        }
+        let allocators = self.phase_allocator_envelope_bytes?;
+        let anchor_pixels = i128::from(self.geometry.width) * i128::from(self.geometry.height);
+        // LOWER CLAMP, exactly as the candle law's: the slopes are fitted across
+        // 768x768 -> 1024x1024 with the anchor at the top, so a sub-768x768 request is priced AT
+        // 768x768 rather than extrapolated below the corpus.
+        let pixels = (i128::from(request.width) * i128::from(request.height))
+            .max(MLX_IMAGE_SMALLEST_RETAINED_PIXELS);
+        let delta = pixels - anchor_pixels;
+        // The conditioning slope is sub-byte-per-pixel, so it is applied as `delta / 16` with the
+        // rounding chosen conservative in BOTH directions: an upward delta rounds UP (charge at
+        // least the slope), a downward delta rounds toward zero (subtract at most the slope).
+        let conditioning_growth = if delta >= 0 {
+            (delta + MLX_IMAGE_COND_ALLOC_PIXELS_PER_BYTE - 1)
+                .div_euclid(MLX_IMAGE_COND_ALLOC_PIXELS_PER_BYTE)
+        } else {
+            -((-delta) / MLX_IMAGE_COND_ALLOC_PIXELS_PER_BYTE)
+        };
+        let conditioning = i128::from(allocators.conditioning) + conditioning_growth;
+        let denoise =
+            i128::from(allocators.denoise) + MLX_IMAGE_DENOISE_ALLOC_PER_PIXEL_BYTES * delta;
+        let decode = i128::from(allocators.decode) + MLX_IMAGE_DECODE_ALLOC_PER_PIXEL_BYTES * delta;
+        Some(AnchorDerivedPhases {
+            conditioning: widened_by(conditioning, MLX_IMAGE_ALLOCATOR_RESIDUAL_MARGIN)?,
+            denoise: widened_by(denoise, MLX_IMAGE_ALLOCATOR_RESIDUAL_MARGIN)?,
+            decode: widened_by(decode, MLX_IMAGE_ALLOCATOR_RESIDUAL_MARGIN)?,
+        })
+    }
+}
+
+/// The workload axes the MLX image derivation prices. There is no temporal axis, and no regime
+/// flag at all: the anchor is the WIDEST (eager resident, unbounded) composition, so it
+/// upper-bounds every composition the lane can execute — see
+/// [`MemoryAnchor::derive_mlx_image_phase_peaks`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AnchorMlxImageDeriveRequest {
+    pub width: u32,
+    pub height: u32,
+}
+
+/// One priced cell from [`MemoryAnchorStore::derive_video_phase_peaks_for_cell`]: the derived
+/// phases, the anchor that priced them, and the component-delta bytes the sibling fall-through
+/// added (zero on the exact-cell path).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct AnchorCellDerivation<'a> {
+    pub phases: AnchorDerivedPhases,
+    pub anchor: &'a MemoryAnchor,
+    pub delta_bytes: u64,
+}
+
+impl MemoryAnchorStore {
+    /// The bound component delta for one `(model, lane, tier, axis, target value)`, or `None`
+    /// when the shipped inventories price no such component — in which case the fall-through
+    /// refuses that axis rather than inventing a size.
+    pub fn component_delta_for(
+        &self,
+        model_id: &str,
+        backend: AnchorBackend,
+        tier: &str,
+        axis: ComponentDeltaAxis,
+        to: &str,
+    ) -> Option<&ComponentDelta> {
+        self.component_deltas.iter().find(|delta| {
+            delta.model_id == model_id
+                && delta.backend == backend
+                && delta.tier == tier
+                && delta.axis == axis
+                && delta.to == to
+        })
+    }
+
+    /// Price one `(model, lane, tier, transformer variant, decoder)` video cell: the exact anchor
+    /// when the cell carries one, otherwise a SIBLING anchor of the same `(model, lane, tier)`
+    /// plus the bound component deltas for every differing pipeline axis (epic 22505 E2,
+    /// feature-end fix round — see the component-delta section comment for the conservative
+    /// direction: deltas ADD the full shipped file size of components the target materializes and
+    /// the sibling does not, and subtract nothing).
+    ///
+    /// The delta is added to every phase's RAW estimate before the shared
+    /// [`ANCHOR_ALLOCATOR_ENVELOPE_MARGIN`] widening: on the MLX lane the allocator retains a
+    /// component's bytes across phase transitions, so no phase can be exempted from the add, and
+    /// widening after the add keeps the delta under the same allocator-envelope pricing as the
+    /// anchored terms.
+    ///
+    /// Sibling choice is deterministic: the fewest differing axes win, then the lexicographically
+    /// smallest anchor id. A sibling differing on an axis with no bound delta is skipped — the
+    /// caller keeps its floor, never a guessed size.
+    pub fn derive_video_phase_peaks_for_cell(
+        &self,
+        model_id: &str,
+        backend: AnchorBackend,
+        tier: &str,
+        transformer_variant: Ltx25TransformerVariant,
+        decoder: Ltx25Decoder,
+        request: AnchorDeriveRequest,
+    ) -> Option<AnchorCellDerivation<'_>> {
+        if let Some(anchor) = self.anchor_for(model_id, backend, tier, transformer_variant, decoder)
+        {
+            return Some(AnchorCellDerivation {
+                phases: anchor.derive_video_phase_peaks(request)?,
+                anchor,
+                delta_bytes: 0,
+            });
+        }
+        let mut candidates: Vec<(u32, &MemoryAnchor, u64)> = Vec::new();
+        for anchor in self.anchors.iter().filter(|anchor| {
+            anchor.model_id == model_id
+                && anchor.backend == backend
+                && anchor.tier == tier
+                && anchor.transformer_variant.is_some()
+                && anchor.decoder.is_some()
+        }) {
+            let mut differing = 0_u32;
+            let mut delta_bytes = 0_u64;
+            if anchor.transformer_variant != Some(transformer_variant) {
+                differing += 1;
+                let Some(delta) = self.component_delta_for(
+                    model_id,
+                    backend,
+                    tier,
+                    ComponentDeltaAxis::TransformerVariant,
+                    transformer_variant_key(transformer_variant),
+                ) else {
+                    continue;
+                };
+                delta_bytes = delta_bytes.saturating_add(delta.bytes);
+            }
+            if anchor.decoder != Some(decoder) {
+                differing += 1;
+                let Some(delta) = self.component_delta_for(
+                    model_id,
+                    backend,
+                    tier,
+                    ComponentDeltaAxis::Decoder,
+                    decoder_key(decoder),
+                ) else {
+                    continue;
+                };
+                delta_bytes = delta_bytes.saturating_add(delta.bytes);
+            }
+            candidates.push((differing, anchor, delta_bytes));
+        }
+        candidates.sort_by(|(left_axes, left, _), (right_axes, right, _)| {
+            left_axes
+                .cmp(right_axes)
+                .then_with(|| left.id.cmp(&right.id))
+        });
+        for (_, sibling, delta_bytes) in candidates {
+            let Some(raw) = sibling.derive_video_phase_estimates_raw(request) else {
+                continue;
+            };
+            // The delta re-prices the SIBLING'S OWN measured intercepts (which embed its
+            // component set); a phase priced by a cell-blind architecture bound takes no add —
+            // the bound's provenance already upper-bounds every variant/decoder, and adding a
+            // component the bound never held would only widen the estimate past what the
+            // conservative rule requires.
+            let priced = |estimate: RawPhaseEstimate| {
+                if estimate.anchored {
+                    estimate.bytes + i128::from(delta_bytes)
+                } else {
+                    estimate.bytes
+                }
+            };
+            let Some(phases) = (|| {
+                Some(AnchorDerivedPhases {
+                    conditioning: widened(priced(raw.conditioning))?,
+                    denoise: widened(priced(raw.denoise))?,
+                    decode: widened(priced(raw.decode))?,
+                })
+            })() else {
+                continue;
+            };
+            return Some(AnchorCellDerivation {
+                phases,
+                anchor: sibling,
+                delta_bytes,
+            });
+        }
+        None
     }
 }
 
@@ -3134,6 +3747,821 @@ mod tests {
             "the derived staged peak {derived_peak} must stay below the retained resident row \
              {resident_row}"
         );
+    }
+
+    // -------------------------------------------------------------------------------------
+    // MLX image lane (epic 22505 feature-end fix round, E2/E7).
+    // -------------------------------------------------------------------------------------
+
+    const IMAGE_MLX_CORPUS_PATH: &str = "docs/generated/memory-calibration-evidence.json";
+
+    /// One retained MLX image record: geometry, composition, and its measured per-phase
+    /// ALLOCATOR levels plus the overall envelope.
+    struct MlxImageCorpusRecord {
+        id: String,
+        tier: String,
+        width: u32,
+        height: u32,
+        load_shape: String,
+        engaged: Vec<String>,
+        conditioning_alloc: u64,
+        denoise_alloc: u64,
+        decode_alloc: u64,
+        overall_envelope: u64,
+    }
+
+    fn mlx_image_corpus(model_id: &str) -> Vec<MlxImageCorpusRecord> {
+        let raw = PACKAGED_MEMORY_ANCHOR_SOURCES
+            .iter()
+            .find(|(path, _)| *path == IMAGE_MLX_CORPUS_PATH)
+            .map(|(_, raw)| *raw)
+            .expect("the image-MLX retained corpus is compiled in");
+        let source: serde_json::Value = serde_json::from_str(raw).expect("corpus parses");
+        source["records"]
+            .as_array()
+            .expect("records")
+            .iter()
+            .filter(|record| {
+                record["target"]["modelId"].as_str() == Some(model_id)
+                    && record["backend"].as_str() == Some("mlx")
+                    && record["target"]["geometry"]["frames"].as_u64() == Some(1)
+            })
+            .map(|record| {
+                let geometry = &record["target"]["geometry"];
+                let alloc = |phase: &str| {
+                    record["observedMemory"][phase]["allocatorBytes"]
+                        .as_u64()
+                        .unwrap_or_else(|| panic!("{phase} allocatorBytes"))
+                };
+                MlxImageCorpusRecord {
+                    id: record["id"].as_str().expect("id").to_owned(),
+                    tier: record["target"]["tier"].as_str().expect("tier").to_owned(),
+                    width: geometry["width"].as_u64().expect("width") as u32,
+                    height: geometry["height"].as_u64().expect("height") as u32,
+                    load_shape: record["loadShape"].as_str().expect("loadShape").to_owned(),
+                    engaged: record["strategy"]["engagedRungs"]
+                        .as_array()
+                        .expect("engaged rungs")
+                        .iter()
+                        .filter_map(|rung| rung.as_str().map(str::to_owned))
+                        .collect(),
+                    conditioning_alloc: alloc("conditioning"),
+                    denoise_alloc: alloc("denoise"),
+                    decode_alloc: alloc("decode"),
+                    overall_envelope: record["observedMemory"]["overall"]["allocatorBytes"]
+                        .as_u64()
+                        .expect("overall envelope"),
+                }
+            })
+            .collect()
+    }
+
+    fn flux2_mlx_anchor(tier: &str) -> &'static MemoryAnchor {
+        store()
+            .image_anchor_for("flux2_dev", AnchorBackend::Mlx, tier)
+            .unwrap_or_else(|| panic!("the flux2_dev {tier} MLX anchor is packaged"))
+    }
+
+    /// The per-model scope of the image-MLX law, read off the packaged store: the models whose own
+    /// retained records vary geometry (flux2_dev, both tiers) derive; the single-geometry models
+    /// (qwen_image, z_image_turbo) and the axis-free video anchor (ltx_2_3) are validation-only
+    /// with their reason stated, and the law honors the statement.
+    #[test]
+    fn image_mlx_derivability_is_scoped_per_model_with_stated_reasons() {
+        for tier in ["q4", "q8"] {
+            let anchor = flux2_mlx_anchor(tier);
+            assert_eq!(anchor.underived_reason, None, "flux2 {tier} must derive");
+            assert!(anchor
+                .derive_mlx_image_phase_peaks(AnchorMlxImageDeriveRequest {
+                    width: 1024,
+                    height: 1024,
+                })
+                .is_some());
+        }
+        for (model, tiers) in [
+            ("qwen_image", &["q4", "q8", "bf16"][..]),
+            ("z_image_turbo", &["q4"][..]),
+        ] {
+            for tier in tiers {
+                let anchor = store()
+                    .image_anchor_for(model, AnchorBackend::Mlx, tier)
+                    .unwrap_or_else(|| panic!("{model} {tier} anchor"));
+                let reason = anchor
+                    .underived_reason
+                    .as_deref()
+                    .unwrap_or_else(|| panic!("{model} {tier} must state why it is underived"));
+                assert!(
+                    reason.contains("single geometry"),
+                    "{model} {tier}: the reason must name the missing spread, got {reason}"
+                );
+                assert!(
+                    anchor
+                        .derive_mlx_image_phase_peaks(AnchorMlxImageDeriveRequest {
+                            width: anchor.geometry.width,
+                            height: anchor.geometry.height,
+                        })
+                        .is_none(),
+                    "{model} {tier}: an underived anchor must price nothing"
+                );
+            }
+        }
+        let ltx23 = store()
+            .anchors
+            .iter()
+            .find(|anchor| anchor.model_id == "ltx_2_3")
+            .expect("the ltx_2_3 anchor is packaged");
+        assert!(
+            ltx23
+                .underived_reason
+                .as_deref()
+                .is_some_and(|reason| reason.contains("pipeline axes")),
+            "ltx_2_3's axis-free anchor must state its refusal"
+        );
+    }
+
+    /// AC (E2/E7): the image-MLX derivation brackets every retained record of the derivable
+    /// models — per-phase against the measured ALLOCATOR levels, and overall against the measured
+    /// admission envelope, inside the named tightness budget.
+    #[test]
+    fn mlx_image_derivation_brackets_every_retained_flux2_measurement() {
+        let corpus = mlx_image_corpus("flux2_dev");
+        // Shape: both anchored tiers and both measured geometries must appear, or the test stops
+        // asking its question.
+        for tier in ["q4", "q8"] {
+            for edge in [768_u32, 1024] {
+                assert!(
+                    corpus
+                        .iter()
+                        .any(|record| record.tier == tier && record.width == edge),
+                    "the retained corpus must cover {tier} at {edge}x{edge}"
+                );
+            }
+        }
+        let mut bracketed = 0_usize;
+        for record in &corpus {
+            let anchor = flux2_mlx_anchor(&record.tier);
+            let derived = anchor
+                .derive_mlx_image_phase_peaks(AnchorMlxImageDeriveRequest {
+                    width: record.width,
+                    height: record.height,
+                })
+                .unwrap_or_else(|| panic!("{} must be derivable", record.id));
+            for (phase, derived_bytes, measured_bytes) in [
+                (
+                    "conditioning",
+                    derived.conditioning,
+                    record.conditioning_alloc,
+                ),
+                ("denoise", derived.denoise, record.denoise_alloc),
+                ("decode", derived.decode, record.decode_alloc),
+            ] {
+                assert!(
+                    derived_bytes >= measured_bytes,
+                    "{} {phase}: derived allocator level {derived_bytes} under the measured \
+                     {measured_bytes}",
+                    record.id
+                );
+            }
+            let upper = derived.peak_bytes();
+            assert!(
+                upper >= record.overall_envelope,
+                "{}: derived admission bound {upper} under the measured envelope {}",
+                record.id,
+                record.overall_envelope
+            );
+            let tight_cap = ((record.overall_envelope as f64)
+                * (1.0 + MLX_IMAGE_VALIDATION_TIGHTNESS_BUDGET))
+                .ceil() as u64;
+            assert!(
+                upper <= tight_cap,
+                "{}: derived admission bound {upper} exceeds the tightness cap {tight_cap}",
+                record.id
+            );
+            bracketed += 1;
+        }
+        assert!(
+            bracketed >= 8,
+            "both tiers at both geometries with their repeat captures must be bracketed, got \
+             {bracketed}"
+        );
+    }
+
+    /// The image-MLX slopes are pinned from both sides: at or ABOVE the highest within-cell
+    /// measured allocator slope (upward extrapolation must not cross below the trend), and BELOW
+    /// the ceiling at which the margin-widened 768x768 downward derivation falls under the
+    /// measured 768x768 allocator level.
+    #[test]
+    fn every_mlx_image_coefficient_sits_inside_the_window_the_retained_pairs_allow() {
+        let corpus = mlx_image_corpus("flux2_dev");
+        let span = 1024_i128 * 1024 - MLX_IMAGE_SMALLEST_RETAINED_PIXELS;
+        let mut cond_slopes: Vec<f64> = Vec::new();
+        let mut denoise_slopes: Vec<f64> = Vec::new();
+        let mut decode_slopes: Vec<f64> = Vec::new();
+        for (index, left) in corpus.iter().enumerate() {
+            for right in &corpus[index + 1..] {
+                if left.tier != right.tier
+                    || left.load_shape != right.load_shape
+                    || left.engaged != right.engaged
+                {
+                    continue;
+                }
+                let left_px = i128::from(left.width) * i128::from(left.height);
+                let right_px = i128::from(right.width) * i128::from(right.height);
+                if left_px == right_px {
+                    continue;
+                }
+                let delta = (right_px - left_px) as f64;
+                cond_slopes.push(
+                    (right.conditioning_alloc as f64 - left.conditioning_alloc as f64) / delta,
+                );
+                denoise_slopes
+                    .push((right.denoise_alloc as f64 - left.denoise_alloc as f64) / delta);
+                decode_slopes.push((right.decode_alloc as f64 - left.decode_alloc as f64) / delta);
+            }
+        }
+        assert!(
+            !denoise_slopes.is_empty(),
+            "the corpus must measure within-cell slopes"
+        );
+        let highest = |slopes: &[f64]| slopes.iter().fold(f64::MIN, |a, &b| a.max(b.abs()));
+        for tier in ["q4", "q8"] {
+            let anchor = flux2_mlx_anchor(tier);
+            let allocators = anchor
+                .phase_allocator_envelope_bytes
+                .expect("flux2 anchors carry phase allocator levels");
+            let measured_768 = corpus
+                .iter()
+                .find(|record| record.tier == tier && record.width == 768)
+                .expect("the 768x768 retained row");
+            for (phase, coefficient, intercept, small_measured, slopes) in [
+                (
+                    "conditioning",
+                    1.0 / MLX_IMAGE_COND_ALLOC_PIXELS_PER_BYTE as f64,
+                    allocators.conditioning,
+                    measured_768.conditioning_alloc,
+                    &cond_slopes,
+                ),
+                (
+                    "denoise",
+                    MLX_IMAGE_DENOISE_ALLOC_PER_PIXEL_BYTES as f64,
+                    allocators.denoise,
+                    measured_768.denoise_alloc,
+                    &denoise_slopes,
+                ),
+                (
+                    "decode",
+                    MLX_IMAGE_DECODE_ALLOC_PER_PIXEL_BYTES as f64,
+                    allocators.decode,
+                    measured_768.decode_alloc,
+                    &decode_slopes,
+                ),
+            ] {
+                let observed = highest(slopes);
+                assert!(
+                    coefficient >= observed,
+                    "{phase}: coefficient {coefficient} sits below the highest measured \
+                     within-cell allocator slope {observed}"
+                );
+                let ceiling = (intercept as f64
+                    - small_measured as f64 / (1.0 + MLX_IMAGE_ALLOCATOR_RESIDUAL_MARGIN))
+                    / span as f64;
+                assert!(
+                    coefficient <= ceiling,
+                    "{tier} {phase}: coefficient {coefficient} exceeds the {ceiling} ceiling at \
+                     which the margin-widened 768x768 derivation falls under the measured level"
+                );
+            }
+        }
+    }
+
+    /// The identity and regime guards of the image-MLX law, each mutated individually on an
+    /// otherwise-derivable anchor.
+    #[test]
+    fn the_mlx_image_law_refuses_foreign_identities_and_regimes() {
+        let request = AnchorMlxImageDeriveRequest {
+            width: 1024,
+            height: 1024,
+        };
+        assert!(
+            flux2_mlx_anchor("q4")
+                .derive_mlx_image_phase_peaks(request)
+                .is_some(),
+            "the unmutated anchor must derive, or the mutations below prove nothing"
+        );
+        for (label, mutate) in [
+            (
+                "the candle lane",
+                Box::new(|anchor: &mut MemoryAnchor| anchor.backend = AnchorBackend::Candle)
+                    as Box<dyn Fn(&mut MemoryAnchor)>,
+            ),
+            (
+                "a video pipeline variant",
+                Box::new(|anchor: &mut MemoryAnchor| {
+                    anchor.transformer_variant = Some(Ltx25TransformerVariant::Dev);
+                }),
+            ),
+            (
+                "a video decoder",
+                Box::new(|anchor: &mut MemoryAnchor| {
+                    anchor.decoder = Some(Ltx25Decoder::Conv);
+                }),
+            ),
+            (
+                "a multi-frame measured geometry",
+                Box::new(|anchor: &mut MemoryAnchor| anchor.geometry.frames = 145),
+            ),
+            (
+                "deferred materialization",
+                Box::new(|anchor: &mut MemoryAnchor| {
+                    anchor.load_shape = AnchorLoadShape::DeferredMaterialization;
+                }),
+            ),
+            (
+                "a staged measured regime",
+                Box::new(|anchor: &mut MemoryAnchor| anchor.measured_regime.staged = true),
+            ),
+            (
+                "a tiled measured regime",
+                Box::new(|anchor: &mut MemoryAnchor| anchor.measured_regime.decode_tiled = true),
+            ),
+            (
+                "a chunked-attention measured regime",
+                Box::new(|anchor: &mut MemoryAnchor| {
+                    anchor.measured_regime.attention_chunked = true;
+                }),
+            ),
+            (
+                "a windowed measured regime",
+                Box::new(|anchor: &mut MemoryAnchor| {
+                    anchor.measured_regime.transformer_windowed = true;
+                }),
+            ),
+            (
+                "no phase allocator decomposition",
+                Box::new(|anchor: &mut MemoryAnchor| {
+                    anchor.phase_allocator_envelope_bytes = None;
+                }),
+            ),
+            (
+                "a stated underived reason",
+                Box::new(|anchor: &mut MemoryAnchor| {
+                    anchor.underived_reason = Some("validation-only".to_owned());
+                }),
+            ),
+        ] {
+            let mut mutated = flux2_mlx_anchor("q4").clone();
+            mutate(&mut mutated);
+            assert!(
+                mutated.derive_mlx_image_phase_peaks(request).is_none(),
+                "the MLX image law must refuse an anchor carrying {label}"
+            );
+        }
+        // And the video/candle laws refuse the MLX image anchor in turn.
+        assert!(flux2_mlx_anchor("q4")
+            .derive_video_phase_peaks(plain_request(1024, 1024, 1))
+            .is_none());
+        assert!(flux2_mlx_anchor("q4")
+            .derive_image_phase_peaks(AnchorImageDeriveRequest {
+                width: 1024,
+                height: 1024,
+                staged_residency: true,
+            })
+            .is_none());
+    }
+
+    #[test]
+    fn mlx_image_derived_peaks_track_output_area_and_clamp_below_the_corpus() {
+        let anchor = flux2_mlx_anchor("q8");
+        let at = |width: u32, height: u32| {
+            anchor
+                .derive_mlx_image_phase_peaks(AnchorMlxImageDeriveRequest { width, height })
+                .unwrap_or_else(|| panic!("{width}x{height} must be derivable"))
+        };
+        assert!(at(896, 896).peak_bytes() < at(1024, 1024).peak_bytes());
+        assert!(at(1024, 1024).peak_bytes() < at(1536, 1536).peak_bytes());
+        // Area, not aspect.
+        assert_eq!(at(1344, 768).peak_bytes(), at(768, 1344).peak_bytes());
+        // Sub-corpus requests clamp to the smallest retained geometry.
+        let floor = at(768, 768);
+        for (label, clamped) in [("1x1", at(1, 1)), ("512x512", at(512, 512))] {
+            assert_eq!(
+                clamped, floor,
+                "{label} must be priced at the 768x768 clamp floor"
+            );
+        }
+        assert!(anchor
+            .derive_mlx_image_phase_peaks(AnchorMlxImageDeriveRequest {
+                width: 0,
+                height: 512,
+            })
+            .is_none());
+    }
+
+    /// An underived anchor prices nothing on ANY lane — the store's statement and the runtime
+    /// behaviour cannot disagree.
+    #[test]
+    fn an_underived_anchor_prices_nothing_on_any_lane() {
+        let mut candle = krea_candle_anchor().clone();
+        candle.underived_reason = Some("validation-only".to_owned());
+        assert!(candle
+            .derive_image_phase_peaks(AnchorImageDeriveRequest {
+                width: 1024,
+                height: 1024,
+                staged_residency: true,
+            })
+            .is_none());
+        let mut video = store()
+            .anchor_for(
+                "ltx_2_5",
+                AnchorBackend::Mlx,
+                "q8",
+                Ltx25TransformerVariant::Dev,
+                Ltx25Decoder::DiffVae,
+            )
+            .expect("q8 dev/diffvae anchor")
+            .clone();
+        video.underived_reason = Some("validation-only".to_owned());
+        assert!(video
+            .derive_video_phase_peaks(plain_request(768, 512, 121))
+            .is_none());
+    }
+
+    // -------------------------------------------------------------------------------------
+    // Variant/decoder component deltas (epic 22505 E2, feature-end fix round).
+    // -------------------------------------------------------------------------------------
+
+    /// E2's headline: an unmeasured (variant, decoder) cell of an anchored (model, tier, lane)
+    /// derives from the sibling anchor plus the bound file-size delta — and the delta is APPLIED,
+    /// byte for byte, so zeroing it reds this test.
+    #[test]
+    fn an_unmeasured_variant_cell_derives_from_the_sibling_anchor_plus_the_bound_delta() {
+        // q8 distilled/diffvae carries no anchor; q8 dev/diffvae is its variant sibling.
+        assert!(store()
+            .anchor_for(
+                "ltx_2_5",
+                AnchorBackend::Mlx,
+                "q8",
+                Ltx25TransformerVariant::Distilled,
+                Ltx25Decoder::DiffVae
+            )
+            .is_none());
+        let request = plain_request(1280, 704, 145);
+        let derived = store()
+            .derive_video_phase_peaks_for_cell(
+                "ltx_2_5",
+                AnchorBackend::Mlx,
+                "q8",
+                Ltx25TransformerVariant::Distilled,
+                Ltx25Decoder::DiffVae,
+                request,
+            )
+            .expect("the unmeasured variant cell derives from its sibling");
+        let sibling = store()
+            .anchor_for(
+                "ltx_2_5",
+                AnchorBackend::Mlx,
+                "q8",
+                Ltx25TransformerVariant::Dev,
+                Ltx25Decoder::DiffVae,
+            )
+            .expect("the sibling anchor");
+        assert_eq!(derived.anchor.id, sibling.id);
+        let delta = store()
+            .component_delta_for(
+                "ltx_2_5",
+                AnchorBackend::Mlx,
+                "q8",
+                ComponentDeltaAxis::TransformerVariant,
+                "distilled",
+            )
+            .expect("the distilled variant delta is bound");
+        assert_eq!(derived.delta_bytes, delta.bytes);
+        // The delta names the distillation LoRA the distilled recipe materializes, and its bytes
+        // are the shipped file's size — not a tuned number.
+        assert_eq!(
+            delta.files,
+            vec!["distilled_lora/ltx-2.5-22b-distilled-lora-450-bf16.safetensors".to_owned()]
+        );
+        let raw = sibling
+            .derive_video_phase_estimates_raw(request)
+            .expect("the sibling prices the request");
+        let expect = |estimate: RawPhaseEstimate| {
+            widened(estimate.bytes + i128::from(delta.bytes)).expect("widens")
+        };
+        assert_eq!(derived.phases.conditioning, expect(raw.conditioning));
+        assert_eq!(derived.phases.denoise, expect(raw.denoise));
+        assert_eq!(derived.phases.decode, expect(raw.decode));
+        // The conservative direction: the delta ADDS — the derived cell sits strictly above the
+        // sibling's own derivation, in every phase.
+        let plain = sibling
+            .derive_video_phase_peaks(request)
+            .expect("the sibling's own derivation");
+        assert!(derived.phases.conditioning > plain.conditioning);
+        assert!(derived.phases.denoise > plain.denoise);
+        assert!(derived.phases.decode > plain.decode);
+    }
+
+    /// The fall-through prefers the exact anchor, then the fewest differing axes, then the
+    /// smallest anchor id — deterministically.
+    #[test]
+    fn the_delta_fall_through_prefers_the_exact_anchor_then_the_fewest_axes() {
+        let request = plain_request(1280, 704, 145);
+        let exact = store()
+            .derive_video_phase_peaks_for_cell(
+                "ltx_2_5",
+                AnchorBackend::Mlx,
+                "q8",
+                Ltx25TransformerVariant::Dev,
+                Ltx25Decoder::DiffVae,
+                request,
+            )
+            .expect("the exact cell derives");
+        assert_eq!(exact.delta_bytes, 0);
+        assert_eq!(
+            exact.anchor.transformer_variant,
+            Some(Ltx25TransformerVariant::Dev)
+        );
+        // Remove the bf16 distilled/diffvae anchor: bf16 distilled/diffvae then has TWO one-axis
+        // siblings (dev/diffvae by variant, distilled/conv by decoder) and the smaller anchor id
+        // (dev/diffvae) must win, with the variant delta.
+        let mut doctored = store().clone();
+        doctored.anchors.retain(|anchor| {
+            !(anchor.model_id == "ltx_2_5"
+                && anchor.tier == "bf16"
+                && anchor.transformer_variant == Some(Ltx25TransformerVariant::Distilled)
+                && anchor.decoder == Some(Ltx25Decoder::DiffVae))
+        });
+        let derived = doctored
+            .derive_video_phase_peaks_for_cell(
+                "ltx_2_5",
+                AnchorBackend::Mlx,
+                "bf16",
+                Ltx25TransformerVariant::Distilled,
+                Ltx25Decoder::DiffVae,
+                request,
+            )
+            .expect("the doctored store still derives the cell via a sibling");
+        assert_eq!(
+            derived.anchor.transformer_variant,
+            Some(Ltx25TransformerVariant::Dev)
+        );
+        assert_eq!(derived.anchor.decoder, Some(Ltx25Decoder::DiffVae));
+        // A cell with NO priced sibling axis fails to the caller's floor: strip the deltas and
+        // the same lookup returns nothing.
+        let mut unpriced = doctored.clone();
+        unpriced.component_deltas.clear();
+        assert!(
+            unpriced
+                .derive_video_phase_peaks_for_cell(
+                    "ltx_2_5",
+                    AnchorBackend::Mlx,
+                    "bf16",
+                    Ltx25TransformerVariant::Distilled,
+                    Ltx25Decoder::DiffVae,
+                    request,
+                )
+                .is_none(),
+            "an axis with no bound delta must fall to the floor, never a guessed size"
+        );
+    }
+
+    /// Leave-one-out validation against the retained records that DO exist for cells the
+    /// fall-through can reach: with the bf16 distilled anchors removed, every retained bf16
+    /// distilled record (diffvae via the variant delta; conv via variant + decoder deltas) must
+    /// be bracketed by the sibling-plus-delta derivation within the delta budget.
+    #[test]
+    fn leave_one_out_sibling_delta_derivations_bracket_the_retained_distilled_records() {
+        let mut doctored = store().clone();
+        doctored.anchors.retain(|anchor| {
+            !(anchor.model_id == "ltx_2_5"
+                && anchor.transformer_variant == Some(Ltx25TransformerVariant::Distilled))
+        });
+        let corpus = retained_corpus();
+        let distilled: Vec<_> = corpus
+            .iter()
+            .filter(|record| record.transformer_variant == Ltx25TransformerVariant::Distilled)
+            .collect();
+        assert!(
+            distilled.len() >= 4,
+            "the retained corpus must carry distilled records to validate against, got {}",
+            distilled.len()
+        );
+        assert!(
+            distilled
+                .iter()
+                .any(|record| record.decoder == Ltx25Decoder::Conv),
+            "the distilled/conv records are part of the validation set"
+        );
+        for record in distilled {
+            let derived = doctored
+                .derive_video_phase_peaks_for_cell(
+                    "ltx_2_5",
+                    AnchorBackend::Mlx,
+                    &record.tier,
+                    record.transformer_variant,
+                    record.decoder,
+                    AnchorDeriveRequest {
+                        width: record.width,
+                        height: record.height,
+                        frames: record.frames,
+                        decode_tiled: record.decode_tiled,
+                        transformer_windowed: record.transformer_windowed,
+                        deferred_materialization: record.deferred,
+                    },
+                )
+                .unwrap_or_else(|| panic!("{} derives via a sibling", record.id));
+            assert!(
+                derived.delta_bytes > 0,
+                "{}: the leave-one-out derivation must actually cross an axis",
+                record.id
+            );
+            // Where the derivation reuses a measured intercept, the crossed-axis delta must be
+            // APPLIED to it — a zeroed delta reds here. Architecture-bounded phases take no add
+            // (the bounds are cell-blind by their documented provenance), so the check names the
+            // intercept-priced phases of this record's regime.
+            let sibling_raw = derived
+                .anchor
+                .derive_video_phase_estimates_raw(AnchorDeriveRequest {
+                    width: record.width,
+                    height: record.height,
+                    frames: record.frames,
+                    decode_tiled: record.decode_tiled,
+                    transformer_windowed: record.transformer_windowed,
+                    deferred_materialization: record.deferred,
+                })
+                .expect("the sibling prices the request");
+            for (phase, anchored, sibling_raw, derived_bytes) in [
+                (
+                    "conditioning",
+                    sibling_raw.conditioning.anchored,
+                    sibling_raw.conditioning.bytes,
+                    derived.phases.conditioning,
+                ),
+                (
+                    "denoise",
+                    sibling_raw.denoise.anchored,
+                    sibling_raw.denoise.bytes,
+                    derived.phases.denoise,
+                ),
+                (
+                    "decode",
+                    sibling_raw.decode.anchored,
+                    sibling_raw.decode.bytes,
+                    derived.phases.decode,
+                ),
+            ] {
+                if anchored {
+                    assert!(
+                        derived_bytes > widened(sibling_raw).expect("widens"),
+                        "{} {phase}: the crossed-axis delta must be applied to the sibling's \
+                         measured intercept",
+                        record.id
+                    );
+                }
+            }
+            for (phase, derived_bytes, measured_bytes) in [
+                (
+                    "conditioning",
+                    derived.phases.conditioning,
+                    record.conditioning_active,
+                ),
+                ("denoise", derived.phases.denoise, record.denoise_active),
+                ("decode", derived.phases.decode, record.decode_active),
+            ] {
+                assert!(
+                    derived_bytes >= measured_bytes,
+                    "{} {phase}: sibling+delta derived {derived_bytes} under measured \
+                     {measured_bytes}",
+                    record.id
+                );
+            }
+            let upper = derived.phases.peak_bytes();
+            assert!(
+                upper >= record.overall_envelope,
+                "{}: derived bound {upper} under the measured envelope {}",
+                record.id,
+                record.overall_envelope
+            );
+            let cap = ((record.overall_envelope as f64)
+                * (1.0 + ANCHOR_DELTA_VALIDATION_TIGHTNESS_BUDGET))
+                .ceil() as u64;
+            assert!(
+                upper <= cap,
+                "{}: derived bound {upper} exceeds the delta tightness cap {cap} over envelope {}",
+                record.id,
+                record.overall_envelope
+            );
+        }
+    }
+
+    /// The delta rows are BOUND to the shipped inventory: a zeroed, inflated, re-pointed,
+    /// unknown-file or duplicated row fails the load.
+    #[test]
+    fn a_doctored_component_delta_is_rejected() {
+        let raw = PACKAGED_MEMORY_ANCHORS;
+        let base: serde_json::Value = serde_json::from_str(raw).expect("store parses");
+        assert!(
+            base["componentDeltas"]
+                .as_array()
+                .is_some_and(|rows| !rows.is_empty()),
+            "the packaged store must carry component deltas for this harness to interrogate"
+        );
+
+        let mut zeroed = base.clone();
+        zeroed["componentDeltas"][0]["bytes"] = serde_json::json!(0);
+        let error =
+            load_memory_anchors(&zeroed.to_string()).expect_err("a zeroed delta must be rejected");
+        assert!(
+            error.contains("must equal the shipped file sizes"),
+            "{error}"
+        );
+
+        let mut inflated = base.clone();
+        let bytes = inflated["componentDeltas"][0]["bytes"]
+            .as_u64()
+            .expect("bytes");
+        inflated["componentDeltas"][0]["bytes"] = serde_json::json!(bytes + 1);
+        let error = load_memory_anchors(&inflated.to_string())
+            .expect_err("an inflated delta must be rejected");
+        assert!(
+            error.contains("must equal the shipped file sizes"),
+            "{error}"
+        );
+
+        let mut repointed = base.clone();
+        repointed["componentDeltas"][0]["source"]["path"] = serde_json::json!("docs/nowhere.json");
+        let error = load_memory_anchors(&repointed.to_string())
+            .expect_err("a foreign inventory citation must be rejected");
+        assert!(
+            error.contains("not a compiled weights file inventory"),
+            "{error}"
+        );
+
+        let mut drifted = base.clone();
+        drifted["componentDeltas"][0]["source"]["sha256"] = serde_json::json!("0".repeat(64));
+        let error = load_memory_anchors(&drifted.to_string())
+            .expect_err("a drifted inventory digest must be rejected");
+        assert!(error.contains("inventory digest mismatch"), "{error}");
+
+        let mut unknown = base.clone();
+        unknown["componentDeltas"][0]["files"] = serde_json::json!(["not/a/file.safetensors"]);
+        let error = load_memory_anchors(&unknown.to_string())
+            .expect_err("an unknown file must be rejected");
+        assert!(error.contains("does not size"), "{error}");
+
+        let mut duplicated = base.clone();
+        let clone = duplicated["componentDeltas"][0].clone();
+        duplicated["componentDeltas"]
+            .as_array_mut()
+            .expect("rows")
+            .push(clone);
+        let error = load_memory_anchors(&duplicated.to_string())
+            .expect_err("a duplicated delta cell must be rejected");
+        assert!(error.contains("duplicate component delta"), "{error}");
+    }
+
+    /// The new anchor fields are bound, not stored-and-trusted: a doctored phase allocator level,
+    /// a dropped decomposition the record reports, and an empty underived reason all fail.
+    #[test]
+    fn a_doctored_phase_allocator_or_empty_underived_reason_is_rejected() {
+        let index = store()
+            .anchors
+            .iter()
+            .position(|anchor| anchor.phase_allocator_envelope_bytes.is_some())
+            .expect("an anchor with phase allocator levels");
+        let mut doctored: serde_json::Value =
+            serde_json::from_str(PACKAGED_MEMORY_ANCHORS).expect("store parses");
+        let level = doctored["anchors"][index]["phaseAllocatorEnvelopeBytes"]["denoise"]
+            .as_u64()
+            .expect("denoise allocator level");
+        doctored["anchors"][index]["phaseAllocatorEnvelopeBytes"]["denoise"] =
+            serde_json::json!(level + 1);
+        let error = load_memory_anchors(&doctored.to_string())
+            .expect_err("a doctored allocator level must be rejected");
+        assert!(
+            error.contains("phase allocator envelopes disagree"),
+            "{error}"
+        );
+
+        let mut dropped: serde_json::Value =
+            serde_json::from_str(PACKAGED_MEMORY_ANCHORS).expect("store parses");
+        dropped["anchors"][index]
+            .as_object_mut()
+            .expect("anchor object")
+            .remove("phaseAllocatorEnvelopeBytes");
+        let error = load_memory_anchors(&dropped.to_string())
+            .expect_err("dropping a reported decomposition must be rejected");
+        assert!(
+            error.contains("phase allocator envelopes disagree"),
+            "{error}"
+        );
+
+        let mut unexplained: serde_json::Value =
+            serde_json::from_str(PACKAGED_MEMORY_ANCHORS).expect("store parses");
+        unexplained["anchors"][index]["underivedReason"] = serde_json::json!("   ");
+        let error = load_memory_anchors(&unexplained.to_string())
+            .expect_err("an empty underived reason must be rejected");
+        assert!(error.contains("without a reason"), "{error}");
     }
 
     /// The candle slopes are pinned by DOWNWARD extrapolation: the anchor is the largest measured

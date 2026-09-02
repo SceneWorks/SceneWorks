@@ -62,25 +62,37 @@ pub const CANDLE_RECAPTURE_SPREAD: f64 = 0.02;
 /// THAT TERM — not of the floor.
 ///
 /// UNCERTAINTY COVERED: the MLX allocator envelope that sits above the modelled active bytes
-/// (cache retention across phase transitions), measured at up to 15.84% over the binding active
-/// phase across the retained corpus and bounded at 17% — the same envelope, from the same
-/// measurement, that `sceneworks_core::memory_anchor::ANCHOR_ALLOCATOR_ENVELOPE_MARGIN` prices for
-/// a derived peak. A floor's weights are allocated once and counted exactly, so they carry none of
-/// it.
+/// (cache retention across phase transitions). RE-DERIVED ON THE BASE IT CHARGES (epic 22505
+/// feature-end fix round, E3): `scripts/derive-ladder-margins.mjs#deriveFloorEnvelopeAllowance`
+/// takes, over every MLX record that reports a steady-state residency, the maximum of
+/// `envelope_bytes / activation_bytes` where `envelope_bytes` is the allocator envelope above the
+/// measured active peak and `activation_bytes` is the active peak above the post-cleanup resident
+/// weight set — i.e. the exact uncertainty over the exact term this fraction multiplies. The
+/// binding record is the flux2_dev q4 768x768 eager resident capture: a 26.40 GB retained
+/// envelope over an 8.50 GB activation transient, a ratio of ~3.10.
 ///
-/// DIFFERENT BASE, same constant — state it rather than let the shared number imply otherwise.
-/// `memory_anchor::widened` multiplies a WHOLE derived phase estimate (its weights included) by
-/// this fraction, while this constant multiplies a floor's ACTIVATION term alone. The two are equal
-/// because the envelope was measured once, not because they are charged against the same quantity;
-/// the equality pin below is a pin on the measurement, not on the base. Whether the anchor side
-/// should narrow its base to activation is carried to the feature-end review, NOT decided here.
+/// The previous 0.17 measured the SAME envelope as a fraction of the whole binding active phase
+/// (weights included) and then charged it against the activation term alone — under-charging by
+/// exactly the weights/activation ratio, which on the retained image renders is most of the
+/// envelope. It also happened to equal
+/// `sceneworks_core::memory_anchor::ANCHOR_ALLOCATOR_ENVELOPE_MARGIN`; the two are now different
+/// numbers BECAUSE their bases differ, and both derivations are stated: the anchor margin
+/// multiplies a WHOLE derived phase estimate (weights included), for which the envelope-over-
+/// binding-phase measurement (15.84%, bounded at 17%) remains the honest fraction, while this
+/// allowance multiplies the activation term alone, for which envelope-over-activation is. One
+/// measured phenomenon, two bases, two correctly-based fractions — the retired equality pin was a
+/// pin on a coincidence of spelling, not of meaning.
+///
+/// A fraction ABOVE 1.0 is not a blanket widening here: it says the retained cache the MLX
+/// allocator holds above the active peak is ~3x the activation transient on the widest retained
+/// render, which is a measurement, not a safety factor. The floor is the LAST-RESORT basis — an
+/// anchor-derived candidate outranks it wherever an anchor is current — so the honest charge
+/// costs admission nothing on any anchored lane.
 ///
 /// NOT COVERED, deliberately: whether one flat headroom number is the right ACTIVE model for this
 /// geometry at all. That residual is unmeasured, and epic 22505 E6 makes runtime catching its
-/// failure posture rather than a standing multiple of an already-modelled allowance. The retired
-/// blanket 50.41% was that standing multiple, priced against the whole peak and named after
-/// nothing.
-pub const FLOOR_ALLOCATOR_ENVELOPE_ALLOWANCE: f64 = 0.17;
+/// failure posture rather than a standing multiple of an already-modelled allowance.
+pub const FLOOR_ALLOCATOR_ENVELOPE_ALLOWANCE: f64 = 3.104_173_817_050_811;
 
 /// The candle lane's counterpart to [`FLOOR_ALLOCATOR_ENVELOPE_ALLOWANCE`], charged against the
 /// SAME term (a floor's activation bytes) but named separately because the uncertainty is a
@@ -272,7 +284,12 @@ const _: () = {
     assert!(CANDLE_RECAPTURE_SPREAD > 0.0 && CANDLE_RECAPTURE_SPREAD < 1.0);
     // The fatal-OOM lane is never charged less than the recoverable one for the SAME term.
     assert!(MLX_RECAPTURE_SPREAD >= CANDLE_RECAPTURE_SPREAD);
-    assert!(FLOOR_ALLOCATOR_ENVELOPE_ALLOWANCE > 0.0 && FLOOR_ALLOCATOR_ENVELOPE_ALLOWANCE < 1.0);
+    // The MLX floor envelope allowance is a fraction of the ACTIVATION term, and the measured
+    // envelope above active runs to ~3.1x that term on the retained image renders — above 1.0 is
+    // the measurement, not a blanket doubling (see the constant's doc). The upper sanity bound
+    // says only that a runaway derivation (an order of magnitude past anything measured) cannot
+    // land silently.
+    assert!(FLOOR_ALLOCATOR_ENVELOPE_ALLOWANCE > 0.0 && FLOOR_ALLOCATOR_ENVELOPE_ALLOWANCE < 10.0);
     assert!(
         CANDLE_FLOOR_ALLOCATOR_ENVELOPE_ALLOWANCE > 0.0
             && CANDLE_FLOOR_ALLOCATOR_ENVELOPE_ALLOWANCE < 1.0
@@ -296,23 +313,30 @@ mod tests {
     fn constants_match_the_sc_22508_derivation() {
         assert_eq!(MLX_RECAPTURE_SPREAD, 0.1260183508475594);
         assert_eq!(CANDLE_RECAPTURE_SPREAD, 0.02);
-        assert_eq!(FLOOR_ALLOCATOR_ENVELOPE_ALLOWANCE, 0.17);
+        // Re-derived on the base it charges (epic 22505 feature-end fix round, E3): the corpus
+        // max of envelope-above-active over activation-above-weights, from
+        // `scripts/derive-ladder-margins.mjs#deriveFloorEnvelopeAllowance` (binding record
+        // imc-d778d59acb0aae38dcbe).
+        assert_eq!(FLOOR_ALLOCATOR_ENVELOPE_ALLOWANCE, 3.104_173_817_050_811);
         assert_eq!(
             CANDLE_FLOOR_ALLOCATOR_ENVELOPE_ALLOWANCE,
             CANDLE_RECAPTURE_SPREAD
         );
-        // One measurement, one number: the anchor derivation prices this same measured envelope,
-        // and a floor must not price the envelope differently.
-        //
-        // The BASE differs, deliberately and on the record: `memory_anchor::widened` multiplies a
-        // whole derived phase estimate (weights included) by this fraction, while the floor
-        // allowance multiplies the activation term alone. This equality therefore pins the shared
-        // measurement, NOT a shared base. Narrowing the anchor side's base is a live question for
-        // the epic 22505 feature-end review and is out of scope here.
-        assert_eq!(
-            FLOOR_ALLOCATOR_ENVELOPE_ALLOWANCE,
-            sceneworks_core::memory_anchor::ANCHOR_ALLOCATOR_ENVELOPE_MARGIN
-        );
+        // The retired equality pin against `ANCHOR_ALLOCATOR_ENVELOPE_MARGIN` is REFRAMED, not
+        // moved: the two constants price one measured phenomenon (the MLX allocator envelope)
+        // against DIFFERENT bases, so they are now different numbers by derivation. What must
+        // hold is the ordering that difference entails — the fraction charged against the
+        // narrower base (activation alone) is necessarily larger than the fraction charged
+        // against the whole phase (weights included), because the envelope bytes are the same
+        // and the base shrank.
+        #[allow(clippy::assertions_on_constants)]
+        {
+            assert!(
+                FLOOR_ALLOCATOR_ENVELOPE_ALLOWANCE
+                    > sceneworks_core::memory_anchor::ANCHOR_ALLOCATOR_ENVELOPE_MARGIN,
+                "the activation-based fraction must exceed the whole-phase-based fraction"
+            );
+        }
     }
 
     /// The floor envelope is a property of the ALLOCATOR, so the two lanes must not share one

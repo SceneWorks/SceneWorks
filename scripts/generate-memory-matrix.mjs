@@ -1705,7 +1705,7 @@ export function implementationVerdict({
 /**
  * The COLLAPSED cell state (sc-22513, epic 22505 E5).
  *
- * A PURE function of three code-and-store facts, and of nothing else:
+ * A PURE function of four code-and-store facts, and of nothing else:
  *
  *   `implementation`     — `implementationVerdict`'s verdict: a claim about code and catalog. A rung
  *                          that is not implemented is still not implemented; that axis was never
@@ -1713,8 +1713,17 @@ export function implementationVerdict({
  *   `anchorPresent`      — the anchor store (`config/memory-anchors.json`) holds a measured anchor
  *                          for this cell's (model, tier, backend lane).
  *   `derivationDefined`  — the analytic derivation is defined AND wired for this cell's lane, read
- *                          off the Rust (`memory_anchor.rs` declares it, the worker admission path
- *                          calls it).
+ *                          off the Rust (`memory_anchor.rs` declares it, the lane's real admission
+ *                          source calls it).
+ *   `anchorDerivable`    — the ANCHOR itself is one the lane's law accepts (epic 22505 feature-end
+ *                          fix round, E5): an anchor the store marks `underivedReason` — an
+ *                          axis-free video anchor the pipeline-keyed law refuses, a
+ *                          single-geometry image model no coefficient can be fitted for —
+ *                          validates its measured point and prices nothing, so a wired lane still
+ *                          publishes it as `Anchored/underived` rather than claiming a derived
+ *                          peak. The store field and the Rust laws are bound to each other (every
+ *                          law refuses an anchor carrying the field), so this is a store fact, not
+ *                          a parallel opinion.
  *
  * Nothing else may enter: not a record, not a plan row, not a geometry, not a campaign, not a
  * currency digest. Anchor CURRENCY is reported on the cell beside the state (sc-22511 makes it a
@@ -1728,17 +1737,18 @@ export function implementationVerdict({
  *   `Implemented`       — implemented; its peak is priced by the analytic floor, not by an anchor.
  *   `Anchored`          — implemented, a measured anchor covers it, and the lane's derivation can
  *                         price an arbitrary request from that anchor.
- *   `Anchored/underived`— implemented and anchored, but this lane has no wired derivation, so the
- *                         anchor bounds nothing beyond its own measured point.
+ *   `Anchored/underived`— implemented and anchored, but the anchor bounds nothing beyond its own
+ *                         measured point: the lane has no wired derivation, or the lane's law
+ *                         refuses this anchor (`anchorDerivable` false).
  */
-export function cellState({ implementation, anchorPresent, derivationDefined }) {
+export function cellState({ implementation, anchorPresent, derivationDefined, anchorDerivable }) {
   if (implementation === "missing") return "Missing";
   if (implementation === "structurally-na") return "Structurally N/A";
   if (implementation !== "implemented") {
     throw new Error(`unknown implementation verdict ${JSON.stringify(implementation)}`);
   }
   if (!anchorPresent) return "Implemented";
-  return derivationDefined ? "Anchored" : "Anchored/underived";
+  return derivationDefined && anchorDerivable ? "Anchored" : "Anchored/underived";
 }
 
 /** The states that assert the rung's CODE exists. */
@@ -1839,6 +1849,7 @@ function validateMatrix(matrix, expectedIds, backendTierOverrides, cellInventory
       implementation: cell.implementation,
       anchorPresent: cell.anchor !== null,
       derivationDefined: cell.derivationDefined,
+      anchorDerivable: cell.anchor !== null && cell.anchor.derivable,
     };
     const recomputed = cellState(facts);
     if (recomputed !== cell.state) {
@@ -2107,25 +2118,40 @@ export function indexLoaderClosures(body) {
  * The lanes the analytic derivation is DEFINED and WIRED for, as `<modality>:<backend>` keys.
  *
  * Read off the Rust rather than declared here, in both halves, because both halves are code facts:
- * `memory_anchor.rs` declares `derive_<modality>_phase_peaks`, and the worker's admission path is
- * where a lane is translated to an `AnchorBackend` and priced from an anchor. A derivation that
+ * `memory_anchor.rs` declares `derive_<law>_phase_peaks`, and each lane's REAL admission source is
+ * where the lane is translated to an `AnchorBackend` and priced from an anchor. A derivation that
  * exists but is called from nowhere is not defined for any lane, and unwiring a lane collapses its
  * cells to `Anchored/underived` rather than leaving them claiming a derived peak.
+ *
+ * Epic 22505 feature-end fix round (E5): each modality maps to the sources that actually ADMIT it
+ * — video through `video_admission.rs`, image through the candle lane's `vram_gate.rs` /
+ * `candle_memory_strategy.rs` and the MLX lane's `mlx_fit_gate.rs`. The previous single-source
+ * read crossed `video_admission.rs`'s backends with every declared law, so `image:candle` read as
+ * wired off a file that never priced an image.
+ *
+ * `admissionSourcesByLane` maps `<modality>:<backend>` to `{ law, sources }`: the lane is wired
+ * exactly when the law is declared in the derivation source AND some admission source both calls
+ * `derive_<law>_phase_peaks` (directly or through the store's `_for_cell` fall-through, which the
+ * call-name check also matches by prefix) and names the lane's `AnchorBackend`.
  */
-export function parseAnchorDerivationLanes(derivationSource, admissionSource) {
-  const modalities = [...derivationSource.matchAll(/pub fn derive_([a-z0-9_]+)_phase_peaks/g)].map(
-    (match) => match[1],
-  );
-  const backends = sortedUnique(
-    [...admissionSource.matchAll(/AnchorBackend::(Mlx|Candle)/g)].map((match) =>
-      match[1].toLowerCase(),
+export function parseAnchorDerivationLanes(derivationSource, admissionSourcesByLane) {
+  const declared = new Set(
+    [...derivationSource.matchAll(/pub fn derive_([a-z0-9_]+)_phase_peaks/g)].map(
+      (match) => match[1],
     ),
   );
+  const backendTokens = { mlx: "AnchorBackend::Mlx", candle: "AnchorBackend::Candle" };
   const lanes = new Set();
-  for (const modality of modalities) {
-    // Declared is not wired: the admission source must actually call this derivation.
-    if (!admissionSource.includes(`derive_${modality}_phase_peaks`)) continue;
-    for (const backend of backends) lanes.add(`${modality}:${backend}`);
+  for (const [lane, { law, sources }] of Object.entries(admissionSourcesByLane)) {
+    if (!declared.has(law)) continue;
+    const backend = lane.split(":")[1];
+    const token = backendTokens[backend];
+    if (!token) throw new Error(`unknown backend in derivation lane ${lane}`);
+    const wired = sources.some(
+      (source) =>
+        source.includes(`derive_${law}_phase_peaks`) && source.includes(token),
+    );
+    if (wired) lanes.add(lane);
   }
   return lanes;
 }
@@ -2217,11 +2243,16 @@ export const SOURCE_PATHS = Object.freeze({
   // campaign edit into a full regeneration diff.
   anchorStore: "config/memory-anchors.json",
   anchorLoaderClosures: "config/anchor-loader-closures.json",
-  // The derivation itself, and the admission path that WIRES it per lane. `derivationDefined` is
-  // read off these two: `memory_anchor.rs` declares `derive_<modality>_phase_peaks`, and the
-  // admission source is where a lane is mapped onto an `AnchorBackend` and priced from it.
+  // The derivation itself, and each lane's REAL admission source (epic 22505 feature-end fix
+  // round, E5). `derivationDefined` is read off these: `memory_anchor.rs` declares
+  // `derive_<law>_phase_peaks`, and per modality the file that maps the lane onto an
+  // `AnchorBackend` and prices from it is: video -> `video_admission.rs`; image ->
+  // `vram_gate.rs` + `candle_memory_strategy.rs` (candle) and `mlx_fit_gate.rs` (MLX, already a
+  // population source above).
   anchorDerivation: "crates/sceneworks-core/src/memory_anchor.rs",
   anchorAdmission: "crates/sceneworks-worker/src/video_admission.rs",
+  anchorAdmissionImageVram: "crates/sceneworks-worker/src/vram_gate.rs",
+  anchorAdmissionImageCandle: "crates/sceneworks-worker/src/candle_memory_strategy.rs",
   // The extractor. The store is a pure function of the retained evidence and this script (sc-22510),
   // so an extractor change is a change to how every anchor was derived.
   anchorExtractor: "scripts/extract-memory-anchors.mjs",
@@ -2293,10 +2324,15 @@ export async function buildMatrix({ sourceOverrides = {}, cellFilter = null, pub
   // sc-22513: the MEMORY axis, both halves, read once.
   const anchorStore = indexAnchorStore(bodies.anchorStore);
   const loaderClosures = indexLoaderClosures(bodies.anchorLoaderClosures);
-  const derivationLanes = parseAnchorDerivationLanes(
-    bodies.anchorDerivation,
-    bodies.anchorAdmission,
-  );
+  const derivationLanes = parseAnchorDerivationLanes(bodies.anchorDerivation, {
+    "video:mlx": { law: "video", sources: [bodies.anchorAdmission] },
+    "video:candle": { law: "video", sources: [bodies.anchorAdmission] },
+    "image:candle": {
+      law: "image",
+      sources: [bodies.anchorAdmissionImageVram, bodies.anchorAdmissionImageCandle],
+    },
+    "image:mlx": { law: "mlx_image", sources: [bodies.mlxFitGate] },
+  });
   // sc-18815: the model universe is MODALITY-AWARE, not `type === "image"`. Every entry of an
   // admitted modality is in, whether or not anything has been measured on it — an entry the matrix
   // does not carry cannot even report `Missing`, which is how the video lane read as complete while
@@ -2427,6 +2463,12 @@ export async function buildMatrix({ sourceOverrides = {}, cellFilter = null, pub
               current:
                 loaderClosures.get(`${anchor.modelId}:${anchor.backend}`) ===
                 anchor.source.loaderClosureDigest,
+              // Anchor-level derivability (epic 22505 feature-end fix round, E5): whether the
+              // lane's law accepts THIS anchor, read off the store's own `underivedReason` field
+              // — which the Rust laws honor byte-for-byte — with the stated reason published so
+              // the matrix says WHY a cell is Anchored/underived rather than merely that it is.
+              derivable: !anchor.underivedReason,
+              ...(anchor.underivedReason ? { underivedReason: anchor.underivedReason } : {}),
             }
           : null;
         for (const mode of modesFor(model)) {
@@ -2450,6 +2492,7 @@ export async function buildMatrix({ sourceOverrides = {}, cellFilter = null, pub
                 implementation: verdict.implementation,
                 anchorPresent: anchorRow !== null,
                 derivationDefined,
+                anchorDerivable: anchorRow !== null && anchorRow.derivable,
               });
               const cell = {
                 id: [model.id, provider, backend, tier, mode, overlay, rung].join(":"),

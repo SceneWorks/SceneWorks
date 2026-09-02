@@ -467,7 +467,10 @@ def test_complete_calibration_schema_fails_closed_on_adversarial_mutations():
     shutil.rmtree(tmp_path, onexc=remove_readonly)
 
 def test_collapsed_cell_state_is_a_pure_function_of_the_published_facts():
-    """sc-22513 (epic 22505, E5): `state = f(implementation, anchor present, derivation defined)`.
+    """sc-22513 (epic 22505, E5): `state = f(implementation, anchor present, derivation defined,
+    anchor derivable)` — the fourth fact is anchor-LEVEL derivability (feature-end fix round):
+    an anchor the lane's law refuses (the store marks it `underivedReason`) publishes
+    Anchored/underived, not Anchored.
 
     Asserted three ways, because "pure" needs all three to mean anything:
 
@@ -482,7 +485,7 @@ def test_collapsed_cell_state_is_a_pure_function_of_the_published_facts():
     """
     matrix = load_matrix()
 
-    def expected(implementation, anchored, derivation_defined):
+    def expected(implementation, anchored, derivation_defined, anchor_derivable):
         if implementation == "missing":
             return "Missing"
         if implementation == "structurally-na":
@@ -490,7 +493,11 @@ def test_collapsed_cell_state_is_a_pure_function_of_the_published_facts():
         assert implementation == "implemented"
         if not anchored:
             return "Implemented"
-        return "Anchored" if derivation_defined else "Anchored/underived"
+        return (
+            "Anchored"
+            if derivation_defined and anchor_derivable
+            else "Anchored/underived"
+        )
 
     states = {state["state"] for state in matrix["conformanceStates"]}
     assert states == {
@@ -526,6 +533,7 @@ def test_collapsed_cell_state_is_a_pure_function_of_the_published_facts():
             cell["implementation"],
             cell["anchor"] is not None,
             cell["derivationDefined"],
+            cell["anchor"] is not None and cell["anchor"]["derivable"],
         )
         assert cell["state"] == expected(*facts), cell["id"]
         by_facts.setdefault(facts, set()).add(cell["state"])
@@ -560,8 +568,10 @@ def test_anchor_currency_is_reported_beside_the_state_and_never_moves_it():
             expected = "Missing"
         elif cell["implementation"] == "structurally-na":
             expected = "Structurally N/A"
+        elif cell["derivationDefined"] and cell["anchor"]["derivable"]:
+            expected = "Anchored"
         else:
-            expected = "Anchored" if cell["derivationDefined"] else "Anchored/underived"
+            expected = "Anchored/underived"
         assert cell["state"] == expected, cell["id"]
     # Teeth: the anchored population must span more than one state, or the loop above is vacuous.
     assert len({cell["state"] for cell in anchored}) > 1
@@ -601,6 +611,14 @@ def test_the_fingerprint_covers_only_the_anchor_and_catalog_sources():
     assert sources["anchorLoaderClosures"] == "config/anchor-loader-closures.json"
     assert sources["anchorDerivation"] == "crates/sceneworks-core/src/memory_anchor.rs"
     assert sources["anchorAdmission"] == "crates/sceneworks-worker/src/video_admission.rs"
+    # Epic 22505 feature-end fix round (E5): each modality's REAL admission sources joined the
+    # fingerprint — image cells derive through vram_gate/candle_memory_strategy (candle) and
+    # mlx_fit_gate (mlx), so an unwiring edit there must move `derivationDefined`.
+    assert sources["anchorAdmissionImageVram"] == "crates/sceneworks-worker/src/vram_gate.rs"
+    assert (
+        sources["anchorAdmissionImageCandle"]
+        == "crates/sceneworks-worker/src/candle_memory_strategy.rs"
+    )
     assert sources["anchorExtractor"] == "scripts/extract-memory-anchors.mjs"
     assert sources["manifest"] == "config/manifests/builtin.models.jsonc"
     removed = {
@@ -638,6 +656,8 @@ def test_the_fingerprint_covers_only_the_anchor_and_catalog_sources():
         "anchorLoaderClosures",
         "anchorDerivation",
         "anchorAdmission",
+        "anchorAdmissionImageVram",
+        "anchorAdmissionImageCandle",
         "anchorExtractor",
     }
 
