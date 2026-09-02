@@ -112,9 +112,15 @@ node -e 'const c=require("./config/inference-provider-closures.json");
   console.log(c.providers["<lane>"] ?? "NOT DECLARED")'
 ```
 
-If it prints `NOT DECLARED`, the capture will fail in seconds — the harness derives one closure
-digest per lane **before the first capture invocation** precisely so this does not surface after a
-multi-hour sweep. Add the lane per §7c first.
+If it prints `NOT DECLARED`, the capture **still runs and still writes a record** — sc-22512 made an
+undeclared lane a non-refusal. What you lose is currency: the harness derives the closure digest
+*after* the provider probe returns, and an undeclared lane derives none at all, so the record carries
+no currency term and can therefore never read `current` or certify a cell
+(`scripts/memory-calibration-harness.mjs`, `closureDigest` in `capturePlannedCase`). Add the lane per
+§7c **before** booking the host so the capture is promotable on the spot. Declaring it afterwards is
+recoverable without re-capturing — `node scripts/backfill-closure-digests.mjs --repo <inference-checkout>
+--write` stamps a record that carries no digest yet — but that is a repair, not the path this runbook
+walks.
 
 ### 2b. The plan declares an ANCHOR for the cell you want measured
 
@@ -136,6 +142,18 @@ fresh-five-rung-z-image-q4-768-seed16402-step2`.
 
 Only `authoritative` scope can ever become `current`. A `fixture`/`candidate` anchor derives no
 digest and can never be current evidence.
+
+🔴 **The anchor's `geometry` is a FREE PLAN CHOICE, not a restatement of the geometry the packaged
+anchor was captured at, and the two are allowed to disagree.** The packaged anchors in
+`config/memory-anchors.json` (surfaced as `anchors[].geometry` in `docs/generated/memory-matrix.json`)
+record where the *last* capture happened; the plan records where the *next* one should happen. Five
+cells disagree today on purpose — `krea_2_turbo:q4:candle`, `flux2_dev:q4:mlx`, `flux2_dev:q8:mlx`,
+`ltx_2_5:bf16:mlx` and `ltx_2_5:q8:mlx` all plan a smaller geometry than the packaged anchor carries
+— and re-capturing any of them **legitimately moves** the packaged geometry to the planned one.
+Nothing derives one from the other and nothing gates on their agreement, so do **not** "fix" a plan
+geometry to match a packaged anchor: editing the plan changes what the next capture measures, and
+that is a measurement decision. Read `crates/sceneworks-core/src/memory_anchor.rs` for how a
+non-anchor cell is derived from whatever geometry the anchor actually carries.
 
 ### 2c. A provider adapter covers the lane
 

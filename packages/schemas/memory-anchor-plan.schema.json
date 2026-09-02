@@ -45,7 +45,7 @@
     "geometry": {
       "type": "object",
       "additionalProperties": false,
-      "$comment": "Exactly ONE geometry per anchor. Each axis is a single integer: a list or a {min,max,step} range fails the type check, so a geometry sweep cannot be written down.",
+      "$comment": "Exactly ONE geometry per anchor. Each axis is a single integer: a list or a {min,max,step} range fails the type check, so a geometry sweep cannot be written down. This geometry is a FREE PLAN CHOICE and is deliberately NOT required to equal the geometry the packaged anchor in config/memory-anchors.json was captured at: the plan says where the NEXT capture should happen, the packaged anchor records where the LAST one did, and re-capturing a cell legitimately MOVES the packaged geometry to the planned one. Five cells disagree today on purpose (krea_2_turbo:q4:candle, flux2_dev:q4:mlx, flux2_dev:q8:mlx, ltx_2_5:bf16:mlx, ltx_2_5:q8:mlx). Nothing derives one from the other and nothing gates on their agreement — see docs/calibration-runbook.md section 2b.",
       "required": ["width", "height", "batch", "frames"],
       "properties": {
         "width": { "type": "integer", "exclusiveMinimum": 0 },

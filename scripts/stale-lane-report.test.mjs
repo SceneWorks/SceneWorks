@@ -442,6 +442,19 @@ test("the real corpus reports the margins the worker actually applies", async ()
   }
 });
 
+// An old-shape (`providers` array) plan has no `anchors` object; `?? {}` used to report every lane
+// as having zero planned entries, which reads exactly like a plan that genuinely covers nothing.
+test("planLaneCoverage refuses an old-shape plan instead of reporting zero coverage", () => {
+  const anchorPlan = {
+    anchors: { "krea_2_turbo:q4:mlx": { provider: "krea_2_turbo", evidenceScope: "authoritative" } },
+  };
+  assert.equal(planLaneCoverage(anchorPlan).get("mlx:krea_2_turbo").entries, 1);
+  assert.throws(
+    () => planLaneCoverage({ providers: [{ backend: "mlx", provider: "krea_2_turbo" }] }),
+    /calibration plan is not an anchor plan/,
+  );
+});
+
 test("the real corpus report is internally consistent, whatever the corpus currently is", async () => {
   // INVARIANTS ONLY — deliberately no snapshot of how stale the corpus happens to be today. This
   // file runs in `npm run check` on every PR, so a pin like "0 lanes are current" or "qwen ranks

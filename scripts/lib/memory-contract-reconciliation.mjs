@@ -397,8 +397,11 @@ export function routeEligibilityFromEngineFacts(engineFacts) {
 
 function planRows(plan) {
   const rows = [];
-  // sc-22514: one anchor per `<modelId>:<tier>:<backend>` key replaced the provider grid.
-  for (const [key, entry] of Object.entries(plan.anchors ?? {})) {
+  // sc-22514: one anchor per `<modelId>:<tier>:<backend>` key replaced the provider grid. A plan
+  // still carrying the old `providers` array has no `anchors` object, and `?? {}` would read that
+  // as "nothing planned" — a silently EMPTY reconciliation rather than a failure. Say so instead.
+  if (!plan.anchors) throw new Error("calibration plan is not an anchor plan (no `anchors` object)");
+  for (const [key, entry] of Object.entries(plan.anchors)) {
     const [modelId, , backend] = key.split(":");
     const provider = entry.provider;
     const mode = entry.mode;

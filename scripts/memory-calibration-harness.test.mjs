@@ -1110,6 +1110,40 @@ test("the anchor plan schema cannot express a duplicate cell or any sweep", asyn
     assert.throws(() => validatePlan(duplicate), /anchor plan is invalid/, key);
   }
 
+  // 2b. The key PATTERN only constrains the SHAPE of a model id, so a well-shaped INVENTED id was
+  //     the remaining escape hatch: `krea_2_turbo_b:q4:mlx`, a byte-for-byte copy of
+  //     `krea_2_turbo:q4:mlx`, is schema-valid and is a second measurement of one physical cell
+  //     wearing a new name. validatePlan closes it by requiring the model id to be a
+  //     docs/generated/memory-matrix.json `models[].id` or one of that file's own
+  //     `summary.outOfMatrixEntries` — a coherence check between two artifacts that are both
+  //     PRESENT in the tree, which never asks whether a cell has been measured.
+  for (const invented of ["krea_2_turbo_b:q4:mlx", "krea_2_turbo_2:q4:mlx", "not_a_model:q4:candle"]) {
+    const renamed = structuredClone(plan);
+    renamed.anchors[invented] = structuredClone(plan.anchors["krea_2_turbo:q4:mlx"]);
+    assert.throws(
+      () => validatePlan(renamed),
+      /is not a docs\/generated\/memory-matrix\.json model/,
+      invented,
+    );
+  }
+  // The allowlist half: an out-of-matrix model the matrix itself names is accepted, and today that
+  // is exactly the MiniMax-H3 pair — which is why the shipped plan's three `minimax_h3` anchors
+  // validate above even though `minimax_h3` is in no `models[]` row.
+  const matrix = JSON.parse(
+    await readFile(new URL("../docs/generated/memory-matrix.json", import.meta.url)),
+  );
+  const outOfMatrix = matrix.summary.outOfMatrixEntries.map((entry) => entry.id);
+  assert.ok(outOfMatrix.includes("minimax_h3"), "minimax_h3 is the out-of-matrix allowlist entry");
+  assert.ok(
+    Object.keys(plan.anchors).some((key) => key.startsWith("minimax_h3:")),
+    "the shipped plan exercises the out-of-matrix allowlist",
+  );
+  assert.equal(
+    matrix.models.some((model) => model.id === "minimax_h3"),
+    false,
+    "…and does so because minimax_h3 is genuinely absent from models[]",
+  );
+
   // 3. Every sweep axis the grid plan used to carry is now unwritable.
   for (const [field, value] of [
     ["cases", [{ parameters: {}, expectedResult: "passed" }]],
@@ -1176,6 +1210,25 @@ test("one capture command writes exactly one record in the extractor's bundle sh
   // The `{records: [...]}` shape scripts/extract-memory-anchors.mjs walks, validated by the same
   // bundle validator every retained corpus is held to.
   assert.equal(validateBundle(bundle), bundle);
+
+  // Every WRITING arm names its destination, and omitting it is a usage error rather than the raw
+  // `TypeError` `path.resolve(undefined)` used to throw from inside `atomicWrite`. `capture` is
+  // additionally proven to refuse BEFORE the provider runs.
+  for (const argv of [
+    ["plan"],
+    ["ingest", "--input", output],
+    ["capture", "--plan", planPath, "--anchor", key,
+      "--provider-command", JSON.stringify(["node", "must-not-start.mjs"]),
+      "--sceneworks-repo", cleanRepo, "--inference-repo", cleanRepo],
+  ]) {
+    const failure = await execFileAsync(process.execPath, [
+      fileURLToPath(new URL("./memory-calibration-harness.mjs", import.meta.url)),
+      ...argv,
+    ]).then(() => null, (error) => error);
+    assert.ok(failure, `${argv[0]} must refuse without --output`);
+    assert.match(failure.stderr, /--output is required/, argv[0]);
+    assert.doesNotMatch(failure.stderr, /TypeError/, argv[0]);
+  }
 });
 
 test("a capture names one anchor the plan declares, before starting the provider", async () => {
@@ -2400,8 +2453,12 @@ test("an undeclared lane is CAPTURED without a currency term, never refused", as
   // so it is the production path and not a stub.
   const cleanRepo = await cleanFixtureRepo();
   const invocations = [];
+  // The MODEL id is real (validatePlan requires one the memory matrix names); the LANE
+  // `candle:never_declared_provider` is what is undeclared, and the lane is what the digest is
+  // keyed on.
   const { plan, key } = lanePlan({
-    backend: "candle", provider: "never_declared_provider", fixture: "cap-undeclared",
+    backend: "candle", provider: "never_declared_provider", modelId: "krea_2_turbo",
+    fixture: "cap-undeclared",
   });
   const result = await captureAnchor({
     plan,

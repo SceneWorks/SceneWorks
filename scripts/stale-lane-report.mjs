@@ -414,7 +414,10 @@ export function adapterCapturableProviders(source, label) {
  */
 export function planLaneCoverage(plan) {
   const byLane = new Map();
-  for (const [key, entry] of Object.entries(plan.anchors ?? {})) {
+  // An old-shape (`providers` array) plan has no `anchors` object, and `?? {}` would report every
+  // lane as having zero planned entries instead of failing.
+  if (!plan.anchors) throw new Error("calibration plan is not an anchor plan (no `anchors` object)");
+  for (const [key, entry] of Object.entries(plan.anchors)) {
     const backend = key.split(":")[2];
     const provider = entry.provider;
     if (typeof backend !== "string" || !backend || typeof provider !== "string") {

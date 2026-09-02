@@ -329,6 +329,21 @@ test("plan and closure to engine is mutation-proven green-red-green", () => {
   );
 });
 
+// An OLD-SHAPE plan (the pre-sc-22514 `providers` array) has no `anchors` object. Reading it with
+// `?? {}` produced zero plan rows — a reconciliation that reports a confident zero mismatches
+// because it compared nothing. Refuse the document instead.
+test("an old-shape calibration plan is refused, never read as nothing planned", () => {
+  const clean = fixture();
+  assert.equal(reconcileMemoryContracts(clean).mismatches, 0);
+  const oldShape = fixture();
+  oldShape.calibrationPlan = { providers: [{ backend: "mlx", provider: "mlx_alpha", mode: "text_to_image" }] };
+  assert.throws(
+    () => reconcileMemoryContracts(oldShape),
+    /calibration plan is not an anchor plan/,
+  );
+  assert.equal(reconcileMemoryContracts(fixture()).mismatches, 0);
+});
+
 test("survey to engine is mutation-proven green-red-green", () => {
   detectsMismatch(
     (input) => input.survey.families[100].backends.mlx.implementation = "none",

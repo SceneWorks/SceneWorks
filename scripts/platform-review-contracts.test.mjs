@@ -464,11 +464,11 @@ test("windows-candle keeps the five-rung guards while decoupling provisioning", 
   assert.match(stepBody(workflow, "Resolve snapshot provisioning parameters"), resolveGate);
 });
 
-test("windows-candle captures and schema-checks the SC-21714 certifying Krea record", async () => {
+test("windows-candle captures and schema-checks the SC-21714 Krea anchor record", async () => {
   const workflow = await source(".github/workflows/windows-candle.yml");
   const capture = stepBody(
     workflow,
-    "Build and run the Candle Krea diagnostic and certifying captures",
+    "Build and run the Candle Krea anchor capture",
   );
   assert.match(capture, /CUDA_VISIBLE_DEVICES: "1"/);
   // sc-22514: ONE anchor, not a fixture ladder plus a batched reuse comparison.

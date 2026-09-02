@@ -158,7 +158,7 @@ on:
   workflow_dispatch:
     inputs:
       run_five_rung_reference:
-        description: "Capture the Krea five-rung diagnostic and q4/1024 certifying exact request"
+        description: "Capture the Candle Krea q4 anchor (krea_2_turbo:q4:candle in the anchor plan)"
         required: false
         type: boolean
         default: false
@@ -821,7 +821,7 @@ jobs:
           token: ${{ secrets.SCENEWORKS_INFERENCE_READ_TOKEN || github.token }}
           path: .calibration/inference
           persist-credentials: false
-      - name: Build and run the Candle Krea diagnostic and certifying captures
+      - name: Build and run the Candle Krea anchor capture
         if: ${{ github.event_name == 'workflow_dispatch' && inputs.run_five_rung_reference }}
         shell: cmd
         env:

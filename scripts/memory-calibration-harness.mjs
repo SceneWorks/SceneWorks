@@ -1411,17 +1411,66 @@ export function parseAnchorKey(key) {
 }
 
 /**
+ * Model ids the anchor plan may name, read from the two checked-in artifacts that between them
+ * enumerate every model SceneWorks knows about:
+ *
+ * - `models[].id` in `docs/generated/memory-matrix.json` — the routed catalog, and
+ * - `summary.outOfMatrixEntries[].id` — the models deliberately absent from that catalog (today
+ *   exactly the MiniMax-H3 pair, which has no familyGroup arm and no video-route resolver row).
+ *
+ * The schema's key pattern only constrains the SHAPE of a model id, so without this a plan could
+ * name an INVENTED model — `krea_2_turbo_b:q4:mlx`, a byte-for-byte copy of `krea_2_turbo:q4:mlx` —
+ * and buy itself a schema-valid second measurement of one physical cell, which is precisely the
+ * thing the object-keyed plan exists to make inexpressible.
+ *
+ * This is a COHERENCE check between two artifacts that are both present in the tree; it never asks
+ * whether a cell has been measured, so it cannot red on a missing measurement.
+ */
+let matrixModelIdsCache;
+function matrixModelIds() {
+  if (matrixModelIdsCache) return matrixModelIdsCache;
+  let matrix;
+  try {
+    matrix = JSON.parse(readFileSync(path.join(ROOT, "docs/generated/memory-matrix.json"), "utf8"));
+  } catch {
+    // The matrix is the OTHER half of the coherence check. If it is not readable there is no
+    // second artifact to be coherent with, so the check abstains rather than inventing a verdict.
+    return (matrixModelIdsCache = null);
+  }
+  const ids = new Set([
+    ...(matrix.models ?? []).map((model) => model.id),
+    ...(matrix.summary?.outOfMatrixEntries ?? []).map((entry) => entry.id),
+  ].filter((id) => typeof id === "string" && id));
+  return (matrixModelIdsCache = ids.size ? ids : null);
+}
+
+/**
  * Schema-validate an anchor plan. The plan cannot express a second measurement of one cell, a
  * geometry or parameter sweep, a rung grid, a negative case or a batch group — see
  * packages/schemas/memory-anchor-plan.schema.json. Nothing here re-checks those by hand: the
  * schema is the enforcement, and this is the seam that runs it.
+ *
+ * The one thing the schema CANNOT see is whether a well-shaped model id names a real model, so
+ * that is checked here against `matrixModelIds()`.
  */
 export function validatePlan(plan) {
   object(plan, "anchor plan");
   const errors = schemaErrors(plan, ANCHOR_PLAN_SCHEMA);
   if (errors.length) fail(`anchor plan is invalid: ${errors.slice(0, 8).join("; ")}`);
+  const knownModelIds = matrixModelIds();
   for (const [key, anchor] of Object.entries(plan.anchors)) {
     const { modelId } = parseAnchorKey(key);
+    // Synthetic plans used by the test suites are exempt, and can only be exempt while they are
+    // BOTH named `fixture_*` and scoped `fixture` — a scope that derives no closure digest and can
+    // never become current evidence. An `authoritative` or `candidate` anchor has no such door.
+    const syntheticFixture = modelId.startsWith("fixture_") && anchor.evidenceScope === "fixture";
+    if (knownModelIds && !syntheticFixture && !knownModelIds.has(modelId)) {
+      fail(
+        `${key}: model id ${JSON.stringify(modelId)} is not a docs/generated/memory-matrix.json ` +
+          "model and is not one of its summary.outOfMatrixEntries; an invented model id is a " +
+          "second measurement of an existing cell wearing a new name",
+      );
+    }
     if (modelId === "ltx_2_5" && (!anchor.transformerVariant || !anchor.decoder)) {
       fail(`${key}: an LTX-2.5 anchor requires transformerVariant and decoder`);
     }
@@ -2185,6 +2234,10 @@ async function main() {
     if (!selected || selected.startsWith("--")) fail(`${flag} requires one value`);
     return selected;
   };
+  // Every writing arm destinations through `atomicWrite`, which resolves its argument against ROOT
+  // — so an omitted `--output` used to surface as a raw `TypeError` from `path.resolve` rather than
+  // as the usage error it is.
+  const outputPath = () => value("--output") ?? fail("--output is required");
   if (command === "check") {
     const closureDigests = await liveInferenceClosureDigests();
     return void await validateSourceSessionFiles(
@@ -2196,21 +2249,21 @@ async function main() {
   if (command === "plan") {
     // Print the anchor obligation. There is nothing to expand: the plan IS the case list.
     const plan = validatePlan(await readJson(value("--plan") ?? ANCHOR_PLAN_PATH));
-    return void await atomicWrite(value("--output"), {
+    return void await atomicWrite(outputPath(), {
       harnessVersion: HARNESS_VERSION,
       anchors: planAnchors(plan),
     });
   }
   if (command === "ingest") {
     const closureDigests = await liveInferenceClosureDigests();
-    return void await atomicWrite(value("--output"), await validateSourceSessionFiles(
+    return void await atomicWrite(outputPath(), await validateSourceSessionFiles(
       await readJson(value("--input")),
       value("--source-root") ? path.resolve(value("--source-root")) : null,
       closureDigests,
     ));
   }
   if (command === "capture") {
-    return void await atomicWrite(value("--output"), await captureAnchor({
+    return void await atomicWrite(outputPath(), await captureAnchor({
       plan: await readJson(value("--plan") ?? ANCHOR_PLAN_PATH),
       anchorKey: value("--anchor"),
       providerCommand: JSON.parse(value("--provider-command")),
