@@ -1,7 +1,7 @@
 {
   "schemaVersion": 11,
   "generatedFrom": {
-    "sceneWorksRevision": "source-tree:a5a8541a5a070d8e02a64afe68c56491232e48f3ef3f19709e5b3f7af6f36779",
+    "sceneWorksRevision": "source-tree:3b8f001b7553c023419e1b3e2ff8d461278b53f4fb517b458ce5a62660111656",
     "sources": {
       "manifest": {
         "path": "config/manifests/builtin.models.jsonc",
@@ -73,7 +73,7 @@
       },
       "anchorLoaderClosures": {
         "path": "config/anchor-loader-closures.json",
-        "sha256": "c4dcf03ccb5b7bdd08a54c24312109765cd06297b238fdc50a73040c3e4fadd6"
+        "sha256": "397ac9dd8cfa95753d94b374ffd419b33a67c6e6097cc8a68415da1b8d063d3a"
       },
       "anchorDerivation": {
         "path": "crates/sceneworks-core/src/memory_anchor.rs",
@@ -165,7 +165,7 @@
     "anchors": 11,
     "analyticOnlyCells": 330,
     "anchoredCells": 247,
-    "staleAnchors": 8,
+    "staleAnchors": 11,
     "fullModels": 0
   },
   "models": [
@@ -4750,7 +4750,7 @@
         "fps": 30
       },
       "source": "docs/calibration/sc-18791/ltx25-mlx-evidence.seed.json",
-      "current": true,
+      "current": false,
       "cells": 42
     },
     {
@@ -4767,7 +4767,7 @@
         "fps": 24
       },
       "source": "docs/calibration/sc-18791/ltx25-mlx-evidence.seed.json",
-      "current": true,
+      "current": false,
       "cells": 42
     },
     {
@@ -4784,7 +4784,7 @@
         "fps": 24
       },
       "source": "docs/calibration/sc-18791/ltx25-mlx-evidence.seed.json",
-      "current": true,
+      "current": false,
       "cells": 42
     },
     {
@@ -19198,7 +19198,7 @@
         "id": "ltx_2_5:mlx:bf16:dev:diffvae:sc-18797-ltx-2-5-mlx-ladder-v1:imc-9c4c5fe8356bcc4f139f",
         "tier": "bf16",
         "source": "config/memory-anchors.json#ltx_2_5:mlx:bf16:dev:diffvae:sc-18797-ltx-2-5-mlx-ladder-v1:imc-9c4c5fe8356bcc4f139f",
-        "current": true,
+        "current": false,
         "derivable": true
       },
       "derivationDefined": true,
@@ -19264,7 +19264,7 @@
         "id": "ltx_2_5:mlx:bf16:dev:diffvae:sc-18797-ltx-2-5-mlx-ladder-v1:imc-9c4c5fe8356bcc4f139f",
         "tier": "bf16",
         "source": "config/memory-anchors.json#ltx_2_5:mlx:bf16:dev:diffvae:sc-18797-ltx-2-5-mlx-ladder-v1:imc-9c4c5fe8356bcc4f139f",
-        "current": true,
+        "current": false,
         "derivable": true
       },
       "derivationDefined": true,
@@ -19327,7 +19327,7 @@
         "id": "ltx_2_5:mlx:bf16:dev:diffvae:sc-18797-ltx-2-5-mlx-ladder-v1:imc-9c4c5fe8356bcc4f139f",
         "tier": "bf16",
         "source": "config/memory-anchors.json#ltx_2_5:mlx:bf16:dev:diffvae:sc-18797-ltx-2-5-mlx-ladder-v1:imc-9c4c5fe8356bcc4f139f",
-        "current": true,
+        "current": false,
         "derivable": true
       },
       "derivationDefined": true,
@@ -19392,7 +19392,7 @@
         "id": "ltx_2_5:mlx:bf16:dev:diffvae:sc-18797-ltx-2-5-mlx-ladder-v1:imc-9c4c5fe8356bcc4f139f",
         "tier": "bf16",
         "source": "config/memory-anchors.json#ltx_2_5:mlx:bf16:dev:diffvae:sc-18797-ltx-2-5-mlx-ladder-v1:imc-9c4c5fe8356bcc4f139f",
-        "current": true,
+        "current": false,
         "derivable": true
       },
       "derivationDefined": true,
@@ -19458,7 +19458,7 @@
         "id": "ltx_2_5:mlx:bf16:dev:diffvae:sc-18797-ltx-2-5-mlx-ladder-v1:imc-9c4c5fe8356bcc4f139f",
         "tier": "bf16",
         "source": "config/memory-anchors.json#ltx_2_5:mlx:bf16:dev:diffvae:sc-18797-ltx-2-5-mlx-ladder-v1:imc-9c4c5fe8356bcc4f139f",
-        "current": true,
+        "current": false,
         "derivable": true
       },
       "derivationDefined": true,
@@ -19524,7 +19524,7 @@
         "id": "ltx_2_5:mlx:bf16:dev:diffvae:sc-18797-ltx-2-5-mlx-ladder-v1:imc-9c4c5fe8356bcc4f139f",
         "tier": "bf16",
         "source": "config/memory-anchors.json#ltx_2_5:mlx:bf16:dev:diffvae:sc-18797-ltx-2-5-mlx-ladder-v1:imc-9c4c5fe8356bcc4f139f",
-        "current": true,
+        "current": false,
         "derivable": true
       },
       "derivationDefined": true,
@@ -19587,7 +19587,7 @@
         "id": "ltx_2_5:mlx:bf16:dev:diffvae:sc-18797-ltx-2-5-mlx-ladder-v1:imc-9c4c5fe8356bcc4f139f",
         "tier": "bf16",
         "source": "config/memory-anchors.json#ltx_2_5:mlx:bf16:dev:diffvae:sc-18797-ltx-2-5-mlx-ladder-v1:imc-9c4c5fe8356bcc4f139f",
-        "current": true,
+        "current": false,
         "derivable": true
       },
       "derivationDefined": true,
@@ -19652,7 +19652,7 @@
         "id": "ltx_2_5:mlx:bf16:dev:diffvae:sc-18797-ltx-2-5-mlx-ladder-v1:imc-9c4c5fe8356bcc4f139f",
         "tier": "bf16",
         "source": "config/memory-anchors.json#ltx_2_5:mlx:bf16:dev:diffvae:sc-18797-ltx-2-5-mlx-ladder-v1:imc-9c4c5fe8356bcc4f139f",
-        "current": true,
+        "current": false,
         "derivable": true
       },
       "derivationDefined": true,
@@ -19718,7 +19718,7 @@
         "id": "ltx_2_5:mlx:bf16:dev:diffvae:sc-18797-ltx-2-5-mlx-ladder-v1:imc-9c4c5fe8356bcc4f139f",
         "tier": "bf16",
         "source": "config/memory-anchors.json#ltx_2_5:mlx:bf16:dev:diffvae:sc-18797-ltx-2-5-mlx-ladder-v1:imc-9c4c5fe8356bcc4f139f",
-        "current": true,
+        "current": false,
         "derivable": true
       },
       "derivationDefined": true,
@@ -19781,7 +19781,7 @@
         "id": "ltx_2_5:mlx:bf16:dev:diffvae:sc-18797-ltx-2-5-mlx-ladder-v1:imc-9c4c5fe8356bcc4f139f",
         "tier": "bf16",
         "source": "config/memory-anchors.json#ltx_2_5:mlx:bf16:dev:diffvae:sc-18797-ltx-2-5-mlx-ladder-v1:imc-9c4c5fe8356bcc4f139f",
-        "current": true,
+        "current": false,
         "derivable": true
       },
       "derivationDefined": true,
@@ -19846,7 +19846,7 @@
         "id": "ltx_2_5:mlx:bf16:dev:diffvae:sc-18797-ltx-2-5-mlx-ladder-v1:imc-9c4c5fe8356bcc4f139f",
         "tier": "bf16",
         "source": "config/memory-anchors.json#ltx_2_5:mlx:bf16:dev:diffvae:sc-18797-ltx-2-5-mlx-ladder-v1:imc-9c4c5fe8356bcc4f139f",
-        "current": true,
+        "current": false,
         "derivable": true
       },
       "derivationDefined": true,
@@ -19912,7 +19912,7 @@
         "id": "ltx_2_5:mlx:bf16:dev:diffvae:sc-18797-ltx-2-5-mlx-ladder-v1:imc-9c4c5fe8356bcc4f139f",
         "tier": "bf16",
         "source": "config/memory-anchors.json#ltx_2_5:mlx:bf16:dev:diffvae:sc-18797-ltx-2-5-mlx-ladder-v1:imc-9c4c5fe8356bcc4f139f",
-        "current": true,
+        "current": false,
         "derivable": true
       },
       "derivationDefined": true,
@@ -19978,7 +19978,7 @@
         "id": "ltx_2_5:mlx:bf16:dev:diffvae:sc-18797-ltx-2-5-mlx-ladder-v1:imc-9c4c5fe8356bcc4f139f",
         "tier": "bf16",
         "source": "config/memory-anchors.json#ltx_2_5:mlx:bf16:dev:diffvae:sc-18797-ltx-2-5-mlx-ladder-v1:imc-9c4c5fe8356bcc4f139f",
-        "current": true,
+        "current": false,
         "derivable": true
       },
       "derivationDefined": true,
@@ -20041,7 +20041,7 @@
         "id": "ltx_2_5:mlx:bf16:dev:diffvae:sc-18797-ltx-2-5-mlx-ladder-v1:imc-9c4c5fe8356bcc4f139f",
         "tier": "bf16",
         "source": "config/memory-anchors.json#ltx_2_5:mlx:bf16:dev:diffvae:sc-18797-ltx-2-5-mlx-ladder-v1:imc-9c4c5fe8356bcc4f139f",
-        "current": true,
+        "current": false,
         "derivable": true
       },
       "derivationDefined": true,
@@ -20106,7 +20106,7 @@
         "id": "ltx_2_5:mlx:bf16:dev:diffvae:sc-18797-ltx-2-5-mlx-ladder-v1:imc-9c4c5fe8356bcc4f139f",
         "tier": "bf16",
         "source": "config/memory-anchors.json#ltx_2_5:mlx:bf16:dev:diffvae:sc-18797-ltx-2-5-mlx-ladder-v1:imc-9c4c5fe8356bcc4f139f",
-        "current": true,
+        "current": false,
         "derivable": true
       },
       "derivationDefined": true,
@@ -20172,7 +20172,7 @@
         "id": "ltx_2_5:mlx:bf16:dev:diffvae:sc-18797-ltx-2-5-mlx-ladder-v1:imc-9c4c5fe8356bcc4f139f",
         "tier": "bf16",
         "source": "config/memory-anchors.json#ltx_2_5:mlx:bf16:dev:diffvae:sc-18797-ltx-2-5-mlx-ladder-v1:imc-9c4c5fe8356bcc4f139f",
-        "current": true,
+        "current": false,
         "derivable": true
       },
       "derivationDefined": true,
@@ -20235,7 +20235,7 @@
         "id": "ltx_2_5:mlx:bf16:dev:diffvae:sc-18797-ltx-2-5-mlx-ladder-v1:imc-9c4c5fe8356bcc4f139f",
         "tier": "bf16",
         "source": "config/memory-anchors.json#ltx_2_5:mlx:bf16:dev:diffvae:sc-18797-ltx-2-5-mlx-ladder-v1:imc-9c4c5fe8356bcc4f139f",
-        "current": true,
+        "current": false,
         "derivable": true
       },
       "derivationDefined": true,
@@ -20300,7 +20300,7 @@
         "id": "ltx_2_5:mlx:bf16:dev:diffvae:sc-18797-ltx-2-5-mlx-ladder-v1:imc-9c4c5fe8356bcc4f139f",
         "tier": "bf16",
         "source": "config/memory-anchors.json#ltx_2_5:mlx:bf16:dev:diffvae:sc-18797-ltx-2-5-mlx-ladder-v1:imc-9c4c5fe8356bcc4f139f",
-        "current": true,
+        "current": false,
         "derivable": true
       },
       "derivationDefined": true,
@@ -20366,7 +20366,7 @@
         "id": "ltx_2_5:mlx:bf16:dev:diffvae:sc-18797-ltx-2-5-mlx-ladder-v1:imc-9c4c5fe8356bcc4f139f",
         "tier": "bf16",
         "source": "config/memory-anchors.json#ltx_2_5:mlx:bf16:dev:diffvae:sc-18797-ltx-2-5-mlx-ladder-v1:imc-9c4c5fe8356bcc4f139f",
-        "current": true,
+        "current": false,
         "derivable": true
       },
       "derivationDefined": true,
@@ -20432,7 +20432,7 @@
         "id": "ltx_2_5:mlx:bf16:dev:diffvae:sc-18797-ltx-2-5-mlx-ladder-v1:imc-9c4c5fe8356bcc4f139f",
         "tier": "bf16",
         "source": "config/memory-anchors.json#ltx_2_5:mlx:bf16:dev:diffvae:sc-18797-ltx-2-5-mlx-ladder-v1:imc-9c4c5fe8356bcc4f139f",
-        "current": true,
+        "current": false,
         "derivable": true
       },
       "derivationDefined": true,
@@ -20495,7 +20495,7 @@
         "id": "ltx_2_5:mlx:bf16:dev:diffvae:sc-18797-ltx-2-5-mlx-ladder-v1:imc-9c4c5fe8356bcc4f139f",
         "tier": "bf16",
         "source": "config/memory-anchors.json#ltx_2_5:mlx:bf16:dev:diffvae:sc-18797-ltx-2-5-mlx-ladder-v1:imc-9c4c5fe8356bcc4f139f",
-        "current": true,
+        "current": false,
         "derivable": true
       },
       "derivationDefined": true,
@@ -20560,7 +20560,7 @@
         "id": "ltx_2_5:mlx:bf16:dev:diffvae:sc-18797-ltx-2-5-mlx-ladder-v1:imc-9c4c5fe8356bcc4f139f",
         "tier": "bf16",
         "source": "config/memory-anchors.json#ltx_2_5:mlx:bf16:dev:diffvae:sc-18797-ltx-2-5-mlx-ladder-v1:imc-9c4c5fe8356bcc4f139f",
-        "current": true,
+        "current": false,
         "derivable": true
       },
       "derivationDefined": true,
@@ -20626,7 +20626,7 @@
         "id": "ltx_2_5:mlx:bf16:dev:diffvae:sc-18797-ltx-2-5-mlx-ladder-v1:imc-9c4c5fe8356bcc4f139f",
         "tier": "bf16",
         "source": "config/memory-anchors.json#ltx_2_5:mlx:bf16:dev:diffvae:sc-18797-ltx-2-5-mlx-ladder-v1:imc-9c4c5fe8356bcc4f139f",
-        "current": true,
+        "current": false,
         "derivable": true
       },
       "derivationDefined": true,
@@ -20689,7 +20689,7 @@
         "id": "ltx_2_5:mlx:bf16:dev:diffvae:sc-18797-ltx-2-5-mlx-ladder-v1:imc-9c4c5fe8356bcc4f139f",
         "tier": "bf16",
         "source": "config/memory-anchors.json#ltx_2_5:mlx:bf16:dev:diffvae:sc-18797-ltx-2-5-mlx-ladder-v1:imc-9c4c5fe8356bcc4f139f",
-        "current": true,
+        "current": false,
         "derivable": true
       },
       "derivationDefined": true,
@@ -20754,7 +20754,7 @@
         "id": "ltx_2_5:mlx:bf16:dev:diffvae:sc-18797-ltx-2-5-mlx-ladder-v1:imc-9c4c5fe8356bcc4f139f",
         "tier": "bf16",
         "source": "config/memory-anchors.json#ltx_2_5:mlx:bf16:dev:diffvae:sc-18797-ltx-2-5-mlx-ladder-v1:imc-9c4c5fe8356bcc4f139f",
-        "current": true,
+        "current": false,
         "derivable": true
       },
       "derivationDefined": true,
@@ -20820,7 +20820,7 @@
         "id": "ltx_2_5:mlx:bf16:dev:diffvae:sc-18797-ltx-2-5-mlx-ladder-v1:imc-9c4c5fe8356bcc4f139f",
         "tier": "bf16",
         "source": "config/memory-anchors.json#ltx_2_5:mlx:bf16:dev:diffvae:sc-18797-ltx-2-5-mlx-ladder-v1:imc-9c4c5fe8356bcc4f139f",
-        "current": true,
+        "current": false,
         "derivable": true
       },
       "derivationDefined": true,
@@ -20886,7 +20886,7 @@
         "id": "ltx_2_5:mlx:bf16:dev:diffvae:sc-18797-ltx-2-5-mlx-ladder-v1:imc-9c4c5fe8356bcc4f139f",
         "tier": "bf16",
         "source": "config/memory-anchors.json#ltx_2_5:mlx:bf16:dev:diffvae:sc-18797-ltx-2-5-mlx-ladder-v1:imc-9c4c5fe8356bcc4f139f",
-        "current": true,
+        "current": false,
         "derivable": true
       },
       "derivationDefined": true,
@@ -20949,7 +20949,7 @@
         "id": "ltx_2_5:mlx:bf16:dev:diffvae:sc-18797-ltx-2-5-mlx-ladder-v1:imc-9c4c5fe8356bcc4f139f",
         "tier": "bf16",
         "source": "config/memory-anchors.json#ltx_2_5:mlx:bf16:dev:diffvae:sc-18797-ltx-2-5-mlx-ladder-v1:imc-9c4c5fe8356bcc4f139f",
-        "current": true,
+        "current": false,
         "derivable": true
       },
       "derivationDefined": true,
@@ -21014,7 +21014,7 @@
         "id": "ltx_2_5:mlx:bf16:dev:diffvae:sc-18797-ltx-2-5-mlx-ladder-v1:imc-9c4c5fe8356bcc4f139f",
         "tier": "bf16",
         "source": "config/memory-anchors.json#ltx_2_5:mlx:bf16:dev:diffvae:sc-18797-ltx-2-5-mlx-ladder-v1:imc-9c4c5fe8356bcc4f139f",
-        "current": true,
+        "current": false,
         "derivable": true
       },
       "derivationDefined": true,
@@ -21080,7 +21080,7 @@
         "id": "ltx_2_5:mlx:bf16:dev:diffvae:sc-18797-ltx-2-5-mlx-ladder-v1:imc-9c4c5fe8356bcc4f139f",
         "tier": "bf16",
         "source": "config/memory-anchors.json#ltx_2_5:mlx:bf16:dev:diffvae:sc-18797-ltx-2-5-mlx-ladder-v1:imc-9c4c5fe8356bcc4f139f",
-        "current": true,
+        "current": false,
         "derivable": true
       },
       "derivationDefined": true,
@@ -21143,7 +21143,7 @@
         "id": "ltx_2_5:mlx:bf16:dev:diffvae:sc-18797-ltx-2-5-mlx-ladder-v1:imc-9c4c5fe8356bcc4f139f",
         "tier": "bf16",
         "source": "config/memory-anchors.json#ltx_2_5:mlx:bf16:dev:diffvae:sc-18797-ltx-2-5-mlx-ladder-v1:imc-9c4c5fe8356bcc4f139f",
-        "current": true,
+        "current": false,
         "derivable": true
       },
       "derivationDefined": true,
@@ -21208,7 +21208,7 @@
         "id": "ltx_2_5:mlx:bf16:dev:diffvae:sc-18797-ltx-2-5-mlx-ladder-v1:imc-9c4c5fe8356bcc4f139f",
         "tier": "bf16",
         "source": "config/memory-anchors.json#ltx_2_5:mlx:bf16:dev:diffvae:sc-18797-ltx-2-5-mlx-ladder-v1:imc-9c4c5fe8356bcc4f139f",
-        "current": true,
+        "current": false,
         "derivable": true
       },
       "derivationDefined": true,
@@ -21274,7 +21274,7 @@
         "id": "ltx_2_5:mlx:bf16:dev:diffvae:sc-18797-ltx-2-5-mlx-ladder-v1:imc-9c4c5fe8356bcc4f139f",
         "tier": "bf16",
         "source": "config/memory-anchors.json#ltx_2_5:mlx:bf16:dev:diffvae:sc-18797-ltx-2-5-mlx-ladder-v1:imc-9c4c5fe8356bcc4f139f",
-        "current": true,
+        "current": false,
         "derivable": true
       },
       "derivationDefined": true,
@@ -21340,7 +21340,7 @@
         "id": "ltx_2_5:mlx:bf16:dev:diffvae:sc-18797-ltx-2-5-mlx-ladder-v1:imc-9c4c5fe8356bcc4f139f",
         "tier": "bf16",
         "source": "config/memory-anchors.json#ltx_2_5:mlx:bf16:dev:diffvae:sc-18797-ltx-2-5-mlx-ladder-v1:imc-9c4c5fe8356bcc4f139f",
-        "current": true,
+        "current": false,
         "derivable": true
       },
       "derivationDefined": true,
@@ -21403,7 +21403,7 @@
         "id": "ltx_2_5:mlx:bf16:dev:diffvae:sc-18797-ltx-2-5-mlx-ladder-v1:imc-9c4c5fe8356bcc4f139f",
         "tier": "bf16",
         "source": "config/memory-anchors.json#ltx_2_5:mlx:bf16:dev:diffvae:sc-18797-ltx-2-5-mlx-ladder-v1:imc-9c4c5fe8356bcc4f139f",
-        "current": true,
+        "current": false,
         "derivable": true
       },
       "derivationDefined": true,
@@ -21468,7 +21468,7 @@
         "id": "ltx_2_5:mlx:bf16:dev:diffvae:sc-18797-ltx-2-5-mlx-ladder-v1:imc-9c4c5fe8356bcc4f139f",
         "tier": "bf16",
         "source": "config/memory-anchors.json#ltx_2_5:mlx:bf16:dev:diffvae:sc-18797-ltx-2-5-mlx-ladder-v1:imc-9c4c5fe8356bcc4f139f",
-        "current": true,
+        "current": false,
         "derivable": true
       },
       "derivationDefined": true,
@@ -21534,7 +21534,7 @@
         "id": "ltx_2_5:mlx:bf16:dev:diffvae:sc-18797-ltx-2-5-mlx-ladder-v1:imc-9c4c5fe8356bcc4f139f",
         "tier": "bf16",
         "source": "config/memory-anchors.json#ltx_2_5:mlx:bf16:dev:diffvae:sc-18797-ltx-2-5-mlx-ladder-v1:imc-9c4c5fe8356bcc4f139f",
-        "current": true,
+        "current": false,
         "derivable": true
       },
       "derivationDefined": true,
@@ -21597,7 +21597,7 @@
         "id": "ltx_2_5:mlx:bf16:dev:diffvae:sc-18797-ltx-2-5-mlx-ladder-v1:imc-9c4c5fe8356bcc4f139f",
         "tier": "bf16",
         "source": "config/memory-anchors.json#ltx_2_5:mlx:bf16:dev:diffvae:sc-18797-ltx-2-5-mlx-ladder-v1:imc-9c4c5fe8356bcc4f139f",
-        "current": true,
+        "current": false,
         "derivable": true
       },
       "derivationDefined": true,
@@ -21662,7 +21662,7 @@
         "id": "ltx_2_5:mlx:bf16:dev:diffvae:sc-18797-ltx-2-5-mlx-ladder-v1:imc-9c4c5fe8356bcc4f139f",
         "tier": "bf16",
         "source": "config/memory-anchors.json#ltx_2_5:mlx:bf16:dev:diffvae:sc-18797-ltx-2-5-mlx-ladder-v1:imc-9c4c5fe8356bcc4f139f",
-        "current": true,
+        "current": false,
         "derivable": true
       },
       "derivationDefined": true,
@@ -21728,7 +21728,7 @@
         "id": "ltx_2_5:mlx:bf16:dev:diffvae:sc-18797-ltx-2-5-mlx-ladder-v1:imc-9c4c5fe8356bcc4f139f",
         "tier": "bf16",
         "source": "config/memory-anchors.json#ltx_2_5:mlx:bf16:dev:diffvae:sc-18797-ltx-2-5-mlx-ladder-v1:imc-9c4c5fe8356bcc4f139f",
-        "current": true,
+        "current": false,
         "derivable": true
       },
       "derivationDefined": true,
@@ -21794,7 +21794,7 @@
         "id": "ltx_2_5:mlx:bf16:dev:diffvae:sc-18797-ltx-2-5-mlx-ladder-v1:imc-9c4c5fe8356bcc4f139f",
         "tier": "bf16",
         "source": "config/memory-anchors.json#ltx_2_5:mlx:bf16:dev:diffvae:sc-18797-ltx-2-5-mlx-ladder-v1:imc-9c4c5fe8356bcc4f139f",
-        "current": true,
+        "current": false,
         "derivable": true
       },
       "derivationDefined": true,
@@ -21857,7 +21857,7 @@
         "id": "ltx_2_5:mlx:bf16:dev:diffvae:sc-18797-ltx-2-5-mlx-ladder-v1:imc-9c4c5fe8356bcc4f139f",
         "tier": "bf16",
         "source": "config/memory-anchors.json#ltx_2_5:mlx:bf16:dev:diffvae:sc-18797-ltx-2-5-mlx-ladder-v1:imc-9c4c5fe8356bcc4f139f",
-        "current": true,
+        "current": false,
         "derivable": true
       },
       "derivationDefined": true,
@@ -21922,7 +21922,7 @@
         "id": "ltx_2_5:mlx:q4:dev:diffvae:sc-18797-ltx-2-5-mlx-ladder-v1:imc-17b5e196f5563098afb3",
         "tier": "q4",
         "source": "config/memory-anchors.json#ltx_2_5:mlx:q4:dev:diffvae:sc-18797-ltx-2-5-mlx-ladder-v1:imc-17b5e196f5563098afb3",
-        "current": true,
+        "current": false,
         "derivable": true
       },
       "derivationDefined": true,
@@ -21988,7 +21988,7 @@
         "id": "ltx_2_5:mlx:q4:dev:diffvae:sc-18797-ltx-2-5-mlx-ladder-v1:imc-17b5e196f5563098afb3",
         "tier": "q4",
         "source": "config/memory-anchors.json#ltx_2_5:mlx:q4:dev:diffvae:sc-18797-ltx-2-5-mlx-ladder-v1:imc-17b5e196f5563098afb3",
-        "current": true,
+        "current": false,
         "derivable": true
       },
       "derivationDefined": true,
@@ -22051,7 +22051,7 @@
         "id": "ltx_2_5:mlx:q4:dev:diffvae:sc-18797-ltx-2-5-mlx-ladder-v1:imc-17b5e196f5563098afb3",
         "tier": "q4",
         "source": "config/memory-anchors.json#ltx_2_5:mlx:q4:dev:diffvae:sc-18797-ltx-2-5-mlx-ladder-v1:imc-17b5e196f5563098afb3",
-        "current": true,
+        "current": false,
         "derivable": true
       },
       "derivationDefined": true,
@@ -22116,7 +22116,7 @@
         "id": "ltx_2_5:mlx:q4:dev:diffvae:sc-18797-ltx-2-5-mlx-ladder-v1:imc-17b5e196f5563098afb3",
         "tier": "q4",
         "source": "config/memory-anchors.json#ltx_2_5:mlx:q4:dev:diffvae:sc-18797-ltx-2-5-mlx-ladder-v1:imc-17b5e196f5563098afb3",
-        "current": true,
+        "current": false,
         "derivable": true
       },
       "derivationDefined": true,
@@ -22182,7 +22182,7 @@
         "id": "ltx_2_5:mlx:q4:dev:diffvae:sc-18797-ltx-2-5-mlx-ladder-v1:imc-17b5e196f5563098afb3",
         "tier": "q4",
         "source": "config/memory-anchors.json#ltx_2_5:mlx:q4:dev:diffvae:sc-18797-ltx-2-5-mlx-ladder-v1:imc-17b5e196f5563098afb3",
-        "current": true,
+        "current": false,
         "derivable": true
       },
       "derivationDefined": true,
@@ -22248,7 +22248,7 @@
         "id": "ltx_2_5:mlx:q4:dev:diffvae:sc-18797-ltx-2-5-mlx-ladder-v1:imc-17b5e196f5563098afb3",
         "tier": "q4",
         "source": "config/memory-anchors.json#ltx_2_5:mlx:q4:dev:diffvae:sc-18797-ltx-2-5-mlx-ladder-v1:imc-17b5e196f5563098afb3",
-        "current": true,
+        "current": false,
         "derivable": true
       },
       "derivationDefined": true,
@@ -22311,7 +22311,7 @@
         "id": "ltx_2_5:mlx:q4:dev:diffvae:sc-18797-ltx-2-5-mlx-ladder-v1:imc-17b5e196f5563098afb3",
         "tier": "q4",
         "source": "config/memory-anchors.json#ltx_2_5:mlx:q4:dev:diffvae:sc-18797-ltx-2-5-mlx-ladder-v1:imc-17b5e196f5563098afb3",
-        "current": true,
+        "current": false,
         "derivable": true
       },
       "derivationDefined": true,
@@ -22376,7 +22376,7 @@
         "id": "ltx_2_5:mlx:q4:dev:diffvae:sc-18797-ltx-2-5-mlx-ladder-v1:imc-17b5e196f5563098afb3",
         "tier": "q4",
         "source": "config/memory-anchors.json#ltx_2_5:mlx:q4:dev:diffvae:sc-18797-ltx-2-5-mlx-ladder-v1:imc-17b5e196f5563098afb3",
-        "current": true,
+        "current": false,
         "derivable": true
       },
       "derivationDefined": true,
@@ -22442,7 +22442,7 @@
         "id": "ltx_2_5:mlx:q4:dev:diffvae:sc-18797-ltx-2-5-mlx-ladder-v1:imc-17b5e196f5563098afb3",
         "tier": "q4",
         "source": "config/memory-anchors.json#ltx_2_5:mlx:q4:dev:diffvae:sc-18797-ltx-2-5-mlx-ladder-v1:imc-17b5e196f5563098afb3",
-        "current": true,
+        "current": false,
         "derivable": true
       },
       "derivationDefined": true,
@@ -22505,7 +22505,7 @@
         "id": "ltx_2_5:mlx:q4:dev:diffvae:sc-18797-ltx-2-5-mlx-ladder-v1:imc-17b5e196f5563098afb3",
         "tier": "q4",
         "source": "config/memory-anchors.json#ltx_2_5:mlx:q4:dev:diffvae:sc-18797-ltx-2-5-mlx-ladder-v1:imc-17b5e196f5563098afb3",
-        "current": true,
+        "current": false,
         "derivable": true
       },
       "derivationDefined": true,
@@ -22570,7 +22570,7 @@
         "id": "ltx_2_5:mlx:q4:dev:diffvae:sc-18797-ltx-2-5-mlx-ladder-v1:imc-17b5e196f5563098afb3",
         "tier": "q4",
         "source": "config/memory-anchors.json#ltx_2_5:mlx:q4:dev:diffvae:sc-18797-ltx-2-5-mlx-ladder-v1:imc-17b5e196f5563098afb3",
-        "current": true,
+        "current": false,
         "derivable": true
       },
       "derivationDefined": true,
@@ -22636,7 +22636,7 @@
         "id": "ltx_2_5:mlx:q4:dev:diffvae:sc-18797-ltx-2-5-mlx-ladder-v1:imc-17b5e196f5563098afb3",
         "tier": "q4",
         "source": "config/memory-anchors.json#ltx_2_5:mlx:q4:dev:diffvae:sc-18797-ltx-2-5-mlx-ladder-v1:imc-17b5e196f5563098afb3",
-        "current": true,
+        "current": false,
         "derivable": true
       },
       "derivationDefined": true,
@@ -22702,7 +22702,7 @@
         "id": "ltx_2_5:mlx:q4:dev:diffvae:sc-18797-ltx-2-5-mlx-ladder-v1:imc-17b5e196f5563098afb3",
         "tier": "q4",
         "source": "config/memory-anchors.json#ltx_2_5:mlx:q4:dev:diffvae:sc-18797-ltx-2-5-mlx-ladder-v1:imc-17b5e196f5563098afb3",
-        "current": true,
+        "current": false,
         "derivable": true
       },
       "derivationDefined": true,
@@ -22765,7 +22765,7 @@
         "id": "ltx_2_5:mlx:q4:dev:diffvae:sc-18797-ltx-2-5-mlx-ladder-v1:imc-17b5e196f5563098afb3",
         "tier": "q4",
         "source": "config/memory-anchors.json#ltx_2_5:mlx:q4:dev:diffvae:sc-18797-ltx-2-5-mlx-ladder-v1:imc-17b5e196f5563098afb3",
-        "current": true,
+        "current": false,
         "derivable": true
       },
       "derivationDefined": true,
@@ -22830,7 +22830,7 @@
         "id": "ltx_2_5:mlx:q4:dev:diffvae:sc-18797-ltx-2-5-mlx-ladder-v1:imc-17b5e196f5563098afb3",
         "tier": "q4",
         "source": "config/memory-anchors.json#ltx_2_5:mlx:q4:dev:diffvae:sc-18797-ltx-2-5-mlx-ladder-v1:imc-17b5e196f5563098afb3",
-        "current": true,
+        "current": false,
         "derivable": true
       },
       "derivationDefined": true,
@@ -22896,7 +22896,7 @@
         "id": "ltx_2_5:mlx:q4:dev:diffvae:sc-18797-ltx-2-5-mlx-ladder-v1:imc-17b5e196f5563098afb3",
         "tier": "q4",
         "source": "config/memory-anchors.json#ltx_2_5:mlx:q4:dev:diffvae:sc-18797-ltx-2-5-mlx-ladder-v1:imc-17b5e196f5563098afb3",
-        "current": true,
+        "current": false,
         "derivable": true
       },
       "derivationDefined": true,
@@ -22959,7 +22959,7 @@
         "id": "ltx_2_5:mlx:q4:dev:diffvae:sc-18797-ltx-2-5-mlx-ladder-v1:imc-17b5e196f5563098afb3",
         "tier": "q4",
         "source": "config/memory-anchors.json#ltx_2_5:mlx:q4:dev:diffvae:sc-18797-ltx-2-5-mlx-ladder-v1:imc-17b5e196f5563098afb3",
-        "current": true,
+        "current": false,
         "derivable": true
       },
       "derivationDefined": true,
@@ -23024,7 +23024,7 @@
         "id": "ltx_2_5:mlx:q4:dev:diffvae:sc-18797-ltx-2-5-mlx-ladder-v1:imc-17b5e196f5563098afb3",
         "tier": "q4",
         "source": "config/memory-anchors.json#ltx_2_5:mlx:q4:dev:diffvae:sc-18797-ltx-2-5-mlx-ladder-v1:imc-17b5e196f5563098afb3",
-        "current": true,
+        "current": false,
         "derivable": true
       },
       "derivationDefined": true,
@@ -23090,7 +23090,7 @@
         "id": "ltx_2_5:mlx:q4:dev:diffvae:sc-18797-ltx-2-5-mlx-ladder-v1:imc-17b5e196f5563098afb3",
         "tier": "q4",
         "source": "config/memory-anchors.json#ltx_2_5:mlx:q4:dev:diffvae:sc-18797-ltx-2-5-mlx-ladder-v1:imc-17b5e196f5563098afb3",
-        "current": true,
+        "current": false,
         "derivable": true
       },
       "derivationDefined": true,
@@ -23156,7 +23156,7 @@
         "id": "ltx_2_5:mlx:q4:dev:diffvae:sc-18797-ltx-2-5-mlx-ladder-v1:imc-17b5e196f5563098afb3",
         "tier": "q4",
         "source": "config/memory-anchors.json#ltx_2_5:mlx:q4:dev:diffvae:sc-18797-ltx-2-5-mlx-ladder-v1:imc-17b5e196f5563098afb3",
-        "current": true,
+        "current": false,
         "derivable": true
       },
       "derivationDefined": true,
@@ -23219,7 +23219,7 @@
         "id": "ltx_2_5:mlx:q4:dev:diffvae:sc-18797-ltx-2-5-mlx-ladder-v1:imc-17b5e196f5563098afb3",
         "tier": "q4",
         "source": "config/memory-anchors.json#ltx_2_5:mlx:q4:dev:diffvae:sc-18797-ltx-2-5-mlx-ladder-v1:imc-17b5e196f5563098afb3",
-        "current": true,
+        "current": false,
         "derivable": true
       },
       "derivationDefined": true,
@@ -23284,7 +23284,7 @@
         "id": "ltx_2_5:mlx:q4:dev:diffvae:sc-18797-ltx-2-5-mlx-ladder-v1:imc-17b5e196f5563098afb3",
         "tier": "q4",
         "source": "config/memory-anchors.json#ltx_2_5:mlx:q4:dev:diffvae:sc-18797-ltx-2-5-mlx-ladder-v1:imc-17b5e196f5563098afb3",
-        "current": true,
+        "current": false,
         "derivable": true
       },
       "derivationDefined": true,
@@ -23350,7 +23350,7 @@
         "id": "ltx_2_5:mlx:q4:dev:diffvae:sc-18797-ltx-2-5-mlx-ladder-v1:imc-17b5e196f5563098afb3",
         "tier": "q4",
         "source": "config/memory-anchors.json#ltx_2_5:mlx:q4:dev:diffvae:sc-18797-ltx-2-5-mlx-ladder-v1:imc-17b5e196f5563098afb3",
-        "current": true,
+        "current": false,
         "derivable": true
       },
       "derivationDefined": true,
@@ -23413,7 +23413,7 @@
         "id": "ltx_2_5:mlx:q4:dev:diffvae:sc-18797-ltx-2-5-mlx-ladder-v1:imc-17b5e196f5563098afb3",
         "tier": "q4",
         "source": "config/memory-anchors.json#ltx_2_5:mlx:q4:dev:diffvae:sc-18797-ltx-2-5-mlx-ladder-v1:imc-17b5e196f5563098afb3",
-        "current": true,
+        "current": false,
         "derivable": true
       },
       "derivationDefined": true,
@@ -23478,7 +23478,7 @@
         "id": "ltx_2_5:mlx:q4:dev:diffvae:sc-18797-ltx-2-5-mlx-ladder-v1:imc-17b5e196f5563098afb3",
         "tier": "q4",
         "source": "config/memory-anchors.json#ltx_2_5:mlx:q4:dev:diffvae:sc-18797-ltx-2-5-mlx-ladder-v1:imc-17b5e196f5563098afb3",
-        "current": true,
+        "current": false,
         "derivable": true
       },
       "derivationDefined": true,
@@ -23544,7 +23544,7 @@
         "id": "ltx_2_5:mlx:q4:dev:diffvae:sc-18797-ltx-2-5-mlx-ladder-v1:imc-17b5e196f5563098afb3",
         "tier": "q4",
         "source": "config/memory-anchors.json#ltx_2_5:mlx:q4:dev:diffvae:sc-18797-ltx-2-5-mlx-ladder-v1:imc-17b5e196f5563098afb3",
-        "current": true,
+        "current": false,
         "derivable": true
       },
       "derivationDefined": true,
@@ -23610,7 +23610,7 @@
         "id": "ltx_2_5:mlx:q4:dev:diffvae:sc-18797-ltx-2-5-mlx-ladder-v1:imc-17b5e196f5563098afb3",
         "tier": "q4",
         "source": "config/memory-anchors.json#ltx_2_5:mlx:q4:dev:diffvae:sc-18797-ltx-2-5-mlx-ladder-v1:imc-17b5e196f5563098afb3",
-        "current": true,
+        "current": false,
         "derivable": true
       },
       "derivationDefined": true,
@@ -23673,7 +23673,7 @@
         "id": "ltx_2_5:mlx:q4:dev:diffvae:sc-18797-ltx-2-5-mlx-ladder-v1:imc-17b5e196f5563098afb3",
         "tier": "q4",
         "source": "config/memory-anchors.json#ltx_2_5:mlx:q4:dev:diffvae:sc-18797-ltx-2-5-mlx-ladder-v1:imc-17b5e196f5563098afb3",
-        "current": true,
+        "current": false,
         "derivable": true
       },
       "derivationDefined": true,
@@ -23738,7 +23738,7 @@
         "id": "ltx_2_5:mlx:q4:dev:diffvae:sc-18797-ltx-2-5-mlx-ladder-v1:imc-17b5e196f5563098afb3",
         "tier": "q4",
         "source": "config/memory-anchors.json#ltx_2_5:mlx:q4:dev:diffvae:sc-18797-ltx-2-5-mlx-ladder-v1:imc-17b5e196f5563098afb3",
-        "current": true,
+        "current": false,
         "derivable": true
       },
       "derivationDefined": true,
@@ -23804,7 +23804,7 @@
         "id": "ltx_2_5:mlx:q4:dev:diffvae:sc-18797-ltx-2-5-mlx-ladder-v1:imc-17b5e196f5563098afb3",
         "tier": "q4",
         "source": "config/memory-anchors.json#ltx_2_5:mlx:q4:dev:diffvae:sc-18797-ltx-2-5-mlx-ladder-v1:imc-17b5e196f5563098afb3",
-        "current": true,
+        "current": false,
         "derivable": true
       },
       "derivationDefined": true,
@@ -23867,7 +23867,7 @@
         "id": "ltx_2_5:mlx:q4:dev:diffvae:sc-18797-ltx-2-5-mlx-ladder-v1:imc-17b5e196f5563098afb3",
         "tier": "q4",
         "source": "config/memory-anchors.json#ltx_2_5:mlx:q4:dev:diffvae:sc-18797-ltx-2-5-mlx-ladder-v1:imc-17b5e196f5563098afb3",
-        "current": true,
+        "current": false,
         "derivable": true
       },
       "derivationDefined": true,
@@ -23932,7 +23932,7 @@
         "id": "ltx_2_5:mlx:q4:dev:diffvae:sc-18797-ltx-2-5-mlx-ladder-v1:imc-17b5e196f5563098afb3",
         "tier": "q4",
         "source": "config/memory-anchors.json#ltx_2_5:mlx:q4:dev:diffvae:sc-18797-ltx-2-5-mlx-ladder-v1:imc-17b5e196f5563098afb3",
-        "current": true,
+        "current": false,
         "derivable": true
       },
       "derivationDefined": true,
@@ -23998,7 +23998,7 @@
         "id": "ltx_2_5:mlx:q4:dev:diffvae:sc-18797-ltx-2-5-mlx-ladder-v1:imc-17b5e196f5563098afb3",
         "tier": "q4",
         "source": "config/memory-anchors.json#ltx_2_5:mlx:q4:dev:diffvae:sc-18797-ltx-2-5-mlx-ladder-v1:imc-17b5e196f5563098afb3",
-        "current": true,
+        "current": false,
         "derivable": true
       },
       "derivationDefined": true,
@@ -24064,7 +24064,7 @@
         "id": "ltx_2_5:mlx:q4:dev:diffvae:sc-18797-ltx-2-5-mlx-ladder-v1:imc-17b5e196f5563098afb3",
         "tier": "q4",
         "source": "config/memory-anchors.json#ltx_2_5:mlx:q4:dev:diffvae:sc-18797-ltx-2-5-mlx-ladder-v1:imc-17b5e196f5563098afb3",
-        "current": true,
+        "current": false,
         "derivable": true
       },
       "derivationDefined": true,
@@ -24127,7 +24127,7 @@
         "id": "ltx_2_5:mlx:q4:dev:diffvae:sc-18797-ltx-2-5-mlx-ladder-v1:imc-17b5e196f5563098afb3",
         "tier": "q4",
         "source": "config/memory-anchors.json#ltx_2_5:mlx:q4:dev:diffvae:sc-18797-ltx-2-5-mlx-ladder-v1:imc-17b5e196f5563098afb3",
-        "current": true,
+        "current": false,
         "derivable": true
       },
       "derivationDefined": true,
@@ -24192,7 +24192,7 @@
         "id": "ltx_2_5:mlx:q4:dev:diffvae:sc-18797-ltx-2-5-mlx-ladder-v1:imc-17b5e196f5563098afb3",
         "tier": "q4",
         "source": "config/memory-anchors.json#ltx_2_5:mlx:q4:dev:diffvae:sc-18797-ltx-2-5-mlx-ladder-v1:imc-17b5e196f5563098afb3",
-        "current": true,
+        "current": false,
         "derivable": true
       },
       "derivationDefined": true,
@@ -24258,7 +24258,7 @@
         "id": "ltx_2_5:mlx:q4:dev:diffvae:sc-18797-ltx-2-5-mlx-ladder-v1:imc-17b5e196f5563098afb3",
         "tier": "q4",
         "source": "config/memory-anchors.json#ltx_2_5:mlx:q4:dev:diffvae:sc-18797-ltx-2-5-mlx-ladder-v1:imc-17b5e196f5563098afb3",
-        "current": true,
+        "current": false,
         "derivable": true
       },
       "derivationDefined": true,
@@ -24321,7 +24321,7 @@
         "id": "ltx_2_5:mlx:q4:dev:diffvae:sc-18797-ltx-2-5-mlx-ladder-v1:imc-17b5e196f5563098afb3",
         "tier": "q4",
         "source": "config/memory-anchors.json#ltx_2_5:mlx:q4:dev:diffvae:sc-18797-ltx-2-5-mlx-ladder-v1:imc-17b5e196f5563098afb3",
-        "current": true,
+        "current": false,
         "derivable": true
       },
       "derivationDefined": true,
@@ -24386,7 +24386,7 @@
         "id": "ltx_2_5:mlx:q4:dev:diffvae:sc-18797-ltx-2-5-mlx-ladder-v1:imc-17b5e196f5563098afb3",
         "tier": "q4",
         "source": "config/memory-anchors.json#ltx_2_5:mlx:q4:dev:diffvae:sc-18797-ltx-2-5-mlx-ladder-v1:imc-17b5e196f5563098afb3",
-        "current": true,
+        "current": false,
         "derivable": true
       },
       "derivationDefined": true,
@@ -24452,7 +24452,7 @@
         "id": "ltx_2_5:mlx:q4:dev:diffvae:sc-18797-ltx-2-5-mlx-ladder-v1:imc-17b5e196f5563098afb3",
         "tier": "q4",
         "source": "config/memory-anchors.json#ltx_2_5:mlx:q4:dev:diffvae:sc-18797-ltx-2-5-mlx-ladder-v1:imc-17b5e196f5563098afb3",
-        "current": true,
+        "current": false,
         "derivable": true
       },
       "derivationDefined": true,
@@ -24518,7 +24518,7 @@
         "id": "ltx_2_5:mlx:q4:dev:diffvae:sc-18797-ltx-2-5-mlx-ladder-v1:imc-17b5e196f5563098afb3",
         "tier": "q4",
         "source": "config/memory-anchors.json#ltx_2_5:mlx:q4:dev:diffvae:sc-18797-ltx-2-5-mlx-ladder-v1:imc-17b5e196f5563098afb3",
-        "current": true,
+        "current": false,
         "derivable": true
       },
       "derivationDefined": true,
@@ -24581,7 +24581,7 @@
         "id": "ltx_2_5:mlx:q4:dev:diffvae:sc-18797-ltx-2-5-mlx-ladder-v1:imc-17b5e196f5563098afb3",
         "tier": "q4",
         "source": "config/memory-anchors.json#ltx_2_5:mlx:q4:dev:diffvae:sc-18797-ltx-2-5-mlx-ladder-v1:imc-17b5e196f5563098afb3",
-        "current": true,
+        "current": false,
         "derivable": true
       },
       "derivationDefined": true,
@@ -24646,7 +24646,7 @@
         "id": "ltx_2_5:mlx:q8:dev:conv:sc-18797-ltx-2-5-mlx-ladder-v1:imc-beaa0f2aacf0832ea28a",
         "tier": "q8",
         "source": "config/memory-anchors.json#ltx_2_5:mlx:q8:dev:conv:sc-18797-ltx-2-5-mlx-ladder-v1:imc-beaa0f2aacf0832ea28a",
-        "current": true,
+        "current": false,
         "derivable": true
       },
       "derivationDefined": true,
@@ -24712,7 +24712,7 @@
         "id": "ltx_2_5:mlx:q8:dev:conv:sc-18797-ltx-2-5-mlx-ladder-v1:imc-beaa0f2aacf0832ea28a",
         "tier": "q8",
         "source": "config/memory-anchors.json#ltx_2_5:mlx:q8:dev:conv:sc-18797-ltx-2-5-mlx-ladder-v1:imc-beaa0f2aacf0832ea28a",
-        "current": true,
+        "current": false,
         "derivable": true
       },
       "derivationDefined": true,
@@ -24775,7 +24775,7 @@
         "id": "ltx_2_5:mlx:q8:dev:conv:sc-18797-ltx-2-5-mlx-ladder-v1:imc-beaa0f2aacf0832ea28a",
         "tier": "q8",
         "source": "config/memory-anchors.json#ltx_2_5:mlx:q8:dev:conv:sc-18797-ltx-2-5-mlx-ladder-v1:imc-beaa0f2aacf0832ea28a",
-        "current": true,
+        "current": false,
         "derivable": true
       },
       "derivationDefined": true,
@@ -24840,7 +24840,7 @@
         "id": "ltx_2_5:mlx:q8:dev:conv:sc-18797-ltx-2-5-mlx-ladder-v1:imc-beaa0f2aacf0832ea28a",
         "tier": "q8",
         "source": "config/memory-anchors.json#ltx_2_5:mlx:q8:dev:conv:sc-18797-ltx-2-5-mlx-ladder-v1:imc-beaa0f2aacf0832ea28a",
-        "current": true,
+        "current": false,
         "derivable": true
       },
       "derivationDefined": true,
@@ -24906,7 +24906,7 @@
         "id": "ltx_2_5:mlx:q8:dev:conv:sc-18797-ltx-2-5-mlx-ladder-v1:imc-beaa0f2aacf0832ea28a",
         "tier": "q8",
         "source": "config/memory-anchors.json#ltx_2_5:mlx:q8:dev:conv:sc-18797-ltx-2-5-mlx-ladder-v1:imc-beaa0f2aacf0832ea28a",
-        "current": true,
+        "current": false,
         "derivable": true
       },
       "derivationDefined": true,
@@ -24972,7 +24972,7 @@
         "id": "ltx_2_5:mlx:q8:dev:conv:sc-18797-ltx-2-5-mlx-ladder-v1:imc-beaa0f2aacf0832ea28a",
         "tier": "q8",
         "source": "config/memory-anchors.json#ltx_2_5:mlx:q8:dev:conv:sc-18797-ltx-2-5-mlx-ladder-v1:imc-beaa0f2aacf0832ea28a",
-        "current": true,
+        "current": false,
         "derivable": true
       },
       "derivationDefined": true,
@@ -25035,7 +25035,7 @@
         "id": "ltx_2_5:mlx:q8:dev:conv:sc-18797-ltx-2-5-mlx-ladder-v1:imc-beaa0f2aacf0832ea28a",
         "tier": "q8",
         "source": "config/memory-anchors.json#ltx_2_5:mlx:q8:dev:conv:sc-18797-ltx-2-5-mlx-ladder-v1:imc-beaa0f2aacf0832ea28a",
-        "current": true,
+        "current": false,
         "derivable": true
       },
       "derivationDefined": true,
@@ -25100,7 +25100,7 @@
         "id": "ltx_2_5:mlx:q8:dev:conv:sc-18797-ltx-2-5-mlx-ladder-v1:imc-beaa0f2aacf0832ea28a",
         "tier": "q8",
         "source": "config/memory-anchors.json#ltx_2_5:mlx:q8:dev:conv:sc-18797-ltx-2-5-mlx-ladder-v1:imc-beaa0f2aacf0832ea28a",
-        "current": true,
+        "current": false,
         "derivable": true
       },
       "derivationDefined": true,
@@ -25166,7 +25166,7 @@
         "id": "ltx_2_5:mlx:q8:dev:conv:sc-18797-ltx-2-5-mlx-ladder-v1:imc-beaa0f2aacf0832ea28a",
         "tier": "q8",
         "source": "config/memory-anchors.json#ltx_2_5:mlx:q8:dev:conv:sc-18797-ltx-2-5-mlx-ladder-v1:imc-beaa0f2aacf0832ea28a",
-        "current": true,
+        "current": false,
         "derivable": true
       },
       "derivationDefined": true,
@@ -25229,7 +25229,7 @@
         "id": "ltx_2_5:mlx:q8:dev:conv:sc-18797-ltx-2-5-mlx-ladder-v1:imc-beaa0f2aacf0832ea28a",
         "tier": "q8",
         "source": "config/memory-anchors.json#ltx_2_5:mlx:q8:dev:conv:sc-18797-ltx-2-5-mlx-ladder-v1:imc-beaa0f2aacf0832ea28a",
-        "current": true,
+        "current": false,
         "derivable": true
       },
       "derivationDefined": true,
@@ -25294,7 +25294,7 @@
         "id": "ltx_2_5:mlx:q8:dev:conv:sc-18797-ltx-2-5-mlx-ladder-v1:imc-beaa0f2aacf0832ea28a",
         "tier": "q8",
         "source": "config/memory-anchors.json#ltx_2_5:mlx:q8:dev:conv:sc-18797-ltx-2-5-mlx-ladder-v1:imc-beaa0f2aacf0832ea28a",
-        "current": true,
+        "current": false,
         "derivable": true
       },
       "derivationDefined": true,
@@ -25360,7 +25360,7 @@
         "id": "ltx_2_5:mlx:q8:dev:conv:sc-18797-ltx-2-5-mlx-ladder-v1:imc-beaa0f2aacf0832ea28a",
         "tier": "q8",
         "source": "config/memory-anchors.json#ltx_2_5:mlx:q8:dev:conv:sc-18797-ltx-2-5-mlx-ladder-v1:imc-beaa0f2aacf0832ea28a",
-        "current": true,
+        "current": false,
         "derivable": true
       },
       "derivationDefined": true,
@@ -25426,7 +25426,7 @@
         "id": "ltx_2_5:mlx:q8:dev:conv:sc-18797-ltx-2-5-mlx-ladder-v1:imc-beaa0f2aacf0832ea28a",
         "tier": "q8",
         "source": "config/memory-anchors.json#ltx_2_5:mlx:q8:dev:conv:sc-18797-ltx-2-5-mlx-ladder-v1:imc-beaa0f2aacf0832ea28a",
-        "current": true,
+        "current": false,
         "derivable": true
       },
       "derivationDefined": true,
@@ -25489,7 +25489,7 @@
         "id": "ltx_2_5:mlx:q8:dev:conv:sc-18797-ltx-2-5-mlx-ladder-v1:imc-beaa0f2aacf0832ea28a",
         "tier": "q8",
         "source": "config/memory-anchors.json#ltx_2_5:mlx:q8:dev:conv:sc-18797-ltx-2-5-mlx-ladder-v1:imc-beaa0f2aacf0832ea28a",
-        "current": true,
+        "current": false,
         "derivable": true
       },
       "derivationDefined": true,
@@ -25554,7 +25554,7 @@
         "id": "ltx_2_5:mlx:q8:dev:conv:sc-18797-ltx-2-5-mlx-ladder-v1:imc-beaa0f2aacf0832ea28a",
         "tier": "q8",
         "source": "config/memory-anchors.json#ltx_2_5:mlx:q8:dev:conv:sc-18797-ltx-2-5-mlx-ladder-v1:imc-beaa0f2aacf0832ea28a",
-        "current": true,
+        "current": false,
         "derivable": true
       },
       "derivationDefined": true,
@@ -25620,7 +25620,7 @@
         "id": "ltx_2_5:mlx:q8:dev:conv:sc-18797-ltx-2-5-mlx-ladder-v1:imc-beaa0f2aacf0832ea28a",
         "tier": "q8",
         "source": "config/memory-anchors.json#ltx_2_5:mlx:q8:dev:conv:sc-18797-ltx-2-5-mlx-ladder-v1:imc-beaa0f2aacf0832ea28a",
-        "current": true,
+        "current": false,
         "derivable": true
       },
       "derivationDefined": true,
@@ -25683,7 +25683,7 @@
         "id": "ltx_2_5:mlx:q8:dev:conv:sc-18797-ltx-2-5-mlx-ladder-v1:imc-beaa0f2aacf0832ea28a",
         "tier": "q8",
         "source": "config/memory-anchors.json#ltx_2_5:mlx:q8:dev:conv:sc-18797-ltx-2-5-mlx-ladder-v1:imc-beaa0f2aacf0832ea28a",
-        "current": true,
+        "current": false,
         "derivable": true
       },
       "derivationDefined": true,
@@ -25748,7 +25748,7 @@
         "id": "ltx_2_5:mlx:q8:dev:conv:sc-18797-ltx-2-5-mlx-ladder-v1:imc-beaa0f2aacf0832ea28a",
         "tier": "q8",
         "source": "config/memory-anchors.json#ltx_2_5:mlx:q8:dev:conv:sc-18797-ltx-2-5-mlx-ladder-v1:imc-beaa0f2aacf0832ea28a",
-        "current": true,
+        "current": false,
         "derivable": true
       },
       "derivationDefined": true,
@@ -25814,7 +25814,7 @@
         "id": "ltx_2_5:mlx:q8:dev:conv:sc-18797-ltx-2-5-mlx-ladder-v1:imc-beaa0f2aacf0832ea28a",
         "tier": "q8",
         "source": "config/memory-anchors.json#ltx_2_5:mlx:q8:dev:conv:sc-18797-ltx-2-5-mlx-ladder-v1:imc-beaa0f2aacf0832ea28a",
-        "current": true,
+        "current": false,
         "derivable": true
       },
       "derivationDefined": true,
@@ -25880,7 +25880,7 @@
         "id": "ltx_2_5:mlx:q8:dev:conv:sc-18797-ltx-2-5-mlx-ladder-v1:imc-beaa0f2aacf0832ea28a",
         "tier": "q8",
         "source": "config/memory-anchors.json#ltx_2_5:mlx:q8:dev:conv:sc-18797-ltx-2-5-mlx-ladder-v1:imc-beaa0f2aacf0832ea28a",
-        "current": true,
+        "current": false,
         "derivable": true
       },
       "derivationDefined": true,
@@ -25943,7 +25943,7 @@
         "id": "ltx_2_5:mlx:q8:dev:conv:sc-18797-ltx-2-5-mlx-ladder-v1:imc-beaa0f2aacf0832ea28a",
         "tier": "q8",
         "source": "config/memory-anchors.json#ltx_2_5:mlx:q8:dev:conv:sc-18797-ltx-2-5-mlx-ladder-v1:imc-beaa0f2aacf0832ea28a",
-        "current": true,
+        "current": false,
         "derivable": true
       },
       "derivationDefined": true,
@@ -26008,7 +26008,7 @@
         "id": "ltx_2_5:mlx:q8:dev:conv:sc-18797-ltx-2-5-mlx-ladder-v1:imc-beaa0f2aacf0832ea28a",
         "tier": "q8",
         "source": "config/memory-anchors.json#ltx_2_5:mlx:q8:dev:conv:sc-18797-ltx-2-5-mlx-ladder-v1:imc-beaa0f2aacf0832ea28a",
-        "current": true,
+        "current": false,
         "derivable": true
       },
       "derivationDefined": true,
@@ -26074,7 +26074,7 @@
         "id": "ltx_2_5:mlx:q8:dev:conv:sc-18797-ltx-2-5-mlx-ladder-v1:imc-beaa0f2aacf0832ea28a",
         "tier": "q8",
         "source": "config/memory-anchors.json#ltx_2_5:mlx:q8:dev:conv:sc-18797-ltx-2-5-mlx-ladder-v1:imc-beaa0f2aacf0832ea28a",
-        "current": true,
+        "current": false,
         "derivable": true
       },
       "derivationDefined": true,
@@ -26137,7 +26137,7 @@
         "id": "ltx_2_5:mlx:q8:dev:conv:sc-18797-ltx-2-5-mlx-ladder-v1:imc-beaa0f2aacf0832ea28a",
         "tier": "q8",
         "source": "config/memory-anchors.json#ltx_2_5:mlx:q8:dev:conv:sc-18797-ltx-2-5-mlx-ladder-v1:imc-beaa0f2aacf0832ea28a",
-        "current": true,
+        "current": false,
         "derivable": true
       },
       "derivationDefined": true,
@@ -26202,7 +26202,7 @@
         "id": "ltx_2_5:mlx:q8:dev:conv:sc-18797-ltx-2-5-mlx-ladder-v1:imc-beaa0f2aacf0832ea28a",
         "tier": "q8",
         "source": "config/memory-anchors.json#ltx_2_5:mlx:q8:dev:conv:sc-18797-ltx-2-5-mlx-ladder-v1:imc-beaa0f2aacf0832ea28a",
-        "current": true,
+        "current": false,
         "derivable": true
       },
       "derivationDefined": true,
@@ -26268,7 +26268,7 @@
         "id": "ltx_2_5:mlx:q8:dev:conv:sc-18797-ltx-2-5-mlx-ladder-v1:imc-beaa0f2aacf0832ea28a",
         "tier": "q8",
         "source": "config/memory-anchors.json#ltx_2_5:mlx:q8:dev:conv:sc-18797-ltx-2-5-mlx-ladder-v1:imc-beaa0f2aacf0832ea28a",
-        "current": true,
+        "current": false,
         "derivable": true
       },
       "derivationDefined": true,
@@ -26334,7 +26334,7 @@
         "id": "ltx_2_5:mlx:q8:dev:conv:sc-18797-ltx-2-5-mlx-ladder-v1:imc-beaa0f2aacf0832ea28a",
         "tier": "q8",
         "source": "config/memory-anchors.json#ltx_2_5:mlx:q8:dev:conv:sc-18797-ltx-2-5-mlx-ladder-v1:imc-beaa0f2aacf0832ea28a",
-        "current": true,
+        "current": false,
         "derivable": true
       },
       "derivationDefined": true,
@@ -26397,7 +26397,7 @@
         "id": "ltx_2_5:mlx:q8:dev:conv:sc-18797-ltx-2-5-mlx-ladder-v1:imc-beaa0f2aacf0832ea28a",
         "tier": "q8",
         "source": "config/memory-anchors.json#ltx_2_5:mlx:q8:dev:conv:sc-18797-ltx-2-5-mlx-ladder-v1:imc-beaa0f2aacf0832ea28a",
-        "current": true,
+        "current": false,
         "derivable": true
       },
       "derivationDefined": true,
@@ -26462,7 +26462,7 @@
         "id": "ltx_2_5:mlx:q8:dev:conv:sc-18797-ltx-2-5-mlx-ladder-v1:imc-beaa0f2aacf0832ea28a",
         "tier": "q8",
         "source": "config/memory-anchors.json#ltx_2_5:mlx:q8:dev:conv:sc-18797-ltx-2-5-mlx-ladder-v1:imc-beaa0f2aacf0832ea28a",
-        "current": true,
+        "current": false,
         "derivable": true
       },
       "derivationDefined": true,
@@ -26528,7 +26528,7 @@
         "id": "ltx_2_5:mlx:q8:dev:conv:sc-18797-ltx-2-5-mlx-ladder-v1:imc-beaa0f2aacf0832ea28a",
         "tier": "q8",
         "source": "config/memory-anchors.json#ltx_2_5:mlx:q8:dev:conv:sc-18797-ltx-2-5-mlx-ladder-v1:imc-beaa0f2aacf0832ea28a",
-        "current": true,
+        "current": false,
         "derivable": true
       },
       "derivationDefined": true,
@@ -26591,7 +26591,7 @@
         "id": "ltx_2_5:mlx:q8:dev:conv:sc-18797-ltx-2-5-mlx-ladder-v1:imc-beaa0f2aacf0832ea28a",
         "tier": "q8",
         "source": "config/memory-anchors.json#ltx_2_5:mlx:q8:dev:conv:sc-18797-ltx-2-5-mlx-ladder-v1:imc-beaa0f2aacf0832ea28a",
-        "current": true,
+        "current": false,
         "derivable": true
       },
       "derivationDefined": true,
@@ -26656,7 +26656,7 @@
         "id": "ltx_2_5:mlx:q8:dev:conv:sc-18797-ltx-2-5-mlx-ladder-v1:imc-beaa0f2aacf0832ea28a",
         "tier": "q8",
         "source": "config/memory-anchors.json#ltx_2_5:mlx:q8:dev:conv:sc-18797-ltx-2-5-mlx-ladder-v1:imc-beaa0f2aacf0832ea28a",
-        "current": true,
+        "current": false,
         "derivable": true
       },
       "derivationDefined": true,
@@ -26722,7 +26722,7 @@
         "id": "ltx_2_5:mlx:q8:dev:conv:sc-18797-ltx-2-5-mlx-ladder-v1:imc-beaa0f2aacf0832ea28a",
         "tier": "q8",
         "source": "config/memory-anchors.json#ltx_2_5:mlx:q8:dev:conv:sc-18797-ltx-2-5-mlx-ladder-v1:imc-beaa0f2aacf0832ea28a",
-        "current": true,
+        "current": false,
         "derivable": true
       },
       "derivationDefined": true,
@@ -26788,7 +26788,7 @@
         "id": "ltx_2_5:mlx:q8:dev:conv:sc-18797-ltx-2-5-mlx-ladder-v1:imc-beaa0f2aacf0832ea28a",
         "tier": "q8",
         "source": "config/memory-anchors.json#ltx_2_5:mlx:q8:dev:conv:sc-18797-ltx-2-5-mlx-ladder-v1:imc-beaa0f2aacf0832ea28a",
-        "current": true,
+        "current": false,
         "derivable": true
       },
       "derivationDefined": true,
@@ -26851,7 +26851,7 @@
         "id": "ltx_2_5:mlx:q8:dev:conv:sc-18797-ltx-2-5-mlx-ladder-v1:imc-beaa0f2aacf0832ea28a",
         "tier": "q8",
         "source": "config/memory-anchors.json#ltx_2_5:mlx:q8:dev:conv:sc-18797-ltx-2-5-mlx-ladder-v1:imc-beaa0f2aacf0832ea28a",
-        "current": true,
+        "current": false,
         "derivable": true
       },
       "derivationDefined": true,
@@ -26916,7 +26916,7 @@
         "id": "ltx_2_5:mlx:q8:dev:conv:sc-18797-ltx-2-5-mlx-ladder-v1:imc-beaa0f2aacf0832ea28a",
         "tier": "q8",
         "source": "config/memory-anchors.json#ltx_2_5:mlx:q8:dev:conv:sc-18797-ltx-2-5-mlx-ladder-v1:imc-beaa0f2aacf0832ea28a",
-        "current": true,
+        "current": false,
         "derivable": true
       },
       "derivationDefined": true,
@@ -26982,7 +26982,7 @@
         "id": "ltx_2_5:mlx:q8:dev:conv:sc-18797-ltx-2-5-mlx-ladder-v1:imc-beaa0f2aacf0832ea28a",
         "tier": "q8",
         "source": "config/memory-anchors.json#ltx_2_5:mlx:q8:dev:conv:sc-18797-ltx-2-5-mlx-ladder-v1:imc-beaa0f2aacf0832ea28a",
-        "current": true,
+        "current": false,
         "derivable": true
       },
       "derivationDefined": true,
@@ -27045,7 +27045,7 @@
         "id": "ltx_2_5:mlx:q8:dev:conv:sc-18797-ltx-2-5-mlx-ladder-v1:imc-beaa0f2aacf0832ea28a",
         "tier": "q8",
         "source": "config/memory-anchors.json#ltx_2_5:mlx:q8:dev:conv:sc-18797-ltx-2-5-mlx-ladder-v1:imc-beaa0f2aacf0832ea28a",
-        "current": true,
+        "current": false,
         "derivable": true
       },
       "derivationDefined": true,
@@ -27110,7 +27110,7 @@
         "id": "ltx_2_5:mlx:q8:dev:conv:sc-18797-ltx-2-5-mlx-ladder-v1:imc-beaa0f2aacf0832ea28a",
         "tier": "q8",
         "source": "config/memory-anchors.json#ltx_2_5:mlx:q8:dev:conv:sc-18797-ltx-2-5-mlx-ladder-v1:imc-beaa0f2aacf0832ea28a",
-        "current": true,
+        "current": false,
         "derivable": true
       },
       "derivationDefined": true,
@@ -27176,7 +27176,7 @@
         "id": "ltx_2_5:mlx:q8:dev:conv:sc-18797-ltx-2-5-mlx-ladder-v1:imc-beaa0f2aacf0832ea28a",
         "tier": "q8",
         "source": "config/memory-anchors.json#ltx_2_5:mlx:q8:dev:conv:sc-18797-ltx-2-5-mlx-ladder-v1:imc-beaa0f2aacf0832ea28a",
-        "current": true,
+        "current": false,
         "derivable": true
       },
       "derivationDefined": true,
@@ -27242,7 +27242,7 @@
         "id": "ltx_2_5:mlx:q8:dev:conv:sc-18797-ltx-2-5-mlx-ladder-v1:imc-beaa0f2aacf0832ea28a",
         "tier": "q8",
         "source": "config/memory-anchors.json#ltx_2_5:mlx:q8:dev:conv:sc-18797-ltx-2-5-mlx-ladder-v1:imc-beaa0f2aacf0832ea28a",
-        "current": true,
+        "current": false,
         "derivable": true
       },
       "derivationDefined": true,
@@ -27305,7 +27305,7 @@
         "id": "ltx_2_5:mlx:q8:dev:conv:sc-18797-ltx-2-5-mlx-ladder-v1:imc-beaa0f2aacf0832ea28a",
         "tier": "q8",
         "source": "config/memory-anchors.json#ltx_2_5:mlx:q8:dev:conv:sc-18797-ltx-2-5-mlx-ladder-v1:imc-beaa0f2aacf0832ea28a",
-        "current": true,
+        "current": false,
         "derivable": true
       },
       "derivationDefined": true,

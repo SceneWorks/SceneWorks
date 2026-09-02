@@ -555,9 +555,12 @@ def test_anchor_currency_is_reported_beside_the_state_and_never_moves_it():
     by_current: dict[bool, set[str]] = {}
     for cell in anchored:
         by_current.setdefault(cell["anchor"]["current"], set()).add(cell["state"])
-    # Both currency values must be represented among the anchored cells for this to have teeth; the
-    # shipped store carries stale and current anchors alike.
-    assert set(by_current) == {True, False}, sorted(by_current)
+    # The currency flag is a boolean report and nothing else. Which values the shipped store happens
+    # to carry is a FACT ABOUT MEASUREMENT CURRENCY at this pin, not a claim this test may pin:
+    # after sc-22414 moved every MLX loader closure the store carries zero current anchors, and the
+    # teeth below — every state re-derives without a currency term, and every flag re-derives from
+    # the closure ledger — bite exactly the same either way.
+    assert by_current and set(by_current) <= {True, False}, sorted(by_current)
     # Every anchored cell's state must re-derive from the three facts WITHOUT a currency term. An
     # anchor may land on a coordinate the architecture rules out (sc-22509 measured krea_2_turbo
     # candle q4, whose streamed-blocks overlay coordinates are structurally exempt), so the

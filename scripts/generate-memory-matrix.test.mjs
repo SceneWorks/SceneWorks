@@ -1702,10 +1702,33 @@ test("every generated cell's state re-derives from its own three published facts
 });
 
 test("anchor CURRENCY is reported and cannot move a state (sc-22511, sc-22513)", async () => {
-  const baseline = await buildMatrix({ publish: false });
   const closures = JSON.parse(
     await readFile(new URL(`../${SOURCE_PATHS.anchorLoaderClosures}`, import.meta.url), "utf8"),
   );
+  // The baseline must carry CURRENT anchors for the mutation below to have teeth, and whether the
+  // shipped store does is a fact about measurement currency at this pin, not this test's claim
+  // (after sc-22414 moved every MLX loader closure it carries none). So the baseline restamps every
+  // anchor's currency key to the live declaration for its lane — the store's own shape, made
+  // current — and the mutation then stales every one of them.
+  const store = JSON.parse(
+    await readFile(new URL(`../${SOURCE_PATHS.anchorStore}`, import.meta.url), "utf8"),
+  );
+  const current = {
+    ...store,
+    anchors: store.anchors.map((anchor) => ({
+      ...anchor,
+      source: {
+        ...anchor.source,
+        loaderClosureDigest:
+          closures.models[`${anchor.modelId}:${anchor.backend}`]?.digest ??
+          anchor.source.loaderClosureDigest,
+      },
+    })),
+  };
+  const baseline = await buildMatrix({
+    publish: false,
+    sourceOverrides: { anchorStore: JSON.stringify(current) },
+  });
   // Stale EVERY anchor's loader closure at once. Currency is a report, so the state of every cell
   // must be byte-identical; only the reported `current` flags may move.
   const staled = {
@@ -1716,13 +1739,16 @@ test("anchor CURRENCY is reported and cannot move a state (sc-22511, sc-22513)",
   };
   const mutated = await buildMatrix({
     publish: false,
-    sourceOverrides: { anchorLoaderClosures: JSON.stringify(staled) },
+    sourceOverrides: {
+      anchorStore: JSON.stringify(current),
+      anchorLoaderClosures: JSON.stringify(staled),
+    },
   });
   assert.deepEqual(
     mutated.cells.map((cell) => [cell.id, cell.state]),
     baseline.cells.map((cell) => [cell.id, cell.state]),
   );
-  assert.ok(baseline.cells.some((cell) => cell.anchor?.current === true));
+  assert.ok(baseline.cells.filter((cell) => cell.anchor).every((cell) => cell.anchor.current === true));
   assert.ok(mutated.cells.filter((cell) => cell.anchor).every((cell) => cell.anchor.current === false));
   assert.equal(mutated.summary.staleAnchors, mutated.anchors.length);
 });

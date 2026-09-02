@@ -254,7 +254,31 @@ test("a pin bump with unchanged loader source leaves the key unchanged", { skip 
   // by name. On CI `requireMeasurementRevision` throws instead of skipping.
   if (!requireMeasurementRevision(t)) return;
   assert.notEqual(MEASURED_AT, PIN, "the two revisions must actually differ");
-  assert.equal(keyAt(MEASURED_AT).digest, keyAt(PIN).digest);
+  // The claim is about the KEY, not about whether this particular pin happened to leave the
+  // loader alone — sc-22414's coherence guard (670dc1f4) moved it, by design, and E9 says that
+  // stales the anchor. So the pin bump under test is the tree at `PIN` with the loader's own
+  // closure held at its MEASURED_AT content: every other file in the repository — and the
+  // revision itself — has moved, and the key must not notice.
+  const measured = keyAt(MEASURED_AT);
+  const measuredTree = gitTree(repo, MEASURED_AT);
+  const pinTree = gitTree(repo, PIN);
+  // Overlay only the closure files whose content moved: an overlaid file carries a synthetic
+  // content id, so holding an UNCHANGED file would itself perturb a non-Rust file's hash.
+  const bodies = measuredTree.read(measured.files);
+  const held = Object.fromEntries(
+    measured.files
+      .filter((file) => pinTree.contentId(file) !== measuredTree.contentId(file))
+      .map((file) => [file, bodies.get(file)]),
+  );
+  assert.ok(Object.keys(held).length > 0, "this pin moved at least one loader file");
+  const bumped = keyAt(PIN, held);
+  assert.deepEqual(bumped.files, measured.files, "the held closure walks to the same files");
+  assert.equal(bumped.digest, measured.digest);
+  // Teeth: the same bump WITHOUT holding the loader still is a real loader move at this pin, and
+  // the key says so — the other half of E9, asserted against the real tree rather than assumed.
+  if (keyAt(PIN).digest !== measured.digest) {
+    assert.notDeepEqual(keyAt(PIN).files, measured.files, "a moved key names its moved files");
+  }
 });
 
 test("a sibling model's edit leaves the key unchanged", { skip }, () => {
