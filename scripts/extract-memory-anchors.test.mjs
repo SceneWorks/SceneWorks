@@ -22,6 +22,11 @@ import {
   inferencePin,
   isDerivable,
   inferenceProviderConstants,
+  LTX25_VARIANT_COMPONENTS,
+  LTX25_WEIGHTS_INVENTORY_PATH,
+  ltx25ComponentDeltas,
+  phaseAllocatorEnvelopes,
+  underivedReasonFor,
   loaderClosureDigestFor,
   locateInferenceCheckout,
   manifestTierEvidence,
@@ -822,4 +827,149 @@ test("the inference pin is read from the inference remote alone", () => {
       ),
     /distinct inference revisions/,
   );
+});
+
+// ── Epic 22505 feature-end fix round: allocator levels, underived reasons, component deltas ────
+
+test("phase allocator levels are extracted exactly when the record reports all three", () => {
+  const record = {
+    observedMemory: {
+      conditioning: { allocatorBytes: 1 },
+      denoise: { allocatorBytes: 2 },
+      decode: { allocatorBytes: 3 },
+      overall: { allocatorBytes: 3 },
+    },
+  };
+  assert.deepEqual(phaseAllocatorEnvelopes(record), { conditioning: 1, denoise: 2, decode: 3 });
+  const partial = structuredClone(record);
+  delete partial.observedMemory.denoise.allocatorBytes;
+  assert.equal(phaseAllocatorEnvelopes(partial), null);
+  const zeroed = structuredClone(record);
+  zeroed.observedMemory.decode.allocatorBytes = 0;
+  assert.equal(phaseAllocatorEnvelopes(zeroed), null);
+});
+
+test("underived reasons are per-model, computed from the model's own retained spread", () => {
+  const packaged = new Set(["docs/generated/fixture-corpus.json"]);
+  const corpusOf = (records) => [
+    { path: "docs/generated/fixture-corpus.json", sha256: "x", records },
+  ];
+  const imageRecord = (modelId, width) => ({
+    backend: "mlx",
+    loadShape: "eager_materialization",
+    strategy: { engagedRungs: [] },
+    target: { modelId, tier: "q4", geometry: { width, height: width, frames: 1 } },
+  });
+  const candidate = (overrides) => ({
+    modelId: "m",
+    backend: "mlx",
+    geometry: { frames: 1 },
+    loadShape: "eager_materialization",
+    measuredRegime: {
+      staged: false,
+      decodeTiled: false,
+      attentionChunked: false,
+      transformerWindowed: false,
+    },
+    transformerVariant: null,
+    decoder: null,
+    ...overrides,
+  });
+  // Spread in the model's own records: derivable.
+  assert.equal(
+    underivedReasonFor(candidate({}), corpusOf([imageRecord("m", 768), imageRecord("m", 1024)]), packaged),
+    null,
+  );
+  // A single geometry: validation-only, with the missing spread named.
+  assert.match(
+    underivedReasonFor(candidate({}), corpusOf([imageRecord("m", 1024), imageRecord("m", 1024)]), packaged),
+    /single geometry/,
+  );
+  // ANOTHER model's spread must not be borrowed — the scoping is per-model by construction.
+  assert.match(
+    underivedReasonFor(
+      candidate({}),
+      corpusOf([imageRecord("other", 768), imageRecord("other", 1024), imageRecord("m", 1024)]),
+      packaged,
+    ),
+    /single geometry/,
+  );
+  // A deep measured regime cannot upper-bound the ladder even with spread.
+  assert.match(
+    underivedReasonFor(
+      candidate({ measuredRegime: { staged: false, decodeTiled: true, attentionChunked: true, transformerWindowed: false } }),
+      corpusOf([imageRecord("m", 768), imageRecord("m", 1024)]),
+      packaged,
+    ),
+    /bounded rungs/,
+  );
+  // An axis-free VIDEO anchor cannot answer the pipeline-keyed video law.
+  assert.match(
+    underivedReasonFor(candidate({ geometry: { frames: 145 } }), corpusOf([]), packaged),
+    /pipeline axes/,
+  );
+  // A video anchor with stated axes takes no reason.
+  assert.equal(
+    underivedReasonFor(
+      candidate({ geometry: { frames: 145 }, transformerVariant: "dev", decoder: "diffvae" }),
+      corpusOf([]),
+      packaged,
+    ),
+    null,
+  );
+});
+
+test("the LTX-2.5 component deltas are priced from the committed weights inventory, per tier and axis", async () => {
+  const inventoryBody = await readFile(
+    path.join(ROOT, LTX25_WEIGHTS_INVENTORY_PATH),
+    "utf8",
+  );
+  const inventory = JSON.parse(inventoryBody);
+  const rows = ltx25ComponentDeltas(inventoryBody, ["q4", "q8", "bf16"]);
+  // 3 tiers x (2 variant targets + 2 decoder targets).
+  assert.equal(rows.length, 12);
+  for (const row of rows) {
+    assert.equal(
+      row.bytes,
+      row.files.reduce((total, file) => total + inventory.files[file], 0),
+      `${row.id}: bytes must be the sum of the shipped files it names`,
+    );
+    // A row is either a priced crossing (files, positive bytes) or an explicit ZERO crossing (no
+    // files, no bytes). Bytes without files is the doctoring shape and never emitted.
+    assert.equal(row.bytes > 0, row.files.length > 0, `${row.id}: bytes and files must agree`);
+    assert.equal(row.source.path, LTX25_WEIGHTS_INVENTORY_PATH);
+  }
+  // The variant deltas are keyed on what the ENGINE materializes, not on the variant's name: the
+  // capture arm pushes the distillation LoRA under the Dev arm and the production worker resolves
+  // no adapter for LTX-2.5 distilled, so DEV prices the LoRA and DISTILLED crosses nothing. The
+  // stock enhancer is inserted for both variants, so it appears in neither row.
+  const byId = new Map(rows.map((row) => [row.id, row]));
+  assert.deepEqual(byId.get("ltx_2_5:mlx:q4:transformer_variant:dev").files, [
+    "distilled_lora/ltx-2.5-22b-distilled-lora-450-bf16.safetensors",
+  ]);
+  assert.deepEqual(byId.get("ltx_2_5:mlx:q4:transformer_variant:distilled").files, []);
+  assert.equal(byId.get("ltx_2_5:mlx:q4:transformer_variant:distilled").bytes, 0);
+  for (const row of rows) {
+    assert.ok(
+      !row.files.some((file) => file.startsWith("enhancer/")),
+      `${row.id}: the enhancer is resident in both variants and crosses nothing`,
+    );
+  }
+  // The table the rows are keyed on is the mirror the Rust cross-check compares to the engine.
+  assert.deepEqual(
+    LTX25_VARIANT_COMPONENTS.map(({ to, components }) => [to, components]),
+    [
+      ["dev", ["distilled_lora"]],
+      ["distilled", []],
+    ],
+  );
+  // The decoder deltas take the WIDER variant's files, so one row upper-bounds both variants.
+  const convQ4 = byId.get("ltx_2_5:mlx:q4:decoder:conv");
+  assert.equal(convQ4.files.length, 1);
+  assert.ok(convQ4.files[0].endsWith("vae_decoder.safetensors"));
+  const diffvaeQ4 = byId.get("ltx_2_5:mlx:q4:decoder:diffvae");
+  assert.equal(diffvaeQ4.files.length, 2);
+  // And the packaged store carries exactly these rows — the extractor and the artifact agree.
+  const packagedStore = JSON.parse(await readFile(path.join(ROOT, STORE_PATH), "utf8"));
+  assert.deepEqual(packagedStore.componentDeltas, rows);
 });

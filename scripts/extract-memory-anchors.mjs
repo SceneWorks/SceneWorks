@@ -49,7 +49,12 @@
  * comparison, every selection rule is total, and re-running over the same corpora reproduces the
  * file byte-identically (`scripts/extract-memory-anchors.test.mjs`).
  *
- * The store is a PURE FUNCTION of the committed evidence — the previous output is never an input.
+ * The store is a PURE FUNCTION of the committed evidence, with EXACTLY ONE named exception: each
+ * anchor's `source.loaderClosureDigest` currency key is CARRIED FORWARD from the checked-in
+ * store's own previous content rather than re-derived (see `loaderClosureDigestFor` — the key
+ * records what the model's loader hashed to AT THE MEASUREMENT, which no committed input of this
+ * script can reproduce, and a newly extracted anchor fails loudly rather than borrowing the
+ * pin's digest). Everything else is re-derived from the committed evidence on every run.
  * There is deliberately no carry-forward union: a row a regeneration does not re-derive has no
  * evidence behind it in this tree, and preserving it would make a withdrawn anchor immortal and
  * make `--check` unable to see the difference. A concurrently landed anchor (sc-22509's candle
@@ -330,11 +335,29 @@ export function anchorCandidate(record, corpus) {
       fps: Number.isInteger(fps) && fps > 0 ? fps : null,
     },
     phaseActivePeakBytes: phases,
+    // Per-phase ALLOCATOR levels (epic 22505 feature-end fix round): the quantity the MLX image
+    // law derives. Bound in both directions by `memory_anchor::validate_anchor`, so it is emitted
+    // exactly when the record reports all three.
+    phaseAllocatorEnvelopeBytes: phaseAllocatorEnvelopes(record),
     overallAllocatorEnvelopeBytes: envelope,
     sourcePath: corpus.path,
     sourceSha256: corpus.sha256,
     recordId,
   };
+}
+
+/** The record's per-phase allocator levels, or `null` when any phase omits one. */
+export function phaseAllocatorEnvelopes(record) {
+  const observed = record?.observedMemory ?? {};
+  const at = (phase) => {
+    const bytes = observed?.[phase]?.allocatorBytes;
+    return Number.isInteger(bytes) && bytes > 0 ? bytes : null;
+  };
+  const conditioning = at("conditioning");
+  const denoise = at("denoise");
+  const decode = at("decode");
+  if (conditioning === null || denoise === null || decode === null) return null;
+  return { conditioning, denoise, decode };
 }
 
 /**
@@ -466,7 +489,7 @@ export function loaderClosureDigestFor(previousStore, anchorId) {
 }
 
 /** Serialise one candidate into the store's anchor shape (field order is the file's field order). */
-function anchorRow(candidate, catalogCell, previousStore) {
+function anchorRow(candidate, catalogCell, previousStore, underivedReason) {
   const id = anchorId(candidate);
   const loaderClosureDigest = loaderClosureDigestFor(previousStore, id);
   return {
@@ -507,8 +530,102 @@ function anchorRow(candidate, catalogCell, previousStore) {
       denoise: candidate.phaseActivePeakBytes.denoise,
       decode: candidate.phaseActivePeakBytes.decode,
     },
+    // Emitted exactly when the record reports all three phase allocator levels — the Rust loader
+    // binds this field in both directions (epic 22505 feature-end fix round).
+    ...(candidate.phaseAllocatorEnvelopeBytes === null
+      ? {}
+      : {
+          phaseAllocatorEnvelopeBytes: {
+            conditioning: candidate.phaseAllocatorEnvelopeBytes.conditioning,
+            denoise: candidate.phaseAllocatorEnvelopeBytes.denoise,
+            decode: candidate.phaseAllocatorEnvelopeBytes.decode,
+          },
+        }),
     overallAllocatorEnvelopeBytes: candidate.overallAllocatorEnvelopeBytes,
+    // `Some` when the anchor validates its measured point but no lane law may derive from it,
+    // with the stated per-model reason (epic 22505 feature-end fix round). Absent otherwise.
+    ...(underivedReason === null ? {} : { underivedReason }),
   };
+}
+
+/**
+ * Why THIS anchor validates its measured point but may not price anything (epic 22505 feature-end
+ * fix round), or `null` when the lane's law derives from it. Per-MODEL and computed from the
+ * model's own retained evidence — never a blanket switch:
+ *
+ * * an MLX still-image anchor derives only when the model's OWN retained image records vary
+ *   geometry within a cell (the within-cell spread the per-pixel coefficients are fitted and
+ *   falsified on) AND the anchor is the eager unbounded resident composition (the widest, which
+ *   is what lets one law upper-bound the whole ladder);
+ * * an MLX VIDEO anchor that states no pipeline axes cannot be priced by the video law, whose
+ *   per-token coefficients are keyed on `(transformer variant, decoder)`.
+ *
+ * Candle anchors take no reason here: `isDerivable` already refuses to ANCHOR a candle cell from
+ * a composition the candle law rejects, so every candle anchor that exists is derivable.
+ */
+export function underivedReasonFor(candidate, corpora, packagedSources) {
+  if (candidate.backend !== "mlx") return null;
+  if (candidate.geometry.frames === 1) {
+    if (!modelHasImageGeometrySpread(candidate.modelId, corpora, packagedSources)) {
+      return (
+        `every retained ${candidate.modelId} MLX image record measures a single geometry per ` +
+        "composition, so no within-cell per-pixel slope exists for this model and the image " +
+        "lane's coefficients (fitted on another model's spread) may not be borrowed; this anchor " +
+        "validates its measured point and prices nothing beyond it"
+      );
+    }
+    const regime = candidate.measuredRegime;
+    const unboundedEager =
+      candidate.loadShape === "eager_materialization" &&
+      !regime.staged &&
+      !regime.decodeTiled &&
+      !regime.attentionChunked &&
+      !regime.transformerWindowed;
+    if (!unboundedEager) {
+      return (
+        "the anchor render engaged bounded rungs (or deferred materialization), so it does not " +
+        "measure the widest composition the MLX image law upper-bounds the ladder from; this " +
+        "anchor validates its measured point and prices nothing beyond it"
+      );
+    }
+    return null;
+  }
+  if (candidate.transformerVariant === null || candidate.decoder === null) {
+    return (
+      "the source record states no (transformer variant, decoder) pipeline axes and the video " +
+      "law's per-token coefficients are keyed on them; this anchor validates its measured point " +
+      "and prices nothing beyond it"
+    );
+  }
+  return null;
+}
+
+/**
+ * Whether the model's packaged retained MLX image records vary geometry WITHIN a cell — the
+ * within-cell spread a per-pixel coefficient needs. A cell here is
+ * `(tier, loadShape, engaged composition)`: only a pair differing in geometry alone measures a
+ * slope.
+ */
+export function modelHasImageGeometrySpread(modelId, corpora, packagedSources) {
+  const cells = new Map();
+  for (const corpus of corpora) {
+    if (!packagedSources.has(corpus.path)) continue;
+    for (const record of corpus.records) {
+      if (record?.backend !== "mlx") continue;
+      const target = record?.target ?? {};
+      if (target.modelId !== modelId) continue;
+      const geometry = target.geometry ?? {};
+      if (geometry.frames !== 1) continue;
+      const engaged = Array.isArray(record.strategy?.engagedRungs)
+        ? [...record.strategy.engagedRungs].sort(compareText)
+        : [];
+      const key = JSON.stringify([target.tier, record.loadShape, engaged]);
+      const geometryKey = `${geometry.width}x${geometry.height}`;
+      if (!cells.has(key)) cells.set(key, new Set());
+      cells.get(key).add(geometryKey);
+    }
+  }
+  return [...cells.values()].some((geometries) => geometries.size > 1);
 }
 
 /**
@@ -834,6 +951,159 @@ export async function inferenceProviderConstants(
 const analyticId = (cell) =>
   `analytic:${cellKey(cell.modelId, cell.backend, cell.tier)}`;
 
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+// Variant/decoder component deltas (epic 22505 E2, feature-end fix round).
+//
+// An unmeasured (variant, decoder) cell of an anchored (model, tier, lane) derives from a sibling
+// anchor plus deltas computed from SHIPPED FILE INVENTORIES: the variant's adapter/refiner file
+// sizes and the decoder's weight file sizes. The sizes come from the committed weights file
+// inventory (per-file sizes of the pinned artifact revision); the Rust loader recomputes every
+// row's bytes from that inventory by digest, so nothing here is a trusted literal.
+//
+// Direction is conservative by construction: a row prices only the component the TARGET cell
+// materializes and a sibling might lack (the DEV variant's distillation LoRA, the target decoder's
+// weight files, at the widest variant where the file exists per variant). Nothing is ever
+// subtracted for sibling-only components, and a variant that crosses nothing gets an explicit ZERO
+// row rather than no row — see the matching section comment in
+// `crates/sceneworks-core/src/memory_anchor.rs`.
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+
+export const LTX25_WEIGHTS_INVENTORY_PATH = "config/ltx25-weights-file-inventory.json";
+
+const LTX25_VARIANTS = ["dev", "distilled"];
+
+/**
+ * What each LTX-2.5 transformer variant MATERIALIZES beyond the components its sibling also loads,
+ * mirrored from the engine rather than from the variant's name:
+ *
+ *   * `crates/sceneworks-memory-adapter/src/bin/mlx_ltx25.rs::configured_spec` pushes `DEV_ADAPTER`
+ *     (the distillation LoRA) onto `spec.adapters` under `variant == TransformerVariant::Dev`, and
+ *     inserts `enhancer` into `spec.components` for BOTH variants.
+ *   * `crates/sceneworks-worker/src/video_jobs/ltx.rs::resolve_ltx_distill_adapter` returns `None`
+ *     for `Ltx25TransformerVariant::Distilled` — the distilled checkpoint already contains the
+ *     refinement — and resolves the manifest's `distilledLora` co-requisite for dev.
+ *
+ * So dev crosses one component and distilled crosses none. Component names are engine-side keys,
+ * not inventory paths; `ltx25ComponentDeltas` resolves each to the shipped file. Held as data so
+ * the Rust cross-check has one thing to compare against instead of a shape hidden in a loop.
+ */
+export const LTX25_VARIANT_COMPONENTS = [
+  { to: "dev", components: ["distilled_lora"] },
+  { to: "distilled", components: [] },
+];
+
+/** The single inventory file under `prefix` matching `suffix`, or a loud failure. */
+function inventoryFile(files, prefix, suffix) {
+  const matches = Object.keys(files)
+    .filter((file) => file.startsWith(prefix) && file.endsWith(suffix))
+    .sort(compareText);
+  if (matches.length !== 1) {
+    throw new Error(
+      `weights inventory names ${matches.length} files under ${prefix}*${suffix}; expected exactly one`,
+    );
+  }
+  return matches[0];
+}
+
+/** The largest-summing variant's file list for one decoder's per-tier weight files. */
+function widestDecoderFiles(files, tier, decoderFiles) {
+  let best = null;
+  for (const variant of LTX25_VARIANTS) {
+    const candidate = decoderFiles.map((name) => `${variant}/${tier}/${name}`);
+    const bytes = candidate.reduce((total, file) => {
+      const size = files[file];
+      if (!Number.isInteger(size) || size <= 0) {
+        throw new Error(`weights inventory does not size ${file}`);
+      }
+      return total + size;
+    }, 0);
+    if (best === null || bytes > best.bytes) best = { files: candidate, bytes };
+  }
+  return best;
+}
+
+/**
+ * The LTX-2.5 MLX component-delta rows for the catalog's tiers, priced from the committed weights
+ * inventory. Per tier and per axis:
+ *
+ *   * `transformer_variant -> dev`: the distillation LoRA. The ENGINE is the authority here, not
+ *     the recipe's name: `mlx_ltx25.rs` pushes `DEV_ADAPTER`
+ *     (`distilled_lora/ltx-2.5-22b-distilled-lora-450-bf16.safetensors`) onto the load spec only
+ *     when `variant == Dev`, and `video_jobs/ltx.rs::resolve_ltx_distill_adapter` returns `None`
+ *     for LTX-2.5 Distilled because the distilled checkpoint already contains the refinement. So
+ *     DEV is the variant that materializes the extra file, and dev is the row that prices it.
+ *   * `transformer_variant -> distilled`: NOTHING is crossed. The distilled recipe materializes no
+ *     component the dev sibling lacks, so the row is a legitimate ZERO — it exists so the
+ *     fall-through can cross the variant axis toward distilled at all (a missing row means
+ *     "unpriced axis, refuse", which is a different claim from "priced at zero"). The stock
+ *     `enhancer/` directory is deliberately NOT here: `configured_spec` inserts it into
+ *     `spec.components` unconditionally for BOTH variants, so it is resident in either measured
+ *     envelope and cancels out of every variant delta. Pricing it into the dev row (as the first
+ *     cut did) both mis-attributed it and, mirrored, under-estimated dev-from-distilled by the
+ *     8.9 GB LoRA — the OOM direction.
+ *   * `decoder -> conv` / `decoder -> diffvae`: the target decoder's per-tier weight files, taken
+ *     at the WIDER of the two variant subdirectories so one row upper-bounds both variants.
+ *
+ * `LTX25_VARIANT_COMPONENTS` is the mirror of the engine's materialization the rows are keyed on;
+ * `ltx25_variant_delta_matches_the_engine_materialization` in `memory_anchor.rs` cross-checks it
+ * against the engine constants, and re-inverting the mapping reds that test.
+ */
+export function ltx25ComponentDeltas(inventoryBody, tiers) {
+  const inventory = JSON.parse(inventoryBody);
+  const files = inventory.files ?? {};
+  const inventorySha256 = sha256(inventoryBody);
+  const source = { path: LTX25_WEIGHTS_INVENTORY_PATH, sha256: inventorySha256 };
+  const rows = [];
+  // A component name IS its top-level directory in the bundle, which is what the Rust cross-check
+  // compares against; resolving it here (rather than hard-coding the file) keeps the mapping
+  // single-sourced in `LTX25_VARIANT_COMPONENTS` and fails loudly if a named component stops
+  // shipping exactly one file.
+  const variantRows = LTX25_VARIANT_COMPONENTS.map(({ to, components }) => ({
+    to,
+    files: components.map((component) =>
+      inventoryFile(files, `${component}/`, ".safetensors"),
+    ),
+  }));
+  for (const tier of [...tiers].sort(compareText)) {
+    for (const { to, files: components } of variantRows) {
+      const bytes = components.reduce((total, file) => total + files[file], 0);
+      rows.push({
+        id: `ltx_2_5:mlx:${tier}:transformer_variant:${to}`,
+        modelId: "ltx_2_5",
+        backend: "mlx",
+        tier,
+        axis: "transformer_variant",
+        to,
+        bytes,
+        files: components,
+        source,
+      });
+    }
+    const decoderRows = [
+      { to: "conv", names: ["vae_decoder.safetensors"] },
+      {
+        to: "diffvae",
+        names: ["diffusion_vae_encoder.safetensors", "vae_diffusion_decoder.safetensors"],
+      },
+    ];
+    for (const { to, names } of decoderRows) {
+      const widest = widestDecoderFiles(files, tier, names);
+      rows.push({
+        id: `ltx_2_5:mlx:${tier}:decoder:${to}`,
+        modelId: "ltx_2_5",
+        backend: "mlx",
+        tier,
+        axis: "decoder",
+        to,
+        bytes: widest.bytes,
+        files: widest.files,
+        source,
+      });
+    }
+  }
+  return rows.sort((left, right) => compareText(left.id, right.id));
+}
+
 const REASONS = {
   measured_envelope:
     "the retained corpus measures this cell's overall allocator envelope but carries no per-phase " +
@@ -949,7 +1219,15 @@ export async function buildAnchorStore({
     const cell = catalogByCell.get(
       cellKey(chosen.modelId, chosen.backend, chosen.tier),
     );
-    extracted.set(key, anchorRow(chosen, cell, previousStore));
+    extracted.set(
+      key,
+      anchorRow(
+        chosen,
+        cell,
+        previousStore,
+        underivedReasonFor(chosen, corpora, packagedSources),
+      ),
+    );
   }
 
   // 2. Every emitted anchor must cite a corpus the Rust loader compiles in. A sibling story's
@@ -1030,7 +1308,37 @@ export async function buildAnchorStore({
   }
   analyticOnly.sort((left, right) => compareText(left.id, right.id));
 
-  return { schemaVersion: MEMORY_ANCHOR_SCHEMA_VERSION, anchors, analyticOnly };
+  // 5. Component deltas (epic 22505 E2, feature-end fix round): emitted exactly when the store
+  //    carries variant-keyed anchors the fall-through can price from. The rows' byte values come
+  //    from the committed weights inventory and are recomputed by the Rust loader.
+  const componentDeltas = anchors.some(
+    (anchor) =>
+      anchor.modelId === "ltx_2_5" &&
+      anchor.backend === "mlx" &&
+      anchor.transformerVariant !== null,
+  )
+    ? ltx25ComponentDeltas(
+        await readFile(path.join(root, LTX25_WEIGHTS_INVENTORY_PATH), "utf8"),
+        sortedUniqueTiers(cells, "ltx_2_5", "mlx"),
+      )
+    : [];
+
+  return {
+    schemaVersion: MEMORY_ANCHOR_SCHEMA_VERSION,
+    anchors,
+    analyticOnly,
+    componentDeltas,
+  };
+}
+
+function sortedUniqueTiers(cells, modelId, backend) {
+  return [
+    ...new Set(
+      cells
+        .filter((cell) => cell.modelId === modelId && cell.backend === backend)
+        .map((cell) => cell.tier),
+    ),
+  ].sort(compareText);
 }
 
 export const serialiseStore = (store) => `${JSON.stringify(store, null, 2)}\n`;

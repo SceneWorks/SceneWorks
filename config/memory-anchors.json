@@ -39,6 +39,11 @@
         "denoise": 32226149968,
         "decode": 43181584080
       },
+      "phaseAllocatorEnvelopeBytes": {
+        "conditioning": 1257504,
+        "denoise": 40910608416,
+        "decode": 88797205692
+      },
       "overallAllocatorEnvelopeBytes": 88797205692
     },
     {
@@ -79,6 +84,11 @@
         "denoise": 57009505872,
         "decode": 67965431504
       },
+      "phaseAllocatorEnvelopeBytes": {
+        "conditioning": 1257504,
+        "denoise": 65264179232,
+        "decode": 113150645436
+      },
       "overallAllocatorEnvelopeBytes": 113150645436
     },
     {
@@ -115,6 +125,11 @@
         "fps": null
       },
       "phaseActivePeakBytes": {
+        "conditioning": 3828350976,
+        "denoise": 15102640128,
+        "decode": 22352494592
+      },
+      "phaseAllocatorEnvelopeBytes": {
         "conditioning": 3828350976,
         "denoise": 15102640128,
         "decode": 22352494592
@@ -159,7 +174,13 @@
         "denoise": 43473686612,
         "decode": 54153098156
       },
-      "overallAllocatorEnvelopeBytes": 159636259044
+      "phaseAllocatorEnvelopeBytes": {
+        "conditioning": 41858403034,
+        "denoise": 43473686612,
+        "decode": 159636259044
+      },
+      "overallAllocatorEnvelopeBytes": 159636259044,
+      "underivedReason": "the source record states no (transformer variant, decoder) pipeline axes and the video law's per-token coefficients are keyed on them; this anchor validates its measured point and prices nothing beyond it"
     },
     {
       "id": "ltx_2_5:mlx:bf16:dev:diffvae:sc-18797-ltx-2-5-mlx-ladder-v1:imc-9c4c5fe8356bcc4f139f",
@@ -196,6 +217,11 @@
       },
       "phaseActivePeakBytes": {
         "conditioning": 45472780950,
+        "denoise": 64442151098,
+        "decode": 79539453812
+      },
+      "phaseAllocatorEnvelopeBytes": {
+        "conditioning": 58068977282,
         "denoise": 64442151098,
         "decode": 79539453812
       },
@@ -239,6 +265,11 @@
         "denoise": 8148677508,
         "decode": 8229179000
       },
+      "phaseAllocatorEnvelopeBytes": {
+        "conditioning": 12389051376,
+        "denoise": 8148677508,
+        "decode": 8229179000
+      },
       "overallAllocatorEnvelopeBytes": 12389051376
     },
     {
@@ -276,6 +307,11 @@
       },
       "phaseActivePeakBytes": {
         "conditioning": 11725838268,
+        "denoise": 8149147524,
+        "decode": 66125852164
+      },
+      "phaseAllocatorEnvelopeBytes": {
+        "conditioning": 12389521392,
         "denoise": 8149147524,
         "decode": 66125852164
       },
@@ -319,6 +355,11 @@
         "denoise": 23765824982,
         "decode": 60013920904
       },
+      "phaseAllocatorEnvelopeBytes": {
+        "conditioning": 15569149550,
+        "denoise": 23765824982,
+        "decode": 60013920904
+      },
       "overallAllocatorEnvelopeBytes": 62416251478
     },
     {
@@ -356,6 +397,11 @@
       },
       "phaseActivePeakBytes": {
         "conditioning": 23405449760,
+        "denoise": 35924382288,
+        "decode": 8257474680
+      },
+      "phaseAllocatorEnvelopeBytes": {
+        "conditioning": 27818661670,
         "denoise": 35924382288,
         "decode": 8257474680
       },
@@ -399,6 +445,11 @@
         "denoise": 35925328080,
         "decode": 64847765684
       },
+      "phaseAllocatorEnvelopeBytes": {
+        "conditioning": 27819607462,
+        "denoise": 35925328080,
+        "decode": 64847765684
+      },
       "overallAllocatorEnvelopeBytes": 69260977594
     },
     {
@@ -439,7 +490,13 @@
         "denoise": 57110329232,
         "decode": 63204334376
       },
-      "overallAllocatorEnvelopeBytes": 69654771776
+      "phaseAllocatorEnvelopeBytes": {
+        "conditioning": 44088,
+        "denoise": 63560766632,
+        "decode": 63204334376
+      },
+      "overallAllocatorEnvelopeBytes": 69654771776,
+      "underivedReason": "every retained qwen_image MLX image record measures a single geometry per composition, so no within-cell per-pixel slope exists for this model and the image lane's coefficients (fitted on another model's spread) may not be borrowed; this anchor validates its measured point and prices nothing beyond it"
     },
     {
       "id": "qwen_image:mlx:q4:base:base:qwen-image-mlx-shared-ladder-2026-08-01-v1:imc-12f3ccbb72de78cea931",
@@ -479,7 +536,13 @@
         "denoise": 27422986300,
         "decode": 30034038832
       },
-      "overallAllocatorEnvelopeBytes": 33921472156
+      "phaseAllocatorEnvelopeBytes": {
+        "conditioning": 44088,
+        "denoise": 31310419624,
+        "decode": 30034038832
+      },
+      "overallAllocatorEnvelopeBytes": 33921472156,
+      "underivedReason": "every retained qwen_image MLX image record measures a single geometry per composition, so no within-cell per-pixel slope exists for this model and the image lane's coefficients (fitted on another model's spread) may not be borrowed; this anchor validates its measured point and prices nothing beyond it"
     },
     {
       "id": "qwen_image:mlx:q8:base:base:qwen-image-mlx-shared-ladder-2026-08-01-v1:imc-8f110511b0f85d15f72f",
@@ -519,7 +582,13 @@
         "denoise": 37540957244,
         "decode": 40204028976
       },
-      "overallAllocatorEnvelopeBytes": 44091560604
+      "phaseAllocatorEnvelopeBytes": {
+        "conditioning": 44088,
+        "denoise": 41428488872,
+        "decode": 40204028976
+      },
+      "overallAllocatorEnvelopeBytes": 44091560604,
+      "underivedReason": "every retained qwen_image MLX image record measures a single geometry per composition, so no within-cell per-pixel slope exists for this model and the image lane's coefficients (fitted on another model's spread) may not be borrowed; this anchor validates its measured point and prices nothing beyond it"
     },
     {
       "id": "z_image_turbo:mlx:q4:base:base:z-image-mlx-independent-materialization-v4:imc-1fc616bea135da2281b8",
@@ -559,7 +628,13 @@
         "denoise": 7353533076,
         "decode": 14309852368
       },
-      "overallAllocatorEnvelopeBytes": 19138127416
+      "phaseAllocatorEnvelopeBytes": {
+        "conditioning": 2266418544,
+        "denoise": 12181808124,
+        "decode": 14309852368
+      },
+      "overallAllocatorEnvelopeBytes": 19138127416,
+      "underivedReason": "every retained z_image_turbo MLX image record measures a single geometry per composition, so no within-cell per-pixel slope exists for this model and the image lane's coefficients (fitted on another model's spread) may not be borrowed; this anchor validates its measured point and prices nothing beyond it"
     }
   ],
   "analyticOnly": [
@@ -4929,6 +5004,197 @@
       "basis": "no_retained_evidence",
       "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
       "evidence": null
+    }
+  ],
+  "componentDeltas": [
+    {
+      "id": "ltx_2_5:mlx:bf16:decoder:conv",
+      "modelId": "ltx_2_5",
+      "backend": "mlx",
+      "tier": "bf16",
+      "axis": "decoder",
+      "to": "conv",
+      "bytes": 814384949,
+      "files": [
+        "dev/bf16/vae_decoder.safetensors"
+      ],
+      "source": {
+        "path": "config/ltx25-weights-file-inventory.json",
+        "sha256": "2d7e66ec2d659a843a306b3fb5577bd7de1356207e69c5ee44594f07fc1b5384"
+      }
+    },
+    {
+      "id": "ltx_2_5:mlx:bf16:decoder:diffvae",
+      "modelId": "ltx_2_5",
+      "backend": "mlx",
+      "tier": "bf16",
+      "axis": "decoder",
+      "to": "diffvae",
+      "bytes": 1472256069,
+      "files": [
+        "distilled/bf16/diffusion_vae_encoder.safetensors",
+        "distilled/bf16/vae_diffusion_decoder.safetensors"
+      ],
+      "source": {
+        "path": "config/ltx25-weights-file-inventory.json",
+        "sha256": "2d7e66ec2d659a843a306b3fb5577bd7de1356207e69c5ee44594f07fc1b5384"
+      }
+    },
+    {
+      "id": "ltx_2_5:mlx:bf16:transformer_variant:dev",
+      "modelId": "ltx_2_5",
+      "backend": "mlx",
+      "tier": "bf16",
+      "axis": "transformer_variant",
+      "to": "dev",
+      "bytes": 8899889568,
+      "files": [
+        "distilled_lora/ltx-2.5-22b-distilled-lora-450-bf16.safetensors"
+      ],
+      "source": {
+        "path": "config/ltx25-weights-file-inventory.json",
+        "sha256": "2d7e66ec2d659a843a306b3fb5577bd7de1356207e69c5ee44594f07fc1b5384"
+      }
+    },
+    {
+      "id": "ltx_2_5:mlx:bf16:transformer_variant:distilled",
+      "modelId": "ltx_2_5",
+      "backend": "mlx",
+      "tier": "bf16",
+      "axis": "transformer_variant",
+      "to": "distilled",
+      "bytes": 0,
+      "files": [],
+      "source": {
+        "path": "config/ltx25-weights-file-inventory.json",
+        "sha256": "2d7e66ec2d659a843a306b3fb5577bd7de1356207e69c5ee44594f07fc1b5384"
+      }
+    },
+    {
+      "id": "ltx_2_5:mlx:q4:decoder:conv",
+      "modelId": "ltx_2_5",
+      "backend": "mlx",
+      "tier": "q4",
+      "axis": "decoder",
+      "to": "conv",
+      "bytes": 814384933,
+      "files": [
+        "dev/q4/vae_decoder.safetensors"
+      ],
+      "source": {
+        "path": "config/ltx25-weights-file-inventory.json",
+        "sha256": "2d7e66ec2d659a843a306b3fb5577bd7de1356207e69c5ee44594f07fc1b5384"
+      }
+    },
+    {
+      "id": "ltx_2_5:mlx:q4:decoder:diffvae",
+      "modelId": "ltx_2_5",
+      "backend": "mlx",
+      "tier": "q4",
+      "axis": "decoder",
+      "to": "diffvae",
+      "bytes": 872891359,
+      "files": [
+        "distilled/q4/diffusion_vae_encoder.safetensors",
+        "distilled/q4/vae_diffusion_decoder.safetensors"
+      ],
+      "source": {
+        "path": "config/ltx25-weights-file-inventory.json",
+        "sha256": "2d7e66ec2d659a843a306b3fb5577bd7de1356207e69c5ee44594f07fc1b5384"
+      }
+    },
+    {
+      "id": "ltx_2_5:mlx:q4:transformer_variant:dev",
+      "modelId": "ltx_2_5",
+      "backend": "mlx",
+      "tier": "q4",
+      "axis": "transformer_variant",
+      "to": "dev",
+      "bytes": 8899889568,
+      "files": [
+        "distilled_lora/ltx-2.5-22b-distilled-lora-450-bf16.safetensors"
+      ],
+      "source": {
+        "path": "config/ltx25-weights-file-inventory.json",
+        "sha256": "2d7e66ec2d659a843a306b3fb5577bd7de1356207e69c5ee44594f07fc1b5384"
+      }
+    },
+    {
+      "id": "ltx_2_5:mlx:q4:transformer_variant:distilled",
+      "modelId": "ltx_2_5",
+      "backend": "mlx",
+      "tier": "q4",
+      "axis": "transformer_variant",
+      "to": "distilled",
+      "bytes": 0,
+      "files": [],
+      "source": {
+        "path": "config/ltx25-weights-file-inventory.json",
+        "sha256": "2d7e66ec2d659a843a306b3fb5577bd7de1356207e69c5ee44594f07fc1b5384"
+      }
+    },
+    {
+      "id": "ltx_2_5:mlx:q8:decoder:conv",
+      "modelId": "ltx_2_5",
+      "backend": "mlx",
+      "tier": "q8",
+      "axis": "decoder",
+      "to": "conv",
+      "bytes": 814384925,
+      "files": [
+        "dev/q8/vae_decoder.safetensors"
+      ],
+      "source": {
+        "path": "config/ltx25-weights-file-inventory.json",
+        "sha256": "2d7e66ec2d659a843a306b3fb5577bd7de1356207e69c5ee44594f07fc1b5384"
+      }
+    },
+    {
+      "id": "ltx_2_5:mlx:q8:decoder:diffvae",
+      "modelId": "ltx_2_5",
+      "backend": "mlx",
+      "tier": "q8",
+      "axis": "decoder",
+      "to": "diffvae",
+      "bytes": 1081375995,
+      "files": [
+        "distilled/q8/diffusion_vae_encoder.safetensors",
+        "distilled/q8/vae_diffusion_decoder.safetensors"
+      ],
+      "source": {
+        "path": "config/ltx25-weights-file-inventory.json",
+        "sha256": "2d7e66ec2d659a843a306b3fb5577bd7de1356207e69c5ee44594f07fc1b5384"
+      }
+    },
+    {
+      "id": "ltx_2_5:mlx:q8:transformer_variant:dev",
+      "modelId": "ltx_2_5",
+      "backend": "mlx",
+      "tier": "q8",
+      "axis": "transformer_variant",
+      "to": "dev",
+      "bytes": 8899889568,
+      "files": [
+        "distilled_lora/ltx-2.5-22b-distilled-lora-450-bf16.safetensors"
+      ],
+      "source": {
+        "path": "config/ltx25-weights-file-inventory.json",
+        "sha256": "2d7e66ec2d659a843a306b3fb5577bd7de1356207e69c5ee44594f07fc1b5384"
+      }
+    },
+    {
+      "id": "ltx_2_5:mlx:q8:transformer_variant:distilled",
+      "modelId": "ltx_2_5",
+      "backend": "mlx",
+      "tier": "q8",
+      "axis": "transformer_variant",
+      "to": "distilled",
+      "bytes": 0,
+      "files": [],
+      "source": {
+        "path": "config/ltx25-weights-file-inventory.json",
+        "sha256": "2d7e66ec2d659a843a306b3fb5577bd7de1356207e69c5ee44594f07fc1b5384"
+      }
     }
   ]
 }

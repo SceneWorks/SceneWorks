@@ -55,15 +55,17 @@
       "properties": { "source": { "type": "string", "minLength": 1 } }
     },
     "cellAnchor": {
-      "description": "The measured anchor covering this cell's (model, tier, backend lane), or null. `current` is the loader-closure currency term (sc-22511): REPORTED, never gated, and it may not move `state`.",
+      "description": "The measured anchor covering this cell's (model, tier, backend lane), or null. `current` is the loader-closure currency term (sc-22511): REPORTED, never gated, and it may not move `state`. `derivable` is the anchor-level derivability term (epic 22505 feature-end fix round, E5): whether the lane's law accepts THIS anchor, read off the store's own `underivedReason` field; false publishes the cell as Anchored/underived, with the stated reason carried in `underivedReason`.",
       "type": ["object", "null"],
       "additionalProperties": false,
-      "required": ["id", "tier", "source", "current"],
+      "required": ["id", "tier", "source", "current", "derivable"],
       "properties": {
         "id": { "type": "string", "minLength": 1 },
         "tier": { "type": "string", "minLength": 1 },
         "source": { "type": "string", "minLength": 1 },
-        "current": { "type": "boolean" }
+        "current": { "type": "boolean" },
+        "derivable": { "type": "boolean" },
+        "underivedReason": { "type": "string", "minLength": 1 }
       }
     },
     "axes": {

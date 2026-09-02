@@ -13,6 +13,7 @@ import {
   RESIDUAL_BOUNDED_MAX_OVER_PHASES_EXEMPT_FROM_BINDING_PHASE_PIN,
   analyzeBackend,
   deriveBackendMargins,
+  deriveFloorEnvelopeAllowance,
   deriveMargins,
   loadEvidenceRecords,
 } from "./derive-ladder-margins.mjs";
@@ -37,8 +38,8 @@ function docCommentAbove(source, index) {
 async function rustConstants() {
   const source = await readFile(RUST_POLICY_PATH, "utf8");
   const constants = {};
-  for (const match of source.matchAll(/pub const ([A-Z0-9_]+): f64 = ([0-9.]+);/g)) {
-    constants[match[1]] = Number(match[2]);
+  for (const match of source.matchAll(/pub const ([A-Z0-9_]+): f64 = ([0-9._]+);/g)) {
+    constants[match[1]] = Number(match[2].replaceAll("_", ""));
   }
   return constants;
 }
@@ -79,10 +80,13 @@ test("rust ladder_margin_policy constants match the derivation output", async ()
   assert.equal(constants.MLX_RECAPTURE_SPREAD, derived.mlx.margins.recaptureSpread);
   assert.equal(constants.CANDLE_RECAPTURE_SPREAD, derived.candle.margins.recaptureSpread);
 
-  // The third f64 is NOT corpus-derived and must not pretend to be: sc-22508 charges a floor's
-  // allocator-envelope allowance against its ACTIVATION term, at the same measured 17% bound the
-  // anchor derivation uses (`sceneworks_core::memory_anchor::ANCHOR_ALLOCATOR_ENVELOPE_MARGIN`).
-  assert.equal(constants.FLOOR_ALLOCATOR_ENVELOPE_ALLOWANCE, 0.17);
+  // The third f64 is corpus-derived ON THE BASE IT CHARGES (epic 22505 feature-end fix round,
+  // E3): the max over MLX records of envelope-above-active per byte of activation-above-weights,
+  // from `deriveFloorEnvelopeAllowance`. Pinned against the live derivation so corpus growth that
+  // widens the measured ratio reds here instead of silently under-charging.
+  const floorEnvelope = deriveFloorEnvelopeAllowance(await loadEvidenceRecords(ROOT));
+  assert.ok(floorEnvelope, "the corpus must measure an envelope-over-activation ratio");
+  assert.equal(constants.FLOOR_ALLOCATOR_ENVELOPE_ALLOWANCE, floorEnvelope.ratio);
 
   // Exactly these three f64 constants exist; a fourth margin constant added to the Rust module
   // without extending this pin would otherwise ship unpinned.

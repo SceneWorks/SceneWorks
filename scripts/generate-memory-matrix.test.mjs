@@ -1563,17 +1563,21 @@ test("an Anchored rollup carries (stale) exactly when every anchor behind it is 
 // ── sc-22513: the collapse ─────────────────────────────────────────────────────────────────────
 
 test("the cell state is a pure function of (implementation, anchor, derivation) and nothing else", () => {
-  // The whole domain, exhaustively. Three implementation verdicts x anchored x derivation-defined,
-  // stated as a table here so a change to the function has to be a change to this table too.
+  // The whole domain, exhaustively. Three implementation verdicts x anchored x derivation-defined
+  // x anchor-derivable (epic 22505 feature-end fix round, E5), stated as a table here so a change
+  // to the function has to be a change to this table too.
   const table = [
-    [{ implementation: "missing", anchorPresent: false, derivationDefined: false }, "Missing"],
-    [{ implementation: "missing", anchorPresent: true, derivationDefined: true }, "Missing"],
-    [{ implementation: "structurally-na", anchorPresent: false, derivationDefined: false }, "Structurally N/A"],
-    [{ implementation: "structurally-na", anchorPresent: true, derivationDefined: true }, "Structurally N/A"],
-    [{ implementation: "implemented", anchorPresent: false, derivationDefined: false }, "Implemented"],
-    [{ implementation: "implemented", anchorPresent: false, derivationDefined: true }, "Implemented"],
-    [{ implementation: "implemented", anchorPresent: true, derivationDefined: false }, "Anchored/underived"],
-    [{ implementation: "implemented", anchorPresent: true, derivationDefined: true }, "Anchored"],
+    [{ implementation: "missing", anchorPresent: false, derivationDefined: false, anchorDerivable: false }, "Missing"],
+    [{ implementation: "missing", anchorPresent: true, derivationDefined: true, anchorDerivable: true }, "Missing"],
+    [{ implementation: "structurally-na", anchorPresent: false, derivationDefined: false, anchorDerivable: false }, "Structurally N/A"],
+    [{ implementation: "structurally-na", anchorPresent: true, derivationDefined: true, anchorDerivable: true }, "Structurally N/A"],
+    [{ implementation: "implemented", anchorPresent: false, derivationDefined: false, anchorDerivable: false }, "Implemented"],
+    [{ implementation: "implemented", anchorPresent: false, derivationDefined: true, anchorDerivable: false }, "Implemented"],
+    [{ implementation: "implemented", anchorPresent: true, derivationDefined: false, anchorDerivable: true }, "Anchored/underived"],
+    // Anchor-level derivability: a wired lane whose LAW refuses this anchor (an axis-free video
+    // anchor, a single-geometry image model) publishes the honest Anchored/underived.
+    [{ implementation: "implemented", anchorPresent: true, derivationDefined: true, anchorDerivable: false }, "Anchored/underived"],
+    [{ implementation: "implemented", anchorPresent: true, derivationDefined: true, anchorDerivable: true }, "Anchored"],
   ];
   for (const [facts, expected] of table) {
     assert.equal(cellState(facts), expected, JSON.stringify(facts));
@@ -1581,7 +1585,7 @@ test("the cell state is a pure function of (implementation, anchor, derivation) 
   // An unknown verdict is a defect, not a silent `Missing`: a fourth implementation value would
   // otherwise inherit whichever arm happened to be last.
   assert.throws(
-    () => cellState({ implementation: "unverified", anchorPresent: false, derivationDefined: false }),
+    () => cellState({ implementation: "unverified", anchorPresent: false, derivationDefined: false, anchorDerivable: false }),
     /unknown implementation verdict/,
   );
   // The retired vocabulary is unreachable, and the implemented set is exactly the three states that
@@ -1603,6 +1607,7 @@ test("every generated cell's state re-derives from its own three published facts
       implementation: cell.implementation,
       anchorPresent: cell.anchor !== null,
       derivationDefined: cell.derivationDefined,
+      anchorDerivable: cell.anchor !== null && cell.anchor.derivable,
     };
     assert.equal(cell.state, cellState(facts), cell.id);
     // Nothing that used to carry per-geometry evidence bookkeeping may survive on a cell.
@@ -1667,6 +1672,7 @@ test("every generated cell's state re-derives from its own three published facts
     implementation: cell.implementation,
     anchorPresent: cell.anchor !== null,
     derivationDefined: cell.derivationDefined,
+    anchorDerivable: cell.anchor !== null && cell.anchor.derivable,
   });
   const before = new Map(matrix.cells.map((cell) => [cell.id, cell]));
   assert.equal(after.cells.length, matrix.cells.length);
@@ -1766,14 +1772,23 @@ test("the derivation is defined per LANE, read off the Rust that declares and wi
     };
     anchor.derive_video_phase_peaks(request)
   `;
-  assert.deepEqual([...parseAnchorDerivationLanes(declares, wires)].sort(), [
+  const laneMap = (source) => ({
+    "video:mlx": { law: "video", sources: [source] },
+    "video:candle": { law: "video", sources: [source] },
+  });
+  assert.deepEqual([...parseAnchorDerivationLanes(declares, laneMap(wires))].sort(), [
     "video:candle",
     "video:mlx",
   ]);
   // Declared but never called is NOT defined for any lane: an anchor priced by nothing prices
   // nothing, and a cell claiming `Anchored` off an unwired derivation would be the false green.
   assert.deepEqual(
-    [...parseAnchorDerivationLanes(declares, wires.replace(/derive_video_phase_peaks\(request\)/, "floor()"))],
+    [
+      ...parseAnchorDerivationLanes(
+        declares,
+        laneMap(wires.replace(/derive_video_phase_peaks\(request\)/, "floor()")),
+      ),
+    ],
     [],
   );
   // Unwiring one lane collapses that lane only.
@@ -1781,38 +1796,77 @@ test("the derivation is defined per LANE, read off the Rust that declares and wi
     [
       ...parseAnchorDerivationLanes(
         declares,
-        wires.replace("VideoLane::Candle => sceneworks_core::memory_anchor::AnchorBackend::Candle,", ""),
+        laneMap(
+          wires.replace(
+            "VideoLane::Candle => sceneworks_core::memory_anchor::AnchorBackend::Candle,",
+            "",
+          ),
+        ),
       ),
     ],
     ["video:mlx"],
   );
-  // And the shipped sources really do define the video lanes, so the fixtures above are not a
-  // parallel universe.
-  assert.ok(!parseAnchorDerivationLanes("", wires).size);
+  // And a law nothing declares defines nothing, so the fixtures above are not a parallel universe.
+  assert.ok(!parseAnchorDerivationLanes("", laneMap(wires)).size);
 });
 
-test("the shipped derivation reaches the video lanes and no image lane (sc-22513)", async () => {
-  const [derivation, admission] = await Promise.all([
+test("the shipped derivation reaches every lane through its REAL admission source (epic 22505)", async () => {
+  const [derivation, admission, vram, candleStrategy, mlxFitGate] = await Promise.all([
     readFile(new URL(`../${SOURCE_PATHS.anchorDerivation}`, import.meta.url), "utf8"),
     readFile(new URL(`../${SOURCE_PATHS.anchorAdmission}`, import.meta.url), "utf8"),
+    readFile(new URL(`../${SOURCE_PATHS.anchorAdmissionImageVram}`, import.meta.url), "utf8"),
+    readFile(new URL(`../${SOURCE_PATHS.anchorAdmissionImageCandle}`, import.meta.url), "utf8"),
+    readFile(new URL(`../${SOURCE_PATHS.mlxFitGate}`, import.meta.url), "utf8"),
   ]);
-  const lanes = parseAnchorDerivationLanes(derivation, admission);
-  assert.deepEqual([...lanes].sort(), ["video:candle", "video:mlx"]);
+  const lanes = parseAnchorDerivationLanes(derivation, {
+    "video:mlx": { law: "video", sources: [admission] },
+    "video:candle": { law: "video", sources: [admission] },
+    "image:candle": { law: "image", sources: [vram, candleStrategy] },
+    "image:mlx": { law: "mlx_image", sources: [mlxFitGate] },
+  });
+  assert.deepEqual(
+    [...lanes].sort(),
+    ["image:candle", "image:mlx", "video:candle", "video:mlx"],
+    "each lane's real admission source wires it (E5): video via video_admission.rs, image via " +
+      "vram_gate.rs / candle_memory_strategy.rs / mlx_fit_gate.rs",
+  );
   const matrix = await buildMatrix({ publish: false });
   for (const cell of matrix.cells) {
     const modality = matrix.models.find((model) => model.id === cell.modelId).modality;
     assert.equal(cell.derivationDefined, lanes.has(`${modality}:${cell.backend}`), cell.id);
   }
-  // An anchored IMAGE cell is `Anchored/underived` rather than `Anchored`: the store holds the
-  // measurement, but nothing prices an unmeasured geometry from it on that lane.
-  const anchoredImage = matrix.cells.filter(
-    (cell) =>
-      cell.anchor &&
-      cell.implementation === "implemented" &&
-      matrix.models.find((model) => model.id === cell.modelId).modality === "image",
+  // Anchored image cells now split on ANCHOR-LEVEL derivability: an anchor the lane's law accepts
+  // publishes `Anchored`; one the store marks underived (single measured geometry, axis-free
+  // video record) publishes `Anchored/underived` with its reason.
+  const anchoredImplemented = matrix.cells.filter(
+    (cell) => cell.anchor && cell.implementation === "implemented" && cell.derivationDefined,
   );
-  assert.ok(anchoredImage.length > 0);
-  assert.ok(anchoredImage.every((cell) => cell.state === "Anchored/underived"));
+  assert.ok(anchoredImplemented.length > 0);
+  for (const cell of anchoredImplemented) {
+    assert.equal(cell.state, cell.anchor.derivable ? "Anchored" : "Anchored/underived", cell.id);
+    if (!cell.anchor.derivable) {
+      assert.ok(cell.anchor.underivedReason, `${cell.id} must state why it is underived`);
+    }
+  }
+  // The headline cells of the feature-end fix round, pinned by name: the candle image anchor
+  // prices its lane (item 3's acceptance), the flux2 image-MLX anchors price theirs (item 1), and
+  // the refused anchors publish honestly (item 4).
+  const stateOf = (modelId, backend, tier) =>
+    new Set(
+      matrix.cells
+        .filter(
+          (cell) =>
+            cell.modelId === modelId &&
+            cell.backend === backend &&
+            cell.tier === tier &&
+            cell.implementation === "implemented",
+        )
+        .map((cell) => cell.state),
+    );
+  assert.deepEqual([...stateOf("krea_2_turbo", "candle", "q4")], ["Anchored"]);
+  assert.deepEqual([...stateOf("flux2_dev", "mlx", "q4")], ["Anchored"]);
+  assert.deepEqual([...stateOf("qwen_image", "mlx", "q8")], ["Anchored/underived"]);
+  assert.deepEqual([...stateOf("ltx_2_3", "mlx", "q8")], ["Anchored/underived"]);
 });
 
 test("the anchor store is indexed by (model, backend lane, tier), and analytic-only is not coverage", () => {
@@ -1897,6 +1951,8 @@ test("the fingerprint covers exactly the anchor and catalog sources, and the art
     anchorLoaderClosures: "config/anchor-loader-closures.json",
     anchorDerivation: "crates/sceneworks-core/src/memory_anchor.rs",
     anchorAdmission: "crates/sceneworks-worker/src/video_admission.rs",
+    anchorAdmissionImageVram: "crates/sceneworks-worker/src/vram_gate.rs",
+    anchorAdmissionImageCandle: "crates/sceneworks-worker/src/candle_memory_strategy.rs",
     anchorExtractor: "scripts/extract-memory-anchors.mjs",
   });
   const matrix = await buildMatrix({ publish: false });

@@ -317,6 +317,58 @@ export function deriveBackendMargins(analysis, hardFloor) {
   };
 }
 
+/**
+ * The MLX floor's allocator-envelope allowance, re-derived ON THE BASE IT CHARGES (epic 22505
+ * feature-end fix round, E3). `ladder_margin_policy::FLOOR_ALLOCATOR_ENVELOPE_ALLOWANCE` is
+ * charged as a fraction of a weights+headroom floor's ACTIVATION term, so the honest fraction is
+ * the corpus maximum of
+ *
+ *     envelope_bytes / activation_bytes
+ *
+ * where, per MLX record that reports a steady-state residency
+ * (`lifecycleCleanPostCleanupActive` — the resident weight set after cleanup, i.e. the floor's
+ * counted-weights analogue):
+ *
+ *     envelope_bytes   = overall.allocatorBytes − overall.activeBytes
+ *                        (the allocator envelope retained ABOVE the modelled active peak — the
+ *                        exact uncertainty the allowance names), and
+ *     activation_bytes = overall.activeBytes − lifecycleCleanPostCleanupActive
+ *                        (the activation transient above the counted weights — the exact term the
+ *                        allowance is charged against).
+ *
+ * The previous constant (0.17) was the same envelope measured as a fraction of the whole BINDING
+ * ACTIVE PHASE — weights included — and then charged against the activation term alone, which
+ * under-charges by exactly the weights/activation ratio. On the retained image-MLX renders the
+ * envelope above active runs to ~3.1x the activation transient (flux2_dev q4 768x768), so that is
+ * what the fraction honestly is. Records with a non-positive activation term (a staged capture
+ * whose active peak IS the steady state) are skipped: they measure no transient for the envelope
+ * to ride on.
+ */
+export function deriveFloorEnvelopeAllowance(records) {
+  let best = null;
+  for (const record of records) {
+    if (record.backend !== "mlx") continue;
+    const measurements = new Map(
+      (record.diagnostics?.measurements ?? []).map((entry) => [entry.name, entry.value]),
+    );
+    const post = measurements.get("lifecycleCleanPostCleanupActive");
+    const overall = record.observedMemory?.overall ?? {};
+    const active = overall.activeBytes ?? null;
+    const allocator = overall.allocatorBytes ?? null;
+    if (!Number.isInteger(post) || !Number.isInteger(active) || !Number.isInteger(allocator)) {
+      continue;
+    }
+    const activation = active - post;
+    const envelope = allocator - active;
+    if (activation <= 0 || envelope < 0) continue;
+    const ratio = envelope / activation;
+    if (best === null || ratio > best.ratio) {
+      best = { ratio, recordId: record.id, envelope, activation };
+    }
+  }
+  return best;
+}
+
 export function deriveMargins(records) {
   const perBackend = {};
   for (const [backend, hardFloor] of [
@@ -341,10 +393,17 @@ function formatPercent(fraction) {
 async function main() {
   const records = await loadEvidenceRecords();
   const derived = deriveMargins(records);
+  const floorEnvelope = deriveFloorEnvelopeAllowance(records);
 
   if (process.argv.includes("--json")) {
-    process.stdout.write(`${JSON.stringify(derived, null, 2)}\n`);
+    process.stdout.write(`${JSON.stringify({ ...derived, floorEnvelope }, null, 2)}\n`);
     return;
+  }
+  if (floorEnvelope) {
+    process.stdout.write(
+      `MLX floor allocator-envelope allowance (max envelope/activation): ${floorEnvelope.ratio} ` +
+        `(${floorEnvelope.recordId}: ${floorEnvelope.envelope} envelope over ${floorEnvelope.activation} activation)\n`,
+    );
   }
 
   process.stdout.write(`sc-18094/sc-22508 recapture-spread derivation — ${EVIDENCE_PATH} (${records.length} records)\n`);

@@ -71,11 +71,23 @@ and must not be used as evidence staleness.
 `Verified`, `Implemented/unverified`, calibration fingerprints, engaged compositions and
 `CALIBRATION_ABI_VERSIONS` describes the RUNTIME selector and the retained evidence corpora, which
 still hold those concepts. The generated matrix does not: a cell's `state` is now a pure function of
-`(implementation, anchor present, derivation defined)` over `config/memory-anchors.json` and the
-routing catalog, its vocabulary is
+`(implementation, anchor present, derivation defined, anchor derivable)` over
+`config/memory-anchors.json` and the routing catalog, its vocabulary is
 `Missing / Structurally N/A / Implemented / Anchored / Anchored/underived`, and the calibration plan,
 the evidence bundle, the provider closure ledger, the rung-4 survey artifacts and the Cargo pin have
 all left `SOURCE_PATHS`. Read `docs/generated/memory-matrix.md` for what the artifact claims today.
+
+**Fitted curves layer AHEAD of anchor derivation, and their absence costs nothing (epic 22505
+feature-end fix round, AT2/E5).** Where a retained fitted per-phase curve covers a request exactly
+— the video curve bundle, or a manifest's measured phase curves inside their hull — the admission
+path prices from the curve first and the anchor derivation is never consulted; the anchor law is
+the second layer, and the phase-blind floor the third. The curves are a PRECISION layer, not an
+obligation: they are validation-only in the specific sense that nothing anywhere requires them to
+be refreshed — a pin bump, a loader change or a catalog edit that stales or removes a curve simply
+drops that lane to the anchor derivation (or the floor), which admits on its own terms. No gate,
+check or campaign is owed to keep a curve current, and a lane that never had one is not missing
+anything: the anchor + analytic derivation is the complete, self-sufficient admission basis, and a
+curve on top of it only tightens estimates where one happens to be retained.
 
 **Provenance is stamped once, not per row (sc-16268).** The revision pair belongs to the document,
 so it lives in `generatedFrom` and nowhere else. Cells carry no `evidenceRevision`: it held the same
