@@ -1,0 +1,514 @@
+diff --git a/crates/llm/mlx-llm/src/models/llama.rs b/crates/llm/mlx-llm/src/models/llama.rs
+index d238d2200..b5d37d6b8 100644
+--- a/crates/llm/mlx-llm/src/models/llama.rs
++++ b/crates/llm/mlx-llm/src/models/llama.rs
+@@ -464,6 +464,7 @@ impl CausalLm {
+ 
+     /// Embed token ids `[batch, seq]` → `[batch, seq, hidden]` (bf16). Gemma scales by √hidden.
+     pub fn embed(&self, input_ids: &Array) -> Result<Array> {
++        crate::primitives::Weights::audit_resident("embed_tokens", &self.embed_tokens);
+         let e = embed(&self.embed_tokens, input_ids)?;
+         match self.embed_scale {
+             Some(s) => Ok(multiply(&e, &Array::from_f32(s).as_dtype(e.dtype())?)?),
+diff --git a/crates/llm/mlx-llm/src/primitives/weights.rs b/crates/llm/mlx-llm/src/primitives/weights.rs
+index ef9e99237..a36ac04bf 100644
+--- a/crates/llm/mlx-llm/src/primitives/weights.rs
++++ b/crates/llm/mlx-llm/src/primitives/weights.rs
+@@ -49,6 +49,7 @@ impl Weights {
+         let path = path.as_ref();
+         let tensors = Array::load_safetensors(path)
+             .map_err(|e| Error::Msg(format!("load_safetensors {}: {e}", path.display())))?;
++        load_audit(path, &tensors);
+         Ok(Self::from_map(tensors))
+     }
+ 
+@@ -252,3 +253,183 @@ mod tests {
+         assert_eq!(w.unused_keys(), ["model.layers.0.never_read"]);
+     }
+ }
++
++/// DIAGNOSTIC ONLY (SC-22414) — never merge. Mirrors `mlx_gen::weights::load_audit`: when
++/// `SCENEWORKS_LTX25_LOAD_AUDIT` names a log file, hash every large tensor from the arrays just
++/// loaded (forcing the cold first materialization NOW), then from an independent second lazy load
++/// of the same file, and on a mismatch report the first differing element and how much of the
++/// first read's tail is exactly zero — the signature of an ignored short read.
++fn load_audit(path: &Path, tensors: &HashMap<String, Array>) {
++    let Ok(log) = std::env::var("SCENEWORKS_LTX25_LOAD_AUDIT") else {
++        return;
++    };
++    let floor: usize = std::env::var("SCENEWORKS_LTX25_LOAD_AUDIT_MIN")
++        .ok()
++        .and_then(|value| value.parse().ok())
++        .unwrap_or(64 * 1024 * 1024);
++    let mut names: Vec<&String> = tensors
++        .keys()
++        .filter(|name| tensors[*name].nbytes() >= floor)
++        .collect();
++    if names.is_empty() {
++        return;
++    }
++    names.sort();
++    let first: Vec<Option<Vec<f32>>> = names.iter().map(|n| host_f32(&tensors[*n])).collect();
++    let reload = Array::load_safetensors(path).ok();
++    let mut out = String::new();
++    for (index, name) in names.iter().enumerate() {
++        let second = reload
++            .as_ref()
++            .and_then(|map| map.get(*name))
++            .and_then(host_f32);
++        let line = match (&first[index], &second) {
++            (Some(a), Some(b)) if a == b => {
++                format!("{} {name} bytes={} MATCH fnv={:016x}", path.display(), tensors[*name].nbytes(), fnv(a))
++            }
++            (Some(a), Some(b)) => {
++                let first_diff = a.iter().zip(b).position(|(x, y)| x != y).unwrap_or(a.len());
++                let zero_tail = a.iter().rev().take_while(|v| **v == 0.0).count();
++                let zeros_total = a.iter().filter(|v| **v == 0.0).count();
++                format!(
++                    "{} {name} bytes={} MISMATCH elems={} first_diff_elem={} zero_tail_elems={} zeros_in_first={} zeros_in_second={} fnv_first={:016x} fnv_second={:016x}",
++                    path.display(), tensors[*name].nbytes(), a.len(), first_diff, zero_tail,
++                    zeros_total, b.iter().filter(|v| **v == 0.0).count(), fnv(a), fnv(b)
++                )
++            }
++            _ => format!("{} {name} HASH-ERROR", path.display()),
++        };
++        out.push_str(&line);
++        out.push('\n');
++    }
++    if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open(&log) {
++        use std::io::Write;
++        let _ = file.write_all(out.as_bytes());
++    }
++}
++
++fn host_f32(array: &Array) -> Option<Vec<f32>> {
++    // CPU stream on purpose: GPU casts of every cold tensor tripped the Metal watchdog
++    // (SubmissionsIgnored, 2026-09-01) and confounded the first TE audit.
++    let as_f32 = array
++        .as_dtype_device(mlx_rs::Dtype::Float32, mlx_rs::StreamOrDevice::cpu())
++        .ok()?;
++    mlx_rs::transforms::eval([&as_f32]).ok()?;
++    Some(as_f32.as_slice::<f32>().to_vec())
++}
++
++fn fnv(values: &[f32]) -> u64 {
++    let mut hash: u64 = 0xcbf29ce484222325;
++    for value in values {
++        for byte in value.to_bits().to_le_bytes() {
++            hash ^= u64::from(byte);
++            hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
++        }
++    }
++    hash
++}
++
++impl Weights {
++    /// DIAGNOSTIC ONLY (SC-22414) — never merge. For every tensor read since the last drain, log a
++    /// CPU-stream hash (what the host sees in the buffer) beside a GPU-stream sum (what a Metal
++    /// kernel sees of the same buffer). Enabled by `SCENEWORKS_LTX25_LAYER_AUDIT=<log file>`.
++    pub fn audit_accessed(&self, label: &str) {
++        let Ok(log) = std::env::var("SCENEWORKS_LTX25_LAYER_AUDIT") else {
++            return;
++        };
++        let accessed = self.accessed.borrow();
++        let mut keys: Vec<&String> = accessed.iter().collect();
++        keys.sort();
++        let mut out = String::new();
++        for key in keys {
++            let Some(array) = self.tensors.get(key) else { continue };
++            let cpu = array
++                .as_dtype_device(mlx_rs::Dtype::Float32, mlx_rs::StreamOrDevice::cpu())
++                .ok()
++                .and_then(|a| mlx_rs::transforms::eval([&a]).ok().map(|_| a))
++                .map(|a| {
++                    let s = a.as_slice::<f32>();
++                    (fnv(s), s.iter().map(|v| f64::from(*v)).sum::<f64>())
++                });
++            let gpu = array
++                .as_dtype(mlx_rs::Dtype::Float32)
++                .ok()
++                .and_then(|a| a.sum(None).ok())
++                .and_then(|s| mlx_rs::transforms::eval([&s]).ok().map(|_| s))
++                .map(|s| s.item::<f32>());
++            out.push_str(&format!(
++                "{label} {key} bytes={} cpu_fnv={} cpu_sum={} gpu_sum={}\n",
++                array.nbytes(),
++                cpu.map(|(h, _)| format!("{h:016x}")).unwrap_or_else(|| "err".into()),
++                cpu.map(|(_, s)| format!("{s:.6e}")).unwrap_or_else(|| "err".into()),
++                gpu.map(|s| format!("{s:.6e}")).unwrap_or_else(|| "err".into()),
++            ));
++        }
++        if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open(&log) {
++            use std::io::Write;
++            let _ = file.write_all(out.as_bytes());
++        }
++    }
++}
++
++impl Weights {
++    /// DIAGNOSTIC ONLY (SC-22414): log a CPU-stream hash and GPU-stream sum of an activation.
++    pub fn audit_activation(label: &str, array: &Array) {
++        let Ok(log) = std::env::var("SCENEWORKS_LTX25_LAYER_AUDIT") else {
++            return;
++        };
++        // Activations are GPU-produced lazy arrays: cast on the GPU stream and read back the
++        // materialized result. A CPU-stream cast here created a cross-stream dependency that the
++        // Metal watchdog killed (GPU Timeout, 2026-09-01 22:41).
++        let cpu = array
++            .as_dtype(mlx_rs::Dtype::Float32)
++            .ok()
++            .and_then(|a| mlx_rs::transforms::eval([&a]).ok().map(|_| a))
++            .map(|a| {
++                let s = a.as_slice::<f32>();
++                (fnv(s), s.iter().map(|v| f64::from(*v)).sum::<f64>())
++            });
++        let gpu = array
++            .as_dtype(mlx_rs::Dtype::Float32)
++            .ok()
++            .and_then(|a| a.sum(None).ok())
++            .and_then(|s| mlx_rs::transforms::eval([&s]).ok().map(|_| s))
++            .map(|s| s.item::<f32>());
++        let line = format!(
++            "{label} shape={:?} cpu_fnv={} cpu_sum={} gpu_sum={}\n",
++            array.shape(),
++            cpu.map(|(h, _)| format!("{h:016x}")).unwrap_or_else(|| "err".into()),
++            cpu.map(|(_, s)| format!("{s:.6e}")).unwrap_or_else(|| "err".into()),
++            gpu.map(|s| format!("{s:.6e}")).unwrap_or_else(|| "err".into()),
++        );
++        if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open(&log) {
++            use std::io::Write;
++            let _ = file.write_all(line.as_bytes());
++        }
++    }
++}
++
++impl Weights {
++    /// DIAGNOSTIC ONLY (SC-22414): CPU-stream hash of a resident (CPU-loaded) tensor at use time.
++    pub fn audit_resident(label: &str, array: &Array) {
++        let Ok(log) = std::env::var("SCENEWORKS_LTX25_LAYER_AUDIT") else {
++            return;
++        };
++        let cpu = array
++            .as_dtype_device(mlx_rs::Dtype::Float32, mlx_rs::StreamOrDevice::cpu())
++            .ok()
++            .and_then(|a| mlx_rs::transforms::eval([&a]).ok().map(|_| a))
++            .map(|a| {
++                let s = a.as_slice::<f32>();
++                (fnv(s), s.iter().map(|v| f64::from(*v)).sum::<f64>(), s.iter().filter(|v| **v == 0.0).count(), s.len())
++            });
++        let line = match cpu {
++            Some((h, s, z, n)) => format!("{label} cpu_fnv={h:016x} cpu_sum={s:.6e} zeros={z}/{n}\n"),
++            None => format!("{label} cpu err\n"),
++        };
++        if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open(&log) {
++            use std::io::Write;
++            let _ = file.write_all(line.as_bytes());
++        }
++    }
++}
+diff --git a/crates/llm/mlx-llm/src/residency.rs b/crates/llm/mlx-llm/src/residency.rs
+index f2179fa17..3fb05e7d0 100644
+--- a/crates/llm/mlx-llm/src/residency.rs
++++ b/crates/llm/mlx-llm/src/residency.rs
+@@ -223,9 +223,14 @@ impl SequentialStack {
+     ) -> Result<Array> {
+         let out = {
+             let layer = self.plan.load(view, cfg, self.quant, i)?;
++            view.audit_accessed(&format!("layer {i}"));
+             self.observation.record_layer();
++            if i == 0 {
++                crate::primitives::Weights::audit_activation(&format!("layer {i} IN"), h);
++            }
+             let out = layer.forward(h, ropes, mask, cache, i, shared)?;
+             eval([&out])?;
++            crate::primitives::Weights::audit_activation(&format!("layer {i} OUT"), &out);
+             out
+             // `layer` drops here, after its output is materialized.
+         };
+diff --git a/crates/media/mlx-gen/mlx-gen-ltx/src/gemma4_te.rs b/crates/media/mlx-gen/mlx-gen-ltx/src/gemma4_te.rs
+index 58f6e3ee3..80aa9eee4 100644
+--- a/crates/media/mlx-gen/mlx-gen-ltx/src/gemma4_te.rs
++++ b/crates/media/mlx-gen/mlx-gen-ltx/src/gemma4_te.rs
+@@ -358,6 +358,10 @@ fn load_backbone(
+     // differently under the stream, and better: the per-layer `eval` inside
+     // `mlx_llm::residency::SequentialStack::run_layer` already bounds every submission to one
+     // layer's weights, which is a tighter bound than the 512 MB batching.
++    crate::stage_hash::stage_hash(
++        &format!("te load_backbone policy={policy:?} path={}", te_path.display()),
++        &[],
++    );
+     let model = match policy {
+         OffloadPolicy::Sequential => {
+             CausalLm::from_file_sequential(te_path, "", cfg, None).map_err(from_llm)?
+@@ -368,6 +372,25 @@ fn load_backbone(
+         OffloadPolicy::Resident => {
+             let weights = LlmWeights::from_file(te_path).map_err(from_llm)?;
+             materialize_in_batches(&weights)?;
++            // DIAGNOSTIC (SC-22414): after the bounded materialization, double-read every large
++            // tensor against a fresh lazy load of the same file — first!=second means the first
++            // (cold) materialization was corrupt at load time.
++            if std::env::var("SCENEWORKS_LTX25_STAGE_LOG").is_ok() {
++                if let Ok(reload) = LlmWeights::from_file(te_path) {
++                    let keys: Vec<String> = weights.keys().map(str::to_string).collect();
++                    for key in &keys {
++                        let Ok(first) = weights.require(key) else { continue };
++                        if first.nbytes() < 64 * 1024 * 1024 {
++                            continue;
++                        }
++                        let Ok(second) = reload.require(key) else { continue };
++                        crate::stage_hash::stage_hash(
++                            &format!("te tensor {key}"),
++                            &[("first", first), ("second", second)],
++                        );
++                    }
++                }
++            }
+             CausalLm::from_weights(&weights, "", cfg).map_err(from_llm)?
+         }
+     };
+diff --git a/crates/media/mlx-gen/mlx-gen-ltx/src/lib.rs b/crates/media/mlx-gen/mlx-gen-ltx/src/lib.rs
+index 6f38d8e1e..86510ca84 100644
+--- a/crates/media/mlx-gen/mlx-gen-ltx/src/lib.rs
++++ b/crates/media/mlx-gen/mlx-gen-ltx/src/lib.rs
+@@ -59,6 +59,7 @@ pub mod params;
+ pub mod pipeline;
+ pub mod positions;
+ pub mod rope;
++pub mod stage_hash;
+ pub mod text_encoder;
+ pub mod tiers;
+ pub mod tokenizer;
+diff --git a/crates/media/mlx-gen/mlx-gen-ltx/src/model.rs b/crates/media/mlx-gen/mlx-gen-ltx/src/model.rs
+index 9aae2e4da..9be8494d4 100644
+--- a/crates/media/mlx-gen/mlx-gen-ltx/src/model.rs
++++ b/crates/media/mlx-gen/mlx-gen-ltx/src/model.rs
+@@ -1402,8 +1402,13 @@ impl Ltx {
+     /// calls its memory-budgeted decoder with the declared mode rather than borrowing the conv
+     /// VAE's tiling selector: these are different planners over different intermediate shapes.
+     fn decode_video(&self, req: &GenerationRequest, latents: &Array, seed: u64) -> Result<Array> {
++        crate::stage_hash::stage_hash("decode_video entry", &[("latents", latents)]);
+         let decode_conv = || {
+             let selected_tiling = crate::memory_strategy::decode_tiling(req)?;
++            crate::stage_hash::stage_hash(
++                &format!("decode_conv tiling={selected_tiling:?}"),
++                &[],
++            );
+             decode_to_frames_with_tiling(&self.vae, latents, &req.cancel, selected_tiling.as_ref())
+         };
+         match &self.execution {
+@@ -1733,12 +1738,16 @@ impl Ltx {
+         // cache so the VAE + audio decode run in the freed footprint (the AvDiT is the denoise peak and
+         // nothing downstream needs it). Mirrors Wan's scope-block release before the VAE decode.
+         mlx_rs::transforms::eval([&video_latents, &audio_latents])?;
++        crate::stage_hash::stage_hash("final latents", &[
++            ("video_latents", &video_latents), ("audio_latents", &audio_latents),
++        ]);
+         finish_calibration_phase(req, mlx_gen::gen_core::MemoryPhase::Denoise, || Ok(()))?;
+         drop(transformer);
+         mlx_rs::memory::clear_cache();
+ 
+         on_progress(Progress::Decoding);
+         let frames = self.decode_video(req, &video_latents, seed)?;
++        crate::stage_hash::stage_hash("decoded frames", &[("frames", &frames)]);
+         let images = frames_to_images(&frames)?;
+         // Audio always denoised (it conditions the video); decode it unless `--no-audio`.
+         let audio = if Self::no_audio(req) {
+diff --git a/crates/media/mlx-gen/mlx-gen-ltx/src/pipeline.rs b/crates/media/mlx-gen/mlx-gen-ltx/src/pipeline.rs
+index 9063de2f8..e9283c7f6 100644
+--- a/crates/media/mlx-gen/mlx-gen-ltx/src/pipeline.rs
++++ b/crates/media/mlx-gen/mlx-gen-ltx/src/pipeline.rs
+@@ -765,6 +765,10 @@ pub fn denoise_av(
+ 
+     let mut vlat = video.clone();
+     let mut alat = audio.clone();
++    crate::stage_hash::stage_hash("denoise_av entry", &[
++        ("video", video), ("audio", audio), ("v_ctx", video_ctx), ("a_ctx", audio_ctx),
++        ("v_pos", video_pos), ("a_pos", audio_pos),
++    ]);
+     // One fresh RoPE epoch for this stage: both position grids are constant across the loop (sc-7141).
+     let rope_epoch = Some(dit.next_rope_epoch());
+     for i in 0..sigmas.len() - 1 {
+@@ -804,6 +808,10 @@ pub fn denoise_av(
+         vlat = euler_step(&vlat, &vden, sigma, sigma_next)?;
+         alat = euler_step(&alat, &aden, sigma, sigma_next)?;
+         mlx_rs::transforms::eval([&vlat, &alat])?;
++        crate::stage_hash::stage_hash(
++            &format!("denoise_av step {}", i + 1),
++            &[("vlat", &vlat), ("alat", &alat)],
++        );
+         on_step(i + 1);
+     }
+     Ok((vlat, alat))
+@@ -838,6 +846,11 @@ pub fn denoise_av_dev(
+     let mut vlat = video.clone();
+     let mut alat = audio.clone();
+     let rope_epoch = Some(dit.next_rope_epoch());
++    crate::stage_hash::stage_hash("denoise_av_dev entry", &[
++        ("video", video), ("audio", audio), ("v_ctx", video_ctx), ("a_ctx", audio_ctx),
++        ("nv_ctx", negative_video_ctx), ("na_ctx", negative_audio_ctx),
++        ("v_pos", video_pos), ("a_pos", audio_pos),
++    ]);
+ 
+     for i in 0..sigmas.len() - 1 {
+         if cancel.is_cancelled() {
+@@ -919,6 +932,10 @@ pub fn denoise_av_dev(
+         vlat = euler_step(&vlat, &vden, sigma, sigma_next)?;
+         alat = euler_step(&alat, &aden, sigma, sigma_next)?;
+         mlx_rs::transforms::eval([&vlat, &alat])?;
++        crate::stage_hash::stage_hash(
++            &format!("denoise_av_dev step {}", i + 1),
++            &[("vlat", &vlat), ("alat", &alat)],
++        );
+         on_step(i + 1);
+     }
+     Ok((vlat, alat))
+@@ -1151,6 +1168,12 @@ pub fn denoise_av_tokens_dev(
+     let mut vtok = video.latent.clone();
+     let mut alat = audio.clone();
+     let rope_epoch = Some(dit.next_rope_epoch());
++    crate::stage_hash::stage_hash("denoise_av_tokens_dev entry", &[
++        ("video", &video.latent), ("audio", audio), ("v_ctx", video_ctx), ("a_ctx", audio_ctx),
++        ("nv_ctx", negative_video_ctx), ("na_ctx", negative_audio_ctx),
++        ("v_pos", &video.positions), ("a_pos", audio_pos),
++        ("clean", &video.clean_latent), ("mask", &video.denoise_mask),
++    ]);
+ 
+     for i in 0..sigmas.len() - 1 {
+         if cancel.is_cancelled() {
+@@ -1225,6 +1248,10 @@ pub fn denoise_av_tokens_dev(
+         vtok = euler_step(&vtok, &vden, sigma, sigma_next)?;
+         alat = euler_step(&alat, &aden, sigma, sigma_next)?;
+         mlx_rs::transforms::eval([&vtok, &alat])?;
++        crate::stage_hash::stage_hash(
++            &format!("denoise_av_tokens_dev step {}", i + 1),
++            &[("vtok", &vtok), ("alat", &alat)],
++        );
+         on_step(i + 1);
+     }
+     Ok((
+@@ -1509,6 +1536,13 @@ pub fn generate_av_latents_for_variant(
+     // production boundary (the shared `denoise_av` stays eager for the parity tests). sc-4045/F-049:
+     // an RAII guard restores the render thread's prior setting on return.
+     let _compile_glue = crate::CompileGlueGuard::enable();
++    crate::stage_hash::stage_hash("generate_av_latents entry", &[
++        ("v_s1_noise", video_s1_noise), ("v_s2_noise", video_s2_noise),
++        ("a_s1_noise", audio_s1_noise), ("a_s2_noise", audio_s2_noise),
++        ("v_ctx", video_ctx), ("a_ctx", audio_ctx),
++        ("v_pos1", video_pos1), ("v_pos2", video_pos2), ("a_pos", audio_pos),
++        ("latent_mean", latent_mean), ("latent_std", latent_std),
++    ]);
+     let execution_plan = crate::dev_sampler::ExecutionPlan::for_variant(variant);
+     let stage1_sigmas = execution_plan.sigmas.as_slice();
+     // Stage 1: video init = conditioned+noised (replace-latent) or pure noise (T2V); audio = noise.
+@@ -1598,7 +1632,9 @@ pub fn generate_av_latents_for_variant(
+             )?,
+         },
+     };
++    crate::stage_hash::stage_hash("stage1 out", &[("v", &v), ("a", &a)]);
+     let v = upsample_latents(&v, upsampler, latent_mean, latent_std)?;
++    crate::stage_hash::stage_hash("upsampled", &[("v", &v)]);
+     // Stage 2: re-noise / re-condition the upscaled video; re-noise audio (never upsampled).
+     let (vlat2, vstate2): (Array, Option<I2vConditioning>) =
+         match stage_keyframe_state(&v, video_keyframes, false)? {
+@@ -1609,6 +1645,7 @@ pub fn generate_av_latents_for_variant(
+             None => (renoise(&v, video_s2_noise, STAGE2_SIGMAS[0])?, None),
+         };
+     let a = renoise(&a, audio_s2_noise, STAGE2_SIGMAS[0])?;
++    crate::stage_hash::stage_hash("stage2 in", &[("vlat2", &vlat2), ("a", &a)]);
+     dit.set_lora_pass(1);
+     match (sampler, vstate2.as_ref()) {
+         (Some(name), None) => denoise_av_curated(
+diff --git a/crates/media/mlx-gen/src/weights.rs b/crates/media/mlx-gen/src/weights.rs
+index 4f06a279e..7c45e6a44 100644
+--- a/crates/media/mlx-gen/src/weights.rs
++++ b/crates/media/mlx-gen/src/weights.rs
+@@ -41,6 +41,7 @@ impl Weights {
+     /// Load a single `.safetensors` file (tensors + metadata).
+     pub fn from_file(path: impl AsRef<Path>) -> Result<Self> {
+         let (tensors, metadata) = Array::load_safetensors_with_metadata(path.as_ref())?;
++        load_audit(path.as_ref(), &tensors);
+         Ok(Self {
+             tensors,
+             metadata,
+@@ -357,6 +358,81 @@ pub fn to_f32(a: &Array) -> Result<Array> {
+     Ok(a.as_dtype(Dtype::Float32)?)
+ }
+ 
++/// DIAGNOSTIC ONLY (SC-22414 / SC-18791 Mac2 cold-load probe) — never merge.
++///
++/// When `SCENEWORKS_LTX25_LOAD_AUDIT` names a log file, every [`Weights::from_file`] hashes each
++/// large tensor twice: once from the arrays just loaded (the vulnerable first materialization of the
++/// lazy `Load` graph — forced NOW, while the file pages may be cold), then again from an independent
++/// second lazy load of the same file (whose pages the first read just warmed). A first/second
++/// mismatch is the smoking gun for the unimplemented `Load::eval_gpu` cold-read path.
++/// `SCENEWORKS_LTX25_LOAD_AUDIT_MIN` overrides the 64 MiB size floor.
++fn load_audit(path: &Path, tensors: &HashMap<String, Array>) {
++    let Ok(log) = std::env::var("SCENEWORKS_LTX25_LOAD_AUDIT") else {
++        return;
++    };
++    let floor: usize = std::env::var("SCENEWORKS_LTX25_LOAD_AUDIT_MIN")
++        .ok()
++        .and_then(|value| value.parse().ok())
++        .unwrap_or(64 * 1024 * 1024);
++    let mut names: Vec<&String> = tensors
++        .keys()
++        .filter(|name| tensors[*name].nbytes() >= floor)
++        .collect();
++    if names.is_empty() {
++        return;
++    }
++    names.sort();
++    // Hash the vulnerable first materializations before anything re-reads the file.
++    let first: Vec<Option<u64>> = names
++        .iter()
++        .map(|name| audit_hash(&tensors[*name]))
++        .collect();
++    let reload = Array::load_safetensors_with_metadata(path).ok();
++    let mut out = String::new();
++    for (index, name) in names.iter().enumerate() {
++        let second = reload
++            .as_ref()
++            .and_then(|(map, _)| map.get(*name))
++            .and_then(audit_hash);
++        let verdict = match (first[index], second) {
++            (Some(a), Some(b)) if a == b => "MATCH",
++            (Some(_), Some(_)) => "MISMATCH",
++            _ => "HASH-ERROR",
++        };
++        out.push_str(&format!(
++            "{} {} bytes={} first={:016x} second={:016x} {}\n",
++            path.display(),
++            name,
++            tensors[*name].nbytes(),
++            first[index].unwrap_or(0),
++            second.unwrap_or(0),
++            verdict,
++        ));
++    }
++    if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open(&log) {
++        use std::io::Write;
++        let _ = file.write_all(out.as_bytes());
++    }
++}
++
++fn audit_hash(array: &Array) -> Option<u64> {
++    // CPU stream on purpose: a GPU cast of every cold tensor at once tripped the Metal watchdog
++    // (SubmissionsIgnored, 2026-09-01) and confounded the audit; this keeps the probe off the GPU.
++    let as_f32 = array
++        .as_dtype_device(Dtype::Float32, mlx_rs::StreamOrDevice::cpu())
++        .ok()?;
++    mlx_rs::transforms::eval([&as_f32]).ok()?;
++    let values = as_f32.as_slice::<f32>();
++    let mut hash: u64 = 0xcbf29ce484222325;
++    for value in values {
++        for byte in value.to_bits().to_le_bytes() {
++            hash ^= u64::from(byte);
++            hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
++        }
++    }
++    Some(hash)
++}
++
+ /// Build a dotted tensor key from a `prefix` and a leaf `name`, collapsing the empty-prefix case
+ /// (so a root module addresses `"weight"`, a nested one `"blocks.0.weight"`). The Rust analogue of
+ /// the fork's `f"{prefix}.{name}"` key assembly — shared so provider loaders/text-encoders that
