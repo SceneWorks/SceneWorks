@@ -157,6 +157,33 @@ describe("loraMatchesModel", () => {
     expect(loraMatchesModel({ id: "l", family: "minimax-h3", model_ids: ["minimax_h3_ref"] }, h3)).toBe(false);
   });
 
+  it("partitions trained LTX-2.3 and LTX-2.5 outputs while preserving the 2.3 Eros sibling", () => {
+    const model23 = { id: "ltx_2_3", family: "ltx-video", loraCompatibility: { families: ["ltx-video"] } };
+    const eros23 = { id: "ltx_2_3_eros", family: "ltx-video", loraCompatibility: { families: ["ltx-video"] } };
+    const model25 = { id: "ltx_2_5", family: "ltx-video", loraCompatibility: { families: ["ltx-video"] } };
+    const trained23 = { id: "trained23", family: "ltx-video", baseModel: "ltx_2_3" };
+    const trained25 = { id: "trained25", family: "ltx-video", base_model: "ltx_2_5" };
+
+    expect(loraMatchesModel(trained23, model23)).toBe(true);
+    expect(loraMatchesModel(trained23, eros23)).toBe(true);
+    expect(loraMatchesModel(trained25, model25)).toBe(true);
+    expect(loraMatchesModel(trained23, model25)).toBe(false);
+    expect(loraMatchesModel(trained25, model23)).toBe(false);
+
+    const familyOnly = { id: "legacy", family: "ltx-video" };
+    expect(loraMatchesModel(familyOnly, model23)).toBe(true);
+    expect(loraMatchesModel(familyOnly, model25)).toBe(false);
+    expect(
+      loraMatchesModel({ ...familyOnly, modelIds: ["ltx_2_5"] }, model25),
+    ).toBe(true);
+    expect(
+      loraMatchesModel(
+        { ...trained23, modelIds: ["ltx_2_5"] },
+        model25,
+      ),
+    ).toBe(false);
+  });
+
   it("offers no LoRA for SenseNova when its schema-valid catalog rows omit the advertisement", () => {
     const seededSenseNova = fallbackModels.filter((model) => model.id.startsWith("sensenova_u1_"));
     expect(seededSenseNova.map((model) => model.id)).toEqual([

@@ -89,8 +89,16 @@ ${arms.join("\n")}
 ${extra}`;
 }
 
-function planEntry(backend, provider, evidenceScope = "authoritative") {
-  return { name: `${backend}-${provider}-${evidenceScope}`, backend, evidenceScope, target: { provider } };
+/**
+ * One ANCHOR plan entry (sc-22514): `<modelId>:<tier>:<backend>` keyed, one per cell. A lane can
+ * still carry several entries — one per tier — which is what the per-lane counts below add up.
+ */
+function planEntry(backend, provider, evidenceScope = "authoritative", tier = "q4") {
+  return [`${provider}_model:${tier}:${backend}`, { provider, evidenceScope }];
+}
+
+function anchorPlan(...entries) {
+  return { anchors: Object.fromEntries(entries) };
 }
 
 /**
@@ -105,7 +113,7 @@ function fixtureFrom({
   models,
   records,
   lanes,
-  plan = { providers: [] },
+  plan = { anchors: {} },
   // Every provider the fixtures declare has an arm BY DEFAULT, so pre-sc-18212 expectations (an
   // unmeasured lane is "pending capture") keep holding; capturability tests override these.
   adapterSources = { mlx: adapterSource(["alpha"]), candle: adapterSource(["beta", "gamma"]) },
@@ -225,7 +233,7 @@ test("recommended MLX T2I coverage detects a missing whole contract and every ap
     models: [model],
     records: [],
     lanes: [["mlx:alpha", LIVE_MLX]],
-    plan: { providers: [planEntry("mlx", "alpha")] },
+    plan: anchorPlan(planEntry("mlx", "alpha")),
     adapterSources: { mlx: adapterSource(["alpha"]), candle: adapterSource(["beta"]) },
   });
   assert.deepEqual(buildStaleLaneReport(complete).flagshipApparatusCoverage.missingLanes, []);
@@ -254,7 +262,7 @@ test("recommended MLX T2I coverage detects a missing whole contract and every ap
   ]);
 
   const withoutDeclaration = { ...complete, liveDigests: new Map(), declarations: {} };
-  const withoutPlan = { ...complete, plan: { providers: [] } };
+  const withoutPlan = { ...complete, plan: { anchors: {} } };
   const withoutArm = {
     ...complete,
     adapterSources: { ...complete.adapterSources, mlx: adapterSource(["other"]) },
@@ -307,8 +315,8 @@ test("ranking weighs the margin, not just the count", () => {
   assert.equal(second.lane, "candle:beta");
   assert.equal(first.rank, 1);
   assert.equal(second.rank, 2);
-  assert.equal(first.impact.widenedAdmissionSurface, 3 * first.margin.staleMeasuredMargin);
-  assert.equal(second.impact.widenedAdmissionSurface, 5 * second.margin.staleMeasuredMargin);
+  assert.equal(first.impact.widenedAdmissionSurface, 3 * first.margin.recaptureSpread);
+  assert.equal(second.impact.widenedAdmissionSurface, 5 * second.margin.recaptureSpread);
   assert.ok(first.impact.widenedAdmissionSurface > second.impact.widenedAdmissionSurface);
 });
 
@@ -366,8 +374,7 @@ test("the margin column is the derivation's, not a literal in this script", asyn
   const report = buildStaleLaneReport(fixture);
   const derived = deriveMargins(fixture.records);
   for (const lane of report.staleLanes) {
-    assert.equal(lane.margin.staleMeasuredMargin, derived[lane.backend].margins.staleMeasuredMargin);
-    assert.equal(lane.margin.estimateMargin, derived[lane.backend].margins.estimateMargin);
+    assert.equal(lane.margin.recaptureSpread, derived[lane.backend].margins.recaptureSpread);
   }
   // No margin literal may be reintroduced here: a hardcoded copy is exactly how this column would
   // drift away from the runtime it claims to describe.
@@ -389,7 +396,9 @@ test("the located binding population covers every closure digest the manifest ca
   const { manifest } = await loadSources();
   const located = manifestBindings({ manifestBody, manifest });
   const occurrences = digestOccurrences(manifestBody.split("\n")).length;
-  assert.ok(occurrences > 0, "the manifest carries closure digests at all");
+  // sc-22512 / E8: no `occurrences > 0` guard. "The manifest carries closure digests at all" reds
+  // on a lane's declaration being ABSENT, which measurement absence is allowed to be. The
+  // derivation below is the real question and holds at zero as well as at forty.
   assert.equal(located.length, occurrences, "every manifest closure digest is in the population");
   assert.ok(located.every((item) => /^(mlx|candle):.+/.test(item.lane)));
   assert.ok(located.every((item) => item.digest === null || /^[0-9a-f]{64}$/.test(item.digest)));
@@ -424,14 +433,26 @@ test("the real corpus reports the margins the worker actually applies", async ()
     rust[match[1]] = Number(match[2]);
   }
   const expected = {
-    mlx: { stale: rust.MLX_STALE_MEASURED_MARGIN, estimate: rust.MLX_ESTIMATE_MARGIN },
-    candle: { stale: rust.CANDLE_STALE_MEASURED_MARGIN, estimate: rust.CANDLE_ESTIMATE_MARGIN },
+    mlx: rust.MLX_RECAPTURE_SPREAD,
+    candle: rust.CANDLE_RECAPTURE_SPREAD,
   };
-  assert.ok(expected.mlx.stale > 0 && expected.candle.stale > 0, "the Rust policy constants parsed");
+  assert.ok(expected.mlx > 0 && expected.candle > 0, "the Rust policy constants parsed");
   for (const lane of [...report.staleLanes, ...report.currentLanes]) {
-    assert.equal(lane.margin.staleMeasuredMargin, expected[lane.backend].stale, lane.lane);
-    assert.equal(lane.margin.estimateMargin, expected[lane.backend].estimate, lane.lane);
+    assert.equal(lane.margin.recaptureSpread, expected[lane.backend], lane.lane);
   }
+});
+
+// An old-shape (`providers` array) plan has no `anchors` object; `?? {}` used to report every lane
+// as having zero planned entries, which reads exactly like a plan that genuinely covers nothing.
+test("planLaneCoverage refuses an old-shape plan instead of reporting zero coverage", () => {
+  const anchorPlan = {
+    anchors: { "krea_2_turbo:q4:mlx": { provider: "krea_2_turbo", evidenceScope: "authoritative" } },
+  };
+  assert.equal(planLaneCoverage(anchorPlan).get("mlx:krea_2_turbo").entries, 1);
+  assert.throws(
+    () => planLaneCoverage({ providers: [{ backend: "mlx", provider: "krea_2_turbo" }] }),
+    /calibration plan is not an anchor plan/,
+  );
 });
 
 test("the real corpus report is internally consistent, whatever the corpus currently is", async () => {
@@ -464,16 +485,13 @@ test("the real corpus report is internally consistent, whatever the corpus curre
       .map((lane) => lane.lane),
     "the real flagship omission list must be derived from the same three gates",
   );
-  assert.deepEqual(
-    report.flagshipApparatusCoverage.lanes.map((lane) => lane.lane),
-    ["mlx:krea_2_turbo", "mlx:sdxl", "mlx:z_image_turbo"],
-    "the bounded recommended MLX T2I census must stay manifest-derived and complete",
-  );
-  assert.deepEqual(
-    report.flagshipApparatusCoverage.missingLanes,
-    [],
-    "all three recommended MLX T2I lanes must have closure, plan, and adapter apparatus",
-  );
+  // sc-22512 / E8: the frozen ["mlx:krea_2_turbo","mlx:sdxl","mlx:z_image_turbo"] roster and the
+  // `missingLanes deepEqual []` completeness pin were removed. The first is an exact expected set —
+  // it reds when the recommended census gains or loses a member. The second reds when a lane has no
+  // closure declaration, no plan entry, or no capture arm; that is measurement apparatus being
+  // ABSENT, which E8 forbids CI from failing on. The derivation directly above (missingLanes is
+  // exactly the not-covered lanes, computed from the same three gates) is unchanged and still
+  // grades the data that IS present.
   // Declared+unmeasured+armless lanes live ONLY in `uncapturableLanes` (status "uncapturable");
   // measured armless lanes stay in the staleness partition and appear in `uncapturableLanes` as a
   // second, cross-cutting membership.
@@ -619,7 +637,12 @@ test("a closure table derived at an older pin still grades, but a malformed one 
   // the report, so replacing the `validatedInferenceClosures` call inside `loadSources` with a raw
   // `closures.providers` read kept every test green (mutation-verified). The refusals below are
   // therefore driven through `loadSources`, and each one is a property a raw `.providers` read would
-  // NOT have: a malformed revision, an unusable digest, and an empty provider table.
+  // NOT have: a malformed revision and an unusable digest — both MALFORMED-PRESENT data.
+  //
+  // sc-22512 / E8: the third refusal, an EMPTY provider table, is gone. A repo that declares no
+  // provider closures is an unmeasured repo, not a broken one; every binding then reads as
+  // not-current, which is the conservative estimate. `validatedInferenceClosures` no longer throws
+  // for it, so asserting the rejection here would have re-installed the gate from the test side.
   const closures = JSON.parse(
     await readFile(path.join(ROOT, "config", "inference-provider-closures.json"), "utf8"),
   );
@@ -652,8 +675,11 @@ test("a closure table derived at an older pin still grades, but a malformed one 
   });
   await assert.rejects(loadSources(scratch), /has no usable digest/);
 
+  // And the absence case is HANDLED, not refused: an empty provider table loads, and every lane
+  // simply grades as undeclared rather than the report failing to build.
   await writeClosures({ ...closures, providers: {} });
-  await assert.rejects(loadSources(scratch), /declares no providers/);
+  const empty = buildStaleLaneReport(await loadSources(scratch));
+  assert.equal(empty.totals.declaredLanes, 0, "no declarations is a report, not a refusal");
 });
 
 test("capturability is parsed from the dispatch arms — literals, consts, and no test scaffolding", () => {
@@ -730,7 +756,10 @@ test("a declared, planned lane with no adapter arm is uncapturable, never pendin
   // its arm — proving the categorization is derived from the dispatch, not from a hand list.
   const fixture = twoLaneFixture({
     extraLanes: [["candle:gamma", digest("d")]],
-    plan: { providers: [planEntry("candle", "gamma"), planEntry("candle", "gamma", "candidate")] },
+    plan: anchorPlan(
+      planEntry("candle", "gamma"),
+      planEntry("candle", "gamma", "candidate", "q8"),
+    ),
   });
   const armed = buildStaleLaneReport(fixture);
   assert.deepEqual(armed.unmeasuredLanes.map((lane) => lane.lane), ["candle:gamma"]);
@@ -755,12 +784,10 @@ test("a planned lane the closure table never declared joins the universe, with i
   // candle:qwen_image (planned, undeclared, arm exists) were invisible to the report entirely.
   const report = buildStaleLaneReport(
     twoLaneFixture({
-      plan: {
-        providers: [
-          planEntry("candle", "delta", "candidate"),
-          planEntry("candle", "gamma", "candidate"),
-        ],
-      },
+      plan: anchorPlan(
+        planEntry("candle", "delta", "candidate"),
+        planEntry("candle", "gamma", "candidate"),
+      ),
     }),
   );
   assert.deepEqual(
@@ -805,16 +832,14 @@ test("the human report separates pending capture from uncapturable, and prints t
       ["candle:delta", digest("e")],
       ["candle:theta", digest("f")],
     ],
-    plan: {
-      providers: [
-        planEntry("candle", "gamma"),
-        planEntry("candle", "delta"),
-        planEntry("candle", "epsilon", "candidate"),
-        // Undeclared AND armless: the report must name both missing prerequisites, not imply that
-        // adding an adapter arm alone would make the lane measurable.
-        planEntry("candle", "zeta", "candidate"),
-      ],
-    },
+    plan: anchorPlan(
+      planEntry("candle", "gamma"),
+      planEntry("candle", "delta"),
+      planEntry("candle", "epsilon", "candidate"),
+      // Undeclared AND armless: the report must name both missing prerequisites, not imply that
+      // adding an adapter arm alone would make the lane measurable.
+      planEntry("candle", "zeta", "candidate"),
+    ),
     // No "beta" arm: the stale candle:beta lane doubles as the measured-but-armless case, so the
     // ranked table's CAPTURE column shows both values at once.
     adapterSources: { mlx: adapterSource(["alpha"]), candle: adapterSource(["gamma", "epsilon"]) },

@@ -1,0 +1,58 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://sceneworks.ai/schemas/memory-anchor-plan.schema.json",
+  "title": "SceneWorks memory anchor plan",
+  "$comment": "sc-22514. Epic 22505 makes ONE anchor per (modelId, quant tier, backend lane) the entire measurement obligation; everything else is derived analytically by crates/sceneworks-core/src/memory_anchor.rs. This schema enforces that BY CONSTRUCTION rather than by review. The anchor set is a JSON OBJECT keyed by `<modelId>:<tier>:<backend>`, so a second measurement of the same cell is not expressible at all — not merely rejected. Every remaining axis of the grid plan it replaced is likewise inexpressible: an entry carries exactly one integer width/height/frames (no list, no range, no `cases` array), no `parameters`, no `rung`/`engagedRungs` (the anchor composition is FIXED per lane by the harness, mirroring `isDerivable` in scripts/extract-memory-anchors.mjs), no `expectedResult`/`negative`, and no warm-repeat, temporal or batch grouping fields. `additionalProperties: false` holds at every level, so a sweep field cannot be smuggled in under a new name.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "anchors"],
+  "properties": {
+    "$schema": { "type": "string" },
+    "schemaVersion": { "const": 1 },
+    "anchors": {
+      "type": "object",
+      "minProperties": 1,
+      "propertyNames": {
+        "type": "string",
+        "$comment": "`<modelId>:<tier>:<backend>` — the cell identity itself. Object keys are unique by construction, which is what makes a duplicate anchor unexpressible.",
+        "pattern": "^[a-z][a-z0-9_]*:(q4|q8|bf16):(mlx|candle)$"
+      },
+      "additionalProperties": { "$ref": "#/$defs/anchor" }
+    }
+  },
+  "$defs": {
+    "anchor": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "provider", "mode", "overlay", "geometry", "evidenceScope", "loadShape",
+        "calibrationFingerprint", "fixture"
+      ],
+      "properties": {
+        "provider": { "type": "string", "pattern": "^[a-z][a-z0-9_]*$" },
+        "mode": { "type": "string", "pattern": "^[a-z][a-z0-9_]*$" },
+        "overlay": { "type": "string", "pattern": "^[a-z][a-z0-9_]*$" },
+        "transformerVariant": { "enum": ["distilled", "dev"] },
+        "decoder": { "enum": ["conv", "diffvae"] },
+        "geometry": { "$ref": "#/$defs/geometry" },
+        "evidenceScope": { "enum": ["authoritative", "candidate", "fixture"] },
+        "loadShape": { "enum": ["eager_materialization", "deferred_materialization"] },
+        "sourceProvenance": { "const": "physical_mlx_v1" },
+        "calibrationFingerprint": { "type": "string", "minLength": 1 },
+        "fixture": { "type": "string", "minLength": 1 }
+      }
+    },
+    "geometry": {
+      "type": "object",
+      "additionalProperties": false,
+      "$comment": "Exactly ONE geometry per anchor. Each axis is a single integer: a list or a {min,max,step} range fails the type check, so a geometry sweep cannot be written down. This geometry is a FREE PLAN CHOICE and is deliberately NOT required to equal the geometry the packaged anchor in config/memory-anchors.json was captured at: the plan says where the NEXT capture should happen, the packaged anchor records where the LAST one did, and re-capturing a cell legitimately MOVES the packaged geometry to the planned one. Five cells disagree today on purpose (krea_2_turbo:q4:candle, flux2_dev:q4:mlx, flux2_dev:q8:mlx, ltx_2_5:bf16:mlx, ltx_2_5:q8:mlx). Nothing derives one from the other and nothing gates on their agreement — see docs/calibration-runbook.md section 2b.",
+      "required": ["width", "height", "batch", "frames"],
+      "properties": {
+        "width": { "type": "integer", "exclusiveMinimum": 0 },
+        "height": { "type": "integer", "exclusiveMinimum": 0 },
+        "batch": { "const": 1 },
+        "frames": { "type": "integer", "exclusiveMinimum": 0 }
+      }
+    }
+  }
+}

@@ -479,7 +479,11 @@ fn resolve_candle_video_route(
     Ok(if request.mode == "replace_person" {
         match scail2_engine_id(&request.model) {
             Some(engine_id) => CandleVideoRoute::ReplacePersonScail2(engine_id),
-            None if candle::candle_video_engine_id(&request.model) == Some("ltx_2_3_distilled") => {
+            None if matches!(
+                candle::candle_video_engine_id(&request.model),
+                Some("ltx_2_3_distilled" | "ltx_2_5_distilled")
+            ) =>
+            {
                 CandleVideoRoute::CandleVideo
             }
             None => CandleVideoRoute::ReplacePersonWanVace,
@@ -488,7 +492,10 @@ fn resolve_candle_video_route(
         let engine_id = scail2_engine_id(&request.model).expect("scail2 model");
         CandleVideoRoute::AnimateScail2(engine_id)
     } else if matches!(request.mode.as_str(), "extend_clip" | "video_bridge")
-        && candle::candle_video_engine_id(&request.model) == Some("ltx_2_3_distilled")
+        && matches!(
+            candle::candle_video_engine_id(&request.model),
+            Some("ltx_2_3_distilled" | "ltx_2_5_distilled")
+        )
     {
         CandleVideoRoute::CandleVideo
     } else if matches!(request.mode.as_str(), "extend_clip" | "video_bridge") {
@@ -630,6 +637,7 @@ pub(crate) async fn run_video_generate_job(
     // that cannot reach that provider before even resolving the project or creating the output
     // directory; a procedural clip is never an honest substitute for this capability.
     validate_vace_fun_capability(&request, settings)?;
+    validate_video_lora_compatibility(&request)?;
     let project =
         ProjectStore::new(settings.data_dir.clone(), "worker").get_project(&request.project_id)?;
     let project_path = PathBuf::from(project.path);
@@ -1223,6 +1231,22 @@ pub(crate) async fn run_video_generate_job(
     )
     .await?;
     Ok(())
+}
+
+/// Re-run the API's model/family partition gate at the worker trust boundary before heartbeat or
+/// any media/model work. LTX-2.3 and LTX-2.5 intentionally share `ltx-video`, so family equality
+/// alone cannot make an adapter safe; `modelIds` and `baseModel` are both enforced by core.
+fn validate_video_lora_compatibility(request: &VideoRequest) -> WorkerResult<()> {
+    if !is_ltx_model(&request.model) {
+        return Ok(());
+    }
+    sceneworks_core::lora_family::validate_lora_compatibility(
+        &request.loras,
+        Some("ltx-video"),
+        "ltx_video",
+        Some(&request.model),
+    )
+    .map_err(WorkerError::InvalidPayload)
 }
 
 /// Build the sanitized workflow envelope for this clip and write it beside the media as an
@@ -2234,8 +2258,9 @@ pub(crate) fn runtime_descriptor_engine_ids(model: &str, mode: &str) -> Vec<&'st
     if mode == "replace_person" {
         return vec![scail2_engine_id(model)
             .or_else(|| {
-                candle::candle_video_engine_id(model)
-                    .filter(|engine_id| *engine_id == "ltx_2_3_distilled")
+                candle::candle_video_engine_id(model).filter(|engine_id| {
+                    matches!(*engine_id, "ltx_2_3_distilled" | "ltx_2_5_distilled")
+                })
             })
             .unwrap_or("wan_vace")];
     }
@@ -2244,7 +2269,7 @@ pub(crate) fn runtime_descriptor_engine_ids(model: &str, mode: &str) -> Vec<&'st
     }
     if matches!(mode, "extend_clip" | "video_bridge") {
         return vec![candle::candle_video_engine_id(model)
-            .filter(|id| *id == "ltx_2_3_distilled")
+            .filter(|id| matches!(*id, "ltx_2_3_distilled" | "ltx_2_5_distilled"))
             .unwrap_or("wan_vace")];
     }
     bernini_engine_id(model)

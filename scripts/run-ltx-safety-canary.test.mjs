@@ -118,7 +118,7 @@ import {
 
 import { hashArtifactInventory } from "./hash-artifact-inventory.mjs";
 import {
-  canonicalJson, recordId, runProviderPlan, validateBundle,
+  canonicalJson, capturePlannedCase, recordId, validateBundle,
 } from "./memory-calibration-harness.mjs";
 
 const TEXT_ENCODER_INVENTORY = {
@@ -1578,16 +1578,14 @@ test("SC-20254 success/failure receipts are chained, exclusive and canonically r
 });
 
 test("SC-20191 publishes one schema-valid canonical runtime record after stripping private evidence", async (t) => {
-  const { provider } = await campaignEntryFixture();
+  const { provider, planned } = await campaignEntryFixture();
   const repo = await cleanCampaignHarnessRepo(t);
   let runRequests = 0;
-  const result = await runProviderPlan({
-    config: { providers: [provider] },
+  const result = await capturePlannedCase({
+    planned,
     providerCommand: ["synthetic-contained-provider"],
     sceneWorksRepo: repo,
     inferenceRepo: repo,
-    backend: "mlx",
-    providerName: CAMPAIGN_ENTRY_PROVIDER,
     closureDigestFor: async () => "b".repeat(64),
     executeProvider: async (_command, _args, input) => {
       const request = JSON.parse(input);
@@ -1639,16 +1637,14 @@ test("SC-20191 publishes one schema-valid canonical runtime record after strippi
 });
 
 test("SC-20318 synthetic adapter to harness path yields one distinct schema-valid record", async (t) => {
-  const { provider } = await boundedCampaignEntryFixture();
+  const { provider, planned } = await boundedCampaignEntryFixture();
   const repo = await cleanCampaignHarnessRepo(t);
   let runRequests = 0;
-  const result = await runProviderPlan({
-    config: { providers: [provider] },
+  const result = await capturePlannedCase({
+    planned,
     providerCommand: ["synthetic-sc20318-provider"],
     sceneWorksRepo: repo,
     inferenceRepo: repo,
-    backend: "mlx",
-    providerName: BOUNDED_CAMPAIGN_ENTRY_PROVIDER,
     closureDigestFor: async () => "c".repeat(64),
     executeProvider: async (_command, _args, input) => {
       const request = JSON.parse(input);
@@ -1712,16 +1708,14 @@ test("SC-20430 q8 and bf16 synthetic adapter paths yield distinct schema-valid b
   const records = [];
   const bundles = {};
   for (const tier of ["q8", "bf16"]) {
-    const { provider } = await boundedCampaignEntryFixture(tier);
+    const { provider, planned } = await boundedCampaignEntryFixture(tier);
     const spec = BOUNDED_CAMPAIGN_ENTRY_SPECS[tier];
     let runRequests = 0;
-    const bundle = await runProviderPlan({
-      config: { providers: [provider] },
+    const bundle = await capturePlannedCase({
+      planned,
       providerCommand: [`synthetic-sc20430-${tier}-provider`],
       sceneWorksRepo: repo,
       inferenceRepo: repo,
-      backend: "mlx",
-      providerName: spec.provider,
       closureDigestFor: async () => "c".repeat(64),
       executeProvider: async (_command, _args, input) => {
         const request = JSON.parse(input);
@@ -1775,13 +1769,11 @@ test("SC-20430 q8 and bf16 synthetic adapter paths yield distinct schema-valid b
   assert.notEqual(records[0].id, records[1].id);
 
   const q4Fixture = await boundedCampaignEntryFixture("q4");
-  bundles.q4 = await runProviderPlan({
-    config: { providers: [q4Fixture.provider] },
+  bundles.q4 = await capturePlannedCase({
+    planned: q4Fixture.planned,
     providerCommand: ["synthetic-sc20430-q4-provider"],
     sceneWorksRepo: repo,
     inferenceRepo: repo,
-    backend: "mlx",
-    providerName: BOUNDED_CAMPAIGN_ENTRY_PROVIDER,
     closureDigestFor: async () => "c".repeat(64),
     executeProvider: async (_command, _args, input) => {
       const request = JSON.parse(input);
@@ -1928,6 +1920,31 @@ test("private artifact clones preserve the canonical immutable snapshot roots", 
   const runnerSource = await readFile(new URL("./run-ltx-safety-canary.mjs", import.meta.url), "utf8");
   assert.match(runnerSource, /privateArtifactRoots\(stage, preparationTier\)/);
   assert.match(runnerSource, /rename\(stage, preparationRoot\)/);
+});
+
+// sc-22514 GUARD. `runCampaignEntryController` — the CONTAINED real-render driver — is reachable
+// only from the CLI arms, so no test in this suite executes it, and when the harness renamed its
+// runner the whole suite stayed green over a call site that would have thrown `runProviderPlan is
+// not defined` on a live canary run. The two properties below are source-level for that reason:
+// they cost nothing and they fail on exactly the drift that got past 38 green tests.
+test("the contained campaign driver calls the harness by the name the harness exports", async () => {
+  const runnerSource = await readFile(new URL("./run-ltx-safety-canary.mjs", import.meta.url), "utf8");
+  const harness = await readFile(new URL("./memory-calibration-harness.mjs", import.meta.url), "utf8");
+  const imported = new Set(
+    (/import \{([^}]*)\} from "\.\/memory-calibration-harness\.mjs";/.exec(runnerSource)?.[1] ?? "")
+      .split(",").map((name) => name.trim()).filter(Boolean),
+  );
+  assert.ok(imported.size, "the runner must import the harness by name");
+  for (const name of imported) {
+    assert.ok(
+      new RegExp(`export (async )?(function|const) ${name}\\b`).test(harness),
+      `${name} is imported from the harness but not exported by it`,
+    );
+  }
+  // Every harness call in the runner resolves to one of those imports — a renamed runner leaves a
+  // free identifier behind, which is a load-time-clean, run-time ReferenceError.
+  assert.match(runnerSource, /bundle = await capturePlannedCase\(\{\n\s+planned,/);
+  assert.ok(imported.has("capturePlannedCase"));
 });
 
 test("the runner refuses promotable or identity-drifted adapter output", () => {

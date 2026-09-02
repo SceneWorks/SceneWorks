@@ -1,7 +1,7 @@
 {
   "schemaVersion": 2,
   "generatedFrom": {
-    "inferenceRevision": "669f749b428ed65acfdfee917bcf601b8cf6db1c",
+    "inferenceRevision": "d27c9fcd6b6bb52dc7db6e674216cf57d7e0ed4e",
     "dumper": "cargo run -p sceneworks-worker --bin dump-engine-capabilities"
   },
   "modelMappings": {
@@ -208,6 +208,48 @@
       ]
     },
     {
+      "modelId": "ltx_2_5",
+      "mode": "extend_clip",
+      "engineIds": [
+        "ltx_2_5"
+      ]
+    },
+    {
+      "modelId": "ltx_2_5",
+      "mode": "first_last_frame",
+      "engineIds": [
+        "ltx_2_5"
+      ]
+    },
+    {
+      "modelId": "ltx_2_5",
+      "mode": "image_to_video",
+      "engineIds": [
+        "ltx_2_5"
+      ]
+    },
+    {
+      "modelId": "ltx_2_5",
+      "mode": "replace_person",
+      "engineIds": [
+        "ltx_2_5"
+      ]
+    },
+    {
+      "modelId": "ltx_2_5",
+      "mode": "text_to_video",
+      "engineIds": [
+        "ltx_2_5"
+      ]
+    },
+    {
+      "modelId": "ltx_2_5",
+      "mode": "video_bridge",
+      "engineIds": [
+        "ltx_2_5"
+      ]
+    },
+    {
       "modelId": "minimax_h3",
       "mode": "first_last_frame",
       "engineIds": [
@@ -330,6 +372,7 @@
     "krea_2_control": "krea_2_control",
     "krea_2_raw_lora": "krea_2_raw",
     "lens_turbo_lora": "lens",
+    "ltx_2_5_video_lora": "ltx_2_5",
     "ltx_video_lora": "ltx_2_3",
     "mage_flow_base_lora": "mage_flow_base",
     "sd3_5_large_lora": "sd3_5_large",

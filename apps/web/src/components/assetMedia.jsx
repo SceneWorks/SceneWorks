@@ -73,6 +73,43 @@ export function assetCanRenderAsVideo(asset) {
   return asset?.type === "video" || asset?.file?.mimeType?.startsWith("video/");
 }
 
+// Scene-linear HDR stills (OpenEXR, sc-18790). These ARE images — the mime starts with `image/`,
+// so assetCanRenderAsImage is true and every picker/grid treats them as stills — but no browser
+// decodes OpenEXR, so an <img> pointed at the stored file paints nothing.
+//
+// The stored bytes stay the deliverable (download must hand back the original float frame), so the
+// UI shows the server's tone-mapped PNG derivative instead and labels it as a proxy. That is why
+// this predicate exists separately from assetCanRenderAsImage: the two answer different questions —
+// "is this a still?" versus "can the browser paint the stored bytes?".
+export function assetIsHdrSource(asset) {
+  if (asset?.file?.mimeType === "image/x-exr") {
+    return true;
+  }
+  const path = asset?.file?.path ?? asset?.url ?? "";
+  return typeof path === "string" && path.toLowerCase().endsWith(".exr");
+}
+
+// URL to PAINT an asset with. Identical to assetUrl() for everything the browser can decode; for an
+// HDR source it is the server-rendered derivative, since the original would render as a broken
+// image. Never use this for downloads — assetUrl() is the original bytes, and for an EXR that
+// distinction is the whole point.
+export function assetDisplayUrl(asset) {
+  return assetIsHdrSource(asset) ? thumbnailUrl(asset) : assetUrl(asset);
+}
+
+// Native pixel size as the SERVER recorded it, or null.
+//
+// Deliberately not "decode the display URL and read naturalWidth". For an HDR source the display
+// URL is the bounded 384px derivative: its aspect ratio is right but its absolute size is not, so
+// a consumer that needs true dimensions — an edit job sizes its output from them — would silently
+// submit a downscaled job. The server sizes EXR from the file header at import (`imagesize`
+// handles OpenEXR), so the recorded value is both authoritative and free.
+export function assetNativeSize(asset) {
+  const width = Number(asset?.file?.width);
+  const height = Number(asset?.file?.height);
+  return width > 0 && height > 0 ? { width, height } : null;
+}
+
 // Audio outputs (SceneWorks Audio Studio, epic 13400 A5). A `type:"audio"` asset
 // (or any file whose mimeType is audio/*) is playable via an <audio> element —
 // there is no poster/thumbnail frame, so the shared results zone renders a
@@ -275,7 +312,20 @@ export const AssetMedia = React.forwardRef(function AssetMedia({ asset, classNam
     );
   }
   if (assetCanRenderAsImage(asset)) {
-    return <img alt="" className={className} ref={ref} src={src} />;
+    // An HDR source paints the server's tone-mapped derivative — no browser decodes OpenEXR, so
+    // `src` (the original float frame) would render as a broken image. The title says so, because
+    // a silently tone-mapped preview of a grading asset is a claim about the pixels that is not
+    // true. Download still hands back the original: it goes through assetUrl(), not this.
+    const hdr = assetIsHdrSource(asset);
+    return (
+      <img
+        alt=""
+        className={className}
+        ref={ref}
+        src={hdr ? assetDisplayUrl(asset) : src}
+        title={hdr ? "HDR source (OpenEXR) — preview is a tone-mapped proxy; download is the original scene-linear frame" : undefined}
+      />
+    );
   }
   return <span className={className}>{asset.type}</span>;
 });

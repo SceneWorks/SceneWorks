@@ -21,8 +21,6 @@ glob = "0.3"
 # cross-platform (the image-job pipeline + its tests run everywhere; only real MLX inference
 # is macOS-gated). Feature set is the workspace union (sc-15052) — it always effectively was.
 image = { workspace = true }
-quick-xml = "0.41"
-resvg = { version = "0.45", default-features = false }
 # CPU raster for DWPose skeleton rendering (epic 3018, sc-3028): filled polygons
 # (rotated-ellipse limbs), circles (joints/points), for the Z-Image strict-pose
 # ControlNet. Pure-Rust + cross-platform (the renderer + its tests run everywhere;
@@ -68,7 +66,7 @@ sceneworks-image-quality = { path = "../sceneworks-image-quality" }
 [features]
 # Native Candle inference stays opt-in because CUDA toolchain/runtime requirements do not belong in
 # the ordinary desktop build. The bundle owns the complete provider and LLM composition.
-backend-candle = ["dep:runtime-cuda", "dep:candle-gen", "dep:ort"]
+backend-candle = ["dep:runtime-cuda", "dep:candle-gen", "dep:candle-gen-ltx", "dep:ort"]
 
 [target.'cfg(target_os = "macos")'.dependencies]
 # DWPose whole-body pose detection in Rust (epic 3482, sc-3487): RTMW (yolox_m +
@@ -97,6 +95,9 @@ ort = { workspace = true, features = ["coreml"] }
 # peak RSS; the exact ratios are not pinned down because the box was under heavy concurrent load
 # (sc-13501 carries the clean numbers).
 runtime-macos = { git = "https://github.com/SceneWorks/inference", rev = "b7ef9254e047d326d232f74e422a2e764e2488a3", features = ["audio-metal"] }
+# Direct weights-free LTX-2.5 training preflight. The runtime bundle owns execution, while this
+# public header/request validator lets dry-run fail before any base model is loaded.
+mlx-gen-ltx = { git = "https://github.com/SceneWorks/inference", rev = "b7ef9254e047d326d232f74e422a2e764e2488a3" }
 # Retained direct dependency: SceneWorks' native person detector uses MLX tensor primitives.
 mlx-rs = { package = "pmetal-mlx-rs", git = "https://github.com/michaeltrefry/mlx-rs", rev = "bd8f0e3c757195b17b2c34fae3073ab826fb7bc1" }
 
@@ -107,6 +108,8 @@ runtime-cuda = { git = "https://github.com/SceneWorks/inference", rev = "b7ef925
 # lets SceneWorks dry-run preflight use the exact optimizer/timestep/bias/loss parser the production
 # family trainers use instead of maintaining a second, inevitably drifting enum mirror.
 candle-gen = { git = "https://github.com/SceneWorks/inference", rev = "b7ef9254e047d326d232f74e422a2e764e2488a3", optional = true }
+# Candle parity for the same weights-free LTX-2.5 prepared-request validation.
+candle-gen-ltx = { git = "https://github.com/SceneWorks/inference", rev = "b7ef9254e047d326d232f74e422a2e764e2488a3", optional = true }
 # DWPose whole-body pose detection off-Mac (sc-5496, epic 5482) — the Windows/Linux/CUDA sibling of the
 # macOS `ort`/CoreML path (sc-3487). Same RTMW detector (yolox_m + rtmw-dw-x-l) and the same pure
 # pre/post math in `pose_jobs.rs`; only the execution provider differs (CUDA here, CoreML on Mac), with

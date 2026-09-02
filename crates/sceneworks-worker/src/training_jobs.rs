@@ -949,6 +949,21 @@ fn validate_weights_free_training_request(
         WorkerError::InvalidPayload(format!("{engine_id} trainer rejected the plan: {error}"))
     })?;
 
+    if plan.target.base_model == "ltx_2_5" {
+        #[cfg(target_os = "macos")]
+        mlx_gen_ltx::training::validate_ltx25_training_request(request).map_err(|error| {
+            WorkerError::InvalidPayload(format!(
+                "{engine_id} trainer rejected the LTX-2.5 plan before model load: {error}"
+            ))
+        })?;
+        #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+        candle_gen_ltx::training::validate_ltx25_training_request(request).map_err(|error| {
+            WorkerError::InvalidPayload(format!(
+                "{engine_id} trainer rejected the LTX-2.5 plan before model load: {error}"
+            ))
+        })?;
+    }
+
     validate_new_family_request(plan, engine_id, request)?;
     Ok(())
 }
@@ -1268,7 +1283,13 @@ pub(crate) fn engine_trainer_id_for(kernel: &str, base_model: &str) -> Option<&'
             "sd3_5_medium" => Some("sd3_5_medium"),
             _ => None,
         },
-        "ltx_mlx_lora" => Some("ltx_2_3"),
+        // LTX-2.3 and 2.5 share the routed kernel but not a trainer identity. The 2.5 engine path
+        // has a stricter adapter contract and a Gemma-4/self-contained base layout.
+        "ltx_mlx_lora" => match base_model {
+            "ltx_2_3" | "ltx_2_3_eros" => Some("ltx_2_3"),
+            "ltx_2_5" => Some(ltx_2_5_trainer_id()),
+            _ => None,
+        },
         // Dense Wan2.2-TI2V-5B.
         "wan_lora" => (base_model == "wan_2_2").then_some("wan2_2_ti2v_5b"),
         // A14B dual-expert MoE; the T2V/I2V base model picks the trainer.
@@ -1304,6 +1325,18 @@ pub(crate) fn engine_trainer_id_for(kernel: &str, base_model: &str) -> Option<&'
             _ => None,
         },
         _ => None,
+    }
+}
+
+/// The registered backend-local identity for LTX-2.5 training.
+fn ltx_2_5_trainer_id() -> &'static str {
+    #[cfg(target_os = "macos")]
+    {
+        "ltx_2_5"
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        "ltx_2_5_distilled"
     }
 }
 
@@ -1613,7 +1646,8 @@ enum TrainEvent {
 /// resolve the bundled sibling and thread it on, letting a self-contained install train without a
 /// separate `mlx-community/gemma-3-12b-it-bf16` download (sc-9989). `None` for every other family (TE
 /// lives inside the weights dir) and for a legacy LTX conversion with no sibling or an operator
-/// `$LTX_GEMMA_DIR`. The same resolver is used by MLX and candle so the turnkey layout is portable.
+/// `$LTX_GEMMA_DIR`. LTX-2.5 self-contains Gemma-4 in the selected tier, so it deliberately keeps
+/// the engine's own resolution. The same resolver is used by MLX and candle.
 #[cfg(any(
     target_os = "macos",
     all(not(target_os = "macos"), feature = "backend-candle")
@@ -2705,6 +2739,7 @@ mod tests {
         let bare = root.join("no_sibling").join("q4");
         std::fs::create_dir_all(&bare).unwrap();
         assert!(training_text_encoder("ltx_2_3", &bare).is_none());
+        assert!(training_text_encoder("ltx_2_5", &tier).is_none());
     }
 
     fn test_settings(data_dir: &Path) -> Settings {
@@ -3238,6 +3273,10 @@ mod tests {
             finalized_checkpointing("ltx_mlx_lora", "ltx_2_3"),
             "LTX-2.3 22B forces gradient checkpointing on candle"
         );
+        assert!(
+            finalized_checkpointing("ltx_mlx_lora", "ltx_2_5"),
+            "LTX-2.5 22B forces gradient checkpointing on candle"
+        );
         let ltx_plan = parse(plan_json(
             dir.path(),
             "ltx_mlx_lora",
@@ -3586,6 +3625,11 @@ mod tests {
     ))]
     #[test]
     fn engine_trainer_id_maps_native_families_and_rejects_the_rest() {
+        let ltx_2_5_trainer = if cfg!(target_os = "macos") {
+            "ltx_2_5"
+        } else {
+            "ltx_2_5_distilled"
+        };
         let cases: &[(&str, &str, Option<&str>)] = &[
             ("z_image_lora", "z_image_turbo", Some("z_image_turbo")),
             ("sdxl_lora", "sdxl", Some("sdxl")),
@@ -3595,6 +3639,8 @@ mod tests {
             ("sdxl_lora", "illustrious_xl_v1", Some("sdxl")),
             ("sdxl_lora", "illustrious_xl_v2", Some("sdxl")),
             ("ltx_mlx_lora", "ltx_2_3", Some("ltx_2_3")),
+            ("ltx_mlx_lora", "ltx_2_5", Some(ltx_2_5_trainer)),
+            ("ltx_mlx_lora", "ltx_2_3_eros", Some("ltx_2_3")),
             ("wan_lora", "wan_2_2", Some("wan2_2_ti2v_5b")),
             ("wan_moe_lora", "wan_2_2_t2v_14b", Some("wan2_2_t2v_14b")),
             ("wan_moe_lora", "wan_2_2_i2v_14b", Some("wan2_2_i2v_14b")),
@@ -4012,7 +4058,13 @@ mod tests {
             &[&image.display().to_string()],
         );
         value["config"]["advanced"]["ltxWorkflow"] = json!("t2v_lora");
-        value["config"]["advanced"]["ltxValidation"] = json!({ "frames": 89 });
+        value["config"]["advanced"]["ltxValidation"] = json!({
+            "width": 960,
+            "height": 544,
+            "frames": 89,
+            "fps": 24,
+            "steps": 30
+        });
         let plan = parse(value);
         let cfg = map_training_config(&plan.config);
         assert_eq!(cfg.rank, 16);

@@ -18,9 +18,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
-use crate::memory_calibration::StrategyRung;
+use crate::memory_calibration::{Ltx25Decoder, Ltx25TransformerVariant, StrategyRung};
 
-pub const VIDEO_MEMORY_CURVE_SCHEMA_VERSION: u32 = 4;
+pub const VIDEO_MEMORY_CURVE_SCHEMA_VERSION: u32 = 5;
 pub const PACKAGED_VIDEO_MEMORY_CURVES: &str =
     include_str!("../../../docs/generated/video-memory-curves.json");
 /// Immutable evidence sources compiled alongside the promoted curve bundle. Paths and record ids
@@ -85,6 +85,8 @@ pub struct VideoMemoryCurve {
     pub provider: String,
     pub backend: VideoCurveBackend,
     pub tier: String,
+    pub transformer_variant: Ltx25TransformerVariant,
+    pub decoder: Ltx25Decoder,
     pub mode: String,
     /// Exact reference carrier and count measured by this curve. Future I2V/reference stories add
     /// their own rows; this prevents the reference-free surface lending its fitted peak to them.
@@ -200,6 +202,8 @@ pub struct VideoCurveQuery<'a> {
     pub provider: &'a str,
     pub backend: VideoCurveBackend,
     pub tier: &'a str,
+    pub transformer_variant: Ltx25TransformerVariant,
+    pub decoder: Ltx25Decoder,
     pub mode: &'a str,
     pub reference_shape: &'a str,
     pub reference_count: u32,
@@ -263,6 +267,8 @@ impl VideoMemoryCurveBundle {
                 && curve.provider == query.provider
                 && curve.backend == query.backend
                 && curve.tier == query.tier
+                && curve.transformer_variant == query.transformer_variant
+                && curve.decoder == query.decoder
                 && curve.mode == query.mode
                 && curve.reference_shape == query.reference_shape
                 && curve.reference_count == query.reference_count
@@ -387,13 +393,15 @@ fn validate_video_memory_curve_bundle_ref(
             return Err(format!("duplicate video-memory curve id {:?}", curve.id));
         }
         let selector = format!(
-            "{}\0{}\0{}\0{}\0{}\0{}\0{}\0{}\0{}\0{:?}\0{:?}\0{:?}\0{:?}\0{}\0{}\0{}\0{:?}\0{}",
+            "{}\0{}\0{}\0{}\0{}\0{}\0{:?}\0{:?}\0{}\0{}\0{}\0{:?}\0{:?}\0{:?}\0{:?}\0{}\0{}\0{}\0{:?}\0{}",
             curve.model_id,
             curve.model_family,
             curve.route,
             curve.provider,
             curve.backend.as_key(),
             curve.tier,
+            curve.transformer_variant,
+            curve.decoder,
             curve.mode,
             curve.reference_shape,
             curve.reference_count,
@@ -731,12 +739,40 @@ fn source_overlay(record: &Value) -> Option<&str> {
     }
 }
 
+fn source_pipeline_identity(record: &Value) -> Option<(Ltx25TransformerVariant, Ltx25Decoder)> {
+    match (
+        value_at_str(record, &["target", "transformerVariant"]),
+        value_at_str(record, &["target", "decoder"]),
+    ) {
+        (Some("distilled"), Some("conv")) => {
+            Some((Ltx25TransformerVariant::Distilled, Ltx25Decoder::Conv))
+        }
+        (Some("distilled"), Some("diffvae")) => {
+            Some((Ltx25TransformerVariant::Distilled, Ltx25Decoder::DiffVae))
+        }
+        (Some("dev"), Some("conv")) => Some((Ltx25TransformerVariant::Dev, Ltx25Decoder::Conv)),
+        (Some("dev"), Some("diffvae")) => {
+            Some((Ltx25TransformerVariant::Dev, Ltx25Decoder::DiffVae))
+        }
+        // The immutable SC-18810 LTX-2.3 corpus predates these fields. Its exact catalog model id
+        // names the only historical pipeline. Do not broaden this into inference from rung,
+        // load-shape, adapters, or decode parameters.
+        (None, None) if value_at_str(record, &["target", "modelId"]) == Some("ltx_2_3") => {
+            Some((Ltx25TransformerVariant::Distilled, Ltx25Decoder::Conv))
+        }
+        _ => None,
+    }
+}
+
 fn source_record_matches_curve(
     record: &Value,
     curve: &VideoMemoryCurve,
     model_families: &BTreeMap<String, String>,
 ) -> bool {
     let Some(reference_count) = source_reference_count(record) else {
+        return false;
+    };
+    let Some((transformer_variant, decoder)) = source_pipeline_identity(record) else {
         return false;
     };
     value_at_str(record, &["target", "modelId"]) == Some(curve.model_id.as_str())
@@ -746,6 +782,8 @@ fn source_record_matches_curve(
         && value_at_str(record, &["target", "provider"]) == Some(curve.provider.as_str())
         && value_at_str(record, &["backend"]) == Some(curve.backend.as_key())
         && value_at_str(record, &["target", "tier"]) == Some(curve.tier.as_str())
+        && transformer_variant == curve.transformer_variant
+        && decoder == curve.decoder
         && value_at_str(record, &["target", "mode"]) == Some(curve.mode.as_str())
         && source_reference_shape(record, reference_count) == Some(curve.reference_shape.as_str())
         && reference_count == curve.reference_count
@@ -994,6 +1032,8 @@ mod tests {
             provider: "ltx_2_3",
             backend: VideoCurveBackend::Mlx,
             tier: "q8",
+            transformer_variant: Ltx25TransformerVariant::Distilled,
+            decoder: Ltx25Decoder::Conv,
             mode: "text_to_video",
             reference_shape: "none",
             reference_count: 0,
@@ -1034,7 +1074,7 @@ mod tests {
             .expect("q8 LTX curve matches");
         assert_eq!(
             evaluation.curve_id,
-            "ltx_2_3:ltx-video:ltx_2_3:ltx_2_3:mlx:q8:text_to_video:refnone-0:fps30:none:staged_residency:eager_materialization:b1:abi3:single_pass:87a27d5dcab7:sc-18808-ltx-2-3-mlx-t2v-staged-capture-v1"
+            "ltx_2_3:ltx-video:ltx_2_3:ltx_2_3:mlx:q8:distilled:conv:text_to_video:refnone-0:fps30:none:staged_residency:eager_materialization:b1:abi3:single_pass:87a27d5dcab7:sc-18808-ltx-2-3-mlx-t2v-staged-capture-v1"
         );
         assert!(evaluation.phases.conditioning > evaluation.phases.denoise);
         assert!(evaluation.phases.denoise > evaluation.phases.decode);
@@ -1161,6 +1201,17 @@ mod tests {
         let mut query = packaged_query();
         query.tier = "bf16";
         assert!(bundle.evaluate(query).is_none(), "unsupported tier");
+
+        let mut query = packaged_query();
+        query.transformer_variant = Ltx25TransformerVariant::Dev;
+        assert!(
+            bundle.evaluate(query).is_none(),
+            "crossed transformer pipeline"
+        );
+
+        let mut query = packaged_query();
+        query.decoder = Ltx25Decoder::DiffVae;
+        assert!(bundle.evaluate(query).is_none(), "crossed decoder pipeline");
 
         let mut query = packaged_query();
         query.model_id = "ltx_2_3_eros";
