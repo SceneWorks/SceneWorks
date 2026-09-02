@@ -1,7 +1,7 @@
 {
-  "_comment": "Exact audit of production include_str!/include_bytes! sites and known hand-ports in inference revision 703d10d9. The digest is checked by check-license-coverage.mjs; source changes require this audit inventory to be refreshed. Tests/fixtures are outside this production inventory. Revision 703d10d9 includes the packed-q8 candle tier promotion (PR #908) and the terminal-campaign case trim to the published runnable bundles (PR #909). The exact scanner records 667 provenance candidates and 97 production-Rust crate prefixes — both unchanged from d27c9fcd. Candidate movement is limited to git blob hashes; normalized provenance-marker hashes are unchanged. Current report-only licensing findings must be read from the checker output; this summary does not freeze their counts.",
-  "inferenceRevision": "703d10d916e80a5fedd88be318159cb0ff553184",
-  "auditDigest": "7700809c203c2f8e9b99843ab828739e5e382f913465dbf9d9ed9c0f444444e0",
+  "_comment": "Exact audit of production include_str!/include_bytes! sites and known hand-ports in inference revision 670dc1f4. The digest is checked by check-license-coverage.mjs; source changes require this audit inventory to be refreshed. Tests/fixtures are outside this production inventory. Revision 670dc1f4 adds the sc-22414 GPU-view coherence guard (PR #914: mlx-llm primitives/coherence.rs mirrored as mlx-gen coherence.rs, first-party original, no ported upstream content) over 703d10d9. The exact scanner records 667 provenance candidates and 97 production-Rust crate prefixes \u2014 both unchanged from 703d10d9. Candidate movement is limited to git blob hashes; normalized provenance-marker hashes are unchanged. Current report-only licensing findings must be read from the checker output; this summary does not freeze their counts.",
+  "inferenceRevision": "670dc1f4418859cf241471987a0a050fedc108c5",
+  "auditDigest": "1e468e3f2bd1a63a38856c11a2bf788476ba905de0af91ce49da065aeed024cb",
   "artifacts": [
     {
       "id": "cmudict",
@@ -17,12 +17,12 @@
   "provenanceScan": {
     "scanner": "scripts/scan-inference-provenance.mjs",
     "candidateList": "config/inference-provenance-candidates.tsv",
-    "revision": "703d10d916e80a5fedd88be318159cb0ff553184",
+    "revision": "670dc1f4418859cf241471987a0a050fedc108c5",
     "pathFilter": "production .rs; exclude tests, testdata, benches, examples, and _vendor path segments",
     "markerRegex": "faithful ... port(s), ported from, port(s) of, vendor(s)/vendored, transcribed, copied ... verbatim, adapted from, mirror(s|ed|ing) ... <port-object>, derived from ... <port-object>, reimplemented/reimplementation from|of, translated/transliterated from, from the reference (not reference-), original implementation|repo(sitory), based on ... <port-object>, follow(s|ing) ... <port-object>, reimplements ... <port-object>, rewrite of ... <port-object>, model(l)ed after ... <port-object>, ported to ... from, 1:1 with ... <port-object>, line-for-line ... <port-object> (case-insensitive; <port-object> = reference(not followed by -)|upstream|python|pytorch|torch|diffusers|comfy(ui)|transformers|implementation). `original` is NOT a bare port-object and `followed` is excluded: both produced verified false positives on first-party prose (sc-15191 review).",
     "normalization": "matched marker text lowercased, internal whitespace collapsed, sorted, newline joined",
     "matchedFiles": 667,
-    "populationSha256": "caf8da8bd703bd9dcaa60f9e4ceb6d973d8417a9864313b049f997c33172f35a"
+    "populationSha256": "58c26506b7d42b27b81adf589de5a741dab2d85758deb049cd232e18053143b3"
   },
   "portedSourceAreas": [
     {
@@ -830,7 +830,7 @@
   "crateCoverage": {
     "scanner": "scripts/scan-inference-provenance.mjs",
     "crateList": "config/inference-crate-prefixes.txt",
-    "revision": "703d10d916e80a5fedd88be318159cb0ff553184",
+    "revision": "670dc1f4418859cf241471987a0a050fedc108c5",
     "rule": "Every production-Rust crate prefix in the pinned revision must be covered by a portedSourceAreas entry OR carry an explicit crateDispositions decision. Anything else FAILS check-license-coverage.mjs.",
     "cratePrefixes": 97,
     "cratePopulationSha256": "993023a1f5832a7402f3c6aaf5989122b8d12436d69b5fd840be84ba90b329f2"
