@@ -6,7 +6,7 @@ import path from "node:path";
 import test from "node:test";
 import { materializeBundle } from "./starvector-terminal-case-bundle.mjs";
 
-const pin = "b7ef9254e047d326d232f74e422a2e764e2488a3", sha = (value) => createHash("sha256").update(value).digest("hex");
+const pin = "8b560e461ccae796da93f288b119fec358884475", sha = (value) => createHash("sha256").update(value).digest("hex");
 test("source bundle refuses row identity drift and seals the resulting bytes", async () => {
   const root = await mkdtemp(path.join(tmpdir(), "starvector-bundle-")), assets = path.join(root, "assets"), output = path.join(root, "bundle.json"); await mkdir(assets);
   await writeFile(path.join(assets, "source.svg"), "svg"); await writeFile(path.join(assets, "input.png"), "input"); await writeFile(path.join(assets, "reference.png"), "reference"); await writeFile(path.join(assets, "preview.png"), "preview");
