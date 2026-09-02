@@ -2,9 +2,9 @@
   "schemaVersion": 4,
   "generatedBy": "cargo run -p sceneworks-core --bin dump-backend-capability-matrix",
   "summary": {
-    "modelCount": 95,
+    "modelCount": 97,
     "importedFamilyCount": 4,
-    "cellCount": 947,
+    "cellCount": 953,
     "mlxOnlyCellCount": 44,
     "candleOnlyCellCount": 51,
     "exceptionCount": 10
