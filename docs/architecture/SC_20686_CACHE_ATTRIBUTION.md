@@ -9,8 +9,8 @@ as a reusable cache opportunity.
 
 | Family | Route | K/V creation and position handling | Reuse boundary |
 | --- | --- | --- | --- |
-| FLUX.2 Klein | `candle-gen-flux2` Klein caption-upsample route | `crates/media/candle-gen/candle-gen-flux2/src/text_encoder.rs:171-198` (`forward_step` creates q/k/v, applies `rotary.apply_at`, then `ContiguousKvCache::update`); `:484-504` drives every layer | `:524` creates one decoder cache per generation; repeated `generate_from_embeds` calls recompute the decoder cache, so only a separately proven prompt/conditioning reuse row may count. Self-attention is excluded. |
-| Wan | `candle-gen-wan` A14B T2V/I2V route | `crates/media/candle-gen/candle-gen-wan/src/wan14b.rs:533-570` (`denoise_range` prepares cross K/V before the loop and reuses it across denoise steps); `:1025-1056` owns lazy component reuse | `prepare_cross_kv` at `:552-554` is request-scoped and reused within the denoise range; changing latent/self-attention state is recomputed per step and excluded. |
+| FLUX.2 Klein | `flux2_klein_9b_edit` reference edit | `candle-gen-flux2/src/transformer.rs:365-381` creates image/text K/V for `DoubleAttention`; `sc20686_observer.rs:620-621` isolates the exact reference slice | `transformer.rs:393` consumes the dense joint context on every denoise evaluation. No persistent reference-K/V reader exists, so this route is a measured no-go rather than a promotable cache. |
+| Wan | TI2V-5B, T2V-14B, I2V-14B, `wan_vace`, and VACE-Fun 14B | `candle-gen-wan/src/transformer.rs:347` registers each prepared cross-K/V cache and `:413` records its reads | Each request-scoped cache is reused across denoise steps and released by its owning prepared-cache lifetime; latent self-attention remains excluded. |
 
 The paired inference reducer is `scripts/sc20686_cache_attribution.py`. It accepts injected runtime
 rows only, rejects inferred rows and self-attention, applies the tracker-recorded thresholds, and
@@ -18,15 +18,53 @@ produces separate family decisions. No real-weight claim or Go/No-go is emitted 
 
 ## Campaign producer boundary
 
-The paired campaign producer is `inference/scripts/sc20686_campaign_adapter.py` at inference commit
-`f9a0ab078b906cb0b46c56b24d16bfebb8ea5138`. It is inert unless called with `--campaign`; normal
-generation has no observer or receipt overhead. For every arm the adapter creates an adapter-owned
-private `events.jsonl` file and passes its path with `--sc20686-events`; provider stdout and stderr
-are sealed only as diagnostics and are never parsed as event evidence. The adapter rejects a missing,
-non-JSONL, or carriage-return-containing event stream before requiring product-owned metadata,
-creation/reuse/invalidation/release, allocator samples, and process samples, then atomically writes
-the canonical raw row and its SHA-256 sidecar. Missing geometry, identity, or explicit campaign mode
-also fails closed.
+The paired producer is `inference/scripts/sc20686_campaign_adapter.py`. It deliberately does not
+pin a fixed inference commit in this document: every run requires
+`--inference-revision <40-hex-commit>`, verifies that value against the inference checkout's
+`git rev-parse HEAD`, and seals it into the resolved inputs, command transcript, observer metadata,
+and row receipt. The adapter rechecks the checkout around every child run. It is inert unless called
+with `--campaign`; normal generation has no observer or receipt overhead.
+
+For every arm, the adapter creates a separate `sealed-run` directory, uses it as the child working
+directory, and passes absolute sibling paths ending in `sealed-run/events.jsonl` for
+`--sc20686-events` and `sealed-run/media` for `--out`. This keeps default or explicit images and
+video frames inside the exact child-run closure. The reducer rejects command evidence when the event
+and media paths do not share that isolated parent. Provider stdout and stderr are sealed only as
+diagnostics and are never parsed as event evidence.
+
+The adapter rejects a missing, non-JSONL, or carriage-return-containing event stream before
+requiring product-owned metadata, creation/reuse/invalidation/release, allocator samples, and
+process samples, then atomically writes the canonical raw row and its SHA-256 sidecar. Missing
+geometry, identity, exact source binding, product residency, or explicit campaign mode also fails
+closed.
+
+### Independent source and model provenance
+
+`source_ref` identifies the verified inference repository commit. It is independent from both
+`model_snapshot_revision`, which identifies the immutable Hugging Face model revision, and
+`model_snapshot_sha256`, which hashes the exact selected model/tier contents. A selected FLUX or
+VACE model root may be either a component/tier directory containing `config.json`, or a Diffusers
+pipeline root containing `model_index.json` plus component `config.json` files. For a nested tier
+such as `<snapshot-revision>/q4`, the revision is resolved from the nearest two ancestors while the
+content hash remains scoped to `q4`; unrelated sibling tiers cannot change or satisfy that identity.
+
+### Product-equivalent residency
+
+`residency_strategy` is a sealed route axis and is passed to the real entrypoint as
+`--sc20686-residency`. The entrypoint applies it to `LoadSpec`; FLUX.2 edit additionally enables its
+request-scoped generation staging. The exact SceneWorks-equivalent map is:
+
+| Product route | Residency |
+| --- | --- |
+| `flux2_klein_9b_edit` | `sequential` |
+| `wan2_2_ti2v_5b` | `sequential` |
+| `wan2_2_t2v_14b` | `sequential` |
+| `wan2_2_i2v_14b` | `sequential` |
+| `wan_vace` | `resident` |
+| `wan2_2_vace_fun_14b` | `sequential` |
+
+The manifest, adapter, entrypoints, observers, receipts, and reducer reject any other route/strategy
+pair rather than accepting evidence from a non-product memory shape.
 
 The Rust entrypoints require a dedicated event file when campaign mode is selected, so provider
 progress output cannot corrupt the observer transcript. The default observer remains `None`, and
@@ -34,25 +72,27 @@ self-attention is never emitted as a reusable event.
 
 ### FLUX.2 Klein route limitation
 
-The supported reference-image route is `Flux2Edit::generate_inner` at
-`crates/media/candle-gen/candle-gen-flux2/src/edit_provider.rs:580-647`: references are VAE-encoded,
-then concatenated into the joint `[target, refs]` stream at `:630` and re-concatenated for every
-denoise prediction at `:685-686`. It does not create a persistent reference-image K/V cache; the
-existing `ContiguousKvCache` hook in `text_encoder.rs` is caption-upsample self-attention and is
-not valid evidence for this story. This is the evidence-based SC-20686 No-go boundary: no persistent
-reference-K/V productization or promotable FLUX cache is claimed unless a product-owned persistent
-cross-attention K/V boundary and reader are actually introduced and measured.
+The supported reference-image route enters `Flux2Edit::generate_inner` at
+`crates/media/candle-gen/candle-gen-flux2/src/edit_provider.rs:506`, with campaign activation at
+`:524`. The edit transformer's `DoubleAttention` projects image K/V at
+`transformer.rs:365-367`, projects the text additions at `:376-381`, and evaluates their dense joint
+attention at `:393`. The observer isolates the reference portion at
+`sc20686_observer.rs:620-621`. It does not create a persistent reference-image K/V cache or packed
+reader. Caption-upsample `ContiguousKvCache` self-attention is outside this route and is never
+campaign evidence. This is the evidence-based SC-20686 no-go boundary: no persistent reference-K/V
+productization or promotable FLUX cache is claimed unless a product-owned persistent cross-attention
+K/V boundary and reader are actually introduced and measured.
 
 ### Wan variant closure
 
-The registered Wan generator surface is asserted in
-`crates/media/candle-gen/candle-gen-wan/src/lib.rs:1488-1492`: TI2V-5B, T2V-14B, I2V-14B,
-`wan_vace`, and VACE-Fun 14B. The shared cross-K/V ownership is
-`transformer.rs:389-439` for block projection/read and `transformer.rs:621-653` for the
-multi-block prepared cache; the denoise lifecycle is `wan14b.rs:533-581`. The checked-in
-coverage manifest lists all five IDs (plus the historical adapter alias) and requires exact
-geometry axes before reduction. No terminal family decision is valid until each listed variant
-has a real full-generation row for its representative geometry coordinates.
+The registered campaign surface is asserted by `candle-gen-wan/src/sc20686_observer.rs:43-48`:
+TI2V-5B, T2V-14B, I2V-14B, `wan_vace`, and VACE-Fun 14B. Shared cross-K/V ownership registers caches
+at `transformer.rs:347`, records reads at `:413`, and releases them with the prepared-cache owner.
+Product activation occurs in `lib.rs:1147`, `wan14b.rs:1171`, `model_vace.rs:471`, and
+`model_vace_fun.rs:576`. The checked-in coverage manifest lists all five IDs and requires exact
+geometry axes before reduction. No terminal family decision is valid until each listed variant has
+a real full-generation row for every representative geometry coordinate and its matching deliberate
+cancellation arm.
 
 Thresholds: opportunity ≥512 MiB and ≥5% peak with reuse ≥2; projected saving ≥256 MiB and ≥3%
 peak without replacement transient; runtime-only opportunity ≥5% generation time.
@@ -62,10 +102,10 @@ available on an uncontended runner. No measurement is fabricated by this source-
 
 ### Wan producer context is wired
 
-The former Wan producer API blocker is superseded by the live runtime context in inference commit
-`f9a0ab078b906cb0b46c56b24d16bfebb8ea5138`. `sc20686_observer::activate_requested` now activates
-only after the product route has reached its snapshot-backed runtime, and
-`bind_cross_kv_geometry` threads the exact product-owned cross-K/V geometry into the observer before
-it emits metadata. The five registered Wan routes therefore emit lifecycle, allocator, and immutable
-identity facts from their real producer context; caller-authored JSON or configuration remains
-non-evidence and is rejected by the adapter and reducer.
+The former Wan producer API blocker is superseded by the live runtime context sealed to each run's
+verified inference revision. `sc20686_observer::activate_requested` activates only after the product
+route has reached its snapshot-backed runtime, and `bind_cross_kv_geometry` threads the exact
+product-owned cross-K/V geometry into the observer before it emits metadata. The five registered Wan
+routes therefore emit lifecycle, allocator, model identity, source identity, and residency facts
+from their real producer context; caller-authored JSON remains non-evidence and is rejected by the
+adapter and reducer.
