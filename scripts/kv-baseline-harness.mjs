@@ -9,8 +9,8 @@ import { cp, mkdir, readFile, readdir, rename, rm, stat, unlink, writeFile } fro
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
-export const SCHEMA_VERSION = 3;
-export const HARNESS_VERSION = "sc-20671-kv-baseline-v3";
+export const SCHEMA_VERSION = 4;
+export const HARNESS_VERSION = "sc-20671-kv-baseline-v4";
 export const CONTRACT_PATH = "config/kv-baseline-quality-contract.json";
 export const POST_RELEASE_PHYS_FOOTPRINT_TOLERANCE_BYTES = 512 * 1024 * 1024;
 
@@ -73,8 +73,25 @@ const TIMING_FIELDS = [
   "ttftMs",
   "firstTokenMs",
   "decodeTokensPerSecond",
-  "coldCompileMs",
-  "warmCompileMs",
+];
+const COMPILE_ATTRIBUTION_FIELDS = [
+  "method",
+  "operation",
+  "source",
+  "probeDurationsMs",
+  "probeEvidence",
+  "firstDispatchMs",
+  "steadyDispatchMs",
+  "firstDispatchExcessMs",
+];
+const COMPILE_PROBE_EVIDENCE_FIELDS = [
+  "index",
+  "operation",
+  "source",
+  "matrixCoordinate",
+  "setupMs",
+  "dispatchMs",
+  "operationEvidenceSha256",
 ];
 const ERROR_QUALITY_FIELDS = ["parityMaxError", "perplexityDelta"];
 const AGREEMENT_QUALITY_FIELDS = [
@@ -191,6 +208,11 @@ function checkedProduct(values, name) {
 
 function positiveNumber(value, name) {
   if (finite(value, name) <= 0) fail(`${name} must be positive`);
+  return value;
+}
+
+function nonnegativeNumber(value, name) {
+  if (finite(value, name) < 0) fail(`${name} must be nonnegative`);
   return value;
 }
 
@@ -464,6 +486,83 @@ function validateTimingSample(sample, index) {
   const name = `timings.samples[${index}]`;
   exactKeys(sample, TIMING_FIELDS, name);
   for (const field of TIMING_FIELDS) positiveNumber(sample[field], `${name}.${field}`);
+}
+
+function compileOperation(matrix) {
+  if (matrix.requestMode === "supported-batch") return "supported-batch";
+  if (matrix.prefillMode === "chunked") return "chunked-prefix-reuse";
+  return "single-shot-generation";
+}
+
+function matrixCoordinate(matrix) {
+  return [
+    matrix.family,
+    matrix.contextBand,
+    matrix.requestMode,
+    matrix.prefillMode,
+    matrix.processTemperature,
+  ].join("-");
+}
+
+function validateCompileAttribution(attribution, matrix) {
+  exactKeys(attribution, COMPILE_ATTRIBUTION_FIELDS, "timings.compileAttribution");
+  if (attribution.method !== "first-dispatch-minus-steady-v1") {
+    fail("timings.compileAttribution.method is not the frozen attribution method");
+  }
+  const expectedOperation = compileOperation(matrix);
+  if (attribution.operation !== expectedOperation) {
+    fail("timings.compileAttribution.operation disagrees with the matrix coordinate");
+  }
+  const cold = matrix.processTemperature === "cold";
+  const expectedSource = cold ? "measured-repeats" : "warmup-suites";
+  const expectedProbes = cold ? 5 : 2;
+  if (attribution.source !== expectedSource) {
+    fail("timings.compileAttribution.source disagrees with process temperature");
+  }
+  if (!Array.isArray(attribution.probeDurationsMs)
+    || attribution.probeDurationsMs.length !== expectedProbes) {
+    fail(`timings.compileAttribution requires exactly ${expectedProbes} probe durations`);
+  }
+  attribution.probeDurationsMs.forEach((duration, index) => {
+    positiveNumber(duration, `timings.compileAttribution.probeDurationsMs[${index}]`);
+  });
+  if (!Array.isArray(attribution.probeEvidence)
+    || attribution.probeEvidence.length !== expectedProbes) {
+    fail(`timings.compileAttribution requires exactly ${expectedProbes} probe evidence rows`);
+  }
+  const expectedCoordinate = matrixCoordinate(matrix);
+  attribution.probeEvidence.forEach((evidence, index) => {
+    const name = `timings.compileAttribution.probeEvidence[${index}]`;
+    exactKeys(evidence, COMPILE_PROBE_EVIDENCE_FIELDS, name);
+    nonnegativeInteger(evidence.index, `${name}.index`);
+    if (evidence.index !== index) fail(`${name}.index is not sequential`);
+    if (evidence.operation !== attribution.operation) fail(`${name}.operation is not bound to attribution`);
+    if (evidence.source !== attribution.source) fail(`${name}.source is not bound to attribution`);
+    if (evidence.matrixCoordinate !== expectedCoordinate) fail(`${name}.matrixCoordinate is not bound to matrix`);
+    nonnegativeNumber(evidence.setupMs, `${name}.setupMs`);
+    positiveNumber(evidence.dispatchMs, `${name}.dispatchMs`);
+    if (evidence.dispatchMs !== attribution.probeDurationsMs[index]) {
+      fail(`${name}.dispatchMs is not bound to its raw probe duration`);
+    }
+    digest(evidence.operationEvidenceSha256, `${name}.operationEvidenceSha256`);
+  });
+  const firstDispatchMs = attribution.probeDurationsMs[0];
+  let steadyDispatchMs;
+  if (cold) {
+    const steadyProbes = attribution.probeDurationsMs.slice(1).sort((left, right) => left - right);
+    steadyDispatchMs = (steadyProbes[1] + steadyProbes[2]) / 2;
+  } else {
+    steadyDispatchMs = attribution.probeDurationsMs[1];
+  }
+  const firstDispatchExcessMs = firstDispatchMs - steadyDispatchMs;
+  for (const field of ["firstDispatchMs", "steadyDispatchMs", "firstDispatchExcessMs"]) {
+    positiveNumber(attribution[field], `timings.compileAttribution.${field}`);
+  }
+  if (Math.abs(attribution.firstDispatchMs - firstDispatchMs) > 1e-9
+    || Math.abs(attribution.steadyDispatchMs - steadyDispatchMs) > 1e-9
+    || Math.abs(attribution.firstDispatchExcessMs - firstDispatchExcessMs) > 1e-9) {
+    fail("timings.compileAttribution derived values do not match the raw probes");
+  }
 }
 
 function validateFixtureEvidence(evidence) {
@@ -834,8 +933,14 @@ export function validateReceipt(receipt, { verifyHash = true } = {}) {
     fail("post-run footprint or MLX allocator state did not return within tolerance");
   }
 
-  exactKeys(receipt.timings, [...TIMING_FIELDS, "samples", "summary"], "timings");
-  for (const field of TIMING_FIELDS) positiveNumber(receipt.timings[field], `timings.${field}`);
+  exactKeys(
+    receipt.timings,
+    [...TIMING_FIELDS, "coldCompileMs", "warmCompileMs", "compileAttribution", "samples", "summary"],
+    "timings",
+  );
+  for (const field of [...TIMING_FIELDS, "coldCompileMs", "warmCompileMs"]) {
+    positiveNumber(receipt.timings[field], `timings.${field}`);
+  }
   if (!Array.isArray(receipt.timings.samples)
     || receipt.timings.samples.length !== CONTRACT.statistics.repeats) {
     fail("raw timing sample count differs from the frozen repeat policy");
@@ -844,6 +949,13 @@ export function validateReceipt(receipt, { verifyHash = true } = {}) {
   for (const field of TIMING_FIELDS) {
     const mean = timingMean(receipt.timings.samples, field);
     if (!nearlyEqual(receipt.timings[field], mean)) fail(`timings.${field} does not derive from raw samples`);
+  }
+  validateCompileAttribution(receipt.timings.compileAttribution, receipt.matrix);
+  if (Math.abs(receipt.timings.coldCompileMs
+      - receipt.timings.compileAttribution.firstDispatchExcessMs) > 1e-9
+    || Math.abs(receipt.timings.warmCompileMs
+      - receipt.timings.compileAttribution.steadyDispatchMs) > 1e-9) {
+    fail("top-level compile timing aliases do not match compile attribution");
   }
   exactKeys(
     receipt.timings.summary,
@@ -945,6 +1057,16 @@ export function validateReceipt(receipt, { verifyHash = true } = {}) {
       || receipt.warmup.sessionId !== "" || receipt.warmup.cacheStateVersion !== 0))) {
     fail("warmup session/cache-state evidence is inconsistent with the coordinate");
   }
+  if (warmRequired) {
+    const expectedSuiteSha256 = sha256(canonicalJson({
+      sessionId: receipt.warmup.sessionId,
+      workerPid: receipt.warmup.workerPid,
+      probeEvidence: receipt.timings.compileAttribution.probeEvidence,
+    }));
+    if (receipt.warmup.suiteSha256 !== expectedSuiteSha256) {
+      fail("warmup suite seal is not bound to compile probe operation evidence");
+    }
+  }
   return receipt;
 }
 
@@ -1034,6 +1156,7 @@ export async function buildVerifiedReceipt(input) {
   }
   const verifiedInput = structuredClone(input);
   delete verifiedInput.provenance.modelFilePath;
+  const fixtureSources = {};
   object(verifiedInput.quality?.fixtureEvidence, "quality.fixtureEvidence");
   for (const fixture of FIXTURES) {
     const sourceRow = object(input.quality?.fixtureEvidence?.[fixture], `quality.fixtureEvidence.${fixture}`);
@@ -1062,6 +1185,7 @@ export async function buildVerifiedReceipt(input) {
     }
     validateFixtureArtifact(artifact, fixture, sourceRow);
     const artifactName = `fixtures/${fixture}.json`;
+    fixtureSources[artifactName] = artifactPath;
     verifiedInput.quality.fixtureEvidence[fixture] = {
       passed: sourceRow.passed,
       artifactName,
@@ -1070,9 +1194,46 @@ export async function buildVerifiedReceipt(input) {
       independentReference: sourceRow.independentReference,
     };
   }
+  if (verifiedInput.matrix?.processTemperature === "cold") {
+    const sourceRow = object(
+      input.quality?.fixtureEvidence?.["kernel-fp32-reference"],
+      "quality.fixtureEvidence.kernel-fp32-reference",
+    );
+    if (!Array.isArray(sourceRow.repeatArtifactPaths)
+      || sourceRow.repeatArtifactPaths.length !== CONTRACT.statistics.repeats) {
+      fail("cold receipt requires exactly five repeat kernel fixture artifact paths");
+    }
+    if (sourceRow.repeatArtifactPaths[0] !== sourceRow.artifactPath) {
+      fail("cold repeat-zero kernel fixture must be the published primary fixture");
+    }
+    for (let index = 0; index < sourceRow.repeatArtifactPaths.length; index += 1) {
+      const artifactPath = text(
+        sourceRow.repeatArtifactPaths[index],
+        `quality.fixtureEvidence.kernel-fp32-reference.repeatArtifactPaths[${index}]`,
+      );
+      let bytes;
+      try {
+        bytes = await readFile(artifactPath);
+      } catch (error) {
+        fail(`repeat ${index} kernel fixture is unavailable: ${error.message}`);
+      }
+      let artifact;
+      try {
+        artifact = JSON.parse(bytes.toString("utf8"));
+      } catch (error) {
+        fail(`repeat ${index} kernel fixture is not valid JSON: ${error.message}`);
+      }
+      validateFixtureArtifact(artifact, "kernel-fp32-reference", sourceRow);
+      validateCompileProbeFixtureBinding(verifiedInput, artifact, index);
+      const artifactName = index === 0
+        ? "fixtures/kernel-fp32-reference.json"
+        : `fixtures/repeat-${index}/kernel-fp32-reference.json`;
+      fixtureSources[artifactName] = artifactPath;
+    }
+  }
   const receipt = buildReceipt(verifiedInput);
   Object.defineProperty(receipt, FIXTURE_SOURCES, {
-    value: Object.fromEntries(FIXTURES.map((fixture) => [fixture, input.quality.fixtureEvidence[fixture].artifactPath])),
+    value: fixtureSources,
     enumerable: false,
   });
   return receipt;
@@ -1117,6 +1278,21 @@ export function validateFixtureArtifact(artifact, fixture, sourceRow) {
     nonnegativeInteger(artifact.evidence.matches, `fixture artifact ${fixture}.matches`);
     positiveInteger(artifact.evidence.total, `fixture artifact ${fixture}.total`);
     if (artifact.evidence.matches > artifact.evidence.total) fail(`fixture artifact ${fixture} matches exceed total`);
+  }
+}
+
+function validateCompileProbeFixtureBinding(receipt, artifact, index) {
+  const binding = object(artifact.binding, `repeat ${index} kernel fixture binding`);
+  if (binding.coordinate !== matrixCoordinate(receipt.matrix) || binding.repeat !== index) {
+    fail(`repeat ${index} kernel fixture coordinate/repeat binding mismatch`);
+  }
+  const candidate = object(binding.candidate, `repeat ${index} kernel fixture candidate binding`);
+  const evidence = receipt.timings.compileAttribution.probeEvidence[index];
+  if (candidate.operation !== evidence.operation
+    || candidate.compileSetupMs !== evidence.setupMs
+    || candidate.compileDispatchMs !== evidence.dispatchMs
+    || candidate.operationEvidenceSha256 !== evidence.operationEvidenceSha256) {
+    fail(`repeat ${index} kernel fixture candidate compile evidence mismatch`);
   }
 }
 
@@ -1176,6 +1352,10 @@ export function renderReceiptMarkdown(receipt) {
     + `- Process footprint peak bytes: ${peak}\n`
     + `- Decode throughput: ${receipt.timings.decodeTokensPerSecond} tok/s\n`
     + `- TTFT: ${receipt.timings.ttftMs} ms\n`
+    + `- Compile attribution: ${receipt.timings.compileAttribution.method} / ${receipt.timings.compileAttribution.operation} / ${receipt.timings.compileAttribution.source}\n`
+    + `- Compile probes: ${receipt.timings.compileAttribution.probeDurationsMs.join(", ")} ms\n`
+    + `- First dispatch excess: ${receipt.timings.coldCompileMs} ms\n`
+    + `- Steady dispatch: ${receipt.timings.warmCompileMs} ms\n`
     + `- Quality contract: ${receipt.contractHash}\n`
     + `- Receipt hash: ${receipt.receiptSha256}\n`
     + `- Lifecycle checks: ${supportedLifecycle}/${LIFECYCLE.length} supported\n`
@@ -1235,20 +1415,37 @@ export async function writeReceiptSet(directory, receipt) {
       writeFile(path.join(staging, "receipt.md.sha256"), `${sha256(markdown)}  receipt.md\n`, { flag: "wx" }),
     ]);
     await mkdir(path.join(staging, "fixtures"), { recursive: false });
-    for (const fixture of FIXTURES) {
-      const source = receipt[FIXTURE_SOURCES][fixture];
+    for (const [artifactName, source] of Object.entries(receipt[FIXTURE_SOURCES])) {
       const bytes = await readFile(source);
-      const name = `${fixture}.json`;
-      const artifactName = `fixtures/${name}`;
-      if (sha256(bytes) !== receipt.quality.fixtureEvidence[fixture].artifactSha256) {
-        fail(`fixture ${fixture} changed before publication`);
-      }
       const sidecar = `${sha256(bytes)}  ${artifactName}\n`;
-      if (sha256(sidecar) !== receipt.quality.fixtureEvidence[fixture].artifactSidecarSha256) {
-        fail(`fixture ${fixture} sidecar changed before publication`);
+      const topLevelFixture = FIXTURES.find((fixture) => artifactName === `fixtures/${fixture}.json`);
+      if (topLevelFixture) {
+        if (sha256(bytes) !== receipt.quality.fixtureEvidence[topLevelFixture].artifactSha256) {
+          fail(`fixture ${topLevelFixture} changed before publication`);
+        }
+        if (sha256(sidecar) !== receipt.quality.fixtureEvidence[topLevelFixture].artifactSidecarSha256) {
+          fail(`fixture ${topLevelFixture} sidecar changed before publication`);
+        }
+      } else {
+        const repeatMatch = artifactName.match(/^fixtures\/repeat-([1-4])\/kernel-fp32-reference[.]json$/);
+        if (!repeatMatch) fail(`unsupported supplemental fixture source ${artifactName}`);
+        let artifact;
+        try {
+          artifact = JSON.parse(bytes.toString("utf8"));
+        } catch (error) {
+          fail(`repeat kernel fixture is not valid JSON: ${error.message}`);
+        }
+        validateFixtureArtifact(
+          artifact,
+          "kernel-fp32-reference",
+          receipt.quality.fixtureEvidence["kernel-fp32-reference"],
+        );
+        validateCompileProbeFixtureBinding(receipt, artifact, Number(repeatMatch[1]));
       }
-      await writeFile(path.join(staging, "fixtures", name), bytes, { flag: "wx" });
-      await writeFile(path.join(staging, "fixtures", `${name}.sha256`), sidecar, { flag: "wx" });
+      const target = path.join(staging, artifactName);
+      await mkdir(path.dirname(target), { recursive: true });
+      await writeFile(target, bytes, { flag: "wx" });
+      await writeFile(`${target}.sha256`, sidecar, { flag: "wx" });
     }
     await rename(staging, directory);
   } catch (error) {
@@ -1259,6 +1456,7 @@ export async function writeReceiptSet(directory, receipt) {
 
 export async function readReceiptSet(directory) {
   const receipt = await readSealedJson(path.join(directory, "receipt.json"));
+  validateReceipt(receipt);
   const markdown = await readSealedText(path.join(directory, "receipt.md"));
   assertMarkdownBound(markdown, receipt);
   const fixtureDirectory = path.join(directory, "fixtures");
@@ -1279,6 +1477,31 @@ export async function readReceiptSet(directory) {
       fail(`published fixture ${fixture} is not valid JSON: ${error.message}`);
     }
     validateFixtureArtifact(artifact, fixture, row);
+  }
+  if (receipt.matrix.processTemperature === "cold") {
+    for (let index = 0; index < CONTRACT.statistics.repeats; index += 1) {
+      const artifactName = index === 0
+        ? "fixtures/kernel-fp32-reference.json"
+        : `fixtures/repeat-${index}/kernel-fp32-reference.json`;
+      const file = path.join(directory, artifactName);
+      const bytes = await readFile(file);
+      const sidecar = await readFile(`${file}.sha256`, "utf8");
+      if (parseSidecar(sidecar, artifactName) !== sha256(bytes)) {
+        fail(`published repeat ${index} kernel fixture sidecar mismatch`);
+      }
+      let artifact;
+      try {
+        artifact = JSON.parse(bytes.toString("utf8"));
+      } catch (error) {
+        fail(`published repeat ${index} kernel fixture is not valid JSON: ${error.message}`);
+      }
+      validateFixtureArtifact(
+        artifact,
+        "kernel-fp32-reference",
+        receipt.quality.fixtureEvidence["kernel-fp32-reference"],
+      );
+      validateCompileProbeFixtureBinding(receipt, artifact, index);
+    }
   }
   return receipt;
 }
