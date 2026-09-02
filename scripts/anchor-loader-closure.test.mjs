@@ -244,19 +244,34 @@ test("the closure is the loader's own crates, not the repository", { skip }, () 
 });
 
 /**
- * THE PIN-BUMP CASE, and it is not hypothetical: the anchors were measured at `MEASURED_AT`, the
- * repository has moved to `PIN` since. The pinned StarVector repair also changed two shipped
- * `mlx-llm` model modules that the LTX loader compiles, so this is a real loader-source change,
- * not a pin-only move. The historical anchor stays retained evidence; its currency report becomes
- * non-current until the loader-equivalent revision is restored or a new extraction is explicitly
- * authorized.
+ * THE PIN-BUMP CASE. The real trees may also contain loader edits, so this test holds the measured
+ * loader closure byte-identical while allowing the revision and every unrelated file to move.
+ * A revision-only change must leave the content-derived key unchanged.
  */
-test("a pin bump that changes shipped loader source rotates the key without erasing the anchor", { skip }, (t) => {
+test("a pin bump with unchanged loader source leaves the key unchanged", { skip }, (t) => {
   // Off CI a local clone that does not carry the measurement revision cannot ask this, and says so
   // by name. On CI `requireMeasurementRevision` throws instead of skipping.
   if (!requireMeasurementRevision(t)) return;
   assert.notEqual(MEASURED_AT, PIN, "the two revisions must actually differ");
-  assert.notEqual(keyAt(MEASURED_AT).digest, keyAt(PIN).digest);
+  // The claim is about the key, not whether this particular real pin also edited loader content.
+  // Hold the loader closure at its measured bytes while every unrelated file and the revision move.
+  const measured = keyAt(MEASURED_AT);
+  const measuredTree = gitTree(repo, MEASURED_AT);
+  const pinTree = gitTree(repo, PIN);
+  // Overlay only the closure files whose content moved: an overlaid file carries a synthetic
+  // content id, so holding an UNCHANGED file would itself perturb a non-Rust file's hash.
+  const bodies = measuredTree.read(measured.files);
+  const held = Object.fromEntries(
+    measured.files
+      .filter((file) => pinTree.contentId(file) !== measuredTree.contentId(file))
+      .map((file) => [file, bodies.get(file)]),
+  );
+  assert.ok(Object.keys(held).length > 0, "this pin moved at least one loader file");
+  const bumped = keyAt(PIN, held);
+  assert.deepEqual(bumped.files, measured.files, "the held closure walks to the same files");
+  assert.equal(bumped.digest, measured.digest);
+  // Teeth: without the overlay, the real loader-content change still rotates the key.
+  assert.notEqual(keyAt(PIN).digest, measured.digest);
 });
 
 test("a sibling model's edit leaves the key unchanged", { skip }, () => {

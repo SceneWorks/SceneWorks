@@ -1,0 +1,3 @@
+[read] pread(fd=11, size=33554432, offset=6506862082) returned -1: Bad address
+[read] pread(fd=11, size=33554432, offset=6540416514) returned -1: Bad address
+memory-strategy provider adapter: mlx op failed: "[METAL] Command buffer execution failed: Caused GPU Timeout Error (00000002:kIOGPUCommandBufferCallbackErrorTimeout). at /Volumes/Data/calibration/sc-18791/diagnostic/SceneWorks/target/release/build/pmetal-mlx-sys-e7001bf321f683d0/out/mlx-c-staged/mlx/c/transforms.cpp:73" at /Volumes/Data/calibration/sc-18791/diagnostic/mlx-rs-fork/mlx-rs/src/transforms/mod.rs:69:5
