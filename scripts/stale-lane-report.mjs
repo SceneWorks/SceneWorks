@@ -24,7 +24,7 @@
  * `memory-calibration-harness.mjs#evidenceSemantics` and `generate-memory-matrix.mjs#closureIsCurrent`
  * key it. A record or manifest calibration binding is stale when the closure digest it was captured
  * under differs from the live digest for its own lane. The live table is loaded through
- * `validatedInferenceClosures`, the SAME predicate the matrix generator uses, so the report and the
+ * `validatedInferenceClosures` (which moved here from the matrix generator at sc-22513), so the report and the
  * matrix cannot disagree about which lanes are current.
  *
  * TWO POPULATIONS, KEPT SEPARATE
@@ -54,7 +54,7 @@
  *
  * MARGIN: DERIVED, NEVER RESTATED
  *
- * The widening column is `staleMeasuredMargin` from `scripts/derive-ladder-margins.mjs`, computed
+ * The widening column is `recaptureSpread` from `scripts/derive-ladder-margins.mjs`, computed
  * over the same evidence corpus this report reads. That module's constants are pinned against
  * `crates/sceneworks-worker/src/ladder_margin_policy.rs` by `scripts/derive-ladder-margins.test.mjs`,
  * so the number printed here is the number the runtime applies, and a drift on either side reds that
@@ -70,7 +70,6 @@ import { fileURLToPath } from "node:url";
 
 import { recordsNeedingDigest, stampManifest } from "./backfill-closure-digests.mjs";
 import { deriveMargins } from "./derive-ladder-margins.mjs";
-import { validatedInferenceClosures } from "./generate-memory-matrix.mjs";
 import { inferencePinFromCargo } from "./inference-closure-digest.mjs";
 import { stripJsoncComments } from "./lib/jsonc.mjs";
 
@@ -86,9 +85,41 @@ export const SOURCE_PATHS = Object.freeze({
   candleAdapter: "crates/sceneworks-memory-adapter/src/bin/candle.rs",
 });
 
+/**
+ * The provider closure ledger, validated (sc-17774).
+ *
+ * Lived in `scripts/generate-memory-matrix.mjs` until sc-22513 collapsed the matrix onto the anchor
+ * store — the ledger is no longer a matrix input, and this report is its only remaining consumer, so
+ * the predicate moved here rather than being re-implemented or left exported from a module that does
+ * not use it. Unchanged in behaviour: it fails closed on a ledger with no revision, an unusable
+ * digest, or no providers at all.
+ */
+export function validatedInferenceClosures(body) {
+  const closures = JSON.parse(body);
+  if (!/^[0-9a-f]{40}$/.test(closures.inferenceRevision ?? "")) {
+    throw new Error(
+      "config/inference-provider-closures.json must record the full inference revision its " +
+        "digests were derived at",
+    );
+  }
+  const digests = new Map();
+  for (const [provider, entry] of Object.entries(closures.providers ?? {})) {
+    if (!/^[0-9a-f]{64}$/.test(entry.digest ?? "")) {
+      throw new Error(`inference closure entry for ${provider} has no usable digest`);
+    }
+    digests.set(provider, entry.digest);
+  }
+  // sc-22512: an EMPTY ledger no longer throws. A repo that declares no provider closures is an
+  // unmeasured repo, not a broken one — every binding then reads as not-current, which is the
+  // conservative estimate. The two throws above stay: they red on data that IS present and is
+  // malformed (no 40-hex derivation revision; an entry with no usable 64-hex digest). Carried across
+  // sc-22513, which moved this function here out of the memory-matrix generator.
+  return digests;
+}
+
 /** Provenance for the margin column, printed so a reader can check it rather than trust it. */
 export const MARGIN_SOURCE =
-  "scripts/derive-ladder-margins.mjs#staleMeasuredMargin (pinned against " +
+  "scripts/derive-ladder-margins.mjs#recaptureSpread (pinned against " +
   "crates/sceneworks-worker/src/ladder_margin_policy.rs by scripts/derive-ladder-margins.test.mjs)";
 
 /**
@@ -375,16 +406,22 @@ export function adapterCapturableProviders(source, label) {
   return [...gates.reduce((acc, gate) => new Set([...acc].filter((id) => gate.has(id))))].sort();
 }
 
-/** Per-lane calibration-plan coverage: `Map<lane, { entries, authoritative }>`. */
+/**
+ * Per-lane anchor-plan coverage: `Map<lane, { entries, authoritative }>`.
+ *
+ * sc-22514: the plan is now one anchor per `<modelId>:<tier>:<backend>` key, so an entry count IS
+ * a cell count rather than a grid-row count.
+ */
 export function planLaneCoverage(plan) {
   const byLane = new Map();
-  for (const entry of plan.providers ?? []) {
-    const backend = entry.backend;
-    const provider = entry.target?.provider;
-    if (typeof backend !== "string" || typeof provider !== "string") {
-      throw new Error(
-        `calibration-plan entry ${JSON.stringify(entry.name ?? "(unnamed)")} names no backend/provider lane`,
-      );
+  // An old-shape (`providers` array) plan has no `anchors` object, and `?? {}` would report every
+  // lane as having zero planned entries instead of failing.
+  if (!plan.anchors) throw new Error("calibration plan is not an anchor plan (no `anchors` object)");
+  for (const [key, entry] of Object.entries(plan.anchors)) {
+    const backend = key.split(":")[2];
+    const provider = entry.provider;
+    if (typeof backend !== "string" || !backend || typeof provider !== "string") {
+      throw new Error(`anchor-plan entry ${JSON.stringify(key)} names no backend/provider lane`);
     }
     const lane = laneOf(backend, provider);
     if (!byLane.has(lane)) byLane.set(lane, { entries: 0, authoritative: 0 });
@@ -599,8 +636,8 @@ export function buildStaleLaneReport({
     const backendMargins = margins[backend]?.margins ?? null;
     // A lane the derivation does not model gets no invented margin: the impact terms fall back to
     // the raw counts so the lane still ranks, and the null is visible in the output.
-    const staleMeasuredMargin = backendMargins?.staleMeasuredMargin ?? null;
-    const weight = staleMeasuredMargin ?? 1;
+    const recaptureSpread = backendMargins?.recaptureSpread ?? null;
+    const weight = recaptureSpread ?? 1;
     const measured = bindingTally.total + recordTally.total > 0;
     const staleCount = bindingTally.stale + recordTally.stale;
     lanes.push({
@@ -640,8 +677,7 @@ export function buildStaleLaneReport({
       },
       margin: backendMargins
         ? {
-            staleMeasuredMargin: backendMargins.staleMeasuredMargin,
-            estimateMargin: backendMargins.estimateMargin,
+            recaptureSpread: backendMargins.recaptureSpread,
             hardFloor: backendMargins.hardFloor,
             source: MARGIN_SOURCE,
           }
@@ -770,16 +806,15 @@ export function formatReport(report) {
   if (report.staleLanes.length === 0) {
     out.push("No stale lanes. Every captured lane's closure digest matches the live derivation.");
   } else {
-    out.push("STALE LANES, ranked by widened admission surface (stale bindings x margin), then evidence surface:");
+    out.push("STALE LANES, ranked by widened admission surface (stale bindings x recapture spread), then evidence surface:");
     out.push("");
-    const header = ["#", "LANE", "BINDINGS", "RECORDS", "MARGIN", "ESTIMATE", "IMPACT", "CAPTURE", "MODELS"];
+    const header = ["#", "LANE", "BINDINGS", "RECORDS", "RECAPTURE", "IMPACT", "CAPTURE", "MODELS"];
     const rows = report.staleLanes.map((lane) => [
       String(lane.rank),
       lane.lane,
       `${lane.bindings.stale}/${lane.bindings.total}`,
       `${lane.records.stale}/${lane.records.total}`,
-      percent(lane.margin?.staleMeasuredMargin ?? null),
-      percent(lane.margin?.estimateMargin ?? null),
+      percent(lane.margin?.recaptureSpread ?? null),
       lane.impact.widenedAdmissionSurface.toFixed(3),
       lane.capturable ? "yes" : "NO ARM",
       lane.models.join(", ") || "(none)",

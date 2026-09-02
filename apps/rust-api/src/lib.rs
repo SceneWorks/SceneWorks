@@ -65,7 +65,8 @@ use sceneworks_core::training_store::{
 };
 use sceneworks_core::video_request::{
     classify_reference_set, default_resolution, duration_limit_error, fps_limit_error,
-    reference_limit_error, requested_steps, resolve_duration, resolve_fps, steps_limit_error,
+    reference_limit_error, requested_auto_duration, requested_ltx25_vae_decoder, requested_steps,
+    requested_temporal_upsample_rounds, resolve_duration, resolve_fps, steps_limit_error,
     ReferenceSetVerdict,
 };
 use serde::de::DeserializeOwned;
@@ -146,9 +147,9 @@ use training::{
     resolve_finetune_output_location, resolve_training_output_location,
     set_training_dataset_item_quality_ack, smart_crop_training_dataset_items,
     strip_exif_training_dataset_items, trusted_adapter_files, trusted_base_checkpoint_files,
-    update_training_dataset, upload_training_dataset_item, validate_lora_id_component,
-    write_training_dataset_analysis_embeddings, write_training_dataset_caption_sidecars,
-    write_training_dataset_face_embeddings,
+    update_training_dataset, upload_ltx_prepared_bundle, upload_training_dataset_item,
+    validate_lora_id_component, write_training_dataset_analysis_embeddings,
+    write_training_dataset_caption_sidecars, write_training_dataset_face_embeddings,
 };
 mod generation;
 use generation::{
@@ -1555,6 +1556,10 @@ fn create_app_with_state_mode(
         .route(
             "/api/v1/projects/:project_id/training/datasets/:dataset_id/items/:item_id/quality-ack",
             post(set_training_dataset_item_quality_ack),
+        )
+        .route(
+            "/api/v1/projects/:project_id/training/datasets/:dataset_id/items/:item_id/ltx-prepared-bundle",
+            post(upload_ltx_prepared_bundle).layer(DefaultBodyLimit::max(MAX_UPLOAD_BYTES)),
         )
         .route(
             "/api/v1/projects/:project_id/training/datasets/:dataset_id/batch-rename",
@@ -3921,6 +3926,10 @@ fn serialize_job_lora(lora: &Value, selected_lora: &Value, lora_id: &str) -> Val
         "families": preferred_lora_value(selected_lora, lora, "families"),
         "compatibleFamilies": preferred_lora_value(selected_lora, lora, "compatibleFamilies"),
         "modelFamilies": preferred_lora_value(selected_lora, lora, "modelFamilies"),
+        // Exact model-id allowlist. Keep both accepted spellings so the API compatibility gate and
+        // the worker see the same conjunctive constraint after catalog hydration.
+        "modelIds": preferred_lora_value(selected_lora, lora, "modelIds"),
+        "model_ids": preferred_lora_value(selected_lora, lora, "model_ids"),
         // The specific base model the LoRA was trained for (e.g. wan_2_2 vs
         // wan_2_2_t2v_14b). The worker gates Wan 5B-vs-14B on this since both share
         // family `wan-video`. Absent for LoRAs that don't record one.

@@ -3,9 +3,10 @@ use super::prelude::*;
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 use super::{
     ltx::{
+        ltx25_dir_is_complete, ltx25_generation_options, ltx25_transformer_variant,
         resolve_ltx_adapters, resolve_ltx_conditioning, resolve_ltx_replace_conditioning,
-        resolve_video_clip_conditioning, LTX_BUNDLE_PRE_BF16_REVISION, LTX_BUNDLE_REPO,
-        LTX_BUNDLE_REVISION,
+        resolve_video_clip_conditioning, LTX25_BUNDLE_REPO, LTX25_BUNDLE_REVISION,
+        LTX_BUNDLE_PRE_BF16_REVISION, LTX_BUNDLE_REPO, LTX_BUNDLE_REVISION,
     },
     mochi::{
         ensure_mochi_bf16_present, ensure_mochi_q8_present, mochi_precheck_dir, mochi_tier_quant,
@@ -90,6 +91,7 @@ pub(super) fn candle_video_engine_id(model: &str) -> Option<&'static str> {
         "wan_2_2_t2v_14b" => Some("wan2_2_t2v_14b"),
         "wan_2_2_i2v_14b" => Some("wan2_2_i2v_14b"),
         "ltx_2_3" => Some("ltx_2_3_distilled"),
+        "ltx_2_5" => Some("ltx_2_5_distilled"),
         // SVD-XT image→video (sc-5493 / epic 5481): the candle-gen-svd provider's `svd_xt` engine.
         "svd" => Some("svd_xt"),
         // Mochi 1 (epic 1788 / sc-11992). The sceneworks id IS the engine id: `candle-gen-mochi`
@@ -119,7 +121,7 @@ pub(super) fn is_candle_video_engine(model: &str) -> bool {
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 pub(super) fn candle_video_adapter_label(engine_id: &str) -> &'static str {
     match engine_id {
-        "ltx_2_3_distilled" => CANDLE_LTX_ADAPTER,
+        "ltx_2_3_distilled" | "ltx_2_5_distilled" => CANDLE_LTX_ADAPTER,
         "svd_xt" => CANDLE_SVD_ADAPTER,
         "mochi_1" => CANDLE_MOCHI_ADAPTER,
         _ => CANDLE_WAN_ADAPTER,
@@ -134,6 +136,7 @@ pub(super) fn candle_video_adapter_label(engine_id: &str) -> &'static str {
 pub(super) fn candle_video_default_repo(engine_id: &str) -> &'static str {
     match engine_id {
         "ltx_2_3_distilled" => LTX_BUNDLE_REPO,
+        "ltx_2_5_distilled" => LTX25_BUNDLE_REPO,
         "svd_xt" => SVD_REPO,
         "wan2_2_t2v_14b" => CANDLE_WAN_T2V_14B_REPO,
         "wan2_2_i2v_14b" => CANDLE_WAN_I2V_14B_REPO,
@@ -285,15 +288,26 @@ fn candle_ltx_tier_complete(dir: &Path) -> bool {
     dir.join("transformer.safetensors").is_file() && dir.join("quantize_config.json").is_file()
 }
 
+/// LTX-2.5's converter uses `split_model.json` rather than the legacy 2.3 quant marker, but that
+/// manifest alone is not a completeness receipt. Require the same full component surface as MLX so
+/// a partially downloaded tier — especially one missing its tier-local Gemma-4 encoder — fails at
+/// selection instead of reaching provider load.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+fn candle_ltx25_tier_complete(dir: &Path) -> bool {
+    ltx25_dir_is_complete(dir)
+}
+
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum CandleLtxTier {
     Q4,
     Q8,
+    Bf16,
 }
 
 /// Parse the Candle LTX tier without conflating an absent override with a present malformed one.
-/// Only an absent value gets the q4 default; every explicit value must parse exactly to 4 or 8.
+/// Only an absent value gets the q4 default. The shared native tier contract encodes bf16 as
+/// `mlxQuantize <= 0`, q4 as 4, and q8 as 8; all other explicit values fail closed.
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 fn candle_ltx_requested_tier(request: &VideoRequest) -> Option<CandleLtxTier> {
     let Some(value) = request.advanced.get("mlxQuantize") else {
@@ -303,6 +317,7 @@ fn candle_ltx_requested_tier(request: &VideoRequest) -> Option<CandleLtxTier> {
         .as_i64()
         .or_else(|| value.as_str()?.trim().parse::<i64>().ok())?;
     match bits {
+        i64::MIN..=0 => Some(CandleLtxTier::Bf16),
         4 => Some(CandleLtxTier::Q4),
         8 => Some(CandleLtxTier::Q8),
         _ => None,
@@ -318,6 +333,7 @@ fn candle_ltx_bundle_tier_across_revisions(root: &Path, tier: CandleLtxTier) -> 
     let tier = match tier {
         CandleLtxTier::Q4 => "q4",
         CandleLtxTier::Q8 => "q8",
+        CandleLtxTier::Bf16 => return None,
     };
     let roots = root
         .parent()
@@ -335,11 +351,12 @@ fn candle_ltx_bundle_tier_across_revisions(root: &Path, tier: CandleLtxTier) -> 
     roots.into_iter().flatten().find_map(resolve)
 }
 
-/// Resolve the exact packed LTX tier selected by the request. The checkpoint is already packed, so
-/// the returned load quant is deliberately `None`: `LoadSpec::quantize` means on-the-fly
-/// quantization to the Candle LTX provider and must never be set for these tiers. Base LTX supports
-/// only the published q4/q8 Candle tiers; an explicit bf16 or other value returns `None` so callers
-/// fail closed rather than silently loading q4. Eros has no Candle route after SC-18902 acceptance.
+/// Resolve the exact packed LTX tier selected by the request. LTX-2.5's provider binds
+/// `LoadSpec::quantize` to the physical split-bundle tier and rejects a mismatch, so q4 carries its
+/// exact numeric identity while dense bf16 carries `None`. q8 is a first-class promoted Candle
+/// tier symmetric with MLX: it resolves the published `q8/` split bundle and carries its exact
+/// `Quant::Q8` identity. LTX-2.3 keeps its legacy `None` marker. Eros has no Candle route after
+/// SC-18902 acceptance.
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 pub(super) fn candle_ltx_tier_subdir(
     root: &Path,
@@ -347,10 +364,26 @@ pub(super) fn candle_ltx_tier_subdir(
     model: &str,
     request: &VideoRequest,
 ) -> Option<(PathBuf, Option<Quant>)> {
-    if engine_id != "ltx_2_3_distilled" || model != "ltx_2_3" {
+    if !matches!(
+        (engine_id, model),
+        ("ltx_2_3_distilled", "ltx_2_3") | ("ltx_2_5_distilled", "ltx_2_5")
+    ) {
         return None;
     }
     let tier = candle_ltx_requested_tier(request)?;
+    if model == "ltx_2_5" {
+        // `ltx25_transformer_variant` has already validated the request before
+        // this resolver runs.  The nested component directory is the selection
+        // boundary; never fall through to a sibling variant.
+        let variant = ltx25_transformer_variant(request).ok()?;
+        let (tier, quant) = match tier {
+            CandleLtxTier::Q4 => ("q4", Some(Quant::Q4)),
+            CandleLtxTier::Q8 => ("q8", Some(Quant::Q8)),
+            CandleLtxTier::Bf16 => ("bf16", None),
+        };
+        let dir = root.join(variant.component_dir()).join(tier);
+        return candle_ltx25_tier_complete(&dir).then_some((dir, quant));
+    }
     // Keep the Candle resolver aligned with the immutable bundle compatibility policy: an existing
     // q4 install may still live at the proven parent while an on-demand q8 fetch lands at the
     // current revision. Do not scan arbitrary cache siblings, which would let an unpinned checkpoint
@@ -1155,26 +1188,50 @@ pub(super) async fn generate_candle_video_using(
         // Resolve-or-error; never a stub (the candle generic arm has no stub fallback once
         // `candle_video_engine_id` resolves the id).
         resolve_mochi_model_dir(settings, request)?
+    } else if engine_id == "ltx_2_5_distilled" {
+        crate::model_jobs::huggingface_pinned_snapshot_dir(
+            &settings.data_dir,
+            LTX25_BUNDLE_REPO,
+            LTX25_BUNDLE_REVISION,
+        )
+        .ok_or_else(|| {
+            WorkerError::InvalidPayload(format!(
+                "candle video weights snapshot not found for {LTX25_BUNDLE_REPO} at immutable \
+                 revision {LTX25_BUNDLE_REVISION}"
+            ))
+        })?
     } else {
         candle_video_snapshot_dir(settings, &repo)?
     };
+    let is_ltx = matches!(engine_id, "ltx_2_3_distilled" | "ltx_2_5_distilled");
+    let ltx25_options = is_ltx
+        .then(|| ltx25_generation_options(request))
+        .transpose()?;
     // Coerce the requested frame count onto the engine's temporal stride — the ONE shared ladder both
     // lanes use (sc-11992), so the candle stride can never drift from the MLX one. Computed HERE, above
     // the tier binding, because Mochi's fit gate (sc-12306) needs the coerced count: the decode peak is
     // linear in frames, so gating on the raw request would size the check against a length that never
     // renders. (The SVD arm below returns before this is read; it derives its own model-fixed burst.)
-    let frames = video_frame_count(&request.model, request.raw_frame_count());
+    let frames = ltx25_options.map_or_else(
+        || video_frame_count(&request.model, request.raw_frame_count()),
+        |options| options.planning_frames,
+    );
     // Packed-tier select: base LTX QLoRA/inference shares the turnkey `q4/` tier on every native
     // backend; Wan quant-matrix repos select q4/q8/bf16 below.
     // q4/q8/bf16 subdirs — resolve the one matching `advanced.mlxQuantize` (default q4) and load from it
     // (the packed-detect seam reads the baked-in quant). A flat/dense repo (no subdirs, e.g. the
     // `Wan-AI/*-Diffusers` fallback) stays as-is with no quant marker.
-    let is_ltx = engine_id == "ltx_2_3_distilled";
+    if engine_id == "ltx_2_5_distilled" {
+        // Reject an unknown/type-mismatched selector before a cache probe can
+        // disguise it as an ordinary missing-model error.
+        ltx25_transformer_variant(request)?;
+    }
     let ltx_tier = candle_ltx_tier_subdir(&snapshot_dir, engine_id, &request.model, request);
     if is_ltx && ltx_tier.is_none() {
         return Err(WorkerError::InvalidPayload(format!(
-            "{} requires a complete Candle LTX q4 or q8 packed tier matching advanced.mlxQuantize \
-             from an approved immutable bundle revision; repair this model in Model Manager",
+            "{} requires a complete Candle LTX packed tier matching advanced.mlxQuantize \
+             (LTX-2.3: q4/q8; LTX-2.5: q4/q8/bf16) from an approved immutable bundle revision; \
+             repair this model in Model Manager",
             request.model
         )));
     }
@@ -1217,9 +1274,12 @@ pub(super) async fn generate_candle_video_using(
         )?;
         (dir, quant)
     };
-    // ltx needs the separate Gemma-3-12B encoder (its only conditioning input). Resolve its snapshot
-    // dir here and thread it onto the LoadSpec below (sc-8827) instead of mutating `$LTX_GEMMA_DIR`.
-    let ltx_gemma_dir = if is_ltx {
+    // LTX-2.3 needs the separate Gemma-3-12B encoder. LTX-2.5 instead carries its self-contained
+    // Gemma-4 encoder as the selected tier's `text_encoder` component; leave the typed override
+    // empty so the split manifest remains the sole component authority.
+    let ltx_gemma_dir = if engine_id == "ltx_2_5_distilled" {
+        None
+    } else if is_ltx {
         super::ltx::resolve_bundled_ltx_gemma_dir(&model_dir)
             .or_else(|| resolve_ltx_gemma_dir(settings))
     } else {
@@ -1336,7 +1396,21 @@ pub(super) async fn generate_candle_video_using(
     // that function's dense-5B tail and force `WAN5B_INTERIM_STEPS` (20) on it, silently
     // overriding the AsymmDiT's own 64-step default with a Wan tuning constant. `None` ⇒ the engine's
     // DEFAULT_STEPS (64) / DEFAULT_GUIDANCE (4.5) stand.
-    let (steps, guidance, negative_prompt) = if is_ltx {
+    let (steps, guidance, negative_prompt) = if engine_id == "ltx_2_5_distilled"
+        && matches!(
+            ltx25_transformer_variant(request)?,
+            super::ltx::Ltx25TransformerVariant::Dev
+        ) {
+        (
+            // The raw dev transformer is defined by the 30-step SC-18759
+            // schedule, not by a caller-provided generic LTX step count.
+            Some(30),
+            // Video/audio guidance is fixed inside the native four-branch dev sampler. The loaded
+            // provider deliberately rejects the unrelated generic request-level guidance axis.
+            None,
+            non_empty_negative_prompt(request),
+        )
+    } else if is_ltx {
         (advanced_opt_u32(request, "steps"), None, None)
     } else if is_mochi {
         (
@@ -1348,11 +1422,21 @@ pub(super) async fn generate_candle_video_using(
         let (steps, guidance) = wan_sampling(engine_id, request);
         (steps, guidance, non_empty_negative_prompt(request))
     };
+    // Explicit fitted-memory axes. These MUST be named here rather than inherited from the
+    // `..VideoGenInput::default()` tail below: the default is `None`/`None`, which admission reads
+    // as "no declared pipeline shape" and which therefore can never match curve evidence. Derived
+    // by the SAME shared helper the MLX arm uses (`super::ltx::ltx_memory_axes`).
+    let (memory_transformer_variant, memory_decoder) = super::ltx::ltx_memory_axes(
+        request,
+        ltx25_options.is_some_and(|options| options.use_diffusion_decoder),
+    )?;
     let input = VideoGenInput {
         sampler: None,
         scheduler: None,
         engine_id,
         model_dir,
+        memory_transformer_variant,
+        memory_decoder,
         // Wan quant-matrix tier marker (sc-10027): `Some(Q4/Q8)` when a packed candle tier subdir was
         // resolved, else `None` (bf16 tier / dense repo / ltx). A no-op on the candle wan load (the
         // packed-detect seam reads the tier's baked-in quant), carried for the LoadSpec + asset record.
@@ -1365,6 +1449,10 @@ pub(super) async fn generate_candle_video_using(
         height: request.height,
         frames,
         fps: request.fps,
+        auto_duration: ltx25_options.and_then(|options| options.auto_duration),
+        temporal_upsample_rounds: ltx25_options
+            .and_then(|options| options.temporal_upsample_rounds),
+        use_diffusion_decoder: ltx25_options.is_some_and(|options| options.use_diffusion_decoder),
         steps,
         guidance,
         seed: resolve_video_seed(request) as u64,

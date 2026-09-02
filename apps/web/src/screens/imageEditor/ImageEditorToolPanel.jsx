@@ -1,5 +1,6 @@
 import React from "react";
 import { EditPromptTemplates } from "../../components/EditPromptTemplates.jsx";
+import { assetDisplayUrl } from "../../components/assetMedia.jsx";
 
 let renderObserverForTests = null;
 
@@ -41,7 +42,7 @@ function samePanelProps(previous, next) {
 }
 
 export const ImageEditorEditPanel = React.memo(function ImageEditorEditPanel({ scope }) {
-  const { EDIT_OUTPUT_ASPECTS, EditorLoraPanel, FitModeControl, MAX_EDIT_REFERENCES, StudioUpdateBadge, StudioUpdateNotice, aiOp, assetUrl, canMask, clearMask, createLoraDownloadJob, createModelDownloadJob, editAspect, editFitMode, editGuidance, editLora, editLoraDownloadRequested, editLoraInstalled, editLoraRequiredMissing, editLoraSelection, editModel, editModels, editPrompt, editSeed, editorPickerLoras, effectiveFitMode, guidanceDefaultFromModel, imageAssets, maskActive, maskBaseImage, maskBrush, maskErase, maskHasContent, maskLines, maskMode, maskRefineRadius, maskSubTool, multiRefCapable, refAssetIds, refineMask, requestEditLoraDownload, requestSmartSelectDownload, runEdit, selectedEditLoras, selectedEditModel, setEditAspect, setEditFitMode, setEditGuidance, setEditModel, setEditPrompt, setEditSeed, setMaskBrush, setMaskErase, setMaskMode, setMaskRefineRadius, setMaskSubTool, setRefAssetIds, setRefPickerOpen, setShowIncompatibleEditLoras, showIncompatibleEditLoras, smartSelectCapabilitySupported, smartSelectDownloadRequested, smartSelectModel, smartSelectSupported, updateOptionLabel } = scope;
+  const { EDIT_OUTPUT_ASPECTS, EditorLoraPanel, FitModeControl, MAX_EDIT_REFERENCES, StudioUpdateBadge, StudioUpdateNotice, aiOp, canMask, clearMask, createLoraDownloadJob, createModelDownloadJob, editAspect, editFitMode, editGuidance, editLora, editLoraDownloadRequested, editLoraInstalled, editLoraRequiredMissing, editLoraSelection, editModel, editModels, editPrompt, editSeed, editorPickerLoras, effectiveFitMode, guidanceDefaultFromModel, imageAssets, maskActive, maskBaseImage, maskBrush, maskErase, maskHasContent, maskLines, maskMode, maskRefineRadius, maskSubTool, multiRefCapable, refAssetIds, refineMask, requestEditLoraDownload, requestSmartSelectDownload, runEdit, selectedEditLoras, selectedEditModel, setEditAspect, setEditFitMode, setEditGuidance, setEditModel, setEditPrompt, setEditSeed, setMaskBrush, setMaskErase, setMaskMode, setMaskRefineRadius, setMaskSubTool, setRefAssetIds, setRefPickerOpen, setShowIncompatibleEditLoras, showIncompatibleEditLoras, smartSelectCapabilitySupported, smartSelectDownloadRequested, smartSelectModel, smartSelectSupported, updateOptionLabel } = scope;
   const renderPanel = () => {
     if (editModels.length === 0) {
       return (
@@ -320,7 +321,7 @@ export const ImageEditorEditPanel = React.memo(function ImageEditorEditPanel({ s
                 const asset = imageAssets.find((item) => item.id === id);
                 return (
                   <div className="ie-ref" key={id}>
-                    {asset ? <img alt="" src={assetUrl(asset)} /> : <span>?</span>}
+                    {asset ? <img alt="" src={assetDisplayUrl(asset)} /> : <span>?</span>}
                     <button
                       aria-label="Remove reference"
                       className="ie-ref-remove"

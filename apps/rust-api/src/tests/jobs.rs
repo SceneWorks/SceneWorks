@@ -867,7 +867,7 @@ fn builtin_starvector_manifests_are_exact_native_image_to_svg_closures() {
             );
             assert_eq!(
                 candidate["productionClosure"]["sha256"],
-                "958ed1157a9795f63c550356fb14c37f936915d686f2c6051f8d5e4ec2e682f4"
+                "6fb138ea73334d08f23259d73f6e038fcf4e3281c5274d7734a22a901e9ee50d"
             );
             assert_eq!(
                 candidate["productionClosure"]["entries"]
@@ -2336,6 +2336,7 @@ async fn retry_and_duplicate_reauthorize_merged_control_weights_before_create() 
 #[cfg(target_os = "macos")]
 #[tokio::test]
 async fn image_create_retry_and_duplicate_resolve_text_encoder_fresh_and_fail_closed() {
+    let _env = isolate_hf_cache();
     std::env::set_var("SCENEWORKS_DISABLE_MODEL_SIZE_ESTIMATE", "1");
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
     let manifest_dir = temp_dir.path().join("config/manifests");
@@ -3060,6 +3061,19 @@ fn serialize_job_lora_carries_network_type_to_payload() {
     // A plain LoRA without the field stays absent/null (treated as lora downstream).
     let plain = serialize_job_lora(&json!({ "id": "x", "family": "sdxl" }), &json!({}), "x");
     assert!(plain.get("networkType").map(Value::is_null).unwrap_or(true));
+}
+
+#[test]
+fn serialize_job_lora_preserves_exact_model_allowlists_for_the_worker() {
+    let catalog_lora = json!({
+        "id": "ltx25",
+        "family": "ltx-video",
+        "modelIds": ["ltx_2_5"],
+        "model_ids": ["ltx_2_5_alias"],
+    });
+    let payload = serialize_job_lora(&catalog_lora, &json!({}), "ltx25");
+    assert_eq!(payload["modelIds"], json!(["ltx_2_5"]));
+    assert_eq!(payload["model_ids"], json!(["ltx_2_5_alias"]));
 }
 
 #[test]

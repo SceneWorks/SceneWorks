@@ -2,22 +2,32 @@
 
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
-import { mkdir, readFile, realpath, rename, writeFile } from "node:fs/promises";
+import { mkdir, readFile, readdir, realpath, rename, stat, writeFile } from "node:fs/promises";
 import { createReadStream, readFileSync } from "node:fs";
 import path from "node:path";
 import process from "node:process";
 import { fileURLToPath } from "node:url";
 
 import { providerClosureDigest } from "./inference-closure-digest.mjs";
+import { hashArtifactInventory } from "./hash-artifact-inventory.mjs";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const CALIBRATION_SCHEMA = JSON.parse(
   readFileSync(path.join(ROOT, "packages/schemas/memory-calibration.schema.json"), "utf8"),
 );
+/**
+ * sc-22514: the ANCHOR PLAN schema. One anchor per (modelId, tier, backend lane) is the entire
+ * measurement obligation of epic 22505, and the plan format is where that is made structural — see
+ * the schema's own `$comment`.
+ */
+export const ANCHOR_PLAN_SCHEMA = JSON.parse(
+  readFileSync(path.join(ROOT, "packages/schemas/memory-anchor-plan.schema.json"), "utf8"),
+);
+export const ANCHOR_PLAN_PATH = "config/memory-calibration-plan.json";
 export const HARNESS_VERSION = "sceneworks-memory-v5";
 // sc-18864 bumped the RECORD SHAPE (per-phase `deviceBytes`/`wiredBytes` removed) without changing
 // the measuring instrument, so the bundle schema version moves and the harness version does not.
-export const SCHEMA_VERSION = 5;
+export const SCHEMA_VERSION = 6;
 // sc-21715: the record-status universe, READ from the bundle schema rather than transcribed here, so
 // a status added there cannot leave a downstream tally silently partial. Every consumer that
 // partitions a bundle by status (`summary.calibrationRunsByStatus`) derives its keys from this list.
@@ -34,17 +44,34 @@ const RUNG_SET = new Set(RUNGS);
 /// Persisted spellings of `gen_core::LoadShape`. Eager and deferred measurements are not
 /// interchangeable, so this is a receipt axis rather than a fingerprint naming convention.
 export const LOAD_SHAPES = ["eager_materialization", "deferred_materialization"];
-export const RUNG_REUSE_TOLERANCE = Object.freeze({
-  absoluteBytes: 256 * 1024 * 1024,
-  relative: 0.05,
-});
+export const LTX25_TRANSFORMER_VARIANTS = ["distilled", "dev"];
+export const LTX25_DECODERS = ["conv", "diffvae"];
+// The public authority is intentionally fixed here as well as in the native adapter: the harness
+// must reject a merely SHA-shaped snapshot before it hashes hundreds of GiB or starts Metal work.
+// The focused selector test binds these literals back to config/download-pattern-evidence.json.
+export const LTX25_CAPTURE_REPOSITORY = "SceneWorks/ltx-2.5-mlx";
+export const LTX25_CAPTURE_REVISION = "081658ce6886cacba20817ce0359bbefef706ff2";
 const PHYSICAL_MLX_SESSION_OUTPUT_ROLES = Object.freeze([
   "request", "selected_rgb", "reference_rgb",
+]);
+const PHYSICAL_MLX_AV_SESSION_OUTPUT_ROLES = Object.freeze([
+  "request", "selected_av", "reference_av",
 ]);
 const PHYSICAL_MLX_PROVIDER_OUTPUT_ROLES = Object.freeze([
   "selected_rgb", "reference_rgb",
 ]);
+const PHYSICAL_MLX_AV_PROVIDER_OUTPUT_ROLES = Object.freeze([
+  "selected_av", "reference_av",
+]);
 const PHYSICAL_MLX_RGB_BASENAME = /^(implan-[0-9a-f]{20})-(selected_rgb|reference_rgb)-([1-9][0-9]*)x([1-9][0-9]*)-([0-9a-f]{64})\.rgb$/;
+const PHYSICAL_MLX_AV_BASENAME = /^(implan-[0-9a-f]{20})-(selected_av|reference_av)-([1-9][0-9]*)x([1-9][0-9]*)-f([1-9][0-9]*)-([0-9a-f]{64})\.avbin$/;
+
+function physicalMlxExpectedRoles(outputs, includeRequest) {
+  const hasAv = outputs?.some((output) => output?.role === "selected_av" || output?.role === "reference_av");
+  return hasAv
+    ? (includeRequest ? PHYSICAL_MLX_AV_SESSION_OUTPUT_ROLES : PHYSICAL_MLX_AV_PROVIDER_OUTPUT_ROLES)
+    : (includeRequest ? PHYSICAL_MLX_SESSION_OUTPUT_ROLES : PHYSICAL_MLX_PROVIDER_OUTPUT_ROLES);
+}
 
 function stable(value) {
   if (Array.isArray(value)) return value.map(stable);
@@ -98,6 +125,67 @@ function physicalMlxRgbMetadata(output, label) {
   return { logicalCaseId: match[1], width, height };
 }
 
+function physicalMlxAvMetadata(output, label) {
+  const match = path.posix.basename(output.path).match(PHYSICAL_MLX_AV_BASENAME);
+  if (!match || match[2] !== output.role) {
+    fail(`${label} path must bind its logical case, A/V role, geometry, frames, and content digest`);
+  }
+  if (output.sha256 !== match[6]) {
+    fail(`${label} SHA-256 must match its content-addressed filename`);
+  }
+  return {
+    logicalCaseId: match[1],
+    width: Number(match[3]),
+    height: Number(match[4]),
+    frames: Number(match[5]),
+  };
+}
+
+export function parsePhysicalMlxAvContent(bytes, label = "physical MLX A/V output") {
+  const magic = Buffer.from("SCENEWORKS_AV1\0", "ascii");
+  if (bytes.length < 45 || !bytes.subarray(0, magic.length).equals(magic)) {
+    fail(`${label} must begin with the canonical SCENEWORKS_AV1 header`);
+  }
+  let offset = magic.length;
+  const width = bytes.readUInt32LE(offset); offset += 4;
+  const height = bytes.readUInt32LE(offset); offset += 4;
+  const frames = bytes.readUInt32LE(offset); offset += 4;
+  const fps = bytes.readUInt32LE(offset); offset += 4;
+  const sampleRateHz = bytes.readUInt32LE(offset); offset += 4;
+  const channels = bytes.readUInt16LE(offset); offset += 2;
+  const sampleCount = Number(bytes.readBigUInt64LE(offset)); offset += 8;
+  if (![width, height, frames, fps, sampleRateHz, channels, sampleCount]
+      .every((value) => Number.isSafeInteger(value) && value > 0)) {
+    fail(`${label} canonical A/V header contains a zero or unsafe dimension`);
+  }
+  for (let frame = 0; frame < frames; frame += 1) {
+    if (offset + 16 > bytes.length) fail(`${label} frame ${frame} header is truncated`);
+    const frameWidth = bytes.readUInt32LE(offset); offset += 4;
+    const frameHeight = bytes.readUInt32LE(offset); offset += 4;
+    const pixelLength = Number(bytes.readBigUInt64LE(offset)); offset += 8;
+    const expected = frameWidth * frameHeight * 3;
+    if (frameWidth !== width || frameHeight !== height || !Number.isSafeInteger(expected)
+        || pixelLength !== expected || offset + pixelLength > bytes.length) {
+      fail(`${label} frame ${frame} does not match the canonical RGB geometry`);
+    }
+    offset += pixelLength;
+  }
+  const pcmBytes = sampleCount * 4;
+  if (!Number.isSafeInteger(pcmBytes) || offset + pcmBytes !== bytes.length) {
+    fail(`${label} PCM payload length does not match sampleCount`);
+  }
+  return {
+    width, height, frames, fps, sampleRateHz, channels, sampleCount,
+    pcmSha256: createHash("sha256").update(bytes.subarray(offset)).digest("hex"),
+  };
+}
+
+function physicalMlxOutputMetadata(output, label) {
+  return output.role === "selected_av" || output.role === "reference_av"
+    ? physicalMlxAvMetadata(output, label)
+    : physicalMlxRgbMetadata(output, label);
+}
+
 function validatePhysicalMlxSessionReceipts(session) {
   const sourceDirectory = path.posix.dirname(session.sourcePath);
   if (session.sourcePath !== `${sourceDirectory}/${session.id}.log`) {
@@ -111,18 +199,77 @@ function validatePhysicalMlxSessionReceipts(session) {
     if (path.posix.dirname(output.path) !== sourceDirectory) {
       fail(`${session.id}: physical MLX RGB receipts must share the source directory`);
     }
-    physicalMlxRgbMetadata(output, `${session.id}.${output.role}`);
+    physicalMlxOutputMetadata(output, `${session.id}.${output.role}`);
   }
 }
 
 function validatePhysicalMlxOutputsAgainstRecord(record, session) {
   for (const output of session.outputs.filter((candidate) => candidate.role !== "request")) {
-    const metadata = physicalMlxRgbMetadata(output, `${session.id}.${output.role}`);
+    const metadata = physicalMlxOutputMetadata(output, `${session.id}.${output.role}`);
     if (metadata.logicalCaseId !== record.logicalCaseId
         || metadata.width !== record.target.geometry.width
-        || metadata.height !== record.target.geometry.height) {
-      fail(`${record.id}: physical MLX RGB receipt does not match the measured logical case geometry`);
+        || metadata.height !== record.target.geometry.height
+        || (metadata.frames !== undefined && metadata.frames !== record.target.geometry.frames)) {
+      fail(`${record.id}: physical MLX output receipt does not match the measured logical case geometry`);
     }
+  }
+  const hasAv = session.outputs.some((output) => output.role === "selected_av");
+  if (hasAv !== (record.quality.audio !== undefined)) {
+    fail(`${record.id}: physical MLX A/V receipts and typed audio quality must be present together`);
+  }
+  if (hasAv) validateAudioQuality(record);
+}
+
+function validateAudioQuality(record) {
+  const audio = record.quality.audio;
+  object(audio, `${record.id}.quality.audio`);
+  if (audio.result !== "passed") fail(`${record.id}: A/V audio quality did not pass`);
+  for (const field of ["sampleRateHz", "channels", "sampleCount"]) {
+    if (!Number.isSafeInteger(audio[field]) || audio[field] <= 0) {
+      fail(`${record.id}.quality.audio.${field} must be a positive safe integer`);
+    }
+  }
+  for (const field of ["selectedPcmSha256", "referencePcmSha256"]) {
+    if (!/^[0-9a-f]{64}$/.test(audio[field])) {
+      fail(`${record.id}.quality.audio.${field} must be a lowercase SHA-256 digest`);
+    }
+  }
+  for (const metric of [
+    "maximumAbsoluteError", "meanAbsoluteError", "rootMeanSquareError",
+    "maximumAbsoluteErrorThreshold", "meanAbsoluteErrorThreshold",
+    "rootMeanSquareErrorThreshold",
+  ]) number(audio[metric], `${record.id}.quality.audio.${metric}`);
+  if (audio.maximumAbsoluteError > audio.maximumAbsoluteErrorThreshold
+      || audio.meanAbsoluteError > audio.meanAbsoluteErrorThreshold
+      || audio.rootMeanSquareError > audio.rootMeanSquareErrorThreshold) {
+    fail(`${record.id}: audio quality threshold exceeded`);
+  }
+}
+
+export function validatePhysicalMlxAvContentsAgainstRecord(record, avContents, label) {
+  if (avContents.size === 0) return;
+  validateAudioQuality(record);
+  const selected = avContents.get("selected_av");
+  const reference = avContents.get("reference_av");
+  const audio = record.quality.audio;
+  const outputFps = record.diagnostics?.measurements?.find(
+    (measurement) => measurement.name === "outputFps",
+  )?.value;
+  for (const content of [selected, reference]) {
+    if (!content
+        || content.width !== record.target.geometry.width
+        || content.height !== record.target.geometry.height
+        || content.frames !== record.target.geometry.frames
+        || content.fps !== outputFps
+        || content.sampleRateHz !== audio.sampleRateHz
+        || content.channels !== audio.channels
+        || content.sampleCount !== audio.sampleCount) {
+      fail(`${label}: canonical A/V header differs from measured video/audio identity`);
+    }
+  }
+  if (selected.pcmSha256 !== audio.selectedPcmSha256
+      || reference.pcmSha256 !== audio.referencePcmSha256) {
+    fail(`${label}: canonical A/V PCM hashes differ from quality.audio`);
   }
 }
 
@@ -338,10 +485,21 @@ function schemaErrors(value, schema, root = schema, location = "$") {
     for (const required of schema.required ?? []) {
       if (!Object.hasOwn(value, required)) errors.push(`${location}.${required}: required property is missing`);
     }
+    if (schema.minProperties !== undefined && Object.keys(value).length < schema.minProperties) {
+      errors.push(`${location}: object has too few properties`);
+    }
     const properties = schema.properties ?? {};
     for (const [key, child] of Object.entries(value)) {
+      // sc-22514: `propertyNames` is what makes the anchor plan's one-per-cell rule structural, so
+      // the runtime validator has to enforce it rather than trust an editor's JSON-Schema plugin.
+      if (schema.propertyNames) {
+        errors.push(...schemaErrors(key, schema.propertyNames, root, `${location}.${key}<key>`));
+      }
       if (properties[key]) errors.push(...schemaErrors(child, properties[key], root, `${location}.${key}`));
       else if (schema.additionalProperties === false) errors.push(`${location}.${key}: unexpected property`);
+      else if (schema.additionalProperties && typeof schema.additionalProperties === "object") {
+        errors.push(...schemaErrors(child, schema.additionalProperties, root, `${location}.${key}`));
+      }
     }
   }
   return errors;
@@ -747,6 +905,20 @@ export function validateRecord(record) {
   }
   object(record.target, `${record.id}.target`);
   for (const key of ["modelId", "provider", "tier", "mode", "overlay"]) text(record.target[key], `${record.id}.target.${key}`);
+  if (record.target.modelId === "ltx_2_5") {
+    if (!LTX25_TRANSFORMER_VARIANTS.includes(record.target.transformerVariant)) {
+      fail(
+        `${record.id}.target.transformerVariant must identify an LTX-2.5 transformer ` +
+          `(${LTX25_TRANSFORMER_VARIANTS.join("|")})`,
+      );
+    }
+    if (!LTX25_DECODERS.includes(record.target.decoder)) {
+      fail(
+        `${record.id}.target.decoder must identify an LTX-2.5 decoder ` +
+          `(${LTX25_DECODERS.join("|")})`,
+      );
+    }
+  }
   for (const key of ["width", "height", "batch", "frames"]) number(record.target.geometry[key], `${record.id}.target.geometry.${key}`, true);
   object(record.strategy, `${record.id}.strategy`);
   if (!RUNG_SET.has(record.strategy.rung)) fail(`${record.id}: invalid rung`);
@@ -761,6 +933,7 @@ export function validateRecord(record) {
   if (record.id !== recordId(record)) fail(`${record.id}: deterministic identity mismatch`);
   object(record.loadability, `${record.id}.loadability`);
   object(record.quality, `${record.id}.quality`);
+  if (record.quality.audio !== undefined) validateAudioQuality(record);
   if (!Array.isArray(record.scenarios)) fail(`${record.id}: scenarios must be an array`);
   validateDiagnosticCeilingAgreesWithTypedField(record);
   if (record.status === "complete") validateComplete(record);
@@ -785,7 +958,7 @@ export function validateBundle(bundle) {
     if (session.kind === "physical_mlx") {
       validateExactOutputReceipts(
         session.outputs,
-        PHYSICAL_MLX_SESSION_OUTPUT_ROLES,
+        physicalMlxExpectedRoles(session.outputs, true),
         `${session.id}.outputs`,
       );
       validatePhysicalMlxSessionReceipts(session);
@@ -842,10 +1015,14 @@ export function validateBundle(bundle) {
       ? "z_image"
       : requiresQwenMlxDerivation ? "qwen_image" : null;
     const requiresDerivation = provenancePolicy !== null;
+    const requiresAudioDerivation = record.quality.audio !== undefined;
     if (requiresQwenMlxDerivation && !record.artifact.inventorySha256) {
       fail(`${record.id}: authoritative Qwen MLX evidence requires an exact artifact inventory`);
     }
     if (requiresDerivation && !record.derivation) fail(`${record.id}: missing source-session derivation`);
+    if (requiresAudioDerivation && !record.derivation) {
+      fail(`${record.id}: typed audio quality requires physical source-session derivation`);
+    }
     if (record.derivation) {
       const derivationSessionIds = new Set();
       for (const [claim, reference] of Object.entries(record.derivation).filter(([key]) => key !== "justification")) {
@@ -860,6 +1037,23 @@ export function validateBundle(bundle) {
           }
           if (requiresDerivation) {
             validateSourceInputsAgainstRecord(record, session, sourceClaim, inventoryInputs, provenancePolicy);
+          }
+          if (record.target.modelId === "ltx_2_5") {
+            if (!session.target) {
+              fail(`${record.id}: ${sessionId} is an LTX derivation source without a target identity`);
+            }
+            for (const [sourceField, recordField] of [
+              ["tier", record.target.tier],
+              ["mode", record.target.mode],
+              ["overlay", record.target.overlay],
+              ["rung", record.strategy.rung],
+              ["transformerVariant", record.target.transformerVariant],
+              ["decoder", record.target.decoder],
+            ]) {
+              if (session.target[sourceField] !== recordField) {
+                fail(`${record.id}: ${sessionId} has the wrong LTX ${sourceField} identity`);
+              }
+            }
           }
           if (["memory", "quality", "overlay"].includes(claim)
               && session.target && session.target.tier !== record.target.tier) {
@@ -898,6 +1092,25 @@ export function validateBundle(bundle) {
       if (requiresQwenMlxDerivation) {
         const [sessionId] = derivationSessionIds;
         validatePhysicalMlxOutputsAgainstRecord(record, sessions.get(sessionId));
+      }
+      if (requiresAudioDerivation) {
+        const audioSourceIds = record.derivation.quality.sourceSessionIds;
+        if (audioSourceIds.length !== 1) {
+          fail(`${record.id}: typed audio quality must bind exactly one physical A/V source session`);
+        }
+        const audioSession = sessions.get(audioSourceIds[0]);
+        if (audioSession?.kind !== "physical_mlx") {
+          fail(`${record.id}: typed audio quality source must be physical_mlx`);
+        }
+        validatePhysicalMlxOutputsAgainstRecord(record, audioSession);
+      }
+      if (record.target.modelId === "ltx_2_5") {
+        for (const sessionId of derivationSessionIds) {
+          const session = sessions.get(sessionId);
+          if (session.kind === "physical_mlx") {
+            validatePhysicalMlxOutputsAgainstRecord(record, session);
+          }
+        }
       }
     }
   }
@@ -1018,6 +1231,7 @@ export async function validateSourceSessionFiles(
     }
     const record = boundRecords[0];
     const requestOutput = session.outputs.find((output) => output.role === "request");
+    const avContents = new Map();
     for (const output of session.outputs) {
       const outputFile = await resolveReceiptPath(output.path, roots);
       const outputBytes = await readFile(outputFile);
@@ -1025,7 +1239,14 @@ export async function validateSourceSessionFiles(
           || outputBytes.length !== output.bytes) {
         fail(`${session.id}: output ${output.path} no longer matches its SHA-256 receipt`);
       }
+      if (output.role === "selected_av" || output.role === "reference_av") {
+        avContents.set(
+          output.role,
+          parsePhysicalMlxAvContent(outputBytes, `${session.id}.${output.role}`),
+        );
+      }
     }
+    validatePhysicalMlxAvContentsAgainstRecord(record, avContents, session.id);
     const requestBytes = await readFile(await resolveReceiptPath(requestOutput.path, roots));
     let request;
     try {
@@ -1051,6 +1272,10 @@ export async function validateSourceSessionFiles(
       tier: request.planned.target.tier,
       mode: request.planned.target.mode,
       overlay: request.planned.target.overlay,
+      ...(request.planned.target.transformerVariant
+        ? { transformerVariant: request.planned.target.transformerVariant }
+        : {}),
+      ...(request.planned.target.decoder ? { decoder: request.planned.target.decoder } : {}),
       rung: request.planned.strategy.rung,
     };
     if (!equal(capturedProvenance(request.repositories), capturedProvenance(record.repositories))
@@ -1077,11 +1302,11 @@ export async function validateSourceSessionFiles(
     }
     validateExactOutputReceipts(
       providerResponse?.sourceCapture?.outputs,
-      PHYSICAL_MLX_PROVIDER_OUTPUT_ROLES,
+      physicalMlxExpectedRoles(providerResponse?.sourceCapture?.outputs, false),
       `${session.id}.providerResponse.sourceCapture.outputs`,
     );
     for (const providerOutput of providerResponse.sourceCapture.outputs) {
-      physicalMlxRgbMetadata(
+      physicalMlxOutputMetadata(
         providerOutput,
         `${session.id}.providerResponse.sourceCapture.outputs[${providerOutput.role}]`,
       );
@@ -1142,235 +1367,457 @@ export function evidenceSemantics(record, revisions) {
   // measurements against the other backend's code.
   const provider = `${record.backend}:${record.target.provider}`;
   const live = revisions.inferenceClosureDigests?.[provider];
-  // Fail closed and LOUDLY. Falling back to pin equality when a digest is missing would silently
-  // restore the policy this replaces, and the fallback would be invisible in a green run.
-  if (!captured) {
-    fail(
-      `${record.id}: no repositories.inference.closureDigest. Every complete record must carry the ` +
-        "provider closure digest it was captured under (sc-17774); re-run the backfill in " +
-        "scripts/backfill-closure-digests.mjs against an inference clone.",
-    );
-  }
-  if (!live) {
-    fail(
-      `${record.id}: provider "${provider}" has no entry in config/inference-provider-closures.json. ` +
-        "Declare its inference crate and regenerate: node scripts/inference-closure-digest.mjs " +
-        "--repo <inference> --write.",
-    );
-  }
+  // sc-22512: fail SAFE, not closed. Both of these used to `fail()` — a record carrying no captured
+  // digest, and a lane carrying no declaration — so the ABSENCE of currency bookkeeping reddened
+  // every consumer of this function, including `npm run check`. Under E8 absence never blocks: it
+  // only withholds an improvement.
+  //
+  // `historical` is that answer, and it is strictly conservative. It is NOT the pin-equality
+  // fallback this replaced (which would have let an unrelated commit decide currency, and could
+  // read `current`): a record with no currency term to compare simply cannot certify a cell, so the
+  // consumer falls back to the analytic estimate. The remedy is still to capture or declare — that
+  // is now an improvement to make rather than a gate to clear.
+  if (!captured || !live) return "historical";
   validateCurrentPhysicalMlxProvenance(record, revisions.inferenceClosureDigests);
   return captured === live ? "current" : "historical";
 }
 
-export function mergeBundles(left, right) {
-  validateBundle(left);
-  validateBundle(right);
-  const records = new Map(left.records.map((record) => [record.id, record]));
-  for (const record of right.records) {
-    const existing = records.get(record.id);
-    if (existing && !equal(existing, record)) fail(`conflicting record with exact identity ${record.id}`);
-    records.set(record.id, record);
+/**
+ * The anchor COMPOSITION, fixed per backend lane rather than planned (sc-22514).
+ *
+ * An anchor is the one render a lane's derivation law can price everything else from, so the
+ * composition is a property of the LAW, not an operator choice: `isDerivable` in
+ * scripts/extract-memory-anchors.mjs accepts any MLX composition but accepts a candle anchor ONLY
+ * when `staged_residency` is engaged and nothing deeper is. Planning the rung would let a capture
+ * spend hours producing a render the extractor then refuses, and would reopen the rung grid this
+ * story closed.
+ */
+export const ANCHOR_STRATEGY = Object.freeze({
+  mlx: Object.freeze({ rung: "resident", engagedRungs: Object.freeze(["resident"]), parameters: Object.freeze({}) }),
+  candle: Object.freeze({
+    rung: "staged_residency",
+    engagedRungs: Object.freeze(["resident", "staged_residency"]),
+    parameters: Object.freeze({}),
+  }),
+});
+
+/** `<modelId>:<tier>:<backend>` — the anchor plan's key, and the cell identity itself. */
+const ANCHOR_KEY = /^([a-z][a-z0-9_]*):(q4|q8|bf16):(mlx|candle)$/;
+
+export function parseAnchorKey(key) {
+  const match = ANCHOR_KEY.exec(typeof key === "string" ? key : "");
+  if (!match) fail(`anchor key ${JSON.stringify(key)} must be <modelId>:<tier>:<backend>`);
+  return { modelId: match[1], tier: match[2], backend: match[3] };
+}
+
+/**
+ * Model ids the anchor plan may name, read from the two checked-in artifacts that between them
+ * enumerate every model SceneWorks knows about:
+ *
+ * - `models[].id` in `docs/generated/memory-matrix.json` — the routed catalog, and
+ * - `summary.outOfMatrixEntries[].id` — the models deliberately absent from that catalog (today
+ *   exactly the MiniMax-H3 pair, which has no familyGroup arm and no video-route resolver row).
+ *
+ * The schema's key pattern only constrains the SHAPE of a model id, so without this a plan could
+ * name an INVENTED model — `krea_2_turbo_b:q4:mlx`, a byte-for-byte copy of `krea_2_turbo:q4:mlx` —
+ * and buy itself a schema-valid second measurement of one physical cell, which is precisely the
+ * thing the object-keyed plan exists to make inexpressible.
+ *
+ * This is a COHERENCE check between two artifacts that are both present in the tree; it never asks
+ * whether a cell has been measured, so it cannot red on a missing measurement.
+ */
+let matrixModelIdsCache;
+function matrixModelIds() {
+  if (matrixModelIdsCache) return matrixModelIdsCache;
+  let matrix;
+  try {
+    matrix = JSON.parse(readFileSync(path.join(ROOT, "docs/generated/memory-matrix.json"), "utf8"));
+  } catch {
+    // The matrix is the OTHER half of the coherence check. If it is not readable there is no
+    // second artifact to be coherent with, so the check abstains rather than inventing a verdict.
+    return (matrixModelIdsCache = null);
   }
-  const sourceSessions = new Map((left.sourceSessions ?? []).map((session) => [session.id, session]));
-  for (const session of right.sourceSessions ?? []) {
-    const existing = sourceSessions.get(session.id);
-    if (existing && !equal(existing, session)) fail(`conflicting source session ${session.id}`);
-    sourceSessions.set(session.id, session);
+  const ids = new Set([
+    ...(matrix.models ?? []).map((model) => model.id),
+    ...(matrix.summary?.outOfMatrixEntries ?? []).map((entry) => entry.id),
+  ].filter((id) => typeof id === "string" && id));
+  return (matrixModelIdsCache = ids.size ? ids : null);
+}
+
+/**
+ * Schema-validate an anchor plan. The plan cannot express a second measurement of one cell, a
+ * geometry or parameter sweep, a rung grid, a negative case or a batch group — see
+ * packages/schemas/memory-anchor-plan.schema.json. Nothing here re-checks those by hand: the
+ * schema is the enforcement, and this is the seam that runs it.
+ *
+ * The one thing the schema CANNOT see is whether a well-shaped model id names a real model, so
+ * that is checked here against `matrixModelIds()`.
+ */
+export function validatePlan(plan) {
+  object(plan, "anchor plan");
+  const errors = schemaErrors(plan, ANCHOR_PLAN_SCHEMA);
+  if (errors.length) fail(`anchor plan is invalid: ${errors.slice(0, 8).join("; ")}`);
+  const knownModelIds = matrixModelIds();
+  for (const [key, anchor] of Object.entries(plan.anchors)) {
+    const { modelId } = parseAnchorKey(key);
+    // Synthetic plans used by the test suites are exempt, and can only be exempt while they are
+    // BOTH named `fixture_*` and scoped `fixture` — a scope that derives no closure digest and can
+    // never become current evidence. An `authoritative` or `candidate` anchor has no such door.
+    const syntheticFixture = modelId.startsWith("fixture_") && anchor.evidenceScope === "fixture";
+    if (knownModelIds && !syntheticFixture && !knownModelIds.has(modelId)) {
+      fail(
+        `${key}: model id ${JSON.stringify(modelId)} is not a docs/generated/memory-matrix.json ` +
+          "model and is not one of its summary.outOfMatrixEntries; an invented model id is a " +
+          "second measurement of an existing cell wearing a new name",
+      );
+    }
+    if (modelId === "ltx_2_5" && (!anchor.transformerVariant || !anchor.decoder)) {
+      fail(`${key}: an LTX-2.5 anchor requires transformerVariant and decoder`);
+    }
+    if (modelId !== "ltx_2_5" && (anchor.transformerVariant || anchor.decoder)) {
+      fail(`${key}: transformerVariant/decoder are LTX-2.5 axes only`);
+    }
   }
+  return plan;
+}
+
+/** Every planned anchor, in key order. */
+export function planAnchors(plan) {
+  validatePlan(plan);
+  return Object.keys(plan.anchors).sort().map((key) => planAnchor(plan, key));
+}
+
+/**
+ * The ONE planned case for one anchor key.
+ *
+ * The wire shape the adapters consume is unchanged — `expectedResult`, `negative`,
+ * `modelLoadPolicy` and `modelLoadGroup` are still sent — but they are CONSTANTS now rather than
+ * plan fields: an anchor capture is one fresh model load of one passing case, and there is no
+ * spelling of the plan that says otherwise.
+ */
+export function planAnchor(plan, key) {
+  validatePlan(plan);
+  const { modelId, tier, backend } = parseAnchorKey(key);
+  const anchor = plan.anchors[key];
+  if (!anchor) {
+    fail(`unknown anchor ${JSON.stringify(key)}; the plan declares: ${Object.keys(plan.anchors).sort().join(", ")}`);
+  }
+  const spec = {
+    evidenceScope: anchor.evidenceScope,
+    backend,
+    loadShape: anchor.loadShape,
+    target: {
+      provider: anchor.provider,
+      modelId,
+      tier,
+      mode: anchor.mode,
+      overlay: anchor.overlay,
+      ...(anchor.transformerVariant ? { transformerVariant: anchor.transformerVariant } : {}),
+      ...(anchor.decoder ? { decoder: anchor.decoder } : {}),
+      geometry: anchor.geometry,
+    },
+    strategy: {
+      rung: ANCHOR_STRATEGY[backend].rung,
+      engagedRungs: [...ANCHOR_STRATEGY[backend].engagedRungs],
+      parameters: {},
+    },
+    ...(anchor.sourceProvenance ? { sourceProvenance: anchor.sourceProvenance } : {}),
+    calibrationFingerprint: anchor.calibrationFingerprint,
+    fixture: anchor.fixture,
+    negative: false,
+  };
   return {
-    schemaVersion: SCHEMA_VERSION,
-    harnessVersion: HARNESS_VERSION,
-    sourceSessions: [...sourceSessions.values()].sort((a, b) => a.id.localeCompare(b.id)),
-    records: [...records.values()].sort((a, b) => a.id.localeCompare(b.id)),
+    logicalCaseId: logicalCaseId(spec),
+    ...spec,
+    expectedResult: "passed",
+    modelLoadPolicy: "fresh_per_case",
+    modelLoadGroup: null,
   };
 }
 
-export function compareRungReuse(fresh, reused, tolerance = RUNG_REUSE_TOLERANCE) {
-  validateBundle(fresh);
-  validateBundle(reused);
-  const freshByLogicalId = new Map(fresh.records.map((record) => [record.logicalCaseId, record]));
-  const reusedByLogicalId = new Map(reused.records.map((record) => [record.logicalCaseId, record]));
-  if (freshByLogicalId.size !== fresh.records.length || reusedByLogicalId.size !== reused.records.length) {
-    fail("fresh/reused comparison cannot contain duplicate logical cases");
+const LTX25_CAPTURE_TIERS = ["q4", "q8", "bf16"];
+function ltx25ArtifactKey(planned) {
+  const variant = planned?.target?.transformerVariant;
+  const tier = planned?.target?.tier;
+  if (!LTX25_TRANSFORMER_VARIANTS.includes(variant) || !LTX25_CAPTURE_TIERS.includes(tier)) {
+    fail(`LTX-2.5 capture target requires transformerVariant=${
+      LTX25_TRANSFORMER_VARIANTS.join("|")
+    } and tier=${LTX25_CAPTURE_TIERS.join("|")}`);
   }
-  if (freshByLogicalId.size !== reusedByLogicalId.size) {
-    fail(`fresh/reused comparison cardinality differs: ${freshByLogicalId.size} != ${reusedByLogicalId.size}`);
+  return `${variant}/${tier}`;
+}
+
+async function requireLtx25File(file, label) {
+  let metadata;
+  try {
+    metadata = await stat(file);
+  } catch (error) {
+    fail(`${label} is missing at ${file}: ${error.message}`);
   }
-  const comparisons = [];
-  for (const [logicalCaseId, freshRecord] of freshByLogicalId) {
-    const reusedRecord = reusedByLogicalId.get(logicalCaseId);
-    if (!reusedRecord) fail(`reused capture is missing ${logicalCaseId}`);
-    if (freshRecord.id !== reusedRecord.id) {
-      fail(`${logicalCaseId}: fresh/reused comparison domain differs in repository, hardware, or artifact provenance`);
+  if (!metadata.isFile() || metadata.size < 1) fail(`${label} must be one non-empty file at ${file}`);
+  return metadata;
+}
+
+async function hashLtx25File(file, label, trustedRoot) {
+  const metadata = await requireLtx25File(file, label);
+  const physical = await realpath(file);
+  const boundary = await realpath(trustedRoot);
+  const relation = path.relative(boundary, physical);
+  if (!relation || relation.startsWith("..") || path.isAbsolute(relation)) {
+    fail(`${label} escaped the repository cache boundary at ${file}`);
+  }
+  const hash = createHash("sha256");
+  let bytes = 0;
+  try {
+    for await (const chunk of createReadStream(physical)) {
+      bytes += chunk.length;
+      hash.update(chunk);
     }
-    if (!freshRecord.observedMemory || !reusedRecord.observedMemory) {
-      fail(`${logicalCaseId}: fresh/reused comparison requires observedMemory on both records`);
+  } catch (error) {
+    fail(`hash ${label} at ${file}: ${error.message}`);
+  }
+  if (bytes !== metadata.size) fail(`${label} changed size while it was being hashed at ${file}`);
+  return { path: file, bytes, sha256: hash.digest("hex") };
+}
+
+export async function prepareLtx25CaptureArtifacts(
+  snapshotRoot,
+  plannedCases,
+  inventoryFor = hashArtifactInventory,
+) {
+  if (typeof snapshotRoot !== "string" || !snapshotRoot || !path.isAbsolute(snapshotRoot)) {
+    fail("--ltx25-snapshot-root must be one absolute path");
+  }
+  if (!Array.isArray(plannedCases) || plannedCases.length === 0) {
+    fail("LTX-2.5 snapshot preparation requires at least one selected case");
+  }
+  if (plannedCases.some((planned) =>
+    planned.backend !== "mlx" ||
+    planned.target?.modelId !== "ltx_2_5" ||
+    planned.target?.provider !== "ltx_2_5")) {
+    fail("--ltx25-snapshot-root is valid only for the mlx:ltx_2_5 plan");
+  }
+
+  const requested = path.resolve(snapshotRoot);
+  let resolved;
+  try {
+    resolved = await realpath(requested);
+  } catch (error) {
+    fail(`cannot canonicalize --ltx25-snapshot-root ${requested}: ${error.message}`);
+  }
+  if (resolved !== requested) {
+    fail(`--ltx25-snapshot-root must be the canonical snapshot path, got ${requested} -> ${resolved}`);
+  }
+  const snapshotsDirectory = path.dirname(resolved);
+  const repositoryDirectory = path.dirname(snapshotsDirectory);
+  const expectedRepositoryDirectory = `models--${LTX25_CAPTURE_REPOSITORY.replaceAll("/", "--")}`;
+  if (
+    path.basename(resolved) !== LTX25_CAPTURE_REVISION ||
+    path.basename(snapshotsDirectory) !== "snapshots" ||
+    path.basename(repositoryDirectory) !== expectedRepositoryDirectory
+  ) {
+    fail(
+      `--ltx25-snapshot-root must be ${expectedRepositoryDirectory}/snapshots/${LTX25_CAPTURE_REVISION}`,
+    );
+  }
+
+  const enhancer = path.join(resolved, "enhancer");
+  let enhancerEntries;
+  try {
+    enhancerEntries = await readdir(enhancer);
+  } catch (error) {
+    fail(`LTX-2.5 enhancer directory is missing at ${enhancer}: ${error.message}`);
+  }
+  if (enhancerEntries.length === 0) fail(`LTX-2.5 enhancer directory is empty at ${enhancer}`);
+  const canonicalEnhancer = await realpath(enhancer);
+  if (canonicalEnhancer !== enhancer) fail(`LTX-2.5 enhancer root must be canonical: ${enhancer}`);
+  let enhancerInventory;
+  try {
+    enhancerInventory = await inventoryFor(enhancer, { trustedRoot: repositoryDirectory });
+  } catch (error) {
+    fail(`hash LTX-2.5 enhancer artifact inventory: ${error.message}`);
+  }
+  if (!Number.isSafeInteger(enhancerInventory.bytes) || enhancerInventory.bytes <= 0 ||
+      !/^[0-9a-f]{64}$/.test(enhancerInventory.sha256)) {
+    fail("LTX-2.5 enhancer artifact inventory is malformed");
+  }
+  const enhancerArtifact = {
+    root: enhancer,
+    bytes: enhancerInventory.bytes,
+    sha256: enhancerInventory.sha256,
+  };
+  const needsDevAdapter = plannedCases.some(
+    (planned) => planned.target.transformerVariant === "dev",
+  );
+  const devAdapter = needsDevAdapter
+    ? await hashLtx25File(
+        path.join(resolved, "distilled_lora", "ltx-2.5-22b-distilled-lora-450-bf16.safetensors"),
+        "LTX-2.5 dev refinement adapter",
+        repositoryDirectory,
+      )
+    : null;
+
+  const artifacts = new Map();
+  const keys = [...new Set(plannedCases.map(ltx25ArtifactKey))].sort();
+  for (const key of keys) {
+    const root = path.join(resolved, ...key.split("/"));
+    let canonicalRoot;
+    try {
+      canonicalRoot = await realpath(root);
+    } catch (error) {
+      fail(`LTX-2.5 nested artifact root ${key} is missing at ${root}: ${error.message}`);
     }
-    const metrics = [];
-    const overallOnly = Object.keys(freshRecord.observedMemory).length === 1
-      || Object.keys(reusedRecord.observedMemory).length === 1;
-    if (overallOnly && (
-      Object.keys(freshRecord.observedMemory).length !== 1
-      || Object.keys(reusedRecord.observedMemory).length !== 1
-    )) fail(`${logicalCaseId}: fresh/reused observedMemory shapes differ`);
-    const phases = overallOnly ? ["overall"] : ["conditioning", "denoise", "decode", "overall"];
-    const metricNames = overallOnly ? ["activeBytes"] : PHASE_METRICS;
-    for (const phase of phases) {
-      for (const metric of metricNames) {
-        const freshBytes = freshRecord.observedMemory[phase][metric];
-        const reusedBytes = reusedRecord.observedMemory[phase][metric];
-        const differenceBytes = Math.abs(reusedBytes - freshBytes);
-        const allowedBytes = Math.max(tolerance.absoluteBytes, Math.ceil(freshBytes * tolerance.relative));
-        metrics.push({ phase, metric, freshBytes, reusedBytes, differenceBytes, allowedBytes,
-          passed: differenceBytes <= allowedBytes });
-      }
+    if (canonicalRoot !== root) fail(`LTX-2.5 nested artifact root ${key} must be canonical: ${root}`);
+    await requireLtx25File(path.join(root, "split_model.json"), `LTX-2.5 ${key} split manifest`);
+    const matching = plannedCases.filter((planned) => ltx25ArtifactKey(planned) === key);
+    if (matching.some((planned) => planned.target.decoder === "conv")) {
+      await requireLtx25File(path.join(root, "vae_decoder.safetensors"), `LTX-2.5 ${key} ConvVAE decoder`);
     }
-    comparisons.push({
-      logicalCaseId,
-      rung: freshRecord.strategy.rung,
-      passed: metrics.every((metric) => metric.passed),
-      metrics,
+    if (matching.some((planned) => planned.target.decoder === "diffvae")) {
+      await requireLtx25File(
+        path.join(root, "vae_diffusion_decoder.safetensors"),
+        `LTX-2.5 ${key} DiffVAE decoder`,
+      );
+    }
+    let inventory;
+    try {
+      inventory = await inventoryFor(root, { trustedRoot: repositoryDirectory });
+    } catch (error) {
+      fail(`hash LTX-2.5 ${key} artifact inventory: ${error.message}`);
+    }
+    if (!Number.isSafeInteger(inventory.bytes) || inventory.bytes <= 0 ||
+        !/^[0-9a-f]{64}$/.test(inventory.sha256)) {
+      fail(`LTX-2.5 ${key} artifact inventory is malformed`);
+    }
+    artifacts.set(key, { root, bytes: inventory.bytes, sha256: inventory.sha256 });
+  }
+  return {
+    snapshotRoot: resolved,
+    repository: LTX25_CAPTURE_REPOSITORY,
+    revision: LTX25_CAPTURE_REVISION,
+    enhancer: enhancerArtifact,
+    devAdapter,
+    artifacts,
+  };
+}
+
+async function assertLtx25ArtifactsStable(sealed, plannedCases, inventoryFor = hashArtifactInventory) {
+  const observed = await prepareLtx25CaptureArtifacts(
+    sealed.snapshotRoot,
+    plannedCases,
+    inventoryFor,
+  );
+  for (const field of ["snapshotRoot", "repository", "revision", "enhancer"]) {
+    if (!equal(observed[field], sealed[field])) {
+      fail(`LTX-2.5 ${field} changed after campaign preparation`);
+    }
+  }
+  if (sealed.devAdapter) {
+    const observedDevAdapter = observed.devAdapter ?? await hashLtx25File(
+      sealed.devAdapter.path,
+      "LTX-2.5 dev refinement adapter",
+      path.dirname(path.dirname(sealed.snapshotRoot)),
+    );
+    if (!equal(observedDevAdapter, sealed.devAdapter)) {
+      fail("LTX-2.5 devAdapter changed after campaign preparation");
+    }
+  }
+  for (const key of new Set(plannedCases.map(ltx25ArtifactKey))) {
+    if (!equal(observed.artifacts.get(key), sealed.artifacts.get(key))) {
+      fail(`LTX-2.5 ${key} artifact inventory changed during provider execution`);
+    }
+  }
+}
+
+export function ltx25ProviderEnvironment(prepared, planned, baseEnvironment = process.env) {
+  const environment = { ...baseEnvironment };
+  for (const name of [
+    "SCENEWORKS_LTX25_ROOT",
+    "SCENEWORKS_MEMORY_MODEL_BYTES",
+    "SCENEWORKS_MEMORY_MODEL_INVENTORY_SHA256",
+    "SCENEWORKS_LTX25_ENHANCER_BYTES",
+    "SCENEWORKS_LTX25_ENHANCER_INVENTORY_SHA256",
+    "SCENEWORKS_LTX25_DEV_ADAPTER_BYTES",
+    "SCENEWORKS_LTX25_DEV_ADAPTER_SHA256",
+  ]) delete environment[name];
+  environment.SCENEWORKS_LTX25_REPOSITORY = prepared.repository;
+  environment.SCENEWORKS_LTX25_REVISION = prepared.revision;
+  if (planned) {
+    const key = ltx25ArtifactKey(planned);
+    const artifact = prepared.artifacts.get(key);
+    if (!artifact) fail(`LTX-2.5 prepared snapshot has no inventory for ${key}`);
+    environment.SCENEWORKS_LTX25_ROOT = artifact.root;
+    environment.SCENEWORKS_MEMORY_MODEL_BYTES = String(artifact.bytes);
+    environment.SCENEWORKS_MEMORY_MODEL_INVENTORY_SHA256 = artifact.sha256;
+    environment.SCENEWORKS_LTX25_ENHANCER_BYTES = String(prepared.enhancer.bytes);
+    environment.SCENEWORKS_LTX25_ENHANCER_INVENTORY_SHA256 = prepared.enhancer.sha256;
+    if (planned.target.transformerVariant === "dev") {
+      if (!prepared.devAdapter) fail("LTX-2.5 prepared snapshot has no dev adapter inventory");
+      environment.SCENEWORKS_LTX25_DEV_ADAPTER_BYTES = String(prepared.devAdapter.bytes);
+      environment.SCENEWORKS_LTX25_DEV_ADAPTER_SHA256 = prepared.devAdapter.sha256;
+    }
+  }
+  return environment;
+}
+
+function ltx25ExpectedSourceInputs(prepared, planned) {
+  const key = ltx25ArtifactKey(planned);
+  const artifact = prepared.artifacts.get(key);
+  if (!artifact) fail(`LTX-2.5 prepared snapshot has no inventory for ${key}`);
+  const inputs = [{
+    role: "base",
+    path: artifact.root,
+    bytes: artifact.bytes,
+    sha256: artifact.sha256,
+    repository: prepared.repository,
+    resolvedRevision: prepared.revision,
+    variant: planned.target.tier,
+  }, {
+    role: "enhancer",
+    path: prepared.enhancer.root,
+    bytes: prepared.enhancer.bytes,
+    sha256: prepared.enhancer.sha256,
+    repository: prepared.repository,
+    resolvedRevision: prepared.revision,
+    variant: "enhancer",
+  }];
+  if (planned.target.transformerVariant === "dev") {
+    if (!prepared.devAdapter) fail("LTX-2.5 prepared snapshot has no dev adapter inventory");
+    inputs.push({
+      role: "adapter",
+      path: prepared.devAdapter.path,
+      bytes: prepared.devAdapter.bytes,
+      sha256: prepared.devAdapter.sha256,
+      repository: prepared.repository,
+      resolvedRevision: prepared.revision,
+      variant: "dev_refinement_lora",
     });
   }
-  const backend = fresh.records[0]?.backend;
-  if (
-    !backend ||
-    fresh.records.some((record) => record.backend !== backend) ||
-    reused.records.some((record) => record.backend !== backend)
-  ) {
-    fail("fresh/reused comparison must contain exactly one backend");
-  }
+  return inputs;
+}
+
+/**
+ * Content identity of a source-session input: everything that identifies the bytes, minus the
+ * absolute snapshot `path`, which is machine-layout state rather than artifact identity.
+ */
+function ltx25InputContentIdentity(input) {
   return {
-    schemaVersion: 1,
-    backend,
-    tolerance,
-    verdict: comparisons.every((comparison) => comparison.passed)
-      ? "amortizable"
-      : "unable_to_amortize",
-    comparisons,
+    role: input?.role,
+    bytes: input?.bytes,
+    sha256: input?.sha256,
+    repository: input?.repository,
+    resolvedRevision: input?.resolvedRevision,
+    variant: input?.variant,
   };
 }
 
-function completedLogicalIds(record) {
-  if (record.status === "negative_complete") return [record.logicalCaseId];
-  if (!["complete", "runtime_complete"].includes(record.status)) return [];
-  return record.sweep.cases.filter((item) => item.result === "passed").map((item) =>
-    logicalCaseId({
-      evidenceScope: record.evidenceScope,
-      backend: record.backend,
-      loadShape: record.loadShape,
-      target: record.target,
-      strategy: {
-        rung: record.strategy.rung,
-        engagedRungs: record.strategy.engagedRungs,
-        parameters: item.parameters,
-      },
-      sourceProvenance: record.sourceProvenance,
-      calibrationFingerprint: record.calibrationFingerprint,
-      fixture: record.fixture,
-      negative: item.result === "failed",
-    }),
-  );
-}
-
-function operationallyAttemptedLogicalIds(records, repositories, hardware) {
-  // sc-17935: compared on repository IDENTITY, with the derived closure digest stripped from both
-  // sides — the same argument `recordId` makes. The digest is a pure function of (lane, inference
-  // revision); the revision is compared here, and the lane is fixed by `logicalCaseId`, so it adds
-  // nothing. Comparing it raw would make resume lane-sensitive: the run-level `repositories` no
-  // longer carries any one lane's digest, so every prior record would look foreign and a resumed
-  // capture would repeat GPU work it had already paid for.
-  //
-  // The converse is deliberate and worth stating: resume is now blind to the digest in BOTH
-  // directions, so a record stamped under a wrong declaration stays "already attempted" until the
-  // bundle is discarded. That is the correct trade — this check decides whether to re-run a
-  // multi-hour capture, not whether the evidence is current. Currency is `evidenceSemantics`, which
-  // reads the digest and fails closed.
-  const wanted = repositoriesIdentity(repositories);
-  return new Set(records
-    .filter((record) =>
-      record.harnessVersion === HARNESS_VERSION &&
-      equal(repositoriesIdentity(record.repositories), wanted) &&
-      equal(record.hardware, hardware)
-    )
-    .map((record) => record.logicalCaseId));
-}
-
-export function expandPlan(config, completed = []) {
-  object(config, "plan config");
-  const completedLogical = new Set(
-    completed.flatMap(completedLogicalIds),
-  );
-  const cases = [];
-  for (const provider of config.providers) {
-    if (!["eager_materialization", "deferred_materialization"].includes(provider.loadShape)) {
-      fail(`${provider.name ?? provider.target.provider}: plan provider requires an explicit loadShape`);
-    }
-    for (const candidate of provider.cases) {
-      if (!["passed", "failed"].includes(candidate.expectedResult)) {
-        fail(`${provider.name ?? provider.target.provider}: plan case requires expectedResult`);
-      }
-      if ((candidate.expectedResult === "failed") !== (candidate.negative === true)) {
-        fail(`${provider.name ?? provider.target.provider}: failed cases must be explicitly negative`);
-      }
-      const spec = {
-        evidenceScope: provider.evidenceScope,
-        backend: provider.backend,
-        loadShape: provider.loadShape,
-        target: provider.target,
-        strategy: {
-          rung: provider.rung,
-          engagedRungs: provider.engagedRungs,
-          parameters: candidate.parameters,
-        },
-        ...(provider.sourceProvenance ? { sourceProvenance: provider.sourceProvenance } : {}),
-        calibrationFingerprint: provider.calibrationFingerprint,
-        fixture: provider.fixture,
-        negative: candidate.negative === true,
-      };
-      const id = logicalCaseId(spec);
-      if (!completedLogical.has(id)) cases.push({
-        logicalCaseId: id,
-        ...spec,
-        expectedResult: candidate.expectedResult,
-        modelLoadPolicy: provider.modelLoadPolicy ?? "fresh_per_case",
-        modelLoadGroup: provider.modelLoadGroup ?? null,
-      });
-    }
-  }
-  return cases.sort((a, b) => a.logicalCaseId.localeCompare(b.logicalCaseId));
-}
-
-export async function assessProviderReuse({ config, providerCommand, backend, fixture }) {
-  if (!Array.isArray(providerCommand) || !providerCommand.length) fail("provider command must be a JSON argv array");
-  const planned = expandPlan(config).filter(
-    (candidate) => candidate.backend === backend && (!fixture || candidate.fixture === fixture),
-  ).sort((left, right) => RUNGS.indexOf(left.strategy.rung) - RUNGS.indexOf(right.strategy.rung));
-  if (planned.length === 0) fail(`reuse assessment selected no ${backend} cases`);
-  const response = JSON.parse(await execute(
-    providerCommand[0],
-    providerCommand.slice(1),
-    canonicalJson({ action: "assess_batch", planned }),
-  ));
-  if (!["eligible_for_measurement", "unable_to_amortize"].includes(response.verdict)) {
-    fail(`provider returned invalid reuse-assessment verdict ${JSON.stringify(response.verdict)}`);
-  }
-  text(response.reason, "reuse assessment reason");
-  return {
-    schemaVersion: 1,
-    backend,
-    fixture: fixture ?? null,
-    tolerance: RUNG_REUSE_TOLERANCE,
-    ...response,
-  };
-}
-
-function execute(command, args, input) {
+function execute(command, args, input, { env } = {}) {
   return new Promise((resolve, reject) => {
     const hasInput = input !== undefined;
     const child = spawn(command, args, {
       stdio: [hasInput ? "pipe" : "ignore", "pipe", "pipe"],
       windowsHide: true,
+      ...(env ? { env } : {}),
     });
     let stdout = "";
     let stderr = "";
@@ -1397,11 +1844,35 @@ function execute(command, args, input) {
   });
 }
 
-export async function runProviderPlan({
-  config, providerCommand, sceneWorksRepo, inferenceRepo, resume, backend, providerName, fixture,
-  onProviderInvocation, onProviderCheckpoint, forceFreshPerCase = false, forceBatchRungs = false,
-  rawLogDir = null, sourcePathPrefix = null,
-  // sc-17774: injectable so the runner's own tests can drive synthetic repositories, which have no
+/**
+ * Capture ONE anchor: one provider probe, one provider render, one record (sc-22514).
+ *
+ * This replaces `runProviderPlan`, whose job was to drive a campaign — a rung/geometry/parameter
+ * grid, batched model loads, resume against a prior bundle, negative cases and per-invocation
+ * checkpoints. Epic 22505 makes one anchor per (model, tier, lane) the whole measurement
+ * obligation, so there is nothing left for a campaign to schedule: the unit of work IS the unit of
+ * evidence, and a re-run is one more command rather than a resumable state machine.
+ *
+ * The output is a bundle in the same `{records: [...]}` shape the retained corpora use, with
+ * exactly one record, so scripts/extract-memory-anchors.mjs consumes it unchanged.
+ */
+export async function captureAnchor({ plan, anchorKey, ...rest }) {
+  return capturePlannedCase({ planned: planAnchor(plan, anchorKey), ...rest });
+}
+
+/**
+ * The capture primitive: one planned case in, one single-record bundle out.
+ *
+ * `captureAnchor` is the only production caller and derives its `planned` from the anchor plan. This
+ * arm is separate for ONE reason: `scripts/run-ltx-safety-canary.mjs` drives a frozen SC-18946
+ * campaign row — retained historical data in the pre-collapse grid shape, pinned by logical case id
+ * in the runner and the adapter alike — through the same request/record assembly. It is not a way to
+ * express a measurement the anchor plan cannot.
+ */
+export async function capturePlannedCase({
+  planned, providerCommand, sceneWorksRepo, inferenceRepo,
+  onProviderInvocation, rawLogDir = null, sourcePathPrefix = null, ltx25SnapshotRoot = null,
+  // sc-17774: injectable so this runner's own tests can drive synthetic repositories, which have no
   // inference crate layout to derive a real closure from. Production always uses the default.
   closureDigestFor = null,
   // SC-20191 keeps the canonical request/record assembly here while allowing the one contained
@@ -1430,6 +1901,7 @@ export async function runProviderPlan({
       }
     }
   }
+  object(planned, "planned case");
   const gitState = async (repo, sceneWorks = false) => ({
     revision: (await execute("git", ["-C", repo, "rev-parse", "HEAD"])).trim(),
     dirty: Boolean((await execute("git", ["-C", repo, "status", "--porcelain"])).trim()),
@@ -1443,36 +1915,29 @@ export async function runProviderPlan({
   });
   // sc-17774: stamp the provider's compile-closure digest AT CAPTURE TIME. The runner already has a
   // live inference checkout, so the captured half of the currency comparison is derived here rather
-  // than backfilled later.
-  //
-  // sc-17935: the LANE decides which closure is measured, and a lane is `<backend>:<provider>` —
-  // exactly the key `config/inference-provider-closures.json` and `evidenceSemantics` use. This used
-  // to pass `providerName`, the `--provider` PLAN-ENTRY name (`candle-krea-q4-fresh-reference-
-  // resident`), which is not a table key and is `undefined` under the `--fixture` selection every
-  // checked-in capture workflow actually uses. Both spellings failed with `provider "…" has no
-  // entry`, so no macOS or Windows capture job could produce replacement evidence — precisely when
-  // a narrowed currency term makes replacement evidence the remedy.
+  // than backfilled later. The LANE decides which closure is measured, and a lane is
+  // `<backend>:<provider>` — the key `config/inference-provider-closures.json` and
+  // `evidenceSemantics` both use.
+  const lane = `${planned.backend}:${planned.target.provider}`;
   const closureDigest =
     closureDigestFor ??
-    (async (lane, revision) => {
+    (async (laneKey, revision) => {
       const declarations = JSON.parse(
         await readFile(path.join(sceneWorksRepo, "config/inference-provider-closures.json"), "utf8"),
       );
-      const crateDir = declarations.providers?.[lane]?.crate;
-      if (!crateDir) {
-        fail(
-          `lane "${lane}" has no entry in config/inference-provider-closures.json. Declare its ` +
-            "inference crate before capturing evidence, or the record cannot carry a currency term.",
-        );
-      }
+      const crateDir = declarations.providers?.[laneKey]?.crate;
+      // sc-22512: an undeclared lane does not REFUSE the capture. Returning no digest is the
+      // conservative answer: the record carries no currency term, so it can never read `current`
+      // and can never certify a cell. The measurement is still taken. Declaring the lane promotes
+      // it later.
+      if (!crateDir) return undefined;
       return providerClosureDigest({
         repo: inferenceRepo,
         revision,
-        provider: lane,
+        provider: laneKey,
         crateDir,
       }).digest;
     });
-  const laneOf = (planned) => `${planned.backend}:${planned.target.provider}`;
   const probeRepositories = async () => ({
     sceneWorks: await gitState(sceneWorksRepo, true),
     inference: await gitState(inferenceRepo),
@@ -1485,342 +1950,259 @@ export async function runProviderPlan({
     const after = await probeRepositories();
     if (!equal(repositories, after)) fail("repository HEAD or dirty state changed during provider execution");
   };
-  const existing = resume
-    ? validateBundle(resume)
-    : { schemaVersion: SCHEMA_VERSION, harnessVersion: HARNESS_VERSION, sourceSessions: [], records: [] };
-  const selectedConfig = {
-    ...config,
-    providers: config.providers.filter(
-      (provider) => (!providerName || provider.name === providerName) && (!fixture || provider.fixture === fixture),
-    ),
-  };
-  if (providerName && selectedConfig.providers.length === 0) {
-    fail(`provider run selected no plan provider named ${providerName}`);
+  if (ltx25SnapshotRoot && planned.target.modelId !== "ltx_2_5") {
+    fail("--ltx25-snapshot-root captures an ltx_2_5 anchor only");
   }
-  if (fixture && selectedConfig.providers.length === 0) {
-    fail(`provider run selected no plan provider with fixture ${fixture}`);
+  if (planned.target.modelId === "ltx_2_5" && !ltx25SnapshotRoot) {
+    fail("an ltx_2_5 anchor requires --ltx25-snapshot-root for artifact binding");
   }
-  if (forceFreshPerCase && forceBatchRungs) fail("cannot force both fresh and batched provider execution");
-  const applyExecutionPolicy = (plannedCases) => plannedCases.map((planned) => {
-    if (forceFreshPerCase) {
-      return { ...planned, modelLoadPolicy: "fresh_per_case", modelLoadGroup: null };
-    }
-    if (forceBatchRungs) return {
-      ...planned,
-      modelLoadPolicy: "batch_rungs",
-      modelLoadGroup: `forced-${digest({ backend: planned.backend, target: planned.target, fixture: planned.fixture })}`,
-    };
-    return planned;
-  });
-  const allExpanded = applyExecutionPolicy(expandPlan(selectedConfig));
-  const expanded = applyExecutionPolicy(expandPlan(selectedConfig, existing.records));
-  const selectedCases = backend ? expanded.filter((planned) => planned.backend === backend) : expanded;
-  if (selectedCases.length === 0) fail(`provider run selected no ${backend ?? "remaining"} cases`);
-  const backends = new Set(selectedCases.map((planned) => planned.backend));
-  if (backends.size !== 1) {
-    fail(`provider run must select exactly one backend; pass --backend mlx|candle (selected: ${[...backends].join(", ")})`);
-  }
-  const probe = JSON.parse(await executeProvider(
-    providerCommand[0],
-    providerCommand.slice(1),
-    canonicalJson({ action: "probe", repositories }),
-  ));
-  await assertRepositoriesStable();
-  // Completion remains an evidence-semantic decision: candidate and gated receipts cannot retire
-  // plan cases or promote matrix cells. Resume has a narrower operational concern. A prior receipt
-  // proves that its exact logical case was already attempted only when the harness, both repository
-  // receipts (including matrix source identity/dirty state), and hardware probe all match this run.
-  // Stale or foreign receipts therefore remain scheduled, while a failed multi-invocation capture
-  // can continue without repeating expensive GPU work or colliding on a fresh capturedAt value.
-  const attempted = operationallyAttemptedLogicalIds(existing.records, repositories, probe.hardware);
-  const cases = selectedCases.filter((planned) => !attempted.has(planned.logicalCaseId));
-  if (cases.length === 0) return existing;
-
-  // Derive one digest per AUTHORITATIVE lane actually being captured, before the first GPU-bound
-  // invocation. Only an authoritative capture can ever be `current` — `evidenceSemantics`
-  // short-circuits fixture and candidate scopes before the comparison is reached — so a selection
-  // that is entirely fixture/candidate derives nothing and needs neither an inference crate layout
-  // nor a declarations file. That is what lets the schema-mutation suite drive this runner against a
-  // synthetic repo. Deriving EAGERLY is the point of doing it here rather than lazily at stamping
-  // time: an undeclared lane must fail before a 26 GB capture burns, not after.
-  const digestByLane = new Map();
-  for (const lane of new Set(cases.filter((planned) => planned.evidenceScope === "authoritative").map(laneOf))) {
-    digestByLane.set(lane, await closureDigest(lane, repositories.inference.revision));
-  }
-  const repositoriesFor = (planned) => {
-    const digest = digestByLane.get(laneOf(planned));
-    if (!digest) return repositories;
-    return { ...repositories, inference: { ...repositories.inference, closureDigest: digest } };
-  };
-  const incoming = [];
-  const incomingSessions = [];
-  let remaining = cases;
-  const sameBatch = (left, right) =>
-    left.modelLoadPolicy === "batch_rungs" &&
-    right.modelLoadPolicy === "batch_rungs" &&
-    left.modelLoadGroup &&
-    left.modelLoadGroup === right.modelLoadGroup &&
-    left.backend === right.backend &&
-    equal(left.target, right.target) &&
-    left.fixture === right.fixture;
-  const requiredBatchRungs = (planned) => {
-    const rungs = new Set(
-      allExpanded
-        .filter((candidate) => sameBatch(planned, candidate))
-        .map((candidate) => candidate.strategy.rung),
+  const ltx25Artifacts = ltx25SnapshotRoot
+    ? await prepareLtx25CaptureArtifacts(ltx25SnapshotRoot, [planned])
+    : null;
+  let probeOutput;
+  try {
+    probeOutput = await executeProvider(
+      providerCommand[0],
+      providerCommand.slice(1),
+      canonicalJson({ action: "probe", repositories }),
+      ltx25Artifacts ? { env: ltx25ProviderEnvironment(ltx25Artifacts) } : undefined,
     );
-    return RUNGS.filter((rung) => rungs.has(rung));
-  };
-  while (remaining.length > 0) {
-    const first = remaining[0];
-    const batchRungs = new Set();
-    const pendingBatch = first.modelLoadPolicy === "batch_rungs"
-      ? remaining
-          .filter((planned) => sameBatch(first, planned))
-          .sort((left, right) => RUNGS.indexOf(left.strategy.rung) - RUNGS.indexOf(right.strategy.rung))
-          .filter((planned) => {
-            if (batchRungs.has(planned.strategy.rung)) return false;
-            batchRungs.add(planned.strategy.rung);
-            return true;
-          })
-      : [first];
-    const pendingRungs = pendingBatch.map((planned) => planned.strategy.rung);
-    // A provider's batch protocol is defined by the complete rung cohort, not by whichever
-    // parameter cases happen to remain. Candidate/gated evidence intentionally cannot retire its
-    // sibling sweep points, so a canonical five-rung Qwen batch leaves decode/window alternatives
-    // pending. Sending those two rungs as a second `run_batch` violates the adapter contract and
-    // used to discard the first successful batch. Measure an incomplete remainder serially instead;
-    // this preserves gated semantics while ensuring every parameter point is still executed.
-    const invocation = first.modelLoadPolicy === "batch_rungs" &&
-        !equal(pendingRungs, requiredBatchRungs(first))
-      ? [first]
-      : pendingBatch;
-    const uniqueRungs = new Set(invocation.map((planned) => planned.strategy.rung));
-    if (first.modelLoadPolicy === "batch_rungs" && uniqueRungs.size !== invocation.length) {
-      fail(`${first.modelLoadGroup}: a rung batch may contain only one pending case per rung`);
-    }
-    const action = invocation.length > 1 ? "run_batch" : "run";
-    onProviderInvocation?.({ action, cases: invocation });
-    const providerRequest = canonicalJson({
-      action,
-      ...(action === "run" ? { planned: first } : { planned: invocation }),
-      repositories: repositoriesFor(first),
-      repositoryPaths: { sceneWorks: sceneWorksRepo, inference: inferenceRepo },
-      hardware: probe.hardware,
-    });
-    const providerOutput = await executeProvider(
+  } finally {
+    if (ltx25Artifacts) await assertLtx25ArtifactsStable(ltx25Artifacts, [planned]);
+  }
+  const probe = JSON.parse(probeOutput);
+  await assertRepositoriesStable();
+  // Only an authoritative capture can ever be `current` — `evidenceSemantics` short-circuits
+  // fixture and candidate scopes before the comparison is reached — so a non-authoritative anchor
+  // derives nothing and needs neither an inference crate layout nor a declarations file. That is
+  // what lets the schema-mutation suite drive this runner against a synthetic repo.
+  const digestForLane = planned.evidenceScope === "authoritative"
+    ? await closureDigest(lane, repositories.inference.revision)
+    : undefined;
+  const stampedRepositories = digestForLane
+    ? { ...repositories, inference: { ...repositories.inference, closureDigest: digestForLane } }
+    : repositories;
+  const providerRequest = canonicalJson({
+    action: "run",
+    planned,
+    repositories: stampedRepositories,
+    repositoryPaths: { sceneWorks: sceneWorksRepo, inference: inferenceRepo },
+    hardware: probe.hardware,
+  });
+  if (ltx25Artifacts) await assertLtx25ArtifactsStable(ltx25Artifacts, [planned]);
+  onProviderInvocation?.({ action: "run", cases: [planned] });
+  let providerOutput;
+  try {
+    providerOutput = await executeProvider(
       providerCommand[0],
       providerCommand.slice(1),
       providerRequest,
+      ltx25Artifacts ? { env: ltx25ProviderEnvironment(ltx25Artifacts, planned) } : undefined,
     );
-    await assertRepositoriesStable();
-    const response = JSON.parse(providerOutput);
-    const fragments = action === "run_batch" ? response.fragments : [response];
-    if (!Array.isArray(fragments) || fragments.length !== invocation.length) {
-      fail(`${first.modelLoadGroup ?? first.logicalCaseId}: provider returned ${
-        Array.isArray(fragments) ? fragments.length : "a non-array"
-      } fragments for ${invocation.length} planned cases`);
-    }
-    if (action === "run_batch" && response.modelLoads !== 1) {
-      fail(`${first.modelLoadGroup}: batched provider must attest exactly one model load`);
-    }
-    for (const [index, fragment] of fragments.entries()) {
-      const planned = invocation[index];
-      const sourceCapture = fragment.sourceCapture;
-      delete fragment.sourceCapture;
-      if (rawLogDir && !sourceCapture) {
-        fail(`${planned.logicalCaseId}: configured raw-log provenance requires provider sourceCapture`);
-      }
-      if (!fragment.strategy || typeof fragment.strategy !== "object" || Array.isArray(fragment.strategy)) {
-        fail(`${planned.logicalCaseId}: provider fragment.strategy must attest the executed strategy`);
-      }
-      validateEngagedRungs(fragment.strategy, `${planned.logicalCaseId}.provider strategy`);
-      if (!equal(fragment.strategy, planned.strategy)) {
-        fail(`${planned.logicalCaseId}: adapter measured strategy does not match planned strategy`);
-      }
-      // The materialization shape is a RECEIPT field: the adapter attests what its run actually
-      // loaded under, and the plan only declares what that rung is expected to select. Taking
-      // `planned.loadShape` here would stamp every record with the plan's claim and make the field
-      // unfalsifiable — the same backfill sc-16482 forbids for historical receipts, applied
-      // silently to new ones. Cross-check instead, and fail closed on divergence.
-      if (!LOAD_SHAPES.includes(fragment.loadShape)) {
-        fail(
-          `${planned.logicalCaseId}: provider fragment must attest a loadShape (${LOAD_SHAPES.join("|")})`,
-        );
-      }
-      if (fragment.loadShape !== planned.loadShape) {
-        fail(
-          `${planned.logicalCaseId}: adapter measured loadShape ${fragment.loadShape} but the plan ` +
-            `declared ${planned.loadShape}`,
-        );
-      }
-      const record = {
-        ...fragment,
-        logicalCaseId: planned.logicalCaseId,
-        evidenceScope: planned.evidenceScope,
-        backend: planned.backend,
-        loadShape: fragment.loadShape,
-        // Per-lane, not per-run: a `--backend candle` run with no `--fixture` selects several
-        // providers, and stamping them all with one lane's digest would compare each against the
-        // wrong code path forever.
-        repositories: repositoriesFor(planned),
-        hardware: probe.hardware,
-        target: planned.target,
-        strategy: fragment.strategy,
-        ...(planned.sourceProvenance ? { sourceProvenance: planned.sourceProvenance } : {}),
-        calibrationFingerprint: planned.calibrationFingerprint,
-        fixture: planned.fixture,
-        harnessVersion: HARNESS_VERSION,
-      };
-      if (sourceCapture) {
-        if (!rawLogDir || !sourcePathPrefix) {
-          fail(`${planned.logicalCaseId}: provider returned sourceCapture without configured raw-log provenance`);
-        }
-        if (action !== "run") {
-          fail(`${planned.logicalCaseId}: physical source capture must run fresh per case`);
-        }
-        object(sourceCapture, `${planned.logicalCaseId}.sourceCapture`);
-        if (sourceCapture.kind !== "physical_mlx") {
-          fail(`${planned.logicalCaseId}: unsupported source capture kind ${JSON.stringify(sourceCapture.kind)}`);
-        }
-        if (!Array.isArray(sourceCapture.inputs) || sourceCapture.inputs.length === 0) {
-          fail(`${planned.logicalCaseId}: physical MLX source capture requires exact inputs`);
-        }
-        validateExactOutputReceipts(
-          sourceCapture.outputs,
-          PHYSICAL_MLX_PROVIDER_OUTPUT_ROLES,
-          `${planned.logicalCaseId}.sourceCapture.outputs`,
-        );
-        if (!Array.isArray(sourceCapture.claims) || sourceCapture.claims.length === 0) {
-          fail(`${planned.logicalCaseId}: physical MLX source capture requires explicit claims`);
-        }
-        const baseInput = sourceCapture.inputs.find((input) => input?.role === "base");
-        if (!baseInput || baseInput.repository !== fragment.artifact?.repository
-            || baseInput.resolvedRevision !== fragment.artifact?.resolvedRevision
-            || baseInput.variant !== fragment.artifact?.variant) {
-          fail(`${planned.logicalCaseId}: physical MLX source input must match the measured artifact exactly`);
-        }
-        if (record.artifact.inventorySha256 !== undefined
-            && record.artifact.inventorySha256 !== baseInput.sha256) {
-          fail(`${planned.logicalCaseId}: provider artifact inventory disagrees with sourceCapture`);
-        }
-        record.artifact.inventorySha256 = baseInput.sha256;
-        const stdoutSha256 = createHash("sha256").update(providerOutput).digest("hex");
-        const sessionId = physicalMlxSessionId({
-          kind: sourceCapture.kind,
-          logicalCaseId: planned.logicalCaseId,
-          capturedAt: fragment.capturedAt,
-          repositories: repositoriesFor(planned),
-          hardware: probe.hardware,
-          stdoutSha256,
-        });
-        const sourcePath = `${sourcePathPrefix}/${sessionId}.log`;
-        const receiptDir = path.join(rawLogDir, ...sourcePathPrefix.split("/"));
-        await mkdir(receiptDir, { recursive: true });
-        await writeImmutableReceipt(path.join(receiptDir, `${sessionId}.log`), providerOutput);
-        const requestFileName = `${sessionId}.request.json`;
-        await writeImmutableReceipt(path.join(receiptDir, requestFileName), providerRequest);
-        const outputs = [{
-          role: "request",
-          path: `${sourcePathPrefix}/${requestFileName}`,
-          sha256: createHash("sha256").update(providerRequest).digest("hex"),
-          bytes: Buffer.byteLength(providerRequest),
-        }];
-        for (const output of sourceCapture.outputs) {
-          object(output, `${planned.logicalCaseId}.sourceCapture.outputs[]`);
-          text(output.role, `${planned.logicalCaseId}.sourceCapture.outputs[].role`);
-          text(output.path, `${planned.logicalCaseId}.sourceCapture.outputs[].path`);
-          text(output.localPath, `${planned.logicalCaseId}.sourceCapture.outputs[].localPath`);
-          const metadata = physicalMlxRgbMetadata(
-            output,
-            `${planned.logicalCaseId}.sourceCapture.outputs[${output.role}]`,
-          );
-          if (metadata.logicalCaseId !== planned.logicalCaseId
-              || metadata.width !== planned.target.geometry.width
-              || metadata.height !== planned.target.geometry.height) {
-            fail(`${planned.logicalCaseId}: physical MLX provider output has the wrong logical case geometry`);
-          }
-          const outputRelative = path.posix.relative(sourcePathPrefix, output.path);
-          if (!outputRelative || outputRelative.startsWith("../") || path.posix.isAbsolute(outputRelative)) {
-            fail(`${planned.logicalCaseId}: physical MLX output path must stay under ${sourcePathPrefix}`);
-          }
-          if (!path.isAbsolute(output.localPath)) {
-            fail(`${planned.logicalCaseId}: physical MLX local output path must be absolute`);
-          }
-          const physicalOutputPath = await realpath(output.localPath);
-          const localRelative = path.relative(rawLogDir, physicalOutputPath);
-          if (!localRelative || localRelative.startsWith(`..${path.sep}`) || path.isAbsolute(localRelative)) {
-            fail(`${planned.logicalCaseId}: physical MLX local output must stay under the raw log directory`);
-          }
-          const bytes = await readFile(physicalOutputPath);
-          const actualSha256 = createHash("sha256").update(bytes).digest("hex");
-          if (actualSha256 !== output.sha256 || bytes.length !== output.bytes) {
-            fail(`${planned.logicalCaseId}: physical MLX provider output differs from its provider attestation`);
-          }
-          outputs.push({
-            role: output.role,
-            path: output.path,
-            sha256: output.sha256,
-            bytes: output.bytes,
-          });
-        }
-        validateExactOutputReceipts(
-          outputs,
-          PHYSICAL_MLX_SESSION_OUTPUT_ROLES,
-          `${sessionId}.outputs`,
-        );
-        record.derivation = physicalMlxDerivation(sessionId);
-        incomingSessions.push({
-          id: sessionId,
-          kind: sourceCapture.kind,
-          command: JSON.stringify(providerCommand),
-          sourcePath,
-          capturedAt: fragment.capturedAt,
-          repositories: repositoriesFor(planned),
-          hardware: probe.hardware,
-          target: {
-            tier: planned.target.tier,
-            mode: planned.target.mode,
-            overlay: planned.target.overlay,
-            rung: planned.strategy.rung,
-          },
-          stdoutSha256,
-          inputs: sourceCapture.inputs,
-          outputs,
-          claims: sourceCapture.claims,
-          result: "passed",
-        });
-      }
-      if (planned.expectedResult === "failed" && record.status !== "negative_complete") {
-        fail(`${planned.logicalCaseId}: negative plan case must return status=negative_complete`);
-      }
-      if (planned.expectedResult === "passed" && record.status === "negative_complete") {
-        fail(`${planned.logicalCaseId}: passing plan case returned a negative result`);
-      }
-      record.id = recordId(record);
-      validateRecord(record);
-      incoming.push(record);
-    }
-    const completed = new Set([...existing.records, ...incoming].flatMap(completedLogicalIds));
-    const invoked = new Set(invocation.map((planned) => planned.logicalCaseId));
-    remaining = remaining.filter(
-      (planned) => !invoked.has(planned.logicalCaseId) && !completed.has(planned.logicalCaseId),
-    );
-    if (onProviderCheckpoint) {
-      await onProviderCheckpoint(mergeBundles(existing, {
-        schemaVersion: SCHEMA_VERSION,
-        harnessVersion: HARNESS_VERSION,
-        sourceSessions: incomingSessions,
-        records: incoming,
-      }));
-    }
+  } finally {
+    if (ltx25Artifacts) await assertLtx25ArtifactsStable(ltx25Artifacts, [planned]);
   }
-  return mergeBundles(existing, {
+  await assertRepositoriesStable();
+  const fragment = JSON.parse(providerOutput);
+  const sourceCapture = fragment.sourceCapture;
+  delete fragment.sourceCapture;
+  if (rawLogDir && !sourceCapture) {
+    fail(`${planned.logicalCaseId}: configured raw-log provenance requires provider sourceCapture`);
+  }
+  if (!fragment.strategy || typeof fragment.strategy !== "object" || Array.isArray(fragment.strategy)) {
+    fail(`${planned.logicalCaseId}: provider fragment.strategy must attest the executed strategy`);
+  }
+  validateEngagedRungs(fragment.strategy, `${planned.logicalCaseId}.provider strategy`);
+  if (!equal(fragment.strategy, planned.strategy)) {
+    fail(`${planned.logicalCaseId}: adapter measured strategy does not match the anchor composition`);
+  }
+  // The materialization shape is a RECEIPT field: the adapter attests what its run actually loaded
+  // under, and the plan only declares what that anchor is expected to select. Taking
+  // `planned.loadShape` here would stamp the record with the plan's claim and make the field
+  // unfalsifiable. Cross-check instead, and fail closed on divergence.
+  if (!LOAD_SHAPES.includes(fragment.loadShape)) {
+    fail(`${planned.logicalCaseId}: provider fragment must attest a loadShape (${LOAD_SHAPES.join("|")})`);
+  }
+  if (fragment.loadShape !== planned.loadShape) {
+    fail(
+      `${planned.logicalCaseId}: adapter measured loadShape ${fragment.loadShape} but the plan ` +
+        `declared ${planned.loadShape}`,
+    );
+  }
+  const record = {
+    ...fragment,
+    logicalCaseId: planned.logicalCaseId,
+    evidenceScope: planned.evidenceScope,
+    backend: planned.backend,
+    loadShape: fragment.loadShape,
+    repositories: stampedRepositories,
+    hardware: probe.hardware,
+    target: planned.target,
+    strategy: fragment.strategy,
+    ...(planned.sourceProvenance ? { sourceProvenance: planned.sourceProvenance } : {}),
+    calibrationFingerprint: planned.calibrationFingerprint,
+    fixture: planned.fixture,
+    harnessVersion: HARNESS_VERSION,
+  };
+  const sourceSessions = [];
+  if (sourceCapture) {
+    if (!rawLogDir || !sourcePathPrefix) {
+      fail(`${planned.logicalCaseId}: provider returned sourceCapture without configured raw-log provenance`);
+    }
+    object(sourceCapture, `${planned.logicalCaseId}.sourceCapture`);
+    if (sourceCapture.kind !== "physical_mlx") {
+      fail(`${planned.logicalCaseId}: unsupported source capture kind ${JSON.stringify(sourceCapture.kind)}`);
+    }
+    if (!Array.isArray(sourceCapture.inputs) || sourceCapture.inputs.length === 0) {
+      fail(`${planned.logicalCaseId}: physical MLX source capture requires exact inputs`);
+    }
+    if (ltx25Artifacts && !equal(
+      sourceCapture.inputs,
+      ltx25ExpectedSourceInputs(ltx25Artifacts, planned),
+    )) {
+      fail(`${planned.logicalCaseId}: LTX-2.5 source inputs do not match the sealed artifact inventories`);
+    }
+    validateExactOutputReceipts(
+      sourceCapture.outputs,
+      physicalMlxExpectedRoles(sourceCapture.outputs, false),
+      `${planned.logicalCaseId}.sourceCapture.outputs`,
+    );
+    if (!Array.isArray(sourceCapture.claims) || sourceCapture.claims.length === 0) {
+      fail(`${planned.logicalCaseId}: physical MLX source capture requires explicit claims`);
+    }
+    const baseInput = sourceCapture.inputs.find((input) => input?.role === "base");
+    if (!baseInput || baseInput.repository !== fragment.artifact?.repository
+        || baseInput.resolvedRevision !== fragment.artifact?.resolvedRevision
+        || baseInput.variant !== fragment.artifact?.variant) {
+      fail(`${planned.logicalCaseId}: physical MLX source input must match the measured artifact exactly`);
+    }
+    if (record.artifact.inventorySha256 !== undefined
+        && record.artifact.inventorySha256 !== baseInput.sha256) {
+      fail(`${planned.logicalCaseId}: provider artifact inventory disagrees with sourceCapture`);
+    }
+    record.artifact.inventorySha256 = baseInput.sha256;
+    const stdoutSha256 = createHash("sha256").update(providerOutput).digest("hex");
+    const sessionId = physicalMlxSessionId({
+      kind: sourceCapture.kind,
+      logicalCaseId: planned.logicalCaseId,
+      capturedAt: fragment.capturedAt,
+      repositories: stampedRepositories,
+      hardware: probe.hardware,
+      stdoutSha256,
+    });
+    const sourcePath = `${sourcePathPrefix}/${sessionId}.log`;
+    const receiptDir = path.join(rawLogDir, ...sourcePathPrefix.split("/"));
+    await mkdir(receiptDir, { recursive: true });
+    await writeImmutableReceipt(path.join(receiptDir, `${sessionId}.log`), providerOutput);
+    const requestFileName = `${sessionId}.request.json`;
+    await writeImmutableReceipt(path.join(receiptDir, requestFileName), providerRequest);
+    const outputs = [{
+      role: "request",
+      path: `${sourcePathPrefix}/${requestFileName}`,
+      sha256: createHash("sha256").update(providerRequest).digest("hex"),
+      bytes: Buffer.byteLength(providerRequest),
+    }];
+    const avContents = new Map();
+    for (const output of sourceCapture.outputs) {
+      object(output, `${planned.logicalCaseId}.sourceCapture.outputs[]`);
+      text(output.role, `${planned.logicalCaseId}.sourceCapture.outputs[].role`);
+      text(output.path, `${planned.logicalCaseId}.sourceCapture.outputs[].path`);
+      text(output.localPath, `${planned.logicalCaseId}.sourceCapture.outputs[].localPath`);
+      const metadata = physicalMlxOutputMetadata(
+        output,
+        `${planned.logicalCaseId}.sourceCapture.outputs[${output.role}]`,
+      );
+      if (metadata.logicalCaseId !== planned.logicalCaseId
+          || metadata.width !== planned.target.geometry.width
+          || metadata.height !== planned.target.geometry.height
+          || (metadata.frames !== undefined && metadata.frames !== planned.target.geometry.frames)) {
+        fail(`${planned.logicalCaseId}: physical MLX provider output has the wrong logical case geometry`);
+      }
+      const outputRelative = path.posix.relative(sourcePathPrefix, output.path);
+      if (!outputRelative || outputRelative.startsWith("../") || path.posix.isAbsolute(outputRelative)) {
+        fail(`${planned.logicalCaseId}: physical MLX output path must stay under ${sourcePathPrefix}`);
+      }
+      if (!path.isAbsolute(output.localPath)) {
+        fail(`${planned.logicalCaseId}: physical MLX local output path must be absolute`);
+      }
+      const physicalOutputPath = await realpath(output.localPath);
+      const localRelative = path.relative(rawLogDir, physicalOutputPath);
+      if (!localRelative || localRelative.startsWith(`..${path.sep}`) || path.isAbsolute(localRelative)) {
+        fail(`${planned.logicalCaseId}: physical MLX local output must stay under the raw log directory`);
+      }
+      const bytes = await readFile(physicalOutputPath);
+      const actualSha256 = createHash("sha256").update(bytes).digest("hex");
+      if (actualSha256 !== output.sha256 || bytes.length !== output.bytes) {
+        fail(`${planned.logicalCaseId}: physical MLX provider output differs from its provider attestation`);
+      }
+      if (output.role === "selected_av" || output.role === "reference_av") {
+        const content = parsePhysicalMlxAvContent(
+          bytes,
+          `${planned.logicalCaseId}.sourceCapture.outputs[${output.role}]`,
+        );
+        const outputFps = record.diagnostics?.measurements?.find(
+          (measurement) => measurement.name === "outputFps",
+        )?.value;
+        if (content.width !== planned.target.geometry.width
+            || content.height !== planned.target.geometry.height
+            || content.frames !== planned.target.geometry.frames
+            || content.fps !== outputFps) {
+          fail(`${planned.logicalCaseId}: canonical A/V header differs from measured geometry/FPS`);
+        }
+        avContents.set(output.role, content);
+      }
+      outputs.push({
+        role: output.role,
+        path: output.path,
+        sha256: output.sha256,
+        bytes: output.bytes,
+      });
+    }
+    validatePhysicalMlxAvContentsAgainstRecord(record, avContents, planned.logicalCaseId);
+    validateExactOutputReceipts(
+      outputs,
+      physicalMlxExpectedRoles(outputs, true),
+      `${sessionId}.outputs`,
+    );
+    record.derivation = physicalMlxDerivation(sessionId);
+    sourceSessions.push({
+      id: sessionId,
+      kind: sourceCapture.kind,
+      command: JSON.stringify(providerCommand),
+      sourcePath,
+      capturedAt: fragment.capturedAt,
+      repositories: stampedRepositories,
+      hardware: probe.hardware,
+      target: {
+        tier: planned.target.tier,
+        mode: planned.target.mode,
+        overlay: planned.target.overlay,
+        ...(planned.target.transformerVariant
+          ? { transformerVariant: planned.target.transformerVariant }
+          : {}),
+        ...(planned.target.decoder ? { decoder: planned.target.decoder } : {}),
+        rung: planned.strategy.rung,
+      },
+      stdoutSha256,
+      inputs: sourceCapture.inputs,
+      outputs,
+      claims: sourceCapture.claims,
+      result: "passed",
+    });
+  }
+  if (record.status === "negative_complete") {
+    fail(`${planned.logicalCaseId}: an anchor capture cannot return a negative result`);
+  }
+  record.id = recordId(record);
+  validateRecord(record);
+  const bundle = {
     schemaVersion: SCHEMA_VERSION,
     harnessVersion: HARNESS_VERSION,
-    sourceSessions: incomingSessions,
-    records: incoming,
-  });
+    ...(sourceSessions.length ? { sourceSessions } : {}),
+    records: [record],
+  };
+  validateBundle(bundle);
+  return bundle;
 }
 
 async function readJson(file) {
@@ -1845,9 +2227,17 @@ export async function atomicWrite(file, value) {
 async function main() {
   const [command, ...args] = process.argv.slice(2);
   const value = (flag) => {
-    const index = args.indexOf(flag);
-    return index < 0 ? undefined : args[index + 1];
+    const indexes = args.flatMap((arg, index) => arg === flag ? [index] : []);
+    if (indexes.length > 1) fail(`${flag} may be supplied only once`);
+    if (indexes.length === 0) return undefined;
+    const selected = args[indexes[0] + 1];
+    if (!selected || selected.startsWith("--")) fail(`${flag} requires one value`);
+    return selected;
   };
+  // Every writing arm destinations through `atomicWrite`, which resolves its argument against ROOT
+  // — so an omitted `--output` used to surface as a raw `TypeError` from `path.resolve` rather than
+  // as the usage error it is.
+  const outputPath = () => value("--output") ?? fail("--output is required");
   if (command === "check") {
     const closureDigests = await liveInferenceClosureDigests();
     return void await validateSourceSessionFiles(
@@ -1857,59 +2247,34 @@ async function main() {
     );
   }
   if (command === "plan") {
-    const resume = value("--resume") ? validateBundle(await readJson(value("--resume"))).records : [];
-    return void await atomicWrite(value("--output"), { harnessVersion: HARNESS_VERSION, cases: expandPlan(await readJson(value("--config")), resume) });
+    // Print the anchor obligation. There is nothing to expand: the plan IS the case list.
+    const plan = validatePlan(await readJson(value("--plan") ?? ANCHOR_PLAN_PATH));
+    return void await atomicWrite(outputPath(), {
+      harnessVersion: HARNESS_VERSION,
+      anchors: planAnchors(plan),
+    });
   }
   if (command === "ingest") {
-    const sourceRoot = value("--source-root") ? path.resolve(value("--source-root")) : null;
     const closureDigests = await liveInferenceClosureDigests();
-    const incoming = await validateSourceSessionFiles(
+    return void await atomicWrite(outputPath(), await validateSourceSessionFiles(
       await readJson(value("--input")),
-      sourceRoot,
+      value("--source-root") ? path.resolve(value("--source-root")) : null,
       closureDigests,
-    );
-    const output = value("--resume")
-      ? mergeBundles(
-          await validateSourceSessionFiles(await readJson(value("--resume")), null, closureDigests),
-          incoming,
-        )
-      : incoming;
-    return void await atomicWrite(value("--output"), output);
+    ));
   }
-  if (command === "compare-reuse") {
-    return void await atomicWrite(
-      value("--output"),
-      compareRungReuse(await readJson(value("--fresh")), await readJson(value("--reused"))),
-    );
-  }
-  if (command === "assess-reuse") {
-    return void await atomicWrite(value("--output"), await assessProviderReuse({
-      config: await readJson(value("--config")),
-      providerCommand: JSON.parse(value("--provider-command")),
-      backend: value("--backend"),
-      fixture: value("--fixture"),
-    }));
-  }
-  if (command === "run") {
-    const outputPath = value("--output");
-    const output = await runProviderPlan({
-      config: await readJson(value("--config")),
+  if (command === "capture") {
+    return void await atomicWrite(outputPath(), await captureAnchor({
+      plan: await readJson(value("--plan") ?? ANCHOR_PLAN_PATH),
+      anchorKey: value("--anchor"),
       providerCommand: JSON.parse(value("--provider-command")),
       sceneWorksRepo: path.resolve(value("--sceneworks-repo")),
       inferenceRepo: path.resolve(value("--inference-repo")),
-      resume: value("--resume") ? await readJson(value("--resume")) : undefined,
-      backend: value("--backend"),
-      providerName: value("--provider"),
-      fixture: value("--fixture"),
-      forceFreshPerCase: args.includes("--fresh-per-case"),
-      forceBatchRungs: args.includes("--batch-rungs"),
       rawLogDir: value("--raw-log-dir") ? path.resolve(value("--raw-log-dir")) : null,
       sourcePathPrefix: value("--source-path-prefix"),
-      onProviderCheckpoint: (checkpoint) => atomicWrite(outputPath, checkpoint),
-    });
-    return void await atomicWrite(outputPath, output);
+      ltx25SnapshotRoot: value("--ltx25-snapshot-root") ?? null,
+    }));
   }
-  fail("usage: check|plan|ingest|assess-reuse|compare-reuse|run (see docs/memory-calibration-harness.md)");
+  fail("usage: capture|check|ingest|plan (see docs/memory-calibration-harness.md)");
 }
 
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) await main();

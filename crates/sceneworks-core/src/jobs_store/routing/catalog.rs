@@ -343,7 +343,7 @@ pub(crate) fn video_mode_probe_payload(model: &str, mode: &str) -> Map<String, V
     // LoRA-bearing advanced job for every model except the dedicated VACE-Fun provider, so attaching
     // this unconditionally would invert the answer for `wan_2_2` — the exact over-report the "no key
     // it does not require" half of the contract above forbids.
-    if matches!(model, "ltx_2_3" | "ltx_2_3_eros")
+    if matches!(model, "ltx_2_3" | "ltx_2_3_eros" | "ltx_2_5")
         && matches!(mode, "extend_clip" | "video_bridge" | "replace_person")
     {
         payload.insert(
@@ -1063,6 +1063,8 @@ pub(crate) const IMAGE_MODEL_CAPS: &[ModelCaps] = &[
 /// Legend for the [`VideoModelCaps::new`] positional args:
 /// `new(id, video_mlx_routed, candle_video_routed, candle_video_i2v, candle_video_vace)`.
 pub(crate) const VIDEO_MODEL_CAPS: &[VideoModelCaps] = &[
+    // LTX-2.5 (epic 18755): both native backends serve the full LTX mode surface.
+    VideoModelCaps::new("ltx_2_5", true, true, false, false),
     // LTX-2.3 base (sc-18478): both native backends serve the provider's current mode surface.
     VideoModelCaps::new("ltx_2_3", true, true, false, false),
     // 10Eros remains MLX-only (sc-18902). Exact-head Candle/CUDA acceptance run 31766800005
@@ -2417,6 +2419,7 @@ mod tests {
 
     const EXPECTED_CANDLE_VIDEO_ROUTED_MODELS: &[&str] = &[
         "wan_2_2",
+        "ltx_2_5",
         "ltx_2_3",
         "wan_2_2_t2v_14b",
         "wan_2_2_i2v_14b",
@@ -2439,6 +2442,7 @@ mod tests {
         &["wan_2_2", "wan_2_2_t2v_14b", "wan_2_2_i2v_14b"];
 
     const EXPECTED_VIDEO_MLX_ROUTED_MODELS: &[&str] = &[
+        "ltx_2_5",
         "ltx_2_3",
         "ltx_2_3_eros",
         "wan_2_2",

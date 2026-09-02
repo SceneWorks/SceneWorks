@@ -160,6 +160,13 @@
           "minItems": 1,
           "uniqueItems": true,
           "items": { "type": "string", "enum": ["none", "lora", "identity", "control"] }
+        },
+        "tiers": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": { "type": "string", "enum": ["bf16", "q4", "q8", "nvfp4", "fp32"] },
+          "description": "Optional exact tier scope. Absence preserves the legacy all-declared-tiers meaning."
         }
       }
     },
@@ -274,6 +281,20 @@
           "minItems": 1,
           "uniqueItems": true,
           "items": { "type": "string", "enum": ["none", "lora", "identity", "control"] }
+        },
+        "modes": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": { "type": "string", "minLength": 1 },
+          "description": "Optional exact mode scope (sc-22513). Absence means every mode, which is the legacy meaning. Narrow it where the rung's path exists on some modes and not others: claiming a structural exemption on a mode whose path was never built would presuppose a path that does not exist, and reads as 'surveyed and exempted' rather than 'not implemented'."
+        },
+        "tiers": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": { "type": "string", "enum": ["bf16", "q4", "q8", "nvfp4", "fp32"] },
+          "description": "Optional exact tier scope (sc-22513), mirroring memoryStrategyCapabilities. Absence means every declared tier."
         },
         "evidence": {
           "type": "array",
@@ -1256,6 +1277,10 @@
                 "x-sceneworks-contract": "advisory",
                 "x-sceneworks-readers": [{ "path": "apps/web/src/tierSuggestion.js", "anchor": "measuredSiblingActiveDiskFraction" }],
                 "description": "Opt in only when every selectable MLX quant tier preserves the same load topology. This is the fraction of precision-dependent disk growth active at once (for example 0.5 when one of two equal experts is resident). The web estimator anchors an unmeasured tier at a smaller compatible sibling's measured peak and scales only the disk delta by this fraction. Absence keeps the calibrated dense fallback; a shared model id alone is not compatibility evidence."
+              },
+              "memoryStrategyCapabilities": {
+                "$ref": "#/properties/models/items/properties/candle/properties/memoryStrategyCapabilities",
+                "description": "MLX sibling of the Candle static capability block. These declarations expose implemented but unmeasured strategy coordinates; they do not promote calibration evidence."
               },
               "memoryStrategyStructuralExemptions": {
                 "$ref": "#/properties/models/items/properties/candle/properties/memoryStrategyStructuralExemptions",

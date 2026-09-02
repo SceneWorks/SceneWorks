@@ -1,6 +1,6 @@
 import React, { useCallback, useRef, useState } from "react";
 import { Icon } from "../components/Icons.jsx";
-import { AssetThumbnail, assetUrl } from "../components/assetMedia.jsx";
+import { AssetThumbnail, assetDisplayUrl, assetUrl } from "../components/assetMedia.jsx";
 import { assetCanCarryWorkflow, stripWorkflowUrl } from "../assetActions.js";
 import { SAVE_WITHOUT_WORKFLOW_LABEL } from "../workflowEmbed.js";
 import { resolveJobResultAssets } from "../jobResultAssets.js";
@@ -84,7 +84,7 @@ export function ReferenceTile({ label, hint, asset, assets, onChange, required =
       options: assets.map((item) => ({
         value: item.id,
         label: item.displayName ?? item.id,
-        thumbnail: assetUrl(item),
+        thumbnail: assetDisplayUrl(item),
       })),
       onSelect: (id) => {
         onChange(id);

@@ -249,7 +249,34 @@ jobs:
           cache-dependency-path: package-lock.json
       - name: Install pinned scaffold dependencies
         run: npm ci --ignore-scripts
+      # sc-22511: `anchor-loader-closure.test.mjs` derives the memory-anchor currency key over the
+      # REAL pinned inference source, because the claims it makes ("a pin bump leaves the key
+      # unchanged", "a sibling model's edit does not", "an edit on the loader's own path does") are
+      # claims about a repository and a synthetic fixture can agree with a broken walk. Without a
+      # clone here, most of its cases skipped and CI green meant nothing ran.
+      #
+      # SceneWorks/inference is PUBLIC (#2164), so a shallow fetch costs seconds and needs no token.
+      # Two things are fetched: the PIN, and EVERY revision the packaged anchors were measured at —
+      # an anchor's recorded currency key is derived at its own measurement revision, so the suite
+      # needs those trees to re-derive it. The revision list comes from `--anchor-revisions`, which
+      # reads the same store the derivation walks, so CI cannot end up fetching a subset while the
+      # remaining cases skip quietly. Under CI the tests FAIL rather than returning when a tree is
+      # missing.
+      - name: Fetch the pinned inference source for the anchor-closure suite
+        run: |
+          set -euo pipefail
+          pin="$(node -e 'const fs=require("fs");const m=fs.readFileSync("Cargo.toml","utf8").match(/candle-kernels\s*=\s*\{[^}]*?github\.com\/SceneWorks\/inference[^}]*?rev\s*=\s*"([0-9a-f]+)"/);if(!m)throw new Error("no inference pin");process.stdout.write(m[1])')"
+          git init -q "$RUNNER_TEMP/inference"
+          git -C "$RUNNER_TEMP/inference" remote add origin https://github.com/SceneWorks/inference
+          git -C "$RUNNER_TEMP/inference" fetch -q --depth=1 origin "$pin"
+          while read -r rev; do
+            [ -n "$rev" ] || continue
+            git -C "$RUNNER_TEMP/inference" fetch -q --depth=1 origin "$rev"
+          done < <(node scripts/anchor-loader-closure.mjs --anchor-revisions)
+          git -C "$RUNNER_TEMP/inference" checkout -q "$pin"
       - name: Run scaffold and compose checks
+        env:
+          INFERENCE_REPO: ${{ runner.temp }}/inference
         run: |
           npm run check
       # DISABLED at PR time (sc-19758). release.yml still scans the BUILT bundle in all three of its

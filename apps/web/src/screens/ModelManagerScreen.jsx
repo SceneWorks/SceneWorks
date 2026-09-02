@@ -726,11 +726,17 @@ export function ModelManagerScreen() {
     () => loras.filter((lora) => matchesFamily(lora, familyFilter)),
     [familyFilter, loras],
   );
-  // Wan A14B MoE paired upload (sc-1991): when the user targets the wan-video
-  // family, let them pick the specific base model and (for two-expert A14B models)
-  // upload the low-noise expert half alongside the high-noise primary.
-  const wanBaseModelOptions = models.filter((model) => model.family === "wan-video");
-  const showBaseModelSelect = importForm.family === "wan-video" && wanBaseModelOptions.length > 0;
+  // Wan and LTX both need an exact base stamp because family membership alone crosses an unsafe
+  // partition. Use each model's OWN family so an extra-compatible but unrelated host never appears.
+  // Wan alone retains the paired A14B file slot.
+  const baseModelFamily = ["wan-video", "ltx-video"].includes(importForm.family)
+    ? importForm.family
+    : "";
+  const baseModelOptions = baseModelFamily
+    ? models.filter((model) => normalizeLoraFamily(model.family) === baseModelFamily)
+    : [];
+  const showBaseModelSelect = Boolean(baseModelFamily && baseModelOptions.length);
+  const ltxBaseModelRequired = importForm.family === "ltx-video";
   const isMoeBaseModel = WAN_MOE_PAIRED_LORA_MODEL_IDS.has(importForm.baseModel);
   const showSecondaryFileSlot = isMoeBaseModel && importForm.mode === "file";
   const moeMissingSecondary = showSecondaryFileSlot && Boolean(importForm.file) && !importForm.secondaryFile;
@@ -745,11 +751,11 @@ export function ModelManagerScreen() {
     setImportForm((current) => (current.family && !families.includes(current.family) ? { ...current, family: "" } : current));
   }, [families, familiesKey]);
 
-  // The base model + low-noise slot only apply to wan-video imports; clear them
-  // when the family changes away so a stale baseModel can't ride along.
+  // The base model applies to Wan/LTX; the low-noise slot remains Wan-only. Clear stale values when
+  // another family is selected so a prior partition cannot ride along.
   useEffect(() => {
     setImportForm((current) =>
-      current.family !== "wan-video" && (current.baseModel || current.secondaryFile)
+      !["wan-video", "ltx-video"].includes(current.family) && (current.baseModel || current.secondaryFile)
         ? { ...current, baseModel: "", secondaryFile: null }
         : current,
     );
@@ -936,7 +942,12 @@ export function ModelManagerScreen() {
   async function importLora(event) {
     event.preventDefault();
     const isFileImport = importForm.mode === "file";
-    if ((!isFileImport && !importForm.sourceUrl.trim()) || (isFileImport && !importForm.file) || !onImportLora) {
+    if (
+      (!isFileImport && !importForm.sourceUrl.trim()) ||
+      (isFileImport && !importForm.file) ||
+      (ltxBaseModelRequired && !importForm.baseModel) ||
+      !onImportLora
+    ) {
       return;
     }
     setImportingLora(true);
@@ -946,7 +957,7 @@ export function ModelManagerScreen() {
     });
     try {
       const familyOverride = importForm.family ? { family: importForm.family } : {};
-      // Carry the chosen base model (wan-video) and, for an A14B MoE upload, the
+      // Carry the chosen base model (Wan/LTX) and, for a Wan A14B MoE upload, the
       // low-noise expert half so both land in one record (sc-1991).
       const baseModelOverride = showBaseModelSelect && importForm.baseModel ? { baseModel: importForm.baseModel } : {};
       const secondaryOverride =
@@ -1137,6 +1148,7 @@ export function ModelManagerScreen() {
   const importDisabled =
     importingLora ||
     !onImportLora ||
+    (ltxBaseModelRequired && !importForm.baseModel) ||
     (importForm.scope === "project" && !activeProject) ||
     (isFileImport ? !importForm.file : !importForm.sourceUrl.trim());
 
@@ -2204,7 +2216,14 @@ export function ModelManagerScreen() {
                 Family
                 <select
                   disabled={importingLora || !families.length}
-                  onChange={(event) => setImportForm((current) => ({ ...current, family: event.target.value }))}
+                  onChange={(event) =>
+                    setImportForm((current) => ({
+                      ...current,
+                      family: event.target.value,
+                      baseModel: "",
+                      secondaryFile: null,
+                    }))
+                  }
                   value={importForm.family}
                 >
                   {families.length ? (
@@ -2229,13 +2248,16 @@ export function ModelManagerScreen() {
                     onChange={(event) => setImportForm((current) => ({ ...current, baseModel: event.target.value }))}
                     value={importForm.baseModel}
                   >
-                    <option value="">Auto / unspecified</option>
-                    {wanBaseModelOptions.map((model) => (
+                    <option value="">{ltxBaseModelRequired ? "Select LTX base model" : "Auto / unspecified"}</option>
+                    {baseModelOptions.map((model) => (
                       <option key={model.id} value={model.id}>
                         {model.name ?? model.id}
                       </option>
                     ))}
                   </select>
+                  {ltxBaseModelRequired ? (
+                    <span className="field-hint">Required so LTX-2.3 and LTX-2.5 adapters stay on the correct base.</span>
+                  ) : null}
                 </label>
               ) : null}
               {isFileImport ? (

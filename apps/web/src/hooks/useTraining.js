@@ -160,6 +160,26 @@ export function useTraining({ token, activeProject, activeProjectRef, setError, 
     [token, activeProject],
   );
 
+  const uploadLtxPreparedBundle = useCallback(
+    async (datasetId, itemId, file, projectId = activeProject?.id) => {
+      if (!projectId || !datasetId || !itemId) {
+        throw new Error("Save the dataset before uploading an LTX prepared bundle.");
+      }
+      const form = new FormData();
+      form.append("file", file);
+      const updated = await apiFetch(
+        `/api/v1/projects/${projectId}/training/datasets/${encodeURIComponent(datasetId)}/items/${encodeURIComponent(itemId)}/ltx-prepared-bundle`,
+        token,
+        { method: "POST", body: form },
+      );
+      if (isCurrentTrainingRequest(projectId)) {
+        await refreshTrainingDatasets(projectId);
+      }
+      return updated;
+    },
+    [token, activeProject, isCurrentTrainingRequest, refreshTrainingDatasets],
+  );
+
   const updateTrainingDataset = useCallback(
     async (datasetId, payload, projectId = activeProject?.id) => {
       if (!projectId || !datasetId) {
@@ -419,6 +439,7 @@ export function useTraining({ token, activeProject, activeProjectRef, setError, 
     setTrainingDatasetItemQualityAck,
     createTrainingDataset,
     uploadTrainingDatasetItem,
+    uploadLtxPreparedBundle,
     updateTrainingDataset,
     batchRenameTrainingDataset,
     deleteTrainingDataset,

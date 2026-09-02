@@ -1800,6 +1800,251 @@ pub(crate) async fn apply_recipe_preset_to_video_payload(
     .await
 }
 
+/// Validate and normalize the LTX-2.5-only generation controls before enqueue.
+///
+/// Returns whether auto-duration remains active. When a caller also supplied `duration`, the
+/// explicit value wins by removing the predictor keys from the enqueued payload; the worker keeps
+/// the same precedence as a replay/backstop. No other video family may carry these keys because
+/// accepting a visible-but-inert control is worse than refusing it at submission.
+fn normalize_ltx25_generation_controls(
+    model_id: &str,
+    job_payload: &mut JsonObject,
+    model_manifest_entry: &Value,
+) -> Result<bool, ApiError> {
+    const KEYS: [&str; 6] = [
+        "vaeDecoder",
+        "autoDuration",
+        "autoDurationMinSeconds",
+        "autoDurationMaxSeconds",
+        "temporalUpsampleRounds",
+        // `transformerVariant` is read only by `ltx25_transformer_variant`, on the 2.5 arm. It
+        // belongs in this list for the same reason `vaeDecoder` does: on any other family it is a
+        // control the UI shows and nothing reads.
+        "transformerVariant",
+    ];
+    /// The legacy LTX guider knobs. LTX-2.5 has no reader for any of them — distilled guidance is
+    /// baked in and the dev checkpoint uses its fixed native video/audio guider parameters — so
+    /// they are inert in exactly the way `guidanceScale` is, and get the same refusal rather than
+    /// being accepted and silently dropped.
+    const DEAD_GUIDANCE_KEYS: [&str; 4] = [
+        "guidanceScale",
+        "videoCfgGuidanceScale",
+        "videoStgGuidanceScale",
+        "videoRescaleScale",
+    ];
+    let advanced = job_payload
+        .get("advanced")
+        .and_then(Value::as_object)
+        .cloned()
+        .unwrap_or_default();
+    let carries_ltx25_control = KEYS.iter().any(|key| advanced.contains_key(*key));
+    if model_id != "ltx_2_5" {
+        if carries_ltx25_control {
+            return Err(ApiError::bad_request(format!(
+                "LTX-2.5 transformer-variant, decoder, auto-duration, and temporal-upsample controls are not supported by {model_id}"
+            )));
+        }
+        return Ok(false);
+    }
+
+    if let Some(key) = DEAD_GUIDANCE_KEYS
+        .iter()
+        .find(|key| advanced.contains_key(**key))
+    {
+        return Err(ApiError::bad_request(format!(
+            "LTX-2.5 does not accept advanced.{key}; distilled guidance is baked in and \
+             the dev checkpoint uses its fixed native video/audio guider parameters"
+        )));
+    }
+
+    requested_ltx25_vae_decoder(&advanced).map_err(ApiError::bad_request)?;
+    requested_temporal_upsample_rounds(&advanced).map_err(ApiError::bad_request)?;
+
+    let explicit_duration = job_payload
+        .get("duration")
+        .and_then(Value::as_f64)
+        .is_some();
+    let auto_enabled = match advanced.get("autoDuration") {
+        None => false,
+        Some(Value::Bool(value)) => *value,
+        Some(_) => {
+            return Err(ApiError::bad_request(
+                "advanced.autoDuration must be a boolean when present",
+            ))
+        }
+    };
+    if explicit_duration && auto_enabled {
+        if let Some(advanced) = job_payload
+            .get_mut("advanced")
+            .and_then(Value::as_object_mut)
+        {
+            for key in [
+                "autoDuration",
+                "autoDurationMinSeconds",
+                "autoDurationMaxSeconds",
+            ] {
+                advanced.remove(key);
+            }
+        }
+        return Ok(false);
+    }
+
+    let Some(range) = requested_auto_duration(&advanced).map_err(ApiError::bad_request)? else {
+        return Ok(false);
+    };
+    if range.min_seconds < 1.0 || range.max_seconds > 30.0 {
+        return Err(ApiError::bad_request(
+            "advanced auto-duration min/max seconds must stay between 1 and 30",
+        ));
+    }
+    let entry = model_manifest_entry
+        .as_object()
+        .cloned()
+        .unwrap_or_default();
+    if let Some(message) = duration_limit_error(model_id, range.min_seconds, &entry)
+        .or_else(|| duration_limit_error(model_id, range.max_seconds, &entry))
+    {
+        return Err(ApiError::bad_request(format!(
+            "Auto-duration range is outside the model's supported duration window. {message}"
+        )));
+    }
+    Ok(true)
+}
+
+#[cfg(test)]
+mod ltx25_generation_control_tests {
+    use super::*;
+
+    fn entry() -> Value {
+        json!({
+            "id": "ltx_2_5",
+            "limits": { "hardMinDuration": 1, "hardMaxDuration": 15 }
+        })
+    }
+
+    fn payload(value: Value) -> JsonObject {
+        value.as_object().cloned().expect("payload object")
+    }
+
+    #[test]
+    fn auto_duration_omits_duration_but_explicit_duration_wins() {
+        let mut automatic = payload(json!({
+            "advanced": {
+                "autoDuration": true,
+                "autoDurationMinSeconds": 2,
+                "autoDurationMaxSeconds": 12
+            }
+        }));
+        assert!(
+            normalize_ltx25_generation_controls("ltx_2_5", &mut automatic, &entry())
+                .expect("valid auto-duration")
+        );
+        assert!(!automatic.contains_key("duration"));
+
+        let mut explicit = payload(json!({
+            "duration": 7,
+            "advanced": {
+                "autoDuration": true,
+                "autoDurationMinSeconds": "ignored because duration wins",
+                "autoDurationMaxSeconds": -1,
+                "vaeDecoder": "diffusion",
+                "temporalUpsampleRounds": 2
+            }
+        }));
+        assert!(
+            !normalize_ltx25_generation_controls("ltx_2_5", &mut explicit, &entry())
+                .expect("explicit duration wins")
+        );
+        let advanced = explicit["advanced"].as_object().unwrap();
+        assert!(!advanced.contains_key("autoDuration"));
+        assert!(!advanced.contains_key("autoDurationMinSeconds"));
+        assert!(!advanced.contains_key("autoDurationMaxSeconds"));
+        assert_eq!(advanced["vaeDecoder"], "diffusion");
+        assert_eq!(advanced["temporalUpsampleRounds"], 2);
+    }
+
+    #[test]
+    fn ltx25_controls_reject_dead_or_out_of_contract_requests() {
+        let mut wrong_model = payload(json!({
+            "advanced": { "vaeDecoder": "diffusion" }
+        }));
+        assert!(normalize_ltx25_generation_controls(
+            "ltx_2_3",
+            &mut wrong_model,
+            &json!({ "id": "ltx_2_3" })
+        )
+        .is_err());
+
+        let mut too_long = payload(json!({
+            "advanced": {
+                "autoDuration": true,
+                "autoDurationMinSeconds": 2,
+                "autoDurationMaxSeconds": 20
+            }
+        }));
+        assert!(normalize_ltx25_generation_controls("ltx_2_5", &mut too_long, &entry()).is_err());
+
+        let mut bad_rounds = payload(json!({
+            "advanced": { "temporalUpsampleRounds": 3 }
+        }));
+        assert!(normalize_ltx25_generation_controls("ltx_2_5", &mut bad_rounds, &entry()).is_err());
+
+        let mut dead_guidance = payload(json!({
+            "advanced": { "transformerVariant": "dev", "guidanceScale": 4.2 }
+        }));
+        assert!(
+            normalize_ltx25_generation_controls("ltx_2_5", &mut dead_guidance, &entry()).is_err()
+        );
+    }
+
+    /// The legacy LTX guider knobs are as inert on 2.5 as `guidanceScale` — nothing in the worker
+    /// reads any of them on the 2.5 arm — so accepting them would leave the studio showing a
+    /// control that silently does nothing, the exact outcome this routine exists to prevent.
+    #[test]
+    fn ltx25_refuses_the_legacy_guider_keys_the_way_it_refuses_guidance_scale() {
+        for key in [
+            "guidanceScale",
+            "videoCfgGuidanceScale",
+            "videoStgGuidanceScale",
+            "videoRescaleScale",
+        ] {
+            let mut inert = payload(json!({ "advanced": { key: 4.2 } }));
+            let error = normalize_ltx25_generation_controls("ltx_2_5", &mut inert, &entry())
+                .expect_err("an inert guider knob must be refused, not accepted");
+            assert_eq!(error.status, StatusCode::BAD_REQUEST);
+            assert!(
+                error.detail.contains(key),
+                "{key} refusal should name the key: {}",
+                error.detail
+            );
+        }
+    }
+
+    /// `transformerVariant` is read only on the 2.5 arm, so it is a 2.5-only control: refused
+    /// elsewhere (like `vaeDecoder`) and accepted here.
+    #[test]
+    fn transformer_variant_is_an_ltx25_only_control() {
+        let mut wrong_model = payload(json!({
+            "advanced": { "transformerVariant": "dev" }
+        }));
+        assert!(normalize_ltx25_generation_controls(
+            "ltx_2_3",
+            &mut wrong_model,
+            &json!({ "id": "ltx_2_3" })
+        )
+        .is_err());
+
+        let mut on_25 = payload(json!({
+            "advanced": { "transformerVariant": "dev" }
+        }));
+        assert!(
+            !normalize_ltx25_generation_controls("ltx_2_5", &mut on_25, &entry())
+                .expect("2.5 accepts its own transformer variant")
+        );
+        assert_eq!(on_25["advanced"]["transformerVariant"], "dev");
+    }
+}
+
 pub(crate) async fn create_video_job(
     State(state): State<AppState>,
     ApiJson(payload): ApiJson<VideoJobRequest>,
@@ -1840,6 +2085,8 @@ pub(crate) async fn create_video_job(
         .unwrap_or(payload.model.as_str())
         .to_owned();
     let model_manifest_entry = resolve_model_manifest_entry(&state, &model_id).await?;
+    let auto_duration_active =
+        normalize_ltx25_generation_controls(&model_id, &mut job_payload, &model_manifest_entry)?;
     // Do not advertise or enqueue the paired source layout until the pinned inference descriptor
     // records it. The worker implementation is deliberately source-ready ahead of that pin, but a
     // direct API client must not be able to send additional references to an older engine that
@@ -1878,18 +2125,20 @@ pub(crate) async fn create_video_job(
     // 6s", a value the caller never set, with a lever ("shorten the clip") for a field they never
     // touched. Enforcing a manifest constraint requires the layer's own default to be
     // manifest-aware first, or the gate refuses a payload this route constructed itself.
-    if let Some(entry) = model_manifest_entry.as_object() {
-        let duration = resolve_duration(job_payload.get("duration"), entry);
-        if let Some(message) = duration_limit_error(&model_id, duration, entry) {
-            return Err(ApiError::bad_request(message));
-        }
-        // Write back ONLY the resolved default. A duration the caller named is already in the
-        // payload verbatim — `validate_video_job` bounded it to 1..=30, so it needs no clamp — and
-        // rewriting it would flatten its JSON shape: `duration` is a `ContractNumber`
-        // (= `serde_json::Number`), which carries int-vs-float across the wire, so a caller's `10`
-        // must not become `10.0`.
-        if !job_payload.contains_key("duration") {
-            job_payload.insert("duration".to_owned(), contract_number(duration));
+    if !auto_duration_active {
+        if let Some(entry) = model_manifest_entry.as_object() {
+            let duration = resolve_duration(job_payload.get("duration"), entry);
+            if let Some(message) = duration_limit_error(&model_id, duration, entry) {
+                return Err(ApiError::bad_request(message));
+            }
+            // Write back ONLY the resolved default. A duration the caller named is already in the
+            // payload verbatim — `validate_video_job` bounded it to 1..=30, so it needs no clamp — and
+            // rewriting it would flatten its JSON shape: `duration` is a `ContractNumber`
+            // (= `serde_json::Number`), which carries int-vs-float across the wire, so a caller's `10`
+            // must not become `10.0`.
+            if !job_payload.contains_key("duration") {
+                job_payload.insert("duration".to_owned(), contract_number(duration));
+            }
         }
     }
     // The model's declared `limits.hardMinSteps` AND `limits.steps`, enforced at enqueue (sc-19426,

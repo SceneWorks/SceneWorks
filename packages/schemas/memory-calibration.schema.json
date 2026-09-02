@@ -5,11 +5,98 @@
   "additionalProperties": false,
   "required": ["schemaVersion", "harnessVersion", "records"],
   "properties": {
-    "schemaVersion": { "const": 5 },
+    "schemaVersion": { "const": 6 },
     "harnessVersion": { "const": "sceneworks-memory-v5" },
     "sourceSessions": { "type": "array", "items": { "$ref": "#/$defs/sourceSession" } },
     "records": { "type": "array", "items": { "$ref": "#/$defs/record" } }
   },
+  "allOf": [
+    {
+      "$comment": "JSON Schema cannot correlate sourceSessionIds with array members, and a source session carries no modelId, so an LTX derivation bundle fail-closes by requiring that at least one carried source session has a complete typed LTX target. It deliberately does NOT impose that shape on every session: a bundle mixes LTX sessions with non-LTX ones that can never carry transformerVariant/decoder. The JS and Rust validators then enforce that every session an LTX derivation actually references is present and exactly matches.",
+      "if": {
+        "properties": {
+          "records": {
+            "contains": {
+              "properties": {
+                "target": {
+                  "properties": { "modelId": { "pattern": "^ltx_2_5$" } },
+                  "required": ["modelId"]
+                },
+                "derivation": { "type": "object" }
+              },
+              "required": ["target", "derivation"]
+            }
+          }
+        },
+        "required": ["records"]
+      },
+      "then": {
+        "required": ["sourceSessions"],
+        "properties": {
+          "sourceSessions": {
+            "minItems": 1,
+            "contains": {
+              "type": "object",
+              "required": ["target"],
+              "properties": {
+                "target": { "required": ["transformerVariant", "decoder"] }
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "$comment": "Any typed audio comparison must have a physical MLX source session carrying the canonical selected/reference A/V pair. JSON Schema proves that such a session exists; the JS and Rust validators bind the record's quality derivation to that exact session.",
+      "if": {
+        "properties": {
+          "records": {
+            "contains": {
+              "properties": {
+                "quality": {
+                  "required": ["audio"]
+                }
+              },
+              "required": ["quality"]
+            }
+          }
+        },
+        "required": ["records"]
+      },
+      "then": {
+        "required": ["sourceSessions"],
+        "properties": {
+          "sourceSessions": {
+            "contains": {
+              "type": "object",
+              "required": ["kind", "outputs"],
+              "properties": {
+                "kind": { "const": "physical_mlx" },
+                "outputs": {
+                  "allOf": [
+                    {
+                      "contains": {
+                        "type": "object",
+                        "required": ["role"],
+                        "properties": { "role": { "const": "selected_av" } }
+                      }
+                    },
+                    {
+                      "contains": {
+                        "type": "object",
+                        "required": ["role"],
+                        "properties": { "role": { "const": "reference_av" } }
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  ],
   "$defs": {
     "gitState": {
       "type": "object", "additionalProperties": false, "required": ["revision", "dirty"],
@@ -31,7 +118,7 @@
     "phase": {
       "type": "object", "additionalProperties": false,
       "description":
-        "Per-phase memory counters. Every field is ONE named backend reading, or an explicitly derived function of two of them. schemaVersion 5 (sc-18864) REMOVED `deviceBytes` and `wiredBytes`: both adapters emitted them as verbatim copies of `allocatorBytes` — provably so across all 456 committed phase objects that carried them (404 across the five bundles plus 52 in the thirteen immutable v4 receipts) — so a record could assert `wiredBytes > hardware.wiredLimitBytes` purely as an artifact of that aliasing, and every committed MLX record did. MLX exposes no third counter for them to have carried, so they are removed rather than redefined.",
+        "Per-phase memory counters. Every field is ONE named backend reading, or an explicitly derived function of two of them. schemaVersion 5 (sc-18864) REMOVED `deviceBytes` and `wiredBytes`: both adapters emitted them as verbatim copies of `allocatorBytes` — provably so across all 456 committed phase objects that carried them (404 across the five bundles plus 52 in the thirteen immutable v4 receipts) — so a record could assert `wiredBytes > hardware.wiredLimitBytes` purely as an artifact of that aliasing, and every committed MLX record did. MLX exposes no third counter for them to have carried, so they are removed rather than redefined. schemaVersion 6 adds explicit LTX transformer and decoder identity to every derived record and its source target.",
       "required": ["activeBytes", "allocatorBytes", "reclaimableBytes"],
       "properties": {
         "activeBytes": {
@@ -91,10 +178,16 @@
     "sourceTarget": {
       "type": "object", "additionalProperties": false,
       "required": ["tier", "mode", "overlay", "rung"],
+      "dependentRequired": {
+        "transformerVariant": ["decoder"],
+        "decoder": ["transformerVariant"]
+      },
       "properties": {
         "tier": { "type": "string", "minLength": 1 },
         "mode": { "type": "string", "minLength": 1 },
         "overlay": { "type": "string", "minLength": 1 },
+        "transformerVariant": { "enum": ["distilled", "dev"] },
+        "decoder": { "enum": ["conv", "diffvae"] },
         "rung": { "enum": ["resident", "staged_residency", "bounded_decode", "bounded_attention", "bounded_transformer_residency"] }
       }
     },
@@ -136,10 +229,34 @@
               "path": { "pattern": "^docs/calibration/[A-Za-z0-9._/-]+/implan-[0-9a-f]{20}-reference_rgb-[1-9][0-9]*x[1-9][0-9]*-[0-9a-f]{64}\\.rgb$" }
             }
           }
+        },
+        {
+          "if": {
+            "properties": { "role": { "const": "selected_av" } },
+            "required": ["role"]
+          },
+          "then": {
+            "required": ["bytes"],
+            "properties": {
+              "path": { "pattern": "^docs/calibration/[A-Za-z0-9._/-]+/implan-[0-9a-f]{20}-selected_av-[1-9][0-9]*x[1-9][0-9]*-f[1-9][0-9]*-[0-9a-f]{64}\\.avbin$" }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": { "role": { "const": "reference_av" } },
+            "required": ["role"]
+          },
+          "then": {
+            "required": ["bytes"],
+            "properties": {
+              "path": { "pattern": "^docs/calibration/[A-Za-z0-9._/-]+/implan-[0-9a-f]{20}-reference_av-[1-9][0-9]*x[1-9][0-9]*-f[1-9][0-9]*-[0-9a-f]{64}\\.avbin$" }
+            }
+          }
         }
       ],
       "properties": {
-        "role": { "enum": ["request", "selected_rgb", "reference_rgb"] },
+        "role": { "enum": ["request", "selected_rgb", "reference_rgb", "selected_av", "reference_av"] },
         "path": { "type": "string", "minLength": 1 },
         "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
         "bytes": { "type": "integer", "minimum": 1 }
@@ -149,7 +266,7 @@
       "type": "object", "additionalProperties": false,
       "required": ["role", "path", "bytes", "sha256", "repository", "resolvedRevision", "variant"],
       "properties": {
-        "role": { "enum": ["base", "control", "adapter"] },
+        "role": { "enum": ["base", "control", "adapter", "enhancer"] },
         "path": { "type": "string", "minLength": 1 },
         "bytes": { "type": "integer", "minimum": 1 },
         "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
@@ -194,22 +311,52 @@
                     "maxContains": 1
                   },
                   {
-                    "contains": {
-                      "type": "object",
-                      "properties": { "role": { "const": "selected_rgb" } },
-                      "required": ["role"]
-                    },
-                    "minContains": 1,
-                    "maxContains": 1
-                  },
-                  {
-                    "contains": {
-                      "type": "object",
-                      "properties": { "role": { "const": "reference_rgb" } },
-                      "required": ["role"]
-                    },
-                    "minContains": 1,
-                    "maxContains": 1
+                    "oneOf": [
+                      {
+                        "allOf": [
+                          {
+                            "contains": {
+                              "type": "object",
+                              "properties": { "role": { "const": "selected_rgb" } },
+                              "required": ["role"]
+                            },
+                            "minContains": 1,
+                            "maxContains": 1
+                          },
+                          {
+                            "contains": {
+                              "type": "object",
+                              "properties": { "role": { "const": "reference_rgb" } },
+                              "required": ["role"]
+                            },
+                            "minContains": 1,
+                            "maxContains": 1
+                          }
+                        ]
+                      },
+                      {
+                        "allOf": [
+                          {
+                            "contains": {
+                              "type": "object",
+                              "properties": { "role": { "const": "selected_av" } },
+                              "required": ["role"]
+                            },
+                            "minContains": 1,
+                            "maxContains": 1
+                          },
+                          {
+                            "contains": {
+                              "type": "object",
+                              "properties": { "role": { "const": "reference_av" } },
+                              "required": ["role"]
+                            },
+                            "minContains": 1,
+                            "maxContains": 1
+                          }
+                        ]
+                      }
+                    ]
                   }
                 ]
               }
@@ -275,6 +422,34 @@
         "loadability", "calibrationFingerprint", "capturedAt", "harnessVersion"
       ],
       "allOf": [
+        {
+          "$comment": "Audio quality is admissible only as a source-derived physical A/V comparison. Bundle-level validators bind derivation.quality to the exact physical session.",
+          "if": {
+            "properties": {
+              "quality": { "required": ["audio"] }
+            },
+            "required": ["quality"]
+          },
+          "then": { "required": ["derivation"] }
+        },
+        {
+          "$comment": "Every derived LTX record carries the two pipeline axes on the record itself. The JS and Rust validators additionally bind every referenced source-session target to all six exact identity fields.",
+          "if": {
+            "properties": {
+              "target": {
+                "properties": { "modelId": { "pattern": "^ltx_2_5$" } },
+                "required": ["modelId"]
+              },
+              "derivation": { "type": "object" }
+            },
+            "required": ["target", "derivation"]
+          },
+          "then": {
+            "properties": {
+              "target": { "required": ["transformerVariant", "decoder"] }
+            }
+          }
+        },
         {
           "$comment": "sc-17774: currency is the provider's compile-closure digest, so an AUTHORITATIVE record must carry the one it was captured under. Fixture and candidate scopes are refused by evidenceSemantics before the comparison is ever reached, so demanding a real digest there would force the harness to derive one against a synthetic repo that has no provider crate to derive from.",
           "if": {
@@ -355,10 +530,22 @@
         "target": {
           "type": "object", "additionalProperties": false,
           "required": ["modelId", "provider", "tier", "mode", "overlay", "geometry"],
+          "allOf": [
+            {
+              "$comment": "SC-18783: LTX-2.5 transformer and decoder choices change both the executed pipeline and its memory profile, so neither may be inferred from provider, tier, or fixture text.",
+              "if": {
+                "properties": { "modelId": { "const": "ltx_2_5" } },
+                "required": ["modelId"]
+              },
+              "then": { "required": ["transformerVariant", "decoder"] }
+            }
+          ],
           "properties": {
             "modelId": { "type": "string", "minLength": 1 }, "provider": { "type": "string", "minLength": 1 },
             "tier": { "type": "string", "minLength": 1 }, "mode": { "type": "string", "minLength": 1 },
             "overlay": { "type": "string", "minLength": 1 },
+            "transformerVariant": { "enum": ["distilled", "dev"] },
+            "decoder": { "enum": ["conv", "diffvae"] },
             "geometry": {
               "type": "object", "additionalProperties": false, "required": ["width", "height", "batch", "frames"],
               "properties": {
@@ -451,7 +638,32 @@
             "rootMeanSquareError": { "type": "number", "minimum": 0 },
             "maximumErrorThreshold": { "type": "number", "minimum": 0 },
             "meanErrorThreshold": { "type": "number", "minimum": 0 },
-            "rootMeanSquareErrorThreshold": { "type": "number", "minimum": 0 }
+            "rootMeanSquareErrorThreshold": { "type": "number", "minimum": 0 },
+            "audio": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "result", "sampleRateHz", "channels", "sampleCount",
+                "selectedPcmSha256", "referencePcmSha256",
+                "maximumAbsoluteError", "meanAbsoluteError", "rootMeanSquareError",
+                "maximumAbsoluteErrorThreshold", "meanAbsoluteErrorThreshold",
+                "rootMeanSquareErrorThreshold"
+              ],
+              "properties": {
+                "result": { "const": "passed" },
+                "sampleRateHz": { "type": "integer", "minimum": 1 },
+                "channels": { "type": "integer", "minimum": 1 },
+                "sampleCount": { "type": "integer", "minimum": 1 },
+                "selectedPcmSha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+                "referencePcmSha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+                "maximumAbsoluteError": { "type": "number", "minimum": 0 },
+                "meanAbsoluteError": { "type": "number", "minimum": 0 },
+                "rootMeanSquareError": { "type": "number", "minimum": 0 },
+                "maximumAbsoluteErrorThreshold": { "type": "number", "minimum": 0 },
+                "meanAbsoluteErrorThreshold": { "type": "number", "minimum": 0 },
+                "rootMeanSquareErrorThreshold": { "type": "number", "minimum": 0 }
+              }
+            }
           }
         },
         "negativeMutation": {

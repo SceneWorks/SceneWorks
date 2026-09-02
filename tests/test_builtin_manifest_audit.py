@@ -193,6 +193,98 @@ def test_cached_manifest_and_schema_loaders_return_isolated_copies():
     assert _load_schema(SCHEMA_PATH)["type"] == original_type
 
 
+def test_ltx25_builtin_manifest_uses_published_tier_sizes_and_geometry():
+    """sc-18781: one selected tier installs both published transformer identities."""
+    manifest = _load_builtin_models_manifest()
+    model = next(model for model in manifest["models"] if model["id"] == "ltx_2_5")
+    co_requisites = [row for row in model["downloads"] if row.get("coRequisite")]
+    tiers = {
+        row["variant"]: row
+        for row in model["downloads"]
+        if not row.get("coRequisite")
+    }
+    expected_bytes = {
+        "q4": 82_001_054_462,
+        "q8": 83_672_150_720,
+        "bf16": 145_561_765_732,
+    }
+
+    assert set(tiers) == set(expected_bytes)
+    for tier, measured_bytes in expected_bytes.items():
+        row = tiers[tier]
+        assert row["files"] == [f"distilled/{tier}/*", f"dev/{tier}/*"]
+        # q8 is a first-class candle tier, so every tier row ships on every platform.
+        assert row["platforms"] == ["macos", "windows", "linux"]
+        assert row["estimatedSizeBytes"] == measured_bytes
+        assert row["footprint"]["diskSizeBytes"] == measured_bytes
+        assert row["footprint"]["residentMemoryBytes"] is None
+        assert row["footprint"]["peakMemoryBytes"] is None
+
+    expected_co_requisites = {
+        ("enhancer/*",): 23_951_748_129,
+        ("distilled_lora/ltx-2.5-22b-distilled-lora-450-bf16.safetensors",): 8_899_889_568,
+    }
+    assert len(co_requisites) == len(expected_co_requisites)
+    for row in co_requisites:
+        expected_platforms = ["macos"] if row["files"] == ["enhancer/*"] else ["macos", "windows", "linux"]
+        assert row["platforms"] == expected_platforms
+        assert row["estimatedSizeBytes"] == expected_co_requisites[tuple(row["files"])]
+
+    assert model["defaults"]["steps"] == 8
+    assert model["limits"]["steps"] == [8, 30]
+    assert model["limits"]["requiresDimensionsMultipleOf"] == 64
+    assert "maxPixels" not in model["limits"]
+
+
+def test_ltx25_builtin_manifest_declares_the_exact_backend_memory_ladders():
+    """sc-18800: static declarations mirror the two provider contracts without false exemptions."""
+    manifest = _load_builtin_models_manifest()
+    model = next(model for model in manifest["models"] if model["id"] == "ltx_2_5")
+
+    assert model["mlx"]["memoryStrategyCapabilities"] == {
+        "bounded_decode": {
+            "parameters": {"decodeTileEdge": 192, "decodeOverlap": 64},
+            "overlays": ["none", "lora"],
+        },
+        "bounded_attention": {
+            "parameters": {"attentionChunkSize": 16_777_216},
+            "overlays": ["none", "lora"],
+        },
+        "bounded_transformer_residency": {
+            "parameters": {
+                "transformerWindowSize": 1,
+                "transformerWindowComponent": "Dit",
+            },
+            "overlays": ["none"],
+        },
+    }
+    assert model["candle"] == {
+        "memoryStrategyCapabilities": {
+            "bounded_decode": {
+                "parameters": {"decodeTileEdge": 192, "decodeOverlap": 64},
+                "overlays": ["none", "lora"],
+                "tiers": ["q4", "q8", "bf16"],
+            },
+            "bounded_attention": {
+                "parameters": {"attentionChunkSize": 16_777_216},
+                "overlays": ["none", "lora"],
+                "tiers": ["q4", "q8", "bf16"],
+            },
+            "bounded_transformer_residency": {
+                "parameters": {
+                    "transformerWindowSize": 1,
+                    "transformerWindowComponent": "Dit",
+                },
+                "overlays": ["none"],
+                "tiers": ["q4", "q8", "bf16"],
+            },
+        }
+    }
+    for backend in ("mlx", "candle"):
+        assert "memoryStrategyStructuralExemptions" not in model[backend]
+    assert "supportsSequentialOffload" not in model["candle"]
+
+
 COMPONENTS_REPO = "SceneWorks/Mage-Flow-Components-mlx"
 COMPONENTS_REVISION = "c936de2a107ee8d0869137e73943f6414f23adaa"
 # Measured on the uploaded artifacts (sc-14980). Per-tier DiT, and the shared per-tier components.
@@ -804,7 +896,7 @@ def test_starvector_terminal_candidate_schema_is_closed_and_mutation_resistant()
     candidate = model["vector"]["deviceAdmission"]["terminalCandidate"]
     assert candidate["inferenceRevision"] == "b7ef9254e047d326d232f74e422a2e764e2488a3"
     assert candidate["corpusSha256"] == "757370c4eed38a52a29ac80c258fdedd7e437ab891637bcb1c916aa608bf32b5"
-    assert candidate["productionClosure"]["sha256"] == "958ed1157a9795f63c550356fb14c37f936915d686f2c6051f8d5e4ec2e682f4"
+    assert candidate["productionClosure"]["sha256"] == "6fb138ea73334d08f23259d73f6e038fcf4e3281c5274d7734a22a901e9ee50d"
     assert len(candidate["productionClosure"]["entries"]) == 28
     assert model["vector"]["providers"] == {
         "mlx": {"id": "mlx-starvector-8b", "available": True},

@@ -447,6 +447,215 @@ mod tests {
     }
 
     #[test]
+    fn ltx25_downloads_keep_the_generation_text_encoder_inside_each_tier() {
+        let stripped = crate::jsonc::strip_jsonc_comments(embedded("builtin.models.jsonc"));
+        let manifest: serde_json::Value =
+            serde_json::from_str(&stripped).expect("builtin.models.jsonc parses as JSON");
+        let model = manifest["models"]
+            .as_array()
+            .expect("builtin.models.jsonc has a models array")
+            .iter()
+            .find(|model| model["id"].as_str() == Some("ltx_2_5"))
+            .expect("ltx_2_5 is present");
+        let files: Vec<&str> = model["downloads"]
+            .as_array()
+            .expect("ltx_2_5 has downloads")
+            .iter()
+            .flat_map(|download| {
+                download["files"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(serde_json::Value::as_str)
+            })
+            .collect();
+
+        assert!(
+            !files.iter().any(|file| file.starts_with("gemma/")),
+            "the self-contained generation text encoder is a tier component, not a gemma/ co-requisite"
+        );
+        assert!(
+            files.contains(&"enhancer/*"),
+            "the stock prompt enhancer still ships offline"
+        );
+        for tier in ["q4", "q8", "bf16"] {
+            assert!(files.contains(&format!("distilled/{tier}/*").as_str()));
+            assert!(files.contains(&format!("dev/{tier}/*").as_str()));
+        }
+    }
+
+    #[test]
+    fn ltx25_builtin_manifest_uses_published_tier_sizes_and_geometry() {
+        let stripped = crate::jsonc::strip_jsonc_comments(embedded("builtin.models.jsonc"));
+        let manifest: serde_json::Value =
+            serde_json::from_str(&stripped).expect("builtin.models.jsonc parses as JSON");
+        let model = manifest["models"]
+            .as_array()
+            .expect("builtin.models.jsonc has a models array")
+            .iter()
+            .find(|model| model["id"].as_str() == Some("ltx_2_5"))
+            .expect("ltx_2_5 is present");
+        let expected = [
+            ("q4", 82_001_054_462_u64),
+            ("q8", 83_672_150_720_u64),
+            ("bf16", 145_561_765_732_u64),
+        ];
+
+        let downloads = model["downloads"]
+            .as_array()
+            .expect("ltx_2_5 has downloads");
+        let tiers: Vec<&serde_json::Value> = downloads
+            .iter()
+            .filter(|row| row["coRequisite"].as_bool() != Some(true))
+            .collect();
+        assert_eq!(tiers.len(), expected.len());
+        for (tier, measured_bytes) in expected {
+            let row = tiers
+                .iter()
+                .find(|row| row["variant"].as_str() == Some(tier))
+                .unwrap_or_else(|| panic!("ltx_2_5 has a {tier} download"));
+            let expected_files = [format!("distilled/{tier}/*"), format!("dev/{tier}/*")];
+            assert_eq!(
+                row["files"]
+                    .as_array()
+                    .expect("tier has file selectors")
+                    .iter()
+                    .filter_map(serde_json::Value::as_str)
+                    .collect::<Vec<_>>(),
+                expected_files
+                    .iter()
+                    .map(String::as_str)
+                    .collect::<Vec<_>>()
+            );
+            // Every tier — q4, q8, bf16 — ships on every platform: the candle lane consumes the
+            // same split bundle as MLX, so q8 carries no macOS-only exclusion.
+            let expected_platforms = serde_json::json!(["macos", "windows", "linux"]);
+            assert_eq!(
+                row["platforms"].as_array().expect("tier has platforms"),
+                expected_platforms.as_array().expect("expected platforms")
+            );
+            assert_eq!(row["estimatedSizeBytes"].as_u64(), Some(measured_bytes));
+            assert_eq!(
+                row["footprint"]["diskSizeBytes"].as_u64(),
+                Some(measured_bytes)
+            );
+            assert!(row["footprint"]["residentMemoryBytes"].is_null());
+            assert!(row["footprint"]["peakMemoryBytes"].is_null());
+        }
+
+        let expected_co_requisites = [
+            (vec!["enhancer/*"], 23_951_748_129_u64),
+            (
+                vec!["distilled_lora/ltx-2.5-22b-distilled-lora-450-bf16.safetensors"],
+                8_899_889_568_u64,
+            ),
+        ];
+        let co_requisites: Vec<&serde_json::Value> = downloads
+            .iter()
+            .filter(|row| row["coRequisite"].as_bool() == Some(true))
+            .collect();
+        assert_eq!(co_requisites.len(), expected_co_requisites.len());
+        for (expected_files, measured_bytes) in expected_co_requisites {
+            let row = co_requisites
+                .iter()
+                .find(|row| {
+                    row["files"]
+                        .as_array()
+                        .is_some_and(|files| files == &expected_files)
+                })
+                .unwrap_or_else(|| panic!("ltx_2_5 has co-requisite {expected_files:?}"));
+            let expected_platforms = if expected_files == ["enhancer/*"] {
+                serde_json::json!(["macos"])
+            } else {
+                serde_json::json!(["macos", "windows", "linux"])
+            };
+            assert_eq!(
+                row["platforms"]
+                    .as_array()
+                    .expect("co-requisite has platforms"),
+                expected_platforms.as_array().expect("expected platforms")
+            );
+            assert_eq!(row["estimatedSizeBytes"].as_u64(), Some(measured_bytes));
+        }
+
+        assert_eq!(model["defaults"]["steps"].as_u64(), Some(8));
+        assert_eq!(model["limits"]["steps"], serde_json::json!([8, 30]));
+        assert_eq!(
+            model["limits"]["requiresDimensionsMultipleOf"].as_u64(),
+            Some(64)
+        );
+        assert!(model["limits"].get("maxPixels").is_none());
+    }
+
+    #[test]
+    fn ltx25_builtin_manifest_declares_the_exact_backend_memory_ladders() {
+        let stripped = crate::jsonc::strip_jsonc_comments(embedded("builtin.models.jsonc"));
+        let manifest: serde_json::Value =
+            serde_json::from_str(&stripped).expect("builtin.models.jsonc parses as JSON");
+        let model = manifest["models"]
+            .as_array()
+            .expect("builtin.models.jsonc has a models array")
+            .iter()
+            .find(|model| model["id"].as_str() == Some("ltx_2_5"))
+            .expect("ltx_2_5 is present");
+
+        assert_eq!(
+            model["mlx"]["memoryStrategyCapabilities"],
+            serde_json::json!({
+                "bounded_decode": {
+                    "parameters": { "decodeTileEdge": 192, "decodeOverlap": 64 },
+                    "overlays": ["none", "lora"]
+                },
+                "bounded_attention": {
+                    "parameters": { "attentionChunkSize": 16_777_216 },
+                    "overlays": ["none", "lora"]
+                },
+                "bounded_transformer_residency": {
+                    "parameters": {
+                        "transformerWindowSize": 1,
+                        "transformerWindowComponent": "Dit"
+                    },
+                    "overlays": ["none"]
+                }
+            })
+        );
+        assert_eq!(
+            model["candle"],
+            serde_json::json!({
+                "memoryStrategyCapabilities": {
+                    "bounded_decode": {
+                        "parameters": { "decodeTileEdge": 192, "decodeOverlap": 64 },
+                        "overlays": ["none", "lora"],
+                        "tiers": ["q4", "q8", "bf16"]
+                    },
+                    "bounded_attention": {
+                        "parameters": { "attentionChunkSize": 16_777_216 },
+                        "overlays": ["none", "lora"],
+                        "tiers": ["q4", "q8", "bf16"]
+                    },
+                    "bounded_transformer_residency": {
+                        "parameters": {
+                            "transformerWindowSize": 1,
+                            "transformerWindowComponent": "Dit"
+                        },
+                        "overlays": ["none"],
+                        "tiers": ["q4", "q8", "bf16"]
+                    }
+                }
+            })
+        );
+        for backend in ["mlx", "candle"] {
+            assert!(
+                model[backend]
+                    .get("memoryStrategyStructuralExemptions")
+                    .is_none(),
+                "Missing rungs are not structural exemptions on {backend}"
+            );
+        }
+        assert!(model["candle"].get("supportsSequentialOffload").is_none());
+    }
+
+    #[test]
     fn krea_2_raw_declares_no_default_negative_and_low_guidance_with_raw_guide() {
         // sc-14203 (partially revises sc-13881): Raw's defaults fix. On-device render-validation showed the
         // "soft/over-warm" heat was driven by the guidance default (Krea's nominal 3.5 ≡ standard-CFG 4.5)
@@ -1162,6 +1371,27 @@ mod tests {
             .as_array()
             .expect("builtin.loras.jsonc has a loras array")
             .clone()
+    }
+
+    #[test]
+    fn ltx_2_3_builtin_loras_are_partitioned_away_from_ltx_2_5() {
+        let ltx: Vec<_> = builtin_loras()
+            .into_iter()
+            .filter(|lora| lora["family"] == serde_json::json!("ltx-video"))
+            .collect();
+        assert_eq!(
+            ltx.len(),
+            4,
+            "the four shipped LTX-2.3 IC-LoRAs are covered"
+        );
+        for lora in ltx {
+            let id = lora["id"].as_str().expect("LTX LoRA id");
+            assert_eq!(
+                lora["modelIds"],
+                serde_json::json!(["ltx_2_3", "ltx_2_3_eros"]),
+                "{id} must not be offered on LTX-2.5: its strict loader contract rejects the shipped 2.3 file"
+            );
+        }
     }
 
     #[test]

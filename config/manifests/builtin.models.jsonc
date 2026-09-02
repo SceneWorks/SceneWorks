@@ -6809,6 +6809,20 @@
         "minMemoryGb": 48,
         "quantize": 8,
         "repo": "SceneWorks/krea-2-turbo-mlx",
+        // sc-22513: re-homed from the deleted rung-4 applicability survey (family 15517, mlx),
+        // which declared rung 4 implemented for `krea_2_turbo` and `krea_2_raw` on the `none` and
+        // `lora` overlays with a window of 1. The provider contract below already covers the
+        // text_to_image slice and the Turbo-edit lora slice; this declaration is what carries the
+        // remaining `edit_image` x `none` coordinates the survey owned. Verified against the pinned
+        // capability dump: every `sequential` surface of `krea_2_turbo` lists
+        // `bounded_transformer_residency` as implemented
+        // (config/engine-capabilities/capabilities.mlx.json#memoryContracts/krea_2_turbo).
+        "memoryStrategyCapabilities": {
+          "bounded_transformer_residency": {
+            "parameters": { "transformerWindowSize": 1 },
+            "overlays": ["none", "lora"]
+          }
+        },
         // SC-18451: the declaration itself owns exact Turbo and Turbo-edit reachability. The
         // pinned provider predicate, not the legacy supportsSequentialOffload mirror, validates the
         // resolved tier, Dir source, low-rank/PiD composition, reference shape, and deferred loader.
@@ -6965,6 +6979,29 @@
       // byte-identical. minMemoryGb 32 covers the common q4 resident lane with headroom.
       "candle": {
         "minMemoryGb": 32,
+        // sc-22513: re-homed from the deleted rung-4 applicability survey (family 15517, candle
+        // `overlayIncompatible`). Krea folds diff-patch/LoRA deltas into the base weights at load
+        // and a streamed block is rebuilt from the snapshot, so an overlay request can never be
+        // served by the streamed path. `modes` scopes this to the text_to_image slice the survey
+        // scoped it to: on `edit_image` the Candle streaming path does not exist at all, so those
+        // coordinates stay Missing for the ordinary reason rather than reading as a structural
+        // exemption from a path that was never built.
+        "memoryStrategyStructuralExemptions": {
+          "bounded_transformer_residency": {
+            "modes": ["text_to_image"],
+            "overlays": ["control", "lora"],
+            "evidence": [
+              {
+                "source": "crates/sceneworks-worker/src/image_jobs/base.rs#allow_streamed_blocks",
+                "reason": "load-time adapters are incompatible with streamed transformer blocks"
+              },
+              {
+                "source": "inference:crates/media/candle-gen/candle-gen-krea/src/pipeline.rs",
+                "reason": "`load_dit` returns a hard error when `stream_blocks` is set together with a load-time LoRA/LoKr spec or a merged diff-patch overlay, so a streamed render cannot serve an overlay request at all."
+              }
+            ]
+          }
+        },
         // SC-18462: Turbo edit is a distinct registered runtime provider. Native Turbo generation
         // retains its established path; only this exact route-local declaration can authorize the
         // request-scoped staged-residency contract.
@@ -8301,6 +8338,18 @@
         "minMemoryGb": 48,
         "quantize": 8,
         "repo": "SceneWorks/krea-2-raw-mlx",
+        // sc-22513: re-homed from the deleted rung-4 applicability survey (family 15517, mlx) —
+        // the same shared-primitive declaration Turbo carries; see the note on
+        // `models/krea_2_turbo/mlx/memoryStrategyCapabilities`. Verified against the pinned
+        // capability dump: every `sequential` surface of `krea_2_raw` lists
+        // `bounded_transformer_residency` as implemented
+        // (config/engine-capabilities/capabilities.mlx.json#memoryContracts/krea_2_raw).
+        "memoryStrategyCapabilities": {
+          "bounded_transformer_residency": {
+            "parameters": { "transformerWindowSize": 1 },
+            "overlays": ["none", "lora"]
+          }
+        },
         // SC-18452: the exact Raw provider owns this declaration. True CFG is internal to
         // `krea_2_raw` (paired conditional/unconditional carries at batch 1), not a synthetic route
         // mode. Plain, reference-latent img2img, PiD, low-rank, and low-rank+PiD generation use the
@@ -19434,6 +19483,167 @@
       }
     },
     {
+      "id": "ltx_2_5",
+      // The 2.5 workflow is a high-control opt-in; LTX-2.3 remains the recommended/default LTX route.
+      "recommended": false,
+      "autoDownload": false,
+      "name": "LTX-2.5",
+      "family": "ltx-video",
+      "type": "video",
+      "adapter": "ltx_video",
+      "capabilities": ["image_to_video", "text_to_video", "first_last_frame", "extend_clip", "video_bridge", "replace_person"],
+      // Neither packed transformer exposes generic request-level guidance: distilled guidance is
+      // baked in, while dev uses the fixed multimodal guider parameters from its checkpoint row.
+      // The default distilled variant also has no negative branch. Video Studio reopens only the
+      // negative prompt when the user explicitly selects dev; guidance stays provider-owned.
+      "video": { "supportsGuidance": false, "supportsNegativePrompt": false },
+      // One rehost, two transformer identities. Every selected quant tier downloads both nested
+      // variants and the worker selects exactly one root. Sizes are measured from the finalized
+      // public bundle and every runtime resolver binds the immutable verified revision below.
+      "downloads": [
+        {
+          "provider": "huggingface",
+          "repo": "SceneWorks/ltx-2.5-mlx",
+          "revision": "081658ce6886cacba20817ce0359bbefef706ff2",
+          "coRequisite": true,
+          "files": ["enhancer/*"],
+          "platforms": ["macos"],
+          "estimatedSizeBytes": 23951748129
+        },
+        {
+          "provider": "huggingface",
+          "repo": "SceneWorks/ltx-2.5-mlx",
+          "revision": "081658ce6886cacba20817ce0359bbefef706ff2",
+          "coRequisite": true,
+          "files": ["distilled_lora/ltx-2.5-22b-distilled-lora-450-bf16.safetensors"],
+          "platforms": ["macos", "windows", "linux"],
+          "estimatedSizeBytes": 8899889568
+        },
+        {
+          "provider": "huggingface",
+          "repo": "SceneWorks/ltx-2.5-mlx",
+          "revision": "081658ce6886cacba20817ce0359bbefef706ff2",
+          "variant": "q4",
+          "default": true,
+          "files": ["distilled/q4/*", "dev/q4/*"],
+          "platforms": ["macos", "windows", "linux"],
+          // Exact published-directory bytes for both transformer identities selected by this row.
+          "estimatedSizeBytes": 82001054462,
+          "footprint": { "diskSizeBytes": 82001054462, "residentMemoryBytes": null, "peakMemoryBytes": null }
+        },
+        {
+          "provider": "huggingface",
+          "repo": "SceneWorks/ltx-2.5-mlx",
+          "revision": "081658ce6886cacba20817ce0359bbefef706ff2",
+          "variant": "q8",
+          "files": ["distilled/q8/*", "dev/q8/*"],
+          // q8 is a first-class Candle tier alongside MLX: the CUDA hosts consume the same split
+          // q8 bundle from this rehost, so the row carries the full platform set like q4/bf16.
+          "platforms": ["macos", "windows", "linux"],
+          "estimatedSizeBytes": 83672150720,
+          "footprint": { "diskSizeBytes": 83672150720, "residentMemoryBytes": null, "peakMemoryBytes": null }
+        },
+        {
+          "provider": "huggingface",
+          "repo": "SceneWorks/ltx-2.5-mlx",
+          "revision": "081658ce6886cacba20817ce0359bbefef706ff2",
+          "variant": "bf16",
+          "files": ["distilled/bf16/*", "dev/bf16/*"],
+          "platforms": ["macos", "windows", "linux"],
+          "estimatedSizeBytes": 145561765732,
+          "footprint": { "diskSizeBytes": 145561765732, "residentMemoryBytes": null, "peakMemoryBytes": null }
+        }
+      ],
+      "paths": { "model": "${HF_CACHE}/SceneWorks/ltx-2.5-mlx" },
+      "resources": {
+        "distilledLora": {
+          "repo": "SceneWorks/ltx-2.5-mlx",
+          "file": "distilled_lora/ltx-2.5-22b-distilled-lora-450-bf16.safetensors"
+        }
+      },
+      "defaults": {
+        "duration": 6,
+        "fps": 25,
+        "resolution": "768x512",
+        "quality": "balanced",
+        "steps": 8
+      },
+      "limits": {
+        "durations": [4, 6, 8, 10, 12, 15],
+        "recommendedMaxDuration": 10,
+        "hardMaxDuration": 15,
+        "fps": [24, 25, 30],
+        "steps": [8, 30],
+        "resolutions": ["768x512", "512x768", "640x640", "1280x704", "704x1280"],
+        "requiresDimensionsMultipleOf": 64,
+        "samplers": ["default", "euler", "euler_ancestral", "heun", "dpmpp_2m", "dpmpp_sde", "uni_pc", "lcm", "ddim"]
+      },
+      "loraCompatibility": { "families": ["ltx-video"], "types": ["style", "motion", "character", "enhance"] },
+      "mlx": {
+        "minMemoryGb": 31,
+        "repo": "SceneWorks/ltx-2.5-mlx",
+        "autoDistillLora": { "stage1Strength": 0.0, "stage2Strength": 1.0 },
+        // SC-18800: the pinned `ltx_2_5` contract exposes the ordinary conv-VAE tiler, both
+        // attention-score budgets, and the adapter-free 48-block AvDiT window. The dev transformer
+        // always installs the required stage-two refinement LoRA, so it deliberately does not
+        // inherit the adapter-free rung-4 claim. Missing is not structural non-applicability: no
+        // structural exemptions are declared for any other coordinate.
+        "memoryStrategyCapabilities": {
+          "bounded_decode": {
+            "parameters": { "decodeTileEdge": 192, "decodeOverlap": 64 },
+            "overlays": ["none", "lora"]
+          },
+          "bounded_attention": {
+            "parameters": { "attentionChunkSize": 16777216 },
+            "overlays": ["none", "lora"]
+          },
+          "bounded_transformer_residency": {
+            "parameters": { "transformerWindowSize": 1, "transformerWindowComponent": "Dit" },
+            "overlays": ["none"]
+          }
+        }
+      },
+      "candle": {
+        // SC-18800: Candle's ordinary ConvVAE route consumes the selected decode edge/overlap, while
+        // the optional DiffVAE route rejects those parameters and keeps its own automatic budget.
+        // Bounded attention and the adapter-free AvDiT window are independently selectable. Staged
+        // residency remains Missing rather than being mislabeled as StructurallyNotApplicable.
+        "memoryStrategyCapabilities": {
+          "bounded_decode": {
+            "parameters": { "decodeTileEdge": 192, "decodeOverlap": 64 },
+            "overlays": ["none", "lora"],
+            "tiers": ["q4", "q8", "bf16"]
+          },
+          "bounded_attention": {
+            "parameters": { "attentionChunkSize": 16777216 },
+            "overlays": ["none", "lora"],
+            "tiers": ["q4", "q8", "bf16"]
+          },
+          "bounded_transformer_residency": {
+            "parameters": { "transformerWindowSize": 1, "transformerWindowComponent": "Dit" },
+            "overlays": ["none"],
+            "tiers": ["q4", "q8", "bf16"]
+          }
+        }
+      },
+      "ui": {
+        "label": "LTX-2.5",
+        "description": "Text and image video with the distilled default or the 30-step guided dev transformer.",
+        "recommendedFor": ["image_to_video", "text_to_video", "first_last_frame", "extend_clip", "video_bridge", "replace_person"],
+        "durationHint": "Distilled is the default. Dev runs the guided 30-step recipe and its bundled stage-two refinement.",
+        "promptGuide": {
+          "title": "LTX-2.5 Gemma 4 Prompt Guide",
+          "path": "/prompt-guides/ltx-2-5.md",
+          "sources": [
+            { "label": "Lightricks LTX-2.5 model card", "url": "https://huggingface.co/Lightricks/LTX-2.5" },
+            { "label": "Lightricks LTX-2.5 Diffusers model card", "url": "https://huggingface.co/Lightricks/LTX-2.5-Diffusers" },
+            { "label": "Lightricks Gemma 4 text-to-video prompt contract", "url": "https://github.com/Lightricks/LTX-2/blob/fd4ded7f2d88d3da713abcdd4ad41ecc4a9314ca/packages/ltx-core/src/ltx_core/text_encoders/gemma/encoders/prompts/gemma4_t2v_system_prompt.txt" },
+            { "label": "Lightricks Gemma 4 image-to-video prompt contract", "url": "https://github.com/Lightricks/LTX-2/blob/fd4ded7f2d88d3da713abcdd4ad41ecc4a9314ca/packages/ltx-core/src/ltx_core/text_encoders/gemma/encoders/prompts/gemma4_i2v_system_prompt.txt" }
+          ]
+        }
+      }
+    },
+    {
       "id": "ltx_2_3",
       // Recommended headline video model, but ~146 GB — keep it badged yet unchecked in
       // the wizard so the big download is a deliberate opt-in.
@@ -20930,6 +21140,21 @@
         "minMemoryGb": 64,
         "repo": "SceneWorks/bernini-mlx",
         "quantize": 4,
+        // sc-22513: re-homed from the deleted rung-4 applicability survey (family 15528, mlx).
+        // The MLX Bernini engine streams a single 80-block global window across the two 40-block
+        // Wan expert stacks; the block stream refuses adapter-bearing loads, so only the no-overlay
+        // routes are claimed. Verified against the pinned capability dump: every
+        // `deferred_materialization` surface of `bernini` lists `bounded_transformer_residency`
+        // as implemented (config/engine-capabilities/capabilities.mlx.json#memoryContracts/bernini).
+        "memoryStrategyCapabilities": {
+          "bounded_transformer_residency": {
+            "parameters": {
+              "transformerWindowSize": 10,
+              "transformerWindowComponent": "Dit"
+            },
+            "overlays": ["none"]
+          }
+        },
         "limits": {
           "samplers": ["default"],
           "schedulers": ["default"]
@@ -25387,7 +25612,7 @@
             },
             "productionClosure": {
               "schemaVersion": 1,
-              "sha256": "958ed1157a9795f63c550356fb14c37f936915d686f2c6051f8d5e4ec2e682f4",
+              "sha256": "6fb138ea73334d08f23259d73f6e038fcf4e3281c5274d7734a22a901e9ee50d",
               "entries": [
                 {
                   "path": ".github/workflows/starvector-terminal.yml",
@@ -25396,8 +25621,8 @@
                 },
                 {
                   "path": "Cargo.lock",
-                  "byteSize": 248766,
-                  "sha256": "de0b313470cbc8cba9e3cb84a109c69efc1ffc865f602c97be2659052ac790f9"
+                  "byteSize": 248799,
+                  "sha256": "14d2d53611835a3994c7b6366306b011605df9a137abcf5d80c8a4120d4ae0d7"
                 },
                 {
                   "path": "Cargo.toml",
@@ -25411,8 +25636,8 @@
                 },
                 {
                   "path": "crates/sceneworks-worker/Cargo.toml",
-                  "byteSize": 8305,
-                  "sha256": "94581dcc1ae86db392e8d1ee7c3fe80c5f4baeb21ce2f90b7dcecdb814e866cb"
+                  "byteSize": 8839,
+                  "sha256": "cd617372a7eaa3ee8311107b5c9f461e847550b2ecb1d97f19dab300b3a8932e"
                 },
                 {
                   "path": "crates/sceneworks-worker/src/bin/starvector_terminal_lease.rs",
@@ -25426,13 +25651,13 @@
                 },
                 {
                   "path": "crates/sceneworks-worker/src/engines.rs",
-                  "byteSize": 138583,
-                  "sha256": "ee1b9298c4a564f98aef398a9042b603aa4381ac6970ec5645ecd4da41bc43fc"
+                  "byteSize": 138683,
+                  "sha256": "9d7fc5f333a93a9e2115bd81a1fe1d4f2dd45d48e743dc43c3f6a09f5e2643b3"
                 },
                 {
                   "path": "crates/sceneworks-worker/src/inference_runtime.rs",
-                  "byteSize": 19261,
-                  "sha256": "1716191c6bc7827f96e92fa74538d04507ff2cacf9406439662499bfce23b2d6"
+                  "byteSize": 20075,
+                  "sha256": "8ffee4ef1978158c755aca2d5c619cb959f846b54edf928272e1032d67bde519"
                 },
                 {
                   "path": "crates/sceneworks-worker/src/lib.rs",
@@ -25441,8 +25666,8 @@
                 },
                 {
                   "path": "crates/sceneworks-worker/src/model_jobs.rs",
-                  "byteSize": 369790,
-                  "sha256": "0faffe6b396a8f803b9893a46a65423820b931d9f816d7cccb718d9262f20ef4"
+                  "byteSize": 371721,
+                  "sha256": "04ec145771e0454b4b397f7530ca267dd95e77c7c245ea5f304d5305acdb3c4b"
                 },
                 {
                   "path": "crates/sceneworks-worker/src/prompt_refine_jobs.rs",
@@ -25466,13 +25691,13 @@
                 },
                 {
                   "path": "package.json",
-                  "byteSize": 6826,
-                  "sha256": "e477763f44ab9665ecf75fd254cd113fbc868e1eb59e016d725c33e4a957777d"
+                  "byteSize": 6906,
+                  "sha256": "79a8359b7bf353844df55679c66d0013468841fa804cf9f222216942e5e7e5a4"
                 },
                 {
                   "path": "packages/schemas/model-manifest.schema.json",
-                  "byteSize": 130323,
-                  "sha256": "9f83388b15f9a50ce77456ba7139282a7d6df8f197790dbe5215d43b20cbdf3e"
+                  "byteSize": 131888,
+                  "sha256": "e99fdeb9f48f659e6135478c804349a56cae27b5567c56f256e06930b5e4adc3"
                 },
                 {
                   "path": "release/starvector-terminal-campaign-v1.json",

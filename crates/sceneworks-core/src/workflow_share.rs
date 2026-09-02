@@ -1546,6 +1546,48 @@ pub const ADVANCED_KEY_RULES: &[AdvancedKeyRule] = &[
          changes the output rather than a memory accommodation.",
     ),
     allow_from(
+        "transformerVariant",
+        AdvancedShape::Scalar,
+        AdvancedKeySource::VideoStudioBuilder,
+        "Authored LTX-2.5 transformer choice (`distilled` or `dev`). It changes the checkpoint, \
+         schedule, guidance, and refinement recipe, so dropping it changes the rendered clip.",
+    ),
+    allow_from(
+        "vaeDecoder",
+        AdvancedShape::Scalar,
+        AdvancedKeySource::VideoStudioBuilder,
+        "Authored LTX-2.5 Conv-versus-DiffVAE decoder choice. The selected decoder changes the \
+         actual reconstruction path and its rendered detail.",
+    ),
+    allow_from(
+        "autoDuration",
+        AdvancedShape::Scalar,
+        AdvancedKeySource::VideoStudioBuilder,
+        "Authored LTX-2.5 duration-head opt-in. It decides whether the prompt or an explicit \
+         duration supplies the frame count, so it is generation intent rather than budget.",
+    ),
+    allow_from(
+        "autoDurationMinSeconds",
+        AdvancedShape::Scalar,
+        AdvancedKeySource::VideoStudioBuilder,
+        "Authored lower bound for LTX-2.5's duration prediction. It constrains the resulting clip \
+         length and must travel with the opt-in.",
+    ),
+    allow_from(
+        "autoDurationMaxSeconds",
+        AdvancedShape::Scalar,
+        AdvancedKeySource::VideoStudioBuilder,
+        "Authored upper bound for LTX-2.5's duration prediction. It constrains the resulting clip \
+         length and must travel with the opt-in.",
+    ),
+    allow_from(
+        "temporalUpsampleRounds",
+        AdvancedShape::Scalar,
+        AdvancedKeySource::VideoStudioBuilder,
+        "Authored LTX-2.5 temporal-refinement count. Each round runs a real x2 DFR refinement and \
+         changes both the output frame count and motion, so it is replay-critical intent.",
+    ),
+    allow_from(
         "textEncoderModel",
         AdvancedShape::Scalar,
         AdvancedKeySource::StudioBuilder,

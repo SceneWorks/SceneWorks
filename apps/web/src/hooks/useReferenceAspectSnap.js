@@ -1,6 +1,6 @@
 import { useEffect, useRef } from "react";
 
-import { assetUrl } from "../components/assetMedia.jsx";
+import { assetIsHdrSource, assetNativeSize, assetUrl } from "../components/assetMedia.jsx";
 import { probeImageDimensions } from "../imageDimensions.js";
 
 // The `snapKey` a resolution-bucket caller should pass: which model's option UNIVERSE we are in.
@@ -58,6 +58,18 @@ export function useReferenceAspectSnap({
     const asset = assets.find((item) => item.id === referenceId);
     // Mark only on a SUCCESSFUL probe: an id whose asset has not resolved yet never reaches this
     // callback, so it stays eligible and snaps on the render where the asset appears.
+    // An HDR source cannot be probed: no browser decodes OpenEXR, so an <img> pointed at it never
+    // fires `onload` and the snap silently never happens. Use the size the server recorded from
+    // the file header instead. Scoped to HDR deliberately — every other asset keeps the existing
+    // decode-and-measure path unchanged, including its timing.
+    if (assetIsHdrSource(asset)) {
+      const recorded = assetNativeSize(asset);
+      if (recorded) {
+        snapped.current = pairKey;
+        onReferenceImageLoaded(recorded.width, recorded.height);
+      }
+      return undefined;
+    }
     return probeImageDimensions(asset && assetUrl(asset), (width, height) => {
       snapped.current = pairKey;
       onReferenceImageLoaded(width, height);

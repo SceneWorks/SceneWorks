@@ -22,6 +22,7 @@ use sceneworks_core::model_artifacts::{
 const EVICTED_MARKER_FILE: &str = "evicted.marker.json";
 
 struct CacheFixture {
+    _env: HfCacheEnvGuard,
     temp_dir: tempfile::TempDir,
     store: ResolvedCacheStore,
     cache_key: String,
@@ -32,6 +33,7 @@ struct CacheFixture {
 /// model that declares the same source repository, so the status route's identity join has
 /// something real to resolve.
 fn cache_fixture(tier: &str) -> CacheFixture {
+    let env = isolate_hf_cache();
     std::env::set_var("SCENEWORKS_DISABLE_MODEL_SIZE_ESTIMATE", "1");
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
     let data_dir = temp_dir.path().join("data");
@@ -116,6 +118,7 @@ fn cache_fixture(tier: &str) -> CacheFixture {
     }
     assert!(entry.join("bundle").join("model.safetensors").is_file());
     CacheFixture {
+        _env: env,
         temp_dir,
         store,
         cache_key: candidate.cache_key,

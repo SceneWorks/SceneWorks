@@ -1,7 +1,7 @@
 {
   "schemaVersion": 2,
   "generatedFrom": {
-    "inferenceRevision": "669f749b428ed65acfdfee917bcf601b8cf6db1c",
+    "inferenceRevision": "703d10d916e80a5fedd88be318159cb0ff553184",
     "dumper": "cargo run -p sceneworks-worker --bin dump-engine-capabilities --no-default-features --features backend-candle"
   },
   "modelMappings": {
@@ -142,6 +142,48 @@
       "mode": "video_bridge",
       "engineIds": [
         "ltx_2_3_distilled"
+      ]
+    },
+    {
+      "modelId": "ltx_2_5",
+      "mode": "extend_clip",
+      "engineIds": [
+        "ltx_2_5_distilled"
+      ]
+    },
+    {
+      "modelId": "ltx_2_5",
+      "mode": "first_last_frame",
+      "engineIds": [
+        "ltx_2_5_distilled"
+      ]
+    },
+    {
+      "modelId": "ltx_2_5",
+      "mode": "image_to_video",
+      "engineIds": [
+        "ltx_2_5_distilled"
+      ]
+    },
+    {
+      "modelId": "ltx_2_5",
+      "mode": "replace_person",
+      "engineIds": [
+        "ltx_2_5_distilled"
+      ]
+    },
+    {
+      "modelId": "ltx_2_5",
+      "mode": "text_to_video",
+      "engineIds": [
+        "ltx_2_5_distilled"
+      ]
+    },
+    {
+      "modelId": "ltx_2_5",
+      "mode": "video_bridge",
+      "engineIds": [
+        "ltx_2_5_distilled"
       ]
     },
     {
@@ -307,6 +349,7 @@
     "krea_2_control": "krea_2_control",
     "krea_2_raw_lora": "krea_2_raw",
     "lens_turbo_lora": "lens",
+    "ltx_2_5_video_lora": "ltx_2_5_distilled",
     "ltx_video_lora": "ltx_2_3",
     "mage_flow_base_lora": "mage_flow_base",
     "sd3_5_large_lora": "sd3_5_large",
@@ -1333,7 +1376,8 @@
         "supports_lora": true,
         "supports_lokr": false,
         "supported_quants": [
-          "q4"
+          "q4",
+          "q8"
         ],
         "supports_preview": false,
         "supports_prompt_enhancement": false,

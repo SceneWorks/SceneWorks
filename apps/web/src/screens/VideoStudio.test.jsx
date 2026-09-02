@@ -1605,6 +1605,44 @@ describe("VideoStudio MLX quant-tier picker (sc-12165)", () => {
     expect(context.createVideoJob.mock.calls[0][0].advanced).not.toHaveProperty("quantization");
   });
 
+  it("routes the exact LTX-2.5 variant and the full q4/q8/bf16 ladder through Candle", async () => {
+    const ltx25 = {
+      ...tieredVideoModel(["q4", "q8", "bf16"]),
+      id: "ltx_2_5",
+      name: "LTX-2.5",
+      family: "ltx-video",
+      adapter: "ltx_video",
+      defaults: { duration: 6, resolution: "768x512", fps: 25, steps: 8 },
+      limits: { steps: [8, 30] },
+    };
+    const context = baseContext({ videoModels: [ltx25], macCapabilities: null });
+    await render(context);
+
+    expect(tierPicker()).toBeTruthy();
+    // q8 is a first-class Candle tier; `nvfp4` from the fixture matrix must still stay out.
+    expect([...tierPicker().options].map((option) => option.value)).toEqual(["q4", "q8", "bf16"]);
+    setSelect(tierPicker(), "q8");
+    await act(async () => {});
+    await click(buttonWithText(container, "Render clip"));
+    expect(context.createVideoJob.mock.calls[0][0].advanced).toMatchObject({ mlxQuantize: 8 });
+    context.createVideoJob.mockClear();
+    setSelect(tierPicker(), "bf16");
+    await openAdvanced();
+    expect(
+      [...container.querySelectorAll("label")].find((label) =>
+        label.textContent.includes("Enhance prompt before generation"),
+      ),
+    ).toBeFalsy();
+    expect(container.querySelector('select[aria-label="Text encoder model"]')).toBeNull();
+    setSelect(container.querySelector('select[aria-label="LTX-2.5 transformer"]'), "dev");
+    await act(async () => {});
+    await click(buttonWithText(container, "Render clip"));
+    expect(context.createVideoJob.mock.calls[0][0].advanced).toMatchObject({
+      mlxQuantize: 0,
+      transformerVariant: "dev",
+    });
+  });
+
   it("offers every admitted q4/q8/bf16 execution tier for Candle SCAIL-2", async () => {
     const scail = {
       ...tieredVideoModel(["q4", "q8", "bf16"]),
@@ -2285,6 +2323,228 @@ describe("VideoStudio Lightning toggle (sc-10048)", () => {
     limits: { steps: [8] },
     ui: { label: "LTX-2.3" },
   };
+  const LTX25 = {
+    ...NON_WAN,
+    id: "ltx_2_5",
+    name: "LTX-2.5",
+    adapter: "ltx_video",
+    video: { supportsGuidance: false, supportsNegativePrompt: false },
+    defaults: { duration: 6, resolution: "768x512", fps: 25, steps: 8 },
+    limits: { steps: [8, 30] },
+    hasVariantMatrix: true,
+    variants: ["q4", "q8", "bf16"].map((variant) => ({
+      variant,
+      installState: "installed",
+    })),
+    // Runtime discovery is adapter-wide today. The UI must not mistake these LTX-2.3 options for
+    // an LTX-2.5 capability merely because they appear on the enriched catalog entry.
+    textEncoderOptions: [
+      { id: "default", label: "Gemma 3 default", isDefault: true },
+      { id: "ltx_amoral_gemma_3_12b", label: "Amoral Gemma 3", isDefault: false },
+    ],
+    ui: { label: "LTX-2.5" },
+  };
+  const LTX25_MAC_CAPS = {
+    macGatingActive: true,
+    candleGatingActive: false,
+    platform: "macos",
+    features: {},
+    training: { supportedKernels: [], lokrOnWanSupported: false },
+  };
+
+  it("declares LTX-2.5 as opt-in with its Gemma 4 prompt guide while LTX-2.3 stays recommended", () => {
+    const manifestPath = resolve(
+      dirname(fileURLToPath(import.meta.url)),
+      "../../../../config/manifests/builtin.models.jsonc",
+    );
+    const models = JSON5.parse(readFileSync(manifestPath, "utf8")).models;
+    const ltx25 = models.find((entry) => entry.id === "ltx_2_5");
+    const ltx23 = models.find((entry) => entry.id === "ltx_2_3");
+
+    expect(ltx25?.recommended).toBe(false);
+    expect(ltx25?.ui?.recommendedFor).toEqual([
+      "image_to_video",
+      "text_to_video",
+      "first_last_frame",
+      "extend_clip",
+      "video_bridge",
+      "replace_person",
+    ]);
+    expect(ltx25?.ui?.promptGuide).toEqual({
+      title: "LTX-2.5 Gemma 4 Prompt Guide",
+      path: "/prompt-guides/ltx-2-5.md",
+      sources: [
+        {
+          label: "Lightricks LTX-2.5 model card",
+          url: "https://huggingface.co/Lightricks/LTX-2.5",
+        },
+        {
+          label: "Lightricks LTX-2.5 Diffusers model card",
+          url: "https://huggingface.co/Lightricks/LTX-2.5-Diffusers",
+        },
+        {
+          label: "Lightricks Gemma 4 text-to-video prompt contract",
+          url: "https://github.com/Lightricks/LTX-2/blob/fd4ded7f2d88d3da713abcdd4ad41ecc4a9314ca/packages/ltx-core/src/ltx_core/text_encoders/gemma/encoders/prompts/gemma4_t2v_system_prompt.txt",
+        },
+        {
+          label: "Lightricks Gemma 4 image-to-video prompt contract",
+          url: "https://github.com/Lightricks/LTX-2/blob/fd4ded7f2d88d3da713abcdd4ad41ecc4a9314ca/packages/ltx-core/src/ltx_core/text_encoders/gemma/encoders/prompts/gemma4_i2v_system_prompt.txt",
+        },
+      ],
+    });
+    expect(ltx23?.recommended).toBe(true);
+  });
+
+  it("keeps LTX-2.3 as the default and confines LTX-2.5 execution controls to its Advanced panel", async () => {
+    const context = baseContext({
+      videoModels: [LTX25, DISTILLED_LTX],
+      macCapabilities: LTX25_MAC_CAPS,
+    });
+    await render(context);
+
+    expect(container.querySelector(".settings-field-model select").value).toBe("ltx_2_3");
+    await openAdvanced();
+    expect(container.querySelector('[aria-label="LTX-2.5 VAE decoder"]')).toBeNull();
+    expect(container.querySelector('[aria-label="LTX-2.5 auto duration"]')).toBeNull();
+    expect(container.querySelector('[aria-label="LTX-2.5 temporal upsampling"]')).toBeNull();
+  });
+
+  it("submits LTX-2.5 decoder, duration-head bounds, and temporal upsampling without a manual duration", async () => {
+    const context = baseContext({ videoModels: [LTX25], macCapabilities: LTX25_MAC_CAPS });
+    await render(context);
+    await openAdvanced();
+
+    const decoder = container.querySelector('[aria-label="LTX-2.5 VAE decoder"]');
+    const autoDuration = container.querySelector('[aria-label="LTX-2.5 auto duration"]');
+    const minDuration = container.querySelector('[aria-label="LTX-2.5 auto duration minimum"]');
+    const maxDuration = container.querySelector('[aria-label="LTX-2.5 auto duration maximum"]');
+    const temporal = container.querySelector('[aria-label="LTX-2.5 temporal upsampling"]');
+
+    expect(decoder.value).toBe("conv");
+    expect(autoDuration.checked).toBe(false);
+    expect(minDuration.disabled).toBe(true);
+    expect(maxDuration.disabled).toBe(true);
+    expect(temporal.value).toBe("0");
+
+    await act(async () => setSelect(decoder, "diffusion"));
+    await act(async () => autoDuration.click());
+    expect(minDuration.disabled).toBe(false);
+    expect(maxDuration.disabled).toBe(false);
+    await act(async () => setInput(minDuration, "5"));
+    await act(async () => setInput(maxDuration, "12"));
+    await act(async () => setSelect(temporal, "2"));
+
+    await click(buttonWithText(container, "Render clip"));
+    const payload = context.createVideoJob.mock.calls[0][0];
+    expect(payload).not.toHaveProperty("duration");
+    expect(payload.advanced).toMatchObject({
+      vaeDecoder: "diffusion",
+      autoDuration: true,
+      autoDurationMinSeconds: 5,
+      autoDurationMaxSeconds: 12,
+      temporalUpsampleRounds: 2,
+    });
+  });
+
+  it("returns LTX-2.5 to an explicit duration when the duration picker changes", async () => {
+    const context = baseContext({ videoModels: [LTX25], macCapabilities: LTX25_MAC_CAPS });
+    await render(context);
+    await openAdvanced();
+    await act(async () => container.querySelector('[aria-label="LTX-2.5 auto duration"]').click());
+
+    const durationPicker = container.querySelector(".settings-field-count select");
+    await act(async () => setSelect(durationPicker, "8"));
+    await click(buttonWithText(container, "Render clip"));
+
+    const payload = context.createVideoJob.mock.calls[0][0];
+    expect(payload.duration).toBe(8);
+    expect(payload.advanced.autoDuration).toBe(false);
+  });
+
+  it("routes the LTX-2.5 dev selector into the request and pins its 30-step row", async () => {
+    const context = baseContext({ videoModels: [LTX25], macCapabilities: LTX25_MAC_CAPS });
+    await render(context);
+    await openAdvanced();
+
+    const variant = container.querySelector('select[aria-label="LTX-2.5 transformer"]');
+    expect(variant.value).toBe("distilled");
+    await act(async () => setSelect(variant, "dev"));
+    const steps = labeledInput("Steps");
+    expect(steps.disabled).toBe(true);
+    expect(steps.placeholder).toBe("30 (fixed schedule)");
+    expect(labeledInput("Guidance")).toBeFalsy();
+    expect(labeledInput("Video CFG")).toBeFalsy();
+    expect(labeledInput("Video STG")).toBeFalsy();
+    expect(labeledInput("Video rescale")).toBeFalsy();
+
+    const negative = [...container.querySelectorAll("label")]
+      .find((label) => label.textContent.trim().startsWith("Negative prompt"))
+      ?.querySelector("textarea");
+    expect(negative).toBeTruthy();
+    await act(async () => {
+      const setter = Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, "value").set;
+      setter.call(negative, "washed out");
+      negative.dispatchEvent(new window.Event("input", { bubbles: true }));
+    });
+
+    const renderButton = buttonWithText(container, "Render clip");
+    expect(renderButton.disabled, container.textContent).toBe(false);
+    await click(renderButton);
+    expect(context.createVideoJob, container.textContent).toHaveBeenCalledTimes(1);
+    const payload = context.createVideoJob.mock.calls[0][0];
+    expect(payload).toMatchObject({
+      model: "ltx_2_5",
+      negativePrompt: "washed out",
+      advanced: { transformerVariant: "dev" },
+    });
+    expect(payload.advanced.steps).toBeUndefined();
+    expect(payload.advanced.guidanceScale).toBeUndefined();
+  });
+
+  it("keeps distilled LTX-2.5 sealed while exposing only its stock prompt enhancer", async () => {
+    const context = baseContext({ videoModels: [LTX25], macCapabilities: LTX25_MAC_CAPS });
+    await render(context);
+    await openAdvanced();
+
+    const steps = labeledInput("Steps");
+    expect(steps.disabled).toBe(true);
+    expect(steps.placeholder).toBe("8 (fixed schedule)");
+    expect(labeledInput("Guidance")).toBeFalsy();
+    expect(
+      [...container.querySelectorAll("label")].find((label) =>
+        label.textContent.trim().startsWith("Negative prompt"),
+      ),
+    ).toBeFalsy();
+    expect(labeledInput("Video CFG")).toBeFalsy();
+    expect(labeledInput("Video STG")).toBeFalsy();
+    expect(labeledInput("Video rescale")).toBeFalsy();
+    expect(container.querySelector('select[aria-label="Text encoder model"]')).toBeNull();
+
+    const enhance = [...container.querySelectorAll("label")]
+      .find((label) => label.textContent.includes("Enhance prompt before generation"))
+      ?.querySelector('input[type="checkbox"]');
+    expect(enhance).toBeTruthy();
+    expect(container.textContent).toContain("stock Gemma-4 enhancer");
+    await act(async () => enhance.click());
+
+    await click(buttonWithText(container, "Render clip"));
+    const payload = context.createVideoJob.mock.calls[0][0];
+    expect(payload.negativePrompt).toBe("");
+    expect(payload.advanced).toMatchObject({
+      transformerVariant: "distilled",
+      enhancePrompt: true,
+    });
+    for (const absent of [
+      "steps",
+      "guidanceScale",
+      "textEncoderModel",
+      "videoCfgGuidanceScale",
+      "videoStgGuidanceScale",
+      "videoRescaleScale",
+    ]) {
+      expect(payload.advanced).not.toHaveProperty(absent);
+    }
+  });
 
   it("pins the Steps control for a model that declares a single legal step count", async () => {
     const context = baseContext({ videoModels: [DISTILLED_LTX] });
@@ -3194,11 +3454,11 @@ describe("VideoStudio Krea Realtime 14B surface (sc-8445)", () => {
     // Both MiniMax-H3 partitions joined in sc-17158: the sc-17242 spike enumerated the reference
     // pipeline's complete 19-parameter input surface and neither `guidance_scale` nor
     // `negative_prompt` is on it, so the axes genuinely do not exist. The non-declaring count is
-    // deliberately asserted separately and did NOT move — a new video entry that keeps both
-    // controls has to be a conscious decision, not a side effect of the list growing.
+    // deliberately asserted separately. LTX-2.5 declares both absent for its default distilled
+    // surface; Video Studio reopens only negative conditioning when dev is explicitly selected.
     const videoEntries = models.filter((entry) => entry.type === "video");
     const declaring = videoEntries.filter((entry) => entry.video).map((entry) => entry.id).sort();
-    expect(declaring).toEqual(["krea_realtime_14b", "minimax_h3", "minimax_h3_ref", "svd"]);
+    expect(declaring).toEqual(["krea_realtime_14b", "ltx_2_5", "minimax_h3", "minimax_h3_ref", "svd"]);
     expect(videoEntries.length - declaring.length).toBe(8);
 
     const context = baseContext({ videoModels: [SVD] });
