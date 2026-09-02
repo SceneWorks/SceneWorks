@@ -6679,17 +6679,27 @@ mod tests {
         let plan: Value =
             serde_json::from_str(include_str!("../../../config/memory-calibration-plan.json"))
                 .expect("memory calibration plan parses");
-        let rows = plan["providers"].as_array().expect("plan providers array");
+        // sc-22514: the plan is an ANCHOR plan — an object keyed `<modelId>:<tier>:<backend>` with
+        // exactly one entry per cell — so the tier and the lane come out of the KEY and everything
+        // else out of the entry. One anchor per cell is the whole measurement obligation; this
+        // guard is unchanged in what it asks, only in where it reads the coordinates from.
+        let anchors = plan["anchors"].as_object().expect("plan anchors object");
         let registry = crate::inference_runtime::media();
         let mut checked = 0_usize;
 
-        for row in rows.iter().filter(|row| row["backend"] == "mlx") {
-            let target = row["target"].as_object().expect("plan target object");
-            let provider = target["provider"].as_str().expect("plan provider");
-            let mode = target["mode"].as_str().expect("plan mode");
-            let tier = target["tier"].as_str().expect("plan tier");
-            let overlay = target["overlay"].as_str().expect("plan overlay");
-            let load_shape = match row["loadShape"].as_str().expect("plan loadShape") {
+        for (key, row) in anchors.iter() {
+            let coordinates: Vec<&str> = key.split(':').collect();
+            let [model_id, tier, backend] = coordinates.as_slice() else {
+                panic!("anchor key {key} must be <modelId>:<tier>:<backend>")
+            };
+            if *backend != "mlx" {
+                continue;
+            }
+            let _ = model_id;
+            let provider = row["provider"].as_str().expect("anchor provider");
+            let mode = row["mode"].as_str().expect("anchor mode");
+            let overlay = row["overlay"].as_str().expect("anchor overlay");
+            let load_shape = match row["loadShape"].as_str().expect("anchor loadShape") {
                 "eager_materialization" => gen_core::LoadShape::EagerMaterialization,
                 "deferred_materialization" => gen_core::LoadShape::DeferredMaterialization,
                 other => {
@@ -6699,7 +6709,7 @@ mod tests {
 
             let mut spec = LoadSpec::new(WeightsSource::Dir(std::path::PathBuf::from("fixture")))
                 .with_load_shape(load_shape);
-            spec = match tier {
+            spec = match *tier {
                 "q4" => spec.with_quant(gen_core::Quant::Q4),
                 "q8" => spec.with_quant(gen_core::Quant::Q8),
                 "bf16" => spec,
@@ -6770,7 +6780,7 @@ mod tests {
 
         assert!(
             checked > 0,
-            "the shipped plan must contain at least one MLX lane"
+            "the shipped plan must contain at least one MLX anchor"
         );
     }
 
