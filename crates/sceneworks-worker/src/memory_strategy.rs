@@ -267,18 +267,36 @@ pub enum CandidateBasis {
     /// hull-restricted — admitting a never-measured `(geometry, frames)` cell is its purpose —
     /// and like [`Self::EstimateFloor`] the per-cell binding-phase constraint does not apply:
     /// the anchor measured all three phases and the derivation prices each per phase.
-    EstimateAnchorDerived,
+    ///
+    /// `lane` names WHICH derivation produced the peak, because the two price their own
+    /// uncertainty differently and the allowance policy must know (sc-22663, epic 22657): the
+    /// video law widens every phase by `ANCHOR_ALLOCATOR_ENVELOPE_MARGIN` inside the derivation;
+    /// the image law widens nothing.
+    EstimateAnchorDerived { lane: AnchorDerivationLane },
     /// Synthesized estimate from the weights + headroom floor — no measured cell in its
     /// extrapolation basis, so the binding-phase constraint does not apply (see the scope
     /// sentence on the constraint's doc).
     EstimateFloor,
 }
 
+/// Which anchor derivation produced an [`CandidateBasis::EstimateAnchorDerived`] peak.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AnchorDerivationLane {
+    /// `sceneworks_core::memory_anchor::MemoryAnchor::derive_phase_peaks` through a lane entry
+    /// point (`derive_image_phase_peaks` on candle, `derive_mlx_image_phase_peaks` on MLX): the
+    /// one image law, which prices measured peaks, component bytes and architecture ratios and
+    /// carries NO margin of its own.
+    Image,
+    /// `MemoryAnchor::derive_video_phase_peaks` (and the sibling+delta cell fall-through): each
+    /// phase already widened by `ANCHOR_ALLOCATOR_ENVELOPE_MARGIN` inside the derivation.
+    Video,
+}
+
 impl CandidateBasis {
     pub const fn is_estimate(self) -> bool {
         matches!(
             self,
-            Self::EstimateFittedCurve | Self::EstimateAnchorDerived | Self::EstimateFloor
+            Self::EstimateFittedCurve | Self::EstimateAnchorDerived { .. } | Self::EstimateFloor
         )
     }
 
@@ -287,7 +305,7 @@ impl CandidateBasis {
         match self {
             Self::Measured => "measured",
             Self::EstimateFittedCurve => "fitted_curve",
-            Self::EstimateAnchorDerived => "anchor_derived",
+            Self::EstimateAnchorDerived { .. } => "anchor_derived",
             Self::EstimateFloor => "floor",
         }
     }
@@ -3074,7 +3092,9 @@ mod tests {
                 },
                 evidence: record,
                 closure_digest: INF,
-                basis: CandidateBasis::EstimateAnchorDerived,
+                basis: CandidateBasis::EstimateAnchorDerived {
+                    lane: AnchorDerivationLane::Video,
+                },
                 unmodeled_activation_bytes: None,
             })
             .collect::<Vec<_>>();
@@ -3131,8 +3151,27 @@ mod tests {
                 evidences[0].predicted_peak_bytes,
             ),
             evidences[0].predicted_peak_bytes,
-            "an anchor-derived candidate is graded at its peak, with no selector allowance"
+            "a video anchor-derived candidate is graded at its peak, with no selector allowance"
         );
+        // The IMAGE lane's derivation widens nothing (sc-22663), so the same peak on the image
+        // lane is graded at its peak plus the backend's same-cell recapture spread — strictly
+        // above the raw peak and strictly below the retired blanket widening.
+        let image_admitted = admitted_peak_bytes(
+            AdmissionSubject {
+                basis: CandidateBasis::EstimateAnchorDerived {
+                    lane: AnchorDerivationLane::Image,
+                },
+                ..candidates[0].admission_subject(MemoryBackend::Mlx, CandidateCurrency::Estimate)
+            },
+            evidences[0].predicted_peak_bytes,
+        );
+        let raw = evidences[0].predicted_peak_bytes;
+        assert_eq!(
+            image_admitted,
+            raw + (raw as f64 * crate::ladder_margin_policy::MLX_RECAPTURE_SPREAD).ceil() as u64
+        );
+        assert!(image_admitted > raw);
+        assert!((image_admitted as f64) < raw as f64 * (1.0 + 0.5040734033902377));
     }
 
     /// sc-22508 E3, at the selector seam: a FLOOR's allowance is charged against its declared

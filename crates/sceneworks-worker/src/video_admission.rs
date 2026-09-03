@@ -43,7 +43,9 @@ use sceneworks_core::video_request::{
 };
 use sha2::Digest;
 
-use crate::memory_strategy::{Budget, Candidate, CandidateBasis, RequestScope, Selection};
+use crate::memory_strategy::{
+    AnchorDerivationLane, Budget, Candidate, CandidateBasis, RequestScope, Selection,
+};
 
 pub(crate) const BERNINI_R2V_RECEIPT_DOMAIN: &str = "bernini-r2v-references-v2";
 pub(crate) const BERNINI_R2V_SEAL_DOMAIN: &str = "bernini-r2v-request-seal-v1";
@@ -1384,7 +1386,9 @@ fn fitted_or_floor_phase_peaks<'a>(
     if let Some((derived, anchor_id)) = anchor_derived_phase_peaks(selector, geometry, engaged) {
         return (
             derived,
-            CandidateBasis::EstimateAnchorDerived,
+            CandidateBasis::EstimateAnchorDerived {
+                lane: AnchorDerivationLane::Video,
+            },
             selector.identity.expected_closure_digest,
             Some(anchor_id),
             None,

@@ -217,12 +217,30 @@ pub const ANCHOR_VALIDATION_TIGHTNESS_BUDGET: f64 = 0.25;
 // ITS regime keeps resident in that phase, and scales the residue by ratios that are architecture
 // facts and geometry, never fits:
 //
-//   * decode residue x (tile area / image area) under `bounded_decode`;
+//   * decode under `bounded_decode`: the residue splits into a NON-TILING FLOOR carried unscaled
+//     and a per-tile part scaled by (decode chunk pixels / image pixels). The floor is what every
+//     bounded decode holds whole-image regardless of the tile: the full-image output accumulator
+//     and the full-image blend-weight accumulator of the engine's tile blender (`candle-gen/src/
+//     vae_tiling.rs::blend_plan` and the Qwen-Image VAE's `tile_blend_tail` at the pinned
+//     revision — one `[B, 3, H, W]` buffer in the activation dtype and one `[1, 1, H, W]` f32
+//     buffer), so it is `pixels x (3 x batch x activation width + 4)` and needs the activation
+//     width fact; without it the whole residue stays unscaled. The chunk is the LARGER of the two
+//     bounding models the pinned engines execute, because the law cannot know per provider which
+//     one a request runs: Krea 2 Turbo and Qwen-Image tile the VAE ON DEVICE through
+//     `gen_core::tiling::split_spatial` (tiles of `edge²` output pixels placed at stride
+//     `edge − overlap`, the halo INSIDE the extent), while Z-Image-Turbo and FLUX transfer
+//     `(edge − overlap)` output rows of latents to a whole-frame CPU decode
+//     (`bounded_host_latent_transfer`), a band of `(edge − overlap) x width` output pixels. The
+//     effective tile fraction is therefore never below `(edge − overlap) x width / pixels`;
 //   * denoise: the full score tensor — heads x tokens² x activation width, tokens from the request
 //     geometry through the VAE scale and patch size plus the conditioning tokens — is separated out
-//     of the residue and replaced by the chunk budget x width under `bounded_attention`; the rest
-//     of the residue scales linearly in tokens;
+//     of the residue and replaced by the chunk budget x width under `bounded_attention` (capped at
+//     the unchunked tensor: a chunk larger than the tensor cannot cost more than the tensor); the
+//     rest of the residue scales linearly in tokens;
 //   * transformer resident bytes x window / blocks under `bounded_transformer_residency`;
+//   * conditioning: the residue scales with the prompt's conditioning tokens over
+//     [`DEFAULT_CONDITIONING_TOKENS`], never below 1.0 (a shorter prompt than the records were
+//     measured with is not credited);
 //   * geometry through token and pixel counts; batch multiplies both.
 //
 // A missing fact leaves the residue it would have scaled UNSCALED, so the estimate only ever errs
@@ -230,6 +248,19 @@ pub const ANCHOR_VALIDATION_TIGHTNESS_BUDGET: f64 = 0.25;
 // lower clamp — a 512x512 request prices below the 1024x1024 anchor, as it should — and no refusal
 // by composition: a resident request from a staged anchor re-adds the text encoder through denoise
 // and decode and prices ABOVE the staged estimate instead of returning `None`.
+//
+// DOMAIN. A phase whose measured peak is BELOW the component set it is decomposed against has
+// left the law's domain: the counters did not see the weights the anchor's regime says were
+// resident, so the subtraction says nothing about the activation working set (clamping it to zero
+// would read "the counters missed the weights" as "zero activation" and price a windowed denoise
+// at the window's weights alone). Such a request returns `None` and the caller keeps its floor.
+// Every packaged MLX image anchor is outside the domain today — its conditioning-phase active
+// peak is a fraction of the eager resident set it claims, and so is its conditioning-phase
+// ALLOCATOR level (the quantity the MLX fit gate admits on), so decomposing the allocator
+// envelope instead would not bring one in (see
+// `the_packaged_mlx_anchors_are_outside_the_laws_domain` for both censuses) — so the MLX lane
+// entry point prices nothing from the packaged store until an anchor whose counters saw its
+// weights is captured.
 //
 // The measured phase level the law subtracts from is [`MemoryAnchor::phase_active_peak_bytes`],
 // the store's byte-bound decomposition. On the candle lane the allocator level equals it in every
@@ -311,13 +342,49 @@ pub struct DecodeTile {
 }
 
 impl DecodeTile {
-    /// The output area one decode pass materializes: the tile plus its overlap halo. The engine
-    /// places tiles at a stride of `edge - overlap` with the halo INSIDE the tile extent, so this
-    /// counts the halo twice — deliberately, as the erring-large reading of the tuple: the bound is
-    /// `(1 + overlap/edge)²` above the tile's exact extent and never below it.
+    /// The output area one ON-DEVICE decode tile materializes: `edge²`. The pinned engine
+    /// (`gen_core::tiling::split_spatial` at inference 670dc1f4) places tiles of exactly `edge`
+    /// output pixels at a stride of `edge − overlap`, with the overlap halo INSIDE the tile extent,
+    /// so the halo is not added on top.
     pub const fn area(self) -> i128 {
-        let extent = self.edge as i128 + self.overlap as i128;
-        extent * extent
+        let edge = self.edge as i128;
+        edge * edge
+    }
+
+    /// The output stride between tiles, `edge − overlap`; `None` when the overlap is not below the
+    /// edge (the engines refuse such a tuple, and so does the law).
+    pub const fn stride(self) -> Option<u32> {
+        if self.overlap < self.edge {
+            Some(self.edge - self.overlap)
+        } else {
+            None
+        }
+    }
+
+    /// The output-pixel band one HOST-TRANSFER bounded decode holds on the device at a time:
+    /// `(edge − overlap)` output rows across the full request width. Z-Image-Turbo and FLUX bound
+    /// their decode this way (`bounded_host_latent_transfer` at the pinned revision: the tuple's
+    /// difference is the output stride, converted to latent rows and transferred to a whole-frame
+    /// CPU decode). `None` when the overlap is not below the edge.
+    pub const fn host_transfer_band(self, request_width: u32) -> Option<i128> {
+        match self.stride() {
+            Some(stride) => Some(stride as i128 * request_width as i128),
+            None => None,
+        }
+    }
+
+    /// The decode chunk the law scales the per-tile decode residue by: the LARGER of the on-device
+    /// tile ([`Self::area`]) and the host-transfer band ([`Self::host_transfer_band`]), because the
+    /// law cannot know per provider which bounding model the request executes and the larger one
+    /// errs large. Callers cap it at the request's own pixel count.
+    pub const fn chunk_pixels(self, request_width: u32) -> Option<i128> {
+        match self.host_transfer_band(request_width) {
+            Some(band) => {
+                let area = self.area();
+                Some(if band > area { band } else { area })
+            }
+            None => None,
+        }
     }
 }
 
@@ -365,6 +432,10 @@ pub struct ImageDeriveRequest {
     pub height: u32,
     pub batch: u32,
     /// Conditioning tokens the prompt encodes to; [`DEFAULT_CONDITIONING_TOKENS`] when unknown.
+    /// Enters the joint-attention sequence length (so the score tensor and the token-linear
+    /// denoise residue see it) and scales the conditioning residue by
+    /// `tokens / DEFAULT_CONDITIONING_TOKENS`, never below 1.0: the retained records do not carry
+    /// the prompt length they were measured with, so a shorter prompt is not credited.
     pub conditioning_tokens: Option<u32>,
     pub regime: RequestRegime,
 }
@@ -1502,8 +1573,12 @@ pub struct AnchorDeriveRequest {
     pub deferred_materialization: bool,
 }
 
-/// Margin-widened per-phase peak estimates. The admission peak is the max over phases; the shared
-/// selector's backend estimate margin still rides on top, exactly as it does for fitted curves.
+/// Per-phase peak estimates. The admission peak is the max over phases. The VIDEO derivation
+/// ([`MemoryAnchor::derive_video_phase_peaks`]) widens each phase by
+/// [`ANCHOR_ALLOCATOR_ENVELOPE_MARGIN`] before returning it; the IMAGE law
+/// ([`MemoryAnchor::derive_phase_peaks`]) widens nothing — it prices measured peaks, component
+/// bytes and architecture ratios only — and the worker's `ladder_margin_policy` charges an
+/// image-lane anchor derivation the lane's same-cell recapture spread instead.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AnchorDerivedPhases {
     pub conditioning: u64,
@@ -1727,8 +1802,12 @@ impl MemoryAnchor {
     /// (staged or resident) is NOT a guard: it only decides which components its measured peaks
     /// contained, and the request's own shape decides which are re-added.
     ///
-    /// Returns `None` on degenerate geometry, a zero rung parameter, a refused identity/regime,
-    /// or a phase that prices to zero bytes (a zero peak would admit anything).
+    /// DOMAIN GUARD: a phase whose measured peak is below the component set it is decomposed
+    /// against is refused (see the section comment) — the residue is never clamped to zero.
+    ///
+    /// Returns `None` on degenerate geometry, a zero rung parameter or a tile whose overlap is not
+    /// below its edge, a refused identity/regime, a phase outside the law's domain, or a phase
+    /// that prices to zero bytes (a zero peak would admit anything).
     pub fn derive_phase_peaks(
         &self,
         request: &ImageDeriveRequest,
@@ -1750,7 +1829,9 @@ impl MemoryAnchor {
         {
             return None;
         }
-        if regime.decode_tile.is_some_and(|tile| tile.edge == 0)
+        if regime
+            .decode_tile
+            .is_some_and(|tile| tile.edge == 0 || tile.stride().is_none())
             || regime.attention_chunk_scores == Some(0)
             || regime.transformer_window == Some(0)
         {
@@ -1765,28 +1846,37 @@ impl MemoryAnchor {
         // Residue per phase: the measured peak minus the components resident in that phase under
         // the ANCHOR's regime. Staged drops the text encoder before denoise and the transformer
         // before decode (the candle three-stage path); resident holds all three throughout. A
-        // measured peak below its resident set (the MLX active counters do not count lazily
-        // materialized weights) has no observable activation residue, never a negative one.
+        // measured peak BELOW its resident set is outside the law's domain (the counters did not
+        // see the weights the regime claims resident, so the subtraction says nothing about the
+        // activation working set) and refuses the request rather than clamping to zero.
         let (anchor_cond, anchor_den, anchor_dec) = if measured.staged {
             (conditioning, transformer, decoder)
         } else {
             (everything, everything, everything)
         };
-        let residue = |peak: u64, resident: i128| (i128::from(peak) - resident).max(0);
+        let residue = |peak: u64, resident: i128| {
+            let residue = i128::from(peak) - resident;
+            (residue >= 0).then_some(residue)
+        };
         let peaks = self.phase_active_peak_bytes;
-        let cond_residue = residue(peaks.conditioning, anchor_cond);
-        let den_residue = residue(peaks.denoise, anchor_den);
-        let dec_residue = residue(peaks.decode, anchor_dec);
+        let cond_residue = residue(peaks.conditioning, anchor_cond)?;
+        let den_residue = residue(peaks.denoise, anchor_den)?;
+        let dec_residue = residue(peaks.decode, anchor_dec)?;
 
         // Geometry. Pixel counts need no fact; token counts need the VAE scale and patch size.
         let batch = i128::from(request.batch);
         let anchor_pixels = i128::from(self.geometry.width) * i128::from(self.geometry.height);
         let request_pixels = i128::from(request.width) * i128::from(request.height);
+        // The anchor's records do not carry the prompt length they were measured with, so the
+        // anchor side of every token ratio is the documented default; the request side is its
+        // own count floored at that default (a shorter prompt is never credited — erring large).
+        let default_tokens = i128::from(DEFAULT_CONDITIONING_TOKENS);
         let conditioning_tokens = i128::from(
             request
                 .conditioning_tokens
                 .unwrap_or(DEFAULT_CONDITIONING_TOKENS),
-        );
+        )
+        .max(default_tokens);
         let token_stride = match (facts.vae_spatial_scale, facts.patch_size) {
             (Some(scale), Some(patch)) if scale > 0 && patch > 0 => {
                 Some(i128::from(scale) * i128::from(patch))
@@ -1794,14 +1884,14 @@ impl MemoryAnchor {
             _ => None,
         };
         // Joint-attention sequence length of one sample: image tokens plus conditioning tokens.
-        let tokens = |width: u32, height: u32| {
+        let tokens = |width: u32, height: u32, conditioning_tokens: i128| {
             token_stride.map(|stride| {
                 div_ceil_i128(i128::from(width), stride) * div_ceil_i128(i128::from(height), stride)
                     + conditioning_tokens
             })
         };
-        let anchor_tokens = tokens(self.geometry.width, self.geometry.height);
-        let request_tokens = tokens(request.width, request.height);
+        let anchor_tokens = tokens(self.geometry.width, self.geometry.height, default_tokens);
+        let request_tokens = tokens(request.width, request.height, conditioning_tokens);
         // Linear activation ratio: tokens when the facts allow, else pixels; batch multiplies.
         let (linear_num, linear_den) = match (request_tokens, anchor_tokens) {
             (Some(request_tokens), Some(anchor_tokens)) if anchor_tokens > 0 => {
@@ -1828,9 +1918,12 @@ impl MemoryAnchor {
             (all, all, all)
         };
 
-        // Conditioning: prompt-shaped, so the residue scales with batch only. The retained
-        // resident/staged candle pairs measure it flat across 768x768 -> 1024x1024.
-        let cond_estimate = request_cond + cond_residue * batch;
+        // Conditioning: prompt-shaped, so the residue scales with batch and with the prompt's
+        // conditioning tokens over the default the records were measured against — never below
+        // 1.0, since the records do not state their prompt length. The retained resident/staged
+        // candle pairs measure it flat across 768x768 -> 1024x1024.
+        let cond_estimate =
+            request_cond + scale_up(cond_residue * batch, conditioning_tokens, default_tokens);
 
         // Denoise. With the score facts the residue splits into the full score tensor at the
         // anchor geometry (capped at the residue — the anchor cannot have held more than it
@@ -1838,44 +1931,61 @@ impl MemoryAnchor {
         // re-priced at the request geometry, or replaced by the chunk budget when chunked.
         // Without the facts the whole residue is treated as the worst-scaling term — quadratic
         // in tokens for growth, linear for shrink — and a requested chunk leaves it unscaled.
-        let score_bytes = |width: u32, height: u32, batch: i128| -> Option<i128> {
+        let score_bytes = |width: u32, height: u32, conditioning: i128, batch: i128| {
             let heads = i128::from(facts.attention_heads?);
             let element = i128::from(facts.activation_dtype_width?);
-            let tokens = tokens(width, height)?;
+            let tokens = tokens(width, height, conditioning)?;
             Some(heads * tokens * tokens * element * batch)
         };
-        let den_estimate = match score_bytes(self.geometry.width, self.geometry.height, 1) {
-            Some(_) if measured.attention_chunked => {
-                // The anchor's own denoise was chunked: its residue already holds a chunk
-                // workspace instead of a score tensor, so there is nothing to separate out.
-                request_den + scale_up(den_residue, linear_num, linear_den)
-            }
-            Some(anchor_scores) => {
-                let non_score = den_residue - anchor_scores.min(den_residue);
-                let score_term = match regime.attention_chunk_scores {
-                    Some(chunk) => {
-                        i128::from(chunk) * i128::from(facts.activation_dtype_width.unwrap_or(1))
-                    }
-                    None => score_bytes(request.width, request.height, batch)?,
-                };
-                request_den + scale_up(non_score, linear_num, linear_den) + score_term
-            }
-            None => {
-                let quadratic_num = request_pixels * request_pixels * batch;
-                let quadratic_den = anchor_pixels * anchor_pixels;
-                let linear = scale_up(den_residue, request_pixels * batch, anchor_pixels);
-                let quadratic = scale_up(den_residue, quadratic_num, quadratic_den);
-                request_den + linear.max(quadratic)
-            }
-        };
+        let den_estimate =
+            match score_bytes(self.geometry.width, self.geometry.height, default_tokens, 1) {
+                Some(_) if measured.attention_chunked => {
+                    // The anchor's own denoise was chunked: its residue already holds a chunk
+                    // workspace instead of a score tensor, so there is nothing to separate out.
+                    request_den + scale_up(den_residue, linear_num, linear_den)
+                }
+                Some(anchor_scores) => {
+                    let non_score = den_residue - anchor_scores.min(den_residue);
+                    // The chunk budget is capped at the unchunked tensor at the request geometry: a
+                    // chunk larger than the whole tensor materializes the tensor, never more, so the
+                    // chunked rung can never price above the unchunked one.
+                    let unchunked_scores =
+                        score_bytes(request.width, request.height, conditioning_tokens, batch)?;
+                    let score_term = match regime.attention_chunk_scores {
+                        Some(chunk) => (i128::from(chunk)
+                            * i128::from(facts.activation_dtype_width.unwrap_or(1)))
+                        .min(unchunked_scores),
+                        None => unchunked_scores,
+                    };
+                    request_den + scale_up(non_score, linear_num, linear_den) + score_term
+                }
+                None => {
+                    let quadratic_num = request_pixels * request_pixels * batch;
+                    let quadratic_den = anchor_pixels * anchor_pixels;
+                    let linear = scale_up(den_residue, request_pixels * batch, anchor_pixels);
+                    let quadratic = scale_up(den_residue, quadratic_num, quadratic_den);
+                    request_den + linear.max(quadratic)
+                }
+            };
 
-        // Decode: pixel-shaped, so the residue scales in output pixels and batch, then by the
-        // tile fraction of the image under `bounded_decode` (capped at the whole image; an
-        // anchor measured tiled already holds the tile working set and is not re-tiled).
+        // Decode: pixel-shaped, so the residue scales in output pixels and batch. Under
+        // `bounded_decode` (from an anchor measured untiled — an anchor measured tiled already
+        // holds the tile working set and is not re-tiled) the scaled residue splits into the
+        // NON-TILING FLOOR, carried unscaled, and the per-tile remainder, scaled by the decode
+        // chunk's fraction of the image. The floor is the tile blender's two full-image
+        // accumulators — output `[B, 3, H, W]` in the activation dtype plus blend weights
+        // `[1, 1, H, W]` in f32 (`vae_tiling.rs::blend_plan` at the pin) — so it needs the
+        // activation width; without that fact the floor is unknowable and the whole residue stays
+        // unscaled. The chunk is the larger of the on-device tile and the host-transfer band
+        // (`DecodeTile::chunk_pixels`), capped at the whole image. See the section comment.
         let mut dec_scaled = scale_up(dec_residue, request_pixels * batch, anchor_pixels);
         if let (Some(tile), false) = (regime.decode_tile, measured.decode_tiled) {
-            let tile_area = tile.area().min(request_pixels);
-            dec_scaled = scale_up(dec_scaled, tile_area, request_pixels);
+            if let Some(element) = facts.activation_dtype_width.filter(|width| *width > 0) {
+                let floor =
+                    (request_pixels * (3 * batch * i128::from(element) + 4)).min(dec_scaled);
+                let chunk = tile.chunk_pixels(request.width)?.min(request_pixels);
+                dec_scaled = floor + scale_up(dec_scaled - floor, chunk, request_pixels);
+            }
         }
         let dec_estimate = request_dec + dec_scaled;
 
@@ -1933,6 +2043,12 @@ impl MemoryAnchor {
     /// grows at larger ones, so it is carried unscaled for a request at or below the anchor
     /// geometry and scaled by the pixel ratio above it. It is a lane term, not a residue of the
     /// law — see the *Image derivation law* section comment.
+    ///
+    /// DOMAIN, at this pin: every packaged MLX image anchor reports a conditioning-phase active
+    /// peak far below the eager resident set its tier's component bytes state (the MLX active
+    /// counters did not see the weights), so the law refuses each of them and this entry point
+    /// returns `None` for the packaged store — the lane keeps its floor until an anchor whose
+    /// counters saw its weights is captured (`the_packaged_mlx_anchors_are_outside_the_laws_domain`).
     pub fn derive_mlx_image_phase_peaks(
         &self,
         request: AnchorMlxImageDeriveRequest,
@@ -3465,8 +3581,13 @@ mod tests {
             .unwrap_or_else(|error| panic!("{Z_IMAGE_Q4_CANDLE_ANCHOR_PATH}: {error}"))
     }
 
-    /// Z-Image-Turbo q4 component bytes on the candle lane, as the story states them from the
-    /// packed tier: text encoder (Qwen3) 2.26 GB, DiT 3.47 GB, VAE 0.16 GB.
+    /// Z-Image-Turbo q4 component bytes on the candle lane: the `SceneWorks/z-image-turbo-mlx`
+    /// q4 tier the retained record's `artifact` names (revision bb2bc989), whose subdirectories
+    /// measure text_encoder (Qwen3) 2.26 GB, transformer 3.47 GB, vae 0.16 GB on disk. The
+    /// record carries no per-component inventory, so the figures are bound to the tier's
+    /// packaged `estimatedSizeBytes` instead:
+    /// `the_fixture_component_bytes_sum_to_their_packaged_tier_sizes` recomputes the sum against
+    /// the manifest within 2%.
     const Z_IMAGE_Q4_COMPONENTS: ComponentBytes = ComponentBytes {
         conditioning: 2_260_000_000,
         transformer: 3_470_000_000,
@@ -3729,7 +3850,7 @@ mod tests {
     /// 1024x1024 prices in [4, 6] GB overall; each deeper rung's per-phase peaks are at or below
     /// the shallower rung's; and the resident composition prices ABOVE staged instead of `None`.
     #[test]
-    fn z_image_q4_rungs_price_from_the_staged_anchor_in_the_stated_window_and_in_order() {
+    fn z_image_q4_rungs_price_from_the_staged_anchor_in_the_restated_window_and_in_order() {
         const GB: u64 = 1_000_000_000;
         let staged = RequestRegime::staged();
         let tiled = RequestRegime {
@@ -3777,24 +3898,45 @@ mod tests {
 
         let fully_engaged = ladder[3];
         let overall = fully_engaged.peak_bytes();
+        // The restated AC-1 window (review of sc-22663): [3, 6] GB overall, strictly below the
+        // staged anchor's overall, and never below the components the engaged composition keeps
+        // resident in any phase — the text encoder plus its conditioning residue, the windowed
+        // DiT share, the VAE. No pad sits anywhere in this arithmetic.
         assert!(
-            (4 * GB..=6 * GB).contains(&overall),
-            "the fully engaged 1024x1024 composition must price in [4, 6] GB overall, got \
+            (3 * GB..=6 * GB).contains(&overall),
+            "the fully engaged 1024x1024 composition must price in [3, 6] GB overall, got \
              {overall} ({fully_engaged:?})"
         );
+        assert!(overall < ladder[0].peak_bytes());
+        let components = Z_IMAGE_Q4_COMPONENTS;
+        let cond_residue = anchor.phase_active_peak_bytes.conditioning - components.conditioning;
+        assert!(overall >= components.conditioning + cond_residue);
+        assert!(overall >= components.transformer.div_ceil(30) + components.decoder);
+        assert!(fully_engaged.denoise >= components.transformer.div_ceil(30));
+        assert!(fully_engaged.decode >= components.decoder);
         // The arithmetic behind that window, stated so a drift is legible: one resident block
         // (3.47 GB / 30), the non-score denoise residue (8.05 - 3.47 GB minus the 30 x 4608² x
-        // 2 B score tensor) plus the 64 Mi x 2 B chunk, and the decode residue (11.74 - 0.16 GB)
-        // scaled by the 640² / 1024² tile fraction over the VAE.
+        // 2 B score tensor) plus the 64 Mi x 2 B chunk; and, over the VAE, the decode residue
+        // (11.74 - 0.16 GB) split into the unscaled blender floor (1024² x (3 x 2 B + 4 B)) and
+        // the remainder scaled by the decode chunk — the larger of the 512² on-device tile and
+        // the (512 - 128) x 1024 host-transfer band, i.e. 384 x 1024 = 3/8 of the image.
         assert_eq!(fully_engaged.conditioning, 3_097_493_504);
         assert_eq!(
             fully_engaged.denoise,
             115_666_667 + 3_306_946_688 + 134_217_728
         );
+        let blender_floor = 1_048_576 * (3 * 2 + 4);
         assert_eq!(
             fully_engaged.decode,
-            160_000_000 + div_ceil_i128(11_581_954_048 * 409_600, 1_048_576) as u64
+            160_000_000
+                + blender_floor
+                + div_ceil_i128(
+                    (11_581_954_048 - blender_floor as i128) * 393_216,
+                    1_048_576
+                ) as u64
         );
+        assert_eq!(fully_engaged.decode, 4_509_786_368);
+        assert_eq!(overall, fully_engaged.decode);
 
         // Resident from the staged anchor: priced, and strictly above staged in every phase.
         let resident = z_image_at(&at(1024, 1024, RequestRegime::resident()));
@@ -3817,11 +3959,11 @@ mod tests {
         );
     }
 
-    /// AC 2: a 512x512 request prices below the 1024x1024 anchor — there is no lower clamp — and
-    /// the same law prices the packaged `qwen_image` MLX resident anchor with the windowed rung
-    /// below the staged rung.
+    /// AC 2, candle bullet: a 512x512 request prices below the 1024x1024 anchor — there is no
+    /// lower clamp. (The MLX bullet is `the_packaged_mlx_anchors_are_outside_the_laws_domain`
+    /// and `a_resident_mlx_anchor_whose_counters_saw_its_weights_prices_the_ladder_in_order`.)
     #[test]
-    fn a_smaller_request_prices_below_the_anchor_and_the_mlx_resident_anchor_prices_the_ladder() {
+    fn a_smaller_request_prices_below_the_anchor_with_no_lower_clamp() {
         let staged = RequestRegime::staged();
         let small = z_image_at(&at(512, 512, staged));
         let mid = z_image_at(&at(768, 768, staged));
@@ -3842,23 +3984,191 @@ mod tests {
             z_image_at(&at(1344, 768, staged)),
             z_image_at(&at(768, 1344, staged))
         );
+    }
 
-        // The packaged qwen_image bf16 MLX anchor: eager, resident, unbounded, measured at
-        // 1024x1024. Its component bytes are the bf16 tier's packaged download
-        // (`estimatedSizeBytes` 57,731,960,832 in the builtin manifest) split at the
-        // Qwen2.5-VL-7B text encoder's bf16 size (16.6 GB) and the VAE's (~254 MB).
-        let qwen = store()
-            .image_anchor_for("qwen_image", AnchorBackend::Mlx, "bf16")
-            .expect("the packaged qwen_image bf16 MLX anchor");
-        assert!(!qwen.measured_regime.staged);
-        assert_eq!(qwen.load_shape, AnchorLoadShape::EagerMaterialization);
+    /// The packaged tier size (`estimatedSizeBytes` of the `variant == tier` download row) of one
+    /// builtin model — the resident set an eager, whole-model anchor of that tier claims.
+    fn packaged_tier_bytes(model_id: &str, tier: &str) -> u64 {
+        let raw = crate::builtin_manifests::BUILTIN_MANIFESTS
+            .iter()
+            .find(|(name, _)| *name == "builtin.models.jsonc")
+            .map(|(_, contents)| crate::jsonc::strip_jsonc_comments(contents))
+            .expect("the builtin models manifest is compiled in");
+        let manifest: serde_json::Value = serde_json::from_str(&raw).expect("manifest parses");
+        manifest["models"]
+            .as_array()
+            .expect("models")
+            .iter()
+            .find(|model| model["id"].as_str() == Some(model_id))
+            .unwrap_or_else(|| panic!("{model_id} is a builtin model"))["downloads"]
+            .as_array()
+            .unwrap_or_else(|| panic!("{model_id} declares downloads"))
+            .iter()
+            .find(|download| download["variant"].as_str() == Some(tier))
+            .and_then(|download| download["estimatedSizeBytes"].as_u64())
+            .unwrap_or_else(|| panic!("{model_id} {tier} declares estimatedSizeBytes"))
+    }
+
+    /// AC 2, MLX bullet — what the packaged store can and cannot support. The story asked for
+    /// the packaged `qwen_image` MLX resident anchor to price rung 4 below rung 2; under the
+    /// domain guard (review of sc-22663: a residue is never clamped to zero) NO packaged MLX
+    /// image anchor is derivable with its tier's real component bytes, because every one of them
+    /// reports a conditioning-phase active peak that is a fraction of the eager resident set it
+    /// claims — the MLX active counters did not see the weights. The numbers, so the refusal is
+    /// legible: conditioning active peaks of 1.26 MB (flux2_dev q4 and q8), 43.9 KB (qwen_image
+    /// bf16/q4/q8) and 2.27 GB (z_image_turbo q4) against packaged resident sets of 33.6 GB,
+    /// 55.0 GB, 57.7 / 28.4 / 38.6 GB and 5.9 GB. The lane entry point therefore prices nothing
+    /// from the packaged store; the rung ordering itself is asserted on an in-domain anchor in
+    /// `a_resident_mlx_anchor_whose_counters_saw_its_weights_prices_the_ladder_in_order`.
+    ///
+    /// ALLOCATOR BASIS (second review pass, D5): the MLX fit gate admits on the per-phase
+    /// ALLOCATOR envelope, and one might expect that level — unlike the active counter — to
+    /// carry the wired weight set. It does not, in the conditioning phase: the allocator
+    /// conditioning levels are 1.26 MB (flux2_dev q4/q8), 44.1 KB (qwen_image bf16/q4/q8) and
+    /// 2.27 GB (z_image_turbo q4), so the allocator-basis residues are, in GB
+    /// (cond / denoise / decode): flux2_dev q4 −33.60 / +7.31 / +55.20; flux2_dev q8 −55.00 /
+    /// +10.26 / +58.15; qwen_image bf16 −57.73 / +5.83 / +5.47; qwen_image q4 −28.39 / +2.92 /
+    /// +1.65; qwen_image q8 −38.58 / +2.84 / +1.62; z_image_turbo q4 −3.64 / +6.27 / +8.40.
+    /// Denoise and decode come back positive on the allocator basis, conditioning never does, so
+    /// no packaged MLX anchor is in the law's domain on either basis and the law keeps
+    /// decomposing the active peak — a switch to the allocator basis would move nothing. Both
+    /// bases are asserted below so a re-captured anchor that reports its weights lands here.
+    #[test]
+    fn the_packaged_mlx_anchors_are_outside_the_laws_domain() {
+        let packaged: Vec<&MemoryAnchor> = store()
+            .anchors
+            .iter()
+            .filter(|anchor| anchor.backend == AnchorBackend::Mlx && anchor.geometry.frames == 1)
+            .collect();
         assert!(
-            qwen.underived_reason.is_some(),
-            "the fitted laws left this anchor underived; the derivation law prices it anyway"
+            packaged.len() >= 6,
+            "the packaged store carries the six MLX image anchors, found {}",
+            packaged.len()
         );
+        for anchor in packaged {
+            assert!(
+                !anchor.measured_regime.staged,
+                "{}: eager resident",
+                anchor.id
+            );
+            let resident_set = packaged_tier_bytes(&anchor.model_id, &anchor.tier);
+            // The split does not matter to a resident-regime decomposition (every phase is
+            // decomposed against the sum); the sum is the manifest's.
+            let components = ComponentBytes {
+                conditioning: resident_set,
+                transformer: 0,
+                decoder: 0,
+            };
+            assert!(
+                anchor.phase_active_peak_bytes.conditioning < resident_set / 2,
+                "{}: conditioning active {} is not below the {resident_set} resident set it claims",
+                anchor.id,
+                anchor.phase_active_peak_bytes.conditioning
+            );
+            // …and so is the ALLOCATOR level of the same phase (D5): every packaged row carries
+            // a per-phase allocator decomposition, and its conditioning level is a fraction of
+            // the resident set too, while its denoise and decode levels sit above it.
+            let allocators = anchor
+                .phase_allocator_envelope_bytes
+                .unwrap_or_else(|| panic!("{}: carries a per-phase allocator envelope", anchor.id));
+            assert!(
+                allocators.conditioning < resident_set / 2,
+                "{}: conditioning allocator {} is not below the {resident_set} resident set",
+                anchor.id,
+                allocators.conditioning
+            );
+            assert!(
+                allocators.denoise > resident_set && allocators.decode > resident_set,
+                "{}: the denoise/decode allocator levels {}/{} must exceed the resident set — if \
+                 this fails the census in the doc comment above has moved",
+                anchor.id,
+                allocators.denoise,
+                allocators.decode
+            );
+            // A resident request with every bounded rung engaged (so neither the regime guard
+            // nor a staged phase priced at a zero component refuses) is refused by the domain
+            // guard alone…
+            let request = at(
+                anchor.geometry.width,
+                anchor.geometry.height,
+                RequestRegime {
+                    staged: false,
+                    ..FULLY_ENGAGED
+                },
+            );
+            assert!(
+                anchor
+                    .derive_phase_peaks(&request, components, ArchitectureFacts::default())
+                    .is_none(),
+                "{}: an out-of-domain anchor must refuse, not clamp",
+                anchor.id
+            );
+            // …and lifting every phase peak to at least the resident set is exactly what makes
+            // it derivable again, so the refusal is the domain guard and nothing else. (The
+            // conditioning phase is below on every packaged row; flux2_dev q4 and qwen_image
+            // bf16 report a denoise active peak below their resident set as well.)
+            let mut lifted = anchor.clone();
+            let peaks = &mut lifted.phase_active_peak_bytes;
+            peaks.conditioning = peaks.conditioning.max(resident_set);
+            peaks.denoise = peaks.denoise.max(resident_set);
+            peaks.decode = peaks.decode.max(resident_set);
+            assert!(
+                lifted
+                    .derive_phase_peaks(&request, components, ArchitectureFacts::default())
+                    .is_some(),
+                "{}: with every phase peak at or above the resident set the anchor derives",
+                anchor.id
+            );
+        }
+    }
+
+    /// A synthetic eager, resident, unbounded MLX anchor at 1024x1024 whose counters saw its
+    /// weights: every phase peak is the whole component set plus a stated activation residue,
+    /// and the allocator level sits a stated envelope above each. Identity fields are borrowed
+    /// from the packaged flux2_dev q8 row (the lane entry point checks lane, load shape and
+    /// regime, not the id); the peaks are NOT the record's.
+    fn in_domain_resident_mlx_anchor(components: ComponentBytes) -> MemoryAnchor {
+        let residues = AnchorPhaseBytes {
+            conditioning: 500_000_000,
+            denoise: 6_000_000_000,
+            decode: 12_000_000_000,
+        };
+        let total = components.total();
+        let mut anchor = flux2_mlx_anchor("q8").clone();
+        anchor.id = "synthetic:mlx:resident:in-domain".to_owned();
+        anchor.underived_reason = None;
+        anchor.geometry = AnchorGeometry {
+            width: 1024,
+            height: 1024,
+            frames: 1,
+            fps: None,
+        };
+        anchor.phase_active_peak_bytes = AnchorPhaseBytes {
+            conditioning: total + residues.conditioning,
+            denoise: total + residues.denoise,
+            decode: total + residues.decode,
+        };
+        anchor.phase_allocator_envelope_bytes = Some(AnchorPhaseBytes {
+            conditioning: total + residues.conditioning + 100_000_000,
+            denoise: total + residues.denoise + 1_000_000_000,
+            decode: total + residues.decode + 2_000_000_000,
+        });
+        anchor.overall_allocator_envelope_bytes = total + residues.decode + 2_000_000_000;
+        anchor
+    }
+
+    /// The rung ordering AC 2 asked of an MLX resident anchor, on an anchor inside the law's
+    /// domain (the packaged ones are not — see the test above): the windowed rung prices below
+    /// the staged rung, with every residue it scales asserted positive so the ordering is not
+    /// vacuous, and the resident derivation at the anchor geometry reproduces the anchor.
+    #[test]
+    fn a_resident_mlx_anchor_whose_counters_saw_its_weights_prices_the_ladder_in_order() {
+        // Qwen-Image bf16 component bytes: the tier's packaged download split at the
+        // Qwen2.5-VL-7B text encoder's bf16 size (16.6 GB) and the VAE's (~254 MB).
+        let total = packaged_tier_bytes("qwen_image", "bf16");
         let components = ComponentBytes {
             conditioning: 16_600_000_000,
-            transformer: 57_731_960_832 - 16_600_000_000 - 253_806_592,
+            transformer: total - 16_600_000_000 - 253_806_592,
             decoder: 253_806_592,
         };
         // Qwen-Image: 24 heads of 128, 60 blocks, patch 2 over the 16-channel x8 VAE, bf16.
@@ -3867,10 +4177,24 @@ mod tests {
             transformer_blocks: Some(60),
             ..Z_IMAGE_FACTS
         };
-        let rung_2 = qwen
+        let anchor = in_domain_resident_mlx_anchor(components);
+        assert!(!anchor.measured_regime.staged);
+        assert_eq!(anchor.load_shape, AnchorLoadShape::EagerMaterialization);
+        for (phase, peak) in [
+            ("conditioning", anchor.phase_active_peak_bytes.conditioning),
+            ("denoise", anchor.phase_active_peak_bytes.denoise),
+            ("decode", anchor.phase_active_peak_bytes.decode),
+        ] {
+            assert!(
+                peak > components.total(),
+                "{phase}: the residue the law scales must be positive, peak {peak} against {}",
+                components.total()
+            );
+        }
+        let rung_2 = anchor
             .derive_phase_peaks(&at(1024, 1024, RequestRegime::staged()), components, facts)
             .expect("the resident MLX anchor prices the staged rung");
-        let rung_4 = qwen
+        let rung_4 = anchor
             .derive_phase_peaks(&at(1024, 1024, FULLY_ENGAGED), components, facts)
             .expect("the resident MLX anchor prices the windowed rung");
         assert!(
@@ -3878,19 +4202,28 @@ mod tests {
             "windowed {rung_4:?} must price below staged {rung_2:?}"
         );
         assert!(rung_4.denoise < rung_2.denoise && rung_4.decode < rung_2.decode);
-        // The resident derivation at the anchor geometry re-adds every component into every
-        // phase, so it sits at or above the measured peaks of the resident capture itself.
-        let resident = qwen
+        // The resident derivation at the anchor geometry IS the anchor: every component re-added
+        // into every phase plus the positive residue, byte for byte.
+        let resident = anchor
             .derive_phase_peaks(
                 &at(1024, 1024, RequestRegime::resident()),
                 components,
                 facts,
             )
             .expect("resident");
-        assert!(resident.conditioning >= qwen.phase_active_peak_bytes.conditioning);
-        assert!(resident.denoise >= qwen.phase_active_peak_bytes.denoise);
-        assert!(resident.decode >= qwen.phase_active_peak_bytes.decode);
+        assert_eq!(
+            resident.conditioning,
+            anchor.phase_active_peak_bytes.conditioning
+        );
+        assert_eq!(resident.denoise, anchor.phase_active_peak_bytes.denoise);
+        assert_eq!(resident.decode, anchor.phase_active_peak_bytes.decode);
         assert!(rung_2.peak_bytes() <= resident.peak_bytes());
+        // And the same anchor with one phase pushed below its resident set is refused whole.
+        let mut below = anchor.clone();
+        below.phase_active_peak_bytes.denoise = components.total() - 1;
+        assert!(below
+            .derive_phase_peaks(&at(1024, 1024, FULLY_ENGAGED), components, facts)
+            .is_none());
     }
 
     /// AC 3: `ArchitectureFacts::default()` leaves every residue unscaled, so the estimate is
@@ -3914,8 +4247,11 @@ mod tests {
         // own measured denoise (whole transformer + whole residue), i.e. the staged rung's.
         assert_eq!(none.denoise, anchor.phase_active_peak_bytes.denoise);
         assert!(none.denoise > full.denoise);
-        // The tile fraction needs no fact, so decode still scales — and identically.
-        assert_eq!(none.decode, full.decode);
+        // The decode floor needs the activation width (the blender's output accumulator is in
+        // that dtype), so without facts the whole decode residue stays unscaled: decode is the
+        // anchor's own measured decode, i.e. the staged rung's.
+        assert_eq!(none.decode, anchor.phase_active_peak_bytes.decode);
+        assert!(none.decode > full.decode);
 
         // Dropping any ONE fact never shrinks the estimate below the full-facts one.
         type FactDrop = fn(&mut ArchitectureFacts);
@@ -3954,14 +4290,15 @@ mod tests {
             }
         }
         // …and the facts that carry a ratio actually move it (so the assertions above are not
-        // vacuous): blocks drive the window, heads/width/patch/scale drive the score split.
+        // vacuous): blocks drive the window, heads/width/patch/scale drive the score split, and
+        // the activation width alone drives the decode floor.
         for (label, drop) in drops {
             let mut facts = Z_IMAGE_FACTS;
             drop(&mut facts);
             let partial = anchor
                 .derive_phase_peaks(&request, Z_IMAGE_Q4_COMPONENTS, facts)
                 .expect("derives");
-            let moves = matches!(
+            let moves_denoise = matches!(
                 label,
                 "attention_heads"
                     | "transformer_blocks"
@@ -3971,9 +4308,16 @@ mod tests {
             );
             assert_eq!(
                 partial.denoise > full.denoise,
-                moves,
+                moves_denoise,
                 "{label}: dropping it {} change the denoise estimate",
-                if moves { "must" } else { "must not" }
+                if moves_denoise { "must" } else { "must not" }
+            );
+            let moves_decode = label == "activation_dtype_width";
+            assert_eq!(
+                partial.decode > full.decode,
+                moves_decode,
+                "{label}: dropping it {} change the decode estimate",
+                if moves_decode { "must" } else { "must not" }
             );
         }
     }
@@ -3988,9 +4332,13 @@ mod tests {
     /// below the staged rung, so the ratios are known to have bitten.
     #[test]
     fn candle_anchor_derivation_brackets_every_retained_candle_measurement() {
-        /// Deeper-rung tightness: the tile fraction reads the tuple as tile plus halo (see
-        /// `DecodeTile::area`), which prices the retained window-1 decode at ~2.3x its measured
-        /// 3.83 GB. Forgetting to subtract the components would put the same rung at ~5.8x.
+        /// Deeper-rung tightness. The binding case is the retained window-1 rung at 2.14x its
+        /// measured 3.996 GB peak, and the phase that binds is DECODE: the law scales Krea's
+        /// decode residue by the larger of the two decode chunk models — the (512 − 128) x 1024
+        /// host-transfer band, 3/8 of the image — because it cannot know that Krea tiles its VAE
+        /// on device at 512² (1/4 of the image; see `DecodeTile::chunk_pixels`), and prices that
+        /// rung's decode at 8.55 GB against a measured 3.83 GB. The next rungs sit at 1.18x and
+        /// 1.02x. Forgetting to subtract the components would put the window-1 rung above 5x.
         const DEEPER_RUNG_TIGHTNESS: f64 = 2.5;
         let anchor = krea_candle_anchor();
         let corpus = krea_candle_corpus();
@@ -4304,6 +4652,20 @@ mod tests {
                 ),
             ),
             (
+                "a tile overlap not below its edge (the engines refuse the tuple too)",
+                at(
+                    1024,
+                    1024,
+                    RequestRegime {
+                        decode_tile: Some(DecodeTile {
+                            edge: 512,
+                            overlap: 512,
+                        }),
+                        ..FULLY_ENGAGED
+                    },
+                ),
+            ),
+            (
                 "a zero chunk",
                 at(
                     1024,
@@ -4375,6 +4737,118 @@ mod tests {
         assert!(unchunked.denoise > anchor.phase_active_peak_bytes.denoise);
     }
 
+    /// A chunk budget larger than the whole score tensor is capped at the tensor: the chunked
+    /// rung can never price above the unchunked one. At 256x256 the Z-Image tensor is
+    /// 30 x 1536² x 2 B = 141.6 MB, so a 1 Gi-score chunk (2 GiB) is capped to it; at 1024x1024
+    /// the 64 Mi chunk sits below the 1.27 GB tensor and must bite by exactly the difference.
+    #[test]
+    fn the_chunk_term_is_capped_at_the_unchunked_score_tensor() {
+        let anchor = z_image_q4_anchor();
+        let chunked = |width: u32, chunk: u64| {
+            anchor
+                .derive_phase_peaks(
+                    &at(
+                        width,
+                        width,
+                        RequestRegime {
+                            attention_chunk_scores: Some(chunk),
+                            ..RequestRegime::staged()
+                        },
+                    ),
+                    Z_IMAGE_Q4_COMPONENTS,
+                    Z_IMAGE_FACTS,
+                )
+                .expect("derives")
+        };
+        let unchunked = |width: u32| {
+            anchor
+                .derive_phase_peaks(
+                    &at(width, width, RequestRegime::staged()),
+                    Z_IMAGE_Q4_COMPONENTS,
+                    Z_IMAGE_FACTS,
+                )
+                .expect("derives")
+        };
+        // 256x256: 32² + 512 = 1536 tokens, tensor 30 x 1536² x 2 B = 141,557,760 B; a 1 Gi
+        // chunk (2 GiB of scores) is far above it and is capped, so chunked == unchunked.
+        let oversized = 1024 * 1024 * 1024;
+        assert!(oversized * 2 > 141_557_760);
+        assert_eq!(chunked(256, oversized).denoise, unchunked(256).denoise);
+        // 1024x1024: the 64 Mi chunk is below the 1,274,019,840 B tensor and bites by exactly
+        // the difference.
+        let chunk_bytes = 64 * 1024 * 1024 * 2;
+        assert!(chunk_bytes < 1_274_019_840);
+        assert_eq!(
+            unchunked(1024).denoise - chunked(1024, 64 * 1024 * 1024).denoise,
+            1_274_019_840 - chunk_bytes
+        );
+    }
+
+    /// The conditioning residue scales with the prompt's conditioning tokens over the default
+    /// — and never below 1.0, since the records do not state the prompt length they were
+    /// measured with. The joint sequence length moves the denoise estimate with it.
+    #[test]
+    fn conditioning_tokens_scale_the_conditioning_residue_and_never_credit_a_short_prompt() {
+        let anchor = z_image_q4_anchor();
+        let with_tokens = |tokens: Option<u32>| {
+            anchor
+                .derive_phase_peaks(
+                    &ImageDeriveRequest {
+                        conditioning_tokens: tokens,
+                        ..at(1024, 1024, RequestRegime::staged())
+                    },
+                    Z_IMAGE_Q4_COMPONENTS,
+                    Z_IMAGE_FACTS,
+                )
+                .expect("derives")
+        };
+        let default = with_tokens(None);
+        assert_eq!(default, with_tokens(Some(DEFAULT_CONDITIONING_TOKENS)));
+        let residue =
+            anchor.phase_active_peak_bytes.conditioning - Z_IMAGE_Q4_COMPONENTS.conditioning;
+        assert!(residue > 0);
+        // Twice the tokens: twice the residue on top of the text encoder, and a longer joint
+        // sequence for denoise.
+        let doubled = with_tokens(Some(2 * DEFAULT_CONDITIONING_TOKENS));
+        assert_eq!(
+            doubled.conditioning,
+            Z_IMAGE_Q4_COMPONENTS.conditioning + 2 * residue
+        );
+        assert!(doubled.denoise > default.denoise);
+        // Half the tokens: no credit anywhere — the request's count is floored at the default
+        // on every side it enters, so the estimate is the default's in every phase.
+        let halved = with_tokens(Some(DEFAULT_CONDITIONING_TOKENS / 2));
+        assert_eq!(halved, default);
+    }
+
+    /// The fixture component bytes are not free literals: each set sums to its tier's packaged
+    /// download (`estimatedSizeBytes` in the builtin manifest) within 2%, so a retyped figure
+    /// or a re-cut tier lands here.
+    #[test]
+    fn the_fixture_component_bytes_sum_to_their_packaged_tier_sizes() {
+        for (label, components, model, tier) in [
+            (
+                "Z-Image-Turbo q4",
+                Z_IMAGE_Q4_COMPONENTS,
+                "z_image_turbo",
+                "q4",
+            ),
+            ("FLUX.2 [dev] q4", flux2_components("q4"), "flux2_dev", "q4"),
+            ("FLUX.2 [dev] q8", flux2_components("q8"), "flux2_dev", "q8"),
+        ] {
+            let packaged = packaged_tier_bytes(model, tier);
+            let sum = components.total();
+            let drift = (sum as f64 - packaged as f64).abs() / packaged as f64;
+            assert!(
+                drift <= 0.02,
+                "{label}: components sum to {sum} against the packaged {packaged} ({drift:.4})"
+            );
+            assert!(components.conditioning > 0 && components.transformer > 0);
+            assert!(components.decoder > 0);
+        }
+        assert_eq!(packaged_tier_bytes("z_image_turbo", "q4"), 5_909_406_487);
+    }
+
     /// Batch multiplies the activation residues (and the score tensor), never the weights.
     #[test]
     fn batch_scales_the_residues_and_not_the_components() {
@@ -4409,64 +4883,6 @@ mod tests {
     // MLX image lane entry point.
     // -------------------------------------------------------------------------------------
 
-    const IMAGE_MLX_CORPUS_PATH: &str = "docs/generated/memory-calibration-evidence.json";
-
-    /// One retained MLX image record: geometry, composition, and its measured per-phase ACTIVE
-    /// peaks, ALLOCATOR levels and overall envelope.
-    struct MlxImageCorpusRecord {
-        id: String,
-        tier: String,
-        width: u32,
-        height: u32,
-        conditioning_active: u64,
-        denoise_active: u64,
-        decode_active: u64,
-        conditioning_alloc: u64,
-        denoise_alloc: u64,
-        decode_alloc: u64,
-        overall_envelope: u64,
-    }
-
-    fn mlx_image_corpus(model_id: &str) -> Vec<MlxImageCorpusRecord> {
-        let raw = PACKAGED_MEMORY_ANCHOR_SOURCES
-            .iter()
-            .find(|(path, _)| *path == IMAGE_MLX_CORPUS_PATH)
-            .map(|(_, raw)| *raw)
-            .expect("the image-MLX retained corpus is compiled in");
-        let source: serde_json::Value = serde_json::from_str(raw).expect("corpus parses");
-        source["records"]
-            .as_array()
-            .expect("records")
-            .iter()
-            .filter(|record| {
-                record["target"]["modelId"].as_str() == Some(model_id)
-                    && record["backend"].as_str() == Some("mlx")
-                    && record["target"]["geometry"]["frames"].as_u64() == Some(1)
-            })
-            .map(|record| {
-                let geometry = &record["target"]["geometry"];
-                let bytes = |phase: &str, key: &str| {
-                    record["observedMemory"][phase][key]
-                        .as_u64()
-                        .unwrap_or_else(|| panic!("{phase} {key}"))
-                };
-                MlxImageCorpusRecord {
-                    id: record["id"].as_str().expect("id").to_owned(),
-                    tier: record["target"]["tier"].as_str().expect("tier").to_owned(),
-                    width: geometry["width"].as_u64().expect("width") as u32,
-                    height: geometry["height"].as_u64().expect("height") as u32,
-                    conditioning_active: bytes("conditioning", "activeBytes"),
-                    denoise_active: bytes("denoise", "activeBytes"),
-                    decode_active: bytes("decode", "activeBytes"),
-                    conditioning_alloc: bytes("conditioning", "allocatorBytes"),
-                    denoise_alloc: bytes("denoise", "allocatorBytes"),
-                    decode_alloc: bytes("decode", "allocatorBytes"),
-                    overall_envelope: bytes("overall", "allocatorBytes"),
-                }
-            })
-            .collect()
-    }
-
     fn flux2_mlx_anchor(tier: &str) -> &'static MemoryAnchor {
         store()
             .image_anchor_for("flux2_dev", AnchorBackend::Mlx, tier)
@@ -4475,8 +4891,8 @@ mod tests {
 
     /// FLUX.2 [dev] MLX component bytes per tier: the tier's packaged download
     /// (`estimatedSizeBytes` in the builtin manifest — 33.6 GB q4, 55.0 GB q8) split at the
-    /// 24B Mistral text encoder's 4-/8-bit size and the VAE. Only the TOTAL enters a
-    /// resident-to-resident derivation, which is all the retained corpus can falsify.
+    /// 24B Mistral text encoder's 4-/8-bit size and the VAE. Bound to the manifest by
+    /// `the_fixture_component_bytes_sum_to_their_packaged_tier_sizes` (within 2%).
     fn flux2_components(tier: &str) -> ComponentBytes {
         match tier {
             "q4" => ComponentBytes {
@@ -4493,97 +4909,9 @@ mod tests {
         }
     }
 
-    /// The image-MLX corpus as a falsifier: the law brackets every retained flux2 record's
-    /// measured ACTIVE peaks phase for phase, and the lane entry point — the law plus the
-    /// anchor's measured allocator envelope — brackets the ALLOCATOR levels and the overall
-    /// admission envelope, both tiers at both geometries.
-    #[test]
-    fn mlx_image_derivation_brackets_every_retained_flux2_measurement() {
-        let corpus = mlx_image_corpus("flux2_dev");
-        for tier in ["q4", "q8"] {
-            for edge in [768_u32, 1024] {
-                assert!(
-                    corpus
-                        .iter()
-                        .any(|record| record.tier == tier && record.width == edge),
-                    "the retained corpus must cover {tier} at {edge}x{edge}"
-                );
-            }
-        }
-        let mut bracketed = 0_usize;
-        for record in &corpus {
-            let anchor = flux2_mlx_anchor(&record.tier);
-            let components = flux2_components(&record.tier);
-            let active = anchor
-                .derive_phase_peaks(
-                    &at(record.width, record.height, RequestRegime::resident()),
-                    components,
-                    ArchitectureFacts::default(),
-                )
-                .unwrap_or_else(|| panic!("{} must be derivable", record.id));
-            for (phase, derived_bytes, measured_bytes) in [
-                (
-                    "conditioning",
-                    active.conditioning,
-                    record.conditioning_active,
-                ),
-                ("denoise", active.denoise, record.denoise_active),
-                ("decode", active.decode, record.decode_active),
-            ] {
-                assert!(
-                    derived_bytes >= measured_bytes,
-                    "{} {phase}: derived active {derived_bytes} under the measured {measured_bytes}",
-                    record.id
-                );
-            }
-            let allocator = anchor
-                .derive_mlx_image_phase_peaks(
-                    AnchorMlxImageDeriveRequest {
-                        width: record.width,
-                        height: record.height,
-                    },
-                    components,
-                )
-                .unwrap_or_else(|| panic!("{} must be derivable through the lane", record.id));
-            for (phase, derived_bytes, measured_bytes) in [
-                (
-                    "conditioning",
-                    allocator.conditioning,
-                    record.conditioning_alloc,
-                ),
-                ("denoise", allocator.denoise, record.denoise_alloc),
-                ("decode", allocator.decode, record.decode_alloc),
-            ] {
-                assert!(
-                    derived_bytes >= measured_bytes,
-                    "{} {phase}: derived allocator level {derived_bytes} under the measured \
-                     {measured_bytes}",
-                    record.id
-                );
-            }
-            let upper = allocator.peak_bytes();
-            assert!(
-                upper >= record.overall_envelope,
-                "{}: derived admission bound {upper} under the measured envelope {}",
-                record.id,
-                record.overall_envelope
-            );
-            // At the anchor's own geometry the bound IS the measured envelope; below it the
-            // retained cache is carried unscaled, which is the loose (and safe) direction.
-            if record.width == anchor.geometry.width {
-                assert_eq!(upper, anchor.overall_allocator_envelope_bytes);
-            }
-            bracketed += 1;
-        }
-        assert!(
-            bracketed >= 8,
-            "both tiers at both geometries with their repeat captures must be bracketed, got \
-             {bracketed}"
-        );
-    }
-
-    /// The MLX entry point's guards, each mutated individually on an otherwise-derivable anchor,
-    /// and its area scaling in both directions.
+    /// The MLX entry point's guards, each mutated individually on an otherwise-derivable anchor
+    /// (an in-domain synthetic one — the packaged rows are refused by the law's domain guard,
+    /// asserted here too), and its area scaling in both directions.
     #[test]
     fn the_mlx_entry_point_keeps_its_guards_and_tracks_output_area() {
         let request = AnchorMlxImageDeriveRequest {
@@ -4591,7 +4919,8 @@ mod tests {
             height: 1024,
         };
         let components = flux2_components("q4");
-        assert!(flux2_mlx_anchor("q4")
+        let in_domain = in_domain_resident_mlx_anchor(components);
+        assert!(in_domain
             .derive_mlx_image_phase_peaks(request, components)
             .is_some());
         for (label, mutate) in [
@@ -4627,7 +4956,7 @@ mod tests {
                 }),
             ),
         ] {
-            let mut mutated = flux2_mlx_anchor("q4").clone();
+            let mut mutated = in_domain.clone();
             mutate(&mut mutated);
             assert!(
                 mutated
@@ -4636,13 +4965,23 @@ mod tests {
                 "the MLX entry point must refuse an anchor carrying {label}"
             );
         }
-        // The packaged single-geometry MLX anchors stay refused at the entry point (their
-        // stated reason), while the law prices them — see the qwen_image acceptance test.
-        for (model, tier) in [("qwen_image", "bf16"), ("z_image_turbo", "q4")] {
+        // Every packaged MLX image anchor is refused at the entry point: the flux2 rows by the
+        // law's domain guard (their conditioning counters saw no weights), the single-geometry
+        // rows by their stated underived reason AND the domain guard.
+        for (model, tier) in [
+            ("flux2_dev", "q4"),
+            ("flux2_dev", "q8"),
+            ("qwen_image", "bf16"),
+            ("z_image_turbo", "q4"),
+        ] {
             let anchor = store()
                 .image_anchor_for(model, AnchorBackend::Mlx, tier)
                 .unwrap_or_else(|| panic!("{model} {tier} anchor"));
-            assert!(anchor.underived_reason.is_some());
+            let components = ComponentBytes {
+                conditioning: packaged_tier_bytes(model, tier),
+                transformer: 0,
+                decoder: 0,
+            };
             assert!(anchor
                 .derive_mlx_image_phase_peaks(request, components)
                 .is_none());
@@ -4652,9 +4991,11 @@ mod tests {
                     components,
                     ArchitectureFacts::default()
                 )
-                .is_some());
+                .is_none());
         }
-        let anchor = flux2_mlx_anchor("q8");
+        // Output-area tracking through the entry point, on the in-domain anchor: the allocator
+        // envelope is carried unscaled below the anchor geometry and pixel-scaled above it.
+        let anchor = in_domain_resident_mlx_anchor(flux2_components("q8"));
         let at = |width: u32, height: u32| {
             anchor
                 .derive_mlx_image_phase_peaks(
@@ -4666,6 +5007,11 @@ mod tests {
         assert!(at(512, 512).peak_bytes() < at(768, 768).peak_bytes());
         assert!(at(768, 768).peak_bytes() < at(1024, 1024).peak_bytes());
         assert!(at(1024, 1024).peak_bytes() < at(1536, 1536).peak_bytes());
+        assert_eq!(
+            at(1024, 1024).peak_bytes(),
+            anchor.overall_allocator_envelope_bytes,
+            "at the anchor geometry the entry point reproduces the anchor's envelope"
+        );
         assert_eq!(at(1344, 768).peak_bytes(), at(768, 1344).peak_bytes());
         assert!(anchor
             .derive_mlx_image_phase_peaks(

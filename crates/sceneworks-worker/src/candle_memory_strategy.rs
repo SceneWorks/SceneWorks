@@ -1319,7 +1319,9 @@ fn synthesize_estimate_floors(
                 );
                 (
                     bytes,
-                    crate::memory_strategy::CandidateBasis::EstimateAnchorDerived,
+                    crate::memory_strategy::CandidateBasis::EstimateAnchorDerived {
+                        lane: crate::memory_strategy::AnchorDerivationLane::Image,
+                    },
                 )
             }
             None => {
@@ -5419,6 +5421,7 @@ mod tests {
             phase_allocator_envelope_bytes: None,
             overall_allocator_envelope_bytes: 4_000_000_000,
             underived_reason: None,
+            component_bytes: None,
         };
         let expected_derived = anchor
             .derive_image_phase_peaks(
@@ -5539,7 +5542,9 @@ mod tests {
             for (_, evidence, basis) in floors(Some(&rotated_store)) {
                 assert_eq!(
                     basis,
-                    crate::memory_strategy::CandidateBasis::EstimateAnchorDerived,
+                    crate::memory_strategy::CandidateBasis::EstimateAnchorDerived {
+                        lane: crate::memory_strategy::AnchorDerivationLane::Image,
+                    },
                     "a rotated calibration campaign is provenance and must not demote the anchor"
                 );
                 assert_eq!(evidence.predicted_peak_bytes, expected_derived);
@@ -5572,7 +5577,9 @@ mod tests {
             for (selection, _, basis) in &drifted_floors {
                 assert_eq!(
                     *basis,
-                    crate::memory_strategy::CandidateBasis::EstimateAnchorDerived,
+                    crate::memory_strategy::CandidateBasis::EstimateAnchorDerived {
+                        lane: crate::memory_strategy::AnchorDerivationLane::Image,
+                    },
                     "a calibration ABI is provenance too and must not demote the anchor ({:?})",
                     selection.strategy
                 );
@@ -5592,7 +5599,9 @@ mod tests {
             for (_, evidence, basis) in floors(Some(&relabelled_store)) {
                 assert_eq!(
                     basis,
-                    crate::memory_strategy::CandidateBasis::EstimateAnchorDerived,
+                    crate::memory_strategy::CandidateBasis::EstimateAnchorDerived {
+                        lane: crate::memory_strategy::AnchorDerivationLane::Image,
+                    },
                     "model_family must not gate the derivation"
                 );
                 assert_eq!(evidence.predicted_peak_bytes, expected_derived);
@@ -5648,7 +5657,9 @@ mod tests {
         for (selection, evidence, basis) in &anchored {
             assert_eq!(
                 *basis,
-                crate::memory_strategy::CandidateBasis::EstimateAnchorDerived,
+                crate::memory_strategy::CandidateBasis::EstimateAnchorDerived {
+                    lane: crate::memory_strategy::AnchorDerivationLane::Image,
+                },
                 "{:?} must be graded as an anchor derivation",
                 selection.strategy
             );

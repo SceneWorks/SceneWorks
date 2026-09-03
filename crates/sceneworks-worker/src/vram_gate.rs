@@ -1780,7 +1780,9 @@ pub(crate) fn krea_turbo_fit_with_runtime(
                 selection: *selection,
                 evidence,
                 closure_digest: &live_closure_digest,
-                basis: memory_strategy::CandidateBasis::EstimateAnchorDerived,
+                basis: memory_strategy::CandidateBasis::EstimateAnchorDerived {
+                    lane: memory_strategy::AnchorDerivationLane::Image,
+                },
                 // No weights/activation split (sc-22508), for the same reason the fitted-curve
                 // candidate above has none: the anchor derivation decomposes its peak by PHASE
                 // (conditioning/denoise/decode), not into counted weights plus an activation
