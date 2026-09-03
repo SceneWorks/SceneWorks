@@ -23,7 +23,7 @@
       },
       "source": {
         "path": "docs/generated/memory-calibration-evidence.json",
-        "sha256": "e9e9f7ce079b0b8f2c615bd03b88f15f320881ba302b160390047c5505805cef",
+        "sha256": "e8b3474d0c05c3d91f309ac75c1bc38eeaad99baa20c36bedca4233a5be49359",
         "recordId": "imc-b6537074420d51413b38",
         "calibrationFingerprint": "sc-18218-flux2-dev-t2i-resident-evidence-v1",
         "loaderClosureDigest": "3326eaab4116261d4261c78e92c796dcdc132b7a81ef36ed512d7db2a3a5ee77"
@@ -68,7 +68,7 @@
       },
       "source": {
         "path": "docs/generated/memory-calibration-evidence.json",
-        "sha256": "e9e9f7ce079b0b8f2c615bd03b88f15f320881ba302b160390047c5505805cef",
+        "sha256": "e8b3474d0c05c3d91f309ac75c1bc38eeaad99baa20c36bedca4233a5be49359",
         "recordId": "imc-421a1bb45e9c2f5d916c",
         "calibrationFingerprint": "sc-18218-flux2-dev-t2i-resident-evidence-v1",
         "loaderClosureDigest": "b71e8b3cd2c7b73a4a7606ed7c37d65d19c7d70dcd1bc14ecb7ad8d249b5c60a"
@@ -519,7 +519,7 @@
       },
       "source": {
         "path": "docs/generated/memory-calibration-evidence.json",
-        "sha256": "e9e9f7ce079b0b8f2c615bd03b88f15f320881ba302b160390047c5505805cef",
+        "sha256": "e8b3474d0c05c3d91f309ac75c1bc38eeaad99baa20c36bedca4233a5be49359",
         "recordId": "imc-d314058df6e188459f3b",
         "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1-eager",
         "loaderClosureDigest": "6be4fdf7bfd948a62bb216200f62cc53d56a9cc1c7d1e497da90a0f7a76c2774"
@@ -564,7 +564,7 @@
       },
       "source": {
         "path": "docs/generated/memory-calibration-evidence.json",
-        "sha256": "e9e9f7ce079b0b8f2c615bd03b88f15f320881ba302b160390047c5505805cef",
+        "sha256": "e8b3474d0c05c3d91f309ac75c1bc38eeaad99baa20c36bedca4233a5be49359",
         "recordId": "imc-12f3ccbb72de78cea931",
         "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1",
         "loaderClosureDigest": "a4c2f95fa9a88b6a31fb6233e467506065a72510852a806bb0610644ca24e620"
@@ -610,7 +610,7 @@
       },
       "source": {
         "path": "docs/generated/memory-calibration-evidence.json",
-        "sha256": "e9e9f7ce079b0b8f2c615bd03b88f15f320881ba302b160390047c5505805cef",
+        "sha256": "e8b3474d0c05c3d91f309ac75c1bc38eeaad99baa20c36bedca4233a5be49359",
         "recordId": "imc-8f110511b0f85d15f72f",
         "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1",
         "loaderClosureDigest": "a4c2f95fa9a88b6a31fb6233e467506065a72510852a806bb0610644ca24e620"
@@ -770,7 +770,7 @@
       "overallAllocatorEnvelopeBytes": 11237588992
     },
     {
-      "id": "z_image_turbo:mlx:q4:base:base:z-image-mlx-independent-materialization-v4:imc-1fc616bea135da2281b8",
+      "id": "z_image_turbo:mlx:q4:base:base:z-image-mlx-independent-materialization-v4:imc-2284d75c08c2a13f1b7e",
       "modelId": "z_image_turbo",
       "modelFamily": "z-image",
       "route": "z_image_turbo",
@@ -791,10 +791,10 @@
       },
       "source": {
         "path": "docs/generated/memory-calibration-evidence.json",
-        "sha256": "e9e9f7ce079b0b8f2c615bd03b88f15f320881ba302b160390047c5505805cef",
-        "recordId": "imc-1fc616bea135da2281b8",
+        "sha256": "e8b3474d0c05c3d91f309ac75c1bc38eeaad99baa20c36bedca4233a5be49359",
+        "recordId": "imc-2284d75c08c2a13f1b7e",
         "calibrationFingerprint": "z-image-mlx-independent-materialization-v4",
-        "loaderClosureDigest": "bc087be1ffc8cd309029a9f57a169748caf4d84354bfd625ea01cd8b93b4180a"
+        "loaderClosureDigest": "dccbde61a8d9765bf91120923842d6a0ee1b6982fb5619bb325db09d7689533f"
       },
       "geometry": {
         "width": 768,
@@ -803,16 +803,16 @@
         "fps": null
       },
       "phaseActivePeakBytes": {
-        "conditioning": 2266383344,
-        "denoise": 7353533076,
-        "decode": 14309852368
+        "conditioning": 5834701816,
+        "denoise": 7589844352,
+        "decode": 14462448216
       },
       "phaseAllocatorEnvelopeBytes": {
-        "conditioning": 2266418544,
-        "denoise": 12181808124,
-        "decode": 14309852368
+        "conditioning": 5834737016,
+        "denoise": 12510771316,
+        "decode": 14462448216
       },
-      "overallAllocatorEnvelopeBytes": 19138127416
+      "overallAllocatorEnvelopeBytes": 19383375180
     }
   ],
   "analyticOnly": [
@@ -1716,7 +1716,7 @@
         "repo": null,
         "revision": null,
         "path": "docs/generated/memory-calibration-evidence.json",
-        "sha256": "e9e9f7ce079b0b8f2c615bd03b88f15f320881ba302b160390047c5505805cef",
+        "sha256": "e8b3474d0c05c3d91f309ac75c1bc38eeaad99baa20c36bedca4233a5be49359",
         "recordId": "imc-674e1b40640dbf345cce",
         "envelopeBytes": 17651074970,
         "values": {
@@ -1795,7 +1795,7 @@
         "repo": null,
         "revision": null,
         "path": "docs/generated/memory-calibration-evidence.json",
-        "sha256": "e9e9f7ce079b0b8f2c615bd03b88f15f320881ba302b160390047c5505805cef",
+        "sha256": "e8b3474d0c05c3d91f309ac75c1bc38eeaad99baa20c36bedca4233a5be49359",
         "recordId": "imc-3e535b3422a162b35758",
         "envelopeBytes": 17642573594,
         "values": {
@@ -2548,7 +2548,7 @@
         "repo": null,
         "revision": null,
         "path": "docs/generated/memory-calibration-evidence.json",
-        "sha256": "e9e9f7ce079b0b8f2c615bd03b88f15f320881ba302b160390047c5505805cef",
+        "sha256": "e8b3474d0c05c3d91f309ac75c1bc38eeaad99baa20c36bedca4233a5be49359",
         "recordId": "imc-2cd840a85ce33b4f22a9",
         "envelopeBytes": 39417727840,
         "values": {

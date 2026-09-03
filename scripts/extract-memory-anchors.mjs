@@ -346,6 +346,15 @@ export function anchorCandidate(record, corpus) {
     // exactly when the record reports all three.
     phaseAllocatorEnvelopeBytes: phaseAllocatorEnvelopes(record),
     overallAllocatorEnvelopeBytes: envelope,
+    // sc-22667 (epic 22657 D3): whether the MLX adapter opened this record's phase window ABOVE
+    // its materialized resident set (`residentSetMaterializedBeforeWindow`). Records captured
+    // before that fix measured a cold first request whose conditioning phase saw only the text
+    // encoder it was materializing, a level the core law refuses to decompose; this flag lets the
+    // re-captured record outrank them in `selectRepresentative` rather than depending on which of
+    // the two envelopes happened to come out larger.
+    residentSetSeen:
+      backend === "mlx" &&
+      (measured.get("residentSetMaterializedBeforeWindow") ?? 0) >= 1,
     sourcePath: corpus.path,
     sourceSha256: corpus.sha256,
     recordId,
@@ -413,8 +422,9 @@ export function isDerivable(candidate) {
 /**
  * The representative render for one identity cell, chosen mechanically: DERIVABILITY first (a
  * record whose composition the lane's law can actually price outranks one it cannot, however much
- * larger the latter's envelope is — see [`isDerivable`]), then the LARGEST measured allocator
- * envelope, tie-broken by (source path, record id). The largest envelope is the most binding
+ * larger the latter's envelope is — see [`isDerivable`]), then an MLX window opened above its
+ * materialized resident set over one opened on a cold first request (`residentSetSeen`, sc-22667
+ * D3), then the LARGEST measured allocator envelope, tie-broken by (source path, record id). The largest envelope is the most binding
  * retained observation of that cell, and every tie-break term is a stable string, so the choice
  * cannot move with corpus iteration order.
  *
@@ -428,6 +438,12 @@ export function selectRepresentative(candidates) {
     const candidateDerivable = isDerivable(candidate);
     if (candidateDerivable !== isDerivable(best))
       return candidateDerivable ? candidate : best;
+    // sc-22667 (D3): an MLX render whose window opened above its materialized resident set
+    // outranks one measured on a cold first request, whatever their envelopes — the cold record's
+    // conditioning level sits below the resident set the law subtracts, so it derives nothing.
+    const candidateSeen = candidate.residentSetSeen === true;
+    if (candidateSeen !== (best.residentSetSeen === true))
+      return candidateSeen ? candidate : best;
     if (
       candidate.overallAllocatorEnvelopeBytes !==
       best.overallAllocatorEnvelopeBytes
