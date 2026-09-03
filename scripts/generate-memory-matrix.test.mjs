@@ -2237,10 +2237,24 @@ test("a cell whose retained corpus is packaged reads Anchored, with its currency
       `${cell.id} must state whether its anchor is current`,
     );
   }
-  // The sc-15859 Z-Image-Turbo candle captures were retained but UNPACKAGED before this story, so
-  // their cells read `Implemented`. They are compiled in now and were measured at the pinned
-  // revision, so every one of them must read Anchored AND current. Named by cell coordinates
-  // rather than by anchor id, so a re-capture that rotates the id does not red this.
+  // The sc-15859 Z-Image-Turbo candle captures were retained but UNPACKAGED before sc-22666, so
+  // their cells read `Implemented`. They are compiled in now, so every one of them must carry the
+  // packaged anchor, read `Anchored`, and STATE its currency. Named by cell coordinates rather
+  // than by anchor id, so a re-capture that rotates the id does not red this.
+  //
+  // CURRENCY IS NOT ASSERTED TRUE, and that is the point of sc-22511 (sc-22667). The captures were
+  // measured at inference 670dc1f4; this pin is a5f643ae, which rewrote the Z-Image candle loader
+  // closure (`candle-gen-z-image/src/memory_strategy.rs` grew the epic's loaded-path pricing and
+  // `candle-gen/src/architecture_facts.rs` joined the closure), so the anchors legitimately read
+  // NON-current until they are re-captured. Demanding `current === true` here asserted a
+  // COINCIDENCE — that the pin had not moved since the capture — and would red on every pin bump
+  // for a reason the matrix explicitly documents as not a state change: "an anchor's CURRENCY is
+  // reported beside the state and deliberately does not move it". The claims that survive are the
+  // ones the story is about: the anchor is packaged, it backs the cell, the cell reads `Anchored`,
+  // and the currency is published as a boolean either way so a stale lane cannot read identically
+  // to a fresh one. The derivation the epic ships prices these cells from this anchor regardless
+  // (see `the_production_anchor_source_admits_z_image_q4_on_eight_gb_at_rung_four_from_the_contracts_facts`),
+  // which is why staleness is a signal and never a gate.
   const zImageCandle = matrix.cells.filter(
     (cell) => cell.modelId === "z_image_turbo" && cell.backend === "candle",
   );
@@ -2248,9 +2262,9 @@ test("a cell whose retained corpus is packaged reads Anchored, with its currency
   for (const cell of zImageCandle) {
     assert.ok(cell.anchor, `${cell.id} must carry the packaged sc-15859 anchor`);
     assert.equal(
-      cell.anchor.current,
-      true,
-      `${cell.id}: the sc-15859 captures were measured at the pin, so they read current`,
+      typeof cell.anchor.current,
+      "boolean",
+      `${cell.id}: the packaged sc-15859 capture must publish its currency either way`,
     );
     if (cell.implementation === "implemented") {
       assert.equal(cell.state, "Anchored", cell.id);

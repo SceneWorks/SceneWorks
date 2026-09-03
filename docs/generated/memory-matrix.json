@@ -1,7 +1,7 @@
 {
   "schemaVersion": 11,
   "generatedFrom": {
-    "sceneWorksRevision": "source-tree:94ccd6a24c4fea5d0be8b5af80412faf6f6fdb048e4597512d9394c269eb705a",
+    "sceneWorksRevision": "source-tree:18f9220c0e37cd3f88d0c347eed1fac2711845e5456dfa258c3d916aebfb215a",
     "sources": {
       "manifest": {
         "path": "config/manifests/builtin.models.jsonc",
@@ -25,7 +25,7 @@
       },
       "imageRouting": {
         "path": "crates/sceneworks-worker/src/image_jobs/base.rs",
-        "sha256": "503f015bf60ffb2b9cafa11e68179ddf61d49e78076891d0f5be6d7e950ca510"
+        "sha256": "c1812623a86ed45785f392dbd6fe7c730a4590b7f88954f522889d031e1896a5"
       },
       "videoRouteWan": {
         "path": "crates/sceneworks-worker/src/video_jobs/wan.rs",
@@ -57,7 +57,7 @@
       },
       "mlxFitGate": {
         "path": "crates/sceneworks-worker/src/mlx_fit_gate.rs",
-        "sha256": "83a3e7e28c30851f3e64764c64bb8a3da75034160823ed48b919962f24210ddc"
+        "sha256": "89cf1993a3dfe8b828e5c470f00e67a1c7b2cd6cd3a0a823e6d7a52cdfe9fd31"
       },
       "memoryRouteRegistry": {
         "path": "crates/sceneworks-worker/src/memory_route_registry.rs",
@@ -65,7 +65,7 @@
       },
       "instantId": {
         "path": "crates/sceneworks-worker/src/image_jobs/instantid.rs",
-        "sha256": "760feb445e0eb3f5602bdca926338e903be877fd823719cad673564df63d0e3e"
+        "sha256": "5d3038d2348f45d461ef9d9a8c824620c5f352774184fca44d600fe283e82ac7"
       },
       "anchorStore": {
         "path": "config/memory-anchors.json",
@@ -73,7 +73,7 @@
       },
       "anchorLoaderClosures": {
         "path": "config/anchor-loader-closures.json",
-        "sha256": "9da2410d47de4031fa5c931e3456320c8d15a7296a05119a1b72f8f555951d20"
+        "sha256": "d92249c72e9314d0c1c4670ced628112230d1ba48bf98f5dcd7a61ed943eea0b"
       },
       "anchorDerivation": {
         "path": "crates/sceneworks-core/src/memory_anchor.rs",
@@ -81,15 +81,15 @@
       },
       "anchorAdmission": {
         "path": "crates/sceneworks-worker/src/video_admission.rs",
-        "sha256": "79623f0bf1fa2d29129d52c27a2bcc89702eaf865aea06f6e257c8b72e96413c"
+        "sha256": "0d588e630d403e69eae24d164937f983bbf46fcda9cfe6c46cfb821b486db43f"
       },
       "anchorAdmissionImageVram": {
         "path": "crates/sceneworks-worker/src/vram_gate.rs",
-        "sha256": "27d142853142902f7c223eb517f7bb34fda903a7e4848174cd84b7c47fc741e0"
+        "sha256": "d3abe6d8962b1e62511541f96f49ed65ea34630f82ad3e5cab24282ce11e1967"
       },
       "anchorAdmissionImageCandle": {
         "path": "crates/sceneworks-worker/src/candle_memory_strategy.rs",
-        "sha256": "8cdc82ed0a7896a5f0476556ebe80b69374a3c926f0a52996e7bb35f5c17c43f"
+        "sha256": "9dbfcf5954a957c4d6713c7caff6ded786889ec84675bf0e5240af03af04ca83"
       },
       "anchorExtractor": {
         "path": "scripts/extract-memory-anchors.mjs",
@@ -165,7 +165,7 @@
     "anchors": 15,
     "analyticOnlyCells": 326,
     "anchoredCells": 299,
-    "staleAnchors": 12,
+    "staleAnchors": 15,
     "fullModels": 0
   },
   "models": [
@@ -4869,7 +4869,7 @@
         "fps": null
       },
       "source": "docs/calibration/sc-15859/z-image-turbo-bf16-candle-anchor.json",
-      "current": true,
+      "current": false,
       "cells": 15
     },
     {
@@ -4886,7 +4886,7 @@
         "fps": null
       },
       "source": "docs/calibration/sc-15859/z-image-turbo-q4-candle-anchor.json",
-      "current": true,
+      "current": false,
       "cells": 15
     },
     {
@@ -4903,7 +4903,7 @@
         "fps": null
       },
       "source": "docs/calibration/sc-15859/z-image-turbo-q8-candle-anchor.json",
-      "current": true,
+      "current": false,
       "cells": 15
     },
     {
@@ -50376,7 +50376,7 @@
         "id": "z_image_turbo:candle:bf16:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-3cd69f2fee9e91e83b58",
         "tier": "bf16",
         "source": "config/memory-anchors.json#z_image_turbo:candle:bf16:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-3cd69f2fee9e91e83b58",
-        "current": true,
+        "current": false,
         "derivable": true
       },
       "derivationDefined": true,
@@ -50433,7 +50433,7 @@
         "id": "z_image_turbo:candle:bf16:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-3cd69f2fee9e91e83b58",
         "tier": "bf16",
         "source": "config/memory-anchors.json#z_image_turbo:candle:bf16:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-3cd69f2fee9e91e83b58",
-        "current": true,
+        "current": false,
         "derivable": true
       },
       "derivationDefined": true,
@@ -50502,7 +50502,7 @@
         "id": "z_image_turbo:candle:bf16:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-3cd69f2fee9e91e83b58",
         "tier": "bf16",
         "source": "config/memory-anchors.json#z_image_turbo:candle:bf16:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-3cd69f2fee9e91e83b58",
-        "current": true,
+        "current": false,
         "derivable": true
       },
       "derivationDefined": true,
@@ -50548,7 +50548,7 @@
         "id": "z_image_turbo:candle:bf16:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-3cd69f2fee9e91e83b58",
         "tier": "bf16",
         "source": "config/memory-anchors.json#z_image_turbo:candle:bf16:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-3cd69f2fee9e91e83b58",
-        "current": true,
+        "current": false,
         "derivable": true
       },
       "derivationDefined": true,
@@ -50594,7 +50594,7 @@
         "id": "z_image_turbo:candle:bf16:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-3cd69f2fee9e91e83b58",
         "tier": "bf16",
         "source": "config/memory-anchors.json#z_image_turbo:candle:bf16:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-3cd69f2fee9e91e83b58",
-        "current": true,
+        "current": false,
         "derivable": true
       },
       "derivationDefined": true,
@@ -50655,7 +50655,7 @@
         "id": "z_image_turbo:candle:q4:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-b8064416c974b5008509",
         "tier": "q4",
         "source": "config/memory-anchors.json#z_image_turbo:candle:q4:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-b8064416c974b5008509",
-        "current": true,
+        "current": false,
         "derivable": true
       },
       "derivationDefined": true,
@@ -50712,7 +50712,7 @@
         "id": "z_image_turbo:candle:q4:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-b8064416c974b5008509",
         "tier": "q4",
         "source": "config/memory-anchors.json#z_image_turbo:candle:q4:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-b8064416c974b5008509",
-        "current": true,
+        "current": false,
         "derivable": true
       },
       "derivationDefined": true,
@@ -50781,7 +50781,7 @@
         "id": "z_image_turbo:candle:q4:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-b8064416c974b5008509",
         "tier": "q4",
         "source": "config/memory-anchors.json#z_image_turbo:candle:q4:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-b8064416c974b5008509",
-        "current": true,
+        "current": false,
         "derivable": true
       },
       "derivationDefined": true,
@@ -50827,7 +50827,7 @@
         "id": "z_image_turbo:candle:q4:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-b8064416c974b5008509",
         "tier": "q4",
         "source": "config/memory-anchors.json#z_image_turbo:candle:q4:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-b8064416c974b5008509",
-        "current": true,
+        "current": false,
         "derivable": true
       },
       "derivationDefined": true,
@@ -50873,7 +50873,7 @@
         "id": "z_image_turbo:candle:q4:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-b8064416c974b5008509",
         "tier": "q4",
         "source": "config/memory-anchors.json#z_image_turbo:candle:q4:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-b8064416c974b5008509",
-        "current": true,
+        "current": false,
         "derivable": true
       },
       "derivationDefined": true,
@@ -50934,7 +50934,7 @@
         "id": "z_image_turbo:candle:q8:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-8cda4f70f78dd33f5330",
         "tier": "q8",
         "source": "config/memory-anchors.json#z_image_turbo:candle:q8:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-8cda4f70f78dd33f5330",
-        "current": true,
+        "current": false,
         "derivable": true
       },
       "derivationDefined": true,
@@ -50991,7 +50991,7 @@
         "id": "z_image_turbo:candle:q8:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-8cda4f70f78dd33f5330",
         "tier": "q8",
         "source": "config/memory-anchors.json#z_image_turbo:candle:q8:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-8cda4f70f78dd33f5330",
-        "current": true,
+        "current": false,
         "derivable": true
       },
       "derivationDefined": true,
@@ -51060,7 +51060,7 @@
         "id": "z_image_turbo:candle:q8:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-8cda4f70f78dd33f5330",
         "tier": "q8",
         "source": "config/memory-anchors.json#z_image_turbo:candle:q8:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-8cda4f70f78dd33f5330",
-        "current": true,
+        "current": false,
         "derivable": true
       },
       "derivationDefined": true,
@@ -51106,7 +51106,7 @@
         "id": "z_image_turbo:candle:q8:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-8cda4f70f78dd33f5330",
         "tier": "q8",
         "source": "config/memory-anchors.json#z_image_turbo:candle:q8:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-8cda4f70f78dd33f5330",
-        "current": true,
+        "current": false,
         "derivable": true
       },
       "derivationDefined": true,
@@ -51152,7 +51152,7 @@
         "id": "z_image_turbo:candle:q8:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-8cda4f70f78dd33f5330",
         "tier": "q8",
         "source": "config/memory-anchors.json#z_image_turbo:candle:q8:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-8cda4f70f78dd33f5330",
-        "current": true,
+        "current": false,
         "derivable": true
       },
       "derivationDefined": true,
@@ -51524,7 +51524,7 @@
         "id": "z_image_turbo:candle:bf16:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-3cd69f2fee9e91e83b58",
         "tier": "bf16",
         "source": "config/memory-anchors.json#z_image_turbo:candle:bf16:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-3cd69f2fee9e91e83b58",
-        "current": true,
+        "current": false,
         "derivable": true
       },
       "derivationDefined": true,
@@ -51581,7 +51581,7 @@
         "id": "z_image_turbo:candle:bf16:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-3cd69f2fee9e91e83b58",
         "tier": "bf16",
         "source": "config/memory-anchors.json#z_image_turbo:candle:bf16:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-3cd69f2fee9e91e83b58",
-        "current": true,
+        "current": false,
         "derivable": true
       },
       "derivationDefined": true,
@@ -51650,7 +51650,7 @@
         "id": "z_image_turbo:candle:bf16:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-3cd69f2fee9e91e83b58",
         "tier": "bf16",
         "source": "config/memory-anchors.json#z_image_turbo:candle:bf16:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-3cd69f2fee9e91e83b58",
-        "current": true,
+        "current": false,
         "derivable": true
       },
       "derivationDefined": true,
@@ -51696,7 +51696,7 @@
         "id": "z_image_turbo:candle:bf16:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-3cd69f2fee9e91e83b58",
         "tier": "bf16",
         "source": "config/memory-anchors.json#z_image_turbo:candle:bf16:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-3cd69f2fee9e91e83b58",
-        "current": true,
+        "current": false,
         "derivable": true
       },
       "derivationDefined": true,
@@ -51748,7 +51748,7 @@
         "id": "z_image_turbo:candle:bf16:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-3cd69f2fee9e91e83b58",
         "tier": "bf16",
         "source": "config/memory-anchors.json#z_image_turbo:candle:bf16:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-3cd69f2fee9e91e83b58",
-        "current": true,
+        "current": false,
         "derivable": true
       },
       "derivationDefined": true,
@@ -51809,7 +51809,7 @@
         "id": "z_image_turbo:candle:bf16:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-3cd69f2fee9e91e83b58",
         "tier": "bf16",
         "source": "config/memory-anchors.json#z_image_turbo:candle:bf16:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-3cd69f2fee9e91e83b58",
-        "current": true,
+        "current": false,
         "derivable": true
       },
       "derivationDefined": true,
@@ -51866,7 +51866,7 @@
         "id": "z_image_turbo:candle:bf16:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-3cd69f2fee9e91e83b58",
         "tier": "bf16",
         "source": "config/memory-anchors.json#z_image_turbo:candle:bf16:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-3cd69f2fee9e91e83b58",
-        "current": true,
+        "current": false,
         "derivable": true
       },
       "derivationDefined": true,
@@ -51935,7 +51935,7 @@
         "id": "z_image_turbo:candle:bf16:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-3cd69f2fee9e91e83b58",
         "tier": "bf16",
         "source": "config/memory-anchors.json#z_image_turbo:candle:bf16:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-3cd69f2fee9e91e83b58",
-        "current": true,
+        "current": false,
         "derivable": true
       },
       "derivationDefined": true,
@@ -51981,7 +51981,7 @@
         "id": "z_image_turbo:candle:bf16:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-3cd69f2fee9e91e83b58",
         "tier": "bf16",
         "source": "config/memory-anchors.json#z_image_turbo:candle:bf16:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-3cd69f2fee9e91e83b58",
-        "current": true,
+        "current": false,
         "derivable": true
       },
       "derivationDefined": true,
@@ -52033,7 +52033,7 @@
         "id": "z_image_turbo:candle:bf16:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-3cd69f2fee9e91e83b58",
         "tier": "bf16",
         "source": "config/memory-anchors.json#z_image_turbo:candle:bf16:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-3cd69f2fee9e91e83b58",
-        "current": true,
+        "current": false,
         "derivable": true
       },
       "derivationDefined": true,
@@ -52094,7 +52094,7 @@
         "id": "z_image_turbo:candle:q4:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-b8064416c974b5008509",
         "tier": "q4",
         "source": "config/memory-anchors.json#z_image_turbo:candle:q4:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-b8064416c974b5008509",
-        "current": true,
+        "current": false,
         "derivable": true
       },
       "derivationDefined": true,
@@ -52151,7 +52151,7 @@
         "id": "z_image_turbo:candle:q4:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-b8064416c974b5008509",
         "tier": "q4",
         "source": "config/memory-anchors.json#z_image_turbo:candle:q4:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-b8064416c974b5008509",
-        "current": true,
+        "current": false,
         "derivable": true
       },
       "derivationDefined": true,
@@ -52220,7 +52220,7 @@
         "id": "z_image_turbo:candle:q4:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-b8064416c974b5008509",
         "tier": "q4",
         "source": "config/memory-anchors.json#z_image_turbo:candle:q4:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-b8064416c974b5008509",
-        "current": true,
+        "current": false,
         "derivable": true
       },
       "derivationDefined": true,
@@ -52266,7 +52266,7 @@
         "id": "z_image_turbo:candle:q4:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-b8064416c974b5008509",
         "tier": "q4",
         "source": "config/memory-anchors.json#z_image_turbo:candle:q4:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-b8064416c974b5008509",
-        "current": true,
+        "current": false,
         "derivable": true
       },
       "derivationDefined": true,
@@ -52318,7 +52318,7 @@
         "id": "z_image_turbo:candle:q4:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-b8064416c974b5008509",
         "tier": "q4",
         "source": "config/memory-anchors.json#z_image_turbo:candle:q4:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-b8064416c974b5008509",
-        "current": true,
+        "current": false,
         "derivable": true
       },
       "derivationDefined": true,
@@ -52379,7 +52379,7 @@
         "id": "z_image_turbo:candle:q4:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-b8064416c974b5008509",
         "tier": "q4",
         "source": "config/memory-anchors.json#z_image_turbo:candle:q4:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-b8064416c974b5008509",
-        "current": true,
+        "current": false,
         "derivable": true
       },
       "derivationDefined": true,
@@ -52436,7 +52436,7 @@
         "id": "z_image_turbo:candle:q4:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-b8064416c974b5008509",
         "tier": "q4",
         "source": "config/memory-anchors.json#z_image_turbo:candle:q4:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-b8064416c974b5008509",
-        "current": true,
+        "current": false,
         "derivable": true
       },
       "derivationDefined": true,
@@ -52505,7 +52505,7 @@
         "id": "z_image_turbo:candle:q4:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-b8064416c974b5008509",
         "tier": "q4",
         "source": "config/memory-anchors.json#z_image_turbo:candle:q4:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-b8064416c974b5008509",
-        "current": true,
+        "current": false,
         "derivable": true
       },
       "derivationDefined": true,
@@ -52551,7 +52551,7 @@
         "id": "z_image_turbo:candle:q4:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-b8064416c974b5008509",
         "tier": "q4",
         "source": "config/memory-anchors.json#z_image_turbo:candle:q4:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-b8064416c974b5008509",
-        "current": true,
+        "current": false,
         "derivable": true
       },
       "derivationDefined": true,
@@ -52603,7 +52603,7 @@
         "id": "z_image_turbo:candle:q4:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-b8064416c974b5008509",
         "tier": "q4",
         "source": "config/memory-anchors.json#z_image_turbo:candle:q4:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-b8064416c974b5008509",
-        "current": true,
+        "current": false,
         "derivable": true
       },
       "derivationDefined": true,
@@ -52664,7 +52664,7 @@
         "id": "z_image_turbo:candle:q8:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-8cda4f70f78dd33f5330",
         "tier": "q8",
         "source": "config/memory-anchors.json#z_image_turbo:candle:q8:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-8cda4f70f78dd33f5330",
-        "current": true,
+        "current": false,
         "derivable": true
       },
       "derivationDefined": true,
@@ -52721,7 +52721,7 @@
         "id": "z_image_turbo:candle:q8:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-8cda4f70f78dd33f5330",
         "tier": "q8",
         "source": "config/memory-anchors.json#z_image_turbo:candle:q8:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-8cda4f70f78dd33f5330",
-        "current": true,
+        "current": false,
         "derivable": true
       },
       "derivationDefined": true,
@@ -52790,7 +52790,7 @@
         "id": "z_image_turbo:candle:q8:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-8cda4f70f78dd33f5330",
         "tier": "q8",
         "source": "config/memory-anchors.json#z_image_turbo:candle:q8:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-8cda4f70f78dd33f5330",
-        "current": true,
+        "current": false,
         "derivable": true
       },
       "derivationDefined": true,
@@ -52836,7 +52836,7 @@
         "id": "z_image_turbo:candle:q8:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-8cda4f70f78dd33f5330",
         "tier": "q8",
         "source": "config/memory-anchors.json#z_image_turbo:candle:q8:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-8cda4f70f78dd33f5330",
-        "current": true,
+        "current": false,
         "derivable": true
       },
       "derivationDefined": true,
@@ -52888,7 +52888,7 @@
         "id": "z_image_turbo:candle:q8:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-8cda4f70f78dd33f5330",
         "tier": "q8",
         "source": "config/memory-anchors.json#z_image_turbo:candle:q8:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-8cda4f70f78dd33f5330",
-        "current": true,
+        "current": false,
         "derivable": true
       },
       "derivationDefined": true,
@@ -52949,7 +52949,7 @@
         "id": "z_image_turbo:candle:q8:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-8cda4f70f78dd33f5330",
         "tier": "q8",
         "source": "config/memory-anchors.json#z_image_turbo:candle:q8:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-8cda4f70f78dd33f5330",
-        "current": true,
+        "current": false,
         "derivable": true
       },
       "derivationDefined": true,
@@ -53006,7 +53006,7 @@
         "id": "z_image_turbo:candle:q8:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-8cda4f70f78dd33f5330",
         "tier": "q8",
         "source": "config/memory-anchors.json#z_image_turbo:candle:q8:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-8cda4f70f78dd33f5330",
-        "current": true,
+        "current": false,
         "derivable": true
       },
       "derivationDefined": true,
@@ -53075,7 +53075,7 @@
         "id": "z_image_turbo:candle:q8:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-8cda4f70f78dd33f5330",
         "tier": "q8",
         "source": "config/memory-anchors.json#z_image_turbo:candle:q8:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-8cda4f70f78dd33f5330",
-        "current": true,
+        "current": false,
         "derivable": true
       },
       "derivationDefined": true,
@@ -53121,7 +53121,7 @@
         "id": "z_image_turbo:candle:q8:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-8cda4f70f78dd33f5330",
         "tier": "q8",
         "source": "config/memory-anchors.json#z_image_turbo:candle:q8:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-8cda4f70f78dd33f5330",
-        "current": true,
+        "current": false,
         "derivable": true
       },
       "derivationDefined": true,
@@ -53173,7 +53173,7 @@
         "id": "z_image_turbo:candle:q8:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-8cda4f70f78dd33f5330",
         "tier": "q8",
         "source": "config/memory-anchors.json#z_image_turbo:candle:q8:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-8cda4f70f78dd33f5330",
-        "current": true,
+        "current": false,
         "derivable": true
       },
       "derivationDefined": true,
