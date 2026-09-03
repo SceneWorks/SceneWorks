@@ -1229,6 +1229,17 @@ pub(crate) fn anchor_component_bytes(
 /// E3), read off the live provider contract — the companion translation to
 /// [`anchor_component_bytes`], shared by both image lanes' anchor consumers.
 ///
+/// WHY THE INPUT DIFFERS FROM ITS COMPANION'S, and why that is not an oversight to "fix" by
+/// matching signatures: [`anchor_component_bytes`] takes [`gen_core::MemoryAssetFacts`] because
+/// component bytes are a property of the resolved ASSET — the weight files this tier actually
+/// loads — and the contract already decomposes them there. Architecture facts are a property of
+/// the MODEL's topology (head count, head dim, block count, patch size, VAE scales, activation
+/// dtype width) and are identical across every tier and asset set of one model, so they belong on
+/// a CONTRACT-level block rather than in per-tier asset facts. sc-22667 adds that block to
+/// [`MemoryProviderContract`] upstream and reads it here, so the parameter is ALREADY the one the
+/// wired implementation needs — the leading underscore is temporary, the signature is not. The
+/// sibling story sc-22664 should converge on exactly this `&MemoryProviderContract` shape.
+///
 /// AT THIS PIN THE CONTRACT CARRIES NONE. `gen_core` at inference `670dc1f4` has no architecture
 /// block on [`gen_core::MemoryProviderContract`], so this returns
 /// [`sceneworks_core::memory_anchor::ArchitectureFacts::default()`] — every fact `None`, which the

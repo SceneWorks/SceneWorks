@@ -2232,10 +2232,23 @@ fn request_regime(
 }
 
 /// The ACTIVATION term of the estimate floor for one graded candidate (sc-22665, epic 22657 E4):
-/// the sc-22663 image law's per-phase residue for THIS request's regime, plus the MLX lane's
-/// measured allocator envelope above the anchor's active peak — the same lane term
-/// `MemoryAnchor::derive_mlx_image_phase_peaks` adds, because MLX admission is on the allocator
-/// level and dropping it would price below the quantity the gate compares against.
+/// the sc-22663 image law's per-phase residue for THIS request's regime, phase-maxed, and NOTHING
+/// ELSE.
+///
+/// The MLX allocator envelope above the anchor's active peak is deliberately NOT pre-added here,
+/// even though MLX admission is on the allocator level, because the SELECTOR charges it:
+/// [`crate::ladder_margin_policy::admission_allowance`] gives every
+/// [`crate::memory_strategy::CandidateBasis::EstimateFloor`] whose activation slice is declared an
+/// [`crate::memory_strategy::AdmissionTerm::AllocatorEnvelopeOverActivation`] allowance of
+/// [`crate::ladder_margin_policy::FLOOR_ALLOCATOR_ENVELOPE_ALLOWANCE`] TIMES this value — and that
+/// constant is the measured ratio of the retained envelope above the active peak to the ACTIVE
+/// activation term. Pre-adding the envelope would seat it inside the term and then charge 3.104x
+/// of it again on top. So this returns the ACTIVE-derived quantity the allowance is defined
+/// against, and the envelope arrives exactly once, from the policy.
+///
+/// The rung-2 anchor derivation ([`mlx_image_anchor_derived_peak`]) is the opposite case and its
+/// doc says so: it MUST carry the envelope itself, because its basis pays only the recapture
+/// spread. This floor must not, because its basis pays the envelope allowance.
 ///
 /// `None` — and the caller keeps [`MlxRequestPlan::generic_headroom_bytes`] — whenever the anchor
 /// does not cover the request (see [`mlx_image_anchor_match`]), the anchor carries no per-phase
@@ -2268,7 +2281,13 @@ fn mlx_image_anchor_activation_residue(
     use sceneworks_core::memory_anchor::ImageDeriveRequest;
 
     let anchor = mlx_image_anchor_match(contract, plan, mode_key, overlay, geometry)?;
-    let allocators = anchor.phase_allocator_envelope_bytes?;
+    // Required, but NOT read: the envelope is not part of this term (see the doc above). The
+    // requirement stands because `FLOOR_ALLOCATOR_ENVELOPE_ALLOWANCE` — the thing that charges the
+    // envelope OVER this term — was derived only over captures that report the retained allocator
+    // level above the active peak, so an anchor carrying no per-phase allocator decomposition was
+    // not measured under the discipline that allowance is defined on, and this term would be
+    // graded by a multiple its own anchor never witnessed.
+    let _envelope_measured = anchor.phase_allocator_envelope_bytes?;
     let residues = anchor.derive_phase_activation_residues(
         &ImageDeriveRequest::new(
             geometry.width,
@@ -2278,38 +2297,12 @@ fn mlx_image_anchor_activation_residue(
         crate::video_admission::anchor_component_bytes(contract.asset_facts),
         facts,
     )?;
-    // The allocator envelope above the anchor's own active peak is retained cache, not a residue
-    // of the law: carried unscaled at or below the anchor geometry and scaled by the output-pixel
-    // ratio above it, exactly as the lane's shim carries it.
-    let anchor_pixels = u128::from(anchor.geometry.width) * u128::from(anchor.geometry.height);
-    let request_pixels = u128::from(geometry.width) * u128::from(geometry.height);
-    let active = anchor.phase_active_peak_bytes;
-    let with_envelope = |residue: u64, allocator: u64, active: u64| -> Option<u64> {
-        let envelope = u128::from(allocator.saturating_sub(active));
-        let envelope = if request_pixels > anchor_pixels && anchor_pixels > 0 {
-            envelope
-                .checked_mul(request_pixels)?
-                .div_ceil(anchor_pixels)
-        } else {
-            envelope
-        };
-        u64::try_from(u128::from(residue).checked_add(envelope)?).ok()
-    };
-    let peak = with_envelope(
-        residues.conditioning,
-        allocators.conditioning,
-        active.conditioning,
-    )?
-    .max(with_envelope(
-        residues.denoise,
-        allocators.denoise,
-        active.denoise,
-    )?)
-    .max(with_envelope(
-        residues.decode,
-        allocators.decode,
-        active.decode,
-    )?);
+    // The ACTIVE-derived phase max, with no envelope byte in it — the quantity
+    // `FLOOR_ALLOCATOR_ENVELOPE_ALLOWANCE` is defined as a multiple OF.
+    let peak = residues
+        .conditioning
+        .max(residues.denoise)
+        .max(residues.decode);
     Some((peak, anchor.id.clone()))
 }
 
@@ -11887,6 +11880,72 @@ mod tests {
             residue(&chunked, tile_and_chunk)
         );
 
+        // THE FIXTURE PREMISE, spelled out and pinned (sc-22665 review round). This contract's
+        // `base_bytes` IS the law's component set, with no auxiliary resident component, so the
+        // floor's weights term is exactly the components the anchor's measured peaks were
+        // decomposed against — which is what makes the identity below an identity. A real
+        // contract that breaks the premise (`base_bytes` above the component sum, or an
+        // auxiliary component the anchor never held) prices the floor ABOVE the anchor's measured
+        // allocator level with nothing else in this file able to see it, and these three
+        // assertions are what catches that the moment sc-22667 wires a real one.
+        let contract = generator.contract.as_ref().expect("contract");
+        let unbounded = [MemoryStrategy::Resident];
+        let weights = estimate_floor_weights_bytes(contract, &unbounded);
+        let store = qwen_in_domain_anchor_store();
+        let anchor = store
+            .image_anchor_for(
+                "flux2_dev",
+                sceneworks_core::memory_anchor::AnchorBackend::Mlx,
+                "q4",
+            )
+            .expect("the injected q4 anchor");
+        let rung_1 = estimate(&unbounded, bare, QWEN_IN_DOMAIN_FACTS);
+
+        // THE IDENTITY THAT HOLDS, at the anchor's own geometry and its own unbounded resident
+        // regime: the floor reproduces the anchor's measured ACTIVE peak in the binding phase
+        // (decode) to the byte. It does NOT reproduce the anchor's ALLOCATOR level, and must not
+        // — the gap between the two is the retained envelope, which the SELECTOR charges as
+        // `FLOOR_ALLOCATOR_ENVELOPE_ALLOWANCE` over this activation term
+        // (`ladder_margin_policy::admission_allowance`, `EstimateFloor` arm). An estimate that
+        // already equalled the allocator level would be an envelope charged twice.
+        assert_eq!(
+            rung_1, anchor.phase_active_peak_bytes.decode,
+            "the unbounded floor is the anchor's measured ACTIVE peak, not its allocator level"
+        );
+        // The premise restated as its own two assertions, so a future fixture edit that breaks it
+        // names the reason rather than only reporting a byte mismatch above.
+        assert_eq!(
+            contract.asset_facts.base_bytes,
+            QWEN_IN_DOMAIN_COMPONENTS.total(),
+            "the fixture's weights are the law's component set, exactly"
+        );
+        assert_eq!(
+            weights,
+            QWEN_IN_DOMAIN_COMPONENTS.total(),
+            "the unbounded resident weights term counts the component set and nothing else"
+        );
+        assert_eq!(
+            anchor.overall_allocator_envelope_bytes - rung_1,
+            anchor
+                .phase_allocator_envelope_bytes
+                .expect("the fixture anchor decomposes its allocator level")
+                .decode
+                - anchor.phase_active_peak_bytes.decode,
+            "exactly the retained envelope separates the floor from the allocator level, so no \
+             envelope byte is inside the estimate"
+        );
+        // And the quantity ADMISSION actually compares against still covers the allocator level:
+        // the allowance-charged floor sits at or above the anchor's measured envelope.
+        let charged = rung_1 as f64
+            + crate::ladder_margin_policy::FLOOR_ALLOCATOR_ENVELOPE_ALLOWANCE
+                * (rung_1 - weights) as f64;
+        assert!(
+            charged >= anchor.overall_allocator_envelope_bytes as f64,
+            "the allowance-charged floor must cover the anchor's measured allocator level: \
+             {charged} vs {}",
+            anchor.overall_allocator_envelope_bytes
+        );
+
         // MUTATION — with the facts the contract states at THIS pin neither the chunk nor the tile
         // scales anything, and every rung's residue is the unbounded one again.
         let blind = sceneworks_core::memory_anchor::ArchitectureFacts::default();
@@ -11996,6 +12055,56 @@ mod tests {
                     "the residue must come from the anchor the arm above graded"
                 );
                 assert_eq!(activation, residue);
+
+                // NO ENVELOPE BYTE IS IN THE TERM (sc-22665 review round, blocker). The selector
+                // charges `FLOOR_ALLOCATOR_ENVELOPE_ALLOWANCE` TIMES this declared slice for the
+                // retained allocator envelope above the active peak, so the slice itself must be
+                // the law's ACTIVE-derived residue — pre-adding the envelope here would seat it
+                // inside the term and then charge 3.104x of it again on top.
+                let derived_anchor = store
+                    .image_anchor_for(
+                        "flux2_dev",
+                        sceneworks_core::memory_anchor::AnchorBackend::Mlx,
+                        "q4",
+                    )
+                    .expect("the injected q4 anchor");
+                let residues = derived_anchor
+                    .derive_phase_activation_residues(
+                        &sceneworks_core::memory_anchor::ImageDeriveRequest::new(
+                            geometry.width,
+                            geometry.height,
+                            request_regime(&engaged, estimate.selection.parameters),
+                        ),
+                        crate::video_admission::anchor_component_bytes(contract.asset_facts),
+                        crate::video_admission::architecture_facts_from_contract(contract),
+                    )
+                    .expect("the chunked rung's regime is inside the law's domain");
+                let decode_envelope = derived_anchor
+                    .phase_allocator_envelope_bytes
+                    .expect("the fixture anchor decomposes its allocator level")
+                    .decode
+                    .checked_sub(derived_anchor.phase_active_peak_bytes.decode)
+                    .expect("the allocator level is at or above the active peak");
+                assert!(
+                    decode_envelope > 0,
+                    "an anchor with no retained envelope would make the bound below vacuous"
+                );
+                assert!(
+                    activation < decode_envelope + residues.decode,
+                    "the term must sit strictly below the envelope-inclusive value, i.e. carry \
+                     no envelope byte: {activation} vs {decode_envelope} + {}",
+                    residues.decode
+                );
+                // Tighter than the bound above, and the reason it is a bound and not a coincidence:
+                // the declared slice IS the law's ACTIVE-derived phase max, whole.
+                assert_eq!(
+                    activation,
+                    residues
+                        .conditioning
+                        .max(residues.denoise)
+                        .max(residues.decode),
+                    "the floor's activation term is the law's ACTIVE-derived phase max, whole"
+                );
                 assert_ne!(
                     activation, generic,
                     "a derived residue that happened to equal the generic headroom would make \
@@ -12047,6 +12156,79 @@ mod tests {
             );
             assert_eq!(estimate.unmodeled_activation_bytes, Some(generic));
         }
+    }
+
+    /// sc-22665 review round — the `transformer_window` arm of [`request_regime`] is LIVE, and
+    /// this is the coverage that says so.
+    ///
+    /// The law's measured-vs-request regime guard (`derive_image_phase_split`,
+    /// `memory_anchor.rs`) refuses any request that does NOT window when the anchor's own
+    /// measurement DID, so against a windowed anchor the arm's output is the only thing that
+    /// separates a `Some` from a `None`. Mirrors the `attention_chunked` differential the AC-2
+    /// test uses, on the one regime field that had no test of its own.
+    ///
+    /// MUTATION: hardcode `request_regime`'s `transformer_window` arm to `None` and the windowed
+    /// rung reds — the law then refuses it exactly as it refuses the unwindowed one.
+    #[test]
+    fn the_request_regimes_transformer_window_reaches_the_laws_measured_regime_guard() {
+        let generator = qwen_in_domain_generator();
+        let contract = generator.contract.as_ref().expect("contract");
+        let plan = flux2_plan();
+        let geometry = MemoryGeometry {
+            width: 1024,
+            height: 1024,
+            batch: 1,
+            frames: 1,
+            reference_count: 0,
+        };
+        let mut store = qwen_in_domain_anchor_store();
+        for anchor in &mut store.anchors {
+            if anchor.model_id == "flux2_dev" {
+                anchor.measured_regime.transformer_windowed = true;
+            }
+        }
+        let residue = |engaged: &[MemoryStrategy], parameters| {
+            with_injected_image_anchor_store(store.clone(), || {
+                mlx_image_anchor_activation_residue(
+                    contract,
+                    &plan,
+                    "text_to_image",
+                    None,
+                    geometry,
+                    engaged,
+                    parameters,
+                    QWEN_IN_DOMAIN_FACTS,
+                )
+            })
+        };
+        let unwindowed = [MemoryStrategy::Resident, MemoryStrategy::StagedResidency];
+        let windowed = [
+            MemoryStrategy::Resident,
+            MemoryStrategy::StagedResidency,
+            MemoryStrategy::BoundedTransformerResidency,
+        ];
+        let bare = gen_core::MemoryStrategyParameters::default();
+        let with_window = gen_core::MemoryStrategyParameters {
+            transformer_window_size: Some(1),
+            ..Default::default()
+        };
+
+        assert!(
+            residue(&windowed, with_window).is_some(),
+            "the windowed rung's declared window must reach the regime and satisfy the law's \
+             measured-regime guard"
+        );
+        assert!(
+            residue(&unwindowed, bare).is_none(),
+            "a request that does not window cannot be priced from a windowed anchor"
+        );
+        // Control on the other half of the arm: engaging the STRATEGY without a declared window
+        // size states no window either, so it is the parameter reaching the regime that matters,
+        // not the strategy being present in the composition.
+        assert!(
+            residue(&windowed, bare).is_none(),
+            "an undeclared window size states no window"
+        );
     }
 
     /// sc-17153 — `synthesize_estimate_ladder` emits NO candidate for a non-implemented rung,
