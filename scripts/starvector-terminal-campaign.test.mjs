@@ -7,7 +7,7 @@ const plan = JSON.parse(readFileSync("release/starvector-terminal-campaign-v1.js
 const lock = JSON.parse(readFileSync("release/starvector-terminal-metrics-lock-v1.json"));
 
 test("terminal campaign is fixed, serial, and fail closed", async () => {
-  assert.equal(validatePlan(plan).inference_contract.revision, "336c1d62f0263050ce39950d3278f5102ecac405");
+  assert.equal(validatePlan(plan).inference_contract.revision, "cc8a351008ff5ecd085323836a0fc0093be76d3e");
   assert.match((await readPlanAndLock("release/starvector-terminal-campaign-v1.json")).metrics_lock_sha256, /^[0-9a-f]{64}$/);
 });
 

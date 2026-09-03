@@ -14,7 +14,7 @@ const inferenceRepository = process.env.STARVECTOR_TERMINAL_INFERENCE_TEST_ROOT 
 let inferenceRoot = inferenceRepository;
 const sha = (value) => createHash("sha256").update(value).digest("hex");
 const digest = sha("artifact");
-const inferenceRevision = "336c1d62f0263050ce39950d3278f5102ecac405";
+const inferenceRevision = "cc8a351008ff5ecd085323836a0fc0093be76d3e";
 const permanentPin = inferenceRevision;
 const sources = [["starvector/svg-stack-simple", "1d2a96a17cc0c4c1f337b7631adc8c5885bc72ea"], ["starvector/svg-icons-simple", "e1918a27ba6649e856e5db0710d8a6c7046762c1"], ["starvector/svg-emoji-simple", "fa75b3617872ae57e6f3cb450aee65dbccbd69e0"], ["starvector/svg-fonts-simple", "453c739ea13ad2685127f721c333f14d99485299"]];
 const models = { "1b": ["starvector-1b-im2svg", "starvector/starvector-1b-im2svg", "380ab95d25a8e9ab1dc825debe238b4953ae13b9"], "8b": ["starvector-8b-im2svg", "starvector/starvector-8b-im2svg", "518beea8dcb5f7a37c5911e92d1d62a76beee7f9"] };
