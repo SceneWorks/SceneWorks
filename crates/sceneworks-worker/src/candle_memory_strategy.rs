@@ -614,6 +614,20 @@ fn receipt_base_phase_floor_bytes(contract: &gen_core::MemoryProviderContract) -
     chroma_base_phase_floor_bytes(contract)
 }
 
+/// The output pixel count the manifest's candle rows were MEASURED at: `candle.vramMeasuredPixels`,
+/// or the rows' documented 1024x1024 when the block states none (every shipped candle block
+/// states it; the fallback is the geometry the rows have always been read as).
+pub(crate) const MANIFEST_ROW_DEFAULT_MEASURED_PIXELS: u64 = 1_048_576;
+
+pub(crate) fn manifest_measured_pixels(manifest: &JsonObject<String, Value>) -> u64 {
+    manifest
+        .get("candle")
+        .and_then(|value| value.get("vramMeasuredPixels"))
+        .and_then(Value::as_u64)
+        .filter(|pixels| *pixels > 0)
+        .unwrap_or(MANIFEST_ROW_DEFAULT_MEASURED_PIXELS)
+}
+
 fn scale_ideogram_hires_envelope(
     engine_id: &str,
     mode: &MemoryMode,
@@ -624,12 +638,7 @@ fn scale_ideogram_hires_envelope(
     if !is_ideogram(engine_id) || *mode != MemoryMode::ImageToImage {
         return bytes;
     }
-    let measured_pixels = manifest
-        .get("candle")
-        .and_then(|value| value.get("vramMeasuredPixels"))
-        .and_then(Value::as_u64)
-        .filter(|pixels| *pixels > 0)
-        .unwrap_or(1_048_576);
+    let measured_pixels = manifest_measured_pixels(manifest);
     let request_pixels = u64::from(geometry.width).saturating_mul(u64::from(geometry.height));
     let numerator = request_pixels.max(measured_pixels);
     bytes
@@ -1296,18 +1305,24 @@ fn estimate_floor_parameters(
 ///   [`MemoryAnchor::derive_phase_peaks`] returns its three phase peaks; the rung's estimate is
 ///   the max over phases plus the runtime overlay. Basis:
 ///   [`CandidateBasis::EstimateAnchorDerived`]. No deeper rung reuses the staged floor.
-/// * Without an anchor, the CONTRACT-ONLY path: the staged rung takes the manifest staged row
-///   unscaled; a deeper staged composition takes the law's ratios applied to that row, by treating
-///   the row as one staged measurement of every phase at the request geometry
-///   ([`floor_pseudo_anchor`]) and decomposing it against the contract's component bytes. The
-///   row is phase-blind, so it is every phase's peak; a deeper rung's ratios move the phases they
-///   bound (decode under the tile, denoise under the chunk and the window) and its reported phase
-///   peaks say so, but NO rung bounds conditioning, so the admission peak — the max over phases —
-///   stays at the row. A floor cannot promise a saving only a measured anchor can show, and the
-///   ladder invents none. With the default architecture facts (this pin — see
-///   `crate::video_admission::architecture_facts_from_contract`) every ratio is inert as well. A staging-free
-///   composition keeps the resident clamp of sc-18253. Basis: [`CandidateBasis::EstimateFloor`]
-///   — the row, not a measured anchor, is the basis.
+/// * Without an anchor, the CONTRACT-ONLY path: every staged composition takes the law over the
+///   manifest staged row, by treating the row as one staged measurement of every phase at the
+///   geometry the manifest MEASURED it at — `candle.vramMeasuredPixels`, never the request's
+///   ([`floor_pseudo_anchor`], sc-22667) — and decomposing it against the contract's component
+///   bytes. The law then scales the row's residue UP to the request geometry before a deeper
+///   rung's ratios apply, so a request above the measured geometry prices above the row on
+///   every rung, and a rung's tile/chunk fractions are taken of the request-sized residue rather
+///   than of a residue the row never measured at that size. At the measured geometry the staged
+///   rung is the row itself (every ratio is 1). The row is phase-blind, so it is every phase's
+///   peak; a deeper rung's ratios move the phases they bound (decode under the tile, denoise
+///   under the chunk and the window) and its reported phase peaks say so, but NO rung bounds
+///   conditioning, so at the measured geometry the admission peak — the max over phases — stays
+///   at the row. A floor cannot promise a saving only a measured anchor can show, and the ladder
+///   invents none. With the default architecture facts (this pin — see
+///   `crate::video_admission::architecture_facts_from_contract`) every rung ratio is inert; the
+///   geometry scaling needs no fact. A staging-free composition keeps the resident clamp of
+///   sc-18253. Basis: [`CandidateBasis::EstimateFloor`] — the row, not a measured anchor, is the
+///   basis.
 ///
 /// WHERE THE RESERVE IS PAID (sc-22664, the rule `crate::memory_strategy::ReserveCharge` states
 /// once): a manifest-row floor — the staged row, scaled or not — carries
@@ -1393,7 +1408,7 @@ fn synthesize_estimate_floors(
     // for the shared ladder — a receipt-priced floor is a structural sum, not a measured working
     // set, and stays unscaled.
     let floor_anchor = if anchor.is_none() && !receipt_priced {
-        raw_staged_row_bytes.map(|row| floor_pseudo_anchor(engine_id, geometry, row))
+        raw_staged_row_bytes.map(|row| floor_pseudo_anchor(engine_id, manifest, row))
     } else {
         None
     };
@@ -1611,7 +1626,7 @@ impl CandleLadderAnchors<'static> {
 /// same unit), which is the quantity `RequestRegime::attention_chunk_scores` prices.
 ///
 /// [`RequestRegime`]: sceneworks_core::memory_anchor::RequestRegime
-fn request_regime(
+pub(crate) fn request_regime(
     engaged: &[MemoryStrategy],
     parameters: &gen_core::MemoryStrategyParameters,
 ) -> Option<sceneworks_core::memory_anchor::RequestRegime> {
@@ -1641,24 +1656,38 @@ fn request_regime(
 }
 
 /// The manifest staged row as a pseudo-anchor (sc-22664, the contract-only path): one STAGED
-/// measurement of every phase at the request geometry, which is exactly the claim
-/// `candle.sequentialPeakGb` makes — the largest single working set of the staged path — stated
-/// phase-blind. Running it through `MemoryAnchor::derive_phase_peaks` at the same geometry returns
-/// the row itself for the staged rung (every ratio is 1) and the law's ratios over the row for a
-/// deeper rung; a row below the component set of some phase is outside the law's domain and the
-/// derivation refuses it, in which case the caller keeps the row unscaled.
+/// measurement of every phase at the geometry the manifest MEASURED the row at, which is exactly
+/// the claim `candle.sequentialPeakGb` makes — the largest single working set of the staged path
+/// at `candle.vramMeasuredPixels` — stated phase-blind. Running it through
+/// `MemoryAnchor::derive_phase_peaks` at that geometry returns the row itself for the staged rung
+/// (every ratio is 1) and the law's ratios over the row for a deeper rung; at a larger request
+/// geometry the law scales the row's residue up first, then applies the rung's ratios to the
+/// request-sized residue. A row below the component set of some phase is outside the law's
+/// domain and the derivation refuses it, in which case the caller keeps the row unscaled.
+///
+/// WHY THE MEASURED GEOMETRY, NOT THE REQUEST'S (sc-22667, epic 22657 feature-end round): the
+/// row is geometry-blind, so stamping it as a measurement AT the request geometry made a 2048²
+/// bounded rung take its tile/chunk fractions of a residue that was measured at 1024² — scaling
+/// the row's phases DOWN, with no measurement behind the saving. Anchored at the measured
+/// geometry the residue is scaled UP to 2048² before any fraction is taken, which is the erring-
+/// large reading the epic requires. The measured pixel count is read as the largest square that
+/// fits it (`isqrt`), so the anchor side of every geometry ratio is at or below the true measured
+/// count and the scale-up is never understated.
 ///
 /// It is a floor, not evidence: its identity fields are the request's, it cites no source, and the
 /// candidate it prices carries `CandidateBasis::EstimateFloor`.
 fn floor_pseudo_anchor(
     engine_id: &str,
-    geometry: MemoryGeometry,
+    manifest: &JsonObject<String, Value>,
     staged_floor_bytes: u64,
 ) -> sceneworks_core::memory_anchor::MemoryAnchor {
     use sceneworks_core::memory_anchor::{
         AnchorBackend, AnchorGeometry, AnchorLoadShape, AnchorMeasuredRegime, AnchorPhaseBytes,
         AnchorSource, MemoryAnchor,
     };
+    let measured_edge = u32::try_from(manifest_measured_pixels(manifest).isqrt())
+        .unwrap_or(u32::MAX)
+        .max(1);
     MemoryAnchor {
         id: format!("floor:{engine_id}:candle:sequentialPeakGb"),
         model_id: engine_id.to_owned(),
@@ -1687,8 +1716,8 @@ fn floor_pseudo_anchor(
             loader_closure_digest: String::new(),
         },
         geometry: AnchorGeometry {
-            width: geometry.width,
-            height: geometry.height,
+            width: measured_edge,
+            height: measured_edge,
             frames: 1,
             fps: None,
         },
@@ -6662,6 +6691,152 @@ mod tests {
                 with_rows.phase_peaks, without_store.phase_peaks,
                 "{:?}: the contract-only per-rung ladder, not a bare manifest scalar",
                 with_rows.selection.strategy
+            );
+        }
+    }
+
+    /// The contract-only floors at an arbitrary geometry and manifest — the same call as
+    /// `z_image_fixture_floors`, with the two inputs the sc-22667 pseudo-anchor test varies.
+    fn z_image_fixture_floors_at(
+        anchors: CandleLadderAnchors<'_>,
+        contract: &gen_core::MemoryProviderContract,
+        manifest: &JsonObject<String, Value>,
+        geometry: MemoryGeometry,
+    ) -> Vec<EstimateCandidate> {
+        synthesize_estimate_floors(
+            "z_image_turbo",
+            "z_image_turbo",
+            contract,
+            manifest,
+            "q4",
+            numeric_tier("z_image_turbo", "q4").expect("q4 tier"),
+            &request_mode("z_image_turbo", "text_to_image"),
+            None,
+            geometry,
+            (18.4 * BYTES_PER_GIB) as u64,
+            0,
+            Z_IMAGE_REQUEST_EVIDENCE_REVISION,
+            anchors,
+        )
+    }
+
+    /// sc-22667 (epic 22657 feature-end round, E3/E5): the manifest staged row is a measurement
+    /// at `candle.vramMeasuredPixels`, geometry-blind, so the pseudo-anchor the contract-only
+    /// path builds from it is pinned at THAT geometry and the law scales its residue UP to the
+    /// request before any rung fraction is taken. Graded at 2048x2048 with the Z-Image facts
+    /// (the ratios are live) on a manifest measured at 1024x1024, with no anchor for the cell:
+    ///
+    /// * every rung prices at or above the pre-epic padded row (`sequentialPeakGb + HEADROOM`),
+    ///   and the staged rung STRICTLY above it — a 2048² request is not the 1024² row;
+    /// * every rung's phase peaks at 2048² are at or above the same rung's at 1024²
+    ///   (monotone in geometry): a bounded rung's tile/chunk fraction is taken of the
+    ///   request-sized residue, never of the measured one;
+    /// * a manifest that states no `vramMeasuredPixels` prices identically to one stating the
+    ///   documented 1024² default.
+    ///
+    /// MUTATION: pinning `floor_pseudo_anchor`'s geometry at the REQUEST geometry (the pre-fix
+    /// code) makes the staged rung EQUAL the padded row at 2048² (first block reds) and scales
+    /// the windowed rung's decode at 2048² BELOW its own 1024² decode — the on-device tile is a
+    /// smaller fraction of a larger image (second block reds). Changing the fallback constant
+    /// reds the third block.
+    #[test]
+    fn the_contract_only_pseudo_anchor_is_pinned_at_the_manifests_measured_geometry() {
+        let contract = z_image_fixture_contract();
+        let manifest = z_image_fixture_manifest();
+        assert_eq!(
+            manifest_measured_pixels(&manifest),
+            1_048_576,
+            "the fixture manifest measures its rows at 1024x1024"
+        );
+        let anchors = CandleLadderAnchors {
+            store: None,
+            facts: Z_IMAGE_FACTS,
+        };
+        let at = |edge: u32| MemoryGeometry {
+            width: edge,
+            height: edge,
+            batch: 1,
+            frames: 1,
+            reference_count: 0,
+        };
+        let measured = z_image_fixture_floors_at(anchors, &contract, &manifest, at(1024));
+        let large = z_image_fixture_floors_at(anchors, &contract, &manifest, at(2048));
+        let padded_row_bytes =
+            ((5.7 + crate::vram_gate::HEADROOM_GB) * BYTES_PER_GIB).ceil() as u64;
+        let peak = |candidate: &EstimateCandidate| candidate.evidence.predicted_peak_bytes;
+        let phases = |candidate: &EstimateCandidate| candidate.phase_peaks.expect("law-scaled");
+
+        // 1. Every rung at 2048² is at or above the pre-epic padded row; the staged rung is
+        //    strictly above it, because the row was measured at a quarter of the pixels.
+        let staged_large = rung_of(&large, MemoryStrategy::StagedResidency);
+        assert!(
+            peak(staged_large) > padded_row_bytes,
+            "the staged rung at 2048x2048 must scale ABOVE the 1024x1024 row ({}), got {}",
+            padded_row_bytes,
+            peak(staged_large)
+        );
+        for strategy in [
+            MemoryStrategy::StagedResidency,
+            MemoryStrategy::BoundedDecode,
+            MemoryStrategy::BoundedAttention,
+            MemoryStrategy::BoundedTransformerResidency,
+        ] {
+            let candidate = rung_of(&large, strategy);
+            assert_eq!(
+                candidate.basis,
+                crate::memory_strategy::CandidateBasis::EstimateFloor
+            );
+            assert!(
+                peak(candidate) >= padded_row_bytes,
+                "{strategy:?}: a 2048x2048 rung must never price below the padded row the \
+                 pre-epic ladder charged, got {} against {}",
+                peak(candidate),
+                padded_row_bytes
+            );
+            // 2. Monotone in geometry, phase by phase: the fraction a bounded rung takes is of
+            //    the request-sized residue.
+            let small = phases(rung_of(&measured, strategy));
+            let big = phases(candidate);
+            assert!(
+                big.conditioning >= small.conditioning
+                    && big.denoise >= small.denoise
+                    && big.decode >= small.decode,
+                "{strategy:?}: every phase at 2048x2048 must be at or above the same rung at \
+                 1024x1024, got {big:?} against {small:?}"
+            );
+        }
+        // The windowed rung is where the pre-fix arithmetic went below the measured decode: its
+        // 2048² decode is the tile blender floor plus a 3/16 band of a residue that the request-
+        // pinned anchor never scaled up.
+        let windowed_small = phases(rung_of(
+            &measured,
+            MemoryStrategy::BoundedTransformerResidency,
+        ));
+        let windowed_large = phases(rung_of(&large, MemoryStrategy::BoundedTransformerResidency));
+        assert!(
+            windowed_large.decode > windowed_small.decode,
+            "the windowed rung's decode must GROW with the request ({} at 1024², {} at 2048²)",
+            windowed_small.decode,
+            windowed_large.decode
+        );
+
+        // 3. A manifest with no `vramMeasuredPixels` is read at the rows' documented 1024².
+        let mut unstated = manifest.clone();
+        unstated["candle"]
+            .as_object_mut()
+            .expect("candle block")
+            .remove("vramMeasuredPixels");
+        assert_eq!(
+            manifest_measured_pixels(&unstated),
+            MANIFEST_ROW_DEFAULT_MEASURED_PIXELS
+        );
+        let fallback = z_image_fixture_floors_at(anchors, &contract, &unstated, at(2048));
+        for (stated, unstated) in large.iter().zip(fallback.iter()) {
+            assert_eq!(stated.selection, unstated.selection);
+            assert_eq!(
+                stated.phase_peaks, unstated.phase_peaks,
+                "{:?}: the unstated measured geometry falls back to 1024x1024",
+                stated.selection.strategy
             );
         }
     }

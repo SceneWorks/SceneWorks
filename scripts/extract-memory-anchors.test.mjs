@@ -35,6 +35,9 @@ import {
   loaderClosureDigestFor,
   locateInferenceCheckout,
   manifestTierEvidence,
+  manifestSequentialRow,
+  isReceiptPricedRoute,
+  RECEIPT_PRICED_ROUTES,
   packagedAnchorSources,
   providerByteConstants,
   selectRepresentative,
@@ -658,15 +661,19 @@ test("a published memoryStrategyContract outranks a bare manifest tier declarati
         ?.memoryStrategyContract,
     );
   // SHAPE: whichever cells fall through to a manifest-only basis, none of them may be one whose
-  // contract is published AND whose lane implements the ladder — that is the precedence claim,
-  // stated without pinning a count. A published contract on a lane with no ladder is NOT
-  // misplaced on a manifest row; that lane never rescales anything (see the lane-restriction test).
+  // contract is published, whose lane implements the ladder AND which carries the ladder's
+  // inputs (sc-22667: the staged row, on a non-receipt-priced route) — that is the precedence
+  // claim, stated without pinning a count. A published contract on a lane with no ladder, on a
+  // receipt-priced route, or without the row is NOT misplaced on a manifest row; the worker never
+  // rescales those (see the lane-restriction and ladder-input tests).
   const misplaced = store.analyticOnly
     .filter((row) => row.basis === "manifest_tier_declaration")
     .filter(
       (row) =>
         publishesContract(row) &&
-        CONTRACT_LADDER_BACKENDS.includes(row.backend),
+        CONTRACT_LADDER_BACKENDS.includes(row.backend) &&
+        !isReceiptPricedRoute(row.route) &&
+        manifestSequentialRow(manifest, row) !== null,
     )
     .map((row) => row.id);
   assert.deepEqual(
@@ -740,6 +747,130 @@ test("every contract_estimate row is on a lane that implements the per-rung ladd
     offLane,
     [],
     "a contract_estimate row asserts a ladder its lane does not implement",
+  );
+});
+
+// ---------------------------------------------------------------------------------------------
+// sc-22667 (epic 22657 feature-end round, AT-4/E5): `contract_estimate` asserts a worker
+// mechanism — `floor_anchor` in `candle_memory_strategy.rs` — that runs only when the manifest
+// declares the raw staged row AND the route is not receipt-priced. The basis is keyed on exactly
+// those two inputs, and the receipt-priced list is read back from the worker source.
+// ---------------------------------------------------------------------------------------------
+
+test("RECEIPT_PRICED_ROUTES mirrors the worker's is_receipt_priced, read from its source", async () => {
+  const source = await readFile(
+    path.join(ROOT, "crates/sceneworks-worker/src/candle_memory_strategy.rs"),
+    "utf8",
+  );
+  const body = source.match(
+    /pub\(crate\) fn is_receipt_priced\(engine_id: &str\) -> bool \{([\s\S]*?)\n\}/,
+  );
+  assert.ok(body, "the worker still names its receipt-priced families in is_receipt_priced");
+  const routes = new Set();
+  for (const [, literal] of body[1].matchAll(/engine_id == "([^"]+)"/g)) {
+    routes.add(literal);
+  }
+  const helpers = [...body[1].matchAll(/\b(is_[a-z0-9_]+)\(engine_id\)/g)].map(
+    ([, helper]) => helper,
+  );
+  assert.ok(helpers.length > 0, "is_receipt_priced delegates to per-family helpers");
+  for (const helper of helpers) {
+    const helperBody = source.match(
+      new RegExp(`fn ${helper}\\(engine_id: &str\\) -> bool \\{([\\s\\S]*?)\\n\\}`),
+    );
+    assert.ok(helperBody, `${helper} is defined on the worker`);
+    const literals = helperBody[1].match(/matches!\(\s*engine_id,([\s\S]*?)\)\s*$/);
+    assert.ok(literals, `${helper} is a matches! over engine-id literals`);
+    for (const [, literal] of literals[1].matchAll(/"([^"]+)"/g)) routes.add(literal);
+  }
+  assert.deepEqual(
+    [...RECEIPT_PRICED_ROUTES].sort(),
+    [...routes].sort(),
+    "the extractor's receipt-priced list must equal the worker's, in both directions",
+  );
+  assert.ok(routes.size >= 10, `the worker names ${routes.size} receipt-priced routes`);
+});
+
+test("contract_estimate is keyed on the ladder's inputs: a sequential row on a non-receipt-priced route", async () => {
+  const store = await buildAnchorStore({ matrix });
+  const manifest = JSON.parse(
+    stripJsoncComments(await readFile(path.join(ROOT, MANIFEST_PATH), "utf8")),
+  );
+  const publishesContract = (row) =>
+    Boolean(
+      manifest.models?.find((model) => model.id === row.modelId)?.[row.backend]
+        ?.memoryStrategyContract,
+    );
+  const candle = store.analyticOnly.filter((row) =>
+    CONTRACT_LADDER_BACKENDS.includes(row.backend),
+  );
+  const estimates = candle.filter((row) => row.basis === "contract_estimate");
+  assert.ok(estimates.length > 0, "the catalog has contract-only ladder cells");
+  // SHAPE: every contract_estimate row carries the row it rescales and sits on a route the
+  // worker would actually rescale for.
+  for (const row of estimates) {
+    const declared = manifestSequentialRow(manifest, row);
+    assert.notEqual(declared, null, `${row.id} has no sequentialPeakGb row to rescale`);
+    assert.equal(
+      row.evidence?.values?.sequentialPeakGb,
+      String(declared),
+      `${row.id} must carry the staged row the reason says the ladder rescales`,
+    );
+    assert.equal(
+      isReceiptPricedRoute(row.route),
+      false,
+      `${row.id} is receipt-priced; its floor is a sealed receipt, never a rescaled row`,
+    );
+    assert.match(row.reason, /sequentialPeakGb/);
+    assert.match(row.reason, /not receipt-priced/);
+  }
+  // …and the converse: no cell that HAS both inputs (and a published contract) fell through.
+  const fellThrough = candle
+    .filter((row) => row.basis !== "contract_estimate")
+    .filter(
+      (row) =>
+        publishesContract(row) &&
+        !isReceiptPricedRoute(row.route) &&
+        manifestSequentialRow(manifest, row) !== null &&
+        row.basis !== "measured_envelope",
+    )
+    .map((row) => `${row.id} (${row.basis})`);
+  assert.deepEqual(fellThrough, [], "a cell with the ladder's inputs is a contract_estimate");
+  // The two exclusions each exist in the catalog, or the keying is vacuous: at least one
+  // receipt-priced cell and at least one row-less cell with a published contract are classified
+  // on a manifest basis.
+  const excluded = candle.filter(
+    (row) =>
+      publishesContract(row) &&
+      ["manifest_tier_declaration", "no_retained_evidence"].includes(row.basis),
+  );
+  assert.ok(
+    excluded.some((row) => isReceiptPricedRoute(row.route)),
+    "a receipt-priced route with a published contract stays on a manifest basis",
+  );
+  assert.ok(
+    excluded.some((row) => manifestSequentialRow(manifest, row) === null),
+    "a published contract with no sequentialPeakGb row stays on a manifest basis",
+  );
+});
+
+test("manifestSequentialRow reads the tier's own row, with the worker's nvfp4 -> q8 fallback", () => {
+  const manifest = {
+    models: [
+      {
+        id: "m",
+        candle: { sequentialPeakGb: { q4: 5.5, q8: 7.25, bf16: "9" } },
+      },
+    ],
+  };
+  const cell = (tier) => ({ modelId: "m", backend: "candle", tier });
+  assert.equal(manifestSequentialRow(manifest, cell("q4")), 5.5);
+  assert.equal(manifestSequentialRow(manifest, cell("nvfp4")), 7.25);
+  assert.equal(manifestSequentialRow(manifest, cell("bf16")), null, "a string is not a row");
+  assert.equal(manifestSequentialRow(manifest, cell("int8")), null);
+  assert.equal(
+    manifestSequentialRow(manifest, { modelId: "m", backend: "mlx", tier: "q4" }),
+    null,
   );
 });
 
