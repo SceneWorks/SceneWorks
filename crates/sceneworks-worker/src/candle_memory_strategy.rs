@@ -7185,7 +7185,8 @@ mod tests {
                     crate::memory_strategy::CandidateBasis::EstimateAnchorDerived {
                         lane: crate::memory_strategy::AnchorDerivationLane::Image,
                     },
-                    "the anchor store is catalog-wide: a packaged model's own row must price its                      own cell ({:?})",
+                    "the anchor store is catalog-wide: a packaged model's own row must price \
+                     its own cell ({:?})",
                     candidate.selection.strategy
                 );
             }

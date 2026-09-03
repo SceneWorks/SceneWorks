@@ -735,13 +735,28 @@ function preferEnvelope(best, candidate) {
  * key here is the PRESENCE of the model's `<backend>.memoryStrategyContract` block plus the rungs
  * it declares. The row carries the declared rung names verbatim so a reader can see exactly what
  * was published, and the digest is the manifest's.
+ *
+ * LANE RESTRICTION (sc-22666, fix round): the per-rung ladder this reason asserts is a CANDLE
+ * mechanism. `candle_memory_strategy.rs`'s `floor_pseudo_anchor` is the code that rescales the
+ * manifest row by the image law's per-rung ratios; `mlx_fit_gate.rs` has no pseudo-anchor and no
+ * manifest-row-rescale path at all, so an mlx cell is not priced that way whatever its contract
+ * publishes. Those cells fall through to `manifest_tier_declaration` / `no_retained_evidence`,
+ * which is true of them. `CONTRACT_LADDER_BACKENDS` names the lanes that implement the ladder; add
+ * a backend here only when that lane grows the mechanism.
+ *
+ * The row also carries the manifest figures the reason says the ladder RESCALES
+ * (`manifestTierEvidence`'s `vramGbByTier` / `sequentialPeakGb`) whenever the manifest declares
+ * them, so the row states the base it rescales rather than only the rungs it rescales it onto.
  */
+export const CONTRACT_LADDER_BACKENDS = Object.freeze(["candle"]);
+
 export function contractEstimateEvidence(
   manifest,
   manifestPath,
   manifestSha256,
   cell,
 ) {
+  if (!CONTRACT_LADDER_BACKENDS.includes(cell.backend)) return null;
   const model = manifest.models?.find((entry) => entry.id === cell.modelId);
   const contract = model?.[cell.backend]?.memoryStrategyContract;
   if (!contract || typeof contract !== "object") return null;
@@ -756,6 +771,15 @@ export function contractEstimateEvidence(
   const values = { declaredRungs: rungs.join(",") };
   if (typeof contract.provider === "string") values.provider = contract.provider;
   if (typeof contract.abi === "number") values.abi = String(contract.abi);
+  // The manifest row the ladder rescales, when the manifest declares one. Without this the row
+  // asserts a rescale of figures it does not carry.
+  const declared = manifestTierEvidence(
+    manifest,
+    manifestPath,
+    manifestSha256,
+    cell,
+  );
+  if (declared !== null) Object.assign(values, declared.values);
   return {
     repo: null,
     revision: null,

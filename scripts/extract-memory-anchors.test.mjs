@@ -10,6 +10,7 @@ import { buildMatrix } from "./generate-memory-matrix.mjs";
 import {
   ANALYTIC_BASES,
   ANCHOR_LOADER_CLOSURES_PATH,
+  CONTRACT_LADDER_BACKENDS,
   MANIFEST_PATH,
   MEMORY_ANCHOR_SCHEMA_VERSION,
   PACKAGED_SOURCES_PATH,
@@ -657,15 +658,21 @@ test("a published memoryStrategyContract outranks a bare manifest tier declarati
         ?.memoryStrategyContract,
     );
   // SHAPE: whichever cells fall through to a manifest-only basis, none of them may be one whose
-  // contract is published — that is the precedence claim, stated without pinning a count.
+  // contract is published AND whose lane implements the ladder — that is the precedence claim,
+  // stated without pinning a count. A published contract on a lane with no ladder is NOT
+  // misplaced on a manifest row; that lane never rescales anything (see the lane-restriction test).
   const misplaced = store.analyticOnly
     .filter((row) => row.basis === "manifest_tier_declaration")
-    .filter(publishesContract)
+    .filter(
+      (row) =>
+        publishesContract(row) &&
+        CONTRACT_LADDER_BACKENDS.includes(row.backend),
+    )
     .map((row) => row.id);
   assert.deepEqual(
     misplaced,
     [],
-    "a cell whose contract is published is a contract_estimate, never a bare manifest row",
+    "a ladder-lane cell whose contract is published is a contract_estimate, never a bare manifest row",
   );
   for (const row of store.analyticOnly.filter(
     (item) => item.basis === "contract_estimate",
@@ -680,11 +687,59 @@ test("a published memoryStrategyContract outranks a bare manifest tier declarati
       (row.evidence?.values?.declaredRungs ?? "").length > 0,
       `${row.id} must carry the rungs the contract declares`,
     );
+    // The reason says the ladder rescales the MANIFEST ROW, so where the manifest declares that
+    // row the evidence must carry it: a row cannot assert a rescale of figures it drops.
+    const declared = manifestTierEvidence(manifest, MANIFEST_PATH, "sha", {
+      modelId: row.modelId,
+      backend: row.backend,
+      tier: row.tier,
+    });
+    if (declared !== null) {
+      for (const [key, value] of Object.entries(declared.values)) {
+        assert.equal(
+          row.evidence?.values?.[key],
+          value,
+          `${row.id} must carry the manifest ${key} its reason says the ladder rescales`,
+        );
+      }
+    }
   }
   assert.ok(
     ANALYTIC_BASES.indexOf("contract_estimate") <
       ANALYTIC_BASES.indexOf("manifest_tier_declaration"),
     "the basis order IS the precedence",
+  );
+});
+
+test("every contract_estimate row is on a lane that implements the per-rung ladder", async () => {
+  // The `contract_estimate` reason asserts a specific worker mechanism: the manifest row rescaled
+  // by the image law's per-rung ratios. That is `floor_pseudo_anchor` in the CANDLE strategy; the
+  // mlx fit gate has no such path. Read the worker sources so the claim is checked against the
+  // code that would have to change, not against a literal repeated in two places.
+  const laneSources = {
+    candle: "crates/sceneworks-worker/src/candle_memory_strategy.rs",
+    mlx: "crates/sceneworks-worker/src/mlx_fit_gate.rs",
+  };
+  const implementing = [];
+  for (const [backend, relative] of Object.entries(laneSources)) {
+    const source = await readFile(path.join(ROOT, relative), "utf8");
+    if (/fn floor_pseudo_anchor\b/.test(source)) implementing.push(backend);
+  }
+  assert.deepEqual(
+    [...CONTRACT_LADDER_BACKENDS].sort(),
+    implementing.sort(),
+    "CONTRACT_LADDER_BACKENDS must name exactly the lanes whose source implements the ladder",
+  );
+  const store = await buildAnchorStore({ matrix });
+  // SHAPE: no row on a lane without the mechanism, whatever the counts are.
+  const offLane = store.analyticOnly
+    .filter((row) => row.basis === "contract_estimate")
+    .filter((row) => !implementing.includes(row.backend))
+    .map((row) => `${row.id} (${row.backend})`);
+  assert.deepEqual(
+    offLane,
+    [],
+    "a contract_estimate row asserts a ladder its lane does not implement",
   );
 });
 
