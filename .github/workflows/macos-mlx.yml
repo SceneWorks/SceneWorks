@@ -882,9 +882,8 @@ jobs:
           set -e
           if [ "$rc" = 1 ]; then
             echo "::warning title=prebuilt MLX (Release) unavailable::no Release prebuilt for the pinned mlx-rs rev; the calibration adapter builds libmlx from source (see step log)"
-            printf 'PMETAL_MLX_PREBUILT_DIR=
-PMETAL_METALLIB_PATH=
-' >> "$GITHUB_ENV"
+            echo "PMETAL_MLX_PREBUILT_DIR=" >> "$GITHUB_ENV"
+            echo "PMETAL_METALLIB_PATH=" >> "$GITHUB_ENV"
           elif [ "$rc" != 0 ]; then
             exit "$rc"
           fi

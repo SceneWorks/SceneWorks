@@ -478,7 +478,8 @@ test("macos-mlx fetches the Release prebuilt before its release-built calibratio
   );
   // No Release asset falls back to the source build by CLEARING the Debug cell's variables, never
   // by leaving them pointing at the mismatched cell.
-  assert.match(fetch, /PMETAL_MLX_PREBUILT_DIR=\nPMETAL_METALLIB_PATH=\n/);
+  assert.match(fetch, /echo "PMETAL_MLX_PREBUILT_DIR=" >> "\$GITHUB_ENV"/);
+  assert.match(fetch, /echo "PMETAL_METALLIB_PATH=" >> "\$GITHUB_ENV"/);
   const fetchAt = workflow.indexOf(`- name: ${fetchName}`);
   assert.ok(fetchAt >= 0);
   for (const capture of [
