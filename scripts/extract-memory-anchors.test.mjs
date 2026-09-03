@@ -517,6 +517,66 @@ test("the representative is the largest envelope, tie-broken by path then record
   );
 });
 
+test("an MLX window opened above its resident set outranks a cold-request render of the same cell", () => {
+  // sc-22667 (epic 22657 D3). The retained z_image_turbo q4 MLX corpus shape: the cold-request
+  // record's overall envelope (19.14 GB) is within allocator jitter of a warm re-capture's, so
+  // envelope-first would pick between them by chance — and the cold record's conditioning level
+  // (2.27 GB) sits below the 5.83 GB resident set the core law subtracts, so it derives nothing.
+  const mlx = (id, envelope, measurements) => ({
+    backend: "mlx",
+    overallAllocatorEnvelopeBytes: envelope,
+    recordId: id,
+    sourcePath: "docs/generated/memory-calibration-evidence.json",
+    ...measurements,
+  });
+  const cold = mlx("cold", 19_138_127_416, { residentSetSeen: false });
+  const warm = mlx("warm", 18_900_000_000, { residentSetSeen: true });
+  assert.equal(selectRepresentative([cold, warm]).recordId, "warm");
+  assert.equal(selectRepresentative([warm, cold]).recordId, "warm");
+  // Between two records of the same kind the envelope still decides; a record predating the flag
+  // (no field at all) ranks with the cold ones.
+  const legacy = mlx("legacy", 19_200_000_000, {});
+  assert.equal(selectRepresentative([legacy, cold]).recordId, "legacy");
+  assert.equal(selectRepresentative([legacy, warm]).recordId, "warm");
+  // …and the flag is read off the record's own diagnostics, only on the MLX lane.
+  const record = (backend, value) => ({
+    id: `r-${backend}`,
+    backend,
+    target: {
+      modelId: "z_image_turbo",
+      provider: "z_image_turbo",
+      tier: "q4",
+      geometry: { width: 768, height: 768, frames: 1 },
+    },
+    loadShape: "eager_materialization",
+    strategy: { engagedRungs: ["resident"] },
+    observedMemory: { overall: { allocatorBytes: 1 } },
+    diagnostics: {
+      measurements: [
+        ...(backend === "mlx"
+          ? [
+              { name: "conditioningActivePeak", unit: "bytes", value: 1 },
+              { name: "denoiseActivePeak", unit: "bytes", value: 1 },
+              { name: "decodeActivePeak", unit: "bytes", value: 1 },
+            ]
+          : [
+              { name: "conditioningDevicePeakDelta", unit: "bytes", value: 1 },
+              { name: "denoiseDevicePeakDelta", unit: "bytes", value: 1 },
+              { name: "decodeDevicePeakDelta", unit: "bytes", value: 1 },
+            ]),
+        ...(value === null
+          ? []
+          : [{ name: "residentSetMaterializedBeforeWindow", unit: "count", value }]),
+      ],
+    },
+  });
+  const corpus = { path: "docs/generated/example.json", sha256: "0".repeat(64) };
+  assert.equal(anchorCandidate(record("mlx", 1), corpus).residentSetSeen, true);
+  assert.equal(anchorCandidate(record("mlx", 0), corpus).residentSetSeen, false);
+  assert.equal(anchorCandidate(record("mlx", null), corpus).residentSetSeen, false);
+  assert.equal(anchorCandidate(record("candle", 1), corpus).residentSetSeen, false);
+});
+
 test("derivability outranks envelope, so a cell is never anchored by a render its law refuses", () => {
   const candle = (id, envelope, regime) => ({
     backend: "candle",

@@ -285,13 +285,17 @@ pub const ANCHOR_VALIDATION_TIGHTNESS_BUDGET: f64 = 0.25;
 // resident, so the subtraction says nothing about the activation working set (clamping it to zero
 // would read "the counters missed the weights" as "zero activation" and price a windowed denoise
 // at the window's weights alone). Such a request returns `None` and the caller keeps its floor.
-// Every packaged MLX image anchor is outside the domain today — its conditioning-phase active
-// peak is a fraction of the eager resident set it claims, and so is its conditioning-phase
-// ALLOCATOR level (the quantity the MLX fit gate admits on), so decomposing the allocator
-// envelope instead would not bring one in (see
-// `the_packaged_mlx_anchors_are_outside_the_laws_domain` for both censuses) — so the MLX lane
-// entry point prices nothing from the packaged store until an anchor whose counters saw its
-// weights is captured.
+// Five of the six packaged MLX image anchors are outside the domain today — their
+// conditioning-phase active peak is a fraction of the eager resident set they claim, and so is
+// their conditioning-phase ALLOCATOR level (the quantity the MLX fit gate admits on), so
+// decomposing the allocator envelope instead would not bring one in (see
+// `the_packaged_mlx_anchors_are_outside_the_laws_domain` for both censuses). The cause was the
+// adapter's capture shape, not the counters (sc-22667, epic 22657 D3): MLX residency is
+// request-scoped even under eager materialization, so a window opened on a freshly loaded
+// generator measured a cold first request that was still materializing its weights. The
+// `z_image_turbo` q4 anchor was re-captured with the window opened above its materialized
+// resident set and is in domain (`the_recaptured_z_image_mlx_anchor_is_inside_the_laws_domain`);
+// the others enter the domain the same way, one re-capture each.
 //
 // The measured phase level the law subtracts from is [`MemoryAnchor::phase_active_peak_bytes`],
 // the store's byte-bound decomposition. On the candle lane the allocator level equals it in every
@@ -2133,11 +2137,13 @@ impl MemoryAnchor {
     /// geometry and scaled by the pixel ratio above it. It is a lane term, not a residue of the
     /// law — see the *Image derivation law* section comment.
     ///
-    /// DOMAIN, at this pin: every packaged MLX image anchor reports a conditioning-phase active
-    /// peak far below the eager resident set its tier's component bytes state (the MLX active
-    /// counters did not see the weights), so the law refuses each of them and this entry point
-    /// returns `None` for the packaged store — the lane keeps its floor until an anchor whose
-    /// counters saw its weights is captured (`the_packaged_mlx_anchors_are_outside_the_laws_domain`).
+    /// DOMAIN, at this pin: five packaged MLX image anchors report a conditioning-phase active
+    /// peak far below the eager resident set their tier's component bytes state (the adapter
+    /// opened their window on a cold first request that was still materializing its weights), so
+    /// the law refuses each of them and this entry point returns `None` for those cells — the
+    /// lane keeps its floor there until each is re-captured
+    /// (`the_packaged_mlx_anchors_are_outside_the_laws_domain`). The re-captured `z_image_turbo`
+    /// q4 anchor prices (`the_recaptured_z_image_mlx_anchor_is_inside_the_laws_domain`).
     pub fn derive_mlx_image_phase_peaks(
         &self,
         request: AnchorMlxImageDeriveRequest,
@@ -4186,16 +4192,27 @@ mod tests {
     /// no packaged MLX anchor is in the law's domain on either basis and the law keeps
     /// decomposing the active peak — a switch to the allocator basis would move nothing. Both
     /// bases are asserted below so a re-captured anchor that reports its weights lands here.
+    ///
+    /// RE-CAPTURE (sc-22667, epic 22657 D3): the cause was the ADAPTER, not the counters — MLX
+    /// residency is request-scoped even under eager materialization, and the window opened on a
+    /// cold first request. `z_image_turbo` q4 was re-captured with the window opened above its
+    /// materialized resident set and is now IN domain
+    /// (`the_recaptured_z_image_mlx_anchor_is_inside_the_laws_domain`); the five other MLX image
+    /// anchors keep the cold-request shape until their own re-capture and stay in this census.
     #[test]
     fn the_packaged_mlx_anchors_are_outside_the_laws_domain() {
         let packaged: Vec<&MemoryAnchor> = store()
             .anchors
             .iter()
-            .filter(|anchor| anchor.backend == AnchorBackend::Mlx && anchor.geometry.frames == 1)
+            .filter(|anchor| {
+                anchor.backend == AnchorBackend::Mlx
+                    && anchor.geometry.frames == 1
+                    && anchor.model_id != "z_image_turbo"
+            })
             .collect();
         assert!(
-            packaged.len() >= 6,
-            "the packaged store carries the six MLX image anchors, found {}",
+            packaged.len() >= 5,
+            "the packaged store carries the five cold-request MLX image anchors, found {}",
             packaged.len()
         );
         for anchor in packaged {
@@ -4273,6 +4290,122 @@ mod tests {
                 anchor.id
             );
         }
+    }
+
+    /// sc-22667 (epic 22657 D3, E6 "one MLX tier"): the packaged `z_image_turbo` q4 MLX anchor was
+    /// re-captured on the nax runner with the adapter's phase window opened ABOVE its
+    /// materialized resident set (`memory-mlx-adapter`, `open_resident_phase_window`), so every
+    /// phase level now includes the 5.9 GB the tier holds resident and the law decomposes it with
+    /// the tier's real component split: the resident derivation reproduces the anchor, the staged
+    /// rung prices below it, and the fully engaged rung 4 prices below the staged rung 2.
+    ///
+    /// The components are the T2I RESIDENT set read off the q4 snapshot's safetensors headers
+    /// (`Z_IMAGE_Q4_MLX_RESIDENT_COMPONENTS`): text encoder, transformer, and the VAE DECODER —
+    /// a text-to-image render never materializes the 67,041,088-byte VAE encoder, and the
+    /// record's post-request live set (5,833,334,792 bytes, `preRungActiveAfterClear`) sits
+    /// 7.1 MB above that sum and 60 MB below the whole-VAE sum.
+    ///
+    /// MUTATION: point the store at the cold-request record this replaced (conditioning active
+    /// peak 2,266,383,344 against the 5.83 GB resident set — the figures the census above still
+    /// asserts for the other five MLX anchors) and every `expect` here fails: the domain guard
+    /// refuses a conditioning residue below zero.
+    #[test]
+    fn the_recaptured_z_image_mlx_anchor_is_inside_the_laws_domain() {
+        let anchor = store()
+            .image_anchor_for("z_image_turbo", AnchorBackend::Mlx, "q4")
+            .expect("the z_image_turbo q4 MLX anchor is packaged");
+        assert!(!anchor.measured_regime.staged);
+        assert_eq!(anchor.load_shape, AnchorLoadShape::EagerMaterialization);
+        let components = Z_IMAGE_Q4_MLX_RESIDENT_COMPONENTS;
+        let resident_set = components.total();
+        let peaks = anchor.phase_active_peak_bytes;
+        // The window opened above the resident set: every phase level carries the weights.
+        for (phase, peak) in [
+            ("conditioning", peaks.conditioning),
+            ("denoise", peaks.denoise),
+            ("decode", peaks.decode),
+        ] {
+            assert!(
+                peak >= resident_set,
+                "{phase}: the re-captured level {peak} must include the {resident_set} resident set"
+            );
+        }
+        let facts = Z_IMAGE_FACTS;
+        let derive = |regime| anchor.derive_phase_peaks(&at(768, 768, regime), components, facts);
+        let resident = derive(RequestRegime::resident())
+            .expect("the re-captured MLX anchor is inside the law's domain");
+        assert_eq!(resident.conditioning, peaks.conditioning);
+        assert_eq!(resident.denoise, peaks.denoise);
+        assert_eq!(resident.decode, peaks.decode);
+        let rung_2 = derive(RequestRegime::staged()).expect("the staged rung prices");
+        let rung_4 = derive(FULLY_ENGAGED).expect("the fully engaged rung prices");
+        assert!(rung_2.peak_bytes() <= resident.peak_bytes());
+        assert!(
+            rung_4.peak_bytes() < rung_2.peak_bytes(),
+            "rung 4 {rung_4:?} must price below rung 2 {rung_2:?}"
+        );
+        assert!(rung_4.denoise < rung_2.denoise && rung_4.decode < rung_2.decode);
+        // …and the lane entry point prices it too, allocator envelope included.
+        let lane = anchor
+            .derive_mlx_image_phase_peaks(
+                AnchorMlxImageDeriveRequest {
+                    width: 768,
+                    height: 768,
+                },
+                components,
+            )
+            .expect("the MLX lane entry point prices the re-captured anchor");
+        assert!(lane.conditioning >= resident.conditioning);
+        assert!(lane.denoise >= resident.denoise);
+        assert!(lane.decode >= resident.decode);
+    }
+
+    /// The Z-Image-Turbo q4 MLX resident set a text-to-image render holds, as tensor bytes summed
+    /// off the packaged snapshot's safetensors headers (`SceneWorks/z-image-turbo-mlx@bb2bc989`,
+    /// `q4/`): every `text_encoder` tensor, every `transformer` tensor, and the `decoder.*`
+    /// tensors of `vae/model.safetensors` (97,583,622 of its 164,624,710 bytes; the other
+    /// 67,041,088 are the encoder, which a T2I render never materializes).
+    const Z_IMAGE_Q4_MLX_RESIDENT_COMPONENTS: ComponentBytes = ComponentBytes {
+        conditioning: 2_262_920_192,
+        transformer: 3_465_730_304,
+        decoder: 97_583_622,
+    };
+
+    /// THE GAP THAT KEEPS THE PRODUCTION ARM ON ITS FLOOR AT THIS PIN (sc-22667 residue): the
+    /// worker prices the anchor with the provider's asset facts
+    /// (`video_admission::anchor_component_bytes`), whose `decoder_bytes` is the WHOLE `vae/`
+    /// directory — encoder included — so the resident set it subtracts (5,893,275,206) exceeds
+    /// the re-captured conditioning level (5,834,701,816, i.e. 1.4 MB of conditioning
+    /// activations above the live set) by 58.6 MB and the law refuses. The refusal is the domain
+    /// guard doing its job on an overstated component, not a capture defect: the same anchor
+    /// derives with the decoder-only split above. Flips to `Some` the moment the pinned provider
+    /// states decoder-only bytes for its T2I resident set.
+    #[test]
+    fn the_recaptured_z_image_mlx_anchor_is_refused_against_the_whole_vae_asset_fact() {
+        let anchor = store()
+            .image_anchor_for("z_image_turbo", AnchorBackend::Mlx, "q4")
+            .expect("the z_image_turbo q4 MLX anchor is packaged");
+        let whole_vae = ComponentBytes {
+            decoder: 164_624_710,
+            ..Z_IMAGE_Q4_MLX_RESIDENT_COMPONENTS
+        };
+        assert!(anchor.phase_active_peak_bytes.conditioning < whole_vae.total());
+        assert!(anchor
+            .derive_phase_peaks(
+                &at(768, 768, RequestRegime::resident()),
+                whole_vae,
+                Z_IMAGE_FACTS
+            )
+            .is_none());
+        assert!(anchor
+            .derive_mlx_image_phase_peaks(
+                AnchorMlxImageDeriveRequest {
+                    width: 768,
+                    height: 768,
+                },
+                whole_vae,
+            )
+            .is_none());
     }
 
     /// A synthetic eager, resident, unbounded MLX anchor at 1024x1024 whose counters saw its
