@@ -179,29 +179,10 @@ jobs:
       - name: Provision pinned metric runtime and official checkpoints
         shell: powershell
         run: |
-          $bootstrapPython = $null
-          $bootstrapIdentity = $null
-          $canonicalDriveExecutable = {
-            param([object]$Value)
-            $text = [string]$Value
-            if ([string]::IsNullOrWhiteSpace($text) -or $text -match '[\r\n"]' -or $text -notmatch '^[A-Za-z]:\\') { return $null }
-            try { $full = [IO.Path]::GetFullPath($text) } catch { return $null }
-            if ($full -notmatch '^[A-Za-z]:\\' -or -not (Test-Path -LiteralPath $full -PathType Leaf)) { return $null }
-            return $full
-          }
-          $candidates = @(Get-Command python.exe -All -CommandType Application -ErrorAction SilentlyContinue | ForEach-Object Source | Where-Object { $_ } | Select-Object -Unique)
-          foreach ($candidate in $candidates) {
-            $identityJson = & $candidate -c 'import json,sys; print(json.dumps({"executable":sys.executable,"version":[sys.version_info.major,sys.version_info.minor,sys.version_info.micro]}))' 2>$null
-            if ($LASTEXITCODE -ne 0) { continue }
-            try { $identity = $identityJson | ConvertFrom-Json -ErrorAction Stop } catch { continue }
-            $canonicalExecutable = & $canonicalDriveExecutable $identity.executable
-            if ($identity.version.Count -eq 3 -and [int]$identity.version[0] -eq 3 -and [int]$identity.version[1] -ge 12 -and $canonicalExecutable) {
-              $bootstrapPython = $canonicalExecutable
-              $bootstrapIdentity = $identity
-              break
-            }
-          }
-          if (-not $bootstrapPython) { throw 'the self-hosted CUDA runner requires a directly executable Python 3.12 or newer on PATH' }
+          . (Join-Path $PWD 'scripts\select-starvector-windows-python.ps1')
+          $bootstrap = Select-StarVectorBootstrapPython
+          $bootstrapPython = $bootstrap.Executable
+          $bootstrapIdentity = $bootstrap.Identity
           $metricsRoot = Join-Path $env:STARVECTOR_TERMINAL_ROOT 'metrics'
           $metricsPython = Join-Path $metricsRoot 'Scripts\python.exe'
           if (-not (Test-Path $metricsPython -PathType Leaf)) {
@@ -209,12 +190,12 @@ jobs:
             if ($LASTEXITCODE -ne 0) { throw 'failed to create the terminal metrics venv with the selected Python interpreter' }
           }
           if (-not (Test-Path $metricsPython -PathType Leaf)) { throw 'terminal metrics venv did not publish Scripts\python.exe' }
-          $venvIdentityJson = & $metricsPython -c 'import json,sys; print(json.dumps({"executable":sys.executable,"base_executable":getattr(sys,"_base_executable",None),"version":[sys.version_info.major,sys.version_info.minor,sys.version_info.micro]}))'
-          if ($LASTEXITCODE -ne 0) { throw 'terminal metrics venv Python identity probe failed' }
-          try { $venvIdentity = $venvIdentityJson | ConvertFrom-Json -ErrorAction Stop } catch { throw 'terminal metrics venv Python identity is not valid JSON' }
-          $expectedMetricsPython = & $canonicalDriveExecutable $metricsPython
-          $observedMetricsPython = & $canonicalDriveExecutable $venvIdentity.executable
-          $observedBasePython = & $canonicalDriveExecutable $venvIdentity.base_executable
+          $venvProbe = Invoke-StarVectorPythonIdentityProbe -Executable $metricsPython -IncludeBaseExecutable
+          if ($venvProbe.ExitCode -ne 0) { throw 'terminal metrics venv Python identity probe failed' }
+          try { $venvIdentity = $venvProbe.StdOut | ConvertFrom-Json -ErrorAction Stop } catch { throw 'terminal metrics venv Python identity is not valid JSON' }
+          $expectedMetricsPython = Resolve-StarVectorWindowsExecutable $metricsPython
+          $observedMetricsPython = Resolve-StarVectorWindowsExecutable $venvIdentity.executable
+          $observedBasePython = Resolve-StarVectorWindowsExecutable $venvIdentity.base_executable
           if (-not $expectedMetricsPython -or -not $observedMetricsPython -or -not $observedBasePython -or -not [StringComparer]::OrdinalIgnoreCase.Equals($expectedMetricsPython, $observedMetricsPython) -or -not [StringComparer]::OrdinalIgnoreCase.Equals($bootstrapPython, $observedBasePython) -or $venvIdentity.version.Count -ne 3 -or [int]$venvIdentity.version[0] -ne [int]$bootstrapIdentity.version[0] -or [int]$venvIdentity.version[1] -ne [int]$bootstrapIdentity.version[1] -or [int]$venvIdentity.version[2] -ne [int]$bootstrapIdentity.version[2]) { throw 'terminal metrics venv is not bound to the selected exact Python interpreter' }
           & $metricsPython -m pip install --disable-pip-version-check numpy==2.2.6 scikit-image==0.25.2 lpips==0.1.4 torch==2.7.0 torchvision==0.22.0 Pillow==11.3.0 open-clip-torch==3.1.0
           if ($LASTEXITCODE -ne 0) { throw 'failed to install the pinned terminal metrics package closure' }
