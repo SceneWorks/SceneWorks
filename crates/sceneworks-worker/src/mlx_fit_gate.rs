@@ -2133,9 +2133,39 @@ fn mlx_image_anchor_derived_peak(
     overlay: Option<&str>,
     geometry: MemoryGeometry,
 ) -> Option<(u64, String)> {
-    use sceneworks_core::memory_anchor::{
-        AnchorBackend, AnchorLoadShape, AnchorMlxImageDeriveRequest,
-    };
+    use sceneworks_core::memory_anchor::AnchorMlxImageDeriveRequest;
+
+    let anchor = mlx_image_anchor_match(contract, plan, mode_key, overlay, geometry)?;
+    let derived = anchor.derive_mlx_image_phase_peaks(
+        AnchorMlxImageDeriveRequest {
+            width: geometry.width,
+            height: geometry.height,
+        },
+        crate::video_admission::anchor_component_bytes(contract.asset_facts),
+    )?;
+    Some((derived.peak_bytes(), anchor.id.clone()))
+}
+
+/// The measured image anchor this request may borrow from, or `None` — the identity, overlay,
+/// reference, geometry-shape and currency conjuncts of the doc comment on
+/// [`mlx_image_anchor_derived_peak`], factored out (sc-22665) so the anchor-derived arm and the
+/// estimate floor's derived activation residue below grade the SAME anchor against the SAME
+/// guards. A second inline copy is how the two arms would silently disagree about whether the
+/// evidence covers the request.
+///
+/// The REGIME conjuncts are deliberately not here: each consumer's own law entry point states what
+/// it needs of the anchor's measured regime (the lane shim wants the eager unbounded resident
+/// composition; the residue path lets the law's own regime guard decide), and hoisting the
+/// stricter of the two here would silently narrow the other.
+fn mlx_image_anchor_match(
+    contract: &MemoryProviderContract,
+    plan: &MlxRequestPlan,
+    mode_key: &str,
+    overlay: Option<&str>,
+    geometry: MemoryGeometry,
+) -> Option<&'static sceneworks_core::memory_anchor::MemoryAnchor> {
+    use sceneworks_core::memory_anchor::{AnchorBackend, AnchorLoadShape};
+
     if overlay.is_some()
         || geometry.reference_count != 0
         || geometry.frames != 1
@@ -2155,19 +2185,132 @@ fn mlx_image_anchor_derived_peak(
         || anchor.mode != mode_key
         || anchor.overlay.is_some()
         || anchor.reference_count != 0
+        || anchor.underived_reason.is_some()
         || anchor_load_shape != contract.load_shape
         || !crate::video_admission::anchor_currency_matches(anchor)
     {
         return None;
     }
-    let derived = anchor.derive_mlx_image_phase_peaks(
-        AnchorMlxImageDeriveRequest {
-            width: geometry.width,
-            height: geometry.height,
-        },
+    Some(anchor)
+}
+
+/// The regime the graded candidate executes in, in the derivation law's vocabulary (sc-22665):
+/// the engaged composition says which rungs are on, the selection's own parameters say how deeply
+/// each one bounds. A rung that is not engaged contributes `None`, which is what makes the law
+/// price it unbounded.
+///
+/// The parameters are the ones the candidate will actually run with — on the estimate floor those
+/// are `estimate_floor_parameters`' most deeply bounding declared values, which is the same
+/// selection `validate_selection` admits and the same one the provider would be handed.
+fn request_regime(
+    engaged: &[MemoryStrategy],
+    parameters: gen_core::MemoryStrategyParameters,
+) -> sceneworks_core::memory_anchor::RequestRegime {
+    use sceneworks_core::memory_anchor::{DecodeTile, RequestRegime};
+
+    RequestRegime {
+        staged: engaged.contains(&MemoryStrategy::StagedResidency),
+        decode_tile: engaged
+            .contains(&MemoryStrategy::BoundedDecode)
+            .then(|| {
+                Some(DecodeTile {
+                    edge: parameters.decode_tile_edge?,
+                    overlap: parameters.decode_overlap?,
+                })
+            })
+            .flatten(),
+        attention_chunk_scores: engaged
+            .contains(&MemoryStrategy::BoundedAttention)
+            .then_some(parameters.attention_chunk_size)
+            .flatten()
+            .map(u64::from),
+        transformer_window: engaged
+            .contains(&MemoryStrategy::BoundedTransformerResidency)
+            .then_some(parameters.transformer_window_size)
+            .flatten(),
+    }
+}
+
+/// The ACTIVATION term of the estimate floor for one graded candidate (sc-22665, epic 22657 E4):
+/// the sc-22663 image law's per-phase residue for THIS request's regime, plus the MLX lane's
+/// measured allocator envelope above the anchor's active peak — the same lane term
+/// `MemoryAnchor::derive_mlx_image_phase_peaks` adds, because MLX admission is on the allocator
+/// level and dropping it would price below the quantity the gate compares against.
+///
+/// `None` — and the caller keeps [`MlxRequestPlan::generic_headroom_bytes`] — whenever the anchor
+/// does not cover the request (see [`mlx_image_anchor_match`]), the anchor carries no per-phase
+/// allocator decomposition, or the law refuses the derivation. At this pin every packaged MLX
+/// image anchor is outside the law's domain (its conditioning counters never saw its weights), so
+/// this returns `None` for the shipped store and the floor is byte-identical to what it was before
+/// this story; sc-22667 re-captures an in-domain anchor on Apple Silicon.
+///
+/// The composition the caller performs — `estimate_floor_weights_bytes` plus the MAX over phases
+/// of this residue — is the phase-max of the weights plus the phase-max of the activation, which
+/// is at or above the law's own phase-wise max of their sums. Erring large is the correct side on
+/// a gate whose permissive failure mode is an OS Jetsam SIGKILL.
+///
+/// `facts` are the architecture facts the law's rung ratios need. Production passes
+/// [`crate::video_admission::architecture_facts_from_contract`], which states none at this pin —
+/// so the window, the chunk and the tile leave the residue unscaled until sc-22667 wires the real
+/// facts, and the fixture tests below pass the model's own facts explicitly to grade the ratios
+/// themselves.
+#[allow(clippy::too_many_arguments)]
+fn mlx_image_anchor_activation_residue(
+    contract: &MemoryProviderContract,
+    plan: &MlxRequestPlan,
+    mode_key: &str,
+    overlay: Option<&str>,
+    geometry: MemoryGeometry,
+    engaged: &[MemoryStrategy],
+    parameters: gen_core::MemoryStrategyParameters,
+    facts: sceneworks_core::memory_anchor::ArchitectureFacts,
+) -> Option<(u64, String)> {
+    use sceneworks_core::memory_anchor::ImageDeriveRequest;
+
+    let anchor = mlx_image_anchor_match(contract, plan, mode_key, overlay, geometry)?;
+    let allocators = anchor.phase_allocator_envelope_bytes?;
+    let residues = anchor.derive_phase_activation_residues(
+        &ImageDeriveRequest::new(
+            geometry.width,
+            geometry.height,
+            request_regime(engaged, parameters),
+        ),
         crate::video_admission::anchor_component_bytes(contract.asset_facts),
+        facts,
     )?;
-    Some((derived.peak_bytes(), anchor.id.clone()))
+    // The allocator envelope above the anchor's own active peak is retained cache, not a residue
+    // of the law: carried unscaled at or below the anchor geometry and scaled by the output-pixel
+    // ratio above it, exactly as the lane's shim carries it.
+    let anchor_pixels = u128::from(anchor.geometry.width) * u128::from(anchor.geometry.height);
+    let request_pixels = u128::from(geometry.width) * u128::from(geometry.height);
+    let active = anchor.phase_active_peak_bytes;
+    let with_envelope = |residue: u64, allocator: u64, active: u64| -> Option<u64> {
+        let envelope = u128::from(allocator.saturating_sub(active));
+        let envelope = if request_pixels > anchor_pixels && anchor_pixels > 0 {
+            envelope
+                .checked_mul(request_pixels)?
+                .div_ceil(anchor_pixels)
+        } else {
+            envelope
+        };
+        u64::try_from(u128::from(residue).checked_add(envelope)?).ok()
+    };
+    let peak = with_envelope(
+        residues.conditioning,
+        allocators.conditioning,
+        active.conditioning,
+    )?
+    .max(with_envelope(
+        residues.denoise,
+        allocators.denoise,
+        active.denoise,
+    )?)
+    .max(with_envelope(
+        residues.decode,
+        allocators.decode,
+        active.decode,
+    )?);
+    Some((peak, anchor.id.clone()))
 }
 
 /// One estimate-backed candidate synthesized for an implemented-but-unmeasured rung (sc-18096).
@@ -2717,9 +2860,13 @@ fn estimate_floor_parameters(
 ///    conjunct holds. Deliberately AHEAD of the floor: the derivation prices its own uncertainty
 ///    terms, so the selector grades it with no additional allowance, where the floor's activation
 ///    term carries the full measured allocator-envelope allowance.
-/// 3. **Weights + headroom floor** — [`estimate_floor_weights_bytes`] plus the exact same
-///    fixed-reserve + area-scaled headroom the resident baseline charges
-///    ([`MlxRequestPlan::generic_headroom_bytes`]).
+/// 3. **Weights + activation floor** — [`estimate_floor_weights_bytes`] plus an activation term
+///    that is, in preference order (sc-22665, epic 22657 E4): the image derivation law's per-phase
+///    residue for THIS rung's regime, priced off the same measured anchor rung 2 uses
+///    ([`mlx_image_anchor_activation_residue`]), so the request's decode tile, attention chunk and
+///    transformer window reach the estimate; otherwise the exact same fixed-reserve + area-scaled
+///    headroom the resident baseline charges ([`MlxRequestPlan::generic_headroom_bytes`]), which
+///    is what every request the anchor or the law refuses keeps — at this pin, all of them.
 ///
 /// The MLX-conservative estimate margin is NOT applied here — the selector owns margin widening
 /// (`memory_strategy::select_strategy`), exactly as it owns the sc-18095 stale widening.
@@ -2959,7 +3106,26 @@ fn synthesize_estimate_ladder(
             if contract.validate_selection(&selection).is_err() {
                 continue;
             }
-            let floor_activation_bytes = plan.generic_headroom_bytes(geometry);
+            //    Its ACTIVATION term is the sc-22663 law's per-phase residue for this rung's own
+            //    regime whenever the anchor can price it (sc-22665, E4) — so the tile, the
+            //    attention chunk and the transformer window reach the MLX estimate instead of the
+            //    geometry-blind generic headroom, which stays the fallback for every request the
+            //    anchor or the law refuses (at this pin: all of them — see
+            //    `mlx_image_anchor_activation_residue`).
+            let derived_residue = mlx_image_anchor_activation_residue(
+                contract,
+                plan,
+                mode_key,
+                overlay,
+                geometry,
+                &engaged,
+                parameter_candidate.parameters,
+                crate::video_admission::architecture_facts_from_contract(contract),
+            );
+            let floor_activation_bytes = match &derived_residue {
+                Some((residue, _)) => *residue,
+                None => plan.generic_headroom_bytes(geometry),
+            };
             let predicted_peak_bytes = estimate_floor_weights_bytes(contract, &engaged)
                 .saturating_add(floor_activation_bytes);
             tracing::info!(
@@ -2967,6 +3133,10 @@ fn synthesize_estimate_ladder(
                 backend = "mlx",
                 ?strategy,
                 raw_peak_bytes = predicted_peak_bytes,
+                activation_bytes = floor_activation_bytes,
+                activation_anchor = derived_residue
+                    .as_ref()
+                    .map(|(_, anchor_id)| anchor_id.as_str()),
                 "synthesized weights+headroom floor estimate candidate"
             );
             let candidate = SynthesizedEstimate {
@@ -11488,6 +11658,394 @@ mod tests {
                     estimate.selection.strategy
                 );
             }
+        }
+    }
+
+    /// The Qwen-Image bf16 component split and architecture facts the core law's own in-domain
+    /// MLX fixture uses (`a_resident_mlx_anchor_whose_counters_saw_its_weights_prices_the_ladder
+    /// _in_order`): 16.6 GB of Qwen2.5-VL text encoder, ~254 MB of VAE, the rest DiT; 24 heads of
+    /// 128 over 60 blocks, patch 2 on the 16-channel x8 VAE, bf16 activations. Restated here
+    /// because the worker fixture must state the SAME model on both sides of the derivation — the
+    /// contract's asset facts and the anchor's component bytes are one model's, not two.
+    const QWEN_IN_DOMAIN_COMPONENTS: sceneworks_core::memory_anchor::ComponentBytes =
+        sceneworks_core::memory_anchor::ComponentBytes {
+            conditioning: 16_600_000_000,
+            transformer: 40_880_000_000,
+            decoder: 253_806_592,
+        };
+
+    const QWEN_IN_DOMAIN_FACTS: sceneworks_core::memory_anchor::ArchitectureFacts =
+        sceneworks_core::memory_anchor::ArchitectureFacts {
+            attention_heads: Some(24),
+            head_dim: Some(128),
+            transformer_blocks: Some(60),
+            patch_size: Some(2),
+            latent_channels: Some(16),
+            vae_spatial_scale: Some(8),
+            vae_temporal_scale: Some(1),
+            activation_dtype_width: Some(2),
+        };
+
+    /// The flux2 fixture generator with its asset facts restated as [`QWEN_IN_DOMAIN_COMPONENTS`],
+    /// so `anchor_component_bytes` off this contract is exactly the component set the in-domain
+    /// anchor below was built against.
+    fn qwen_in_domain_generator() -> RequestGenerator {
+        let mut generator = flux2_generator();
+        let facts = &mut generator
+            .contract
+            .as_mut()
+            .expect("fixture contract")
+            .asset_facts;
+        facts.conditioning_bytes = QWEN_IN_DOMAIN_COMPONENTS.conditioning;
+        facts.transformer_bytes = QWEN_IN_DOMAIN_COMPONENTS.transformer;
+        facts.decoder_bytes = QWEN_IN_DOMAIN_COMPONENTS.decoder;
+        facts.base_bytes = QWEN_IN_DOMAIN_COMPONENTS.total();
+        generator
+    }
+
+    /// A store whose flux2 q4 row is the SYNTHETIC in-domain resident MLX anchor the core law's
+    /// fixture defines — measured at 1024x1024 with every phase peak the whole component set plus
+    /// a stated activation residue (+0.5 / +6 / +12 GB) and an allocator level a stated envelope
+    /// above each (+0.1 / +1 / +2 GB). The packaged MLX rows are outside the law's domain by
+    /// design (their conditioning counters never saw their weights — core test
+    /// `the_packaged_mlx_anchors_are_outside_the_laws_domain`), and sc-22667 owns re-capturing a
+    /// real one; the identity, route, provider, mode and currency here are the packaged row's, so
+    /// only the numbers are synthetic.
+    fn qwen_in_domain_anchor_store() -> sceneworks_core::memory_anchor::MemoryAnchorStore {
+        use sceneworks_core::memory_anchor::{AnchorGeometry, AnchorPhaseBytes};
+
+        let mut store = flux2_live_anchor_store();
+        let total = QWEN_IN_DOMAIN_COMPONENTS.total();
+        for anchor in &mut store.anchors {
+            if anchor.model_id != "flux2_dev" {
+                continue;
+            }
+            anchor.underived_reason = None;
+            anchor.geometry = AnchorGeometry {
+                width: 1024,
+                height: 1024,
+                frames: 1,
+                fps: None,
+            };
+            anchor.phase_active_peak_bytes = AnchorPhaseBytes {
+                conditioning: total + 500_000_000,
+                denoise: total + 6_000_000_000,
+                decode: total + 12_000_000_000,
+            };
+            anchor.phase_allocator_envelope_bytes = Some(AnchorPhaseBytes {
+                conditioning: total + 500_000_000 + 100_000_000,
+                denoise: total + 6_000_000_000 + 1_000_000_000,
+                decode: total + 12_000_000_000 + 2_000_000_000,
+            });
+            anchor.overall_allocator_envelope_bytes = total + 14_000_000_000;
+        }
+        store
+    }
+
+    /// The estimate the FLOOR arm composes for one rung: the contract-decomposed weights term plus
+    /// the derived activation residue, exactly as `synthesize_estimate_ladder`'s third tier does.
+    /// `None` where the floor would keep `generic_headroom_bytes` instead.
+    fn qwen_in_domain_floor_estimate(
+        generator: &RequestGenerator,
+        engaged: &[MemoryStrategy],
+        parameters: gen_core::MemoryStrategyParameters,
+        facts: sceneworks_core::memory_anchor::ArchitectureFacts,
+    ) -> Option<u64> {
+        let contract = generator.contract.as_ref().expect("contract");
+        let (residue, _) = mlx_image_anchor_activation_residue(
+            contract,
+            &flux2_plan(),
+            "text_to_image",
+            None,
+            MemoryGeometry {
+                width: 1024,
+                height: 1024,
+                batch: 1,
+                frames: 1,
+                reference_count: 0,
+            },
+            engaged,
+            parameters,
+            facts,
+        )?;
+        Some(estimate_floor_weights_bytes(contract, engaged).saturating_add(residue))
+    }
+
+    /// AC 1 (sc-22665, epic 22657 E4) — the MLX estimate floor's activation term is the sc-22663
+    /// law's per-phase residue for the RUNG's own regime, so the decode tile, the attention chunk
+    /// and the transformer window reach the estimate where `generic_headroom_bytes` charged the
+    /// same geometry-blind number to every rung.
+    ///
+    /// Graded on the in-domain resident MLX anchor (see `qwen_in_domain_anchor_store`) at 1024²,
+    /// where the request's 4096 image tokens plus 512 prompt tokens make the full bf16 score
+    /// tensor `24 x 4608² x 2` ≈ 1.02 GB against the 64 Mi-score chunk's 128 MB — the condition
+    /// AC 1 names for the chunked rung to price below the staged one.
+    ///
+    /// MUTATION (the story's): feed `ArchitectureFacts::default()` — what the contract states at
+    /// this pin — and the chunk scales nothing, so rung 3's estimate is rung 2's again. That is
+    /// the honest state of the lane until sc-22667, and it is asserted rather than hidden.
+    #[test]
+    fn the_mlx_estimate_floor_prices_each_rungs_own_regime_through_the_derivation_law() {
+        let generator = qwen_in_domain_generator();
+        let staged = [MemoryStrategy::Resident, MemoryStrategy::StagedResidency];
+        // The ladder's compositions are CUMULATIVE, so the chunked rung tiles decode as well; the
+        // chunk's own contribution is isolated against `tiled` below.
+        let tiled = [
+            MemoryStrategy::Resident,
+            MemoryStrategy::StagedResidency,
+            MemoryStrategy::BoundedDecode,
+        ];
+        let chunked = [
+            MemoryStrategy::Resident,
+            MemoryStrategy::StagedResidency,
+            MemoryStrategy::BoundedDecode,
+            MemoryStrategy::BoundedAttention,
+        ];
+        let windowed = [
+            MemoryStrategy::Resident,
+            MemoryStrategy::StagedResidency,
+            MemoryStrategy::BoundedDecode,
+            MemoryStrategy::BoundedAttention,
+            MemoryStrategy::BoundedTransformerResidency,
+        ];
+        let bare = gen_core::MemoryStrategyParameters::default();
+        let tile_only = gen_core::MemoryStrategyParameters {
+            decode_tile_edge: Some(512),
+            decode_overlap: Some(128),
+            ..Default::default()
+        };
+        let tile_and_chunk = gen_core::MemoryStrategyParameters {
+            attention_chunk_size: Some(64 * 1024 * 1024),
+            ..tile_only
+        };
+        let fully_engaged = gen_core::MemoryStrategyParameters {
+            decode_tile_edge: Some(512),
+            decode_overlap: Some(128),
+            attention_chunk_size: Some(64 * 1024 * 1024),
+            transformer_window_size: Some(1),
+            ..Default::default()
+        };
+
+        let estimate = |engaged: &[MemoryStrategy], parameters, facts| {
+            with_injected_image_anchor_store(qwen_in_domain_anchor_store(), || {
+                qwen_in_domain_floor_estimate(&generator, engaged, parameters, facts)
+            })
+            .expect("the in-domain anchor prices this rung")
+        };
+
+        let rung_2 = estimate(&staged, bare, QWEN_IN_DOMAIN_FACTS);
+        let rung_3 = estimate(&chunked, tile_and_chunk, QWEN_IN_DOMAIN_FACTS);
+        let rung_4 = estimate(&windowed, fully_engaged, QWEN_IN_DOMAIN_FACTS);
+        assert!(
+            rung_3 < rung_2,
+            "the chunked rung must price below the unbounded rung: {rung_3} vs {rung_2}"
+        );
+        assert!(
+            rung_4 < rung_2,
+            "the windowed rung must price below the staged rung: {rung_4} vs {rung_2}"
+        );
+        assert!(
+            rung_4 < rung_3,
+            "the transformer window must price below the chunked rung: {rung_4} vs {rung_3}"
+        );
+
+        // The residue is what moved, not only the weights term: the same rungs graded with an
+        // IDENTICAL weights term still order the same way, and the CHUNK's own contribution is
+        // visible against the same composition tiled but unchunked — at 1024² the denoise phase
+        // binds once decode is tiled, so replacing the ~1.02 GB score tensor with the 128 MB
+        // chunk budget moves the estimate on its own.
+        let residue = |engaged: &[MemoryStrategy], parameters| {
+            with_injected_image_anchor_store(qwen_in_domain_anchor_store(), || {
+                mlx_image_anchor_activation_residue(
+                    generator.contract.as_ref().expect("contract"),
+                    &flux2_plan(),
+                    "text_to_image",
+                    None,
+                    MemoryGeometry {
+                        width: 1024,
+                        height: 1024,
+                        batch: 1,
+                        frames: 1,
+                        reference_count: 0,
+                    },
+                    engaged,
+                    parameters,
+                    QWEN_IN_DOMAIN_FACTS,
+                )
+            })
+            .expect("the in-domain anchor prices this rung")
+            .0
+        };
+        assert!(residue(&tiled, tile_only) < residue(&staged, bare));
+        assert!(
+            residue(&chunked, tile_and_chunk) < residue(&tiled, tile_only),
+            "the attention chunk alone must lower the residue"
+        );
+        // The window is a RESIDENCY bound: it moves the weights term, never the activation one.
+        assert_eq!(
+            residue(&windowed, fully_engaged),
+            residue(&chunked, tile_and_chunk)
+        );
+
+        // MUTATION — with the facts the contract states at THIS pin neither the chunk nor the tile
+        // scales anything, and every rung's residue is the unbounded one again.
+        let blind = sceneworks_core::memory_anchor::ArchitectureFacts::default();
+        assert_eq!(
+            estimate(&chunked, tile_and_chunk, blind),
+            estimate(&staged, bare, blind),
+            "without architecture facts the chunk and the tile cannot shrink the residue"
+        );
+        assert_eq!(
+            crate::video_admission::architecture_facts_from_contract(
+                generator.contract.as_ref().expect("contract")
+            ),
+            blind,
+            "the contract states no architecture facts at this pin (sc-22667 wires them)"
+        );
+    }
+
+    /// AC 2 — the derived residue reaches the LADDER, per rung, and the packaged-anchor refusal
+    /// keeps the weights-plus-generic-headroom floor byte for byte.
+    ///
+    /// The differential is the anchor's own measured regime. An anchor measured under
+    /// `bounded_attention` is refused by the rung-2 lane shim (`derive_mlx_image_phase_peaks`
+    /// wants the eager unbounded resident composition) AND by the law for any request that does
+    /// not chunk — so on one ladder the staged and bounded-decode rungs keep the generic headroom
+    /// while the bounded-attention rung's floor is the law's residue. That is the wiring this
+    /// story adds, visible as a per-rung difference no `generic_headroom_bytes` can produce.
+    #[test]
+    fn the_ladder_floor_takes_the_derived_residue_per_rung_and_falls_back_when_refused() {
+        use crate::memory_strategy::CandidateBasis;
+
+        let generator = qwen_in_domain_generator();
+        let contract = generator.contract.as_ref().expect("contract");
+        let plan = flux2_plan();
+        let geometry = MemoryGeometry {
+            width: 1024,
+            height: 1024,
+            batch: 1,
+            frames: 1,
+            reference_count: 0,
+        };
+        let mut store = qwen_in_domain_anchor_store();
+        for anchor in &mut store.anchors {
+            if anchor.model_id == "flux2_dev" {
+                anchor.measured_regime.attention_chunked = true;
+            }
+        }
+        let ladder = with_injected_image_anchor_store(store.clone(), || {
+            synthesize_estimate_ladder(
+                contract,
+                &plan,
+                "text_to_image",
+                None,
+                geometry,
+                false,
+                None,
+                &[],
+            )
+        });
+        assert!(!ladder.estimates.is_empty());
+        let generic = plan.generic_headroom_bytes(geometry);
+        let mut saw_derived = false;
+        let mut saw_generic = false;
+        for estimate in &ladder.estimates {
+            assert_eq!(
+                estimate.basis,
+                CandidateBasis::EstimateFloor,
+                "{:?}: a chunk-measured anchor cannot price the rung-2 lane shim",
+                estimate.selection.strategy
+            );
+            let engaged = contract.engaged_composition_for_selection(&estimate.selection);
+            let weights = estimate_floor_weights_bytes(contract, &engaged);
+            let activation = estimate
+                .evidence
+                .predicted_peak_bytes
+                .checked_sub(weights)
+                .expect("the floor is its weights term plus an activation term");
+            assert_eq!(
+                estimate.unmodeled_activation_bytes,
+                Some(activation),
+                "{:?}: the declared activation slice is the one the peak was built from",
+                estimate.selection.strategy
+            );
+            if engaged.contains(&MemoryStrategy::BoundedAttention) {
+                let (residue, anchor_id) = with_injected_image_anchor_store(store.clone(), || {
+                    mlx_image_anchor_activation_residue(
+                        contract,
+                        &plan,
+                        "text_to_image",
+                        None,
+                        geometry,
+                        &engaged,
+                        estimate.selection.parameters,
+                        crate::video_admission::architecture_facts_from_contract(contract),
+                    )
+                })
+                .expect("the chunked rung's regime is inside the law's domain");
+                assert_eq!(
+                    anchor_id,
+                    store
+                        .image_anchor_for(
+                            "flux2_dev",
+                            sceneworks_core::memory_anchor::AnchorBackend::Mlx,
+                            "q4",
+                        )
+                        .expect("the injected q4 anchor")
+                        .id,
+                    "the residue must come from the anchor the arm above graded"
+                );
+                assert_eq!(activation, residue);
+                assert_ne!(
+                    activation, generic,
+                    "a derived residue that happened to equal the generic headroom would make \
+                     this test vacuous"
+                );
+                saw_derived = true;
+            } else {
+                assert_eq!(
+                    activation, generic,
+                    "{:?}: an unchunked request leaves a chunk-measured anchor's residue \
+                     unpriced and keeps the generic headroom",
+                    estimate.selection.strategy
+                );
+                saw_generic = true;
+            }
+        }
+        assert!(
+            saw_derived && saw_generic,
+            "the ladder must show BOTH activation terms for this test to say anything"
+        );
+
+        // AC 2's refusal fallback, pinned: the PACKAGED anchors (negative conditioning residue)
+        // price nothing, and every rung's floor is the weights term plus the generic headroom,
+        // byte for byte — exactly what it was before this story.
+        let ladder = with_injected_image_anchor_store(flux2_live_anchor_store(), || {
+            synthesize_estimate_ladder(
+                contract,
+                &plan,
+                "text_to_image",
+                None,
+                geometry,
+                false,
+                None,
+                &[],
+            )
+        });
+        assert!(
+            !ladder.estimates.is_empty(),
+            "fail to the floor, never refuse"
+        );
+        for estimate in &ladder.estimates {
+            assert_eq!(estimate.basis, CandidateBasis::EstimateFloor);
+            let engaged = contract.engaged_composition_for_selection(&estimate.selection);
+            assert_eq!(
+                estimate.evidence.predicted_peak_bytes,
+                estimate_floor_weights_bytes(contract, &engaged).saturating_add(generic),
+                "{:?}: a refused anchor leaves the weights+generic-headroom floor untouched",
+                estimate.selection.strategy
+            );
+            assert_eq!(estimate.unmodeled_activation_bytes, Some(generic));
         }
     }
 

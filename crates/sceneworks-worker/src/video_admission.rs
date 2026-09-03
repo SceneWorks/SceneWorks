@@ -1225,6 +1225,28 @@ pub(crate) fn anchor_component_bytes(
     }
 }
 
+/// The architecture facts the image derivation law scales its residues by (sc-22663, epic 22657
+/// E3), read off the live provider contract — the companion translation to
+/// [`anchor_component_bytes`], shared by both image lanes' anchor consumers.
+///
+/// AT THIS PIN THE CONTRACT CARRIES NONE. `gen_core` at inference `670dc1f4` has no architecture
+/// block on [`gen_core::MemoryProviderContract`], so this returns
+/// [`sceneworks_core::memory_anchor::ArchitectureFacts::default()`] — every fact `None`, which the
+/// law documents as "leave the residue this fact would have scaled UNSCALED". That is the
+/// conservative direction and nothing more: with no facts the windowed and chunked rungs price at
+/// their unbounded residue rather than below it (core test
+/// `missing_facts_leave_residues_unscaled_and_never_shrink_the_estimate`), so a consumer wired
+/// through here is never optimistic about a bound it cannot see.
+///
+/// The terminal story of this epic (sc-22667) reads the real facts off the contract once the pin
+/// carries them; this function is the single seam that then changes, and the fixture tests that
+/// grade the law itself pass their facts explicitly rather than through it.
+pub(crate) fn architecture_facts_from_contract(
+    _contract: &MemoryProviderContract,
+) -> sceneworks_core::memory_anchor::ArchitectureFacts {
+    sceneworks_core::memory_anchor::ArchitectureFacts::default()
+}
+
 /// Derive per-phase peaks from the measured memory anchor for this
 /// `(model, tier, lane, transformer variant, decoder)` coordinate (sc-22507, epic 22505), for the
 /// exact regime of the candidate being graded.
