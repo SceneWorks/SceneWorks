@@ -284,6 +284,12 @@ fn instantid_pid_gpu_smoke() {
                 ),
         )
         .expect("stage SDXL components"),
+        // Declare the two resident overlays the contract prices (epic sc-22657, E1) so this smoke
+        // loads the same composition the worker does: the OpenPose ControlNet (when the env dir is
+        // set) and the SCRFD + ArcFace dir. The `with_openpose` / `with_face` calls below re-seal
+        // onto the same composition, so the documented attach order is unchanged.
+        openpose: openpose.as_ref().map(|dir| WeightsSource::Dir(dir.clone())),
+        face_dir: Some(face_dir.clone()),
     })
     .expect("load candle InstantId");
     // Attach OpenPose (pose mode) BEFORE the face stack — the engine's documented order. Harmless for

@@ -1,7 +1,7 @@
 {
   "_comment": "Per-model loader-closure digests: the memory anchor currency key (sc-22511). An anchor is CURRENT while the digest it recorded still equals the digest here for its (model, backend lane). The unit is the source files the model's loader reaches, and nothing else — not the pin, not sibling models, not shared crates the loader never reaches. Regenerate when the pinned inference revision changes: node scripts/anchor-loader-closure.mjs --repo <inference> --write. A regeneration that leaves the digests unchanged is the expected case.",
   "digestVersion": "anchor-loader-closure v2",
-  "inferenceRevision": "670dc1f4418859cf241471987a0a050fedc108c5",
+  "inferenceRevision": "a5f643ae58a4ed81e6be8280afbf29750da5ffe2",
   "models": {
     "flux2_dev:mlx": {
       "entryPoints": [
@@ -9,8 +9,8 @@
         "crates/media/mlx-gen/mlx-gen-flux2/src/memory_strategy.rs",
         "crates/media/mlx-gen/mlx-gen-flux2/src/model.rs"
       ],
-      "digest": "2db51fb9c661e720b1f4346494d7df81c9f1d078881038016e606e7c993794a9",
-      "closureFileCount": 136,
+      "digest": "6d583298f4e47f269da90b42d19f8a219608a1c8e36a1d6c3bfac00eae4ee078",
+      "closureFileCount": 137,
       "closureFiles": [
         "crates/contracts/core-llm/src/constraint.rs",
         "crates/contracts/core-llm/src/error.rs",
@@ -124,6 +124,7 @@
         "crates/media/mlx-gen/mlx-gen-pid/src/tiling.rs",
         "crates/media/mlx-gen/src/adapters.rs",
         "crates/media/mlx-gen/src/adapters/loader.rs",
+        "crates/media/mlx-gen/src/architecture_facts.rs",
         "crates/media/mlx-gen/src/array.rs",
         "crates/media/mlx-gen/src/asset_facts.rs",
         "crates/media/mlx-gen/src/attention.rs",
@@ -154,8 +155,8 @@
       "entryPoints": [
         "crates/media/candle-gen/candle-gen-krea/src/lib.rs"
       ],
-      "digest": "a82252d022fb4da6cffa8b082492b2b9eb49546d3180501b2514e7a42ac12473",
-      "closureFileCount": 142,
+      "digest": "789623b362277218391fc0610b7067b8750da81ee843bbda72b95aa1e28385d8",
+      "closureFileCount": 143,
       "closureFiles": [
         "crates/contracts/gen-core/src/approximation.rs",
         "crates/contracts/gen-core/src/attention_budget.rs",
@@ -261,6 +262,7 @@
         "crates/media/candle-gen/candle-gen-qwen-image/src/vision.rs",
         "crates/media/candle-gen/candle-gen-qwen-image/src/vision_language.rs",
         "crates/media/candle-gen/candle-gen-qwen-image/src/vl_tokenizer.rs",
+        "crates/media/candle-gen/candle-gen/src/architecture_facts.rs",
         "crates/media/candle-gen/candle-gen/src/attention.rs",
         "crates/media/candle-gen/candle-gen/src/block_window.rs",
         "crates/media/candle-gen/candle-gen/src/comfyui_vae.rs",
@@ -306,8 +308,8 @@
         "crates/media/mlx-gen/mlx-gen-ltx/src/memory_strategy.rs",
         "crates/media/mlx-gen/mlx-gen-ltx/src/model.rs"
       ],
-      "digest": "d3ea90ce009dfdbc4f37898deb8cc8d306f97e82ec484c831b04f80e353a89e7",
-      "closureFileCount": 171,
+      "digest": "14589033608acbeb7fc7b3cef10681cbe2299107dff70654eecdd56db628a953",
+      "closureFileCount": 172,
       "closureFiles": [
         "crates/contracts/core-llm/src/cancel.rs",
         "crates/contracts/core-llm/src/capabilities.rs",
@@ -456,6 +458,7 @@
         "crates/media/mlx-gen/mlx-gen-ltx/src/vocoder.rs",
         "crates/media/mlx-gen/src/adapters.rs",
         "crates/media/mlx-gen/src/adapters/loader.rs",
+        "crates/media/mlx-gen/src/architecture_facts.rs",
         "crates/media/mlx-gen/src/array.rs",
         "crates/media/mlx-gen/src/asset_facts.rs",
         "crates/media/mlx-gen/src/attention.rs",
@@ -487,8 +490,8 @@
         "crates/media/mlx-gen/mlx-gen-ltx/src/memory_strategy_2_5.rs",
         "crates/media/mlx-gen/mlx-gen-ltx/src/model.rs"
       ],
-      "digest": "fd06be5128df3628b06534828cd867b1e4d3789f628d833e67a20e64159a1064",
-      "closureFileCount": 171,
+      "digest": "c37a94e633669e76f81caec6930692ac0778126f9c7c92dee60f1702171b1981",
+      "closureFileCount": 172,
       "closureFiles": [
         "crates/contracts/core-llm/src/cancel.rs",
         "crates/contracts/core-llm/src/capabilities.rs",
@@ -637,6 +640,7 @@
         "crates/media/mlx-gen/mlx-gen-ltx/src/vocoder.rs",
         "crates/media/mlx-gen/src/adapters.rs",
         "crates/media/mlx-gen/src/adapters/loader.rs",
+        "crates/media/mlx-gen/src/architecture_facts.rs",
         "crates/media/mlx-gen/src/array.rs",
         "crates/media/mlx-gen/src/asset_facts.rs",
         "crates/media/mlx-gen/src/attention.rs",
@@ -668,8 +672,8 @@
         "crates/media/candle-gen/candle-gen-qwen-image/src/lib.rs",
         "crates/media/candle-gen/candle-gen-qwen-image/src/memory_strategy.rs"
       ],
-      "digest": "0d893867b00015361927fdfbe6cb2b2d2eb62662f476787e325158e32e38194c",
-      "closureFileCount": 112,
+      "digest": "e45fa797eb4369736b4a6bf55e124d9d18b6218aba2f96c7c64c633005279327",
+      "closureFileCount": 113,
       "closureFiles": [
         "crates/contracts/gen-core/src/approximation.rs",
         "crates/contracts/gen-core/src/attention_budget.rs",
@@ -747,6 +751,7 @@
         "crates/media/candle-gen/candle-gen-qwen-image/src/vision.rs",
         "crates/media/candle-gen/candle-gen-qwen-image/src/vision_language.rs",
         "crates/media/candle-gen/candle-gen-qwen-image/src/vl_tokenizer.rs",
+        "crates/media/candle-gen/candle-gen/src/architecture_facts.rs",
         "crates/media/candle-gen/candle-gen/src/attention.rs",
         "crates/media/candle-gen/candle-gen/src/block_window.rs",
         "crates/media/candle-gen/candle-gen/src/comfyui_vae.rs",
@@ -790,8 +795,8 @@
         "crates/media/mlx-gen/mlx-gen-qwen-image/src/memory_strategy.rs",
         "crates/media/mlx-gen/mlx-gen-qwen-image/src/model.rs"
       ],
-      "digest": "fbb598acdf3cf1ef722c87cdc7d82d1cf5a40e150712c44c6778fe4bbbcc5854",
-      "closureFileCount": 159,
+      "digest": "d126ae63eb1b9eaabebaaad0c9cb1a4cabea6fd4813676ad4e92697548e36221",
+      "closureFileCount": 160,
       "closureFiles": [
         "crates/contracts/core-llm/src/constraint.rs",
         "crates/contracts/core-llm/src/error.rs",
@@ -923,6 +928,7 @@
         "crates/media/mlx-gen/mlx-gen-wan/src/vae_common.rs",
         "crates/media/mlx-gen/src/adapters.rs",
         "crates/media/mlx-gen/src/adapters/loader.rs",
+        "crates/media/mlx-gen/src/architecture_facts.rs",
         "crates/media/mlx-gen/src/array.rs",
         "crates/media/mlx-gen/src/asset_facts.rs",
         "crates/media/mlx-gen/src/attention.rs",
@@ -959,8 +965,8 @@
         "crates/media/candle-gen/candle-gen-z-image/src/lib.rs",
         "crates/media/candle-gen/candle-gen-z-image/src/memory_strategy.rs"
       ],
-      "digest": "d898a646af0d63830df11c8174499d068b4de867f2c5f5c7c4aa0737f3c711fe",
-      "closureFileCount": 108,
+      "digest": "3a21e5af4a065d86fac09d6edd53d7181a9ad5ab48f53a431fe5f0bf8273b87a",
+      "closureFileCount": 109,
       "closureFiles": [
         "crates/contracts/gen-core/src/approximation.rs",
         "crates/contracts/gen-core/src/attention_budget.rs",
@@ -1034,6 +1040,7 @@
         "crates/media/candle-gen/candle-gen-z-image/src/preview.rs",
         "crates/media/candle-gen/candle-gen-z-image/src/quant.rs",
         "crates/media/candle-gen/candle-gen-z-image/src/training.rs",
+        "crates/media/candle-gen/candle-gen/src/architecture_facts.rs",
         "crates/media/candle-gen/candle-gen/src/attention.rs",
         "crates/media/candle-gen/candle-gen/src/block_window.rs",
         "crates/media/candle-gen/candle-gen/src/cuda_arch.rs",
@@ -1077,8 +1084,8 @@
         "crates/media/mlx-gen/mlx-gen-z-image/src/memory_strategy.rs",
         "crates/media/mlx-gen/mlx-gen-z-image/src/model.rs"
       ],
-      "digest": "42810ab3d6030fddbdee0961e8ca671c1fa78d4d870719f95548fb79afbf93d7",
-      "closureFileCount": 136,
+      "digest": "dccbde61a8d9765bf91120923842d6a0ee1b6982fb5619bb325db09d7689533f",
+      "closureFileCount": 137,
       "closureFiles": [
         "crates/contracts/core-llm/src/constraint.rs",
         "crates/contracts/core-llm/src/error.rs",
@@ -1187,6 +1194,7 @@
         "crates/media/mlx-gen/mlx-gen-z-image/src/vae/up_sampler.rs",
         "crates/media/mlx-gen/src/adapters.rs",
         "crates/media/mlx-gen/src/adapters/loader.rs",
+        "crates/media/mlx-gen/src/architecture_facts.rs",
         "crates/media/mlx-gen/src/array.rs",
         "crates/media/mlx-gen/src/asset_facts.rs",
         "crates/media/mlx-gen/src/attention.rs",

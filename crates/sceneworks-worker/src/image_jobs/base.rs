@@ -10398,7 +10398,17 @@ mod candle_resolved_tier_contract_tests {
     fn seed_only_tier(root: &Path, tier: &str) {
         let transformer = root.join(tier).join("transformer");
         std::fs::create_dir_all(&transformer).expect("tier transformer dir");
-        std::fs::write(transformer.join("model.safetensors"), b"x")
+        // A syntactically VALID, tensor-free safetensors file rather than the pre-sc-22667 one-byte
+        // `b"x"` marker. The tier probe this fixture serves only needs the file to EXIST, but since
+        // the sc-22657 pin the shared image contract prices every staged component by reading its
+        // safetensors HEADER (`gen_core::materialized_header_bytes`), and a one-byte file cannot
+        // even yield the 8-byte header length — the read failed with "failed to fill whole buffer"
+        // and took the whole contract down. An empty header keeps the marker's meaning (this tier is
+        // present) while pricing it at the zero bytes it actually materializes.
+        let header = br#"{}"#;
+        let mut empty_safetensors = (header.len() as u64).to_le_bytes().to_vec();
+        empty_safetensors.extend_from_slice(header);
+        std::fs::write(transformer.join("model.safetensors"), &empty_safetensors)
             .expect("tier presence marker");
         let config = match tier {
             "q4" => r#"{"quantization":{"bits":4,"group_size":64}}"#,

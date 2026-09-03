@@ -845,9 +845,20 @@ fn krea_test_artifact_root(tier: &str) -> std::path::PathBuf {
             .expect("Krea encoder contract");
         for (tier, bits) in [("q4", Some(4)), ("q8", Some(8)), ("bf16", None)] {
             let tier_root = root.join(tier);
-            gen_core_testkit::write_encoder_contract_fixture(
+            // AT THE TIER'S QUANTIZATION, not dense (sc-22667). The `bits` this loop already uses
+            // for the transformer's `config.json` describe the whole tier's snapshot: a q4 Krea
+            // store holds a q4 text encoder too. Writing a dense encoder for every tier was
+            // invisible while the pinned contract published `MemoryAssetFacts::default()`, but the
+            // sc-22657 contract prices `conditioning_bytes` from this fixture's safetensors
+            // HEADERS — dense made q4's encoder 15.69 GB, four times the packaged anchor's whole
+            // 3.83 GB measured conditioning peak, so the derivation law correctly refused a
+            // conditioning residency the measurement contradicts and every Krea derivation test
+            // below went unpriceable. At the tier's own width it is 3.76 GB, i.e. the anchor's
+            // measured peak less ~64 MB of activation — the composition that measurement saw.
+            gen_core_testkit::write_encoder_contract_fixture_with_quant(
                 &tier_root.join("text_encoder"),
                 contract,
+                bits,
             )
             .expect("write sparse Krea encoder fixture");
             // Per tier, not once at the end: the moment between the testkit's `set_len` and the
