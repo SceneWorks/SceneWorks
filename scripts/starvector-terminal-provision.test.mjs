@@ -15,6 +15,9 @@ import { validateTerminalServiceClosure } from "./starvector-terminal-readiness.
 const execFile = promisify(execFileCallback);
 const digest = (value) => createHash("sha256").update(value).digest("hex");
 const workflow = await readFile(".github/workflows/starvector-terminal-provision.yml", "utf8");
+const windowsWorkflow = await readFile(".github/workflows/desktop-windows.yml", "utf8");
+const windowsPythonProbe = await readFile("scripts/select-starvector-windows-python.ps1", "utf8");
+const windowsPythonProbeTest = await readFile("scripts/select-starvector-windows-python.test.ps1", "utf8");
 
 test("file and tree identities stream exact bytes with bounded reads and portable ordering", async () => {
   const chunks = [Buffer.from("large-file-"), Buffer.from("identity")];
@@ -75,24 +78,47 @@ test("provision workflow is dispatch-only and never runs a model, service, campa
 
 function assertWindowsMetricsPythonContract(step) {
   assert.doesNotMatch(step, /\bpy\s+-3\.11\b/);
-  assert.doesNotMatch(step, /IsPathFullyQualified/);
-  assert.match(step, /Get-Command python\.exe -All -CommandType Application/);
-  assert.match(step, /\$text -match '\[\\r\\n"\]'/);
-  assert.match(step, /\$text -notmatch '\^\[A-Za-z\]:\\\\'/);
-  assert.match(step, /\[IO\.Path\]::GetFullPath\(\$text\)/);
-  assert.match(step, /Test-Path -LiteralPath \$full -PathType Leaf/);
-  assert.match(step, /sys\.executable/);
-  assert.match(step, /version\":\[sys\.version_info\.major,sys\.version_info\.minor,sys\.version_info\.micro\]/);
-  assert.match(step, /\[int\]\$identity\.version\[1\] -ge 12/);
+  assert.match(step, /select-starvector-windows-python\.ps1/);
+  assert.match(step, /\$bootstrap = Select-StarVectorBootstrapPython/);
+  assert.match(step, /\$bootstrapPython = \$bootstrap\.Executable/);
+  assert.match(step, /\$bootstrapIdentity = \$bootstrap\.Identity/);
+  assert.doesNotMatch(step, /& \$candidate/);
   assert.match(step, /& \$bootstrapPython -m venv \$metricsRoot/);
   assert.match(step, /if \(\$LASTEXITCODE -ne 0\) \{ throw 'failed to create the terminal metrics venv/);
   assert.match(step, /Test-Path \$metricsPython -PathType Leaf/);
-  assert.match(step, /base_executable\":getattr\(sys,"_base_executable",None\)/);
-  assert.match(step, /\$observedBasePython = & \$canonicalDriveExecutable \$venvIdentity\.base_executable/);
+  assert.match(step, /Invoke-StarVectorPythonIdentityProbe -Executable \$metricsPython -IncludeBaseExecutable/);
+  assert.match(step, /if \(\$venvProbe\.ExitCode -ne 0\) \{ throw 'terminal metrics venv Python identity probe failed/);
+  assert.match(step, /\$venvProbe\.StdOut \| ConvertFrom-Json -ErrorAction Stop/);
+  assert.match(step, /\$observedBasePython = Resolve-StarVectorWindowsExecutable \$venvIdentity\.base_executable/);
   assert.match(step, /OrdinalIgnoreCase\.Equals\(\$bootstrapPython, \$observedBasePython\)/);
   assert.match(step, /\[int\]\$venvIdentity\.version\[2\] -ne \[int\]\$bootstrapIdentity\.version\[2\]/);
   assert.match(step, /& \$metricsPython -m pip install/);
   assert.match(step, /starvector-terminal-provision\.mjs metrics[^\n]*\$metricsRoot \$metricsPython/);
+}
+
+function assertWindowsPythonProbeContract(source) {
+  assert.match(source, /Get-Command python\.exe -All -CommandType Application/);
+  assert.match(source, /\$text -match '\[\\r\\n"\]'/);
+  assert.match(source, /\$text -notmatch '\^\[A-Za-z\]:\\\\'/);
+  assert.match(source, /\[IO\.Path\]::GetFullPath\(\$text\)/);
+  assert.match(source, /Test-Path -LiteralPath \$full -PathType Leaf/);
+  assert.match(source, /New-Object System\.Diagnostics\.ProcessStartInfo/);
+  assert.match(source, /\$startInfo\.FileName = \$Executable/);
+  assert.match(source, /\$startInfo\.UseShellExecute = \$false/);
+  assert.match(source, /\$startInfo\.RedirectStandardOutput = \$true/);
+  assert.match(source, /\$startInfo\.RedirectStandardError = \$true/);
+  assert.match(source, /\$startInfo\.CreateNoWindow = \$true/);
+  assert.match(source, /\$stdoutTask = \$process\.StandardOutput\.ReadToEndAsync\(\)/);
+  assert.match(source, /\$stderrTask = \$process\.StandardError\.ReadToEndAsync\(\)/);
+  assert.match(source, /\$process\.WaitForExit\(\)/);
+  assert.match(source, /ExitCode = \$process\.ExitCode/);
+  assert.match(source, /StdOut = \$stdoutTask\.Result/);
+  assert.match(source, /StdErr = \$stderrTask\.Result/);
+  assert.match(source, /base_executable'':getattr\(sys,''_base_executable'',None\)/);
+  assert.match(source, /if \(\$probe\.ExitCode -ne 0\) \{ continue \}/);
+  assert.match(source, /\$probe\.StdOut \| ConvertFrom-Json -ErrorAction Stop/);
+  assert.match(source, /\[int\]\$identity\.version\[1\] -ge 12/);
+  assert.doesNotMatch(source, /& \$candidate|Invoke-Expression|Start-Process/);
 }
 
 test("Windows metrics provisioning selects, uses, and verifies one explicit Python 3.12+ executable", () => {
@@ -108,15 +134,43 @@ test("Windows metrics provisioning selects, uses, and verifies one explicit Pyth
   }
 });
 
+test("Windows Python probes capture native stderr without invoking through PowerShell", () => {
+  assertWindowsPythonProbeContract(windowsPythonProbe);
+  assert.match(windowsPythonProbeTest, /\$ErrorActionPreference = 'Stop'/);
+  assert.match(windowsPythonProbeTest, /01-bad python\.exe/);
+  assert.match(windowsPythonProbeTest, /02-malformed python\.exe/);
+  assert.match(windowsPythonProbeTest, /03-valid python\.exe/);
+  assert.match(windowsPythonProbeTest, /Traceback from the first fake Python candidate/);
+  assert.match(windowsPythonProbeTest, /Select-StarVectorBootstrapPython -CandidatePaths @\(\$bad, \$malformed,/);
+  assert.match(windowsPythonProbeTest, /all invalid candidates must fail closed/);
+  assert.match(windowsWorkflow, /"scripts\/select-starvector-windows-python\.ps1"/);
+  assert.match(windowsWorkflow, /"scripts\/select-starvector-windows-python\.test\.ps1"/);
+  assert.match(windowsWorkflow, /shell: powershell\s+run: \.\\scripts\\select-starvector-windows-python\.test\.ps1/);
+});
+
+test("Windows Python probe contract rejects native-process safety mutations", () => {
+  for (const [label, mutation] of [
+    ["shell execution", (value) => value.replace("$startInfo.UseShellExecute = $false", "$startInfo.UseShellExecute = $true")],
+    ["stdout capture", (value) => value.replace("$startInfo.RedirectStandardOutput = $true", "$startInfo.RedirectStandardOutput = $false")],
+    ["stderr capture", (value) => value.replace("$startInfo.RedirectStandardError = $true", "$startInfo.RedirectStandardError = $false")],
+    ["candidate path binding", (value) => value.replace("$startInfo.FileName = $Executable", "$startInfo.FileName = 'python.exe'")],
+    ["exit status", (value) => value.replace("ExitCode = $process.ExitCode", "ExitCode = 0")],
+    ["bad-candidate continuation", (value) => value.replace("if ($probe.ExitCode -ne 0) { continue }", "if ($probe.ExitCode -ne 0) { break }")],
+    ["PowerShell invocation", (value) => value.replace("$probe = Invoke-StarVectorPythonIdentityProbe -Executable $canonicalCandidate", "$probe = & $candidate -c $code")],
+  ]) {
+    const changed = mutation(windowsPythonProbe);
+    assert.notEqual(changed, windowsPythonProbe, `${label} mutation must alter the helper fixture`);
+    assert.throws(() => assertWindowsPythonProbeContract(changed), { name: "AssertionError" }, label);
+  }
+});
+
 test("Windows metrics Python contract rejects path, base-interpreter, and patch-version guard mutations", () => {
   const start = workflow.indexOf("- name: Provision pinned metric runtime and official checkpoints", workflow.indexOf("  provision-windows:"));
   const end = workflow.indexOf("- name: Materialize the exact pinned 120-row corpus", start);
   const step = workflow.slice(start, end);
   for (const [label, mutation] of [
-    ["drive-absolute guard", (value) => value.replace("$text -notmatch '^[A-Za-z]:\\\\'", "$text -notmatch '^\\\\'")],
-    ["unsafe quoting guard", (value) => value.replace("$text -match '[\\r\\n\"]'", "$text -match '[\\r\\n]'")],
-    ["PowerShell 5.1 canonicalization", (value) => value.replace("[IO.Path]::GetFullPath($text)", "$text")],
-    ["venv base executable", (value) => value.replace('"_base_executable",None', '"executable",None')],
+    ["selection helper", (value) => value.replace("$bootstrap = Select-StarVectorBootstrapPython", "$bootstrap = Get-Command python.exe")],
+    ["venv captured probe", (value) => value.replace("$venvProbe = Invoke-StarVectorPythonIdentityProbe -Executable $metricsPython -IncludeBaseExecutable", "$venvProbe = & $metricsPython -c $code")],
     ["base path equality", (value) => value.replace("OrdinalIgnoreCase.Equals($bootstrapPython, $observedBasePython)", "OrdinalIgnoreCase.Equals($bootstrapPython, $bootstrapPython)")],
     ["patch version equality", (value) => value.replace("[int]$venvIdentity.version[2] -ne [int]$bootstrapIdentity.version[2]", "[int]$venvIdentity.version[2] -ne [int]$venvIdentity.version[2]")],
   ]) {
