@@ -10,6 +10,7 @@ import path from "node:path";
 import { inventory } from "./starvector-terminal-producer.mjs";
 import { isExecutedModule } from "./starvector-terminal-cli.mjs";
 import { fileSha256 } from "./lib/file-sha256.mjs";
+import { sortTerminalTreeEntries, terminalTreeEntry, terminalTreeSha256 } from "./lib/terminal-tree-identity.mjs";
 
 const execFile = promisify(execFileCallback);
 const SHA256 = /^[a-f0-9]{64}$/;
@@ -38,11 +39,11 @@ export async function tree(root, symlinkBoundary = root, digestFile = fileSha256
     const file = path.join(root, name), info = await lstat(file);
     if (info.isDirectory()) continue;
     const regular = await sourceFile(symlinkBoundary, boundaryReal, file);
-    entries.push({ path: name.split(path.sep).join("/"), byte_size: regular.size, sha256: await digestFile(file) });
+    entries.push(terminalTreeEntry(name.split(path.sep).join("/"), regular.size, await digestFile(file)));
   }
-  entries.sort((left, right) => left.path < right.path ? -1 : left.path > right.path ? 1 : 0);
-  if (entries.length === 0) die(`source tree is empty: ${root}`);
-  return { entries, aggregate_sha256: sha(JSON.stringify(entries)) };
+  const canonicalEntries = sortTerminalTreeEntries(entries);
+  if (canonicalEntries.length === 0) die(`source tree is empty: ${root}`);
+  return { entries: canonicalEntries, aggregate_sha256: terminalTreeSha256(canonicalEntries) };
 }
 
 async function copyTree(source, destination, symlinkBoundary = source) {

@@ -7,6 +7,7 @@ import path from "node:path";
 import test from "node:test";
 import { promisify } from "node:util";
 import { treeIdentity, validateCorpusAssets, validateTerminalServiceClosure } from "./starvector-terminal-readiness.mjs";
+import { terminalTreeEntry, terminalTreeSha256 } from "./lib/terminal-tree-identity.mjs";
 import { closureTreeHash, copyRegularTree, productServiceBackendEnv, productServiceBuildArgs, productServiceStateRoot } from "./starvector-terminal-product-service.mjs";
 
 const workflow = await readFile(".github/workflows/starvector-terminal.yml", "utf8");
@@ -67,8 +68,8 @@ test("product service streams copied closure identity and preserves portable ord
   assert.equal(copied.length, 4);
   const hashed = [];
   const identity = await closureTreeHash(destination, async (file) => { hashed.push(file); return hash(await readFile(file)); });
-  const rows = [["nested/a.bin", 1, hash("a")], ["z.bin", 1, hash("z")]];
-  assert.equal(identity, hash(JSON.stringify(rows)));
+  const rows = [terminalTreeEntry("nested/a.bin", 1, hash("a")), terminalTreeEntry("z.bin", 1, hash("z"))];
+  assert.equal(identity, terminalTreeSha256(rows));
   assert.equal(hashed.length, 2);
   await symlink(path.join(source, "z.bin"), path.join(source, "link"));
   await assert.rejects(() => copyRegularTree(source, path.join(root, "rejected")), /weights closure rejects symlink/);
@@ -110,7 +111,7 @@ test("readiness validates the complete service tree closure without materializin
   await writeFile(path.join(root, "app", "receipts.json"), "receipts"); await writeFile(path.join(root, "hf", "weights.bin"), "weights");
   const tree = async (name) => {
     const file = path.join(root, name, name === "app" ? "receipts.json" : "weights.bin"), bytes = await readFile(file);
-    return hash(JSON.stringify([[path.basename(file), bytes.length, hash(bytes)]]));
+    return terminalTreeSha256([terminalTreeEntry(path.basename(file), bytes.length, hash(bytes))]);
   };
   const weights = { models: { "starvector-1b": {}, "starvector-8b": {} }, terminal_service_closure: { app_data_relative_path: "app", app_data_sha256: await tree("app"), hf_home_relative_path: "hf", hf_home_sha256: await tree("hf") } };
   const result = await validateTerminalServiceClosure(root, weights);

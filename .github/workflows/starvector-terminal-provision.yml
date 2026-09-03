@@ -179,12 +179,49 @@ jobs:
       - name: Provision pinned metric runtime and official checkpoints
         shell: powershell
         run: |
-          if (-not (Test-Path "$env:STARVECTOR_TERMINAL_ROOT\metrics\Scripts\python.exe")) { py -3.11 -m venv "$env:STARVECTOR_TERMINAL_ROOT\metrics" }
-          & "$env:STARVECTOR_TERMINAL_ROOT\metrics\Scripts\python.exe" -m pip install --disable-pip-version-check numpy==2.2.6 scikit-image==0.25.2 lpips==0.1.4 torch==2.7.0 torchvision==0.22.0 Pillow==11.3.0 open-clip-torch==3.1.0
+          $bootstrapPython = $null
+          $bootstrapIdentity = $null
+          $canonicalDriveExecutable = {
+            param([object]$Value)
+            $text = [string]$Value
+            if ([string]::IsNullOrWhiteSpace($text) -or $text -match '[\r\n"]' -or $text -notmatch '^[A-Za-z]:\\') { return $null }
+            try { $full = [IO.Path]::GetFullPath($text) } catch { return $null }
+            if ($full -notmatch '^[A-Za-z]:\\' -or -not (Test-Path -LiteralPath $full -PathType Leaf)) { return $null }
+            return $full
+          }
+          $candidates = @(Get-Command python.exe -All -CommandType Application -ErrorAction SilentlyContinue | ForEach-Object Source | Where-Object { $_ } | Select-Object -Unique)
+          foreach ($candidate in $candidates) {
+            $identityJson = & $candidate -c 'import json,sys; print(json.dumps({"executable":sys.executable,"version":[sys.version_info.major,sys.version_info.minor,sys.version_info.micro]}))' 2>$null
+            if ($LASTEXITCODE -ne 0) { continue }
+            try { $identity = $identityJson | ConvertFrom-Json -ErrorAction Stop } catch { continue }
+            $canonicalExecutable = & $canonicalDriveExecutable $identity.executable
+            if ($identity.version.Count -eq 3 -and [int]$identity.version[0] -eq 3 -and [int]$identity.version[1] -ge 12 -and $canonicalExecutable) {
+              $bootstrapPython = $canonicalExecutable
+              $bootstrapIdentity = $identity
+              break
+            }
+          }
+          if (-not $bootstrapPython) { throw 'the self-hosted CUDA runner requires a directly executable Python 3.12 or newer on PATH' }
+          $metricsRoot = Join-Path $env:STARVECTOR_TERMINAL_ROOT 'metrics'
+          $metricsPython = Join-Path $metricsRoot 'Scripts\python.exe'
+          if (-not (Test-Path $metricsPython -PathType Leaf)) {
+            & $bootstrapPython -m venv $metricsRoot
+            if ($LASTEXITCODE -ne 0) { throw 'failed to create the terminal metrics venv with the selected Python interpreter' }
+          }
+          if (-not (Test-Path $metricsPython -PathType Leaf)) { throw 'terminal metrics venv did not publish Scripts\python.exe' }
+          $venvIdentityJson = & $metricsPython -c 'import json,sys; print(json.dumps({"executable":sys.executable,"base_executable":getattr(sys,"_base_executable",None),"version":[sys.version_info.major,sys.version_info.minor,sys.version_info.micro]}))'
+          if ($LASTEXITCODE -ne 0) { throw 'terminal metrics venv Python identity probe failed' }
+          try { $venvIdentity = $venvIdentityJson | ConvertFrom-Json -ErrorAction Stop } catch { throw 'terminal metrics venv Python identity is not valid JSON' }
+          $expectedMetricsPython = & $canonicalDriveExecutable $metricsPython
+          $observedMetricsPython = & $canonicalDriveExecutable $venvIdentity.executable
+          $observedBasePython = & $canonicalDriveExecutable $venvIdentity.base_executable
+          if (-not $expectedMetricsPython -or -not $observedMetricsPython -or -not $observedBasePython -or -not [StringComparer]::OrdinalIgnoreCase.Equals($expectedMetricsPython, $observedMetricsPython) -or -not [StringComparer]::OrdinalIgnoreCase.Equals($bootstrapPython, $observedBasePython) -or $venvIdentity.version.Count -ne 3 -or [int]$venvIdentity.version[0] -ne [int]$bootstrapIdentity.version[0] -or [int]$venvIdentity.version[1] -ne [int]$bootstrapIdentity.version[1] -or [int]$venvIdentity.version[2] -ne [int]$bootstrapIdentity.version[2]) { throw 'terminal metrics venv is not bound to the selected exact Python interpreter' }
+          & $metricsPython -m pip install --disable-pip-version-check numpy==2.2.6 scikit-image==0.25.2 lpips==0.1.4 torch==2.7.0 torchvision==0.22.0 Pillow==11.3.0 open-clip-torch==3.1.0
+          if ($LASTEXITCODE -ne 0) { throw 'failed to install the pinned terminal metrics package closure' }
           node scripts/starvector-terminal-provision.mjs download https://raw.githubusercontent.com/richzhang/PerceptualSimilarity/master/lpips/weights/v0.1/alex.pth "$env:STARVECTOR_TERMINAL_ROOT\metrics\checkpoints\lpips-v0.1-alex.pth" df73285e35b22355a2df87cdb6b70b343713b667eddbda73e1977e0c860835c0
           node scripts/starvector-terminal-provision.mjs download https://download.pytorch.org/models/alexnet-owt-7be5be79.pth "$env:STARVECTOR_TERMINAL_ROOT\metrics\checkpoints\alexnet-owt-7be5be79.pth" 7be5be791159472b1fbf3c69796f7cb30dca7ad8466c2df70058c37116cdee02
           node scripts/starvector-terminal-provision.mjs download https://huggingface.co/laion/CLIP-ViT-B-32-laion2B-s34B-b79K/resolve/1a25a446712ba5ee05982a381eed697ef9b435cf/open_clip_pytorch_model.bin "$env:STARVECTOR_TERMINAL_ROOT\metrics\checkpoints\open_clip_pytorch_model.bin" 1bd3c7172de5b207ceac554f5ab5266166f3b9baccc9af5989bc801016d080ad
-          node scripts/starvector-terminal-provision.mjs metrics "$env:GITHUB_WORKSPACE\sceneworks" "$env:STARVECTOR_TERMINAL_ROOT\metrics" "$env:STARVECTOR_TERMINAL_ROOT\metrics\Scripts\python.exe" $env:STARVECTOR_CLIP_REVISION
+          node scripts/starvector-terminal-provision.mjs metrics "$env:GITHUB_WORKSPACE\sceneworks" $metricsRoot $metricsPython $env:STARVECTOR_CLIP_REVISION
       - name: Materialize the exact pinned 120-row corpus
         shell: powershell
         run: |
