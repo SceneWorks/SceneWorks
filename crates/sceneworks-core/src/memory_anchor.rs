@@ -2188,11 +2188,12 @@ impl MemoryAnchor {
 
 /// The transformer bytes a `bounded_transformer_residency` rung keeps RESIDENT: the law's window
 /// share `transformer x min(window, blocks) / blocks`, rounded up (sc-22663, epic 22657 E3; the
-/// worker's MLX estimate floor states the same share since sc-22667 so both image lanes price one
-/// windowed residency). With no window the whole transformer is resident; with a window but no
-/// block count — the default facts at this pin — the share is UNKNOWABLE and stays the whole
-/// transformer, the erring-large reading, never zero: a floor that removed the transformer it
-/// cannot size would promise a saving no fact supports.
+/// worker's MLX estimate floor states the same share since sc-22667 whenever the facts carry a
+/// block count, so both image lanes price one windowed residency). With no window the whole
+/// transformer is resident; with a window but no block count — the default facts at this pin —
+/// the share is UNKNOWABLE and the LAW keeps the whole transformer, the erring-large reading,
+/// never zero. (The MLX floor's no-block-count arm is a separate, worker-side decision: it keeps
+/// its pre-epic accounting so shipped admissions do not move before the pin bump.)
 pub fn windowed_transformer_bytes(
     transformer: u64,
     window: Option<u32>,
