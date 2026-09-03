@@ -865,6 +865,29 @@ jobs:
           token: ${{ secrets.SCENEWORKS_INFERENCE_READ_TOKEN || github.token }}
           path: .calibration/inference
           persist-credentials: false
+      # The two capture steps below build the adapter with `--release`, and pmetal-mlx-sys links a
+      # prebuilt only when the cell's build type matches: the Debug cell the job fetched above for
+      # `cargo build` FAILS a release build ("build_type: prebuilt=Debug this build=Release" -- run
+      # 33815754628, sc-22667; every calibration dispatch since sc-21382 hit this). Fetch the
+      # Release cell of the same rev and deployment target and point the release build at it. With
+      # no Release asset published the adapter builds libmlx from source: an EMPTY
+      # PMETAL_MLX_PREBUILT_DIR is pmetal-mlx-sys's cmake path, and the source build populates the
+      # metallib cache the empty PMETAL_METALLIB_PATH then falls back to.
+      - name: Fetch prebuilt MLX (Release) for the release-built calibration adapter
+        if: ${{ github.event_name == 'workflow_dispatch' && (inputs.run_memory_calibration || inputs.run_five_rung_reference) }}
+        run: |
+          set +e
+          scripts/fetch-prebuilt-mlx.sh --build-type Release --github-env
+          rc=$?
+          set -e
+          if [ "$rc" = 1 ]; then
+            echo "::warning title=prebuilt MLX (Release) unavailable::no Release prebuilt for the pinned mlx-rs rev; the calibration adapter builds libmlx from source (see step log)"
+            printf 'PMETAL_MLX_PREBUILT_DIR=
+PMETAL_METALLIB_PATH=
+' >> "$GITHUB_ENV"
+          elif [ "$rc" != 0 ]; then
+            exit "$rc"
+          fi
       - name: Build and capture the authoritative Qwen MLX anchor
         if: ${{ github.event_name == 'workflow_dispatch' && inputs.run_memory_calibration }}
         env:
