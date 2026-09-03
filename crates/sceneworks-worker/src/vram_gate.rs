@@ -43,6 +43,41 @@ pub(crate) const CUDA_VRAM_CAP_ENV: &str = "SCENEWORKS_CUDA_VRAM_CAP_GB";
 /// meanings or values to the same dedicated pool.
 pub(crate) const HEADROOM_GB: f64 = crate::fit_gate::dedicated_vram_reserve().gb;
 
+/// The named margin the candle ladder's operational reserve carries ABOVE the measured idle
+/// baseline (sc-22664, epic 22657 E4). The baseline is what the box holds before this load — the
+/// CUDA context(s) and WDDM residency `nvidia-smi` reports as used — and this margin is the growth
+/// of that residency the pre-load probe cannot yet see: the cuBLAS/cuDNN workspaces and module
+/// images a first kernel launch materializes inside the context, which a cold worker pays once on
+/// top of the modelled phase peaks. It is NOT allocator slack (candle's counted allocations carry
+/// none — `ladder_margin_policy::CANDLE_RECAPTURE_SPREAD`) and NOT activation headroom (the law
+/// prices activations); it is only the context's own post-probe growth.
+pub(crate) const LADDER_RESERVE_MARGIN_GB: f64 = 0.25;
+
+// The margin is a fraction of the slack it replaces, by construction: a margin at or above the
+// legacy reserve would make the ceiling in `ladder_reserve_gb` the whole answer.
+const _: () = assert!(LADDER_RESERVE_MARGIN_GB > 0.0 && LADDER_RESERVE_MARGIN_GB < HEADROOM_GB);
+
+/// The operational reserve the candle memory-strategy ladder charges EXACTLY ONCE, against the
+/// selector budget, never inside a candidate's peak (sc-22664, epic 22657 E4).
+///
+/// Derived from the measured idle baseline of the selected card — `total − free` as probed before
+/// the load, i.e. the CUDA context + WDDM residency this box actually carries — plus
+/// [`LADDER_RESERVE_MARGIN_GB`]. The retained candle anchors measure every phase peak as a device
+/// DELTA above exactly that pre-load residency, so the baseline is the one term the derived peaks
+/// do not contain; charging it against the budget once, rather than folding a fixed 2 GB into
+/// every floor AND subtracting 2 GB from the budget (the double charge this replaces), is what
+/// lets an 8 GB card admit a 4.5 GB fully-engaged composition.
+///
+/// The legacy [`HEADROOM_GB`] stays the CEILING: on a card whose reported used bytes exceed it,
+/// the "idle" reading is foreign residency (another process's model, a second worker on the same
+/// GPU), which is already excluded from `free` and says nothing about this process's context, so
+/// the reserve falls back to the legacy allocator slack rather than charging the foreign bytes a
+/// second time. A budget with more free than total (a capped emulation) reads as a zero baseline.
+pub(crate) fn ladder_reserve_gb(budget: VramBudget) -> f64 {
+    let idle_baseline_gb = (budget.total_gb - budget.free_gb).max(0.0);
+    (idle_baseline_gb + LADDER_RESERVE_MARGIN_GB).min(HEADROOM_GB)
+}
+
 /// A live (or capped) VRAM budget for the selected GPU, in GB.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct VramBudget {
@@ -192,6 +227,29 @@ pub(crate) fn requested_tier_key(
 /// [`requested_tier_key`] returned `"q8"` for it. So the sizing is no less conservative than the
 /// status quo, and a missing row can only ever cost a spurious `TooBig`/`Offload`, never an OOM.
 pub(crate) fn predicted_peak_gb(manifest_entry: &JsonObject, tier_key: &str) -> Option<f64> {
+    if let Some(gb) = measured_resident_peak_gb(manifest_entry, tier_key) {
+        return Some(gb + HEADROOM_GB);
+    }
+    manifest_entry
+        .get("candle")?
+        .get("minMemoryGb")
+        .and_then(json_f64)
+}
+
+/// The RAW measured resident row, `candle.vramGbByTier[tier_key]` (or the `q8` row for an
+/// unmeasured `nvfp4` tier, exactly as [`predicted_peak_gb`] degrades), with NO headroom folded
+/// in. `None` where the tier has no measured row — [`predicted_peak_gb`] then lands on
+/// `minMemoryGb`, which the manifest pads itself.
+///
+/// This is the row the memory-strategy ladder prices its resident candidate from (sc-22664): the
+/// ladder charges its operational reserve once against the selector budget
+/// ([`ladder_reserve_gb`]), so a candidate that also carried [`HEADROOM_GB`] would pay twice. The
+/// legacy fit gate keeps consuming the padded [`predicted_peak_gb`] because it charges no reserve
+/// against its budget.
+pub(crate) fn measured_resident_peak_gb(
+    manifest_entry: &JsonObject,
+    tier_key: &str,
+) -> Option<f64> {
     let candle = manifest_entry.get("candle")?;
     let measured = |key: &str| {
         candle
@@ -199,16 +257,9 @@ pub(crate) fn predicted_peak_gb(manifest_entry: &JsonObject, tier_key: &str) -> 
             .and_then(|tiers| tiers.get(key))
             .and_then(json_f64)
     };
-    if let Some(gb) = measured(tier_key) {
-        return Some(gb + HEADROOM_GB);
-    }
-    // NVFP4 with no measured row → the q8 row (a deliberate over-prediction; see the note above).
-    if tier_key == NVFP4_TIER {
-        if let Some(gb) = measured("q8") {
-            return Some(gb + HEADROOM_GB);
-        }
-    }
-    candle.get("minMemoryGb").and_then(json_f64)
+    measured(tier_key)
+        // NVFP4 with no measured row → the q8 row (a deliberate over-prediction; see the note above).
+        .or_else(|| (tier_key == NVFP4_TIER).then(|| measured("q8")).flatten())
 }
 
 /// Resident prediction with a load-exact independently resident adapter stack. Callers pass zero
@@ -235,11 +286,20 @@ pub(crate) fn predicted_sequential_peak_gb(
     manifest_entry: &JsonObject,
     tier_key: &str,
 ) -> Option<f64> {
+    measured_sequential_peak_gb(manifest_entry, tier_key).map(|gb| gb + HEADROOM_GB)
+}
+
+/// The RAW measured sequential row, `candle.sequentialPeakGb[tier_key]` (or the `q8` row for an
+/// unmeasured `nvfp4` tier), with NO headroom folded in — the staged working set the ladder's
+/// manifest-row floor prices (sc-22664; see [`measured_resident_peak_gb`] for why the ladder's
+/// candidates carry no headroom).
+pub(crate) fn measured_sequential_peak_gb(
+    manifest_entry: &JsonObject,
+    tier_key: &str,
+) -> Option<f64> {
     let sequential = manifest_entry.get("candle")?.get("sequentialPeakGb")?;
     let measured = |key: &str| sequential.get(key).and_then(json_f64);
-    measured(tier_key)
-        .or_else(|| (tier_key == NVFP4_TIER).then(|| measured("q8")).flatten())
-        .map(|gb| gb + HEADROOM_GB)
+    measured(tier_key).or_else(|| (tier_key == NVFP4_TIER).then(|| measured("q8")).flatten())
 }
 
 /// Sequential prediction with the same adapter residency charged in every lifecycle policy.
@@ -3646,6 +3706,49 @@ mod tests {
             context.calibration_abi,
             identity.abi
         );
+    }
+
+    /// sc-22664 (epic 22657 E4): the ladder's operational reserve is the measured idle baseline
+    /// plus its named margin, capped at the legacy allocator slack — never the fixed 2 GB on a
+    /// card whose baseline is below it, never MORE than it on a card carrying foreign residency.
+    #[test]
+    fn ladder_reserve_is_the_idle_baseline_plus_the_margin_capped_at_the_legacy_slack() {
+        // The AC fixture: total 8.0, free 7.3 → 0.7 GB idle + the margin.
+        let fixture = ladder_reserve_gb(VramBudget {
+            free_gb: 7.3,
+            total_gb: 8.0,
+        });
+        assert!(
+            (fixture - (0.7 + LADDER_RESERVE_MARGIN_GB)).abs() < 1e-9,
+            "{fixture}"
+        );
+        assert!(fixture < HEADROOM_GB);
+        // A dedicated card at rest: ~1 GB of context + WDDM residency, charged once.
+        let dedicated = ladder_reserve_gb(VramBudget {
+            free_gb: 95.0,
+            total_gb: 96.0,
+        });
+        assert!((dedicated - (1.0 + LADDER_RESERVE_MARGIN_GB)).abs() < 1e-9);
+        // Foreign residency far above the slack (another process holds most of the card): the
+        // idle reading says nothing about this process's context and is already out of `free`,
+        // so the legacy slack is the ceiling — the reserve never charges those bytes twice.
+        let foreign = ladder_reserve_gb(VramBudget {
+            free_gb: 7.0,
+            total_gb: 96.0,
+        });
+        assert_eq!(foreign, HEADROOM_GB);
+        // A capped emulation with free == total has no measurable baseline: the margin alone.
+        let capped = ladder_reserve_gb(VramBudget {
+            free_gb: 10.0,
+            total_gb: 10.0,
+        });
+        assert_eq!(capped, LADDER_RESERVE_MARGIN_GB);
+        // A reclaimable-credited budget can read free above total; that is a zero baseline too.
+        let credited = ladder_reserve_gb(VramBudget {
+            free_gb: 10.5,
+            total_gb: 10.0,
+        });
+        assert_eq!(credited, LADDER_RESERVE_MARGIN_GB);
     }
 
     #[test]
