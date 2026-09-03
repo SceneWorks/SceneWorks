@@ -2160,10 +2160,13 @@ fn mlx_image_anchor_derived_peak(
     {
         return None;
     }
-    let derived = anchor.derive_mlx_image_phase_peaks(AnchorMlxImageDeriveRequest {
-        width: geometry.width,
-        height: geometry.height,
-    })?;
+    let derived = anchor.derive_mlx_image_phase_peaks(
+        AnchorMlxImageDeriveRequest {
+            width: geometry.width,
+            height: geometry.height,
+        },
+        crate::video_admission::anchor_component_bytes(contract.asset_facts),
+    )?;
     Some((derived.peak_bytes(), anchor.id.clone()))
 }
 
@@ -11167,6 +11170,9 @@ mod tests {
                     width: geometry.width,
                     height: geometry.height,
                 },
+                crate::video_admission::anchor_component_bytes(
+                    generator.contract.as_ref().expect("contract").asset_facts,
+                ),
             )
             .expect("the anchor prices the request")
             .peak_bytes();

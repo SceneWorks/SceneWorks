@@ -1494,6 +1494,7 @@ pub(crate) fn krea_turbo_fit_with_runtime(
                     height,
                     staged_residency: engaged.contains(&MemoryStrategy::StagedResidency),
                 },
+                crate::video_admission::anchor_component_bytes(provider_contract.asset_facts),
             ) else {
                 continue;
             };
@@ -6651,11 +6652,17 @@ mod tests {
             })
             .expect("the packaged Krea candle q4 anchor");
         let derived = anchor
-            .derive_image_phase_peaks(sceneworks_core::memory_anchor::AnchorImageDeriveRequest {
-                width,
-                height,
-                staged_residency: true,
-            })
+            .derive_image_phase_peaks(
+                sceneworks_core::memory_anchor::AnchorImageDeriveRequest {
+                    width,
+                    height,
+                    staged_residency: true,
+                },
+                // The same component bytes the gate reads off the fixture runtime's contract.
+                crate::video_admission::anchor_component_bytes(
+                    krea_test_provider_contract("q4").asset_facts,
+                ),
+            )
             .expect("the derivation prices this geometry");
         derived.peak_bytes() as f64 / BYTES_PER_GIB
     }

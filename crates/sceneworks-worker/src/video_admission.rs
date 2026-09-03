@@ -1208,6 +1208,21 @@ pub(crate) fn anchor_currency_matches(
         .is_some_and(|closures| anchor.is_current(closures))
 }
 
+/// The component bytes the image derivation law subtracts from an anchor's measured peaks and
+/// re-adds per the request's regime (sc-22663, epic 22657 E3), read off the live provider
+/// contract's asset facts. The law takes them as an explicit argument because the anchor store
+/// carries none today; this is the single translation from `gen_core` to the core type, shared by
+/// both image lanes' anchor consumers.
+pub(crate) fn anchor_component_bytes(
+    facts: gen_core::MemoryAssetFacts,
+) -> sceneworks_core::memory_anchor::ComponentBytes {
+    sceneworks_core::memory_anchor::ComponentBytes {
+        conditioning: facts.conditioning_bytes,
+        transformer: facts.transformer_bytes,
+        decoder: facts.decoder_bytes,
+    }
+}
+
 /// Derive per-phase peaks from the measured memory anchor for this
 /// `(model, tier, lane, transformer variant, decoder)` coordinate (sc-22507, epic 22505), for the
 /// exact regime of the candidate being graded.
