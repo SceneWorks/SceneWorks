@@ -1,7 +1,7 @@
 {
-  "_comment": "Exact audit of production include_str!/include_bytes! sites and known hand-ports in inference revision 5a28cdd7. The digest is checked by check-license-coverage.mjs; source changes require this audit inventory to be refreshed. Tests/fixtures are outside this production inventory. The reviewed pin advance includes the cross-platform StarVector inventory-order repair and the Candle StarVector-1B 2 MiB SVG contract repair. The exact scanner records 667 provenance candidates and 97 production-Rust crate prefixes, unchanged from the prior audit. Six MLX/LTX candidate rows changed git blob hashes while their normalized provenance-marker hashes stayed unchanged; no candidate path or disposition moved. Current report-only licensing findings must be read from the checker output; this summary does not freeze their counts.",
-  "inferenceRevision": "5a28cdd71f7f4343c0a758566afc6f9eb82d0afc",
-  "auditDigest": "3c42dd5092bfed536bc350fc53b0d87d03102f5a69e5e82f0b8f505319a2e2e5",
+  "_comment": "Exact audit of production include_str!/include_bytes! sites and known hand-ports in inference revision c7f10e21. The digest is checked by check-license-coverage.mjs; source changes require this audit inventory to be refreshed. Tests/fixtures are outside this production inventory. The reviewed pin advance preserves the cross-platform StarVector inventory-order and 2 MiB SVG contract repairs and adds Candle StarVector image-dtype alignment before F16 checkpoint convolution. The exact scanner records 667 provenance candidates and 97 production-Rust crate prefixes, unchanged from the prior audit; no candidate path or disposition moved. Current report-only licensing findings must be read from the checker output; this summary does not freeze their counts.",
+  "inferenceRevision": "c7f10e2191cc9df221c852cb5a32605fae9e94b2",
+  "auditDigest": "cff4c1582e0eddf7e6128ff811cdbd7ef7d0b3b7e8b74628f89e2c58ce834d21",
   "artifacts": [
     {
       "id": "cmudict",
@@ -17,7 +17,7 @@
   "provenanceScan": {
     "scanner": "scripts/scan-inference-provenance.mjs",
     "candidateList": "config/inference-provenance-candidates.tsv",
-    "revision": "5a28cdd71f7f4343c0a758566afc6f9eb82d0afc",
+    "revision": "c7f10e2191cc9df221c852cb5a32605fae9e94b2",
     "pathFilter": "production .rs; exclude tests, testdata, benches, examples, and _vendor path segments",
     "markerRegex": "faithful ... port(s), ported from, port(s) of, vendor(s)/vendored, transcribed, copied ... verbatim, adapted from, mirror(s|ed|ing) ... <port-object>, derived from ... <port-object>, reimplemented/reimplementation from|of, translated/transliterated from, from the reference (not reference-), original implementation|repo(sitory), based on ... <port-object>, follow(s|ing) ... <port-object>, reimplements ... <port-object>, rewrite of ... <port-object>, model(l)ed after ... <port-object>, ported to ... from, 1:1 with ... <port-object>, line-for-line ... <port-object> (case-insensitive; <port-object> = reference(not followed by -)|upstream|python|pytorch|torch|diffusers|comfy(ui)|transformers|implementation). `original` is NOT a bare port-object and `followed` is excluded: both produced verified false positives on first-party prose (sc-15191 review).",
     "normalization": "matched marker text lowercased, internal whitespace collapsed, sorted, newline joined",
@@ -830,7 +830,7 @@
   "crateCoverage": {
     "scanner": "scripts/scan-inference-provenance.mjs",
     "crateList": "config/inference-crate-prefixes.txt",
-    "revision": "5a28cdd71f7f4343c0a758566afc6f9eb82d0afc",
+    "revision": "c7f10e2191cc9df221c852cb5a32605fae9e94b2",
     "rule": "Every production-Rust crate prefix in the pinned revision must be covered by a portedSourceAreas entry OR carry an explicit crateDispositions decision. Anything else FAILS check-license-coverage.mjs.",
     "cratePrefixes": 97,
     "cratePopulationSha256": "993023a1f5832a7402f3c6aaf5989122b8d12436d69b5fd840be84ba90b329f2"
