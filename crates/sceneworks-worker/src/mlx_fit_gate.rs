@@ -2480,8 +2480,27 @@ fn intra_transformer_evicted_bytes(contract: &MemoryProviderContract) -> u64 {
 ///   set is the larger of the conditioning stack and everything else, exactly the
 ///   `staged_weights_gb` split the load-time gate has always used.
 /// * `BoundedTransformerResidency` engaged ⇒ the transformer's declared bytes leave the resident
-///   floor: the rung windows them, and the window slice plus scratch is carried by the headroom
-///   term and the estimate margin, not by a guessed window fraction.
+///   floor and the rung's RESIDENT WINDOW comes back in. Which window depends on the lane
+///   (sc-22667, epic 22657 feature-end round):
+///   * the VIDEO lane ([`estimate_floor_weights_bytes`], `video_admission::floor_phase_peaks`)
+///     keeps its sc-18096 accounting — the window slice plus scratch is carried by its headroom
+///     term and the estimate margin, and its own law prices a windowed denoise BOUND rather than
+///     a share, so the weights term carries no window;
+///   * the IMAGE lane ([`image_floor_weights_bytes`]) has TWO regimes, keyed on whether the
+///     contract's architecture facts state a block count:
+///     - `transformer_blocks: Some(_)` — the SAME windowed residency the image law and the candle
+///       ladder price, `transformer x window / blocks`
+///       (`sceneworks_core::memory_anchor::windowed_transformer_bytes`), because its activation
+///       term is the law's residue for the rung's regime (sc-22665), which carries no weights;
+///     - `transformer_blocks: None` (the default facts at this pin) — the PRE-EPIC sc-18096
+///       accounting above, the whole transformer out and the window carried by the
+///       headroom/allowance term. Keeping the whole transformer resident here would price rung 4
+///       like rung 2 and refuse, on real Macs, shipped unmeasured models the lane admitted before
+///       the epic (`shipped_plain_krea_without_a_binding_preserves_the_request_on_estimate_admission`,
+///       `shipped_plain_sdxl_without_a_binding_preserves_the_three_rung_estimate_path`); that is
+///       a regression, not conservatism, so admission is unchanged until the pin bump supplies
+///       block counts. The law itself stays err-large (`windowed_transformer_bytes` keeps the
+///       whole transformer with no block count); this is a worker floor decision.
 /// * Rungs 2 and 3 bound TRANSIENTS, not weights, so they take no weights reduction here — and
 ///   deliberately no transient reduction either, because no measured basis for one exists on an
 ///   unmeasured cell. Their floor equals rung 1's, which keeps them selectable without ever
@@ -2525,6 +2544,46 @@ pub(crate) fn estimate_floor_weights_bytes(
     contract: &MemoryProviderContract,
     engaged: &[MemoryStrategy],
 ) -> u64 {
+    floor_weights_bytes(contract, engaged, 0)
+}
+
+/// The IMAGE lane's floor weights term (sc-22667): [`estimate_floor_weights_bytes`] with rung 4's
+/// resident window stated as the image law states it — `transformer x min(window, blocks) /
+/// blocks` — WHEN the facts carry a block count, and the pre-epic whole-transformer-out
+/// accounting (window carried by the headroom/allowance term) when they do not: see the two
+/// regimes on [`estimate_floor_weights_bytes`]. `transformer_window` is the selected
+/// `transformer_window_size`; `facts` are the contract's architecture facts
+/// (`video_admission::architecture_facts_from_contract`). Both are ignored unless the composition
+/// engages `BoundedTransformerResidency`.
+pub(crate) fn image_floor_weights_bytes(
+    contract: &MemoryProviderContract,
+    engaged: &[MemoryStrategy],
+    transformer_window: Option<u32>,
+    facts: sceneworks_core::memory_anchor::ArchitectureFacts,
+) -> u64 {
+    let resident_window = match facts.transformer_blocks {
+        Some(_) if engaged.contains(&MemoryStrategy::BoundedTransformerResidency) => {
+            sceneworks_core::memory_anchor::windowed_transformer_bytes(
+                contract.asset_facts.transformer_bytes,
+                transformer_window,
+                facts.transformer_blocks,
+            )
+        }
+        // No block count (this pin) or no window engaged: the pre-epic accounting, zero
+        // resident window.
+        _ => 0,
+    };
+    floor_weights_bytes(contract, engaged, resident_window)
+}
+
+/// The shared arithmetic: `resident_window_bytes` is what rung 4 keeps resident of the
+/// transformer once the rung has removed it (0 on the video lane, the law's share on the image
+/// lane), clamped at the load-exact transformer so no lane can state more than it loads.
+fn floor_weights_bytes(
+    contract: &MemoryProviderContract,
+    engaged: &[MemoryStrategy],
+    resident_window_bytes: u64,
+) -> u64 {
     let facts = contract.asset_facts;
     let conditioning = facts.conditioning_bytes;
     let staged = engaged.contains(&MemoryStrategy::StagedResidency);
@@ -2541,7 +2600,9 @@ pub(crate) fn estimate_floor_weights_bytes(
             .saturating_sub(intra_transformer_evicted_bytes(contract))
             .max(facts.transformer_bytes)
     } else if bounded_transformer {
-        heavy_load_exact.saturating_sub(facts.transformer_bytes)
+        heavy_load_exact
+            .saturating_sub(facts.transformer_bytes)
+            .saturating_add(resident_window_bytes.min(facts.transformer_bytes))
     } else {
         heavy_load_exact
     };
@@ -3105,6 +3166,7 @@ fn synthesize_estimate_ladder(
             //    geometry-blind generic headroom, which stays the fallback for every request the
             //    anchor or the law refuses (at this pin: all of them — see
             //    `mlx_image_anchor_activation_residue`).
+            let facts = crate::video_admission::architecture_facts_from_contract(contract);
             let derived_residue = mlx_image_anchor_activation_residue(
                 contract,
                 plan,
@@ -3113,14 +3175,21 @@ fn synthesize_estimate_ladder(
                 geometry,
                 &engaged,
                 parameter_candidate.parameters,
-                crate::video_admission::architecture_facts_from_contract(contract),
+                facts,
             );
             let floor_activation_bytes = match &derived_residue {
                 Some((residue, _)) => *residue,
                 None => plan.generic_headroom_bytes(geometry),
             };
-            let predicted_peak_bytes = estimate_floor_weights_bytes(contract, &engaged)
-                .saturating_add(floor_activation_bytes);
+            // The weights term states rung 4's resident window as the law does (sc-22667): the
+            // image lane's floor and the candle ladder price ONE windowed residency.
+            let predicted_peak_bytes = image_floor_weights_bytes(
+                contract,
+                &engaged,
+                parameter_candidate.parameters.transformer_window_size,
+                facts,
+            )
+            .saturating_add(floor_activation_bytes);
             tracing::info!(
                 route = contract.provider_id,
                 backend = "mlx",
@@ -8888,9 +8957,91 @@ mod tests {
     /// the fixture facts (base 3 GiB all-transformer, headroom 2 fixed + 4 area) and spelled out in
     /// full on [`unmeasured_provider_under_a_small_budget_selects_a_deep_estimate_rung`]:
     /// resident / staged / bounded-decode / bounded-attention all floor at 3 + 6 = 9 GiB, while
-    /// rung 4 windows the transformer out of residency and floors at 0 + 6 = 6 GiB.
-    const FIXTURE_DEEP_ESTIMATE_FLOOR_GB: f64 = 6.0;
+    /// rung 4 windows the transformer down to its RESIDENT WINDOW (sc-22667: the law's share,
+    /// `FULL_LADDER_WEIGHTS_GB x 2 / FULL_LADDER_FIXTURE_BLOCKS` = 2 GiB under the injected
+    /// fixture facts) and floors at 2 + 6 = 8 GiB.
+    const FIXTURE_DEEP_ESTIMATE_FLOOR_GB: f64 = 6.0 + FULL_LADDER_RESIDENT_WINDOW_GB;
     const FIXTURE_SHALLOW_ESTIMATE_FLOOR_GB: f64 = 9.0;
+
+    /// The block count the full-ladder fixture states through the `architecture_facts_from_contract`
+    /// seam (sc-22667): with the smallest declared window (2) of these blocks resident, rung 4
+    /// keeps `FULL_LADDER_RESIDENT_WINDOW_GB` of its all-transformer weights. Under the DEFAULT
+    /// facts (no block count) the floor keeps the PRE-EPIC accounting (whole transformer out) —
+    /// `without_facts_the_deep_rung_floor_keeps_the_pre_epic_accounting_and_admits` grades that
+    /// arm; every deep-rung admission fixture below injects these facts to grade the share.
+    const FULL_LADDER_FIXTURE_BLOCKS: u32 = 40;
+    const FULL_LADDER_RESIDENT_WINDOW_GB: f64 =
+        FULL_LADDER_WEIGHTS_GB * 2.0 / FULL_LADDER_FIXTURE_BLOCKS as f64;
+    const FULL_LADDER_FIXTURE_FACTS: sceneworks_core::memory_anchor::ArchitectureFacts =
+        sceneworks_core::memory_anchor::ArchitectureFacts {
+            attention_heads: None,
+            head_dim: None,
+            transformer_blocks: Some(FULL_LADDER_FIXTURE_BLOCKS),
+            patch_size: None,
+            latent_channels: None,
+            vae_spatial_scale: None,
+            vae_temporal_scale: None,
+            activation_dtype_width: None,
+        };
+
+    /// sc-22667 (coordinator decision after the macOS lane): with NO block count on the facts
+    /// (this pin), the MLX image floor's rung-4 weights term keeps the PRE-EPIC accounting — the
+    /// whole transformer out, its window carried by the headroom/allowance term — so a shipped,
+    /// unmeasured model keeps admitting on the deep rung exactly as before the epic. Graded on
+    /// the full-ladder fixture WITHOUT injected facts: rung 4 admits at its pre-epic floor
+    /// (0 + 6 GiB raw), one window below the injected-facts fixtures' 2 GiB resident share. The
+    /// arithmetic is the one the macOS-only shipped Krea/SDXL fixtures (40/5/35 GiB, 6 GiB
+    /// headroom, 40 GiB host) depend on: rung 4 weights `max(5, 40 - 5 - 35 + 0) = 5` GiB, plus
+    /// 6 GiB headroom, widened by the floor allowance to ~29.6 GiB admitted — under 40 — where a
+    /// whole-transformer share would price 40 + 6 = 46 raw, ~51.8 admitted, and refuse.
+    ///
+    /// MUTATION: dropping the `None` arm of `image_floor_weights_bytes` (whole transformer
+    /// resident without a block count) refuses here and reds the `expect`; the identity
+    /// assertion reds if the fallback keeps any window at all.
+    #[test]
+    fn without_facts_the_deep_rung_floor_keeps_the_pre_epic_accounting_and_admits() {
+        let generator = full_ladder_generator();
+        let mut plan = fixture_plan();
+        plan.calibration = MlxCalibrationConfig::Absent;
+        let inputs = fixture_inputs(1024, 1024);
+        // A budget that admits rung 4 at its PRE-EPIC floor (6 GiB raw) but not at the
+        // injected-facts share (8 GiB raw): the midpoint of the two widened ceilings.
+        let pre_epic = widened_estimate_gb(6.0);
+        let with_share = widened_estimate_gb(FIXTURE_DEEP_ESTIMATE_FLOOR_GB);
+        assert!(pre_epic < with_share);
+        let evaluation = evaluate_request_with_budget(
+            &generator,
+            &plan,
+            &inputs,
+            MemoryCacheState::Cold,
+            OffloadPolicy::Resident,
+            fixture_budget((pre_epic + with_share) / 2.0),
+            full_ladder_baseline_bytes(),
+            0,
+            &[],
+        )
+        .expect("with no block count rung 4 prices at its pre-epic floor and admits");
+        assert_eq!(
+            evaluation.context.selection.strategy,
+            MemoryStrategy::BoundedTransformerResidency
+        );
+        let contract = generator.contract.as_ref().expect("contract");
+        let engaged = contract.engaged_composition_for_selection(&evaluation.context.selection);
+        assert_eq!(
+            image_floor_weights_bytes(
+                contract,
+                &engaged,
+                evaluation
+                    .context
+                    .selection
+                    .parameters
+                    .transformer_window_size,
+                crate::video_admission::architecture_facts_from_contract(contract),
+            ),
+            estimate_floor_weights_bytes(contract, &engaged),
+            "without a block count the image floor IS the pre-epic floor"
+        );
+    }
 
     /// The fixture's flat activation-headroom term (2 GiB fixed reserve + 4 GiB area at 1024²) —
     /// the ONLY uncertain half of every floor above, and the term sc-22508's allowance is charged
@@ -9520,6 +9671,8 @@ mod tests {
     /// today's fractions.
     #[test]
     fn the_legacy_resident_baseline_is_graded_without_a_declared_activation_split() {
+        // sc-22667: the fixture's block count through the production facts seam.
+        let _facts = crate::video_admission::inject_architecture_facts(FULL_LADDER_FIXTURE_FACTS);
         let generator = full_ladder_generator();
         let mut plan = fixture_plan();
         plan.calibration = MlxCalibrationConfig::Absent;
@@ -9586,6 +9739,8 @@ mod tests {
     /// ceiling and the cheapest shallower candidate, so exactly one rung admits.
     #[test]
     fn unmeasured_provider_under_a_small_budget_selects_a_deep_estimate_rung() {
+        // sc-22667: the fixture's block count through the production facts seam.
+        let _facts = crate::video_admission::inject_architecture_facts(FULL_LADDER_FIXTURE_FACTS);
         let generator = full_ladder_generator();
         let mut plan = fixture_plan();
         plan.calibration = MlxCalibrationConfig::Absent;
@@ -9680,6 +9835,8 @@ mod tests {
 
     #[test]
     fn pulid_identity_route_is_estimated_only_and_refusal_is_terminal() {
+        // sc-22667: the fixture's block count through the production facts seam.
+        let _facts = crate::video_admission::inject_architecture_facts(FULL_LADDER_FIXTURE_FACTS);
         let mut generator = full_ladder_generator();
         generator.descriptor.id = "pulid_flux";
         let contract = generator.contract.as_mut().expect("fixture contract");
@@ -9810,6 +9967,8 @@ mod tests {
 
     #[test]
     fn krea_raw_estimate_floor_selects_exact_native_and_pid_decode_domains() {
+        // sc-22667: the fixture's block count through the production facts seam.
+        let _facts = crate::video_admission::inject_architecture_facts(FULL_LADDER_FIXTURE_FACTS);
         let mut generator = full_ladder_generator();
         generator.descriptor.id = "krea_2_raw";
         let contract = generator.contract.as_mut().expect("fixture contract");
@@ -9877,6 +10036,8 @@ mod tests {
 
     #[test]
     fn flux2_klein_provider_axes_and_estimate_floor_keep_native_and_pid_domains_exact() {
+        // sc-22667: the fixture's block count through the production facts seam.
+        let _facts = crate::video_admission::inject_architecture_facts(FULL_LADDER_FIXTURE_FACTS);
         let mut composed = LoadSpec::new(WeightsSource::Dir("klein".into()))
             .with_adapters(vec![gen_core::AdapterSpec::new(
                 "adapter.safetensors".into(),
@@ -10236,6 +10397,8 @@ mod tests {
 
     #[test]
     fn krea_turbo_and_edit_routes_use_provider_exact_estimated_authority() {
+        // sc-22667: the fixture's block count through the production facts seam.
+        let _facts = crate::video_admission::inject_architecture_facts(FULL_LADDER_FIXTURE_FACTS);
         for (provider, model_id, mode, references) in [
             ("krea_2_turbo", "krea_2_turbo", "image_generation", 0),
             ("krea_2_edit", "krea_2_raw", "edit_image", 2),
@@ -10361,6 +10524,8 @@ mod tests {
 
     #[test]
     fn uncalibrated_chroma_routes_authorize_exact_quality_backed_estimates() {
+        // sc-22667: the fixture's block count through the production facts seam.
+        let _facts = crate::video_admission::inject_architecture_facts(FULL_LADDER_FIXTURE_FACTS);
         for route in ["chroma1_hd", "chroma1_flash"] {
             let mut generator = full_ladder_generator();
             generator.descriptor.id = route;
@@ -11761,7 +11926,10 @@ mod tests {
             parameters,
             facts,
         )?;
-        Some(estimate_floor_weights_bytes(contract, engaged).saturating_add(residue))
+        Some(
+            image_floor_weights_bytes(contract, engaged, parameters.transformer_window_size, facts)
+                .saturating_add(residue),
+        )
     }
 
     /// AC 1 (sc-22665, epic 22657 E4) — the MLX estimate floor's activation term is the sc-22663
@@ -12016,7 +12184,12 @@ mod tests {
                 estimate.selection.strategy
             );
             let engaged = contract.engaged_composition_for_selection(&estimate.selection);
-            let weights = estimate_floor_weights_bytes(contract, &engaged);
+            let weights = image_floor_weights_bytes(
+                contract,
+                &engaged,
+                estimate.selection.parameters.transformer_window_size,
+                crate::video_admission::architecture_facts_from_contract(contract),
+            );
             let activation = estimate
                 .evidence
                 .predicted_peak_bytes
@@ -12150,7 +12323,13 @@ mod tests {
             let engaged = contract.engaged_composition_for_selection(&estimate.selection);
             assert_eq!(
                 estimate.evidence.predicted_peak_bytes,
-                estimate_floor_weights_bytes(contract, &engaged).saturating_add(generic),
+                image_floor_weights_bytes(
+                    contract,
+                    &engaged,
+                    estimate.selection.parameters.transformer_window_size,
+                    crate::video_admission::architecture_facts_from_contract(contract),
+                )
+                .saturating_add(generic),
                 "{:?}: a refused anchor leaves the weights+generic-headroom floor untouched",
                 estimate.selection.strategy
             );
@@ -19847,6 +20026,76 @@ mod tests {
                 estimate_floor_weights_bytes(&contract, STAGED_PLUS_RUNG4),
                 gib_to_bytes(2.0),
                 "rung 4: max(conditioning, decoder) with the transformer windowed out"
+            );
+        }
+
+        /// sc-22667 (epic 22657 feature-end round, E3/E4): with a block count on the facts the
+        /// IMAGE lane's rung-4 floor keeps the law's window share of the transformer resident —
+        /// the same `windowed_transformer_bytes` the candle ladder and the law price — where the
+        /// video lane's form removes the whole transformer (its window is carried by its headroom
+        /// term, sc-18096). With the DEFAULT facts (no block count, this pin) the image floor
+        /// keeps that pre-epic accounting too, so admission on real Macs is unchanged until the
+        /// pin bump supplies block counts.
+        ///
+        /// MUTATION: passing `0` as the resident window whatever the facts reds the first two
+        /// assertions; keeping the whole transformer under the default facts (dropping the `None`
+        /// arm) reds the third; a divergence from the law's helper reds the last.
+        #[test]
+        fn the_image_floor_keeps_the_laws_window_share_resident_and_errs_large_without_facts() {
+            let mut contract = h3_shaped_contract(
+                gib_to_bytes(1.0),
+                gib_to_bytes(5.0),
+                ADALN_RESIDENT_Q4_BYTES,
+                false,
+            );
+            contract.asset_facts.conditioning_bytes = gib_to_bytes(1.0);
+            contract.asset_facts.transformer_bytes = gib_to_bytes(5.0);
+            contract.asset_facts.decoder_bytes = gib_to_bytes(2.0);
+            contract.asset_facts.base_bytes = gib_to_bytes(8.0);
+            let facts = sceneworks_core::memory_anchor::ArchitectureFacts {
+                transformer_blocks: Some(10),
+                ..Default::default()
+            };
+            assert_eq!(
+                image_floor_weights_bytes(&contract, STAGED_PLUS_RUNG4, Some(1), facts),
+                gib_to_bytes(2.5),
+                "rung 4 with one of ten blocks resident: max(conditioning, decoder + 0.5 GiB)"
+            );
+            assert_eq!(
+                image_floor_weights_bytes(&contract, STAGED_PLUS_RUNG4, Some(4), facts),
+                gib_to_bytes(4.0),
+                "four of ten blocks: decoder + 2 GiB"
+            );
+            assert_eq!(
+                image_floor_weights_bytes(
+                    &contract,
+                    STAGED_PLUS_RUNG4,
+                    Some(1),
+                    sceneworks_core::memory_anchor::ArchitectureFacts::default(),
+                ),
+                gib_to_bytes(2.0),
+                "no block count (this pin): the PRE-EPIC accounting — the whole transformer out, \
+                 its window carried by the headroom term — so real-Mac admission is unchanged"
+            );
+            assert_eq!(
+                image_floor_weights_bytes(&contract, STAGED, Some(1), facts),
+                estimate_floor_weights_bytes(&contract, STAGED),
+                "a composition that does not window is unchanged by the window inputs"
+            );
+            assert_eq!(
+                estimate_floor_weights_bytes(&contract, STAGED_PLUS_RUNG4),
+                gib_to_bytes(2.0),
+                "the video lane's form keeps its sc-18096 accounting: the whole transformer leaves"
+            );
+            assert_eq!(
+                image_floor_weights_bytes(&contract, STAGED_PLUS_RUNG4, Some(3), facts)
+                    - estimate_floor_weights_bytes(&contract, STAGED_PLUS_RUNG4),
+                sceneworks_core::memory_anchor::windowed_transformer_bytes(
+                    gib_to_bytes(5.0),
+                    Some(3),
+                    Some(10)
+                ),
+                "the share is the law's helper, byte for byte"
             );
         }
 

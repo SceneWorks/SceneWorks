@@ -2129,10 +2129,17 @@ export function indexLoaderClosures(body) {
  * read crossed `video_admission.rs`'s backends with every declared law, so `image:candle` read as
  * wired off a file that never priced an image.
  *
- * `admissionSourcesByLane` maps `<modality>:<backend>` to `{ law, sources }`: the lane is wired
- * exactly when the law is declared in the derivation source AND some admission source both calls
- * `derive_<law>_phase_peaks` (directly or through the store's `_for_cell` fall-through, which the
- * call-name check also matches by prefix) and names the lane's `AnchorBackend`.
+ * `admissionSourcesByLane` maps `<modality>:<backend>` to `{ law, sources, entryPoints? }`: the
+ * lane is wired exactly when the law is declared in the derivation source AND some admission
+ * source both calls one of the lane's DECLARED entry points and names the lane's
+ * `AnchorBackend`. The entry points default to `derive_<law>_phase_peaks` (directly or through the
+ * store's `_for_cell` fall-through, which the call-name check also matches by prefix). The image
+ * lanes name the ONE image law as well (sc-22667, epic 22657 E3): `derive_phase_peaks` is the law
+ * both `derive_image_phase_peaks` and `derive_mlx_image_phase_peaks` translate onto, and since
+ * sc-22664/sc-22665/sc-22667 the candle ladder, the Krea lane and the MLX floor call it (or its
+ * activation half, `derive_phase_activation_residues`) directly with the rung's regime rather than
+ * through the shallow shims — so a lane priced from the law itself is wired, and a lane that calls
+ * nothing declared is not.
  */
 export function parseAnchorDerivationLanes(derivationSource, admissionSourcesByLane) {
   const declared = new Set(
@@ -2140,21 +2147,48 @@ export function parseAnchorDerivationLanes(derivationSource, admissionSourcesByL
       (match) => match[1],
     ),
   );
+  // Every anchor-derivation entry point the source declares, by full name: the per-law shims,
+  // the law itself, and its activation half.
+  const declaredEntryPoints = new Set(
+    [
+      ...derivationSource.matchAll(
+        /pub fn (derive_[a-z0-9_]*?(?:phase_peaks|phase_activation_residues))\b/g,
+      ),
+    ].map((match) => match[1]),
+  );
   const backendTokens = { mlx: "AnchorBackend::Mlx", candle: "AnchorBackend::Candle" };
   const lanes = new Set();
-  for (const [lane, { law, sources }] of Object.entries(admissionSourcesByLane)) {
+  for (const [lane, { law, sources, entryPoints }] of Object.entries(
+    admissionSourcesByLane,
+  )) {
     if (!declared.has(law)) continue;
     const backend = lane.split(":")[1];
     const token = backendTokens[backend];
     if (!token) throw new Error(`unknown backend in derivation lane ${lane}`);
+    const calls = (entryPoints ?? [`derive_${law}_phase_peaks`]).filter((name) =>
+      declaredEntryPoints.has(name),
+    );
     const wired = sources.some(
-      (source) =>
-        source.includes(`derive_${law}_phase_peaks`) && source.includes(token),
+      (source) => calls.some((name) => source.includes(name)) && source.includes(token),
     );
     if (wired) lanes.add(lane);
   }
   return lanes;
 }
+
+/**
+ * The image lanes' entry points onto the law (see `parseAnchorDerivationLanes`): the lane shim,
+ * the law itself, and — for the MLX floor — the law's activation half.
+ */
+export const IMAGE_CANDLE_DERIVATION_ENTRY_POINTS = Object.freeze([
+  "derive_image_phase_peaks",
+  "derive_phase_peaks",
+]);
+export const IMAGE_MLX_DERIVATION_ENTRY_POINTS = Object.freeze([
+  "derive_mlx_image_phase_peaks",
+  "derive_phase_activation_residues",
+  "derive_phase_peaks",
+]);
 
 /**
  * Catalog entries deliberately held OUT of the matrix universe (sc-18663, re-homed by sc-22513).
@@ -2330,8 +2364,13 @@ export async function buildMatrix({ sourceOverrides = {}, cellFilter = null, pub
     "image:candle": {
       law: "image",
       sources: [bodies.anchorAdmissionImageVram, bodies.anchorAdmissionImageCandle],
+      entryPoints: IMAGE_CANDLE_DERIVATION_ENTRY_POINTS,
     },
-    "image:mlx": { law: "mlx_image", sources: [bodies.mlxFitGate] },
+    "image:mlx": {
+      law: "mlx_image",
+      sources: [bodies.mlxFitGate],
+      entryPoints: IMAGE_MLX_DERIVATION_ENTRY_POINTS,
+    },
   });
   // sc-18815: the model universe is MODALITY-AWARE, not `type === "image"`. Every entry of an
   // admitted modality is in, whether or not anything has been measured on it — an entry the matrix

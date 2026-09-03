@@ -1255,7 +1255,41 @@ pub(crate) fn anchor_component_bytes(
 pub(crate) fn architecture_facts_from_contract(
     _contract: &MemoryProviderContract,
 ) -> sceneworks_core::memory_anchor::ArchitectureFacts {
+    #[cfg(test)]
+    if let Some(facts) = INJECTED_ARCHITECTURE_FACTS.with(std::cell::Cell::get) {
+        return facts;
+    }
     sceneworks_core::memory_anchor::ArchitectureFacts::default()
+}
+
+#[cfg(test)]
+thread_local! {
+    static INJECTED_ARCHITECTURE_FACTS: std::cell::Cell<
+        Option<sceneworks_core::memory_anchor::ArchitectureFacts>,
+    > = const { std::cell::Cell::new(None) };
+}
+
+/// Test seam (sc-22667): stand `facts` in for what [`architecture_facts_from_contract`] reads off
+/// the contract, for the lifetime of the returned guard, so a fixture can grade the lanes' rung
+/// ratios through their PRODUCTION admission paths before the pin carries the real block. The
+/// same shape as `vram_gate::tests::with_injected_anchor_store`.
+#[cfg(test)]
+#[must_use = "the injection lasts exactly as long as the guard"]
+pub(crate) struct InjectedArchitectureFacts;
+
+#[cfg(test)]
+impl Drop for InjectedArchitectureFacts {
+    fn drop(&mut self) {
+        INJECTED_ARCHITECTURE_FACTS.with(|cell| cell.set(None));
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn inject_architecture_facts(
+    facts: sceneworks_core::memory_anchor::ArchitectureFacts,
+) -> InjectedArchitectureFacts {
+    INJECTED_ARCHITECTURE_FACTS.with(|cell| cell.set(Some(facts)));
+    InjectedArchitectureFacts
 }
 
 /// Derive per-phase peaks from the measured memory anchor for this

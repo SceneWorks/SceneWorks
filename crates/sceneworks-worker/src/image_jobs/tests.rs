@@ -26360,6 +26360,75 @@ fn the_guard_resident_base_table_mirrors_the_checkpoint_plan_family_tables() {
     }
 }
 
+/// sc-22667 (epic 22657 feature-end round, E4/E7) wiring of the Krea 2 Turbo lane in
+/// `generate_candle_stream`, which no unit test can drive: every call into the lane's gate passes
+/// the RAW-probe reserve (`shared_reserve_gb`) explicitly after the (credited) budget, so the
+/// lane charges `ladder_reserve_gb` once on the budget side and never derives it from the
+/// reclaimable-credited pool; and both the `Fits` and the `Resident` arms EMIT the
+/// `image_memory_strategy_selected` event built by `KreaTurboFit::selection_telemetry`.
+///
+/// MUTATIONS: passing `budget` alone (dropping `shared_reserve_gb`) to any Krea gate call reds
+/// the count; deleting either `fit.selection_telemetry(..)` emission reds its block.
+#[test]
+fn candle_stream_emits_the_krea_ladder_selection() {
+    let source = include_str!("base.rs");
+    let stream = source
+        .split_once("async fn generate_candle_stream(")
+        .expect("generate_candle_stream")
+        .1;
+    let gate_calls = stream
+        .matches("crate::vram_gate::krea_turbo_fit_with_runtime(")
+        .count()
+        + stream
+            .matches("crate::vram_gate::krea_turbo_smaller_fit_with_runtime(")
+            .count();
+    assert!(gate_calls >= 2, "the Krea gate is consulted in the stream");
+    // Each gate call's argument list: `budget,` must be followed by `shared_reserve_gb,`.
+    let reserved_calls = stream
+        .match_indices("crate::vram_gate::krea_turbo_")
+        .filter(|(at, _)| {
+            let call = &stream[*at..];
+            call.starts_with("crate::vram_gate::krea_turbo_fit_with_runtime(")
+                || call.starts_with("crate::vram_gate::krea_turbo_smaller_fit_with_runtime(")
+        })
+        .filter(|(at, _)| {
+            let arguments = stream[*at..].split_once(')').map_or("", |(head, _)| head);
+            arguments
+                .split_once("budget,\n")
+                .is_some_and(|(_, rest)| rest.trim_start().starts_with("shared_reserve_gb,"))
+        })
+        .count();
+    assert_eq!(
+        reserved_calls, gate_calls,
+        "every Krea gate call passes the raw-probe reserve right after the credited budget"
+    );
+
+    let fits_arm = stream
+        .split_once("\"Krea Turbo VRAM fit ladder selected the least-cost sufficient rung\"")
+        .expect("the Fits arm")
+        .1
+        .split_once("true\n")
+        .expect("end of the Fits arm")
+        .0;
+    assert!(
+        fits_arm.contains("fit.selection_telemetry(tier, memory_width, memory_height)")
+            && fits_arm.contains("emit_event(\"image_memory_strategy_selected\", telemetry);"),
+        "the Fits arm must EMIT the Krea selection event"
+    );
+    let resident_arm = stream
+        .split_once("\"shared memory-strategy selector retained Krea Turbo resident execution\"")
+        .expect("the Resident arm")
+        .1
+        .split_once("false\n")
+        .expect("end of the Resident arm")
+        .0;
+    assert!(
+        resident_arm.contains("fit.selection_telemetry(tier, memory_width, memory_height)")
+            && resident_arm.contains("emit_event(\"image_memory_strategy_selected\", telemetry);"),
+        "the Resident arm must EMIT the Krea selection event"
+    );
+}
+
 /// sc-22664 (epic 22657 E4/E7) wiring in `generate_candle_stream`, which no unit test can drive
 /// (it probes a GPU): the shared ladder's selection EMITS the `image_memory_strategy_selected`
 /// event built by `CandleMemoryEvaluation::selection_telemetry`; the ladder's reserve is derived

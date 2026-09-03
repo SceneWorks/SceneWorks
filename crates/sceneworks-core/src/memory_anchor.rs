@@ -1997,14 +1997,11 @@ impl MemoryAnchor {
         // Resident components under the REQUEST's regime. The window applies wherever the
         // transformer is counted: windowed residency materializes one window at a time for the
         // whole render, not just inside denoise.
-        let windowed_transformer = match (regime.transformer_window, facts.transformer_blocks) {
-            (Some(window), Some(blocks)) if blocks > 0 => scale_up(
-                transformer,
-                i128::from(window.min(blocks)),
-                i128::from(blocks),
-            ),
-            _ => transformer,
-        };
+        let windowed_transformer = i128::from(windowed_transformer_bytes(
+            components.transformer,
+            regime.transformer_window,
+            facts.transformer_blocks,
+        ));
         let (request_cond, request_den, request_dec) = if regime.staged {
             (conditioning, windowed_transformer, decoder)
         } else {
@@ -2086,9 +2083,11 @@ impl MemoryAnchor {
         })
     }
 
-    /// The candle image lane's entry point onto [`Self::derive_phase_peaks`] — sc-22509's
-    /// signature, which the worker's candle admission still calls until the lane's own story
-    /// rewires it with the request's full regime and the contract's architecture facts.
+    /// The sc-22509 shallow entry point onto [`Self::derive_phase_peaks`], kept for the fixtures
+    /// written against it. Since sc-22667 NO worker lane prices through it: the shared candle
+    /// ladder (sc-22664) and the Krea 2 Turbo lane both call the law directly with the rung's own
+    /// regime (`RequestRegime` from the selected parameters) and the contract's architecture
+    /// facts, so a rung's tile, chunk and window reach the estimate.
     ///
     /// Pins the lane (a non-candle anchor is refused) and keeps the shallow-anchor asymmetry the
     /// candle consumers were written against: the anchor must be the staged composition with no
@@ -2184,6 +2183,30 @@ impl MemoryAnchor {
                 i128::from(active.decode) + envelope(allocators.decode, peaks.decode),
             )?,
         })
+    }
+}
+
+/// The transformer bytes a `bounded_transformer_residency` rung keeps RESIDENT: the law's window
+/// share `transformer x min(window, blocks) / blocks`, rounded up (sc-22663, epic 22657 E3; the
+/// worker's MLX estimate floor states the same share since sc-22667 whenever the facts carry a
+/// block count, so both image lanes price one windowed residency). With no window the whole
+/// transformer is resident; with a window but no block count — the default facts at this pin —
+/// the share is UNKNOWABLE and the LAW keeps the whole transformer, the erring-large reading,
+/// never zero. (The MLX floor's no-block-count arm is a separate, worker-side decision: it keeps
+/// its pre-epic accounting so shipped admissions do not move before the pin bump.)
+pub fn windowed_transformer_bytes(
+    transformer: u64,
+    window: Option<u32>,
+    blocks: Option<u32>,
+) -> u64 {
+    match (window, blocks) {
+        (Some(window), Some(blocks)) if blocks > 0 && window > 0 => u64::try_from(scale_up(
+            i128::from(transformer),
+            i128::from(window.min(blocks)),
+            i128::from(blocks),
+        ))
+        .unwrap_or(transformer),
+        _ => transformer,
     }
 }
 
@@ -4429,6 +4452,43 @@ mod tests {
         assert!(below
             .derive_phase_activation_residues(&at(1024, 1024, FULLY_ENGAGED), components, facts)
             .is_none());
+    }
+
+    /// sc-22667 (epic 22657 feature-end round): the window share both image lanes state is ONE
+    /// function. `transformer x min(window, blocks) / blocks` rounded up when both are known; the
+    /// WHOLE transformer when the block count is unknown (the default facts at this pin) or no
+    /// window is engaged — never zero.
+    ///
+    /// MUTATION: returning `0` (or `transformer.saturating_sub(..)`) for the unknown-blocks arm
+    /// reds the second assertion; dropping the `.min(blocks)` clamp reds the fourth; and the law
+    /// itself is graded through this helper by `z_image_q4_rungs_price_from_the_staged_anchor_*`,
+    /// so a divergence between the two reds there.
+    #[test]
+    fn the_windowed_transformer_share_is_the_laws_and_errs_large_without_a_block_count() {
+        assert_eq!(
+            windowed_transformer_bytes(3_470_000_000, Some(1), Some(30)),
+            115_666_667,
+            "one of thirty blocks, rounded up"
+        );
+        assert_eq!(
+            windowed_transformer_bytes(3_470_000_000, Some(1), None),
+            3_470_000_000,
+            "a window with no block count keeps the whole transformer resident"
+        );
+        assert_eq!(
+            windowed_transformer_bytes(3_470_000_000, None, Some(30)),
+            3_470_000_000,
+            "no window engaged: whole transformer"
+        );
+        assert_eq!(
+            windowed_transformer_bytes(3_470_000_000, Some(64), Some(30)),
+            3_470_000_000,
+            "a window wider than the model is the whole model, never more"
+        );
+        assert_eq!(
+            windowed_transformer_bytes(3_470_000_000, Some(0), Some(30)),
+            3_470_000_000
+        );
     }
 
     /// AC 3: `ArchitectureFacts::default()` leaves every residue unscaled, so the estimate is

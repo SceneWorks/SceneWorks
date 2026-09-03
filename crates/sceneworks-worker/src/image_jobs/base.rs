@@ -9672,6 +9672,12 @@ mod candle_request_residency_tests {
                 },
             },
             memory: gen_core::GenerationMemory::default(),
+            basis: crate::memory_strategy::CandidateBasis::Measured,
+            admitted: crate::candle_memory_strategy::AdmittedBudget {
+                needed_gb: 1.0,
+                available_gb: 1.0,
+                reserve_gb: 0.0,
+            },
             estimate_scoped: false,
         };
         let streamed = fit(gen_core::MemoryStrategy::BoundedTransformerResidency);
@@ -10025,7 +10031,18 @@ mod krea_turbo_memory_route_tests {
         });
         let fit = |tier| {
             let runtime = crate::vram_gate::KreaRuntimeEvidenceContext::verified_for_test(tier);
-            match krea_turbo_fit(&manifest, tier, 1024, 1024, budget, true, Some(&runtime))
+            // The legacy 2 GB reserve these historical thresholds were calibrated against, which
+            // `ladder_reserve_gb` reproduces for a card with >= 1.75 GB idle residency (sc-22667).
+            match krea_turbo_fit(
+                &manifest,
+                tier,
+                1024,
+                1024,
+                budget,
+                crate::vram_gate::HEADROOM_GB,
+                true,
+                Some(&runtime),
+            )
                 .expect("Q8 and Q4 have measured ladder curves")
             {
             KreaTurboFit::Resident { .. } | KreaTurboFit::Fits { .. } => TierFit::Fits,
@@ -10069,7 +10086,18 @@ mod krea_turbo_memory_route_tests {
         });
         let fit = |tier| {
             let runtime = crate::vram_gate::KreaRuntimeEvidenceContext::verified_for_test(tier);
-            match krea_turbo_fit(&manifest, tier, 1024, 1024, budget, true, Some(&runtime))
+            // The legacy 2 GB reserve these historical thresholds were calibrated against, which
+            // `ladder_reserve_gb` reproduces for a card with >= 1.75 GB idle residency (sc-22667).
+            match krea_turbo_fit(
+                &manifest,
+                tier,
+                1024,
+                1024,
+                budget,
+                crate::vram_gate::HEADROOM_GB,
+                true,
+                Some(&runtime),
+            )
                 .expect("BF16, Q8, and Q4 have measured ladder curves")
             {
             KreaTurboFit::Resident { .. } | KreaTurboFit::Fits { .. } => TierFit::Fits,
@@ -11169,6 +11197,7 @@ async fn generate_candle_stream(
                             memory_width,
                             memory_height,
                             budget,
+                            shared_reserve_gb,
                             krea_allow_streamed_blocks,
                             candidate_runtime.as_ref(),
                         ) {
@@ -11261,6 +11290,7 @@ async fn generate_candle_stream(
                         memory_width,
                         memory_height,
                         budget,
+                        shared_reserve_gb,
                         krea_allow_streamed_blocks,
                         smallest_runtime.as_ref(),
                     );
@@ -11282,6 +11312,7 @@ async fn generate_candle_stream(
                                             memory_width,
                                             memory_height,
                                             budget,
+                                            shared_reserve_gb,
                                             krea_allow_streamed_blocks,
                                             candidate_runtime.as_ref(),
                                         ),
@@ -11617,6 +11648,7 @@ async fn generate_candle_stream(
                 memory_width,
                 memory_height,
                 budget,
+                shared_reserve_gb,
                 krea_allow_streamed_blocks,
                 krea_runtime_context.as_ref(),
             )
@@ -11657,12 +11689,14 @@ async fn generate_candle_stream(
     let use_sequential =
         if receipt_selector_authoritative {
             generation_memory.is_some_and(|memory| memory.stage_residency)
-        } else if let Some(crate::vram_gate::KreaTurboFit::Resident {
-            peak_gb,
-            needed_gb,
-            selection,
-        }) =
-            shared_krea_fit
+        } else if let Some(
+            fit @ crate::vram_gate::KreaTurboFit::Resident {
+                peak_gb,
+                needed_gb,
+                selection,
+                ..
+            },
+        ) = shared_krea_fit
         {
             memory_strategy_selection = Some(selection);
             adapted_peak_gb = Some(peak_gb);
@@ -11675,6 +11709,10 @@ async fn generate_candle_stream(
                 available_gb = budget.map_or(0.0, |budget| budget.free_gb),
                 "shared memory-strategy selector retained Krea Turbo resident execution"
             );
+            // sc-22667 (E7): the Krea lane's selection event, in the shared ladder's spelling.
+            if let Some(telemetry) = fit.selection_telemetry(tier, memory_width, memory_height) {
+                emit_event("image_memory_strategy_selected", telemetry);
+            }
             false
         } else {
             // A verified non-resident Krea result bypasses the legacy chooser. Missing or
@@ -11747,24 +11785,31 @@ async fn generate_candle_stream(
                 let krea_selected = if krea_turbo_ladder {
                     match shared_krea_fit {
                         Some(crate::vram_gate::KreaTurboFit::Resident { .. }) => false,
-                        Some(crate::vram_gate::KreaTurboFit::Fits {
-                            phases,
-                            needed_gb,
-                            selection,
-                            memory,
-                            // Measured or estimate-scoped (sc-18097): the selected rung and its
-                            // knobs are what this lane acts on, and both are already graded. The
-                            // flag exists for refusal ADVICE (`krea_turbo_smaller_fit_*`), which
-                            // must not name an estimate-backed geometry.
-                            estimate_scoped: _,
-                        }) => {
+                        Some(
+                            fit @ crate::vram_gate::KreaTurboFit::Fits {
+                                phases,
+                                needed_gb,
+                                selection,
+                                memory,
+                                // `estimate_scoped` is deliberately not read here (sc-18097):
+                                // the selected rung and its knobs are what this lane acts on,
+                                // and both are already graded. The flag exists for refusal
+                                // ADVICE (`krea_turbo_smaller_fit_*`), which must not name an
+                                // estimate-backed geometry.
+                                ..
+                            },
+                        ) => {
                             memory_strategy_selection = Some(selection);
                             generation_memory = Some(memory);
                             // Reclaim accounting records allocations, not the admission threshold.
-                            // `needed_gb` includes the 2 GB safety reserve, which is deliberately never
-                            // allocated and therefore cannot be credited back during a model swap.
+                            // `needed_gb` includes the ladder's operational reserve
+                            // (`vram_gate::ladder_reserve_gb`, sc-22667), which is deliberately
+                            // never allocated and therefore cannot be credited back during a
+                            // model swap.
                             adapted_peak_gb = Some(phases.peak_gb());
                             tracing::info!(
+                                event = "image_memory_strategy_selected",
+                                job_id = %job.id,
                                 model = %request.model,
                                 tier,
                                 width,
@@ -11777,6 +11822,15 @@ async fn generate_candle_stream(
                                 available_gb,
                                 "Krea Turbo VRAM fit ladder selected the least-cost sufficient rung"
                             );
+                            // sc-22667 (epic 22657 E7): the Krea lane's selection event — the
+                            // rung, its basis and the three phase peaks the selector graded, in
+                            // the shared ladder's spelling — so an OOM under this selection is
+                            // attributable to the exact estimate that admitted it.
+                            if let Some(telemetry) =
+                                fit.selection_telemetry(tier, memory_width, memory_height)
+                            {
+                                emit_event("image_memory_strategy_selected", telemetry);
+                            }
                             true
                         }
                         Some(crate::vram_gate::KreaTurboFit::Reject { phases, needed_gb }) => {
@@ -11800,6 +11854,7 @@ async fn generate_candle_stream(
                                                     memory_width,
                                                     memory_height,
                                                     budget,
+                                                    shared_reserve_gb,
                                                     krea_allow_streamed_blocks,
                                                     candidate_runtime.as_ref(),
                                                 ),
@@ -11817,6 +11872,7 @@ async fn generate_candle_stream(
                                 memory_width,
                                 memory_height,
                                 budget,
+                                shared_reserve_gb,
                                 krea_allow_streamed_blocks,
                                 krea_runtime_context.as_ref(),
                             );
@@ -11959,6 +12015,7 @@ async fn generate_candle_stream(
                                             memory_width,
                                             memory_height,
                                             budget,
+                                            shared_reserve_gb,
                                             krea_allow_streamed_blocks,
                                             candidate_runtime.as_ref(),
                                         ),

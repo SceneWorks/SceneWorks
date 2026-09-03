@@ -33,6 +33,8 @@ import {
   MODEL_STORIES,
   modelStory,
   OUT_OF_MATRIX_CATALOG_ENTRIES,
+  IMAGE_CANDLE_DERIVATION_ENTRY_POINTS,
+  IMAGE_MLX_DERIVATION_ENTRY_POINTS,
   parseAnchorDerivationLanes,
   parseCandleBespokeStagedLanes,
   parseInternalCandleVideoRoutes,
@@ -1834,6 +1836,37 @@ test("the derivation is defined per LANE, read off the Rust that declares and wi
   );
   // And a law nothing declares defines nothing, so the fixtures above are not a parallel universe.
   assert.ok(!parseAnchorDerivationLanes("", laneMap(wires)).size);
+
+  // sc-22667: a lane may name the law ITSELF as an entry point. It wires only when the source
+  // declares that entry point too — an entry point nothing declares wires nothing.
+  const imageDeclares =
+    "pub fn derive_phase_peaks(&self, request: &ImageDeriveRequest) {}\n" +
+    "pub fn derive_image_phase_peaks(&self, request: AnchorImageDeriveRequest) {}";
+  const imageWires =
+    "anchor.backend != sceneworks_core::memory_anchor::AnchorBackend::Candle;\n" +
+    "anchor.derive_phase_peaks(&request, components, facts)";
+  const imageLane = (entryPoints) => ({
+    "image:candle": { law: "image", sources: [imageWires], entryPoints },
+  });
+  assert.deepEqual(
+    [...parseAnchorDerivationLanes(imageDeclares, imageLane(["derive_phase_peaks"]))],
+    ["image:candle"],
+  );
+  assert.deepEqual(
+    [...parseAnchorDerivationLanes(imageDeclares, imageLane(["derive_image_phase_peaks"]))],
+    [],
+    "the source calls the law, not the shim",
+  );
+  assert.deepEqual(
+    [
+      ...parseAnchorDerivationLanes(
+        "pub fn derive_image_phase_peaks(&self) {}",
+        imageLane(["derive_phase_peaks"]),
+      ),
+    ],
+    [],
+    "an entry point the derivation source does not declare wires nothing",
+  );
 });
 
 test("the shipped derivation reaches every lane through its REAL admission source (epic 22505)", async () => {
@@ -1847,9 +1880,36 @@ test("the shipped derivation reaches every lane through its REAL admission sourc
   const lanes = parseAnchorDerivationLanes(derivation, {
     "video:mlx": { law: "video", sources: [admission] },
     "video:candle": { law: "video", sources: [admission] },
-    "image:candle": { law: "image", sources: [vram, candleStrategy] },
-    "image:mlx": { law: "mlx_image", sources: [mlxFitGate] },
+    "image:candle": {
+      law: "image",
+      sources: [vram, candleStrategy],
+      entryPoints: IMAGE_CANDLE_DERIVATION_ENTRY_POINTS,
+    },
+    "image:mlx": {
+      law: "mlx_image",
+      sources: [mlxFitGate],
+      entryPoints: IMAGE_MLX_DERIVATION_ENTRY_POINTS,
+    },
   });
+  // sc-22667: the candle image lane is wired through the LAW ITSELF — neither admission source
+  // calls the shallow `derive_image_phase_peaks` shim any more — so the wiring read must see
+  // `derive_phase_peaks`, and a read keyed on the shim alone would collapse every anchored candle
+  // image cell to `Anchored/underived` while the lane prices from the law.
+  assert.ok(
+    !vram.includes("derive_image_phase_peaks(") &&
+      !candleStrategy.includes("derive_image_phase_peaks("),
+    "no candle admission source calls the shallow shim since sc-22667",
+  );
+  assert.ok(
+    vram.includes("derive_phase_peaks(") && candleStrategy.includes("derive_phase_peaks("),
+    "both candle admission sources call the law",
+  );
+  assert.ok(
+    !parseAnchorDerivationLanes(derivation, {
+      "image:candle": { law: "image", sources: [vram, candleStrategy] },
+    }).has("image:candle"),
+    "keyed on the shim alone the lane reads unwired — which is why the entry points name the law",
+  );
   assert.deepEqual(
     [...lanes].sort(),
     ["image:candle", "image:mlx", "video:candle", "video:mlx"],

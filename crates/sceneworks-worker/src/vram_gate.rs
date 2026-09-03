@@ -506,14 +506,25 @@ impl KreaTurboPhasePeaks {
 pub(crate) enum KreaTurboFit {
     Resident {
         peak_gb: f64,
+        /// The admitted peak plus the operational reserve the selector charged once against the
+        /// budget (`ladder_reserve_gb`, sc-22667) — what the lane quotes as its need.
         needed_gb: f64,
         selection: gen_core::MemorySelection,
+        /// The selector's own admission figures (sc-22667, E7 telemetry).
+        admitted: crate::candle_memory_strategy::AdmittedBudget,
     },
     Fits {
         phases: KreaTurboPhasePeaks,
+        /// The admitted peak plus the operational reserve (see `Resident::needed_gb`).
         needed_gb: f64,
         selection: gen_core::MemorySelection,
         memory: gen_core::GenerationMemory,
+        /// What priced the selected rung (sc-22667, E7): a measured record of this cell, the
+        /// tier's fitted curve, or the anchor derivation through the image law.
+        basis: crate::memory_strategy::CandidateBasis,
+        /// The selector's own admission figures, so the telemetry agrees with the selector by
+        /// construction.
+        admitted: crate::candle_memory_strategy::AdmittedBudget,
         /// The rung was carried by a synthesized fitted-curve ESTIMATE, not by an exact measured
         /// record of this cell (sc-18097). True exactly when the request geometry has no
         /// `exact_request` record: a rung's measured candidates come only from that record, and a
@@ -531,6 +542,75 @@ pub(crate) enum KreaTurboFit {
     Unverified {
         reason: gen_core::MemoryEvidenceVerdict,
     },
+}
+
+impl KreaTurboFit {
+    /// The `image_memory_strategy_selected` telemetry payload for a selection this lane made
+    /// (sc-22667, epic 22657 E7) — the same shape the shared candle ladder emits
+    /// (`candle_memory_strategy::CandleMemoryEvaluation::selection_telemetry`): the selected rung
+    /// and its parameters, the basis that priced it, the three phase peaks where a phase
+    /// decomposition priced it (every optimized rung: the measured curves, the fitted curves and
+    /// the anchor derivation are all per phase), and the selector's admission figures. `None`
+    /// for a refusal or an unverified result, which select nothing.
+    pub(crate) fn selection_telemetry(&self, tier: &str, width: u32, height: u32) -> Option<Value> {
+        let (selection, basis, phases, admitted, predicted_peak_gb) = match self {
+            Self::Resident {
+                peak_gb,
+                selection,
+                admitted,
+                ..
+            } => (
+                selection,
+                crate::memory_strategy::CandidateBasis::Measured,
+                None,
+                admitted,
+                *peak_gb,
+            ),
+            Self::Fits {
+                phases,
+                selection,
+                basis,
+                admitted,
+                ..
+            } => (selection, *basis, Some(*phases), admitted, phases.peak_gb()),
+            Self::Reject { .. } | Self::Unverified { .. } => return None,
+        };
+        let bytes = |gb: f64| (gb * BYTES_PER_GIB).round().clamp(0.0, u64::MAX as f64) as u64;
+        let parameters = selection.parameters;
+        Some(serde_json::json!({
+            "backend": "candle",
+            "route": "krea_2_turbo",
+            "actualTier": tier,
+            "mode": "text_to_image",
+            "geometry": {
+                "width": width,
+                "height": height,
+                "batch": 1,
+                "frames": KREA_LANE_FRAMES,
+            },
+            "referenceCount": 0,
+            "overlay": Value::Null,
+            "strategy": crate::candle_memory_strategy::strategy_label(selection.strategy),
+            "parameters": {
+                "decodeTileEdge": parameters.decode_tile_edge,
+                "decodeOverlap": parameters.decode_overlap,
+                "attentionChunkSize": parameters.attention_chunk_size,
+                "transformerWindowSize": parameters.transformer_window_size,
+            },
+            "basis": basis.as_key(),
+            "authority": if basis.is_estimate() { "estimated" } else { "calibrated" },
+            "predictedPeakBytes": bytes(predicted_peak_gb),
+            "phasePeakBytes": phases.map(|phases| serde_json::json!({
+                "conditioning": bytes(phases.text_gb),
+                "denoise": bytes(phases.denoise_gb),
+                "decode": bytes(phases.decode_gb),
+            })),
+            "admittedPeakGb": admitted.needed_gb,
+            "availableGb": admitted.available_gb,
+            "reserveGb": admitted.reserve_gb,
+            "evidenceRevision": KREA_TURBO_SCENEWORKS_REVISION,
+        }))
+    }
 }
 
 pub(crate) const KREA_TURBO_SCENEWORKS_REVISION: &str = "sc-15449-contract-v1";
@@ -1114,14 +1194,65 @@ fn krea_store_anchor(
 /// candidate anchored to a verified measured record, graded by the shared selector behind the
 /// candle estimate margin — see the synthesis block below for the anchoring and binding-phase
 /// rules.
+///
+/// Since sc-22667 (epic 22657 feature-end round, E3/E4/E7) the lane is on the same law and the
+/// same reserve as the shared candle ladder:
+///
+/// * an OUT-OF-ENVELOPE rung — one the fitted `turboFit` curves cannot price — is derived through
+///   `MemoryAnchor::derive_phase_peaks` with the rung's OWN regime
+///   (`candle_memory_strategy::request_regime` over the manifest's `strategyParameters`: the
+///   decode tile, the attention score budget, the transformer window) and the contract's
+///   architecture facts (`video_admission::architecture_facts_from_contract`), so rung 3 and
+///   rung 4 price their bounded working sets rather than every rung repeating the shallow staged
+///   derivation. In-envelope rungs keep the fitted curves: they are measured evidence.
+/// * `reserve_gb` is the operational reserve — `ladder_reserve_gb` of the caller's RAW probe,
+///   handed in explicitly so a reclaimable-credited `budget` can never derive it — charged
+///   EXACTLY ONCE, on the budget side, against every candidate
+///   (`memory_strategy::ReserveCharge::EveryCandidate`): every candidate this lane grades is a
+///   device delta above the pre-load residency (the measured records, the curves fitted over
+///   them, and the anchor derivation alike), so none carries the reserve inside its peak. The
+///   quoted `needed_gb` is the admitted peak plus that reserve.
+/// * the selection reports its basis and admission figures, so the caller can emit the
+///   `image_memory_strategy_selected` event with the three phase peaks
+///   ([`KreaTurboFit::selection_telemetry`]).
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn krea_turbo_fit_with_runtime(
     manifest_entry: &JsonObject,
     tier: &str,
     width: u32,
     height: u32,
     budget: Option<VramBudget>,
+    reserve_gb: f64,
     allow_streamed_blocks: bool,
     runtime: Option<&KreaRuntimeEvidenceContext>,
+) -> Option<KreaTurboFit> {
+    krea_turbo_fit_priced(
+        manifest_entry,
+        tier,
+        width,
+        height,
+        budget,
+        reserve_gb,
+        allow_streamed_blocks,
+        runtime,
+        None,
+    )
+}
+
+/// [`krea_turbo_fit_with_runtime`] with the architecture facts the derivation scales by as an
+/// explicit input: `None` reads them off the loaded contract (production; the default facts at
+/// this pin), `Some` lets a fixture grade the rung ratios with the model's real facts.
+#[allow(clippy::too_many_arguments)]
+fn krea_turbo_fit_priced(
+    manifest_entry: &JsonObject,
+    tier: &str,
+    width: u32,
+    height: u32,
+    budget: Option<VramBudget>,
+    reserve_gb: f64,
+    allow_streamed_blocks: bool,
+    runtime: Option<&KreaRuntimeEvidenceContext>,
+    facts_override: Option<sceneworks_core::memory_anchor::ArchitectureFacts>,
 ) -> Option<KreaTurboFit> {
     use crate::memory_strategy::{self, Budget, Candidate, RequestScope, Selection};
     use gen_core::{
@@ -1202,6 +1333,15 @@ pub(crate) fn krea_turbo_fit_with_runtime(
             reason: MemoryEvidenceVerdict::OutOfEnvelope,
         });
     }
+    if !reserve_gb.is_finite() || reserve_gb < 0.0 {
+        return None;
+    }
+    // The law's inputs for the out-of-envelope rungs (sc-22667): the component bytes of the
+    // loaded tier and the model's architecture facts, both off the contract.
+    let components = crate::video_admission::anchor_component_bytes(provider_contract.asset_facts);
+    let facts = facts_override.unwrap_or_else(|| {
+        crate::video_admission::architecture_facts_from_contract(provider_contract)
+    });
     let measured_closure_digest = turbo_fit
         .get("inferenceClosureDigest")
         .and_then(Value::as_str)
@@ -1589,14 +1729,31 @@ pub(crate) fn krea_turbo_fit_with_runtime(
             let Some(anchor) = anchor else {
                 continue;
             };
+            if anchor.underived_reason.is_some()
+                || anchor.backend != sceneworks_core::memory_anchor::AnchorBackend::Candle
+            {
+                continue;
+            }
             let engaged = provider_contract.engaged_composition(strategy);
-            let Some(derived) = anchor.derive_image_phase_peaks(
-                sceneworks_core::memory_anchor::AnchorImageDeriveRequest {
+            // sc-22667: the rung's OWN regime — its engaged composition and the parameters the
+            // manifest selects for it — through the one law, with the contract's facts. Rungs 3
+            // and 4 therefore price their chunk and window where the shallow shim priced every
+            // rung at the staged working set. A rung whose parameters are incomplete cannot be
+            // executed as selected and is skipped, like a rung the law refuses.
+            let Some(regime) = crate::candle_memory_strategy::request_regime(&engaged, &parameters)
+            else {
+                continue;
+            };
+            let Some(derived) = anchor.derive_phase_peaks(
+                &sceneworks_core::memory_anchor::ImageDeriveRequest {
                     width,
                     height,
-                    staged_residency: engaged.contains(&MemoryStrategy::StagedResidency),
+                    batch: 1,
+                    conditioning_tokens: None,
+                    regime,
                 },
-                crate::video_admission::anchor_component_bytes(provider_contract.asset_facts),
+                components,
+                facts,
             ) else {
                 continue;
             };
@@ -1612,6 +1769,9 @@ pub(crate) fn krea_turbo_fit_with_runtime(
                 ?strategy,
                 anchor = anchor.id.as_str(),
                 anchor_geometry = format!("{}x{}", anchor.geometry.width, anchor.geometry.height),
+                conditioning_peak_bytes = derived.conditioning,
+                denoise_peak_bytes = derived.denoise,
+                decode_peak_bytes = derived.decode,
                 raw_peak_bytes = predicted_peak_bytes,
                 "synthesized anchor-derived estimate candidate for a geometry outside the \
                  measured curve envelope"
@@ -1619,7 +1779,7 @@ pub(crate) fn krea_turbo_fit_with_runtime(
             measured.push((
                 strategy,
                 phases,
-                phases.peak_gb() + HEADROOM_GB,
+                phases.peak_gb() + reserve_gb,
                 selection,
                 true,
             ));
@@ -1664,7 +1824,7 @@ pub(crate) fn krea_turbo_fit_with_runtime(
             continue;
         };
         let phase_peak_gb = phases.peak_gb();
-        let needed_gb = phase_peak_gb + HEADROOM_GB;
+        let needed_gb = phase_peak_gb + reserve_gb;
         measured.push((strategy, phases, needed_gb, selection, false));
         evidence.push(make_evidence(
             selection,
@@ -1893,17 +2053,28 @@ pub(crate) fn krea_turbo_fit_with_runtime(
                 unmodeled_activation_bytes: None,
             }),
     );
-    let selection = memory_strategy::select_strategy(
+    // sc-22667: the operational reserve is charged ONCE, on the budget side, against every
+    // candidate (`ReserveCharge::EveryCandidate`): none of this lane's candidates carries a pad
+    // inside its peak — see the function doc. The legacy fixed `HEADROOM_GB` is gone from both
+    // sides of the comparison.
+    let selection = memory_strategy::select_strategy_charging(
         request,
         provider_contract,
         Some(Budget {
             available_gb: budget.free_gb,
             reclaimable_gb: 0.0,
             total_gb: budget.total_gb,
-            reserved_headroom_gb: HEADROOM_GB,
+            reserved_headroom_gb: reserve_gb,
         }),
         &candidates,
+        memory_strategy::ReserveCharge::EveryCandidate,
     );
+    let admitted =
+        |needed_gb: f64, available_gb: f64| crate::candle_memory_strategy::AdmittedBudget {
+            needed_gb,
+            available_gb,
+            reserve_gb,
+        };
     match selection {
         Selection::Selected {
             selection:
@@ -1912,20 +2083,33 @@ pub(crate) fn krea_turbo_fit_with_runtime(
                     ..
                 },
             needed_gb,
-            ..
+            available_gb,
         } => Some(KreaTurboFit::Resident {
             peak_gb: resident_peak_gb,
-            needed_gb: needed_gb + HEADROOM_GB,
+            needed_gb: needed_gb + reserve_gb,
             selection: selected,
+            admitted: admitted(needed_gb, available_gb),
         }),
         Selection::Selected {
             selection: selected,
             needed_gb,
-            ..
+            available_gb,
         } => {
-            let (_, phases, _, _, _) = measured
+            let (_, phases, _, _, from_anchor) = measured
                 .into_iter()
                 .find(|(_, _, _, selection, _)| selection.strategy == selected.strategy)?;
+            // What priced the rung: the anchor derivation, else the request cell's own measured
+            // record, else the tier's fitted curve (the only estimate an in-envelope cell without
+            // a record can be carried by — see `Fits::estimate_scoped`).
+            let basis = if from_anchor {
+                memory_strategy::CandidateBasis::EstimateAnchorDerived {
+                    lane: memory_strategy::AnchorDerivationLane::Image,
+                }
+            } else if evidence_record.is_some() {
+                memory_strategy::CandidateBasis::Measured
+            } else {
+                memory_strategy::CandidateBasis::EstimateFittedCurve
+            };
             let memory = gen_core::GenerationMemory {
                 tile_vae_decode: provider_contract
                     .engages(selected.strategy, MemoryStrategy::BoundedDecode),
@@ -1939,9 +2123,11 @@ pub(crate) fn krea_turbo_fit_with_runtime(
             };
             Some(KreaTurboFit::Fits {
                 phases,
-                needed_gb: needed_gb + HEADROOM_GB,
+                needed_gb: needed_gb + reserve_gb,
                 selection: selected,
                 memory,
+                basis,
+                admitted: admitted(needed_gb, available_gb),
                 // See the field doc: with no `exact_request` record at this geometry the rung's
                 // measured candidates are structurally excluded, so only a synthesized estimate
                 // can have carried it.
@@ -1952,7 +2138,7 @@ pub(crate) fn krea_turbo_fit_with_runtime(
             let (_, phases, _, _, _) = measured.last().copied()?;
             Some(KreaTurboFit::Reject {
                 phases,
-                needed_gb: needed_gb + HEADROOM_GB,
+                needed_gb: needed_gb + reserve_gb,
             })
         }
         // sc-18097 narrowed this arm's meaning: an in-envelope unmeasured geometry now carries a
@@ -1964,6 +2150,17 @@ pub(crate) fn krea_turbo_fit_with_runtime(
         Selection::Unverified { reason } => Some(KreaTurboFit::Unverified { reason }),
     }
 }
+
+/// The reserve the threshold fixtures below were calibrated against: the legacy 2 GB, which is
+/// exactly what [`ladder_reserve_gb`] produces for a card whose idle baseline is at or above
+/// `HEADROOM_GB - LADDER_RESERVE_MARGIN_GB` (the ceiling arm). The reserve is an INPUT of the lane
+/// since sc-22667 — production derives it from the raw probe — so the fixtures state it rather
+/// than re-deriving a different number from their `free == total` budgets, which would move
+/// every calibrated admission threshold for no reason connected to what they grade. The
+/// derivation itself is graded by the `ladder_reserve_*` tests and by
+/// `an_out_of_envelope_krea_request_charges_the_ladder_reserve_once`.
+#[cfg(test)]
+const KREA_FIXTURE_RESERVE_GB: f64 = HEADROOM_GB;
 
 #[cfg(test)]
 fn krea_turbo_fit(
@@ -1981,6 +2178,7 @@ fn krea_turbo_fit(
         width,
         height,
         budget,
+        KREA_FIXTURE_RESERVE_GB,
         allow_streamed_blocks,
         Some(&runtime),
     )
@@ -1997,12 +2195,14 @@ fn krea_turbo_fit(
 /// a second refusal at the geometry the user was just told to switch to. `Resident` keeps its
 /// pre-sc-18097 acceptance: that verdict is the manifest's geometry-independent `vramGbByTier`
 /// row, which this helper has always been allowed to quote.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn krea_turbo_smaller_fit_with_runtime(
     manifest_entry: &JsonObject,
     tier: &str,
     width: u32,
     height: u32,
     budget: Option<VramBudget>,
+    reserve_gb: f64,
     allow_streamed_blocks: bool,
     runtime: Option<&KreaRuntimeEvidenceContext>,
 ) -> Option<(u32, u32)> {
@@ -2027,6 +2227,7 @@ pub(crate) fn krea_turbo_smaller_fit_with_runtime(
                 *w,
                 *h,
                 budget,
+                reserve_gb,
                 allow_streamed_blocks,
                 runtime,
             ),
@@ -2057,6 +2258,7 @@ fn krea_turbo_smaller_fit(
         width,
         height,
         budget,
+        KREA_FIXTURE_RESERVE_GB,
         allow_streamed_blocks,
         Some(&runtime),
     )
@@ -4122,7 +4324,16 @@ mod tests {
             total_gb: 20.0,
         });
         let run = |runtime: Option<&KreaRuntimeEvidenceContext>| {
-            krea_turbo_fit_with_runtime(&manifest, "q4", 1024, 1024, budget, true, runtime)
+            krea_turbo_fit_with_runtime(
+                &manifest,
+                "q4",
+                1024,
+                1024,
+                budget,
+                KREA_FIXTURE_RESERVE_GB,
+                true,
+                runtime,
+            )
         };
         assert!(matches!(run(None), Some(KreaTurboFit::Unverified { .. })));
 
@@ -6858,10 +7069,9 @@ mod tests {
         sceneworks_core::memory_anchor::MemoryAnchorStore { anchors, ..store }
     }
 
-    /// The derived peak for one geometry, straight from the packaged anchor — the same call the
-    /// gate makes, so the expectations below are not a second transcription of the coefficients.
-    fn krea_anchor_derived_peak_gb(width: u32, height: u32) -> f64 {
-        let anchor = sceneworks_core::memory_anchor::packaged_memory_anchors()
+    /// The packaged Krea candle q4 anchor, as the gate reads it.
+    fn krea_packaged_q4_anchor() -> &'static sceneworks_core::memory_anchor::MemoryAnchor {
+        sceneworks_core::memory_anchor::packaged_memory_anchors()
             .and_then(|store| {
                 store.image_anchor_for(
                     "krea_2_turbo",
@@ -6869,22 +7079,101 @@ mod tests {
                     "q4",
                 )
             })
-            .expect("the packaged Krea candle q4 anchor");
-        let derived = anchor
-            .derive_image_phase_peaks(
-                sceneworks_core::memory_anchor::AnchorImageDeriveRequest {
+            .expect("the packaged Krea candle q4 anchor")
+    }
+
+    /// The ladder reserve a fixture budget produces, as production derives it from the raw probe.
+    fn reserve_for(budget: Option<VramBudget>) -> f64 {
+        budget.map_or(0.0, ladder_reserve_gb)
+    }
+
+    /// One rung's derived phase peaks for a geometry, straight from the packaged anchor through
+    /// the law with the rung's OWN regime (the manifest's `strategyParameters`) and the given
+    /// facts — the same call the gate makes since sc-22667, so the expectations below are not a
+    /// second transcription of the coefficients.
+    fn krea_anchor_derived_phases(
+        manifest: &JsonObject,
+        strategy: MemoryStrategy,
+        width: u32,
+        height: u32,
+        facts: sceneworks_core::memory_anchor::ArchitectureFacts,
+    ) -> sceneworks_core::memory_anchor::AnchorDerivedPhases {
+        krea_anchor_derived_phases_with(
+            manifest,
+            strategy,
+            width,
+            height,
+            facts,
+            // The same component bytes the gate reads off the fixture runtime's contract.
+            crate::video_admission::anchor_component_bytes(
+                krea_test_provider_contract("q4").asset_facts,
+            ),
+        )
+    }
+
+    /// [`krea_anchor_derived_phases`] with the component bytes stated explicitly.
+    fn krea_anchor_derived_phases_with(
+        manifest: &JsonObject,
+        strategy: MemoryStrategy,
+        width: u32,
+        height: u32,
+        facts: sceneworks_core::memory_anchor::ArchitectureFacts,
+        components: sceneworks_core::memory_anchor::ComponentBytes,
+    ) -> sceneworks_core::memory_anchor::AnchorDerivedPhases {
+        let contract = krea_test_provider_contract("q4");
+        let parameters = krea_rung_parameters(&manifest["candle"]["turboFit"], strategy)
+            .expect("the fixture declares every rung's parameters");
+        let regime = crate::candle_memory_strategy::request_regime(
+            &contract.engaged_composition(strategy),
+            &parameters,
+        )
+        .expect("a complete regime");
+        krea_packaged_q4_anchor()
+            .derive_phase_peaks(
+                &sceneworks_core::memory_anchor::ImageDeriveRequest {
                     width,
                     height,
-                    staged_residency: true,
+                    batch: 1,
+                    conditioning_tokens: None,
+                    regime,
                 },
-                // The same component bytes the gate reads off the fixture runtime's contract.
-                crate::video_admission::anchor_component_bytes(
-                    krea_test_provider_contract("q4").asset_facts,
-                ),
+                components,
+                facts,
             )
-            .expect("the derivation prices this geometry");
-        derived.peak_bytes() as f64 / BYTES_PER_GIB
+            .expect("the derivation prices this geometry")
     }
+
+    /// The derived peak of the staged rung under the DEFAULT facts (this pin), which every deeper
+    /// rung equals when no fact can scale its ratio — the number the default-facts tests below
+    /// grade against.
+    fn krea_anchor_derived_peak_gb(width: u32, height: u32) -> f64 {
+        krea_anchor_derived_phases(
+            &krea_fit_manifest(),
+            MemoryStrategy::StagedResidency,
+            width,
+            height,
+            sceneworks_core::memory_anchor::ArchitectureFacts::default(),
+        )
+        .peak_bytes() as f64
+            / BYTES_PER_GIB
+    }
+
+    /// Krea 2 Turbo's architecture facts, from the pinned engine's `Krea2Config::turbo()`
+    /// (`candle-gen-krea/src/config.rs` at inference 670dc1f4): 48 attention heads of 128, 28
+    /// single-stream blocks, patch 2, 16 latent channels behind a x8 VAE, bf16 activations.
+    /// Supplied by the fixture because the contract does not carry them at this pin
+    /// (`architecture_facts_from_contract`).
+    const KREA_2_FACTS: sceneworks_core::memory_anchor::ArchitectureFacts =
+        sceneworks_core::memory_anchor::ArchitectureFacts {
+            attention_heads: Some(48),
+            head_dim: Some(128),
+            transformer_blocks: Some(28),
+            patch_size: Some(2),
+            latent_channels: Some(16),
+            vae_spatial_scale: Some(8),
+            vae_temporal_scale: Some(1),
+            activation_dtype_width: Some(2),
+        };
 
     /// The fixture with a resident row too large to fit, so an admission can only come from an
     /// optimized rung. Without this the selector answers `Resident` and the rung under test is
@@ -6912,12 +7201,14 @@ mod tests {
         );
         let derived_peak_gb = krea_anchor_derived_peak_gb(width, height);
         // Generous enough that the estimate margin the shared selector applies cannot be what
-        // decides the outcome, and far below the resident row.
+        // decides the outcome, and far below the resident row. The reserve is the ladder's, as
+        // production charges it (sc-22667), not the retired fixed 2 GB.
         let free_gb = derived_peak_gb * 1.25 + HEADROOM_GB;
         let budget = Some(VramBudget {
             free_gb,
             total_gb: free_gb,
         });
+        let reserve_gb = reserve_for(budget);
         let fit = with_injected_anchor_store(krea_live_anchor_store(), || {
             krea_turbo_fit_with_runtime(
                 &manifest,
@@ -6925,6 +7216,7 @@ mod tests {
                 width,
                 height,
                 budget,
+                reserve_for(budget),
                 true,
                 Some(&runtime),
             )
@@ -6947,11 +7239,14 @@ mod tests {
             "the admitted rung must be priced by the derivation ({derived_peak_gb} GiB), got \
              {phases:?}"
         );
+        // Re-based by sc-22667: the lane charges `ladder_reserve_gb` of the probe once, so the
+        // quoted need is the derived peak plus THAT reserve, not plus the legacy 2 GB.
         assert!(
-            needed_gb >= derived_peak_gb + HEADROOM_GB
-                && needed_gb <= derived_peak_gb * 1.10 + HEADROOM_GB,
-            "the derived need must be the derived peak plus the standard reserve and at most the \
-             selector's estimate margin above it, got {needed_gb} against {derived_peak_gb}"
+            needed_gb >= derived_peak_gb + reserve_gb
+                && needed_gb <= derived_peak_gb * 1.10 + reserve_gb,
+            "the derived need must be the derived peak plus the ladder reserve and at most the \
+             selector's estimate margin above it, got {needed_gb} against {derived_peak_gb} + \
+             {reserve_gb}"
         );
     }
 
@@ -6982,6 +7277,7 @@ mod tests {
                     1280,
                     1280,
                     budget,
+                    reserve_for(budget),
                     false,
                     Some(&runtime),
                 )
@@ -7010,6 +7306,7 @@ mod tests {
                     1280,
                     1280,
                     budget,
+                    reserve_for(budget),
                     true,
                     Some(&runtime),
                 )
@@ -7027,8 +7324,17 @@ mod tests {
         // observation of the OTHER branch instead of a red test nobody can act on.
         let shipped_anchor_is_live = krea_store_anchor("q4", true).is_some();
         assert_eq!(
-            krea_turbo_fit_with_runtime(&manifest, "q4", 1280, 1280, budget, true, Some(&runtime))
-                .is_some_and(|fit| matches!(fit, KreaTurboFit::Fits { .. })),
+            krea_turbo_fit_with_runtime(
+                &manifest,
+                "q4",
+                1280,
+                1280,
+                budget,
+                reserve_for(budget),
+                true,
+                Some(&runtime)
+            )
+            .is_some_and(|fit| matches!(fit, KreaTurboFit::Fits { .. })),
             shipped_anchor_is_live,
             "the shipped anchor prices this geometry exactly when its loader closure is current"
         );
@@ -7070,8 +7376,16 @@ mod tests {
         // CONTROL, or the assertion below is vacuous: at an IN-ENVELOPE geometry this same card and
         // manifest DO admit on the geometry-free resident row. So the refusal that follows is about
         // the row not pricing the request, not about the budget.
-        let control =
-            krea_turbo_fit_with_runtime(&manifest, "q4", 1024, 1024, budget, true, Some(&runtime));
+        let control = krea_turbo_fit_with_runtime(
+            &manifest,
+            "q4",
+            1024,
+            1024,
+            budget,
+            reserve_for(budget),
+            true,
+            Some(&runtime),
+        );
         assert!(
             matches!(
                 control,
@@ -7090,6 +7404,7 @@ mod tests {
                 width,
                 height,
                 budget,
+                reserve_for(budget),
                 true,
                 Some(&runtime),
             )
@@ -7118,7 +7433,16 @@ mod tests {
         // A CURRENT anchor is present throughout: the claim is that the curves answer FIRST, which
         // is only tested if the derivation was actually available to be preferred.
         let fit = with_injected_anchor_store(krea_live_anchor_store(), || {
-            krea_turbo_fit_with_runtime(&manifest, "q4", 1024, 1024, budget, true, Some(&runtime))
+            krea_turbo_fit_with_runtime(
+                &manifest,
+                "q4",
+                1024,
+                1024,
+                budget,
+                reserve_for(budget),
+                true,
+                Some(&runtime),
+            )
         });
         let Some(KreaTurboFit::Fits { phases, .. }) = fit else {
             panic!("the measured geometry must still admit, got {fit:?}");
@@ -7129,6 +7453,326 @@ mod tests {
             "in-envelope admission must stay on the measured curve ({}), not fall through to the \
              derivation ({derived_peak_gb})",
             phases.peak_gb()
+        );
+    }
+    /// sc-22667 (epic 22657 feature-end round, E3/E4): OUT of the measured envelope the Krea lane
+    /// prices every rung through the law with the rung's OWN regime and the contract's facts. With
+    /// Krea 2 Turbo's real facts at 2048x2048 the chunked rung (3) prices its 128 Mi-score budget
+    /// where the staged rung (2) prices the whole 48-head score tensor, and the windowed rung (4)
+    /// keeps the window share resident wherever the contract engages the window — so 3 and 4
+    /// price strictly below 2, and the gate's selection carries exactly the law's per-rung
+    /// phases: a card that cannot host rung 2 admits on rung 3 at the law's rung-3 peak.
+    ///
+    /// MUTATION: replacing the rung regime in `krea_turbo_fit_priced` with
+    /// `RequestRegime::staged()` (the retired shim's composition) makes every rung price at the
+    /// staged derivation — the `<` assertions and the rung-3 admission below go red. Passing
+    /// `ArchitectureFacts::default()` instead of `facts` reds the same way (every ratio inert).
+    #[test]
+    fn an_out_of_envelope_krea_request_prices_the_bounded_rungs_below_the_staged_one() {
+        let manifest = krea_fit_manifest_with_unfittable_resident();
+        let runtime = KreaRuntimeEvidenceContext::verified_for_test("q4");
+        let (width, height) = (2048u32, 2048u32);
+        assert!(
+            u64::from(width) * u64::from(height)
+                > manifest["candle"]["turboFit"]["maxMeasuredPixels"]
+                    .as_u64()
+                    .expect("maxMeasuredPixels")
+        );
+        let derived =
+            |strategy| krea_anchor_derived_phases(&manifest, strategy, width, height, KREA_2_FACTS);
+        let staged = derived(MemoryStrategy::StagedResidency);
+        let tiled = derived(MemoryStrategy::BoundedDecode);
+        let chunked = derived(MemoryStrategy::BoundedAttention);
+        let windowed = derived(MemoryStrategy::BoundedTransformerResidency);
+        assert!(
+            chunked.denoise < staged.denoise && chunked.peak_bytes() < staged.peak_bytes(),
+            "rung 3 (chunk) must price below rung 2: {chunked:?} against {staged:?}"
+        );
+        // Rung 4 is priced from the composition the CONTRACT says it executes and the component
+        // bytes it states. The weights-free test contract (`krea_test_load_spec`) states a ZERO
+        // transformer, so on the gate's own inputs the window has nothing to shrink and rung 4
+        // equals rung 3's working set; the window share is graded below on the same anchor with
+        // a stated transformer, through the same regime the gate builds.
+        let contract = krea_test_provider_contract("q4");
+        let gate_components = crate::video_admission::anchor_component_bytes(contract.asset_facts);
+        assert!(
+            contract
+                .engaged_composition(MemoryStrategy::BoundedTransformerResidency)
+                .contains(&MemoryStrategy::BoundedTransformerResidency),
+            "the pinned Krea contract executes the window on rung 4"
+        );
+        if gate_components.transformer > 0 {
+            assert!(
+                windowed.denoise < chunked.denoise,
+                "rung 4 (window) must price below rung 3: {windowed:?} against {chunked:?}"
+            );
+        } else {
+            assert_eq!(
+                windowed, chunked,
+                "with no transformer bytes to window, rung 4 is rung 3's working set"
+            );
+        }
+        let with_transformer = sceneworks_core::memory_anchor::ComponentBytes {
+            transformer: 4_000_000_000,
+            ..gate_components
+        };
+        let derived_with = |strategy| {
+            krea_anchor_derived_phases_with(
+                &manifest,
+                strategy,
+                width,
+                height,
+                KREA_2_FACTS,
+                with_transformer,
+            )
+        };
+        let chunked_with = derived_with(MemoryStrategy::BoundedAttention);
+        let windowed_with = derived_with(MemoryStrategy::BoundedTransformerResidency);
+        assert!(
+            windowed_with.denoise < chunked_with.denoise
+                && chunked_with.denoise - windowed_with.denoise
+                    >= 4_000_000_000 - 4_000_000_000_u64.div_ceil(28),
+            "with a 4 GB transformer the window keeps one of 28 blocks resident:              {windowed_with:?} against {chunked_with:?}"
+        );
+        assert!(
+            windowed.peak_bytes() < staged.peak_bytes(),
+            "rung 4 must price below rung 2: {windowed:?} against {staged:?}"
+        );
+        assert!(
+            tiled.decode < staged.decode && windowed.peak_bytes() <= tiled.peak_bytes(),
+            "the tile moves decode and the deeper rungs never price above the tiled one: \
+             {tiled:?} / {windowed:?}"
+        );
+
+        // A card between rung 2 and rung 3 (with room for the estimate margin and the reserve):
+        // rung 2 cannot fit, rung 3 does — and it is priced at the law's rung-3 phases.
+        let chunked_peak_gb = chunked.peak_bytes() as f64 / BYTES_PER_GIB;
+        let staged_peak_gb = staged.peak_bytes() as f64 / BYTES_PER_GIB;
+        let free_gb = chunked_peak_gb * 1.25 + HEADROOM_GB;
+        assert!(
+            free_gb < staged_peak_gb,
+            "the card must sit below rung 2 ({staged_peak_gb}) for the admission to discriminate"
+        );
+        let budget = Some(VramBudget {
+            free_gb,
+            total_gb: free_gb,
+        });
+        let fit = with_injected_anchor_store(krea_live_anchor_store(), || {
+            krea_turbo_fit_priced(
+                &manifest,
+                "q4",
+                width,
+                height,
+                budget,
+                reserve_for(budget),
+                true,
+                Some(&runtime),
+                Some(KREA_2_FACTS),
+            )
+        });
+        let Some(KreaTurboFit::Fits {
+            phases,
+            selection,
+            basis,
+            ..
+        }) = fit
+        else {
+            panic!("rung 3 must admit on the law's derivation, got {fit:?}");
+        };
+        assert_eq!(selection.strategy, MemoryStrategy::BoundedAttention);
+        assert_eq!(
+            basis,
+            crate::memory_strategy::CandidateBasis::EstimateAnchorDerived {
+                lane: crate::memory_strategy::AnchorDerivationLane::Image,
+            }
+        );
+        let gib = |bytes: u64| bytes as f64 / BYTES_PER_GIB;
+        assert!(
+            (phases.text_gb - gib(chunked.conditioning)).abs() < 1e-6
+                && (phases.denoise_gb - gib(chunked.denoise)).abs() < 1e-6
+                && (phases.decode_gb - gib(chunked.decode)).abs() < 1e-6,
+            "the admitted rung carries the law's rung-3 phases: {phases:?} against {chunked:?}"
+        );
+    }
+
+    /// sc-22667 (E4): the operational reserve is charged EXACTLY ONCE, on the budget side, as
+    /// `ladder_reserve_gb` of the probe — never the retired fixed 2 GB, and never also inside a
+    /// candidate's peak. Graded on an out-of-envelope anchor-derived admission, where the lane
+    /// used to fold `HEADROOM_GB` into the derivation AND subtract it from the budget.
+    ///
+    /// MUTATION: `reserved_headroom_gb: HEADROOM_GB` (or `+ HEADROOM_GB` on the quoted need) reds
+    /// the equality on the reserve; adding the reserve to the candidate peak as well reds the
+    /// `needed_gb` identity; charging `ReserveCharge::ExceptPadCarrying` naming the anchor
+    /// candidate reds the `available_gb` identity.
+    #[test]
+    fn an_out_of_envelope_krea_request_charges_the_ladder_reserve_once() {
+        let manifest = krea_fit_manifest_with_unfittable_resident();
+        let runtime = KreaRuntimeEvidenceContext::verified_for_test("q4");
+        let derived_peak_gb = krea_anchor_derived_peak_gb(1280, 1280);
+        // A warm-looking probe: 30 GB card with 3 GB already resident, so the ladder reserve is
+        // the ceiling (`HEADROOM_GB`) and differs from the bare margin a `free == total` fixture
+        // would produce — both arms of `ladder_reserve_gb` are therefore visible here.
+        let total_gb = derived_peak_gb * 1.25 + 3.0 + HEADROOM_GB;
+        let budget = Some(VramBudget {
+            free_gb: total_gb - 3.0,
+            total_gb,
+        });
+        let reserve_gb = reserve_for(budget);
+        assert!(
+            (reserve_gb - HEADROOM_GB).abs() < 1e-9,
+            "a 3 GB idle baseline caps the reserve at the legacy ceiling"
+        );
+        let fit = with_injected_anchor_store(krea_live_anchor_store(), || {
+            krea_turbo_fit_with_runtime(
+                &manifest,
+                "q4",
+                1280,
+                1280,
+                budget,
+                reserve_gb,
+                true,
+                Some(&runtime),
+            )
+        });
+        let Some(KreaTurboFit::Fits {
+            phases,
+            needed_gb,
+            admitted,
+            ..
+        }) = fit
+        else {
+            panic!("the derived estimate must admit, got {fit:?}");
+        };
+        assert!((admitted.reserve_gb - reserve_gb).abs() < 1e-9);
+        assert!(
+            (needed_gb - (admitted.needed_gb + reserve_gb)).abs() < 1e-9,
+            "the quoted need is the admitted peak plus the reserve, once: {needed_gb} against \
+             {admitted:?}"
+        );
+        assert!(
+            admitted.needed_gb >= phases.peak_gb() && admitted.needed_gb <= phases.peak_gb() * 1.10,
+            "the admitted peak is the derived peak plus the estimate allowance and NO reserve: \
+             {admitted:?} against {}",
+            phases.peak_gb()
+        );
+        assert!(
+            (admitted.available_gb - (total_gb - 3.0 - reserve_gb)).abs() < 1e-9,
+            "the selector pool is free minus the reserve, subtracted once: {admitted:?}"
+        );
+
+        // The same request on a bare fixture budget (`free == total`) charges the measured
+        // pre-load residency plus the margin — a different, smaller reserve — which is the other
+        // arm of `ladder_reserve_gb` reaching this lane.
+        let bare = Some(VramBudget {
+            free_gb: derived_peak_gb * 1.25 + HEADROOM_GB,
+            total_gb: derived_peak_gb * 1.25 + HEADROOM_GB,
+        });
+        let bare_reserve = reserve_for(bare);
+        assert!(bare_reserve < HEADROOM_GB);
+        let bare_fit = with_injected_anchor_store(krea_live_anchor_store(), || {
+            krea_turbo_fit_with_runtime(
+                &manifest,
+                "q4",
+                1280,
+                1280,
+                bare,
+                bare_reserve,
+                true,
+                Some(&runtime),
+            )
+        });
+        let Some(KreaTurboFit::Fits { admitted, .. }) = bare_fit else {
+            panic!("{bare_fit:?}");
+        };
+        assert!((admitted.reserve_gb - bare_reserve).abs() < 1e-9);
+        // The SELECTOR charged that smaller reserve — its pool is free minus it, not minus the
+        // legacy ceiling — which is the arm a `reserved_headroom_gb: HEADROOM_GB` mutation
+        // cannot pass.
+        assert!(
+            (admitted.available_gb - (derived_peak_gb * 1.25 + HEADROOM_GB - bare_reserve)).abs()
+                < 1e-9,
+            "the selector pool is free minus the ladder reserve: {admitted:?}"
+        );
+    }
+
+    /// sc-22667 (E7): the Krea selection's `image_memory_strategy_selected` payload carries the
+    /// selected rung, its parameters, the basis and the THREE phase peaks the selector graded, in
+    /// the shared ladder's spelling. `generate_candle_stream` emits it in the `Fits` arm
+    /// (`candle_stream_emits_the_krea_ladder_selection` in `image_jobs::tests` reads the source).
+    ///
+    /// MUTATION: dropping `phasePeakBytes` (or any one of its three keys) from
+    /// `selection_telemetry` reds this; spelling the strategy or basis differently from the
+    /// shared ladder reds the label assertions.
+    #[test]
+    fn the_krea_selection_telemetry_carries_the_three_phase_peaks() {
+        let manifest = krea_fit_manifest_with_unfittable_resident();
+        let fit = krea_turbo_fit(
+            &manifest,
+            "q4",
+            1024,
+            1024,
+            Some(VramBudget {
+                free_gb: 19.0,
+                total_gb: 19.0,
+            }),
+            true,
+        )
+        .expect("a graded result");
+        let Some(KreaTurboFit::Fits {
+            phases,
+            selection,
+            admitted,
+            ..
+        }) = Some(fit)
+        else {
+            panic!("the fixture admits on an optimized rung, got {fit:?}");
+        };
+        let telemetry = fit
+            .selection_telemetry("q4", 1024, 1024)
+            .expect("a selection emits telemetry");
+        assert_eq!(telemetry["backend"], "candle");
+        assert_eq!(telemetry["route"], "krea_2_turbo");
+        assert_eq!(telemetry["actualTier"], "q4");
+        assert_eq!(telemetry["geometry"]["width"], 1024);
+        assert_eq!(
+            telemetry["strategy"],
+            crate::candle_memory_strategy::strategy_label(selection.strategy)
+        );
+        assert_eq!(telemetry["basis"], "measured");
+        let bytes = |gb: f64| (gb * BYTES_PER_GIB).round() as u64;
+        assert_eq!(
+            telemetry["phasePeakBytes"]["conditioning"],
+            bytes(phases.text_gb)
+        );
+        assert_eq!(
+            telemetry["phasePeakBytes"]["denoise"],
+            bytes(phases.denoise_gb)
+        );
+        assert_eq!(
+            telemetry["phasePeakBytes"]["decode"],
+            bytes(phases.decode_gb)
+        );
+        assert_eq!(telemetry["predictedPeakBytes"], bytes(phases.peak_gb()));
+        assert_eq!(telemetry["admittedPeakGb"], admitted.needed_gb);
+        assert_eq!(telemetry["availableGb"], admitted.available_gb);
+        assert_eq!(telemetry["reserveGb"], admitted.reserve_gb);
+        assert_eq!(
+            telemetry["parameters"]["decodeTileEdge"],
+            serde_json::json!(selection.parameters.decode_tile_edge)
+        );
+        assert!(
+            KreaTurboFit::Unverified {
+                reason: gen_core::MemoryEvidenceVerdict::Missing,
+            }
+            .selection_telemetry("q4", 1024, 1024)
+            .is_none()
+                && KreaTurboFit::Reject {
+                    phases,
+                    needed_gb: 0.0,
+                }
+                .selection_telemetry("q4", 1024, 1024)
+                .is_none(),
+            "only a selection emits"
         );
     }
 }

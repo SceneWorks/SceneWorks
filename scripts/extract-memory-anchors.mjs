@@ -730,11 +730,25 @@ function preferEnvelope(best, candidate) {
  * repeated across the ladder, so classifying it as `manifest_tier_declaration` would understate
  * where its evidence genuinely is.
  *
+ * KEYED ON THE LADDER'S INPUTS (sc-22667, feature-end round): the worker builds that pseudo-anchor
+ * (`candle_memory_strategy.rs`, `floor_anchor`) only when BOTH hold —
+ *
+ *   * the manifest declares the RAW staged row the law decomposes,
+ *     `candle.sequentialPeakGb[tier]` (`vram_gate::measured_sequential_peak_gb`, with its `q8`
+ *     fallback for an unmeasured `nvfp4` tier), and
+ *   * the route is not RECEIPT-PRICED (`is_receipt_priced`): a receipt-priced family's floor is a
+ *     structural weights-plus-headroom sum sealed from the provider receipt and is never rescaled.
+ *
+ * A cell missing either is NOT priced by the mechanism this reason names, whatever its contract
+ * publishes, and falls through to `manifest_tier_declaration` / `no_retained_evidence`, which is
+ * true of it. `RECEIPT_PRICED_ROUTES` mirrors the worker's list; the extractor test reads the
+ * worker source so the two cannot drift.
+ *
  * SCOPE, stated because it bounds the claim: at this pin the generator cannot resolve a contract's
  * own asset facts (they live behind the provider surface at the pinned inference revision), so the
- * key here is the PRESENCE of the model's `<backend>.memoryStrategyContract` block plus the rungs
- * it declares. The row carries the declared rung names verbatim so a reader can see exactly what
- * was published, and the digest is the manifest's.
+ * remaining key is the PRESENCE of the model's `<backend>.memoryStrategyContract` block plus the
+ * rungs it declares. The row carries the declared rung names verbatim so a reader can see exactly
+ * what was published, and the digest is the manifest's.
  *
  * LANE RESTRICTION (sc-22666, fix round): the per-rung ladder this reason asserts is a CANDLE
  * mechanism. `candle_memory_strategy.rs`'s `floor_pseudo_anchor` is the code that rescales the
@@ -749,6 +763,62 @@ function preferEnvelope(best, candidate) {
  * them, so the row states the base it rescales rather than only the rungs it rescales it onto.
  */
 export const CONTRACT_LADDER_BACKENDS = Object.freeze(["candle"]);
+
+/**
+ * Every candle route whose admitted peak is priced from an exact provider receipt rather than a
+ * manifest estimate — the mirror of `candle_memory_strategy::is_receipt_priced` (and the `is_*`
+ * helpers it calls), pinned here because no config file states the list. The extractor test
+ * `RECEIPT_PRICED_ROUTES mirrors the worker's is_receipt_priced` parses the worker source and
+ * fails when the two sets differ, in either direction.
+ */
+export const RECEIPT_PRICED_ROUTES = Object.freeze(
+  [
+    // is_chroma
+    "chroma1_hd",
+    "chroma1_base",
+    "chroma1_flash",
+    // is_ideogram
+    "ideogram_4",
+    "ideogram_4_turbo",
+    // is_sana
+    "sana_1600m",
+    "sana_sprint_1600m",
+    // is_sd35
+    "sd3_5_large",
+    "sd3_5_large_turbo",
+    "sd3_5_medium",
+    // engine_id == "kolors"
+    "kolors",
+    // is_sealed_kolors_bespoke
+    "candle_kolors_ipadapter",
+    "candle_kolors_control",
+  ].sort(compareText),
+);
+
+export function isReceiptPricedRoute(route) {
+  return RECEIPT_PRICED_ROUTES.includes(route);
+}
+
+/**
+ * The RAW staged row the worker's contract-only ladder decomposes,
+ * `candle.sequentialPeakGb[tier]`, read exactly as `vram_gate::measured_sequential_peak_gb` reads
+ * it: the tier's own row, or the `q8` row for an `nvfp4` tier that has none. `null` when the
+ * manifest declares no such row — then no pseudo-anchor is built for the cell.
+ */
+export function manifestSequentialRow(manifest, cell) {
+  const model = manifest.models?.find((entry) => entry.id === cell.modelId);
+  const rows = model?.[cell.backend]?.sequentialPeakGb;
+  if (!rows || typeof rows !== "object") return null;
+  const read = (tier) => {
+    const declared = rows[tier];
+    return typeof declared === "number" && Number.isFinite(declared)
+      ? declared
+      : null;
+  };
+  const own = read(cell.tier);
+  if (own !== null) return own;
+  return cell.tier === "nvfp4" ? read("q8") : null;
+}
 
 export function contractEstimateEvidence(
   manifest,
@@ -768,7 +838,15 @@ export function contractEstimateEvidence(
     ),
   ].sort(compareText);
   if (rungs.length === 0) return null;
-  const values = { declaredRungs: rungs.join(",") };
+  // The ladder's inputs (sc-22667): the raw staged row it decomposes, on a route whose floor is
+  // not a sealed receipt. Absent either, the worker never builds the pseudo-anchor.
+  if (isReceiptPricedRoute(cell.route)) return null;
+  const sequentialRow = manifestSequentialRow(manifest, cell);
+  if (sequentialRow === null) return null;
+  const values = {
+    declaredRungs: rungs.join(","),
+    sequentialPeakGb: String(sequentialRow),
+  };
   if (typeof contract.provider === "string") values.provider = contract.provider;
   if (typeof contract.abi === "number") values.abi = String(contract.abi);
   // The manifest row the ladder rescales, when the manifest declares one. Without this the row
@@ -1207,11 +1285,13 @@ const REASONS = {
     "no retained render for this cell; the pinned MLX provider publishes measured component/stage " +
     "byte constants, which price components rather than a render peak",
   contract_estimate:
-    "no retained render for this cell; the model's backend block publishes a memoryStrategyContract, " +
-    "so the cell's estimate is the CONTRACT-ONLY per-rung ladder (the manifest row rescaled by the " +
-    "image law's per-rung ratios) rather than one manifest scalar repeated across every rung — this " +
-    "generator reads the contract's presence in the manifest, not the contract's own asset facts, " +
-    "which only the worker resolves at admission",
+    "no retained render for this cell; the model's backend block publishes a memoryStrategyContract " +
+    "and declares the staged row (candle.sequentialPeakGb) on a route that is not receipt-priced, " +
+    "so the cell's estimate is the CONTRACT-ONLY per-rung ladder (that row, anchored at the " +
+    "manifest's measured geometry and rescaled by the image law's per-rung ratios) rather than one " +
+    "manifest scalar repeated across every rung — this generator reads the contract's presence and " +
+    "the row in the manifest, not the contract's own asset facts, which only the worker resolves at " +
+    "admission",
   manifest_tier_declaration:
     "no retained render for this cell; the catalog manifest declares a measured per-tier envelope, " +
     "which is a whole-render figure with no phase decomposition",
