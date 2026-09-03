@@ -1226,40 +1226,57 @@ pub(crate) fn anchor_component_bytes(
 }
 
 /// The architecture facts the image derivation law scales its residues by (sc-22663, epic 22657
-/// E3), read off the live provider contract — the companion translation to
-/// [`anchor_component_bytes`], shared by both image lanes' anchor consumers.
+/// E3), read off the live provider contract's `architecture_facts` block (sc-22667) — the
+/// companion translation to [`anchor_component_bytes`], shared by both image lanes' anchor
+/// consumers (`candle_memory_strategy::CandleLadderAnchors::packaged` and the MLX estimate
+/// floor) and the ONE worker-edge seam through which gen-core's facts reach the core law.
 ///
 /// WHY THE INPUT DIFFERS FROM ITS COMPANION'S, and why that is not an oversight to "fix" by
 /// matching signatures: [`anchor_component_bytes`] takes [`gen_core::MemoryAssetFacts`] because
 /// component bytes are a property of the resolved ASSET — the weight files this tier actually
 /// loads — and the contract already decomposes them there. Architecture facts are a property of
 /// the MODEL's topology (head count, head dim, block count, patch size, VAE scales, activation
-/// dtype width) and are identical across every tier and asset set of one model, so they belong on
-/// a CONTRACT-level block rather than in per-tier asset facts. sc-22667 adds that block to
-/// [`MemoryProviderContract`] upstream and reads it here, so the parameter is ALREADY the one the
-/// wired implementation needs — the leading underscore is temporary, the signature is not. The
-/// sibling story sc-22664 should converge on exactly this `&MemoryProviderContract` shape.
+/// dtype width) and are identical across every tier and asset set of one model, so they live on
+/// the CONTRACT-level [`gen_core::MemoryArchitectureFacts`] block rather than in per-tier asset
+/// facts.
 ///
-/// AT THIS PIN THE CONTRACT CARRIES NONE. `gen_core` at inference `670dc1f4` has no architecture
-/// block on [`gen_core::MemoryProviderContract`], so this returns
-/// [`sceneworks_core::memory_anchor::ArchitectureFacts::default()`] — every fact `None`, which the
-/// law documents as "leave the residue this fact would have scaled UNSCALED". That is the
-/// conservative direction and nothing more: with no facts the windowed and chunked rungs price at
-/// their unbounded residue rather than below it (core test
-/// `missing_facts_leave_residues_unscaled_and_never_shrink_the_estimate`), so a consumer wired
-/// through here is never optimistic about a bound it cannot see.
-///
-/// The terminal story of this epic (sc-22667) reads the real facts off the contract once the pin
-/// carries them; this function is the single seam that then changes, and the fixture tests that
-/// grade the law itself pass their facts explicitly rather than through it.
+/// AXIS BY AXIS, `None` PRESERVED. The two structs state the same eight axes in the same units;
+/// the contract's block is destructured exhaustively, so a ninth axis added upstream is a compile
+/// error here rather than a silently dropped fact. An absent axis stays absent: the law documents
+/// `None` as "leave the residue this fact would have scaled UNSCALED" (core test
+/// `missing_facts_leave_residues_unscaled_and_never_shrink_the_estimate`), so a contract that
+/// states nothing — the registry's weights-free sentinel surfaces, a single-file import, a
+/// provider that has not adopted the block — prices its bounded rungs at their unbounded residue,
+/// never below it. Nothing is defaulted to zero: a zero axis is not a fact (a defaulted `0` would
+/// poison every ratio that multiplies by it), and gen-core's own facts conformance
+/// (`MemoryArchitectureFacts::zero_valued_axes`) refuses one at the provider.
 pub(crate) fn architecture_facts_from_contract(
-    _contract: &MemoryProviderContract,
+    contract: &MemoryProviderContract,
 ) -> sceneworks_core::memory_anchor::ArchitectureFacts {
     #[cfg(test)]
     if let Some(facts) = INJECTED_ARCHITECTURE_FACTS.with(std::cell::Cell::get) {
         return facts;
     }
-    sceneworks_core::memory_anchor::ArchitectureFacts::default()
+    let &gen_core::MemoryArchitectureFacts {
+        attention_heads,
+        head_dim,
+        transformer_blocks,
+        patch_size,
+        latent_channels,
+        vae_spatial_scale,
+        vae_temporal_scale,
+        activation_dtype_width,
+    } = &contract.architecture_facts;
+    sceneworks_core::memory_anchor::ArchitectureFacts {
+        attention_heads,
+        head_dim,
+        transformer_blocks,
+        patch_size,
+        latent_channels,
+        vae_spatial_scale,
+        vae_temporal_scale,
+        activation_dtype_width,
+    }
 }
 
 #[cfg(test)]
@@ -1271,8 +1288,8 @@ thread_local! {
 
 /// Test seam (sc-22667): stand `facts` in for what [`architecture_facts_from_contract`] reads off
 /// the contract, for the lifetime of the returned guard, so a fixture can grade the lanes' rung
-/// ratios through their PRODUCTION admission paths before the pin carries the real block. The
-/// same shape as `vram_gate::tests::with_injected_anchor_store`.
+/// ratios through their PRODUCTION admission paths on a fixture contract that states no facts of
+/// its own. The same shape as `vram_gate::tests::with_injected_anchor_store`.
 #[cfg(test)]
 #[must_use = "the injection lasts exactly as long as the guard"]
 pub(crate) struct InjectedArchitectureFacts;

@@ -1240,8 +1240,9 @@ pub(crate) fn krea_turbo_fit_with_runtime(
 }
 
 /// [`krea_turbo_fit_with_runtime`] with the architecture facts the derivation scales by as an
-/// explicit input: `None` reads them off the loaded contract (production; the default facts at
-/// this pin), `Some` lets a fixture grade the rung ratios with the model's real facts.
+/// explicit input: `None` reads them off the loaded contract (production — the contract's own
+/// `architecture_facts` block through `architecture_facts_from_contract`, sc-22667), `Some` lets
+/// a fixture grade the rung ratios with facts it states directly.
 #[allow(clippy::too_many_arguments)]
 fn krea_turbo_fit_priced(
     manifest_entry: &JsonObject,
@@ -7143,26 +7144,33 @@ mod tests {
             .expect("the derivation prices this geometry")
     }
 
-    /// The derived peak of the staged rung under the DEFAULT facts (this pin), which every deeper
-    /// rung equals when no fact can scale its ratio — the number the default-facts tests below
-    /// grade against.
+    /// The derived peak of the staged rung under the facts the loaded contract states — read
+    /// through the production seam (`architecture_facts_from_contract`, sc-22667) so the number
+    /// the admission tests below grade against is the one the gate itself prices with, whatever
+    /// the pinned provider declares. The staged rung is the least-cost rung the selector can
+    /// admit out of the envelope, so it is the one an ample budget selects.
     fn krea_anchor_derived_peak_gb(width: u32, height: u32) -> f64 {
         krea_anchor_derived_phases(
             &krea_fit_manifest(),
             MemoryStrategy::StagedResidency,
             width,
             height,
-            sceneworks_core::memory_anchor::ArchitectureFacts::default(),
+            crate::video_admission::architecture_facts_from_contract(krea_test_provider_contract(
+                "q4",
+            )),
         )
         .peak_bytes() as f64
             / BYTES_PER_GIB
     }
 
-    /// Krea 2 Turbo's architecture facts, from the pinned engine's `Krea2Config::turbo()`
-    /// (`candle-gen-krea/src/config.rs` at inference 670dc1f4): 48 attention heads of 128, 28
-    /// single-stream blocks, patch 2, 16 latent channels behind a x8 VAE, bf16 activations.
-    /// Supplied by the fixture because the contract does not carry them at this pin
-    /// (`architecture_facts_from_contract`).
+    /// Krea 2 Turbo's architecture facts as the candle provider publishes them off its resolved
+    /// snapshot's DiT config (`candle-gen-krea::architecture_facts`, `Krea2Config::from_snapshot`):
+    /// 48 attention heads of 128, 28 single-stream blocks, patch 2, 16 latent channels behind a
+    /// x8 VAE, bf16 activations, and NO temporal scale — the reused Qwen-Image VAE decodes one
+    /// frame per image, so the axis is structurally absent and declared absent, never `1`. The
+    /// fixture contract carries exactly these (sc-22667 —
+    /// `an_unmeasured_krea_geometry_admits_on_the_anchor_derivation` asserts the seam reads them);
+    /// the explicit-facts fixtures below state them directly to grade the ratios themselves.
     const KREA_2_FACTS: sceneworks_core::memory_anchor::ArchitectureFacts =
         sceneworks_core::memory_anchor::ArchitectureFacts {
             attention_heads: Some(48),
@@ -7171,7 +7179,7 @@ mod tests {
             patch_size: Some(2),
             latent_channels: Some(16),
             vae_spatial_scale: Some(8),
-            vae_temporal_scale: Some(1),
+            vae_temporal_scale: None,
             activation_dtype_width: Some(2),
         };
 
@@ -7198,6 +7206,15 @@ mod tests {
         assert!(
             u64::from(width) * u64::from(height) > max_pixels,
             "the request geometry must sit outside the measured curve envelope"
+        );
+        // The facts the gate prices with are the contract's own, read through the production
+        // seam (sc-22667) — Krea 2 Turbo's real architecture, not the default facts.
+        assert_eq!(
+            crate::video_admission::architecture_facts_from_contract(krea_test_provider_contract(
+                "q4"
+            )),
+            KREA_2_FACTS,
+            "the Krea contract's architecture facts must reach the gate through the seam"
         );
         let derived_peak_gb = krea_anchor_derived_peak_gb(width, height);
         // Generous enough that the estimate margin the shared selector applies cannot be what
