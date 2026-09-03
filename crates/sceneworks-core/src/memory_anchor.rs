@@ -72,7 +72,30 @@ pub const PACKAGED_MEMORY_ANCHORS: &str = include_str!("../../../config/memory-a
 /// Immutable retained evidence the anchors were extracted from. Every anchor's `source.path` must
 /// name one of these files, whose bytes are compiled in so the handshake cannot be bypassed by
 /// editing the file on disk.
+///
+/// EVERY retained corpus is packaged (sc-22666, epic 22657 E5). Packaging used to be a per-model
+/// opt-in because the candle image lane priced a cell with per-pixel slopes fitted on Krea Turbo,
+/// so anchoring another model from a freshly committed corpus would have repriced it with borrowed
+/// slopes. Since sc-22663 the image lanes fit nothing — the law decomposes each anchor's OWN
+/// measured peaks against the contract's component bytes — so there is no slope left to borrow and
+/// a retained corpus that is not compiled in is a defect rather than a deferral.
+/// `scripts/extract-memory-anchors.mjs` fails when it walks a corpus that could anchor a catalog
+/// cell but is absent from this list, so the packaging can never silently lapse again.
+///
+/// Keep sorted by path; `include_str!` paths are relative to this crate's `src/`.
 const PACKAGED_MEMORY_ANCHOR_SOURCES: &[(&str, &str)] = &[
+    (
+        "docs/calibration/sc-15859/z-image-turbo-bf16-candle-anchor.json",
+        include_str!("../../../docs/calibration/sc-15859/z-image-turbo-bf16-candle-anchor.json"),
+    ),
+    (
+        "docs/calibration/sc-15859/z-image-turbo-q4-candle-anchor.json",
+        include_str!("../../../docs/calibration/sc-15859/z-image-turbo-q4-candle-anchor.json"),
+    ),
+    (
+        "docs/calibration/sc-15859/z-image-turbo-q8-candle-anchor.json",
+        include_str!("../../../docs/calibration/sc-15859/z-image-turbo-q8-candle-anchor.json"),
+    ),
     (
         "docs/calibration/sc-18791/ltx25-mlx-evidence.seed.json",
         include_str!("../../../docs/calibration/sc-18791/ltx25-mlx-evidence.seed.json"),
@@ -86,8 +109,16 @@ const PACKAGED_MEMORY_ANCHOR_SOURCES: &[(&str, &str)] = &[
         include_str!("../../../docs/generated/ltx-mlx-geometry-sweep-sc-18810.json"),
     ),
     (
+        "docs/generated/ltx-mlx-video-sc-18808.json",
+        include_str!("../../../docs/generated/ltx-mlx-video-sc-18808.json"),
+    ),
+    (
         "docs/generated/memory-calibration-evidence.json",
         include_str!("../../../docs/generated/memory-calibration-evidence.json"),
+    ),
+    (
+        "docs/generated/qwen-candle-five-rung-sc-15817.json",
+        include_str!("../../../docs/generated/qwen-candle-five-rung-sc-15817.json"),
     ),
 ];
 
@@ -610,6 +641,11 @@ pub enum AnalyticOnlyBasis {
     MeasuredEnvelope,
     /// The pinned MLX provider publishes measured component/stage byte constants.
     ProviderMeasuredConstants,
+    /// The model's backend block publishes a `memoryStrategyContract` (sc-22666, epic 22657 E5):
+    /// no render is retained for the cell, but the contract's per-rung declaration plus the image
+    /// law's ratios price every rung of the ladder from the manifest row, so the cell's estimate
+    /// is a CONTRACT-ONLY per-rung ladder rather than one manifest scalar repeated.
+    ContractEstimate,
     /// The catalog manifest declares a `measured: true` per-tier envelope.
     ManifestTierDeclaration,
     /// Nothing measured covers the cell at all.
@@ -2331,6 +2367,46 @@ mod tests {
     use std::collections::BTreeSet;
 
     const LTX25_CORPUS_PATH: &str = "docs/calibration/sc-18791/ltx25-mlx-evidence.seed.json";
+
+    /// EVERY retained corpus is compiled in (sc-22666, epic 22657 E5), and the packaged store
+    /// loads with the byte-exact handshake against all of them.
+    ///
+    /// SHAPE, not a census: the assertion is that every compiled-in entry parses as a corpus and
+    /// that every anchor's cited source resolves inside the list — never how many corpora exist or
+    /// which models they name, which would red on a retirement rather than on a defect. The
+    /// packaging-lapse guard that keeps a RETAINED corpus from being left out lives in
+    /// `scripts/extract-memory-anchors.mjs` (`assertEveryDerivableCorpusIsPackaged`), which can see
+    /// the walked tree this crate cannot.
+    #[test]
+    fn every_packaged_corpus_parses_and_backs_the_store_it_is_compiled_in_for() {
+        assert!(!PACKAGED_MEMORY_ANCHOR_SOURCES.is_empty());
+        let mut paths = BTreeSet::new();
+        for (path, raw) in PACKAGED_MEMORY_ANCHOR_SOURCES {
+            assert!(paths.insert(*path), "{path} is compiled in twice");
+            let parsed: serde_json::Value =
+                serde_json::from_str(raw).unwrap_or_else(|error| panic!("{path}: {error}"));
+            assert!(
+                parsed["records"].as_array().is_some_and(|r| !r.is_empty()),
+                "{path} carries no retained records, so it is not a corpus"
+            );
+        }
+        let sorted: Vec<&str> = paths.iter().copied().collect();
+        let declared: Vec<&str> = PACKAGED_MEMORY_ANCHOR_SOURCES
+            .iter()
+            .map(|(path, _)| *path)
+            .collect();
+        assert_eq!(sorted, declared, "the compiled-in list must stay sorted");
+
+        let store = packaged_memory_anchors().expect("the packaged anchor store must load");
+        for anchor in &store.anchors {
+            assert!(
+                paths.contains(anchor.source.path.as_str()),
+                "{} cites {}, which is not compiled in",
+                anchor.id,
+                anchor.source.path
+            );
+        }
+    }
 
     fn corpus_raw() -> &'static str {
         PACKAGED_MEMORY_ANCHOR_SOURCES

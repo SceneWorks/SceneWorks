@@ -1241,12 +1241,12 @@ fn synthesize_estimate_floors(
     if is_receipt_priced(engine_id) && staged_floor_bytes >= resident_peak_bytes {
         return Vec::new();
     }
-    // NOTE (sc-22509): no PACKAGED anchor can match this lookup today. The store's only candle
-    // image anchor is `krea_2_turbo`, and that route is graded by `vram_gate::krea_turbo_fit_*`
-    // rather than by this shared-image ladder; every model that does reach here (`z_image*`,
-    // `flux*`, `chroma`, …) has a different `model_id` and no anchor row. The seam is wired and
-    // tested against an injected store so that the first shared-image anchor extracted by
-    // sc-22510's extractor is priced the moment it lands, with no second code change.
+    // NOTE (sc-22509, reopened by sc-22666): this lookup now MATCHES packaged anchors. Every
+    // retained corpus is compiled in since epic 22657 E5, so `z_image_turbo:candle` (q4/q8/bf16,
+    // sc-15859) and the qwen candle rows answer here through the shared-image ladder. The
+    // per-model allow-list that used to keep them out is gone; identity and loader-closure
+    // currency are the only guards left, and a cell with no anchor row falls through to the
+    // contract-only per-rung estimate rather than to a bare manifest scalar.
     let anchor = candle_image_anchor(
         anchors, engine_id, model_id, contract, tier_key, mode, overlay, geometry,
     );
@@ -1390,14 +1390,6 @@ fn synthesize_estimate_floors(
     synthesized
 }
 
-/// Catalog models whose candle image admission the anchor derivation may price. Written when the
-/// lane's law was three per-pixel coefficients fitted on Krea Turbo; since sc-22663 the core law
-/// fits nothing (`MemoryAnchor::derive_phase_peaks`), so the scope is no longer a coefficient
-/// question — it is kept until the candle lane's own story (epic 22657) rewires this consumer
-/// with the request's full regime and the contract's architecture facts. See the note in
-/// [`candle_image_anchor`].
-const CANDLE_ANCHOR_COEFFICIENT_MODELS: &[&str] = &["krea_2_turbo"];
-
 /// The measured memory anchor for this candle image request, or `None` to keep the manifest-row
 /// floor (sc-22509, epic 22505).
 ///
@@ -1424,20 +1416,16 @@ fn candle_image_anchor<'a>(
     if overlay.is_some() || geometry.reference_count != 0 || geometry.batch != 1 {
         return None;
     }
-    // MODEL SCOPE. This guard dates from the fitted candle law (three Krea Turbo per-pixel slopes,
-    // sc-22509), which could not price another model's row. The core law has fitted nothing since
-    // sc-22663 — it prices any image anchor from its measured peaks, the contract's component
-    // bytes and architecture facts — so the reason for the scope is gone; the guard stays only
-    // until the candle lane's own story (epic 22657) rewires this consumer onto the full law and
-    // decides the scope on the contract's facts, the same way `vram_gate::krea_store_anchor` will.
-    //
-    // The store is catalog-wide since sc-22510, so until then this is load-bearing rather than
-    // defensive: a future candle corpus landing under a walked root and being packaged would
-    // otherwise start answering here on the day it was committed, priced through the shim's
-    // shallow (facts-free) composition.
-    if !CANDLE_ANCHOR_COEFFICIENT_MODELS.contains(&model_id) {
-        return None;
-    }
+    // NO MODEL SCOPE (sc-22666, epic 22657 E5). A `CANDLE_ANCHOR_COEFFICIENT_MODELS` allow-list
+    // (`["krea_2_turbo"]`) used to stand here, because the sc-22509 candle law was three per-pixel
+    // slopes fitted on Krea Turbo and pricing another model's row through them would have been
+    // borrowing empirics. The core law fits nothing since sc-22663 — it decomposes THIS anchor's
+    // own measured peaks against THIS contract's component bytes and rescales the residues by
+    // architecture facts — so a store anchor for any `(model, tier)` cell prices its own cell and
+    // nobody else's. The identity conjuncts below (route, provider, mode, overlay, references,
+    // materialization shape, loader-closure currency) remain the whole guard: they are per-row
+    // facts, not a model census, so a newly packaged corpus is priced the day it lands, which is
+    // the point of packaging every retained corpus.
     let anchor = anchors?.image_anchor_for(
         model_id,
         sceneworks_core::memory_anchor::AnchorBackend::Candle,
@@ -5607,17 +5595,23 @@ mod tests {
                 assert_eq!(evidence.predicted_peak_bytes, expected_derived);
             }
         }
-        // COEFFICIENT SCOPE (sc-22510 reconciliation): `model_id` DOES gate it. The store is
-        // catalog-wide, so a row for a model whose per-pixel slopes were never fitted must keep
-        // the manifest-row floor rather than be priced with Krea's empirics. The anchor row here
-        // is otherwise identical and passes every conjunct above.
+        // NO MODEL SCOPE (sc-22666, epic 22657 E5): `model_id` no longer gates the derivation.
+        // A `CANDLE_ANCHOR_COEFFICIENT_MODELS` allow-list used to refuse exactly this row, because
+        // the lane priced cells with per-pixel slopes fitted on Krea Turbo and another model would
+        // have been priced with borrowed empirics. The law fits nothing since sc-22663, so a
+        // catalog-wide store answers for whichever cell it measured. The row below is the control
+        // with only `(model_id, route)` moved — the provider stays the contract's, so every other
+        // conjunct still passes — and it carries THAT model's own live loader-closure digest, so
+        // currency is satisfied and the removed allow-list is the only thing that could refuse it.
         {
             let mut foreign = store.anchors[0].clone();
-            // Only the model/route move: the provider stays the contract's, so EVERY other
-            // conjunct of `candle_image_anchor` still passes and the coefficient scope is the one
-            // guard that can refuse this row.
             foreign.model_id = "qwen_image".to_owned();
             foreign.route = "qwen_image".to_owned();
+            foreign.source.loader_closure_digest =
+                sceneworks_core::memory_anchor::packaged_anchor_loader_closures()
+                    .and_then(|closures| closures.digest_for("qwen_image", AnchorBackend::Candle))
+                    .expect("qwen_image:candle must declare a loader closure")
+                    .to_owned();
             let foreign_store = MemoryAnchorStore {
                 schema_version: MEMORY_ANCHOR_SCHEMA_VERSION,
                 analytic_only: Vec::new(),
@@ -5639,11 +5633,15 @@ mod tests {
                 Z_IMAGE_REQUEST_EVIDENCE_REVISION,
                 Some(&foreign_store),
             );
+            assert!(!foreign_floors.is_empty());
             for (selection, _, basis) in &foreign_floors {
                 assert_eq!(
                     *basis,
-                    crate::memory_strategy::CandidateBasis::EstimateFloor,
-                    "a model outside the fitted coefficient set must not be anchor-priced ({:?})",
+                    crate::memory_strategy::CandidateBasis::EstimateAnchorDerived {
+                        lane: crate::memory_strategy::AnchorDerivationLane::Image,
+                    },
+                    "the anchor store is catalog-wide: a packaged model's own row must price its \
+                     own cell ({:?})",
                     selection.strategy
                 );
             }

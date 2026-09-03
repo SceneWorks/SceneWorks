@@ -2152,3 +2152,48 @@ test("the anchor inventory is closed against the cells, in both directions (sc-2
   assert.ok(!markdown.includes("| Runtime verified |"));
   assert.ok(!markdown.includes("| Implemented/unverified |"));
 });
+
+// ---------------------------------------------------------------------------------------------
+// sc-22666 (epic 22657 E5): every retained corpus is packaged, so a cell whose evidence is
+// committed reads `Anchored` rather than analytic-only. SHAPE, never a count: the claim is that a
+// published cell backed by a packaged anchor states that anchor and its currency, and that no
+// published cell claims an anchor the store does not carry.
+// ---------------------------------------------------------------------------------------------
+
+test("a cell whose retained corpus is packaged reads Anchored, with its currency stated", async () => {
+  const matrix = await buildMatrix();
+  const anchored = matrix.cells.filter((cell) => cell.anchor);
+  assert.ok(anchored.length > 0, "the store must anchor at least one published cell");
+  for (const cell of anchored) {
+    // A rung the route does not implement stays `Structurally N/A` whatever the store holds —
+    // `state` is a function of implementation first. The anchor claim applies to implemented rungs.
+    assert.ok(
+      cell.implementation !== "implemented" || cell.state.startsWith("Anchored"),
+      `${cell.id} cites an anchor but does not read Anchored (${cell.state})`,
+    );
+    assert.equal(
+      typeof cell.anchor.current,
+      "boolean",
+      `${cell.id} must state whether its anchor is current`,
+    );
+  }
+  // The sc-15859 Z-Image-Turbo candle captures were retained but UNPACKAGED before this story, so
+  // their cells read `Implemented`. They are compiled in now and were measured at the pinned
+  // revision, so every one of them must read Anchored AND current. Named by cell coordinates
+  // rather than by anchor id, so a re-capture that rotates the id does not red this.
+  const zImageCandle = matrix.cells.filter(
+    (cell) => cell.modelId === "z_image_turbo" && cell.backend === "candle",
+  );
+  assert.ok(zImageCandle.length > 0, "z_image_turbo publishes candle cells");
+  for (const cell of zImageCandle) {
+    assert.ok(cell.anchor, `${cell.id} must carry the packaged sc-15859 anchor`);
+    assert.equal(
+      cell.anchor.current,
+      true,
+      `${cell.id}: the sc-15859 captures were measured at the pin, so they read current`,
+    );
+    if (cell.implementation === "implemented") {
+      assert.equal(cell.state, "Anchored", cell.id);
+    }
+  }
+});
