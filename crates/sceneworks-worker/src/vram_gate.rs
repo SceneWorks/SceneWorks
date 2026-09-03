@@ -272,10 +272,10 @@ pub(crate) fn predicted_peak_gb(manifest_entry: &JsonObject, tier_key: &str) -> 
     if let Some(gb) = measured_resident_peak_gb(manifest_entry, tier_key) {
         return Some(gb + HEADROOM_GB);
     }
-    manifest_entry
-        .get("candle")?
-        .get("minMemoryGb")
-        .and_then(json_f64)
+    // Spelled exactly so: the manifest constraint-contract registry anchors the `candle.minMemoryGb`
+    // reader on this expression (`tests/test_builtin_manifest_audit.py`).
+    let candle = manifest_entry.get("candle")?;
+    candle.get("minMemoryGb").and_then(json_f64)
 }
 
 /// The RAW measured resident row, `candle.vramGbByTier[tier_key]` (or the `q8` row for an
