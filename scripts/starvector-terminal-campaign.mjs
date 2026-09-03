@@ -6,7 +6,7 @@ import { isExecutedModule } from "./starvector-terminal-cli.mjs";
 const sha = (value) => createHash("sha256").update(value).digest("hex");
 export const TUPLES = ["mlx:1b", "mlx:8b", "candle-cuda:1b", "candle-cuda:8b"];
 export const COUNTS = { image_quality: 120, deterministic_parity: 20, hostile_sanitizer: 200, prompt_composition: 60 };
-export const INFERENCE_REVISION = "cc8a351008ff5ecd085323836a0fc0093be76d3e";
+export const INFERENCE_REVISION = "b2d9e0917499517cf8c1518e0d360cac8693b0c0";
 export const LPIPS_LINEAR_SHA256 = "df73285e35b22355a2df87cdb6b70b343713b667eddbda73e1977e0c860835c0";
 export const ALEXNET_SHA256 = "7be5be791159472b1fbf3c69796f7cb30dca7ad8466c2df70058c37116cdee02";
 
