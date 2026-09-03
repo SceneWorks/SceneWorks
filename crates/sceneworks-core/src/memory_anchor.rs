@@ -1608,6 +1608,16 @@ struct RawPhaseEstimate {
     anchored: bool,
 }
 
+/// The two halves of one IMAGE derivation, `[conditioning, denoise, decode]` each: the components
+/// the request's regime holds resident in each phase, and the activation residue the law scales
+/// onto them. Their per-phase sum is [`MemoryAnchor::derive_phase_peaks`]; the activation half
+/// alone is [`MemoryAnchor::derive_phase_activation_residues`].
+#[derive(Debug, Clone, Copy)]
+struct ImagePhaseSplit {
+    resident: [i128; 3],
+    activation: [i128; 3],
+}
+
 /// The three raw phase estimates of one video derivation.
 #[derive(Debug, Clone, Copy)]
 struct RawVideoPhaseEstimates {
@@ -1814,6 +1824,54 @@ impl MemoryAnchor {
         components: ComponentBytes,
         facts: ArchitectureFacts,
     ) -> Option<AnchorDerivedPhases> {
+        let split = self.derive_image_phase_split(request, components, facts)?;
+        Some(AnchorDerivedPhases {
+            conditioning: positive(split.resident[0] + split.activation[0])?,
+            denoise: positive(split.resident[1] + split.activation[1])?,
+            decode: positive(split.resident[2] + split.activation[2])?,
+        })
+    }
+
+    /// The ACTIVATION half of [`Self::derive_phase_peaks`], phase by phase: the anchor's measured
+    /// residue after the components are subtracted, re-scaled for the request's geometry, batch,
+    /// prompt length and engaged rungs — and NOT re-adding any component byte.
+    ///
+    /// This is what a caller that already prices the model's wired weights itself needs (sc-22665,
+    /// epic 22657 E4): the MLX worker's estimate floor composes its own contract-decomposed weights
+    /// term with this residue instead of the lane's geometry-blind generic headroom, so the
+    /// request's tile, attention chunk and transformer window reach the estimate. A caller that
+    /// wants the whole priced peak, components included, calls [`Self::derive_phase_peaks`].
+    ///
+    /// Refuses exactly what [`Self::derive_phase_peaks`] refuses, the per-phase positivity of the
+    /// FULL estimate included: a residue the law would not have stood behind as part of a whole
+    /// peak is not handed out on its own.
+    pub fn derive_phase_activation_residues(
+        &self,
+        request: &ImageDeriveRequest,
+        components: ComponentBytes,
+        facts: ArchitectureFacts,
+    ) -> Option<AnchorPhaseBytes> {
+        let split = self.derive_image_phase_split(request, components, facts)?;
+        for phase in 0..3 {
+            positive(split.resident[phase] + split.activation[phase])?;
+        }
+        Some(AnchorPhaseBytes {
+            conditioning: u64::try_from(split.activation[0]).ok()?,
+            denoise: u64::try_from(split.activation[1]).ok()?,
+            decode: u64::try_from(split.activation[2]).ok()?,
+        })
+    }
+
+    /// The law itself, kept as the two halves its consumers need separately: the components the
+    /// REQUEST's regime holds resident in each phase, and the activation residue the law scales
+    /// onto them. `[conditioning, denoise, decode]` in both, in `i128` because the sum is what the
+    /// positivity guard is defined on — an intermediate is never clamped.
+    fn derive_image_phase_split(
+        &self,
+        request: &ImageDeriveRequest,
+        components: ComponentBytes,
+        facts: ArchitectureFacts,
+    ) -> Option<ImagePhaseSplit> {
         if request.width == 0 || request.height == 0 || request.batch == 0 {
             return None;
         }
@@ -1922,8 +1980,7 @@ impl MemoryAnchor {
         // conditioning tokens over the default the records were measured against — never below
         // 1.0, since the records do not state their prompt length. The retained resident/staged
         // candle pairs measure it flat across 768x768 -> 1024x1024.
-        let cond_estimate =
-            request_cond + scale_up(cond_residue * batch, conditioning_tokens, default_tokens);
+        let cond_activation = scale_up(cond_residue * batch, conditioning_tokens, default_tokens);
 
         // Denoise. With the score facts the residue splits into the full score tensor at the
         // anchor geometry (capped at the residue — the anchor cannot have held more than it
@@ -1937,12 +1994,12 @@ impl MemoryAnchor {
             let tokens = tokens(width, height, conditioning)?;
             Some(heads * tokens * tokens * element * batch)
         };
-        let den_estimate =
+        let den_activation =
             match score_bytes(self.geometry.width, self.geometry.height, default_tokens, 1) {
                 Some(_) if measured.attention_chunked => {
                     // The anchor's own denoise was chunked: its residue already holds a chunk
                     // workspace instead of a score tensor, so there is nothing to separate out.
-                    request_den + scale_up(den_residue, linear_num, linear_den)
+                    scale_up(den_residue, linear_num, linear_den)
                 }
                 Some(anchor_scores) => {
                     let non_score = den_residue - anchor_scores.min(den_residue);
@@ -1957,14 +2014,14 @@ impl MemoryAnchor {
                         .min(unchunked_scores),
                         None => unchunked_scores,
                     };
-                    request_den + scale_up(non_score, linear_num, linear_den) + score_term
+                    scale_up(non_score, linear_num, linear_den) + score_term
                 }
                 None => {
                     let quadratic_num = request_pixels * request_pixels * batch;
                     let quadratic_den = anchor_pixels * anchor_pixels;
                     let linear = scale_up(den_residue, request_pixels * batch, anchor_pixels);
                     let quadratic = scale_up(den_residue, quadratic_num, quadratic_den);
-                    request_den + linear.max(quadratic)
+                    linear.max(quadratic)
                 }
             };
 
@@ -1987,12 +2044,9 @@ impl MemoryAnchor {
                 dec_scaled = floor + scale_up(dec_scaled - floor, chunk, request_pixels);
             }
         }
-        let dec_estimate = request_dec + dec_scaled;
-
-        Some(AnchorDerivedPhases {
-            conditioning: positive(cond_estimate)?,
-            denoise: positive(den_estimate)?,
-            decode: positive(dec_estimate)?,
+        Some(ImagePhaseSplit {
+            resident: [request_cond, request_den, request_dec],
+            activation: [cond_activation, den_activation, dec_scaled],
         })
     }
 
@@ -4223,6 +4277,81 @@ mod tests {
         below.phase_active_peak_bytes.denoise = components.total() - 1;
         assert!(below
             .derive_phase_peaks(&at(1024, 1024, FULLY_ENGAGED), components, facts)
+            .is_none());
+    }
+
+    /// sc-22665 (E4): the activation half of the law is exactly the whole estimate minus the
+    /// components the request's regime holds resident in that phase — nothing is re-added, and a
+    /// request the law refuses hands out no residue either. Asserted on the same in-domain
+    /// resident MLX anchor the rung-ordering test uses, at three regimes, so the residue's own
+    /// rung ordering (chunk shrinks denoise, tile shrinks decode) is visible without the
+    /// components' rung ordering masking it.
+    #[test]
+    fn the_activation_residues_are_the_derived_peaks_minus_the_regimes_resident_components() {
+        let total = packaged_tier_bytes("qwen_image", "bf16");
+        let components = ComponentBytes {
+            conditioning: 16_600_000_000,
+            transformer: total - 16_600_000_000 - 253_806_592,
+            decoder: 253_806_592,
+        };
+        let facts = ArchitectureFacts {
+            attention_heads: Some(24),
+            transformer_blocks: Some(60),
+            ..Z_IMAGE_FACTS
+        };
+        let anchor = in_domain_resident_mlx_anchor(components);
+        let chunked = RequestRegime {
+            staged: true,
+            attention_chunk_scores: Some(64 * 1024 * 1024),
+            ..RequestRegime::staged()
+        };
+        let residues = |regime| {
+            let request = at(1024, 1024, regime);
+            let peaks = anchor
+                .derive_phase_peaks(&request, components, facts)
+                .expect("the in-domain anchor prices this regime");
+            let residues = anchor
+                .derive_phase_activation_residues(&request, components, facts)
+                .expect("…and hands out the activation half of the same estimate");
+            // The difference is a COMPONENT set, never an activation byte: every phase's
+            // peak-minus-residue is a sum of the three component figures.
+            for (phase, peak, residue) in [
+                ("conditioning", peaks.conditioning, residues.conditioning),
+                ("denoise", peaks.denoise, residues.denoise),
+                ("decode", peaks.decode, residues.decode),
+            ] {
+                let resident = peak
+                    .checked_sub(residue)
+                    .unwrap_or_else(|| panic!("{phase}: the residue cannot exceed the peak"));
+                assert!(
+                    resident <= components.total(),
+                    "{phase}: {resident} resident bytes exceed the whole component set"
+                );
+            }
+            residues
+        };
+        let rung_2 = residues(RequestRegime::staged());
+        let rung_3 = residues(chunked);
+        let rung_4 = residues(FULLY_ENGAGED);
+        assert_eq!(
+            rung_2.conditioning, rung_4.conditioning,
+            "no rung below bounds the conditioning phase"
+        );
+        assert!(
+            rung_3.denoise < rung_2.denoise,
+            "the attention chunk must shrink the denoise residue: {rung_3:?} vs {rung_2:?}"
+        );
+        assert_eq!(rung_3.decode, rung_2.decode, "rung 3 does not tile decode");
+        assert!(
+            rung_4.decode < rung_3.decode,
+            "the decode tile must shrink the decode residue: {rung_4:?} vs {rung_3:?}"
+        );
+        assert_eq!(rung_4.denoise, rung_3.denoise);
+        // A refused request hands out no residue either.
+        let mut below = anchor.clone();
+        below.phase_active_peak_bytes.denoise = components.total() - 1;
+        assert!(below
+            .derive_phase_activation_residues(&at(1024, 1024, FULLY_ENGAGED), components, facts)
             .is_none());
     }
 
