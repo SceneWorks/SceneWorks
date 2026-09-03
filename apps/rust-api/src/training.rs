@@ -2147,13 +2147,15 @@ fn ltx25_q4_training_tier_present(snapshot: &FsPath) -> bool {
     .all(|file| q4.join(file).is_file())
 }
 
-fn training_tier_name(target: &TrainingTarget) -> &'static str {
+/// The tier subdirectory training reads, as path segments so the caller joins them with the
+/// platform separator (a `"dev/q4"` literal would embed a forward slash on Windows).
+fn training_tier_segments(target: &TrainingTarget) -> &'static [&'static str] {
     if target.base_model == "ltx_2_5" {
-        "dev/q4"
+        &["dev", "q4"]
     } else if target.kernel == "ltx_mlx_lora" {
-        "q4"
+        &["q4"]
     } else {
-        "bf16"
+        &["bf16"]
     }
 }
 
@@ -2179,7 +2181,9 @@ fn tiered_turnkey_train_dir(
     // LTX-2.5 nests two transformer identities before the quant tier, so it does not match the
     // root-level `bf16/q8/q4` turnkey shape tested below.
     if target.base_model == "ltx_2_5" || snapshot_is_tiered_turnkey(&snapshot) {
-        return snapshot.join(training_tier_name(target));
+        return training_tier_segments(target)
+            .iter()
+            .fold(snapshot, |dir, segment| dir.join(segment));
     }
     snapshot
 }
