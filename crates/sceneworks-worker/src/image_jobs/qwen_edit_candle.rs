@@ -945,6 +945,7 @@ pub(super) async fn generate_candle_qwen_edit_stream(
                 false,
                 false,
                 budget,
+                raw_budget.map_or(0.0, crate::vram_gate::ladder_reserve_gb),
                 needed,
                 // The manifest rows include Lightning's built-in distill. User adapters remain a
                 // request-local overlay and are charged to every candidate independently.

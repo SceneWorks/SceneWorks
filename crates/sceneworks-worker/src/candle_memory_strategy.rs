@@ -1256,13 +1256,13 @@ fn estimate_floor_parameters(
 /// (`crate::vram_gate::predicted_peak_gb` conventions) — never a tuned coefficient and never a
 /// promised unmeasured saving:
 ///
-/// * `StagedResidency` — the RAW `candle.sequentialPeakGb` row (a measured working set for
-///   legacy adopters; the reserve the legacy sequential-offload gate folds over it is the selector
-///   budget's to charge, once — sc-22664). Chroma and the other receipt-priced families instead
-///   carry a structural floor: the provider receipt's largest materialized phase plus headroom,
-///   maxed against the padded row, required to remain genuinely below resident. Absent the row,
-///   other adopters use the resident estimate: staging stays selectable but promises no
-///   unmeasured saving.
+/// * `StagedResidency` — the `candle.sequentialPeakGb` row plus [`crate::vram_gate::HEADROOM_GB`]
+///   (`vram_gate::predicted_sequential_peak_gb`, the same padded row the legacy sequential-offload
+///   gate compares — a measured working set for legacy adopters). Chroma and the other
+///   receipt-priced families instead carry a structural floor: the provider receipt's largest
+///   materialized phase plus headroom, maxed against the padded row, required to remain genuinely
+///   below resident. Absent the row, other adopters use the resident estimate: staging stays
+///   selectable but promises no unmeasured saving.
 /// * Rungs 2–4 bound transients/residency the manifest has NOT measured for this cell. Since
 ///   sc-22664 they are priced per rung through the law (below); before it they took the STAGED
 ///   floor unreduced. (Where a measured record for a rung exists it is a `verified_candidates`
@@ -1305,16 +1305,19 @@ fn estimate_floor_parameters(
 ///   peaks say so, but NO rung bounds conditioning, so the admission peak — the max over phases —
 ///   stays at the row. A floor cannot promise a saving only a measured anchor can show, and the
 ///   ladder invents none. With the default architecture facts (this pin — see
-///   [`architecture_facts_from_contract`]) every ratio is inert as well. A staging-free
+///   `crate::video_admission::architecture_facts_from_contract`) every ratio is inert as well. A staging-free
 ///   composition keeps the resident clamp of sc-18253. Basis: [`CandidateBasis::EstimateFloor`]
 ///   — the row, not a measured anchor, is the basis.
 ///
-/// No candidate here carries [`crate::vram_gate::HEADROOM_GB`] (sc-22664): the ladder charges its
-/// operational reserve exactly once, against the selector budget
-/// ([`crate::vram_gate::ladder_reserve_gb`]). The receipt-priced families are the exception by
-/// construction — their floors are STRUCTURAL weights-plus-headroom floors sealed from the
-/// provider receipt, in which the headroom is the modelled activation term rather than a reserve —
-/// and keep that shape byte-for-byte.
+/// WHERE THE RESERVE IS PAID (sc-22664, the rule `crate::memory_strategy::ReserveCharge` states
+/// once): a manifest-row floor — the staged row, scaled or not — carries
+/// [`crate::vram_gate::HEADROOM_GB`] INSIDE its peak exactly as before sc-22664, and the selector
+/// compares it against the unreserved pool; an anchor-derived candidate carries NO pad, because
+/// the anchor measured every phase as a device delta above the pre-load residency, and pays the
+/// operational reserve ([`crate::vram_gate::ladder_reserve_gb`]) on the budget side instead. The
+/// receipt-priced families' floors are STRUCTURAL weights-plus-headroom floors sealed from the
+/// provider receipt, in which the headroom is the modelled activation term, and are pad-carrying
+/// the same way.
 ///
 /// [`RequestRegime`]: sceneworks_core::memory_anchor::RequestRegime
 /// [`MemoryAnchor::derive_phase_peaks`]: sceneworks_core::memory_anchor::MemoryAnchor::derive_phase_peaks
@@ -1352,14 +1355,22 @@ fn synthesize_estimate_floors(
             .predicted_peak_from_base(declared.max(structural))
             .predicted_peak_bytes()
     } else {
-        // The RAW staged row: the reserve is the budget's to charge, once (sc-22664).
-        crate::vram_gate::measured_sequential_peak_gb(manifest, tier_key)
+        // The staged row plus the structural pad, exactly as before sc-22664: the pad is INSIDE a
+        // manifest-row floor, so the selector compares such a floor against the unreserved pool
+        // (`crate::memory_strategy::ReserveCharge`). Absent the row, the resident estimate.
+        crate::vram_gate::predicted_sequential_peak_gb(manifest, tier_key)
             .map(|gb| {
                 ((gb * BYTES_PER_GIB).ceil().clamp(0.0, u64::MAX as f64) as u64)
                     .saturating_add(runtime_overlay_bytes)
             })
             .unwrap_or(resident_peak_bytes)
     };
+    let headroom_bytes = (crate::vram_gate::HEADROOM_GB * BYTES_PER_GIB).ceil() as u64;
+    // The RAW staged row — what the manifest measured, without the pad or the request's overlay —
+    // is what the law decomposes for the contract-only deeper rungs; both charges are folded back
+    // over the derivation.
+    let raw_staged_row_bytes = crate::vram_gate::measured_sequential_peak_gb(manifest, tier_key)
+        .map(|gb| (gb * BYTES_PER_GIB).ceil().clamp(0.0, u64::MAX as f64) as u64);
     // Chroma claims a staged saving only when the receipt-derived largest phase plus exact
     // auxiliaries is genuinely below its receipt-derived co-resident floor. Equal or crossed rows
     // are not an optimized strategy and cannot become selectable through a tier label.
@@ -1374,13 +1385,11 @@ fn synthesize_estimate_floors(
     // one staged measurement of every phase at the request geometry (see the doc comment). Only
     // for the shared ladder — a receipt-priced floor is a structural sum, not a measured working
     // set, and stays unscaled.
-    let floor_anchor = (anchor.is_none() && !receipt_priced).then(|| {
-        floor_pseudo_anchor(
-            engine_id,
-            geometry,
-            staged_floor_bytes.saturating_sub(runtime_overlay_bytes),
-        )
-    });
+    let floor_anchor = if anchor.is_none() && !receipt_priced {
+        raw_staged_row_bytes.map(|row| floor_pseudo_anchor(engine_id, geometry, row))
+    } else {
+        None
+    };
     let mut synthesized = Vec::new();
     for strategy in MemoryStrategy::ALL {
         if strategy == MemoryStrategy::Resident {
@@ -1468,9 +1477,14 @@ fn synthesize_estimate_floors(
                 } else {
                     None
                 };
+                // A law-scaled row carries the same structural pad and overlay the unscaled
+                // staged floor does: it is still a manifest-row floor.
                 let (bytes, phase_peaks) = match from_floor {
                     Some(phases) => (
-                        phases.peak_bytes().saturating_add(runtime_overlay_bytes),
+                        phases
+                            .peak_bytes()
+                            .saturating_add(headroom_bytes)
+                            .saturating_add(runtime_overlay_bytes),
                         Some(phases),
                     ),
                     None if staged => (staged_floor_bytes, None),
@@ -1578,7 +1592,11 @@ pub(crate) struct CandleLadderAnchors<'a> {
     pub store: Option<&'a sceneworks_core::memory_anchor::MemoryAnchorStore>,
     pub scope: AnchorStoreScope,
     /// The facts the law scales its residues by. From the contract in production
-    /// ([`architecture_facts_from_contract`]); a fixture may state the model's real facts.
+    /// ([`architecture_facts_from_contract`], the one worker-edge seam shared with the MLX and
+    /// video lanes, which states the default facts at this pin — sc-22667 wires the real
+    /// block); a fixture may state the model's real facts.
+    ///
+    /// [`architecture_facts_from_contract`]: crate::video_admission::architecture_facts_from_contract
     pub facts: sceneworks_core::memory_anchor::ArchitectureFacts,
 }
 
@@ -1589,28 +1607,9 @@ impl CandleLadderAnchors<'static> {
         Self {
             store: sceneworks_core::memory_anchor::packaged_memory_anchors(),
             scope: AnchorStoreScope::Packaged,
-            facts: architecture_facts_from_contract(contract),
+            facts: crate::video_admission::architecture_facts_from_contract(contract),
         }
     }
-}
-
-/// The architecture facts of the model behind `contract`, at the worker edge (sc-22664).
-///
-/// AT THIS PIN (inference 670dc1f4) `gen_core::MemoryProviderContract` carries no
-/// `MemoryArchitectureFacts` — the field lands with the epic's pin bump in sc-22667, which is the
-/// story that replaces this body with the translation of the contract's own facts (attention
-/// heads, head dim, block count, patch size, latent channels, VAE scales, activation width). Until
-/// then the facts are the DEFAULT, and the law's contract is explicit about what that means
-/// (`sceneworks_core::memory_anchor`, *Image derivation law*): a missing fact leaves the residue
-/// it would have scaled UNSCALED, so every ratio that needs a fact — the denoise score split and
-/// chunk, the transformer window over blocks, the tiled-decode blender floor, the token-linear
-/// scaling — is inert and the estimate only errs LARGE. The per-rung derivation is therefore
-/// conservative in production until sc-22667 lands, and exactly right in structure: the fixture
-/// tests supply the real facts and exercise every ratio the selector will see after the bump.
-pub(crate) fn architecture_facts_from_contract(
-    _contract: &gen_core::MemoryProviderContract,
-) -> sceneworks_core::memory_anchor::ArchitectureFacts {
-    sceneworks_core::memory_anchor::ArchitectureFacts::default()
 }
 
 /// The [`RequestRegime`] one ladder rung executes in: its engaged composition plus the parameters
@@ -1863,6 +1862,7 @@ pub(crate) fn evaluate_shared_image(
     has_phases: bool,
     request_has_phases: bool,
     budget: Option<VramBudget>,
+    reserve_gb: f64,
     predicted_peak_gb: Option<f64>,
     runtime_overlay_bytes: u64,
     cache_state: MemoryCacheState,
@@ -1945,6 +1945,7 @@ pub(crate) fn evaluate_shared_image(
         has_phases,
         request_has_phases,
         budget,
+        reserve_gb,
         predicted_peak_gb,
         runtime_overlay_bytes,
         cache_state,
@@ -2036,6 +2037,7 @@ pub(crate) fn evaluate_shared_bespoke_image(
     use_pid: bool,
     has_phases: bool,
     budget: Option<VramBudget>,
+    reserve_gb: f64,
     predicted_peak_gb: Option<f64>,
     runtime_overlay_bytes: u64,
     cache_state: MemoryCacheState,
@@ -2099,6 +2101,7 @@ pub(crate) fn evaluate_shared_bespoke_image(
         has_phases,
         has_phases,
         budget,
+        reserve_gb,
         predicted_peak_gb,
         runtime_overlay_bytes,
         cache_state,
@@ -2126,6 +2129,7 @@ fn evaluate_shared_image_inner(
     worker_multipass: bool,
     request_has_phases: bool,
     budget: Option<VramBudget>,
+    reserve_gb: f64,
     predicted_peak_gb: Option<f64>,
     runtime_overlay_bytes: u64,
     cache_state: MemoryCacheState,
@@ -2306,15 +2310,11 @@ fn evaluate_shared_image_inner(
                 contract
                     .predicted_peak_from_base(declared.max(structural))
                     .predicted_peak_bytes()
-            } else if crate::vram_gate::measured_resident_peak_gb(manifest, tier_key).is_some() {
-                // sc-22664: the caller's resident peak is `vram_gate::predicted_peak_gb`, which
-                // folds `HEADROOM_GB` over the measured `vramGbByTier` row. The ladder charges its
-                // reserve once, against the selector budget (`ladder_reserve_gb`), so the resident
-                // candidate is the RAW row plus the caller's adapter residency. A tier with no
-                // measured row lands on `minMemoryGb`, whose pad is the manifest's own and stays.
-                declared
-                    .saturating_sub((crate::vram_gate::HEADROOM_GB * BYTES_PER_GIB).ceil() as u64)
             } else {
+                // The caller's resident peak is `vram_gate::predicted_peak_gb`: the measured
+                // `vramGbByTier` row plus `HEADROOM_GB` (or `minMemoryGb`, padded by the manifest
+                // itself). The pad stays INSIDE this candidate and it is compared against the
+                // unreserved pool (`crate::memory_strategy::ReserveCharge`, sc-22664).
                 declared
             }
         },
@@ -2480,22 +2480,30 @@ fn evaluate_shared_image_inner(
         // sc-17774: one mechanism, same as every other lane. `unwrap_or_default` fails closed.
         expected_closure_digest: &live_closure_digest,
     };
-    // sc-22664: the operational reserve, charged HERE and only here — the measured idle baseline
-    // plus its named margin (`vram_gate::ladder_reserve_gb`), never a fixed 2 GB, and never also
-    // folded into a candidate's peak (the shared-ladder candidates above are raw rows and raw
-    // derivations; see `synthesize_estimate_floors`).
-    let reserve_gb = crate::vram_gate::ladder_reserve_gb(budget);
+    // sc-22664: the operational reserve — `vram_gate::ladder_reserve_gb` of the caller's RAW probe,
+    // handed in explicitly so a reclaimable-credited `budget` can never derive it — on the selector
+    // budget, charged per candidate by the one rule `crate::memory_strategy::ReserveCharge`
+    // states: an anchor-derived candidate (a reserve-free device delta) compares against the pool
+    // minus the reserve; the resident live estimate, a manifest-row floor and a receipt-priced
+    // structural floor already carry `HEADROOM_GB` inside their peaks and compare against the
+    // unreserved pool, so no candidate pays twice.
     let selector_budget = Some(Budget {
         available_gb: budget.free_gb,
         reclaimable_gb: 0.0,
         total_gb: budget.total_gb,
         reserved_headroom_gb: reserve_gb,
     });
-    let selected = crate::memory_strategy::select_strategy(
+    let pad_carrying = |candidate: &Candidate<'_>| {
+        std::ptr::eq(candidate.evidence, &resident)
+            || candidate.basis == crate::memory_strategy::CandidateBasis::EstimateFloor
+    };
+    let reserve_charge = crate::memory_strategy::ReserveCharge::ExceptPadCarrying(&pad_carrying);
+    let selected = crate::memory_strategy::select_strategy_charging(
         request_scope,
         &contract,
         selector_budget,
         &candidates,
+        reserve_charge,
     );
     let Selection::Selected {
         selection,
@@ -2590,11 +2598,12 @@ fn evaluate_shared_image_inner(
             })
             .cloned()
             .collect::<Vec<_>>();
-        match crate::memory_strategy::select_strategy(
+        match crate::memory_strategy::select_strategy_charging(
             request_scope,
             &contract,
             selector_budget,
             &staged_candidates,
+            reserve_charge,
         ) {
             Selection::Selected {
                 selection: staged_selection,
@@ -2697,6 +2706,13 @@ mod tests {
             })),
         )
         .is_some());
+    }
+
+    /// The reserve a production caller hands the ladder for `budget`: `vram_gate::ladder_reserve_gb`
+    /// of the RAW probe (sc-22664 review, D2). The fixtures below probe no card, so their budget
+    /// IS the raw probe.
+    fn reserve_for(budget: Option<VramBudget>) -> f64 {
+        budget.map_or(0.0, crate::vram_gate::ladder_reserve_gb)
     }
 
     fn gib(value: u64) -> u64 {
@@ -3206,6 +3222,10 @@ mod tests {
                 free_gb,
                 total_gb: 48.0,
             }),
+            reserve_for(Some(VramBudget {
+                free_gb,
+                total_gb: 48.0,
+            })),
             Some(30.0),
             0,
             MemoryCacheState::Cold,
@@ -3250,6 +3270,10 @@ mod tests {
                 free_gb,
                 total_gb: 48.0,
             }),
+            reserve_for(Some(VramBudget {
+                free_gb,
+                total_gb: 48.0,
+            })),
             Some(30.0),
             0,
             MemoryCacheState::Cold,
@@ -3291,6 +3315,10 @@ mod tests {
                 free_gb,
                 total_gb: 48.0,
             }),
+            reserve_for(Some(VramBudget {
+                free_gb,
+                total_gb: 48.0,
+            })),
             Some(30.0),
             0,
             MemoryCacheState::Cold,
@@ -3340,6 +3368,7 @@ mod tests {
             false,
             false,
             budget,
+            reserve_for(budget),
             Some(30.0),
             0,
             MemoryCacheState::Cold,
@@ -3387,6 +3416,7 @@ mod tests {
             false,
             false,
             budget,
+            reserve_for(budget),
             Some(30.0),
             0,
             MemoryCacheState::Cold,
@@ -3417,6 +3447,7 @@ mod tests {
             false,
             false,
             budget,
+            reserve_for(budget),
             Some(30.0),
             0,
             MemoryCacheState::Cold,
@@ -3533,6 +3564,7 @@ mod tests {
                         false,
                         false,
                         staged_budget(&ip_contract, tier),
+                        reserve_for(staged_budget(&ip_contract, tier)),
                         Some(tier_resident_gb(tier)),
                         0,
                         cache_state,
@@ -3581,6 +3613,7 @@ mod tests {
                             use_pid,
                             false,
                             staged_budget(&control_contract, tier),
+                            reserve_for(staged_budget(&control_contract, tier)),
                             Some(tier_resident_gb(tier)),
                             0,
                             cache_state,
@@ -3624,6 +3657,10 @@ mod tests {
                 free_gb: 96.0,
                 total_gb: 96.0,
             }),
+            reserve_for(Some(VramBudget {
+                free_gb: 96.0,
+                total_gb: 96.0,
+            })),
             Some(tier_resident_gb("q4")),
             0,
             MemoryCacheState::Cold,
@@ -3838,6 +3875,10 @@ mod tests {
                     free_gb,
                     total_gb: 96.0,
                 }),
+                reserve_for(Some(VramBudget {
+                    free_gb,
+                    total_gb: 96.0,
+                })),
                 crate::vram_gate::predicted_peak_gb(&manifest, "q4"),
                 gib(80),
                 MemoryCacheState::Cold,
@@ -3848,10 +3889,12 @@ mod tests {
             )
         };
 
-        // The raw staged estimate is 11 + 2 headroom + 2 adapter + 3 PiD = 18 GiB. The shared
-        // 4% estimate margin makes that 18.72; with the selector's 2 GiB reserve, 22 GiB free fits
-        // staged while the 25 GiB resident receipt does not. The deliberately bogus 80 GiB generic
-        // adapter input must not affect this receipt-priced result.
+        // The raw staged estimate is 11 + 2 headroom + 2 adapter + 3 PiD = 18 GiB, widened by the
+        // candle recapture spread. That floor CARRIES its pad, so it pays no reserve on the budget
+        // side (`memory_strategy::ReserveCharge`, sc-22664 D1/D4): the admission threshold is the
+        // widened floor itself, against the unreserved pool. 22 GiB free fits staged while the
+        // 25 GiB resident receipt does not. The deliberately bogus 80 GiB generic adapter input
+        // must not affect this receipt-priced result.
         let staged = evaluate(22.0, Some("lora"), contract.clone())
             .expect("exact Chroma evaluation")
             .expect("staged strategy fits");
@@ -3865,8 +3908,32 @@ mod tests {
             staged.context.optimization_authority,
             gen_core::MemoryOptimizationAuthority::Estimated
         );
+        let staged_threshold_gb = staged.admitted.needed_gb;
+        assert!(
+            (staged_threshold_gb
+                - 18.0 * (1.0 + crate::ladder_margin_policy::CANDLE_RECAPTURE_SPREAD))
+                .abs()
+                < 1e-6,
+            "{staged_threshold_gb}"
+        );
+        assert_eq!(
+            staged.admitted.available_gb, 22.0,
+            "a pad-carrying structural floor compares against the UNRESERVED pool"
+        );
+        assert!(staged.admitted.reserve_gb > 0.0);
 
-        let no_fit = evaluate(20.0, Some("lora"), contract.clone())
+        // The single charge, straddled: the widened floor fits one hundredth above itself and
+        // fails closed one hundredth below. MUTATION: charging the reserve against this floor as
+        // well (`ReserveCharge::EveryCandidate` in `evaluate_shared_image_inner`) refuses the
+        // upper arm.
+        let just_fits = evaluate(staged_threshold_gb + 0.01, Some("lora"), contract.clone())
+            .expect("exact Chroma evaluation")
+            .expect("the widened floor fits at its own threshold");
+        assert_eq!(
+            just_fits.context.selection.strategy,
+            MemoryStrategy::StagedResidency
+        );
+        let no_fit = evaluate(staged_threshold_gb - 0.01, Some("lora"), contract.clone())
             .err()
             .expect("a budget below the widened exact staged floor must fail closed");
         assert!(no_fit.to_string().contains("no exact resident or staged"));
@@ -3937,6 +4004,10 @@ mod tests {
                         free_gb,
                         total_gb: 48.0,
                     }),
+                    reserve_for(Some(VramBudget {
+                        free_gb,
+                        total_gb: 48.0,
+                    })),
                     None,
                     0,
                     MemoryCacheState::Cold,
@@ -3974,12 +4045,45 @@ mod tests {
                 );
             }
 
+            // The receipt-derived staged floor carries its pad and pays no reserve on the budget
+            // side (`memory_strategy::ReserveCharge`, sc-22664 D1/D4): its widened peak is the
+            // threshold, against the unreserved pool. MUTATION: charging the reserve against the
+            // floor as well refuses the `just_fits` arm.
+            let staged = evaluate(
+                "text_to_image",
+                0,
+                false,
+                false,
+                15.0,
+                sana_probe_contract(provider),
+            )
+            .expect("exact SANA receipt evaluation")
+            .expect("staged phase floor fits");
+            let threshold_gb = staged.admitted.needed_gb;
+            assert_eq!(
+                staged.admitted.available_gb, 15.0,
+                "a pad-carrying structural floor compares against the UNRESERVED pool"
+            );
+            let just_fits = evaluate(
+                "text_to_image",
+                0,
+                false,
+                false,
+                threshold_gb + 0.01,
+                sana_probe_contract(provider),
+            )
+            .expect("exact SANA receipt evaluation")
+            .expect("the widened floor fits at its own threshold");
+            assert_eq!(
+                just_fits.context.selection.strategy,
+                MemoryStrategy::StagedResidency
+            );
             let no_fit = match evaluate(
                 "text_to_image",
                 0,
                 false,
                 false,
-                14.0,
+                threshold_gb - 0.01,
                 sana_probe_contract(provider),
             ) {
                 Err(error) => error,
@@ -4049,6 +4153,10 @@ mod tests {
                                     free_gb,
                                     total_gb: 48.0,
                                 }),
+                                reserve_for(Some(VramBudget {
+                                    free_gb,
+                                    total_gb: 48.0,
+                                })),
                                 None,
                                 0,
                                 MemoryCacheState::Cold,
@@ -4136,6 +4244,10 @@ mod tests {
                     free_gb,
                     total_gb: 48.0,
                 }),
+                reserve_for(Some(VramBudget {
+                    free_gb,
+                    total_gb: 48.0,
+                })),
                 None,
                 0,
                 MemoryCacheState::Cold,
@@ -4146,7 +4258,18 @@ mod tests {
             )
         };
 
-        let no_fit = match evaluate(13.0, None, None, sd35_probe_contract("sd3_5_large", None)) {
+        // The staged envelope carries its pad and pays no reserve on the budget side
+        // (`memory_strategy::ReserveCharge`, sc-22664 D1/D4): its widened peak is the threshold.
+        let staged = evaluate(16.0, None, None, sd35_probe_contract("sd3_5_large", None))
+            .expect("sealed SD3.5 receipt evaluates")
+            .expect("staged phase envelope fits");
+        let staged_threshold_gb = staged.admitted.needed_gb;
+        let no_fit = match evaluate(
+            staged_threshold_gb - 0.01,
+            None,
+            None,
+            sd35_probe_contract("sd3_5_large", None),
+        ) {
             Err(error) => error,
             Ok(_) => panic!("a budget below the exact staged envelope must refuse"),
         };
@@ -4238,6 +4361,10 @@ mod tests {
                 free_gb: 24.0,
                 total_gb: 48.0,
             }),
+            reserve_for(Some(VramBudget {
+                free_gb: 24.0,
+                total_gb: 48.0,
+            })),
             None,
             0,
             MemoryCacheState::Cold,
@@ -4333,6 +4460,10 @@ mod tests {
                     free_gb,
                     total_gb: 96.0,
                 }),
+                reserve_for(Some(VramBudget {
+                    free_gb,
+                    total_gb: 96.0,
+                })),
                 crate::vram_gate::predicted_peak_gb(&manifest, "q4"),
                 gib(80),
                 MemoryCacheState::Warm,
@@ -4382,6 +4513,10 @@ mod tests {
                 free_gb: 64.0,
                 total_gb: 128.0,
             }),
+            reserve_for(Some(VramBudget {
+                free_gb: 64.0,
+                total_gb: 128.0,
+            })),
             crate::vram_gate::predicted_peak_gb(&manifest, "q4"),
             gib(80),
             MemoryCacheState::Cold,
@@ -4411,7 +4546,11 @@ mod tests {
             gib(staged_row_gib * hires_scale + auxiliaries_gib)
         );
 
-        assert!(evaluate(20.0, contract.clone()).is_err());
+        // The receipt-derived staged floor carries its pad and pays no reserve on the budget side
+        // (`memory_strategy::ReserveCharge`, sc-22664 D1/D4): it is compared against the
+        // unreserved pool and a budget one hundredth under its widened peak refuses.
+        assert_eq!(staged.admitted.available_gb, 23.0);
+        assert!(evaluate(staged.admitted.needed_gb - 0.01, contract.clone()).is_err());
         assert!(evaluate(
             23.0,
             ideogram_probe_contract("ideogram_4_turbo", Some(&identity), false, true),
@@ -4833,6 +4972,10 @@ mod tests {
                 free_gb,
                 total_gb: 32.0,
             }),
+            reserve_for(Some(VramBudget {
+                free_gb,
+                total_gb: 32.0,
+            })),
             Some(RESIDENT_PEAK_GB),
             0,
             MemoryCacheState::Cold,
@@ -5297,6 +5440,10 @@ mod tests {
                     free_gb,
                     total_gb: 96.0,
                 }),
+                reserve_for(Some(VramBudget {
+                    free_gb,
+                    total_gb: 96.0,
+                })),
                 Some(live_predicted_peak),
                 0,
                 MemoryCacheState::Cold,
@@ -5374,6 +5521,10 @@ mod tests {
                     free_gb,
                     total_gb: 96.0,
                 }),
+                reserve_for(Some(VramBudget {
+                    free_gb,
+                    total_gb: 96.0,
+                })),
                 Some(8.0),
                 0,
                 MemoryCacheState::Cold,
@@ -5390,9 +5541,16 @@ mod tests {
             MemoryStrategy::StagedResidency,
             "the cheapest fitting estimate rung must win"
         );
-        // The floor is the RAW manifest staged row (the selector owns the widening, the budget
-        // owns the reserve — sc-22664).
-        assert!((evaluation.predicted_peak_gb - 2.5).abs() < 1e-6);
+        // The floor is the manifest staged row plus its structural pad, exactly as before
+        // sc-22664 (the selector owns the widening; the pad-carrying floor pays no reserve on the
+        // budget side — `memory_strategy::ReserveCharge`).
+        assert!(
+            (evaluation.predicted_peak_gb - (2.5 + crate::vram_gate::HEADROOM_GB)).abs() < 1e-6
+        );
+        assert_eq!(
+            evaluation.admitted.available_gb, 7.0,
+            "a pad-carrying floor compares against the UNRESERVED pool"
+        );
         let memory = evaluation
             .memory
             .expect("optimized selection carries memory");
@@ -5409,8 +5567,8 @@ mod tests {
             Z_IMAGE_REQUEST_EVIDENCE_REVISION
         );
 
-        // Margin mutation arm: at 4.52 GiB free (2.52 effective) the RAW staged floor (2.5) fits
-        // but the widened one (2.55) does not — the selector rejects, this lane falls back to the
+        // Margin mutation arm: at 4.52 GiB free the padded staged floor (2.5 + 2 = 4.5) fits but
+        // the widened one (4.59) does not — the selector rejects, this lane falls back to the
         // established legacy gates (`None`), and a zeroed estimate margin would admit instead and
         // flip this arm red.
         assert!(
@@ -5733,6 +5891,21 @@ mod tests {
         budget: VramBudget,
         store: &sceneworks_core::memory_anchor::MemoryAnchorStore,
     ) -> Option<CandleMemoryEvaluation> {
+        evaluate_z_image_fixture_with(
+            budget,
+            reserve_for(Some(budget)),
+            Some(z_image_ladder_anchors(store)),
+        )
+    }
+
+    /// [`evaluate_z_image_fixture`] with the reserve and the anchor source spelled out: `None`
+    /// anchors is the PRODUCTION source (`CandleLadderAnchors::packaged`), and `reserve_gb` is
+    /// what the caller derived from its raw probe.
+    fn evaluate_z_image_fixture_with(
+        budget: VramBudget,
+        reserve_gb: f64,
+        anchors: Option<CandleLadderAnchors<'_>>,
+    ) -> Option<CandleMemoryEvaluation> {
         let spec = LoadSpec::new(WeightsSource::Dir(PathBuf::from("missing-z-image-q4")));
         evaluate_shared_image_inner(
             "z_image_turbo",
@@ -5750,6 +5923,7 @@ mod tests {
             false,
             false,
             Some(budget),
+            reserve_gb,
             // What `generate_candle_stream` passes: `vram_gate::predicted_peak_gb`, the resident
             // row with the legacy headroom folded in.
             Some(18.4 + crate::vram_gate::HEADROOM_GB),
@@ -5758,7 +5932,7 @@ mod tests {
             None,
             Some(z_image_fixture_contract()),
             None,
-            Some(z_image_ladder_anchors(store)),
+            anchors,
         )
         .expect("the fixture ladder evaluates")
     }
@@ -5831,11 +6005,20 @@ mod tests {
         assert!(memory.stage_residency && memory.tile_vae_decode && memory.chunk_attention);
         assert!(memory.stream_transformer_blocks);
 
-        // The reserve: idle baseline 0.7 + the named margin, once. The effective budget is free
-        // minus exactly that, and the admitted peak is the raw derived peak widened by the
+        // The reserve: the probed idle baseline (0.7) is below the measured pre-load residency the
+        // retained record carries, so that residency floors it (D3), plus the named margin, once.
+        // An anchor-derived candidate is a reserve-free device delta, so its effective budget is
+        // free minus exactly that, and the admitted peak is the raw derived peak widened by the
         // image-lane recapture spread — no headroom anywhere inside it.
         let reserve_gb = crate::vram_gate::ladder_reserve_gb(budget);
-        assert!((reserve_gb - (0.7 + crate::vram_gate::LADDER_RESERVE_MARGIN_GB)).abs() < 1e-9);
+        assert!(
+            (reserve_gb
+                - (crate::vram_gate::MEASURED_PRELOAD_RESIDENCY_GB
+                    + crate::vram_gate::LADDER_RESERVE_MARGIN_GB))
+                .abs()
+                < 1e-9
+        );
+        assert!(reserve_gb > 0.7 + crate::vram_gate::LADDER_RESERVE_MARGIN_GB);
         assert_eq!(evaluation.admitted.reserve_gb, reserve_gb);
         assert!((evaluation.admitted.available_gb - (7.3 - reserve_gb)).abs() < 1e-9);
         let admitted_bytes = (4_509_786_368f64
@@ -6045,6 +6228,327 @@ mod tests {
         assert!(evaluate_z_image_fixture(budget, &store).is_none());
     }
 
+    /// The selector, driven exactly as `evaluate_shared_image_inner` drives it for the Z-Image
+    /// fixture: the resident live estimate (the caller's padded resident row) plus the
+    /// synthesized floors, the reserve charged per `ReserveCharge::ExceptPadCarrying`.
+    fn select_z_image_fixture(
+        candidates: &[EstimateCandidate],
+        contract: &gen_core::MemoryProviderContract,
+        budget: VramBudget,
+        reserve_gb: f64,
+        resident_peak_bytes: u64,
+    ) -> Selection {
+        let live_closure_digest = sceneworks_core::memory_calibration::packaged_closure_digest(
+            "candle",
+            evidence_provider("z_image_turbo"),
+        )
+        .unwrap_or_default();
+        let resident_selection = MemorySelection {
+            strategy: MemoryStrategy::Resident,
+            parameters: Default::default(),
+            tier: numeric_tier("z_image_turbo", "q4").expect("q4 tier"),
+        };
+        let mut resident = rung_of(candidates, MemoryStrategy::StagedResidency)
+            .evidence
+            .clone();
+        resident.key.strategy = MemoryStrategy::Resident;
+        resident.key.parameters = resident_selection.parameters;
+        resident.key.engaged_composition = contract.engaged_composition(MemoryStrategy::Resident);
+        resident.predicted_peak_bytes = resident_peak_bytes;
+        let mut selector_candidates = vec![Candidate {
+            selection: resident_selection,
+            evidence: &resident,
+            closure_digest: &live_closure_digest,
+            basis: crate::memory_strategy::CandidateBasis::Measured,
+            unmodeled_activation_bytes: None,
+        }];
+        selector_candidates.extend(candidates.iter().map(|candidate| Candidate {
+            selection: candidate.selection,
+            evidence: &candidate.evidence,
+            closure_digest: &live_closure_digest,
+            basis: candidate.basis,
+            unmodeled_activation_bytes: None,
+        }));
+        let pad_carrying = |candidate: &Candidate<'_>| {
+            std::ptr::eq(candidate.evidence, &resident)
+                || candidate.basis == crate::memory_strategy::CandidateBasis::EstimateFloor
+        };
+        crate::memory_strategy::select_strategy_charging(
+            RequestScope {
+                resolved_route: "z_image_turbo",
+                backend: "candle",
+                tier: numeric_tier("z_image_turbo", "q4").expect("q4 tier"),
+                mode: &request_mode("z_image_turbo", "text_to_image").scope_key,
+                overlay: None,
+                geometry: Z_IMAGE_FIXTURE_GEOMETRY,
+                expected_closure_digest: &live_closure_digest,
+            },
+            contract,
+            Some(Budget {
+                available_gb: budget.free_gb,
+                reclaimable_gb: 0.0,
+                total_gb: budget.total_gb,
+                reserved_headroom_gb: reserve_gb,
+            }),
+            &selector_candidates,
+            crate::memory_strategy::ReserveCharge::ExceptPadCarrying(&pad_carrying),
+        )
+    }
+
+    /// sc-22664 review D1 — the PRODUCTION path: the same `z_image_turbo` q4 request on the same
+    /// 8 GB card (total 8.0, free 7.3), priced through the production anchor source —
+    /// `CandleLadderAnchors::packaged` under its model-scope guard, with the default architecture
+    /// facts — has NO anchor for the cell at this pin, so every rung is a manifest-row floor
+    /// carrying its structural pad: 5.7 + 2.0 = 7.7 GiB, widened to 7.85 GiB, against 7.3 GiB
+    /// free. It REJECTS, exactly as before this story, naming needed and available, and the entry
+    /// point hands back to the legacy gates (`None`). The 8 GB admission of AC 1 is unlocked only
+    /// by a packaged anchor for the cell plus its facts (sc-22666 / sc-22667), never by the
+    /// ladder's accounting alone — the retained sc-15859 record measures this cell's staged
+    /// decode at 10.93 GiB, which is why the floor must keep its pad.
+    ///
+    /// MUTATION: stripping `HEADROOM_GB` from the manifest-row floor (`measured_sequential_peak_gb`
+    /// in place of `predicted_sequential_peak_gb` in `synthesize_estimate_floors`) prices the
+    /// floor at 5.7 GiB → 5.81 admitted against 7.3, and this arm ADMITS — red.
+    #[test]
+    fn the_production_anchor_source_rejects_z_image_q4_on_an_eight_gb_card_at_this_pin() {
+        let contract = z_image_fixture_contract();
+        let budget = VramBudget {
+            free_gb: 7.3,
+            total_gb: 8.0,
+        };
+        let reserve_gb = crate::vram_gate::ladder_reserve_gb(budget);
+        let packaged = CandleLadderAnchors::packaged(&contract);
+        assert_eq!(packaged.scope, AnchorStoreScope::Packaged);
+        assert_eq!(
+            packaged.facts,
+            sceneworks_core::memory_anchor::ArchitectureFacts::default(),
+            "the contract states no facts at this pin"
+        );
+        // No packaged anchor prices this cell: the scope guard keeps the packaged store to
+        // `CANDLE_ANCHOR_COEFFICIENT_MODELS`, which does not name `z_image_turbo` (sc-22666).
+        assert!(!CANDLE_ANCHOR_COEFFICIENT_MODELS.contains(&"z_image_turbo"));
+        let candidates = z_image_fixture_floors(packaged, &contract);
+        let padded_row_bytes =
+            ((5.7 + crate::vram_gate::HEADROOM_GB) * BYTES_PER_GIB).ceil() as u64;
+        for candidate in &candidates {
+            assert_eq!(
+                candidate.basis,
+                crate::memory_strategy::CandidateBasis::EstimateFloor,
+                "{:?}: the production source yields no anchor for this cell",
+                candidate.selection.strategy
+            );
+            assert_eq!(
+                candidate.evidence.predicted_peak_bytes, padded_row_bytes,
+                "{:?}: the manifest-row floor carries its pad, exactly as before sc-22664",
+                candidate.selection.strategy
+            );
+        }
+
+        // Selector level: Reject, naming the widened padded row against the UNRESERVED pool (a
+        // pad-carrying floor pays no reserve twice).
+        let selected = select_z_image_fixture(
+            &candidates,
+            &contract,
+            budget,
+            reserve_gb,
+            ((18.4 + crate::vram_gate::HEADROOM_GB) * BYTES_PER_GIB).ceil() as u64,
+        );
+        let Selection::Reject {
+            needed_gb,
+            available_gb,
+        } = selected
+        else {
+            panic!("the production source must reject this card at this pin, got {selected:?}");
+        };
+        let expected_needed = (padded_row_bytes as f64
+            * (1.0 + crate::ladder_margin_policy::CANDLE_RECAPTURE_SPREAD))
+            .ceil()
+            / BYTES_PER_GIB;
+        assert!((needed_gb - expected_needed).abs() < 1e-6, "{needed_gb}");
+        assert!(needed_gb > 7.7 && needed_gb < 8.0, "{needed_gb}");
+        assert_eq!(
+            available_gb, 7.3,
+            "a pad-carrying floor compares against the unreserved pool: free, not free − reserve"
+        );
+        assert!(needed_gb > available_gb);
+
+        // End to end through the production source (no anchor override): nothing admitted, the
+        // legacy gates decide — byte-for-byte the pre-story outcome for this cell.
+        assert!(evaluate_z_image_fixture_with(budget, reserve_gb, None).is_none());
+    }
+
+    /// sc-22664 review D2: the reserve is derived from the RAW probe, never from the
+    /// reclaimable-credited budget the ladder is handed. A warm 8 GB card whose resident model
+    /// leaves 3.3 GiB free is credited to 7.8 GiB for the imminent evict; the reserve is still the
+    /// raw probe's — 4.7 GiB of residency, capped at the legacy slack — and not the credited
+    /// budget's 0.2 GiB idle (the measured floor plus the margin). MUTATION: deriving the reserve
+    /// inside the ladder from `budget` (`ladder_reserve_gb(budget)` in place of the explicit
+    /// parameter) reports the credited figure and reds this.
+    #[test]
+    fn the_reserve_is_derived_from_the_raw_probe_not_the_credited_budget() {
+        let store = z_image_q4_store();
+        let raw = VramBudget {
+            free_gb: 3.3,
+            total_gb: 8.0,
+        };
+        let credited = crate::vram_gate::with_reclaimable(raw, 4.5);
+        assert!((credited.free_gb - 7.8).abs() < 1e-9);
+        let raw_reserve_gb = crate::vram_gate::ladder_reserve_gb(raw);
+        assert_eq!(raw_reserve_gb, crate::vram_gate::HEADROOM_GB);
+        let credited_reserve_gb = crate::vram_gate::ladder_reserve_gb(credited);
+        assert!(
+            (credited_reserve_gb
+                - (crate::vram_gate::MEASURED_PRELOAD_RESIDENCY_GB
+                    + crate::vram_gate::LADDER_RESERVE_MARGIN_GB))
+                .abs()
+                < 1e-9
+        );
+        assert!(credited_reserve_gb < raw_reserve_gb);
+
+        let evaluation = evaluate_z_image_fixture_with(
+            credited,
+            raw_reserve_gb,
+            Some(z_image_ladder_anchors(&store)),
+        )
+        .expect("the credited card admits the windowed rung");
+        assert_eq!(
+            evaluation.context.selection.strategy,
+            MemoryStrategy::BoundedTransformerResidency
+        );
+        assert_eq!(evaluation.admitted.reserve_gb, raw_reserve_gb);
+        assert!(
+            (evaluation.admitted.available_gb - (7.8 - raw_reserve_gb)).abs() < 1e-9,
+            "{}",
+            evaluation.admitted.available_gb
+        );
+        assert_eq!(
+            evaluation.context.budget.reserved_headroom_bytes,
+            (raw_reserve_gb * BYTES_PER_GIB).round() as u64
+        );
+        assert_eq!(
+            evaluation.selection_telemetry("z_image_turbo", "q4")["reserveGb"],
+            raw_reserve_gb
+        );
+    }
+
+    /// sc-22664 review D4: a receipt-priced family near idle. SD3.5 large q4 on a 24 GB card
+    /// with 23 GiB free: the reserve is 1.0 idle + the margin, and the structural resident floor
+    /// (18 GiB of weights + 2 GiB headroom) fits — against the UNRESERVED pool, because a
+    /// structural floor carries its pad. The single charge is proven by straddling both rungs: one
+    /// hundredth above the widened resident floor selects Resident, one hundredth below drops to
+    /// Staged; one hundredth above the widened staged floor still selects Staged, one hundredth
+    /// below refuses. MUTATION: `ReserveCharge::EveryCandidate` in `evaluate_shared_image_inner`
+    /// (charging the reserve against the floors too) drops the above-resident arm to Staged and
+    /// refuses the above-staged arm — red.
+    #[test]
+    fn sd35_structural_floors_carry_their_pad_and_pay_no_reserve_near_idle() {
+        let manifest = json!({ "candle": {} })
+            .as_object()
+            .expect("SD3.5 structural manifest")
+            .clone();
+        let spec = LoadSpec::new(WeightsSource::Dir(PathBuf::from("sealed-sd35-q4")))
+            .with_resolved_route("sd3_5_large");
+        let geometry = MemoryGeometry {
+            width: 1024,
+            height: 1024,
+            batch: 1,
+            frames: 1,
+            reference_count: 0,
+        };
+        let evaluate = |total_gb: f64, free_gb: f64| {
+            let budget = VramBudget { free_gb, total_gb };
+            evaluate_shared_image_inner(
+                "sd3_5_large",
+                "sd3_5_large",
+                &spec,
+                true,
+                &manifest,
+                "q4",
+                "text_to_image",
+                None,
+                None,
+                geometry,
+                false,
+                false,
+                false,
+                false,
+                Some(budget),
+                reserve_for(Some(budget)),
+                None,
+                0,
+                MemoryCacheState::Cold,
+                None,
+                Some(sd35_probe_contract("sd3_5_large", None)),
+                Some(SD35_REQUEST_EVIDENCE_REVISION),
+                None,
+            )
+        };
+        let reserve_gb = crate::vram_gate::ladder_reserve_gb(VramBudget {
+            free_gb: 23.0,
+            total_gb: 24.0,
+        });
+        assert!((reserve_gb - (1.0 + crate::vram_gate::LADDER_RESERVE_MARGIN_GB)).abs() < 1e-9);
+
+        let near_idle = evaluate(24.0, 23.0)
+            .expect("sealed SD3.5 receipt evaluates")
+            .expect("the resident envelope fits a near-idle 24 GB card");
+        assert_eq!(
+            near_idle.context.selection.strategy,
+            MemoryStrategy::Resident
+        );
+        assert_eq!(near_idle.admitted.reserve_gb, reserve_gb);
+        assert_eq!(
+            near_idle.admitted.available_gb, 23.0,
+            "a structural floor carries its pad and compares against the UNRESERVED pool"
+        );
+        let resident_threshold_gb = near_idle.admitted.needed_gb;
+        // 18 GiB of weights + 2 GiB headroom, graded as the live resident estimate (a measured-
+        // current subject carries no allowance).
+        assert_eq!(resident_threshold_gb, 20.0);
+
+        let above_resident = evaluate(24.0, resident_threshold_gb + 0.01)
+            .expect("sealed SD3.5 receipt evaluates")
+            .expect("the widened resident floor fits at its own threshold");
+        assert_eq!(
+            above_resident.context.selection.strategy,
+            MemoryStrategy::Resident
+        );
+        let below_resident = evaluate(24.0, resident_threshold_gb - 0.01)
+            .expect("sealed SD3.5 receipt evaluates")
+            .expect("the staged envelope still fits just under the resident one");
+        assert_eq!(
+            below_resident.context.selection.strategy,
+            MemoryStrategy::StagedResidency
+        );
+        let staged_threshold_gb = below_resident.admitted.needed_gb;
+        // The 10 GiB DiT + 2 GiB headroom staged envelope, widened by the recapture spread.
+        assert!(
+            (staged_threshold_gb
+                - 12.0 * (1.0 + crate::ladder_margin_policy::CANDLE_RECAPTURE_SPREAD))
+                .abs()
+                < 1e-6,
+            "{staged_threshold_gb}"
+        );
+        assert!(staged_threshold_gb < resident_threshold_gb);
+        assert_eq!(
+            below_resident.admitted.available_gb,
+            resident_threshold_gb - 0.01
+        );
+
+        let above_staged = evaluate(24.0, staged_threshold_gb + 0.01)
+            .expect("sealed SD3.5 receipt evaluates")
+            .expect("the widened staged floor fits at its own threshold");
+        assert_eq!(
+            above_staged.context.selection.strategy,
+            MemoryStrategy::StagedResidency
+        );
+        let no_fit = match evaluate(24.0, staged_threshold_gb - 0.01) {
+            Err(error) => error,
+            Ok(_) => panic!("a budget below the widened staged floor must refuse"),
+        };
+        assert!(no_fit.to_string().contains("no exact resident or staged"));
+    }
+
     /// The contract-only path (sc-22664): with NO anchor for the cell, the staged rung is the
     /// manifest staged row unscaled, and each deeper staged composition is the law's ratios over
     /// that row — the row decomposed against the contract's component bytes and scaled by the
@@ -6064,6 +6568,12 @@ mod tests {
             &contract,
         );
         let staged_row_bytes = (5.7 * BYTES_PER_GIB).ceil() as u64;
+        // A manifest-row floor carries the structural pad INSIDE its peak (sc-22664 D1): the law
+        // decomposes the raw row, and the pad is folded back over every rung's derivation.
+        let headroom_bytes = (crate::vram_gate::HEADROOM_GB * BYTES_PER_GIB).ceil() as u64;
+        let padded_row_bytes =
+            ((5.7 + crate::vram_gate::HEADROOM_GB) * BYTES_PER_GIB).ceil() as u64;
+        assert_eq!(padded_row_bytes, staged_row_bytes + headroom_bytes);
         let staged = rung_of(&candidates, MemoryStrategy::StagedResidency);
         let tiled = rung_of(&candidates, MemoryStrategy::BoundedDecode);
         let chunked = rung_of(&candidates, MemoryStrategy::BoundedAttention);
@@ -6079,8 +6589,8 @@ mod tests {
         let peak = |candidate: &EstimateCandidate| candidate.evidence.predicted_peak_bytes;
         assert_eq!(
             peak(staged),
-            staged_row_bytes,
-            "the staged rung is the row, unscaled"
+            padded_row_bytes,
+            "the staged rung is the padded row, unscaled"
         );
         let phases = |candidate: &EstimateCandidate| candidate.phase_peaks.expect("law-scaled");
         // The row is phase-blind, so it is read as every phase's peak…
@@ -6107,8 +6617,8 @@ mod tests {
             assert_eq!(phases(candidate).conditioning, staged_row_bytes);
             assert_eq!(
                 peak(candidate),
-                staged_row_bytes,
-                "{:?}",
+                padded_row_bytes,
+                "{:?}: the law-scaled row is still a manifest-row floor and carries the pad",
                 candidate.selection.strategy
             );
         }
@@ -6161,6 +6671,10 @@ mod tests {
                 free_gb: 7.0,
                 total_gb: 96.0,
             }),
+            reserve_for(Some(VramBudget {
+                free_gb: 7.0,
+                total_gb: 96.0,
+            })),
             Some(8.0),
             0,
             MemoryCacheState::Cold,
@@ -6221,8 +6735,9 @@ mod tests {
             reference_count: 0,
         };
         let resident_peak_bytes = (8.0 * BYTES_PER_GIB) as u64;
-        // The RAW staged row (sc-22664): the reserve is charged once, by the selector budget.
-        let staged_floor_bytes = (2.5 * BYTES_PER_GIB) as u64;
+        // The staged row plus its structural pad (sc-22664 D1): a manifest-row floor carries the
+        // pad and is compared against the unreserved pool.
+        let staged_floor_bytes = ((2.5 + crate::vram_gate::HEADROOM_GB) * BYTES_PER_GIB) as u64;
         assert_ne!(
             resident_peak_bytes, staged_floor_bytes,
             "the two floor sources must be distinguishable for the assertions below to bite"
@@ -6322,8 +6837,9 @@ mod tests {
             reference_count: 0,
         };
         let resident_peak_bytes = (8.0 * BYTES_PER_GIB) as u64;
-        // The RAW staged row (sc-22664): no headroom inside a ladder candidate.
-        let staged_floor_bytes = (2.5 * BYTES_PER_GIB) as u64;
+        // The staged row plus its structural pad (sc-22664 D1): the manifest-row floor carries the
+        // pad; only the anchor-derived candidate is reserve-free.
+        let staged_floor_bytes = ((2.5 + crate::vram_gate::HEADROOM_GB) * BYTES_PER_GIB) as u64;
         let mut contract = composition_probe_contract(true, true);
         contract.provider_id = "krea_2_turbo".to_owned();
         contract.load_shape = gen_core::LoadShape::EagerMaterialization;
@@ -6755,6 +7271,10 @@ mod tests {
                 free_gb,
                 total_gb: 96.0,
             }),
+            reserve_for(Some(VramBudget {
+                free_gb,
+                total_gb: 96.0,
+            })),
             Some(8.0),
             0,
             MemoryCacheState::Cold,
@@ -6828,6 +7348,10 @@ mod tests {
                     free_gb,
                     total_gb: 32.0,
                 }),
+                reserve_for(Some(VramBudget {
+                    free_gb,
+                    total_gb: 32.0,
+                })),
                 Some(8.0),
                 0,
                 MemoryCacheState::Cold,
@@ -6905,6 +7429,10 @@ mod tests {
                 free_gb: 32.0,
                 total_gb: 32.0,
             }),
+            reserve_for(Some(VramBudget {
+                free_gb: 32.0,
+                total_gb: 32.0,
+            })),
             Some(8.0),
             0,
             MemoryCacheState::Cold,
@@ -6952,6 +7480,10 @@ mod tests {
                 free_gb: 32.0,
                 total_gb: 32.0,
             }),
+            reserve_for(Some(VramBudget {
+                free_gb: 32.0,
+                total_gb: 32.0,
+            })),
             Some(8.0),
             0,
             MemoryCacheState::Cold,
@@ -6991,6 +7523,10 @@ mod tests {
                     free_gb: 32.0,
                     total_gb: 32.0,
                 }),
+                reserve_for(Some(VramBudget {
+                    free_gb: 32.0,
+                    total_gb: 32.0,
+                })),
                 Some(8.0),
                 0,
                 MemoryCacheState::Cold,
