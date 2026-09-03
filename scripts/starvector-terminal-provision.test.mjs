@@ -1,16 +1,56 @@
 import assert from "node:assert/strict";
 import { execFile as execFileCallback } from "node:child_process";
 import { createHash } from "node:crypto";
-import { mkdir, mkdtemp, readFile, symlink, writeFile } from "node:fs/promises";
+import { lstat, mkdir, mkdtemp, readFile, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { Readable } from "node:stream";
 import test from "node:test";
 import { promisify } from "node:util";
-import { assemblePreflight, assembleWeights, downloadExact, installCheckout } from "./starvector-terminal-provision.mjs";
+import { fileSha256 } from "./lib/file-sha256.mjs";
+import { assemblePreflight, assembleWeights, downloadExact, installCheckout, tree } from "./starvector-terminal-provision.mjs";
 
 const execFile = promisify(execFileCallback);
 const digest = (value) => createHash("sha256").update(value).digest("hex");
 const workflow = await readFile(".github/workflows/starvector-terminal-provision.yml", "utf8");
+
+test("file and tree identities stream exact bytes with bounded reads and portable ordering", async () => {
+  const chunks = [Buffer.from("large-file-"), Buffer.from("identity")];
+  let opened;
+  const streamed = await fileSha256("virtual-4995740600-byte-shard", {
+    openReadStream(file, options) {
+      opened = { file, highWaterMark: options.highWaterMark };
+      return Readable.from(chunks);
+    },
+  });
+  assert.equal(streamed, digest(Buffer.concat(chunks)));
+  assert.deepEqual(opened, { file: "virtual-4995740600-byte-shard", highWaterMark: 1024 * 1024 });
+
+  const root = await mkdtemp(path.join(tmpdir(), "starvector-provision-tree-"));
+  await mkdir(path.join(root, "nested"));
+  await writeFile(path.join(root, "z.bin"), "z");
+  await writeFile(path.join(root, "nested", "a.bin"), "a");
+  const calls = [];
+  const identity = await tree(root, root, async (file) => {
+    calls.push(file);
+    return digest(await readFile(file));
+  });
+  assert.deepEqual(identity.entries.map((entry) => entry.path), ["nested/a.bin", "z.bin"]);
+  assert.deepEqual(identity.entries.map((entry) => entry.sha256), [digest("a"), digest("z")]);
+  assert.equal(calls.length, 2);
+  assert.equal(identity.aggregate_sha256, digest(JSON.stringify(identity.entries)));
+});
+
+test("streaming file identity propagates read failures", async () => {
+  await assert.rejects(() => fileSha256("virtual-shard", {
+    openReadStream() {
+      return Readable.from((async function* () {
+        yield Buffer.from("partial");
+        throw new Error("stream read failed");
+      })());
+    },
+  }), /stream read failed/);
+});
 
 test("provision workflow is dispatch-only and never runs a model, service, campaign, or lease", () => {
   assert.match(workflow, /^\s+workflow_dispatch:/m);
@@ -41,6 +81,11 @@ test("preflight assembly requires and copies exactly two inventories plus four h
   await writeFile(path.join(source, "starvector-terminal-preflight.json"), JSON.stringify(index));
   await assemblePreflight(source, destination, revision); await assemblePreflight(source, destination, revision);
   assert.deepEqual(JSON.parse(await readFile(path.join(destination, "starvector-terminal-preflight.json"))), index);
+  const recovered = path.join(root, "recovered"), staleStaging = `${recovered}.staging-${process.pid}`;
+  await mkdir(staleStaging, { recursive: true }); await writeFile(path.join(staleStaging, "partial"), "partial");
+  await assemblePreflight(source, recovered, revision);
+  assert.deepEqual(JSON.parse(await readFile(path.join(recovered, "starvector-terminal-preflight.json"))), index);
+  assert.equal(await lstat(staleStaging).catch((error) => error.code === "ENOENT" ? null : Promise.reject(error)), null);
   const incomplete = structuredClone(index); incomplete.hook_logs.pop(); await writeFile(path.join(source, "starvector-terminal-preflight.json"), JSON.stringify(incomplete));
   await assert.rejects(() => assemblePreflight(source, path.join(root, "incomplete"), revision), /cardinality/);
   const duplicate = structuredClone(index); duplicate.hook_logs[3].backend = "mlx"; await writeFile(path.join(source, "starvector-terminal-preflight.json"), JSON.stringify(duplicate));

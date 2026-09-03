@@ -1,13 +1,13 @@
 import assert from "node:assert/strict";
 import { execFile as execFileCallback } from "node:child_process";
 import { createHash } from "node:crypto";
-import { mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { promisify } from "node:util";
-import { validateCorpusAssets, validateTerminalServiceClosure } from "./starvector-terminal-readiness.mjs";
-import { productServiceBackendEnv, productServiceBuildArgs, productServiceStateRoot } from "./starvector-terminal-product-service.mjs";
+import { treeIdentity, validateCorpusAssets, validateTerminalServiceClosure } from "./starvector-terminal-readiness.mjs";
+import { closureTreeHash, copyRegularTree, productServiceBackendEnv, productServiceBuildArgs, productServiceStateRoot } from "./starvector-terminal-product-service.mjs";
 
 const workflow = await readFile(".github/workflows/starvector-terminal.yml", "utf8");
 const readiness = await readFile(".github/workflows/starvector-terminal-readiness.yml", "utf8");
@@ -57,6 +57,25 @@ test("source-built product service enables the native backend for each campaign 
   assert.notEqual(productServiceStateRoot(path.join("tmp", "tuple")), path.join("tmp", "tuple", "product-service-state"));
 });
 
+test("product service streams copied closure identity and preserves portable ordering", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "starvector-service-copy-")), source = path.join(root, "source"), destination = path.join(root, "destination");
+  await mkdir(path.join(source, "nested"), { recursive: true });
+  await writeFile(path.join(source, "z.bin"), "z"); await writeFile(path.join(source, "nested", "a.bin"), "a");
+  const copied = [];
+  const digestFile = async (file) => { copied.push(path.relative(root, file).split(path.sep).join("/")); return hash(await readFile(file)); };
+  await copyRegularTree(source, destination, digestFile);
+  assert.equal(copied.length, 4);
+  const hashed = [];
+  const identity = await closureTreeHash(destination, async (file) => { hashed.push(file); return hash(await readFile(file)); });
+  const rows = [["nested/a.bin", 1, hash("a")], ["z.bin", 1, hash("z")]];
+  assert.equal(identity, hash(JSON.stringify(rows)));
+  assert.equal(hashed.length, 2);
+  await symlink(path.join(source, "z.bin"), path.join(source, "link"));
+  await assert.rejects(() => copyRegularTree(source, path.join(root, "rejected")), /weights closure rejects symlink/);
+  await symlink(path.join(destination, "z.bin"), path.join(destination, "link"));
+  await assert.rejects(() => closureTreeHash(destination), /weights closure copy contains symlink/);
+});
+
 test("readiness workflow is an identity-only dispatch on both campaign hosts", () => {
   assert.match(readiness, /^\s+workflow_dispatch:/m);
   assert.doesNotMatch(readiness, /^\s+(push|pull_request|schedule):/m);
@@ -96,6 +115,9 @@ test("readiness validates the complete service tree closure without materializin
   const weights = { models: { "starvector-1b": {}, "starvector-8b": {} }, terminal_service_closure: { app_data_relative_path: "app", app_data_sha256: await tree("app"), hf_home_relative_path: "hf", hf_home_sha256: await tree("hf") } };
   const result = await validateTerminalServiceClosure(root, weights);
   assert.equal(result.app_data.file_count, 1); assert.equal(result.hf_home.file_count, 1);
+  const streamed = [];
+  assert.equal((await treeIdentity(root, "hf", "terminal HF closure", async (file) => { streamed.push(file); return hash(await readFile(file)); })).sha256, weights.terminal_service_closure.hf_home_sha256);
+  assert.equal(streamed.length, 1);
   await writeFile(path.join(root, "hf", "weights.bin"), "drift");
   await assert.rejects(() => validateTerminalServiceClosure(root, weights), /service closure tree hash mismatch/);
 });
