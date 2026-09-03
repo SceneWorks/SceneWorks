@@ -9,7 +9,7 @@ test("route runner can only construct the typed project-owned vector_generate re
 });
 
 test("route refuses a count-only or incomplete terminal bundle before product calls", () => {
-  process.env.STARVECTOR_TERMINAL_PERMANENT_PIN = "8b560e461ccae796da93f288b119fec358884475";
+  process.env.STARVECTOR_TERMINAL_PERMANENT_PIN = "5a28cdd71f7f4343c0a758566afc6f9eb82d0afc";
   const records = (count, prefix) => Array.from({ length: count }, (_, index) => ({ case_id: `${prefix}-${index}`, projectId: "p", sourceAssetId: `a-${index}`, model: "starvector_8b" }));
   const bundle = { schema_version: 1, inference_revision: process.env.STARVECTOR_TERMINAL_PERMANENT_PIN, corpus_sha256: "a".repeat(64), tuples: { "candle-cuda:8b": { image_quality: records(120, "quality"), deterministic_parity: records(20, "parity"), lifecycle: records(4, "lifecycle"), limits: ["complete_root", "eos", "token_limit", "byte_limit", "wall_time_limit", "cancelled"].map((finish_reason, index) => ({ ...records(1, "limit")[0], case_id: `limit-${index}`, finish_reason })) } }, hostile_sanitizer: records(200, "hostile"), prompt_composition: records(60, "prompt") };
   assert.equal(validateBundle(bundle, "candle-cuda:8b"), bundle.tuples["candle-cuda:8b"]);

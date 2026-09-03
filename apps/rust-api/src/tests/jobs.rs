@@ -859,7 +859,7 @@ fn builtin_starvector_manifests_are_exact_native_image_to_svg_closures() {
             let candidate = &model["vector"]["deviceAdmission"]["terminalCandidate"];
             assert_eq!(
                 candidate["inferenceRevision"],
-                "8b560e461ccae796da93f288b119fec358884475"
+                "5a28cdd71f7f4343c0a758566afc6f9eb82d0afc"
             );
             assert_eq!(
                 candidate["corpusSha256"],
@@ -867,7 +867,7 @@ fn builtin_starvector_manifests_are_exact_native_image_to_svg_closures() {
             );
             assert_eq!(
                 candidate["productionClosure"]["sha256"],
-                "724eb50b31e48a5f978d58ebfba67561232bf96eb1f44eaf9e2dbab8bb732044"
+                "b01f0f6d4dcabb4a23a6fd56d022bd3be150bed01211cfffc02ec8a6908eedac"
             );
             assert_eq!(
                 candidate["productionClosure"]["entries"]

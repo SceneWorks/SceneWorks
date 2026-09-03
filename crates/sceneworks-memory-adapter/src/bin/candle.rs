@@ -25,6 +25,15 @@ const QWEN_PLAIN_EXECUTION_PATH: &str = "the Candle Qwen-Image base-only text-to
 /// The label the Qwen arm refuses a non-still geometry under (sc-18808); see
 /// [`still_calibration_label`].
 const QWEN_STILL_CALIBRATION: &str = "Candle Qwen base calibration";
+/// The Z-Image-Turbo provider (sc-15859). Registry id of `candle-gen-z-image`'s Turbo generator —
+/// the catalog's `z_image_turbo` route, NOT the base `z_image` provider, which has its own contract
+/// and its own plan cells.
+const Z_IMAGE_TURBO_ID: &str = "z_image_turbo";
+const Z_IMAGE_TURBO_PLAIN_EXECUTION_PATH: &str =
+    "the Candle Z-Image-Turbo base-only text-to-image path";
+/// The label the Z-Image-Turbo arm refuses a non-still geometry under; see
+/// [`still_calibration_label`].
+const Z_IMAGE_TURBO_STILL_CALIBRATION: &str = "Candle Z-Image-Turbo base calibration";
 const LTX25_ID: &str = "ltx_2_5_distilled";
 const LTX25_EXECUTION_PATH: &str =
     "the Candle LTX-2.5 text-to-video base recipe (including the official dev refinement LoRA)";
@@ -602,6 +611,7 @@ fn plain_execution_path(request: &Value) -> Result<&'static str, String> {
     match planned_provider(request)? {
         "qwen_image" => Ok(QWEN_PLAIN_EXECUTION_PATH),
         "krea_2_turbo" => Ok(KREA_PLAIN_EXECUTION_PATH),
+        "z_image_turbo" => Ok(Z_IMAGE_TURBO_PLAIN_EXECUTION_PATH),
         provider => Err(format!(
             "Candle five-rung calibration does not implement provider {provider:?}"
         )),
@@ -625,6 +635,7 @@ fn still_calibration_label(request: &Value) -> Result<&'static str, String> {
     match planned_provider(request)? {
         QWEN_ID => Ok(QWEN_STILL_CALIBRATION),
         KREA_ID => Ok(KREA_STILL_CALIBRATION),
+        Z_IMAGE_TURBO_ID => Ok(Z_IMAGE_TURBO_STILL_CALIBRATION),
         provider => Err(format!(
             "Candle five-rung calibration does not implement provider {provider:?}"
         )),
@@ -785,6 +796,18 @@ fn load_five_rung_generator(request: &Value) -> Result<LoadedFiveRungGenerator, 
                 "SCENEWORKS_KREA_ROOT",
                 protocol::KREA_REPOSITORY,
             ),
+            // sc-15859. The artifact family is `SceneWorks/z-image-turbo-mlx` (`Z_IMAGE_REPOSITORY`),
+            // the same per-tier `q4/ q8/ bf16/` re-host the MLX arm measures, so the env family is
+            // `SCENEWORKS_Z_IMAGE_*` on both adapters (docs/calibration-runbook.md, "Adapter
+            // environment").
+            "z_image_turbo" => (
+                Z_IMAGE_TURBO_ID,
+                Z_IMAGE_TURBO_PLAIN_EXECUTION_PATH,
+                "SCENEWORKS_Z_IMAGE_REPOSITORY",
+                "SCENEWORKS_Z_IMAGE_REVISION",
+                "SCENEWORKS_Z_IMAGE_ROOT",
+                protocol::Z_IMAGE_REPOSITORY,
+            ),
             provider => {
                 return Err(format!(
                     "Candle five-rung calibration does not implement provider {provider:?}"
@@ -815,9 +838,11 @@ fn load_five_rung_generator(request: &Value) -> Result<LoadedFiveRungGenerator, 
         // carry no quant at all (`Quant::None` — the same shape the worker's `tier_to_quant` uses).
         (KREA_ID, Some(quant)) => spec.with_quant(quant),
         (KREA_ID, None) => spec,
-        // Qwen packed Diffusers snapshots declare their device-format quantization in
-        // transformer/config.json. Passing LoadSpec.quant would request a second, unsupported
-        // runtime quantization pass instead of loading the packed artifact as authored.
+        // Qwen and Z-Image-Turbo packed Diffusers snapshots declare their device-format
+        // quantization in transformer/config.json (`snapshot_quant_tier` in candle-gen-z-image's
+        // memory_strategy.rs). Passing LoadSpec.quant would request a second, unsupported runtime
+        // quantization pass — both loaders reject it by name — instead of loading the packed
+        // artifact as authored.
         _ => spec,
     };
     let catalog =
@@ -1071,6 +1096,12 @@ fn run_five_rung_reference_loaded(
             "SC-15817 five-rung conformance measures exact per-rung memory, strategy identity, ",
             "and loadability; it intentionally remains gated because this run does not repeat ",
             "each sibling story's promotion-quality, negative-mutation, and lifecycle suite"
+        )
+    } else if provider_id == Z_IMAGE_TURBO_ID {
+        concat!(
+            "SC-15859 anchor capture measures exact per-phase memory and strategy identity for ",
+            "the Candle Z-Image-Turbo lane; it intentionally remains gated because this run does ",
+            "not repeat the full promotion-quality, negative-mutation, and lifecycle scenario suite"
         )
     } else {
         concat!(
@@ -1670,7 +1701,10 @@ fn routes_to_five_rung_reference(request: &Value) -> Result<bool, String> {
         .get("fixture")
         .and_then(Value::as_str)
         .is_some_and(|fixture| fixture.starts_with(FIVE_RUNG_FIXTURE_PREFIX));
-    Ok(is_five_rung_fixture || planned_provider(request)? == QWEN_ID)
+    // Qwen and Z-Image-Turbo have no inline arm at all, so every fixture on them is a five-rung
+    // reference capture regardless of its spelling.
+    let provider = planned_provider(request)?;
+    Ok(is_five_rung_fixture || provider == QWEN_ID || provider == Z_IMAGE_TURBO_ID)
 }
 
 fn run(request: &Value) -> Result<Value, String> {
@@ -2497,6 +2531,11 @@ mod tests {
         for (provider, label, fixture) in [
             (QWEN_ID, QWEN_STILL_CALIBRATION, "fresh-five-rung-unused"),
             (KREA_ID, KREA_STILL_CALIBRATION, "fresh-five-rung-unused"),
+            (
+                Z_IMAGE_TURBO_ID,
+                Z_IMAGE_TURBO_STILL_CALIBRATION,
+                "fresh-five-rung-unused",
+            ),
             // The inline Krea arm — a real shipped plan fixture, which the two rows above cannot
             // reach.
             (KREA_ID, KREA_STILL_CALIBRATION, "krea-q4-1024-seed42"),
@@ -2519,6 +2558,7 @@ mod tests {
         for (provider, label) in [
             (QWEN_ID, QWEN_STILL_CALIBRATION),
             (KREA_ID, KREA_STILL_CALIBRATION),
+            (Z_IMAGE_TURBO_ID, Z_IMAGE_TURBO_STILL_CALIBRATION),
         ] {
             for frames in [0_u64, 2, 97] {
                 let expected = format!("{label} requires geometry.frames == 1, got {frames}");
@@ -2560,6 +2600,12 @@ mod tests {
         for (provider, fixture) in [
             (KREA_ID, "fresh-five-rung-krea-q4-1024-seed16402-step2"),
             (QWEN_ID, "qwen-image-candle-q4-seed15817-step2"),
+            (
+                Z_IMAGE_TURBO_ID,
+                "fresh-five-rung-z-image-turbo-q4-1024-seed16402-step2",
+            ),
+            // No inline arm exists for Z-Image-Turbo, so an off-prefix fixture still routes here.
+            (Z_IMAGE_TURBO_ID, "z-image-turbo-any-other-fixture"),
         ] {
             let request = json!({
                 "planned": still_planned_case_with_fixture(provider, "resident", 1, fixture)
@@ -2575,7 +2621,7 @@ mod tests {
     /// passes it on both Candle labels, so the refusals above cannot be an unconditional error.
     #[test]
     fn the_candle_still_geometry_guard_is_not_a_blanket_refusal() {
-        for provider in [QWEN_ID, KREA_ID] {
+        for provider in [QWEN_ID, KREA_ID, Z_IMAGE_TURBO_ID] {
             let request = json!({ "planned": still_planned_case(provider, "resident", 1) });
             let label = still_calibration_label(&request).unwrap();
             protocol::validate_still_geometry(&request, label)

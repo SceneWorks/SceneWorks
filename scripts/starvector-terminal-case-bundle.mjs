@@ -9,7 +9,7 @@ import { isExecutedModule } from "./starvector-terminal-cli.mjs";
 
 const sha = (value) => createHash("sha256").update(value).digest("hex");
 const die = (message) => { throw new Error(`starvector terminal bundle: ${message}`); };
-const REV = "8b560e461ccae796da93f288b119fec358884475";
+const REV = "5a28cdd71f7f4343c0a758566afc6f9eb82d0afc";
 const json = async (file) => JSON.parse(await readFile(file, "utf8"));
 
 async function bindLocalFile(root, relative, expected, label) {
