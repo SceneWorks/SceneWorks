@@ -8,6 +8,7 @@ import path from "node:path";
 import { pathToFileURL } from "node:url";
 import { INFERENCE_REVISION, readPlanAndLock } from "./starvector-terminal-campaign.mjs";
 import { isExecutedModule } from "./starvector-terminal-cli.mjs";
+import { fileSha256 } from "./lib/file-sha256.mjs";
 
 const execFile = promisify(execFileCallback);
 const sha = (bytes) => createHash("sha256").update(bytes).digest("hex");
@@ -22,12 +23,12 @@ const stable = (value) => Array.isArray(value) ? `[${value.map(stable).join(",")
 // materializes the exact validator paths in its canonical evidence tree.
 const portableRelative = (relative) => relative.split("/").map((part) => part.replaceAll(":", "__colon__")).join("/");
 
-export async function inventory(root) {
+export async function inventory(root, digestFile = fileSha256) {
   const entries = [];
   for (const name of (await readdir(root, { recursive: true })).sort()) {
     const file = path.join(root, name); const info = await lstat(file);
     if (info.isSymbolicLink()) die(`inventory rejects symlink ${name}`);
-    if (info.isFile()) entries.push({ path: name.split(path.sep).join("/"), byte_size: info.size, sha256: sha(await readFile(file)) });
+    if (info.isFile()) entries.push({ path: name.split(path.sep).join("/"), byte_size: info.size, sha256: await digestFile(file) });
   }
   // Do not use locale collation here: a receipt produced on a Windows runner must
   // hash identically to one produced on macOS regardless of the host locale.

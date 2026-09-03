@@ -8,6 +8,7 @@ import { copyFile, lstat, mkdir, readFile, readdir, rm, writeFile } from "node:f
 import { promisify } from "node:util";
 import path from "node:path";
 import { isExecutedModule } from "./starvector-terminal-cli.mjs";
+import { fileSha256 } from "./lib/file-sha256.mjs";
 
 const execFile = promisify(execFileCallback);
 const sha = (value) => createHash("sha256").update(value).digest("hex");
@@ -38,18 +39,29 @@ async function waitHealthy(url) {
   }
   die("source-built API did not become ready");
 }
-async function copyRegularTree(source, destination) {
+export async function copyRegularTree(source, destination, digestFile = fileSha256) {
   const info = await lstat(source);
   if (info.isSymbolicLink()) die(`weights closure rejects symlink ${source}`);
   if (info.isDirectory()) {
     await mkdir(destination, { recursive: true });
-    for (const name of await readdir(source)) await copyRegularTree(path.join(source, name), path.join(destination, name));
+    for (const name of await readdir(source)) await copyRegularTree(path.join(source, name), path.join(destination, name), digestFile);
     return;
   }
   if (!info.isFile()) die(`weights closure rejects non-regular file ${source}`);
   await mkdir(path.dirname(destination), { recursive: true });
   await copyFile(source, destination);
-  if (sha(await readFile(source)) !== sha(await readFile(destination))) die(`weights closure copy hash drifted: ${source}`);
+  if (await digestFile(source) !== await digestFile(destination)) die(`weights closure copy hash drifted: ${source}`);
+}
+
+export async function closureTreeHash(root, digestFile = fileSha256) {
+  const rows = [];
+  for (const name of await readdir(root, { recursive: true })) {
+    const file = path.join(root, name), info = await lstat(file);
+    if (info.isSymbolicLink()) die(`weights closure copy contains symlink ${name}`);
+    if (info.isFile()) rows.push([name.split(path.sep).join("/"), info.size, await digestFile(file)]);
+  }
+  rows.sort((a, b) => a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0);
+  return sha(JSON.stringify(rows));
 }
 
 async function materializeOfflineWeights(weightsRoot, stateRoot) {
@@ -61,12 +73,7 @@ async function materializeOfflineWeights(weightsRoot, stateRoot) {
   const hfSource = path.join(weightsRoot, ...closure.hf_home_relative_path.split(/[\\/]/));
   await copyRegularTree(appSource, path.join(stateRoot, "data"));
   await copyRegularTree(hfSource, path.join(stateRoot, "hf"));
-  const hashTree = async (root) => {
-    const rows = [];
-    for (const name of await readdir(root, { recursive: true })) { const file = path.join(root, name), info = await lstat(file); if (info.isSymbolicLink()) die(`weights closure copy contains symlink ${name}`); if (info.isFile()) rows.push([name.split(path.sep).join("/"), info.size, sha(await readFile(file))]); }
-    rows.sort((a, b) => a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0); return sha(JSON.stringify(rows));
-  };
-  if (await hashTree(path.join(stateRoot, "data")) !== closure.app_data_sha256 || await hashTree(path.join(stateRoot, "hf")) !== closure.hf_home_sha256) die("materialized receipt/HF closure hash mismatch");
+  if (await closureTreeHash(path.join(stateRoot, "data")) !== closure.app_data_sha256 || await closureTreeHash(path.join(stateRoot, "hf")) !== closure.hf_home_sha256) die("materialized receipt/HF closure hash mismatch");
   const models = {};
   for (const [key, model] of Object.entries(manifest.models ?? {})) {
     if (!model?.relative_path || !model?.inventory_sha256) die("weights manifest model inventory is incomplete");

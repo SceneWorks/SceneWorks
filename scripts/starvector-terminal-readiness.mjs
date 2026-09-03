@@ -9,6 +9,7 @@ import { promisify } from "node:util";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 import { INFERENCE_REVISION, TUPLES, readPlanAndLock } from "./starvector-terminal-campaign.mjs";
+import { fileSha256 } from "./lib/file-sha256.mjs";
 import {
   validateInferencePreflight,
   validateMetricsEnvironment,
@@ -40,7 +41,7 @@ async function regularFile(root, relative, expected, label) {
   return { path: relative.split(/[\\/]/).join("/"), byte_size: info.size, sha256: expected };
 }
 
-async function treeIdentity(root, relative, label) {
+export async function treeIdentity(root, relative, label, digestFile = fileSha256) {
   const directory = path.join(root, ...safeRelative(relative, label));
   const rootInfo = await lstat(directory);
   if (!rootInfo.isDirectory() || rootInfo.isSymbolicLink()) die(`${label} must be a regular directory tree`);
@@ -49,7 +50,7 @@ async function treeIdentity(root, relative, label) {
     const file = path.join(directory, name); const info = await lstat(file);
     if (info.isSymbolicLink()) die(`${label} rejects symlink ${name}`);
     if (!info.isFile() && !info.isDirectory()) die(`${label} rejects non-regular entry ${name}`);
-    if (info.isFile()) rows.push([name.split(path.sep).join("/"), info.size, sha(await readFile(file))]);
+    if (info.isFile()) rows.push([name.split(path.sep).join("/"), info.size, await digestFile(file)]);
   }
   rows.sort((left, right) => left[0] < right[0] ? -1 : left[0] > right[0] ? 1 : 0);
   return { file_count: rows.length, sha256: sha(JSON.stringify(rows)) };

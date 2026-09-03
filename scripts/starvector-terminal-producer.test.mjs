@@ -100,6 +100,9 @@ test("tuple marker, bytewise inventory, and symlink policy prevent mixed evidenc
   await claimTupleMarker(root, permanentPin, "campaign", "mlx:1b");
   await assert.rejects(() => claimTupleMarker(root, permanentPin, "campaign", "mlx:1b"), /tuple already/);
   await mkdir(path.join(root, "nested")); await writeFile(path.join(root, "nested", "z"), "z"); await writeFile(path.join(root, "A"), "a");
-  const listed = await inventory(root); assert.deepEqual(listed.entries.map((entry) => entry.path), [...listed.entries.map((entry) => entry.path)].sort());
+  const hashed = [];
+  const listed = await inventory(root, async (file) => { hashed.push(file); return sha(await readFile(file)); });
+  assert.deepEqual(listed.entries.map((entry) => entry.path), [...listed.entries.map((entry) => entry.path)].sort());
+  assert.equal(hashed.length, 3);
   await symlink(path.join(root, "A"), path.join(root, "link")); await assert.rejects(() => inventory(root), /rejects symlink/);
 });

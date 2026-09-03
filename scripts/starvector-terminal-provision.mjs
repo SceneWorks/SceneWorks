@@ -9,6 +9,7 @@ import { promisify } from "node:util";
 import path from "node:path";
 import { inventory } from "./starvector-terminal-producer.mjs";
 import { isExecutedModule } from "./starvector-terminal-cli.mjs";
+import { fileSha256 } from "./lib/file-sha256.mjs";
 
 const execFile = promisify(execFileCallback);
 const SHA256 = /^[a-f0-9]{64}$/;
@@ -28,7 +29,7 @@ async function sourceFile(root, rootReal, file) {
   return targetInfo;
 }
 
-async function tree(root, symlinkBoundary = root) {
+export async function tree(root, symlinkBoundary = root, digestFile = fileSha256) {
   const entries = [];
   const rootInfo = await lstat(root).catch(() => null);
   if (!rootInfo?.isDirectory() || rootInfo.isSymbolicLink()) die(`regular source directory required: ${root}`);
@@ -37,7 +38,7 @@ async function tree(root, symlinkBoundary = root) {
     const file = path.join(root, name), info = await lstat(file);
     if (info.isDirectory()) continue;
     const regular = await sourceFile(symlinkBoundary, boundaryReal, file);
-    entries.push({ path: name.split(path.sep).join("/"), byte_size: regular.size, sha256: sha(await readFile(file)) });
+    entries.push({ path: name.split(path.sep).join("/"), byte_size: regular.size, sha256: await digestFile(file) });
   }
   entries.sort((left, right) => left.path < right.path ? -1 : left.path > right.path ? 1 : 0);
   if (entries.length === 0) die(`source tree is empty: ${root}`);
