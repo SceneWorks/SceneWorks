@@ -10,6 +10,7 @@ import path from "node:path";
 import { pathToFileURL } from "node:url";
 import { INFERENCE_REVISION, TUPLES, readPlanAndLock } from "./starvector-terminal-campaign.mjs";
 import { fileSha256 } from "./lib/file-sha256.mjs";
+import { sortTerminalTreeEntries, terminalTreeEntry, terminalTreeSha256 } from "./lib/terminal-tree-identity.mjs";
 import {
   validateInferencePreflight,
   validateMetricsEnvironment,
@@ -50,10 +51,10 @@ export async function treeIdentity(root, relative, label, digestFile = fileSha25
     const file = path.join(directory, name); const info = await lstat(file);
     if (info.isSymbolicLink()) die(`${label} rejects symlink ${name}`);
     if (!info.isFile() && !info.isDirectory()) die(`${label} rejects non-regular entry ${name}`);
-    if (info.isFile()) rows.push([name.split(path.sep).join("/"), info.size, await digestFile(file)]);
+    if (info.isFile()) rows.push(terminalTreeEntry(name.split(path.sep).join("/"), info.size, await digestFile(file)));
   }
-  rows.sort((left, right) => left[0] < right[0] ? -1 : left[0] > right[0] ? 1 : 0);
-  return { file_count: rows.length, sha256: sha(JSON.stringify(rows)) };
+  const canonicalRows = sortTerminalTreeEntries(rows);
+  return { file_count: canonicalRows.length, sha256: terminalTreeSha256(canonicalRows) };
 }
 
 export async function validateTerminalServiceClosure(weightsRoot, weights) {

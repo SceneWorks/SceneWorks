@@ -31,6 +31,7 @@ export const PRODUCTION_CLOSURE_PATHS = Object.freeze([
   "release/starvector-terminal-campaign-v1.json",
   "release/starvector-terminal-metrics-lock-v1.json",
   "scripts/lib/file-sha256.mjs",
+  "scripts/lib/terminal-tree-identity.mjs",
   "scripts/starvector-production-closure.mjs",
   "scripts/starvector-terminal-assets.mjs",
   "scripts/starvector-terminal-campaign.mjs",

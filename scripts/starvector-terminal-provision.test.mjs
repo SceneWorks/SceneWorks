@@ -1,14 +1,16 @@
 import assert from "node:assert/strict";
 import { execFile as execFileCallback } from "node:child_process";
 import { createHash } from "node:crypto";
-import { lstat, mkdir, mkdtemp, readFile, symlink, writeFile } from "node:fs/promises";
+import { lstat, mkdir, mkdtemp, readFile, rename, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { Readable } from "node:stream";
 import test from "node:test";
 import { promisify } from "node:util";
 import { fileSha256 } from "./lib/file-sha256.mjs";
+import { terminalTreeEntry, terminalTreeSha256 } from "./lib/terminal-tree-identity.mjs";
 import { assemblePreflight, assembleWeights, downloadExact, installCheckout, tree } from "./starvector-terminal-provision.mjs";
+import { validateTerminalServiceClosure } from "./starvector-terminal-readiness.mjs";
 
 const execFile = promisify(execFileCallback);
 const digest = (value) => createHash("sha256").update(value).digest("hex");
@@ -71,6 +73,26 @@ test("provision workflow is dispatch-only and never runs a model, service, campa
   assert.doesNotMatch(workflow, /STARVECTOR_PROMPT_PROVIDER: flux_diffusers/);
 });
 
+test("Windows metrics provisioning selects, uses, and verifies one explicit Python 3.12+ executable", () => {
+  const start = workflow.indexOf("- name: Provision pinned metric runtime and official checkpoints", workflow.indexOf("  provision-windows:"));
+  const end = workflow.indexOf("- name: Materialize the exact pinned 120-row corpus", start);
+  const step = workflow.slice(start, end);
+  assert.ok(start >= 0 && end > start);
+  assert.doesNotMatch(step, /\bpy\s+-3\.11\b/);
+  assert.match(step, /Get-Command python\.exe -All -CommandType Application/);
+  assert.match(step, /sys\.executable/);
+  assert.match(step, /version\":\[sys\.version_info\.major,sys\.version_info\.minor,sys\.version_info\.micro\]/);
+  assert.match(step, /\[IO\.Path\]::IsPathFullyQualified/);
+  assert.match(step, /\[int\]\$identity\.version\[1\] -ge 12/);
+  assert.match(step, /& \$bootstrapPython -m venv \$metricsRoot/);
+  assert.match(step, /if \(\$LASTEXITCODE -ne 0\) \{ throw 'failed to create the terminal metrics venv/);
+  assert.match(step, /Test-Path \$metricsPython -PathType Leaf/);
+  assert.match(step, /& \$metricsPython -c 'import json,sys/);
+  assert.match(step, /OrdinalIgnoreCase\.Equals\(\$expectedMetricsPython, \$observedMetricsPython\)/);
+  assert.match(step, /& \$metricsPython -m pip install/);
+  assert.match(step, /starvector-terminal-provision\.mjs metrics[^\n]*\$metricsRoot \$metricsPython/);
+});
+
 test("preflight assembly requires and copies exactly two inventories plus four hooks", async () => {
   const root = await mkdtemp(path.join(tmpdir(), "starvector-provision-preflight-")), source = path.join(root, "source"), destination = path.join(root, "destination");
   await mkdir(path.join(source, "inventory"), { recursive: true }); await mkdir(path.join(source, "hooks"), { recursive: true });
@@ -111,6 +133,36 @@ test("weights assembly inventories fixed model roots and copies only source-prod
   assert.deepEqual(Object.keys(manifest.models).sort(), ["starvector-1b", "starvector-8b"]);
   assert.equal(manifest.prompt_raster.provider_id, "candle_flux");
   assert.match(manifest.terminal_service_closure.app_data_sha256, /^[a-f0-9]{64}$/);
+  const weightsRoot = path.join(hostRoot, "weights");
+  const readiness = await validateTerminalServiceClosure(weightsRoot, manifest);
+  assert.equal(readiness.app_data.sha256, manifest.terminal_service_closure.app_data_sha256);
+  assert.equal(readiness.hf_home.sha256, manifest.terminal_service_closure.hf_home_sha256);
+  const assembledHf = await tree(path.join(weightsRoot, "service-closure", "hf-home"));
+  assert.equal(assembledHf.aggregate_sha256, manifest.terminal_service_closure.hf_home_sha256);
+  const first = assembledHf.entries[0];
+  for (const mutation of [
+    { ...first, path: `changed/${first.path}` },
+    { ...first, byte_size: first.byte_size + 1 },
+    { ...first, sha256: digest("changed") },
+  ]) {
+    const entries = assembledHf.entries.map((entry, index) => index === 0 ? mutation : entry);
+    assert.notEqual(terminalTreeSha256(entries), assembledHf.aggregate_sha256);
+  }
+  assert.throws(() => terminalTreeSha256([...assembledHf.entries].reverse()), /uniquely sorted/);
+  assert.throws(() => terminalTreeSha256(assembledHf.entries.map((entry) => [entry.path, entry.byte_size, entry.sha256])), /exactly \{path, byte_size, sha256\}/);
+  assert.deepEqual(terminalTreeEntry(first.path, first.byte_size, first.sha256), first);
+  const assembledFile = path.join(weightsRoot, "service-closure", "hf-home", ...first.path.split("/"));
+  const originalBytes = await readFile(assembledFile), renamedFile = `${assembledFile}.renamed`;
+  await rename(assembledFile, renamedFile);
+  await assert.rejects(() => validateTerminalServiceClosure(weightsRoot, manifest), /service closure tree hash mismatch/);
+  await rename(renamedFile, assembledFile);
+  await writeFile(assembledFile, Buffer.concat([originalBytes, Buffer.from("size-drift")]));
+  await assert.rejects(() => validateTerminalServiceClosure(weightsRoot, manifest), /service closure tree hash mismatch/);
+  const hashDrift = Buffer.from(originalBytes); hashDrift[0] ^= 0xff;
+  await writeFile(assembledFile, hashDrift);
+  await assert.rejects(() => validateTerminalServiceClosure(weightsRoot, manifest), /service closure tree hash mismatch/);
+  await writeFile(assembledFile, originalBytes);
+  await validateTerminalServiceClosure(weightsRoot, manifest);
   await assembleWeights({ hostRoot, serviceAppData: path.join(sources, "app"), serviceHfHome: path.join(sources, "hf"), promptProvider: "candle_flux", promptModel: "flux_schnell", promptRevision: revisions.flux });
   const missing = structuredClone(validReceipts); missing.receipts[2].resolvedFiles = ["q4/missing.bin"]; missing.resolvedFiles = ["q4/missing.bin"];
   await writeFile(path.join(sources, "app", "models", "receipt", ".sceneworks-download-complete.json"), JSON.stringify(missing));

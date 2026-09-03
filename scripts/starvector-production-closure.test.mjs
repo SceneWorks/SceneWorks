@@ -65,8 +65,8 @@ test("shape and tree checks detect every closure mutation", async () => {
 
 test("live manifest seals the exact frozen-tree production closure", async () => {
   const closure = await checkManifestProductionClosure();
-  assert.equal(closure.sha256, "f1aa5a3a056a18c54860fa3e93a38d5319d183fb7c866890a349c01f632c2404");
-  assert.equal(closure.entries.length, 29);
+  assert.equal(closure.sha256, "6c300cd26bdd7cc6fee60dc11a47188802a3b52eec1389ab789e082d71e958d3");
+  assert.equal(closure.entries.length, 30);
 });
 
 test("the sealed campaign worker and standalone worker keep the large-stack entry seam", async () => {

@@ -9,6 +9,7 @@ import { promisify } from "node:util";
 import path from "node:path";
 import { isExecutedModule } from "./starvector-terminal-cli.mjs";
 import { fileSha256 } from "./lib/file-sha256.mjs";
+import { sortTerminalTreeEntries, terminalTreeEntry, terminalTreeSha256 } from "./lib/terminal-tree-identity.mjs";
 
 const execFile = promisify(execFileCallback);
 const sha = (value) => createHash("sha256").update(value).digest("hex");
@@ -58,10 +59,10 @@ export async function closureTreeHash(root, digestFile = fileSha256) {
   for (const name of await readdir(root, { recursive: true })) {
     const file = path.join(root, name), info = await lstat(file);
     if (info.isSymbolicLink()) die(`weights closure copy contains symlink ${name}`);
-    if (info.isFile()) rows.push([name.split(path.sep).join("/"), info.size, await digestFile(file)]);
+    if (info.isFile()) rows.push(terminalTreeEntry(name.split(path.sep).join("/"), info.size, await digestFile(file)));
   }
-  rows.sort((a, b) => a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0);
-  return sha(JSON.stringify(rows));
+  const canonicalRows = sortTerminalTreeEntries(rows);
+  return terminalTreeSha256(canonicalRows);
 }
 
 async function materializeOfflineWeights(weightsRoot, stateRoot) {
