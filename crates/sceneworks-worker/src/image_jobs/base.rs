@@ -10268,6 +10268,8 @@ pub(super) async fn admit_sdxl_bespoke_memory(
         use_pid,
         false,
         budget,
+        // This lane gates on the raw probe (no reclaimable credit), so the reserve derives from it.
+        budget.map_or(0.0, crate::vram_gate::ladder_reserve_gb),
         predicted_peak,
         runtime_overlay_bytes,
         gen_core::MemoryCacheState::Cold,
@@ -10480,6 +10482,10 @@ mod candle_resolved_tier_contract_tests {
                     false,
                     false,
                     Some(crate::vram_gate::VramBudget {
+                        free_gb: 64.0,
+                        total_gb: 64.0,
+                    }),
+                    crate::vram_gate::ladder_reserve_gb(crate::vram_gate::VramBudget {
                         free_gb: 64.0,
                         total_gb: 64.0,
                     }),
@@ -11051,6 +11057,11 @@ async fn generate_candle_stream(
     let reclaimable_gb = crate::vram_gate::reclaimable_pool_gb(&settings.gpu_id);
     let budget =
         raw_budget.map(|budget| crate::vram_gate::with_reclaimable(budget, reclaimable_gb));
+    // sc-22664: the shared ladder's operational reserve is derived from the RAW probe, never from
+    // the reclaimable-credited `budget` above — the credit predicts the free the imminent evict
+    // will produce, so on a warm run `total − free` of the credited budget reads the card as
+    // nearly idle and the reserve would collapse to the bare margin (`vram_gate::ladder_reserve_gb`).
+    let shared_reserve_gb = raw_budget.map_or(0.0, crate::vram_gate::ladder_reserve_gb);
     // sc-12090: budget + name the tier the disk-probing resolver ACTUALLY landed on (`weights_dir`),
     // not a manifest re-derivation that ignores what's installed. `requested_tier_key` re-derived from
     // `mlx.quantize` with no disk check, so a q4-only install was budgeted (and rejected) against a q8
@@ -11482,6 +11493,7 @@ async fn generate_candle_stream(
         hires_fix.is_some(),
         hires_fix.is_some(),
         budget,
+        shared_reserve_gb,
         shared_predicted_peak_gb,
         shared_runtime_overlay_bytes,
         if reclaimable_gb > 0.0 {
@@ -11521,6 +11533,7 @@ async fn generate_candle_stream(
             false,
             false,
             budget,
+            shared_reserve_gb,
             shared_predicted_peak_gb,
             shared_runtime_overlay_bytes,
             if reclaimable_gb > 0.0 {
@@ -11538,13 +11551,40 @@ async fn generate_candle_stream(
     // load policy has to agree with.
     let mut receipt_priced_selection: Option<gen_core::MemoryStrategy> = None;
     if let Some(evaluation) = shared_memory {
+        if receipt_priced_route {
+            receipt_priced_selection = Some(evaluation.context.selection.strategy);
+        } else {
+            // sc-22664 (epic 22657 E7): the shared ladder's selection, with the rung the selector
+            // chose and the three phase peaks the law derived for it, so an OOM under this
+            // selection is attributable to the exact estimate that admitted it. The receipt-priced
+            // families emit their own exact-receipt event after the load (below) and are not
+            // duplicated here.
+            let telemetry = evaluation.selection_telemetry(engine_id, tier);
+            tracing::info!(
+                event = "image_memory_strategy_selected",
+                job_id = %job.id,
+                model = %request.model,
+                route = engine_id,
+                actual_tier = tier,
+                strategy = crate::candle_memory_strategy::strategy_label(
+                    evaluation.context.selection.strategy
+                ),
+                basis = evaluation.basis.as_key(),
+                predicted_peak_bytes = evaluation.context.predicted_peak_bytes,
+                conditioning_peak_bytes = evaluation.phase_peaks.map(|phases| phases.conditioning),
+                denoise_peak_bytes = evaluation.phase_peaks.map(|phases| phases.denoise),
+                decode_peak_bytes = evaluation.phase_peaks.map(|phases| phases.decode),
+                admitted_peak_gb = evaluation.admitted.needed_gb,
+                available_gb = evaluation.admitted.available_gb,
+                reserve_gb = evaluation.admitted.reserve_gb,
+                "shared memory-strategy ladder selected a candle strategy"
+            );
+            emit_event("image_memory_strategy_selected", telemetry);
+        }
         memory_strategy_selection = Some(evaluation.context.selection);
         generation_memory = evaluation.memory;
         adapted_peak_gb = Some(evaluation.predicted_peak_gb);
         ideogram_warm_staged = evaluation.warm_staged;
-        if receipt_priced_route {
-            receipt_priced_selection = Some(evaluation.context.selection.strategy);
-        }
         // Resident is the selector's conservative sentinel, not authority to reconfigure a request.
         // In particular, a later legacy low-VRAM decision may choose sequential residency; carrying a
         // Resident scope would then overwrite that request memory back to resident in configure_request.
@@ -11656,6 +11696,33 @@ async fn generate_candle_stream(
                 }
             } else if krea_turbo_ladder {
                 krea_unverified_resident_decision(needed, budget)
+            } else if sequential_capable
+                && memory_strategy_selection
+                    .is_some_and(|selection| selection.strategy.is_optimized())
+                && generation_memory.is_some_and(|memory| memory.stage_residency)
+            {
+                // sc-22664: the shared ladder SELECTED an optimized rung that ENGAGES staged
+                // residency for this request, priced per rung from the law against the
+                // reserve-charged budget, on a provider that supports sequential offload. That
+                // decision stands: the legacy resident-vs-free comparison (the padded
+                // `vramGbByTier` row) must not re-refuse it, and the Offload arm below already
+                // defers its sequential-overflow gate to a shared selection. The figures name the
+                // resident peak the ladder moved off, as the Krea Fits arm above does.
+                //
+                // A staging-FREE optimized selection (a bounded rung whose composition excludes
+                // `StagedResidency`) runs whole-model resident, so the resident-vs-free gate
+                // below still applies to it; and a provider without `supportsSequentialOffload`
+                // cannot run the staged shape the ladder chose, so it keeps its `TooBig` refusal
+                // rather than being sent down an Offload path it does not implement.
+                match (needed, budget) {
+                    (Some(needed_gb), Some(budget)) => {
+                        crate::vram_gate::FitDecision::Offload {
+                            needed_gb,
+                            available_gb: budget.free_gb,
+                        }
+                    }
+                    _ => crate::vram_gate::FitDecision::Unknown,
+                }
             } else {
                 crate::vram_gate::resolve_offload(
                     crate::vram_gate::fit_decision(needed, budget),

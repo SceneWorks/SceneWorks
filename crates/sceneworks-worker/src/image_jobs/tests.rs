@@ -26359,3 +26359,114 @@ fn the_guard_resident_base_table_mirrors_the_checkpoint_plan_family_tables() {
         );
     }
 }
+
+/// sc-22664 (epic 22657 E4/E7) wiring in `generate_candle_stream`, which no unit test can drive
+/// (it probes a GPU): the shared ladder's selection EMITS the `image_memory_strategy_selected`
+/// event built by `CandleMemoryEvaluation::selection_telemetry`; the ladder's reserve is derived
+/// from the RAW probe, never from the reclaimable-credited budget (review D2); and the legacy
+/// resident-vs-free gate defers to the ladder only for a selection that engages staged residency
+/// on a provider that supports sequential offload (review minor).
+///
+/// MUTATIONS: deleting the `emit_event("image_memory_strategy_selected", telemetry)` call reds
+/// the first block; deriving `shared_reserve_gb` from `budget` (or passing `budget` instead of
+/// `shared_reserve_gb`) reds the second; dropping `sequential_capable` or `stage_residency` from
+/// the deference arm reds the third.
+#[test]
+fn candle_stream_emits_the_ladder_selection_and_charges_the_reserve_from_the_raw_probe() {
+    let source = include_str!("base.rs");
+    let stream = source
+        .split_once("async fn generate_candle_stream(")
+        .expect("generate_candle_stream")
+        .1;
+
+    // E7: the non-receipt-priced branch of the shared selection builds the telemetry from the
+    // evaluation and emits it, before the selection is adopted.
+    let selection_block = stream
+        .split_once("if let Some(evaluation) = shared_memory {")
+        .expect("shared selection adoption")
+        .1
+        .split_once("memory_strategy_selection = Some(evaluation.context.selection);")
+        .expect("end of shared selection adoption")
+        .0;
+    assert!(
+        selection_block
+            .contains("let telemetry = evaluation.selection_telemetry(engine_id, tier);"),
+        "the shared selection must build its telemetry from the evaluation the selector produced"
+    );
+    assert!(
+        selection_block.contains("emit_event(\"image_memory_strategy_selected\", telemetry);"),
+        "the shared selection must EMIT the image_memory_strategy_selected event"
+    );
+    assert!(
+        selection_block.contains("event = \"image_memory_strategy_selected\""),
+        "the shared selection must also trace the event"
+    );
+    let emit_at = selection_block
+        .find("emit_event(\"image_memory_strategy_selected\"")
+        .expect("emission");
+    let receipt_branch = selection_block
+        .find("if receipt_priced_route {")
+        .expect("receipt-priced branch");
+    assert!(
+        receipt_branch < emit_at,
+        "the emission belongs to the non-receipt-priced else-branch: receipt-priced families \
+         emit their own exact-receipt event after the load"
+    );
+
+    // D2: the reserve is derived from `raw_budget`, defined before the credited `budget`, and
+    // both shared-ladder calls pass it explicitly right after the (credited) budget.
+    let reserve_at = stream
+        .find(
+            "let shared_reserve_gb = raw_budget.map_or(0.0, crate::vram_gate::ladder_reserve_gb);",
+        )
+        .expect("the shared reserve must be derived from the raw probe");
+    let credited_at = stream
+        .find(
+            "raw_budget.map(|budget| crate::vram_gate::with_reclaimable(budget, reclaimable_gb));",
+        )
+        .expect("the credited budget");
+    assert!(
+        credited_at < reserve_at,
+        "the reserve is derived after (and not from) the credit"
+    );
+    assert!(
+        !stream.contains("ladder_reserve_gb(budget"),
+        "the ladder reserve must never be derived from the reclaimable-credited budget"
+    );
+    let shared_calls = stream
+        .match_indices("crate::candle_memory_strategy::evaluate_shared_image(")
+        .count();
+    assert_eq!(
+        shared_calls, 2,
+        "the final-pass and hires first-pass shared selections"
+    );
+    assert_eq!(
+        stream
+            .match_indices("budget,\n        shared_reserve_gb,\n        shared_predicted_peak_gb,")
+            .count()
+            + stream
+                .match_indices(
+                    "budget,\n            shared_reserve_gb,\n            shared_predicted_peak_gb,"
+                )
+                .count(),
+        2,
+        "both shared selections must pass the raw-probe reserve explicitly after the budget"
+    );
+
+    // Deference arm: gated on sequential capability AND a staging-engaging selection.
+    let deference = stream
+        .split_once("} else if sequential_capable\n                && memory_strategy_selection")
+        .expect("the legacy gate's deference arm is gated on sequential_capable")
+        .1
+        .split_once("match (needed, budget) {")
+        .expect("deference arm body")
+        .0;
+    assert!(
+        deference.contains(".is_some_and(|selection| selection.strategy.is_optimized())"),
+        "the deference arm requires an optimized selection"
+    );
+    assert!(
+        deference.contains("generation_memory.is_some_and(|memory| memory.stage_residency)"),
+        "the deference arm requires the selection to ENGAGE staged residency"
+    );
+}
