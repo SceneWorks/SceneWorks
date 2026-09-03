@@ -1225,6 +1225,39 @@ pub(crate) fn anchor_component_bytes(
     }
 }
 
+/// The architecture facts the image derivation law scales its residues by (sc-22663, epic 22657
+/// E3), read off the live provider contract — the companion translation to
+/// [`anchor_component_bytes`], shared by both image lanes' anchor consumers.
+///
+/// WHY THE INPUT DIFFERS FROM ITS COMPANION'S, and why that is not an oversight to "fix" by
+/// matching signatures: [`anchor_component_bytes`] takes [`gen_core::MemoryAssetFacts`] because
+/// component bytes are a property of the resolved ASSET — the weight files this tier actually
+/// loads — and the contract already decomposes them there. Architecture facts are a property of
+/// the MODEL's topology (head count, head dim, block count, patch size, VAE scales, activation
+/// dtype width) and are identical across every tier and asset set of one model, so they belong on
+/// a CONTRACT-level block rather than in per-tier asset facts. sc-22667 adds that block to
+/// [`MemoryProviderContract`] upstream and reads it here, so the parameter is ALREADY the one the
+/// wired implementation needs — the leading underscore is temporary, the signature is not. The
+/// sibling story sc-22664 should converge on exactly this `&MemoryProviderContract` shape.
+///
+/// AT THIS PIN THE CONTRACT CARRIES NONE. `gen_core` at inference `670dc1f4` has no architecture
+/// block on [`gen_core::MemoryProviderContract`], so this returns
+/// [`sceneworks_core::memory_anchor::ArchitectureFacts::default()`] — every fact `None`, which the
+/// law documents as "leave the residue this fact would have scaled UNSCALED". That is the
+/// conservative direction and nothing more: with no facts the windowed and chunked rungs price at
+/// their unbounded residue rather than below it (core test
+/// `missing_facts_leave_residues_unscaled_and_never_shrink_the_estimate`), so a consumer wired
+/// through here is never optimistic about a bound it cannot see.
+///
+/// The terminal story of this epic (sc-22667) reads the real facts off the contract once the pin
+/// carries them; this function is the single seam that then changes, and the fixture tests that
+/// grade the law itself pass their facts explicitly rather than through it.
+pub(crate) fn architecture_facts_from_contract(
+    _contract: &MemoryProviderContract,
+) -> sceneworks_core::memory_anchor::ArchitectureFacts {
+    sceneworks_core::memory_anchor::ArchitectureFacts::default()
+}
+
 /// Derive per-phase peaks from the measured memory anchor for this
 /// `(model, tier, lane, transformer variant, decoder)` coordinate (sc-22507, epic 22505), for the
 /// exact regime of the candidate being graded.
