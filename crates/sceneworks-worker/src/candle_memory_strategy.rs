@@ -8037,4 +8037,625 @@ mod tests {
 
         assert_eq!(evidence.predicted_peak_bytes, 8 * 1024 + 512);
     }
+
+    // -------------------------------------------------------------------------------------
+    // sc-22667 (epic 22657 E6): the ONE falsification pass of the image derivation law on the
+    // candle five-rung batch path — z-image q4 and krea q4, derived vs measured per rung per phase.
+    // -------------------------------------------------------------------------------------
+
+    /// The committed measurement: `memory-candle-adapter run_batch` at inference a5f643ae on GPU 1
+    /// (one model load per tier, five rungs in canonical order), plus the staged rung alone in a
+    /// fresh process (`coldStagedControl`) and the LOADED provider contract's component bytes,
+    /// architecture facts and published rung parameters (`providerContract`), captured by the
+    /// same binary in the same process as the measurement.
+    const SC_22667_FALSIFICATION_FIXTURE: &str = include_str!(
+        "../../../docs/calibration/sc-22657/candle-five-rung-falsification-sc-22667.json"
+    );
+
+    /// Over-prediction bound per cell (derived / measured per phase), every rung, every phase.
+    /// Chosen from the fixture, not carried over from the prior art's 2.5: the binding cell is
+    /// z-image's window-1 DECODE at 3.93x (derived 4.51 GB over a measured 1.15 GB), the next
+    /// Krea's window-1 decode at 2.27x. Both are the same mechanism — the anchor's staged decode
+    /// still holds the DiT (z-image's tiled decode measures 4.50 GB two rungs earlier, 3.36 GB
+    /// above the window rung's 1.15, i.e. the q4 DiT), so the decode residue the law tiles
+    /// carries a transformer the window rung does not, and the 3/8 host-transfer band
+    /// (`DecodeTile::chunk_pixels`) keeps 3/8 of it. Every other cell sits at or below 1.47x.
+    /// Raising this past the data keeps the test green; lowering it under 3.93 turns it red on
+    /// that one cell.
+    const SC_22667_OVER_PREDICTION_BOUND: f64 = 4.0;
+
+    /// The under side a re-measure is allowed to sit at against the raw law: the lane's same-cell
+    /// recapture spread, which admission charges on top of every image-lane anchor derivation
+    /// (`ladder_margin_policy::CANDLE_RECAPTURE_SPREAD`). In the fixture the cold staged control
+    /// lands between -3.6% (z-image conditioning, 2.989 GB against the anchor's 3.097) and +0.04%
+    /// (z-image decode, 11.747 against 11.742), and the warm batch positions (rungs 4 and 5, after
+    /// three generations in the same process) carry a conditioning phase up to +1.0% over the
+    /// anchor (z-image 3.127 against 3.097).
+    const SC_22667_RECAPTURE_BOUND: f64 =
+        1.0 + crate::ladder_margin_policy::CANDLE_RECAPTURE_SPREAD;
+
+    /// FINDING (law): Krea's `bounded_decode` and `bounded_attention` rungs measure their tiled
+    /// DECODE at 9.239 GB against a derived 8.706 (measured / derived 1.061 on both cells). The
+    /// prior art skipped Krea's tiled decode phase outright ("the decode phase itself is asserted
+    /// where the anchor's composition holds"); this pins it instead — the under-scaling must not
+    /// deepen — and the rung's admission PEAK (its denoise, 15.10 GB derived over 14.91 measured)
+    /// is asserted to bracket the measured overall like every other rung's.
+    const SC_22667_KREA_TILED_DECODE_UNDERSCALE_BOUND: f64 = 1.07;
+
+    /// Why a pinned cell sits under the raw law. Each class is asserted by its own witness, so a
+    /// cell cannot be pinned without saying what it is.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    enum Sc22667Under {
+        /// A re-measure inside the recapture spread: a conditioning phase in a warm batch
+        /// position (rungs 4 and 5), or the cold same-cell recapture of the staged anchor itself
+        /// (z-image decode, 11.747 GB against the anchor's 11.742).
+        WithinRecaptureSpread,
+        /// z-image q4 window-1 DENOISE: derived 0.378 GB against a measured 2.993 (7.9x under).
+        /// The contract's `transformer_bytes` (7.31 GB) is the q4 `transformer/` DIRECTORY, and
+        /// gen-core's `safetensors_dir_bytes` (weightsmeta.rs at a5f643ae) recurses into the
+        /// `.candle-device-format-v1/` cache it holds — 3.85 GB of `*.q4_1.safetensors` blocks on
+        /// top of the 3.47 GB `model.safetensors`. Under that DiT the anchor's staged denoise
+        /// residue (8.05 − 7.31 = 0.74 GB) is smaller than the full score tensor the law separates
+        /// out (30 heads x 4608² x 2 B = 1.27 GB), the non-score residue collapses to zero, and the
+        /// window rung prices at one block plus the chunk. WITNESS: the resident rung holds every
+        /// component in every phase, and its measured conditioning (7.19 GB) is BELOW the
+        /// contract's component total (9.99 GB) — a contract that over-reports. Krea, whose
+        /// `loaded_asset_facts` prices the DiT from its own file, passes the same witness.
+        /// Upstream (inference gen-core / candle-gen-z-image), not this repo; the pin flips red
+        /// the day the facts are fixed so it is removed rather than forgotten.
+        ContractOverReportsTransformer,
+        /// See `SC_22667_KREA_TILED_DECODE_UNDERSCALE_BOUND`.
+        KreaTiledDecodeUnderscaled,
+    }
+
+    /// The cells where the RAW law (no admission margin) prices under the measurement, as
+    /// `(model, rung, phase, why)`, in grading order. See the headline test's FINDINGS. A cell
+    /// that leaves this list (fixed) or joins it (regressed) fails the test either way.
+    const SC_22667_RAW_UNDER_PREDICTIONS: &[(&str, &str, &str, Sc22667Under)] = &[
+        (
+            "z_image_turbo",
+            "staged_residency",
+            "decode",
+            Sc22667Under::WithinRecaptureSpread,
+        ),
+        (
+            "z_image_turbo",
+            "bounded_attention",
+            "conditioning",
+            Sc22667Under::WithinRecaptureSpread,
+        ),
+        (
+            "z_image_turbo",
+            "bounded_transformer_residency",
+            "conditioning",
+            Sc22667Under::WithinRecaptureSpread,
+        ),
+        (
+            "z_image_turbo",
+            "bounded_transformer_residency",
+            "denoise",
+            Sc22667Under::ContractOverReportsTransformer,
+        ),
+        (
+            "krea_2_turbo",
+            "bounded_decode",
+            "decode",
+            Sc22667Under::KreaTiledDecodeUnderscaled,
+        ),
+        (
+            "krea_2_turbo",
+            "bounded_attention",
+            "conditioning",
+            Sc22667Under::WithinRecaptureSpread,
+        ),
+        (
+            "krea_2_turbo",
+            "bounded_attention",
+            "decode",
+            Sc22667Under::KreaTiledDecodeUnderscaled,
+        ),
+    ];
+
+    fn sc_22667_strategy(key: &str) -> MemoryStrategy {
+        match key {
+            "resident" => MemoryStrategy::Resident,
+            "staged_residency" => MemoryStrategy::StagedResidency,
+            "bounded_decode" => MemoryStrategy::BoundedDecode,
+            "bounded_attention" => MemoryStrategy::BoundedAttention,
+            "bounded_transformer_residency" => MemoryStrategy::BoundedTransformerResidency,
+            other => panic!("unknown rung key {other:?} in the sc-22667 fixture"),
+        }
+    }
+
+    fn sc_22667_strategy_key(strategy: MemoryStrategy) -> &'static str {
+        match strategy {
+            MemoryStrategy::Resident => "resident",
+            MemoryStrategy::StagedResidency => "staged_residency",
+            MemoryStrategy::BoundedDecode => "bounded_decode",
+            MemoryStrategy::BoundedAttention => "bounded_attention",
+            MemoryStrategy::BoundedTransformerResidency => "bounded_transformer_residency",
+        }
+    }
+
+    fn sc_22667_u32s(value: &Value) -> Vec<u32> {
+        value
+            .as_array()
+            .expect("an array of integers")
+            .iter()
+            .map(|entry| u32::try_from(entry.as_u64().expect("an integer")).expect("a u32"))
+            .collect()
+    }
+
+    fn sc_22667_opt_u32(value: &Value) -> Option<u32> {
+        value
+            .as_u64()
+            .map(|entry| u32::try_from(entry).expect("a u32"))
+    }
+
+    /// One measured rung of a fragment: `[conditioning, denoise, decode]` device deltas in bytes.
+    fn sc_22667_measured(fragment: &Value) -> [u64; 3] {
+        let phase = |name: &str| {
+            fragment["observedMemory"][name]["activeBytes"]
+                .as_u64()
+                .unwrap_or_else(|| panic!("observedMemory.{name}.activeBytes"))
+        };
+        [phase("conditioning"), phase("denoise"), phase("decode")]
+    }
+
+    /// The loaded provider contract, rebuilt from what the adapter recorded off the pinned
+    /// provider in the measuring process: its published rung ranges, load shape, calibration
+    /// identity, asset facts and architecture facts. The twin is checked against the recording —
+    /// every rung's engaged composition must reproduce the one the provider itself measured under
+    /// — so the derived side prices the SAME composition the measured side ran.
+    fn sc_22667_contract(tier: &Value) -> gen_core::MemoryProviderContract {
+        let recorded = &tier["providerContract"];
+        let provider_id = recorded["providerId"].as_str().expect("providerId");
+        let mut contract = gen_core::MemoryProviderContract::compatibility_default(
+            provider_id,
+            gen_core::MemoryBackendRealization::CandleCuda {
+                device_residency: true,
+                host_backed_weights: true,
+                host_to_device_block_materialization: true,
+                block_materialization: gen_core::MemoryWindowMaterialization::DeviceFormatTransfer,
+            },
+        );
+        contract.strategies = recorded["strategies"]
+            .as_array()
+            .expect("providerContract.strategies")
+            .iter()
+            .map(|capability| {
+                let ranges = &capability["parameters"];
+                assert_eq!(
+                    capability["support"].as_str(),
+                    Some("Implemented"),
+                    "{provider_id}: the fixture measured every rung, so every rung is implemented"
+                );
+                gen_core::MemoryStrategyCapability {
+                    strategy: sc_22667_strategy(capability["strategy"].as_str().expect("rung")),
+                    support: gen_core::MemoryStrategySupport::Implemented,
+                    parameters: gen_core::MemoryParameterRanges {
+                        decode_tile_edges: sc_22667_u32s(&ranges["decodeTileEdges"]),
+                        decode_overlaps: sc_22667_u32s(&ranges["decodeOverlaps"]),
+                        attention_chunk_sizes: sc_22667_u32s(&ranges["attentionChunkSizes"]),
+                        transformer_window_sizes: sc_22667_u32s(&ranges["transformerWindowSizes"]),
+                        ..Default::default()
+                    },
+                }
+            })
+            .collect();
+        assert_eq!(
+            recorded["loadShape"].as_str(),
+            Some("deferred_materialization")
+        );
+        contract.load_shape = gen_core::LoadShape::DeferredMaterialization;
+        contract.calibration = Some(gen_core::MemoryCalibrationIdentity::new(
+            recorded["calibrationFingerprint"]
+                .as_str()
+                .expect("calibrationFingerprint"),
+            gen_core::LoadShape::DeferredMaterialization,
+        ));
+        contract.lifecycle = gen_core::MemoryLifecycleCapabilities {
+            phases: vec![
+                gen_core::MemoryPhase::Conditioning,
+                gen_core::MemoryPhase::Denoise,
+                gen_core::MemoryPhase::Decode,
+            ],
+            synchronized_phase_release: true,
+            decode_tiling: true,
+            attention_chunking: true,
+            transformer_window_materialization: true,
+        };
+        // Both providers bind their deeper rungs to staging in the same request (candle-gen-z-image
+        // `memory_strategy.rs`, candle-gen-krea `lib.rs` at the pin); the composition check below
+        // is what holds this twin to the recording.
+        contract.additional_prerequisites = [
+            MemoryStrategy::BoundedDecode,
+            MemoryStrategy::BoundedAttention,
+            MemoryStrategy::BoundedTransformerResidency,
+        ]
+        .into_iter()
+        .map(|strategy| {
+            (
+                strategy,
+                gen_core::MemoryStrategyPrerequisite::Rung {
+                    rung: MemoryStrategy::StagedResidency,
+                    scope: gen_core::MemoryPrerequisiteScope::EngagedInSameRequest,
+                },
+            )
+        })
+        .collect();
+        let assets = &recorded["assetFacts"];
+        let bytes = |name: &str| {
+            assets[name]
+                .as_u64()
+                .unwrap_or_else(|| panic!("assetFacts.{name}"))
+        };
+        contract.asset_facts = gen_core::MemoryAssetFacts {
+            base_bytes: bytes("baseBytes"),
+            conditioning_bytes: bytes("conditioningBytes"),
+            transformer_bytes: bytes("transformerBytes"),
+            decoder_bytes: bytes("decoderBytes"),
+            overlay_bytes: bytes("overlayBytes"),
+        };
+        let facts = &recorded["architectureFacts"];
+        contract.architecture_facts = gen_core::MemoryArchitectureFacts {
+            attention_heads: sc_22667_opt_u32(&facts["attentionHeads"]),
+            head_dim: sc_22667_opt_u32(&facts["headDim"]),
+            transformer_blocks: sc_22667_opt_u32(&facts["transformerBlocks"]),
+            patch_size: sc_22667_opt_u32(&facts["patchSize"]),
+            latent_channels: sc_22667_opt_u32(&facts["latentChannels"]),
+            vae_spatial_scale: sc_22667_opt_u32(&facts["vaeSpatialScale"]),
+            vae_temporal_scale: sc_22667_opt_u32(&facts["vaeTemporalScale"]),
+            activation_dtype_width: sc_22667_opt_u32(&facts["activationDtypeWidth"]),
+        };
+        for capability in recorded["strategies"].as_array().unwrap() {
+            let strategy = sc_22667_strategy(capability["strategy"].as_str().unwrap());
+            let engaged: Vec<&str> = contract
+                .engaged_composition(strategy)
+                .into_iter()
+                .map(sc_22667_strategy_key)
+                .collect();
+            let recorded: Vec<&str> = capability["engagedRungs"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|rung| rung.as_str().unwrap())
+                .collect();
+            assert_eq!(
+                engaged, recorded,
+                "{provider_id} {strategy:?}: the rebuilt contract must compose the rung exactly as \
+                 the pinned provider measured it"
+            );
+        }
+        contract
+    }
+
+    /// The packaged store with `model_id`'s candle rows re-stamped at the loader-closure digest
+    /// the pin currently declares — the construction and rationale of `z_image_live_anchor_store`
+    /// and `vram_gate::tests::krea_live_anchor_store`, for either model.
+    fn sc_22667_live_anchor_store(
+        model_id: &str,
+    ) -> sceneworks_core::memory_anchor::MemoryAnchorStore {
+        use sceneworks_core::memory_anchor::AnchorBackend;
+
+        let store = sceneworks_core::memory_anchor::packaged_memory_anchors()
+            .expect("the packaged anchor store")
+            .clone();
+        let digest = sceneworks_core::memory_anchor::packaged_anchor_loader_closures()
+            .and_then(|closures| closures.digest_for(model_id, AnchorBackend::Candle))
+            .unwrap_or_else(|| panic!("{model_id}:candle must declare a loader closure"))
+            .to_owned();
+        let anchors = store
+            .anchors
+            .into_iter()
+            .map(|mut anchor| {
+                if anchor.model_id == model_id && anchor.backend == AnchorBackend::Candle {
+                    anchor.source.loader_closure_digest = digest.clone();
+                }
+                anchor
+            })
+            .collect();
+        sceneworks_core::memory_anchor::MemoryAnchorStore { anchors, ..store }
+    }
+
+    /// The derived side of the falsification, per rung: `[conditioning, denoise, decode]` bytes
+    /// priced through the PRODUCTION seam — `synthesize_estimate_floors` with the packaged anchor
+    /// store, `architecture_facts_from_contract` and `anchor_component_bytes` on the recorded
+    /// contract, `estimate_floor_parameters` picking the rung parameters — so every deeper rung
+    /// is what the worker would submit for this cell. The resident rung, which the ladder never
+    /// synthesizes (its live estimate is submitted on every request), is priced through the same
+    /// law under `RequestRegime::resident()` from the same anchor, components and facts.
+    fn sc_22667_derived(
+        tier: &Value,
+        contract: &gen_core::MemoryProviderContract,
+        measured_overall: [u64; 2],
+    ) -> Vec<(MemoryStrategy, [u64; 3])> {
+        use sceneworks_core::memory_anchor::{AnchorBackend, ImageDeriveRequest};
+
+        let model_id = tier["provider"].as_str().expect("provider");
+        let geometry = MemoryGeometry {
+            width: tier["geometry"]["width"].as_u64().unwrap() as u32,
+            height: tier["geometry"]["height"].as_u64().unwrap() as u32,
+            batch: 1,
+            frames: 1,
+            reference_count: 0,
+        };
+        let store = sc_22667_live_anchor_store(model_id);
+        let anchors = CandleLadderAnchors {
+            store: Some(&store),
+            facts: crate::video_admission::architecture_facts_from_contract(contract),
+        };
+        // The manifest rows only feed the floors the ladder falls back to WITHOUT an anchor; with
+        // the packaged anchor present every rung's phase peaks come from the law. They are stated
+        // as the measured resident / staged overall peaks so the fixture carries no invented row.
+        let [resident_overall, staged_overall] = measured_overall;
+        let manifest = json!({
+            "candle": {
+                "vramGbByTier": { "q4": resident_overall as f64 / BYTES_PER_GIB },
+                "vramMeasuredPixels": u64::from(geometry.width) * u64::from(geometry.height),
+                "sequentialPeakGb": { "q4": staged_overall as f64 / BYTES_PER_GIB },
+                "supportsSequentialOffload": true
+            }
+        })
+        .as_object()
+        .unwrap()
+        .clone();
+        let floors = synthesize_estimate_floors(
+            model_id,
+            model_id,
+            contract,
+            &manifest,
+            "q4",
+            numeric_tier(model_id, "q4").expect("q4 tier"),
+            &request_mode(model_id, "text_to_image"),
+            None,
+            geometry,
+            resident_overall,
+            0,
+            "sc-22667-e6-falsification",
+            anchors,
+        );
+        let anchor = store
+            .image_anchor_for(model_id, AnchorBackend::Candle, "q4")
+            .unwrap_or_else(|| panic!("{model_id}:candle:q4 must be packaged"));
+        let components = crate::video_admission::anchor_component_bytes(contract.asset_facts);
+        let resident_regime = request_regime(
+            &[MemoryStrategy::Resident],
+            &gen_core::MemoryStrategyParameters::default(),
+        )
+        .expect("the resident regime");
+        let resident = anchor
+            .derive_phase_peaks(
+                &ImageDeriveRequest {
+                    width: geometry.width,
+                    height: geometry.height,
+                    batch: 1,
+                    conditioning_tokens: None,
+                    regime: resident_regime,
+                },
+                components,
+                anchors.facts,
+            )
+            .expect("the resident rung derives");
+        let mut derived = vec![(
+            MemoryStrategy::Resident,
+            [resident.conditioning, resident.denoise, resident.decode],
+        )];
+        for strategy in MemoryStrategy::ALL.into_iter().filter(|s| s.is_optimized()) {
+            let candidate = rung_of(&floors, strategy);
+            assert!(
+                matches!(
+                    candidate.basis,
+                    crate::memory_strategy::CandidateBasis::EstimateAnchorDerived {
+                        lane: crate::memory_strategy::AnchorDerivationLane::Image
+                    }
+                ),
+                "{model_id} {strategy:?}: the ladder must price this rung through the law, got {:?}",
+                candidate.basis
+            );
+            let phases = candidate
+                .phase_peaks
+                .unwrap_or_else(|| panic!("{model_id} {strategy:?} carries its derived phases"));
+            derived.push((
+                strategy,
+                [phases.conditioning, phases.denoise, phases.decode],
+            ));
+        }
+        derived
+    }
+
+    /// E6, falsified once. For both tiers, every rung, every phase: the law's over-prediction is
+    /// bounded by `SC_22667_OVER_PREDICTION_BOUND`; every rung's derived admission PEAK brackets
+    /// its measured overall; and the raw law prices under the measurement in EXACTLY the pinned
+    /// cells (`SC_22667_RAW_UNDER_PREDICTIONS`), each held to its class's witness. The staged rung
+    /// is graded against its cold single-process control (the shape the packaged anchor was
+    /// captured in); the batch's own staged row is graded as the carry-over it is.
+    ///
+    /// FINDING (batch path): rung 2 (`staged_residency`) runs second in a process whose
+    /// `resident` rung just left the deferred-materialization DiT on the device, so its
+    /// CONDITIONING phase carries that residency — z-image 6.95 GB and Krea 12.29 GB in the batch
+    /// against 2.99 / 3.69 GB cold (Krea's staged DECODE likewise, 24.47 vs 22.35 GB). The law
+    /// prices a request's own residency, not the previous request's leftovers, and the packaged
+    /// anchors were measured cold, so the batch staged row is graded against the cold control and
+    /// its carry-over is asserted to be exactly that: above the recapture spread, at most the
+    /// DiT + VAE the resident rung could have left resident (plus the spread) — Krea's 8.60 GB
+    /// carry sits 80 MB above its 8.52 GB DiT alone.
+    #[test]
+    fn sc_22667_candle_five_rung_batch_is_bracketed_by_the_derivation_law() {
+        let fixture: Value =
+            serde_json::from_str(SC_22667_FALSIFICATION_FIXTURE).expect("the fixture parses");
+        assert_eq!(
+            fixture["inferencePin"].as_str(),
+            Some("a5f643ae58a4ed81e6be8280afbf29750da5ffe2")
+        );
+        let phases = ["conditioning", "denoise", "decode"];
+        let mut graded_cells = 0usize;
+        let mut raw_under: Vec<(&str, &str, &str)> = Vec::new();
+        for tier in fixture["tiers"].as_array().expect("tiers") {
+            let model_id = tier["provider"].as_str().unwrap();
+            let fragments = tier["batch"]["fragments"]
+                .as_array()
+                .expect("five fragments");
+            assert_eq!(
+                fragments.len(),
+                5,
+                "{model_id}: one canonical five-rung batch"
+            );
+            assert_eq!(tier["batch"]["modelLoads"].as_u64(), Some(1));
+            let measured: Vec<(MemoryStrategy, [u64; 3])> = fragments
+                .iter()
+                .map(|fragment| {
+                    (
+                        sc_22667_strategy(fragment["strategy"]["rung"].as_str().unwrap()),
+                        sc_22667_measured(fragment),
+                    )
+                })
+                .collect();
+            let rungs: Vec<MemoryStrategy> = measured.iter().map(|(s, _)| *s).collect();
+            assert_eq!(
+                rungs,
+                MemoryStrategy::ALL.to_vec(),
+                "{model_id}: canonical rung order"
+            );
+            let cold_staged = sc_22667_measured(&tier["coldStagedControl"]["fragment"]);
+            assert_eq!(
+                tier["coldStagedControl"]["fragment"]["strategy"]["rung"].as_str(),
+                Some("staged_residency")
+            );
+            let contract = sc_22667_contract(tier);
+            let overall = |bytes: [u64; 3]| bytes.into_iter().max().unwrap();
+            let derived = sc_22667_derived(
+                tier,
+                &contract,
+                [overall(measured[0].1), overall(measured[1].1)],
+            );
+            let measured_resident_conditioning = measured[0].1[0];
+            for ((strategy, measured_bytes), (derived_strategy, derived_bytes)) in
+                measured.iter().zip(&derived)
+            {
+                assert_eq!(strategy, derived_strategy);
+                let rung = sc_22667_strategy_key(*strategy);
+                let batch_staged = *strategy == MemoryStrategy::StagedResidency;
+                let graded = if batch_staged {
+                    cold_staged
+                } else {
+                    *measured_bytes
+                };
+                // Admission compares the rung's PEAK: it brackets the measured overall everywhere
+                // — the same-cell staged recapture inside the spread admission charges (z-image
+                // decode re-measures 5 MB over its own anchor), every other rung raw.
+                let peak_bound = if batch_staged {
+                    SC_22667_RECAPTURE_BOUND
+                } else {
+                    1.0
+                };
+                assert!(
+                    overall(*derived_bytes) as f64 * peak_bound >= overall(graded) as f64,
+                    "{model_id} {rung}: derived peak {} under-predicts the measured overall {}",
+                    overall(*derived_bytes),
+                    overall(graded)
+                );
+                for (phase, (measured_phase, derived_phase)) in
+                    phases.iter().zip(graded.iter().zip(derived_bytes))
+                {
+                    let ratio = *derived_phase as f64 / *measured_phase as f64;
+                    eprintln!(
+                        "sc-22667 {model_id} {rung} {phase}: measured {:.3} GB derived {:.3} GB \
+                         ratio {ratio:.3}{}",
+                        *measured_phase as f64 / 1e9,
+                        *derived_phase as f64 / 1e9,
+                        if batch_staged { " (cold control)" } else { "" }
+                    );
+                    assert!(
+                        ratio <= SC_22667_OVER_PREDICTION_BOUND,
+                        "{model_id} {rung} {phase}: derived {derived_phase} is {ratio:.3}x the \
+                         measured {measured_phase}, over the {SC_22667_OVER_PREDICTION_BOUND}x bound"
+                    );
+                    if derived_phase < measured_phase {
+                        raw_under.push((model_id, rung, phase));
+                        let class = SC_22667_RAW_UNDER_PREDICTIONS
+                            .iter()
+                            .find(|(m, r, p, _)| (*m, *r, *p) == (model_id, rung, *phase))
+                            .map(|(_, _, _, class)| *class)
+                            .unwrap_or_else(|| {
+                                panic!(
+                                    "{model_id} {rung} {phase}: derived {derived_phase} \
+                                     under-predicts the measured {measured_phase} and is not a \
+                                     pinned finding"
+                                )
+                            });
+                        match class {
+                            Sc22667Under::WithinRecaptureSpread => assert!(
+                                (*derived_phase as f64) * SC_22667_RECAPTURE_BOUND
+                                    >= *measured_phase as f64,
+                                "{model_id} {rung} {phase}: the warm re-measure {measured_phase} \
+                                 lies outside the recapture spread of the derived {derived_phase}"
+                            ),
+                            Sc22667Under::ContractOverReportsTransformer => assert!(
+                                contract.asset_facts.base_bytes > measured_resident_conditioning,
+                                "{model_id}: the contract's component total {} no longer exceeds \
+                                 the measured resident conditioning {} — the asset facts were \
+                                 fixed upstream; drop this pin",
+                                contract.asset_facts.base_bytes,
+                                measured_resident_conditioning
+                            ),
+                            Sc22667Under::KreaTiledDecodeUnderscaled => assert!(
+                                (*measured_phase as f64)
+                                    <= (*derived_phase as f64)
+                                        * SC_22667_KREA_TILED_DECODE_UNDERSCALE_BOUND,
+                                "{model_id} {rung} {phase}: the tiled decode under-scaling \
+                                 deepened — measured {measured_phase} over derived {derived_phase}"
+                            ),
+                        }
+                    }
+                    graded_cells += 1;
+                }
+            }
+            // Krea passes the over-report witness (component total 11.79 GB under its measured
+            // resident conditioning 12.73); z-image fails it (9.99 GB over 7.19) — see
+            // `Sc22667Under::ContractOverReportsTransformer`.
+            let over_reports = contract.asset_facts.base_bytes > measured_resident_conditioning;
+            assert_eq!(
+                over_reports,
+                model_id == "z_image_turbo",
+                "{model_id}: the resident-conditioning witness of an over-reporting contract moved"
+            );
+            // The batch staged row's carry-over, pinned as the finding it is.
+            let batch_staged = measured[1].1;
+            let carry = batch_staged[0].saturating_sub(cold_staged[0]) as f64;
+            let spread =
+                cold_staged[0] as f64 * crate::ladder_margin_policy::CANDLE_RECAPTURE_SPREAD;
+            // What the resident rung can leave behind for the next request's conditioning phase:
+            // the DiT and the VAE. The text encoder is the staged rung's own conditioning-phase
+            // residency and is priced by the anchor already.
+            let leftover = (contract.asset_facts.transformer_bytes
+                + contract.asset_facts.decoder_bytes) as f64;
+            assert!(
+                carry > spread,
+                "{model_id}: the batch staged conditioning {} no longer carries the resident rung's \
+                 residency over the cold {} — retire this finding and grade the batch row directly",
+                batch_staged[0],
+                cold_staged[0]
+            );
+            assert!(
+                carry <= leftover + spread,
+                "{model_id}: the batch staged conditioning carries {carry} bytes over the cold \
+                 control, more than the {leftover} bytes of DiT + VAE the resident rung could \
+                 have left resident"
+            );
+        }
+        assert_eq!(
+            graded_cells,
+            2 * 5 * 3,
+            "two tiers x five rungs x three phases"
+        );
+        let pinned: Vec<(&str, &str, &str)> = SC_22667_RAW_UNDER_PREDICTIONS
+            .iter()
+            .map(|(m, r, p, _)| (*m, *r, *p))
+            .collect();
+        assert_eq!(
+            raw_under, pinned,
+            "the set of cells the raw law prices under the measurement changed"
+        );
+    }
 }
