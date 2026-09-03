@@ -1,7 +1,7 @@
 {
   "_comment": "Per-model loader-closure digests: the memory anchor currency key (sc-22511). An anchor is CURRENT while the digest it recorded still equals the digest here for its (model, backend lane). The unit is the source files the model's loader reaches, and nothing else — not the pin, not sibling models, not shared crates the loader never reaches. Regenerate when the pinned inference revision changes: node scripts/anchor-loader-closure.mjs --repo <inference> --write. A regeneration that leaves the digests unchanged is the expected case.",
   "digestVersion": "anchor-loader-closure v2",
-  "inferenceRevision": "a7aa955e50232897745ea4c78c4fc7335ba9c809",
+  "inferenceRevision": "336c1d62f0263050ce39950d3278f5102ecac405",
   "models": {
     "flux2_dev:mlx": {
       "entryPoints": [
