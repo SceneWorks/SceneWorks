@@ -1,7 +1,7 @@
 {
-  "_comment": "Exact audit of production include_str!/include_bytes! sites and known hand-ports in inference revision 336c1d62. The digest is checked by check-license-coverage.mjs; source changes require this audit inventory to be refreshed. Tests/fixtures are outside this production inventory. The reviewed pin advance preserves the cross-platform StarVector inventory-order, 2 MiB SVG contract, image-dtype, and conditioning-dtype repairs and restores Candle GPTBigCode multi-query-attention tensor axes without repeating shared key/value storage. The exact scanner records 667 provenance candidates and 97 production-Rust crate prefixes, unchanged from the prior audit; no candidate path or disposition moved. Current report-only licensing findings must be read from the checker output; this summary does not freeze their counts.",
-  "inferenceRevision": "336c1d62f0263050ce39950d3278f5102ecac405",
-  "auditDigest": "b215660a4222e2eb3d6e787cbe1209175e381bd3237f9b5c93d7a474cb4599fe",
+  "_comment": "Exact audit of production include_str!/include_bytes! sites and known hand-ports in inference revision cc8a3510. The digest is checked by check-license-coverage.mjs; source changes require this audit inventory to be refreshed. Tests/fixtures are outside this production inventory. The reviewed pin advance preserves the cross-platform StarVector inventory-order, 2 MiB SVG contract, image-dtype, conditioning-dtype, and Candle GPTBigCode multi-query-attention tensor-axis repairs and accepts the singleton token-selection cardinality returned by the StarVector 1B streaming path. The exact scanner records 667 provenance candidates and 97 production-Rust crate prefixes, unchanged from the prior audit; no candidate path or disposition moved. Current report-only licensing findings must be read from the checker output; this summary does not freeze their counts.",
+  "inferenceRevision": "cc8a351008ff5ecd085323836a0fc0093be76d3e",
+  "auditDigest": "1b6378deb04174dbbcd1620f9f94bbde1e5e5bf4ac86434017b8b93f8ccd477c",
   "artifacts": [
     {
       "id": "cmudict",
@@ -17,7 +17,7 @@
   "provenanceScan": {
     "scanner": "scripts/scan-inference-provenance.mjs",
     "candidateList": "config/inference-provenance-candidates.tsv",
-    "revision": "336c1d62f0263050ce39950d3278f5102ecac405",
+    "revision": "cc8a351008ff5ecd085323836a0fc0093be76d3e",
     "pathFilter": "production .rs; exclude tests, testdata, benches, examples, and _vendor path segments",
     "markerRegex": "faithful ... port(s), ported from, port(s) of, vendor(s)/vendored, transcribed, copied ... verbatim, adapted from, mirror(s|ed|ing) ... <port-object>, derived from ... <port-object>, reimplemented/reimplementation from|of, translated/transliterated from, from the reference (not reference-), original implementation|repo(sitory), based on ... <port-object>, follow(s|ing) ... <port-object>, reimplements ... <port-object>, rewrite of ... <port-object>, model(l)ed after ... <port-object>, ported to ... from, 1:1 with ... <port-object>, line-for-line ... <port-object> (case-insensitive; <port-object> = reference(not followed by -)|upstream|python|pytorch|torch|diffusers|comfy(ui)|transformers|implementation). `original` is NOT a bare port-object and `followed` is excluded: both produced verified false positives on first-party prose (sc-15191 review).",
     "normalization": "matched marker text lowercased, internal whitespace collapsed, sorted, newline joined",
@@ -830,7 +830,7 @@
   "crateCoverage": {
     "scanner": "scripts/scan-inference-provenance.mjs",
     "crateList": "config/inference-crate-prefixes.txt",
-    "revision": "336c1d62f0263050ce39950d3278f5102ecac405",
+    "revision": "cc8a351008ff5ecd085323836a0fc0093be76d3e",
     "rule": "Every production-Rust crate prefix in the pinned revision must be covered by a portedSourceAreas entry OR carry an explicit crateDispositions decision. Anything else FAILS check-license-coverage.mjs.",
     "cratePrefixes": 97,
     "cratePopulationSha256": "993023a1f5832a7402f3c6aaf5989122b8d12436d69b5fd840be84ba90b329f2"

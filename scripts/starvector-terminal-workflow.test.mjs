@@ -12,7 +12,7 @@ import { productServiceBackendEnv, productServiceBuildArgs, productServiceStateR
 const workflow = await readFile(".github/workflows/starvector-terminal.yml", "utf8");
 const readiness = await readFile(".github/workflows/starvector-terminal-readiness.yml", "utf8");
 const hash = (value) => createHash("sha256").update(value).digest("hex");
-const pin = "336c1d62f0263050ce39950d3278f5102ecac405";
+const pin = "cc8a351008ff5ecd085323836a0fc0093be76d3e";
 const execFile = promisify(execFileCallback);
 
 test("terminal workflow is dispatch-only, serial, and seals raw evidence", () => {

@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "inference_contract": {"repository":"SceneWorks/inference","revision":"336c1d62f0263050ce39950d3278f5102ecac405","receipt_schema":"release/starvector-terminal-receipt-v1.schema.json","corpus":"release/starvector-terminal-corpus-v1.json"},
+  "inference_contract": {"repository":"SceneWorks/inference","revision":"cc8a351008ff5ecd085323836a0fc0093be76d3e","receipt_schema":"release/starvector-terminal-receipt-v1.schema.json","corpus":"release/starvector-terminal-corpus-v1.json"},
   "tuples":["mlx:1b","mlx:8b","candle-cuda:1b","candle-cuda:8b"],
   "counts":{"image_quality":120,"deterministic_parity":20,"hostile_sanitizer":200,"prompt_composition":60},
   "model_snapshot_revisions":{"starvector-1b":"380ab95d25a8e9ab1dc825debe238b4953ae13b9","starvector-8b":"518beea8dcb5f7a37c5911e92d1d62a76beee7f9"},

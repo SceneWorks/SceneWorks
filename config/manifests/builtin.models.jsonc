@@ -25584,7 +25584,7 @@
           // campaign must re-verify these checked-in facts live in its same-run receipt.
           "terminalCandidate": {
             "schemaVersion": 1,
-            "inferenceRevision": "336c1d62f0263050ce39950d3278f5102ecac405",
+            "inferenceRevision": "cc8a351008ff5ecd085323836a0fc0093be76d3e",
             "corpusSha256": "757370c4eed38a52a29ac80c258fdedd7e437ab891637bcb1c916aa608bf32b5",
             "model": {
               "repository": "starvector/starvector-8b-im2svg",
@@ -25612,7 +25612,7 @@
             },
             "productionClosure": {
               "schemaVersion": 1,
-              "sha256": "1981380298a6509ff52864af9a2793642dbe877e364870cea4ca1fb7a4826465",
+              "sha256": "1b940bbab0b6688fd42b846df5d97e7d9956665df7826eae2a923d0ddfa2bcab",
               "entries": [
                 {
                   "path": ".github/workflows/starvector-terminal.yml",
@@ -25622,12 +25622,12 @@
                 {
                   "path": "Cargo.lock",
                   "byteSize": 248799,
-                  "sha256": "a252a5ee3c2d1b652180b689920b0eebd9041dbb90aa2445fef1f20b6d9916e4"
+                  "sha256": "8c8e032e47fb3e5fa753bc73218401c3b34ce4f9198e050252436238ae8890c0"
                 },
                 {
                   "path": "Cargo.toml",
                   "byteSize": 8688,
-                  "sha256": "6dedb8a598be57a506527e162c5bc80253b3a1a3fa5c10e0527657c58edfce05"
+                  "sha256": "31f95e4b868b8ad8975b52709b48ec3892f8d576f5ddbf866c32287169dc3249"
                 },
                 {
                   "path": "apps/rust-api/src/main.rs",
@@ -25637,7 +25637,7 @@
                 {
                   "path": "crates/sceneworks-worker/Cargo.toml",
                   "byteSize": 8839,
-                  "sha256": "4782faa95609c1b98a9fbaa37006527cd2ea797604497b4c1709e222d6701544"
+                  "sha256": "81e13206229b21cc625d9a1ff852d5dc37fdf8c3a8bb055413a43a43441c01d9"
                 },
                 {
                   "path": "crates/sceneworks-worker/src/bin/starvector_terminal_lease.rs",
@@ -25702,7 +25702,7 @@
                 {
                   "path": "release/starvector-terminal-campaign-v1.json",
                   "byteSize": 800,
-                  "sha256": "2e3050bc2a148a5a763d64ff0eccee8d2c864795c12743c5be8a2f9dfd7da086"
+                  "sha256": "861935df28d17c910359fe4edd3556cb741bfeef3e1a5c47baf0b0e1391f1b67"
                 },
                 {
                   "path": "release/starvector-terminal-metrics-lock-v1.json",
@@ -25722,12 +25722,12 @@
                 {
                   "path": "scripts/starvector-terminal-campaign.mjs",
                   "byteSize": 4289,
-                  "sha256": "ed9160e34acdcefdaefd065149da65e7ac7f6bc26ace9685e01d71167f9ce425"
+                  "sha256": "0b2e6d613f6e1a1b41902bc8d7fc7c7749dca2d96c3fc85d0d1960bf0b613344"
                 },
                 {
                   "path": "scripts/starvector-terminal-case-bundle.mjs",
                   "byteSize": 6654,
-                  "sha256": "e94f86b48717b97a226fb6cc7b72baa09215d00ef6e37f2615ddfd8c7f1f7667"
+                  "sha256": "78f2db9648488e14d5d506f22e9e5c3babb2c48d4d9ec7db68a6f0ddaa211839"
                 },
                 {
                   "path": "scripts/starvector-terminal-cli.mjs",
