@@ -11,19 +11,23 @@
 //! There are exactly three terms, and each names the uncertainty it covers:
 //!
 //! * [`AdmissionTerm::FullyPriced`] — nothing is left for the selector to add. Two bases reach it.
-//!   A MEASURED cell under the live closure is the measurement. An
-//!   [`CandidateBasis::EstimateAnchorDerived`] peak already carries both of its uncertainties
-//!   inside the derivation (`sceneworks_core::memory_anchor`): coefficient uncertainty is priced
-//!   INSIDE each coefficient (every slope sits at or above the highest measured within-cell slope)
-//!   and the MLX allocator envelope above a phase's active peak is priced by
-//!   `ANCHOR_ALLOCATOR_ENVELOPE_MARGIN`. Re-widening it here would double-charge terms the
-//!   derivation already paid for.
+//!   A MEASURED cell under the live closure is the measurement. A VIDEO-lane
+//!   [`CandidateBasis::EstimateAnchorDerived`] peak (`MemoryAnchor::derive_video_phase_peaks`)
+//!   already carries its uncertainties inside the derivation: its per-token/per-voxel
+//!   coefficients each sit at or above the highest measured within-cell slope, and every phase
+//!   is widened by `ANCHOR_ALLOCATOR_ENVELOPE_MARGIN` before it leaves the derivation.
+//!   Re-widening it here would double-charge terms the derivation already paid for.
 //! * [`AdmissionTerm::SameCellRecaptureSpread`] — capture-to-capture spread of the SAME cell's
 //!   binding phase. This one IS proportionate to the whole peak, because the quantity that moves
 //!   between two captures of one cell is the peak itself. Derived, not invented:
 //!   `scripts/derive-ladder-margins.mjs` reports the max binding-phase spread across the corpus's
 //!   repeat pairs, and the epic-18093 "x2 safety" and "x2 estimate widening" multipliers that sat
-//!   on top of it — neither of which named a term — are gone.
+//!   on top of it — neither of which named a term — are gone. An IMAGE-lane
+//!   [`CandidateBasis::EstimateAnchorDerived`] peak takes this term (sc-22663): the image law
+//!   (`MemoryAnchor::derive_phase_peaks`) fits no coefficient and widens nothing — it prices one
+//!   retained render's measured peaks minus component bytes, scaled by architecture ratios — so
+//!   the uncertainty left over it is exactly the re-capture spread of the cell it was derived
+//!   from, and nothing else is charged.
 //! * [`AdmissionTerm::AllocatorEnvelopeOverActivation`] — the allocator envelope that sits above a
 //!   floor's modelled ACTIVATION bytes. It is proportionate ONLY to that activation (headroom)
 //!   term. The weights half of a floor is counted bytes off the manifest that the allocator holds
@@ -38,7 +42,7 @@
 
 use gen_core::MemoryBackend;
 
-use crate::memory_strategy::CandidateBasis;
+use crate::memory_strategy::{AnchorDerivationLane, CandidateBasis};
 
 /// Same-cell capture-to-capture spread on the MLX lane: the max binding-phase spread over the
 /// corpus's repeat pairs (`scripts/derive-ladder-margins.mjs`, `recaptureSpread`).
@@ -290,9 +294,16 @@ pub fn admission_allowance(subject: AdmissionSubject) -> AdmissionAllowance {
         // The fitted per-phase laws already carry each phase's max fit/held-out residual, so what
         // remains is the recapture spread of the cell the curve was fitted through.
         CandidateBasis::EstimateFittedCurve => spread,
-        // Coefficient uncertainty is inside the coefficients and the allocator envelope is inside
-        // `ANCHOR_ALLOCATOR_ENVELOPE_MARGIN`. Nothing is left for the selector to add.
-        CandidateBasis::EstimateAnchorDerived => AdmissionAllowance::NONE,
+        // The video derivation prices its own terms — bounded coefficients and the
+        // `ANCHOR_ALLOCATOR_ENVELOPE_MARGIN` widening of every phase. Nothing is left to add.
+        CandidateBasis::EstimateAnchorDerived {
+            lane: AnchorDerivationLane::Video,
+        } => AdmissionAllowance::NONE,
+        // The image law widens nothing (sc-22663), so what remains over its derived peak is the
+        // re-capture spread of the cell it was derived from — the same term a fitted curve pays.
+        CandidateBasis::EstimateAnchorDerived {
+            lane: AnchorDerivationLane::Image,
+        } => spread,
         CandidateBasis::EstimateFloor => {
             if subject.unmodeled_activation_bytes.is_some() {
                 AdmissionAllowance {
@@ -443,13 +454,49 @@ mod tests {
         );
     }
 
-    /// The anchor derivation prices its own two terms, so the selector adds nothing. This is the
-    /// bullet that lets a 60 GB derived peak reach the rungs it fits.
+    /// The VIDEO anchor derivation prices its own terms (bounded coefficients, every phase widened
+    /// by the allocator-envelope margin), so the selector adds nothing. This is the bullet that
+    /// lets a 60 GB derived peak reach the rungs it fits.
     #[test]
-    fn an_anchor_derived_peak_carries_no_selector_allowance() {
-        let allowance = admission_allowance(subject(CandidateBasis::EstimateAnchorDerived, None));
+    fn a_video_anchor_derived_peak_carries_no_selector_allowance() {
+        let allowance = admission_allowance(subject(
+            CandidateBasis::EstimateAnchorDerived {
+                lane: AnchorDerivationLane::Video,
+            },
+            None,
+        ));
         assert_eq!(allowance.term, AdmissionTerm::FullyPriced);
         assert_eq!(allowance.bytes(60 * 1024 * 1024 * 1024, 0), 0);
+    }
+
+    /// The IMAGE law widens nothing (sc-22663), so an image-lane anchor derivation is charged the
+    /// backend's same-cell recapture spread on the whole peak — the term a fitted curve pays —
+    /// and never the video lane's zero.
+    #[test]
+    fn an_image_anchor_derived_peak_is_charged_the_recapture_spread() {
+        for (backend, spread) in [
+            (MemoryBackend::Mlx, MLX_RECAPTURE_SPREAD),
+            (MemoryBackend::Candle, CANDLE_RECAPTURE_SPREAD),
+        ] {
+            let allowance = admission_allowance(AdmissionSubject {
+                backend,
+                ..subject(
+                    CandidateBasis::EstimateAnchorDerived {
+                        lane: AnchorDerivationLane::Image,
+                    },
+                    None,
+                )
+            });
+            assert_eq!(allowance.term, AdmissionTerm::SameCellRecaptureSpread);
+            assert_eq!(allowance.fraction, spread);
+            let peak = 60 * 1024 * 1024 * 1024;
+            assert_eq!(
+                allowance.bytes(peak, 0),
+                (peak as f64 * spread).ceil() as u64,
+                "{backend:?}: the image lane pays the recapture spread on the whole peak"
+            );
+            assert!(allowance.bytes(peak, 0) > 0);
+        }
     }
 
     /// A current measurement is the measurement; an undeclared floor states its approximation by

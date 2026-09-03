@@ -1494,6 +1494,7 @@ pub(crate) fn krea_turbo_fit_with_runtime(
                     height,
                     staged_residency: engaged.contains(&MemoryStrategy::StagedResidency),
                 },
+                crate::video_admission::anchor_component_bytes(provider_contract.asset_facts),
             ) else {
                 continue;
             };
@@ -1779,7 +1780,9 @@ pub(crate) fn krea_turbo_fit_with_runtime(
                 selection: *selection,
                 evidence,
                 closure_digest: &live_closure_digest,
-                basis: memory_strategy::CandidateBasis::EstimateAnchorDerived,
+                basis: memory_strategy::CandidateBasis::EstimateAnchorDerived {
+                    lane: memory_strategy::AnchorDerivationLane::Image,
+                },
                 // No weights/activation split (sc-22508), for the same reason the fitted-curve
                 // candidate above has none: the anchor derivation decomposes its peak by PHASE
                 // (conditioning/denoise/decode), not into counted weights plus an activation
@@ -6651,11 +6654,17 @@ mod tests {
             })
             .expect("the packaged Krea candle q4 anchor");
         let derived = anchor
-            .derive_image_phase_peaks(sceneworks_core::memory_anchor::AnchorImageDeriveRequest {
-                width,
-                height,
-                staged_residency: true,
-            })
+            .derive_image_phase_peaks(
+                sceneworks_core::memory_anchor::AnchorImageDeriveRequest {
+                    width,
+                    height,
+                    staged_residency: true,
+                },
+                // The same component bytes the gate reads off the fixture runtime's contract.
+                crate::video_admission::anchor_component_bytes(
+                    krea_test_provider_contract("q4").asset_facts,
+                ),
+            )
             .expect("the derivation prices this geometry");
         derived.peak_bytes() as f64 / BYTES_PER_GIB
     }

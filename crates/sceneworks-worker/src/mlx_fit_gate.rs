@@ -2160,10 +2160,13 @@ fn mlx_image_anchor_derived_peak(
     {
         return None;
     }
-    let derived = anchor.derive_mlx_image_phase_peaks(AnchorMlxImageDeriveRequest {
-        width: geometry.width,
-        height: geometry.height,
-    })?;
+    let derived = anchor.derive_mlx_image_phase_peaks(
+        AnchorMlxImageDeriveRequest {
+            width: geometry.width,
+            height: geometry.height,
+        },
+        crate::video_admission::anchor_component_bytes(contract.asset_facts),
+    )?;
     Some((derived.peak_bytes(), anchor.id.clone()))
 }
 
@@ -2891,9 +2894,11 @@ fn synthesize_estimate_ladder(
             //    per-phase allocator envelopes upper-bounding every optimized composition — and
             //    OUTRANKS the generic weights+headroom floor below whenever the anchor is current
             //    and every identity/regime conjunct holds (`mlx_image_anchor_derived_peak`). The
-            //    selector adds nothing on top: the derivation prices its own coefficient and
-            //    allocator-envelope terms (`ladder_margin_policy` grades `EstimateAnchorDerived`
-            //    as fully priced).
+            //    selector charges it the lane's same-cell recapture spread and nothing else
+            //    (`ladder_margin_policy`: the image law fits and widens nothing, so that spread
+            //    is the one uncertainty left over its peak — sc-22663). At this pin the packaged
+            //    flux2 rows are outside the law's domain and this arm yields to the floor; see
+            //    `MemoryAnchor::derive_mlx_image_phase_peaks`.
             let anchored =
                 mlx_image_anchor_derived_peak(contract, plan, mode_key, overlay, geometry)
                     .and_then(|(predicted_peak_bytes, anchor_id)| {
@@ -2927,7 +2932,9 @@ fn synthesize_estimate_ladder(
                                 predicted_peak_bytes,
                                 calibration_fingerprint,
                             ),
-                            basis: CandidateBasis::EstimateAnchorDerived,
+                            basis: CandidateBasis::EstimateAnchorDerived {
+                                lane: crate::memory_strategy::AnchorDerivationLane::Image,
+                            },
                             // The anchor derivation decomposes its peak by PHASE, not into counted
                             // weights plus an activation remainder — same reason as the fitted arm.
                             unmodeled_activation_bytes: None,
@@ -11114,6 +11121,46 @@ mod tests {
         store
     }
 
+    /// [`flux2_live_anchor_store`] with the flux2 anchors' phase peaks lifted INTO the core law's
+    /// domain for the fixture contract's component bytes. The packaged flux2 rows are outside it
+    /// (sc-22663 review, D3): their conditioning-phase active peak is 1.26 MB against the eager
+    /// resident set they claim, so `MemoryAnchor::derive_phase_peaks` refuses them with any
+    /// non-zero component set rather than clamp a negative residue to zero (core test
+    /// `the_packaged_mlx_anchors_are_outside_the_laws_domain`). This fixture adds the fixture's
+    /// resident set to every phase's active AND allocator level — the peaks are synthetic, the
+    /// identity, currency and regime are the packaged row's — so the ARM's wiring (identity
+    /// guards, currency, outranking the floor) is exercised on an anchor the law can price.
+    fn flux2_in_domain_anchor_store() -> sceneworks_core::memory_anchor::MemoryAnchorStore {
+        let mut store = flux2_live_anchor_store();
+        let lift = crate::video_admission::anchor_component_bytes(
+            flux2_generator()
+                .contract
+                .as_ref()
+                .expect("fixture contract")
+                .asset_facts,
+        )
+        .total();
+        assert!(lift > 0, "the fixture contract states a resident set");
+        for anchor in &mut store.anchors {
+            if anchor.model_id != "flux2_dev" {
+                continue;
+            }
+            let peaks = &mut anchor.phase_active_peak_bytes;
+            peaks.conditioning += lift;
+            peaks.denoise += lift;
+            peaks.decode += lift;
+            let allocators = anchor
+                .phase_allocator_envelope_bytes
+                .as_mut()
+                .expect("the flux2 rows carry a per-phase allocator decomposition");
+            allocators.conditioning += lift;
+            allocators.denoise += lift;
+            allocators.decode += lift;
+            anchor.overall_allocator_envelope_bytes += lift;
+        }
+        store
+    }
+
     fn flux2_geometry() -> MemoryGeometry {
         MemoryGeometry {
             width: 1536,
@@ -11143,10 +11190,67 @@ mod tests {
         )
     }
 
-    /// E2/E7 wired: on a legacy image-MLX route with a CURRENT anchor, every implemented
-    /// optimized rung's estimate is the anchor-derived candidate — at exactly the core law's
-    /// derived admission peak — and it OUTRANKS the generic weights+headroom floor, which is what
-    /// the ladder falls back to the moment the anchor's currency breaks.
+    /// The PACKAGED flux2 anchors, verbatim and current, price nothing on this fixture: the core
+    /// law refuses them (their conditioning counters saw no weights — see
+    /// `flux2_in_domain_anchor_store`), and the ladder falls to the weights+headroom floor,
+    /// never to a refusal. The differential control for the in-domain test below.
+    #[test]
+    fn the_packaged_flux2_anchors_are_refused_and_the_ladder_keeps_its_floor() {
+        use crate::memory_strategy::CandidateBasis;
+
+        let generator = flux2_generator();
+        let components = crate::video_admission::anchor_component_bytes(
+            generator.contract.as_ref().expect("contract").asset_facts,
+        );
+        let store = flux2_live_anchor_store();
+        let anchor = store
+            .image_anchor_for(
+                "flux2_dev",
+                sceneworks_core::memory_anchor::AnchorBackend::Mlx,
+                "q4",
+            )
+            .expect("the flux2 q4 anchor");
+        assert!(
+            anchor.phase_active_peak_bytes.conditioning < components.total(),
+            "the packaged row's conditioning peak sits below the fixture's resident set"
+        );
+        assert!(anchor
+            .derive_mlx_image_phase_peaks(
+                sceneworks_core::memory_anchor::AnchorMlxImageDeriveRequest {
+                    width: flux2_geometry().width,
+                    height: flux2_geometry().height,
+                },
+                components,
+            )
+            .is_none());
+        let ladder = with_injected_image_anchor_store(store, || {
+            flux2_ladder(
+                &generator,
+                &flux2_plan(),
+                "text_to_image",
+                None,
+                flux2_geometry(),
+            )
+        });
+        assert!(
+            !ladder.estimates.is_empty(),
+            "fail to the floor, never refuse"
+        );
+        for estimate in &ladder.estimates {
+            assert_eq!(
+                estimate.basis,
+                CandidateBasis::EstimateFloor,
+                "{:?}: an out-of-domain anchor must leave the floor in place",
+                estimate.selection.strategy
+            );
+        }
+    }
+
+    /// E2/E7 wired: on a legacy image-MLX route with a CURRENT anchor the law can price (see
+    /// `flux2_in_domain_anchor_store`), every implemented optimized rung's estimate is the
+    /// anchor-derived candidate — at exactly the core law's derived admission peak, on the image
+    /// lane — and it OUTRANKS the generic weights+headroom floor, which is what the ladder falls
+    /// back to the moment the anchor's currency breaks.
     #[test]
     fn the_image_anchor_prices_the_mlx_ladder_ahead_of_the_floor() {
         use crate::memory_strategy::CandidateBasis;
@@ -11154,7 +11258,7 @@ mod tests {
         let generator = flux2_generator();
         let plan = flux2_plan();
         let geometry = flux2_geometry();
-        let store = flux2_live_anchor_store();
+        let store = flux2_in_domain_anchor_store();
         let expected_peak = store
             .image_anchor_for(
                 "flux2_dev",
@@ -11167,6 +11271,9 @@ mod tests {
                     width: geometry.width,
                     height: geometry.height,
                 },
+                crate::video_admission::anchor_component_bytes(
+                    generator.contract.as_ref().expect("contract").asset_facts,
+                ),
             )
             .expect("the anchor prices the request")
             .peak_bytes();
@@ -11181,7 +11288,9 @@ mod tests {
         for estimate in &ladder.estimates {
             assert_eq!(
                 estimate.basis,
-                CandidateBasis::EstimateAnchorDerived,
+                CandidateBasis::EstimateAnchorDerived {
+                    lane: crate::memory_strategy::AnchorDerivationLane::Image,
+                },
                 "{:?}: a current anchor must outrank the weights+headroom floor",
                 estimate.selection.strategy
             );
@@ -11198,7 +11307,7 @@ mod tests {
 
         // Currency mutation: rotate the anchor's recorded digest and the whole ladder falls back
         // to the floor — fail to the floor, never refuse.
-        let mut stale = flux2_live_anchor_store();
+        let mut stale = flux2_in_domain_anchor_store();
         for anchor in &mut stale.anchors {
             if anchor.model_id == "flux2_dev" {
                 anchor.source.loader_closure_digest = "d".repeat(64);
@@ -11364,7 +11473,7 @@ mod tests {
             ),
         ];
         for (label, build) in cases {
-            let ladder = with_injected_image_anchor_store(flux2_live_anchor_store(), build);
+            let ladder = with_injected_image_anchor_store(flux2_in_domain_anchor_store(), build);
             assert!(
                 !ladder.estimates.is_empty(),
                 "{label}: the ladder must fail to the floor, never refuse"
@@ -11372,7 +11481,9 @@ mod tests {
             for estimate in &ladder.estimates {
                 assert_ne!(
                     estimate.basis,
-                    CandidateBasis::EstimateAnchorDerived,
+                    CandidateBasis::EstimateAnchorDerived {
+                        lane: crate::memory_strategy::AnchorDerivationLane::Image,
+                    },
                     "{label} ({:?}): the anchor must not price a mismatched request",
                     estimate.selection.strategy
                 );

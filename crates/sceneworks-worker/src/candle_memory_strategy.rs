@@ -1289,6 +1289,7 @@ fn synthesize_estimate_floors(
                         height: geometry.height,
                         staged_residency: engaged.contains(&MemoryStrategy::StagedResidency),
                     },
+                    crate::video_admission::anchor_component_bytes(contract.asset_facts),
                 )
                 .map(|phases| {
                     // The retained candle phase peaks are device-usage DELTAS above the process's
@@ -1318,7 +1319,9 @@ fn synthesize_estimate_floors(
                 );
                 (
                     bytes,
-                    crate::memory_strategy::CandidateBasis::EstimateAnchorDerived,
+                    crate::memory_strategy::CandidateBasis::EstimateAnchorDerived {
+                        lane: crate::memory_strategy::AnchorDerivationLane::Image,
+                    },
                 )
             }
             None => {
@@ -1387,10 +1390,12 @@ fn synthesize_estimate_floors(
     synthesized
 }
 
-/// Catalog models whose candle image admission the anchor derivation may price: the ones the
-/// lane's per-pixel coefficients were fitted on. See the COEFFICIENT SCOPE note in
-/// [`candle_image_anchor`] — adding a model here without fitting its slopes would price its
-/// renders with another model's empirics.
+/// Catalog models whose candle image admission the anchor derivation may price. Written when the
+/// lane's law was three per-pixel coefficients fitted on Krea Turbo; since sc-22663 the core law
+/// fits nothing (`MemoryAnchor::derive_phase_peaks`), so the scope is no longer a coefficient
+/// question — it is kept until the candle lane's own story (epic 22657) rewires this consumer
+/// with the request's full regime and the contract's architecture facts. See the note in
+/// [`candle_image_anchor`].
 const CANDLE_ANCHOR_COEFFICIENT_MODELS: &[&str] = &["krea_2_turbo"];
 
 /// The measured memory anchor for this candle image request, or `None` to keep the manifest-row
@@ -1419,17 +1424,17 @@ fn candle_image_anchor<'a>(
     if overlay.is_some() || geometry.reference_count != 0 || geometry.batch != 1 {
         return None;
     }
-    // COEFFICIENT SCOPE. `CANDLE_COND_PER_PIXEL_BYTES` and its two siblings are Krea Turbo
-    // empirics — slopes fitted across that model's retained 768x768 -> 1024x1024 pair — not
-    // architecture facts the way the LTX latent-geometry constants are. A store row for another
-    // model would therefore be priced with borrowed slopes, so this lane is scoped to the models
-    // whose coefficients it actually holds, the same way `vram_gate::krea_store_anchor` is.
+    // MODEL SCOPE. This guard dates from the fitted candle law (three Krea Turbo per-pixel slopes,
+    // sc-22509), which could not price another model's row. The core law has fitted nothing since
+    // sc-22663 — it prices any image anchor from its measured peaks, the contract's component
+    // bytes and architecture facts — so the reason for the scope is gone; the guard stays only
+    // until the candle lane's own story (epic 22657) rewires this consumer onto the full law and
+    // decides the scope on the contract's facts, the same way `vram_gate::krea_store_anchor` will.
     //
-    // The store is catalog-wide since sc-22510, so this is load-bearing rather than defensive: a
-    // future candle corpus landing under a walked root and being packaged would otherwise start
-    // answering here on the day it was committed. GENERICIZING THIS REQUIRES PER-MODEL
-    // COEFFICIENTS — a fitted slope set per model, selected alongside the anchor — not the removal
-    // of this guard.
+    // The store is catalog-wide since sc-22510, so until then this is load-bearing rather than
+    // defensive: a future candle corpus landing under a walked root and being packaged would
+    // otherwise start answering here on the day it was committed, priced through the shim's
+    // shallow (facts-free) composition.
     if !CANDLE_ANCHOR_COEFFICIENT_MODELS.contains(&model_id) {
         return None;
     }
@@ -5416,13 +5421,17 @@ mod tests {
             phase_allocator_envelope_bytes: None,
             overall_allocator_envelope_bytes: 4_000_000_000,
             underived_reason: None,
+            component_bytes: None,
         };
         let expected_derived = anchor
-            .derive_image_phase_peaks(AnchorImageDeriveRequest {
-                width: geometry.width,
-                height: geometry.height,
-                staged_residency: true,
-            })
+            .derive_image_phase_peaks(
+                AnchorImageDeriveRequest {
+                    width: geometry.width,
+                    height: geometry.height,
+                    staged_residency: true,
+                },
+                crate::video_admission::anchor_component_bytes(contract.asset_facts),
+            )
             .expect("the anchor prices its own geometry")
             .peak_bytes()
             .saturating_add((crate::vram_gate::HEADROOM_GB * BYTES_PER_GIB).ceil() as u64);
@@ -5533,7 +5542,9 @@ mod tests {
             for (_, evidence, basis) in floors(Some(&rotated_store)) {
                 assert_eq!(
                     basis,
-                    crate::memory_strategy::CandidateBasis::EstimateAnchorDerived,
+                    crate::memory_strategy::CandidateBasis::EstimateAnchorDerived {
+                        lane: crate::memory_strategy::AnchorDerivationLane::Image,
+                    },
                     "a rotated calibration campaign is provenance and must not demote the anchor"
                 );
                 assert_eq!(evidence.predicted_peak_bytes, expected_derived);
@@ -5566,7 +5577,9 @@ mod tests {
             for (selection, _, basis) in &drifted_floors {
                 assert_eq!(
                     *basis,
-                    crate::memory_strategy::CandidateBasis::EstimateAnchorDerived,
+                    crate::memory_strategy::CandidateBasis::EstimateAnchorDerived {
+                        lane: crate::memory_strategy::AnchorDerivationLane::Image,
+                    },
                     "a calibration ABI is provenance too and must not demote the anchor ({:?})",
                     selection.strategy
                 );
@@ -5586,7 +5599,9 @@ mod tests {
             for (_, evidence, basis) in floors(Some(&relabelled_store)) {
                 assert_eq!(
                     basis,
-                    crate::memory_strategy::CandidateBasis::EstimateAnchorDerived,
+                    crate::memory_strategy::CandidateBasis::EstimateAnchorDerived {
+                        lane: crate::memory_strategy::AnchorDerivationLane::Image,
+                    },
                     "model_family must not gate the derivation"
                 );
                 assert_eq!(evidence.predicted_peak_bytes, expected_derived);
@@ -5642,7 +5657,9 @@ mod tests {
         for (selection, evidence, basis) in &anchored {
             assert_eq!(
                 *basis,
-                crate::memory_strategy::CandidateBasis::EstimateAnchorDerived,
+                crate::memory_strategy::CandidateBasis::EstimateAnchorDerived {
+                    lane: crate::memory_strategy::AnchorDerivationLane::Image,
+                },
                 "{:?} must be graded as an anchor derivation",
                 selection.strategy
             );
