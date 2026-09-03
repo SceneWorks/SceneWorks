@@ -73,24 +73,57 @@ test("provision workflow is dispatch-only and never runs a model, service, campa
   assert.doesNotMatch(workflow, /STARVECTOR_PROMPT_PROVIDER: flux_diffusers/);
 });
 
+function assertWindowsMetricsPythonContract(step) {
+  assert.doesNotMatch(step, /\bpy\s+-3\.11\b/);
+  assert.doesNotMatch(step, /IsPathFullyQualified/);
+  assert.match(step, /Get-Command python\.exe -All -CommandType Application/);
+  assert.match(step, /\$text -match '\[\\r\\n"\]'/);
+  assert.match(step, /\$text -notmatch '\^\[A-Za-z\]:\\\\'/);
+  assert.match(step, /\[IO\.Path\]::GetFullPath\(\$text\)/);
+  assert.match(step, /Test-Path -LiteralPath \$full -PathType Leaf/);
+  assert.match(step, /sys\.executable/);
+  assert.match(step, /version\":\[sys\.version_info\.major,sys\.version_info\.minor,sys\.version_info\.micro\]/);
+  assert.match(step, /\[int\]\$identity\.version\[1\] -ge 12/);
+  assert.match(step, /& \$bootstrapPython -m venv \$metricsRoot/);
+  assert.match(step, /if \(\$LASTEXITCODE -ne 0\) \{ throw 'failed to create the terminal metrics venv/);
+  assert.match(step, /Test-Path \$metricsPython -PathType Leaf/);
+  assert.match(step, /base_executable\":getattr\(sys,"_base_executable",None\)/);
+  assert.match(step, /\$observedBasePython = & \$canonicalDriveExecutable \$venvIdentity\.base_executable/);
+  assert.match(step, /OrdinalIgnoreCase\.Equals\(\$bootstrapPython, \$observedBasePython\)/);
+  assert.match(step, /\[int\]\$venvIdentity\.version\[2\] -ne \[int\]\$bootstrapIdentity\.version\[2\]/);
+  assert.match(step, /& \$metricsPython -m pip install/);
+  assert.match(step, /starvector-terminal-provision\.mjs metrics[^\n]*\$metricsRoot \$metricsPython/);
+}
+
 test("Windows metrics provisioning selects, uses, and verifies one explicit Python 3.12+ executable", () => {
   const start = workflow.indexOf("- name: Provision pinned metric runtime and official checkpoints", workflow.indexOf("  provision-windows:"));
   const end = workflow.indexOf("- name: Materialize the exact pinned 120-row corpus", start);
   const step = workflow.slice(start, end);
   assert.ok(start >= 0 && end > start);
-  assert.doesNotMatch(step, /\bpy\s+-3\.11\b/);
-  assert.match(step, /Get-Command python\.exe -All -CommandType Application/);
-  assert.match(step, /sys\.executable/);
-  assert.match(step, /version\":\[sys\.version_info\.major,sys\.version_info\.minor,sys\.version_info\.micro\]/);
-  assert.match(step, /\[IO\.Path\]::IsPathFullyQualified/);
-  assert.match(step, /\[int\]\$identity\.version\[1\] -ge 12/);
-  assert.match(step, /& \$bootstrapPython -m venv \$metricsRoot/);
-  assert.match(step, /if \(\$LASTEXITCODE -ne 0\) \{ throw 'failed to create the terminal metrics venv/);
-  assert.match(step, /Test-Path \$metricsPython -PathType Leaf/);
-  assert.match(step, /& \$metricsPython -c 'import json,sys/);
-  assert.match(step, /OrdinalIgnoreCase\.Equals\(\$expectedMetricsPython, \$observedMetricsPython\)/);
-  assert.match(step, /& \$metricsPython -m pip install/);
-  assert.match(step, /starvector-terminal-provision\.mjs metrics[^\n]*\$metricsRoot \$metricsPython/);
+  assertWindowsMetricsPythonContract(step);
+  const isSafeDriveAbsolute = (value) => /^[A-Za-z]:\\/.test(value) && !/[\r\n"]/.test(value);
+  assert.equal(isSafeDriveAbsolute("C:\\Python312\\python.exe"), true);
+  for (const rejected of ["python.exe", "C:python.exe", "\\python.exe", "\\\\server\\share\\python.exe", "C:/Python312/python.exe", "C:\\Python312\\py\nthon.exe", 'C:\\Python312\\py"thon.exe']) {
+    assert.equal(isSafeDriveAbsolute(rejected), false, rejected);
+  }
+});
+
+test("Windows metrics Python contract rejects path, base-interpreter, and patch-version guard mutations", () => {
+  const start = workflow.indexOf("- name: Provision pinned metric runtime and official checkpoints", workflow.indexOf("  provision-windows:"));
+  const end = workflow.indexOf("- name: Materialize the exact pinned 120-row corpus", start);
+  const step = workflow.slice(start, end);
+  for (const [label, mutation] of [
+    ["drive-absolute guard", (value) => value.replace("$text -notmatch '^[A-Za-z]:\\\\'", "$text -notmatch '^\\\\'")],
+    ["unsafe quoting guard", (value) => value.replace("$text -match '[\\r\\n\"]'", "$text -match '[\\r\\n]'")],
+    ["PowerShell 5.1 canonicalization", (value) => value.replace("[IO.Path]::GetFullPath($text)", "$text")],
+    ["venv base executable", (value) => value.replace('"_base_executable",None', '"executable",None')],
+    ["base path equality", (value) => value.replace("OrdinalIgnoreCase.Equals($bootstrapPython, $observedBasePython)", "OrdinalIgnoreCase.Equals($bootstrapPython, $bootstrapPython)")],
+    ["patch version equality", (value) => value.replace("[int]$venvIdentity.version[2] -ne [int]$bootstrapIdentity.version[2]", "[int]$venvIdentity.version[2] -ne [int]$venvIdentity.version[2]")],
+  ]) {
+    const changed = mutation(step);
+    assert.notEqual(changed, step, `${label} mutation must alter the workflow fixture`);
+    assert.throws(() => assertWindowsMetricsPythonContract(changed), { name: "AssertionError" }, label);
+  }
 });
 
 test("preflight assembly requires and copies exactly two inventories plus four hooks", async () => {
