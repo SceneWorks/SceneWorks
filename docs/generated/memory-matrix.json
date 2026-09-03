@@ -1,7 +1,7 @@
 {
   "schemaVersion": 11,
   "generatedFrom": {
-    "sceneWorksRevision": "source-tree:2025567a0df90c913418507fde0decd08bfd97430148b6ff3bc7736db17e0f67",
+    "sceneWorksRevision": "source-tree:58074dbf3a5badaaf73628444a2a7d5f812241eee71e599ade06efd3954040aa",
     "sources": {
       "manifest": {
         "path": "config/manifests/builtin.models.jsonc",
@@ -69,15 +69,15 @@
       },
       "anchorStore": {
         "path": "config/memory-anchors.json",
-        "sha256": "7db208a67db00ee1e9b2ba5b280d1c9a214b6990156ff9bc9ec81ece81155749"
+        "sha256": "747aa71de9a22317915f3c442fdec94b83abab71ed5fbdb4f443b7396b0793b8"
       },
       "anchorLoaderClosures": {
         "path": "config/anchor-loader-closures.json",
-        "sha256": "397ac9dd8cfa95753d94b374ffd419b33a67c6e6097cc8a68415da1b8d063d3a"
+        "sha256": "9da2410d47de4031fa5c931e3456320c8d15a7296a05119a1b72f8f555951d20"
       },
       "anchorDerivation": {
         "path": "crates/sceneworks-core/src/memory_anchor.rs",
-        "sha256": "58539111036594f12690acb5ceffc22a1de94a58f1027833fc55a98c387a4951"
+        "sha256": "608bbc7b0b9701033da357118b4ca0bf4ec5d7130bb7bc65efb726f155e08304"
       },
       "anchorAdmission": {
         "path": "crates/sceneworks-worker/src/video_admission.rs",
@@ -89,11 +89,11 @@
       },
       "anchorAdmissionImageCandle": {
         "path": "crates/sceneworks-worker/src/candle_memory_strategy.rs",
-        "sha256": "7fa33dee812e0bcb3c169d0f0bb9adb65ffb66cc7c957a19fb242bf64e6f0a3a"
+        "sha256": "21e855c59f19892b8c1ef1f9815a7ba9947ec454403d15eb586efeab14148bdd"
       },
       "anchorExtractor": {
         "path": "scripts/extract-memory-anchors.mjs",
-        "sha256": "70e4ab33b9d53738bc9dd6067503de52ebfb79d3d5dc52b558f5540184e2cfaf"
+        "sha256": "576602d72ae5695204ae0d0cc9aeee9175a99075dfc6926424d98464d5e7eb3e"
       }
     }
   },
@@ -138,10 +138,10 @@
       "video": 11
     },
     "cells": 9305,
-    "publishedCells": 710,
-    "elidedCells": 8595,
+    "publishedCells": 762,
+    "elidedCells": 8543,
     "elidedByState": {
-      "Implemented": 4174,
+      "Implemented": 4122,
       "Missing": 4421
     },
     "publicationPredicate": "A coordinate is published when it carries a claim a per-lane census cannot: a measured memory anchor covers its (model, tier, backend lane), or it is structurally exempt. A bare `Implemented` or `Missing` state is a property of the whole lane, replicated across every tier x mode x overlay, and is counted in `summary.elidedByState` and the per-(entry, backend, rung) `coverage` census instead of restated thousands of times.",
@@ -162,10 +162,10 @@
         "reason": "no familyGroup arm and no video-route resolver row"
       }
     ],
-    "anchors": 11,
-    "analyticOnlyCells": 330,
-    "anchoredCells": 247,
-    "staleAnchors": 11,
+    "anchors": 15,
+    "analyticOnlyCells": 326,
+    "anchoredCells": 299,
+    "staleAnchors": 12,
     "fullModels": 0
   },
   "models": [
@@ -4788,6 +4788,23 @@
       "cells": 42
     },
     {
+      "id": "qwen_image:candle:q4:base:base:qwen-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v1:imc-48b48f5179e387bc2841",
+      "modelId": "qwen_image",
+      "backend": "candle",
+      "tier": "q4",
+      "provider": "qwen_image",
+      "mode": "text_to_image",
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "frames": 1,
+        "fps": null
+      },
+      "source": "docs/generated/qwen-candle-five-rung-sc-15817.json",
+      "current": false,
+      "cells": 7
+    },
+    {
       "id": "qwen_image:mlx:bf16:base:base:qwen-image-mlx-shared-ladder-2026-08-01-v1-eager:imc-d314058df6e188459f3b",
       "modelId": "qwen_image",
       "backend": "mlx",
@@ -4837,6 +4854,57 @@
       "source": "docs/generated/memory-calibration-evidence.json",
       "current": false,
       "cells": 12
+    },
+    {
+      "id": "z_image_turbo:candle:bf16:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-3cd69f2fee9e91e83b58",
+      "modelId": "z_image_turbo",
+      "backend": "candle",
+      "tier": "bf16",
+      "provider": "z_image_turbo",
+      "mode": "text_to_image",
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "frames": 1,
+        "fps": null
+      },
+      "source": "docs/calibration/sc-15859/z-image-turbo-bf16-candle-anchor.json",
+      "current": true,
+      "cells": 15
+    },
+    {
+      "id": "z_image_turbo:candle:q4:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-b8064416c974b5008509",
+      "modelId": "z_image_turbo",
+      "backend": "candle",
+      "tier": "q4",
+      "provider": "z_image_turbo",
+      "mode": "text_to_image",
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "frames": 1,
+        "fps": null
+      },
+      "source": "docs/calibration/sc-15859/z-image-turbo-q4-candle-anchor.json",
+      "current": true,
+      "cells": 15
+    },
+    {
+      "id": "z_image_turbo:candle:q8:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-8cda4f70f78dd33f5330",
+      "modelId": "z_image_turbo",
+      "backend": "candle",
+      "tier": "q8",
+      "provider": "z_image_turbo",
+      "mode": "text_to_image",
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "frames": 1,
+        "fps": null
+      },
+      "source": "docs/calibration/sc-15859/z-image-turbo-q8-candle-anchor.json",
+      "current": true,
+      "cells": 15
     },
     {
       "id": "z_image_turbo:mlx:q4:base:base:z-image-mlx-independent-materialization-v4:imc-1fc616bea135da2281b8",
@@ -11698,11 +11766,12 @@
       "backend": "candle",
       "rung": "bounded_attention",
       "coordinates": 9,
-      "published": 0,
-      "elided": 9,
+      "published": 1,
+      "elided": 8,
       "implemented": 3,
       "states": {
-        "Implemented": 3,
+        "Anchored": 1,
+        "Implemented": 2,
         "Missing": 6
       },
       "implementedBy": {
@@ -11726,11 +11795,12 @@
       "backend": "candle",
       "rung": "bounded_decode",
       "coordinates": 9,
-      "published": 0,
-      "elided": 9,
+      "published": 1,
+      "elided": 8,
       "implemented": 3,
       "states": {
-        "Implemented": 3,
+        "Anchored": 1,
+        "Implemented": 2,
         "Missing": 6
       },
       "implementedBy": {
@@ -11754,11 +11824,12 @@
       "backend": "candle",
       "rung": "bounded_transformer_residency",
       "coordinates": 9,
-      "published": 0,
-      "elided": 9,
+      "published": 1,
+      "elided": 8,
       "implemented": 3,
       "states": {
-        "Implemented": 3,
+        "Anchored": 1,
+        "Implemented": 2,
         "Missing": 6
       },
       "implementedBy": {
@@ -11782,11 +11853,12 @@
       "backend": "candle",
       "rung": "resident",
       "coordinates": 9,
-      "published": 0,
-      "elided": 9,
+      "published": 3,
+      "elided": 6,
       "implemented": 9,
       "states": {
-        "Implemented": 9
+        "Anchored": 3,
+        "Implemented": 6
       }
     },
     {
@@ -11794,11 +11866,12 @@
       "backend": "candle",
       "rung": "staged_residency",
       "coordinates": 9,
-      "published": 0,
-      "elided": 9,
+      "published": 1,
+      "elided": 8,
       "implemented": 3,
       "states": {
-        "Implemented": 3,
+        "Anchored": 1,
+        "Implemented": 2,
         "Missing": 6
       },
       "implementedBy": {
@@ -11826,7 +11899,8 @@
       "elided": 3,
       "implemented": 6,
       "states": {
-        "Anchored/underived": 6,
+        "Anchored": 2,
+        "Anchored/underived": 4,
         "Missing": 3
       },
       "implementedBy": {
@@ -11854,7 +11928,8 @@
       "elided": 3,
       "implemented": 6,
       "states": {
-        "Anchored/underived": 6,
+        "Anchored": 2,
+        "Anchored/underived": 4,
         "Missing": 3
       },
       "implementedBy": {
@@ -11882,7 +11957,8 @@
       "elided": 3,
       "implemented": 6,
       "states": {
-        "Anchored/underived": 6,
+        "Anchored": 2,
+        "Anchored/underived": 4,
         "Missing": 3
       },
       "implementedBy": {
@@ -11910,7 +11986,8 @@
       "elided": 0,
       "implemented": 9,
       "states": {
-        "Anchored/underived": 9
+        "Anchored": 3,
+        "Anchored/underived": 6
       }
     },
     {
@@ -11922,7 +11999,8 @@
       "elided": 0,
       "implemented": 9,
       "states": {
-        "Anchored/underived": 9
+        "Anchored": 3,
+        "Anchored/underived": 6
       }
     },
     {
@@ -14690,11 +14768,11 @@
       "backend": "candle",
       "rung": "bounded_attention",
       "coordinates": 9,
-      "published": 0,
-      "elided": 9,
+      "published": 9,
+      "elided": 0,
       "implemented": 9,
       "states": {
-        "Implemented": 9
+        "Anchored": 9
       }
     },
     {
@@ -14702,11 +14780,11 @@
       "backend": "candle",
       "rung": "bounded_decode",
       "coordinates": 9,
-      "published": 0,
-      "elided": 9,
+      "published": 9,
+      "elided": 0,
       "implemented": 9,
       "states": {
-        "Implemented": 9
+        "Anchored": 9
       }
     },
     {
@@ -14714,11 +14792,11 @@
       "backend": "candle",
       "rung": "bounded_transformer_residency",
       "coordinates": 9,
-      "published": 0,
-      "elided": 9,
+      "published": 9,
+      "elided": 0,
       "implemented": 9,
       "states": {
-        "Implemented": 9
+        "Anchored": 9
       }
     },
     {
@@ -14726,11 +14804,11 @@
       "backend": "candle",
       "rung": "resident",
       "coordinates": 9,
-      "published": 0,
-      "elided": 9,
+      "published": 9,
+      "elided": 0,
       "implemented": 9,
       "states": {
-        "Implemented": 9
+        "Anchored": 9
       }
     },
     {
@@ -14738,11 +14816,11 @@
       "backend": "candle",
       "rung": "staged_residency",
       "coordinates": 9,
-      "published": 0,
-      "elided": 9,
+      "published": 9,
+      "elided": 0,
       "implemented": 9,
       "states": {
-        "Implemented": 9
+        "Anchored": 9
       }
     },
     {
@@ -14754,7 +14832,7 @@
       "elided": 6,
       "implemented": 9,
       "states": {
-        "Anchored/underived": 3,
+        "Anchored": 3,
         "Implemented": 6
       }
     },
@@ -14767,7 +14845,7 @@
       "elided": 6,
       "implemented": 9,
       "states": {
-        "Anchored/underived": 3,
+        "Anchored": 3,
         "Implemented": 6
       }
     },
@@ -14780,7 +14858,7 @@
       "elided": 6,
       "implemented": 9,
       "states": {
-        "Anchored/underived": 3,
+        "Anchored": 3,
         "Implemented": 6
       }
     },
@@ -14793,7 +14871,7 @@
       "elided": 6,
       "implemented": 9,
       "states": {
-        "Anchored/underived": 3,
+        "Anchored": 3,
         "Implemented": 6
       }
     },
@@ -14806,7 +14884,7 @@
       "elided": 6,
       "implemented": 9,
       "states": {
-        "Anchored/underived": 3,
+        "Anchored": 3,
         "Implemented": 6
       }
     },
@@ -28785,6 +28863,342 @@
       }
     },
     {
+      "id": "qwen_image:qwen_image:candle:q4:text_to_image:control:resident",
+      "modelId": "qwen_image",
+      "resolvedRoute": "qwen_image",
+      "provider": "qwen_image",
+      "backend": "candle",
+      "tier": "q4",
+      "mode": "text_to_image",
+      "overlay": "control",
+      "rung": "resident",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "768x768",
+          "1024x1024",
+          "1280x720",
+          "720x1280"
+        ]
+      },
+      "strategyParameters": {},
+      "implementation": "implemented",
+      "anchor": {
+        "id": "qwen_image:candle:q4:base:base:qwen-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v1:imc-48b48f5179e387bc2841",
+        "tier": "q4",
+        "source": "config/memory-anchors.json#qwen_image:candle:q4:base:base:qwen-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v1:imc-48b48f5179e387bc2841",
+        "current": false,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 15817,
+      "owningModelStory": 15865,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "crates/sceneworks-worker/src/engines.rs#MODEL_TABLE"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#qwen_image:candle:q4:base:base:qwen-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v1:imc-48b48f5179e387bc2841"
+          }
+        ]
+      }
+    },
+    {
+      "id": "qwen_image:qwen_image:candle:q4:text_to_image:lora:resident",
+      "modelId": "qwen_image",
+      "resolvedRoute": "qwen_image",
+      "provider": "qwen_image",
+      "backend": "candle",
+      "tier": "q4",
+      "mode": "text_to_image",
+      "overlay": "lora",
+      "rung": "resident",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "768x768",
+          "1024x1024",
+          "1280x720",
+          "720x1280"
+        ]
+      },
+      "strategyParameters": {},
+      "implementation": "implemented",
+      "anchor": {
+        "id": "qwen_image:candle:q4:base:base:qwen-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v1:imc-48b48f5179e387bc2841",
+        "tier": "q4",
+        "source": "config/memory-anchors.json#qwen_image:candle:q4:base:base:qwen-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v1:imc-48b48f5179e387bc2841",
+        "current": false,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 15817,
+      "owningModelStory": 15865,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "crates/sceneworks-worker/src/engines.rs#MODEL_TABLE"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#qwen_image:candle:q4:base:base:qwen-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v1:imc-48b48f5179e387bc2841"
+          }
+        ]
+      }
+    },
+    {
+      "id": "qwen_image:qwen_image:candle:q4:text_to_image:none:bounded_attention",
+      "modelId": "qwen_image",
+      "resolvedRoute": "qwen_image",
+      "provider": "qwen_image",
+      "backend": "candle",
+      "tier": "q4",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "rung": "bounded_attention",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "768x768",
+          "1024x1024",
+          "1280x720",
+          "720x1280"
+        ]
+      },
+      "strategyParameters": {
+        "attentionChunkSize": 67108864
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "qwen_image:candle:q4:base:base:qwen-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v1:imc-48b48f5179e387bc2841",
+        "tier": "q4",
+        "source": "config/memory-anchors.json#qwen_image:candle:q4:base:base:qwen-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v1:imc-48b48f5179e387bc2841",
+        "current": false,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 15817,
+      "owningModelStory": 15865,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "config/manifests/builtin.models.jsonc#models/qwen_image/candle/memoryStrategyCapabilities/bounded_attention"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#qwen_image:candle:q4:base:base:qwen-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v1:imc-48b48f5179e387bc2841"
+          }
+        ]
+      }
+    },
+    {
+      "id": "qwen_image:qwen_image:candle:q4:text_to_image:none:bounded_decode",
+      "modelId": "qwen_image",
+      "resolvedRoute": "qwen_image",
+      "provider": "qwen_image",
+      "backend": "candle",
+      "tier": "q4",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "rung": "bounded_decode",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "768x768",
+          "1024x1024",
+          "1280x720",
+          "720x1280"
+        ]
+      },
+      "strategyParameters": {
+        "decodeTileEdge": 512,
+        "decodeOverlap": 64
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "qwen_image:candle:q4:base:base:qwen-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v1:imc-48b48f5179e387bc2841",
+        "tier": "q4",
+        "source": "config/memory-anchors.json#qwen_image:candle:q4:base:base:qwen-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v1:imc-48b48f5179e387bc2841",
+        "current": false,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 15817,
+      "owningModelStory": 15865,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "config/manifests/builtin.models.jsonc#models/qwen_image/candle/memoryStrategyCapabilities/bounded_decode"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#qwen_image:candle:q4:base:base:qwen-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v1:imc-48b48f5179e387bc2841"
+          }
+        ]
+      }
+    },
+    {
+      "id": "qwen_image:qwen_image:candle:q4:text_to_image:none:bounded_transformer_residency",
+      "modelId": "qwen_image",
+      "resolvedRoute": "qwen_image",
+      "provider": "qwen_image",
+      "backend": "candle",
+      "tier": "q4",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "rung": "bounded_transformer_residency",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "768x768",
+          "1024x1024",
+          "1280x720",
+          "720x1280"
+        ]
+      },
+      "strategyParameters": {
+        "transformerWindowSize": 1,
+        "transformerWindowComponent": "Dit"
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "qwen_image:candle:q4:base:base:qwen-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v1:imc-48b48f5179e387bc2841",
+        "tier": "q4",
+        "source": "config/memory-anchors.json#qwen_image:candle:q4:base:base:qwen-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v1:imc-48b48f5179e387bc2841",
+        "current": false,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 15817,
+      "owningModelStory": 15865,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "config/manifests/builtin.models.jsonc#models/qwen_image/candle/memoryStrategyCapabilities/bounded_transformer_residency"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#qwen_image:candle:q4:base:base:qwen-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v1:imc-48b48f5179e387bc2841"
+          }
+        ]
+      }
+    },
+    {
+      "id": "qwen_image:qwen_image:candle:q4:text_to_image:none:resident",
+      "modelId": "qwen_image",
+      "resolvedRoute": "qwen_image",
+      "provider": "qwen_image",
+      "backend": "candle",
+      "tier": "q4",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "rung": "resident",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "768x768",
+          "1024x1024",
+          "1280x720",
+          "720x1280"
+        ]
+      },
+      "strategyParameters": {},
+      "implementation": "implemented",
+      "anchor": {
+        "id": "qwen_image:candle:q4:base:base:qwen-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v1:imc-48b48f5179e387bc2841",
+        "tier": "q4",
+        "source": "config/memory-anchors.json#qwen_image:candle:q4:base:base:qwen-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v1:imc-48b48f5179e387bc2841",
+        "current": false,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 15817,
+      "owningModelStory": 15865,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "crates/sceneworks-worker/src/engines.rs#MODEL_TABLE"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#qwen_image:candle:q4:base:base:qwen-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v1:imc-48b48f5179e387bc2841"
+          }
+        ]
+      }
+    },
+    {
+      "id": "qwen_image:qwen_image:candle:q4:text_to_image:none:staged_residency",
+      "modelId": "qwen_image",
+      "resolvedRoute": "qwen_image",
+      "provider": "qwen_image",
+      "backend": "candle",
+      "tier": "q4",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "rung": "staged_residency",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "768x768",
+          "1024x1024",
+          "1280x720",
+          "720x1280"
+        ]
+      },
+      "strategyParameters": {
+        "phaseOrder": [
+          "conditioning",
+          "denoise",
+          "decode"
+        ]
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "qwen_image:candle:q4:base:base:qwen-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v1:imc-48b48f5179e387bc2841",
+        "tier": "q4",
+        "source": "config/memory-anchors.json#qwen_image:candle:q4:base:base:qwen-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v1:imc-48b48f5179e387bc2841",
+        "current": false,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 15817,
+      "owningModelStory": 15865,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "config/manifests/builtin.models.jsonc#models/qwen_image/candle"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#qwen_image:candle:q4:base:base:qwen-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v1:imc-48b48f5179e387bc2841"
+          }
+        ]
+      }
+    },
+    {
       "id": "qwen_image:qwen_image:mlx:bf16:text_to_image:control:resident",
       "modelId": "qwen_image",
       "resolvedRoute": "qwen_image",
@@ -28810,11 +29224,10 @@
         "tier": "bf16",
         "source": "config/memory-anchors.json#qwen_image:mlx:bf16:base:base:qwen-image-mlx-shared-ladder-2026-08-01-v1-eager:imc-d314058df6e188459f3b",
         "current": false,
-        "derivable": false,
-        "underivedReason": "every retained qwen_image MLX image record measures a single geometry per composition, so no within-cell per-pixel slope exists for this model and the image lane's coefficients (fitted on another model's spread) may not be borrowed; this anchor validates its measured point and prices nothing beyond it"
+        "derivable": true
       },
       "derivationDefined": true,
-      "state": "Anchored/underived",
+      "state": "Anchored",
       "owningFamilyStory": 15511,
       "owningModelStory": 15459,
       "evidence": {
@@ -28863,11 +29276,10 @@
         "tier": "bf16",
         "source": "config/memory-anchors.json#qwen_image:mlx:bf16:base:base:qwen-image-mlx-shared-ladder-2026-08-01-v1-eager:imc-d314058df6e188459f3b",
         "current": false,
-        "derivable": false,
-        "underivedReason": "every retained qwen_image MLX image record measures a single geometry per composition, so no within-cell per-pixel slope exists for this model and the image lane's coefficients (fitted on another model's spread) may not be borrowed; this anchor validates its measured point and prices nothing beyond it"
+        "derivable": true
       },
       "derivationDefined": true,
-      "state": "Anchored/underived",
+      "state": "Anchored",
       "owningFamilyStory": 15511,
       "owningModelStory": 15459,
       "evidence": {
@@ -28931,11 +29343,10 @@
         "tier": "bf16",
         "source": "config/memory-anchors.json#qwen_image:mlx:bf16:base:base:qwen-image-mlx-shared-ladder-2026-08-01-v1-eager:imc-d314058df6e188459f3b",
         "current": false,
-        "derivable": false,
-        "underivedReason": "every retained qwen_image MLX image record measures a single geometry per composition, so no within-cell per-pixel slope exists for this model and the image lane's coefficients (fitted on another model's spread) may not be borrowed; this anchor validates its measured point and prices nothing beyond it"
+        "derivable": true
       },
       "derivationDefined": true,
-      "state": "Anchored/underived",
+      "state": "Anchored",
       "owningFamilyStory": 15511,
       "owningModelStory": 15459,
       "evidence": {
@@ -28995,11 +29406,10 @@
         "tier": "bf16",
         "source": "config/memory-anchors.json#qwen_image:mlx:bf16:base:base:qwen-image-mlx-shared-ladder-2026-08-01-v1-eager:imc-d314058df6e188459f3b",
         "current": false,
-        "derivable": false,
-        "underivedReason": "every retained qwen_image MLX image record measures a single geometry per composition, so no within-cell per-pixel slope exists for this model and the image lane's coefficients (fitted on another model's spread) may not be borrowed; this anchor validates its measured point and prices nothing beyond it"
+        "derivable": true
       },
       "derivationDefined": true,
-      "state": "Anchored/underived",
+      "state": "Anchored",
       "owningFamilyStory": 15511,
       "owningModelStory": 15459,
       "evidence": {
@@ -29071,11 +29481,10 @@
         "tier": "bf16",
         "source": "config/memory-anchors.json#qwen_image:mlx:bf16:base:base:qwen-image-mlx-shared-ladder-2026-08-01-v1-eager:imc-d314058df6e188459f3b",
         "current": false,
-        "derivable": false,
-        "underivedReason": "every retained qwen_image MLX image record measures a single geometry per composition, so no within-cell per-pixel slope exists for this model and the image lane's coefficients (fitted on another model's spread) may not be borrowed; this anchor validates its measured point and prices nothing beyond it"
+        "derivable": true
       },
       "derivationDefined": true,
-      "state": "Anchored/underived",
+      "state": "Anchored",
       "owningFamilyStory": 15511,
       "owningModelStory": 15459,
       "evidence": {
@@ -29118,11 +29527,10 @@
         "tier": "bf16",
         "source": "config/memory-anchors.json#qwen_image:mlx:bf16:base:base:qwen-image-mlx-shared-ladder-2026-08-01-v1-eager:imc-d314058df6e188459f3b",
         "current": false,
-        "derivable": false,
-        "underivedReason": "every retained qwen_image MLX image record measures a single geometry per composition, so no within-cell per-pixel slope exists for this model and the image lane's coefficients (fitted on another model's spread) may not be borrowed; this anchor validates its measured point and prices nothing beyond it"
+        "derivable": true
       },
       "derivationDefined": true,
-      "state": "Anchored/underived",
+      "state": "Anchored",
       "owningFamilyStory": 15511,
       "owningModelStory": 15459,
       "evidence": {
@@ -29171,11 +29579,10 @@
         "tier": "bf16",
         "source": "config/memory-anchors.json#qwen_image:mlx:bf16:base:base:qwen-image-mlx-shared-ladder-2026-08-01-v1-eager:imc-d314058df6e188459f3b",
         "current": false,
-        "derivable": false,
-        "underivedReason": "every retained qwen_image MLX image record measures a single geometry per composition, so no within-cell per-pixel slope exists for this model and the image lane's coefficients (fitted on another model's spread) may not be borrowed; this anchor validates its measured point and prices nothing beyond it"
+        "derivable": true
       },
       "derivationDefined": true,
-      "state": "Anchored/underived",
+      "state": "Anchored",
       "owningFamilyStory": 15511,
       "owningModelStory": 15459,
       "evidence": {
@@ -29239,11 +29646,10 @@
         "tier": "bf16",
         "source": "config/memory-anchors.json#qwen_image:mlx:bf16:base:base:qwen-image-mlx-shared-ladder-2026-08-01-v1-eager:imc-d314058df6e188459f3b",
         "current": false,
-        "derivable": false,
-        "underivedReason": "every retained qwen_image MLX image record measures a single geometry per composition, so no within-cell per-pixel slope exists for this model and the image lane's coefficients (fitted on another model's spread) may not be borrowed; this anchor validates its measured point and prices nothing beyond it"
+        "derivable": true
       },
       "derivationDefined": true,
-      "state": "Anchored/underived",
+      "state": "Anchored",
       "owningFamilyStory": 15511,
       "owningModelStory": 15459,
       "evidence": {
@@ -29303,11 +29709,10 @@
         "tier": "bf16",
         "source": "config/memory-anchors.json#qwen_image:mlx:bf16:base:base:qwen-image-mlx-shared-ladder-2026-08-01-v1-eager:imc-d314058df6e188459f3b",
         "current": false,
-        "derivable": false,
-        "underivedReason": "every retained qwen_image MLX image record measures a single geometry per composition, so no within-cell per-pixel slope exists for this model and the image lane's coefficients (fitted on another model's spread) may not be borrowed; this anchor validates its measured point and prices nothing beyond it"
+        "derivable": true
       },
       "derivationDefined": true,
-      "state": "Anchored/underived",
+      "state": "Anchored",
       "owningFamilyStory": 15511,
       "owningModelStory": 15459,
       "evidence": {
@@ -29379,11 +29784,10 @@
         "tier": "bf16",
         "source": "config/memory-anchors.json#qwen_image:mlx:bf16:base:base:qwen-image-mlx-shared-ladder-2026-08-01-v1-eager:imc-d314058df6e188459f3b",
         "current": false,
-        "derivable": false,
-        "underivedReason": "every retained qwen_image MLX image record measures a single geometry per composition, so no within-cell per-pixel slope exists for this model and the image lane's coefficients (fitted on another model's spread) may not be borrowed; this anchor validates its measured point and prices nothing beyond it"
+        "derivable": true
       },
       "derivationDefined": true,
-      "state": "Anchored/underived",
+      "state": "Anchored",
       "owningFamilyStory": 15511,
       "owningModelStory": 15459,
       "evidence": {
@@ -29426,11 +29830,10 @@
         "tier": "bf16",
         "source": "config/memory-anchors.json#qwen_image:mlx:bf16:base:base:qwen-image-mlx-shared-ladder-2026-08-01-v1-eager:imc-d314058df6e188459f3b",
         "current": false,
-        "derivable": false,
-        "underivedReason": "every retained qwen_image MLX image record measures a single geometry per composition, so no within-cell per-pixel slope exists for this model and the image lane's coefficients (fitted on another model's spread) may not be borrowed; this anchor validates its measured point and prices nothing beyond it"
+        "derivable": true
       },
       "derivationDefined": true,
-      "state": "Anchored/underived",
+      "state": "Anchored",
       "owningFamilyStory": 15511,
       "owningModelStory": 15459,
       "evidence": {
@@ -29473,11 +29876,10 @@
         "tier": "bf16",
         "source": "config/memory-anchors.json#qwen_image:mlx:bf16:base:base:qwen-image-mlx-shared-ladder-2026-08-01-v1-eager:imc-d314058df6e188459f3b",
         "current": false,
-        "derivable": false,
-        "underivedReason": "every retained qwen_image MLX image record measures a single geometry per composition, so no within-cell per-pixel slope exists for this model and the image lane's coefficients (fitted on another model's spread) may not be borrowed; this anchor validates its measured point and prices nothing beyond it"
+        "derivable": true
       },
       "derivationDefined": true,
-      "state": "Anchored/underived",
+      "state": "Anchored",
       "owningFamilyStory": 15511,
       "owningModelStory": 15459,
       "evidence": {
@@ -29521,7 +29923,7 @@
         "source": "config/memory-anchors.json#qwen_image:mlx:q4:base:base:qwen-image-mlx-shared-ladder-2026-08-01-v1:imc-12f3ccbb72de78cea931",
         "current": false,
         "derivable": false,
-        "underivedReason": "every retained qwen_image MLX image record measures a single geometry per composition, so no within-cell per-pixel slope exists for this model and the image lane's coefficients (fitted on another model's spread) may not be borrowed; this anchor validates its measured point and prices nothing beyond it"
+        "underivedReason": "the anchor render engaged bounded rungs (or deferred materialization), so it does not measure the widest composition the MLX image law upper-bounds the ladder from; this anchor validates its measured point and prices nothing beyond it"
       },
       "derivationDefined": true,
       "state": "Anchored/underived",
@@ -29574,7 +29976,7 @@
         "source": "config/memory-anchors.json#qwen_image:mlx:q4:base:base:qwen-image-mlx-shared-ladder-2026-08-01-v1:imc-12f3ccbb72de78cea931",
         "current": false,
         "derivable": false,
-        "underivedReason": "every retained qwen_image MLX image record measures a single geometry per composition, so no within-cell per-pixel slope exists for this model and the image lane's coefficients (fitted on another model's spread) may not be borrowed; this anchor validates its measured point and prices nothing beyond it"
+        "underivedReason": "the anchor render engaged bounded rungs (or deferred materialization), so it does not measure the widest composition the MLX image law upper-bounds the ladder from; this anchor validates its measured point and prices nothing beyond it"
       },
       "derivationDefined": true,
       "state": "Anchored/underived",
@@ -29642,7 +30044,7 @@
         "source": "config/memory-anchors.json#qwen_image:mlx:q4:base:base:qwen-image-mlx-shared-ladder-2026-08-01-v1:imc-12f3ccbb72de78cea931",
         "current": false,
         "derivable": false,
-        "underivedReason": "every retained qwen_image MLX image record measures a single geometry per composition, so no within-cell per-pixel slope exists for this model and the image lane's coefficients (fitted on another model's spread) may not be borrowed; this anchor validates its measured point and prices nothing beyond it"
+        "underivedReason": "the anchor render engaged bounded rungs (or deferred materialization), so it does not measure the widest composition the MLX image law upper-bounds the ladder from; this anchor validates its measured point and prices nothing beyond it"
       },
       "derivationDefined": true,
       "state": "Anchored/underived",
@@ -29706,7 +30108,7 @@
         "source": "config/memory-anchors.json#qwen_image:mlx:q4:base:base:qwen-image-mlx-shared-ladder-2026-08-01-v1:imc-12f3ccbb72de78cea931",
         "current": false,
         "derivable": false,
-        "underivedReason": "every retained qwen_image MLX image record measures a single geometry per composition, so no within-cell per-pixel slope exists for this model and the image lane's coefficients (fitted on another model's spread) may not be borrowed; this anchor validates its measured point and prices nothing beyond it"
+        "underivedReason": "the anchor render engaged bounded rungs (or deferred materialization), so it does not measure the widest composition the MLX image law upper-bounds the ladder from; this anchor validates its measured point and prices nothing beyond it"
       },
       "derivationDefined": true,
       "state": "Anchored/underived",
@@ -29782,7 +30184,7 @@
         "source": "config/memory-anchors.json#qwen_image:mlx:q4:base:base:qwen-image-mlx-shared-ladder-2026-08-01-v1:imc-12f3ccbb72de78cea931",
         "current": false,
         "derivable": false,
-        "underivedReason": "every retained qwen_image MLX image record measures a single geometry per composition, so no within-cell per-pixel slope exists for this model and the image lane's coefficients (fitted on another model's spread) may not be borrowed; this anchor validates its measured point and prices nothing beyond it"
+        "underivedReason": "the anchor render engaged bounded rungs (or deferred materialization), so it does not measure the widest composition the MLX image law upper-bounds the ladder from; this anchor validates its measured point and prices nothing beyond it"
       },
       "derivationDefined": true,
       "state": "Anchored/underived",
@@ -29829,7 +30231,7 @@
         "source": "config/memory-anchors.json#qwen_image:mlx:q4:base:base:qwen-image-mlx-shared-ladder-2026-08-01-v1:imc-12f3ccbb72de78cea931",
         "current": false,
         "derivable": false,
-        "underivedReason": "every retained qwen_image MLX image record measures a single geometry per composition, so no within-cell per-pixel slope exists for this model and the image lane's coefficients (fitted on another model's spread) may not be borrowed; this anchor validates its measured point and prices nothing beyond it"
+        "underivedReason": "the anchor render engaged bounded rungs (or deferred materialization), so it does not measure the widest composition the MLX image law upper-bounds the ladder from; this anchor validates its measured point and prices nothing beyond it"
       },
       "derivationDefined": true,
       "state": "Anchored/underived",
@@ -29882,7 +30284,7 @@
         "source": "config/memory-anchors.json#qwen_image:mlx:q4:base:base:qwen-image-mlx-shared-ladder-2026-08-01-v1:imc-12f3ccbb72de78cea931",
         "current": false,
         "derivable": false,
-        "underivedReason": "every retained qwen_image MLX image record measures a single geometry per composition, so no within-cell per-pixel slope exists for this model and the image lane's coefficients (fitted on another model's spread) may not be borrowed; this anchor validates its measured point and prices nothing beyond it"
+        "underivedReason": "the anchor render engaged bounded rungs (or deferred materialization), so it does not measure the widest composition the MLX image law upper-bounds the ladder from; this anchor validates its measured point and prices nothing beyond it"
       },
       "derivationDefined": true,
       "state": "Anchored/underived",
@@ -29950,7 +30352,7 @@
         "source": "config/memory-anchors.json#qwen_image:mlx:q4:base:base:qwen-image-mlx-shared-ladder-2026-08-01-v1:imc-12f3ccbb72de78cea931",
         "current": false,
         "derivable": false,
-        "underivedReason": "every retained qwen_image MLX image record measures a single geometry per composition, so no within-cell per-pixel slope exists for this model and the image lane's coefficients (fitted on another model's spread) may not be borrowed; this anchor validates its measured point and prices nothing beyond it"
+        "underivedReason": "the anchor render engaged bounded rungs (or deferred materialization), so it does not measure the widest composition the MLX image law upper-bounds the ladder from; this anchor validates its measured point and prices nothing beyond it"
       },
       "derivationDefined": true,
       "state": "Anchored/underived",
@@ -30014,7 +30416,7 @@
         "source": "config/memory-anchors.json#qwen_image:mlx:q4:base:base:qwen-image-mlx-shared-ladder-2026-08-01-v1:imc-12f3ccbb72de78cea931",
         "current": false,
         "derivable": false,
-        "underivedReason": "every retained qwen_image MLX image record measures a single geometry per composition, so no within-cell per-pixel slope exists for this model and the image lane's coefficients (fitted on another model's spread) may not be borrowed; this anchor validates its measured point and prices nothing beyond it"
+        "underivedReason": "the anchor render engaged bounded rungs (or deferred materialization), so it does not measure the widest composition the MLX image law upper-bounds the ladder from; this anchor validates its measured point and prices nothing beyond it"
       },
       "derivationDefined": true,
       "state": "Anchored/underived",
@@ -30090,7 +30492,7 @@
         "source": "config/memory-anchors.json#qwen_image:mlx:q4:base:base:qwen-image-mlx-shared-ladder-2026-08-01-v1:imc-12f3ccbb72de78cea931",
         "current": false,
         "derivable": false,
-        "underivedReason": "every retained qwen_image MLX image record measures a single geometry per composition, so no within-cell per-pixel slope exists for this model and the image lane's coefficients (fitted on another model's spread) may not be borrowed; this anchor validates its measured point and prices nothing beyond it"
+        "underivedReason": "the anchor render engaged bounded rungs (or deferred materialization), so it does not measure the widest composition the MLX image law upper-bounds the ladder from; this anchor validates its measured point and prices nothing beyond it"
       },
       "derivationDefined": true,
       "state": "Anchored/underived",
@@ -30137,7 +30539,7 @@
         "source": "config/memory-anchors.json#qwen_image:mlx:q4:base:base:qwen-image-mlx-shared-ladder-2026-08-01-v1:imc-12f3ccbb72de78cea931",
         "current": false,
         "derivable": false,
-        "underivedReason": "every retained qwen_image MLX image record measures a single geometry per composition, so no within-cell per-pixel slope exists for this model and the image lane's coefficients (fitted on another model's spread) may not be borrowed; this anchor validates its measured point and prices nothing beyond it"
+        "underivedReason": "the anchor render engaged bounded rungs (or deferred materialization), so it does not measure the widest composition the MLX image law upper-bounds the ladder from; this anchor validates its measured point and prices nothing beyond it"
       },
       "derivationDefined": true,
       "state": "Anchored/underived",
@@ -30190,7 +30592,7 @@
         "source": "config/memory-anchors.json#qwen_image:mlx:q4:base:base:qwen-image-mlx-shared-ladder-2026-08-01-v1:imc-12f3ccbb72de78cea931",
         "current": false,
         "derivable": false,
-        "underivedReason": "every retained qwen_image MLX image record measures a single geometry per composition, so no within-cell per-pixel slope exists for this model and the image lane's coefficients (fitted on another model's spread) may not be borrowed; this anchor validates its measured point and prices nothing beyond it"
+        "underivedReason": "the anchor render engaged bounded rungs (or deferred materialization), so it does not measure the widest composition the MLX image law upper-bounds the ladder from; this anchor validates its measured point and prices nothing beyond it"
       },
       "derivationDefined": true,
       "state": "Anchored/underived",
@@ -30237,7 +30639,7 @@
         "source": "config/memory-anchors.json#qwen_image:mlx:q8:base:base:qwen-image-mlx-shared-ladder-2026-08-01-v1:imc-8f110511b0f85d15f72f",
         "current": false,
         "derivable": false,
-        "underivedReason": "every retained qwen_image MLX image record measures a single geometry per composition, so no within-cell per-pixel slope exists for this model and the image lane's coefficients (fitted on another model's spread) may not be borrowed; this anchor validates its measured point and prices nothing beyond it"
+        "underivedReason": "the anchor render engaged bounded rungs (or deferred materialization), so it does not measure the widest composition the MLX image law upper-bounds the ladder from; this anchor validates its measured point and prices nothing beyond it"
       },
       "derivationDefined": true,
       "state": "Anchored/underived",
@@ -30290,7 +30692,7 @@
         "source": "config/memory-anchors.json#qwen_image:mlx:q8:base:base:qwen-image-mlx-shared-ladder-2026-08-01-v1:imc-8f110511b0f85d15f72f",
         "current": false,
         "derivable": false,
-        "underivedReason": "every retained qwen_image MLX image record measures a single geometry per composition, so no within-cell per-pixel slope exists for this model and the image lane's coefficients (fitted on another model's spread) may not be borrowed; this anchor validates its measured point and prices nothing beyond it"
+        "underivedReason": "the anchor render engaged bounded rungs (or deferred materialization), so it does not measure the widest composition the MLX image law upper-bounds the ladder from; this anchor validates its measured point and prices nothing beyond it"
       },
       "derivationDefined": true,
       "state": "Anchored/underived",
@@ -30358,7 +30760,7 @@
         "source": "config/memory-anchors.json#qwen_image:mlx:q8:base:base:qwen-image-mlx-shared-ladder-2026-08-01-v1:imc-8f110511b0f85d15f72f",
         "current": false,
         "derivable": false,
-        "underivedReason": "every retained qwen_image MLX image record measures a single geometry per composition, so no within-cell per-pixel slope exists for this model and the image lane's coefficients (fitted on another model's spread) may not be borrowed; this anchor validates its measured point and prices nothing beyond it"
+        "underivedReason": "the anchor render engaged bounded rungs (or deferred materialization), so it does not measure the widest composition the MLX image law upper-bounds the ladder from; this anchor validates its measured point and prices nothing beyond it"
       },
       "derivationDefined": true,
       "state": "Anchored/underived",
@@ -30422,7 +30824,7 @@
         "source": "config/memory-anchors.json#qwen_image:mlx:q8:base:base:qwen-image-mlx-shared-ladder-2026-08-01-v1:imc-8f110511b0f85d15f72f",
         "current": false,
         "derivable": false,
-        "underivedReason": "every retained qwen_image MLX image record measures a single geometry per composition, so no within-cell per-pixel slope exists for this model and the image lane's coefficients (fitted on another model's spread) may not be borrowed; this anchor validates its measured point and prices nothing beyond it"
+        "underivedReason": "the anchor render engaged bounded rungs (or deferred materialization), so it does not measure the widest composition the MLX image law upper-bounds the ladder from; this anchor validates its measured point and prices nothing beyond it"
       },
       "derivationDefined": true,
       "state": "Anchored/underived",
@@ -30498,7 +30900,7 @@
         "source": "config/memory-anchors.json#qwen_image:mlx:q8:base:base:qwen-image-mlx-shared-ladder-2026-08-01-v1:imc-8f110511b0f85d15f72f",
         "current": false,
         "derivable": false,
-        "underivedReason": "every retained qwen_image MLX image record measures a single geometry per composition, so no within-cell per-pixel slope exists for this model and the image lane's coefficients (fitted on another model's spread) may not be borrowed; this anchor validates its measured point and prices nothing beyond it"
+        "underivedReason": "the anchor render engaged bounded rungs (or deferred materialization), so it does not measure the widest composition the MLX image law upper-bounds the ladder from; this anchor validates its measured point and prices nothing beyond it"
       },
       "derivationDefined": true,
       "state": "Anchored/underived",
@@ -30545,7 +30947,7 @@
         "source": "config/memory-anchors.json#qwen_image:mlx:q8:base:base:qwen-image-mlx-shared-ladder-2026-08-01-v1:imc-8f110511b0f85d15f72f",
         "current": false,
         "derivable": false,
-        "underivedReason": "every retained qwen_image MLX image record measures a single geometry per composition, so no within-cell per-pixel slope exists for this model and the image lane's coefficients (fitted on another model's spread) may not be borrowed; this anchor validates its measured point and prices nothing beyond it"
+        "underivedReason": "the anchor render engaged bounded rungs (or deferred materialization), so it does not measure the widest composition the MLX image law upper-bounds the ladder from; this anchor validates its measured point and prices nothing beyond it"
       },
       "derivationDefined": true,
       "state": "Anchored/underived",
@@ -30598,7 +31000,7 @@
         "source": "config/memory-anchors.json#qwen_image:mlx:q8:base:base:qwen-image-mlx-shared-ladder-2026-08-01-v1:imc-8f110511b0f85d15f72f",
         "current": false,
         "derivable": false,
-        "underivedReason": "every retained qwen_image MLX image record measures a single geometry per composition, so no within-cell per-pixel slope exists for this model and the image lane's coefficients (fitted on another model's spread) may not be borrowed; this anchor validates its measured point and prices nothing beyond it"
+        "underivedReason": "the anchor render engaged bounded rungs (or deferred materialization), so it does not measure the widest composition the MLX image law upper-bounds the ladder from; this anchor validates its measured point and prices nothing beyond it"
       },
       "derivationDefined": true,
       "state": "Anchored/underived",
@@ -30666,7 +31068,7 @@
         "source": "config/memory-anchors.json#qwen_image:mlx:q8:base:base:qwen-image-mlx-shared-ladder-2026-08-01-v1:imc-8f110511b0f85d15f72f",
         "current": false,
         "derivable": false,
-        "underivedReason": "every retained qwen_image MLX image record measures a single geometry per composition, so no within-cell per-pixel slope exists for this model and the image lane's coefficients (fitted on another model's spread) may not be borrowed; this anchor validates its measured point and prices nothing beyond it"
+        "underivedReason": "the anchor render engaged bounded rungs (or deferred materialization), so it does not measure the widest composition the MLX image law upper-bounds the ladder from; this anchor validates its measured point and prices nothing beyond it"
       },
       "derivationDefined": true,
       "state": "Anchored/underived",
@@ -30730,7 +31132,7 @@
         "source": "config/memory-anchors.json#qwen_image:mlx:q8:base:base:qwen-image-mlx-shared-ladder-2026-08-01-v1:imc-8f110511b0f85d15f72f",
         "current": false,
         "derivable": false,
-        "underivedReason": "every retained qwen_image MLX image record measures a single geometry per composition, so no within-cell per-pixel slope exists for this model and the image lane's coefficients (fitted on another model's spread) may not be borrowed; this anchor validates its measured point and prices nothing beyond it"
+        "underivedReason": "the anchor render engaged bounded rungs (or deferred materialization), so it does not measure the widest composition the MLX image law upper-bounds the ladder from; this anchor validates its measured point and prices nothing beyond it"
       },
       "derivationDefined": true,
       "state": "Anchored/underived",
@@ -30806,7 +31208,7 @@
         "source": "config/memory-anchors.json#qwen_image:mlx:q8:base:base:qwen-image-mlx-shared-ladder-2026-08-01-v1:imc-8f110511b0f85d15f72f",
         "current": false,
         "derivable": false,
-        "underivedReason": "every retained qwen_image MLX image record measures a single geometry per composition, so no within-cell per-pixel slope exists for this model and the image lane's coefficients (fitted on another model's spread) may not be borrowed; this anchor validates its measured point and prices nothing beyond it"
+        "underivedReason": "the anchor render engaged bounded rungs (or deferred materialization), so it does not measure the widest composition the MLX image law upper-bounds the ladder from; this anchor validates its measured point and prices nothing beyond it"
       },
       "derivationDefined": true,
       "state": "Anchored/underived",
@@ -30853,7 +31255,7 @@
         "source": "config/memory-anchors.json#qwen_image:mlx:q8:base:base:qwen-image-mlx-shared-ladder-2026-08-01-v1:imc-8f110511b0f85d15f72f",
         "current": false,
         "derivable": false,
-        "underivedReason": "every retained qwen_image MLX image record measures a single geometry per composition, so no within-cell per-pixel slope exists for this model and the image lane's coefficients (fitted on another model's spread) may not be borrowed; this anchor validates its measured point and prices nothing beyond it"
+        "underivedReason": "the anchor render engaged bounded rungs (or deferred materialization), so it does not measure the widest composition the MLX image law upper-bounds the ladder from; this anchor validates its measured point and prices nothing beyond it"
       },
       "derivationDefined": true,
       "state": "Anchored/underived",
@@ -30906,7 +31308,7 @@
         "source": "config/memory-anchors.json#qwen_image:mlx:q8:base:base:qwen-image-mlx-shared-ladder-2026-08-01-v1:imc-8f110511b0f85d15f72f",
         "current": false,
         "derivable": false,
-        "underivedReason": "every retained qwen_image MLX image record measures a single geometry per composition, so no within-cell per-pixel slope exists for this model and the image lane's coefficients (fitted on another model's spread) may not be borrowed; this anchor validates its measured point and prices nothing beyond it"
+        "underivedReason": "the anchor render engaged bounded rungs (or deferred materialization), so it does not measure the widest composition the MLX image law upper-bounds the ladder from; this anchor validates its measured point and prices nothing beyond it"
       },
       "derivationDefined": true,
       "state": "Anchored/underived",
@@ -49935,6 +50337,843 @@
       }
     },
     {
+      "id": "z_image_turbo:z_image_turbo_control:candle:bf16:text_to_image:control:bounded_attention",
+      "modelId": "z_image_turbo",
+      "resolvedRoute": "z_image_turbo_control",
+      "provider": "z_image_turbo_control",
+      "backend": "candle",
+      "tier": "bf16",
+      "mode": "text_to_image",
+      "overlay": "control",
+      "rung": "bounded_attention",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "768x768",
+          "1024x1024",
+          "1280x720",
+          "720x1280"
+        ]
+      },
+      "strategyParameters": {
+        "decodeTileEdge": 512,
+        "decodeOverlap": 128,
+        "attentionChunkSize": 67108864,
+        "publishedRanges": {
+          "decodeTileEdges": [
+            512
+          ],
+          "decodeOverlaps": [
+            128
+          ],
+          "attentionChunkSizes": [
+            67108864
+          ]
+        }
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "z_image_turbo:candle:bf16:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-3cd69f2fee9e91e83b58",
+        "tier": "bf16",
+        "source": "config/memory-anchors.json#z_image_turbo:candle:bf16:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-3cd69f2fee9e91e83b58",
+        "current": true,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 15815,
+      "owningModelStory": 15859,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "inference:crates/media/candle-gen/candle-gen-z-image/src/memory_strategy.rs"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#z_image_turbo:candle:bf16:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-3cd69f2fee9e91e83b58"
+          }
+        ]
+      }
+    },
+    {
+      "id": "z_image_turbo:z_image_turbo_control:candle:bf16:text_to_image:control:bounded_decode",
+      "modelId": "z_image_turbo",
+      "resolvedRoute": "z_image_turbo_control",
+      "provider": "z_image_turbo_control",
+      "backend": "candle",
+      "tier": "bf16",
+      "mode": "text_to_image",
+      "overlay": "control",
+      "rung": "bounded_decode",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "768x768",
+          "1024x1024",
+          "1280x720",
+          "720x1280"
+        ]
+      },
+      "strategyParameters": {
+        "decodeTileEdge": 512,
+        "decodeOverlap": 128,
+        "publishedRanges": {
+          "decodeTileEdges": [
+            512
+          ],
+          "decodeOverlaps": [
+            128
+          ]
+        }
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "z_image_turbo:candle:bf16:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-3cd69f2fee9e91e83b58",
+        "tier": "bf16",
+        "source": "config/memory-anchors.json#z_image_turbo:candle:bf16:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-3cd69f2fee9e91e83b58",
+        "current": true,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 15815,
+      "owningModelStory": 15859,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "inference:crates/media/candle-gen/candle-gen-z-image/src/memory_strategy.rs"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#z_image_turbo:candle:bf16:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-3cd69f2fee9e91e83b58"
+          }
+        ]
+      }
+    },
+    {
+      "id": "z_image_turbo:z_image_turbo_control:candle:bf16:text_to_image:control:bounded_transformer_residency",
+      "modelId": "z_image_turbo",
+      "resolvedRoute": "z_image_turbo_control",
+      "provider": "z_image_turbo_control",
+      "backend": "candle",
+      "tier": "bf16",
+      "mode": "text_to_image",
+      "overlay": "control",
+      "rung": "bounded_transformer_residency",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "768x768",
+          "1024x1024",
+          "1280x720",
+          "720x1280"
+        ]
+      },
+      "strategyParameters": {
+        "decodeTileEdge": 512,
+        "decodeOverlap": 128,
+        "attentionChunkSize": 67108864,
+        "transformerWindowSize": 1,
+        "transformerWindowComponent": "Dit",
+        "publishedRanges": {
+          "decodeTileEdges": [
+            512
+          ],
+          "decodeOverlaps": [
+            128
+          ],
+          "attentionChunkSizes": [
+            67108864
+          ],
+          "transformerWindowSizes": [
+            1
+          ],
+          "transformerWindowComponents": [
+            "Dit"
+          ]
+        }
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "z_image_turbo:candle:bf16:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-3cd69f2fee9e91e83b58",
+        "tier": "bf16",
+        "source": "config/memory-anchors.json#z_image_turbo:candle:bf16:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-3cd69f2fee9e91e83b58",
+        "current": true,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 15815,
+      "owningModelStory": 15859,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "inference:crates/media/candle-gen/candle-gen-z-image/src/memory_strategy.rs"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#z_image_turbo:candle:bf16:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-3cd69f2fee9e91e83b58"
+          }
+        ]
+      }
+    },
+    {
+      "id": "z_image_turbo:z_image_turbo_control:candle:bf16:text_to_image:control:resident",
+      "modelId": "z_image_turbo",
+      "resolvedRoute": "z_image_turbo_control",
+      "provider": "z_image_turbo_control",
+      "backend": "candle",
+      "tier": "bf16",
+      "mode": "text_to_image",
+      "overlay": "control",
+      "rung": "resident",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "768x768",
+          "1024x1024",
+          "1280x720",
+          "720x1280"
+        ]
+      },
+      "strategyParameters": {},
+      "implementation": "implemented",
+      "anchor": {
+        "id": "z_image_turbo:candle:bf16:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-3cd69f2fee9e91e83b58",
+        "tier": "bf16",
+        "source": "config/memory-anchors.json#z_image_turbo:candle:bf16:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-3cd69f2fee9e91e83b58",
+        "current": true,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 15815,
+      "owningModelStory": 15859,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "crates/sceneworks-worker/src/engines.rs#MODEL_TABLE"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#z_image_turbo:candle:bf16:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-3cd69f2fee9e91e83b58"
+          }
+        ]
+      }
+    },
+    {
+      "id": "z_image_turbo:z_image_turbo_control:candle:bf16:text_to_image:control:staged_residency",
+      "modelId": "z_image_turbo",
+      "resolvedRoute": "z_image_turbo_control",
+      "provider": "z_image_turbo_control",
+      "backend": "candle",
+      "tier": "bf16",
+      "mode": "text_to_image",
+      "overlay": "control",
+      "rung": "staged_residency",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "768x768",
+          "1024x1024",
+          "1280x720",
+          "720x1280"
+        ]
+      },
+      "strategyParameters": {},
+      "implementation": "implemented",
+      "anchor": {
+        "id": "z_image_turbo:candle:bf16:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-3cd69f2fee9e91e83b58",
+        "tier": "bf16",
+        "source": "config/memory-anchors.json#z_image_turbo:candle:bf16:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-3cd69f2fee9e91e83b58",
+        "current": true,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 15815,
+      "owningModelStory": 15859,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "config/engine-capabilities/capabilities.candle.json#memoryContracts/z_image_turbo_control"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#z_image_turbo:candle:bf16:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-3cd69f2fee9e91e83b58"
+          }
+        ]
+      }
+    },
+    {
+      "id": "z_image_turbo:z_image_turbo_control:candle:q4:text_to_image:control:bounded_attention",
+      "modelId": "z_image_turbo",
+      "resolvedRoute": "z_image_turbo_control",
+      "provider": "z_image_turbo_control",
+      "backend": "candle",
+      "tier": "q4",
+      "mode": "text_to_image",
+      "overlay": "control",
+      "rung": "bounded_attention",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "768x768",
+          "1024x1024",
+          "1280x720",
+          "720x1280"
+        ]
+      },
+      "strategyParameters": {
+        "decodeTileEdge": 512,
+        "decodeOverlap": 128,
+        "attentionChunkSize": 67108864,
+        "publishedRanges": {
+          "decodeTileEdges": [
+            512
+          ],
+          "decodeOverlaps": [
+            128
+          ],
+          "attentionChunkSizes": [
+            67108864
+          ]
+        }
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "z_image_turbo:candle:q4:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-b8064416c974b5008509",
+        "tier": "q4",
+        "source": "config/memory-anchors.json#z_image_turbo:candle:q4:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-b8064416c974b5008509",
+        "current": true,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 15815,
+      "owningModelStory": 15859,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "inference:crates/media/candle-gen/candle-gen-z-image/src/memory_strategy.rs"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#z_image_turbo:candle:q4:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-b8064416c974b5008509"
+          }
+        ]
+      }
+    },
+    {
+      "id": "z_image_turbo:z_image_turbo_control:candle:q4:text_to_image:control:bounded_decode",
+      "modelId": "z_image_turbo",
+      "resolvedRoute": "z_image_turbo_control",
+      "provider": "z_image_turbo_control",
+      "backend": "candle",
+      "tier": "q4",
+      "mode": "text_to_image",
+      "overlay": "control",
+      "rung": "bounded_decode",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "768x768",
+          "1024x1024",
+          "1280x720",
+          "720x1280"
+        ]
+      },
+      "strategyParameters": {
+        "decodeTileEdge": 512,
+        "decodeOverlap": 128,
+        "publishedRanges": {
+          "decodeTileEdges": [
+            512
+          ],
+          "decodeOverlaps": [
+            128
+          ]
+        }
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "z_image_turbo:candle:q4:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-b8064416c974b5008509",
+        "tier": "q4",
+        "source": "config/memory-anchors.json#z_image_turbo:candle:q4:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-b8064416c974b5008509",
+        "current": true,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 15815,
+      "owningModelStory": 15859,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "inference:crates/media/candle-gen/candle-gen-z-image/src/memory_strategy.rs"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#z_image_turbo:candle:q4:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-b8064416c974b5008509"
+          }
+        ]
+      }
+    },
+    {
+      "id": "z_image_turbo:z_image_turbo_control:candle:q4:text_to_image:control:bounded_transformer_residency",
+      "modelId": "z_image_turbo",
+      "resolvedRoute": "z_image_turbo_control",
+      "provider": "z_image_turbo_control",
+      "backend": "candle",
+      "tier": "q4",
+      "mode": "text_to_image",
+      "overlay": "control",
+      "rung": "bounded_transformer_residency",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "768x768",
+          "1024x1024",
+          "1280x720",
+          "720x1280"
+        ]
+      },
+      "strategyParameters": {
+        "decodeTileEdge": 512,
+        "decodeOverlap": 128,
+        "attentionChunkSize": 67108864,
+        "transformerWindowSize": 1,
+        "transformerWindowComponent": "Dit",
+        "publishedRanges": {
+          "decodeTileEdges": [
+            512
+          ],
+          "decodeOverlaps": [
+            128
+          ],
+          "attentionChunkSizes": [
+            67108864
+          ],
+          "transformerWindowSizes": [
+            1
+          ],
+          "transformerWindowComponents": [
+            "Dit"
+          ]
+        }
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "z_image_turbo:candle:q4:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-b8064416c974b5008509",
+        "tier": "q4",
+        "source": "config/memory-anchors.json#z_image_turbo:candle:q4:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-b8064416c974b5008509",
+        "current": true,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 15815,
+      "owningModelStory": 15859,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "inference:crates/media/candle-gen/candle-gen-z-image/src/memory_strategy.rs"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#z_image_turbo:candle:q4:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-b8064416c974b5008509"
+          }
+        ]
+      }
+    },
+    {
+      "id": "z_image_turbo:z_image_turbo_control:candle:q4:text_to_image:control:resident",
+      "modelId": "z_image_turbo",
+      "resolvedRoute": "z_image_turbo_control",
+      "provider": "z_image_turbo_control",
+      "backend": "candle",
+      "tier": "q4",
+      "mode": "text_to_image",
+      "overlay": "control",
+      "rung": "resident",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "768x768",
+          "1024x1024",
+          "1280x720",
+          "720x1280"
+        ]
+      },
+      "strategyParameters": {},
+      "implementation": "implemented",
+      "anchor": {
+        "id": "z_image_turbo:candle:q4:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-b8064416c974b5008509",
+        "tier": "q4",
+        "source": "config/memory-anchors.json#z_image_turbo:candle:q4:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-b8064416c974b5008509",
+        "current": true,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 15815,
+      "owningModelStory": 15859,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "crates/sceneworks-worker/src/engines.rs#MODEL_TABLE"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#z_image_turbo:candle:q4:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-b8064416c974b5008509"
+          }
+        ]
+      }
+    },
+    {
+      "id": "z_image_turbo:z_image_turbo_control:candle:q4:text_to_image:control:staged_residency",
+      "modelId": "z_image_turbo",
+      "resolvedRoute": "z_image_turbo_control",
+      "provider": "z_image_turbo_control",
+      "backend": "candle",
+      "tier": "q4",
+      "mode": "text_to_image",
+      "overlay": "control",
+      "rung": "staged_residency",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "768x768",
+          "1024x1024",
+          "1280x720",
+          "720x1280"
+        ]
+      },
+      "strategyParameters": {},
+      "implementation": "implemented",
+      "anchor": {
+        "id": "z_image_turbo:candle:q4:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-b8064416c974b5008509",
+        "tier": "q4",
+        "source": "config/memory-anchors.json#z_image_turbo:candle:q4:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-b8064416c974b5008509",
+        "current": true,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 15815,
+      "owningModelStory": 15859,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "config/engine-capabilities/capabilities.candle.json#memoryContracts/z_image_turbo_control"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#z_image_turbo:candle:q4:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-b8064416c974b5008509"
+          }
+        ]
+      }
+    },
+    {
+      "id": "z_image_turbo:z_image_turbo_control:candle:q8:text_to_image:control:bounded_attention",
+      "modelId": "z_image_turbo",
+      "resolvedRoute": "z_image_turbo_control",
+      "provider": "z_image_turbo_control",
+      "backend": "candle",
+      "tier": "q8",
+      "mode": "text_to_image",
+      "overlay": "control",
+      "rung": "bounded_attention",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "768x768",
+          "1024x1024",
+          "1280x720",
+          "720x1280"
+        ]
+      },
+      "strategyParameters": {
+        "decodeTileEdge": 512,
+        "decodeOverlap": 128,
+        "attentionChunkSize": 67108864,
+        "publishedRanges": {
+          "decodeTileEdges": [
+            512
+          ],
+          "decodeOverlaps": [
+            128
+          ],
+          "attentionChunkSizes": [
+            67108864
+          ]
+        }
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "z_image_turbo:candle:q8:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-8cda4f70f78dd33f5330",
+        "tier": "q8",
+        "source": "config/memory-anchors.json#z_image_turbo:candle:q8:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-8cda4f70f78dd33f5330",
+        "current": true,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 15815,
+      "owningModelStory": 15859,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "inference:crates/media/candle-gen/candle-gen-z-image/src/memory_strategy.rs"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#z_image_turbo:candle:q8:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-8cda4f70f78dd33f5330"
+          }
+        ]
+      }
+    },
+    {
+      "id": "z_image_turbo:z_image_turbo_control:candle:q8:text_to_image:control:bounded_decode",
+      "modelId": "z_image_turbo",
+      "resolvedRoute": "z_image_turbo_control",
+      "provider": "z_image_turbo_control",
+      "backend": "candle",
+      "tier": "q8",
+      "mode": "text_to_image",
+      "overlay": "control",
+      "rung": "bounded_decode",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "768x768",
+          "1024x1024",
+          "1280x720",
+          "720x1280"
+        ]
+      },
+      "strategyParameters": {
+        "decodeTileEdge": 512,
+        "decodeOverlap": 128,
+        "publishedRanges": {
+          "decodeTileEdges": [
+            512
+          ],
+          "decodeOverlaps": [
+            128
+          ]
+        }
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "z_image_turbo:candle:q8:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-8cda4f70f78dd33f5330",
+        "tier": "q8",
+        "source": "config/memory-anchors.json#z_image_turbo:candle:q8:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-8cda4f70f78dd33f5330",
+        "current": true,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 15815,
+      "owningModelStory": 15859,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "inference:crates/media/candle-gen/candle-gen-z-image/src/memory_strategy.rs"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#z_image_turbo:candle:q8:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-8cda4f70f78dd33f5330"
+          }
+        ]
+      }
+    },
+    {
+      "id": "z_image_turbo:z_image_turbo_control:candle:q8:text_to_image:control:bounded_transformer_residency",
+      "modelId": "z_image_turbo",
+      "resolvedRoute": "z_image_turbo_control",
+      "provider": "z_image_turbo_control",
+      "backend": "candle",
+      "tier": "q8",
+      "mode": "text_to_image",
+      "overlay": "control",
+      "rung": "bounded_transformer_residency",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "768x768",
+          "1024x1024",
+          "1280x720",
+          "720x1280"
+        ]
+      },
+      "strategyParameters": {
+        "decodeTileEdge": 512,
+        "decodeOverlap": 128,
+        "attentionChunkSize": 67108864,
+        "transformerWindowSize": 1,
+        "transformerWindowComponent": "Dit",
+        "publishedRanges": {
+          "decodeTileEdges": [
+            512
+          ],
+          "decodeOverlaps": [
+            128
+          ],
+          "attentionChunkSizes": [
+            67108864
+          ],
+          "transformerWindowSizes": [
+            1
+          ],
+          "transformerWindowComponents": [
+            "Dit"
+          ]
+        }
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "z_image_turbo:candle:q8:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-8cda4f70f78dd33f5330",
+        "tier": "q8",
+        "source": "config/memory-anchors.json#z_image_turbo:candle:q8:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-8cda4f70f78dd33f5330",
+        "current": true,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 15815,
+      "owningModelStory": 15859,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "inference:crates/media/candle-gen/candle-gen-z-image/src/memory_strategy.rs"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#z_image_turbo:candle:q8:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-8cda4f70f78dd33f5330"
+          }
+        ]
+      }
+    },
+    {
+      "id": "z_image_turbo:z_image_turbo_control:candle:q8:text_to_image:control:resident",
+      "modelId": "z_image_turbo",
+      "resolvedRoute": "z_image_turbo_control",
+      "provider": "z_image_turbo_control",
+      "backend": "candle",
+      "tier": "q8",
+      "mode": "text_to_image",
+      "overlay": "control",
+      "rung": "resident",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "768x768",
+          "1024x1024",
+          "1280x720",
+          "720x1280"
+        ]
+      },
+      "strategyParameters": {},
+      "implementation": "implemented",
+      "anchor": {
+        "id": "z_image_turbo:candle:q8:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-8cda4f70f78dd33f5330",
+        "tier": "q8",
+        "source": "config/memory-anchors.json#z_image_turbo:candle:q8:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-8cda4f70f78dd33f5330",
+        "current": true,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 15815,
+      "owningModelStory": 15859,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "crates/sceneworks-worker/src/engines.rs#MODEL_TABLE"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#z_image_turbo:candle:q8:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-8cda4f70f78dd33f5330"
+          }
+        ]
+      }
+    },
+    {
+      "id": "z_image_turbo:z_image_turbo_control:candle:q8:text_to_image:control:staged_residency",
+      "modelId": "z_image_turbo",
+      "resolvedRoute": "z_image_turbo_control",
+      "provider": "z_image_turbo_control",
+      "backend": "candle",
+      "tier": "q8",
+      "mode": "text_to_image",
+      "overlay": "control",
+      "rung": "staged_residency",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "768x768",
+          "1024x1024",
+          "1280x720",
+          "720x1280"
+        ]
+      },
+      "strategyParameters": {},
+      "implementation": "implemented",
+      "anchor": {
+        "id": "z_image_turbo:candle:q8:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-8cda4f70f78dd33f5330",
+        "tier": "q8",
+        "source": "config/memory-anchors.json#z_image_turbo:candle:q8:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-8cda4f70f78dd33f5330",
+        "current": true,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 15815,
+      "owningModelStory": 15859,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "config/engine-capabilities/capabilities.candle.json#memoryContracts/z_image_turbo_control"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#z_image_turbo:candle:q8:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-8cda4f70f78dd33f5330"
+          }
+        ]
+      }
+    },
+    {
       "id": "z_image_turbo:z_image_turbo_control:mlx:q4:text_to_image:control:bounded_attention",
       "modelId": "z_image_turbo",
       "resolvedRoute": "z_image_turbo_control",
@@ -49983,11 +51222,10 @@
         "tier": "q4",
         "source": "config/memory-anchors.json#z_image_turbo:mlx:q4:base:base:z-image-mlx-independent-materialization-v4:imc-1fc616bea135da2281b8",
         "current": false,
-        "derivable": false,
-        "underivedReason": "every retained z_image_turbo MLX image record measures a single geometry per composition, so no within-cell per-pixel slope exists for this model and the image lane's coefficients (fitted on another model's spread) may not be borrowed; this anchor validates its measured point and prices nothing beyond it"
+        "derivable": true
       },
       "derivationDefined": true,
-      "state": "Anchored/underived",
+      "state": "Anchored",
       "owningFamilyStory": 15510,
       "owningModelStory": 15456,
       "evidence": {
@@ -50049,11 +51287,10 @@
         "tier": "q4",
         "source": "config/memory-anchors.json#z_image_turbo:mlx:q4:base:base:z-image-mlx-independent-materialization-v4:imc-1fc616bea135da2281b8",
         "current": false,
-        "derivable": false,
-        "underivedReason": "every retained z_image_turbo MLX image record measures a single geometry per composition, so no within-cell per-pixel slope exists for this model and the image lane's coefficients (fitted on another model's spread) may not be borrowed; this anchor validates its measured point and prices nothing beyond it"
+        "derivable": true
       },
       "derivationDefined": true,
-      "state": "Anchored/underived",
+      "state": "Anchored",
       "owningFamilyStory": 15510,
       "owningModelStory": 15456,
       "evidence": {
@@ -50129,11 +51366,10 @@
         "tier": "q4",
         "source": "config/memory-anchors.json#z_image_turbo:mlx:q4:base:base:z-image-mlx-independent-materialization-v4:imc-1fc616bea135da2281b8",
         "current": false,
-        "derivable": false,
-        "underivedReason": "every retained z_image_turbo MLX image record measures a single geometry per composition, so no within-cell per-pixel slope exists for this model and the image lane's coefficients (fitted on another model's spread) may not be borrowed; this anchor validates its measured point and prices nothing beyond it"
+        "derivable": true
       },
       "derivationDefined": true,
-      "state": "Anchored/underived",
+      "state": "Anchored",
       "owningFamilyStory": 15510,
       "owningModelStory": 15456,
       "evidence": {
@@ -50176,11 +51412,10 @@
         "tier": "q4",
         "source": "config/memory-anchors.json#z_image_turbo:mlx:q4:base:base:z-image-mlx-independent-materialization-v4:imc-1fc616bea135da2281b8",
         "current": false,
-        "derivable": false,
-        "underivedReason": "every retained z_image_turbo MLX image record measures a single geometry per composition, so no within-cell per-pixel slope exists for this model and the image lane's coefficients (fitted on another model's spread) may not be borrowed; this anchor validates its measured point and prices nothing beyond it"
+        "derivable": true
       },
       "derivationDefined": true,
-      "state": "Anchored/underived",
+      "state": "Anchored",
       "owningFamilyStory": 15510,
       "owningModelStory": 15456,
       "evidence": {
@@ -50229,11 +51464,10 @@
         "tier": "q4",
         "source": "config/memory-anchors.json#z_image_turbo:mlx:q4:base:base:z-image-mlx-independent-materialization-v4:imc-1fc616bea135da2281b8",
         "current": false,
-        "derivable": false,
-        "underivedReason": "every retained z_image_turbo MLX image record measures a single geometry per composition, so no within-cell per-pixel slope exists for this model and the image lane's coefficients (fitted on another model's spread) may not be borrowed; this anchor validates its measured point and prices nothing beyond it"
+        "derivable": true
       },
       "derivationDefined": true,
-      "state": "Anchored/underived",
+      "state": "Anchored",
       "owningFamilyStory": 15510,
       "owningModelStory": 15456,
       "evidence": {
@@ -50246,6 +51480,1716 @@
         "anchor": [
           {
             "source": "config/memory-anchors.json#z_image_turbo:mlx:q4:base:base:z-image-mlx-independent-materialization-v4:imc-1fc616bea135da2281b8"
+          }
+        ]
+      }
+    },
+    {
+      "id": "z_image_turbo:z_image_turbo:candle:bf16:text_to_image:lora:bounded_attention",
+      "modelId": "z_image_turbo",
+      "resolvedRoute": "z_image_turbo",
+      "provider": "z_image_turbo",
+      "backend": "candle",
+      "tier": "bf16",
+      "mode": "text_to_image",
+      "overlay": "lora",
+      "rung": "bounded_attention",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "768x768",
+          "1024x1024",
+          "1280x720",
+          "720x1280"
+        ]
+      },
+      "strategyParameters": {
+        "decodeTileEdge": 512,
+        "decodeOverlap": 128,
+        "attentionChunkSize": 67108864,
+        "publishedRanges": {
+          "decodeTileEdges": [
+            512
+          ],
+          "decodeOverlaps": [
+            128
+          ],
+          "attentionChunkSizes": [
+            67108864
+          ]
+        }
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "z_image_turbo:candle:bf16:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-3cd69f2fee9e91e83b58",
+        "tier": "bf16",
+        "source": "config/memory-anchors.json#z_image_turbo:candle:bf16:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-3cd69f2fee9e91e83b58",
+        "current": true,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 15815,
+      "owningModelStory": 15859,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "inference:crates/media/candle-gen/candle-gen-z-image/src/memory_strategy.rs"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#z_image_turbo:candle:bf16:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-3cd69f2fee9e91e83b58"
+          }
+        ]
+      }
+    },
+    {
+      "id": "z_image_turbo:z_image_turbo:candle:bf16:text_to_image:lora:bounded_decode",
+      "modelId": "z_image_turbo",
+      "resolvedRoute": "z_image_turbo",
+      "provider": "z_image_turbo",
+      "backend": "candle",
+      "tier": "bf16",
+      "mode": "text_to_image",
+      "overlay": "lora",
+      "rung": "bounded_decode",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "768x768",
+          "1024x1024",
+          "1280x720",
+          "720x1280"
+        ]
+      },
+      "strategyParameters": {
+        "decodeTileEdge": 512,
+        "decodeOverlap": 128,
+        "publishedRanges": {
+          "decodeTileEdges": [
+            512
+          ],
+          "decodeOverlaps": [
+            128
+          ]
+        }
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "z_image_turbo:candle:bf16:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-3cd69f2fee9e91e83b58",
+        "tier": "bf16",
+        "source": "config/memory-anchors.json#z_image_turbo:candle:bf16:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-3cd69f2fee9e91e83b58",
+        "current": true,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 15815,
+      "owningModelStory": 15859,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "inference:crates/media/candle-gen/candle-gen-z-image/src/memory_strategy.rs"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#z_image_turbo:candle:bf16:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-3cd69f2fee9e91e83b58"
+          }
+        ]
+      }
+    },
+    {
+      "id": "z_image_turbo:z_image_turbo:candle:bf16:text_to_image:lora:bounded_transformer_residency",
+      "modelId": "z_image_turbo",
+      "resolvedRoute": "z_image_turbo",
+      "provider": "z_image_turbo",
+      "backend": "candle",
+      "tier": "bf16",
+      "mode": "text_to_image",
+      "overlay": "lora",
+      "rung": "bounded_transformer_residency",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "768x768",
+          "1024x1024",
+          "1280x720",
+          "720x1280"
+        ]
+      },
+      "strategyParameters": {
+        "decodeTileEdge": 512,
+        "decodeOverlap": 128,
+        "attentionChunkSize": 67108864,
+        "transformerWindowSize": 1,
+        "transformerWindowComponent": "Dit",
+        "publishedRanges": {
+          "decodeTileEdges": [
+            512
+          ],
+          "decodeOverlaps": [
+            128
+          ],
+          "attentionChunkSizes": [
+            67108864
+          ],
+          "transformerWindowSizes": [
+            1
+          ],
+          "transformerWindowComponents": [
+            "Dit"
+          ]
+        }
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "z_image_turbo:candle:bf16:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-3cd69f2fee9e91e83b58",
+        "tier": "bf16",
+        "source": "config/memory-anchors.json#z_image_turbo:candle:bf16:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-3cd69f2fee9e91e83b58",
+        "current": true,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 15815,
+      "owningModelStory": 15859,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "inference:crates/media/candle-gen/candle-gen-z-image/src/memory_strategy.rs"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#z_image_turbo:candle:bf16:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-3cd69f2fee9e91e83b58"
+          }
+        ]
+      }
+    },
+    {
+      "id": "z_image_turbo:z_image_turbo:candle:bf16:text_to_image:lora:resident",
+      "modelId": "z_image_turbo",
+      "resolvedRoute": "z_image_turbo",
+      "provider": "z_image_turbo",
+      "backend": "candle",
+      "tier": "bf16",
+      "mode": "text_to_image",
+      "overlay": "lora",
+      "rung": "resident",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "768x768",
+          "1024x1024",
+          "1280x720",
+          "720x1280"
+        ]
+      },
+      "strategyParameters": {},
+      "implementation": "implemented",
+      "anchor": {
+        "id": "z_image_turbo:candle:bf16:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-3cd69f2fee9e91e83b58",
+        "tier": "bf16",
+        "source": "config/memory-anchors.json#z_image_turbo:candle:bf16:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-3cd69f2fee9e91e83b58",
+        "current": true,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 15815,
+      "owningModelStory": 15859,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "crates/sceneworks-worker/src/engines.rs#MODEL_TABLE"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#z_image_turbo:candle:bf16:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-3cd69f2fee9e91e83b58"
+          }
+        ]
+      }
+    },
+    {
+      "id": "z_image_turbo:z_image_turbo:candle:bf16:text_to_image:lora:staged_residency",
+      "modelId": "z_image_turbo",
+      "resolvedRoute": "z_image_turbo",
+      "provider": "z_image_turbo",
+      "backend": "candle",
+      "tier": "bf16",
+      "mode": "text_to_image",
+      "overlay": "lora",
+      "rung": "staged_residency",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "768x768",
+          "1024x1024",
+          "1280x720",
+          "720x1280"
+        ]
+      },
+      "strategyParameters": {
+        "phaseOrder": [
+          "conditioning",
+          "denoise",
+          "decode"
+        ]
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "z_image_turbo:candle:bf16:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-3cd69f2fee9e91e83b58",
+        "tier": "bf16",
+        "source": "config/memory-anchors.json#z_image_turbo:candle:bf16:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-3cd69f2fee9e91e83b58",
+        "current": true,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 15815,
+      "owningModelStory": 15859,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "config/manifests/builtin.models.jsonc#models/z_image_turbo/candle"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#z_image_turbo:candle:bf16:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-3cd69f2fee9e91e83b58"
+          }
+        ]
+      }
+    },
+    {
+      "id": "z_image_turbo:z_image_turbo:candle:bf16:text_to_image:none:bounded_attention",
+      "modelId": "z_image_turbo",
+      "resolvedRoute": "z_image_turbo",
+      "provider": "z_image_turbo",
+      "backend": "candle",
+      "tier": "bf16",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "rung": "bounded_attention",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "768x768",
+          "1024x1024",
+          "1280x720",
+          "720x1280"
+        ]
+      },
+      "strategyParameters": {
+        "decodeTileEdge": 512,
+        "decodeOverlap": 128,
+        "attentionChunkSize": 67108864,
+        "publishedRanges": {
+          "decodeTileEdges": [
+            512
+          ],
+          "decodeOverlaps": [
+            128
+          ],
+          "attentionChunkSizes": [
+            67108864
+          ]
+        }
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "z_image_turbo:candle:bf16:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-3cd69f2fee9e91e83b58",
+        "tier": "bf16",
+        "source": "config/memory-anchors.json#z_image_turbo:candle:bf16:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-3cd69f2fee9e91e83b58",
+        "current": true,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 15815,
+      "owningModelStory": 15859,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "inference:crates/media/candle-gen/candle-gen-z-image/src/memory_strategy.rs"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#z_image_turbo:candle:bf16:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-3cd69f2fee9e91e83b58"
+          }
+        ]
+      }
+    },
+    {
+      "id": "z_image_turbo:z_image_turbo:candle:bf16:text_to_image:none:bounded_decode",
+      "modelId": "z_image_turbo",
+      "resolvedRoute": "z_image_turbo",
+      "provider": "z_image_turbo",
+      "backend": "candle",
+      "tier": "bf16",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "rung": "bounded_decode",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "768x768",
+          "1024x1024",
+          "1280x720",
+          "720x1280"
+        ]
+      },
+      "strategyParameters": {
+        "decodeTileEdge": 512,
+        "decodeOverlap": 128,
+        "publishedRanges": {
+          "decodeTileEdges": [
+            512
+          ],
+          "decodeOverlaps": [
+            128
+          ]
+        }
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "z_image_turbo:candle:bf16:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-3cd69f2fee9e91e83b58",
+        "tier": "bf16",
+        "source": "config/memory-anchors.json#z_image_turbo:candle:bf16:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-3cd69f2fee9e91e83b58",
+        "current": true,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 15815,
+      "owningModelStory": 15859,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "inference:crates/media/candle-gen/candle-gen-z-image/src/memory_strategy.rs"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#z_image_turbo:candle:bf16:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-3cd69f2fee9e91e83b58"
+          }
+        ]
+      }
+    },
+    {
+      "id": "z_image_turbo:z_image_turbo:candle:bf16:text_to_image:none:bounded_transformer_residency",
+      "modelId": "z_image_turbo",
+      "resolvedRoute": "z_image_turbo",
+      "provider": "z_image_turbo",
+      "backend": "candle",
+      "tier": "bf16",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "rung": "bounded_transformer_residency",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "768x768",
+          "1024x1024",
+          "1280x720",
+          "720x1280"
+        ]
+      },
+      "strategyParameters": {
+        "decodeTileEdge": 512,
+        "decodeOverlap": 128,
+        "attentionChunkSize": 67108864,
+        "transformerWindowSize": 1,
+        "transformerWindowComponent": "Dit",
+        "publishedRanges": {
+          "decodeTileEdges": [
+            512
+          ],
+          "decodeOverlaps": [
+            128
+          ],
+          "attentionChunkSizes": [
+            67108864
+          ],
+          "transformerWindowSizes": [
+            1
+          ],
+          "transformerWindowComponents": [
+            "Dit"
+          ]
+        }
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "z_image_turbo:candle:bf16:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-3cd69f2fee9e91e83b58",
+        "tier": "bf16",
+        "source": "config/memory-anchors.json#z_image_turbo:candle:bf16:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-3cd69f2fee9e91e83b58",
+        "current": true,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 15815,
+      "owningModelStory": 15859,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "inference:crates/media/candle-gen/candle-gen-z-image/src/memory_strategy.rs"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#z_image_turbo:candle:bf16:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-3cd69f2fee9e91e83b58"
+          }
+        ]
+      }
+    },
+    {
+      "id": "z_image_turbo:z_image_turbo:candle:bf16:text_to_image:none:resident",
+      "modelId": "z_image_turbo",
+      "resolvedRoute": "z_image_turbo",
+      "provider": "z_image_turbo",
+      "backend": "candle",
+      "tier": "bf16",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "rung": "resident",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "768x768",
+          "1024x1024",
+          "1280x720",
+          "720x1280"
+        ]
+      },
+      "strategyParameters": {},
+      "implementation": "implemented",
+      "anchor": {
+        "id": "z_image_turbo:candle:bf16:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-3cd69f2fee9e91e83b58",
+        "tier": "bf16",
+        "source": "config/memory-anchors.json#z_image_turbo:candle:bf16:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-3cd69f2fee9e91e83b58",
+        "current": true,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 15815,
+      "owningModelStory": 15859,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "crates/sceneworks-worker/src/engines.rs#MODEL_TABLE"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#z_image_turbo:candle:bf16:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-3cd69f2fee9e91e83b58"
+          }
+        ]
+      }
+    },
+    {
+      "id": "z_image_turbo:z_image_turbo:candle:bf16:text_to_image:none:staged_residency",
+      "modelId": "z_image_turbo",
+      "resolvedRoute": "z_image_turbo",
+      "provider": "z_image_turbo",
+      "backend": "candle",
+      "tier": "bf16",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "rung": "staged_residency",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "768x768",
+          "1024x1024",
+          "1280x720",
+          "720x1280"
+        ]
+      },
+      "strategyParameters": {
+        "phaseOrder": [
+          "conditioning",
+          "denoise",
+          "decode"
+        ]
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "z_image_turbo:candle:bf16:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-3cd69f2fee9e91e83b58",
+        "tier": "bf16",
+        "source": "config/memory-anchors.json#z_image_turbo:candle:bf16:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-3cd69f2fee9e91e83b58",
+        "current": true,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 15815,
+      "owningModelStory": 15859,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "config/manifests/builtin.models.jsonc#models/z_image_turbo/candle"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#z_image_turbo:candle:bf16:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-3cd69f2fee9e91e83b58"
+          }
+        ]
+      }
+    },
+    {
+      "id": "z_image_turbo:z_image_turbo:candle:q4:text_to_image:lora:bounded_attention",
+      "modelId": "z_image_turbo",
+      "resolvedRoute": "z_image_turbo",
+      "provider": "z_image_turbo",
+      "backend": "candle",
+      "tier": "q4",
+      "mode": "text_to_image",
+      "overlay": "lora",
+      "rung": "bounded_attention",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "768x768",
+          "1024x1024",
+          "1280x720",
+          "720x1280"
+        ]
+      },
+      "strategyParameters": {
+        "decodeTileEdge": 512,
+        "decodeOverlap": 128,
+        "attentionChunkSize": 67108864,
+        "publishedRanges": {
+          "decodeTileEdges": [
+            512
+          ],
+          "decodeOverlaps": [
+            128
+          ],
+          "attentionChunkSizes": [
+            67108864
+          ]
+        }
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "z_image_turbo:candle:q4:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-b8064416c974b5008509",
+        "tier": "q4",
+        "source": "config/memory-anchors.json#z_image_turbo:candle:q4:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-b8064416c974b5008509",
+        "current": true,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 15815,
+      "owningModelStory": 15859,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "inference:crates/media/candle-gen/candle-gen-z-image/src/memory_strategy.rs"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#z_image_turbo:candle:q4:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-b8064416c974b5008509"
+          }
+        ]
+      }
+    },
+    {
+      "id": "z_image_turbo:z_image_turbo:candle:q4:text_to_image:lora:bounded_decode",
+      "modelId": "z_image_turbo",
+      "resolvedRoute": "z_image_turbo",
+      "provider": "z_image_turbo",
+      "backend": "candle",
+      "tier": "q4",
+      "mode": "text_to_image",
+      "overlay": "lora",
+      "rung": "bounded_decode",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "768x768",
+          "1024x1024",
+          "1280x720",
+          "720x1280"
+        ]
+      },
+      "strategyParameters": {
+        "decodeTileEdge": 512,
+        "decodeOverlap": 128,
+        "publishedRanges": {
+          "decodeTileEdges": [
+            512
+          ],
+          "decodeOverlaps": [
+            128
+          ]
+        }
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "z_image_turbo:candle:q4:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-b8064416c974b5008509",
+        "tier": "q4",
+        "source": "config/memory-anchors.json#z_image_turbo:candle:q4:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-b8064416c974b5008509",
+        "current": true,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 15815,
+      "owningModelStory": 15859,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "inference:crates/media/candle-gen/candle-gen-z-image/src/memory_strategy.rs"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#z_image_turbo:candle:q4:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-b8064416c974b5008509"
+          }
+        ]
+      }
+    },
+    {
+      "id": "z_image_turbo:z_image_turbo:candle:q4:text_to_image:lora:bounded_transformer_residency",
+      "modelId": "z_image_turbo",
+      "resolvedRoute": "z_image_turbo",
+      "provider": "z_image_turbo",
+      "backend": "candle",
+      "tier": "q4",
+      "mode": "text_to_image",
+      "overlay": "lora",
+      "rung": "bounded_transformer_residency",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "768x768",
+          "1024x1024",
+          "1280x720",
+          "720x1280"
+        ]
+      },
+      "strategyParameters": {
+        "decodeTileEdge": 512,
+        "decodeOverlap": 128,
+        "attentionChunkSize": 67108864,
+        "transformerWindowSize": 1,
+        "transformerWindowComponent": "Dit",
+        "publishedRanges": {
+          "decodeTileEdges": [
+            512
+          ],
+          "decodeOverlaps": [
+            128
+          ],
+          "attentionChunkSizes": [
+            67108864
+          ],
+          "transformerWindowSizes": [
+            1
+          ],
+          "transformerWindowComponents": [
+            "Dit"
+          ]
+        }
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "z_image_turbo:candle:q4:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-b8064416c974b5008509",
+        "tier": "q4",
+        "source": "config/memory-anchors.json#z_image_turbo:candle:q4:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-b8064416c974b5008509",
+        "current": true,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 15815,
+      "owningModelStory": 15859,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "inference:crates/media/candle-gen/candle-gen-z-image/src/memory_strategy.rs"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#z_image_turbo:candle:q4:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-b8064416c974b5008509"
+          }
+        ]
+      }
+    },
+    {
+      "id": "z_image_turbo:z_image_turbo:candle:q4:text_to_image:lora:resident",
+      "modelId": "z_image_turbo",
+      "resolvedRoute": "z_image_turbo",
+      "provider": "z_image_turbo",
+      "backend": "candle",
+      "tier": "q4",
+      "mode": "text_to_image",
+      "overlay": "lora",
+      "rung": "resident",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "768x768",
+          "1024x1024",
+          "1280x720",
+          "720x1280"
+        ]
+      },
+      "strategyParameters": {},
+      "implementation": "implemented",
+      "anchor": {
+        "id": "z_image_turbo:candle:q4:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-b8064416c974b5008509",
+        "tier": "q4",
+        "source": "config/memory-anchors.json#z_image_turbo:candle:q4:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-b8064416c974b5008509",
+        "current": true,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 15815,
+      "owningModelStory": 15859,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "crates/sceneworks-worker/src/engines.rs#MODEL_TABLE"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#z_image_turbo:candle:q4:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-b8064416c974b5008509"
+          }
+        ]
+      }
+    },
+    {
+      "id": "z_image_turbo:z_image_turbo:candle:q4:text_to_image:lora:staged_residency",
+      "modelId": "z_image_turbo",
+      "resolvedRoute": "z_image_turbo",
+      "provider": "z_image_turbo",
+      "backend": "candle",
+      "tier": "q4",
+      "mode": "text_to_image",
+      "overlay": "lora",
+      "rung": "staged_residency",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "768x768",
+          "1024x1024",
+          "1280x720",
+          "720x1280"
+        ]
+      },
+      "strategyParameters": {
+        "phaseOrder": [
+          "conditioning",
+          "denoise",
+          "decode"
+        ]
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "z_image_turbo:candle:q4:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-b8064416c974b5008509",
+        "tier": "q4",
+        "source": "config/memory-anchors.json#z_image_turbo:candle:q4:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-b8064416c974b5008509",
+        "current": true,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 15815,
+      "owningModelStory": 15859,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "config/manifests/builtin.models.jsonc#models/z_image_turbo/candle"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#z_image_turbo:candle:q4:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-b8064416c974b5008509"
+          }
+        ]
+      }
+    },
+    {
+      "id": "z_image_turbo:z_image_turbo:candle:q4:text_to_image:none:bounded_attention",
+      "modelId": "z_image_turbo",
+      "resolvedRoute": "z_image_turbo",
+      "provider": "z_image_turbo",
+      "backend": "candle",
+      "tier": "q4",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "rung": "bounded_attention",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "768x768",
+          "1024x1024",
+          "1280x720",
+          "720x1280"
+        ]
+      },
+      "strategyParameters": {
+        "decodeTileEdge": 512,
+        "decodeOverlap": 128,
+        "attentionChunkSize": 67108864,
+        "publishedRanges": {
+          "decodeTileEdges": [
+            512
+          ],
+          "decodeOverlaps": [
+            128
+          ],
+          "attentionChunkSizes": [
+            67108864
+          ]
+        }
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "z_image_turbo:candle:q4:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-b8064416c974b5008509",
+        "tier": "q4",
+        "source": "config/memory-anchors.json#z_image_turbo:candle:q4:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-b8064416c974b5008509",
+        "current": true,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 15815,
+      "owningModelStory": 15859,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "inference:crates/media/candle-gen/candle-gen-z-image/src/memory_strategy.rs"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#z_image_turbo:candle:q4:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-b8064416c974b5008509"
+          }
+        ]
+      }
+    },
+    {
+      "id": "z_image_turbo:z_image_turbo:candle:q4:text_to_image:none:bounded_decode",
+      "modelId": "z_image_turbo",
+      "resolvedRoute": "z_image_turbo",
+      "provider": "z_image_turbo",
+      "backend": "candle",
+      "tier": "q4",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "rung": "bounded_decode",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "768x768",
+          "1024x1024",
+          "1280x720",
+          "720x1280"
+        ]
+      },
+      "strategyParameters": {
+        "decodeTileEdge": 512,
+        "decodeOverlap": 128,
+        "publishedRanges": {
+          "decodeTileEdges": [
+            512
+          ],
+          "decodeOverlaps": [
+            128
+          ]
+        }
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "z_image_turbo:candle:q4:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-b8064416c974b5008509",
+        "tier": "q4",
+        "source": "config/memory-anchors.json#z_image_turbo:candle:q4:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-b8064416c974b5008509",
+        "current": true,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 15815,
+      "owningModelStory": 15859,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "inference:crates/media/candle-gen/candle-gen-z-image/src/memory_strategy.rs"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#z_image_turbo:candle:q4:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-b8064416c974b5008509"
+          }
+        ]
+      }
+    },
+    {
+      "id": "z_image_turbo:z_image_turbo:candle:q4:text_to_image:none:bounded_transformer_residency",
+      "modelId": "z_image_turbo",
+      "resolvedRoute": "z_image_turbo",
+      "provider": "z_image_turbo",
+      "backend": "candle",
+      "tier": "q4",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "rung": "bounded_transformer_residency",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "768x768",
+          "1024x1024",
+          "1280x720",
+          "720x1280"
+        ]
+      },
+      "strategyParameters": {
+        "decodeTileEdge": 512,
+        "decodeOverlap": 128,
+        "attentionChunkSize": 67108864,
+        "transformerWindowSize": 1,
+        "transformerWindowComponent": "Dit",
+        "publishedRanges": {
+          "decodeTileEdges": [
+            512
+          ],
+          "decodeOverlaps": [
+            128
+          ],
+          "attentionChunkSizes": [
+            67108864
+          ],
+          "transformerWindowSizes": [
+            1
+          ],
+          "transformerWindowComponents": [
+            "Dit"
+          ]
+        }
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "z_image_turbo:candle:q4:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-b8064416c974b5008509",
+        "tier": "q4",
+        "source": "config/memory-anchors.json#z_image_turbo:candle:q4:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-b8064416c974b5008509",
+        "current": true,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 15815,
+      "owningModelStory": 15859,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "inference:crates/media/candle-gen/candle-gen-z-image/src/memory_strategy.rs"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#z_image_turbo:candle:q4:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-b8064416c974b5008509"
+          }
+        ]
+      }
+    },
+    {
+      "id": "z_image_turbo:z_image_turbo:candle:q4:text_to_image:none:resident",
+      "modelId": "z_image_turbo",
+      "resolvedRoute": "z_image_turbo",
+      "provider": "z_image_turbo",
+      "backend": "candle",
+      "tier": "q4",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "rung": "resident",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "768x768",
+          "1024x1024",
+          "1280x720",
+          "720x1280"
+        ]
+      },
+      "strategyParameters": {},
+      "implementation": "implemented",
+      "anchor": {
+        "id": "z_image_turbo:candle:q4:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-b8064416c974b5008509",
+        "tier": "q4",
+        "source": "config/memory-anchors.json#z_image_turbo:candle:q4:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-b8064416c974b5008509",
+        "current": true,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 15815,
+      "owningModelStory": 15859,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "crates/sceneworks-worker/src/engines.rs#MODEL_TABLE"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#z_image_turbo:candle:q4:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-b8064416c974b5008509"
+          }
+        ]
+      }
+    },
+    {
+      "id": "z_image_turbo:z_image_turbo:candle:q4:text_to_image:none:staged_residency",
+      "modelId": "z_image_turbo",
+      "resolvedRoute": "z_image_turbo",
+      "provider": "z_image_turbo",
+      "backend": "candle",
+      "tier": "q4",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "rung": "staged_residency",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "768x768",
+          "1024x1024",
+          "1280x720",
+          "720x1280"
+        ]
+      },
+      "strategyParameters": {
+        "phaseOrder": [
+          "conditioning",
+          "denoise",
+          "decode"
+        ]
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "z_image_turbo:candle:q4:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-b8064416c974b5008509",
+        "tier": "q4",
+        "source": "config/memory-anchors.json#z_image_turbo:candle:q4:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-b8064416c974b5008509",
+        "current": true,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 15815,
+      "owningModelStory": 15859,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "config/manifests/builtin.models.jsonc#models/z_image_turbo/candle"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#z_image_turbo:candle:q4:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-b8064416c974b5008509"
+          }
+        ]
+      }
+    },
+    {
+      "id": "z_image_turbo:z_image_turbo:candle:q8:text_to_image:lora:bounded_attention",
+      "modelId": "z_image_turbo",
+      "resolvedRoute": "z_image_turbo",
+      "provider": "z_image_turbo",
+      "backend": "candle",
+      "tier": "q8",
+      "mode": "text_to_image",
+      "overlay": "lora",
+      "rung": "bounded_attention",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "768x768",
+          "1024x1024",
+          "1280x720",
+          "720x1280"
+        ]
+      },
+      "strategyParameters": {
+        "decodeTileEdge": 512,
+        "decodeOverlap": 128,
+        "attentionChunkSize": 67108864,
+        "publishedRanges": {
+          "decodeTileEdges": [
+            512
+          ],
+          "decodeOverlaps": [
+            128
+          ],
+          "attentionChunkSizes": [
+            67108864
+          ]
+        }
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "z_image_turbo:candle:q8:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-8cda4f70f78dd33f5330",
+        "tier": "q8",
+        "source": "config/memory-anchors.json#z_image_turbo:candle:q8:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-8cda4f70f78dd33f5330",
+        "current": true,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 15815,
+      "owningModelStory": 15859,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "inference:crates/media/candle-gen/candle-gen-z-image/src/memory_strategy.rs"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#z_image_turbo:candle:q8:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-8cda4f70f78dd33f5330"
+          }
+        ]
+      }
+    },
+    {
+      "id": "z_image_turbo:z_image_turbo:candle:q8:text_to_image:lora:bounded_decode",
+      "modelId": "z_image_turbo",
+      "resolvedRoute": "z_image_turbo",
+      "provider": "z_image_turbo",
+      "backend": "candle",
+      "tier": "q8",
+      "mode": "text_to_image",
+      "overlay": "lora",
+      "rung": "bounded_decode",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "768x768",
+          "1024x1024",
+          "1280x720",
+          "720x1280"
+        ]
+      },
+      "strategyParameters": {
+        "decodeTileEdge": 512,
+        "decodeOverlap": 128,
+        "publishedRanges": {
+          "decodeTileEdges": [
+            512
+          ],
+          "decodeOverlaps": [
+            128
+          ]
+        }
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "z_image_turbo:candle:q8:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-8cda4f70f78dd33f5330",
+        "tier": "q8",
+        "source": "config/memory-anchors.json#z_image_turbo:candle:q8:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-8cda4f70f78dd33f5330",
+        "current": true,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 15815,
+      "owningModelStory": 15859,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "inference:crates/media/candle-gen/candle-gen-z-image/src/memory_strategy.rs"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#z_image_turbo:candle:q8:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-8cda4f70f78dd33f5330"
+          }
+        ]
+      }
+    },
+    {
+      "id": "z_image_turbo:z_image_turbo:candle:q8:text_to_image:lora:bounded_transformer_residency",
+      "modelId": "z_image_turbo",
+      "resolvedRoute": "z_image_turbo",
+      "provider": "z_image_turbo",
+      "backend": "candle",
+      "tier": "q8",
+      "mode": "text_to_image",
+      "overlay": "lora",
+      "rung": "bounded_transformer_residency",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "768x768",
+          "1024x1024",
+          "1280x720",
+          "720x1280"
+        ]
+      },
+      "strategyParameters": {
+        "decodeTileEdge": 512,
+        "decodeOverlap": 128,
+        "attentionChunkSize": 67108864,
+        "transformerWindowSize": 1,
+        "transformerWindowComponent": "Dit",
+        "publishedRanges": {
+          "decodeTileEdges": [
+            512
+          ],
+          "decodeOverlaps": [
+            128
+          ],
+          "attentionChunkSizes": [
+            67108864
+          ],
+          "transformerWindowSizes": [
+            1
+          ],
+          "transformerWindowComponents": [
+            "Dit"
+          ]
+        }
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "z_image_turbo:candle:q8:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-8cda4f70f78dd33f5330",
+        "tier": "q8",
+        "source": "config/memory-anchors.json#z_image_turbo:candle:q8:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-8cda4f70f78dd33f5330",
+        "current": true,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 15815,
+      "owningModelStory": 15859,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "inference:crates/media/candle-gen/candle-gen-z-image/src/memory_strategy.rs"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#z_image_turbo:candle:q8:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-8cda4f70f78dd33f5330"
+          }
+        ]
+      }
+    },
+    {
+      "id": "z_image_turbo:z_image_turbo:candle:q8:text_to_image:lora:resident",
+      "modelId": "z_image_turbo",
+      "resolvedRoute": "z_image_turbo",
+      "provider": "z_image_turbo",
+      "backend": "candle",
+      "tier": "q8",
+      "mode": "text_to_image",
+      "overlay": "lora",
+      "rung": "resident",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "768x768",
+          "1024x1024",
+          "1280x720",
+          "720x1280"
+        ]
+      },
+      "strategyParameters": {},
+      "implementation": "implemented",
+      "anchor": {
+        "id": "z_image_turbo:candle:q8:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-8cda4f70f78dd33f5330",
+        "tier": "q8",
+        "source": "config/memory-anchors.json#z_image_turbo:candle:q8:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-8cda4f70f78dd33f5330",
+        "current": true,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 15815,
+      "owningModelStory": 15859,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "crates/sceneworks-worker/src/engines.rs#MODEL_TABLE"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#z_image_turbo:candle:q8:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-8cda4f70f78dd33f5330"
+          }
+        ]
+      }
+    },
+    {
+      "id": "z_image_turbo:z_image_turbo:candle:q8:text_to_image:lora:staged_residency",
+      "modelId": "z_image_turbo",
+      "resolvedRoute": "z_image_turbo",
+      "provider": "z_image_turbo",
+      "backend": "candle",
+      "tier": "q8",
+      "mode": "text_to_image",
+      "overlay": "lora",
+      "rung": "staged_residency",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "768x768",
+          "1024x1024",
+          "1280x720",
+          "720x1280"
+        ]
+      },
+      "strategyParameters": {
+        "phaseOrder": [
+          "conditioning",
+          "denoise",
+          "decode"
+        ]
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "z_image_turbo:candle:q8:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-8cda4f70f78dd33f5330",
+        "tier": "q8",
+        "source": "config/memory-anchors.json#z_image_turbo:candle:q8:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-8cda4f70f78dd33f5330",
+        "current": true,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 15815,
+      "owningModelStory": 15859,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "config/manifests/builtin.models.jsonc#models/z_image_turbo/candle"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#z_image_turbo:candle:q8:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-8cda4f70f78dd33f5330"
+          }
+        ]
+      }
+    },
+    {
+      "id": "z_image_turbo:z_image_turbo:candle:q8:text_to_image:none:bounded_attention",
+      "modelId": "z_image_turbo",
+      "resolvedRoute": "z_image_turbo",
+      "provider": "z_image_turbo",
+      "backend": "candle",
+      "tier": "q8",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "rung": "bounded_attention",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "768x768",
+          "1024x1024",
+          "1280x720",
+          "720x1280"
+        ]
+      },
+      "strategyParameters": {
+        "decodeTileEdge": 512,
+        "decodeOverlap": 128,
+        "attentionChunkSize": 67108864,
+        "publishedRanges": {
+          "decodeTileEdges": [
+            512
+          ],
+          "decodeOverlaps": [
+            128
+          ],
+          "attentionChunkSizes": [
+            67108864
+          ]
+        }
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "z_image_turbo:candle:q8:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-8cda4f70f78dd33f5330",
+        "tier": "q8",
+        "source": "config/memory-anchors.json#z_image_turbo:candle:q8:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-8cda4f70f78dd33f5330",
+        "current": true,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 15815,
+      "owningModelStory": 15859,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "inference:crates/media/candle-gen/candle-gen-z-image/src/memory_strategy.rs"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#z_image_turbo:candle:q8:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-8cda4f70f78dd33f5330"
+          }
+        ]
+      }
+    },
+    {
+      "id": "z_image_turbo:z_image_turbo:candle:q8:text_to_image:none:bounded_decode",
+      "modelId": "z_image_turbo",
+      "resolvedRoute": "z_image_turbo",
+      "provider": "z_image_turbo",
+      "backend": "candle",
+      "tier": "q8",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "rung": "bounded_decode",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "768x768",
+          "1024x1024",
+          "1280x720",
+          "720x1280"
+        ]
+      },
+      "strategyParameters": {
+        "decodeTileEdge": 512,
+        "decodeOverlap": 128,
+        "publishedRanges": {
+          "decodeTileEdges": [
+            512
+          ],
+          "decodeOverlaps": [
+            128
+          ]
+        }
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "z_image_turbo:candle:q8:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-8cda4f70f78dd33f5330",
+        "tier": "q8",
+        "source": "config/memory-anchors.json#z_image_turbo:candle:q8:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-8cda4f70f78dd33f5330",
+        "current": true,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 15815,
+      "owningModelStory": 15859,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "inference:crates/media/candle-gen/candle-gen-z-image/src/memory_strategy.rs"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#z_image_turbo:candle:q8:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-8cda4f70f78dd33f5330"
+          }
+        ]
+      }
+    },
+    {
+      "id": "z_image_turbo:z_image_turbo:candle:q8:text_to_image:none:bounded_transformer_residency",
+      "modelId": "z_image_turbo",
+      "resolvedRoute": "z_image_turbo",
+      "provider": "z_image_turbo",
+      "backend": "candle",
+      "tier": "q8",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "rung": "bounded_transformer_residency",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "768x768",
+          "1024x1024",
+          "1280x720",
+          "720x1280"
+        ]
+      },
+      "strategyParameters": {
+        "decodeTileEdge": 512,
+        "decodeOverlap": 128,
+        "attentionChunkSize": 67108864,
+        "transformerWindowSize": 1,
+        "transformerWindowComponent": "Dit",
+        "publishedRanges": {
+          "decodeTileEdges": [
+            512
+          ],
+          "decodeOverlaps": [
+            128
+          ],
+          "attentionChunkSizes": [
+            67108864
+          ],
+          "transformerWindowSizes": [
+            1
+          ],
+          "transformerWindowComponents": [
+            "Dit"
+          ]
+        }
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "z_image_turbo:candle:q8:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-8cda4f70f78dd33f5330",
+        "tier": "q8",
+        "source": "config/memory-anchors.json#z_image_turbo:candle:q8:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-8cda4f70f78dd33f5330",
+        "current": true,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 15815,
+      "owningModelStory": 15859,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "inference:crates/media/candle-gen/candle-gen-z-image/src/memory_strategy.rs"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#z_image_turbo:candle:q8:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-8cda4f70f78dd33f5330"
+          }
+        ]
+      }
+    },
+    {
+      "id": "z_image_turbo:z_image_turbo:candle:q8:text_to_image:none:resident",
+      "modelId": "z_image_turbo",
+      "resolvedRoute": "z_image_turbo",
+      "provider": "z_image_turbo",
+      "backend": "candle",
+      "tier": "q8",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "rung": "resident",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "768x768",
+          "1024x1024",
+          "1280x720",
+          "720x1280"
+        ]
+      },
+      "strategyParameters": {},
+      "implementation": "implemented",
+      "anchor": {
+        "id": "z_image_turbo:candle:q8:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-8cda4f70f78dd33f5330",
+        "tier": "q8",
+        "source": "config/memory-anchors.json#z_image_turbo:candle:q8:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-8cda4f70f78dd33f5330",
+        "current": true,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 15815,
+      "owningModelStory": 15859,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "crates/sceneworks-worker/src/engines.rs#MODEL_TABLE"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#z_image_turbo:candle:q8:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-8cda4f70f78dd33f5330"
+          }
+        ]
+      }
+    },
+    {
+      "id": "z_image_turbo:z_image_turbo:candle:q8:text_to_image:none:staged_residency",
+      "modelId": "z_image_turbo",
+      "resolvedRoute": "z_image_turbo",
+      "provider": "z_image_turbo",
+      "backend": "candle",
+      "tier": "q8",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "rung": "staged_residency",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "768x768",
+          "1024x1024",
+          "1280x720",
+          "720x1280"
+        ]
+      },
+      "strategyParameters": {
+        "phaseOrder": [
+          "conditioning",
+          "denoise",
+          "decode"
+        ]
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "z_image_turbo:candle:q8:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-8cda4f70f78dd33f5330",
+        "tier": "q8",
+        "source": "config/memory-anchors.json#z_image_turbo:candle:q8:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-8cda4f70f78dd33f5330",
+        "current": true,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 15815,
+      "owningModelStory": 15859,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "config/manifests/builtin.models.jsonc#models/z_image_turbo/candle"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#z_image_turbo:candle:q8:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-8cda4f70f78dd33f5330"
           }
         ]
       }
@@ -50299,11 +53243,10 @@
         "tier": "q4",
         "source": "config/memory-anchors.json#z_image_turbo:mlx:q4:base:base:z-image-mlx-independent-materialization-v4:imc-1fc616bea135da2281b8",
         "current": false,
-        "derivable": false,
-        "underivedReason": "every retained z_image_turbo MLX image record measures a single geometry per composition, so no within-cell per-pixel slope exists for this model and the image lane's coefficients (fitted on another model's spread) may not be borrowed; this anchor validates its measured point and prices nothing beyond it"
+        "derivable": true
       },
       "derivationDefined": true,
-      "state": "Anchored/underived",
+      "state": "Anchored",
       "owningFamilyStory": 15510,
       "owningModelStory": 15456,
       "evidence": {
@@ -50365,11 +53308,10 @@
         "tier": "q4",
         "source": "config/memory-anchors.json#z_image_turbo:mlx:q4:base:base:z-image-mlx-independent-materialization-v4:imc-1fc616bea135da2281b8",
         "current": false,
-        "derivable": false,
-        "underivedReason": "every retained z_image_turbo MLX image record measures a single geometry per composition, so no within-cell per-pixel slope exists for this model and the image lane's coefficients (fitted on another model's spread) may not be borrowed; this anchor validates its measured point and prices nothing beyond it"
+        "derivable": true
       },
       "derivationDefined": true,
-      "state": "Anchored/underived",
+      "state": "Anchored",
       "owningFamilyStory": 15510,
       "owningModelStory": 15456,
       "evidence": {
@@ -50445,11 +53387,10 @@
         "tier": "q4",
         "source": "config/memory-anchors.json#z_image_turbo:mlx:q4:base:base:z-image-mlx-independent-materialization-v4:imc-1fc616bea135da2281b8",
         "current": false,
-        "derivable": false,
-        "underivedReason": "every retained z_image_turbo MLX image record measures a single geometry per composition, so no within-cell per-pixel slope exists for this model and the image lane's coefficients (fitted on another model's spread) may not be borrowed; this anchor validates its measured point and prices nothing beyond it"
+        "derivable": true
       },
       "derivationDefined": true,
-      "state": "Anchored/underived",
+      "state": "Anchored",
       "owningFamilyStory": 15510,
       "owningModelStory": 15456,
       "evidence": {
@@ -50492,11 +53433,10 @@
         "tier": "q4",
         "source": "config/memory-anchors.json#z_image_turbo:mlx:q4:base:base:z-image-mlx-independent-materialization-v4:imc-1fc616bea135da2281b8",
         "current": false,
-        "derivable": false,
-        "underivedReason": "every retained z_image_turbo MLX image record measures a single geometry per composition, so no within-cell per-pixel slope exists for this model and the image lane's coefficients (fitted on another model's spread) may not be borrowed; this anchor validates its measured point and prices nothing beyond it"
+        "derivable": true
       },
       "derivationDefined": true,
-      "state": "Anchored/underived",
+      "state": "Anchored",
       "owningFamilyStory": 15510,
       "owningModelStory": 15456,
       "evidence": {
@@ -50545,11 +53485,10 @@
         "tier": "q4",
         "source": "config/memory-anchors.json#z_image_turbo:mlx:q4:base:base:z-image-mlx-independent-materialization-v4:imc-1fc616bea135da2281b8",
         "current": false,
-        "derivable": false,
-        "underivedReason": "every retained z_image_turbo MLX image record measures a single geometry per composition, so no within-cell per-pixel slope exists for this model and the image lane's coefficients (fitted on another model's spread) may not be borrowed; this anchor validates its measured point and prices nothing beyond it"
+        "derivable": true
       },
       "derivationDefined": true,
-      "state": "Anchored/underived",
+      "state": "Anchored",
       "owningFamilyStory": 15510,
       "owningModelStory": 15456,
       "evidence": {
@@ -50615,11 +53554,10 @@
         "tier": "q4",
         "source": "config/memory-anchors.json#z_image_turbo:mlx:q4:base:base:z-image-mlx-independent-materialization-v4:imc-1fc616bea135da2281b8",
         "current": false,
-        "derivable": false,
-        "underivedReason": "every retained z_image_turbo MLX image record measures a single geometry per composition, so no within-cell per-pixel slope exists for this model and the image lane's coefficients (fitted on another model's spread) may not be borrowed; this anchor validates its measured point and prices nothing beyond it"
+        "derivable": true
       },
       "derivationDefined": true,
-      "state": "Anchored/underived",
+      "state": "Anchored",
       "owningFamilyStory": 15510,
       "owningModelStory": 15456,
       "evidence": {
@@ -50681,11 +53619,10 @@
         "tier": "q4",
         "source": "config/memory-anchors.json#z_image_turbo:mlx:q4:base:base:z-image-mlx-independent-materialization-v4:imc-1fc616bea135da2281b8",
         "current": false,
-        "derivable": false,
-        "underivedReason": "every retained z_image_turbo MLX image record measures a single geometry per composition, so no within-cell per-pixel slope exists for this model and the image lane's coefficients (fitted on another model's spread) may not be borrowed; this anchor validates its measured point and prices nothing beyond it"
+        "derivable": true
       },
       "derivationDefined": true,
-      "state": "Anchored/underived",
+      "state": "Anchored",
       "owningFamilyStory": 15510,
       "owningModelStory": 15456,
       "evidence": {
@@ -50761,11 +53698,10 @@
         "tier": "q4",
         "source": "config/memory-anchors.json#z_image_turbo:mlx:q4:base:base:z-image-mlx-independent-materialization-v4:imc-1fc616bea135da2281b8",
         "current": false,
-        "derivable": false,
-        "underivedReason": "every retained z_image_turbo MLX image record measures a single geometry per composition, so no within-cell per-pixel slope exists for this model and the image lane's coefficients (fitted on another model's spread) may not be borrowed; this anchor validates its measured point and prices nothing beyond it"
+        "derivable": true
       },
       "derivationDefined": true,
-      "state": "Anchored/underived",
+      "state": "Anchored",
       "owningFamilyStory": 15510,
       "owningModelStory": 15456,
       "evidence": {
@@ -50808,11 +53744,10 @@
         "tier": "q4",
         "source": "config/memory-anchors.json#z_image_turbo:mlx:q4:base:base:z-image-mlx-independent-materialization-v4:imc-1fc616bea135da2281b8",
         "current": false,
-        "derivable": false,
-        "underivedReason": "every retained z_image_turbo MLX image record measures a single geometry per composition, so no within-cell per-pixel slope exists for this model and the image lane's coefficients (fitted on another model's spread) may not be borrowed; this anchor validates its measured point and prices nothing beyond it"
+        "derivable": true
       },
       "derivationDefined": true,
-      "state": "Anchored/underived",
+      "state": "Anchored",
       "owningFamilyStory": 15510,
       "owningModelStory": 15456,
       "evidence": {
@@ -50855,11 +53790,10 @@
         "tier": "q4",
         "source": "config/memory-anchors.json#z_image_turbo:mlx:q4:base:base:z-image-mlx-independent-materialization-v4:imc-1fc616bea135da2281b8",
         "current": false,
-        "derivable": false,
-        "underivedReason": "every retained z_image_turbo MLX image record measures a single geometry per composition, so no within-cell per-pixel slope exists for this model and the image lane's coefficients (fitted on another model's spread) may not be borrowed; this anchor validates its measured point and prices nothing beyond it"
+        "derivable": true
       },
       "derivationDefined": true,
-      "state": "Anchored/underived",
+      "state": "Anchored",
       "owningFamilyStory": 15510,
       "owningModelStory": 15456,
       "evidence": {
@@ -51154,6 +54088,13 @@
     ],
     "pulid_flux_dev": [],
     "qwen_image": [
+      "qwen_image:qwen_image:candle:q4:text_to_image:control:resident",
+      "qwen_image:qwen_image:candle:q4:text_to_image:lora:resident",
+      "qwen_image:qwen_image:candle:q4:text_to_image:none:bounded_attention",
+      "qwen_image:qwen_image:candle:q4:text_to_image:none:bounded_decode",
+      "qwen_image:qwen_image:candle:q4:text_to_image:none:bounded_transformer_residency",
+      "qwen_image:qwen_image:candle:q4:text_to_image:none:resident",
+      "qwen_image:qwen_image:candle:q4:text_to_image:none:staged_residency",
       "qwen_image:qwen_image:mlx:bf16:text_to_image:control:resident",
       "qwen_image:qwen_image:mlx:bf16:text_to_image:control:staged_residency",
       "qwen_image:qwen_image:mlx:bf16:text_to_image:lora:bounded_attention",
@@ -51654,11 +54595,56 @@
     "z_image": [],
     "z_image_edit": [],
     "z_image_turbo": [
+      "z_image_turbo:z_image_turbo_control:candle:bf16:text_to_image:control:bounded_attention",
+      "z_image_turbo:z_image_turbo_control:candle:bf16:text_to_image:control:bounded_decode",
+      "z_image_turbo:z_image_turbo_control:candle:bf16:text_to_image:control:bounded_transformer_residency",
+      "z_image_turbo:z_image_turbo_control:candle:bf16:text_to_image:control:resident",
+      "z_image_turbo:z_image_turbo_control:candle:bf16:text_to_image:control:staged_residency",
+      "z_image_turbo:z_image_turbo_control:candle:q4:text_to_image:control:bounded_attention",
+      "z_image_turbo:z_image_turbo_control:candle:q4:text_to_image:control:bounded_decode",
+      "z_image_turbo:z_image_turbo_control:candle:q4:text_to_image:control:bounded_transformer_residency",
+      "z_image_turbo:z_image_turbo_control:candle:q4:text_to_image:control:resident",
+      "z_image_turbo:z_image_turbo_control:candle:q4:text_to_image:control:staged_residency",
+      "z_image_turbo:z_image_turbo_control:candle:q8:text_to_image:control:bounded_attention",
+      "z_image_turbo:z_image_turbo_control:candle:q8:text_to_image:control:bounded_decode",
+      "z_image_turbo:z_image_turbo_control:candle:q8:text_to_image:control:bounded_transformer_residency",
+      "z_image_turbo:z_image_turbo_control:candle:q8:text_to_image:control:resident",
+      "z_image_turbo:z_image_turbo_control:candle:q8:text_to_image:control:staged_residency",
       "z_image_turbo:z_image_turbo_control:mlx:q4:text_to_image:control:bounded_attention",
       "z_image_turbo:z_image_turbo_control:mlx:q4:text_to_image:control:bounded_decode",
       "z_image_turbo:z_image_turbo_control:mlx:q4:text_to_image:control:bounded_transformer_residency",
       "z_image_turbo:z_image_turbo_control:mlx:q4:text_to_image:control:resident",
       "z_image_turbo:z_image_turbo_control:mlx:q4:text_to_image:control:staged_residency",
+      "z_image_turbo:z_image_turbo:candle:bf16:text_to_image:lora:bounded_attention",
+      "z_image_turbo:z_image_turbo:candle:bf16:text_to_image:lora:bounded_decode",
+      "z_image_turbo:z_image_turbo:candle:bf16:text_to_image:lora:bounded_transformer_residency",
+      "z_image_turbo:z_image_turbo:candle:bf16:text_to_image:lora:resident",
+      "z_image_turbo:z_image_turbo:candle:bf16:text_to_image:lora:staged_residency",
+      "z_image_turbo:z_image_turbo:candle:bf16:text_to_image:none:bounded_attention",
+      "z_image_turbo:z_image_turbo:candle:bf16:text_to_image:none:bounded_decode",
+      "z_image_turbo:z_image_turbo:candle:bf16:text_to_image:none:bounded_transformer_residency",
+      "z_image_turbo:z_image_turbo:candle:bf16:text_to_image:none:resident",
+      "z_image_turbo:z_image_turbo:candle:bf16:text_to_image:none:staged_residency",
+      "z_image_turbo:z_image_turbo:candle:q4:text_to_image:lora:bounded_attention",
+      "z_image_turbo:z_image_turbo:candle:q4:text_to_image:lora:bounded_decode",
+      "z_image_turbo:z_image_turbo:candle:q4:text_to_image:lora:bounded_transformer_residency",
+      "z_image_turbo:z_image_turbo:candle:q4:text_to_image:lora:resident",
+      "z_image_turbo:z_image_turbo:candle:q4:text_to_image:lora:staged_residency",
+      "z_image_turbo:z_image_turbo:candle:q4:text_to_image:none:bounded_attention",
+      "z_image_turbo:z_image_turbo:candle:q4:text_to_image:none:bounded_decode",
+      "z_image_turbo:z_image_turbo:candle:q4:text_to_image:none:bounded_transformer_residency",
+      "z_image_turbo:z_image_turbo:candle:q4:text_to_image:none:resident",
+      "z_image_turbo:z_image_turbo:candle:q4:text_to_image:none:staged_residency",
+      "z_image_turbo:z_image_turbo:candle:q8:text_to_image:lora:bounded_attention",
+      "z_image_turbo:z_image_turbo:candle:q8:text_to_image:lora:bounded_decode",
+      "z_image_turbo:z_image_turbo:candle:q8:text_to_image:lora:bounded_transformer_residency",
+      "z_image_turbo:z_image_turbo:candle:q8:text_to_image:lora:resident",
+      "z_image_turbo:z_image_turbo:candle:q8:text_to_image:lora:staged_residency",
+      "z_image_turbo:z_image_turbo:candle:q8:text_to_image:none:bounded_attention",
+      "z_image_turbo:z_image_turbo:candle:q8:text_to_image:none:bounded_decode",
+      "z_image_turbo:z_image_turbo:candle:q8:text_to_image:none:bounded_transformer_residency",
+      "z_image_turbo:z_image_turbo:candle:q8:text_to_image:none:resident",
+      "z_image_turbo:z_image_turbo:candle:q8:text_to_image:none:staged_residency",
       "z_image_turbo:z_image_turbo:mlx:q4:text_to_image:lora:bounded_attention",
       "z_image_turbo:z_image_turbo:mlx:q4:text_to_image:lora:bounded_decode",
       "z_image_turbo:z_image_turbo:mlx:q4:text_to_image:lora:bounded_transformer_residency",

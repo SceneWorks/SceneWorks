@@ -1377,6 +1377,13 @@ fn synthesize_estimate_floors(
     if receipt_priced && staged_floor_bytes >= resident_peak_bytes {
         return Vec::new();
     }
+    // NOTE (sc-22509, reopened by sc-22666): this lookup now MATCHES packaged anchors. Every
+    // retained corpus is compiled in since epic 22657 E5, so `z_image_turbo:candle` (q4/q8/bf16,
+    // sc-15859) and the qwen candle rows answer here through the shared-image ladder. The
+    // per-model allow-list that used to keep them out is gone; identity and loader-closure
+    // currency are the only guards left, and a cell with no anchor row falls through to
+    // `floor_anchor` below -- the contract-only per-rung ladder (sc-22664), never a bare
+    // manifest scalar repeated across every rung.
     let anchor = candle_image_anchor(
         anchors, engine_id, model_id, contract, tier_key, mode, overlay, geometry,
     );
@@ -1571,26 +1578,10 @@ pub(crate) struct EstimateCandidate {
     pub phase_peaks: Option<sceneworks_core::memory_anchor::AnchorDerivedPhases>,
 }
 
-/// Which store a [`CandleLadderAnchors`] carries, because the packaged store is scoped
-/// (sc-22509 / sc-22510: see [`CANDLE_ANCHOR_COEFFICIENT_MODELS`]) while a caller-supplied store
-/// was already scoped by whoever built it.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum AnchorStoreScope {
-    /// `sceneworks_core::memory_anchor::packaged_memory_anchors()`: the model-scope guard applies.
-    Packaged,
-    /// A store the caller assembled for this cell (a fixture, or a future per-model injection):
-    /// the derivation takes whatever anchor it yields for the cell. Production reaches the ladder
-    /// through the packaged store only, so this variant is constructed by the fixtures alone
-    /// until an injected store exists.
-    #[cfg_attr(not(test), allow(dead_code))]
-    CallerSupplied,
-}
-
 /// The anchor store and architecture facts the candle ladder prices from (sc-22664).
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct CandleLadderAnchors<'a> {
     pub store: Option<&'a sceneworks_core::memory_anchor::MemoryAnchorStore>,
-    pub scope: AnchorStoreScope,
     /// The facts the law scales its residues by. From the contract in production
     /// ([`architecture_facts_from_contract`], the one worker-edge seam shared with the MLX and
     /// video lanes, which states the default facts at this pin — sc-22667 wires the real
@@ -1601,12 +1592,11 @@ pub(crate) struct CandleLadderAnchors<'a> {
 }
 
 impl CandleLadderAnchors<'static> {
-    /// The production source: the packaged store under its scope guard, and the facts the
-    /// contract states at this pin.
+    /// The production source: the packaged store -- catalog-wide and unscoped since sc-22666 --
+    /// and the facts the contract states at this pin.
     pub(crate) fn packaged(contract: &gen_core::MemoryProviderContract) -> Self {
         Self {
             store: sceneworks_core::memory_anchor::packaged_memory_anchors(),
-            scope: AnchorStoreScope::Packaged,
             facts: crate::video_admission::architecture_facts_from_contract(contract),
         }
     }
@@ -1714,15 +1704,6 @@ fn floor_pseudo_anchor(
     }
 }
 
-/// Catalog models whose candle image admission the PACKAGED anchor store may price. Written when
-/// the lane's law was three per-pixel coefficients fitted on Krea Turbo; since sc-22663 the core
-/// law fits nothing (`MemoryAnchor::derive_phase_peaks`) and since sc-22664 this lane prices every
-/// rung through it, so the scope is no longer a coefficient question — it is a PACKAGING question
-/// (which packaged rows are current, per-model, on this lane), owned by sc-22666. It applies to the
-/// packaged store only ([`AnchorStoreScope::Packaged`]); a caller-supplied store is taken as
-/// scoped. See the note in [`candle_image_anchor`].
-const CANDLE_ANCHOR_COEFFICIENT_MODELS: &[&str] = &["krea_2_turbo"];
-
 /// The measured memory anchor for this candle image request, or `None` to keep the manifest-row
 /// floor (sc-22509, epic 22505).
 ///
@@ -1749,22 +1730,18 @@ fn candle_image_anchor<'a>(
     if overlay.is_some() || geometry.reference_count != 0 || geometry.batch != 1 {
         return None;
     }
-    // MODEL SCOPE of the PACKAGED store. This guard dates from the fitted candle law (three Krea
-    // Turbo per-pixel slopes, sc-22509), which could not price another model's row. The core law
-    // has fitted nothing since sc-22663 and this lane prices every rung through it since sc-22664,
-    // so the guard is no longer about coefficients: it is about which packaged rows are current
-    // on this lane, a packaging question sc-22666 owns. A caller-supplied store
-    // (`AnchorStoreScope::CallerSupplied`) is already scoped by its caller and the derivation
-    // takes whatever anchor it yields for the cell.
+    // NO MODEL SCOPE (sc-22666, epic 22657 E5). A `CANDLE_ANCHOR_COEFFICIENT_MODELS` allow-list
+    // (`["krea_2_turbo"]`) used to stand here, because the sc-22509 candle law was three per-pixel
+    // slopes fitted on Krea Turbo and pricing another model's row through them would have been
+    // borrowing empirics. The core law fits nothing since sc-22663 and this lane prices every rung
+    // through it since sc-22664 -- it decomposes THIS anchor's own measured peaks against THIS
+    // contract's component bytes and rescales the residues by architecture facts -- so a store
+    // anchor for any `(model, tier)` cell prices its own cell and nobody else's. Nor is it a
+    // packaging question any more: every retained corpus is compiled in, so a packaged row is
+    // priced the day it lands, which is the point of packaging them.
     //
-    // The store is catalog-wide since sc-22510, so this is load-bearing rather than defensive: a
-    // future candle corpus landing under a walked root and being packaged would otherwise start
-    // answering here on the day it was committed.
-    if anchors.scope == AnchorStoreScope::Packaged
-        && !CANDLE_ANCHOR_COEFFICIENT_MODELS.contains(&model_id)
-    {
-        return None;
-    }
+    // The identity conjuncts below (route, provider, mode, overlay, references, materialization
+    // shape, loader-closure currency) are the whole guard now: per-row facts, not a model census.
     let anchor = anchors.store?.image_anchor_for(
         model_id,
         sceneworks_core::memory_anchor::AnchorBackend::Candle,
@@ -1814,15 +1791,12 @@ fn candle_image_anchor<'a>(
     // the same seam `video_admission::anchor_currency_matches` and `vram_gate::krea_store_anchor`
     // grade on, so no two lanes can disagree about whether an anchor is live.
     //
-    // The declaration is a PACKAGED one (`config/anchor-loader-closures.json` names the packaged
-    // rows' closures), so like the model scope it grades the packaged store; a caller-supplied
-    // row's currency is its caller's (sc-22664).
-    match anchors.scope {
-        AnchorStoreScope::Packaged => {
-            crate::video_admission::anchor_currency_matches(anchor).then_some(anchor)
-        }
-        AnchorStoreScope::CallerSupplied => Some(anchor),
-    }
+    // It grades EVERY store since sc-22666: the per-store `AnchorStoreScope` split existed to hold
+    // the model allow-list, and with that gone a caller-supplied row is graded on exactly the
+    // conjuncts a packaged one is. `config/anchor-loader-closures.json` declares a closure for
+    // every packaged (model, lane), so a fixture row states its own model's digest or reads stale
+    // -- which is the truth about it.
+    crate::video_admission::anchor_currency_matches(anchor).then_some(anchor)
 }
 
 fn memory_for_selection(
@@ -5699,7 +5673,6 @@ mod tests {
     fn no_anchors() -> CandleLadderAnchors<'static> {
         CandleLadderAnchors {
             store: None,
-            scope: AnchorStoreScope::CallerSupplied,
             facts: sceneworks_core::memory_anchor::ArchitectureFacts::default(),
         }
     }
@@ -5785,7 +5758,17 @@ mod tests {
                 sha256: String::new(),
                 record_id: String::new(),
                 calibration_fingerprint: "sc-18253-composition-probe-v1".to_owned(),
-                loader_closure_digest: "0".repeat(64),
+                // The model's OWN live loader-closure declaration, READ rather than frozen as a
+                // literal (sc-22666): since the per-store scope split went with the model
+                // allow-list, `candle_image_anchor` grades a fixture row's currency exactly as it
+                // grades a packaged one, and a literal here would be a pin-coupled golden.
+                loader_closure_digest:
+                    sceneworks_core::memory_anchor::packaged_anchor_loader_closures()
+                        .and_then(|closures| {
+                            closures.digest_for("z_image_turbo", AnchorBackend::Candle)
+                        })
+                        .expect("z_image_turbo:candle must declare a loader closure")
+                        .to_owned(),
             },
             geometry: AnchorGeometry {
                 width: 1024,
@@ -5859,7 +5842,6 @@ mod tests {
     ) -> CandleLadderAnchors<'_> {
         CandleLadderAnchors {
             store: Some(store),
-            scope: AnchorStoreScope::CallerSupplied,
             facts: Z_IMAGE_FACTS,
         }
     }
@@ -6295,22 +6277,29 @@ mod tests {
         )
     }
 
-    /// sc-22664 review D1 — the PRODUCTION path: the same `z_image_turbo` q4 request on the same
-    /// 8 GB card (total 8.0, free 7.3), priced through the production anchor source —
-    /// `CandleLadderAnchors::packaged` under its model-scope guard, with the default architecture
-    /// facts — has NO anchor for the cell at this pin, so every rung is a manifest-row floor
-    /// carrying its structural pad: 5.7 + 2.0 = 7.7 GiB, widened to 7.85 GiB, against 7.3 GiB
-    /// free. It REJECTS, exactly as before this story, naming needed and available, and the entry
-    /// point hands back to the legacy gates (`None`). The 8 GB admission of AC 1 is unlocked only
-    /// by a packaged anchor for the cell plus its facts (sc-22666 / sc-22667), never by the
-    /// ladder's accounting alone — the retained sc-15859 record measures this cell's staged
-    /// decode at 10.93 GiB, which is why the floor must keep its pad.
+    /// sc-22664 review D1, re-keyed by sc-22666 — the PRODUCTION path: the same `z_image_turbo`
+    /// q4 request on the same 8 GB card (total 8.0, free 7.3), priced through the production
+    /// anchor source (`CandleLadderAnchors::packaged`, default architecture facts).
     ///
-    /// MUTATION: stripping `HEADROOM_GB` from the manifest-row floor (`measured_sequential_peak_gb`
-    /// in place of `predicted_sequential_peak_gb` in `synthesize_estimate_floors`) prices the
-    /// floor at 5.7 GiB → 5.81 admitted against 7.3, and this arm ADMITS — red.
+    /// WHAT MOVED. Before sc-22666 the packaged store yielded NO anchor for this cell — the
+    /// sc-15859 captures were retained but unpackaged, and a `CANDLE_ANCHOR_COEFFICIENT_MODELS`
+    /// allow-list refused the model besides — so every rung was the manifest row plus its pad.
+    /// Every retained corpus is compiled in now and the allow-list is gone, so the production
+    /// source prices the cell from its OWN measured anchor.
+    ///
+    /// WHAT DID NOT. The card still REJECTS, and the two halves of the unlock stay separable: the
+    /// ANCHOR is this story's, the FACTS are sc-22667's. With `ArchitectureFacts::default()` the
+    /// law has no architecture to shrink a deeper rung by, so all four rungs price at the anchor's
+    /// measured staged decode peak (10.93 GiB) and the deepest is no cheaper than the staged one.
+    /// That is the honest state of the lane at this pin, and it is what makes the 8 GB admission
+    /// of AC 1 attributable to the facts rather than to the ladder's accounting.
+    ///
+    /// MUTATION: pricing a rung from the manifest row instead of the anchor (dropping the store
+    /// from `CandleLadderAnchors::packaged`) puts every rung back on `EstimateFloor` at 7.7 GiB
+    /// and reds the basis arm.
     #[test]
-    fn the_production_anchor_source_rejects_z_image_q4_on_an_eight_gb_card_at_this_pin() {
+    fn the_production_anchor_source_prices_z_image_q4_from_its_packaged_anchor_and_still_rejects_eight_gb(
+    ) {
         let contract = z_image_fixture_contract();
         let budget = VramBudget {
             free_gb: 7.3,
@@ -6318,34 +6307,44 @@ mod tests {
         };
         let reserve_gb = crate::vram_gate::ladder_reserve_gb(budget);
         let packaged = CandleLadderAnchors::packaged(&contract);
-        assert_eq!(packaged.scope, AnchorStoreScope::Packaged);
         assert_eq!(
             packaged.facts,
             sceneworks_core::memory_anchor::ArchitectureFacts::default(),
-            "the contract states no facts at this pin"
+            "the contract states no facts at this pin (sc-22667 wires them)"
         );
-        // No packaged anchor prices this cell: the scope guard keeps the packaged store to
-        // `CANDLE_ANCHOR_COEFFICIENT_MODELS`, which does not name `z_image_turbo` (sc-22666).
-        assert!(!CANDLE_ANCHOR_COEFFICIENT_MODELS.contains(&"z_image_turbo"));
+        // The peak is READ from the packaged store, never restated: a re-capture that moves the
+        // measurement must move this expectation with it rather than red for having moved.
+        let anchor_decode_bytes = packaged
+            .store
+            .expect("the packaged anchor store must load")
+            .image_anchor_for(
+                "z_image_turbo",
+                sceneworks_core::memory_anchor::AnchorBackend::Candle,
+                "q4",
+            )
+            .expect("sc-22666 packages the sc-15859 z_image_turbo candle corpus")
+            .phase_active_peak_bytes
+            .decode;
+
         let candidates = z_image_fixture_floors(packaged, &contract);
-        let padded_row_bytes =
-            ((5.7 + crate::vram_gate::HEADROOM_GB) * BYTES_PER_GIB).ceil() as u64;
+        assert!(!candidates.is_empty());
         for candidate in &candidates {
             assert_eq!(
                 candidate.basis,
-                crate::memory_strategy::CandidateBasis::EstimateFloor,
-                "{:?}: the production source yields no anchor for this cell",
+                crate::memory_strategy::CandidateBasis::EstimateAnchorDerived {
+                    lane: crate::memory_strategy::AnchorDerivationLane::Image,
+                },
+                "{:?}: the packaged sc-15859 anchor prices this cell since sc-22666",
                 candidate.selection.strategy
             );
             assert_eq!(
-                candidate.evidence.predicted_peak_bytes, padded_row_bytes,
-                "{:?}: the manifest-row floor carries its pad, exactly as before sc-22664",
+                candidate.evidence.predicted_peak_bytes, anchor_decode_bytes,
+                "{:?}: with default facts the law has nothing to shrink the rung by",
                 candidate.selection.strategy
             );
         }
 
-        // Selector level: Reject, naming the widened padded row against the UNRESERVED pool (a
-        // pad-carrying floor pays no reserve twice).
+        // Selector level: still Reject — the measured peak is well above the card.
         let selected = select_z_image_fixture(
             &candidates,
             &contract,
@@ -6358,22 +6357,21 @@ mod tests {
             available_gb,
         } = selected
         else {
-            panic!("the production source must reject this card at this pin, got {selected:?}");
+            panic!("an 8 GB card cannot hold the measured peak at this pin, got {selected:?}");
         };
-        let expected_needed = (padded_row_bytes as f64
+        let expected_needed = (anchor_decode_bytes as f64
             * (1.0 + crate::ladder_margin_policy::CANDLE_RECAPTURE_SPREAD))
             .ceil()
             / BYTES_PER_GIB;
         assert!((needed_gb - expected_needed).abs() < 1e-6, "{needed_gb}");
-        assert!(needed_gb > 7.7 && needed_gb < 8.0, "{needed_gb}");
-        assert_eq!(
-            available_gb, 7.3,
-            "a pad-carrying floor compares against the unreserved pool: free, not free − reserve"
+        // An anchor-derived candidate carries no structural pad, so it pays the reserve.
+        assert!(
+            (available_gb - (budget.free_gb - reserve_gb)).abs() < 1e-9,
+            "{available_gb}"
         );
         assert!(needed_gb > available_gb);
 
-        // End to end through the production source (no anchor override): nothing admitted, the
-        // legacy gates decide — byte-for-byte the pre-story outcome for this cell.
+        // End to end through the production source: nothing admitted, the legacy gates decide.
         assert!(evaluate_z_image_fixture_with(budget, reserve_gb, None).is_none());
     }
 
@@ -6562,7 +6560,6 @@ mod tests {
         let candidates = z_image_fixture_floors(
             CandleLadderAnchors {
                 store: None,
-                scope: AnchorStoreScope::CallerSupplied,
                 facts: Z_IMAGE_FACTS,
             },
             &contract,
@@ -6627,6 +6624,46 @@ mod tests {
         assert!(windowed_phases.conditioning >= Z_IMAGE_Q4_COMPONENTS.conditioning);
         assert!(windowed_phases.denoise >= Z_IMAGE_Q4_COMPONENTS.transformer.div_ceil(30));
         assert!(windowed_phases.decode >= Z_IMAGE_Q4_COMPONENTS.decoder);
+
+        // sc-22666: "no anchor" is a property of the CELL, not of the store being absent. A store
+        // that exists and carries rows — as the packaged one now does for every retained corpus —
+        // but holds nothing for THIS cell must fall through to the same contract-only per-rung
+        // ladder, not to a bare row repeated. The store below is the real z_image q4 anchor
+        // relabelled onto another model, so the lookup misses on `model_id` alone.
+        let mut foreign = z_image_q4_anchor();
+        foreign.model_id = "krea_2_turbo".to_owned();
+        foreign.route = "krea_2_turbo".to_owned();
+        let foreign_store = sceneworks_core::memory_anchor::MemoryAnchorStore {
+            schema_version: sceneworks_core::memory_anchor::MEMORY_ANCHOR_SCHEMA_VERSION,
+            anchors: vec![foreign],
+            analytic_only: Vec::new(),
+            component_deltas: Vec::new(),
+        };
+        let absent_cell = z_image_fixture_floors(
+            CandleLadderAnchors {
+                store: Some(&foreign_store),
+                facts: Z_IMAGE_FACTS,
+            },
+            &contract,
+        );
+        assert_eq!(absent_cell.len(), candidates.len());
+        for (with_rows, without_store) in absent_cell.iter().zip(candidates.iter()) {
+            assert_eq!(
+                with_rows.selection.strategy,
+                without_store.selection.strategy
+            );
+            assert_eq!(
+                with_rows.basis, without_store.basis,
+                "{:?}: a cell absent from a populated store is priced exactly as one with no \
+                 store at all",
+                with_rows.selection.strategy
+            );
+            assert_eq!(
+                with_rows.phase_peaks, without_store.phase_peaks,
+                "{:?}: the contract-only per-rung ladder, not a bare manifest scalar",
+                with_rows.selection.strategy
+            );
+        }
     }
 
     #[test]
@@ -6930,10 +6967,10 @@ mod tests {
             analytic_only: Vec::new(),
             component_deltas: Vec::new(),
         };
-        // Graded under the PACKAGED scope: the identity, currency and model-scope guards of
-        // `candle_image_anchor` are the packaged store's guards (sc-22664), and `krea_2_turbo` is
-        // inside the packaged scope, so the injected store exercises every one of them.
-        let floors = |anchors: Option<&MemoryAnchorStore>, scope: AnchorStoreScope| {
+        // Every guard of `candle_image_anchor` -- identity and loader-closure currency -- applies
+        // to whatever store it is handed since sc-22666 (the per-store scope split went with the
+        // model allow-list), so the injected store exercises all of them.
+        let floors = |anchors: Option<&MemoryAnchorStore>| {
             synthesize_estimate_floors(
                 "krea_2_turbo",
                 "krea_2_turbo",
@@ -6949,7 +6986,6 @@ mod tests {
                 Z_IMAGE_REQUEST_EVIDENCE_REVISION,
                 CandleLadderAnchors {
                     store: anchors,
-                    scope,
                     facts: ArchitectureFacts::default(),
                 },
             )
@@ -7004,7 +7040,7 @@ mod tests {
                 component_deltas: Vec::new(),
                 anchors: vec![mutated],
             };
-            for candidate in floors(Some(&mutated_store), AnchorStoreScope::Packaged) {
+            for candidate in floors(Some(&mutated_store)) {
                 assert_eq!(
                     candidate.basis,
                     crate::memory_strategy::CandidateBasis::EstimateFloor,
@@ -7029,7 +7065,7 @@ mod tests {
                 component_deltas: Vec::new(),
                 anchors: vec![rotated],
             };
-            for candidate in floors(Some(&rotated_store), AnchorStoreScope::Packaged) {
+            for candidate in floors(Some(&rotated_store)) {
                 assert_eq!(
                     candidate.basis,
                     crate::memory_strategy::CandidateBasis::EstimateAnchorDerived {
@@ -7063,7 +7099,6 @@ mod tests {
                 Z_IMAGE_REQUEST_EVIDENCE_REVISION,
                 CandleLadderAnchors {
                     store: Some(&store),
-                    scope: AnchorStoreScope::Packaged,
                     facts: ArchitectureFacts::default(),
                 },
             );
@@ -7090,7 +7125,7 @@ mod tests {
                 component_deltas: Vec::new(),
                 anchors: vec![relabelled],
             };
-            for candidate in floors(Some(&relabelled_store), AnchorStoreScope::Packaged) {
+            for candidate in floors(Some(&relabelled_store)) {
                 assert_eq!(
                     candidate.basis,
                     crate::memory_strategy::CandidateBasis::EstimateAnchorDerived {
@@ -7101,69 +7136,63 @@ mod tests {
                 assert_eq!(candidate.evidence.predicted_peak_bytes, expected_derived);
             }
         }
-        // PACKAGED SCOPE (sc-22510 reconciliation, re-keyed by sc-22664): `model_id` gates the
-        // PACKAGED store. The store is catalog-wide, so a packaged row for a model outside the
-        // scope (a packaging question sc-22666 owns) must keep the manifest-row floor; a
-        // CALLER-SUPPLIED store is taken as scoped, and the same row is priced by the law. The
-        // anchor row here is otherwise identical and passes every conjunct above.
+        // NO MODEL SCOPE (sc-22666, epic 22657 E5): `model_id` no longer gates the derivation.
+        // A `CANDLE_ANCHOR_COEFFICIENT_MODELS` allow-list used to refuse exactly this row, because
+        // the lane priced cells with per-pixel slopes fitted on Krea Turbo and another model would
+        // have been priced with borrowed empirics. The law fits nothing since sc-22663 and every
+        // retained corpus is packaged since sc-22666, so the catalog-wide store answers for
+        // whichever cell it measured. The row below is the control with only `(model_id, route)`
+        // moved -- the provider stays the contract's, so every other conjunct still passes -- and
+        // it carries THAT model's own live loader-closure digest, so currency is satisfied and the
+        // removed allow-list is the only thing that could have refused it.
         {
             let mut foreign = store.anchors[0].clone();
-            // Only the model/route move: the provider stays the contract's, so EVERY other
-            // conjunct of `candle_image_anchor` still passes and the coefficient scope is the one
-            // guard that can refuse this row.
             foreign.model_id = "qwen_image".to_owned();
             foreign.route = "qwen_image".to_owned();
+            foreign.source.loader_closure_digest =
+                sceneworks_core::memory_anchor::packaged_anchor_loader_closures()
+                    .and_then(|closures| closures.digest_for("qwen_image", AnchorBackend::Candle))
+                    .expect("qwen_image:candle must declare a loader closure")
+                    .to_owned();
             let foreign_store = MemoryAnchorStore {
                 schema_version: MEMORY_ANCHOR_SCHEMA_VERSION,
                 analytic_only: Vec::new(),
                 component_deltas: Vec::new(),
                 anchors: vec![foreign],
             };
-            let foreign_floors = |scope: AnchorStoreScope| {
-                synthesize_estimate_floors(
-                    "qwen_image",
-                    "qwen_image",
-                    &contract,
-                    &manifest,
-                    "q4",
-                    numeric_tier("krea_2_turbo", "q4").expect("q4 tier"),
-                    &request_mode("krea_2_turbo", "text_to_image"),
-                    None,
-                    geometry,
-                    resident_peak_bytes,
-                    0,
-                    Z_IMAGE_REQUEST_EVIDENCE_REVISION,
-                    CandleLadderAnchors {
-                        store: Some(&foreign_store),
-                        scope,
-                        facts: ArchitectureFacts::default(),
-                    },
-                )
-            };
-            for candidate in foreign_floors(AnchorStoreScope::Packaged) {
-                assert_eq!(
-                    candidate.basis,
-                    crate::memory_strategy::CandidateBasis::EstimateFloor,
-                    "a packaged row outside the packaged scope must not be anchor-priced ({:?})",
-                    candidate.selection.strategy
-                );
-            }
-            // The foreign row carries the krea loader closure digest, which is not qwen's
-            // packaged declaration — under the caller-supplied scope neither the model scope nor
-            // the packaged currency declaration applies, and the law prices the row.
-            for candidate in foreign_floors(AnchorStoreScope::CallerSupplied) {
+            let foreign_floors = synthesize_estimate_floors(
+                "qwen_image",
+                "qwen_image",
+                &contract,
+                &manifest,
+                "q4",
+                numeric_tier("krea_2_turbo", "q4").expect("q4 tier"),
+                &request_mode("krea_2_turbo", "text_to_image"),
+                None,
+                geometry,
+                resident_peak_bytes,
+                0,
+                Z_IMAGE_REQUEST_EVIDENCE_REVISION,
+                CandleLadderAnchors {
+                    store: Some(&foreign_store),
+                    facts: ArchitectureFacts::default(),
+                },
+            );
+            assert!(!foreign_floors.is_empty());
+            for candidate in &foreign_floors {
                 assert_eq!(
                     candidate.basis,
                     crate::memory_strategy::CandidateBasis::EstimateAnchorDerived {
                         lane: crate::memory_strategy::AnchorDerivationLane::Image,
                     },
-                    "a caller-supplied row is taken as scoped and priced by the law ({:?})",
+                    "the anchor store is catalog-wide: a packaged model's own row must price \
+                     its own cell ({:?})",
                     candidate.selection.strategy
                 );
             }
         }
 
-        let anchored = floors(Some(&store), AnchorStoreScope::Packaged);
+        let anchored = floors(Some(&store));
         assert!(
             !anchored.is_empty(),
             "the probe contract must implement optimized rungs"
@@ -7191,7 +7220,7 @@ mod tests {
         // Differential control: the identical call with no anchor keeps the manifest-row floor
         // and the floor basis. Under the default facts the contract-only path's ratios are all
         // inert, so every rung carries the raw staged row.
-        let unanchored = floors(None, AnchorStoreScope::Packaged);
+        let unanchored = floors(None);
         assert_eq!(unanchored.len(), anchored.len());
         for candidate in &unanchored {
             assert_eq!(

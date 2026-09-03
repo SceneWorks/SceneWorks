@@ -453,6 +453,51 @@
       "overallAllocatorEnvelopeBytes": 69260977594
     },
     {
+      "id": "qwen_image:candle:q4:base:base:qwen-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v1:imc-48b48f5179e387bc2841",
+      "modelId": "qwen_image",
+      "modelFamily": "qwen-image",
+      "route": "qwen_image",
+      "provider": "qwen_image",
+      "backend": "candle",
+      "tier": "q4",
+      "transformerVariant": null,
+      "decoder": null,
+      "mode": "text_to_image",
+      "overlay": null,
+      "referenceCount": 0,
+      "loadShape": "deferred_materialization",
+      "measuredRegime": {
+        "decodeTiled": false,
+        "transformerWindowed": false,
+        "staged": true,
+        "attentionChunked": false
+      },
+      "source": {
+        "path": "docs/generated/qwen-candle-five-rung-sc-15817.json",
+        "sha256": "c3a47c9b085f5c75b3ee0cbe2ac55c7c20d7225be9b71abac6310488dfc7034f",
+        "recordId": "imc-48b48f5179e387bc2841",
+        "calibrationFingerprint": "qwen-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v1",
+        "loaderClosureDigest": "165efbbce5d3b9e337c762bc73760e772b87af9437b69d1cc228c909756f5c35"
+      },
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "frames": 1,
+        "fps": null
+      },
+      "phaseActivePeakBytes": {
+        "conditioning": 42048946176,
+        "denoise": 29734469632,
+        "decode": 33526120448
+      },
+      "phaseAllocatorEnvelopeBytes": {
+        "conditioning": 42048946176,
+        "denoise": 29734469632,
+        "decode": 33526120448
+      },
+      "overallAllocatorEnvelopeBytes": 42048946176
+    },
+    {
       "id": "qwen_image:mlx:bf16:base:base:qwen-image-mlx-shared-ladder-2026-08-01-v1-eager:imc-d314058df6e188459f3b",
       "modelId": "qwen_image",
       "modelFamily": "qwen-image",
@@ -495,8 +540,7 @@
         "denoise": 63560766632,
         "decode": 63204334376
       },
-      "overallAllocatorEnvelopeBytes": 69654771776,
-      "underivedReason": "every retained qwen_image MLX image record measures a single geometry per composition, so no within-cell per-pixel slope exists for this model and the image lane's coefficients (fitted on another model's spread) may not be borrowed; this anchor validates its measured point and prices nothing beyond it"
+      "overallAllocatorEnvelopeBytes": 69654771776
     },
     {
       "id": "qwen_image:mlx:q4:base:base:qwen-image-mlx-shared-ladder-2026-08-01-v1:imc-12f3ccbb72de78cea931",
@@ -542,7 +586,7 @@
         "decode": 30034038832
       },
       "overallAllocatorEnvelopeBytes": 33921472156,
-      "underivedReason": "every retained qwen_image MLX image record measures a single geometry per composition, so no within-cell per-pixel slope exists for this model and the image lane's coefficients (fitted on another model's spread) may not be borrowed; this anchor validates its measured point and prices nothing beyond it"
+      "underivedReason": "the anchor render engaged bounded rungs (or deferred materialization), so it does not measure the widest composition the MLX image law upper-bounds the ladder from; this anchor validates its measured point and prices nothing beyond it"
     },
     {
       "id": "qwen_image:mlx:q8:base:base:qwen-image-mlx-shared-ladder-2026-08-01-v1:imc-8f110511b0f85d15f72f",
@@ -588,7 +632,142 @@
         "decode": 40204028976
       },
       "overallAllocatorEnvelopeBytes": 44091560604,
-      "underivedReason": "every retained qwen_image MLX image record measures a single geometry per composition, so no within-cell per-pixel slope exists for this model and the image lane's coefficients (fitted on another model's spread) may not be borrowed; this anchor validates its measured point and prices nothing beyond it"
+      "underivedReason": "the anchor render engaged bounded rungs (or deferred materialization), so it does not measure the widest composition the MLX image law upper-bounds the ladder from; this anchor validates its measured point and prices nothing beyond it"
+    },
+    {
+      "id": "z_image_turbo:candle:bf16:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-3cd69f2fee9e91e83b58",
+      "modelId": "z_image_turbo",
+      "modelFamily": "z-image",
+      "route": "z_image_turbo",
+      "provider": "z_image_turbo",
+      "backend": "candle",
+      "tier": "bf16",
+      "transformerVariant": null,
+      "decoder": null,
+      "mode": "text_to_image",
+      "overlay": null,
+      "referenceCount": 0,
+      "loadShape": "deferred_materialization",
+      "measuredRegime": {
+        "decodeTiled": false,
+        "transformerWindowed": false,
+        "staged": true,
+        "attentionChunked": false
+      },
+      "source": {
+        "path": "docs/calibration/sc-15859/z-image-turbo-bf16-candle-anchor.json",
+        "sha256": "124f7d4f9988c1626d3e914edfa3faa620115f8775781e2456dc130f6c482e5b",
+        "recordId": "imc-3cd69f2fee9e91e83b58",
+        "calibrationFingerprint": "z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2",
+        "loaderClosureDigest": "d898a646af0d63830df11c8174499d068b4de867f2c5f5c7c4aa0737f3c711fe"
+      },
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "frames": 1,
+        "fps": null
+      },
+      "phaseActivePeakBytes": {
+        "conditioning": 8727298048,
+        "denoise": 16545480704,
+        "decode": 12988710912
+      },
+      "phaseAllocatorEnvelopeBytes": {
+        "conditioning": 8727298048,
+        "denoise": 16545480704,
+        "decode": 12988710912
+      },
+      "overallAllocatorEnvelopeBytes": 16545480704
+    },
+    {
+      "id": "z_image_turbo:candle:q4:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-b8064416c974b5008509",
+      "modelId": "z_image_turbo",
+      "modelFamily": "z-image",
+      "route": "z_image_turbo",
+      "provider": "z_image_turbo",
+      "backend": "candle",
+      "tier": "q4",
+      "transformerVariant": null,
+      "decoder": null,
+      "mode": "text_to_image",
+      "overlay": null,
+      "referenceCount": 0,
+      "loadShape": "deferred_materialization",
+      "measuredRegime": {
+        "decodeTiled": false,
+        "transformerWindowed": false,
+        "staged": true,
+        "attentionChunked": false
+      },
+      "source": {
+        "path": "docs/calibration/sc-15859/z-image-turbo-q4-candle-anchor.json",
+        "sha256": "1732064045f417bb421de01e1379cf15a3322653e21e8515ff751d654b0a35d6",
+        "recordId": "imc-b8064416c974b5008509",
+        "calibrationFingerprint": "z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2",
+        "loaderClosureDigest": "d898a646af0d63830df11c8174499d068b4de867f2c5f5c7c4aa0737f3c711fe"
+      },
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "frames": 1,
+        "fps": null
+      },
+      "phaseActivePeakBytes": {
+        "conditioning": 3097493504,
+        "denoise": 8050966528,
+        "decode": 11741954048
+      },
+      "phaseAllocatorEnvelopeBytes": {
+        "conditioning": 3097493504,
+        "denoise": 8050966528,
+        "decode": 11741954048
+      },
+      "overallAllocatorEnvelopeBytes": 11741954048
+    },
+    {
+      "id": "z_image_turbo:candle:q8:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-8cda4f70f78dd33f5330",
+      "modelId": "z_image_turbo",
+      "modelFamily": "z-image",
+      "route": "z_image_turbo",
+      "provider": "z_image_turbo",
+      "backend": "candle",
+      "tier": "q8",
+      "transformerVariant": null,
+      "decoder": null,
+      "mode": "text_to_image",
+      "overlay": null,
+      "referenceCount": 0,
+      "loadShape": "deferred_materialization",
+      "measuredRegime": {
+        "decodeTiled": false,
+        "transformerWindowed": false,
+        "staged": true,
+        "attentionChunked": false
+      },
+      "source": {
+        "path": "docs/calibration/sc-15859/z-image-turbo-q8-candle-anchor.json",
+        "sha256": "1291f34ddfbb84de15327a814121a9f622bbaf342e52c95296e6b5870ae93581",
+        "recordId": "imc-8cda4f70f78dd33f5330",
+        "calibrationFingerprint": "z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2",
+        "loaderClosureDigest": "d898a646af0d63830df11c8174499d068b4de867f2c5f5c7c4aa0737f3c711fe"
+      },
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "frames": 1,
+        "fps": null
+      },
+      "phaseActivePeakBytes": {
+        "conditioning": 5030019072,
+        "denoise": 11237588992,
+        "decode": 10230956032
+      },
+      "phaseAllocatorEnvelopeBytes": {
+        "conditioning": 5030019072,
+        "denoise": 11237588992,
+        "decode": 10230956032
+      },
+      "overallAllocatorEnvelopeBytes": 11237588992
     },
     {
       "id": "z_image_turbo:mlx:q4:base:base:z-image-mlx-independent-materialization-v4:imc-1fc616bea135da2281b8",
@@ -633,8 +812,7 @@
         "denoise": 12181808124,
         "decode": 14309852368
       },
-      "overallAllocatorEnvelopeBytes": 19138127416,
-      "underivedReason": "every retained z_image_turbo MLX image record measures a single geometry per composition, so no within-cell per-pixel slope exists for this model and the image lane's coefficients (fitted on another model's spread) may not be borrowed; this anchor validates its measured point and prices nothing beyond it"
+      "overallAllocatorEnvelopeBytes": 19138127416
     }
   ],
   "analyticOnly": [
@@ -645,9 +823,21 @@
       "route": "anima_aesthetic",
       "backend": "candle",
       "tier": "default",
-      "basis": "no_retained_evidence",
-      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
-      "evidence": null
+      "basis": "contract_estimate",
+      "reason": "no retained render for this cell; the model's backend block publishes a memoryStrategyContract, so the cell's estimate is the CONTRACT-ONLY per-rung ladder (the manifest row rescaled by the image law's per-rung ratios) rather than one manifest scalar repeated across every rung — this generator reads the contract's presence in the manifest, not the contract's own asset facts, which only the worker resolves at admission",
+      "evidence": {
+        "repo": null,
+        "revision": null,
+        "path": "config/manifests/builtin.models.jsonc#models/anima_aesthetic/candle/memoryStrategyContract",
+        "sha256": "f3bffe3ae3745d704caffa309c5806c0712e4a2940cb9edba9fdcf0c4f2ce9f1",
+        "recordId": null,
+        "envelopeBytes": null,
+        "values": {
+          "declaredRungs": "resident,staged_residency",
+          "provider": "anima_aesthetic",
+          "abi": "1"
+        }
+      }
     },
     {
       "id": "analytic:anima_aesthetic:mlx:bf16",
@@ -689,9 +879,21 @@
       "route": "anima_base",
       "backend": "candle",
       "tier": "default",
-      "basis": "no_retained_evidence",
-      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
-      "evidence": null
+      "basis": "contract_estimate",
+      "reason": "no retained render for this cell; the model's backend block publishes a memoryStrategyContract, so the cell's estimate is the CONTRACT-ONLY per-rung ladder (the manifest row rescaled by the image law's per-rung ratios) rather than one manifest scalar repeated across every rung — this generator reads the contract's presence in the manifest, not the contract's own asset facts, which only the worker resolves at admission",
+      "evidence": {
+        "repo": null,
+        "revision": null,
+        "path": "config/manifests/builtin.models.jsonc#models/anima_base/candle/memoryStrategyContract",
+        "sha256": "f3bffe3ae3745d704caffa309c5806c0712e4a2940cb9edba9fdcf0c4f2ce9f1",
+        "recordId": null,
+        "envelopeBytes": null,
+        "values": {
+          "declaredRungs": "resident,staged_residency",
+          "provider": "anima_base",
+          "abi": "1"
+        }
+      }
     },
     {
       "id": "analytic:anima_base:mlx:bf16",
@@ -733,9 +935,21 @@
       "route": "anima_turbo",
       "backend": "candle",
       "tier": "default",
-      "basis": "no_retained_evidence",
-      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
-      "evidence": null
+      "basis": "contract_estimate",
+      "reason": "no retained render for this cell; the model's backend block publishes a memoryStrategyContract, so the cell's estimate is the CONTRACT-ONLY per-rung ladder (the manifest row rescaled by the image law's per-rung ratios) rather than one manifest scalar repeated across every rung — this generator reads the contract's presence in the manifest, not the contract's own asset facts, which only the worker resolves at admission",
+      "evidence": {
+        "repo": null,
+        "revision": null,
+        "path": "config/manifests/builtin.models.jsonc#models/anima_turbo/candle/memoryStrategyContract",
+        "sha256": "f3bffe3ae3745d704caffa309c5806c0712e4a2940cb9edba9fdcf0c4f2ce9f1",
+        "recordId": null,
+        "envelopeBytes": null,
+        "values": {
+          "declaredRungs": "resident,staged_residency",
+          "provider": "anima_turbo",
+          "abi": "1"
+        }
+      }
     },
     {
       "id": "analytic:anima_turbo:mlx:bf16",
@@ -843,9 +1057,21 @@
       "route": "bernini",
       "backend": "candle",
       "tier": "bf16",
-      "basis": "no_retained_evidence",
-      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
-      "evidence": null
+      "basis": "contract_estimate",
+      "reason": "no retained render for this cell; the model's backend block publishes a memoryStrategyContract, so the cell's estimate is the CONTRACT-ONLY per-rung ladder (the manifest row rescaled by the image law's per-rung ratios) rather than one manifest scalar repeated across every rung — this generator reads the contract's presence in the manifest, not the contract's own asset facts, which only the worker resolves at admission",
+      "evidence": {
+        "repo": null,
+        "revision": null,
+        "path": "config/manifests/builtin.models.jsonc#models/bernini_image/candle/memoryStrategyContract",
+        "sha256": "f3bffe3ae3745d704caffa309c5806c0712e4a2940cb9edba9fdcf0c4f2ce9f1",
+        "recordId": null,
+        "envelopeBytes": null,
+        "values": {
+          "declaredRungs": "bounded_decode,resident",
+          "provider": "bernini",
+          "abi": "1"
+        }
+      }
     },
     {
       "id": "analytic:bernini_image:candle:q4",
@@ -854,9 +1080,21 @@
       "route": "bernini",
       "backend": "candle",
       "tier": "q4",
-      "basis": "no_retained_evidence",
-      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
-      "evidence": null
+      "basis": "contract_estimate",
+      "reason": "no retained render for this cell; the model's backend block publishes a memoryStrategyContract, so the cell's estimate is the CONTRACT-ONLY per-rung ladder (the manifest row rescaled by the image law's per-rung ratios) rather than one manifest scalar repeated across every rung — this generator reads the contract's presence in the manifest, not the contract's own asset facts, which only the worker resolves at admission",
+      "evidence": {
+        "repo": null,
+        "revision": null,
+        "path": "config/manifests/builtin.models.jsonc#models/bernini_image/candle/memoryStrategyContract",
+        "sha256": "f3bffe3ae3745d704caffa309c5806c0712e4a2940cb9edba9fdcf0c4f2ce9f1",
+        "recordId": null,
+        "envelopeBytes": null,
+        "values": {
+          "declaredRungs": "bounded_decode,resident",
+          "provider": "bernini",
+          "abi": "1"
+        }
+      }
     },
     {
       "id": "analytic:bernini_image:candle:q8",
@@ -865,9 +1103,21 @@
       "route": "bernini",
       "backend": "candle",
       "tier": "q8",
-      "basis": "no_retained_evidence",
-      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
-      "evidence": null
+      "basis": "contract_estimate",
+      "reason": "no retained render for this cell; the model's backend block publishes a memoryStrategyContract, so the cell's estimate is the CONTRACT-ONLY per-rung ladder (the manifest row rescaled by the image law's per-rung ratios) rather than one manifest scalar repeated across every rung — this generator reads the contract's presence in the manifest, not the contract's own asset facts, which only the worker resolves at admission",
+      "evidence": {
+        "repo": null,
+        "revision": null,
+        "path": "config/manifests/builtin.models.jsonc#models/bernini_image/candle/memoryStrategyContract",
+        "sha256": "f3bffe3ae3745d704caffa309c5806c0712e4a2940cb9edba9fdcf0c4f2ce9f1",
+        "recordId": null,
+        "envelopeBytes": null,
+        "values": {
+          "declaredRungs": "bounded_decode,resident",
+          "provider": "bernini",
+          "abi": "1"
+        }
+      }
     },
     {
       "id": "analytic:bernini_image:mlx:bf16",
@@ -909,16 +1159,19 @@
       "route": "boogu_image",
       "backend": "candle",
       "tier": "bf16",
-      "basis": "manifest_tier_declaration",
-      "reason": "no retained render for this cell; the catalog manifest declares a measured per-tier envelope, which is a whole-render figure with no phase decomposition",
+      "basis": "contract_estimate",
+      "reason": "no retained render for this cell; the model's backend block publishes a memoryStrategyContract, so the cell's estimate is the CONTRACT-ONLY per-rung ladder (the manifest row rescaled by the image law's per-rung ratios) rather than one manifest scalar repeated across every rung — this generator reads the contract's presence in the manifest, not the contract's own asset facts, which only the worker resolves at admission",
       "evidence": {
         "repo": null,
         "revision": null,
-        "path": "config/manifests/builtin.models.jsonc#models/boogu_image/candle",
+        "path": "config/manifests/builtin.models.jsonc#models/boogu_image/candle/memoryStrategyContract",
         "sha256": "f3bffe3ae3745d704caffa309c5806c0712e4a2940cb9edba9fdcf0c4f2ce9f1",
         "recordId": null,
         "envelopeBytes": null,
         "values": {
+          "declaredRungs": "resident,staged_residency",
+          "provider": "boogu_image",
+          "abi": "1",
           "vramGbByTier": "54.4"
         }
       }
@@ -930,16 +1183,19 @@
       "route": "boogu_image",
       "backend": "candle",
       "tier": "q4",
-      "basis": "manifest_tier_declaration",
-      "reason": "no retained render for this cell; the catalog manifest declares a measured per-tier envelope, which is a whole-render figure with no phase decomposition",
+      "basis": "contract_estimate",
+      "reason": "no retained render for this cell; the model's backend block publishes a memoryStrategyContract, so the cell's estimate is the CONTRACT-ONLY per-rung ladder (the manifest row rescaled by the image law's per-rung ratios) rather than one manifest scalar repeated across every rung — this generator reads the contract's presence in the manifest, not the contract's own asset facts, which only the worker resolves at admission",
       "evidence": {
         "repo": null,
         "revision": null,
-        "path": "config/manifests/builtin.models.jsonc#models/boogu_image/candle",
+        "path": "config/manifests/builtin.models.jsonc#models/boogu_image/candle/memoryStrategyContract",
         "sha256": "f3bffe3ae3745d704caffa309c5806c0712e4a2940cb9edba9fdcf0c4f2ce9f1",
         "recordId": null,
         "envelopeBytes": null,
         "values": {
+          "declaredRungs": "resident,staged_residency",
+          "provider": "boogu_image",
+          "abi": "1",
           "vramGbByTier": "31.7"
         }
       }
@@ -951,16 +1207,19 @@
       "route": "boogu_image",
       "backend": "candle",
       "tier": "q8",
-      "basis": "manifest_tier_declaration",
-      "reason": "no retained render for this cell; the catalog manifest declares a measured per-tier envelope, which is a whole-render figure with no phase decomposition",
+      "basis": "contract_estimate",
+      "reason": "no retained render for this cell; the model's backend block publishes a memoryStrategyContract, so the cell's estimate is the CONTRACT-ONLY per-rung ladder (the manifest row rescaled by the image law's per-rung ratios) rather than one manifest scalar repeated across every rung — this generator reads the contract's presence in the manifest, not the contract's own asset facts, which only the worker resolves at admission",
       "evidence": {
         "repo": null,
         "revision": null,
-        "path": "config/manifests/builtin.models.jsonc#models/boogu_image/candle",
+        "path": "config/manifests/builtin.models.jsonc#models/boogu_image/candle/memoryStrategyContract",
         "sha256": "f3bffe3ae3745d704caffa309c5806c0712e4a2940cb9edba9fdcf0c4f2ce9f1",
         "recordId": null,
         "envelopeBytes": null,
         "values": {
+          "declaredRungs": "resident,staged_residency",
+          "provider": "boogu_image",
+          "abi": "1",
           "vramGbByTier": "42"
         }
       }
@@ -983,9 +1242,21 @@
       "route": "boogu_image_edit",
       "backend": "candle",
       "tier": "default",
-      "basis": "no_retained_evidence",
-      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
-      "evidence": null
+      "basis": "contract_estimate",
+      "reason": "no retained render for this cell; the model's backend block publishes a memoryStrategyContract, so the cell's estimate is the CONTRACT-ONLY per-rung ladder (the manifest row rescaled by the image law's per-rung ratios) rather than one manifest scalar repeated across every rung — this generator reads the contract's presence in the manifest, not the contract's own asset facts, which only the worker resolves at admission",
+      "evidence": {
+        "repo": null,
+        "revision": null,
+        "path": "config/manifests/builtin.models.jsonc#models/boogu_image_edit/candle/memoryStrategyContract",
+        "sha256": "f3bffe3ae3745d704caffa309c5806c0712e4a2940cb9edba9fdcf0c4f2ce9f1",
+        "recordId": null,
+        "envelopeBytes": null,
+        "values": {
+          "declaredRungs": "resident,staged_residency",
+          "provider": "boogu_image_edit",
+          "abi": "1"
+        }
+      }
     },
     {
       "id": "analytic:boogu_image_edit:mlx:q8",
@@ -1005,16 +1276,19 @@
       "route": "boogu_image_turbo",
       "backend": "candle",
       "tier": "bf16",
-      "basis": "manifest_tier_declaration",
-      "reason": "no retained render for this cell; the catalog manifest declares a measured per-tier envelope, which is a whole-render figure with no phase decomposition",
+      "basis": "contract_estimate",
+      "reason": "no retained render for this cell; the model's backend block publishes a memoryStrategyContract, so the cell's estimate is the CONTRACT-ONLY per-rung ladder (the manifest row rescaled by the image law's per-rung ratios) rather than one manifest scalar repeated across every rung — this generator reads the contract's presence in the manifest, not the contract's own asset facts, which only the worker resolves at admission",
       "evidence": {
         "repo": null,
         "revision": null,
-        "path": "config/manifests/builtin.models.jsonc#models/boogu_image_turbo/candle",
+        "path": "config/manifests/builtin.models.jsonc#models/boogu_image_turbo/candle/memoryStrategyContract",
         "sha256": "f3bffe3ae3745d704caffa309c5806c0712e4a2940cb9edba9fdcf0c4f2ce9f1",
         "recordId": null,
         "envelopeBytes": null,
         "values": {
+          "declaredRungs": "resident,staged_residency",
+          "provider": "boogu_image_turbo",
+          "abi": "1",
           "vramGbByTier": "54.5"
         }
       }
@@ -1026,16 +1300,19 @@
       "route": "boogu_image_turbo",
       "backend": "candle",
       "tier": "q4",
-      "basis": "manifest_tier_declaration",
-      "reason": "no retained render for this cell; the catalog manifest declares a measured per-tier envelope, which is a whole-render figure with no phase decomposition",
+      "basis": "contract_estimate",
+      "reason": "no retained render for this cell; the model's backend block publishes a memoryStrategyContract, so the cell's estimate is the CONTRACT-ONLY per-rung ladder (the manifest row rescaled by the image law's per-rung ratios) rather than one manifest scalar repeated across every rung — this generator reads the contract's presence in the manifest, not the contract's own asset facts, which only the worker resolves at admission",
       "evidence": {
         "repo": null,
         "revision": null,
-        "path": "config/manifests/builtin.models.jsonc#models/boogu_image_turbo/candle",
+        "path": "config/manifests/builtin.models.jsonc#models/boogu_image_turbo/candle/memoryStrategyContract",
         "sha256": "f3bffe3ae3745d704caffa309c5806c0712e4a2940cb9edba9fdcf0c4f2ce9f1",
         "recordId": null,
         "envelopeBytes": null,
         "values": {
+          "declaredRungs": "resident,staged_residency",
+          "provider": "boogu_image_turbo",
+          "abi": "1",
           "vramGbByTier": "31.6"
         }
       }
@@ -1047,16 +1324,19 @@
       "route": "boogu_image_turbo",
       "backend": "candle",
       "tier": "q8",
-      "basis": "manifest_tier_declaration",
-      "reason": "no retained render for this cell; the catalog manifest declares a measured per-tier envelope, which is a whole-render figure with no phase decomposition",
+      "basis": "contract_estimate",
+      "reason": "no retained render for this cell; the model's backend block publishes a memoryStrategyContract, so the cell's estimate is the CONTRACT-ONLY per-rung ladder (the manifest row rescaled by the image law's per-rung ratios) rather than one manifest scalar repeated across every rung — this generator reads the contract's presence in the manifest, not the contract's own asset facts, which only the worker resolves at admission",
       "evidence": {
         "repo": null,
         "revision": null,
-        "path": "config/manifests/builtin.models.jsonc#models/boogu_image_turbo/candle",
+        "path": "config/manifests/builtin.models.jsonc#models/boogu_image_turbo/candle/memoryStrategyContract",
         "sha256": "f3bffe3ae3745d704caffa309c5806c0712e4a2940cb9edba9fdcf0c4f2ce9f1",
         "recordId": null,
         "envelopeBytes": null,
         "values": {
+          "declaredRungs": "resident,staged_residency",
+          "provider": "boogu_image_turbo",
+          "abi": "1",
           "vramGbByTier": "42.1"
         }
       }
@@ -1079,9 +1359,21 @@
       "route": "chroma1_base",
       "backend": "candle",
       "tier": "bf16",
-      "basis": "no_retained_evidence",
-      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
-      "evidence": null
+      "basis": "contract_estimate",
+      "reason": "no retained render for this cell; the model's backend block publishes a memoryStrategyContract, so the cell's estimate is the CONTRACT-ONLY per-rung ladder (the manifest row rescaled by the image law's per-rung ratios) rather than one manifest scalar repeated across every rung — this generator reads the contract's presence in the manifest, not the contract's own asset facts, which only the worker resolves at admission",
+      "evidence": {
+        "repo": null,
+        "revision": null,
+        "path": "config/manifests/builtin.models.jsonc#models/chroma1_base/candle/memoryStrategyContract",
+        "sha256": "f3bffe3ae3745d704caffa309c5806c0712e4a2940cb9edba9fdcf0c4f2ce9f1",
+        "recordId": null,
+        "envelopeBytes": null,
+        "values": {
+          "declaredRungs": "resident,staged_residency",
+          "provider": "chroma1_base",
+          "abi": "1"
+        }
+      }
     },
     {
       "id": "analytic:chroma1_base:candle:q4",
@@ -1090,9 +1382,21 @@
       "route": "chroma1_base",
       "backend": "candle",
       "tier": "q4",
-      "basis": "no_retained_evidence",
-      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
-      "evidence": null
+      "basis": "contract_estimate",
+      "reason": "no retained render for this cell; the model's backend block publishes a memoryStrategyContract, so the cell's estimate is the CONTRACT-ONLY per-rung ladder (the manifest row rescaled by the image law's per-rung ratios) rather than one manifest scalar repeated across every rung — this generator reads the contract's presence in the manifest, not the contract's own asset facts, which only the worker resolves at admission",
+      "evidence": {
+        "repo": null,
+        "revision": null,
+        "path": "config/manifests/builtin.models.jsonc#models/chroma1_base/candle/memoryStrategyContract",
+        "sha256": "f3bffe3ae3745d704caffa309c5806c0712e4a2940cb9edba9fdcf0c4f2ce9f1",
+        "recordId": null,
+        "envelopeBytes": null,
+        "values": {
+          "declaredRungs": "resident,staged_residency",
+          "provider": "chroma1_base",
+          "abi": "1"
+        }
+      }
     },
     {
       "id": "analytic:chroma1_base:candle:q8",
@@ -1101,9 +1405,21 @@
       "route": "chroma1_base",
       "backend": "candle",
       "tier": "q8",
-      "basis": "no_retained_evidence",
-      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
-      "evidence": null
+      "basis": "contract_estimate",
+      "reason": "no retained render for this cell; the model's backend block publishes a memoryStrategyContract, so the cell's estimate is the CONTRACT-ONLY per-rung ladder (the manifest row rescaled by the image law's per-rung ratios) rather than one manifest scalar repeated across every rung — this generator reads the contract's presence in the manifest, not the contract's own asset facts, which only the worker resolves at admission",
+      "evidence": {
+        "repo": null,
+        "revision": null,
+        "path": "config/manifests/builtin.models.jsonc#models/chroma1_base/candle/memoryStrategyContract",
+        "sha256": "f3bffe3ae3745d704caffa309c5806c0712e4a2940cb9edba9fdcf0c4f2ce9f1",
+        "recordId": null,
+        "envelopeBytes": null,
+        "values": {
+          "declaredRungs": "resident,staged_residency",
+          "provider": "chroma1_base",
+          "abi": "1"
+        }
+      }
     },
     {
       "id": "analytic:chroma1_base:mlx:bf16",
@@ -1145,9 +1461,21 @@
       "route": "chroma1_flash",
       "backend": "candle",
       "tier": "bf16",
-      "basis": "no_retained_evidence",
-      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
-      "evidence": null
+      "basis": "contract_estimate",
+      "reason": "no retained render for this cell; the model's backend block publishes a memoryStrategyContract, so the cell's estimate is the CONTRACT-ONLY per-rung ladder (the manifest row rescaled by the image law's per-rung ratios) rather than one manifest scalar repeated across every rung — this generator reads the contract's presence in the manifest, not the contract's own asset facts, which only the worker resolves at admission",
+      "evidence": {
+        "repo": null,
+        "revision": null,
+        "path": "config/manifests/builtin.models.jsonc#models/chroma1_flash/candle/memoryStrategyContract",
+        "sha256": "f3bffe3ae3745d704caffa309c5806c0712e4a2940cb9edba9fdcf0c4f2ce9f1",
+        "recordId": null,
+        "envelopeBytes": null,
+        "values": {
+          "declaredRungs": "resident,staged_residency",
+          "provider": "chroma1_flash",
+          "abi": "1"
+        }
+      }
     },
     {
       "id": "analytic:chroma1_flash:candle:q4",
@@ -1156,9 +1484,21 @@
       "route": "chroma1_flash",
       "backend": "candle",
       "tier": "q4",
-      "basis": "no_retained_evidence",
-      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
-      "evidence": null
+      "basis": "contract_estimate",
+      "reason": "no retained render for this cell; the model's backend block publishes a memoryStrategyContract, so the cell's estimate is the CONTRACT-ONLY per-rung ladder (the manifest row rescaled by the image law's per-rung ratios) rather than one manifest scalar repeated across every rung — this generator reads the contract's presence in the manifest, not the contract's own asset facts, which only the worker resolves at admission",
+      "evidence": {
+        "repo": null,
+        "revision": null,
+        "path": "config/manifests/builtin.models.jsonc#models/chroma1_flash/candle/memoryStrategyContract",
+        "sha256": "f3bffe3ae3745d704caffa309c5806c0712e4a2940cb9edba9fdcf0c4f2ce9f1",
+        "recordId": null,
+        "envelopeBytes": null,
+        "values": {
+          "declaredRungs": "resident,staged_residency",
+          "provider": "chroma1_flash",
+          "abi": "1"
+        }
+      }
     },
     {
       "id": "analytic:chroma1_flash:candle:q8",
@@ -1167,9 +1507,21 @@
       "route": "chroma1_flash",
       "backend": "candle",
       "tier": "q8",
-      "basis": "no_retained_evidence",
-      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
-      "evidence": null
+      "basis": "contract_estimate",
+      "reason": "no retained render for this cell; the model's backend block publishes a memoryStrategyContract, so the cell's estimate is the CONTRACT-ONLY per-rung ladder (the manifest row rescaled by the image law's per-rung ratios) rather than one manifest scalar repeated across every rung — this generator reads the contract's presence in the manifest, not the contract's own asset facts, which only the worker resolves at admission",
+      "evidence": {
+        "repo": null,
+        "revision": null,
+        "path": "config/manifests/builtin.models.jsonc#models/chroma1_flash/candle/memoryStrategyContract",
+        "sha256": "f3bffe3ae3745d704caffa309c5806c0712e4a2940cb9edba9fdcf0c4f2ce9f1",
+        "recordId": null,
+        "envelopeBytes": null,
+        "values": {
+          "declaredRungs": "resident,staged_residency",
+          "provider": "chroma1_flash",
+          "abi": "1"
+        }
+      }
     },
     {
       "id": "analytic:chroma1_flash:mlx:bf16",
@@ -1211,9 +1563,21 @@
       "route": "chroma1_hd",
       "backend": "candle",
       "tier": "bf16",
-      "basis": "no_retained_evidence",
-      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
-      "evidence": null
+      "basis": "contract_estimate",
+      "reason": "no retained render for this cell; the model's backend block publishes a memoryStrategyContract, so the cell's estimate is the CONTRACT-ONLY per-rung ladder (the manifest row rescaled by the image law's per-rung ratios) rather than one manifest scalar repeated across every rung — this generator reads the contract's presence in the manifest, not the contract's own asset facts, which only the worker resolves at admission",
+      "evidence": {
+        "repo": null,
+        "revision": null,
+        "path": "config/manifests/builtin.models.jsonc#models/chroma1_hd/candle/memoryStrategyContract",
+        "sha256": "f3bffe3ae3745d704caffa309c5806c0712e4a2940cb9edba9fdcf0c4f2ce9f1",
+        "recordId": null,
+        "envelopeBytes": null,
+        "values": {
+          "declaredRungs": "resident,staged_residency",
+          "provider": "chroma1_hd",
+          "abi": "1"
+        }
+      }
     },
     {
       "id": "analytic:chroma1_hd:candle:q4",
@@ -1222,9 +1586,21 @@
       "route": "chroma1_hd",
       "backend": "candle",
       "tier": "q4",
-      "basis": "no_retained_evidence",
-      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
-      "evidence": null
+      "basis": "contract_estimate",
+      "reason": "no retained render for this cell; the model's backend block publishes a memoryStrategyContract, so the cell's estimate is the CONTRACT-ONLY per-rung ladder (the manifest row rescaled by the image law's per-rung ratios) rather than one manifest scalar repeated across every rung — this generator reads the contract's presence in the manifest, not the contract's own asset facts, which only the worker resolves at admission",
+      "evidence": {
+        "repo": null,
+        "revision": null,
+        "path": "config/manifests/builtin.models.jsonc#models/chroma1_hd/candle/memoryStrategyContract",
+        "sha256": "f3bffe3ae3745d704caffa309c5806c0712e4a2940cb9edba9fdcf0c4f2ce9f1",
+        "recordId": null,
+        "envelopeBytes": null,
+        "values": {
+          "declaredRungs": "resident,staged_residency",
+          "provider": "chroma1_hd",
+          "abi": "1"
+        }
+      }
     },
     {
       "id": "analytic:chroma1_hd:candle:q8",
@@ -1233,9 +1609,21 @@
       "route": "chroma1_hd",
       "backend": "candle",
       "tier": "q8",
-      "basis": "no_retained_evidence",
-      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
-      "evidence": null
+      "basis": "contract_estimate",
+      "reason": "no retained render for this cell; the model's backend block publishes a memoryStrategyContract, so the cell's estimate is the CONTRACT-ONLY per-rung ladder (the manifest row rescaled by the image law's per-rung ratios) rather than one manifest scalar repeated across every rung — this generator reads the contract's presence in the manifest, not the contract's own asset facts, which only the worker resolves at admission",
+      "evidence": {
+        "repo": null,
+        "revision": null,
+        "path": "config/manifests/builtin.models.jsonc#models/chroma1_hd/candle/memoryStrategyContract",
+        "sha256": "f3bffe3ae3745d704caffa309c5806c0712e4a2940cb9edba9fdcf0c4f2ce9f1",
+        "recordId": null,
+        "envelopeBytes": null,
+        "values": {
+          "declaredRungs": "resident,staged_residency",
+          "provider": "chroma1_hd",
+          "abi": "1"
+        }
+      }
     },
     {
       "id": "analytic:chroma1_hd:mlx:bf16",
@@ -1277,9 +1665,21 @@
       "route": "flux2_dev",
       "backend": "candle",
       "tier": "q4",
-      "basis": "no_retained_evidence",
-      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
-      "evidence": null
+      "basis": "contract_estimate",
+      "reason": "no retained render for this cell; the model's backend block publishes a memoryStrategyContract, so the cell's estimate is the CONTRACT-ONLY per-rung ladder (the manifest row rescaled by the image law's per-rung ratios) rather than one manifest scalar repeated across every rung — this generator reads the contract's presence in the manifest, not the contract's own asset facts, which only the worker resolves at admission",
+      "evidence": {
+        "repo": null,
+        "revision": null,
+        "path": "config/manifests/builtin.models.jsonc#models/flux2_dev/candle/memoryStrategyContract",
+        "sha256": "f3bffe3ae3745d704caffa309c5806c0712e4a2940cb9edba9fdcf0c4f2ce9f1",
+        "recordId": null,
+        "envelopeBytes": null,
+        "values": {
+          "declaredRungs": "bounded_attention,bounded_decode,bounded_transformer_residency,staged_residency",
+          "provider": "flux2_dev",
+          "abi": "1"
+        }
+      }
     },
     {
       "id": "analytic:flux2_dev:candle:q8",
@@ -1288,9 +1688,21 @@
       "route": "flux2_dev",
       "backend": "candle",
       "tier": "q8",
-      "basis": "no_retained_evidence",
-      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
-      "evidence": null
+      "basis": "contract_estimate",
+      "reason": "no retained render for this cell; the model's backend block publishes a memoryStrategyContract, so the cell's estimate is the CONTRACT-ONLY per-rung ladder (the manifest row rescaled by the image law's per-rung ratios) rather than one manifest scalar repeated across every rung — this generator reads the contract's presence in the manifest, not the contract's own asset facts, which only the worker resolves at admission",
+      "evidence": {
+        "repo": null,
+        "revision": null,
+        "path": "config/manifests/builtin.models.jsonc#models/flux2_dev/candle/memoryStrategyContract",
+        "sha256": "f3bffe3ae3745d704caffa309c5806c0712e4a2940cb9edba9fdcf0c4f2ce9f1",
+        "recordId": null,
+        "envelopeBytes": null,
+        "values": {
+          "declaredRungs": "bounded_attention,bounded_decode,bounded_transformer_residency,staged_residency",
+          "provider": "flux2_dev",
+          "abi": "1"
+        }
+      }
     },
     {
       "id": "analytic:flux2_dev:mlx:bf16",
@@ -1310,16 +1722,19 @@
       "route": "flux2_klein_9b",
       "backend": "candle",
       "tier": "bf16",
-      "basis": "manifest_tier_declaration",
-      "reason": "no retained render for this cell; the catalog manifest declares a measured per-tier envelope, which is a whole-render figure with no phase decomposition",
+      "basis": "contract_estimate",
+      "reason": "no retained render for this cell; the model's backend block publishes a memoryStrategyContract, so the cell's estimate is the CONTRACT-ONLY per-rung ladder (the manifest row rescaled by the image law's per-rung ratios) rather than one manifest scalar repeated across every rung — this generator reads the contract's presence in the manifest, not the contract's own asset facts, which only the worker resolves at admission",
       "evidence": {
         "repo": null,
         "revision": null,
-        "path": "config/manifests/builtin.models.jsonc#models/flux2_klein_9b/candle",
+        "path": "config/manifests/builtin.models.jsonc#models/flux2_klein_9b/candle/memoryStrategyContract",
         "sha256": "f3bffe3ae3745d704caffa309c5806c0712e4a2940cb9edba9fdcf0c4f2ce9f1",
         "recordId": null,
         "envelopeBytes": null,
         "values": {
+          "declaredRungs": "bounded_attention,bounded_decode,bounded_transformer_residency,staged_residency",
+          "provider": "flux2_klein_9b",
+          "abi": "1",
           "vramGbByTier": "75.5",
           "sequentialPeakGb": "53.3"
         }
@@ -1332,16 +1747,19 @@
       "route": "flux2_klein_9b",
       "backend": "candle",
       "tier": "q4",
-      "basis": "manifest_tier_declaration",
-      "reason": "no retained render for this cell; the catalog manifest declares a measured per-tier envelope, which is a whole-render figure with no phase decomposition",
+      "basis": "contract_estimate",
+      "reason": "no retained render for this cell; the model's backend block publishes a memoryStrategyContract, so the cell's estimate is the CONTRACT-ONLY per-rung ladder (the manifest row rescaled by the image law's per-rung ratios) rather than one manifest scalar repeated across every rung — this generator reads the contract's presence in the manifest, not the contract's own asset facts, which only the worker resolves at admission",
       "evidence": {
         "repo": null,
         "revision": null,
-        "path": "config/manifests/builtin.models.jsonc#models/flux2_klein_9b/candle",
+        "path": "config/manifests/builtin.models.jsonc#models/flux2_klein_9b/candle/memoryStrategyContract",
         "sha256": "f3bffe3ae3745d704caffa309c5806c0712e4a2940cb9edba9fdcf0c4f2ce9f1",
         "recordId": null,
         "envelopeBytes": null,
         "values": {
+          "declaredRungs": "bounded_attention,bounded_decode,bounded_transformer_residency,staged_residency",
+          "provider": "flux2_klein_9b",
+          "abi": "1",
           "vramGbByTier": "46.2",
           "sequentialPeakGb": "24.2"
         }
@@ -1354,16 +1772,19 @@
       "route": "flux2_klein_9b",
       "backend": "candle",
       "tier": "q8",
-      "basis": "manifest_tier_declaration",
-      "reason": "no retained render for this cell; the catalog manifest declares a measured per-tier envelope, which is a whole-render figure with no phase decomposition",
+      "basis": "contract_estimate",
+      "reason": "no retained render for this cell; the model's backend block publishes a memoryStrategyContract, so the cell's estimate is the CONTRACT-ONLY per-rung ladder (the manifest row rescaled by the image law's per-rung ratios) rather than one manifest scalar repeated across every rung — this generator reads the contract's presence in the manifest, not the contract's own asset facts, which only the worker resolves at admission",
       "evidence": {
         "repo": null,
         "revision": null,
-        "path": "config/manifests/builtin.models.jsonc#models/flux2_klein_9b/candle",
+        "path": "config/manifests/builtin.models.jsonc#models/flux2_klein_9b/candle/memoryStrategyContract",
         "sha256": "f3bffe3ae3745d704caffa309c5806c0712e4a2940cb9edba9fdcf0c4f2ce9f1",
         "recordId": null,
         "envelopeBytes": null,
         "values": {
+          "declaredRungs": "bounded_attention,bounded_decode,bounded_transformer_residency,staged_residency",
+          "provider": "flux2_klein_9b",
+          "abi": "1",
           "vramGbByTier": "50.6",
           "sequentialPeakGb": "28.7"
         }
@@ -1518,16 +1939,19 @@
       "route": "flux1_dev",
       "backend": "candle",
       "tier": "q8",
-      "basis": "manifest_tier_declaration",
-      "reason": "no retained render for this cell; the catalog manifest declares a measured per-tier envelope, which is a whole-render figure with no phase decomposition",
+      "basis": "contract_estimate",
+      "reason": "no retained render for this cell; the model's backend block publishes a memoryStrategyContract, so the cell's estimate is the CONTRACT-ONLY per-rung ladder (the manifest row rescaled by the image law's per-rung ratios) rather than one manifest scalar repeated across every rung — this generator reads the contract's presence in the manifest, not the contract's own asset facts, which only the worker resolves at admission",
       "evidence": {
         "repo": null,
         "revision": null,
-        "path": "config/manifests/builtin.models.jsonc#models/flux_dev/candle",
+        "path": "config/manifests/builtin.models.jsonc#models/flux_dev/candle/memoryStrategyContract",
         "sha256": "f3bffe3ae3745d704caffa309c5806c0712e4a2940cb9edba9fdcf0c4f2ce9f1",
         "recordId": null,
         "envelopeBytes": null,
         "values": {
+          "declaredRungs": "bounded_attention,bounded_decode,bounded_transformer_residency,staged_residency",
+          "provider": "flux1_dev",
+          "abi": "1",
           "vramGbByTier": "31.8",
           "sequentialPeakGb": "26.4"
         }
@@ -1594,9 +2018,21 @@
       "route": "flux1_schnell",
       "backend": "candle",
       "tier": "q8",
-      "basis": "no_retained_evidence",
-      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
-      "evidence": null
+      "basis": "contract_estimate",
+      "reason": "no retained render for this cell; the model's backend block publishes a memoryStrategyContract, so the cell's estimate is the CONTRACT-ONLY per-rung ladder (the manifest row rescaled by the image law's per-rung ratios) rather than one manifest scalar repeated across every rung — this generator reads the contract's presence in the manifest, not the contract's own asset facts, which only the worker resolves at admission",
+      "evidence": {
+        "repo": null,
+        "revision": null,
+        "path": "config/manifests/builtin.models.jsonc#models/flux_schnell/candle/memoryStrategyContract",
+        "sha256": "f3bffe3ae3745d704caffa309c5806c0712e4a2940cb9edba9fdcf0c4f2ce9f1",
+        "recordId": null,
+        "envelopeBytes": null,
+        "values": {
+          "declaredRungs": "bounded_attention,bounded_decode,bounded_transformer_residency,staged_residency",
+          "provider": "flux1_schnell",
+          "abi": "1"
+        }
+      }
     },
     {
       "id": "analytic:flux_schnell:mlx:bf16",
@@ -1638,16 +2074,19 @@
       "route": "ideogram_4",
       "backend": "candle",
       "tier": "bf16",
-      "basis": "manifest_tier_declaration",
-      "reason": "no retained render for this cell; the catalog manifest declares a measured per-tier envelope, which is a whole-render figure with no phase decomposition",
+      "basis": "contract_estimate",
+      "reason": "no retained render for this cell; the model's backend block publishes a memoryStrategyContract, so the cell's estimate is the CONTRACT-ONLY per-rung ladder (the manifest row rescaled by the image law's per-rung ratios) rather than one manifest scalar repeated across every rung — this generator reads the contract's presence in the manifest, not the contract's own asset facts, which only the worker resolves at admission",
       "evidence": {
         "repo": null,
         "revision": null,
-        "path": "config/manifests/builtin.models.jsonc#models/ideogram_4/candle",
+        "path": "config/manifests/builtin.models.jsonc#models/ideogram_4/candle/memoryStrategyContract",
         "sha256": "f3bffe3ae3745d704caffa309c5806c0712e4a2940cb9edba9fdcf0c4f2ce9f1",
         "recordId": null,
         "envelopeBytes": null,
         "values": {
+          "declaredRungs": "bounded_attention,bounded_decode,bounded_transformer_residency,resident,staged_residency",
+          "provider": "ideogram_4",
+          "abi": "1",
           "vramGbByTier": "74.1",
           "sequentialPeakGb": "67"
         }
@@ -1660,16 +2099,19 @@
       "route": "ideogram_4",
       "backend": "candle",
       "tier": "q4",
-      "basis": "manifest_tier_declaration",
-      "reason": "no retained render for this cell; the catalog manifest declares a measured per-tier envelope, which is a whole-render figure with no phase decomposition",
+      "basis": "contract_estimate",
+      "reason": "no retained render for this cell; the model's backend block publishes a memoryStrategyContract, so the cell's estimate is the CONTRACT-ONLY per-rung ladder (the manifest row rescaled by the image law's per-rung ratios) rather than one manifest scalar repeated across every rung — this generator reads the contract's presence in the manifest, not the contract's own asset facts, which only the worker resolves at admission",
       "evidence": {
         "repo": null,
         "revision": null,
-        "path": "config/manifests/builtin.models.jsonc#models/ideogram_4/candle",
+        "path": "config/manifests/builtin.models.jsonc#models/ideogram_4/candle/memoryStrategyContract",
         "sha256": "f3bffe3ae3745d704caffa309c5806c0712e4a2940cb9edba9fdcf0c4f2ce9f1",
         "recordId": null,
         "envelopeBytes": null,
         "values": {
+          "declaredRungs": "bounded_attention,bounded_decode,bounded_transformer_residency,resident,staged_residency",
+          "provider": "ideogram_4",
+          "abi": "1",
           "vramGbByTier": "38.5",
           "sequentialPeakGb": "34"
         }
@@ -1682,16 +2124,19 @@
       "route": "ideogram_4",
       "backend": "candle",
       "tier": "q8",
-      "basis": "manifest_tier_declaration",
-      "reason": "no retained render for this cell; the catalog manifest declares a measured per-tier envelope, which is a whole-render figure with no phase decomposition",
+      "basis": "contract_estimate",
+      "reason": "no retained render for this cell; the model's backend block publishes a memoryStrategyContract, so the cell's estimate is the CONTRACT-ONLY per-rung ladder (the manifest row rescaled by the image law's per-rung ratios) rather than one manifest scalar repeated across every rung — this generator reads the contract's presence in the manifest, not the contract's own asset facts, which only the worker resolves at admission",
       "evidence": {
         "repo": null,
         "revision": null,
-        "path": "config/manifests/builtin.models.jsonc#models/ideogram_4/candle",
+        "path": "config/manifests/builtin.models.jsonc#models/ideogram_4/candle/memoryStrategyContract",
         "sha256": "f3bffe3ae3745d704caffa309c5806c0712e4a2940cb9edba9fdcf0c4f2ce9f1",
         "recordId": null,
         "envelopeBytes": null,
         "values": {
+          "declaredRungs": "bounded_attention,bounded_decode,bounded_transformer_residency,resident,staged_residency",
+          "provider": "ideogram_4",
+          "abi": "1",
           "vramGbByTier": "55.3",
           "sequentialPeakGb": "50"
         }
@@ -1737,16 +2182,19 @@
       "route": "ideogram_4_turbo",
       "backend": "candle",
       "tier": "bf16",
-      "basis": "manifest_tier_declaration",
-      "reason": "no retained render for this cell; the catalog manifest declares a measured per-tier envelope, which is a whole-render figure with no phase decomposition",
+      "basis": "contract_estimate",
+      "reason": "no retained render for this cell; the model's backend block publishes a memoryStrategyContract, so the cell's estimate is the CONTRACT-ONLY per-rung ladder (the manifest row rescaled by the image law's per-rung ratios) rather than one manifest scalar repeated across every rung — this generator reads the contract's presence in the manifest, not the contract's own asset facts, which only the worker resolves at admission",
       "evidence": {
         "repo": null,
         "revision": null,
-        "path": "config/manifests/builtin.models.jsonc#models/ideogram_4_turbo/candle",
+        "path": "config/manifests/builtin.models.jsonc#models/ideogram_4_turbo/candle/memoryStrategyContract",
         "sha256": "f3bffe3ae3745d704caffa309c5806c0712e4a2940cb9edba9fdcf0c4f2ce9f1",
         "recordId": null,
         "envelopeBytes": null,
         "values": {
+          "declaredRungs": "bounded_attention,bounded_decode,bounded_transformer_residency,resident,staged_residency",
+          "provider": "ideogram_4_turbo",
+          "abi": "1",
           "vramGbByTier": "56.3",
           "sequentialPeakGb": "51"
         }
@@ -1759,16 +2207,19 @@
       "route": "ideogram_4_turbo",
       "backend": "candle",
       "tier": "q4",
-      "basis": "manifest_tier_declaration",
-      "reason": "no retained render for this cell; the catalog manifest declares a measured per-tier envelope, which is a whole-render figure with no phase decomposition",
+      "basis": "contract_estimate",
+      "reason": "no retained render for this cell; the model's backend block publishes a memoryStrategyContract, so the cell's estimate is the CONTRACT-ONLY per-rung ladder (the manifest row rescaled by the image law's per-rung ratios) rather than one manifest scalar repeated across every rung — this generator reads the contract's presence in the manifest, not the contract's own asset facts, which only the worker resolves at admission",
       "evidence": {
         "repo": null,
         "revision": null,
-        "path": "config/manifests/builtin.models.jsonc#models/ideogram_4_turbo/candle",
+        "path": "config/manifests/builtin.models.jsonc#models/ideogram_4_turbo/candle/memoryStrategyContract",
         "sha256": "f3bffe3ae3745d704caffa309c5806c0712e4a2940cb9edba9fdcf0c4f2ce9f1",
         "recordId": null,
         "envelopeBytes": null,
         "values": {
+          "declaredRungs": "bounded_attention,bounded_decode,bounded_transformer_residency,resident,staged_residency",
+          "provider": "ideogram_4_turbo",
+          "abi": "1",
           "vramGbByTier": "33.5",
           "sequentialPeakGb": "29"
         }
@@ -1781,16 +2232,19 @@
       "route": "ideogram_4_turbo",
       "backend": "candle",
       "tier": "q8",
-      "basis": "manifest_tier_declaration",
-      "reason": "no retained render for this cell; the catalog manifest declares a measured per-tier envelope, which is a whole-render figure with no phase decomposition",
+      "basis": "contract_estimate",
+      "reason": "no retained render for this cell; the model's backend block publishes a memoryStrategyContract, so the cell's estimate is the CONTRACT-ONLY per-rung ladder (the manifest row rescaled by the image law's per-rung ratios) rather than one manifest scalar repeated across every rung — this generator reads the contract's presence in the manifest, not the contract's own asset facts, which only the worker resolves at admission",
       "evidence": {
         "repo": null,
         "revision": null,
-        "path": "config/manifests/builtin.models.jsonc#models/ideogram_4_turbo/candle",
+        "path": "config/manifests/builtin.models.jsonc#models/ideogram_4_turbo/candle/memoryStrategyContract",
         "sha256": "f3bffe3ae3745d704caffa309c5806c0712e4a2940cb9edba9fdcf0c4f2ce9f1",
         "recordId": null,
         "envelopeBytes": null,
         "values": {
+          "declaredRungs": "bounded_attention,bounded_decode,bounded_transformer_residency,resident,staged_residency",
+          "provider": "ideogram_4_turbo",
+          "abi": "1",
           "vramGbByTier": "43.9",
           "sequentialPeakGb": "39"
         }
@@ -1836,9 +2290,21 @@
       "route": "sdxl",
       "backend": "candle",
       "tier": "bf16",
-      "basis": "no_retained_evidence",
-      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
-      "evidence": null
+      "basis": "contract_estimate",
+      "reason": "no retained render for this cell; the model's backend block publishes a memoryStrategyContract, so the cell's estimate is the CONTRACT-ONLY per-rung ladder (the manifest row rescaled by the image law's per-rung ratios) rather than one manifest scalar repeated across every rung — this generator reads the contract's presence in the manifest, not the contract's own asset facts, which only the worker resolves at admission",
+      "evidence": {
+        "repo": null,
+        "revision": null,
+        "path": "config/manifests/builtin.models.jsonc#models/illustrious_xl_v1/candle/memoryStrategyContract",
+        "sha256": "f3bffe3ae3745d704caffa309c5806c0712e4a2940cb9edba9fdcf0c4f2ce9f1",
+        "recordId": null,
+        "envelopeBytes": null,
+        "values": {
+          "declaredRungs": "bounded_attention,bounded_decode,resident,staged_residency",
+          "provider": "sdxl",
+          "abi": "1"
+        }
+      }
     },
     {
       "id": "analytic:illustrious_xl_v1:candle:q4",
@@ -1847,9 +2313,21 @@
       "route": "sdxl",
       "backend": "candle",
       "tier": "q4",
-      "basis": "no_retained_evidence",
-      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
-      "evidence": null
+      "basis": "contract_estimate",
+      "reason": "no retained render for this cell; the model's backend block publishes a memoryStrategyContract, so the cell's estimate is the CONTRACT-ONLY per-rung ladder (the manifest row rescaled by the image law's per-rung ratios) rather than one manifest scalar repeated across every rung — this generator reads the contract's presence in the manifest, not the contract's own asset facts, which only the worker resolves at admission",
+      "evidence": {
+        "repo": null,
+        "revision": null,
+        "path": "config/manifests/builtin.models.jsonc#models/illustrious_xl_v1/candle/memoryStrategyContract",
+        "sha256": "f3bffe3ae3745d704caffa309c5806c0712e4a2940cb9edba9fdcf0c4f2ce9f1",
+        "recordId": null,
+        "envelopeBytes": null,
+        "values": {
+          "declaredRungs": "bounded_attention,bounded_decode,resident,staged_residency",
+          "provider": "sdxl",
+          "abi": "1"
+        }
+      }
     },
     {
       "id": "analytic:illustrious_xl_v1:candle:q8",
@@ -1858,9 +2336,21 @@
       "route": "sdxl",
       "backend": "candle",
       "tier": "q8",
-      "basis": "no_retained_evidence",
-      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
-      "evidence": null
+      "basis": "contract_estimate",
+      "reason": "no retained render for this cell; the model's backend block publishes a memoryStrategyContract, so the cell's estimate is the CONTRACT-ONLY per-rung ladder (the manifest row rescaled by the image law's per-rung ratios) rather than one manifest scalar repeated across every rung — this generator reads the contract's presence in the manifest, not the contract's own asset facts, which only the worker resolves at admission",
+      "evidence": {
+        "repo": null,
+        "revision": null,
+        "path": "config/manifests/builtin.models.jsonc#models/illustrious_xl_v1/candle/memoryStrategyContract",
+        "sha256": "f3bffe3ae3745d704caffa309c5806c0712e4a2940cb9edba9fdcf0c4f2ce9f1",
+        "recordId": null,
+        "envelopeBytes": null,
+        "values": {
+          "declaredRungs": "bounded_attention,bounded_decode,resident,staged_residency",
+          "provider": "sdxl",
+          "abi": "1"
+        }
+      }
     },
     {
       "id": "analytic:illustrious_xl_v1:mlx:bf16",
@@ -1902,9 +2392,21 @@
       "route": "sdxl",
       "backend": "candle",
       "tier": "bf16",
-      "basis": "no_retained_evidence",
-      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
-      "evidence": null
+      "basis": "contract_estimate",
+      "reason": "no retained render for this cell; the model's backend block publishes a memoryStrategyContract, so the cell's estimate is the CONTRACT-ONLY per-rung ladder (the manifest row rescaled by the image law's per-rung ratios) rather than one manifest scalar repeated across every rung — this generator reads the contract's presence in the manifest, not the contract's own asset facts, which only the worker resolves at admission",
+      "evidence": {
+        "repo": null,
+        "revision": null,
+        "path": "config/manifests/builtin.models.jsonc#models/illustrious_xl_v2/candle/memoryStrategyContract",
+        "sha256": "f3bffe3ae3745d704caffa309c5806c0712e4a2940cb9edba9fdcf0c4f2ce9f1",
+        "recordId": null,
+        "envelopeBytes": null,
+        "values": {
+          "declaredRungs": "bounded_attention,bounded_decode,resident,staged_residency",
+          "provider": "sdxl",
+          "abi": "1"
+        }
+      }
     },
     {
       "id": "analytic:illustrious_xl_v2:candle:q4",
@@ -1913,9 +2415,21 @@
       "route": "sdxl",
       "backend": "candle",
       "tier": "q4",
-      "basis": "no_retained_evidence",
-      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
-      "evidence": null
+      "basis": "contract_estimate",
+      "reason": "no retained render for this cell; the model's backend block publishes a memoryStrategyContract, so the cell's estimate is the CONTRACT-ONLY per-rung ladder (the manifest row rescaled by the image law's per-rung ratios) rather than one manifest scalar repeated across every rung — this generator reads the contract's presence in the manifest, not the contract's own asset facts, which only the worker resolves at admission",
+      "evidence": {
+        "repo": null,
+        "revision": null,
+        "path": "config/manifests/builtin.models.jsonc#models/illustrious_xl_v2/candle/memoryStrategyContract",
+        "sha256": "f3bffe3ae3745d704caffa309c5806c0712e4a2940cb9edba9fdcf0c4f2ce9f1",
+        "recordId": null,
+        "envelopeBytes": null,
+        "values": {
+          "declaredRungs": "bounded_attention,bounded_decode,resident,staged_residency",
+          "provider": "sdxl",
+          "abi": "1"
+        }
+      }
     },
     {
       "id": "analytic:illustrious_xl_v2:candle:q8",
@@ -1924,9 +2438,21 @@
       "route": "sdxl",
       "backend": "candle",
       "tier": "q8",
-      "basis": "no_retained_evidence",
-      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
-      "evidence": null
+      "basis": "contract_estimate",
+      "reason": "no retained render for this cell; the model's backend block publishes a memoryStrategyContract, so the cell's estimate is the CONTRACT-ONLY per-rung ladder (the manifest row rescaled by the image law's per-rung ratios) rather than one manifest scalar repeated across every rung — this generator reads the contract's presence in the manifest, not the contract's own asset facts, which only the worker resolves at admission",
+      "evidence": {
+        "repo": null,
+        "revision": null,
+        "path": "config/manifests/builtin.models.jsonc#models/illustrious_xl_v2/candle/memoryStrategyContract",
+        "sha256": "f3bffe3ae3745d704caffa309c5806c0712e4a2940cb9edba9fdcf0c4f2ce9f1",
+        "recordId": null,
+        "envelopeBytes": null,
+        "values": {
+          "declaredRungs": "bounded_attention,bounded_decode,resident,staged_residency",
+          "provider": "sdxl",
+          "abi": "1"
+        }
+      }
     },
     {
       "id": "analytic:illustrious_xl_v2:mlx:bf16",
@@ -1968,9 +2494,21 @@
       "route": "instantid",
       "backend": "candle",
       "tier": "bf16",
-      "basis": "no_retained_evidence",
-      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
-      "evidence": null
+      "basis": "contract_estimate",
+      "reason": "no retained render for this cell; the model's backend block publishes a memoryStrategyContract, so the cell's estimate is the CONTRACT-ONLY per-rung ladder (the manifest row rescaled by the image law's per-rung ratios) rather than one manifest scalar repeated across every rung — this generator reads the contract's presence in the manifest, not the contract's own asset facts, which only the worker resolves at admission",
+      "evidence": {
+        "repo": null,
+        "revision": null,
+        "path": "config/manifests/builtin.models.jsonc#models/instantid_realvisxl/candle/memoryStrategyContract",
+        "sha256": "f3bffe3ae3745d704caffa309c5806c0712e4a2940cb9edba9fdcf0c4f2ce9f1",
+        "recordId": null,
+        "envelopeBytes": null,
+        "values": {
+          "declaredRungs": "resident,staged_residency",
+          "provider": "instantid",
+          "abi": "1"
+        }
+      }
     },
     {
       "id": "analytic:instantid_realvisxl:mlx:bf16",
@@ -2108,9 +2646,21 @@
       "route": "krea_2_raw",
       "backend": "candle",
       "tier": "bf16",
-      "basis": "no_retained_evidence",
-      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
-      "evidence": null
+      "basis": "contract_estimate",
+      "reason": "no retained render for this cell; the model's backend block publishes a memoryStrategyContract, so the cell's estimate is the CONTRACT-ONLY per-rung ladder (the manifest row rescaled by the image law's per-rung ratios) rather than one manifest scalar repeated across every rung — this generator reads the contract's presence in the manifest, not the contract's own asset facts, which only the worker resolves at admission",
+      "evidence": {
+        "repo": null,
+        "revision": null,
+        "path": "config/manifests/builtin.models.jsonc#models/krea_2_raw/candle/memoryStrategyContract",
+        "sha256": "f3bffe3ae3745d704caffa309c5806c0712e4a2940cb9edba9fdcf0c4f2ce9f1",
+        "recordId": null,
+        "envelopeBytes": null,
+        "values": {
+          "declaredRungs": "staged_residency",
+          "provider": "krea_2_raw",
+          "abi": "1"
+        }
+      }
     },
     {
       "id": "analytic:krea_2_raw:candle:q4",
@@ -2119,9 +2669,21 @@
       "route": "krea_2_raw",
       "backend": "candle",
       "tier": "q4",
-      "basis": "no_retained_evidence",
-      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
-      "evidence": null
+      "basis": "contract_estimate",
+      "reason": "no retained render for this cell; the model's backend block publishes a memoryStrategyContract, so the cell's estimate is the CONTRACT-ONLY per-rung ladder (the manifest row rescaled by the image law's per-rung ratios) rather than one manifest scalar repeated across every rung — this generator reads the contract's presence in the manifest, not the contract's own asset facts, which only the worker resolves at admission",
+      "evidence": {
+        "repo": null,
+        "revision": null,
+        "path": "config/manifests/builtin.models.jsonc#models/krea_2_raw/candle/memoryStrategyContract",
+        "sha256": "f3bffe3ae3745d704caffa309c5806c0712e4a2940cb9edba9fdcf0c4f2ce9f1",
+        "recordId": null,
+        "envelopeBytes": null,
+        "values": {
+          "declaredRungs": "staged_residency",
+          "provider": "krea_2_raw",
+          "abi": "1"
+        }
+      }
     },
     {
       "id": "analytic:krea_2_raw:candle:q8",
@@ -2130,9 +2692,21 @@
       "route": "krea_2_raw",
       "backend": "candle",
       "tier": "q8",
-      "basis": "no_retained_evidence",
-      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
-      "evidence": null
+      "basis": "contract_estimate",
+      "reason": "no retained render for this cell; the model's backend block publishes a memoryStrategyContract, so the cell's estimate is the CONTRACT-ONLY per-rung ladder (the manifest row rescaled by the image law's per-rung ratios) rather than one manifest scalar repeated across every rung — this generator reads the contract's presence in the manifest, not the contract's own asset facts, which only the worker resolves at admission",
+      "evidence": {
+        "repo": null,
+        "revision": null,
+        "path": "config/manifests/builtin.models.jsonc#models/krea_2_raw/candle/memoryStrategyContract",
+        "sha256": "f3bffe3ae3745d704caffa309c5806c0712e4a2940cb9edba9fdcf0c4f2ce9f1",
+        "recordId": null,
+        "envelopeBytes": null,
+        "values": {
+          "declaredRungs": "staged_residency",
+          "provider": "krea_2_raw",
+          "abi": "1"
+        }
+      }
     },
     {
       "id": "analytic:krea_2_raw:mlx:bf16",
@@ -2174,16 +2748,19 @@
       "route": "krea_2_turbo",
       "backend": "candle",
       "tier": "bf16",
-      "basis": "manifest_tier_declaration",
-      "reason": "no retained render for this cell; the catalog manifest declares a measured per-tier envelope, which is a whole-render figure with no phase decomposition",
+      "basis": "contract_estimate",
+      "reason": "no retained render for this cell; the model's backend block publishes a memoryStrategyContract, so the cell's estimate is the CONTRACT-ONLY per-rung ladder (the manifest row rescaled by the image law's per-rung ratios) rather than one manifest scalar repeated across every rung — this generator reads the contract's presence in the manifest, not the contract's own asset facts, which only the worker resolves at admission",
       "evidence": {
         "repo": null,
         "revision": null,
-        "path": "config/manifests/builtin.models.jsonc#models/krea_2_turbo/candle",
+        "path": "config/manifests/builtin.models.jsonc#models/krea_2_turbo/candle/memoryStrategyContract",
         "sha256": "f3bffe3ae3745d704caffa309c5806c0712e4a2940cb9edba9fdcf0c4f2ce9f1",
         "recordId": null,
         "envelopeBytes": null,
         "values": {
+          "declaredRungs": "staged_residency",
+          "provider": "krea_2_turbo_edit",
+          "abi": "1",
           "vramGbByTier": "47.2",
           "sequentialPeakGb": "39.4"
         }
@@ -2196,16 +2773,19 @@
       "route": "krea_2_turbo",
       "backend": "candle",
       "tier": "q8",
-      "basis": "manifest_tier_declaration",
-      "reason": "no retained render for this cell; the catalog manifest declares a measured per-tier envelope, which is a whole-render figure with no phase decomposition",
+      "basis": "contract_estimate",
+      "reason": "no retained render for this cell; the model's backend block publishes a memoryStrategyContract, so the cell's estimate is the CONTRACT-ONLY per-rung ladder (the manifest row rescaled by the image law's per-rung ratios) rather than one manifest scalar repeated across every rung — this generator reads the contract's presence in the manifest, not the contract's own asset facts, which only the worker resolves at admission",
       "evidence": {
         "repo": null,
         "revision": null,
-        "path": "config/manifests/builtin.models.jsonc#models/krea_2_turbo/candle",
+        "path": "config/manifests/builtin.models.jsonc#models/krea_2_turbo/candle/memoryStrategyContract",
         "sha256": "f3bffe3ae3745d704caffa309c5806c0712e4a2940cb9edba9fdcf0c4f2ce9f1",
         "recordId": null,
         "envelopeBytes": null,
         "values": {
+          "declaredRungs": "staged_residency",
+          "provider": "krea_2_turbo_edit",
+          "abi": "1",
           "vramGbByTier": "35.2",
           "sequentialPeakGb": "29.4"
         }
@@ -2295,9 +2875,21 @@
       "route": "lens",
       "backend": "candle",
       "tier": "bf16",
-      "basis": "no_retained_evidence",
-      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
-      "evidence": null
+      "basis": "contract_estimate",
+      "reason": "no retained render for this cell; the model's backend block publishes a memoryStrategyContract, so the cell's estimate is the CONTRACT-ONLY per-rung ladder (the manifest row rescaled by the image law's per-rung ratios) rather than one manifest scalar repeated across every rung — this generator reads the contract's presence in the manifest, not the contract's own asset facts, which only the worker resolves at admission",
+      "evidence": {
+        "repo": null,
+        "revision": null,
+        "path": "config/manifests/builtin.models.jsonc#models/lens/candle/memoryStrategyContract",
+        "sha256": "f3bffe3ae3745d704caffa309c5806c0712e4a2940cb9edba9fdcf0c4f2ce9f1",
+        "recordId": null,
+        "envelopeBytes": null,
+        "values": {
+          "declaredRungs": "bounded_attention,bounded_decode,bounded_transformer_residency,staged_residency",
+          "provider": "lens",
+          "abi": "1"
+        }
+      }
     },
     {
       "id": "analytic:lens:candle:q4",
@@ -2306,9 +2898,21 @@
       "route": "lens",
       "backend": "candle",
       "tier": "q4",
-      "basis": "no_retained_evidence",
-      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
-      "evidence": null
+      "basis": "contract_estimate",
+      "reason": "no retained render for this cell; the model's backend block publishes a memoryStrategyContract, so the cell's estimate is the CONTRACT-ONLY per-rung ladder (the manifest row rescaled by the image law's per-rung ratios) rather than one manifest scalar repeated across every rung — this generator reads the contract's presence in the manifest, not the contract's own asset facts, which only the worker resolves at admission",
+      "evidence": {
+        "repo": null,
+        "revision": null,
+        "path": "config/manifests/builtin.models.jsonc#models/lens/candle/memoryStrategyContract",
+        "sha256": "f3bffe3ae3745d704caffa309c5806c0712e4a2940cb9edba9fdcf0c4f2ce9f1",
+        "recordId": null,
+        "envelopeBytes": null,
+        "values": {
+          "declaredRungs": "bounded_attention,bounded_decode,bounded_transformer_residency,staged_residency",
+          "provider": "lens",
+          "abi": "1"
+        }
+      }
     },
     {
       "id": "analytic:lens:candle:q8",
@@ -2317,9 +2921,21 @@
       "route": "lens",
       "backend": "candle",
       "tier": "q8",
-      "basis": "no_retained_evidence",
-      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
-      "evidence": null
+      "basis": "contract_estimate",
+      "reason": "no retained render for this cell; the model's backend block publishes a memoryStrategyContract, so the cell's estimate is the CONTRACT-ONLY per-rung ladder (the manifest row rescaled by the image law's per-rung ratios) rather than one manifest scalar repeated across every rung — this generator reads the contract's presence in the manifest, not the contract's own asset facts, which only the worker resolves at admission",
+      "evidence": {
+        "repo": null,
+        "revision": null,
+        "path": "config/manifests/builtin.models.jsonc#models/lens/candle/memoryStrategyContract",
+        "sha256": "f3bffe3ae3745d704caffa309c5806c0712e4a2940cb9edba9fdcf0c4f2ce9f1",
+        "recordId": null,
+        "envelopeBytes": null,
+        "values": {
+          "declaredRungs": "bounded_attention,bounded_decode,bounded_transformer_residency,staged_residency",
+          "provider": "lens",
+          "abi": "1"
+        }
+      }
     },
     {
       "id": "analytic:lens:mlx:bf16",
@@ -2361,9 +2977,21 @@
       "route": "lens_turbo",
       "backend": "candle",
       "tier": "bf16",
-      "basis": "no_retained_evidence",
-      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
-      "evidence": null
+      "basis": "contract_estimate",
+      "reason": "no retained render for this cell; the model's backend block publishes a memoryStrategyContract, so the cell's estimate is the CONTRACT-ONLY per-rung ladder (the manifest row rescaled by the image law's per-rung ratios) rather than one manifest scalar repeated across every rung — this generator reads the contract's presence in the manifest, not the contract's own asset facts, which only the worker resolves at admission",
+      "evidence": {
+        "repo": null,
+        "revision": null,
+        "path": "config/manifests/builtin.models.jsonc#models/lens_turbo/candle/memoryStrategyContract",
+        "sha256": "f3bffe3ae3745d704caffa309c5806c0712e4a2940cb9edba9fdcf0c4f2ce9f1",
+        "recordId": null,
+        "envelopeBytes": null,
+        "values": {
+          "declaredRungs": "bounded_attention,bounded_decode,bounded_transformer_residency,staged_residency",
+          "provider": "lens_turbo",
+          "abi": "1"
+        }
+      }
     },
     {
       "id": "analytic:lens_turbo:candle:q4",
@@ -2372,9 +3000,21 @@
       "route": "lens_turbo",
       "backend": "candle",
       "tier": "q4",
-      "basis": "no_retained_evidence",
-      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
-      "evidence": null
+      "basis": "contract_estimate",
+      "reason": "no retained render for this cell; the model's backend block publishes a memoryStrategyContract, so the cell's estimate is the CONTRACT-ONLY per-rung ladder (the manifest row rescaled by the image law's per-rung ratios) rather than one manifest scalar repeated across every rung — this generator reads the contract's presence in the manifest, not the contract's own asset facts, which only the worker resolves at admission",
+      "evidence": {
+        "repo": null,
+        "revision": null,
+        "path": "config/manifests/builtin.models.jsonc#models/lens_turbo/candle/memoryStrategyContract",
+        "sha256": "f3bffe3ae3745d704caffa309c5806c0712e4a2940cb9edba9fdcf0c4f2ce9f1",
+        "recordId": null,
+        "envelopeBytes": null,
+        "values": {
+          "declaredRungs": "bounded_attention,bounded_decode,bounded_transformer_residency,staged_residency",
+          "provider": "lens_turbo",
+          "abi": "1"
+        }
+      }
     },
     {
       "id": "analytic:lens_turbo:candle:q8",
@@ -2383,9 +3023,21 @@
       "route": "lens_turbo",
       "backend": "candle",
       "tier": "q8",
-      "basis": "no_retained_evidence",
-      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
-      "evidence": null
+      "basis": "contract_estimate",
+      "reason": "no retained render for this cell; the model's backend block publishes a memoryStrategyContract, so the cell's estimate is the CONTRACT-ONLY per-rung ladder (the manifest row rescaled by the image law's per-rung ratios) rather than one manifest scalar repeated across every rung — this generator reads the contract's presence in the manifest, not the contract's own asset facts, which only the worker resolves at admission",
+      "evidence": {
+        "repo": null,
+        "revision": null,
+        "path": "config/manifests/builtin.models.jsonc#models/lens_turbo/candle/memoryStrategyContract",
+        "sha256": "f3bffe3ae3745d704caffa309c5806c0712e4a2940cb9edba9fdcf0c4f2ce9f1",
+        "recordId": null,
+        "envelopeBytes": null,
+        "values": {
+          "declaredRungs": "bounded_attention,bounded_decode,bounded_transformer_residency,staged_residency",
+          "provider": "lens_turbo",
+          "abi": "1"
+        }
+      }
     },
     {
       "id": "analytic:lens_turbo:mlx:bf16",
@@ -2526,9 +3178,21 @@
       "route": "mage_flow",
       "backend": "candle",
       "tier": "bf16",
-      "basis": "no_retained_evidence",
-      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
-      "evidence": null
+      "basis": "contract_estimate",
+      "reason": "no retained render for this cell; the model's backend block publishes a memoryStrategyContract, so the cell's estimate is the CONTRACT-ONLY per-rung ladder (the manifest row rescaled by the image law's per-rung ratios) rather than one manifest scalar repeated across every rung — this generator reads the contract's presence in the manifest, not the contract's own asset facts, which only the worker resolves at admission",
+      "evidence": {
+        "repo": null,
+        "revision": null,
+        "path": "config/manifests/builtin.models.jsonc#models/mage_flow/candle/memoryStrategyContract",
+        "sha256": "f3bffe3ae3745d704caffa309c5806c0712e4a2940cb9edba9fdcf0c4f2ce9f1",
+        "recordId": null,
+        "envelopeBytes": null,
+        "values": {
+          "declaredRungs": "bounded_attention,bounded_transformer_residency,staged_residency",
+          "provider": "mage_flow",
+          "abi": "1"
+        }
+      }
     },
     {
       "id": "analytic:mage_flow:candle:q4",
@@ -2537,9 +3201,21 @@
       "route": "mage_flow",
       "backend": "candle",
       "tier": "q4",
-      "basis": "no_retained_evidence",
-      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
-      "evidence": null
+      "basis": "contract_estimate",
+      "reason": "no retained render for this cell; the model's backend block publishes a memoryStrategyContract, so the cell's estimate is the CONTRACT-ONLY per-rung ladder (the manifest row rescaled by the image law's per-rung ratios) rather than one manifest scalar repeated across every rung — this generator reads the contract's presence in the manifest, not the contract's own asset facts, which only the worker resolves at admission",
+      "evidence": {
+        "repo": null,
+        "revision": null,
+        "path": "config/manifests/builtin.models.jsonc#models/mage_flow/candle/memoryStrategyContract",
+        "sha256": "f3bffe3ae3745d704caffa309c5806c0712e4a2940cb9edba9fdcf0c4f2ce9f1",
+        "recordId": null,
+        "envelopeBytes": null,
+        "values": {
+          "declaredRungs": "bounded_attention,bounded_transformer_residency,staged_residency",
+          "provider": "mage_flow",
+          "abi": "1"
+        }
+      }
     },
     {
       "id": "analytic:mage_flow:candle:q8",
@@ -2548,9 +3224,21 @@
       "route": "mage_flow",
       "backend": "candle",
       "tier": "q8",
-      "basis": "no_retained_evidence",
-      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
-      "evidence": null
+      "basis": "contract_estimate",
+      "reason": "no retained render for this cell; the model's backend block publishes a memoryStrategyContract, so the cell's estimate is the CONTRACT-ONLY per-rung ladder (the manifest row rescaled by the image law's per-rung ratios) rather than one manifest scalar repeated across every rung — this generator reads the contract's presence in the manifest, not the contract's own asset facts, which only the worker resolves at admission",
+      "evidence": {
+        "repo": null,
+        "revision": null,
+        "path": "config/manifests/builtin.models.jsonc#models/mage_flow/candle/memoryStrategyContract",
+        "sha256": "f3bffe3ae3745d704caffa309c5806c0712e4a2940cb9edba9fdcf0c4f2ce9f1",
+        "recordId": null,
+        "envelopeBytes": null,
+        "values": {
+          "declaredRungs": "bounded_attention,bounded_transformer_residency,staged_residency",
+          "provider": "mage_flow",
+          "abi": "1"
+        }
+      }
     },
     {
       "id": "analytic:mage_flow:mlx:bf16",
@@ -2592,9 +3280,21 @@
       "route": "mage_flow_base",
       "backend": "candle",
       "tier": "bf16",
-      "basis": "no_retained_evidence",
-      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
-      "evidence": null
+      "basis": "contract_estimate",
+      "reason": "no retained render for this cell; the model's backend block publishes a memoryStrategyContract, so the cell's estimate is the CONTRACT-ONLY per-rung ladder (the manifest row rescaled by the image law's per-rung ratios) rather than one manifest scalar repeated across every rung — this generator reads the contract's presence in the manifest, not the contract's own asset facts, which only the worker resolves at admission",
+      "evidence": {
+        "repo": null,
+        "revision": null,
+        "path": "config/manifests/builtin.models.jsonc#models/mage_flow_base/candle/memoryStrategyContract",
+        "sha256": "f3bffe3ae3745d704caffa309c5806c0712e4a2940cb9edba9fdcf0c4f2ce9f1",
+        "recordId": null,
+        "envelopeBytes": null,
+        "values": {
+          "declaredRungs": "bounded_attention,bounded_transformer_residency,staged_residency",
+          "provider": "mage_flow_base",
+          "abi": "1"
+        }
+      }
     },
     {
       "id": "analytic:mage_flow_base:candle:q4",
@@ -2603,9 +3303,21 @@
       "route": "mage_flow_base",
       "backend": "candle",
       "tier": "q4",
-      "basis": "no_retained_evidence",
-      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
-      "evidence": null
+      "basis": "contract_estimate",
+      "reason": "no retained render for this cell; the model's backend block publishes a memoryStrategyContract, so the cell's estimate is the CONTRACT-ONLY per-rung ladder (the manifest row rescaled by the image law's per-rung ratios) rather than one manifest scalar repeated across every rung — this generator reads the contract's presence in the manifest, not the contract's own asset facts, which only the worker resolves at admission",
+      "evidence": {
+        "repo": null,
+        "revision": null,
+        "path": "config/manifests/builtin.models.jsonc#models/mage_flow_base/candle/memoryStrategyContract",
+        "sha256": "f3bffe3ae3745d704caffa309c5806c0712e4a2940cb9edba9fdcf0c4f2ce9f1",
+        "recordId": null,
+        "envelopeBytes": null,
+        "values": {
+          "declaredRungs": "bounded_attention,bounded_transformer_residency,staged_residency",
+          "provider": "mage_flow_base",
+          "abi": "1"
+        }
+      }
     },
     {
       "id": "analytic:mage_flow_base:candle:q8",
@@ -2614,9 +3326,21 @@
       "route": "mage_flow_base",
       "backend": "candle",
       "tier": "q8",
-      "basis": "no_retained_evidence",
-      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
-      "evidence": null
+      "basis": "contract_estimate",
+      "reason": "no retained render for this cell; the model's backend block publishes a memoryStrategyContract, so the cell's estimate is the CONTRACT-ONLY per-rung ladder (the manifest row rescaled by the image law's per-rung ratios) rather than one manifest scalar repeated across every rung — this generator reads the contract's presence in the manifest, not the contract's own asset facts, which only the worker resolves at admission",
+      "evidence": {
+        "repo": null,
+        "revision": null,
+        "path": "config/manifests/builtin.models.jsonc#models/mage_flow_base/candle/memoryStrategyContract",
+        "sha256": "f3bffe3ae3745d704caffa309c5806c0712e4a2940cb9edba9fdcf0c4f2ce9f1",
+        "recordId": null,
+        "envelopeBytes": null,
+        "values": {
+          "declaredRungs": "bounded_attention,bounded_transformer_residency,staged_residency",
+          "provider": "mage_flow_base",
+          "abi": "1"
+        }
+      }
     },
     {
       "id": "analytic:mage_flow_base:mlx:bf16",
@@ -2658,9 +3382,21 @@
       "route": "mage_flow_edit",
       "backend": "candle",
       "tier": "bf16",
-      "basis": "no_retained_evidence",
-      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
-      "evidence": null
+      "basis": "contract_estimate",
+      "reason": "no retained render for this cell; the model's backend block publishes a memoryStrategyContract, so the cell's estimate is the CONTRACT-ONLY per-rung ladder (the manifest row rescaled by the image law's per-rung ratios) rather than one manifest scalar repeated across every rung — this generator reads the contract's presence in the manifest, not the contract's own asset facts, which only the worker resolves at admission",
+      "evidence": {
+        "repo": null,
+        "revision": null,
+        "path": "config/manifests/builtin.models.jsonc#models/mage_flow_edit/candle/memoryStrategyContract",
+        "sha256": "f3bffe3ae3745d704caffa309c5806c0712e4a2940cb9edba9fdcf0c4f2ce9f1",
+        "recordId": null,
+        "envelopeBytes": null,
+        "values": {
+          "declaredRungs": "bounded_attention,bounded_transformer_residency,staged_residency",
+          "provider": "mage_flow_edit",
+          "abi": "1"
+        }
+      }
     },
     {
       "id": "analytic:mage_flow_edit:candle:q4",
@@ -2669,9 +3405,21 @@
       "route": "mage_flow_edit",
       "backend": "candle",
       "tier": "q4",
-      "basis": "no_retained_evidence",
-      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
-      "evidence": null
+      "basis": "contract_estimate",
+      "reason": "no retained render for this cell; the model's backend block publishes a memoryStrategyContract, so the cell's estimate is the CONTRACT-ONLY per-rung ladder (the manifest row rescaled by the image law's per-rung ratios) rather than one manifest scalar repeated across every rung — this generator reads the contract's presence in the manifest, not the contract's own asset facts, which only the worker resolves at admission",
+      "evidence": {
+        "repo": null,
+        "revision": null,
+        "path": "config/manifests/builtin.models.jsonc#models/mage_flow_edit/candle/memoryStrategyContract",
+        "sha256": "f3bffe3ae3745d704caffa309c5806c0712e4a2940cb9edba9fdcf0c4f2ce9f1",
+        "recordId": null,
+        "envelopeBytes": null,
+        "values": {
+          "declaredRungs": "bounded_attention,bounded_transformer_residency,staged_residency",
+          "provider": "mage_flow_edit",
+          "abi": "1"
+        }
+      }
     },
     {
       "id": "analytic:mage_flow_edit:candle:q8",
@@ -2680,9 +3428,21 @@
       "route": "mage_flow_edit",
       "backend": "candle",
       "tier": "q8",
-      "basis": "no_retained_evidence",
-      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
-      "evidence": null
+      "basis": "contract_estimate",
+      "reason": "no retained render for this cell; the model's backend block publishes a memoryStrategyContract, so the cell's estimate is the CONTRACT-ONLY per-rung ladder (the manifest row rescaled by the image law's per-rung ratios) rather than one manifest scalar repeated across every rung — this generator reads the contract's presence in the manifest, not the contract's own asset facts, which only the worker resolves at admission",
+      "evidence": {
+        "repo": null,
+        "revision": null,
+        "path": "config/manifests/builtin.models.jsonc#models/mage_flow_edit/candle/memoryStrategyContract",
+        "sha256": "f3bffe3ae3745d704caffa309c5806c0712e4a2940cb9edba9fdcf0c4f2ce9f1",
+        "recordId": null,
+        "envelopeBytes": null,
+        "values": {
+          "declaredRungs": "bounded_attention,bounded_transformer_residency,staged_residency",
+          "provider": "mage_flow_edit",
+          "abi": "1"
+        }
+      }
     },
     {
       "id": "analytic:mage_flow_edit:mlx:bf16",
@@ -2724,9 +3484,21 @@
       "route": "mage_flow_edit_base",
       "backend": "candle",
       "tier": "bf16",
-      "basis": "no_retained_evidence",
-      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
-      "evidence": null
+      "basis": "contract_estimate",
+      "reason": "no retained render for this cell; the model's backend block publishes a memoryStrategyContract, so the cell's estimate is the CONTRACT-ONLY per-rung ladder (the manifest row rescaled by the image law's per-rung ratios) rather than one manifest scalar repeated across every rung — this generator reads the contract's presence in the manifest, not the contract's own asset facts, which only the worker resolves at admission",
+      "evidence": {
+        "repo": null,
+        "revision": null,
+        "path": "config/manifests/builtin.models.jsonc#models/mage_flow_edit_base/candle/memoryStrategyContract",
+        "sha256": "f3bffe3ae3745d704caffa309c5806c0712e4a2940cb9edba9fdcf0c4f2ce9f1",
+        "recordId": null,
+        "envelopeBytes": null,
+        "values": {
+          "declaredRungs": "bounded_attention,bounded_transformer_residency,staged_residency",
+          "provider": "mage_flow_edit_base",
+          "abi": "1"
+        }
+      }
     },
     {
       "id": "analytic:mage_flow_edit_base:candle:q4",
@@ -2735,9 +3507,21 @@
       "route": "mage_flow_edit_base",
       "backend": "candle",
       "tier": "q4",
-      "basis": "no_retained_evidence",
-      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
-      "evidence": null
+      "basis": "contract_estimate",
+      "reason": "no retained render for this cell; the model's backend block publishes a memoryStrategyContract, so the cell's estimate is the CONTRACT-ONLY per-rung ladder (the manifest row rescaled by the image law's per-rung ratios) rather than one manifest scalar repeated across every rung — this generator reads the contract's presence in the manifest, not the contract's own asset facts, which only the worker resolves at admission",
+      "evidence": {
+        "repo": null,
+        "revision": null,
+        "path": "config/manifests/builtin.models.jsonc#models/mage_flow_edit_base/candle/memoryStrategyContract",
+        "sha256": "f3bffe3ae3745d704caffa309c5806c0712e4a2940cb9edba9fdcf0c4f2ce9f1",
+        "recordId": null,
+        "envelopeBytes": null,
+        "values": {
+          "declaredRungs": "bounded_attention,bounded_transformer_residency,staged_residency",
+          "provider": "mage_flow_edit_base",
+          "abi": "1"
+        }
+      }
     },
     {
       "id": "analytic:mage_flow_edit_base:candle:q8",
@@ -2746,9 +3530,21 @@
       "route": "mage_flow_edit_base",
       "backend": "candle",
       "tier": "q8",
-      "basis": "no_retained_evidence",
-      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
-      "evidence": null
+      "basis": "contract_estimate",
+      "reason": "no retained render for this cell; the model's backend block publishes a memoryStrategyContract, so the cell's estimate is the CONTRACT-ONLY per-rung ladder (the manifest row rescaled by the image law's per-rung ratios) rather than one manifest scalar repeated across every rung — this generator reads the contract's presence in the manifest, not the contract's own asset facts, which only the worker resolves at admission",
+      "evidence": {
+        "repo": null,
+        "revision": null,
+        "path": "config/manifests/builtin.models.jsonc#models/mage_flow_edit_base/candle/memoryStrategyContract",
+        "sha256": "f3bffe3ae3745d704caffa309c5806c0712e4a2940cb9edba9fdcf0c4f2ce9f1",
+        "recordId": null,
+        "envelopeBytes": null,
+        "values": {
+          "declaredRungs": "bounded_attention,bounded_transformer_residency,staged_residency",
+          "provider": "mage_flow_edit_base",
+          "abi": "1"
+        }
+      }
     },
     {
       "id": "analytic:mage_flow_edit_base:mlx:bf16",
@@ -2790,9 +3586,21 @@
       "route": "mage_flow_edit_turbo",
       "backend": "candle",
       "tier": "bf16",
-      "basis": "no_retained_evidence",
-      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
-      "evidence": null
+      "basis": "contract_estimate",
+      "reason": "no retained render for this cell; the model's backend block publishes a memoryStrategyContract, so the cell's estimate is the CONTRACT-ONLY per-rung ladder (the manifest row rescaled by the image law's per-rung ratios) rather than one manifest scalar repeated across every rung — this generator reads the contract's presence in the manifest, not the contract's own asset facts, which only the worker resolves at admission",
+      "evidence": {
+        "repo": null,
+        "revision": null,
+        "path": "config/manifests/builtin.models.jsonc#models/mage_flow_edit_turbo/candle/memoryStrategyContract",
+        "sha256": "f3bffe3ae3745d704caffa309c5806c0712e4a2940cb9edba9fdcf0c4f2ce9f1",
+        "recordId": null,
+        "envelopeBytes": null,
+        "values": {
+          "declaredRungs": "bounded_attention,bounded_transformer_residency,staged_residency",
+          "provider": "mage_flow_edit_turbo",
+          "abi": "1"
+        }
+      }
     },
     {
       "id": "analytic:mage_flow_edit_turbo:candle:q4",
@@ -2801,9 +3609,21 @@
       "route": "mage_flow_edit_turbo",
       "backend": "candle",
       "tier": "q4",
-      "basis": "no_retained_evidence",
-      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
-      "evidence": null
+      "basis": "contract_estimate",
+      "reason": "no retained render for this cell; the model's backend block publishes a memoryStrategyContract, so the cell's estimate is the CONTRACT-ONLY per-rung ladder (the manifest row rescaled by the image law's per-rung ratios) rather than one manifest scalar repeated across every rung — this generator reads the contract's presence in the manifest, not the contract's own asset facts, which only the worker resolves at admission",
+      "evidence": {
+        "repo": null,
+        "revision": null,
+        "path": "config/manifests/builtin.models.jsonc#models/mage_flow_edit_turbo/candle/memoryStrategyContract",
+        "sha256": "f3bffe3ae3745d704caffa309c5806c0712e4a2940cb9edba9fdcf0c4f2ce9f1",
+        "recordId": null,
+        "envelopeBytes": null,
+        "values": {
+          "declaredRungs": "bounded_attention,bounded_transformer_residency,staged_residency",
+          "provider": "mage_flow_edit_turbo",
+          "abi": "1"
+        }
+      }
     },
     {
       "id": "analytic:mage_flow_edit_turbo:candle:q8",
@@ -2812,9 +3632,21 @@
       "route": "mage_flow_edit_turbo",
       "backend": "candle",
       "tier": "q8",
-      "basis": "no_retained_evidence",
-      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
-      "evidence": null
+      "basis": "contract_estimate",
+      "reason": "no retained render for this cell; the model's backend block publishes a memoryStrategyContract, so the cell's estimate is the CONTRACT-ONLY per-rung ladder (the manifest row rescaled by the image law's per-rung ratios) rather than one manifest scalar repeated across every rung — this generator reads the contract's presence in the manifest, not the contract's own asset facts, which only the worker resolves at admission",
+      "evidence": {
+        "repo": null,
+        "revision": null,
+        "path": "config/manifests/builtin.models.jsonc#models/mage_flow_edit_turbo/candle/memoryStrategyContract",
+        "sha256": "f3bffe3ae3745d704caffa309c5806c0712e4a2940cb9edba9fdcf0c4f2ce9f1",
+        "recordId": null,
+        "envelopeBytes": null,
+        "values": {
+          "declaredRungs": "bounded_attention,bounded_transformer_residency,staged_residency",
+          "provider": "mage_flow_edit_turbo",
+          "abi": "1"
+        }
+      }
     },
     {
       "id": "analytic:mage_flow_edit_turbo:mlx:bf16",
@@ -2856,9 +3688,21 @@
       "route": "mage_flow_turbo",
       "backend": "candle",
       "tier": "bf16",
-      "basis": "no_retained_evidence",
-      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
-      "evidence": null
+      "basis": "contract_estimate",
+      "reason": "no retained render for this cell; the model's backend block publishes a memoryStrategyContract, so the cell's estimate is the CONTRACT-ONLY per-rung ladder (the manifest row rescaled by the image law's per-rung ratios) rather than one manifest scalar repeated across every rung — this generator reads the contract's presence in the manifest, not the contract's own asset facts, which only the worker resolves at admission",
+      "evidence": {
+        "repo": null,
+        "revision": null,
+        "path": "config/manifests/builtin.models.jsonc#models/mage_flow_turbo/candle/memoryStrategyContract",
+        "sha256": "f3bffe3ae3745d704caffa309c5806c0712e4a2940cb9edba9fdcf0c4f2ce9f1",
+        "recordId": null,
+        "envelopeBytes": null,
+        "values": {
+          "declaredRungs": "bounded_attention,bounded_transformer_residency,staged_residency",
+          "provider": "mage_flow_turbo",
+          "abi": "1"
+        }
+      }
     },
     {
       "id": "analytic:mage_flow_turbo:candle:q4",
@@ -2867,9 +3711,21 @@
       "route": "mage_flow_turbo",
       "backend": "candle",
       "tier": "q4",
-      "basis": "no_retained_evidence",
-      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
-      "evidence": null
+      "basis": "contract_estimate",
+      "reason": "no retained render for this cell; the model's backend block publishes a memoryStrategyContract, so the cell's estimate is the CONTRACT-ONLY per-rung ladder (the manifest row rescaled by the image law's per-rung ratios) rather than one manifest scalar repeated across every rung — this generator reads the contract's presence in the manifest, not the contract's own asset facts, which only the worker resolves at admission",
+      "evidence": {
+        "repo": null,
+        "revision": null,
+        "path": "config/manifests/builtin.models.jsonc#models/mage_flow_turbo/candle/memoryStrategyContract",
+        "sha256": "f3bffe3ae3745d704caffa309c5806c0712e4a2940cb9edba9fdcf0c4f2ce9f1",
+        "recordId": null,
+        "envelopeBytes": null,
+        "values": {
+          "declaredRungs": "bounded_attention,bounded_transformer_residency,staged_residency",
+          "provider": "mage_flow_turbo",
+          "abi": "1"
+        }
+      }
     },
     {
       "id": "analytic:mage_flow_turbo:candle:q8",
@@ -2878,9 +3734,21 @@
       "route": "mage_flow_turbo",
       "backend": "candle",
       "tier": "q8",
-      "basis": "no_retained_evidence",
-      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
-      "evidence": null
+      "basis": "contract_estimate",
+      "reason": "no retained render for this cell; the model's backend block publishes a memoryStrategyContract, so the cell's estimate is the CONTRACT-ONLY per-rung ladder (the manifest row rescaled by the image law's per-rung ratios) rather than one manifest scalar repeated across every rung — this generator reads the contract's presence in the manifest, not the contract's own asset facts, which only the worker resolves at admission",
+      "evidence": {
+        "repo": null,
+        "revision": null,
+        "path": "config/manifests/builtin.models.jsonc#models/mage_flow_turbo/candle/memoryStrategyContract",
+        "sha256": "f3bffe3ae3745d704caffa309c5806c0712e4a2940cb9edba9fdcf0c4f2ce9f1",
+        "recordId": null,
+        "envelopeBytes": null,
+        "values": {
+          "declaredRungs": "bounded_attention,bounded_transformer_residency,staged_residency",
+          "provider": "mage_flow_turbo",
+          "abi": "1"
+        }
+      }
     },
     {
       "id": "analytic:mage_flow_turbo:mlx:bf16",
@@ -2988,39 +3856,21 @@
       "route": "qwen_image",
       "backend": "candle",
       "tier": "bf16",
-      "basis": "manifest_tier_declaration",
-      "reason": "no retained render for this cell; the catalog manifest declares a measured per-tier envelope, which is a whole-render figure with no phase decomposition",
+      "basis": "contract_estimate",
+      "reason": "no retained render for this cell; the model's backend block publishes a memoryStrategyContract, so the cell's estimate is the CONTRACT-ONLY per-rung ladder (the manifest row rescaled by the image law's per-rung ratios) rather than one manifest scalar repeated across every rung — this generator reads the contract's presence in the manifest, not the contract's own asset facts, which only the worker resolves at admission",
       "evidence": {
         "repo": null,
         "revision": null,
-        "path": "config/manifests/builtin.models.jsonc#models/qwen_image/candle",
+        "path": "config/manifests/builtin.models.jsonc#models/qwen_image/candle/memoryStrategyContract",
         "sha256": "f3bffe3ae3745d704caffa309c5806c0712e4a2940cb9edba9fdcf0c4f2ce9f1",
         "recordId": null,
         "envelopeBytes": null,
         "values": {
+          "declaredRungs": "bounded_attention,bounded_decode,bounded_transformer_residency,staged_residency",
+          "provider": "qwen_image",
+          "abi": "1",
           "vramGbByTier": "82.5",
           "sequentialPeakGb": "71.7"
-        }
-      }
-    },
-    {
-      "id": "analytic:qwen_image:candle:q4",
-      "modelId": "qwen_image",
-      "modelFamily": "qwen-image",
-      "route": "qwen_image",
-      "backend": "candle",
-      "tier": "q4",
-      "basis": "measured_envelope",
-      "reason": "the retained corpus measures this cell's overall allocator envelope but carries no per-phase decomposition, so it bounds admission without anchoring the derivation",
-      "evidence": {
-        "repo": null,
-        "revision": null,
-        "path": "docs/generated/qwen-candle-five-rung-sc-15817.json",
-        "sha256": "c3a47c9b085f5c75b3ee0cbe2ac55c7c20d7225be9b71abac6310488dfc7034f",
-        "recordId": "imc-c02e430ca15bb29cf327",
-        "envelopeBytes": 55604936704,
-        "values": {
-          "provider": "qwen_image"
         }
       }
     },
@@ -3031,16 +3881,19 @@
       "route": "qwen_image",
       "backend": "candle",
       "tier": "q8",
-      "basis": "manifest_tier_declaration",
-      "reason": "no retained render for this cell; the catalog manifest declares a measured per-tier envelope, which is a whole-render figure with no phase decomposition",
+      "basis": "contract_estimate",
+      "reason": "no retained render for this cell; the model's backend block publishes a memoryStrategyContract, so the cell's estimate is the CONTRACT-ONLY per-rung ladder (the manifest row rescaled by the image law's per-rung ratios) rather than one manifest scalar repeated across every rung — this generator reads the contract's presence in the manifest, not the contract's own asset facts, which only the worker resolves at admission",
       "evidence": {
         "repo": null,
         "revision": null,
-        "path": "config/manifests/builtin.models.jsonc#models/qwen_image/candle",
+        "path": "config/manifests/builtin.models.jsonc#models/qwen_image/candle/memoryStrategyContract",
         "sha256": "f3bffe3ae3745d704caffa309c5806c0712e4a2940cb9edba9fdcf0c4f2ce9f1",
         "recordId": null,
         "envelopeBytes": null,
         "values": {
+          "declaredRungs": "bounded_attention,bounded_decode,bounded_transformer_residency,staged_residency",
+          "provider": "qwen_image",
+          "abi": "1",
           "vramGbByTier": "65.3",
           "sequentialPeakGb": "38.7"
         }
@@ -3053,16 +3906,19 @@
       "route": "qwen_image_edit",
       "backend": "candle",
       "tier": "bf16",
-      "basis": "manifest_tier_declaration",
-      "reason": "no retained render for this cell; the catalog manifest declares a measured per-tier envelope, which is a whole-render figure with no phase decomposition",
+      "basis": "contract_estimate",
+      "reason": "no retained render for this cell; the model's backend block publishes a memoryStrategyContract, so the cell's estimate is the CONTRACT-ONLY per-rung ladder (the manifest row rescaled by the image law's per-rung ratios) rather than one manifest scalar repeated across every rung — this generator reads the contract's presence in the manifest, not the contract's own asset facts, which only the worker resolves at admission",
       "evidence": {
         "repo": null,
         "revision": null,
-        "path": "config/manifests/builtin.models.jsonc#models/qwen_image_edit_2511/candle",
+        "path": "config/manifests/builtin.models.jsonc#models/qwen_image_edit_2511/candle/memoryStrategyContract",
         "sha256": "f3bffe3ae3745d704caffa309c5806c0712e4a2940cb9edba9fdcf0c4f2ce9f1",
         "recordId": null,
         "envelopeBytes": null,
         "values": {
+          "declaredRungs": "bounded_attention,bounded_decode,bounded_transformer_residency,resident,staged_residency",
+          "provider": "qwen_image_edit",
+          "abi": "1",
           "vramGbByTier": "81.7",
           "sequentialPeakGb": "52.2"
         }
@@ -3075,16 +3931,19 @@
       "route": "qwen_image_edit",
       "backend": "candle",
       "tier": "q4",
-      "basis": "manifest_tier_declaration",
-      "reason": "no retained render for this cell; the catalog manifest declares a measured per-tier envelope, which is a whole-render figure with no phase decomposition",
+      "basis": "contract_estimate",
+      "reason": "no retained render for this cell; the model's backend block publishes a memoryStrategyContract, so the cell's estimate is the CONTRACT-ONLY per-rung ladder (the manifest row rescaled by the image law's per-rung ratios) rather than one manifest scalar repeated across every rung — this generator reads the contract's presence in the manifest, not the contract's own asset facts, which only the worker resolves at admission",
       "evidence": {
         "repo": null,
         "revision": null,
-        "path": "config/manifests/builtin.models.jsonc#models/qwen_image_edit_2511/candle",
+        "path": "config/manifests/builtin.models.jsonc#models/qwen_image_edit_2511/candle/memoryStrategyContract",
         "sha256": "f3bffe3ae3745d704caffa309c5806c0712e4a2940cb9edba9fdcf0c4f2ce9f1",
         "recordId": null,
         "envelopeBytes": null,
         "values": {
+          "declaredRungs": "bounded_attention,bounded_decode,bounded_transformer_residency,resident,staged_residency",
+          "provider": "qwen_image_edit",
+          "abi": "1",
           "vramGbByTier": "56.7",
           "sequentialPeakGb": "36.9"
         }
@@ -3097,16 +3956,19 @@
       "route": "qwen_image_edit",
       "backend": "candle",
       "tier": "q8",
-      "basis": "manifest_tier_declaration",
-      "reason": "no retained render for this cell; the catalog manifest declares a measured per-tier envelope, which is a whole-render figure with no phase decomposition",
+      "basis": "contract_estimate",
+      "reason": "no retained render for this cell; the model's backend block publishes a memoryStrategyContract, so the cell's estimate is the CONTRACT-ONLY per-rung ladder (the manifest row rescaled by the image law's per-rung ratios) rather than one manifest scalar repeated across every rung — this generator reads the contract's presence in the manifest, not the contract's own asset facts, which only the worker resolves at admission",
       "evidence": {
         "repo": null,
         "revision": null,
-        "path": "config/manifests/builtin.models.jsonc#models/qwen_image_edit_2511/candle",
+        "path": "config/manifests/builtin.models.jsonc#models/qwen_image_edit_2511/candle/memoryStrategyContract",
         "sha256": "f3bffe3ae3745d704caffa309c5806c0712e4a2940cb9edba9fdcf0c4f2ce9f1",
         "recordId": null,
         "envelopeBytes": null,
         "values": {
+          "declaredRungs": "bounded_attention,bounded_decode,bounded_transformer_residency,resident,staged_residency",
+          "provider": "qwen_image_edit",
+          "abi": "1",
           "vramGbByTier": "69",
           "sequentialPeakGb": "39.3"
         }
@@ -3152,16 +4014,19 @@
       "route": "qwen_image_edit",
       "backend": "candle",
       "tier": "bf16",
-      "basis": "manifest_tier_declaration",
-      "reason": "no retained render for this cell; the catalog manifest declares a measured per-tier envelope, which is a whole-render figure with no phase decomposition",
+      "basis": "contract_estimate",
+      "reason": "no retained render for this cell; the model's backend block publishes a memoryStrategyContract, so the cell's estimate is the CONTRACT-ONLY per-rung ladder (the manifest row rescaled by the image law's per-rung ratios) rather than one manifest scalar repeated across every rung — this generator reads the contract's presence in the manifest, not the contract's own asset facts, which only the worker resolves at admission",
       "evidence": {
         "repo": null,
         "revision": null,
-        "path": "config/manifests/builtin.models.jsonc#models/qwen_image_edit_2511_lightning/candle",
+        "path": "config/manifests/builtin.models.jsonc#models/qwen_image_edit_2511_lightning/candle/memoryStrategyContract",
         "sha256": "f3bffe3ae3745d704caffa309c5806c0712e4a2940cb9edba9fdcf0c4f2ce9f1",
         "recordId": null,
         "envelopeBytes": null,
         "values": {
+          "declaredRungs": "bounded_attention,bounded_decode,resident,staged_residency",
+          "provider": "qwen_image_edit",
+          "abi": "1",
           "vramGbByTier": "87.4",
           "sequentialPeakGb": "53.2"
         }
@@ -3174,16 +4039,19 @@
       "route": "qwen_image_edit",
       "backend": "candle",
       "tier": "q4",
-      "basis": "manifest_tier_declaration",
-      "reason": "no retained render for this cell; the catalog manifest declares a measured per-tier envelope, which is a whole-render figure with no phase decomposition",
+      "basis": "contract_estimate",
+      "reason": "no retained render for this cell; the model's backend block publishes a memoryStrategyContract, so the cell's estimate is the CONTRACT-ONLY per-rung ladder (the manifest row rescaled by the image law's per-rung ratios) rather than one manifest scalar repeated across every rung — this generator reads the contract's presence in the manifest, not the contract's own asset facts, which only the worker resolves at admission",
       "evidence": {
         "repo": null,
         "revision": null,
-        "path": "config/manifests/builtin.models.jsonc#models/qwen_image_edit_2511_lightning/candle",
+        "path": "config/manifests/builtin.models.jsonc#models/qwen_image_edit_2511_lightning/candle/memoryStrategyContract",
         "sha256": "f3bffe3ae3745d704caffa309c5806c0712e4a2940cb9edba9fdcf0c4f2ce9f1",
         "recordId": null,
         "envelopeBytes": null,
         "values": {
+          "declaredRungs": "bounded_attention,bounded_decode,resident,staged_residency",
+          "provider": "qwen_image_edit",
+          "abi": "1",
           "vramGbByTier": "57",
           "sequentialPeakGb": "33.1"
         }
@@ -3196,16 +4064,19 @@
       "route": "qwen_image_edit",
       "backend": "candle",
       "tier": "q8",
-      "basis": "manifest_tier_declaration",
-      "reason": "no retained render for this cell; the catalog manifest declares a measured per-tier envelope, which is a whole-render figure with no phase decomposition",
+      "basis": "contract_estimate",
+      "reason": "no retained render for this cell; the model's backend block publishes a memoryStrategyContract, so the cell's estimate is the CONTRACT-ONLY per-rung ladder (the manifest row rescaled by the image law's per-rung ratios) rather than one manifest scalar repeated across every rung — this generator reads the contract's presence in the manifest, not the contract's own asset facts, which only the worker resolves at admission",
       "evidence": {
         "repo": null,
         "revision": null,
-        "path": "config/manifests/builtin.models.jsonc#models/qwen_image_edit_2511_lightning/candle",
+        "path": "config/manifests/builtin.models.jsonc#models/qwen_image_edit_2511_lightning/candle/memoryStrategyContract",
         "sha256": "f3bffe3ae3745d704caffa309c5806c0712e4a2940cb9edba9fdcf0c4f2ce9f1",
         "recordId": null,
         "envelopeBytes": null,
         "values": {
+          "declaredRungs": "bounded_attention,bounded_decode,resident,staged_residency",
+          "provider": "qwen_image_edit",
+          "abi": "1",
           "vramGbByTier": "65.8",
           "sequentialPeakGb": "39.3"
         }
@@ -3251,9 +4122,21 @@
       "route": "sdxl",
       "backend": "candle",
       "tier": "bf16",
-      "basis": "no_retained_evidence",
-      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
-      "evidence": null
+      "basis": "contract_estimate",
+      "reason": "no retained render for this cell; the model's backend block publishes a memoryStrategyContract, so the cell's estimate is the CONTRACT-ONLY per-rung ladder (the manifest row rescaled by the image law's per-rung ratios) rather than one manifest scalar repeated across every rung — this generator reads the contract's presence in the manifest, not the contract's own asset facts, which only the worker resolves at admission",
+      "evidence": {
+        "repo": null,
+        "revision": null,
+        "path": "config/manifests/builtin.models.jsonc#models/realvisxl/candle/memoryStrategyContract",
+        "sha256": "f3bffe3ae3745d704caffa309c5806c0712e4a2940cb9edba9fdcf0c4f2ce9f1",
+        "recordId": null,
+        "envelopeBytes": null,
+        "values": {
+          "declaredRungs": "bounded_attention,bounded_decode,resident,staged_residency",
+          "provider": "sdxl",
+          "abi": "1"
+        }
+      }
     },
     {
       "id": "analytic:realvisxl:candle:q4",
@@ -3262,9 +4145,21 @@
       "route": "sdxl",
       "backend": "candle",
       "tier": "q4",
-      "basis": "no_retained_evidence",
-      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
-      "evidence": null
+      "basis": "contract_estimate",
+      "reason": "no retained render for this cell; the model's backend block publishes a memoryStrategyContract, so the cell's estimate is the CONTRACT-ONLY per-rung ladder (the manifest row rescaled by the image law's per-rung ratios) rather than one manifest scalar repeated across every rung — this generator reads the contract's presence in the manifest, not the contract's own asset facts, which only the worker resolves at admission",
+      "evidence": {
+        "repo": null,
+        "revision": null,
+        "path": "config/manifests/builtin.models.jsonc#models/realvisxl/candle/memoryStrategyContract",
+        "sha256": "f3bffe3ae3745d704caffa309c5806c0712e4a2940cb9edba9fdcf0c4f2ce9f1",
+        "recordId": null,
+        "envelopeBytes": null,
+        "values": {
+          "declaredRungs": "bounded_attention,bounded_decode,resident,staged_residency",
+          "provider": "sdxl",
+          "abi": "1"
+        }
+      }
     },
     {
       "id": "analytic:realvisxl:candle:q8",
@@ -3273,9 +4168,21 @@
       "route": "sdxl",
       "backend": "candle",
       "tier": "q8",
-      "basis": "no_retained_evidence",
-      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
-      "evidence": null
+      "basis": "contract_estimate",
+      "reason": "no retained render for this cell; the model's backend block publishes a memoryStrategyContract, so the cell's estimate is the CONTRACT-ONLY per-rung ladder (the manifest row rescaled by the image law's per-rung ratios) rather than one manifest scalar repeated across every rung — this generator reads the contract's presence in the manifest, not the contract's own asset facts, which only the worker resolves at admission",
+      "evidence": {
+        "repo": null,
+        "revision": null,
+        "path": "config/manifests/builtin.models.jsonc#models/realvisxl/candle/memoryStrategyContract",
+        "sha256": "f3bffe3ae3745d704caffa309c5806c0712e4a2940cb9edba9fdcf0c4f2ce9f1",
+        "recordId": null,
+        "envelopeBytes": null,
+        "values": {
+          "declaredRungs": "bounded_attention,bounded_decode,resident,staged_residency",
+          "provider": "sdxl",
+          "abi": "1"
+        }
+      }
     },
     {
       "id": "analytic:realvisxl:mlx:bf16",
@@ -3317,9 +4224,21 @@
       "route": "sdxl",
       "backend": "candle",
       "tier": "bf16",
-      "basis": "no_retained_evidence",
-      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
-      "evidence": null
+      "basis": "contract_estimate",
+      "reason": "no retained render for this cell; the model's backend block publishes a memoryStrategyContract, so the cell's estimate is the CONTRACT-ONLY per-rung ladder (the manifest row rescaled by the image law's per-rung ratios) rather than one manifest scalar repeated across every rung — this generator reads the contract's presence in the manifest, not the contract's own asset facts, which only the worker resolves at admission",
+      "evidence": {
+        "repo": null,
+        "revision": null,
+        "path": "config/manifests/builtin.models.jsonc#models/realvisxl_lightning/candle/memoryStrategyContract",
+        "sha256": "f3bffe3ae3745d704caffa309c5806c0712e4a2940cb9edba9fdcf0c4f2ce9f1",
+        "recordId": null,
+        "envelopeBytes": null,
+        "values": {
+          "declaredRungs": "bounded_attention,bounded_decode,resident,staged_residency",
+          "provider": "sdxl",
+          "abi": "1"
+        }
+      }
     },
     {
       "id": "analytic:realvisxl_lightning:candle:q4",
@@ -3328,9 +4247,21 @@
       "route": "sdxl",
       "backend": "candle",
       "tier": "q4",
-      "basis": "no_retained_evidence",
-      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
-      "evidence": null
+      "basis": "contract_estimate",
+      "reason": "no retained render for this cell; the model's backend block publishes a memoryStrategyContract, so the cell's estimate is the CONTRACT-ONLY per-rung ladder (the manifest row rescaled by the image law's per-rung ratios) rather than one manifest scalar repeated across every rung — this generator reads the contract's presence in the manifest, not the contract's own asset facts, which only the worker resolves at admission",
+      "evidence": {
+        "repo": null,
+        "revision": null,
+        "path": "config/manifests/builtin.models.jsonc#models/realvisxl_lightning/candle/memoryStrategyContract",
+        "sha256": "f3bffe3ae3745d704caffa309c5806c0712e4a2940cb9edba9fdcf0c4f2ce9f1",
+        "recordId": null,
+        "envelopeBytes": null,
+        "values": {
+          "declaredRungs": "bounded_attention,bounded_decode,resident,staged_residency",
+          "provider": "sdxl",
+          "abi": "1"
+        }
+      }
     },
     {
       "id": "analytic:realvisxl_lightning:candle:q8",
@@ -3339,9 +4270,21 @@
       "route": "sdxl",
       "backend": "candle",
       "tier": "q8",
-      "basis": "no_retained_evidence",
-      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
-      "evidence": null
+      "basis": "contract_estimate",
+      "reason": "no retained render for this cell; the model's backend block publishes a memoryStrategyContract, so the cell's estimate is the CONTRACT-ONLY per-rung ladder (the manifest row rescaled by the image law's per-rung ratios) rather than one manifest scalar repeated across every rung — this generator reads the contract's presence in the manifest, not the contract's own asset facts, which only the worker resolves at admission",
+      "evidence": {
+        "repo": null,
+        "revision": null,
+        "path": "config/manifests/builtin.models.jsonc#models/realvisxl_lightning/candle/memoryStrategyContract",
+        "sha256": "f3bffe3ae3745d704caffa309c5806c0712e4a2940cb9edba9fdcf0c4f2ce9f1",
+        "recordId": null,
+        "envelopeBytes": null,
+        "values": {
+          "declaredRungs": "bounded_attention,bounded_decode,resident,staged_residency",
+          "provider": "sdxl",
+          "abi": "1"
+        }
+      }
     },
     {
       "id": "analytic:realvisxl_lightning:mlx:bf16",
@@ -3383,9 +4326,21 @@
       "route": "sana_1600m",
       "backend": "candle",
       "tier": "bf16",
-      "basis": "no_retained_evidence",
-      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
-      "evidence": null
+      "basis": "contract_estimate",
+      "reason": "no retained render for this cell; the model's backend block publishes a memoryStrategyContract, so the cell's estimate is the CONTRACT-ONLY per-rung ladder (the manifest row rescaled by the image law's per-rung ratios) rather than one manifest scalar repeated across every rung — this generator reads the contract's presence in the manifest, not the contract's own asset facts, which only the worker resolves at admission",
+      "evidence": {
+        "repo": null,
+        "revision": null,
+        "path": "config/manifests/builtin.models.jsonc#models/sana_1600m/candle/memoryStrategyContract",
+        "sha256": "f3bffe3ae3745d704caffa309c5806c0712e4a2940cb9edba9fdcf0c4f2ce9f1",
+        "recordId": null,
+        "envelopeBytes": null,
+        "values": {
+          "declaredRungs": "bounded_attention,bounded_decode,bounded_transformer_residency,resident,staged_residency",
+          "provider": "sana_1600m",
+          "abi": "1"
+        }
+      }
     },
     {
       "id": "analytic:sana_1600m:candle:q4",
@@ -3394,9 +4349,21 @@
       "route": "sana_1600m",
       "backend": "candle",
       "tier": "q4",
-      "basis": "no_retained_evidence",
-      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
-      "evidence": null
+      "basis": "contract_estimate",
+      "reason": "no retained render for this cell; the model's backend block publishes a memoryStrategyContract, so the cell's estimate is the CONTRACT-ONLY per-rung ladder (the manifest row rescaled by the image law's per-rung ratios) rather than one manifest scalar repeated across every rung — this generator reads the contract's presence in the manifest, not the contract's own asset facts, which only the worker resolves at admission",
+      "evidence": {
+        "repo": null,
+        "revision": null,
+        "path": "config/manifests/builtin.models.jsonc#models/sana_1600m/candle/memoryStrategyContract",
+        "sha256": "f3bffe3ae3745d704caffa309c5806c0712e4a2940cb9edba9fdcf0c4f2ce9f1",
+        "recordId": null,
+        "envelopeBytes": null,
+        "values": {
+          "declaredRungs": "bounded_attention,bounded_decode,bounded_transformer_residency,resident,staged_residency",
+          "provider": "sana_1600m",
+          "abi": "1"
+        }
+      }
     },
     {
       "id": "analytic:sana_1600m:candle:q8",
@@ -3405,9 +4372,21 @@
       "route": "sana_1600m",
       "backend": "candle",
       "tier": "q8",
-      "basis": "no_retained_evidence",
-      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
-      "evidence": null
+      "basis": "contract_estimate",
+      "reason": "no retained render for this cell; the model's backend block publishes a memoryStrategyContract, so the cell's estimate is the CONTRACT-ONLY per-rung ladder (the manifest row rescaled by the image law's per-rung ratios) rather than one manifest scalar repeated across every rung — this generator reads the contract's presence in the manifest, not the contract's own asset facts, which only the worker resolves at admission",
+      "evidence": {
+        "repo": null,
+        "revision": null,
+        "path": "config/manifests/builtin.models.jsonc#models/sana_1600m/candle/memoryStrategyContract",
+        "sha256": "f3bffe3ae3745d704caffa309c5806c0712e4a2940cb9edba9fdcf0c4f2ce9f1",
+        "recordId": null,
+        "envelopeBytes": null,
+        "values": {
+          "declaredRungs": "bounded_attention,bounded_decode,bounded_transformer_residency,resident,staged_residency",
+          "provider": "sana_1600m",
+          "abi": "1"
+        }
+      }
     },
     {
       "id": "analytic:sana_1600m:mlx:bf16",
@@ -3449,9 +4428,21 @@
       "route": "sana_sprint_1600m",
       "backend": "candle",
       "tier": "bf16",
-      "basis": "no_retained_evidence",
-      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
-      "evidence": null
+      "basis": "contract_estimate",
+      "reason": "no retained render for this cell; the model's backend block publishes a memoryStrategyContract, so the cell's estimate is the CONTRACT-ONLY per-rung ladder (the manifest row rescaled by the image law's per-rung ratios) rather than one manifest scalar repeated across every rung — this generator reads the contract's presence in the manifest, not the contract's own asset facts, which only the worker resolves at admission",
+      "evidence": {
+        "repo": null,
+        "revision": null,
+        "path": "config/manifests/builtin.models.jsonc#models/sana_sprint_1600m/candle/memoryStrategyContract",
+        "sha256": "f3bffe3ae3745d704caffa309c5806c0712e4a2940cb9edba9fdcf0c4f2ce9f1",
+        "recordId": null,
+        "envelopeBytes": null,
+        "values": {
+          "declaredRungs": "bounded_attention,bounded_decode,bounded_transformer_residency,resident,staged_residency",
+          "provider": "sana_sprint_1600m",
+          "abi": "1"
+        }
+      }
     },
     {
       "id": "analytic:sana_sprint_1600m:candle:q4",
@@ -3460,9 +4451,21 @@
       "route": "sana_sprint_1600m",
       "backend": "candle",
       "tier": "q4",
-      "basis": "no_retained_evidence",
-      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
-      "evidence": null
+      "basis": "contract_estimate",
+      "reason": "no retained render for this cell; the model's backend block publishes a memoryStrategyContract, so the cell's estimate is the CONTRACT-ONLY per-rung ladder (the manifest row rescaled by the image law's per-rung ratios) rather than one manifest scalar repeated across every rung — this generator reads the contract's presence in the manifest, not the contract's own asset facts, which only the worker resolves at admission",
+      "evidence": {
+        "repo": null,
+        "revision": null,
+        "path": "config/manifests/builtin.models.jsonc#models/sana_sprint_1600m/candle/memoryStrategyContract",
+        "sha256": "f3bffe3ae3745d704caffa309c5806c0712e4a2940cb9edba9fdcf0c4f2ce9f1",
+        "recordId": null,
+        "envelopeBytes": null,
+        "values": {
+          "declaredRungs": "bounded_attention,bounded_decode,bounded_transformer_residency,resident,staged_residency",
+          "provider": "sana_sprint_1600m",
+          "abi": "1"
+        }
+      }
     },
     {
       "id": "analytic:sana_sprint_1600m:candle:q8",
@@ -3471,9 +4474,21 @@
       "route": "sana_sprint_1600m",
       "backend": "candle",
       "tier": "q8",
-      "basis": "no_retained_evidence",
-      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
-      "evidence": null
+      "basis": "contract_estimate",
+      "reason": "no retained render for this cell; the model's backend block publishes a memoryStrategyContract, so the cell's estimate is the CONTRACT-ONLY per-rung ladder (the manifest row rescaled by the image law's per-rung ratios) rather than one manifest scalar repeated across every rung — this generator reads the contract's presence in the manifest, not the contract's own asset facts, which only the worker resolves at admission",
+      "evidence": {
+        "repo": null,
+        "revision": null,
+        "path": "config/manifests/builtin.models.jsonc#models/sana_sprint_1600m/candle/memoryStrategyContract",
+        "sha256": "f3bffe3ae3745d704caffa309c5806c0712e4a2940cb9edba9fdcf0c4f2ce9f1",
+        "recordId": null,
+        "envelopeBytes": null,
+        "values": {
+          "declaredRungs": "bounded_attention,bounded_decode,bounded_transformer_residency,resident,staged_residency",
+          "provider": "sana_sprint_1600m",
+          "abi": "1"
+        }
+      }
     },
     {
       "id": "analytic:sana_sprint_1600m:mlx:bf16",
@@ -3611,16 +4626,19 @@
       "route": "sd3_5_large",
       "backend": "candle",
       "tier": "bf16",
-      "basis": "manifest_tier_declaration",
-      "reason": "no retained render for this cell; the catalog manifest declares a measured per-tier envelope, which is a whole-render figure with no phase decomposition",
+      "basis": "contract_estimate",
+      "reason": "no retained render for this cell; the model's backend block publishes a memoryStrategyContract, so the cell's estimate is the CONTRACT-ONLY per-rung ladder (the manifest row rescaled by the image law's per-rung ratios) rather than one manifest scalar repeated across every rung — this generator reads the contract's presence in the manifest, not the contract's own asset facts, which only the worker resolves at admission",
       "evidence": {
         "repo": null,
         "revision": null,
-        "path": "config/manifests/builtin.models.jsonc#models/sd3_5_large/candle",
+        "path": "config/manifests/builtin.models.jsonc#models/sd3_5_large/candle/memoryStrategyContract",
         "sha256": "f3bffe3ae3745d704caffa309c5806c0712e4a2940cb9edba9fdcf0c4f2ce9f1",
         "recordId": null,
         "envelopeBytes": null,
         "values": {
+          "declaredRungs": "resident,staged_residency",
+          "provider": "sd3_5_large",
+          "abi": "1",
           "vramGbByTier": "41.3"
         }
       }
@@ -3632,16 +4650,19 @@
       "route": "sd3_5_large",
       "backend": "candle",
       "tier": "q4",
-      "basis": "manifest_tier_declaration",
-      "reason": "no retained render for this cell; the catalog manifest declares a measured per-tier envelope, which is a whole-render figure with no phase decomposition",
+      "basis": "contract_estimate",
+      "reason": "no retained render for this cell; the model's backend block publishes a memoryStrategyContract, so the cell's estimate is the CONTRACT-ONLY per-rung ladder (the manifest row rescaled by the image law's per-rung ratios) rather than one manifest scalar repeated across every rung — this generator reads the contract's presence in the manifest, not the contract's own asset facts, which only the worker resolves at admission",
       "evidence": {
         "repo": null,
         "revision": null,
-        "path": "config/manifests/builtin.models.jsonc#models/sd3_5_large/candle",
+        "path": "config/manifests/builtin.models.jsonc#models/sd3_5_large/candle/memoryStrategyContract",
         "sha256": "f3bffe3ae3745d704caffa309c5806c0712e4a2940cb9edba9fdcf0c4f2ce9f1",
         "recordId": null,
         "envelopeBytes": null,
         "values": {
+          "declaredRungs": "resident,staged_residency",
+          "provider": "sd3_5_large",
+          "abi": "1",
           "vramGbByTier": "33.9"
         }
       }
@@ -3686,9 +4707,21 @@
       "route": "sd3_5_large_turbo",
       "backend": "candle",
       "tier": "bf16",
-      "basis": "no_retained_evidence",
-      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
-      "evidence": null
+      "basis": "contract_estimate",
+      "reason": "no retained render for this cell; the model's backend block publishes a memoryStrategyContract, so the cell's estimate is the CONTRACT-ONLY per-rung ladder (the manifest row rescaled by the image law's per-rung ratios) rather than one manifest scalar repeated across every rung — this generator reads the contract's presence in the manifest, not the contract's own asset facts, which only the worker resolves at admission",
+      "evidence": {
+        "repo": null,
+        "revision": null,
+        "path": "config/manifests/builtin.models.jsonc#models/sd3_5_large_turbo/candle/memoryStrategyContract",
+        "sha256": "f3bffe3ae3745d704caffa309c5806c0712e4a2940cb9edba9fdcf0c4f2ce9f1",
+        "recordId": null,
+        "envelopeBytes": null,
+        "values": {
+          "declaredRungs": "resident,staged_residency",
+          "provider": "sd3_5_large_turbo",
+          "abi": "1"
+        }
+      }
     },
     {
       "id": "analytic:sd3_5_large_turbo:candle:q4",
@@ -3697,9 +4730,21 @@
       "route": "sd3_5_large_turbo",
       "backend": "candle",
       "tier": "q4",
-      "basis": "no_retained_evidence",
-      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
-      "evidence": null
+      "basis": "contract_estimate",
+      "reason": "no retained render for this cell; the model's backend block publishes a memoryStrategyContract, so the cell's estimate is the CONTRACT-ONLY per-rung ladder (the manifest row rescaled by the image law's per-rung ratios) rather than one manifest scalar repeated across every rung — this generator reads the contract's presence in the manifest, not the contract's own asset facts, which only the worker resolves at admission",
+      "evidence": {
+        "repo": null,
+        "revision": null,
+        "path": "config/manifests/builtin.models.jsonc#models/sd3_5_large_turbo/candle/memoryStrategyContract",
+        "sha256": "f3bffe3ae3745d704caffa309c5806c0712e4a2940cb9edba9fdcf0c4f2ce9f1",
+        "recordId": null,
+        "envelopeBytes": null,
+        "values": {
+          "declaredRungs": "resident,staged_residency",
+          "provider": "sd3_5_large_turbo",
+          "abi": "1"
+        }
+      }
     },
     {
       "id": "analytic:sd3_5_large_turbo:mlx:bf16",
@@ -3741,9 +4786,21 @@
       "route": "sd3_5_medium",
       "backend": "candle",
       "tier": "bf16",
-      "basis": "no_retained_evidence",
-      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
-      "evidence": null
+      "basis": "contract_estimate",
+      "reason": "no retained render for this cell; the model's backend block publishes a memoryStrategyContract, so the cell's estimate is the CONTRACT-ONLY per-rung ladder (the manifest row rescaled by the image law's per-rung ratios) rather than one manifest scalar repeated across every rung — this generator reads the contract's presence in the manifest, not the contract's own asset facts, which only the worker resolves at admission",
+      "evidence": {
+        "repo": null,
+        "revision": null,
+        "path": "config/manifests/builtin.models.jsonc#models/sd3_5_medium/candle/memoryStrategyContract",
+        "sha256": "f3bffe3ae3745d704caffa309c5806c0712e4a2940cb9edba9fdcf0c4f2ce9f1",
+        "recordId": null,
+        "envelopeBytes": null,
+        "values": {
+          "declaredRungs": "resident,staged_residency",
+          "provider": "sd3_5_medium",
+          "abi": "1"
+        }
+      }
     },
     {
       "id": "analytic:sd3_5_medium:candle:q4",
@@ -3752,9 +4809,21 @@
       "route": "sd3_5_medium",
       "backend": "candle",
       "tier": "q4",
-      "basis": "no_retained_evidence",
-      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
-      "evidence": null
+      "basis": "contract_estimate",
+      "reason": "no retained render for this cell; the model's backend block publishes a memoryStrategyContract, so the cell's estimate is the CONTRACT-ONLY per-rung ladder (the manifest row rescaled by the image law's per-rung ratios) rather than one manifest scalar repeated across every rung — this generator reads the contract's presence in the manifest, not the contract's own asset facts, which only the worker resolves at admission",
+      "evidence": {
+        "repo": null,
+        "revision": null,
+        "path": "config/manifests/builtin.models.jsonc#models/sd3_5_medium/candle/memoryStrategyContract",
+        "sha256": "f3bffe3ae3745d704caffa309c5806c0712e4a2940cb9edba9fdcf0c4f2ce9f1",
+        "recordId": null,
+        "envelopeBytes": null,
+        "values": {
+          "declaredRungs": "resident,staged_residency",
+          "provider": "sd3_5_medium",
+          "abi": "1"
+        }
+      }
     },
     {
       "id": "analytic:sd3_5_medium:mlx:bf16",
@@ -3796,9 +4865,21 @@
       "route": "sdxl",
       "backend": "candle",
       "tier": "bf16",
-      "basis": "no_retained_evidence",
-      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
-      "evidence": null
+      "basis": "contract_estimate",
+      "reason": "no retained render for this cell; the model's backend block publishes a memoryStrategyContract, so the cell's estimate is the CONTRACT-ONLY per-rung ladder (the manifest row rescaled by the image law's per-rung ratios) rather than one manifest scalar repeated across every rung — this generator reads the contract's presence in the manifest, not the contract's own asset facts, which only the worker resolves at admission",
+      "evidence": {
+        "repo": null,
+        "revision": null,
+        "path": "config/manifests/builtin.models.jsonc#models/sdxl/candle/memoryStrategyContract",
+        "sha256": "f3bffe3ae3745d704caffa309c5806c0712e4a2940cb9edba9fdcf0c4f2ce9f1",
+        "recordId": null,
+        "envelopeBytes": null,
+        "values": {
+          "declaredRungs": "bounded_attention,bounded_decode,resident,staged_residency",
+          "provider": "sdxl",
+          "abi": "1"
+        }
+      }
     },
     {
       "id": "analytic:sdxl:candle:q4",
@@ -3807,9 +4888,21 @@
       "route": "sdxl",
       "backend": "candle",
       "tier": "q4",
-      "basis": "no_retained_evidence",
-      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
-      "evidence": null
+      "basis": "contract_estimate",
+      "reason": "no retained render for this cell; the model's backend block publishes a memoryStrategyContract, so the cell's estimate is the CONTRACT-ONLY per-rung ladder (the manifest row rescaled by the image law's per-rung ratios) rather than one manifest scalar repeated across every rung — this generator reads the contract's presence in the manifest, not the contract's own asset facts, which only the worker resolves at admission",
+      "evidence": {
+        "repo": null,
+        "revision": null,
+        "path": "config/manifests/builtin.models.jsonc#models/sdxl/candle/memoryStrategyContract",
+        "sha256": "f3bffe3ae3745d704caffa309c5806c0712e4a2940cb9edba9fdcf0c4f2ce9f1",
+        "recordId": null,
+        "envelopeBytes": null,
+        "values": {
+          "declaredRungs": "bounded_attention,bounded_decode,resident,staged_residency",
+          "provider": "sdxl",
+          "abi": "1"
+        }
+      }
     },
     {
       "id": "analytic:sdxl:candle:q8",
@@ -3818,9 +4911,21 @@
       "route": "sdxl",
       "backend": "candle",
       "tier": "q8",
-      "basis": "no_retained_evidence",
-      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
-      "evidence": null
+      "basis": "contract_estimate",
+      "reason": "no retained render for this cell; the model's backend block publishes a memoryStrategyContract, so the cell's estimate is the CONTRACT-ONLY per-rung ladder (the manifest row rescaled by the image law's per-rung ratios) rather than one manifest scalar repeated across every rung — this generator reads the contract's presence in the manifest, not the contract's own asset facts, which only the worker resolves at admission",
+      "evidence": {
+        "repo": null,
+        "revision": null,
+        "path": "config/manifests/builtin.models.jsonc#models/sdxl/candle/memoryStrategyContract",
+        "sha256": "f3bffe3ae3745d704caffa309c5806c0712e4a2940cb9edba9fdcf0c4f2ce9f1",
+        "recordId": null,
+        "envelopeBytes": null,
+        "values": {
+          "declaredRungs": "bounded_attention,bounded_decode,resident,staged_residency",
+          "provider": "sdxl",
+          "abi": "1"
+        }
+      }
     },
     {
       "id": "analytic:sdxl:mlx:bf16",
@@ -4759,16 +5864,19 @@
       "route": "z_image",
       "backend": "candle",
       "tier": "bf16",
-      "basis": "manifest_tier_declaration",
-      "reason": "no retained render for this cell; the catalog manifest declares a measured per-tier envelope, which is a whole-render figure with no phase decomposition",
+      "basis": "contract_estimate",
+      "reason": "no retained render for this cell; the model's backend block publishes a memoryStrategyContract, so the cell's estimate is the CONTRACT-ONLY per-rung ladder (the manifest row rescaled by the image law's per-rung ratios) rather than one manifest scalar repeated across every rung — this generator reads the contract's presence in the manifest, not the contract's own asset facts, which only the worker resolves at admission",
       "evidence": {
         "repo": null,
         "revision": null,
-        "path": "config/manifests/builtin.models.jsonc#models/z_image/candle",
+        "path": "config/manifests/builtin.models.jsonc#models/z_image/candle/memoryStrategyContract",
         "sha256": "f3bffe3ae3745d704caffa309c5806c0712e4a2940cb9edba9fdcf0c4f2ce9f1",
         "recordId": null,
         "envelopeBytes": null,
         "values": {
+          "declaredRungs": "bounded_attention,bounded_decode,bounded_transformer_residency,staged_residency",
+          "provider": "z_image",
+          "abi": "1",
           "vramGbByTier": "40.7",
           "sequentialPeakGb": "25.4"
         }
@@ -4781,16 +5889,19 @@
       "route": "z_image",
       "backend": "candle",
       "tier": "q4",
-      "basis": "manifest_tier_declaration",
-      "reason": "no retained render for this cell; the catalog manifest declares a measured per-tier envelope, which is a whole-render figure with no phase decomposition",
+      "basis": "contract_estimate",
+      "reason": "no retained render for this cell; the model's backend block publishes a memoryStrategyContract, so the cell's estimate is the CONTRACT-ONLY per-rung ladder (the manifest row rescaled by the image law's per-rung ratios) rather than one manifest scalar repeated across every rung — this generator reads the contract's presence in the manifest, not the contract's own asset facts, which only the worker resolves at admission",
       "evidence": {
         "repo": null,
         "revision": null,
-        "path": "config/manifests/builtin.models.jsonc#models/z_image/candle",
+        "path": "config/manifests/builtin.models.jsonc#models/z_image/candle/memoryStrategyContract",
         "sha256": "f3bffe3ae3745d704caffa309c5806c0712e4a2940cb9edba9fdcf0c4f2ce9f1",
         "recordId": null,
         "envelopeBytes": null,
         "values": {
+          "declaredRungs": "bounded_attention,bounded_decode,bounded_transformer_residency,staged_residency",
+          "provider": "z_image",
+          "abi": "1",
           "vramGbByTier": "27.2",
           "sequentialPeakGb": "16.9"
         }
@@ -4803,16 +5914,19 @@
       "route": "z_image",
       "backend": "candle",
       "tier": "q8",
-      "basis": "manifest_tier_declaration",
-      "reason": "no retained render for this cell; the catalog manifest declares a measured per-tier envelope, which is a whole-render figure with no phase decomposition",
+      "basis": "contract_estimate",
+      "reason": "no retained render for this cell; the model's backend block publishes a memoryStrategyContract, so the cell's estimate is the CONTRACT-ONLY per-rung ladder (the manifest row rescaled by the image law's per-rung ratios) rather than one manifest scalar repeated across every rung — this generator reads the contract's presence in the manifest, not the contract's own asset facts, which only the worker resolves at admission",
       "evidence": {
         "repo": null,
         "revision": null,
-        "path": "config/manifests/builtin.models.jsonc#models/z_image/candle",
+        "path": "config/manifests/builtin.models.jsonc#models/z_image/candle/memoryStrategyContract",
         "sha256": "f3bffe3ae3745d704caffa309c5806c0712e4a2940cb9edba9fdcf0c4f2ce9f1",
         "recordId": null,
         "envelopeBytes": null,
         "values": {
+          "declaredRungs": "bounded_attention,bounded_decode,bounded_transformer_residency,staged_residency",
+          "provider": "z_image",
+          "abi": "1",
           "vramGbByTier": "32.1",
           "sequentialPeakGb": "19.9"
         }
@@ -4858,9 +5972,21 @@
       "route": "z_image_turbo",
       "backend": "candle",
       "tier": "bf16",
-      "basis": "no_retained_evidence",
-      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
-      "evidence": null
+      "basis": "contract_estimate",
+      "reason": "no retained render for this cell; the model's backend block publishes a memoryStrategyContract, so the cell's estimate is the CONTRACT-ONLY per-rung ladder (the manifest row rescaled by the image law's per-rung ratios) rather than one manifest scalar repeated across every rung — this generator reads the contract's presence in the manifest, not the contract's own asset facts, which only the worker resolves at admission",
+      "evidence": {
+        "repo": null,
+        "revision": null,
+        "path": "config/manifests/builtin.models.jsonc#models/z_image_edit/candle/memoryStrategyContract",
+        "sha256": "f3bffe3ae3745d704caffa309c5806c0712e4a2940cb9edba9fdcf0c4f2ce9f1",
+        "recordId": null,
+        "envelopeBytes": null,
+        "values": {
+          "declaredRungs": "bounded_transformer_residency",
+          "provider": "z_image_turbo",
+          "abi": "1"
+        }
+      }
     },
     {
       "id": "analytic:z_image_edit:candle:q4",
@@ -4869,9 +5995,21 @@
       "route": "z_image_turbo",
       "backend": "candle",
       "tier": "q4",
-      "basis": "no_retained_evidence",
-      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
-      "evidence": null
+      "basis": "contract_estimate",
+      "reason": "no retained render for this cell; the model's backend block publishes a memoryStrategyContract, so the cell's estimate is the CONTRACT-ONLY per-rung ladder (the manifest row rescaled by the image law's per-rung ratios) rather than one manifest scalar repeated across every rung — this generator reads the contract's presence in the manifest, not the contract's own asset facts, which only the worker resolves at admission",
+      "evidence": {
+        "repo": null,
+        "revision": null,
+        "path": "config/manifests/builtin.models.jsonc#models/z_image_edit/candle/memoryStrategyContract",
+        "sha256": "f3bffe3ae3745d704caffa309c5806c0712e4a2940cb9edba9fdcf0c4f2ce9f1",
+        "recordId": null,
+        "envelopeBytes": null,
+        "values": {
+          "declaredRungs": "bounded_transformer_residency",
+          "provider": "z_image_turbo",
+          "abi": "1"
+        }
+      }
     },
     {
       "id": "analytic:z_image_edit:candle:q8",
@@ -4880,9 +6018,21 @@
       "route": "z_image_turbo",
       "backend": "candle",
       "tier": "q8",
-      "basis": "no_retained_evidence",
-      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
-      "evidence": null
+      "basis": "contract_estimate",
+      "reason": "no retained render for this cell; the model's backend block publishes a memoryStrategyContract, so the cell's estimate is the CONTRACT-ONLY per-rung ladder (the manifest row rescaled by the image law's per-rung ratios) rather than one manifest scalar repeated across every rung — this generator reads the contract's presence in the manifest, not the contract's own asset facts, which only the worker resolves at admission",
+      "evidence": {
+        "repo": null,
+        "revision": null,
+        "path": "config/manifests/builtin.models.jsonc#models/z_image_edit/candle/memoryStrategyContract",
+        "sha256": "f3bffe3ae3745d704caffa309c5806c0712e4a2940cb9edba9fdcf0c4f2ce9f1",
+        "recordId": null,
+        "envelopeBytes": null,
+        "values": {
+          "declaredRungs": "bounded_transformer_residency",
+          "provider": "z_image_turbo",
+          "abi": "1"
+        }
+      }
     },
     {
       "id": "analytic:z_image_edit:mlx:bf16",
@@ -4916,69 +6066,6 @@
       "basis": "no_retained_evidence",
       "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
       "evidence": null
-    },
-    {
-      "id": "analytic:z_image_turbo:candle:bf16",
-      "modelId": "z_image_turbo",
-      "modelFamily": "z-image",
-      "route": "z_image_turbo",
-      "backend": "candle",
-      "tier": "bf16",
-      "basis": "measured_envelope",
-      "reason": "the retained corpus measures this cell's overall allocator envelope but carries no per-phase decomposition, so it bounds admission without anchoring the derivation",
-      "evidence": {
-        "repo": null,
-        "revision": null,
-        "path": "docs/calibration/sc-15859/z-image-turbo-bf16-candle-anchor.json",
-        "sha256": "124f7d4f9988c1626d3e914edfa3faa620115f8775781e2456dc130f6c482e5b",
-        "recordId": "imc-3cd69f2fee9e91e83b58",
-        "envelopeBytes": 16545480704,
-        "values": {
-          "provider": "z_image_turbo"
-        }
-      }
-    },
-    {
-      "id": "analytic:z_image_turbo:candle:q4",
-      "modelId": "z_image_turbo",
-      "modelFamily": "z-image",
-      "route": "z_image_turbo",
-      "backend": "candle",
-      "tier": "q4",
-      "basis": "measured_envelope",
-      "reason": "the retained corpus measures this cell's overall allocator envelope but carries no per-phase decomposition, so it bounds admission without anchoring the derivation",
-      "evidence": {
-        "repo": null,
-        "revision": null,
-        "path": "docs/calibration/sc-15859/z-image-turbo-q4-candle-anchor.json",
-        "sha256": "1732064045f417bb421de01e1379cf15a3322653e21e8515ff751d654b0a35d6",
-        "recordId": "imc-b8064416c974b5008509",
-        "envelopeBytes": 11741954048,
-        "values": {
-          "provider": "z_image_turbo"
-        }
-      }
-    },
-    {
-      "id": "analytic:z_image_turbo:candle:q8",
-      "modelId": "z_image_turbo",
-      "modelFamily": "z-image",
-      "route": "z_image_turbo",
-      "backend": "candle",
-      "tier": "q8",
-      "basis": "measured_envelope",
-      "reason": "the retained corpus measures this cell's overall allocator envelope but carries no per-phase decomposition, so it bounds admission without anchoring the derivation",
-      "evidence": {
-        "repo": null,
-        "revision": null,
-        "path": "docs/calibration/sc-15859/z-image-turbo-q8-candle-anchor.json",
-        "sha256": "1291f34ddfbb84de15327a814121a9f622bbaf342e52c95296e6b5870ae93581",
-        "recordId": "imc-8cda4f70f78dd33f5330",
-        "envelopeBytes": 11237588992,
-        "values": {
-          "provider": "z_image_turbo"
-        }
-      }
     },
     {
       "id": "analytic:z_image_turbo:mlx:bf16",
