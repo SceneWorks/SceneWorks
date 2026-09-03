@@ -43,6 +43,83 @@ pub(crate) const CUDA_VRAM_CAP_ENV: &str = "SCENEWORKS_CUDA_VRAM_CAP_GB";
 /// meanings or values to the same dedicated pool.
 pub(crate) const HEADROOM_GB: f64 = crate::fit_gate::dedicated_vram_reserve().gb;
 
+/// The named margin the candle ladder's operational reserve carries ABOVE the measured idle
+/// baseline (sc-22664, epic 22657 E4). The baseline is what the box holds before this load — the
+/// CUDA context(s) and WDDM residency `nvidia-smi` reports as used — and this margin is the growth
+/// of that residency the pre-load probe cannot yet see: the cuBLAS/cuDNN workspaces and module
+/// images a first kernel launch materializes inside the context, which a cold worker pays once on
+/// top of the modelled phase peaks. It is NOT allocator slack (candle's counted allocations carry
+/// none — `ladder_margin_policy::CANDLE_RECAPTURE_SPREAD`) and NOT activation headroom (the law
+/// prices activations); it is only the context's own post-probe growth.
+pub(crate) const LADDER_RESERVE_MARGIN_GB: f64 = 0.25;
+
+// The margin is a fraction of the slack it replaces, by construction: a margin at or above the
+// legacy reserve would make the ceiling in `ladder_reserve_gb` the whole answer.
+const _: () = assert!(LADDER_RESERVE_MARGIN_GB > 0.0 && LADDER_RESERVE_MARGIN_GB < HEADROOM_GB);
+
+/// The pre-load device residency a candle worker process MEASURABLY carries on this box, in bytes
+/// (sc-22664 review, D3): the `preLoadDeviceUsed` diagnostic of the retained candle calibration
+/// record `imc-06fbd2ff6dcba95f8555` (`docs/generated/memory-calibration-evidence.json`; Krea 2
+/// Turbo q4, `memory-candle-adapter:krea-turbo-certifying`, RTX PRO 6000 Blackwell, captured
+/// 2026-08-28) — the device's used bytes the harness read immediately before its load, i.e. the
+/// CUDA context, module images and WDDM residency the process pays before the first weight lands.
+/// The retained anchors measure every phase peak as a device DELTA above exactly this residency,
+/// so it is the one term no derived peak contains.
+///
+/// It is the FLOOR of [`ladder_reserve_gb`]'s idle baseline rather than its whole answer because
+/// the live probe can only see this process's context AFTER the context exists: on a cold worker
+/// `total − free` is the card's residency before this process created its context, which on a
+/// headless card is ~0, and a reserve derived from that alone would collapse to the bare margin
+/// and under-charge the residency the record shows the process will carry.
+///
+/// `ladder_reserve_reads_the_measured_pre_load_residency_off_the_retained_record` reads this
+/// constant back against the record, so it cannot drift from the evidence it cites.
+pub(crate) const MEASURED_PRELOAD_RESIDENCY_BYTES: u64 = 1_045_430_272;
+
+/// [`MEASURED_PRELOAD_RESIDENCY_BYTES`] in the budget's unit (GiB, what `nvidia-smi`'s MiB
+/// reading divides down to): ~0.97.
+pub(crate) const MEASURED_PRELOAD_RESIDENCY_GB: f64 =
+    MEASURED_PRELOAD_RESIDENCY_BYTES as f64 / BYTES_PER_GIB;
+
+// The measured residency plus the margin sits under the ceiling, so the ceiling is a genuine cap
+// on foreign residency and not the answer on every idle card.
+const _: () = assert!(MEASURED_PRELOAD_RESIDENCY_GB + LADDER_RESERVE_MARGIN_GB < HEADROOM_GB);
+
+/// The operational reserve the candle memory-strategy ladder charges EXACTLY ONCE per candidate
+/// (sc-22664, epic 22657 E4) — against the selector budget for a candidate priced from a measured
+/// device delta, and never ALSO against a candidate whose peak already carries the structural pad;
+/// `crate::memory_strategy::ReserveCharge` states that rule once.
+///
+/// `reserve = max(total − free, MEASURED_PRELOAD_RESIDENCY_GB) + LADDER_RESERVE_MARGIN_GB`, capped
+/// at `HEADROOM_GB`:
+///
+/// * `total − free` is the idle baseline of the selected card as probed before the load — the
+///   CUDA context(s) and WDDM residency the box actually carries — and it MUST be the RAW probe,
+///   never the reclaimable-credited budget (`with_reclaimable`), which predicts the free the
+///   imminent evict will produce and so reads a warm card as nearly idle (review D2).
+/// * [`MEASURED_PRELOAD_RESIDENCY_GB`] floors it at the residency the retained record shows this
+///   process carrying before its load, because a cold probe cannot see its own context (D3).
+/// * [`LADDER_RESERVE_MARGIN_GB`] is the context's post-probe growth.
+/// * The legacy [`HEADROOM_GB`] stays the CEILING: on a card whose reported used bytes exceed it,
+///   the "idle" reading is foreign residency (another process's model, a second worker on the
+///   same GPU, or on a warm run this process's own resident model about to be evicted), which is
+///   already excluded from `free` and says nothing about this process's context, so the reserve
+///   falls back to the legacy allocator slack rather than charging those bytes a second time. A
+///   budget with more free than total (a capped emulation) reads as a zero baseline and lands on
+///   the measured floor.
+///
+/// The retained candle anchors measure every phase peak as a device DELTA above the pre-load
+/// residency, so this baseline is the one term an anchor-derived peak does not contain; charging
+/// it against the budget once for such a candidate, rather than folding a fixed 2 GB into the
+/// derivation AND subtracting 2 GB from the budget, is what lets an 8 GB card admit a 4.5 GB
+/// fully-engaged composition once a packaged anchor prices the cell.
+pub(crate) fn ladder_reserve_gb(budget: VramBudget) -> f64 {
+    let idle_baseline_gb = (budget.total_gb - budget.free_gb)
+        .max(0.0)
+        .max(MEASURED_PRELOAD_RESIDENCY_GB);
+    (idle_baseline_gb + LADDER_RESERVE_MARGIN_GB).min(HEADROOM_GB)
+}
+
 /// A live (or capped) VRAM budget for the selected GPU, in GB.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct VramBudget {
@@ -192,6 +269,29 @@ pub(crate) fn requested_tier_key(
 /// [`requested_tier_key`] returned `"q8"` for it. So the sizing is no less conservative than the
 /// status quo, and a missing row can only ever cost a spurious `TooBig`/`Offload`, never an OOM.
 pub(crate) fn predicted_peak_gb(manifest_entry: &JsonObject, tier_key: &str) -> Option<f64> {
+    if let Some(gb) = measured_resident_peak_gb(manifest_entry, tier_key) {
+        return Some(gb + HEADROOM_GB);
+    }
+    // Spelled exactly so: the manifest constraint-contract registry anchors the `candle.minMemoryGb`
+    // reader on this expression (`tests/test_builtin_manifest_audit.py`).
+    let candle = manifest_entry.get("candle")?;
+    candle.get("minMemoryGb").and_then(json_f64)
+}
+
+/// The RAW measured resident row, `candle.vramGbByTier[tier_key]` (or the `q8` row for an
+/// unmeasured `nvfp4` tier, exactly as [`predicted_peak_gb`] degrades), with NO headroom folded
+/// in. `None` where the tier has no measured row — [`predicted_peak_gb`] then lands on
+/// `minMemoryGb`, which the manifest pads itself.
+///
+/// This is the row the memory-strategy ladder prices its resident candidate from (sc-22664): the
+/// ladder charges its operational reserve once against the selector budget
+/// ([`ladder_reserve_gb`]), so a candidate that also carried [`HEADROOM_GB`] would pay twice. The
+/// legacy fit gate keeps consuming the padded [`predicted_peak_gb`] because it charges no reserve
+/// against its budget.
+pub(crate) fn measured_resident_peak_gb(
+    manifest_entry: &JsonObject,
+    tier_key: &str,
+) -> Option<f64> {
     let candle = manifest_entry.get("candle")?;
     let measured = |key: &str| {
         candle
@@ -199,16 +299,9 @@ pub(crate) fn predicted_peak_gb(manifest_entry: &JsonObject, tier_key: &str) -> 
             .and_then(|tiers| tiers.get(key))
             .and_then(json_f64)
     };
-    if let Some(gb) = measured(tier_key) {
-        return Some(gb + HEADROOM_GB);
-    }
-    // NVFP4 with no measured row → the q8 row (a deliberate over-prediction; see the note above).
-    if tier_key == NVFP4_TIER {
-        if let Some(gb) = measured("q8") {
-            return Some(gb + HEADROOM_GB);
-        }
-    }
-    candle.get("minMemoryGb").and_then(json_f64)
+    measured(tier_key)
+        // NVFP4 with no measured row → the q8 row (a deliberate over-prediction; see the note above).
+        .or_else(|| (tier_key == NVFP4_TIER).then(|| measured("q8")).flatten())
 }
 
 /// Resident prediction with a load-exact independently resident adapter stack. Callers pass zero
@@ -235,11 +328,20 @@ pub(crate) fn predicted_sequential_peak_gb(
     manifest_entry: &JsonObject,
     tier_key: &str,
 ) -> Option<f64> {
+    measured_sequential_peak_gb(manifest_entry, tier_key).map(|gb| gb + HEADROOM_GB)
+}
+
+/// The RAW measured sequential row, `candle.sequentialPeakGb[tier_key]` (or the `q8` row for an
+/// unmeasured `nvfp4` tier), with NO headroom folded in — the staged working set the ladder's
+/// manifest-row floor prices (sc-22664; see [`measured_resident_peak_gb`] for why the ladder's
+/// candidates carry no headroom).
+pub(crate) fn measured_sequential_peak_gb(
+    manifest_entry: &JsonObject,
+    tier_key: &str,
+) -> Option<f64> {
     let sequential = manifest_entry.get("candle")?.get("sequentialPeakGb")?;
     let measured = |key: &str| sequential.get(key).and_then(json_f64);
-    measured(tier_key)
-        .or_else(|| (tier_key == NVFP4_TIER).then(|| measured("q8")).flatten())
-        .map(|gb| gb + HEADROOM_GB)
+    measured(tier_key).or_else(|| (tier_key == NVFP4_TIER).then(|| measured("q8")).flatten())
 }
 
 /// Sequential prediction with the same adapter residency charged in every lifecycle policy.
@@ -3645,6 +3747,121 @@ mod tests {
              (manifest ABI {}, provider ABI {})",
             context.calibration_abi,
             identity.abi
+        );
+    }
+
+    /// sc-22664 (epic 22657 E4): the ladder's operational reserve is the idle baseline — the
+    /// probe's `total − free`, floored at the measured pre-load residency — plus its named
+    /// margin, capped at the legacy allocator slack: never the fixed 2 GB on a card whose baseline
+    /// is below it, never MORE than it on a card carrying foreign residency, and never below what
+    /// the retained record shows the process carrying.
+    ///
+    /// MUTATION: dropping the `MEASURED_PRELOAD_RESIDENCY_GB` floor from `ladder_reserve_gb`
+    /// reds the fixture, capped and credited arms (each collapses to a baseline below the record).
+    #[test]
+    fn ladder_reserve_is_the_idle_baseline_plus_the_margin_capped_at_the_legacy_slack() {
+        let floor = MEASURED_PRELOAD_RESIDENCY_GB;
+        assert!(floor > 0.9 && floor < 1.0, "{floor}");
+        // The AC fixture: total 8.0, free 7.3 → 0.7 GB probed idle, BELOW the measured residency,
+        // so the record's residency is the baseline (D3): a cold probe cannot see its own context.
+        let fixture = ladder_reserve_gb(VramBudget {
+            free_gb: 7.3,
+            total_gb: 8.0,
+        });
+        assert!(
+            (fixture - (floor + LADDER_RESERVE_MARGIN_GB)).abs() < 1e-9,
+            "{fixture}"
+        );
+        assert!(fixture > 0.7 + LADDER_RESERVE_MARGIN_GB);
+        assert!(fixture < HEADROOM_GB);
+        // A dedicated card at rest with its context already up: ~1.2 GB of context + WDDM
+        // residency probed, above the floor, charged once.
+        let dedicated = ladder_reserve_gb(VramBudget {
+            free_gb: 94.8,
+            total_gb: 96.0,
+        });
+        assert!((dedicated - (1.2 + LADDER_RESERVE_MARGIN_GB)).abs() < 1e-9);
+        // Foreign residency far above the slack (another process holds most of the card): the
+        // idle reading says nothing about this process's context and is already out of `free`,
+        // so the legacy slack is the ceiling — the reserve never charges those bytes twice.
+        let foreign = ladder_reserve_gb(VramBudget {
+            free_gb: 7.0,
+            total_gb: 96.0,
+        });
+        assert_eq!(foreign, HEADROOM_GB);
+        // A capped emulation with free == total probes no baseline at all — a headless card reads
+        // the same — and lands on the measured floor, not on the bare margin.
+        let capped = ladder_reserve_gb(VramBudget {
+            free_gb: 10.0,
+            total_gb: 10.0,
+        });
+        assert_eq!(capped, floor + LADDER_RESERVE_MARGIN_GB);
+        // A reclaimable-credited budget can read free above total; that is a zero baseline too
+        // (and the reason the reserve is derived from the RAW probe — see
+        // `candle_memory_strategy::tests::the_reserve_is_derived_from_the_raw_probe_not_the_credited_budget`).
+        let credited = ladder_reserve_gb(VramBudget {
+            free_gb: 10.5,
+            total_gb: 10.0,
+        });
+        assert_eq!(credited, floor + LADDER_RESERVE_MARGIN_GB);
+    }
+
+    /// sc-22664 review D3: `MEASURED_PRELOAD_RESIDENCY_BYTES` is read back off the retained
+    /// candle record it cites — the `preLoadDeviceUsed` diagnostic of
+    /// `imc-06fbd2ff6dcba95f8555` in the packaged calibration evidence — so the floor is measured
+    /// evidence, not an asserted number. MUTATION: changing the constant by one byte, or pointing
+    /// the doc at a record without that diagnostic, reds this.
+    #[test]
+    fn ladder_reserve_reads_the_measured_pre_load_residency_off_the_retained_record() {
+        let bundle: Value = serde_json::from_str(
+            sceneworks_core::memory_calibration::PACKAGED_MEMORY_CALIBRATION_EVIDENCE,
+        )
+        .expect("packaged calibration evidence parses");
+        let records = bundle["records"]
+            .as_array()
+            .expect("the evidence bundle carries records");
+        let record = records
+            .iter()
+            .find(|record| record["id"] == "imc-06fbd2ff6dcba95f8555")
+            .expect("the cited candle record is retained");
+        assert_eq!(record["backend"], "candle");
+        let measurements = record["diagnostics"]["measurements"]
+            .as_array()
+            .expect("the record carries harness diagnostics");
+        let pre_load = measurements
+            .iter()
+            .find(|measurement| measurement["name"] == "preLoadDeviceUsed")
+            .expect("the record measured the pre-load device residency");
+        assert_eq!(pre_load["unit"], "bytes");
+        assert_eq!(
+            pre_load["value"].as_u64(),
+            Some(MEASURED_PRELOAD_RESIDENCY_BYTES),
+            "the reserve floor must be the record's own pre-load residency"
+        );
+        // Every candle record that measured a pre-load residency agrees with the floor — a later
+        // capture on this box that reads higher must move the constant, not silently under-charge.
+        for record in records
+            .iter()
+            .filter(|record| record["backend"] == "candle")
+        {
+            let Some(measurements) = record["diagnostics"]["measurements"].as_array() else {
+                continue;
+            };
+            for measurement in measurements
+                .iter()
+                .filter(|measurement| measurement["name"] == "preLoadDeviceUsed")
+            {
+                assert!(
+                    measurement["value"].as_u64().unwrap_or(u64::MAX)
+                        <= MEASURED_PRELOAD_RESIDENCY_BYTES,
+                    "{} measured a pre-load residency above the floor",
+                    record["id"]
+                );
+            }
+        }
+        assert_eq!(
+            MEASURED_PRELOAD_RESIDENCY_GB,
+            MEASURED_PRELOAD_RESIDENCY_BYTES as f64 / BYTES_PER_GIB
         );
     }
 
