@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { execFile as execFileCallback } from "node:child_process";
 import { createHash } from "node:crypto";
-import { lstat, mkdir, mkdtemp, readFile, rename, symlink, writeFile } from "node:fs/promises";
+import { chmod, lstat, mkdir, mkdtemp, readFile, realpath, rename, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { Readable } from "node:stream";
@@ -9,6 +9,7 @@ import test from "node:test";
 import { promisify } from "node:util";
 import { fileSha256 } from "./lib/file-sha256.mjs";
 import { terminalTreeEntry, terminalTreeSha256 } from "./lib/terminal-tree-identity.mjs";
+import { removeStarVectorMacMetricsTree, selectStarVectorMacPython, validateStarVectorMacVenv } from "./select-starvector-macos-python.mjs";
 import { assemblePreflight, assembleWeights, downloadExact, installCheckout, tree } from "./starvector-terminal-provision.mjs";
 import { validateTerminalServiceClosure } from "./starvector-terminal-readiness.mjs";
 
@@ -17,6 +18,7 @@ const digest = (value) => createHash("sha256").update(value).digest("hex");
 const workflow = await readFile(".github/workflows/starvector-terminal-provision.yml", "utf8");
 const windowsWorkflow = await readFile(".github/workflows/desktop-windows.yml", "utf8");
 const windowsWheelWorkflow = await readFile(".github/workflows/starvector-metrics-windows.yml", "utf8");
+const macosPythonSelector = await readFile("scripts/select-starvector-macos-python.mjs", "utf8");
 const windowsPythonProbe = await readFile("scripts/select-starvector-windows-python.ps1", "utf8");
 const windowsPythonProbeTest = await readFile("scripts/select-starvector-windows-python.test.ps1", "utf8");
 const windowsWheelVerification = await readFile("scripts/verify-starvector-windows-metric-wheels.ps1", "utf8");
@@ -76,6 +78,30 @@ test("provision workflow is dispatch-only and never runs a model, service, campa
   assert.equal((workflow.match(/Upload .* provisioning readiness even on failure/g) ?? []).length, 2);
   assert.match(workflow, /STARVECTOR_PROMPT_PROVIDER: candle_flux/);
   assert.doesNotMatch(workflow, /STARVECTOR_PROMPT_PROVIDER: flux_diffusers/);
+});
+
+function assertWindowsCorpusCompilesWithoutInheritedRustcWrapper(workflowSource) {
+  const jobStart = workflowSource.indexOf("  provision-windows:");
+  const stepStart = workflowSource.indexOf("- name: Materialize the exact pinned 120-row corpus", jobStart);
+  const stepEnd = workflowSource.indexOf("- name: Read-only readiness validation", stepStart);
+  assert.ok(jobStart >= 0 && stepStart > jobStart && stepEnd > stepStart);
+  const step = workflowSource.slice(stepStart, stepEnd);
+  const clearWrapper = step.indexOf("Remove-Item Env:RUSTC_WRAPPER -ErrorAction SilentlyContinue");
+  const cargo = step.indexOf("cargo run --release --locked -p sceneworks-worker --bin starvector_terminal_corpus");
+  assert.equal((step.match(/Remove-Item Env:RUSTC_WRAPPER -ErrorAction SilentlyContinue/g) ?? []).length, 1);
+  assert.ok(clearWrapper >= 0 && clearWrapper < cargo);
+}
+
+test("Windows corpus compilation cannot inherit the persistent runner's sccache wrapper", () => {
+  assertWindowsCorpusCompilesWithoutInheritedRustcWrapper(workflow);
+  for (const [label, mutation] of [
+    ["missing wrapper clear", (value) => value.replace("Remove-Item Env:RUSTC_WRAPPER -ErrorAction SilentlyContinue", "Write-Host $env:RUSTC_WRAPPER")],
+    ["wrapper cleared after Cargo", (value) => value.replace(/(\s+)(Remove-Item Env:RUSTC_WRAPPER -ErrorAction SilentlyContinue)(\s+)(cargo run --release --locked -p sceneworks-worker --bin starvector_terminal_corpus[^\n]+)/, "$1$4$3$2")],
+  ]) {
+    const changed = mutation(workflow);
+    assert.notEqual(changed, workflow, `${label} mutation must alter the workflow fixture`);
+    assert.throws(() => assertWindowsCorpusCompilesWithoutInheritedRustcWrapper(changed), { name: "AssertionError" }, label);
+  }
 });
 
 function assertWindowsMetricsPythonContract(step) {
@@ -153,14 +179,26 @@ function assertWindowsPythonProbeContract(source) {
 }
 
 test("terminal metrics provisioning fixes CPython 3.12 and wheel-only installation on both hosts", () => {
-  assert.equal((workflow.match(/uses: actions\/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97/g) ?? []).length, 2);
-  assert.equal((workflow.match(/python-version: "3\.12"/g) ?? []).length, 2);
-  assert.equal((workflow.match(/update-environment: false/g) ?? []).length, 2);
-  assert.match(workflow, /Set up supported CPython 3\.12 arm64 for terminal metrics[\s\S]*?architecture: arm64/);
+  assert.equal((workflow.match(/uses: actions\/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97/g) ?? []).length, 1);
+  assert.equal((workflow.match(/python-version: "3\.12"/g) ?? []).length, 1);
+  assert.equal((workflow.match(/update-environment: false/g) ?? []).length, 1);
+  assert.match(workflow, /Select supported existing CPython 3\.12 arm64 for terminal metrics/);
+  assert.match(workflow, /select-starvector-macos-python\.mjs select \/opt\/homebrew\/bin\/python3\.12 \/usr\/local\/bin\/python3\.12/);
+  assert.match(workflow, /select-starvector-macos-python\.mjs verify-venv "\$STARVECTOR_METRICS_BOOTSTRAP_PYTHON" "\$STARVECTOR_TERMINAL_ROOT\/metrics\/bin\/python"/);
+  assert.match(workflow, /remove-metrics-tree "\$STARVECTOR_TERMINAL_ROOT\/metrics" \/Users\/Shared\/SceneWorks\/starvector-terminal\/metrics/);
+  assert.doesNotMatch(workflow.slice(workflow.indexOf("  provision-macos:"), workflow.indexOf("  provision-windows:")), /actions\/setup-python|RUNNER_TOOL_CACHE|AGENT_TOOLSDIRECTORY|\/Users\/runner\/hostedtoolcache/);
   assert.match(workflow, /Set up supported CPython 3\.12 x64 for terminal metrics[\s\S]*?architecture: x64/);
   assert.equal((workflow.match(/pip install --disable-pip-version-check --only-binary=:all: --retries 5 --timeout 60/g) ?? []).length, 2);
   assert.doesNotMatch(workflow, /pip install --disable-pip-version-check (?!.*--only-binary=:all:)/);
-  assert.match(workflow, /sys\.version_info\[:2\] == \(3, 12\)[^\n]*platform\.machine\(\)\.lower\(\) in \{"arm64", "aarch64"\}/);
+  assert.match(macosPythonSelector, /identity\.version\[1\] === 12/);
+  assert.match(macosPythonSelector, /identity\.implementation === "CPython"/);
+  assert.match(macosPythonSelector, /\["arm64", "aarch64"\]\.includes\(identity\.architecture\.toLowerCase\(\)\)/);
+  assert.match(macosPythonSelector, /identity\.pointer_bits === 64/);
+  assert.match(macosPythonSelector, /"prefix":sys\.prefix,"base_prefix":sys\.base_prefix/);
+  assert.match(macosPythonSelector, /spawnSync\(path\.resolve\(value\)/);
+  assert.doesNotMatch(macosPythonSelector, /spawnSync\(executable,/);
+  assert.match(macosPythonSelector, /canonicalObservedPrefix !== canonicalExpectedPrefix \|\| canonicalObservedPrefix === canonicalBasePrefix/);
+  assert.match(macosPythonSelector, /if \(item\.isSymbolicLink\(\)\) \{\s+unlinkSync\(frame\.file\);/);
 
   const start = workflow.indexOf("- name: Provision pinned metric runtime and official checkpoints", workflow.indexOf("  provision-windows:"));
   const end = workflow.indexOf("- name: Materialize the exact pinned 120-row corpus", start);
@@ -172,6 +210,86 @@ test("terminal metrics provisioning fixes CPython 3.12 and wheel-only installati
   for (const rejected of ["python.exe", "C:python.exe", "\\python.exe", "\\\\server\\share\\python.exe", "C:/Python312/python.exe", "C:\\Python312\\py\nthon.exe", 'C:\\Python312\\py"thon.exe']) {
     assert.equal(isSafeDriveAbsolute(rejected), false, rejected);
   }
+});
+
+test("macOS Python selection ignores unwritable action caches and verifies the exact venv base and micro", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "starvector-macos-python-"));
+  const writeFakePython = async (name, identity, exitCode = 0) => {
+    const executable = path.join(root, name);
+    await mkdir(path.dirname(executable), { recursive: true });
+    const payload = JSON.stringify({
+      executable,
+      base_executable: identity.base_executable ?? executable,
+      prefix: identity.prefix ?? path.dirname(path.dirname(executable)),
+      base_prefix: identity.base_prefix ?? root,
+      ...identity,
+    });
+    await writeFile(executable, `#!/bin/sh\nprintf '%s\\n' '${payload}'\nexit ${exitCode}\n`);
+    await chmod(executable, 0o755);
+    return executable;
+  };
+  const invalid = await writeFakePython("python-invalid", { version: [3, 14, 1], implementation: "CPython", architecture: "arm64", pointer_bits: 64 });
+  const bootstrap = await writeFakePython("python-valid", { prefix: root, base_prefix: root, version: [3, 12, 13], implementation: "CPython", architecture: "arm64", pointer_bits: 64 });
+  const venv = await writeFakePython("metrics/bin/python", { base_executable: bootstrap, version: [3, 12, 13], implementation: "CPython", architecture: "arm64", pointer_bits: 64 });
+  const previousRunnerCache = process.env.RUNNER_TOOL_CACHE;
+  const previousAgentTools = process.env.AGENT_TOOLSDIRECTORY;
+  process.env.RUNNER_TOOL_CACHE = "/root/unwritable-hostedtoolcache";
+  process.env.AGENT_TOOLSDIRECTORY = "/root/unwritable-agent-tools";
+  try {
+    assert.equal(selectStarVectorMacPython([invalid, bootstrap]).executable, await realpath(bootstrap));
+    assert.equal(validateStarVectorMacVenv(bootstrap, venv).venv.identity.version[2], 13);
+  } finally {
+    if (previousRunnerCache === undefined) delete process.env.RUNNER_TOOL_CACHE; else process.env.RUNNER_TOOL_CACHE = previousRunnerCache;
+    if (previousAgentTools === undefined) delete process.env.AGENT_TOOLSDIRECTORY; else process.env.AGENT_TOOLSDIRECTORY = previousAgentTools;
+  }
+  assert.throws(() => validateStarVectorMacVenv(bootstrap, bootstrap), /not an isolated venv/);
+  const wrongMicro = await writeFakePython("wrong-metrics/bin/python", { base_executable: bootstrap, version: [3, 12, 12], implementation: "CPython", architecture: "arm64", pointer_bits: 64 });
+  assert.throws(() => validateStarVectorMacVenv(bootstrap, wrongMicro), /selected exact CPython/);
+  await chmod(bootstrap, 0o644);
+  assert.throws(() => selectStarVectorMacPython([bootstrap]), /existing absolute CPython/);
+});
+
+function selectLocalMacPythonOrSkip(context) {
+  try {
+    return selectStarVectorMacPython(["/opt/homebrew/bin/python3.12", "/usr/local/bin/python3.12"]);
+  } catch {
+    context.skip("requires a local CPython 3.12 arm64 interpreter");
+    return null;
+  }
+}
+
+test("macOS venv validation executes the supplied venv path and rejects the bootstrap itself", async (context) => {
+  const bootstrap = selectLocalMacPythonOrSkip(context);
+  if (!bootstrap) return;
+  const root = await mkdtemp(path.join(tmpdir(), "starvector-real-macos-venv-"));
+  const metrics = path.join(root, "metrics");
+  await execFile(bootstrap.executable, ["-m", "venv", metrics]);
+  const validated = validateStarVectorMacVenv(bootstrap.executable, path.join(metrics, "bin", "python"));
+  assert.equal(await realpath(validated.venv.identity.prefix), await realpath(metrics));
+  assert.notEqual(await realpath(validated.venv.identity.prefix), await realpath(validated.venv.identity.base_prefix));
+  assert.throws(() => validateStarVectorMacVenv(bootstrap.executable, bootstrap.executable), /not an isolated venv/);
+  removeStarVectorMacMetricsTree(metrics, metrics);
+});
+
+test("macOS stale metrics cleanup removes real venv symlinks without traversing external targets", async (context) => {
+  const bootstrap = selectLocalMacPythonOrSkip(context);
+  if (!bootstrap) return;
+  const root = await mkdtemp(path.join(tmpdir(), "starvector-macos-metrics-"));
+  const metrics = path.join(root, "metrics");
+  const outside = path.join(root, "outside");
+  await execFile(bootstrap.executable, ["-m", "venv", metrics]);
+  await mkdir(outside, { recursive: true });
+  await writeFile(path.join(outside, "sentinel.txt"), "outside");
+  assert.throws(() => removeStarVectorMacMetricsTree(metrics, path.join(root, "wrong")), /exact workflow-owned terminal root/);
+  await symlink(outside, path.join(metrics, "external-link"));
+  removeStarVectorMacMetricsTree(metrics, metrics);
+  assert.equal(await lstat(metrics).catch((error) => error.code === "ENOENT" ? null : Promise.reject(error)), null);
+  assert.equal(await readFile(path.join(outside, "sentinel.txt"), "utf8"), "outside");
+
+  const rootSymlink = path.join(root, "metrics-root-link");
+  await symlink(outside, rootSymlink);
+  assert.throws(() => removeStarVectorMacMetricsTree(rootSymlink, rootSymlink), /root is a symlink|containing a symlink/);
+  assert.equal(await readFile(path.join(outside, "sentinel.txt"), "utf8"), "outside");
 });
 
 test("Windows Python probes capture native stderr without invoking through PowerShell", () => {

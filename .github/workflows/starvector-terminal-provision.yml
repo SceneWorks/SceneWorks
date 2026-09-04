@@ -110,21 +110,20 @@ jobs:
       - name: Assemble durable model and product-service closure
         run: |
           node scripts/starvector-terminal-provision.mjs weights "$STARVECTOR_TERMINAL_ROOT" "$STARVECTOR_APP_DATA_SOURCE" "$STARVECTOR_HF_HOME_SOURCE" "$STARVECTOR_PROMPT_PROVIDER" "$STARVECTOR_PROMPT_MODEL" "$STARVECTOR_PROMPT_REVISION"
-      - name: Set up supported CPython 3.12 arm64 for terminal metrics
+      - name: Select supported existing CPython 3.12 arm64 for terminal metrics
         id: metrics-python
-        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
-        with:
-          python-version: "3.12"
-          architecture: arm64
-          check-latest: false
-          update-environment: false
+        run: |
+          bootstrap_python="$(node scripts/select-starvector-macos-python.mjs select /opt/homebrew/bin/python3.12 /usr/local/bin/python3.12)"
+          printf 'python-path=%s\n' "$bootstrap_python" >> "$GITHUB_OUTPUT"
       - name: Provision pinned metric runtime and official checkpoints
         env:
           STARVECTOR_METRICS_BOOTSTRAP_PYTHON: ${{ steps.metrics-python.outputs.python-path }}
         run: |
-          "$STARVECTOR_METRICS_BOOTSTRAP_PYTHON" -c 'import platform,struct,sys; assert sys.version_info[:2] == (3, 12) and platform.python_implementation() == "CPython" and platform.machine().lower() in {"arm64", "aarch64"} and struct.calcsize("P") * 8 == 64'
-          test -x "$STARVECTOR_TERMINAL_ROOT/metrics/bin/python" || "$STARVECTOR_METRICS_BOOTSTRAP_PYTHON" -m venv "$STARVECTOR_TERMINAL_ROOT/metrics"
-          "$STARVECTOR_TERMINAL_ROOT/metrics/bin/python" -c 'import platform,struct,sys; assert sys.version_info[:2] == (3, 12) and platform.python_implementation() == "CPython" and platform.machine().lower() in {"arm64", "aarch64"} and struct.calcsize("P") * 8 == 64'
+          if ! node scripts/select-starvector-macos-python.mjs verify-venv "$STARVECTOR_METRICS_BOOTSTRAP_PYTHON" "$STARVECTOR_TERMINAL_ROOT/metrics/bin/python"; then
+            node scripts/select-starvector-macos-python.mjs remove-metrics-tree "$STARVECTOR_TERMINAL_ROOT/metrics" /Users/Shared/SceneWorks/starvector-terminal/metrics
+            "$STARVECTOR_METRICS_BOOTSTRAP_PYTHON" -m venv "$STARVECTOR_TERMINAL_ROOT/metrics"
+          fi
+          node scripts/select-starvector-macos-python.mjs verify-venv "$STARVECTOR_METRICS_BOOTSTRAP_PYTHON" "$STARVECTOR_TERMINAL_ROOT/metrics/bin/python"
           "$STARVECTOR_TERMINAL_ROOT/metrics/bin/python" -m pip install --disable-pip-version-check --only-binary=:all: --retries 5 --timeout 60 numpy==2.2.6 scikit-image==0.25.2 lpips==0.1.4 torch==2.7.0 torchvision==0.22.0 Pillow==11.3.0 open-clip-torch==3.1.0
           node scripts/starvector-terminal-provision.mjs download https://raw.githubusercontent.com/richzhang/PerceptualSimilarity/master/lpips/weights/v0.1/alex.pth "$STARVECTOR_TERMINAL_ROOT/metrics/checkpoints/lpips-v0.1-alex.pth" df73285e35b22355a2df87cdb6b70b343713b667eddbda73e1977e0c860835c0
           node scripts/starvector-terminal-provision.mjs download https://download.pytorch.org/models/alexnet-owt-7be5be79.pth "$STARVECTOR_TERMINAL_ROOT/metrics/checkpoints/alexnet-owt-7be5be79.pth" 7be5be791159472b1fbf3c69796f7cb30dca7ad8466c2df70058c37116cdee02
@@ -243,6 +242,9 @@ jobs:
           node scripts/starvector-terminal-provision.mjs download https://huggingface.co/datasets/starvector/svg-fonts-simple/resolve/453c739ea13ad2685127f721c333f14d99485299/data/test-00000-of-00001.parquet "$env:RUNNER_TEMP\starvector-parquet\source-3.parquet" 86db32ae45896a18b938baba088b69d797ae2d5f6d3d79742753a0e2ea89d86d
           if (-not (Test-Path "$env:STARVECTOR_TERMINAL_ROOT\corpora\starvector-terminal-v1")) {
             $inventory = (Get-FileHash -Algorithm SHA256 "$env:STARVECTOR_TERMINAL_ROOT\weights\inventories\prompt-raster-inventory-v1.json").Hash.ToLowerInvariant()
+            # The persistent runner exports sccache through RUSTC_WRAPPER. Compile this
+            # deterministic provisioning artifact directly so stale daemon state cannot abort it.
+            Remove-Item Env:RUSTC_WRAPPER -ErrorAction SilentlyContinue
             cargo run --release --locked -p sceneworks-worker --bin starvector_terminal_corpus -- "$env:STARVECTOR_TERMINAL_ROOT\inference\release\starvector-terminal-corpus-v1.json" "$env:RUNNER_TEMP\starvector-parquet" "$env:STARVECTOR_TERMINAL_ROOT\corpora\starvector-terminal-v1" $env:STARVECTOR_INFERENCE_REVISION $env:STARVECTOR_PROMPT_PROVIDER $env:STARVECTOR_PROMPT_MODEL $env:STARVECTOR_PROMPT_REVISION $inventory
           }
       - name: Read-only readiness validation
