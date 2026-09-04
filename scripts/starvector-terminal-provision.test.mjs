@@ -21,6 +21,8 @@ const windowsWheelWorkflow = await readFile(".github/workflows/starvector-metric
 const macosPythonSelector = await readFile("scripts/select-starvector-macos-python.mjs", "utf8");
 const windowsPythonProbe = await readFile("scripts/select-starvector-windows-python.ps1", "utf8");
 const windowsPythonProbeTest = await readFile("scripts/select-starvector-windows-python.test.ps1", "utf8");
+const windowsPythonProvision = await readFile("scripts/provision-starvector-windows-python.ps1", "utf8");
+const windowsPythonProvisionTest = await readFile("scripts/provision-starvector-windows-python.test.ps1", "utf8");
 const windowsWheelVerification = await readFile("scripts/verify-starvector-windows-metric-wheels.ps1", "utf8");
 
 test("file and tree identities stream exact bytes with bounded reads and portable ordering", async () => {
@@ -106,8 +108,8 @@ test("Windows corpus compilation cannot inherit the persistent runner's sccache 
 
 function assertWindowsMetricsPythonContract(step) {
   assert.doesNotMatch(step, /\bpy\s+-3\.11\b/);
-  assert.match(step, /select-starvector-windows-python\.ps1/);
-  assert.match(step, /\$bootstrap = Select-StarVectorBootstrapPython -CandidatePaths @\(\$env:STARVECTOR_METRICS_BOOTSTRAP_PYTHON\)/);
+  assert.match(step, /provision-starvector-windows-python\.ps1/);
+  assert.match(step, /\$bootstrap = Select-StarVectorBootstrapPython -CandidatePaths @\(\$bootstrapPython\) -ExpectedVersion @\(3, 12, 10\)/);
   assert.match(step, /\$bootstrapPython = \$bootstrap\.Executable/);
   assert.match(step, /\$bootstrapIdentity = \$bootstrap\.Identity/);
   assert.doesNotMatch(step, /Get-Command python\.exe/);
@@ -119,7 +121,7 @@ function assertWindowsMetricsPythonContract(step) {
   assert.match(step, /\[int\]\$existingIdentity\.version\[2\] -ne \[int\]\$bootstrapIdentity\.version\[2\]/);
   assert.match(step, /if \(\$rebuildMetricsVenv\) \{\s+Remove-StarVectorWindowsDirectoryTree -TargetRoot \$metricsRoot -AllowedRoot 'D:\\sceneworks-terminal\\metrics'/);
   assert.doesNotMatch(step, /Remove-Item[^\n]*-Recurse/);
-  assert.match(step, /& \$bootstrapPython -m venv \$metricsRoot/);
+  assert.match(step, /& \$bootstrapPython -m venv --copies \$metricsRoot/);
   assert.match(step, /if \(\$LASTEXITCODE -ne 0\) \{ throw 'failed to create the terminal metrics venv/);
   assert.match(step, /Test-Path \$metricsPython -PathType Leaf/);
   assert.match(step, /\$venvProbe = Invoke-StarVectorPythonIdentityProbe -Executable \$metricsPython -IncludeBaseExecutable/);
@@ -142,7 +144,7 @@ function assertWindowsPythonProbeContract(source) {
   assert.match(source, /function Remove-StarVectorWindowsDirectoryTree/);
   assert.match(source, /OrdinalIgnoreCase\.Equals\(\$canonicalTarget, \$canonicalAllowed\)/);
   assert.match(source, /New-Object System\.Collections\.Stack/);
-  assert.equal((source.match(/Attributes -band \[IO\.FileAttributes\]::ReparsePoint/g) ?? []).length, 2);
+  assert.ok((source.match(/Attributes -band \[IO\.FileAttributes\]::ReparsePoint/g) ?? []).length >= 4);
   assert.match(source, /Get-ChildItem -LiteralPath \$item\.FullName -Force -ErrorAction Stop/);
   assert.match(source, /Remove-Item -LiteralPath \$item\.FullName -Force -ErrorAction Stop/);
   assert.doesNotMatch(source, /Remove-Item[^\n]*-Recurse/);
@@ -151,6 +153,7 @@ function assertWindowsPythonProbeContract(source) {
   assert.match(source, /\$text -notmatch '\^\[A-Za-z\]:\\\\'/);
   assert.match(source, /\[IO\.Path\]::GetFullPath\(\$text\)/);
   assert.match(source, /Test-Path -LiteralPath \$full -PathType Leaf/);
+  assert.match(source, /Assert-StarVectorWindowsPathComponents -Path \$full -LeafType File/);
   assert.match(source, /New-Object System\.Diagnostics\.ProcessStartInfo/);
   assert.match(source, /\$startInfo\.FileName = \$Executable/);
   assert.match(source, /\$startInfo\.UseShellExecute = \$false/);
@@ -159,18 +162,21 @@ function assertWindowsPythonProbeContract(source) {
   assert.match(source, /\$startInfo\.CreateNoWindow = \$true/);
   assert.match(source, /\$stdoutTask = \$process\.StandardOutput\.ReadToEndAsync\(\)/);
   assert.match(source, /\$stderrTask = \$process\.StandardError\.ReadToEndAsync\(\)/);
-  assert.match(source, /\$process\.WaitForExit\(\)/);
+  assert.match(source, /\$process\.WaitForExit\(\$TimeoutMilliseconds\)/);
+  assert.match(source, /\$process\.Kill\(\)/);
   assert.match(source, /ExitCode = \$process\.ExitCode/);
   assert.match(source, /StdOut = \$stdoutTask\.Result/);
   assert.match(source, /StdErr = \$stderrTask\.Result/);
+  assert.match(source, /import ensurepip,json,pip,platform,struct,sys,venv/);
   assert.match(source, /base_executable'':getattr\(sys,''_base_executable'',None\)/);
   assert.match(source, /platform\.python_implementation\(\)/);
   assert.match(source, /platform\.machine\(\)/);
   assert.match(source, /struct\.calcsize\(''P''\)\*8/);
   assert.match(source, /if \(\$probe\.ExitCode -ne 0\) \{ continue \}/);
   assert.match(source, /\$probe\.StdOut \| ConvertFrom-Json -ErrorAction Stop/);
-  assert.match(source, /\[int\]\$identity\.version\[1\] -eq 12/);
-  assert.doesNotMatch(source, /\[int\]\$identity\.version\[1\] -ge 12/);
+  assert.match(source, /\[int\]\$identity\.version\[1\] -eq \$ExpectedVersion\[1\]/);
+  assert.match(source, /\$ExpectedVersion\.Count -eq 2 -or \[int\]\$identity\.version\[2\] -eq \$ExpectedVersion\[2\]/);
+  assert.doesNotMatch(source, /\[int\]\$identity\.version\[1\] -ge \$ExpectedVersion\[1\]/);
   assert.match(source, /\[string\]\$identity\.implementation -ceq 'CPython'/);
   assert.match(source, /\[string\]\$identity\.architecture -ceq 'AMD64'/);
   assert.match(source, /\[int\]\$identity\.pointer_bits -eq 64/);
@@ -178,16 +184,121 @@ function assertWindowsPythonProbeContract(source) {
   assert.doesNotMatch(source, /& \$candidate|Invoke-Expression|Start-Process/);
 }
 
+function assertWindowsPortablePythonContract(step, source, testSource) {
+  assert.match(source, /https:\/\/api\.nuget\.org\/v3-flatcontainer\/python\/3\.12\.10\/python\.3\.12\.10\.nupkg/);
+  assert.match(source, /0eb85c2dfccccf1b17352de4c397f69194035b7d37149eacc16f1147d93de3b8/);
+  assert.match(source, /bbda4dcf688a94211b62d50968a91b38f305d0b8d1ecd90269f74a86f8a0a4fcebb7ca162a0753a47691eb3df0c964009bd3d8194c6fd19afae8d5fd01e1cc0f/);
+  assert.match(source, /StarVectorWindowsPythonPackageBytes = 14515433/);
+  assert.match(source, /4d6f5f81a4bca11191c4c7c6b43632694d0a4ce74e068619d8fdc161d469859a/);
+  assert.match(source, /9a0e3435aaa680d868150f87ab3e388ad2eebc22f87e036155c7b4eda8cd2120/);
+  assert.match(source, /StarVectorWindowsPythonMaximumPackageBytes = 20MB/);
+  assert.match(source, /StarVectorWindowsPythonMaximumExpandedBytes = 80MB/);
+  assert.match(source, /StarVectorWindowsPythonMaximumArchiveEntries = 1400/);
+  assert.match(source, /function Invoke-StarVectorWindowsPythonLock/);
+  assert.match(source, /\$stream = \[IO\.File\]::Open\(\$canonicalLock, \[IO\.FileMode\]::OpenOrCreate, \[IO\.FileAccess\]::ReadWrite, \[IO\.FileShare\]::None\)/);
+  assert.match(source, /timed out waiting for the exclusive portable Python lock/);
+  assert.match(source, /function Save-StarVectorWindowsPythonPackage/);
+  assert.match(source, /\$handler\.AllowAutoRedirect = \$false/);
+  assert.match(source, /\$client\.Timeout = \[TimeSpan\]::FromSeconds\(\$TimeoutSeconds\)/);
+  assert.match(source, /ContentLength -ne \$ExpectedBytes/);
+  assert.match(source, /\$bytes\.LongLength -ne \$ExpectedBytes/);
+  assert.match(source, /Get-StarVectorSha256 \$destinationPath/);
+  assert.match(source, /Get-StarVectorSha512 \$destinationPath/);
+  assert.match(source, /\$entryCount -gt \$MaximumEntries/);
+  assert.match(source, /\$expandedBytes -gt \$MaximumExpandedBytes/);
+  assert.match(source, /path escapes its staging root/);
+  assert.match(source, /Add-Type -AssemblyName System\.IO\.Compression\.FileSystem/);
+  assert.match(source, /\[IO\.Compression\.ZipFile\]::OpenRead\(\$ArchivePath\)/);
+  assert.match(source, /Python Software Foundation/);
+  assert.match(source, /https:\/\/github\.com\/Python\/CPython\.git/);
+  assert.match(source, /0cc8128/);
+  assert.match(source, /\.signature\.p7s/);
+  assert.match(source, /Get-StarVectorSha256 \$python\) -cne \$ExpectedPythonSha256/);
+  assert.match(source, /Get-StarVectorSha256 \$pythonDll\) -cne \$ExpectedDllSha256/);
+  assert.match(source, /Assert-StarVectorWindowsPathComponents -Path \$DestinationRoot -LeafType Directory -AllowMissingLeaf/);
+  assert.match(source, /\[IO\.Directory\]::Move\(\$stagingRoot, \$DestinationRoot\)/);
+  assert.doesNotMatch(source, /msiexec|python-3\.12\.10-amd64\.exe|HKLM:|HKCR:|choco install/i);
+
+  assert.match(step, /timeout-minutes: 70/);
+  assert.match(step, /\$pythonRoot = Join-Path \$env:STARVECTOR_TERMINAL_ROOT 'python\\cpython-3\.12\.10-x64-nuget'/);
+  assert.match(step, /\$lockPath = Join-Path \$env:STARVECTOR_TERMINAL_ROOT '\.locks\\cpython-3\.12\.10-x64-nuget\.lock'/);
+  assert.doesNotMatch(step, /\$lockPath[^\n]*python\\/);
+  assert.equal((step.match(/Invoke-StarVectorWindowsPythonLock -LockPath \$lockPath -ScriptBlock \{/g) ?? []).length, 1);
+  const lockedBody = step.match(/Invoke-StarVectorWindowsPythonLock -LockPath \$lockPath -ScriptBlock \{\n([\s\S]*?)\n          \}\s*$/)?.[1];
+  assert.ok(lockedBody, "portable Python and metric setup must remain inside the exclusive lock body");
+  const install = lockedBody.indexOf("Install-StarVectorWindowsPythonPackage");
+  const venv = lockedBody.indexOf("& $bootstrapPython -m venv --copies $metricsRoot", install);
+  const metrics = lockedBody.indexOf("starvector-terminal-provision.mjs metrics", venv);
+  assert.ok(install >= 0 && venv > install && metrics > venv);
+  assert.match(step, /Select-StarVectorBootstrapPython -CandidatePaths @\(\$bootstrapPython\) -ExpectedVersion @\(3, 12, 10\)/);
+  assert.doesNotMatch(step, /actions\/setup-python|RUNNER_TOOL_CACHE|AGENT_TOOLSDIRECTORY|GITHUB_PATH|\$env:Path\s*=|GITHUB_OUTPUT/);
+
+  assert.match(testSource, /partial setup-python installer root/);
+  assert.match(testSource, /RUNNER_TOOL_CACHE = 'D:\\actions-runner\\_work\\_tool'/);
+  assert.match(testSource, /AGENT_TOOLSDIRECTORY = 'E:\\different-runner\\_work\\_tool'/);
+  assert.match(testSource, /exclusive lock did not reject a concurrent shared-root provisioner/);
+  assert.match(testSource, /portable Python did not reject a \$junctionKind-root junction/);
+  assert.doesNotMatch(testSource, /CreateFromDirectory/);
+  assert.match(testSource, /Replace\(\[IO\.Path\]::DirectorySeparatorChar, \[IO\.Path\]::AltDirectorySeparatorChar\)/);
+  assert.match(testSource, /New-SingleEntryZip -DestinationPath \$backslashArchive -EntryName 'tools\\python\.exe'/);
+  assert.match(testSource, /archive entry with a backslash name was not rejected/);
+  assert.match(testSource, /archive entry-count limit was not enforced/);
+  assert.match(testSource, /archive expansion-size limit was not enforced/);
+  assert.match(testSource, /Install-StarVectorWindowsPythonPackage -DestinationRoot \$officialRoot/);
+  assert.match(testSource, /official portable python\.exe hash changed/);
+  assert.match(testSource, /official portable python312\.dll hash changed/);
+  assert.match(testSource, /& \$official -m venv --copies \$venvRoot/);
+  assertWindowsPortablePythonFixtureArchiveContract(testSource);
+}
+
+function assertWindowsPortablePythonFixtureArchiveContract(testSource) {
+  const compressionLoad = testSource.indexOf("Add-Type -AssemblyName System.IO.Compression\n");
+  const fileSystemLoad = testSource.indexOf("Add-Type -AssemblyName System.IO.Compression.FileSystem\n");
+  const firstArchiveConstruction = testSource.indexOf("[IO.Compression.ZipArchive]::new");
+  assert.ok(compressionLoad >= 0 && fileSystemLoad > compressionLoad && firstArchiveConstruction > fileSystemLoad);
+
+  for (const functionName of ["New-CanonicalZipFromDirectory", "New-SingleEntryZip"]) {
+    const start = testSource.indexOf(`function ${functionName} {`);
+    const nextFunction = testSource.indexOf("\nfunction ", start + 1);
+    const scriptBody = testSource.indexOf("\n$root =", start + 1);
+    const end = nextFunction >= 0 ? nextFunction : scriptBody;
+    const body = testSource.slice(start, end);
+    const streamOpen = body.indexOf("$stream = [IO.File]::Open(");
+    const guardedConstruction = body.indexOf("try {\n    $archive = [IO.Compression.ZipArchive]::new", streamOpen);
+    const archiveDispose = body.indexOf("$archive.Dispose()", guardedConstruction);
+    const streamDispose = body.indexOf("$stream.Dispose()", archiveDispose);
+    assert.ok(start >= 0 && streamOpen >= 0 && guardedConstruction > streamOpen && archiveDispose > guardedConstruction && streamDispose > archiveDispose, functionName);
+    assert.match(body, /ZipArchive\]::new\(\$stream, \[IO\.Compression\.ZipArchiveMode\]::Create, \$true\)/);
+  }
+}
+
+test("PowerShell 5.1 ZIP fixtures load their defining assembly and guard every acquired stream", () => {
+  assertWindowsPortablePythonFixtureArchiveContract(windowsPythonProvisionTest);
+  for (const [label, mutation] of [
+    ["compression assembly", (value) => value.replace("Add-Type -AssemblyName System.IO.Compression\n", "")],
+    ["guard before archive construction", (value) => value.replace("  try {\n    $archive = [IO.Compression.ZipArchive]::new($stream, [IO.Compression.ZipArchiveMode]::Create, $true)", "  $archive = [IO.Compression.ZipArchive]::new($stream, [IO.Compression.ZipArchiveMode]::Create, $true)\n  try {")],
+    ["archive disposal", (value) => value.replace("      $archive.Dispose()", "      Write-Host $archive")],
+    ["stream disposal", (value) => value.replace("    $stream.Dispose()", "    Write-Host $stream")],
+    ["outer stream ownership", (value) => value.replace("[IO.Compression.ZipArchiveMode]::Create, $true", "[IO.Compression.ZipArchiveMode]::Create, $false")],
+  ]) {
+    const changed = mutation(windowsPythonProvisionTest);
+    assert.notEqual(changed, windowsPythonProvisionTest, `${label} mutation must alter the fixture`);
+    assert.throws(() => assertWindowsPortablePythonFixtureArchiveContract(changed), { name: "AssertionError" }, label);
+  }
+});
+
 test("terminal metrics provisioning fixes CPython 3.12 and wheel-only installation on both hosts", () => {
-  assert.equal((workflow.match(/uses: actions\/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97/g) ?? []).length, 1);
-  assert.equal((workflow.match(/python-version: "3\.12"/g) ?? []).length, 1);
-  assert.equal((workflow.match(/update-environment: false/g) ?? []).length, 1);
+  assert.equal((workflow.match(/uses: actions\/setup-python@/g) ?? []).length, 0);
+  assert.equal((workflow.match(/python-version:/g) ?? []).length, 0);
+  assert.equal((workflow.match(/update-environment:/g) ?? []).length, 0);
   assert.match(workflow, /Select supported existing CPython 3\.12 arm64 for terminal metrics/);
   assert.match(workflow, /select-starvector-macos-python\.mjs select \/opt\/homebrew\/bin\/python3\.12 \/usr\/local\/bin\/python3\.12/);
   assert.match(workflow, /select-starvector-macos-python\.mjs verify-venv "\$STARVECTOR_METRICS_BOOTSTRAP_PYTHON" "\$STARVECTOR_TERMINAL_ROOT\/metrics\/bin\/python"/);
   assert.match(workflow, /remove-metrics-tree "\$STARVECTOR_TERMINAL_ROOT\/metrics" \/Users\/Shared\/SceneWorks\/starvector-terminal\/metrics/);
   assert.doesNotMatch(workflow.slice(workflow.indexOf("  provision-macos:"), workflow.indexOf("  provision-windows:")), /actions\/setup-python|RUNNER_TOOL_CACHE|AGENT_TOOLSDIRECTORY|\/Users\/runner\/hostedtoolcache/);
-  assert.match(workflow, /Set up supported CPython 3\.12 x64 for terminal metrics[\s\S]*?architecture: x64/);
+  const windowsJob = workflow.slice(workflow.indexOf("  provision-windows:"));
+  assert.doesNotMatch(windowsJob, /actions\/setup-python|RUNNER_TOOL_CACHE|AGENT_TOOLSDIRECTORY|D:\\actions-runner|cuda-windows-2/);
+  assert.match(windowsJob, /Provision exact portable CPython 3\.12\.10 x64 and terminal metrics/);
   assert.equal((workflow.match(/pip install --disable-pip-version-check --only-binary=:all: --retries 5 --timeout 60/g) ?? []).length, 2);
   assert.doesNotMatch(workflow, /pip install --disable-pip-version-check (?!.*--only-binary=:all:)/);
   assert.match(macosPythonSelector, /identity\.version\[1\] === 12/);
@@ -200,11 +311,12 @@ test("terminal metrics provisioning fixes CPython 3.12 and wheel-only installati
   assert.match(macosPythonSelector, /canonicalObservedPrefix !== canonicalExpectedPrefix \|\| canonicalObservedPrefix === canonicalBasePrefix/);
   assert.match(macosPythonSelector, /if \(item\.isSymbolicLink\(\)\) \{\s+unlinkSync\(frame\.file\);/);
 
-  const start = workflow.indexOf("- name: Provision pinned metric runtime and official checkpoints", workflow.indexOf("  provision-windows:"));
+  const start = workflow.indexOf("- name: Provision exact portable CPython 3.12.10 x64 and terminal metrics", workflow.indexOf("  provision-windows:"));
   const end = workflow.indexOf("- name: Materialize the exact pinned 120-row corpus", start);
   const step = workflow.slice(start, end);
   assert.ok(start >= 0 && end > start);
   assertWindowsMetricsPythonContract(step);
+  assertWindowsPortablePythonContract(step, windowsPythonProvision, windowsPythonProvisionTest);
   const isSafeDriveAbsolute = (value) => /^[A-Za-z]:\\/.test(value) && !/[\r\n"]/.test(value);
   assert.equal(isSafeDriveAbsolute("C:\\Python312\\python.exe"), true);
   for (const rejected of ["python.exe", "C:python.exe", "\\python.exe", "\\\\server\\share\\python.exe", "C:/Python312/python.exe", "C:\\Python312\\py\nthon.exe", 'C:\\Python312\\py"thon.exe']) {
@@ -301,9 +413,12 @@ test("Windows Python probes capture native stderr without invoking through Power
   assert.match(windowsPythonProbeTest, /04-python314\.exe/);
   assert.match(windowsPythonProbeTest, /05-python312-arm64\.exe/);
   assert.match(windowsPythonProbeTest, /06-python312-amd64\.exe/);
+  assert.match(windowsPythonProbeTest, /07-hanging-python\.exe/);
   assert.match(windowsPythonProbeTest, /Traceback from the first fake Python candidate/);
   assert.match(windowsPythonProbeTest, /Select-StarVectorBootstrapPython -CandidatePaths @\(\$bad, \$malformed, \$belowMinimum, \$newerUnsupported, \$wrongArchitecture,/);
   assert.match(windowsPythonProbeTest, /all invalid candidates must fail closed/);
+  assert.match(windowsPythonProbeTest, /exact-micro selection accepted a different CPython 3\.12 patch release/);
+  assert.match(windowsPythonProbeTest, /executable selection traversed a junction parent/);
   assert.match(windowsPythonProbeTest, /ConvertTo-StarVectorPythonDistributionName 'Open\.CLIP_Torch'/);
   assert.match(windowsPythonProbeTest, /New-Item -ItemType Junction -Path \$junction -Target \$outside/);
   assert.match(windowsPythonProbeTest, /junction refusal must preserve the outside sentinel/);
@@ -323,7 +438,9 @@ test("Windows Python probe contract rejects native-process safety mutations", ()
     ["exit status", (value) => value.replace("ExitCode = $process.ExitCode", "ExitCode = 0")],
     ["bad-candidate continuation", (value) => value.replace("if ($probe.ExitCode -ne 0) { continue }", "if ($probe.ExitCode -ne 0) { break }")],
     ["PowerShell invocation", (value) => value.replace("$probe = Invoke-StarVectorPythonIdentityProbe -Executable $canonicalCandidate", "$probe = & $candidate -c $code")],
-    ["permissive Python minor", (value) => value.replace("[int]$identity.version[1] -eq 12", "[int]$identity.version[1] -ge 12")],
+    ["missing probe timeout", (value) => value.replace("$process.WaitForExit($TimeoutMilliseconds)", "$process.WaitForExit()")],
+    ["permissive Python minor", (value) => value.replace("[int]$identity.version[1] -eq $ExpectedVersion[1]", "[int]$identity.version[1] -ge $ExpectedVersion[1]")],
+    ["ignored Python micro", (value) => value.replace("$ExpectedVersion.Count -eq 2 -or [int]$identity.version[2] -eq $ExpectedVersion[2]", "$true")],
     ["implementation identity", (value) => value.replace("[string]$identity.implementation -ceq 'CPython'", "$true")],
     ["architecture identity", (value) => value.replace("[string]$identity.architecture -ceq 'AMD64'", "$true")],
     ["pointer width", (value) => value.replace("[int]$identity.pointer_bits -eq 64", "$true")],
@@ -339,12 +456,39 @@ test("Windows Python probe contract rejects native-process safety mutations", ()
   }
 });
 
+test("portable Windows Python contract rejects provenance, bounds, lock, and path-safety mutations", () => {
+  const start = workflow.indexOf("- name: Provision exact portable CPython 3.12.10 x64 and terminal metrics", workflow.indexOf("  provision-windows:"));
+  const end = workflow.indexOf("- name: Materialize the exact pinned 120-row corpus", start);
+  const step = workflow.slice(start, end);
+  for (const [label, stepMutation, sourceMutation] of [
+    ["floating package", (value) => value, (value) => value.replace("python/3.12.10/python.3.12.10.nupkg", "python/3.12.10/python.nupkg")],
+    ["package sha256", (value) => value, (value) => value.replace("0eb85c2dfccccf1b17352de4c397f69194035b7d37149eacc16f1147d93de3b8", "0".repeat(64))],
+    ["package size", (value) => value, (value) => value.replace("StarVectorWindowsPythonPackageBytes = 14515433", "StarVectorWindowsPythonPackageBytes = 0")],
+    ["python exe hash", (value) => value, (value) => value.replace("4d6f5f81a4bca11191c4c7c6b43632694d0a4ce74e068619d8fdc161d469859a", "0".repeat(64))],
+    ["runtime dll hash", (value) => value, (value) => value.replace("9a0e3435aaa680d868150f87ab3e388ad2eebc22f87e036155c7b4eda8cd2120", "0".repeat(64))],
+    ["archive entry cap", (value) => value, (value) => value.replace("StarVectorWindowsPythonMaximumArchiveEntries = 1400", "StarVectorWindowsPythonMaximumArchiveEntries = 10000")],
+    ["expanded byte cap", (value) => value, (value) => value.replace("StarVectorWindowsPythonMaximumExpandedBytes = 80MB", "StarVectorWindowsPythonMaximumExpandedBytes = 256MB")],
+    ["redirect refusal", (value) => value, (value) => value.replace("$handler.AllowAutoRedirect = $false", "$handler.AllowAutoRedirect = $true")],
+    ["exclusive file lock", (value) => value, (value) => value.replace("[IO.FileShare]::None", "[IO.FileShare]::ReadWrite")],
+    ["destination component validation", (value) => value, (value) => value.replaceAll("Assert-StarVectorWindowsPathComponents -Path $DestinationRoot -LeafType Directory -AllowMissingLeaf", "Write-Host $DestinationRoot")],
+    ["missing workflow lock", (value) => value.replace("Invoke-StarVectorWindowsPythonLock -LockPath $lockPath -ScriptBlock {", "& {"), (value) => value],
+    ["lock inside mutable Python root", (value) => value.replace("'.locks\\cpython-3.12.10-x64-nuget.lock'", "'python\\cpython-3.12.10-x64-nuget.lock'"), (value) => value],
+    ["ambient venv links", (value) => value.replace("-m venv --copies $metricsRoot", "-m venv $metricsRoot"), (value) => value],
+    ["path mutation", (value) => value.replace("$bootstrapPython = $bootstrap.Executable", "$env:Path = \"$bootstrapPython;$env:Path\""), (value) => value],
+  ]) {
+    const changedStep = stepMutation(step);
+    const changedSource = sourceMutation(windowsPythonProvision);
+    assert.ok(changedStep !== step || changedSource !== windowsPythonProvision, `${label} mutation must alter a fixture`);
+    assert.throws(() => assertWindowsPortablePythonContract(changedStep, changedSource, windowsPythonProvisionTest), { name: "AssertionError" }, label);
+  }
+});
+
 test("Windows metrics Python contract rejects path, base-interpreter, and patch-version guard mutations", () => {
-  const start = workflow.indexOf("- name: Provision pinned metric runtime and official checkpoints", workflow.indexOf("  provision-windows:"));
+  const start = workflow.indexOf("- name: Provision exact portable CPython 3.12.10 x64 and terminal metrics", workflow.indexOf("  provision-windows:"));
   const end = workflow.indexOf("- name: Materialize the exact pinned 120-row corpus", start);
   const step = workflow.slice(start, end);
   for (const [label, mutation] of [
-    ["selection helper", (value) => value.replace("$bootstrap = Select-StarVectorBootstrapPython -CandidatePaths @($env:STARVECTOR_METRICS_BOOTSTRAP_PYTHON)", "$bootstrap = Get-Command python.exe")],
+    ["selection helper", (value) => value.replace("$bootstrap = Select-StarVectorBootstrapPython -CandidatePaths @($bootstrapPython) -ExpectedVersion @(3, 12, 10)", "$bootstrap = Get-Command python.exe")],
     ["venv captured probe", (value) => value.replace("$venvProbe = Invoke-StarVectorPythonIdentityProbe -Executable $metricsPython -IncludeBaseExecutable", "$venvProbe = & $metricsPython -c $code")],
     ["base path equality", (value) => value.replace("OrdinalIgnoreCase.Equals($bootstrapPython, $observedBasePython)", "OrdinalIgnoreCase.Equals($bootstrapPython, $bootstrapPython)")],
     ["patch version equality", (value) => value.replace("[int]$venvIdentity.version[2] -ne [int]$bootstrapIdentity.version[2]", "[int]$venvIdentity.version[2] -ne [int]$venvIdentity.version[2]")],
@@ -368,8 +512,11 @@ function assertHostedWindowsWheelContract(hostedWorkflow, verification) {
   assert.match(hostedWorkflow, /timeout-minutes: 25/);
   assert.match(hostedWorkflow, /uses: actions\/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97/);
   assert.match(hostedWorkflow, /python-version: "3\.12"[\s\S]*?architecture: x64[\s\S]*?update-environment: false/);
-  assert.equal((hostedWorkflow.match(/shell: powershell/g) ?? []).length, 2);
+  assert.equal((hostedWorkflow.match(/shell: powershell/g) ?? []).length, 3);
   assert.match(hostedWorkflow, /select-starvector-windows-python\.test\.ps1/);
+  assert.match(hostedWorkflow, /"scripts\/provision-starvector-windows-python\.ps1"/);
+  assert.match(hostedWorkflow, /"scripts\/provision-starvector-windows-python\.test\.ps1"/);
+  assert.match(hostedWorkflow, /timeout-minutes: 10\s+run: \.\\scripts\\provision-starvector-windows-python\.test\.ps1/);
   assert.match(hostedWorkflow, /"scripts\/starvector-terminal-metrics\.py"/);
   assert.match(hostedWorkflow, /STARVECTOR_METRICS_BOOTSTRAP_PYTHON: \$\{\{ steps\.metrics-python\.outputs\.python-path \}\}/);
   assert.match(hostedWorkflow, /verify-starvector-windows-metric-wheels\.ps1/);
@@ -396,6 +543,8 @@ test("hosted Windows wheel contract rejects source-distribution and ambient-inte
     ["ambient interpreter", (value) => value.replace("${{ steps.metrics-python.outputs.python-path }}", "python.exe"), (value) => value],
     ["floating minor", (value) => value.replace('python-version: "3.12"', 'python-version: ">=3.12"'), (value) => value],
     ["import surface trigger", (value) => value.replace('      - "scripts/starvector-terminal-metrics.py"\n', ''), (value) => value],
+    ["portable provision trigger", (value) => value.replace('      - "scripts/provision-starvector-windows-python.ps1"\n', ''), (value) => value],
+    ["portable provision test", (value) => value.replace("run: .\\scripts\\provision-starvector-windows-python.test.ps1", "run: Write-Host skipped"), (value) => value],
     ["source download", (value) => value, (value) => value.replace("'--only-binary=:all:', '--retries'", "'--prefer-binary', '--retries'")],
     ["online install", (value) => value, (value) => value.replace("'--no-index', '--find-links'", "'--index-url', 'https://pypi.org/simple', '--find-links'")],
     ["source archive acceptance", (value) => value, (value) => value.replace("$_.Extension -cne '.whl'", "$false")],

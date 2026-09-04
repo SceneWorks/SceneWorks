@@ -1,3 +1,62 @@
+function Assert-StarVectorWindowsPathComponents {
+  param(
+    [Parameter(Mandatory = $true)]
+    [string]$Path,
+    [ValidateSet('Any', 'File', 'Directory')]
+    [string]$LeafType = 'Any',
+    [switch]$AllowMissingLeaf
+  )
+
+  if ([string]::IsNullOrWhiteSpace($Path) -or $Path -match '[\r\n"]' -or $Path -notmatch '^[A-Za-z]:\\') {
+    throw 'expected an absolute Windows path without control characters'
+  }
+  try {
+    $canonical = [IO.Path]::GetFullPath($Path)
+    $pathRoot = [IO.Path]::GetPathRoot($canonical)
+  } catch {
+    throw 'expected a canonical absolute Windows path'
+  }
+  if ($canonical -notmatch '^[A-Za-z]:\\' -or [string]::IsNullOrWhiteSpace($pathRoot)) {
+    throw 'expected a canonical absolute Windows path'
+  }
+
+  $rootItem = Get-Item -LiteralPath $pathRoot -Force -ErrorAction Stop
+  if (-not $rootItem.PSIsContainer -or ($rootItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+    throw "path root must be a regular directory: $pathRoot"
+  }
+  $parts = @($canonical.Substring($pathRoot.Length) -split '\\' | Where-Object { -not [string]::IsNullOrEmpty($_) })
+  $current = $pathRoot
+  $missing = $false
+  for ($index = 0; $index -lt $parts.Count; $index++) {
+    $current = Join-Path $current $parts[$index]
+    $isLeaf = $index -eq ($parts.Count - 1)
+    if (-not (Test-Path -LiteralPath $current)) {
+      $missing = $true
+      continue
+    }
+    if ($missing) {
+      throw "path changed while its components were validated: $canonical"
+    }
+    $item = Get-Item -LiteralPath $current -Force -ErrorAction Stop
+    if (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+      throw "path must not traverse a reparse point: $($item.FullName)"
+    }
+    if (-not $isLeaf -and -not $item.PSIsContainer) {
+      throw "path parent must be a directory: $($item.FullName)"
+    }
+    if ($isLeaf -and $LeafType -ceq 'File' -and $item.PSIsContainer) {
+      throw "path leaf must be a regular file: $($item.FullName)"
+    }
+    if ($isLeaf -and $LeafType -ceq 'Directory' -and -not $item.PSIsContainer) {
+      throw "path leaf must be a regular directory: $($item.FullName)"
+    }
+  }
+  if ($missing -and -not $AllowMissingLeaf) {
+    throw "path does not exist: $canonical"
+  }
+  return $canonical
+}
+
 function Resolve-StarVectorWindowsExecutable {
   param([object]$Value)
 
@@ -11,6 +70,11 @@ function Resolve-StarVectorWindowsExecutable {
     return $null
   }
   if ($full -notmatch '^[A-Za-z]:\\' -or -not (Test-Path -LiteralPath $full -PathType Leaf)) {
+    return $null
+  }
+  try {
+    Assert-StarVectorWindowsPathComponents -Path $full -LeafType File | Out-Null
+  } catch {
     return $null
   }
   return $full
@@ -89,15 +153,17 @@ function Invoke-StarVectorPythonIdentityProbe {
   param(
     [Parameter(Mandatory = $true)]
     [string]$Executable,
-    [switch]$IncludeBaseExecutable
+    [switch]$IncludeBaseExecutable,
+    [ValidateRange(1, 120000)]
+    [int]$TimeoutMilliseconds = 15000
   )
 
   $startInfo = New-Object System.Diagnostics.ProcessStartInfo
   $startInfo.FileName = $Executable
   if ($IncludeBaseExecutable) {
-    $startInfo.Arguments = '-c "import json,platform,struct,sys;print(json.dumps({''executable'':sys.executable,''base_executable'':getattr(sys,''_base_executable'',None),''version'':[sys.version_info.major,sys.version_info.minor,sys.version_info.micro],''implementation'':platform.python_implementation(),''architecture'':platform.machine(),''pointer_bits'':struct.calcsize(''P'')*8}))"'
+    $startInfo.Arguments = '-c "import ensurepip,json,pip,platform,struct,sys,venv;print(json.dumps({''executable'':sys.executable,''base_executable'':getattr(sys,''_base_executable'',None),''version'':[sys.version_info.major,sys.version_info.minor,sys.version_info.micro],''implementation'':platform.python_implementation(),''architecture'':platform.machine(),''pointer_bits'':struct.calcsize(''P'')*8}))"'
   } else {
-    $startInfo.Arguments = '-c "import json,platform,struct,sys;print(json.dumps({''executable'':sys.executable,''version'':[sys.version_info.major,sys.version_info.minor,sys.version_info.micro],''implementation'':platform.python_implementation(),''architecture'':platform.machine(),''pointer_bits'':struct.calcsize(''P'')*8}))"'
+    $startInfo.Arguments = '-c "import ensurepip,json,pip,platform,struct,sys,venv;print(json.dumps({''executable'':sys.executable,''version'':[sys.version_info.major,sys.version_info.minor,sys.version_info.micro],''implementation'':platform.python_implementation(),''architecture'':platform.machine(),''pointer_bits'':struct.calcsize(''P'')*8}))"'
   }
   $startInfo.UseShellExecute = $false
   $startInfo.RedirectStandardOutput = $true
@@ -112,6 +178,11 @@ function Invoke-StarVectorPythonIdentityProbe {
     }
     $stdoutTask = $process.StandardOutput.ReadToEndAsync()
     $stderrTask = $process.StandardError.ReadToEndAsync()
+    if (-not $process.WaitForExit($TimeoutMilliseconds)) {
+      try { $process.Kill() } catch { }
+      try { $process.WaitForExit(5000) | Out-Null } catch { }
+      return [pscustomobject]@{ ExitCode = -1; StdOut = ''; StdErr = "Python identity probe exceeded $TimeoutMilliseconds ms" }
+    }
     $process.WaitForExit()
     return [pscustomobject]@{
       ExitCode = $process.ExitCode
@@ -128,7 +199,9 @@ function Invoke-StarVectorPythonIdentityProbe {
 function Select-StarVectorBootstrapPython {
   param(
     [Parameter(Mandatory = $true)]
-    [string[]]$CandidatePaths
+    [string[]]$CandidatePaths,
+    [ValidateCount(2, 3)]
+    [int[]]$ExpectedVersion = @(3, 12)
   )
 
   foreach ($candidate in $CandidatePaths) {
@@ -142,9 +215,11 @@ function Select-StarVectorBootstrapPython {
       continue
     }
     $canonicalExecutable = Resolve-StarVectorWindowsExecutable $identity.executable
-    if ($identity.version.Count -eq 3 -and
-        [int]$identity.version[0] -eq 3 -and
-        [int]$identity.version[1] -eq 12 -and
+    $versionMatches = $identity.version.Count -eq 3 -and
+      [int]$identity.version[0] -eq $ExpectedVersion[0] -and
+      [int]$identity.version[1] -eq $ExpectedVersion[1] -and
+      ($ExpectedVersion.Count -eq 2 -or [int]$identity.version[2] -eq $ExpectedVersion[2])
+    if ($versionMatches -and
         [string]$identity.implementation -ceq 'CPython' -and
         [string]$identity.architecture -ceq 'AMD64' -and
         [int]$identity.pointer_bits -eq 64 -and

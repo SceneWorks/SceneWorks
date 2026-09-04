@@ -20,6 +20,7 @@ try {
 using System;
 using System.Diagnostics;
 using System.IO;
+using System.Threading;
 
 public static class FakePython {
     public static int Main() {
@@ -31,6 +32,10 @@ public static class FakePython {
         }
         if (name.StartsWith("02-")) {
             Console.Out.WriteLine("{not-json");
+            return 0;
+        }
+        if (name.StartsWith("07-")) {
+            Thread.Sleep(30000);
             return 0;
         }
         int minor = name.StartsWith("03-") ? 11 : (name.StartsWith("04-") ? 14 : 12);
@@ -49,16 +54,21 @@ public static class FakePython {
   $newerUnsupported = Join-Path $root '04-python314.exe'
   $wrongArchitecture = Join-Path $root '05-python312-arm64.exe'
   $valid = Join-Path $root '06-python312-amd64.exe'
+  $hanging = Join-Path $root '07-hanging-python.exe'
   Copy-Item -LiteralPath $template -Destination $bad
   Copy-Item -LiteralPath $template -Destination $malformed
   Copy-Item -LiteralPath $template -Destination $belowMinimum
   Copy-Item -LiteralPath $template -Destination $newerUnsupported
   Copy-Item -LiteralPath $template -Destination $wrongArchitecture
   Copy-Item -LiteralPath $template -Destination $valid
+  Copy-Item -LiteralPath $template -Destination $hanging
 
   $badProbe = Invoke-StarVectorPythonIdentityProbe -Executable $bad
   Assert-Equal 7 $badProbe.ExitCode 'stderr-writing candidate exit code was not captured'
   Assert-True ($badProbe.StdErr -match 'Traceback') 'stderr-writing candidate stderr was not captured'
+  $hangingProbe = Invoke-StarVectorPythonIdentityProbe -Executable $hanging -TimeoutMilliseconds 100
+  Assert-Equal -1 $hangingProbe.ExitCode 'hanging identity probe was not terminated'
+  Assert-True ($hangingProbe.StdErr -match 'exceeded 100 ms') 'hanging identity probe did not report its bound'
 
   $selection = Select-StarVectorBootstrapPython -CandidatePaths @($bad, $malformed, $belowMinimum, $newerUnsupported, $wrongArchitecture, "$valid`"", $valid)
   Assert-Equal ([IO.Path]::GetFullPath($valid)) $selection.Executable 'selection did not continue to the valid Python candidate'
@@ -69,6 +79,23 @@ public static class FakePython {
   Assert-Equal 'AMD64' $selection.Identity.architecture 'selected Python architecture changed'
   Assert-Equal 64 $selection.Identity.pointer_bits 'selected Python pointer width changed'
   Assert-True ($null -eq (Resolve-StarVectorWindowsExecutable "$valid`"")) 'quoted executable path must fail closed'
+
+  $wrongMicroFailed = $false
+  try {
+    Select-StarVectorBootstrapPython -CandidatePaths @($valid) -ExpectedVersion @(3, 12, 10) | Out-Null
+  } catch {
+    $wrongMicroFailed = $_.Exception.Message -eq 'StarVector terminal metrics require the explicitly provisioned CPython 3.12 x64 interpreter'
+  }
+  Assert-True $wrongMicroFailed 'exact-micro selection accepted a different CPython 3.12 patch release'
+  Assert-Equal ([IO.Path]::GetFullPath($valid)) (Select-StarVectorBootstrapPython -CandidatePaths @($valid) -ExpectedVersion @(3, 12, 7)).Executable 'exact-micro selection rejected its pinned patch release'
+
+  $candidateJunction = Join-Path $root 'candidate-junction'
+  New-Item -ItemType Junction -Path $candidateJunction -Target $root | Out-Null
+  try {
+    Assert-True ($null -eq (Resolve-StarVectorWindowsExecutable (Join-Path $candidateJunction '06-python312-amd64.exe'))) 'executable selection traversed a junction parent'
+  } finally {
+    [IO.Directory]::Delete($candidateJunction)
+  }
 
   $allFailed = $false
   try {

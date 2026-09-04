@@ -6,6 +6,8 @@ on:
       - ".github/workflows/starvector-metrics-windows.yml"
       - ".github/workflows/starvector-terminal-provision.yml"
       - "release/starvector-terminal-metrics-lock-v1.json"
+      - "scripts/provision-starvector-windows-python.ps1"
+      - "scripts/provision-starvector-windows-python.test.ps1"
       - "scripts/select-starvector-windows-python.ps1"
       - "scripts/select-starvector-windows-python.test.ps1"
       - "scripts/starvector-terminal-provision.test.mjs"
@@ -37,6 +39,10 @@ jobs:
       - name: Reject unsupported Windows Python identities under PowerShell 5.1
         shell: powershell
         run: .\scripts\select-starvector-windows-python.test.ps1
+      - name: Verify portable CPython provisioning under PowerShell 5.1
+        shell: powershell
+        timeout-minutes: 10
+        run: .\scripts\provision-starvector-windows-python.test.ps1
       - name: Resolve and install the pinned metric closure from wheels
         shell: powershell
         env:
