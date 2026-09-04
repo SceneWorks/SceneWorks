@@ -50,11 +50,10 @@ $installArgs = @('-m', 'pip', 'install', '--disable-pip-version-check', '--no-in
 if ($LASTEXITCODE -ne 0) { throw 'the wheel-only StarVector metric closure did not install offline' }
 
 foreach ($package in $lockedPackages) {
-  $observedJson = & $venvPython -c 'import importlib.metadata,json,sys;d=importlib.metadata.distribution(sys.argv[1]);print(json.dumps({"name":d.metadata["Name"],"version":d.version}))' ([string]$package.name)
-  if ($LASTEXITCODE -ne 0) { throw "the installed StarVector metric package identity was unreadable: $($package.name)" }
-  try { $observed = ([string]$observedJson).Trim() | ConvertFrom-Json -ErrorAction Stop } catch { throw "the installed StarVector metric package identity was invalid: $($package.name)" }
-  $observedCanonicalName = ConvertTo-StarVectorPythonDistributionName ([string]$observed.name)
-  if ($observedCanonicalName -cne [string]$package.canonical_name -or [string]$observed.version -cne [string]$package.version) {
+  $observedIdentity = @(& $venvPython -c 'import importlib.metadata,sys;d=importlib.metadata.distribution(sys.argv[1]);print(d.name);print(d.version)' ([string]$package.name))
+  if ($LASTEXITCODE -ne 0 -or $observedIdentity.Count -ne 2) { throw "the installed StarVector metric package identity was unreadable: $($package.name)" }
+  $observedCanonicalName = ConvertTo-StarVectorPythonDistributionName ([string]$observedIdentity[0])
+  if ($observedCanonicalName -cne [string]$package.canonical_name -or [string]$observedIdentity[1] -cne [string]$package.version) {
     throw "the installed StarVector metric package identity drifted: $($package.name)"
   }
 }

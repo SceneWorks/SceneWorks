@@ -260,10 +260,12 @@ function assertHostedWindowsWheelContract(hostedWorkflow, verification) {
   assert.match(verification, /Where-Object \{ \$_\.Extension -cne '\.whl' \}/);
   assert.match(verification, /'pip', 'install'[\s\S]*?'--no-index'[\s\S]*?'--find-links'[\s\S]*?'--only-binary=:all:'/);
   assert.match(verification, /\$seen\.ContainsKey\(\$canonicalName\)/);
-  assert.match(verification, /importlib\.metadata\.distribution\(sys\.argv\[1\]\)/);
+  assert.match(verification, /importlib\.metadata\.distribution\(sys\.argv\[1\]\);print\(d\.name\);print\(d\.version\)/);
+  assert.doesNotMatch(verification, /json\.dumps/);
+  assert.match(verification, /\$observedIdentity\.Count -ne 2/);
   assert.match(verification, /\$observedCanonicalName = ConvertTo-StarVectorPythonDistributionName/);
   assert.match(verification, /\$observedCanonicalName -cne \[string\]\$package\.canonical_name/);
-  assert.match(verification, /\[string\]\$observed\.version -cne \[string\]\$package\.version/);
+  assert.match(verification, /\[string\]\$observedIdentity\[1\] -cne \[string\]\$package\.version/);
   assert.match(verification, /import PIL,lpips,numpy,open_clip,skimage,torch,torchvision/);
 }
 
@@ -280,6 +282,8 @@ test("hosted Windows wheel contract rejects source-distribution and ambient-inte
     ["online install", (value) => value, (value) => value.replace("'--no-index', '--find-links'", "'--index-url', 'https://pypi.org/simple', '--find-links'")],
     ["source archive acceptance", (value) => value, (value) => value.replace("$_.Extension -cne '.whl'", "$false")],
     ["canonical duplicate detection", (value) => value, (value) => value.replace("$seen.ContainsKey($canonicalName)", "$seen.ContainsKey($name)")],
+    ["JSON native-argument quoting", (value) => value, (value) => value.replace("print(d.name);print(d.version)", 'print(json.dumps({"name":d.name,"version":d.version}))')],
+    ["metadata line count", (value) => value, (value) => value.replace("$observedIdentity.Count -ne 2", "$false")],
     ["observed canonical identity", (value) => value, (value) => value.replace("$observedCanonicalName -cne [string]$package.canonical_name", "$false")],
     ["lpips import", (value) => value, (value) => value.replace(",lpips", "")],
     ["open_clip import", (value) => value, (value) => value.replace(",open_clip", "")],
