@@ -9,7 +9,7 @@ import test from "node:test";
 import { promisify } from "node:util";
 import { treeIdentity, validateCorpusAssets, validateTerminalServiceClosure } from "./starvector-terminal-readiness.mjs";
 import { terminalTreeEntry, terminalTreeSha256 } from "./lib/terminal-tree-identity.mjs";
-import { closureTreeHash, copyRegularTree, productServiceActiveStatePath, productServiceBackendEnv, productServiceBuildArgs, productServiceLogPaths, productServiceLogsIdentity, productServiceStateRoot, productServiceTaskkillArguments, stopProductService } from "./starvector-terminal-product-service.mjs";
+import { closureTreeHash, copyRegularTree, productServiceActiveStatePath, productServiceBackendEnv, productServiceBuildArgs, productServiceLogPaths, productServiceLogsIdentity, productServiceStateRoot, productServiceTaskkillArguments, relocateProductServiceLibrary, stopProductService } from "./starvector-terminal-product-service.mjs";
 
 const workflow = await readFile(".github/workflows/starvector-terminal.yml", "utf8");
 const readiness = await readFile(".github/workflows/starvector-terminal-readiness.yml", "utf8");
@@ -36,7 +36,7 @@ async function executableAlias(destination) {
   if (copied && process.platform !== "win32") await chmod(destination, 0o755);
 }
 
-async function productServiceFixture() {
+async function productServiceFixture({ tamperRelocation = false } = {}) {
   const sandbox = await mkdtemp(path.join(tmpdir(), "starvector-service-detach-"));
   const root = path.join(sandbox, "repo"), output = path.join(sandbox, "tuple"), weightsRoot = path.join(sandbox, "weights"), shimRoot = path.join(sandbox, "bin");
   await mkdir(root); await mkdir(shimRoot); await mkdir(path.join(weightsRoot, "app"), { recursive: true }); await mkdir(path.join(weightsRoot, "hf"), { recursive: true });
@@ -52,13 +52,32 @@ const path = require("node:path");
 if (path.basename(process.argv[1] ?? "") === "build") process.exit(0);
 if (process.argv.length === 1) {
   const worker = process.env.SCENEWORKS_WORKER_ONLY === "1";
+  let relocatedLibrary;
   let server;
   const timer = setInterval(() => {
     process.stdout.write((worker ? "worker" : "api") + " stdout " + process.pid + "\\n");
     process.stderr.write((worker ? "worker" : "api") + " stderr " + process.pid + "\\n");
   }, 25);
   if (!worker) {
-    server = http.createServer((_request, response) => {
+    server = http.createServer((request, response) => {
+      if (request.method === "POST" && request.url === "/api/v1/model-library/relocate") {
+        let bytes = "";
+        request.setEncoding("utf8");
+        request.on("data", (chunk) => { bytes += chunk; });
+        request.on("end", () => {
+          const body = JSON.parse(bytes);
+          if (body.path !== process.env.HF_HOME) { response.writeHead(409, { "content-type": "application/json" }); response.end(JSON.stringify({ detail: "wrong library" })); return; }
+          relocatedLibrary = path.join(body.path, "hub");
+          response.writeHead(200, { "content-type": "application/json" });
+          response.end(JSON.stringify({ adopted: true, hfHome: body.path, libraryRoot: process.env.STARVECTOR_TEST_TAMPER_RELOCATION === "1" ? path.join(path.dirname(body.path), "tampered", "hub") : relocatedLibrary }));
+        });
+        return;
+      }
+      if (request.method === "GET" && request.url === "/api/v1/model-library") {
+        response.writeHead(200, { "content-type": "application/json" });
+        response.end(JSON.stringify({ available: relocatedLibrary !== undefined, probeStatus: relocatedLibrary ? "available" : "identity_mismatch", configuredLibraryPath: path.join(process.env.HF_HOME, "hub"), expectedLibrary: relocatedLibrary ? { configuredPath: relocatedLibrary } : null }));
+        return;
+      }
       response.writeHead(200, { "content-type": "application/json" });
       response.end(JSON.stringify({ status: "ok", readiness: { status: "ready" } }));
     });
@@ -90,7 +109,7 @@ if (process.argv.length === 1) {
   };
   const manifestPath = path.join(weightsRoot, "starvector-terminal-weights-v1.json");
   await writeFile(manifestPath, JSON.stringify(manifest));
-  const cliEnv = { ...process.env, NODE_OPTIONS: `${process.env.NODE_OPTIONS ?? ""} --require="${runtime}"`.trim(), PATH: `${shimRoot}${path.delimiter}${process.env.PATH ?? ""}` };
+  const cliEnv = { ...process.env, NODE_OPTIONS: `${process.env.NODE_OPTIONS ?? ""} --require="${runtime}"`.trim(), PATH: `${shimRoot}${path.delimiter}${process.env.PATH ?? ""}`, STARVECTOR_TEST_TAMPER_RELOCATION: tamperRelocation ? "1" : "0" };
   const serviceScript = path.resolve("scripts/starvector-terminal-product-service.mjs");
   return { sandbox, root, output, weightsRoot, manifest, manifestPath, cliEnv, serviceScript };
 }
@@ -192,6 +211,12 @@ test("product service start CLI exits while durable-log services remain alive an
     await runProductServiceCli(fixture, "start", port);
     record = JSON.parse(await readFile(path.join(fixture.output, "product-service-provenance.json"), "utf8"));
     assertPidsRunning(record);
+    assert.deepEqual(record.offline.library_relocation, {
+      adopted: true,
+      hf_home: path.relative(fixture.output, path.join(productServiceStateRoot(fixture.output), "hf")),
+      library_root: path.relative(fixture.output, path.join(productServiceStateRoot(fixture.output), "hf", "hub")),
+      probe_status: "available",
+    });
     const logPaths = productServiceLogPaths(fixture.output);
     assert.deepEqual(record.logs, Object.fromEntries(Object.entries(logPaths).map(([name, file]) => [name, path.relative(fixture.output, file)])));
     const initialSizes = await Promise.all(Object.values(logPaths).map(async (file) => (await stat(file)).size));
@@ -275,11 +300,63 @@ test("product service rejects a pre-existing healthy listener before provenance"
   }
 });
 
+test("product service relocation requires the exact adopted offline path", async () => {
+  const expected = path.resolve(tmpdir(), "starvector-relocated-hf");
+  const ok = await relocateProductServiceLibrary("http://127.0.0.1:1", expected, {
+    fetchImpl: async (url, init) => {
+      assert.ok(init.signal);
+      if (url.pathname === "/api/v1/model-library/relocate") {
+        assert.deepEqual(JSON.parse(init.body), { path: expected });
+        assert.equal(init.method, "POST");
+        return { ok: true, json: async () => ({ adopted: true, hfHome: expected, libraryRoot: path.join(expected, "hub") }) };
+      }
+      assert.equal(url.pathname, "/api/v1/model-library");
+      return { ok: true, json: async () => ({ available: true, probeStatus: "available", configuredLibraryPath: path.join(expected, "hub"), expectedLibrary: { configuredPath: path.join(expected, "hub") } }) };
+    },
+  });
+  assert.deepEqual(ok, { adopted: true, hf_home: expected, library_root: path.join(expected, "hub"), probe_status: "available" });
+  for (const body of [
+    { adopted: false, hfHome: expected, libraryRoot: path.join(expected, "hub") },
+    { adopted: true, hfHome: path.dirname(expected), libraryRoot: path.join(expected, "hub") },
+    { adopted: true, hfHome: expected, libraryRoot: path.join(path.dirname(expected), "other", "hub") },
+  ]) {
+    await assert.rejects(
+      () => relocateProductServiceLibrary("http://127.0.0.1:1", expected, { fetchImpl: async () => ({ ok: true, json: async () => body }) }),
+      /returned an inexact binding/,
+    );
+  }
+  await assert.rejects(
+    () => relocateProductServiceLibrary("http://127.0.0.1:1", expected, {
+      fetchImpl: async (url) => ({ ok: true, json: async () => url.pathname.endsWith("/relocate")
+        ? { adopted: true, hfHome: expected, libraryRoot: path.join(expected, "hub") }
+        : { available: false, probeStatus: "identity_mismatch", configuredLibraryPath: path.join(expected, "hub"), expectedLibrary: { configuredPath: path.join(expected, "hub") } } }),
+    }),
+    /did not read back as the exact available binding/,
+  );
+});
+
+test("a rejected product relocation terminates both services and records the failure", { timeout: 15_000 }, async () => {
+  const fixture = await productServiceFixture({ tamperRelocation: true }), port = await availableLoopbackPort();
+  try {
+    await assert.rejects(() => runProductServiceCli(fixture, "start", port), /returned an inexact binding/);
+    const failure = JSON.parse(await readFile(path.join(fixture.output, "product-service-start-failed.json"), "utf8"));
+    assert.equal(failure.cleanup.status, "terminated");
+    assert.equal(failure.cleanup.state_retained, false);
+    assert.match(failure.error, /returned an inexact binding/);
+    for (const pid of [failure.api_pid, failure.worker_pid]) assert.throws(() => process.kill(pid, 0), { code: "ESRCH" });
+    assert.equal(await lstat(productServiceStateRoot(fixture.output)).catch((error) => error.code === "ENOENT" ? null : Promise.reject(error)), null);
+    assert.equal(await lstat(path.join(fixture.output, "product-service-provenance.json")).catch((error) => error.code === "ENOENT" ? null : Promise.reject(error)), null);
+  } finally {
+    await forceFixtureCleanup(fixture);
+  }
+});
+
 test("product service records setup and log-open failures before removing child-free state", { timeout: 20_000 }, async () => {
-  for (const failure of ["setup", "open"]) {
+  for (const failure of ["setup", "hf-hash", "open"]) {
     const fixture = await productServiceFixture(), port = await availableLoopbackPort();
     try {
       if (failure === "setup") await writeFile(fixture.manifestPath, JSON.stringify({ ...fixture.manifest, terminal_service_closure: { ...fixture.manifest.terminal_service_closure, app_data_sha256: "0".repeat(64) } }));
+      else if (failure === "hf-hash") await writeFile(path.join(fixture.weightsRoot, "hf", "weights.bin"), "tampered");
       else { await mkdir(fixture.output); await writeFile(productServiceLogPaths(fixture.output).api_stdout, "stale log"); }
       await assert.rejects(() => runProductServiceCli(fixture, "start", port));
       const report = JSON.parse(await readFile(path.join(fixture.output, "product-service-start-failed.json"), "utf8"));

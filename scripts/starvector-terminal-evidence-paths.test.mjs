@@ -45,4 +45,7 @@ test("source-built service materializes a receipt-backed offline closure", async
   assert.match(service, /TRANSFORMERS_OFFLINE: "1"/);
   assert.match(service, /copyRegularTree/);
   assert.match(service, /isSymbolicLink/);
+  assert.match(service, /\/api\/v1\/model-library\/relocate/);
+  assert.match(service, /\/api\/v1\/model-library/);
+  assert.doesNotMatch(service, /(?:huggingface-cli|\bcurl\b|\bwget\b)/i);
 });

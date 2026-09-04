@@ -619,6 +619,75 @@ fn write_download_receipt(data_dir: &Path, repo: &str, file: &str) {
     .unwrap();
 }
 
+fn copy_test_tree(source: &Path, destination: &Path) {
+    std::fs::create_dir_all(destination).unwrap();
+    for entry in std::fs::read_dir(source).unwrap() {
+        let entry = entry.unwrap();
+        let target = destination.join(entry.file_name());
+        if entry.file_type().unwrap().is_dir() {
+            copy_test_tree(&entry.path(), &target);
+        } else {
+            std::fs::copy(entry.path(), target).unwrap();
+        }
+    }
+}
+
+/// The terminal campaign copies both app-data and HF_HOME into an isolated tuple root. The copied
+/// receipt and closure ledgers still name the source library's physical directory by design: byte
+/// copying must not silently make a different path/volume trusted. The public relocation producer
+/// is the only transition that can adopt the already-complete copy without weakening that guard.
+#[test]
+fn copied_receipts_require_validated_relocation_before_the_copied_library_is_ready() {
+    let temp = TempDir::new().unwrap();
+    let source_data = temp.path().join("source-data");
+    let source_library = temp.path().join("source-hf").join("hub");
+    seed_snapshot(&source_library, "owner/model", "model.safetensors");
+    write_download_receipt(&source_data, "owner/model", "model.safetensors");
+    let requirements = vec![requirement("owner/model", "model.safetensors")];
+    assert_eq!(
+        resolve_model_availability(&source_data, &source_library, &requirements, true, &[])
+            .availability,
+        ModelAvailability::ExternalReady
+    );
+
+    let copied_data = temp.path().join("tuple-data");
+    let copied_library = temp.path().join("tuple-hf").join("hub");
+    copy_test_tree(&source_data, &copied_data);
+    copy_test_tree(&source_library, &copied_library);
+    let mismatched =
+        resolve_model_availability(&copied_data, &copied_library, &requirements, true, &[]);
+    assert_eq!(
+        mismatched.availability,
+        ModelAvailability::InstalledExternalUnavailable
+    );
+    assert!(
+        mismatched.library_present,
+        "the copied library exists but its path/physical identity is not the receipted source"
+    );
+
+    let copied_store = ExternalLibraryBindingStore::new(&copied_data).unwrap();
+    copied_store.relocate_binding(&copied_library).unwrap();
+    assert_eq!(
+        resolve_model_availability(&copied_data, &copied_library, &requirements, true, &[])
+            .availability,
+        ModelAvailability::ExternalReady
+    );
+
+    let mut tampered = copied_store.load().unwrap().unwrap();
+    tampered.physical_identity.volume_id = "tampered-volume".to_owned();
+    copied_store.write_unlocked(&tampered).unwrap();
+    let refused =
+        resolve_model_availability(&copied_data, &copied_library, &requirements, true, &[]);
+    assert_eq!(
+        refused.availability,
+        ModelAvailability::InstalledExternalUnavailable
+    );
+    assert!(
+        refused.library_present,
+        "a present library with a tampered volume identity must fail closed"
+    );
+}
+
 /// Nothing installed means nothing can be orphaned and nothing to check a candidate against: an
 /// EMPTY directory (no `models--*` layout at all) binds as a fresh cache home, and the recorded
 /// identity is then what every later install is judged against — the Settings "change model
