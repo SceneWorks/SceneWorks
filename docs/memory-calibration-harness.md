@@ -213,6 +213,54 @@ node scripts/anchor-loader-closure.mjs --stamp-anchors
 to an analytic-only row instead. Add the new file there when the lane's derivation law is fitted to
 it.
 
+### Measuring the whole catalog on one host
+
+`scripts/measure-memory-catalog.mjs` walks every anchor the plan declares for ONE backend and runs
+the sequence above per anchor — capture → check → ingest → `PACKAGED_MEMORY_ANCHOR_SOURCES` →
+`extract-memory-anchors` → `--stamp-anchors` → `generate-memory-matrix` → **commit** — so a crash or
+a cancel keeps every anchor that already landed. It adds no batch mode to the harness: each capture
+is still one `capture --anchor` on a clean HEAD, and committing between captures is what keeps the
+dirty-tree and HEAD-moved checks satisfied.
+
+```text
+npm run measure:memory-catalog -- --backend mlx --list          # what this host can capture, and why not
+npm run measure:memory-catalog -- --backend mlx \
+  --adapter target/release/memory-mlx-adapter \
+  --inference-repo /abs/path/to/inference \
+  --work-dir /abs/path/OUTSIDE/the/repo/calib \
+  --campaign sc-XXXXX \
+  [--hf-cache /Volumes/Models/huggingface/hub] [--model sdxl ...] [--anchors k1,k2] [--skip-current] [--dry-run] [--no-commit]
+```
+
+Per anchor it derives the adapter environment from the plan key and the manifest — the
+`SCENEWORKS_<FAMILY>_{REPOSITORY,REVISION,ROOT}` triple from the tier download's repo and revision,
+the MiniMax upstream root, `--ltx25-snapshot-root` for `ltx_2_5`, and the raw-log pair plus
+`SCENEWORKS_MEMORY_CAPTURE_DIR` for the arms whose authoritative record needs the physical receipt
+session (the Qwen MLX arm, the only one that emits a `sourceCapture`). `--list` / `--dry-run`
+classify every anchor as `runnable`, `weights_missing` (no snapshot at the manifest revision under
+any hub root), `no_adapter_arm`, `harness_unsupported` (candle `ltx_2_5`), `lane_undeclared`
+(`<model>:<backend>` has no entry in `config/anchor-loader-closures.json`, so `--stamp-anchors`
+would refuse the anchor after the render — runbook §7c declares a lane) or `already_captured` (an
+evidence bundle for the key is already under `docs/calibration/<campaign>/`), and print the roots
+and env a run would use.
+
+A freshly captured record always produces a NEW anchor id, and `extract-memory-anchors.mjs` refuses
+an id it has never carried (a new anchor must not borrow the pin's digest). The script seeds the new
+id with an all-zero placeholder key, re-runs the extractor, and then runs `--stamp-anchors`, which
+re-derives every key at its record's own measurement revision; a placeholder that survived the
+stamp refuses the commit. The commit also carries `docs/generated/memory-matrix.md` and the
+harness's `<session>.log` receipt (force-added past the blanket `*.log` ignore rule). Hub roots are `--hf-cache` (repeatable) first, then `HF_HUB_CACHE` / `HF_HOME` /
+`~/.cache/huggingface/hub`, then the app cache on macOS.
+
+Preflight refuses a dirty checkout, an inference checkout that is not at the adapter's compiled
+`INFERENCE_PIN`, a work dir inside the tree, a missing adapter, and committing onto `main`. A failed
+capture or check is logged under `<work-dir>/logs/` and the loop moves on; a failed post-step is
+rolled back so the tree is clean for the next anchor, with the raw capture kept under
+`<work-dir>/captures/` for a by-hand ingest. Ctrl-C finishes the anchor in flight (the harness is
+spawned detached, so the adapter is never signalled mid-render) and then stops. The measurement
+commits do NOT move the shipped manifest bindings (runbook §7d) or relax the pinned doc-fact tests
+(runbook §9); those remain the closing work of the PR that lands the campaign.
+
 
 SceneWorks now contains two real provider-protocol executables. They compile against the same exact
 inference revision as the worker and never convert partial measurements into complete evidence:
