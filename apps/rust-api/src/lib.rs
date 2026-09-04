@@ -2230,12 +2230,6 @@ async fn get_project_file(
                 )
                     .into_response();
                 response.headers_mut().extend(base_headers);
-                if force_download {
-                    response.headers_mut().insert(
-                        header::CONTENT_DISPOSITION,
-                        HeaderValue::from_static("attachment"),
-                    );
-                }
                 response.headers_mut().insert(
                     header::CONTENT_LENGTH,
                     HeaderValue::from_str(&len.to_string())
@@ -2270,14 +2264,6 @@ async fn get_project_file(
     )
         .into_response();
     response.headers_mut().extend(base_headers);
-    if force_download {
-        // Raw SVG is active document syntax. It is available only as a download; clients must use
-        // the worker-produced PNG preview path recorded on a vector sidecar for inline display.
-        response.headers_mut().insert(
-            header::CONTENT_DISPOSITION,
-            HeaderValue::from_static("attachment"),
-        );
-    }
     Ok(response)
 }
 
@@ -2540,6 +2526,17 @@ fn project_file_response_headers(
     last_modified: Option<SystemTime>,
 ) -> Result<HeaderMap, ApiError> {
     let mut headers = HeaderMap::new();
+    // Every representation, including stripWorkflow, ranges and 304 responses, shares this
+    // boundary. SVG source is download-only; only the worker-rendered PNG is inline media.
+    let content_type = if content_type.eq_ignore_ascii_case("image/svg+xml") {
+        headers.insert(
+            header::CONTENT_DISPOSITION,
+            HeaderValue::from_static("attachment"),
+        );
+        "application/octet-stream"
+    } else {
+        content_type
+    };
     for (name, value) in [
         (header::CONTENT_TYPE, content_type.to_owned()),
         (header::ACCEPT_RANGES, "bytes".to_owned()),

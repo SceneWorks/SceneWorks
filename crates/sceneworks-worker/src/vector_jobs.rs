@@ -229,6 +229,7 @@ pub(crate) trait MultimodalVectorProviderAdapter: Send + Sync {
         &self,
         request: &VectorProviderRequest,
         cancel: &gen_core::CancelFlag,
+        progress: tokio::sync::watch::Sender<u32>,
         on_source: &mut dyn FnMut(&str, u32) -> WorkerResult<()>,
     ) -> WorkerResult<()>;
 
@@ -346,6 +347,7 @@ impl MultimodalVectorProviderAdapter for NativeStarVectorProvider {
         &self,
         request: &VectorProviderRequest,
         cancel: &gen_core::CancelFlag,
+        progress: tokio::sync::watch::Sender<u32>,
         on_source: &mut dyn FnMut(&str, u32) -> WorkerResult<()>,
     ) -> WorkerResult<()> {
         let source_path = request.source_path.as_deref().ok_or_else(|| {
@@ -393,7 +395,17 @@ impl MultimodalVectorProviderAdapter for NativeStarVectorProvider {
                     }
                     let mut events = Vec::new();
                     let output = provider
-                        .generate_svg(&typed_request, &mut |event| events.push(event))
+                        .generate_svg(&typed_request, &mut |event| {
+                            if let StarVectorStreamEvent::Progress { generated_tokens } = &event {
+                                // Only counters leave this private source boundary. A watch channel
+                                // stores one value even if decode outruns the async publisher.
+                                record_vector_token_progress(
+                                    &progress, *generated_tokens, typed_request.text_request.max_new_tokens,
+                                );
+                            } else {
+                                events.push(event);
+                            }
+                        })
                         .map_err(classify_starvector_error)?;
                     let terminal = TerminalProviderOutcome {
                         finish_reason: terminal_finish_reason(output.finish_reason),
@@ -604,6 +616,7 @@ fn validate_native_starvector_generation(
     let mut done = None;
     for event in events {
         match event {
+            StarVectorStreamEvent::Progress { .. } => {}
             StarVectorStreamEvent::Source { text, index } => {
                 if done.is_some() {
                     return Err(WorkerError::Engine(
@@ -695,10 +708,79 @@ struct CollectedSvgSource {
     terminal: Option<TerminalProviderOutcome>,
 }
 
+fn record_vector_token_progress(
+    progress: &tokio::sync::watch::Sender<u32>,
+    count: u32,
+    maximum: u32,
+) {
+    progress.send_modify(|previous| *previous = (*previous).max(count.min(maximum)));
+}
+
+/// Poll a single latest counter at most four times a second. The heartbeat runner remains
+/// responsible for cancellation and task ownership while publication is pending.
+async fn with_vector_progress<R, G, P, F>(
+    progress: tokio::sync::watch::Receiver<u32>,
+    maximum: u32,
+    cancel: gen_core::CancelFlag,
+    generation: G,
+    mut publish: P,
+) -> WorkerResult<R>
+where
+    G: std::future::Future<Output = WorkerResult<R>>,
+    P: FnMut(u32, u32) -> F,
+    F: std::future::Future<Output = WorkerResult<()>>,
+{
+    tokio::pin!(generation);
+    let mut interval = tokio::time::interval(Duration::from_millis(250));
+    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    let mut reported = 0;
+    loop {
+        tokio::select! {
+            result = &mut generation => return result,
+            _ = interval.tick() => {
+                let count = (*progress.borrow()).min(maximum);
+                if count <= reported || cancel.is_cancelled() { continue; }
+                if let Err(error) = publish(count, maximum).await {
+                    // A progress POST failure cannot detach ongoing decode. Keep polling the
+                    // heartbeat/owned task while cooperative cancel unwinds, with its usual bound.
+                    cancel.cancel();
+                    let _ = tokio::time::timeout(
+                        crate::progress::CANCEL_JOIN_GRACE + crate::progress::CANCEL_JOIN_ABANDON,
+                        &mut generation,
+                    ).await;
+                    return Err(error);
+                }
+                reported = count;
+            }
+        }
+    }
+}
+
+fn vector_token_progress(count: u32, maximum: u32) -> ProgressRequest {
+    let fraction = f64::from(count) / f64::from(maximum.max(1));
+    let mut payload = progress_payload(
+        JobStatus::Running,
+        ProgressStage::Generating,
+        0.25 + 0.45 * fraction,
+        &format!("Generating SVG: {count} / {maximum} tokens."),
+        None,
+        None,
+        None,
+    );
+    payload
+        .extra
+        .insert("generatedTokens".to_owned(), json!(count));
+    payload
+        .extra
+        .insert("maxNewTokens".to_owned(), json!(maximum));
+    payload
+}
+
 fn collect_svg_source(
     provider: &dyn MultimodalVectorProviderAdapter,
     request: &VectorProviderRequest,
     cancel: &gen_core::CancelFlag,
+    progress: tokio::sync::watch::Sender<u32>,
 ) -> WorkerResult<CollectedSvgSource> {
     if request.model.trim().is_empty() {
         return Err(WorkerError::InvalidPayload(
@@ -743,7 +825,7 @@ fn collect_svg_source(
         .map_err(|_| WorkerError::InvalidPayload("maxSvgBytes does not fit usize".to_owned()))?;
     let mut source = String::new();
     let mut expected_index = 0u32;
-    provider.generate_svg(request, cancel, &mut |fragment, index| {
+    provider.generate_svg(request, cancel, progress, &mut |fragment, index| {
         if cancel.is_cancelled() {
             return Err(WorkerError::Canceled(CANCEL_MESSAGE.to_owned()));
         }
@@ -915,22 +997,33 @@ pub(crate) async fn run_vector_job_with_provider(
     let blocking_cancel = cancel.clone();
     let blocking_provider = provider.clone();
     let blocking_request = request.clone();
+    let (progress_tx, progress_rx) = tokio::sync::watch::channel(0);
     let task = tokio::task::spawn_blocking(move || {
         collect_svg_source(
             blocking_provider.as_ref(),
             &blocking_request,
             &blocking_cancel,
+            progress_tx,
         )
     });
-    let collected = run_blocking_with_heartbeat(
+    let generation = run_blocking_with_heartbeat(
         api,
         settings,
         &job.id,
-        Some(cancel),
+        Some(cancel.clone()),
         CANCEL_MESSAGE,
         "vector provider stream",
         no_cancel_ack(),
         task,
+    );
+    let collected = with_vector_progress(
+        progress_rx,
+        request.detail_budget.max_new_tokens,
+        cancel,
+        generation,
+        |count, maximum| async move {
+            update_job(api, &job.id, vector_token_progress(count, maximum)).await
+        },
     )
     .await?;
     let source_raster = match request.source_path.as_deref() {
@@ -1981,6 +2074,7 @@ mod tests {
             &self,
             _request: &VectorProviderRequest,
             cancel: &gen_core::CancelFlag,
+            _progress: tokio::sync::watch::Sender<u32>,
             on_source: &mut dyn FnMut(&str, u32) -> WorkerResult<()>,
         ) -> WorkerResult<()> {
             on_source("<svg xmlns=\"http://www.w3.org/2000/svg\">", 0)?;
@@ -1988,6 +2082,109 @@ mod tests {
             on_source("<rect width=\"1\" height=\"1\"/></svg>", 1)?;
             Ok(())
         }
+    }
+
+    #[tokio::test]
+    async fn vector_progress_is_live_bounded_monotonic_and_private() {
+        let (tx, rx) = tokio::sync::watch::channel(0);
+        let (release, blocked) = tokio::sync::oneshot::channel();
+        let finished = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let completed = finished.clone();
+        let generation = async move {
+            blocked.await.expect("test releases provider");
+            completed.store(true, std::sync::atomic::Ordering::Release);
+            Ok(())
+        };
+        // Exercise the same bounded sink used by the native provider callback. Older counts
+        // cannot regress progress, and a bad provider cannot exceed the declared maximum.
+        record_vector_token_progress(&tx, 1, 10);
+        let mut release = Some(release);
+        let mut observations = Vec::new();
+        tokio::time::timeout(
+            Duration::from_secs(3),
+            with_vector_progress(
+                rx,
+                10,
+                gen_core::CancelFlag::new(),
+                generation,
+                |count, maximum| {
+                    assert!(
+                        !finished.load(std::sync::atomic::Ordering::Acquire),
+                        "progress must precede decode completion"
+                    );
+                    observations.push(count);
+                    let payload = vector_token_progress(count, maximum);
+                    assert_eq!(payload.extra["generatedTokens"], count);
+                    assert_eq!(payload.extra["maxNewTokens"], 10);
+                    let encoded = serde_json::to_string(&payload).expect("serializes");
+                    assert!(!encoded.contains("<svg"));
+                    if count == 1 {
+                        record_vector_token_progress(&tx, 0, 10);
+                        assert_eq!(*tx.borrow(), 1);
+                        record_vector_token_progress(&tx, 1000, 10);
+                    } else {
+                        release
+                            .take()
+                            .expect("one completion")
+                            .send(())
+                            .expect("provider held");
+                    }
+                    std::future::ready(Ok(()))
+                },
+            ),
+        )
+        .await
+        .expect("live progress completes without waiting for provider")
+        .expect("progress succeeds");
+        assert_eq!(observations, [1, 10]);
+        assert!(finished.load(std::sync::atomic::Ordering::Acquire));
+    }
+
+    #[tokio::test]
+    async fn vector_progress_post_failure_cancels_and_joins_generation() {
+        let (tx, rx) = tokio::sync::watch::channel(1);
+        let cancel = gen_core::CancelFlag::new();
+        let provider_cancel = cancel.clone();
+        let joined = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let provider_joined = joined.clone();
+        let generation = async move {
+            while !provider_cancel.is_cancelled() {
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
+            provider_joined.store(true, std::sync::atomic::Ordering::Release);
+            Ok(())
+        };
+        let result = with_vector_progress(rx, 10, cancel.clone(), generation, |_, _| {
+            std::future::ready(Err(WorkerError::Engine("progress unavailable".to_owned())))
+        })
+        .await;
+        drop(tx);
+        assert!(result.is_err());
+        assert!(cancel.is_cancelled());
+        assert!(joined.load(std::sync::atomic::Ordering::Acquire));
+    }
+
+    #[tokio::test]
+    async fn vector_progress_never_posts_after_cancellation() {
+        let (_tx, rx) = tokio::sync::watch::channel(3);
+        let cancel = gen_core::CancelFlag::new();
+        cancel.cancel();
+        let result: WorkerResult<()> = with_vector_progress(
+            rx,
+            10,
+            cancel,
+            async {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+                Err(WorkerError::Canceled(CANCEL_MESSAGE.to_owned()))
+            },
+            |_, _| {
+                panic!("cancelled generation must not post Running progress");
+                #[allow(unreachable_code)]
+                std::future::ready(Ok(()))
+            },
+        )
+        .await;
+        assert!(matches!(result, Err(WorkerError::Canceled(_))));
     }
 
     #[test]
@@ -2153,7 +2350,12 @@ mod tests {
     fn cancellation_during_streamed_svg_never_reaches_publication() {
         let request = vector_request(VectorMode::TextToSvg, "a compact mark");
         let cancel = gen_core::CancelFlag::new();
-        let output = collect_svg_source(&CancelingProvider, &request, &cancel);
+        let output = collect_svg_source(
+            &CancelingProvider,
+            &request,
+            &cancel,
+            tokio::sync::watch::channel(0).0,
+        );
         assert!(matches!(output, Err(WorkerError::Canceled(_))));
 
         // This is the exact publication boundary used by `run_vector_job_with_provider`: staging

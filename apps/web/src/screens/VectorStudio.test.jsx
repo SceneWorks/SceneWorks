@@ -1,3 +1,5 @@
+import fs from "node:fs";
+import JSON5 from "json5";
 import React, { act } from "react";
 import { createRoot } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -9,6 +11,7 @@ import {
   promptVectorModelAvailability,
   rasterPromptModelAvailability,
   vectorSourceAssets,
+  vectorDetailBudget,
 } from "./VectorStudio.jsx";
 
 const RASTER_REVISION = "1111111111111111111111111111111111111111";
@@ -115,12 +118,103 @@ describe("Create from Prompt disclosure", () => {
           setActiveView: vi.fn(),
           studioLaunch: overrides.studioLaunch,
         }}>
-          <VectorStudio />
+          <VectorStudio key={overrides.renderKey} />
         </AppContext.Provider>,
       );
     });
     return createVectorPromptWorkflow;
   }
+
+  const source = { id: "source", projectId: "p1", type: "image", file: { mimeType: "image/png" }, status: {} };
+  const sampling = { seed: 123, temperature: 0.8, topP: 0.7, topK: 5, repetitionPenalty: 1.2, repetitionContext: 40 };
+  const budget = { maxNewTokens: 2345, maxSvgBytes: 150000, maxWallTimeMs: 67000 };
+  async function submit() {
+    await act(async () => container.querySelector("form").dispatchEvent(new Event("submit", { bubbles: true, cancelable: true })));
+  }
+
+  it("submits every preset in both modes within the real catalog and wire DTO", async () => {
+    const catalog = JSON5.parse(fs.readFileSync("../../config/manifests/builtin.models.jsonc", "utf8"));
+    for (const manifest of catalog.models.filter((model) => model.type === "vector")) {
+      const create = vi.fn(async () => ({}));
+      const convert = vi.fn(async () => ({}));
+      await render([rasterModel(), vectorModel({ ...manifest, installState: "installed", cacheState: "complete" })], create, {
+        renderKey: manifest.id, assets: [source], createVectorJob: convert, studioLaunch: { view: "VectorStudio", assetId: source.id },
+      });
+      for (const mode of ["Convert Image", "Create from Prompt"]) {
+        await act(async () => [...container.querySelectorAll("button")].find((button) => button.textContent === mode).click());
+        if (mode === "Create from Prompt") {
+          await act(async () => {
+            const input = container.querySelector("textarea");
+            Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, "value").set.call(input, "a circle");
+            input.dispatchEvent(new Event("input", { bubbles: true }));
+          });
+        }
+        for (const preset of Object.keys(VECTOR_DETAIL_PRESETS)) {
+          await act(async () => {
+            const select = container.querySelector('[aria-label="Vector detail"]');
+            select.value = preset;
+            select.dispatchEvent(new Event("change", { bubbles: true }));
+          });
+          await submit();
+          const dto = (mode === "Convert Image" ? convert : create).mock.lastCall[0].detailBudget;
+          expect(Object.keys(dto).sort()).toEqual(["maxNewTokens", "maxSvgBytes", "maxWallTimeMs"].sort());
+          for (const key of Object.keys(dto)) {
+            expect(dto[key]).toBeGreaterThan(0);
+            expect(dto[key]).toBeLessThanOrEqual(manifest.vector[key]);
+          }
+        }
+      }
+    }
+  });
+
+  it("replays exact conversion inputs after a composed recipe and preserves custom detail", async () => {
+    const convert = vi.fn(async () => ({}));
+    const models = [rasterModel(), vectorModel(), vectorModel({ id: "starvector_8b" })];
+    await render(models, undefined, { studioLaunch: { view: "VectorStudio", recipe: { workflow: {
+      kind: "create_from_prompt", rasterStage: { prompt: "circle", model: "flux_schnell" }, vectorStage: { model: "starvector_1b" },
+    } } } });
+    await render(models, undefined, { assets: [source], createVectorJob: convert, studioLaunch: {
+      view: "VectorStudio", assetId: source.id,
+      recipe: { mode: "image_to_svg", model: "starvector_8b", prompt: "", sampling, detailBudget: budget },
+    } });
+    await submit();
+    expect(convert).toHaveBeenLastCalledWith({ mode: "image_to_svg", model: "starvector_8b", sourceAssetId: "source", prompt: "", sampling, detailBudget: budget });
+    await act(async () => {
+      const select = container.querySelector('[aria-label="Vector detail"]');
+      select.value = "draft";
+      select.dispatchEvent(new Event("change", { bubbles: true }));
+    });
+    await submit();
+    expect(convert.mock.lastCall[0]).toMatchObject({ sampling, detailBudget: vectorDetailBudget(VECTOR_DETAIL_PRESETS.draft, models[2]) });
+  });
+
+  it("replays both composed stages including seed dimensions sampling and exact revisions", async () => {
+    const create = vi.fn(async () => ({}));
+    await render([rasterModel(), vectorModel(), vectorModel({ id: "starvector_8b" })], create, { studioLaunch: {
+      view: "VectorStudio", recipe: { workflow: {
+        kind: "create_from_prompt",
+        rasterStage: { model: "flux_schnell", revision: RASTER_REVISION, prompt: "circle", negativePrompt: "noise", seed: 456, width: 768, height: 512 },
+        vectorStage: { model: "starvector_8b", revision: VECTOR_REVISION, sampling, detailBudget: budget },
+      } },
+    } });
+    await submit();
+    expect(create).toHaveBeenLastCalledWith({ prompt: "circle", negativePrompt: "noise", rasterModel: "flux_schnell", vectorModel: "starvector_8b", seed: 456, width: 768, height: 512, sampling, detailBudget: budget, expectedRasterRevision: RASTER_REVISION, expectedVectorRevision: VECTOR_REVISION });
+  });
+
+  it("does not substitute an unavailable recorded model or clamp recorded budgets", async () => {
+    const convert = vi.fn(async () => ({}));
+    for (const recipe of [
+      { model: "missing", detailBudget: budget },
+      { model: "starvector_1b", detailBudget: { ...budget, maxNewTokens: 5000 } },
+    ]) {
+      await render([vectorModel(), vectorModel({ id: "starvector_8b" })], undefined, { assets: [source], createVectorJob: convert, studioLaunch: {
+        view: "VectorStudio", assetId: source.id, recipe: { mode: "image_to_svg", sampling, ...recipe },
+      } });
+      expect(container.querySelector('[role="alert"]').textContent).toContain("This recipe cannot run");
+      if (container.querySelector("form")) await submit();
+    }
+    expect(convert).not.toHaveBeenCalled();
+  });
 
   it("does not expose the workflow tab until both stages are eligible", async () => {
     await render([vectorModel()]);
@@ -230,7 +324,7 @@ describe("Create from Prompt disclosure", () => {
       prompt: "a geometric fox",
       rasterModel: "flux_schnell",
       vectorModel: "starvector_1b",
-      detailBudget: VECTOR_DETAIL_PRESETS.standard,
+      detailBudget: vectorDetailBudget(VECTOR_DETAIL_PRESETS.standard, vectorModel()),
     }));
   });
 });

@@ -111,9 +111,59 @@ async fn vector_source_is_attachment_only_while_its_preview_is_inline_png() {
     )
     .await;
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(headers["content-type"], "image/svg+xml");
+    assert_eq!(headers["content-type"], "application/octet-stream");
     assert_eq!(headers["content-disposition"], "attachment");
     assert_eq!(headers["x-content-type-options"], "nosniff");
+
+    let etag = headers["etag"].to_str().expect("etag");
+    let modified = headers["last-modified"].to_str().expect("last modified");
+    for suffix in ["", "?stripWorkflow=true"] {
+        for (request_headers, expected) in [
+            (vec![], StatusCode::OK),
+            (
+                vec![("range", "bytes=0-9")],
+                if suffix.is_empty() {
+                    StatusCode::PARTIAL_CONTENT
+                } else {
+                    StatusCode::OK
+                },
+            ),
+            (
+                vec![("range", "bytes=9999-")],
+                if suffix.is_empty() {
+                    StatusCode::RANGE_NOT_SATISFIABLE
+                } else {
+                    StatusCode::OK
+                },
+            ),
+            (vec![("if-none-match", etag)], StatusCode::NOT_MODIFIED),
+            (
+                vec![("if-modified-since", modified)],
+                StatusCode::NOT_MODIFIED,
+            ),
+        ] {
+            let (status, variant_headers, bytes) = request_raw(
+                app.clone(),
+                "GET",
+                &format!(
+                    "/api/v1/projects/{project_id}/files/assets/images/vector/vector.svg{suffix}"
+                ),
+                Body::empty(),
+                &request_headers,
+            )
+            .await;
+            assert_eq!(status, expected, "{suffix} {request_headers:?}");
+            assert_eq!(variant_headers["content-type"], "application/octet-stream");
+            assert_eq!(variant_headers["content-disposition"], "attachment");
+            assert_eq!(variant_headers["x-content-type-options"], "nosniff");
+            if status == StatusCode::NOT_MODIFIED {
+                assert!(bytes.is_empty());
+            }
+            if status == StatusCode::PARTIAL_CONTENT {
+                assert_eq!(bytes.len(), 10);
+            }
+        }
+    }
 
     let (status, error) = request(
         app.clone(),
