@@ -80,6 +80,30 @@ test("provision workflow is dispatch-only and never runs a model, service, campa
   assert.doesNotMatch(workflow, /STARVECTOR_PROMPT_PROVIDER: flux_diffusers/);
 });
 
+function assertWindowsCorpusCompilesWithoutInheritedRustcWrapper(workflowSource) {
+  const jobStart = workflowSource.indexOf("  provision-windows:");
+  const stepStart = workflowSource.indexOf("- name: Materialize the exact pinned 120-row corpus", jobStart);
+  const stepEnd = workflowSource.indexOf("- name: Read-only readiness validation", stepStart);
+  assert.ok(jobStart >= 0 && stepStart > jobStart && stepEnd > stepStart);
+  const step = workflowSource.slice(stepStart, stepEnd);
+  const clearWrapper = step.indexOf("Remove-Item Env:RUSTC_WRAPPER -ErrorAction SilentlyContinue");
+  const cargo = step.indexOf("cargo run --release --locked -p sceneworks-worker --bin starvector_terminal_corpus");
+  assert.equal((step.match(/Remove-Item Env:RUSTC_WRAPPER -ErrorAction SilentlyContinue/g) ?? []).length, 1);
+  assert.ok(clearWrapper >= 0 && clearWrapper < cargo);
+}
+
+test("Windows corpus compilation cannot inherit the persistent runner's sccache wrapper", () => {
+  assertWindowsCorpusCompilesWithoutInheritedRustcWrapper(workflow);
+  for (const [label, mutation] of [
+    ["missing wrapper clear", (value) => value.replace("Remove-Item Env:RUSTC_WRAPPER -ErrorAction SilentlyContinue", "Write-Host $env:RUSTC_WRAPPER")],
+    ["wrapper cleared after Cargo", (value) => value.replace(/(\s+)(Remove-Item Env:RUSTC_WRAPPER -ErrorAction SilentlyContinue)(\s+)(cargo run --release --locked -p sceneworks-worker --bin starvector_terminal_corpus[^\n]+)/, "$1$4$3$2")],
+  ]) {
+    const changed = mutation(workflow);
+    assert.notEqual(changed, workflow, `${label} mutation must alter the workflow fixture`);
+    assert.throws(() => assertWindowsCorpusCompilesWithoutInheritedRustcWrapper(changed), { name: "AssertionError" }, label);
+  }
+});
+
 function assertWindowsMetricsPythonContract(step) {
   assert.doesNotMatch(step, /\bpy\s+-3\.11\b/);
   assert.match(step, /select-starvector-windows-python\.ps1/);

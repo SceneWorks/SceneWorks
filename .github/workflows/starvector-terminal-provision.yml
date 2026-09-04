@@ -242,6 +242,9 @@ jobs:
           node scripts/starvector-terminal-provision.mjs download https://huggingface.co/datasets/starvector/svg-fonts-simple/resolve/453c739ea13ad2685127f721c333f14d99485299/data/test-00000-of-00001.parquet "$env:RUNNER_TEMP\starvector-parquet\source-3.parquet" 86db32ae45896a18b938baba088b69d797ae2d5f6d3d79742753a0e2ea89d86d
           if (-not (Test-Path "$env:STARVECTOR_TERMINAL_ROOT\corpora\starvector-terminal-v1")) {
             $inventory = (Get-FileHash -Algorithm SHA256 "$env:STARVECTOR_TERMINAL_ROOT\weights\inventories\prompt-raster-inventory-v1.json").Hash.ToLowerInvariant()
+            # The persistent runner exports sccache through RUSTC_WRAPPER. Compile this
+            # deterministic provisioning artifact directly so stale daemon state cannot abort it.
+            Remove-Item Env:RUSTC_WRAPPER -ErrorAction SilentlyContinue
             cargo run --release --locked -p sceneworks-worker --bin starvector_terminal_corpus -- "$env:STARVECTOR_TERMINAL_ROOT\inference\release\starvector-terminal-corpus-v1.json" "$env:RUNNER_TEMP\starvector-parquet" "$env:STARVECTOR_TERMINAL_ROOT\corpora\starvector-terminal-v1" $env:STARVECTOR_INFERENCE_REVISION $env:STARVECTOR_PROMPT_PROVIDER $env:STARVECTOR_PROMPT_MODEL $env:STARVECTOR_PROMPT_REVISION $inventory
           }
       - name: Read-only readiness validation
