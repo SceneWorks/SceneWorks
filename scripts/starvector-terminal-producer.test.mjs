@@ -14,7 +14,7 @@ const inferenceRepository = process.env.STARVECTOR_TERMINAL_INFERENCE_TEST_ROOT 
 let inferenceRoot = inferenceRepository;
 const sha = (value) => createHash("sha256").update(value).digest("hex");
 const digest = sha("artifact");
-const inferenceRevision = "b2d9e0917499517cf8c1518e0d360cac8693b0c0";
+const inferenceRevision = "c6d6a4dbd61ab09c26ff5526632cae2cefea60ed";
 const permanentPin = inferenceRevision;
 const sources = [["starvector/svg-stack-simple", "1d2a96a17cc0c4c1f337b7631adc8c5885bc72ea"], ["starvector/svg-icons-simple", "e1918a27ba6649e856e5db0710d8a6c7046762c1"], ["starvector/svg-emoji-simple", "fa75b3617872ae57e6f3cb450aee65dbccbd69e0"], ["starvector/svg-fonts-simple", "453c739ea13ad2685127f721c333f14d99485299"]];
 const models = { "1b": ["starvector-1b-im2svg", "starvector/starvector-1b-im2svg", "380ab95d25a8e9ab1dc825debe238b4953ae13b9"], "8b": ["starvector-8b-im2svg", "starvector/starvector-8b-im2svg", "518beea8dcb5f7a37c5911e92d1d62a76beee7f9"] };
@@ -79,13 +79,16 @@ test("inference preflight requires every exact inventory and native-hook artifac
   const file = async (name) => { await writeFile(path.join(root, name), "artifact"); return { path: name, sha256: digest }; };
   const index = { workflow_run_id: "run", workflow_run_attempt: 1, head_sha: permanentPin, inventory_artifacts: [{ tier: "1b", ...(await file("one")) }, { tier: "8b", ...(await file("eight")) }], hook_logs: [] };
   for (const key of ["mlx:1b", "mlx:8b", "candle-cuda:1b", "candle-cuda:8b"]) { const [backend, tier] = key.split(":"); index.hook_logs.push({ backend, tier, ...(await file(key.replace(":", "-"))) }); }
+  const sealed = structuredClone(index);
   const source = path.join(root, "preflight.json"); await writeFile(source, JSON.stringify(index));
   const previous = process.env.STARVECTOR_TERMINAL_INFERENCE_PREFLIGHT; process.env.STARVECTOR_TERMINAL_INFERENCE_PREFLIGHT = source;
-  const verified = await validateInferencePreflight(root, permanentPin); assert.equal(Object.keys(verified.sources).length, 6);
-  await writeFile(path.join(root, "mlx-1b"), "drift"); await assert.rejects(() => validateInferencePreflight(root, permanentPin), /missing or mismatched/);
-  await writeFile(path.join(root, "mlx-1b"), "artifact"); await symlink(path.join(root, "mlx-1b"), path.join(root, "linked-hook")); index.hook_logs[0].path = "linked-hook"; await writeFile(source, JSON.stringify(index)); await assert.rejects(() => validateInferencePreflight(root, permanentPin), /missing or mismatched/);
+  const verified = await validateInferencePreflight(root, permanentPin, sealed); assert.equal(Object.keys(verified.sources).length, 6);
+  await writeFile(path.join(root, "mlx-1b"), "drift"); await assert.rejects(() => validateInferencePreflight(root, permanentPin, sealed), /missing or mismatched/);
+  await writeFile(path.join(root, "mlx-1b"), "artifact"); await symlink(path.join(root, "mlx-1b"), path.join(root, "linked-hook")); index.hook_logs[0].path = "linked-hook"; await writeFile(source, JSON.stringify(index)); await assert.rejects(() => validateInferencePreflight(root, permanentPin, sealed), /missing or mismatched/);
   index.hook_logs[0].path = "mlx-1b";
-  index.hook_logs.pop(); await writeFile(source, JSON.stringify(index)); await assert.rejects(() => validateInferencePreflight(root, permanentPin), /identity is invalid/);
+  index.workflow_run_id = "other-run"; await writeFile(source, JSON.stringify(index)); await assert.rejects(() => validateInferencePreflight(root, permanentPin, sealed), /sealed terminal plan provenance/);
+  index.workflow_run_id = sealed.workflow_run_id;
+  index.hook_logs.pop(); await writeFile(source, JSON.stringify(index)); await assert.rejects(() => validateInferencePreflight(root, permanentPin, sealed), /identity is invalid/);
   if (previous === undefined) delete process.env.STARVECTOR_TERMINAL_INFERENCE_PREFLIGHT; else process.env.STARVECTOR_TERMINAL_INFERENCE_PREFLIGHT = previous;
 });
 

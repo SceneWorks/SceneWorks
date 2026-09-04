@@ -2,14 +2,17 @@
 // Source-owned, idempotent host provisioning for the terminal campaign. It
 // acquires immutable inputs and assembles manifests; it never starts a product
 // service, invokes a model, writes an install receipt, or claims a campaign.
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { execFile as execFileCallback } from "node:child_process";
 import { copyFile, lstat, mkdir, readFile, readdir, realpath, rename, rm, writeFile } from "node:fs/promises";
 import { promisify } from "node:util";
+import { setTimeout as delay } from "node:timers/promises";
 import path from "node:path";
 import { inventory } from "./starvector-terminal-producer.mjs";
 import { isExecutedModule } from "./starvector-terminal-cli.mjs";
+import { readPlanAndLock } from "./starvector-terminal-campaign.mjs";
 import { fileSha256 } from "./lib/file-sha256.mjs";
+import { assertTerminalPhysicalContainment, assertTerminalPinPhysicalContainment, ensureTerminalPhysicalDirectory } from "./lib/starvector-terminal-pin-paths.mjs";
 import { sortTerminalTreeEntries, terminalTreeEntry, terminalTreeSha256 } from "./lib/terminal-tree-identity.mjs";
 
 const execFile = promisify(execFileCallback);
@@ -123,21 +126,209 @@ export async function downloadExact(url, destination, expected) {
   await mkdir(path.dirname(destination), { recursive: true }); await writeFile(destination, bytes, { flag: "wx" }); return destination;
 }
 
-export async function installCheckout(source, destination, revision) {
-  if (!REVISION.test(revision) || !path.isAbsolute(source) || !path.isAbsolute(destination)) die("checkout requires absolute roots and an exact SHA");
-  const existing = await lstat(destination).catch(() => null);
-  if (!existing) {
-    await mkdir(path.dirname(destination), { recursive: true });
-    await execFile("git", ["clone", "--no-hardlinks", "--no-checkout", source, destination]);
-    await execFile("git", ["-C", destination, "checkout", "--detach", revision]);
+async function validatePublishedCheckout(destination, revision) {
+  const existing = await lstat(destination).catch((error) => error?.code === "ENOENT" ? null : Promise.reject(error));
+  if (!existing) return null;
+  if (!existing.isDirectory() || existing.isSymbolicLink()) die("published inference checkout is not an ordinary directory");
+  let head;
+  let dirty;
+  try {
+    head = (await execFile("git", ["-C", destination, "rev-parse", "HEAD"])).stdout.trim();
+    dirty = (await execFile("git", ["-C", destination, "status", "--porcelain"])).stdout.trim();
+  } catch {
+    die("published inference checkout is not exact and clean");
   }
-  const head = (await execFile("git", ["-C", destination, "rev-parse", "HEAD"])).stdout.trim();
-  const dirty = (await execFile("git", ["-C", destination, "status", "--porcelain"])).stdout.trim();
   if (head !== revision || dirty) die("published inference checkout is not exact and clean");
   for (const relative of ["release/starvector-terminal-receipt-v1.schema.json", "release/starvector-terminal-corpus-v1.json", "scripts/release/starvector_terminal_evidence.mjs"]) {
     const info = await lstat(path.join(destination, relative)).catch(() => null); if (!info?.isFile() || info.isSymbolicLink()) die(`inference checkout lacks ${relative}`);
   }
   return head;
+}
+
+export async function installCheckout(source, destination, revision) {
+  if (!REVISION.test(revision) || !path.isAbsolute(source) || !path.isAbsolute(destination)) die("checkout requires absolute roots and an exact SHA");
+  const existing = await lstat(destination).catch(() => null);
+  if (existing) return validatePublishedCheckout(destination, revision);
+  await mkdir(path.dirname(destination), { recursive: true });
+  const staging = `${destination}.staging-${process.pid}-${randomUUID()}`;
+  try {
+    await execFile("git", ["clone", "--no-hardlinks", "--no-checkout", source, staging]);
+    await execFile("git", ["-C", staging, "checkout", "--detach", revision]);
+    await validatePublishedCheckout(staging, revision);
+    try {
+      await rename(staging, destination);
+    } catch (error) {
+      if (!["EEXIST", "ENOTEMPTY", "EPERM"].includes(error?.code)) throw error;
+      await validatePublishedCheckout(destination, revision);
+    }
+    return validatePublishedCheckout(destination, revision);
+  } finally {
+    // The UUID makes this process the sole owner of the staging path. Never
+    // sweep siblings: another direct provision may be cloning there.
+    await rm(staging, { recursive: true, force: true });
+  }
+}
+
+export function pinnedCheckoutLockPath(hostRoot, revision) {
+  if (!REVISION.test(revision) || !path.isAbsolute(hostRoot)) die("checkout lock requires an absolute host root and exact SHA");
+  return path.join(hostRoot, ".locks", `inference-checkout-${revision}.lock`);
+}
+
+function processIsAlive(pid) {
+  if (!Number.isSafeInteger(pid) || pid < 1) return false;
+  try { process.kill(pid, 0); return true; } catch (error) { return error?.code === "EPERM"; }
+}
+
+async function removeOwnedLock(lockRoot, token) {
+  const info = await lstat(lockRoot).catch((error) => error?.code === "ENOENT" ? null : Promise.reject(error));
+  if (!info) return;
+  if (!info.isDirectory() || info.isSymbolicLink()) die(`checkout lock is not an ordinary directory: ${lockRoot}`);
+  const owner = await json(path.join(lockRoot, "owner.json")).catch(() => null);
+  if (owner?.token !== token) die(`checkout lock ownership changed before release: ${lockRoot}`);
+  await rm(lockRoot, { recursive: true, force: true });
+}
+
+async function withPinnedCheckoutLock(hostRoot, revision, callback, { timeoutMs = 30_000 } = {}) {
+  const lockParent = path.join(hostRoot, ".locks");
+  await ensureTerminalPhysicalDirectory(hostRoot, lockParent);
+  const lockRoot = pinnedCheckoutLockPath(hostRoot, revision);
+  const token = randomUUID();
+  const deadline = Date.now() + timeoutMs;
+  while (true) {
+    try {
+      await mkdir(lockRoot);
+      await writeFile(path.join(lockRoot, "owner.json"), `${JSON.stringify({ token, pid: process.pid, created_at: new Date().toISOString() })}\n`, { flag: "wx" });
+      break;
+    } catch (error) {
+      if (error?.code !== "EEXIST") {
+        await rm(lockRoot, { recursive: true, force: true }).catch(() => {});
+        throw error;
+      }
+      const lockInfo = await lstat(lockRoot).catch(() => null);
+      if (!lockInfo?.isDirectory() || lockInfo.isSymbolicLink()) die(`checkout lock is not an ordinary directory: ${lockRoot}`);
+      const owner = await json(path.join(lockRoot, "owner.json")).catch(() => null);
+      const ownerAgeMs = Date.now() - lockInfo.mtimeMs;
+      if ((owner && !processIsAlive(owner.pid)) || (!owner && ownerAgeMs > 5_000)) {
+        await rm(lockRoot, { recursive: true, force: true });
+        continue;
+      }
+      if (Date.now() >= deadline) die(`timed out waiting for exact-pin checkout lock: ${lockRoot}`);
+      await delay(50);
+    }
+  }
+  try {
+    return await callback();
+  } finally {
+    await removeOwnedLock(lockRoot, token);
+  }
+}
+
+export async function installPinnedCheckout(source, hostRoot, revision) {
+  const roots = await assertTerminalPinPhysicalContainment(hostRoot, revision);
+  await ensureTerminalPhysicalDirectory(roots.hostRoot, roots.pinRoot);
+  return withPinnedCheckoutLock(roots.hostRoot, revision, async () => {
+    await assertTerminalPhysicalContainment(roots.hostRoot, roots.inferenceRoot);
+    try {
+      const existing = await validatePublishedCheckout(roots.inferenceRoot, revision);
+      if (existing) return existing;
+    } catch {
+      const info = await lstat(roots.inferenceRoot).catch((error) => error?.code === "ENOENT" ? null : Promise.reject(error));
+      if (info) {
+        if (!info.isDirectory() || info.isSymbolicLink()) die("stale inference checkout root is not an ordinary exact destination");
+        await rm(roots.inferenceRoot, { recursive: true, force: true });
+      }
+    }
+    const published = await installCheckout(source, roots.inferenceRoot, revision);
+    await assertTerminalPhysicalContainment(roots.hostRoot, roots.inferenceRoot);
+    return published;
+  });
+}
+
+export async function validatePreflightTransport(planPath, transport) {
+  const { plan } = await readPlanAndLock(planPath);
+  const expected = plan.inference_preflight;
+  const observed = {
+    revision: transport.revision,
+    workflow_run_id: transport.workflowRunId,
+    artifact_name: transport.artifactName,
+  };
+  const accepted = {
+    revision: plan.inference_contract.revision,
+    workflow_run_id: expected.workflow_run_id,
+    artifact_name: expected.artifact.name,
+  };
+  if (JSON.stringify(observed) !== JSON.stringify(accepted)) die("preflight transport does not equal the sealed terminal plan");
+  return { ...accepted, workflow_run_attempt: expected.workflow_run_attempt, artifact_id: expected.artifact.id, artifact_digest: expected.artifact.digest };
+}
+
+export async function validatePreflightMetadata(planPath, artifact, run) {
+  const { plan } = await readPlanAndLock(planPath);
+  const expected = plan.inference_preflight;
+  const expectedRepository = expected.repository;
+  const observedArtifact = {
+    id: artifact?.id,
+    name: artifact?.name,
+    size_in_bytes: artifact?.size_in_bytes,
+    digest: artifact?.digest,
+    expired: artifact?.expired,
+    workflow_run_id: String(artifact?.workflow_run?.id ?? ""),
+    workflow_run_head_sha: artifact?.workflow_run?.head_sha,
+    workflow_run_repository_id: artifact?.workflow_run?.repository_id,
+    workflow_run_head_repository_id: artifact?.workflow_run?.head_repository_id,
+  };
+  const acceptedArtifact = {
+    id: expected.artifact.id,
+    name: expected.artifact.name,
+    size_in_bytes: expected.artifact.size_in_bytes,
+    digest: expected.artifact.digest,
+    expired: false,
+    workflow_run_id: expected.workflow_run_id,
+    workflow_run_head_sha: expected.head_sha,
+    workflow_run_repository_id: run?.repository?.id,
+    workflow_run_head_repository_id: run?.head_repository?.id,
+  };
+  const observedRun = {
+    id: String(run?.id ?? ""),
+    run_attempt: run?.run_attempt,
+    head_sha: run?.head_sha,
+    workflow_id: run?.workflow_id,
+    name: run?.name,
+    path: run?.path,
+    event: run?.event,
+    status: run?.status,
+    conclusion: run?.conclusion,
+    repository: run?.repository?.full_name,
+    head_repository: run?.head_repository?.full_name,
+  };
+  const acceptedRun = {
+    id: expected.workflow_run_id,
+    run_attempt: expected.workflow_run_attempt,
+    head_sha: expected.head_sha,
+    workflow_id: expected.workflow.id,
+    name: expected.workflow.name,
+    path: expected.workflow.path,
+    event: expected.workflow.event,
+    status: "completed",
+    conclusion: "success",
+    repository: expectedRepository,
+    head_repository: expectedRepository,
+  };
+  if (expectedRepository !== plan.inference_contract.repository || JSON.stringify(observedArtifact) !== JSON.stringify(acceptedArtifact) || JSON.stringify(observedRun) !== JSON.stringify(acceptedRun)) {
+    die("live preflight artifact and workflow metadata do not equal the sealed terminal plan");
+  }
+  return { artifact: acceptedArtifact, run: acceptedRun };
+}
+
+export function validateSealedPreflightIndex(observed, expected) {
+  const sealedIndex = expected && {
+    workflow_run_id: expected.workflow_run_id,
+    workflow_run_attempt: expected.workflow_run_attempt,
+    head_sha: expected.head_sha,
+    inventory_artifacts: expected.inventory_artifacts,
+    hook_logs: expected.hook_logs,
+  };
+  if (!sealedIndex || JSON.stringify(observed) !== JSON.stringify(sealedIndex)) die("preflight index does not equal the sealed terminal plan provenance");
+  return observed;
 }
 
 export async function assemblePreflight(source, destination, revision) {
@@ -153,6 +344,17 @@ export async function assemblePreflight(source, destination, revision) {
     if (!info?.isFile() || info.isSymbolicLink() || info.size === 0 || sha(await readFile(file)) !== entry.sha256) die(`preflight artifact is missing or drifted: ${entry.path}`);
   }
   await copyTree(source, destination); return index;
+}
+
+export async function assemblePinnedPreflight(source, hostRoot, planPath) {
+  const { plan } = await readPlanAndLock(planPath);
+  const expected = plan.inference_preflight;
+  const observed = await json(path.join(source, "starvector-terminal-preflight.json"));
+  validateSealedPreflightIndex(observed, expected);
+  const roots = await assertTerminalPinPhysicalContainment(hostRoot, plan.inference_contract.revision);
+  await ensureTerminalPhysicalDirectory(roots.hostRoot, roots.pinRoot);
+  await assertTerminalPhysicalContainment(roots.hostRoot, roots.preflightRoot);
+  return assemblePreflight(source, roots.preflightRoot, plan.inference_contract.revision);
 }
 
 export async function assembleWeights({ hostRoot, serviceAppData, serviceHfHome, promptProvider, promptModel, promptRevision }) {
@@ -204,11 +406,19 @@ export async function assembleMetrics({ sceneWorksRoot, metricsRoot, python, cli
 async function main(argv) {
   const [command, ...args] = argv;
   if (command === "download" && args.length === 3) return downloadExact(args[0], args[1], args[2]);
-  if (command === "checkout" && args.length === 3) return installCheckout(args[0], args[1], args[2]);
-  if (command === "preflight" && args.length === 3) return assemblePreflight(args[0], args[1], args[2]);
+  if (command === "checkout" && args.length === 3) return installPinnedCheckout(args[0], args[1], args[2]);
+  if (command === "preflight" && args.length === 3) return assemblePinnedPreflight(args[0], args[1], args[2]);
+  if (command === "preflight-transport" && args.length === 4) {
+    const accepted = await validatePreflightTransport(args[0], { revision: args[1], workflowRunId: args[2], artifactName: args[3] });
+    console.log(accepted.artifact_id);
+    return accepted;
+  }
+  if (command === "preflight-metadata" && args.length === 3) {
+    return validatePreflightMetadata(args[0], await json(args[1]), await json(args[2]));
+  }
   if (command === "weights" && args.length === 6) return assembleWeights({ hostRoot: args[0], serviceAppData: args[1], serviceHfHome: args[2], promptProvider: args[3], promptModel: args[4], promptRevision: args[5] });
   if (command === "metrics" && args.length === 4) return assembleMetrics({ sceneWorksRoot: args[0], metricsRoot: args[1], python: args[2], clipRevision: args[3] });
-  die("usage: download <url> <path> <sha256> | checkout <source> <destination> <sha> | preflight <source> <destination> <sha> | weights <host-root> <app-data-source> <hf-source> <provider> <model> <revision> | metrics <sceneworks-root> <metrics-root> <python> <clip-revision>");
+  die("usage: download <url> <path> <sha256> | checkout <source> <host-root> <sha> | preflight <source> <host-root> <plan> | preflight-transport <plan> <sha> <run-id> <artifact-name> | preflight-metadata <plan> <artifact-json> <run-json> | weights <host-root> <app-data-source> <hf-source> <provider> <model> <revision> | metrics <sceneworks-root> <metrics-root> <python> <clip-revision>");
 }
 
 if (isExecutedModule(import.meta.url)) main(process.argv.slice(2)).catch((error) => { console.error(error.message); process.exitCode = 1; });

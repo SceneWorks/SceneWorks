@@ -150,9 +150,9 @@ export async function validateCorpusAssets(inferenceRoot, corpusRelative, assets
   return { corpus_sha256: corpusSha256, row_identity_sha256: rowIdentity, index_sha256: sha(indexBytes), assets_sha256: sha(stable(assetEntries)), asset_file_references: assetEntries.length, lifecycle_sha256: lifecycle, limits_sha256: limits, prompt_sha256: promptIdentity };
 }
 
-export async function terminalReadiness({ sceneWorksRoot, planPath, inferenceRoot, weightsRoot, metricsRoot, metricsPython, assetsRoot }) {
+export async function terminalReadiness({ sceneWorksRoot, planPath, inferenceRoot, weightsRoot, metricsRoot, metricsPython, assetsRoot, permanentPin }) {
   const { plan, metrics_lock_sha256 } = await readPlanAndLock(planPath);
-  const permanentPin = plan.inference_contract.revision;
+  if (permanentPin !== plan.inference_contract.revision) die("requested permanent pin does not equal the sealed terminal plan");
   await verifyInferenceCheckout(inferenceRoot);
   await verifyPermanentPin(sceneWorksRoot, permanentPin, permanentPin);
   const route = await verifyRouteClosure(sceneWorksRoot, path.join(sceneWorksRoot, "scripts", "starvector-terminal-route.mjs"));
@@ -160,16 +160,16 @@ export async function terminalReadiness({ sceneWorksRoot, planPath, inferenceRoo
   const service = await validateTerminalServiceClosure(weightsRoot, weights);
   const metrics = await validateMetricsEnvironment(metricsRoot, metrics_lock_sha256);
   const packages = await validateMetricRuntime(metricsPython, metrics.packages);
-  const preflight = await validateInferencePreflight(inferenceRoot, permanentPin);
+  const preflight = await validateInferencePreflight(inferenceRoot, permanentPin, plan.inference_preflight);
   const corpus = await validateCorpusAssets(inferenceRoot, plan.inference_contract.corpus, assetsRoot, permanentPin);
   return { permanent_pin: permanentPin, sceneworks_revision: route.sceneworks_revision, route: { path: route.path, sha256: route.sha256, metric_path: route.metric_path, metric_sha256: route.metric_sha256 }, weights: { models: Object.fromEntries(Object.entries(weights.models).map(([key, value]) => [key, { revision: value.revision, inventory_sha256: value.inventory_sha256 }])), prompt_raster: { provider_id: weights.prompt_raster.provider_id, model: weights.prompt_raster.model, revision: weights.prompt_raster.revision, inventory_sha256: weights.prompt_raster.inventory_sha256 }, terminal_service_closure: service }, metrics: { metrics_lock_sha256, packages, lpips_linear_sha256: metrics.weights.lpips_linear.sha256, alexnet_sha256: metrics.weights.alexnet.sha256, clip_sha256: metrics.clip.checkpoint.sha256 }, inference_preflight: preflight.receipt, corpus };
 }
 
 async function main() {
-  const [sceneWorksRoot, planPath, inferenceRoot, weightsRoot, metricsRoot, metricsPython, assetsRoot, output] = process.argv.slice(2);
-  if (!output) { console.error("usage: <sceneworks-root> <plan> <inference-root> <weights-root> <metrics-root> <metrics-python> <assets-root> <output>"); process.exitCode = 2; return; }
+  const [sceneWorksRoot, planPath, inferenceRoot, weightsRoot, metricsRoot, metricsPython, assetsRoot, permanentPin, output] = process.argv.slice(2);
+  if (!output) { console.error("usage: <sceneworks-root> <plan> <inference-root> <weights-root> <metrics-root> <metrics-python> <assets-root> <permanent-pin> <output>"); process.exitCode = 2; return; }
   const report = { schema_version: 1, kind: "starvector_terminal_readiness", runner: { name: process.env.RUNNER_NAME ?? null, os: process.platform, arch: process.arch }, checked_at: new Date().toISOString(), status: "failed" };
-  try { report.readiness = await terminalReadiness({ sceneWorksRoot, planPath, inferenceRoot, weightsRoot, metricsRoot, metricsPython, assetsRoot }); report.status = "ready"; }
+  try { report.readiness = await terminalReadiness({ sceneWorksRoot, planPath, inferenceRoot, weightsRoot, metricsRoot, metricsPython, assetsRoot, permanentPin }); report.status = "ready"; }
   catch (error) { report.error = String(error?.message ?? error); process.exitCode = 1; }
   await mkdir(path.dirname(output), { recursive: true }); await writeFile(output, JSON.stringify(report, null, 2) + "\n");
   console.log(`starvector terminal readiness: ${report.status}`);

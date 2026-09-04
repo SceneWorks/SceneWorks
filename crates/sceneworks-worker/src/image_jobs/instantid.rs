@@ -1357,6 +1357,19 @@ async fn generate_instantid_stream(
                 // The caller-staged SDXL components as an `SdxlComponents` (candle only — see above).
                 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
                 sdxl,
+                // c6d prices the full Candle composition at load time. Seed the paths with the
+                // already-resolved sources; the later builders still attach those same sources
+                // so their load/reload behavior remains unchanged while the admission contract
+                // sees the complete resident stack.
+                #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+                openpose: openpose.clone(),
+                #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+                face_dir: Some(
+                    scrfd_path
+                        .parent()
+                        .unwrap_or(scrfd_path.as_path())
+                        .to_path_buf(),
+                ),
             };
             // Admitted load (sc-20799): the provider revalidates the exact route/composition/budget
             // handshake and RETAINS it, which is what makes `begin_memory_request` reachable per

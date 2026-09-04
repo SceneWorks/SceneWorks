@@ -175,6 +175,58 @@ test("provenance is stamped once on the document, never per row", async () => {
   );
 });
 
+test("InstantID provenance hashes only the parsed backend-tier contract", async () => {
+  const instantId = await readFile(
+    new URL(`../${SOURCE_PATHS.instantId}`, import.meta.url),
+    "utf8",
+  );
+  const baseline = await buildMatrix({ publish: false });
+
+  const unrelatedImplementation = await buildMatrix({
+    publish: false,
+    sourceOverrides: {
+      instantId: `${instantId}\nconst MATRIX_IRRELEVANT_INSTANTID_IMPLEMENTATION: &str = "changed";\n`,
+    },
+  });
+  assert.equal(
+    unrelatedImplementation.generatedFrom.sceneWorksRevision,
+    baseline.generatedFrom.sceneWorksRevision,
+    "implementation details outside the parsed tier contract must not rotate matrix provenance",
+  );
+
+  const changedTierSource = instantId.replace(
+    /(\#\[cfg\(not\(target_os = "macos"\)\)\]\s*let preferred = \{[\s\S]*?)"bf16"([\s\S]*?\};)/,
+    '$1"fp16"$2',
+  );
+  assert.notEqual(changedTierSource, instantId, "fixture must mutate the parsed Candle tier");
+  const changedTier = await buildMatrix({
+    publish: false,
+    sourceOverrides: { instantId: changedTierSource },
+  });
+  assert.notEqual(
+    changedTier.generatedFrom.sceneWorksRevision,
+    baseline.generatedFrom.sceneWorksRevision,
+    "a consumed tier mutation must rotate matrix provenance",
+  );
+  assert.ok(
+    baseline.cells.some(
+      (cell) =>
+        cell.modelId === "instantid_realvisxl" &&
+        cell.backend === "candle" &&
+        cell.tier === "bf16",
+    ),
+  );
+  assert.ok(
+    changedTier.cells.some(
+      (cell) =>
+        cell.modelId === "instantid_realvisxl" &&
+        cell.backend === "candle" &&
+        cell.tier === "fp16",
+    ),
+    "the tier mutation must alter generated output, not only its hash",
+  );
+});
+
 test("inventory guard rejects duplicate and unknown-scope cells", async () => {
   const cells = [
     {
