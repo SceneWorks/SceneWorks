@@ -2115,6 +2115,18 @@ export function indexLoaderClosures(body) {
 }
 
 /**
+ * The store's own record of HOW an anchor's currency key was derived (sc-22667): `null` when at
+ * the record's measurement revision, else the reviewed attestation — measured and attested
+ * revisions, class, why and witness — that `anchor-loader-closure.mjs --stamp-anchors` copied in
+ * from `config/anchor-currency-attestations.json`. Published verbatim so a current anchor never
+ * hides whether it is current by measurement or by attestation.
+ */
+export function currencyAttestationOf(anchor) {
+  const attestation = anchor?.source?.currencyAttestation;
+  return attestation && typeof attestation === "object" ? { ...attestation } : null;
+}
+
+/**
  * The lanes the analytic derivation is DEFINED and WIRED for, as `<modality>:<backend>` keys.
  *
  * Read off the Rust rather than declared here, in both halves, because both halves are code facts:
@@ -2129,10 +2141,17 @@ export function indexLoaderClosures(body) {
  * read crossed `video_admission.rs`'s backends with every declared law, so `image:candle` read as
  * wired off a file that never priced an image.
  *
- * `admissionSourcesByLane` maps `<modality>:<backend>` to `{ law, sources }`: the lane is wired
- * exactly when the law is declared in the derivation source AND some admission source both calls
- * `derive_<law>_phase_peaks` (directly or through the store's `_for_cell` fall-through, which the
- * call-name check also matches by prefix) and names the lane's `AnchorBackend`.
+ * `admissionSourcesByLane` maps `<modality>:<backend>` to `{ law, sources, entryPoints? }`: the
+ * lane is wired exactly when the law is declared in the derivation source AND some admission
+ * source both calls one of the lane's DECLARED entry points and names the lane's
+ * `AnchorBackend`. The entry points default to `derive_<law>_phase_peaks` (directly or through the
+ * store's `_for_cell` fall-through, which the call-name check also matches by prefix). The image
+ * lanes name the ONE image law as well (sc-22667, epic 22657 E3): `derive_phase_peaks` is the law
+ * both `derive_image_phase_peaks` and `derive_mlx_image_phase_peaks` translate onto, and since
+ * sc-22664/sc-22665/sc-22667 the candle ladder, the Krea lane and the MLX floor call it (or its
+ * activation half, `derive_phase_activation_residues`) directly with the rung's regime rather than
+ * through the shallow shims — so a lane priced from the law itself is wired, and a lane that calls
+ * nothing declared is not.
  */
 export function parseAnchorDerivationLanes(derivationSource, admissionSourcesByLane) {
   const declared = new Set(
@@ -2140,21 +2159,48 @@ export function parseAnchorDerivationLanes(derivationSource, admissionSourcesByL
       (match) => match[1],
     ),
   );
+  // Every anchor-derivation entry point the source declares, by full name: the per-law shims,
+  // the law itself, and its activation half.
+  const declaredEntryPoints = new Set(
+    [
+      ...derivationSource.matchAll(
+        /pub fn (derive_[a-z0-9_]*?(?:phase_peaks|phase_activation_residues))\b/g,
+      ),
+    ].map((match) => match[1]),
+  );
   const backendTokens = { mlx: "AnchorBackend::Mlx", candle: "AnchorBackend::Candle" };
   const lanes = new Set();
-  for (const [lane, { law, sources }] of Object.entries(admissionSourcesByLane)) {
+  for (const [lane, { law, sources, entryPoints }] of Object.entries(
+    admissionSourcesByLane,
+  )) {
     if (!declared.has(law)) continue;
     const backend = lane.split(":")[1];
     const token = backendTokens[backend];
     if (!token) throw new Error(`unknown backend in derivation lane ${lane}`);
+    const calls = (entryPoints ?? [`derive_${law}_phase_peaks`]).filter((name) =>
+      declaredEntryPoints.has(name),
+    );
     const wired = sources.some(
-      (source) =>
-        source.includes(`derive_${law}_phase_peaks`) && source.includes(token),
+      (source) => calls.some((name) => source.includes(name)) && source.includes(token),
     );
     if (wired) lanes.add(lane);
   }
   return lanes;
 }
+
+/**
+ * The image lanes' entry points onto the law (see `parseAnchorDerivationLanes`): the lane shim,
+ * the law itself, and — for the MLX floor — the law's activation half.
+ */
+export const IMAGE_CANDLE_DERIVATION_ENTRY_POINTS = Object.freeze([
+  "derive_image_phase_peaks",
+  "derive_phase_peaks",
+]);
+export const IMAGE_MLX_DERIVATION_ENTRY_POINTS = Object.freeze([
+  "derive_mlx_image_phase_peaks",
+  "derive_phase_activation_residues",
+  "derive_phase_peaks",
+]);
 
 /**
  * Catalog entries deliberately held OUT of the matrix universe (sc-18663, re-homed by sc-22513).
@@ -2330,8 +2376,13 @@ export async function buildMatrix({ sourceOverrides = {}, cellFilter = null, pub
     "image:candle": {
       law: "image",
       sources: [bodies.anchorAdmissionImageVram, bodies.anchorAdmissionImageCandle],
+      entryPoints: IMAGE_CANDLE_DERIVATION_ENTRY_POINTS,
     },
-    "image:mlx": { law: "mlx_image", sources: [bodies.mlxFitGate] },
+    "image:mlx": {
+      law: "mlx_image",
+      sources: [bodies.mlxFitGate],
+      entryPoints: IMAGE_MLX_DERIVATION_ENTRY_POINTS,
+    },
   });
   // sc-18815: the model universe is MODALITY-AWARE, not `type === "image"`. Every entry of an
   // admitted modality is in, whether or not anything has been measured on it — an entry the matrix
@@ -2463,6 +2514,11 @@ export async function buildMatrix({ sourceOverrides = {}, cellFilter = null, pub
               current:
                 loaderClosures.get(`${anchor.modelId}:${anchor.backend}`) ===
                 anchor.source.loaderClosureDigest,
+              // sc-22667: HOW the key was derived. `null` means at the record's own measurement
+              // revision; otherwise the reviewed currency attestation (config/
+              // anchor-currency-attestations.json) that keyed it at a later revision because the
+              // closure diff since the measurement is accounting-only or witnessed unchanged.
+              currencyAttestation: currencyAttestationOf(anchor),
               // Anchor-level derivability (epic 22505 feature-end fix round, E5): whether the
               // lane's law accepts THIS anchor, read off the store's own `underivedReason` field
               // — which the Rust laws honor byte-for-byte — with the stated reason published so
@@ -2552,6 +2608,7 @@ export async function buildMatrix({ sourceOverrides = {}, cellFilter = null, pub
       current:
         loaderClosures.get(`${anchor.modelId}:${anchor.backend}`) ===
         anchor.source.loaderClosureDigest,
+      currencyAttestation: currencyAttestationOf(anchor),
       cells: anchorCellCounts.get(anchor.id) ?? 0,
     }))
     .sort((left, right) => left.id.localeCompare(right.id));
@@ -2686,6 +2743,11 @@ export async function buildMatrix({ sourceOverrides = {}, cellFilter = null, pub
       analyticOnlyCells: anchorStore.analyticOnly,
       anchoredCells: cells.filter((cell) => cell.anchor !== null && cell.state !== "Missing").length,
       staleAnchors: anchorInventory.filter((anchor) => !anchor.current).length,
+      // sc-22667: how many of the CURRENT anchors are current by attestation rather than by
+      // measurement at the pin's own closure. A report beside `staleAnchors`, moving nothing.
+      attestedAnchors: anchorInventory.filter(
+        (anchor) => anchor.current && anchor.currencyAttestation !== null,
+      ).length,
       fullModels: 0,
     },
     models,
@@ -2757,12 +2819,14 @@ export function renderMarkdown(matrix) {
         .join(", ") || "none"
     })`,
     `- MLX staged-residency static coverage: image ${matrix.summary.mlxStagedStaticCoverage}/${matrix.summary.mlxStagedStaticCoverageDenominator}, video ${matrix.summary.videoMlxStagedStaticCoverage}/${matrix.summary.videoMlxStagedStaticCoverageDenominator}`,
-    `- Measured anchors: ${matrix.summary.anchors} (covering ${matrix.summary.anchoredCells} coordinates; ${matrix.summary.staleAnchors} stale)`,
+    `- Measured anchors: ${matrix.summary.anchors} (covering ${matrix.summary.anchoredCells} coordinates; ${matrix.summary.staleAnchors} stale; ${matrix.summary.attestedAnchors} current by attestation)`,
     `- Coordinates the store classifies analytic-only: ${matrix.summary.analyticOnlyCells}`,
     "",
     `sc-22513 (epic 22505, E5): a cell's \`state\` is a PURE FUNCTION of three facts published on the cell itself — \`implementation\` (does the code implement this rung on this route), \`anchor\` (does the store hold a measured anchor for this model x tier x backend lane) and \`derivationDefined\` (is the analytic derivation wired for this lane). Nothing else may enter it: no calibration record, no plan row, no measured geometry, no campaign, no currency digest. The per-geometry \`memoryCharacterization\` claim, the \`Verified\`/\`Runtime verified\` promotion and the per-record calibration join are GONE; the historical corpora they read are retained as validation data for the derivation, never as gates.`,
     "",
     `An anchor's CURRENCY (\`anchor.current\`, from \`config/anchor-loader-closures.json\`) is reported beside the state and deliberately does not move it — a staled loader closure means the anchor needs re-extraction, not that the rung stopped existing (sc-22511).`,
+    "",
+    "sc-22667: a current anchor also states HOW it is current. `anchor.currencyAttestation` is `null` when its key was derived at the record's own measurement revision; otherwise it is the reviewed attestation from `config/anchor-currency-attestations.json` — the closure diff from the measurement revision to the attested one was read file by file and is accounting-only, or a re-measure on the same hardware witnessed the behaviour unchanged (`class`, `why`, `witness`). An attestation is bounded to the one revision it names: the next pin bump that moves the loader closure past it stales the anchor again.",
     "",
     `sc-18099: \`cells\` is a SUBSET. ${matrix.summary.publicationPredicate} The counts on this page, \`summary\`, and the per-(entry, backend, rung) \`coverage\` census in the JSON artifact are all derived from every resolved coordinate, published or not, and \`models[].axes\` publishes the axes those coordinates span so an unimplemented lane stays distinguishable from an absent one.`,
     "",
@@ -2835,8 +2899,14 @@ export function renderMarkdown(matrix) {
     const geometry = `${anchor.geometry.width}x${anchor.geometry.height}${
       anchor.geometry.frames > 1 ? `x${anchor.geometry.frames}f` : ""
     }`;
+    const attested = anchor.currencyAttestation;
+    const current = !anchor.current
+      ? "no — re-extract"
+      : attested
+        ? `yes — attested ${attested.class} ${attested.measuredRevision.slice(0, 8)}→${attested.attestedRevision.slice(0, 8)} (${attested.story})`
+        : "yes";
     lines.push(
-      `| \`${anchor.id}\` | \`${anchor.modelId}\` | ${anchor.backend} | ${anchor.tier} | ${geometry} | ${anchor.current ? "yes" : "no — re-extract"} | ${anchor.cells} |`,
+      `| \`${anchor.id}\` | \`${anchor.modelId}\` | ${anchor.backend} | ${anchor.tier} | ${geometry} | ${current} | ${anchor.cells} |`,
     );
   }
   lines.push("");

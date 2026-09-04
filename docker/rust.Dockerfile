@@ -96,7 +96,11 @@ COPY docs/generated/memory-calibration-evidence.json ./docs/generated/
 COPY docs/generated/video-memory-curves.json ./docs/generated/
 COPY docs/generated/ltx-mlx-*.json ./docs/generated/
 COPY docs/calibration/sc-18791/ltx25-mlx-evidence.seed.json ./docs/calibration/sc-18791/
+COPY docs/calibration/sc-15859/z-image-turbo-bf16-candle-anchor.json ./docs/calibration/sc-15859/
+COPY docs/calibration/sc-15859/z-image-turbo-q4-candle-anchor.json ./docs/calibration/sc-15859/
+COPY docs/calibration/sc-15859/z-image-turbo-q8-candle-anchor.json ./docs/calibration/sc-15859/
 COPY docs/generated/krea-candle-five-rung-sc-11045.json ./docs/generated/
+COPY docs/generated/qwen-candle-five-rung-sc-15817.json ./docs/generated/
 
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/usr/local/cargo/git \
@@ -225,7 +229,11 @@ COPY docs/generated/memory-calibration-evidence.json ./docs/generated/
 COPY docs/generated/video-memory-curves.json ./docs/generated/
 COPY docs/generated/ltx-mlx-*.json ./docs/generated/
 COPY docs/calibration/sc-18791/ltx25-mlx-evidence.seed.json ./docs/calibration/sc-18791/
+COPY docs/calibration/sc-15859/z-image-turbo-bf16-candle-anchor.json ./docs/calibration/sc-15859/
+COPY docs/calibration/sc-15859/z-image-turbo-q4-candle-anchor.json ./docs/calibration/sc-15859/
+COPY docs/calibration/sc-15859/z-image-turbo-q8-candle-anchor.json ./docs/calibration/sc-15859/
 COPY docs/generated/krea-candle-five-rung-sc-11045.json ./docs/generated/
+COPY docs/generated/qwen-candle-five-rung-sc-15817.json ./docs/generated/
 
 # nvcc compiles every candle provider's CUDA kernels here (compiling needs no GPU).
 # The general Candle kernels retain compute_80 PTX, but the GGUF/MoE kernels in

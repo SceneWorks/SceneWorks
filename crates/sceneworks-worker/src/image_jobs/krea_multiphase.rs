@@ -635,6 +635,7 @@ async fn generate_krea_multiphase_stream(
             false,
             true,
             budget,
+            raw_budget.map_or(0.0, crate::vram_gate::ladder_reserve_gb),
             predicted_peak_gb,
             adapter_resident_bytes,
             if reclaimable_gb > 0.0 {

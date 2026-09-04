@@ -700,18 +700,128 @@ export function anchorMeasurementRevision(anchor, corpus) {
   return revision;
 }
 
+export const ANCHOR_CURRENCY_ATTESTATIONS_PATH = "config/anchor-currency-attestations.json";
+
+const REVISION_RE = /^[0-9a-f]{40}$/;
+
+/** The attestation fields the store carries — the file list stays in the config and its doc. */
+const STORE_ATTESTATION_FIELDS = [
+  "measuredRevision",
+  "attestedRevision",
+  "attestedAt",
+  "story",
+  "class",
+  "why",
+  "witness",
+];
+
+/**
+ * `config/anchor-currency-attestations.json`, indexed by anchor id, every entry shape-checked.
+ *
+ * WHAT AN ATTESTATION IS, AND WHAT IT IS NOT (sc-22667). The currency key is derived at the
+ * measurement revision, so a pin bump that touches a model's loader closure stales its anchors.
+ * That is the right default, and it is also only HALF of this repository's invalidation doctrine:
+ * a differing closure digest says the loader's SOURCE moved, not that its memory behaviour did.
+ * An attestation is the second half written down — a reviewed statement that the diff from the
+ * anchor's measurement revision to one named later revision was read file by file and is
+ * accounting-only (contract pricing, byte walkers, facts, tests), or that a re-measure on the
+ * same hardware witnessed the behaviour unchanged across it. With one on file, the key is derived
+ * at `attestedRevision` instead, and the attestation itself is copied into the store so the
+ * matrix reports the anchor as current BY ATTESTATION rather than by measurement.
+ *
+ * It is bounded on both ends. `measuredRevision` must still equal what the cited record says, so
+ * a re-capture that moves the record invalidates the entry loudly rather than re-keying a new
+ * measurement at an old justification; and `attestedRevision` is one revision, so the next pin
+ * bump that moves the closure past it stales the anchor again — an attestation is never "current
+ * from now on". What it must never be is a way past a load-or-device-path change with no witness;
+ * that is precisely the false green the key exists to prevent, and the reviewed narrative for
+ * every entry lives in docs/calibration/sc-22657/anchor-currency-attestation-sc-22667.md.
+ */
+export function indexCurrencyAttestations(config) {
+  const out = new Map();
+  for (const entry of config?.attestations ?? []) {
+    if (typeof entry?.anchorId !== "string" || entry.anchorId.length === 0) {
+      throw new Error(`${ANCHOR_CURRENCY_ATTESTATIONS_PATH}: an attestation names no anchorId`);
+    }
+    if (out.has(entry.anchorId)) {
+      throw new Error(`${ANCHOR_CURRENCY_ATTESTATIONS_PATH}: ${entry.anchorId} is attested twice`);
+    }
+    for (const field of ["measuredRevision", "attestedRevision"]) {
+      if (!REVISION_RE.test(entry[field] ?? "")) {
+        throw new Error(
+          `${ANCHOR_CURRENCY_ATTESTATIONS_PATH}: ${entry.anchorId} ${field} is not a 40-hex revision`,
+        );
+      }
+    }
+    if (entry.measuredRevision === entry.attestedRevision) {
+      throw new Error(
+        `${ANCHOR_CURRENCY_ATTESTATIONS_PATH}: ${entry.anchorId} attests its own measurement ` +
+          "revision — an anchor measured at the revision it is keyed to needs no attestation",
+      );
+    }
+    for (const field of ["attestedAt", "story", "class", "why", "witness"]) {
+      if (typeof entry[field] !== "string" || entry[field].trim().length === 0) {
+        throw new Error(
+          `${ANCHOR_CURRENCY_ATTESTATIONS_PATH}: ${entry.anchorId} states no ${field} — an ` +
+            "attestation without its justification is a re-stamp, which is what this file forbids",
+        );
+      }
+    }
+    if (
+      !Array.isArray(entry.filesChangedSinceMeasurement) ||
+      entry.filesChangedSinceMeasurement.some(
+        (file) => typeof file?.path !== "string" || typeof file?.class !== "string",
+      )
+    ) {
+      throw new Error(
+        `${ANCHOR_CURRENCY_ATTESTATIONS_PATH}: ${entry.anchorId} must list every closure file ` +
+          "changed between measuredRevision and attestedRevision with its class",
+      );
+    }
+    out.set(entry.anchorId, entry);
+  }
+  return out;
+}
+
+/**
+ * The revision one anchor's currency key is derived at: its attestation's `attestedRevision`
+ * when one is on file (and still describes the record — its `measuredRevision` must equal the
+ * record's), else the measurement revision itself.
+ */
+export function anchorCurrencyRevision(anchor, corpus, attestations = new Map()) {
+  const measured = anchorMeasurementRevision(anchor, corpus);
+  const attestation = attestations.get(anchor.id);
+  if (!attestation) return { revision: measured, attestation: null };
+  if (attestation.measuredRevision !== measured) {
+    throw new Error(
+      `anchor ${anchor.id} is attested from ${attestation.measuredRevision.slice(0, 8)} but its ` +
+        `record was measured at ${measured.slice(0, 8)} — the measurement moved under the ` +
+        `attestation; re-read the diff and rewrite the entry in ${ANCHOR_CURRENCY_ATTESTATIONS_PATH}, ` +
+        "or delete it",
+    );
+  }
+  return { revision: attestation.attestedRevision, attestation };
+}
+
+/** The attestation as the store carries it: the justification, not the file list. */
+function storeAttestation(attestation) {
+  return Object.fromEntries(STORE_ATTESTATION_FIELDS.map((field) => [field, attestation[field]]));
+}
+
 /**
  * `store` with every anchor's `source.loaderClosureDigest` re-derived at its own measurement
- * revision. Returns the new store and a per-anchor report.
+ * revision — or, for an anchor with a currency attestation on file, at the attested revision,
+ * with the attestation copied into `source.currencyAttestation` (and that field dropped from any
+ * anchor no longer attested). Returns the new store and a per-anchor report.
  */
-export function stampAnchorStore({ repo, store, declared, corpora }) {
+export function stampAnchorStore({ repo, store, declared, corpora, attestations = new Map() }) {
   const byRevision = new Map();
   for (const anchor of store.anchors) {
     const corpus = corpora.get(anchor.source?.path);
     if (!corpus) {
       throw new Error(`anchor ${anchor.id} cites ${anchor.source?.path}, which was not read`);
     }
-    const revision = anchorMeasurementRevision(anchor, corpus);
+    const { revision } = anchorCurrencyRevision(anchor, corpus, attestations);
     const model = `${anchor.modelId}:${anchor.backend}`;
     if (!declared[model]) {
       throw new Error(
@@ -751,10 +861,24 @@ export function stampAnchorStore({ repo, store, declared, corpora }) {
   }
   const report = [];
   const anchors = store.anchors.map((anchor) => {
-    const revision = anchorMeasurementRevision(anchor, corpora.get(anchor.source.path));
+    const { revision, attestation } = anchorCurrencyRevision(
+      anchor,
+      corpora.get(anchor.source.path),
+      attestations,
+    );
     const digest = digests.get(`${revision}|${anchor.modelId}:${anchor.backend}`);
-    report.push({ id: anchor.id, revision, digest, changed: digest !== anchor.source.loaderClosureDigest });
-    return { ...anchor, source: { ...anchor.source, loaderClosureDigest: digest } };
+    const { currencyAttestation: _previous, ...source } = anchor.source;
+    const stamped = attestation
+      ? { ...source, loaderClosureDigest: digest, currencyAttestation: storeAttestation(attestation) }
+      : { ...source, loaderClosureDigest: digest };
+    report.push({
+      id: anchor.id,
+      revision,
+      digest,
+      attested: Boolean(attestation),
+      changed: JSON.stringify(stamped) !== JSON.stringify(anchor.source),
+    });
+    return { ...anchor, source: stamped };
   });
   return { store: { ...store, anchors }, report };
 }
@@ -769,10 +893,13 @@ function usage() {
     "  --check            fail if the checked-in config does not match the derivation",
     "  --model ID         print one model's canonical closure text and exit",
     "  --stamp-anchors    re-derive every packaged anchor's currency key AT ITS OWN measurement",
-    "                     revision and write it into config/memory-anchors.json (add --check to",
-    "                     verify instead of write). The clone must carry every cited revision.",
-    "  --anchor-revisions print every revision the packaged anchors were measured at (needs no",
-    "                     --repo); this is the fetch list a shallow CI clone must satisfy",
+    "                     revision — or at the revision a reviewed currency attestation in",
+    "                     config/anchor-currency-attestations.json names for it — and write it",
+    "                     into config/memory-anchors.json (add --check to verify instead of",
+    "                     write). The clone must carry every cited revision.",
+    "  --anchor-revisions print every revision the packaged anchors were measured at, plus every",
+    "                     attested revision (needs no --repo); this is the fetch list a shallow",
+    "                     CI clone must satisfy",
     "",
     "With neither --write nor --check it prints the derived digests.",
   ].join("\n");
@@ -792,6 +919,9 @@ export async function main(argv = process.argv.slice(2)) {
   // drifting into "CI fetched four of the seven revisions and the fifth silently skipped".
   if (argv.includes("--anchor-revisions")) {
     const store = JSON.parse(await readFile(path.join(root, ANCHOR_STORE_PATH), "utf8"));
+    const attestations = indexCurrencyAttestations(
+      JSON.parse(await readFile(path.join(root, ANCHOR_CURRENCY_ATTESTATIONS_PATH), "utf8")),
+    );
     const corpora = new Map();
     const revisions = new Set();
     for (const anchor of store.anchors) {
@@ -799,7 +929,10 @@ export async function main(argv = process.argv.slice(2)) {
       if (cited && !corpora.has(cited)) {
         corpora.set(cited, JSON.parse(await readFile(path.join(root, cited), "utf8")));
       }
+      // Both the measurement revision and, where attested, the attested one: the attestation
+      // check re-reads the record's revision, and the stamp derives at the attested one.
       revisions.add(anchorMeasurementRevision(anchor, corpora.get(cited)));
+      revisions.add(anchorCurrencyRevision(anchor, corpora.get(cited), attestations).revision);
     }
     process.stdout.write(`${[...revisions].sort().join("\n")}\n`);
     return 0;
@@ -844,15 +977,20 @@ export async function main(argv = process.argv.slice(2)) {
         corpora.set(cited, JSON.parse(await readFile(path.join(root, cited), "utf8")));
       }
     }
+    const attestations = indexCurrencyAttestations(
+      JSON.parse(await readFile(path.join(root, ANCHOR_CURRENCY_ATTESTATIONS_PATH), "utf8")),
+    );
     const { store: stamped, report } = stampAnchorStore({
       repo: path.resolve(repo),
       store,
       declared,
       corpora,
+      attestations,
     });
     for (const row of report) {
       console.log(
-        `${row.changed ? "*" : " "} ${row.revision.slice(0, 8)} ${row.digest.slice(0, 16)} ${row.id}`,
+        `${row.changed ? "*" : " "} ${row.revision.slice(0, 8)} ${row.digest.slice(0, 16)} ` +
+          `${row.attested ? "attested " : ""}${row.id}`,
       );
     }
     const body = `${JSON.stringify(stamped, null, 2)}\n`;

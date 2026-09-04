@@ -1,7 +1,7 @@
 {
-  "_comment": "Exact audit of production include_str!/include_bytes! sites and known hand-ports in inference revision 670dc1f4. The digest is checked by check-license-coverage.mjs; source changes require this audit inventory to be refreshed. Tests/fixtures are outside this production inventory. Revision 670dc1f4 adds the sc-22414 GPU-view coherence guard (PR #914: mlx-llm primitives/coherence.rs mirrored as mlx-gen coherence.rs, first-party original, no ported upstream content) over 703d10d9. The exact scanner records 667 provenance candidates and 97 production-Rust crate prefixes \u2014 both unchanged from 703d10d9. Candidate movement is limited to git blob hashes; normalized provenance-marker hashes are unchanged. Current report-only licensing findings must be read from the checker output; this summary does not freeze their counts.",
-  "inferenceRevision": "670dc1f4418859cf241471987a0a050fedc108c5",
-  "auditDigest": "1e468e3f2bd1a63a38856c11a2bf788476ba905de0af91ce49da065aeed024cb",
+  "_comment": "Exact audit of production include_str!/include_bytes! sites and known hand-ports in inference revision c6d6a4db. The digest is checked by check-license-coverage.mjs; source changes require this audit inventory to be refreshed. Tests/fixtures are outside this production inventory. Revision c6d6a4db advances a5f643ae with the close of epic sc-22657: the gen-core weight walkers skip the hidden .candle-device-format-v1/ cache so the Z-Image contracts price the loaded checkpoint rather than the device-format copy, a new MemoryComponentKind::ReferenceEncoder splits the VAE encoder out of decoder_bytes as a typed auxiliary overlay, and the MLX route-facts test expectations were folded into a struct. The exact scanner records 683 provenance candidates and 97 production-Rust crate prefixes — both unchanged from a5f643ae, with no candidate path added or removed; movement is confined to git blob hashes on files that were already candidates. No new include_str!/include_bytes! site and no new hand-port appeared: the embedded-artifact inventory is still the single cmudict entry, and every changed file is first-party pricing/derivation code. Current report-only licensing findings must be read from the checker output; this summary does not freeze their counts.",
+  "inferenceRevision": "c6d6a4dbd61ab09c26ff5526632cae2cefea60ed",
+  "auditDigest": "c1890ab48504dc71abcb0c6d0943426d231b6520de65a4c16303499a8f198db1",
   "artifacts": [
     {
       "id": "cmudict",
@@ -17,12 +17,12 @@
   "provenanceScan": {
     "scanner": "scripts/scan-inference-provenance.mjs",
     "candidateList": "config/inference-provenance-candidates.tsv",
-    "revision": "670dc1f4418859cf241471987a0a050fedc108c5",
+    "revision": "c6d6a4dbd61ab09c26ff5526632cae2cefea60ed",
     "pathFilter": "production .rs; exclude tests, testdata, benches, examples, and _vendor path segments",
     "markerRegex": "faithful ... port(s), ported from, port(s) of, vendor(s)/vendored, transcribed, copied ... verbatim, adapted from, mirror(s|ed|ing) ... <port-object>, derived from ... <port-object>, reimplemented/reimplementation from|of, translated/transliterated from, from the reference (not reference-), original implementation|repo(sitory), based on ... <port-object>, follow(s|ing) ... <port-object>, reimplements ... <port-object>, rewrite of ... <port-object>, model(l)ed after ... <port-object>, ported to ... from, 1:1 with ... <port-object>, line-for-line ... <port-object> (case-insensitive; <port-object> = reference(not followed by -)|upstream|python|pytorch|torch|diffusers|comfy(ui)|transformers|implementation). `original` is NOT a bare port-object and `followed` is excluded: both produced verified false positives on first-party prose (sc-15191 review).",
     "normalization": "matched marker text lowercased, internal whitespace collapsed, sorted, newline joined",
-    "matchedFiles": 667,
-    "populationSha256": "58c26506b7d42b27b81adf589de5a741dab2d85758deb049cd232e18053143b3"
+    "matchedFiles": 683,
+    "populationSha256": "57010a05c32b161d53715bfb45954c7fc4a1c687a46a110a56b4bdbbce8486ea"
   },
   "portedSourceAreas": [
     {
@@ -830,7 +830,7 @@
   "crateCoverage": {
     "scanner": "scripts/scan-inference-provenance.mjs",
     "crateList": "config/inference-crate-prefixes.txt",
-    "revision": "670dc1f4418859cf241471987a0a050fedc108c5",
+    "revision": "c6d6a4dbd61ab09c26ff5526632cae2cefea60ed",
     "rule": "Every production-Rust crate prefix in the pinned revision must be covered by a portedSourceAreas entry OR carry an explicit crateDispositions decision. Anything else FAILS check-license-coverage.mjs.",
     "cratePrefixes": 97,
     "cratePopulationSha256": "993023a1f5832a7402f3c6aaf5989122b8d12436d69b5fd840be84ba90b329f2"

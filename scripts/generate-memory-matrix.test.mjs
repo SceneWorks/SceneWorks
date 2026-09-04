@@ -33,6 +33,8 @@ import {
   MODEL_STORIES,
   modelStory,
   OUT_OF_MATRIX_CATALOG_ENTRIES,
+  IMAGE_CANDLE_DERIVATION_ENTRY_POINTS,
+  IMAGE_MLX_DERIVATION_ENTRY_POINTS,
   parseAnchorDerivationLanes,
   parseCandleBespokeStagedLanes,
   parseInternalCandleVideoRoutes,
@@ -1834,6 +1836,37 @@ test("the derivation is defined per LANE, read off the Rust that declares and wi
   );
   // And a law nothing declares defines nothing, so the fixtures above are not a parallel universe.
   assert.ok(!parseAnchorDerivationLanes("", laneMap(wires)).size);
+
+  // sc-22667: a lane may name the law ITSELF as an entry point. It wires only when the source
+  // declares that entry point too — an entry point nothing declares wires nothing.
+  const imageDeclares =
+    "pub fn derive_phase_peaks(&self, request: &ImageDeriveRequest) {}\n" +
+    "pub fn derive_image_phase_peaks(&self, request: AnchorImageDeriveRequest) {}";
+  const imageWires =
+    "anchor.backend != sceneworks_core::memory_anchor::AnchorBackend::Candle;\n" +
+    "anchor.derive_phase_peaks(&request, components, facts)";
+  const imageLane = (entryPoints) => ({
+    "image:candle": { law: "image", sources: [imageWires], entryPoints },
+  });
+  assert.deepEqual(
+    [...parseAnchorDerivationLanes(imageDeclares, imageLane(["derive_phase_peaks"]))],
+    ["image:candle"],
+  );
+  assert.deepEqual(
+    [...parseAnchorDerivationLanes(imageDeclares, imageLane(["derive_image_phase_peaks"]))],
+    [],
+    "the source calls the law, not the shim",
+  );
+  assert.deepEqual(
+    [
+      ...parseAnchorDerivationLanes(
+        "pub fn derive_image_phase_peaks(&self) {}",
+        imageLane(["derive_phase_peaks"]),
+      ),
+    ],
+    [],
+    "an entry point the derivation source does not declare wires nothing",
+  );
 });
 
 test("the shipped derivation reaches every lane through its REAL admission source (epic 22505)", async () => {
@@ -1847,9 +1880,36 @@ test("the shipped derivation reaches every lane through its REAL admission sourc
   const lanes = parseAnchorDerivationLanes(derivation, {
     "video:mlx": { law: "video", sources: [admission] },
     "video:candle": { law: "video", sources: [admission] },
-    "image:candle": { law: "image", sources: [vram, candleStrategy] },
-    "image:mlx": { law: "mlx_image", sources: [mlxFitGate] },
+    "image:candle": {
+      law: "image",
+      sources: [vram, candleStrategy],
+      entryPoints: IMAGE_CANDLE_DERIVATION_ENTRY_POINTS,
+    },
+    "image:mlx": {
+      law: "mlx_image",
+      sources: [mlxFitGate],
+      entryPoints: IMAGE_MLX_DERIVATION_ENTRY_POINTS,
+    },
   });
+  // sc-22667: the candle image lane is wired through the LAW ITSELF — neither admission source
+  // calls the shallow `derive_image_phase_peaks` shim any more — so the wiring read must see
+  // `derive_phase_peaks`, and a read keyed on the shim alone would collapse every anchored candle
+  // image cell to `Anchored/underived` while the lane prices from the law.
+  assert.ok(
+    !vram.includes("derive_image_phase_peaks(") &&
+      !candleStrategy.includes("derive_image_phase_peaks("),
+    "no candle admission source calls the shallow shim since sc-22667",
+  );
+  assert.ok(
+    vram.includes("derive_phase_peaks(") && candleStrategy.includes("derive_phase_peaks("),
+    "both candle admission sources call the law",
+  );
+  assert.ok(
+    !parseAnchorDerivationLanes(derivation, {
+      "image:candle": { law: "image", sources: [vram, candleStrategy] },
+    }).has("image:candle"),
+    "keyed on the shim alone the lane reads unwired — which is why the entry points name the law",
+  );
   assert.deepEqual(
     [...lanes].sort(),
     ["image:candle", "image:mlx", "video:candle", "video:mlx"],
@@ -2151,4 +2211,110 @@ test("the anchor inventory is closed against the cells, in both directions (sc-2
   // The retired vocabulary may not appear as a rendered STATE (the prose says it was retired).
   assert.ok(!markdown.includes("| Runtime verified |"));
   assert.ok(!markdown.includes("| Implemented/unverified |"));
+});
+
+// ---------------------------------------------------------------------------------------------
+// sc-22666 (epic 22657 E5): every retained corpus is packaged, so a cell whose evidence is
+// committed reads `Anchored` rather than analytic-only. SHAPE, never a count: the claim is that a
+// published cell backed by a packaged anchor states that anchor and its currency, and that no
+// published cell claims an anchor the store does not carry.
+// ---------------------------------------------------------------------------------------------
+
+test("a cell whose retained corpus is packaged reads Anchored, with its currency stated", async () => {
+  const matrix = await buildMatrix();
+  const anchored = matrix.cells.filter((cell) => cell.anchor);
+  assert.ok(anchored.length > 0, "the store must anchor at least one published cell");
+  for (const cell of anchored) {
+    // A rung the route does not implement stays `Structurally N/A` whatever the store holds —
+    // `state` is a function of implementation first. The anchor claim applies to implemented rungs.
+    assert.ok(
+      cell.implementation !== "implemented" || cell.state.startsWith("Anchored"),
+      `${cell.id} cites an anchor but does not read Anchored (${cell.state})`,
+    );
+    assert.equal(
+      typeof cell.anchor.current,
+      "boolean",
+      `${cell.id} must state whether its anchor is current`,
+    );
+  }
+  // The sc-15859 Z-Image-Turbo candle captures were retained but UNPACKAGED before sc-22666, so
+  // their cells read `Implemented`. They are compiled in now, so every one of them must carry the
+  // packaged anchor, read `Anchored`, and STATE its currency. Named by cell coordinates rather
+  // than by anchor id, so a re-capture that rotates the id does not red this.
+  //
+  // CURRENCY IS NOT ASSERTED TRUE HERE, and that is the point of sc-22511: `current` is a report
+  // the MATRIX may not turn into a state, and demanding `true` would assert a coincidence about
+  // the pin. What the worker does with a non-current anchor is a different question with a
+  // different answer — admission REFUSES it and prices from the manifest floor
+  // (`candle_image_anchor` / `krea_store_anchor`), which is exactly why sc-22667 made these rows
+  // current at the pin through a reviewed attestation rather than leaving them stale (see the
+  // attestation test below and `the_production_anchor_source_admits_z_image_q4_on_eight_gb_at_
+  // rung_four_from_the_contracts_facts`, which asserts currency on the packaged row). The claims
+  // that survive here are the matrix's own: the anchor is packaged, it backs the cell, the cell
+  // reads `Anchored`, and the currency is published as a boolean either way so a stale lane
+  // cannot read identically to a fresh one.
+  const zImageCandle = matrix.cells.filter(
+    (cell) => cell.modelId === "z_image_turbo" && cell.backend === "candle",
+  );
+  assert.ok(zImageCandle.length > 0, "z_image_turbo publishes candle cells");
+  for (const cell of zImageCandle) {
+    assert.ok(cell.anchor, `${cell.id} must carry the packaged sc-15859 anchor`);
+    assert.equal(
+      typeof cell.anchor.current,
+      "boolean",
+      `${cell.id}: the packaged sc-15859 capture must publish its currency either way`,
+    );
+    if (cell.implementation === "implemented") {
+      assert.equal(cell.state, "Anchored", cell.id);
+    }
+  }
+});
+
+// ---------------------------------------------------------------------------------------------
+// sc-22667: an anchor that is current BY ATTESTATION says so — on every cell it backs, in the
+// inventory, in the summary and in the rendered table — and an anchor keyed at its own
+// measurement revision says `null`. The attestation is the store's own (`source.currencyAttestation`,
+// written by `anchor-loader-closure.mjs --stamp-anchors`), published verbatim; the matrix neither
+// invents nor drops it, so a current row can never hide HOW it is current.
+test("a current-by-attestation anchor publishes its attestation everywhere it is cited (sc-22667)", async () => {
+  const store = JSON.parse(
+    await readFile(new URL(`../${SOURCE_PATHS.anchorStore}`, import.meta.url), "utf8"),
+  );
+  const attested = store.anchors.filter((anchor) => anchor.source.currencyAttestation);
+  assert.ok(attested.length > 0, "the packaged store carries attested anchors at this pin");
+  const matrix = await buildMatrix();
+  for (const anchor of attested) {
+    const row = matrix.anchors.find((entry) => entry.id === anchor.id);
+    assert.ok(row, `${anchor.id} is in the inventory`);
+    assert.deepEqual(row.currencyAttestation, anchor.source.currencyAttestation);
+    assert.equal(row.current, true, `${anchor.id}: an attestation that leaves the anchor stale is stale itself`);
+    const cells = matrix.cells.filter((cell) => cell.anchor?.id === anchor.id);
+    assert.ok(cells.length > 0, `${anchor.id} backs a published cell`);
+    for (const cell of cells) {
+      assert.deepEqual(cell.anchor.currencyAttestation, anchor.source.currencyAttestation, cell.id);
+    }
+  }
+  for (const row of matrix.anchors.filter((entry) => !attested.some((a) => a.id === entry.id))) {
+    assert.equal(row.currencyAttestation, null, `${row.id}: unattested anchors publish null`);
+  }
+  assert.equal(
+    matrix.summary.attestedAnchors,
+    matrix.anchors.filter((row) => row.current && row.currencyAttestation).length,
+  );
+  assert.ok(matrix.summary.attestedAnchors > 0);
+  // The rendered table names the attestation on the row, and the plain "yes" is reserved for an
+  // anchor current by measurement.
+  const markdown = renderMarkdown(matrix);
+  for (const anchor of attested) {
+    const line = markdown.split("\n").find((entry) => entry.startsWith(`| \`${anchor.id}\` |`));
+    assert.ok(line, `${anchor.id} has a table row`);
+    const { class: kind, measuredRevision, attestedRevision, story } = anchor.source.currencyAttestation;
+    assert.ok(
+      line.includes(
+        `| yes — attested ${kind} ${measuredRevision.slice(0, 8)}→${attestedRevision.slice(0, 8)} (${story}) |`,
+      ),
+      line,
+    );
+  }
+  assert.match(markdown, /current by attestation\)/);
 });

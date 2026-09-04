@@ -26359,3 +26359,183 @@ fn the_guard_resident_base_table_mirrors_the_checkpoint_plan_family_tables() {
         );
     }
 }
+
+/// sc-22667 (epic 22657 feature-end round, E4/E7) wiring of the Krea 2 Turbo lane in
+/// `generate_candle_stream`, which no unit test can drive: every call into the lane's gate passes
+/// the RAW-probe reserve (`shared_reserve_gb`) explicitly after the (credited) budget, so the
+/// lane charges `ladder_reserve_gb` once on the budget side and never derives it from the
+/// reclaimable-credited pool; and both the `Fits` and the `Resident` arms EMIT the
+/// `image_memory_strategy_selected` event built by `KreaTurboFit::selection_telemetry`.
+///
+/// MUTATIONS: passing `budget` alone (dropping `shared_reserve_gb`) to any Krea gate call reds
+/// the count; deleting either `fit.selection_telemetry(..)` emission reds its block.
+#[test]
+fn candle_stream_emits_the_krea_ladder_selection() {
+    let source = include_str!("base.rs");
+    let stream = source
+        .split_once("async fn generate_candle_stream(")
+        .expect("generate_candle_stream")
+        .1;
+    let gate_calls = stream
+        .matches("crate::vram_gate::krea_turbo_fit_with_runtime(")
+        .count()
+        + stream
+            .matches("crate::vram_gate::krea_turbo_smaller_fit_with_runtime(")
+            .count();
+    assert!(gate_calls >= 2, "the Krea gate is consulted in the stream");
+    // Each gate call's argument list: `budget,` must be followed by `shared_reserve_gb,`.
+    let reserved_calls = stream
+        .match_indices("crate::vram_gate::krea_turbo_")
+        .filter(|(at, _)| {
+            let call = &stream[*at..];
+            call.starts_with("crate::vram_gate::krea_turbo_fit_with_runtime(")
+                || call.starts_with("crate::vram_gate::krea_turbo_smaller_fit_with_runtime(")
+        })
+        .filter(|(at, _)| {
+            let arguments = stream[*at..].split_once(')').map_or("", |(head, _)| head);
+            arguments
+                .split_once("budget,\n")
+                .is_some_and(|(_, rest)| rest.trim_start().starts_with("shared_reserve_gb,"))
+        })
+        .count();
+    assert_eq!(
+        reserved_calls, gate_calls,
+        "every Krea gate call passes the raw-probe reserve right after the credited budget"
+    );
+
+    let fits_arm = stream
+        .split_once("\"Krea Turbo VRAM fit ladder selected the least-cost sufficient rung\"")
+        .expect("the Fits arm")
+        .1
+        .split_once("true\n")
+        .expect("end of the Fits arm")
+        .0;
+    assert!(
+        fits_arm.contains("fit.selection_telemetry(tier, memory_width, memory_height)")
+            && fits_arm.contains("emit_event(\"image_memory_strategy_selected\", telemetry);"),
+        "the Fits arm must EMIT the Krea selection event"
+    );
+    let resident_arm = stream
+        .split_once("\"shared memory-strategy selector retained Krea Turbo resident execution\"")
+        .expect("the Resident arm")
+        .1
+        .split_once("false\n")
+        .expect("end of the Resident arm")
+        .0;
+    assert!(
+        resident_arm.contains("fit.selection_telemetry(tier, memory_width, memory_height)")
+            && resident_arm.contains("emit_event(\"image_memory_strategy_selected\", telemetry);"),
+        "the Resident arm must EMIT the Krea selection event"
+    );
+}
+
+/// sc-22664 (epic 22657 E4/E7) wiring in `generate_candle_stream`, which no unit test can drive
+/// (it probes a GPU): the shared ladder's selection EMITS the `image_memory_strategy_selected`
+/// event built by `CandleMemoryEvaluation::selection_telemetry`; the ladder's reserve is derived
+/// from the RAW probe, never from the reclaimable-credited budget (review D2); and the legacy
+/// resident-vs-free gate defers to the ladder only for a selection that engages staged residency
+/// on a provider that supports sequential offload (review minor).
+///
+/// MUTATIONS: deleting the `emit_event("image_memory_strategy_selected", telemetry)` call reds
+/// the first block; deriving `shared_reserve_gb` from `budget` (or passing `budget` instead of
+/// `shared_reserve_gb`) reds the second; dropping `sequential_capable` or `stage_residency` from
+/// the deference arm reds the third.
+#[test]
+fn candle_stream_emits_the_ladder_selection_and_charges_the_reserve_from_the_raw_probe() {
+    let source = include_str!("base.rs");
+    let stream = source
+        .split_once("async fn generate_candle_stream(")
+        .expect("generate_candle_stream")
+        .1;
+
+    // E7: the non-receipt-priced branch of the shared selection builds the telemetry from the
+    // evaluation and emits it, before the selection is adopted.
+    let selection_block = stream
+        .split_once("if let Some(evaluation) = shared_memory {")
+        .expect("shared selection adoption")
+        .1
+        .split_once("memory_strategy_selection = Some(evaluation.context.selection);")
+        .expect("end of shared selection adoption")
+        .0;
+    assert!(
+        selection_block
+            .contains("let telemetry = evaluation.selection_telemetry(engine_id, tier);"),
+        "the shared selection must build its telemetry from the evaluation the selector produced"
+    );
+    assert!(
+        selection_block.contains("emit_event(\"image_memory_strategy_selected\", telemetry);"),
+        "the shared selection must EMIT the image_memory_strategy_selected event"
+    );
+    assert!(
+        selection_block.contains("event = \"image_memory_strategy_selected\""),
+        "the shared selection must also trace the event"
+    );
+    let emit_at = selection_block
+        .find("emit_event(\"image_memory_strategy_selected\"")
+        .expect("emission");
+    let receipt_branch = selection_block
+        .find("if receipt_priced_route {")
+        .expect("receipt-priced branch");
+    assert!(
+        receipt_branch < emit_at,
+        "the emission belongs to the non-receipt-priced else-branch: receipt-priced families \
+         emit their own exact-receipt event after the load"
+    );
+
+    // D2: the reserve is derived from `raw_budget`, defined before the credited `budget`, and
+    // both shared-ladder calls pass it explicitly right after the (credited) budget.
+    let reserve_at = stream
+        .find(
+            "let shared_reserve_gb = raw_budget.map_or(0.0, crate::vram_gate::ladder_reserve_gb);",
+        )
+        .expect("the shared reserve must be derived from the raw probe");
+    let credited_at = stream
+        .find(
+            "raw_budget.map(|budget| crate::vram_gate::with_reclaimable(budget, reclaimable_gb));",
+        )
+        .expect("the credited budget");
+    assert!(
+        credited_at < reserve_at,
+        "the reserve is derived after (and not from) the credit"
+    );
+    assert!(
+        !stream.contains("ladder_reserve_gb(budget"),
+        "the ladder reserve must never be derived from the reclaimable-credited budget"
+    );
+    let shared_calls = stream
+        .match_indices("crate::candle_memory_strategy::evaluate_shared_image(")
+        .count();
+    assert_eq!(
+        shared_calls, 2,
+        "the final-pass and hires first-pass shared selections"
+    );
+    assert_eq!(
+        stream
+            .match_indices("budget,\n        shared_reserve_gb,\n        shared_predicted_peak_gb,")
+            .count()
+            + stream
+                .match_indices(
+                    "budget,\n            shared_reserve_gb,\n            shared_predicted_peak_gb,"
+                )
+                .count(),
+        2,
+        "both shared selections must pass the raw-probe reserve explicitly after the budget"
+    );
+
+    // Deference arm: gated on sequential capability AND a staging-engaging selection.
+    let deference = stream
+        .split_once("} else if sequential_capable\n                && memory_strategy_selection")
+        .expect("the legacy gate's deference arm is gated on sequential_capable")
+        .1
+        .split_once("match (needed, budget) {")
+        .expect("deference arm body")
+        .0;
+    assert!(
+        deference.contains(".is_some_and(|selection| selection.strategy.is_optimized())"),
+        "the deference arm requires an optimized selection"
+    );
+    assert!(
+        deference.contains("generation_memory.is_some_and(|memory| memory.stage_residency)"),
+        "the deference arm requires the selection to ENGAGE staged residency"
+    );
+}
