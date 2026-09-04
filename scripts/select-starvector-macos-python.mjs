@@ -6,7 +6,7 @@ import { pathToFileURL } from "node:url";
 import { spawnSync } from "node:child_process";
 
 const DEFAULT_PROBE_TIMEOUT_MS = 15_000;
-const PROBE = `import json,platform,struct,sys;print(json.dumps({"executable":sys.executable,"base_executable":getattr(sys,"_base_executable",None),"version":[sys.version_info.major,sys.version_info.minor,sys.version_info.micro],"implementation":platform.python_implementation(),"architecture":platform.machine(),"pointer_bits":struct.calcsize("P")*8}))`;
+const PROBE = `import json,platform,struct,sys;print(json.dumps({"executable":sys.executable,"base_executable":getattr(sys,"_base_executable",None),"prefix":sys.prefix,"base_prefix":sys.base_prefix,"version":[sys.version_info.major,sys.version_info.minor,sys.version_info.micro],"implementation":platform.python_implementation(),"architecture":platform.machine(),"pointer_bits":struct.calcsize("P")*8}))`;
 
 function safeAbsolutePath(value) {
   return typeof value === "string" && path.isAbsolute(value) && !/[\0\r\n"]/.test(value);
@@ -40,7 +40,9 @@ function parseIdentity(stdout) {
 export function probeStarVectorMacPython(value, { timeoutMs = DEFAULT_PROBE_TIMEOUT_MS } = {}) {
   const executable = executableRealpath(value);
   if (!executable) return null;
-  const probe = spawnSync(executable, ["-c", PROBE], {
+  // Invoke the supplied path, not its realpath: CPython finds a venv's adjacent
+  // pyvenv.cfg through that path even when bin/python is a symlink to the base interpreter.
+  const probe = spawnSync(path.resolve(value), ["-c", PROBE], {
     encoding: "utf8",
     timeout: timeoutMs,
     maxBuffer: 1024 * 1024,
@@ -80,6 +82,23 @@ export function validateStarVectorMacVenv(bootstrapPath, venvPythonPath, options
   if (!baseExecutable || baseExecutable !== bootstrap.executable || venv.identity.version.some((part, index) => part !== bootstrap.identity.version[index])) {
     throw new Error("StarVector terminal metrics venv is not bound to the selected exact CPython 3.12 arm64 interpreter");
   }
+  const expectedPrefix = path.dirname(path.dirname(path.resolve(venvPythonPath)));
+  if (!safeAbsolutePath(venv.identity.prefix) || !safeAbsolutePath(venv.identity.base_prefix)) {
+    throw new Error("StarVector terminal metrics venv does not report valid prefix identities");
+  }
+  let canonicalExpectedPrefix;
+  let canonicalObservedPrefix;
+  let canonicalBasePrefix;
+  try {
+    canonicalExpectedPrefix = realpathSync(expectedPrefix);
+    canonicalObservedPrefix = realpathSync(venv.identity.prefix);
+    canonicalBasePrefix = realpathSync(venv.identity.base_prefix);
+  } catch {
+    throw new Error("StarVector terminal metrics venv does not report valid prefix identities");
+  }
+  if (canonicalObservedPrefix !== canonicalExpectedPrefix || canonicalObservedPrefix === canonicalBasePrefix) {
+    throw new Error("StarVector terminal metrics Python is not an isolated venv at the expected metrics root");
+  }
   return { bootstrap, venv };
 }
 
@@ -113,7 +132,8 @@ export function removeStarVectorMacMetricsTree(targetRoot, allowedRoot) {
     const frame = pending.pop();
     const item = lstatSync(frame.file);
     if (item.isSymbolicLink()) {
-      throw new Error(`refusing to remove a metrics venv containing a symlink: ${frame.file}`);
+      unlinkSync(frame.file);
+      continue;
     }
     if (!item.isDirectory()) {
       if (!item.isFile()) throw new Error(`refusing to remove a metrics venv containing a special file: ${frame.file}`);
@@ -122,11 +142,6 @@ export function removeStarVectorMacMetricsTree(targetRoot, allowedRoot) {
     }
     if (!frame.expanded) {
       const children = readdirSync(frame.file).map((name) => path.join(frame.file, name));
-      for (const child of children) {
-        if (lstatSync(child).isSymbolicLink()) {
-          throw new Error(`refusing to remove a metrics venv containing a symlink: ${child}`);
-        }
-      }
       pending.push({ file: frame.file, expanded: true });
       for (let index = children.length - 1; index >= 0; index -= 1) {
         pending.push({ file: children[index], expanded: false });

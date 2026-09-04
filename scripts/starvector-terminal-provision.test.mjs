@@ -194,6 +194,11 @@ test("terminal metrics provisioning fixes CPython 3.12 and wheel-only installati
   assert.match(macosPythonSelector, /identity\.implementation === "CPython"/);
   assert.match(macosPythonSelector, /\["arm64", "aarch64"\]\.includes\(identity\.architecture\.toLowerCase\(\)\)/);
   assert.match(macosPythonSelector, /identity\.pointer_bits === 64/);
+  assert.match(macosPythonSelector, /"prefix":sys\.prefix,"base_prefix":sys\.base_prefix/);
+  assert.match(macosPythonSelector, /spawnSync\(path\.resolve\(value\)/);
+  assert.doesNotMatch(macosPythonSelector, /spawnSync\(executable,/);
+  assert.match(macosPythonSelector, /canonicalObservedPrefix !== canonicalExpectedPrefix \|\| canonicalObservedPrefix === canonicalBasePrefix/);
+  assert.match(macosPythonSelector, /if \(item\.isSymbolicLink\(\)\) \{\s+unlinkSync\(frame\.file\);/);
 
   const start = workflow.indexOf("- name: Provision pinned metric runtime and official checkpoints", workflow.indexOf("  provision-windows:"));
   const end = workflow.indexOf("- name: Materialize the exact pinned 120-row corpus", start);
@@ -211,14 +216,21 @@ test("macOS Python selection ignores unwritable action caches and verifies the e
   const root = await mkdtemp(path.join(tmpdir(), "starvector-macos-python-"));
   const writeFakePython = async (name, identity, exitCode = 0) => {
     const executable = path.join(root, name);
-    const payload = JSON.stringify({ executable, base_executable: identity.base_executable ?? executable, ...identity });
+    await mkdir(path.dirname(executable), { recursive: true });
+    const payload = JSON.stringify({
+      executable,
+      base_executable: identity.base_executable ?? executable,
+      prefix: identity.prefix ?? path.dirname(path.dirname(executable)),
+      base_prefix: identity.base_prefix ?? root,
+      ...identity,
+    });
     await writeFile(executable, `#!/bin/sh\nprintf '%s\\n' '${payload}'\nexit ${exitCode}\n`);
     await chmod(executable, 0o755);
     return executable;
   };
   const invalid = await writeFakePython("python-invalid", { version: [3, 14, 1], implementation: "CPython", architecture: "arm64", pointer_bits: 64 });
-  const bootstrap = await writeFakePython("python-valid", { version: [3, 12, 13], implementation: "CPython", architecture: "arm64", pointer_bits: 64 });
-  const venv = await writeFakePython("venv-python", { base_executable: bootstrap, version: [3, 12, 13], implementation: "CPython", architecture: "arm64", pointer_bits: 64 });
+  const bootstrap = await writeFakePython("python-valid", { prefix: root, base_prefix: root, version: [3, 12, 13], implementation: "CPython", architecture: "arm64", pointer_bits: 64 });
+  const venv = await writeFakePython("metrics/bin/python", { base_executable: bootstrap, version: [3, 12, 13], implementation: "CPython", architecture: "arm64", pointer_bits: 64 });
   const previousRunnerCache = process.env.RUNNER_TOOL_CACHE;
   const previousAgentTools = process.env.AGENT_TOOLSDIRECTORY;
   process.env.RUNNER_TOOL_CACHE = "/root/unwritable-hostedtoolcache";
@@ -230,27 +242,53 @@ test("macOS Python selection ignores unwritable action caches and verifies the e
     if (previousRunnerCache === undefined) delete process.env.RUNNER_TOOL_CACHE; else process.env.RUNNER_TOOL_CACHE = previousRunnerCache;
     if (previousAgentTools === undefined) delete process.env.AGENT_TOOLSDIRECTORY; else process.env.AGENT_TOOLSDIRECTORY = previousAgentTools;
   }
-  const wrongMicro = await writeFakePython("venv-wrong-micro", { base_executable: bootstrap, version: [3, 12, 12], implementation: "CPython", architecture: "arm64", pointer_bits: 64 });
+  assert.throws(() => validateStarVectorMacVenv(bootstrap, bootstrap), /not an isolated venv/);
+  const wrongMicro = await writeFakePython("wrong-metrics/bin/python", { base_executable: bootstrap, version: [3, 12, 12], implementation: "CPython", architecture: "arm64", pointer_bits: 64 });
   assert.throws(() => validateStarVectorMacVenv(bootstrap, wrongMicro), /selected exact CPython/);
   await chmod(bootstrap, 0o644);
   assert.throws(() => selectStarVectorMacPython([bootstrap]), /existing absolute CPython/);
 });
 
-test("macOS stale metrics cleanup is exact-root bounded and refuses symlink escape", async () => {
+function selectLocalMacPythonOrSkip(context) {
+  try {
+    return selectStarVectorMacPython(["/opt/homebrew/bin/python3.12", "/usr/local/bin/python3.12"]);
+  } catch {
+    context.skip("requires a local CPython 3.12 arm64 interpreter");
+    return null;
+  }
+}
+
+test("macOS venv validation executes the supplied venv path and rejects the bootstrap itself", async (context) => {
+  const bootstrap = selectLocalMacPythonOrSkip(context);
+  if (!bootstrap) return;
+  const root = await mkdtemp(path.join(tmpdir(), "starvector-real-macos-venv-"));
+  const metrics = path.join(root, "metrics");
+  await execFile(bootstrap.executable, ["-m", "venv", metrics]);
+  const validated = validateStarVectorMacVenv(bootstrap.executable, path.join(metrics, "bin", "python"));
+  assert.equal(await realpath(validated.venv.identity.prefix), await realpath(metrics));
+  assert.notEqual(await realpath(validated.venv.identity.prefix), await realpath(validated.venv.identity.base_prefix));
+  assert.throws(() => validateStarVectorMacVenv(bootstrap.executable, bootstrap.executable), /not an isolated venv/);
+  removeStarVectorMacMetricsTree(metrics, metrics);
+});
+
+test("macOS stale metrics cleanup removes real venv symlinks without traversing external targets", async (context) => {
+  const bootstrap = selectLocalMacPythonOrSkip(context);
+  if (!bootstrap) return;
   const root = await mkdtemp(path.join(tmpdir(), "starvector-macos-metrics-"));
   const metrics = path.join(root, "metrics");
   const outside = path.join(root, "outside");
-  await mkdir(path.join(metrics, "nested"), { recursive: true });
+  await execFile(bootstrap.executable, ["-m", "venv", metrics]);
   await mkdir(outside, { recursive: true });
-  await writeFile(path.join(metrics, "nested", "inside.txt"), "inside");
   await writeFile(path.join(outside, "sentinel.txt"), "outside");
   assert.throws(() => removeStarVectorMacMetricsTree(metrics, path.join(root, "wrong")), /exact workflow-owned terminal root/);
-  await symlink(outside, path.join(metrics, "escape"));
-  assert.throws(() => removeStarVectorMacMetricsTree(metrics, metrics), /containing a symlink/);
-  assert.equal(await readFile(path.join(outside, "sentinel.txt"), "utf8"), "outside");
-  await rename(path.join(metrics, "escape"), path.join(root, "detached-symlink"));
+  await symlink(outside, path.join(metrics, "external-link"));
   removeStarVectorMacMetricsTree(metrics, metrics);
   assert.equal(await lstat(metrics).catch((error) => error.code === "ENOENT" ? null : Promise.reject(error)), null);
+  assert.equal(await readFile(path.join(outside, "sentinel.txt"), "utf8"), "outside");
+
+  const rootSymlink = path.join(root, "metrics-root-link");
+  await symlink(outside, rootSymlink);
+  assert.throws(() => removeStarVectorMacMetricsTree(rootSymlink, rootSymlink), /root is a symlink|containing a symlink/);
   assert.equal(await readFile(path.join(outside, "sentinel.txt"), "utf8"), "outside");
 });
 
