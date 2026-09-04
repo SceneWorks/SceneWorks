@@ -58,6 +58,8 @@ on:
         required: true
         type: string
     secrets:
+      STARVECTOR_UPSTREAM_COMPONENTS_JSON:
+        required: true
       INFERENCE_READ_TOKEN:
         required: true
 
@@ -298,6 +300,13 @@ jobs:
             Remove-Item Env:RUSTC_WRAPPER -ErrorAction SilentlyContinue
             cargo run --release --locked -p sceneworks-worker --bin starvector_terminal_corpus -- "$env:STARVECTOR_TERMINAL_INFERENCE_ROOT\release\starvector-terminal-corpus-v1.json" "$env:RUNNER_TEMP\starvector-parquet" $env:STARVECTOR_TERMINAL_CORPUS_ASSETS_ROOT $env:STARVECTOR_INFERENCE_REVISION $env:STARVECTOR_PROMPT_PROVIDER $env:STARVECTOR_PROMPT_MODEL $env:STARVECTOR_PROMPT_REVISION $inventory
           }
+      - name: Materialize authorized offline component configs from confidential transport
+        shell: powershell
+        env:
+          STARVECTOR_UPSTREAM_COMPONENTS_JSON: ${{ secrets.STARVECTOR_UPSTREAM_COMPONENTS_JSON }}
+        run: |
+          node scripts/starvector-terminal-components.mjs install release/starvector-terminal-upstream-lock-v1.json "$env:STARVECTOR_TERMINAL_ROOT/upstream-components"
+          if ($LASTEXITCODE -ne 0) { throw 'component bundle identity or readback failed' }
       - name: Provision audited upstream validation closure without executing models
         shell: powershell
         timeout-minutes: 75
