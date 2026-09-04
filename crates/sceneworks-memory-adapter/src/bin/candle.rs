@@ -3,9 +3,9 @@ compile_error!("memory-candle-adapter is supported only on CUDA hosts");
 
 use candle_gen::testkit::{StableIdleConfig, VramProbe};
 use runtime_cuda::gen_core::{
-    adapter_stack_identity, AdapterKind, AdapterSpec, GenerationOutput, GenerationRequest,
-    LoadShape, LoadSpec, MemoryBudget, MemoryCacheState, MemoryGeometry, MemoryMode,
-    MemoryNumericTier, MemoryOptimizationAuthority, MemoryPhase, MemoryRunContext,
+    adapter_stack_identity, AdapterKind, AdapterSpec, Conditioning, GenerationOutput,
+    GenerationRequest, Image, LoadShape, LoadSpec, MemoryBudget, MemoryCacheState, MemoryGeometry,
+    MemoryMode, MemoryNumericTier, MemoryOptimizationAuthority, MemoryPhase, MemoryRunContext,
     MemoryRunOutcome, MemorySafetyDecision, MemorySelection, MemoryStrategy,
     MemoryStrategyParameters, OffloadPolicy, Precision, Progress, Quant, TransformerComponent,
     WeightsSource,
@@ -34,6 +34,26 @@ const Z_IMAGE_TURBO_PLAIN_EXECUTION_PATH: &str =
 /// The label the Z-Image-Turbo arm refuses a non-still geometry under; see
 /// [`still_calibration_label`].
 const Z_IMAGE_TURBO_STILL_CALIBRATION: &str = "Candle Z-Image-Turbo base calibration";
+/// `z_image_edit` is a catalog alias for the Turbo provider driven in `edit_image` mode (worker
+/// `engines.rs`; on Candle the registered Turbo generator's `Conditioning::Reference` route,
+/// sc-11783). Its anchors plan `provider: z_image_turbo, mode: edit_image`; the SAME loaded Turbo
+/// generator is conditioned on one reference image (sc-22724).
+const Z_IMAGE_TURBO_EDIT_EXECUTION_PATH: &str =
+    "the Candle Z-Image-Turbo reference-conditioned edit path (the z_image_edit route)";
+/// The worker's production edit strength default (`resolve_zimage_edit_init`, `advanced.strength`).
+const Z_IMAGE_EDIT_STRENGTH: f32 = 0.6;
+/// Edit captures run four steps: the img2img start step is `floor(steps * strength)` (the shared
+/// `init_time_step` law), so `4 * 0.6` starts at step 2 and leaves two executed denoise steps —
+/// the same two-step conditioning/denoise phase shape the text-to-image captures use.
+const Z_IMAGE_EDIT_STEPS: u32 = 4;
+/// The undistilled Z-Image BASE provider (sc-22724): registry id of `candle-gen-z-image`'s
+/// `base` generator, its own artifact family (`SceneWorks/z-image-mlx`, `SCENEWORKS_Z_IMAGE_BASE_*`)
+/// and real CFG in the denoise loop.
+const Z_IMAGE_ID: &str = "z_image";
+const Z_IMAGE_PLAIN_EXECUTION_PATH: &str = "the Candle Z-Image base-model text-to-image path";
+/// The label the Z-Image base arm refuses a non-still geometry under; see
+/// [`still_calibration_label`].
+const Z_IMAGE_STILL_CALIBRATION: &str = "Candle Z-Image base-model calibration";
 const LTX25_ID: &str = "ltx_2_5_distilled";
 const LTX25_EXECUTION_PATH: &str =
     "the Candle LTX-2.5 text-to-video base recipe (including the official dev refinement LoRA)";
@@ -607,11 +627,31 @@ fn planned_provider(request: &Value) -> Result<&str, String> {
         .ok_or_else(|| "planned.target.provider must be a string".to_owned())
 }
 
+fn planned_mode(request: &Value) -> Result<&str, String> {
+    protocol::planned(request)?
+        .pointer("/target/mode")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "planned.target.mode must be a string".to_owned())
+}
+
+/// Whether this case is the `z_image_edit` route: the Turbo provider in `edit_image` mode. Every
+/// other provider this adapter implements is measured text-to-image regardless of the mode
+/// spelling, exactly as before; only the Turbo arm has a second mode it can actually execute.
+fn is_z_image_edit(request: &Value) -> Result<bool, String> {
+    Ok(planned_provider(request)? == Z_IMAGE_TURBO_ID && planned_mode(request)? == "edit_image")
+}
+
 fn plain_execution_path(request: &Value) -> Result<&'static str, String> {
     match planned_provider(request)? {
         "qwen_image" => Ok(QWEN_PLAIN_EXECUTION_PATH),
         "krea_2_turbo" => Ok(KREA_PLAIN_EXECUTION_PATH),
-        "z_image_turbo" => Ok(Z_IMAGE_TURBO_PLAIN_EXECUTION_PATH),
+        "z_image_turbo" => Ok(if is_z_image_edit(request)? {
+            Z_IMAGE_TURBO_EDIT_EXECUTION_PATH
+        } else {
+            Z_IMAGE_TURBO_PLAIN_EXECUTION_PATH
+        }),
+        // sc-22724: the undistilled base is its own registry id with its own artifact family.
+        "z_image" => Ok(Z_IMAGE_PLAIN_EXECUTION_PATH),
         provider => Err(format!(
             "Candle five-rung calibration does not implement provider {provider:?}"
         )),
@@ -636,6 +676,7 @@ fn still_calibration_label(request: &Value) -> Result<&'static str, String> {
         QWEN_ID => Ok(QWEN_STILL_CALIBRATION),
         KREA_ID => Ok(KREA_STILL_CALIBRATION),
         Z_IMAGE_TURBO_ID => Ok(Z_IMAGE_TURBO_STILL_CALIBRATION),
+        Z_IMAGE_ID => Ok(Z_IMAGE_STILL_CALIBRATION),
         provider => Err(format!(
             "Candle five-rung calibration does not implement provider {provider:?}"
         )),
@@ -802,11 +843,23 @@ fn load_five_rung_generator(request: &Value) -> Result<LoadedFiveRungGenerator, 
             // environment").
             "z_image_turbo" => (
                 Z_IMAGE_TURBO_ID,
-                Z_IMAGE_TURBO_PLAIN_EXECUTION_PATH,
+                // The edit route (`z_image_edit`) loads the same Turbo provider from the same
+                // artifact; only the generation request and the admitted mode differ.
+                plain_execution_path(request)?,
                 "SCENEWORKS_Z_IMAGE_REPOSITORY",
                 "SCENEWORKS_Z_IMAGE_REVISION",
                 "SCENEWORKS_Z_IMAGE_ROOT",
                 protocol::Z_IMAGE_REPOSITORY,
+            ),
+            // sc-22724. The base model's own rehost, bound through its own env family so a base
+            // plan can never be satisfied by Turbo weights.
+            "z_image" => (
+                Z_IMAGE_ID,
+                Z_IMAGE_PLAIN_EXECUTION_PATH,
+                "SCENEWORKS_Z_IMAGE_BASE_REPOSITORY",
+                "SCENEWORKS_Z_IMAGE_BASE_REVISION",
+                "SCENEWORKS_Z_IMAGE_BASE_ROOT",
+                protocol::Z_IMAGE_BASE_REPOSITORY,
             ),
             provider => {
                 return Err(format!(
@@ -838,11 +891,11 @@ fn load_five_rung_generator(request: &Value) -> Result<LoadedFiveRungGenerator, 
         // carry no quant at all (`Quant::None` — the same shape the worker's `tier_to_quant` uses).
         (KREA_ID, Some(quant)) => spec.with_quant(quant),
         (KREA_ID, None) => spec,
-        // Qwen and Z-Image-Turbo packed Diffusers snapshots declare their device-format
-        // quantization in transformer/config.json (`snapshot_quant_tier` in candle-gen-z-image's
-        // memory_strategy.rs). Passing LoadSpec.quant would request a second, unsupported runtime
-        // quantization pass — both loaders reject it by name — instead of loading the packed
-        // artifact as authored.
+        // Qwen, Z-Image-Turbo and the Z-Image base packed Diffusers snapshots declare their
+        // device-format quantization in transformer/config.json (`snapshot_quant_tier` in
+        // candle-gen-z-image's memory_strategy.rs). Passing LoadSpec.quant would request a second,
+        // unsupported runtime quantization pass — every one of those loaders rejects it by name —
+        // instead of loading the packed artifact as authored.
         _ => spec,
     };
     let catalog =
@@ -919,14 +972,22 @@ fn run_five_rung_reference_loaded(
         .pointer("/hardware/memoryBytes")
         .and_then(Value::as_u64)
         .ok_or_else(|| "run request.hardware.memoryBytes must be an integer".to_owned())?;
+    // sc-22724: the mode the plan declared, as the worker would admit it. The `z_image_edit`
+    // route carries one reference and is admitted under `MemoryMode::Edit` (the contract the
+    // `z_image_edit` manifest entry declares for the Turbo provider).
+    let edit = is_z_image_edit(request)?;
     let context = MemoryRunContext {
         selection,
         optimization_authority: MemoryOptimizationAuthority::Calibrated,
         calibration_abi: calibration.abi,
         calibration_fingerprint: calibration.fingerprint.clone(),
         load_shape: calibration.load_shape,
-        mode: MemoryMode::TextToImage,
-        has_reference: false,
+        mode: if edit {
+            MemoryMode::Edit
+        } else {
+            MemoryMode::TextToImage
+        },
+        has_reference: edit,
         use_pid: false,
         has_phases: false,
         geometry: MemoryGeometry {
@@ -934,7 +995,7 @@ fn run_five_rung_reference_loaded(
             height,
             batch: 1,
             frames: 1,
-            reference_count: 0,
+            reference_count: u32::from(edit),
         },
         overlay: None,
         budget: MemoryBudget {
@@ -977,18 +1038,7 @@ fn run_five_rung_reference_loaded(
                 format!("configure {provider_id} fresh-reference transformer: {error}")
             })?;
     }
-    let mut generation = GenerationRequest {
-        prompt: "a photorealistic red apple on a wooden table, studio lighting".to_owned(),
-        width,
-        height,
-        count: 1,
-        seed: Some(16402),
-        // Two steps are intentional: resident Krea has no provider loading boundary between text
-        // encode and denoise. The first Step callback closes a conservative conditioning envelope;
-        // the second step then gives denoise its own measured interval before Decoding.
-        steps: Some(2),
-        ..Default::default()
-    };
+    let mut generation = five_rung_generation_request(width, height, edit);
     scope
         .configure_request(&mut generation)
         .map_err(|error| format!("apply {provider_id} fresh-reference strategy: {error}"))?;
@@ -1103,6 +1153,12 @@ fn run_five_rung_reference_loaded(
             "the Candle Z-Image-Turbo lane; it intentionally remains gated because this run does ",
             "not repeat the full promotion-quality, negative-mutation, and lifecycle scenario suite"
         )
+    } else if provider_id == Z_IMAGE_ID {
+        concat!(
+            "sc-22724 anchor capture measures exact per-phase memory and strategy identity for ",
+            "the Candle Z-Image base lane; it intentionally remains gated because this run does ",
+            "not repeat the full promotion-quality, negative-mutation, and lifecycle scenario suite"
+        )
     } else {
         concat!(
             "five-rung oracle capture measures exact per-rung memory and strategy identity for ",
@@ -1149,6 +1205,38 @@ fn run_five_rung_reference_loaded(
         "overall": cuda_phase_metrics(overall_bytes),
     });
     Ok(fragment)
+}
+
+/// The one fresh planned request every five-rung reference renders. Two steps are intentional:
+/// a resident image provider has no loading boundary between text encode and denoise, so the
+/// first Step callback closes a conservative conditioning envelope and the second gives denoise
+/// its own measured interval before Decoding. The edit route (sc-22724) is the worker's edit
+/// request — one `Conditioning::Reference` fitted to the request geometry plus the strength
+/// lever (`resolve_zimage_edit_init`) — with the step count raised so the engine-derived start
+/// step (`floor(steps * strength)`) still leaves two executed denoise steps.
+fn five_rung_generation_request(width: u32, height: u32, edit: bool) -> GenerationRequest {
+    let mut generation = GenerationRequest {
+        prompt: "a photorealistic red apple on a wooden table, studio lighting".to_owned(),
+        width,
+        height,
+        count: 1,
+        seed: Some(16402),
+        steps: Some(2),
+        ..Default::default()
+    };
+    if edit {
+        generation.steps = Some(Z_IMAGE_EDIT_STEPS);
+        generation.strength = Some(Z_IMAGE_EDIT_STRENGTH);
+        generation.conditioning = vec![Conditioning::Reference {
+            image: Image {
+                width,
+                height,
+                pixels: protocol::synthetic_reference_rgb(width, height),
+            },
+            strength: Some(Z_IMAGE_EDIT_STRENGTH),
+        }];
+    }
+    generation
 }
 
 fn run_five_rung_reference(request: &Value) -> Result<Value, String> {
@@ -1774,10 +1862,13 @@ fn routes_to_five_rung_reference(request: &Value) -> Result<bool, String> {
         .get("fixture")
         .and_then(Value::as_str)
         .is_some_and(|fixture| fixture.starts_with(FIVE_RUNG_FIXTURE_PREFIX));
-    // Qwen and Z-Image-Turbo have no inline arm at all, so every fixture on them is a five-rung
-    // reference capture regardless of its spelling.
+    // Qwen, Z-Image-Turbo and the Z-Image base have no inline arm at all, so every fixture on
+    // them is a five-rung reference capture regardless of its spelling.
     let provider = planned_provider(request)?;
-    Ok(is_five_rung_fixture || provider == QWEN_ID || provider == Z_IMAGE_TURBO_ID)
+    Ok(is_five_rung_fixture
+        || provider == QWEN_ID
+        || provider == Z_IMAGE_TURBO_ID
+        || provider == Z_IMAGE_ID)
 }
 
 fn run(request: &Value) -> Result<Value, String> {
@@ -2609,6 +2700,11 @@ mod tests {
                 Z_IMAGE_TURBO_STILL_CALIBRATION,
                 "fresh-five-rung-unused",
             ),
+            (
+                Z_IMAGE_ID,
+                Z_IMAGE_STILL_CALIBRATION,
+                "fresh-five-rung-unused",
+            ),
             // The inline Krea arm — a real shipped plan fixture, which the two rows above cannot
             // reach.
             (KREA_ID, KREA_STILL_CALIBRATION, "krea-q4-1024-seed42"),
@@ -2632,6 +2728,7 @@ mod tests {
             (QWEN_ID, QWEN_STILL_CALIBRATION),
             (KREA_ID, KREA_STILL_CALIBRATION),
             (Z_IMAGE_TURBO_ID, Z_IMAGE_TURBO_STILL_CALIBRATION),
+            (Z_IMAGE_ID, Z_IMAGE_STILL_CALIBRATION),
         ] {
             for frames in [0_u64, 2, 97] {
                 let expected = format!("{label} requires geometry.frames == 1, got {frames}");
@@ -2679,6 +2776,11 @@ mod tests {
             ),
             // No inline arm exists for Z-Image-Turbo, so an off-prefix fixture still routes here.
             (Z_IMAGE_TURBO_ID, "z-image-turbo-any-other-fixture"),
+            // sc-22724: nor for the base, whose shipped fixtures carry the sc-16170 spelling.
+            (
+                Z_IMAGE_ID,
+                "sc-16170-z-image-q4-1024-text_to_image-none-seed16170",
+            ),
         ] {
             let request = json!({
                 "planned": still_planned_case_with_fixture(provider, "resident", 1, fixture)
@@ -2690,11 +2792,70 @@ mod tests {
         }
     }
 
+    /// sc-22724: the `z_image_edit` route is the Turbo provider in `edit_image` mode — the same
+    /// loader, a distinct execution path, and one reference on the request — and only the Turbo
+    /// arm has that second mode.
+    #[test]
+    fn the_z_image_edit_route_is_the_turbo_arm_in_edit_mode() {
+        let mut edit = still_planned_case(Z_IMAGE_TURBO_ID, "resident", 1);
+        edit["target"]["mode"] = json!("edit_image");
+        edit["target"]["modelId"] = json!("z_image_edit");
+        let request = json!({ "planned": edit });
+        assert!(is_z_image_edit(&request).unwrap());
+        assert_eq!(
+            plain_execution_path(&request).unwrap(),
+            Z_IMAGE_TURBO_EDIT_EXECUTION_PATH
+        );
+        assert!(routes_to_five_rung_reference(&request).unwrap());
+        let plain = json!({ "planned": still_planned_case(Z_IMAGE_TURBO_ID, "resident", 1) });
+        assert!(!is_z_image_edit(&plain).unwrap());
+        assert_eq!(
+            plain_execution_path(&plain).unwrap(),
+            Z_IMAGE_TURBO_PLAIN_EXECUTION_PATH
+        );
+        // The base has no edit route; its mode does not change its path.
+        let mut base = still_planned_case(Z_IMAGE_ID, "resident", 1);
+        base["target"]["mode"] = json!("edit_image");
+        let base = json!({ "planned": base });
+        assert!(!is_z_image_edit(&base).unwrap());
+        assert_eq!(
+            plain_execution_path(&base).unwrap(),
+            Z_IMAGE_PLAIN_EXECUTION_PATH
+        );
+    }
+
+    /// sc-22724: the edit request is the worker's — one reference at the target geometry plus the
+    /// production strength — and the text-to-image request carries none.
+    #[test]
+    fn the_edit_generation_request_carries_one_reference_at_the_target_geometry() {
+        let edit = five_rung_generation_request(1024, 768, true);
+        assert_eq!(edit.conditioning.len(), 1);
+        match &edit.conditioning[0] {
+            Conditioning::Reference { image, strength } => {
+                assert_eq!((image.width, image.height), (1024, 768));
+                assert_eq!(image.pixels.len(), 1024 * 768 * 3);
+                assert_eq!(*strength, Some(Z_IMAGE_EDIT_STRENGTH));
+            }
+            other => panic!("expected one Reference, got {other:?}"),
+        }
+        assert_eq!(edit.strength, Some(Z_IMAGE_EDIT_STRENGTH));
+        assert_eq!(edit.steps, Some(Z_IMAGE_EDIT_STEPS));
+        // floor(4 * 0.6) = 2: two executed denoise steps remain behind the conditioning boundary.
+        assert_eq!(
+            ((Z_IMAGE_EDIT_STEPS as f32 * Z_IMAGE_EDIT_STRENGTH) as u32).max(1),
+            Z_IMAGE_EDIT_STEPS - 2
+        );
+        let plain = five_rung_generation_request(1024, 1024, false);
+        assert!(plain.conditioning.is_empty());
+        assert_eq!(plain.strength, None);
+        assert_eq!(plain.steps, Some(2));
+    }
+
     /// And the guard is the frames axis rather than a blanket rejection: the same still geometry
     /// passes it on both Candle labels, so the refusals above cannot be an unconditional error.
     #[test]
     fn the_candle_still_geometry_guard_is_not_a_blanket_refusal() {
-        for provider in [QWEN_ID, KREA_ID, Z_IMAGE_TURBO_ID] {
+        for provider in [QWEN_ID, KREA_ID, Z_IMAGE_TURBO_ID, Z_IMAGE_ID] {
             let request = json!({ "planned": still_planned_case(provider, "resident", 1) });
             let label = still_calibration_label(&request).unwrap();
             protocol::validate_still_geometry(&request, label)

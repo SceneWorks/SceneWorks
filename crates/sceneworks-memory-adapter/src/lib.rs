@@ -14,7 +14,15 @@ pub const QWEN_REPOSITORY: &str = "SceneWorks/qwen-image-mlx";
 pub const FLUX2_REPOSITORY: &str = "SceneWorks/flux2-dev-mlx";
 pub const KREA_REPOSITORY: &str = "SceneWorks/krea-2-turbo-mlx";
 pub const SDXL_REPOSITORY: &str = "SceneWorks/sdxl-base-mlx";
+/// The Z-Image-Turbo tiered rehost. Serves the `z_image_turbo` provider AND the `z_image_edit`
+/// catalog alias (the worker routes `z_image_edit` to the Turbo weights driven in `edit_image`
+/// mode — `crates/sceneworks-worker/src/engines.rs`), on both adapters, through the
+/// `SCENEWORKS_Z_IMAGE_*` family.
 pub const Z_IMAGE_REPOSITORY: &str = "SceneWorks/z-image-turbo-mlx";
+/// The undistilled Z-Image BASE tiered rehost (sc-22724) — the `z_image` provider's own artifact,
+/// bound through the separate `SCENEWORKS_Z_IMAGE_BASE_*` family so a base plan can never be
+/// satisfied by Turbo weights and re-label Turbo's peaks as the base model's.
+pub const Z_IMAGE_BASE_REPOSITORY: &str = "SceneWorks/z-image-mlx";
 /// The `mlx:ltx_2_3` calibration artifact (sc-18808). Its `gemma/` co-requisite text encoder is a
 /// hard load-time requirement of the pinned provider, not a fallback, so a capture resolves TWO
 /// roots under this one repository: the numeric tier and `gemma`.
@@ -658,6 +666,26 @@ pub fn settle_plain_overlay_scenario(
         ),
     });
     Ok(())
+}
+
+/// The reference image an `edit_image` anchor conditions on: a deterministic RGB gradient at the
+/// request geometry (`width * height * 3` interleaved bytes), which is exactly the shape the worker
+/// hands the engine — it fits the user's source to the request geometry before conditioning
+/// (`fit_engine_image` in `image_jobs/base.rs`). A reference is what makes an edit capture measure
+/// the edit path (VAE-encode of the source, the reduced denoise tail) rather than text-to-image
+/// wearing a different mode label; the pixel CONTENT does not move memory, so a synthetic one
+/// keeps the capture hermetic and reproducible.
+pub fn synthetic_reference_rgb(width: u32, height: u32) -> Vec<u8> {
+    let (w, h) = (width.max(1) as u64, height.max(1) as u64);
+    let mut pixels = Vec::with_capacity((w * h * 3) as usize);
+    for y in 0..h {
+        for x in 0..w {
+            pixels.push((x * 255 / w.max(2).saturating_sub(1).max(1)).min(255) as u8);
+            pixels.push((y * 255 / h.max(2).saturating_sub(1).max(1)).min(255) as u8);
+            pixels.push((((x + y) * 255) / (w + h).saturating_sub(2).max(1)).min(255) as u8);
+        }
+    }
+    pixels
 }
 
 pub fn required_env(name: &str) -> Result<String, String> {
@@ -1761,5 +1789,25 @@ mod tests {
             MINIMAX_UPSTREAM_REPOSITORY
         )
         .is_err());
+    }
+
+    /// sc-22724: the edit reference is one interleaved RGB frame at the request geometry, and it
+    /// is deterministic — two captures of the same anchor condition on the same bytes.
+    #[test]
+    fn synthetic_reference_is_one_rgb_frame_at_the_request_geometry() {
+        let pixels = synthetic_reference_rgb(64, 48);
+        assert_eq!(pixels.len(), 64 * 48 * 3);
+        assert_eq!(pixels, synthetic_reference_rgb(64, 48));
+        assert_ne!(
+            pixels[..3],
+            pixels[pixels.len() - 3..],
+            "a gradient, not a flat field"
+        );
+        assert_eq!(synthetic_reference_rgb(1, 1).len(), 3);
+        assert_eq!(
+            synthetic_reference_rgb(0, 0).len(),
+            3,
+            "a degenerate geometry still yields one pixel"
+        );
     }
 }

@@ -578,10 +578,12 @@ export function loaderClosureFiles({ tree, entryPoints, crates }) {
  * The REVISION IS ABSENT BY CONSTRUCTION — it is provenance, not content, and hashing it would make
  * every anchor stale on every pin bump, which is precisely the coupling E9 forbids.
  */
-export function loaderClosureText({ model, entryPoints, files }) {
+export function loaderClosureText({ model, engineId, entryPoints, files }) {
   return `${[
     `# ${ANCHOR_LOADER_CLOSURE_VERSION}`,
     `# model: ${model}`,
+    // Present only for a catalog alias, so every declaration without one hashes exactly as before.
+    ...(engineId ? [`# engine: ${engineId}`] : []),
     "[entry-points]",
     ...[...entryPoints].sort(),
     "[source]",
@@ -603,15 +605,15 @@ export function loaderFileHash(file, contentId, body) {
 }
 
 /** Compute one `(model, backend lane)`'s loader closure digest over a tree. */
-export function loaderClosureDigest({ model, entryPoints, tree, crates }) {
+export function loaderClosureDigest({ model, engineId, entryPoints, tree, crates }) {
   const files = loaderClosureFiles({ tree, entryPoints, crates });
   const bodies = tree.read(files);
   const hashed = files.map((file) => [
     file,
     loaderFileHash(file, tree.contentId(file), bodies.get(file)),
   ]);
-  const text = loaderClosureText({ model, entryPoints, files: hashed });
-  return { model, entryPoints, files, digest: sha256(text), text };
+  const text = loaderClosureText({ model, engineId, entryPoints, files: hashed });
+  return { model, engineId, entryPoints, files, digest: sha256(text), text };
 }
 
 /**
@@ -619,9 +621,26 @@ export function loaderClosureDigest({ model, entryPoints, tree, crates }) {
  * appear as a string literal in the declared entry points' own source. An entry point that never
  * names the model digests some other model's code path and reports currency for a loader it never
  * looked at — a false green, and the expensive kind.
+ *
+ * A CATALOG ALIAS names the engine id it resolves to instead (`engineId`, sc-22724): `z_image_edit`
+ * is a SceneWorks-side id for the `z_image_turbo` provider driven in `edit_image` mode
+ * (`crates/sceneworks-worker/src/engines.rs`), and the inference tree carries no such literal. The
+ * alias is EXPLICIT in the declaration — the literal rule is then asked of the engine id, and the
+ * engine id becomes part of the hashed closure text — so an alias can never be a silent way around
+ * the check: a declaration that names neither its own id nor a real engine id is still refused.
  */
-export function assertModelIsNamedByEntryPoints({ model, entryPoints, tree }) {
-  const id = model.split(":")[0];
+export function assertModelIsNamedByEntryPoints({ model, engineId, entryPoints, tree }) {
+  const modelId = model.split(":")[0];
+  if (engineId !== undefined && (typeof engineId !== "string" || !/^[a-z][a-z0-9_]*$/.test(engineId))) {
+    throw new Error(`anchor loader declaration "${model}" carries a malformed engineId ${JSON.stringify(engineId)}`);
+  }
+  if (engineId === modelId) {
+    throw new Error(
+      `anchor loader declaration "${model}" declares engineId "${engineId}", which is its own model id — ` +
+        "engineId is for a catalog alias only; drop it",
+    );
+  }
+  const id = engineId ?? modelId;
   const bodies = tree.read(entryPoints);
   const named = entryPoints.some((file) => (bodies.get(file) ?? "").includes(`"${id}"`));
   if (!named) {
@@ -639,8 +658,9 @@ export function anchorLoaderDigests({ repo, revision, declared, tree }) {
   const crates = firstPartyCrates(resolved, resolved.paths());
   const out = new Map();
   for (const [model, entry] of Object.entries(declared)) {
-    assertModelIsNamedByEntryPoints({ model, entryPoints: entry.entryPoints, tree: resolved });
-    out.set(model, loaderClosureDigest({ model, entryPoints: entry.entryPoints, tree: resolved, crates }));
+    const { entryPoints, engineId } = entry;
+    assertModelIsNamedByEntryPoints({ model, engineId, entryPoints, tree: resolved });
+    out.set(model, loaderClosureDigest({ model, engineId, entryPoints, tree: resolved, crates }));
   }
   return out;
 }
@@ -652,6 +672,7 @@ export function buildAnchorLoaderConfig({ repo, revision, declared }) {
   for (const model of Object.keys(declared).sort()) {
     const entry = digests.get(model);
     models[model] = {
+      ...(entry.engineId ? { engineId: entry.engineId } : {}),
       entryPoints: [...entry.entryPoints].sort(),
       digest: entry.digest,
       closureFileCount: entry.files.length,
@@ -665,7 +686,9 @@ export function buildAnchorLoaderConfig({ repo, revision, declared }) {
       "lane). The unit is the source files the model's loader reaches, and nothing else — not the " +
       "pin, not sibling models, not shared crates the loader never reaches. Regenerate when the " +
       "pinned inference revision changes: node scripts/anchor-loader-closure.mjs --repo " +
-      "<inference> --write. A regeneration that leaves the digests unchanged is the expected case.",
+      "<inference> --write. A regeneration that leaves the digests unchanged is the expected case. " +
+      "A catalog alias (a model id the inference tree never names, such as z_image_edit) declares " +
+      "the engine id it resolves to as engineId; the alias is part of its hashed closure text.",
     digestVersion: ANCHOR_LOADER_CLOSURE_VERSION,
     inferenceRevision: revision,
     models,
@@ -845,7 +868,10 @@ export function stampAnchorStore({ repo, store, declared, corpora, attestations 
     const historical = Object.fromEntries(
       [...models].map((model) => [
         model,
-        { entryPoints: declared[model].entryPoints.filter((file) => tree.has(file)) },
+        {
+          ...(declared[model].engineId ? { engineId: declared[model].engineId } : {}),
+          entryPoints: declared[model].entryPoints.filter((file) => tree.has(file)),
+        },
       ]),
     );
     for (const [model, entry] of Object.entries(historical)) {
@@ -949,7 +975,10 @@ export async function main(argv = process.argv.slice(2)) {
   const declared = Object.fromEntries(
     Object.entries(existing.models).map(([model, entry]) => [
       model,
-      { entryPoints: entry.entryPoints },
+      {
+        ...(entry.engineId ? { engineId: entry.engineId } : {}),
+        entryPoints: entry.entryPoints,
+      },
     ]),
   );
   const pinned = inferencePinFromCargo(await readFile(path.join(root, "Cargo.toml"), "utf8"));

@@ -28,6 +28,7 @@ import {
   ANCHOR_LOADER_CLOSURE_VERSION,
   anchorCurrencyRevision,
   anchorMeasurementRevision,
+  assertModelIsNamedByEntryPoints,
   buildAnchorLoaderConfig,
   indexCurrencyAttestations,
   expandUsePath,
@@ -35,6 +36,7 @@ import {
   gitTree,
   loaderClosureDigest,
   loaderClosureFiles,
+  loaderClosureText,
   moduleDirOf,
   overlayTree,
   referencesIn,
@@ -664,6 +666,46 @@ test("an entry point that never names the model is refused", { skip }, () => {
       }),
     /never carry the literal "ltx_2_5"/,
   );
+});
+
+// sc-22724: `z_image_edit` is a SceneWorks catalog id for the `z_image_turbo` provider driven in
+// `edit_image` mode (worker engines.rs); the inference tree never spells "z_image_edit". The alias
+// is declared EXPLICITLY as `engineId`, the literal rule is asked of the engine id, and the engine
+// id is hashed into the closure text — so an alias is never a way around the check.
+test("a catalog alias declares the engine id it resolves to, and that id must be named by the entry points", () => {
+  const tree = {
+    read: (files) => new Map(files.map((file) => [
+      file,
+      file.endsWith("model.rs") ? 'pub const MODEL_ID: &str = "z_image_turbo";' : "// nothing named here",
+    ])),
+  };
+  const entryPoints = ["crates/x/src/model.rs", "crates/x/src/memory_strategy.rs"];
+  assert.throws(
+    () => assertModelIsNamedByEntryPoints({ model: "z_image_edit:mlx", entryPoints, tree }),
+    /never carry the literal "z_image_edit"/,
+  );
+  assertModelIsNamedByEntryPoints({ model: "z_image_edit:mlx", engineId: "z_image_turbo", entryPoints, tree });
+  // The alias is not a wildcard: an engine id the entry points never name is refused the same way.
+  assert.throws(
+    () => assertModelIsNamedByEntryPoints({ model: "z_image_edit:mlx", engineId: "z_image", entryPoints, tree }),
+    /never carry the literal "z_image"/,
+  );
+  // And it is for aliases only.
+  assert.throws(
+    () => assertModelIsNamedByEntryPoints({ model: "z_image_turbo:mlx", engineId: "z_image_turbo", entryPoints, tree }),
+    /its own model id/,
+  );
+  assert.throws(
+    () => assertModelIsNamedByEntryPoints({ model: "z_image_edit:mlx", engineId: "Z-Image Turbo", entryPoints, tree }),
+    /malformed engineId/,
+  );
+  // The engine id is part of the hashed text; a declaration without one hashes exactly as before.
+  const files = [["crates/x/src/model.rs", "s:abc"]];
+  const plain = loaderClosureText({ model: "z_image_turbo:mlx", entryPoints, files });
+  assert.ok(!plain.includes("# engine:"), "no alias line for a model that is its own engine");
+  const aliased = loaderClosureText({ model: "z_image_edit:mlx", engineId: "z_image_turbo", entryPoints, files });
+  assert.ok(aliased.includes("\n# engine: z_image_turbo\n"));
+  assert.notEqual(aliased.replace("z_image_edit", "z_image_turbo"), plain, "the alias line keeps the two closures distinct even over identical files");
 });
 
 test("a declared entry point that is not shipped source is refused", { skip }, () => {

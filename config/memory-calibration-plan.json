@@ -432,6 +432,21 @@
       "calibrationFingerprint": "z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2",
       "fixture": "sc-16170-z-image-bf16-1024-text_to_image-none-seed16170"
     },
+    "z_image:bf16:mlx": {
+      "provider": "z_image",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 768,
+        "height": 768,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "eager_materialization",
+      "calibrationFingerprint": "z-image-mlx-independent-materialization-v4",
+      "fixture": "fresh-five-rung-z-image-base-bf16-768-seed16402-step2"
+    },
     "z_image:q4:candle": {
       "provider": "z_image",
       "mode": "text_to_image",
@@ -446,6 +461,21 @@
       "loadShape": "deferred_materialization",
       "calibrationFingerprint": "z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2",
       "fixture": "sc-16170-z-image-q4-1024-text_to_image-none-seed16170"
+    },
+    "z_image:q4:mlx": {
+      "provider": "z_image",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 768,
+        "height": 768,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "eager_materialization",
+      "calibrationFingerprint": "z-image-mlx-independent-materialization-v4",
+      "fixture": "fresh-five-rung-z-image-base-q4-768-seed16402-step2"
     },
     "z_image:q8:candle": {
       "provider": "z_image",
@@ -462,6 +492,111 @@
       "calibrationFingerprint": "z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2",
       "fixture": "sc-16170-z-image-q8-1024-text_to_image-none-seed16170"
     },
+    "z_image:q8:mlx": {
+      "provider": "z_image",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 768,
+        "height": 768,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "eager_materialization",
+      "calibrationFingerprint": "z-image-mlx-independent-materialization-v4",
+      "fixture": "fresh-five-rung-z-image-base-q8-768-seed16402-step2"
+    },
+    "z_image_edit:bf16:candle": {
+      "provider": "z_image_turbo",
+      "mode": "edit_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "deferred_materialization",
+      "calibrationFingerprint": "z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2",
+      "fixture": "fresh-five-rung-z-image-edit-bf16-1024-seed16402-step4"
+    },
+    "z_image_edit:bf16:mlx": {
+      "provider": "z_image_turbo",
+      "mode": "edit_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 768,
+        "height": 768,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "eager_materialization",
+      "calibrationFingerprint": "z-image-mlx-independent-materialization-v4",
+      "fixture": "fresh-five-rung-z-image-edit-bf16-768-seed16402-step4"
+    },
+    "z_image_edit:q4:candle": {
+      "provider": "z_image_turbo",
+      "mode": "edit_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "deferred_materialization",
+      "calibrationFingerprint": "z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2",
+      "fixture": "fresh-five-rung-z-image-edit-q4-1024-seed16402-step4"
+    },
+    "z_image_edit:q4:mlx": {
+      "provider": "z_image_turbo",
+      "mode": "edit_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 768,
+        "height": 768,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "eager_materialization",
+      "calibrationFingerprint": "z-image-mlx-independent-materialization-v4",
+      "fixture": "fresh-five-rung-z-image-edit-q4-768-seed16402-step4"
+    },
+    "z_image_edit:q8:candle": {
+      "provider": "z_image_turbo",
+      "mode": "edit_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "deferred_materialization",
+      "calibrationFingerprint": "z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2",
+      "fixture": "fresh-five-rung-z-image-edit-q8-1024-seed16402-step4"
+    },
+    "z_image_edit:q8:mlx": {
+      "provider": "z_image_turbo",
+      "mode": "edit_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 768,
+        "height": 768,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "eager_materialization",
+      "calibrationFingerprint": "z-image-mlx-independent-materialization-v4",
+      "fixture": "fresh-five-rung-z-image-edit-q8-768-seed16402-step4"
+    },
     "z_image_turbo:bf16:candle": {
       "provider": "z_image_turbo",
       "mode": "text_to_image",
@@ -476,6 +611,21 @@
       "loadShape": "deferred_materialization",
       "calibrationFingerprint": "z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2",
       "fixture": "fresh-five-rung-z-image-turbo-bf16-1024-seed16402-step2"
+    },
+    "z_image_turbo:bf16:mlx": {
+      "provider": "z_image_turbo",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 768,
+        "height": 768,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "eager_materialization",
+      "calibrationFingerprint": "z-image-mlx-independent-materialization-v4",
+      "fixture": "fresh-five-rung-z-image-bf16-768-seed16402-step2"
     },
     "z_image_turbo:q4:candle": {
       "provider": "z_image_turbo",
@@ -521,6 +671,21 @@
       "loadShape": "deferred_materialization",
       "calibrationFingerprint": "z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2",
       "fixture": "fresh-five-rung-z-image-turbo-q8-1024-seed16402-step2"
+    },
+    "z_image_turbo:q8:mlx": {
+      "provider": "z_image_turbo",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 768,
+        "height": 768,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "eager_materialization",
+      "calibrationFingerprint": "z-image-mlx-independent-materialization-v4",
+      "fixture": "fresh-five-rung-z-image-q8-768-seed16402-step2"
     }
   }
 }
