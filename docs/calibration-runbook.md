@@ -693,6 +693,13 @@ node scripts/memory-calibration-harness.mjs capture \
   --output /abs/path/OUTSIDE/the/repo/<anchor>-evidence.json
 ```
 
+To capture EVERY anchor the plan declares for this host's backend, committing each one as it
+lands, use `scripts/measure-memory-catalog.mjs` instead of repeating the command by hand — it runs
+exactly this capture plus §7a and §8 per anchor and stops cleanly on Ctrl-C; see
+[memory-calibration-harness.md](memory-calibration-harness.md), "Measuring the whole catalog on one
+host". On this Mac the shipped snapshots live under `/Volumes/Models/huggingface/hub` (and the
+LTX-2.5 snapshot under `~/ModelStaging/sc18783-hf-cache`), which is what its `--hf-cache` is for.
+
 Then schema-check the raw bundle before doing anything else:
 
 ```bash
