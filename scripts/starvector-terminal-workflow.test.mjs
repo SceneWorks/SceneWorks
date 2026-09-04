@@ -16,7 +16,7 @@ const readiness = await readFile(".github/workflows/starvector-terminal-readines
 const producer = await readFile("scripts/starvector-terminal-producer.mjs", "utf8");
 const route = await readFile("scripts/starvector-terminal-route.mjs", "utf8");
 const hash = (value) => createHash("sha256").update(value).digest("hex");
-const pin = "c6d6a4dbd61ab09c26ff5526632cae2cefea60ed";
+const pin = "42ab6f2b8b9815205bc215c6d19c2b7714c908fe";
 const execFile = promisify(execFileCallback);
 const productServiceSupported = process.platform === "darwin" || process.platform === "win32";
 

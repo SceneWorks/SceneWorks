@@ -7,7 +7,7 @@ import test from "node:test";
 import { serializeTerminalSourceRows, terminalSourceRowsSha256 } from "./starvector-terminal-campaign.mjs";
 import { materializeBundle } from "./starvector-terminal-case-bundle.mjs";
 
-const pin = "c6d6a4dbd61ab09c26ff5526632cae2cefea60ed", sha = (value) => createHash("sha256").update(value).digest("hex");
+const pin = "42ab6f2b8b9815205bc215c6d19c2b7714c908fe", sha = (value) => createHash("sha256").update(value).digest("hex");
 const pinnedSources = [
   ["starvector/svg-stack-simple", "1d2a96a17cc0c4c1f337b7631adc8c5885bc72ea"],
   ["starvector/svg-icons-simple", "e1918a27ba6649e856e5db0710d8a6c7046762c1"],

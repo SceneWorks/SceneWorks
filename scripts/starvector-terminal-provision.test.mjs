@@ -128,8 +128,8 @@ test("provision workflow is dispatch-only and never runs a model, service, campa
   assert.match(workflow, /runs-on: \[self-hosted, Windows, X64, cuda, real-weights\]/);
   assert.match(workflow, /inference_revision:[\s\S]*required: true/);
   assert.match(workflow, /inference_preflight_run_id:[\s\S]*required: true/);
-  assert.match(workflow, /default: "33851645747"/);
-  assert.match(workflow, /default: starvector-terminal-preflight-c6d6a4dbd61ab09c26ff5526632cae2cefea60ed-33851645747-1/);
+  assert.match(workflow, /default: "33928871038"/);
+  assert.match(workflow, /default: starvector-terminal-preflight-42ab6f2b8b9815205bc215c6d19c2b7714c908fe-33928871038-1/);
   assert.equal((workflow.match(/starvector-terminal-pin-paths\.mjs/g) ?? []).length, 2);
   assert.equal((workflow.match(/preflight-transport release[\\/]starvector-terminal-campaign-v1\.json/g) ?? []).length, 2);
   assert.equal((workflow.match(/preflight-metadata release[\\/]starvector-terminal-campaign-v1\.json/g) ?? []).length, 2);
@@ -167,19 +167,19 @@ test("workflow shell blocks consume untrusted dispatch inputs only through quote
   }
 });
 
-test("provision transport accepts only the sealed c6d native-preflight run and artifact", async () => {
+test("provision transport accepts only the sealed current native-preflight run and artifact", async () => {
   const accepted = await validatePreflightTransport("release/starvector-terminal-campaign-v1.json", {
-    revision: "c6d6a4dbd61ab09c26ff5526632cae2cefea60ed",
-    workflowRunId: "33851645747",
-    artifactName: "starvector-terminal-preflight-c6d6a4dbd61ab09c26ff5526632cae2cefea60ed-33851645747-1",
+    revision: "42ab6f2b8b9815205bc215c6d19c2b7714c908fe",
+    workflowRunId: "33928871038",
+    artifactName: "starvector-terminal-preflight-42ab6f2b8b9815205bc215c6d19c2b7714c908fe-33928871038-1",
   });
   assert.deepEqual(accepted, {
-    revision: "c6d6a4dbd61ab09c26ff5526632cae2cefea60ed",
-    workflow_run_id: "33851645747",
-    artifact_name: "starvector-terminal-preflight-c6d6a4dbd61ab09c26ff5526632cae2cefea60ed-33851645747-1",
+    revision: "42ab6f2b8b9815205bc215c6d19c2b7714c908fe",
+    workflow_run_id: "33928871038",
+    artifact_name: "starvector-terminal-preflight-42ab6f2b8b9815205bc215c6d19c2b7714c908fe-33928871038-1",
     workflow_run_attempt: 1,
-    artifact_id: 9928624696,
-    artifact_digest: "sha256:4df39fc45d36ef11f968aa82c48eda6292f48c54086a4beee4ff3f6e8ba48226",
+    artifact_id: 9957850431,
+    artifact_digest: "sha256:609a2850118c206a4a38698e1680e81b78666d6b72be07d66ba677b0f50a9831",
   });
   for (const [label, mutation] of [
     ["revision", { revision: "0".repeat(40) }],
@@ -197,9 +197,9 @@ test("provision transport accepts only the sealed c6d native-preflight run and a
 
 test("live preflight artifact and run metadata must match every sealed transport identity", async () => {
   const run = {
-    id: 33851645747,
+    id: 33928871038,
     run_attempt: 1,
-    head_sha: "c6d6a4dbd61ab09c26ff5526632cae2cefea60ed",
+    head_sha: "42ab6f2b8b9815205bc215c6d19c2b7714c908fe",
     workflow_id: 312370029,
     name: "Real-weight validation",
     path: ".github/workflows/real-weights.yml",
@@ -210,14 +210,14 @@ test("live preflight artifact and run metadata must match every sealed transport
     head_repository: { id: 1299380446, full_name: "SceneWorks/inference" },
   };
   const artifact = {
-    id: 9928624696,
-    name: "starvector-terminal-preflight-c6d6a4dbd61ab09c26ff5526632cae2cefea60ed-33851645747-1",
-    size_in_bytes: 6329,
-    digest: "sha256:4df39fc45d36ef11f968aa82c48eda6292f48c54086a4beee4ff3f6e8ba48226",
+    id: 9957850431,
+    name: "starvector-terminal-preflight-42ab6f2b8b9815205bc215c6d19c2b7714c908fe-33928871038-1",
+    size_in_bytes: 6456,
+    digest: "sha256:609a2850118c206a4a38698e1680e81b78666d6b72be07d66ba677b0f50a9831",
     expired: false,
     workflow_run: {
-      id: 33851645747,
-      head_sha: "c6d6a4dbd61ab09c26ff5526632cae2cefea60ed",
+      id: 33928871038,
+      head_sha: "42ab6f2b8b9815205bc215c6d19c2b7714c908fe",
       repository_id: 1299380446,
       head_repository_id: 1299380446,
     },
