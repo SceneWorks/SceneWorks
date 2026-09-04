@@ -5,14 +5,18 @@ import path from "node:path";
 import test, { before } from "node:test";
 import { fileURLToPath } from "node:url";
 
+import { stripJsoncComments } from "./lib/jsonc.mjs";
 import { buildMatrix } from "./generate-memory-matrix.mjs";
 import {
   ANALYTIC_BASES,
   ANCHOR_LOADER_CLOSURES_PATH,
+  CONTRACT_LADDER_BACKENDS,
+  MANIFEST_PATH,
   MEMORY_ANCHOR_SCHEMA_VERSION,
   PACKAGED_SOURCES_PATH,
   STORE_PATH,
   anchorCandidate,
+  assertEveryDerivableCorpusIsPackaged,
   assertPackagedSources,
   buildAnchorStore,
   carryManifestTierEvidence,
@@ -23,6 +27,7 @@ import {
   inferencePin,
   isDerivable,
   inferenceProviderConstants,
+  loadCorpora,
   LTX25_VARIANT_COMPONENTS,
   LTX25_WEIGHTS_INVENTORY_PATH,
   ltx25ComponentDeltas,
@@ -31,6 +36,9 @@ import {
   loaderClosureDigestFor,
   locateInferenceCheckout,
   manifestTierEvidence,
+  manifestSequentialRow,
+  isReceiptPricedRoute,
+  RECEIPT_PRICED_ROUTES,
   packagedAnchorSources,
   providerByteConstants,
   selectRepresentative,
@@ -510,6 +518,66 @@ test("the representative is the largest envelope, tie-broken by path then record
   );
 });
 
+test("an MLX window opened above its resident set outranks a cold-request render of the same cell", () => {
+  // sc-22667 (epic 22657 D3). The retained z_image_turbo q4 MLX corpus shape: the cold-request
+  // record's overall envelope (19.14 GB) is within allocator jitter of a warm re-capture's, so
+  // envelope-first would pick between them by chance — and the cold record's conditioning level
+  // (2.27 GB) sits below the 5.83 GB resident set the core law subtracts, so it derives nothing.
+  const mlx = (id, envelope, measurements) => ({
+    backend: "mlx",
+    overallAllocatorEnvelopeBytes: envelope,
+    recordId: id,
+    sourcePath: "docs/generated/memory-calibration-evidence.json",
+    ...measurements,
+  });
+  const cold = mlx("cold", 19_138_127_416, { residentSetSeen: false });
+  const warm = mlx("warm", 18_900_000_000, { residentSetSeen: true });
+  assert.equal(selectRepresentative([cold, warm]).recordId, "warm");
+  assert.equal(selectRepresentative([warm, cold]).recordId, "warm");
+  // Between two records of the same kind the envelope still decides; a record predating the flag
+  // (no field at all) ranks with the cold ones.
+  const legacy = mlx("legacy", 19_200_000_000, {});
+  assert.equal(selectRepresentative([legacy, cold]).recordId, "legacy");
+  assert.equal(selectRepresentative([legacy, warm]).recordId, "warm");
+  // …and the flag is read off the record's own diagnostics, only on the MLX lane.
+  const record = (backend, value) => ({
+    id: `r-${backend}`,
+    backend,
+    target: {
+      modelId: "z_image_turbo",
+      provider: "z_image_turbo",
+      tier: "q4",
+      geometry: { width: 768, height: 768, frames: 1 },
+    },
+    loadShape: "eager_materialization",
+    strategy: { engagedRungs: ["resident"] },
+    observedMemory: { overall: { allocatorBytes: 1 } },
+    diagnostics: {
+      measurements: [
+        ...(backend === "mlx"
+          ? [
+              { name: "conditioningActivePeak", unit: "bytes", value: 1 },
+              { name: "denoiseActivePeak", unit: "bytes", value: 1 },
+              { name: "decodeActivePeak", unit: "bytes", value: 1 },
+            ]
+          : [
+              { name: "conditioningDevicePeakDelta", unit: "bytes", value: 1 },
+              { name: "denoiseDevicePeakDelta", unit: "bytes", value: 1 },
+              { name: "decodeDevicePeakDelta", unit: "bytes", value: 1 },
+            ]),
+        ...(value === null
+          ? []
+          : [{ name: "residentSetMaterializedBeforeWindow", unit: "count", value }]),
+      ],
+    },
+  });
+  const corpus = { path: "docs/generated/example.json", sha256: "0".repeat(64) };
+  assert.equal(anchorCandidate(record("mlx", 1), corpus).residentSetSeen, true);
+  assert.equal(anchorCandidate(record("mlx", 0), corpus).residentSetSeen, false);
+  assert.equal(anchorCandidate(record("mlx", null), corpus).residentSetSeen, false);
+  assert.equal(anchorCandidate(record("candle", 1), corpus).residentSetSeen, false);
+});
+
 test("derivability outranks envelope, so a cell is never anchored by a render its law refuses", () => {
   const candle = (id, envelope, regime) => ({
     backend: "candle",
@@ -558,7 +626,7 @@ test("derivability outranks envelope, so a cell is never anchored by a render it
   assert.equal(isDerivable({ backend: "mlx", measuredRegime: {} }), true);
 });
 
-test("a corpus outside the compiled-in evidence list contributes evidence but never an anchor", async () => {
+test("every emitted anchor cites a compiled-in corpus, and every retained corpus is compiled in", async () => {
   const store = await buildAnchorStore({ matrix });
   const packaged = packagedAnchorSources(
     await readFile(path.join(ROOT, PACKAGED_SOURCES_PATH), "utf8"),
@@ -569,29 +637,301 @@ test("a corpus outside the compiled-in evidence list contributes evidence but ne
       `${anchor.id} cites an unpackaged corpus`,
     );
   }
-  // `docs/generated/qwen-candle-five-rung-sc-15817.json` is walked and phase-decomposed, so it
-  // WOULD anchor `qwen_image:candle:q4` on shape alone. It is deliberately not packaged: the
-  // candle per-pixel coefficients are Krea empirics, so anchoring another model from it would
-  // reprice that model with borrowed slopes. It must classify as analytic-only instead.
-  assert.equal(
-    store.anchors.some(
-      (anchor) =>
-        anchor.modelId === "qwen_image" && anchor.backend === "candle",
-    ),
-    false,
-    "an unpackaged corpus must not anchor its cell",
+  // THE CONVERSE (sc-22666, epic 22657 E5). Packaging used to be an opt-in a story could defer,
+  // because the image lane priced cells with slopes fitted on Krea Turbo and anchoring another
+  // model from a freshly committed corpus would have borrowed them. The law fits nothing since
+  // sc-22663, so an unpackaged corpus that could anchor a catalog cell is now a defect: the
+  // generator must fail rather than classify the cell analytic-only beside its own evidence.
+  const corpora = await loadCorpora(ROOT);
+  const catalogByCell = new Map(
+    (await catalogCells(matrix)).map((cell) => [
+      cellKey(cell.modelId, cell.backend, cell.tier),
+      cell,
+    ]),
   );
-  const qwen = store.analyticOnly.find(
-    (row) => row.id === "analytic:qwen_image:candle:q4",
+  assert.doesNotThrow(() =>
+    assertEveryDerivableCorpusIsPackaged(corpora, packaged, catalogByCell),
   );
-  assert.equal(
-    qwen.basis,
-    "measured_envelope",
-    "its envelope is still retained as evidence",
+  // SHAPE, not a census: whichever corpora are retained, dropping any ONE of them from the
+  // packaged list must be caught, and the failure must name the file and the cells it strands.
+  const anchoredPaths = [
+    ...new Set(store.anchors.map((anchor) => anchor.source.path)),
+  ].sort();
+  assert.ok(anchoredPaths.length > 0, "the store must cite at least one corpus");
+  for (const dropped of anchoredPaths) {
+    const narrowed = new Set([...packaged].filter((item) => item !== dropped));
+    assert.throws(
+      () =>
+        assertEveryDerivableCorpusIsPackaged(corpora, narrowed, catalogByCell),
+      (error) =>
+        error.message.includes(dropped) &&
+        /not compiled into PACKAGED_MEMORY_ANCHOR_SOURCES/.test(error.message),
+      `dropping ${dropped} from the packaged list must fail the run`,
+    );
+  }
+});
+
+test("a newly packaged candle corpus anchors its own cells rather than bounding them", async () => {
+  const store = await buildAnchorStore({ matrix });
+  // sc-15859's three Z-Image-Turbo candle captures and sc-15817's qwen candle ladder were retained
+  // but unpackaged before sc-22666. They are compiled in now, so they ANCHOR their cells, and
+  // those cells must no longer appear on the analytic-only side (a cell is classified once).
+  for (const [modelId, tiers] of [
+    ["z_image_turbo", ["bf16", "q4", "q8"]],
+    ["qwen_image", ["q4"]],
+  ]) {
+    for (const tier of tiers) {
+      assert.ok(
+        store.anchors.some(
+          (anchor) =>
+            anchor.modelId === modelId &&
+            anchor.backend === "candle" &&
+            anchor.tier === tier,
+        ),
+        `${modelId}:candle:${tier} must be anchored from its packaged corpus`,
+      );
+      assert.equal(
+        store.analyticOnly.some(
+          (row) =>
+            row.modelId === modelId &&
+            row.backend === "candle" &&
+            row.tier === tier,
+        ),
+        false,
+        `${modelId}:candle:${tier} is anchored, so it cannot also be analytic-only`,
+      );
+    }
+  }
+});
+
+// ---------------------------------------------------------------------------------------------
+// `contract_estimate` (sc-22666, epic 22657 E5): a cell whose backend block publishes a
+// `memoryStrategyContract` is priced by the worker as a CONTRACT-ONLY per-rung ladder (sc-22664),
+// not as one manifest scalar repeated, so classifying it `manifest_tier_declaration` would put its
+// evidence in the wrong place.
+// ---------------------------------------------------------------------------------------------
+
+test("a published memoryStrategyContract outranks a bare manifest tier declaration", async () => {
+  const store = await buildAnchorStore({ matrix });
+  const manifest = JSON.parse(
+    stripJsoncComments(await readFile(path.join(ROOT, MANIFEST_PATH), "utf8")),
   );
+  const publishesContract = (row) =>
+    Boolean(
+      manifest.models?.find((model) => model.id === row.modelId)?.[row.backend]
+        ?.memoryStrategyContract,
+    );
+  // SHAPE: whichever cells fall through to a manifest-only basis, none of them may be one whose
+  // contract is published, whose lane implements the ladder AND which carries the ladder's
+  // inputs (sc-22667: the staged row, on a non-receipt-priced route) — that is the precedence
+  // claim, stated without pinning a count. A published contract on a lane with no ladder, on a
+  // receipt-priced route, or without the row is NOT misplaced on a manifest row; the worker never
+  // rescales those (see the lane-restriction and ladder-input tests).
+  const misplaced = store.analyticOnly
+    .filter((row) => row.basis === "manifest_tier_declaration")
+    .filter(
+      (row) =>
+        publishesContract(row) &&
+        CONTRACT_LADDER_BACKENDS.includes(row.backend) &&
+        !isReceiptPricedRoute(row.route) &&
+        manifestSequentialRow(manifest, row) !== null,
+    )
+    .map((row) => row.id);
+  assert.deepEqual(
+    misplaced,
+    [],
+    "a ladder-lane cell whose contract is published is a contract_estimate, never a bare manifest row",
+  );
+  for (const row of store.analyticOnly.filter(
+    (item) => item.basis === "contract_estimate",
+  )) {
+    assert.ok(publishesContract(row), `${row.id} cites a contract that is not published`);
+    assert.match(row.reason, /per-rung ladder/);
+    assert.ok(
+      row.evidence?.path?.endsWith("/memoryStrategyContract"),
+      `${row.id} must cite the contract block it was classified from`,
+    );
+    assert.ok(
+      (row.evidence?.values?.declaredRungs ?? "").length > 0,
+      `${row.id} must carry the rungs the contract declares`,
+    );
+    // The reason says the ladder rescales the MANIFEST ROW, so where the manifest declares that
+    // row the evidence must carry it: a row cannot assert a rescale of figures it drops.
+    const declared = manifestTierEvidence(manifest, MANIFEST_PATH, "sha", {
+      modelId: row.modelId,
+      backend: row.backend,
+      tier: row.tier,
+    });
+    if (declared !== null) {
+      for (const [key, value] of Object.entries(declared.values)) {
+        assert.equal(
+          row.evidence?.values?.[key],
+          value,
+          `${row.id} must carry the manifest ${key} its reason says the ladder rescales`,
+        );
+      }
+    }
+  }
+  assert.ok(
+    ANALYTIC_BASES.indexOf("contract_estimate") <
+      ANALYTIC_BASES.indexOf("manifest_tier_declaration"),
+    "the basis order IS the precedence",
+  );
+});
+
+test("every contract_estimate row is on a lane that implements the per-rung ladder", async () => {
+  // The `contract_estimate` reason asserts a specific worker mechanism: the manifest row rescaled
+  // by the image law's per-rung ratios. That is `floor_pseudo_anchor` in the CANDLE strategy; the
+  // mlx fit gate has no such path. Read the worker sources so the claim is checked against the
+  // code that would have to change, not against a literal repeated in two places.
+  const laneSources = {
+    candle: "crates/sceneworks-worker/src/candle_memory_strategy.rs",
+    mlx: "crates/sceneworks-worker/src/mlx_fit_gate.rs",
+  };
+  const implementing = [];
+  for (const [backend, relative] of Object.entries(laneSources)) {
+    const source = await readFile(path.join(ROOT, relative), "utf8");
+    if (/fn floor_pseudo_anchor\b/.test(source)) implementing.push(backend);
+  }
+  assert.deepEqual(
+    [...CONTRACT_LADDER_BACKENDS].sort(),
+    implementing.sort(),
+    "CONTRACT_LADDER_BACKENDS must name exactly the lanes whose source implements the ladder",
+  );
+  const store = await buildAnchorStore({ matrix });
+  // SHAPE: no row on a lane without the mechanism, whatever the counts are.
+  const offLane = store.analyticOnly
+    .filter((row) => row.basis === "contract_estimate")
+    .filter((row) => !implementing.includes(row.backend))
+    .map((row) => `${row.id} (${row.backend})`);
+  assert.deepEqual(
+    offLane,
+    [],
+    "a contract_estimate row asserts a ladder its lane does not implement",
+  );
+});
+
+// ---------------------------------------------------------------------------------------------
+// sc-22667 (epic 22657 feature-end round, AT-4/E5): `contract_estimate` asserts a worker
+// mechanism — `floor_anchor` in `candle_memory_strategy.rs` — that runs only when the manifest
+// declares the raw staged row AND the route is not receipt-priced. The basis is keyed on exactly
+// those two inputs, and the receipt-priced list is read back from the worker source.
+// ---------------------------------------------------------------------------------------------
+
+test("RECEIPT_PRICED_ROUTES mirrors the worker's is_receipt_priced, read from its source", async () => {
+  const source = await readFile(
+    path.join(ROOT, "crates/sceneworks-worker/src/candle_memory_strategy.rs"),
+    "utf8",
+  );
+  const body = source.match(
+    /pub\(crate\) fn is_receipt_priced\(engine_id: &str\) -> bool \{([\s\S]*?)\n\}/,
+  );
+  assert.ok(body, "the worker still names its receipt-priced families in is_receipt_priced");
+  const routes = new Set();
+  for (const [, literal] of body[1].matchAll(/engine_id == "([^"]+)"/g)) {
+    routes.add(literal);
+  }
+  const helpers = [...body[1].matchAll(/\b(is_[a-z0-9_]+)\(engine_id\)/g)].map(
+    ([, helper]) => helper,
+  );
+  assert.ok(helpers.length > 0, "is_receipt_priced delegates to per-family helpers");
+  for (const helper of helpers) {
+    const helperBody = source.match(
+      new RegExp(`fn ${helper}\\(engine_id: &str\\) -> bool \\{([\\s\\S]*?)\\n\\}`),
+    );
+    assert.ok(helperBody, `${helper} is defined on the worker`);
+    const literals = helperBody[1].match(/matches!\(\s*engine_id,([\s\S]*?)\)\s*$/);
+    assert.ok(literals, `${helper} is a matches! over engine-id literals`);
+    for (const [, literal] of literals[1].matchAll(/"([^"]+)"/g)) routes.add(literal);
+  }
+  assert.deepEqual(
+    [...RECEIPT_PRICED_ROUTES].sort(),
+    [...routes].sort(),
+    "the extractor's receipt-priced list must equal the worker's, in both directions",
+  );
+  assert.ok(routes.size >= 10, `the worker names ${routes.size} receipt-priced routes`);
+});
+
+test("contract_estimate is keyed on the ladder's inputs: a sequential row on a non-receipt-priced route", async () => {
+  const store = await buildAnchorStore({ matrix });
+  const manifest = JSON.parse(
+    stripJsoncComments(await readFile(path.join(ROOT, MANIFEST_PATH), "utf8")),
+  );
+  const publishesContract = (row) =>
+    Boolean(
+      manifest.models?.find((model) => model.id === row.modelId)?.[row.backend]
+        ?.memoryStrategyContract,
+    );
+  const candle = store.analyticOnly.filter((row) =>
+    CONTRACT_LADDER_BACKENDS.includes(row.backend),
+  );
+  const estimates = candle.filter((row) => row.basis === "contract_estimate");
+  assert.ok(estimates.length > 0, "the catalog has contract-only ladder cells");
+  // SHAPE: every contract_estimate row carries the row it rescales and sits on a route the
+  // worker would actually rescale for.
+  for (const row of estimates) {
+    const declared = manifestSequentialRow(manifest, row);
+    assert.notEqual(declared, null, `${row.id} has no sequentialPeakGb row to rescale`);
+    assert.equal(
+      row.evidence?.values?.sequentialPeakGb,
+      String(declared),
+      `${row.id} must carry the staged row the reason says the ladder rescales`,
+    );
+    assert.equal(
+      isReceiptPricedRoute(row.route),
+      false,
+      `${row.id} is receipt-priced; its floor is a sealed receipt, never a rescaled row`,
+    );
+    assert.match(row.reason, /sequentialPeakGb/);
+    assert.match(row.reason, /not receipt-priced/);
+  }
+  // …and the converse: no cell that HAS both inputs (and a published contract) fell through.
+  const fellThrough = candle
+    .filter((row) => row.basis !== "contract_estimate")
+    .filter(
+      (row) =>
+        publishesContract(row) &&
+        !isReceiptPricedRoute(row.route) &&
+        manifestSequentialRow(manifest, row) !== null &&
+        row.basis !== "measured_envelope",
+    )
+    .map((row) => `${row.id} (${row.basis})`);
+  assert.deepEqual(fellThrough, [], "a cell with the ladder's inputs is a contract_estimate");
+  // The two exclusions each exist in the catalog, or the keying is vacuous: at least one
+  // receipt-priced cell and at least one row-less cell with a published contract are classified
+  // on a manifest basis.
+  const excluded = candle.filter(
+    (row) =>
+      publishesContract(row) &&
+      ["manifest_tier_declaration", "no_retained_evidence"].includes(row.basis),
+  );
+  assert.ok(
+    excluded.some((row) => isReceiptPricedRoute(row.route)),
+    "a receipt-priced route with a published contract stays on a manifest basis",
+  );
+  assert.ok(
+    excluded.some((row) => manifestSequentialRow(manifest, row) === null),
+    "a published contract with no sequentialPeakGb row stays on a manifest basis",
+  );
+});
+
+test("manifestSequentialRow reads the tier's own row, with the worker's nvfp4 -> q8 fallback", () => {
+  const manifest = {
+    models: [
+      {
+        id: "m",
+        candle: { sequentialPeakGb: { q4: 5.5, q8: 7.25, bf16: "9" } },
+      },
+    ],
+  };
+  const cell = (tier) => ({ modelId: "m", backend: "candle", tier });
+  assert.equal(manifestSequentialRow(manifest, cell("q4")), 5.5);
+  assert.equal(manifestSequentialRow(manifest, cell("nvfp4")), 7.25);
+  assert.equal(manifestSequentialRow(manifest, cell("bf16")), null, "a string is not a row");
+  assert.equal(manifestSequentialRow(manifest, cell("int8")), null);
   assert.equal(
-    qwen.evidence.path,
-    "docs/generated/qwen-candle-five-rung-sc-15817.json",
+    manifestSequentialRow(manifest, { modelId: "m", backend: "mlx", tier: "q4" }),
+    null,
   );
 });
 
@@ -886,17 +1226,7 @@ test("phase allocator levels are extracted exactly when the record reports all t
   assert.equal(phaseAllocatorEnvelopes(zeroed), null);
 });
 
-test("underived reasons are per-model, computed from the model's own retained spread", () => {
-  const packaged = new Set(["docs/generated/fixture-corpus.json"]);
-  const corpusOf = (records) => [
-    { path: "docs/generated/fixture-corpus.json", sha256: "x", records },
-  ];
-  const imageRecord = (modelId, width) => ({
-    backend: "mlx",
-    loadShape: "eager_materialization",
-    strategy: { engagedRungs: [] },
-    target: { modelId, tier: "q4", geometry: { width, height: width, frames: 1 } },
-  });
+test("an underived reason names the measured REGIME, never a missing geometry spread", () => {
   const candidate = (overrides) => ({
     modelId: "m",
     backend: "mlx",
@@ -912,48 +1242,56 @@ test("underived reasons are per-model, computed from the model's own retained sp
     decoder: null,
     ...overrides,
   });
-  // Spread in the model's own records: derivable.
+  // THE BORROWED-SLOPE REFUSAL IS GONE (sc-22666, epic 22657 E5). An MLX image anchor used to be
+  // refused unless the model's OWN retained records varied geometry within a cell, because the
+  // lane priced cells with per-pixel slopes fitted on some model's spread. The image law fits
+  // nothing since sc-22663 — it decomposes THIS anchor's measured peaks against THIS contract's
+  // component bytes — so a single-geometry anchor derives, and the reason no longer depends on the
+  // corpus at all (the signature takes only the candidate).
+  assert.equal(underivedReasonFor(candidate({})), null);
   assert.equal(
-    underivedReasonFor(candidate({}), corpusOf([imageRecord("m", 768), imageRecord("m", 1024)]), packaged),
-    null,
+    underivedReasonFor.length,
+    1,
+    "the refusal's corpus inputs are gone with it",
   );
-  // A single geometry: validation-only, with the missing spread named.
-  assert.match(
-    underivedReasonFor(candidate({}), corpusOf([imageRecord("m", 1024), imageRecord("m", 1024)]), packaged),
-    /single geometry/,
-  );
-  // ANOTHER model's spread must not be borrowed — the scoping is per-model by construction.
+  // A deep measured regime still cannot upper-bound the ladder: that guard is about WHICH
+  // composition was measured, not about fitting anything.
   assert.match(
     underivedReasonFor(
-      candidate({}),
-      corpusOf([imageRecord("other", 768), imageRecord("other", 1024), imageRecord("m", 1024)]),
-      packaged,
+      candidate({
+        measuredRegime: {
+          staged: false,
+          decodeTiled: true,
+          attentionChunked: true,
+          transformerWindowed: false,
+        },
+      }),
     ),
-    /single geometry/,
+    /bounded rungs/,
   );
-  // A deep measured regime cannot upper-bound the ladder even with spread.
   assert.match(
-    underivedReasonFor(
-      candidate({ measuredRegime: { staged: false, decodeTiled: true, attentionChunked: true, transformerWindowed: false } }),
-      corpusOf([imageRecord("m", 768), imageRecord("m", 1024)]),
-      packaged,
-    ),
+    underivedReasonFor(candidate({ loadShape: "deferred_materialization" })),
     /bounded rungs/,
   );
   // An axis-free VIDEO anchor cannot answer the pipeline-keyed video law.
   assert.match(
-    underivedReasonFor(candidate({ geometry: { frames: 145 } }), corpusOf([]), packaged),
+    underivedReasonFor(candidate({ geometry: { frames: 145 } })),
     /pipeline axes/,
   );
   // A video anchor with stated axes takes no reason.
   assert.equal(
     underivedReasonFor(
-      candidate({ geometry: { frames: 145 }, transformerVariant: "dev", decoder: "diffvae" }),
-      corpusOf([]),
-      packaged,
+      candidate({
+        geometry: { frames: 145 },
+        transformerVariant: "dev",
+        decoder: "diffvae",
+      }),
     ),
     null,
   );
+  // A candle anchor takes no reason at all: `isDerivable` already refused the compositions the
+  // candle law rejects, so every candle anchor that exists derives.
+  assert.equal(underivedReasonFor(candidate({ backend: "candle" })), null);
 });
 
 test("the LTX-2.5 component deltas are priced from the committed weights inventory, per tier and axis", async () => {

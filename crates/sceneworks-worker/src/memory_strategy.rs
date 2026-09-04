@@ -267,18 +267,36 @@ pub enum CandidateBasis {
     /// hull-restricted — admitting a never-measured `(geometry, frames)` cell is its purpose —
     /// and like [`Self::EstimateFloor`] the per-cell binding-phase constraint does not apply:
     /// the anchor measured all three phases and the derivation prices each per phase.
-    EstimateAnchorDerived,
+    ///
+    /// `lane` names WHICH derivation produced the peak, because the two price their own
+    /// uncertainty differently and the allowance policy must know (sc-22663, epic 22657): the
+    /// video law widens every phase by `ANCHOR_ALLOCATOR_ENVELOPE_MARGIN` inside the derivation;
+    /// the image law widens nothing.
+    EstimateAnchorDerived { lane: AnchorDerivationLane },
     /// Synthesized estimate from the weights + headroom floor — no measured cell in its
     /// extrapolation basis, so the binding-phase constraint does not apply (see the scope
     /// sentence on the constraint's doc).
     EstimateFloor,
 }
 
+/// Which anchor derivation produced an [`CandidateBasis::EstimateAnchorDerived`] peak.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AnchorDerivationLane {
+    /// `sceneworks_core::memory_anchor::MemoryAnchor::derive_phase_peaks` through a lane entry
+    /// point (`derive_image_phase_peaks` on candle, `derive_mlx_image_phase_peaks` on MLX): the
+    /// one image law, which prices measured peaks, component bytes and architecture ratios and
+    /// carries NO margin of its own.
+    Image,
+    /// `MemoryAnchor::derive_video_phase_peaks` (and the sibling+delta cell fall-through): each
+    /// phase already widened by `ANCHOR_ALLOCATOR_ENVELOPE_MARGIN` inside the derivation.
+    Video,
+}
+
 impl CandidateBasis {
     pub const fn is_estimate(self) -> bool {
         matches!(
             self,
-            Self::EstimateFittedCurve | Self::EstimateAnchorDerived | Self::EstimateFloor
+            Self::EstimateFittedCurve | Self::EstimateAnchorDerived { .. } | Self::EstimateFloor
         )
     }
 
@@ -287,7 +305,7 @@ impl CandidateBasis {
         match self {
             Self::Measured => "measured",
             Self::EstimateFittedCurve => "fitted_curve",
-            Self::EstimateAnchorDerived => "anchor_derived",
+            Self::EstimateAnchorDerived { .. } => "anchor_derived",
             Self::EstimateFloor => "floor",
         }
     }
@@ -450,6 +468,58 @@ impl Budget {
                 .min((self.total_gb - self.reserved_headroom_gb).max(0.0)),
         )
     }
+
+    /// The same pool with NO reserve subtracted: what a candidate whose peak already carries the
+    /// reserve (see [`ReserveCharge::ExceptPadCarrying`]) is compared against.
+    fn unreserved_gb(self) -> Option<f64> {
+        Budget {
+            reserved_headroom_gb: 0.0,
+            ..self
+        }
+        .effective_gb()
+    }
+}
+
+/// How a budget's `reserved_headroom_gb` is charged across one candidate set — THE rule for where
+/// the operational reserve is paid, stated once (sc-22664, epic 22657 E4, review D1).
+///
+/// A reserve is paid exactly once per candidate, on one side of the comparison or the other:
+///
+/// * A candidate priced from a MEASURED DEVICE DELTA — a calibration record, or an anchor
+///   derivation ([`CandidateBasis::EstimateAnchorDerived`]) — carries no reserve in its peak: the
+///   retained candle anchors measure every phase as a delta above the process's pre-load
+///   residency. Such a candidate compares against [`Budget::effective_gb`], the pool with the
+///   reserve subtracted.
+/// * A candidate priced from a MANIFEST ROW or a STRUCTURAL RECEIPT — the resident live estimate
+///   (`vram_gate::predicted_peak_gb`, the row plus `HEADROOM_GB`), a manifest-row floor
+///   ([`CandidateBasis::EstimateFloor`], the staged row plus `HEADROOM_GB`), a receipt-priced
+///   family's weights-plus-headroom floor — already carries the structural pad INSIDE its peak,
+///   exactly as it did before sc-22664. Subtracting the reserve from the pool as well would
+///   charge it twice, so it compares against the UNRESERVED pool.
+///
+/// Every lane except the candle image ladder charges [`Self::EveryCandidate`]: their candidates
+/// are uniform in what they carry. The candle ladder mixes both kinds in one selection and names
+/// the pad-carrying ones through [`Self::ExceptPadCarrying`].
+#[derive(Clone, Copy)]
+pub enum ReserveCharge<'p> {
+    /// Every candidate compares against [`Budget::effective_gb`]: the reserve subtracted once
+    /// from the pool, never from a peak.
+    EveryCandidate,
+    /// The reserve is subtracted from the pool only for candidates the predicate does NOT name;
+    /// a named candidate's peak already carries the structural pad and compares against the
+    /// unreserved pool ([`Budget::unreserved_gb`]).
+    ExceptPadCarrying(&'p dyn Fn(&Candidate<'_>) -> bool),
+}
+
+impl ReserveCharge<'_> {
+    /// Whether `candidate`'s peak already carries the reserve, so the pool must not subtract it
+    /// again.
+    fn carried_in_peak(self, candidate: &Candidate<'_>) -> bool {
+        match self {
+            Self::EveryCandidate => false,
+            Self::ExceptPadCarrying(pad_carrying) => pad_carrying(candidate),
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -585,12 +655,31 @@ fn candidate_exclusion(
 }
 
 /// Select the first fitting candidate in the normative resident → staged → bounded-decode →
-/// bounded-attention → bounded-transformer order.
+/// bounded-attention → bounded-transformer order, charging the budget's reserve against every
+/// candidate ([`ReserveCharge::EveryCandidate`]).
 pub fn select_strategy(
     request: RequestScope<'_>,
     contract: &MemoryProviderContract,
     budget: Option<Budget>,
     candidates: &[Candidate<'_>],
+) -> Selection {
+    select_strategy_charging(
+        request,
+        contract,
+        budget,
+        candidates,
+        ReserveCharge::EveryCandidate,
+    )
+}
+
+/// [`select_strategy`] with the reserve charged per [`ReserveCharge`]: the candle image ladder's
+/// entry point, whose candidate set mixes pad-carrying rows with reserve-free derivations.
+pub fn select_strategy_charging(
+    request: RequestScope<'_>,
+    contract: &MemoryProviderContract,
+    budget: Option<Budget>,
+    candidates: &[Candidate<'_>],
+    reserve: ReserveCharge<'_>,
 ) -> Selection {
     if !contract.conformance_errors().is_empty()
         || contract.runtime.cancellation
@@ -602,7 +691,10 @@ pub fn select_strategy(
             reason: MemoryEvidenceVerdict::Invalid,
         };
     }
-    let Some(available_gb) = budget.and_then(Budget::effective_gb) else {
+    let (Some(reserved_gb), Some(unreserved_gb)) = (
+        budget.and_then(Budget::effective_gb),
+        budget.and_then(Budget::unreserved_gb),
+    ) else {
         return Selection::Unverified {
             reason: MemoryEvidenceVerdict::Missing,
         };
@@ -610,11 +702,20 @@ pub fn select_strategy(
     // Evidence is an integer-byte ceiling. Canonicalize the effective budget to the same unit before
     // comparing, so a decimal GiB equality (for example 28.6 - 2.0 == 26.6) cannot miss by one byte
     // after the evidence ceiling conversion and spuriously select a deeper rung.
-    let available_bytes = (available_gb * BYTES_PER_GIB)
-        .ceil()
-        .clamp(0.0, u64::MAX as f64) as u64;
+    let to_bytes = |gb: f64| (gb * BYTES_PER_GIB).ceil().clamp(0.0, u64::MAX as f64) as u64;
+    // The pool one candidate is compared against, per the reserve rule (`ReserveCharge`): the
+    // reserved pool unless its peak already carries the reserve.
+    let pool_for = |candidate: &Candidate<'_>| {
+        if reserve.carried_in_peak(candidate) {
+            unreserved_gb
+        } else {
+            reserved_gb
+        }
+    };
     let backend_kind = contract.backend.backend_kind();
-    let mut deepest = None;
+    // The deepest (smallest) admitted peak that did not fit, with the pool it was compared
+    // against, so a `Reject` names both figures of the same comparison.
+    let mut deepest: Option<(f64, f64)> = None;
     let mut first_unknown = None;
     for strategy in MemoryStrategy::ALL {
         let support = contract
@@ -744,7 +845,9 @@ pub fn select_strategy(
         };
         if let Some((candidate, currency, admitted_peak_bytes)) = eligible
             .iter()
-            .filter(|(_, _, admitted_peak_bytes)| *admitted_peak_bytes <= available_bytes)
+            .filter(|(candidate, _, admitted_peak_bytes)| {
+                *admitted_peak_bytes <= to_bytes(pool_for(candidate))
+            })
             .max_by(
                 |(left, left_currency, left_peak), (right, right_currency, right_peak)| {
                     left_peak
@@ -792,15 +895,23 @@ pub fn select_strategy(
             return Selection::Selected {
                 selection: candidate.selection,
                 needed_gb,
-                available_gb,
+                available_gb: pool_for(candidate),
             };
         }
         let minimum = eligible
             .iter()
-            .map(|(_, _, admitted_peak_bytes)| peak_bytes_to_gb(*admitted_peak_bytes))
-            .min_by(f64::total_cmp)
+            .map(|(candidate, _, admitted_peak_bytes)| {
+                (peak_bytes_to_gb(*admitted_peak_bytes), pool_for(candidate))
+            })
+            .min_by(|left, right| left.0.total_cmp(&right.0))
             .expect("eligible rung is non-empty");
-        deepest = Some(deepest.map_or(minimum, |current: f64| current.min(minimum)));
+        deepest = Some(deepest.map_or(minimum, |current: (f64, f64)| {
+            if minimum.0 < current.0 {
+                minimum
+            } else {
+                current
+            }
+        }));
     }
     if let Some(reason) = first_unknown {
         Selection::Unverified { reason }
@@ -809,7 +920,7 @@ pub fn select_strategy(
             Selection::Unverified {
                 reason: MemoryEvidenceVerdict::Missing,
             },
-            |needed_gb| Selection::Reject {
+            |(needed_gb, available_gb)| Selection::Reject {
                 needed_gb,
                 available_gb,
             },
@@ -1000,6 +1111,152 @@ mod tests {
             gen_core::MEMORY_CALIBRATION_ABI,
             "bump sceneworks_core::memory_calibration::MEMORY_CALIBRATION_ABI (and migrate the \
              receipt schema) together with the inference pin"
+        );
+    }
+
+    /// sc-22664 review D1: the reserve is charged per candidate by `ReserveCharge`. A candidate
+    /// the predicate names as pad-carrying compares against the UNRESERVED pool; every other
+    /// candidate compares against the pool minus the reserve; `select_strategy` itself is
+    /// `EveryCandidate`. A `Reject` names the pool of the deepest candidate it graded. MUTATION:
+    /// `ReserveCharge::carried_in_peak` returning `false` for `ExceptPadCarrying` selects Staged in
+    /// the second arm and reports 4.0 in the fourth — red.
+    #[test]
+    fn the_reserve_is_charged_per_candidate_and_a_pad_carrying_peak_pays_it_once() {
+        // Resident and staged only, so a budget below both is a `Reject` (a deeper implemented
+        // rung with no candidate would read as `Unverified { Missing }` instead).
+        let mut provider = contract();
+        for capability in &mut provider.strategies {
+            if capability.strategy.is_optimized()
+                && capability.strategy != MemoryStrategy::StagedResidency
+            {
+                capability.support = MemoryStrategySupport::Missing;
+            }
+        }
+        let contract = || provider.clone();
+        let mut resident = evidence(MemoryStrategy::Resident);
+        rekey_composition(&mut resident, &provider);
+        resident.predicted_peak_bytes = (10.0 * BYTES_PER_GIB) as u64;
+        let mut staged = evidence(MemoryStrategy::StagedResidency);
+        rekey_composition(&mut staged, &provider);
+        staged.predicted_peak_bytes = (7.0 * BYTES_PER_GIB) as u64;
+        let candidates = [
+            Candidate {
+                selection: MemorySelection {
+                    strategy: MemoryStrategy::Resident,
+                    parameters: params(MemoryStrategy::Resident),
+                    tier: tier(),
+                },
+                evidence: &resident,
+                closure_digest: INF,
+                basis: CandidateBasis::Measured,
+                unmodeled_activation_bytes: None,
+            },
+            Candidate {
+                selection: MemorySelection {
+                    strategy: MemoryStrategy::StagedResidency,
+                    parameters: params(MemoryStrategy::StagedResidency),
+                    tier: tier(),
+                },
+                evidence: &staged,
+                closure_digest: INF,
+                basis: CandidateBasis::Measured,
+                unmodeled_activation_bytes: None,
+            },
+        ];
+        let budget = |available_gb: f64| {
+            Some(Budget {
+                available_gb,
+                reclaimable_gb: 0.0,
+                total_gb: 96.0,
+                reserved_headroom_gb: 2.0,
+            })
+        };
+        let resident_is_padded =
+            |candidate: &Candidate<'_>| candidate.selection.strategy == MemoryStrategy::Resident;
+        let staged_is_padded = |candidate: &Candidate<'_>| {
+            candidate.selection.strategy == MemoryStrategy::StagedResidency
+        };
+
+        // Uniform charge: 10.5 − 2.0 = 8.5 excludes the 10 GiB resident peak, admits staged.
+        let uniform = select_strategy(request(), &contract(), budget(10.5), &candidates);
+        let Selection::Selected {
+            selection,
+            available_gb,
+            ..
+        } = uniform
+        else {
+            panic!("{uniform:?}");
+        };
+        assert_eq!(selection.strategy, MemoryStrategy::StagedResidency);
+        assert_eq!(available_gb, 8.5);
+
+        // The resident peak carries its pad: it compares against 10.5 and fits, once.
+        let charged = select_strategy_charging(
+            request(),
+            &contract(),
+            budget(10.5),
+            &candidates,
+            ReserveCharge::ExceptPadCarrying(&resident_is_padded),
+        );
+        let Selection::Selected {
+            selection,
+            available_gb,
+            needed_gb,
+        } = charged
+        else {
+            panic!("{charged:?}");
+        };
+        assert_eq!(selection.strategy, MemoryStrategy::Resident);
+        assert_eq!(available_gb, 10.5);
+        assert_eq!(needed_gb, 10.0);
+
+        // A reserve-free candidate under the same charge still pays the reserve: with the
+        // resident excluded on the unreserved pool (10 > 9.5), staged is graded against
+        // 9.5 − 2.0 = 7.5 and fits, reporting THAT pool.
+        let mixed = select_strategy_charging(
+            request(),
+            &contract(),
+            budget(9.5),
+            &candidates,
+            ReserveCharge::ExceptPadCarrying(&resident_is_padded),
+        );
+        assert!(
+            matches!(
+                mixed,
+                Selection::Selected {
+                    selection: MemorySelection {
+                        strategy: MemoryStrategy::StagedResidency,
+                        ..
+                    },
+                    available_gb: 7.5,
+                    ..
+                }
+            ),
+            "{mixed:?}"
+        );
+
+        // A reject names the deepest candidate's own pool: staged, pad-carrying here, was graded
+        // against the unreserved 6.0, not 4.0.
+        let rejected = select_strategy_charging(
+            request(),
+            &contract(),
+            budget(6.0),
+            &candidates,
+            ReserveCharge::ExceptPadCarrying(&staged_is_padded),
+        );
+        assert_eq!(
+            rejected,
+            Selection::Reject {
+                needed_gb: 7.0,
+                available_gb: 6.0,
+            }
+        );
+        assert_eq!(
+            select_strategy(request(), &contract(), budget(6.0), &candidates),
+            Selection::Reject {
+                needed_gb: 7.0,
+                available_gb: 4.0,
+            }
         );
     }
 
@@ -3074,7 +3331,9 @@ mod tests {
                 },
                 evidence: record,
                 closure_digest: INF,
-                basis: CandidateBasis::EstimateAnchorDerived,
+                basis: CandidateBasis::EstimateAnchorDerived {
+                    lane: AnchorDerivationLane::Video,
+                },
                 unmodeled_activation_bytes: None,
             })
             .collect::<Vec<_>>();
@@ -3131,8 +3390,27 @@ mod tests {
                 evidences[0].predicted_peak_bytes,
             ),
             evidences[0].predicted_peak_bytes,
-            "an anchor-derived candidate is graded at its peak, with no selector allowance"
+            "a video anchor-derived candidate is graded at its peak, with no selector allowance"
         );
+        // The IMAGE lane's derivation widens nothing (sc-22663), so the same peak on the image
+        // lane is graded at its peak plus the backend's same-cell recapture spread — strictly
+        // above the raw peak and strictly below the retired blanket widening.
+        let image_admitted = admitted_peak_bytes(
+            AdmissionSubject {
+                basis: CandidateBasis::EstimateAnchorDerived {
+                    lane: AnchorDerivationLane::Image,
+                },
+                ..candidates[0].admission_subject(MemoryBackend::Mlx, CandidateCurrency::Estimate)
+            },
+            evidences[0].predicted_peak_bytes,
+        );
+        let raw = evidences[0].predicted_peak_bytes;
+        assert_eq!(
+            image_admitted,
+            raw + (raw as f64 * crate::ladder_margin_policy::MLX_RECAPTURE_SPREAD).ceil() as u64
+        );
+        assert!(image_admitted > raw);
+        assert!((image_admitted as f64) < raw as f64 * (1.0 + 0.5040734033902377));
     }
 
     /// sc-22508 E3, at the selector seam: a FLOOR's allowance is charged against its declared

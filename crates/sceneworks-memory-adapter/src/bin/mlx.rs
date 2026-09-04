@@ -1873,6 +1873,28 @@ struct AllocatorState {
     cache: u64,
 }
 
+/// The live `mlx_rs::memory` counters behind [`protocol::ResidencyCounters`], so a phase window's
+/// opening order is the one the adapter crate proves on every host (sc-22667 D3).
+struct MlxResidencyCounters;
+
+impl protocol::ResidencyCounters for MlxResidencyCounters {
+    fn clear_cache(&mut self) {
+        clear_cache();
+    }
+    fn reset_peak(&mut self) {
+        reset_peak_memory();
+    }
+    fn active(&self) -> u64 {
+        get_active_memory() as u64
+    }
+    fn cache(&self) -> u64 {
+        get_cache_memory() as u64
+    }
+    fn peak(&self) -> u64 {
+        get_peak_memory() as u64
+    }
+}
+
 impl AllocatorState {
     fn capture_current() -> Self {
         Self {
@@ -2340,11 +2362,28 @@ fn run_z_image_reference_loaded(
         active: 0,
         cache: 0,
     });
-    clear_cache();
-    reset_peak_memory();
-    let pre_rung_active = get_active_memory() as u64;
-    let pre_rung_cache = get_cache_memory() as u64;
-    let peak_after_reset = get_peak_memory() as u64;
+    // sc-22667 (epic 22657 D3): Z-Image's residency is REQUEST-SCOPED even under eager
+    // materialization — each component is materialized the first time a request reaches its
+    // phase and retained afterwards — so a window opened on the freshly loaded generator measured
+    // a cold first request whose conditioning phase saw only the text encoder it was materializing
+    // (2.27 GB against a 5.83 GB resident set), which the core anchor law refuses to decompose.
+    // One unmeasured request on the same scope materializes the whole resident set FIRST; the
+    // window then opens above it, the way the candle adapter measures every phase above weights
+    // already on device. `protocol::open_resident_phase_window` fixes that order and refuses a
+    // resident set the counters did not see.
+    let opening = protocol::open_resident_phase_window(&mut MlxResidencyCounters, || {
+        one_image(scoped_generate(
+            generator,
+            z_image_request(width, height),
+            &context,
+            None,
+            &mut |_| {},
+        )?)
+        .map(|_| ())
+    })?;
+    let pre_rung_active = opening.resident_active;
+    let pre_rung_cache = opening.resident_cache;
+    let peak_after_reset = opening.peak_after_reset;
     let selected = one_image(scoped_generate(
         generator,
         z_image_request(width, height),
@@ -2663,6 +2702,9 @@ fn run_z_image_reference_loaded(
                 ("lifecycleMaximumRecoveryPostCleanupActive", "bytes", lifecycle_max_recovery_active),
                 ("lifecycleMaximumRecoveryPostCleanupCache", "bytes", lifecycle_max_recovery_cache),
                 ("loadShapeDeferred", "count", u64::from(load_shape == LoadShape::DeferredMaterialization)),
+                // The window opened ABOVE the materialized resident set (sc-22667 D3); a record
+                // without this measurement was captured on a cold first request.
+                ("residentSetMaterializedBeforeWindow", "count", 1),
             ],
         ),
         "capturedAt": protocol::captured_at(),

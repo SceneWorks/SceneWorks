@@ -1261,7 +1261,80 @@ fn run_five_rung_batch(request: &Value) -> Result<Value, String> {
         let after = smi.used_bytes()?;
         update_warmed_retention_baseline(&mut settled_after_resident, after)?;
     }
-    Ok(json!({ "modelLoads": 1, "fragments": fragments }))
+    // sc-22667 (epic 22657 E6): the LOADED provider's component bytes, architecture facts and
+    // published rung parameters ride along with the fragments, so the derived side of the
+    // falsification prices the five rungs from exactly the contract this measurement ran under
+    // rather than a hand-constructed twin. Additive: the harness reads `fragments` only.
+    let provider_contract = generator
+        .memory_strategy_contract()
+        .map(loaded_contract_facts)
+        .ok_or_else(|| format!("loaded {provider_id} has no memory-strategy contract"))?;
+    Ok(json!({
+        "modelLoads": 1,
+        "fragments": fragments,
+        "providerContract": provider_contract,
+    }))
+}
+
+/// The facts of a loaded provider contract the worker's candle ladder prices from
+/// (`anchor_component_bytes(contract.asset_facts)`, `architecture_facts_from_contract`,
+/// `estimate_floor_parameters`), serialized verbatim in the contract's own field names.
+fn loaded_contract_facts(contract: &runtime_cuda::gen_core::MemoryProviderContract) -> Value {
+    let assets = contract.asset_facts;
+    let facts = contract.architecture_facts;
+    let strategies: Vec<Value> = contract
+        .strategies
+        .iter()
+        .map(|capability| {
+            let ranges = &capability.parameters;
+            json!({
+                "strategy": strategy_name(capability.strategy),
+                "support": format!("{:?}", capability.support),
+                "engagedRungs": contract
+                    .engaged_composition(capability.strategy)
+                    .into_iter()
+                    .map(strategy_name)
+                    .collect::<Vec<_>>(),
+                "parameters": {
+                    "decodeTileEdges": ranges.decode_tile_edges,
+                    "decodeOverlaps": ranges.decode_overlaps,
+                    "attentionChunkSizes": ranges.attention_chunk_sizes,
+                    "transformerWindowSizes": ranges.transformer_window_sizes,
+                    "transformerWindowComponents": ranges
+                        .transformer_window_components
+                        .iter()
+                        .map(|component| format!("{component:?}"))
+                        .collect::<Vec<_>>(),
+                },
+            })
+        })
+        .collect();
+    json!({
+        "providerId": contract.provider_id,
+        "loadShape": load_shape_key(contract.load_shape),
+        "calibrationFingerprint": contract
+            .calibration
+            .as_ref()
+            .map(|calibration| calibration.fingerprint.clone()),
+        "assetFacts": {
+            "baseBytes": assets.base_bytes,
+            "conditioningBytes": assets.conditioning_bytes,
+            "transformerBytes": assets.transformer_bytes,
+            "decoderBytes": assets.decoder_bytes,
+            "overlayBytes": assets.overlay_bytes,
+        },
+        "architectureFacts": {
+            "attentionHeads": facts.attention_heads,
+            "headDim": facts.head_dim,
+            "transformerBlocks": facts.transformer_blocks,
+            "patchSize": facts.patch_size,
+            "latentChannels": facts.latent_channels,
+            "vaeSpatialScale": facts.vae_spatial_scale,
+            "vaeTemporalScale": facts.vae_temporal_scale,
+            "activationDtypeWidth": facts.activation_dtype_width,
+        },
+        "strategies": strategies,
+    })
 }
 
 fn ltx25_planned_load_shape(

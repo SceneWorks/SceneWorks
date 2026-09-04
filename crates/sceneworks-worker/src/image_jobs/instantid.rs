@@ -1357,10 +1357,14 @@ async fn generate_instantid_stream(
                 // The caller-staged SDXL components as an `SdxlComponents` (candle only — see above).
                 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
                 sdxl,
-                // c6d prices the full Candle composition at load time. Seed the paths with the
-                // already-resolved sources; the later builders still attach those same sources
-                // so their load/reload behavior remains unchanged while the admission contract
-                // sees the complete resident stack.
+                // c6d prices the full Candle composition at load time. The two resident overlays
+                // added to that contract by sc-22657 are the OpenPose SDXL ControlNet held beside
+                // IdentityNet on the pose route and the f32 SCRFD + ArcFace face stack retained for
+                // the whole request. Seed both already-resolved sources here so
+                // `load_with_memory_context` charges them once in `overlay_bytes`; the later
+                // `with_openpose` / `with_face` calls re-seal those same sources onto the same
+                // composition, preserving the documented load order without duplicate pricing.
+                // The MLX `InstantIdPaths` carries neither field, hence the candle gate.
                 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
                 openpose: openpose.clone(),
                 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
