@@ -1,0 +1,70 @@
+{
+  "schema_version": 1,
+  "campaign_id": "sc-22261-f4c46bb-c6d6a4db-terminal-1",
+  "inference_revision": "c6d6a4dbd61ab09c26ff5526632cae2cefea60ed",
+  "sceneworks_revision": "f4c46bb22e8adf8caaa848bf3b3af29b64851a7d",
+  "workflow": {
+    "repository": "SceneWorks/SceneWorks",
+    "path": ".github/workflows/server-candle-linux.yml",
+    "run_id": "33871911197",
+    "run_attempt": 1,
+    "head_sha": "f4c46bb22e8adf8caaa848bf3b3af29b64851a7d",
+    "conclusion": "cancelled"
+  },
+  "failure": {
+    "code": "worker_cpu_fallback",
+    "phase": "execution",
+    "tuple": "mlx:1b"
+  },
+  "markers": {
+    "campaign": {
+      "path": "starvector-terminal-c6d6a4dbd61ab09c26ff5526632cae2cefea60ed.campaign.json",
+      "size": 127,
+      "sha256": "bbe82941483fc032c87aa07313aaf176ca9a85257b6133bdcd41c2a118314243",
+      "content": "{\n  \"permanent_pin\": \"c6d6a4dbd61ab09c26ff5526632cae2cefea60ed\",\n  \"campaign_run_id\": \"sc-22261-f4c46bb-c6d6a4db-terminal-1\"\n}\n"
+    },
+    "tuple": {
+      "path": "starvector-terminal-c6d6a4dbd61ab09c26ff5526632cae2cefea60ed-sc-22261-f4c46bb-c6d6a4db-terminal-1-mlx-1b.tuple.json",
+      "size": 192,
+      "sha256": "a67d3f40b3506bcce1063c46451ea45dae033da9c6c60afd35b7b5235936b331",
+      "content": "{\n  \"permanent_pin\": \"c6d6a4dbd61ab09c26ff5526632cae2cefea60ed\",\n  \"campaign_run_id\": \"sc-22261-f4c46bb-c6d6a4db-terminal-1\",\n  \"tuple\": \"mlx:1b\",\n  \"started_at\": \"2026-09-04T12:23:44.883Z\"\n}\n"
+    }
+  },
+  "source_artifacts": [
+    {
+      "role": "raw",
+      "repository": "SceneWorks/SceneWorks",
+      "workflow_run_id": "33871911197",
+      "workflow_run_attempt": 1,
+      "head_sha": "f4c46bb22e8adf8caaa848bf3b3af29b64851a7d",
+      "api_workflow_run": {
+        "id": "33871911197",
+        "head_sha": "f4c46bb22e8adf8caaa848bf3b3af29b64851a7d"
+      },
+      "id": "9936854378",
+      "name": "starvector-terminal-mlx-1b-sc-22261-f4c46bb-c6d6a4db-terminal-1",
+      "size": 194617,
+      "digest": "sha256:9e880bd51c2725bb12983a13fde32e9cb1961a42362b9d26bdbfd9fee0e62d8f"
+    },
+    {
+      "role": "combined",
+      "repository": "SceneWorks/SceneWorks",
+      "workflow_run_id": "33871911197",
+      "workflow_run_attempt": 1,
+      "head_sha": "f4c46bb22e8adf8caaa848bf3b3af29b64851a7d",
+      "api_workflow_run": {
+        "id": "33871911197",
+        "head_sha": "f4c46bb22e8adf8caaa848bf3b3af29b64851a7d"
+      },
+      "id": "9936862671",
+      "name": "starvector-terminal-receipt-sc-22261-f4c46bb-c6d6a4db-terminal-1",
+      "size": 234235,
+      "digest": "sha256:aeab03bfa8d1e5b8296ea00824a604adf9de047c0619b3fbdc4e6ab1d83538c6"
+    }
+  ],
+  "authority": {
+    "story": "https://app.shortcut.com/trefry/story/22261",
+    "handoff": "https://app.shortcut.com/trefry/epic/19699#activity-22703",
+    "reason": "Retired campaign selected CPU worker; require corrected GPU identity and four fresh measured tuples. Historical evidence is quarantined only."
+  }
+}

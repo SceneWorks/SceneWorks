@@ -7,6 +7,7 @@ import path from "node:path";
 import { pathToFileURL } from "node:url";
 import { INFERENCE_REVISION, terminalSourceRowsSha256 } from "./starvector-terminal-campaign.mjs";
 import { isExecutedModule } from "./starvector-terminal-cli.mjs";
+import { loadUpstreamReference, verifyUpstreamExecution } from "./lib/starvector-terminal-upstream-reference.mjs";
 
 const sha = (value) => createHash("sha256").update(value).digest("hex");
 const die = (message) => { throw new Error(`starvector terminal bundle: ${message}`); };
@@ -20,7 +21,7 @@ async function bindLocalFile(root, relative, expected, label) {
   return { path: file, byte_size: info.size, sha256: expected };
 }
 
-export async function materializeBundle({ corpusPath, assetsRoot, output, permanentPin, bindingPath, hostileGenerator = null }) {
+export async function materializeBundle({ corpusPath, assetsRoot, output, permanentPin, bindingPath, hostileGenerator = null, upstreamRoot = process.env.STARVECTOR_TERMINAL_UPSTREAM_ROOT ?? (process.env.RUNNER_TEMP ? path.join(process.env.RUNNER_TEMP, "starvector-upstream") : undefined) }) {
   if (permanentPin !== INFERENCE_REVISION) die("permanent pin must equal the exact inference corpus revision");
   const corpus = await json(corpusPath), index = await json(path.join(assetsRoot, "starvector-terminal-row-index-v1.json")), binding = await json(bindingPath);
   if (index.inference_revision !== INFERENCE_REVISION || index.row_identity_sha256 !== corpus.upstream_image_quality_cases.row_identity_sha256 || !Array.isArray(index.rows) || index.rows.length !== 120) die("pre-provisioned corpus row index identity/count mismatch");
@@ -37,6 +38,19 @@ export async function materializeBundle({ corpusPath, assetsRoot, output, perman
   const parityRows = corpus.upstream_image_quality_cases.sources.flatMap((_, sourceIndex) => rows.slice(sourceIndex * 30, sourceIndex * 30 + 5));
   if (parityRows.length !== 20) die("pinned corpus must select five deterministic parity rows from each of four sources");
   const tuples = Object.fromEntries(["mlx:1b", "mlx:8b", "candle-cuda:1b", "candle-cuda:8b"].map((tuple) => { const tier = tuple.split(":")[1]; return [tuple, { image_quality: rows.map((row) => route(row, "", tier)), deterministic_parity: parityRows.map((row, seed) => ({ ...route(row, "-parity", tier), seed })), lifecycle: index.lifecycle_cases?.[tuple], limits: index.limit_cases?.[tuple] }]; }));
+  if (!hostileGenerator) {
+    await verifyUpstreamExecution(upstreamRoot);
+    // The same two immutable model-specific oracle bundles serve both backends.
+    for (const tier of ["1b", "8b"]) {
+      const upstream = await loadUpstreamReference(upstreamRoot, tier, index.rows);
+      for (const backend of ["mlx", "candle-cuda"]) {
+        const entry = tuples[`${backend}:${tier}`];
+        entry.upstream_reference = upstream.upstream_reference;
+        entry.upstream_paths = { config: upstream.config_path, processor: upstream.processor_path, transcript: upstream.transcript_path };
+        entry.deterministic_parity = entry.deterministic_parity.map((item, i) => ({ ...item, upstream_svg: upstream.cases[i].upstream_svg, upstream_svg_sha256: upstream.cases[i].upstream_svg_sha256, upstream_preview_png: upstream.cases[i].upstream_preview_png, upstream_preview_png_sha256: upstream.cases[i].upstream_preview_png_sha256 }));
+      }
+    }
+  }
   const inferenceRoot = path.resolve(path.dirname(corpusPath), "..");
   const validator = hostileGenerator ? null : await import(pathToFileURL(path.join(inferenceRoot, "scripts", "release", "starvector_terminal_evidence.mjs")).href);
   const payloadFor = hostileGenerator ?? validator.hostilePayload;

@@ -6,7 +6,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { pathToFileURL } from "node:url";
-import { claimCampaignMarker, claimTupleMarker, consolidateCanonicalArtifacts, inventory, sealReceipt, validateInferencePreflight, verifyInferenceCheckout, verifyPermanentPin } from "./starvector-terminal-producer.mjs";
+import { claimTupleMarker, consolidateCanonicalArtifacts, inventory, sealReceipt, validateInferencePreflight, verifyInferenceCheckout, verifyPermanentPin } from "./starvector-terminal-producer.mjs";
 
 // CI supplies an exact pinned inference checkout; the local default preserves
 // the focused fixture without embedding a developer-specific worktree path.
@@ -37,7 +37,7 @@ test("required CI fetches the exact terminal inference revision", async () => {
 
 test("exact pinned validator accepts sealed golden receipt and rejects every gate mutation", async () => {
   const root = await mkdtemp(path.join(tmpdir(), "starvector-terminal-")); inferenceRoot = await pinnedInferenceCheckout(root); const sceneWorksRoot = await fakeSceneWorks(path.join(root, "sceneworks")); const evidence = path.join(root, "evidence"), output = path.join(root, "output"); await mkdir(evidence); const { validator, corpus } = await golden(evidence, sceneWorksRoot);
-  await assert.rejects(() => sealReceipt({ sceneWorksRoot, planPath: path.join(process.cwd(), "release/starvector-terminal-campaign-v1.json"), inferenceRoot, evidenceRoot: evidence, output: path.join(root, "real-output"), campaignRunId: "campaign", permanentPin }), /metrics\/2 source digest drifted/);
+  await assert.rejects(() => sealReceipt({ sceneWorksRoot, planPath: path.join(process.cwd(), "release/starvector-terminal-campaign-v1.json"), inferenceRoot, evidenceRoot: evidence, output: path.join(root, "real-output"), campaignRunId: "campaign", permanentPin }), /tuple-controller/);
   const receipt = await sealReceipt({ sceneWorksRoot, planPath: path.join(process.cwd(), "release/starvector-terminal-campaign-v1.json"), inferenceRoot, evidenceRoot: evidence, output, campaignRunId: "campaign", permanentPin, syntheticFixture: true });
   validator.validateReceipt(receipt, validator.validatePlan(corpus), inferenceRevision, receipt.sceneworks_revision, corpus);
   const reject = (mutate) => { const copy = structuredClone(receipt); mutate(copy); assert.throws(() => validator.validateReceipt(copy, validator.validatePlan(corpus), inferenceRevision, copy.sceneworks_revision, corpus)); };
@@ -92,11 +92,7 @@ test("inference preflight requires every exact inventory and native-hook artifac
   if (previous === undefined) delete process.env.STARVECTOR_TERMINAL_INFERENCE_PREFLIGHT; else process.env.STARVECTOR_TERMINAL_INFERENCE_PREFLIGHT = previous;
 });
 
-test("persistent permanent-pin campaign marker refuses a second campaign identity", async () => {
-  const root = await mkdtemp(path.join(tmpdir(), "starvector-marker-"));
-  await claimCampaignMarker(root, permanentPin, "campaign-a"); await claimCampaignMarker(root, permanentPin, "campaign-a");
-  await assert.rejects(() => claimCampaignMarker(root, permanentPin, "campaign-b"), /different terminal campaign marker/);
-});
+
 
 test("tuple marker, bytewise inventory, and symlink policy prevent mixed evidence", async () => {
   const root = await mkdtemp(path.join(tmpdir(), "starvector-marker-"));

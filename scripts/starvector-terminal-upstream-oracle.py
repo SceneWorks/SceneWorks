@@ -352,7 +352,7 @@ def generate(model, row, device):
     observation = {}
     budget = row['detail_budget']['maxNewTokens']
     deadline = time.monotonic() + row['detail_budget']['maxWallTimeMs'] / 1000
-    from transformers import StoppingCriteria
+    from transformers import StoppingCriteria, StoppingCriteriaList
     class Deadline(StoppingCriteria):
         def __call__(self, input_ids, scores, **kwargs):
             if time.monotonic() > deadline:
@@ -363,7 +363,8 @@ def generate(model, row, device):
             fail('upstream wrapper did not select greedy decoding')
         observation['prefix_length'] = int(kwargs['inputs_embeds'].shape[1])
         kwargs.pop('max_length', None)
-        kwargs['maxNewTokens'] = budget
+        kwargs['max_new_tokens'] = budget
+        kwargs['stopping_criteria'] = StoppingCriteriaList([*kwargs.get('stopping_criteria', []), Deadline()])
         output = original(**kwargs)
         observation['generated_tokens'] = int(output.shape[1])
         if observation['generated_tokens'] > budget:
@@ -447,15 +448,19 @@ def worker(args, facts):
             raise
     config_copy = tier_root / 'config.json'; shutil.copyfile(facts['config_path'], config_copy)
     processor_copy = tier_root / 'processor.json'; shutil.copyfile(facts['processor_path'], processor_copy)
-    checkpoint = facts['lock']['checkpoints'][args.tier]
-    value = {'schema_version': 1, 'upstream_reference': {
-        'implementation_repository': facts['lock']['implementation_repository'], 'implementation_revision': facts['lock']['implementation_revision'],
-        'checkpoint_repository': checkpoint['repository'], 'checkpoint_revision': checkpoint['revision'],
-        'checkpoint_inventory_sha256': facts['model_inventory_sha256'], 'config_sha256': digest(config_copy),
-        'processor_sha256': digest(processor_copy), 'transcript_sha256': digest(transcript_path)},
+    value = {'schema_version': 1, 'upstream_reference': reference_metadata(facts, args.tier, config_copy, processor_copy, transcript_path),
         'config_path': config_copy.relative_to(output).as_posix(), 'processor_path': processor_copy.relative_to(output).as_posix(),
         'transcript_path': transcript_path.relative_to(output).as_posix(), 'cases': cases}
     durable_json(output / ('upstream-reference-' + args.tier + '.json'), value)
+
+
+def reference_metadata(facts, tier, config_path, processor_path, transcript_path):
+    checkpoint = facts['lock']['checkpoints'][tier]
+    return {'implementation_repository': facts['lock']['implementation_repository'],
+            'implementation_revision': facts['lock']['implementation_revision'],
+            'checkpoint_repository': checkpoint['repository'], 'checkpoint_revision': checkpoint['revision'],
+            'checkpoint_inventory_sha256': facts['model_inventory_sha256'], 'config_sha256': digest(config_path),
+            'processor_sha256': digest(processor_path), 'transcript_sha256': digest(transcript_path)}
 
 
 def supervise(args):

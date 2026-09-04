@@ -49,11 +49,77 @@ env:
   STARVECTOR_TERMINAL_PRODUCT_ROUTE_COMMAND: ${{ github.workspace }}/scripts/starvector-terminal-route.mjs
 
 jobs:
-  mlx-1b:
-    runs-on: [self-hosted, macOS, ARM64, rw-starvector]
-    timeout-minutes: 720
+  prepare-recovery:
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Quarantine exact retired artifacts before hardware admission
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: node scripts/starvector-terminal-recovery.mjs prepare release/starvector-terminal-recovery-v1.json "$RUNNER_TEMP/starvector-recovery"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: starvector-recovery-${{ env.STARVECTOR_TERMINAL_CAMPAIGN_RUN_ID }}
+          path: ${{ runner.temp }}/starvector-recovery
+          if-no-files-found: error
+
+  upstream-reference:
+    needs: prepare-recovery
+    runs-on: [self-hosted, Windows, X64, cuda, real-weights]
+    timeout-minutes: 180
+    env:
+      STARVECTOR_TERMINAL_GPU_ID: "0"
+      STARVECTOR_TERMINAL_ROOT: D:\sceneworks-terminal
+      STARVECTOR_TERMINAL_WEIGHTS_ROOT: D:\\sceneworks-terminal\\weights
+      STARVECTOR_TERMINAL_METRICS_ROOT: D:\\sceneworks-terminal\\metrics
+      STARVECTOR_TERMINAL_METRICS_PYTHON: D:\\sceneworks-terminal\\metrics\\Scripts\\python.exe
+      STARVECTOR_TERMINAL_API_URL: http://127.0.0.1:17821
+      STARVECTOR_TERMINAL_LEASE_ROOT: C:\\ProgramData\\SceneWorks\\terminal-leases
+      STARVECTOR_TERMINAL_LEASE_HELPER: ${{ github.workspace }}\\target\\release\\starvector_terminal_lease.exe
+      STARVECTOR_TERMINAL_SANITIZER: ${{ github.workspace }}\\target\\release\\starvector_terminal_sanitize.exe
+      STARVECTOR_TERMINAL_PRODUCT_ROUTE_COMMAND: ${{ github.workspace }}\\scripts\\starvector-terminal-route.mjs
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: starvector-recovery-${{ env.STARVECTOR_TERMINAL_CAMPAIGN_RUN_ID }}
+          path: ${{ runner.temp }}/starvector-recovery
+      - name: Generate one shared immutable upstream reference bundle
+        shell: powershell
+        run: |
+          $pinEnvironment = node scripts/lib/starvector-terminal-pin-paths.mjs "$env:STARVECTOR_TERMINAL_ROOT" "$env:STARVECTOR_TERMINAL_PERMANENT_PIN"
+          if ($LASTEXITCODE -ne 0) { throw 'pin path resolution failed' }
+          foreach ($line in $pinEnvironment) { $parts = $line -split '=', 2; [Environment]::SetEnvironmentVariable($parts[0], $parts[1], 'Process') }
+          cargo build --release --locked -p sceneworks-worker --bin starvector_terminal_lease --bin starvector_terminal_sanitize
+          if ($LASTEXITCODE -ne 0) { throw 'terminal helpers failed to build' }
+          node scripts/starvector-terminal-upstream.mjs run "$env:GITHUB_WORKSPACE" "$env:RUNNER_TEMP/starvector-upstream"
+          if ($LASTEXITCODE -ne 0) { throw 'upstream reference failed' }
+      - name: Preserve upstream reference and partial failure evidence
+        if: ${{ always() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: starvector-upstream-${{ env.STARVECTOR_TERMINAL_CAMPAIGN_RUN_ID }}
+          path: ${{ runner.temp }}/starvector-upstream
+          if-no-files-found: warn
+
+  mlx-1b:
+    needs: upstream-reference
+    runs-on: [self-hosted, macOS, ARM64, rw-starvector]
+    timeout-minutes: 720
+    env:
+      STARVECTOR_TERMINAL_GPU_ID: mlx
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Download verified recovery quarantine
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: starvector-recovery-${{ env.STARVECTOR_TERMINAL_CAMPAIGN_RUN_ID }}
+          path: ${{ runner.temp }}/starvector-recovery
+      - name: Download the shared upstream reference from this workflow attempt
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: starvector-upstream-${{ env.STARVECTOR_TERMINAL_CAMPAIGN_RUN_ID }}
+          path: ${{ runner.temp }}/starvector-upstream
       - name: Resolve immutable pin-keyed terminal inputs
         run: node scripts/lib/starvector-terminal-pin-paths.mjs "$STARVECTOR_TERMINAL_ROOT" "$STARVECTOR_TERMINAL_PERMANENT_PIN" >> "$GITHUB_ENV"
       - name: Validate immutable dispatch plan and pre-provisioned controller inputs
@@ -69,7 +135,7 @@ jobs:
       - name: Run production vector_generate route for MLX 1B
         run: |
           export STARVECTOR_TERMINAL_CASE_BUNDLE="$RUNNER_TEMP/starvector-terminal/mlx-1b/case-bundle.json"
-          node scripts/starvector-terminal-product-service.mjs start "$GITHUB_WORKSPACE" "$RUNNER_TEMP/starvector-terminal/mlx-1b" "$STARVECTOR_TERMINAL_PERMANENT_PIN" "$STARVECTOR_TERMINAL_API_URL" "$STARVECTOR_TERMINAL_WEIGHTS_ROOT"
+          node scripts/starvector-terminal-product-service.mjs start "$GITHUB_WORKSPACE" "$RUNNER_TEMP/starvector-terminal/mlx-1b" "$STARVECTOR_TERMINAL_PERMANENT_PIN" "$STARVECTOR_TERMINAL_API_URL" "$STARVECTOR_TERMINAL_WEIGHTS_ROOT" mlx:1b
           node scripts/starvector-terminal-assets.mjs "$STARVECTOR_TERMINAL_CORPUS_ASSETS_ROOT" "$STARVECTOR_TERMINAL_API_URL" mlx:1b "$RUNNER_TEMP/starvector-terminal/mlx-1b/imported-assets.json"
           node scripts/starvector-terminal-case-bundle.mjs "$STARVECTOR_TERMINAL_INFERENCE_ROOT/release/starvector-terminal-corpus-v1.json" "$STARVECTOR_TERMINAL_CORPUS_ASSETS_ROOT" "$STARVECTOR_TERMINAL_CASE_BUNDLE" "$STARVECTOR_TERMINAL_PERMANENT_PIN" "$RUNNER_TEMP/starvector-terminal/mlx-1b/imported-assets.json"
           node scripts/starvector-terminal-producer.mjs run "$GITHUB_WORKSPACE" release/starvector-terminal-campaign-v1.json "$STARVECTOR_TERMINAL_INFERENCE_ROOT" "$STARVECTOR_TERMINAL_WEIGHTS_ROOT" "$STARVECTOR_TERMINAL_METRICS_ROOT" "$STARVECTOR_TERMINAL_LEASE_ROOT" "$STARVECTOR_TERMINAL_LEASE_HELPER" "$RUNNER_TEMP/starvector-terminal/mlx-1b" mlx:1b "$STARVECTOR_TERMINAL_CAMPAIGN_RUN_ID" "$STARVECTOR_TERMINAL_PERMANENT_PIN" "$STARVECTOR_TERMINAL_PRODUCT_ROUTE_COMMAND"
@@ -88,8 +154,20 @@ jobs:
     needs: mlx-1b
     runs-on: [self-hosted, macOS, ARM64, rw-starvector]
     timeout-minutes: 720
+    env:
+      STARVECTOR_TERMINAL_GPU_ID: mlx
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Download verified recovery quarantine
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: starvector-recovery-${{ env.STARVECTOR_TERMINAL_CAMPAIGN_RUN_ID }}
+          path: ${{ runner.temp }}/starvector-recovery
+      - name: Download the shared upstream reference from this workflow attempt
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: starvector-upstream-${{ env.STARVECTOR_TERMINAL_CAMPAIGN_RUN_ID }}
+          path: ${{ runner.temp }}/starvector-upstream
       - name: Resolve immutable pin-keyed terminal inputs
         run: node scripts/lib/starvector-terminal-pin-paths.mjs "$STARVECTOR_TERMINAL_ROOT" "$STARVECTOR_TERMINAL_PERMANENT_PIN" >> "$GITHUB_ENV"
       - name: Run production vector_generate route for MLX 8B
@@ -97,7 +175,7 @@ jobs:
           cargo build --release --locked -p sceneworks-worker --bin starvector_terminal_lease --bin starvector_terminal_sanitize
           node scripts/starvector-terminal-campaign.mjs validate-dispatch release/starvector-terminal-campaign-v1.json "$STARVECTOR_TERMINAL_PERMANENT_PIN" "$STARVECTOR_TERMINAL_CAMPAIGN_RUN_ID"
           export STARVECTOR_TERMINAL_CASE_BUNDLE="$RUNNER_TEMP/starvector-terminal/mlx-8b/case-bundle.json"
-          node scripts/starvector-terminal-product-service.mjs start "$GITHUB_WORKSPACE" "$RUNNER_TEMP/starvector-terminal/mlx-8b" "$STARVECTOR_TERMINAL_PERMANENT_PIN" "$STARVECTOR_TERMINAL_API_URL" "$STARVECTOR_TERMINAL_WEIGHTS_ROOT"
+          node scripts/starvector-terminal-product-service.mjs start "$GITHUB_WORKSPACE" "$RUNNER_TEMP/starvector-terminal/mlx-8b" "$STARVECTOR_TERMINAL_PERMANENT_PIN" "$STARVECTOR_TERMINAL_API_URL" "$STARVECTOR_TERMINAL_WEIGHTS_ROOT" mlx:8b
           node scripts/starvector-terminal-assets.mjs "$STARVECTOR_TERMINAL_CORPUS_ASSETS_ROOT" "$STARVECTOR_TERMINAL_API_URL" mlx:8b "$RUNNER_TEMP/starvector-terminal/mlx-8b/imported-assets.json"
           node scripts/starvector-terminal-case-bundle.mjs "$STARVECTOR_TERMINAL_INFERENCE_ROOT/release/starvector-terminal-corpus-v1.json" "$STARVECTOR_TERMINAL_CORPUS_ASSETS_ROOT" "$STARVECTOR_TERMINAL_CASE_BUNDLE" "$STARVECTOR_TERMINAL_PERMANENT_PIN" "$RUNNER_TEMP/starvector-terminal/mlx-8b/imported-assets.json"
           node scripts/starvector-terminal-producer.mjs run "$GITHUB_WORKSPACE" release/starvector-terminal-campaign-v1.json "$STARVECTOR_TERMINAL_INFERENCE_ROOT" "$STARVECTOR_TERMINAL_WEIGHTS_ROOT" "$STARVECTOR_TERMINAL_METRICS_ROOT" "$STARVECTOR_TERMINAL_LEASE_ROOT" "$STARVECTOR_TERMINAL_LEASE_HELPER" "$RUNNER_TEMP/starvector-terminal/mlx-8b" mlx:8b "$STARVECTOR_TERMINAL_CAMPAIGN_RUN_ID" "$STARVECTOR_TERMINAL_PERMANENT_PIN" "$STARVECTOR_TERMINAL_PRODUCT_ROUTE_COMMAND"
@@ -117,6 +195,7 @@ jobs:
     runs-on: [self-hosted, Windows, X64, cuda, real-weights]
     timeout-minutes: 720
     env:
+      STARVECTOR_TERMINAL_GPU_ID: "0"
       STARVECTOR_TERMINAL_ROOT: D:\sceneworks-terminal
       STARVECTOR_TERMINAL_WEIGHTS_ROOT: D:\\sceneworks-terminal\\weights
       STARVECTOR_TERMINAL_METRICS_ROOT: D:\\sceneworks-terminal\\metrics
@@ -128,6 +207,16 @@ jobs:
       STARVECTOR_TERMINAL_PRODUCT_ROUTE_COMMAND: ${{ github.workspace }}\\scripts\\starvector-terminal-route.mjs
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Download verified recovery quarantine
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: starvector-recovery-${{ env.STARVECTOR_TERMINAL_CAMPAIGN_RUN_ID }}
+          path: ${{ runner.temp }}/starvector-recovery
+      - name: Download the shared upstream reference from this workflow attempt
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: starvector-upstream-${{ env.STARVECTOR_TERMINAL_CAMPAIGN_RUN_ID }}
+          path: ${{ runner.temp }}/starvector-upstream
       - name: Resolve immutable pin-keyed terminal inputs
         shell: powershell
         run: |
@@ -141,7 +230,7 @@ jobs:
           node scripts/starvector-terminal-campaign.mjs validate-dispatch release/starvector-terminal-campaign-v1.json "$env:STARVECTOR_TERMINAL_PERMANENT_PIN" "$env:STARVECTOR_TERMINAL_CAMPAIGN_RUN_ID"
           if ($LASTEXITCODE -ne 0) { throw 'terminal dispatch input validation failed' }
           $env:STARVECTOR_TERMINAL_CASE_BUNDLE = "$env:RUNNER_TEMP\\starvector-terminal\\cuda-1b\\case-bundle.json"
-          node scripts/starvector-terminal-product-service.mjs start "$env:GITHUB_WORKSPACE" "$env:RUNNER_TEMP\\starvector-terminal\\cuda-1b" "$env:STARVECTOR_TERMINAL_PERMANENT_PIN" "$env:STARVECTOR_TERMINAL_API_URL" "$env:STARVECTOR_TERMINAL_WEIGHTS_ROOT"
+          node scripts/starvector-terminal-product-service.mjs start "$env:GITHUB_WORKSPACE" "$env:RUNNER_TEMP\\starvector-terminal\\cuda-1b" "$env:STARVECTOR_TERMINAL_PERMANENT_PIN" "$env:STARVECTOR_TERMINAL_API_URL" "$env:STARVECTOR_TERMINAL_WEIGHTS_ROOT" candle-cuda:1b
           node scripts/starvector-terminal-assets.mjs "$env:STARVECTOR_TERMINAL_CORPUS_ASSETS_ROOT" "$env:STARVECTOR_TERMINAL_API_URL" candle-cuda:1b "$env:RUNNER_TEMP\\starvector-terminal\\cuda-1b\\imported-assets.json"
           node scripts/starvector-terminal-case-bundle.mjs "$env:STARVECTOR_TERMINAL_INFERENCE_ROOT\\release\\starvector-terminal-corpus-v1.json" "$env:STARVECTOR_TERMINAL_CORPUS_ASSETS_ROOT" "$env:STARVECTOR_TERMINAL_CASE_BUNDLE" "$env:STARVECTOR_TERMINAL_PERMANENT_PIN" "$env:RUNNER_TEMP\\starvector-terminal\\cuda-1b\\imported-assets.json"
           node scripts/starvector-terminal-producer.mjs run "$env:GITHUB_WORKSPACE" release/starvector-terminal-campaign-v1.json "$env:STARVECTOR_TERMINAL_INFERENCE_ROOT" "$env:STARVECTOR_TERMINAL_WEIGHTS_ROOT" "$env:STARVECTOR_TERMINAL_METRICS_ROOT" "$env:STARVECTOR_TERMINAL_LEASE_ROOT" "$env:STARVECTOR_TERMINAL_LEASE_HELPER" "$env:RUNNER_TEMP\\starvector-terminal\\cuda-1b" candle-cuda:1b "$env:STARVECTOR_TERMINAL_CAMPAIGN_RUN_ID" "$env:STARVECTOR_TERMINAL_PERMANENT_PIN" "$env:STARVECTOR_TERMINAL_PRODUCT_ROUTE_COMMAND"
@@ -162,6 +251,7 @@ jobs:
     runs-on: [self-hosted, Windows, X64, cuda, real-weights]
     timeout-minutes: 720
     env:
+      STARVECTOR_TERMINAL_GPU_ID: "0"
       STARVECTOR_TERMINAL_ROOT: D:\sceneworks-terminal
       STARVECTOR_TERMINAL_WEIGHTS_ROOT: D:\\sceneworks-terminal\\weights
       STARVECTOR_TERMINAL_METRICS_ROOT: D:\\sceneworks-terminal\\metrics
@@ -173,6 +263,16 @@ jobs:
       STARVECTOR_TERMINAL_PRODUCT_ROUTE_COMMAND: ${{ github.workspace }}\\scripts\\starvector-terminal-route.mjs
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Download verified recovery quarantine
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: starvector-recovery-${{ env.STARVECTOR_TERMINAL_CAMPAIGN_RUN_ID }}
+          path: ${{ runner.temp }}/starvector-recovery
+      - name: Download the shared upstream reference from this workflow attempt
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: starvector-upstream-${{ env.STARVECTOR_TERMINAL_CAMPAIGN_RUN_ID }}
+          path: ${{ runner.temp }}/starvector-upstream
       - name: Resolve immutable pin-keyed terminal inputs
         shell: powershell
         run: |
@@ -186,7 +286,7 @@ jobs:
           node scripts/starvector-terminal-campaign.mjs validate-dispatch release/starvector-terminal-campaign-v1.json "$env:STARVECTOR_TERMINAL_PERMANENT_PIN" "$env:STARVECTOR_TERMINAL_CAMPAIGN_RUN_ID"
           if ($LASTEXITCODE -ne 0) { throw 'terminal dispatch input validation failed' }
           $env:STARVECTOR_TERMINAL_CASE_BUNDLE = "$env:RUNNER_TEMP\\starvector-terminal\\cuda-8b\\case-bundle.json"
-          node scripts/starvector-terminal-product-service.mjs start "$env:GITHUB_WORKSPACE" "$env:RUNNER_TEMP\\starvector-terminal\\cuda-8b" "$env:STARVECTOR_TERMINAL_PERMANENT_PIN" "$env:STARVECTOR_TERMINAL_API_URL" "$env:STARVECTOR_TERMINAL_WEIGHTS_ROOT"
+          node scripts/starvector-terminal-product-service.mjs start "$env:GITHUB_WORKSPACE" "$env:RUNNER_TEMP\\starvector-terminal\\cuda-8b" "$env:STARVECTOR_TERMINAL_PERMANENT_PIN" "$env:STARVECTOR_TERMINAL_API_URL" "$env:STARVECTOR_TERMINAL_WEIGHTS_ROOT" candle-cuda:8b
           node scripts/starvector-terminal-assets.mjs "$env:STARVECTOR_TERMINAL_CORPUS_ASSETS_ROOT" "$env:STARVECTOR_TERMINAL_API_URL" candle-cuda:8b "$env:RUNNER_TEMP\\starvector-terminal\\cuda-8b\\imported-assets.json"
           node scripts/starvector-terminal-case-bundle.mjs "$env:STARVECTOR_TERMINAL_INFERENCE_ROOT\\release\\starvector-terminal-corpus-v1.json" "$env:STARVECTOR_TERMINAL_CORPUS_ASSETS_ROOT" "$env:STARVECTOR_TERMINAL_CASE_BUNDLE" "$env:STARVECTOR_TERMINAL_PERMANENT_PIN" "$env:RUNNER_TEMP\\starvector-terminal\\cuda-8b\\imported-assets.json"
           node scripts/starvector-terminal-producer.mjs run "$env:GITHUB_WORKSPACE" release/starvector-terminal-campaign-v1.json "$env:STARVECTOR_TERMINAL_INFERENCE_ROOT" "$env:STARVECTOR_TERMINAL_WEIGHTS_ROOT" "$env:STARVECTOR_TERMINAL_METRICS_ROOT" "$env:STARVECTOR_TERMINAL_LEASE_ROOT" "$env:STARVECTOR_TERMINAL_LEASE_HELPER" "$env:RUNNER_TEMP\\starvector-terminal\\cuda-8b" candle-cuda:8b "$env:STARVECTOR_TERMINAL_CAMPAIGN_RUN_ID" "$env:STARVECTOR_TERMINAL_PERMANENT_PIN" "$env:STARVECTOR_TERMINAL_PRODUCT_ROUTE_COMMAND"
@@ -208,6 +308,11 @@ jobs:
     runs-on: [self-hosted, macOS, ARM64, rw-starvector]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Download verified recovery quarantine
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: starvector-recovery-${{ env.STARVECTOR_TERMINAL_CAMPAIGN_RUN_ID }}
+          path: ${{ runner.temp }}/starvector-recovery
       - name: Resolve immutable pin-keyed terminal inputs
         run: node scripts/lib/starvector-terminal-pin-paths.mjs "$STARVECTOR_TERMINAL_ROOT" "$STARVECTOR_TERMINAL_PERMANENT_PIN" >> "$GITHUB_ENV"
       - name: Validate immutable dispatch identity before artifact selection

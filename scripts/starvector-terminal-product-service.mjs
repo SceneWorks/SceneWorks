@@ -11,6 +11,7 @@ import { promisify } from "node:util";
 import path from "node:path";
 import { isExecutedModule } from "./starvector-terminal-cli.mjs";
 import { fileSha256 } from "./lib/file-sha256.mjs";
+import { terminalGpuBinding, terminalGpuEnvironment, probeTerminalCuda } from "./lib/starvector-terminal-gpu.mjs";
 import { sortTerminalTreeEntries, terminalTreeEntry, terminalTreeSha256 } from "./lib/terminal-tree-identity.mjs";
 
 const execFile = promisify(execFileCallback);
@@ -22,7 +23,105 @@ export function productServiceBuildArgs(platform = process.platform) {
   return args;
 }
 export function productServiceBackendEnv(platform = process.platform) {
-  return platform === "win32" ? { SCENEWORKS_BACKEND_CANDLE_ENABLED: "true" } : {};
+  if (platform === "win32") return {
+    SCENEWORKS_BACKEND_MLX_ENABLED: "false",
+    SCENEWORKS_BACKEND_CANDLE_ENABLED: "true",
+    SCENEWORKS_MLX_REQUIRED: "0",
+    SCENEWORKS_CANDLE_REQUIRED: "1",
+    SCENEWORKS_CANDLE_UNSUPPORTED_MODE: "enforce",
+  };
+  return {
+    SCENEWORKS_BACKEND_MLX_ENABLED: "true",
+    SCENEWORKS_BACKEND_CANDLE_ENABLED: "false",
+    SCENEWORKS_MLX_REQUIRED: "1",
+    SCENEWORKS_MLX_UNSUPPORTED_MODE: "enforce",
+    SCENEWORKS_CANDLE_REQUIRED: "0",
+  };
+}
+const TERMINAL_PRODUCT_WORKERS = Object.freeze({
+  "mlx:1b": Object.freeze({ platform: "darwin", backend: "mlx", tier: "1b", gpu_id: "mlx", gpu_name: "Apple Silicon (MLX)", model_id: "starvector_1b", provider_id: "mlx-starvector-1b", required_capabilities: Object.freeze(["gpu", "vector_image_to_svg"]) }),
+  "mlx:8b": Object.freeze({ platform: "darwin", backend: "mlx", tier: "8b", gpu_id: "mlx", gpu_name: "Apple Silicon (MLX)", model_id: "starvector_8b", provider_id: "mlx-starvector-8b", required_capabilities: Object.freeze(["gpu", "vector_image_to_svg"]) }),
+  "candle-cuda:1b": Object.freeze({ platform: "win32", backend: "candle", tier: "1b", gpu_id: "0", model_id: "starvector_1b", provider_id: "candle-starvector-1b", required_capabilities: Object.freeze(["gpu", "nvidia", "candle", "vector_image_to_svg"]) }),
+  "candle-cuda:8b": Object.freeze({ platform: "win32", backend: "candle", tier: "8b", gpu_id: "0", model_id: "starvector_8b", provider_id: "candle-starvector-8b", required_capabilities: Object.freeze(["gpu", "nvidia", "candle", "vector_image_to_svg"]) }),
+});
+export function terminalProductWorkerContract(tuple, platform = process.platform) {
+  const contract = TERMINAL_PRODUCT_WORKERS[tuple];
+  if (!contract) die(`unsupported product worker tuple ${tuple}`);
+  if (contract.platform !== platform) die(`tuple ${tuple} requires ${contract.platform}, not ${platform}`);
+  return contract;
+}
+export function terminalProductWorkerId(tuple, instanceToken) {
+  if (!TERMINAL_PRODUCT_WORKERS[tuple] || !/^[a-f0-9]{64}$/.test(instanceToken ?? "")) die("exact tuple and instance token are required for worker identity");
+  return `starvector-terminal-${tuple.replace(/[^a-z0-9]+/gi, "-")}-${instanceToken}`;
+}
+export function validateTerminalProductWorkerReadiness(workers, models, contract, expectedWorkerId) {
+  if (!Array.isArray(workers) || !Array.isArray(models) || !contract || typeof expectedWorkerId !== "string" || expectedWorkerId.length === 0) die("worker readiness response is malformed");
+  const matching = workers.filter((worker) => worker?.id === expectedWorkerId);
+  if (matching.length !== 1) die(`exact terminal worker ${expectedWorkerId} is not registered`);
+  const worker = matching[0], capabilities = worker.capabilities;
+  if (worker.status !== "idle" || worker.currentJobId != null) die(`exact terminal worker ${expectedWorkerId} is not healthy and idle`);
+  if (worker.gpuId !== contract.gpu_id || typeof worker.gpuName !== "string" || worker.gpuName.length === 0 || !Array.isArray(capabilities) || new Set(capabilities).size !== capabilities.length || capabilities.includes("cpu")) die(`exact terminal worker ${expectedWorkerId} has the wrong device identity`);
+  for (const capability of contract.required_capabilities) if (!capabilities.includes(capability)) die(`exact terminal worker ${expectedWorkerId} lacks ${capability}`);
+  if (contract.backend === "mlx") {
+    if (worker.gpuName !== contract.gpu_name || capabilities.includes("candle") || capabilities.includes("nvidia")) die(`exact terminal worker ${expectedWorkerId} is not the native MLX worker`);
+  } else if (!/^NVIDIA\b/.test(worker.gpuName) || worker.gpuName === `GPU ${contract.gpu_id}`) {
+    die(`exact terminal worker ${expectedWorkerId} lacks discovered NVIDIA hardware identity`);
+  }
+  const selectedModels = models.filter((model) => model?.id === contract.model_id);
+  if (selectedModels.length !== 1) die(`terminal model ${contract.model_id} is not uniquely cataloged`);
+  const model = selectedModels[0], provider = model.vector?.providers?.[contract.backend];
+  if (model.installState !== "installed" || !Array.isArray(model.capabilities) || !model.capabilities.includes("image_to_svg") || provider?.id !== contract.provider_id || provider.available !== true) die(`terminal provider ${contract.provider_id} is not installed and available`);
+  return {
+    worker_id: worker.id,
+    gpu_id: worker.gpuId,
+    gpu_name: worker.gpuName,
+    status: worker.status,
+    capabilities: [...capabilities].sort(),
+    backend: contract.backend,
+    tier: contract.tier,
+    model_id: contract.model_id,
+    provider_id: provider.id,
+  };
+}
+export async function assertTerminalProductWorkerReady(url, tuple, expectedWorkerId, {
+  platform = process.platform,
+  fetchImpl = fetch,
+  timeoutMs = 5_000,
+} = {}) {
+  const contract = terminalProductWorkerContract(tuple, platform);
+  let workerResponse;
+  let modelResponse;
+  try {
+    const signal = AbortSignal.timeout(timeoutMs);
+    [workerResponse, modelResponse] = await Promise.all([
+      fetchImpl(new URL("/api/v1/workers", url), { signal }),
+      fetchImpl(new URL("/api/v1/models", url), { signal }),
+    ]);
+  } catch (error) {
+    die(`worker readiness request failed: ${error.message}`);
+  }
+  if (!workerResponse.ok || !modelResponse.ok) die(`worker readiness HTTP failed: workers=${workerResponse.status}, models=${modelResponse.status}`);
+  return validateTerminalProductWorkerReadiness(await workerResponse.json(), await modelResponse.json(), contract, expectedWorkerId);
+}
+async function waitForTerminalProductWorker(url, tuple, expectedWorkerId, assertRunning) {
+  let lastError;
+  for (let attempt = 0; attempt < 30; attempt += 1) {
+    assertRunning();
+    try { return await assertTerminalProductWorkerReady(url, tuple, expectedWorkerId); } catch (error) { lastError = error; }
+    await new Promise((resolve) => setTimeout(resolve, 1000));
+  }
+  die(`exact native product worker did not become ready: ${lastError?.message ?? "unknown readiness failure"}`);
+}
+export async function runProductServiceGpuPreflight(binary, serviceEnv, {
+  execFileImpl = execFile,
+  timeoutMs = 60_000,
+} = {}) {
+  try {
+    await execFileImpl(binary, [], { env: { ...serviceEnv, SCENEWORKS_GPU_CHECK: "1" }, timeout: timeoutMs, windowsHide: true });
+  } catch (error) {
+    const reason = String(error.stdout ?? error.stderr ?? error.message ?? error).trim();
+    die(`native GPU preflight failed${reason ? `: ${reason}` : ""}`);
+  }
 }
 export function productServiceStateRoot(output) {
   return path.join(path.dirname(output), `${path.basename(output)}-product-service-state`);
@@ -261,8 +360,11 @@ export function validateProductServiceActiveState(active, record, output) {
   return active;
 }
 
-export async function startProductService({ root, output, permanentPin, url, weightsRoot }) {
-  if (!root || !output || !weightsRoot || !permanentPin || !url || !url.startsWith("http://127.0.0.1:")) die("local current-tree root/output/offline weights/pin/API URL required");
+export async function startProductService({ root, output, permanentPin, url, weightsRoot, tuple }) {
+  if (!root || !output || !weightsRoot || !permanentPin || !url || !url.startsWith("http://127.0.0.1:") || !tuple) die("local current-tree root/output/offline weights/pin/API URL/tuple required");
+  const workerContract = terminalProductWorkerContract(tuple);
+  if (process.env.STARVECTOR_TERMINAL_GPU_ID !== workerContract.gpu_id) die(`tuple ${tuple} requires STARVECTOR_TERMINAL_GPU_ID=${workerContract.gpu_id}`);
+  const gpuBinding = await terminalGpuBinding();
   const identity = await serviceIdentity(root, permanentPin);
   const endpoint = await assertProductServicePortFree(url);
   await mkdir(output, { recursive: true });
@@ -273,7 +375,7 @@ export async function startProductService({ root, output, permanentPin, url, wei
   const binary = path.join(root, "target", "debug", process.platform === "win32" ? "sceneworks-rust-api.exe" : "sceneworks-rust-api");
   const common = { cwd: root, detached: true }, stateRoot = productServiceStateRoot(output);
   if (await lstat(stateRoot).catch((error) => error.code === "ENOENT" ? null : Promise.reject(error))) die("temporary product service state already exists");
-  const logPaths = productServiceLogPaths(output), instanceToken = randomBytes(32).toString("hex");
+  const logPaths = productServiceLogPaths(output), instanceToken = randomBytes(32).toString("hex"), workerId = terminalProductWorkerId(tuple, instanceToken);
   let stateCreated = false;
   let logHandles = {};
   let api;
@@ -285,8 +387,12 @@ export async function startProductService({ root, output, permanentPin, url, wei
     stateCreated = true;
     await mkdir(path.join(stateRoot, "data"), { recursive: true }); await mkdir(path.join(stateRoot, "config"), { recursive: true });
     const weights = await materializeOfflineWeights(weightsRoot, stateRoot), hfHome = path.join(stateRoot, "hf"), binarySha256 = await fileSha256(binary);
-    const serviceEnv = { ...process.env, ...productServiceBackendEnv(), SCENEWORKS_TERMINAL_CAMPAIGN: "1", SCENEWORKS_TERMINAL_SERVICE_INSTANCE_TOKEN: instanceToken, SCENEWORKS_API_HOST: endpoint.host, SCENEWORKS_API_PORT: String(endpoint.port), SCENEWORKS_API_URL: url, SCENEWORKS_DATA_DIR: path.join(stateRoot, "data"), SCENEWORKS_CONFIG_DIR: path.join(stateRoot, "config"), SCENEWORKS_JOBS_DB_PATH: path.join(stateRoot, "data", "cache", "jobs.db"), SCENEWORKS_GPU_ID: process.env.STARVECTOR_TERMINAL_GPU_ID ?? "auto", HF_HOME: hfHome, HUGGINGFACE_HUB_CACHE: path.join(hfHome, "hub"), HF_HUB_OFFLINE: "1", TRANSFORMERS_OFFLINE: "1" };
+    const serviceEnv = { ...process.env, ...productServiceBackendEnv(), ...terminalGpuEnvironment(gpuBinding), SCENEWORKS_TERMINAL_CAMPAIGN: "1", SCENEWORKS_TERMINAL_SERVICE_INSTANCE_TOKEN: instanceToken, SCENEWORKS_API_HOST: endpoint.host, SCENEWORKS_API_PORT: String(endpoint.port), SCENEWORKS_API_URL: url, SCENEWORKS_DATA_DIR: path.join(stateRoot, "data"), SCENEWORKS_CONFIG_DIR: path.join(stateRoot, "config"), SCENEWORKS_JOBS_DB_PATH: path.join(stateRoot, "data", "cache", "jobs.db"), SCENEWORKS_WORKER_ID: workerId, HF_HOME: hfHome, HUGGINGFACE_HUB_CACHE: path.join(hfHome, "hub"), HF_HUB_OFFLINE: "1", TRANSFORMERS_OFFLINE: "1" };
     for (const inherited of ["TRANSFORMERS_CACHE", "HF_DATASETS_CACHE", "HF_ENDPOINT"]) delete serviceEnv[inherited];
+    // The worker's registration is the routing contract, but it is not a substitute
+    // for actually opening the accelerator. Run the binary's production GPU probe
+    // first and treat every non-zero/timeout as terminal for this one-shot campaign.
+    await runProductServiceGpuPreflight(binary, serviceEnv);
     // Piped readable streams keep this CLI referenced after child.unref(). Give
     // each service durable files instead; the children retain their inherited
     // descriptors after these parent FileHandles close and after this CLI exits.
@@ -315,7 +421,13 @@ export async function startProductService({ root, output, permanentPin, url, wei
     // identity without rewriting receipts or downloading anything.
     const relocation = await relocateProductServiceLibrary(url, hfHome);
     assertRunning();
-    const record = { ...identity, ...weights, instance_token: instanceToken, api_url: url, api_host: endpoint.host, api_port: endpoint.port, state_root: path.relative(output, stateRoot), api_binary: path.relative(root, binary), worker_binary: path.relative(root, binary), api_binary_sha256: binarySha256, api_pid: api.pid, worker_pid: worker.pid, logs: Object.fromEntries(Object.entries(logPaths).map(([name, file]) => [name, path.relative(output, file)])), health, offline: { hf_home: path.relative(output, hfHome), hf_hub_offline: serviceEnv.HF_HUB_OFFLINE, transformers_offline: serviceEnv.TRANSFORMERS_OFFLINE, library_relocation: { adopted: relocation.adopted, hf_home: path.relative(output, relocation.hf_home), library_root: path.relative(output, relocation.library_root), probe_status: relocation.probe_status } }, started_at: startedAt };
+    const selectedWorker = await waitForTerminalProductWorker(url, tuple, workerId, assertRunning);
+    if (gpuBinding.backend === "candle") {
+      const current = await probeTerminalCuda(gpuBinding.uuid, { expectedUuid: gpuBinding.uuid });
+      if (current.index !== selectedWorker.gpu_id || current.name !== selectedWorker.gpu_name) die("registered worker and selected physical GPU differ");
+    }
+    assertRunning();
+    const record = { ...identity, ...weights, tuple, gpu_binding: gpuBinding, instance_token: instanceToken, api_url: url, api_host: endpoint.host, api_port: endpoint.port, state_root: path.relative(output, stateRoot), api_binary: path.relative(root, binary), worker_binary: path.relative(root, binary), api_binary_sha256: binarySha256, api_pid: api.pid, worker_pid: worker.pid, worker: selectedWorker, logs: Object.fromEntries(Object.entries(logPaths).map(([name, file]) => [name, path.relative(output, file)])), health, offline: { hf_home: path.relative(output, hfHome), hf_hub_offline: serviceEnv.HF_HUB_OFFLINE, transformers_offline: serviceEnv.TRANSFORMERS_OFFLINE, library_relocation: { adopted: relocation.adopted, hf_home: path.relative(output, relocation.hf_home), library_root: path.relative(output, relocation.library_root), probe_status: relocation.probe_status } }, started_at: startedAt };
     await writeFile(path.join(output, "product-service-provenance.json"), JSON.stringify(record, null, 2) + "\n");
     return record;
   } catch (error) {
@@ -367,5 +479,5 @@ export async function stopProductService(output, { terminate = terminateProductS
   }
 }
 if (isExecutedModule(import.meta.url)) {
-  const [command, ...args] = process.argv.slice(2); const run = command === "start" ? startProductService({ root: args[0], output: args[1], permanentPin: args[2], url: args[3], weightsRoot: args[4] }) : command === "stop" ? stopProductService(args[0]) : Promise.reject(new Error("usage: start <root> <output> <pin> <url> <weights-root> | stop <output>")); run.catch((error) => { console.error(error.message); process.exitCode = 1; });
+  const [command, ...args] = process.argv.slice(2); const run = command === "start" ? startProductService({ root: args[0], output: args[1], permanentPin: args[2], url: args[3], weightsRoot: args[4], tuple: args[5] }) : command === "stop" ? stopProductService(args[0]) : Promise.reject(new Error("usage: start <root> <output> <pin> <url> <weights-root> <tuple> | stop <output>")); run.catch((error) => { console.error(error.message); process.exitCode = 1; });
 }

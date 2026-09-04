@@ -283,7 +283,7 @@ test("provision, readiness, and campaign share one pin-root formula with no lega
   for (const [label, source, expectedCalls] of [
     ["provision", workflow, 2],
     ["readiness", readinessWorkflow, 2],
-    ["campaign", campaignWorkflow, 5],
+    ["campaign", campaignWorkflow, 6],
   ]) {
     assert.equal((source.match(/scripts[\\/]lib[\\/]starvector-terminal-pin-paths\.mjs/g) ?? []).length, expectedCalls, `${label} helper calls`);
     assert.doesNotMatch(source, /starvector-terminal[\\/]inference(?:[\\/]|\s|$)/, `${label} legacy inference fallback`);

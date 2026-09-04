@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "implementation_repository": "joanrod/star-vector",
+  "implementation_repository": "https://github.com/joanrod/star-vector",
   "implementation_revision": "0e083c1911760aa31bc576ca7f337a7f8ee605ec",
   "python_source_sha256": "795bf9bbe41865f32523b1e07835d160d52ff99ef1b6361c159d04a93254fb5e",
   "checkpoints": {
@@ -38,8 +38,8 @@
     }
   },
   "required_packages": {
-    "torch": "2.5.1",
-    "torchvision": "0.20.1",
+    "torch": "2.7.1+cu128",
+    "torchvision": "0.22.1+cu128",
     "transformers": "4.49.0",
     "tokenizers": "0.21.1",
     "safetensors": "0.5.3",
@@ -54,5 +54,6 @@
     "CairoSVG": "2.7.1",
     "psutil": "7.0.0",
     "huggingface-hub": "0.28.1"
-  }
+  },
+  "torch_index_url": "https://download.pytorch.org/whl/cu128"
 }

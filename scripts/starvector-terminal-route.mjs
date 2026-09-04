@@ -9,6 +9,8 @@ import { promisify } from "node:util";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { isExecutedModule } from "./starvector-terminal-cli.mjs";
+import { assertTerminalProductWorkerReady } from "./starvector-terminal-product-service.mjs";
+import { probeTerminalCuda } from "./lib/starvector-terminal-gpu.mjs";
 
 const execFile = promisify(execFileCallback);
 const die = (message) => { throw new Error(`starvector terminal route: ${message}`); };
@@ -76,7 +78,7 @@ async function runCases(baseUrl, records, transcript, fetchOptions, suite) {
 }
 async function runParityCases(baseUrl, records, transcript, fetchOptions) {
   const completed = [];
-  for (const record of records) completed.push({ case_id: record.case_id, seed: record.seed, first: await submitAndPoll(baseUrl, record, transcript, fetchOptions), second: await submitAndPoll(baseUrl, record, transcript, fetchOptions) });
+  for (const record of records) completed.push({ case_id: record.case_id, seed: record.seed, job: await submitAndPoll(baseUrl, record, transcript, fetchOptions) });
   return completed;
 }
 async function runLifecycle(baseUrl, records, transcript, fetchOptions) {
@@ -170,10 +172,15 @@ async function materializeRunArtifacts(output, tuple, entry, events, run) {
       await materializeArtifact(output, `${prefix}/preview`, item.previewPngPath, record.preview_png_sha256);
     }
   }
+  for (const role of ["config", "processor", "transcript"]) {
+    await materializeArtifact(output, `runs/${tuple}/parity/upstream-${role}`, entry.upstream_paths[role], entry.upstream_reference[`${role}_sha256`]);
+  }
   for (const [index, record] of run.deterministic_parity.cases.entries()) {
-    const event = events.deterministic_parity[index], first = evidence({ job: event.first }, `parity artifact first ${index}`), second = evidence({ job: event.second }, `parity artifact second ${index}`), prefix = `runs/${tuple}/parity/${index}`;
-    await materializeArtifact(output, `${prefix}/first`, first.previewPngPath, record.first_preview_png_sha256);
-    await materializeArtifact(output, `${prefix}/second`, second.previewPngPath, record.second_preview_png_sha256);
+    const event = events.deterministic_parity[index], native = evidence(event, `native parity artifact ${index}`), golden = entry.deterministic_parity[index], prefix = `runs/${tuple}/parity/${index}`;
+    await materializeArtifact(output, `${prefix}/input`, native.sourceRasterPath, record.input_png_sha256);
+    await materializeArtifact(output, `${prefix}/native-preview`, native.previewPngPath, record.native_preview_png_sha256);
+    await materializeArtifact(output, `${prefix}/upstream-svg`, golden.upstream_svg, record.upstream_svg_sha256);
+    await materializeArtifact(output, `${prefix}/upstream-preview`, golden.upstream_preview_png, record.upstream_preview_png_sha256);
   }
 }
 async function materializePromptArtifacts(output, bundle, events, suites) {
@@ -203,7 +210,11 @@ export function assembleRun(tuple, entry, events, metricFacts, parityFacts = [])
   });
   const parityMetrics = new Map(metricResult.deterministic_parity_facts.map((fact) => [fact.case_id, fact]));
   if (parityMetrics.size !== 20) die("metric script did not emit 20 unique deterministic parity facts");
-  const parity = events.deterministic_parity.map((event, case_index) => { const first = evidence({ job: event.first }, `parity first ${case_index}`), second = evidence({ job: event.second }, `parity second ${case_index}`), fact = parityMetrics.get(event.case_id); if (!Number.isInteger(event.seed) || typeof first.previewPngSha256 !== "string" || typeof second.previewPngSha256 !== "string" || typeof fact?.rendered_ssim !== "number") die("invalid deterministic parity event"); return { case_index, seed: event.seed, first_preview_png_sha256: first.previewPngSha256, second_preview_png_sha256: second.previewPngSha256, rendered_ssim: fact.rendered_ssim }; });
+  const parity = events.deterministic_parity.map((event, case_index) => {
+    const native = evidence(event, `native parity ${case_index}`), golden = entry.deterministic_parity[case_index], fact = parityMetrics.get(event.case_id);
+    if (!Number.isInteger(event.seed) || native.sourceRasterSha256 !== golden.input_png_sha256 || typeof native.previewPngSha256 !== "string" || typeof fact?.rendered_ssim !== "number") die("invalid upstream parity event");
+    return { case_index, seed: event.seed, input_png_sha256: native.sourceRasterSha256, native_preview_png_sha256: native.previewPngSha256, upstream_svg_sha256: golden.upstream_svg_sha256, upstream_preview_png_sha256: golden.upstream_preview_png_sha256, rendered_ssim: fact.rendered_ssim };
+  });
   const lifecycle = Object.fromEntries(events.lifecycle.map((event) => {
     if (event.operation === "unload") return ["unload", event.observation?.accepted === true || event.observation?.status === "accepted"];
     const item = evidence(event, "lifecycle");
@@ -217,7 +228,7 @@ export function assembleRun(tuple, entry, events, metricFacts, parityFacts = [])
   const [backend, tier] = tuple.split(":"), expectedNativeBackend = backend === "candle-cuda" ? "candle" : "mlx";
   const expectedModel = tier === "1b" ? "starvector_1b" : "starvector_8b";
   if (identity.backend !== expectedNativeBackend || identity.modelId !== expectedModel) die("terminal evidence backend/model does not match this tuple");
-  return { backend, provider_id: identity.providerId, tier, device: hardware.accelerator?.name, model: { key: tier === "1b" ? "starvector-1b-im2svg" : "starvector-8b-im2svg", repository: identity.modelRepository, revision: identity.modelRevision, inventory_sha256: metricResult.runtime.inventory_sha256 }, hardware, image_quality: { cases: imageCases }, deterministic_parity: { case_count: 20, cases: parity }, lifecycle: { load: true, unload: true, reload: true, memory_reported: true }, limits, lifecycle_memory_transcript_sha256: metricResult.runtime.lifecycle_memory_transcript_sha256 };
+  return { backend, provider_id: identity.providerId, tier, device: hardware.accelerator?.name, model: { key: tier === "1b" ? "starvector-1b-im2svg" : "starvector-8b-im2svg", repository: identity.modelRepository, revision: identity.modelRevision, inventory_sha256: metricResult.runtime.inventory_sha256 }, hardware, image_quality: { cases: imageCases }, deterministic_parity: { case_count: 20, upstream_reference: entry.upstream_reference, cases: parity }, lifecycle: { load: true, unload: true, reload: true, memory_reported: true }, limits, lifecycle_memory_transcript_sha256: metricResult.runtime.lifecycle_memory_transcript_sha256 };
 }
 
 async function shell(command, args) {
@@ -241,10 +252,11 @@ async function liveRuntime(output, tuple, events) {
     positiveInteger(free, "macOS available memory");
     hardware = { runner_name: process.env.RUNNER_NAME ?? "macos-self-hosted", os: "macOS", arch, system_memory_total_bytes: total, baseline_available_bytes: free, peak_process_rss_bytes: peakProcess, accelerator: { name: "Apple unified memory", uuid: null, driver_runtime: "MLX", total_bytes: total, baseline_free_bytes: free, peak_used_bytes: peakProcess } };
   } else if (os === "win32") {
-    const raw = await shell("nvidia-smi", ["--query-gpu=uuid,name,driver_version,memory.total,memory.free,memory.used", "--format=csv,noheader,nounits"]);
-    const values = raw.split(/\r?\n/).filter(Boolean); if (values.length !== 1) die("CUDA runtime probe must observe exactly one selected GPU");
-    const [uuid, name, driver, totalMiB, freeMiB, usedMiB] = values[0].split(",").map((item) => item.trim());
-    const total = positiveInteger(Number(totalMiB) * 1024 * 1024, "CUDA total memory"), free = positiveInteger(Number(freeMiB) * 1024 * 1024, "CUDA free memory"), used = positiveInteger(Number(usedMiB) * 1024 * 1024, "CUDA used memory");
+    const binding = service.gpu_binding;
+    if (!binding?.uuid || binding.gpu_id !== service.worker?.gpu_id) die("CUDA runtime lacks pre-execution physical GPU binding");
+    const observedGpu = await probeTerminalCuda(binding.uuid, { expectedUuid: binding.uuid });
+    if (observedGpu.index !== binding.gpu_id || observedGpu.name !== binding.name) die("CUDA hardware identity drifted during the campaign");
+    const { uuid, name, driver, total_bytes: total, free_bytes: free, used_bytes: used } = observedGpu;
     const system = JSON.parse(await shell("powershell", ["-NoProfile", "-Command", "@{ total=(Get-CimInstance Win32_ComputerSystem).TotalPhysicalMemory; free=(Get-CimInstance Win32_OperatingSystem).FreePhysicalMemory*1KB } | ConvertTo-Json -Compress"]));
     const acceleratorPeaks = metricRecords.map((entry) => entry.job?.terminalMetrics?.peakAcceleratorBytes).filter((value) => Number.isInteger(value) && value > 0);
     if (!acceleratorPeaks.length) die("CUDA runtime probe lacks worker-owned peak accelerator memory observations");
@@ -301,6 +313,13 @@ async function main() {
   const output = process.env.STARVECTOR_TERMINAL_OUTPUT, tuple = process.env.STARVECTOR_TERMINAL_TUPLE, bundlePath = process.env.STARVECTOR_TERMINAL_CASE_BUNDLE, baseUrl = process.env.STARVECTOR_TERMINAL_API_URL, python = process.env.STARVECTOR_TERMINAL_METRICS_PYTHON;
   if (process.env.STARVECTOR_TERMINAL_NO_JOB_DOWNLOADS !== "1") die("no-job-downloads guard is required");
   if (!output || !tuple || !bundlePath || !baseUrl || !python || !path.isAbsolute(python)) die("output, tuple, case bundle, product API URL, and pre-provisioned metrics Python required");
+  const contextPath = process.env.STARVECTOR_TERMINAL_CONTROLLER_CONTEXT;
+  if (!contextPath || !path.isAbsolute(contextPath)) die("source-owned controller context path is required");
+  const contextInfo = await lstat(contextPath); if (!contextInfo.isFile() || contextInfo.isSymbolicLink()) die("controller context must be a regular non-symlink file");
+  const controllerContext = await json(contextPath);
+  if (controllerContext.tuple !== tuple || controllerContext.service?.tuple !== tuple || typeof controllerContext.service?.worker?.worker_id !== "string") die("controller context does not bind the exact tuple worker");
+  const liveWorker = await assertTerminalProductWorkerReady(baseUrl, tuple, controllerContext.service.worker.worker_id);
+  if (JSON.stringify(liveWorker) !== JSON.stringify(controllerContext.service.worker)) die("route worker identity drifted after marker acquisition");
   const bundle = await readSealedBundle(bundlePath), cases = validateBundle(bundle, tuple);
   await mkdir(output, { recursive: true });
   const transcript = path.join(output, "vector-generate-route.ndjson");
@@ -329,11 +348,8 @@ async function main() {
   await materializeArtifact(output, `runs/${tuple}/lifecycle-memory`, runtime.lifecycle_memory_transcript_path, run.lifecycle_memory_transcript_sha256);
   await writeFile(path.join(output, "raw-results.json"), JSON.stringify({ tuple, run }, null, 2) + "\n");
   if (tuple === "candle-cuda:8b") {
-    const contextPath = process.env.STARVECTOR_TERMINAL_CONTROLLER_CONTEXT;
-    if (!contextPath || !path.isAbsolute(contextPath)) die("source-owned controller context path is required");
-    const contextInfo = await lstat(contextPath); if (!contextInfo.isFile() || contextInfo.isSymbolicLink()) die("controller context must be a regular non-symlink file");
     const sanitizer = process.env.STARVECTOR_TERMINAL_SANITIZER, sanitizerInfo = await lstat(sanitizer); if (!sanitizerInfo.isFile() || sanitizerInfo.isSymbolicLink()) die("source-built sanitizer identity is invalid");
-    const suites = assembleSuites(bundle, events, metrics, await json(contextPath), transcriptSha, new Date().toISOString(), `sha256:${sha(await readFile(sanitizer))}`);
+    const suites = assembleSuites(bundle, events, metrics, controllerContext, transcriptSha, new Date().toISOString(), `sha256:${sha(await readFile(sanitizer))}`);
     await materializePromptArtifacts(output, bundle, events, suites);
     await materializeArtifact(output, "metrics/4", metrics.terminal_suite_measurements.metric_observation.metric_transcript_path, suites.metric_identity.metric_transcript_sha256);
     await materializeArtifact(output, "prompt/metric_transcript_sha256", metrics.terminal_suite_measurements.metric_observation.metric_transcript_path, suites.prompt_composition.metric_transcript_sha256);

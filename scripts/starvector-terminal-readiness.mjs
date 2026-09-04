@@ -10,6 +10,7 @@ import path from "node:path";
 import { pathToFileURL } from "node:url";
 import { INFERENCE_REVISION, TUPLES, readPlanAndLock, terminalSourceRowsSha256 } from "./starvector-terminal-campaign.mjs";
 import { fileSha256 } from "./lib/file-sha256.mjs";
+import { terminalGpuBinding } from "./lib/starvector-terminal-gpu.mjs";
 import { sortTerminalTreeEntries, terminalTreeEntry, terminalTreeSha256 } from "./lib/terminal-tree-identity.mjs";
 import {
   validateInferencePreflight,
@@ -151,6 +152,7 @@ export async function validateCorpusAssets(inferenceRoot, corpusRelative, assets
 }
 
 export async function terminalReadiness({ sceneWorksRoot, planPath, inferenceRoot, weightsRoot, metricsRoot, metricsPython, assetsRoot, permanentPin }) {
+  const gpu = await terminalGpuBinding();
   const { plan, metrics_lock_sha256 } = await readPlanAndLock(planPath);
   if (permanentPin !== plan.inference_contract.revision) die("requested permanent pin does not equal the sealed terminal plan");
   await verifyInferenceCheckout(inferenceRoot);
@@ -161,8 +163,12 @@ export async function terminalReadiness({ sceneWorksRoot, planPath, inferenceRoo
   const metrics = await validateMetricsEnvironment(metricsRoot, metrics_lock_sha256);
   const packages = await validateMetricRuntime(metricsPython, metrics.packages);
   const preflight = await validateInferencePreflight(inferenceRoot, permanentPin, plan.inference_preflight);
+  if (process.platform === "win32") {
+    const { upstreamOptions, validateUpstreamInputs } = await import("./starvector-terminal-upstream.mjs");
+    await validateUpstreamInputs({ ...upstreamOptions(sceneWorksRoot), weightsRoot, assetsRoot }, path.join(process.env.RUNNER_TEMP ?? weightsRoot, "upstream-readiness"));
+  }
   const corpus = await validateCorpusAssets(inferenceRoot, plan.inference_contract.corpus, assetsRoot, permanentPin);
-  return { permanent_pin: permanentPin, sceneworks_revision: route.sceneworks_revision, route: { path: route.path, sha256: route.sha256, metric_path: route.metric_path, metric_sha256: route.metric_sha256 }, weights: { models: Object.fromEntries(Object.entries(weights.models).map(([key, value]) => [key, { revision: value.revision, inventory_sha256: value.inventory_sha256 }])), prompt_raster: { provider_id: weights.prompt_raster.provider_id, model: weights.prompt_raster.model, revision: weights.prompt_raster.revision, inventory_sha256: weights.prompt_raster.inventory_sha256 }, terminal_service_closure: service }, metrics: { metrics_lock_sha256, packages, lpips_linear_sha256: metrics.weights.lpips_linear.sha256, alexnet_sha256: metrics.weights.alexnet.sha256, clip_sha256: metrics.clip.checkpoint.sha256 }, inference_preflight: preflight.receipt, corpus };
+  return { gpu, permanent_pin: permanentPin, sceneworks_revision: route.sceneworks_revision, route: { path: route.path, sha256: route.sha256, metric_path: route.metric_path, metric_sha256: route.metric_sha256 }, weights: { models: Object.fromEntries(Object.entries(weights.models).map(([key, value]) => [key, { revision: value.revision, inventory_sha256: value.inventory_sha256 }])), prompt_raster: { provider_id: weights.prompt_raster.provider_id, model: weights.prompt_raster.model, revision: weights.prompt_raster.revision, inventory_sha256: weights.prompt_raster.inventory_sha256 }, terminal_service_closure: service }, metrics: { metrics_lock_sha256, packages, lpips_linear_sha256: metrics.weights.lpips_linear.sha256, alexnet_sha256: metrics.weights.alexnet.sha256, clip_sha256: metrics.clip.checkpoint.sha256 }, inference_preflight: preflight.receipt, corpus };
 }
 
 async function main() {

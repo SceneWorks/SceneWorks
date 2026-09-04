@@ -403,8 +403,31 @@ export async function assembleMetrics({ sceneWorksRoot, metricsRoot, python, cli
   await writeExact(path.join(metricsRoot, "starvector-terminal-metrics-environment-v1.json"), Buffer.from(`${JSON.stringify(manifest, null, 2)}\n`)); return manifest;
 }
 
+// Provisioning may acquire dependencies; the campaign validation/execution is offline.
+export async function provisionUpstream({ sceneWorksRoot, hostRoot, python, assetsRoot, sanitizer }) {
+  const lock = await json(path.join(sceneWorksRoot, "release/starvector-terminal-upstream-lock-v1.json"));
+  const source = path.join(hostRoot, "upstream-source"), environment = path.join(hostRoot, "upstream-env");
+  if (!await lstat(source).catch(() => null)) {
+    await execFile("git", ["clone", "--no-checkout", `${lock.implementation_repository}.git`, source]);
+    await execFile("git", ["-C", source, "checkout", "--detach", lock.implementation_revision]);
+  }
+  const head = (await execFile("git", ["-C", source, "rev-parse", "HEAD"])).stdout.trim();
+  const dirty = (await execFile("git", ["-C", source, "status", "--porcelain"])).stdout.trim();
+  if (head !== lock.implementation_revision || dirty) die("upstream source must be exact and clean");
+  const oraclePython = path.join(environment, process.platform === "win32" ? "Scripts" : "bin", process.platform === "win32" ? "python.exe" : "python");
+  if (!await lstat(oraclePython).catch(() => null)) await execFile(python, ["-m", "venv", environment]);
+  if (lock.torch_index_url !== "https://download.pytorch.org/whl/cu128") die("oracle requires the locked CUDA 12.8 wheel index");
+  await execFile(oraclePython, ["-m", "pip", "install", "--disable-pip-version-check", "--index-url", lock.torch_index_url, ...["torch", "torchvision"].map(name => `${name}==${lock.required_packages[name]}`)], { timeout: 60 * 60 * 1000, maxBuffer: 4 * 1024 * 1024 });
+  await execFile(oraclePython, ["-m", "pip", "install", "--disable-pip-version-check", ...Object.entries(lock.required_packages).map(([name, version]) => `${name}==${version}`)], { timeout: 60 * 60 * 1000, maxBuffer: 4 * 1024 * 1024 });
+  const { validateUpstreamInputs } = await import("./starvector-terminal-upstream.mjs");
+  // Authenticated component configs are provisioned separately with immutable
+  // repository/revision/hash metadata; never synthesize missing backbone defaults.
+  return validateUpstreamInputs({ sceneWorksRoot, python: oraclePython, upstreamRoot: source, weightsRoot: path.join(hostRoot, "weights"), assetsRoot, componentsRoot: path.join(hostRoot, "upstream-components"), sanitizer }, path.join(hostRoot, "upstream-validation"));
+}
+
 async function main(argv) {
   const [command, ...args] = argv;
+  if (command === "upstream" && args.length === 5) return provisionUpstream({ sceneWorksRoot: args[0], hostRoot: args[1], python: args[2], assetsRoot: args[3], sanitizer: args[4] });
   if (command === "download" && args.length === 3) return downloadExact(args[0], args[1], args[2]);
   if (command === "checkout" && args.length === 3) return installPinnedCheckout(args[0], args[1], args[2]);
   if (command === "preflight" && args.length === 3) return assemblePinnedPreflight(args[0], args[1], args[2]);

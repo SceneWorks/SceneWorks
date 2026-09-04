@@ -202,14 +202,17 @@ def main():
     parity_facts = []
     parity_records = bundle["tuples"][args.tuple]["deterministic_parity"]
     if len(parity_records) != 20 or len(events.get("deterministic_parity", [])) != 20:
-        fail("exactly 20 deterministic reruns required")
+        fail("exactly 20 upstream parity cases required")
     for case, event in zip(parity_records, events["deterministic_parity"]):
         if case.get("case_id") != event.get("case_id"):
             fail("deterministic route event order mismatch")
-        first, second = event_evidence({"job": event.get("first")}, "parity first"), event_evidence({"job": event.get("second")}, "parity second")
-        first_file = verified_file(first.get("previewPngPath"), first.get("previewPngSha256"), "first actual parity preview")
-        second_file = verified_file(second.get("previewPngPath"), second.get("previewPngSha256"), "second actual parity preview")
-        parity_facts.append({"case_id": case["case_id"], "rendered_ssim": compare(first_file, second_file)["ssim"]})
+        native = event_evidence(event, "native parity")
+        if native.get("sourceRasterSha256") != case.get("input_png_sha256"):
+            fail("parity worker consumed a different raster than the upstream oracle")
+        native_file = verified_file(native.get("previewPngPath"), native.get("previewPngSha256"), "actual native parity preview")
+        upstream_file = verified_file(case.get("upstream_preview_png"), case.get("upstream_preview_png_sha256"), "independent upstream parity preview")
+        verified_file(case.get("upstream_svg"), case.get("upstream_svg_sha256"), "independent upstream SVG")
+        parity_facts.append({"case_id": case["case_id"], "rendered_ssim": compare(native_file, upstream_file)["ssim"]})
     # The JS producer owns exact inference-schema assembly.  This script emits
     # raw per-case values only, never a pass/fail or trusted aggregate.
     hardware = runtime.get("hardware") if isinstance(runtime, dict) else None

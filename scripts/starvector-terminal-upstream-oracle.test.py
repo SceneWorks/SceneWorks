@@ -6,6 +6,7 @@ import json
 from pathlib import Path
 import struct
 import tempfile
+from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
@@ -21,6 +22,45 @@ class OracleTests(unittest.TestCase):
 
     def tearDown(self):
         self.temporary.cleanup()
+
+    def test_actual_lock_metadata_matches_v2_consumer_contract(self):
+        lock = json.loads((Path(__file__).parent.parent / 'release/starvector-terminal-upstream-lock-v1.json').read_text())
+        artifact = self.root / 'artifact.json'; artifact.write_text('{"cpu_fixture":true}\n')
+        facts = {'lock': lock, 'model_inventory_sha256': 'a' * 64}
+        reference = oracle.reference_metadata(facts, '1b', artifact, artifact, artifact)
+        self.assertEqual(reference['implementation_repository'], 'https://github.com/joanrod/star-vector')
+        self.assertEqual(reference['implementation_revision'], '0e083c1911760aa31bc576ca7f337a7f8ee605ec')
+        self.assertEqual(reference['checkpoint_repository'], 'starvector/starvector-1b-im2svg')
+        self.assertEqual(reference['config_sha256'], oracle.digest(artifact))
+        self.assertEqual(lock['required_packages']['torch'], '2.7.1+cu128')
+        self.assertEqual(lock['required_packages']['torchvision'], '0.22.1+cu128')
+
+    @unittest.skipUnless(importlib.util.find_spec('torch') and importlib.util.find_spec('transformers'), 'requires existing CPU torch/transformers environment')
+    def test_real_hf_generate_boundary_and_case_deadline_for_both_backbones(self):
+        import torch
+        from PIL import Image
+        from transformers import GPTBigCodeConfig, GPTBigCodeForCausalLM, Starcoder2Config, Starcoder2ForCausalLM
+        image = self.root / 'input.png'; Image.new('RGB', (16, 16), 'white').save(image)
+        row = {'seed': 3, 'input_png': str(image), 'sampling': {}, 'detail_budget': {'maxNewTokens': 3, 'maxSvgBytes': 1024, 'maxWallTimeMs': 120000}}
+        configurations = [
+            (GPTBigCodeConfig(vocab_size=32, n_embd=16, n_layer=1, n_head=2, n_positions=64, bos_token_id=1, eos_token_id=None, pad_token_id=0), GPTBigCodeForCausalLM),
+            (Starcoder2Config(vocab_size=32, hidden_size=16, intermediate_size=32, num_hidden_layers=1, num_attention_heads=2, num_key_value_heads=2, max_position_embeddings=64, bos_token_id=1, eos_token_id=None, pad_token_id=0), Starcoder2ForCausalLM)]
+        for config, constructor in configurations:
+            lm = constructor(config).eval()
+            class Wrapper:
+                model = SimpleNamespace(processor=lambda **kwargs: {'pixel_values': torch.zeros(1,3,16,16)}, svg_transformer=SimpleNamespace(transformer=lm))
+                def generate_im2svg(self, batch, **kwargs):
+                    output = lm.generate(inputs_embeds=torch.zeros(1,19,16), attention_mask=torch.ones(1,19,dtype=torch.long), do_sample=False, num_beams=1, max_length=kwargs['max_length'], pad_token_id=0)
+                    self.output_length = output.shape[1]
+                    return ['<svg xmlns="http://www.w3.org/2000/svg"/>']
+            wrapper = Wrapper()
+            _, observed = oracle.generate(wrapper, row, torch.device('cpu'))
+            self.assertEqual(observed['prefix_length'], 19)
+            self.assertEqual(observed['generated_tokens'], 3)
+            self.assertEqual(wrapper.output_length, 3)
+            with patch.object(oracle.time, 'monotonic', side_effect=[0.0] + [1000.0]*100):
+                with self.assertRaisesRegex(ValueError, 'case wall-time budget'):
+                    oracle.generate(wrapper, row, torch.device('cpu'))
 
     def rows(self):
         rows = []

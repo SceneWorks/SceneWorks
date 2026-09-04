@@ -9,6 +9,9 @@ import { pathToFileURL } from "node:url";
 import { INFERENCE_REVISION, readPlanAndLock, validateTerminalDispatchInputs } from "./starvector-terminal-campaign.mjs";
 import { isExecutedModule } from "./starvector-terminal-cli.mjs";
 import { fileSha256 } from "./lib/file-sha256.mjs";
+import { bindRecoveryLineage, verifyRecovery } from "./starvector-terminal-recovery.mjs";
+import { assertTerminalProductWorkerReady } from "./starvector-terminal-product-service.mjs";
+import { claimTerminalAttempt } from "./lib/starvector-terminal-attempt.mjs";
 
 const execFile = promisify(execFileCallback);
 const sha = (bytes) => createHash("sha256").update(bytes).digest("hex");
@@ -75,18 +78,6 @@ export async function acquireStableLease(leaseRoot, leaseHelper, permanentPin, c
     holder.stdin.end(); const code = await new Promise((resolve) => holder.once("exit", resolve));
     if (code !== 0) die(`fs2 advisory lease holder release failed: ${stderr}`);
   };
-}
-
-export async function claimCampaignMarker(leaseRoot, permanentPin, campaignRunId) {
-  await mkdir(leaseRoot, { recursive: true });
-  const marker = path.join(leaseRoot, `starvector-terminal-${permanentPin}.campaign.json`);
-  const identity = { permanent_pin: permanentPin, campaign_run_id: campaignRunId };
-  try { const handle = await open(marker, "wx"); await handle.writeFile(JSON.stringify(identity, null, 2) + "\n"); await handle.close(); }
-  catch {
-    const existing = await json(marker);
-    if (existing.permanent_pin !== permanentPin || existing.campaign_run_id !== campaignRunId) die(`permanent pin already has a different terminal campaign marker: ${marker}`);
-  }
-  return identity;
 }
 
 // A tuple marker is written only after all fail-closed preflight work and the
@@ -222,18 +213,20 @@ export async function verifyRouteClosure(sceneWorksRoot, command) {
   return closure;
 }
 
-async function verifyProductService(output, sceneWorksRoot, permanentPin) {
+async function verifyProductService(output, sceneWorksRoot, permanentPin, tuple) {
   const service = await json(path.join(output, "product-service-provenance.json"));
-  if (service.sceneworks_revision !== await git(sceneWorksRoot, ["rev-parse", "HEAD"]) || service.inference_revision !== permanentPin || !service.api_url?.startsWith("http://127.0.0.1:") || !SHA256.test(service.api_binary_sha256) || !service.worker_binary) die("source-built local API/worker provenance is missing or mismatched");
+  if (service.sceneworks_revision !== await git(sceneWorksRoot, ["rev-parse", "HEAD"]) || service.inference_revision !== permanentPin || service.tuple !== tuple || !service.api_url?.startsWith("http://127.0.0.1:") || !SHA256.test(service.api_binary_sha256) || !service.worker_binary || typeof service.worker?.worker_id !== "string") die("source-built local API/worker provenance is missing or mismatched");
+  const liveWorker = await assertTerminalProductWorkerReady(service.api_url, tuple, service.worker.worker_id);
+  if (stable(liveWorker) !== stable(service.worker)) die("live terminal worker identity drifted from product service provenance");
   return service;
 }
 
-export async function preflight({ sceneWorksRoot, planPath, inferenceRoot, weightsRoot, metricsRoot, permanentPin, command, leaseHelper, output }) {
+export async function preflight({ sceneWorksRoot, planPath, inferenceRoot, weightsRoot, metricsRoot, permanentPin, command, leaseHelper, output, tuple }) {
   const { plan, metrics_lock_sha256 } = await readPlanAndLock(planPath);
   await verifyInferenceCheckout(inferenceRoot); await verifyPermanentPin(sceneWorksRoot, permanentPin, plan.inference_contract.revision);
   if (!weightsRoot || !metricsRoot) die("pre-provisioned weights and metrics roots required; network acquisition is forbidden");
   await stat(leaseHelper).catch(() => die("current-tree fs2 lease helper is missing"));
-  return { plan, metrics_lock_sha256, service: await verifyProductService(output, sceneWorksRoot, permanentPin), weights: await validateWeightsEnvironment(weightsRoot, plan.model_snapshot_revisions), metrics: await validateMetricsEnvironment(metricsRoot, metrics_lock_sha256), inference_preflight: await validateInferencePreflight(inferenceRoot, permanentPin, plan.inference_preflight), route: { ...(await verifyRouteClosure(sceneWorksRoot, command)), root: sceneWorksRoot } };
+  return { plan, metrics_lock_sha256, service: await verifyProductService(output, sceneWorksRoot, permanentPin, tuple), weights: await validateWeightsEnvironment(weightsRoot, plan.model_snapshot_revisions), metrics: await validateMetricsEnvironment(metricsRoot, metrics_lock_sha256), inference_preflight: await validateInferencePreflight(inferenceRoot, permanentPin, plan.inference_preflight), route: { ...(await verifyRouteClosure(sceneWorksRoot, command)), root: sceneWorksRoot } };
 }
 
 async function failureArtifact(output, context, error) {
@@ -252,28 +245,43 @@ export async function executeTuple({ sceneWorksRoot, planPath, inferenceRoot, we
   const context = { campaign_run_id: campaignRunId, permanent_pin: permanentPin, tuple, command };
   try {
     if (!TUPLES.includes(tuple)) die("unsupported tuple");
-    const pre = await preflight({ sceneWorksRoot, planPath, inferenceRoot, weightsRoot, metricsRoot, permanentPin, command, leaseHelper, output });
-    await claimCampaignMarker(leaseRoot, permanentPin, campaignRunId);
+    const pre = await preflight({ sceneWorksRoot, planPath, inferenceRoot, weightsRoot, metricsRoot, permanentPin, command, leaseHelper, output, tuple });
+    const predecessor = await verifyRecovery(await json(path.join(sceneWorksRoot, "release/starvector-terminal-recovery-v1.json")), (process.env.STARVECTOR_TERMINAL_RECOVERY_ROOT ?? path.join(process.env.RUNNER_TEMP ?? "", "starvector-recovery")), { campaignRunId, permanentPin, leaseRoot: tuple.startsWith("mlx:") ? leaseRoot : undefined });
     release = await acquireStableLease(leaseRoot, leaseHelper, permanentPin, campaignRunId);
+    await claimTerminalAttempt(leaseRoot, permanentPin, campaignRunId, { workflowRunId: process.env.GITHUB_RUN_ID, workflowRunAttempt: Number(process.env.GITHUB_RUN_ATTEMPT), predecessor });
     await claimTupleMarker(leaseRoot, permanentPin, campaignRunId, tuple);
     await materializeSharedArtifacts(output, pre, tuple);
     const route = { ...pre.route }; delete route.root;
-    const controllerContext = { campaign_run_id: campaignRunId, inference_revision: INFERENCE_REVISION, permanent_pin: permanentPin, workflow_run_id: process.env.GITHUB_RUN_ID ?? null, workflow_run_attempt: Number(process.env.GITHUB_RUN_ATTEMPT ?? 0) || null, service: pre.service, route, inference_preflight: pre.inference_preflight.receipt, metrics: { metrics_lock_sha256: pre.metrics_lock_sha256, packages: pre.metrics.packages, weights: pre.metrics.weights, clip: pre.metrics.clip }, prompt_raster: Object.fromEntries(Object.entries(pre.weights.prompt_raster).filter(([key]) => key !== "inventory_source")), model_revisions: pre.plan.model_snapshot_revisions, controller_started_at: new Date().toISOString() };
+    const controllerContext = { campaign_run_id: campaignRunId, inference_revision: INFERENCE_REVISION, permanent_pin: permanentPin, tuple, workflow_run_id: process.env.GITHUB_RUN_ID ?? null, workflow_run_attempt: Number(process.env.GITHUB_RUN_ATTEMPT ?? 0) || null, service: pre.service, route, inference_preflight: pre.inference_preflight.receipt, metrics: { metrics_lock_sha256: pre.metrics_lock_sha256, packages: pre.metrics.packages, weights: pre.metrics.weights, clip: pre.metrics.clip }, prompt_raster: Object.fromEntries(Object.entries(pre.weights.prompt_raster).filter(([key]) => key !== "inventory_source")), model_revisions: pre.plan.model_snapshot_revisions, controller_started_at: new Date().toISOString() };
     const contextPath = path.join(output, "preflight-provenance.json");
     await writeFile(contextPath, JSON.stringify(controllerContext, null, 2) + "\n", { flag: "wx" });
     try {
       const linear = pre.metrics.weights.lpips_linear, alexnet = pre.metrics.weights.alexnet;
       const metricEnvironment = path.join(metricsRoot, "starvector-terminal-metrics-environment-v1.json");
-      const commandResult = await execFile(command, [], { env: { ...process.env, STARVECTOR_TERMINAL_RUN_ID: campaignRunId, STARVECTOR_TERMINAL_TUPLE: tuple, STARVECTOR_TERMINAL_OUTPUT: output, STARVECTOR_TERMINAL_PERMANENT_PIN: permanentPin, STARVECTOR_TERMINAL_ROUTE_CLOSURE_SHA256: pre.route.sha256, STARVECTOR_TERMINAL_CONTROLLER_CONTEXT: contextPath, STARVECTOR_TERMINAL_METRICS_ENVIRONMENT: metricEnvironment, STARVECTOR_TERMINAL_LPIPS_LINEAR: path.join(metricsRoot, linear.path), STARVECTOR_TERMINAL_LPIPS_LINEAR_SHA256: linear.sha256, STARVECTOR_TERMINAL_ALEXNET: path.join(metricsRoot, alexnet.path), STARVECTOR_TERMINAL_ALEXNET_SHA256: alexnet.sha256, TORCH_HOME: path.dirname(path.dirname(path.join(metricsRoot, alexnet.path))), HF_HUB_OFFLINE: "1", TRANSFORMERS_OFFLINE: "1" }, maxBuffer: 1024 * 1024 });
+      const commandResult = await executeNodeRoute(command, { env: { ...process.env, STARVECTOR_TERMINAL_RUN_ID: campaignRunId, STARVECTOR_TERMINAL_TUPLE: tuple, STARVECTOR_TERMINAL_OUTPUT: output, STARVECTOR_TERMINAL_PERMANENT_PIN: permanentPin, STARVECTOR_TERMINAL_ROUTE_CLOSURE_SHA256: pre.route.sha256, STARVECTOR_TERMINAL_CONTROLLER_CONTEXT: contextPath, STARVECTOR_TERMINAL_METRICS_ENVIRONMENT: metricEnvironment, STARVECTOR_TERMINAL_LPIPS_LINEAR: path.join(metricsRoot, linear.path), STARVECTOR_TERMINAL_LPIPS_LINEAR_SHA256: linear.sha256, STARVECTOR_TERMINAL_ALEXNET: path.join(metricsRoot, alexnet.path), STARVECTOR_TERMINAL_ALEXNET_SHA256: alexnet.sha256, TORCH_HOME: path.dirname(path.dirname(path.join(metricsRoot, alexnet.path))), HF_HUB_OFFLINE: "1", TRANSFORMERS_OFFLINE: "1" }, maxBuffer: 1024 * 1024 });
       await writeFile(path.join(output, "route-command-transcript.json"), JSON.stringify({ stdout: commandResult.stdout, stderr: commandResult.stderr }, null, 2) + "\n");
     } catch (error) {
       await writeFile(path.join(output, "route-command-transcript.json"), JSON.stringify({ stdout: error.stdout ?? "", stderr: error.stderr ?? "", error: String(error.message ?? error) }, null, 2) + "\n");
       throw error;
     }
     await stat(path.join(output, "raw-results.json"));
-    await writeFile(path.join(output, "tuple-controller.json"), JSON.stringify({ ...context, status: "succeeded", route: pre.route, metrics_lock_sha256: pre.metrics_lock_sha256 }, null, 2) + "\n");
+    await writeFile(path.join(output, "tuple-controller.json"), JSON.stringify({ ...context, status: "succeeded", workflow_run_id: controllerContext.workflow_run_id, workflow_run_attempt: controllerContext.workflow_run_attempt, sceneworks_revision: pre.service.sceneworks_revision, raw_results_sha256: await fileSha256(path.join(output, "raw-results.json")), route: pre.route, metrics_lock_sha256: pre.metrics_lock_sha256 }, null, 2) + "\n", { flag: "wx" });
   } catch (error) { await failureArtifact(output, context, error); throw error; }
   finally { if (release) await release(); }
+}
+
+export function executeNodeRoute(command, options = {}) {
+  // Native Windows process creation cannot interpret a JavaScript shebang.
+  return execFile(process.execPath, [command], options);
+}
+
+export async function verifyTupleExecution(root, expected) {
+  const controller = await json(path.join(root, "tuple-controller.json"));
+  for (const key of ["campaign_run_id", "permanent_pin", "tuple", "workflow_run_id", "workflow_run_attempt", "sceneworks_revision"]) {
+    if (controller[key] !== expected[key]) die(`tuple evidence belongs to another ${key}`);
+  }
+  if (controller.status !== "succeeded" || controller.raw_results_sha256 !== await fileSha256(path.join(root, "raw-results.json"))) die("tuple evidence does not bind successful current output bytes");
+  return controller;
 }
 
 function canonicalRun(raw, tuple) {
@@ -282,20 +290,21 @@ function canonicalRun(raw, tuple) {
   return raw.run;
 }
 async function canonicalModule(inferenceRoot) { return import(pathToFileURL(path.join(inferenceRoot, "scripts/release/starvector_terminal_evidence.mjs")).href); }
-async function artifactManifestFromFiles(receipt, corpus, evidenceRoot, validator) {
-  const expected = validator.buildArtifactManifest(receipt, corpus).entries;
+export async function artifactManifestFromFiles(receipt, corpus, evidenceRoot, validator) {
+  const expected = validator.currentArtifactReferences(receipt, corpus);
+  const sizes = new Map();
   const expectedPaths = new Set(expected.map((entry) => entry.path));
   for (const entry of expected) {
     if (path.isAbsolute(entry.path) || entry.path.split("/").includes("..")) die(`unsafe canonical artifact path ${entry.path}`);
     const file = path.join(evidenceRoot, ...entry.path.split("/")); const info = await lstat(file);
     if (!info.isFile() || info.isSymbolicLink()) die(`canonical artifact is not a regular file: ${entry.path}`);
     const bytes = await readFile(file); if (sha(bytes) !== entry.sha256) die(`canonical artifact digest mismatch: ${entry.path}`);
-    entry.byte_size = info.size;
+    sizes.set(entry.path, info.size);
   }
   for (const root of ["runs", "hostile", "prompt", "metrics", "preflight", "producer"]) {
     const directory = path.join(evidenceRoot, root); try { for (const name of await readdir(directory, { recursive: true })) { const relative = `${root}/${name.split(path.sep).join("/")}`; if ((await lstat(path.join(directory, name))).isFile() && !expectedPaths.has(relative)) die(`unreferenced canonical artifact: ${relative}`); } } catch (error) { if (error.code !== "ENOENT") throw error; }
   }
-  return { campaign_run_id: receipt.campaign_run_id, entries: expected, aggregate_sha256: sha(stable({ campaign_run_id: receipt.campaign_run_id, entries: expected })) };
+  return validator.buildArtifactManifest(receipt, corpus, sizes);
 }
 
 async function validateSuiteProvenance(suites, sceneWorksRoot, route) {
@@ -307,7 +316,7 @@ async function validateSuiteProvenance(suites, sceneWorksRoot, route) {
 }
 
 export async function consolidateCanonicalArtifacts(receipt, corpus, validator, canonicalRoot, tupleRoots, suiteRoot) {
-  const expected = validator.buildArtifactManifest(receipt, corpus).entries;
+  const expected = validator.currentArtifactReferences ? validator.currentArtifactReferences(receipt, corpus) : validator.buildArtifactManifest(receipt, corpus).entries;
   for (const entry of expected) {
     const match = entry.path.match(/^runs\/([^/]+:[^/]+)\//);
     const sourceRoot = match ? tupleRoots.get(match[1]) : suiteRoot;
@@ -333,6 +342,9 @@ export async function sealReceipt({ sceneWorksRoot, planPath, inferenceRoot, evi
   const validator = await canonicalModule(inferenceRoot);
   const corpus = await json(path.join(inferenceRoot, plan.inference_contract.corpus));
   const sceneworksRevision = await git(sceneWorksRoot, ["rev-parse", "HEAD"]);
+  if (!syntheticFixture) for (const [tuple, root] of tupleRoots) {
+    await verifyTupleExecution(root, { campaign_run_id: campaignRunId, permanent_pin: permanentPin, tuple, workflow_run_id: String(process.env.GITHUB_RUN_ID), workflow_run_attempt: Number(process.env.GITHUB_RUN_ATTEMPT), sceneworks_revision: sceneworksRevision });
+  }
   const receipt = { schema_version: 1, campaign_run_id: campaignRunId, inference_revision: INFERENCE_REVISION, sceneworks_revision: sceneworksRevision, corpus_sha256: validator.validatePlan(corpus), execution: suites.execution, producer: suites.producer, metric_identity: suites.metric_identity, inference_preflight: suites.inference_preflight, runs: TUPLES.map((tuple) => byTuple.get(tuple)), hostile_sanitizer: suites.hostile_sanitizer, prompt_composition: suites.prompt_composition, artifact_manifest: null };
   receipt.execution.head_sha = sceneworksRevision;
   // Synthetic contract fixtures prove the canonical validator separately. Production callers
@@ -341,13 +353,14 @@ export async function sealReceipt({ sceneWorksRoot, planPath, inferenceRoot, evi
   if (syntheticFixture) manifest = validator.buildArtifactManifest(receipt, corpus);
   else {
     const canonicalRoot = path.join(output, "canonical-evidence");
+    await bindRecoveryLineage(receipt, await json(path.join(sceneWorksRoot, "release/starvector-terminal-recovery-v1.json")), (process.env.STARVECTOR_TERMINAL_RECOVERY_ROOT ?? path.join(process.env.RUNNER_TEMP ?? "", "starvector-recovery")), canonicalRoot);
     await consolidateCanonicalArtifacts(receipt, corpus, validator, canonicalRoot, tupleRoots, path.dirname(suitePath));
     manifest = await artifactManifestFromFiles(receipt, corpus, canonicalRoot, validator);
   }
   receipt.artifact_manifest = manifest; receipt.producer.artifact_manifest_sha256 = manifest.aggregate_sha256;
   await mkdir(output, { recursive: true }); const receiptPath = path.join(output, "terminal-receipt.json"); await writeFile(receiptPath, JSON.stringify(receipt, null, 2) + "\n");
   const validatorPath = path.join(inferenceRoot, "scripts/release/starvector_terminal_evidence.mjs");
-  await execFile(process.execPath, [validatorPath, "validate-receipt", "--corpus", path.join(inferenceRoot, plan.inference_contract.corpus), "--receipt", receiptPath, "--inference-revision", INFERENCE_REVISION, "--sceneworks-revision", sceneworksRevision]);
+  await execFile(process.execPath, [validatorPath, "validate-receipt", "--corpus", path.join(inferenceRoot, plan.inference_contract.corpus), "--receipt", receiptPath, "--inference-revision", INFERENCE_REVISION, "--sceneworks-revision", sceneworksRevision, ...(syntheticFixture ? [] : ["--evidence-root", path.join(output, "canonical-evidence")])]);
   await writeFile(path.join(output, "terminal-artifacts.json"), JSON.stringify(await inventory(syntheticFixture ? evidenceRoot : path.join(output, "canonical-evidence")), null, 2) + "\n");
   return receipt;
 }

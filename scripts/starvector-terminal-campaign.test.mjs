@@ -47,23 +47,13 @@ test("terminal campaign rejects count, lock, and LPIPS weight drift", () => {
   assert.throws(() => validateMetricsLock(badLock), /LPIPS/);
 });
 
-test("terminal campaign rejects every sealed native-preflight provenance mutation", () => {
-  for (const [label, mutate] of [
-    ["repository", (value) => { value.inference_preflight.repository = "fork/inference"; }],
-    ["workflow", (value) => { value.inference_preflight.workflow.id += 1; }],
-    ["run", (value) => { value.inference_preflight.workflow_run_id = "33851645748"; }],
-    ["attempt", (value) => { value.inference_preflight.workflow_run_attempt = 2; }],
-    ["head", (value) => { value.inference_preflight.head_sha = "0".repeat(40); }],
-    ["artifact id", (value) => { value.inference_preflight.artifact.id += 1; }],
-    ["artifact name", (value) => { value.inference_preflight.artifact.name += "-other"; }],
-    ["artifact size", (value) => { value.inference_preflight.artifact.size_in_bytes += 1; }],
-    ["artifact digest", (value) => { value.inference_preflight.artifact.digest = `sha256:${"0".repeat(64)}`; }],
-    ["inventory", (value) => { value.inference_preflight.inventory_artifacts[0].sha256 = "0".repeat(64); }],
-    ["hook", (value) => { value.inference_preflight.hook_logs[0].sha256 = "0".repeat(64); }],
-  ]) {
-    const changed = structuredClone(plan);
-    mutate(changed);
-    assert.throws(() => validatePlan(changed), /preflight provenance/, label);
+test("plan validates preflight structure while allowing newly recorded exact evidence", () => {
+  const next = structuredClone(plan);
+  next.inference_preflight.artifact.id += 1;
+  next.inference_preflight.artifact.digest = `sha256:${"a".repeat(64)}`;
+  assert.equal(validatePlan(next), next);
+  for (const change of [p => p.inference_preflight.head_sha = "0".repeat(40), p => p.inference_preflight.artifact.digest = "invalid", p => p.inference_preflight.workflow_run_attempt = 0, p => p.inference_preflight.hook_logs.pop()]) {
+    const invalid = structuredClone(plan); change(invalid); assert.throws(() => validatePlan(invalid), /preflight provenance/);
   }
 });
 

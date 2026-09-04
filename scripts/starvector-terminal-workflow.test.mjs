@@ -9,13 +9,16 @@ import test from "node:test";
 import { promisify } from "node:util";
 import { treeIdentity, validateCorpusAssets, validateTerminalServiceClosure } from "./starvector-terminal-readiness.mjs";
 import { terminalTreeEntry, terminalTreeSha256 } from "./lib/terminal-tree-identity.mjs";
-import { closureTreeHash, copyRegularTree, productServiceActiveStatePath, productServiceBackendEnv, productServiceBuildArgs, productServiceLogPaths, productServiceLogsIdentity, productServiceStateRoot, productServiceTaskkillArguments, relocateProductServiceLibrary, stopProductService } from "./starvector-terminal-product-service.mjs";
+import { assertTerminalProductWorkerReady, closureTreeHash, copyRegularTree, productServiceActiveStatePath, productServiceBackendEnv, productServiceBuildArgs, productServiceLogPaths, productServiceLogsIdentity, productServiceStateRoot, productServiceTaskkillArguments, relocateProductServiceLibrary, runProductServiceGpuPreflight, stopProductService, terminalProductWorkerContract, terminalProductWorkerId, validateTerminalProductWorkerReadiness } from "./starvector-terminal-product-service.mjs";
 
 const workflow = await readFile(".github/workflows/starvector-terminal.yml", "utf8");
 const readiness = await readFile(".github/workflows/starvector-terminal-readiness.yml", "utf8");
+const producer = await readFile("scripts/starvector-terminal-producer.mjs", "utf8");
+const route = await readFile("scripts/starvector-terminal-route.mjs", "utf8");
 const hash = (value) => createHash("sha256").update(value).digest("hex");
 const pin = "c6d6a4dbd61ab09c26ff5526632cae2cefea60ed";
 const execFile = promisify(execFileCallback);
+const productServiceSupported = process.platform === "darwin" || process.platform === "win32";
 
 async function availableLoopbackPort() {
   const reservation = createServer();
@@ -36,7 +39,7 @@ async function executableAlias(destination) {
   if (copied && process.platform !== "win32") await chmod(destination, 0o755);
 }
 
-async function productServiceFixture({ tamperRelocation = false } = {}) {
+async function productServiceFixture({ tamperRelocation = false, tuple = process.platform === "win32" ? "candle-cuda:1b" : "mlx:1b" } = {}) {
   const sandbox = await mkdtemp(path.join(tmpdir(), "starvector-service-detach-"));
   const root = path.join(sandbox, "repo"), output = path.join(sandbox, "tuple"), weightsRoot = path.join(sandbox, "weights"), shimRoot = path.join(sandbox, "bin");
   await mkdir(root); await mkdir(shimRoot); await mkdir(path.join(weightsRoot, "app"), { recursive: true }); await mkdir(path.join(weightsRoot, "hf"), { recursive: true });
@@ -49,7 +52,9 @@ async function productServiceFixture({ tamperRelocation = false } = {}) {
   const runtime = path.join(sandbox, "fake-service.cjs");
   await writeFile(runtime, `const http = require("node:http");
 const path = require("node:path");
+if ((process.argv[1] ?? "").startsWith("--id=")) { process.stdout.write("0, GPU-12345678-1234-1234-1234-123456789abc, NVIDIA Fixture GPU, 580.0, 32768, 30000, 2768\\n"); process.exit(0); }
 if (path.basename(process.argv[1] ?? "") === "build") process.exit(0);
+if (process.argv.length === 1 && process.env.SCENEWORKS_GPU_CHECK === "1") process.exit(0);
 if (process.argv.length === 1) {
   const worker = process.env.SCENEWORKS_WORKER_ONLY === "1";
   let relocatedLibrary;
@@ -78,6 +83,19 @@ if (process.argv.length === 1) {
         response.end(JSON.stringify({ available: relocatedLibrary !== undefined, probeStatus: relocatedLibrary ? "available" : "identity_mismatch", configuredLibraryPath: path.join(process.env.HF_HOME, "hub"), expectedLibrary: relocatedLibrary ? { configuredPath: relocatedLibrary } : null }));
         return;
       }
+      if (request.method === "GET" && request.url === "/api/v1/workers") {
+        const mlx = process.env.SCENEWORKS_GPU_ID === "mlx";
+        const capabilities = mlx ? ["gpu", "vector_image_to_svg"] : ["gpu", "nvidia", "candle", "vector_image_to_svg"];
+        response.writeHead(200, { "content-type": "application/json" });
+        response.end(JSON.stringify([{ id: process.env.SCENEWORKS_WORKER_ID, gpuId: process.env.SCENEWORKS_GPU_ID, gpuName: mlx ? "Apple Silicon (MLX)" : "NVIDIA Fixture GPU", status: "idle", currentJobId: null, capabilities }]));
+        return;
+      }
+      if (request.method === "GET" && request.url === "/api/v1/models") {
+        const tier = process.env.STARVECTOR_TEST_TUPLE.endsWith(":8b") ? "8b" : "1b";
+        response.writeHead(200, { "content-type": "application/json" });
+        response.end(JSON.stringify([{ id: "starvector_" + tier, installState: "installed", capabilities: ["image_to_svg"], vector: { providers: { mlx: { id: "mlx-starvector-" + tier, available: true }, candle: { id: "candle-starvector-" + tier, available: true } } } }]));
+        return;
+      }
       response.writeHead(200, { "content-type": "application/json" });
       response.end(JSON.stringify({ status: "ok", readiness: { status: "ready" } }));
     });
@@ -92,6 +110,7 @@ if (process.argv.length === 1) {
 }
 `);
   await executableAlias(path.join(shimRoot, process.platform === "win32" ? "cargo.exe" : "cargo"));
+  if (process.platform === "win32") await executableAlias(path.join(shimRoot, "nvidia-smi.exe"));
   await executableAlias(path.join(root, "target", "debug", process.platform === "win32" ? "sceneworks-rust-api.exe" : "sceneworks-rust-api"));
   await writeFile(path.join(weightsRoot, "app", "receipt.json"), "receipt");
   await writeFile(path.join(weightsRoot, "hf", "weights.bin"), "weights");
@@ -109,14 +128,15 @@ if (process.argv.length === 1) {
   };
   const manifestPath = path.join(weightsRoot, "starvector-terminal-weights-v1.json");
   await writeFile(manifestPath, JSON.stringify(manifest));
-  const cliEnv = { ...process.env, NODE_OPTIONS: `${process.env.NODE_OPTIONS ?? ""} --require="${runtime}"`.trim(), PATH: `${shimRoot}${path.delimiter}${process.env.PATH ?? ""}`, STARVECTOR_TEST_TAMPER_RELOCATION: tamperRelocation ? "1" : "0" };
+  const contract = terminalProductWorkerContract(tuple);
+  const cliEnv = { ...process.env, NODE_OPTIONS: `${process.env.NODE_OPTIONS ?? ""} --require="${runtime}"`.trim(), PATH: `${shimRoot}${path.delimiter}${process.env.PATH ?? ""}`, STARVECTOR_TERMINAL_GPU_ID: contract.gpu_id, STARVECTOR_TEST_TUPLE: tuple, STARVECTOR_TEST_TAMPER_RELOCATION: tamperRelocation ? "1" : "0" };
   const serviceScript = path.resolve("scripts/starvector-terminal-product-service.mjs");
-  return { sandbox, root, output, weightsRoot, manifest, manifestPath, cliEnv, serviceScript };
+  return { sandbox, root, output, weightsRoot, manifest, manifestPath, tuple, cliEnv, serviceScript };
 }
 
 async function runProductServiceCli(fixture, command, port, timeout = 8_000) {
   const args = command === "start"
-    ? [fixture.serviceScript, "start", fixture.root, fixture.output, pin, `http://127.0.0.1:${port}`, fixture.weightsRoot]
+    ? [fixture.serviceScript, "start", fixture.root, fixture.output, pin, `http://127.0.0.1:${port}`, fixture.weightsRoot, fixture.tuple]
     : [fixture.serviceScript, "stop", fixture.output];
   return execFile(process.execPath, args, { env: fixture.cliEnv, timeout });
 }
@@ -148,10 +168,14 @@ test("terminal workflow is dispatch-only, serial, and seals raw evidence", () =>
   assert.equal((workflow.match(/starvector-terminal-case-bundle\.mjs/g) ?? []).length, 4);
   assert.equal((workflow.match(/starvector-terminal-assets\.mjs/g) ?? []).length, 4);
   assert.match(workflow, /starvector_terminal_lease/);
-  assert.equal((workflow.match(/cargo build --release --locked -p sceneworks-worker --bin starvector_terminal_lease/g) ?? []).length, 4);
+  assert.equal((workflow.match(/cargo build --release --locked -p sceneworks-worker --bin starvector_terminal_lease/g) ?? []).length, 5);
   assert.doesNotMatch(workflow, /RUNNER_TEMP[^\n]*\.lease/);
   assert.match(workflow, /Upload combined evidence even on failure/);
   assert.equal((workflow.match(/timeout-minutes: 720/g) ?? []).length, 4);
+  assert.equal((workflow.match(/STARVECTOR_TERMINAL_GPU_ID: mlx/g) ?? []).length, 2);
+  assert.equal((workflow.match(/STARVECTOR_TERMINAL_GPU_ID: "0"/g) ?? []).length, 3);
+  for (const tuple of ["mlx:1b", "mlx:8b", "candle-cuda:1b", "candle-cuda:8b"]) assert.match(workflow, new RegExp(`product-service\\.mjs start[^\\n]+ ${tuple.replace(":", "\\:")}`));
+  assert.doesNotMatch(workflow, /STARVECTOR_TERMINAL_GPU_ID:\s*auto/);
 });
 
 test("every tuple stops its service before uploading final logs and stop provenance", () => {
@@ -178,11 +202,122 @@ test("terminal workflow has no install or model download step", () => {
 
 test("source-built product service enables the native backend for each campaign host", () => {
   assert.deepEqual(productServiceBuildArgs("darwin"), ["build", "--locked", "-p", "sceneworks-rust-api"]);
-  assert.deepEqual(productServiceBackendEnv("darwin"), {});
+  assert.deepEqual(productServiceBackendEnv("darwin"), {
+    SCENEWORKS_BACKEND_MLX_ENABLED: "true",
+    SCENEWORKS_BACKEND_CANDLE_ENABLED: "false",
+    SCENEWORKS_MLX_REQUIRED: "1",
+    SCENEWORKS_MLX_UNSUPPORTED_MODE: "enforce",
+    SCENEWORKS_CANDLE_REQUIRED: "0",
+  });
   assert.deepEqual(productServiceBuildArgs("win32"), ["build", "--locked", "-p", "sceneworks-rust-api", "--features", "backend-candle"]);
-  assert.deepEqual(productServiceBackendEnv("win32"), { SCENEWORKS_BACKEND_CANDLE_ENABLED: "true" });
+  assert.deepEqual(productServiceBackendEnv("win32"), {
+    SCENEWORKS_BACKEND_MLX_ENABLED: "false",
+    SCENEWORKS_BACKEND_CANDLE_ENABLED: "true",
+    SCENEWORKS_MLX_REQUIRED: "0",
+    SCENEWORKS_CANDLE_REQUIRED: "1",
+    SCENEWORKS_CANDLE_UNSUPPORTED_MODE: "enforce",
+  });
   assert.equal(productServiceStateRoot(path.join("tmp", "tuple")), path.join("tmp", "tuple-product-service-state"));
   assert.notEqual(productServiceStateRoot(path.join("tmp", "tuple")), path.join("tmp", "tuple", "product-service-state"));
+});
+
+function workerReadinessFixture(tuple, platform) {
+  const contract = terminalProductWorkerContract(tuple, platform), workerId = terminalProductWorkerId(tuple, "a".repeat(64));
+  const worker = {
+    id: workerId,
+    gpuId: contract.gpu_id,
+    gpuName: contract.backend === "mlx" ? contract.gpu_name : "NVIDIA RTX PRO 6000 Blackwell Max-Q Workstation Edition",
+    status: "idle",
+    currentJobId: null,
+    capabilities: [...contract.required_capabilities],
+  };
+  const model = {
+    id: contract.model_id,
+    installState: "installed",
+    capabilities: ["image_to_svg"],
+    vector: { providers: { [contract.backend]: { id: contract.provider_id, available: true } } },
+  };
+  return { contract, workerId, workers: [{ id: "utility", gpuId: "cpu", gpuName: "CPU utility worker", status: "idle", currentJobId: null, capabilities: ["cpu"] }, worker], models: [model] };
+}
+
+test("terminal product worker readiness binds each tuple to its native provider, device, and healthy worker", async () => {
+  for (const [tuple, platform] of [["mlx:1b", "darwin"], ["mlx:8b", "darwin"], ["candle-cuda:1b", "win32"], ["candle-cuda:8b", "win32"]]) {
+    const fixture = workerReadinessFixture(tuple, platform);
+    const selected = validateTerminalProductWorkerReadiness(fixture.workers, fixture.models, fixture.contract, fixture.workerId);
+    assert.deepEqual(selected, {
+      worker_id: fixture.workerId,
+      gpu_id: fixture.contract.gpu_id,
+      gpu_name: fixture.workers[1].gpuName,
+      status: "idle",
+      capabilities: [...fixture.contract.required_capabilities].sort(),
+      backend: fixture.contract.backend,
+      tier: fixture.contract.tier,
+      model_id: fixture.contract.model_id,
+      provider_id: fixture.contract.provider_id,
+    });
+    const fetched = await assertTerminalProductWorkerReady("http://127.0.0.1:17821", tuple, fixture.workerId, {
+      platform,
+      fetchImpl: async (url) => ({ ok: true, status: 200, json: async () => url.pathname.endsWith("/workers") ? fixture.workers : fixture.models }),
+    });
+    assert.deepEqual(fetched, selected);
+  }
+  assert.throws(() => terminalProductWorkerContract("mlx:1b", "win32"), /requires darwin/);
+  assert.throws(() => terminalProductWorkerId("mlx:1b", "short"), /exact tuple and instance token/);
+});
+
+test("terminal product worker readiness rejects CPU-only, stale, wrong-backend, and unavailable-provider sets", () => {
+  const mlx = workerReadinessFixture("mlx:1b", "darwin");
+  assert.throws(() => validateTerminalProductWorkerReadiness(mlx.workers.slice(0, 1), mlx.models, mlx.contract, mlx.workerId), /is not registered/);
+  for (const status of ["offline", "unhealthy", "busy"]) {
+    const workers = structuredClone(mlx.workers); workers[1].status = status;
+    assert.throws(() => validateTerminalProductWorkerReadiness(workers, mlx.models, mlx.contract, mlx.workerId), /not healthy and idle/);
+  }
+  {
+    const workers = structuredClone(mlx.workers); workers[1].capabilities.push("candle", "nvidia");
+    assert.throws(() => validateTerminalProductWorkerReadiness(workers, mlx.models, mlx.contract, mlx.workerId), /not the native MLX worker/);
+  }
+  {
+    const workers = structuredClone(mlx.workers); workers[1].capabilities = ["cpu"];
+    assert.throws(() => validateTerminalProductWorkerReadiness(workers, mlx.models, mlx.contract, mlx.workerId), /wrong device identity/);
+  }
+  const cuda = workerReadinessFixture("candle-cuda:1b", "win32");
+  for (const mutate of [
+    (fixture) => { fixture.workers[1].gpuName = "GPU 0"; },
+    (fixture) => { fixture.workers[1].gpuId = "mlx"; },
+    (fixture) => { fixture.workers[1].capabilities = fixture.workers[1].capabilities.filter((capability) => capability !== "candle"); },
+    (fixture) => { fixture.models[0].vector.providers.candle.id = "mlx-starvector-1b"; },
+    (fixture) => { fixture.models[0].vector.providers.candle.available = false; },
+    (fixture) => { fixture.models[0].installState = "not_installed"; },
+  ]) {
+    const changed = structuredClone(cuda); mutate(changed);
+    assert.throws(() => validateTerminalProductWorkerReadiness(changed.workers, changed.models, changed.contract, changed.workerId), /wrong device identity|lacks discovered NVIDIA|lacks candle|not installed and available/);
+  }
+});
+
+test("terminal product GPU preflight is mandatory, bounded, and fail-closed", async () => {
+  let options;
+  await runProductServiceGpuPreflight("/fixture/sceneworks-rust-api", { SCENEWORKS_GPU_ID: "mlx" }, {
+    timeoutMs: 12_345,
+    execFileImpl: async (binary, args, received) => { assert.equal(binary, "/fixture/sceneworks-rust-api"); assert.deepEqual(args, []); options = received; },
+  });
+  assert.equal(options.timeout, 12_345);
+  assert.equal(options.env.SCENEWORKS_GPU_ID, "mlx");
+  assert.equal(options.env.SCENEWORKS_GPU_CHECK, "1");
+  await assert.rejects(
+    () => runProductServiceGpuPreflight("/fixture/sceneworks-rust-api", { SCENEWORKS_GPU_ID: "0" }, { execFileImpl: async () => { const error = new Error("exit 2"); error.stdout = "CUDA driver unavailable"; throw error; } }),
+    /native GPU preflight failed: CUDA driver unavailable/,
+  );
+});
+
+test("native worker readiness is checked before tuple marker acquisition and before route submission", () => {
+  const verifyStart = producer.indexOf("const liveWorker = await assertTerminalProductWorkerReady");
+  const preflightDefinition = producer.indexOf("export async function preflight");
+  assert.ok(verifyStart >= 0 && verifyStart < preflightDefinition, "producer preflight must live-check the selected worker");
+  const execute = producer.slice(producer.indexOf("export async function executeTuple"), producer.indexOf("function canonicalRun"));
+  assert.ok(execute.indexOf("await preflight") < execute.indexOf("await claimTerminalAttempt"), "worker-bearing preflight must finish before the permanent marker");
+  assert.ok(execute.indexOf("await preflight") < execute.indexOf("await claimTupleMarker"), "worker-bearing preflight must finish before the tuple marker");
+  const routeMain = route.slice(route.indexOf("async function main()"));
+  assert.ok(routeMain.indexOf("await assertTerminalProductWorkerReady") < routeMain.indexOf("image_quality: await runCases"), "route must re-check the worker before the first vector job submission");
 });
 
 test("product service streams copied closure identity and preserves portable ordering", async () => {
@@ -204,13 +339,19 @@ test("product service streams copied closure identity and preserves portable ord
   await assert.rejects(() => closureTreeHash(destination), /weights closure copy contains symlink/);
 });
 
-test("product service start CLI exits while durable-log services remain alive and can later be stopped", { timeout: 30_000 }, async () => {
+test("product service start CLI exits while durable-log services remain alive and can later be stopped", { timeout: 30_000, skip: !productServiceSupported }, async () => {
   const fixture = await productServiceFixture(), port = await availableLoopbackPort();
   let record;
   try {
     await runProductServiceCli(fixture, "start", port);
     record = JSON.parse(await readFile(path.join(fixture.output, "product-service-provenance.json"), "utf8"));
     assertPidsRunning(record);
+    const contract = terminalProductWorkerContract(fixture.tuple);
+    assert.equal(record.tuple, fixture.tuple);
+    assert.equal(record.worker.worker_id, terminalProductWorkerId(fixture.tuple, record.instance_token));
+    assert.equal(record.worker.gpu_id, contract.gpu_id);
+    assert.equal(record.worker.backend, contract.backend);
+    assert.equal(record.worker.provider_id, contract.provider_id);
     assert.deepEqual(record.offline.library_relocation, {
       adopted: true,
       hf_home: path.relative(fixture.output, path.join(productServiceStateRoot(fixture.output), "hf")),
@@ -247,7 +388,7 @@ test("product service start CLI exits while durable-log services remain alive an
   }
 });
 
-test("product service stop requires an exact active sentinel before signaling", { timeout: 25_000 }, async () => {
+test("product service stop requires an exact active sentinel before signaling", { timeout: 25_000, skip: !productServiceSupported }, async () => {
   const fixture = await productServiceFixture(), port = await availableLoopbackPort();
   let record;
   try {
@@ -286,7 +427,7 @@ test("product service stop requires an exact active sentinel before signaling", 
   }
 });
 
-test("product service rejects a pre-existing healthy listener before provenance", { timeout: 15_000 }, async () => {
+test("product service rejects a pre-existing healthy listener before provenance", { timeout: 15_000, skip: !productServiceSupported }, async () => {
   const fixture = await productServiceFixture(), listener = createServer((_request, response) => response.end(JSON.stringify({ status: "ok", readiness: { status: "ready" } })));
   try {
     await new Promise((resolve, reject) => { listener.once("error", reject); listener.listen(0, "127.0.0.1", resolve); });
@@ -335,7 +476,7 @@ test("product service relocation requires the exact adopted offline path", async
   );
 });
 
-test("a rejected product relocation terminates both services and records the failure", { timeout: 15_000 }, async () => {
+test("a rejected product relocation terminates both services and records the failure", { timeout: 15_000, skip: !productServiceSupported }, async () => {
   const fixture = await productServiceFixture({ tamperRelocation: true }), port = await availableLoopbackPort();
   try {
     await assert.rejects(() => runProductServiceCli(fixture, "start", port), /returned an inexact binding/);
@@ -351,7 +492,7 @@ test("a rejected product relocation terminates both services and records the fai
   }
 });
 
-test("product service records setup and log-open failures before removing child-free state", { timeout: 20_000 }, async () => {
+test("product service records setup and log-open failures before removing child-free state", { timeout: 20_000, skip: !productServiceSupported }, async () => {
   for (const failure of ["setup", "hf-hash", "open"]) {
     const fixture = await productServiceFixture(), port = await availableLoopbackPort();
     try {
@@ -372,7 +513,7 @@ test("product service records setup and log-open failures before removing child-
   }
 });
 
-test("failed termination records diagnostics and retains authenticated state for safe retry", { timeout: 20_000 }, async () => {
+test("failed termination records diagnostics and retains authenticated state for safe retry", { timeout: 20_000, skip: !productServiceSupported }, async () => {
   const fixture = await productServiceFixture(), port = await availableLoopbackPort();
   let record;
   try {
@@ -408,7 +549,7 @@ test("readiness workflow is an identity-only dispatch on both campaign hosts", (
   assert.equal((readiness.match(/if: \$\{\{ always\(\) \}\}/g) ?? []).length, 2);
   assert.match(readiness, /permanent_pin:[\s\S]*required: true/);
   assert.equal((readiness.match(/starvector-terminal-pin-paths\.mjs/g) ?? []).length, 2);
-  assert.equal((workflow.match(/starvector-terminal-pin-paths\.mjs/g) ?? []).length, 5);
+  assert.equal((workflow.match(/starvector-terminal-pin-paths\.mjs/g) ?? []).length, 6);
   assert.equal((readiness.match(/\$\{\{ inputs\.permanent_pin \}\}/g) ?? []).length, 1);
   assert.equal((workflow.match(/\$\{\{ inputs\.permanent_pin \}\}/g) ?? []).length, 2);
   assert.doesNotMatch(`${workflow}\n${readiness}`, /starvector-terminal[\\/]inference(?:[\\/]|\s|$)/);

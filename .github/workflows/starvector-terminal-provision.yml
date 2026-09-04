@@ -298,6 +298,15 @@ jobs:
             Remove-Item Env:RUSTC_WRAPPER -ErrorAction SilentlyContinue
             cargo run --release --locked -p sceneworks-worker --bin starvector_terminal_corpus -- "$env:STARVECTOR_TERMINAL_INFERENCE_ROOT\release\starvector-terminal-corpus-v1.json" "$env:RUNNER_TEMP\starvector-parquet" $env:STARVECTOR_TERMINAL_CORPUS_ASSETS_ROOT $env:STARVECTOR_INFERENCE_REVISION $env:STARVECTOR_PROMPT_PROVIDER $env:STARVECTOR_PROMPT_MODEL $env:STARVECTOR_PROMPT_REVISION $inventory
           }
+      - name: Provision audited upstream validation closure without executing models
+        shell: powershell
+        timeout-minutes: 75
+        run: |
+          cargo build --release --locked -p sceneworks-worker --bin starvector_terminal_sanitize
+          if ($LASTEXITCODE -ne 0) { throw 'sanitizer build failed' }
+          $bootstrapPython = Join-Path $env:STARVECTOR_TERMINAL_ROOT 'python/cpython-3.12.10-x64-nuget/tools/python.exe'
+          node scripts/starvector-terminal-provision.mjs upstream "$env:GITHUB_WORKSPACE/sceneworks" "$env:STARVECTOR_TERMINAL_ROOT" "$bootstrapPython" "$env:STARVECTOR_TERMINAL_CORPUS_ASSETS_ROOT" "$env:GITHUB_WORKSPACE/sceneworks/target/release/starvector_terminal_sanitize.exe"
+          if ($LASTEXITCODE -ne 0) { throw 'offline upstream closure validation failed; exact component config provenance is required' }
       - name: Read-only readiness validation
         if: ${{ always() }}
         shell: powershell

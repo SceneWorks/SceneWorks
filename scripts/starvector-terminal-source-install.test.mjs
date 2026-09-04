@@ -117,7 +117,7 @@ test("Windows terminal workflows use the in-box PowerShell host", async () => {
     "",
   ].map((suffix) => readFile(new URL(`../.github/workflows/starvector-terminal${suffix ? `-${suffix}` : ""}.yml`, import.meta.url), "utf8")));
   for (const workflow of workflows) assert.doesNotMatch(workflow, /shell: pwsh/);
-  assert.equal(workflows.reduce((count, workflow) => count + (workflow.match(/shell: powershell/g) ?? []).length, 0), 16);
+  assert.equal(workflows.reduce((count, workflow) => count + (workflow.match(/shell: powershell/g) ?? []).length, 0), 18);
 });
 
 test("existing default-branch workflow bridges every pre-merge terminal operation", async () => {
