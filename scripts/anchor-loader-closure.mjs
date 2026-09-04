@@ -90,6 +90,7 @@
 // are separately bound to the anchor by the store's source handshake in `memory_anchor.rs`, which
 // validates every anchor against the retained record's `strategy.engagedRungs` and geometry.
 
+import { readFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -110,6 +111,20 @@ import { canonicalSourceText, stripInertLines } from "./lib/source-revision.mjs"
 export const ANCHOR_LOADER_CLOSURE_VERSION = "anchor-loader-closure v2";
 
 export const ANCHOR_LOADER_CONFIG_PATH = "config/anchor-loader-closures.json";
+
+/** The anchor plan: ground truth for which provider a declared `(model, lane)` actually measures. */
+export const CALIBRATION_PLAN_PATH = "config/memory-calibration-plan.json";
+
+const SCENEWORKS_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+
+let planAnchorsCache;
+
+/** `config/memory-calibration-plan.json`'s `anchors`, read once per process. */
+export function calibrationPlanAnchors() {
+  planAnchorsCache ??=
+    JSON.parse(readFileSync(path.join(SCENEWORKS_ROOT, CALIBRATION_PLAN_PATH), "utf8")).anchors ?? {};
+  return planAnchorsCache;
+}
 
 /** Directories under a crate that are never compiled into the shipped loader. */
 const NON_SHIPPED_DIRS = ["tests/", "benches/", "examples/", "testdata/", "fixtures/"];
@@ -652,14 +667,51 @@ export function assertModelIsNamedByEntryPoints({ model, engineId, entryPoints, 
   }
 }
 
+/**
+ * `engineId` redirects the literal rule above at a DIFFERENT model's loader, so it cannot be taken
+ * on the declaration's own word: `krea_2_turbo:mlx` declaring `engineId: "z_image_turbo"` with the
+ * Z-Image entry points would otherwise pass every shape check and key Krea's currency to the
+ * Z-Image loader — the sc-22511 false green, reached through one word.
+ *
+ * The anchor plan already carries the ground truth (each `<modelId>:<tier>:<lane>` row names the
+ * `provider` the adapter actually loads), so the alias is cross-checked against it: the providers
+ * the plan declares for this `(modelId, lane)` must be exactly `{engineId ?? modelId}`. That
+ * refuses a mis-pointed alias, an alias on a model the plan measures under its own id, and a
+ * MISSING alias on a model the plan measures under someone else's. A declared lane the plan carries
+ * no row for (`ltx_2_3:mlx`) has no ground truth to check against and is left alone.
+ */
+export function assertEngineIdMatchesPlan({ model, engineId, planAnchors }) {
+  const [modelId, lane] = model.split(":");
+  const providers = new Set(
+    Object.entries(planAnchors)
+      .filter(([key]) => {
+        const parts = key.split(":");
+        return parts[0] === modelId && parts[2] === lane;
+      })
+      .map(([, anchor]) => anchor.provider),
+  );
+  if (providers.size === 0) return;
+  const expected = engineId ?? modelId;
+  const wrong = [...providers].filter((provider) => provider !== expected).sort();
+  if (wrong.length === 0) return;
+  throw new Error(
+    `anchor loader declaration "${model}" ${engineId ? `declares engineId "${engineId}"` : "declares no engineId"}, ` +
+      `but ${CALIBRATION_PLAN_PATH} measures ${modelId} on ${lane} with provider(s) ` +
+      `${wrong.map((provider) => `"${provider}"`).join(", ")}. The declaration must name the provider the ` +
+      "plan loads, or the closure digests the wrong model's loader.",
+  );
+}
+
 /** Every declared model's digest at one revision, sharing the per-revision tree read. */
-export function anchorLoaderDigests({ repo, revision, declared, tree }) {
+export function anchorLoaderDigests({ repo, revision, declared, tree, planAnchors }) {
   const resolved = tree ?? gitTree(repo, revision);
+  const plan = planAnchors ?? calibrationPlanAnchors();
   const crates = firstPartyCrates(resolved, resolved.paths());
   const out = new Map();
   for (const [model, entry] of Object.entries(declared)) {
     const { entryPoints, engineId } = entry;
     assertModelIsNamedByEntryPoints({ model, engineId, entryPoints, tree: resolved });
+    assertEngineIdMatchesPlan({ model, engineId, planAnchors: plan });
     out.set(model, loaderClosureDigest({ model, engineId, entryPoints, tree: resolved, crates }));
   }
   return out;

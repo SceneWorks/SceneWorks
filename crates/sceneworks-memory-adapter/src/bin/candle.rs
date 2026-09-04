@@ -40,6 +40,10 @@ const Z_IMAGE_TURBO_STILL_CALIBRATION: &str = "Candle Z-Image-Turbo base calibra
 /// generator is conditioned on one reference image (sc-22724).
 const Z_IMAGE_TURBO_EDIT_EXECUTION_PATH: &str =
     "the Candle Z-Image-Turbo reference-conditioned edit path (the z_image_edit route)";
+/// The label the edit route refuses a non-still geometry under. The edit route is its own route
+/// with its own plan cells, so it names itself in the refusal rather than borrowing the
+/// text-to-image label — the same split the MLX arm carries (`Z_IMAGE_EDIT_ARM.still_calibration`).
+const Z_IMAGE_TURBO_EDIT_STILL_CALIBRATION: &str = "Candle Z-Image-Turbo edit calibration";
 /// The worker's production edit strength default (`resolve_zimage_edit_init`, `advanced.strength`).
 const Z_IMAGE_EDIT_STRENGTH: f32 = 0.6;
 /// Edit captures run four steps: the img2img start step is `floor(steps * strength)` (the shared
@@ -675,7 +679,11 @@ fn still_calibration_label(request: &Value) -> Result<&'static str, String> {
     match planned_provider(request)? {
         QWEN_ID => Ok(QWEN_STILL_CALIBRATION),
         KREA_ID => Ok(KREA_STILL_CALIBRATION),
-        Z_IMAGE_TURBO_ID => Ok(Z_IMAGE_TURBO_STILL_CALIBRATION),
+        Z_IMAGE_TURBO_ID => Ok(if is_z_image_edit(request)? {
+            Z_IMAGE_TURBO_EDIT_STILL_CALIBRATION
+        } else {
+            Z_IMAGE_TURBO_STILL_CALIBRATION
+        }),
         Z_IMAGE_ID => Ok(Z_IMAGE_STILL_CALIBRATION),
         provider => Err(format!(
             "Candle five-rung calibration does not implement provider {provider:?}"
@@ -1184,7 +1192,13 @@ fn run_five_rung_reference_loaded(
                 ),
             }),
             diagnostics: protocol::diagnostics(
-                &format!("memory-candle-adapter:{provider_id}-five-rung-reference"),
+                // sc-22724: `provider_id` is `z_image_turbo` for BOTH the text-to-image and the
+                // edit capture, so the route has to be in the source or the two records are
+                // indistinguishable by their own diagnostics. Mirrors `ZImageArm::slug` on MLX.
+                &format!(
+                    "memory-candle-adapter:{provider_id}{}-five-rung-reference",
+                    if edit { "-edit" } else { "" }
+                ),
                 "executed",
                 [blocker.to_owned()],
                 [
@@ -1192,6 +1206,8 @@ fn run_five_rung_reference_loaded(
                     ("denoiseDevicePeakDelta", "bytes", denoise_bytes),
                     ("decodeDevicePeakDelta", "bytes", decode_bytes),
                     ("overallDevicePeakDelta", "bytes", overall_bytes),
+                    // The edit route conditions every request on one reference image.
+                    ("referenceImages", "count", u64::from(edit)),
                 ],
             ),
         },
@@ -1226,7 +1242,10 @@ fn five_rung_generation_request(width: u32, height: u32, edit: bool) -> Generati
     };
     if edit {
         generation.steps = Some(Z_IMAGE_EDIT_STEPS);
-        generation.strength = Some(Z_IMAGE_EDIT_STRENGTH);
+        // `request.strength` stays None: the worker sets ONLY the per-reference strength
+        // (`build_lane_conditioning`, image_jobs/base.rs:7136) and leaves the request-level lever —
+        // gen-core's documented fallback for a single `Reference` with no strength of its own —
+        // unset. This arm reproduces the worker's request shape, so it does the same (sc-22724).
         generation.conditioning = vec![Conditioning::Reference {
             image: Image {
                 width,
@@ -2644,8 +2663,16 @@ mod tests {
         still_planned_case_with_fixture(provider, rung, frames, "fresh-five-rung-unused")
     }
 
-    /// The canonical five-rung batch shape `run_five_rung_batch` requires, at `frames`.
-    fn still_batch_request(provider: &str, frames: u64) -> Value {
+    /// The same shape in a declared plan mode. `edit_image` on the Turbo provider is the
+    /// `z_image_edit` route (sc-22724), which is its own execution path with its own refusal label.
+    fn still_planned_case_in_mode(provider: &str, rung: &str, frames: u64, mode: &str) -> Value {
+        let mut planned = still_planned_case(provider, rung, frames);
+        planned["target"]["mode"] = json!(mode);
+        planned
+    }
+
+    /// The canonical five-rung batch shape `run_five_rung_batch` requires, at `frames` and `mode`.
+    fn still_batch_request_in_mode(provider: &str, frames: u64, mode: &str) -> Value {
         let planned: Vec<Value> = [
             "resident",
             "staged_residency",
@@ -2654,7 +2681,7 @@ mod tests {
             "bounded_transformer_residency",
         ]
         .into_iter()
-        .map(|rung| still_planned_case(provider, rung, frames))
+        .map(|rung| still_planned_case_in_mode(provider, rung, frames, mode))
         .collect();
         json!({ "action": "run_batch", "planned": planned })
     }
@@ -2692,51 +2719,83 @@ mod tests {
     /// `run_five_rung_batch`'s on the strength of them still being there.
     #[test]
     fn every_candle_arm_still_refuses_a_multi_frame_geometry() {
-        for (provider, label, fixture) in [
-            (QWEN_ID, QWEN_STILL_CALIBRATION, "fresh-five-rung-unused"),
-            (KREA_ID, KREA_STILL_CALIBRATION, "fresh-five-rung-unused"),
+        for (provider, mode, label, fixture) in [
+            (
+                QWEN_ID,
+                "text_to_image",
+                QWEN_STILL_CALIBRATION,
+                "fresh-five-rung-unused",
+            ),
+            (
+                KREA_ID,
+                "text_to_image",
+                KREA_STILL_CALIBRATION,
+                "fresh-five-rung-unused",
+            ),
             (
                 Z_IMAGE_TURBO_ID,
+                "text_to_image",
                 Z_IMAGE_TURBO_STILL_CALIBRATION,
+                "fresh-five-rung-unused",
+            ),
+            // The `z_image_edit` route is its own execution path and refuses under its own label
+            // (sc-22724): the two Turbo rows must not report the same sentence.
+            (
+                Z_IMAGE_TURBO_ID,
+                "edit_image",
+                Z_IMAGE_TURBO_EDIT_STILL_CALIBRATION,
                 "fresh-five-rung-unused",
             ),
             (
                 Z_IMAGE_ID,
+                "text_to_image",
                 Z_IMAGE_STILL_CALIBRATION,
                 "fresh-five-rung-unused",
             ),
-            // The inline Krea arm — a real shipped plan fixture, which the two rows above cannot
+            // The inline Krea arm — a real shipped plan fixture, which the rows above cannot
             // reach.
-            (KREA_ID, KREA_STILL_CALIBRATION, "krea-q4-1024-seed42"),
+            (
+                KREA_ID,
+                "text_to_image",
+                KREA_STILL_CALIBRATION,
+                "krea-q4-1024-seed42",
+            ),
         ] {
             for frames in [0_u64, 2, 97] {
                 let expected = format!("{label} requires geometry.frames == 1, got {frames}");
-                let request = json!({
-                    "action": "run",
-                    "planned": still_planned_case_with_fixture(
-                        provider, "resident", frames, fixture,
-                    )
-                });
+                let mut planned =
+                    still_planned_case_with_fixture(provider, "resident", frames, fixture);
+                planned["target"]["mode"] = json!(mode);
+                let request = json!({ "action": "run", "planned": planned });
                 assert_eq!(
                     run(&request).expect_err("the Candle dispatcher must refuse a video geometry"),
                     expected,
-                    "run: {provider} at frames={frames} via fixture {fixture:?}"
+                    "run: {provider}/{mode} at frames={frames} via fixture {fixture:?}"
                 );
             }
         }
-        for (provider, label) in [
-            (QWEN_ID, QWEN_STILL_CALIBRATION),
-            (KREA_ID, KREA_STILL_CALIBRATION),
-            (Z_IMAGE_TURBO_ID, Z_IMAGE_TURBO_STILL_CALIBRATION),
-            (Z_IMAGE_ID, Z_IMAGE_STILL_CALIBRATION),
+        for (provider, mode, label) in [
+            (QWEN_ID, "text_to_image", QWEN_STILL_CALIBRATION),
+            (KREA_ID, "text_to_image", KREA_STILL_CALIBRATION),
+            (
+                Z_IMAGE_TURBO_ID,
+                "text_to_image",
+                Z_IMAGE_TURBO_STILL_CALIBRATION,
+            ),
+            (
+                Z_IMAGE_TURBO_ID,
+                "edit_image",
+                Z_IMAGE_TURBO_EDIT_STILL_CALIBRATION,
+            ),
+            (Z_IMAGE_ID, "text_to_image", Z_IMAGE_STILL_CALIBRATION),
         ] {
             for frames in [0_u64, 2, 97] {
                 let expected = format!("{label} requires geometry.frames == 1, got {frames}");
                 assert_eq!(
-                    run_five_rung_batch(&still_batch_request(provider, frames))
+                    run_five_rung_batch(&still_batch_request_in_mode(provider, frames, mode))
                         .expect_err("the Candle batch arm must refuse a video geometry"),
                     expected,
-                    "run_batch: {provider} at frames={frames}"
+                    "run_batch: {provider}/{mode} at frames={frames}"
                 );
             }
         }
@@ -2838,13 +2897,12 @@ mod tests {
             }
             other => panic!("expected one Reference, got {other:?}"),
         }
-        assert_eq!(edit.strength, Some(Z_IMAGE_EDIT_STRENGTH));
+        // The worker sets ONLY the per-reference strength (`build_lane_conditioning`,
+        // image_jobs/base.rs:7136); the request-level lever stays unset, and so does this arm's.
+        assert_eq!(edit.strength, None);
+        // floor(4 * 0.6) = 2, so two executed denoise steps remain behind the conditioning
+        // boundary — the engine's `init_time_step` law, not this arm's.
         assert_eq!(edit.steps, Some(Z_IMAGE_EDIT_STEPS));
-        // floor(4 * 0.6) = 2: two executed denoise steps remain behind the conditioning boundary.
-        assert_eq!(
-            ((Z_IMAGE_EDIT_STEPS as f32 * Z_IMAGE_EDIT_STRENGTH) as u32).max(1),
-            Z_IMAGE_EDIT_STEPS - 2
-        );
         let plain = five_rung_generation_request(1024, 1024, false);
         assert!(plain.conditioning.is_empty());
         assert_eq!(plain.strength, None);

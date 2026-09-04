@@ -275,7 +275,7 @@ test("every provider the committed plan declares is either served by a family ro
  *   and per-family engine tables the worker dispatches with). A lane that does not route the
  *   model is the ONLY exemption; a "structurally N/A" matrix cell is not one (epic 22723 E1).
  */
-async function shippedTieredCells() {
+async function computeShippedTieredCells() {
   const models = await readManifestModels();
   const matrix = JSON.parse(await readFile(path.join(ROOT, MATRIX_PATH), "utf8"));
   const routed = new Map(matrix.models.map((model) => [model.id, model.backends ?? []]));
@@ -294,8 +294,25 @@ async function shippedTieredCells() {
   return cells;
 }
 
+/**
+ * Both derivations are pure over the checked-in manifest, matrix and plan, and both are asked for by
+ * more than one case — `measurabilityGaps()` alone is two full `planRun`s with per-anchor filesystem
+ * probes. Memoized as module-level promises so the whole file pays for each exactly once.
+ */
+let shippedTieredCellsPromise;
+function shippedTieredCells() {
+  shippedTieredCellsPromise ??= computeShippedTieredCells();
+  return shippedTieredCellsPromise;
+}
+
+let measurabilityGapsPromise;
+function measurabilityGaps() {
+  measurabilityGapsPromise ??= computeMeasurabilityGaps();
+  return measurabilityGapsPromise;
+}
+
 /** The measurability gap set: shipped cells `--list` does not classify runnable / weights_missing. */
-async function measurabilityGaps() {
+async function computeMeasurabilityGaps() {
   const plan = await readPlan();
   const rows = new Map();
   for (const backend of ["mlx", "candle"]) {

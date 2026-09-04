@@ -1324,13 +1324,12 @@ mod tests {
             }
             other => panic!("expected one Reference, got {other:?}"),
         }
-        assert_eq!(edit.strength, Some(Z_IMAGE_EDIT_STRENGTH));
+        // The worker sets ONLY the per-reference strength (`build_lane_conditioning`,
+        // image_jobs/base.rs:7136); the request-level lever stays unset, and so does this arm's.
+        assert_eq!(edit.strength, None);
+        // floor(4 * 0.6) = 2, so two executed denoise steps remain behind the conditioning
+        // boundary — the engine's `init_time_step` law (mlx-gen/src/img2img.rs), not this arm's.
         assert_eq!(edit.steps, Some(Z_IMAGE_EDIT_STEPS));
-        // floor(4 * 0.6) = 2: two executed denoise steps remain behind the conditioning boundary.
-        assert_eq!(
-            ((Z_IMAGE_EDIT_STEPS as f32 * Z_IMAGE_EDIT_STRENGTH) as u32).max(1),
-            Z_IMAGE_EDIT_STEPS - 2
-        );
         for arm in [Z_IMAGE_TURBO_ARM, Z_IMAGE_BASE_ARM] {
             let plain = z_image_request(arm, 768, 768);
             assert!(plain.conditioning.is_empty());
@@ -2642,7 +2641,10 @@ fn z_image_request(arm: ZImageArm, width: u32, height: u32) -> GenerationRequest
         // `steps * strength` by the engine, so the step count is raised to keep two executed
         // denoise steps behind the conditioning boundary.
         request.steps = Some(Z_IMAGE_EDIT_STEPS);
-        request.strength = Some(Z_IMAGE_EDIT_STRENGTH);
+        // `request.strength` stays None: the worker sets ONLY the per-reference strength
+        // (`build_lane_conditioning`, image_jobs/base.rs:7136) and leaves the request-level lever —
+        // gen-core's documented fallback for a single `Reference` with no strength of its own —
+        // unset. This arm reproduces the worker's request shape, so it does the same (sc-22724).
         request.conditioning = vec![Conditioning::Reference {
             image: Image {
                 width,
