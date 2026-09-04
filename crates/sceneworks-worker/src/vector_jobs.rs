@@ -1022,7 +1022,9 @@ pub(crate) async fn run_vector_job_with_provider(
         cancel,
         generation,
         |count, maximum| async move {
-            update_job(api, &job.id, vector_token_progress(count, maximum)).await
+            update_job(api, &job.id, vector_token_progress(count, maximum))
+                .await
+                .map(|_| ())
         },
     )
     .await?;
