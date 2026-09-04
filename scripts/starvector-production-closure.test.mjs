@@ -65,7 +65,7 @@ test("shape and tree checks detect every closure mutation", async () => {
 
 test("live manifest seals the exact frozen-tree production closure", async () => {
   const closure = await checkManifestProductionClosure();
-  assert.equal(closure.sha256, "6c300cd26bdd7cc6fee60dc11a47188802a3b52eec1389ab789e082d71e958d3");
+  assert.equal(closure.sha256, "cd7b7124fb4e04c58caa739d7292187199515fb9dc8ec575bf885334f3a4e115");
   assert.equal(closure.entries.length, 30);
 });
 

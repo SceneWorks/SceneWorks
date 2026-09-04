@@ -1,14 +1,15 @@
 import assert from "node:assert/strict";
 import { execFile as execFileCallback } from "node:child_process";
 import { createHash } from "node:crypto";
-import { mkdir, mkdtemp, readFile, symlink, writeFile } from "node:fs/promises";
+import { chmod, lstat, mkdir, mkdtemp, readFile, rm, stat, symlink, writeFile } from "node:fs/promises";
+import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { promisify } from "node:util";
 import { treeIdentity, validateCorpusAssets, validateTerminalServiceClosure } from "./starvector-terminal-readiness.mjs";
 import { terminalTreeEntry, terminalTreeSha256 } from "./lib/terminal-tree-identity.mjs";
-import { closureTreeHash, copyRegularTree, productServiceBackendEnv, productServiceBuildArgs, productServiceStateRoot } from "./starvector-terminal-product-service.mjs";
+import { closureTreeHash, copyRegularTree, productServiceBackendEnv, productServiceBuildArgs, productServiceLogPaths, productServiceLogsSha256, productServiceStateRoot } from "./starvector-terminal-product-service.mjs";
 
 const workflow = await readFile(".github/workflows/starvector-terminal.yml", "utf8");
 const readiness = await readFile(".github/workflows/starvector-terminal-readiness.yml", "utf8");
@@ -75,6 +76,94 @@ test("product service streams copied closure identity and preserves portable ord
   await assert.rejects(() => copyRegularTree(source, path.join(root, "rejected")), /weights closure rejects symlink/);
   await symlink(path.join(destination, "z.bin"), path.join(destination, "link"));
   await assert.rejects(() => closureTreeHash(destination), /weights closure copy contains symlink/);
+});
+
+test("product service start CLI exits while durable-log services remain alive and can later be stopped", { timeout: 20_000 }, async (context) => {
+  if (process.platform === "win32") { context.skip("the executable fixture is a POSIX script; Windows lifecycle uses the same file-backed stdio contract"); return; }
+  const sandbox = await mkdtemp(path.join(tmpdir(), "starvector-service-detach-"));
+  const root = path.join(sandbox, "repo"), output = path.join(sandbox, "tuple"), weightsRoot = path.join(sandbox, "weights"), shimRoot = path.join(sandbox, "bin");
+  const serviceScript = path.resolve("scripts/starvector-terminal-product-service.mjs");
+  let record;
+  try {
+    await mkdir(root); await mkdir(shimRoot); await mkdir(path.join(weightsRoot, "app"), { recursive: true }); await mkdir(path.join(weightsRoot, "hf"), { recursive: true });
+    await writeFile(path.join(root, ".gitignore"), "target/\n");
+    await writeFile(path.join(root, "Cargo.toml"), `[dependencies]\ncandle-core = { git = "https://github.com/SceneWorks/inference", rev = "${pin}" }\n`);
+    await execFile("git", ["init", "-q", root]);
+    await execFile("git", ["-C", root, "add", "."]);
+    await execFile("git", ["-C", root, "-c", "user.name=SceneWorks Test", "-c", "user.email=test@sceneworks.invalid", "commit", "-qm", "fixture"]);
+
+    const cargo = path.join(shimRoot, "cargo");
+    await writeFile(cargo, "#!/bin/sh\nexit 0\n"); await chmod(cargo, 0o755);
+    const binary = path.join(root, "target", "debug", "sceneworks-rust-api");
+    await mkdir(path.dirname(binary), { recursive: true });
+    await writeFile(binary, `#!/usr/bin/env node
+const http = require("node:http");
+const worker = process.env.SCENEWORKS_WORKER_ONLY === "1";
+let server;
+const timer = setInterval(() => {
+  process.stdout.write((worker ? "worker" : "api") + " stdout " + process.pid + "\\n");
+  process.stderr.write((worker ? "worker" : "api") + " stderr " + process.pid + "\\n");
+}, 25);
+if (!worker) {
+  server = http.createServer((_request, response) => {
+    response.writeHead(200, { "content-type": "application/json" });
+    response.end(JSON.stringify({ status: "ok", readiness: { status: "ready" } }));
+  });
+  server.listen(Number(process.env.SCENEWORKS_API_PORT), "127.0.0.1");
+}
+const stop = () => {
+  clearInterval(timer);
+  if (server) server.close(() => process.exit(0)); else process.exit(0);
+};
+process.on("SIGTERM", stop);
+process.on("SIGINT", stop);
+`);
+    await chmod(binary, 0o755);
+
+    await writeFile(path.join(weightsRoot, "app", "receipt.json"), "receipt");
+    await writeFile(path.join(weightsRoot, "hf", "weights.bin"), "weights");
+    const manifest = {
+      terminal_service_closure: {
+        app_data_relative_path: "app",
+        app_data_sha256: await closureTreeHash(path.join(weightsRoot, "app")),
+        hf_home_relative_path: "hf",
+        hf_home_sha256: await closureTreeHash(path.join(weightsRoot, "hf")),
+      },
+      models: {
+        "starvector-1b": { relative_path: "models/1b", revision: "1".repeat(40), inventory_sha256: "a".repeat(64) },
+        "starvector-8b": { relative_path: "models/8b", revision: "2".repeat(40), inventory_sha256: "b".repeat(64) },
+      },
+    };
+    await writeFile(path.join(weightsRoot, "starvector-terminal-weights-v1.json"), JSON.stringify(manifest));
+
+    const reservation = createServer();
+    await new Promise((resolve, reject) => { reservation.once("error", reject); reservation.listen(0, "127.0.0.1", resolve); });
+    const port = reservation.address().port;
+    await new Promise((resolve, reject) => reservation.close((error) => error ? reject(error) : resolve()));
+    const cliEnv = { ...process.env, PATH: `${shimRoot}${path.delimiter}${process.env.PATH ?? ""}` };
+    await execFile(process.execPath, [serviceScript, "start", root, output, pin, `http://127.0.0.1:${port}`, weightsRoot], { env: cliEnv, timeout: 8_000 });
+
+    record = JSON.parse(await readFile(path.join(output, "product-service-provenance.json"), "utf8"));
+    for (const pid of [record.api_pid, record.worker_pid]) assert.doesNotThrow(() => process.kill(pid, 0));
+    const logPaths = productServiceLogPaths(output);
+    assert.deepEqual(record.logs, Object.fromEntries(Object.entries(logPaths).map(([name, file]) => [name, path.relative(output, file)])));
+    const initialSizes = await Promise.all(Object.values(logPaths).map(async (file) => (await stat(file)).size));
+    await new Promise((resolve) => setTimeout(resolve, 150));
+    const laterSizes = await Promise.all(Object.values(logPaths).map(async (file) => (await stat(file)).size));
+    for (let index = 0; index < initialSizes.length; index += 1) assert.ok(laterSizes[index] > initialSizes[index], `service log ${index} stopped after the start CLI exited`);
+
+    await execFile(process.execPath, [serviceScript, "stop", output], { env: cliEnv, timeout: 8_000 });
+    const stopped = JSON.parse(await readFile(path.join(output, "product-service-stopped.json"), "utf8"));
+    assert.equal(stopped.status, "stopped");
+    assert.equal(stopped.logs_sha256, await productServiceLogsSha256(output));
+    assert.equal((await readFile(path.join(output, "product-service-logs.sha256"), "utf8")).trim(), stopped.logs_sha256);
+    for (const pid of [record.api_pid, record.worker_pid]) assert.throws(() => process.kill(pid, 0), { code: "ESRCH" });
+    assert.equal(await lstat(productServiceStateRoot(output)).catch((error) => error.code === "ENOENT" ? null : Promise.reject(error)), null);
+    record = null;
+  } finally {
+    if (record) await execFile(process.execPath, [serviceScript, "stop", output], { timeout: 8_000 }).catch(() => {});
+    await rm(sandbox, { recursive: true, force: true });
+  }
 });
 
 test("readiness workflow is an identity-only dispatch on both campaign hosts", () => {
