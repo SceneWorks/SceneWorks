@@ -12,6 +12,7 @@ import { stripJsoncComments } from "./lib/jsonc.mjs";
 
 export const PRODUCTION_CLOSURE_PATHS = Object.freeze([
   ".github/workflows/starvector-terminal.yml",
+  ".github/workflows/starvector-terminal-provision.yml",
   "Cargo.lock",
   "Cargo.toml",
   "apps/rust-api/src/main.rs",
@@ -30,7 +31,12 @@ export const PRODUCTION_CLOSURE_PATHS = Object.freeze([
   "packages/schemas/model-manifest.schema.json",
   "release/starvector-terminal-campaign-v1.json",
   "release/starvector-terminal-metrics-lock-v1.json",
+  "release/starvector-terminal-recovery-v1.json",
+  "release/starvector-terminal-upstream-lock-v1.json",
   "scripts/lib/file-sha256.mjs",
+  "scripts/lib/starvector-terminal-attempt.mjs",
+  "scripts/lib/starvector-terminal-gpu.mjs",
+  "scripts/lib/starvector-terminal-upstream-reference.mjs",
   "scripts/lib/starvector-terminal-pin-paths.mjs",
   "scripts/lib/terminal-tree-identity.mjs",
   "scripts/starvector-production-closure.mjs",
@@ -42,6 +48,10 @@ export const PRODUCTION_CLOSURE_PATHS = Object.freeze([
   "scripts/starvector-terminal-producer.mjs",
   "scripts/starvector-terminal-product-service.mjs",
   "scripts/starvector-terminal-route.mjs",
+  "scripts/starvector-terminal-recovery.mjs",
+  "scripts/starvector-terminal-provision.mjs",
+  "scripts/starvector-terminal-upstream.mjs",
+  "scripts/starvector-terminal-upstream-oracle.py",
 ]);
 
 const SHA256 = /^[0-9a-f]{64}$/;
