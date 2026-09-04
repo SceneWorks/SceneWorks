@@ -8,14 +8,17 @@ import { Readable } from "node:stream";
 import test from "node:test";
 import { promisify } from "node:util";
 import { fileSha256 } from "./lib/file-sha256.mjs";
+import { terminalPinPaths } from "./lib/starvector-terminal-pin-paths.mjs";
 import { terminalTreeEntry, terminalTreeSha256 } from "./lib/terminal-tree-identity.mjs";
 import { removeStarVectorMacMetricsTree, selectStarVectorMacPython, validateStarVectorMacVenv } from "./select-starvector-macos-python.mjs";
-import { assemblePreflight, assembleWeights, downloadExact, installCheckout, tree } from "./starvector-terminal-provision.mjs";
+import { assemblePreflight, assembleWeights, downloadExact, installCheckout, installPinnedCheckout, tree, validatePreflightTransport, validateSealedPreflightIndex } from "./starvector-terminal-provision.mjs";
 import { validateTerminalServiceClosure } from "./starvector-terminal-readiness.mjs";
 
 const execFile = promisify(execFileCallback);
 const digest = (value) => createHash("sha256").update(value).digest("hex");
 const workflow = await readFile(".github/workflows/starvector-terminal-provision.yml", "utf8");
+const readinessWorkflow = await readFile(".github/workflows/starvector-terminal-readiness.yml", "utf8");
+const campaignWorkflow = await readFile(".github/workflows/starvector-terminal.yml", "utf8");
 const windowsWorkflow = await readFile(".github/workflows/desktop-windows.yml", "utf8");
 const windowsWheelWorkflow = await readFile(".github/workflows/starvector-metrics-windows.yml", "utf8");
 const macosPythonSelector = await readFile("scripts/select-starvector-macos-python.mjs", "utf8");
@@ -24,6 +27,7 @@ const windowsPythonProbeTest = await readFile("scripts/select-starvector-windows
 const windowsPythonProvision = await readFile("scripts/provision-starvector-windows-python.ps1", "utf8");
 const windowsPythonProvisionTest = await readFile("scripts/provision-starvector-windows-python.test.ps1", "utf8");
 const windowsWheelVerification = await readFile("scripts/verify-starvector-windows-metric-wheels.ps1", "utf8");
+const terminalPlan = JSON.parse(await readFile("release/starvector-terminal-campaign-v1.json", "utf8"));
 
 test("file and tree identities stream exact bytes with bounded reads and portable ordering", async () => {
   const chunks = [Buffer.from("large-file-"), Buffer.from("identity")];
@@ -70,6 +74,12 @@ test("provision workflow is dispatch-only and never runs a model, service, campa
   assert.match(workflow, /runs-on: \[self-hosted, Windows, X64, cuda, real-weights\]/);
   assert.match(workflow, /inference_revision:[\s\S]*required: true/);
   assert.match(workflow, /inference_preflight_run_id:[\s\S]*required: true/);
+  assert.match(workflow, /default: "33851645747"/);
+  assert.match(workflow, /default: starvector-terminal-preflight-c6d6a4dbd61ab09c26ff5526632cae2cefea60ed-33851645747-1/);
+  assert.equal((workflow.match(/starvector-terminal-pin-paths\.mjs/g) ?? []).length, 2);
+  assert.equal((workflow.match(/preflight-transport release[\\/]starvector-terminal-campaign-v1\.json/g) ?? []).length, 2);
+  assert.equal((workflow.match(/artifact-ids: \$\{\{ steps\.preflight-transport\.outputs\.artifact-id \}\}/g) ?? []).length, 2);
+  assert.doesNotMatch(workflow, /STARVECTOR_TERMINAL_ROOT[\\/]inference|STARVECTOR_TERMINAL_ROOT[\\/]inference-preflight|STARVECTOR_TERMINAL_ROOT[\\/]corpora/);
   assert.match(workflow, /\/Users\/Shared\/SceneWorks\/starvector-terminal/);
   assert.ok(workflow.includes("D:\\sceneworks-terminal"));
   assert.equal((workflow.match(/path: sceneworks/g) ?? []).length, 2);
@@ -80,6 +90,86 @@ test("provision workflow is dispatch-only and never runs a model, service, campa
   assert.equal((workflow.match(/Upload .* provisioning readiness even on failure/g) ?? []).length, 2);
   assert.match(workflow, /STARVECTOR_PROMPT_PROVIDER: candle_flux/);
   assert.doesNotMatch(workflow, /STARVECTOR_PROMPT_PROVIDER: flux_diffusers/);
+});
+
+test("provision transport accepts only the sealed c6d native-preflight run and artifact", async () => {
+  const accepted = await validatePreflightTransport("release/starvector-terminal-campaign-v1.json", {
+    revision: "c6d6a4dbd61ab09c26ff5526632cae2cefea60ed",
+    workflowRunId: "33851645747",
+    artifactName: "starvector-terminal-preflight-c6d6a4dbd61ab09c26ff5526632cae2cefea60ed-33851645747-1",
+  });
+  assert.deepEqual(accepted, {
+    revision: "c6d6a4dbd61ab09c26ff5526632cae2cefea60ed",
+    workflow_run_id: "33851645747",
+    artifact_name: "starvector-terminal-preflight-c6d6a4dbd61ab09c26ff5526632cae2cefea60ed-33851645747-1",
+    workflow_run_attempt: 1,
+    artifact_id: 9928624696,
+    artifact_digest: "sha256:4df39fc45d36ef11f968aa82c48eda6292f48c54086a4beee4ff3f6e8ba48226",
+  });
+  for (const [label, mutation] of [
+    ["revision", { revision: "0".repeat(40) }],
+    ["run", { workflowRunId: "33851645748" }],
+    ["artifact name", { artifactName: "starvector-terminal-preflight" }],
+  ]) {
+    await assert.rejects(() => validatePreflightTransport("release/starvector-terminal-campaign-v1.json", {
+      revision: accepted.revision,
+      workflowRunId: accepted.workflow_run_id,
+      artifactName: accepted.artifact_name,
+      ...mutation,
+    }), /sealed terminal plan/, label);
+  }
+});
+
+test("downloaded preflight index must exactly match the checked-in native-preflight identity", () => {
+  const expected = terminalPlan.inference_preflight;
+  const observed = {
+    workflow_run_id: expected.workflow_run_id,
+    workflow_run_attempt: expected.workflow_run_attempt,
+    head_sha: expected.head_sha,
+    inventory_artifacts: structuredClone(expected.inventory_artifacts),
+    hook_logs: structuredClone(expected.hook_logs),
+  };
+  assert.deepEqual(validateSealedPreflightIndex(structuredClone(observed), expected), observed);
+  for (const [label, mutation] of [
+    ["run", (value) => { value.workflow_run_id = "33851645748"; }],
+    ["attempt", (value) => { value.workflow_run_attempt = 2; }],
+    ["head", (value) => { value.head_sha = "0".repeat(40); }],
+    ["inventory identity", (value) => { value.inventory_artifacts[0].sha256 = "0".repeat(64); }],
+    ["hook identity", (value) => { value.hook_logs[0].sha256 = "0".repeat(64); }],
+  ]) {
+    const changed = structuredClone(observed);
+    mutation(changed);
+    assert.throws(() => validateSealedPreflightIndex(changed, expected), /sealed terminal plan provenance/, label);
+  }
+});
+
+test("provision, readiness, and campaign share one pin-root formula with no legacy fallback", () => {
+  for (const [label, source, expectedCalls] of [
+    ["provision", workflow, 2],
+    ["readiness", readinessWorkflow, 2],
+    ["campaign", campaignWorkflow, 5],
+  ]) {
+    assert.equal((source.match(/scripts[\\/]lib[\\/]starvector-terminal-pin-paths\.mjs/g) ?? []).length, expectedCalls, `${label} helper calls`);
+    assert.doesNotMatch(source, /starvector-terminal[\\/]inference(?:[\\/]|\s|$)/, `${label} legacy inference fallback`);
+    assert.doesNotMatch(source, /starvector-terminal[\\/]inference-preflight(?:[\\/]|\s|$)/, `${label} legacy preflight fallback`);
+    assert.doesNotMatch(source, /starvector-terminal[\\/]corpora[\\/]starvector-terminal-v1/, `${label} legacy corpus fallback`);
+  }
+  for (const shared of ["weights", "metrics"]) assert.match(workflow + readinessWorkflow + campaignWorkflow, new RegExp(`starvector-terminal[\\\\/]${shared}`));
+  assert.match(workflow, /Join-Path \$env:STARVECTOR_TERMINAL_ROOT 'python\\cpython-3\.12\.10-x64-nuget'/);
+  assert.match(workflow, /Join-Path \$env:STARVECTOR_TERMINAL_ROOT '\.locks\\cpython-3\.12\.10-x64-nuget\.lock'/);
+  assert.match(campaignWorkflow, /SceneWorks[\\\\/]terminal-leases|ProgramData[\\\\/]SceneWorks[\\\\/]terminal-leases/);
+});
+
+function assertWindowsPinResolutionFailsBeforeEnvironmentPublication(source, expectedSteps) {
+  const guarded = /\$pinEnvironment = node scripts\\lib\\starvector-terminal-pin-paths\.mjs[^\n]*\n\s+if \(\$LASTEXITCODE -ne 0\) \{ throw 'immutable pin-keyed terminal path resolution failed' \}\n\s+\$pinEnvironment \| Out-File -FilePath \$env:GITHUB_ENV -Encoding utf8 -Append/g;
+  assert.equal((source.match(guarded) ?? []).length, expectedSteps);
+}
+
+test("Windows pin and transport validation fail before publishing outputs", () => {
+  assertWindowsPinResolutionFailsBeforeEnvironmentPublication(workflow, 1);
+  assertWindowsPinResolutionFailsBeforeEnvironmentPublication(readinessWorkflow, 1);
+  assertWindowsPinResolutionFailsBeforeEnvironmentPublication(campaignWorkflow, 2);
+  assert.match(workflow, /\$artifactId = node scripts\\starvector-terminal-provision\.mjs preflight-transport[^\n]*\n\s+if \(\$LASTEXITCODE -ne 0\) \{ throw 'sealed inference preflight transport validation failed' \}\n\s+"artifact-id=\$artifactId" \| Out-File -FilePath \$env:GITHUB_OUTPUT/);
 });
 
 function assertWindowsCorpusCompilesWithoutInheritedRustcWrapper(workflowSource) {
@@ -658,4 +748,17 @@ test("inference checkout publication binds an exact clean detached revision", as
   const revision = (await execFile("git", ["-C", source, "rev-parse", "HEAD"])).stdout.trim();
   assert.equal(await installCheckout(source, destination, revision), revision); assert.equal(await installCheckout(source, destination, revision), revision);
   await writeFile(path.join(destination, "drift"), "drift"); await assert.rejects(() => installCheckout(source, destination, revision), /not exact and clean/);
+});
+
+test("pinned inference checkout publication is same-pin idempotent and derives the immutable destination", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "starvector-provision-pinned-checkout-")), source = path.join(root, "source"), hostRoot = path.join(root, "host");
+  await mkdir(path.join(source, "release"), { recursive: true }); await mkdir(path.join(source, "scripts", "release"), { recursive: true });
+  for (const relative of ["release/starvector-terminal-receipt-v1.schema.json", "release/starvector-terminal-corpus-v1.json", "scripts/release/starvector_terminal_evidence.mjs"]) await writeFile(path.join(source, relative), relative);
+  await execFile("git", ["init", source]); await execFile("git", ["-C", source, "add", "."]); await execFile("git", ["-C", source, "-c", "user.name=fixture", "-c", "user.email=fixture@example.com", "commit", "-m", "fixture"]);
+  const revision = (await execFile("git", ["-C", source, "rev-parse", "HEAD"])).stdout.trim();
+  const expected = terminalPinPaths(hostRoot, revision).inferenceRoot;
+  assert.equal(await installPinnedCheckout(source, hostRoot, revision), revision);
+  assert.equal(await installPinnedCheckout(source, hostRoot, revision), revision);
+  assert.equal((await execFile("git", ["-C", expected, "rev-parse", "HEAD"])).stdout.trim(), revision);
+  assert.equal(await lstat(path.join(hostRoot, "inference")).catch((error) => error.code === "ENOENT" ? null : Promise.reject(error)), null);
 });

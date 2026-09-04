@@ -6,15 +6,17 @@ on:
       inference_revision:
         description: Exact merged inference commit that produced the preflight bundle.
         required: true
+        default: c6d6a4dbd61ab09c26ff5526632cae2cefea60ed
         type: string
       inference_preflight_run_id:
         description: Completed SceneWorks/inference workflow run containing the full preflight bundle.
         required: true
+        default: "33851645747"
         type: string
       inference_preflight_artifact:
-        description: Artifact name containing the two inventories, four hooks, and preflight index.
+        description: Exact sealed artifact name containing the two inventories, four hooks, and preflight index.
         required: true
-        default: starvector-terminal-preflight
+        default: starvector-terminal-preflight-c6d6a4dbd61ab09c26ff5526632cae2cefea60ed-33851645747-1
         type: string
       mac_app_data_source:
         description: Absolute macOS source for existing SceneWorks-produced install receipts/app data.
@@ -80,7 +82,6 @@ jobs:
         working-directory: ${{ github.workspace }}/sceneworks
     env:
       STARVECTOR_TERMINAL_ROOT: /Users/Shared/SceneWorks/starvector-terminal
-      STARVECTOR_TERMINAL_INFERENCE_PREFLIGHT: /Users/Shared/SceneWorks/starvector-terminal/inference-preflight/starvector-terminal-preflight.json
       STARVECTOR_INFERENCE_REVISION: ${{ inputs.inference_revision }}
       STARVECTOR_APP_DATA_SOURCE: ${{ inputs.mac_app_data_source }}
       STARVECTOR_HF_HOME_SOURCE: ${{ inputs.mac_hf_home_source }}
@@ -88,6 +89,13 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           path: sceneworks
+      - name: Resolve immutable pin-keyed terminal inputs
+        run: node scripts/lib/starvector-terminal-pin-paths.mjs "$STARVECTOR_TERMINAL_ROOT" "$STARVECTOR_INFERENCE_REVISION" >> "$GITHUB_ENV"
+      - name: Validate sealed inference preflight transport
+        id: preflight-transport
+        run: |
+          artifact_id="$(node scripts/starvector-terminal-provision.mjs preflight-transport release/starvector-terminal-campaign-v1.json "$STARVECTOR_INFERENCE_REVISION" "${{ inputs.inference_preflight_run_id }}" "${{ inputs.inference_preflight_artifact }}")"
+          printf 'artifact-id=%s\n' "$artifact_id" >> "$GITHUB_OUTPUT"
       - name: Check out the exact inference source input
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -101,12 +109,13 @@ jobs:
           repository: SceneWorks/inference
           run-id: ${{ inputs.inference_preflight_run_id }}
           github-token: ${{ secrets.INFERENCE_READ_TOKEN }}
-          name: ${{ inputs.inference_preflight_artifact }}
+          artifact-ids: ${{ steps.preflight-transport.outputs.artifact-id }}
+          merge-multiple: true
           path: ${{ runner.temp }}/starvector-preflight
       - name: Publish exact inference and preflight inputs
         run: |
-          node scripts/starvector-terminal-provision.mjs checkout "$GITHUB_WORKSPACE/inference-source" "$STARVECTOR_TERMINAL_ROOT/inference" "$STARVECTOR_INFERENCE_REVISION"
-          node scripts/starvector-terminal-provision.mjs preflight "$RUNNER_TEMP/starvector-preflight" "$STARVECTOR_TERMINAL_ROOT/inference-preflight" "$STARVECTOR_INFERENCE_REVISION"
+          node scripts/starvector-terminal-provision.mjs checkout "$GITHUB_WORKSPACE/inference-source" "$STARVECTOR_TERMINAL_ROOT" "$STARVECTOR_INFERENCE_REVISION"
+          node scripts/starvector-terminal-provision.mjs preflight "$RUNNER_TEMP/starvector-preflight" "$STARVECTOR_TERMINAL_ROOT" release/starvector-terminal-campaign-v1.json
       - name: Assemble durable model and product-service closure
         run: |
           node scripts/starvector-terminal-provision.mjs weights "$STARVECTOR_TERMINAL_ROOT" "$STARVECTOR_APP_DATA_SOURCE" "$STARVECTOR_HF_HOME_SOURCE" "$STARVECTOR_PROMPT_PROVIDER" "$STARVECTOR_PROMPT_MODEL" "$STARVECTOR_PROMPT_REVISION"
@@ -136,12 +145,12 @@ jobs:
           node scripts/starvector-terminal-provision.mjs download https://huggingface.co/datasets/starvector/svg-icons-simple/resolve/e1918a27ba6649e856e5db0710d8a6c7046762c1/data/test-00000-of-00001.parquet "$RUNNER_TEMP/starvector-parquet/source-1.parquet" 02cd88a8b8f5234975024a948c80a19f7a83092247685b1bef63c3db0b957227
           node scripts/starvector-terminal-provision.mjs download https://huggingface.co/datasets/starvector/svg-emoji-simple/resolve/fa75b3617872ae57e6f3cb450aee65dbccbd69e0/data/test-00000-of-00001.parquet "$RUNNER_TEMP/starvector-parquet/source-2.parquet" be192dfce16b45605df62eebffeb00db2f0b80e6f4919e10cea68c311af97807
           node scripts/starvector-terminal-provision.mjs download https://huggingface.co/datasets/starvector/svg-fonts-simple/resolve/453c739ea13ad2685127f721c333f14d99485299/data/test-00000-of-00001.parquet "$RUNNER_TEMP/starvector-parquet/source-3.parquet" 86db32ae45896a18b938baba088b69d797ae2d5f6d3d79742753a0e2ea89d86d
-          if [ ! -e "$STARVECTOR_TERMINAL_ROOT/corpora/starvector-terminal-v1" ]; then
-            cargo run --release --locked -p sceneworks-worker --bin starvector_terminal_corpus -- "$STARVECTOR_TERMINAL_ROOT/inference/release/starvector-terminal-corpus-v1.json" "$RUNNER_TEMP/starvector-parquet" "$STARVECTOR_TERMINAL_ROOT/corpora/starvector-terminal-v1" "$STARVECTOR_INFERENCE_REVISION" "$STARVECTOR_PROMPT_PROVIDER" "$STARVECTOR_PROMPT_MODEL" "$STARVECTOR_PROMPT_REVISION" "$(shasum -a 256 "$STARVECTOR_TERMINAL_ROOT/weights/inventories/prompt-raster-inventory-v1.json" | cut -d ' ' -f 1)"
+          if [ ! -e "$STARVECTOR_TERMINAL_CORPUS_ASSETS_ROOT" ]; then
+            cargo run --release --locked -p sceneworks-worker --bin starvector_terminal_corpus -- "$STARVECTOR_TERMINAL_INFERENCE_ROOT/release/starvector-terminal-corpus-v1.json" "$RUNNER_TEMP/starvector-parquet" "$STARVECTOR_TERMINAL_CORPUS_ASSETS_ROOT" "$STARVECTOR_INFERENCE_REVISION" "$STARVECTOR_PROMPT_PROVIDER" "$STARVECTOR_PROMPT_MODEL" "$STARVECTOR_PROMPT_REVISION" "$(shasum -a 256 "$STARVECTOR_TERMINAL_ROOT/weights/inventories/prompt-raster-inventory-v1.json" | cut -d ' ' -f 1)"
           fi
       - name: Read-only readiness validation
         if: ${{ always() }}
-        run: node scripts/starvector-terminal-readiness.mjs "$GITHUB_WORKSPACE/sceneworks" release/starvector-terminal-campaign-v1.json "$STARVECTOR_TERMINAL_ROOT/inference" "$STARVECTOR_TERMINAL_ROOT/weights" "$STARVECTOR_TERMINAL_ROOT/metrics" "$STARVECTOR_TERMINAL_ROOT/metrics/bin/python" "$STARVECTOR_TERMINAL_ROOT/corpora/starvector-terminal-v1" "$RUNNER_TEMP/starvector-terminal-provision/macos.json"
+        run: node scripts/starvector-terminal-readiness.mjs "$GITHUB_WORKSPACE/sceneworks" release/starvector-terminal-campaign-v1.json "$STARVECTOR_TERMINAL_INFERENCE_ROOT" "$STARVECTOR_TERMINAL_ROOT/weights" "$STARVECTOR_TERMINAL_ROOT/metrics" "$STARVECTOR_TERMINAL_ROOT/metrics/bin/python" "$STARVECTOR_TERMINAL_CORPUS_ASSETS_ROOT" "$STARVECTOR_INFERENCE_REVISION" "$RUNNER_TEMP/starvector-terminal-provision/macos.json"
       - name: Upload macOS provisioning readiness even on failure
         if: ${{ always() }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -158,7 +167,6 @@ jobs:
         working-directory: ${{ github.workspace }}\sceneworks
     env:
       STARVECTOR_TERMINAL_ROOT: D:\sceneworks-terminal
-      STARVECTOR_TERMINAL_INFERENCE_PREFLIGHT: D:\sceneworks-terminal\inference-preflight\starvector-terminal-preflight.json
       STARVECTOR_INFERENCE_REVISION: ${{ inputs.inference_revision }}
       STARVECTOR_APP_DATA_SOURCE: ${{ inputs.windows_app_data_source }}
       STARVECTOR_HF_HOME_SOURCE: ${{ inputs.windows_hf_home_source }}
@@ -166,6 +174,19 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           path: sceneworks
+      - name: Resolve immutable pin-keyed terminal inputs
+        shell: powershell
+        run: |
+          $pinEnvironment = node scripts\lib\starvector-terminal-pin-paths.mjs $env:STARVECTOR_TERMINAL_ROOT $env:STARVECTOR_INFERENCE_REVISION
+          if ($LASTEXITCODE -ne 0) { throw 'immutable pin-keyed terminal path resolution failed' }
+          $pinEnvironment | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+      - name: Validate sealed inference preflight transport
+        id: preflight-transport
+        shell: powershell
+        run: |
+          $artifactId = node scripts\starvector-terminal-provision.mjs preflight-transport release\starvector-terminal-campaign-v1.json $env:STARVECTOR_INFERENCE_REVISION "${{ inputs.inference_preflight_run_id }}" "${{ inputs.inference_preflight_artifact }}"
+          if ($LASTEXITCODE -ne 0) { throw 'sealed inference preflight transport validation failed' }
+          "artifact-id=$artifactId" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
       - name: Check out the exact inference source input
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -179,13 +200,14 @@ jobs:
           repository: SceneWorks/inference
           run-id: ${{ inputs.inference_preflight_run_id }}
           github-token: ${{ secrets.INFERENCE_READ_TOKEN }}
-          name: ${{ inputs.inference_preflight_artifact }}
+          artifact-ids: ${{ steps.preflight-transport.outputs.artifact-id }}
+          merge-multiple: true
           path: ${{ runner.temp }}\starvector-preflight
       - name: Publish exact inference, preflight, and model closure
         shell: powershell
         run: |
-          node scripts/starvector-terminal-provision.mjs checkout "$env:GITHUB_WORKSPACE\inference-source" "$env:STARVECTOR_TERMINAL_ROOT\inference" $env:STARVECTOR_INFERENCE_REVISION
-          node scripts/starvector-terminal-provision.mjs preflight "$env:RUNNER_TEMP\starvector-preflight" "$env:STARVECTOR_TERMINAL_ROOT\inference-preflight" $env:STARVECTOR_INFERENCE_REVISION
+          node scripts/starvector-terminal-provision.mjs checkout "$env:GITHUB_WORKSPACE\inference-source" $env:STARVECTOR_TERMINAL_ROOT $env:STARVECTOR_INFERENCE_REVISION
+          node scripts/starvector-terminal-provision.mjs preflight "$env:RUNNER_TEMP\starvector-preflight" $env:STARVECTOR_TERMINAL_ROOT release\starvector-terminal-campaign-v1.json
           node scripts/starvector-terminal-provision.mjs weights $env:STARVECTOR_TERMINAL_ROOT $env:STARVECTOR_APP_DATA_SOURCE $env:STARVECTOR_HF_HOME_SOURCE $env:STARVECTOR_PROMPT_PROVIDER $env:STARVECTOR_PROMPT_MODEL $env:STARVECTOR_PROMPT_REVISION
       - name: Provision exact portable CPython 3.12.10 x64 and terminal metrics
         shell: powershell
@@ -236,17 +258,17 @@ jobs:
           node scripts/starvector-terminal-provision.mjs download https://huggingface.co/datasets/starvector/svg-icons-simple/resolve/e1918a27ba6649e856e5db0710d8a6c7046762c1/data/test-00000-of-00001.parquet "$env:RUNNER_TEMP\starvector-parquet\source-1.parquet" 02cd88a8b8f5234975024a948c80a19f7a83092247685b1bef63c3db0b957227
           node scripts/starvector-terminal-provision.mjs download https://huggingface.co/datasets/starvector/svg-emoji-simple/resolve/fa75b3617872ae57e6f3cb450aee65dbccbd69e0/data/test-00000-of-00001.parquet "$env:RUNNER_TEMP\starvector-parquet\source-2.parquet" be192dfce16b45605df62eebffeb00db2f0b80e6f4919e10cea68c311af97807
           node scripts/starvector-terminal-provision.mjs download https://huggingface.co/datasets/starvector/svg-fonts-simple/resolve/453c739ea13ad2685127f721c333f14d99485299/data/test-00000-of-00001.parquet "$env:RUNNER_TEMP\starvector-parquet\source-3.parquet" 86db32ae45896a18b938baba088b69d797ae2d5f6d3d79742753a0e2ea89d86d
-          if (-not (Test-Path "$env:STARVECTOR_TERMINAL_ROOT\corpora\starvector-terminal-v1")) {
+          if (-not (Test-Path $env:STARVECTOR_TERMINAL_CORPUS_ASSETS_ROOT)) {
             $inventory = (Get-FileHash -Algorithm SHA256 "$env:STARVECTOR_TERMINAL_ROOT\weights\inventories\prompt-raster-inventory-v1.json").Hash.ToLowerInvariant()
             # The persistent runner exports sccache through RUSTC_WRAPPER. Compile this
             # deterministic provisioning artifact directly so stale daemon state cannot abort it.
             Remove-Item Env:RUSTC_WRAPPER -ErrorAction SilentlyContinue
-            cargo run --release --locked -p sceneworks-worker --bin starvector_terminal_corpus -- "$env:STARVECTOR_TERMINAL_ROOT\inference\release\starvector-terminal-corpus-v1.json" "$env:RUNNER_TEMP\starvector-parquet" "$env:STARVECTOR_TERMINAL_ROOT\corpora\starvector-terminal-v1" $env:STARVECTOR_INFERENCE_REVISION $env:STARVECTOR_PROMPT_PROVIDER $env:STARVECTOR_PROMPT_MODEL $env:STARVECTOR_PROMPT_REVISION $inventory
+            cargo run --release --locked -p sceneworks-worker --bin starvector_terminal_corpus -- "$env:STARVECTOR_TERMINAL_INFERENCE_ROOT\release\starvector-terminal-corpus-v1.json" "$env:RUNNER_TEMP\starvector-parquet" $env:STARVECTOR_TERMINAL_CORPUS_ASSETS_ROOT $env:STARVECTOR_INFERENCE_REVISION $env:STARVECTOR_PROMPT_PROVIDER $env:STARVECTOR_PROMPT_MODEL $env:STARVECTOR_PROMPT_REVISION $inventory
           }
       - name: Read-only readiness validation
         if: ${{ always() }}
         shell: powershell
-        run: node scripts/starvector-terminal-readiness.mjs "$env:GITHUB_WORKSPACE\sceneworks" release/starvector-terminal-campaign-v1.json "$env:STARVECTOR_TERMINAL_ROOT\inference" "$env:STARVECTOR_TERMINAL_ROOT\weights" "$env:STARVECTOR_TERMINAL_ROOT\metrics" "$env:STARVECTOR_TERMINAL_ROOT\metrics\Scripts\python.exe" "$env:STARVECTOR_TERMINAL_ROOT\corpora\starvector-terminal-v1" "$env:RUNNER_TEMP\starvector-terminal-provision\windows.json"
+        run: node scripts/starvector-terminal-readiness.mjs "$env:GITHUB_WORKSPACE\sceneworks" release/starvector-terminal-campaign-v1.json $env:STARVECTOR_TERMINAL_INFERENCE_ROOT "$env:STARVECTOR_TERMINAL_ROOT\weights" "$env:STARVECTOR_TERMINAL_ROOT\metrics" "$env:STARVECTOR_TERMINAL_ROOT\metrics\Scripts\python.exe" $env:STARVECTOR_TERMINAL_CORPUS_ASSETS_ROOT $env:STARVECTOR_INFERENCE_REVISION "$env:RUNNER_TEMP\starvector-terminal-provision\windows.json"
       - name: Upload Windows provisioning readiness even on failure
         if: ${{ always() }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1

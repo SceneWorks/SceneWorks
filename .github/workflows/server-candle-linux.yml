@@ -31,15 +31,17 @@ on:
       inference_revision:
         description: Exact merged inference commit for terminal provisioning.
         required: false
+        default: c6d6a4dbd61ab09c26ff5526632cae2cefea60ed
         type: string
       inference_preflight_run_id:
         description: Exact inference preflight workflow run id.
         required: false
+        default: "33851645747"
         type: string
       inference_preflight_artifact:
         description: Complete inference preflight artifact name.
         required: false
-        default: starvector-terminal-preflight
+        default: starvector-terminal-preflight-c6d6a4dbd61ab09c26ff5526632cae2cefea60ed-33851645747-1
         type: string
       mac_app_data_source:
         description: Absolute macOS source-produced app-data root.
@@ -60,6 +62,7 @@ on:
       permanent_pin:
         description: Exact permanent inference pin for the one terminal campaign.
         required: false
+        default: c6d6a4dbd61ab09c26ff5526632cae2cefea60ed
         type: string
       campaign_run_id:
         description: Unique terminal campaign identity.
@@ -187,6 +190,8 @@ jobs:
   starvector-readiness:
     if: ${{ inputs.starvector_terminal_operation == 'readiness' }}
     uses: ./.github/workflows/starvector-terminal-readiness.yml
+    with:
+      permanent_pin: ${{ inputs.permanent_pin }}
     secrets: inherit
 
   starvector-campaign:

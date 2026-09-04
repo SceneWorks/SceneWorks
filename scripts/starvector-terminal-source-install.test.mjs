@@ -117,7 +117,7 @@ test("Windows terminal workflows use the in-box PowerShell host", async () => {
     "",
   ].map((suffix) => readFile(new URL(`../.github/workflows/starvector-terminal${suffix ? `-${suffix}` : ""}.yml`, import.meta.url), "utf8")));
   for (const workflow of workflows) assert.doesNotMatch(workflow, /shell: pwsh/);
-  assert.equal(workflows.reduce((count, workflow) => count + (workflow.match(/shell: powershell/g) ?? []).length, 0), 11);
+  assert.equal(workflows.reduce((count, workflow) => count + (workflow.match(/shell: powershell/g) ?? []).length, 0), 16);
 });
 
 test("existing default-branch workflow bridges every pre-merge terminal operation", async () => {
@@ -130,4 +130,5 @@ test("existing default-branch workflow bridges every pre-merge terminal operatio
     assert.match(bridge, new RegExp(`uses: \\.\\/.github/workflows/starvector-terminal${suffix}\\.yml`));
   }
   assert.match(bridge, /options: \[standard, source, provision, readiness, campaign\]/);
+  assert.match(bridge, /starvector-readiness:[\s\S]*?uses: \.\/.github\/workflows\/starvector-terminal-readiness\.yml[\s\S]*?with:[\s\S]*?permanent_pin: \$\{\{ inputs\.permanent_pin \}\}/);
 });

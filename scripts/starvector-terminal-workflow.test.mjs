@@ -14,7 +14,7 @@ import { closureTreeHash, copyRegularTree, productServiceActiveStatePath, produc
 const workflow = await readFile(".github/workflows/starvector-terminal.yml", "utf8");
 const readiness = await readFile(".github/workflows/starvector-terminal-readiness.yml", "utf8");
 const hash = (value) => createHash("sha256").update(value).digest("hex");
-const pin = "b2d9e0917499517cf8c1518e0d360cac8693b0c0";
+const pin = "c6d6a4dbd61ab09c26ff5526632cae2cefea60ed";
 const execFile = promisify(execFileCallback);
 
 async function availableLoopbackPort() {
@@ -406,11 +406,18 @@ test("readiness workflow is an identity-only dispatch on both campaign hosts", (
   assert.match(readiness, /runs-on: \[self-hosted, Windows, X64, cuda, real-weights\]/);
   assert.equal((readiness.match(/starvector-terminal-readiness\.mjs/g) ?? []).length, 2);
   assert.equal((readiness.match(/if: \$\{\{ always\(\) \}\}/g) ?? []).length, 2);
-  assert.match(readiness, /STARVECTOR_TERMINAL_INFERENCE_ROOT: \/Users\/Shared\/SceneWorks\/starvector-terminal\/inference/);
-  assert.match(workflow, /STARVECTOR_TERMINAL_INFERENCE_ROOT: \/Users\/Shared\/SceneWorks\/starvector-terminal\/inference/);
+  assert.match(readiness, /permanent_pin:[\s\S]*required: true/);
+  assert.equal((readiness.match(/starvector-terminal-pin-paths\.mjs/g) ?? []).length, 2);
+  assert.equal((workflow.match(/starvector-terminal-pin-paths\.mjs/g) ?? []).length, 5);
+  assert.equal((readiness.match(/\$\{\{ inputs\.permanent_pin \}\}/g) ?? []).length, 4);
+  assert.equal((workflow.match(/\$\{\{ inputs\.permanent_pin \}\}/g) ?? []).length >= 15, true);
+  assert.doesNotMatch(`${workflow}\n${readiness}`, /starvector-terminal[\\/]inference(?:[\\/]|\s|$)/);
+  assert.doesNotMatch(`${workflow}\n${readiness}`, /starvector-terminal[\\/]inference-preflight(?:[\\/]|\s|$)/);
+  assert.doesNotMatch(`${workflow}\n${readiness}`, /starvector-terminal[\\/]corpora[\\/]starvector-terminal-v1/);
   assert.doesNotMatch(`${workflow}\n${readiness}`, /\/opt\/sceneworks-terminal/);
-  assert.match(readiness, /STARVECTOR_TERMINAL_INFERENCE_PREFLIGHT: D:\\\\sceneworks-terminal\\\\inference-preflight\\\\starvector-terminal-preflight\.json/);
-  assert.doesNotMatch(readiness, /campaign_run_id|permanent_pin|concurrency:/);
+  assert.match(readiness, /STARVECTOR_TERMINAL_WEIGHTS_ROOT: D:\\\\sceneworks-terminal\\\\weights/);
+  assert.match(readiness, /STARVECTOR_TERMINAL_METRICS_ROOT: D:\\\\sceneworks-terminal\\\\metrics/);
+  assert.doesNotMatch(readiness, /campaign_run_id|concurrency:/);
 });
 
 test("readiness workflow cannot start services, claim leases, or execute models", () => {
@@ -421,7 +428,7 @@ test("readiness workflow cannot start services, claim leases, or execute models"
 
 test("readiness CLI writes a structured failure report before returning nonzero", async () => {
   const root = await mkdtemp(path.join(tmpdir(), "starvector-readiness-report-")), output = path.join(root, "nested", "report.json");
-  await assert.rejects(() => execFile(process.execPath, ["scripts/starvector-terminal-readiness.mjs", root, path.join(root, "missing-plan.json"), root, root, root, process.execPath, root, output]));
+  await assert.rejects(() => execFile(process.execPath, ["scripts/starvector-terminal-readiness.mjs", root, path.join(root, "missing-plan.json"), root, root, root, process.execPath, root, "0".repeat(40), output]));
   const report = JSON.parse(await readFile(output, "utf8"));
   assert.equal(report.schema_version, 1); assert.equal(report.kind, "starvector_terminal_readiness"); assert.equal(report.status, "failed"); assert.match(report.error, /ENOENT/);
 });

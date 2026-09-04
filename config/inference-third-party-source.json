@@ -1,7 +1,7 @@
 {
-  "_comment": "Exact audit of production include_str!/include_bytes! sites and known hand-ports in inference revision b2d9e091. The digest is checked by check-license-coverage.mjs; source changes require this audit inventory to be refreshed. Tests/fixtures are outside this production inventory. The reviewed pin advance preserves the cross-platform StarVector inventory-order, 2 MiB SVG contract, image-dtype, conditioning-dtype, Candle GPTBigCode multi-query-attention tensor-axis, and singleton token-selection repairs, and preserves the literal SVG root through cumulative Candle StarVector-1B continuation decode while retaining the shared strict SVG boundary. The exact scanner records 667 provenance candidates and 97 production-Rust crate prefixes, unchanged from the prior audit; no candidate path or disposition moved. Current report-only licensing findings must be read from the checker output; this summary does not freeze their counts.",
-  "inferenceRevision": "b2d9e0917499517cf8c1518e0d360cac8693b0c0",
-  "auditDigest": "06b65290ae130fb32980f109c6002a8abcbc3e3cd82c0e904a682e72e46c134b",
+  "_comment": "Exact audit of production include_str!/include_bytes! sites and known hand-ports in inference revision c6d6a4db. The digest is checked by check-license-coverage.mjs; source changes require this audit inventory to be refreshed. Tests/fixtures are outside this production inventory. The reviewed pin advance preserves the cross-platform StarVector inventory-order, 2 MiB SVG contract, image-dtype, conditioning-dtype, Candle GPTBigCode multi-query-attention tensor-axis, singleton token-selection repairs, literal SVG root through cumulative Candle StarVector-1B continuation decode, and shared strict SVG boundary. The exact scanner records 683 provenance candidates and 97 production-Rust crate prefixes. New memory-strategy provenance rows remain covered by their existing model-family areas; the previously uncovered Candle and MLX MiniMax-H3 provider crates are now explicitly classified against the already-shipped MiniMax-H3 terms, and the workspace-only root is explicitly classified as first-party composition metadata. Current report-only licensing findings must be read from the checker output; this summary does not freeze their counts.",
+  "inferenceRevision": "c6d6a4dbd61ab09c26ff5526632cae2cefea60ed",
+  "auditDigest": "6ff13db3b9812b0ed487317cff8e7da0995a4dc689f8f18225ac19ba771079bb",
   "artifacts": [
     {
       "id": "cmudict",
@@ -17,12 +17,12 @@
   "provenanceScan": {
     "scanner": "scripts/scan-inference-provenance.mjs",
     "candidateList": "config/inference-provenance-candidates.tsv",
-    "revision": "b2d9e0917499517cf8c1518e0d360cac8693b0c0",
+    "revision": "c6d6a4dbd61ab09c26ff5526632cae2cefea60ed",
     "pathFilter": "production .rs; exclude tests, testdata, benches, examples, and _vendor path segments",
     "markerRegex": "faithful ... port(s), ported from, port(s) of, vendor(s)/vendored, transcribed, copied ... verbatim, adapted from, mirror(s|ed|ing) ... <port-object>, derived from ... <port-object>, reimplemented/reimplementation from|of, translated/transliterated from, from the reference (not reference-), original implementation|repo(sitory), based on ... <port-object>, follow(s|ing) ... <port-object>, reimplements ... <port-object>, rewrite of ... <port-object>, model(l)ed after ... <port-object>, ported to ... from, 1:1 with ... <port-object>, line-for-line ... <port-object> (case-insensitive; <port-object> = reference(not followed by -)|upstream|python|pytorch|torch|diffusers|comfy(ui)|transformers|implementation). `original` is NOT a bare port-object and `followed` is excluded: both produced verified false positives on first-party prose (sc-15191 review).",
     "normalization": "matched marker text lowercased, internal whitespace collapsed, sorted, newline joined",
-    "matchedFiles": 667,
-    "populationSha256": "58c26506b7d42b27b81adf589de5a741dab2d85758deb049cd232e18053143b3"
+    "matchedFiles": 683,
+    "populationSha256": "57010a05c32b161d53715bfb45954c7fc4a1c687a46a110a56b4bdbbce8486ea"
   },
   "portedSourceAreas": [
     {
@@ -139,7 +139,7 @@
     },
     {
       "id": "architecture:crates/media/candle-gen/candle-gen",
-      "pathPrefix": "crates/media/candle-gen/candle-gen/src/",
+      "pathPrefix": "crates/media/candle-gen/candle-gen/",
       "provenance": "Marker-bearing production Rust source within this concrete crate prefix describes an architectural, backend, or formula port.",
       "disposition": "architecture-reimplementation-existing-terms",
       "evidence": "Applicable upstream model/provider terms for this concrete crate are already mapped in the About manifest; the candidate inventory pins the exact source blob and normalized provenance markers."
@@ -259,6 +259,13 @@
       "provenance": "Marker-bearing production Rust source within this concrete crate prefix describes an architectural, backend, or formula port.",
       "disposition": "architecture-reimplementation-existing-terms",
       "evidence": "Applicable upstream model/provider terms for this concrete crate are already mapped in the About manifest; the candidate inventory pins the exact source blob and normalized provenance markers."
+    },
+    {
+      "id": "architecture:crates/media/candle-gen/candle-gen-minimax-h3",
+      "pathPrefix": "crates/media/candle-gen/candle-gen-minimax-h3/",
+      "provenance": "Marker-bearing production Rust source reimplements the MiniMax-H3 architecture and tensor transformations for Candle/CUDA.",
+      "disposition": "architecture-reimplementation-existing-terms",
+      "evidence": "The provider is a Rust architecture reimplementation with no copied expressive source. MiniMax-H3's restricted model terms, Qwen3-VL text-encoder terms, NOTICE, and required attribution are already mapped to both shipped MiniMax-H3 catalog entries in About -> Licenses."
     },
     {
       "id": "architecture:crates/media/candle-gen/candle-gen-mochi",
@@ -492,6 +499,13 @@
       "excludePaths": [
         "crates/media/mlx-gen/mlx-gen-mage/src/latent.rs"
       ]
+    },
+    {
+      "id": "architecture:crates/media/mlx-gen/mlx-gen-minimax-h3",
+      "pathPrefix": "crates/media/mlx-gen/mlx-gen-minimax-h3/src/",
+      "provenance": "Marker-bearing production Rust source reimplements the MiniMax-H3 architecture and tensor transformations for MLX.",
+      "disposition": "architecture-reimplementation-existing-terms",
+      "evidence": "The provider is a Rust architecture reimplementation with no copied expressive source. MiniMax-H3's restricted model terms, Qwen3-VL text-encoder terms, NOTICE, and required attribution are already mapped to both shipped MiniMax-H3 catalog entries in About -> Licenses."
     },
     {
       "id": "architecture:crates/media/mlx-gen/mlx-gen-mochi",
@@ -830,12 +844,17 @@
   "crateCoverage": {
     "scanner": "scripts/scan-inference-provenance.mjs",
     "crateList": "config/inference-crate-prefixes.txt",
-    "revision": "b2d9e0917499517cf8c1518e0d360cac8693b0c0",
+    "revision": "c6d6a4dbd61ab09c26ff5526632cae2cefea60ed",
     "rule": "Every production-Rust crate prefix in the pinned revision must be covered by a portedSourceAreas entry OR carry an explicit crateDispositions decision. Anything else FAILS check-license-coverage.mjs.",
     "cratePrefixes": 97,
     "cratePopulationSha256": "993023a1f5832a7402f3c6aaf5989122b8d12436d69b5fd840be84ba90b329f2"
   },
   "crateDispositions": [
+    {
+      "prefix": ".",
+      "disposition": "first-party-original",
+      "evidence": "Workspace-only Cargo composition root. It declares member crates and shared dependency versions, contains no production Rust source, model architecture, or upstream expressive source."
+    },
     {
       "prefix": "crates/audio/candle-audio",
       "disposition": "architecture-reimplementation-existing-terms",

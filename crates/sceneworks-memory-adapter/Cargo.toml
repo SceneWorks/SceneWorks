@@ -11,22 +11,22 @@ serde_json = "1.0"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 # Keep every first-party adapter crate on the exact pinned inference revision.
-mlx-gen = { git = "https://github.com/SceneWorks/inference", rev = "b2d9e0917499517cf8c1518e0d360cac8693b0c0", optional = true }
-mlx-gen-flux2 = { git = "https://github.com/SceneWorks/inference", rev = "b2d9e0917499517cf8c1518e0d360cac8693b0c0", optional = true }
-mlx-gen-krea = { git = "https://github.com/SceneWorks/inference", rev = "b2d9e0917499517cf8c1518e0d360cac8693b0c0", optional = true }
-mlx-gen-ltx = { git = "https://github.com/SceneWorks/inference", rev = "b2d9e0917499517cf8c1518e0d360cac8693b0c0", optional = true }
-mlx-gen-minimax-h3 = { git = "https://github.com/SceneWorks/inference", rev = "b2d9e0917499517cf8c1518e0d360cac8693b0c0", optional = true }
-mlx-gen-sdxl = { git = "https://github.com/SceneWorks/inference", rev = "b2d9e0917499517cf8c1518e0d360cac8693b0c0", optional = true }
+mlx-gen = { git = "https://github.com/SceneWorks/inference", rev = "c6d6a4dbd61ab09c26ff5526632cae2cefea60ed", optional = true }
+mlx-gen-flux2 = { git = "https://github.com/SceneWorks/inference", rev = "c6d6a4dbd61ab09c26ff5526632cae2cefea60ed", optional = true }
+mlx-gen-krea = { git = "https://github.com/SceneWorks/inference", rev = "c6d6a4dbd61ab09c26ff5526632cae2cefea60ed", optional = true }
+mlx-gen-ltx = { git = "https://github.com/SceneWorks/inference", rev = "c6d6a4dbd61ab09c26ff5526632cae2cefea60ed", optional = true }
+mlx-gen-minimax-h3 = { git = "https://github.com/SceneWorks/inference", rev = "c6d6a4dbd61ab09c26ff5526632cae2cefea60ed", optional = true }
+mlx-gen-sdxl = { git = "https://github.com/SceneWorks/inference", rev = "c6d6a4dbd61ab09c26ff5526632cae2cefea60ed", optional = true }
 mlx-rs = { package = "pmetal-mlx-rs", git = "https://github.com/michaeltrefry/mlx-rs", rev = "bd8f0e3c757195b17b2c34fae3073ab826fb7bc1", optional = true }
-runtime-macos = { git = "https://github.com/SceneWorks/inference", rev = "b2d9e0917499517cf8c1518e0d360cac8693b0c0", optional = true }
+runtime-macos = { git = "https://github.com/SceneWorks/inference", rev = "c6d6a4dbd61ab09c26ff5526632cae2cefea60ed", optional = true }
 sha2 = "0.10"
 
 [target.'cfg(not(target_os = "macos"))'.dependencies]
-candle-gen = { git = "https://github.com/SceneWorks/inference", rev = "b2d9e0917499517cf8c1518e0d360cac8693b0c0", features = ["cuda", "testkit"], optional = true }
-runtime-cuda = { git = "https://github.com/SceneWorks/inference", rev = "b2d9e0917499517cf8c1518e0d360cac8693b0c0", optional = true }
+candle-gen = { git = "https://github.com/SceneWorks/inference", rev = "c6d6a4dbd61ab09c26ff5526632cae2cefea60ed", features = ["cuda", "testkit"], optional = true }
+runtime-cuda = { git = "https://github.com/SceneWorks/inference", rev = "c6d6a4dbd61ab09c26ff5526632cae2cefea60ed", optional = true }
 
 [target.'cfg(target_os = "macos")'.dev-dependencies]
-sceneworks-gen-core-testkit = { git = "https://github.com/SceneWorks/inference", rev = "b2d9e0917499517cf8c1518e0d360cac8693b0c0" }
+sceneworks-gen-core-testkit = { git = "https://github.com/SceneWorks/inference", rev = "c6d6a4dbd61ab09c26ff5526632cae2cefea60ed" }
 
 [dev-dependencies]
 # The SC-19115 corpus mutation test intentionally executes the production MLX admission-envelope

@@ -183,7 +183,7 @@ async function materializeSharedArtifacts(output, pre, tuple) {
 // dispatch-only inference workflow.  Its source files are verified here before
 // the SceneWorks tuples begin; a count-only declaration cannot become receipt
 // evidence.
-export async function validateInferencePreflight(inferenceRoot, permanentPin) {
+export async function validateInferencePreflight(inferenceRoot, permanentPin, expectedPreflight) {
   const configured = process.env.STARVECTOR_TERMINAL_INFERENCE_PREFLIGHT;
   if (!configured || !path.isAbsolute(configured)) die("exact inference preflight artifact index is required");
   const indexInfo = await lstat(configured); if (!indexInfo.isFile() || indexInfo.isSymbolicLink()) die("inference preflight artifact index must be a regular file");
@@ -199,7 +199,16 @@ export async function validateInferencePreflight(inferenceRoot, permanentPin) {
     if (!TUPLES.includes(key) || hooks.has(key)) die("inference preflight hook identities are invalid");
     hooks.add(key); sources[`preflight/hook/${key}`] = await checkedArtifact(root, entry.path, entry.sha256, `inference ${key} hook`);
   }
-  return { receipt: { workflow_run_id: value.workflow_run_id, workflow_run_attempt: value.workflow_run_attempt, head_sha: value.head_sha, inventory_artifacts: value.inventory_artifacts.map(({ tier, sha256 }) => ({ tier, sha256 })), hook_logs: value.hook_logs.map(({ backend, tier, sha256 }) => ({ backend, tier, sha256 })) }, sources };
+  const receipt = { workflow_run_id: value.workflow_run_id, workflow_run_attempt: value.workflow_run_attempt, head_sha: value.head_sha, inventory_artifacts: value.inventory_artifacts.map(({ tier, sha256 }) => ({ tier, sha256 })), hook_logs: value.hook_logs.map(({ backend, tier, sha256 }) => ({ backend, tier, sha256 })) };
+  const expectedReceipt = expectedPreflight && {
+    workflow_run_id: expectedPreflight.workflow_run_id,
+    workflow_run_attempt: expectedPreflight.workflow_run_attempt,
+    head_sha: expectedPreflight.head_sha,
+    inventory_artifacts: expectedPreflight.inventory_artifacts.map(({ tier, sha256 }) => ({ tier, sha256 })),
+    hook_logs: expectedPreflight.hook_logs.map(({ backend, tier, sha256 }) => ({ backend, tier, sha256 })),
+  };
+  if (!expectedReceipt || JSON.stringify(receipt) !== JSON.stringify(expectedReceipt)) die("inference preflight does not equal the sealed terminal plan provenance");
+  return { receipt, sources };
 }
 
 export async function verifyRouteClosure(sceneWorksRoot, command) {
@@ -224,7 +233,7 @@ export async function preflight({ sceneWorksRoot, planPath, inferenceRoot, weigh
   await verifyInferenceCheckout(inferenceRoot); await verifyPermanentPin(sceneWorksRoot, permanentPin, plan.inference_contract.revision);
   if (!weightsRoot || !metricsRoot) die("pre-provisioned weights and metrics roots required; network acquisition is forbidden");
   await stat(leaseHelper).catch(() => die("current-tree fs2 lease helper is missing"));
-  return { plan, metrics_lock_sha256, service: await verifyProductService(output, sceneWorksRoot, permanentPin), weights: await validateWeightsEnvironment(weightsRoot, plan.model_snapshot_revisions), metrics: await validateMetricsEnvironment(metricsRoot, metrics_lock_sha256), inference_preflight: await validateInferencePreflight(inferenceRoot, permanentPin), route: { ...(await verifyRouteClosure(sceneWorksRoot, command)), root: sceneWorksRoot } };
+  return { plan, metrics_lock_sha256, service: await verifyProductService(output, sceneWorksRoot, permanentPin), weights: await validateWeightsEnvironment(weightsRoot, plan.model_snapshot_revisions), metrics: await validateMetricsEnvironment(metricsRoot, metrics_lock_sha256), inference_preflight: await validateInferencePreflight(inferenceRoot, permanentPin, plan.inference_preflight), route: { ...(await verifyRouteClosure(sceneWorksRoot, command)), root: sceneWorksRoot } };
 }
 
 async function failureArtifact(output, context, error) {

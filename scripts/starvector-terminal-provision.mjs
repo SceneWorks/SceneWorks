@@ -9,7 +9,9 @@ import { promisify } from "node:util";
 import path from "node:path";
 import { inventory } from "./starvector-terminal-producer.mjs";
 import { isExecutedModule } from "./starvector-terminal-cli.mjs";
+import { readPlanAndLock } from "./starvector-terminal-campaign.mjs";
 import { fileSha256 } from "./lib/file-sha256.mjs";
+import { terminalPinPaths } from "./lib/starvector-terminal-pin-paths.mjs";
 import { sortTerminalTreeEntries, terminalTreeEntry, terminalTreeSha256 } from "./lib/terminal-tree-identity.mjs";
 
 const execFile = promisify(execFileCallback);
@@ -140,6 +142,39 @@ export async function installCheckout(source, destination, revision) {
   return head;
 }
 
+export async function installPinnedCheckout(source, hostRoot, revision) {
+  return installCheckout(source, terminalPinPaths(hostRoot, revision).inferenceRoot, revision);
+}
+
+export async function validatePreflightTransport(planPath, transport) {
+  const { plan } = await readPlanAndLock(planPath);
+  const expected = plan.inference_preflight;
+  const observed = {
+    revision: transport.revision,
+    workflow_run_id: transport.workflowRunId,
+    artifact_name: transport.artifactName,
+  };
+  const accepted = {
+    revision: plan.inference_contract.revision,
+    workflow_run_id: expected.workflow_run_id,
+    artifact_name: expected.artifact.name,
+  };
+  if (JSON.stringify(observed) !== JSON.stringify(accepted)) die("preflight transport does not equal the sealed terminal plan");
+  return { ...accepted, workflow_run_attempt: expected.workflow_run_attempt, artifact_id: expected.artifact.id, artifact_digest: expected.artifact.digest };
+}
+
+export function validateSealedPreflightIndex(observed, expected) {
+  const sealedIndex = expected && {
+    workflow_run_id: expected.workflow_run_id,
+    workflow_run_attempt: expected.workflow_run_attempt,
+    head_sha: expected.head_sha,
+    inventory_artifacts: expected.inventory_artifacts,
+    hook_logs: expected.hook_logs,
+  };
+  if (!sealedIndex || JSON.stringify(observed) !== JSON.stringify(sealedIndex)) die("preflight index does not equal the sealed terminal plan provenance");
+  return observed;
+}
+
 export async function assemblePreflight(source, destination, revision) {
   const index = await json(path.join(source, "starvector-terminal-preflight.json"));
   if (index.head_sha !== revision || typeof index.workflow_run_id !== "string" || !index.workflow_run_id || !Number.isInteger(index.workflow_run_attempt) || index.workflow_run_attempt < 1 || !Array.isArray(index.inventory_artifacts) || index.inventory_artifacts.length !== 2 || !Array.isArray(index.hook_logs) || index.hook_logs.length !== 4) die("preflight bundle identity/cardinality mismatches dispatch revision");
@@ -153,6 +188,15 @@ export async function assemblePreflight(source, destination, revision) {
     if (!info?.isFile() || info.isSymbolicLink() || info.size === 0 || sha(await readFile(file)) !== entry.sha256) die(`preflight artifact is missing or drifted: ${entry.path}`);
   }
   await copyTree(source, destination); return index;
+}
+
+export async function assemblePinnedPreflight(source, hostRoot, planPath) {
+  const { plan } = await readPlanAndLock(planPath);
+  const expected = plan.inference_preflight;
+  const observed = await json(path.join(source, "starvector-terminal-preflight.json"));
+  validateSealedPreflightIndex(observed, expected);
+  const roots = terminalPinPaths(hostRoot, plan.inference_contract.revision);
+  return assemblePreflight(source, roots.preflightRoot, plan.inference_contract.revision);
 }
 
 export async function assembleWeights({ hostRoot, serviceAppData, serviceHfHome, promptProvider, promptModel, promptRevision }) {
@@ -204,11 +248,16 @@ export async function assembleMetrics({ sceneWorksRoot, metricsRoot, python, cli
 async function main(argv) {
   const [command, ...args] = argv;
   if (command === "download" && args.length === 3) return downloadExact(args[0], args[1], args[2]);
-  if (command === "checkout" && args.length === 3) return installCheckout(args[0], args[1], args[2]);
-  if (command === "preflight" && args.length === 3) return assemblePreflight(args[0], args[1], args[2]);
+  if (command === "checkout" && args.length === 3) return installPinnedCheckout(args[0], args[1], args[2]);
+  if (command === "preflight" && args.length === 3) return assemblePinnedPreflight(args[0], args[1], args[2]);
+  if (command === "preflight-transport" && args.length === 4) {
+    const accepted = await validatePreflightTransport(args[0], { revision: args[1], workflowRunId: args[2], artifactName: args[3] });
+    console.log(accepted.artifact_id);
+    return accepted;
+  }
   if (command === "weights" && args.length === 6) return assembleWeights({ hostRoot: args[0], serviceAppData: args[1], serviceHfHome: args[2], promptProvider: args[3], promptModel: args[4], promptRevision: args[5] });
   if (command === "metrics" && args.length === 4) return assembleMetrics({ sceneWorksRoot: args[0], metricsRoot: args[1], python: args[2], clipRevision: args[3] });
-  die("usage: download <url> <path> <sha256> | checkout <source> <destination> <sha> | preflight <source> <destination> <sha> | weights <host-root> <app-data-source> <hf-source> <provider> <model> <revision> | metrics <sceneworks-root> <metrics-root> <python> <clip-revision>");
+  die("usage: download <url> <path> <sha256> | checkout <source> <host-root> <sha> | preflight <source> <host-root> <plan> | preflight-transport <plan> <sha> <run-id> <artifact-name> | weights <host-root> <app-data-source> <hf-source> <provider> <model> <revision> | metrics <sceneworks-root> <metrics-root> <python> <clip-revision>");
 }
 
 if (isExecutedModule(import.meta.url)) main(process.argv.slice(2)).catch((error) => { console.error(error.message); process.exitCode = 1; });
