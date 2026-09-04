@@ -93,6 +93,41 @@ async function waitHealthy(url, assertRunning = () => {}) {
   }
   die("source-built API did not become ready");
 }
+export async function relocateProductServiceLibrary(url, hfHome, {
+  fetchImpl = fetch,
+  timeoutMs = 120_000,
+} = {}) {
+  if (typeof hfHome !== "string" || !path.isAbsolute(hfHome)) die("offline HF home must be an absolute path");
+  const expectedHfHome = path.resolve(hfHome), expectedLibraryRoot = path.join(expectedHfHome, "hub");
+  let response;
+  let body;
+  let probeResponse;
+  let probe;
+  try {
+    const signal = AbortSignal.timeout(timeoutMs);
+    response = await fetchImpl(new URL("/api/v1/model-library/relocate", url), {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ path: expectedHfHome }),
+      signal,
+    });
+    body = await response.json();
+    if (response.ok) {
+      probeResponse = await fetchImpl(new URL("/api/v1/model-library", url), { signal });
+      probe = await probeResponse.json();
+    }
+  } catch (error) {
+    die(`offline model library relocation request failed: ${error.message}`);
+  }
+  if (!response.ok) die(`offline model library relocation HTTP ${response.status}: ${JSON.stringify(body)}`);
+  if (body?.adopted !== true || typeof body.hfHome !== "string" || typeof body.libraryRoot !== "string" || !path.isAbsolute(body.hfHome) || !path.isAbsolute(body.libraryRoot) || path.relative(expectedHfHome, path.resolve(body.hfHome)) !== "" || path.relative(expectedLibraryRoot, path.resolve(body.libraryRoot)) !== "") {
+    die("offline model library relocation returned an inexact binding");
+  }
+  if (!probeResponse.ok || probe?.available !== true || probe.probeStatus !== "available" || typeof probe.configuredLibraryPath !== "string" || path.relative(expectedLibraryRoot, path.resolve(probe.configuredLibraryPath)) !== "" || typeof probe.expectedLibrary?.configuredPath !== "string" || path.relative(expectedLibraryRoot, path.resolve(probe.expectedLibrary.configuredPath)) !== "") {
+    die("offline model library relocation did not read back as the exact available binding");
+  }
+  return { adopted: true, hf_home: expectedHfHome, library_root: expectedLibraryRoot, probe_status: probe.probeStatus };
+}
 export async function assertProductServicePortFree(url, { serverFactory = createServer } = {}) {
   const parsed = new URL(url), port = Number(parsed.port);
   if (parsed.hostname !== "127.0.0.1" || !Number.isInteger(port) || port < 1 || port > 65535) die("product service must bind an explicit loopback host/port");
@@ -274,7 +309,13 @@ export async function startProductService({ root, output, permanentPin, url, wei
       if (spawnErrors.length || api.pid === undefined || worker.pid === undefined || api.exitCode !== null || worker.exitCode !== null || api.signalCode !== null || worker.signalCode !== null) die(`source-built API or worker exited during readiness${spawnErrors.length ? `: ${spawnErrors.join("; ")}` : ""}`);
     };
     const health = await waitHealthy(url, assertRunning);
-    const record = { ...identity, ...weights, instance_token: instanceToken, api_url: url, api_host: endpoint.host, api_port: endpoint.port, state_root: path.relative(output, stateRoot), api_binary: path.relative(root, binary), worker_binary: path.relative(root, binary), api_binary_sha256: binarySha256, api_pid: api.pid, worker_pid: worker.pid, logs: Object.fromEntries(Object.entries(logPaths).map(([name, file]) => [name, path.relative(output, file)])), health, offline: { hf_home: path.relative(output, hfHome), hf_hub_offline: serviceEnv.HF_HUB_OFFLINE, transformers_offline: serviceEnv.TRANSFORMERS_OFFLINE }, started_at: startedAt };
+    // The app-data closure deliberately carries the source machine's physical-library binding.
+    // Rebind the already hash-verified offline copy through the product relocation seam: it proves
+    // every receipted/validated model at the new root and atomically captures its path + volume
+    // identity without rewriting receipts or downloading anything.
+    const relocation = await relocateProductServiceLibrary(url, hfHome);
+    assertRunning();
+    const record = { ...identity, ...weights, instance_token: instanceToken, api_url: url, api_host: endpoint.host, api_port: endpoint.port, state_root: path.relative(output, stateRoot), api_binary: path.relative(root, binary), worker_binary: path.relative(root, binary), api_binary_sha256: binarySha256, api_pid: api.pid, worker_pid: worker.pid, logs: Object.fromEntries(Object.entries(logPaths).map(([name, file]) => [name, path.relative(output, file)])), health, offline: { hf_home: path.relative(output, hfHome), hf_hub_offline: serviceEnv.HF_HUB_OFFLINE, transformers_offline: serviceEnv.TRANSFORMERS_OFFLINE, library_relocation: { adopted: relocation.adopted, hf_home: path.relative(output, relocation.hf_home), library_root: path.relative(output, relocation.library_root), probe_status: relocation.probe_status } }, started_at: startedAt };
     await writeFile(path.join(output, "product-service-provenance.json"), JSON.stringify(record, null, 2) + "\n");
     return record;
   } catch (error) {
