@@ -464,6 +464,37 @@ test("windows-candle keeps the five-rung guards while decoupling provisioning", 
   assert.match(stepBody(workflow, "Resolve snapshot provisioning parameters"), resolveGate);
 });
 
+test("macos-mlx fetches the Release prebuilt before its release-built calibration adapters", async () => {
+  // sc-22667: the Debug prebuilt fetched for `cargo build` fails a `--release` adapter build
+  // ("build_type: prebuilt=Debug this build=Release"), so both capture steps must be preceded by
+  // a Release fetch on the same dispatch gate, and must still build the adapter in release.
+  const workflow = await source(".github/workflows/macos-mlx.yml");
+  const fetchName = "Fetch prebuilt MLX (Release) for the release-built calibration adapter";
+  const fetch = stepBody(workflow, fetchName);
+  assert.match(fetch, /scripts\/fetch-prebuilt-mlx\.sh --build-type Release --github-env/);
+  assert.match(
+    fetch,
+    /if: \$\{\{ github\.event_name == 'workflow_dispatch' && \(inputs\.run_memory_calibration \|\| inputs\.run_five_rung_reference\) \}\}/,
+  );
+  // No Release asset falls back to the source build by CLEARING the Debug cell's variables, never
+  // by leaving them pointing at the mismatched cell.
+  assert.match(fetch, /echo "PMETAL_MLX_PREBUILT_DIR=" >> "\$GITHUB_ENV"/);
+  assert.match(fetch, /echo "PMETAL_METALLIB_PATH=" >> "\$GITHUB_ENV"/);
+  const fetchAt = workflow.indexOf(`- name: ${fetchName}`);
+  assert.ok(fetchAt >= 0);
+  for (const capture of [
+    "Build and capture the authoritative Qwen MLX anchor",
+    "Build and capture the authoritative Z-Image MLX anchor",
+  ]) {
+    const at = workflow.indexOf(`- name: ${capture}`);
+    assert.ok(at > fetchAt, `${capture} must follow the Release fetch`);
+    assert.match(
+      stepBody(workflow, capture),
+      /cargo build --release --locked -p sceneworks-memory-adapter/,
+    );
+  }
+});
+
 test("windows-candle captures and schema-checks the SC-21714 Krea anchor record", async () => {
   const workflow = await source(".github/workflows/windows-candle.yml");
   const capture = stepBody(

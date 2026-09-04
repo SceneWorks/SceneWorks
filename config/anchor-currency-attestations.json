@@ -1,0 +1,409 @@
+{
+  "_comment": "Memory-anchor CURRENCY ATTESTATIONS (sc-22667, epic sc-22657). An anchor's currency key is normally derived at its own measurement revision (scripts/anchor-loader-closure.mjs --stamp-anchors), so a pin bump that touches the model's loader closure stales it. This repository's invalidation doctrine is two-gated: a differing closure digest is not evidence that memory behaviour changed - only a load-or-device-path change without a behaviour witness is. An entry here records, per anchor, that the closure diff from `measuredRevision` to `attestedRevision` was read file by file and is accounting-only (contract pricing, byte walkers, facts, tests, docs) or is witnessed unchanged by a re-measure on the same hardware; `--stamp-anchors` then derives that anchor's key at `attestedRevision` and copies the attestation into the store's `source.currencyAttestation`. The attestation is BOUNDED: it names one revision, `measuredRevision` must still equal the cited record's inference revision, and a later pin bump that moves the loader closure past `attestedRevision` stales the anchor again until it is re-read (a new entry) or re-captured (delete the entry). Never write one for a load-or-device-path change without a measured witness - that is the false green the currency key exists to prevent. Reviewed narrative: docs/calibration/sc-22657/anchor-currency-attestation-sc-22667.md.",
+  "attestations": [
+    {
+      "anchorId": "krea_2_turbo:candle:q4:base:base:krea-turbo-cuda-phase-curves-v1:imc-7f1a63e5459300aed47c",
+      "measuredRevision": "3cd86ba2165f35db7c4fceecbeb7fbd12bca1c0c",
+      "attestedRevision": "c6d6a4dbd61ab09c26ff5526632cae2cefea60ed",
+      "attestedAt": "2026-09-04",
+      "story": "sc-22667",
+      "class": "witnessed-unchanged",
+      "why": "3cd86ba2..c6d6a4db DOES touch the Krea loader path (candle-gen-krea loader.rs / pipeline.rs / transformer/mod.rs / control*.rs, candle-gen quant/mod.rs + quant/adapt.rs, candle-gen-boogu, candle-gen-qwen-image and candle-gen-pid files the closure reaches), so the diff alone cannot classify this anchor. It is attested on a MEASURED witness instead: the E6 falsification fixture re-measured krea_2_turbo q4 at a5f643ae (22 first-parent merges after 3cd86ba2) on the same GPU and the cold staged control reproduces the packaged anchor per phase. The remaining a5f643ae..c6d6a4db range is accounting-only: gen-core lib.rs (re-export), memory_strategy.rs (contract types), weightsmeta.rs (walker hidden-cache skip) and candle-gen quant/sidecar.rs (CACHE_DIR constant re-homed, same value).",
+      "witness": "docs/calibration/sc-22657/candle-five-rung-falsification-sc-22667.json krea_2_turbo q4 coldStagedControl at a5f643ae against the packaged anchor: conditioning 3.694 GB vs 3.828 (-3.5%, under), denoise 15.099 vs 15.103 (-0.02%), decode 22.349 vs 22.352 (-0.01%). The batch's resident rung (12.73 GB conditioning) also brackets the contract's 11.73 GB component total, as the E6 test asserts.",
+      "filesChangedSinceMeasurement": [
+        {
+          "path": "crates/contracts/gen-core/src/caption.rs",
+          "class": "not read individually - covered by the measured witness"
+        },
+        {
+          "path": "crates/contracts/gen-core/src/duration_head.rs",
+          "class": "not read individually - covered by the measured witness"
+        },
+        {
+          "path": "crates/contracts/gen-core/src/encoder_contract.rs",
+          "class": "not read individually - covered by the measured witness"
+        },
+        {
+          "path": "crates/contracts/gen-core/src/exr_io.rs",
+          "class": "not read individually - covered by the measured witness"
+        },
+        {
+          "path": "crates/contracts/gen-core/src/gemma_assets.rs",
+          "class": "not read individually - covered by the measured witness"
+        },
+        {
+          "path": "crates/contracts/gen-core/src/generator.rs",
+          "class": "not read individually - covered by the measured witness"
+        },
+        {
+          "path": "crates/contracts/gen-core/src/hdr.rs",
+          "class": "not read individually - covered by the measured witness"
+        },
+        {
+          "path": "crates/contracts/gen-core/src/imageops.rs",
+          "class": "not read individually - covered by the measured witness"
+        },
+        {
+          "path": "crates/contracts/gen-core/src/lib.rs",
+          "class": "accounting-only"
+        },
+        {
+          "path": "crates/contracts/gen-core/src/ltx_checkpoint.rs",
+          "class": "not read individually - covered by the measured witness"
+        },
+        {
+          "path": "crates/contracts/gen-core/src/ltx_dfr.rs",
+          "class": "not read individually - covered by the measured witness"
+        },
+        {
+          "path": "crates/contracts/gen-core/src/media.rs",
+          "class": "not read individually - covered by the measured witness"
+        },
+        {
+          "path": "crates/contracts/gen-core/src/memory_strategy.rs",
+          "class": "accounting-only"
+        },
+        {
+          "path": "crates/contracts/gen-core/src/registry.rs",
+          "class": "test-only"
+        },
+        {
+          "path": "crates/contracts/gen-core/src/runtime.rs",
+          "class": "test-only"
+        },
+        {
+          "path": "crates/contracts/gen-core/src/sd3_encoder_artifacts.rs",
+          "class": "not read individually - covered by the measured witness"
+        },
+        {
+          "path": "crates/contracts/gen-core/src/sd3_request.rs",
+          "class": "not read individually - covered by the measured witness"
+        },
+        {
+          "path": "crates/contracts/gen-core/src/tokenizer.rs",
+          "class": "not read individually - covered by the measured witness"
+        },
+        {
+          "path": "crates/contracts/gen-core/src/train.rs",
+          "class": "not read individually - covered by the measured witness"
+        },
+        {
+          "path": "crates/contracts/gen-core/src/wan_i2v_memory.rs",
+          "class": "accounting-only"
+        },
+        {
+          "path": "crates/contracts/gen-core/src/weightsmeta.rs",
+          "class": "accounting-only"
+        },
+        {
+          "path": "crates/media/candle-gen/candle-gen-boogu/src/lib.rs",
+          "class": "not read individually - covered by the measured witness"
+        },
+        {
+          "path": "crates/media/candle-gen/candle-gen-boogu/src/memory_strategy.rs",
+          "class": "accounting-only"
+        },
+        {
+          "path": "crates/media/candle-gen/candle-gen-boogu/src/pipeline.rs",
+          "class": "not read individually - covered by the measured witness"
+        },
+        {
+          "path": "crates/media/candle-gen/candle-gen-boogu/src/tokenizer.rs",
+          "class": "not read individually - covered by the measured witness"
+        },
+        {
+          "path": "crates/media/candle-gen/candle-gen-boogu/src/vision/preprocess.rs",
+          "class": "not read individually - covered by the measured witness"
+        },
+        {
+          "path": "crates/media/candle-gen/candle-gen-krea/src/control.rs",
+          "class": "not read individually - covered by the measured witness"
+        },
+        {
+          "path": "crates/media/candle-gen/candle-gen-krea/src/control_provider.rs",
+          "class": "not read individually - covered by the measured witness"
+        },
+        {
+          "path": "crates/media/candle-gen/candle-gen-krea/src/lib.rs",
+          "class": "not read individually - covered by the measured witness"
+        },
+        {
+          "path": "crates/media/candle-gen/candle-gen-krea/src/loader.rs",
+          "class": "not read individually - covered by the measured witness"
+        },
+        {
+          "path": "crates/media/candle-gen/candle-gen-krea/src/pipeline.rs",
+          "class": "not read individually - covered by the measured witness"
+        },
+        {
+          "path": "crates/media/candle-gen/candle-gen-krea/src/train_dit.rs",
+          "class": "not read individually - covered by the measured witness"
+        },
+        {
+          "path": "crates/media/candle-gen/candle-gen-krea/src/training.rs",
+          "class": "not read individually - covered by the measured witness"
+        },
+        {
+          "path": "crates/media/candle-gen/candle-gen-krea/src/transformer/mod.rs",
+          "class": "not read individually - covered by the measured witness"
+        },
+        {
+          "path": "crates/media/candle-gen/candle-gen-krea/src/vision.rs",
+          "class": "not read individually - covered by the measured witness"
+        },
+        {
+          "path": "crates/media/candle-gen/candle-gen-pid/src/backbone/mod.rs",
+          "class": "not read individually - covered by the measured witness"
+        },
+        {
+          "path": "crates/media/candle-gen/candle-gen-pid/src/backbone/rope.rs",
+          "class": "not read individually - covered by the measured witness"
+        },
+        {
+          "path": "crates/media/candle-gen/candle-gen-pid/src/caption.rs",
+          "class": "not read individually - covered by the measured witness"
+        },
+        {
+          "path": "crates/media/candle-gen/candle-gen-pid/src/engine.rs",
+          "class": "same-value-constant"
+        },
+        {
+          "path": "crates/media/candle-gen/candle-gen-qwen-image/src/lib.rs",
+          "class": "not read individually - covered by the measured witness"
+        },
+        {
+          "path": "crates/media/candle-gen/candle-gen-qwen-image/src/memory_strategy.rs",
+          "class": "accounting-only"
+        },
+        {
+          "path": "crates/media/candle-gen/candle-gen-qwen-image/src/vae.rs",
+          "class": "not read individually - covered by the measured witness"
+        },
+        {
+          "path": "crates/media/candle-gen/candle-gen/src/architecture_facts.rs",
+          "class": "accounting-only"
+        },
+        {
+          "path": "crates/media/candle-gen/candle-gen/src/diffusion_schedule.rs",
+          "class": "not read individually - covered by the measured witness"
+        },
+        {
+          "path": "crates/media/candle-gen/candle-gen/src/lib.rs",
+          "class": "accounting-only"
+        },
+        {
+          "path": "crates/media/candle-gen/candle-gen/src/quant/adapt.rs",
+          "class": "not read individually - covered by the measured witness"
+        },
+        {
+          "path": "crates/media/candle-gen/candle-gen/src/quant/mod.rs",
+          "class": "not read individually - covered by the measured witness"
+        },
+        {
+          "path": "crates/media/candle-gen/candle-gen/src/quant/sidecar.rs",
+          "class": "accounting-only"
+        },
+        {
+          "path": "crates/media/candle-gen/candle-gen/src/train/flow_match.rs",
+          "class": "not read individually - covered by the measured witness"
+        }
+      ]
+    },
+    {
+      "anchorId": "z_image_turbo:candle:bf16:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-3cd69f2fee9e91e83b58",
+      "measuredRevision": "670dc1f4418859cf241471987a0a050fedc108c5",
+      "attestedRevision": "c6d6a4dbd61ab09c26ff5526632cae2cefea60ed",
+      "attestedAt": "2026-09-04",
+      "story": "sc-22667",
+      "class": "accounting-only",
+      "why": "Every file the z_image_turbo:candle loader closure changed in 670dc1f4..c6d6a4db carries contract ACCOUNTING, not load or device behaviour: candle-gen-z-image/src/memory_strategy.rs grew the per-component asset facts, architecture facts and loaded-path pricing the sc-22657 law reads; candle-gen/src/architecture_facts.rs is a new snapshot-config reader for those facts; gen-core's memory_strategy.rs / weightsmeta.rs / wan_i2v_memory.rs carry the contract types and the tensor-free byte walkers (materialized_* readers; the .candle-device-format-v1 hidden-cache skip) that price the checkpoint without touching the loader; gen-core lib.rs and candle-gen lib.rs are re-export / `pub mod` lines for those; gen-core registry.rs and runtime.rs move a #[cfg(test)] helper and fix a Windows-only test fixture; candle-gen-pid/src/engine.rs names the f32 load dtype and merged-file constants it already used (same values, and PiD is not on the Z-Image path); candle-gen/src/quant/sidecar.rs re-homes the `.candle-device-format-v1` CACHE_DIR literal to gen-core's constant with the same value. No loader, pipeline, weights, kernel, quant or device-format code path changed.",
+      "witness": "No hardware re-measure of the bf16 tier itself; the classification stands on the diff alone, which is the same file set as the q4 anchor's (the closure is per model, not per tier) and carries no load or device path change. The q4 tier's cold-staged re-measure at a5f643ae (docs/calibration/sc-22657/candle-five-rung-falsification-sc-22667.json) witnesses that the shared loader's memory behaviour did not move across the larger half of this range.",
+      "filesChangedSinceMeasurement": [
+        {
+          "path": "crates/contracts/gen-core/src/lib.rs",
+          "class": "accounting-only"
+        },
+        {
+          "path": "crates/contracts/gen-core/src/memory_strategy.rs",
+          "class": "accounting-only"
+        },
+        {
+          "path": "crates/contracts/gen-core/src/registry.rs",
+          "class": "test-only"
+        },
+        {
+          "path": "crates/contracts/gen-core/src/runtime.rs",
+          "class": "test-only"
+        },
+        {
+          "path": "crates/contracts/gen-core/src/wan_i2v_memory.rs",
+          "class": "accounting-only"
+        },
+        {
+          "path": "crates/contracts/gen-core/src/weightsmeta.rs",
+          "class": "accounting-only"
+        },
+        {
+          "path": "crates/media/candle-gen/candle-gen-pid/src/engine.rs",
+          "class": "same-value-constant"
+        },
+        {
+          "path": "crates/media/candle-gen/candle-gen-z-image/src/memory_strategy.rs",
+          "class": "accounting-only"
+        },
+        {
+          "path": "crates/media/candle-gen/candle-gen/src/architecture_facts.rs",
+          "class": "accounting-only"
+        },
+        {
+          "path": "crates/media/candle-gen/candle-gen/src/lib.rs",
+          "class": "accounting-only"
+        },
+        {
+          "path": "crates/media/candle-gen/candle-gen/src/quant/sidecar.rs",
+          "class": "accounting-only"
+        }
+      ]
+    },
+    {
+      "anchorId": "z_image_turbo:candle:q4:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-b8064416c974b5008509",
+      "measuredRevision": "670dc1f4418859cf241471987a0a050fedc108c5",
+      "attestedRevision": "c6d6a4dbd61ab09c26ff5526632cae2cefea60ed",
+      "attestedAt": "2026-09-04",
+      "story": "sc-22667",
+      "class": "accounting-only",
+      "why": "Every file the z_image_turbo:candle loader closure changed in 670dc1f4..c6d6a4db carries contract ACCOUNTING, not load or device behaviour: candle-gen-z-image/src/memory_strategy.rs grew the per-component asset facts, architecture facts and loaded-path pricing the sc-22657 law reads; candle-gen/src/architecture_facts.rs is a new snapshot-config reader for those facts; gen-core's memory_strategy.rs / weightsmeta.rs / wan_i2v_memory.rs carry the contract types and the tensor-free byte walkers (materialized_* readers; the .candle-device-format-v1 hidden-cache skip) that price the checkpoint without touching the loader; gen-core lib.rs and candle-gen lib.rs are re-export / `pub mod` lines for those; gen-core registry.rs and runtime.rs move a #[cfg(test)] helper and fix a Windows-only test fixture; candle-gen-pid/src/engine.rs names the f32 load dtype and merged-file constants it already used (same values, and PiD is not on the Z-Image path); candle-gen/src/quant/sidecar.rs re-homes the `.candle-device-format-v1` CACHE_DIR literal to gen-core's constant with the same value. No loader, pipeline, weights, kernel, quant or device-format code path changed.",
+      "witness": "docs/calibration/sc-22657/candle-five-rung-falsification-sc-22667.json: the same tier re-measured at a5f643ae on the same GPU (memory-candle-adapter run_batch, coldStagedControl) lands on the packaged anchor within the lane's recapture spread - denoise +0.07%, decode +0.04%, conditioning -3.5% (the phase's own cold-start jitter, under the anchor). a5f643ae..c6d6a4db then touches only gen-core lib.rs / memory_strategy.rs / weightsmeta.rs, candle-gen quant/sidecar.rs (constant re-home) and candle-gen-z-image memory_strategy.rs.",
+      "filesChangedSinceMeasurement": [
+        {
+          "path": "crates/contracts/gen-core/src/lib.rs",
+          "class": "accounting-only"
+        },
+        {
+          "path": "crates/contracts/gen-core/src/memory_strategy.rs",
+          "class": "accounting-only"
+        },
+        {
+          "path": "crates/contracts/gen-core/src/registry.rs",
+          "class": "test-only"
+        },
+        {
+          "path": "crates/contracts/gen-core/src/runtime.rs",
+          "class": "test-only"
+        },
+        {
+          "path": "crates/contracts/gen-core/src/wan_i2v_memory.rs",
+          "class": "accounting-only"
+        },
+        {
+          "path": "crates/contracts/gen-core/src/weightsmeta.rs",
+          "class": "accounting-only"
+        },
+        {
+          "path": "crates/media/candle-gen/candle-gen-pid/src/engine.rs",
+          "class": "same-value-constant"
+        },
+        {
+          "path": "crates/media/candle-gen/candle-gen-z-image/src/memory_strategy.rs",
+          "class": "accounting-only"
+        },
+        {
+          "path": "crates/media/candle-gen/candle-gen/src/architecture_facts.rs",
+          "class": "accounting-only"
+        },
+        {
+          "path": "crates/media/candle-gen/candle-gen/src/lib.rs",
+          "class": "accounting-only"
+        },
+        {
+          "path": "crates/media/candle-gen/candle-gen/src/quant/sidecar.rs",
+          "class": "accounting-only"
+        }
+      ]
+    },
+    {
+      "anchorId": "z_image_turbo:candle:q8:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-8cda4f70f78dd33f5330",
+      "measuredRevision": "670dc1f4418859cf241471987a0a050fedc108c5",
+      "attestedRevision": "c6d6a4dbd61ab09c26ff5526632cae2cefea60ed",
+      "attestedAt": "2026-09-04",
+      "story": "sc-22667",
+      "class": "accounting-only",
+      "why": "Every file the z_image_turbo:candle loader closure changed in 670dc1f4..c6d6a4db carries contract ACCOUNTING, not load or device behaviour: candle-gen-z-image/src/memory_strategy.rs grew the per-component asset facts, architecture facts and loaded-path pricing the sc-22657 law reads; candle-gen/src/architecture_facts.rs is a new snapshot-config reader for those facts; gen-core's memory_strategy.rs / weightsmeta.rs / wan_i2v_memory.rs carry the contract types and the tensor-free byte walkers (materialized_* readers; the .candle-device-format-v1 hidden-cache skip) that price the checkpoint without touching the loader; gen-core lib.rs and candle-gen lib.rs are re-export / `pub mod` lines for those; gen-core registry.rs and runtime.rs move a #[cfg(test)] helper and fix a Windows-only test fixture; candle-gen-pid/src/engine.rs names the f32 load dtype and merged-file constants it already used (same values, and PiD is not on the Z-Image path); candle-gen/src/quant/sidecar.rs re-homes the `.candle-device-format-v1` CACHE_DIR literal to gen-core's constant with the same value. No loader, pipeline, weights, kernel, quant or device-format code path changed.",
+      "witness": "No hardware re-measure of the q8 tier itself; the classification stands on the diff alone, which is the same file set as the q4 anchor's (the closure is per model, not per tier) and carries no load or device path change. The q4 tier's cold-staged re-measure at a5f643ae (docs/calibration/sc-22657/candle-five-rung-falsification-sc-22667.json) witnesses that the shared loader's memory behaviour did not move across the larger half of this range.",
+      "filesChangedSinceMeasurement": [
+        {
+          "path": "crates/contracts/gen-core/src/lib.rs",
+          "class": "accounting-only"
+        },
+        {
+          "path": "crates/contracts/gen-core/src/memory_strategy.rs",
+          "class": "accounting-only"
+        },
+        {
+          "path": "crates/contracts/gen-core/src/registry.rs",
+          "class": "test-only"
+        },
+        {
+          "path": "crates/contracts/gen-core/src/runtime.rs",
+          "class": "test-only"
+        },
+        {
+          "path": "crates/contracts/gen-core/src/wan_i2v_memory.rs",
+          "class": "accounting-only"
+        },
+        {
+          "path": "crates/contracts/gen-core/src/weightsmeta.rs",
+          "class": "accounting-only"
+        },
+        {
+          "path": "crates/media/candle-gen/candle-gen-pid/src/engine.rs",
+          "class": "same-value-constant"
+        },
+        {
+          "path": "crates/media/candle-gen/candle-gen-z-image/src/memory_strategy.rs",
+          "class": "accounting-only"
+        },
+        {
+          "path": "crates/media/candle-gen/candle-gen/src/architecture_facts.rs",
+          "class": "accounting-only"
+        },
+        {
+          "path": "crates/media/candle-gen/candle-gen/src/lib.rs",
+          "class": "accounting-only"
+        },
+        {
+          "path": "crates/media/candle-gen/candle-gen/src/quant/sidecar.rs",
+          "class": "accounting-only"
+        }
+      ]
+    },
+    {
+      "anchorId": "z_image_turbo:mlx:q4:base:base:z-image-mlx-independent-materialization-v4:imc-2284d75c08c2a13f1b7e",
+      "measuredRevision": "a5f643ae58a4ed81e6be8280afbf29750da5ffe2",
+      "attestedRevision": "c6d6a4dbd61ab09c26ff5526632cae2cefea60ed",
+      "attestedAt": "2026-09-04",
+      "story": "sc-22667",
+      "class": "accounting-only",
+      "why": "a5f643ae..c6d6a4db changes four files in the z_image_turbo:mlx closure and none is a load or device path: gen-core lib.rs adds the CANDLE_DEVICE_FORMAT_CACHE_DIR re-export; gen-core memory_strategy.rs carries contract types; gen-core weightsmeta.rs makes the tensor-free byte walkers skip hidden directories (a pricing read, never a tensor load - and MLX never writes that cache); mlx-gen-z-image memory_strategy.rs re-prices the contract's asset facts. mlx-gen-z-image model.rs, the loader, and mlx-gen/src are untouched.",
+      "witness": "The anchor itself was captured at a5f643ae on the nax-macos runner (macos-mlx.yml run_five_rung_reference, run 33817079839), i.e. after every loader-path change in the store's history; the range to the pin is the accounting diff listed here and carries nothing the MLX loader executes.",
+      "filesChangedSinceMeasurement": [
+        {
+          "path": "crates/contracts/gen-core/src/lib.rs",
+          "class": "accounting-only"
+        },
+        {
+          "path": "crates/contracts/gen-core/src/memory_strategy.rs",
+          "class": "accounting-only"
+        },
+        {
+          "path": "crates/contracts/gen-core/src/weightsmeta.rs",
+          "class": "accounting-only"
+        },
+        {
+          "path": "crates/media/mlx-gen/mlx-gen-z-image/src/memory_strategy.rs",
+          "class": "accounting-only"
+        }
+      ]
+    }
+  ]
+}

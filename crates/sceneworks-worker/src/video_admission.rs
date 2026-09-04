@@ -43,7 +43,9 @@ use sceneworks_core::video_request::{
 };
 use sha2::Digest;
 
-use crate::memory_strategy::{Budget, Candidate, CandidateBasis, RequestScope, Selection};
+use crate::memory_strategy::{
+    AnchorDerivationLane, Budget, Candidate, CandidateBasis, RequestScope, Selection,
+};
 
 pub(crate) const BERNINI_R2V_RECEIPT_DOMAIN: &str = "bernini-r2v-references-v2";
 pub(crate) const BERNINI_R2V_SEAL_DOMAIN: &str = "bernini-r2v-request-seal-v1";
@@ -1208,6 +1210,105 @@ pub(crate) fn anchor_currency_matches(
         .is_some_and(|closures| anchor.is_current(closures))
 }
 
+/// The component bytes the image derivation law subtracts from an anchor's measured peaks and
+/// re-adds per the request's regime (sc-22663, epic 22657 E3), read off the live provider
+/// contract's asset facts. The law takes them as an explicit argument because the anchor store
+/// carries none today; this is the single translation from `gen_core` to the core type, shared by
+/// both image lanes' anchor consumers.
+pub(crate) fn anchor_component_bytes(
+    facts: gen_core::MemoryAssetFacts,
+) -> sceneworks_core::memory_anchor::ComponentBytes {
+    sceneworks_core::memory_anchor::ComponentBytes {
+        conditioning: facts.conditioning_bytes,
+        transformer: facts.transformer_bytes,
+        decoder: facts.decoder_bytes,
+    }
+}
+
+/// The architecture facts the image derivation law scales its residues by (sc-22663, epic 22657
+/// E3), read off the live provider contract's `architecture_facts` block (sc-22667) — the
+/// companion translation to [`anchor_component_bytes`], shared by both image lanes' anchor
+/// consumers (`candle_memory_strategy::CandleLadderAnchors::packaged` and the MLX estimate
+/// floor) and the ONE worker-edge seam through which gen-core's facts reach the core law.
+///
+/// WHY THE INPUT DIFFERS FROM ITS COMPANION'S, and why that is not an oversight to "fix" by
+/// matching signatures: [`anchor_component_bytes`] takes [`gen_core::MemoryAssetFacts`] because
+/// component bytes are a property of the resolved ASSET — the weight files this tier actually
+/// loads — and the contract already decomposes them there. Architecture facts are a property of
+/// the MODEL's topology (head count, head dim, block count, patch size, VAE scales, activation
+/// dtype width) and are identical across every tier and asset set of one model, so they live on
+/// the CONTRACT-level [`gen_core::MemoryArchitectureFacts`] block rather than in per-tier asset
+/// facts.
+///
+/// AXIS BY AXIS, `None` PRESERVED. The two structs state the same eight axes in the same units;
+/// the contract's block is destructured exhaustively, so a ninth axis added upstream is a compile
+/// error here rather than a silently dropped fact. An absent axis stays absent: the law documents
+/// `None` as "leave the residue this fact would have scaled UNSCALED" (core test
+/// `missing_facts_leave_residues_unscaled_and_never_shrink_the_estimate`), so a contract that
+/// states nothing — the registry's weights-free sentinel surfaces, a single-file import, a
+/// provider that has not adopted the block — prices its bounded rungs at their unbounded residue,
+/// never below it. Nothing is defaulted to zero: a zero axis is not a fact (a defaulted `0` would
+/// poison every ratio that multiplies by it), and gen-core's own facts conformance
+/// (`MemoryArchitectureFacts::zero_valued_axes`) refuses one at the provider.
+pub(crate) fn architecture_facts_from_contract(
+    contract: &MemoryProviderContract,
+) -> sceneworks_core::memory_anchor::ArchitectureFacts {
+    #[cfg(test)]
+    if let Some(facts) = INJECTED_ARCHITECTURE_FACTS.with(std::cell::Cell::get) {
+        return facts;
+    }
+    let &gen_core::MemoryArchitectureFacts {
+        attention_heads,
+        head_dim,
+        transformer_blocks,
+        patch_size,
+        latent_channels,
+        vae_spatial_scale,
+        vae_temporal_scale,
+        activation_dtype_width,
+    } = &contract.architecture_facts;
+    sceneworks_core::memory_anchor::ArchitectureFacts {
+        attention_heads,
+        head_dim,
+        transformer_blocks,
+        patch_size,
+        latent_channels,
+        vae_spatial_scale,
+        vae_temporal_scale,
+        activation_dtype_width,
+    }
+}
+
+#[cfg(test)]
+thread_local! {
+    static INJECTED_ARCHITECTURE_FACTS: std::cell::Cell<
+        Option<sceneworks_core::memory_anchor::ArchitectureFacts>,
+    > = const { std::cell::Cell::new(None) };
+}
+
+/// Test seam (sc-22667): stand `facts` in for what [`architecture_facts_from_contract`] reads off
+/// the contract, for the lifetime of the returned guard, so a fixture can grade the lanes' rung
+/// ratios through their PRODUCTION admission paths on a fixture contract that states no facts of
+/// its own. The same shape as `vram_gate::tests::with_injected_anchor_store`.
+#[cfg(test)]
+#[must_use = "the injection lasts exactly as long as the guard"]
+pub(crate) struct InjectedArchitectureFacts;
+
+#[cfg(test)]
+impl Drop for InjectedArchitectureFacts {
+    fn drop(&mut self) {
+        INJECTED_ARCHITECTURE_FACTS.with(|cell| cell.set(None));
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn inject_architecture_facts(
+    facts: sceneworks_core::memory_anchor::ArchitectureFacts,
+) -> InjectedArchitectureFacts {
+    INJECTED_ARCHITECTURE_FACTS.with(|cell| cell.set(Some(facts)));
+    InjectedArchitectureFacts
+}
+
 /// Derive per-phase peaks from the measured memory anchor for this
 /// `(model, tier, lane, transformer variant, decoder)` coordinate (sc-22507, epic 22505), for the
 /// exact regime of the candidate being graded.
@@ -1369,7 +1470,9 @@ fn fitted_or_floor_phase_peaks<'a>(
     if let Some((derived, anchor_id)) = anchor_derived_phase_peaks(selector, geometry, engaged) {
         return (
             derived,
-            CandidateBasis::EstimateAnchorDerived,
+            CandidateBasis::EstimateAnchorDerived {
+                lane: AnchorDerivationLane::Video,
+            },
             selector.identity.expected_closure_digest,
             Some(anchor_id),
             None,

@@ -2133,9 +2133,39 @@ fn mlx_image_anchor_derived_peak(
     overlay: Option<&str>,
     geometry: MemoryGeometry,
 ) -> Option<(u64, String)> {
-    use sceneworks_core::memory_anchor::{
-        AnchorBackend, AnchorLoadShape, AnchorMlxImageDeriveRequest,
-    };
+    use sceneworks_core::memory_anchor::AnchorMlxImageDeriveRequest;
+
+    let anchor = mlx_image_anchor_match(contract, plan, mode_key, overlay, geometry)?;
+    let derived = anchor.derive_mlx_image_phase_peaks(
+        AnchorMlxImageDeriveRequest {
+            width: geometry.width,
+            height: geometry.height,
+        },
+        crate::video_admission::anchor_component_bytes(contract.asset_facts),
+    )?;
+    Some((derived.peak_bytes(), anchor.id.clone()))
+}
+
+/// The measured image anchor this request may borrow from, or `None` — the identity, overlay,
+/// reference, geometry-shape and currency conjuncts of the doc comment on
+/// [`mlx_image_anchor_derived_peak`], factored out (sc-22665) so the anchor-derived arm and the
+/// estimate floor's derived activation residue below grade the SAME anchor against the SAME
+/// guards. A second inline copy is how the two arms would silently disagree about whether the
+/// evidence covers the request.
+///
+/// The REGIME conjuncts are deliberately not here: each consumer's own law entry point states what
+/// it needs of the anchor's measured regime (the lane shim wants the eager unbounded resident
+/// composition; the residue path lets the law's own regime guard decide), and hoisting the
+/// stricter of the two here would silently narrow the other.
+fn mlx_image_anchor_match(
+    contract: &MemoryProviderContract,
+    plan: &MlxRequestPlan,
+    mode_key: &str,
+    overlay: Option<&str>,
+    geometry: MemoryGeometry,
+) -> Option<&'static sceneworks_core::memory_anchor::MemoryAnchor> {
+    use sceneworks_core::memory_anchor::{AnchorBackend, AnchorLoadShape};
+
     if overlay.is_some()
         || geometry.reference_count != 0
         || geometry.frames != 1
@@ -2155,16 +2185,125 @@ fn mlx_image_anchor_derived_peak(
         || anchor.mode != mode_key
         || anchor.overlay.is_some()
         || anchor.reference_count != 0
+        || anchor.underived_reason.is_some()
         || anchor_load_shape != contract.load_shape
         || !crate::video_admission::anchor_currency_matches(anchor)
     {
         return None;
     }
-    let derived = anchor.derive_mlx_image_phase_peaks(AnchorMlxImageDeriveRequest {
-        width: geometry.width,
-        height: geometry.height,
-    })?;
-    Some((derived.peak_bytes(), anchor.id.clone()))
+    Some(anchor)
+}
+
+/// The regime the graded candidate executes in, in the derivation law's vocabulary (sc-22665):
+/// the engaged composition says which rungs are on, the selection's own parameters say how deeply
+/// each one bounds. A rung that is not engaged contributes `None`, which is what makes the law
+/// price it unbounded.
+///
+/// The parameters are the ones the candidate will actually run with — on the estimate floor those
+/// are `estimate_floor_parameters`' most deeply bounding declared values, which is the same
+/// selection `validate_selection` admits and the same one the provider would be handed.
+fn request_regime(
+    engaged: &[MemoryStrategy],
+    parameters: gen_core::MemoryStrategyParameters,
+) -> sceneworks_core::memory_anchor::RequestRegime {
+    use sceneworks_core::memory_anchor::{DecodeTile, RequestRegime};
+
+    RequestRegime {
+        staged: engaged.contains(&MemoryStrategy::StagedResidency),
+        decode_tile: engaged
+            .contains(&MemoryStrategy::BoundedDecode)
+            .then(|| {
+                Some(DecodeTile {
+                    edge: parameters.decode_tile_edge?,
+                    overlap: parameters.decode_overlap?,
+                })
+            })
+            .flatten(),
+        attention_chunk_scores: engaged
+            .contains(&MemoryStrategy::BoundedAttention)
+            .then_some(parameters.attention_chunk_size)
+            .flatten()
+            .map(u64::from),
+        transformer_window: engaged
+            .contains(&MemoryStrategy::BoundedTransformerResidency)
+            .then_some(parameters.transformer_window_size)
+            .flatten(),
+    }
+}
+
+/// The ACTIVATION term of the estimate floor for one graded candidate (sc-22665, epic 22657 E4):
+/// the sc-22663 image law's per-phase residue for THIS request's regime, phase-maxed, and NOTHING
+/// ELSE.
+///
+/// The MLX allocator envelope above the anchor's active peak is deliberately NOT pre-added here,
+/// even though MLX admission is on the allocator level, because the SELECTOR charges it:
+/// [`crate::ladder_margin_policy::admission_allowance`] gives every
+/// [`crate::memory_strategy::CandidateBasis::EstimateFloor`] whose activation slice is declared an
+/// [`crate::memory_strategy::AdmissionTerm::AllocatorEnvelopeOverActivation`] allowance of
+/// [`crate::ladder_margin_policy::FLOOR_ALLOCATOR_ENVELOPE_ALLOWANCE`] TIMES this value — and that
+/// constant is the measured ratio of the retained envelope above the active peak to the ACTIVE
+/// activation term. Pre-adding the envelope would seat it inside the term and then charge 3.104x
+/// of it again on top. So this returns the ACTIVE-derived quantity the allowance is defined
+/// against, and the envelope arrives exactly once, from the policy.
+///
+/// The rung-2 anchor derivation ([`mlx_image_anchor_derived_peak`]) is the opposite case and its
+/// doc says so: it MUST carry the envelope itself, because its basis pays only the recapture
+/// spread. This floor must not, because its basis pays the envelope allowance.
+///
+/// `None` — and the caller keeps [`MlxRequestPlan::generic_headroom_bytes`] — whenever the anchor
+/// does not cover the request (see [`mlx_image_anchor_match`]), the anchor carries no per-phase
+/// allocator decomposition, or the law refuses the derivation. At this pin every packaged MLX
+/// image anchor is outside the law's domain (its conditioning counters never saw its weights), so
+/// this returns `None` for the shipped store and the floor is byte-identical to what it was before
+/// this story; sc-22667 re-captures an in-domain anchor on Apple Silicon.
+///
+/// The composition the caller performs — `estimate_floor_weights_bytes` plus the MAX over phases
+/// of this residue — is the phase-max of the weights plus the phase-max of the activation, which
+/// is at or above the law's own phase-wise max of their sums. Erring large is the correct side on
+/// a gate whose permissive failure mode is an OS Jetsam SIGKILL.
+///
+/// `facts` are the architecture facts the law's rung ratios need. Production passes
+/// [`crate::video_admission::architecture_facts_from_contract`] — the contract's own
+/// `architecture_facts` block, axis by axis (sc-22667); a contract that states none leaves the
+/// window, the chunk and the tile unscaled. The fixture tests below pass the model's own facts
+/// explicitly to grade the ratios themselves.
+#[allow(clippy::too_many_arguments)]
+fn mlx_image_anchor_activation_residue(
+    contract: &MemoryProviderContract,
+    plan: &MlxRequestPlan,
+    mode_key: &str,
+    overlay: Option<&str>,
+    geometry: MemoryGeometry,
+    engaged: &[MemoryStrategy],
+    parameters: gen_core::MemoryStrategyParameters,
+    facts: sceneworks_core::memory_anchor::ArchitectureFacts,
+) -> Option<(u64, String)> {
+    use sceneworks_core::memory_anchor::ImageDeriveRequest;
+
+    let anchor = mlx_image_anchor_match(contract, plan, mode_key, overlay, geometry)?;
+    // Required, but NOT read: the envelope is not part of this term (see the doc above). The
+    // requirement stands because `FLOOR_ALLOCATOR_ENVELOPE_ALLOWANCE` — the thing that charges the
+    // envelope OVER this term — was derived only over captures that report the retained allocator
+    // level above the active peak, so an anchor carrying no per-phase allocator decomposition was
+    // not measured under the discipline that allowance is defined on, and this term would be
+    // graded by a multiple its own anchor never witnessed.
+    let _envelope_measured = anchor.phase_allocator_envelope_bytes?;
+    let residues = anchor.derive_phase_activation_residues(
+        &ImageDeriveRequest::new(
+            geometry.width,
+            geometry.height,
+            request_regime(engaged, parameters),
+        ),
+        crate::video_admission::anchor_component_bytes(contract.asset_facts),
+        facts,
+    )?;
+    // The ACTIVE-derived phase max, with no envelope byte in it — the quantity
+    // `FLOOR_ALLOCATOR_ENVELOPE_ALLOWANCE` is defined as a multiple OF.
+    let peak = residues
+        .conditioning
+        .max(residues.denoise)
+        .max(residues.decode);
+    Some((peak, anchor.id.clone()))
 }
 
 /// One estimate-backed candidate synthesized for an implemented-but-unmeasured rung (sc-18096).
@@ -2341,8 +2480,35 @@ fn intra_transformer_evicted_bytes(contract: &MemoryProviderContract) -> u64 {
 ///   set is the larger of the conditioning stack and everything else, exactly the
 ///   `staged_weights_gb` split the load-time gate has always used.
 /// * `BoundedTransformerResidency` engaged ⇒ the transformer's declared bytes leave the resident
-///   floor: the rung windows them, and the window slice plus scratch is carried by the headroom
-///   term and the estimate margin, not by a guessed window fraction.
+///   floor and the rung's RESIDENT WINDOW comes back in. Which window depends on the lane
+///   (sc-22667, epic 22657 feature-end round):
+///   * the VIDEO lane ([`estimate_floor_weights_bytes`], `video_admission::floor_phase_peaks`)
+///     keeps its sc-18096 accounting — the window slice plus scratch is carried by its headroom
+///     term and the estimate margin, and its own law prices a windowed denoise BOUND rather than
+///     a share, so the weights term carries no window;
+///   * the IMAGE lane ([`image_floor_weights_bytes`]) has TWO regimes, keyed on whether the
+///     contract's architecture facts state a block count:
+///     - `transformer_blocks: Some(_)` — the SAME windowed residency the image law and the candle
+///       ladder price, `transformer x window / blocks`
+///       (`sceneworks_core::memory_anchor::windowed_transformer_bytes`), because its activation
+///       term is the law's residue for the rung's regime (sc-22665), which carries no weights;
+///     - `transformer_blocks: None` (a contract that states no facts — the registry's weights-free
+///       surfaces, a single-file import, a provider that has not adopted the block) — keyed on
+///       WHICH activation term the floor is composed with ([`ImageFloorActivationTerm`]):
+///       * with the GENERIC headroom, the PRE-EPIC sc-18096 accounting above, the whole
+///         transformer out and the window carried by the headroom/allowance term. Keeping the
+///         whole transformer resident here would price rung 4 like rung 2 and refuse, on real
+///         Macs, shipped unmeasured models the lane admitted before the epic
+///         (`shipped_plain_krea_without_a_binding_preserves_the_request_on_estimate_admission`,
+///         `shipped_plain_sdxl_without_a_binding_preserves_the_three_rung_estimate_path`); that
+///         is a regression, not conservatism, so admission is unchanged until the contract
+///         supplies a block count. This is a worker floor decision;
+///       * with the LAW's residue (an in-domain anchor priced the rung), the whole transformer
+///         STAYS resident — the law's own erring-large reading (`windowed_transformer_bytes`
+///         keeps the whole transformer with no block count). The residue carries no weights and
+///         no window, so removing the transformer here would charge rung 4's window slice
+///         NOWHERE (sc-22667 round-2 review): rung 4 prices as rung 3 until a block count makes
+///         the share knowable, never below it.
 /// * Rungs 2 and 3 bound TRANSIENTS, not weights, so they take no weights reduction here — and
 ///   deliberately no transient reduction either, because no measured basis for one exists on an
 ///   unmeasured cell. Their floor equals rung 1's, which keeps them selectable without ever
@@ -2386,6 +2552,67 @@ pub(crate) fn estimate_floor_weights_bytes(
     contract: &MemoryProviderContract,
     engaged: &[MemoryStrategy],
 ) -> u64 {
+    floor_weights_bytes(contract, engaged, 0)
+}
+
+/// Which ACTIVATION term the image floor composes [`image_floor_weights_bytes`] with — the input
+/// that decides where rung 4's window slice is charged when the facts state no block count (see
+/// the `transformer_blocks: None` regime on [`estimate_floor_weights_bytes`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ImageFloorActivationTerm {
+    /// The sc-22663 law's per-phase residue for the rung's regime
+    /// ([`mlx_image_anchor_activation_residue`]): weights-free and window-free, so the weights
+    /// term must carry every resident weight itself.
+    LawResidue,
+    /// `MlxRequestPlan::generic_headroom_bytes`: the pre-epic geometry-blind allowance, which the
+    /// sc-18096 accounting defines as carrying rung 4's window slice.
+    GenericHeadroom,
+}
+
+/// The IMAGE lane's floor weights term (sc-22667): [`estimate_floor_weights_bytes`] with rung 4's
+/// resident window stated as the image law states it — `transformer x min(window, blocks) /
+/// blocks` — WHEN the facts carry a block count. Without one the window share is unknowable and
+/// the term depends on what carries the slice: under the generic headroom, the pre-epic
+/// whole-transformer-out accounting (the headroom/allowance term carries it); under the law's
+/// residue, the whole transformer stays resident (the law's own reading — the residue carries no
+/// weights, so nothing else would). See the regimes on [`estimate_floor_weights_bytes`].
+/// `transformer_window` is the selected `transformer_window_size`; `facts` are the contract's
+/// architecture facts (`video_admission::architecture_facts_from_contract`). All three inputs are
+/// ignored unless the composition engages `BoundedTransformerResidency`.
+pub(crate) fn image_floor_weights_bytes(
+    contract: &MemoryProviderContract,
+    engaged: &[MemoryStrategy],
+    transformer_window: Option<u32>,
+    facts: sceneworks_core::memory_anchor::ArchitectureFacts,
+    activation: ImageFloorActivationTerm,
+) -> u64 {
+    let windows = engaged.contains(&MemoryStrategy::BoundedTransformerResidency);
+    let resident_window = match (facts.transformer_blocks, activation) {
+        _ if !windows => 0,
+        // A block count, or the law's residue without one: the law's helper, which states the
+        // share when it can and keeps the whole transformer when it cannot.
+        (Some(_), _) | (None, ImageFloorActivationTerm::LawResidue) => {
+            sceneworks_core::memory_anchor::windowed_transformer_bytes(
+                contract.asset_facts.transformer_bytes,
+                transformer_window,
+                facts.transformer_blocks,
+            )
+        }
+        // No block count under the generic headroom: the pre-epic accounting, zero resident
+        // window — the headroom term carries the slice.
+        (None, ImageFloorActivationTerm::GenericHeadroom) => 0,
+    };
+    floor_weights_bytes(contract, engaged, resident_window)
+}
+
+/// The shared arithmetic: `resident_window_bytes` is what rung 4 keeps resident of the
+/// transformer once the rung has removed it (0 on the video lane, the law's share on the image
+/// lane), clamped at the load-exact transformer so no lane can state more than it loads.
+fn floor_weights_bytes(
+    contract: &MemoryProviderContract,
+    engaged: &[MemoryStrategy],
+    resident_window_bytes: u64,
+) -> u64 {
     let facts = contract.asset_facts;
     let conditioning = facts.conditioning_bytes;
     let staged = engaged.contains(&MemoryStrategy::StagedResidency);
@@ -2402,7 +2629,9 @@ pub(crate) fn estimate_floor_weights_bytes(
             .saturating_sub(intra_transformer_evicted_bytes(contract))
             .max(facts.transformer_bytes)
     } else if bounded_transformer {
-        heavy_load_exact.saturating_sub(facts.transformer_bytes)
+        heavy_load_exact
+            .saturating_sub(facts.transformer_bytes)
+            .saturating_add(resident_window_bytes.min(facts.transformer_bytes))
     } else {
         heavy_load_exact
     };
@@ -2714,9 +2943,13 @@ fn estimate_floor_parameters(
 ///    conjunct holds. Deliberately AHEAD of the floor: the derivation prices its own uncertainty
 ///    terms, so the selector grades it with no additional allowance, where the floor's activation
 ///    term carries the full measured allocator-envelope allowance.
-/// 3. **Weights + headroom floor** — [`estimate_floor_weights_bytes`] plus the exact same
-///    fixed-reserve + area-scaled headroom the resident baseline charges
-///    ([`MlxRequestPlan::generic_headroom_bytes`]).
+/// 3. **Weights + activation floor** — [`estimate_floor_weights_bytes`] plus an activation term
+///    that is, in preference order (sc-22665, epic 22657 E4): the image derivation law's per-phase
+///    residue for THIS rung's regime, priced off the same measured anchor rung 2 uses
+///    ([`mlx_image_anchor_activation_residue`]), so the request's decode tile, attention chunk and
+///    transformer window reach the estimate; otherwise the exact same fixed-reserve + area-scaled
+///    headroom the resident baseline charges ([`MlxRequestPlan::generic_headroom_bytes`]), which
+///    is what every request the anchor or the law refuses keeps — at this pin, all of them.
 ///
 /// The MLX-conservative estimate margin is NOT applied here — the selector owns margin widening
 /// (`memory_strategy::select_strategy`), exactly as it owns the sc-18095 stale widening.
@@ -2891,9 +3124,11 @@ fn synthesize_estimate_ladder(
             //    per-phase allocator envelopes upper-bounding every optimized composition — and
             //    OUTRANKS the generic weights+headroom floor below whenever the anchor is current
             //    and every identity/regime conjunct holds (`mlx_image_anchor_derived_peak`). The
-            //    selector adds nothing on top: the derivation prices its own coefficient and
-            //    allocator-envelope terms (`ladder_margin_policy` grades `EstimateAnchorDerived`
-            //    as fully priced).
+            //    selector charges it the lane's same-cell recapture spread and nothing else
+            //    (`ladder_margin_policy`: the image law fits and widens nothing, so that spread
+            //    is the one uncertainty left over its peak — sc-22663). At this pin the packaged
+            //    flux2 rows are outside the law's domain and this arm yields to the floor; see
+            //    `MemoryAnchor::derive_mlx_image_phase_peaks`.
             let anchored =
                 mlx_image_anchor_derived_peak(contract, plan, mode_key, overlay, geometry)
                     .and_then(|(predicted_peak_bytes, anchor_id)| {
@@ -2927,7 +3162,9 @@ fn synthesize_estimate_ladder(
                                 predicted_peak_bytes,
                                 calibration_fingerprint,
                             ),
-                            basis: CandidateBasis::EstimateAnchorDerived,
+                            basis: CandidateBasis::EstimateAnchorDerived {
+                                lane: crate::memory_strategy::AnchorDerivationLane::Image,
+                            },
                             // The anchor derivation decomposes its peak by PHASE, not into counted
                             // weights plus an activation remainder — same reason as the fitted arm.
                             unmodeled_activation_bytes: None,
@@ -2952,14 +3189,52 @@ fn synthesize_estimate_ladder(
             if contract.validate_selection(&selection).is_err() {
                 continue;
             }
-            let floor_activation_bytes = plan.generic_headroom_bytes(geometry);
-            let predicted_peak_bytes = estimate_floor_weights_bytes(contract, &engaged)
-                .saturating_add(floor_activation_bytes);
+            //    Its ACTIVATION term is the sc-22663 law's per-phase residue for this rung's own
+            //    regime whenever the anchor can price it (sc-22665, E4) — so the tile, the
+            //    attention chunk and the transformer window reach the MLX estimate instead of the
+            //    geometry-blind generic headroom, which stays the fallback for every request the
+            //    anchor or the law refuses (at this pin: all of them — see
+            //    `mlx_image_anchor_activation_residue`).
+            let facts = crate::video_admission::architecture_facts_from_contract(contract);
+            let derived_residue = mlx_image_anchor_activation_residue(
+                contract,
+                plan,
+                mode_key,
+                overlay,
+                geometry,
+                &engaged,
+                parameter_candidate.parameters,
+                facts,
+            );
+            let (floor_activation_bytes, activation_term) = match &derived_residue {
+                Some((residue, _)) => (*residue, ImageFloorActivationTerm::LawResidue),
+                None => (
+                    plan.generic_headroom_bytes(geometry),
+                    ImageFloorActivationTerm::GenericHeadroom,
+                ),
+            };
+            // The weights term states rung 4's resident window as the law does (sc-22667): the
+            // image lane's floor and the candle ladder price ONE windowed residency. It is told
+            // which activation term it is composed with, because without a block count that is
+            // what decides whether the window slice is carried by the headroom or must stay in
+            // the weights.
+            let predicted_peak_bytes = image_floor_weights_bytes(
+                contract,
+                &engaged,
+                parameter_candidate.parameters.transformer_window_size,
+                facts,
+                activation_term,
+            )
+            .saturating_add(floor_activation_bytes);
             tracing::info!(
                 route = contract.provider_id,
                 backend = "mlx",
                 ?strategy,
                 raw_peak_bytes = predicted_peak_bytes,
+                activation_bytes = floor_activation_bytes,
+                activation_anchor = derived_residue
+                    .as_ref()
+                    .map(|(_, anchor_id)| anchor_id.as_str()),
                 "synthesized weights+headroom floor estimate candidate"
             );
             let candidate = SynthesizedEstimate {
@@ -8718,9 +8993,92 @@ mod tests {
     /// the fixture facts (base 3 GiB all-transformer, headroom 2 fixed + 4 area) and spelled out in
     /// full on [`unmeasured_provider_under_a_small_budget_selects_a_deep_estimate_rung`]:
     /// resident / staged / bounded-decode / bounded-attention all floor at 3 + 6 = 9 GiB, while
-    /// rung 4 windows the transformer out of residency and floors at 0 + 6 = 6 GiB.
-    const FIXTURE_DEEP_ESTIMATE_FLOOR_GB: f64 = 6.0;
+    /// rung 4 windows the transformer down to its RESIDENT WINDOW (sc-22667: the law's share,
+    /// `FULL_LADDER_WEIGHTS_GB x 2 / FULL_LADDER_FIXTURE_BLOCKS` = 2 GiB under the injected
+    /// fixture facts) and floors at 2 + 6 = 8 GiB.
+    const FIXTURE_DEEP_ESTIMATE_FLOOR_GB: f64 = 6.0 + FULL_LADDER_RESIDENT_WINDOW_GB;
     const FIXTURE_SHALLOW_ESTIMATE_FLOOR_GB: f64 = 9.0;
+
+    /// The block count the full-ladder fixture states through the `architecture_facts_from_contract`
+    /// seam (sc-22667): with the smallest declared window (2) of these blocks resident, rung 4
+    /// keeps `FULL_LADDER_RESIDENT_WINDOW_GB` of its all-transformer weights. Under the DEFAULT
+    /// facts (no block count) the floor keeps the PRE-EPIC accounting (whole transformer out) —
+    /// `without_facts_the_deep_rung_floor_keeps_the_pre_epic_accounting_and_admits` grades that
+    /// arm; every deep-rung admission fixture below injects these facts to grade the share.
+    const FULL_LADDER_FIXTURE_BLOCKS: u32 = 40;
+    const FULL_LADDER_RESIDENT_WINDOW_GB: f64 =
+        FULL_LADDER_WEIGHTS_GB * 2.0 / FULL_LADDER_FIXTURE_BLOCKS as f64;
+    const FULL_LADDER_FIXTURE_FACTS: sceneworks_core::memory_anchor::ArchitectureFacts =
+        sceneworks_core::memory_anchor::ArchitectureFacts {
+            attention_heads: None,
+            head_dim: None,
+            transformer_blocks: Some(FULL_LADDER_FIXTURE_BLOCKS),
+            patch_size: None,
+            latent_channels: None,
+            vae_spatial_scale: None,
+            vae_temporal_scale: None,
+            activation_dtype_width: None,
+        };
+
+    /// sc-22667 (coordinator decision after the macOS lane): with NO block count on the facts
+    /// (this pin), the MLX image floor's rung-4 weights term keeps the PRE-EPIC accounting — the
+    /// whole transformer out, its window carried by the headroom/allowance term — so a shipped,
+    /// unmeasured model keeps admitting on the deep rung exactly as before the epic. Graded on
+    /// the full-ladder fixture WITHOUT injected facts: rung 4 admits at its pre-epic floor
+    /// (0 + 6 GiB raw), one window below the injected-facts fixtures' 2 GiB resident share. The
+    /// arithmetic is the one the macOS-only shipped Krea/SDXL fixtures (40/5/35 GiB, 6 GiB
+    /// headroom, 40 GiB host) depend on: rung 4 weights `max(5, 40 - 5 - 35 + 0) = 5` GiB, plus
+    /// 6 GiB headroom, widened by the floor allowance to ~29.6 GiB admitted — under 40 — where a
+    /// whole-transformer share would price 40 + 6 = 46 raw, ~51.8 admitted, and refuse.
+    ///
+    /// MUTATION: dropping the `None` arm of `image_floor_weights_bytes` (whole transformer
+    /// resident without a block count) refuses here and reds the `expect`; the identity
+    /// assertion reds if the fallback keeps any window at all.
+    #[test]
+    fn without_facts_the_deep_rung_floor_keeps_the_pre_epic_accounting_and_admits() {
+        let generator = full_ladder_generator();
+        let mut plan = fixture_plan();
+        plan.calibration = MlxCalibrationConfig::Absent;
+        let inputs = fixture_inputs(1024, 1024);
+        // A budget that admits rung 4 at its PRE-EPIC floor (6 GiB raw) but not at the
+        // injected-facts share (8 GiB raw): the midpoint of the two widened ceilings.
+        let pre_epic = widened_estimate_gb(6.0);
+        let with_share = widened_estimate_gb(FIXTURE_DEEP_ESTIMATE_FLOOR_GB);
+        assert!(pre_epic < with_share);
+        let evaluation = evaluate_request_with_budget(
+            &generator,
+            &plan,
+            &inputs,
+            MemoryCacheState::Cold,
+            OffloadPolicy::Resident,
+            fixture_budget((pre_epic + with_share) / 2.0),
+            full_ladder_baseline_bytes(),
+            0,
+            &[],
+        )
+        .expect("with no block count rung 4 prices at its pre-epic floor and admits");
+        assert_eq!(
+            evaluation.context.selection.strategy,
+            MemoryStrategy::BoundedTransformerResidency
+        );
+        let contract = generator.contract.as_ref().expect("contract");
+        let engaged = contract.engaged_composition_for_selection(&evaluation.context.selection);
+        assert_eq!(
+            image_floor_weights_bytes(
+                contract,
+                &engaged,
+                evaluation
+                    .context
+                    .selection
+                    .parameters
+                    .transformer_window_size,
+                crate::video_admission::architecture_facts_from_contract(contract),
+                ImageFloorActivationTerm::GenericHeadroom,
+            ),
+            estimate_floor_weights_bytes(contract, &engaged),
+            "without a block count the image floor IS the pre-epic floor"
+        );
+    }
 
     /// The fixture's flat activation-headroom term (2 GiB fixed reserve + 4 GiB area at 1024²) —
     /// the ONLY uncertain half of every floor above, and the term sc-22508's allowance is charged
@@ -9350,6 +9708,8 @@ mod tests {
     /// today's fractions.
     #[test]
     fn the_legacy_resident_baseline_is_graded_without_a_declared_activation_split() {
+        // sc-22667: the fixture's block count through the production facts seam.
+        let _facts = crate::video_admission::inject_architecture_facts(FULL_LADDER_FIXTURE_FACTS);
         let generator = full_ladder_generator();
         let mut plan = fixture_plan();
         plan.calibration = MlxCalibrationConfig::Absent;
@@ -9416,6 +9776,8 @@ mod tests {
     /// ceiling and the cheapest shallower candidate, so exactly one rung admits.
     #[test]
     fn unmeasured_provider_under_a_small_budget_selects_a_deep_estimate_rung() {
+        // sc-22667: the fixture's block count through the production facts seam.
+        let _facts = crate::video_admission::inject_architecture_facts(FULL_LADDER_FIXTURE_FACTS);
         let generator = full_ladder_generator();
         let mut plan = fixture_plan();
         plan.calibration = MlxCalibrationConfig::Absent;
@@ -9510,6 +9872,8 @@ mod tests {
 
     #[test]
     fn pulid_identity_route_is_estimated_only_and_refusal_is_terminal() {
+        // sc-22667: the fixture's block count through the production facts seam.
+        let _facts = crate::video_admission::inject_architecture_facts(FULL_LADDER_FIXTURE_FACTS);
         let mut generator = full_ladder_generator();
         generator.descriptor.id = "pulid_flux";
         let contract = generator.contract.as_mut().expect("fixture contract");
@@ -9640,6 +10004,8 @@ mod tests {
 
     #[test]
     fn krea_raw_estimate_floor_selects_exact_native_and_pid_decode_domains() {
+        // sc-22667: the fixture's block count through the production facts seam.
+        let _facts = crate::video_admission::inject_architecture_facts(FULL_LADDER_FIXTURE_FACTS);
         let mut generator = full_ladder_generator();
         generator.descriptor.id = "krea_2_raw";
         let contract = generator.contract.as_mut().expect("fixture contract");
@@ -9707,6 +10073,8 @@ mod tests {
 
     #[test]
     fn flux2_klein_provider_axes_and_estimate_floor_keep_native_and_pid_domains_exact() {
+        // sc-22667: the fixture's block count through the production facts seam.
+        let _facts = crate::video_admission::inject_architecture_facts(FULL_LADDER_FIXTURE_FACTS);
         let mut composed = LoadSpec::new(WeightsSource::Dir("klein".into()))
             .with_adapters(vec![gen_core::AdapterSpec::new(
                 "adapter.safetensors".into(),
@@ -10066,6 +10434,8 @@ mod tests {
 
     #[test]
     fn krea_turbo_and_edit_routes_use_provider_exact_estimated_authority() {
+        // sc-22667: the fixture's block count through the production facts seam.
+        let _facts = crate::video_admission::inject_architecture_facts(FULL_LADDER_FIXTURE_FACTS);
         for (provider, model_id, mode, references) in [
             ("krea_2_turbo", "krea_2_turbo", "image_generation", 0),
             ("krea_2_edit", "krea_2_raw", "edit_image", 2),
@@ -10191,6 +10561,8 @@ mod tests {
 
     #[test]
     fn uncalibrated_chroma_routes_authorize_exact_quality_backed_estimates() {
+        // sc-22667: the fixture's block count through the production facts seam.
+        let _facts = crate::video_admission::inject_architecture_facts(FULL_LADDER_FIXTURE_FACTS);
         for route in ["chroma1_hd", "chroma1_flash"] {
             let mut generator = full_ladder_generator();
             generator.descriptor.id = route;
@@ -11091,8 +11463,17 @@ mod tests {
     }
 
     /// The packaged store with the flux2 anchors re-stamped at the loader-closure digest the pin
-    /// currently DECLARES — the same construction (and the same rationale) as
-    /// `vram_gate::tests::krea_live_anchor_store`.
+    /// currently DECLARES, so the gate's derivation can be graded on them.
+    ///
+    /// sc-22667 retired this construction for the candle lanes (`vram_gate::tests::
+    /// krea_packaged_anchor_store`, `candle_memory_strategy::tests::sc_22667_packaged_anchor_store`):
+    /// those rows are now current at the pin by a reviewed attestation and the tests price from
+    /// the packaged store unmodified. The flux2 MLX rows are NOT attested — they were measured at
+    /// 10831e4c / 75d66db5 and nobody has read the mlx-gen-flux2 closure diff since, so they
+    /// honestly read stale (`packaged_anchor_currency_is_reported_not_gated`) and production
+    /// prices them from the floor. This re-stamp therefore grades the derivation's arithmetic on
+    /// the measured numbers, not the shipped currency; retiring it means an attestation (a read
+    /// diff, or a nax re-measure) for `flux2_dev:mlx`, which is its own story.
     fn flux2_live_anchor_store() -> sceneworks_core::memory_anchor::MemoryAnchorStore {
         let mut store = sceneworks_core::memory_anchor::packaged_memory_anchors()
             .expect("the packaged anchor store")
@@ -11110,6 +11491,46 @@ mod tests {
             if anchor.model_id == "flux2_dev" {
                 anchor.source.loader_closure_digest.clone_from(&digest);
             }
+        }
+        store
+    }
+
+    /// [`flux2_live_anchor_store`] with the flux2 anchors' phase peaks lifted INTO the core law's
+    /// domain for the fixture contract's component bytes. The packaged flux2 rows are outside it
+    /// (sc-22663 review, D3): their conditioning-phase active peak is 1.26 MB against the eager
+    /// resident set they claim, so `MemoryAnchor::derive_phase_peaks` refuses them with any
+    /// non-zero component set rather than clamp a negative residue to zero (core test
+    /// `the_packaged_mlx_anchors_are_outside_the_laws_domain`). This fixture adds the fixture's
+    /// resident set to every phase's active AND allocator level — the peaks are synthetic, the
+    /// identity, currency and regime are the packaged row's — so the ARM's wiring (identity
+    /// guards, currency, outranking the floor) is exercised on an anchor the law can price.
+    fn flux2_in_domain_anchor_store() -> sceneworks_core::memory_anchor::MemoryAnchorStore {
+        let mut store = flux2_live_anchor_store();
+        let lift = crate::video_admission::anchor_component_bytes(
+            flux2_generator()
+                .contract
+                .as_ref()
+                .expect("fixture contract")
+                .asset_facts,
+        )
+        .total();
+        assert!(lift > 0, "the fixture contract states a resident set");
+        for anchor in &mut store.anchors {
+            if anchor.model_id != "flux2_dev" {
+                continue;
+            }
+            let peaks = &mut anchor.phase_active_peak_bytes;
+            peaks.conditioning += lift;
+            peaks.denoise += lift;
+            peaks.decode += lift;
+            let allocators = anchor
+                .phase_allocator_envelope_bytes
+                .as_mut()
+                .expect("the flux2 rows carry a per-phase allocator decomposition");
+            allocators.conditioning += lift;
+            allocators.denoise += lift;
+            allocators.decode += lift;
+            anchor.overall_allocator_envelope_bytes += lift;
         }
         store
     }
@@ -11143,10 +11564,67 @@ mod tests {
         )
     }
 
-    /// E2/E7 wired: on a legacy image-MLX route with a CURRENT anchor, every implemented
-    /// optimized rung's estimate is the anchor-derived candidate — at exactly the core law's
-    /// derived admission peak — and it OUTRANKS the generic weights+headroom floor, which is what
-    /// the ladder falls back to the moment the anchor's currency breaks.
+    /// The PACKAGED flux2 anchors, verbatim and current, price nothing on this fixture: the core
+    /// law refuses them (their conditioning counters saw no weights — see
+    /// `flux2_in_domain_anchor_store`), and the ladder falls to the weights+headroom floor,
+    /// never to a refusal. The differential control for the in-domain test below.
+    #[test]
+    fn the_packaged_flux2_anchors_are_refused_and_the_ladder_keeps_its_floor() {
+        use crate::memory_strategy::CandidateBasis;
+
+        let generator = flux2_generator();
+        let components = crate::video_admission::anchor_component_bytes(
+            generator.contract.as_ref().expect("contract").asset_facts,
+        );
+        let store = flux2_live_anchor_store();
+        let anchor = store
+            .image_anchor_for(
+                "flux2_dev",
+                sceneworks_core::memory_anchor::AnchorBackend::Mlx,
+                "q4",
+            )
+            .expect("the flux2 q4 anchor");
+        assert!(
+            anchor.phase_active_peak_bytes.conditioning < components.total(),
+            "the packaged row's conditioning peak sits below the fixture's resident set"
+        );
+        assert!(anchor
+            .derive_mlx_image_phase_peaks(
+                sceneworks_core::memory_anchor::AnchorMlxImageDeriveRequest {
+                    width: flux2_geometry().width,
+                    height: flux2_geometry().height,
+                },
+                components,
+            )
+            .is_none());
+        let ladder = with_injected_image_anchor_store(store, || {
+            flux2_ladder(
+                &generator,
+                &flux2_plan(),
+                "text_to_image",
+                None,
+                flux2_geometry(),
+            )
+        });
+        assert!(
+            !ladder.estimates.is_empty(),
+            "fail to the floor, never refuse"
+        );
+        for estimate in &ladder.estimates {
+            assert_eq!(
+                estimate.basis,
+                CandidateBasis::EstimateFloor,
+                "{:?}: an out-of-domain anchor must leave the floor in place",
+                estimate.selection.strategy
+            );
+        }
+    }
+
+    /// E2/E7 wired: on a legacy image-MLX route with a CURRENT anchor the law can price (see
+    /// `flux2_in_domain_anchor_store`), every implemented optimized rung's estimate is the
+    /// anchor-derived candidate — at exactly the core law's derived admission peak, on the image
+    /// lane — and it OUTRANKS the generic weights+headroom floor, which is what the ladder falls
+    /// back to the moment the anchor's currency breaks.
     #[test]
     fn the_image_anchor_prices_the_mlx_ladder_ahead_of_the_floor() {
         use crate::memory_strategy::CandidateBasis;
@@ -11154,7 +11632,7 @@ mod tests {
         let generator = flux2_generator();
         let plan = flux2_plan();
         let geometry = flux2_geometry();
-        let store = flux2_live_anchor_store();
+        let store = flux2_in_domain_anchor_store();
         let expected_peak = store
             .image_anchor_for(
                 "flux2_dev",
@@ -11167,6 +11645,9 @@ mod tests {
                     width: geometry.width,
                     height: geometry.height,
                 },
+                crate::video_admission::anchor_component_bytes(
+                    generator.contract.as_ref().expect("contract").asset_facts,
+                ),
             )
             .expect("the anchor prices the request")
             .peak_bytes();
@@ -11181,7 +11662,9 @@ mod tests {
         for estimate in &ladder.estimates {
             assert_eq!(
                 estimate.basis,
-                CandidateBasis::EstimateAnchorDerived,
+                CandidateBasis::EstimateAnchorDerived {
+                    lane: crate::memory_strategy::AnchorDerivationLane::Image,
+                },
                 "{:?}: a current anchor must outrank the weights+headroom floor",
                 estimate.selection.strategy
             );
@@ -11198,7 +11681,7 @@ mod tests {
 
         // Currency mutation: rotate the anchor's recorded digest and the whole ladder falls back
         // to the floor — fail to the floor, never refuse.
-        let mut stale = flux2_live_anchor_store();
+        let mut stale = flux2_in_domain_anchor_store();
         for anchor in &mut stale.anchors {
             if anchor.model_id == "flux2_dev" {
                 anchor.source.loader_closure_digest = "d".repeat(64);
@@ -11364,7 +11847,7 @@ mod tests {
             ),
         ];
         for (label, build) in cases {
-            let ladder = with_injected_image_anchor_store(flux2_live_anchor_store(), build);
+            let ladder = with_injected_image_anchor_store(flux2_in_domain_anchor_store(), build);
             assert!(
                 !ladder.estimates.is_empty(),
                 "{label}: the ladder must fail to the floor, never refuse"
@@ -11372,12 +11855,723 @@ mod tests {
             for estimate in &ladder.estimates {
                 assert_ne!(
                     estimate.basis,
-                    CandidateBasis::EstimateAnchorDerived,
+                    CandidateBasis::EstimateAnchorDerived {
+                        lane: crate::memory_strategy::AnchorDerivationLane::Image,
+                    },
                     "{label} ({:?}): the anchor must not price a mismatched request",
                     estimate.selection.strategy
                 );
             }
         }
+    }
+
+    /// The Qwen-Image bf16 component split and architecture facts the core law's own in-domain
+    /// MLX fixture uses (`a_resident_mlx_anchor_whose_counters_saw_its_weights_prices_the_ladder
+    /// _in_order`): 16.6 GB of Qwen2.5-VL text encoder, ~254 MB of VAE, the rest DiT; 24 heads of
+    /// 128 over 60 blocks, patch 2 on the 16-channel x8 VAE, bf16 activations. Restated here
+    /// because the worker fixture must state the SAME model on both sides of the derivation — the
+    /// contract's asset facts and the anchor's component bytes are one model's, not two.
+    const QWEN_IN_DOMAIN_COMPONENTS: sceneworks_core::memory_anchor::ComponentBytes =
+        sceneworks_core::memory_anchor::ComponentBytes {
+            conditioning: 16_600_000_000,
+            transformer: 40_880_000_000,
+            decoder: 253_806_592,
+        };
+
+    const QWEN_IN_DOMAIN_FACTS: sceneworks_core::memory_anchor::ArchitectureFacts =
+        sceneworks_core::memory_anchor::ArchitectureFacts {
+            attention_heads: Some(24),
+            head_dim: Some(128),
+            transformer_blocks: Some(60),
+            patch_size: Some(2),
+            latent_channels: Some(16),
+            vae_spatial_scale: Some(8),
+            vae_temporal_scale: Some(1),
+            activation_dtype_width: Some(2),
+        };
+
+    /// The flux2 fixture generator with its asset facts restated as [`QWEN_IN_DOMAIN_COMPONENTS`],
+    /// so `anchor_component_bytes` off this contract is exactly the component set the in-domain
+    /// anchor below was built against.
+    fn qwen_in_domain_generator() -> RequestGenerator {
+        let mut generator = flux2_generator();
+        let facts = &mut generator
+            .contract
+            .as_mut()
+            .expect("fixture contract")
+            .asset_facts;
+        facts.conditioning_bytes = QWEN_IN_DOMAIN_COMPONENTS.conditioning;
+        facts.transformer_bytes = QWEN_IN_DOMAIN_COMPONENTS.transformer;
+        facts.decoder_bytes = QWEN_IN_DOMAIN_COMPONENTS.decoder;
+        facts.base_bytes = QWEN_IN_DOMAIN_COMPONENTS.total();
+        generator
+    }
+
+    /// A store whose flux2 q4 row is the SYNTHETIC in-domain resident MLX anchor the core law's
+    /// fixture defines — measured at 1024x1024 with every phase peak the whole component set plus
+    /// a stated activation residue (+0.5 / +6 / +12 GB) and an allocator level a stated envelope
+    /// above each (+0.1 / +1 / +2 GB). The packaged MLX rows are outside the law's domain by
+    /// design (their conditioning counters never saw their weights — core test
+    /// `the_packaged_mlx_anchors_are_outside_the_laws_domain`), and sc-22667 owns re-capturing a
+    /// real one; the identity, route, provider, mode and currency here are the packaged row's, so
+    /// only the numbers are synthetic.
+    fn qwen_in_domain_anchor_store() -> sceneworks_core::memory_anchor::MemoryAnchorStore {
+        use sceneworks_core::memory_anchor::{AnchorGeometry, AnchorPhaseBytes};
+
+        let mut store = flux2_live_anchor_store();
+        let total = QWEN_IN_DOMAIN_COMPONENTS.total();
+        for anchor in &mut store.anchors {
+            if anchor.model_id != "flux2_dev" {
+                continue;
+            }
+            anchor.underived_reason = None;
+            anchor.geometry = AnchorGeometry {
+                width: 1024,
+                height: 1024,
+                frames: 1,
+                fps: None,
+            };
+            anchor.phase_active_peak_bytes = AnchorPhaseBytes {
+                conditioning: total + 500_000_000,
+                denoise: total + 6_000_000_000,
+                decode: total + 12_000_000_000,
+            };
+            anchor.phase_allocator_envelope_bytes = Some(AnchorPhaseBytes {
+                conditioning: total + 500_000_000 + 100_000_000,
+                denoise: total + 6_000_000_000 + 1_000_000_000,
+                decode: total + 12_000_000_000 + 2_000_000_000,
+            });
+            anchor.overall_allocator_envelope_bytes = total + 14_000_000_000;
+        }
+        store
+    }
+
+    /// The estimate the FLOOR arm composes for one rung: the contract-decomposed weights term plus
+    /// the derived activation residue, exactly as `synthesize_estimate_ladder`'s third tier does.
+    /// `None` where the floor would keep `generic_headroom_bytes` instead.
+    fn qwen_in_domain_floor_estimate(
+        generator: &RequestGenerator,
+        engaged: &[MemoryStrategy],
+        parameters: gen_core::MemoryStrategyParameters,
+        facts: sceneworks_core::memory_anchor::ArchitectureFacts,
+    ) -> Option<u64> {
+        let contract = generator.contract.as_ref().expect("contract");
+        let (residue, _) = mlx_image_anchor_activation_residue(
+            contract,
+            &flux2_plan(),
+            "text_to_image",
+            None,
+            MemoryGeometry {
+                width: 1024,
+                height: 1024,
+                batch: 1,
+                frames: 1,
+                reference_count: 0,
+            },
+            engaged,
+            parameters,
+            facts,
+        )?;
+        Some(
+            image_floor_weights_bytes(
+                contract,
+                engaged,
+                parameters.transformer_window_size,
+                facts,
+                ImageFloorActivationTerm::LawResidue,
+            )
+            .saturating_add(residue),
+        )
+    }
+
+    /// AC 1 (sc-22665, epic 22657 E4) — the MLX estimate floor's activation term is the sc-22663
+    /// law's per-phase residue for the RUNG's own regime, so the decode tile, the attention chunk
+    /// and the transformer window reach the estimate where `generic_headroom_bytes` charged the
+    /// same geometry-blind number to every rung.
+    ///
+    /// Graded on the in-domain resident MLX anchor (see `qwen_in_domain_anchor_store`) at 1024²,
+    /// where the request's 4096 image tokens plus 512 prompt tokens make the full bf16 score
+    /// tensor `24 x 4608² x 2` ≈ 1.02 GB against the 64 Mi-score chunk's 128 MB — the condition
+    /// AC 1 names for the chunked rung to price below the staged one.
+    ///
+    /// MUTATION (the story's): feed `ArchitectureFacts::default()` — what the contract states at
+    /// this pin — and the chunk scales nothing, so rung 3's estimate is rung 2's again. That is
+    /// the honest state of the lane until sc-22667, and it is asserted rather than hidden.
+    #[test]
+    fn the_mlx_estimate_floor_prices_each_rungs_own_regime_through_the_derivation_law() {
+        let generator = qwen_in_domain_generator();
+        let staged = [MemoryStrategy::Resident, MemoryStrategy::StagedResidency];
+        // The ladder's compositions are CUMULATIVE, so the chunked rung tiles decode as well; the
+        // chunk's own contribution is isolated against `tiled` below.
+        let tiled = [
+            MemoryStrategy::Resident,
+            MemoryStrategy::StagedResidency,
+            MemoryStrategy::BoundedDecode,
+        ];
+        let chunked = [
+            MemoryStrategy::Resident,
+            MemoryStrategy::StagedResidency,
+            MemoryStrategy::BoundedDecode,
+            MemoryStrategy::BoundedAttention,
+        ];
+        let windowed = [
+            MemoryStrategy::Resident,
+            MemoryStrategy::StagedResidency,
+            MemoryStrategy::BoundedDecode,
+            MemoryStrategy::BoundedAttention,
+            MemoryStrategy::BoundedTransformerResidency,
+        ];
+        let bare = gen_core::MemoryStrategyParameters::default();
+        let tile_only = gen_core::MemoryStrategyParameters {
+            decode_tile_edge: Some(512),
+            decode_overlap: Some(128),
+            ..Default::default()
+        };
+        let tile_and_chunk = gen_core::MemoryStrategyParameters {
+            attention_chunk_size: Some(64 * 1024 * 1024),
+            ..tile_only
+        };
+        let fully_engaged = gen_core::MemoryStrategyParameters {
+            decode_tile_edge: Some(512),
+            decode_overlap: Some(128),
+            attention_chunk_size: Some(64 * 1024 * 1024),
+            transformer_window_size: Some(1),
+            ..Default::default()
+        };
+
+        let estimate = |engaged: &[MemoryStrategy], parameters, facts| {
+            with_injected_image_anchor_store(qwen_in_domain_anchor_store(), || {
+                qwen_in_domain_floor_estimate(&generator, engaged, parameters, facts)
+            })
+            .expect("the in-domain anchor prices this rung")
+        };
+
+        let rung_2 = estimate(&staged, bare, QWEN_IN_DOMAIN_FACTS);
+        let rung_3 = estimate(&chunked, tile_and_chunk, QWEN_IN_DOMAIN_FACTS);
+        let rung_4 = estimate(&windowed, fully_engaged, QWEN_IN_DOMAIN_FACTS);
+        assert!(
+            rung_3 < rung_2,
+            "the chunked rung must price below the unbounded rung: {rung_3} vs {rung_2}"
+        );
+        assert!(
+            rung_4 < rung_2,
+            "the windowed rung must price below the staged rung: {rung_4} vs {rung_2}"
+        );
+        assert!(
+            rung_4 < rung_3,
+            "the transformer window must price below the chunked rung: {rung_4} vs {rung_3}"
+        );
+
+        // The residue is what moved, not only the weights term: the same rungs graded with an
+        // IDENTICAL weights term still order the same way, and the CHUNK's own contribution is
+        // visible against the same composition tiled but unchunked — at 1024² the denoise phase
+        // binds once decode is tiled, so replacing the ~1.02 GB score tensor with the 128 MB
+        // chunk budget moves the estimate on its own.
+        let residue = |engaged: &[MemoryStrategy], parameters| {
+            with_injected_image_anchor_store(qwen_in_domain_anchor_store(), || {
+                mlx_image_anchor_activation_residue(
+                    generator.contract.as_ref().expect("contract"),
+                    &flux2_plan(),
+                    "text_to_image",
+                    None,
+                    MemoryGeometry {
+                        width: 1024,
+                        height: 1024,
+                        batch: 1,
+                        frames: 1,
+                        reference_count: 0,
+                    },
+                    engaged,
+                    parameters,
+                    QWEN_IN_DOMAIN_FACTS,
+                )
+            })
+            .expect("the in-domain anchor prices this rung")
+            .0
+        };
+        assert!(residue(&tiled, tile_only) < residue(&staged, bare));
+        assert!(
+            residue(&chunked, tile_and_chunk) < residue(&tiled, tile_only),
+            "the attention chunk alone must lower the residue"
+        );
+        // The window is a RESIDENCY bound: it moves the weights term, never the activation one.
+        assert_eq!(
+            residue(&windowed, fully_engaged),
+            residue(&chunked, tile_and_chunk)
+        );
+
+        // THE FIXTURE PREMISE, spelled out and pinned (sc-22665 review round). This contract's
+        // `base_bytes` IS the law's component set, with no auxiliary resident component, so the
+        // floor's weights term is exactly the components the anchor's measured peaks were
+        // decomposed against — which is what makes the identity below an identity. A real
+        // contract that breaks the premise (`base_bytes` above the component sum, or an
+        // auxiliary component the anchor never held) prices the floor ABOVE the anchor's measured
+        // allocator level with nothing else in this file able to see it, and these three
+        // assertions are what catches that the moment sc-22667 wires a real one.
+        let contract = generator.contract.as_ref().expect("contract");
+        let unbounded = [MemoryStrategy::Resident];
+        let weights = estimate_floor_weights_bytes(contract, &unbounded);
+        let store = qwen_in_domain_anchor_store();
+        let anchor = store
+            .image_anchor_for(
+                "flux2_dev",
+                sceneworks_core::memory_anchor::AnchorBackend::Mlx,
+                "q4",
+            )
+            .expect("the injected q4 anchor");
+        let rung_1 = estimate(&unbounded, bare, QWEN_IN_DOMAIN_FACTS);
+
+        // THE IDENTITY THAT HOLDS, at the anchor's own geometry and its own unbounded resident
+        // regime: the floor reproduces the anchor's measured ACTIVE peak in the binding phase
+        // (decode) to the byte. It does NOT reproduce the anchor's ALLOCATOR level, and must not
+        // — the gap between the two is the retained envelope, which the SELECTOR charges as
+        // `FLOOR_ALLOCATOR_ENVELOPE_ALLOWANCE` over this activation term
+        // (`ladder_margin_policy::admission_allowance`, `EstimateFloor` arm). An estimate that
+        // already equalled the allocator level would be an envelope charged twice.
+        assert_eq!(
+            rung_1, anchor.phase_active_peak_bytes.decode,
+            "the unbounded floor is the anchor's measured ACTIVE peak, not its allocator level"
+        );
+        // The premise restated as its own two assertions, so a future fixture edit that breaks it
+        // names the reason rather than only reporting a byte mismatch above.
+        assert_eq!(
+            contract.asset_facts.base_bytes,
+            QWEN_IN_DOMAIN_COMPONENTS.total(),
+            "the fixture's weights are the law's component set, exactly"
+        );
+        assert_eq!(
+            weights,
+            QWEN_IN_DOMAIN_COMPONENTS.total(),
+            "the unbounded resident weights term counts the component set and nothing else"
+        );
+        assert_eq!(
+            anchor.overall_allocator_envelope_bytes - rung_1,
+            anchor
+                .phase_allocator_envelope_bytes
+                .expect("the fixture anchor decomposes its allocator level")
+                .decode
+                - anchor.phase_active_peak_bytes.decode,
+            "exactly the retained envelope separates the floor from the allocator level, so no \
+             envelope byte is inside the estimate"
+        );
+        // And the quantity ADMISSION actually compares against still covers the allocator level:
+        // the allowance-charged floor sits at or above the anchor's measured envelope.
+        let charged = rung_1 as f64
+            + crate::ladder_margin_policy::FLOOR_ALLOCATOR_ENVELOPE_ALLOWANCE
+                * (rung_1 - weights) as f64;
+        assert!(
+            charged >= anchor.overall_allocator_envelope_bytes as f64,
+            "the allowance-charged floor must cover the anchor's measured allocator level: \
+             {charged} vs {}",
+            anchor.overall_allocator_envelope_bytes
+        );
+
+        // MUTATION — with the facts the contract states at THIS pin neither the chunk nor the tile
+        // scales anything, and every rung's residue is the unbounded one again.
+        let blind = sceneworks_core::memory_anchor::ArchitectureFacts::default();
+        assert_eq!(
+            estimate(&chunked, tile_and_chunk, blind),
+            estimate(&staged, bare, blind),
+            "without architecture facts the chunk and the tile cannot shrink the residue"
+        );
+        assert_eq!(
+            crate::video_admission::architecture_facts_from_contract(
+                generator.contract.as_ref().expect("contract")
+            ),
+            blind,
+            "the contract states no architecture facts at this pin (sc-22667 wires them)"
+        );
+    }
+
+    /// sc-22667 round-2 review (b): an in-domain anchor whose contract states NO block count
+    /// still prices rung 4 through the law's residue — and that residue carries neither weights
+    /// nor the window slice. Before the fix the weights term removed the whole transformer
+    /// (the pre-epic accounting, whose slice lives in the GENERIC headroom that this rung is no
+    /// longer composed with), so rung 4's window was charged nowhere and the rung priced a whole
+    /// transformer below rung 3 with no fact behind the saving. Now the transformer stays
+    /// resident: rung 4 prices exactly as rung 3, at the law's own erring-large reading, until a
+    /// block count makes the share knowable — and with one it prices the share.
+    ///
+    /// MUTATION: `(None, LawResidue) => 0` in `image_floor_weights_bytes` (the pre-fix code)
+    /// makes the blind rung 4 price `transformer_bytes` below rung 3 and reds the first and third
+    /// assertions.
+    #[test]
+    fn without_a_block_count_a_law_priced_rung_4_keeps_the_transformer_resident() {
+        let generator = qwen_in_domain_generator();
+        let contract = generator.contract.as_ref().expect("contract");
+        let chunked = [
+            MemoryStrategy::Resident,
+            MemoryStrategy::StagedResidency,
+            MemoryStrategy::BoundedDecode,
+            MemoryStrategy::BoundedAttention,
+        ];
+        let windowed = [
+            MemoryStrategy::Resident,
+            MemoryStrategy::StagedResidency,
+            MemoryStrategy::BoundedDecode,
+            MemoryStrategy::BoundedAttention,
+            MemoryStrategy::BoundedTransformerResidency,
+        ];
+        let tile_and_chunk = gen_core::MemoryStrategyParameters {
+            decode_tile_edge: Some(512),
+            decode_overlap: Some(128),
+            attention_chunk_size: Some(64 * 1024 * 1024),
+            ..Default::default()
+        };
+        let fully_engaged = gen_core::MemoryStrategyParameters {
+            transformer_window_size: Some(1),
+            ..tile_and_chunk
+        };
+        // The in-domain facts with the block count withheld: every ratio but the window's is live,
+        // so the residue is the same one the block-counted rung 4 is priced with.
+        let no_blocks = sceneworks_core::memory_anchor::ArchitectureFacts {
+            transformer_blocks: None,
+            ..QWEN_IN_DOMAIN_FACTS
+        };
+        let estimate = |engaged: &[MemoryStrategy], parameters, facts| {
+            with_injected_image_anchor_store(qwen_in_domain_anchor_store(), || {
+                qwen_in_domain_floor_estimate(&generator, engaged, parameters, facts)
+            })
+            .expect("the in-domain anchor prices this rung")
+        };
+
+        let rung_3 = estimate(&chunked, tile_and_chunk, no_blocks);
+        let rung_4_blind = estimate(&windowed, fully_engaged, no_blocks);
+        let rung_4_counted = estimate(&windowed, fully_engaged, QWEN_IN_DOMAIN_FACTS);
+        assert_eq!(
+            rung_4_blind, rung_3,
+            "without a block count the law-priced rung 4 keeps the whole transformer resident and \
+             prices as rung 3: {rung_4_blind} vs {rung_3}"
+        );
+        assert!(
+            rung_4_counted < rung_4_blind,
+            "with the block count rung 4 prices the law's share below the blind reading: \
+             {rung_4_counted} vs {rung_4_blind}"
+        );
+        // The weights term alone, against the pre-fix reading: the whole transformer is what the
+        // fix keeps, and the generic-headroom regime is untouched by it.
+        let weights = |facts, term| {
+            image_floor_weights_bytes(
+                contract,
+                &windowed,
+                fully_engaged.transformer_window_size,
+                facts,
+                term,
+            )
+        };
+        assert_eq!(
+            weights(no_blocks, ImageFloorActivationTerm::LawResidue),
+            estimate_floor_weights_bytes(contract, &chunked),
+            "the law-residue regime keeps the whole transformer: rung 4's weights term is rung \
+             3's (staged: max(conditioning, transformer + decoder))"
+        );
+        assert!(
+            weights(no_blocks, ImageFloorActivationTerm::LawResidue)
+                > weights(no_blocks, ImageFloorActivationTerm::GenericHeadroom),
+            "…and above the generic-headroom regime's, which hands the transformer to its \
+             headroom term"
+        );
+        assert_eq!(
+            weights(no_blocks, ImageFloorActivationTerm::GenericHeadroom),
+            estimate_floor_weights_bytes(contract, &windowed),
+            "the generic-headroom regime is still the pre-epic floor"
+        );
+        assert_eq!(
+            weights(QWEN_IN_DOMAIN_FACTS, ImageFloorActivationTerm::LawResidue),
+            weights(
+                QWEN_IN_DOMAIN_FACTS,
+                ImageFloorActivationTerm::GenericHeadroom
+            ),
+            "with a block count the activation term no longer matters: the share is the law's"
+        );
+    }
+
+    /// AC 2 — the derived residue reaches the LADDER, per rung, and the packaged-anchor refusal
+    /// keeps the weights-plus-generic-headroom floor byte for byte.
+    ///
+    /// The differential is the anchor's own measured regime. An anchor measured under
+    /// `bounded_attention` is refused by the rung-2 lane shim (`derive_mlx_image_phase_peaks`
+    /// wants the eager unbounded resident composition) AND by the law for any request that does
+    /// not chunk — so on one ladder the staged and bounded-decode rungs keep the generic headroom
+    /// while the bounded-attention rung's floor is the law's residue. That is the wiring this
+    /// story adds, visible as a per-rung difference no `generic_headroom_bytes` can produce.
+    #[test]
+    fn the_ladder_floor_takes_the_derived_residue_per_rung_and_falls_back_when_refused() {
+        use crate::memory_strategy::CandidateBasis;
+
+        let generator = qwen_in_domain_generator();
+        let contract = generator.contract.as_ref().expect("contract");
+        let plan = flux2_plan();
+        let geometry = MemoryGeometry {
+            width: 1024,
+            height: 1024,
+            batch: 1,
+            frames: 1,
+            reference_count: 0,
+        };
+        let mut store = qwen_in_domain_anchor_store();
+        for anchor in &mut store.anchors {
+            if anchor.model_id == "flux2_dev" {
+                anchor.measured_regime.attention_chunked = true;
+            }
+        }
+        let ladder = with_injected_image_anchor_store(store.clone(), || {
+            synthesize_estimate_ladder(
+                contract,
+                &plan,
+                "text_to_image",
+                None,
+                geometry,
+                false,
+                None,
+                &[],
+            )
+        });
+        assert!(!ladder.estimates.is_empty());
+        let generic = plan.generic_headroom_bytes(geometry);
+        let mut saw_derived = false;
+        let mut saw_generic = false;
+        for estimate in &ladder.estimates {
+            assert_eq!(
+                estimate.basis,
+                CandidateBasis::EstimateFloor,
+                "{:?}: a chunk-measured anchor cannot price the rung-2 lane shim",
+                estimate.selection.strategy
+            );
+            let engaged = contract.engaged_composition_for_selection(&estimate.selection);
+            // The chunked rungs are the ones this anchor prices (the branch below), so their
+            // weights term is composed with the law's residue; the rest keep the generic headroom.
+            let activation_term = if engaged.contains(&MemoryStrategy::BoundedAttention) {
+                ImageFloorActivationTerm::LawResidue
+            } else {
+                ImageFloorActivationTerm::GenericHeadroom
+            };
+            let weights = image_floor_weights_bytes(
+                contract,
+                &engaged,
+                estimate.selection.parameters.transformer_window_size,
+                crate::video_admission::architecture_facts_from_contract(contract),
+                activation_term,
+            );
+            let activation = estimate
+                .evidence
+                .predicted_peak_bytes
+                .checked_sub(weights)
+                .expect("the floor is its weights term plus an activation term");
+            assert_eq!(
+                estimate.unmodeled_activation_bytes,
+                Some(activation),
+                "{:?}: the declared activation slice is the one the peak was built from",
+                estimate.selection.strategy
+            );
+            if engaged.contains(&MemoryStrategy::BoundedAttention) {
+                let (residue, anchor_id) = with_injected_image_anchor_store(store.clone(), || {
+                    mlx_image_anchor_activation_residue(
+                        contract,
+                        &plan,
+                        "text_to_image",
+                        None,
+                        geometry,
+                        &engaged,
+                        estimate.selection.parameters,
+                        crate::video_admission::architecture_facts_from_contract(contract),
+                    )
+                })
+                .expect("the chunked rung's regime is inside the law's domain");
+                assert_eq!(
+                    anchor_id,
+                    store
+                        .image_anchor_for(
+                            "flux2_dev",
+                            sceneworks_core::memory_anchor::AnchorBackend::Mlx,
+                            "q4",
+                        )
+                        .expect("the injected q4 anchor")
+                        .id,
+                    "the residue must come from the anchor the arm above graded"
+                );
+                assert_eq!(activation, residue);
+
+                // NO ENVELOPE BYTE IS IN THE TERM (sc-22665 review round, blocker). The selector
+                // charges `FLOOR_ALLOCATOR_ENVELOPE_ALLOWANCE` TIMES this declared slice for the
+                // retained allocator envelope above the active peak, so the slice itself must be
+                // the law's ACTIVE-derived residue — pre-adding the envelope here would seat it
+                // inside the term and then charge 3.104x of it again on top.
+                let derived_anchor = store
+                    .image_anchor_for(
+                        "flux2_dev",
+                        sceneworks_core::memory_anchor::AnchorBackend::Mlx,
+                        "q4",
+                    )
+                    .expect("the injected q4 anchor");
+                let residues = derived_anchor
+                    .derive_phase_activation_residues(
+                        &sceneworks_core::memory_anchor::ImageDeriveRequest::new(
+                            geometry.width,
+                            geometry.height,
+                            request_regime(&engaged, estimate.selection.parameters),
+                        ),
+                        crate::video_admission::anchor_component_bytes(contract.asset_facts),
+                        crate::video_admission::architecture_facts_from_contract(contract),
+                    )
+                    .expect("the chunked rung's regime is inside the law's domain");
+                let decode_envelope = derived_anchor
+                    .phase_allocator_envelope_bytes
+                    .expect("the fixture anchor decomposes its allocator level")
+                    .decode
+                    .checked_sub(derived_anchor.phase_active_peak_bytes.decode)
+                    .expect("the allocator level is at or above the active peak");
+                assert!(
+                    decode_envelope > 0,
+                    "an anchor with no retained envelope would make the bound below vacuous"
+                );
+                assert!(
+                    activation < decode_envelope + residues.decode,
+                    "the term must sit strictly below the envelope-inclusive value, i.e. carry \
+                     no envelope byte: {activation} vs {decode_envelope} + {}",
+                    residues.decode
+                );
+                // Tighter than the bound above, and the reason it is a bound and not a coincidence:
+                // the declared slice IS the law's ACTIVE-derived phase max, whole.
+                assert_eq!(
+                    activation,
+                    residues
+                        .conditioning
+                        .max(residues.denoise)
+                        .max(residues.decode),
+                    "the floor's activation term is the law's ACTIVE-derived phase max, whole"
+                );
+                assert_ne!(
+                    activation, generic,
+                    "a derived residue that happened to equal the generic headroom would make \
+                     this test vacuous"
+                );
+                saw_derived = true;
+            } else {
+                assert_eq!(
+                    activation, generic,
+                    "{:?}: an unchunked request leaves a chunk-measured anchor's residue \
+                     unpriced and keeps the generic headroom",
+                    estimate.selection.strategy
+                );
+                saw_generic = true;
+            }
+        }
+        assert!(
+            saw_derived && saw_generic,
+            "the ladder must show BOTH activation terms for this test to say anything"
+        );
+
+        // AC 2's refusal fallback, pinned: the PACKAGED anchors (negative conditioning residue)
+        // price nothing, and every rung's floor is the weights term plus the generic headroom,
+        // byte for byte — exactly what it was before this story.
+        let ladder = with_injected_image_anchor_store(flux2_live_anchor_store(), || {
+            synthesize_estimate_ladder(
+                contract,
+                &plan,
+                "text_to_image",
+                None,
+                geometry,
+                false,
+                None,
+                &[],
+            )
+        });
+        assert!(
+            !ladder.estimates.is_empty(),
+            "fail to the floor, never refuse"
+        );
+        for estimate in &ladder.estimates {
+            assert_eq!(estimate.basis, CandidateBasis::EstimateFloor);
+            let engaged = contract.engaged_composition_for_selection(&estimate.selection);
+            assert_eq!(
+                estimate.evidence.predicted_peak_bytes,
+                image_floor_weights_bytes(
+                    contract,
+                    &engaged,
+                    estimate.selection.parameters.transformer_window_size,
+                    crate::video_admission::architecture_facts_from_contract(contract),
+                    ImageFloorActivationTerm::GenericHeadroom,
+                )
+                .saturating_add(generic),
+                "{:?}: a refused anchor leaves the weights+generic-headroom floor untouched",
+                estimate.selection.strategy
+            );
+            assert_eq!(estimate.unmodeled_activation_bytes, Some(generic));
+        }
+    }
+
+    /// sc-22665 review round — the `transformer_window` arm of [`request_regime`] is LIVE, and
+    /// this is the coverage that says so.
+    ///
+    /// The law's measured-vs-request regime guard (`derive_image_phase_split`,
+    /// `memory_anchor.rs`) refuses any request that does NOT window when the anchor's own
+    /// measurement DID, so against a windowed anchor the arm's output is the only thing that
+    /// separates a `Some` from a `None`. Mirrors the `attention_chunked` differential the AC-2
+    /// test uses, on the one regime field that had no test of its own.
+    ///
+    /// MUTATION: hardcode `request_regime`'s `transformer_window` arm to `None` and the windowed
+    /// rung reds — the law then refuses it exactly as it refuses the unwindowed one.
+    #[test]
+    fn the_request_regimes_transformer_window_reaches_the_laws_measured_regime_guard() {
+        let generator = qwen_in_domain_generator();
+        let contract = generator.contract.as_ref().expect("contract");
+        let plan = flux2_plan();
+        let geometry = MemoryGeometry {
+            width: 1024,
+            height: 1024,
+            batch: 1,
+            frames: 1,
+            reference_count: 0,
+        };
+        let mut store = qwen_in_domain_anchor_store();
+        for anchor in &mut store.anchors {
+            if anchor.model_id == "flux2_dev" {
+                anchor.measured_regime.transformer_windowed = true;
+            }
+        }
+        let residue = |engaged: &[MemoryStrategy], parameters| {
+            with_injected_image_anchor_store(store.clone(), || {
+                mlx_image_anchor_activation_residue(
+                    contract,
+                    &plan,
+                    "text_to_image",
+                    None,
+                    geometry,
+                    engaged,
+                    parameters,
+                    QWEN_IN_DOMAIN_FACTS,
+                )
+            })
+        };
+        let unwindowed = [MemoryStrategy::Resident, MemoryStrategy::StagedResidency];
+        let windowed = [
+            MemoryStrategy::Resident,
+            MemoryStrategy::StagedResidency,
+            MemoryStrategy::BoundedTransformerResidency,
+        ];
+        let bare = gen_core::MemoryStrategyParameters::default();
+        let with_window = gen_core::MemoryStrategyParameters {
+            transformer_window_size: Some(1),
+            ..Default::default()
+        };
+
+        assert!(
+            residue(&windowed, with_window).is_some(),
+            "the windowed rung's declared window must reach the regime and satisfy the law's \
+             measured-regime guard"
+        );
+        assert!(
+            residue(&unwindowed, bare).is_none(),
+            "a request that does not window cannot be priced from a windowed anchor"
+        );
+        // Control on the other half of the arm: engaging the STRATEGY without a declared window
+        // size states no window either, so it is the parameter reaching the regime that matters,
+        // not the strategy being present in the composition.
+        assert!(
+            residue(&windowed, bare).is_none(),
+            "an undeclared window size states no window"
+        );
     }
 
     /// sc-17153 — `synthesize_estimate_ladder` emits NO candidate for a non-implemented rung,
@@ -18999,6 +20193,99 @@ mod tests {
             );
         }
 
+        /// sc-22667 (epic 22657 feature-end round, E3/E4): with a block count on the facts the
+        /// IMAGE lane's rung-4 floor keeps the law's window share of the transformer resident —
+        /// the same `windowed_transformer_bytes` the candle ladder and the law price — where the
+        /// video lane's form removes the whole transformer (its window is carried by its headroom
+        /// term, sc-18096). With the DEFAULT facts (no block count, this pin) the image floor
+        /// keeps that pre-epic accounting too, so admission on real Macs is unchanged until the
+        /// pin bump supplies block counts.
+        ///
+        /// MUTATION: passing `0` as the resident window whatever the facts reds the first two
+        /// assertions; keeping the whole transformer under the default facts with the generic
+        /// headroom (dropping the `GenericHeadroom` arm) reds the third; removing it under the
+        /// default facts with the law's residue (the pre-round-2 code, window charged nowhere)
+        /// reds the fourth; a divergence from the law's helper reds the last.
+        #[test]
+        fn the_image_floor_keeps_the_laws_window_share_resident_and_errs_large_without_facts() {
+            use ImageFloorActivationTerm::{GenericHeadroom, LawResidue};
+
+            let mut contract = h3_shaped_contract(
+                gib_to_bytes(1.0),
+                gib_to_bytes(5.0),
+                ADALN_RESIDENT_Q4_BYTES,
+                false,
+            );
+            contract.asset_facts.conditioning_bytes = gib_to_bytes(1.0);
+            contract.asset_facts.transformer_bytes = gib_to_bytes(5.0);
+            contract.asset_facts.decoder_bytes = gib_to_bytes(2.0);
+            contract.asset_facts.base_bytes = gib_to_bytes(8.0);
+            let facts = sceneworks_core::memory_anchor::ArchitectureFacts {
+                transformer_blocks: Some(10),
+                ..Default::default()
+            };
+            let blind = sceneworks_core::memory_anchor::ArchitectureFacts::default();
+            for term in [LawResidue, GenericHeadroom] {
+                assert_eq!(
+                    image_floor_weights_bytes(&contract, STAGED_PLUS_RUNG4, Some(1), facts, term),
+                    gib_to_bytes(2.5),
+                    "{term:?}: rung 4 with one of ten blocks resident: max(conditioning, decoder \
+                     + 0.5 GiB)"
+                );
+                assert_eq!(
+                    image_floor_weights_bytes(&contract, STAGED_PLUS_RUNG4, Some(4), facts, term),
+                    gib_to_bytes(4.0),
+                    "{term:?}: four of ten blocks: decoder + 2 GiB"
+                );
+            }
+            assert_eq!(
+                image_floor_weights_bytes(
+                    &contract,
+                    STAGED_PLUS_RUNG4,
+                    Some(1),
+                    blind,
+                    GenericHeadroom
+                ),
+                gib_to_bytes(2.0),
+                "no block count under the generic headroom: the PRE-EPIC accounting — the whole \
+                 transformer out, its window carried by the headroom term — so real-Mac admission \
+                 is unchanged"
+            );
+            assert_eq!(
+                image_floor_weights_bytes(&contract, STAGED_PLUS_RUNG4, Some(1), blind, LawResidue),
+                gib_to_bytes(7.0),
+                "no block count under the law's residue: the whole transformer stays resident \
+                 (decoder + 5 GiB), because the residue carries no window slice"
+            );
+            assert_eq!(
+                image_floor_weights_bytes(&contract, STAGED_PLUS_RUNG4, Some(1), blind, LawResidue),
+                image_floor_weights_bytes(&contract, STAGED, Some(1), blind, LawResidue),
+                "…which is rung 3's weights term: no saving is promised until the share is knowable"
+            );
+            for term in [LawResidue, GenericHeadroom] {
+                assert_eq!(
+                    image_floor_weights_bytes(&contract, STAGED, Some(1), facts, term),
+                    estimate_floor_weights_bytes(&contract, STAGED),
+                    "{term:?}: a composition that does not window is unchanged by the window inputs"
+                );
+            }
+            assert_eq!(
+                estimate_floor_weights_bytes(&contract, STAGED_PLUS_RUNG4),
+                gib_to_bytes(2.0),
+                "the video lane's form keeps its sc-18096 accounting: the whole transformer leaves"
+            );
+            assert_eq!(
+                image_floor_weights_bytes(&contract, STAGED_PLUS_RUNG4, Some(3), facts, LawResidue)
+                    - estimate_floor_weights_bytes(&contract, STAGED_PLUS_RUNG4),
+                sceneworks_core::memory_anchor::windowed_transformer_bytes(
+                    gib_to_bytes(5.0),
+                    Some(3),
+                    Some(10)
+                ),
+                "the share is the law's helper, byte for byte"
+            );
+        }
+
         /// An eviction declared on an AUXILIARY network is not inside `transformer_bytes`, so it
         /// must not be subtracted from the transformer's term. This is the distinction between
         /// `steady_state_transformer_bytes()` and `evicted_component_bytes()`, and swapping one for
@@ -19089,5 +20376,146 @@ mod tests {
                  above changes and must be re-derived rather than re-stamped"
             );
         }
+    }
+
+    /// sc-22667, second pin bump (inference c6d6a4db): the packaged `z_image_turbo` q4 MLX cell is
+    /// IN DOMAIN through the production seam, and prices rung 4 below rung 2.
+    ///
+    /// THE FLIP. At a5f643ae the MLX provider's `decoder_bytes` was the WHOLE `vae/` directory —
+    /// the `decoder.*` tensors a text-to-image render materializes AND the `encoder.*` tensors it
+    /// never does. `anchor_component_bytes` therefore handed the law a 5,893,275,206-byte resident
+    /// set against a re-captured conditioning level of 5,834,701,816, the domain guard refused the
+    /// negative residue, and the production cell sat on its generic weights+headroom estimate
+    /// floor (core test, then named `..._is_refused_against_the_whole_vae_asset_fact`). c6d6a4db
+    /// splits the directory by key prefix: `decoder_bytes` is the render-resident half and the
+    /// encoder becomes a typed `MemoryComponentKind::ReferenceEncoder` auxiliary in
+    /// `overlay_bytes`.
+    ///
+    /// WHY THIS TEST LIVES IN THE WORKER, not in core. The core law only ever sees a
+    /// `ComponentBytes`; what could regress is the SEAM that builds one. `anchor_component_bytes`
+    /// must read the three BASE legs and NOT add `overlay_bytes` — `base_bytes` is exactly
+    /// `conditioning + transformer + decoder`, and the auxiliary is charged on top by the
+    /// contract's own `predicted_peak_from_base` at admission. A seam that summed base + overlay
+    /// would hand the law 5,893,275,206 again and put this cell straight back on the floor, which
+    /// is the exact defect the flip removed. The facts below are the pinned provider's own
+    /// (`mlx-gen-z-image::memory_strategy::component_asset_facts`) for the q4 T2I route; MLX
+    /// cannot be built on Windows, so they are stated rather than read off a linked registry, and
+    /// `base_bytes` is asserted to equal the three legs so a restatement cannot drift silently.
+    ///
+    /// MUTATION (the pre-c6d6a4db shape): fold `overlay_bytes` back into `decoder_bytes` and the
+    /// derivation returns `None` on every rung — asserted below, so this test fails if the split
+    /// stops being what admits the cell.
+    #[test]
+    fn the_packaged_z_image_mlx_cell_prices_rung_four_below_rung_two_from_the_contracts_base_legs()
+    {
+        use sceneworks_core::memory_anchor::{AnchorBackend, AnchorMlxImageDeriveRequest};
+
+        // The pinned MLX contract's asset facts for z_image_turbo q4, text-to-image, no control:
+        // the three base legs plus the reference-encoder auxiliary.
+        let facts = gen_core::MemoryAssetFacts {
+            base_bytes: 2_262_920_192 + 3_465_730_304 + 97_583_622,
+            conditioning_bytes: 2_262_920_192,
+            transformer_bytes: 3_465_730_304,
+            decoder_bytes: 97_583_622,
+            overlay_bytes: 67_041_088,
+        };
+        assert_eq!(
+            facts.base_bytes,
+            facts.conditioning_bytes + facts.transformer_bytes + facts.decoder_bytes,
+            "base_bytes is the three legs; the auxiliary rides in overlay_bytes"
+        );
+
+        let components = crate::video_admission::anchor_component_bytes(facts);
+        assert_eq!(components.conditioning, facts.conditioning_bytes);
+        assert_eq!(components.transformer, facts.transformer_bytes);
+        assert_eq!(components.decoder, facts.decoder_bytes);
+        assert_eq!(
+            components.total(),
+            facts.base_bytes,
+            "the seam must pass the BASE legs — adding the auxiliary overlay here is the defect \
+             that floored this cell at a5f643ae"
+        );
+
+        let store = sceneworks_core::memory_anchor::packaged_memory_anchors()
+            .expect("the packaged anchor store");
+        let anchor = store
+            .image_anchor_for("z_image_turbo", AnchorBackend::Mlx, "q4")
+            .expect("the packaged z_image_turbo q4 MLX anchor");
+        let request = AnchorMlxImageDeriveRequest {
+            width: 768,
+            height: 768,
+        };
+
+        let priced = anchor
+            .derive_mlx_image_phase_peaks(request, components)
+            .expect(
+                "the packaged MLX cell is in the law's domain through the production seam \
+                 (this is the sc-22667 flip; it returned None at a5f643ae)",
+            );
+        assert!(priced.peak_bytes() > 0);
+
+        // Rung ordering on the same cell, through the law the lane prices with.
+        let facts_axes = sceneworks_core::memory_anchor::ArchitectureFacts {
+            attention_heads: Some(30),
+            head_dim: Some(128),
+            transformer_blocks: Some(30),
+            patch_size: Some(2),
+            latent_channels: Some(16),
+            vae_spatial_scale: Some(8),
+            vae_temporal_scale: None,
+            activation_dtype_width: Some(2),
+        };
+        let derive = |regime| {
+            anchor.derive_phase_peaks(
+                &sceneworks_core::memory_anchor::ImageDeriveRequest {
+                    width: 768,
+                    height: 768,
+                    batch: 1,
+                    conditioning_tokens: None,
+                    regime,
+                },
+                components,
+                facts_axes,
+            )
+        };
+        let rung_2 = derive(sceneworks_core::memory_anchor::RequestRegime::staged())
+            .expect("rung 2 prices from the contract's base legs");
+        let rung_4 = derive(sceneworks_core::memory_anchor::RequestRegime {
+            decode_tile: Some(sceneworks_core::memory_anchor::DecodeTile {
+                edge: 512,
+                overlap: 128,
+            }),
+            attention_chunk_scores: Some(64 * 1024 * 1024),
+            transformer_window: Some(1),
+            staged: true,
+        })
+        .expect("rung 4 prices from the contract's base legs");
+        eprintln!(
+            "sc-22667 z_image_turbo q4 mlx 768x768: lane peak {} | rung 2 {rung_2:?} peak {} | \
+             rung 4 {rung_4:?} peak {}",
+            priced.peak_bytes(),
+            rung_2.peak_bytes(),
+            rung_4.peak_bytes()
+        );
+        assert!(
+            rung_4.peak_bytes() < rung_2.peak_bytes(),
+            "rung 4 {rung_4:?} must price below rung 2 {rung_2:?}"
+        );
+
+        // The mutation: the pre-c6d6a4db whole-directory decoder floors the cell again.
+        let whole_vae =
+            crate::video_admission::anchor_component_bytes(gen_core::MemoryAssetFacts {
+                base_bytes: facts.base_bytes + facts.overlay_bytes,
+                decoder_bytes: facts.decoder_bytes + facts.overlay_bytes,
+                overlay_bytes: 0,
+                ..facts
+            });
+        assert!(
+            anchor
+                .derive_mlx_image_phase_peaks(request, whole_vae)
+                .is_none(),
+            "folding the reference encoder back into decoder_bytes must refuse — otherwise this \
+             test would pass with or without the split it exists to pin"
+        );
     }
 }

@@ -1376,9 +1376,30 @@ node scripts/anchor-loader-closure.mjs --repo <inference clone> --stamp-anchors 
 ```
 
 Run it when a NEW anchor enters the store (the extractor fails loudly for an anchor with nothing to
-carry forward). **Do not run it after a pin bump** — that would rewrite the measurement's own
-provenance and mark every anchor current again. A pin bump is *supposed* to leave the moved models'
-anchors stale.
+carry forward). Running it after a pin bump changes nothing by itself — every key is re-derived at
+its own measurement revision — and it must never be bent into a stamp at the pin: that would rewrite
+the measurement's own provenance and mark every anchor current again. A pin bump is *supposed* to
+leave the moved models' anchors stale.
+
+**Currency attestations — the second gate, written down (sc-22667).** A staled key says the
+loader's *source* moved. This runbook's invalidation doctrine is two-gated: only a load-or-device-path
+change with no behaviour witness says the *memory behaviour* moved, and a differing digest alone is
+not that evidence. When a pin bump stales an anchor and the closure diff since its measurement is
+accounting-only (contract pricing, byte walkers, architecture facts, tests, docs) — or a re-measure
+on the same hardware reproduces the anchor across the range — record that reading, per anchor, in
+`config/anchor-currency-attestations.json`: `measuredRevision` (must equal the cited record's),
+`attestedRevision` (the pin), `class` (`accounting-only` | `witnessed-unchanged`), `why` (the
+file-by-file reading), `witness` (the re-measure, or why none was needed) and
+`filesChangedSinceMeasurement` (every closure file in the diff with its class; derive the list with
+`git diff --name-only <measured>..<pin> -- <every crate `closureFiles` names>`). `--stamp-anchors`
+then derives that anchor's key at `attestedRevision` and copies the justification into the store's
+`source.currencyAttestation`, the matrix reports the row as `yes — attested …` and counts it under
+`summary.attestedAnchors`, and `sceneworks-core` validates the shape at load. The attestation is
+bounded: the next pin bump that moves the closure past `attestedRevision` stales the anchor again,
+and a re-capture that moves the record's revision refuses the entry until it is rewritten or deleted.
+**Never attest a load-or-device-path change without a measured witness** — re-capture instead. The
+first five entries and their reading are in
+`docs/calibration/sc-22657/anchor-currency-attestation-sc-22667.md`.
 
 A historical revision that predates a file today's declaration names (`mlx-gen-ltx`'s per-model
 `memory_strategy.rs` postdates the LTX-2.3 capture) narrows that anchor's entry-point list rather

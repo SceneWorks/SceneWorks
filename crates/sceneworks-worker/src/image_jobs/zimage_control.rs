@@ -647,6 +647,7 @@ pub(super) async fn generate_candle_zimage_control_stream(
             false,
             false,
             budget,
+            budget.map_or(0.0, crate::vram_gate::ladder_reserve_gb),
             needed,
             control_bytes,
             gen_core::MemoryCacheState::Cold,

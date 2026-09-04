@@ -3888,3 +3888,204 @@ fn a_foreign_identity_or_a_moved_loader_closure_does_not_reach_the_anchor_deriva
         "a later campaign fingerprint must not close the anchor evidence gate"
     );
 }
+
+// ---------------------------------------------------------------------------------------------
+// sc-22667 (epic 22657 E3/E4): the contract's architecture facts reach the core law through
+// `architecture_facts_from_contract`, axis by axis, `None` preserved.
+// ---------------------------------------------------------------------------------------------
+
+/// A conformant contract carrying exactly `facts` as its architecture block.
+fn contract_stating(facts: gen_core::MemoryArchitectureFacts) -> MemoryProviderContract {
+    let mut contract = fixture_contract(40, 5, &[MemoryStrategy::StagedResidency]);
+    contract.architecture_facts = facts;
+    contract
+}
+
+/// Every axis, with a setter on the gen-core block and a reader on the core facts, and a value
+/// distinct per axis so a swapped translation cannot pass as a faithful one.
+type ContractAxisSet = fn(&mut gen_core::MemoryArchitectureFacts, u32);
+type CoreAxisGet = fn(&sceneworks_core::memory_anchor::ArchitectureFacts) -> Option<u32>;
+const ARCHITECTURE_AXES: [(&str, u32, ContractAxisSet, CoreAxisGet); 8] = [
+    (
+        "attention_heads",
+        30,
+        |facts, value| facts.attention_heads = Some(value),
+        |facts| facts.attention_heads,
+    ),
+    (
+        "head_dim",
+        128,
+        |facts, value| facts.head_dim = Some(value),
+        |facts| facts.head_dim,
+    ),
+    (
+        "transformer_blocks",
+        60,
+        |facts, value| facts.transformer_blocks = Some(value),
+        |facts| facts.transformer_blocks,
+    ),
+    (
+        "patch_size",
+        2,
+        |facts, value| facts.patch_size = Some(value),
+        |facts| facts.patch_size,
+    ),
+    (
+        "latent_channels",
+        16,
+        |facts, value| facts.latent_channels = Some(value),
+        |facts| facts.latent_channels,
+    ),
+    (
+        "vae_spatial_scale",
+        8,
+        |facts, value| facts.vae_spatial_scale = Some(value),
+        |facts| facts.vae_spatial_scale,
+    ),
+    (
+        "vae_temporal_scale",
+        4,
+        |facts, value| facts.vae_temporal_scale = Some(value),
+        |facts| facts.vae_temporal_scale,
+    ),
+    (
+        "activation_dtype_width",
+        3,
+        |facts, value| facts.activation_dtype_width = Some(value),
+        |facts| facts.activation_dtype_width,
+    ),
+];
+
+/// One axis stated on the contract arrives on exactly that core axis, and on no other — the
+/// seven others stay `None`. MUTATION: hard-wiring any translated axis to `None`, or crossing two
+/// axes (`head_dim: attention_heads`), reds the arm named after it.
+fn assert_axis_translates_alone(axis: &str) {
+    let (label, value, set, get) = ARCHITECTURE_AXES
+        .into_iter()
+        .find(|(label, ..)| *label == axis)
+        .unwrap_or_else(|| panic!("{axis} is not an architecture axis"));
+    let mut stated = gen_core::MemoryArchitectureFacts::default();
+    set(&mut stated, value);
+    let translated = architecture_facts_from_contract(&contract_stating(stated));
+    assert_eq!(
+        get(&translated),
+        Some(value),
+        "{label}: the stated axis must arrive"
+    );
+    for (other, _, _, other_get) in ARCHITECTURE_AXES {
+        if other != label {
+            assert_eq!(
+                other_get(&translated),
+                None,
+                "{label}: must not arrive on {other} — an unstated axis stays None"
+            );
+        }
+    }
+}
+
+#[test]
+fn architecture_facts_translate_attention_heads() {
+    assert_axis_translates_alone("attention_heads");
+}
+
+#[test]
+fn architecture_facts_translate_head_dim() {
+    assert_axis_translates_alone("head_dim");
+}
+
+#[test]
+fn architecture_facts_translate_transformer_blocks() {
+    assert_axis_translates_alone("transformer_blocks");
+}
+
+#[test]
+fn architecture_facts_translate_patch_size() {
+    assert_axis_translates_alone("patch_size");
+}
+
+#[test]
+fn architecture_facts_translate_latent_channels() {
+    assert_axis_translates_alone("latent_channels");
+}
+
+#[test]
+fn architecture_facts_translate_vae_spatial_scale() {
+    assert_axis_translates_alone("vae_spatial_scale");
+}
+
+#[test]
+fn architecture_facts_translate_vae_temporal_scale() {
+    assert_axis_translates_alone("vae_temporal_scale");
+}
+
+#[test]
+fn architecture_facts_translate_activation_dtype_width() {
+    assert_axis_translates_alone("activation_dtype_width");
+}
+
+/// A contract stating every axis translates to every axis, each with its own value — the
+/// exhaustive complement of the one-at-a-time arms, which is what catches a translation that
+/// reads the right axis only because the others were absent.
+#[test]
+fn architecture_facts_translate_every_axis_together() {
+    let mut stated = gen_core::MemoryArchitectureFacts::default();
+    for (_, value, set, _) in ARCHITECTURE_AXES {
+        set(&mut stated, value);
+    }
+    assert!(!stated.is_empty());
+    let translated = architecture_facts_from_contract(&contract_stating(stated));
+    for (label, value, _, get) in ARCHITECTURE_AXES {
+        assert_eq!(get(&translated), Some(value), "{label}");
+    }
+    assert_eq!(
+        translated,
+        sceneworks_core::memory_anchor::ArchitectureFacts {
+            attention_heads: Some(30),
+            head_dim: Some(128),
+            transformer_blocks: Some(60),
+            patch_size: Some(2),
+            latent_channels: Some(16),
+            vae_spatial_scale: Some(8),
+            vae_temporal_scale: Some(4),
+            activation_dtype_width: Some(3),
+        }
+    );
+}
+
+/// A contract with every axis absent — the registry's weights-free surfaces, a single-file
+/// import, a provider that has not adopted the block, and `compatibility_default` itself —
+/// yields the default core facts: every axis `None`, none of them zero. The law then leaves every
+/// residue unscaled (its `missing_facts_leave_residues_unscaled_and_never_shrink_the_estimate`),
+/// which is the conservative reading and the reason zero-by-default would be a defect here.
+/// MUTATION: `.unwrap_or(0)` (or `Some(0)`) on any translated axis reds both arms.
+#[test]
+fn a_contract_stating_no_architecture_facts_yields_the_default_core_facts() {
+    let empty = gen_core::MemoryArchitectureFacts::default();
+    assert!(empty.is_empty());
+    let translated = architecture_facts_from_contract(&contract_stating(empty));
+    assert_eq!(
+        translated,
+        sceneworks_core::memory_anchor::ArchitectureFacts::default()
+    );
+    for (label, _, _, get) in ARCHITECTURE_AXES {
+        assert_eq!(
+            get(&translated),
+            None,
+            "{label}: absent stays absent, never zero"
+        );
+    }
+    // The compatibility default a not-yet-adopting provider publishes states none either.
+    let compatibility = MemoryProviderContract::compatibility_default(
+        "ltx_2_3",
+        MemoryBackendRealization::CandleCuda {
+            device_residency: true,
+            host_backed_weights: false,
+            host_to_device_block_materialization: false,
+            block_materialization: MemoryWindowMaterialization::DeviceFormatTransfer,
+        },
+    );
+    assert_eq!(
+        architecture_facts_from_contract(&compatibility),
+        sceneworks_core::memory_anchor::ArchitectureFacts::default()
+    );
+}
