@@ -824,17 +824,23 @@ fn collect_svg_source(
     let max_bytes = usize::try_from(request.detail_budget.max_svg_bytes)
         .map_err(|_| WorkerError::InvalidPayload("maxSvgBytes does not fit usize".to_owned()))?;
     let mut source = String::new();
-    let mut expected_index = 0u32;
+    let mut previous_source_index = None;
     provider.generate_svg(request, cancel, progress, &mut |fragment, index| {
         if cancel.is_cancelled() {
             return Err(WorkerError::Canceled(CANCEL_MESSAGE.to_owned()));
         }
-        if index != expected_index {
+        // All native providers emit the static SVG prefix at zero. Decoder tokens that
+        // produce no visible text leave gaps after it; they still count in token progress.
+        let invalid_index = match previous_source_index {
+            None => index != 0,
+            Some(previous) => index <= previous,
+        };
+        if invalid_index {
             return Err(WorkerError::Engine(format!(
-                "vector provider emitted non-monotonic source index {index}; expected {expected_index}"
+                "vector provider emitted non-monotonic source index {index}; previous {previous_source_index:?}"
             )));
         }
-        expected_index = expected_index.saturating_add(1);
+        previous_source_index = Some(index);
         let next_len = source
             .len()
             .checked_add(fragment.len())
@@ -2083,6 +2089,96 @@ mod tests {
             cancel.cancel();
             on_source("<rect width=\"1\" height=\"1\"/></svg>", 1)?;
             Ok(())
+        }
+    }
+
+    struct NativeSourceSequence([u32; 3]);
+
+    impl MultimodalVectorProviderAdapter for NativeSourceSequence {
+        fn provider_id(&self) -> &str {
+            "starvector"
+        }
+
+        fn supports_mode(&self, mode: VectorMode) -> bool {
+            mode == VectorMode::TextToSvg
+        }
+
+        fn generate_svg(
+            &self,
+            request: &VectorProviderRequest,
+            _cancel: &gen_core::CancelFlag,
+            progress: tokio::sync::watch::Sender<u32>,
+            on_source: &mut dyn FnMut(&str, u32) -> WorkerResult<()>,
+        ) -> WorkerResult<()> {
+            // One hidden decoder token separates the static prefix and first visible delta.
+            // Validate native output/events, then forward the original indices just as the
+            // production adapter does. Source fragments and token counts stay independent.
+            let svg = "<svg></svg>";
+            let output = StarVectorOutput {
+                svg: Some(svg.to_owned()),
+                generated_tokens: 3,
+                generated_bytes: svg.len(),
+                finish_reason: StarVectorFinishReason::CompleteRoot,
+            };
+            let mut events = Vec::new();
+            for (index, fragment) in self.0.into_iter().zip(["<svg", ">", "</svg>"]) {
+                events.push(StarVectorStreamEvent::Source {
+                    text: fragment.to_owned(),
+                    index,
+                });
+            }
+            for generated_tokens in 1..=3 {
+                record_vector_token_progress(
+                    &progress,
+                    generated_tokens,
+                    request.detail_budget.max_new_tokens,
+                );
+            }
+            events.push(StarVectorStreamEvent::Done {
+                finish_reason: output.finish_reason,
+                generated_tokens: output.generated_tokens,
+                generated_bytes: output.generated_bytes,
+            });
+            for (fragment, index) in validate_native_starvector_generation(output, events)? {
+                on_source(&fragment, index)?;
+            }
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn native_hidden_token_source_gaps_reach_product_collection() {
+        let request = vector_request(VectorMode::TextToSvg, "a compact mark");
+        let (progress, observed) = tokio::sync::watch::channel(0);
+        let collected = collect_svg_source(
+            &NativeSourceSequence([0, 2, 3]),
+            &request,
+            &gen_core::CancelFlag::new(),
+            progress,
+        )
+        .expect("native hidden-token indices remain valid at the product boundary");
+        assert_eq!(collected.source.as_deref(), Some("<svg></svg>"));
+        assert_eq!(
+            *observed.borrow(),
+            3,
+            "progress counts actual decoder tokens"
+        );
+    }
+
+    #[test]
+    fn native_source_indices_still_reject_duplicates_regressions_and_missing_prefix() {
+        let request = vector_request(VectorMode::TextToSvg, "a compact mark");
+        for indices in [[0, 0, 3], [0, 3, 2], [1, 2, 3]] {
+            let result = collect_svg_source(
+                &NativeSourceSequence(indices),
+                &request,
+                &gen_core::CancelFlag::new(),
+                tokio::sync::watch::channel(0).0,
+            );
+            assert!(
+                matches!(result, Err(WorkerError::Engine(message)) if message.contains("source index")),
+                "invalid sequence {indices:?} must remain rejected",
+            );
         }
     }
 
