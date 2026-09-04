@@ -2,9 +2,11 @@
 // Start the actual current-tree Rust API and worker for the terminal campaign.
 // This is intentionally not an arbitrary service command: its source revision,
 // Cargo inference pin, binaries and health response are all recorded together.
-import { createHash } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import { execFile as execFileCallback, spawn } from "node:child_process";
-import { copyFile, lstat, mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
+import { createReadStream } from "node:fs";
+import { copyFile, lstat, mkdir, open, readFile, readdir, rm, writeFile } from "node:fs/promises";
+import { createServer } from "node:net";
 import { promisify } from "node:util";
 import path from "node:path";
 import { isExecutedModule } from "./starvector-terminal-cli.mjs";
@@ -25,6 +27,56 @@ export function productServiceBackendEnv(platform = process.platform) {
 export function productServiceStateRoot(output) {
   return path.join(path.dirname(output), `${path.basename(output)}-product-service-state`);
 }
+export function productServiceActiveStatePath(output) {
+  return path.join(productServiceStateRoot(output), "product-service-active.json");
+}
+const PRODUCT_SERVICE_LOG_FILES = Object.freeze({
+  api_stdout: "product-service-api.stdout.log",
+  api_stderr: "product-service-api.stderr.log",
+  worker_stdout: "product-service-worker.stdout.log",
+  worker_stderr: "product-service-worker.stderr.log",
+});
+export function productServiceLogPaths(output) {
+  return Object.fromEntries(Object.entries(PRODUCT_SERVICE_LOG_FILES).map(([name, file]) => [name, path.join(output, file)]));
+}
+async function openProductServiceLogs(output) {
+  const handles = {};
+  try {
+    for (const [name, file] of Object.entries(productServiceLogPaths(output))) handles[name] = await open(file, "wx", 0o600);
+    return handles;
+  } catch (error) {
+    await Promise.allSettled(Object.values(handles).map((handle) => handle.close()));
+    throw error;
+  }
+}
+async function fixedPrefixSha256(file, byteSize) {
+  if (byteSize === 0) return sha("");
+  return fileSha256(file, { openReadStream: (input, options) => createReadStream(input, { ...options, start: 0, end: byteSize - 1 }) });
+}
+export async function productServiceLogsIdentity(output, { requireAll = true } = {}) {
+  const entries = [];
+  for (const file of Object.values(productServiceLogPaths(output))) {
+    const info = await lstat(file).catch((error) => error.code === "ENOENT" ? null : Promise.reject(error));
+    if (!info) {
+      if (requireAll) die(`product service log is missing: ${file}`);
+      continue;
+    }
+    if (info.isSymbolicLink() || !info.isFile()) {
+      if (requireAll) die(`product service log is not a regular file: ${file}`);
+      continue;
+    }
+    const relative = path.relative(output, file).split(path.sep).join("/");
+    entries.push(terminalTreeEntry(relative, info.size, await fixedPrefixSha256(file, info.size)));
+  }
+  const canonicalEntries = sortTerminalTreeEntries(entries);
+  return { schema_version: 1, entries: canonicalEntries, sha256: terminalTreeSha256(canonicalEntries) };
+}
+async function writeProductServiceLogsIdentity(output, options) {
+  const identity = await productServiceLogsIdentity(output, options);
+  await writeFile(path.join(output, "product-service-logs.json"), JSON.stringify(identity, null, 2) + "\n");
+  await writeFile(path.join(output, "product-service-logs.sha256"), `${identity.sha256}\n`);
+  return identity;
+}
 async function git(root, args) { return (await execFile("git", ["-C", root, ...args])).stdout.trim(); }
 async function serviceIdentity(root, permanentPin) {
   if (await git(root, ["status", "--porcelain"])) die("current-tree product service checkout must be clean");
@@ -33,12 +85,74 @@ async function serviceIdentity(root, permanentPin) {
   if (!pin || pin !== permanentPin) die("current-tree product service Cargo inference pin mismatches permanent pin");
   return { sceneworks_revision: revision, inference_revision: pin };
 }
-async function waitHealthy(url) {
+async function waitHealthy(url, assertRunning = () => {}) {
   for (let attempt = 0; attempt < 120; attempt += 1) {
-    try { const response = await fetch(new URL("/api/v1/health", url)); const body = await response.json(); if (response.ok && body?.status === "ok" && body?.readiness?.status === "ready") return body; } catch { /* booting */ }
+    assertRunning();
+    try { const response = await fetch(new URL("/api/v1/health", url), { signal: AbortSignal.timeout(1000) }); const body = await response.json(); if (response.ok && body?.status === "ok" && body?.readiness?.status === "ready") { assertRunning(); return body; } } catch { /* booting */ }
     await new Promise((resolve) => setTimeout(resolve, 1000));
   }
   die("source-built API did not become ready");
+}
+export async function assertProductServicePortFree(url, { serverFactory = createServer } = {}) {
+  const parsed = new URL(url), port = Number(parsed.port);
+  if (parsed.hostname !== "127.0.0.1" || !Number.isInteger(port) || port < 1 || port > 65535) die("product service must bind an explicit loopback host/port");
+  await new Promise((resolve, reject) => {
+    const server = serverFactory();
+    server.unref();
+    server.once("error", (error) => reject(new Error(`starvector terminal service: API port is already occupied: ${error.message}`)));
+    server.listen({ host: parsed.hostname, port, exclusive: true }, () => server.close((error) => error ? reject(error) : resolve()));
+  });
+  return { host: parsed.hostname, port };
+}
+export function productServiceTaskkillArguments(pid) {
+  if (!Number.isSafeInteger(pid) || pid <= 0) die("invalid product service PID");
+  return ["/PID", String(pid), "/T", "/F"];
+}
+async function runProductServiceTaskkill(pid, timeoutMs) {
+  await execFile("taskkill.exe", productServiceTaskkillArguments(pid), { timeout: timeoutMs, windowsHide: true });
+}
+async function pidIsRunning(pid, kill) {
+  try { kill(pid, 0); return true; } catch (error) { if (error.code === "ESRCH") return false; if (error.code === "EPERM") return true; throw error; }
+}
+export async function terminateProductServicePids(pids, {
+  requireAll = true,
+  platform = process.platform,
+  kill = process.kill,
+  taskkill = runProductServiceTaskkill,
+  wait = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds)),
+  timeoutMs = 5000,
+  pollMs = 100,
+} = {}) {
+  const validPids = pids.filter((pid) => Number.isInteger(pid) && pid > 0);
+  if (requireAll && validPids.length !== pids.length) die("invalid product service PID");
+  const live = async () => {
+    const result = [];
+    for (const pid of validPids) if (await pidIsRunning(pid, kill)) result.push(pid);
+    return result;
+  };
+  let remaining = await live();
+  if (platform === "win32") {
+    for (const pid of remaining) {
+      try { await taskkill(pid, timeoutMs); } catch (error) { if (await pidIsRunning(pid, kill)) throw error; }
+    }
+  } else {
+    for (const pid of remaining) { try { kill(pid, "SIGTERM"); } catch (error) { if (error.code !== "ESRCH") throw error; } }
+  }
+  const attempts = Math.max(1, Math.ceil(timeoutMs / pollMs));
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
+    remaining = await live();
+    if (remaining.length === 0) return;
+    await wait(pollMs);
+  }
+  if (platform !== "win32") {
+    for (const pid of remaining) { try { kill(pid, "SIGKILL"); } catch (error) { if (error.code !== "ESRCH") throw error; } }
+    for (let attempt = 0; attempt < attempts; attempt += 1) {
+      remaining = await live();
+      if (remaining.length === 0) return;
+      await wait(pollMs);
+    }
+  }
+  die(`product service did not stop (pids: ${remaining.join(", ")})`);
 }
 export async function copyRegularTree(source, destination, digestFile = fileSha256) {
   const info = await lstat(source);
@@ -87,52 +201,129 @@ async function materializeOfflineWeights(weightsRoot, stateRoot) {
   return { app_data_sha256: closure.app_data_sha256, hf_home_sha256: closure.hf_home_sha256, models };
 }
 
+const ACTIVE_STATE_KEYS = [
+  "api_binary_sha256",
+  "api_pid",
+  "api_url",
+  "inference_revision",
+  "instance_token",
+  "kind",
+  "schema_version",
+  "sceneworks_revision",
+  "started_at",
+  "state_root",
+  "worker_pid",
+].sort();
+const ACTIVE_BINDING_KEYS = ACTIVE_STATE_KEYS.filter((key) => !["kind", "schema_version"].includes(key));
+
+export function validateProductServiceActiveState(active, record, output) {
+  if (!active || typeof active !== "object" || Array.isArray(active) || JSON.stringify(Object.keys(active).sort()) !== JSON.stringify(ACTIVE_STATE_KEYS)) die("active product service state shape is invalid");
+  if (active.schema_version !== 1 || active.kind !== "starvector_terminal_product_service_active" || !/^[a-f0-9]{64}$/.test(active.instance_token)) die("active product service sentinel is invalid");
+  if (!/^[a-f0-9]{40}$/.test(active.sceneworks_revision) || !/^[a-f0-9]{40}$/.test(active.inference_revision) || !/^[a-f0-9]{64}$/.test(active.api_binary_sha256)) die("active product service identity is invalid");
+  if (!Number.isSafeInteger(active.api_pid) || active.api_pid <= 0 || !Number.isSafeInteger(active.worker_pid) || active.worker_pid <= 0 || active.api_pid === active.worker_pid) die("active product service PIDs are invalid");
+  if (active.state_root !== path.relative(output, productServiceStateRoot(output)) || !active.api_url?.startsWith("http://127.0.0.1:")) die("active product service location is invalid");
+  for (const key of ACTIVE_BINDING_KEYS) if (active[key] !== record?.[key]) die(`active product service state mismatches provenance field ${key}`);
+  return active;
+}
+
 export async function startProductService({ root, output, permanentPin, url, weightsRoot }) {
   if (!root || !output || !weightsRoot || !permanentPin || !url || !url.startsWith("http://127.0.0.1:")) die("local current-tree root/output/offline weights/pin/API URL required");
-  const identity = await serviceIdentity(root, permanentPin); await mkdir(output, { recursive: true });
+  const identity = await serviceIdentity(root, permanentPin);
+  const endpoint = await assertProductServicePortFree(url);
+  await mkdir(output, { recursive: true });
   // `cargo build` is source ownership: no prebuilt or /opt sidecar can satisfy
   // this contract.  It never downloads model weights; the controller separately
   // rejects any model acquisition at job time.
   await execFile("cargo", productServiceBuildArgs(), { cwd: root });
   const binary = path.join(root, "target", "debug", process.platform === "win32" ? "sceneworks-rust-api.exe" : "sceneworks-rust-api");
-  const common = { cwd: root, detached: true, stdio: ["ignore", "pipe", "pipe"] }, parsed = new URL(url), apiPort = parsed.port, stateRoot = productServiceStateRoot(output);
-  if (parsed.hostname !== "127.0.0.1" || !apiPort) die("product service must bind an explicit loopback host/port");
+  const common = { cwd: root, detached: true }, stateRoot = productServiceStateRoot(output);
   if (await lstat(stateRoot).catch((error) => error.code === "ENOENT" ? null : Promise.reject(error))) die("temporary product service state already exists");
-  await mkdir(path.join(stateRoot, "data"), { recursive: true }); await mkdir(path.join(stateRoot, "config"), { recursive: true });
-  const weights = await materializeOfflineWeights(weightsRoot, stateRoot);
-  const hfHome = path.join(stateRoot, "hf");
-  const serviceEnv = { ...process.env, ...productServiceBackendEnv(), SCENEWORKS_TERMINAL_CAMPAIGN: "1", SCENEWORKS_API_HOST: "127.0.0.1", SCENEWORKS_API_PORT: apiPort, SCENEWORKS_API_URL: url, SCENEWORKS_DATA_DIR: path.join(stateRoot, "data"), SCENEWORKS_CONFIG_DIR: path.join(stateRoot, "config"), SCENEWORKS_JOBS_DB_PATH: path.join(stateRoot, "data", "cache", "jobs.db"), SCENEWORKS_GPU_ID: process.env.STARVECTOR_TERMINAL_GPU_ID ?? "auto", HF_HOME: hfHome, HUGGINGFACE_HUB_CACHE: path.join(hfHome, "hub"), HF_HUB_OFFLINE: "1", TRANSFORMERS_OFFLINE: "1" };
-  for (const inherited of ["TRANSFORMERS_CACHE", "HF_DATASETS_CACHE", "HF_ENDPOINT"]) delete serviceEnv[inherited];
-  const api = spawn(binary, [], { ...common, env: serviceEnv });
-  const worker = spawn(binary, [], { ...common, env: { ...serviceEnv, SCENEWORKS_WORKER_ONLY: "1" } });
-  const stdout = [], stderr = []; for (const child of [api, worker]) { child.stdout.on("data", (chunk) => stdout.push(chunk)); child.stderr.on("data", (chunk) => stderr.push(chunk)); child.unref(); }
-  const health = await waitHealthy(url); if (api.exitCode !== null || worker.exitCode !== null || api.pid === undefined || worker.pid === undefined) die("source-built API or worker exited during readiness"); const record = { ...identity, ...weights, api_url: url, api_host: "127.0.0.1", api_port: Number(apiPort), state_root: path.relative(output, stateRoot), api_binary: path.relative(root, binary), worker_binary: path.relative(root, binary), api_binary_sha256: sha(await readFile(binary)), api_pid: api.pid, worker_pid: worker.pid, health, offline: { hf_home: path.relative(output, hfHome), hf_hub_offline: serviceEnv.HF_HUB_OFFLINE, transformers_offline: serviceEnv.TRANSFORMERS_OFFLINE }, started_at: new Date().toISOString() };
-  await writeFile(path.join(output, "product-service-provenance.json"), JSON.stringify(record, null, 2) + "\n");
-  await writeFile(path.join(output, "product-service-logs.sha256"), sha(Buffer.concat([...stdout, ...stderr])) + "\n");
-  return record;
+  const logPaths = productServiceLogPaths(output), instanceToken = randomBytes(32).toString("hex");
+  let stateCreated = false;
+  let logHandles = {};
+  let api;
+  let worker;
+  let activeState;
+  const spawnErrors = [];
+  try {
+    await mkdir(stateRoot);
+    stateCreated = true;
+    await mkdir(path.join(stateRoot, "data"), { recursive: true }); await mkdir(path.join(stateRoot, "config"), { recursive: true });
+    const weights = await materializeOfflineWeights(weightsRoot, stateRoot), hfHome = path.join(stateRoot, "hf"), binarySha256 = await fileSha256(binary);
+    const serviceEnv = { ...process.env, ...productServiceBackendEnv(), SCENEWORKS_TERMINAL_CAMPAIGN: "1", SCENEWORKS_TERMINAL_SERVICE_INSTANCE_TOKEN: instanceToken, SCENEWORKS_API_HOST: endpoint.host, SCENEWORKS_API_PORT: String(endpoint.port), SCENEWORKS_API_URL: url, SCENEWORKS_DATA_DIR: path.join(stateRoot, "data"), SCENEWORKS_CONFIG_DIR: path.join(stateRoot, "config"), SCENEWORKS_JOBS_DB_PATH: path.join(stateRoot, "data", "cache", "jobs.db"), SCENEWORKS_GPU_ID: process.env.STARVECTOR_TERMINAL_GPU_ID ?? "auto", HF_HOME: hfHome, HUGGINGFACE_HUB_CACHE: path.join(hfHome, "hub"), HF_HUB_OFFLINE: "1", TRANSFORMERS_OFFLINE: "1" };
+    for (const inherited of ["TRANSFORMERS_CACHE", "HF_DATASETS_CACHE", "HF_ENDPOINT"]) delete serviceEnv[inherited];
+    // Piped readable streams keep this CLI referenced after child.unref(). Give
+    // each service durable files instead; the children retain their inherited
+    // descriptors after these parent FileHandles close and after this CLI exits.
+    logHandles = await openProductServiceLogs(output);
+    try {
+      api = spawn(binary, [], { ...common, env: serviceEnv, stdio: ["ignore", logHandles.api_stdout.fd, logHandles.api_stderr.fd] });
+      api.once("error", (error) => spawnErrors.push(`API: ${error.message}`));
+      worker = spawn(binary, [], { ...common, env: { ...serviceEnv, SCENEWORKS_WORKER_ONLY: "1" }, stdio: ["ignore", logHandles.worker_stdout.fd, logHandles.worker_stderr.fd] });
+      worker.once("error", (error) => spawnErrors.push(`worker: ${error.message}`));
+    } finally {
+      await Promise.allSettled(Object.values(logHandles).map((handle) => handle.close()));
+      logHandles = {};
+    }
+    if (api.pid === undefined || worker.pid === undefined) die("source-built API or worker has no process identity");
+    const startedAt = new Date().toISOString();
+    activeState = { api_binary_sha256: binarySha256, api_pid: api.pid, api_url: url, inference_revision: identity.inference_revision, instance_token: instanceToken, kind: "starvector_terminal_product_service_active", schema_version: 1, sceneworks_revision: identity.sceneworks_revision, started_at: startedAt, state_root: path.relative(output, stateRoot), worker_pid: worker.pid };
+    await writeFile(productServiceActiveStatePath(output), JSON.stringify(activeState, null, 2) + "\n", { flag: "wx", mode: 0o600 });
+    for (const child of [api, worker]) child.unref();
+    const assertRunning = () => {
+      if (spawnErrors.length || api.pid === undefined || worker.pid === undefined || api.exitCode !== null || worker.exitCode !== null || api.signalCode !== null || worker.signalCode !== null) die(`source-built API or worker exited during readiness${spawnErrors.length ? `: ${spawnErrors.join("; ")}` : ""}`);
+    };
+    const health = await waitHealthy(url, assertRunning);
+    const record = { ...identity, ...weights, instance_token: instanceToken, api_url: url, api_host: endpoint.host, api_port: endpoint.port, state_root: path.relative(output, stateRoot), api_binary: path.relative(root, binary), worker_binary: path.relative(root, binary), api_binary_sha256: binarySha256, api_pid: api.pid, worker_pid: worker.pid, logs: Object.fromEntries(Object.entries(logPaths).map(([name, file]) => [name, path.relative(output, file)])), health, offline: { hf_home: path.relative(output, hfHome), hf_hub_offline: serviceEnv.HF_HUB_OFFLINE, transformers_offline: serviceEnv.TRANSFORMERS_OFFLINE }, started_at: startedAt };
+    await writeFile(path.join(output, "product-service-provenance.json"), JSON.stringify(record, null, 2) + "\n");
+    return record;
+  } catch (error) {
+    await Promise.allSettled(Object.values(logHandles).map((handle) => handle.close()));
+    const knownPids = [worker?.pid, api?.pid].filter((pid) => Number.isSafeInteger(pid) && pid > 0);
+    const cleanup = { status: knownPids.length ? "terminated" : "not_needed", error: null, state_retained: false };
+    try { await terminateProductServicePids(knownPids, { requireAll: false }); } catch (cleanupError) { cleanup.status = "failed"; cleanup.error = cleanupError.message; cleanup.state_retained = true; error.message += `; service cleanup failed: ${cleanupError.message}`; }
+    let recorded = false;
+    try {
+      const logs = await writeProductServiceLogsIdentity(output, { requireAll: false });
+      await writeFile(path.join(output, "product-service-start-failed.json"), JSON.stringify({ schema_version: 1, status: "failed", api_pid: api?.pid, worker_pid: worker?.pid, active_state: activeState ?? null, cleanup, logs, error: error.message, failed_at: new Date().toISOString() }, null, 2) + "\n");
+      recorded = true;
+    } catch (recordError) {
+      cleanup.state_retained = true;
+      error.message += `; failure record could not be written: ${recordError.message}`;
+    }
+    if (stateCreated && cleanup.status !== "failed" && recorded) await rm(stateRoot, { recursive: true, force: true });
+    throw error;
+  }
 }
-export async function stopProductService(output) {
-  const record = JSON.parse(await readFile(path.join(output, "product-service-provenance.json"), "utf8"));
+export async function stopProductService(output, { terminate = terminateProductServicePids } = {}) {
+  if (await lstat(path.join(output, "product-service-stopped.json")).catch((error) => error.code === "ENOENT" ? null : Promise.reject(error))) die("product service is already stopped");
+  let record;
+  try {
+    record = JSON.parse(await readFile(path.join(output, "product-service-provenance.json"), "utf8"));
+  } catch (error) {
+    if (error.code !== "ENOENT") throw error;
+    const failure = JSON.parse(await readFile(path.join(output, "product-service-start-failed.json"), "utf8"));
+    if (failure.cleanup?.status !== "failed" || !failure.active_state) die("failed product service start has no active instance to stop");
+    record = failure.active_state;
+  }
   const stateRoot = path.resolve(output, record.state_root);
   if (stateRoot !== path.resolve(productServiceStateRoot(output))) die("product service state path escaped its tuple temporary root");
-  for (const pid of [record.worker_pid, record.api_pid]) { if (!Number.isInteger(pid) || pid < 1) die("invalid product service PID"); try { process.kill(pid, "SIGTERM"); } catch (error) { if (error.code !== "ESRCH") throw error; } }
-  for (let attempt = 0; attempt < 50; attempt += 1) {
-    let alive = false;
-    for (const pid of [record.worker_pid, record.api_pid]) {
-      try { process.kill(pid, 0); alive = true; } catch (error) { if (error.code !== "ESRCH") throw error; }
-    }
-    if (!alive) break;
-    await new Promise((resolve) => setTimeout(resolve, 100));
-    if (attempt === 49) die("product service did not stop after SIGTERM");
-  }
+  const stateInfo = await lstat(stateRoot);
+  if (stateInfo.isSymbolicLink() || !stateInfo.isDirectory()) die("product service state root is not an owned directory");
+  const activePath = productServiceActiveStatePath(output), activeInfo = await lstat(activePath);
+  if (activeInfo.isSymbolicLink() || !activeInfo.isFile()) die("active product service sentinel is not a regular file");
+  const active = validateProductServiceActiveState(JSON.parse(await readFile(activePath, "utf8")), record, output);
   try {
-    const response = await fetch(new URL("/api/v1/health", record.api_url));
-    if (response.ok) die("product service port remains occupied after shutdown");
+    await terminate([active.worker_pid, active.api_pid]);
+    await assertProductServicePortFree(active.api_url);
+    const logs = await writeProductServiceLogsIdentity(output);
+    await writeFile(path.join(output, "product-service-stopped.json"), JSON.stringify({ schema_version: 1, status: "stopped", instance_token: active.instance_token, api_pid: active.api_pid, worker_pid: active.worker_pid, logs, stopped_at: new Date().toISOString() }, null, 2) + "\n");
+    await rm(stateRoot, { recursive: true });
   } catch (error) {
-    if (String(error.message).includes("port remains occupied")) throw error;
+    const logs = await writeProductServiceLogsIdentity(output, { requireAll: false });
+    await writeFile(path.join(output, "product-service-stop-failed.json"), JSON.stringify({ schema_version: 1, status: "failed", instance_token: active.instance_token, api_pid: active.api_pid, worker_pid: active.worker_pid, cleanup: { status: "failed", error: error.message, state_retained: true }, logs, error: error.message, failed_at: new Date().toISOString() }, null, 2) + "\n");
+    throw error;
   }
-  await writeFile(path.join(output, "product-service-stopped.json"), JSON.stringify({ api_pid: record.api_pid, worker_pid: record.worker_pid, stopped_at: new Date().toISOString() }, null, 2) + "\n");
-  await rm(stateRoot, { recursive: true, force: true });
 }
 if (isExecutedModule(import.meta.url)) {
   const [command, ...args] = process.argv.slice(2); const run = command === "start" ? startProductService({ root: args[0], output: args[1], permanentPin: args[2], url: args[3], weightsRoot: args[4] }) : command === "stop" ? stopProductService(args[0]) : Promise.reject(new Error("usage: start <root> <output> <pin> <url> <weights-root> | stop <output>")); run.catch((error) => { console.error(error.message); process.exitCode = 1; });
