@@ -4371,17 +4371,32 @@ mod tests {
         decoder: 97_583_622,
     };
 
-    /// THE GAP THAT KEEPS THE PRODUCTION ARM ON ITS FLOOR AT THIS PIN (sc-22667 residue): the
-    /// worker prices the anchor with the provider's asset facts
-    /// (`video_admission::anchor_component_bytes`), whose `decoder_bytes` is the WHOLE `vae/`
-    /// directory — encoder included — so the resident set it subtracts (5,893,275,206) exceeds
-    /// the re-captured conditioning level (5,834,701,816, i.e. 1.4 MB of conditioning
-    /// activations above the live set) by 58.6 MB and the law refuses. The refusal is the domain
-    /// guard doing its job on an overstated component, not a capture defect: the same anchor
-    /// derives with the decoder-only split above. Flips to `Some` the moment the pinned provider
-    /// states decoder-only bytes for its T2I resident set.
+    /// THE GAP IS CLOSED (sc-22667, inference c6d6a4db) — what remains here is a DOMAIN GUARD,
+    /// not a production residue.
+    ///
+    /// It used to read: the worker prices the anchor with the provider's asset facts
+    /// (`video_admission::anchor_component_bytes`), whose `decoder_bytes` was the WHOLE `vae/`
+    /// directory — encoder included — so the resident set it subtracted (5,893,275,206) exceeded
+    /// the re-captured conditioning level (5,834,701,816) by 58.6 MB, the law refused, and the
+    /// production MLX cell stayed on its estimate floor. The pinned provider now splits that
+    /// directory by key prefix: `decoder_bytes` is the render-resident `decoder.*` half
+    /// (97,583,622 B, exactly [`Z_IMAGE_Q4_MLX_RESIDENT_COMPONENTS`]) and the `encoder.*` half a
+    /// `Reference` request opts into is a typed `MemoryComponentKind::ReferenceEncoder` auxiliary
+    /// carried in `overlay_bytes`. `anchor_component_bytes` hands the law the three BASE legs, and
+    /// `base_bytes` is exactly `text_encoder + dit + vae` with the auxiliary charged on top by the
+    /// contract's own `predicted_peak_from_base` — so production now hands this anchor the
+    /// decoder-only split and it is IN DOMAIN. `the_recaptured_z_image_mlx_anchor_is_inside_the_laws_domain`
+    /// above walks that path; the worker's
+    /// `the_packaged_z_image_mlx_cell_prices_rung_four_below_rung_two_from_the_contracts_base_legs`
+    /// grades the same cell through the production seam.
+    ///
+    /// What survives is the guard: an OVERSTATED component — the whole directory, which is what a
+    /// provider that folded the encoder back into `decoder_bytes` would state — must still be
+    /// REFUSED rather than clamped to zero, because the law will not subtract a resident set the
+    /// measurement contradicts. If this test starts deriving, the domain guard has been weakened;
+    /// if the decoder-only split stops deriving, the pin regressed.
     #[test]
-    fn the_recaptured_z_image_mlx_anchor_is_refused_against_the_whole_vae_asset_fact() {
+    fn an_overstated_whole_vae_component_is_still_refused_by_the_anchor_domain_guard() {
         let anchor = store()
             .image_anchor_for("z_image_turbo", AnchorBackend::Mlx, "q4")
             .expect("the z_image_turbo q4 MLX anchor is packaged");

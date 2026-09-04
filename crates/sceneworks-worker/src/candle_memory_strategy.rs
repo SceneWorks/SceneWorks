@@ -5711,14 +5711,26 @@ mod tests {
     // -------------------------------------------------------------------------------------
 
     /// Z-Image-Turbo q4 component bytes on the candle lane (the `SceneWorks/z-image-turbo-mlx` q4
-    /// tier the retained record names): text encoder 2.26 GB, transformer 3.47 GB, VAE 0.16 GB —
-    /// the same figures `sceneworks_core::memory_anchor`'s own AC fixture binds to the packaged
-    /// tier size.
+    /// tier the retained record names), read VERBATIM off the pinned provider contract at
+    /// inference c6d6a4db through the production seam
+    /// (`memory_strategy_contract("z_image_turbo", …)` on that snapshot root, then
+    /// [`anchor_component_bytes`]): text encoder 2.514 GB, transformer 3.848 GB, VAE decoder
+    /// 0.168 GB.
+    ///
+    /// sc-22667, second pin bump: these were round ON-DISK approximations (2.26 / 3.47 / 0.16).
+    /// They are now the contract's own MATERIALIZED figures, which differ from the file sizes —
+    /// the DiT's 3.47 GB q4 checkpoint materializes to 3.85 GB, and the encoder to 2.51 rather
+    /// than 2.26. Using the contract's numbers is what makes this fixture the composition the
+    /// production ladder actually prices, rather than a hand-rounded neighbour of it. The VAE
+    /// ENCODER is deliberately absent: since c6d6a4db it is a typed
+    /// `MemoryComponentKind::ReferenceEncoder` auxiliary carrying `overlay_bytes` (137.1 MB), and
+    /// [`anchor_component_bytes`] passes the anchor law the three BASE legs only — the auxiliary
+    /// is charged on top by the contract's `predicted_peak_from_base` at admission.
     const Z_IMAGE_Q4_COMPONENTS: sceneworks_core::memory_anchor::ComponentBytes =
         sceneworks_core::memory_anchor::ComponentBytes {
-            conditioning: 2_260_000_000,
-            transformer: 3_470_000_000,
-            decoder: 160_000_000,
+            conditioning: 2_514_307_072,
+            transformer: 3_848_255_616,
+            decoder: 167_639_366,
         };
 
     /// Z-Image architecture facts as the candle provider publishes them off its loader presets
@@ -5770,11 +5782,22 @@ mod tests {
     /// facts (`memory_anchor::z_image_q4_rungs_price_from_the_staged_anchor_*` states the
     /// arithmetic): one resident block plus the non-score denoise residue plus the 64 Mi x 2 B
     /// chunk; and the decode residue split into the blender floor and the 3/8 host-transfer band.
+    /// sc-22667, second pin bump (c6d6a4db): the denoise decomposition moved with the DiT the
+    /// contract now states. One resident block is `div_ceil(3_848_255_616, 30)` rather than
+    /// `div_ceil(3_470_000_000, 30)`, and — because the anchor's measured staged denoise
+    /// (8.051 GB) is FIXED — the non-score residue it leaves shrinks by exactly the DiT's growth:
+    /// `8_050_966_528 - 3_848_255_616 - 1_274_019_840` (the 30 x 4608² x 2 B score tensor the law
+    /// separates out) = 2_928_691_072, down from 3_306_946_688. So a BIGGER declared transformer
+    /// makes the window rung's denoise SMALLER, 3.56 GB -> 3.19: the block the rung holds grows by
+    /// 12.6 MB while the residue it no longer has to carry falls by 378 MB. The decode moves the
+    /// other way (4.510 -> 4.515 GB) because its blender floor and 3/8 host-transfer band are cut
+    /// from the decode residue, which the same subtraction leaves 5 MB larger after the VAE
+    /// decoder's own 0.16 -> 0.168 GB correction.
     const Z_IMAGE_Q4_WINDOWED_PEAKS: sceneworks_core::memory_anchor::AnchorDerivedPhases =
         sceneworks_core::memory_anchor::AnchorDerivedPhases {
             conditioning: 3_097_493_504,
-            denoise: 115_666_667 + 3_306_946_688 + 134_217_728,
-            decode: 4_509_786_368,
+            denoise: 128_275_188 + 2_928_691_072 + 134_217_728,
+            decode: 4_514_560_972,
         };
 
     fn z_image_q4_anchor() -> sceneworks_core::memory_anchor::MemoryAnchor {
@@ -6061,7 +6084,7 @@ mod tests {
         // The peak the selector graded IS the max of the three phases: telemetry and selector
         // agree by construction (E7).
         assert_eq!(evaluation.context.predicted_peak_bytes, phases.peak_bytes());
-        assert_eq!(evaluation.context.predicted_peak_bytes, 4_509_786_368);
+        assert_eq!(evaluation.context.predicted_peak_bytes, 4_514_560_972);
         let memory = evaluation
             .memory
             .expect("an optimized selection carries request memory");
@@ -6084,7 +6107,7 @@ mod tests {
         assert!(reserve_gb > 0.7 + crate::vram_gate::LADDER_RESERVE_MARGIN_GB);
         assert_eq!(evaluation.admitted.reserve_gb, reserve_gb);
         assert!((evaluation.admitted.available_gb - (7.3 - reserve_gb)).abs() < 1e-9);
-        let admitted_bytes = (4_509_786_368f64
+        let admitted_bytes = (4_514_560_972f64
             * (1.0 + crate::ladder_margin_policy::CANDLE_RECAPTURE_SPREAD))
             .ceil();
         assert!((evaluation.admitted.needed_gb - admitted_bytes / BYTES_PER_GIB).abs() < 1e-6);
@@ -6093,7 +6116,7 @@ mod tests {
         // headroom folded into the candidate AND the fixed 2 GiB reserve on the budget (what this
         // lane did before sc-22664) is 6.48 GiB admitted against 5.3 GiB effective. That is what
         // kept this card out; the mutation arms of the story restore exactly that and red here.
-        let double_charged_bytes = (4_509_786_368f64
+        let double_charged_bytes = (4_514_560_972f64
             + crate::vram_gate::HEADROOM_GB * BYTES_PER_GIB)
             * (1.0 + crate::ladder_margin_policy::CANDLE_RECAPTURE_SPREAD);
         assert!(
@@ -6118,7 +6141,7 @@ mod tests {
                 "decode": Z_IMAGE_Q4_WINDOWED_PEAKS.decode,
             })
         );
-        assert_eq!(telemetry["predictedPeakBytes"], 4_509_786_368u64);
+        assert_eq!(telemetry["predictedPeakBytes"], 4_514_560_972u64);
         assert_eq!(telemetry["parameters"]["transformerWindowSize"], 1);
         assert_eq!(
             telemetry["parameters"]["attentionChunkSize"],
@@ -6182,9 +6205,14 @@ mod tests {
         // The tiled rung's binding phase is still denoise (unchanged from the anchor); the
         // chunked rung's is the chunked denoise; the windowed rung's is decode.
         assert_eq!(peak(tiled), Z_IMAGE_Q4_STAGED_PEAKS.denoise);
+        // The chunked rung holds the WHOLE DiT (only the window rung streams it a block at a
+        // time), so its denoise is the full transformer plus the same non-score residue and the
+        // same 64 Mi x 2 B chunk the window rung carries. That residue is the one subtraction
+        // `Z_IMAGE_Q4_WINDOWED_PEAKS` documents, which is why this reads the same 2_928_691_072
+        // (3_306_946_688 before the c6d6a4db DiT correction).
         assert_eq!(
             peak(chunked),
-            Z_IMAGE_Q4_COMPONENTS.transformer + 3_306_946_688 + 134_217_728
+            Z_IMAGE_Q4_COMPONENTS.transformer + 2_928_691_072 + 134_217_728
         );
         assert_eq!(peak(windowed), Z_IMAGE_Q4_WINDOWED_PEAKS.decode);
     }
@@ -8059,9 +8087,18 @@ mod tests {
     /// still holds the DiT (z-image's tiled decode measures 4.50 GB two rungs earlier, 3.36 GB
     /// above the window rung's 1.15, i.e. the q4 DiT), so the decode residue the law tiles
     /// carries a transformer the window rung does not, and the 3/8 host-transfer band
-    /// (`DecodeTile::chunk_pixels`) keeps 3/8 of it. Every other cell sits at or below 1.47x.
-    /// Raising this past the data keeps the test green; lowering it under 3.93 turns it red on
-    /// that one cell.
+    /// (`DecodeTile::chunk_pixels`) keeps 3/8 of it. Every other cell sits at or below 1.34x
+    /// (Krea's resident decode; the deepest denoise is z-image's chunked rung at 1.29x, and no
+    /// conditioning cell exceeds 1.04x). Raising this past the data keeps the test green; lowering
+    /// it under 3.94 turns it red on that one cell.
+    ///
+    /// sc-22667, second pin bump (c6d6a4db): the bound is NOT re-tightened, because the binding
+    /// cell did not move — 3.934x became 3.935x. What moved is everything the contract's DiT
+    /// bytes fed: the retired `ContractOverReportsTransformer` cell (z-image's window-1 denoise)
+    /// went from 0.126x to 1.066x, Krea's resident decode from 1.336x to 1.333x, and the whole
+    /// z-image resident column down by the 3.46 GB of device-format cache the walkers no longer
+    /// count. The over-prediction ceiling is a property of the DECODE-tile mechanism, not of the
+    /// asset facts, which is why fixing the facts left it where it was.
     const SC_22667_OVER_PREDICTION_BOUND: f64 = 4.0;
 
     /// The under side a re-measure is allowed to sit at against the raw law: the lane's same-cell
@@ -8090,20 +8127,27 @@ mod tests {
         /// position (rungs 4 and 5), or the cold same-cell recapture of the staged anchor itself
         /// (z-image decode, 11.747 GB against the anchor's 11.742).
         WithinRecaptureSpread,
-        /// z-image q4 window-1 DENOISE: derived 0.378 GB against a measured 2.993 (7.9x under).
-        /// The contract's `transformer_bytes` (7.31 GB) is the q4 `transformer/` DIRECTORY, and
-        /// gen-core's `safetensors_dir_bytes` (weightsmeta.rs at a5f643ae) recurses into the
-        /// `.candle-device-format-v1/` cache it holds — 3.85 GB of `*.q4_1.safetensors` blocks on
-        /// top of the 3.47 GB `model.safetensors`. Under that DiT the anchor's staged denoise
-        /// residue (8.05 − 7.31 = 0.74 GB) is smaller than the full score tensor the law separates
-        /// out (30 heads x 4608² x 2 B = 1.27 GB), the non-score residue collapses to zero, and the
-        /// window rung prices at one block plus the chunk. WITNESS: the resident rung holds every
-        /// component in every phase, and its measured conditioning (7.19 GB) is BELOW the
-        /// contract's component total (9.99 GB) — a contract that over-reports. Krea, whose
-        /// `loaded_asset_facts` prices the DiT from its own file, passes the same witness.
-        /// Upstream (inference gen-core / candle-gen-z-image), not this repo; the pin flips red
-        /// the day the facts are fixed so it is removed rather than forgotten.
-        ContractOverReportsTransformer,
+        /// The RESIDENT rung's conditioning, under by the auxiliary overlay the anchor derivation
+        /// deliberately does not price.
+        ///
+        /// The anchor law is a statement about the BASE composition: [`anchor_component_bytes`]
+        /// hands it `conditioning_bytes + transformer_bytes + decoder_bytes`, the three legs that
+        /// sum to `base_bytes`, and nothing else. A typed auxiliary — since inference c6d6a4db,
+        /// z-image's VAE encoder as a [`MemoryComponentKind::ReferenceEncoder`] carrying
+        /// `overlay_bytes` — is resident alongside them but is charged ON TOP by the contract's
+        /// own `predicted_peak_from_base` at admission, not by the anchor. So a rung that holds
+        /// every component at once measures the overlay while the raw law does not, and the raw
+        /// figure sits under the measurement by at most that overlay.
+        ///
+        /// WITNESS, and why it cannot be satisfied by accident: the contract must publish a
+        /// NON-ZERO `overlay_bytes`, and the shortfall (measured − derived) must not exceed it. A
+        /// contract with no auxiliary cannot claim this class, and a shortfall larger than the
+        /// auxiliary is a different defect that reds here. For z-image q4 the overlay is 137.1 MB
+        /// and the shortfall 73.6 MB (derived 7.113 GB against a measured 7.187): the law's own
+        /// residue already covers 63.5 MB of it. Admission never sees this gap — it prices the
+        /// overlay explicitly — so this is a property of the RAW law, which is what this pass
+        /// grades.
+        AuxiliaryOverlayNotPricedByTheAnchor,
         /// See `SC_22667_KREA_TILED_DECODE_UNDERSCALE_BOUND`.
         KreaTiledDecodeUnderscaled,
     }
@@ -8112,6 +8156,18 @@ mod tests {
     /// `(model, rung, phase, why)`, in grading order. See the headline test's FINDINGS. A cell
     /// that leaves this list (fixed) or joins it (regressed) fails the test either way.
     const SC_22667_RAW_UNDER_PREDICTIONS: &[(&str, &str, &str, Sc22667Under)] = &[
+        (
+            "z_image_turbo",
+            "resident",
+            "conditioning",
+            Sc22667Under::AuxiliaryOverlayNotPricedByTheAnchor,
+        ),
+        (
+            "z_image_turbo",
+            "staged_residency",
+            "denoise",
+            Sc22667Under::WithinRecaptureSpread,
+        ),
         (
             "z_image_turbo",
             "staged_residency",
@@ -8129,12 +8185,6 @@ mod tests {
             "bounded_transformer_residency",
             "conditioning",
             Sc22667Under::WithinRecaptureSpread,
-        ),
-        (
-            "z_image_turbo",
-            "bounded_transformer_residency",
-            "denoise",
-            Sc22667Under::ContractOverReportsTransformer,
         ),
         (
             "krea_2_turbo",
@@ -8591,14 +8641,24 @@ mod tests {
                                 "{model_id} {rung} {phase}: the warm re-measure {measured_phase} \
                                  lies outside the recapture spread of the derived {derived_phase}"
                             ),
-                            Sc22667Under::ContractOverReportsTransformer => assert!(
-                                contract.asset_facts.base_bytes > measured_resident_conditioning,
-                                "{model_id}: the contract's component total {} no longer exceeds \
-                                 the measured resident conditioning {} — the asset facts were \
-                                 fixed upstream; drop this pin",
-                                contract.asset_facts.base_bytes,
-                                measured_resident_conditioning
-                            ),
+                            Sc22667Under::AuxiliaryOverlayNotPricedByTheAnchor => {
+                                assert!(
+                                    contract.asset_facts.overlay_bytes > 0,
+                                    "{model_id} {rung} {phase}: this class means the RESIDENT set \
+                                     holds a typed auxiliary the base legs exclude, but the \
+                                     contract publishes no overlay_bytes — the shortfall is a \
+                                     different defect; do not pin it here"
+                                );
+                                assert!(
+                                    measured_phase.saturating_sub(*derived_phase)
+                                        <= contract.asset_facts.overlay_bytes,
+                                    "{model_id} {rung} {phase}: the raw law is short by {} bytes, \
+                                     MORE than the {} byte auxiliary overlay it declines to price \
+                                     — the shortfall is no longer explained by the overlay",
+                                    measured_phase.saturating_sub(*derived_phase),
+                                    contract.asset_facts.overlay_bytes
+                                );
+                            }
                             Sc22667Under::KreaTiledDecodeUnderscaled => assert!(
                                 (*measured_phase as f64)
                                     <= (*derived_phase as f64)
@@ -8611,14 +8671,24 @@ mod tests {
                     graded_cells += 1;
                 }
             }
-            // Krea passes the over-report witness (component total 11.79 GB under its measured
-            // resident conditioning 12.73); z-image fails it (9.99 GB over 7.19) — see
-            // `Sc22667Under::ContractOverReportsTransformer`.
-            let over_reports = contract.asset_facts.base_bytes > measured_resident_conditioning;
-            assert_eq!(
-                over_reports,
-                model_id == "z_image_turbo",
-                "{model_id}: the resident-conditioning witness of an over-reporting contract moved"
+            // NO contract over-reports its components any more, and that is the sc-22667 flip.
+            // At a5f643ae z-image's `transformer_bytes` was the q4 `transformer/` DIRECTORY and
+            // gen-core's walker recursed into the `.candle-device-format-v1/` cache inside it, so
+            // the contract claimed 9.99 GB of components against a measured resident conditioning
+            // of 7.19 — a contract that over-reported, which is what drove the retired
+            // `ContractOverReportsTransformer` pin. At c6d6a4db the walkers skip that hidden cache
+            // and z-image's DiT prices at its own 3.85 GB checkpoint, putting the component total
+            // at 6.53 GB, BELOW the measurement, exactly where Krea always sat (11.73 against
+            // 12.73). Asserted for BOTH models with no model-keyed exception: a contract whose
+            // component total climbs back above what a rung holding every component measures has
+            // regressed to the retired defect.
+            assert!(
+                contract.asset_facts.base_bytes <= measured_resident_conditioning,
+                "{model_id}: the contract's component total {} exceeds the measured resident \
+                 conditioning {} — a contract cannot claim more resident bytes than a rung \
+                 holding every component measured (the a5f643ae device-format-cache defect)",
+                contract.asset_facts.base_bytes,
+                measured_resident_conditioning
             );
             // The batch staged row's carry-over, pinned as the finding it is.
             let batch_staged = measured[1].1;

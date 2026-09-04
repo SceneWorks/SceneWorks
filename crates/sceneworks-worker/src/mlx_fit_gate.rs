@@ -20368,4 +20368,145 @@ mod tests {
             );
         }
     }
+
+    /// sc-22667, second pin bump (inference c6d6a4db): the packaged `z_image_turbo` q4 MLX cell is
+    /// IN DOMAIN through the production seam, and prices rung 4 below rung 2.
+    ///
+    /// THE FLIP. At a5f643ae the MLX provider's `decoder_bytes` was the WHOLE `vae/` directory —
+    /// the `decoder.*` tensors a text-to-image render materializes AND the `encoder.*` tensors it
+    /// never does. `anchor_component_bytes` therefore handed the law a 5,893,275,206-byte resident
+    /// set against a re-captured conditioning level of 5,834,701,816, the domain guard refused the
+    /// negative residue, and the production cell sat on its generic weights+headroom estimate
+    /// floor (core test, then named `..._is_refused_against_the_whole_vae_asset_fact`). c6d6a4db
+    /// splits the directory by key prefix: `decoder_bytes` is the render-resident half and the
+    /// encoder becomes a typed `MemoryComponentKind::ReferenceEncoder` auxiliary in
+    /// `overlay_bytes`.
+    ///
+    /// WHY THIS TEST LIVES IN THE WORKER, not in core. The core law only ever sees a
+    /// `ComponentBytes`; what could regress is the SEAM that builds one. `anchor_component_bytes`
+    /// must read the three BASE legs and NOT add `overlay_bytes` — `base_bytes` is exactly
+    /// `conditioning + transformer + decoder`, and the auxiliary is charged on top by the
+    /// contract's own `predicted_peak_from_base` at admission. A seam that summed base + overlay
+    /// would hand the law 5,893,275,206 again and put this cell straight back on the floor, which
+    /// is the exact defect the flip removed. The facts below are the pinned provider's own
+    /// (`mlx-gen-z-image::memory_strategy::component_asset_facts`) for the q4 T2I route; MLX
+    /// cannot be built on Windows, so they are stated rather than read off a linked registry, and
+    /// `base_bytes` is asserted to equal the three legs so a restatement cannot drift silently.
+    ///
+    /// MUTATION (the pre-c6d6a4db shape): fold `overlay_bytes` back into `decoder_bytes` and the
+    /// derivation returns `None` on every rung — asserted below, so this test fails if the split
+    /// stops being what admits the cell.
+    #[test]
+    fn the_packaged_z_image_mlx_cell_prices_rung_four_below_rung_two_from_the_contracts_base_legs()
+    {
+        use sceneworks_core::memory_anchor::{AnchorBackend, AnchorMlxImageDeriveRequest};
+
+        // The pinned MLX contract's asset facts for z_image_turbo q4, text-to-image, no control:
+        // the three base legs plus the reference-encoder auxiliary.
+        let facts = gen_core::MemoryAssetFacts {
+            base_bytes: 2_262_920_192 + 3_465_730_304 + 97_583_622,
+            conditioning_bytes: 2_262_920_192,
+            transformer_bytes: 3_465_730_304,
+            decoder_bytes: 97_583_622,
+            overlay_bytes: 67_041_088,
+        };
+        assert_eq!(
+            facts.base_bytes,
+            facts.conditioning_bytes + facts.transformer_bytes + facts.decoder_bytes,
+            "base_bytes is the three legs; the auxiliary rides in overlay_bytes"
+        );
+
+        let components = crate::video_admission::anchor_component_bytes(facts);
+        assert_eq!(components.conditioning, facts.conditioning_bytes);
+        assert_eq!(components.transformer, facts.transformer_bytes);
+        assert_eq!(components.decoder, facts.decoder_bytes);
+        assert_eq!(
+            components.total(),
+            facts.base_bytes,
+            "the seam must pass the BASE legs — adding the auxiliary overlay here is the defect \
+             that floored this cell at a5f643ae"
+        );
+
+        let store = sceneworks_core::memory_anchor::packaged_memory_anchors()
+            .expect("the packaged anchor store");
+        let anchor = store
+            .image_anchor_for("z_image_turbo", AnchorBackend::Mlx, "q4")
+            .expect("the packaged z_image_turbo q4 MLX anchor");
+        let request = AnchorMlxImageDeriveRequest {
+            width: 768,
+            height: 768,
+        };
+
+        let priced = anchor
+            .derive_mlx_image_phase_peaks(request, components)
+            .expect(
+                "the packaged MLX cell is in the law's domain through the production seam \
+                 (this is the sc-22667 flip; it returned None at a5f643ae)",
+            );
+        assert!(priced.peak_bytes() > 0);
+
+        // Rung ordering on the same cell, through the law the lane prices with.
+        let facts_axes = sceneworks_core::memory_anchor::ArchitectureFacts {
+            attention_heads: Some(30),
+            head_dim: Some(128),
+            transformer_blocks: Some(30),
+            patch_size: Some(2),
+            latent_channels: Some(16),
+            vae_spatial_scale: Some(8),
+            vae_temporal_scale: None,
+            activation_dtype_width: Some(2),
+        };
+        let derive = |regime| {
+            anchor.derive_phase_peaks(
+                &sceneworks_core::memory_anchor::ImageDeriveRequest {
+                    width: 768,
+                    height: 768,
+                    batch: 1,
+                    conditioning_tokens: None,
+                    regime,
+                },
+                components,
+                facts_axes,
+            )
+        };
+        let rung_2 = derive(sceneworks_core::memory_anchor::RequestRegime::staged())
+            .expect("rung 2 prices from the contract's base legs");
+        let rung_4 = derive(sceneworks_core::memory_anchor::RequestRegime {
+            decode_tile: Some(sceneworks_core::memory_anchor::DecodeTile {
+                edge: 512,
+                overlap: 128,
+            }),
+            attention_chunk_scores: Some(64 * 1024 * 1024),
+            transformer_window: Some(1),
+            staged: true,
+        })
+        .expect("rung 4 prices from the contract's base legs");
+        eprintln!(
+            "sc-22667 z_image_turbo q4 mlx 768x768: lane peak {} | rung 2 {rung_2:?} peak {} | \
+             rung 4 {rung_4:?} peak {}",
+            priced.peak_bytes(),
+            rung_2.peak_bytes(),
+            rung_4.peak_bytes()
+        );
+        assert!(
+            rung_4.peak_bytes() < rung_2.peak_bytes(),
+            "rung 4 {rung_4:?} must price below rung 2 {rung_2:?}"
+        );
+
+        // The mutation: the pre-c6d6a4db whole-directory decoder floors the cell again.
+        let whole_vae =
+            crate::video_admission::anchor_component_bytes(gen_core::MemoryAssetFacts {
+                base_bytes: facts.base_bytes + facts.overlay_bytes,
+                decoder_bytes: facts.decoder_bytes + facts.overlay_bytes,
+                overlay_bytes: 0,
+                ..facts
+            });
+        assert!(
+            anchor
+                .derive_mlx_image_phase_peaks(request, whole_vae)
+                .is_none(),
+            "folding the reference encoder back into decoder_bytes must refuse — otherwise this \
+             test would pass with or without the split it exists to pin"
+        );
+    }
 }

@@ -942,11 +942,11 @@
         "loadShape": "deferred_materialization",
         "calibrationFingerprint": "z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2",
         "assetFacts": {
-          "baseBytes": 9991097816,
+          "baseBytes": 6530202054,
           "conditioningBytes": 2514307072,
-          "transformerBytes": 7312136708,
-          "decoderBytes": 164654036,
-          "overlayBytes": 0
+          "transformerBytes": 3848255616,
+          "decoderBytes": 167639366,
+          "overlayBytes": 137096832
         },
         "architectureFacts": {
           "attentionHeads": 30,
@@ -2144,9 +2144,9 @@
         "loadShape": "deferred_materialization",
         "calibrationFingerprint": "krea-turbo-cuda-phase-curves-v1",
         "assetFacts": {
-          "baseBytes": 11790449284,
+          "baseBytes": 11727534692,
           "conditioningBytes": 2765258240,
-          "transformerBytes": 8517620920,
+          "transformerBytes": 8454706328,
           "decoderBytes": 507570124,
           "overlayBytes": 0
         },
@@ -2418,5 +2418,13 @@
         }
       }
     }
-  ]
+  ],
+  "contractRestamp": {
+    "pin": "c6d6a4dbd61ab09c26ff5526632cae2cefea60ed",
+    "restampedAt": "2026-09-03",
+    "scope": "providerContract.assetFacts only",
+    "method": "weights-free contract read of the SAME snapshot roots named in each tier’s environment block, through the production seam (inference_runtime::media().memory_strategy_contract). No render, no device allocation, no re-measurement.",
+    "why": "inference c6d6a4db stopped the gen-core weight walkers recursing into the hidden .candle-device-format-v1/ cache and split the VAE encoder out of decoder_bytes into a typed ReferenceEncoder overlay. observedMemory is the ORIGINAL a5f643ae measurement and is deliberately untouched: the device the adapter measured did not change, only what the contract claims about it.",
+    "measuredColumnPin": "a5f643ae58a4ed81e6be8280afbf29750da5ffe2"
+  }
 }
