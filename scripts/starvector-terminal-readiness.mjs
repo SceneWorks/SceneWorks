@@ -8,7 +8,7 @@ import { lstat, mkdir, readFile, readdir, stat, writeFile } from "node:fs/promis
 import { promisify } from "node:util";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
-import { INFERENCE_REVISION, TUPLES, readPlanAndLock } from "./starvector-terminal-campaign.mjs";
+import { INFERENCE_REVISION, TUPLES, readPlanAndLock, terminalSourceRowsSha256 } from "./starvector-terminal-campaign.mjs";
 import { fileSha256 } from "./lib/file-sha256.mjs";
 import { sortTerminalTreeEntries, terminalTreeEntry, terminalTreeSha256 } from "./lib/terminal-tree-identity.mjs";
 import {
@@ -130,12 +130,11 @@ export async function validateCorpusAssets(inferenceRoot, corpusRelative, assets
     if (row.preview_png !== undefined || row.preview_png_sha256 !== undefined) assetEntries.push(await regularFile(assetsRoot, row.preview_png, row.preview_png_sha256, `row ${position} preview PNG`));
     rows.push(row);
   }
-  const rowRecord = (row) => JSON.stringify({ dataset: row.dataset, revision: row.revision, row_index: row.row_index, filename: row.filename, svg_sha256: row.svg_sha256 });
-  const rowIdentity = sha(`${rows.map(rowRecord).join("\n")}\n`);
+  const rowIdentity = terminalSourceRowsSha256(rows);
   if (rowIdentity !== corpus.upstream_image_quality_cases.row_identity_sha256) die("terminal row identities drifted from the pinned corpus");
-  for (const [sourceIndex, source] of corpus.upstream_image_quality_cases.sources.entries()) if (sha(`${rows.slice(sourceIndex * 30, sourceIndex * 30 + 30).map(rowRecord).join("\n")}\n`) !== source.row_identity_sha256) die(`terminal rows for ${source.dataset} drifted`);
+  for (const [sourceIndex, source] of corpus.upstream_image_quality_cases.sources.entries()) if (terminalSourceRowsSha256(rows.slice(sourceIndex * 30, sourceIndex * 30 + 30)) !== source.row_identity_sha256) die(`terminal rows for ${source.dataset} drifted`);
   const parityRows = corpus.upstream_image_quality_cases.sources.flatMap((_, sourceIndex) => rows.slice(sourceIndex * 30, sourceIndex * 30 + 5));
-  if (sha(`${parityRows.map(rowRecord).join("\n")}\n`) !== corpus.deterministic_parity_cases.row_identity_sha256) die("deterministic parity row identities drifted from the pinned corpus");
+  if (terminalSourceRowsSha256(parityRows) !== corpus.deterministic_parity_cases.row_identity_sha256) die("deterministic parity row identities drifted from the pinned corpus");
 
   const lifecycle = exactCases(index, "lifecycle_cases", ["load", "unload", "reload", "memory_reported"], "operation");
   const limits = exactCases(index, "limit_cases", ["complete_root", "eos", "token_limit", "byte_limit", "wall_time_limit", "cancelled"], "finish_reason");
