@@ -72,6 +72,9 @@ jobs:
           node scripts/starvector-terminal-assets.mjs "$STARVECTOR_TERMINAL_CORPUS_ASSETS_ROOT" "$STARVECTOR_TERMINAL_API_URL" mlx:1b "$RUNNER_TEMP/starvector-terminal/mlx-1b/imported-assets.json"
           node scripts/starvector-terminal-case-bundle.mjs "$STARVECTOR_TERMINAL_INFERENCE_ROOT/release/starvector-terminal-corpus-v1.json" "$STARVECTOR_TERMINAL_CORPUS_ASSETS_ROOT" "$STARVECTOR_TERMINAL_CASE_BUNDLE" "${{ inputs.permanent_pin }}" "$RUNNER_TEMP/starvector-terminal/mlx-1b/imported-assets.json"
           node scripts/starvector-terminal-producer.mjs run "$GITHUB_WORKSPACE" release/starvector-terminal-campaign-v1.json "$STARVECTOR_TERMINAL_INFERENCE_ROOT" "$STARVECTOR_TERMINAL_WEIGHTS_ROOT" "$STARVECTOR_TERMINAL_METRICS_ROOT" "$STARVECTOR_TERMINAL_LEASE_ROOT" "$STARVECTOR_TERMINAL_LEASE_HELPER" "$RUNNER_TEMP/starvector-terminal/mlx-1b" mlx:1b "${{ inputs.campaign_run_id }}" "${{ inputs.permanent_pin }}" "$STARVECTOR_TERMINAL_PRODUCT_ROUTE_COMMAND"
+      - name: Stop MLX 1B source-built service
+        if: ${{ always() }}
+        run: node scripts/starvector-terminal-product-service.mjs stop "$RUNNER_TEMP/starvector-terminal/mlx-1b"
       - name: Upload MLX 1B raw evidence even on failure
         if: ${{ always() }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -79,9 +82,6 @@ jobs:
           name: starvector-terminal-mlx-1b-${{ inputs.campaign_run_id }}
           path: ${{ runner.temp }}/starvector-terminal/mlx-1b
           if-no-files-found: warn
-      - name: Stop MLX 1B source-built service
-        if: ${{ always() }}
-        run: node scripts/starvector-terminal-product-service.mjs stop "$RUNNER_TEMP/starvector-terminal/mlx-1b"
 
   mlx-8b:
     needs: mlx-1b
@@ -97,6 +97,9 @@ jobs:
           node scripts/starvector-terminal-assets.mjs "$STARVECTOR_TERMINAL_CORPUS_ASSETS_ROOT" "$STARVECTOR_TERMINAL_API_URL" mlx:8b "$RUNNER_TEMP/starvector-terminal/mlx-8b/imported-assets.json"
           node scripts/starvector-terminal-case-bundle.mjs "$STARVECTOR_TERMINAL_INFERENCE_ROOT/release/starvector-terminal-corpus-v1.json" "$STARVECTOR_TERMINAL_CORPUS_ASSETS_ROOT" "$STARVECTOR_TERMINAL_CASE_BUNDLE" "${{ inputs.permanent_pin }}" "$RUNNER_TEMP/starvector-terminal/mlx-8b/imported-assets.json"
           node scripts/starvector-terminal-producer.mjs run "$GITHUB_WORKSPACE" release/starvector-terminal-campaign-v1.json "$STARVECTOR_TERMINAL_INFERENCE_ROOT" "$STARVECTOR_TERMINAL_WEIGHTS_ROOT" "$STARVECTOR_TERMINAL_METRICS_ROOT" "$STARVECTOR_TERMINAL_LEASE_ROOT" "$STARVECTOR_TERMINAL_LEASE_HELPER" "$RUNNER_TEMP/starvector-terminal/mlx-8b" mlx:8b "${{ inputs.campaign_run_id }}" "${{ inputs.permanent_pin }}" "$STARVECTOR_TERMINAL_PRODUCT_ROUTE_COMMAND"
+      - name: Stop MLX 8B source-built service
+        if: ${{ always() }}
+        run: node scripts/starvector-terminal-product-service.mjs stop "$RUNNER_TEMP/starvector-terminal/mlx-8b"
       - name: Upload MLX 8B raw evidence even on failure
         if: ${{ always() }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -104,9 +107,6 @@ jobs:
           name: starvector-terminal-mlx-8b-${{ inputs.campaign_run_id }}
           path: ${{ runner.temp }}/starvector-terminal/mlx-8b
           if-no-files-found: warn
-      - name: Stop MLX 8B source-built service
-        if: ${{ always() }}
-        run: node scripts/starvector-terminal-product-service.mjs stop "$RUNNER_TEMP/starvector-terminal/mlx-8b"
 
   cuda-1b:
     needs: mlx-8b
@@ -136,6 +136,10 @@ jobs:
           node scripts/starvector-terminal-assets.mjs $env:STARVECTOR_TERMINAL_CORPUS_ASSETS_ROOT $env:STARVECTOR_TERMINAL_API_URL candle-cuda:1b "$env:RUNNER_TEMP\\starvector-terminal\\cuda-1b\\imported-assets.json"
           node scripts/starvector-terminal-case-bundle.mjs "$env:STARVECTOR_TERMINAL_INFERENCE_ROOT\\release\\starvector-terminal-corpus-v1.json" $env:STARVECTOR_TERMINAL_CORPUS_ASSETS_ROOT $env:STARVECTOR_TERMINAL_CASE_BUNDLE "${{ inputs.permanent_pin }}" "$env:RUNNER_TEMP\\starvector-terminal\\cuda-1b\\imported-assets.json"
           node scripts/starvector-terminal-producer.mjs run $env:GITHUB_WORKSPACE release/starvector-terminal-campaign-v1.json $env:STARVECTOR_TERMINAL_INFERENCE_ROOT $env:STARVECTOR_TERMINAL_WEIGHTS_ROOT $env:STARVECTOR_TERMINAL_METRICS_ROOT $env:STARVECTOR_TERMINAL_LEASE_ROOT $env:STARVECTOR_TERMINAL_LEASE_HELPER "$env:RUNNER_TEMP\\starvector-terminal\\cuda-1b" candle-cuda:1b "${{ inputs.campaign_run_id }}" "${{ inputs.permanent_pin }}" $env:STARVECTOR_TERMINAL_PRODUCT_ROUTE_COMMAND
+      - name: Stop CUDA 1B source-built service
+        if: ${{ always() }}
+        shell: powershell
+        run: node scripts/starvector-terminal-product-service.mjs stop "$env:RUNNER_TEMP\starvector-terminal\cuda-1b"
       - name: Upload CUDA 1B raw evidence even on failure
         if: ${{ always() }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -143,10 +147,6 @@ jobs:
           name: starvector-terminal-cuda-1b-${{ inputs.campaign_run_id }}
           path: ${{ runner.temp }}\starvector-terminal\cuda-1b
           if-no-files-found: warn
-      - name: Stop CUDA 1B source-built service
-        if: ${{ always() }}
-        shell: powershell
-        run: node scripts/starvector-terminal-product-service.mjs stop "$env:RUNNER_TEMP\starvector-terminal\cuda-1b"
 
   cuda-8b:
     needs: cuda-1b
@@ -176,6 +176,10 @@ jobs:
           node scripts/starvector-terminal-assets.mjs $env:STARVECTOR_TERMINAL_CORPUS_ASSETS_ROOT $env:STARVECTOR_TERMINAL_API_URL candle-cuda:8b "$env:RUNNER_TEMP\\starvector-terminal\\cuda-8b\\imported-assets.json"
           node scripts/starvector-terminal-case-bundle.mjs "$env:STARVECTOR_TERMINAL_INFERENCE_ROOT\\release\\starvector-terminal-corpus-v1.json" $env:STARVECTOR_TERMINAL_CORPUS_ASSETS_ROOT $env:STARVECTOR_TERMINAL_CASE_BUNDLE "${{ inputs.permanent_pin }}" "$env:RUNNER_TEMP\\starvector-terminal\\cuda-8b\\imported-assets.json"
           node scripts/starvector-terminal-producer.mjs run $env:GITHUB_WORKSPACE release/starvector-terminal-campaign-v1.json $env:STARVECTOR_TERMINAL_INFERENCE_ROOT $env:STARVECTOR_TERMINAL_WEIGHTS_ROOT $env:STARVECTOR_TERMINAL_METRICS_ROOT $env:STARVECTOR_TERMINAL_LEASE_ROOT $env:STARVECTOR_TERMINAL_LEASE_HELPER "$env:RUNNER_TEMP\\starvector-terminal\\cuda-8b" candle-cuda:8b "${{ inputs.campaign_run_id }}" "${{ inputs.permanent_pin }}" $env:STARVECTOR_TERMINAL_PRODUCT_ROUTE_COMMAND
+      - name: Stop CUDA 8B source-built service
+        if: ${{ always() }}
+        shell: powershell
+        run: node scripts/starvector-terminal-product-service.mjs stop "$env:RUNNER_TEMP\starvector-terminal\cuda-8b"
       - name: Upload CUDA 8B raw evidence and terminal suites even on failure
         if: ${{ always() }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -183,10 +187,6 @@ jobs:
           name: starvector-terminal-cuda-8b-${{ inputs.campaign_run_id }}
           path: ${{ runner.temp }}\starvector-terminal\cuda-8b
           if-no-files-found: warn
-      - name: Stop CUDA 8B source-built service
-        if: ${{ always() }}
-        shell: powershell
-        run: node scripts/starvector-terminal-product-service.mjs stop "$env:RUNNER_TEMP\starvector-terminal\cuda-8b"
 
   seal-receipt:
     if: ${{ always() }}

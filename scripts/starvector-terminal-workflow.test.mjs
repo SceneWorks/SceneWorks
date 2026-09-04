@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { execFile as execFileCallback } from "node:child_process";
 import { createHash } from "node:crypto";
-import { chmod, lstat, mkdir, mkdtemp, readFile, rm, stat, symlink, writeFile } from "node:fs/promises";
+import { chmod, copyFile, link, lstat, mkdir, mkdtemp, readFile, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -9,13 +9,110 @@ import test from "node:test";
 import { promisify } from "node:util";
 import { treeIdentity, validateCorpusAssets, validateTerminalServiceClosure } from "./starvector-terminal-readiness.mjs";
 import { terminalTreeEntry, terminalTreeSha256 } from "./lib/terminal-tree-identity.mjs";
-import { closureTreeHash, copyRegularTree, productServiceBackendEnv, productServiceBuildArgs, productServiceLogPaths, productServiceLogsSha256, productServiceStateRoot } from "./starvector-terminal-product-service.mjs";
+import { closureTreeHash, copyRegularTree, productServiceActiveStatePath, productServiceBackendEnv, productServiceBuildArgs, productServiceLogPaths, productServiceLogsIdentity, productServiceStateRoot, productServiceTaskkillArguments, stopProductService } from "./starvector-terminal-product-service.mjs";
 
 const workflow = await readFile(".github/workflows/starvector-terminal.yml", "utf8");
 const readiness = await readFile(".github/workflows/starvector-terminal-readiness.yml", "utf8");
 const hash = (value) => createHash("sha256").update(value).digest("hex");
 const pin = "b2d9e0917499517cf8c1518e0d360cac8693b0c0";
 const execFile = promisify(execFileCallback);
+
+async function availableLoopbackPort() {
+  const reservation = createServer();
+  await new Promise((resolve, reject) => { reservation.once("error", reject); reservation.listen(0, "127.0.0.1", resolve); });
+  const port = reservation.address().port;
+  await new Promise((resolve, reject) => reservation.close((error) => error ? reject(error) : resolve()));
+  return port;
+}
+
+async function executableAlias(destination) {
+  await mkdir(path.dirname(destination), { recursive: true });
+  let copied = false;
+  try { await link(process.execPath, destination); } catch (error) {
+    if (!["EXDEV", "EPERM", "EACCES"].includes(error.code)) throw error;
+    await copyFile(process.execPath, destination);
+    copied = true;
+  }
+  if (copied && process.platform !== "win32") await chmod(destination, 0o755);
+}
+
+async function productServiceFixture() {
+  const sandbox = await mkdtemp(path.join(tmpdir(), "starvector-service-detach-"));
+  const root = path.join(sandbox, "repo"), output = path.join(sandbox, "tuple"), weightsRoot = path.join(sandbox, "weights"), shimRoot = path.join(sandbox, "bin");
+  await mkdir(root); await mkdir(shimRoot); await mkdir(path.join(weightsRoot, "app"), { recursive: true }); await mkdir(path.join(weightsRoot, "hf"), { recursive: true });
+  await writeFile(path.join(root, ".gitignore"), "target/\n");
+  await writeFile(path.join(root, "Cargo.toml"), `[dependencies]\ncandle-core = { git = "https://github.com/SceneWorks/inference", rev = "${pin}" }\n`);
+  await execFile("git", ["init", "-q", root]);
+  await execFile("git", ["-C", root, "add", "."]);
+  await execFile("git", ["-C", root, "-c", "user.name=SceneWorks Test", "-c", "user.email=test@sceneworks.invalid", "commit", "-qm", "fixture"]);
+
+  const runtime = path.join(sandbox, "fake-service.cjs");
+  await writeFile(runtime, `const http = require("node:http");
+const path = require("node:path");
+if (path.basename(process.argv[1] ?? "") === "build") process.exit(0);
+if (process.argv.length === 1) {
+  const worker = process.env.SCENEWORKS_WORKER_ONLY === "1";
+  let server;
+  const timer = setInterval(() => {
+    process.stdout.write((worker ? "worker" : "api") + " stdout " + process.pid + "\\n");
+    process.stderr.write((worker ? "worker" : "api") + " stderr " + process.pid + "\\n");
+  }, 25);
+  if (!worker) {
+    server = http.createServer((_request, response) => {
+      response.writeHead(200, { "content-type": "application/json" });
+      response.end(JSON.stringify({ status: "ok", readiness: { status: "ready" } }));
+    });
+    server.listen(Number(process.env.SCENEWORKS_API_PORT), "127.0.0.1");
+  }
+  const stop = () => {
+    clearInterval(timer);
+    if (server) server.close(() => process.exit(0)); else process.exit(0);
+  };
+  process.on("SIGTERM", stop);
+  process.on("SIGINT", stop);
+}
+`);
+  await executableAlias(path.join(shimRoot, process.platform === "win32" ? "cargo.exe" : "cargo"));
+  await executableAlias(path.join(root, "target", "debug", process.platform === "win32" ? "sceneworks-rust-api.exe" : "sceneworks-rust-api"));
+  await writeFile(path.join(weightsRoot, "app", "receipt.json"), "receipt");
+  await writeFile(path.join(weightsRoot, "hf", "weights.bin"), "weights");
+  const manifest = {
+    terminal_service_closure: {
+      app_data_relative_path: "app",
+      app_data_sha256: await closureTreeHash(path.join(weightsRoot, "app")),
+      hf_home_relative_path: "hf",
+      hf_home_sha256: await closureTreeHash(path.join(weightsRoot, "hf")),
+    },
+    models: {
+      "starvector-1b": { relative_path: "models/1b", revision: "1".repeat(40), inventory_sha256: "a".repeat(64) },
+      "starvector-8b": { relative_path: "models/8b", revision: "2".repeat(40), inventory_sha256: "b".repeat(64) },
+    },
+  };
+  const manifestPath = path.join(weightsRoot, "starvector-terminal-weights-v1.json");
+  await writeFile(manifestPath, JSON.stringify(manifest));
+  const cliEnv = { ...process.env, NODE_OPTIONS: `${process.env.NODE_OPTIONS ?? ""} --require="${runtime}"`.trim(), PATH: `${shimRoot}${path.delimiter}${process.env.PATH ?? ""}` };
+  const serviceScript = path.resolve("scripts/starvector-terminal-product-service.mjs");
+  return { sandbox, root, output, weightsRoot, manifest, manifestPath, cliEnv, serviceScript };
+}
+
+async function runProductServiceCli(fixture, command, port, timeout = 8_000) {
+  const args = command === "start"
+    ? [fixture.serviceScript, "start", fixture.root, fixture.output, pin, `http://127.0.0.1:${port}`, fixture.weightsRoot]
+    : [fixture.serviceScript, "stop", fixture.output];
+  return execFile(process.execPath, args, { env: fixture.cliEnv, timeout });
+}
+
+function assertPidsRunning(record) {
+  for (const pid of [record.api_pid, record.worker_pid]) assert.doesNotThrow(() => process.kill(pid, 0));
+}
+
+async function forceFixtureCleanup(fixture, record) {
+  if (record) {
+    await runProductServiceCli(fixture, "stop", 0).catch(() => {});
+    for (const pid of [record.worker_pid, record.api_pid]) { try { process.kill(pid, "SIGKILL"); } catch { /* already stopped */ } }
+  }
+  await rm(fixture.sandbox, { recursive: true, force: true });
+}
 
 test("terminal workflow is dispatch-only, serial, and seals raw evidence", () => {
   assert.match(workflow, /^\s+workflow_dispatch:/m);
@@ -36,6 +133,16 @@ test("terminal workflow is dispatch-only, serial, and seals raw evidence", () =>
   assert.doesNotMatch(workflow, /RUNNER_TEMP[^\n]*\.lease/);
   assert.match(workflow, /Upload combined evidence even on failure/);
   assert.equal((workflow.match(/timeout-minutes: 720/g) ?? []).length, 4);
+});
+
+test("every tuple stops its service before uploading final logs and stop provenance", () => {
+  const jobs = ["mlx-1b", "mlx-8b", "cuda-1b", "cuda-8b"];
+  for (let index = 0; index < jobs.length; index += 1) {
+    const start = workflow.indexOf(`  ${jobs[index]}:`), end = index + 1 < jobs.length ? workflow.indexOf(`  ${jobs[index + 1]}:`) : workflow.indexOf("  seal-receipt:");
+    const job = workflow.slice(start, end), stop = job.indexOf("starvector-terminal-product-service.mjs stop"), upload = job.indexOf("uses: actions/upload-artifact@");
+    assert.ok(stop >= 0 && upload >= 0 && stop < upload, `${jobs[index]} must stop and seal logs before artifact upload`);
+    assert.match(job.slice(job.lastIndexOf("- name:", stop), upload), /if: \$\{\{ always\(\) \}\}/);
+  }
 });
 
 test("terminal workflow has no install or model download step", () => {
@@ -78,92 +185,140 @@ test("product service streams copied closure identity and preserves portable ord
   await assert.rejects(() => closureTreeHash(destination), /weights closure copy contains symlink/);
 });
 
-test("product service start CLI exits while durable-log services remain alive and can later be stopped", { timeout: 20_000 }, async (context) => {
-  if (process.platform === "win32") { context.skip("the executable fixture is a POSIX script; Windows lifecycle uses the same file-backed stdio contract"); return; }
-  const sandbox = await mkdtemp(path.join(tmpdir(), "starvector-service-detach-"));
-  const root = path.join(sandbox, "repo"), output = path.join(sandbox, "tuple"), weightsRoot = path.join(sandbox, "weights"), shimRoot = path.join(sandbox, "bin");
-  const serviceScript = path.resolve("scripts/starvector-terminal-product-service.mjs");
+test("product service start CLI exits while durable-log services remain alive and can later be stopped", { timeout: 30_000 }, async () => {
+  const fixture = await productServiceFixture(), port = await availableLoopbackPort();
   let record;
   try {
-    await mkdir(root); await mkdir(shimRoot); await mkdir(path.join(weightsRoot, "app"), { recursive: true }); await mkdir(path.join(weightsRoot, "hf"), { recursive: true });
-    await writeFile(path.join(root, ".gitignore"), "target/\n");
-    await writeFile(path.join(root, "Cargo.toml"), `[dependencies]\ncandle-core = { git = "https://github.com/SceneWorks/inference", rev = "${pin}" }\n`);
-    await execFile("git", ["init", "-q", root]);
-    await execFile("git", ["-C", root, "add", "."]);
-    await execFile("git", ["-C", root, "-c", "user.name=SceneWorks Test", "-c", "user.email=test@sceneworks.invalid", "commit", "-qm", "fixture"]);
-
-    const cargo = path.join(shimRoot, "cargo");
-    await writeFile(cargo, "#!/bin/sh\nexit 0\n"); await chmod(cargo, 0o755);
-    const binary = path.join(root, "target", "debug", "sceneworks-rust-api");
-    await mkdir(path.dirname(binary), { recursive: true });
-    await writeFile(binary, `#!/usr/bin/env node
-const http = require("node:http");
-const worker = process.env.SCENEWORKS_WORKER_ONLY === "1";
-let server;
-const timer = setInterval(() => {
-  process.stdout.write((worker ? "worker" : "api") + " stdout " + process.pid + "\\n");
-  process.stderr.write((worker ? "worker" : "api") + " stderr " + process.pid + "\\n");
-}, 25);
-if (!worker) {
-  server = http.createServer((_request, response) => {
-    response.writeHead(200, { "content-type": "application/json" });
-    response.end(JSON.stringify({ status: "ok", readiness: { status: "ready" } }));
-  });
-  server.listen(Number(process.env.SCENEWORKS_API_PORT), "127.0.0.1");
-}
-const stop = () => {
-  clearInterval(timer);
-  if (server) server.close(() => process.exit(0)); else process.exit(0);
-};
-process.on("SIGTERM", stop);
-process.on("SIGINT", stop);
-`);
-    await chmod(binary, 0o755);
-
-    await writeFile(path.join(weightsRoot, "app", "receipt.json"), "receipt");
-    await writeFile(path.join(weightsRoot, "hf", "weights.bin"), "weights");
-    const manifest = {
-      terminal_service_closure: {
-        app_data_relative_path: "app",
-        app_data_sha256: await closureTreeHash(path.join(weightsRoot, "app")),
-        hf_home_relative_path: "hf",
-        hf_home_sha256: await closureTreeHash(path.join(weightsRoot, "hf")),
-      },
-      models: {
-        "starvector-1b": { relative_path: "models/1b", revision: "1".repeat(40), inventory_sha256: "a".repeat(64) },
-        "starvector-8b": { relative_path: "models/8b", revision: "2".repeat(40), inventory_sha256: "b".repeat(64) },
-      },
-    };
-    await writeFile(path.join(weightsRoot, "starvector-terminal-weights-v1.json"), JSON.stringify(manifest));
-
-    const reservation = createServer();
-    await new Promise((resolve, reject) => { reservation.once("error", reject); reservation.listen(0, "127.0.0.1", resolve); });
-    const port = reservation.address().port;
-    await new Promise((resolve, reject) => reservation.close((error) => error ? reject(error) : resolve()));
-    const cliEnv = { ...process.env, PATH: `${shimRoot}${path.delimiter}${process.env.PATH ?? ""}` };
-    await execFile(process.execPath, [serviceScript, "start", root, output, pin, `http://127.0.0.1:${port}`, weightsRoot], { env: cliEnv, timeout: 8_000 });
-
-    record = JSON.parse(await readFile(path.join(output, "product-service-provenance.json"), "utf8"));
-    for (const pid of [record.api_pid, record.worker_pid]) assert.doesNotThrow(() => process.kill(pid, 0));
-    const logPaths = productServiceLogPaths(output);
-    assert.deepEqual(record.logs, Object.fromEntries(Object.entries(logPaths).map(([name, file]) => [name, path.relative(output, file)])));
+    await runProductServiceCli(fixture, "start", port);
+    record = JSON.parse(await readFile(path.join(fixture.output, "product-service-provenance.json"), "utf8"));
+    assertPidsRunning(record);
+    const logPaths = productServiceLogPaths(fixture.output);
+    assert.deepEqual(record.logs, Object.fromEntries(Object.entries(logPaths).map(([name, file]) => [name, path.relative(fixture.output, file)])));
     const initialSizes = await Promise.all(Object.values(logPaths).map(async (file) => (await stat(file)).size));
     await new Promise((resolve) => setTimeout(resolve, 150));
     const laterSizes = await Promise.all(Object.values(logPaths).map(async (file) => (await stat(file)).size));
-    for (let index = 0; index < initialSizes.length; index += 1) assert.ok(laterSizes[index] > initialSizes[index], `service log ${index} stopped after the start CLI exited`);
+    for (let index = 0; index < initialSizes.length; index += 1) assert.ok(laterSizes[index] > initialSizes[index], "service log stopped after the start CLI exited");
 
-    await execFile(process.execPath, [serviceScript, "stop", output], { env: cliEnv, timeout: 8_000 });
-    const stopped = JSON.parse(await readFile(path.join(output, "product-service-stopped.json"), "utf8"));
+    await runProductServiceCli(fixture, "stop", 0);
+    const stopped = JSON.parse(await readFile(path.join(fixture.output, "product-service-stopped.json"), "utf8"));
+    const logs = await productServiceLogsIdentity(fixture.output);
     assert.equal(stopped.status, "stopped");
-    assert.equal(stopped.logs_sha256, await productServiceLogsSha256(output));
-    assert.equal((await readFile(path.join(output, "product-service-logs.sha256"), "utf8")).trim(), stopped.logs_sha256);
+    assert.deepEqual(stopped.logs, logs);
+    assert.equal(logs.entries.length, 4);
+    assert.equal(logs.sha256, terminalTreeSha256(logs.entries));
+    for (const entry of logs.entries) {
+      const file = path.join(fixture.output, entry.path);
+      assert.deepEqual(Object.keys(entry), ["path", "byte_size", "sha256"]);
+      assert.equal(entry.byte_size, (await stat(file)).size);
+      assert.equal(entry.sha256, hash(await readFile(file)));
+    }
+    assert.deepEqual(JSON.parse(await readFile(path.join(fixture.output, "product-service-logs.json"), "utf8")), logs);
+    assert.equal((await readFile(path.join(fixture.output, "product-service-logs.sha256"), "utf8")).trim(), logs.sha256);
     for (const pid of [record.api_pid, record.worker_pid]) assert.throws(() => process.kill(pid, 0), { code: "ESRCH" });
-    assert.equal(await lstat(productServiceStateRoot(output)).catch((error) => error.code === "ENOENT" ? null : Promise.reject(error)), null);
+    assert.equal(await lstat(productServiceStateRoot(fixture.output)).catch((error) => error.code === "ENOENT" ? null : Promise.reject(error)), null);
     record = null;
   } finally {
-    if (record) await execFile(process.execPath, [serviceScript, "stop", output], { timeout: 8_000 }).catch(() => {});
-    await rm(sandbox, { recursive: true, force: true });
+    await forceFixtureCleanup(fixture, record);
   }
+});
+
+test("product service stop requires an exact active sentinel before signaling", { timeout: 25_000 }, async () => {
+  const fixture = await productServiceFixture(), port = await availableLoopbackPort();
+  let record;
+  try {
+    await runProductServiceCli(fixture, "start", port);
+    record = JSON.parse(await readFile(path.join(fixture.output, "product-service-provenance.json"), "utf8"));
+    const activePath = productServiceActiveStatePath(fixture.output), activeText = await readFile(activePath, "utf8"), active = JSON.parse(activeText);
+    assert.equal(active.instance_token, record.instance_token);
+    assert.match(record.instance_token, /^[a-f0-9]{64}$/);
+
+    await rm(activePath);
+    await assert.rejects(() => runProductServiceCli(fixture, "stop", 0), /product-service-active\.json|ENOENT/);
+    assertPidsRunning(record);
+    await writeFile(activePath, activeText, { flag: "wx", mode: 0o600 });
+
+    await writeFile(activePath, JSON.stringify({ ...active, instance_token: "0".repeat(64) }));
+    await assert.rejects(() => runProductServiceCli(fixture, "stop", 0), /mismatches provenance field instance_token/);
+    assertPidsRunning(record);
+
+    await writeFile(activePath, JSON.stringify({ ...active, api_pid: process.pid }));
+    await assert.rejects(() => runProductServiceCli(fixture, "stop", 0), /mismatches provenance field api_pid/);
+    assertPidsRunning(record);
+
+    await writeFile(activePath, JSON.stringify({ ...active, status: "stopped" }));
+    await assert.rejects(() => runProductServiceCli(fixture, "stop", 0), /active product service state shape is invalid/);
+    assertPidsRunning(record);
+
+    await writeFile(activePath, activeText);
+    await runProductServiceCli(fixture, "stop", 0);
+    await assert.rejects(
+      () => stopProductService(fixture.output, { terminate: async () => assert.fail("double-stop must reject before termination") }),
+      /already stopped/,
+    );
+    record = null;
+  } finally {
+    await forceFixtureCleanup(fixture, record);
+  }
+});
+
+test("product service rejects a pre-existing healthy listener before provenance", { timeout: 15_000 }, async () => {
+  const fixture = await productServiceFixture(), listener = createServer((_request, response) => response.end(JSON.stringify({ status: "ok", readiness: { status: "ready" } })));
+  try {
+    await new Promise((resolve, reject) => { listener.once("error", reject); listener.listen(0, "127.0.0.1", resolve); });
+    const port = listener.address().port;
+    await assert.rejects(() => runProductServiceCli(fixture, "start", port), /API port is already occupied/);
+    assert.equal(listener.listening, true);
+    assert.equal(await lstat(path.join(fixture.output, "product-service-provenance.json")).catch((error) => error.code === "ENOENT" ? null : Promise.reject(error)), null);
+  } finally {
+    await new Promise((resolve) => listener.close(resolve));
+    await forceFixtureCleanup(fixture);
+  }
+});
+
+test("product service records setup and log-open failures before removing child-free state", { timeout: 20_000 }, async () => {
+  for (const failure of ["setup", "open"]) {
+    const fixture = await productServiceFixture(), port = await availableLoopbackPort();
+    try {
+      if (failure === "setup") await writeFile(fixture.manifestPath, JSON.stringify({ ...fixture.manifest, terminal_service_closure: { ...fixture.manifest.terminal_service_closure, app_data_sha256: "0".repeat(64) } }));
+      else { await mkdir(fixture.output); await writeFile(productServiceLogPaths(fixture.output).api_stdout, "stale log"); }
+      await assert.rejects(() => runProductServiceCli(fixture, "start", port));
+      const report = JSON.parse(await readFile(path.join(fixture.output, "product-service-start-failed.json"), "utf8"));
+      assert.equal(report.status, "failed");
+      assert.equal(report.cleanup.status, "not_needed");
+      assert.equal(report.cleanup.state_retained, false);
+      assert.match(report.logs.sha256, /^[a-f0-9]{64}$/);
+      assert.equal((await readFile(path.join(fixture.output, "product-service-logs.sha256"), "utf8")).trim(), report.logs.sha256);
+      assert.equal(await lstat(productServiceStateRoot(fixture.output)).catch((error) => error.code === "ENOENT" ? null : Promise.reject(error)), null);
+    } finally {
+      await forceFixtureCleanup(fixture);
+    }
+  }
+});
+
+test("failed termination records diagnostics and retains authenticated state for safe retry", { timeout: 20_000 }, async () => {
+  const fixture = await productServiceFixture(), port = await availableLoopbackPort();
+  let record;
+  try {
+    await runProductServiceCli(fixture, "start", port);
+    record = JSON.parse(await readFile(path.join(fixture.output, "product-service-provenance.json"), "utf8"));
+    await assert.rejects(() => stopProductService(fixture.output, { terminate: async () => { throw new Error("injected termination failure"); } }), /injected termination failure/);
+    assertPidsRunning(record);
+    assert.equal((await lstat(productServiceStateRoot(fixture.output))).isDirectory(), true);
+    const report = JSON.parse(await readFile(path.join(fixture.output, "product-service-stop-failed.json"), "utf8"));
+    assert.equal(report.status, "failed");
+    assert.deepEqual(report.cleanup, { status: "failed", error: "injected termination failure", state_retained: true });
+    assert.match(report.logs.sha256, /^[a-f0-9]{64}$/);
+    assert.equal((await readFile(path.join(fixture.output, "product-service-logs.sha256"), "utf8")).trim(), report.logs.sha256);
+    await runProductServiceCli(fixture, "stop", 0);
+    record = null;
+  } finally {
+    await forceFixtureCleanup(fixture, record);
+  }
+});
+
+test("product service Windows termination uses bounded process-tree taskkill", () => {
+  assert.deepEqual(productServiceTaskkillArguments(4242), ["/PID", "4242", "/T", "/F"]);
+  assert.throws(() => productServiceTaskkillArguments(0), /invalid product service PID/);
 });
 
 test("readiness workflow is an identity-only dispatch on both campaign hosts", () => {
