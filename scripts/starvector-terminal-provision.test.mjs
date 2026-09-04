@@ -207,6 +207,8 @@ function assertWindowsPortablePythonContract(step, source, testSource) {
   assert.match(source, /\$entryCount -gt \$MaximumEntries/);
   assert.match(source, /\$expandedBytes -gt \$MaximumExpandedBytes/);
   assert.match(source, /path escapes its staging root/);
+  assert.match(source, /Add-Type -AssemblyName System\.IO\.Compression\.FileSystem/);
+  assert.match(source, /\[IO\.Compression\.ZipFile\]::OpenRead\(\$ArchivePath\)/);
   assert.match(source, /Python Software Foundation/);
   assert.match(source, /https:\/\/github\.com\/Python\/CPython\.git/);
   assert.match(source, /0cc8128/);
@@ -238,7 +240,7 @@ function assertWindowsPortablePythonContract(step, source, testSource) {
   assert.match(testSource, /portable Python did not reject a \$junctionKind-root junction/);
   assert.doesNotMatch(testSource, /CreateFromDirectory/);
   assert.match(testSource, /Replace\(\[IO\.Path\]::DirectorySeparatorChar, \[IO\.Path\]::AltDirectorySeparatorChar\)/);
-  assert.match(testSource, /CreateEntry\('tools\\python\.exe'\)/);
+  assert.match(testSource, /New-SingleEntryZip -DestinationPath \$backslashArchive -EntryName 'tools\\python\.exe'/);
   assert.match(testSource, /archive entry with a backslash name was not rejected/);
   assert.match(testSource, /archive entry-count limit was not enforced/);
   assert.match(testSource, /archive expansion-size limit was not enforced/);
@@ -246,7 +248,44 @@ function assertWindowsPortablePythonContract(step, source, testSource) {
   assert.match(testSource, /official portable python\.exe hash changed/);
   assert.match(testSource, /official portable python312\.dll hash changed/);
   assert.match(testSource, /& \$official -m venv --copies \$venvRoot/);
+  assertWindowsPortablePythonFixtureArchiveContract(testSource);
 }
+
+function assertWindowsPortablePythonFixtureArchiveContract(testSource) {
+  const compressionLoad = testSource.indexOf("Add-Type -AssemblyName System.IO.Compression\n");
+  const fileSystemLoad = testSource.indexOf("Add-Type -AssemblyName System.IO.Compression.FileSystem\n");
+  const firstArchiveConstruction = testSource.indexOf("[IO.Compression.ZipArchive]::new");
+  assert.ok(compressionLoad >= 0 && fileSystemLoad > compressionLoad && firstArchiveConstruction > fileSystemLoad);
+
+  for (const functionName of ["New-CanonicalZipFromDirectory", "New-SingleEntryZip"]) {
+    const start = testSource.indexOf(`function ${functionName} {`);
+    const nextFunction = testSource.indexOf("\nfunction ", start + 1);
+    const scriptBody = testSource.indexOf("\n$root =", start + 1);
+    const end = nextFunction >= 0 ? nextFunction : scriptBody;
+    const body = testSource.slice(start, end);
+    const streamOpen = body.indexOf("$stream = [IO.File]::Open(");
+    const guardedConstruction = body.indexOf("try {\n    $archive = [IO.Compression.ZipArchive]::new", streamOpen);
+    const archiveDispose = body.indexOf("$archive.Dispose()", guardedConstruction);
+    const streamDispose = body.indexOf("$stream.Dispose()", archiveDispose);
+    assert.ok(start >= 0 && streamOpen >= 0 && guardedConstruction > streamOpen && archiveDispose > guardedConstruction && streamDispose > archiveDispose, functionName);
+    assert.match(body, /ZipArchive\]::new\(\$stream, \[IO\.Compression\.ZipArchiveMode\]::Create, \$true\)/);
+  }
+}
+
+test("PowerShell 5.1 ZIP fixtures load their defining assembly and guard every acquired stream", () => {
+  assertWindowsPortablePythonFixtureArchiveContract(windowsPythonProvisionTest);
+  for (const [label, mutation] of [
+    ["compression assembly", (value) => value.replace("Add-Type -AssemblyName System.IO.Compression\n", "")],
+    ["guard before archive construction", (value) => value.replace("  try {\n    $archive = [IO.Compression.ZipArchive]::new($stream, [IO.Compression.ZipArchiveMode]::Create, $true)", "  $archive = [IO.Compression.ZipArchive]::new($stream, [IO.Compression.ZipArchiveMode]::Create, $true)\n  try {")],
+    ["archive disposal", (value) => value.replace("      $archive.Dispose()", "      Write-Host $archive")],
+    ["stream disposal", (value) => value.replace("    $stream.Dispose()", "    Write-Host $stream")],
+    ["outer stream ownership", (value) => value.replace("[IO.Compression.ZipArchiveMode]::Create, $true", "[IO.Compression.ZipArchiveMode]::Create, $false")],
+  ]) {
+    const changed = mutation(windowsPythonProvisionTest);
+    assert.notEqual(changed, windowsPythonProvisionTest, `${label} mutation must alter the fixture`);
+    assert.throws(() => assertWindowsPortablePythonFixtureArchiveContract(changed), { name: "AssertionError" }, label);
+  }
+});
 
 test("terminal metrics provisioning fixes CPython 3.12 and wheel-only installation on both hosts", () => {
   assert.equal((workflow.match(/uses: actions\/setup-python@/g) ?? []).length, 0);

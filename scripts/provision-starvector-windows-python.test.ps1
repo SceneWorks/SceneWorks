@@ -3,6 +3,9 @@ Set-StrictMode -Version Latest
 
 . (Join-Path $PSScriptRoot 'provision-starvector-windows-python.ps1')
 
+Add-Type -AssemblyName System.IO.Compression
+Add-Type -AssemblyName System.IO.Compression.FileSystem
+
 function Assert-True {
   param([bool]$Value, [string]$Message)
   if (-not $Value) { throw $Message }
@@ -23,23 +26,54 @@ function New-CanonicalZipFromDirectory {
 
   $canonicalSourceRoot = [IO.Path]::GetFullPath($SourceRoot).TrimEnd([IO.Path]::DirectorySeparatorChar)
   $stream = [IO.File]::Open($DestinationPath, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::None)
-  $archive = [IO.Compression.ZipArchive]::new($stream, [IO.Compression.ZipArchiveMode]::Create, $false)
   try {
-    foreach ($file in Get-ChildItem -LiteralPath $canonicalSourceRoot -File -Recurse | Sort-Object FullName) {
-      $relativePath = $file.FullName.Substring($canonicalSourceRoot.Length).TrimStart([IO.Path]::DirectorySeparatorChar)
-      $entryName = $relativePath.Replace([IO.Path]::DirectorySeparatorChar, [IO.Path]::AltDirectorySeparatorChar)
-      $entry = $archive.CreateEntry($entryName, [IO.Compression.CompressionLevel]::Optimal)
-      $input = [IO.File]::OpenRead($file.FullName)
-      $output = $entry.Open()
-      try {
-        $input.CopyTo($output)
-      } finally {
-        $output.Dispose()
-        $input.Dispose()
+    $archive = [IO.Compression.ZipArchive]::new($stream, [IO.Compression.ZipArchiveMode]::Create, $true)
+    try {
+      foreach ($file in Get-ChildItem -LiteralPath $canonicalSourceRoot -File -Recurse | Sort-Object FullName) {
+        $relativePath = $file.FullName.Substring($canonicalSourceRoot.Length).TrimStart([IO.Path]::DirectorySeparatorChar)
+        $entryName = $relativePath.Replace([IO.Path]::DirectorySeparatorChar, [IO.Path]::AltDirectorySeparatorChar)
+        $entry = $archive.CreateEntry($entryName, [IO.Compression.CompressionLevel]::Optimal)
+        $sourceStream = [IO.File]::OpenRead($file.FullName)
+        try {
+          $entryStream = $entry.Open()
+          try {
+            $sourceStream.CopyTo($entryStream)
+          } finally {
+            $entryStream.Dispose()
+          }
+        } finally {
+          $sourceStream.Dispose()
+        }
       }
+    } finally {
+      $archive.Dispose()
     }
   } finally {
-    $archive.Dispose()
+    $stream.Dispose()
+  }
+}
+
+function New-SingleEntryZip {
+  param(
+    [Parameter(Mandatory = $true)]
+    [string]$DestinationPath,
+    [Parameter(Mandatory = $true)]
+    [string]$EntryName,
+    [Parameter(Mandatory = $true)]
+    [string]$Content
+  )
+
+  $stream = [IO.File]::Open($DestinationPath, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::None)
+  try {
+    $archive = [IO.Compression.ZipArchive]::new($stream, [IO.Compression.ZipArchiveMode]::Create, $true)
+    try {
+      $entry = $archive.CreateEntry($EntryName)
+      $writer = [IO.StreamWriter]::new($entry.Open())
+      try { $writer.Write($Content) } finally { $writer.Dispose() }
+    } finally {
+      $archive.Dispose()
+    }
+  } finally {
     $stream.Dispose()
   }
 }
@@ -64,7 +98,6 @@ try {
   }
   Assert-Equal 'lock-acquired' (Invoke-StarVectorWindowsPythonLock -LockPath $lockPath -ScriptBlock { 'lock-acquired' }) 'exclusive lock did not release cleanly'
 
-  Add-Type -AssemblyName System.IO.Compression.FileSystem
   $source = @'
 using System;
 using System.Diagnostics;
@@ -173,16 +206,7 @@ public static class FakePortablePython {
   }
 
   $traversalArchive = Join-Path $root 'traversal.nupkg'
-  $stream = [IO.File]::Open($traversalArchive, [IO.FileMode]::CreateNew)
-  $zip = [IO.Compression.ZipArchive]::new($stream, [IO.Compression.ZipArchiveMode]::Create, $false)
-  try {
-    $entry = $zip.CreateEntry('../escape.txt')
-    $writer = [IO.StreamWriter]::new($entry.Open())
-    try { $writer.Write('escape') } finally { $writer.Dispose() }
-  } finally {
-    $zip.Dispose()
-    $stream.Dispose()
-  }
+  New-SingleEntryZip -DestinationPath $traversalArchive -EntryName '../escape.txt' -Content 'escape'
   $traversalRoot = Join-Path $root 'traversal-root'
   $traversalRejected = $false
   try {
@@ -194,16 +218,7 @@ public static class FakePortablePython {
   Assert-True (-not (Test-Path -LiteralPath (Join-Path $root 'escape.txt'))) 'archive path traversal wrote outside the staging root'
 
   $backslashArchive = Join-Path $root 'backslash-name.nupkg'
-  $stream = [IO.File]::Open($backslashArchive, [IO.FileMode]::CreateNew)
-  $zip = [IO.Compression.ZipArchive]::new($stream, [IO.Compression.ZipArchiveMode]::Create, $false)
-  try {
-    $entry = $zip.CreateEntry('tools\python.exe')
-    $writer = [IO.StreamWriter]::new($entry.Open())
-    try { $writer.Write('unsafe noncanonical entry') } finally { $writer.Dispose() }
-  } finally {
-    $zip.Dispose()
-    $stream.Dispose()
-  }
+  New-SingleEntryZip -DestinationPath $backslashArchive -EntryName 'tools\python.exe' -Content 'unsafe noncanonical entry'
   $backslashRoot = Join-Path $root 'backslash-root'
   $backslashRejected = $false
   try {
