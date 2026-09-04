@@ -1,0 +1,44 @@
+name: StarVector metrics wheels (Windows)
+
+on:
+  pull_request:
+    paths:
+      - ".github/workflows/starvector-metrics-windows.yml"
+      - ".github/workflows/starvector-terminal-provision.yml"
+      - "release/starvector-terminal-metrics-lock-v1.json"
+      - "scripts/select-starvector-windows-python.ps1"
+      - "scripts/select-starvector-windows-python.test.ps1"
+      - "scripts/starvector-terminal-provision.test.mjs"
+      - "scripts/starvector-terminal-metrics.py"
+      - "scripts/verify-starvector-windows-metric-wheels.ps1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: starvector-metrics-windows-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  wheel-contract:
+    runs-on: windows-2022
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Set up supported CPython 3.12 x64
+        id: metrics-python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+          architecture: x64
+          check-latest: false
+          update-environment: false
+      - name: Reject unsupported Windows Python identities under PowerShell 5.1
+        shell: powershell
+        run: .\scripts\select-starvector-windows-python.test.ps1
+      - name: Resolve and install the pinned metric closure from wheels
+        shell: powershell
+        env:
+          STARVECTOR_METRICS_BOOTSTRAP_PYTHON: ${{ steps.metrics-python.outputs.python-path }}
+        run: .\scripts\verify-starvector-windows-metric-wheels.ps1
