@@ -1,7 +1,7 @@
 {
   "schemaVersion": 11,
   "generatedFrom": {
-    "sceneWorksRevision": "source-tree:e2750a3fb0a1263d4d019f82d14119824384563d4ae121d9645f5ba6dacec58f",
+    "sceneWorksRevision": "source-tree:45156524e9fc6ce2476b9892f393bb240cff4fcd210a4e39641168c9046cc9e2",
     "sources": {
       "manifest": {
         "path": "config/manifests/builtin.models.jsonc",
@@ -57,7 +57,7 @@
       },
       "mlxFitGate": {
         "path": "crates/sceneworks-worker/src/mlx_fit_gate.rs",
-        "sha256": "89cf1993a3dfe8b828e5c470f00e67a1c7b2cd6cd3a0a823e6d7a52cdfe9fd31"
+        "sha256": "696547d177651eb45649eb7fb301ff82cb105b14eb88425ad57692e0b4421290"
       },
       "memoryRouteRegistry": {
         "path": "crates/sceneworks-worker/src/memory_route_registry.rs",
@@ -73,11 +73,11 @@
       },
       "anchorLoaderClosures": {
         "path": "config/anchor-loader-closures.json",
-        "sha256": "d92249c72e9314d0c1c4670ced628112230d1ba48bf98f5dcd7a61ed943eea0b"
+        "sha256": "e810e31cc8961dd44c7d81a4a1cc3045b98dcff129602e26a0a5731e9948bd82"
       },
       "anchorDerivation": {
         "path": "crates/sceneworks-core/src/memory_anchor.rs",
-        "sha256": "6c512e1016f86875914670c0efcf0137f8eb479faca9c64ad21c7cda8630a06f"
+        "sha256": "ab1f0bfc2ae4c8afb82ca89a2634a26d41ea545c1e301a546b9faea9ef22a108"
       },
       "anchorAdmission": {
         "path": "crates/sceneworks-worker/src/video_admission.rs",
@@ -89,7 +89,7 @@
       },
       "anchorAdmissionImageCandle": {
         "path": "crates/sceneworks-worker/src/candle_memory_strategy.rs",
-        "sha256": "275431593faea83db764d316011938a2753d5eab8e465791706ecaf39d2de970"
+        "sha256": "d75600e0baf41c9c3bd71ecfdff3afc2991d92d532aab9bd047fcbc799958695"
       },
       "anchorExtractor": {
         "path": "scripts/extract-memory-anchors.mjs",
@@ -165,7 +165,7 @@
     "anchors": 15,
     "analyticOnlyCells": 326,
     "anchoredCells": 299,
-    "staleAnchors": 14,
+    "staleAnchors": 15,
     "fullModels": 0
   },
   "models": [
@@ -4920,7 +4920,7 @@
         "fps": null
       },
       "source": "docs/generated/memory-calibration-evidence.json",
-      "current": true,
+      "current": false,
       "cells": 15
     }
   ],
@@ -51221,7 +51221,7 @@
         "id": "z_image_turbo:mlx:q4:base:base:z-image-mlx-independent-materialization-v4:imc-2284d75c08c2a13f1b7e",
         "tier": "q4",
         "source": "config/memory-anchors.json#z_image_turbo:mlx:q4:base:base:z-image-mlx-independent-materialization-v4:imc-2284d75c08c2a13f1b7e",
-        "current": true,
+        "current": false,
         "derivable": true
       },
       "derivationDefined": true,
@@ -51286,7 +51286,7 @@
         "id": "z_image_turbo:mlx:q4:base:base:z-image-mlx-independent-materialization-v4:imc-2284d75c08c2a13f1b7e",
         "tier": "q4",
         "source": "config/memory-anchors.json#z_image_turbo:mlx:q4:base:base:z-image-mlx-independent-materialization-v4:imc-2284d75c08c2a13f1b7e",
-        "current": true,
+        "current": false,
         "derivable": true
       },
       "derivationDefined": true,
@@ -51365,7 +51365,7 @@
         "id": "z_image_turbo:mlx:q4:base:base:z-image-mlx-independent-materialization-v4:imc-2284d75c08c2a13f1b7e",
         "tier": "q4",
         "source": "config/memory-anchors.json#z_image_turbo:mlx:q4:base:base:z-image-mlx-independent-materialization-v4:imc-2284d75c08c2a13f1b7e",
-        "current": true,
+        "current": false,
         "derivable": true
       },
       "derivationDefined": true,
@@ -51411,7 +51411,7 @@
         "id": "z_image_turbo:mlx:q4:base:base:z-image-mlx-independent-materialization-v4:imc-2284d75c08c2a13f1b7e",
         "tier": "q4",
         "source": "config/memory-anchors.json#z_image_turbo:mlx:q4:base:base:z-image-mlx-independent-materialization-v4:imc-2284d75c08c2a13f1b7e",
-        "current": true,
+        "current": false,
         "derivable": true
       },
       "derivationDefined": true,
@@ -51463,7 +51463,7 @@
         "id": "z_image_turbo:mlx:q4:base:base:z-image-mlx-independent-materialization-v4:imc-2284d75c08c2a13f1b7e",
         "tier": "q4",
         "source": "config/memory-anchors.json#z_image_turbo:mlx:q4:base:base:z-image-mlx-independent-materialization-v4:imc-2284d75c08c2a13f1b7e",
-        "current": true,
+        "current": false,
         "derivable": true
       },
       "derivationDefined": true,
@@ -53242,7 +53242,7 @@
         "id": "z_image_turbo:mlx:q4:base:base:z-image-mlx-independent-materialization-v4:imc-2284d75c08c2a13f1b7e",
         "tier": "q4",
         "source": "config/memory-anchors.json#z_image_turbo:mlx:q4:base:base:z-image-mlx-independent-materialization-v4:imc-2284d75c08c2a13f1b7e",
-        "current": true,
+        "current": false,
         "derivable": true
       },
       "derivationDefined": true,
@@ -53307,7 +53307,7 @@
         "id": "z_image_turbo:mlx:q4:base:base:z-image-mlx-independent-materialization-v4:imc-2284d75c08c2a13f1b7e",
         "tier": "q4",
         "source": "config/memory-anchors.json#z_image_turbo:mlx:q4:base:base:z-image-mlx-independent-materialization-v4:imc-2284d75c08c2a13f1b7e",
-        "current": true,
+        "current": false,
         "derivable": true
       },
       "derivationDefined": true,
@@ -53386,7 +53386,7 @@
         "id": "z_image_turbo:mlx:q4:base:base:z-image-mlx-independent-materialization-v4:imc-2284d75c08c2a13f1b7e",
         "tier": "q4",
         "source": "config/memory-anchors.json#z_image_turbo:mlx:q4:base:base:z-image-mlx-independent-materialization-v4:imc-2284d75c08c2a13f1b7e",
-        "current": true,
+        "current": false,
         "derivable": true
       },
       "derivationDefined": true,
@@ -53432,7 +53432,7 @@
         "id": "z_image_turbo:mlx:q4:base:base:z-image-mlx-independent-materialization-v4:imc-2284d75c08c2a13f1b7e",
         "tier": "q4",
         "source": "config/memory-anchors.json#z_image_turbo:mlx:q4:base:base:z-image-mlx-independent-materialization-v4:imc-2284d75c08c2a13f1b7e",
-        "current": true,
+        "current": false,
         "derivable": true
       },
       "derivationDefined": true,
@@ -53484,7 +53484,7 @@
         "id": "z_image_turbo:mlx:q4:base:base:z-image-mlx-independent-materialization-v4:imc-2284d75c08c2a13f1b7e",
         "tier": "q4",
         "source": "config/memory-anchors.json#z_image_turbo:mlx:q4:base:base:z-image-mlx-independent-materialization-v4:imc-2284d75c08c2a13f1b7e",
-        "current": true,
+        "current": false,
         "derivable": true
       },
       "derivationDefined": true,
@@ -53553,7 +53553,7 @@
         "id": "z_image_turbo:mlx:q4:base:base:z-image-mlx-independent-materialization-v4:imc-2284d75c08c2a13f1b7e",
         "tier": "q4",
         "source": "config/memory-anchors.json#z_image_turbo:mlx:q4:base:base:z-image-mlx-independent-materialization-v4:imc-2284d75c08c2a13f1b7e",
-        "current": true,
+        "current": false,
         "derivable": true
       },
       "derivationDefined": true,
@@ -53618,7 +53618,7 @@
         "id": "z_image_turbo:mlx:q4:base:base:z-image-mlx-independent-materialization-v4:imc-2284d75c08c2a13f1b7e",
         "tier": "q4",
         "source": "config/memory-anchors.json#z_image_turbo:mlx:q4:base:base:z-image-mlx-independent-materialization-v4:imc-2284d75c08c2a13f1b7e",
-        "current": true,
+        "current": false,
         "derivable": true
       },
       "derivationDefined": true,
@@ -53697,7 +53697,7 @@
         "id": "z_image_turbo:mlx:q4:base:base:z-image-mlx-independent-materialization-v4:imc-2284d75c08c2a13f1b7e",
         "tier": "q4",
         "source": "config/memory-anchors.json#z_image_turbo:mlx:q4:base:base:z-image-mlx-independent-materialization-v4:imc-2284d75c08c2a13f1b7e",
-        "current": true,
+        "current": false,
         "derivable": true
       },
       "derivationDefined": true,
@@ -53743,7 +53743,7 @@
         "id": "z_image_turbo:mlx:q4:base:base:z-image-mlx-independent-materialization-v4:imc-2284d75c08c2a13f1b7e",
         "tier": "q4",
         "source": "config/memory-anchors.json#z_image_turbo:mlx:q4:base:base:z-image-mlx-independent-materialization-v4:imc-2284d75c08c2a13f1b7e",
-        "current": true,
+        "current": false,
         "derivable": true
       },
       "derivationDefined": true,
@@ -53789,7 +53789,7 @@
         "id": "z_image_turbo:mlx:q4:base:base:z-image-mlx-independent-materialization-v4:imc-2284d75c08c2a13f1b7e",
         "tier": "q4",
         "source": "config/memory-anchors.json#z_image_turbo:mlx:q4:base:base:z-image-mlx-independent-materialization-v4:imc-2284d75c08c2a13f1b7e",
-        "current": true,
+        "current": false,
         "derivable": true
       },
       "derivationDefined": true,
