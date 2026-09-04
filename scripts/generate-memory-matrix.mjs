@@ -2115,6 +2115,18 @@ export function indexLoaderClosures(body) {
 }
 
 /**
+ * The store's own record of HOW an anchor's currency key was derived (sc-22667): `null` when at
+ * the record's measurement revision, else the reviewed attestation — measured and attested
+ * revisions, class, why and witness — that `anchor-loader-closure.mjs --stamp-anchors` copied in
+ * from `config/anchor-currency-attestations.json`. Published verbatim so a current anchor never
+ * hides whether it is current by measurement or by attestation.
+ */
+export function currencyAttestationOf(anchor) {
+  const attestation = anchor?.source?.currencyAttestation;
+  return attestation && typeof attestation === "object" ? { ...attestation } : null;
+}
+
+/**
  * The lanes the analytic derivation is DEFINED and WIRED for, as `<modality>:<backend>` keys.
  *
  * Read off the Rust rather than declared here, in both halves, because both halves are code facts:
@@ -2502,6 +2514,11 @@ export async function buildMatrix({ sourceOverrides = {}, cellFilter = null, pub
               current:
                 loaderClosures.get(`${anchor.modelId}:${anchor.backend}`) ===
                 anchor.source.loaderClosureDigest,
+              // sc-22667: HOW the key was derived. `null` means at the record's own measurement
+              // revision; otherwise the reviewed currency attestation (config/
+              // anchor-currency-attestations.json) that keyed it at a later revision because the
+              // closure diff since the measurement is accounting-only or witnessed unchanged.
+              currencyAttestation: currencyAttestationOf(anchor),
               // Anchor-level derivability (epic 22505 feature-end fix round, E5): whether the
               // lane's law accepts THIS anchor, read off the store's own `underivedReason` field
               // — which the Rust laws honor byte-for-byte — with the stated reason published so
@@ -2591,6 +2608,7 @@ export async function buildMatrix({ sourceOverrides = {}, cellFilter = null, pub
       current:
         loaderClosures.get(`${anchor.modelId}:${anchor.backend}`) ===
         anchor.source.loaderClosureDigest,
+      currencyAttestation: currencyAttestationOf(anchor),
       cells: anchorCellCounts.get(anchor.id) ?? 0,
     }))
     .sort((left, right) => left.id.localeCompare(right.id));
@@ -2725,6 +2743,11 @@ export async function buildMatrix({ sourceOverrides = {}, cellFilter = null, pub
       analyticOnlyCells: anchorStore.analyticOnly,
       anchoredCells: cells.filter((cell) => cell.anchor !== null && cell.state !== "Missing").length,
       staleAnchors: anchorInventory.filter((anchor) => !anchor.current).length,
+      // sc-22667: how many of the CURRENT anchors are current by attestation rather than by
+      // measurement at the pin's own closure. A report beside `staleAnchors`, moving nothing.
+      attestedAnchors: anchorInventory.filter(
+        (anchor) => anchor.current && anchor.currencyAttestation !== null,
+      ).length,
       fullModels: 0,
     },
     models,
@@ -2796,12 +2819,14 @@ export function renderMarkdown(matrix) {
         .join(", ") || "none"
     })`,
     `- MLX staged-residency static coverage: image ${matrix.summary.mlxStagedStaticCoverage}/${matrix.summary.mlxStagedStaticCoverageDenominator}, video ${matrix.summary.videoMlxStagedStaticCoverage}/${matrix.summary.videoMlxStagedStaticCoverageDenominator}`,
-    `- Measured anchors: ${matrix.summary.anchors} (covering ${matrix.summary.anchoredCells} coordinates; ${matrix.summary.staleAnchors} stale)`,
+    `- Measured anchors: ${matrix.summary.anchors} (covering ${matrix.summary.anchoredCells} coordinates; ${matrix.summary.staleAnchors} stale; ${matrix.summary.attestedAnchors} current by attestation)`,
     `- Coordinates the store classifies analytic-only: ${matrix.summary.analyticOnlyCells}`,
     "",
     `sc-22513 (epic 22505, E5): a cell's \`state\` is a PURE FUNCTION of three facts published on the cell itself — \`implementation\` (does the code implement this rung on this route), \`anchor\` (does the store hold a measured anchor for this model x tier x backend lane) and \`derivationDefined\` (is the analytic derivation wired for this lane). Nothing else may enter it: no calibration record, no plan row, no measured geometry, no campaign, no currency digest. The per-geometry \`memoryCharacterization\` claim, the \`Verified\`/\`Runtime verified\` promotion and the per-record calibration join are GONE; the historical corpora they read are retained as validation data for the derivation, never as gates.`,
     "",
     `An anchor's CURRENCY (\`anchor.current\`, from \`config/anchor-loader-closures.json\`) is reported beside the state and deliberately does not move it — a staled loader closure means the anchor needs re-extraction, not that the rung stopped existing (sc-22511).`,
+    "",
+    "sc-22667: a current anchor also states HOW it is current. `anchor.currencyAttestation` is `null` when its key was derived at the record's own measurement revision; otherwise it is the reviewed attestation from `config/anchor-currency-attestations.json` — the closure diff from the measurement revision to the attested one was read file by file and is accounting-only, or a re-measure on the same hardware witnessed the behaviour unchanged (`class`, `why`, `witness`). An attestation is bounded to the one revision it names: the next pin bump that moves the loader closure past it stales the anchor again.",
     "",
     `sc-18099: \`cells\` is a SUBSET. ${matrix.summary.publicationPredicate} The counts on this page, \`summary\`, and the per-(entry, backend, rung) \`coverage\` census in the JSON artifact are all derived from every resolved coordinate, published or not, and \`models[].axes\` publishes the axes those coordinates span so an unimplemented lane stays distinguishable from an absent one.`,
     "",
@@ -2874,8 +2899,14 @@ export function renderMarkdown(matrix) {
     const geometry = `${anchor.geometry.width}x${anchor.geometry.height}${
       anchor.geometry.frames > 1 ? `x${anchor.geometry.frames}f` : ""
     }`;
+    const attested = anchor.currencyAttestation;
+    const current = !anchor.current
+      ? "no — re-extract"
+      : attested
+        ? `yes — attested ${attested.class} ${attested.measuredRevision.slice(0, 8)}→${attested.attestedRevision.slice(0, 8)} (${attested.story})`
+        : "yes";
     lines.push(
-      `| \`${anchor.id}\` | \`${anchor.modelId}\` | ${anchor.backend} | ${anchor.tier} | ${geometry} | ${anchor.current ? "yes" : "no — re-extract"} | ${anchor.cells} |`,
+      `| \`${anchor.id}\` | \`${anchor.modelId}\` | ${anchor.backend} | ${anchor.tier} | ${geometry} | ${current} | ${anchor.cells} |`,
     );
   }
   lines.push("");

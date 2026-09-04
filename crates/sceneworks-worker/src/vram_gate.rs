@@ -845,9 +845,20 @@ fn krea_test_artifact_root(tier: &str) -> std::path::PathBuf {
             .expect("Krea encoder contract");
         for (tier, bits) in [("q4", Some(4)), ("q8", Some(8)), ("bf16", None)] {
             let tier_root = root.join(tier);
-            gen_core_testkit::write_encoder_contract_fixture(
+            // AT THE TIER'S QUANTIZATION, not dense (sc-22667). The `bits` this loop already uses
+            // for the transformer's `config.json` describe the whole tier's snapshot: a q4 Krea
+            // store holds a q4 text encoder too. Writing a dense encoder for every tier was
+            // invisible while the pinned contract published `MemoryAssetFacts::default()`, but the
+            // sc-22657 contract prices `conditioning_bytes` from this fixture's safetensors
+            // HEADERS — dense made q4's encoder 15.69 GB, four times the packaged anchor's whole
+            // 3.83 GB measured conditioning peak, so the derivation law correctly refused a
+            // conditioning residency the measurement contradicts and every Krea derivation test
+            // below went unpriceable. At the tier's own width it is 3.76 GB, i.e. the anchor's
+            // measured peak less ~64 MB of activation — the composition that measurement saw.
+            gen_core_testkit::write_encoder_contract_fixture_with_quant(
                 &tier_root.join("text_encoder"),
                 contract,
+                bits,
             )
             .expect("write sparse Krea encoder fixture");
             // Per tier, not once at the end: the moment between the testkit's `set_len` and the
@@ -1240,8 +1251,9 @@ pub(crate) fn krea_turbo_fit_with_runtime(
 }
 
 /// [`krea_turbo_fit_with_runtime`] with the architecture facts the derivation scales by as an
-/// explicit input: `None` reads them off the loaded contract (production; the default facts at
-/// this pin), `Some` lets a fixture grade the rung ratios with the model's real facts.
+/// explicit input: `None` reads them off the loaded contract (production — the contract's own
+/// `architecture_facts` block through `architecture_facts_from_contract`, sc-22667), `Some` lets
+/// a fixture grade the rung ratios with facts it states directly.
 #[allow(clippy::too_many_arguments)]
 fn krea_turbo_fit_priced(
     manifest_entry: &JsonObject,
@@ -7032,41 +7044,36 @@ mod tests {
         outcome
     }
 
-    /// The packaged Krea candle q4 anchor, re-stamped at the loader-closure digest the pin
-    /// currently DECLARES, so it grades as current.
+    /// The PACKAGED store, unmodified, with its Krea candle q4 row asserted CURRENT through the
+    /// production currency seam (sc-22667 review, blocker).
     ///
-    /// The shipped anchor is deliberately left alone: at this pin it is stale — the Krea candle
-    /// loader moved between the anchor's measurement revision and the pinned revision — and
-    /// `packaged_anchor_currency_is_reported_not_gated` in `sceneworks-core` is what asserts that
-    /// honestly. Re-stamping HERE is not a fudge of that fact: it is how the derivation's own
-    /// behaviour is graded independently of whether today's pin happens to make the shipped row
-    /// live, which is a property of the pin and not of this code.
-    fn krea_live_anchor_store() -> sceneworks_core::memory_anchor::MemoryAnchorStore {
+    /// This used to re-stamp the row at the pin's declared digest so the gate's derivation could
+    /// be graded whether or not the shipped row happened to be current. That graded a path
+    /// production never takes: `krea_store_anchor` refuses a row whose recorded loader-closure
+    /// digest is not the pin's, so a stale packaged row prices from the manifest floor, not from
+    /// the anchor. The shipped row is current at this pin by attestation
+    /// (`config/anchor-currency-attestations.json`: the Krea loader did move between the
+    /// measurement revision and the pin, and the E6 re-measure at a5f643ae witnessed the anchor
+    /// reproduced per phase). An inference bump that moves the Krea closure reds this, and the
+    /// answer is a new attestation or a re-capture — never a private re-stamp here.
+    fn krea_packaged_anchor_store() -> sceneworks_core::memory_anchor::MemoryAnchorStore {
         let store = sceneworks_core::memory_anchor::packaged_memory_anchors()
-            .expect("the packaged anchor store")
-            .clone();
-        let digest = sceneworks_core::memory_anchor::packaged_anchor_loader_closures()
-            .and_then(|closures| {
-                closures.digest_for(
-                    "krea_2_turbo",
-                    sceneworks_core::memory_anchor::AnchorBackend::Candle,
-                )
-            })
-            .expect("krea_2_turbo:candle must declare a loader closure")
-            .to_owned();
-        let anchors = store
-            .anchors
-            .into_iter()
-            .map(|mut anchor| {
-                if anchor.model_id == "krea_2_turbo"
-                    && anchor.backend == sceneworks_core::memory_anchor::AnchorBackend::Candle
-                {
-                    anchor.source.loader_closure_digest = digest.clone();
-                }
-                anchor
-            })
-            .collect();
-        sceneworks_core::memory_anchor::MemoryAnchorStore { anchors, ..store }
+            .expect("the packaged anchor store");
+        let anchor = store
+            .image_anchor_for(
+                "krea_2_turbo",
+                sceneworks_core::memory_anchor::AnchorBackend::Candle,
+                "q4",
+            )
+            .expect("the packaged krea_2_turbo:candle:q4 row");
+        assert!(
+            crate::video_admission::anchor_currency_matches(anchor),
+            "the packaged krea_2_turbo:candle:q4 anchor is not current at this pin (recorded \
+             loader closure {}) — the gate would refuse it, so these tests would not be grading \
+             the shipped path",
+            anchor.source.loader_closure_digest
+        );
+        store.clone()
     }
 
     /// The packaged Krea candle q4 anchor, as the gate reads it.
@@ -7143,26 +7150,33 @@ mod tests {
             .expect("the derivation prices this geometry")
     }
 
-    /// The derived peak of the staged rung under the DEFAULT facts (this pin), which every deeper
-    /// rung equals when no fact can scale its ratio — the number the default-facts tests below
-    /// grade against.
+    /// The derived peak of the staged rung under the facts the loaded contract states — read
+    /// through the production seam (`architecture_facts_from_contract`, sc-22667) so the number
+    /// the admission tests below grade against is the one the gate itself prices with, whatever
+    /// the pinned provider declares. The staged rung is the least-cost rung the selector can
+    /// admit out of the envelope, so it is the one an ample budget selects.
     fn krea_anchor_derived_peak_gb(width: u32, height: u32) -> f64 {
         krea_anchor_derived_phases(
             &krea_fit_manifest(),
             MemoryStrategy::StagedResidency,
             width,
             height,
-            sceneworks_core::memory_anchor::ArchitectureFacts::default(),
+            crate::video_admission::architecture_facts_from_contract(krea_test_provider_contract(
+                "q4",
+            )),
         )
         .peak_bytes() as f64
             / BYTES_PER_GIB
     }
 
-    /// Krea 2 Turbo's architecture facts, from the pinned engine's `Krea2Config::turbo()`
-    /// (`candle-gen-krea/src/config.rs` at inference 670dc1f4): 48 attention heads of 128, 28
-    /// single-stream blocks, patch 2, 16 latent channels behind a x8 VAE, bf16 activations.
-    /// Supplied by the fixture because the contract does not carry them at this pin
-    /// (`architecture_facts_from_contract`).
+    /// Krea 2 Turbo's architecture facts as the candle provider publishes them off its resolved
+    /// snapshot's DiT config (`candle-gen-krea::architecture_facts`, `Krea2Config::from_snapshot`):
+    /// 48 attention heads of 128, 28 single-stream blocks, patch 2, 16 latent channels behind a
+    /// x8 VAE, bf16 activations, and NO temporal scale — the reused Qwen-Image VAE decodes one
+    /// frame per image, so the axis is structurally absent and declared absent, never `1`. The
+    /// fixture contract carries exactly these (sc-22667 —
+    /// `an_unmeasured_krea_geometry_admits_on_the_anchor_derivation` asserts the seam reads them);
+    /// the explicit-facts fixtures below state them directly to grade the ratios themselves.
     const KREA_2_FACTS: sceneworks_core::memory_anchor::ArchitectureFacts =
         sceneworks_core::memory_anchor::ArchitectureFacts {
             attention_heads: Some(48),
@@ -7171,7 +7185,7 @@ mod tests {
             patch_size: Some(2),
             latent_channels: Some(16),
             vae_spatial_scale: Some(8),
-            vae_temporal_scale: Some(1),
+            vae_temporal_scale: None,
             activation_dtype_width: Some(2),
         };
 
@@ -7199,6 +7213,15 @@ mod tests {
             u64::from(width) * u64::from(height) > max_pixels,
             "the request geometry must sit outside the measured curve envelope"
         );
+        // The facts the gate prices with are the contract's own, read through the production
+        // seam (sc-22667) — Krea 2 Turbo's real architecture, not the default facts.
+        assert_eq!(
+            crate::video_admission::architecture_facts_from_contract(krea_test_provider_contract(
+                "q4"
+            )),
+            KREA_2_FACTS,
+            "the Krea contract's architecture facts must reach the gate through the seam"
+        );
         let derived_peak_gb = krea_anchor_derived_peak_gb(width, height);
         // Generous enough that the estimate margin the shared selector applies cannot be what
         // decides the outcome, and far below the resident row. The reserve is the ladder's, as
@@ -7209,7 +7232,7 @@ mod tests {
             total_gb: free_gb,
         });
         let reserve_gb = reserve_for(budget);
-        let fit = with_injected_anchor_store(krea_live_anchor_store(), || {
+        let fit = with_injected_anchor_store(krea_packaged_anchor_store(), || {
             krea_turbo_fit_with_runtime(
                 &manifest,
                 "q4",
@@ -7270,7 +7293,7 @@ mod tests {
             total_gb: free_gb,
         });
         assert_eq!(
-            with_injected_anchor_store(krea_live_anchor_store(), || {
+            with_injected_anchor_store(krea_packaged_anchor_store(), || {
                 krea_turbo_fit_with_runtime(
                     &manifest,
                     "q4",
@@ -7290,7 +7313,7 @@ mod tests {
 
         // The clean control: the model's own loader closure moved, so the evidence no longer
         // describes the code that will run and the hull refusal stands.
-        let mut moved = krea_live_anchor_store();
+        let mut moved = krea_packaged_anchor_store();
         for anchor in &mut moved.anchors {
             if anchor.model_id == "krea_2_turbo"
                 && anchor.backend == sceneworks_core::memory_anchor::AnchorBackend::Candle
@@ -7397,7 +7420,7 @@ mod tests {
 
         // Graded against a CURRENT anchor: the claim is that the anchor declines to re-price a
         // whole-model-resident composition, which a stale (absent) anchor would satisfy vacuously.
-        let fit = with_injected_anchor_store(krea_live_anchor_store(), || {
+        let fit = with_injected_anchor_store(krea_packaged_anchor_store(), || {
             krea_turbo_fit_with_runtime(
                 &manifest,
                 "q4",
@@ -7432,7 +7455,7 @@ mod tests {
         });
         // A CURRENT anchor is present throughout: the claim is that the curves answer FIRST, which
         // is only tested if the derivation was actually available to be preferred.
-        let fit = with_injected_anchor_store(krea_live_anchor_store(), || {
+        let fit = with_injected_anchor_store(krea_packaged_anchor_store(), || {
             krea_turbo_fit_with_runtime(
                 &manifest,
                 "q4",
@@ -7557,7 +7580,7 @@ mod tests {
             free_gb,
             total_gb: free_gb,
         });
-        let fit = with_injected_anchor_store(krea_live_anchor_store(), || {
+        let fit = with_injected_anchor_store(krea_packaged_anchor_store(), || {
             krea_turbo_fit_priced(
                 &manifest,
                 "q4",
@@ -7622,7 +7645,7 @@ mod tests {
             (reserve_gb - HEADROOM_GB).abs() < 1e-9,
             "a 3 GB idle baseline caps the reserve at the legacy ceiling"
         );
-        let fit = with_injected_anchor_store(krea_live_anchor_store(), || {
+        let fit = with_injected_anchor_store(krea_packaged_anchor_store(), || {
             krea_turbo_fit_with_runtime(
                 &manifest,
                 "q4",
@@ -7669,7 +7692,7 @@ mod tests {
         });
         let bare_reserve = reserve_for(bare);
         assert!(bare_reserve < HEADROOM_GB);
-        let bare_fit = with_injected_anchor_store(krea_live_anchor_store(), || {
+        let bare_fit = with_injected_anchor_store(krea_packaged_anchor_store(), || {
             krea_turbo_fit_with_runtime(
                 &manifest,
                 "q4",

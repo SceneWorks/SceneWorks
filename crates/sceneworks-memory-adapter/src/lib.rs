@@ -9,7 +9,7 @@ use std::io::{self, Read};
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-pub const INFERENCE_PIN: &str = "670dc1f4418859cf241471987a0a050fedc108c5";
+pub const INFERENCE_PIN: &str = "c6d6a4dbd61ab09c26ff5526632cae2cefea60ed";
 pub const QWEN_REPOSITORY: &str = "SceneWorks/qwen-image-mlx";
 pub const FLUX2_REPOSITORY: &str = "SceneWorks/flux2-dev-mlx";
 pub const KREA_REPOSITORY: &str = "SceneWorks/krea-2-turbo-mlx";
@@ -891,9 +891,173 @@ pub fn fail(message: impl AsRef<str>) -> ! {
     std::process::exit(1);
 }
 
+/// The allocator counters an MLX phase window is opened against, abstracted so the ORDER in which
+/// the window opens can be proven on a host with no Apple hardware (sc-22667, epic 22657 D3).
+///
+/// The production implementation is the `mlx_rs::memory` free functions; the tests drive a fake.
+pub trait ResidencyCounters {
+    /// Release the allocator's retained free buffers (`mlx_rs::memory::clear_cache`).
+    fn clear_cache(&mut self);
+    /// Restart the active high-water mark (`mlx_rs::memory::reset_peak_memory`).
+    fn reset_peak(&mut self);
+    /// Bytes held by live arrays right now (`get_active_memory`).
+    fn active(&self) -> u64;
+    /// Bytes the allocator retains for reuse right now (`get_cache_memory`).
+    fn cache(&self) -> u64;
+    /// The active high-water mark since the last reset (`get_peak_memory`).
+    fn peak(&self) -> u64;
+}
+
+/// What the counters read the instant a resident phase window opened: the resident set the window's
+/// every phase peak will then include, and the two readings the record carries beside it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ResidentWindowOpening {
+    /// Live bytes after the resident set was materialized and the cache released — the weights, and
+    /// nothing else. Recorded as `preRungActiveAfterClear`.
+    pub resident_active: u64,
+    /// Retained cache after the release, expected ~0. Recorded as `preRungCacheAfterClear`.
+    pub resident_cache: u64,
+    /// The high-water mark immediately after the reset, before the first allocation of the window.
+    /// Recorded as `peakAfterReset`.
+    pub peak_after_reset: u64,
+}
+
+/// Open a phase window whose peaks INCLUDE the model's resident set, the way the candle adapter's
+/// device deltas do (weights on device before the window, every phase measured above the idle
+/// baseline).
+///
+/// ROOT CAUSE THIS EXISTS FOR (sc-22667 D3). The MLX providers with request-scoped residency
+/// (Z-Image, Qwen-Image, FLUX.2) materialize each component the first time a request reaches its
+/// phase, even under `LoadShape::EagerMaterialization` — "eager" names retention across requests,
+/// not materialization at load. A window opened on a freshly loaded generator therefore measured a
+/// COLD first request: the conditioning phase saw only the text encoder it was materializing
+/// (packaged z_image_turbo q4 MLX record: `preRungActiveAfterClear` 0, conditioning active peak
+/// 2.27 GB against a 5.83 GB post-request resident set), the denoise phase saw the text encoder plus
+/// the transformer it was materializing, and only the decode phase saw the whole set. Every packaged
+/// MLX image anchor reported a conditioning level below the resident set its eager regime claims,
+/// so the core derivation law (`sceneworks-core::memory_anchor`) refused to decompose any of them —
+/// a residue below zero is not a working set — and the MLX lane priced nothing from its anchors.
+///
+/// The fix is an ORDER: `materialize_resident_set` runs FIRST (one unmeasured request on the same
+/// loaded generator, which materializes and retains every component), THEN the cache is released,
+/// THEN the peak is reset and the window opens. Every phase peak of the measured request then sits
+/// above the same resident set, which is the quantity the law subtracts. The opening refuses a
+/// resident set the active counter did not see at all (zero live bytes after materialization): that
+/// is the exact false reading this fix removes, and recording it again would re-create the defect
+/// under a new capture date.
+pub fn open_resident_phase_window<C: ResidencyCounters>(
+    counters: &mut C,
+    materialize_resident_set: impl FnOnce() -> Result<(), String>,
+) -> Result<ResidentWindowOpening, String> {
+    materialize_resident_set()?;
+    counters.clear_cache();
+    counters.reset_peak();
+    let opening = ResidentWindowOpening {
+        resident_active: counters.active(),
+        resident_cache: counters.cache(),
+        peak_after_reset: counters.peak(),
+    };
+    if opening.resident_active == 0 {
+        return Err(
+            "the MLX active counter reports zero live bytes after the resident set was \
+             materialized; a phase window opened here would measure activations without their \
+             weights, which the anchor derivation law cannot decompose"
+                .to_owned(),
+        );
+    }
+    Ok(opening)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A counter fake that logs every call, so a test can assert the ORDER the window opens in,
+    /// and whose shared state the materializing closure raises the way a first request does.
+    #[derive(Default)]
+    struct FakeState {
+        log: Vec<&'static str>,
+        active: u64,
+        cache: u64,
+        peak: u64,
+    }
+
+    #[derive(Clone, Default)]
+    struct FakeCounters(std::rc::Rc<std::cell::RefCell<FakeState>>);
+
+    impl ResidencyCounters for FakeCounters {
+        fn clear_cache(&mut self) {
+            let mut state = self.0.borrow_mut();
+            state.log.push("clear_cache");
+            state.cache = 0;
+        }
+        fn reset_peak(&mut self) {
+            let mut state = self.0.borrow_mut();
+            state.log.push("reset_peak");
+            // MLX's reset zeroes the mark; the next allocation raises it to at least `active`.
+            state.peak = 0;
+        }
+        fn active(&self) -> u64 {
+            self.0.borrow().active
+        }
+        fn cache(&self) -> u64 {
+            self.0.borrow().cache
+        }
+        fn peak(&self) -> u64 {
+            self.0.borrow().peak
+        }
+    }
+
+    #[test]
+    fn a_resident_phase_window_materializes_the_weights_before_it_rebaselines() {
+        let mut counters = FakeCounters::default();
+        let shared = counters.clone();
+        // The materializing request is what a loaded request-scoped generator does on its first
+        // render: the resident set appears in `active`, and the request leaves cache behind.
+        let opening = open_resident_phase_window(&mut counters, || {
+            let mut state = shared.0.borrow_mut();
+            state.log.push("materialize");
+            state.active = 5_833_351_792;
+            state.cache = 4_846_009_704;
+            state.peak = 9_910_632_828;
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(
+            counters.0.borrow().log,
+            ["materialize", "clear_cache", "reset_peak"],
+            "the rebaseline must follow the materialization, never precede it"
+        );
+        assert_eq!(
+            opening,
+            ResidentWindowOpening {
+                resident_active: 5_833_351_792,
+                resident_cache: 0,
+                peak_after_reset: 0,
+            }
+        );
+    }
+
+    #[test]
+    fn a_resident_phase_window_refuses_a_resident_set_the_counters_did_not_see() {
+        let mut counters = FakeCounters::default();
+        let error = open_resident_phase_window(&mut counters, || Ok(())).unwrap_err();
+        assert!(error.contains("zero live bytes"), "{error}");
+        assert_eq!(counters.0.borrow().log, ["clear_cache", "reset_peak"]);
+    }
+
+    #[test]
+    fn a_resident_phase_window_does_not_rebaseline_when_materialization_fails() {
+        let mut counters = FakeCounters::default();
+        let error = open_resident_phase_window(&mut counters, || Err("render failed".to_owned()))
+            .unwrap_err();
+        assert_eq!(error, "render failed");
+        assert!(
+            counters.0.borrow().log.is_empty(),
+            "no counter was touched: {:?}",
+            counters.0.borrow().log
+        );
+    }
 
     fn ltx25_request() -> Value {
         json!({

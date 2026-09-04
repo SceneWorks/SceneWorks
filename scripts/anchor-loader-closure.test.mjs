@@ -24,9 +24,12 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 import {
+  ANCHOR_CURRENCY_ATTESTATIONS_PATH,
   ANCHOR_LOADER_CLOSURE_VERSION,
+  anchorCurrencyRevision,
   anchorMeasurementRevision,
   buildAnchorLoaderConfig,
+  indexCurrencyAttestations,
   expandUsePath,
   firstPartyCrates,
   gitTree,
@@ -483,19 +486,27 @@ function packagedStore() {
       { entryPoints: entry.entryPoints },
     ]),
   );
-  const revisions = store.anchors.map((anchor) =>
-    anchorMeasurementRevision(anchor, corpora.get(anchor.source.path)),
+  const attestations = indexCurrencyAttestations(
+    JSON.parse(readFileSync(path.join(root, ANCHOR_CURRENCY_ATTESTATIONS_PATH), "utf8")),
   );
-  return { store, corpora, declared, revisions };
+  // Both the measurement revisions and the attested ones: the stamp derives at the latter for an
+  // attested anchor, and the attestation check re-reads the former.
+  const revisions = store.anchors.flatMap((anchor) => [
+    anchorMeasurementRevision(anchor, corpora.get(anchor.source.path)),
+    anchorCurrencyRevision(anchor, corpora.get(anchor.source.path), attestations).revision,
+  ]);
+  return { store, corpora, declared, revisions, attestations };
 }
 
 test("every packaged anchor's key is the derivation at ITS OWN measurement revision", { skip }, (t) => {
-  const { store, corpora, declared, revisions } = packagedStore();
+  const { store, corpora, declared, revisions, attestations } = packagedStore();
   if (!requireRevisions(t, revisions)) return;
-  const { store: stamped } = stampAnchorStore({ repo, store, declared, corpora });
+  const { store: stamped } = stampAnchorStore({ repo, store, declared, corpora, attestations });
+  // The whole `source` block, not just the digest: an attested anchor's key is one claim with the
+  // attestation that justifies deriving it later than the measurement (sc-22667).
   assert.deepEqual(
-    stamped.anchors.map((anchor) => anchor.source.loaderClosureDigest),
-    store.anchors.map((anchor) => anchor.source.loaderClosureDigest),
+    stamped.anchors.map((anchor) => anchor.source),
+    store.anchors.map((anchor) => anchor.source),
     "re-run: node scripts/anchor-loader-closure.mjs --repo <clone> --stamp-anchors",
   );
 
@@ -513,6 +524,115 @@ test("every packaged anchor's key is the derivation at ITS OWN measurement revis
     "no packaged anchor is stale — the recorded key is being derived at the pin, not at its " +
       "measurement, and currency has become a tautology",
   );
+  // And no UNATTESTED anchor reads current unless its measurement revision's closure really equals
+  // the pin's: currency by attestation is the only other way to be current, and it is declared.
+  for (const anchor of store.anchors) {
+    if (anchor.source.currencyAttestation) continue;
+    const declaredAtPin = config.models[`${anchor.modelId}:${anchor.backend}`].digest;
+    if (anchor.source.loaderClosureDigest === declaredAtPin) {
+      const measured = anchorMeasurementRevision(anchor, corpora.get(anchor.source.path));
+      assert.notEqual(
+        measured,
+        PIN,
+        `${anchor.id}: measured at the pin itself, so currency is a value against itself here`,
+      );
+    }
+  }
+});
+
+test("an ATTESTED anchor's key is the derivation at the attested revision, carried with its justification (sc-22667)", { skip }, (t) => {
+  const { store, corpora, declared, revisions, attestations } = packagedStore();
+  if (!requireRevisions(t, revisions)) return;
+  const attested = store.anchors.filter((anchor) => attestations.has(anchor.id));
+  assert.ok(attested.length > 0, "the packaged store must carry an attested anchor for this case");
+  const { store: withAttestations, report } = stampAnchorStore({ repo, store, declared, corpora, attestations });
+  const { store: withoutAttestations } = stampAnchorStore({ repo, store, declared, corpora });
+  for (const anchor of attested) {
+    const attestation = attestations.get(anchor.id);
+    const now = withAttestations.anchors.find((entry) => entry.id === anchor.id);
+    const raw = withoutAttestations.anchors.find((entry) => entry.id === anchor.id);
+    const row = report.find((entry) => entry.id === anchor.id);
+    // Derived at the attested revision, and the report says so.
+    assert.equal(row.revision, attestation.attestedRevision);
+    assert.equal(row.attested, true);
+    // The attestation DID something: at the measurement revision the closure differs — otherwise
+    // the entry is dead weight and should be deleted, not carried.
+    assert.notEqual(
+      now.source.loaderClosureDigest,
+      raw.source.loaderClosureDigest,
+      `${anchor.id}: the closure did not move between measurement and attested revision`,
+    );
+    // The justification travels with the key: the store's copy is the config's entry minus the
+    // file list, field for field.
+    assert.deepEqual(now.source.currencyAttestation, {
+      measuredRevision: attestation.measuredRevision,
+      attestedRevision: attestation.attestedRevision,
+      attestedAt: attestation.attestedAt,
+      story: attestation.story,
+      class: attestation.class,
+      why: attestation.why,
+      witness: attestation.witness,
+    });
+    // And an unattested stamp carries NO attestation — a stale entry cannot linger in the store.
+    assert.equal(raw.source.currencyAttestation, undefined);
+  }
+});
+
+test("an attestation whose measurement revision no longer matches the record is refused (sc-22667)", () => {
+  const { store, corpora, attestations } = packagedStore();
+  const anchor = store.anchors.find((entry) => attestations.has(entry.id));
+  assert.ok(anchor, "needs an attested packaged anchor");
+  const entry = attestations.get(anchor.id);
+  const moved = new Map([[anchor.id, { ...entry, measuredRevision: "0".repeat(40) }]]);
+  assert.throws(
+    () => anchorCurrencyRevision(anchor, corpora.get(anchor.source.path), moved),
+    /the measurement moved under the attestation/,
+  );
+  // The unmoved entry resolves to the attested revision; an unattested anchor to its own.
+  assert.equal(
+    anchorCurrencyRevision(anchor, corpora.get(anchor.source.path), attestations).revision,
+    entry.attestedRevision,
+  );
+  assert.equal(
+    anchorCurrencyRevision(anchor, corpora.get(anchor.source.path), new Map()).revision,
+    entry.measuredRevision,
+  );
+});
+
+test("an attestation without its justification, or of its own measurement revision, is refused (sc-22667)", () => {
+  const config = JSON.parse(readFileSync(path.join(root, ANCHOR_CURRENCY_ATTESTATIONS_PATH), "utf8"));
+  assert.ok(config.attestations.length > 0);
+  const [entry] = config.attestations;
+  const doctored = (patch) => ({ attestations: [{ ...entry, ...patch }] });
+  for (const field of ["why", "witness", "class", "attestedAt", "story"]) {
+    assert.throws(
+      () => indexCurrencyAttestations(doctored({ [field]: "  " })),
+      new RegExp(`states no ${field}`),
+      field,
+    );
+  }
+  assert.throws(
+    () => indexCurrencyAttestations(doctored({ attestedRevision: entry.measuredRevision })),
+    /attests its own measurement revision/,
+  );
+  assert.throws(
+    () => indexCurrencyAttestations(doctored({ attestedRevision: "abc" })),
+    /attestedRevision is not a 40-hex revision/,
+  );
+  assert.throws(
+    () => indexCurrencyAttestations(doctored({ filesChangedSinceMeasurement: [{ path: "x" }] })),
+    /must list every closure file/,
+  );
+  assert.throws(
+    () => indexCurrencyAttestations({ attestations: [entry, entry] }),
+    /is attested twice/,
+  );
+  // The checked-in file itself is well-formed, and every entry names a packaged anchor.
+  const indexed = indexCurrencyAttestations(config);
+  const store = JSON.parse(readFileSync(path.join(root, "config/memory-anchors.json"), "utf8"));
+  for (const id of indexed.keys()) {
+    assert.ok(store.anchors.some((anchor) => anchor.id === id), `${id} is not a packaged anchor`);
+  }
 });
 
 test("an entry point absent at a historical revision narrows the unit, it does not throw", { skip }, (t) => {

@@ -2237,10 +2237,22 @@ test("a cell whose retained corpus is packaged reads Anchored, with its currency
       `${cell.id} must state whether its anchor is current`,
     );
   }
-  // The sc-15859 Z-Image-Turbo candle captures were retained but UNPACKAGED before this story, so
-  // their cells read `Implemented`. They are compiled in now and were measured at the pinned
-  // revision, so every one of them must read Anchored AND current. Named by cell coordinates
-  // rather than by anchor id, so a re-capture that rotates the id does not red this.
+  // The sc-15859 Z-Image-Turbo candle captures were retained but UNPACKAGED before sc-22666, so
+  // their cells read `Implemented`. They are compiled in now, so every one of them must carry the
+  // packaged anchor, read `Anchored`, and STATE its currency. Named by cell coordinates rather
+  // than by anchor id, so a re-capture that rotates the id does not red this.
+  //
+  // CURRENCY IS NOT ASSERTED TRUE HERE, and that is the point of sc-22511: `current` is a report
+  // the MATRIX may not turn into a state, and demanding `true` would assert a coincidence about
+  // the pin. What the worker does with a non-current anchor is a different question with a
+  // different answer — admission REFUSES it and prices from the manifest floor
+  // (`candle_image_anchor` / `krea_store_anchor`), which is exactly why sc-22667 made these rows
+  // current at the pin through a reviewed attestation rather than leaving them stale (see the
+  // attestation test below and `the_production_anchor_source_admits_z_image_q4_on_eight_gb_at_
+  // rung_four_from_the_contracts_facts`, which asserts currency on the packaged row). The claims
+  // that survive here are the matrix's own: the anchor is packaged, it backs the cell, the cell
+  // reads `Anchored`, and the currency is published as a boolean either way so a stale lane
+  // cannot read identically to a fresh one.
   const zImageCandle = matrix.cells.filter(
     (cell) => cell.modelId === "z_image_turbo" && cell.backend === "candle",
   );
@@ -2248,12 +2260,61 @@ test("a cell whose retained corpus is packaged reads Anchored, with its currency
   for (const cell of zImageCandle) {
     assert.ok(cell.anchor, `${cell.id} must carry the packaged sc-15859 anchor`);
     assert.equal(
-      cell.anchor.current,
-      true,
-      `${cell.id}: the sc-15859 captures were measured at the pin, so they read current`,
+      typeof cell.anchor.current,
+      "boolean",
+      `${cell.id}: the packaged sc-15859 capture must publish its currency either way`,
     );
     if (cell.implementation === "implemented") {
       assert.equal(cell.state, "Anchored", cell.id);
     }
   }
+});
+
+// ---------------------------------------------------------------------------------------------
+// sc-22667: an anchor that is current BY ATTESTATION says so — on every cell it backs, in the
+// inventory, in the summary and in the rendered table — and an anchor keyed at its own
+// measurement revision says `null`. The attestation is the store's own (`source.currencyAttestation`,
+// written by `anchor-loader-closure.mjs --stamp-anchors`), published verbatim; the matrix neither
+// invents nor drops it, so a current row can never hide HOW it is current.
+test("a current-by-attestation anchor publishes its attestation everywhere it is cited (sc-22667)", async () => {
+  const store = JSON.parse(
+    await readFile(new URL(`../${SOURCE_PATHS.anchorStore}`, import.meta.url), "utf8"),
+  );
+  const attested = store.anchors.filter((anchor) => anchor.source.currencyAttestation);
+  assert.ok(attested.length > 0, "the packaged store carries attested anchors at this pin");
+  const matrix = await buildMatrix();
+  for (const anchor of attested) {
+    const row = matrix.anchors.find((entry) => entry.id === anchor.id);
+    assert.ok(row, `${anchor.id} is in the inventory`);
+    assert.deepEqual(row.currencyAttestation, anchor.source.currencyAttestation);
+    assert.equal(row.current, true, `${anchor.id}: an attestation that leaves the anchor stale is stale itself`);
+    const cells = matrix.cells.filter((cell) => cell.anchor?.id === anchor.id);
+    assert.ok(cells.length > 0, `${anchor.id} backs a published cell`);
+    for (const cell of cells) {
+      assert.deepEqual(cell.anchor.currencyAttestation, anchor.source.currencyAttestation, cell.id);
+    }
+  }
+  for (const row of matrix.anchors.filter((entry) => !attested.some((a) => a.id === entry.id))) {
+    assert.equal(row.currencyAttestation, null, `${row.id}: unattested anchors publish null`);
+  }
+  assert.equal(
+    matrix.summary.attestedAnchors,
+    matrix.anchors.filter((row) => row.current && row.currencyAttestation).length,
+  );
+  assert.ok(matrix.summary.attestedAnchors > 0);
+  // The rendered table names the attestation on the row, and the plain "yes" is reserved for an
+  // anchor current by measurement.
+  const markdown = renderMarkdown(matrix);
+  for (const anchor of attested) {
+    const line = markdown.split("\n").find((entry) => entry.startsWith(`| \`${anchor.id}\` |`));
+    assert.ok(line, `${anchor.id} has a table row`);
+    const { class: kind, measuredRevision, attestedRevision, story } = anchor.source.currencyAttestation;
+    assert.ok(
+      line.includes(
+        `| yes — attested ${kind} ${measuredRevision.slice(0, 8)}→${attestedRevision.slice(0, 8)} (${story}) |`,
+      ),
+      line,
+    );
+  }
+  assert.match(markdown, /current by attestation\)/);
 });

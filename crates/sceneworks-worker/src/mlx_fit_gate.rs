@@ -2263,10 +2263,10 @@ fn request_regime(
 /// a gate whose permissive failure mode is an OS Jetsam SIGKILL.
 ///
 /// `facts` are the architecture facts the law's rung ratios need. Production passes
-/// [`crate::video_admission::architecture_facts_from_contract`], which states none at this pin —
-/// so the window, the chunk and the tile leave the residue unscaled until sc-22667 wires the real
-/// facts, and the fixture tests below pass the model's own facts explicitly to grade the ratios
-/// themselves.
+/// [`crate::video_admission::architecture_facts_from_contract`] — the contract's own
+/// `architecture_facts` block, axis by axis (sc-22667); a contract that states none leaves the
+/// window, the chunk and the tile unscaled. The fixture tests below pass the model's own facts
+/// explicitly to grade the ratios themselves.
 #[allow(clippy::too_many_arguments)]
 fn mlx_image_anchor_activation_residue(
     contract: &MemoryProviderContract,
@@ -2492,15 +2492,23 @@ fn intra_transformer_evicted_bytes(contract: &MemoryProviderContract) -> u64 {
 ///       ladder price, `transformer x window / blocks`
 ///       (`sceneworks_core::memory_anchor::windowed_transformer_bytes`), because its activation
 ///       term is the law's residue for the rung's regime (sc-22665), which carries no weights;
-///     - `transformer_blocks: None` (the default facts at this pin) — the PRE-EPIC sc-18096
-///       accounting above, the whole transformer out and the window carried by the
-///       headroom/allowance term. Keeping the whole transformer resident here would price rung 4
-///       like rung 2 and refuse, on real Macs, shipped unmeasured models the lane admitted before
-///       the epic (`shipped_plain_krea_without_a_binding_preserves_the_request_on_estimate_admission`,
-///       `shipped_plain_sdxl_without_a_binding_preserves_the_three_rung_estimate_path`); that is
-///       a regression, not conservatism, so admission is unchanged until the pin bump supplies
-///       block counts. The law itself stays err-large (`windowed_transformer_bytes` keeps the
-///       whole transformer with no block count); this is a worker floor decision.
+///     - `transformer_blocks: None` (a contract that states no facts — the registry's weights-free
+///       surfaces, a single-file import, a provider that has not adopted the block) — keyed on
+///       WHICH activation term the floor is composed with ([`ImageFloorActivationTerm`]):
+///       * with the GENERIC headroom, the PRE-EPIC sc-18096 accounting above, the whole
+///         transformer out and the window carried by the headroom/allowance term. Keeping the
+///         whole transformer resident here would price rung 4 like rung 2 and refuse, on real
+///         Macs, shipped unmeasured models the lane admitted before the epic
+///         (`shipped_plain_krea_without_a_binding_preserves_the_request_on_estimate_admission`,
+///         `shipped_plain_sdxl_without_a_binding_preserves_the_three_rung_estimate_path`); that
+///         is a regression, not conservatism, so admission is unchanged until the contract
+///         supplies a block count. This is a worker floor decision;
+///       * with the LAW's residue (an in-domain anchor priced the rung), the whole transformer
+///         STAYS resident — the law's own erring-large reading (`windowed_transformer_bytes`
+///         keeps the whole transformer with no block count). The residue carries no weights and
+///         no window, so removing the transformer here would charge rung 4's window slice
+///         NOWHERE (sc-22667 round-2 review): rung 4 prices as rung 3 until a block count makes
+///         the share knowable, never below it.
 /// * Rungs 2 and 3 bound TRANSIENTS, not weights, so they take no weights reduction here — and
 ///   deliberately no transient reduction either, because no measured basis for one exists on an
 ///   unmeasured cell. Their floor equals rung 1's, which keeps them selectable without ever
@@ -2547,31 +2555,52 @@ pub(crate) fn estimate_floor_weights_bytes(
     floor_weights_bytes(contract, engaged, 0)
 }
 
+/// Which ACTIVATION term the image floor composes [`image_floor_weights_bytes`] with — the input
+/// that decides where rung 4's window slice is charged when the facts state no block count (see
+/// the `transformer_blocks: None` regime on [`estimate_floor_weights_bytes`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ImageFloorActivationTerm {
+    /// The sc-22663 law's per-phase residue for the rung's regime
+    /// ([`mlx_image_anchor_activation_residue`]): weights-free and window-free, so the weights
+    /// term must carry every resident weight itself.
+    LawResidue,
+    /// `MlxRequestPlan::generic_headroom_bytes`: the pre-epic geometry-blind allowance, which the
+    /// sc-18096 accounting defines as carrying rung 4's window slice.
+    GenericHeadroom,
+}
+
 /// The IMAGE lane's floor weights term (sc-22667): [`estimate_floor_weights_bytes`] with rung 4's
 /// resident window stated as the image law states it — `transformer x min(window, blocks) /
-/// blocks` — WHEN the facts carry a block count, and the pre-epic whole-transformer-out
-/// accounting (window carried by the headroom/allowance term) when they do not: see the two
-/// regimes on [`estimate_floor_weights_bytes`]. `transformer_window` is the selected
-/// `transformer_window_size`; `facts` are the contract's architecture facts
-/// (`video_admission::architecture_facts_from_contract`). Both are ignored unless the composition
-/// engages `BoundedTransformerResidency`.
+/// blocks` — WHEN the facts carry a block count. Without one the window share is unknowable and
+/// the term depends on what carries the slice: under the generic headroom, the pre-epic
+/// whole-transformer-out accounting (the headroom/allowance term carries it); under the law's
+/// residue, the whole transformer stays resident (the law's own reading — the residue carries no
+/// weights, so nothing else would). See the regimes on [`estimate_floor_weights_bytes`].
+/// `transformer_window` is the selected `transformer_window_size`; `facts` are the contract's
+/// architecture facts (`video_admission::architecture_facts_from_contract`). All three inputs are
+/// ignored unless the composition engages `BoundedTransformerResidency`.
 pub(crate) fn image_floor_weights_bytes(
     contract: &MemoryProviderContract,
     engaged: &[MemoryStrategy],
     transformer_window: Option<u32>,
     facts: sceneworks_core::memory_anchor::ArchitectureFacts,
+    activation: ImageFloorActivationTerm,
 ) -> u64 {
-    let resident_window = match facts.transformer_blocks {
-        Some(_) if engaged.contains(&MemoryStrategy::BoundedTransformerResidency) => {
+    let windows = engaged.contains(&MemoryStrategy::BoundedTransformerResidency);
+    let resident_window = match (facts.transformer_blocks, activation) {
+        _ if !windows => 0,
+        // A block count, or the law's residue without one: the law's helper, which states the
+        // share when it can and keeps the whole transformer when it cannot.
+        (Some(_), _) | (None, ImageFloorActivationTerm::LawResidue) => {
             sceneworks_core::memory_anchor::windowed_transformer_bytes(
                 contract.asset_facts.transformer_bytes,
                 transformer_window,
                 facts.transformer_blocks,
             )
         }
-        // No block count (this pin) or no window engaged: the pre-epic accounting, zero
-        // resident window.
-        _ => 0,
+        // No block count under the generic headroom: the pre-epic accounting, zero resident
+        // window — the headroom term carries the slice.
+        (None, ImageFloorActivationTerm::GenericHeadroom) => 0,
     };
     floor_weights_bytes(contract, engaged, resident_window)
 }
@@ -3177,17 +3206,24 @@ fn synthesize_estimate_ladder(
                 parameter_candidate.parameters,
                 facts,
             );
-            let floor_activation_bytes = match &derived_residue {
-                Some((residue, _)) => *residue,
-                None => plan.generic_headroom_bytes(geometry),
+            let (floor_activation_bytes, activation_term) = match &derived_residue {
+                Some((residue, _)) => (*residue, ImageFloorActivationTerm::LawResidue),
+                None => (
+                    plan.generic_headroom_bytes(geometry),
+                    ImageFloorActivationTerm::GenericHeadroom,
+                ),
             };
             // The weights term states rung 4's resident window as the law does (sc-22667): the
-            // image lane's floor and the candle ladder price ONE windowed residency.
+            // image lane's floor and the candle ladder price ONE windowed residency. It is told
+            // which activation term it is composed with, because without a block count that is
+            // what decides whether the window slice is carried by the headroom or must stay in
+            // the weights.
             let predicted_peak_bytes = image_floor_weights_bytes(
                 contract,
                 &engaged,
                 parameter_candidate.parameters.transformer_window_size,
                 facts,
+                activation_term,
             )
             .saturating_add(floor_activation_bytes);
             tracing::info!(
@@ -9037,6 +9073,7 @@ mod tests {
                     .parameters
                     .transformer_window_size,
                 crate::video_admission::architecture_facts_from_contract(contract),
+                ImageFloorActivationTerm::GenericHeadroom,
             ),
             estimate_floor_weights_bytes(contract, &engaged),
             "without a block count the image floor IS the pre-epic floor"
@@ -11426,8 +11463,17 @@ mod tests {
     }
 
     /// The packaged store with the flux2 anchors re-stamped at the loader-closure digest the pin
-    /// currently DECLARES — the same construction (and the same rationale) as
-    /// `vram_gate::tests::krea_live_anchor_store`.
+    /// currently DECLARES, so the gate's derivation can be graded on them.
+    ///
+    /// sc-22667 retired this construction for the candle lanes (`vram_gate::tests::
+    /// krea_packaged_anchor_store`, `candle_memory_strategy::tests::sc_22667_packaged_anchor_store`):
+    /// those rows are now current at the pin by a reviewed attestation and the tests price from
+    /// the packaged store unmodified. The flux2 MLX rows are NOT attested — they were measured at
+    /// 10831e4c / 75d66db5 and nobody has read the mlx-gen-flux2 closure diff since, so they
+    /// honestly read stale (`packaged_anchor_currency_is_reported_not_gated`) and production
+    /// prices them from the floor. This re-stamp therefore grades the derivation's arithmetic on
+    /// the measured numbers, not the shipped currency; retiring it means an attestation (a read
+    /// diff, or a nax re-measure) for `flux2_dev:mlx`, which is its own story.
     fn flux2_live_anchor_store() -> sceneworks_core::memory_anchor::MemoryAnchorStore {
         let mut store = sceneworks_core::memory_anchor::packaged_memory_anchors()
             .expect("the packaged anchor store")
@@ -11927,8 +11973,14 @@ mod tests {
             facts,
         )?;
         Some(
-            image_floor_weights_bytes(contract, engaged, parameters.transformer_window_size, facts)
-                .saturating_add(residue),
+            image_floor_weights_bytes(
+                contract,
+                engaged,
+                parameters.transformer_window_size,
+                facts,
+                ImageFloorActivationTerm::LawResidue,
+            )
+            .saturating_add(residue),
         )
     }
 
@@ -12131,6 +12183,109 @@ mod tests {
         );
     }
 
+    /// sc-22667 round-2 review (b): an in-domain anchor whose contract states NO block count
+    /// still prices rung 4 through the law's residue — and that residue carries neither weights
+    /// nor the window slice. Before the fix the weights term removed the whole transformer
+    /// (the pre-epic accounting, whose slice lives in the GENERIC headroom that this rung is no
+    /// longer composed with), so rung 4's window was charged nowhere and the rung priced a whole
+    /// transformer below rung 3 with no fact behind the saving. Now the transformer stays
+    /// resident: rung 4 prices exactly as rung 3, at the law's own erring-large reading, until a
+    /// block count makes the share knowable — and with one it prices the share.
+    ///
+    /// MUTATION: `(None, LawResidue) => 0` in `image_floor_weights_bytes` (the pre-fix code)
+    /// makes the blind rung 4 price `transformer_bytes` below rung 3 and reds the first and third
+    /// assertions.
+    #[test]
+    fn without_a_block_count_a_law_priced_rung_4_keeps_the_transformer_resident() {
+        let generator = qwen_in_domain_generator();
+        let contract = generator.contract.as_ref().expect("contract");
+        let chunked = [
+            MemoryStrategy::Resident,
+            MemoryStrategy::StagedResidency,
+            MemoryStrategy::BoundedDecode,
+            MemoryStrategy::BoundedAttention,
+        ];
+        let windowed = [
+            MemoryStrategy::Resident,
+            MemoryStrategy::StagedResidency,
+            MemoryStrategy::BoundedDecode,
+            MemoryStrategy::BoundedAttention,
+            MemoryStrategy::BoundedTransformerResidency,
+        ];
+        let tile_and_chunk = gen_core::MemoryStrategyParameters {
+            decode_tile_edge: Some(512),
+            decode_overlap: Some(128),
+            attention_chunk_size: Some(64 * 1024 * 1024),
+            ..Default::default()
+        };
+        let fully_engaged = gen_core::MemoryStrategyParameters {
+            transformer_window_size: Some(1),
+            ..tile_and_chunk
+        };
+        // The in-domain facts with the block count withheld: every ratio but the window's is live,
+        // so the residue is the same one the block-counted rung 4 is priced with.
+        let no_blocks = sceneworks_core::memory_anchor::ArchitectureFacts {
+            transformer_blocks: None,
+            ..QWEN_IN_DOMAIN_FACTS
+        };
+        let estimate = |engaged: &[MemoryStrategy], parameters, facts| {
+            with_injected_image_anchor_store(qwen_in_domain_anchor_store(), || {
+                qwen_in_domain_floor_estimate(&generator, engaged, parameters, facts)
+            })
+            .expect("the in-domain anchor prices this rung")
+        };
+
+        let rung_3 = estimate(&chunked, tile_and_chunk, no_blocks);
+        let rung_4_blind = estimate(&windowed, fully_engaged, no_blocks);
+        let rung_4_counted = estimate(&windowed, fully_engaged, QWEN_IN_DOMAIN_FACTS);
+        assert_eq!(
+            rung_4_blind, rung_3,
+            "without a block count the law-priced rung 4 keeps the whole transformer resident and \
+             prices as rung 3: {rung_4_blind} vs {rung_3}"
+        );
+        assert!(
+            rung_4_counted < rung_4_blind,
+            "with the block count rung 4 prices the law's share below the blind reading: \
+             {rung_4_counted} vs {rung_4_blind}"
+        );
+        // The weights term alone, against the pre-fix reading: the whole transformer is what the
+        // fix keeps, and the generic-headroom regime is untouched by it.
+        let weights = |facts, term| {
+            image_floor_weights_bytes(
+                contract,
+                &windowed,
+                fully_engaged.transformer_window_size,
+                facts,
+                term,
+            )
+        };
+        assert_eq!(
+            weights(no_blocks, ImageFloorActivationTerm::LawResidue),
+            estimate_floor_weights_bytes(contract, &chunked),
+            "the law-residue regime keeps the whole transformer: rung 4's weights term is rung \
+             3's (staged: max(conditioning, transformer + decoder))"
+        );
+        assert!(
+            weights(no_blocks, ImageFloorActivationTerm::LawResidue)
+                > weights(no_blocks, ImageFloorActivationTerm::GenericHeadroom),
+            "…and above the generic-headroom regime's, which hands the transformer to its \
+             headroom term"
+        );
+        assert_eq!(
+            weights(no_blocks, ImageFloorActivationTerm::GenericHeadroom),
+            estimate_floor_weights_bytes(contract, &windowed),
+            "the generic-headroom regime is still the pre-epic floor"
+        );
+        assert_eq!(
+            weights(QWEN_IN_DOMAIN_FACTS, ImageFloorActivationTerm::LawResidue),
+            weights(
+                QWEN_IN_DOMAIN_FACTS,
+                ImageFloorActivationTerm::GenericHeadroom
+            ),
+            "with a block count the activation term no longer matters: the share is the law's"
+        );
+    }
+
     /// AC 2 — the derived residue reaches the LADDER, per rung, and the packaged-anchor refusal
     /// keeps the weights-plus-generic-headroom floor byte for byte.
     ///
@@ -12184,11 +12339,19 @@ mod tests {
                 estimate.selection.strategy
             );
             let engaged = contract.engaged_composition_for_selection(&estimate.selection);
+            // The chunked rungs are the ones this anchor prices (the branch below), so their
+            // weights term is composed with the law's residue; the rest keep the generic headroom.
+            let activation_term = if engaged.contains(&MemoryStrategy::BoundedAttention) {
+                ImageFloorActivationTerm::LawResidue
+            } else {
+                ImageFloorActivationTerm::GenericHeadroom
+            };
             let weights = image_floor_weights_bytes(
                 contract,
                 &engaged,
                 estimate.selection.parameters.transformer_window_size,
                 crate::video_admission::architecture_facts_from_contract(contract),
+                activation_term,
             );
             let activation = estimate
                 .evidence
@@ -12328,6 +12491,7 @@ mod tests {
                     &engaged,
                     estimate.selection.parameters.transformer_window_size,
                     crate::video_admission::architecture_facts_from_contract(contract),
+                    ImageFloorActivationTerm::GenericHeadroom,
                 )
                 .saturating_add(generic),
                 "{:?}: a refused anchor leaves the weights+generic-headroom floor untouched",
@@ -20038,10 +20202,14 @@ mod tests {
         /// pin bump supplies block counts.
         ///
         /// MUTATION: passing `0` as the resident window whatever the facts reds the first two
-        /// assertions; keeping the whole transformer under the default facts (dropping the `None`
-        /// arm) reds the third; a divergence from the law's helper reds the last.
+        /// assertions; keeping the whole transformer under the default facts with the generic
+        /// headroom (dropping the `GenericHeadroom` arm) reds the third; removing it under the
+        /// default facts with the law's residue (the pre-round-2 code, window charged nowhere)
+        /// reds the fourth; a divergence from the law's helper reds the last.
         #[test]
         fn the_image_floor_keeps_the_laws_window_share_resident_and_errs_large_without_facts() {
+            use ImageFloorActivationTerm::{GenericHeadroom, LawResidue};
+
             let mut contract = h3_shaped_contract(
                 gib_to_bytes(1.0),
                 gib_to_bytes(5.0),
@@ -20056,39 +20224,58 @@ mod tests {
                 transformer_blocks: Some(10),
                 ..Default::default()
             };
-            assert_eq!(
-                image_floor_weights_bytes(&contract, STAGED_PLUS_RUNG4, Some(1), facts),
-                gib_to_bytes(2.5),
-                "rung 4 with one of ten blocks resident: max(conditioning, decoder + 0.5 GiB)"
-            );
-            assert_eq!(
-                image_floor_weights_bytes(&contract, STAGED_PLUS_RUNG4, Some(4), facts),
-                gib_to_bytes(4.0),
-                "four of ten blocks: decoder + 2 GiB"
-            );
+            let blind = sceneworks_core::memory_anchor::ArchitectureFacts::default();
+            for term in [LawResidue, GenericHeadroom] {
+                assert_eq!(
+                    image_floor_weights_bytes(&contract, STAGED_PLUS_RUNG4, Some(1), facts, term),
+                    gib_to_bytes(2.5),
+                    "{term:?}: rung 4 with one of ten blocks resident: max(conditioning, decoder \
+                     + 0.5 GiB)"
+                );
+                assert_eq!(
+                    image_floor_weights_bytes(&contract, STAGED_PLUS_RUNG4, Some(4), facts, term),
+                    gib_to_bytes(4.0),
+                    "{term:?}: four of ten blocks: decoder + 2 GiB"
+                );
+            }
             assert_eq!(
                 image_floor_weights_bytes(
                     &contract,
                     STAGED_PLUS_RUNG4,
                     Some(1),
-                    sceneworks_core::memory_anchor::ArchitectureFacts::default(),
+                    blind,
+                    GenericHeadroom
                 ),
                 gib_to_bytes(2.0),
-                "no block count (this pin): the PRE-EPIC accounting — the whole transformer out, \
-                 its window carried by the headroom term — so real-Mac admission is unchanged"
+                "no block count under the generic headroom: the PRE-EPIC accounting — the whole \
+                 transformer out, its window carried by the headroom term — so real-Mac admission \
+                 is unchanged"
             );
             assert_eq!(
-                image_floor_weights_bytes(&contract, STAGED, Some(1), facts),
-                estimate_floor_weights_bytes(&contract, STAGED),
-                "a composition that does not window is unchanged by the window inputs"
+                image_floor_weights_bytes(&contract, STAGED_PLUS_RUNG4, Some(1), blind, LawResidue),
+                gib_to_bytes(7.0),
+                "no block count under the law's residue: the whole transformer stays resident \
+                 (decoder + 5 GiB), because the residue carries no window slice"
             );
+            assert_eq!(
+                image_floor_weights_bytes(&contract, STAGED_PLUS_RUNG4, Some(1), blind, LawResidue),
+                image_floor_weights_bytes(&contract, STAGED, Some(1), blind, LawResidue),
+                "…which is rung 3's weights term: no saving is promised until the share is knowable"
+            );
+            for term in [LawResidue, GenericHeadroom] {
+                assert_eq!(
+                    image_floor_weights_bytes(&contract, STAGED, Some(1), facts, term),
+                    estimate_floor_weights_bytes(&contract, STAGED),
+                    "{term:?}: a composition that does not window is unchanged by the window inputs"
+                );
+            }
             assert_eq!(
                 estimate_floor_weights_bytes(&contract, STAGED_PLUS_RUNG4),
                 gib_to_bytes(2.0),
                 "the video lane's form keeps its sc-18096 accounting: the whole transformer leaves"
             );
             assert_eq!(
-                image_floor_weights_bytes(&contract, STAGED_PLUS_RUNG4, Some(3), facts)
+                image_floor_weights_bytes(&contract, STAGED_PLUS_RUNG4, Some(3), facts, LawResidue)
                     - estimate_floor_weights_bytes(&contract, STAGED_PLUS_RUNG4),
                 sceneworks_core::memory_anchor::windowed_transformer_bytes(
                     gib_to_bytes(5.0),
@@ -20189,5 +20376,146 @@ mod tests {
                  above changes and must be re-derived rather than re-stamped"
             );
         }
+    }
+
+    /// sc-22667, second pin bump (inference c6d6a4db): the packaged `z_image_turbo` q4 MLX cell is
+    /// IN DOMAIN through the production seam, and prices rung 4 below rung 2.
+    ///
+    /// THE FLIP. At a5f643ae the MLX provider's `decoder_bytes` was the WHOLE `vae/` directory —
+    /// the `decoder.*` tensors a text-to-image render materializes AND the `encoder.*` tensors it
+    /// never does. `anchor_component_bytes` therefore handed the law a 5,893,275,206-byte resident
+    /// set against a re-captured conditioning level of 5,834,701,816, the domain guard refused the
+    /// negative residue, and the production cell sat on its generic weights+headroom estimate
+    /// floor (core test, then named `..._is_refused_against_the_whole_vae_asset_fact`). c6d6a4db
+    /// splits the directory by key prefix: `decoder_bytes` is the render-resident half and the
+    /// encoder becomes a typed `MemoryComponentKind::ReferenceEncoder` auxiliary in
+    /// `overlay_bytes`.
+    ///
+    /// WHY THIS TEST LIVES IN THE WORKER, not in core. The core law only ever sees a
+    /// `ComponentBytes`; what could regress is the SEAM that builds one. `anchor_component_bytes`
+    /// must read the three BASE legs and NOT add `overlay_bytes` — `base_bytes` is exactly
+    /// `conditioning + transformer + decoder`, and the auxiliary is charged on top by the
+    /// contract's own `predicted_peak_from_base` at admission. A seam that summed base + overlay
+    /// would hand the law 5,893,275,206 again and put this cell straight back on the floor, which
+    /// is the exact defect the flip removed. The facts below are the pinned provider's own
+    /// (`mlx-gen-z-image::memory_strategy::component_asset_facts`) for the q4 T2I route; MLX
+    /// cannot be built on Windows, so they are stated rather than read off a linked registry, and
+    /// `base_bytes` is asserted to equal the three legs so a restatement cannot drift silently.
+    ///
+    /// MUTATION (the pre-c6d6a4db shape): fold `overlay_bytes` back into `decoder_bytes` and the
+    /// derivation returns `None` on every rung — asserted below, so this test fails if the split
+    /// stops being what admits the cell.
+    #[test]
+    fn the_packaged_z_image_mlx_cell_prices_rung_four_below_rung_two_from_the_contracts_base_legs()
+    {
+        use sceneworks_core::memory_anchor::{AnchorBackend, AnchorMlxImageDeriveRequest};
+
+        // The pinned MLX contract's asset facts for z_image_turbo q4, text-to-image, no control:
+        // the three base legs plus the reference-encoder auxiliary.
+        let facts = gen_core::MemoryAssetFacts {
+            base_bytes: 2_262_920_192 + 3_465_730_304 + 97_583_622,
+            conditioning_bytes: 2_262_920_192,
+            transformer_bytes: 3_465_730_304,
+            decoder_bytes: 97_583_622,
+            overlay_bytes: 67_041_088,
+        };
+        assert_eq!(
+            facts.base_bytes,
+            facts.conditioning_bytes + facts.transformer_bytes + facts.decoder_bytes,
+            "base_bytes is the three legs; the auxiliary rides in overlay_bytes"
+        );
+
+        let components = crate::video_admission::anchor_component_bytes(facts);
+        assert_eq!(components.conditioning, facts.conditioning_bytes);
+        assert_eq!(components.transformer, facts.transformer_bytes);
+        assert_eq!(components.decoder, facts.decoder_bytes);
+        assert_eq!(
+            components.total(),
+            facts.base_bytes,
+            "the seam must pass the BASE legs — adding the auxiliary overlay here is the defect \
+             that floored this cell at a5f643ae"
+        );
+
+        let store = sceneworks_core::memory_anchor::packaged_memory_anchors()
+            .expect("the packaged anchor store");
+        let anchor = store
+            .image_anchor_for("z_image_turbo", AnchorBackend::Mlx, "q4")
+            .expect("the packaged z_image_turbo q4 MLX anchor");
+        let request = AnchorMlxImageDeriveRequest {
+            width: 768,
+            height: 768,
+        };
+
+        let priced = anchor
+            .derive_mlx_image_phase_peaks(request, components)
+            .expect(
+                "the packaged MLX cell is in the law's domain through the production seam \
+                 (this is the sc-22667 flip; it returned None at a5f643ae)",
+            );
+        assert!(priced.peak_bytes() > 0);
+
+        // Rung ordering on the same cell, through the law the lane prices with.
+        let facts_axes = sceneworks_core::memory_anchor::ArchitectureFacts {
+            attention_heads: Some(30),
+            head_dim: Some(128),
+            transformer_blocks: Some(30),
+            patch_size: Some(2),
+            latent_channels: Some(16),
+            vae_spatial_scale: Some(8),
+            vae_temporal_scale: None,
+            activation_dtype_width: Some(2),
+        };
+        let derive = |regime| {
+            anchor.derive_phase_peaks(
+                &sceneworks_core::memory_anchor::ImageDeriveRequest {
+                    width: 768,
+                    height: 768,
+                    batch: 1,
+                    conditioning_tokens: None,
+                    regime,
+                },
+                components,
+                facts_axes,
+            )
+        };
+        let rung_2 = derive(sceneworks_core::memory_anchor::RequestRegime::staged())
+            .expect("rung 2 prices from the contract's base legs");
+        let rung_4 = derive(sceneworks_core::memory_anchor::RequestRegime {
+            decode_tile: Some(sceneworks_core::memory_anchor::DecodeTile {
+                edge: 512,
+                overlap: 128,
+            }),
+            attention_chunk_scores: Some(64 * 1024 * 1024),
+            transformer_window: Some(1),
+            staged: true,
+        })
+        .expect("rung 4 prices from the contract's base legs");
+        eprintln!(
+            "sc-22667 z_image_turbo q4 mlx 768x768: lane peak {} | rung 2 {rung_2:?} peak {} | \
+             rung 4 {rung_4:?} peak {}",
+            priced.peak_bytes(),
+            rung_2.peak_bytes(),
+            rung_4.peak_bytes()
+        );
+        assert!(
+            rung_4.peak_bytes() < rung_2.peak_bytes(),
+            "rung 4 {rung_4:?} must price below rung 2 {rung_2:?}"
+        );
+
+        // The mutation: the pre-c6d6a4db whole-directory decoder floors the cell again.
+        let whole_vae =
+            crate::video_admission::anchor_component_bytes(gen_core::MemoryAssetFacts {
+                base_bytes: facts.base_bytes + facts.overlay_bytes,
+                decoder_bytes: facts.decoder_bytes + facts.overlay_bytes,
+                overlay_bytes: 0,
+                ..facts
+            });
+        assert!(
+            anchor
+                .derive_mlx_image_phase_peaks(request, whole_vae)
+                .is_none(),
+            "folding the reference encoder back into decoder_bytes must refuse — otherwise this \
+             test would pass with or without the split it exists to pin"
+        );
     }
 }

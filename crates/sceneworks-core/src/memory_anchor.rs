@@ -285,13 +285,17 @@ pub const ANCHOR_VALIDATION_TIGHTNESS_BUDGET: f64 = 0.25;
 // resident, so the subtraction says nothing about the activation working set (clamping it to zero
 // would read "the counters missed the weights" as "zero activation" and price a windowed denoise
 // at the window's weights alone). Such a request returns `None` and the caller keeps its floor.
-// Every packaged MLX image anchor is outside the domain today — its conditioning-phase active
-// peak is a fraction of the eager resident set it claims, and so is its conditioning-phase
-// ALLOCATOR level (the quantity the MLX fit gate admits on), so decomposing the allocator
-// envelope instead would not bring one in (see
-// `the_packaged_mlx_anchors_are_outside_the_laws_domain` for both censuses) — so the MLX lane
-// entry point prices nothing from the packaged store until an anchor whose counters saw its
-// weights is captured.
+// Five of the six packaged MLX image anchors are outside the domain today — their
+// conditioning-phase active peak is a fraction of the eager resident set they claim, and so is
+// their conditioning-phase ALLOCATOR level (the quantity the MLX fit gate admits on), so
+// decomposing the allocator envelope instead would not bring one in (see
+// `the_packaged_mlx_anchors_are_outside_the_laws_domain` for both censuses). The cause was the
+// adapter's capture shape, not the counters (sc-22667, epic 22657 D3): MLX residency is
+// request-scoped even under eager materialization, so a window opened on a freshly loaded
+// generator measured a cold first request that was still materializing its weights. The
+// `z_image_turbo` q4 anchor was re-captured with the window opened above its materialized
+// resident set and is in domain (`the_recaptured_z_image_mlx_anchor_is_inside_the_laws_domain`);
+// the others enter the domain the same way, one re-capture each.
 //
 // The measured phase level the law subtracts from is [`MemoryAnchor::phase_active_peak_bytes`],
 // the store's byte-bound decomposition. On the candle lane the allocator level equals it in every
@@ -741,6 +745,44 @@ pub struct AnchorSource {
     /// untouched leaves this equal — which is exactly the claim E9 makes: an anchor predating an
     /// unrelated change stays authoritative.
     pub loader_closure_digest: String,
+    /// HOW the key above was derived (sc-22667). `None`: at the record's own measurement revision,
+    /// the default. `Some`: at [`AnchorCurrencyAttestation::attested_revision`] instead, on the
+    /// strength of a reviewed attestation in `config/anchor-currency-attestations.json` that the
+    /// loader closure's diff from the measurement revision to that one is accounting-only or was
+    /// witnessed unchanged by a re-measure on the same hardware. Copied into the store by
+    /// `scripts/anchor-loader-closure.mjs --stamp-anchors`, never written here; carried so a
+    /// current anchor cannot hide whether it is current by measurement or by attestation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub currency_attestation: Option<AnchorCurrencyAttestation>,
+}
+
+/// A reviewed statement that an anchor's evidence still describes the loader at a revision later
+/// than its measurement (sc-22667, epic 22657). The repository's invalidation doctrine is
+/// two-gated: a differing loader-closure digest says the SOURCE moved, and only a
+/// load-or-device-path change with no behaviour witness says the MEMORY BEHAVIOUR did. This is the
+/// second gate written down — `why` classifies every changed closure file, `witness` names the
+/// re-measure (or states there is none and why the diff alone suffices). It is bounded: it names
+/// one `attested_revision`, and a pin bump that moves the loader closure past it stales the anchor
+/// again exactly as if the attestation were absent.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AnchorCurrencyAttestation {
+    /// The inference revision the cited record was measured at — must equal the record's own.
+    pub measured_revision: String,
+    /// The inference revision the currency key was derived at instead.
+    pub attested_revision: String,
+    /// When the diff was read (ISO date).
+    pub attested_at: String,
+    /// The story that reviewed it.
+    pub story: String,
+    /// `accounting-only` (every changed file prices, reports or tests; none loads or executes) or
+    /// `witnessed-unchanged` (load-path files changed, and a re-measure on the same hardware
+    /// reproduced the anchor).
+    pub class: String,
+    /// The file-by-file reading of the diff.
+    pub why: String,
+    /// The behaviour witness, or the stated reason none was needed.
+    pub witness: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -1068,6 +1110,45 @@ fn validate_anchor(anchor: &MemoryAnchor) -> Result<(), String> {
             "memory anchor {} loader closure digest {} is not a sha256",
             anchor.id, anchor.source.loader_closure_digest
         ));
+    }
+    // An attestation is a justification or it is nothing (sc-22667): both revisions must be real
+    // and distinct, and the reading of the diff must be stated. What is NOT checked here is
+    // whether the attested revision equals the pin — that is the currency verdict, reported at
+    // admission and never a load failure, exactly as a mismatched digest is.
+    if let Some(attestation) = &anchor.source.currency_attestation {
+        for (field, revision) in [
+            ("measuredRevision", &attestation.measured_revision),
+            ("attestedRevision", &attestation.attested_revision),
+        ] {
+            if !is_revision(revision) {
+                return Err(format!(
+                    "memory anchor {} currency attestation {field} {revision:?} is not a 40-hex \
+                     revision",
+                    anchor.id
+                ));
+            }
+        }
+        if attestation.measured_revision == attestation.attested_revision {
+            return Err(format!(
+                "memory anchor {} currency attestation attests its own measurement revision {}",
+                anchor.id, attestation.measured_revision
+            ));
+        }
+        for (field, value) in [
+            ("attestedAt", &attestation.attested_at),
+            ("story", &attestation.story),
+            ("class", &attestation.class),
+            ("why", &attestation.why),
+            ("witness", &attestation.witness),
+        ] {
+            if value.trim().is_empty() {
+                return Err(format!(
+                    "memory anchor {} currency attestation states no {field} — an attestation \
+                     without its justification is a re-stamp",
+                    anchor.id
+                ));
+            }
+        }
     }
     let Some((_, source_raw)) = PACKAGED_MEMORY_ANCHOR_SOURCES
         .iter()
@@ -1505,6 +1586,11 @@ pub fn load_anchor_loader_closures(raw: &str) -> Result<AnchorLoaderClosures, St
         }
     }
     Ok(closures)
+}
+
+/// A full 40-hex git revision, as the attestation names them.
+fn is_revision(value: &str) -> bool {
+    value.len() == 40 && value.chars().all(|c| c.is_ascii_hexdigit())
 }
 
 fn is_sha256(value: &str) -> bool {
@@ -2133,11 +2219,13 @@ impl MemoryAnchor {
     /// geometry and scaled by the pixel ratio above it. It is a lane term, not a residue of the
     /// law — see the *Image derivation law* section comment.
     ///
-    /// DOMAIN, at this pin: every packaged MLX image anchor reports a conditioning-phase active
-    /// peak far below the eager resident set its tier's component bytes state (the MLX active
-    /// counters did not see the weights), so the law refuses each of them and this entry point
-    /// returns `None` for the packaged store — the lane keeps its floor until an anchor whose
-    /// counters saw its weights is captured (`the_packaged_mlx_anchors_are_outside_the_laws_domain`).
+    /// DOMAIN, at this pin: five packaged MLX image anchors report a conditioning-phase active
+    /// peak far below the eager resident set their tier's component bytes state (the adapter
+    /// opened their window on a cold first request that was still materializing its weights), so
+    /// the law refuses each of them and this entry point returns `None` for those cells — the
+    /// lane keeps its floor there until each is re-captured
+    /// (`the_packaged_mlx_anchors_are_outside_the_laws_domain`). The re-captured `z_image_turbo`
+    /// q4 anchor prices (`the_recaptured_z_image_mlx_anchor_is_inside_the_laws_domain`).
     pub fn derive_mlx_image_phase_peaks(
         &self,
         request: AnchorMlxImageDeriveRequest,
@@ -3212,6 +3300,85 @@ mod tests {
         }
     }
 
+    /// sc-22667: an attested anchor carries the WHOLE justification, and the attestation binds to
+    /// the pin it names — a packaged attestation whose `attestedRevision` is not the pin the
+    /// closures were derived at is an attestation of some other pin, and the anchor it keys must
+    /// not read current on the strength of it. Read off the packaged closure file's own
+    /// `inferenceRevision`, so this cannot drift into a hand-kept literal.
+    #[test]
+    fn a_packaged_currency_attestation_names_the_pin_it_keys_the_anchor_to() {
+        let store = load_memory_anchors(PACKAGED_MEMORY_ANCHORS).expect("packaged store loads");
+        let closures = packaged_closures();
+        let pin: serde_json::Value =
+            serde_json::from_str(PACKAGED_ANCHOR_LOADER_CLOSURES).expect("closures parse");
+        let pin = pin["inferenceRevision"]
+            .as_str()
+            .expect("the closure file names its pin");
+        let attested: Vec<&MemoryAnchor> = store
+            .anchors
+            .iter()
+            .filter(|anchor| anchor.source.currency_attestation.is_some())
+            .collect();
+        for anchor in &attested {
+            let attestation = anchor.source.currency_attestation.as_ref().unwrap();
+            // Current BY ATTESTATION means: keyed at the pin, on a stated reading of the diff.
+            // An attestation of an older revision would leave the anchor stale AND claim a
+            // justification — the contradiction this test exists to catch.
+            assert_eq!(
+                anchor.is_current(&closures),
+                attestation.attested_revision == pin,
+                "{}: attested at {} against pin {pin} but is_current={}",
+                anchor.id,
+                attestation.attested_revision,
+                anchor.is_current(&closures)
+            );
+            assert!(
+                matches!(
+                    attestation.class.as_str(),
+                    "accounting-only" | "witnessed-unchanged"
+                ),
+                "{}: attestation class {:?} is not one the doctrine names",
+                anchor.id,
+                attestation.class
+            );
+        }
+    }
+
+    /// The attestation's shape is validated at load like the digest's: a revision that is not a
+    /// revision, an attestation of its own measurement, or a missing justification is a load
+    /// failure, never a silently-current anchor.
+    #[test]
+    fn a_malformed_currency_attestation_is_rejected_at_load() {
+        let store: serde_json::Value =
+            serde_json::from_str(PACKAGED_MEMORY_ANCHORS).expect("packaged store parses");
+        let index = store["anchors"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .position(|anchor| anchor["source"]["currencyAttestation"].is_object())
+            .expect("the packaged store carries an attested anchor");
+        let doctor = |patch: &dyn Fn(&mut serde_json::Value)| {
+            let mut doctored = store.clone();
+            patch(&mut doctored["anchors"][index]["source"]["currencyAttestation"]);
+            load_memory_anchors(&doctored.to_string()).expect_err("must reject")
+        };
+        let error = doctor(&|a| a["attestedRevision"] = serde_json::json!("abc"));
+        assert!(error.contains("not a 40-hex revision"), "{error}");
+        let error = doctor(&|a| a["attestedRevision"] = a["measuredRevision"].clone());
+        assert!(
+            error.contains("attests its own measurement revision"),
+            "{error}"
+        );
+        for field in ["why", "witness", "class", "story", "attestedAt"] {
+            let error = doctor(&|a| a[field] = serde_json::json!("   "));
+            assert!(error.contains(&format!("states no {field}")), "{error}");
+        }
+        let error = doctor(&|a| a["extra"] = serde_json::json!(1));
+        assert!(error.contains("unknown field"), "{error}");
+        // Well-formed as shipped.
+        assert!(load_memory_anchors(&store.to_string()).is_ok());
+    }
+
     /// THE HEADLINE, comparison half: rotating one model's loader digest stales exactly that
     /// model's anchors — a sibling model declared beside it keeps its own.
     ///
@@ -3859,6 +4026,7 @@ mod tests {
                 record_id: str_at(record, "id"),
                 calibration_fingerprint: str_at(record, "calibrationFingerprint"),
                 loader_closure_digest: "0".repeat(64),
+                currency_attestation: None,
             },
             geometry: AnchorGeometry {
                 width: target["geometry"]["width"].as_u64().expect("width") as u32,
@@ -4186,16 +4354,27 @@ mod tests {
     /// no packaged MLX anchor is in the law's domain on either basis and the law keeps
     /// decomposing the active peak — a switch to the allocator basis would move nothing. Both
     /// bases are asserted below so a re-captured anchor that reports its weights lands here.
+    ///
+    /// RE-CAPTURE (sc-22667, epic 22657 D3): the cause was the ADAPTER, not the counters — MLX
+    /// residency is request-scoped even under eager materialization, and the window opened on a
+    /// cold first request. `z_image_turbo` q4 was re-captured with the window opened above its
+    /// materialized resident set and is now IN domain
+    /// (`the_recaptured_z_image_mlx_anchor_is_inside_the_laws_domain`); the five other MLX image
+    /// anchors keep the cold-request shape until their own re-capture and stay in this census.
     #[test]
     fn the_packaged_mlx_anchors_are_outside_the_laws_domain() {
         let packaged: Vec<&MemoryAnchor> = store()
             .anchors
             .iter()
-            .filter(|anchor| anchor.backend == AnchorBackend::Mlx && anchor.geometry.frames == 1)
+            .filter(|anchor| {
+                anchor.backend == AnchorBackend::Mlx
+                    && anchor.geometry.frames == 1
+                    && anchor.model_id != "z_image_turbo"
+            })
             .collect();
         assert!(
-            packaged.len() >= 6,
-            "the packaged store carries the six MLX image anchors, found {}",
+            packaged.len() >= 5,
+            "the packaged store carries the five cold-request MLX image anchors, found {}",
             packaged.len()
         );
         for anchor in packaged {
@@ -4273,6 +4452,137 @@ mod tests {
                 anchor.id
             );
         }
+    }
+
+    /// sc-22667 (epic 22657 D3, E6 "one MLX tier"): the packaged `z_image_turbo` q4 MLX anchor was
+    /// re-captured on the nax runner with the adapter's phase window opened ABOVE its
+    /// materialized resident set (`memory-mlx-adapter`, `open_resident_phase_window`), so every
+    /// phase level now includes the 5.9 GB the tier holds resident and the law decomposes it with
+    /// the tier's real component split: the resident derivation reproduces the anchor, the staged
+    /// rung prices below it, and the fully engaged rung 4 prices below the staged rung 2.
+    ///
+    /// The components are the T2I RESIDENT set read off the q4 snapshot's safetensors headers
+    /// (`Z_IMAGE_Q4_MLX_RESIDENT_COMPONENTS`): text encoder, transformer, and the VAE DECODER —
+    /// a text-to-image render never materializes the 67,041,088-byte VAE encoder, and the
+    /// record's post-request live set (5,833,334,792 bytes, `preRungActiveAfterClear`) sits
+    /// 7.1 MB above that sum and 60 MB below the whole-VAE sum.
+    ///
+    /// MUTATION: point the store at the cold-request record this replaced (conditioning active
+    /// peak 2,266,383,344 against the 5.83 GB resident set — the figures the census above still
+    /// asserts for the other five MLX anchors) and every `expect` here fails: the domain guard
+    /// refuses a conditioning residue below zero.
+    #[test]
+    fn the_recaptured_z_image_mlx_anchor_is_inside_the_laws_domain() {
+        let anchor = store()
+            .image_anchor_for("z_image_turbo", AnchorBackend::Mlx, "q4")
+            .expect("the z_image_turbo q4 MLX anchor is packaged");
+        assert!(!anchor.measured_regime.staged);
+        assert_eq!(anchor.load_shape, AnchorLoadShape::EagerMaterialization);
+        let components = Z_IMAGE_Q4_MLX_RESIDENT_COMPONENTS;
+        let resident_set = components.total();
+        let peaks = anchor.phase_active_peak_bytes;
+        // The window opened above the resident set: every phase level carries the weights.
+        for (phase, peak) in [
+            ("conditioning", peaks.conditioning),
+            ("denoise", peaks.denoise),
+            ("decode", peaks.decode),
+        ] {
+            assert!(
+                peak >= resident_set,
+                "{phase}: the re-captured level {peak} must include the {resident_set} resident set"
+            );
+        }
+        let facts = Z_IMAGE_FACTS;
+        let derive = |regime| anchor.derive_phase_peaks(&at(768, 768, regime), components, facts);
+        let resident = derive(RequestRegime::resident())
+            .expect("the re-captured MLX anchor is inside the law's domain");
+        assert_eq!(resident.conditioning, peaks.conditioning);
+        assert_eq!(resident.denoise, peaks.denoise);
+        assert_eq!(resident.decode, peaks.decode);
+        let rung_2 = derive(RequestRegime::staged()).expect("the staged rung prices");
+        let rung_4 = derive(FULLY_ENGAGED).expect("the fully engaged rung prices");
+        assert!(rung_2.peak_bytes() <= resident.peak_bytes());
+        assert!(
+            rung_4.peak_bytes() < rung_2.peak_bytes(),
+            "rung 4 {rung_4:?} must price below rung 2 {rung_2:?}"
+        );
+        assert!(rung_4.denoise < rung_2.denoise && rung_4.decode < rung_2.decode);
+        // …and the lane entry point prices it too, allocator envelope included.
+        let lane = anchor
+            .derive_mlx_image_phase_peaks(
+                AnchorMlxImageDeriveRequest {
+                    width: 768,
+                    height: 768,
+                },
+                components,
+            )
+            .expect("the MLX lane entry point prices the re-captured anchor");
+        assert!(lane.conditioning >= resident.conditioning);
+        assert!(lane.denoise >= resident.denoise);
+        assert!(lane.decode >= resident.decode);
+    }
+
+    /// The Z-Image-Turbo q4 MLX resident set a text-to-image render holds, as tensor bytes summed
+    /// off the packaged snapshot's safetensors headers (`SceneWorks/z-image-turbo-mlx@bb2bc989`,
+    /// `q4/`): every `text_encoder` tensor, every `transformer` tensor, and the `decoder.*`
+    /// tensors of `vae/model.safetensors` (97,583,622 of its 164,624,710 bytes; the other
+    /// 67,041,088 are the encoder, which a T2I render never materializes).
+    const Z_IMAGE_Q4_MLX_RESIDENT_COMPONENTS: ComponentBytes = ComponentBytes {
+        conditioning: 2_262_920_192,
+        transformer: 3_465_730_304,
+        decoder: 97_583_622,
+    };
+
+    /// THE GAP IS CLOSED (sc-22667, inference c6d6a4db) — what remains here is a DOMAIN GUARD,
+    /// not a production residue.
+    ///
+    /// It used to read: the worker prices the anchor with the provider's asset facts
+    /// (`video_admission::anchor_component_bytes`), whose `decoder_bytes` was the WHOLE `vae/`
+    /// directory — encoder included — so the resident set it subtracted (5,893,275,206) exceeded
+    /// the re-captured conditioning level (5,834,701,816) by 58.6 MB, the law refused, and the
+    /// production MLX cell stayed on its estimate floor. The pinned provider now splits that
+    /// directory by key prefix: `decoder_bytes` is the render-resident `decoder.*` half
+    /// (97,583,622 B, exactly [`Z_IMAGE_Q4_MLX_RESIDENT_COMPONENTS`]) and the `encoder.*` half a
+    /// `Reference` request opts into is a typed `MemoryComponentKind::ReferenceEncoder` auxiliary
+    /// carried in `overlay_bytes`. `anchor_component_bytes` hands the law the three BASE legs, and
+    /// `base_bytes` is exactly `text_encoder + dit + vae` with the auxiliary charged on top by the
+    /// contract's own `predicted_peak_from_base` — so production now hands this anchor the
+    /// decoder-only split and it is IN DOMAIN. `the_recaptured_z_image_mlx_anchor_is_inside_the_laws_domain`
+    /// above walks that path; the worker's
+    /// `the_packaged_z_image_mlx_cell_prices_rung_four_below_rung_two_from_the_contracts_base_legs`
+    /// grades the same cell through the production seam.
+    ///
+    /// What survives is the guard: an OVERSTATED component — the whole directory, which is what a
+    /// provider that folded the encoder back into `decoder_bytes` would state — must still be
+    /// REFUSED rather than clamped to zero, because the law will not subtract a resident set the
+    /// measurement contradicts. If this test starts deriving, the domain guard has been weakened;
+    /// if the decoder-only split stops deriving, the pin regressed.
+    #[test]
+    fn an_overstated_whole_vae_component_is_still_refused_by_the_anchor_domain_guard() {
+        let anchor = store()
+            .image_anchor_for("z_image_turbo", AnchorBackend::Mlx, "q4")
+            .expect("the z_image_turbo q4 MLX anchor is packaged");
+        let whole_vae = ComponentBytes {
+            decoder: 164_624_710,
+            ..Z_IMAGE_Q4_MLX_RESIDENT_COMPONENTS
+        };
+        assert!(anchor.phase_active_peak_bytes.conditioning < whole_vae.total());
+        assert!(anchor
+            .derive_phase_peaks(
+                &at(768, 768, RequestRegime::resident()),
+                whole_vae,
+                Z_IMAGE_FACTS
+            )
+            .is_none());
+        assert!(anchor
+            .derive_mlx_image_phase_peaks(
+                AnchorMlxImageDeriveRequest {
+                    width: 768,
+                    height: 768,
+                },
+                whole_vae,
+            )
+            .is_none());
     }
 
     /// A synthetic eager, resident, unbounded MLX anchor at 1024x1024 whose counters saw its
