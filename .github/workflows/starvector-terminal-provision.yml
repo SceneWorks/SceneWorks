@@ -207,7 +207,6 @@ jobs:
           $bootstrapIdentity = $bootstrap.Identity
           $metricsRoot = Join-Path $env:STARVECTOR_TERMINAL_ROOT 'metrics'
           $metricsPython = Join-Path $metricsRoot 'Scripts\python.exe'
-          if (-not [StringComparer]::OrdinalIgnoreCase.Equals([IO.Path]::GetFullPath($metricsRoot), 'D:\sceneworks-terminal\metrics')) { throw 'refusing to replace a metrics venv outside the workflow-owned terminal root' }
           $rebuildMetricsVenv = -not (Test-Path $metricsPython -PathType Leaf)
           if (-not $rebuildMetricsVenv) {
             $existingProbe = Invoke-StarVectorPythonIdentityProbe -Executable $metricsPython -IncludeBaseExecutable
@@ -216,7 +215,7 @@ jobs:
             $rebuildMetricsVenv = $existingProbe.ExitCode -ne 0 -or -not $existingIdentity -or -not $existingBasePython -or -not [StringComparer]::OrdinalIgnoreCase.Equals($bootstrapPython, $existingBasePython) -or $existingIdentity.version.Count -ne 3 -or [int]$existingIdentity.version[0] -ne [int]$bootstrapIdentity.version[0] -or [int]$existingIdentity.version[1] -ne [int]$bootstrapIdentity.version[1] -or [int]$existingIdentity.version[2] -ne [int]$bootstrapIdentity.version[2] -or [string]$existingIdentity.implementation -cne 'CPython' -or [string]$existingIdentity.architecture -cne 'AMD64' -or [int]$existingIdentity.pointer_bits -ne 64
           }
           if ($rebuildMetricsVenv) {
-            if (Test-Path $metricsRoot) { Remove-Item -LiteralPath $metricsRoot -Recurse -Force }
+            Remove-StarVectorWindowsDirectoryTree -TargetRoot $metricsRoot -AllowedRoot 'D:\sceneworks-terminal\metrics'
             & $bootstrapPython -m venv $metricsRoot
             if ($LASTEXITCODE -ne 0) { throw 'failed to create the terminal metrics venv with the selected Python interpreter' }
           }

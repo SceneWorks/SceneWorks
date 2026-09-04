@@ -77,6 +77,54 @@ public static class FakePython {
     $allFailed = $_.Exception.Message -eq 'StarVector terminal metrics require the explicitly provisioned CPython 3.12 x64 interpreter'
   }
   Assert-True $allFailed 'all invalid candidates must fail closed with the expected error'
+
+  Assert-Equal 'open-clip-torch' (ConvertTo-StarVectorPythonDistributionName 'Open.CLIP_Torch') 'distribution-name normalization must fold case, dots, underscores, and hyphens'
+  Assert-Equal 'scikit-image' (ConvertTo-StarVectorPythonDistributionName 'scikit---image') 'distribution-name normalization must collapse repeated separators'
+
+  $outside = Join-Path $root 'outside-sentinel'
+  $safeTree = Join-Path $root 'metrics-tree'
+  $wrongAllowedRoot = Join-Path $root 'wrong-metrics-tree'
+  $junction = Join-Path $safeTree 'escape-junction'
+  New-Item -ItemType Directory -Path $outside | Out-Null
+  New-Item -ItemType Directory -Path (Join-Path $safeTree 'nested') | Out-Null
+  [IO.File]::WriteAllText((Join-Path $outside 'sentinel.txt'), 'outside must survive')
+  [IO.File]::WriteAllText((Join-Path $safeTree 'nested\inside.txt'), 'safe tree file')
+
+  $wrongRootBlocked = $false
+  try {
+    Remove-StarVectorWindowsDirectoryTree -TargetRoot $safeTree -AllowedRoot $wrongAllowedRoot
+  } catch {
+    $wrongRootBlocked = $_.Exception.Message -eq 'refusing to remove a metrics venv outside the exact workflow-owned terminal root'
+  }
+  Assert-True $wrongRootBlocked 'directory deletion must require the exact allowed root'
+  Assert-True (Test-Path -LiteralPath (Join-Path $safeTree 'nested\inside.txt') -PathType Leaf) 'exact-root refusal must preserve the target tree'
+
+  New-Item -ItemType Junction -Path $junction -Target $outside | Out-Null
+  $reparseBlocked = $false
+  try {
+    Remove-StarVectorWindowsDirectoryTree -TargetRoot $safeTree -AllowedRoot $safeTree
+  } catch {
+    $reparseBlocked = $_.Exception.Message -like 'refusing to remove a metrics venv containing a reparse point:*'
+  }
+  Assert-True $reparseBlocked 'directory deletion must refuse a descendant junction'
+  Assert-True (Test-Path -LiteralPath (Join-Path $outside 'sentinel.txt') -PathType Leaf) 'junction refusal must preserve the outside sentinel'
+
+  [IO.Directory]::Delete($junction)
+  Remove-StarVectorWindowsDirectoryTree -TargetRoot $safeTree -AllowedRoot $safeTree
+  Assert-True (-not (Test-Path -LiteralPath $safeTree)) 'a normal metrics tree must be removed after validation'
+  Assert-True (Test-Path -LiteralPath (Join-Path $outside 'sentinel.txt') -PathType Leaf) 'normal tree deletion must not affect the outside sentinel'
+
+  $rootJunction = Join-Path $root 'metrics-root-junction'
+  New-Item -ItemType Junction -Path $rootJunction -Target $outside | Out-Null
+  $rootReparseBlocked = $false
+  try {
+    Remove-StarVectorWindowsDirectoryTree -TargetRoot $rootJunction -AllowedRoot $rootJunction
+  } catch {
+    $rootReparseBlocked = $_.Exception.Message -like 'refusing to remove a metrics venv containing a reparse point:*'
+  }
+  Assert-True $rootReparseBlocked 'directory deletion must refuse a root junction'
+  Assert-True (Test-Path -LiteralPath (Join-Path $outside 'sentinel.txt') -PathType Leaf) 'root-junction refusal must preserve the outside sentinel'
+  [IO.Directory]::Delete($rootJunction)
 } finally {
   Remove-Item -LiteralPath $root -Recurse -Force -ErrorAction SilentlyContinue
 }

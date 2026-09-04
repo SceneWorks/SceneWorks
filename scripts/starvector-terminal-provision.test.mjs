@@ -86,9 +86,13 @@ function assertWindowsMetricsPythonContract(step) {
   assert.match(step, /\$bootstrapIdentity = \$bootstrap\.Identity/);
   assert.doesNotMatch(step, /Get-Command python\.exe/);
   assert.doesNotMatch(step, /& \$candidate/);
-  assert.match(step, /refusing to replace a metrics venv outside the workflow-owned terminal root/);
   assert.match(step, /\$rebuildMetricsVenv = \$existingProbe\.ExitCode -ne 0/);
-  assert.match(step, /Remove-Item -LiteralPath \$metricsRoot -Recurse -Force/);
+  assert.match(step, /OrdinalIgnoreCase\.Equals\(\$bootstrapPython, \$existingBasePython\)/);
+  assert.match(step, /\[int\]\$existingIdentity\.version\[0\] -ne \[int\]\$bootstrapIdentity\.version\[0\]/);
+  assert.match(step, /\[int\]\$existingIdentity\.version\[1\] -ne \[int\]\$bootstrapIdentity\.version\[1\]/);
+  assert.match(step, /\[int\]\$existingIdentity\.version\[2\] -ne \[int\]\$bootstrapIdentity\.version\[2\]/);
+  assert.match(step, /if \(\$rebuildMetricsVenv\) \{\s+Remove-StarVectorWindowsDirectoryTree -TargetRoot \$metricsRoot -AllowedRoot 'D:\\sceneworks-terminal\\metrics'/);
+  assert.doesNotMatch(step, /Remove-Item[^\n]*-Recurse/);
   assert.match(step, /& \$bootstrapPython -m venv \$metricsRoot/);
   assert.match(step, /if \(\$LASTEXITCODE -ne 0\) \{ throw 'failed to create the terminal metrics venv/);
   assert.match(step, /Test-Path \$metricsPython -PathType Leaf/);
@@ -108,6 +112,15 @@ function assertWindowsMetricsPythonContract(step) {
 function assertWindowsPythonProbeContract(source) {
   assert.doesNotMatch(source, /Get-Command python\.exe/);
   assert.match(source, /\[Parameter\(Mandatory = \$true\)\]/);
+  assert.ok(source.includes("[regex]::Replace($Name.Trim().ToLowerInvariant(), '[-_.]+', '-')"));
+  assert.match(source, /function Remove-StarVectorWindowsDirectoryTree/);
+  assert.match(source, /OrdinalIgnoreCase\.Equals\(\$canonicalTarget, \$canonicalAllowed\)/);
+  assert.match(source, /New-Object System\.Collections\.Stack/);
+  assert.equal((source.match(/Attributes -band \[IO\.FileAttributes\]::ReparsePoint/g) ?? []).length, 2);
+  assert.match(source, /Get-ChildItem -LiteralPath \$item\.FullName -Force -ErrorAction Stop/);
+  assert.match(source, /Remove-Item -LiteralPath \$item\.FullName -Force -ErrorAction Stop/);
+  assert.doesNotMatch(source, /Remove-Item[^\n]*-Recurse/);
+  assert.match(source, /refusing to remove a metrics venv outside the exact workflow-owned terminal root/);
   assert.match(source, /\$text -match '\[\\r\\n"\]'/);
   assert.match(source, /\$text -notmatch '\^\[A-Za-z\]:\\\\'/);
   assert.match(source, /\[IO\.Path\]::GetFullPath\(\$text\)/);
@@ -173,6 +186,11 @@ test("Windows Python probes capture native stderr without invoking through Power
   assert.match(windowsPythonProbeTest, /Traceback from the first fake Python candidate/);
   assert.match(windowsPythonProbeTest, /Select-StarVectorBootstrapPython -CandidatePaths @\(\$bad, \$malformed, \$belowMinimum, \$newerUnsupported, \$wrongArchitecture,/);
   assert.match(windowsPythonProbeTest, /all invalid candidates must fail closed/);
+  assert.match(windowsPythonProbeTest, /ConvertTo-StarVectorPythonDistributionName 'Open\.CLIP_Torch'/);
+  assert.match(windowsPythonProbeTest, /New-Item -ItemType Junction -Path \$junction -Target \$outside/);
+  assert.match(windowsPythonProbeTest, /junction refusal must preserve the outside sentinel/);
+  assert.match(windowsPythonProbeTest, /directory deletion must refuse a root junction/);
+  assert.match(windowsPythonProbeTest, /a normal metrics tree must be removed after validation/);
   assert.match(windowsWorkflow, /"scripts\/select-starvector-windows-python\.ps1"/);
   assert.match(windowsWorkflow, /"scripts\/select-starvector-windows-python\.test\.ps1"/);
   assert.match(windowsWorkflow, /shell: powershell\s+run: \.\\scripts\\select-starvector-windows-python\.test\.ps1/);
@@ -192,6 +210,10 @@ test("Windows Python probe contract rejects native-process safety mutations", ()
     ["architecture identity", (value) => value.replace("[string]$identity.architecture -ceq 'AMD64'", "$true")],
     ["pointer width", (value) => value.replace("[int]$identity.pointer_bits -eq 64", "$true")],
     ["reported executable equality", (value) => value.replace("[StringComparer]::OrdinalIgnoreCase.Equals($canonicalCandidate, $canonicalExecutable)", "$true")],
+    ["distribution name separator folding", (value) => value.replace("'[-_.]+'", "'[-_]+'")],
+    ["exact deletion root", (value) => value.replace("[StringComparer]::OrdinalIgnoreCase.Equals($canonicalTarget, $canonicalAllowed)", "$true")],
+    ["reparse-point refusal", (value) => value.replace("($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0", "$false")],
+    ["non-recursive removal", (value) => value.replace("Remove-Item -LiteralPath $item.FullName -Force -ErrorAction Stop", "Remove-Item -LiteralPath $item.FullName -Recurse -Force -ErrorAction Stop")],
   ]) {
     const changed = mutation(windowsPythonProbe);
     assert.notEqual(changed, windowsPythonProbe, `${label} mutation must alter the helper fixture`);
@@ -208,8 +230,14 @@ test("Windows metrics Python contract rejects path, base-interpreter, and patch-
     ["venv captured probe", (value) => value.replace("$venvProbe = Invoke-StarVectorPythonIdentityProbe -Executable $metricsPython -IncludeBaseExecutable", "$venvProbe = & $metricsPython -c $code")],
     ["base path equality", (value) => value.replace("OrdinalIgnoreCase.Equals($bootstrapPython, $observedBasePython)", "OrdinalIgnoreCase.Equals($bootstrapPython, $bootstrapPython)")],
     ["patch version equality", (value) => value.replace("[int]$venvIdentity.version[2] -ne [int]$bootstrapIdentity.version[2]", "[int]$venvIdentity.version[2] -ne [int]$venvIdentity.version[2]")],
+    ["stale rebuild gate", (value) => value.replace("if ($rebuildMetricsVenv)", "if ($false)")],
+    ["stale exact root", (value) => value.replace("-AllowedRoot 'D:\\sceneworks-terminal\\metrics'", "-AllowedRoot $metricsRoot")],
+    ["stale base mismatch", (value) => value.replace("OrdinalIgnoreCase.Equals($bootstrapPython, $existingBasePython)", "OrdinalIgnoreCase.Equals($bootstrapPython, $bootstrapPython)")],
+    ["stale major mismatch", (value) => value.replace("[int]$existingIdentity.version[0] -ne [int]$bootstrapIdentity.version[0]", "$false")],
+    ["stale minor mismatch", (value) => value.replace("[int]$existingIdentity.version[1] -ne [int]$bootstrapIdentity.version[1]", "$false")],
+    ["stale micro mismatch", (value) => value.replace("[int]$existingIdentity.version[2] -ne [int]$bootstrapIdentity.version[2]", "$false")],
     ["wheel-only install", (value) => value.replace("--only-binary=:all:", "--prefer-binary")],
-    ["stale venv replacement", (value) => value.replace("Remove-Item -LiteralPath $metricsRoot -Recurse -Force", "Write-Host $metricsRoot")],
+    ["stale venv replacement", (value) => value.replace("Remove-StarVectorWindowsDirectoryTree -TargetRoot $metricsRoot", "Write-Host $metricsRoot")],
   ]) {
     const changed = mutation(step);
     assert.notEqual(changed, step, `${label} mutation must alter the workflow fixture`);
@@ -224,14 +252,19 @@ function assertHostedWindowsWheelContract(hostedWorkflow, verification) {
   assert.match(hostedWorkflow, /python-version: "3\.12"[\s\S]*?architecture: x64[\s\S]*?update-environment: false/);
   assert.equal((hostedWorkflow.match(/shell: powershell/g) ?? []).length, 2);
   assert.match(hostedWorkflow, /select-starvector-windows-python\.test\.ps1/);
+  assert.match(hostedWorkflow, /"scripts\/starvector-terminal-metrics\.py"/);
   assert.match(hostedWorkflow, /STARVECTOR_METRICS_BOOTSTRAP_PYTHON: \$\{\{ steps\.metrics-python\.outputs\.python-path \}\}/);
   assert.match(hostedWorkflow, /verify-starvector-windows-metric-wheels\.ps1/);
   assert.match(verification, /Select-StarVectorBootstrapPython -CandidatePaths @\(\$BootstrapPython\)/);
   assert.match(verification, /'pip', 'download'[\s\S]*?'--only-binary=:all:'[\s\S]*?'--retries', '5'/);
   assert.match(verification, /Where-Object \{ \$_\.Extension -cne '\.whl' \}/);
   assert.match(verification, /'pip', 'install'[\s\S]*?'--no-index'[\s\S]*?'--find-links'[\s\S]*?'--only-binary=:all:'/);
-  assert.match(verification, /\$installed\[\[string\]\$package\.name\] -cne \[string\]\$package\.version/);
-  assert.match(verification, /import PIL,numpy,skimage,torch,torchvision/);
+  assert.match(verification, /\$seen\.ContainsKey\(\$canonicalName\)/);
+  assert.match(verification, /importlib\.metadata\.distribution\(sys\.argv\[1\]\)/);
+  assert.match(verification, /\$observedCanonicalName = ConvertTo-StarVectorPythonDistributionName/);
+  assert.match(verification, /\$observedCanonicalName -cne \[string\]\$package\.canonical_name/);
+  assert.match(verification, /\[string\]\$observed\.version -cne \[string\]\$package\.version/);
+  assert.match(verification, /import PIL,lpips,numpy,open_clip,skimage,torch,torchvision/);
 }
 
 test("hosted Windows resolves and installs the metric lock exclusively from wheels under PowerShell 5.1", () => {
@@ -242,9 +275,14 @@ test("hosted Windows wheel contract rejects source-distribution and ambient-inte
   for (const [label, workflowMutation, scriptMutation] of [
     ["ambient interpreter", (value) => value.replace("${{ steps.metrics-python.outputs.python-path }}", "python.exe"), (value) => value],
     ["floating minor", (value) => value.replace('python-version: "3.12"', 'python-version: ">=3.12"'), (value) => value],
+    ["import surface trigger", (value) => value.replace('      - "scripts/starvector-terminal-metrics.py"\n', ''), (value) => value],
     ["source download", (value) => value, (value) => value.replace("'--only-binary=:all:', '--retries'", "'--prefer-binary', '--retries'")],
     ["online install", (value) => value, (value) => value.replace("'--no-index', '--find-links'", "'--index-url', 'https://pypi.org/simple', '--find-links'")],
     ["source archive acceptance", (value) => value, (value) => value.replace("$_.Extension -cne '.whl'", "$false")],
+    ["canonical duplicate detection", (value) => value, (value) => value.replace("$seen.ContainsKey($canonicalName)", "$seen.ContainsKey($name)")],
+    ["observed canonical identity", (value) => value, (value) => value.replace("$observedCanonicalName -cne [string]$package.canonical_name", "$false")],
+    ["lpips import", (value) => value, (value) => value.replace(",lpips", "")],
+    ["open_clip import", (value) => value, (value) => value.replace(",open_clip", "")],
   ]) {
     const changedWorkflow = workflowMutation(windowsWheelWorkflow);
     const changedScript = scriptMutation(windowsWheelVerification);

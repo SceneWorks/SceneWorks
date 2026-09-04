@@ -14,15 +14,18 @@ $packages = @((Get-Content -LiteralPath $MetricsLock -Raw | ConvertFrom-Json -Er
 if ($packages.Count -ne 7) { throw 'the StarVector metric lock must contain exactly seven direct packages' }
 
 $specs = @()
+$lockedPackages = @()
 $seen = @{}
 foreach ($package in $packages) {
   $name = [string]$package.name
   $version = [string]$package.version
-  if ([string]::IsNullOrWhiteSpace($name) -or [string]::IsNullOrWhiteSpace($version) -or $seen.ContainsKey($name)) {
+  $canonicalName = ConvertTo-StarVectorPythonDistributionName $name
+  if ([string]::IsNullOrWhiteSpace($version) -or $seen.ContainsKey($canonicalName)) {
     throw 'the StarVector metric lock contains an invalid or duplicate package identity'
   }
-  $seen[$name] = $true
+  $seen[$canonicalName] = $true
   $specs += "$name==$version"
+  $lockedPackages += [pscustomobject]@{ name = $name; canonical_name = $canonicalName; version = $version }
 }
 
 $root = Join-Path $env:RUNNER_TEMP ("starvector-metric-wheel-contract-{0}" -f [Guid]::NewGuid().ToString('N'))
@@ -46,17 +49,17 @@ $installArgs = @('-m', 'pip', 'install', '--disable-pip-version-check', '--no-in
 & $venvPython @installArgs
 if ($LASTEXITCODE -ne 0) { throw 'the wheel-only StarVector metric closure did not install offline' }
 
-$installed = @{}
-@((& $venvPython -m pip list --format json | ConvertFrom-Json -ErrorAction Stop)) | ForEach-Object {
-  $installed[[string]$_.name] = [string]$_.version
-}
-foreach ($package in $packages) {
-  if (-not $installed.ContainsKey([string]$package.name) -or $installed[[string]$package.name] -cne [string]$package.version) {
+foreach ($package in $lockedPackages) {
+  $observedJson = & $venvPython -c 'import importlib.metadata,json,sys;d=importlib.metadata.distribution(sys.argv[1]);print(json.dumps({"name":d.metadata["Name"],"version":d.version}))' ([string]$package.name)
+  if ($LASTEXITCODE -ne 0) { throw "the installed StarVector metric package identity was unreadable: $($package.name)" }
+  try { $observed = ([string]$observedJson).Trim() | ConvertFrom-Json -ErrorAction Stop } catch { throw "the installed StarVector metric package identity was invalid: $($package.name)" }
+  $observedCanonicalName = ConvertTo-StarVectorPythonDistributionName ([string]$observed.name)
+  if ($observedCanonicalName -cne [string]$package.canonical_name -or [string]$observed.version -cne [string]$package.version) {
     throw "the installed StarVector metric package identity drifted: $($package.name)"
   }
 }
 
-& $venvPython -c 'import PIL,numpy,skimage,torch,torchvision'
+& $venvPython -c 'import PIL,lpips,numpy,open_clip,skimage,torch,torchvision'
 if ($LASTEXITCODE -ne 0) { throw 'the compiled StarVector metric packages did not import after wheel-only installation' }
 
 Write-Host ("verified {0} wheel files for CPython {1} {2}" -f $downloads.Count, ($bootstrap.Identity.version -join '.'), $bootstrap.Identity.architecture)

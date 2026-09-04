@@ -9,6 +9,7 @@ on:
       - "scripts/select-starvector-windows-python.ps1"
       - "scripts/select-starvector-windows-python.test.ps1"
       - "scripts/starvector-terminal-provision.test.mjs"
+      - "scripts/starvector-terminal-metrics.py"
       - "scripts/verify-starvector-windows-metric-wheels.ps1"
   workflow_dispatch:
 

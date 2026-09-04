@@ -16,6 +16,75 @@ function Resolve-StarVectorWindowsExecutable {
   return $full
 }
 
+function ConvertTo-StarVectorPythonDistributionName {
+  param(
+    [Parameter(Mandatory = $true)]
+    [string]$Name
+  )
+
+  $canonical = [regex]::Replace($Name.Trim().ToLowerInvariant(), '[-_.]+', '-')
+  if ($canonical -notmatch '^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$') {
+    throw "invalid Python distribution name: $Name"
+  }
+  return $canonical
+}
+
+function Remove-StarVectorWindowsDirectoryTree {
+  param(
+    [Parameter(Mandatory = $true)]
+    [string]$TargetRoot,
+    [Parameter(Mandatory = $true)]
+    [string]$AllowedRoot
+  )
+
+  foreach ($value in @($TargetRoot, $AllowedRoot)) {
+    if ([string]::IsNullOrWhiteSpace($value) -or $value -match '[\r\n"]' -or $value -notmatch '^[A-Za-z]:\\') {
+      throw 'refusing to remove a metrics venv outside the exact workflow-owned terminal root'
+    }
+  }
+  try {
+    $canonicalTarget = [IO.Path]::GetFullPath($TargetRoot)
+    $canonicalAllowed = [IO.Path]::GetFullPath($AllowedRoot)
+  } catch {
+    throw 'refusing to remove a metrics venv outside the exact workflow-owned terminal root'
+  }
+  if (-not [StringComparer]::OrdinalIgnoreCase.Equals($canonicalTarget, $canonicalAllowed)) {
+    throw 'refusing to remove a metrics venv outside the exact workflow-owned terminal root'
+  }
+  if (-not (Test-Path -LiteralPath $canonicalTarget)) { return }
+
+  $pending = New-Object System.Collections.Stack
+  $pending.Push([pscustomobject]@{ Path = $canonicalTarget; Expanded = $false })
+  while ($pending.Count -gt 0) {
+    $frame = $pending.Pop()
+    $item = Get-Item -LiteralPath $frame.Path -Force -ErrorAction Stop
+    if (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+      throw "refusing to remove a metrics venv containing a reparse point: $($item.FullName)"
+    }
+    if (-not $item.PSIsContainer) {
+      Remove-Item -LiteralPath $item.FullName -Force -ErrorAction Stop
+      continue
+    }
+    if (-not $frame.Expanded) {
+      $children = @(Get-ChildItem -LiteralPath $item.FullName -Force -ErrorAction Stop)
+      foreach ($child in $children) {
+        if (($child.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+          throw "refusing to remove a metrics venv containing a reparse point: $($child.FullName)"
+        }
+      }
+      $pending.Push([pscustomobject]@{ Path = $item.FullName; Expanded = $true })
+      for ($index = $children.Count - 1; $index -ge 0; $index--) {
+        $pending.Push([pscustomobject]@{ Path = $children[$index].FullName; Expanded = $false })
+      }
+      continue
+    }
+    if (@(Get-ChildItem -LiteralPath $item.FullName -Force -ErrorAction Stop).Count -ne 0) {
+      throw "refusing to remove a metrics venv that changed during validation: $($item.FullName)"
+    }
+    Remove-Item -LiteralPath $item.FullName -Force -ErrorAction Stop
+  }
+}
+
 function Invoke-StarVectorPythonIdentityProbe {
   param(
     [Parameter(Mandatory = $true)]
