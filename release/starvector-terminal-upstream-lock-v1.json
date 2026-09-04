@@ -1,0 +1,58 @@
+{
+  "schema_version": 1,
+  "implementation_repository": "joanrod/star-vector",
+  "implementation_revision": "0e083c1911760aa31bc576ca7f337a7f8ee605ec",
+  "python_source_sha256": "795bf9bbe41865f32523b1e07835d160d52ff99ef1b6361c159d04a93254fb5e",
+  "checkpoints": {
+    "1b": {
+      "repository": "starvector/starvector-1b-im2svg",
+      "revision": "380ab95d25a8e9ab1dc825debe238b4953ae13b9",
+      "config_sha256": "bf664b453b718e559dec76f4c7ab294c7ffd6ce1ac24794dca874b8ec03898de",
+      "processor_file": "processor_config.json",
+      "processor_sha256": "fb904bfccb24eb65c5b249ef73fa757e2b2d21758ec33d5a13a39cc78341c994",
+      "tensor_count": 584
+    },
+    "8b": {
+      "repository": "starvector/starvector-8b-im2svg",
+      "revision": "518beea8dcb5f7a37c5911e92d1d62a76beee7f9",
+      "config_sha256": "bed06bc847a54b26366fbac9f32344f5f312cfe4a596fbcff4ed2ae2988d688c",
+      "processor_file": "preprocessor_config.json",
+      "processor_sha256": "ec1f371074fb4867ea1c654e00bc5ea99d706f409aaebf8dc614d67c0735aff8",
+      "tensor_count": 921
+    }
+  },
+  "components": {
+    "starcoder1": {
+      "repository": "bigcode/starcoderbase-1b",
+      "revision": "182f0165fdf8da9c9935901eec65c94337f01c11"
+    },
+    "starcoder2": {
+      "repository": "bigcode/starcoder2-7b",
+      "revision": "bb9afde76d7945da5745592525db122d4d729eb1",
+      "config_sha256": "af07df1e6ea8f9a1b74b8ada728e694c9e63db00fd71b1feccd0ae69d5292b9d"
+    },
+    "siglip": {
+      "repository": "google/siglip-large-patch16-384",
+      "revision": "ce005573a40965dfd21fd937fbdeeebf2439fc35",
+      "config_sha256": "ddefe38fdfe333d5dbb7d56a247bdc6fe84dbcdb4eafd2f462e05e9b13c532bc"
+    }
+  },
+  "required_packages": {
+    "torch": "2.5.1",
+    "torchvision": "0.20.1",
+    "transformers": "4.49.0",
+    "tokenizers": "0.21.1",
+    "safetensors": "0.5.3",
+    "accelerate": "1.4.0",
+    "Pillow": "11.3.0",
+    "numpy": "1.26.4",
+    "omegaconf": "2.3.0",
+    "fairscale": "0.4.13",
+    "matplotlib": "3.10.1",
+    "beautifulsoup4": "4.13.3",
+    "svgpathtools": "1.6.1",
+    "CairoSVG": "2.7.1",
+    "psutil": "7.0.0",
+    "huggingface-hub": "0.28.1"
+  }
+}

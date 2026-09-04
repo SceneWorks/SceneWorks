@@ -1,0 +1,141 @@
+#!/usr/bin/env python3
+"""CPU-only contract/failure-path tests; no model weights, network, or GPU."""
+import hashlib
+import importlib.util
+import json
+from pathlib import Path
+import struct
+import tempfile
+import unittest
+from unittest.mock import patch
+
+spec = importlib.util.spec_from_file_location('oracle', Path(__file__).with_name('starvector-terminal-upstream-oracle.py'))
+oracle = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(oracle)
+
+
+class OracleTests(unittest.TestCase):
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory()
+        self.root = Path(self.temporary.name)
+
+    def tearDown(self):
+        self.temporary.cleanup()
+
+    def rows(self):
+        rows = []
+        for index in range(120):
+            path = self.root / ('%s.png' % index)
+            path.write_bytes(('distinct PNG fixture %s' % index).encode())
+            rows.append({'case_index': index, 'input_png_path': path.name, 'png_sha256': oracle.digest(path),
+                         'sampling': {'temperature': 0.0, 'topP': 1.0, 'topK': 1, 'repetitionPenalty': 1.0, 'seed': index},
+                         'detail_budget': {'maxNewTokens': 4000, 'maxSvgBytes': 262144, 'maxWallTimeMs': 120000}})
+        self.save_rows(rows)
+        return rows
+
+    def save_rows(self, rows):
+        (self.root / 'starvector-terminal-row-index-v1.json').write_text(json.dumps({'rows': rows}))
+
+    def test_exact_balanced_twenty_rows_and_seed_identity(self):
+        self.rows()
+        result = oracle.select_rows(self.root)
+        self.assertEqual([r['source_case_index'] for r in result], [*range(5), *range(30, 35), *range(60, 65), *range(90, 95)])
+        self.assertEqual([r['seed'] for r in result], list(range(20)))
+        self.assertEqual(result[10]['detail_budget']['maxNewTokens'], 4000)
+
+    def test_duplicate_images_are_rejected_across_distinct_source_rows(self):
+        rows = self.rows()
+        rows[30]['input_png_path'] = rows[0]['input_png_path']
+        rows[30]['png_sha256'] = rows[0]['png_sha256']
+        self.save_rows(rows)
+        with self.assertRaisesRegex(ValueError, 'distinct'):
+            oracle.select_rows(self.root)
+
+    def test_changed_input_bytes_are_rejected(self):
+        self.rows()
+        (self.root / '60.png').write_bytes(b'changed')
+        with self.assertRaisesRegex(ValueError, 'identity mismatch'):
+            oracle.select_rows(self.root)
+
+    def test_non_greedy_and_unsupported_sampling_are_rejected(self):
+        for key, value in [('temperature', 0.1), ('topK', 2), ('topP', 0.9), ('repetitionPenalty', 1.1)]:
+            rows = self.rows(); rows[0]['sampling'][key] = value; self.save_rows(rows)
+            with self.assertRaisesRegex(ValueError, 'greedy'):
+                oracle.select_rows(self.root)
+
+    def test_bad_budget_and_row_order_are_rejected(self):
+        rows = self.rows(); rows[0]['detail_budget']['maxNewTokens'] = True; self.save_rows(rows)
+        with self.assertRaisesRegex(ValueError, 'token budget'):
+            oracle.select_rows(self.root)
+        rows[0], rows[1] = rows[1], rows[0]; self.save_rows(rows)
+        with self.assertRaisesRegex(ValueError, 'ordered'):
+            oracle.select_rows(self.root)
+
+    def test_path_escape_and_symlink_are_rejected(self):
+        (self.root / 'real').write_text('bytes')
+        (self.root / 'link').symlink_to(self.root / 'real')
+        for path in ['../real', '/real', 'link', 'a\\b']:
+            with self.assertRaises(ValueError):
+                oracle.local_file(self.root, path)
+
+    def test_inventory_matches_native_json_byte_order(self):
+        (self.root / 'z').write_bytes(b'z'); (self.root / 'A').write_bytes(b'a')
+        expected = [{'path': p, 'byte_size': 1, 'sha256': hashlib.sha256(b).hexdigest()} for p, b in [('A', b'a'), ('z', b'z')]]
+        self.assertEqual(oracle.inventory(self.root), hashlib.sha256(json.dumps(expected, separators=(',', ':')).encode()).hexdigest())
+
+    def test_tied_head_is_the_only_missing_tensor_allowed(self):
+        embedding = 'model.svg_transformer.transformer.transformer.wte.weight'
+        head = 'model.svg_transformer.transformer.lm_head.weight'
+        expected = {embedding: [16, 4], head: [16, 4], 'vision.weight': [2, 4]}
+        observed = {embedding: [16, 4], 'vision.weight': [2, 4]}
+        mapping = dict.fromkeys(observed, 'model.safetensors')
+        self.assertEqual(oracle.check_tensor_coverage(expected, mapping, observed), {head: embedding})
+        del observed['vision.weight']; del mapping['vision.weight']
+        with self.assertRaisesRegex(ValueError, 'coverage'):
+            oracle.check_tensor_coverage(expected, mapping, observed)
+
+    def test_wrong_shapes_or_extra_tensor_cannot_claim_strict_loading(self):
+        with self.assertRaisesRegex(ValueError, 'shape mismatch'):
+            oracle.check_tensor_coverage({'x': [2, 4]}, {'x': 'm'}, {'x': [4, 2]})
+        with self.assertRaisesRegex(ValueError, 'coverage'):
+            oracle.check_tensor_coverage({'x': [2]}, {'x': 'm'}, {'x': [2], 'unused': [2]})
+
+    def shard(self, header, payload=b'1234'):
+        data = json.dumps(header).encode()
+        (self.root / 'model.safetensors').write_bytes(struct.pack('<Q', len(data)) + data + payload)
+        (self.root / 'model.safetensors.index.json').write_text(json.dumps({'weight_map': {'x': 'model.safetensors'}}))
+
+    def test_safetensors_headers_bind_all_shards_to_index(self):
+        self.shard({'x': {'dtype': 'F32', 'shape': [1], 'data_offsets': [0, 4]}})
+        self.assertEqual(oracle.checkpoint_map(self.root), {'x': 'model.safetensors'})
+        self.shard({'wrong': {'dtype': 'F32', 'shape': [1], 'data_offsets': [0, 4]}})
+        with self.assertRaisesRegex(ValueError, 'misindexed'):
+            oracle.checkpoint_map(self.root)
+
+    def test_truncated_safetensors_payload_is_rejected(self):
+        self.shard({'x': {'dtype': 'F32', 'shape': [1], 'data_offsets': [0, 8]}})
+        with self.assertRaisesRegex(ValueError, 'data range'):
+            oracle.checkpoint_map(self.root)
+
+    def test_source_hash_binds_actual_checkout_and_rejects_extra_python(self):
+        directory = self.root / 'starvector'; directory.mkdir()
+        (directory / 'source.py').write_text('def upstream(): return 1\n')
+        entries = [{'path': 'starvector/source.py', 'sha256': oracle.digest(directory / 'source.py')}]
+        lock = {'implementation_revision': 'a' * 40, 'python_source_sha256': hashlib.sha256(oracle.canonical(entries)).hexdigest()}
+        with patch.object(oracle.subprocess, 'check_output', side_effect=['a' * 40, 'starvector/source.py\n']):
+            self.assertEqual(oracle.source_identity(self.root, lock), lock['python_source_sha256'])
+        (directory / 'injected.py').write_text('raise RuntimeError()')
+        with patch.object(oracle.subprocess, 'check_output', side_effect=['a' * 40, 'starvector/source.py\n']):
+            with self.assertRaisesRegex(ValueError, 'untracked'):
+                oracle.source_identity(self.root, lock)
+
+    def test_completed_manifest_cannot_overwrite_prior_evidence(self):
+        path = self.root / 'manifest.json'
+        oracle.durable_json(path, {'completed': 20})
+        with self.assertRaises(FileExistsError):
+            oracle.durable_json(path, {'completed': 0})
+        self.assertEqual(json.loads(path.read_text()), {'completed': 20})
+
+
+if __name__ == '__main__':
+    unittest.main()
