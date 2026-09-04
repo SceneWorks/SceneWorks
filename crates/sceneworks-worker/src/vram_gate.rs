@@ -7044,41 +7044,36 @@ mod tests {
         outcome
     }
 
-    /// The packaged Krea candle q4 anchor, re-stamped at the loader-closure digest the pin
-    /// currently DECLARES, so it grades as current.
+    /// The PACKAGED store, unmodified, with its Krea candle q4 row asserted CURRENT through the
+    /// production currency seam (sc-22667 review, blocker).
     ///
-    /// The shipped anchor is deliberately left alone: at this pin it is stale — the Krea candle
-    /// loader moved between the anchor's measurement revision and the pinned revision — and
-    /// `packaged_anchor_currency_is_reported_not_gated` in `sceneworks-core` is what asserts that
-    /// honestly. Re-stamping HERE is not a fudge of that fact: it is how the derivation's own
-    /// behaviour is graded independently of whether today's pin happens to make the shipped row
-    /// live, which is a property of the pin and not of this code.
-    fn krea_live_anchor_store() -> sceneworks_core::memory_anchor::MemoryAnchorStore {
+    /// This used to re-stamp the row at the pin's declared digest so the gate's derivation could
+    /// be graded whether or not the shipped row happened to be current. That graded a path
+    /// production never takes: `krea_store_anchor` refuses a row whose recorded loader-closure
+    /// digest is not the pin's, so a stale packaged row prices from the manifest floor, not from
+    /// the anchor. The shipped row is current at this pin by attestation
+    /// (`config/anchor-currency-attestations.json`: the Krea loader did move between the
+    /// measurement revision and the pin, and the E6 re-measure at a5f643ae witnessed the anchor
+    /// reproduced per phase). An inference bump that moves the Krea closure reds this, and the
+    /// answer is a new attestation or a re-capture — never a private re-stamp here.
+    fn krea_packaged_anchor_store() -> sceneworks_core::memory_anchor::MemoryAnchorStore {
         let store = sceneworks_core::memory_anchor::packaged_memory_anchors()
-            .expect("the packaged anchor store")
-            .clone();
-        let digest = sceneworks_core::memory_anchor::packaged_anchor_loader_closures()
-            .and_then(|closures| {
-                closures.digest_for(
-                    "krea_2_turbo",
-                    sceneworks_core::memory_anchor::AnchorBackend::Candle,
-                )
-            })
-            .expect("krea_2_turbo:candle must declare a loader closure")
-            .to_owned();
-        let anchors = store
-            .anchors
-            .into_iter()
-            .map(|mut anchor| {
-                if anchor.model_id == "krea_2_turbo"
-                    && anchor.backend == sceneworks_core::memory_anchor::AnchorBackend::Candle
-                {
-                    anchor.source.loader_closure_digest = digest.clone();
-                }
-                anchor
-            })
-            .collect();
-        sceneworks_core::memory_anchor::MemoryAnchorStore { anchors, ..store }
+            .expect("the packaged anchor store");
+        let anchor = store
+            .image_anchor_for(
+                "krea_2_turbo",
+                sceneworks_core::memory_anchor::AnchorBackend::Candle,
+                "q4",
+            )
+            .expect("the packaged krea_2_turbo:candle:q4 row");
+        assert!(
+            crate::video_admission::anchor_currency_matches(anchor),
+            "the packaged krea_2_turbo:candle:q4 anchor is not current at this pin (recorded \
+             loader closure {}) — the gate would refuse it, so these tests would not be grading \
+             the shipped path",
+            anchor.source.loader_closure_digest
+        );
+        store.clone()
     }
 
     /// The packaged Krea candle q4 anchor, as the gate reads it.
@@ -7237,7 +7232,7 @@ mod tests {
             total_gb: free_gb,
         });
         let reserve_gb = reserve_for(budget);
-        let fit = with_injected_anchor_store(krea_live_anchor_store(), || {
+        let fit = with_injected_anchor_store(krea_packaged_anchor_store(), || {
             krea_turbo_fit_with_runtime(
                 &manifest,
                 "q4",
@@ -7298,7 +7293,7 @@ mod tests {
             total_gb: free_gb,
         });
         assert_eq!(
-            with_injected_anchor_store(krea_live_anchor_store(), || {
+            with_injected_anchor_store(krea_packaged_anchor_store(), || {
                 krea_turbo_fit_with_runtime(
                     &manifest,
                     "q4",
@@ -7318,7 +7313,7 @@ mod tests {
 
         // The clean control: the model's own loader closure moved, so the evidence no longer
         // describes the code that will run and the hull refusal stands.
-        let mut moved = krea_live_anchor_store();
+        let mut moved = krea_packaged_anchor_store();
         for anchor in &mut moved.anchors {
             if anchor.model_id == "krea_2_turbo"
                 && anchor.backend == sceneworks_core::memory_anchor::AnchorBackend::Candle
@@ -7425,7 +7420,7 @@ mod tests {
 
         // Graded against a CURRENT anchor: the claim is that the anchor declines to re-price a
         // whole-model-resident composition, which a stale (absent) anchor would satisfy vacuously.
-        let fit = with_injected_anchor_store(krea_live_anchor_store(), || {
+        let fit = with_injected_anchor_store(krea_packaged_anchor_store(), || {
             krea_turbo_fit_with_runtime(
                 &manifest,
                 "q4",
@@ -7460,7 +7455,7 @@ mod tests {
         });
         // A CURRENT anchor is present throughout: the claim is that the curves answer FIRST, which
         // is only tested if the derivation was actually available to be preferred.
-        let fit = with_injected_anchor_store(krea_live_anchor_store(), || {
+        let fit = with_injected_anchor_store(krea_packaged_anchor_store(), || {
             krea_turbo_fit_with_runtime(
                 &manifest,
                 "q4",
@@ -7585,7 +7580,7 @@ mod tests {
             free_gb,
             total_gb: free_gb,
         });
-        let fit = with_injected_anchor_store(krea_live_anchor_store(), || {
+        let fit = with_injected_anchor_store(krea_packaged_anchor_store(), || {
             krea_turbo_fit_priced(
                 &manifest,
                 "q4",
@@ -7650,7 +7645,7 @@ mod tests {
             (reserve_gb - HEADROOM_GB).abs() < 1e-9,
             "a 3 GB idle baseline caps the reserve at the legacy ceiling"
         );
-        let fit = with_injected_anchor_store(krea_live_anchor_store(), || {
+        let fit = with_injected_anchor_store(krea_packaged_anchor_store(), || {
             krea_turbo_fit_with_runtime(
                 &manifest,
                 "q4",
@@ -7697,7 +7692,7 @@ mod tests {
         });
         let bare_reserve = reserve_for(bare);
         assert!(bare_reserve < HEADROOM_GB);
-        let bare_fit = with_injected_anchor_store(krea_live_anchor_store(), || {
+        let bare_fit = with_injected_anchor_store(krea_packaged_anchor_store(), || {
             krea_turbo_fit_with_runtime(
                 &manifest,
                 "q4",

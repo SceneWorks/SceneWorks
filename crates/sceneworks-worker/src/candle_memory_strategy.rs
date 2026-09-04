@@ -1714,6 +1714,7 @@ fn floor_pseudo_anchor(
             record_id: String::new(),
             calibration_fingerprint: String::new(),
             loader_closure_digest: String::new(),
+            currency_attestation: None,
         },
         geometry: AnchorGeometry {
             width: measured_edge,
@@ -5841,6 +5842,7 @@ mod tests {
                         })
                         .expect("z_image_turbo:candle must declare a loader closure")
                         .to_owned(),
+                currency_attestation: None,
             },
             geometry: AnchorGeometry {
                 width: 1024,
@@ -5863,36 +5865,6 @@ mod tests {
             analytic_only: Vec::new(),
             component_deltas: Vec::new(),
         }
-    }
-
-    /// The PACKAGED store with its `z_image_turbo` candle rows re-stamped at the loader-closure
-    /// digest the pin currently declares, so they grade as current — the same construction, and
-    /// the same rationale, as `vram_gate::tests::krea_live_anchor_store`: whether a given pin
-    /// leaves the shipped rows' digest current is a property of the pin, reported (never gated)
-    /// by `sceneworks-core`'s `packaged_anchor_currency_is_reported_not_gated`, and not of the
-    /// derivation graded here. Only the digest is touched; every measured byte is the packaged
-    /// corpus's.
-    fn z_image_live_anchor_store() -> sceneworks_core::memory_anchor::MemoryAnchorStore {
-        use sceneworks_core::memory_anchor::AnchorBackend;
-
-        let store = sceneworks_core::memory_anchor::packaged_memory_anchors()
-            .expect("the packaged anchor store")
-            .clone();
-        let digest = sceneworks_core::memory_anchor::packaged_anchor_loader_closures()
-            .and_then(|closures| closures.digest_for("z_image_turbo", AnchorBackend::Candle))
-            .expect("z_image_turbo:candle must declare a loader closure")
-            .to_owned();
-        let anchors = store
-            .anchors
-            .into_iter()
-            .map(|mut anchor| {
-                if anchor.model_id == "z_image_turbo" && anchor.backend == AnchorBackend::Candle {
-                    anchor.source.loader_closure_digest = digest.clone();
-                }
-                anchor
-            })
-            .collect();
-        sceneworks_core::memory_anchor::MemoryAnchorStore { anchors, ..store }
     }
 
     /// The Z-Image-Turbo q4 contract shape the ladder grades: every rung implemented and bound to
@@ -6451,25 +6423,31 @@ mod tests {
                 .is_some(),
             "sc-22666 packages the sc-15859 z_image_turbo candle corpus"
         );
-        // … re-stamped at the loader-closure digest the pin currently DECLARES, exactly as
-        // `vram_gate::tests::krea_live_anchor_store` does and for the same reason: whether
-        // today's pin happens to leave the shipped row's digest current is a property of the pin
-        // (an inference bump that touches a model's loader closure stales its packaged rows until
-        // the anchors are re-extracted — the epic's terminal regeneration), graded honestly by
-        // `sceneworks-core`'s `packaged_anchor_currency_is_reported_not_gated`, and not of the
-        // derivation this test grades. The FACTS stay the production seam's.
-        let live = z_image_live_anchor_store();
-        let anchors = CandleLadderAnchors {
-            store: Some(&live),
-            facts: packaged.facts,
-        };
+        // … UNMODIFIED, and CURRENT at this pin through the production currency seam (sc-22667
+        // review, blocker): `candle_image_anchor` refuses any anchor whose recorded loader-closure
+        // digest is not the one `config/anchor-loader-closures.json` declares, so a store this
+        // test re-stamped privately would prove nothing about what the worker ships. The row is
+        // current by attestation — `config/anchor-currency-attestations.json` records that the
+        // z_image_turbo:candle closure diff from the sc-15859 measurement (670dc1f4) to the pin
+        // is accounting-only, and `--stamp-anchors` keyed it at the pin on that reading. The
+        // next inference bump that moves this loader's closure reds this assertion, and that is
+        // the intended demand: re-read the diff (a new attestation) or re-capture, in the open.
+        let anchor = packaged
+            .store
+            .expect("the packaged anchor store must load")
+            .image_anchor_for("z_image_turbo", AnchorBackend::Candle, "q4")
+            .expect("the packaged z_image_turbo q4 row");
+        assert!(
+            crate::video_admission::anchor_currency_matches(anchor),
+            "the packaged z_image_turbo:candle:q4 anchor is not current at this pin (recorded \
+             loader closure {}): production would refuse it and price from the manifest floor",
+            anchor.source.loader_closure_digest
+        );
+        let anchors = packaged;
 
         // The expected phases are DERIVED from the packaged anchor with the law at rung 4's own
         // regime, never restated: a re-capture that moves the measurement moves this expectation
         // with it.
-        let anchor = live
-            .image_anchor_for("z_image_turbo", AnchorBackend::Candle, "q4")
-            .expect("the re-stamped store keeps the packaged z_image_turbo q4 row");
         let candidates = z_image_fixture_floors(anchors, &contract);
         assert!(!candidates.is_empty());
         let rung_4 = rung_of(&candidates, MemoryStrategy::BoundedTransformerResidency);
@@ -7365,6 +7343,7 @@ mod tests {
                 record_id: String::new(),
                 calibration_fingerprint: "anchor-seam-v1".to_owned(),
                 loader_closure_digest: live_loader_closure_digest.clone(),
+                currency_attestation: None,
             },
             geometry: AnchorGeometry {
                 width: 1024,
@@ -8080,26 +8059,52 @@ mod tests {
         "../../../docs/calibration/sc-22657/candle-five-rung-falsification-sc-22667.json"
     );
 
-    /// Over-prediction bound per cell (derived / measured per phase), every rung, every phase.
-    /// Chosen from the fixture, not carried over from the prior art's 2.5: the binding cell is
-    /// z-image's window-1 DECODE at 3.93x (derived 4.51 GB over a measured 1.15 GB), the next
-    /// Krea's window-1 decode at 2.27x. Both are the same mechanism — the anchor's staged decode
-    /// still holds the DiT (z-image's tiled decode measures 4.50 GB two rungs earlier, 3.36 GB
-    /// above the window rung's 1.15, i.e. the q4 DiT), so the decode residue the law tiles
-    /// carries a transformer the window rung does not, and the 3/8 host-transfer band
-    /// (`DecodeTile::chunk_pixels`) keeps 3/8 of it. Every other cell sits at or below 1.34x
-    /// (Krea's resident decode; the deepest denoise is z-image's chunked rung at 1.29x, and no
-    /// conditioning cell exceeds 1.04x). Raising this past the data keeps the test green; lowering
-    /// it under 3.94 turns it red on that one cell.
+    /// Over-prediction bound per cell (derived / measured), PER PHASE, every rung. Chosen from the
+    /// fixture, not carried over from the prior art's 2.5, and bounded phase by phase because the
+    /// three phases over-predict by different mechanisms and a single ceiling set by the loosest
+    /// one cannot see the others move (sc-22667 review, major):
     ///
-    /// sc-22667, second pin bump (c6d6a4db): the bound is NOT re-tightened, because the binding
-    /// cell did not move — 3.934x became 3.935x. What moved is everything the contract's DiT
-    /// bytes fed: the retired `ContractOverReportsTransformer` cell (z-image's window-1 denoise)
-    /// went from 0.126x to 1.066x, Krea's resident decode from 1.336x to 1.333x, and the whole
-    /// z-image resident column down by the 3.46 GB of device-format cache the walkers no longer
-    /// count. The over-prediction ceiling is a property of the DECODE-tile mechanism, not of the
-    /// asset facts, which is why fixing the facts left it where it was.
-    const SC_22667_OVER_PREDICTION_BOUND: f64 = 4.0;
+    /// * DECODE 4.0: the binding cell is z-image's window-1 decode at 3.93x (derived 4.51 GB over
+    ///   a measured 1.15 GB), the next Krea's window-1 decode at 2.27x. Both are the same
+    ///   mechanism — the anchor's staged decode still holds the DiT (z-image's tiled decode
+    ///   measures 4.50 GB two rungs earlier, 3.36 GB above the window rung's 1.15, i.e. the q4
+    ///   DiT), so the decode residue the law tiles carries a transformer the window rung does
+    ///   not, and the 3/8 host-transfer band (`DecodeTile::chunk_pixels`) keeps 3/8 of it. Every
+    ///   other decode cell sits at or below 1.34x (Krea's resident decode). Lowering this under
+    ///   3.94 turns the test red on that one cell.
+    /// * DENOISE 1.35: the deepest denoise cell is z-image's chunked rung at 1.29x; the window
+    ///   rung's denoise, which the architecture facts scale down to its one resident block,
+    ///   prices at 1.07x. Under a decode-sized 4.0x ceiling, LOSING that window share — the DiT
+    ///   priced whole at rung 4 (`transformer_blocks: None` at the
+    ///   `architecture_facts_from_contract` seam, video_admission.rs) — lands at ~2.3x and stays
+    ///   green; under 1.35 it is red, which is what a tolerance is for.
+    /// * CONDITIONING 1.10: no conditioning cell exceeds 1.04x; the text encoder is priced from
+    ///   the anchor's own conditioning intercept with no residue to scale, so there is no
+    ///   mechanism for it to drift far and a 10% band is all the data allows.
+    ///
+    /// Raising any of these past its data keeps the test green; each is pinned at the first
+    /// round number above its binding cell.
+    ///
+    /// sc-22667, second pin bump (c6d6a4db): the decode bound is NOT re-tightened, because the
+    /// binding cell did not move — 3.934x became 3.935x. What moved is everything the contract's
+    /// DiT bytes fed: the retired `ContractOverReportsTransformer` cell (z-image's window-1
+    /// denoise) went from 0.126x to 1.066x, Krea's resident decode from 1.336x to 1.333x, and the
+    /// whole z-image resident column down by the 3.46 GB of device-format cache the walkers no
+    /// longer count. The over-prediction ceiling is a property of the DECODE-tile mechanism, not
+    /// of the asset facts, which is why fixing the facts left it where it was.
+    const SC_22667_OVER_PREDICTION_BOUND_CONDITIONING: f64 = 1.10;
+    const SC_22667_OVER_PREDICTION_BOUND_DENOISE: f64 = 1.35;
+    const SC_22667_OVER_PREDICTION_BOUND_DECODE: f64 = 4.0;
+
+    /// The per-phase bound, indexed as the fixture's `[conditioning, denoise, decode]`.
+    fn sc_22667_over_prediction_bound(phase: &str) -> f64 {
+        match phase {
+            "conditioning" => SC_22667_OVER_PREDICTION_BOUND_CONDITIONING,
+            "denoise" => SC_22667_OVER_PREDICTION_BOUND_DENOISE,
+            "decode" => SC_22667_OVER_PREDICTION_BOUND_DECODE,
+            other => panic!("no over-prediction bound for phase {other}"),
+        }
+    }
 
     /// The under side a re-measure is allowed to sit at against the raw law: the lane's same-cell
     /// recapture spread, which admission charges on top of every image-lane anchor derivation
@@ -8380,32 +8385,31 @@ mod tests {
         contract
     }
 
-    /// The packaged store with `model_id`'s candle rows re-stamped at the loader-closure digest
-    /// the pin currently declares — the construction and rationale of `z_image_live_anchor_store`
-    /// and `vram_gate::tests::krea_live_anchor_store`, for either model.
-    fn sc_22667_live_anchor_store(
+    /// The PACKAGED store, unmodified, with `model_id`'s candle q4 row asserted CURRENT through
+    /// the production currency seam (sc-22667 review, blocker). The derivation below prices
+    /// through `synthesize_estimate_floors`, which reads anchors via `candle_image_anchor` — the
+    /// seam that refuses a row whose recorded loader-closure digest is not the pin's — so a
+    /// privately re-stamped store here would grade a path production never takes. The packaged
+    /// rows are current by attestation (`config/anchor-currency-attestations.json`); an inference
+    /// bump that moves either loader's closure reds this, on purpose.
+    fn sc_22667_packaged_anchor_store(
         model_id: &str,
-    ) -> sceneworks_core::memory_anchor::MemoryAnchorStore {
+    ) -> &'static sceneworks_core::memory_anchor::MemoryAnchorStore {
         use sceneworks_core::memory_anchor::AnchorBackend;
 
         let store = sceneworks_core::memory_anchor::packaged_memory_anchors()
-            .expect("the packaged anchor store")
-            .clone();
-        let digest = sceneworks_core::memory_anchor::packaged_anchor_loader_closures()
-            .and_then(|closures| closures.digest_for(model_id, AnchorBackend::Candle))
-            .unwrap_or_else(|| panic!("{model_id}:candle must declare a loader closure"))
-            .to_owned();
-        let anchors = store
-            .anchors
-            .into_iter()
-            .map(|mut anchor| {
-                if anchor.model_id == model_id && anchor.backend == AnchorBackend::Candle {
-                    anchor.source.loader_closure_digest = digest.clone();
-                }
-                anchor
-            })
-            .collect();
-        sceneworks_core::memory_anchor::MemoryAnchorStore { anchors, ..store }
+            .expect("the packaged anchor store");
+        let anchor = store
+            .image_anchor_for(model_id, AnchorBackend::Candle, "q4")
+            .unwrap_or_else(|| panic!("{model_id}:candle:q4 must be packaged"));
+        assert!(
+            crate::video_admission::anchor_currency_matches(anchor),
+            "{model_id}: the packaged candle q4 anchor is not current at this pin (recorded \
+             loader closure {}) — production refuses it, so this falsification would not be \
+             grading the shipped path",
+            anchor.source.loader_closure_digest
+        );
+        store
     }
 
     /// The derived side of the falsification, per rung: `[conditioning, denoise, decode]` bytes
@@ -8430,9 +8434,9 @@ mod tests {
             frames: 1,
             reference_count: 0,
         };
-        let store = sc_22667_live_anchor_store(model_id);
+        let store = sc_22667_packaged_anchor_store(model_id);
         let anchors = CandleLadderAnchors {
-            store: Some(&store),
+            store: Some(store),
             facts: crate::video_admission::architecture_facts_from_contract(contract),
         };
         // The manifest rows only feed the floors the ladder falls back to WITHOUT an anchor; with
@@ -8616,10 +8620,11 @@ mod tests {
                         *derived_phase as f64 / 1e9,
                         if batch_staged { " (cold control)" } else { "" }
                     );
+                    let bound = sc_22667_over_prediction_bound(phase);
                     assert!(
-                        ratio <= SC_22667_OVER_PREDICTION_BOUND,
+                        ratio <= bound,
                         "{model_id} {rung} {phase}: derived {derived_phase} is {ratio:.3}x the \
-                         measured {measured_phase}, over the {SC_22667_OVER_PREDICTION_BOUND}x bound"
+                         measured {measured_phase}, over the {bound}x {phase} bound"
                     );
                     if derived_phase < measured_phase {
                         raw_under.push((model_id, rung, phase));

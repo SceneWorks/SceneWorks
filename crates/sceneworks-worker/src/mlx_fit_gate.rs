@@ -11463,8 +11463,17 @@ mod tests {
     }
 
     /// The packaged store with the flux2 anchors re-stamped at the loader-closure digest the pin
-    /// currently DECLARES — the same construction (and the same rationale) as
-    /// `vram_gate::tests::krea_live_anchor_store`.
+    /// currently DECLARES, so the gate's derivation can be graded on them.
+    ///
+    /// sc-22667 retired this construction for the candle lanes (`vram_gate::tests::
+    /// krea_packaged_anchor_store`, `candle_memory_strategy::tests::sc_22667_packaged_anchor_store`):
+    /// those rows are now current at the pin by a reviewed attestation and the tests price from
+    /// the packaged store unmodified. The flux2 MLX rows are NOT attested — they were measured at
+    /// 10831e4c / 75d66db5 and nobody has read the mlx-gen-flux2 closure diff since, so they
+    /// honestly read stale (`packaged_anchor_currency_is_reported_not_gated`) and production
+    /// prices them from the floor. This re-stamp therefore grades the derivation's arithmetic on
+    /// the measured numbers, not the shipped currency; retiring it means an attestation (a read
+    /// diff, or a nax re-measure) for `flux2_dev:mlx`, which is its own story.
     fn flux2_live_anchor_store() -> sceneworks_core::memory_anchor::MemoryAnchorStore {
         let mut store = sceneworks_core::memory_anchor::packaged_memory_anchors()
             .expect("the packaged anchor store")

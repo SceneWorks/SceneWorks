@@ -745,6 +745,44 @@ pub struct AnchorSource {
     /// untouched leaves this equal — which is exactly the claim E9 makes: an anchor predating an
     /// unrelated change stays authoritative.
     pub loader_closure_digest: String,
+    /// HOW the key above was derived (sc-22667). `None`: at the record's own measurement revision,
+    /// the default. `Some`: at [`AnchorCurrencyAttestation::attested_revision`] instead, on the
+    /// strength of a reviewed attestation in `config/anchor-currency-attestations.json` that the
+    /// loader closure's diff from the measurement revision to that one is accounting-only or was
+    /// witnessed unchanged by a re-measure on the same hardware. Copied into the store by
+    /// `scripts/anchor-loader-closure.mjs --stamp-anchors`, never written here; carried so a
+    /// current anchor cannot hide whether it is current by measurement or by attestation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub currency_attestation: Option<AnchorCurrencyAttestation>,
+}
+
+/// A reviewed statement that an anchor's evidence still describes the loader at a revision later
+/// than its measurement (sc-22667, epic 22657). The repository's invalidation doctrine is
+/// two-gated: a differing loader-closure digest says the SOURCE moved, and only a
+/// load-or-device-path change with no behaviour witness says the MEMORY BEHAVIOUR did. This is the
+/// second gate written down — `why` classifies every changed closure file, `witness` names the
+/// re-measure (or states there is none and why the diff alone suffices). It is bounded: it names
+/// one `attested_revision`, and a pin bump that moves the loader closure past it stales the anchor
+/// again exactly as if the attestation were absent.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AnchorCurrencyAttestation {
+    /// The inference revision the cited record was measured at — must equal the record's own.
+    pub measured_revision: String,
+    /// The inference revision the currency key was derived at instead.
+    pub attested_revision: String,
+    /// When the diff was read (ISO date).
+    pub attested_at: String,
+    /// The story that reviewed it.
+    pub story: String,
+    /// `accounting-only` (every changed file prices, reports or tests; none loads or executes) or
+    /// `witnessed-unchanged` (load-path files changed, and a re-measure on the same hardware
+    /// reproduced the anchor).
+    pub class: String,
+    /// The file-by-file reading of the diff.
+    pub why: String,
+    /// The behaviour witness, or the stated reason none was needed.
+    pub witness: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -1072,6 +1110,45 @@ fn validate_anchor(anchor: &MemoryAnchor) -> Result<(), String> {
             "memory anchor {} loader closure digest {} is not a sha256",
             anchor.id, anchor.source.loader_closure_digest
         ));
+    }
+    // An attestation is a justification or it is nothing (sc-22667): both revisions must be real
+    // and distinct, and the reading of the diff must be stated. What is NOT checked here is
+    // whether the attested revision equals the pin — that is the currency verdict, reported at
+    // admission and never a load failure, exactly as a mismatched digest is.
+    if let Some(attestation) = &anchor.source.currency_attestation {
+        for (field, revision) in [
+            ("measuredRevision", &attestation.measured_revision),
+            ("attestedRevision", &attestation.attested_revision),
+        ] {
+            if !is_revision(revision) {
+                return Err(format!(
+                    "memory anchor {} currency attestation {field} {revision:?} is not a 40-hex \
+                     revision",
+                    anchor.id
+                ));
+            }
+        }
+        if attestation.measured_revision == attestation.attested_revision {
+            return Err(format!(
+                "memory anchor {} currency attestation attests its own measurement revision {}",
+                anchor.id, attestation.measured_revision
+            ));
+        }
+        for (field, value) in [
+            ("attestedAt", &attestation.attested_at),
+            ("story", &attestation.story),
+            ("class", &attestation.class),
+            ("why", &attestation.why),
+            ("witness", &attestation.witness),
+        ] {
+            if value.trim().is_empty() {
+                return Err(format!(
+                    "memory anchor {} currency attestation states no {field} — an attestation \
+                     without its justification is a re-stamp",
+                    anchor.id
+                ));
+            }
+        }
     }
     let Some((_, source_raw)) = PACKAGED_MEMORY_ANCHOR_SOURCES
         .iter()
@@ -1509,6 +1586,11 @@ pub fn load_anchor_loader_closures(raw: &str) -> Result<AnchorLoaderClosures, St
         }
     }
     Ok(closures)
+}
+
+/// A full 40-hex git revision, as the attestation names them.
+fn is_revision(value: &str) -> bool {
+    value.len() == 40 && value.chars().all(|c| c.is_ascii_hexdigit())
 }
 
 fn is_sha256(value: &str) -> bool {
@@ -3218,6 +3300,85 @@ mod tests {
         }
     }
 
+    /// sc-22667: an attested anchor carries the WHOLE justification, and the attestation binds to
+    /// the pin it names — a packaged attestation whose `attestedRevision` is not the pin the
+    /// closures were derived at is an attestation of some other pin, and the anchor it keys must
+    /// not read current on the strength of it. Read off the packaged closure file's own
+    /// `inferenceRevision`, so this cannot drift into a hand-kept literal.
+    #[test]
+    fn a_packaged_currency_attestation_names_the_pin_it_keys_the_anchor_to() {
+        let store = load_memory_anchors(PACKAGED_MEMORY_ANCHORS).expect("packaged store loads");
+        let closures = packaged_closures();
+        let pin: serde_json::Value =
+            serde_json::from_str(PACKAGED_ANCHOR_LOADER_CLOSURES).expect("closures parse");
+        let pin = pin["inferenceRevision"]
+            .as_str()
+            .expect("the closure file names its pin");
+        let attested: Vec<&MemoryAnchor> = store
+            .anchors
+            .iter()
+            .filter(|anchor| anchor.source.currency_attestation.is_some())
+            .collect();
+        for anchor in &attested {
+            let attestation = anchor.source.currency_attestation.as_ref().unwrap();
+            // Current BY ATTESTATION means: keyed at the pin, on a stated reading of the diff.
+            // An attestation of an older revision would leave the anchor stale AND claim a
+            // justification — the contradiction this test exists to catch.
+            assert_eq!(
+                anchor.is_current(&closures),
+                attestation.attested_revision == pin,
+                "{}: attested at {} against pin {pin} but is_current={}",
+                anchor.id,
+                attestation.attested_revision,
+                anchor.is_current(&closures)
+            );
+            assert!(
+                matches!(
+                    attestation.class.as_str(),
+                    "accounting-only" | "witnessed-unchanged"
+                ),
+                "{}: attestation class {:?} is not one the doctrine names",
+                anchor.id,
+                attestation.class
+            );
+        }
+    }
+
+    /// The attestation's shape is validated at load like the digest's: a revision that is not a
+    /// revision, an attestation of its own measurement, or a missing justification is a load
+    /// failure, never a silently-current anchor.
+    #[test]
+    fn a_malformed_currency_attestation_is_rejected_at_load() {
+        let store: serde_json::Value =
+            serde_json::from_str(PACKAGED_MEMORY_ANCHORS).expect("packaged store parses");
+        let index = store["anchors"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .position(|anchor| anchor["source"]["currencyAttestation"].is_object())
+            .expect("the packaged store carries an attested anchor");
+        let doctor = |patch: &dyn Fn(&mut serde_json::Value)| {
+            let mut doctored = store.clone();
+            patch(&mut doctored["anchors"][index]["source"]["currencyAttestation"]);
+            load_memory_anchors(&doctored.to_string()).expect_err("must reject")
+        };
+        let error = doctor(&|a| a["attestedRevision"] = serde_json::json!("abc"));
+        assert!(error.contains("not a 40-hex revision"), "{error}");
+        let error = doctor(&|a| a["attestedRevision"] = a["measuredRevision"].clone());
+        assert!(
+            error.contains("attests its own measurement revision"),
+            "{error}"
+        );
+        for field in ["why", "witness", "class", "story", "attestedAt"] {
+            let error = doctor(&|a| a[field] = serde_json::json!("   "));
+            assert!(error.contains(&format!("states no {field}")), "{error}");
+        }
+        let error = doctor(&|a| a["extra"] = serde_json::json!(1));
+        assert!(error.contains("unknown field"), "{error}");
+        // Well-formed as shipped.
+        assert!(load_memory_anchors(&store.to_string()).is_ok());
+    }
+
     /// THE HEADLINE, comparison half: rotating one model's loader digest stales exactly that
     /// model's anchors — a sibling model declared beside it keeps its own.
     ///
@@ -3865,6 +4026,7 @@ mod tests {
                 record_id: str_at(record, "id"),
                 calibration_fingerprint: str_at(record, "calibrationFingerprint"),
                 loader_closure_digest: "0".repeat(64),
+                currency_attestation: None,
             },
             geometry: AnchorGeometry {
                 width: target["geometry"]["width"].as_u64().expect("width") as u32,

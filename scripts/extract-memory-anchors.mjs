@@ -510,10 +510,25 @@ export function loaderClosureDigestFor(previousStore, anchorId) {
   return recorded;
 }
 
+/**
+ * The anchor's CURRENCY ATTESTATION, carried forward with the key it justifies (sc-22667). Written
+ * only by `anchor-loader-closure.mjs --stamp-anchors` from `config/anchor-currency-attestations.json`
+ * — the reviewed statement that the closure diff since the measurement is accounting-only or
+ * witnessed unchanged, which is why the key was derived at a later revision than the record's.
+ * Carried for the same reason the digest is: the two are one claim, and this generator re-derives
+ * neither half. `null` for an anchor keyed at its own measurement revision.
+ */
+export function currencyAttestationFor(previousStore, anchorId) {
+  const recorded = (previousStore?.anchors ?? []).find((anchor) => anchor.id === anchorId)?.source
+    ?.currencyAttestation;
+  return recorded && typeof recorded === "object" ? recorded : null;
+}
+
 /** Serialise one candidate into the store's anchor shape (field order is the file's field order). */
 function anchorRow(candidate, catalogCell, previousStore, underivedReason) {
   const id = anchorId(candidate);
   const loaderClosureDigest = loaderClosureDigestFor(previousStore, id);
+  const currencyAttestation = currencyAttestationFor(previousStore, id);
   return {
     id,
     modelId: candidate.modelId,
@@ -540,6 +555,7 @@ function anchorRow(candidate, catalogCell, previousStore, underivedReason) {
       recordId: candidate.recordId,
       calibrationFingerprint: candidate.calibrationFingerprint,
       loaderClosureDigest,
+      ...(currencyAttestation ? { currencyAttestation } : {}),
     },
     geometry: {
       width: candidate.geometry.width,
