@@ -26,9 +26,9 @@ function Invoke-StarVectorPythonIdentityProbe {
   $startInfo = New-Object System.Diagnostics.ProcessStartInfo
   $startInfo.FileName = $Executable
   if ($IncludeBaseExecutable) {
-    $startInfo.Arguments = '-c "import json,sys;print(json.dumps({''executable'':sys.executable,''base_executable'':getattr(sys,''_base_executable'',None),''version'':[sys.version_info.major,sys.version_info.minor,sys.version_info.micro]}))"'
+    $startInfo.Arguments = '-c "import json,platform,struct,sys;print(json.dumps({''executable'':sys.executable,''base_executable'':getattr(sys,''_base_executable'',None),''version'':[sys.version_info.major,sys.version_info.minor,sys.version_info.micro],''implementation'':platform.python_implementation(),''architecture'':platform.machine(),''pointer_bits'':struct.calcsize(''P'')*8}))"'
   } else {
-    $startInfo.Arguments = '-c "import json,sys;print(json.dumps({''executable'':sys.executable,''version'':[sys.version_info.major,sys.version_info.minor,sys.version_info.micro]}))"'
+    $startInfo.Arguments = '-c "import json,platform,struct,sys;print(json.dumps({''executable'':sys.executable,''version'':[sys.version_info.major,sys.version_info.minor,sys.version_info.micro],''implementation'':platform.python_implementation(),''architecture'':platform.machine(),''pointer_bits'':struct.calcsize(''P'')*8}))"'
   }
   $startInfo.UseShellExecute = $false
   $startInfo.RedirectStandardOutput = $true
@@ -57,11 +57,10 @@ function Invoke-StarVectorPythonIdentityProbe {
 }
 
 function Select-StarVectorBootstrapPython {
-  param([string[]]$CandidatePaths)
-
-  if ($null -eq $CandidatePaths) {
-    $CandidatePaths = @(Get-Command python.exe -All -CommandType Application -ErrorAction SilentlyContinue | ForEach-Object Source | Where-Object { $_ } | Select-Object -Unique)
-  }
+  param(
+    [Parameter(Mandatory = $true)]
+    [string[]]$CandidatePaths
+  )
 
   foreach ($candidate in $CandidatePaths) {
     $canonicalCandidate = Resolve-StarVectorWindowsExecutable $candidate
@@ -74,10 +73,17 @@ function Select-StarVectorBootstrapPython {
       continue
     }
     $canonicalExecutable = Resolve-StarVectorWindowsExecutable $identity.executable
-    if ($identity.version.Count -eq 3 -and [int]$identity.version[0] -eq 3 -and [int]$identity.version[1] -ge 12 -and $canonicalExecutable) {
+    if ($identity.version.Count -eq 3 -and
+        [int]$identity.version[0] -eq 3 -and
+        [int]$identity.version[1] -eq 12 -and
+        [string]$identity.implementation -ceq 'CPython' -and
+        [string]$identity.architecture -ceq 'AMD64' -and
+        [int]$identity.pointer_bits -eq 64 -and
+        $canonicalExecutable -and
+        [StringComparer]::OrdinalIgnoreCase.Equals($canonicalCandidate, $canonicalExecutable)) {
       return [pscustomobject]@{ Executable = $canonicalExecutable; Identity = $identity }
     }
   }
 
-  throw 'the self-hosted CUDA runner requires a directly executable Python 3.12 or newer on PATH'
+  throw 'StarVector terminal metrics require the explicitly provisioned CPython 3.12 x64 interpreter'
 }

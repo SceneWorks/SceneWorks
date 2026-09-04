@@ -16,8 +16,10 @@ const execFile = promisify(execFileCallback);
 const digest = (value) => createHash("sha256").update(value).digest("hex");
 const workflow = await readFile(".github/workflows/starvector-terminal-provision.yml", "utf8");
 const windowsWorkflow = await readFile(".github/workflows/desktop-windows.yml", "utf8");
+const windowsWheelWorkflow = await readFile(".github/workflows/starvector-metrics-windows.yml", "utf8");
 const windowsPythonProbe = await readFile("scripts/select-starvector-windows-python.ps1", "utf8");
 const windowsPythonProbeTest = await readFile("scripts/select-starvector-windows-python.test.ps1", "utf8");
+const windowsWheelVerification = await readFile("scripts/verify-starvector-windows-metric-wheels.ps1", "utf8");
 
 test("file and tree identities stream exact bytes with bounded reads and portable ordering", async () => {
   const chunks = [Buffer.from("large-file-"), Buffer.from("identity")];
@@ -79,25 +81,33 @@ test("provision workflow is dispatch-only and never runs a model, service, campa
 function assertWindowsMetricsPythonContract(step) {
   assert.doesNotMatch(step, /\bpy\s+-3\.11\b/);
   assert.match(step, /select-starvector-windows-python\.ps1/);
-  assert.match(step, /\$bootstrap = Select-StarVectorBootstrapPython/);
+  assert.match(step, /\$bootstrap = Select-StarVectorBootstrapPython -CandidatePaths @\(\$env:STARVECTOR_METRICS_BOOTSTRAP_PYTHON\)/);
   assert.match(step, /\$bootstrapPython = \$bootstrap\.Executable/);
   assert.match(step, /\$bootstrapIdentity = \$bootstrap\.Identity/);
+  assert.doesNotMatch(step, /Get-Command python\.exe/);
   assert.doesNotMatch(step, /& \$candidate/);
+  assert.match(step, /refusing to replace a metrics venv outside the workflow-owned terminal root/);
+  assert.match(step, /\$rebuildMetricsVenv = \$existingProbe\.ExitCode -ne 0/);
+  assert.match(step, /Remove-Item -LiteralPath \$metricsRoot -Recurse -Force/);
   assert.match(step, /& \$bootstrapPython -m venv \$metricsRoot/);
   assert.match(step, /if \(\$LASTEXITCODE -ne 0\) \{ throw 'failed to create the terminal metrics venv/);
   assert.match(step, /Test-Path \$metricsPython -PathType Leaf/);
-  assert.match(step, /Invoke-StarVectorPythonIdentityProbe -Executable \$metricsPython -IncludeBaseExecutable/);
+  assert.match(step, /\$venvProbe = Invoke-StarVectorPythonIdentityProbe -Executable \$metricsPython -IncludeBaseExecutable/);
   assert.match(step, /if \(\$venvProbe\.ExitCode -ne 0\) \{ throw 'terminal metrics venv Python identity probe failed/);
   assert.match(step, /\$venvProbe\.StdOut \| ConvertFrom-Json -ErrorAction Stop/);
   assert.match(step, /\$observedBasePython = Resolve-StarVectorWindowsExecutable \$venvIdentity\.base_executable/);
   assert.match(step, /OrdinalIgnoreCase\.Equals\(\$bootstrapPython, \$observedBasePython\)/);
   assert.match(step, /\[int\]\$venvIdentity\.version\[2\] -ne \[int\]\$bootstrapIdentity\.version\[2\]/);
-  assert.match(step, /& \$metricsPython -m pip install/);
+  assert.match(step, /\[string\]\$venvIdentity\.implementation -cne 'CPython'/);
+  assert.match(step, /\[string\]\$venvIdentity\.architecture -cne 'AMD64'/);
+  assert.match(step, /\[int\]\$venvIdentity\.pointer_bits -ne 64/);
+  assert.match(step, /& \$metricsPython -m pip install --disable-pip-version-check --only-binary=:all: --retries 5 --timeout 60/);
   assert.match(step, /starvector-terminal-provision\.mjs metrics[^\n]*\$metricsRoot \$metricsPython/);
 }
 
 function assertWindowsPythonProbeContract(source) {
-  assert.match(source, /Get-Command python\.exe -All -CommandType Application/);
+  assert.doesNotMatch(source, /Get-Command python\.exe/);
+  assert.match(source, /\[Parameter\(Mandatory = \$true\)\]/);
   assert.match(source, /\$text -match '\[\\r\\n"\]'/);
   assert.match(source, /\$text -notmatch '\^\[A-Za-z\]:\\\\'/);
   assert.match(source, /\[IO\.Path\]::GetFullPath\(\$text\)/);
@@ -115,13 +125,30 @@ function assertWindowsPythonProbeContract(source) {
   assert.match(source, /StdOut = \$stdoutTask\.Result/);
   assert.match(source, /StdErr = \$stderrTask\.Result/);
   assert.match(source, /base_executable'':getattr\(sys,''_base_executable'',None\)/);
+  assert.match(source, /platform\.python_implementation\(\)/);
+  assert.match(source, /platform\.machine\(\)/);
+  assert.match(source, /struct\.calcsize\(''P''\)\*8/);
   assert.match(source, /if \(\$probe\.ExitCode -ne 0\) \{ continue \}/);
   assert.match(source, /\$probe\.StdOut \| ConvertFrom-Json -ErrorAction Stop/);
-  assert.match(source, /\[int\]\$identity\.version\[1\] -ge 12/);
+  assert.match(source, /\[int\]\$identity\.version\[1\] -eq 12/);
+  assert.doesNotMatch(source, /\[int\]\$identity\.version\[1\] -ge 12/);
+  assert.match(source, /\[string\]\$identity\.implementation -ceq 'CPython'/);
+  assert.match(source, /\[string\]\$identity\.architecture -ceq 'AMD64'/);
+  assert.match(source, /\[int\]\$identity\.pointer_bits -eq 64/);
+  assert.match(source, /OrdinalIgnoreCase\.Equals\(\$canonicalCandidate, \$canonicalExecutable\)/);
   assert.doesNotMatch(source, /& \$candidate|Invoke-Expression|Start-Process/);
 }
 
-test("Windows metrics provisioning selects, uses, and verifies one explicit Python 3.12+ executable", () => {
+test("terminal metrics provisioning fixes CPython 3.12 and wheel-only installation on both hosts", () => {
+  assert.equal((workflow.match(/uses: actions\/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97/g) ?? []).length, 2);
+  assert.equal((workflow.match(/python-version: "3\.12"/g) ?? []).length, 2);
+  assert.equal((workflow.match(/update-environment: false/g) ?? []).length, 2);
+  assert.match(workflow, /Set up supported CPython 3\.12 arm64 for terminal metrics[\s\S]*?architecture: arm64/);
+  assert.match(workflow, /Set up supported CPython 3\.12 x64 for terminal metrics[\s\S]*?architecture: x64/);
+  assert.equal((workflow.match(/pip install --disable-pip-version-check --only-binary=:all: --retries 5 --timeout 60/g) ?? []).length, 2);
+  assert.doesNotMatch(workflow, /pip install --disable-pip-version-check (?!.*--only-binary=:all:)/);
+  assert.match(workflow, /sys\.version_info\[:2\] == \(3, 12\)[^\n]*platform\.machine\(\)\.lower\(\) in \{"arm64", "aarch64"\}/);
+
   const start = workflow.indexOf("- name: Provision pinned metric runtime and official checkpoints", workflow.indexOf("  provision-windows:"));
   const end = workflow.indexOf("- name: Materialize the exact pinned 120-row corpus", start);
   const step = workflow.slice(start, end);
@@ -139,9 +166,12 @@ test("Windows Python probes capture native stderr without invoking through Power
   assert.match(windowsPythonProbeTest, /\$ErrorActionPreference = 'Stop'/);
   assert.match(windowsPythonProbeTest, /01-bad python\.exe/);
   assert.match(windowsPythonProbeTest, /02-malformed python\.exe/);
-  assert.match(windowsPythonProbeTest, /03-valid python\.exe/);
+  assert.match(windowsPythonProbeTest, /03-python311\.exe/);
+  assert.match(windowsPythonProbeTest, /04-python314\.exe/);
+  assert.match(windowsPythonProbeTest, /05-python312-arm64\.exe/);
+  assert.match(windowsPythonProbeTest, /06-python312-amd64\.exe/);
   assert.match(windowsPythonProbeTest, /Traceback from the first fake Python candidate/);
-  assert.match(windowsPythonProbeTest, /Select-StarVectorBootstrapPython -CandidatePaths @\(\$bad, \$malformed,/);
+  assert.match(windowsPythonProbeTest, /Select-StarVectorBootstrapPython -CandidatePaths @\(\$bad, \$malformed, \$belowMinimum, \$newerUnsupported, \$wrongArchitecture,/);
   assert.match(windowsPythonProbeTest, /all invalid candidates must fail closed/);
   assert.match(windowsWorkflow, /"scripts\/select-starvector-windows-python\.ps1"/);
   assert.match(windowsWorkflow, /"scripts\/select-starvector-windows-python\.test\.ps1"/);
@@ -157,6 +187,11 @@ test("Windows Python probe contract rejects native-process safety mutations", ()
     ["exit status", (value) => value.replace("ExitCode = $process.ExitCode", "ExitCode = 0")],
     ["bad-candidate continuation", (value) => value.replace("if ($probe.ExitCode -ne 0) { continue }", "if ($probe.ExitCode -ne 0) { break }")],
     ["PowerShell invocation", (value) => value.replace("$probe = Invoke-StarVectorPythonIdentityProbe -Executable $canonicalCandidate", "$probe = & $candidate -c $code")],
+    ["permissive Python minor", (value) => value.replace("[int]$identity.version[1] -eq 12", "[int]$identity.version[1] -ge 12")],
+    ["implementation identity", (value) => value.replace("[string]$identity.implementation -ceq 'CPython'", "$true")],
+    ["architecture identity", (value) => value.replace("[string]$identity.architecture -ceq 'AMD64'", "$true")],
+    ["pointer width", (value) => value.replace("[int]$identity.pointer_bits -eq 64", "$true")],
+    ["reported executable equality", (value) => value.replace("[StringComparer]::OrdinalIgnoreCase.Equals($canonicalCandidate, $canonicalExecutable)", "$true")],
   ]) {
     const changed = mutation(windowsPythonProbe);
     assert.notEqual(changed, windowsPythonProbe, `${label} mutation must alter the helper fixture`);
@@ -169,14 +204,52 @@ test("Windows metrics Python contract rejects path, base-interpreter, and patch-
   const end = workflow.indexOf("- name: Materialize the exact pinned 120-row corpus", start);
   const step = workflow.slice(start, end);
   for (const [label, mutation] of [
-    ["selection helper", (value) => value.replace("$bootstrap = Select-StarVectorBootstrapPython", "$bootstrap = Get-Command python.exe")],
+    ["selection helper", (value) => value.replace("$bootstrap = Select-StarVectorBootstrapPython -CandidatePaths @($env:STARVECTOR_METRICS_BOOTSTRAP_PYTHON)", "$bootstrap = Get-Command python.exe")],
     ["venv captured probe", (value) => value.replace("$venvProbe = Invoke-StarVectorPythonIdentityProbe -Executable $metricsPython -IncludeBaseExecutable", "$venvProbe = & $metricsPython -c $code")],
     ["base path equality", (value) => value.replace("OrdinalIgnoreCase.Equals($bootstrapPython, $observedBasePython)", "OrdinalIgnoreCase.Equals($bootstrapPython, $bootstrapPython)")],
     ["patch version equality", (value) => value.replace("[int]$venvIdentity.version[2] -ne [int]$bootstrapIdentity.version[2]", "[int]$venvIdentity.version[2] -ne [int]$venvIdentity.version[2]")],
+    ["wheel-only install", (value) => value.replace("--only-binary=:all:", "--prefer-binary")],
+    ["stale venv replacement", (value) => value.replace("Remove-Item -LiteralPath $metricsRoot -Recurse -Force", "Write-Host $metricsRoot")],
   ]) {
     const changed = mutation(step);
     assert.notEqual(changed, step, `${label} mutation must alter the workflow fixture`);
     assert.throws(() => assertWindowsMetricsPythonContract(changed), { name: "AssertionError" }, label);
+  }
+});
+
+function assertHostedWindowsWheelContract(hostedWorkflow, verification) {
+  assert.match(hostedWorkflow, /runs-on: windows-2022/);
+  assert.match(hostedWorkflow, /timeout-minutes: 25/);
+  assert.match(hostedWorkflow, /uses: actions\/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97/);
+  assert.match(hostedWorkflow, /python-version: "3\.12"[\s\S]*?architecture: x64[\s\S]*?update-environment: false/);
+  assert.equal((hostedWorkflow.match(/shell: powershell/g) ?? []).length, 2);
+  assert.match(hostedWorkflow, /select-starvector-windows-python\.test\.ps1/);
+  assert.match(hostedWorkflow, /STARVECTOR_METRICS_BOOTSTRAP_PYTHON: \$\{\{ steps\.metrics-python\.outputs\.python-path \}\}/);
+  assert.match(hostedWorkflow, /verify-starvector-windows-metric-wheels\.ps1/);
+  assert.match(verification, /Select-StarVectorBootstrapPython -CandidatePaths @\(\$BootstrapPython\)/);
+  assert.match(verification, /'pip', 'download'[\s\S]*?'--only-binary=:all:'[\s\S]*?'--retries', '5'/);
+  assert.match(verification, /Where-Object \{ \$_\.Extension -cne '\.whl' \}/);
+  assert.match(verification, /'pip', 'install'[\s\S]*?'--no-index'[\s\S]*?'--find-links'[\s\S]*?'--only-binary=:all:'/);
+  assert.match(verification, /\$installed\[\[string\]\$package\.name\] -cne \[string\]\$package\.version/);
+  assert.match(verification, /import PIL,numpy,skimage,torch,torchvision/);
+}
+
+test("hosted Windows resolves and installs the metric lock exclusively from wheels under PowerShell 5.1", () => {
+  assertHostedWindowsWheelContract(windowsWheelWorkflow, windowsWheelVerification);
+});
+
+test("hosted Windows wheel contract rejects source-distribution and ambient-interpreter mutations", () => {
+  for (const [label, workflowMutation, scriptMutation] of [
+    ["ambient interpreter", (value) => value.replace("${{ steps.metrics-python.outputs.python-path }}", "python.exe"), (value) => value],
+    ["floating minor", (value) => value.replace('python-version: "3.12"', 'python-version: ">=3.12"'), (value) => value],
+    ["source download", (value) => value, (value) => value.replace("'--only-binary=:all:', '--retries'", "'--prefer-binary', '--retries'")],
+    ["online install", (value) => value, (value) => value.replace("'--no-index', '--find-links'", "'--index-url', 'https://pypi.org/simple', '--find-links'")],
+    ["source archive acceptance", (value) => value, (value) => value.replace("$_.Extension -cne '.whl'", "$false")],
+  ]) {
+    const changedWorkflow = workflowMutation(windowsWheelWorkflow);
+    const changedScript = scriptMutation(windowsWheelVerification);
+    assert.ok(changedWorkflow !== windowsWheelWorkflow || changedScript !== windowsWheelVerification, `${label} mutation must alter a fixture`);
+    assert.throws(() => assertHostedWindowsWheelContract(changedWorkflow, changedScript), { name: "AssertionError" }, label);
   }
 });
 
