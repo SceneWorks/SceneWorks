@@ -857,24 +857,30 @@ fn builtin_starvector_manifests_are_exact_native_image_to_svg_closures() {
         );
         if id == "starvector_8b" {
             let candidate = &model["vector"]["deviceAdmission"]["terminalCandidate"];
+            let plan: Value = serde_json::from_str(include_str!(
+                "../../../../release/starvector-terminal-campaign-v1.json"
+            ))
+            .expect("terminal campaign plan");
             assert_eq!(
                 candidate["inferenceRevision"],
-                "c6d6a4dbd61ab09c26ff5526632cae2cefea60ed"
+                plan["inference_contract"]["revision"]
             );
             assert_eq!(
                 candidate["corpusSha256"],
                 "757370c4eed38a52a29ac80c258fdedd7e437ab891637bcb1c916aa608bf32b5"
             );
-            assert_eq!(
-                candidate["productionClosure"]["sha256"],
-                "f9d6ad6f23c07945d6eb96b1bc24e586921ae01fbb91d5bb16d6ff94f59c44a9"
-            );
-            assert_eq!(
-                candidate["productionClosure"]["entries"]
-                    .as_array()
-                    .expect("production closure entries")
-                    .len(),
-                31
+            let closure_check = std::process::Command::new("node")
+                .args([
+                    "scripts/starvector-production-closure.mjs",
+                    "check-manifest",
+                ])
+                .current_dir(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../.."))
+                .output()
+                .expect("run the authoritative source-closure checker");
+            assert!(
+                closure_check.status.success(),
+                "source closure mismatch: {}",
+                String::from_utf8_lossy(&closure_check.stderr)
             );
             assert_eq!(
                 candidate["supportedDevices"]["mlx"],
