@@ -72,6 +72,7 @@ env:
   STARVECTOR_PROMPT_MODEL: flux_schnell
   STARVECTOR_PROMPT_REVISION: bba3ae01dfd94089f173c05edd4e1a4c551f2599
   STARVECTOR_CLIP_REVISION: 1a25a446712ba5ee05982a381eed697ef9b435cf
+  STARVECTOR_INFERENCE_REPOSITORY: SceneWorks/inference
 
 jobs:
   provision-macos:
@@ -85,6 +86,8 @@ jobs:
       STARVECTOR_INFERENCE_REVISION: ${{ inputs.inference_revision }}
       STARVECTOR_APP_DATA_SOURCE: ${{ inputs.mac_app_data_source }}
       STARVECTOR_HF_HOME_SOURCE: ${{ inputs.mac_hf_home_source }}
+      STARVECTOR_PREFLIGHT_RUN_ID: ${{ inputs.inference_preflight_run_id }}
+      STARVECTOR_PREFLIGHT_ARTIFACT_NAME: ${{ inputs.inference_preflight_artifact }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -93,21 +96,32 @@ jobs:
         run: node scripts/lib/starvector-terminal-pin-paths.mjs "$STARVECTOR_TERMINAL_ROOT" "$STARVECTOR_INFERENCE_REVISION" >> "$GITHUB_ENV"
       - name: Validate sealed inference preflight transport
         id: preflight-transport
+        env:
+          GH_TOKEN: ${{ secrets.INFERENCE_READ_TOKEN }}
         run: |
-          artifact_id="$(node scripts/starvector-terminal-provision.mjs preflight-transport release/starvector-terminal-campaign-v1.json "$STARVECTOR_INFERENCE_REVISION" "${{ inputs.inference_preflight_run_id }}" "${{ inputs.inference_preflight_artifact }}")"
-          printf 'artifact-id=%s\n' "$artifact_id" >> "$GITHUB_OUTPUT"
+          artifact_id="$(node scripts/starvector-terminal-provision.mjs preflight-transport release/starvector-terminal-campaign-v1.json "$STARVECTOR_INFERENCE_REVISION" "$STARVECTOR_PREFLIGHT_RUN_ID" "$STARVECTOR_PREFLIGHT_ARTIFACT_NAME")"
+          metadata_root="$RUNNER_TEMP/starvector-preflight-metadata"
+          mkdir -p "$metadata_root"
+          gh api "repos/$STARVECTOR_INFERENCE_REPOSITORY/actions/artifacts/$artifact_id" > "$metadata_root/artifact.json"
+          gh api "repos/$STARVECTOR_INFERENCE_REPOSITORY/actions/runs/$STARVECTOR_PREFLIGHT_RUN_ID" > "$metadata_root/run.json"
+          node scripts/starvector-terminal-provision.mjs preflight-metadata release/starvector-terminal-campaign-v1.json "$metadata_root/artifact.json" "$metadata_root/run.json"
+          {
+            printf 'artifact-id=%s\n' "$artifact_id"
+            printf 'run-id=%s\n' "$STARVECTOR_PREFLIGHT_RUN_ID"
+            printf 'revision=%s\n' "$STARVECTOR_INFERENCE_REVISION"
+          } >> "$GITHUB_OUTPUT"
       - name: Check out the exact inference source input
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: SceneWorks/inference
-          ref: ${{ inputs.inference_revision }}
+          ref: ${{ steps.preflight-transport.outputs.revision }}
           token: ${{ secrets.INFERENCE_READ_TOKEN }}
           path: inference-source
       - name: Download the complete inference preflight artifact
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           repository: SceneWorks/inference
-          run-id: ${{ inputs.inference_preflight_run_id }}
+          run-id: ${{ steps.preflight-transport.outputs.run-id }}
           github-token: ${{ secrets.INFERENCE_READ_TOKEN }}
           artifact-ids: ${{ steps.preflight-transport.outputs.artifact-id }}
           merge-multiple: true
@@ -170,6 +184,8 @@ jobs:
       STARVECTOR_INFERENCE_REVISION: ${{ inputs.inference_revision }}
       STARVECTOR_APP_DATA_SOURCE: ${{ inputs.windows_app_data_source }}
       STARVECTOR_HF_HOME_SOURCE: ${{ inputs.windows_hf_home_source }}
+      STARVECTOR_PREFLIGHT_RUN_ID: ${{ inputs.inference_preflight_run_id }}
+      STARVECTOR_PREFLIGHT_ARTIFACT_NAME: ${{ inputs.inference_preflight_artifact }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -177,28 +193,45 @@ jobs:
       - name: Resolve immutable pin-keyed terminal inputs
         shell: powershell
         run: |
-          $pinEnvironment = node scripts\lib\starvector-terminal-pin-paths.mjs $env:STARVECTOR_TERMINAL_ROOT $env:STARVECTOR_INFERENCE_REVISION
+          $pinEnvironment = node scripts\lib\starvector-terminal-pin-paths.mjs "$env:STARVECTOR_TERMINAL_ROOT" "$env:STARVECTOR_INFERENCE_REVISION"
           if ($LASTEXITCODE -ne 0) { throw 'immutable pin-keyed terminal path resolution failed' }
           $pinEnvironment | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
       - name: Validate sealed inference preflight transport
         id: preflight-transport
         shell: powershell
+        env:
+          GH_TOKEN: ${{ secrets.INFERENCE_READ_TOKEN }}
         run: |
-          $artifactId = node scripts\starvector-terminal-provision.mjs preflight-transport release\starvector-terminal-campaign-v1.json $env:STARVECTOR_INFERENCE_REVISION "${{ inputs.inference_preflight_run_id }}" "${{ inputs.inference_preflight_artifact }}"
+          $artifactId = node scripts\starvector-terminal-provision.mjs preflight-transport release\starvector-terminal-campaign-v1.json "$env:STARVECTOR_INFERENCE_REVISION" "$env:STARVECTOR_PREFLIGHT_RUN_ID" "$env:STARVECTOR_PREFLIGHT_ARTIFACT_NAME"
           if ($LASTEXITCODE -ne 0) { throw 'sealed inference preflight transport validation failed' }
+          $metadataRoot = Join-Path $env:RUNNER_TEMP 'starvector-preflight-metadata'
+          New-Item -ItemType Directory -Path $metadataRoot -Force | Out-Null
+          $artifactJson = gh api "repos/$env:STARVECTOR_INFERENCE_REPOSITORY/actions/artifacts/$artifactId"
+          if ($LASTEXITCODE -ne 0) { throw 'failed to read sealed inference preflight artifact metadata' }
+          $runJson = gh api "repos/$env:STARVECTOR_INFERENCE_REPOSITORY/actions/runs/$env:STARVECTOR_PREFLIGHT_RUN_ID"
+          if ($LASTEXITCODE -ne 0) { throw 'failed to read sealed inference preflight run metadata' }
+          $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+          $artifactPath = Join-Path $metadataRoot 'artifact.json'
+          $runPath = Join-Path $metadataRoot 'run.json'
+          [IO.File]::WriteAllText($artifactPath, ($artifactJson -join [Environment]::NewLine), $utf8NoBom)
+          [IO.File]::WriteAllText($runPath, ($runJson -join [Environment]::NewLine), $utf8NoBom)
+          node scripts\starvector-terminal-provision.mjs preflight-metadata release\starvector-terminal-campaign-v1.json "$artifactPath" "$runPath"
+          if ($LASTEXITCODE -ne 0) { throw 'live inference preflight metadata validation failed' }
           "artifact-id=$artifactId" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          "run-id=$env:STARVECTOR_PREFLIGHT_RUN_ID" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          "revision=$env:STARVECTOR_INFERENCE_REVISION" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
       - name: Check out the exact inference source input
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: SceneWorks/inference
-          ref: ${{ inputs.inference_revision }}
+          ref: ${{ steps.preflight-transport.outputs.revision }}
           token: ${{ secrets.INFERENCE_READ_TOKEN }}
           path: inference-source
       - name: Download the complete inference preflight artifact
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           repository: SceneWorks/inference
-          run-id: ${{ inputs.inference_preflight_run_id }}
+          run-id: ${{ steps.preflight-transport.outputs.run-id }}
           github-token: ${{ secrets.INFERENCE_READ_TOKEN }}
           artifact-ids: ${{ steps.preflight-transport.outputs.artifact-id }}
           merge-multiple: true
@@ -206,9 +239,9 @@ jobs:
       - name: Publish exact inference, preflight, and model closure
         shell: powershell
         run: |
-          node scripts/starvector-terminal-provision.mjs checkout "$env:GITHUB_WORKSPACE\inference-source" $env:STARVECTOR_TERMINAL_ROOT $env:STARVECTOR_INFERENCE_REVISION
-          node scripts/starvector-terminal-provision.mjs preflight "$env:RUNNER_TEMP\starvector-preflight" $env:STARVECTOR_TERMINAL_ROOT release\starvector-terminal-campaign-v1.json
-          node scripts/starvector-terminal-provision.mjs weights $env:STARVECTOR_TERMINAL_ROOT $env:STARVECTOR_APP_DATA_SOURCE $env:STARVECTOR_HF_HOME_SOURCE $env:STARVECTOR_PROMPT_PROVIDER $env:STARVECTOR_PROMPT_MODEL $env:STARVECTOR_PROMPT_REVISION
+          node scripts/starvector-terminal-provision.mjs checkout "$env:GITHUB_WORKSPACE\inference-source" "$env:STARVECTOR_TERMINAL_ROOT" "$env:STARVECTOR_INFERENCE_REVISION"
+          node scripts/starvector-terminal-provision.mjs preflight "$env:RUNNER_TEMP\starvector-preflight" "$env:STARVECTOR_TERMINAL_ROOT" release\starvector-terminal-campaign-v1.json
+          node scripts/starvector-terminal-provision.mjs weights "$env:STARVECTOR_TERMINAL_ROOT" "$env:STARVECTOR_APP_DATA_SOURCE" "$env:STARVECTOR_HF_HOME_SOURCE" "$env:STARVECTOR_PROMPT_PROVIDER" "$env:STARVECTOR_PROMPT_MODEL" "$env:STARVECTOR_PROMPT_REVISION"
       - name: Provision exact portable CPython 3.12.10 x64 and terminal metrics
         shell: powershell
         timeout-minutes: 70

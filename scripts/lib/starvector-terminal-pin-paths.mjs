@@ -1,3 +1,4 @@
+import { lstat, mkdir, realpath } from "node:fs/promises";
 import path from "node:path";
 import { isExecutedModule } from "../starvector-terminal-cli.mjs";
 
@@ -47,10 +48,88 @@ export function terminalPinEnvironment(hostRoot, permanentPin, pathApi = path) {
   };
 }
 
+function samePhysicalPath(left, right) {
+  const normalize = (value) => process.platform === "win32" ? value.toLowerCase() : value;
+  return normalize(path.normalize(left)) === normalize(path.normalize(right));
+}
+
+/**
+ * Prove every existing component from the durable host root through `targetRoot`
+ * is an ordinary directory. Missing suffixes are allowed because provision will
+ * create them, then call this check again before publication. Symlinks and
+ * Windows junctions are reported by Node as symbolic links; comparing each
+ * component's physical path also refuses any other redirecting reparse point.
+ */
+export async function assertTerminalPhysicalContainment(hostRoot, targetRoot) {
+  if (typeof hostRoot !== "string" || !hostRoot || typeof targetRoot !== "string" || !targetRoot) {
+    fail("physical containment requires host and target roots");
+  }
+  const root = path.resolve(hostRoot);
+  const target = path.resolve(targetRoot);
+  const relative = path.relative(root, target);
+  if (relative === ".." || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) {
+    fail("physical containment target escapes the host root");
+  }
+  const suffix = relative ? relative.split(path.sep) : [];
+  const components = [root];
+  for (let index = 0; index < suffix.length; index += 1) {
+    components.push(path.join(root, ...suffix.slice(0, index + 1)));
+  }
+  let physicalRoot;
+  for (let index = 0; index < components.length; index += 1) {
+    const component = components[index];
+    const info = await lstat(component).catch((error) => {
+      if (error?.code === "ENOENT") return null;
+      throw error;
+    });
+    if (!info) {
+      if (index === 0) fail(`physical containment requires an existing host root: ${root}`);
+      break;
+    }
+    if (info.isSymbolicLink() || !info.isDirectory()) {
+      fail(`physical containment rejects symlink, junction, reparse, or non-directory component: ${component}`);
+    }
+    const observed = await realpath(component);
+    if (index === 0) {
+      physicalRoot = observed;
+    } else {
+      const expected = path.join(physicalRoot, ...suffix.slice(0, index));
+      if (!samePhysicalPath(observed, expected)) {
+        fail(`physical containment rejects redirected component: ${component}`);
+      }
+    }
+  }
+  return target;
+}
+
+export async function ensureTerminalPhysicalDirectory(hostRoot, targetRoot) {
+  const target = await assertTerminalPhysicalContainment(hostRoot, targetRoot);
+  const root = path.resolve(hostRoot);
+  const relative = path.relative(root, target);
+  const suffix = relative ? relative.split(path.sep) : [];
+  for (let index = 0; index < suffix.length; index += 1) {
+    const component = path.join(root, ...suffix.slice(0, index + 1));
+    try {
+      await mkdir(component);
+    } catch (error) {
+      if (error?.code !== "EEXIST") throw error;
+    }
+    await assertTerminalPhysicalContainment(root, component);
+  }
+  return target;
+}
+
+export async function assertTerminalPinPhysicalContainment(hostRoot, permanentPin) {
+  const roots = terminalPinPaths(hostRoot, permanentPin);
+  await assertTerminalPhysicalContainment(roots.hostRoot, roots.pinRoot);
+  return roots;
+}
+
 if (isExecutedModule(import.meta.url)) {
   try {
     const [hostRoot, permanentPin] = process.argv.slice(2);
     if (!permanentPin) fail("usage: <absolute-host-root> <permanent-pin>");
+    await assertTerminalPinPhysicalContainment(hostRoot, permanentPin);
     for (const [name, value] of Object.entries(terminalPinEnvironment(hostRoot, permanentPin))) {
       console.log(`${name}=${value}`);
     }

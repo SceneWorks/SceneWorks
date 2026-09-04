@@ -409,8 +409,8 @@ test("readiness workflow is an identity-only dispatch on both campaign hosts", (
   assert.match(readiness, /permanent_pin:[\s\S]*required: true/);
   assert.equal((readiness.match(/starvector-terminal-pin-paths\.mjs/g) ?? []).length, 2);
   assert.equal((workflow.match(/starvector-terminal-pin-paths\.mjs/g) ?? []).length, 5);
-  assert.equal((readiness.match(/\$\{\{ inputs\.permanent_pin \}\}/g) ?? []).length, 4);
-  assert.equal((workflow.match(/\$\{\{ inputs\.permanent_pin \}\}/g) ?? []).length >= 15, true);
+  assert.equal((readiness.match(/\$\{\{ inputs\.permanent_pin \}\}/g) ?? []).length, 1);
+  assert.equal((workflow.match(/\$\{\{ inputs\.permanent_pin \}\}/g) ?? []).length, 2);
   assert.doesNotMatch(`${workflow}\n${readiness}`, /starvector-terminal[\\/]inference(?:[\\/]|\s|$)/);
   assert.doesNotMatch(`${workflow}\n${readiness}`, /starvector-terminal[\\/]inference-preflight(?:[\\/]|\s|$)/);
   assert.doesNotMatch(`${workflow}\n${readiness}`, /starvector-terminal[\\/]corpora[\\/]starvector-terminal-v1/);

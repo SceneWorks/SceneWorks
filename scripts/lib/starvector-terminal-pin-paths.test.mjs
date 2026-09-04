@@ -1,9 +1,11 @@
 import assert from "node:assert/strict";
-import { lstat, mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
+import { lstat, mkdir, mkdtemp, readFile, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
 import {
+  assertTerminalPhysicalContainment,
+  assertTerminalPinPhysicalContainment,
   terminalPinEnvironment,
   terminalPinPaths,
   validateTerminalPermanentPin,
@@ -85,4 +87,43 @@ test("malformed or traversal-shaped pins and non-absolute roots fail closed", ()
   for (const root of ["relative", "../terminal", "/terminal\nGITHUB_ENV=pwned"]) {
     assert.throws(() => terminalPinPaths(root, firstPin, path.posix), /absolute single-line path/);
   }
+});
+
+test("physical pin containment rejects a POSIX symlink component before use", async (context) => {
+  if (process.platform === "win32") return context.skip("POSIX symlink contract");
+  const sandbox = await mkdtemp(path.join(tmpdir(), "starvector-pin-physical-"));
+  const hostRoot = path.join(sandbox, "host");
+  const outside = path.join(sandbox, "outside");
+  await mkdir(hostRoot);
+  await mkdir(outside);
+  await symlink(outside, path.join(hostRoot, "pins"));
+  await assert.rejects(
+    () => assertTerminalPinPhysicalContainment(hostRoot, firstPin),
+    /symlink, junction, reparse/,
+  );
+  assert.equal(await readFile(path.join(outside, "sentinel"), "utf8").catch((error) => error.code === "ENOENT" ? null : Promise.reject(error)), null);
+});
+
+test("physical pin containment rejects a hosted-Windows junction component", async (context) => {
+  if (process.platform !== "win32") return context.skip("hosted Windows junction contract");
+  const sandbox = await mkdtemp(path.join(tmpdir(), "starvector-pin-junction-"));
+  const hostRoot = path.join(sandbox, "host");
+  const outside = path.join(sandbox, "outside");
+  await mkdir(hostRoot);
+  await mkdir(outside);
+  await symlink(outside, path.join(hostRoot, "pins"), "junction");
+  await assert.rejects(
+    () => assertTerminalPinPhysicalContainment(hostRoot, firstPin),
+    /symlink, junction, reparse|redirected component/,
+  );
+});
+
+test("physical containment rejects targets outside the exact host root", async () => {
+  const sandbox = await mkdtemp(path.join(tmpdir(), "starvector-pin-escape-"));
+  const hostRoot = path.join(sandbox, "host");
+  await mkdir(hostRoot);
+  await assert.rejects(
+    () => assertTerminalPhysicalContainment(hostRoot, path.join(sandbox, "outside")),
+    /target escapes/,
+  );
 });

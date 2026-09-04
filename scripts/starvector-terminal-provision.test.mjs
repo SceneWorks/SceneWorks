@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { execFile as execFileCallback } from "node:child_process";
 import { createHash } from "node:crypto";
-import { chmod, lstat, mkdir, mkdtemp, readFile, realpath, rename, symlink, writeFile } from "node:fs/promises";
+import { chmod, lstat, mkdir, mkdtemp, readFile, readdir, realpath, rename, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { Readable } from "node:stream";
@@ -11,7 +11,7 @@ import { fileSha256 } from "./lib/file-sha256.mjs";
 import { terminalPinPaths } from "./lib/starvector-terminal-pin-paths.mjs";
 import { terminalTreeEntry, terminalTreeSha256 } from "./lib/terminal-tree-identity.mjs";
 import { removeStarVectorMacMetricsTree, selectStarVectorMacPython, validateStarVectorMacVenv } from "./select-starvector-macos-python.mjs";
-import { assemblePreflight, assembleWeights, downloadExact, installCheckout, installPinnedCheckout, tree, validatePreflightTransport, validateSealedPreflightIndex } from "./starvector-terminal-provision.mjs";
+import { assemblePreflight, assembleWeights, downloadExact, installCheckout, installPinnedCheckout, pinnedCheckoutLockPath, tree, validatePreflightMetadata, validatePreflightTransport, validateSealedPreflightIndex } from "./starvector-terminal-provision.mjs";
 import { validateTerminalServiceClosure } from "./starvector-terminal-readiness.mjs";
 
 const execFile = promisify(execFileCallback);
@@ -27,7 +27,61 @@ const windowsPythonProbeTest = await readFile("scripts/select-starvector-windows
 const windowsPythonProvision = await readFile("scripts/provision-starvector-windows-python.ps1", "utf8");
 const windowsPythonProvisionTest = await readFile("scripts/provision-starvector-windows-python.test.ps1", "utf8");
 const windowsWheelVerification = await readFile("scripts/verify-starvector-windows-metric-wheels.ps1", "utf8");
+const instantIdWorker = await readFile("crates/sceneworks-worker/src/image_jobs/instantid.rs", "utf8");
+const instantIdSmoke = await readFile("crates/sceneworks-worker/src/instantid_pid_gpu_smoke.rs", "utf8");
 const terminalPlan = JSON.parse(await readFile("release/starvector-terminal-campaign-v1.json", "utf8"));
+
+function workflowRunBodies(source) {
+  const lines = source.split("\n");
+  const bodies = [];
+  for (let index = 0; index < lines.length; index += 1) {
+    const block = lines[index].match(/^(\s*)run:\s*[|>]\s*$/);
+    const inline = lines[index].match(/^(\s*)run:\s+(.+)$/);
+    if (inline && !block) {
+      bodies.push(inline[2]);
+      continue;
+    }
+    if (!block) continue;
+    const indent = block[1].length;
+    const body = [];
+    for (index += 1; index < lines.length; index += 1) {
+      const line = lines[index];
+      if (line.trim() && line.match(/^\s*/)[0].length <= indent) {
+        index -= 1;
+        break;
+      }
+      body.push(line);
+    }
+    bodies.push(body.join("\n"));
+  }
+  return bodies;
+}
+
+function assertNoDirectInputInterpolationInShell(source) {
+  for (const body of workflowRunBodies(source)) assert.doesNotMatch(body, /\$\{\{\s*inputs\./);
+}
+
+function assertC6dCandleInstantIdPaths(workerSource, smokeSource) {
+  assert.match(workerSource, /let paths = InstantIdPaths \{[\s\S]*?openpose: openpose\.clone\(\),[\s\S]*?face_dir: Some\([\s\S]*?scrfd_path[\s\S]*?\.parent\(\)[\s\S]*?\.to_path_buf\(\),[\s\S]*?\);/);
+  assert.match(workerSource, /match &openpose \{[\s\S]*?model\.with_openpose\(source\)/);
+  assert.match(workerSource, /model\.with_face\(face_dir\)/);
+  assert.match(smokeSource, /InstantId::load\(&InstantIdPaths \{[\s\S]*?openpose: openpose[\s\S]*?WeightsSource::Dir\(dir\.clone\(\)\)[\s\S]*?face_dir: Some\(face_dir\.clone\(\)\),[\s\S]*?\}\)/);
+  assert.match(smokeSource, /\.with_openpose\(&WeightsSource::Dir\(dir\.clone\(\)\)\)/);
+  assert.match(smokeSource, /\.with_face\(&face_dir\)/);
+}
+
+test("c6d Candle InstantID initializers price resolved OpenPose and face paths before preserving builder loads", () => {
+  assertC6dCandleInstantIdPaths(instantIdWorker, instantIdSmoke);
+  for (const [label, changedWorker, changedSmoke] of [
+    ["production openpose", instantIdWorker.replace("                openpose: openpose.clone(),\n", ""), instantIdSmoke],
+    ["production face", instantIdWorker.replace(/                face_dir: Some\([\s\S]*?                \),\n/, ""), instantIdSmoke],
+    ["smoke openpose", instantIdWorker, instantIdSmoke.replace("        openpose: openpose.as_ref().map(|dir| WeightsSource::Dir(dir.clone())),\n", "")],
+    ["smoke face", instantIdWorker, instantIdSmoke.replace("        face_dir: Some(face_dir.clone()),\n", "")],
+  ]) {
+    assert.ok(changedWorker !== instantIdWorker || changedSmoke !== instantIdSmoke, `${label} mutation must alter a fixture`);
+    assert.throws(() => assertC6dCandleInstantIdPaths(changedWorker, changedSmoke), { name: "AssertionError" }, label);
+  }
+});
 
 test("file and tree identities stream exact bytes with bounded reads and portable ordering", async () => {
   const chunks = [Buffer.from("large-file-"), Buffer.from("identity")];
@@ -78,6 +132,8 @@ test("provision workflow is dispatch-only and never runs a model, service, campa
   assert.match(workflow, /default: starvector-terminal-preflight-c6d6a4dbd61ab09c26ff5526632cae2cefea60ed-33851645747-1/);
   assert.equal((workflow.match(/starvector-terminal-pin-paths\.mjs/g) ?? []).length, 2);
   assert.equal((workflow.match(/preflight-transport release[\\/]starvector-terminal-campaign-v1\.json/g) ?? []).length, 2);
+  assert.equal((workflow.match(/preflight-metadata release[\\/]starvector-terminal-campaign-v1\.json/g) ?? []).length, 2);
+  assert.equal((workflow.match(/gh api "repos\//g) ?? []).length, 4);
   assert.equal((workflow.match(/artifact-ids: \$\{\{ steps\.preflight-transport\.outputs\.artifact-id \}\}/g) ?? []).length, 2);
   assert.doesNotMatch(workflow, /STARVECTOR_TERMINAL_ROOT[\\/]inference|STARVECTOR_TERMINAL_ROOT[\\/]inference-preflight|STARVECTOR_TERMINAL_ROOT[\\/]corpora/);
   assert.match(workflow, /\/Users\/Shared\/SceneWorks\/starvector-terminal/);
@@ -90,6 +146,25 @@ test("provision workflow is dispatch-only and never runs a model, service, campa
   assert.equal((workflow.match(/Upload .* provisioning readiness even on failure/g) ?? []).length, 2);
   assert.match(workflow, /STARVECTOR_PROMPT_PROVIDER: candle_flux/);
   assert.doesNotMatch(workflow, /STARVECTOR_PROMPT_PROVIDER: flux_diffusers/);
+});
+
+test("workflow shell blocks consume untrusted dispatch inputs only through quoted environment variables", () => {
+  for (const source of [workflow, readinessWorkflow, campaignWorkflow]) assertNoDirectInputInterpolationInShell(source);
+  assert.match(workflow, /preflight-transport[^\n]*"\$STARVECTOR_INFERENCE_REVISION" "\$STARVECTOR_PREFLIGHT_RUN_ID" "\$STARVECTOR_PREFLIGHT_ARTIFACT_NAME"/);
+  assert.match(workflow, /preflight-transport[^\n]*"\$env:STARVECTOR_INFERENCE_REVISION" "\$env:STARVECTOR_PREFLIGHT_RUN_ID" "\$env:STARVECTOR_PREFLIGHT_ARTIFACT_NAME"/);
+  assert.match(campaignWorkflow, /validate-dispatch[^\n]*"\$STARVECTOR_TERMINAL_PERMANENT_PIN" "\$STARVECTOR_TERMINAL_CAMPAIGN_RUN_ID"/);
+  assert.match(campaignWorkflow, /validate-dispatch[^\n]*"\$env:STARVECTOR_TERMINAL_PERMANENT_PIN" "\$env:STARVECTOR_TERMINAL_CAMPAIGN_RUN_ID"/);
+  const expression = (name) => '"' + "$" + "{{ inputs." + name + " }}\"";
+  for (const [label, source, mutation] of [
+    ["Bash direct permanent-pin expression", campaignWorkflow, (value) => value.replace('"$STARVECTOR_TERMINAL_PERMANENT_PIN"', expression("permanent_pin"))],
+    ["PowerShell direct campaign expression", campaignWorkflow, (value) => value.replace('"$env:STARVECTOR_TERMINAL_CAMPAIGN_RUN_ID"', expression("campaign_run_id"))],
+    ["Bash direct preflight run expression", workflow, (value) => value.replace('"$STARVECTOR_PREFLIGHT_RUN_ID"', expression("inference_preflight_run_id"))],
+    ["PowerShell direct artifact expression", workflow, (value) => value.replace('"$env:STARVECTOR_PREFLIGHT_ARTIFACT_NAME"', expression("inference_preflight_artifact"))],
+  ]) {
+    const changed = mutation(source);
+    assert.notEqual(changed, source, label);
+    assert.throws(() => assertNoDirectInputInterpolationInShell(changed), { name: "AssertionError" }, label);
+  }
 });
 
 test("provision transport accepts only the sealed c6d native-preflight run and artifact", async () => {
@@ -117,6 +192,67 @@ test("provision transport accepts only the sealed c6d native-preflight run and a
       artifactName: accepted.artifact_name,
       ...mutation,
     }), /sealed terminal plan/, label);
+  }
+});
+
+test("live preflight artifact and run metadata must match every sealed transport identity", async () => {
+  const run = {
+    id: 33851645747,
+    run_attempt: 1,
+    head_sha: "c6d6a4dbd61ab09c26ff5526632cae2cefea60ed",
+    workflow_id: 312370029,
+    name: "Real-weight validation",
+    path: ".github/workflows/real-weights.yml",
+    event: "workflow_dispatch",
+    status: "completed",
+    conclusion: "success",
+    repository: { id: 1299380446, full_name: "SceneWorks/inference" },
+    head_repository: { id: 1299380446, full_name: "SceneWorks/inference" },
+  };
+  const artifact = {
+    id: 9928624696,
+    name: "starvector-terminal-preflight-c6d6a4dbd61ab09c26ff5526632cae2cefea60ed-33851645747-1",
+    size_in_bytes: 6329,
+    digest: "sha256:4df39fc45d36ef11f968aa82c48eda6292f48c54086a4beee4ff3f6e8ba48226",
+    expired: false,
+    workflow_run: {
+      id: 33851645747,
+      head_sha: "c6d6a4dbd61ab09c26ff5526632cae2cefea60ed",
+      repository_id: 1299380446,
+      head_repository_id: 1299380446,
+    },
+  };
+  await validatePreflightMetadata("release/starvector-terminal-campaign-v1.json", artifact, run);
+  for (const [label, target, mutate] of [
+    ["artifact id", "artifact", (value) => { value.id += 1; }],
+    ["artifact name", "artifact", (value) => { value.name += "-other"; }],
+    ["artifact size", "artifact", (value) => { value.size_in_bytes += 1; }],
+    ["artifact digest", "artifact", (value) => { value.digest = `sha256:${"0".repeat(64)}`; }],
+    ["artifact expiry", "artifact", (value) => { value.expired = true; }],
+    ["artifact run", "artifact", (value) => { value.workflow_run.id += 1; }],
+    ["artifact head", "artifact", (value) => { value.workflow_run.head_sha = "0".repeat(40); }],
+    ["artifact repository id", "artifact", (value) => { value.workflow_run.repository_id += 1; }],
+    ["artifact head repository id", "artifact", (value) => { value.workflow_run.head_repository_id += 1; }],
+    ["run id", "run", (value) => { value.id += 1; }],
+    ["run attempt", "run", (value) => { value.run_attempt += 1; }],
+    ["run head", "run", (value) => { value.head_sha = "0".repeat(40); }],
+    ["workflow id", "run", (value) => { value.workflow_id += 1; }],
+    ["workflow name", "run", (value) => { value.name += " other"; }],
+    ["workflow path", "run", (value) => { value.path = ".github/workflows/other.yml"; }],
+    ["workflow event", "run", (value) => { value.event = "push"; }],
+    ["run status", "run", (value) => { value.status = "in_progress"; }],
+    ["run conclusion", "run", (value) => { value.conclusion = "failure"; }],
+    ["repository", "run", (value) => { value.repository.full_name = "fork/inference"; }],
+    ["head repository", "run", (value) => { value.head_repository.full_name = "fork/inference"; }],
+  ]) {
+    const changedArtifact = structuredClone(artifact);
+    const changedRun = structuredClone(run);
+    mutate(target === "artifact" ? changedArtifact : changedRun);
+    await assert.rejects(
+      () => validatePreflightMetadata("release/starvector-terminal-campaign-v1.json", changedArtifact, changedRun),
+      /live preflight artifact and workflow metadata/,
+      label,
+    );
   }
 });
 
@@ -169,7 +305,14 @@ test("Windows pin and transport validation fail before publishing outputs", () =
   assertWindowsPinResolutionFailsBeforeEnvironmentPublication(workflow, 1);
   assertWindowsPinResolutionFailsBeforeEnvironmentPublication(readinessWorkflow, 1);
   assertWindowsPinResolutionFailsBeforeEnvironmentPublication(campaignWorkflow, 2);
-  assert.match(workflow, /\$artifactId = node scripts\\starvector-terminal-provision\.mjs preflight-transport[^\n]*\n\s+if \(\$LASTEXITCODE -ne 0\) \{ throw 'sealed inference preflight transport validation failed' \}\n\s+"artifact-id=\$artifactId" \| Out-File -FilePath \$env:GITHUB_OUTPUT/);
+  const windowsJob = workflow.slice(workflow.indexOf("  provision-windows:"));
+  const transport = windowsJob.indexOf("preflight-transport");
+  const artifactApi = windowsJob.indexOf("actions/artifacts/$artifactId", transport);
+  const runApi = windowsJob.indexOf("actions/runs/$env:STARVECTOR_PREFLIGHT_RUN_ID", artifactApi);
+  const metadata = windowsJob.indexOf("preflight-metadata", runApi);
+  const output = windowsJob.indexOf('"artifact-id=$artifactId"', metadata);
+  const download = windowsJob.indexOf("- name: Download the complete inference preflight artifact", output);
+  assert.ok(transport >= 0 && artifactApi > transport && runApi > artifactApi && metadata > runApi && output > metadata && download > output);
 });
 
 function assertWindowsCorpusCompilesWithoutInheritedRustcWrapper(workflowSource) {
@@ -752,13 +895,60 @@ test("inference checkout publication binds an exact clean detached revision", as
 
 test("pinned inference checkout publication is same-pin idempotent and derives the immutable destination", async () => {
   const root = await mkdtemp(path.join(tmpdir(), "starvector-provision-pinned-checkout-")), source = path.join(root, "source"), hostRoot = path.join(root, "host");
+  await mkdir(hostRoot);
   await mkdir(path.join(source, "release"), { recursive: true }); await mkdir(path.join(source, "scripts", "release"), { recursive: true });
   for (const relative of ["release/starvector-terminal-receipt-v1.schema.json", "release/starvector-terminal-corpus-v1.json", "scripts/release/starvector_terminal_evidence.mjs"]) await writeFile(path.join(source, relative), relative);
   await execFile("git", ["init", source]); await execFile("git", ["-C", source, "add", "."]); await execFile("git", ["-C", source, "-c", "user.name=fixture", "-c", "user.email=fixture@example.com", "commit", "-m", "fixture"]);
   const revision = (await execFile("git", ["-C", source, "rev-parse", "HEAD"])).stdout.trim();
   const expected = terminalPinPaths(hostRoot, revision).inferenceRoot;
-  assert.equal(await installPinnedCheckout(source, hostRoot, revision), revision);
+  // Recover the exact old implementation's interrupted direct-clone shape.
+  await mkdir(expected, { recursive: true });
+  await writeFile(path.join(expected, "partial-clone"), "incomplete");
+  const foreignStaging = `${expected}.staging-foreign-owner`;
+  await mkdir(foreignStaging);
+  await writeFile(path.join(foreignStaging, "owner"), "other provision");
+  assert.deepEqual(
+    await Promise.all([
+      installPinnedCheckout(source, hostRoot, revision),
+      installPinnedCheckout(source, hostRoot, revision),
+      installPinnedCheckout(source, hostRoot, revision),
+    ]),
+    [revision, revision, revision],
+  );
+  assert.equal(await readFile(path.join(foreignStaging, "owner"), "utf8"), "other provision");
   assert.equal(await installPinnedCheckout(source, hostRoot, revision), revision);
   assert.equal((await execFile("git", ["-C", expected, "rev-parse", "HEAD"])).stdout.trim(), revision);
   assert.equal(await lstat(path.join(hostRoot, "inference")).catch((error) => error.code === "ENOENT" ? null : Promise.reject(error)), null);
+  assert.deepEqual((await readdir(path.dirname(expected))).filter((name) => name.includes(`staging-${process.pid}-`)), []);
+
+  await rm(expected, { recursive: true });
+  const outside = path.join(root, "outside-checkout");
+  await mkdir(outside);
+  await writeFile(path.join(outside, "sentinel"), "outside");
+  await symlink(outside, expected, process.platform === "win32" ? "junction" : "dir");
+  await assert.rejects(() => installPinnedCheckout(source, hostRoot, revision), /symlink, junction, reparse|redirected component/);
+  assert.equal(await readFile(path.join(outside, "sentinel"), "utf8"), "outside");
+});
+
+test("checkout concurrency guards are exact-pin scoped", async () => {
+  const root = path.resolve(path.join(tmpdir(), "starvector-lock-scope"));
+  const first = pinnedCheckoutLockPath(root, "1".repeat(40));
+  const second = pinnedCheckoutLockPath(root, "2".repeat(40));
+  assert.notEqual(first, second);
+  assert.equal(path.dirname(first), path.join(root, ".locks"));
+  assert.match(path.basename(first), /^inference-checkout-1{40}\.lock$/);
+});
+
+test("failed atomic checkout removes only its unique staging directory", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "starvector-provision-checkout-failure-"));
+  const destination = path.join(root, "destination");
+  const foreignStaging = `${destination}.staging-foreign-owner`;
+  await mkdir(foreignStaging);
+  await writeFile(path.join(foreignStaging, "owner"), "other provision");
+  await assert.rejects(
+    () => installCheckout(path.join(root, "missing-source"), destination, "a".repeat(40)),
+    /Command failed|repository .* does not exist|fatal:/,
+  );
+  assert.equal(await readFile(path.join(foreignStaging, "owner"), "utf8"), "other provision");
+  assert.deepEqual((await readdir(root)).filter((name) => name.includes(`staging-${process.pid}-`)), []);
 });

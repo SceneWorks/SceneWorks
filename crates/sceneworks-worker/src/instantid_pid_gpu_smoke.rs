@@ -284,6 +284,8 @@ fn instantid_pid_gpu_smoke() {
                 ),
         )
         .expect("stage SDXL components"),
+        openpose: openpose.as_ref().map(|dir| WeightsSource::Dir(dir.clone())),
+        face_dir: Some(face_dir.clone()),
     })
     .expect("load candle InstantId");
     // Attach OpenPose (pose mode) BEFORE the face stack — the engine's documented order. Harmless for

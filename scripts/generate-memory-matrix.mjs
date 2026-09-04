@@ -1111,6 +1111,18 @@ function parseBackendTierOverrides(instantIdSource) {
   return new Map([["instantid_realvisxl:candle", [candleDense]], ...CONVERTER_TIER_OVERRIDES]);
 }
 
+// `instantid.rs` is a large production route, but the matrix consumes exactly one fact from it:
+// the backend-tier override map above. Fingerprint that parsed contract instead of every unrelated
+// implementation detail in the route. Sorting the keys makes the projection stable without hiding
+// tier order, which is itself part of the generated catalog axes.
+function backendTierOverridesRevisionBody(overrides) {
+  return JSON.stringify(
+    [...overrides.entries()]
+      .sort(([left], [right]) => left.localeCompare(right))
+      .map(([key, tiers]) => [key, [...tiers]]),
+  );
+}
+
 function modesFor(model) {
   const modes = (model.capabilities ?? []).filter((capability) => GENERATION_CAPABILITIES.has(capability));
   return modes.length ? sortedUnique(modes) : ["catalog_default"];
@@ -2317,6 +2329,10 @@ async function carryGeneratedFromForUnchangedContract(matrix) {
     "manifest",
     "anchorLoaderClosures",
     "anchorExtractor",
+    // The InstantID source is projected to the exact backend-tier facts the matrix consumes. During
+    // the transition from the old whole-file fingerprint, carry the prior provenance whenever that
+    // projected contract leaves the published document byte-identical.
+    "instantId",
   ]);
   const currentSources = matrix.generatedFrom?.sources ?? {};
   const previousSources = previous.generatedFrom?.sources ?? {};
@@ -2421,6 +2437,7 @@ export async function buildMatrix({ sourceOverrides = {}, cellFilter = null, pub
   const stagedResidencyEngines = parseMlxStagedResidencyEngines(mlxFitBody);
   const candleBespokeStagedLanes = parseCandleBespokeStagedLanes(bodies.memoryRouteRegistry);
   const backendTierOverrides = parseBackendTierOverrides(bodies.instantId);
+  revisionBodies.instantId = backendTierOverridesRevisionBody(backendTierOverrides);
   assertOutOfMatrixEntriesAreStillUnroutable(manifest.models, (model) =>
     resolveRoute(model, routes, videoRoutes, backendScopes(model, routedBackends)),
   );

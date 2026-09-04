@@ -867,7 +867,7 @@ fn builtin_starvector_manifests_are_exact_native_image_to_svg_closures() {
             );
             assert_eq!(
                 candidate["productionClosure"]["sha256"],
-                "a4173d0375075a91d156c9aac718931baacf610047a52c99259c5b0e76226bb4"
+                "f9d6ad6f23c07945d6eb96b1bc24e586921ae01fbb91d5bb16d6ff94f59c44a9"
             );
             assert_eq!(
                 candidate["productionClosure"]["entries"]

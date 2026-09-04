@@ -6,7 +6,7 @@ import { lstat, mkdir, open, readdir, readFile, stat, writeFile } from "node:fs/
 import { promisify } from "node:util";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
-import { INFERENCE_REVISION, readPlanAndLock } from "./starvector-terminal-campaign.mjs";
+import { INFERENCE_REVISION, readPlanAndLock, validateTerminalDispatchInputs } from "./starvector-terminal-campaign.mjs";
 import { isExecutedModule } from "./starvector-terminal-cli.mjs";
 import { fileSha256 } from "./lib/file-sha256.mjs";
 
@@ -246,6 +246,8 @@ async function failureArtifact(output, context, error) {
 }
 
 export async function executeTuple({ sceneWorksRoot, planPath, inferenceRoot, weightsRoot, metricsRoot, leaseRoot, leaseHelper, command, output, tuple, campaignRunId = randomUUID(), permanentPin }) {
+  const { plan: dispatchPlan } = await readPlanAndLock(planPath);
+  validateTerminalDispatchInputs(dispatchPlan, permanentPin, campaignRunId);
   await mkdir(output, { recursive: true }); let release;
   const context = { campaign_run_id: campaignRunId, permanent_pin: permanentPin, tuple, command };
   try {
@@ -315,7 +317,9 @@ export async function consolidateCanonicalArtifacts(receipt, corpus, validator, 
 }
 
 export async function sealReceipt({ sceneWorksRoot, planPath, inferenceRoot, evidenceRoot, output, campaignRunId, permanentPin, syntheticFixture = false }) {
-  const { plan } = await readPlanAndLock(planPath); await verifyInferenceCheckout(inferenceRoot); await verifyPermanentPin(sceneWorksRoot, permanentPin, plan.inference_contract.revision);
+  const { plan } = await readPlanAndLock(planPath);
+  validateTerminalDispatchInputs(plan, permanentPin, campaignRunId);
+  await verifyInferenceCheckout(inferenceRoot); await verifyPermanentPin(sceneWorksRoot, permanentPin, plan.inference_contract.revision);
   const rows = await readdir(evidenceRoot, { recursive: true });
   const rawFiles = rows.filter((name) => name.endsWith("raw-results.json"));
   const suiteFiles = rows.filter((name) => name.endsWith("terminal-suites.json"));

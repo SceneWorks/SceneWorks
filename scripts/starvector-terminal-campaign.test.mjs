@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
-import { readPlanAndLock, validateMetricsLock, validatePlan } from "./starvector-terminal-campaign.mjs";
+import { readPlanAndLock, validateMetricsLock, validatePlan, validateTerminalDispatchInputs } from "./starvector-terminal-campaign.mjs";
 
 const plan = JSON.parse(readFileSync("release/starvector-terminal-campaign-v1.json"));
 const lock = JSON.parse(readFileSync("release/starvector-terminal-metrics-lock-v1.json"));
@@ -10,12 +10,20 @@ test("terminal campaign is fixed, serial, and fail closed", async () => {
   const validated = validatePlan(plan);
   assert.equal(validated.inference_contract.revision, "c6d6a4dbd61ab09c26ff5526632cae2cefea60ed");
   assert.deepEqual(validated.inference_preflight, {
+    repository: "SceneWorks/inference",
+    workflow: {
+      id: 312370029,
+      name: "Real-weight validation",
+      path: ".github/workflows/real-weights.yml",
+      event: "workflow_dispatch",
+    },
     workflow_run_id: "33851645747",
     workflow_run_attempt: 1,
     head_sha: "c6d6a4dbd61ab09c26ff5526632cae2cefea60ed",
     artifact: {
       id: 9928624696,
       name: "starvector-terminal-preflight-c6d6a4dbd61ab09c26ff5526632cae2cefea60ed-33851645747-1",
+      size_in_bytes: 6329,
       digest: "sha256:4df39fc45d36ef11f968aa82c48eda6292f48c54086a4beee4ff3f6e8ba48226",
     },
     inventory_artifacts: [
@@ -41,11 +49,14 @@ test("terminal campaign rejects count, lock, and LPIPS weight drift", () => {
 
 test("terminal campaign rejects every sealed native-preflight provenance mutation", () => {
   for (const [label, mutate] of [
+    ["repository", (value) => { value.inference_preflight.repository = "fork/inference"; }],
+    ["workflow", (value) => { value.inference_preflight.workflow.id += 1; }],
     ["run", (value) => { value.inference_preflight.workflow_run_id = "33851645748"; }],
     ["attempt", (value) => { value.inference_preflight.workflow_run_attempt = 2; }],
     ["head", (value) => { value.inference_preflight.head_sha = "0".repeat(40); }],
     ["artifact id", (value) => { value.inference_preflight.artifact.id += 1; }],
     ["artifact name", (value) => { value.inference_preflight.artifact.name += "-other"; }],
+    ["artifact size", (value) => { value.inference_preflight.artifact.size_in_bytes += 1; }],
     ["artifact digest", (value) => { value.inference_preflight.artifact.digest = `sha256:${"0".repeat(64)}`; }],
     ["inventory", (value) => { value.inference_preflight.inventory_artifacts[0].sha256 = "0".repeat(64); }],
     ["hook", (value) => { value.inference_preflight.hook_logs[0].sha256 = "0".repeat(64); }],
@@ -54,4 +65,28 @@ test("terminal campaign rejects every sealed native-preflight provenance mutatio
     mutate(changed);
     assert.throws(() => validatePlan(changed), /preflight provenance/, label);
   }
+});
+
+test("dispatch identities reject Bash and PowerShell injection-shaped payloads", () => {
+  const pin = "c6d6a4dbd61ab09c26ff5526632cae2cefea60ed";
+  assert.deepEqual(validateTerminalDispatchInputs(plan, pin, "campaign-33851645747"), {
+    permanent_pin: pin,
+    campaign_run_id: "campaign-33851645747",
+  });
+  for (const value of [
+    "$(touch /tmp/starvector-shell-injection)",
+    "campaign'; Write-Output pwned; #",
+    'campaign\"; Start-Process calc; #',
+    "campaign;rm",
+  ]) {
+    assert.throws(
+      () => validateTerminalDispatchInputs(plan, pin, value),
+      /bounded portable identifier/,
+      value,
+    );
+  }
+  assert.throws(
+    () => validateTerminalDispatchInputs(plan, `$(printf ${pin})`, "campaign"),
+    /permanent pin/,
+  );
 });
