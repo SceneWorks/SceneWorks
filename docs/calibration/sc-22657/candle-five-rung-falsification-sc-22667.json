@@ -2425,6 +2425,18 @@
     "scope": "providerContract.assetFacts only",
     "method": "weights-free contract read of the SAME snapshot roots named in each tier’s environment block, through the production seam (inference_runtime::media().memory_strategy_contract). No render, no device allocation, no re-measurement.",
     "why": "inference c6d6a4db stopped the gen-core weight walkers recursing into the hidden .candle-device-format-v1/ cache and split the VAE encoder out of decoder_bytes into a typed ReferenceEncoder overlay. observedMemory is the ORIGINAL a5f643ae measurement and is deliberately untouched: the device the adapter measured did not change, only what the contract claims about it.",
-    "measuredColumnPin": "a5f643ae58a4ed81e6be8280afbf29750da5ffe2"
+    "measuredColumnPin": "a5f643ae58a4ed81e6be8280afbf29750da5ffe2",
+    "measuredColumnValidAtPin": {
+      "verified": "git -C <inference> diff --stat a5f643ae58a4ed81e6be8280afbf29750da5ffe2..c6d6a4dbd61ab09c26ff5526632cae2cefea60ed -- crates/contracts/gen-core/src crates/media/candle-gen (the whole candle-gen tree: every crate in the z_image_turbo:candle and krea_2_turbo:candle loader closures per config/anchor-loader-closures.json, plus every sibling)",
+      "filesChanged": [
+        { "path": "crates/contracts/gen-core/src/lib.rs", "class": "accounting-only", "what": "re-exports CANDLE_DEVICE_FORMAT_CACHE_DIR" },
+        { "path": "crates/contracts/gen-core/src/memory_strategy.rs", "class": "accounting-only", "what": "contract types: the typed ReferenceEncoder overlay and its pricing" },
+        { "path": "crates/contracts/gen-core/src/weightsmeta.rs", "class": "accounting-only", "what": "tensor-free byte walkers (safetensors_dir_bytes / safetensors_path_tensor_headers) skip hidden directories; is_hidden_dir; a unit test. Pricing reads only - the loader opens shards by name, never through these walkers" },
+        { "path": "crates/media/candle-gen/candle-gen-z-image/src/memory_strategy.rs", "class": "accounting-only", "what": "the Z-Image contract's asset facts (transformer_bytes from the source file alone, encoder split out) and tests" },
+        { "path": "crates/media/candle-gen/candle-gen/src/quant/sidecar.rs", "class": "accounting-only", "what": "CACHE_DIR literal re-homed to gen-core's CANDLE_DEVICE_FORMAT_CACHE_DIR constant with the identical value \".candle-device-format-v1\"; the sidecar reader/writer logic is untouched" }
+      ],
+      "candleGenKreaTouched": false,
+      "why": "None of the five files changed between the measured column's pin (a5f643ae) and the landed pin (c6d6a4db) is on a load, pipeline, weights, kernel, quant-compute or device-format execution path: three are contract-accounting functions the adapter's providerContract read exercises (which is exactly what contractRestamp re-read), one is a re-export line, and one moves a string constant without changing its value. crates/media/candle-gen/candle-gen-krea is byte-identical across the range, so the krea_2_turbo measured column needs no argument at all; the z_image_turbo column stands on the same five files. The observedMemory column measured at a5f643ae therefore describes the c6d6a4db binary's device behaviour, and only the contract column was re-read at c6d6a4db."
+    }
   }
 }
