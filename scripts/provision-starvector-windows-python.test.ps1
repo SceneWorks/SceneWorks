@@ -13,6 +13,37 @@ function Assert-Equal {
   if ($Expected -ne $Actual) { throw "$Message (expected '$Expected', got '$Actual')" }
 }
 
+function New-CanonicalZipFromDirectory {
+  param(
+    [Parameter(Mandatory = $true)]
+    [string]$SourceRoot,
+    [Parameter(Mandatory = $true)]
+    [string]$DestinationPath
+  )
+
+  $canonicalSourceRoot = [IO.Path]::GetFullPath($SourceRoot).TrimEnd([IO.Path]::DirectorySeparatorChar)
+  $stream = [IO.File]::Open($DestinationPath, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::None)
+  $archive = [IO.Compression.ZipArchive]::new($stream, [IO.Compression.ZipArchiveMode]::Create, $false)
+  try {
+    foreach ($file in Get-ChildItem -LiteralPath $canonicalSourceRoot -File -Recurse | Sort-Object FullName) {
+      $relativePath = $file.FullName.Substring($canonicalSourceRoot.Length).TrimStart([IO.Path]::DirectorySeparatorChar)
+      $entryName = $relativePath.Replace([IO.Path]::DirectorySeparatorChar, [IO.Path]::AltDirectorySeparatorChar)
+      $entry = $archive.CreateEntry($entryName, [IO.Compression.CompressionLevel]::Optimal)
+      $input = [IO.File]::OpenRead($file.FullName)
+      $output = $entry.Open()
+      try {
+        $input.CopyTo($output)
+      } finally {
+        $output.Dispose()
+        $input.Dispose()
+      }
+    }
+  } finally {
+    $archive.Dispose()
+    $stream.Dispose()
+  }
+}
+
 $root = Join-Path $env:RUNNER_TEMP ("starvector portable python {0}" -f [Guid]::NewGuid().ToString('N'))
 [IO.Directory]::CreateDirectory($root) | Out-Null
 try {
@@ -63,7 +94,7 @@ public static class FakePortablePython {
   $fixtureExeSha256 = Get-StarVectorSha256 (Join-Path $fixtureTools 'python.exe')
   $fixtureDllSha256 = Get-StarVectorSha256 (Join-Path $fixtureTools 'python312.dll')
   $fixtureArchive = Join-Path $root 'python.3.12.10.fixture.nupkg'
-  [IO.Compression.ZipFile]::CreateFromDirectory($fixtureRoot, $fixtureArchive)
+  New-CanonicalZipFromDirectory -SourceRoot $fixtureRoot -DestinationPath $fixtureArchive
   $fixtureSha256 = Get-StarVectorSha256 $fixtureArchive
   $fixtureSha512 = Get-StarVectorSha512 $fixtureArchive
   $fixturePackage = @{
@@ -161,6 +192,26 @@ public static class FakePortablePython {
   }
   Assert-True $traversalRejected 'archive path traversal was not rejected'
   Assert-True (-not (Test-Path -LiteralPath (Join-Path $root 'escape.txt'))) 'archive path traversal wrote outside the staging root'
+
+  $backslashArchive = Join-Path $root 'backslash-name.nupkg'
+  $stream = [IO.File]::Open($backslashArchive, [IO.FileMode]::CreateNew)
+  $zip = [IO.Compression.ZipArchive]::new($stream, [IO.Compression.ZipArchiveMode]::Create, $false)
+  try {
+    $entry = $zip.CreateEntry('tools\python.exe')
+    $writer = [IO.StreamWriter]::new($entry.Open())
+    try { $writer.Write('unsafe noncanonical entry') } finally { $writer.Dispose() }
+  } finally {
+    $zip.Dispose()
+    $stream.Dispose()
+  }
+  $backslashRoot = Join-Path $root 'backslash-root'
+  $backslashRejected = $false
+  try {
+    Expand-StarVectorWindowsPythonPackage -ArchivePath $backslashArchive -DestinationRoot $backslashRoot
+  } catch {
+    $backslashRejected = $_.Exception.Message -like 'portable Python package contains an unsafe archive path:*'
+  }
+  Assert-True $backslashRejected 'archive entry with a backslash name was not rejected'
 
   $entryLimitRoot = Join-Path $root 'entry-limit-root'
   $entryLimitRejected = $false

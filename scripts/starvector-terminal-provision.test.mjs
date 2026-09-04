@@ -236,6 +236,10 @@ function assertWindowsPortablePythonContract(step, source, testSource) {
   assert.match(testSource, /AGENT_TOOLSDIRECTORY = 'E:\\different-runner\\_work\\_tool'/);
   assert.match(testSource, /exclusive lock did not reject a concurrent shared-root provisioner/);
   assert.match(testSource, /portable Python did not reject a \$junctionKind-root junction/);
+  assert.doesNotMatch(testSource, /CreateFromDirectory/);
+  assert.match(testSource, /Replace\(\[IO\.Path\]::DirectorySeparatorChar, \[IO\.Path\]::AltDirectorySeparatorChar\)/);
+  assert.match(testSource, /CreateEntry\('tools\\python\.exe'\)/);
+  assert.match(testSource, /archive entry with a backslash name was not rejected/);
   assert.match(testSource, /archive entry-count limit was not enforced/);
   assert.match(testSource, /archive expansion-size limit was not enforced/);
   assert.match(testSource, /Install-StarVectorWindowsPythonPackage -DestinationRoot \$officialRoot/);
