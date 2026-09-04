@@ -568,10 +568,15 @@ test("readiness workflow cannot start services, claim leases, or execute models"
 });
 
 test("readiness CLI writes a structured failure report before returning nonzero", async () => {
-  const root = await mkdtemp(path.join(tmpdir(), "starvector-readiness-report-")), output = path.join(root, "nested", "report.json");
-  await assert.rejects(() => execFile(process.execPath, ["scripts/starvector-terminal-readiness.mjs", root, path.join(root, "missing-plan.json"), root, root, root, process.execPath, root, "0".repeat(40), output]));
-  const report = JSON.parse(await readFile(output, "utf8"));
-  assert.equal(report.schema_version, 1); assert.equal(report.kind, "starvector_terminal_readiness"); assert.equal(report.status, "failed"); assert.match(report.error, /ENOENT/);
+  const root = await mkdtemp(path.join(tmpdir(), "starvector-readiness-report-"));
+  for (const [platform, expectedError] of [["darwin", /ENOENT/], ["linux", /^terminal GPU: unsupported campaign platform linux$/]]) {
+    const output = path.join(root, "nested", `${platform}.json`);
+    // Set only this test child's platform before loading the CLI. Both failures precede GPU work.
+    const bootstrap = `data:text/javascript,${encodeURIComponent(`Object.defineProperty(process, "platform", { value: ${JSON.stringify(platform)} })`)}`;
+    await assert.rejects(() => execFile(process.execPath, ["--import", bootstrap, "scripts/starvector-terminal-readiness.mjs", root, path.join(root, "missing-plan.json"), root, root, root, process.execPath, root, "0".repeat(40), output]));
+    const report = JSON.parse(await readFile(output, "utf8"));
+    assert.equal(report.schema_version, 1); assert.equal(report.kind, "starvector_terminal_readiness"); assert.equal(report.status, "failed"); assert.equal(report.runner.os, platform); assert.match(report.error, expectedError);
+  }
 });
 
 test("readiness validates the complete service tree closure without materializing it", async () => {
