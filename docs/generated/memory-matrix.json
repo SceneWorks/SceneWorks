@@ -1,7 +1,7 @@
 {
   "schemaVersion": 11,
   "generatedFrom": {
-    "sceneWorksRevision": "source-tree:2ab971a5cd660a1dfda4f70afa1a42ce0c7f21bbce189e854bcfb8797c88d112",
+    "sceneWorksRevision": "source-tree:a921dfe14bdf7d2c8d624ac1669a2d4cc98500e11c1f422dcc0f20fb51be64d2",
     "sources": {
       "manifest": {
         "path": "config/manifests/builtin.models.jsonc",
@@ -73,7 +73,7 @@
       },
       "anchorLoaderClosures": {
         "path": "config/anchor-loader-closures.json",
-        "sha256": "8c9beb21ca21dab094ed2069063a5f41524881bdc8d15f20d8d5aa37ce122d68"
+        "sha256": "b93457b5dd6be8c03e527fbe810f6258793d2bf4763a95bf3138011fe8a098b1"
       },
       "anchorDerivation": {
         "path": "crates/sceneworks-core/src/memory_anchor.rs",
@@ -154,12 +154,12 @@
       {
         "id": "minimax_h3",
         "epic": 17137,
-        "reason": "no familyGroup arm and no video-route resolver row"
+        "reason": "the MLX resolver is a PREFIX PREDICATE this generator cannot enumerate, and no Candle video route arm exists at all"
       },
       {
         "id": "minimax_h3_ref",
         "epic": 17137,
-        "reason": "no familyGroup arm and no video-route resolver row"
+        "reason": "the MLX resolver is a PREFIX PREDICATE this generator cannot enumerate, and no Candle video route arm exists at all"
       }
     ],
     "anchors": 15,

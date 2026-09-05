@@ -2339,15 +2339,51 @@ export const IMAGE_MLX_DERIVATION_ENTRY_POINTS = Object.freeze([
  *
  * This used to be read from the rung-4 survey, which has left the fingerprint with the rest of the
  * measurement-absence machinery. The fact itself survives the collapse and is not a memory fact at
- * all: `familyGroup` has no arm for MiniMax-H3 and no video-route resolver row exists, so admitting
- * these entries fails generation at `resolveRoute` rather than producing a row. Declared here, in
- * the generator, exactly like `UNROUTED_CATALOG_ENTRIES` — and it fails LOUDLY the day the family is
- * routed, because `assertOutOfMatrixEntriesAreStillUnroutable` refuses an entry the generator can
- * now resolve.
+ * all. Declared here, in the generator, exactly like `UNROUTED_CATALOG_ENTRIES` — and it fails
+ * LOUDLY the day the family is routed, because `assertOutOfMatrixEntriesAreStillUnroutable` refuses
+ * an entry the generator can now resolve.
+ *
+ * ## sc-22737: the recorded reason was STALE, and the true one is narrower
+ *
+ * The old reason read "no familyGroup arm and no video-route resolver row exists". Only the first
+ * clause was ever a fact about this generator, and the second was wrong about the WORKER:
+ * `video_jobs/minimax_h3.rs#minimax_h3_engine_id` exists and `resolve_video_route` consults it, so
+ * the MLX lane IS routed. Re-examined against both sources, the two conditions that actually keep
+ * these entries out are:
+ *
+ * 1. **MLX — the resolver is not in a shape this generator can read.** Every other family's
+ *    `*_engine_id` enumerates its catalog ids (`match model { "a" => Some("x"), … }`, `model == …`,
+ *    or `matches!(model, …)`), and `parseVideoEngineIds` parses exactly those three forms into a
+ *    model -> engine map. MiniMax-H3's is
+ *    `is_minimax_h3_model(model).then_some(MINIMAX_H3_ENGINE_ID)`, and that predicate
+ *    (`sceneworks_core::video_request::is_minimax_h3_model`) is `model.starts_with("minimax_h3")` —
+ *    a PREFIX test, which enumerates nothing. Admitting the family therefore needs the parser to
+ *    grow a fourth form that resolves a prefix predicate out of another crate and expands it
+ *    against the manifest, not merely a `VIDEO_ROUTE_RESOLVERS` row; adding the row alone throws
+ *    `minimax_h3_engine_id declared no model -> engine arm`, which is how this was measured.
+ *
+ * 2. **Candle — the lane is not routed at all.** `video_jobs/candle.rs#candle_video_engine_id` has
+ *    no `minimax_h3` arm, so no Candle MiniMax job resolves an engine, and
+ *    `memory_route_registry.rs` declares no MiniMax row on either lane. Claiming Candle MiniMax
+ *    cells would claim cells no lane can open — the SAME class sc-22737 removed for
+ *    `ltx_2_3:bf16:candle`, re-introduced. So the Candle half is an UNROUTED (lane, tier), which is
+ *    epic 22723 E1's one exemption, and routing it is a production behaviour change (a missing arm
+ *    falls through to `CandleVideoRoute::Stub`, which hands the user a procedural fake video) that
+ *    does not belong to a measurability story.
+ *
+ * The `mlx:minimax_h3` and `mlx:minimax_h3_ref` ANCHORS are nonetheless planned, armed and closed
+ * over by sc-22737 (`config/memory-calibration-plan.json`,
+ * `crates/sceneworks-memory-adapter/src/bin/mlx.rs`), so the cells are measurable through
+ * `measure-memory-catalog.mjs` — which is the oracle epic 22723 E2 names — even while this
+ * generator still subtracts them from the MATRIX universe.
  */
+const MINIMAX_OUT_OF_MATRIX_REASON =
+  "the MLX resolver is a PREFIX PREDICATE this generator cannot enumerate, and no Candle video " +
+  "route arm exists at all";
+
 export const OUT_OF_MATRIX_CATALOG_ENTRIES = new Map([
-  ["minimax_h3", { epic: 17137, reason: "no familyGroup arm and no video-route resolver row" }],
-  ["minimax_h3_ref", { epic: 17137, reason: "no familyGroup arm and no video-route resolver row" }],
+  ["minimax_h3", { epic: 17137, reason: MINIMAX_OUT_OF_MATRIX_REASON }],
+  ["minimax_h3_ref", { epic: 17137, reason: MINIMAX_OUT_OF_MATRIX_REASON }],
 ]);
 
 /**

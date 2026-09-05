@@ -900,10 +900,42 @@ fn plain_execution_path(request: &Value) -> Result<&'static str, String> {
         "chroma1_hd" => Ok(CHROMA1_HD_PLAIN_EXECUTION_PATH),
         "chroma1_base" => Ok(CHROMA1_BASE_PLAIN_EXECUTION_PATH),
         "chroma1_flash" => Ok(CHROMA1_FLASH_PLAIN_EXECUTION_PATH),
+        // sc-22737: the STILL Bernini entry. `bernini` and `bernini_image` are two catalog entries
+        // on ONE engine provider id, and only the still one reaches this far — the video one is
+        // dispatched above `validate_still_geometry` by `sc22737_video_arm`. Resolved by name
+        // rather than assumed, so a video plan row that somehow reached the still gate is refused
+        // naming the member instead of silently borrowing the still route's execution path.
+        BERNINI_CANDLE_ID => {
+            bernini_candle_still_member(request).map(|_| BERNINI_CANDLE_IMAGE_EXECUTION_PATH)
+        }
         provider => Err(format!(
             "Candle five-rung calibration does not implement provider {provider:?}"
         )),
     }
+}
+
+/// Refuse any Bernini catalog entry but the STILL one at the still gate (sc-22737).
+///
+/// `bernini` (video) and `bernini_image` (still) share the engine provider id `bernini`, so the
+/// provider alone cannot say which member a plan row means. The video member is dispatched above
+/// the still gate and never arrives here; if it does, the plan is asking for a video record on the
+/// image path, and the two are not interchangeable — a still record carries `frames: 1` and the
+/// `text_to_image` mode key, which is a different admission key from the one the video route asks
+/// under. Refused BY NAME rather than defaulted.
+fn bernini_candle_still_member(request: &Value) -> Result<&'static str, String> {
+    let model_id = protocol::planned(request)?
+        .pointer("/target/modelId")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "planned.target.modelId must be a string".to_owned())?;
+    if model_id != BERNINI_CANDLE_IMAGE_MODEL_ID {
+        return Err(format!(
+            "the Candle Bernini still path serves catalog entry \
+             {BERNINI_CANDLE_IMAGE_MODEL_ID:?}, got modelId {model_id:?}; \
+             {BERNINI_CANDLE_VIDEO_MODEL_ID:?} is the video entry and is measured by the sc-22737 \
+             video arm instead"
+        ));
+    }
+    Ok(BERNINI_CANDLE_IMAGE_MODEL_ID)
 }
 
 /// The calibration label this Candle target refuses a non-still geometry under (sc-18808).
@@ -950,6 +982,10 @@ fn still_calibration_label(request: &Value) -> Result<&'static str, String> {
         CHROMA1_HD_ID => Ok(CHROMA1_HD_STILL_CALIBRATION),
         CHROMA1_BASE_ID => Ok(CHROMA1_BASE_STILL_CALIBRATION),
         CHROMA1_FLASH_ID => Ok(CHROMA1_FLASH_STILL_CALIBRATION),
+        // sc-22737: the still Bernini entry only — see `bernini_candle_still_member`.
+        BERNINI_CANDLE_ID => {
+            bernini_candle_still_member(request).map(|_| BERNINI_CANDLE_STILL_CALIBRATION)
+        }
         provider => Err(format!(
             "Candle five-rung calibration does not implement provider {provider:?}"
         )),
@@ -1041,6 +1077,15 @@ fn five_rung_calibration_fingerprint(provider_id: &str, tier: &str) -> Option<St
             "{}-{tier}-cuda-{CHROMA1_CANDLE_LADDER_REVISION}",
             provider_id.replace('_', "-")
         )),
+        // sc-22737. `candle-gen-bernini` mints `bernini-{route}-{tier}-candle-dual-expert-ladder-v1`
+        // per (provider, ARTIFACT-PROVEN tier) — the packing its `production_assets` has already
+        // reconciled against the transformer's own `quantize_config.json` and tensor geometry, so a
+        // dense root asked for as q4 never reaches the identity at all. Every SceneWorks load
+        // resolves the `image` route (`bernini_renderer` is registered by the engine but named by
+        // no load path in this repository), so the route token is constant and the tier is the only
+        // axis. The capture still refuses a loaded contract whose identity differs from this, so a
+        // drift is caught at the pin bump rather than inside a record.
+        BERNINI_CANDLE_ID => Some(format!("bernini-image-{tier}-candle-dual-expert-ladder-v1")),
         _ => None,
     }
 }
@@ -1058,6 +1103,9 @@ fn five_rung_family_slug(provider_id: &str) -> Option<&'static str> {
         CHROMA1_HD_ID => Some("chroma1-hd"),
         CHROMA1_BASE_ID => Some("chroma1-base"),
         CHROMA1_FLASH_ID => Some("chroma1-flash"),
+        // sc-22737. `bernini-image`, not `bernini`: the slug names the CATALOG ENTRY this fixture
+        // measures, and the bare `bernini` fixtures belong to the video member's own arm.
+        BERNINI_CANDLE_ID => Some("bernini-image"),
         _ => None,
     }
 }
@@ -1599,6 +1647,23 @@ fn load_five_rung_generator(request: &Value) -> Result<LoadedFiveRungGenerator, 
                 "SCENEWORKS_CHROMA1_FLASH_ROOT",
                 protocol::CHROMA1_FLASH_REPOSITORY,
             ),
+            // sc-22737. The STILL Bernini entry. Its artifact is the CANDLE rehost
+            // `SceneWorks/bernini` — a different repository from the macOS `SceneWorks/bernini-mlx`
+            // one — which the manifest ships untiered at the download level while carrying `q4/`,
+            // `q8/` and `bf16/` subtrees inside the snapshot, so the load root is still the tier
+            // directory (`five_rung_root_is_tiered` is true here). The video member never reaches
+            // this loader: it is dispatched above the still gate by `sc22737_video_arm`.
+            BERNINI_CANDLE_ID => {
+                bernini_candle_still_member(request)?;
+                (
+                    BERNINI_CANDLE_ID,
+                    BERNINI_CANDLE_IMAGE_EXECUTION_PATH,
+                    "SCENEWORKS_BERNINI_CANDLE_REPOSITORY",
+                    "SCENEWORKS_BERNINI_CANDLE_REVISION",
+                    "SCENEWORKS_BERNINI_CANDLE_ROOT",
+                    protocol::BERNINI_CANDLE_REPOSITORY,
+                )
+            }
             provider => {
                 return Err(format!(
                     "Candle five-rung calibration does not implement provider {provider:?}"
@@ -2929,6 +2994,7 @@ fn five_rung_evidence_story(provider_id: &str) -> &'static str {
     match provider_id {
         FLUX1_DEV_ID | FLUX1_SCHNELL_ID => "sc-22726",
         SD3_5_LARGE_ID | SD3_5_LARGE_TURBO_ID | SD3_5_MEDIUM_ID => "sc-22730",
+        BERNINI_CANDLE_ID => "sc-22737",
         _ => "sc-16402",
     }
 }
@@ -4276,12 +4342,15 @@ fn run_sc22737_video_capture(request: &Value, arm: Sc22737VideoArm) -> Result<Va
         runtime_cuda::catalog().map_err(|error| format!("build CUDA catalog: {error}"))?;
     let mut vram = certifying_vram_probe();
     let load_sample = vram.phase();
-    let generator = catalog.media().load(arm.engine_id, &spec).map_err(|error| {
-        format!(
-            "load real {} {} {} generator: {error}",
-            arm.engine_id, arm.model_id, target.tier
-        )
-    })?;
+    let generator = catalog
+        .media()
+        .load(arm.engine_id, &spec)
+        .map_err(|error| {
+            format!(
+                "load real {} {} {} generator: {error}",
+                arm.engine_id, arm.model_id, target.tier
+            )
+        })?;
     vram.end_load(load_sample);
     let contract = generator
         .memory_strategy_contract()
@@ -4356,7 +4425,12 @@ fn run_sc22737_video_capture(request: &Value, arm: Sc22737VideoArm) -> Result<Va
     let mut scope = generator
         .begin_memory_strategy_request(&context)
         .map_err(|error| format!("begin {} capture scope: {error}", arm.engine_id))?
-        .ok_or_else(|| format!("{} selection did not create a provider scope", arm.engine_id))?;
+        .ok_or_else(|| {
+            format!(
+                "{} selection did not create a provider scope",
+                arm.engine_id
+            )
+        })?;
     let parameters = context.selection.parameters;
     match (parameters.decode_tile_edge, parameters.decode_overlap) {
         (Some(edge), Some(overlap)) => scope
@@ -4460,7 +4534,10 @@ fn run_sc22737_video_capture(request: &Value, arm: Sc22737VideoArm) -> Result<Va
     let (frames, fps, audio) = match output {
         GenerationOutput::Video { frames, fps, audio } => (frames, fps, audio),
         GenerationOutput::Images(_) => {
-            return Err(format!("{} returned images, not a video clip", arm.model_id))
+            return Err(format!(
+                "{} returned images, not a video clip",
+                arm.model_id
+            ))
         }
         GenerationOutput::Audio(_) => {
             return Err(format!(
@@ -4477,8 +4554,8 @@ fn run_sc22737_video_capture(request: &Value, arm: Sc22737VideoArm) -> Result<Va
     }
     // The soundtrack is half of what a joint A/V family denoises; a record that did not observe one
     // is not a record of the render it claims.
-    let audio =
-        audio.filter(|track| !track.samples.is_empty() && track.sample_rate > 0 && track.channels > 0);
+    let audio = audio
+        .filter(|track| !track.samples.is_empty() && track.sample_rate > 0 && track.channels > 0);
     if arm.requires_audio && audio.is_none() {
         return Err(format!(
             "{} render returned no non-empty audio track, but this family denoises video and audio \
@@ -4505,10 +4582,10 @@ fn run_sc22737_video_capture(request: &Value, arm: Sc22737VideoArm) -> Result<Va
         target.height,
         &frame_shapes,
     )?;
-    let conditioning_bytes = decimal_gb_to_bytes(
-        peaks[0]
-            .ok_or_else(|| format!("{} did not expose the conditioning boundary", arm.engine_id))?,
-    );
+    let conditioning_bytes =
+        decimal_gb_to_bytes(peaks[0].ok_or_else(|| {
+            format!("{} did not expose the conditioning boundary", arm.engine_id)
+        })?);
     let denoise_bytes = decimal_gb_to_bytes(
         peaks[1].ok_or_else(|| format!("{} did not expose the denoise boundary", arm.engine_id))?,
     );
@@ -4609,7 +4686,11 @@ fn routes_to_five_rung_reference(request: &Value) -> Result<bool, String> {
         || MAGE_ARMS.iter().any(|arm| arm.provider == provider)
         || provider == SD3_5_LARGE_ID
         || provider == SD3_5_LARGE_TURBO_ID
-        || provider == SD3_5_MEDIUM_ID)
+        || provider == SD3_5_MEDIUM_ID
+        // sc-22737: the STILL Bernini entry has no inline arm either. The VIDEO entry never
+        // reaches this function — `sc22737_video_arm` dispatches it above the still gate — so
+        // naming the shared engine provider id here claims only the still member.
+        || provider == BERNINI_CANDLE_ID)
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -5163,6 +5244,16 @@ fn run(request: &Value) -> Result<Value, String> {
     // exist to measure.
     if candle_wan_scail2::implements(provider) {
         return candle_wan_scail2::run(request);
+    }
+    // sc-22737: Bernini's VIDEO entry, LTX-2.3 and both MiniMax-H3 entries dispatch above the
+    // shared still gate for the same reason the two blocks above do — `validate_still_geometry`
+    // would refuse the multi-frame geometry these arms exist to measure. `sc22737_video_arm`
+    // answers `None` for a provider this block does not serve AND for Bernini's STILL entry
+    // (`bernini_image`), which is an image route and rides the shared five-rung reference path
+    // below; it errors by name only for an unknown `(provider, modelId)` pair on a provider it
+    // does serve.
+    if let Some(arm) = sc22737_video_arm(request)? {
+        return run_sc22737_video_capture(request, arm);
     }
     // sc-22726: PuLID-FLUX dispatches ABOVE the shared plain-overlay gate, like LTX-2.5. Its
     // declared overlay is `identity`, so routing it through `validate_plain_overlay_target` would

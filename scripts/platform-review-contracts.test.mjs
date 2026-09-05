@@ -545,6 +545,10 @@ test("windows-candle captures and schema-checks the SC-21714 Krea anchor record"
       ["run_pulid_flux_capture", "certifying_vram_probe()"],
       // The Qwen edit bespoke arm (sc-22728).
       ["run_qwen_edit", "certifying_vram_probe()"],
+      // The sc-22737 video block: Bernini's video entry, LTX-2.3 and both MiniMax-H3 entries share
+      // ONE capture, so one probe owner covers all four. It certifies an idle GPU BEFORE it samples
+      // — unlike LTX-2.5 above, which cannot because that arm renders first.
+      ["run_sc22737_video_capture", "certifying_vram_probe()"],
     ],
     "every Candle VRAM probe must be an allowlisted certifying spelling, built once by its named arm",
   );
