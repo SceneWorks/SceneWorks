@@ -816,29 +816,111 @@ test("MAGE_COMPONENT_IDS are the adapter's own component-id constants", async ()
   }
 });
 
-// Every Mage plan row's `calibrationFingerprint` must be a string the PRODUCTION contract can emit
-// for that lane: `mlx-gen-mage` publishes ONE shared identity across all six routes and all tiers
-// (`model.rs` MEMORY_CALIBRATION_FINGERPRINT), while `candle-gen-mage` derives a per-provider one
-// (`memory_strategy.rs` `fingerprint`). A plan row naming anything else is a capture that loads real
-// weights and then fails on the fingerprint comparison inside the arm.
-test("every mage-flow plan row names a fingerprint its engine can emit", async () => {
+// Every Mage plan row's `calibrationFingerprint` must be the string the PRODUCTION contract emits
+// for that cell, and every row's `loadShape` the shape the WORKER loads that cell under. Both are
+// per (lane, tier) tables, bound here as the adapters bind them (`mage_calibration_fingerprint` in
+// both `mlx.rs` and `candle.rs`, which refuse a plan row naming anything else BEFORE the load):
+//
+// * MLX: `mlx-gen-mage` `production_calibration_fingerprint` (inference PR 953) —
+//   `mage-flow-<route>-<tier>-mlx-shared-ladder-v1`, 18 cells; the registry-conformance family
+//   (`mage-flow-mlx-registry-behavior-v1-<route>-<tier>`) and the retired single string
+//   (`mage-flow-mlx-shared-ladder-2026-08-03-v1`) are never production identities.
+// * Candle: `candle-gen-mage` `production_calibration_fingerprint` —
+//   `mage-flow-cuda-<provider>-<tier>-shared-ladder-v3`, 18 cells.
+// * Shape: the worker's MLX stream evaluates Mage `Applied + Deferred` on every tier (typed rules,
+//   BTR declared on all three tiers), while its Candle stream matches the generated BTR row's own
+//   `tiers` (`["bf16"]`) — deferred on bf16, refused (eager) on q4/q8. The worker's
+//   `memory_route_registry` Mage tests drive both evaluators over the real manifest entries and pin
+//   these rows to them.
+//
+// The cell set is derived (family x shipped tiers x routed lanes), never a frozen count.
+test("every mage-flow plan row names its cell's production identity and the worker's load shape", async () => {
   const plan = await readPlan();
-  const mage = Object.entries(plan.anchors).filter(([, row]) => row.provider.startsWith("mage_flow"));
-  assert.equal(mage.length, 36, "six members x three tiers x two lanes are planned");
+  const family = [
+    "mage_flow", "mage_flow_base", "mage_flow_turbo",
+    "mage_flow_edit", "mage_flow_edit_base", "mage_flow_edit_turbo",
+  ];
+  const expectedKeys = (await shippedTieredCells()).filter((cell) => family.includes(cell.modelId)).map((cell) => cell.key).sort();
+  const mage = Object.entries(plan.anchors).filter(([, row]) => family.includes(row.provider));
+  assert.deepEqual(mage.map(([key]) => key).sort(), expectedKeys, "the planned Mage cells are exactly the shipped ones");
+  const route = (provider) => provider.replaceAll("_", "-");
+  const identities = new Set();
   for (const [key, row] of mage) {
-    const { backend } = anchorParts(key);
+    const { modelId, tier, backend } = anchorParts(key);
+    assert.equal(row.provider, modelId, `${key}: catalog id and engine provider id are equal on every Mage row`);
     const expected = backend === "mlx"
-      ? "mage-flow-mlx-shared-ladder-2026-08-03-v1"
-      : `mage-flow-cuda-shared-ladder-provider-abi-v2-${row.provider.replaceAll("_", "-")}`;
+      ? `mage-flow-${route(row.provider)}-${tier}-mlx-shared-ladder-v1`
+      : `mage-flow-cuda-${route(row.provider)}-${tier}-shared-ladder-v3`;
     assert.equal(row.calibrationFingerprint, expected, `${key} names a fingerprint ${backend} cannot emit`);
-    // Both lanes load the anchor eagerly: MLX composes the resident rung, and the worker leaves the
-    // candle shape at its `EagerMaterialization` default (Mage has no `memory_route_registry` rule
-    // and its manifest `candle` block declares no load shape). The candle contract keys its
-    // calibration identity on `spec.load_shape`, so a deferred plan row would name an identity the
-    // worker's own load never emits.
-    assert.equal(row.loadShape, "eager_materialization", `${key} must plan the shape the worker loads`);
+    assert.ok(!row.calibrationFingerprint.startsWith("mage-flow-mlx-registry-behavior-v1"), `${key} names a weights-free conformance string`);
+    assert.notEqual(row.calibrationFingerprint, "mage-flow-mlx-shared-ladder-2026-08-03-v1", `${key} names the retired single string`);
+    assert.ok(!identities.has(row.calibrationFingerprint), `${key} shares its identity with another cell`);
+    identities.add(row.calibrationFingerprint);
+    const shape = backend === "mlx" || tier === "bf16" ? "deferred_materialization" : "eager_materialization";
+    assert.equal(row.loadShape, shape, `${key} must plan the shape the worker loads`);
     assert.equal(row.overlay, "none", `${key} carries no overlay`);
   }
+  assert.equal(identities.size, expectedKeys.length, "one identity per cell");
+});
+
+// The manifest's six MLX Mage contract blocks carry the ENGINE'S weights-free conformance identity
+// per row, as every declared MLX family does (FLUX.1: `flux-one-static-registry-behavior-v2-dev`).
+// `mlx-gen-mage` publishes that identity per (route, tier), so the rows are split per tier and no
+// row may carry a production string, the retired single string, or a multi-tier `tiers` list.
+test("every mage-flow MLX manifest row declares its own per-tier registry-conformance identity", async () => {
+  const models = await readManifestModels();
+  for (const modelId of Object.keys(PROVIDER_FAMILIES).filter((id) => id.startsWith("mage_flow"))) {
+    const contract = models.find((model) => model.id === modelId)?.mlx?.memoryStrategyContract;
+    assert.ok(contract, `${modelId} declares an MLX memory contract`);
+    assert.equal(contract.provider, modelId);
+    const cells = new Set();
+    for (const row of contract.implementations) {
+      assert.deepEqual(Object.keys(row).filter((k) => k === "tiers"), ["tiers"], `${modelId}/${row.rung} declares tiers`);
+      assert.equal(row.tiers.length, 1, `${modelId}/${row.rung} rows are split per tier, got ${JSON.stringify(row.tiers)}`);
+      const [tier] = row.tiers;
+      assert.equal(row.fingerprint, `mage-flow-mlx-registry-behavior-v1-${modelId.replaceAll("_", "-")}-${tier}`, `${modelId}/${row.rung}/${tier}`);
+      cells.add(`${row.rung}:${tier}`);
+    }
+    assert.deepEqual(
+      [...cells].sort(),
+      ["bounded_attention", "bounded_decode", "bounded_transformer_residency", "resident", "staged_residency"]
+        .flatMap((rung) => ["bf16", "q4", "q8"].map((tier) => `${rung}:${tier}`)).sort(),
+      `${modelId} declares every rung on every shipped tier exactly once`,
+    );
+  }
+});
+
+// A Mage cell whose components row for THIS tier is not declared (or whose components repo has no
+// rows at all) is `weights_missing` — planned and armed, merely not bindable on this host — and
+// never a thrown error, which would abort the whole `--list` for every other cell (sc-22733 review).
+test("a mage-flow cell with no components row for its tier is weights_missing, not an error", async () => {
+  const family = PROVIDER_FAMILIES.mage_flow;
+  const variant = (tier) => ({ repo: family.repo, revision: REVISION, variant: tier, files: [`${tier}/*`] });
+  const component = (tier, componentId) => ({
+    repo: MAGE_COMPONENTS.repo, revision: UPSTREAM, coRequisite: true, componentId, variant: tier,
+    subdir: `${tier}/${componentId}`, files: [`${tier}/${componentId}/*`],
+  });
+  const models = [
+    { id: "mage_flow", downloads: [variant("q4"), variant("bf16"), ...MAGE_COMPONENT_IDS.map((id) => component("q4", id))] },
+    { id: "mage_flow_base", downloads: [{ ...variant("q4"), repo: PROVIDER_FAMILIES.mage_flow_base.repo }] },
+  ];
+  const hub = await fakeHub([
+    [family.repo, REVISION, "q4"],
+    [family.repo, REVISION, "bf16"],
+    [PROVIDER_FAMILIES.mage_flow_base.repo, REVISION, "q4"],
+    ...MAGE_COMPONENT_IDS.map((id) => [MAGE_COMPONENTS.repo, UPSTREAM, "q4", id]),
+  ]);
+  const context = { models, backend: "mlx", hubs: [hub], current: new Map(), captured: new Map() };
+  const runnable = await classifyAnchor("mage_flow:q4:mlx", { provider: "mage_flow" }, context);
+  assert.equal(runnable.status, "runnable", runnable.reason);
+  assert.equal(runnable.env[`SCENEWORKS_${MAGE_COMPONENTS.env}_ROOT`], snapshotPath(hub, MAGE_COMPONENTS.repo, UPSTREAM));
+  const noTierRow = await classifyAnchor("mage_flow:bf16:mlx", { provider: "mage_flow" }, context);
+  assert.equal(noTierRow.status, "weights_missing");
+  assert.match(noTierRow.reason, /declares no .*Mage-Flow-Components-mlx components row for tier bf16/);
+  assert.ok(noTierRow.roots.some((root) => root.label === "components snapshot"), "the missing root is named");
+  const noRows = await classifyAnchor("mage_flow_base:q4:mlx", { provider: "mage_flow_base" }, context);
+  assert.equal(noRows.status, "weights_missing");
+  assert.match(noRows.reason, /mage_flow_base declares no .* components row for tier q4/);
 });
 
 // The catalog-wide burndown. `todo` until the terminal story of epic 22723 (sc-22738) promotes it:

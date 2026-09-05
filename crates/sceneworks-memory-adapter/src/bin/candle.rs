@@ -1104,6 +1104,8 @@ fn load_mage_generator(request: &Value, arm: MageArm) -> Result<LoadedFiveRungGe
     validate_mage_mode(request, arm)?;
     let tier = planned_tier(request)?;
     validate_fixture_binds_tier_and_geometry(request)?;
+    validate_mage_plan_identity(request, arm, tier)?;
+    let load_shape = mage_planned_load_shape(request)?;
     let repository = protocol::required_env(arm.repository_env)?;
     let revision = protocol::required_env(arm.revision_env)?;
     protocol::validate_artifact_identity(&repository, &revision, arm.repository)?;
@@ -1136,7 +1138,7 @@ fn load_mage_generator(request: &Value, arm: MageArm) -> Result<LoadedFiveRungGe
         &components_revision,
         protocol::MAGE_COMPONENTS_REPOSITORY,
     )?;
-    let spec = mage_load_spec(tier, root, &components_root)?;
+    let spec = mage_load_spec(tier, load_shape, root, &components_root)?;
     let catalog =
         runtime_cuda::catalog().map_err(|error| format!("build CUDA catalog: {error}"))?;
     let mut vram = certifying_vram_probe();
@@ -1699,10 +1701,12 @@ const MAGE_SEED: u64 = 22733;
 /// One member of the Mage-Flow family. `candle-gen-mage` registers SIX generators (`lib.rs`
 /// `REGISTRATION`, `BASE_`, `TURBO_`, `EDIT_`, `EDIT_BASE_`, `EDIT_TURBO_`), one per catalog id, and
 /// the CUDA catalog registers all six (`candle-gen-catalog` `candle_gen_mage::register_providers`).
-/// Each publishes its OWN calibration identity (`memory_strategy.rs` `fingerprint`:
-/// `mage-flow-cuda-shared-ladder-provider-abi-v2-<provider>`), so a member measured under another's
-/// key would be caught by the fingerprint comparison — the table below still binds member, artifact
-/// and fixture so it is caught BEFORE the load is paid for.
+/// Each publishes its OWN per-tier calibration identity (`memory_strategy.rs`
+/// `production_calibration_fingerprint`: `mage-flow-cuda-<provider>-<tier>-shared-ladder-v3`, from
+/// `resolved_quant(spec)`), so a member or a tier measured under another's key would be caught by
+/// the fingerprint comparison — the table below still binds member, artifact and fixture, and
+/// [`mage_calibration_fingerprint`] binds the identity, so both are caught BEFORE the load is paid
+/// for.
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct MageArm {
     provider: &'static str,
@@ -1920,23 +1924,37 @@ fn validate_mage_fixture(request: &Value, arm: MageArm, tier: &str) -> Result<()
 ///   carried on the spec rather than read out of `transformer/config.json`.
 /// * The offload policy is `Sequential`: the candle anchor rung is `staged_residency`
 ///   (`memory-calibration-harness.mjs` `ANCHOR_STRATEGY.candle`), which is exactly the rung the
-///   worker selects `use_sequential` for.
-/// * The load shape stays `EagerMaterialization` — the DEFAULT, and what the worker leaves it at:
-///   Mage has no row in `memory_route_registry::RULES` and its manifest `candle` block declares no
-///   `memoryStrategyContract`, so neither `evaluate_declared_candle_load_shape` nor
-///   `apply_registered_load_shape` moves it. Reusing the five-rung path's `DeferredMaterialization`
-///   here would measure rung 4's load under the staged rung's key and, because the candle Mage
-///   contract keys `MemoryCalibrationIdentity` on `spec.load_shape`, would publish an identity the
-///   worker's own load never emits.
+///   worker selects `use_sequential` for (`image_jobs/base.rs` binds `OffloadPolicy::Sequential`
+///   after the declaration pass).
+/// * The load shape is the PLAN's, and the plan's is the worker's, per tier. Every Mage manifest
+///   entry's `candle.memoryStrategyContract.implementations` declares
+///   `bounded_transformer_residency`, and the six Candle Mage rows of
+///   `memory_route_registry::RULES` (`ALL_TIERS` × `ALL_MODES`, `PLAIN`,
+///   `requires_sequential_selection: false`) exist for every planned cell, so the worker's
+///   `apply_declared_candle_image_load_shape` → `evaluate_declared_candle_load_shape` owns the
+///   shape rather than leaving it at its default. That evaluator matches the declaration on the
+///   BTR row's OWN `tiers`, and the generated BTR row lists `["bf16"]` only — `candle-gen-mage`
+///   publishes BTR `Implemented` where `memory_strategy::streamable` AND
+///   `transformer_has_device_format` hold, and the stage-1 dump found device-format blocks on the
+///   bf16 snapshot alone. So bf16 is `Applied + DeferredMaterialization` (the engine is asked about
+///   a Deferred candidate and `streamable` holds for this plain directory load), and q4/q8 are
+///   `Refused + EagerMaterialization`; both regardless of the selected rung. The worker's own
+///   `mage_candle_production_load_shape_is_deferred_on_bf16_and_eager_on_the_packed_tiers` drives
+///   that evaluator over the real manifest entries and pins the 18 `mage_flow*:*:candle` plan rows
+///   to it; `the_load_spec_is_the_shape_the_worker_loads` below pins THIS spec to those same rows,
+///   and a capture re-asserts the loaded contract's `MemoryCalibrationIdentity::load_shape` against
+///   the plan. The candle Mage identity is keyed on the resolved tier alone (`-v3`), so the shape is
+///   not an identity axis and neither planned shape can name the other tier's cell.
 fn mage_load_spec(
     tier: &str,
+    load_shape: LoadShape,
     root: PathBuf,
     components_root: &std::path::Path,
 ) -> Result<LoadSpec, String> {
     let tier_components = components_root.join(tier);
     let mut spec = LoadSpec::new(WeightsSource::Dir(root))
         .with_offload_policy(OffloadPolicy::Sequential)
-        .with_load_shape(LoadShape::EagerMaterialization)
+        .with_load_shape(load_shape)
         .with_component(
             protocol::MAGE_COMPONENT_TEXT_ENCODER,
             WeightsSource::Dir(tier_components.join(protocol::MAGE_COMPONENT_TEXT_ENCODER)),
@@ -1949,6 +1967,56 @@ fn mage_load_spec(
         spec = spec.with_quant(quant);
     }
     Ok(spec)
+}
+
+/// The production calibration identity the loaded Candle Mage generator publishes for one
+/// `(member, tier)` cell — the table `candle-gen-mage::memory_strategy::production_calibration_fingerprint`
+/// mints (inference PR 953): `mage-flow-cuda-<provider>-<tier>-shared-ladder-v3`, eighteen distinct
+/// strings, the tier read off `resolved_quant(spec)` (the quant this arm carries on the spec).
+/// Written here as well so the plan/arm binding is weights-free and holds at inference
+/// `c6d6a4db`, whose engine still publishes the tier-free `-v2` string; the capture refuses a
+/// loaded contract whose identity differs from the plan, so the two copies cannot drift unnoticed
+/// once the epic's pin bump lands.
+fn mage_calibration_fingerprint(arm: MageArm, tier: &str) -> String {
+    format!(
+        "mage-flow-cuda-{}-{tier}-shared-ladder-v3",
+        arm.provider.replace('_', "-")
+    )
+}
+
+/// The load shape the plan declares for this cell, which the capture must execute under and then
+/// re-assert against the loaded contract's identity. Deriving it from the selected rung would
+/// silently rewrite the per-tier shape the worker binds (see [`mage_load_spec`]).
+fn mage_planned_load_shape(request: &Value) -> Result<LoadShape, String> {
+    match protocol::planned(request)?
+        .get("loadShape")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "planned.loadShape must be a string".to_owned())?
+    {
+        protocol::LOAD_SHAPE_EAGER => Ok(LoadShape::EagerMaterialization),
+        protocol::LOAD_SHAPE_DEFERRED => Ok(LoadShape::DeferredMaterialization),
+        other => Err(format!("unsupported planned.loadShape {other:?}")),
+    }
+}
+
+/// The plan row must name the production identity this cell's loaded generator publishes —
+/// checked against the weights-free table BEFORE the load, so a row still carrying the retired
+/// tier-free `-v2` string (or an MLX identity) fails in milliseconds rather than after a
+/// multi-gigabyte load.
+fn validate_mage_plan_identity(request: &Value, arm: MageArm, tier: &str) -> Result<(), String> {
+    let planned_fingerprint = protocol::planned(request)?
+        .get("calibrationFingerprint")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "planned.calibrationFingerprint must be a string".to_owned())?;
+    let expected_fingerprint = mage_calibration_fingerprint(arm, tier);
+    if planned_fingerprint != expected_fingerprint {
+        return Err(format!(
+            "plan/provider calibration mismatch: plan={planned_fingerprint}, the {} {tier} \
+             production identity is {expected_fingerprint}",
+            arm.provider
+        ));
+    }
+    Ok(())
 }
 
 /// The generation request one Mage capture renders — the worker's request shape for this member.
@@ -4281,14 +4349,14 @@ mod mage_tests {
                     "geometry": { "width": 768, "height": 768, "batch": 1, "frames": 1 }
                 },
                 "backend": "candle",
-                "loadShape": "eager_materialization",
+                "loadShape": if tier == "bf16" { "deferred_materialization" } else { "eager_materialization" },
                 "strategy": {
                     "rung": "staged_residency",
                     "engagedRungs": ["resident", "staged_residency"],
                     "parameters": {}
                 },
                 "calibrationFingerprint":
-                    format!("mage-flow-cuda-shared-ladder-provider-abi-v2-{slug}"),
+                    format!("mage-flow-cuda-{slug}-{tier}-shared-ladder-v3"),
                 "fixture": format!("{slug}-candle-{tier}-768-seed{MAGE_SEED}-step{steps}"),
             }
         })
@@ -4402,24 +4470,52 @@ mod mage_tests {
     }
 
     /// The composed `LoadSpec` is the shape the WORKER loads at the candle anchor rung: `Sequential`
-    /// (the `staged_residency` composition), `EagerMaterialization` (the worker moves Mage's shape
-    /// nowhere), the planned tier's quant on the spec (`resolved_quant` reads it directly), and both
-    /// shared components staged from the components snapshot's own tier directory.
+    /// (the `staged_residency` composition), the PLAN's per-tier load shape — deferred on bf16
+    /// (the Applied BTR declaration), eager on q4/q8 (the refused one; see [`mage_load_spec`]) —
+    /// the planned tier's quant on the spec (`resolved_quant` reads it directly), and both shared
+    /// components staged from the components snapshot's own tier directory.
+    ///
+    /// The shape is asserted against the committed plan's 18 `mage_flow*:*:candle` rows, read
+    /// through the same `mage_planned_load_shape` a capture uses, rather than a literal: the
+    /// worker's `memory_route_registry` test pins those rows to the registry's own evaluation over
+    /// the real manifest entries, so this closes the chain arm == plan == registry. The per-tier
+    /// split is ALSO asserted literally, so a plan regenerated all-eager or all-deferred cannot
+    /// carry this test along with it.
     #[test]
-    fn the_load_spec_is_the_staged_eager_shape_with_both_components_staged() {
+    fn the_load_spec_is_the_shape_the_worker_loads() {
+        let plan: Value = serde_json::from_str(include_str!(
+            "../../../../config/memory-calibration-plan.json"
+        ))
+        .expect("the anchor plan parses");
+        let anchors = plan["anchors"].as_object().expect("anchors object");
         for tier in ["bf16", "q4", "q8"] {
             let root = PathBuf::from("/hub/models--SceneWorks--Mage-Flow/snapshots/abc").join(tier);
             let components =
                 PathBuf::from("/hub/models--SceneWorks--Mage-Flow-Components-mlx/snapshots/def");
-            let spec = mage_load_spec(tier, root.clone(), &components).unwrap();
-            assert_eq!(spec.weights, WeightsSource::Dir(root));
-            assert_eq!(spec.offload_policy, OffloadPolicy::Sequential);
-            assert_eq!(
-                spec.load_shape,
-                LoadShape::EagerMaterialization,
-                "the worker leaves Mage's candle load shape at its eager default; a deferred spec \
-                 would publish rung 4's identity under the staged rung's key"
-            );
+            let expected_shape = if tier == "bf16" {
+                LoadShape::DeferredMaterialization
+            } else {
+                LoadShape::EagerMaterialization
+            };
+            for arm in MAGE_ARMS {
+                let key = format!("{}:{tier}:candle", arm.provider);
+                let request =
+                    json!({ "planned": { "loadShape": anchors[&key]["loadShape"].clone() } });
+                let load_shape = mage_planned_load_shape(&request)
+                    .unwrap_or_else(|error| panic!("{key}: {error}"));
+                assert_eq!(
+                    load_shape, expected_shape,
+                    "{key}: the plan must bind the shape the worker loads on this tier"
+                );
+                let spec = mage_load_spec(tier, load_shape, root.clone(), &components).unwrap();
+                assert_eq!(spec.weights, WeightsSource::Dir(root.clone()));
+                assert_eq!(spec.offload_policy, OffloadPolicy::Sequential);
+                assert_eq!(
+                    spec.load_shape, load_shape,
+                    "{key}: the arm must load the shape the plan (and the worker) binds"
+                );
+            }
+            let spec = mage_load_spec(tier, expected_shape, root.clone(), &components).unwrap();
             assert_eq!(spec.quantize, numeric_tier(tier).unwrap().quant);
             for component in [
                 protocol::MAGE_COMPONENT_TEXT_ENCODER,
@@ -4431,6 +4527,80 @@ mod mage_tests {
                 assert_eq!(dir, &components.join(tier).join(component));
             }
         }
+    }
+
+    /// Every candle Mage plan row names the per-(member, tier) production identity the loaded
+    /// generator publishes (inference PR 953's `-v3` table), the 18 identities are distinct, no row
+    /// carries the retired tier-free `-v2` string or an MLX identity, and the pre-load check
+    /// refuses a row that does — before any env or weights are touched.
+    #[test]
+    fn every_planned_mage_candle_row_names_the_production_identity_and_is_checked_before_the_load()
+    {
+        let plan: Value = serde_json::from_str(include_str!(
+            "../../../../config/memory-calibration-plan.json"
+        ))
+        .expect("the anchor plan parses");
+        let anchors = plan["anchors"].as_object().expect("anchors object");
+        let mut identities = std::collections::BTreeSet::new();
+        let mut seen = std::collections::BTreeSet::new();
+        for arm in MAGE_ARMS {
+            for tier in ["bf16", "q4", "q8"] {
+                let key = format!("{}:{tier}:candle", arm.provider);
+                let row = &anchors[&key];
+                let expected = mage_calibration_fingerprint(arm, tier);
+                assert_eq!(
+                    row["calibrationFingerprint"].as_str(),
+                    Some(expected.as_str()),
+                    "{key}"
+                );
+                assert!(expected.ends_with("-shared-ladder-v3"), "{expected}");
+                assert!(expected.contains(&format!("-{tier}-")), "{expected}");
+                assert!(!expected.contains("-mlx-"), "{expected}");
+                assert!(
+                    identities.insert(expected),
+                    "{key}: identity shared with another cell"
+                );
+                seen.insert(key.clone());
+                // The checked-in row passes the pre-load check; a retired or foreign string fails
+                // it by name.
+                let request = json!({ "planned": {
+                    "target": { "provider": arm.provider, "modelId": arm.provider, "tier": tier },
+                    "calibrationFingerprint": row["calibrationFingerprint"].clone(),
+                }});
+                validate_mage_plan_identity(&request, arm, tier).unwrap();
+                assert!(mage_planned_load_shape(
+                    &json!({ "planned": { "loadShape": "streamed" } })
+                )
+                .unwrap_err()
+                .contains("unsupported planned.loadShape"));
+                for stale in [
+                    format!(
+                        "mage-flow-cuda-shared-ladder-provider-abi-v2-{}",
+                        arm.provider.replace('_', "-")
+                    ),
+                    format!(
+                        "mage-flow-{}-{tier}-mlx-shared-ladder-v1",
+                        arm.provider.replace('_', "-")
+                    ),
+                ] {
+                    let mut wrong = request.clone();
+                    wrong["planned"]["calibrationFingerprint"] = json!(stale);
+                    let error = validate_mage_plan_identity(&wrong, arm, tier).unwrap_err();
+                    assert!(error.contains("calibration mismatch"), "{key}: {error}");
+                    assert!(error.contains(&stale), "{key}: {error}");
+                }
+            }
+        }
+        let expected: std::collections::BTreeSet<String> = MAGE_ARMS
+            .iter()
+            .flat_map(|arm| {
+                ["bf16", "q4", "q8"]
+                    .iter()
+                    .map(move |tier| format!("{}:{tier}:candle", arm.provider))
+            })
+            .collect();
+        assert_eq!(seen, expected);
+        assert_eq!(identities.len(), 18);
     }
 
     /// The edit members condition on exactly one reference, the text-to-image members on none, and

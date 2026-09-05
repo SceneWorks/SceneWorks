@@ -655,8 +655,8 @@
         "frames": 1
       },
       "evidenceScope": "authoritative",
-      "loadShape": "eager_materialization",
-      "calibrationFingerprint": "mage-flow-cuda-shared-ladder-provider-abi-v2-mage-flow",
+      "loadShape": "deferred_materialization",
+      "calibrationFingerprint": "mage-flow-cuda-mage-flow-bf16-shared-ladder-v3",
       "fixture": "mage-flow-candle-bf16-768-seed22733-step2"
     },
     "mage_flow:bf16:mlx": {
@@ -670,8 +670,8 @@
         "frames": 1
       },
       "evidenceScope": "authoritative",
-      "loadShape": "eager_materialization",
-      "calibrationFingerprint": "mage-flow-mlx-shared-ladder-2026-08-03-v1",
+      "loadShape": "deferred_materialization",
+      "calibrationFingerprint": "mage-flow-mage-flow-bf16-mlx-shared-ladder-v1",
       "fixture": "mage-flow-mlx-bf16-768-seed22733-step2"
     },
     "mage_flow:q4:candle": {
@@ -686,7 +686,7 @@
       },
       "evidenceScope": "authoritative",
       "loadShape": "eager_materialization",
-      "calibrationFingerprint": "mage-flow-cuda-shared-ladder-provider-abi-v2-mage-flow",
+      "calibrationFingerprint": "mage-flow-cuda-mage-flow-q4-shared-ladder-v3",
       "fixture": "mage-flow-candle-q4-768-seed22733-step2"
     },
     "mage_flow:q4:mlx": {
@@ -700,8 +700,8 @@
         "frames": 1
       },
       "evidenceScope": "authoritative",
-      "loadShape": "eager_materialization",
-      "calibrationFingerprint": "mage-flow-mlx-shared-ladder-2026-08-03-v1",
+      "loadShape": "deferred_materialization",
+      "calibrationFingerprint": "mage-flow-mage-flow-q4-mlx-shared-ladder-v1",
       "fixture": "mage-flow-mlx-q4-768-seed22733-step2"
     },
     "mage_flow:q8:candle": {
@@ -716,7 +716,7 @@
       },
       "evidenceScope": "authoritative",
       "loadShape": "eager_materialization",
-      "calibrationFingerprint": "mage-flow-cuda-shared-ladder-provider-abi-v2-mage-flow",
+      "calibrationFingerprint": "mage-flow-cuda-mage-flow-q8-shared-ladder-v3",
       "fixture": "mage-flow-candle-q8-768-seed22733-step2"
     },
     "mage_flow:q8:mlx": {
@@ -730,8 +730,8 @@
         "frames": 1
       },
       "evidenceScope": "authoritative",
-      "loadShape": "eager_materialization",
-      "calibrationFingerprint": "mage-flow-mlx-shared-ladder-2026-08-03-v1",
+      "loadShape": "deferred_materialization",
+      "calibrationFingerprint": "mage-flow-mage-flow-q8-mlx-shared-ladder-v1",
       "fixture": "mage-flow-mlx-q8-768-seed22733-step2"
     },
     "mage_flow_base:bf16:candle": {
@@ -745,8 +745,8 @@
         "frames": 1
       },
       "evidenceScope": "authoritative",
-      "loadShape": "eager_materialization",
-      "calibrationFingerprint": "mage-flow-cuda-shared-ladder-provider-abi-v2-mage-flow-base",
+      "loadShape": "deferred_materialization",
+      "calibrationFingerprint": "mage-flow-cuda-mage-flow-base-bf16-shared-ladder-v3",
       "fixture": "mage-flow-base-candle-bf16-768-seed22733-step2"
     },
     "mage_flow_base:bf16:mlx": {
@@ -760,8 +760,8 @@
         "frames": 1
       },
       "evidenceScope": "authoritative",
-      "loadShape": "eager_materialization",
-      "calibrationFingerprint": "mage-flow-mlx-shared-ladder-2026-08-03-v1",
+      "loadShape": "deferred_materialization",
+      "calibrationFingerprint": "mage-flow-mage-flow-base-bf16-mlx-shared-ladder-v1",
       "fixture": "mage-flow-base-mlx-bf16-768-seed22733-step2"
     },
     "mage_flow_base:q4:candle": {
@@ -776,7 +776,7 @@
       },
       "evidenceScope": "authoritative",
       "loadShape": "eager_materialization",
-      "calibrationFingerprint": "mage-flow-cuda-shared-ladder-provider-abi-v2-mage-flow-base",
+      "calibrationFingerprint": "mage-flow-cuda-mage-flow-base-q4-shared-ladder-v3",
       "fixture": "mage-flow-base-candle-q4-768-seed22733-step2"
     },
     "mage_flow_base:q4:mlx": {
@@ -790,8 +790,8 @@
         "frames": 1
       },
       "evidenceScope": "authoritative",
-      "loadShape": "eager_materialization",
-      "calibrationFingerprint": "mage-flow-mlx-shared-ladder-2026-08-03-v1",
+      "loadShape": "deferred_materialization",
+      "calibrationFingerprint": "mage-flow-mage-flow-base-q4-mlx-shared-ladder-v1",
       "fixture": "mage-flow-base-mlx-q4-768-seed22733-step2"
     },
     "mage_flow_base:q8:candle": {
@@ -806,7 +806,7 @@
       },
       "evidenceScope": "authoritative",
       "loadShape": "eager_materialization",
-      "calibrationFingerprint": "mage-flow-cuda-shared-ladder-provider-abi-v2-mage-flow-base",
+      "calibrationFingerprint": "mage-flow-cuda-mage-flow-base-q8-shared-ladder-v3",
       "fixture": "mage-flow-base-candle-q8-768-seed22733-step2"
     },
     "mage_flow_base:q8:mlx": {
@@ -820,8 +820,8 @@
         "frames": 1
       },
       "evidenceScope": "authoritative",
-      "loadShape": "eager_materialization",
-      "calibrationFingerprint": "mage-flow-mlx-shared-ladder-2026-08-03-v1",
+      "loadShape": "deferred_materialization",
+      "calibrationFingerprint": "mage-flow-mage-flow-base-q8-mlx-shared-ladder-v1",
       "fixture": "mage-flow-base-mlx-q8-768-seed22733-step2"
     },
     "mage_flow_edit:bf16:candle": {
@@ -835,8 +835,8 @@
         "frames": 1
       },
       "evidenceScope": "authoritative",
-      "loadShape": "eager_materialization",
-      "calibrationFingerprint": "mage-flow-cuda-shared-ladder-provider-abi-v2-mage-flow-edit",
+      "loadShape": "deferred_materialization",
+      "calibrationFingerprint": "mage-flow-cuda-mage-flow-edit-bf16-shared-ladder-v3",
       "fixture": "mage-flow-edit-candle-bf16-768-seed22733-step2"
     },
     "mage_flow_edit:bf16:mlx": {
@@ -850,8 +850,8 @@
         "frames": 1
       },
       "evidenceScope": "authoritative",
-      "loadShape": "eager_materialization",
-      "calibrationFingerprint": "mage-flow-mlx-shared-ladder-2026-08-03-v1",
+      "loadShape": "deferred_materialization",
+      "calibrationFingerprint": "mage-flow-mage-flow-edit-bf16-mlx-shared-ladder-v1",
       "fixture": "mage-flow-edit-mlx-bf16-768-seed22733-step2"
     },
     "mage_flow_edit:q4:candle": {
@@ -866,7 +866,7 @@
       },
       "evidenceScope": "authoritative",
       "loadShape": "eager_materialization",
-      "calibrationFingerprint": "mage-flow-cuda-shared-ladder-provider-abi-v2-mage-flow-edit",
+      "calibrationFingerprint": "mage-flow-cuda-mage-flow-edit-q4-shared-ladder-v3",
       "fixture": "mage-flow-edit-candle-q4-768-seed22733-step2"
     },
     "mage_flow_edit:q4:mlx": {
@@ -880,8 +880,8 @@
         "frames": 1
       },
       "evidenceScope": "authoritative",
-      "loadShape": "eager_materialization",
-      "calibrationFingerprint": "mage-flow-mlx-shared-ladder-2026-08-03-v1",
+      "loadShape": "deferred_materialization",
+      "calibrationFingerprint": "mage-flow-mage-flow-edit-q4-mlx-shared-ladder-v1",
       "fixture": "mage-flow-edit-mlx-q4-768-seed22733-step2"
     },
     "mage_flow_edit:q8:candle": {
@@ -896,7 +896,7 @@
       },
       "evidenceScope": "authoritative",
       "loadShape": "eager_materialization",
-      "calibrationFingerprint": "mage-flow-cuda-shared-ladder-provider-abi-v2-mage-flow-edit",
+      "calibrationFingerprint": "mage-flow-cuda-mage-flow-edit-q8-shared-ladder-v3",
       "fixture": "mage-flow-edit-candle-q8-768-seed22733-step2"
     },
     "mage_flow_edit:q8:mlx": {
@@ -910,8 +910,8 @@
         "frames": 1
       },
       "evidenceScope": "authoritative",
-      "loadShape": "eager_materialization",
-      "calibrationFingerprint": "mage-flow-mlx-shared-ladder-2026-08-03-v1",
+      "loadShape": "deferred_materialization",
+      "calibrationFingerprint": "mage-flow-mage-flow-edit-q8-mlx-shared-ladder-v1",
       "fixture": "mage-flow-edit-mlx-q8-768-seed22733-step2"
     },
     "mage_flow_edit_base:bf16:candle": {
@@ -925,8 +925,8 @@
         "frames": 1
       },
       "evidenceScope": "authoritative",
-      "loadShape": "eager_materialization",
-      "calibrationFingerprint": "mage-flow-cuda-shared-ladder-provider-abi-v2-mage-flow-edit-base",
+      "loadShape": "deferred_materialization",
+      "calibrationFingerprint": "mage-flow-cuda-mage-flow-edit-base-bf16-shared-ladder-v3",
       "fixture": "mage-flow-edit-base-candle-bf16-768-seed22733-step2"
     },
     "mage_flow_edit_base:bf16:mlx": {
@@ -940,8 +940,8 @@
         "frames": 1
       },
       "evidenceScope": "authoritative",
-      "loadShape": "eager_materialization",
-      "calibrationFingerprint": "mage-flow-mlx-shared-ladder-2026-08-03-v1",
+      "loadShape": "deferred_materialization",
+      "calibrationFingerprint": "mage-flow-mage-flow-edit-base-bf16-mlx-shared-ladder-v1",
       "fixture": "mage-flow-edit-base-mlx-bf16-768-seed22733-step2"
     },
     "mage_flow_edit_base:q4:candle": {
@@ -956,7 +956,7 @@
       },
       "evidenceScope": "authoritative",
       "loadShape": "eager_materialization",
-      "calibrationFingerprint": "mage-flow-cuda-shared-ladder-provider-abi-v2-mage-flow-edit-base",
+      "calibrationFingerprint": "mage-flow-cuda-mage-flow-edit-base-q4-shared-ladder-v3",
       "fixture": "mage-flow-edit-base-candle-q4-768-seed22733-step2"
     },
     "mage_flow_edit_base:q4:mlx": {
@@ -970,8 +970,8 @@
         "frames": 1
       },
       "evidenceScope": "authoritative",
-      "loadShape": "eager_materialization",
-      "calibrationFingerprint": "mage-flow-mlx-shared-ladder-2026-08-03-v1",
+      "loadShape": "deferred_materialization",
+      "calibrationFingerprint": "mage-flow-mage-flow-edit-base-q4-mlx-shared-ladder-v1",
       "fixture": "mage-flow-edit-base-mlx-q4-768-seed22733-step2"
     },
     "mage_flow_edit_base:q8:candle": {
@@ -986,7 +986,7 @@
       },
       "evidenceScope": "authoritative",
       "loadShape": "eager_materialization",
-      "calibrationFingerprint": "mage-flow-cuda-shared-ladder-provider-abi-v2-mage-flow-edit-base",
+      "calibrationFingerprint": "mage-flow-cuda-mage-flow-edit-base-q8-shared-ladder-v3",
       "fixture": "mage-flow-edit-base-candle-q8-768-seed22733-step2"
     },
     "mage_flow_edit_base:q8:mlx": {
@@ -1000,8 +1000,8 @@
         "frames": 1
       },
       "evidenceScope": "authoritative",
-      "loadShape": "eager_materialization",
-      "calibrationFingerprint": "mage-flow-mlx-shared-ladder-2026-08-03-v1",
+      "loadShape": "deferred_materialization",
+      "calibrationFingerprint": "mage-flow-mage-flow-edit-base-q8-mlx-shared-ladder-v1",
       "fixture": "mage-flow-edit-base-mlx-q8-768-seed22733-step2"
     },
     "mage_flow_edit_turbo:bf16:candle": {
@@ -1015,8 +1015,8 @@
         "frames": 1
       },
       "evidenceScope": "authoritative",
-      "loadShape": "eager_materialization",
-      "calibrationFingerprint": "mage-flow-cuda-shared-ladder-provider-abi-v2-mage-flow-edit-turbo",
+      "loadShape": "deferred_materialization",
+      "calibrationFingerprint": "mage-flow-cuda-mage-flow-edit-turbo-bf16-shared-ladder-v3",
       "fixture": "mage-flow-edit-turbo-candle-bf16-768-seed22733-step4"
     },
     "mage_flow_edit_turbo:bf16:mlx": {
@@ -1030,8 +1030,8 @@
         "frames": 1
       },
       "evidenceScope": "authoritative",
-      "loadShape": "eager_materialization",
-      "calibrationFingerprint": "mage-flow-mlx-shared-ladder-2026-08-03-v1",
+      "loadShape": "deferred_materialization",
+      "calibrationFingerprint": "mage-flow-mage-flow-edit-turbo-bf16-mlx-shared-ladder-v1",
       "fixture": "mage-flow-edit-turbo-mlx-bf16-768-seed22733-step4"
     },
     "mage_flow_edit_turbo:q4:candle": {
@@ -1046,7 +1046,7 @@
       },
       "evidenceScope": "authoritative",
       "loadShape": "eager_materialization",
-      "calibrationFingerprint": "mage-flow-cuda-shared-ladder-provider-abi-v2-mage-flow-edit-turbo",
+      "calibrationFingerprint": "mage-flow-cuda-mage-flow-edit-turbo-q4-shared-ladder-v3",
       "fixture": "mage-flow-edit-turbo-candle-q4-768-seed22733-step4"
     },
     "mage_flow_edit_turbo:q4:mlx": {
@@ -1060,8 +1060,8 @@
         "frames": 1
       },
       "evidenceScope": "authoritative",
-      "loadShape": "eager_materialization",
-      "calibrationFingerprint": "mage-flow-mlx-shared-ladder-2026-08-03-v1",
+      "loadShape": "deferred_materialization",
+      "calibrationFingerprint": "mage-flow-mage-flow-edit-turbo-q4-mlx-shared-ladder-v1",
       "fixture": "mage-flow-edit-turbo-mlx-q4-768-seed22733-step4"
     },
     "mage_flow_edit_turbo:q8:candle": {
@@ -1076,7 +1076,7 @@
       },
       "evidenceScope": "authoritative",
       "loadShape": "eager_materialization",
-      "calibrationFingerprint": "mage-flow-cuda-shared-ladder-provider-abi-v2-mage-flow-edit-turbo",
+      "calibrationFingerprint": "mage-flow-cuda-mage-flow-edit-turbo-q8-shared-ladder-v3",
       "fixture": "mage-flow-edit-turbo-candle-q8-768-seed22733-step4"
     },
     "mage_flow_edit_turbo:q8:mlx": {
@@ -1090,8 +1090,8 @@
         "frames": 1
       },
       "evidenceScope": "authoritative",
-      "loadShape": "eager_materialization",
-      "calibrationFingerprint": "mage-flow-mlx-shared-ladder-2026-08-03-v1",
+      "loadShape": "deferred_materialization",
+      "calibrationFingerprint": "mage-flow-mage-flow-edit-turbo-q8-mlx-shared-ladder-v1",
       "fixture": "mage-flow-edit-turbo-mlx-q8-768-seed22733-step4"
     },
     "mage_flow_turbo:bf16:candle": {
@@ -1105,8 +1105,8 @@
         "frames": 1
       },
       "evidenceScope": "authoritative",
-      "loadShape": "eager_materialization",
-      "calibrationFingerprint": "mage-flow-cuda-shared-ladder-provider-abi-v2-mage-flow-turbo",
+      "loadShape": "deferred_materialization",
+      "calibrationFingerprint": "mage-flow-cuda-mage-flow-turbo-bf16-shared-ladder-v3",
       "fixture": "mage-flow-turbo-candle-bf16-768-seed22733-step4"
     },
     "mage_flow_turbo:bf16:mlx": {
@@ -1120,8 +1120,8 @@
         "frames": 1
       },
       "evidenceScope": "authoritative",
-      "loadShape": "eager_materialization",
-      "calibrationFingerprint": "mage-flow-mlx-shared-ladder-2026-08-03-v1",
+      "loadShape": "deferred_materialization",
+      "calibrationFingerprint": "mage-flow-mage-flow-turbo-bf16-mlx-shared-ladder-v1",
       "fixture": "mage-flow-turbo-mlx-bf16-768-seed22733-step4"
     },
     "mage_flow_turbo:q4:candle": {
@@ -1136,7 +1136,7 @@
       },
       "evidenceScope": "authoritative",
       "loadShape": "eager_materialization",
-      "calibrationFingerprint": "mage-flow-cuda-shared-ladder-provider-abi-v2-mage-flow-turbo",
+      "calibrationFingerprint": "mage-flow-cuda-mage-flow-turbo-q4-shared-ladder-v3",
       "fixture": "mage-flow-turbo-candle-q4-768-seed22733-step4"
     },
     "mage_flow_turbo:q4:mlx": {
@@ -1150,8 +1150,8 @@
         "frames": 1
       },
       "evidenceScope": "authoritative",
-      "loadShape": "eager_materialization",
-      "calibrationFingerprint": "mage-flow-mlx-shared-ladder-2026-08-03-v1",
+      "loadShape": "deferred_materialization",
+      "calibrationFingerprint": "mage-flow-mage-flow-turbo-q4-mlx-shared-ladder-v1",
       "fixture": "mage-flow-turbo-mlx-q4-768-seed22733-step4"
     },
     "mage_flow_turbo:q8:candle": {
@@ -1166,7 +1166,7 @@
       },
       "evidenceScope": "authoritative",
       "loadShape": "eager_materialization",
-      "calibrationFingerprint": "mage-flow-cuda-shared-ladder-provider-abi-v2-mage-flow-turbo",
+      "calibrationFingerprint": "mage-flow-cuda-mage-flow-turbo-q8-shared-ladder-v3",
       "fixture": "mage-flow-turbo-candle-q8-768-seed22733-step4"
     },
     "mage_flow_turbo:q8:mlx": {
@@ -1180,8 +1180,8 @@
         "frames": 1
       },
       "evidenceScope": "authoritative",
-      "loadShape": "eager_materialization",
-      "calibrationFingerprint": "mage-flow-mlx-shared-ladder-2026-08-03-v1",
+      "loadShape": "deferred_materialization",
+      "calibrationFingerprint": "mage-flow-mage-flow-turbo-q8-mlx-shared-ladder-v1",
       "fixture": "mage-flow-turbo-mlx-q8-768-seed22733-step4"
     },
     "minimax_h3:bf16:mlx": {

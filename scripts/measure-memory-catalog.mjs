@@ -468,7 +468,20 @@ export async function classifyAnchor(key, planned, { models, backend, hubs, curr
   // `weights_missing` — a Mage load whose components are not staged cannot open at all, because the
   // variant rehost carries no `text_encoder/` or `vae/` sibling for the loader to fall back to.
   if (family.components) {
-    const download = tierDownload(models, parts.modelId, family.components.repo, parts.tier);
+    // The components are declared PER TIER (one co-requisite row per component per tier), so the
+    // row for THIS tier is what says the tier's text encoder and VAE are shipped at all. No row is
+    // `weights_missing` — the cell is planned and the arm exists, the host merely cannot bind the
+    // artifact — never a thrown error that aborts the whole `--list` (sc-22733 review).
+    const download = (models.find((entry) => entry.id === parts.modelId)?.downloads ?? []).find(
+      (row) => row.repo === family.components.repo && row.coRequisite && row.variant === parts.tier,
+    );
+    if (!download) {
+      row.roots.push({ label: "components snapshot", path: `$SCENEWORKS_${family.components.env}_ROOT` });
+      return {
+        ...row, status: "weights_missing",
+        reason: `manifest ${parts.modelId} declares no ${family.components.repo} components row for tier ${parts.tier}`,
+      };
+    }
     const root = await firstExistingDirectory(
       hubs.map((hub) => snapshotPath(hub, family.components.repo, download.revision)),
     );

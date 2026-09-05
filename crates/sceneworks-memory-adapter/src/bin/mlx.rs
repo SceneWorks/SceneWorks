@@ -7973,8 +7973,9 @@ fn run_qwen_edit_provider(request: &Value) -> Result<Value, String> {
 
 /// Every Mage capture renders at 768². `mlx-gen-mage`'s `config::MIN_SIZE` is 512 and both sides
 /// must be multiples of `SIZE_MULTIPLE` (16), so 768 is a legal native resolution — and it is the
-/// edge the provider's own published calibration identity was measured at (`model.rs`
-/// `MEMORY_CALIBRATION_FINGERPRINT`: "At 768²/one step, …").
+/// edge the family's retired SC-15509 identity was measured at (`model.rs`
+/// `production_calibration_fingerprint` doc: "At 768²/one step, …"), kept so the per-tier cells
+/// this arm measures are comparable with that record.
 const MAGE_EDGE: u32 = 768;
 /// One fixed seed for every `mlx:mage_flow*` fixture (`<prefix>-<tier>-768-seed22733-step<n>`).
 const MAGE_SEED: u64 = 22733;
@@ -7994,7 +7995,9 @@ fn mage_quality_passes(maximum: f64, mean: f64) -> bool {
 ///
 /// Unlike the Qwen edit family (one engine provider, two catalog ids), Mage is SIX registered
 /// engine providers — `mlx-gen-mage` `model::MODEL_IDS`, registered one `Generator` each in
-/// `lib.rs::register_providers` — whose catalog ids are identical to their provider ids
+/// `lib.rs::register_providers` — each publishing its own per-tier production identity
+/// ([`mage_calibration_fingerprint`], bound by the engine only to a tier PROVEN off the component
+/// directories it opened), and whose catalog ids are identical to their provider ids
 /// (`crates/sceneworks-worker/src/engines.rs` `MODEL_TABLE`: `sceneworks_id == engine_id` on all
 /// six rows). The arm still resolves from `(provider, modelId)` and refuses any other pair by name:
 /// the two are separate namespaces, and a plan that crossed them would measure one checkpoint under
@@ -8129,6 +8132,51 @@ const MAGE_ARMS: [MageArm; 6] = [
 /// two captures of one anchor are the same request.
 const MAGE_PROMPT: &str = "a weathered brass astrolabe on a linen cloth, soft window light";
 const MAGE_EDIT_PROMPT: &str = "replace the background with a plain grey studio backdrop";
+
+/// The production calibration identity the loaded MLX Mage generator publishes for one
+/// `(member, tier)` cell — the table `mlx-gen-mage::model::production_calibration_fingerprint`
+/// mints (inference PR 953): `mage-flow-<route>-<tier>-mlx-shared-ladder-v1`, eighteen distinct
+/// strings. The engine binds one only when the tier is PROVEN off the `quantization.bits` marker of
+/// the component directories the loader itself opened (DiT and text encoder agreeing) and equals
+/// the request knob; a dense snapshot requantized at load withholds it, which the capture reports
+/// as a plan/provider mismatch rather than measuring under a borrowed name. Written here as well so
+/// the plan/arm binding is weights-free and holds at inference `c6d6a4db`, whose engine still
+/// publishes the retired single string; the capture refuses a loaded contract whose identity
+/// differs from the plan, so the two copies cannot drift unnoticed once the epic's pin bump lands.
+fn mage_calibration_fingerprint(arm: MageArm, tier: &str) -> String {
+    format!("mage-flow-{}-{tier}-mlx-shared-ladder-v1", arm.slug)
+}
+
+/// The weights-free conformance identities `mlx-gen-mage` publishes for a registry surface that
+/// loaded no weights (`model.rs` `STATIC_BEHAVIOR_FINGERPRINT` = `mage-flow-mlx-registry-behavior-v1`,
+/// suffixed `-<route>-<tier>`), and the retired pre-sc-22733 single string. A plan row naming one
+/// of these could never be satisfied by a production load. Test-only: the sole caller is the
+/// plan-identity conformance test in `mage_tests`.
+#[cfg(test)]
+fn is_mage_weights_free_fingerprint(fingerprint: &str) -> bool {
+    fingerprint.starts_with("mage-flow-mlx-registry-behavior-v1")
+        || fingerprint == "mage-flow-mlx-shared-ladder-2026-08-03-v1"
+}
+
+/// The plan row must name the production identity this cell's loaded generator publishes —
+/// checked against the weights-free table BEFORE the load, so a row still carrying the retired
+/// single string (or a conformance string) fails in milliseconds rather than after a
+/// multi-gigabyte load.
+fn validate_mage_plan_identity(request: &Value, arm: MageArm, tier: &str) -> Result<(), String> {
+    let planned_fingerprint = protocol::planned(request)?
+        .get("calibrationFingerprint")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "planned.calibrationFingerprint must be a string".to_owned())?;
+    let expected_fingerprint = mage_calibration_fingerprint(arm, tier);
+    if planned_fingerprint != expected_fingerprint {
+        return Err(format!(
+            "plan/provider calibration mismatch: plan={planned_fingerprint}, the {} {tier} \
+             production identity is {expected_fingerprint}",
+            arm.provider
+        ));
+    }
+    Ok(())
+}
 
 /// Which family member the plan asks for. Refuses by name: the six checkpoints are
 /// architecturally identical (byte-identical configs and tensor schemas — `model.rs`
@@ -8428,6 +8476,15 @@ fn run_mage_provider(request: &Value) -> Result<Value, String> {
     let selection = planned_selection(request)?;
     let tier = planned_qwen_tier(request)?;
     let seed = planned_mage_seed(request, arm, tier)?;
+    validate_mage_plan_identity(request, arm, tier)?;
+    // The plan's shape is the worker's: the six MLX Mage `memory_route_registry::RULES` are typed
+    // (`requires_sequential_selection: false`), every Mage manifest entry's MLX BTR row matches
+    // the anchor's exact request context, and `mlx-gen-mage` publishes BTR `Implemented` for a
+    // streamable Deferred candidate, so `image_jobs/base.rs` evaluates `Applied + Deferred` before
+    // any rung is selected — the resident anchor rows bind `deferred_materialization` (the
+    // worker's `mage_mlx_production_load_shape_is_deferred_and_sequential_for_the_resident_selection`
+    // drives that evaluator over the real manifest entries and pins the 18 `mage_flow*:*:mlx` plan
+    // rows to it). The capture executes that shape and re-asserts it against the loaded identity.
     let load_shape = planned_load_shape(request)?;
     // Mage never reads `LoadSpec::offload_policy` — `assemble` builds a `Residency::request_scoped`
     // pipeline and staging is selected per request by `GenerationRequest::memory` — but the spec
@@ -8786,9 +8843,9 @@ mod mage_tests {
                     "geometry": { "width": MAGE_EDGE, "height": MAGE_EDGE, "batch": 1, "frames": 1 }
                 },
                 "backend": "mlx",
-                "loadShape": "eager_materialization",
+                "loadShape": "deferred_materialization",
                 "strategy": { "rung": "resident", "engagedRungs": ["resident"], "parameters": {} },
-                "calibrationFingerprint": "mage-flow-mlx-shared-ladder-2026-08-03-v1",
+                "calibrationFingerprint": format!("mage-flow-{slug}-{tier}-mlx-shared-ladder-v1"),
                 "fixture": format!("{slug}-mlx-{tier}-{}-seed{MAGE_SEED}-step{steps}", MAGE_EDGE),
             }
         })
@@ -8999,10 +9056,82 @@ mod mage_tests {
         }
     }
 
+    /// Every MLX Mage plan row names the per-(member, tier) production identity the loaded
+    /// generator publishes (inference PR 953's table), the 18 identities are distinct, no row
+    /// names a weights-free conformance string or the retired single string, every row binds the
+    /// deferred shape the worker loads, and the pre-load check refuses a row that names anything
+    /// else — before any env or weights are touched.
+    #[test]
+    fn every_planned_mage_mlx_row_names_the_production_identity_and_is_checked_before_the_load() {
+        let plan: Value = serde_json::from_str(include_str!(
+            "../../../../config/memory-calibration-plan.json"
+        ))
+        .expect("the anchor plan parses");
+        let anchors = plan["anchors"].as_object().expect("anchors object");
+        let mut identities = std::collections::BTreeSet::new();
+        let mut seen = std::collections::BTreeSet::new();
+        for arm in MAGE_ARMS {
+            for tier in ["bf16", "q4", "q8"] {
+                let key = format!("{}:{tier}:mlx", arm.provider);
+                let row = &anchors[&key];
+                let expected = mage_calibration_fingerprint(arm, tier);
+                assert_eq!(
+                    row["calibrationFingerprint"].as_str(),
+                    Some(expected.as_str()),
+                    "{key}"
+                );
+                assert!(!is_mage_weights_free_fingerprint(&expected), "{expected}");
+                assert!(expected.contains(&format!("-{tier}-mlx-")), "{expected}");
+                assert!(
+                    identities.insert(expected),
+                    "{key}: identity shared with another cell"
+                );
+                assert_eq!(
+                    row["loadShape"].as_str(),
+                    Some(protocol::LOAD_SHAPE_DEFERRED),
+                    "{key}: the worker loads Mage deferred on MLX"
+                );
+                seen.insert(key.clone());
+                let request = json!({ "planned": {
+                    "target": { "provider": arm.provider, "modelId": arm.provider, "tier": tier },
+                    "calibrationFingerprint": row["calibrationFingerprint"].clone(),
+                }});
+                validate_mage_plan_identity(&request, arm, tier).unwrap();
+                for stale in [
+                    "mage-flow-mlx-shared-ladder-2026-08-03-v1".to_owned(),
+                    format!("mage-flow-mlx-registry-behavior-v1-{}-{tier}", arm.slug),
+                    format!("mage-flow-cuda-{}-{tier}-shared-ladder-v3", arm.slug),
+                ] {
+                    assert!(
+                        is_mage_weights_free_fingerprint(&stale) || stale.contains("-cuda-"),
+                        "{stale}"
+                    );
+                    let mut wrong = request.clone();
+                    wrong["planned"]["calibrationFingerprint"] = json!(stale);
+                    let error = validate_mage_plan_identity(&wrong, arm, tier).unwrap_err();
+                    assert!(error.contains("calibration mismatch"), "{key}: {error}");
+                    assert!(error.contains(&stale), "{key}: {error}");
+                }
+            }
+        }
+        let expected: std::collections::BTreeSet<String> = MAGE_ARMS
+            .iter()
+            .flat_map(|arm| {
+                ["bf16", "q4", "q8"]
+                    .iter()
+                    .map(move |tier| format!("{}:{tier}:mlx", arm.provider))
+            })
+            .collect();
+        assert_eq!(seen, expected);
+        assert_eq!(identities.len(), 18);
+    }
+
     /// The composed `LoadSpec` is the shape the WORKER loads at the planned rung: the variant's own
     /// tier root, both shared components staged EXPLICITLY (the variant rehost has no
     /// `text_encoder/` or `vae/` sibling for the loader's flat-layout fallback to find), the planned
-    /// tier's quant, `Resident`, and eager materialization.
+    /// tier's quant, and the offload policy and load shape the caller passed through unchanged
+    /// (the capture passes the plan's deferred shape; the arguments here are the eager/resident
+    /// pair so the pass-through itself is what is asserted).
     #[test]
     fn the_load_spec_binds_the_tier_root_both_components_and_the_planned_quant() {
         for arm in MAGE_ARMS {

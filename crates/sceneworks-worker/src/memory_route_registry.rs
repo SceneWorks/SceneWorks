@@ -3510,6 +3510,252 @@ mod tests {
         .clone()
     }
 
+    /// The six shipped Mage-Flow catalog ids. Catalog id and engine provider id are equal on every
+    /// row (`engines.rs` `MODEL_TABLE`), which the anchor arms assert rather than assume.
+    const MAGE_MODELS: [&str; 6] = [
+        "mage_flow",
+        "mage_flow_base",
+        "mage_flow_turbo",
+        "mage_flow_edit",
+        "mage_flow_edit_base",
+        "mage_flow_edit_turbo",
+    ];
+
+    /// The mode a Mage member is admitted under: the three instruction editors render
+    /// `edit_image` on one reference, the rest plain `text_to_image`.
+    fn mage_mode(model_id: &str) -> (MemoryRouteMode, &'static str, u32) {
+        if model_id.contains("edit") {
+            (MemoryRouteMode::EditImage, "edit_image", 1)
+        } else {
+            (MemoryRouteMode::TextToImage, "text_to_image", 0)
+        }
+    }
+
+    /// The worker's Mage load spec at the anchor coordinate: a snapshot directory, the resolved
+    /// tier's quant on the spec, no overlay (`MemoryRouteLoadProfile::Plain`), bound to its own
+    /// catalog route, with the shared text-encoder/VAE components staged the way
+    /// `image_jobs/base.rs` `attach_required_components` stages them (named components are not a
+    /// load-profile axis, so the profile stays `Plain`).
+    fn mage_spec(model_id: &str, tier: MemoryRouteTier) -> LoadSpec {
+        spec(tier, MemoryRouteLoadProfile::Plain)
+            .with_resolved_route(model_id)
+            .with_component(
+                "text_encoder",
+                WeightsSource::Dir("components/text_encoder".into()),
+            )
+            .with_component("vae", WeightsSource::Dir("components/vae".into()))
+    }
+
+    /// sc-22733 review (blocker, E4): the shape the worker's Candle image stream LOADS Mage under —
+    /// driven through the same declaration evaluator production runs
+    /// (`image_jobs/base.rs` `apply_declared_candle_image_load_shape` →
+    /// `evaluate_declared_candle_load_shape`) over the REAL shipped manifest entries.
+    ///
+    /// Every Mage entry's `candle.memoryStrategyContract` declares `bounded_transformer_residency`,
+    /// so `has_relevant_btr_declaration` is true and the six Candle `RULES` rows (`ALL_TIERS` ×
+    /// `ALL_MODES`, `PLAIN`, `requires_sequential_selection: false`) exist for every cell — but
+    /// the declaration is matched on the BTR row's OWN `tiers` (`implementation_declares_selector`
+    /// looks at no other rung), and the generated candle BTR row of every Mage entry lists
+    /// `["bf16"]` only: `candle-gen-mage` publishes BTR `Implemented` only where `streamable` AND
+    /// `transformer_has_device_format` hold, and the stage-1 dump
+    /// (`capabilities.candle.json` `memoryContracts/mage_flow*`) found device-format blocks on the
+    /// bf16 snapshot alone. So the shape the worker LOADS is per tier: `Applied +
+    /// DeferredMaterialization` at bf16 (the provider predicate is asked about a Deferred
+    /// candidate, for which `streamable` holds — the predicate below mirrors that gate), and
+    /// `Refused + EagerMaterialization` at q4 and q8, where the generic shaper that follows must
+    /// not re-admit the route. Both results hold in BOTH modes and REGARDLESS of whether the staged
+    /// rung was selected. The anchor arm and the 18 `mage_flow*:*:candle` plan rows bind exactly
+    /// that: `deferred_materialization` on bf16, `eager_materialization` on q4/q8.
+    ///
+    /// *Mutations this kills:* a bf16 plan row moved to `eager_materialization` or a q4/q8 row to
+    /// `deferred_materialization`; a Mage Candle rule flipped to `requires_sequential_selection:
+    /// true` (the resident selection would fall to `Eligible + Eager` at bf16); the manifest's
+    /// bf16 BTR row deleted (bf16 would refuse) or widened to q4 (q4 would apply).
+    #[test]
+    fn mage_candle_production_load_shape_is_deferred_on_bf16_and_eager_on_the_packed_tiers() {
+        let plan: Value =
+            serde_json::from_str(include_str!("../../../config/memory-calibration-plan.json"))
+                .expect("memory calibration plan parses");
+        let anchors = plan["anchors"].as_object().expect("plan anchors object");
+        let mut checked = 0;
+        for model_id in MAGE_MODELS {
+            let manifest = shipped_model(model_id);
+            let (mode, mode_key, _) = mage_mode(model_id);
+            for tier in [
+                MemoryRouteTier::Bf16,
+                MemoryRouteTier::Q4,
+                MemoryRouteTier::Q8,
+            ] {
+                for sequential_selected in [false, true] {
+                    let shaped = evaluate_declared_candle_load_shape_with(
+                        model_id,
+                        Some(tier.as_str()),
+                        Some(mode),
+                        &manifest,
+                        mage_spec(model_id, tier),
+                        sequential_selected,
+                        // `candle-gen-mage` `memory_strategy::streamable`: Deferred, a directory
+                        // source, and none of the overlay slots.
+                        |candidate| {
+                            candidate.load_shape == LoadShape::DeferredMaterialization
+                                && matches!(candidate.weights, WeightsSource::Dir(_))
+                                && candidate.adapters.is_empty()
+                                && candidate.control.is_none()
+                                && candidate.extra_controls.is_empty()
+                                && candidate.ip_adapter.is_none()
+                                && candidate.pid.is_none()
+                                && candidate.identity.is_none()
+                        },
+                    );
+                    let (expected_result, expected_shape, expected_key) =
+                        if tier == MemoryRouteTier::Bf16 {
+                            (
+                                LoadShapeDeclarationResult::Applied,
+                                LoadShape::DeferredMaterialization,
+                                "deferred_materialization",
+                            )
+                        } else {
+                            (
+                                LoadShapeDeclarationResult::Refused,
+                                LoadShape::EagerMaterialization,
+                                "eager_materialization",
+                            )
+                        };
+                    assert_eq!(
+                        shaped.load_shape_declaration_result,
+                        expected_result,
+                        "{model_id} {} sequential_selected={sequential_selected}",
+                        tier.as_str()
+                    );
+                    assert_eq!(shaped.load_shape, expected_shape);
+                    // The generic shaper that follows in production must move neither an Applied
+                    // nor a Refused declaration.
+                    let generic = apply_registered_load_shape(
+                        MemoryRouteBackend::Candle,
+                        model_id,
+                        mode,
+                        shaped,
+                        sequential_selected,
+                    );
+                    assert_eq!(generic.load_shape, expected_shape);
+                    let key = format!("{model_id}:{}:candle", tier.as_str());
+                    let row = anchors
+                        .get(&key)
+                        .unwrap_or_else(|| panic!("the plan has no {key} anchor"));
+                    assert_eq!(
+                        row["loadShape"].as_str(),
+                        Some(expected_key),
+                        "{key} must plan the shape the worker loads"
+                    );
+                }
+                let key = format!("{model_id}:{}:candle", tier.as_str());
+                let row = anchors
+                    .get(&key)
+                    .unwrap_or_else(|| panic!("the plan has no {key} anchor"));
+                assert_eq!(row["mode"].as_str(), Some(mode_key), "{key}");
+                checked += 1;
+            }
+        }
+        assert_eq!(checked, MAGE_MODELS.len() * 3);
+    }
+
+    /// sc-22733 review (scope gap 1): the shape the worker's MLX image stream LOADS Mage under for
+    /// the RESIDENT anchor selection, driven through the production evaluator pair
+    /// (`image_jobs/base.rs` → `evaluate_declared_mlx_load_shape_for_request` then
+    /// `apply_declared_mlx_load_policy_for_request`) over the real shipped manifest entries with
+    /// the request context the anchor renders (plain text-to-image with no reference, or
+    /// `edit_image` with exactly one).
+    ///
+    /// The resident rows do NOT stay eager. The six MLX Mage `RULES` are typed
+    /// (`legacy_shaping: false`, `requires_sequential_selection: false`), the manifest's BTR row
+    /// matches the anchor's exact request context, and `mlx-gen-mage` publishes BTR `Implemented`
+    /// for any streamable Deferred candidate (`model.rs` `streamable_spec`: Deferred, a directory,
+    /// no diff-patch adapters — the predicate below mirrors exactly that), so the worker evaluates
+    /// `Applied + DeferredMaterialization` BEFORE any rung is selected and then binds the BTR row's
+    /// `requiredOffloadPolicy: "sequential"`. The 18 `mage_flow*:*:mlx` plan rows therefore bind
+    /// `deferred_materialization`, exactly like the FLUX.1 MLX rows (sc-22726) and unlike Z-Image,
+    /// whose MLX rule couples the deferred shape to the Sequential decision.
+    ///
+    /// *Mutations this kills:* an MLX plan row moved back to `eager_materialization`; an MLX Mage
+    /// rule flipped to `requires_sequential_selection: true` (the resident selection would fall to
+    /// `Eligible + Eager`); the manifest BTR row's `requiredOffloadPolicy` removed (the bound policy
+    /// would stay `Resident`).
+    #[test]
+    fn mage_mlx_production_load_shape_is_deferred_and_sequential_for_the_resident_selection() {
+        let plan: Value =
+            serde_json::from_str(include_str!("../../../config/memory-calibration-plan.json"))
+                .expect("memory calibration plan parses");
+        let anchors = plan["anchors"].as_object().expect("plan anchors object");
+        let mut checked = 0;
+        for model_id in MAGE_MODELS {
+            let manifest = shipped_model(model_id);
+            let (mode, _, reference_count) = mage_mode(model_id);
+            let context = MemoryRouteRequestContext {
+                mode,
+                reference_count,
+                use_pid: false,
+                has_phases: false,
+            };
+            for tier in [
+                MemoryRouteTier::Bf16,
+                MemoryRouteTier::Q4,
+                MemoryRouteTier::Q8,
+            ] {
+                let evaluated = evaluate_declared_mlx_load_shape_for_request_with(
+                    model_id,
+                    Some(tier.as_str()),
+                    Some(mode),
+                    &manifest,
+                    mage_spec(model_id, tier),
+                    context,
+                    // `mlx-gen-mage` publishes rung 4 Implemented for a deferred candidate on
+                    // every shipped tier under both offload policies (`mlx-gen-catalog`
+                    // `mage_routes_publish_the_full_rung_four_ladder_on_every_shipped_tier`).
+                    |candidate| candidate.load_shape == LoadShape::DeferredMaterialization,
+                );
+                let bound = apply_declared_mlx_load_policy_for_request(
+                    model_id,
+                    Some(tier.as_str()),
+                    Some(mode),
+                    &manifest,
+                    evaluated.clone(),
+                    context,
+                );
+                let key = format!("{model_id}:{}:mlx", tier.as_str());
+                assert_eq!(
+                    evaluated.load_shape_declaration_result,
+                    LoadShapeDeclarationResult::Applied,
+                    "{key}"
+                );
+                assert_eq!(
+                    evaluated.load_shape,
+                    LoadShape::DeferredMaterialization,
+                    "{key}"
+                );
+                assert_eq!(
+                    bound.load_shape,
+                    LoadShape::DeferredMaterialization,
+                    "{key}"
+                );
+                assert_eq!(
+                    bound.offload_policy,
+                    OffloadPolicy::Sequential,
+                    "{key}: the BTR row's requiredOffloadPolicy is bound"
+                );
+                let row = anchors
+                    .get(&key)
+                    .unwrap_or_else(|| panic!("the plan has no {key} anchor"));
+                assert_eq!(
+                    row["loadShape"].as_str(),
+                    Some("deferred_materialization"),
+                    "{key} must plan the shape the worker loads"
+                );
+                checked += 1;
+            }
+        }
+        assert_eq!(checked, MAGE_MODELS.len() * 3);
+    }
+
     fn shipped_model(id: &str) -> JsonObject<String, Value> {
         let raw = include_str!("../../../config/manifests/builtin.models.jsonc");
         let manifest: Value =

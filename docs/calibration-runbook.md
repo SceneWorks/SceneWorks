@@ -180,6 +180,19 @@ The FLUX.1 MLX plan rows (sc-22726) name the per-(route, tier) production calibr
 that inference PR 943 (`story/sc-22726-flux-calibration-identity`) makes `mlx-gen-flux` and
 `mlx-gen-pulid` publish for every worker load shape; the arm binds them after the epic's pin bump.
 
+The 36 Mage-Flow plan rows (sc-22733) likewise name the per-(route, tier) identities inference PR 953
+(`story/sc-22733-epic-22723-memory-anchor-measurability`) makes both engines publish — MLX
+`mage-flow-<route>-<tier>-mlx-shared-ladder-v1` (bound by the engine only to a tier PROVEN off the
+component directories it opened), Candle `mage-flow-cuda-<provider>-<tier>-shared-ladder-v3` — and
+both arms refuse a plan row naming anything else before the load. The retired single string
+`mage-flow-mlx-shared-ladder-2026-08-03-v1` survives nowhere in this repo except as the worker's
+`mlx_fit_gate` estimator handshake, which the epic's pin bump must move to the per-tier table. The
+rows also bind the shape the WORKER loads, per lane and tier: deferred on every MLX cell (typed
+rules, BTR declared on all three tiers), and on Candle deferred at bf16 only — the generated Candle
+BTR row lists `["bf16"]`, so the worker's declaration evaluator refuses q4/q8 and loads them eager.
+The worker's `memory_route_registry` Mage tests drive both evaluators over the real manifest entries
+and pin the plan rows to them.
+
 Both adapters now refuse an unimplemented provider **by name, before any environment or model work**,
 on **both** MLX actions — `run`, and `assess_batch`, where the check lives inside
 `validate_z_image_batch` so it fires before `runtime_macos::catalog()` is built.
