@@ -766,6 +766,33 @@ function downloadServesLane(download, backend) {
   return !download.platforms || download.platforms.includes(LANE_PLATFORM[backend]);
 }
 
+/**
+ * Whether this lane's host fetches an untiered TIER BUNDLE for `model` — one repository whose tier
+ * subdirectories live inside it, so it serves every tier the model ships.
+ *
+ * **A co-requisite is not a bundle (sc-22737).** This test used to be `variant` alone, and that let
+ * a model's SIDE artifact decide its tier axis: LTX-2.3's only untiered download is its dense Gemma
+ * text encoder (`coRequisite: true`), which the Candle host does fetch — and which contains no tier
+ * subdirectory at all. That claimed `ltx_2_3:bf16:candle`, a cell no lane can open: the manifest
+ * ships LTX-2.3's `bf16` download as `platforms: ["macos"]`, and the worker's Candle tier resolver
+ * (`crates/sceneworks-worker/src/video_jobs/candle.rs#candle_ltx_bundle_tier_across_revisions`)
+ * returns `None` for `CandleLtxTier::Bf16` — there is no dense off-Mac tier to resolve.
+ *
+ * Excluding co-requisites is the same filter `shipped` already applies to the tiered rows, and it is
+ * NARROW: across the whole catalog it changes exactly that one cell (every other model whose
+ * untiered downloads are all co-requisites reaches its tiers through the downloads' own `platforms`
+ * instead). `SceneWorks/bernini` — a real off-Mac bundle carrying q4/q8/bf16 subdirs and no
+ * `coRequisite` flag — is unaffected, which is what keeps Bernini's six Candle cells claimed.
+ */
+function laneHasTierBundle(model, backend) {
+  return (model.downloads ?? []).some(
+    (download) =>
+      typeof download.variant !== "string" &&
+      !download.coRequisite &&
+      downloadServesLane(download, backend),
+  );
+}
+
 let routeLaneTiersPromise;
 /** The registry's per-lane tier FLOOR, from the generator's own parser — never a second spelling. */
 function routeLaneTiers() {
@@ -788,12 +815,10 @@ async function computeShippedTieredCells() {
     );
     if (shipped.length === 0) continue;
     for (const backend of routed.get(model.id) ?? []) {
-      // An untiered download this lane's host fetches is a BUNDLE whose tiers live inside it, so it
-      // serves every tier the model ships. `SceneWorks/bernini` is that repo; LTX-2.3's dense
-      // co-requisite is another.
-      const bundled = (model.downloads ?? []).some(
-        (download) => typeof download.variant !== "string" && downloadServesLane(download, backend),
-      );
+      // An untiered NON-co-requisite download this lane's host fetches is a BUNDLE whose tiers live
+      // inside it, so it serves every tier the model ships — `SceneWorks/bernini` is that repo. See
+      // `laneHasTierBundle` for why a co-requisite is not one.
+      const bundled = laneHasTierBundle(model, backend);
       const floor = laneTiers.get(`${backend}:${model.id}`) ?? new Set();
       const tiers = [...new Set(
         shipped
@@ -893,9 +918,7 @@ test("a lane only claims the tiers whose downloads that lane's host would fetch"
       (download) => !download.coRequisite && ["q4", "q8", "bf16"].includes(download.variant),
     );
     for (const backend of routed.get(model.id) ?? []) {
-      const bundled = (model.downloads ?? []).some(
-        (download) => typeof download.variant !== "string" && downloadServesLane(download, backend),
-      );
+      const bundled = laneHasTierBundle(model, backend);
       const floor = laneTiers.get(`${backend}:${model.id}`) ?? new Set();
       for (const tier of new Set(shipped.map((download) => download.variant))) {
         const serves =
@@ -910,6 +933,75 @@ test("a lane only claims the tiers whose downloads that lane's host would fetch"
       }
     }
   }
+});
+
+// sc-22737. The ONE cell of this story's table that is deliberately not claimed, and the reason,
+// asserted against the two sources that decide it rather than against a hand-kept exemption list.
+//
+// `ltx_2_3:bf16:candle` is an unrouted (lane, tier), which is epic 22723 E1's one exemption:
+//
+//   1. the manifest ships LTX-2.3's `bf16` download as `platforms: ["macos"]`, so no Candle host
+//      ever fetches it, and LTX-2.3's only untiered download is a co-requisite rather than a tier
+//      bundle (see `laneHasTierBundle`);
+//   2. the worker resolves no dense off-Mac tier —
+//      `video_jobs/candle.rs#candle_ltx_bundle_tier_across_revisions` returns `None` for
+//      `CandleLtxTier::Bf16`, while its q4 and q8 arms return a subdirectory.
+//
+// Both halves are read here, so the exemption cannot outlive either reason: shipping a Candle-served
+// bf16 download, or teaching the worker to resolve one, turns this case RED and demands the cell.
+test("ltx_2_3 claims q4 and q8 on candle, and bf16 only on mlx", async () => {
+  const models = await readManifestModels();
+  const ltx = models.find((model) => model.id === "ltx_2_3");
+  assert.ok(ltx, "the catalog still carries ltx_2_3");
+
+  // (1) The manifest half.
+  const bf16 = (ltx.downloads ?? []).filter(
+    (download) => download.variant === "bf16" && !download.coRequisite,
+  );
+  assert.equal(bf16.length, 1, "ltx_2_3 ships exactly one bf16 row");
+  assert.equal(
+    downloadServesLane(bf16[0], "candle"),
+    false,
+    "ltx_2_3's bf16 download is macOS-only; a Candle-served one would make the cell real",
+  );
+  assert.equal(
+    laneHasTierBundle(ltx, "candle"),
+    false,
+    "ltx_2_3's only untiered download is a co-requisite, not a tier bundle",
+  );
+
+  // (2) The worker half, read off the source that decides it.
+  const worker = await readFile(
+    path.join(ROOT, "crates/sceneworks-worker/src/video_jobs/candle.rs"),
+    "utf8",
+  );
+  const resolver = worker.match(
+    /fn candle_ltx_bundle_tier_across_revisions\([\s\S]*?\n\}/,
+  )?.[0];
+  assert.ok(resolver, "the Candle LTX tier resolver must still be findable");
+  assert.match(
+    resolver,
+    /CandleLtxTier::Bf16 => return None/,
+    "the Candle lane resolves no dense LTX-2.3 tier; if it does now, bf16:candle is a real cell",
+  );
+  for (const tier of ["q4", "q8"]) {
+    assert.ok(resolver.includes(`"${tier}"`), `the Candle lane resolves the ${tier} tier subdir`);
+  }
+
+  // And therefore the claimed key set is exactly five cells.
+  assert.deepEqual(
+    (await shippedTieredCells())
+      .filter((cell) => cell.modelId === "ltx_2_3")
+      .map((cell) => cell.key)
+      .sort(),
+    [
+      "ltx_2_3:bf16:mlx",
+      "ltx_2_3:q4:candle",
+      "ltx_2_3:q4:mlx",
+      "ltx_2_3:q8:candle",
+      "ltx_2_3:q8:mlx",
+    ],
+  );
 });
 
 // Epic 22723 E1/E2: measurability is a SHAPE claim over the manifest and the plan — no weights, no
