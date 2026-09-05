@@ -51,6 +51,31 @@ pub const FLUX1_DEV_REPOSITORY: &str = "SceneWorks/flux1-dev-mlx";
 /// The FLUX.1 [schnell] tiered rehost (sc-22726), the `flux1_schnell` provider's own artifact.
 pub const FLUX1_SCHNELL_REPOSITORY: &str = "SceneWorks/flux1-schnell-mlx";
 pub const SDXL_REPOSITORY: &str = "SceneWorks/sdxl-base-mlx";
+/// The SANA 1.6B tiered rehost (sc-22731) — the `sana_1600m` provider's MLX artifact. The three
+/// packed tiers are `platforms: ["macos"]` turnkeys, so this repository serves the MLX lane ONLY;
+/// the Candle lane loads [`SANA_DENSE_REPOSITORY`] instead.
+pub const SANA_REPOSITORY: &str = "SceneWorks/Sana_1600M_1024px_mlx";
+/// The SANA-Sprint 1.6B tiered rehost (sc-22731), the `sana_sprint_1600m` provider's MLX artifact.
+pub const SANA_SPRINT_REPOSITORY: &str = "SceneWorks/Sana_Sprint_1.6B_1024px_mlx";
+/// The upstream dense diffusers snapshot the CANDLE `sana_1600m` route loads
+/// (`crates/sceneworks-worker/src/image_jobs/base.rs` `SANA_CANDLE_DIFFUSERS_REPO`). It has no tier
+/// sub-directory and ships one variant, so it is bound through
+/// [`validate_huggingface_revision_root`] and only ever at `bf16` — `candle-gen-sana`'s
+/// `validate_load_spec` refuses any `LoadSpec::quantize`, and there is no packed SANA artifact
+/// off-Mac to point it at.
+pub const SANA_DENSE_REPOSITORY: &str = "Efficient-Large-Model/Sana_1600M_1024px_diffusers";
+/// The Sprint route's upstream dense diffusers snapshot (`SANA_SPRINT_CANDLE_DIFFUSERS_REPO`).
+pub const SANA_SPRINT_DENSE_REPOSITORY: &str =
+    "Efficient-Large-Model/Sana_Sprint_1.6B_1024px_diffusers";
+/// The three Chroma1 tiered rehosts (sc-22731). One per route, on BOTH lanes: the Candle lane
+/// packed-loads the same SceneWorks turnkey the macOS path does, and `candle-gen-chroma`'s
+/// `ChromaLoadReceipt::capture` pins each route to its own repository and revision by name — so a
+/// Flash plan can never be satisfied by HD weights.
+pub const CHROMA1_HD_REPOSITORY: &str = "SceneWorks/chroma1-hd-mlx";
+/// See [`CHROMA1_HD_REPOSITORY`].
+pub const CHROMA1_BASE_REPOSITORY: &str = "SceneWorks/chroma1-base-mlx";
+/// See [`CHROMA1_HD_REPOSITORY`].
+pub const CHROMA1_FLASH_REPOSITORY: &str = "SceneWorks/chroma1-flash-mlx";
 /// The Z-Image-Turbo tiered rehost. Serves the `z_image_turbo` provider AND the `z_image_edit`
 /// catalog alias (the worker routes `z_image_edit` to the Turbo weights driven in `edit_image`
 /// mode — `crates/sceneworks-worker/src/engines.rs`), on both adapters, through the
@@ -60,6 +85,14 @@ pub const Z_IMAGE_REPOSITORY: &str = "SceneWorks/z-image-turbo-mlx";
 /// bound through the separate `SCENEWORKS_Z_IMAGE_BASE_*` family so a base plan can never be
 /// satisfied by Turbo weights and re-label Turbo's peaks as the base model's.
 pub const Z_IMAGE_BASE_REPOSITORY: &str = "SceneWorks/z-image-mlx";
+/// The three SD3.5 tiered rehosts (sc-22730). Unlike the Z-Image pair these are three DISTINCT
+/// engine providers (`sd3_5_large`, `sd3_5_large_turbo`, `sd3_5_medium` — the same ids on both
+/// lanes, with no aliasing), each with its own artifact family, so each gets its own
+/// `SCENEWORKS_SD3_5_*` env triple. Serving one route from another's weights would re-label that
+/// route's peaks; the arms validate the repository literal before any weight work.
+pub const SD3_5_LARGE_REPOSITORY: &str = "SceneWorks/sd3.5-large-mlx";
+pub const SD3_5_LARGE_TURBO_REPOSITORY: &str = "SceneWorks/sd3.5-large-turbo-mlx";
+pub const SD3_5_MEDIUM_REPOSITORY: &str = "SceneWorks/sd3.5-medium-mlx";
 /// The `mlx:ltx_2_3` calibration artifact (sc-18808). Its `gemma/` co-requisite text encoder is a
 /// hard load-time requirement of the pinned provider, not a fallback, so a capture resolves TWO
 /// roots under this one repository: the numeric tier and `gemma`.
@@ -892,8 +925,12 @@ pub fn validate_artifact_identity(
     expected_repository: &str,
 ) -> Result<(), String> {
     if repository != expected_repository {
+        // The OFFENDING repository is named as well as the expected one: a sibling-member root
+        // handed to the wrong arm is the failure this check exists for, and an operator (or a
+        // test) cannot tell that refusal apart from any other without seeing what was passed.
         return Err(format!(
-            "artifact repository must be the fixed {expected_repository} calibration artifact"
+            "artifact repository must be the fixed {expected_repository} calibration artifact, \
+             not {repository}"
         ));
     }
     if revision.len() != 40
