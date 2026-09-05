@@ -191,6 +191,32 @@ export const PROVIDER_FAMILIES = Object.freeze({
   // `MODEL_25_ID`), so the candle plan rows name `ltx_2_5_distilled` while the anchor key — and
   // therefore the manifest download the snapshot root resolves through — stays `ltx_2_5`.
   ltx_2_5_distilled: { ltx25: true, repo: LTX25_REPOSITORY, arms: ["candle"] },
+  // The turnkey still family (sc-22732). Five catalog models over three engine crates, each a plain
+  // reference-free text-to-image route with its text encoder, transformer and decoder packed inside
+  // the per-tier snapshot — so one root is the whole load and no `upstream` or `bundle` is needed.
+  // The engine id equals the catalog model id for all five, so the family key, the plan row's
+  // `provider` and the anchor key's modelId are the same token.
+  kolors: { env: "KOLORS", repo: "SceneWorks/kolors-mlx", arms: ["mlx", "candle"] },
+  lens: { env: "LENS", repo: "SceneWorks/lens-mlx", arms: ["mlx", "candle"] },
+  // Its OWN rehost at its OWN revision, split from base Lens the way `flux1_schnell` is split from
+  // `flux1_dev`: a turbo plan satisfied by base weights would re-label the base model's peaks.
+  lens_turbo: { env: "LENS_TURBO", repo: "SceneWorks/lens-turbo-mlx", arms: ["mlx", "candle"] },
+  // Ideogram is the only shipped family whose tiers do NOT all come from one repository, which is
+  // what `tiers` exists for: `q4`/`q8` are the packed `SceneWorks/ideogram-4-mlx` turnkey, and
+  // `bf16` is the separate `SceneWorks/ideogram-4` repo at a separate revision (worker
+  // `image_jobs/base.rs` `IDEOGRAM_BF16_REPO`, and the manifest's own third `downloads[]` entry).
+  // Without the override `tierDownload` would fall back to the packed repo's q4 download — its
+  // "any download from this repo" arm — and bind bf16 to the wrong repository AND the wrong
+  // revision, which the record's loadability fingerprint is the only place that would ever show.
+  // Both Ideogram members share both repositories at both revisions and differ by provider.
+  ideogram_4: {
+    env: "IDEOGRAM", repo: "SceneWorks/ideogram-4-mlx", arms: ["mlx", "candle"],
+    tiers: { bf16: { env: "IDEOGRAM_BF16", repo: "SceneWorks/ideogram-4" } },
+  },
+  ideogram_4_turbo: {
+    env: "IDEOGRAM", repo: "SceneWorks/ideogram-4-mlx", arms: ["mlx", "candle"],
+    tiers: { bf16: { env: "IDEOGRAM_BF16", repo: "SceneWorks/ideogram-4" } },
+  },
 });
 
 export function fail(message) {
@@ -404,13 +430,18 @@ export async function classifyAnchor(key, planned, { models, backend, hubs, curr
     return row;
   }
 
-  // Which artifact THIS lane opens. Almost every family loads one repository on both lanes, so the
-  // family row IS the artifact; `lanes[backend]` overrides it for a family whose lanes load
-  // different artifacts (sc-22731: SANA's MLX turnkey vs its upstream dense Candle snapshot).
+  // Which artifact THIS lane and THIS tier open. Almost every family loads one repository on both
+  // lanes at every tier, so the family row IS the artifact. `lanes[backend]` overrides it for a
+  // family whose lanes load different artifacts (sc-22731: SANA's MLX turnkey vs its upstream dense
+  // Candle snapshot), and `tiers[tier]` overrides it again for a family whose tiers span more than
+  // one repository (sc-22732: `ideogram_4`'s bf16 tier ships from a different repo at a different
+  // revision than its packed q4/q8 tiers) — so the revision is looked up against the repository the
+  // tier actually comes from and the harness exports the env family the adapter arm binds for it.
+  // The tier override is applied last, because it is the narrower claim.
   // `tiered: false` means the load root is the snapshot ITSELF — no `<tier>` component — which is
   // what the worker resolves for such a repository and what the adapter validates against
   // (`validate_huggingface_revision_root`).
-  const artifact = family.lanes?.[backend] ?? family;
+  const artifact = { ...family, ...(family.lanes?.[backend] ?? {}), ...(family.tiers?.[parts.tier] ?? {}) };
   const tiered = artifact.tiered !== false;
   const download = tierDownload(models, parts.modelId, artifact.repo, parts.tier);
   const suffix = tiered ? [parts.tier] : [];

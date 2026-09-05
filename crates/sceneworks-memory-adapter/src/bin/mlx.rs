@@ -4252,6 +4252,773 @@ fn run_flux_one(request: &Value) -> Result<Value, String> {
 }
 
 // ---------------------------------------------------------------------------------------------
+// The turnkey still-image arm (sc-22732): `kolors`, `ideogram_4`, `ideogram_4_turbo`, `lens` and
+// `lens_turbo`. Five catalog models over three engine crates, one arm.
+// ---------------------------------------------------------------------------------------------
+
+/// One artifact family a turnkey capture may bind: the env triple the harness exports and the
+/// repository id the record must name.
+///
+/// A member normally has exactly one. Ideogram has two, because its bf16 tier ships from a
+/// DIFFERENT repository at a DIFFERENT revision than its packed `q4`/`q8` tiers
+/// (`image_jobs/base.rs` `IDEOGRAM_BF16_REPO`, and the manifest's own third `downloads[]` entry).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct TurnkeyFamily {
+    repository_env: &'static str,
+    revision_env: &'static str,
+    root_env: &'static str,
+    expected_repository: &'static str,
+}
+
+/// One member of the turnkey still-image family this arm measures, resolved from the plan's
+/// `(target.provider, target.mode)` — never assumed.
+///
+/// All five are plain reference-free text-to-image routes whose text encoder, transformer and
+/// decoder are packed INSIDE the per-tier snapshot (Kolors' ChatGLM3-6B, Lens' gpt-oss-20b MoE,
+/// Ideogram's Qwen3-VL-8B), so a capture opens exactly one weights root and binds no second
+/// repository — unlike `minimax_h3`, whose rehost is not self-sufficient.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct TurnkeyArm {
+    /// The registry id handed to `catalog.media().load` — the production loader (E4). For all five
+    /// members the engine id EQUALS the catalog model id
+    /// (`crates/sceneworks-worker/src/engines.rs` MODEL_TABLE), which is why no anchor-loader
+    /// closure row needs an `engineId` alias.
+    provider: &'static str,
+    /// The plan `target.mode` this member serves. Every member is text-to-image: Kolors and
+    /// Ideogram also advertise edit routes, and Kolors a character route, but those are separate
+    /// providers or separate measurements and no anchor plans them.
+    mode: &'static str,
+    execution_path: &'static str,
+    /// The still-geometry refusal label (sc-18808).
+    still_calibration: &'static str,
+    /// The artifact family for the packed tiers, and for bf16 too unless [`Self::bf16_family`]
+    /// overrides it.
+    family: TurnkeyFamily,
+    /// `Some` only where the bf16 tier is a different repository — Ideogram. Binding bf16 through
+    /// the packed family would name the wrong repo AND the wrong revision in the record's
+    /// loadability fingerprint, which is the one claim about the snapshot nothing downstream can
+    /// re-derive.
+    bf16_family: Option<TurnkeyFamily>,
+    /// The record's diagnostics source, `memory-mlx-adapter:<slug>-shared-ladder`, and the fixture
+    /// prefix.
+    slug: &'static str,
+}
+
+const KOLORS_PROVIDER: &str = "kolors";
+const IDEOGRAM_PROVIDER: &str = "ideogram_4";
+const IDEOGRAM_TURBO_PROVIDER: &str = "ideogram_4_turbo";
+const LENS_PROVIDER: &str = "lens";
+const LENS_TURBO_PROVIDER: &str = "lens_turbo";
+/// The seed every turnkey capture renders at. The fixture binds member, tier and edge, so the seed
+/// does not also have to carry the route.
+const TURNKEY_SEED: u64 = 22732;
+/// Two steps, the shared still-image phase-boundary pattern: the first Step callback closes a
+/// conservative conditioning envelope and the second gives denoise its own measured interval before
+/// Decoding.
+const TURNKEY_STEPS: u32 = 2;
+
+const KOLORS_FAMILY: TurnkeyFamily = TurnkeyFamily {
+    repository_env: "SCENEWORKS_KOLORS_REPOSITORY",
+    revision_env: "SCENEWORKS_KOLORS_REVISION",
+    root_env: "SCENEWORKS_KOLORS_ROOT",
+    expected_repository: protocol::KOLORS_REPOSITORY,
+};
+
+/// The packed `q4`/`q8` Ideogram turnkey, shared BY BOTH Ideogram members at the same revision.
+const IDEOGRAM_FAMILY: TurnkeyFamily = TurnkeyFamily {
+    repository_env: "SCENEWORKS_IDEOGRAM_REPOSITORY",
+    revision_env: "SCENEWORKS_IDEOGRAM_REVISION",
+    root_env: "SCENEWORKS_IDEOGRAM_ROOT",
+    expected_repository: protocol::IDEOGRAM_REPOSITORY,
+};
+
+const IDEOGRAM_BF16_FAMILY: TurnkeyFamily = TurnkeyFamily {
+    repository_env: "SCENEWORKS_IDEOGRAM_BF16_REPOSITORY",
+    revision_env: "SCENEWORKS_IDEOGRAM_BF16_REVISION",
+    root_env: "SCENEWORKS_IDEOGRAM_BF16_ROOT",
+    expected_repository: protocol::IDEOGRAM_BF16_REPOSITORY,
+};
+
+const LENS_FAMILY: TurnkeyFamily = TurnkeyFamily {
+    repository_env: "SCENEWORKS_LENS_REPOSITORY",
+    revision_env: "SCENEWORKS_LENS_REVISION",
+    root_env: "SCENEWORKS_LENS_ROOT",
+    expected_repository: protocol::LENS_REPOSITORY,
+};
+
+const LENS_TURBO_FAMILY: TurnkeyFamily = TurnkeyFamily {
+    repository_env: "SCENEWORKS_LENS_TURBO_REPOSITORY",
+    revision_env: "SCENEWORKS_LENS_TURBO_REVISION",
+    root_env: "SCENEWORKS_LENS_TURBO_ROOT",
+    expected_repository: protocol::LENS_TURBO_REPOSITORY,
+};
+
+const KOLORS_ARM: TurnkeyArm = TurnkeyArm {
+    provider: KOLORS_PROVIDER,
+    mode: "text_to_image",
+    execution_path: "the MLX Kolors base-only text-to-image path",
+    still_calibration: "MLX Kolors calibration",
+    family: KOLORS_FAMILY,
+    bf16_family: None,
+    slug: "kolors",
+};
+
+const IDEOGRAM_ARM: TurnkeyArm = TurnkeyArm {
+    provider: IDEOGRAM_PROVIDER,
+    mode: "text_to_image",
+    execution_path: "the MLX Ideogram 4 base-only text-to-image path",
+    still_calibration: "MLX Ideogram 4 calibration",
+    family: IDEOGRAM_FAMILY,
+    bf16_family: Some(IDEOGRAM_BF16_FAMILY),
+    slug: "ideogram-4",
+};
+
+const IDEOGRAM_TURBO_ARM: TurnkeyArm = TurnkeyArm {
+    provider: IDEOGRAM_TURBO_PROVIDER,
+    mode: "text_to_image",
+    execution_path: "the MLX Ideogram 4 Turbo base-only text-to-image path",
+    still_calibration: "MLX Ideogram 4 Turbo calibration",
+    // Same two repositories as the base member, at the same revisions: the turbo tier is the same
+    // snapshot plus the `turbo_lora.safetensors` the engine installs at load. What makes it a
+    // different measurement is the provider, not the artifact.
+    family: IDEOGRAM_FAMILY,
+    bf16_family: Some(IDEOGRAM_BF16_FAMILY),
+    slug: "ideogram-4-turbo",
+};
+
+const LENS_ARM: TurnkeyArm = TurnkeyArm {
+    provider: LENS_PROVIDER,
+    mode: "text_to_image",
+    execution_path: "the MLX Lens base-only text-to-image path",
+    still_calibration: "MLX Lens calibration",
+    family: LENS_FAMILY,
+    bf16_family: None,
+    slug: "lens",
+};
+
+const LENS_TURBO_ARM: TurnkeyArm = TurnkeyArm {
+    provider: LENS_TURBO_PROVIDER,
+    mode: "text_to_image",
+    execution_path: "the MLX Lens-Turbo base-only text-to-image path",
+    still_calibration: "MLX Lens-Turbo calibration",
+    // Its OWN rehost at its OWN revision, split from base Lens the way `flux1_schnell` is split
+    // from `flux1_dev`, so a turbo plan can never be satisfied by base weights.
+    family: LENS_TURBO_FAMILY,
+    bf16_family: None,
+    slug: "lens-turbo",
+};
+
+impl TurnkeyArm {
+    fn family_for(self, tier: &str) -> TurnkeyFamily {
+        match (tier, self.bf16_family) {
+            ("bf16", Some(family)) => family,
+            _ => self.family,
+        }
+    }
+}
+
+/// Which turnkey member the plan asks for. Refuses by name: a `(provider, mode)` pair no member
+/// serves must not be measured as its nearest neighbour. Kolors' `edit_image` and `character_image`
+/// capabilities and Ideogram's `edit_image` / `image_inpaint` capabilities are real routes with
+/// their own admission contexts, and none of them is this arm's plain text-to-image measurement.
+fn turnkey_arm(request: &Value) -> Result<TurnkeyArm, String> {
+    let planned = protocol::planned(request)?;
+    let provider = planned
+        .pointer("/target/provider")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "planned.target.provider must be a string".to_owned())?;
+    let mode = planned
+        .pointer("/target/mode")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "planned.target.mode must be a string".to_owned())?;
+    match (provider, mode) {
+        (KOLORS_PROVIDER, "text_to_image") => Ok(KOLORS_ARM),
+        (IDEOGRAM_PROVIDER, "text_to_image") => Ok(IDEOGRAM_ARM),
+        (IDEOGRAM_TURBO_PROVIDER, "text_to_image") => Ok(IDEOGRAM_TURBO_ARM),
+        (LENS_PROVIDER, "text_to_image") => Ok(LENS_ARM),
+        (LENS_TURBO_PROVIDER, "text_to_image") => Ok(LENS_TURBO_ARM),
+        (provider, mode) => Err(format!(
+            "the MLX turnkey still arm does not implement provider {provider:?} in mode {mode:?}"
+        )),
+    }
+}
+
+/// The artifact one turnkey capture loads: the env-bound repository and revision for the PLANNED
+/// tier's family, and the `LoadSpec` that opens exactly that tier.
+#[derive(Debug)]
+struct TurnkeyArtifact {
+    arm: TurnkeyArm,
+    repository: String,
+    revision: String,
+    tier: &'static str,
+    spec: LoadSpec,
+}
+
+impl TurnkeyArtifact {
+    fn loadability_fingerprint(&self) -> String {
+        format!("{}@{}:{}", self.repository, self.revision, self.tier)
+    }
+
+    fn artifact_json(&self) -> Value {
+        json!({
+            "repository": self.repository,
+            "resolvedRevision": self.revision,
+            "variant": self.tier,
+        })
+    }
+}
+
+/// The env-free half of [`turnkey_load_spec`], so the tier and family bindings are unit-testable
+/// without weights. The root must end in the PLANNED tier's directory
+/// (`.../snapshots/<revision>/<tier>`), so a stale `…/q4` export can never satisfy a q8 or bf16 plan
+/// and quietly re-label another tier's peaks (the sc-17097 defect class).
+fn turnkey_load_spec_at(
+    request: &Value,
+    load_shape: LoadShape,
+    repository: String,
+    revision: String,
+    root: PathBuf,
+) -> Result<TurnkeyArtifact, String> {
+    let arm = turnkey_arm(request)?;
+    protocol::validate_plain_overlay_target(request, arm.execution_path)?;
+    let tier = match planned_qwen_tier(request)? {
+        "bf16" => "bf16",
+        "q4" => "q4",
+        "q8" => "q8",
+        _ => unreachable!("planned_qwen_tier returned an unsupported tier"),
+    };
+    let family = arm.family_for(tier);
+    protocol::validate_artifact_identity(&repository, &revision, family.expected_repository)?;
+    let root = std::fs::canonicalize(&root)
+        .map_err(|error| format!("canonicalize {}: {error}", family.root_env))?;
+    protocol::validate_huggingface_snapshot_root(
+        &root,
+        &repository,
+        &revision,
+        tier,
+        family.expected_repository,
+    )?;
+    // Resident + the plan's materialization shape, which is what the worker loads all five under.
+    // `apply_declared_mlx_load_policy_for_request` returns the spec untouched here: Kolors and Lens
+    // carry `legacy_shaping: true` MLX route rules (`memory_route_registry.rs`), so the declaration
+    // is not owned and no `requiredOffloadPolicy` is admissible, and Ideogram has no MLX route rule
+    // and no `mlx.memoryStrategyContract` at all. None of the five manifests declares a
+    // `requiredOffloadPolicy` on any MLX row, so gen-core's `Resident` default stands and the
+    // legacy `apply_registered_load_shape` path is what runs.
+    let mut spec = LoadSpec::new(WeightsSource::Dir(root))
+        .with_offload_policy(OffloadPolicy::Resident)
+        .with_load_shape(load_shape);
+    // The worker FORWARDS the request-derived quant for all five —
+    // `mlx_load_quant_for_resolved_artifact` (`image_jobs/base.rs`) nulls it only for the krea and
+    // flux2-klein ids, and every one of these five manifests declares `mlx.quantize: 4`, so a
+    // default job hands the provider a real `Quant`. It is an advisory no-op on the already-packed
+    // tier, but binding `None` here would be a DIFFERENT load from the one the worker issues.
+    if let (_, Some(quant)) = tier_precision_quant(tier) {
+        spec = spec.with_quant(quant);
+    }
+    Ok(TurnkeyArtifact {
+        arm,
+        repository,
+        revision,
+        tier,
+        spec,
+    })
+}
+
+fn turnkey_load_spec(request: &Value, load_shape: LoadShape) -> Result<TurnkeyArtifact, String> {
+    let arm = turnkey_arm(request)?;
+    let family = arm.family_for(planned_qwen_tier(request)?);
+    let repository = protocol::required_env(family.repository_env)?;
+    let revision = protocol::required_env(family.revision_env)?;
+    let root = PathBuf::from(protocol::required_env(family.root_env)?);
+    turnkey_load_spec_at(request, load_shape, repository, revision, root)
+}
+
+/// The one fresh planned request every turnkey capture renders.
+fn turnkey_request(width: u32, height: u32) -> GenerationRequest {
+    GenerationRequest {
+        prompt: "a portrait of a person in a sunlit studio, editorial photograph".to_owned(),
+        width,
+        height,
+        count: 1,
+        seed: Some(TURNKEY_SEED),
+        steps: Some(TURNKEY_STEPS),
+        ..Default::default()
+    }
+}
+
+/// Bind the fixture to the planned member, tier, geometry edge, seed and step count, so a bf16
+/// record can never be emitted against a q4 capture that merely reused the fixture string.
+fn validate_turnkey_fixture(request: &Value, arm: TurnkeyArm, tier: &str) -> Result<(), String> {
+    let fixture = protocol::planned(request)?
+        .get("fixture")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "planned.fixture must be a string".to_owned())?;
+    let (width, _) = protocol::target_geometry(request)?;
+    let prefix = format!("{}-mlx-{tier}-{width}-seed", arm.slug);
+    let remainder = fixture
+        .strip_prefix(&prefix)
+        .ok_or_else(|| format!("planned.fixture {fixture:?} must start with {prefix:?}"))?;
+    let (seed, steps) = remainder
+        .split_once("-step")
+        .ok_or_else(|| format!("planned.fixture {fixture:?} must end with -step<count>"))?;
+    let seed = seed
+        .parse::<u64>()
+        .map_err(|error| format!("parse turnkey fixture seed {seed:?}: {error}"))?;
+    if seed != TURNKEY_SEED {
+        return Err(format!(
+            "planned.fixture seed {seed} does not match the turnkey calibration seed {TURNKEY_SEED}"
+        ));
+    }
+    let steps = steps
+        .parse::<u32>()
+        .map_err(|error| format!("parse turnkey fixture step count {steps:?}: {error}"))?;
+    if steps != TURNKEY_STEPS {
+        return Err(format!(
+            "planned.fixture {fixture:?} must use the {TURNKEY_STEPS}-step calibration request"
+        ));
+    }
+    Ok(())
+}
+
+/// The production calibration identity the loaded turnkey generator publishes for one
+/// `(member, tier)` cell — the tables `mlx-gen-kolors`, `mlx-gen-ideogram` and `mlx-gen-lens`
+/// `memory_strategy::production_calibration_fingerprint` mint (inference PR
+/// `story/sc-22732-epic-22723-memory-anchor-measurability`): the two measured keys are preserved
+/// byte-for-byte and read off the engine constants, and every other cell is
+/// `kolors-<tier>-mlx-shared-ladder-v1` / `ideogram-4[-turbo]-<tier>-mlx-shared-ladder-v1` /
+/// `lens[-turbo]-<tier>-mlx-shared-ladder-v1`. Written here as well so the plan/arm binding is
+/// weights-free and holds at inference `c6d6a4db`, whose engines publish the two preserved keys
+/// only (and `mlx-gen-ideogram` none at all); the capture refuses a loaded contract whose identity
+/// differs from this table, so the two copies cannot drift unnoticed once the epic's pin bump
+/// lands.
+///
+/// `lens_turbo` bf16 is deliberately NOT `mlx-gen-lens`'s `LEGACY_TEXT_ENCODER_FINGERPRINT`: that
+/// string names the SC-15800 narrowed text-encoder envelope, reachable only under
+/// `Sequential + DeferredMaterialization` (`is_streamable_spec`), and this arm loads every member
+/// `Resident` + the plan's eager shape, where the engine publishes the full-ladder key.
+///
+/// FAIL-CLOSED on the tier axis too (sc-22732 review). The per-member arms below bind `tier` as a
+/// free variable, so before this guard any string at all — `"q2"`, `"nvfp4"`, a typo in a plan row —
+/// minted a plausible-looking identity no engine publishes, and the caller's equality check would
+/// then accept it. Only the three tiers the turnkey family ships are nameable; every other tier is
+/// `None`, which the caller turns into a refusal before any weight work.
+fn turnkey_calibration_fingerprint(arm: TurnkeyArm, tier: &str) -> Option<String> {
+    if !matches!(tier, "bf16" | "q4" | "q8") {
+        return None;
+    }
+    Some(match (arm.provider, tier) {
+        (KOLORS_PROVIDER, "q4") => {
+            runtime_macos::providers::kolors::memory_strategy::MEMORY_CALIBRATION_FINGERPRINT
+                .to_owned()
+        }
+        (LENS_PROVIDER, "q4") => {
+            runtime_macos::providers::lens::memory_strategy::MEMORY_CALIBRATION_FINGERPRINT
+                .to_owned()
+        }
+        (KOLORS_PROVIDER, tier) => format!("kolors-{tier}-mlx-shared-ladder-v1"),
+        (IDEOGRAM_PROVIDER, tier) => format!("ideogram-4-{tier}-mlx-shared-ladder-v1"),
+        (IDEOGRAM_TURBO_PROVIDER, tier) => format!("ideogram-4-turbo-{tier}-mlx-shared-ladder-v1"),
+        (LENS_PROVIDER, tier) => format!("lens-{tier}-mlx-shared-ladder-v1"),
+        (LENS_TURBO_PROVIDER, tier) => format!("lens-turbo-{tier}-mlx-shared-ladder-v1"),
+        // A provider that is not a turnkey member is unnameable rather than collapsed onto one.
+        _ => return None,
+    })
+}
+
+/// The weights-free conformance identities the three engines publish for a registry-behaviour
+/// contract that loaded no weights — `mlx-gen-lens` `STATIC_BEHAVIOR_FINGERPRINT` (an engine
+/// constant at the pin) and the `kolors-mlx-registry-behavior-v1` / `ideogram4-mlx-registry-behavior-v1`
+/// namespaces the sc-22732 inference head introduces, each with its `-<route>-…` suffixes — plus
+/// `mlx-gen-lens`'s legacy dense text-encoder key, which no `Resident` load returns. A plan row
+/// naming any of these could never be satisfied by a production load. Test-only: the sole caller
+/// is the plan-identity conformance test in `turnkey_still_tests`.
+#[cfg(test)]
+fn is_turnkey_weights_free_fingerprint(fingerprint: &str) -> bool {
+    fingerprint
+        .starts_with(runtime_macos::providers::lens::memory_strategy::STATIC_BEHAVIOR_FINGERPRINT)
+        || fingerprint.starts_with("kolors-mlx-registry-behavior-v1")
+        || fingerprint.starts_with("ideogram4-mlx-registry-behavior-v1")
+        || fingerprint
+            == runtime_macos::providers::lens::memory_strategy::LEGACY_TEXT_ENCODER_FINGERPRINT
+}
+
+/// The admission context for the turnkey safety scenarios, in the shape the worker admits each
+/// member under: plain reference-free text-to-image, no overlay, no PiD.
+fn turnkey_context(
+    selection: &MemorySelection,
+    calibration: &MemoryCalibrationIdentity,
+    fingerprint: &str,
+    width: u32,
+    height: u32,
+    total_bytes: u64,
+    predicted_peak_bytes: u64,
+) -> MemoryRunContext {
+    MemoryRunContext {
+        selection: *selection,
+        optimization_authority: MemoryOptimizationAuthority::Calibrated,
+        calibration_abi: calibration.abi,
+        // A parameter only so the stale-evidence probe can pass a deliberate mismatch; the real
+        // call sites pass `calibration.fingerprint` (the Krea-arm lesson at `krea_context`).
+        calibration_fingerprint: fingerprint.to_owned(),
+        load_shape: calibration.load_shape,
+        mode: MemoryMode::TextToImage,
+        has_reference: false,
+        use_pid: false,
+        has_phases: false,
+        geometry: MemoryGeometry {
+            width,
+            height,
+            batch: 1,
+            frames: 1,
+            reference_count: 0,
+        },
+        overlay: None,
+        budget: MemoryBudget {
+            total_bytes,
+            committed_bytes: 0,
+            reclaimable_bytes: 0,
+            reserved_headroom_bytes: 0,
+        },
+        predicted_peak_bytes,
+        cache_state: MemoryCacheState::Cold,
+        evidence_revision: format!("sc-22732@{}", protocol::INFERENCE_PIN),
+    }
+}
+
+fn turnkey_complete_sweep(request: &Value) -> Result<Value, String> {
+    let mut sweep = protocol::reference_sweep(request, "passed")?;
+    sweep["rangeVerified"] = json!(true);
+    Ok(sweep)
+}
+
+/// The `mlx:kolors` / `mlx:ideogram_4` / `mlx:ideogram_4_turbo` / `mlx:lens` / `mlx:lens_turbo` arm
+/// (sc-22732).
+///
+/// Loads through the SAME seam the worker loads these five through —
+/// `runtime_macos::catalog().media().load(engine_id, &spec)`, which is exactly what
+/// `crates/sceneworks-worker/src/inference_runtime.rs` wraps — reads the LOADED generator's own
+/// contract, and measures the resident anchor composition against it.
+fn run_turnkey_still(request: &Value) -> Result<Value, String> {
+    // Before the load, not inside it: a non-still target must be refused without paying for
+    // weights. The arm is resolved first so the refusal carries the member's own label.
+    let arm = turnkey_arm(request)?;
+    protocol::validate_still_geometry(request, arm.still_calibration)?;
+    let load_shape = planned_load_shape(request)?;
+    let selection = planned_selection(request)?;
+    let tier = planned_qwen_tier(request)?;
+    validate_turnkey_fixture(request, arm, tier)?;
+    let (width, height) = protocol::target_geometry(request)?;
+    // The plan row must name the production identity this cell's loaded generator publishes —
+    // checked against the weights-free table BEFORE the load, so a row still carrying a
+    // conformance string (or the legacy dense Lens-Turbo key) fails in milliseconds rather than
+    // after a multi-gigabyte load.
+    let planned_fingerprint = protocol::planned(request)?
+        .get("calibrationFingerprint")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "planned.calibrationFingerprint must be a string".to_owned())?
+        .to_owned();
+    let expected_fingerprint = turnkey_calibration_fingerprint(arm, tier).ok_or_else(|| {
+        format!(
+            "no turnkey member {} at tier {tier}: the turnkey family ships bf16, q4 and q8 only",
+            arm.provider
+        )
+    })?;
+    if planned_fingerprint != expected_fingerprint {
+        return Err(format!(
+            "plan/provider calibration mismatch: plan={planned_fingerprint}, the {} {tier} \
+             production identity is {expected_fingerprint}",
+            arm.provider
+        ));
+    }
+    let artifact = turnkey_load_spec(request, load_shape)?;
+    // From the ARTIFACT, so the member that was actually bound to a root is the member that is
+    // measured — not a second, independent resolution of the same plan.
+    let arm = artifact.arm;
+
+    let catalog =
+        runtime_macos::catalog().map_err(|error| format!("build MLX catalog: {error}"))?;
+    let generator = catalog
+        .media()
+        .load(arm.provider, &artifact.spec)
+        .map_err(|error| format!("load real {} {tier} provider: {error}", arm.provider))?;
+    let contract = generator.memory_strategy_contract().ok_or_else(|| {
+        format!(
+            "loaded {} exposed no memory-strategy contract",
+            arm.provider
+        )
+    })?;
+    contract.validate_selection(&selection).map_err(|error| {
+        format!(
+            "pinned {} provider rejected planned selection: {error}",
+            arm.provider
+        )
+    })?;
+    let strategy = attested_strategy(
+        request,
+        &selection,
+        &contract.engaged_composition(selection.strategy),
+    )?;
+    // The LOADED generator's own identity is what the record attests. An absent one is refused by
+    // name — an anchor recorded against no identity would claim measured authority the engine never
+    // granted.
+    let calibration = contract.calibration.as_ref().ok_or_else(|| {
+        format!(
+            "the loaded {} provider at inference {} published no calibration identity for the \
+             {tier} artifact",
+            arm.provider,
+            protocol::INFERENCE_PIN
+        )
+    })?;
+    if calibration.fingerprint != planned_fingerprint {
+        return Err(format!(
+            "plan/provider calibration mismatch: plan={planned_fingerprint}, pinned provider={}",
+            calibration.fingerprint
+        ));
+    }
+    if load_shape_key(calibration.load_shape) != load_shape_key(load_shape) {
+        return Err(format!(
+            "plan/provider load-shape mismatch: plan={}, pinned provider={}",
+            load_shape_key(load_shape),
+            load_shape_key(calibration.load_shape)
+        ));
+    }
+    let hardware_bytes = request
+        .pointer("/hardware/memoryBytes")
+        .and_then(Value::as_u64)
+        .ok_or_else(|| "run request.hardware.memoryBytes must be an integer".to_owned())?;
+    let safety = |fingerprint: &str, total_bytes: u64, predicted: u64| {
+        generator.memory_strategy_safety_check(&turnkey_context(
+            &selection,
+            calibration,
+            fingerprint,
+            width,
+            height,
+            total_bytes,
+            predicted,
+        ))
+    };
+    // Admission mutation hygiene: the gate must ACCEPT a fitting request, so the two rejections
+    // below cannot pass through a blanket refusal.
+    if !matches!(
+        safety(&calibration.fingerprint, hardware_bytes, 1),
+        MemorySafetyDecision::Accept
+    ) {
+        return Err(format!(
+            "{} admission rejected a fitting probe budget; the scenario rejections below would be \
+             a blanket refusal, not evidence",
+            arm.provider
+        ));
+    }
+    if !matches!(
+        safety(&calibration.fingerprint, 0, 1),
+        MemorySafetyDecision::Reject { .. }
+    ) {
+        return Err(format!(
+            "{} admission accepted an unknown/zero memory budget",
+            arm.provider
+        ));
+    }
+    if !matches!(
+        safety("stale-turnkey-fingerprint", hardware_bytes, 1),
+        MemorySafetyDecision::Reject { .. }
+    ) {
+        return Err(format!(
+            "{} admission accepted stale calibration evidence",
+            arm.provider
+        ));
+    }
+
+    let conditioning = Cell::new(PhaseMemory {
+        active: 0,
+        cache: 0,
+    });
+    let denoise = Cell::new(PhaseMemory {
+        active: 0,
+        cache: 0,
+    });
+    clear_cache();
+    reset_peak_memory();
+    let pre_rung_active = get_active_memory() as u64;
+    let pre_rung_cache = get_cache_memory() as u64;
+    let selected = one_image(
+        generator
+            .generate(
+                &turnkey_request(width, height),
+                &mut |progress| match progress {
+                    Progress::Step { current: 1, .. } => {
+                        conditioning.set(PhaseMemory::capture());
+                        reset_peak_memory();
+                    }
+                    Progress::Decoding => {
+                        denoise.set(PhaseMemory::capture());
+                        reset_peak_memory();
+                    }
+                    _ => {}
+                },
+            )
+            .map_err(|error| format!("generate measured {} render: {error}", arm.provider))?,
+    )?;
+    let decode = PhaseMemory::capture();
+    let conditioning = conditioning.get();
+    let denoise = denoise.get();
+    if [conditioning.active, denoise.active, decode.active].contains(&0) {
+        return Err(format!(
+            "a synchronized {} lifecycle phase reported a zero active peak",
+            arm.provider
+        ));
+    }
+    let overall = PhaseMemory::overall(&[conditioning, denoise, decode]);
+    let predicted_peaks = image_predicted_peak_bytes(conditioning, denoise, decode);
+    let predicted = predicted_peaks.overall;
+    if !matches!(
+        safety(&calibration.fingerprint, predicted, predicted),
+        MemorySafetyDecision::Accept
+    ) {
+        return Err(format!(
+            "{} admission rejected an exact-fit calibrated budget",
+            arm.provider
+        ));
+    }
+
+    // Warm-repeat determinism and allocator cleanup bounds on this exact loaded provider.
+    clear_cache();
+    reset_peak_memory();
+    let baseline = one_image(
+        generator
+            .generate(&turnkey_request(width, height), &mut |_| {})
+            .map_err(|error| format!("generate warm {} control: {error}", arm.provider))?,
+    )?;
+    let clean_warm_peak = get_peak_memory() as u64;
+    clear_cache();
+    let clean_post_cleanup = AllocatorState::capture_current();
+    let cleanup_bounds =
+        LifecycleMemoryBounds::from_clean_warm(clean_warm_peak, clean_post_cleanup);
+    let (maximum_error, mean_error, rms_error) = image_max_mean_rms_abs(&selected, &baseline)?;
+    if !flux2_quality_passes(maximum_error, mean_error, rms_error) {
+        return Err(format!(
+            "{} warm repeat exceeded the determinism envelope: max={maximum_error:.6}, \
+             mean={mean_error:.6}, rms={rms_error:.6}",
+            arm.provider
+        ));
+    }
+    reset_peak_memory();
+    let warm = one_image(
+        generator
+            .generate(&turnkey_request(width, height), &mut |_| {})
+            .map_err(|error| format!("generate warm {} repeat: {error}", arm.provider))?,
+    )?;
+    let warm_peak = get_peak_memory() as u64;
+    if !cleanup_bounds.allows_warm_peak(warm_peak) {
+        return Err(format!(
+            "{} warm repeat peaked at {warm_peak} bytes, above the clean warm control \
+             {clean_warm_peak} bytes plus 2%",
+            arm.provider
+        ));
+    }
+    clear_cache();
+    let warm_post_cleanup = AllocatorState::capture_current();
+    if !cleanup_bounds.allows_retained(warm_post_cleanup) {
+        return Err(format!(
+            "{} warm repeat retained active/cache bytes {warm_post_cleanup:?} above the clean warm \
+             cleanup {clean_post_cleanup:?} plus {} bytes",
+            arm.provider, cleanup_bounds.tolerance_bytes,
+        ));
+    }
+    let (warm_maximum, warm_mean, warm_rms) = image_max_mean_rms_abs(&selected, &warm)?;
+    if !flux2_quality_passes(warm_maximum, warm_mean, warm_rms) {
+        return Err(format!(
+            "{} second warm repeat changed the deterministic output",
+            arm.provider
+        ));
+    }
+
+    // Arm-internal negative-mutation falsifiability check: a runtime_complete record must keep
+    // `negativeMutation` null, so the breach is verified here and the numbers land in diagnostics.
+    let mutated = qwen_negative_mutation(&selected);
+    let (mutated_maximum, mutated_mean, mutated_rms) = image_max_mean_rms_abs(&mutated, &baseline)?;
+    if flux2_quality_passes(mutated_maximum, mutated_mean, mutated_rms) {
+        return Err(format!(
+            "{} output mutation did not breach the determinism envelope",
+            arm.provider
+        ));
+    }
+
+    let lifecycle_blocker = concat!(
+        "the pinned Kolors, Ideogram and Lens crates open no memory-strategy request scope for the ",
+        "resident anchor composition and expose no calibration fault-injection site, so the scoped ",
+        "lifecycle scenarios cannot execute; unscoped repeat determinism and allocator cleanup ",
+        "bounds are attested in quality and diagnostics instead"
+    );
+    let mut fragment = json!({
+        "status": "runtime_complete",
+        "strategy": strategy,
+        "loadShape": load_shape_key(calibration.load_shape),
+        "artifact": artifact.artifact_json(),
+        "sweep": turnkey_complete_sweep(request)?,
+        "scenarios": [
+            { "name": "exact_fit", "result": "passed", "predictedBytes": predicted, "effectiveBudgetBytes": predicted },
+            { "name": "unknown_budget", "result": "passed" },
+            { "name": "stale_evidence", "result": "passed" },
+            { "name": "warm_repeat", "result": "not_run", "reason": lifecycle_blocker },
+            { "name": "cancel", "result": "not_run", "reason": lifecycle_blocker },
+            { "name": "error", "result": "not_run", "reason": lifecycle_blocker },
+            { "name": "loadability", "result": "passed" },
+            { "name": "overlay", "result": "not_applicable", "reason": "settled below from the declared target" }
+        ],
+        "predictedPeakBytes": predicted_peaks.json(),
+        "observedMemory": {
+            "conditioning": conditioning.json(),
+            "denoise": denoise.json(),
+            "decode": decode.json(),
+            "overall": overall.json(),
+        },
+        "quality": {
+            "contract": "identical artifact, prompt, seed, geometry, steps, tier, and loaded provider; cold measured render versus warm unscoped repeats",
+            "identicalInputs": true,
+            "result": "passed",
+            "maximumError": maximum_error,
+            "meanError": mean_error,
+            "rootMeanSquareError": rms_error,
+            "maximumErrorThreshold": FLUX2_MAX_THRESHOLD,
+            "meanErrorThreshold": FLUX2_MEAN_THRESHOLD,
+            "rootMeanSquareErrorThreshold": FLUX2_RMS_THRESHOLD,
+        },
+        "negativeMutation": null,
+        "loadability": {
+            "result": "passed",
+            "resolvedPathFingerprint": artifact.loadability_fingerprint(),
+        },
+        "diagnostics": protocol::diagnostics(
+            &format!("memory-mlx-adapter:{}-shared-ladder", arm.slug),
+            "executed",
+            [lifecycle_blocker.to_owned()],
+            [
+                ("preRungActiveAfterClear", "bytes", pre_rung_active),
+                ("preRungCacheAfterClear", "bytes", pre_rung_cache),
+                ("conditioningActivePeak", "bytes", conditioning.active),
+                ("denoiseActivePeak", "bytes", denoise.active),
+                ("decodeActivePeak", "bytes", decode.active),
+                ("overallAllocatorEnvelope", "bytes", overall.allocator_bytes()),
+                ("lifecycleCleanWarmPeak", "bytes", clean_warm_peak),
+                ("lifecycleCleanPostCleanupActive", "bytes", clean_post_cleanup.active),
+                ("lifecycleCleanPostCleanupCache", "bytes", clean_post_cleanup.cache),
+                ("lifecycleCleanupTolerance", "bytes", cleanup_bounds.tolerance_bytes),
+                ("lifecycleWarmRepeatPeak", "bytes", warm_peak),
+                ("lifecycleWarmRepeatPostCleanupActive", "bytes", warm_post_cleanup.active),
+                ("lifecycleWarmRepeatPostCleanupCache", "bytes", warm_post_cleanup.cache),
+                ("negativeMutationMaximumErrorPer255", "count", (mutated_maximum * 255.0).round() as u64),
+                ("negativeMutationMeanErrorPer255", "count", (mutated_mean * 255.0).round() as u64),
+                ("loadShapeDeferred", "count", u64::from(calibration.load_shape == LoadShape::DeferredMaterialization)),
+            ],
+        ),
+        "capturedAt": protocol::captured_at(),
+    });
+    protocol::settle_plain_overlay_scenario(request, &mut fragment, arm.execution_path)?;
+    Ok(fragment)
+}
+
+// ---------------------------------------------------------------------------------------------
 // The SANA and Chroma1 family arm (sc-22731): `sana_1600m`, `sana_sprint_1600m`, `chroma1_hd`,
 // `chroma1_base`, `chroma1_flash`.
 // ---------------------------------------------------------------------------------------------
@@ -14052,6 +14819,15 @@ fn run(request: &Value) -> Result<Value, String> {
         CHROMA1_HD_PROVIDER => run_sana_chroma(request),
         CHROMA1_BASE_PROVIDER => run_sana_chroma(request),
         CHROMA1_FLASH_PROVIDER => run_sana_chroma(request),
+        // sc-22732: the turnkey still family. Five registry ids on one arm, over three engine
+        // crates — `mlx-gen-kolors`, `mlx-gen-ideogram` and `mlx-gen-lens`. The arm resolves which
+        // member from `(provider, mode)`, and the member carries its own artifact family (Ideogram's
+        // bf16 tier ships from a second repository).
+        KOLORS_PROVIDER => run_turnkey_still(request),
+        IDEOGRAM_PROVIDER => run_turnkey_still(request),
+        IDEOGRAM_TURBO_PROVIDER => run_turnkey_still(request),
+        LENS_PROVIDER => run_turnkey_still(request),
+        LENS_TURBO_PROVIDER => run_turnkey_still(request),
         // sc-18808: the first VIDEO arm. Every arm above it refuses `geometry.frames != 1`; this one
         // validates against LTX's own resolution/temporal envelope instead.
         LTX_PROVIDER => run_ltx(request),
@@ -20213,5 +20989,490 @@ mod minimax_tests {
             ),
             (3, 1, 2)
         );
+    }
+}
+
+/// sc-22732 — the turnkey still arm: `kolors`, `ideogram_4`, `ideogram_4_turbo`, `lens` and
+/// `lens_turbo`.
+///
+/// Everything here is env-free and weights-free, which is the point: the arm's plan binding (member
+/// resolution, tier, artifact family, root suffix, request shape, fixture) is decided before a
+/// single weight file is opened, so it can be proven on a CPU-only host. The measured render itself
+/// belongs to the terminal capture campaign.
+#[cfg(test)]
+mod turnkey_still_tests {
+    use super::*;
+
+    const MEMBERS: [(&str, &str); 5] = [
+        (KOLORS_PROVIDER, "kolors"),
+        (IDEOGRAM_PROVIDER, "ideogram-4"),
+        (IDEOGRAM_TURBO_PROVIDER, "ideogram-4-turbo"),
+        (LENS_PROVIDER, "lens"),
+        (LENS_TURBO_PROVIDER, "lens-turbo"),
+    ];
+
+    fn turnkey_planned(provider: &str, mode: &str, tier: &str) -> Value {
+        json!({
+            "planned": {
+                "target": {
+                    "provider": provider,
+                    "tier": tier,
+                    "mode": mode,
+                    "overlay": "none",
+                    "geometry": { "width": 1024, "height": 1024, "batch": 1, "frames": 1 }
+                },
+                "backend": "mlx",
+                "loadShape": "eager_materialization",
+                "strategy": { "rung": "resident", "engagedRungs": ["resident"], "parameters": {} },
+                "calibrationFingerprint": "unused",
+                "fixture": "unused"
+            }
+        })
+    }
+
+    fn turnkey_snapshot_root(repository: &str, revision: &str, tier: &str) -> PathBuf {
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir()
+            .join(format!("sc-22732-{}-{nonce}", std::process::id()))
+            .join(format!("models--{}", repository.replace('/', "--")))
+            .join("snapshots")
+            .join(revision)
+            .join(tier);
+        std::fs::create_dir_all(&root).unwrap();
+        root
+    }
+
+    /// The member is read off the plan's `(provider, mode)`, and a pair no member serves is refused
+    /// BY NAME rather than measured as its nearest neighbour. Kolors advertises `edit_image` and
+    /// `character_image`, and both Ideogram members advertise `edit_image` and `image_inpaint` —
+    /// real routes with their own admission contexts, none of which is this arm's plain
+    /// text-to-image measurement.
+    #[test]
+    fn the_turnkey_arm_resolves_the_member_and_refuses_every_pair_no_member_serves() {
+        for (provider, slug) in MEMBERS {
+            let arm = turnkey_arm(&turnkey_planned(provider, "text_to_image", "q4")).unwrap();
+            assert_eq!(arm.provider, provider);
+            assert_eq!(arm.slug, slug);
+            for mode in [
+                "edit_image",
+                "character_image",
+                "image_inpaint",
+                "text_to_video",
+            ] {
+                let error = turnkey_arm(&turnkey_planned(provider, mode, "q4"))
+                    .expect_err("a mode no member serves must be refused");
+                assert_eq!(
+                    error,
+                    format!(
+                        "the MLX turnkey still arm does not implement provider {provider:?} in \
+                         mode {mode:?}"
+                    )
+                );
+            }
+        }
+        let error = turnkey_arm(&turnkey_planned("sana_1600m", "text_to_image", "q4"))
+            .expect_err("a provider no member serves must be refused");
+        assert!(error.contains("\"sana_1600m\""), "{error}");
+    }
+
+    /// Every member binds ITS OWN artifact family, and Ideogram binds a SECOND one for bf16. A
+    /// wrong binding still produces a well-formed record; the only place it would ever show is the
+    /// repository and revision inside the loadability fingerprint, so it is asserted here.
+    #[test]
+    fn each_member_binds_its_own_artifact_family_and_ideogram_splits_bf16() {
+        let expect = |arm: TurnkeyArm, tier: &str, repository: &str, env: &str| {
+            let family = arm.family_for(tier);
+            assert_eq!(family.expected_repository, repository, "{tier}");
+            assert_eq!(
+                family.repository_env,
+                format!("SCENEWORKS_{env}_REPOSITORY")
+            );
+            assert_eq!(family.revision_env, format!("SCENEWORKS_{env}_REVISION"));
+            assert_eq!(family.root_env, format!("SCENEWORKS_{env}_ROOT"));
+        };
+        for tier in ["q4", "q8", "bf16"] {
+            expect(KOLORS_ARM, tier, protocol::KOLORS_REPOSITORY, "KOLORS");
+            expect(LENS_ARM, tier, protocol::LENS_REPOSITORY, "LENS");
+            expect(
+                LENS_TURBO_ARM,
+                tier,
+                protocol::LENS_TURBO_REPOSITORY,
+                "LENS_TURBO",
+            );
+        }
+        for arm in [IDEOGRAM_ARM, IDEOGRAM_TURBO_ARM] {
+            for tier in ["q4", "q8"] {
+                expect(arm, tier, protocol::IDEOGRAM_REPOSITORY, "IDEOGRAM");
+            }
+            expect(
+                arm,
+                "bf16",
+                protocol::IDEOGRAM_BF16_REPOSITORY,
+                "IDEOGRAM_BF16",
+            );
+        }
+        // Base Lens and Lens-Turbo must never share a family: a turbo plan satisfied by base
+        // weights would re-label the base model's peaks as the distilled model's.
+        assert_ne!(
+            LENS_ARM.family.expected_repository,
+            LENS_TURBO_ARM.family.expected_repository
+        );
+    }
+
+    /// The root must end in the PLANNED tier's directory, and the spec must open exactly that tier
+    /// under the policy the worker loads: `Resident`, plus the request-derived quant the worker
+    /// forwards for all five (`mlx_load_quant_for_resolved_artifact` nulls it only for the krea and
+    /// flux2-klein ids).
+    #[test]
+    fn the_turnkey_root_must_carry_the_planned_tier_and_the_spec_binds_it() {
+        let revision = "a".repeat(40);
+        for (provider, _) in MEMBERS {
+            let arm = turnkey_arm(&turnkey_planned(provider, "text_to_image", "q4")).unwrap();
+            for (tier, quant) in [
+                ("q4", Some(Quant::Q4)),
+                ("q8", Some(Quant::Q8)),
+                ("bf16", None),
+            ] {
+                let family = arm.family_for(tier);
+                let root = turnkey_snapshot_root(family.expected_repository, &revision, tier);
+                let artifact = turnkey_load_spec_at(
+                    &turnkey_planned(provider, "text_to_image", tier),
+                    LoadShape::EagerMaterialization,
+                    family.expected_repository.to_owned(),
+                    revision.clone(),
+                    root.clone(),
+                )
+                .unwrap_or_else(|error| panic!("{provider} {tier}: {error}"));
+                assert_eq!(artifact.tier, tier);
+                assert_eq!(artifact.spec.offload_policy, OffloadPolicy::Resident);
+                assert_eq!(artifact.spec.load_shape, LoadShape::EagerMaterialization);
+                assert_eq!(artifact.spec.quantize, quant, "{provider} {tier}");
+                assert_eq!(
+                    artifact.loadability_fingerprint(),
+                    format!("{}@{revision}:{tier}", family.expected_repository)
+                );
+
+                // A root exported for ANOTHER tier can never satisfy this plan.
+                let wrong = if tier == "q4" { "q8" } else { "q4" };
+                turnkey_load_spec_at(
+                    &turnkey_planned(provider, "text_to_image", wrong),
+                    LoadShape::EagerMaterialization,
+                    family.expected_repository.to_owned(),
+                    revision.clone(),
+                    root.clone(),
+                )
+                .expect_err("a mismatched tier root must be refused");
+            }
+        }
+    }
+
+    /// Ideogram's bf16 plan must be refused against the PACKED repository, and its packed plans
+    /// against the bf16 repository. Both are real repositories at real revisions, so nothing but
+    /// this check stands between a bf16 record and the packed artifact's identity.
+    #[test]
+    fn an_ideogram_tier_cannot_be_satisfied_by_the_other_repositorys_snapshot() {
+        let revision = "b".repeat(40);
+        for arm in [IDEOGRAM_ARM, IDEOGRAM_TURBO_ARM] {
+            for (tier, foreign) in [
+                ("bf16", protocol::IDEOGRAM_REPOSITORY),
+                ("q4", protocol::IDEOGRAM_BF16_REPOSITORY),
+            ] {
+                let root = turnkey_snapshot_root(foreign, &revision, tier);
+                let error = turnkey_load_spec_at(
+                    &turnkey_planned(arm.provider, "text_to_image", tier),
+                    LoadShape::EagerMaterialization,
+                    foreign.to_owned(),
+                    revision.clone(),
+                    root,
+                )
+                .expect_err("the other Ideogram repository must not satisfy this tier");
+                assert!(
+                    error.contains(arm.family_for(tier).expected_repository),
+                    "{error}"
+                );
+            }
+        }
+    }
+
+    /// Every member refuses a non-still geometry before it resolves an environment variable or
+    /// touches a weight snapshot (sc-18808), under its OWN calibration label.
+    #[test]
+    fn every_turnkey_member_refuses_a_multi_frame_geometry() {
+        for (provider, _) in MEMBERS {
+            let mut request = turnkey_planned(provider, "text_to_image", "q4");
+            request["planned"]["target"]["geometry"]["frames"] = json!(2);
+            let arm = turnkey_arm(&request).unwrap();
+            let error = protocol::validate_still_geometry(&request, arm.still_calibration)
+                .expect_err("a multi-frame geometry must be refused");
+            assert!(error.contains(arm.still_calibration), "{error}");
+        }
+    }
+
+    /// The fixture binds member, tier, edge, seed and step count, so a bf16 record can never be
+    /// emitted against a q4 capture that merely reused the fixture string.
+    #[test]
+    fn the_turnkey_fixture_binds_member_tier_edge_seed_and_steps() {
+        for (provider, slug) in MEMBERS {
+            let arm = turnkey_arm(&turnkey_planned(provider, "text_to_image", "q4")).unwrap();
+            let case = |fixture: &str, tier: &str| {
+                let mut request = turnkey_planned(provider, "text_to_image", tier);
+                request["planned"]["fixture"] = json!(fixture);
+                validate_turnkey_fixture(&request, arm, tier)
+            };
+            case(&format!("{slug}-mlx-q4-1024-seed22732-step2"), "q4").unwrap();
+            // A fixture naming another tier, another edge, another seed, or another step count is
+            // refused on its own; so is one naming the five-rung seed the CANDLE lane renders at.
+            assert!(case(&format!("{slug}-mlx-q8-1024-seed22732-step2"), "q4").is_err());
+            assert!(case(&format!("{slug}-mlx-q4-768-seed22732-step2"), "q4").is_err());
+            assert!(case(&format!("{slug}-mlx-q4-1024-seed16402-step2"), "q4").is_err());
+            assert!(case(&format!("{slug}-mlx-q4-1024-seed22732-step4"), "q4").is_err());
+        }
+        // And one member's fixture never satisfies another member's plan.
+        let arm = turnkey_arm(&turnkey_planned(LENS_PROVIDER, "text_to_image", "q4")).unwrap();
+        let mut request = turnkey_planned(LENS_PROVIDER, "text_to_image", "q4");
+        request["planned"]["fixture"] = json!("lens-turbo-mlx-q4-1024-seed22732-step2");
+        validate_turnkey_fixture(&request, arm, "q4")
+            .expect_err("Lens-Turbo's fixture must not satisfy a base Lens plan");
+    }
+
+    /// The committed plan's MLX turnkey cells, as an exact key set: five members x three tiers,
+    /// each served by an arm whose fixture, tier, geometry and load shape all bind.
+    #[test]
+    fn every_planned_turnkey_mlx_cell_is_served_by_an_arm() {
+        let plan: Value = serde_json::from_str(include_str!(
+            "../../../../config/memory-calibration-plan.json"
+        ))
+        .expect("the anchor plan parses");
+        let mut seen = std::collections::BTreeSet::new();
+        for (key, entry) in plan["anchors"].as_object().expect("anchors object") {
+            if !key.ends_with(":mlx") {
+                continue;
+            }
+            let provider = entry["provider"].as_str().unwrap();
+            if !MEMBERS.iter().any(|(member, _)| *member == provider) {
+                continue;
+            }
+            seen.insert(key.clone());
+            let (_, rest) = key.split_once(':').unwrap();
+            let tier = rest.split_once(':').unwrap().0;
+            let request = json!({ "planned": {
+                "backend": "mlx",
+                "target": {
+                    "provider": provider,
+                    "tier": tier,
+                    "mode": entry["mode"].clone(),
+                    "overlay": entry["overlay"].clone(),
+                    "geometry": entry["geometry"].clone(),
+                },
+                "loadShape": entry["loadShape"].clone(),
+                "strategy": { "rung": "resident", "engagedRungs": ["resident"], "parameters": {} },
+                "calibrationFingerprint": entry["calibrationFingerprint"].clone(),
+                "fixture": entry["fixture"].clone(),
+            }});
+            let arm = turnkey_arm(&request).unwrap_or_else(|error| panic!("{key}: {error}"));
+            assert_eq!(planned_qwen_tier(&request).unwrap(), tier, "{key}");
+            validate_turnkey_fixture(&request, arm, tier)
+                .unwrap_or_else(|error| panic!("{key}: {error}"));
+            protocol::validate_still_geometry(&request, arm.still_calibration)
+                .unwrap_or_else(|error| panic!("{key}: {error}"));
+            // The anchor rung on this lane is `resident` (`memory-calibration-harness.mjs`
+            // ANCHOR_STRATEGY.mlx), and the worker materializes all five eagerly under it.
+            assert_eq!(
+                planned_load_shape(&request).unwrap(),
+                LoadShape::EagerMaterialization,
+                "{key}"
+            );
+        }
+        let expected: std::collections::BTreeSet<String> = [
+            "kolors",
+            "ideogram_4",
+            "ideogram_4_turbo",
+            "lens",
+            "lens_turbo",
+        ]
+        .iter()
+        .flat_map(|model| {
+            ["bf16", "q4", "q8"]
+                .iter()
+                .map(move |tier| format!("{model}:{tier}:mlx"))
+        })
+        .collect();
+        assert_eq!(seen, expected);
+    }
+
+    /// sc-22732 review: the identity table must REFUSE an unknown coordinate, not synthesize one.
+    /// The per-member arms bind `tier` as a free variable, so before the guard
+    /// `turnkey_calibration_fingerprint(kolors_arm, "q2")` returned
+    /// `"kolors-q2-mlx-shared-ladder-v1"` — a well-formed identity no engine publishes — and the
+    /// plan check compared a plan row against it instead of refusing the coordinate.
+    #[test]
+    fn the_turnkey_mlx_identity_table_refuses_an_unshipped_tier() {
+        for (provider, _) in MEMBERS {
+            // Every shipped tier stays nameable, so the guard cannot pass by refusing everything.
+            for tier in ["bf16", "q4", "q8"] {
+                let arm = turnkey_arm(&turnkey_planned(provider, "text_to_image", tier)).unwrap();
+                assert!(
+                    turnkey_calibration_fingerprint(arm, tier).is_some(),
+                    "{provider} {tier} is a shipped turnkey cell"
+                );
+            }
+            // Tiers this family does not ship: the axis the free variable let through.
+            let arm = turnkey_arm(&turnkey_planned(provider, "text_to_image", "q4")).unwrap();
+            for tier in ["q2", "q6", "nvfp4", "fp8", "bf16 ", "", "Q4"] {
+                assert_eq!(
+                    turnkey_calibration_fingerprint(arm, tier),
+                    None,
+                    "{provider} {tier:?} is not a shipped turnkey tier"
+                );
+            }
+        }
+    }
+
+    /// Every turnkey MLX plan row names the production calibration identity its loaded generator
+    /// publishes (the sc-22732 inference head's per-(route, tier) tables): the two measured keys
+    /// are the engine constants byte-for-byte, no row names a weights-free conformance string or
+    /// the legacy dense Lens-Turbo key, and the fifteen identities are distinct. The
+    /// member-resolution test above never looks at `calibrationFingerprint`, which is how rows
+    /// naming strings no `Resident` load can return shipped in the first draft of this plan.
+    #[test]
+    fn every_planned_turnkey_mlx_cell_names_the_identity_its_loaded_generator_publishes() {
+        let plan: Value = serde_json::from_str(include_str!(
+            "../../../../config/memory-calibration-plan.json"
+        ))
+        .expect("the anchor plan parses");
+        let mut identities = std::collections::BTreeMap::new();
+        for (key, entry) in plan["anchors"].as_object().expect("anchors object") {
+            let provider = entry["provider"].as_str().unwrap();
+            if !key.ends_with(":mlx") || !MEMBERS.iter().any(|(member, _)| *member == provider) {
+                continue;
+            }
+            let tier = key.split(':').nth(1).unwrap();
+            let mode = entry["mode"].as_str().unwrap();
+            let arm = turnkey_arm(&turnkey_planned(provider, mode, tier)).unwrap();
+            let planned = entry["calibrationFingerprint"]
+                .as_str()
+                .unwrap_or_else(|| panic!("{key}: calibrationFingerprint must be a string"));
+            assert!(
+                !is_turnkey_weights_free_fingerprint(planned),
+                "{key}: {planned} is a weights-free conformance identity no production load returns"
+            );
+            assert_eq!(
+                planned,
+                turnkey_calibration_fingerprint(arm, tier)
+                    .unwrap_or_else(|| panic!("{key}: no turnkey identity"))
+                    .as_str(),
+                "{key}: the plan row must name the loaded generator's production identity"
+            );
+            assert!(
+                identities.insert(planned.to_owned(), key.clone()).is_none(),
+                "{key}: {planned} is already claimed by {}",
+                identities[planned]
+            );
+        }
+        assert_eq!(
+            identities.len(),
+            15,
+            "fifteen distinct turnkey MLX identities"
+        );
+        // The preserved measured keys, byte-for-byte, so the table cannot drift off the engine.
+        assert_eq!(
+            identities["kolors-mlx-chatglm3-sdxl-unet-ladder-v1"],
+            "kolors:q4:mlx"
+        );
+        assert_eq!(
+            identities["lens-mlx-shared-ladder-2026-08-03-v1"],
+            "lens:q4:mlx"
+        );
+        assert_eq!(
+            runtime_macos::providers::kolors::memory_strategy::MEMORY_CALIBRATION_FINGERPRINT,
+            "kolors-mlx-chatglm3-sdxl-unet-ladder-v1"
+        );
+        assert_eq!(
+            runtime_macos::providers::lens::memory_strategy::MEMORY_CALIBRATION_FINGERPRINT,
+            "lens-mlx-shared-ladder-2026-08-03-v1"
+        );
+        // The legacy dense Lens-Turbo key is a real engine constant and it is NOT a cell here.
+        assert_eq!(
+            runtime_macos::providers::lens::memory_strategy::LEGACY_TEXT_ENCODER_FINGERPRINT,
+            "lens-text-encoder-window-2026-07-31-v1"
+        );
+        assert!(!identities.contains_key("lens-text-encoder-window-2026-07-31-v1"));
+        // The thirteen new cells, spelled out: the strings the sc-22732 inference head mints.
+        for (key, identity) in [
+            ("kolors:q8:mlx", "kolors-q8-mlx-shared-ladder-v1"),
+            ("kolors:bf16:mlx", "kolors-bf16-mlx-shared-ladder-v1"),
+            ("ideogram_4:q4:mlx", "ideogram-4-q4-mlx-shared-ladder-v1"),
+            ("ideogram_4:q8:mlx", "ideogram-4-q8-mlx-shared-ladder-v1"),
+            (
+                "ideogram_4:bf16:mlx",
+                "ideogram-4-bf16-mlx-shared-ladder-v1",
+            ),
+            (
+                "ideogram_4_turbo:q4:mlx",
+                "ideogram-4-turbo-q4-mlx-shared-ladder-v1",
+            ),
+            (
+                "ideogram_4_turbo:q8:mlx",
+                "ideogram-4-turbo-q8-mlx-shared-ladder-v1",
+            ),
+            (
+                "ideogram_4_turbo:bf16:mlx",
+                "ideogram-4-turbo-bf16-mlx-shared-ladder-v1",
+            ),
+            ("lens:q8:mlx", "lens-q8-mlx-shared-ladder-v1"),
+            ("lens:bf16:mlx", "lens-bf16-mlx-shared-ladder-v1"),
+            ("lens_turbo:q4:mlx", "lens-turbo-q4-mlx-shared-ladder-v1"),
+            ("lens_turbo:q8:mlx", "lens-turbo-q8-mlx-shared-ladder-v1"),
+            (
+                "lens_turbo:bf16:mlx",
+                "lens-turbo-bf16-mlx-shared-ladder-v1",
+            ),
+        ] {
+            assert_eq!(identities[identity], key);
+        }
+    }
+
+    /// The arm binds the plan row to the table BEFORE any environment or weight work, naming
+    /// both strings, so a stale row cannot cost a load.
+    #[test]
+    fn a_plan_row_naming_a_foreign_identity_is_refused_before_the_load() {
+        for (provider, slug, foreign) in [
+            (
+                LENS_TURBO_PROVIDER,
+                "lens-turbo",
+                "lens-text-encoder-window-2026-07-31-v1",
+            ),
+            (
+                KOLORS_PROVIDER,
+                "kolors",
+                "kolors-mlx-registry-behavior-v1-bf16-dense-resident",
+            ),
+            (
+                IDEOGRAM_PROVIDER,
+                "ideogram-4",
+                "ideogram4-mlx-registry-behavior-v1-ideogram-4-bf16-dense-resident",
+            ),
+        ] {
+            let mut request = turnkey_planned(provider, "text_to_image", "bf16");
+            request["planned"]["fixture"] = json!(format!(
+                "{slug}-mlx-bf16-1024-seed{TURNKEY_SEED}-step{TURNKEY_STEPS}"
+            ));
+            request["planned"]["calibrationFingerprint"] = json!(foreign);
+            let error = run(&request).expect_err("a conformance identity is not capturable");
+            let arm = turnkey_arm(&request).unwrap();
+            assert!(
+                error.contains(&format!("plan={foreign}"))
+                    && error.contains(
+                        &turnkey_calibration_fingerprint(arm, "bf16")
+                            .expect("bf16 is a shipped turnkey tier")
+                    ),
+                "{provider}: {error}"
+            );
+            // Not an env error: the refusal fired before `SCENEWORKS_<MEMBER>_*` was read.
+            assert!(!error.contains("required environment variable"), "{error}");
+        }
     }
 }
