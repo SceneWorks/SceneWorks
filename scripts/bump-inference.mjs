@@ -110,6 +110,7 @@ const MEMORY_PROVENANCE_RE = /(pub const INFERENCE_PIN: &str = ")[0-9a-f]{40}(";
 // Relative-plus-joined rather than one absolute path because `--self-test` drives the same code over
 // a fixture tree; nothing else in this script needs a second root.
 const INFERENCE_CLOSURES_RELATIVE = "config/inference-provider-closures.json";
+const ANCHOR_CURRENCY_ATTESTATIONS = "config/anchor-currency-attestations.json";
 const INFERENCE_CLOSURES = join(repoRoot, INFERENCE_CLOSURES_RELATIVE);
 const SHA_RE = /^[0-9a-f]{40}$/;
 
@@ -575,6 +576,61 @@ function reportCrossLaneWork(sha) {
   }
 }
 
+/**
+ * Say up front which memory-anchor currency attestations this pin strands.
+ *
+ * `config/anchor-currency-attestations.json` is the OTHER half of a pin bump, and the only half
+ * nothing here derives. An attestation is bounded to the one revision it names: it records that the
+ * loader-closure diff from an anchor's measurement revision up to `attestedRevision` was read and is
+ * accounting-only, or is witnessed unchanged by a re-measure. Moving the pin past that revision
+ * leaves the store claiming a justification for a revision that is no longer the pin — which
+ * `sceneworks-core`'s `a_packaged_currency_attestation_names_the_pin_it_keys_the_anchor_to` reds on
+ * `parity-rust`, at the END of a CI round (sc-22765, where it cost exactly that).
+ *
+ * Reported rather than rewritten, for the same reason as the licence audit's prose: the remediation
+ * is a REVIEW. Re-keying means reading the new range against that anchor's closure and either
+ * extending the justification or deleting the entry so the anchor goes honestly stale. A script that
+ * stamped the new revision in would manufacture the false green the currency key exists to prevent.
+ *
+ * Pure over the parsed config so `--self-test` drives it without a checkout.
+ */
+function staleCurrencyAttestations(config, sha) {
+  return (config?.attestations ?? [])
+    .filter((entry) => entry?.attestedRevision && entry.attestedRevision !== sha)
+    .map((entry) => [entry.anchorId, entry.attestedRevision]);
+}
+
+function reportStaleCurrencyAttestations(sha) {
+  let config;
+  try {
+    config = JSON.parse(readFileSync(join(repoRoot, ANCHOR_CURRENCY_ATTESTATIONS), "utf8"));
+  } catch {
+    /* absent or unparsable is the anchor tooling's business, not this preview's */
+    return;
+  }
+  const stale = staleCurrencyAttestations(config, sha);
+  if (stale.length === 0) return;
+  console.log(
+    `bump-inference: ${stale.length} memory-anchor currency attestation(s) key to a revision this ` +
+      "pin moves past —",
+  );
+  for (const [anchorId, at] of stale) {
+    console.log(`    ${anchorId}  (attested at ${at.slice(0, 12)}…)`);
+  }
+  console.log(
+    [
+      "  Each is a REVIEW, not a re-stamp. For one anchor, intersect its `closureFiles` in",
+      "  config/anchor-loader-closures.json with the range's changed files:",
+      `      git -C <inference> diff --name-only <attestedRevision>..${sha.slice(0, 12)}`,
+      "  An EMPTY intersection means that anchor's closure is byte-identical across the range: extend",
+      "  the entry to this pin and record that reading in its `why`. A non-empty one must be",
+      "  classified file by file, or the entry DELETED so the anchor goes honestly stale. Then:",
+      "      node scripts/anchor-loader-closure.mjs --repo <clone> --stamp-anchors",
+      "  Leaving them is a parity-rust failure, not a warning.",
+    ].join("\n"),
+  );
+}
+
 // Every checked-in file under `config/engine-capabilities/` records the producing revision and the
 // preview flags plus the rich `runtime/` descriptor/trainer/provider and worker-capability surfaces
 // read off the LINKED registries (sc-16965, epic 16948). A pin change alone does not invalidate that
@@ -876,6 +932,26 @@ function selfTest() {
     threw = true;
   }
   check("throws when no inference pin is present", threw);
+
+  // The currency-attestation preview (sc-22765). It fires on exactly the condition that reds
+  // parity-rust — an entry keyed to anything but the new pin — and stays silent once re-keyed, so
+  // "it is wired" is again not the same as "it fires".
+  const attestations = {
+    attestations: [
+      { anchorId: "keyed-to-the-old-pin", attestedRevision: "b".repeat(40) },
+      { anchorId: "keyed-to-this-pin", attestedRevision: SHA },
+    ],
+  };
+  check(
+    "a currency attestation keyed to another revision is reported, and one at the pin is not",
+    JSON.stringify(staleCurrencyAttestations(attestations, SHA)) ===
+      JSON.stringify([["keyed-to-the-old-pin", "b".repeat(40)]]),
+  );
+  check(
+    "an attestation file with no entries reports nothing",
+    staleCurrencyAttestations({ attestations: [] }, SHA).length === 0 &&
+      staleCurrencyAttestations({}, SHA).length === 0,
+  );
 
   // The fixture deliberately carries a DECOY 40-hex constant: the real file declares
   // CLIP_MODEL_REVISION (an upstream HF model revision) two lines above the stamp, and nothing else
@@ -1582,6 +1658,7 @@ function main() {
   // bump produces it instead of aborting with instructions for producing it. The verifiers are kept
   // and still run — they now grade the derivation rather than the caller's diligence.
   reportCrossLaneWork(sha);
+  reportStaleCurrencyAttestations(sha);
   const repo = ensureInferenceCheckout(sha, explicitRepo);
   deriveInferenceClosures(sha, repo);
   verifyInferenceClosures(sha);

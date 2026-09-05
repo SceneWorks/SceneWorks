@@ -1,4 +1,4 @@
-# Anchor currency attestations at inference `c6d6a4db` (sc-22667, epic sc-22657)
+# Anchor currency attestations at inference `c6d6a4db`, extended to `1cd0e393` (sc-22667 / sc-22765, epic sc-22657)
 
 Terminal-story close-out of the memory-anchor currency question the sc-22667 review raised as a
 blocker: at the landed pin `c6d6a4dbd61ab09c26ff5526632cae2cefea60ed`, none of the five anchors the
@@ -81,3 +81,29 @@ the anchor; the E6 test documents the same band ("cold staged control lands betw
   **unmodified** and assert `anchor_currency_matches` on the packaged row, so they cannot pass on a
   re-stamp: flipping the packaged digest reds them. `mlx_fit_gate::flux2_live_anchor_store` remains
   and says why (the flux2 MLX rows are not attested and honestly stale).
+
+## Extension to inference `1cd0e393` (sc-22765, 2026-09-05)
+
+The pin moved `c6d6a4db` → `1cd0e393` (the sc-22760 FLUX.2 Klein rehost fix). Under the bound
+stated above that would stale all five attested anchors, so each entry was re-read for the new
+range and re-keyed to the new pin. The reading is mechanical and exhaustive rather than a judgement
+call:
+
+* `c6d6a4db..1cd0e393` changes 20 inference files — the sc-19699 / sc-22261 StarVector work
+  (`core-llm` contracts and testkit, `candle-llm` StarVector plus its decode streaming, `mlx-llm`
+  StarVector), the sc-22760 `mlx-gen-flux2` artifact inventory and its tests, and `release/` +
+  `scripts/release/` tooling.
+* **None of those files appears in any of the five anchors' loader closures.** Intersecting each
+  anchor's `closureFiles` in `config/anchor-loader-closures.json` with the range's changed-file list
+  is empty for `krea_2_turbo:candle` (143 files), `z_image_turbo:candle` (109) and
+  `z_image_turbo:mlx` (137). The closures are byte-identical across the range, and their digests are
+  unchanged in the regenerated config.
+* So there was no file left to classify: the extension adds nothing to either the accounting-only
+  reading or the measured witness the four/one entries already rest on, and each entry keeps its
+  original `class`, `witness` and `filesChangedSinceMeasurement` (that list still covers
+  `measuredRevision..attestedRevision` exactly, because the widened range contributed no closure
+  file).
+
+Three closures DID move on this bump — `flux2_dev:mlx`, `ltx_2_3:mlx` and `ltx_2_5:mlx`, all of
+which reach `mlx-gen-flux2`'s artifact inventory. Those anchors were already honestly stale and
+unattested before this bump, and they stay that way: nothing here re-keys them.

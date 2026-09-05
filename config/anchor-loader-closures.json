@@ -1,7 +1,7 @@
 {
   "_comment": "Per-model loader-closure digests: the memory anchor currency key (sc-22511). An anchor is CURRENT while the digest it recorded still equals the digest here for its (model, backend lane). The unit is the source files the model's loader reaches, and nothing else — not the pin, not sibling models, not shared crates the loader never reaches. Regenerate when the pinned inference revision changes: node scripts/anchor-loader-closure.mjs --repo <inference> --write. A regeneration that leaves the digests unchanged is the expected case.",
   "digestVersion": "anchor-loader-closure v2",
-  "inferenceRevision": "c6d6a4dbd61ab09c26ff5526632cae2cefea60ed",
+  "inferenceRevision": "1cd0e393863f7d3d880400e409519bcadfb43959",
   "models": {
     "flux2_dev:mlx": {
       "entryPoints": [
@@ -9,7 +9,7 @@
         "crates/media/mlx-gen/mlx-gen-flux2/src/memory_strategy.rs",
         "crates/media/mlx-gen/mlx-gen-flux2/src/model.rs"
       ],
-      "digest": "a97ac68e434f6b909da1c0c6d5b2a04fce3c0563518b49b42dea13db50fee9c2",
+      "digest": "c8ca9643a0c91449113b8df397e5282add5901b3768dcfc9316cc9845ba88bbe",
       "closureFileCount": 137,
       "closureFiles": [
         "crates/contracts/core-llm/src/constraint.rs",
@@ -565,7 +565,7 @@
         "crates/media/mlx-gen/mlx-gen-ltx/src/memory_strategy.rs",
         "crates/media/mlx-gen/mlx-gen-ltx/src/model.rs"
       ],
-      "digest": "18d6415f1f42389dabbdaa6e9baec6b6dea933d6c3a36b2a5d803c43a0460f9f",
+      "digest": "1e94712ec8440fe7f8345510d626192ba61064d215426d7992b0ba622ef5de58",
       "closureFileCount": 172,
       "closureFiles": [
         "crates/contracts/core-llm/src/cancel.rs",
@@ -747,7 +747,7 @@
         "crates/media/mlx-gen/mlx-gen-ltx/src/memory_strategy_2_5.rs",
         "crates/media/mlx-gen/mlx-gen-ltx/src/model.rs"
       ],
-      "digest": "9040ac7050d84035acc26ea48c264f3734ba8b815f88e3b362a04181189382d6",
+      "digest": "ebfb10f850d219bcab1e93722706f947c95880d364ca5d803cf55da4e1566691",
       "closureFileCount": 172,
       "closureFiles": [
         "crates/contracts/core-llm/src/cancel.rs",
