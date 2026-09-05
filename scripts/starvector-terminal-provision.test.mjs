@@ -11,7 +11,7 @@ import { fileSha256 } from "./lib/file-sha256.mjs";
 import { terminalPinPaths } from "./lib/starvector-terminal-pin-paths.mjs";
 import { terminalTreeEntry, terminalTreeSha256 } from "./lib/terminal-tree-identity.mjs";
 import { removeStarVectorMacMetricsTree, selectStarVectorMacPython, validateStarVectorMacVenv } from "./select-starvector-macos-python.mjs";
-import { assemblePreflight, assembleWeights, downloadExact, installCheckout, installPinnedCheckout, pinnedCheckoutLockPath, tree, validatePreflightMetadata, validatePreflightTransport, validateSealedPreflightIndex } from "./starvector-terminal-provision.mjs";
+import { assemblePreflight, assembleWeights, downloadExact, installCheckout, installPinnedCheckout, prepareUpstreamSource, pinnedCheckoutLockPath, tree, validatePreflightMetadata, validatePreflightTransport, validateSealedPreflightIndex } from "./starvector-terminal-provision.mjs";
 import { validateTerminalServiceClosure } from "./starvector-terminal-readiness.mjs";
 
 const execFile = promisify(execFileCallback);
@@ -998,4 +998,43 @@ test("failed atomic checkout removes only its unique staging directory", async (
   );
   assert.equal(await readFile(path.join(foreignStaging, "owner"), "utf8"), "other provision");
   assert.deepEqual((await readdir(root)).filter((name) => name.includes(`staging-${process.pid}-`)), []);
+});
+
+
+test("upstream source restores canonical bytes from an exact clean CRLF checkout", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "starvector-upstream-eol-"));
+  try {
+    const source = path.join(root, "source.git"), destination = path.join(root, "upstream-source");
+    const bytes = "def upstream():\n    return 1\n";
+    await mkdir(source);
+    await execFile("git", ["init", source]);
+    await execFile("git", ["-C", source, "config", "core.autocrlf", "false"]);
+    await writeFile(path.join(source, "source.py"), bytes);
+    await execFile("git", ["-C", source, "add", "."]);
+    await execFile("git", ["-C", source, "-c", "user.name=fixture", "-c", "user.email=fixture@example.com", "commit", "-m", "fixture"]);
+    const revision = (await execFile("git", ["-C", source, "rev-parse", "HEAD"])).stdout.trim();
+    await execFile("git", ["clone", "--config", "core.autocrlf=true", source, destination]);
+    assert.equal(await readFile(path.join(destination, "source.py"), "utf8"), bytes.replaceAll("\n", "\r\n"));
+    assert.equal((await execFile("git", ["-C", destination, "status", "--porcelain"])).stdout, "");
+    const lock = { implementation_repository: source.slice(0, -4), implementation_revision: revision };
+    await prepareUpstreamSource(destination, lock);
+    assert.equal(await readFile(path.join(destination, "source.py"), "utf8"), bytes);
+    assert.equal((await execFile("git", ["-C", destination, "status", "--porcelain"])).stdout, "");
+    assert.equal((await execFile("git", ["-C", destination, "rev-parse", "HEAD"])).stdout.trim(), revision);
+    await prepareUpstreamSource(destination, lock);
+    assert.equal(await readFile(path.join(destination, "source.py"), "utf8"), bytes);
+    const fresh = path.join(root, "fresh-source");
+    await prepareUpstreamSource(fresh, lock);
+    assert.equal(await readFile(path.join(fresh, "source.py"), "utf8"), bytes);
+
+    const dirty = bytes + "# unauthorized edit\n";
+    await writeFile(path.join(destination, "source.py"), dirty);
+    await assert.rejects(() => prepareUpstreamSource(destination, lock), /exact and clean/);
+    assert.equal(await readFile(path.join(destination, "source.py"), "utf8"), dirty);
+    await writeFile(path.join(destination, "source.py"), bytes);
+    await assert.rejects(() => prepareUpstreamSource(destination, { ...lock, implementation_revision: "a".repeat(40) }), /exact and clean/);
+    assert.equal(await readFile(path.join(destination, "source.py"), "utf8"), bytes);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
 });

@@ -408,17 +408,28 @@ export async function assembleMetrics({ sceneWorksRoot, metricsRoot, python, cli
   await writeExact(path.join(metricsRoot, "starvector-terminal-metrics-environment-v1.json"), Buffer.from(`${JSON.stringify(manifest, null, 2)}\n`)); return manifest;
 }
 
-// Provisioning may acquire dependencies; the campaign validation/execution is offline.
-export async function provisionUpstream({ sceneWorksRoot, hostRoot, python, assetsRoot, sanitizer }) {
-  const lock = await json(path.join(sceneWorksRoot, "release/starvector-terminal-upstream-lock-v1.json"));
-  const source = path.join(hostRoot, "upstream-source"), environment = path.join(hostRoot, "upstream-env");
+export async function prepareUpstreamSource(source, lock) {
   if (!await lstat(source).catch(() => null)) {
-    await execFile("git", ["clone", "--no-checkout", `${lock.implementation_repository}.git`, source]);
+    await execFile("git", ["clone", "--config", "core.autocrlf=false", "--config", "core.eol=lf", "--no-checkout", `${lock.implementation_repository}.git`, source]);
     await execFile("git", ["-C", source, "checkout", "--detach", lock.implementation_revision]);
   }
   const head = (await execFile("git", ["-C", source, "rev-parse", "HEAD"])).stdout.trim();
   const dirty = (await execFile("git", ["-C", source, "status", "--porcelain"])).stdout.trim();
   if (head !== lock.implementation_revision || dirty) die("upstream source must be exact and clean");
+  // A clean Windows checkout can still contain CRLF bytes. The oracle hashes exact
+  // audited source bytes, so rematerialize this owned, verified checkout from its
+  // unchanged index; config alone would leave an existing CRLF worktree intact.
+  await execFile("git", ["-C", source, "config", "core.autocrlf", "false"]);
+  await execFile("git", ["-C", source, "config", "core.eol", "lf"]);
+  await execFile("git", ["-C", source, "checkout-index", "--force", "--all", "--index"]);
+  return source;
+}
+
+// Provisioning may acquire dependencies; the campaign validation/execution is offline.
+export async function provisionUpstream({ sceneWorksRoot, hostRoot, python, assetsRoot, sanitizer }) {
+  const lock = await json(path.join(sceneWorksRoot, "release/starvector-terminal-upstream-lock-v1.json"));
+  const source = path.join(hostRoot, "upstream-source"), environment = path.join(hostRoot, "upstream-env");
+  await prepareUpstreamSource(source, lock);
   const oraclePython = path.join(environment, process.platform === "win32" ? "Scripts" : "bin", process.platform === "win32" ? "python.exe" : "python");
   if (!await lstat(oraclePython).catch(() => null)) await execFile(python, ["-m", "venv", environment]);
   if (lock.torch_index_url !== "https://download.pytorch.org/whl/cu128") die("oracle requires the locked CUDA 12.8 wheel index");

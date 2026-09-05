@@ -1506,7 +1506,7 @@
         "repo": null,
         "revision": null,
         "path": "config/manifests/builtin.models.jsonc#models/flux2_dev/candle/memoryStrategyContract",
-        "sha256": "21913a313cf5cf7d3a849458ac05759e5a5fd686012dbec4b51bbbb5ca9ea921",
+        "sha256": "22e97645173b01a65362f24d4859d0aa92d617d10ca5254b253fa5be45513c2b",
         "recordId": null,
         "envelopeBytes": null,
         "values": {
@@ -1530,7 +1530,7 @@
         "repo": null,
         "revision": null,
         "path": "config/manifests/builtin.models.jsonc#models/flux2_dev/candle/memoryStrategyContract",
-        "sha256": "21913a313cf5cf7d3a849458ac05759e5a5fd686012dbec4b51bbbb5ca9ea921",
+        "sha256": "22e97645173b01a65362f24d4859d0aa92d617d10ca5254b253fa5be45513c2b",
         "recordId": null,
         "envelopeBytes": null,
         "values": {
@@ -1565,7 +1565,7 @@
         "repo": null,
         "revision": null,
         "path": "config/manifests/builtin.models.jsonc#models/flux2_klein_9b/candle/memoryStrategyContract",
-        "sha256": "21913a313cf5cf7d3a849458ac05759e5a5fd686012dbec4b51bbbb5ca9ea921",
+        "sha256": "22e97645173b01a65362f24d4859d0aa92d617d10ca5254b253fa5be45513c2b",
         "recordId": null,
         "envelopeBytes": null,
         "values": {
@@ -1590,7 +1590,7 @@
         "repo": null,
         "revision": null,
         "path": "config/manifests/builtin.models.jsonc#models/flux2_klein_9b/candle/memoryStrategyContract",
-        "sha256": "21913a313cf5cf7d3a849458ac05759e5a5fd686012dbec4b51bbbb5ca9ea921",
+        "sha256": "22e97645173b01a65362f24d4859d0aa92d617d10ca5254b253fa5be45513c2b",
         "recordId": null,
         "envelopeBytes": null,
         "values": {
@@ -1615,7 +1615,7 @@
         "repo": null,
         "revision": null,
         "path": "config/manifests/builtin.models.jsonc#models/flux2_klein_9b/candle/memoryStrategyContract",
-        "sha256": "21913a313cf5cf7d3a849458ac05759e5a5fd686012dbec4b51bbbb5ca9ea921",
+        "sha256": "22e97645173b01a65362f24d4859d0aa92d617d10ca5254b253fa5be45513c2b",
         "recordId": null,
         "envelopeBytes": null,
         "values": {
@@ -1782,7 +1782,7 @@
         "repo": null,
         "revision": null,
         "path": "config/manifests/builtin.models.jsonc#models/flux_dev/candle/memoryStrategyContract",
-        "sha256": "21913a313cf5cf7d3a849458ac05759e5a5fd686012dbec4b51bbbb5ca9ea921",
+        "sha256": "22e97645173b01a65362f24d4859d0aa92d617d10ca5254b253fa5be45513c2b",
         "recordId": null,
         "envelopeBytes": null,
         "values": {
@@ -1861,7 +1861,7 @@
         "repo": null,
         "revision": null,
         "path": "config/manifests/builtin.models.jsonc#models/flux_schnell/candle/memoryStrategyContract",
-        "sha256": "21913a313cf5cf7d3a849458ac05759e5a5fd686012dbec4b51bbbb5ca9ea921",
+        "sha256": "22e97645173b01a65362f24d4859d0aa92d617d10ca5254b253fa5be45513c2b",
         "recordId": null,
         "envelopeBytes": null,
         "values": {
@@ -2116,7 +2116,7 @@
         "repo": null,
         "revision": null,
         "path": "config/manifests/builtin.models.jsonc#models/illustrious_xl_v1/candle/memoryStrategyContract",
-        "sha256": "21913a313cf5cf7d3a849458ac05759e5a5fd686012dbec4b51bbbb5ca9ea921",
+        "sha256": "22e97645173b01a65362f24d4859d0aa92d617d10ca5254b253fa5be45513c2b",
         "recordId": null,
         "envelopeBytes": null,
         "values": {
@@ -2140,7 +2140,7 @@
         "repo": null,
         "revision": null,
         "path": "config/manifests/builtin.models.jsonc#models/illustrious_xl_v1/candle/memoryStrategyContract",
-        "sha256": "21913a313cf5cf7d3a849458ac05759e5a5fd686012dbec4b51bbbb5ca9ea921",
+        "sha256": "22e97645173b01a65362f24d4859d0aa92d617d10ca5254b253fa5be45513c2b",
         "recordId": null,
         "envelopeBytes": null,
         "values": {
@@ -2164,7 +2164,7 @@
         "repo": null,
         "revision": null,
         "path": "config/manifests/builtin.models.jsonc#models/illustrious_xl_v1/candle/memoryStrategyContract",
-        "sha256": "21913a313cf5cf7d3a849458ac05759e5a5fd686012dbec4b51bbbb5ca9ea921",
+        "sha256": "22e97645173b01a65362f24d4859d0aa92d617d10ca5254b253fa5be45513c2b",
         "recordId": null,
         "envelopeBytes": null,
         "values": {
@@ -2221,7 +2221,7 @@
         "repo": null,
         "revision": null,
         "path": "config/manifests/builtin.models.jsonc#models/illustrious_xl_v2/candle/memoryStrategyContract",
-        "sha256": "21913a313cf5cf7d3a849458ac05759e5a5fd686012dbec4b51bbbb5ca9ea921",
+        "sha256": "22e97645173b01a65362f24d4859d0aa92d617d10ca5254b253fa5be45513c2b",
         "recordId": null,
         "envelopeBytes": null,
         "values": {
@@ -2245,7 +2245,7 @@
         "repo": null,
         "revision": null,
         "path": "config/manifests/builtin.models.jsonc#models/illustrious_xl_v2/candle/memoryStrategyContract",
-        "sha256": "21913a313cf5cf7d3a849458ac05759e5a5fd686012dbec4b51bbbb5ca9ea921",
+        "sha256": "22e97645173b01a65362f24d4859d0aa92d617d10ca5254b253fa5be45513c2b",
         "recordId": null,
         "envelopeBytes": null,
         "values": {
@@ -2269,7 +2269,7 @@
         "repo": null,
         "revision": null,
         "path": "config/manifests/builtin.models.jsonc#models/illustrious_xl_v2/candle/memoryStrategyContract",
-        "sha256": "21913a313cf5cf7d3a849458ac05759e5a5fd686012dbec4b51bbbb5ca9ea921",
+        "sha256": "22e97645173b01a65362f24d4859d0aa92d617d10ca5254b253fa5be45513c2b",
         "recordId": null,
         "envelopeBytes": null,
         "values": {
@@ -2532,7 +2532,7 @@
         "repo": null,
         "revision": null,
         "path": "config/manifests/builtin.models.jsonc#models/krea_2_turbo/candle/memoryStrategyContract",
-        "sha256": "21913a313cf5cf7d3a849458ac05759e5a5fd686012dbec4b51bbbb5ca9ea921",
+        "sha256": "22e97645173b01a65362f24d4859d0aa92d617d10ca5254b253fa5be45513c2b",
         "recordId": null,
         "envelopeBytes": null,
         "values": {
@@ -2557,7 +2557,7 @@
         "repo": null,
         "revision": null,
         "path": "config/manifests/builtin.models.jsonc#models/krea_2_turbo/candle/memoryStrategyContract",
-        "sha256": "21913a313cf5cf7d3a849458ac05759e5a5fd686012dbec4b51bbbb5ca9ea921",
+        "sha256": "22e97645173b01a65362f24d4859d0aa92d617d10ca5254b253fa5be45513c2b",
         "recordId": null,
         "envelopeBytes": null,
         "values": {
@@ -3352,7 +3352,7 @@
         "repo": null,
         "revision": null,
         "path": "config/manifests/builtin.models.jsonc#models/qwen_image/candle/memoryStrategyContract",
-        "sha256": "21913a313cf5cf7d3a849458ac05759e5a5fd686012dbec4b51bbbb5ca9ea921",
+        "sha256": "22e97645173b01a65362f24d4859d0aa92d617d10ca5254b253fa5be45513c2b",
         "recordId": null,
         "envelopeBytes": null,
         "values": {
@@ -3377,7 +3377,7 @@
         "repo": null,
         "revision": null,
         "path": "config/manifests/builtin.models.jsonc#models/qwen_image/candle/memoryStrategyContract",
-        "sha256": "21913a313cf5cf7d3a849458ac05759e5a5fd686012dbec4b51bbbb5ca9ea921",
+        "sha256": "22e97645173b01a65362f24d4859d0aa92d617d10ca5254b253fa5be45513c2b",
         "recordId": null,
         "envelopeBytes": null,
         "values": {
@@ -3402,7 +3402,7 @@
         "repo": null,
         "revision": null,
         "path": "config/manifests/builtin.models.jsonc#models/qwen_image_edit_2511/candle/memoryStrategyContract",
-        "sha256": "21913a313cf5cf7d3a849458ac05759e5a5fd686012dbec4b51bbbb5ca9ea921",
+        "sha256": "22e97645173b01a65362f24d4859d0aa92d617d10ca5254b253fa5be45513c2b",
         "recordId": null,
         "envelopeBytes": null,
         "values": {
@@ -3427,7 +3427,7 @@
         "repo": null,
         "revision": null,
         "path": "config/manifests/builtin.models.jsonc#models/qwen_image_edit_2511/candle/memoryStrategyContract",
-        "sha256": "21913a313cf5cf7d3a849458ac05759e5a5fd686012dbec4b51bbbb5ca9ea921",
+        "sha256": "22e97645173b01a65362f24d4859d0aa92d617d10ca5254b253fa5be45513c2b",
         "recordId": null,
         "envelopeBytes": null,
         "values": {
@@ -3452,7 +3452,7 @@
         "repo": null,
         "revision": null,
         "path": "config/manifests/builtin.models.jsonc#models/qwen_image_edit_2511/candle/memoryStrategyContract",
-        "sha256": "21913a313cf5cf7d3a849458ac05759e5a5fd686012dbec4b51bbbb5ca9ea921",
+        "sha256": "22e97645173b01a65362f24d4859d0aa92d617d10ca5254b253fa5be45513c2b",
         "recordId": null,
         "envelopeBytes": null,
         "values": {
@@ -3510,7 +3510,7 @@
         "repo": null,
         "revision": null,
         "path": "config/manifests/builtin.models.jsonc#models/qwen_image_edit_2511_lightning/candle/memoryStrategyContract",
-        "sha256": "21913a313cf5cf7d3a849458ac05759e5a5fd686012dbec4b51bbbb5ca9ea921",
+        "sha256": "22e97645173b01a65362f24d4859d0aa92d617d10ca5254b253fa5be45513c2b",
         "recordId": null,
         "envelopeBytes": null,
         "values": {
@@ -3535,7 +3535,7 @@
         "repo": null,
         "revision": null,
         "path": "config/manifests/builtin.models.jsonc#models/qwen_image_edit_2511_lightning/candle/memoryStrategyContract",
-        "sha256": "21913a313cf5cf7d3a849458ac05759e5a5fd686012dbec4b51bbbb5ca9ea921",
+        "sha256": "22e97645173b01a65362f24d4859d0aa92d617d10ca5254b253fa5be45513c2b",
         "recordId": null,
         "envelopeBytes": null,
         "values": {
@@ -3560,7 +3560,7 @@
         "repo": null,
         "revision": null,
         "path": "config/manifests/builtin.models.jsonc#models/qwen_image_edit_2511_lightning/candle/memoryStrategyContract",
-        "sha256": "21913a313cf5cf7d3a849458ac05759e5a5fd686012dbec4b51bbbb5ca9ea921",
+        "sha256": "22e97645173b01a65362f24d4859d0aa92d617d10ca5254b253fa5be45513c2b",
         "recordId": null,
         "envelopeBytes": null,
         "values": {
@@ -3618,7 +3618,7 @@
         "repo": null,
         "revision": null,
         "path": "config/manifests/builtin.models.jsonc#models/realvisxl/candle/memoryStrategyContract",
-        "sha256": "21913a313cf5cf7d3a849458ac05759e5a5fd686012dbec4b51bbbb5ca9ea921",
+        "sha256": "22e97645173b01a65362f24d4859d0aa92d617d10ca5254b253fa5be45513c2b",
         "recordId": null,
         "envelopeBytes": null,
         "values": {
@@ -3642,7 +3642,7 @@
         "repo": null,
         "revision": null,
         "path": "config/manifests/builtin.models.jsonc#models/realvisxl/candle/memoryStrategyContract",
-        "sha256": "21913a313cf5cf7d3a849458ac05759e5a5fd686012dbec4b51bbbb5ca9ea921",
+        "sha256": "22e97645173b01a65362f24d4859d0aa92d617d10ca5254b253fa5be45513c2b",
         "recordId": null,
         "envelopeBytes": null,
         "values": {
@@ -3666,7 +3666,7 @@
         "repo": null,
         "revision": null,
         "path": "config/manifests/builtin.models.jsonc#models/realvisxl/candle/memoryStrategyContract",
-        "sha256": "21913a313cf5cf7d3a849458ac05759e5a5fd686012dbec4b51bbbb5ca9ea921",
+        "sha256": "22e97645173b01a65362f24d4859d0aa92d617d10ca5254b253fa5be45513c2b",
         "recordId": null,
         "envelopeBytes": null,
         "values": {
@@ -3723,7 +3723,7 @@
         "repo": null,
         "revision": null,
         "path": "config/manifests/builtin.models.jsonc#models/realvisxl_lightning/candle/memoryStrategyContract",
-        "sha256": "21913a313cf5cf7d3a849458ac05759e5a5fd686012dbec4b51bbbb5ca9ea921",
+        "sha256": "22e97645173b01a65362f24d4859d0aa92d617d10ca5254b253fa5be45513c2b",
         "recordId": null,
         "envelopeBytes": null,
         "values": {
@@ -3747,7 +3747,7 @@
         "repo": null,
         "revision": null,
         "path": "config/manifests/builtin.models.jsonc#models/realvisxl_lightning/candle/memoryStrategyContract",
-        "sha256": "21913a313cf5cf7d3a849458ac05759e5a5fd686012dbec4b51bbbb5ca9ea921",
+        "sha256": "22e97645173b01a65362f24d4859d0aa92d617d10ca5254b253fa5be45513c2b",
         "recordId": null,
         "envelopeBytes": null,
         "values": {
@@ -3771,7 +3771,7 @@
         "repo": null,
         "revision": null,
         "path": "config/manifests/builtin.models.jsonc#models/realvisxl_lightning/candle/memoryStrategyContract",
-        "sha256": "21913a313cf5cf7d3a849458ac05759e5a5fd686012dbec4b51bbbb5ca9ea921",
+        "sha256": "22e97645173b01a65362f24d4859d0aa92d617d10ca5254b253fa5be45513c2b",
         "recordId": null,
         "envelopeBytes": null,
         "values": {
@@ -4241,7 +4241,7 @@
         "repo": null,
         "revision": null,
         "path": "config/manifests/builtin.models.jsonc#models/sdxl/candle/memoryStrategyContract",
-        "sha256": "21913a313cf5cf7d3a849458ac05759e5a5fd686012dbec4b51bbbb5ca9ea921",
+        "sha256": "22e97645173b01a65362f24d4859d0aa92d617d10ca5254b253fa5be45513c2b",
         "recordId": null,
         "envelopeBytes": null,
         "values": {
@@ -4265,7 +4265,7 @@
         "repo": null,
         "revision": null,
         "path": "config/manifests/builtin.models.jsonc#models/sdxl/candle/memoryStrategyContract",
-        "sha256": "21913a313cf5cf7d3a849458ac05759e5a5fd686012dbec4b51bbbb5ca9ea921",
+        "sha256": "22e97645173b01a65362f24d4859d0aa92d617d10ca5254b253fa5be45513c2b",
         "recordId": null,
         "envelopeBytes": null,
         "values": {
@@ -4289,7 +4289,7 @@
         "repo": null,
         "revision": null,
         "path": "config/manifests/builtin.models.jsonc#models/sdxl/candle/memoryStrategyContract",
-        "sha256": "21913a313cf5cf7d3a849458ac05759e5a5fd686012dbec4b51bbbb5ca9ea921",
+        "sha256": "22e97645173b01a65362f24d4859d0aa92d617d10ca5254b253fa5be45513c2b",
         "recordId": null,
         "envelopeBytes": null,
         "values": {
@@ -5243,7 +5243,7 @@
         "repo": null,
         "revision": null,
         "path": "config/manifests/builtin.models.jsonc#models/z_image/candle/memoryStrategyContract",
-        "sha256": "21913a313cf5cf7d3a849458ac05759e5a5fd686012dbec4b51bbbb5ca9ea921",
+        "sha256": "22e97645173b01a65362f24d4859d0aa92d617d10ca5254b253fa5be45513c2b",
         "recordId": null,
         "envelopeBytes": null,
         "values": {
@@ -5268,7 +5268,7 @@
         "repo": null,
         "revision": null,
         "path": "config/manifests/builtin.models.jsonc#models/z_image/candle/memoryStrategyContract",
-        "sha256": "21913a313cf5cf7d3a849458ac05759e5a5fd686012dbec4b51bbbb5ca9ea921",
+        "sha256": "22e97645173b01a65362f24d4859d0aa92d617d10ca5254b253fa5be45513c2b",
         "recordId": null,
         "envelopeBytes": null,
         "values": {
@@ -5293,7 +5293,7 @@
         "repo": null,
         "revision": null,
         "path": "config/manifests/builtin.models.jsonc#models/z_image/candle/memoryStrategyContract",
-        "sha256": "21913a313cf5cf7d3a849458ac05759e5a5fd686012dbec4b51bbbb5ca9ea921",
+        "sha256": "22e97645173b01a65362f24d4859d0aa92d617d10ca5254b253fa5be45513c2b",
         "recordId": null,
         "envelopeBytes": null,
         "values": {

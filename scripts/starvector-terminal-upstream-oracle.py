@@ -111,7 +111,7 @@ def source_identity(root, lock):
     entries = [{'path': p, 'sha256': digest(local_file(root, p))} for p in paths]
     observed = hashlib.sha256(canonical(entries)).hexdigest()
     if observed != lock['python_source_sha256']:
-        fail('audited upstream Python source changed')
+        fail(f'audited upstream Python source changed: expected={lock["python_source_sha256"]} actual={observed} files={len(entries)}')
     actual = {p.relative_to(root).as_posix() for p in (root / 'starvector').rglob('*.py')}
     if actual != set(paths):
         fail('untracked upstream Python source is forbidden')
@@ -206,7 +206,7 @@ def validate(args, packages=True):
     if packages:
         for name, version in lock['required_packages'].items():
             try:
-                actual = importlib.metadata.version(name).split('+')[0]
+                actual = importlib.metadata.version(name)
             except importlib.metadata.PackageNotFoundError:
                 fail('missing validation-only package: ' + name)
             if actual != version:

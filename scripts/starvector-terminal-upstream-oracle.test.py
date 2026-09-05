@@ -35,6 +35,44 @@ class OracleTests(unittest.TestCase):
         self.assertEqual(lock['required_packages']['torch'], '2.7.1+cu128')
         self.assertEqual(lock['required_packages']['torchvision'], '0.22.1+cu128')
 
+    def check_package_versions(self, versions, error=None):
+        class ReachedCheckpointValidation(Exception):
+            pass
+        args = SimpleNamespace(upstream_root=self.root, weights_root=self.root)
+        def installed(name):
+            if name not in versions:
+                raise oracle.importlib.metadata.PackageNotFoundError(name)
+            return versions[name]
+        with patch.object(oracle, 'source_identity', return_value='source-verified'), \
+             patch.object(oracle.importlib.metadata, 'version', side_effect=installed), \
+             patch.object(oracle, 'local_file', side_effect=ReachedCheckpointValidation) as checkpoint:
+            if error is None:
+                with self.assertRaises(ReachedCheckpointValidation):
+                    oracle.validate(args)
+                checkpoint.assert_called_once()
+            else:
+                with self.assertRaisesRegex(ValueError, error):
+                    oracle.validate(args)
+                checkpoint.assert_not_called()
+
+    def test_exact_locked_package_versions_reach_checkpoint_validation(self):
+        versions = json.loads(oracle.LOCK.read_text())['required_packages']
+        self.check_package_versions(versions)
+
+    def test_wrong_cuda_build_or_package_version_fails_before_checkpoint_access(self):
+        locked = json.loads(oracle.LOCK.read_text())['required_packages']
+        for name, wrong in [('torch', '2.7.1'), ('torch', '2.7.1+cpu'),
+                            ('torch', '2.7.1+cu126'), ('torch', '2.7.0+cu128'),
+                            ('torchvision', '0.22.1'), ('torchvision', '0.22.1+cu126'),
+                            ('transformers', '4.49.1'), ('transformers', '4.49.0+custom')]:
+            with self.subTest(package=name, installed=wrong):
+                self.check_package_versions({**locked, name: wrong}, 'package version mismatch: ' + name)
+
+    def test_missing_locked_package_fails_before_checkpoint_access(self):
+        versions = json.loads(oracle.LOCK.read_text())['required_packages']
+        del versions['torchvision']
+        self.check_package_versions(versions, 'missing validation-only package: torchvision')
+
     @unittest.skipUnless(importlib.util.find_spec('torch') and importlib.util.find_spec('transformers'), 'requires existing CPU torch/transformers environment')
     def test_real_hf_generate_boundary_and_case_deadline_for_both_backbones(self):
         import torch
@@ -164,6 +202,13 @@ class OracleTests(unittest.TestCase):
         lock = {'implementation_revision': 'a' * 40, 'python_source_sha256': hashlib.sha256(oracle.canonical(entries)).hexdigest()}
         with patch.object(oracle.subprocess, 'check_output', side_effect=['a' * 40, 'starvector/source.py\n']):
             self.assertEqual(oracle.source_identity(self.root, lock), lock['python_source_sha256'])
+        (directory / 'source.py').write_bytes(b'def upstream(): return 1\r\n')
+        changed = [{'path': 'starvector/source.py', 'sha256': oracle.digest(directory / 'source.py')}]
+        changed_hash = hashlib.sha256(oracle.canonical(changed)).hexdigest()
+        with patch.object(oracle.subprocess, 'check_output', side_effect=['a' * 40, 'starvector/source.py\n']):
+            with self.assertRaisesRegex(ValueError, 'expected=' + lock['python_source_sha256'] + ' actual=' + changed_hash + ' files=1'):
+                oracle.source_identity(self.root, lock)
+        (directory / 'source.py').write_text('def upstream(): return 1\n')
         (directory / 'injected.py').write_text('raise RuntimeError()')
         with patch.object(oracle.subprocess, 'check_output', side_effect=['a' * 40, 'starvector/source.py\n']):
             with self.assertRaisesRegex(ValueError, 'untracked'):
