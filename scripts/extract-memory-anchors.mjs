@@ -391,12 +391,28 @@ export function phaseAllocatorEnvelopes(record) {
  *   stated — is deliberately NOT a filter here: since sc-22510 an axis-free row is how a cell
  *   measured without pipeline axes is CLASSIFIED, and withdrawing those rows would narrow the
  *   catalog coverage that story established rather than fix anything.
- * * `candle` mirrors `MemoryAnchor::derive_image_phase_peaks`: that law prices exactly the SHALLOW
- *   optimized composition — `staged_residency` engaged and nothing deeper — on a still, with no
- *   pipeline axes. Every deeper rung exists to make a phase smaller, so the shallow anchor upper
- *   bounds them; a resident composition holds the text encoder through denoise and decode and is
- *   strictly LARGER, the direction the anchor cannot cover, so the law refuses it. Anchoring the
- *   cell from a resident render would therefore emit a row the law rejects on every lookup.
+ * * `candle` mirrors `MemoryAnchor::derive_image_phase_peaks` — but ONLY for a STILL cell. That law
+ *   prices exactly the SHALLOW optimized composition — `staged_residency` engaged and nothing
+ *   deeper — on a still, with no pipeline axes. Every deeper rung exists to make a phase smaller,
+ *   so the shallow anchor upper bounds them; a resident composition holds the text encoder through
+ *   denoise and decode and is strictly LARGER, the direction the anchor cannot cover, so the law
+ *   refuses it. Anchoring the cell from a resident render would therefore emit a row the law
+ *   rejects on every lookup.
+ * * A candle VIDEO cell is priced by the VIDEO law instead, so it mirrors the `mlx` bullet above.
+ *   `crates/sceneworks-worker/src/video_admission.rs::anchor_derived_phase_peaks` maps the
+ *   REQUEST's own lane onto `AnchorBackend` (`VideoLane::Candle => AnchorBackend::Candle`) and
+ *   calls `MemoryAnchorStore::derive_video_phase_peaks_for_cell` for both lanes, and
+ *   `MemoryAnchor::derive_video_phase_peaks` is not backend-gated the way
+ *   `derive_image_phase_peaks` (`self.backend != AnchorBackend::Candle`) and
+ *   `derive_mlx_image_phase_peaks` (`!= AnchorBackend::Mlx`) are.
+ *
+ *   sc-22736: reading the image law for a video row was wrong in the direction that HIDES a cell.
+ *   `derive_image_phase_peaks` demands `frames == 1` and a pipeline-axis-free record, which no
+ *   video capture can satisfy — so every candle video anchor would have been refused at
+ *   extraction and its cell left unanchored, including the six LTX-2.5 candle rows the plan has
+ *   declared since sc-22725 (`transformerVariant: "distilled"`, `decoder: "conv"`, `frames: 145`)
+ *   and the twelve Wan/SCAIL-2 candle rows this story adds. No measurement had run yet, so the
+ *   defect was latent rather than shipped.
  *
  * An unknown lane has no law to mirror and gets no opinion.
  */
@@ -406,6 +422,7 @@ export function isDerivable(candidate) {
     return true;
   }
   if (candidate.backend === "candle") {
+    if ((candidate.geometry?.frames ?? 1) > 1) return true;
     return (
       candidate.transformerVariant === null &&
       candidate.decoder === null &&

@@ -625,6 +625,54 @@ test("derivability outranks envelope, so a cell is never anchored by a render it
   assert.equal(isDerivable({ backend: "mlx", measuredRegime: {} }), true);
 });
 
+/**
+ * sc-22736. The candle branch of `isDerivable` mirrors `derive_image_phase_peaks`, which is a STILL
+ * law: it demands `frames == 1` and a pipeline-axis-free record. A candle VIDEO cell is priced by
+ * the video law instead — `video_admission.rs::anchor_derived_phase_peaks` maps the request's own
+ * lane onto `AnchorBackend` and calls `derive_video_phase_peaks_for_cell` for BOTH lanes, and
+ * `MemoryAnchor::derive_video_phase_peaks` carries no backend gate — so applying the still law to a
+ * video row refuses records the law would happily price, and leaves the cell unanchored.
+ *
+ * Mutations this kills:
+ * - deleting the `frames > 1` branch (every candle video row becomes underivable again);
+ * - widening it to `frames >= 1` (a still would stop being held to the shallow-staged rule);
+ * - reading `frames` without the still-defaulting `?? 1` (an axis-free record would flip lanes).
+ */
+test("a candle VIDEO record is derivable under the video law, not the still image law", () => {
+  const candleVideo = (frames, regime = {}) => ({
+    backend: "candle",
+    // The LTX-2.5 candle rows the plan has declared since sc-22725 state both pipeline axes; the
+    // Wan and SCAIL-2 rows sc-22736 adds state neither. Both must be derivable.
+    transformerVariant: "distilled",
+    decoder: "conv",
+    geometry: { width: 768, height: 512, frames, fps: 24 },
+    measuredRegime: {
+      decodeTiled: false,
+      transformerWindowed: false,
+      staged: true,
+      attentionChunked: false,
+      ...regime,
+    },
+    overallAllocatorEnvelopeBytes: 1,
+    recordId: `candle-video-f${frames}`,
+    sourcePath: "docs/generated/example.json",
+  });
+  assert.equal(isDerivable(candleVideo(145)), true, "the shipped LTX-2.5 candle geometry");
+  assert.equal(isDerivable(candleVideo(81)), true, "the Wan / SCAIL-2 candle geometry");
+  // The video law's regime guards are all anchor-vs-request, so a bounded video capture is still a
+  // usable row — exactly as it is on MLX.
+  assert.equal(isDerivable(candleVideo(81, { decodeTiled: true })), true);
+  assert.equal(isDerivable(candleVideo(81, { staged: false })), true);
+  // A STILL keeps the image law, pipeline axes and all.
+  assert.equal(isDerivable({ ...candleVideo(1) }), false, "a still with pipeline axes");
+  // A record that states no frames axis at all is classified as the still it is, not promoted.
+  assert.equal(
+    isDerivable({ ...candleVideo(145), geometry: { width: 1024, height: 1024, fps: null } }),
+    false,
+    "an axis-free candle record stays under the still law",
+  );
+});
+
 test("every emitted anchor cites a compiled-in corpus, and every retained corpus is compiled in", async () => {
   const store = await buildAnchorStore({ matrix });
   const packaged = packagedAnchorSources(

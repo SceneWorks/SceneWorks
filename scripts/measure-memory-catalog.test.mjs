@@ -33,6 +33,8 @@ import {
   readPlan,
   snapshotPath,
   tierDownload,
+  familyArtifact,
+  resolveArtifactRoot,
 } from "./measure-memory-catalog.mjs";
 import { LTX25_LANE_PROVIDERS } from "./memory-calibration-harness.mjs";
 
@@ -87,6 +89,19 @@ function fakeModels() {
       ],
     },
     { id: "chroma1_hd", downloads: [{ repo: "SceneWorks/chroma1-hd-mlx", revision: REVISION, variant: "q4", files: ["q4/*"] }] },
+    // sc-22736: the first family whose ARTIFACT is per (lane, tier). The MLX rehost carries all
+    // three tiers under one revision; the candle rehost carries the packed two; the candle bf16
+    // leg is the UPSTREAM Diffusers checkpoint, which the manifest ships with NO revision and
+    // whose weights sit at the snapshot root rather than under a `bf16/` subtree.
+    {
+      id: "wan_2_2",
+      downloads: [
+        { repo: "SceneWorks/wan2.2-ti2v-5b-mlx", revision: REVISION, variant: "q4", files: ["q4/*"] },
+        { repo: "SceneWorks/wan2.2-ti2v-5b-mlx", revision: REVISION, variant: "bf16", files: ["bf16/*"] },
+        { repo: "SceneWorks/wan2.2-ti2v-5b-candle", revision: UPSTREAM, variant: "q4", files: ["q4/*"] },
+        { repo: "Wan-AI/Wan2.2-TI2V-5B-Diffusers", variant: "bf16", files: [] },
+      ],
+    },
   ];
 }
 
@@ -132,6 +147,84 @@ test("the tier download is the non-corequisite entry for the tier, so its revisi
   assert.equal(tierDownload(models, "minimax_h3", "MiniMaxAI/MiniMax-H3", "q4").revision, UPSTREAM);
   assert.throws(() => tierDownload(models, "qwen_image", "SceneWorks/nope", "q4"), /no download from/);
   assert.throws(() => tierDownload(models, "absent", "SceneWorks/qwen-image-mlx", "q4"), /no model absent/);
+});
+
+/**
+ * sc-22736. Before the Wan 2.2 family every row rehosted all three tiers of both lanes in ONE
+ * repository under a `<tier>/` subtree, so the family's `repo`/`env` was the whole answer. Wan
+ * ships three shapes at once, and the worker selects between them the same way
+ * (`crates/sceneworks-worker/src/video_jobs/candle.rs` `candle_wan_tier_repo_from_downloads`).
+ *
+ * Mutations this kills:
+ * - dropping the `artifacts[backend][tier]` lookup (a candle bf16 plan would probe the packed
+ *   rehost's non-existent `bf16/` subtree and report a stageable cell `weights_missing`);
+ * - dropping `layout: "flat"` (the upstream Diffusers snapshot would be probed at `<root>/bf16`);
+ * - resolving the unpinned upstream download through `tierDownload`'s any-revision fallback (which
+ *   would name the PACKED rehost's revision for a dense checkpoint);
+ * - reporting the unpinned-and-unstaged case with the ordinary "no repo@rev/tier" sentence, which
+ *   sends an operator to fetch a revision the manifest never pinned.
+ */
+test("an artifact is resolved per (lane, tier), including the flat upstream leg the manifest leaves unpinned", async () => {
+  const models = fakeModels();
+  // A LOCAL family literal, not a `PROVIDER_FAMILIES` row: this test owns the mechanism, and the
+  // mechanism must be provable before any family declares an arm that consumes it. The shape is
+  // the one the Wan 2.2 manifest entries have — a per-lane rehost, packed tiers on the Candle
+  // rehost, and the upstream unpinned Diffusers checkpoint as the Candle bf16 leg.
+  const family = {
+    env: "WAN_TI2V_5B",
+    repo: "SceneWorks/wan2.2-ti2v-5b-mlx",
+    arms: ["mlx", "candle"],
+    artifacts: {
+      candle: {
+        q4: { repo: "SceneWorks/wan2.2-ti2v-5b-candle" },
+        q8: { repo: "SceneWorks/wan2.2-ti2v-5b-candle" },
+        bf16: { repo: "Wan-AI/Wan2.2-TI2V-5B-Diffusers", layout: "flat" },
+      },
+    },
+  };
+  assert.deepEqual(familyArtifact(family, "mlx", "bf16"), {
+    env: "WAN_TI2V_5B", repo: "SceneWorks/wan2.2-ti2v-5b-mlx", layout: "tiered",
+  });
+  assert.deepEqual(familyArtifact(family, "candle", "q4"), {
+    env: "WAN_TI2V_5B", repo: "SceneWorks/wan2.2-ti2v-5b-candle", layout: "tiered",
+  });
+  assert.deepEqual(familyArtifact(family, "candle", "bf16"), {
+    env: "WAN_TI2V_5B", repo: "Wan-AI/Wan2.2-TI2V-5B-Diffusers", layout: "flat",
+  });
+  // A family with no `artifacts` block is unchanged: the row itself, tiered. Asserted against a
+  // real shipped row so the override stays a per-family opt-in rather than a global change.
+  assert.deepEqual(familyArtifact(PROVIDER_FAMILIES.qwen_image, "candle", "q8"), {
+    env: PROVIDER_FAMILIES.qwen_image.env,
+    repo: PROVIDER_FAMILIES.qwen_image.repo,
+    layout: "tiered",
+  });
+
+  const hub = await fakeHub([
+    ["SceneWorks/wan2.2-ti2v-5b-mlx", REVISION, "bf16"],
+    ["SceneWorks/wan2.2-ti2v-5b-candle", UPSTREAM, "q4"],
+    ["Wan-AI/Wan2.2-TI2V-5B-Diffusers", REVISION],
+  ]);
+  const mlx = await resolveArtifactRoot(models, "wan_2_2", "bf16", familyArtifact(family, "mlx", "bf16"), [hub]);
+  assert.equal(mlx.root, snapshotPath(hub, "SceneWorks/wan2.2-ti2v-5b-mlx", REVISION, "bf16"));
+  assert.equal(mlx.revision, REVISION);
+
+  const packed = await resolveArtifactRoot(models, "wan_2_2", "q4", familyArtifact(family, "candle", "q4"), [hub]);
+  assert.equal(packed.root, snapshotPath(hub, "SceneWorks/wan2.2-ti2v-5b-candle", UPSTREAM, "q4"));
+  assert.equal(packed.revision, UPSTREAM, "the candle rehost's own revision, never the MLX one's");
+
+  // The unpinned upstream leg: the revision is READ off whatever snapshot is staged, and the root
+  // is the snapshot itself — there is no `bf16/` subtree in a Diffusers checkpoint.
+  const flat = await resolveArtifactRoot(models, "wan_2_2", "bf16", familyArtifact(family, "candle", "bf16"), [hub]);
+  assert.equal(flat.root, snapshotPath(hub, "Wan-AI/Wan2.2-TI2V-5B-Diffusers", REVISION));
+  assert.equal(flat.revision, REVISION);
+
+  const bare = await fakeHub([]);
+  const missing = await resolveArtifactRoot(models, "wan_2_2", "bf16", familyArtifact(family, "candle", "bf16"), [bare]);
+  assert.equal(missing.root, null);
+  assert.match(missing.reason, /shipped without a pinned revision/);
+  const missingTier = await resolveArtifactRoot(models, "wan_2_2", "q4", familyArtifact(family, "candle", "q4"), [bare]);
+  assert.equal(missingTier.root, null);
+  assert.match(missingTier.reason, /^no SceneWorks\/wan2\.2-ti2v-5b-candle@[0-9a-f]{8}\/q4 on this host$/);
 });
 
 test("classification: runnable anchors carry the adapter env family and the canonical tier root", async () => {

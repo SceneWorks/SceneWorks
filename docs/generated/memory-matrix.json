@@ -1,7 +1,7 @@
 {
   "schemaVersion": 11,
   "generatedFrom": {
-    "sceneWorksRevision": "source-tree:347172d1b7dda309dc9cae82ff106743208455175bf55432fa14004511b41eb2",
+    "sceneWorksRevision": "source-tree:daa7cf9c6947f42e1f1344977aecb1fa57529f260bc153fa7fa9157351f9f569",
     "sources": {
       "manifest": {
         "path": "config/manifests/builtin.models.jsonc",
@@ -93,7 +93,7 @@
       },
       "anchorExtractor": {
         "path": "scripts/extract-memory-anchors.mjs",
-        "sha256": "c6914eaeb8e6fd77ceab49d0e877b03e1b489cfcba34e9e756608f87cbe9a328"
+        "sha256": "34b51baf953aa32a98f633b0e2cd4b5143dc22caf61207ee7870058286b957f3"
       }
     }
   },
