@@ -864,21 +864,11 @@ pub(crate) fn build_image_describe_messages(style: DescribeStyle, multi: bool) -
 /// preserving, rather than lean on the provider's ceiling because that ceiling is both too high for
 /// dense attention AND hardcoded from `Qwen35ImageProcessor::default()` (provider.rs ignores the
 /// model's `preprocessor_config.json`) — fixing that upstream is tracked separately.
-#[cfg(any(
-    test,
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
 const VISION_REFERENCE_MAX_PIXELS: u64 = 1_048_576; // 1024² — safe for the dense ViT attention
 
 /// Shrink `image` (aspect-preserving) so its pixel count does not exceed `max_pixels`; an image already
 /// within budget is returned untouched. The target box is the source dimensions scaled by
 /// `sqrt(max_pixels / pixels)`, so the result is the largest same-ratio image inside the budget.
-#[cfg(any(
-    test,
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
 fn downscale_to_pixel_budget(image: image::DynamicImage, max_pixels: u64) -> image::DynamicImage {
     let (width, height) = (image.width(), image.height());
     let pixels = u64::from(width) * u64::from(height);
@@ -897,11 +887,6 @@ fn downscale_to_pixel_budget(image: image::DynamicImage, max_pixels: u64) -> ima
 /// and `image_describe` tasks to build the `Content::Image` block. The decoded image is capped to
 /// [`VISION_REFERENCE_MAX_PIXELS`] BEFORE conversion so a large reference image cannot OOM the dense
 /// ViT attention in the vision tower.
-#[cfg(any(
-    test,
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
 pub(crate) fn load_caption_image_ref(path: &Path) -> WorkerResult<gen_core::core_llm::ImageRef> {
     let decoded = crate::image_decode::decode_image_any(path).map_err(|error| {
         WorkerError::InvalidPayload(format!(

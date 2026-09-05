@@ -1080,6 +1080,8 @@ describe("ModelManagerScreen type-grouped layout", () => {
     { id: "z_image_turbo", name: "Z-Image-Turbo", type: "image", family: "z-image", capabilities: ["text_to_image"], installState: "missing" },
     { id: "wan_t2v", name: "Wan T2V", type: "video", family: "wan-video", capabilities: ["text_to_video"], installState: "missing" },
     { id: "real_esrgan", name: "Real-ESRGAN", type: "utility", family: "real-esrgan", capabilities: [], installState: "missing" },
+    { id: "starvector_1b", name: "StarVector-1B", type: "vector", family: "starvector", capabilities: ["image_to_svg"], installState: "missing", cacheState: "missing", downloadable: true },
+    { id: "starvector_8b", name: "StarVector-8B", type: "vector", family: "starvector", capabilities: ["image_to_svg"], installState: "missing", cacheState: "missing", downloadable: true },
   ];
 
   function tabLabels() {
@@ -1088,8 +1090,8 @@ describe("ModelManagerScreen type-grouped layout", () => {
 
   it("renders a tab per model type in fixed order, each scoped to its own type", async () => {
     await render({ models: MODELS });
-    // Five fixed tabs; the model tabs carry a total-count badge (Audio + LoRAs are 0 here).
-    expect(tabLabels()).toEqual(["Image Models1", "Video Models1", "Audio Models0", "Utility Models1", "LoRAs0"]);
+    // Six fixed tabs; the model tabs carry a total-count badge (Audio + LoRAs are 0 here).
+    expect(tabLabels()).toEqual(["Image Models1", "Video Models1", "Audio Models0", "Vector Models2", "Utility Models1", "LoRAs0"]);
     // The default (Image) tab shows only its own type's card.
     expect(container.querySelectorAll(".model-card").length).toBe(1);
     expect(container.textContent).toContain("Z-Image-Turbo");
@@ -1100,11 +1102,17 @@ describe("ModelManagerScreen type-grouped layout", () => {
     expect(container.textContent).not.toContain("Z-Image-Turbo");
     await selectTab(container, "Utility Models");
     expect(container.textContent).toContain("Real-ESRGAN");
+    await selectTab(container, "Vector Models");
+    expect(container.textContent).toContain("StarVector-1B");
+    expect(container.textContent).toContain("StarVector-8B");
+    expect(container.textContent).toContain("Image to SVG");
+    expect(container.textContent).not.toContain("Text to SVG");
+    expect(container.textContent).toContain("Download");
   });
 
-  it("always shows all five tabs, with a zero count and empty state for an unpopulated type", async () => {
+  it("always shows all six tabs, with a zero count and empty state for an unpopulated type", async () => {
     await render({ models: [MODELS[0]] });
-    expect(tabLabels()).toEqual(["Image Models1", "Video Models0", "Audio Models0", "Utility Models0", "LoRAs0"]);
+    expect(tabLabels()).toEqual(["Image Models1", "Video Models0", "Audio Models0", "Vector Models0", "Utility Models0", "LoRAs0"]);
     await selectTab(container, "Video Models");
     expect(container.querySelector(".models-empty")).toBeTruthy();
     expect(container.textContent).toContain("No models match your search.");
@@ -2267,8 +2275,8 @@ describe("ModelManagerScreen Audio Models tab + capability chips (sc-13406)", ()
   it("registers an Audio Models tab with a per-type count that lists only audio models", async () => {
     await render([IMAGE_MODEL, KOKORO, ACE_STEP, OPENVOICE]);
     const tabLabels = [...container.querySelectorAll('[role="tab"]')].map((tab) => tab.textContent);
-    // Fixed order: Image, Video, Audio, Utility, LoRAs. Audio carries a total-of-3 badge.
-    expect(tabLabels).toEqual(["Image Models1", "Video Models0", "Audio Models3", "Utility Models0", "LoRAs0"]);
+    // Fixed order: Image, Video, Audio, Vector, Utility, LoRAs. Audio carries a total-of-3 badge.
+    expect(tabLabels).toEqual(["Image Models1", "Video Models0", "Audio Models3", "Vector Models0", "Utility Models0", "LoRAs0"]);
     // Default (Image) tab shows only the image card, not the audio ones.
     expect(container.textContent).toContain("Z-Image-Turbo");
     expect(cardFor("Kokoro 82M (Speech)")).toBeUndefined();

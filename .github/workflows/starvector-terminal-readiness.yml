@@ -1,0 +1,71 @@
+name: StarVector terminal readiness
+
+on:
+  workflow_dispatch:
+    inputs:
+      permanent_pin:
+        description: Exact permanent inference pin whose immutable roots are validated.
+        required: true
+        type: string
+  workflow_call:
+    inputs:
+      permanent_pin:
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+env:
+  STARVECTOR_TERMINAL_PERMANENT_PIN: ${{ inputs.permanent_pin }}
+  STARVECTOR_TERMINAL_ROOT: /Users/Shared/SceneWorks/starvector-terminal
+  STARVECTOR_TERMINAL_WEIGHTS_ROOT: /Users/Shared/SceneWorks/starvector-terminal/weights
+  STARVECTOR_TERMINAL_METRICS_ROOT: /Users/Shared/SceneWorks/starvector-terminal/metrics
+  STARVECTOR_TERMINAL_METRICS_PYTHON: /Users/Shared/SceneWorks/starvector-terminal/metrics/bin/python
+
+jobs:
+  macos-readiness:
+    runs-on: [self-hosted, macOS, ARM64, rw-starvector]
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Resolve immutable pin-keyed terminal inputs
+        run: node scripts/lib/starvector-terminal-pin-paths.mjs "$STARVECTOR_TERMINAL_ROOT" "$STARVECTOR_TERMINAL_PERMANENT_PIN" >> "$GITHUB_ENV"
+      - name: Validate macOS terminal host without executing models
+        run: |
+          node scripts/starvector-terminal-readiness.mjs "$GITHUB_WORKSPACE" release/starvector-terminal-campaign-v1.json "$STARVECTOR_TERMINAL_INFERENCE_ROOT" "$STARVECTOR_TERMINAL_WEIGHTS_ROOT" "$STARVECTOR_TERMINAL_METRICS_ROOT" "$STARVECTOR_TERMINAL_METRICS_PYTHON" "$STARVECTOR_TERMINAL_CORPUS_ASSETS_ROOT" "$STARVECTOR_TERMINAL_PERMANENT_PIN" "$RUNNER_TEMP/starvector-terminal-readiness/macos.json"
+      - name: Upload macOS readiness report even on failure
+        if: ${{ always() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: starvector-terminal-readiness-macos-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/starvector-terminal-readiness/macos.json
+          if-no-files-found: warn
+
+  windows-readiness:
+    runs-on: [self-hosted, Windows, X64, cuda, real-weights]
+    timeout-minutes: 20
+    env:
+      STARVECTOR_TERMINAL_ROOT: D:\sceneworks-terminal
+      STARVECTOR_TERMINAL_WEIGHTS_ROOT: D:\\sceneworks-terminal\\weights
+      STARVECTOR_TERMINAL_METRICS_ROOT: D:\\sceneworks-terminal\\metrics
+      STARVECTOR_TERMINAL_METRICS_PYTHON: D:\\sceneworks-terminal\\metrics\\Scripts\\python.exe
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Resolve immutable pin-keyed terminal inputs
+        shell: powershell
+        run: |
+          $pinEnvironment = node scripts\lib\starvector-terminal-pin-paths.mjs "$env:STARVECTOR_TERMINAL_ROOT" "$env:STARVECTOR_TERMINAL_PERMANENT_PIN"
+          if ($LASTEXITCODE -ne 0) { throw 'immutable pin-keyed terminal path resolution failed' }
+          $pinEnvironment | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+      - name: Validate Windows terminal host without executing models
+        shell: powershell
+        run: |
+          node scripts/starvector-terminal-readiness.mjs "$env:GITHUB_WORKSPACE" release/starvector-terminal-campaign-v1.json "$env:STARVECTOR_TERMINAL_INFERENCE_ROOT" "$env:STARVECTOR_TERMINAL_WEIGHTS_ROOT" "$env:STARVECTOR_TERMINAL_METRICS_ROOT" "$env:STARVECTOR_TERMINAL_METRICS_PYTHON" "$env:STARVECTOR_TERMINAL_CORPUS_ASSETS_ROOT" "$env:STARVECTOR_TERMINAL_PERMANENT_PIN" "$env:RUNNER_TEMP\\starvector-terminal-readiness\\windows.json"
+      - name: Upload Windows readiness report even on failure
+        if: ${{ always() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: starvector-terminal-readiness-windows-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}\starvector-terminal-readiness\windows.json
+          if-no-files-found: warn

@@ -21,13 +21,68 @@ name: Server Candle (Linux/NVIDIA)
 
 on:
   workflow_dispatch:
+    inputs:
+      starvector_terminal_operation:
+        description: Run the ordinary Linux build or bridge one terminal operation from this existing default-branch workflow.
+        required: true
+        default: standard
+        type: choice
+        options: [standard, source, provision, readiness, campaign]
+      inference_revision:
+        description: Exact merged inference commit for terminal provisioning.
+        required: false
+        default: 42ab6f2b8b9815205bc215c6d19c2b7714c908fe
+        type: string
+      inference_preflight_run_id:
+        description: Exact inference preflight workflow run id.
+        required: false
+        default: "33928871038"
+        type: string
+      inference_preflight_artifact:
+        description: Complete inference preflight artifact name.
+        required: false
+        default: starvector-terminal-preflight-42ab6f2b8b9815205bc215c6d19c2b7714c908fe-33928871038-1
+        type: string
+      mac_app_data_source:
+        description: Absolute macOS source-produced app-data root.
+        required: false
+        type: string
+      mac_hf_home_source:
+        description: Absolute macOS isolated Hugging Face source root.
+        required: false
+        type: string
+      windows_app_data_source:
+        description: Absolute Windows source-produced app-data root.
+        required: false
+        type: string
+      windows_hf_home_source:
+        description: Absolute Windows isolated Hugging Face source root.
+        required: false
+        type: string
+      permanent_pin:
+        description: Exact permanent inference pin for the one terminal campaign.
+        required: false
+        default: 42ab6f2b8b9815205bc215c6d19c2b7714c908fe
+        type: string
+      campaign_run_id:
+        description: Unique terminal campaign identity.
+        required: false
+        type: string
+
+permissions:
+  contents: read
+  actions: read
 
 concurrency:
-  group: server-candle-linux-${{ github.ref }}
-  cancel-in-progress: true
+  # Every terminal phase shares one non-canceling bridge queue. An unrelated
+  # ordinary Linux compile must not cancel a source/provision/readiness/campaign
+  # caller, and a later terminal phase must wait for its predecessor to finish.
+  group: ${{ (inputs.starvector_terminal_operation == 'standard' || inputs.starvector_terminal_operation == '') && format('server-candle-linux-{0}', github.ref) || 'starvector-terminal-bridge' }}
+  cancel-in-progress: ${{ inputs.starvector_terminal_operation == 'standard' || inputs.starvector_terminal_operation == '' }}
 
 jobs:
   build-candle:
+    if: ${{ inputs.starvector_terminal_operation == 'standard' || inputs.starvector_terminal_operation == '' }}
     runs-on: ubuntu-22.04
     env:
       # compute_80 PTX the driver JITs forward to sm_120 — one binary covers
@@ -109,3 +164,40 @@ jobs:
           name: sceneworks-api-candle-linux
           path: target/release/sceneworks-rust-api
           if-no-files-found: error
+
+  # GitHub exposes workflow_dispatch only for files that already exist on the
+  # default branch. This standing manual workflow is therefore the narrow
+  # bridge that can call the feature branch's source/provision/readiness/campaign
+  # reusable workflows before the final feature-to-main merge.
+  starvector-source-closure:
+    if: ${{ inputs.starvector_terminal_operation == 'source' }}
+    uses: ./.github/workflows/starvector-terminal-source.yml
+    secrets: inherit
+
+  starvector-provision:
+    if: ${{ inputs.starvector_terminal_operation == 'provision' }}
+    uses: ./.github/workflows/starvector-terminal-provision.yml
+    with:
+      inference_revision: ${{ inputs.inference_revision }}
+      inference_preflight_run_id: ${{ inputs.inference_preflight_run_id }}
+      inference_preflight_artifact: ${{ inputs.inference_preflight_artifact }}
+      mac_app_data_source: ${{ inputs.mac_app_data_source }}
+      mac_hf_home_source: ${{ inputs.mac_hf_home_source }}
+      windows_app_data_source: ${{ inputs.windows_app_data_source }}
+      windows_hf_home_source: ${{ inputs.windows_hf_home_source }}
+    secrets: inherit
+
+  starvector-readiness:
+    if: ${{ inputs.starvector_terminal_operation == 'readiness' }}
+    uses: ./.github/workflows/starvector-terminal-readiness.yml
+    with:
+      permanent_pin: ${{ inputs.permanent_pin }}
+    secrets: inherit
+
+  starvector-campaign:
+    if: ${{ inputs.starvector_terminal_operation == 'campaign' }}
+    uses: ./.github/workflows/starvector-terminal.yml
+    with:
+      permanent_pin: ${{ inputs.permanent_pin }}
+      campaign_run_id: ${{ inputs.campaign_run_id }}
+    secrets: inherit

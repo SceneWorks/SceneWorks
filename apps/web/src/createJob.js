@@ -49,6 +49,14 @@ export const CREATE_JOB_DEFINITIONS = Object.freeze({
     path: "/api/v1/image/interleave/jobs",
     buildBody: generationBody,
   },
+  vector: {
+    path: "/api/v1/image/vectorize/jobs",
+    buildBody: ([payload], project, requestedGpu) => ({ projectId: project.id, projectName: project.name, requestedGpu, ...payload }),
+  },
+  vectorPrompt: {
+    path: "/api/v1/image/vectorize/prompt/jobs",
+    buildBody: generationBody,
+  },
 });
 
 // Canonical project-scoped POST-job wrapper. Each definition owns only its route

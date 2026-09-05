@@ -1,11 +1,11 @@
 {
   "schemaVersion": 11,
   "generatedFrom": {
-    "sceneWorksRevision": "source-tree:49fc8c37fdb64d17f571781ad674ac58ef816a9b794b1007ac10673361dc0658",
+    "sceneWorksRevision": "source-tree:b632f26b007db95aaf1a62604b12861a43888a3a30253369601b12dfa104f79b",
     "sources": {
       "manifest": {
         "path": "config/manifests/builtin.models.jsonc",
-        "sha256": "2738a6258adc3ef06d4916d965b55afdaa2c0d01b90a339476f0efbede29de92"
+        "sha256": "143917605dcc2fec938dac52bc87939f6b99a13cb460d794a6a04d3e3c3699ef"
       },
       "routingCatalog": {
         "path": "crates/sceneworks-core/src/jobs_store/routing/catalog.rs",
@@ -21,7 +21,7 @@
       },
       "engines": {
         "path": "crates/sceneworks-worker/src/engines.rs",
-        "sha256": "329503d76fa303901c64b05fe00bbea37bf40bdbc0309283d21a6e2c9256b20b"
+        "sha256": "1216490b7ed6d9af6f2c008bb40935ae5af8d403c2b7d791bc5a6d74164c9398"
       },
       "imageRouting": {
         "path": "crates/sceneworks-worker/src/image_jobs/base.rs",
@@ -65,19 +65,19 @@
       },
       "instantId": {
         "path": "crates/sceneworks-worker/src/image_jobs/instantid.rs",
-        "sha256": "5d3038d2348f45d461ef9d9a8c824620c5f352774184fca44d600fe283e82ac7"
+        "sha256": "9276495b6ebe65609c31d505753b2ce55e597f1d85d74d4010329d5398c5e27c"
       },
       "anchorStore": {
         "path": "config/memory-anchors.json",
-        "sha256": "ee286af26cbf1ed96db31182548a94278ea288fefadd5c07de3c5c4040ad5c6d"
+        "sha256": "ac9eb5ddd07135a7d7d1760bb1fbd44395cc9a8a1350c767d3f945861bcd1f39"
       },
       "anchorLoaderClosures": {
         "path": "config/anchor-loader-closures.json",
-        "sha256": "4c0e4aa9ffd1f4a10b425d92eeb4a9e90ff83886da6e4cfe633d50722dd8e035"
+        "sha256": "a00abe8d000deb482b85b93988cc97de6899e56d2c3a1267d3d31ecff408ba4b"
       },
       "anchorDerivation": {
         "path": "crates/sceneworks-core/src/memory_anchor.rs",
-        "sha256": "225936d4936e7e0f77b44fdb07d813a3b0a1d9b99adae4a7767615efb0d230b5"
+        "sha256": "d86755a8b745411ea01aa0c51794047d0d1e2132f58c7bcde25f483f9d4bbbc0"
       },
       "anchorAdmission": {
         "path": "crates/sceneworks-worker/src/video_admission.rs",
@@ -93,7 +93,7 @@
       },
       "anchorExtractor": {
         "path": "scripts/extract-memory-anchors.mjs",
-        "sha256": "c6914eaeb8e6fd77ceab49d0e877b03e1b489cfcba34e9e756608f87cbe9a328"
+        "sha256": "760088ab91515fb3e4728f60844aa4b09799974b2dda0a6a20c931efd19c790b"
       }
     }
   },

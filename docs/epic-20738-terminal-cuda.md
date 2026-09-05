@@ -47,7 +47,7 @@ The current Illustrious primaries select published immutable revisions
 `672e9851ede4dc856fa945649b6691975c9d74a3` (v2). Their q4 text encoder, second text encoder, and
 UNet configs must each carry the exact `bits: 4`, `group_size: 64` marker represented by the closed
 profile marker. The current download inventory is independently digest-bound as
-`1fa06ef39a0e2c321a4fa15fa1128c0157ba8cf22fd868ac54c6cefaec13a5ee`. The republished
+`6b44ace4816056daf97ed5741d27c7b563e1f4e8cb215b0a9a1af129e9adbaba`. The republished
 authorities change configuration metadata only; their packed q4 component configs are bound to
 SHA-256 `f87b89e4249e027632236caba75d1140e14fd4c2ce4b4e554f2912b234e72cf9`,
 `3b96bc14843360d24e864f7d1ac6d83e95cad8f68209e7e503cefa9a4f65b18b`, and

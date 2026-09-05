@@ -387,6 +387,7 @@
     "pose_detect",
     "prompt_refine",
     "training_caption",
+    "vector_image_to_svg",
     "video_bridge",
     "video_extend",
     "video_generate",

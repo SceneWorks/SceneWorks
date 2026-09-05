@@ -247,21 +247,17 @@ test("the closure is the loader's own crates, not the repository", { skip }, () 
 });
 
 /**
- * THE PIN-BUMP CASE, and it is not hypothetical: the anchors were measured at `MEASURED_AT`, the
- * repository has moved to `PIN` since, and the loader's source did not. Under the old crate-level
- * unit that revision change alone rotated the currency term; under this one the key is identical,
- * which is E9's claim — an anchor predating an unrelated change stays authoritative.
+ * THE PIN-BUMP CASE. The real trees may also contain loader edits, so this test holds the measured
+ * loader closure byte-identical while allowing the revision and every unrelated file to move.
+ * A revision-only change must leave the content-derived key unchanged.
  */
 test("a pin bump with unchanged loader source leaves the key unchanged", { skip }, (t) => {
   // Off CI a local clone that does not carry the measurement revision cannot ask this, and says so
   // by name. On CI `requireMeasurementRevision` throws instead of skipping.
   if (!requireMeasurementRevision(t)) return;
   assert.notEqual(MEASURED_AT, PIN, "the two revisions must actually differ");
-  // The claim is about the KEY, not about whether this particular pin happened to leave the
-  // loader alone — sc-22414's coherence guard (670dc1f4) moved it, by design, and E9 says that
-  // stales the anchor. So the pin bump under test is the tree at `PIN` with the loader's own
-  // closure held at its MEASURED_AT content: every other file in the repository — and the
-  // revision itself — has moved, and the key must not notice.
+  // The claim is about the key, not whether this particular real pin also edited loader content.
+  // Hold the loader closure at its measured bytes while every unrelated file and the revision move.
   const measured = keyAt(MEASURED_AT);
   const measuredTree = gitTree(repo, MEASURED_AT);
   const pinTree = gitTree(repo, PIN);
@@ -273,15 +269,19 @@ test("a pin bump with unchanged loader source leaves the key unchanged", { skip 
       .filter((file) => pinTree.contentId(file) !== measuredTree.contentId(file))
       .map((file) => [file, bodies.get(file)]),
   );
-  assert.ok(Object.keys(held).length > 0, "this pin moved at least one loader file");
   const bumped = keyAt(PIN, held);
   assert.deepEqual(bumped.files, measured.files, "the held closure walks to the same files");
   assert.equal(bumped.digest, measured.digest);
-  // Teeth: the same bump WITHOUT holding the loader still is a real loader move at this pin, and
-  // the key says so — the other half of E9, asserted against the real tree rather than assumed.
-  if (keyAt(PIN).digest !== measured.digest) {
-    assert.notDeepEqual(keyAt(PIN).files, measured.files, "a moved key names its moved files");
-  }
+
+  // Teeth independent of what happened between these two concrete revisions: changing bytes in
+  // a loader file must rotate the key even when the real pin bump happened to be revision-only.
+  const current = keyAt(PIN);
+  const loader = current.files.find((file) => file.endsWith(".rs"));
+  assert.ok(loader, "the loader closure contains Rust source");
+  const editedLoader = keyAt(PIN, {
+    [loader]: edited(pinTree, loader, "pub const SC_22511_LOADER_CONTENT_EDIT: u64 = 1;"),
+  });
+  assert.notEqual(editedLoader.digest, current.digest);
 });
 
 test("a sibling model's edit leaves the key unchanged", { skip }, () => {

@@ -1,0 +1,89 @@
+{
+  "schema_version": 1,
+  "inference_contract": {
+    "repository": "SceneWorks/inference",
+    "revision": "42ab6f2b8b9815205bc215c6d19c2b7714c908fe",
+    "receipt_schema": "release/starvector-terminal-receipt-v2.schema.json",
+    "corpus": "release/starvector-terminal-corpus-v1.json"
+  },
+  "inference_preflight": {
+    "repository": "SceneWorks/inference",
+    "workflow": {
+      "id": 312370029,
+      "name": "Real-weight validation",
+      "path": ".github/workflows/real-weights.yml",
+      "event": "workflow_dispatch"
+    },
+    "workflow_run_id": "33928871038",
+    "workflow_run_attempt": 1,
+    "head_sha": "42ab6f2b8b9815205bc215c6d19c2b7714c908fe",
+    "artifact": {
+      "id": 9957850431,
+      "name": "starvector-terminal-preflight-42ab6f2b8b9815205bc215c6d19c2b7714c908fe-33928871038-1",
+      "size_in_bytes": 6456,
+      "digest": "sha256:609a2850118c206a4a38698e1680e81b78666d6b72be07d66ba677b0f50a9831"
+    },
+    "inventory_artifacts": [
+      {
+        "tier": "1b",
+        "path": "inventory/starvector-1b-inventory.json",
+        "sha256": "f4b8345ae7b6aa535080191c05694bba68fb3bbfe0391ff95f5bfd9b381812da"
+      },
+      {
+        "tier": "8b",
+        "path": "inventory/starvector-8b-inventory.json",
+        "sha256": "af1bcb4c38b86bbe1a973aedcba2ca72b03485d2c5877457192878beeb5989a2"
+      }
+    ],
+    "hook_logs": [
+      {
+        "backend": "mlx",
+        "tier": "1b",
+        "path": "hooks/mlx-starvector-1b.log",
+        "sha256": "61fa4d975619bf4fd5fe7935f328926ec1f1454f43b8fcce10c20cc6d7182f5d"
+      },
+      {
+        "backend": "mlx",
+        "tier": "8b",
+        "path": "hooks/mlx-starvector-8b.log",
+        "sha256": "63ddfbaf05a9f299de3e5688586e4e3ac2cdb91053131192771c4754d672bc7d"
+      },
+      {
+        "backend": "candle-cuda",
+        "tier": "1b",
+        "path": "hooks/candle-cuda-starvector-1b.log",
+        "sha256": "9dfec9f0651396e8e9d0e92cabde7ea9b0c6af393694647e7cc3fd8d855d7da6"
+      },
+      {
+        "backend": "candle-cuda",
+        "tier": "8b",
+        "path": "hooks/candle-cuda-starvector-8b.log",
+        "sha256": "86b069670b6515227a6e7a016f6c5bb3c27f701dee5b799d24f9a53c8feaf9b2"
+      }
+    ]
+  },
+  "tuples": [
+    "mlx:1b",
+    "mlx:8b",
+    "candle-cuda:1b",
+    "candle-cuda:8b"
+  ],
+  "counts": {
+    "image_quality": 120,
+    "deterministic_parity": 20,
+    "hostile_sanitizer": 200,
+    "prompt_composition": 60
+  },
+  "model_snapshot_revisions": {
+    "starvector-1b": "380ab95d25a8e9ab1dc825debe238b4953ae13b9",
+    "starvector-8b": "518beea8dcb5f7a37c5911e92d1d62a76beee7f9"
+  },
+  "metrics_lock": "release/starvector-terminal-metrics-lock-v1.json",
+  "policy": {
+    "dispatch_only": true,
+    "no_job_time_downloads": true,
+    "single_attempt_run": true,
+    "upload_on_failure": true,
+    "fail_closed": true
+  }
+}

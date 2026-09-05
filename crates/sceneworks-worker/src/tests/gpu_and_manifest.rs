@@ -268,6 +268,14 @@ fn mlx_gpu_advertises_generation_capabilities_only() {
     assert!(capabilities
         .iter()
         .any(|capability| capability.as_str() == "video_generate"));
+    // The terminal integration wires the native image-to-SVG provider. Text-to-SVG stays
+    // unavailable because neither StarVector model exposes that mode.
+    assert!(capabilities
+        .iter()
+        .any(|capability| capability.as_str() == "vector_image_to_svg"));
+    assert!(!capabilities
+        .iter()
+        .any(|capability| capability.as_str() == "vector_text_to_svg"));
     assert!(capabilities
         .iter()
         .any(|capability| capability.as_str() == "training_caption"));
@@ -334,6 +342,7 @@ fn mlx_gpu_capability_set_matches_expected_full_set() {
         WorkerCapability::ImageDetail,
         WorkerCapability::ImageVqa,
         WorkerCapability::ImageInterleave,
+        WorkerCapability::VectorImageToSvg,
         WorkerCapability::VideoExtend,
         WorkerCapability::VideoBridge,
         WorkerCapability::PersonReplace,

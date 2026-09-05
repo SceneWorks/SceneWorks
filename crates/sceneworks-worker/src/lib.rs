@@ -174,6 +174,11 @@ use gpu::*;
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 mod candle_memory_strategy;
 mod fit_gate;
+// StarVector's cross-backend pre-load device admission. Unlike the image-only CUDA gate below,
+// vectors run through MLX on macOS and Candle/CUDA off-Mac, so this small reader is intentionally
+// all-targets. It consumes the exact unmeasured static weights floor and fails 8B closed until the
+// permanent-pin terminal candidate exists; terminal peaks and quality remain merge evidence.
+mod vector_admission;
 // Margin constants derived from repeat-capture variance in the calibration evidence (sc-18094,
 // epic 18093). Consumed by the stale-closure widening (sc-18095) and estimate-backed admission
 // (sc-18096/18097) follow-ups; pinned to `scripts/derive-ladder-margins.mjs` by
@@ -235,6 +240,12 @@ use media_jobs::*;
 mod image_decode;
 mod image_jobs;
 use image_jobs::*;
+mod vector_jobs;
+use vector_jobs::*;
+#[doc(hidden)]
+pub use vector_jobs::{
+    terminal_sanitize_svg_bytes, terminal_write_sanitized_pair, TerminalSanitizedSvg,
+};
 // Ideogram 4 mandatory JSON-caption conditioning + placeholder detect-and-recover (epic 4725,
 // sc-6501). Pure prompt-guard + post-render heuristic, compiled cross-platform so its unit tests run
 // on the Linux parity lane. sc-6610: its functions are called only from the macOS MLX generate path
@@ -1023,6 +1034,42 @@ fn emit_event(event: &str, payload: Value) {
         object.insert("event".to_owned(), Value::String(event.to_owned()));
     }
     emit_event_value(Level::INFO, value);
+}
+
+/// Stack reserved for the outermost worker future.
+///
+/// The worker dispatch future contains every platform-compiled job handler. Windows executable
+/// main threads have a smaller default stack than macOS/Linux, so polling that future directly
+/// from `#[tokio::main]` can overflow before a claimed job reaches its first network transfer.
+/// Keep this explicit rather than relying on a linker-specific `/STACK` flag or Tokio's runtime
+/// worker-thread setting, neither of which changes the stack used by `Runtime::block_on`.
+pub const WORKER_ENTRY_STACK_BYTES: usize = 8 * 1024 * 1024;
+pub const WORKER_ENTRY_THREAD_NAME: &str = "sceneworks-worker-entry";
+
+/// Construct the Tokio runtime and the complete worker future on a named, explicitly sized thread.
+///
+/// `worker` is invoked inside the new thread so its future is never constructed on the process
+/// main thread. Both shipped worker entry binaries use this seam.
+pub fn run_on_worker_entry_thread<F, Fut>(worker: F) -> WorkerResult<()>
+where
+    F: FnOnce() -> Fut + Send + 'static,
+    Fut: std::future::Future<Output = WorkerResult<()>> + 'static,
+{
+    let worker = std::thread::Builder::new()
+        .name(WORKER_ENTRY_THREAD_NAME.to_owned())
+        .stack_size(WORKER_ENTRY_STACK_BYTES)
+        .spawn(move || {
+            let runtime = tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .build()
+                .map_err(WorkerError::Io)?;
+            runtime.block_on(worker())
+        })
+        .map_err(WorkerError::Io)?;
+    match worker.join() {
+        Ok(result) => result,
+        Err(payload) => std::panic::resume_unwind(payload),
+    }
 }
 
 pub async fn run() -> WorkerResult<()> {
@@ -2044,6 +2091,9 @@ async fn run_utility_job(
             JobType::ImageEdit => run_image_generate_job(api, settings, &job)
                 .await
                 .map_err(|error| ("Image edit failed.", error)),
+            JobType::VectorGenerate => run_vector_job(api, settings, &job)
+                .await
+                .map_err(|error| ("Vector generation failed.", error)),
             // Native MLX tile-ControlNet detail refine (epic 3041, sc-3060), served in-process
             // by the engine on the macOS Apple-Silicon GPU worker. Off macOS the capability is
             // never advertised, so this arm is unreachable there and the job remains queued.

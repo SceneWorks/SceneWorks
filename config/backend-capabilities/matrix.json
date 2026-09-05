@@ -2,9 +2,9 @@
   "schemaVersion": 4,
   "generatedBy": "cargo run -p sceneworks-core --bin dump-backend-capability-matrix",
   "summary": {
-    "modelCount": 95,
+    "modelCount": 97,
     "importedFamilyCount": 4,
-    "cellCount": 947,
+    "cellCount": 953,
     "mlxOnlyCellCount": 44,
     "candleOnlyCellCount": 51,
     "exceptionCount": 10
@@ -5717,6 +5717,60 @@
       }
     },
     {
+      "id": "starvector_1b",
+      "family": "starvector",
+      "modelType": "vector",
+      "manifestOperations": [
+        "image_to_svg"
+      ],
+      "evaluatedOperations": [
+        "image_to_svg"
+      ],
+      "operationAndMode": [
+        {
+          "capability": "image_to_svg",
+          "mlx": true,
+          "candle": true
+        }
+      ],
+      "conditioningShape": [],
+      "userAdapters": [],
+      "precisionTier": [],
+      "guidanceMethod": [],
+      "preview": {
+        "capability": "live_preview",
+        "mlx": null,
+        "candle": null
+      }
+    },
+    {
+      "id": "starvector_8b",
+      "family": "starvector",
+      "modelType": "vector",
+      "manifestOperations": [
+        "image_to_svg"
+      ],
+      "evaluatedOperations": [
+        "image_to_svg"
+      ],
+      "operationAndMode": [
+        {
+          "capability": "image_to_svg",
+          "mlx": true,
+          "candle": true
+        }
+      ],
+      "conditioningShape": [],
+      "userAdapters": [],
+      "precisionTier": [],
+      "guidanceMethod": [],
+      "preview": {
+        "capability": "live_preview",
+        "mlx": null,
+        "candle": null
+      }
+    },
+    {
       "id": "svd",
       "family": "svd",
       "modelType": "video",
@@ -7109,6 +7163,22 @@
           "capability": "representative_request",
           "mlx": true,
           "candle": true
+        }
+      ]
+    },
+    {
+      "jobType": "vector_generate",
+      "category": "per-model",
+      "requests": [
+        {
+          "capability": "image_to_svg",
+          "mlx": true,
+          "candle": true
+        },
+        {
+          "capability": "text_to_svg",
+          "mlx": false,
+          "candle": false
         }
       ]
     },

@@ -19,6 +19,7 @@ import {
   assertEveryDerivableCorpusIsPackaged,
   assertPackagedSources,
   buildAnchorStore,
+  carryManifestTierEvidence,
   catalogCells,
   cellKey,
   envelopeEvidence,
@@ -990,6 +991,42 @@ test("only measured manifest tier tables become evidence", () => {
     }),
     null,
     "a tier the table does not declare is not evidence",
+  );
+});
+
+test("manifest tier provenance survives unrelated manifest drift but not a measured-value change", () => {
+  const cell = { modelId: "example", backend: "candle", tier: "q4" };
+  const previousEvidence = {
+    repo: null,
+    revision: null,
+    path: "manifest.jsonc#models/example/candle",
+    sha256: "a".repeat(64),
+    recordId: null,
+    envelopeBytes: null,
+    values: { vramGbByTier: "18.4", sequentialPeakGb: "5.7" },
+  };
+  const previousStore = {
+    analyticOnly: [
+      {
+        id: "analytic:example:candle:q4",
+        basis: "manifest_tier_declaration",
+        evidence: previousEvidence,
+      },
+    ],
+  };
+  const unchangedContract = { ...previousEvidence, sha256: "b".repeat(64) };
+  assert.equal(
+    carryManifestTierEvidence(previousStore, cell, unchangedContract).sha256,
+    previousEvidence.sha256,
+  );
+
+  const changedContract = {
+    ...unchangedContract,
+    values: { ...unchangedContract.values, vramGbByTier: "19.1" },
+  };
+  assert.equal(
+    carryManifestTierEvidence(previousStore, cell, changedContract).sha256,
+    changedContract.sha256,
   );
 });
 

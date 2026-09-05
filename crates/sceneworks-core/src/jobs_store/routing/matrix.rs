@@ -271,6 +271,8 @@ struct ManifestModel {
     mlx: Value,
     #[serde(default)]
     candle: Value,
+    #[serde(default)]
+    vector: ManifestVectorConfig,
     #[serde(rename = "loraCompatibility", default)]
     lora_compatibility: Value,
     /// Declarative non-routability (sc-19708): the entry is an installable component bundle
@@ -278,6 +280,20 @@ struct ManifestModel {
     /// adding component entries never adds a model-id branch here.
     #[serde(rename = "componentOnly", default)]
     component_only: bool,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct ManifestVectorConfig {
+    #[serde(default)]
+    providers: BTreeMap<String, ManifestProviderAvailability>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ManifestProviderAvailability {
+    id: String,
+    available: bool,
+    #[serde(default)]
+    reason: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -402,6 +418,13 @@ fn backend_capability_matrix_from_runtime_sources(
 
     let mut models = Vec::with_capacity(manifest.models.len());
     for model in &manifest.models {
+        // Catalog entries awaiting the feature train's one permanent inference pin are
+        // installable, but are not shipped runtime generators yet. Excluding this exact typed
+        // state keeps the capability matrix honest without weakening the invariant that every
+        // shipped utility/audio model must have a runtime provider or canonical request.
+        if model_is_pending_terminal_vector_install(model) {
+            continue;
+        }
         models.push(model_row(
             model,
             preview.models.get(&model.id),
@@ -439,6 +462,15 @@ fn backend_capability_matrix_from_runtime_sources(
         training_kernels,
         exceptions: exceptions.records,
     })
+}
+
+fn model_is_pending_terminal_vector_install(model: &ManifestModel) -> bool {
+    model.model_type == "vector"
+        && !model.vector.providers.is_empty()
+        && model.vector.providers.values().all(|provider| {
+            !provider.available
+                && provider.reason.as_deref() == Some("pending_terminal_inference_pin")
+        })
 }
 
 fn matrix_summary(
@@ -2427,6 +2459,43 @@ fn provider_alias(id: &str) -> &str {
     }
 }
 
+fn vector_operation_cell(
+    model: &ManifestModel,
+    operation: &str,
+    mlx_facts: &RuntimeDescriptorFacts,
+    candle_facts: &RuntimeDescriptorFacts,
+) -> Result<CapabilityCell, String> {
+    let payload = match operation {
+        "image_to_svg" => json!({ "mode": "image_to_svg", "sourceAssetId": "probe" }),
+        "text_to_svg" => json!({ "mode": "text_to_svg", "prompt": "probe" }),
+        other => {
+            return Err(format!(
+                "vector model {:?} has no canonical request for operation {other:?}",
+                model.id
+            ));
+        }
+    };
+    let job = probe_job(JobType::VectorGenerate, &model.id, payload)?;
+    let supports = |facts: &RuntimeDescriptorFacts| -> Result<bool, String> {
+        let Some(provider) = model.vector.providers.get(&facts.snapshot.backend) else {
+            return Ok(false);
+        };
+        Ok(provider.available
+            && facts
+                .snapshot
+                .text_llm_ids
+                .iter()
+                .any(|registered| registered == &provider.id)
+            && backend_supports(&job, facts)?)
+    };
+    Ok(cell(
+        operation.to_owned(),
+        supports(mlx_facts)?,
+        supports(candle_facts)?,
+        gap_for(&model.id, "operation", operation),
+    ))
+}
+
 fn utility_model_cells(
     model: &ManifestModel,
     mlx_facts: &RuntimeDescriptorFacts,
@@ -2438,6 +2507,12 @@ fn utility_model_cells(
     // by owning lanes (the InstantID face stack), never a routable `model` of any job.
     if model.id.starts_with("pid_") || model.component_only {
         return Ok(Vec::new());
+    }
+    if model.model_type == "vector" {
+        return evaluated_operations(model)
+            .into_iter()
+            .map(|operation| vector_operation_cell(model, &operation, mlx_facts, candle_facts))
+            .collect();
     }
     let engine_request = match model.id.as_str() {
         "real_esrgan" => Some((
@@ -2748,6 +2823,18 @@ fn validate_probe_structure(
         JobType::ImageInterleave => {
             require(nonempty("model"), "model is required")?;
             require(nonempty("prompt"), "prompt is required")?;
+        }
+        JobType::VectorGenerate => {
+            require(nonempty("model"), "model is required")?;
+            require(
+                matches!(mode, Some("image_to_svg" | "text_to_svg")),
+                "mode must be image_to_svg or text_to_svg",
+            )?;
+            if mode == Some("image_to_svg") {
+                require(nonempty("sourceAssetId"), "sourceAssetId is required")?;
+            } else {
+                require(nonempty("prompt"), "prompt is required")?;
+            }
         }
         JobType::VideoGenerate => {
             require(nonempty("model"), "model is required")?;
@@ -3149,6 +3236,50 @@ fn gpu_job_rows(
             )?],
         });
     }
+    // Keep both request modes visible, deriving image_to_svg from the shipped StarVector model and
+    // text_to_svg from an intentionally unshipped contract probe. The latter must remain
+    // false/false until a real catalog model and native provider advertise it.
+    let vector_image_model = manifest
+        .models
+        .iter()
+        .find(|model| {
+            model
+                .capabilities
+                .iter()
+                .any(|value| value == "image_to_svg")
+        })
+        .ok_or_else(|| "no shipped model has operation \"image_to_svg\"".to_owned())?;
+    let mut vector_requests = vec![vector_operation_cell(
+        vector_image_model,
+        "image_to_svg",
+        mlx_facts,
+        candle_facts,
+    )?];
+    if let Some(vector_text_model) = manifest.models.iter().find(|model| {
+        model
+            .capabilities
+            .iter()
+            .any(|value| value == "text_to_svg")
+    }) {
+        vector_requests.push(vector_operation_cell(
+            vector_text_model,
+            "text_to_svg",
+            mlx_facts,
+            candle_facts,
+        )?);
+    } else {
+        vector_requests.push(cell(
+            "text_to_svg".to_owned(),
+            false,
+            false,
+            gap_for("starvector_contract_probe", "operation", "text_to_svg"),
+        ));
+    }
+    rows.push(JobCapabilityRow {
+        job_type: "vector_generate".to_owned(),
+        category: "per-model".to_owned(),
+        requests: vector_requests,
+    });
     let mut upscale_requests = Vec::new();
     for (capability, engine) in [
         ("engine:real-esrgan", "real-esrgan"),
@@ -3629,6 +3760,54 @@ mod tests {
     }
 
     #[test]
+    fn terminal_vector_install_is_projected_from_native_worker_capabilities() {
+        let manifest: ManifestRoot = serde_json::from_str(&strip_jsonc_comments(MANIFEST)).unwrap();
+        let starvector = manifest
+            .models
+            .iter()
+            .find(|model| model.id == "starvector_1b")
+            .expect("StarVector remains in the installable catalog");
+        assert!(!model_is_pending_terminal_vector_install(starvector));
+
+        let matrix = backend_capability_matrix().expect("capability matrix generates");
+        for model_id in ["starvector_1b", "starvector_8b"] {
+            let model = matrix
+                .models
+                .iter()
+                .find(|model| model.id == model_id)
+                .unwrap_or_else(|| panic!("missing shipped vector model {model_id}"));
+            assert_eq!(model.model_type, "vector");
+            assert!(!model
+                .operation_and_mode
+                .iter()
+                .any(|cell| cell.capability == "text_to_svg"));
+            assert!(model.operation_and_mode.iter().any(|cell| {
+                cell.capability == "image_to_svg"
+                    && cell.mlx == Some(true)
+                    && cell.candle == Some(true)
+            }));
+        }
+
+        let job = matrix
+            .gpu_job_types
+            .iter()
+            .find(|job| job.job_type == "vector_generate")
+            .expect("vector job row exists");
+        let image = job
+            .requests
+            .iter()
+            .find(|request| request.capability == "image_to_svg")
+            .expect("image_to_svg request exists");
+        assert_eq!((image.mlx, image.candle), (Some(true), Some(true)));
+        let text = job
+            .requests
+            .iter()
+            .find(|request| request.capability == "text_to_svg")
+            .expect("text_to_svg request exists");
+        assert_eq!((text.mlx, text.candle), (Some(false), Some(false)));
+    }
+
+    #[test]
     fn source_capture_digest_values_are_provenance_not_semantics() {
         let checked_in: BackendCapabilityMatrix = serde_json::from_str(CHECKED_IN).unwrap();
         let mut live = checked_in.clone();
@@ -4059,9 +4238,8 @@ mod tests {
             assert_eq!((cell.mlx, cell.candle), (Some(true), Some(true)));
             assert!(cell.parity_obligation.is_none());
         }
-        let checked_in: BackendCapabilityMatrix = serde_json::from_str(CHECKED_IN).unwrap();
         assert!(
-            checked_in_matrix_matches_live(checked_in, mutated).is_ok(),
+            checked_in_matrix_matches_live(baseline, mutated).is_ok(),
             "the route-backed exact five must survive descriptor-only capture drift"
         );
 
@@ -6162,6 +6340,9 @@ mod tests {
         let candle = runtime_facts(CANDLE_RUNTIME_FACTS, "candle").unwrap();
 
         for model in &manifest.models {
+            if model_is_pending_terminal_vector_install(model) {
+                continue;
+            }
             let row = matrix.models.iter().find(|row| row.id == model.id).unwrap();
             let descriptors: Vec<_> = [&mlx, &candle]
                 .into_iter()

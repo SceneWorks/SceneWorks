@@ -5425,6 +5425,58 @@
       ]
     },
     {
+      "key": "starvector/starvector-1b-im2svg@380ab95d25a8e9ab1dc825debe238b4953ae13b9",
+      "repo": "starvector/starvector-1b-im2svg",
+      "revision": "380ab95d25a8e9ab1dc825debe238b4953ae13b9",
+      "resolvedSha": "380ab95d25a8e9ab1dc825debe238b4953ae13b9",
+      "servedRepo": "starvector/starvector-1b-im2svg",
+      "gated": false,
+      "files": [
+        ".gitattributes",
+        "README.md",
+        "added_tokens.json",
+        "config.json",
+        "merges.txt",
+        "model-00001-of-00002.safetensors",
+        "model-00002-of-00002.safetensors",
+        "model.safetensors.index.json",
+        "preprocessor_config.json",
+        "processing_starvector.py",
+        "processor_config.json",
+        "special_tokens_map.json",
+        "starvector_arch.py",
+        "tokenizer.json",
+        "tokenizer_config.json",
+        "vocab.json"
+      ]
+    },
+    {
+      "key": "starvector/starvector-8b-im2svg@518beea8dcb5f7a37c5911e92d1d62a76beee7f9",
+      "repo": "starvector/starvector-8b-im2svg",
+      "revision": "518beea8dcb5f7a37c5911e92d1d62a76beee7f9",
+      "resolvedSha": "518beea8dcb5f7a37c5911e92d1d62a76beee7f9",
+      "servedRepo": "starvector/starvector-8b-im2svg",
+      "gated": false,
+      "files": [
+        ".gitattributes",
+        "README.md",
+        "added_tokens.json",
+        "config.json",
+        "merges.txt",
+        "model-00001-of-00004.safetensors",
+        "model-00002-of-00004.safetensors",
+        "model-00003-of-00004.safetensors",
+        "model-00004-of-00004.safetensors",
+        "model.safetensors.index.json",
+        "preprocessor_config.json",
+        "processor_config.json",
+        "special_tokens_map.json",
+        "starvector_arch.py",
+        "tokenizer_config.json",
+        "vocab.json"
+      ]
+    },
+    {
       "key": "wikeeyang/Flux2-Klein-9B-True-V2@9c9fe9880029a4e0c4af5ca7d86e83cdb83eea83",
       "repo": "wikeeyang/Flux2-Klein-9B-True-V2",
       "revision": "9c9fe9880029a4e0c4af5ca7d86e83cdb83eea83",

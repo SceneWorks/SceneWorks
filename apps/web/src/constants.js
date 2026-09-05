@@ -23,6 +23,7 @@ export const LIBRARY_ORIGINS = new Set([
   "video_studio",
   "audio_studio",
   "document_studio",
+  "vector_studio",
   "upload",
 ]);
 

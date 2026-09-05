@@ -3300,37 +3300,59 @@ mod tests {
         }
     }
 
-    /// sc-22667: an attested anchor carries the WHOLE justification, and the attestation binds to
-    /// the pin it names — a packaged attestation whose `attestedRevision` is not the pin the
-    /// closures were derived at is an attestation of some other pin, and the anchor it keys must
-    /// not read current on the strength of it. Read off the packaged closure file's own
-    /// `inferenceRevision`, so this cannot drift into a hand-kept literal.
+    /// An attestation supplies the loader digest at its reviewed revision. A later pin keeps
+    /// that evidence current while the loader is unchanged, just as measured evidence does.
     #[test]
-    fn a_packaged_currency_attestation_names_the_pin_it_keys_the_anchor_to() {
+    fn attested_anchor_currency_follows_loader_changes_not_unrelated_pin_changes() {
         let store = load_memory_anchors(PACKAGED_MEMORY_ANCHORS).expect("packaged store loads");
-        let closures = packaged_closures();
-        let pin: serde_json::Value =
-            serde_json::from_str(PACKAGED_ANCHOR_LOADER_CLOSURES).expect("closures parse");
-        let pin = pin["inferenceRevision"]
-            .as_str()
-            .expect("the closure file names its pin");
         let attested: Vec<&MemoryAnchor> = store
             .anchors
             .iter()
             .filter(|anchor| anchor.source.currency_attestation.is_some())
             .collect();
+        assert!(
+            !attested.is_empty(),
+            "packaged attestations exercise this contract"
+        );
         for anchor in &attested {
             let attestation = anchor.source.currency_attestation.as_ref().unwrap();
-            // Current BY ATTESTATION means: keyed at the pin, on a stated reading of the diff.
-            // An attestation of an older revision would leave the anchor stale AND claim a
-            // justification — the contradiction this test exists to catch.
-            assert_eq!(
+            // Construct the reviewed starting point without requiring today's packaged evidence
+            // to be current. A stale packaged anchor is allowed to use the conservative floor.
+            let mut closures = packaged_closures();
+            let key = anchor_loader_closure_key(&anchor.model_id, anchor.backend);
+            closures
+                .models
+                .get_mut(&key)
+                .expect("loader declared")
+                .digest = anchor.source.loader_closure_digest.clone();
+            closures.inference_revision = attestation.attested_revision.clone();
+            assert!(
                 anchor.is_current(&closures),
-                attestation.attested_revision == pin,
-                "{}: attested at {} against pin {pin} but is_current={}",
-                anchor.id,
-                attestation.attested_revision,
-                anchor.is_current(&closures)
+                "{}: reviewed loader",
+                anchor.id
+            );
+
+            closures.inference_revision = if attestation.attested_revision == "0".repeat(40) {
+                "1".repeat(40)
+            } else {
+                "0".repeat(40)
+            };
+            assert!(
+                anchor.is_current(&closures),
+                "{}: unchanged loader at a later pin",
+                anchor.id
+            );
+
+            closures.models.get_mut(&key).unwrap().digest =
+                if anchor.source.loader_closure_digest == "0".repeat(64) {
+                    "1".repeat(64)
+                } else {
+                    "0".repeat(64)
+                };
+            assert!(
+                !anchor.is_current(&closures),
+                "{}: changed loader",
+                anchor.id
             );
             assert!(
                 matches!(

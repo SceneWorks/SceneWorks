@@ -1111,6 +1111,18 @@ function parseBackendTierOverrides(instantIdSource) {
   return new Map([["instantid_realvisxl:candle", [candleDense]], ...CONVERTER_TIER_OVERRIDES]);
 }
 
+// `instantid.rs` is a large production route, but the matrix consumes exactly one fact from it:
+// the backend-tier override map above. Fingerprint that parsed contract instead of every unrelated
+// implementation detail in the route. Sorting the keys makes the projection stable without hiding
+// tier order, which is itself part of the generated catalog axes.
+function backendTierOverridesRevisionBody(overrides) {
+  return JSON.stringify(
+    [...overrides.entries()]
+      .sort(([left], [right]) => left.localeCompare(right))
+      .map(([key, tiers]) => [key, [...tiers]]),
+  );
+}
+
 function modesFor(model) {
   const modes = (model.capabilities ?? []).filter((capability) => GENERATION_CAPABILITIES.has(capability));
   return modes.length ? sortedUnique(modes) : ["catalog_default"];
@@ -2307,8 +2319,10 @@ export const SOURCE_PATHS = Object.freeze({
 // `matrixSourceRevision` is generated provenance written back into the manifest's calibration
 // bindings. Including that value in the source-tree hash creates an impossible fixed point:
 // regenerating the matrix rotates the value, certification writes the new value into the
-// manifest, and the next regeneration rotates it again. Keep every binding field that affects
-// eligibility in the semantic hash, but replace only this self-stamped provenance value.
+// manifest, and the next regeneration rotates it again. A terminal candidate is likewise outside
+// this generator's capability and memory inputs: it records a campaign pin and source closure but
+// cannot move a matrix cell. Keep every field that can affect a cell in the semantic hash, while
+// replacing these provenance-only subtrees.
 function manifestRevisionBody(body) {
   const parsed = JSON.parse(stripJsoncComments(body));
   const visit = (value) => {
@@ -2317,11 +2331,75 @@ function manifestRevisionBody(body) {
     return Object.fromEntries(
       Object.entries(value).map(([key, child]) => [
         key,
-        key === "matrixSourceRevision" ? "source-tree:<generated>" : visit(child),
+        key === "matrixSourceRevision"
+          ? "source-tree:<generated>"
+          : key === "terminalCandidate"
+            ? "<terminal-candidate-provenance>"
+            : visit(child),
       ]),
     );
   };
   return JSON.stringify(visit(parsed));
+}
+
+// Currency reads only `models[*].digest` (see `indexLoaderClosures`). The closure file's top-level
+// inference pin, entry-point inventory and source-file inventory are provenance for how those
+// digests were produced; if every content-derived digest is unchanged, they cannot move a cell and
+// must not invalidate the matrix. Sort the projection so JSON member order is also inert.
+function anchorLoaderClosureRevisionBody(body) {
+  const parsed = JSON.parse(body);
+  return JSON.stringify(
+    Object.fromEntries(
+      Object.entries(parsed.models ?? {})
+        .sort(([left], [right]) => left.localeCompare(right))
+        .map(([key, entry]) => [key, entry.digest ?? null]),
+    ),
+  );
+}
+
+// The fingerprint is a staleness tripwire for the PUBLISHED contract, not a source-control receipt.
+// If the complete published document is byte-for-byte unchanged apart from `generatedFrom`, carry
+// its existing provenance rather than making a source-only refactor or pin record invalidate it.
+// Any cell, anchor-currency, census, claim or model-slice change breaks this equality and records the
+// newly derived fingerprint.
+async function carryGeneratedFromForUnchangedContract(matrix) {
+  let previous;
+  try {
+    previous = JSON.parse(await readFile(path.join(ROOT, OUTPUT_JSON), "utf8"));
+  } catch (error) {
+    if (error?.code === "ENOENT") return matrix;
+    throw error;
+  }
+  const withoutGeneratedFrom = ({ generatedFrom: _generatedFrom, ...contract }) => contract;
+  const provenanceOnlySources = new Set([
+    "manifest",
+    "anchorLoaderClosures",
+    "anchorExtractor",
+    // The InstantID source is projected to the exact backend-tier facts the matrix consumes. During
+    // the transition from the old whole-file fingerprint, carry the prior provenance whenever that
+    // projected contract leaves the published document byte-identical.
+    "instantId",
+  ]);
+  const currentSources = matrix.generatedFrom?.sources ?? {};
+  const previousSources = previous.generatedFrom?.sources ?? {};
+  const sourceNames = new Set([...Object.keys(currentSources), ...Object.keys(previousSources)]);
+  for (const name of sourceNames) {
+    const current = currentSources[name];
+    const recorded = previousSources[name];
+    if (
+      current?.path !== recorded?.path ||
+      (!provenanceOnlySources.has(name) && current?.sha256 !== recorded?.sha256)
+    ) {
+      return matrix;
+    }
+  }
+  if (
+    JSON.stringify(withoutGeneratedFrom(previous)) ===
+    JSON.stringify(withoutGeneratedFrom(matrix))
+  ) {
+    return { ...matrix, generatedFrom: previous.generatedFrom };
+  }
+  return matrix;
 }
 
 /**
@@ -2364,6 +2442,8 @@ export async function buildMatrix({ sourceOverrides = {}, cellFilter = null, pub
       name,
       name === "manifest"
         ? manifestRevisionBody(bodies[name])
+        : name === "anchorLoaderClosures"
+          ? anchorLoaderClosureRevisionBody(bodies[name])
         : semanticSourceBody(relative, bodies[name]),
     ]),
   );
@@ -2408,6 +2488,7 @@ export async function buildMatrix({ sourceOverrides = {}, cellFilter = null, pub
   const stagedResidencyEngines = parseMlxStagedResidencyEngines(mlxFitBody);
   const candleBespokeStagedLanes = parseCandleBespokeStagedLanes(bodies.memoryRouteRegistry);
   const backendTierOverrides = parseBackendTierOverrides(bodies.instantId);
+  revisionBodies.instantId = backendTierOverridesRevisionBody(backendTierOverrides);
   assertOutOfMatrixEntriesAreStillUnroutable(manifest.models, (model) =>
     resolveRoute(model, routes, videoRoutes, backendScopes(model, routedBackends)),
   );
@@ -2782,7 +2863,7 @@ export async function buildMatrix({ sourceOverrides = {}, cellFilter = null, pub
     ]),
   );
   assertPublishedDocumentIsClosed(matrix, cells.length);
-  return matrix;
+  return carryGeneratedFromForUnchangedContract(matrix);
 }
 
 export function renderMarkdown(matrix) {

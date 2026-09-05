@@ -177,6 +177,58 @@ test("provenance is stamped once on the document, never per row", async () => {
   );
 });
 
+test("InstantID provenance hashes only the parsed backend-tier contract", async () => {
+  const instantId = await readFile(
+    new URL(`../${SOURCE_PATHS.instantId}`, import.meta.url),
+    "utf8",
+  );
+  const baseline = await buildMatrix({ publish: false });
+
+  const unrelatedImplementation = await buildMatrix({
+    publish: false,
+    sourceOverrides: {
+      instantId: `${instantId}\nconst MATRIX_IRRELEVANT_INSTANTID_IMPLEMENTATION: &str = "changed";\n`,
+    },
+  });
+  assert.equal(
+    unrelatedImplementation.generatedFrom.sceneWorksRevision,
+    baseline.generatedFrom.sceneWorksRevision,
+    "implementation details outside the parsed tier contract must not rotate matrix provenance",
+  );
+
+  const changedTierSource = instantId.replace(
+    /(\#\[cfg\(not\(target_os = "macos"\)\)\]\s*let preferred = \{[\s\S]*?)"bf16"([\s\S]*?\};)/,
+    '$1"fp16"$2',
+  );
+  assert.notEqual(changedTierSource, instantId, "fixture must mutate the parsed Candle tier");
+  const changedTier = await buildMatrix({
+    publish: false,
+    sourceOverrides: { instantId: changedTierSource },
+  });
+  assert.notEqual(
+    changedTier.generatedFrom.sceneWorksRevision,
+    baseline.generatedFrom.sceneWorksRevision,
+    "a consumed tier mutation must rotate matrix provenance",
+  );
+  assert.ok(
+    baseline.cells.some(
+      (cell) =>
+        cell.modelId === "instantid_realvisxl" &&
+        cell.backend === "candle" &&
+        cell.tier === "bf16",
+    ),
+  );
+  assert.ok(
+    changedTier.cells.some(
+      (cell) =>
+        cell.modelId === "instantid_realvisxl" &&
+        cell.backend === "candle" &&
+        cell.tier === "fp16",
+    ),
+    "the tier mutation must alter generated output, not only its hash",
+  );
+});
+
 test("inventory guard rejects duplicate and unknown-scope cells", async () => {
   const cells = [
     {
@@ -1707,11 +1759,9 @@ test("anchor CURRENCY is reported and cannot move a state (sc-22511, sc-22513)",
   const closures = JSON.parse(
     await readFile(new URL(`../${SOURCE_PATHS.anchorLoaderClosures}`, import.meta.url), "utf8"),
   );
-  // The baseline must carry CURRENT anchors for the mutation below to have teeth, and whether the
-  // shipped store does is a fact about measurement currency at this pin, not this test's claim
-  // (after sc-22414 moved every MLX loader closure it carries none). So the baseline restamps every
-  // anchor's currency key to the live declaration for its lane — the store's own shape, made
-  // current — and the mutation then stales every one of them.
+  // The baseline must carry CURRENT anchors for the mutation below to have teeth. Whether the
+  // checked-in store is current at this pin is provenance, not this test's claim, so restamp the
+  // existing store shape to the live content-derived closure keys before staling every anchor.
   const store = JSON.parse(
     await readFile(new URL(`../${SOURCE_PATHS.anchorStore}`, import.meta.url), "utf8"),
   );
@@ -1753,6 +1803,96 @@ test("anchor CURRENCY is reported and cannot move a state (sc-22511, sc-22513)",
   assert.ok(baseline.cells.filter((cell) => cell.anchor).every((cell) => cell.anchor.current === true));
   assert.ok(mutated.cells.filter((cell) => cell.anchor).every((cell) => cell.anchor.current === false));
   assert.equal(mutated.summary.staleAnchors, mutated.anchors.length);
+});
+
+test("pin provenance alone does not invalidate the matrix fingerprint", async () => {
+  const baseline = await buildMatrix();
+  const manifest = JSON.parse(
+    stripJsoncComments(
+      await readFile(new URL(`../${SOURCE_PATHS.manifest}`, import.meta.url), "utf8"),
+    ),
+  );
+  const starvector = manifest.models.find((model) => model.id === "starvector_8b");
+  const candidate = starvector?.vector?.deviceAdmission?.terminalCandidate;
+  assert.ok(candidate, "StarVector terminal candidate fixture is missing");
+  candidate.inferenceRevision = "f".repeat(40);
+  candidate.productionClosure.sha256 = "e".repeat(64);
+
+  const closures = JSON.parse(
+    await readFile(new URL(`../${SOURCE_PATHS.anchorLoaderClosures}`, import.meta.url), "utf8"),
+  );
+  closures.inferenceRevision = "d".repeat(40);
+  const provenanceOnly = await buildMatrix({
+    sourceOverrides: {
+      manifest: JSON.stringify(manifest),
+      anchorLoaderClosures: JSON.stringify(closures),
+    },
+  });
+  assert.equal(provenanceOnly.generatedFrom.sceneWorksRevision, baseline.generatedFrom.sceneWorksRevision);
+  assert.equal(
+    provenanceOnly.generatedFrom.sources.manifest.sha256,
+    baseline.generatedFrom.sources.manifest.sha256,
+  );
+  assert.equal(
+    provenanceOnly.generatedFrom.sources.anchorLoaderClosures.sha256,
+    baseline.generatedFrom.sources.anchorLoaderClosures.sha256,
+  );
+  assert.deepEqual(provenanceOnly.cells, baseline.cells);
+
+  const store = JSON.parse(
+    await readFile(new URL(`../${SOURCE_PATHS.anchorStore}`, import.meta.url), "utf8"),
+  );
+  for (const anchor of store.anchors) {
+    closures.models[`${anchor.modelId}:${anchor.backend}`].digest =
+      anchor.source.loaderClosureDigest;
+  }
+  const currentContract = await buildMatrix({
+    sourceOverrides: { anchorLoaderClosures: JSON.stringify(closures) },
+  });
+  const currentAnchor = currentContract.anchors.find((anchor) => anchor.current);
+  assert.ok(currentAnchor, "fixture could not make any recorded loader contract current");
+  const target = store.anchors.find((anchor) => anchor.id === currentAnchor.id);
+  const targetKey = `${target.modelId}:${target.backend}`;
+  closures.models[targetKey].digest = "0".repeat(64);
+  const contentChanged = await buildMatrix({
+    sourceOverrides: { anchorLoaderClosures: JSON.stringify(closures) },
+  });
+  assert.equal(
+    contentChanged.anchors.find((anchor) => anchor.id === target.id).current,
+    false,
+  );
+  assert.notEqual(
+    contentChanged.generatedFrom.sceneWorksRevision,
+    currentContract.generatedFrom.sceneWorksRevision,
+  );
+  assert.notEqual(
+    contentChanged.generatedFrom.sources.anchorLoaderClosures.sha256,
+    currentContract.generatedFrom.sources.anchorLoaderClosures.sha256,
+  );
+
+  const anchorStore = JSON.parse(
+    await readFile(new URL(`../${SOURCE_PATHS.anchorStore}`, import.meta.url), "utf8"),
+  );
+  const tierEvidence = anchorStore.analyticOnly.find(
+    (entry) => entry.basis === "manifest_tier_declaration",
+  );
+  assert.ok(tierEvidence, "fixture has no measured-tier analytic evidence");
+  tierEvidence.evidence.values = {
+    ...tierEvidence.evidence.values,
+    vramGbByTier: "54.525",
+  };
+  tierEvidence.evidence.sha256 = "c".repeat(64);
+  const measuredContentChanged = await buildMatrix({
+    sourceOverrides: { anchorStore: JSON.stringify(anchorStore) },
+  });
+  assert.notEqual(
+    measuredContentChanged.generatedFrom.sceneWorksRevision,
+    baseline.generatedFrom.sceneWorksRevision,
+  );
+  assert.notEqual(
+    measuredContentChanged.generatedFrom.sources.anchorStore.sha256,
+    baseline.generatedFrom.sources.anchorStore.sha256,
+  );
 });
 
 test("removing an anchor demotes exactly its own coordinates, and nothing else (sc-22513)", async () => {

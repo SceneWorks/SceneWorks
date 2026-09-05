@@ -3174,10 +3174,10 @@ fn ltx25_unmeasured_geometry() -> VideoAdmissionGeometry {
     }
 }
 
-/// `None` when the packaged store carries no q8 dev/diffvae MLX anchor for LTX-2.5 (sc-22512, E8):
-/// the anchor is LOOKED UP, not required. A corpus that never measured that cell is absence — the
-/// request simply prices from the analytic floor — so callers withhold their question instead of
-/// reddening. A PRESENT anchor that cannot derive the geometry is still a contradiction and panics.
+/// `None` when the packaged store carries no q8 dev/diffvae MLX anchor for LTX-2.5 (sc-22512,
+/// E8/E9). Currency is deliberately not part of this helper: selector tests restamp the packaged
+/// store to the live content-derived closure and must retain their anchor-path coverage when a pin
+/// changes. Only the production-funnel test asks whether the packaged anchor itself is current.
 fn ltx25_expected_derived_peaks() -> Option<sceneworks_core::memory_anchor::AnchorDerivedPhases> {
     let anchor = sceneworks_core::memory_anchor::packaged_memory_anchors()
         .expect("packaged anchors load")

@@ -1731,7 +1731,6 @@ fn scoped_generate_observed_after_configuration(
         .map_err(|error| format!("enter conditioning phase: {error}"))?;
     let mut current_phase = Some(MemoryPhase::Conditioning);
     let mut phase_error = None;
-    let coherence_before = gpu_view_retries();
     let result = generator.generate(&request, &mut |progress| {
         let next = match progress {
             Progress::Step { current: 1, .. } => Some(MemoryPhase::Denoise),
@@ -1758,7 +1757,6 @@ fn scoped_generate_observed_after_configuration(
         }
         on_progress(progress);
     });
-    report_gpu_view_retries(coherence_before);
     if phase_error.is_none() {
         if let Some(current) = current_phase {
             if let Err(error) = scope.leave_phase(current) {
@@ -1793,29 +1791,6 @@ fn scoped_generate_observed_after_configuration(
         };
     }
     settle_scoped_generation(result, finish, observed_failure)
-}
-
-/// The two GPU-view coherence retry counters (sc-22414): mlx-gen's and mlx-llm's mirrored guards
-/// each count every time the GPU had to be re-read before it agreed with the CPU on a freshly
-/// loaded buffer. Process-global and monotonic, so a render's incidence is the delta around it.
-fn gpu_view_retries() -> (u64, u64) {
-    (
-        mlx_gen::coherence::retries(),
-        runtime_macos::llm::primitives::coherence::retries(),
-    )
-}
-
-/// Print the render's GPU-view retry incidence to stderr — the harness log is where the Mac2
-/// reproducer's expected outcome ("pass, with non-zero retries") is read. Always printed, so a
-/// zero reads as "the guard ran and saw nothing" rather than as silence.
-fn report_gpu_view_retries(before: (u64, u64)) {
-    let after = gpu_view_retries();
-    eprintln!(
-        "memory-strategy provider adapter: GPU-view coherence retries during this render: \
-         mlx_gen={} mlx_llm={} (sc-22414)",
-        after.0.saturating_sub(before.0),
-        after.1.saturating_sub(before.1),
-    );
 }
 
 /// Combine the generator and request-scope terminals without losing either failure. A provider

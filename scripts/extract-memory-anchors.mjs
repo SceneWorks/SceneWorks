@@ -930,6 +930,33 @@ export function manifestTierEvidence(
   };
 }
 
+/**
+ * Preserve the declaration's recorded source digest while its measured contract is unchanged.
+ *
+ * A manifest-wide digest is useful provenance when the declaration is first recorded, but unrelated
+ * catalog edits (including an inference pin under another model's terminal candidate) do not change
+ * this cell's measured tier values. Rotating every analytic-only row for such an edit would turn
+ * provenance drift into measurement invalidation. The path and declared values are the contract;
+ * when either changes, the current manifest digest is recorded instead.
+ */
+export function carryManifestTierEvidence(previousStore, cell, evidence) {
+  if (evidence === null) return null;
+  const previous = (previousStore?.analyticOnly ?? []).find(
+    (entry) => entry.id === analyticId(cell),
+  );
+  const recorded = previous?.evidence;
+  if (
+    previous?.basis === "manifest_tier_declaration" &&
+    recorded?.path === evidence.path &&
+    JSON.stringify(recorded.values) === JSON.stringify(evidence.values) &&
+    typeof recorded.sha256 === "string" &&
+    /^[0-9a-f]{64}$/.test(recorded.sha256)
+  ) {
+    return { ...evidence, sha256: recorded.sha256 };
+  }
+  return evidence;
+}
+
 /** The pinned inference revision, read from the worker's git dependency declaration. */
 export function inferencePin(cargoToml) {
   // Scoped to the inference remote on purpose: the same file pins other git dependencies (mlx-rs),
@@ -1333,8 +1360,9 @@ const REASONS = {
 };
 
 /**
- * Build the complete store from the committed evidence. The previous output is NOT an input: there
- * is no carry-forward, so `--check` and a regeneration ask the same question.
+ * Build the complete store from the committed evidence. The previous output supplies only frozen
+ * provenance for unchanged measured contracts: anchor loader-closure keys and manifest-tier source
+ * digests. It never supplies measured values, so `--check` and a regeneration ask the same question.
  *
  * `inferenceRoot` is the one optional input and it defaults to OFF (`null`): `"auto"` locates the
  * cargo checkout of the pin on this host, a path reads that directory, and `null` reads no checkout
@@ -1352,8 +1380,8 @@ export async function buildAnchorStore({
   const manifest = JSON.parse(stripJsoncComments(manifestBody));
   const manifestSha256 = sha256(manifestBody);
   const pin = inferencePin(await readFile(path.join(root, PIN_PATH), "utf8"));
-  // The store's own previous content, read for ONE field: each anchor's frozen currency key. See
-  // `loaderClosureDigestFor` for why that field is carried rather than re-derived.
+  // The store's own previous content supplies frozen provenance only. See
+  // `loaderClosureDigestFor` and `carryManifestTierEvidence` for the two narrow carry-forward rules.
   const previousStore = JSON.parse(await readFile(path.join(root, STORE_PATH), "utf8"));
 
   // The fitted video curves name the corpora the video lane's identities were measured from. They
@@ -1489,11 +1517,15 @@ export async function buildAnchorStore({
       manifestSha256,
       cell,
     );
-    const declared = manifestTierEvidence(
-      manifest,
-      MANIFEST_PATH,
-      manifestSha256,
+    const declared = carryManifestTierEvidence(
+      previousStore,
       cell,
+      manifestTierEvidence(
+        manifest,
+        MANIFEST_PATH,
+        manifestSha256,
+        cell,
+      ),
     );
     const [basis, evidence] =
       envelope !== null
