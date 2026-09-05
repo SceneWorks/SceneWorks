@@ -585,6 +585,42 @@ SCENEWORKS_PULID_WEIGHTS=/abs/path/to/pulid-flux-bundle
 #   scrfd_10g.safetensors           (SceneWorks/instantid-mlx)
 #   arcface_iresnet100.safetensors  (SceneWorks/instantid-mlx)
 
+# memory-mlx-adapter — sana_1600m / sana_sprint_1600m (sc-22731; the MLX turnkeys)
+SCENEWORKS_SANA_REPOSITORY=SceneWorks/Sana_1600M_1024px_mlx    # fixed; validated against SANA_REPOSITORY
+SCENEWORKS_SANA_REVISION=<exact artifact revision>
+SCENEWORKS_SANA_ROOT=/abs/path/.../snapshots/<rev>/<tier>     # bf16 | q4 | q8, derived from the plan target
+SCENEWORKS_SANA_SPRINT_REPOSITORY=SceneWorks/Sana_Sprint_1.6B_1024px_mlx  # validated against SANA_SPRINT_REPOSITORY
+SCENEWORKS_SANA_SPRINT_REVISION=<exact artifact revision>
+SCENEWORKS_SANA_SPRINT_ROOT=/abs/path/.../snapshots/<rev>/<tier>
+
+# memory-candle-adapter — sana_1600m / sana_sprint_1600m (sc-22731). A DIFFERENT repository from the
+# MLX lane's, and the ROOT IS THE SNAPSHOT ITSELF — no `<tier>` component. The worker resolves
+# `huggingface_pinned_snapshot_dir(SANA_CANDLE_DIFFUSERS_REPO, …)` off-Mac (`image_jobs/base.rs`),
+# `candle-gen-sana`'s `validate_immutable_root` requires exactly that root, and its
+# `validate_load_spec` refuses any `LoadSpec::quantize`. bf16 is the ONLY tier this lane has: the
+# packed q4/q8 turnkeys above are `platforms: ["macos"]`, so there is no q4/q8 Candle cell to plan.
+SCENEWORKS_SANA_DENSE_REPOSITORY=Efficient-Large-Model/Sana_1600M_1024px_diffusers
+SCENEWORKS_SANA_DENSE_REVISION=<exact artifact revision>
+SCENEWORKS_SANA_DENSE_ROOT=/abs/path/.../snapshots/<rev>       # NO tier component
+SCENEWORKS_SANA_SPRINT_DENSE_REPOSITORY=Efficient-Large-Model/Sana_Sprint_1.6B_1024px_diffusers
+SCENEWORKS_SANA_SPRINT_DENSE_REVISION=<exact artifact revision>
+SCENEWORKS_SANA_SPRINT_DENSE_ROOT=/abs/path/.../snapshots/<rev>
+
+# BOTH adapters — chroma1_hd / chroma1_base / chroma1_flash (sc-22731). Three separate receipt and
+# evidence domains (SC-20788) over three separate rehosts, so THREE env families — never one shared
+# `CHROMA1`, which would let a Flash plan be satisfied by HD weights. `candle-gen-chroma` pins each
+# route's repository and revision by name and cross-checks the path tier against the transformer's
+# own packed marker, refusing the crossing.
+SCENEWORKS_CHROMA1_HD_REPOSITORY=SceneWorks/chroma1-hd-mlx     # validated against CHROMA1_HD_REPOSITORY
+SCENEWORKS_CHROMA1_HD_REVISION=<exact artifact revision>
+SCENEWORKS_CHROMA1_HD_ROOT=/abs/path/.../snapshots/<rev>/<tier>   # bf16 | q4 | q8
+SCENEWORKS_CHROMA1_BASE_REPOSITORY=SceneWorks/chroma1-base-mlx
+SCENEWORKS_CHROMA1_BASE_REVISION=<exact artifact revision>
+SCENEWORKS_CHROMA1_BASE_ROOT=/abs/path/.../snapshots/<rev>/<tier>
+SCENEWORKS_CHROMA1_FLASH_REPOSITORY=SceneWorks/chroma1-flash-mlx
+SCENEWORKS_CHROMA1_FLASH_REVISION=<exact artifact revision>
+SCENEWORKS_CHROMA1_FLASH_ROOT=/abs/path/.../snapshots/<rev>/<tier>
+
 # memory-mlx-adapter — krea_2_turbo (plain text-to-image)
 SCENEWORKS_KREA_REPOSITORY=SceneWorks/krea-2-turbo-mlx       # fixed; validated against KREA_REPOSITORY
 SCENEWORKS_KREA_REVISION=<exact base artifact revision>
