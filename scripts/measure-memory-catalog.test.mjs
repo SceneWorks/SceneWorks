@@ -14,6 +14,8 @@ import {
   PLAN_PATH,
   PACKAGED_SOURCES_PATH,
   PROVIDER_FAMILIES,
+  MAGE_COMPONENTS,
+  MAGE_COMPONENT_IDS,
   providerFamily,
   anchorParts,
   anchorSlug,
@@ -75,6 +77,11 @@ function fakeModels() {
     // `flux_dev`; its identity stack is fetched on first use and is not a manifest download at all.
     { id: "flux_dev", downloads: [{ repo: "SceneWorks/flux1-dev-mlx", revision: REVISION, variant: "q4", files: ["q4/*"] }] },
     { id: "pulid_flux_dev", downloads: [{ repo: "SceneWorks/flux1-dev-mlx", revision: REVISION, variant: "q4", files: ["q4/*"] }] },
+    // The SD3.5 family (sc-22730). Three DISTINCT engine providers, each with its own tiered
+    // rehost — none is an alias for another's backbone, so each resolves its own env family.
+    { id: "sd3_5_large", downloads: [{ repo: "SceneWorks/sd3.5-large-mlx", revision: REVISION, variant: "q4", files: ["q4/*"] }] },
+    { id: "sd3_5_large_turbo", downloads: [{ repo: "SceneWorks/sd3.5-large-turbo-mlx", revision: REVISION, variant: "q4", files: ["q4/*"] }] },
+    { id: "sd3_5_medium", downloads: [{ repo: "SceneWorks/sd3.5-medium-mlx", revision: UPSTREAM, variant: "q8", files: ["q8/*"] }] },
     // sc-22731. SANA is the one family whose two lanes load DIFFERENT repositories: the MLX lane
     // opens the per-tier SceneWorks turnkey, the Candle lane the upstream dense diffusers snapshot
     // at its root. Chroma1 is the ordinary shape — one per-tier turnkey serving both lanes — and is
@@ -196,6 +203,42 @@ test("the z-image family: the base model has its own env family, and the edit al
       SCENEWORKS_Z_IMAGE_REVISION: REVISION,
       SCENEWORKS_Z_IMAGE_ROOT: snapshotPath(hub, "SceneWorks/z-image-turbo-mlx", REVISION, "q4"),
     });
+  }
+});
+
+test("each SD3.5 member binds its OWN artifact family on both lanes", async () => {
+  // The three members share an engine crate but NOT an artifact: serving a Medium plan from Large
+  // weights would re-label Large's peaks as Medium's. A member whose snapshot is absent must be
+  // `weights_missing` — never satisfied by a sibling's staged root.
+  const hub = await fakeHub([
+    ["SceneWorks/sd3.5-large-mlx", REVISION, "q4"],
+    ["SceneWorks/sd3.5-large-turbo-mlx", REVISION, "q4"],
+  ]);
+  for (const backend of ["mlx", "candle"]) {
+    const context = { models: fakeModels(), backend, hubs: [hub], current: new Map(), captured: new Map() };
+    const large = await classifyAnchor(`sd3_5_large:q4:${backend}`, { provider: "sd3_5_large" }, context);
+    assert.equal(large.status, "runnable", `${backend}: ${large.reason}`);
+    assert.deepEqual(large.env, {
+      SCENEWORKS_SD3_5_LARGE_REPOSITORY: "SceneWorks/sd3.5-large-mlx",
+      SCENEWORKS_SD3_5_LARGE_REVISION: REVISION,
+      SCENEWORKS_SD3_5_LARGE_ROOT: snapshotPath(hub, "SceneWorks/sd3.5-large-mlx", REVISION, "q4"),
+    });
+
+    const turbo = await classifyAnchor(`sd3_5_large_turbo:q4:${backend}`, { provider: "sd3_5_large_turbo" }, context);
+    assert.equal(turbo.status, "runnable", `${backend}: ${turbo.reason}`);
+    assert.deepEqual(turbo.env, {
+      SCENEWORKS_SD3_5_LARGE_TURBO_REPOSITORY: "SceneWorks/sd3.5-large-turbo-mlx",
+      SCENEWORKS_SD3_5_LARGE_TURBO_REVISION: REVISION,
+      SCENEWORKS_SD3_5_LARGE_TURBO_ROOT: snapshotPath(hub, "SceneWorks/sd3.5-large-turbo-mlx", REVISION, "q4"),
+    });
+    // Turbo is its own env family, so a Large root can never stand in for it.
+    assert.notDeepEqual(Object.keys(turbo.env), Object.keys(large.env));
+
+    // Medium's snapshot is NOT staged on this fake hub: it must report missing under its OWN
+    // repository, not fall back to a sibling's.
+    const medium = await classifyAnchor(`sd3_5_medium:q8:${backend}`, { provider: "sd3_5_medium" }, context);
+    assert.equal(medium.status, "weights_missing", `${backend}: ${medium.reason}`);
+    assert.match(medium.reason, /SceneWorks\/sd3\.5-medium-mlx@[0-9a-f]{8}\/q8/);
   }
 });
 
@@ -346,6 +389,9 @@ test("every family's derived env names are read back by each arm it declares", a
     const envFamilies = [
       family.env,
       family.upstream?.env,
+      // sc-22733: the shared component snapshot a split-layout family stages its text encoder and
+      // VAE from is exported the same way and must be read back the same way.
+      family.components?.env,
       // sc-22727: a per-modelId variant is a derived env family too — the KV klein row exports
       // `SCENEWORKS_FLUX2_KLEIN_KV_*` and each declared arm must read those names back.
       ...Object.values(family.variants ?? {}).map((variant) => variant.env),
@@ -1059,6 +1105,31 @@ test("the flux.1 family is measurable on every shipped tier of every routed lane
   assert.equal(gaps.length, 0, gapReport(gaps));
 });
 
+// sc-22733. Same shape claim, for the Mage-Flow family: SIX registered engine providers (three
+// text-to-image checkpoints and three instruction editors), each with its own tiered rehost, all
+// sharing ONE text-encoder/VAE components snapshot. Key sets, never a frozen count.
+test("the mage-flow family is measurable on every shipped tier of every routed lane", async () => {
+  const family = [
+    "mage_flow", "mage_flow_base", "mage_flow_turbo",
+    "mage_flow_edit", "mage_flow_edit_base", "mage_flow_edit_turbo",
+  ];
+  const cells = (await shippedTieredCells()).filter((cell) => family.includes(cell.modelId));
+  assert.equal(cells.length, 6 * 3 * 2, "six models x three shipped tiers x two routed lanes");
+  const gaps = (await measurabilityGaps()).filter((gap) => family.includes(gap.modelId));
+  assert.equal(gaps.length, 0, gapReport(gaps));
+});
+
+// sc-22730. Same shape claim, for the SD3.5 family: three DISTINCT base text-to-image providers of
+// the shared SD3.5 engine crates, each with its OWN tiered rehost, on the registry path of BOTH
+// lanes. `sd3_5_*` is the catalog model id AND the engine provider id, so no alias is involved.
+test("the sd3.5 family is measurable on every shipped tier of every routed lane", async () => {
+  const family = ["sd3_5_large", "sd3_5_large_turbo", "sd3_5_medium"];
+  const cells = (await shippedTieredCells()).filter((cell) => family.includes(cell.modelId));
+  assert.equal(cells.length, 3 * 3 * 2, "three models x three shipped tiers x two routed lanes");
+  const gaps = (await measurabilityGaps()).filter((gap) => family.includes(gap.modelId));
+  assert.equal(gaps.length, 0, gapReport(gaps));
+});
+
 // sc-22731. Same shape claim, for the SANA and Chroma1 families. Chroma1 is the ordinary case —
 // three routes x three shipped tiers x two routed lanes. SANA is not: its packed tiers are
 // `platforms: ["macos"]` turnkeys and the Candle lane has ONE dense cell per route, which is an
@@ -1089,6 +1160,224 @@ test("the sana and chroma1 families are measurable on every shipped tier of ever
   assert.equal(gaps.length, 0, gapReport(gaps));
 });
 
+// Each Mage variant binds TWO artifact triples: its OWN tiered rehost (never a sibling's — the six
+// checkpoints are architecturally identical, so a crossed root would be caught by nothing else) and
+// the ONE shared components snapshot. This asserts the derivation produces exactly that.
+test("every mage-flow member binds its own rehost plus the one shared components snapshot", async () => {
+  const models = await readManifestModels();
+  const seenComponents = new Set();
+  for (const [modelId, family] of Object.entries(PROVIDER_FAMILIES)) {
+    if (!modelId.startsWith("mage_flow")) continue;
+    assert.deepEqual(family.arms, ["mlx", "candle"], `${modelId} is routed on both lanes`);
+    assert.equal(family.components, MAGE_COMPONENTS, `${modelId} shares the one components row`);
+    // The variant repo is this member's own, and it is the repo the manifest ships the tiers from.
+    const download = tierDownload(models, modelId, family.repo, "q4");
+    assert.equal(download.variant, "q4", `${modelId} ships a q4 tier from ${family.repo}`);
+    assert.ok(!download.coRequisite, `${modelId}'s tier download is the primary, not a co-requisite`);
+    // The components repo is shared: same repo AND same revision for every member.
+    const components = tierDownload(models, modelId, MAGE_COMPONENTS.repo, "q4");
+    assert.ok(components.coRequisite, "the components rows are declared as co-requisites");
+    seenComponents.add(components.revision);
+    // No two members may claim the same variant rehost.
+    const others = Object.entries(PROVIDER_FAMILIES).filter(
+      ([id, other]) => id !== modelId && id.startsWith("mage_flow") && other.repo === family.repo,
+    );
+    assert.deepEqual(others, [], `${modelId} shares its variant rehost with ${others.map(([id]) => id).join(", ")}`);
+  }
+  assert.equal(seenComponents.size, 1, "every Mage entry co-requires the SAME components revision");
+});
+
+// The component directory names this script probes must be the ones the adapters actually stage, or
+// a cell reports `runnable` while the load cannot open its text encoder.
+test("MAGE_COMPONENT_IDS are the adapter's own component-id constants", async () => {
+  const source = await readFile(path.join(ROOT, "crates/sceneworks-memory-adapter/src/lib.rs"), "utf8");
+  const declared = [
+    ["MAGE_COMPONENT_TEXT_ENCODER", "text_encoder"],
+    ["MAGE_COMPONENT_VAE", "vae"],
+  ];
+  for (const [name, value] of declared) {
+    assert.match(source, new RegExp(`pub const ${name}: &str =\\s*"${value}"`));
+  }
+  assert.deepEqual(MAGE_COMPONENT_IDS, declared.map(([, value]) => value));
+  // And both adapter arms stage exactly those two components rather than composing a path.
+  for (const backend of ["mlx", "candle"]) {
+    const arm = await readFile(path.join(ROOT, `crates/sceneworks-memory-adapter/src/bin/${backend}.rs`), "utf8");
+    for (const [name] of declared) {
+      assert.ok(arm.includes(`protocol::${name}`), `${backend}.rs never stages ${name}`);
+    }
+  }
+});
+
+// Every Mage plan row's `calibrationFingerprint` must be the string the PRODUCTION contract emits
+// for that cell, and every row's `loadShape` the shape the WORKER loads that cell under. Both are
+// per (lane, tier) tables, bound here as the adapters bind them (`mage_calibration_fingerprint` in
+// both `mlx.rs` and `candle.rs`, which refuse a plan row naming anything else BEFORE the load):
+//
+// * MLX: `mlx-gen-mage` `production_calibration_fingerprint` (inference PR 953) —
+//   `mage-flow-<route>-<tier>-mlx-shared-ladder-v1`, 18 cells; the registry-conformance family
+//   (`mage-flow-mlx-registry-behavior-v1-<route>-<tier>`) and the retired single string
+//   (`mage-flow-mlx-shared-ladder-2026-08-03-v1`) are never production identities.
+// * Candle: `candle-gen-mage` `production_calibration_fingerprint` —
+//   `mage-flow-cuda-<provider>-<tier>-shared-ladder-v3`, 18 cells.
+// * Shape: the worker's MLX stream evaluates Mage `Applied + Deferred` on every tier (typed rules,
+//   BTR declared on all three tiers), while its Candle stream matches the generated BTR row's own
+//   `tiers` (`["bf16"]`) — deferred on bf16, refused (eager) on q4/q8. The worker's
+//   `memory_route_registry` Mage tests drive both evaluators over the real manifest entries and pin
+//   these rows to them.
+//
+// The cell set is derived (family x shipped tiers x routed lanes), never a frozen count.
+test("every mage-flow plan row names its cell's production identity and the worker's load shape", async () => {
+  const plan = await readPlan();
+  const family = [
+    "mage_flow", "mage_flow_base", "mage_flow_turbo",
+    "mage_flow_edit", "mage_flow_edit_base", "mage_flow_edit_turbo",
+  ];
+  const expectedKeys = (await shippedTieredCells()).filter((cell) => family.includes(cell.modelId)).map((cell) => cell.key).sort();
+  const mage = Object.entries(plan.anchors).filter(([, row]) => family.includes(row.provider));
+  assert.deepEqual(mage.map(([key]) => key).sort(), expectedKeys, "the planned Mage cells are exactly the shipped ones");
+  const route = (provider) => provider.replaceAll("_", "-");
+  const identities = new Set();
+  for (const [key, row] of mage) {
+    const { modelId, tier, backend } = anchorParts(key);
+    assert.equal(row.provider, modelId, `${key}: catalog id and engine provider id are equal on every Mage row`);
+    const expected = backend === "mlx"
+      ? `mage-flow-${route(row.provider)}-${tier}-mlx-shared-ladder-v1`
+      : `mage-flow-cuda-${route(row.provider)}-${tier}-shared-ladder-v3`;
+    assert.equal(row.calibrationFingerprint, expected, `${key} names a fingerprint ${backend} cannot emit`);
+    assert.ok(!row.calibrationFingerprint.startsWith("mage-flow-mlx-registry-behavior-v1"), `${key} names a weights-free conformance string`);
+    assert.notEqual(row.calibrationFingerprint, "mage-flow-mlx-shared-ladder-2026-08-03-v1", `${key} names the retired single string`);
+    assert.ok(!identities.has(row.calibrationFingerprint), `${key} shares its identity with another cell`);
+    identities.add(row.calibrationFingerprint);
+    const shape = backend === "mlx" || tier === "bf16" ? "deferred_materialization" : "eager_materialization";
+    assert.equal(row.loadShape, shape, `${key} must plan the shape the worker loads`);
+    assert.equal(row.overlay, "none", `${key} carries no overlay`);
+  }
+  assert.equal(identities.size, expectedKeys.length, "one identity per cell");
+});
+
+// The manifest's six MLX Mage contract blocks carry the ENGINE'S weights-free conformance identity
+// per row, as every declared MLX family does (FLUX.1: `flux-one-static-registry-behavior-v2-dev`).
+// `mlx-gen-mage` publishes that identity per (route, tier), so the rows are split per tier and no
+// row may carry a production string, the retired single string, or a multi-tier `tiers` list.
+test("every mage-flow MLX manifest row declares its own per-tier registry-conformance identity", async () => {
+  const models = await readManifestModels();
+  for (const modelId of Object.keys(PROVIDER_FAMILIES).filter((id) => id.startsWith("mage_flow"))) {
+    const contract = models.find((model) => model.id === modelId)?.mlx?.memoryStrategyContract;
+    assert.ok(contract, `${modelId} declares an MLX memory contract`);
+    assert.equal(contract.provider, modelId);
+    const cells = new Set();
+    for (const row of contract.implementations) {
+      assert.deepEqual(Object.keys(row).filter((k) => k === "tiers"), ["tiers"], `${modelId}/${row.rung} declares tiers`);
+      assert.equal(row.tiers.length, 1, `${modelId}/${row.rung} rows are split per tier, got ${JSON.stringify(row.tiers)}`);
+      const [tier] = row.tiers;
+      assert.equal(row.fingerprint, `mage-flow-mlx-registry-behavior-v1-${modelId.replaceAll("_", "-")}-${tier}`, `${modelId}/${row.rung}/${tier}`);
+      cells.add(`${row.rung}:${tier}`);
+    }
+    assert.deepEqual(
+      [...cells].sort(),
+      ["bounded_attention", "bounded_decode", "bounded_transformer_residency", "resident", "staged_residency"]
+        .flatMap((rung) => ["bf16", "q4", "q8"].map((tier) => `${rung}:${tier}`)).sort(),
+      `${modelId} declares every rung on every shipped tier exactly once`,
+    );
+  }
+});
+
+// A Mage cell whose components row for THIS tier is not declared (or whose components repo has no
+// rows at all) is `weights_missing` — planned and armed, merely not bindable on this host — and
+// never a thrown error, which would abort the whole `--list` for every other cell (sc-22733 review).
+test("a mage-flow cell with no components row for its tier is weights_missing, not an error", async () => {
+  const family = PROVIDER_FAMILIES.mage_flow;
+  const variant = (tier) => ({ repo: family.repo, revision: REVISION, variant: tier, files: [`${tier}/*`] });
+  const component = (tier, componentId) => ({
+    repo: MAGE_COMPONENTS.repo, revision: UPSTREAM, coRequisite: true, componentId, variant: tier,
+    subdir: `${tier}/${componentId}`, files: [`${tier}/${componentId}/*`],
+  });
+  const models = [
+    { id: "mage_flow", downloads: [variant("q4"), variant("bf16"), ...MAGE_COMPONENT_IDS.map((id) => component("q4", id))] },
+    { id: "mage_flow_base", downloads: [{ ...variant("q4"), repo: PROVIDER_FAMILIES.mage_flow_base.repo }] },
+  ];
+  const hub = await fakeHub([
+    [family.repo, REVISION, "q4"],
+    [family.repo, REVISION, "bf16"],
+    [PROVIDER_FAMILIES.mage_flow_base.repo, REVISION, "q4"],
+    ...MAGE_COMPONENT_IDS.map((id) => [MAGE_COMPONENTS.repo, UPSTREAM, "q4", id]),
+  ]);
+  const context = { models, backend: "mlx", hubs: [hub], current: new Map(), captured: new Map() };
+  const runnable = await classifyAnchor("mage_flow:q4:mlx", { provider: "mage_flow" }, context);
+  assert.equal(runnable.status, "runnable", runnable.reason);
+  assert.equal(runnable.env[`SCENEWORKS_${MAGE_COMPONENTS.env}_ROOT`], snapshotPath(hub, MAGE_COMPONENTS.repo, UPSTREAM));
+  const noTierRow = await classifyAnchor("mage_flow:bf16:mlx", { provider: "mage_flow" }, context);
+  assert.equal(noTierRow.status, "weights_missing");
+  assert.match(noTierRow.reason, /declares no .*Mage-Flow-Components-mlx components row for tier bf16/);
+  assert.ok(noTierRow.roots.some((root) => root.label === "components snapshot"), "the missing root is named");
+  const noRows = await classifyAnchor("mage_flow_base:q4:mlx", { provider: "mage_flow_base" }, context);
+  assert.equal(noRows.status, "weights_missing");
+  assert.match(noRows.reason, /mage_flow_base declares no .* components row for tier q4/);
+});
+
+// sc-22730. The plan's SD3.5 fingerprints are the one claim a capture cannot re-derive on a host
+// with no weights, and they are duplicated across three artifacts: the plan, the engine (through
+// inference PR 950) and — on the candle lane only — the shipped manifest's declared contract.
+//
+// The CANDLE half is a real cross-source binding, and it holds AT THE OLD PIN: the manifest already
+// declares `sd35-<route>-candle-resident-staged-v1` for every tier of every member, so a plan row
+// naming anything else would name an identity the shipped declaration never promises.
+//
+// The MLX half CANNOT be bound to a constant here: `mlx-gen-sd3` at the compiled pin publishes no
+// production identity at all (that is exactly what inference PR 950 adds), so there is nothing for
+// CI at the old pin to read. It is bound to the (route, TIER) shape the merged engine mints instead
+// — `mlx-gen-sd3/src/memory_strategy.rs:269-288` at `d606395b5` keys the identity on the proven
+// artifact tier, because the three tiers of one route are three different resident sets and one
+// anchor cannot price all three. The byte-for-byte binding to the LOADED contract is enforced where
+// it can be — inside the capture, by `run_sd3`, which refuses a provider whose published string
+// differs from `sd3_calibration_fingerprint(arm, artifact.tier)`.
+test("every planned sd3.5 fingerprint is one its lane's declaration can emit", async () => {
+  const plan = await readPlan();
+  const models = await readManifestModels();
+  const slugs = { sd3_5_large: "large", sd3_5_large_turbo: "large-turbo", sd3_5_medium: "medium" };
+  let seen = 0;
+  for (const [key, entry] of Object.entries(plan.anchors)) {
+    const { modelId, tier, backend } = anchorParts(key);
+    if (!(modelId in slugs)) continue;
+    seen += 1;
+    if (backend === "candle") {
+      const model = models.find((candidate) => candidate.id === modelId);
+      const declared = new Set(
+        (model?.candle?.memoryStrategyContract?.implementations ?? []).map((impl) => impl.fingerprint),
+      );
+      assert.ok(
+        declared.has(entry.calibrationFingerprint),
+        `${key}: plan names ${entry.calibrationFingerprint}, manifest declares ${[...declared].join(", ")}`,
+      );
+    } else {
+      assert.equal(entry.calibrationFingerprint, `sd3-5-${slugs[modelId]}-${tier}-mlx-shared-ladder-v1`, key);
+    }
+  }
+  assert.equal(seen, 3 * 3 * 2, "every SD3.5 cell is priced by the plan");
+});
+
+// sc-22726 left this binding open and sc-22730 closes it: the artifact repository of every family
+// is written down TWICE — as `PROVIDER_FAMILIES[*].repo` here and as a `pub const *_REPOSITORY` in
+// the adapter's lib.rs, which is what both arms validate the operator's env against
+// (`validate_artifact_identity`). Editing either alone yields a runner that stages a root the
+// adapter then refuses by name, with every test in both languages still green.
+test("PROVIDER_FAMILIES repos are the adapter's *_REPOSITORY constants", async () => {
+  const lib = await readFile(path.join(ROOT, ADAPTER_LIB_PATH), "utf8");
+  const declared = new Set();
+  for (const match of lib.matchAll(/pub const [A-Z0-9_]+_REPOSITORY: &str = "([^"]+)";/g)) {
+    declared.add(match[1]);
+  }
+  assert.ok(declared.size > 0, "lib.rs declares repository constants");
+  for (const [provider, family] of Object.entries(PROVIDER_FAMILIES)) {
+    // LTX-2.5 is bound by the harness itself rather than by an adapter env family, so its repo
+    // literal lives in this module (`LTX25_REPOSITORY`) and not in lib.rs.
+    if (family.ltx25) continue;
+    assert.ok(
+      declared.has(family.repo),
+      `${provider}: ${family.repo} is not declared as a *_REPOSITORY const in ${ADAPTER_LIB_PATH}`,
+    );
+  }
+});
 // The catalog-wide burndown. `todo` until the terminal story of epic 22723 (sc-22738) promotes it:
 // node:test reports a failing todo without failing the run, so the gap set is printed on every
 // `npm run check` while the other families are brought in, and the assertion itself is already

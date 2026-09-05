@@ -85,6 +85,14 @@ pub const Z_IMAGE_REPOSITORY: &str = "SceneWorks/z-image-turbo-mlx";
 /// bound through the separate `SCENEWORKS_Z_IMAGE_BASE_*` family so a base plan can never be
 /// satisfied by Turbo weights and re-label Turbo's peaks as the base model's.
 pub const Z_IMAGE_BASE_REPOSITORY: &str = "SceneWorks/z-image-mlx";
+/// The three SD3.5 tiered rehosts (sc-22730). Unlike the Z-Image pair these are three DISTINCT
+/// engine providers (`sd3_5_large`, `sd3_5_large_turbo`, `sd3_5_medium` — the same ids on both
+/// lanes, with no aliasing), each with its own artifact family, so each gets its own
+/// `SCENEWORKS_SD3_5_*` env triple. Serving one route from another's weights would re-label that
+/// route's peaks; the arms validate the repository literal before any weight work.
+pub const SD3_5_LARGE_REPOSITORY: &str = "SceneWorks/sd3.5-large-mlx";
+pub const SD3_5_LARGE_TURBO_REPOSITORY: &str = "SceneWorks/sd3.5-large-turbo-mlx";
+pub const SD3_5_MEDIUM_REPOSITORY: &str = "SceneWorks/sd3.5-medium-mlx";
 /// The `mlx:ltx_2_3` calibration artifact (sc-18808). Its `gemma/` co-requisite text encoder is a
 /// hard load-time requirement of the pinned provider, not a fallback, so a capture resolves TWO
 /// roots under this one repository: the numeric tier and `gemma`.
@@ -109,6 +117,32 @@ pub const MINIMAX_REPOSITORY: &str = "SceneWorks/minimax-h3-mlx";
 /// [`validate_huggingface_revision_root`] rather than being forced through the rehost's
 /// variant-suffixed validator.
 pub const MINIMAX_UPSTREAM_REPOSITORY: &str = "MiniMaxAI/MiniMax-H3";
+/// The six Mage-Flow variant rehosts (sc-22733). Unlike every other image family in this file, a
+/// Mage variant repository ships the DiT ALONE: `<snapshot>/<tier>/transformer/`. The text encoder
+/// and the VAE are bit-identical across all six variants and are hosted ONCE in
+/// [`MAGE_COMPONENTS_REPOSITORY`], which the manifest declares as a per-tier co-requisite of every
+/// Mage entry (`config/manifests/builtin.models.jsonc`). Both engines resolve that split through
+/// `LoadSpec::components` (`mlx-gen-mage` `model::resolve_component_dirs`, `candle-gen-mage`
+/// `resolved_component_dirs`), so a Mage capture binds TWO artifact triples: the variant's own tier
+/// root and the shared components snapshot.
+///
+/// One constant per variant rather than a derived string: the anchor key, the engine provider id and
+/// the artifact are three separate namespaces, and a capture that resolved the repository by
+/// transforming the provider id would silently follow any future rename.
+pub const MAGE_FLOW_REPOSITORY: &str = "SceneWorks/Mage-Flow";
+pub const MAGE_FLOW_BASE_REPOSITORY: &str = "SceneWorks/Mage-Flow-Base";
+pub const MAGE_FLOW_TURBO_REPOSITORY: &str = "SceneWorks/Mage-Flow-Turbo";
+pub const MAGE_FLOW_EDIT_REPOSITORY: &str = "SceneWorks/Mage-Flow-Edit";
+pub const MAGE_FLOW_EDIT_BASE_REPOSITORY: &str = "SceneWorks/Mage-Flow-Edit-Base";
+pub const MAGE_FLOW_EDIT_TURBO_REPOSITORY: &str = "SceneWorks/Mage-Flow-Edit-Turbo";
+/// The shared Mage text-encoder + VAE rehost. Named `-mlx` upstream but consumed by BOTH lanes: the
+/// manifest ships exactly these co-requisite downloads for every Mage entry regardless of backend,
+/// and `candle-gen-mage` reads the same `text_encoder`/`vae` component ids.
+pub const MAGE_COMPONENTS_REPOSITORY: &str = "SceneWorks/Mage-Flow-Components-mlx";
+/// The two component ids both Mage engines advertise, in descriptor order (`mlx-gen-mage`
+/// `model::REQUIRED_COMPONENTS`, `candle-gen-mage` `REQUIRED_COMPONENTS`).
+pub const MAGE_COMPONENT_TEXT_ENCODER: &str = "text_encoder";
+pub const MAGE_COMPONENT_VAE: &str = "vae";
 /// The Bernini MLX artifact (sc-22737). ONE tiered rehost serves BOTH shipped catalog entries —
 /// `bernini` (the Wan2.2-A14B video renderer) and `bernini_image` (the still route over the same
 /// block stack) — because they are not two providers: `crates/sceneworks-worker/src/engines.rs`
@@ -904,8 +938,12 @@ pub fn validate_artifact_identity(
     expected_repository: &str,
 ) -> Result<(), String> {
     if repository != expected_repository {
+        // The OFFENDING repository is named as well as the expected one: a sibling-member root
+        // handed to the wrong arm is the failure this check exists for, and an operator (or a
+        // test) cannot tell that refusal apart from any other without seeing what was passed.
         return Err(format!(
-            "artifact repository must be the fixed {expected_repository} calibration artifact"
+            "artifact repository must be the fixed {expected_repository} calibration artifact, \
+             not {repository}"
         ));
     }
     if revision.len() != 40

@@ -1,11 +1,11 @@
 {
   "schemaVersion": 11,
   "generatedFrom": {
-    "sceneWorksRevision": "source-tree:347172d1b7dda309dc9cae82ff106743208455175bf55432fa14004511b41eb2",
+    "sceneWorksRevision": "source-tree:ae9ce4003bc95e3c3af21ac7ca6f946d42702a4aa907e03d26e2763bf96395a2",
     "sources": {
       "manifest": {
         "path": "config/manifests/builtin.models.jsonc",
-        "sha256": "2738a6258adc3ef06d4916d965b55afdaa2c0d01b90a339476f0efbede29de92"
+        "sha256": "ce2f52f37c198ec91dc5f17eb0e264f08519626c81baa811e680a87ab3c242b7"
       },
       "routingCatalog": {
         "path": "crates/sceneworks-core/src/jobs_store/routing/catalog.rs",
@@ -61,7 +61,7 @@
       },
       "memoryRouteRegistry": {
         "path": "crates/sceneworks-worker/src/memory_route_registry.rs",
-        "sha256": "502e308f4e775b36005b2260952c8427c3056890c2778c5aa030a3da48bc60d0"
+        "sha256": "3413e12f1d40cf3cf4f5191636d00f9d246c82388daa513fdc21a046a89f62bd"
       },
       "instantId": {
         "path": "crates/sceneworks-worker/src/image_jobs/instantid.rs",
@@ -69,11 +69,11 @@
       },
       "anchorStore": {
         "path": "config/memory-anchors.json",
-        "sha256": "926a184ad1ab31fb274603ca87d924d6eba856ae2c34a3e258a0e4227cc305fe"
+        "sha256": "b56b0f55e985c8c12973ff7d7db5669fe66799299f8f9bb356d9a29b28bfebb7"
       },
       "anchorLoaderClosures": {
         "path": "config/anchor-loader-closures.json",
-        "sha256": "87b6a4479e19795826959a3676a7502bf613f3348bc8a7dbe74d7a26f33ff75d"
+        "sha256": "40899500d7e5ad1f8611c0819efaa0f779c4c6f78d2e67b9bb88c2b29325039a"
       },
       "anchorDerivation": {
         "path": "crates/sceneworks-core/src/memory_anchor.rs",
