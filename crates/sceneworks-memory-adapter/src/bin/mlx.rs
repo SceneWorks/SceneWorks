@@ -1612,6 +1612,167 @@ mod tests {
         assert!(error.contains("must start with"));
     }
 
+    const QWEN_EDIT_TEST_REVISION: &str = "bb2bc9893b3c49ae96c813350775f791a2e8bc80";
+
+    fn scratch_dir(label: &str) -> PathBuf {
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        std::env::temp_dir().join(format!("sc-22728-{label}-{}-{nonce}", std::process::id()))
+    }
+
+    /// A `models--<repo>/snapshots/<revision>/<tier>` root laid out exactly as the HF cache does, so
+    /// the tier suffix the validator pins is real rather than mocked.
+    fn qwen_edit_snapshot_root(tier: &str) -> PathBuf {
+        let root = scratch_dir("qwen-edit-root")
+            .join(format!(
+                "models--{}",
+                protocol::QWEN_EDIT_REPOSITORY.replace('/', "--")
+            ))
+            .join("snapshots")
+            .join(QWEN_EDIT_TEST_REVISION)
+            .join(tier);
+        std::fs::create_dir_all(&root).unwrap();
+        root
+    }
+
+    /// The distill snapshot, with the one pinned file actually on disk — the adapter helper refuses
+    /// any other file name, so a fixture that skipped this would assert nothing.
+    fn qwen_edit_lightning_fixture() -> QwenEditLightningSource {
+        let root = scratch_dir("qwen-edit-lightning");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join(protocol::QWEN_EDIT_LIGHTNING_FILE), b"distill").unwrap();
+        QwenEditLightningSource {
+            repository: protocol::QWEN_EDIT_LIGHTNING_REPOSITORY.to_owned(),
+            revision: QWEN_EDIT_TEST_REVISION.to_owned(),
+            root,
+        }
+    }
+
+    fn qwen_edit_source(arm: QwenEditArm, tier: &str) -> QwenEditArtifactSource {
+        QwenEditArtifactSource {
+            repository: protocol::QWEN_EDIT_REPOSITORY.to_owned(),
+            revision: QWEN_EDIT_TEST_REVISION.to_owned(),
+            root: qwen_edit_snapshot_root(tier),
+            lightning: arm.lightning.then(qwen_edit_lightning_fixture),
+        }
+    }
+
+    fn qwen_edit_request_for(arm: QwenEditArm, model_id: &str, tier: &str) -> Value {
+        let fixture = format!("{}-{tier}-seed16353-step{}", arm.fixture_prefix, arm.steps);
+        qwen_edit_planned(model_id, tier, arm.overlay, &fixture)
+    }
+
+    const QWEN_EDIT_MEMBERS: [(QwenEditArm, &str); 2] = [
+        (QWEN_EDIT_ARM, "qwen_image_edit_2511"),
+        (QWEN_EDIT_LIGHTNING_ARM, "qwen_image_edit_2511_lightning"),
+    ];
+
+    /// sc-22728: the ONE thing that makes the Lightning member Lightning at load time. Every
+    /// downstream claim — the record's `builtInAdapters` count, the overlay scenario's verdict, and
+    /// the run context's `overlay` — is read off `spec.adapters`, so if this attachment were lost the
+    /// arm would publish an authoritative record asserting a distill that never participated. The
+    /// stack itself is therefore asserted here, on BOTH members and at every shipped tier.
+    #[test]
+    fn the_qwen_edit_load_spec_carries_the_distill_on_exactly_the_lightning_member() {
+        for (arm, model_id) in QWEN_EDIT_MEMBERS {
+            for (tier, quant) in [
+                ("q4", Some(Quant::Q4)),
+                ("q8", Some(Quant::Q8)),
+                ("bf16", None),
+            ] {
+                let request = qwen_edit_request_for(arm, model_id, tier);
+                let selection = planned_selection(&request).unwrap();
+                let source = qwen_edit_source(arm, tier);
+                let artifact = qwen_edit_load_spec(
+                    arm,
+                    tier,
+                    &source,
+                    &selection,
+                    OffloadPolicy::Resident,
+                    LoadShape::EagerMaterialization,
+                )
+                .unwrap_or_else(|error| panic!("{model_id}/{tier}: {error}"));
+                assert_eq!(
+                    artifact.spec.quantize, quant,
+                    "{model_id}/{tier} load quant"
+                );
+                assert_eq!(
+                    artifact.spec.adapters.len(),
+                    usize::from(arm.lightning),
+                    "{model_id}/{tier}: the distill stack must be exactly the member's"
+                );
+                if arm.lightning {
+                    let expected = source
+                        .lightning
+                        .as_ref()
+                        .unwrap()
+                        .root
+                        .canonicalize()
+                        .unwrap()
+                        .join(protocol::QWEN_EDIT_LIGHTNING_FILE);
+                    let adapter = &artifact.spec.adapters[0];
+                    assert_eq!(adapter.path, expected, "{model_id}/{tier} distill path");
+                    assert!(
+                        adapter.path.ends_with(protocol::QWEN_EDIT_LIGHTNING_FILE),
+                        "{model_id}/{tier}: {}",
+                        adapter.path.display()
+                    );
+                    assert_eq!(adapter.scale, 1.0, "{model_id}/{tier} distill scale");
+                    assert!(
+                        matches!(adapter.kind, AdapterKind::Lora),
+                        "{model_id}/{tier}: {:?}",
+                        adapter.kind
+                    );
+                }
+            }
+        }
+    }
+
+    /// sc-22728: the root the capture opens must end in the PLANNED tier's directory, per member —
+    /// a stale `…/q4` export cannot satisfy a q8 plan and quietly re-label another tier's peaks
+    /// (the sc-17097 defect class). Modelled on
+    /// `z_image_root_must_carry_the_planned_tier_and_the_spec_binds_it`.
+    #[test]
+    fn a_qwen_edit_root_of_another_tier_is_refused_naming_the_planned_tier() {
+        for (arm, model_id) in QWEN_EDIT_MEMBERS {
+            let request = qwen_edit_request_for(arm, model_id, "q8");
+            let selection = planned_selection(&request).unwrap();
+            // The plan is q8; the root on disk is the q4 export.
+            let source = qwen_edit_source(arm, "q4");
+            let error = qwen_edit_load_spec(
+                arm,
+                "q8",
+                &source,
+                &selection,
+                OffloadPolicy::Resident,
+                LoadShape::EagerMaterialization,
+            )
+            .expect_err("a q8 plan must not be satisfied by a q4 root");
+            assert!(
+                error.ends_with(&format!("/snapshots/{QWEN_EDIT_TEST_REVISION}/q8")),
+                "{model_id}: {error}"
+            );
+            // The wrong artifact family is refused before the root is even looked at.
+            let mut foreign = qwen_edit_source(arm, "q8");
+            foreign.repository = protocol::QWEN_EDIT_LIGHTNING_REPOSITORY.to_owned();
+            let error = qwen_edit_load_spec(
+                arm,
+                "q8",
+                &foreign,
+                &selection,
+                OffloadPolicy::Resident,
+                LoadShape::EagerMaterialization,
+            )
+            .expect_err("the distill repository is not the base artifact");
+            assert!(
+                error.contains(protocol::QWEN_EDIT_REPOSITORY),
+                "{model_id}: {error}"
+            );
+        }
+    }
+
     #[test]
     fn qwen_load_spec_preserves_every_planned_numeric_tier() {
         for (tier, expected_quant) in [
@@ -6215,23 +6376,40 @@ fn planned_qwen_edit_seed(request: &Value, arm: QwenEditArm, tier: &str) -> Resu
     Ok(seed)
 }
 
+/// Where the built-in Lightning distill snapshot lives, as the three
+/// `SCENEWORKS_QWEN_EDIT_LIGHTNING_LORA_*` values name it — lifted out of the environment so the
+/// attachment that makes the Lightning member Lightning is unit-testable.
+#[derive(Clone, Debug)]
+struct QwenEditLightningSource {
+    repository: String,
+    revision: String,
+    root: PathBuf,
+}
+
+fn qwen_edit_lightning_source() -> Result<QwenEditLightningSource, String> {
+    Ok(QwenEditLightningSource {
+        repository: protocol::required_env("SCENEWORKS_QWEN_EDIT_LIGHTNING_LORA_REPOSITORY")?,
+        revision: protocol::required_env("SCENEWORKS_QWEN_EDIT_LIGHTNING_LORA_REVISION")?,
+        root: PathBuf::from(protocol::required_env(
+            "SCENEWORKS_QWEN_EDIT_LIGHTNING_LORA_ROOT",
+        )?),
+    })
+}
+
 /// The built-in Lightning distill adapter, exactly as the worker stacks it: the one pinned file in
 /// the pinned snapshot, as a single LoRA at scale 1.0 ahead of any user adapters (of which a
 /// calibration capture has none). The Candle engine refuses any other path, scale or kind by name;
 /// the MLX engine consumes whatever `spec.adapters` carries, so the pin is asserted HERE too rather
 /// than assumed from the environment.
-fn qwen_edit_lightning_adapter() -> Result<AdapterSpec, String> {
-    let repository = protocol::required_env("SCENEWORKS_QWEN_EDIT_LIGHTNING_LORA_REPOSITORY")?;
-    let revision = protocol::required_env("SCENEWORKS_QWEN_EDIT_LIGHTNING_LORA_REVISION")?;
+fn qwen_edit_lightning_adapter(source: &QwenEditLightningSource) -> Result<AdapterSpec, String> {
     protocol::validate_artifact_identity(
-        &repository,
-        &revision,
+        &source.repository,
+        &source.revision,
         protocol::QWEN_EDIT_LIGHTNING_REPOSITORY,
     )?;
-    let root = std::fs::canonicalize(PathBuf::from(protocol::required_env(
-        "SCENEWORKS_QWEN_EDIT_LIGHTNING_LORA_ROOT",
-    )?))
-    .map_err(|error| format!("canonicalize SCENEWORKS_QWEN_EDIT_LIGHTNING_LORA_ROOT: {error}"))?;
+    let root = std::fs::canonicalize(&source.root).map_err(|error| {
+        format!("canonicalize SCENEWORKS_QWEN_EDIT_LIGHTNING_LORA_ROOT: {error}")
+    })?;
     let path = root.join(protocol::QWEN_EDIT_LIGHTNING_FILE);
     if !path.is_file() {
         return Err(format!(
@@ -6240,6 +6418,77 @@ fn qwen_edit_lightning_adapter() -> Result<AdapterSpec, String> {
         ));
     }
     Ok(AdapterSpec::new(path, 1.0, AdapterKind::Lora))
+}
+
+/// The three `SCENEWORKS_QWEN_IMAGE_EDIT_*` values naming the base snapshot one capture opens, plus
+/// the distill snapshot the Lightning member stacks — lifted out of the environment so both the tier
+/// binding and the adapter attachment are unit-testable.
+#[derive(Clone, Debug)]
+struct QwenEditArtifactSource {
+    repository: String,
+    revision: String,
+    root: PathBuf,
+    lightning: Option<QwenEditLightningSource>,
+}
+
+fn qwen_edit_artifact_source(arm: QwenEditArm) -> Result<QwenEditArtifactSource, String> {
+    Ok(QwenEditArtifactSource {
+        repository: protocol::required_env("SCENEWORKS_QWEN_IMAGE_EDIT_REPOSITORY")?,
+        revision: protocol::required_env("SCENEWORKS_QWEN_IMAGE_EDIT_REVISION")?,
+        root: PathBuf::from(protocol::required_env("SCENEWORKS_QWEN_IMAGE_EDIT_ROOT")?),
+        lightning: arm.lightning.then(qwen_edit_lightning_source).transpose()?,
+    })
+}
+
+/// The artifact one Qwen edit capture loads: the canonical snapshot root, and the `LoadSpec` that
+/// opens it.
+#[derive(Debug)]
+struct QwenEditArtifact {
+    root: PathBuf,
+    spec: LoadSpec,
+}
+
+/// The env-free half of the Qwen edit load, so both of its load-time bindings are unit-testable:
+///
+/// * the root must end in the PLANNED tier's directory, so a stale `…/q4` export cannot satisfy a q8
+///   or bf16 plan and quietly re-label another tier's peaks (the sc-17097 defect class); and
+/// * the built-in distill lands in `spec.adapters` exactly when the arm is the Lightning member —
+///   the ONE thing that makes that member Lightning at load time. Every downstream overlay claim in
+///   [`run_qwen_edit_provider`] is read back off `spec.adapters` rather than off `arm.lightning`, so
+///   a record can never assert an overlay the load did not carry.
+fn qwen_edit_load_spec(
+    arm: QwenEditArm,
+    tier: &str,
+    source: &QwenEditArtifactSource,
+    selection: &MemorySelection,
+    offload: OffloadPolicy,
+    load_shape: LoadShape,
+) -> Result<QwenEditArtifact, String> {
+    protocol::validate_artifact_identity(
+        &source.repository,
+        &source.revision,
+        protocol::QWEN_EDIT_REPOSITORY,
+    )?;
+    let root = std::fs::canonicalize(&source.root)
+        .map_err(|error| format!("canonicalize SCENEWORKS_QWEN_IMAGE_EDIT_ROOT: {error}"))?;
+    protocol::validate_huggingface_snapshot_root(
+        &root,
+        &source.repository,
+        &source.revision,
+        tier,
+        protocol::QWEN_EDIT_REPOSITORY,
+    )?;
+    let mut spec = qwen_load_spec(root.clone(), selection, offload, load_shape);
+    if arm.lightning {
+        let lightning = source.lightning.as_ref().ok_or_else(|| {
+            format!(
+                "{} is the Lightning member but no distill snapshot was supplied",
+                arm.model_id
+            )
+        })?;
+        spec = spec.with_adapters(vec![qwen_edit_lightning_adapter(lightning)?]);
+    }
+    Ok(QwenEditArtifact { root, spec })
 }
 
 /// The generation request one Qwen edit capture renders: the worker's edit request shape — one
@@ -6301,26 +6550,18 @@ fn run_qwen_edit_provider(request: &Value) -> Result<Value, String> {
         OffloadPolicy::Resident
     };
     let (width, height) = protocol::target_geometry(request)?;
-    let repository = protocol::required_env("SCENEWORKS_QWEN_IMAGE_EDIT_REPOSITORY")?;
-    let revision = protocol::required_env("SCENEWORKS_QWEN_IMAGE_EDIT_REVISION")?;
-    protocol::validate_artifact_identity(&repository, &revision, protocol::QWEN_EDIT_REPOSITORY)?;
-    let root = std::fs::canonicalize(PathBuf::from(protocol::required_env(
-        "SCENEWORKS_QWEN_IMAGE_EDIT_ROOT",
-    )?))
-    .map_err(|error| format!("canonicalize SCENEWORKS_QWEN_IMAGE_EDIT_ROOT: {error}"))?;
+    let source = qwen_edit_artifact_source(arm)?;
+    let repository = source.repository.clone();
+    let revision = source.revision.clone();
     // The root must end in the PLANNED tier's directory, so a stale `…/q4` export cannot satisfy a
-    // q8 or bf16 plan and quietly re-label another tier's peaks.
-    protocol::validate_huggingface_snapshot_root(
-        &root,
-        &repository,
-        &revision,
-        tier,
-        protocol::QWEN_EDIT_REPOSITORY,
-    )?;
-    let mut spec = qwen_load_spec(root.clone(), &selection, offload, load_shape);
-    if arm.lightning {
-        spec = spec.with_adapters(vec![qwen_edit_lightning_adapter()?]);
-    }
+    // q8 or bf16 plan and quietly re-label another tier's peaks; and the distill is attached here,
+    // on exactly the Lightning member.
+    let QwenEditArtifact { root: _root, spec } =
+        qwen_edit_load_spec(arm, tier, &source, &selection, offload, load_shape)?;
+    // Every overlay claim below is read off the stack the LOAD carries, never off `arm.lightning`:
+    // if the attachment above were ever lost, the record must say so rather than assert a distill
+    // that never participated.
+    let loaded_adapters = spec.adapters.len();
     let catalog =
         runtime_macos::catalog().map_err(|error| format!("build MLX catalog: {error}"))?;
     let generator = catalog
@@ -6379,7 +6620,7 @@ fn run_qwen_edit_provider(request: &Value) -> Result<Value, String> {
     context.mode = MemoryMode::Edit;
     context.has_reference = true;
     context.geometry.reference_count = 1;
-    context.overlay = arm.lightning.then(|| arm.overlay.to_owned());
+    context.overlay = (loaded_adapters > 0).then(|| arm.overlay.to_owned());
 
     let conditioning = Cell::new(PhaseMemory {
         active: 0,
@@ -6560,7 +6801,7 @@ fn run_qwen_edit_provider(request: &Value) -> Result<Value, String> {
             "Qwen edit output mutation did not breach the production parity envelope".to_owned(),
         );
     }
-    let overlay_scenario = if arm.lightning {
+    let overlay_scenario = if loaded_adapters > 0 {
         json!({
             "name": "overlay",
             "result": "passed",
@@ -6629,12 +6870,12 @@ fn run_qwen_edit_provider(request: &Value) -> Result<Value, String> {
                 // Every Qwen edit capture conditions on exactly one reference image, and the
                 // Lightning member additionally carries exactly one built-in distill adapter.
                 ("referenceImages", "count", 1),
-                ("builtInAdapters", "count", u64::from(arm.lightning)),
+                ("builtInAdapters", "count", loaded_adapters as u64),
             ],
         ),
         "capturedAt": protocol::captured_at(),
     });
-    if !arm.lightning {
+    if loaded_adapters == 0 {
         protocol::settle_plain_overlay_scenario(request, &mut fragment, arm.execution_path)?;
     }
     Ok(fragment)

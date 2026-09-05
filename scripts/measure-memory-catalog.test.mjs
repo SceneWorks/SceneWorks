@@ -269,6 +269,51 @@ test("the pinned Lightning distill LoRA matches the worker constants on both lan
   }
 });
 
+// The env FAMILY names in `PROVIDER_FAMILIES` are the other half of the same hand-duplication: this
+// table derives `SCENEWORKS_<env>_{REPOSITORY,REVISION,ROOT}` and exports them into the adapter, and
+// each adapter arm reads those exact names back as its own source literals. Nothing bound the two,
+// on ANY family — renaming one side (or adding a family whose arm never reads it) leaves every test
+// in both files green and fails only mid-campaign, after the weights are staged. This is that
+// binding, per family, per declared arm, including the `upstream` and `sideArtifact` sub-families.
+test("every family's derived env names are read back by each arm it declares", async () => {
+  const lanes = new Map();
+  for (const backend of ["mlx", "candle"]) {
+    lanes.set(
+      backend,
+      await readFile(path.join(ROOT, `crates/sceneworks-memory-adapter/src/bin/${backend}.rs`), "utf8"),
+    );
+  }
+  let checked = 0;
+  for (const [id, family] of Object.entries(PROVIDER_FAMILIES)) {
+    // The LTX-2.5 families carry no env family at all: the harness binds their snapshot root
+    // directly (`--ltx25-snapshot-root`), which `classifyAnchor` asserts by leaving `row.env` empty.
+    const envFamilies = [
+      family.env,
+      family.upstream?.env,
+      ...Object.values(family.sideArtifact ?? {}).map((side) => side.env),
+    ].filter(Boolean);
+    if (envFamilies.length === 0) {
+      assert.ok(family.ltx25, `${id} declares neither an env family nor the LTX-2.5 harness binding`);
+      continue;
+    }
+    for (const arm of family.arms) {
+      const source = lanes.get(arm);
+      assert.ok(source, `${id} declares an unknown adapter arm ${arm}`);
+      for (const env of envFamilies) {
+        for (const suffix of ["REPOSITORY", "REVISION", "ROOT"]) {
+          const name = `SCENEWORKS_${env}_${suffix}`;
+          assert.ok(
+            source.includes(`"${name}"`),
+            `${arm}.rs never reads ${name}, which ${id} exports into it`,
+          );
+          checked += 1;
+        }
+      }
+    }
+  }
+  assert.ok(checked >= 45, `expected the whole table to be covered, checked ${checked} names`);
+});
+
 // sc-22725: LTX-2.5 reaches the two lanes under two engine ids off ONE public snapshot. Both
 // families must therefore derive the same snapshot root, on their own lane and on no other.
 test("the LTX-2.5 family derives the same snapshot root on both lanes, under each lane's engine id", async () => {

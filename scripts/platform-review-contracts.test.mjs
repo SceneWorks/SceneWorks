@@ -1467,10 +1467,56 @@ test("memory adapters bind every emitted overlay verdict to the requested target
   // Every gated fragment the Candle adapter emits must come from a protocol builder that settles the
   // overlay scenario against the DECLARED target — `plain_gated_fragment` for an overlay-free path,
   // `overlay_gated_fragment` for one that actually loaded an overlay (sc-22728's Qwen edit Lightning
-  // distill). A count of one builder was the old guard; it would not have noticed a hand-rolled
-  // `"status": "gated"` object leaving `overlay` at `not_run`, which is the thing that must not ship.
-  assert.ok((candle.match(/protocol::plain_gated_fragment\(/g)?.length ?? 0) >= 1);
-  assert.ok((candle.match(/protocol::overlay_gated_fragment\(/g)?.length ?? 0) >= 1);
+  // distill). A whole-file COUNT is the wrong claim in both directions: a frozen `3` breaks on every
+  // new arm, and a `>= 1` per builder stops noticing one specific arm's builder call being dropped.
+  // So the claim is PER ARM: each function that assembles a `PlainGatedFragment` must reach a
+  // builder in its OWN body.
+  const candleFunctions = new Map();
+  for (const match of candle.matchAll(/^fn ([a-z0-9_]+)[(<]/gm)) {
+    const start = match.index;
+    const next = candle.indexOf("\nfn ", start + 1);
+    candleFunctions.set(
+      match[1],
+      candle.slice(start, next === -1 ? candle.length : next),
+    );
+  }
+  const gatedEmitters = [...candleFunctions].filter(([, body]) =>
+    body.includes("protocol::PlainGatedFragment {"),
+  );
+  assert.ok(
+    gatedEmitters.length >= 4,
+    `expected every gated-fragment arm to be discovered, found ${gatedEmitters.length}`,
+  );
+  for (const [name, body] of gatedEmitters) {
+    assert.ok(
+      /protocol::(plain|overlay)_gated_fragment\(/.test(body),
+      `${name} assembles a gated fragment but never reaches an overlay-settling builder`,
+    );
+  }
+  // sc-22728's Qwen edit arm is the only one that emits BOTH shapes — the plain member and the
+  // Lightning member — so each of its two builder calls is named rather than counted.
+  const qwenEdit = candleFunctions.get("run_qwen_edit");
+  assert.ok(qwenEdit, "run_qwen_edit must exist on the Candle adapter");
+  assert.match(qwenEdit, /protocol::overlay_gated_fragment\(/);
+  assert.match(qwenEdit, /protocol::plain_gated_fragment\(/);
+  // And the Lightning branch is selected from the stack the LOAD carried, never from the arm flag,
+  // so a record can never claim an overlay the load did not fold in.
+  assert.match(qwenEdit, /let loaded_adapters = adapters\.len\(\);/);
+  assert.match(
+    qwenEdit,
+    /let mut fragment = if loaded_adapters > 0 \{\s*protocol::overlay_gated_fragment\(/,
+  );
+  assert.match(qwenEdit, /\("builtInAdapters", "count", loaded_adapters as u64\)/);
+  assert.match(qwenEdit, /overlay: \(loaded_adapters > 0\)\.then\(\|\| "lora"\.to_owned\(\)\)/);
+  // The MLX twin publishes the same claims off its own loaded stack.
+  const mlxQwenEdit = mlx.slice(
+    mlx.indexOf("fn run_qwen_edit_provider("),
+    mlx.indexOf("\nfn ", mlx.indexOf("fn run_qwen_edit_provider(") + 1),
+  );
+  assert.match(mlxQwenEdit, /let loaded_adapters = spec\.adapters\.len\(\);/);
+  assert.match(mlxQwenEdit, /let overlay_scenario = if loaded_adapters > 0 \{/);
+  assert.match(mlxQwenEdit, /\("builtInAdapters", "count", loaded_adapters as u64\)/);
+  assert.match(mlxQwenEdit, /if loaded_adapters == 0 \{\s*protocol::settle_plain_overlay_scenario\(/);
   assert.doesNotMatch(
     candle,
     /"status":\s*"gated"/,
