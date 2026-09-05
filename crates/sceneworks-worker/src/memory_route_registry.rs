@@ -2328,6 +2328,40 @@ pub fn evaluate_declared_mlx_load_shape(
     )
 }
 
+/// Does the pinned provider implement `strategy` for the candidate whose contract this is?
+///
+/// A contract-read ERROR is not the same fact as "the provider does not implement it", and the
+/// declaration evaluator can only act on the latter. sc-22727 measured the cost of conflating them:
+/// the shipped FLUX.2 Klein rehosts failed `KleinArtifactInventory::verify_for_provider` while the
+/// contract was being read, the `Err` collapsed to `false` here, the BTR declaration was refused,
+/// and the route silently downgraded to an eager resident load carrying NO calibration identity —
+/// with nothing in the log to say an artifact had been rejected. The downgrade is still the right
+/// fallback (a load that cannot prove its rung must not claim it), so this keeps returning `false`;
+/// it just stops doing it silently.
+fn provider_implements_declared_strategy(
+    contract: gen_core::Result<Option<gen_core::MemoryProviderContract>>,
+    provider: &str,
+    strategy: MemoryStrategy,
+) -> bool {
+    match contract {
+        Ok(contract) => contract.is_some_and(|contract| {
+            contract
+                .capability(strategy)
+                .is_some_and(|capability| capability.support == MemoryStrategySupport::Implemented)
+        }),
+        Err(error) => {
+            tracing::warn!(
+                provider,
+                strategy = ?strategy,
+                %error,
+                "memory-strategy contract read failed; treating the declared strategy as \
+                 unimplemented and falling back to the eager resident load shape"
+            );
+            false
+        }
+    }
+}
+
 /// Request-exact MLX declaration intersection. Full BTR rows authorize `Applied + Deferred`;
 /// exact lower-only staged rows authorize only `Eligible + Eager` under their declared load policy.
 /// `Eligible` remains non-authorizing for BTR and is ignored by every legacy shaper. Krea and FLUX
@@ -2350,15 +2384,11 @@ pub fn evaluate_declared_mlx_load_shape_for_request(
         spec,
         context,
         |candidate, strategy| {
-            crate::inference_runtime::media()
-                .memory_strategy_contract(provider, candidate)
-                .ok()
-                .flatten()
-                .is_some_and(|contract| {
-                    contract.capability(strategy).is_some_and(|capability| {
-                        capability.support == MemoryStrategySupport::Implemented
-                    })
-                })
+            provider_implements_declared_strategy(
+                crate::inference_runtime::media().memory_strategy_contract(provider, candidate),
+                provider,
+                strategy,
+            )
         },
     )
 }
@@ -3282,6 +3312,95 @@ mod tests {
             };
         }
         contract
+    }
+
+    /// sc-22727: a contract-read ERROR downgrades the declaration (it is not proof of the rung),
+    /// but it must not do so silently — it is how the shipped FLUX.2 Klein rehosts came to run
+    /// uncalibrated with nothing in the log. Weights-free: the seam is a pure function of the
+    /// `Result` the registry hands back.
+    #[test]
+    fn a_failed_contract_read_downgrades_the_declared_strategy_and_is_not_silent() {
+        let implemented = provider_implements_declared_strategy(
+            Ok(Some(staged_contract("flux2_klein_9b"))),
+            "flux2_klein_9b",
+            MemoryStrategy::StagedResidency,
+        );
+        assert!(
+            implemented,
+            "an implemented rung must still read as implemented"
+        );
+        assert!(
+            !provider_implements_declared_strategy(
+                Ok(Some(staged_contract("flux2_klein_9b"))),
+                "flux2_klein_9b",
+                MemoryStrategy::BoundedTransformerResidency,
+            ),
+            "a Missing rung must read as unimplemented"
+        );
+        assert!(
+            !provider_implements_declared_strategy(
+                Ok(None),
+                "flux2_klein_9b",
+                MemoryStrategy::BoundedTransformerResidency,
+            ),
+            "no contract is not an implemented rung"
+        );
+        let logs = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let captured = std::sync::Arc::clone(&logs);
+        let refused =
+            tracing::subscriber::with_default(CapturingSubscriber { messages: captured }, || {
+                provider_implements_declared_strategy(
+                    Err(gen_core::Error::Unsupported(
+                        "flux2 Klein turnkey text encoder is not dense".to_owned(),
+                    )),
+                    "flux2_klein_9b",
+                    MemoryStrategy::BoundedTransformerResidency,
+                )
+            });
+        assert!(!refused, "an unreadable contract cannot authorize the rung");
+        let logs = logs.lock().expect("log buffer");
+        assert_eq!(logs.len(), 1, "exactly one warning: {logs:?}");
+        assert!(
+            logs[0].contains("flux2_klein_9b")
+                && logs[0].contains("flux2 Klein turnkey text encoder is not dense"),
+            "the warning must name the provider AND the error: {}",
+            logs[0]
+        );
+    }
+
+    /// A minimal `tracing` subscriber that records every event's rendered fields, so the seam's
+    /// warning can be asserted without a global subscriber or a log-capture dependency.
+    struct CapturingSubscriber {
+        messages: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+    }
+
+    impl tracing::Subscriber for CapturingSubscriber {
+        fn enabled(&self, _: &tracing::Metadata<'_>) -> bool {
+            true
+        }
+        fn new_span(&self, _: &tracing::span::Attributes<'_>) -> tracing::Id {
+            tracing::Id::from_u64(1)
+        }
+        fn record(&self, _: &tracing::Id, _: &tracing::span::Record<'_>) {}
+        fn record_follows_from(&self, _: &tracing::Id, _: &tracing::Id) {}
+        fn event(&self, event: &tracing::Event<'_>) {
+            struct Render<'a>(&'a mut String);
+            impl tracing::field::Visit for Render<'_> {
+                fn record_debug(
+                    &mut self,
+                    field: &tracing::field::Field,
+                    value: &dyn std::fmt::Debug,
+                ) {
+                    use std::fmt::Write;
+                    let _ = write!(self.0, "{}={value:?} ", field.name());
+                }
+            }
+            let mut rendered = String::new();
+            event.record(&mut Render(&mut rendered));
+            self.messages.lock().expect("log buffer").push(rendered);
+        }
+        fn enter(&self, _: &tracing::Id) {}
+        fn exit(&self, _: &tracing::Id) {}
     }
 
     fn sana_contract(provider: &str) -> gen_core::MemoryProviderContract {
