@@ -11,7 +11,7 @@ import { fileSha256 } from "./lib/file-sha256.mjs";
 import { terminalPinPaths } from "./lib/starvector-terminal-pin-paths.mjs";
 import { terminalTreeEntry, terminalTreeSha256 } from "./lib/terminal-tree-identity.mjs";
 import { removeStarVectorMacMetricsTree, selectStarVectorMacPython, validateStarVectorMacVenv } from "./select-starvector-macos-python.mjs";
-import { assemblePreflight, assembleWeights, downloadExact, installCheckout, installPinnedCheckout, installUpstreamPackages, prepareUpstreamSource, pinnedCheckoutLockPath, tree, validatePreflightMetadata, validatePreflightTransport, validateSealedPreflightIndex } from "./starvector-terminal-provision.mjs";
+import { assemblePreflight, assembleWeights, downloadExact, installCheckout, installPinnedCheckout, installUpstreamPackages, prepareUpstreamSource, runUpstreamPip, upstreamPipProgress, pinnedCheckoutLockPath, tree, validatePreflightMetadata, validatePreflightTransport, validateSealedPreflightIndex } from "./starvector-terminal-provision.mjs";
 import { validateTerminalServiceClosure } from "./starvector-terminal-readiness.mjs";
 
 const execFile = promisify(execFileCallback);
@@ -1083,6 +1083,7 @@ test("upstream pip downloads retain exact CUDA builds and stop within finite ret
   assert.equal(calls.length, 2);
   for (const [python, args, bounds] of calls) {
     assert.equal(python, "fixture-python");
+    assert.equal(args[args.indexOf("--progress-bar") + 1], "raw");
     assert.equal(args[args.indexOf("--timeout") + 1], "120");
     assert.equal(args[args.indexOf("--retries") + 1], "3");
     assert.equal(bounds.timeout, 60 * 60 * 1000);
@@ -1103,4 +1104,54 @@ test("upstream pip downloads retain exact CUDA builds and stop within finite ret
   let attempts = 0;
   await assert.rejects(() => installUpstreamPackages("fixture-python", { ...lock, torch_index_url: "https://wrong.invalid" }, async () => { attempts++; }), /locked CUDA/);
   assert.equal(attempts, 0);
+});
+
+
+test("upstream pip diagnostics reflect only numeric progress and public locked wheel identity", () => {
+  assert.deepEqual(upstreamPipProgress("Progress 123 of 456"), { event: "download", bytes: 123, total_bytes: 456 });
+  assert.equal(upstreamPipProgress("Progress 457 of 456"), null);
+  assert.equal(upstreamPipProgress("Progress 9007199254740993 of 0"), null);
+  assert.deepEqual(upstreamPipProgress("Downloading https://download-r2.pytorch.org/whl/cu128/torch-2.7.1%2Bcu128-cp312-cp312-win_amd64.whl?token=FIXTURE_PRIVATE"), { event: "download_started", package: "torch" });
+  for (const line of ["Authorization: Bearer FIXTURE_PRIVATE", "PIP_INDEX_URL=FIXTURE_PRIVATE", "config.json {secret: FIXTURE_PRIVATE}", "Downloading https://user:FIXTURE_PRIVATE@download.pytorch.org/a.whl", "Downloading https://private.invalid/FIXTURE_PRIVATE.whl", "ERROR: FIXTURE_PRIVATE"]) assert.equal(upstreamPipProgress(line), null);
+});
+
+test("upstream pip child reports byte progress while suppressing secret-like stdout and stderr", async () => {
+  const events = [];
+  const script = `process.stdout.write('Authorization: Bearer FIXTURE_PRIVATE\\nProgress 1');
+    process.stderr.write('config.json FIXTURE_PRIVATE\\n');
+    setTimeout(() => process.stdout.write(' of 10\\n'), 30);
+    setTimeout(() => process.stdout.write('Progress 10 of 10\\nInstalling collected packages: fixture\\n'), 80);
+    setTimeout(() => process.exit(0), 140);`;
+  await runUpstreamPip(process.execPath, ["-e", script], { timeout: 3000, maxBuffer: 4096 }, { emit: line => events.push(JSON.parse(line)), heartbeatMs: 20, noProgressMs: 1000 });
+  assert.ok(events.some(event => event.last_progress?.bytes === 1));
+  assert.equal(events.at(-1).event, "completed");
+  assert.equal(events.at(-1).last_transfer.bytes, 10);
+  assert.doesNotMatch(JSON.stringify(events), /FIXTURE_PRIVATE|Authorization|config.json/);
+});
+
+test("upstream pip watchdog closes its owned child on repeated or decreasing transfer counts", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "starvector-pip-watchdog-"));
+  try {
+    for (const [name, script, reason] of [
+      ["stalled", "let count=0; setInterval(() => console.log('Progress '+(++count%2)+' of 10'), 20);", "download_stalled"],
+      ["unsupported", "setInterval(() => console.log('Unrecognized progress FIXTURE_PRIVATE'), 20);", "no_observable_download_progress"],
+    ]) {
+      const pidPath = path.join(root, name), events = [];
+      const code = `require('node:fs').writeFileSync(${JSON.stringify(pidPath)}, String(process.pid)); ${script}`;
+      await assert.rejects(() => runUpstreamPip(process.execPath, ["-e", code], { timeout: 5000, maxBuffer: 16384 }, { emit: line => events.push(JSON.parse(line)), heartbeatMs: 30, noProgressMs: 600 }), new RegExp(reason));
+      assert.equal(events.at(-1).failure, reason);
+      assert.equal(events.at(-1).killed, true);
+      const pid = Number(await readFile(pidPath, "utf8"));
+      assert.throws(() => process.kill(pid, 0), /ESRCH/);
+      assert.doesNotMatch(JSON.stringify(events), /FIXTURE_PRIVATE/);
+    }
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("upstream pip process deadline remains explicit after installation starts", async () => {
+  const events = [];
+  const script = "console.log('Installing collected packages: fixture'); setInterval(() => {}, 100);";
+  await assert.rejects(() => runUpstreamPip(process.execPath, ["-e", script], { timeout: 1000, maxBuffer: 4096 }, { emit: line => events.push(JSON.parse(line)), heartbeatMs: 20, noProgressMs: 300 }), /process_deadline/);
+  assert.equal(events.at(-1).failure, "process_deadline");
+  assert.equal(events.at(-1).killed, true);
 });

@@ -315,7 +315,7 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw 'sanitizer build failed' }
           $bootstrapPython = Join-Path $env:STARVECTOR_TERMINAL_ROOT 'python/cpython-3.12.10-x64-nuget/tools/python.exe'
           node scripts/starvector-terminal-provision.mjs upstream "$env:GITHUB_WORKSPACE/sceneworks" "$env:STARVECTOR_TERMINAL_ROOT" "$bootstrapPython" "$env:STARVECTOR_TERMINAL_CORPUS_ASSETS_ROOT" "$env:GITHUB_WORKSPACE/sceneworks/target/release/starvector_terminal_sanitize.exe"
-          if ($LASTEXITCODE -ne 0) { throw 'offline upstream closure validation failed; exact component config provenance is required' }
+          if ($LASTEXITCODE -ne 0) { throw 'upstream dependency provisioning or offline validation failed; see preceding stage diagnostics' }
       - name: Read-only readiness validation
         if: ${{ always() }}
         shell: powershell

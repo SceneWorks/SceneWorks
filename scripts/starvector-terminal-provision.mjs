@@ -463,11 +463,98 @@ export async function prepareUpstreamSource(source, lock) {
   return source;
 }
 
-export async function installUpstreamPackages(python, lock, execute = execFile) {
+// Never forward pip output verbatim: index/proxy configuration may contain
+// credentials. The raw renderer supplies byte counts without URLs or paths.
+export function upstreamPipProgress(line) {
+  const progress = /^Progress ([0-9]{1,16}) of ([0-9]{1,16})$/.exec(line.trim());
+  if (progress) {
+    const current = Number(progress[1]), total = Number(progress[2]);
+    if (Number.isSafeInteger(current) && Number.isSafeInteger(total) && (!total || current <= total)) return { event: "download", bytes: current, total_bytes: total };
+  }
+  if (/^Installing collected packages: /.test(line)) return { event: "installing" };
+  if (/ReadTimeoutError|The read operation timed out/.test(line)) return { event: "socket_timeout" };
+  if (/^ERROR: No matching distribution found for /.test(line)) return { event: "no_matching_distribution" };
+  if (/^ERROR: .*No space left on device/.test(line)) return { event: "disk_full" };
+  const wheel = /^\s*(Downloading|Using cached) (\S+)/.exec(line);
+  if (wheel) {
+    try {
+      const url = new URL(wheel[2]);
+      if (url.protocol !== "https:" || url.username || url.password || !["download.pytorch.org", "download-r2.pytorch.org", "files.pythonhosted.org"].includes(url.hostname)) return null;
+      // Only identify our two locked CUDA wheels; other dependencies still report
+      // numeric progress without reflecting arbitrary package names or paths.
+      const name = decodeURIComponent(url.pathname.split("/").at(-1));
+      const packageName = /^torch-2\.7\.1\+cu128-/.test(name) ? "torch" : /^torchvision-0\.22\.1\+cu128-/.test(name) ? "torchvision" : null;
+      return { event: wheel[1] === "Downloading" ? "download_started" : "cached_download", ...(packageName ? { package: packageName } : {}) };
+    } catch { return null; }
+  }
+  return null;
+}
+
+export async function runUpstreamPip(python, args, bounds, { emit = console.log, heartbeatMs = 30_000, noProgressMs = 300_000 } = {}) {
+  const start = Date.now();
+  let latest = null, transfer = null, lastProgressAt = start, installing = false, stopReason = null;
+  const report = event => emit(JSON.stringify({ kind: "upstream-package-install", elapsed_seconds: Math.floor((Date.now() - start) / 1000), ...event }));
+  report({ event: "started", timeout_seconds: bounds.timeout / 1000, no_progress_timeout_seconds: noProgressMs / 1000 });
+  return new Promise((resolve, reject) => {
+    const partial = { stdout: "", stderr: "" };
+    const child = execFileCallback(python, args, bounds, (error) => {
+      clearInterval(heartbeat);
+      for (const line of Object.values(partial)) if (line) accept(line);
+      const failed = error || stopReason;
+      const outcome = { event: failed ? "failed" : "completed", ...(latest ? { last_progress: latest } : {}), ...(transfer ? { last_transfer: transfer } : {}) };
+      if (failed) {
+        outcome.killed = error?.killed === true;
+        outcome.signal = ["SIGTERM", "SIGKILL"].includes(error?.signal) ? error.signal : null;
+        outcome.exit_code = Number.isInteger(error?.code) ? error.code : null;
+        outcome.failure = stopReason ?? (error.killed && Date.now() - start >= bounds.timeout ? "process_deadline" : error.code === "ERR_CHILD_PROCESS_STDIO_MAXBUFFER" ? "output_limit" : "process_exit");
+      }
+      report(outcome);
+      if (failed) reject(new Error(`upstream package acquisition failed: ${JSON.stringify(outcome)}`));
+      else resolve();
+    });
+    const accept = line => {
+      const event = upstreamPipProgress(line);
+      if (!event) return;
+      latest = event;
+      if (event.event === "installing") installing = true;
+      if (event.event === "download") {
+        // Repeated counts do not prove progress. A completed transfer followed by
+        // a new file starts a new bounded observation window.
+        if (!transfer || event.bytes > transfer.bytes || (transfer.total_bytes && transfer.bytes === transfer.total_bytes && event.bytes < transfer.bytes)) {
+          lastProgressAt = Date.now();
+          transfer = event;
+        }
+      } else if (event.event === "download_started" || event.event === "cached_download") {
+        lastProgressAt = Date.now();
+        transfer = null;
+      }
+      if (event.event !== "download") report(event);
+    };
+    const consume = stream => chunk => {
+      partial[stream] += chunk.toString();
+      const lines = partial[stream].split(/\r?\n/); partial[stream] = lines.pop();
+      for (const line of lines) accept(line);
+      // Discard oversized/unrecognized lines rather than accumulating secrets.
+      if (partial[stream].length > 8192) partial[stream] = "";
+    };
+    child.stdout.on("data", consume("stdout"));
+    child.stderr.on("data", consume("stderr"));
+    const heartbeat = setInterval(() => {
+      const silence = Date.now() - lastProgressAt;
+      report({ event: "waiting", phase: installing ? "installing" : "acquiring", seconds_since_progress: Math.floor(silence / 1000), ...(latest ? { last_progress: latest } : {}) });
+      if (!installing && silence >= noProgressMs && !stopReason) {
+        stopReason = transfer ? "download_stalled" : "no_observable_download_progress";
+        child.kill();
+      }
+    }, Math.min(heartbeatMs, noProgressMs));
+  });
+}
+
+export async function installUpstreamPackages(python, lock, execute = runUpstreamPip) {
   if (lock.torch_index_url !== "https://download.pytorch.org/whl/cu128") die("oracle requires the locked CUDA 12.8 wheel index");
   // pip's timeout is a socket timeout, independent of the bounded process time.
   // Do not restart a failed multi-gigabyte install or discard its reusable cache.
-  const base = ["-m", "pip", "install", "--disable-pip-version-check", "--timeout", "120", "--retries", "3"];
+  const base = ["-m", "pip", "install", "--disable-pip-version-check", "--progress-bar", "raw", "--timeout", "120", "--retries", "3"];
   const bounds = { timeout: 60 * 60 * 1000, maxBuffer: 4 * 1024 * 1024 };
   await execute(python, [...base, "--index-url", lock.torch_index_url, ...["torch", "torchvision"].map(name => `${name}==${lock.required_packages[name]}`)], bounds);
   await execute(python, [...base, ...Object.entries(lock.required_packages).map(([name, version]) => `${name}==${version}`)], bounds);
@@ -480,6 +567,9 @@ export async function provisionUpstream({ sceneWorksRoot, hostRoot, python, asse
   await prepareUpstreamSource(source, lock);
   const oraclePython = path.join(environment, process.platform === "win32" ? "Scripts" : "bin", process.platform === "win32" ? "python.exe" : "python");
   if (!await lstat(oraclePython).catch(() => null)) await execFile(python, ["-m", "venv", environment]);
+  const pipVersion = (await execFile(oraclePython, ["-c", "import importlib.metadata; print(importlib.metadata.version('pip'))"], { timeout: 30_000 })).stdout.trim();
+  if (!/^[0-9]+\.[0-9]+(?:\.[0-9]+)?$/.test(pipVersion)) die("upstream pip version probe returned an invalid version");
+  console.log(JSON.stringify({ kind: "upstream-package-installer", pip_version: pipVersion, resume_configured: false }));
   await installUpstreamPackages(oraclePython, lock);
   const { validateUpstreamInputs } = await import("./starvector-terminal-upstream.mjs");
   // Authenticated component configs are provisioned separately with immutable
