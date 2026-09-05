@@ -994,34 +994,12 @@
       "evidence": null
     },
     {
-      "id": "analytic:bernini:candle:bf16",
+      "id": "analytic:bernini:candle:default",
       "modelId": "bernini",
       "modelFamily": "bernini",
       "route": "bernini",
       "backend": "candle",
-      "tier": "bf16",
-      "basis": "no_retained_evidence",
-      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
-      "evidence": null
-    },
-    {
-      "id": "analytic:bernini:candle:q4",
-      "modelId": "bernini",
-      "modelFamily": "bernini",
-      "route": "bernini",
-      "backend": "candle",
-      "tier": "q4",
-      "basis": "no_retained_evidence",
-      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
-      "evidence": null
-    },
-    {
-      "id": "analytic:bernini:candle:q8",
-      "modelId": "bernini",
-      "modelFamily": "bernini",
-      "route": "bernini",
-      "backend": "candle",
-      "tier": "q8",
+      "tier": "default",
       "basis": "no_retained_evidence",
       "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
       "evidence": null
@@ -1060,34 +1038,12 @@
       "evidence": null
     },
     {
-      "id": "analytic:bernini_image:candle:bf16",
+      "id": "analytic:bernini_image:candle:default",
       "modelId": "bernini_image",
       "modelFamily": "bernini",
       "route": "bernini",
       "backend": "candle",
-      "tier": "bf16",
-      "basis": "no_retained_evidence",
-      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
-      "evidence": null
-    },
-    {
-      "id": "analytic:bernini_image:candle:q4",
-      "modelId": "bernini_image",
-      "modelFamily": "bernini",
-      "route": "bernini",
-      "backend": "candle",
-      "tier": "q4",
-      "basis": "no_retained_evidence",
-      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
-      "evidence": null
-    },
-    {
-      "id": "analytic:bernini_image:candle:q8",
-      "modelId": "bernini_image",
-      "modelFamily": "bernini",
-      "route": "bernini",
-      "backend": "candle",
-      "tier": "q8",
+      "tier": "default",
       "basis": "no_retained_evidence",
       "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
       "evidence": null
@@ -2779,17 +2735,6 @@
       "evidence": null
     },
     {
-      "id": "analytic:ltx_2_3:candle:bf16",
-      "modelId": "ltx_2_3",
-      "modelFamily": "ltx-video",
-      "route": "ltx_2_3_distilled",
-      "backend": "candle",
-      "tier": "bf16",
-      "basis": "no_retained_evidence",
-      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
-      "evidence": null
-    },
-    {
       "id": "analytic:ltx_2_3:candle:q4",
       "modelId": "ltx_2_3",
       "modelFamily": "ltx-video",
@@ -3827,28 +3772,6 @@
       "evidence": null
     },
     {
-      "id": "analytic:sana_1600m:candle:q4",
-      "modelId": "sana_1600m",
-      "modelFamily": "sana",
-      "route": "sana_1600m",
-      "backend": "candle",
-      "tier": "q4",
-      "basis": "no_retained_evidence",
-      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
-      "evidence": null
-    },
-    {
-      "id": "analytic:sana_1600m:candle:q8",
-      "modelId": "sana_1600m",
-      "modelFamily": "sana",
-      "route": "sana_1600m",
-      "backend": "candle",
-      "tier": "q8",
-      "basis": "no_retained_evidence",
-      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
-      "evidence": null
-    },
-    {
       "id": "analytic:sana_1600m:mlx:bf16",
       "modelId": "sana_1600m",
       "modelFamily": "sana",
@@ -3888,28 +3811,6 @@
       "route": "sana_sprint_1600m",
       "backend": "candle",
       "tier": "bf16",
-      "basis": "no_retained_evidence",
-      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
-      "evidence": null
-    },
-    {
-      "id": "analytic:sana_sprint_1600m:candle:q4",
-      "modelId": "sana_sprint_1600m",
-      "modelFamily": "sana",
-      "route": "sana_sprint_1600m",
-      "backend": "candle",
-      "tier": "q4",
-      "basis": "no_retained_evidence",
-      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
-      "evidence": null
-    },
-    {
-      "id": "analytic:sana_sprint_1600m:candle:q8",
-      "modelId": "sana_sprint_1600m",
-      "modelFamily": "sana",
-      "route": "sana_sprint_1600m",
-      "backend": "candle",
-      "tier": "q8",
       "basis": "no_retained_evidence",
       "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
       "evidence": null

@@ -2318,3 +2318,48 @@ test("a current-by-attestation anchor publishes its attestation everywhere it is
   }
   assert.match(markdown, /current by attestation\)/);
 });
+
+// sc-22731: a download this lane's HOST would never fetch is not a tier this lane advertises.
+// `tiersFor` used to union `downloads[].variant` across ALL platforms, so a model whose candle
+// block carries no `vramGbByTier` inherited the other lane's tier axis: `sana_1600m` advertised a
+// three-tier Candle axis whose q4/q8 halves are `platforms: ["macos"]` MLX turnkeys, contradicting
+// its own shipped contract (`"tiers": ["bf16"]` on every candle implementation), the worker (which
+// pins the candle SANA tier to bf16) and the route registry (`BF16_ONLY`).
+//
+// Asserted as the INVARIANT over the whole published matrix rather than as a list of fixed cells,
+// so a newly platform-gated download is covered without editing this test.
+test("no lane advertises a tier whose only downloads that lane's host would never fetch", async () => {
+  const matrix = JSON.parse(await readFile("docs/generated/memory-matrix.json", "utf8"));
+  const manifest = JSON.parse(
+    stripJsoncComments(await readFile("config/manifests/builtin.models.jsonc", "utf8")),
+  );
+  const models = new Map((manifest.models ?? manifest).map((model) => [model.id, model]));
+  // MLX is macOS-only by construction; Candle is the off-Mac lane. `platforms` selection itself is
+  // the shipped rule (`model_artifacts/artifact_selection.rs`) — a row with no `platforms` key
+  // applies everywhere; this map is only which OS stands for which lane.
+  const lanePlatform = { mlx: "macos", candle: "linux" };
+  let checked = 0;
+  for (const model of matrix.models) {
+    const downloads = models.get(model.id)?.downloads ?? [];
+    for (const [backend, axes] of Object.entries(model.axes ?? {})) {
+      for (const tier of axes.tiers) {
+        // `default` is the generator's "this lane advertises no tier axis" sentinel, and a tier the
+        // BACKEND block declares (`vramGbByTier`, `quantize`) is a lane-local claim rather than a
+        // download claim. Only a tier that could ONLY have come from `downloads[]` is in scope.
+        if (tier === "default") continue;
+        const variants = downloads.filter((download) => download.variant === tier);
+        if (variants.length === 0) continue;
+        const laneDeclares = Object.keys(models.get(model.id)?.[backend]?.vramGbByTier ?? {}).includes(tier);
+        assert.ok(
+          laneDeclares ||
+            variants.some(
+              (download) => !download.platforms || download.platforms.includes(lanePlatform[backend]),
+            ),
+          `${model.id}:${backend} advertises ${tier}, but every ${tier} download is gated away from this lane`,
+        );
+        checked += 1;
+      }
+    }
+  }
+  assert.ok(checked > 100, `the invariant must actually be exercised (checked ${checked})`);
+});

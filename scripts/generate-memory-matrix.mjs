@@ -1084,7 +1084,21 @@ function tiersFor(model, backend, backendTierOverrides) {
   const override = backendTierOverrides.get(`${model.id}:${backend}`);
   if (override) return override;
   const backendTiers = Object.keys(model[backend]?.vramGbByTier ?? {});
+  // sc-22731: a download this lane's HOST would never fetch is not a tier this lane advertises.
+  // The manifest's own `platforms` selection is the rule
+  // (`crates/sceneworks-core/src/model_artifacts/artifact_selection.rs`; a row with no `platforms`
+  // key applies everywhere), and MLX is macOS-only by construction while Candle is the off-Mac
+  // lane. Without the filter, `sana_1600m` — whose three packed tiers are `platforms: ["macos"]`
+  // turnkeys and whose only off-Mac download is the dense diffusers snapshot — advertised a
+  // three-tier Candle axis: 20 coordinates no Candle load can reach, contradicting its own shipped
+  // contract (every `sana_1600m` candle implementation declares `"tiers": ["bf16"]`), the worker
+  // (`base.rs` pins the candle SANA tier to `bf16`) and the route registry (`BF16_ONLY`). Two other
+  // families were mis-stated the same way: `ltx_2_3`'s candle axis claimed a macOS-only `bf16`, and
+  // `bernini`/`bernini_image` claimed three candle tiers although their ONLY off-Mac download
+  // (`SceneWorks/bernini`) carries no variant at all — which is what the `default` axis now says.
+  const lanePlatform = backend === "mlx" ? "macos" : "linux";
   const downloadTiers = (model.downloads ?? [])
+    .filter((download) => !download.platforms || download.platforms.includes(lanePlatform))
     .map((download) => download.variant)
     .filter((variant) => typeof variant === "string" && /^(bf16|fp16|q\d+|nvfp4|int\d+)/.test(variant));
   const inferred = model[backend]?.quantize === 4 ? ["q4"] : model[backend]?.quantize === 8 ? ["q8"] : [];

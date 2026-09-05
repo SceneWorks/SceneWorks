@@ -1,7 +1,7 @@
 {
   "schemaVersion": 11,
   "generatedFrom": {
-    "sceneWorksRevision": "source-tree:f8d73ca2ad6319cc8d215b8a647f31426a35fcad97c72ae82bfb84e60b49300d",
+    "sceneWorksRevision": "source-tree:fd19dd3b9ccef14b06242a721e126e07c97723b2abbd252fecded92ef166f341",
     "sources": {
       "manifest": {
         "path": "config/manifests/builtin.models.jsonc",
@@ -69,11 +69,11 @@
       },
       "anchorStore": {
         "path": "config/memory-anchors.json",
-        "sha256": "ee286af26cbf1ed96db31182548a94278ea288fefadd5c07de3c5c4040ad5c6d"
+        "sha256": "33fbb2eca48e49076617df19a827ff85517a42f755e3aec3fb816aaeda23e35c"
       },
       "anchorLoaderClosures": {
         "path": "config/anchor-loader-closures.json",
-        "sha256": "13cdf54ebf06d36fc3bea62b9219d7a8de344cf0e1dc5ace7bc96b16f5a6a899"
+        "sha256": "4566f3da07d63299445f3a1e1fa8dd3a30852ad3fa6c25886599780b87ef5ac8"
       },
       "anchorDerivation": {
         "path": "crates/sceneworks-core/src/memory_anchor.rs",
@@ -137,12 +137,12 @@
       "image": 53,
       "video": 11
     },
-    "cells": 9305,
+    "cells": 9045,
     "publishedCells": 762,
-    "elidedCells": 8543,
+    "elidedCells": 8283,
     "elidedByState": {
-      "Implemented": 4122,
-      "Missing": 4421
+      "Implemented": 4098,
+      "Missing": 4185
     },
     "publicationPredicate": "A coordinate is published when it carries a claim a per-lane census cannot: a measured memory anchor covers its (model, tier, backend lane), or it is structurally exempt. A bare `Implemented` or `Missing` state is a property of the whole lane, replicated across every tier x mode x overlay, and is counted in `summary.elidedByState` and the per-(entry, backend, rung) `coverage` census instead of restated thousands of times.",
     "mlxStagedStaticCoverage": 47,
@@ -163,7 +163,7 @@
       }
     ],
     "anchors": 15,
-    "analyticOnlyCells": 326,
+    "analyticOnlyCells": 317,
     "anchoredCells": 299,
     "staleAnchors": 10,
     "attestedAnchors": 5,
@@ -424,9 +424,7 @@
         },
         "candle": {
           "tiers": [
-            "bf16",
-            "q4",
-            "q8"
+            "default"
           ],
           "modes": [
             "ads2v",
@@ -499,9 +497,7 @@
         },
         "candle": {
           "tiers": [
-            "bf16",
-            "q4",
-            "q8"
+            "default"
           ],
           "modes": [
             "edit_image",
@@ -2201,7 +2197,6 @@
         },
         "candle": {
           "tiers": [
-            "bf16",
             "q4",
             "q8"
           ],
@@ -3244,9 +3239,7 @@
         },
         "candle": {
           "tiers": [
-            "bf16",
-            "q4",
-            "q8"
+            "bf16"
           ],
           "modes": [
             "image_to_image",
@@ -3313,9 +3306,7 @@
         },
         "candle": {
           "tiers": [
-            "bf16",
-            "q4",
-            "q8"
+            "bf16"
           ],
           "modes": [
             "image_to_image",
@@ -5345,60 +5336,60 @@
       "modelId": "bernini_image",
       "backend": "candle",
       "rung": "bounded_attention",
-      "coordinates": 12,
+      "coordinates": 4,
       "published": 0,
-      "elided": 12,
+      "elided": 4,
       "implemented": 0,
       "states": {
-        "Missing": 12
+        "Missing": 4
       }
     },
     {
       "modelId": "bernini_image",
       "backend": "candle",
       "rung": "bounded_decode",
-      "coordinates": 12,
+      "coordinates": 4,
       "published": 0,
-      "elided": 12,
-      "implemented": 12,
+      "elided": 4,
+      "implemented": 0,
       "states": {
-        "Implemented": 12
+        "Missing": 4
       }
     },
     {
       "modelId": "bernini_image",
       "backend": "candle",
       "rung": "bounded_transformer_residency",
-      "coordinates": 12,
+      "coordinates": 4,
       "published": 0,
-      "elided": 12,
+      "elided": 4,
       "implemented": 0,
       "states": {
-        "Missing": 12
+        "Missing": 4
       }
     },
     {
       "modelId": "bernini_image",
       "backend": "candle",
       "rung": "resident",
-      "coordinates": 12,
+      "coordinates": 4,
       "published": 0,
-      "elided": 12,
-      "implemented": 12,
+      "elided": 4,
+      "implemented": 0,
       "states": {
-        "Implemented": 12
+        "Missing": 4
       }
     },
     {
       "modelId": "bernini_image",
       "backend": "candle",
       "rung": "staged_residency",
-      "coordinates": 12,
+      "coordinates": 4,
       "published": 0,
-      "elided": 12,
+      "elided": 4,
       "implemented": 0,
       "states": {
-        "Missing": 12
+        "Missing": 4
       }
     },
     {
@@ -5513,60 +5504,60 @@
       "modelId": "bernini",
       "backend": "candle",
       "rung": "bounded_attention",
-      "coordinates": 36,
+      "coordinates": 12,
       "published": 0,
-      "elided": 36,
+      "elided": 12,
       "implemented": 0,
       "states": {
-        "Missing": 36
+        "Missing": 12
       }
     },
     {
       "modelId": "bernini",
       "backend": "candle",
       "rung": "bounded_decode",
-      "coordinates": 36,
+      "coordinates": 12,
       "published": 0,
-      "elided": 36,
+      "elided": 12,
       "implemented": 0,
       "states": {
-        "Missing": 36
+        "Missing": 12
       }
     },
     {
       "modelId": "bernini",
       "backend": "candle",
       "rung": "bounded_transformer_residency",
-      "coordinates": 36,
+      "coordinates": 12,
       "published": 0,
-      "elided": 36,
+      "elided": 12,
       "implemented": 0,
       "states": {
-        "Missing": 36
+        "Missing": 12
       }
     },
     {
       "modelId": "bernini",
       "backend": "candle",
       "rung": "resident",
-      "coordinates": 36,
+      "coordinates": 12,
       "published": 0,
-      "elided": 36,
+      "elided": 12,
       "implemented": 0,
       "states": {
-        "Missing": 36
+        "Missing": 12
       }
     },
     {
       "modelId": "bernini",
       "backend": "candle",
       "rung": "staged_residency",
-      "coordinates": 36,
+      "coordinates": 12,
       "published": 0,
-      "elided": 36,
+      "elided": 12,
       "implemented": 0,
       "states": {
-        "Missing": 36
+        "Missing": 12
       }
     },
     {
@@ -9969,60 +9960,60 @@
       "modelId": "ltx_2_3",
       "backend": "candle",
       "rung": "bounded_attention",
-      "coordinates": 36,
+      "coordinates": 24,
       "published": 0,
-      "elided": 36,
+      "elided": 24,
       "implemented": 0,
       "states": {
-        "Missing": 36
+        "Missing": 24
       }
     },
     {
       "modelId": "ltx_2_3",
       "backend": "candle",
       "rung": "bounded_decode",
-      "coordinates": 36,
+      "coordinates": 24,
       "published": 0,
-      "elided": 36,
+      "elided": 24,
       "implemented": 0,
       "states": {
-        "Missing": 36
+        "Missing": 24
       }
     },
     {
       "modelId": "ltx_2_3",
       "backend": "candle",
       "rung": "bounded_transformer_residency",
-      "coordinates": 36,
+      "coordinates": 24,
       "published": 0,
-      "elided": 36,
+      "elided": 24,
       "implemented": 0,
       "states": {
-        "Missing": 36
+        "Missing": 24
       }
     },
     {
       "modelId": "ltx_2_3",
       "backend": "candle",
       "rung": "resident",
-      "coordinates": 36,
+      "coordinates": 24,
       "published": 0,
-      "elided": 36,
+      "elided": 24,
       "implemented": 0,
       "states": {
-        "Missing": 36
+        "Missing": 24
       }
     },
     {
       "modelId": "ltx_2_3",
       "backend": "candle",
       "rung": "staged_residency",
-      "coordinates": 36,
+      "coordinates": 24,
       "published": 0,
-      "elided": 36,
+      "elided": 24,
       "implemented": 0,
       "states": {
-        "Missing": 36
+        "Missing": 24
       }
     },
     {
@@ -12393,135 +12384,60 @@
       "modelId": "sana_1600m",
       "backend": "candle",
       "rung": "bounded_attention",
-      "coordinates": 6,
+      "coordinates": 2,
       "published": 0,
-      "elided": 6,
+      "elided": 2,
       "implemented": 2,
       "states": {
-        "Implemented": 2,
-        "Missing": 4
-      },
-      "implementedBy": {
-        "tier": {
-          "bf16": 2,
-          "q4": 0,
-          "q8": 0
-        },
-        "mode": {
-          "image_to_image": 1,
-          "text_to_image": 1
-        },
-        "overlay": {
-          "none": 2
-        }
+        "Implemented": 2
       }
     },
     {
       "modelId": "sana_1600m",
       "backend": "candle",
       "rung": "bounded_decode",
-      "coordinates": 6,
+      "coordinates": 2,
       "published": 0,
-      "elided": 6,
+      "elided": 2,
       "implemented": 2,
       "states": {
-        "Implemented": 2,
-        "Missing": 4
-      },
-      "implementedBy": {
-        "tier": {
-          "bf16": 2,
-          "q4": 0,
-          "q8": 0
-        },
-        "mode": {
-          "image_to_image": 1,
-          "text_to_image": 1
-        },
-        "overlay": {
-          "none": 2
-        }
+        "Implemented": 2
       }
     },
     {
       "modelId": "sana_1600m",
       "backend": "candle",
       "rung": "bounded_transformer_residency",
-      "coordinates": 6,
+      "coordinates": 2,
       "published": 0,
-      "elided": 6,
+      "elided": 2,
       "implemented": 2,
       "states": {
-        "Implemented": 2,
-        "Missing": 4
-      },
-      "implementedBy": {
-        "tier": {
-          "bf16": 2,
-          "q4": 0,
-          "q8": 0
-        },
-        "mode": {
-          "image_to_image": 1,
-          "text_to_image": 1
-        },
-        "overlay": {
-          "none": 2
-        }
+        "Implemented": 2
       }
     },
     {
       "modelId": "sana_1600m",
       "backend": "candle",
       "rung": "resident",
-      "coordinates": 6,
+      "coordinates": 2,
       "published": 0,
-      "elided": 6,
+      "elided": 2,
       "implemented": 2,
       "states": {
-        "Implemented": 2,
-        "Missing": 4
-      },
-      "implementedBy": {
-        "tier": {
-          "bf16": 2,
-          "q4": 0,
-          "q8": 0
-        },
-        "mode": {
-          "image_to_image": 1,
-          "text_to_image": 1
-        },
-        "overlay": {
-          "none": 2
-        }
+        "Implemented": 2
       }
     },
     {
       "modelId": "sana_1600m",
       "backend": "candle",
       "rung": "staged_residency",
-      "coordinates": 6,
+      "coordinates": 2,
       "published": 0,
-      "elided": 6,
+      "elided": 2,
       "implemented": 2,
       "states": {
-        "Implemented": 2,
-        "Missing": 4
-      },
-      "implementedBy": {
-        "tier": {
-          "bf16": 2,
-          "q4": 0,
-          "q8": 0
-        },
-        "mode": {
-          "image_to_image": 1,
-          "text_to_image": 1
-        },
-        "overlay": {
-          "none": 2
-        }
+        "Implemented": 2
       }
     },
     {
@@ -12588,135 +12504,60 @@
       "modelId": "sana_sprint_1600m",
       "backend": "candle",
       "rung": "bounded_attention",
-      "coordinates": 6,
+      "coordinates": 2,
       "published": 0,
-      "elided": 6,
+      "elided": 2,
       "implemented": 2,
       "states": {
-        "Implemented": 2,
-        "Missing": 4
-      },
-      "implementedBy": {
-        "tier": {
-          "bf16": 2,
-          "q4": 0,
-          "q8": 0
-        },
-        "mode": {
-          "image_to_image": 1,
-          "text_to_image": 1
-        },
-        "overlay": {
-          "none": 2
-        }
+        "Implemented": 2
       }
     },
     {
       "modelId": "sana_sprint_1600m",
       "backend": "candle",
       "rung": "bounded_decode",
-      "coordinates": 6,
+      "coordinates": 2,
       "published": 0,
-      "elided": 6,
+      "elided": 2,
       "implemented": 2,
       "states": {
-        "Implemented": 2,
-        "Missing": 4
-      },
-      "implementedBy": {
-        "tier": {
-          "bf16": 2,
-          "q4": 0,
-          "q8": 0
-        },
-        "mode": {
-          "image_to_image": 1,
-          "text_to_image": 1
-        },
-        "overlay": {
-          "none": 2
-        }
+        "Implemented": 2
       }
     },
     {
       "modelId": "sana_sprint_1600m",
       "backend": "candle",
       "rung": "bounded_transformer_residency",
-      "coordinates": 6,
+      "coordinates": 2,
       "published": 0,
-      "elided": 6,
+      "elided": 2,
       "implemented": 2,
       "states": {
-        "Implemented": 2,
-        "Missing": 4
-      },
-      "implementedBy": {
-        "tier": {
-          "bf16": 2,
-          "q4": 0,
-          "q8": 0
-        },
-        "mode": {
-          "image_to_image": 1,
-          "text_to_image": 1
-        },
-        "overlay": {
-          "none": 2
-        }
+        "Implemented": 2
       }
     },
     {
       "modelId": "sana_sprint_1600m",
       "backend": "candle",
       "rung": "resident",
-      "coordinates": 6,
+      "coordinates": 2,
       "published": 0,
-      "elided": 6,
+      "elided": 2,
       "implemented": 2,
       "states": {
-        "Implemented": 2,
-        "Missing": 4
-      },
-      "implementedBy": {
-        "tier": {
-          "bf16": 2,
-          "q4": 0,
-          "q8": 0
-        },
-        "mode": {
-          "image_to_image": 1,
-          "text_to_image": 1
-        },
-        "overlay": {
-          "none": 2
-        }
+        "Implemented": 2
       }
     },
     {
       "modelId": "sana_sprint_1600m",
       "backend": "candle",
       "rung": "staged_residency",
-      "coordinates": 6,
+      "coordinates": 2,
       "published": 0,
-      "elided": 6,
+      "elided": 2,
       "implemented": 2,
       "states": {
-        "Implemented": 2,
-        "Missing": 4
-      },
-      "implementedBy": {
-        "tier": {
-          "bf16": 2,
-          "q4": 0,
-          "q8": 0
-        },
-        "mode": {
-          "image_to_image": 1,
-          "text_to_image": 1
-        },
-        "overlay": {
-          "none": 2
-        }
+        "Implemented": 2
       }
     },
     {
