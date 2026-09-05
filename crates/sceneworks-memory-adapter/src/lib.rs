@@ -11,6 +11,24 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 pub const INFERENCE_PIN: &str = "c6d6a4dbd61ab09c26ff5526632cae2cefea60ed";
 pub const QWEN_REPOSITORY: &str = "SceneWorks/qwen-image-mlx";
+/// The Qwen-Image-Edit-2511 tiered rehost (sc-22728). Serves BOTH shipped edit catalog ids —
+/// `qwen_image_edit_2511` and `qwen_image_edit_2511_lightning` — on both lanes, because they are one
+/// checkpoint routed to one engine provider (`qwen_image_edit`; worker `image_jobs/qwen.rs`
+/// `qwen_edit_engine_id` and `image_jobs/qwen_edit_candle.rs`). The Candle engine additionally pins
+/// this exact repository directory and revision by path suffix (`candle-gen-qwen-image` `edit.rs`
+/// `exact_base_tier`), so a re-host under any other name cannot satisfy an edit capture at all.
+pub const QWEN_EDIT_REPOSITORY: &str = "SceneWorks/qwen-image-edit-2511-mlx";
+/// The built-in Lightning distill LoRA the `qwen_image_edit_2511_lightning` id folds into the MMDiT
+/// at load. It is NOT a manifest download — the worker fetches it lazily into the HF cache at a
+/// pinned revision (`QWEN_LIGHTNING_LORA_REPO` in the worker's `image_jobs/qwen.rs`, and
+/// `QWEN_EDIT_CANDLE_LIGHTNING_LORA_REPO` on the Candle lane) — so the capture is handed its
+/// snapshot through its own `SCENEWORKS_QWEN_EDIT_LIGHTNING_LORA_*` family.
+pub const QWEN_EDIT_LIGHTNING_REPOSITORY: &str = "lightx2v/Qwen-Image-Edit-2511-Lightning";
+/// The one distill file inside that snapshot. The Candle engine refuses any other file name by exact
+/// suffix (`edit.rs` `is_exact_lightning_path`), and the MLX worker names the same file, so this is a
+/// pinned artifact identity rather than a convenience default.
+pub const QWEN_EDIT_LIGHTNING_FILE: &str =
+    "Qwen-Image-Edit-2511-Lightning-4steps-V1.0-bf16.safetensors";
 pub const FLUX2_REPOSITORY: &str = "SceneWorks/flux2-dev-mlx";
 pub const KREA_REPOSITORY: &str = "SceneWorks/krea-2-turbo-mlx";
 pub const SDXL_REPOSITORY: &str = "SceneWorks/sdxl-base-mlx";
@@ -897,7 +915,43 @@ pub fn plain_gated_fragment(
     parts: PlainGatedFragment<'_>,
 ) -> Result<Value, String> {
     validate_plain_overlay_target(request, execution_path)?;
-    let mut fragment = json!({
+    let mut fragment = gated_fragment_body(parts);
+    settle_plain_overlay_scenario(request, &mut fragment, execution_path)?;
+    Ok(fragment)
+}
+
+/// The same gated fragment for a provider path that DID load and exercise a material overlay
+/// (sc-22728: the Qwen edit Lightning distill is one built-in LoRA folded into the MMDiT at load).
+/// The declared target is required to be exactly that overlay, so an overlay-free plan can never
+/// pick up a `passed` overlay verdict, and a differently-overlaid one can never be recorded here.
+/// `overlay_reason` states what actually participated in the measured renders.
+pub fn overlay_gated_fragment(
+    request: &Value,
+    expected_overlay: &str,
+    execution_path: &str,
+    overlay_reason: &str,
+    parts: PlainGatedFragment<'_>,
+) -> Result<Value, String> {
+    validate_exact_overlay_target(request, expected_overlay, execution_path)?;
+    let mut fragment = gated_fragment_body(parts);
+    let scenarios = fragment
+        .get_mut("scenarios")
+        .and_then(Value::as_array_mut)
+        .ok_or_else(|| "provider fragment.scenarios must be an array".to_owned())?;
+    let overlay_index = scenarios
+        .iter()
+        .position(|scenario| scenario.get("name").and_then(Value::as_str) == Some("overlay"))
+        .ok_or_else(|| "provider fragment is missing the required overlay scenario".to_owned())?;
+    scenarios[overlay_index] = json!({
+        "name": "overlay",
+        "result": "passed",
+        "reason": overlay_reason,
+    });
+    Ok(fragment)
+}
+
+fn gated_fragment_body(parts: PlainGatedFragment<'_>) -> Value {
+    json!({
         "status": "gated",
         "artifact": parts.artifact,
         "sweep": parts.sweep,
@@ -909,9 +963,7 @@ pub fn plain_gated_fragment(
         "loadability": parts.loadability,
         "diagnostics": parts.diagnostics,
         "capturedAt": captured_at(),
-    });
-    settle_plain_overlay_scenario(request, &mut fragment, execution_path)?;
-    Ok(fragment)
+    })
 }
 
 pub fn fail(message: impl AsRef<str>) -> ! {
@@ -1328,6 +1380,61 @@ mod tests {
             assert!(error.contains("refusing"));
             assert_eq!(fragment, before, "a refusal must not become false coverage");
         }
+    }
+
+    /// sc-22728: the overlay-carrying gated fragment records `passed` for exactly the overlay the
+    /// target declares and refuses every other declaration — including `"none"`, so a plan with no
+    /// overlay can never collect a `passed` overlay verdict from a path that loaded one.
+    #[test]
+    fn an_overlay_gated_fragment_settles_only_the_overlay_its_target_declares() {
+        let parts = || PlainGatedFragment {
+            artifact: json!({}),
+            sweep: json!({}),
+            blocker: "gated",
+            quality: json!({ "result": "not_run" }),
+            negative_mutation: Value::Null,
+            loadability: json!({ "result": "passed" }),
+            diagnostics: json!({}),
+        };
+        let request = json!({ "planned": { "target": { "overlay": "lora" } } });
+        let fragment = overlay_gated_fragment(
+            &request,
+            "lora",
+            "the edit path",
+            "the distill ran",
+            parts(),
+        )
+        .unwrap();
+        let overlay = fragment["scenarios"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|scenario| scenario["name"] == "overlay")
+            .unwrap()
+            .clone();
+        assert_eq!(overlay["result"], "passed");
+        assert_eq!(overlay["reason"], "the distill ran");
+        assert_eq!(fragment["status"], "gated");
+        for declared in ["none", "identity", "control:1"] {
+            let request = json!({ "planned": { "target": { "overlay": declared } } });
+            let error = overlay_gated_fragment(
+                &request,
+                "lora",
+                "the edit path",
+                "the distill ran",
+                parts(),
+            )
+            .unwrap_err();
+            assert!(error.contains(declared), "{error}");
+            assert!(error.contains("refusing"), "{error}");
+        }
+        // And the plain builder still refuses a material overlay, so the two are not interchangeable.
+        assert!(plain_gated_fragment(
+            &json!({ "planned": { "target": { "overlay": "lora" } } }),
+            "the edit path",
+            parts(),
+        )
+        .is_err());
     }
 
     #[test]

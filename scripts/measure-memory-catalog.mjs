@@ -52,18 +52,52 @@ export const HARNESS = "scripts/memory-calibration-harness.mjs";
 export const LTX25_REPOSITORY = "SceneWorks/ltx-2.5-mlx";
 
 /**
+ * The built-in Qwen-Image-Edit-2511 Lightning distill LoRA (sc-22728). It is NOT a manifest
+ * download — the worker fetches it lazily into the HF cache on first use — so its repository,
+ * revision and file are pinned in the worker's own source on both lanes
+ * (`crates/sceneworks-worker/src/image_jobs/qwen.rs` `QWEN_LIGHTNING_LORA_{REPO,REVISION}` and
+ * `image_jobs/qwen_edit_candle.rs` `QWEN_EDIT_CANDLE_LIGHTNING_LORA_*`), and the candle engine
+ * refuses any other path by exact suffix (`edit.rs` `is_exact_lightning_path`). The values below are
+ * bound to those constants by a test rather than trusted, because a drift here would send the
+ * capture at a LoRA the engine will reject after the load.
+ */
+export const QWEN_EDIT_LIGHTNING_LORA = Object.freeze({
+  env: "QWEN_EDIT_LIGHTNING_LORA",
+  repo: "lightx2v/Qwen-Image-Edit-2511-Lightning",
+  revision: "d74eba145674fd7e31b949324e148e21e7118abd",
+  file: "Qwen-Image-Edit-2511-Lightning-4steps-V1.0-bf16.safetensors",
+});
+
+/**
  * One row per provider arm an adapter implements, mirroring `match provider` in
  * crates/sceneworks-memory-adapter/src/bin/{mlx,candle}.rs and the env families the runbook lists
  * under "Adapter environment". `physical` marks the one arm that emits a provider `sourceCapture`
  * (the Qwen MLX source capture, mlx.rs `qwen_source_capture`): the harness REQUIRES a sourceCapture
  * whenever `--raw-log-dir` is given, so the raw-log pair and `SCENEWORKS_MEMORY_CAPTURE_DIR` must be
- * passed for that arm and for no other.
+ * passed for that arm and for no other. `physical` is NOT inherited by a sibling family: the harness
+ * scopes the receipt requirement to `modelId === "qwen_image"` alone
+ * (`requiresPhysicalMlxProvenanceForCurrency`, memory-calibration-harness.mjs), and a test below
+ * binds this table to that predicate.
+ *
+ * `sideArtifact` is a second root a family member needs that the MANIFEST does not ship — today only
+ * the Qwen edit Lightning distill LoRA, which the worker fetches lazily at a pinned revision. It is
+ * keyed by model id because it belongs to one member of a shared-provider family, not to the family.
  */
 export const PROVIDER_FAMILIES = Object.freeze({
   qwen_image: { env: "QWEN_IMAGE", repo: "SceneWorks/qwen-image-mlx", arms: ["mlx", "candle"], physical: true },
   // `z_image_edit` anchors ride this family too (sc-22724): the catalog id is an alias for the
   // Turbo provider driven in `edit_image` mode (worker engines.rs `z_image_edit → z_image_turbo`),
   // and its manifest entry ships the same Turbo tiers, which `tierDownload` resolves by model id.
+  // Both Qwen edit catalog ids (`qwen_image_edit_2511` and `..._lightning`) plan this ONE engine
+  // provider (worker `qwen.rs` `qwen_edit_engine_id`, `qwen_edit_candle.rs` `QWEN_EDIT_PROVIDER_ID`)
+  // and ship the SAME per-tier rehost, which `tierDownload` resolves per model id. The Lightning id
+  // additionally loads the pinned distill LoRA, declared as its `sideArtifact` below.
+  qwen_image_edit: {
+    env: "QWEN_IMAGE_EDIT",
+    repo: "SceneWorks/qwen-image-edit-2511-mlx",
+    arms: ["mlx", "candle"],
+    sideArtifact: { qwen_image_edit_2511_lightning: QWEN_EDIT_LIGHTNING_LORA },
+  },
   z_image_turbo: { env: "Z_IMAGE", repo: "SceneWorks/z-image-turbo-mlx", arms: ["mlx", "candle"] },
   // The undistilled base is a distinct engine provider (`z_image`) with its own artifact family
   // (sc-22724). Never the Turbo env: a base plan satisfied by Turbo weights re-labels Turbo's peaks.
@@ -304,6 +338,19 @@ export async function classifyAnchor(key, planned, { models, backend, hubs, curr
     row.env[`SCENEWORKS_${family.upstream.env}_REPOSITORY`] = family.upstream.repo;
     row.env[`SCENEWORKS_${family.upstream.env}_REVISION`] = upstream.revision;
     row.env[`SCENEWORKS_${family.upstream.env}_ROOT`] = upstreamRoot;
+  }
+  // A member-specific artifact the manifest does not ship (the Qwen edit Lightning distill LoRA):
+  // its repository and revision are pinned in the family row, so the root is the snapshot itself.
+  const side = family.sideArtifact?.[parts.modelId];
+  if (side) {
+    const sideRoot = await firstExistingDirectory(hubs.map((hub) => snapshotPath(hub, side.repo, side.revision)));
+    row.roots.push({ label: "side artifact", path: sideRoot ?? snapshotPath(hubs[0], side.repo, side.revision) });
+    if (!sideRoot) {
+      return { ...row, status: "weights_missing", reason: `no ${side.repo}@${side.revision.slice(0, 8)} snapshot on this host` };
+    }
+    row.env[`SCENEWORKS_${side.env}_REPOSITORY`] = side.repo;
+    row.env[`SCENEWORKS_${side.env}_REVISION`] = side.revision;
+    row.env[`SCENEWORKS_${side.env}_ROOT`] = sideRoot;
   }
   row.physical = backend === "mlx" && family.physical === true;
   return row;

@@ -61,6 +61,10 @@ function fakeModels() {
     // The edit model is a catalog alias for the Turbo provider driven in edit_image mode: it ships
     // the Turbo weights (worker engines.rs `z_image_edit → z_image_turbo`).
     { id: "z_image_edit", downloads: [{ repo: "SceneWorks/z-image-turbo-mlx", revision: REVISION, variant: "q4", files: ["q4/*"] }] },
+    // The two Qwen edit ids are ONE checkpoint on ONE rehost, routed to one engine provider; only
+    // the Lightning id additionally loads the pinned distill LoRA, which no download ships.
+    { id: "qwen_image_edit_2511", downloads: [{ repo: "SceneWorks/qwen-image-edit-2511-mlx", revision: REVISION, variant: "q4", files: ["q4/*"] }] },
+    { id: "qwen_image_edit_2511_lightning", downloads: [{ repo: "SceneWorks/qwen-image-edit-2511-mlx", revision: REVISION, variant: "q4", files: ["q4/*"] }] },
   ];
 }
 
@@ -170,6 +174,98 @@ test("the z-image family: the base model has its own env family, and the edit al
       SCENEWORKS_Z_IMAGE_REVISION: REVISION,
       SCENEWORKS_Z_IMAGE_ROOT: snapshotPath(hub, "SceneWorks/z-image-turbo-mlx", REVISION, "q4"),
     });
+  }
+});
+
+// sc-22728: the Qwen edit family is two catalog ids on ONE engine provider and ONE rehost, and the
+// Lightning id needs a SECOND root the manifest does not ship (the pinned distill LoRA). Both roots
+// must be derived, on both lanes, and neither id may be served without its own.
+test("the qwen edit family derives the tier root on both lanes, and Lightning also derives its pinned distill LoRA", async () => {
+  const lora = PROVIDER_FAMILIES.qwen_image_edit.sideArtifact.qwen_image_edit_2511_lightning;
+  const hub = await fakeHub([
+    ["SceneWorks/qwen-image-edit-2511-mlx", REVISION, "q4"],
+    [lora.repo, lora.revision],
+  ]);
+  for (const backend of ["mlx", "candle"]) {
+    const context = { models: fakeModels(), backend, hubs: [hub], current: new Map(), captured: new Map() };
+    const planned = { provider: "qwen_image_edit", mode: "edit_image" };
+    const base = await classifyAnchor(`qwen_image_edit_2511:q4:${backend}`, planned, context);
+    assert.equal(base.status, "runnable", `${backend}: ${base.reason}`);
+    assert.equal(base.physical, false, "only the qwen_image MLX arm emits a sourceCapture");
+    assert.deepEqual(base.env, {
+      SCENEWORKS_QWEN_IMAGE_EDIT_REPOSITORY: "SceneWorks/qwen-image-edit-2511-mlx",
+      SCENEWORKS_QWEN_IMAGE_EDIT_REVISION: REVISION,
+      SCENEWORKS_QWEN_IMAGE_EDIT_ROOT: snapshotPath(hub, "SceneWorks/qwen-image-edit-2511-mlx", REVISION, "q4"),
+    }, "the production id loads the tier root and nothing else");
+
+    const lightning = await classifyAnchor(`qwen_image_edit_2511_lightning:q4:${backend}`, planned, context);
+    assert.equal(lightning.status, "runnable", `${backend}: ${lightning.reason}`);
+    assert.equal(lightning.env.SCENEWORKS_QWEN_IMAGE_EDIT_ROOT, base.env.SCENEWORKS_QWEN_IMAGE_EDIT_ROOT, "one shared checkpoint");
+    assert.equal(lightning.env.SCENEWORKS_QWEN_EDIT_LIGHTNING_LORA_REPOSITORY, lora.repo);
+    assert.equal(lightning.env.SCENEWORKS_QWEN_EDIT_LIGHTNING_LORA_REVISION, lora.revision);
+    assert.equal(
+      lightning.env.SCENEWORKS_QWEN_EDIT_LIGHTNING_LORA_ROOT,
+      snapshotPath(hub, lora.repo, lora.revision),
+      "the distill LoRA snapshot, at the revision the engine pins",
+    );
+  }
+  // Without the distill snapshot the Lightning cell is `weights_missing` — measurable, but not
+  // runnable on this host — while the production id stays runnable off the same tier root.
+  const tierOnly = await fakeHub([["SceneWorks/qwen-image-edit-2511-mlx", REVISION, "q4"]]);
+  const context = { models: fakeModels(), backend: "mlx", hubs: [tierOnly], current: new Map(), captured: new Map() };
+  const planned = { provider: "qwen_image_edit", mode: "edit_image" };
+  assert.equal((await classifyAnchor("qwen_image_edit_2511:q4:mlx", planned, context)).status, "runnable");
+  const missing = await classifyAnchor("qwen_image_edit_2511_lightning:q4:mlx", planned, context);
+  assert.equal(missing.status, "weights_missing");
+  assert.match(missing.reason, /Qwen-Image-Edit-2511-Lightning@/);
+});
+
+// The catalog's `physical` flag and the harness's receipt predicate are two spellings of one rule,
+// and sc-22728 added a family that LOOKS like Qwen and must not inherit it. Bind them: the harness
+// requires a physical source session for `qwen_image` alone, so exactly that family may carry the
+// flag — passing `--raw-log-dir` for any other arm makes the harness refuse the render outright.
+test("only the family the harness demands a physical receipt for is marked physical", async () => {
+  const harness = await readFile(path.join(ROOT, "scripts/memory-calibration-harness.mjs"), "utf8");
+  const predicate = /function requiresPhysicalMlxProvenanceForCurrency\(record\) \{([\s\S]*?)\n\}/.exec(harness);
+  assert.ok(predicate, "the harness still declares requiresPhysicalMlxProvenanceForCurrency");
+  const named = [...predicate[1].matchAll(/record\.target\.modelId === "([a-z0-9_]+)"/g)].map((match) => match[1]);
+  assert.deepEqual(named, ["qwen_image"], "the harness scopes the receipt to exactly one model id");
+  assert.deepEqual(
+    Object.entries(PROVIDER_FAMILIES).filter(([, family]) => family.physical).map(([id]) => id),
+    named,
+    "a family marked physical that the harness does not demand a receipt for would make every capture of it fail",
+  );
+});
+
+// The Lightning distill LoRA is the one artifact in this table the MANIFEST does not ship, so the
+// repository, revision and file name below are a COPY of the worker's own pinned constants. Nothing
+// derives one from the other, and a drift would send the capture at a LoRA the Candle engine rejects
+// by exact path after a 28-57 GB load. This is that binding, read from both lanes' worker source.
+test("the pinned Lightning distill LoRA matches the worker constants on both lanes", async () => {
+  const lora = PROVIDER_FAMILIES.qwen_image_edit.sideArtifact.qwen_image_edit_2511_lightning;
+  for (const file of [
+    "crates/sceneworks-worker/src/image_jobs/qwen.rs",
+    "crates/sceneworks-worker/src/image_jobs/qwen_edit_candle.rs",
+  ]) {
+    const source = await readFile(path.join(ROOT, file), "utf8");
+    for (const [label, value] of Object.entries(lora)) {
+      if (label === "env") continue;
+      assert.ok(
+        source.includes(`"${value}"`),
+        `${file} does not name the ${label} ${JSON.stringify(value)} this table pins`,
+      );
+    }
+  }
+  // And the adapters resolve the file name from the shared protocol constant rather than a literal.
+  const protocolSource = await readFile(path.join(ROOT, "crates/sceneworks-memory-adapter/src/lib.rs"), "utf8");
+  // rustfmt may wrap a long const onto its own line, so match the declaration and its literal
+  // rather than one exact source line.
+  for (const [name, value] of [
+    ["QWEN_EDIT_LIGHTNING_REPOSITORY", lora.repo],
+    ["QWEN_EDIT_LIGHTNING_FILE", lora.file],
+  ]) {
+    const declaration = new RegExp(`pub const ${name}: &str =\\s*"${value.replaceAll(".", "\\.")}"`);
+    assert.match(protocolSource, declaration);
   }
 });
 
@@ -417,6 +513,17 @@ test("qwen_image and ltx_2_5 are measurable on every shipped tier of every route
   const families = ["qwen_image", "ltx_2_5"];
   const cells = (await shippedTieredCells()).filter((cell) => families.includes(cell.modelId));
   assert.ok(cells.length >= 2 * 3 * 2, "both models × three tiers × two lanes are shipped and routed");
+  const gaps = (await measurabilityGaps()).filter((gap) => families.includes(gap.modelId));
+  assert.equal(gaps.length, 0, gapReport(gaps));
+});
+
+// sc-22728: the Qwen EDIT family — two catalog ids on one engine provider, one of which loads a
+// built-in distill LoRA — on every shipped tier of every routed lane. Same shape claim as the two
+// cases above: manifest tiers + matrix lanes + plan anchors + both closure declarations.
+test("the qwen edit family is measurable on every shipped tier of every routed lane", async () => {
+  const families = ["qwen_image_edit_2511", "qwen_image_edit_2511_lightning"];
+  const cells = (await shippedTieredCells()).filter((cell) => families.includes(cell.modelId));
+  assert.ok(cells.length >= 2 * 3 * 2, "both edit ids × three tiers × two lanes are shipped and routed");
   const gaps = (await measurabilityGaps()).filter((gap) => families.includes(gap.modelId));
   assert.equal(gaps.length, 0, gapReport(gaps));
 });

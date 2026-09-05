@@ -515,7 +515,23 @@ test("windows-candle captures and schema-checks the SC-21714 Krea anchor record"
 
   const adapter = await source("crates/sceneworks-memory-adapter/src/bin/candle.rs");
   assert.match(adapter, /StableIdleConfig::new\(2\.0, 5, 64, 200\)/);
-  assert.equal(adapter.match(/let mut vram = certifying_vram_probe\(\);/g)?.length, 2);
+  // A SHAPE claim, not a count (sc-22728 added a third capture path): EVERY VRAM probe in the
+  // Candle adapter must be the certifying one, which asserts a stable idle GPU before it samples.
+  // A frozen count would have let a new capture path introduce a bare `VramProbe::start_rendered()`
+  // as long as it also added a certifying one somewhere.
+  const probes = adapter.match(/let mut vram = [A-Za-z_:]+\(/g) ?? [];
+  const uncertified = probes.filter((probe) => probe !== "let mut vram = certifying_vram_probe(");
+  assert.ok(probes.length > 0, "the Candle adapter no longer probes VRAM at all");
+  // Every image-lane capture path certifies its idle GPU; LTX-2.5 is the one deliberate exception
+  // (`assert_idle(1.0)` — a video capture on a host it does not share). Asserting "all but that one"
+  // is the shape claim; the old exact count would have passed a NEW uncertified path as long as a
+  // certified one was added alongside it, which is how a contaminated anchor would ship.
+  assert.deepEqual(
+    uncertified,
+    ["let mut vram = VramProbe::start_rendered("],
+    "a capture path samples VRAM without certifying an idle GPU first",
+  );
+  assert.match(adapter, /VramProbe::start_rendered\(\)\.assert_idle\(1\.0\)/);
 });
 
 test("windows-candle routes weights dispatches to a real-weights runner, like the MLX lane", async () => {
@@ -1448,9 +1464,18 @@ test("memory adapters bind every emitted overlay verdict to the requested target
       candleReference.lastIndexOf("load_five_rung_generator(&first_request)?"),
     "the Candle batch must validate every target before its one model load",
   );
-  // The inline Krea arm emits a complete receipt after SC-21714; only the two pre-execution and
-  // five-rung paths remain gated. LTX-2.5 adds its own pre-execution fragment.
-  assert.equal(candle.match(/protocol::plain_gated_fragment\(/g)?.length, 3);
+  // Every gated fragment the Candle adapter emits must come from a protocol builder that settles the
+  // overlay scenario against the DECLARED target — `plain_gated_fragment` for an overlay-free path,
+  // `overlay_gated_fragment` for one that actually loaded an overlay (sc-22728's Qwen edit Lightning
+  // distill). A count of one builder was the old guard; it would not have noticed a hand-rolled
+  // `"status": "gated"` object leaving `overlay` at `not_run`, which is the thing that must not ship.
+  assert.ok((candle.match(/protocol::plain_gated_fragment\(/g)?.length ?? 0) >= 1);
+  assert.ok((candle.match(/protocol::overlay_gated_fragment\(/g)?.length ?? 0) >= 1);
+  assert.doesNotMatch(
+    candle,
+    /"status":\s*"gated"/,
+    "a hand-rolled gated fragment bypasses the overlay-settling builders",
+  );
   assert.match(
     candle,
     /settle_plain_overlay_scenario\(request, &mut fragment, KREA_PLAIN_EXECUTION_PATH\)\?/,

@@ -406,6 +406,36 @@
       "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1",
       "fixture": "qwen-image-q8-seed16353-step2"
     },
+    "qwen_image_edit_2511:bf16:candle": {
+      "provider": "qwen_image_edit",
+      "mode": "edit_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "candidate",
+      "loadShape": "deferred_materialization",
+      "calibrationFingerprint": "qwen-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2",
+      "fixture": "qwen-edit-candle-bf16-seed15817-step2"
+    },
+    "qwen_image_edit_2511:bf16:mlx": {
+      "provider": "qwen_image_edit",
+      "mode": "edit_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 768,
+        "height": 768,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "candidate",
+      "loadShape": "deferred_materialization",
+      "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1",
+      "fixture": "qwen-edit-mlx-bf16-seed16353-step2"
+    },
     "qwen_image_edit_2511:q4:candle": {
       "provider": "qwen_image_edit",
       "mode": "edit_image",
@@ -418,8 +448,83 @@
       },
       "evidenceScope": "candidate",
       "loadShape": "deferred_materialization",
-      "calibrationFingerprint": "qwen-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v1",
+      "calibrationFingerprint": "qwen-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2",
       "fixture": "qwen-edit-candle-q4-seed15817-step2"
+    },
+    "qwen_image_edit_2511:q4:mlx": {
+      "provider": "qwen_image_edit",
+      "mode": "edit_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 768,
+        "height": 768,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "candidate",
+      "loadShape": "deferred_materialization",
+      "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1",
+      "fixture": "qwen-edit-mlx-q4-seed16353-step2"
+    },
+    "qwen_image_edit_2511:q8:candle": {
+      "provider": "qwen_image_edit",
+      "mode": "edit_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "candidate",
+      "loadShape": "deferred_materialization",
+      "calibrationFingerprint": "qwen-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2",
+      "fixture": "qwen-edit-candle-q8-seed15817-step2"
+    },
+    "qwen_image_edit_2511:q8:mlx": {
+      "provider": "qwen_image_edit",
+      "mode": "edit_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 768,
+        "height": 768,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "candidate",
+      "loadShape": "deferred_materialization",
+      "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1",
+      "fixture": "qwen-edit-mlx-q8-seed16353-step2"
+    },
+    "qwen_image_edit_2511_lightning:bf16:candle": {
+      "provider": "qwen_image_edit",
+      "mode": "edit_image",
+      "overlay": "lora",
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "candidate",
+      "loadShape": "eager_materialization",
+      "calibrationFingerprint": "qwen-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2",
+      "fixture": "qwen-edit-lightning-candle-bf16-seed15817-step4"
+    },
+    "qwen_image_edit_2511_lightning:bf16:mlx": {
+      "provider": "qwen_image_edit",
+      "mode": "edit_image",
+      "overlay": "lora",
+      "geometry": {
+        "width": 768,
+        "height": 768,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "candidate",
+      "loadShape": "deferred_materialization",
+      "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1",
+      "fixture": "qwen-edit-lightning-mlx-bf16-seed16353-step4"
     },
     "qwen_image_edit_2511_lightning:q4:candle": {
       "provider": "qwen_image_edit",
@@ -433,8 +538,53 @@
       },
       "evidenceScope": "candidate",
       "loadShape": "eager_materialization",
-      "calibrationFingerprint": "qwen-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v1",
-      "fixture": "qwen-edit-lightning-candle-q4-seed15817-step2"
+      "calibrationFingerprint": "qwen-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2",
+      "fixture": "qwen-edit-lightning-candle-q4-seed15817-step4"
+    },
+    "qwen_image_edit_2511_lightning:q4:mlx": {
+      "provider": "qwen_image_edit",
+      "mode": "edit_image",
+      "overlay": "lora",
+      "geometry": {
+        "width": 768,
+        "height": 768,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "candidate",
+      "loadShape": "deferred_materialization",
+      "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1",
+      "fixture": "qwen-edit-lightning-mlx-q4-seed16353-step4"
+    },
+    "qwen_image_edit_2511_lightning:q8:candle": {
+      "provider": "qwen_image_edit",
+      "mode": "edit_image",
+      "overlay": "lora",
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "candidate",
+      "loadShape": "eager_materialization",
+      "calibrationFingerprint": "qwen-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2",
+      "fixture": "qwen-edit-lightning-candle-q8-seed15817-step4"
+    },
+    "qwen_image_edit_2511_lightning:q8:mlx": {
+      "provider": "qwen_image_edit",
+      "mode": "edit_image",
+      "overlay": "lora",
+      "geometry": {
+        "width": 768,
+        "height": 768,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "candidate",
+      "loadShape": "deferred_materialization",
+      "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1",
+      "fixture": "qwen-edit-lightning-mlx-q8-seed16353-step4"
     },
     "sdxl:bf16:mlx": {
       "provider": "sdxl",
