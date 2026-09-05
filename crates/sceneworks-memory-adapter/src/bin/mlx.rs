@@ -56,7 +56,11 @@ const Z_IMAGE_MEAN_THRESHOLD: f64 = 4.0 / 255.0;
 /// Plain, reference-free Krea 2 Turbo text-to-image. This is a distinct calibration lane from the
 /// pose-control provider below even though both providers live in `mlx-gen-krea`.
 const KREA_BASE_PROVIDER: &str = "krea_2_turbo";
-const KREA_BASE_CALIBRATION_FINGERPRINT: &str =
+/// The string `krea_2_turbo` (and, before sc-22735, every other base route) published at all three
+/// tiers. Retired in the engine and retained by no cell: no MLX turbo record was ever measured
+/// against it. Kept here only so the tests below can assert it never comes back.
+#[cfg(test)]
+const RETIRED_KREA_BASE_CALIBRATION_FINGERPRINT: &str =
     "krea-2-mlx-full-ladder-native-pid-attn64m-window1-2026-08-03-v3";
 const KREA_BASE_SEED: u64 = 18377;
 /// The undistilled full-CFG Krea 2 base (`mlx_gen_krea::KREA_2_RAW_ID`), the second member of the
@@ -593,11 +597,12 @@ const KREA_REALTIME_RMS_THRESHOLD: f64 = 1.5 / 255.0;
 /// `spec.quantize`, which is recipe-only on a directory load. This table is the SceneWorks half of
 /// that binding.
 ///
-/// **`krea_2_turbo` is deliberately absent.** Its measured MLX key
-/// [`KREA_BASE_CALIBRATION_FINGERPRINT`] is a real, already-priced anchor identity that the pinned
-/// provider still publishes unchanged; re-keying it here would invalidate evidence this story has no
-/// business touching. `None` for Turbo means this check is silent for it and its existing exact
-/// post-load comparison is the whole binding, exactly as before.
+/// **`krea_2_turbo` is here too.** It was carved out of the first sc-22735 pass on the argument that
+/// its shared MLX key was already-priced evidence. It was not: `config/memory-anchors.json` holds no
+/// measured `krea_2_turbo` MLX record at any tier — the one turbo anchor in the catalog is
+/// `krea_2_turbo:candle:q4`, a Candle string — so the retired
+/// `krea-2-mlx-full-ladder-native-pid-attn64m-window1-2026-08-03-v3` protected nothing and only kept
+/// three tiers indistinguishable. The pinned provider now keys turbo per tier like the other routes.
 ///
 /// It is a PRE-LOAD check on purpose. Both arms already compare the plan's fingerprint against the
 /// LOADED contract's, but that comparison happens after a multi-tens-of-GB load; a plan row naming a
@@ -609,6 +614,7 @@ fn mlx_production_fingerprint(provider_id: &str, tier: &str) -> Option<String> {
         return None;
     }
     match provider_id {
+        KREA_BASE_PROVIDER => Some(format!("krea-2-turbo-{tier}-mlx-shared-ladder-v1")),
         KREA_RAW_PROVIDER => Some(format!("krea-2-raw-{tier}-mlx-shared-ladder-v1")),
         KREA_REALTIME_PROVIDER => Some(format!("krea-realtime-14b-{tier}-mlx-resident-ladder-v1")),
         _ => None,
@@ -937,6 +943,88 @@ mod tests {
         assert_eq!(
             predicted_phase_ceiling(phase, VIDEO_PREDICTED_PEAK_BASIS),
             predicted_ceiling(16 * MIB)
+        );
+    }
+
+    /// sc-22735 fix pass. Every `crates/<crate>/src/<path>.rs` in THIS workspace that this file
+    /// cites in prose must be a file that exists.
+    ///
+    /// A doc comment citing `pinned_engine_geometry.rs` under `sceneworks-core` shipped for a
+    /// module that lives in `sceneworks-worker`, and nothing caught it: a wrong path reads exactly
+    /// like a right one, and the reader who follows it finds nothing and re-derives the fact. The
+    /// paths are read out of this file's own source and resolved against the workspace root, so a
+    /// module that is renamed or moved reds here rather than leaving a citation pointing at air.
+    ///
+    /// A citation is checked only when its crate segment names a REAL directory under `crates/`.
+    /// That is what separates the three things this scan must not confuse:
+    ///
+    ///  * a citation into THIS workspace (`crates/sceneworks-worker/src/…`) — checked, and the
+    ///    `sceneworks-core` typo above is caught precisely because that crate does exist, so the
+    ///    wrong-module citation is resolved and found missing rather than waved through;
+    ///  * a cross-repo citation into the pinned inference tree (`crates/media/mlx-gen/…`) — skipped,
+    ///    since that file is not in this checkout and its absence here says nothing;
+    ///  * a prose placeholder (`crates/<name>/src/<...>.rs`) — skipped, being no path at all.
+    #[test]
+    fn every_cited_workspace_source_path_exists() {
+        let source = include_str!("mlx.rs");
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(std::path::Path::parent)
+            .expect("the workspace root is two levels above this crate");
+        // The crates this workspace actually contains, read off disk rather than listed, so a new
+        // or renamed crate is covered without editing this test.
+        let workspace_crates: std::collections::BTreeSet<String> =
+            std::fs::read_dir(root.join("crates"))
+                .expect("the workspace crates directory")
+                .filter_map(|entry| {
+                    let entry = entry.ok()?;
+                    entry
+                        .file_type()
+                        .ok()?
+                        .is_dir()
+                        .then(|| entry.file_name().to_string_lossy().into_owned())
+                })
+                .collect();
+        assert!(
+            workspace_crates.contains("sceneworks-worker"),
+            "the crate scan found no sceneworks-worker; it is reading the wrong directory"
+        );
+
+        // `crates/<name>/src/<...>.rs`, wherever it appears — backticked in prose, inside a
+        // `source:` string, or in a plain comment.
+        let cited: std::collections::BTreeSet<&str> = source
+            .match_indices("crates/")
+            .filter_map(|(start, _)| {
+                let rest = &source[start..];
+                let end = rest.find(".rs")? + 3;
+                let path = &rest[..end];
+                // Stop at anything that cannot be part of a path: a citation may carry a line-range
+                // suffix or trailing prose, but the path itself is one unbroken token.
+                (!path.contains(char::is_whitespace)
+                    && !path.contains('`')
+                    && !path.contains('#')
+                    && path.contains("/src/"))
+                .then_some(path)
+            })
+            // Only the citations that name a crate of THIS workspace; see the doc above.
+            .filter(|path| {
+                path.split('/')
+                    .nth(1)
+                    .is_some_and(|krate| workspace_crates.contains(krate))
+            })
+            .collect();
+        assert!(
+            cited.len() > 5,
+            "the citation scan found almost nothing ({cited:?}); it no longer guards anything"
+        );
+        let missing: Vec<&str> = cited
+            .iter()
+            .copied()
+            .filter(|path| !root.join(path).exists())
+            .collect();
+        assert!(
+            missing.is_empty(),
+            "these cited workspace source files do not exist: {missing:?}"
         );
     }
 
@@ -6118,9 +6206,6 @@ struct KreaBaseArm {
     /// keeps `true` because its cells are already-priced anchors measured under that spec and are not
     /// this story's to re-measure; Raw is captured in the worker's own shape.
     load_spec_carries_quant: bool,
-    /// A member whose pinned calibration identity is ONE frozen string across all three tiers.
-    /// `None` means the identity is tier-keyed and comes from [`mlx_production_fingerprint`].
-    frozen_fingerprint: Option<&'static str>,
 }
 
 const KREA_TURBO_ARM: KreaBaseArm = KreaBaseArm {
@@ -6136,7 +6221,6 @@ const KREA_TURBO_ARM: KreaBaseArm = KreaBaseArm {
     fixture_stem: "krea-base-mlx",
     load_shape: LoadShape::DeferredMaterialization,
     load_spec_carries_quant: true,
-    frozen_fingerprint: Some(KREA_BASE_CALIBRATION_FINGERPRINT),
 };
 
 const KREA_RAW_ARM: KreaBaseArm = KreaBaseArm {
@@ -6152,7 +6236,6 @@ const KREA_RAW_ARM: KreaBaseArm = KreaBaseArm {
     fixture_stem: "krea-raw-mlx",
     load_shape: LoadShape::EagerMaterialization,
     load_spec_carries_quant: false,
-    frozen_fingerprint: None,
 };
 
 /// Which family member the plan asks for. Refuses an unimplemented provider BY NAME, before any
@@ -6174,12 +6257,13 @@ fn krea_base_arm(request: &Value) -> Result<KreaBaseArm, String> {
 }
 
 /// The pinned calibration identity this arm expects the loaded provider to publish for
-/// `(member, tier)`: a frozen per-provider string where the member declares one, otherwise the
-/// tier-keyed identity from [`mlx_production_fingerprint`].
+/// `(member, tier)`.
+///
+/// sc-22735: every member is tier-keyed. The per-member frozen-string escape hatch this used to
+/// carry existed only for `krea_2_turbo`, whose "measured" MLX key turned out to back no anchor at
+/// all; it is gone rather than left standing for the next route to re-freeze itself with.
 fn krea_base_pinned_fingerprint(arm: KreaBaseArm, tier: &str) -> Option<String> {
-    arm.frozen_fingerprint
-        .map(str::to_owned)
-        .or_else(|| mlx_production_fingerprint(arm.provider, tier))
+    mlx_production_fingerprint(arm.provider, tier)
 }
 
 fn validate_krea_base_target(request: &Value) -> Result<KreaBaseArm, String> {
@@ -14281,81 +14365,6 @@ fn run_sd3(request: &Value) -> Result<Value, String> {
     Ok(fragment)
 }
 
-fn run(request: &Value) -> Result<Value, String> {
-    let provider = protocol::planned(request)?
-        .pointer("/target/provider")
-        .and_then(Value::as_str)
-        .ok_or_else(|| "planned.target.provider must be a string".to_owned())?;
-    // sc-18104: this used to be `else { run_qwen_provider(request) }`, so ANY provider the MLX
-    // adapter does not implement was silently routed to the Qwen arm rather than refused. It then
-    // failed further in on a Qwen-shaped complaint that named neither the provider nor the missing
-    // arm — measured by reverting this match, capturing `flux2_dev` reported
-    // `planned.target.overlay must be a string`, which reads as a malformed plan entry and sends the
-    // operator off fixing fixtures or provisioning weights for the wrong model. Refuse by name
-    // instead, mirroring the Candle adapter's `plain_execution_path` (candle.rs:540-548).
-    match provider {
-        Z_IMAGE_PROVIDER => run_z_image_reference(request),
-        // sc-22724: the undistilled base rides the same arm under its own registry id, artifact
-        // family and execution path; the arm resolves which member from `(provider, mode)`.
-        Z_IMAGE_BASE_PROVIDER => run_z_image_reference(request),
-        KREA_BASE_PROVIDER => run_krea_base(request),
-        SDXL_PROVIDER => run_sdxl(request),
-        KREA_PROVIDER => run_krea_control(request),
-        QWEN_PROVIDER => run_qwen_provider(request),
-        // sc-22728: the Qwen edit lane. One engine provider serves both shipped catalog ids, so the
-        // arm resolves which from `(provider, modelId)` and refuses any other pair by name.
-        QWEN_EDIT_PROVIDER => run_qwen_edit_provider(request),
-        FLUX2_PROVIDER => run_flux2(request),
-        // sc-22727: both klein catalog models (`flux2_klein_9b`, `flux2_klein_9b_kv`) load through
-        // this ONE engine provider id; `flux2_arm` resolves which from `(provider, modelId)` and
-        // refuses an unknown pair by name.
-        FLUX2_KLEIN_PROVIDER => run_flux2(request),
-        // sc-22726: the FLUX.1 family. Three registry ids on one arm — the two base text-to-image
-        // providers of `mlx-gen-flux`, and `mlx-gen-pulid`'s identity route over the same
-        // FLUX.1-dev backbone. The arm resolves which member from `(provider, mode)`.
-        // One arm per line: `stale-lane-report.mjs#adapterCapturableProviders` derives the
-        // capturable provider set by parsing these arms, and only accepts a bare literal or a
-        // single `&str` const per arm — an or-pattern would make it throw.
-        FLUX1_DEV_PROVIDER => run_flux_one(request),
-        FLUX1_SCHNELL_PROVIDER => run_flux_one(request),
-        PULID_FLUX_PROVIDER => run_flux_one(request),
-        // sc-22731: the SANA and Chroma1 families. Five registry ids on one arm — the two
-        // `mlx-gen-sana` routes and the three `mlx-gen-chroma` ones. One arm per line, for the
-        // same reason the FLUX.1 block above is: `stale-lane-report.mjs#adapterCapturableProviders`
-        // parses these arms and accepts only a bare literal or a single `&str` const per arm.
-        SANA_PROVIDER => run_sana_chroma(request),
-        SANA_SPRINT_PROVIDER => run_sana_chroma(request),
-        CHROMA1_HD_PROVIDER => run_sana_chroma(request),
-        CHROMA1_BASE_PROVIDER => run_sana_chroma(request),
-        CHROMA1_FLASH_PROVIDER => run_sana_chroma(request),
-        // sc-18808: the first VIDEO arm. Every arm above it refuses `geometry.frames != 1`; this one
-        // validates against LTX's own resolution/temporal envelope instead.
-        LTX_PROVIDER => run_ltx(request),
-        // SC-18783: LTX-2.5 is a separate provider contract. Its variant and decoder axes are
-        // validated inside the arm rather than being folded into the legacy 2.3 route.
-        LTX25_PROVIDER => mlx_ltx25::run(request),
-        // sc-18663: the second video arm, and the first joint audio+video one. Same rule as LTX —
-        // it accepts a multi-frame geometry only by validating against MiniMax-H3's own lattice,
-        // stride and canvas budget, read off the pinned engine crate.
-        MINIMAX_PROVIDER => run_minimax_h3(request),
-        // sc-22730: the SD3.5 family. Three distinct engine providers sharing one arm, each with
-        // its own artifact family and published identity; `sd3_arm` resolves which from
-        // `(provider, mode)` and refuses every other pair by name.
-        //
-        // THREE SEPARATE ARMS ON PURPOSE, like the FLUX.1 members above. The derived capturability
-        // report parses this block arm by arm
-        // (`stale-lane-report.mjs#adapterCapturableProviders`) and recognizes a string literal, a
-        // single `&str` const, or the refusal arm's binding — never an or-pattern, which it refuses
-        // to guess about rather than silently reading this lane as having no arm for the family.
-        SD3_LARGE_PROVIDER => run_sd3(request),
-        SD3_LARGE_TURBO_PROVIDER => run_sd3(request),
-        SD3_MEDIUM_PROVIDER => run_sd3(request),
-        other => Err(format!(
-            "MLX five-rung calibration does not implement provider {other:?}"
-        )),
-    }
-}
-
 /// The geometry one `mlx:krea_realtime_14b` capture renders, with the AR loop's own derived
 /// quantities carried beside the declared axes rather than asserted away.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -14383,7 +14392,7 @@ struct KreaRealtimeGeometry {
 ///   smaller clip through integer division;
 /// * the per-edge range — `Capabilities::min_size ..= Capabilities::max_size`. This is a PER-EDGE
 ///   bound, not an area budget, and it is applied as one. **The engine has NO area/pixel cap**:
-///   `crates/sceneworks-core/src/pinned_engine_geometry.rs` lists `krea_realtime_14b` as
+///   `crates/sceneworks-worker/src/pinned_engine_geometry.rs` lists `krea_realtime_14b` as
 ///   `PinnedAreaCap::EngineHasNone`. Refusing a large area here would be an invented gate that made
 ///   this harness reject geometries the shipped engine renders, so nothing below multiplies the
 ///   edges together;
@@ -15237,6 +15246,18 @@ fn run(request: &Value) -> Result<Value, String> {
         // spatial grid, per-edge range and temporal lattice, read off the pinned engine crate's
         // advertised descriptor. It deliberately applies NO area cap: the engine has none.
         KREA_REALTIME_PROVIDER => run_krea_realtime(request),
+        // sc-22730: the SD3.5 family. Three distinct engine providers sharing one arm, each with
+        // its own artifact family and published identity; `sd3_arm` resolves which from
+        // `(provider, mode)` and refuses every other pair by name.
+        //
+        // THREE SEPARATE ARMS ON PURPOSE, like the FLUX.1 members above. The derived capturability
+        // report parses this block arm by arm
+        // (`stale-lane-report.mjs#adapterCapturableProviders`) and recognizes a string literal, a
+        // single `&str` const, or the refusal arm's binding — never an or-pattern, which it refuses
+        // to guess about rather than silently reading this lane as having no arm for the family.
+        SD3_LARGE_PROVIDER => run_sd3(request),
+        SD3_LARGE_TURBO_PROVIDER => run_sd3(request),
+        SD3_MEDIUM_PROVIDER => run_sd3(request),
         other => Err(format!(
             "MLX five-rung calibration does not implement provider {other:?}"
         )),
@@ -17893,14 +17914,20 @@ mod krea_base_tests {
             );
             assert_eq!(spec.load_shape, LoadShape::EagerMaterialization);
 
-            // A stale export of ANOTHER tier can never satisfy this plan row.
+            // A stale export of ANOTHER tier can never satisfy this plan row — and the refusal has
+            // to SAY which tier it wanted. sc-22735 fix pass: a bare `expect_err` here passed on any
+            // error at all, so a refusal that stopped naming the tier (or that started refusing for
+            // an unrelated reason) stayed green and left the operator holding "it failed". The
+            // message `validate_snapshot_suffix` builds is the whole expected suffix, so assert the
+            // planned tier appears in it AND that it appears as the `snapshots/<revision>/<tier>`
+            // tail rather than incidentally anywhere in the string.
             for stale in ["bf16", "q4", "q8"] {
                 if stale == tier {
                     continue;
                 }
                 let stale_root = root.parent().unwrap().join(stale);
                 std::fs::create_dir_all(&stale_root).unwrap();
-                krea_base_spec_at(
+                let error = krea_base_spec_at(
                     KREA_RAW_ARM,
                     tier,
                     repository,
@@ -17911,6 +17938,11 @@ mod krea_base_tests {
                 .expect_err(&format!(
                     "a .../{stale} root must not satisfy a {tier} plan"
                 ));
+                assert!(
+                    error.contains(&format!("snapshots/{revision}/{tier}")),
+                    "the {tier} refusal against a .../{stale} root must name the tier-exact \
+                     snapshot suffix it required, got {error:?}"
+                );
             }
             std::fs::remove_dir_all(root.parent().unwrap()).ok();
         }
@@ -18020,7 +18052,8 @@ mod krea_base_tests {
     #[test]
     fn base_admission_context_is_reference_free_text_to_image() {
         let calibration = MemoryCalibrationIdentity::new(
-            KREA_BASE_CALIBRATION_FINGERPRINT,
+            mlx_production_fingerprint(KREA_BASE_PROVIDER, "q4")
+                .expect("krea_2_turbo publishes a production identity at q4"),
             LoadShape::DeferredMaterialization,
         );
         let context = krea_base_context(
@@ -18065,9 +18098,15 @@ mod krea_base_tests {
             .unwrap()
             .expect("the pinned Krea base provider contract");
         assert_eq!(contract.provider_id, KREA_BASE_PROVIDER);
+        // The fixture packs the transformer at q4, so the pinned provider names the turbo q4 cell —
+        // never the retired string every tier used to share.
         assert_eq!(
             contract.calibration.as_ref().unwrap().fingerprint,
-            KREA_BASE_CALIBRATION_FINGERPRINT
+            mlx_production_fingerprint(KREA_BASE_PROVIDER, "q4").unwrap()
+        );
+        assert_ne!(
+            contract.calibration.as_ref().unwrap().fingerprint,
+            RETIRED_KREA_BASE_CALIBRATION_FINGERPRINT
         );
         for strategy in [
             MemoryStrategy::Resident,
@@ -18409,7 +18448,10 @@ mod mlx_production_fingerprint_tests {
                 continue;
             }
             let provider = entry["provider"].as_str().expect("provider string");
-            if !matches!(provider, KREA_RAW_PROVIDER | KREA_REALTIME_PROVIDER) {
+            if !matches!(
+                provider,
+                KREA_BASE_PROVIDER | KREA_RAW_PROVIDER | KREA_REALTIME_PROVIDER
+            ) {
                 continue;
             }
             // `<provider>:<tier>:<backend>` — read the tier from the key rather than assuming it.
@@ -18431,7 +18473,11 @@ mod mlx_production_fingerprint_tests {
             .iter()
             .map(|tier| (*tier).to_owned())
             .collect();
-        for provider in [KREA_RAW_PROVIDER, KREA_REALTIME_PROVIDER] {
+        for provider in [
+            KREA_BASE_PROVIDER,
+            KREA_RAW_PROVIDER,
+            KREA_REALTIME_PROVIDER,
+        ] {
             assert_eq!(
                 covered.get(provider),
                 Some(&wanted),
@@ -18440,19 +18486,24 @@ mod mlx_production_fingerprint_tests {
         }
     }
 
-    /// (b) All six cells are pairwise distinct, and none of them collides with Turbo's measured MLX
-    /// key — the collision this story exists to close. Turbo itself is deliberately NOT in the
-    /// table, so the pre-load check stays silent for it and its own frozen comparison is unchanged.
+    /// (b) All NINE modelled cells — Turbo's three included, sc-22735 fix pass — are pairwise
+    /// distinct, each keys on its own tier, and none of them is the retired string every route used
+    /// to share. Turbo is no longer carved out: nothing was ever measured against that string on
+    /// this lane, so keeping it collapsed three tiers onto one key for no evidentiary gain.
     #[test]
-    fn the_six_widened_cells_are_pairwise_distinct_and_never_collide_with_turbo() {
+    fn every_modelled_cell_is_pairwise_distinct_and_keys_on_its_own_tier() {
         let mut seen = std::collections::BTreeSet::new();
-        for provider in [KREA_RAW_PROVIDER, KREA_REALTIME_PROVIDER] {
+        for provider in [
+            KREA_BASE_PROVIDER,
+            KREA_RAW_PROVIDER,
+            KREA_REALTIME_PROVIDER,
+        ] {
             for tier in NUMERIC_TIERS {
                 let identity = mlx_production_fingerprint(provider, tier)
                     .unwrap_or_else(|| panic!("({provider}, {tier}) must be modelled"));
                 assert_ne!(
-                    identity, KREA_BASE_CALIBRATION_FINGERPRINT,
-                    "({provider}, {tier}) collides with the Krea 2 Turbo measured key"
+                    identity, RETIRED_KREA_BASE_CALIBRATION_FINGERPRINT,
+                    "({provider}, {tier}) republishes the retired shared MLX key"
                 );
                 assert!(
                     identity.contains(tier),
@@ -18460,16 +18511,15 @@ mod mlx_production_fingerprint_tests {
                 );
                 assert!(
                     seen.insert(identity.clone()),
-                    "duplicate identity {identity} across the widened cells"
+                    "duplicate identity {identity} across the modelled cells"
                 );
             }
         }
-        assert_eq!(seen.len(), 6);
-        // Turbo is absent by design, and an unmodelled tier resolves to nothing rather than to a
-        // fabricated string.
-        assert_eq!(mlx_production_fingerprint(KREA_BASE_PROVIDER, "q4"), None);
+        assert_eq!(seen.len(), 9);
+        // An unmodelled provider or tier resolves to nothing rather than to a fabricated string.
         assert_eq!(mlx_production_fingerprint("qwen_image", "q4"), None);
         assert_eq!(mlx_production_fingerprint(KREA_RAW_PROVIDER, "q6"), None);
+        assert_eq!(mlx_production_fingerprint(KREA_BASE_PROVIDER, "q6"), None);
     }
 
     /// The pre-load check refuses a plan row naming an unproducible identity, and is SILENT for a
@@ -18488,9 +18538,22 @@ mod mlx_production_fingerprint_tests {
             "{error}"
         );
         assert!(error.contains(KREA_RAW_PROVIDER), "{error}");
-        // Silent for Turbo, whose measured key this story preserves untouched.
-        validate_planned_fingerprint_is_producible(KREA_BASE_PROVIDER, "q4", &request)
+
+        // sc-22735 fix pass: Turbo is no longer the silence example — the table models it now, so
+        // this row would be REFUSED (it names Raw's identity) and the case would be asserting the
+        // opposite of what it claims. Use a provider the table genuinely does not model.
+        assert_eq!(mlx_production_fingerprint("qwen_image", "q4"), None);
+        validate_planned_fingerprint_is_producible("qwen_image", "q4", &request)
             .expect("the table must stay silent for a provider it does not model");
+        // And the silence really is per-provider, not a dead check: the same wrong identity IS
+        // refused for Turbo, which the table now models.
+        let turbo_error =
+            validate_planned_fingerprint_is_producible(KREA_BASE_PROVIDER, "q4", &request)
+                .expect_err("a modelled provider must refuse another route's identity");
+        assert!(
+            turbo_error.contains("krea-2-turbo-q4-mlx-shared-ladder-v1"),
+            "{turbo_error}"
+        );
     }
 }
 

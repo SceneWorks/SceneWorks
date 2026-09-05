@@ -4457,8 +4457,27 @@ mod tests {
                 |_| true,
             )
         };
+        // sc-22735: Turbo's rows are per-(route, tier) now, so index 2 no longer names the BTR row
+        // this q4 text-to-image request resolves through — a mutation planted there would sit on a
+        // row the request never reads and every refusal below would pass without its guard ever
+        // running. Locate the row by what identifies it: the native (no `runtimeProvider`, which is
+        // what separates Turbo from the `krea_2_turbo_edit` rows in the same array) BTR row that
+        // declares q4.
+        let turbo_btr_q4 = manifest["mlx"]["memoryStrategyContract"]["implementations"]
+            .as_array()
+            .expect("implementation rows")
+            .iter()
+            .position(|row| {
+                row["rung"] == "bounded_transformer_residency"
+                    && row.get("runtimeProvider").is_none()
+                    && row["tiers"]
+                        .as_array()
+                        .is_some_and(|tiers| tiers.iter().any(|tier| tier == "q4"))
+            })
+            .expect("the native Turbo q4 BTR row");
+
         let mut crossed_provider_mode = manifest.clone();
-        crossed_provider_mode["mlx"]["memoryStrategyContract"]["implementations"][2]
+        crossed_provider_mode["mlx"]["memoryStrategyContract"]["implementations"][turbo_btr_q4]
             ["requestContexts"][0]["providerMode"] = Value::String("image_to_image".to_owned());
         assert_eq!(
             evaluate_mutated(&crossed_provider_mode).load_shape_declaration_result,
@@ -4467,7 +4486,7 @@ mod tests {
         );
 
         let mut ambiguous = manifest.clone();
-        let contexts = ambiguous["mlx"]["memoryStrategyContract"]["implementations"][2]
+        let contexts = ambiguous["mlx"]["memoryStrategyContract"]["implementations"][turbo_btr_q4]
             ["requestContexts"]
             .as_array_mut()
             .expect("Turbo BTR request contexts");
@@ -4480,7 +4499,7 @@ mod tests {
         );
 
         let mut missing_matching_contexts = manifest.clone();
-        missing_matching_contexts["mlx"]["memoryStrategyContract"]["implementations"][2]
+        missing_matching_contexts["mlx"]["memoryStrategyContract"]["implementations"][turbo_btr_q4]
             .as_object_mut()
             .expect("Turbo BTR implementation")
             .remove("requestContexts");

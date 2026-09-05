@@ -1138,7 +1138,7 @@
         "repo": null,
         "revision": null,
         "path": "config/manifests/builtin.models.jsonc#models/boogu_image/candle",
-        "sha256": "90c58fbe5bc48a9c5218abedfabd93c61711cb048b42284139d8dd71395344d5",
+        "sha256": "b818b409fd292f5f179db0f1abba477f8456f83292568c6f9d376a04fb4416bf",
         "recordId": null,
         "envelopeBytes": null,
         "values": {
@@ -1159,7 +1159,7 @@
         "repo": null,
         "revision": null,
         "path": "config/manifests/builtin.models.jsonc#models/boogu_image/candle",
-        "sha256": "90c58fbe5bc48a9c5218abedfabd93c61711cb048b42284139d8dd71395344d5",
+        "sha256": "b818b409fd292f5f179db0f1abba477f8456f83292568c6f9d376a04fb4416bf",
         "recordId": null,
         "envelopeBytes": null,
         "values": {
@@ -1180,7 +1180,7 @@
         "repo": null,
         "revision": null,
         "path": "config/manifests/builtin.models.jsonc#models/boogu_image/candle",
-        "sha256": "90c58fbe5bc48a9c5218abedfabd93c61711cb048b42284139d8dd71395344d5",
+        "sha256": "b818b409fd292f5f179db0f1abba477f8456f83292568c6f9d376a04fb4416bf",
         "recordId": null,
         "envelopeBytes": null,
         "values": {
@@ -1234,7 +1234,7 @@
         "repo": null,
         "revision": null,
         "path": "config/manifests/builtin.models.jsonc#models/boogu_image_turbo/candle",
-        "sha256": "90c58fbe5bc48a9c5218abedfabd93c61711cb048b42284139d8dd71395344d5",
+        "sha256": "b818b409fd292f5f179db0f1abba477f8456f83292568c6f9d376a04fb4416bf",
         "recordId": null,
         "envelopeBytes": null,
         "values": {
@@ -1255,7 +1255,7 @@
         "repo": null,
         "revision": null,
         "path": "config/manifests/builtin.models.jsonc#models/boogu_image_turbo/candle",
-        "sha256": "90c58fbe5bc48a9c5218abedfabd93c61711cb048b42284139d8dd71395344d5",
+        "sha256": "b818b409fd292f5f179db0f1abba477f8456f83292568c6f9d376a04fb4416bf",
         "recordId": null,
         "envelopeBytes": null,
         "values": {
@@ -1276,7 +1276,7 @@
         "repo": null,
         "revision": null,
         "path": "config/manifests/builtin.models.jsonc#models/boogu_image_turbo/candle",
-        "sha256": "90c58fbe5bc48a9c5218abedfabd93c61711cb048b42284139d8dd71395344d5",
+        "sha256": "b818b409fd292f5f179db0f1abba477f8456f83292568c6f9d376a04fb4416bf",
         "recordId": null,
         "envelopeBytes": null,
         "values": {
@@ -1506,7 +1506,7 @@
         "repo": null,
         "revision": null,
         "path": "config/manifests/builtin.models.jsonc#models/flux2_dev/candle/memoryStrategyContract",
-        "sha256": "90c58fbe5bc48a9c5218abedfabd93c61711cb048b42284139d8dd71395344d5",
+        "sha256": "b818b409fd292f5f179db0f1abba477f8456f83292568c6f9d376a04fb4416bf",
         "recordId": null,
         "envelopeBytes": null,
         "values": {
@@ -1530,7 +1530,7 @@
         "repo": null,
         "revision": null,
         "path": "config/manifests/builtin.models.jsonc#models/flux2_dev/candle/memoryStrategyContract",
-        "sha256": "90c58fbe5bc48a9c5218abedfabd93c61711cb048b42284139d8dd71395344d5",
+        "sha256": "b818b409fd292f5f179db0f1abba477f8456f83292568c6f9d376a04fb4416bf",
         "recordId": null,
         "envelopeBytes": null,
         "values": {
@@ -1565,7 +1565,7 @@
         "repo": null,
         "revision": null,
         "path": "config/manifests/builtin.models.jsonc#models/flux2_klein_9b/candle/memoryStrategyContract",
-        "sha256": "90c58fbe5bc48a9c5218abedfabd93c61711cb048b42284139d8dd71395344d5",
+        "sha256": "b818b409fd292f5f179db0f1abba477f8456f83292568c6f9d376a04fb4416bf",
         "recordId": null,
         "envelopeBytes": null,
         "values": {
@@ -1590,7 +1590,7 @@
         "repo": null,
         "revision": null,
         "path": "config/manifests/builtin.models.jsonc#models/flux2_klein_9b/candle/memoryStrategyContract",
-        "sha256": "90c58fbe5bc48a9c5218abedfabd93c61711cb048b42284139d8dd71395344d5",
+        "sha256": "b818b409fd292f5f179db0f1abba477f8456f83292568c6f9d376a04fb4416bf",
         "recordId": null,
         "envelopeBytes": null,
         "values": {
@@ -1615,7 +1615,7 @@
         "repo": null,
         "revision": null,
         "path": "config/manifests/builtin.models.jsonc#models/flux2_klein_9b/candle/memoryStrategyContract",
-        "sha256": "90c58fbe5bc48a9c5218abedfabd93c61711cb048b42284139d8dd71395344d5",
+        "sha256": "b818b409fd292f5f179db0f1abba477f8456f83292568c6f9d376a04fb4416bf",
         "recordId": null,
         "envelopeBytes": null,
         "values": {
@@ -1782,7 +1782,7 @@
         "repo": null,
         "revision": null,
         "path": "config/manifests/builtin.models.jsonc#models/flux_dev/candle/memoryStrategyContract",
-        "sha256": "90c58fbe5bc48a9c5218abedfabd93c61711cb048b42284139d8dd71395344d5",
+        "sha256": "b818b409fd292f5f179db0f1abba477f8456f83292568c6f9d376a04fb4416bf",
         "recordId": null,
         "envelopeBytes": null,
         "values": {
@@ -1861,7 +1861,7 @@
         "repo": null,
         "revision": null,
         "path": "config/manifests/builtin.models.jsonc#models/flux_schnell/candle/memoryStrategyContract",
-        "sha256": "90c58fbe5bc48a9c5218abedfabd93c61711cb048b42284139d8dd71395344d5",
+        "sha256": "b818b409fd292f5f179db0f1abba477f8456f83292568c6f9d376a04fb4416bf",
         "recordId": null,
         "envelopeBytes": null,
         "values": {
@@ -1918,7 +1918,7 @@
         "repo": null,
         "revision": null,
         "path": "config/manifests/builtin.models.jsonc#models/ideogram_4/candle",
-        "sha256": "90c58fbe5bc48a9c5218abedfabd93c61711cb048b42284139d8dd71395344d5",
+        "sha256": "b818b409fd292f5f179db0f1abba477f8456f83292568c6f9d376a04fb4416bf",
         "recordId": null,
         "envelopeBytes": null,
         "values": {
@@ -1940,7 +1940,7 @@
         "repo": null,
         "revision": null,
         "path": "config/manifests/builtin.models.jsonc#models/ideogram_4/candle",
-        "sha256": "90c58fbe5bc48a9c5218abedfabd93c61711cb048b42284139d8dd71395344d5",
+        "sha256": "b818b409fd292f5f179db0f1abba477f8456f83292568c6f9d376a04fb4416bf",
         "recordId": null,
         "envelopeBytes": null,
         "values": {
@@ -1962,7 +1962,7 @@
         "repo": null,
         "revision": null,
         "path": "config/manifests/builtin.models.jsonc#models/ideogram_4/candle",
-        "sha256": "90c58fbe5bc48a9c5218abedfabd93c61711cb048b42284139d8dd71395344d5",
+        "sha256": "b818b409fd292f5f179db0f1abba477f8456f83292568c6f9d376a04fb4416bf",
         "recordId": null,
         "envelopeBytes": null,
         "values": {
@@ -2017,7 +2017,7 @@
         "repo": null,
         "revision": null,
         "path": "config/manifests/builtin.models.jsonc#models/ideogram_4_turbo/candle",
-        "sha256": "90c58fbe5bc48a9c5218abedfabd93c61711cb048b42284139d8dd71395344d5",
+        "sha256": "b818b409fd292f5f179db0f1abba477f8456f83292568c6f9d376a04fb4416bf",
         "recordId": null,
         "envelopeBytes": null,
         "values": {
@@ -2039,7 +2039,7 @@
         "repo": null,
         "revision": null,
         "path": "config/manifests/builtin.models.jsonc#models/ideogram_4_turbo/candle",
-        "sha256": "90c58fbe5bc48a9c5218abedfabd93c61711cb048b42284139d8dd71395344d5",
+        "sha256": "b818b409fd292f5f179db0f1abba477f8456f83292568c6f9d376a04fb4416bf",
         "recordId": null,
         "envelopeBytes": null,
         "values": {
@@ -2061,7 +2061,7 @@
         "repo": null,
         "revision": null,
         "path": "config/manifests/builtin.models.jsonc#models/ideogram_4_turbo/candle",
-        "sha256": "90c58fbe5bc48a9c5218abedfabd93c61711cb048b42284139d8dd71395344d5",
+        "sha256": "b818b409fd292f5f179db0f1abba477f8456f83292568c6f9d376a04fb4416bf",
         "recordId": null,
         "envelopeBytes": null,
         "values": {
@@ -2116,7 +2116,7 @@
         "repo": null,
         "revision": null,
         "path": "config/manifests/builtin.models.jsonc#models/illustrious_xl_v1/candle/memoryStrategyContract",
-        "sha256": "90c58fbe5bc48a9c5218abedfabd93c61711cb048b42284139d8dd71395344d5",
+        "sha256": "b818b409fd292f5f179db0f1abba477f8456f83292568c6f9d376a04fb4416bf",
         "recordId": null,
         "envelopeBytes": null,
         "values": {
@@ -2140,7 +2140,7 @@
         "repo": null,
         "revision": null,
         "path": "config/manifests/builtin.models.jsonc#models/illustrious_xl_v1/candle/memoryStrategyContract",
-        "sha256": "90c58fbe5bc48a9c5218abedfabd93c61711cb048b42284139d8dd71395344d5",
+        "sha256": "b818b409fd292f5f179db0f1abba477f8456f83292568c6f9d376a04fb4416bf",
         "recordId": null,
         "envelopeBytes": null,
         "values": {
@@ -2164,7 +2164,7 @@
         "repo": null,
         "revision": null,
         "path": "config/manifests/builtin.models.jsonc#models/illustrious_xl_v1/candle/memoryStrategyContract",
-        "sha256": "90c58fbe5bc48a9c5218abedfabd93c61711cb048b42284139d8dd71395344d5",
+        "sha256": "b818b409fd292f5f179db0f1abba477f8456f83292568c6f9d376a04fb4416bf",
         "recordId": null,
         "envelopeBytes": null,
         "values": {
@@ -2221,7 +2221,7 @@
         "repo": null,
         "revision": null,
         "path": "config/manifests/builtin.models.jsonc#models/illustrious_xl_v2/candle/memoryStrategyContract",
-        "sha256": "90c58fbe5bc48a9c5218abedfabd93c61711cb048b42284139d8dd71395344d5",
+        "sha256": "b818b409fd292f5f179db0f1abba477f8456f83292568c6f9d376a04fb4416bf",
         "recordId": null,
         "envelopeBytes": null,
         "values": {
@@ -2245,7 +2245,7 @@
         "repo": null,
         "revision": null,
         "path": "config/manifests/builtin.models.jsonc#models/illustrious_xl_v2/candle/memoryStrategyContract",
-        "sha256": "90c58fbe5bc48a9c5218abedfabd93c61711cb048b42284139d8dd71395344d5",
+        "sha256": "b818b409fd292f5f179db0f1abba477f8456f83292568c6f9d376a04fb4416bf",
         "recordId": null,
         "envelopeBytes": null,
         "values": {
@@ -2269,7 +2269,7 @@
         "repo": null,
         "revision": null,
         "path": "config/manifests/builtin.models.jsonc#models/illustrious_xl_v2/candle/memoryStrategyContract",
-        "sha256": "90c58fbe5bc48a9c5218abedfabd93c61711cb048b42284139d8dd71395344d5",
+        "sha256": "b818b409fd292f5f179db0f1abba477f8456f83292568c6f9d376a04fb4416bf",
         "recordId": null,
         "envelopeBytes": null,
         "values": {
@@ -2370,7 +2370,7 @@
         "repo": null,
         "revision": null,
         "path": "config/manifests/builtin.models.jsonc#models/kolors/candle",
-        "sha256": "90c58fbe5bc48a9c5218abedfabd93c61711cb048b42284139d8dd71395344d5",
+        "sha256": "b818b409fd292f5f179db0f1abba477f8456f83292568c6f9d376a04fb4416bf",
         "recordId": null,
         "envelopeBytes": null,
         "values": {
@@ -2391,7 +2391,7 @@
         "repo": null,
         "revision": null,
         "path": "config/manifests/builtin.models.jsonc#models/kolors/candle",
-        "sha256": "90c58fbe5bc48a9c5218abedfabd93c61711cb048b42284139d8dd71395344d5",
+        "sha256": "b818b409fd292f5f179db0f1abba477f8456f83292568c6f9d376a04fb4416bf",
         "recordId": null,
         "envelopeBytes": null,
         "values": {
@@ -2412,7 +2412,7 @@
         "repo": null,
         "revision": null,
         "path": "config/manifests/builtin.models.jsonc#models/kolors/candle",
-        "sha256": "90c58fbe5bc48a9c5218abedfabd93c61711cb048b42284139d8dd71395344d5",
+        "sha256": "b818b409fd292f5f179db0f1abba477f8456f83292568c6f9d376a04fb4416bf",
         "recordId": null,
         "envelopeBytes": null,
         "values": {
@@ -2532,7 +2532,7 @@
         "repo": null,
         "revision": null,
         "path": "config/manifests/builtin.models.jsonc#models/krea_2_turbo/candle/memoryStrategyContract",
-        "sha256": "90c58fbe5bc48a9c5218abedfabd93c61711cb048b42284139d8dd71395344d5",
+        "sha256": "b818b409fd292f5f179db0f1abba477f8456f83292568c6f9d376a04fb4416bf",
         "recordId": null,
         "envelopeBytes": null,
         "values": {
@@ -2557,7 +2557,7 @@
         "repo": null,
         "revision": null,
         "path": "config/manifests/builtin.models.jsonc#models/krea_2_turbo/candle/memoryStrategyContract",
-        "sha256": "90c58fbe5bc48a9c5218abedfabd93c61711cb048b42284139d8dd71395344d5",
+        "sha256": "b818b409fd292f5f179db0f1abba477f8456f83292568c6f9d376a04fb4416bf",
         "recordId": null,
         "envelopeBytes": null,
         "values": {
@@ -3352,7 +3352,7 @@
         "repo": null,
         "revision": null,
         "path": "config/manifests/builtin.models.jsonc#models/qwen_image/candle/memoryStrategyContract",
-        "sha256": "90c58fbe5bc48a9c5218abedfabd93c61711cb048b42284139d8dd71395344d5",
+        "sha256": "b818b409fd292f5f179db0f1abba477f8456f83292568c6f9d376a04fb4416bf",
         "recordId": null,
         "envelopeBytes": null,
         "values": {
@@ -3377,7 +3377,7 @@
         "repo": null,
         "revision": null,
         "path": "config/manifests/builtin.models.jsonc#models/qwen_image/candle/memoryStrategyContract",
-        "sha256": "90c58fbe5bc48a9c5218abedfabd93c61711cb048b42284139d8dd71395344d5",
+        "sha256": "b818b409fd292f5f179db0f1abba477f8456f83292568c6f9d376a04fb4416bf",
         "recordId": null,
         "envelopeBytes": null,
         "values": {
@@ -3402,7 +3402,7 @@
         "repo": null,
         "revision": null,
         "path": "config/manifests/builtin.models.jsonc#models/qwen_image_edit_2511/candle/memoryStrategyContract",
-        "sha256": "90c58fbe5bc48a9c5218abedfabd93c61711cb048b42284139d8dd71395344d5",
+        "sha256": "b818b409fd292f5f179db0f1abba477f8456f83292568c6f9d376a04fb4416bf",
         "recordId": null,
         "envelopeBytes": null,
         "values": {
@@ -3427,7 +3427,7 @@
         "repo": null,
         "revision": null,
         "path": "config/manifests/builtin.models.jsonc#models/qwen_image_edit_2511/candle/memoryStrategyContract",
-        "sha256": "90c58fbe5bc48a9c5218abedfabd93c61711cb048b42284139d8dd71395344d5",
+        "sha256": "b818b409fd292f5f179db0f1abba477f8456f83292568c6f9d376a04fb4416bf",
         "recordId": null,
         "envelopeBytes": null,
         "values": {
@@ -3452,7 +3452,7 @@
         "repo": null,
         "revision": null,
         "path": "config/manifests/builtin.models.jsonc#models/qwen_image_edit_2511/candle/memoryStrategyContract",
-        "sha256": "90c58fbe5bc48a9c5218abedfabd93c61711cb048b42284139d8dd71395344d5",
+        "sha256": "b818b409fd292f5f179db0f1abba477f8456f83292568c6f9d376a04fb4416bf",
         "recordId": null,
         "envelopeBytes": null,
         "values": {
@@ -3510,7 +3510,7 @@
         "repo": null,
         "revision": null,
         "path": "config/manifests/builtin.models.jsonc#models/qwen_image_edit_2511_lightning/candle/memoryStrategyContract",
-        "sha256": "90c58fbe5bc48a9c5218abedfabd93c61711cb048b42284139d8dd71395344d5",
+        "sha256": "b818b409fd292f5f179db0f1abba477f8456f83292568c6f9d376a04fb4416bf",
         "recordId": null,
         "envelopeBytes": null,
         "values": {
@@ -3535,7 +3535,7 @@
         "repo": null,
         "revision": null,
         "path": "config/manifests/builtin.models.jsonc#models/qwen_image_edit_2511_lightning/candle/memoryStrategyContract",
-        "sha256": "90c58fbe5bc48a9c5218abedfabd93c61711cb048b42284139d8dd71395344d5",
+        "sha256": "b818b409fd292f5f179db0f1abba477f8456f83292568c6f9d376a04fb4416bf",
         "recordId": null,
         "envelopeBytes": null,
         "values": {
@@ -3560,7 +3560,7 @@
         "repo": null,
         "revision": null,
         "path": "config/manifests/builtin.models.jsonc#models/qwen_image_edit_2511_lightning/candle/memoryStrategyContract",
-        "sha256": "90c58fbe5bc48a9c5218abedfabd93c61711cb048b42284139d8dd71395344d5",
+        "sha256": "b818b409fd292f5f179db0f1abba477f8456f83292568c6f9d376a04fb4416bf",
         "recordId": null,
         "envelopeBytes": null,
         "values": {
@@ -3618,7 +3618,7 @@
         "repo": null,
         "revision": null,
         "path": "config/manifests/builtin.models.jsonc#models/realvisxl/candle/memoryStrategyContract",
-        "sha256": "90c58fbe5bc48a9c5218abedfabd93c61711cb048b42284139d8dd71395344d5",
+        "sha256": "b818b409fd292f5f179db0f1abba477f8456f83292568c6f9d376a04fb4416bf",
         "recordId": null,
         "envelopeBytes": null,
         "values": {
@@ -3642,7 +3642,7 @@
         "repo": null,
         "revision": null,
         "path": "config/manifests/builtin.models.jsonc#models/realvisxl/candle/memoryStrategyContract",
-        "sha256": "90c58fbe5bc48a9c5218abedfabd93c61711cb048b42284139d8dd71395344d5",
+        "sha256": "b818b409fd292f5f179db0f1abba477f8456f83292568c6f9d376a04fb4416bf",
         "recordId": null,
         "envelopeBytes": null,
         "values": {
@@ -3666,7 +3666,7 @@
         "repo": null,
         "revision": null,
         "path": "config/manifests/builtin.models.jsonc#models/realvisxl/candle/memoryStrategyContract",
-        "sha256": "90c58fbe5bc48a9c5218abedfabd93c61711cb048b42284139d8dd71395344d5",
+        "sha256": "b818b409fd292f5f179db0f1abba477f8456f83292568c6f9d376a04fb4416bf",
         "recordId": null,
         "envelopeBytes": null,
         "values": {
@@ -3723,7 +3723,7 @@
         "repo": null,
         "revision": null,
         "path": "config/manifests/builtin.models.jsonc#models/realvisxl_lightning/candle/memoryStrategyContract",
-        "sha256": "90c58fbe5bc48a9c5218abedfabd93c61711cb048b42284139d8dd71395344d5",
+        "sha256": "b818b409fd292f5f179db0f1abba477f8456f83292568c6f9d376a04fb4416bf",
         "recordId": null,
         "envelopeBytes": null,
         "values": {
@@ -3747,7 +3747,7 @@
         "repo": null,
         "revision": null,
         "path": "config/manifests/builtin.models.jsonc#models/realvisxl_lightning/candle/memoryStrategyContract",
-        "sha256": "90c58fbe5bc48a9c5218abedfabd93c61711cb048b42284139d8dd71395344d5",
+        "sha256": "b818b409fd292f5f179db0f1abba477f8456f83292568c6f9d376a04fb4416bf",
         "recordId": null,
         "envelopeBytes": null,
         "values": {
@@ -3771,7 +3771,7 @@
         "repo": null,
         "revision": null,
         "path": "config/manifests/builtin.models.jsonc#models/realvisxl_lightning/candle/memoryStrategyContract",
-        "sha256": "90c58fbe5bc48a9c5218abedfabd93c61711cb048b42284139d8dd71395344d5",
+        "sha256": "b818b409fd292f5f179db0f1abba477f8456f83292568c6f9d376a04fb4416bf",
         "recordId": null,
         "envelopeBytes": null,
         "values": {
@@ -3916,7 +3916,7 @@
         "repo": null,
         "revision": null,
         "path": "config/manifests/builtin.models.jsonc#models/scail2_14b/candle",
-        "sha256": "90c58fbe5bc48a9c5218abedfabd93c61711cb048b42284139d8dd71395344d5",
+        "sha256": "b818b409fd292f5f179db0f1abba477f8456f83292568c6f9d376a04fb4416bf",
         "recordId": null,
         "envelopeBytes": null,
         "values": {
@@ -3937,7 +3937,7 @@
         "repo": null,
         "revision": null,
         "path": "config/manifests/builtin.models.jsonc#models/scail2_14b/candle",
-        "sha256": "90c58fbe5bc48a9c5218abedfabd93c61711cb048b42284139d8dd71395344d5",
+        "sha256": "b818b409fd292f5f179db0f1abba477f8456f83292568c6f9d376a04fb4416bf",
         "recordId": null,
         "envelopeBytes": null,
         "values": {
@@ -3958,7 +3958,7 @@
         "repo": null,
         "revision": null,
         "path": "config/manifests/builtin.models.jsonc#models/scail2_14b/candle",
-        "sha256": "90c58fbe5bc48a9c5218abedfabd93c61711cb048b42284139d8dd71395344d5",
+        "sha256": "b818b409fd292f5f179db0f1abba477f8456f83292568c6f9d376a04fb4416bf",
         "recordId": null,
         "envelopeBytes": null,
         "values": {
@@ -4012,7 +4012,7 @@
         "repo": null,
         "revision": null,
         "path": "config/manifests/builtin.models.jsonc#models/sd3_5_large/candle",
-        "sha256": "90c58fbe5bc48a9c5218abedfabd93c61711cb048b42284139d8dd71395344d5",
+        "sha256": "b818b409fd292f5f179db0f1abba477f8456f83292568c6f9d376a04fb4416bf",
         "recordId": null,
         "envelopeBytes": null,
         "values": {
@@ -4033,7 +4033,7 @@
         "repo": null,
         "revision": null,
         "path": "config/manifests/builtin.models.jsonc#models/sd3_5_large/candle",
-        "sha256": "90c58fbe5bc48a9c5218abedfabd93c61711cb048b42284139d8dd71395344d5",
+        "sha256": "b818b409fd292f5f179db0f1abba477f8456f83292568c6f9d376a04fb4416bf",
         "recordId": null,
         "envelopeBytes": null,
         "values": {
@@ -4197,7 +4197,7 @@
         "repo": null,
         "revision": null,
         "path": "config/manifests/builtin.models.jsonc#models/sdxl/candle/memoryStrategyContract",
-        "sha256": "90c58fbe5bc48a9c5218abedfabd93c61711cb048b42284139d8dd71395344d5",
+        "sha256": "b818b409fd292f5f179db0f1abba477f8456f83292568c6f9d376a04fb4416bf",
         "recordId": null,
         "envelopeBytes": null,
         "values": {
@@ -4221,7 +4221,7 @@
         "repo": null,
         "revision": null,
         "path": "config/manifests/builtin.models.jsonc#models/sdxl/candle/memoryStrategyContract",
-        "sha256": "90c58fbe5bc48a9c5218abedfabd93c61711cb048b42284139d8dd71395344d5",
+        "sha256": "b818b409fd292f5f179db0f1abba477f8456f83292568c6f9d376a04fb4416bf",
         "recordId": null,
         "envelopeBytes": null,
         "values": {
@@ -4245,7 +4245,7 @@
         "repo": null,
         "revision": null,
         "path": "config/manifests/builtin.models.jsonc#models/sdxl/candle/memoryStrategyContract",
-        "sha256": "90c58fbe5bc48a9c5218abedfabd93c61711cb048b42284139d8dd71395344d5",
+        "sha256": "b818b409fd292f5f179db0f1abba477f8456f83292568c6f9d376a04fb4416bf",
         "recordId": null,
         "envelopeBytes": null,
         "values": {
@@ -4302,7 +4302,7 @@
         "repo": null,
         "revision": null,
         "path": "config/manifests/builtin.models.jsonc#models/sensenova_u1_8b/candle",
-        "sha256": "90c58fbe5bc48a9c5218abedfabd93c61711cb048b42284139d8dd71395344d5",
+        "sha256": "b818b409fd292f5f179db0f1abba477f8456f83292568c6f9d376a04fb4416bf",
         "recordId": null,
         "envelopeBytes": null,
         "values": {
@@ -4323,7 +4323,7 @@
         "repo": null,
         "revision": null,
         "path": "config/manifests/builtin.models.jsonc#models/sensenova_u1_8b/candle",
-        "sha256": "90c58fbe5bc48a9c5218abedfabd93c61711cb048b42284139d8dd71395344d5",
+        "sha256": "b818b409fd292f5f179db0f1abba477f8456f83292568c6f9d376a04fb4416bf",
         "recordId": null,
         "envelopeBytes": null,
         "values": {
@@ -4344,7 +4344,7 @@
         "repo": null,
         "revision": null,
         "path": "config/manifests/builtin.models.jsonc#models/sensenova_u1_8b/candle",
-        "sha256": "90c58fbe5bc48a9c5218abedfabd93c61711cb048b42284139d8dd71395344d5",
+        "sha256": "b818b409fd292f5f179db0f1abba477f8456f83292568c6f9d376a04fb4416bf",
         "recordId": null,
         "envelopeBytes": null,
         "values": {
@@ -4398,7 +4398,7 @@
         "repo": null,
         "revision": null,
         "path": "config/manifests/builtin.models.jsonc#models/sensenova_u1_8b_fast/candle",
-        "sha256": "90c58fbe5bc48a9c5218abedfabd93c61711cb048b42284139d8dd71395344d5",
+        "sha256": "b818b409fd292f5f179db0f1abba477f8456f83292568c6f9d376a04fb4416bf",
         "recordId": null,
         "envelopeBytes": null,
         "values": {
@@ -4419,7 +4419,7 @@
         "repo": null,
         "revision": null,
         "path": "config/manifests/builtin.models.jsonc#models/sensenova_u1_8b_fast/candle",
-        "sha256": "90c58fbe5bc48a9c5218abedfabd93c61711cb048b42284139d8dd71395344d5",
+        "sha256": "b818b409fd292f5f179db0f1abba477f8456f83292568c6f9d376a04fb4416bf",
         "recordId": null,
         "envelopeBytes": null,
         "values": {
@@ -4440,7 +4440,7 @@
         "repo": null,
         "revision": null,
         "path": "config/manifests/builtin.models.jsonc#models/sensenova_u1_8b_fast/candle",
-        "sha256": "90c58fbe5bc48a9c5218abedfabd93c61711cb048b42284139d8dd71395344d5",
+        "sha256": "b818b409fd292f5f179db0f1abba477f8456f83292568c6f9d376a04fb4416bf",
         "recordId": null,
         "envelopeBytes": null,
         "values": {
@@ -4494,7 +4494,7 @@
         "repo": null,
         "revision": null,
         "path": "config/manifests/builtin.models.jsonc#models/sensenova_u1_8b_infographic_v2/candle",
-        "sha256": "90c58fbe5bc48a9c5218abedfabd93c61711cb048b42284139d8dd71395344d5",
+        "sha256": "b818b409fd292f5f179db0f1abba477f8456f83292568c6f9d376a04fb4416bf",
         "recordId": null,
         "envelopeBytes": null,
         "values": {
@@ -4515,7 +4515,7 @@
         "repo": null,
         "revision": null,
         "path": "config/manifests/builtin.models.jsonc#models/sensenova_u1_8b_infographic_v2/candle",
-        "sha256": "90c58fbe5bc48a9c5218abedfabd93c61711cb048b42284139d8dd71395344d5",
+        "sha256": "b818b409fd292f5f179db0f1abba477f8456f83292568c6f9d376a04fb4416bf",
         "recordId": null,
         "envelopeBytes": null,
         "values": {
@@ -4536,7 +4536,7 @@
         "repo": null,
         "revision": null,
         "path": "config/manifests/builtin.models.jsonc#models/sensenova_u1_8b_infographic_v2/candle",
-        "sha256": "90c58fbe5bc48a9c5218abedfabd93c61711cb048b42284139d8dd71395344d5",
+        "sha256": "b818b409fd292f5f179db0f1abba477f8456f83292568c6f9d376a04fb4416bf",
         "recordId": null,
         "envelopeBytes": null,
         "values": {
@@ -4590,7 +4590,7 @@
         "repo": null,
         "revision": null,
         "path": "config/manifests/builtin.models.jsonc#models/sensenova_u1_8b_infographic_v2_fast/candle",
-        "sha256": "90c58fbe5bc48a9c5218abedfabd93c61711cb048b42284139d8dd71395344d5",
+        "sha256": "b818b409fd292f5f179db0f1abba477f8456f83292568c6f9d376a04fb4416bf",
         "recordId": null,
         "envelopeBytes": null,
         "values": {
@@ -4611,7 +4611,7 @@
         "repo": null,
         "revision": null,
         "path": "config/manifests/builtin.models.jsonc#models/sensenova_u1_8b_infographic_v2_fast/candle",
-        "sha256": "90c58fbe5bc48a9c5218abedfabd93c61711cb048b42284139d8dd71395344d5",
+        "sha256": "b818b409fd292f5f179db0f1abba477f8456f83292568c6f9d376a04fb4416bf",
         "recordId": null,
         "envelopeBytes": null,
         "values": {
@@ -4632,7 +4632,7 @@
         "repo": null,
         "revision": null,
         "path": "config/manifests/builtin.models.jsonc#models/sensenova_u1_8b_infographic_v2_fast/candle",
-        "sha256": "90c58fbe5bc48a9c5218abedfabd93c61711cb048b42284139d8dd71395344d5",
+        "sha256": "b818b409fd292f5f179db0f1abba477f8456f83292568c6f9d376a04fb4416bf",
         "recordId": null,
         "envelopeBytes": null,
         "values": {
@@ -4686,7 +4686,7 @@
         "repo": null,
         "revision": null,
         "path": "config/manifests/builtin.models.jsonc#models/sensenova_u1_8b_infographic_v3/candle",
-        "sha256": "90c58fbe5bc48a9c5218abedfabd93c61711cb048b42284139d8dd71395344d5",
+        "sha256": "b818b409fd292f5f179db0f1abba477f8456f83292568c6f9d376a04fb4416bf",
         "recordId": null,
         "envelopeBytes": null,
         "values": {
@@ -4707,7 +4707,7 @@
         "repo": null,
         "revision": null,
         "path": "config/manifests/builtin.models.jsonc#models/sensenova_u1_8b_infographic_v3/candle",
-        "sha256": "90c58fbe5bc48a9c5218abedfabd93c61711cb048b42284139d8dd71395344d5",
+        "sha256": "b818b409fd292f5f179db0f1abba477f8456f83292568c6f9d376a04fb4416bf",
         "recordId": null,
         "envelopeBytes": null,
         "values": {
@@ -4728,7 +4728,7 @@
         "repo": null,
         "revision": null,
         "path": "config/manifests/builtin.models.jsonc#models/sensenova_u1_8b_infographic_v3/candle",
-        "sha256": "90c58fbe5bc48a9c5218abedfabd93c61711cb048b42284139d8dd71395344d5",
+        "sha256": "b818b409fd292f5f179db0f1abba477f8456f83292568c6f9d376a04fb4416bf",
         "recordId": null,
         "envelopeBytes": null,
         "values": {
@@ -4782,7 +4782,7 @@
         "repo": null,
         "revision": null,
         "path": "config/manifests/builtin.models.jsonc#models/sensenova_u1_8b_infographic_v3_fast/candle",
-        "sha256": "90c58fbe5bc48a9c5218abedfabd93c61711cb048b42284139d8dd71395344d5",
+        "sha256": "b818b409fd292f5f179db0f1abba477f8456f83292568c6f9d376a04fb4416bf",
         "recordId": null,
         "envelopeBytes": null,
         "values": {
@@ -4803,7 +4803,7 @@
         "repo": null,
         "revision": null,
         "path": "config/manifests/builtin.models.jsonc#models/sensenova_u1_8b_infographic_v3_fast/candle",
-        "sha256": "90c58fbe5bc48a9c5218abedfabd93c61711cb048b42284139d8dd71395344d5",
+        "sha256": "b818b409fd292f5f179db0f1abba477f8456f83292568c6f9d376a04fb4416bf",
         "recordId": null,
         "envelopeBytes": null,
         "values": {
@@ -4824,7 +4824,7 @@
         "repo": null,
         "revision": null,
         "path": "config/manifests/builtin.models.jsonc#models/sensenova_u1_8b_infographic_v3_fast/candle",
-        "sha256": "90c58fbe5bc48a9c5218abedfabd93c61711cb048b42284139d8dd71395344d5",
+        "sha256": "b818b409fd292f5f179db0f1abba477f8456f83292568c6f9d376a04fb4416bf",
         "recordId": null,
         "envelopeBytes": null,
         "values": {
@@ -4900,7 +4900,7 @@
         "repo": null,
         "revision": null,
         "path": "config/manifests/builtin.models.jsonc#models/wan_2_2/candle",
-        "sha256": "90c58fbe5bc48a9c5218abedfabd93c61711cb048b42284139d8dd71395344d5",
+        "sha256": "b818b409fd292f5f179db0f1abba477f8456f83292568c6f9d376a04fb4416bf",
         "recordId": null,
         "envelopeBytes": null,
         "values": {
@@ -4921,7 +4921,7 @@
         "repo": null,
         "revision": null,
         "path": "config/manifests/builtin.models.jsonc#models/wan_2_2/candle",
-        "sha256": "90c58fbe5bc48a9c5218abedfabd93c61711cb048b42284139d8dd71395344d5",
+        "sha256": "b818b409fd292f5f179db0f1abba477f8456f83292568c6f9d376a04fb4416bf",
         "recordId": null,
         "envelopeBytes": null,
         "values": {
@@ -4942,7 +4942,7 @@
         "repo": null,
         "revision": null,
         "path": "config/manifests/builtin.models.jsonc#models/wan_2_2/candle",
-        "sha256": "90c58fbe5bc48a9c5218abedfabd93c61711cb048b42284139d8dd71395344d5",
+        "sha256": "b818b409fd292f5f179db0f1abba477f8456f83292568c6f9d376a04fb4416bf",
         "recordId": null,
         "envelopeBytes": null,
         "values": {
@@ -4996,7 +4996,7 @@
         "repo": null,
         "revision": null,
         "path": "config/manifests/builtin.models.jsonc#models/wan_2_2_i2v_14b/candle",
-        "sha256": "90c58fbe5bc48a9c5218abedfabd93c61711cb048b42284139d8dd71395344d5",
+        "sha256": "b818b409fd292f5f179db0f1abba477f8456f83292568c6f9d376a04fb4416bf",
         "recordId": null,
         "envelopeBytes": null,
         "values": {
@@ -5017,7 +5017,7 @@
         "repo": null,
         "revision": null,
         "path": "config/manifests/builtin.models.jsonc#models/wan_2_2_i2v_14b/candle",
-        "sha256": "90c58fbe5bc48a9c5218abedfabd93c61711cb048b42284139d8dd71395344d5",
+        "sha256": "b818b409fd292f5f179db0f1abba477f8456f83292568c6f9d376a04fb4416bf",
         "recordId": null,
         "envelopeBytes": null,
         "values": {
@@ -5038,7 +5038,7 @@
         "repo": null,
         "revision": null,
         "path": "config/manifests/builtin.models.jsonc#models/wan_2_2_i2v_14b/candle",
-        "sha256": "90c58fbe5bc48a9c5218abedfabd93c61711cb048b42284139d8dd71395344d5",
+        "sha256": "b818b409fd292f5f179db0f1abba477f8456f83292568c6f9d376a04fb4416bf",
         "recordId": null,
         "envelopeBytes": null,
         "values": {
@@ -5092,7 +5092,7 @@
         "repo": null,
         "revision": null,
         "path": "config/manifests/builtin.models.jsonc#models/wan_2_2_t2v_14b/candle",
-        "sha256": "90c58fbe5bc48a9c5218abedfabd93c61711cb048b42284139d8dd71395344d5",
+        "sha256": "b818b409fd292f5f179db0f1abba477f8456f83292568c6f9d376a04fb4416bf",
         "recordId": null,
         "envelopeBytes": null,
         "values": {
@@ -5113,7 +5113,7 @@
         "repo": null,
         "revision": null,
         "path": "config/manifests/builtin.models.jsonc#models/wan_2_2_t2v_14b/candle",
-        "sha256": "90c58fbe5bc48a9c5218abedfabd93c61711cb048b42284139d8dd71395344d5",
+        "sha256": "b818b409fd292f5f179db0f1abba477f8456f83292568c6f9d376a04fb4416bf",
         "recordId": null,
         "envelopeBytes": null,
         "values": {
@@ -5134,7 +5134,7 @@
         "repo": null,
         "revision": null,
         "path": "config/manifests/builtin.models.jsonc#models/wan_2_2_t2v_14b/candle",
-        "sha256": "90c58fbe5bc48a9c5218abedfabd93c61711cb048b42284139d8dd71395344d5",
+        "sha256": "b818b409fd292f5f179db0f1abba477f8456f83292568c6f9d376a04fb4416bf",
         "recordId": null,
         "envelopeBytes": null,
         "values": {
@@ -5199,7 +5199,7 @@
         "repo": null,
         "revision": null,
         "path": "config/manifests/builtin.models.jsonc#models/z_image/candle/memoryStrategyContract",
-        "sha256": "90c58fbe5bc48a9c5218abedfabd93c61711cb048b42284139d8dd71395344d5",
+        "sha256": "b818b409fd292f5f179db0f1abba477f8456f83292568c6f9d376a04fb4416bf",
         "recordId": null,
         "envelopeBytes": null,
         "values": {
@@ -5224,7 +5224,7 @@
         "repo": null,
         "revision": null,
         "path": "config/manifests/builtin.models.jsonc#models/z_image/candle/memoryStrategyContract",
-        "sha256": "90c58fbe5bc48a9c5218abedfabd93c61711cb048b42284139d8dd71395344d5",
+        "sha256": "b818b409fd292f5f179db0f1abba477f8456f83292568c6f9d376a04fb4416bf",
         "recordId": null,
         "envelopeBytes": null,
         "values": {
@@ -5249,7 +5249,7 @@
         "repo": null,
         "revision": null,
         "path": "config/manifests/builtin.models.jsonc#models/z_image/candle/memoryStrategyContract",
-        "sha256": "90c58fbe5bc48a9c5218abedfabd93c61711cb048b42284139d8dd71395344d5",
+        "sha256": "b818b409fd292f5f179db0f1abba477f8456f83292568c6f9d376a04fb4416bf",
         "recordId": null,
         "envelopeBytes": null,
         "values": {

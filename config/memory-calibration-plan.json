@@ -554,7 +554,7 @@
       },
       "evidenceScope": "authoritative",
       "loadShape": "deferred_materialization",
-      "calibrationFingerprint": "krea-turbo-cuda-phase-curves-v1",
+      "calibrationFingerprint": "krea-2-turbo-bf16-cuda-phase-curves-v1",
       "fixture": "fresh-five-rung-krea-bf16-768-seed16402-step2"
     },
     "krea_2_turbo:bf16:mlx": {
@@ -569,7 +569,7 @@
       },
       "evidenceScope": "authoritative",
       "loadShape": "deferred_materialization",
-      "calibrationFingerprint": "krea-2-mlx-full-ladder-native-pid-attn64m-window1-2026-08-03-v3",
+      "calibrationFingerprint": "krea-2-turbo-bf16-mlx-shared-ladder-v1",
       "fixture": "krea-base-mlx-bf16-1024-seed18377-step2"
     },
     "krea_2_turbo:q4:candle": {
@@ -599,7 +599,7 @@
       },
       "evidenceScope": "authoritative",
       "loadShape": "deferred_materialization",
-      "calibrationFingerprint": "krea-2-mlx-full-ladder-native-pid-attn64m-window1-2026-08-03-v3",
+      "calibrationFingerprint": "krea-2-turbo-q4-mlx-shared-ladder-v1",
       "fixture": "krea-base-mlx-q4-768-seed18377-step2"
     },
     "krea_2_turbo:q8:candle": {
@@ -614,7 +614,7 @@
       },
       "evidenceScope": "authoritative",
       "loadShape": "deferred_materialization",
-      "calibrationFingerprint": "krea-turbo-cuda-phase-curves-v1",
+      "calibrationFingerprint": "krea-2-turbo-q8-cuda-phase-curves-v1",
       "fixture": "fresh-five-rung-krea-q8-768-seed16402-step2"
     },
     "krea_2_turbo:q8:mlx": {
@@ -629,7 +629,7 @@
       },
       "evidenceScope": "authoritative",
       "loadShape": "deferred_materialization",
-      "calibrationFingerprint": "krea-2-mlx-full-ladder-native-pid-attn64m-window1-2026-08-03-v3",
+      "calibrationFingerprint": "krea-2-turbo-q8-mlx-shared-ladder-v1",
       "fixture": "krea-base-mlx-q8-1024-seed18377-step2"
     },
     "krea_realtime_14b:bf16:mlx": {

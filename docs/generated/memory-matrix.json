@@ -1,11 +1,11 @@
 {
   "schemaVersion": 11,
   "generatedFrom": {
-    "sceneWorksRevision": "source-tree:0059d109977708ed0e116e105c57fb52e3034eeeba40eee84e65f95c5e7fd9a8",
+    "sceneWorksRevision": "source-tree:fed982d7b9fea0ceee9513cfd27385899f565b1180fb7b38f4c38a6d8ce13107",
     "sources": {
       "manifest": {
         "path": "config/manifests/builtin.models.jsonc",
-        "sha256": "40a4b8a20da5e1e7e27e50c6cc9920c150bc4ae9561314b393c420af9598d4b0"
+        "sha256": "e156303572dc3255d46a8d613c574bedc36982d7be880b4680d97108258f5dbb"
       },
       "routingCatalog": {
         "path": "crates/sceneworks-core/src/jobs_store/routing/catalog.rs",
@@ -61,7 +61,7 @@
       },
       "memoryRouteRegistry": {
         "path": "crates/sceneworks-worker/src/memory_route_registry.rs",
-        "sha256": "8f3b590f8f6dff3e57a3a214a03ad6c3840cc108c0b648078a6ae8845244d23a"
+        "sha256": "45b680e99dee7225494eff2b8ed7b93ef549f47c9ffd59d17f8038c7e02893fa"
       },
       "instantId": {
         "path": "crates/sceneworks-worker/src/image_jobs/instantid.rs",
@@ -69,11 +69,11 @@
       },
       "anchorStore": {
         "path": "config/memory-anchors.json",
-        "sha256": "18a8b3e3632b4e25ee22e4afebf99d79c281abf4aebeea057c7b6b7af188800a"
+        "sha256": "8bc3b06c8cac7b0506192fca3f4baec33d73e078f2039d5ecad0a283760aa126"
       },
       "anchorLoaderClosures": {
         "path": "config/anchor-loader-closures.json",
-        "sha256": "340a9f2075297c09d0081f36d5e024c1a0b13d52149489b07beed5b8775183e1"
+        "sha256": "0e11d443a3a2773d2f25b9daee914920aa692932d049d5f407e44425e26a3f81"
       },
       "anchorDerivation": {
         "path": "crates/sceneworks-core/src/memory_anchor.rs",
@@ -85,7 +85,7 @@
       },
       "anchorAdmissionImageVram": {
         "path": "crates/sceneworks-worker/src/vram_gate.rs",
-        "sha256": "48903b0c0ec858275b4553c09f923f3bf383a7848dc3edd80b33de09312364ab"
+        "sha256": "7a3524a95e551fcfee066f424e083349b8abf01d89c7d271dd9098cf5c615d00"
       },
       "anchorAdmissionImageCandle": {
         "path": "crates/sceneworks-worker/src/candle_memory_strategy.rs",
