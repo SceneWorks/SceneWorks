@@ -161,8 +161,8 @@
           "q4": 16381470720,
           "q8": 16381470720
         },
-        "source": "config/manifests/builtin.models.jsonc — \"the dense TE (~16 GB) dominates the floor\"; crates/sceneworks-worker/src/image_jobs/tier_resolver.rs `is_dense_te_tier`; isolated artifact: SceneWorks/flux2-klein-9b-mlx@acf05e8d5103838baba6a5e32dc91d6997a56023:q8/text_encoder/model.safetensors",
-        "isolation": "Summed the exact safetensors-header tensor shapes for q8/text_encoder/model.safetensors at immutable revision acf05e8d5103838baba6a5e32dc91d6997a56023; floating tensors were counted at the BF16 runtime load dtype for the mlx lane, while integer metadata tensors retained their native width. This is isolated weight residency, excluding activations and allocator overhead.",
+        "source": "config/manifests/builtin.models.jsonc — \"the dense TE (~16 GB) dominates the floor\"; crates/sceneworks-worker/src/image_jobs/tier_resolver.rs `is_dense_te_tier`; isolated artifact: SceneWorks/flux2-klein-9b-mlx@1902693279fcfb828919370dfac2b8922d99499a:q8/text_encoder/model.safetensors",
+        "isolation": "Summed the exact safetensors-header tensor shapes for q8/text_encoder/model.safetensors at immutable revision 1902693279fcfb828919370dfac2b8922d99499a; floating tensors were counted at the BF16 runtime load dtype for the mlx lane, while integer metadata tensors retained their native width. This is isolated weight residency, excluding activations and allocator overhead.",
         "triageDecision": "measure",
         "reviewedCause": "packing-exception",
         "triageNote": "Measure, not eliminate: the provider deliberately excludes this component from packing, and the tree contains no verified quality-neutral lower-tier artifact that could replace it before calibration.",
@@ -188,8 +188,8 @@
           "q4": 32762941440,
           "q8": 32762941440
         },
-        "source": "config/manifests/builtin.models.jsonc — \"the dense TE (~16 GB) dominates the floor\"; crates/sceneworks-worker/src/image_jobs/tier_resolver.rs `is_dense_te_tier`; isolated artifact: SceneWorks/flux2-klein-9b-mlx@acf05e8d5103838baba6a5e32dc91d6997a56023:q8/text_encoder/model.safetensors",
-        "isolation": "Summed the exact safetensors-header tensor shapes for q8/text_encoder/model.safetensors at immutable revision acf05e8d5103838baba6a5e32dc91d6997a56023; floating tensors were counted at the F32 runtime load dtype for the candle lane, while integer metadata tensors retained their native width. This is isolated weight residency, excluding activations and allocator overhead.",
+        "source": "config/manifests/builtin.models.jsonc — \"the dense TE (~16 GB) dominates the floor\"; crates/sceneworks-worker/src/image_jobs/tier_resolver.rs `is_dense_te_tier`; isolated artifact: SceneWorks/flux2-klein-9b-mlx@1902693279fcfb828919370dfac2b8922d99499a:q8/text_encoder/model.safetensors",
+        "isolation": "Summed the exact safetensors-header tensor shapes for q8/text_encoder/model.safetensors at immutable revision 1902693279fcfb828919370dfac2b8922d99499a; floating tensors were counted at the F32 runtime load dtype for the candle lane, while integer metadata tensors retained their native width. This is isolated weight residency, excluding activations and allocator overhead.",
         "triageDecision": "measure",
         "reviewedCause": "packing-exception",
         "triageNote": "Measure, not eliminate: the provider deliberately excludes this component from packing, and the tree contains no verified quality-neutral lower-tier artifact that could replace it before calibration.",
@@ -215,8 +215,8 @@
           "q4": 16381470720,
           "q8": 16381470720
         },
-        "source": "config/manifests/builtin.models.jsonc `flux2_klein_9b_kv.mlx.denseTextEncoderTier`; isolated artifact: SceneWorks/flux2-klein-9b-kv-mlx@406265beebe141024a06e24038c3713cf7af87d8:q8/text_encoder/model.safetensors",
-        "isolation": "Summed the exact safetensors-header tensor shapes for q8/text_encoder/model.safetensors at immutable revision 406265beebe141024a06e24038c3713cf7af87d8; floating tensors were counted at the BF16 runtime load dtype for the mlx lane, while integer metadata tensors retained their native width. This is isolated weight residency, excluding activations and allocator overhead.",
+        "source": "config/manifests/builtin.models.jsonc `flux2_klein_9b_kv.mlx.denseTextEncoderTier`; isolated artifact: SceneWorks/flux2-klein-9b-kv-mlx@bbf22de8d654789de3b177632d2e283cc4f77729:q8/text_encoder/model.safetensors",
+        "isolation": "Summed the exact safetensors-header tensor shapes for q8/text_encoder/model.safetensors at immutable revision bbf22de8d654789de3b177632d2e283cc4f77729; floating tensors were counted at the BF16 runtime load dtype for the mlx lane, while integer metadata tensors retained their native width. This is isolated weight residency, excluding activations and allocator overhead.",
         "triageDecision": "measure",
         "reviewedCause": "packing-exception",
         "triageNote": "Measure, not eliminate: the provider deliberately excludes this component from packing, and the tree contains no verified quality-neutral lower-tier artifact that could replace it before calibration."
@@ -241,8 +241,8 @@
           "q4": 32762941440,
           "q8": 32762941440
         },
-        "source": "crates/media/candle-gen/candle-gen-flux2/src/lib.rs — the pipeline's `dtype: DType::F32` feeds `component_vb(\"text_encoder\")`; crates/sceneworks-worker/src/engines.rs maps sceneworks_id \"flux2_klein_9b_kv\" to engine_id \"flux2_klein_9b\", so the same candle FLUX.2 provider serves it; isolated artifact: SceneWorks/flux2-klein-9b-kv-mlx@406265beebe141024a06e24038c3713cf7af87d8:q8/text_encoder/model.safetensors",
-        "isolation": "Summed the exact safetensors-header tensor shapes for q8/text_encoder/model.safetensors at immutable revision 406265beebe141024a06e24038c3713cf7af87d8; floating tensors were counted at the F32 runtime load dtype for the candle lane, while integer metadata tensors retained their native width. Same element count as the mlx sibling row (8,190,735,360), which counts them at 2 bytes. This is isolated weight residency, excluding activations and allocator overhead.",
+        "source": "crates/media/candle-gen/candle-gen-flux2/src/lib.rs — the pipeline's `dtype: DType::F32` feeds `component_vb(\"text_encoder\")`; crates/sceneworks-worker/src/engines.rs maps sceneworks_id \"flux2_klein_9b_kv\" to engine_id \"flux2_klein_9b\", so the same candle FLUX.2 provider serves it; isolated artifact: SceneWorks/flux2-klein-9b-kv-mlx@bbf22de8d654789de3b177632d2e283cc4f77729:q8/text_encoder/model.safetensors",
+        "isolation": "Summed the exact safetensors-header tensor shapes for q8/text_encoder/model.safetensors at immutable revision bbf22de8d654789de3b177632d2e283cc4f77729; floating tensors were counted at the F32 runtime load dtype for the candle lane, while integer metadata tensors retained their native width. Same element count as the mlx sibling row (8,190,735,360), which counts them at 2 bytes. This is isolated weight residency, excluding activations and allocator overhead.",
         "triageDecision": "measure",
         "reviewedCause": "packing-exception",
         "triageNote": "Measure, not eliminate: the provider deliberately excludes this component from packing, and the tree contains no verified quality-neutral lower-tier artifact that could replace it before calibration.",
@@ -1160,8 +1160,8 @@
           "q4": 336185484,
           "q8": 336185484
         },
-        "source": "crates/media/mlx-gen/mlx-gen-flux2/src/vae.rs; isolated artifact: SceneWorks/flux2-klein-9b-mlx@acf05e8d5103838baba6a5e32dc91d6997a56023:q8/vae/diffusion_pytorch_model.safetensors",
-        "isolation": "Selected encoder, decoder, quant_conv, post_quant_conv, bn.running_mean, and bn.running_var tensor shapes from q8/vae/diffusion_pytorch_model.safetensors at immutable revision acf05e8d5103838baba6a5e32dc91d6997a56023, totaling 84,046,371 elements. The unused `bn.num_batches_tracked` metadata scalar is excluded before applying the four-byte F32 runtime width. This is isolated weight residency, excluding activations and allocator overhead. VAE scope: full autoencoder (encoder + decoder), representing worst-case weight residency across advertised modes.",
+        "source": "crates/media/mlx-gen/mlx-gen-flux2/src/vae.rs; isolated artifact: SceneWorks/flux2-klein-9b-mlx@1902693279fcfb828919370dfac2b8922d99499a:q8/vae/diffusion_pytorch_model.safetensors",
+        "isolation": "Selected encoder, decoder, quant_conv, post_quant_conv, bn.running_mean, and bn.running_var tensor shapes from q8/vae/diffusion_pytorch_model.safetensors at immutable revision 1902693279fcfb828919370dfac2b8922d99499a, totaling 84,046,371 elements. The unused `bn.num_batches_tracked` metadata scalar is excluded before applying the four-byte F32 runtime width. This is isolated weight residency, excluding activations and allocator overhead. VAE scope: full autoencoder (encoder + decoder), representing worst-case weight residency across advertised modes.",
         "triageDecision": "measure",
         "reviewedCause": "structural",
         "triageNote": "Measure, not eliminate: the provider audit confirms there are no packer-targeted Linear leaves, so re-hosting cannot remove this residency."
@@ -1188,8 +1188,8 @@
           "q4": 336185484,
           "q8": 336185484
         },
-        "source": "crates/media/mlx-gen/mlx-gen-flux2/src/vae.rs; isolated artifact: SceneWorks/flux2-klein-9b-kv-mlx@406265beebe141024a06e24038c3713cf7af87d8:q8/vae/diffusion_pytorch_model.safetensors",
-        "isolation": "Selected encoder, decoder, quant_conv, post_quant_conv, bn.running_mean, and bn.running_var tensor shapes from q8/vae/diffusion_pytorch_model.safetensors at immutable revision 406265beebe141024a06e24038c3713cf7af87d8, totaling 84,046,371 elements. The unused `bn.num_batches_tracked` metadata scalar is excluded before applying the four-byte F32 runtime width. This is isolated weight residency, excluding activations and allocator overhead. VAE scope: full autoencoder (encoder + decoder), representing worst-case weight residency across advertised modes.",
+        "source": "crates/media/mlx-gen/mlx-gen-flux2/src/vae.rs; isolated artifact: SceneWorks/flux2-klein-9b-kv-mlx@bbf22de8d654789de3b177632d2e283cc4f77729:q8/vae/diffusion_pytorch_model.safetensors",
+        "isolation": "Selected encoder, decoder, quant_conv, post_quant_conv, bn.running_mean, and bn.running_var tensor shapes from q8/vae/diffusion_pytorch_model.safetensors at immutable revision bbf22de8d654789de3b177632d2e283cc4f77729, totaling 84,046,371 elements. The unused `bn.num_batches_tracked` metadata scalar is excluded before applying the four-byte F32 runtime width. This is isolated weight residency, excluding activations and allocator overhead. VAE scope: full autoencoder (encoder + decoder), representing worst-case weight residency across advertised modes.",
         "triageDecision": "measure",
         "reviewedCause": "structural",
         "triageNote": "Measure, not eliminate: the provider audit confirms there are no packer-targeted Linear leaves, so re-hosting cannot remove this residency."

@@ -8626,7 +8626,7 @@
           // (`mlx.denseTextEncoderTier`). Replaces the old gated 49 GiB whole-repo + load-time quantize.
           "provider": "huggingface",
           "repo": "SceneWorks/flux2-klein-9b-mlx",
-          "revision": "acf05e8d5103838baba6a5e32dc91d6997a56023",
+          "revision": "1902693279fcfb828919370dfac2b8922d99499a",
           "variant": "q4",
           "default": true,
           "files": ["q4/*"],
@@ -8636,7 +8636,7 @@
         {
           "provider": "huggingface",
           "repo": "SceneWorks/flux2-klein-9b-mlx",
-          "revision": "acf05e8d5103838baba6a5e32dc91d6997a56023",
+          "revision": "1902693279fcfb828919370dfac2b8922d99499a",
           "variant": "q8",
           "files": ["q8/*"],
           "estimatedSizeBytes": 26100000000,
@@ -8647,7 +8647,7 @@
           // per-variant tracking (sc-8508/8509).
           "provider": "huggingface",
           "repo": "SceneWorks/flux2-klein-9b-mlx",
-          "revision": "acf05e8d5103838baba6a5e32dc91d6997a56023",
+          "revision": "1902693279fcfb828919370dfac2b8922d99499a",
           "variant": "bf16",
           "files": ["bf16/*"],
           "estimatedSizeBytes": 34600000000,
@@ -9002,7 +9002,7 @@
           // load via `mlx.denseTextEncoderTier`). Replaces the old gated whole-repo + load-time quantize.
           "provider": "huggingface",
           "repo": "SceneWorks/flux2-klein-9b-kv-mlx",
-          "revision": "406265beebe141024a06e24038c3713cf7af87d8",
+          "revision": "bbf22de8d654789de3b177632d2e283cc4f77729",
           "variant": "q4",
           "default": true,
           "files": ["q4/*"],
@@ -9012,7 +9012,7 @@
         {
           "provider": "huggingface",
           "repo": "SceneWorks/flux2-klein-9b-kv-mlx",
-          "revision": "406265beebe141024a06e24038c3713cf7af87d8",
+          "revision": "bbf22de8d654789de3b177632d2e283cc4f77729",
           "variant": "q8",
           "files": ["q8/*"],
           "estimatedSizeBytes": 26100000000,
@@ -9021,7 +9021,7 @@
         {
           "provider": "huggingface",
           "repo": "SceneWorks/flux2-klein-9b-kv-mlx",
-          "revision": "406265beebe141024a06e24038c3713cf7af87d8",
+          "revision": "bbf22de8d654789de3b177632d2e283cc4f77729",
           "variant": "bf16",
           "files": ["bf16/*"],
           "estimatedSizeBytes": 34600000000,
@@ -25612,7 +25612,7 @@
             },
             "productionClosure": {
               "schemaVersion": 1,
-              "sha256": "ba76ab38f376d19b9b3e8884f970eea46415b9587847b797ed7291f11ec45766",
+              "sha256": "3719d40aa3ec6a99a17e7debca2c378fe19b5772dfd6a4cf9d566186b39715aa",
               "entries": [
                 {
                   "path": ".github/workflows/starvector-terminal-provision.yml",
@@ -25627,12 +25627,12 @@
                 {
                   "path": "Cargo.lock",
                   "byteSize": 248799,
-                  "sha256": "62b739d06a5532986428c785ef494d52d582ffb7f8c90eb5fe6e91339ac27cd7"
+                  "sha256": "4f1901b324ba4a2de791d98293325c052ae2c33d4fd9af9b97df19aaa9a3bf49"
                 },
                 {
                   "path": "Cargo.toml",
                   "byteSize": 8688,
-                  "sha256": "aab38e259b97b77a7edd3824a28b4c8b1c3ae238dfed6788dbad783377595486"
+                  "sha256": "4ac7f5d1c0c574cfe88f889ed2868fbe73b38afd389e34ff9dc910e766305ee3"
                 },
                 {
                   "path": "apps/rust-api/src/main.rs",
@@ -25642,7 +25642,7 @@
                 {
                   "path": "crates/sceneworks-worker/Cargo.toml",
                   "byteSize": 8839,
-                  "sha256": "7880e024d4858555a407e3eb376640b8a2a0f5329798eefa23653239dc85c262"
+                  "sha256": "0a65c5df67c41e02661f52ad4dc14e837192a3a3a9cf392a6f63aab7ba9f7fd7"
                 },
                 {
                   "path": "crates/sceneworks-worker/src/bin/starvector_terminal_lease.rs",
@@ -25666,8 +25666,8 @@
                 },
                 {
                   "path": "crates/sceneworks-worker/src/lib.rs",
-                  "byteSize": 146088,
-                  "sha256": "bedf5c216ab6530c1745052703c97a95c40a1d535e1bb749154b5a95e657383e"
+                  "byteSize": 146546,
+                  "sha256": "69e42ac0cf96661a9e55acaf15997f7c38b8d3d4fd6a20cc9b6b1e40ce806353"
                 },
                 {
                   "path": "crates/sceneworks-worker/src/model_jobs.rs",
