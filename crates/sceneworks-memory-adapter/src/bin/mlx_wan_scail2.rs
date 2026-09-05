@@ -160,24 +160,36 @@ const ARMS: [Arm; 4] = [TI2V_5B, T2V_A14B, I2V_A14B, SCAIL2];
 /// than a mislabelled anchor. Checked BEFORE the load as well, against the plan, so a row still
 /// carrying a weights-free conformance string fails in milliseconds.
 fn production_fingerprint(arm: Arm, tier: &str) -> Result<String, String> {
-    let tier_token = match tier {
-        "bf16" => "dense",
-        other => other,
-    };
     Ok(match arm.provider {
         // sc-19236's own per-tier table (`mlx-gen-wan/src/memory_strategy.rs`), which names the
         // packing group and the Q8 text-encoder floor in the packed cells.
-        "wan2_2_ti2v_5b" => match tier {
+        WAN_TI2V_5B_PROVIDER => match tier {
             "bf16" => "sc-19236-wan2-2-ti2v-5b-mlx-dense-v1".to_owned(),
             "q4" => "sc-19236-wan2-2-ti2v-5b-mlx-q4-g64-teq8-v1".to_owned(),
             "q8" => "sc-19236-wan2-2-ti2v-5b-mlx-q8-g64-teq8-v1".to_owned(),
             other => return Err(format!("{LABEL}: unsupported TI2V-5B tier {other:?}")),
         },
-        // sc-22736's shared A14B authority (`gen_core::wan_i2v_memory`).
-        "wan2_2_t2v_14b" => format!("sc-22736-wan2-2-t2v-a14b-mlx-{tier_token}-v1"),
-        "wan2_2_i2v_14b" => format!("sc-22736-wan2-2-i2v-a14b-mlx-{tier_token}-v1"),
+        // sc-22736's shared A14B authority (`gen_core::wan_i2v_memory`), whose dense token is
+        // `dense`. The tier is matched by name, never interpolated, so an unrecognized tier is a
+        // refusal rather than a plausible-looking identity no engine publishes.
+        WAN_T2V_A14B_PROVIDER | WAN_I2V_A14B_PROVIDER => {
+            let route = if arm.provider == WAN_T2V_A14B_PROVIDER {
+                "t2v"
+            } else {
+                "i2v"
+            };
+            let token = match tier {
+                "bf16" => "dense",
+                "q4" | "q8" => tier,
+                other => return Err(format!("{LABEL}: unsupported A14B tier {other:?}")),
+            };
+            format!("sc-22736-wan2-2-{route}-a14b-mlx-{token}-v1")
+        }
         // sc-22736's SCAIL-2 table, whose tier token is the DIRECTORY name, not `dense`.
-        "scail2_14b" => format!("scail2-14b-{tier}-mlx-resident-eager-v1"),
+        SCAIL2_PROVIDER => match tier {
+            "bf16" | "q4" | "q8" => format!("scail2-14b-{tier}-mlx-resident-eager-v1"),
+            other => return Err(format!("{LABEL}: unsupported SCAIL-2 tier {other:?}")),
+        },
         other => return Err(format!("{LABEL} does not implement provider {other:?}")),
     })
 }
@@ -594,6 +606,31 @@ fn complete_sweep(request: &Value) -> Result<Value, String> {
 }
 
 /// The `mlx:{wan2_2_ti2v_5b,wan2_2_t2v_14b,wan2_2_i2v_14b,scail2_14b}` arm (sc-22736).
+/// What this record claims nothing about, spelled per arm.
+///
+/// The A14B routes are measured with NO adapters at their native multi-step CFG recipe, while the
+/// worker runs them with the Lightning distill DEFAULT-ON (`video_jobs/wan.rs`
+/// `wan_lightning_on`, sc-10047): the record names that exclusion so it cannot be read as the
+/// default composition's evidence.
+fn lifecycle_blocker(arm: Arm) -> String {
+    let mut blocker = concat!(
+        "this arm executes the measured render plus two unscoped warm repeats on the loaded ",
+        "provider; it opens no memory-strategy request scope and injects no calibration fault, so ",
+        "the scoped cancellation and authorized-error scenarios and their recovery renders are ",
+        "unexecuted. This record claims nothing about them"
+    )
+    .to_owned();
+    if matches!(arm.route, Some(WanI2vRoute::T2v14b | WanI2vRoute::I2v14b)) {
+        blocker.push_str(&format!(
+            ". The A14B render is measured with NO adapters at the native multi-step recipe \
+             (steps: {}): the Lightning distill the worker attaches DEFAULT-ON is OFF here, so \
+             this record does not price the default Lightning composition",
+            arm.steps
+        ));
+    }
+    blocker
+}
+
 pub(super) fn run(request: &Value) -> Result<Value, String> {
     // Everything cheap and refusable first, so a mis-planned row costs milliseconds rather than a
     // multi-gigabyte load: the member, the mode, the geometry against the ENGINE's own menus, the
@@ -877,12 +914,8 @@ pub(super) fn run(request: &Value) -> Result<Value, String> {
         ));
     }
 
-    let lifecycle_blocker = concat!(
-        "this arm executes the measured render plus two unscoped warm repeats on the loaded ",
-        "provider; it opens no memory-strategy request scope and injects no calibration fault, so ",
-        "the scoped cancellation and authorized-error scenarios and their recovery renders are ",
-        "unexecuted. This record claims nothing about them"
-    );
+    let lifecycle_blocker = lifecycle_blocker(arm);
+    let lifecycle_blocker = lifecycle_blocker.as_str();
     let mut fragment = json!({
         "status": "runtime_complete",
         "strategy": strategy,
@@ -1012,12 +1045,12 @@ mod tests {
     fn every_arm_plans_a_geometry_its_own_engine_admits() {
         for arm in ARMS {
             let geometry = match arm.provider {
-                "wan2_2_ti2v_5b" => Geometry {
+                WAN_TI2V_5B_PROVIDER => Geometry {
                     width: 832,
                     height: 480,
                     frames: 121,
                 },
-                "scail2_14b" => Geometry {
+                SCAIL2_PROVIDER => Geometry {
                     width: 832,
                     height: 480,
                     frames: 77,
@@ -1038,6 +1071,64 @@ mod tests {
             assert!(
                 validate_geometry(arm, crossed).is_err(),
                 "{}: an off-menu frame count must be refused",
+                arm.provider
+            );
+        }
+    }
+
+    /// An unrecognized tier is refused BY NAME on every arm, never minted into a plausible identity
+    /// (sc-22736 review). Mutation that reds this: interpolating `{tier}` into the A14B or SCAIL-2
+    /// string without the match.
+    #[test]
+    fn an_unrecognized_tier_is_refused_by_name_on_every_arm() {
+        for arm in ARMS {
+            for tier in ["nvfp4", "fp8", "dense", ""] {
+                let error = production_fingerprint(arm, tier)
+                    .err()
+                    .unwrap_or_else(|| panic!("{} must refuse tier {tier:?}", arm.provider));
+                assert!(
+                    error.contains(&format!("{tier:?}")),
+                    "{}: the refusal must name the tier: {error}",
+                    arm.provider
+                );
+                assert!(
+                    !error.contains("-v1"),
+                    "{}: minted an identity: {error}",
+                    arm.provider
+                );
+            }
+        }
+    }
+
+    /// The two A14B records name the Lightning exclusion — they are measured with no adapters at
+    /// the native 40-step recipe while the worker attaches the distill DEFAULT-ON — and the other
+    /// two, which have no such default, do not (sc-22736 review).
+    #[test]
+    fn the_a14b_blockers_name_the_lightning_off_measurement() {
+        for arm in [T2V_A14B, I2V_A14B] {
+            let blocker = lifecycle_blocker(arm);
+            assert!(blocker.contains("Lightning"), "{}: {blocker}", arm.provider);
+            assert!(
+                blocker.contains("DEFAULT-ON"),
+                "{}: {blocker}",
+                arm.provider
+            );
+            assert!(
+                blocker.contains("NO adapters"),
+                "{}: {blocker}",
+                arm.provider
+            );
+            assert!(
+                blocker.contains(&format!("steps: {}", arm.steps)),
+                "{}: {blocker}",
+                arm.provider
+            );
+        }
+        for arm in [TI2V_5B, SCAIL2] {
+            let blocker = lifecycle_blocker(arm);
+            assert!(
+                !blocker.contains("Lightning"),
+                "{}: {blocker}",
                 arm.provider
             );
         }

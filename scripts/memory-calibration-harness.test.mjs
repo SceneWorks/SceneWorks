@@ -1173,6 +1173,62 @@ test("the anchor plan schema cannot express a duplicate cell or any sweep", asyn
   assert.throws(() => validatePlan(batched), /anchor plan is invalid/);
 });
 
+// sc-22736: the ONE per-anchor composition freedom — `rung: "resident"` on a candle VIDEO cell whose
+// provider implements no staged residency (Candle SCAIL-2) — and its boundaries. Mutations this
+// kills: `planAnchor` ignoring `anchor.rung` (the SCAIL-2 candle rows would plan `staged_residency`
+// again and fail `validate_selection` on every attempt); deriving `engagedRungs` from the lane
+// default instead of the rung; dropping the still refusal in `validatePlan`; widening the schema
+// enum to a bounded rung.
+test("a candle VIDEO anchor may plan the resident composition, a still may not, and nothing deeper is expressible", async () => {
+  const video = { geometry: { width: 832, height: 480, batch: 1, frames: 77 }, mode: "animation" };
+  const resident = anchorPlanFixture("fixture_model:q4:candle", { ...video, rung: "resident" });
+  assert.equal(validatePlan(resident), resident);
+  assert.deepEqual(planAnchor(resident, "fixture_model:q4:candle").strategy, {
+    rung: "resident",
+    engagedRungs: ["resident"],
+    parameters: {},
+  });
+  // The lane default still applies when the row states nothing.
+  const defaulted = anchorPlanFixture("fixture_model:q4:candle", video);
+  assert.deepEqual(planAnchor(defaulted, "fixture_model:q4:candle").strategy, {
+    rung: ANCHOR_STRATEGY.candle.rung,
+    engagedRungs: [...ANCHOR_STRATEGY.candle.engagedRungs],
+    parameters: {},
+  });
+  // Stating the lane default explicitly is the same plan.
+  const explicit = anchorPlanFixture("fixture_model:q4:candle", { ...video, rung: "staged_residency" });
+  assert.deepEqual(
+    planAnchor(explicit, "fixture_model:q4:candle").strategy,
+    planAnchor(defaulted, "fixture_model:q4:candle").strategy,
+  );
+  // A candle STILL may not plan resident: the candle image law prices only the staged composition.
+  assert.throws(
+    () => validatePlan(anchorPlanFixture("fixture_model:q4:candle", { rung: "resident" })),
+    /candle STILL anchor must engage staged_residency/,
+  );
+  // An MLX still may (its law accepts every composition), and it is the MLX default anyway.
+  const mlxStill = anchorPlanFixture("fixture_model:q4:mlx", { rung: "resident" });
+  assert.equal(planAnchor(mlxStill, "fixture_model:q4:mlx").strategy.rung, "resident");
+  // No bounded rung is expressible, on either lane, still or video.
+  for (const rung of ["bounded_decode", "bounded_attention", "bounded_transformer_residency", "none"]) {
+    assert.throws(
+      () => validatePlan(anchorPlanFixture("fixture_model:q4:candle", { ...video, rung })),
+      /anchor plan is invalid/,
+      rung,
+    );
+  }
+  // The shipped plan: every candle SCAIL-2 cell plans resident, and it is the ONLY candle cell
+  // that does — a second resident candle row would need its own contract-level reason.
+  const plan = JSON.parse(await readFile(new URL("../config/memory-calibration-plan.json", import.meta.url)));
+  const residentCandle = Object.keys(plan.anchors)
+    .filter((key) => key.endsWith(":candle") && plan.anchors[key].rung === "resident")
+    .sort();
+  assert.deepEqual(residentCandle, ["scail2_14b:bf16:candle", "scail2_14b:q4:candle", "scail2_14b:q8:candle"]);
+  for (const key of residentCandle) {
+    assert.deepEqual(planAnchor(plan, key).strategy.engagedRungs, ["resident"], key);
+  }
+});
+
 // sc-22514 / epic acceptance test 1, second half: ONE command captures ONE anchor and writes ONE
 // record, with no campaign, resume or currency ceremony — and the record it writes is one the
 // anchor extractor can consume.

@@ -1865,6 +1865,7 @@
       "provider": "scail2_14b",
       "mode": "animation",
       "overlay": "none",
+      "rung": "resident",
       "geometry": {
         "width": 832,
         "height": 480,
@@ -1895,6 +1896,7 @@
       "provider": "scail2_14b",
       "mode": "animation",
       "overlay": "none",
+      "rung": "resident",
       "geometry": {
         "width": 832,
         "height": 480,
@@ -1925,6 +1927,7 @@
       "provider": "scail2_14b",
       "mode": "animation",
       "overlay": "none",
+      "rung": "resident",
       "geometry": {
         "width": 832,
         "height": 480,

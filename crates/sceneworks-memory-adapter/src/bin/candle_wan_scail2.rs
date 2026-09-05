@@ -214,18 +214,27 @@ fn production_fingerprint(arm: Arm, tier: &str) -> Result<String, String> {
             "q4" | "q8" => format!("sc-19223-wan2-2-ti2v-5b-candle-{tier}-sequential-load-v1"),
             other => return Err(format!("{LABEL}: unsupported TI2V-5B tier {other:?}")),
         },
-        // sc-22736's shared A14B authority, whose dense token is `dense`.
+        // sc-22736's shared A14B authority, whose dense token is `dense`. The tier is matched by
+        // name, never interpolated, so an unrecognized tier is a refusal rather than a
+        // plausible-looking identity no engine publishes.
         WAN_T2V_A14B_ID | WAN_I2V_A14B_ID => {
             let route = if arm.provider == WAN_T2V_A14B_ID {
                 "t2v"
             } else {
                 "i2v"
             };
-            let token = if tier == "bf16" { "dense" } else { tier };
+            let token = match tier {
+                "bf16" => "dense",
+                "q4" | "q8" => tier,
+                other => return Err(format!("{LABEL}: unsupported A14B tier {other:?}")),
+            };
             format!("sc-22736-wan2-2-{route}-a14b-candle-{token}-v1")
         }
         // sc-22736's SCAIL-2 table, whose tier token is the DIRECTORY name.
-        SCAIL2_ID => format!("scail2-14b-{tier}-candle-resident-eager-v1"),
+        SCAIL2_ID => match tier {
+            "bf16" | "q4" | "q8" => format!("scail2-14b-{tier}-candle-resident-eager-v1"),
+            other => return Err(format!("{LABEL}: unsupported SCAIL-2 tier {other:?}")),
+        },
         other => return Err(format!("{LABEL} does not implement provider {other:?}")),
     })
 }
@@ -261,6 +270,11 @@ fn arm(request: &Value) -> Result<Arm, String> {
 /// so `candle.rs`'s dispatch can route by provider id alone.
 pub(super) fn implements(provider: &str) -> bool {
     ARMS.iter().any(|arm| arm.provider == provider)
+}
+
+/// The four provider ids, in arm order, for `candle.rs`'s pre-gate agreement test.
+pub(super) fn providers() -> [&'static str; 4] {
+    ARMS.map(|arm| arm.provider)
 }
 
 /// The engine's own answer to "does this route admit this bucket at this rate?".
@@ -558,6 +572,30 @@ fn context(
     }
 }
 
+/// What this record claims nothing about, spelled per arm.
+///
+/// The A14B routes are measured with NO adapters at their native multi-step CFG recipe, while the
+/// worker runs them with the Lightning distill DEFAULT-ON (`video_jobs/wan.rs`
+/// `wan_lightning_on`, sc-10047): the record names that exclusion so it cannot be read as the
+/// default composition's evidence.
+fn blocker(arm: Arm) -> String {
+    let mut blocker = concat!(
+        "this arm drives the provider's own request scope for one measured render; it runs no warm ",
+        "repeat and injects no calibration fault, so the determinism, cancellation and ",
+        "authorized-error scenarios are unexecuted and this record claims nothing about them"
+    )
+    .to_owned();
+    if matches!(arm.route, Some(WanI2vRoute::T2v14b | WanI2vRoute::I2v14b)) {
+        blocker.push_str(&format!(
+            ". The A14B render is measured with NO adapters at the native multi-step recipe \
+             (steps: {}): the Lightning distill the worker attaches DEFAULT-ON is OFF here, so \
+             this record does not price the default Lightning composition",
+            arm.steps
+        ));
+    }
+    blocker
+}
+
 /// The `candle:{wan2_2_ti2v_5b,wan2_2_t2v_14b,wan2_2_i2v_14b,scail2_14b}` arm (sc-22736).
 pub(super) fn run(request: &Value) -> Result<Value, String> {
     let arm = arm(request)?;
@@ -835,11 +873,8 @@ pub(super) fn run(request: &Value) -> Result<Value, String> {
         cumulative_run_peak_bytes,
         [conditioning_bytes, denoise_bytes, decode_bytes],
     )?;
-    let blocker = concat!(
-        "this arm drives the provider's own request scope for one measured render; it runs no warm ",
-        "repeat and injects no calibration fault, so the determinism, cancellation and ",
-        "authorized-error scenarios are unexecuted and this record claims nothing about them"
-    );
+    let blocker = blocker(arm);
+    let blocker = blocker.as_str();
     let mut fragment = protocol::plain_gated_fragment(
         request,
         arm.execution_path,
@@ -963,6 +998,64 @@ mod tests {
                 family.layout,
                 Layout::Tiered,
                 "SCAIL-2 ships one repository with all three tiers to both lanes"
+            );
+        }
+    }
+
+    /// An unrecognized tier is refused BY NAME on every arm, never minted into a plausible identity
+    /// (sc-22736 review). Mutation that reds this: interpolating `{tier}` into the A14B or SCAIL-2
+    /// string without the match.
+    #[test]
+    fn an_unrecognized_tier_is_refused_by_name_on_every_arm() {
+        for arm in ARMS {
+            for tier in ["nvfp4", "fp8", "dense", ""] {
+                let error = production_fingerprint(arm, tier)
+                    .err()
+                    .unwrap_or_else(|| panic!("{} must refuse tier {tier:?}", arm.provider));
+                assert!(
+                    error.contains(&format!("{tier:?}")),
+                    "{}: the refusal must name the tier: {error}",
+                    arm.provider
+                );
+                assert!(
+                    !error.contains("-v1"),
+                    "{}: minted an identity: {error}",
+                    arm.provider
+                );
+            }
+        }
+    }
+
+    /// The two A14B records name the Lightning exclusion — they are measured with no adapters at
+    /// the native 40-step recipe while the worker attaches the distill DEFAULT-ON — and the other
+    /// two, which have no such default, do not (sc-22736 review).
+    #[test]
+    fn the_a14b_blockers_name_the_lightning_off_measurement() {
+        for arm in [T2V_A14B, I2V_A14B] {
+            let blocker = blocker(arm);
+            assert!(blocker.contains("Lightning"), "{}: {blocker}", arm.provider);
+            assert!(
+                blocker.contains("DEFAULT-ON"),
+                "{}: {blocker}",
+                arm.provider
+            );
+            assert!(
+                blocker.contains("NO adapters"),
+                "{}: {blocker}",
+                arm.provider
+            );
+            assert!(
+                blocker.contains(&format!("steps: {}", arm.steps)),
+                "{}: {blocker}",
+                arm.provider
+            );
+        }
+        for arm in [TI2V_5B, SCAIL2] {
+            let blocker = blocker(arm);
+            assert!(
+                !blocker.contains("Lightning"),
+                "{}: {blocker}",
+                arm.provider
             );
         }
     }

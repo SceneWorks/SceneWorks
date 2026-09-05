@@ -790,6 +790,80 @@ fn load(request: &Value) -> Result<Loaded, String> {
   );
 });
 
+// sc-22736. A VIDEO arm is dispatched by `run()` BEFORE the shared still gates — the LTX-2.5 shape
+// (`if provider == LTX25_ID { return … }`) and the Wan/SCAIL-2 shape (`if matches!(provider, A | B)
+// { return module::run(request); }`) — so it appears in NO refusal-carrying match and the
+// intersection rule alone reported every such lane `uncapturable` (candle:ltx_2_5_distilled,
+// candle:qwen_image_edit, and all four Wan/SCAIL-2 lanes). Mutations this kills: dropping the
+// bespoke-pre-gate union; matching the guard without the `return …(request)` tail (a plain
+// `if provider == X { … }` branch is not a dispatch); hiding the ids behind a helper call.
+test("a bespoke pre-gate routed before the shared gates makes its providers capturable", () => {
+  const source = adapterSource(["alpha"], {
+    extra: `
+const VIDEO_ID: &str = "video";
+const WAN_A_ID: &str = "wan_a";
+const WAN_B_ID: &str = "wan_b";
+fn run_entry(request: &Value) -> Result<Value, String> {
+    let provider = planned_provider(request)?;
+    if provider == VIDEO_ID {
+        return run_video_capture(request);
+    }
+    if matches!(
+        provider,
+        WAN_A_ID | WAN_B_ID | "literal_arm"
+    ) {
+        return wan_module::run(request);
+    }
+    // Not a dispatch: no early return on the request.
+    if provider == "not_dispatched" {
+        log(provider);
+    }
+    plain(request)
+}
+`,
+  });
+  assert.deepEqual(
+    adapterCapturableProviders(source, "synthetic"),
+    ["alpha", "literal_arm", "video", "wan_a", "wan_b"],
+  );
+  // A guard whose ids live behind a helper call names nothing — and says nothing, because the
+  // parser cannot see through it; `candle.rs` therefore spells its ids in the guard.
+  assert.deepEqual(
+    adapterCapturableProviders(
+      adapterSource(["alpha"], {
+        extra: `
+fn run_entry(request: &Value) -> Result<Value, String> {
+    if wan_module::implements(provider) {
+        return wan_module::run(request);
+    }
+    plain(request)
+}
+`,
+      }),
+      "synthetic",
+    ),
+    ["alpha"],
+  );
+  // An unresolved const in a pre-gate is loud, like an unresolved match arm.
+  assert.throws(
+    () =>
+      adapterCapturableProviders(
+        adapterSource(["alpha"], {
+          extra: `
+fn run_entry(request: &Value) -> Result<Value, String> {
+    if provider == GHOST_ID {
+        return run_ghost(request);
+    }
+    plain(request)
+}
+`,
+        }),
+        "synthetic",
+      ),
+    /bespoke pre-gate GHOST_ID does not resolve/,
+  );
+});
+
 test("losing the dispatch anchor is loud, never an empty (or full) capturable set", () => {
   assert.throws(
     () => adapterCapturableProviders("fn run() -> u32 { 42 }", "synthetic"),

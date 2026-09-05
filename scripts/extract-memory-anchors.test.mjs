@@ -639,12 +639,13 @@ test("derivability outranks envelope, so a cell is never anchored by a render it
  * - reading `frames` without the still-defaulting `?? 1` (an axis-free record would flip lanes).
  */
 test("a candle VIDEO record is derivable under the video law, not the still image law", () => {
-  const candleVideo = (frames, regime = {}) => ({
+  const candleVideo = (frames, regime = {}, axes = {}) => ({
     backend: "candle",
     // The LTX-2.5 candle rows the plan has declared since sc-22725 state both pipeline axes; the
-    // Wan and SCAIL-2 rows sc-22736 adds state neither. Both must be derivable.
+    // Wan and SCAIL-2 rows sc-22736 adds state neither (`axisFree` below). Both must be derivable.
     transformerVariant: "distilled",
     decoder: "conv",
+    ...axes,
     geometry: { width: 768, height: 512, frames, fps: 24 },
     measuredRegime: {
       decodeTiled: false,
@@ -657,8 +658,18 @@ test("a candle VIDEO record is derivable under the video law, not the still imag
     recordId: `candle-video-f${frames}`,
     sourcePath: "docs/generated/example.json",
   });
+  const axisFree = { transformerVariant: null, decoder: null };
   assert.equal(isDerivable(candleVideo(145)), true, "the shipped LTX-2.5 candle geometry");
-  assert.equal(isDerivable(candleVideo(81)), true, "the Wan / SCAIL-2 candle geometry");
+  assert.equal(isDerivable(candleVideo(81)), true, "an axis-keyed row at the Wan geometry");
+  // The Wan 2.2 / SCAIL-2 candle rows: multi-frame and AXIS-FREE. Explicit, because the helper's
+  // default axes would otherwise leave the axis-free shape unexercised (sc-22736 review).
+  assert.equal(
+    isDerivable(candleVideo(81, {}, axisFree)),
+    true,
+    "the Wan / SCAIL-2 candle geometry with no pipeline axes",
+  );
+  assert.equal(isDerivable(candleVideo(77, { staged: false }, axisFree)), true, "resident SCAIL-2");
+  assert.equal(isDerivable(candleVideo(121, { decodeTiled: true }, axisFree)), true);
   // The video law's regime guards are all anchor-vs-request, so a bounded video capture is still a
   // usable row — exactly as it is on MLX.
   assert.equal(isDerivable(candleVideo(81, { decodeTiled: true })), true);
@@ -1300,9 +1311,37 @@ test("an underived reason names the measured REGIME, never a missing geometry sp
     ),
     null,
   );
-  // A candle anchor takes no reason at all: `isDerivable` already refused the compositions the
-  // candle law rejects, so every candle anchor that exists derives.
+  // A candle STILL anchor takes no reason at all: `isDerivable` already refused the compositions
+  // the candle image law rejects, so every candle image anchor that exists derives.
   assert.equal(underivedReasonFor(candidate({ backend: "candle" })), null);
+  // A candle VIDEO anchor is held to the same axis rule as MLX (sc-22736): the video law refuses
+  // an axis-free row on both lanes, so the twelve Wan 2.2 / SCAIL-2 candle anchors carry the same
+  // reason the MLX twelve do. Mutation this kills: the old `backend !== "mlx"` early return ahead
+  // of the video branch, which emitted `null` for every candle video row.
+  const candleWan = candidate({
+    backend: "candle",
+    geometry: { width: 1280, height: 720, frames: 81, fps: 16 },
+    transformerVariant: null,
+    decoder: null,
+  });
+  assert.match(underivedReasonFor(candleWan), /pipeline axes/);
+  assert.equal(
+    underivedReasonFor(candleWan),
+    underivedReasonFor(candidate({ geometry: { frames: 81 } })),
+    "one reason text on both lanes",
+  );
+  // ...and a candle video row WITH stated axes (the LTX-2.5 candle cells) still takes none.
+  assert.equal(
+    underivedReasonFor(
+      candidate({
+        backend: "candle",
+        geometry: { frames: 145 },
+        transformerVariant: "distilled",
+        decoder: "conv",
+      }),
+    ),
+    null,
+  );
 });
 
 test("the LTX-2.5 component deltas are priced from the committed weights inventory, per tier and axis", async () => {

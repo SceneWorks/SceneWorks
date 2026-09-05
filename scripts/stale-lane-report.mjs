@@ -184,7 +184,13 @@ export function recommendedMlxT2iLanes(manifest) {
  * refusal IS a dispatch gate, and the union of its non-fallback arms is the provider set it admits.
  * A provider counts as capturable only if every such gate admits it (the candle adapter has two —
  * entry dispatch and generator loading — and a provider missing from either cannot complete a
- * capture). Parsing the adapter source is the same discipline `generate-memory-matrix.mjs` applies
+ * capture). The one exception is a BESPOKE PRE-GATE (sc-22736): an arm that `run()` routes to
+ * BEFORE the shared gates — `if provider == LTX25_ID { return run_ltx25_capture(request); }`, or
+ * `if matches!(provider, A | B) { return module::run(request); }` — never reaches those gates at
+ * all, so the providers it names are capturable on that arm alone. Only that exact shape is
+ * recognized (a bare const or literal, or a `matches!` over them, returning a call on `request`);
+ * a guard that hides its ids behind a helper call is invisible here, which is why `candle.rs`
+ * spells its Wan/SCAIL-2 ids in the guard. Parsing the adapter source is the same discipline `generate-memory-matrix.mjs` applies
  * to `image_jobs/base.rs`: a hand-maintained provider list here would be a new false green, going
  * stale the day an arm is added or retired. Every anchor below throws rather than degrades — a
  * refactor that moves the dispatch out of reach must red the tests, not silently report nothing
@@ -425,7 +431,35 @@ export function adapterCapturableProviders(source, label) {
         "has moved, so capturability can no longer be derived from this adapter",
     );
   }
-  return [...gates.reduce((acc, gate) => new Set([...acc].filter((id) => gate.has(id))))].sort();
+  const gated = gates.reduce((acc, gate) => new Set([...acc].filter((id) => gate.has(id))));
+  return [...new Set([...gated, ...bespokePreGateProviders(cleaned, consts, label)])].sort();
+}
+
+/**
+ * The providers a bespoke pre-gate routes before the shared dispatch gates (sc-22736) — see the
+ * block comment above. Returns the provider ids named by every
+ * `if provider == <id> { return <call>(request); }` and
+ * `if matches!(provider, <id> | <id> …) { return <call>(request); }` in the cleaned source.
+ */
+export function bespokePreGateProviders(cleaned, consts, label) {
+  const providers = new Set();
+  const resolve = (pattern) => {
+    const literal = /^"((?:\\.|[^"\\])*)"$/.exec(pattern);
+    if (literal) return literal[1];
+    if (/^[A-Z][A-Z0-9_]*$/.test(pattern)) {
+      if (!consts.has(pattern)) {
+        throw new Error(`${label}: bespoke pre-gate ${pattern} does not resolve to a &str const`);
+      }
+      return consts.get(pattern);
+    }
+    throw new Error(`${label}: unrecognized bespoke pre-gate pattern ${JSON.stringify(pattern)}`);
+  };
+  const guard = /\bif\s+(?:provider\s*==\s*("(?:\\.|[^"\\])*"|[A-Z][A-Z0-9_]*)|matches!\(\s*provider\s*,\s*([^)]+?)\s*\))\s*\{\s*return\s+[A-Za-z_][A-Za-z0-9_:]*\s*\(\s*request\s*\)\s*;?\s*\}/g;
+  for (const match of cleaned.matchAll(guard)) {
+    const patterns = match[1] ? [match[1]] : match[2].split("|").map((part) => part.trim());
+    for (const pattern of patterns) providers.add(resolve(pattern));
+  }
+  return providers;
 }
 
 /**

@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://sceneworks.ai/schemas/memory-anchor-plan.schema.json",
   "title": "SceneWorks memory anchor plan",
-  "$comment": "sc-22514. Epic 22505 makes ONE anchor per (modelId, quant tier, backend lane) the entire measurement obligation; everything else is derived analytically by crates/sceneworks-core/src/memory_anchor.rs. This schema enforces that BY CONSTRUCTION rather than by review. The anchor set is a JSON OBJECT keyed by `<modelId>:<tier>:<backend>`, so a second measurement of the same cell is not expressible at all — not merely rejected. Every remaining axis of the grid plan it replaced is likewise inexpressible: an entry carries exactly one integer width/height/frames (no list, no range, no `cases` array), no `parameters`, no `rung`/`engagedRungs` (the anchor composition is FIXED per lane by the harness, mirroring `isDerivable` in scripts/extract-memory-anchors.mjs), no `expectedResult`/`negative`, and no warm-repeat, temporal or batch grouping fields. `additionalProperties: false` holds at every level, so a sweep field cannot be smuggled in under a new name.",
+  "$comment": "sc-22514. Epic 22505 makes ONE anchor per (modelId, quant tier, backend lane) the entire measurement obligation; everything else is derived analytically by crates/sceneworks-core/src/memory_anchor.rs. This schema enforces that BY CONSTRUCTION rather than by review. The anchor set is a JSON OBJECT keyed by `<modelId>:<tier>:<backend>`, so a second measurement of the same cell is not expressible at all — not merely rejected. Every remaining axis of the grid plan it replaced is likewise inexpressible: an entry carries exactly one integer width/height/frames (no list, no range, no `cases` array), no `parameters`, no `engagedRungs` and no bounded `rung` (the anchor composition is FIXED per lane by the harness, mirroring `isDerivable` in scripts/extract-memory-anchors.mjs; the ONE per-anchor freedom is `rung: resident` on a candle VIDEO cell whose provider implements no staged residency — sc-22736 — which the harness refuses on a still because the candle image law prices only the staged composition), no `expectedResult`/`negative`, and no warm-repeat, temporal or batch grouping fields. `additionalProperties: false` holds at every level, so a sweep field cannot be smuggled in under a new name.",
   "type": "object",
   "additionalProperties": false,
   "required": ["schemaVersion", "anchors"],
@@ -37,6 +37,10 @@
         "geometry": { "$ref": "#/$defs/geometry" },
         "evidenceScope": { "enum": ["authoritative", "candidate", "fixture"] },
         "loadShape": { "enum": ["eager_materialization", "deferred_materialization"] },
+        "rung": {
+          "enum": ["resident", "staged_residency"],
+          "$comment": "sc-22736. Optional; the lane default from memory-calibration-harness.mjs ANCHOR_STRATEGY applies when absent (mlx: resident, candle: staged_residency). Only the two residency shapes are expressible — no bounded rung, so no rung grid — and a candle `resident` is refused on a single-frame cell by validatePlan."
+        },
         "sourceProvenance": { "const": "physical_mlx_v1" },
         "calibrationFingerprint": { "type": "string", "minLength": 1 },
         "fixture": { "type": "string", "minLength": 1 }

@@ -3371,8 +3371,8 @@ fn an_unmeasured_pipeline_cell_derives_from_the_sibling_anchor_plus_the_bound_de
         "ltx_2_5",
         sceneworks_core::memory_anchor::AnchorBackend::Mlx,
         "q8",
-        Ltx25TransformerVariant::Distilled,
-        Ltx25Decoder::Conv,
+        Some(Ltx25TransformerVariant::Distilled),
+        Some(Ltx25Decoder::Conv),
         sceneworks_core::memory_anchor::AnchorDeriveRequest {
             width: geometry.width,
             height: geometry.height,
@@ -3886,6 +3886,261 @@ fn a_foreign_identity_or_a_moved_loader_closure_does_not_reach_the_anchor_deriva
             &request
         ),
         "a later campaign fingerprint must not close the anchor evidence gate"
+    );
+}
+
+// ---------------------------------------------------------------------------------------------
+// sc-22736: a Wan 2.2 / SCAIL-2 anchor — axis-free, measured WITH its reference — is consumed.
+// ---------------------------------------------------------------------------------------------
+
+/// A synthetic `wan_2_2_i2v_14b:bf16:candle` anchor, current against the packaged loader closure
+/// for its `(model, lane)` so the currency guard is the production one, not a bypass.
+fn wan_i2v_candle_anchor_store() -> sceneworks_core::memory_anchor::MemoryAnchorStore {
+    use sceneworks_core::memory_anchor::*;
+    let closures = packaged_anchor_loader_closures().expect("the packaged loader closures load");
+    let digest = closures
+        .digest_for("wan_2_2_i2v_14b", AnchorBackend::Candle)
+        .expect("sc-22736 declares the wan_2_2_i2v_14b candle loader closure")
+        .to_owned();
+    MemoryAnchorStore {
+        schema_version: 1,
+        anchors: vec![MemoryAnchor {
+            id: "wan_2_2_i2v_14b:candle:bf16:-:-:sc-22736-wan2-2-i2v-a14b-candle-dense-v1:imc-test"
+                .to_owned(),
+            model_id: "wan_2_2_i2v_14b".to_owned(),
+            model_family: "wan-video".to_owned(),
+            route: "wan2_2_i2v_14b".to_owned(),
+            provider: "wan2_2_i2v_14b".to_owned(),
+            backend: AnchorBackend::Candle,
+            tier: "bf16".to_owned(),
+            transformer_variant: None,
+            decoder: None,
+            mode: "image_to_video".to_owned(),
+            overlay: None,
+            reference_count: 1,
+            load_shape: AnchorLoadShape::EagerMaterialization,
+            measured_regime: AnchorMeasuredRegime {
+                decode_tiled: false,
+                transformer_windowed: false,
+                staged: true,
+                attention_chunked: false,
+            },
+            source: AnchorSource {
+                path: String::new(),
+                sha256: String::new(),
+                record_id: "imc-test".to_owned(),
+                calibration_fingerprint: "sc-22736-wan2-2-i2v-a14b-candle-dense-v1".to_owned(),
+                loader_closure_digest: digest,
+                currency_attestation: None,
+            },
+            geometry: AnchorGeometry {
+                width: 1280,
+                height: 720,
+                frames: 77,
+                fps: Some(16),
+            },
+            phase_active_peak_bytes: AnchorPhaseBytes {
+                conditioning: 30 * GIB,
+                denoise: 62 * GIB,
+                decode: 48 * GIB,
+            },
+            phase_allocator_envelope_bytes: None,
+            overall_allocator_envelope_bytes: 62 * GIB,
+            underived_reason: Some("axis-free (sc-22736)".to_owned()),
+            component_bytes: None,
+        }],
+        analytic_only: Vec::new(),
+        component_deltas: Vec::new(),
+    }
+}
+
+fn wan_i2v_candle_contract() -> MemoryProviderContract {
+    let mut contract = fixture_contract_with_realization(
+        60,
+        12,
+        &[MemoryStrategy::StagedResidency],
+        MemoryBackendRealization::CandleCuda {
+            device_residency: true,
+            host_backed_weights: false,
+            host_to_device_block_materialization: true,
+            block_materialization: MemoryWindowMaterialization::DeviceFormatTransfer,
+        },
+    );
+    contract.provider_id = "wan2_2_i2v_14b".to_owned();
+    contract.calibration = Some(MemoryCalibrationIdentity {
+        abi: gen_core::MEMORY_CALIBRATION_ABI,
+        fingerprint: "sc-22736-wan2-2-i2v-a14b-candle-dense-v1".to_owned(),
+        load_shape: LoadShape::EagerMaterialization,
+    });
+    assert!(contract.conformance_errors().is_empty());
+    contract
+}
+
+fn wan_i2v_identity(reference_count: u32) -> VideoRequestIdentity<'static> {
+    VideoRequestIdentity {
+        model_id: "wan_2_2_i2v_14b",
+        model_family: "wan-video",
+        route: "wan2_2_i2v_14b",
+        mode: "image_to_video",
+        reference_count,
+        reference_shape: if reference_count == 0 {
+            "none"
+        } else {
+            "image"
+        },
+        fps: 16,
+        overlay: None,
+        lane: VideoLane::Candle,
+        tier: MemoryNumericTier {
+            precision: Precision::Bf16,
+            quant: None,
+            component_precision_floors: &[],
+        },
+        transformer_variant: None,
+        decoder: None,
+        calibration_abi: gen_core::MEMORY_CALIBRATION_ABI,
+        expected_closure_digest: crate::mlx_fit_gate::UNCALIBRATED_CLOSURE,
+    }
+}
+
+/// A geometry the anchor DOMINATES — fewer pixels and fewer frames than the measured 1280x720 f77.
+fn wan_dominated_geometry() -> VideoAdmissionGeometry {
+    VideoAdmissionGeometry {
+        width: 832,
+        height: 480,
+        frames: 45,
+        decode_pass_frames: 45,
+        batch: 1,
+        decode_pass: VideoDecodePass::SinglePass,
+        role: VideoGeometryRole::Requested,
+    }
+}
+
+/// A `wan_2_2_i2v_14b` request with ONE reference and no pipeline axes reaches its anchor
+/// (sc-22736): the derivation prices from it, the evidence gate opens on it, and `select` carries
+/// it. Mutations this kills, one at a time: restoring `identity.reference_count != 0 → None` in
+/// `anchor_derived_phase_peaks`; restoring `identity.transformer_variant?` / `decoder?` there;
+/// restoring either bail in `anchor_evidence_covers_request`; refusing the axis-free anchor in the
+/// core video law.
+#[test]
+fn a_wan_i2v_request_with_one_reference_consumes_its_axis_free_candle_anchor() {
+    let anchors = wan_i2v_candle_anchor_store();
+    let contract = wan_i2v_candle_contract();
+    let anchor = &anchors.anchors[0];
+    let expected = anchor
+        .derive_video_phase_peaks(sceneworks_core::memory_anchor::AnchorDeriveRequest {
+            width: 832,
+            height: 480,
+            frames: 45,
+            decode_tiled: false,
+            transformer_windowed: false,
+            deferred_materialization: false,
+        })
+        .expect("the dominated geometry is bounded by the measured point");
+
+    // Derivation: consulted, and priced at the anchor's measured point.
+    let selector =
+        LadderVideoSelector::new(wan_i2v_identity(1), &contract, budget(80.0), 18 * GIB, 0)
+            .with_anchor_store(Some(&anchors));
+    let (peaks, anchor_id) = anchor_derived_phase_peaks(&selector, wan_dominated_geometry(), &[])
+        .expect("the reference-conditioned request must reach its anchor");
+    assert_eq!(anchor_id, anchor.id);
+    assert_eq!(peaks.conditioning_bytes, expected.conditioning);
+    assert_eq!(peaks.denoise_bytes, expected.denoise);
+    assert_eq!(peaks.decode_bytes, expected.decode);
+
+    // The conditioning surface is graded against the ANCHOR'S record: the same model with zero
+    // references is a different surface and does not borrow the one-reference anchor.
+    let unconditioned =
+        LadderVideoSelector::new(wan_i2v_identity(0), &contract, budget(80.0), 18 * GIB, 0)
+            .with_anchor_store(Some(&anchors));
+    assert!(anchor_derived_phase_peaks(&unconditioned, wan_dominated_geometry(), &[]).is_none());
+    // …nor does an overlaid one.
+    let mut overlaid_identity = wan_i2v_identity(1);
+    overlaid_identity.overlay = Some("provider_video_mode:image_to_video");
+    let overlaid =
+        LadderVideoSelector::new(overlaid_identity, &contract, budget(80.0), 18 * GIB, 0)
+            .with_anchor_store(Some(&anchors));
+    assert!(anchor_derived_phase_peaks(&overlaid, wan_dominated_geometry(), &[]).is_none());
+    // …nor a variant-keyed request: an axis-free anchor answers no variant-keyed lookup.
+    let mut keyed_identity = wan_i2v_identity(1);
+    keyed_identity.transformer_variant = Some(Ltx25TransformerVariant::Distilled);
+    keyed_identity.decoder = Some(Ltx25Decoder::Conv);
+    let keyed = LadderVideoSelector::new(keyed_identity, &contract, budget(80.0), 18 * GIB, 0)
+        .with_anchor_store(Some(&anchors));
+    assert!(anchor_derived_phase_peaks(&keyed, wan_dominated_geometry(), &[]).is_none());
+    // Beyond the measured point the anchor prices nothing and the request keeps its floor (E5).
+    let mut beyond = wan_dominated_geometry();
+    beyond.frames = 81;
+    beyond.decode_pass_frames = 81;
+    assert!(anchor_derived_phase_peaks(&selector, beyond, &[]).is_none());
+
+    // The evidence gate opens on exactly the same identity.
+    let mut request = inputs(45, budget(80.0), 18 * GIB);
+    request.model_id = "wan_2_2_i2v_14b";
+    request.model_family = "wan-video";
+    request.route = "wan2_2_i2v_14b";
+    request.mode = "image_to_video";
+    request.reference_count = 1;
+    request.reference_shape = "image";
+    request.lane = VideoLane::Candle;
+    request.tier = wan_i2v_identity(1).tier;
+    request.transformer_variant = None;
+    request.decoder = None;
+    request.width = 832;
+    request.height = 480;
+    request.fps = 16;
+    assert!(anchor_evidence_covers_request(
+        Some(&anchors),
+        &contract,
+        &request
+    ));
+    let mut unconditioned_request = inputs(45, budget(80.0), 18 * GIB);
+    unconditioned_request.model_id = request.model_id;
+    unconditioned_request.model_family = request.model_family;
+    unconditioned_request.route = request.route;
+    unconditioned_request.mode = request.mode;
+    unconditioned_request.lane = VideoLane::Candle;
+    unconditioned_request.tier = request.tier;
+    unconditioned_request.transformer_variant = None;
+    unconditioned_request.decoder = None;
+    unconditioned_request.width = 832;
+    unconditioned_request.height = 480;
+    unconditioned_request.fps = 16;
+    assert!(!anchor_evidence_covers_request(
+        Some(&anchors),
+        &contract,
+        &unconditioned_request
+    ));
+
+    // End to end: the selection carries the anchor, not the floor — and the floor control proves
+    // the anchor path is what carried it.
+    let mut selector =
+        LadderVideoSelector::new(wan_i2v_identity(1), &contract, budget(80.0), 18 * GIB, 0)
+            .with_anchor_store(Some(&anchors));
+    assert!(matches!(
+        selector.select(wan_dominated_geometry()),
+        VideoRungSelection::Selected { .. }
+    ));
+    assert_eq!(selector.selections[0].evidence_revision, anchor.id);
+    assert_eq!(
+        selector.selections[0].predicted_peak_bytes,
+        expected.peak_bytes()
+    );
+    let mut floored =
+        LadderVideoSelector::new(wan_i2v_identity(1), &contract, budget(80.0), 18 * GIB, 0)
+            .with_anchor_store(None);
+    assert!(matches!(
+        floored.select(wan_dominated_geometry()),
+        VideoRungSelection::Selected { .. }
+    ));
+    assert_eq!(
+        floored.selections[0].evidence_revision,
+        "video-estimate-floor-v1"
+    );
+    assert_ne!(
+        floored.selections[0].predicted_peak_bytes,
+        expected.peak_bytes()
     );
 }
 

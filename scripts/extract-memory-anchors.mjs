@@ -622,10 +622,25 @@ function anchorRow(candidate, catalogCell, previousStore, underivedReason) {
  * to withhold derivation from a single-geometry anchor. The regime guard below is unaffected: it
  * is about WHICH composition was measured, not about fitting anything.
  *
- * Candle anchors take no reason here: `isDerivable` already refuses to ANCHOR a candle cell from
- * a composition the candle law rejects, so every candle anchor that exists is derivable.
+ * Candle STILL anchors take no reason here: `isDerivable` already refuses to ANCHOR a candle image
+ * cell from a composition the candle law rejects, so every candle image anchor that exists is
+ * derivable. Candle VIDEO anchors are a different matter (sc-22736): `isDerivable` admits every
+ * candle video composition, and the video law refuses an axis-free row on BOTH lanes
+ * (`memory_anchor.rs` `derive_video_phase_estimates_raw` prices only at and below the measured point
+ * without `(transformerVariant, decoder)`), so the axis-free reason is stated lane-blind, before
+ * the MLX-only image branch.
  */
 export function underivedReasonFor(candidate) {
+  if ((candidate.geometry.frames ?? 1) > 1) {
+    if (candidate.transformerVariant === null || candidate.decoder === null) {
+      return (
+        "the source record states no (transformer variant, decoder) pipeline axes and the video " +
+        "law's per-token coefficients are keyed on them; this anchor validates its measured point " +
+        "and prices nothing beyond it"
+      );
+    }
+    return null;
+  }
   if (candidate.backend !== "mlx") return null;
   if (candidate.geometry.frames === 1) {
     const regime = candidate.measuredRegime;
@@ -643,13 +658,6 @@ export function underivedReasonFor(candidate) {
       );
     }
     return null;
-  }
-  if (candidate.transformerVariant === null || candidate.decoder === null) {
-    return (
-      "the source record states no (transformer variant, decoder) pipeline axes and the video " +
-      "law's per-token coefficients are keyed on them; this anchor validates its measured point " +
-      "and prices nothing beyond it"
-    );
   }
   return null;
 }
