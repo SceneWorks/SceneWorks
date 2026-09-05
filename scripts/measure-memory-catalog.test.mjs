@@ -1444,7 +1444,10 @@ test("every planned sd3.5 fingerprint is one its lane's declaration can emit", a
 test("PROVIDER_FAMILIES repos are the adapter's *_REPOSITORY constants", async () => {
   const lib = await readFile(path.join(ROOT, ADAPTER_LIB_PATH), "utf8");
   const declared = new Set();
-  for (const match of lib.matchAll(/pub const [A-Z0-9_]+_REPOSITORY: &str = "([^"]+)";/g)) {
+  // `\s*` after the `=`, not a space: rustfmt wraps a long declaration onto the next line
+  // (`SANA_SPRINT_DENSE_REPOSITORY`), and a single-line pattern read those as undeclared — a guard
+  // blind to exactly the longest repository names, which are the upstream ones.
+  for (const match of lib.matchAll(/pub const [A-Z0-9_]+_REPOSITORY: &str =\s*"([^"]+)";/g)) {
     declared.add(match[1]);
   }
   assert.ok(declared.size > 0, "lib.rs declares repository constants");
@@ -1452,10 +1455,22 @@ test("PROVIDER_FAMILIES repos are the adapter's *_REPOSITORY constants", async (
     // LTX-2.5 is bound by the harness itself rather than by an adapter env family, so its repo
     // literal lives in this module (`LTX25_REPOSITORY`) and not in lib.rs.
     if (family.ltx25) continue;
-    assert.ok(
-      declared.has(family.repo),
-      `${provider}: ${family.repo} is not declared as a *_REPOSITORY const in ${ADAPTER_LIB_PATH}`,
-    );
+    // Through `familyArtifact`, so the per-(lane, TIER) overrides are covered too (sc-22736): the
+    // Wan candle q4/q8 rehost and its upstream dense leg are repositories an arm validates the
+    // operator's env against exactly as it does `family.repo`, and reading only the top-level key
+    // would have left six of them bound in one language alone.
+    const repos = new Set([
+      family.repo,
+      ...(family.arms ?? []).flatMap((arm) =>
+        ["bf16", "q4", "q8"].map((tier) => familyArtifact(family, arm, tier).repo),
+      ),
+    ]);
+    for (const repo of repos) {
+      assert.ok(
+        declared.has(repo),
+        `${provider}: ${repo} is not declared as a *_REPOSITORY const in ${ADAPTER_LIB_PATH}`,
+      );
+    }
   }
 });
 // The catalog-wide burndown. `todo` until the terminal story of epic 22723 (sc-22738) promotes it:

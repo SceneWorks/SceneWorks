@@ -98,7 +98,7 @@ const TI2V_5B: Arm = Arm {
     repository_env: "SCENEWORKS_WAN22_TI2V_5B_MLX_REPOSITORY",
     revision_env: "SCENEWORKS_WAN22_TI2V_5B_MLX_REVISION",
     root_env: "SCENEWORKS_WAN22_TI2V_5B_MLX_ROOT",
-    repository: "SceneWorks/wan2.2-ti2v-5b-mlx",
+    repository: protocol::WAN22_TI2V_5B_MLX_REPOSITORY,
     slug: "wan-2-2-ti2v-5b",
     execution_path: "the MLX Wan2.2 TI2V-5B base text-to-video path",
 };
@@ -114,7 +114,7 @@ const T2V_A14B: Arm = Arm {
     repository_env: "SCENEWORKS_WAN22_T2V_A14B_MLX_REPOSITORY",
     revision_env: "SCENEWORKS_WAN22_T2V_A14B_MLX_REVISION",
     root_env: "SCENEWORKS_WAN22_T2V_A14B_MLX_ROOT",
-    repository: "SceneWorks/wan2.2-t2v-a14b-mlx",
+    repository: protocol::WAN22_T2V_A14B_MLX_REPOSITORY,
     slug: "wan-2-2-t2v-a14b",
     execution_path: "the MLX Wan2.2 T2V-A14B dual-expert text-to-video path",
 };
@@ -130,7 +130,7 @@ const I2V_A14B: Arm = Arm {
     repository_env: "SCENEWORKS_WAN22_I2V_A14B_MLX_REPOSITORY",
     revision_env: "SCENEWORKS_WAN22_I2V_A14B_MLX_REVISION",
     root_env: "SCENEWORKS_WAN22_I2V_A14B_MLX_ROOT",
-    repository: "SceneWorks/wan2.2-i2v-a14b-mlx",
+    repository: protocol::WAN22_I2V_A14B_MLX_REPOSITORY,
     slug: "wan-2-2-i2v-a14b",
     execution_path: "the MLX Wan2.2 I2V-A14B dual-expert image-to-video path",
 };
@@ -146,7 +146,7 @@ const SCAIL2: Arm = Arm {
     repository_env: "SCENEWORKS_SCAIL2_REPOSITORY",
     revision_env: "SCENEWORKS_SCAIL2_REVISION",
     root_env: "SCENEWORKS_SCAIL2_ROOT",
-    repository: "SceneWorks/scail2-mlx",
+    repository: protocol::SCAIL2_REPOSITORY,
     slug: "scail2-14b",
     execution_path: "the MLX SCAIL-2 character-animation path",
 };
