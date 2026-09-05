@@ -69,6 +69,16 @@ export const QWEN_EDIT_LIGHTNING_LORA = Object.freeze({
 });
 
 /**
+ * The converter-written marker every SenseNova `_fast` rehost tier subdir carries (sc-22734). Both
+ * engines read it by this exact name (`DISTILL_MERGED_MARKER` in `mlx-gen-sensenova` and
+ * `candle-gen-sensenova`), and both WITHHOLD the production calibration identity when it is absent —
+ * so a `_fast` tier root without it is not a capturable cell, it is a cell whose capture would fail
+ * on an identity mismatch after the load. Declared as `requiredTierFiles` on the three `_fast`
+ * family rows so `classifyAnchor` refuses it by name.
+ */
+export const SENSENOVA_DISTILL_MERGED_MARKER = "distill_merged.json";
+
+/**
  * One row per provider arm an adapter implements, mirroring `match provider` in
  * crates/sceneworks-memory-adapter/src/bin/{mlx,candle}.rs and the env families the runbook lists
  * under "Adapter environment". `physical` marks the one arm that emits a provider `sourceCapture`
@@ -220,14 +230,17 @@ export const PROVIDER_FAMILIES = Object.freeze({
     repo: "SceneWorks/sensenova-u1-8b-infographic-v3-mlx", arms: ["mlx", "candle"],
   },
   sensenova_u1_8b_fast: {
+    requiredTierFiles: [SENSENOVA_DISTILL_MERGED_MARKER],
     provider: "sensenova_u1_8b_fast", env: "SENSENOVA_U1_8B_FAST",
     repo: "SceneWorks/sensenova-u1-8b-fast-mlx", arms: ["mlx", "candle"],
   },
   sensenova_u1_8b_infographic_v2_fast: {
+    requiredTierFiles: [SENSENOVA_DISTILL_MERGED_MARKER],
     provider: "sensenova_u1_8b_fast", env: "SENSENOVA_U1_8B_INFOGRAPHIC_V2_FAST",
     repo: "SceneWorks/sensenova-u1-8b-infographic-v2-fast-mlx", arms: ["mlx", "candle"],
   },
   sensenova_u1_8b_infographic_v3_fast: {
+    requiredTierFiles: [SENSENOVA_DISTILL_MERGED_MARKER],
     provider: "sensenova_u1_8b_fast", env: "SENSENOVA_U1_8B_INFOGRAPHIC_V3_FAST",
     repo: "SceneWorks/sensenova-u1-8b-infographic-v3-fast-mlx", arms: ["mlx", "candle"],
   },
@@ -482,6 +495,27 @@ export async function classifyAnchor(key, planned, { models, backend, hubs, curr
   row.env[`SCENEWORKS_${artifact.env}_REVISION`] = download.revision;
   row.env[`SCENEWORKS_${artifact.env}_ROOT`] = tierRoot;
   row.tierRoot = tierRoot;
+  // A converter-written file the ENGINE requires INSIDE the resolved tier root, beyond the weights
+  // the manifest download ships (sc-22734 review). The SenseNova `_fast` rehosts are the live case:
+  // `mlx-gen-sensenova`'s `production_calibration_identity` and `candle-gen-sensenova`'s
+  // `fast_spec_is_the_premerged_turnkey` both WITHHOLD the production identity when a `_fast` tier
+  // root carries no `distill_merged.json`, because without the marker the loader merges the distill
+  // LoRA at load and the resident shape is not the one the anchor prices. Nine `_fast` MLX cells
+  // would therefore hard-fail at capture with an identity mismatch, hours into a booked session,
+  // over a fact this probe can read in a millisecond. Classified by name instead.
+  const requiredTierFiles = artifact.requiredTierFiles ?? family.requiredTierFiles ?? [];
+  const missingTierFiles = [];
+  for (const file of requiredTierFiles) {
+    try {
+      if (!(await stat(path.join(tierRoot, file))).isFile()) missingTierFiles.push(file);
+    } catch { missingTierFiles.push(file); }
+  }
+  if (missingTierFiles.length > 0) {
+    return {
+      ...row, status: "weights_missing",
+      reason: `tier root ${tierRoot} is missing ${missingTierFiles.join(", ")}, which the engine requires before it will publish this cell's calibration identity`,
+    };
+  }
   if (family.bundle) {
     // A pre-staged loose-file bundle rather than an HF snapshot, so it is probed through the
     // operator env the worker itself honours. Absent or incomplete is `weights_missing` — the same

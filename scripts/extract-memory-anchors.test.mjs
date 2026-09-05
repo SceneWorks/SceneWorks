@@ -737,6 +737,88 @@ test("a candle lane whose engine has no staged composition is anchored by its re
   }
 });
 
+// sc-22734 review. The `regime?.staged === !stagedExempt` inversion in `isDerivable` is NOT a
+// SenseNova rule: it governs every candle lane whose manifest declares a `staged_residency`
+// structural exemption, and the shipped manifest declares six such lanes that have nothing to do
+// with SenseNova (the Boogu trio and the Anima trio). The case above only ever drove SenseNova ids,
+// so a change that scoped the inversion to the SenseNova family — or an exemption silently
+// appearing on, or vanishing from, one of these six — stayed green. This one names them.
+test("the staged-residency inversion governs every exempt candle lane, not only the SenseNova family", async () => {
+  const realManifest = JSON.parse(
+    stripJsoncComments(await readFile(path.join(ROOT, MANIFEST_PATH), "utf8")),
+  );
+  const lanes = stagedResidencyExemptLanes(realManifest);
+
+  // The expected set is DERIVED from the manifest — no frozen count, no hand-kept list — so a
+  // model that gains or loses the declaration moves this with no second edit here.
+  const expectedCandle = realManifest.models
+    .filter(
+      (model) => model.candle?.memoryStrategyStructuralExemptions?.staged_residency,
+    )
+    .map((model) => `${model.id}:candle`)
+    .sort();
+  assert.deepEqual(
+    [...lanes].filter((lane) => lane.endsWith(":candle")).sort(),
+    expectedCandle,
+  );
+
+  // The six lanes the review named: they carry the exemption today and are the ones the
+  // SenseNova-only coverage left unspoken.
+  const NON_SENSENOVA_EXEMPT = [
+    "boogu_image",
+    "boogu_image_turbo",
+    "boogu_image_edit",
+    "anima_base",
+    "anima_aesthetic",
+    "anima_turbo",
+  ];
+  for (const modelId of NON_SENSENOVA_EXEMPT) {
+    assert.ok(
+      lanes.has(`${modelId}:candle`),
+      `${modelId}:candle declares staged_residency structurally not applicable`,
+    );
+  }
+  assert.deepEqual(
+    expectedCandle.filter((lane) => !lane.startsWith("sensenova_u1_8b")).sort(),
+    NON_SENSENOVA_EXEMPT.map((modelId) => `${modelId}:candle`).sort(),
+    "the exempt candle lanes outside the SenseNova family are exactly these six",
+  );
+
+  const candidate = (modelId, regime) => ({
+    modelId,
+    backend: "candle",
+    transformerVariant: null,
+    decoder: null,
+    geometry: { width: 1024, height: 1024, frames: 1, fps: null },
+    measuredRegime: {
+      decodeTiled: false,
+      transformerWindowed: false,
+      staged: false,
+      attentionChunked: false,
+      ...regime,
+    },
+    overallAllocatorEnvelopeBytes: 1,
+    recordId: modelId,
+    sourcePath: "docs/generated/example.json",
+  });
+
+  // The inversion, on each of the six: the RESIDENT render is the admissible anchor, and a staged
+  // corpus on a lane that declares staging structurally impossible is refused rather than
+  // preferred — which is the same claim the SenseNova case makes, on lanes it never drove.
+  for (const modelId of NON_SENSENOVA_EXEMPT) {
+    assert.equal(
+      isDerivable(candidate(modelId, {}), lanes),
+      true,
+      `${modelId}: the resident render is the exempt lane's admissible anchor`,
+    );
+    assert.equal(
+      isDerivable(candidate(modelId, { staged: true }), lanes),
+      false,
+      `${modelId}: a staged corpus on a structurally-exempt lane is not a record the law can price`,
+    );
+  }
+});
+
 test("every emitted anchor cites a compiled-in corpus, and every retained corpus is compiled in", async () => {
   const store = await buildAnchorStore({ matrix });
   const packaged = packagedAnchorSources(

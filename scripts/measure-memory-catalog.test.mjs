@@ -26,6 +26,7 @@ import {
   failureReason,
   extractSeedingNewAnchors,
   SEED_DIGEST,
+  SENSENOVA_DISTILL_MERGED_MARKER,
   measureAnchor,
   parseArgs,
   providerCommand,
@@ -238,6 +239,67 @@ test("each SD3.5 member binds its OWN artifact family on both lanes", async () =
     const medium = await classifyAnchor(`sd3_5_medium:q8:${backend}`, { provider: "sd3_5_medium" }, context);
     assert.equal(medium.status, "weights_missing", `${backend}: ${medium.reason}`);
     assert.match(medium.reason, /SceneWorks\/sd3\.5-medium-mlx@[0-9a-f]{8}\/q8/);
+  }
+});
+
+// sc-22734 review. Nine `_fast` MLX cells hard-fail at capture — after the load, hours into a
+// booked session — when a `_fast` tier root carries no `distill_merged.json`: both engines withhold
+// the production calibration identity without it, so the harness sees an identity mismatch rather
+// than a classification. `classifyAnchor` now reads the marker off the resolved tier root and
+// refuses the cell by name before anything is scheduled.
+test("a _fast sensenova tier root without the pre-merge marker is refused by name, not scheduled", async () => {
+  const REPO = "SceneWorks/sensenova-u1-8b-fast-mlx";
+  const models = [
+    { id: "sensenova_u1_8b_fast", downloads: [{ repo: REPO, revision: REVISION, variant: "q4", files: ["q4/*"] }] },
+    { id: "sensenova_u1_8b", downloads: [{ repo: "SceneWorks/sensenova-u1-8b-mlx", revision: REVISION, variant: "q4", files: ["q4/*"] }] },
+  ];
+  const hub = await fakeHub([
+    [REPO, REVISION, "q4"],
+    ["SceneWorks/sensenova-u1-8b-mlx", REVISION, "q4"],
+  ]);
+  const planned = { provider: "sensenova_u1_8b_fast" };
+  for (const backend of ["mlx", "candle"]) {
+    const context = { models, backend, hubs: [hub], current: new Map(), captured: new Map() };
+
+    // The marker is absent: refused by NAME, and the reason cites the file and the root.
+    const refused = await classifyAnchor(`sensenova_u1_8b_fast:q4:${backend}`, planned, context);
+    assert.equal(refused.status, "weights_missing", `${backend}: ${refused.reason}`);
+    assert.match(refused.reason, new RegExp(SENSENOVA_DISTILL_MERGED_MARKER.replace(".", "\\.")));
+    assert.match(refused.reason, /calibration identity/);
+    assert.ok(
+      refused.reason.includes(snapshotPath(hub, REPO, REVISION, "q4")),
+      `${backend}: the refusal names the tier root it probed`,
+    );
+
+    // The QUALITY route declares no marker requirement, so the same hub runs it — proving the
+    // probe is scoped to the `_fast` rows and is not a new blanket requirement.
+    const quality = await classifyAnchor(
+      `sensenova_u1_8b:q4:${backend}`,
+      { provider: "sensenova_u1_8b" },
+      context,
+    );
+    assert.equal(quality.status, "runnable", `${backend}: ${quality.reason}`);
+  }
+
+  // Write the marker and the same cell becomes runnable on both lanes.
+  await writeFile(path.join(snapshotPath(hub, REPO, REVISION, "q4"), SENSENOVA_DISTILL_MERGED_MARKER), "{}\n");
+  for (const backend of ["mlx", "candle"]) {
+    const context = { models, backend, hubs: [hub], current: new Map(), captured: new Map() };
+    const runnable = await classifyAnchor(`sensenova_u1_8b_fast:q4:${backend}`, planned, context);
+    assert.equal(runnable.status, "runnable", `${backend}: ${runnable.reason}`);
+    assert.equal(runnable.env.SCENEWORKS_SENSENOVA_U1_8B_FAST_ROOT, snapshotPath(hub, REPO, REVISION, "q4"));
+  }
+});
+
+// Every `_fast` family row declares the marker requirement, and no quality row does — derived from
+// the table, so a seventh route added to either half is covered with no edit here.
+test("the marker requirement is declared on exactly the _fast sensenova family rows", () => {
+  const sensenova = Object.entries(PROVIDER_FAMILIES).filter(([, row]) =>
+    typeof row.provider === "string" && row.provider.startsWith("sensenova_u1_8b"));
+  assert.ok(sensenova.length > 0, "the table declares SenseNova rows");
+  for (const [modelId, row] of sensenova) {
+    const expected = row.provider === "sensenova_u1_8b_fast" ? [SENSENOVA_DISTILL_MERGED_MARKER] : undefined;
+    assert.deepEqual(row.requiredTierFiles, expected, modelId);
   }
 });
 
@@ -1212,7 +1274,11 @@ test("every planned sd3.5 fingerprint is one its lane's declaration can emit", a
 test("PROVIDER_FAMILIES repos are the adapter's *_REPOSITORY constants", async () => {
   const lib = await readFile(path.join(ROOT, ADAPTER_LIB_PATH), "utf8");
   const declared = new Set();
-  for (const match of lib.matchAll(/pub const [A-Z0-9_]+_REPOSITORY: &str = "([^"]+)";/g)) {
+  // `\s*` after the `=`, not a space (sc-22734): rustfmt wraps the initializer onto its own line
+  // whenever the declaration exceeds the width, which four of the six SenseNova repository consts
+  // do. A single-space pattern reads those four as UNDECLARED and fails a lane that is in fact
+  // bound — the binding this case exists to check is the const's VALUE, not its line breaks.
+  for (const match of lib.matchAll(/pub const [A-Z0-9_]+_REPOSITORY: &str =\s*"([^"]+)";/g)) {
     declared.add(match[1]);
   }
   assert.ok(declared.size > 0, "lib.rs declares repository constants");
