@@ -1391,6 +1391,17 @@ export function evidenceSemantics(record, revisions) {
  * when `staged_residency` is engaged and nothing deeper is. Planning the rung would let a capture
  * spend hours producing a render the extractor then refuses, and would reopen the rung grid this
  * story closed.
+ *
+ * ONE ESCAPE, and it is not an operator knob either (sc-22734): a plan row may carry its own
+ * `strategy`, and it exists for a provider whose CONTRACT refuses the lane default. SenseNova
+ * classifies `StagedResidency` as `StructurallyNotApplicable` on both lanes — it is one fused
+ * dual-path transformer with no separable conditioning component, so there is no phase boundary to
+ * release — and `contract.validate_selection` therefore rejects the candle default rung before any
+ * weight is read. The override makes those rows plan the RESIDENT rung, which the contract admits.
+ * It is derived, not chosen: a test in scripts/measure-memory-catalog.test.mjs requires a row's
+ * effective rung to be `resident` exactly when the model's manifest lane block declares a
+ * `memoryStrategyStructuralExemptions.staged_residency`, so this cannot be used to pick a rung the
+ * architecture does not force.
  */
 export const ANCHOR_STRATEGY = Object.freeze({
   mlx: Object.freeze({ rung: "resident", engagedRungs: Object.freeze(["resident"]), parameters: Object.freeze({}) }),
@@ -1517,8 +1528,8 @@ export function planAnchor(plan, key) {
       geometry: anchor.geometry,
     },
     strategy: {
-      rung: ANCHOR_STRATEGY[backend].rung,
-      engagedRungs: [...ANCHOR_STRATEGY[backend].engagedRungs],
+      rung: (anchor.strategy ?? ANCHOR_STRATEGY[backend]).rung,
+      engagedRungs: [...(anchor.strategy ?? ANCHOR_STRATEGY[backend]).engagedRungs],
       parameters: {},
     },
     ...(anchor.sourceProvenance ? { sourceProvenance: anchor.sourceProvenance } : {}),

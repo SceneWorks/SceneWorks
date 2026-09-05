@@ -548,6 +548,8 @@ test("windows-candle captures and schema-checks the SC-21714 Krea anchor record"
       ["run_pulid_flux_capture", "certifying_vram_probe()"],
       // The Qwen edit bespoke arm (sc-22728).
       ["run_qwen_edit", "certifying_vram_probe()"],
+      // The SenseNova family arm (sc-22734).
+      ["run_sensenova_capture", "certifying_vram_probe()"],
     ],
     "every Candle VRAM probe must be an allowlisted certifying spelling, built once by its named arm",
   );
@@ -622,8 +624,8 @@ function assertEveryVramProbeIsCertifying(adapter) {
     [],
     "a function constructing a VRAM probe must sample a phase with it",
   );
-  // The certifying arms are exactly the capture sites: the InstantID arm (sc-22729) and the
-  // Mage-Flow loader (sc-22733) are both among them.
+  // The certifying arms are exactly the capture sites: the InstantID arm (sc-22729), the Mage-Flow
+  // loader (sc-22733) and the SenseNova arm (sc-22734) are all among them.
   assert.deepEqual(
     [...certifying].sort(),
     [
@@ -633,6 +635,7 @@ function assertEveryVramProbeIsCertifying(adapter) {
       "run_instantid_candle",
       "run_pulid_flux_capture",
       "run_qwen_edit",
+      "run_sensenova_capture",
     ],
   );
   // The exception list is not allowed to quietly grow: exactly one site, and it is the LTX-2.5 arm.
@@ -1623,21 +1626,26 @@ test("memory adapters bind every emitted overlay verdict to the requested target
   assert.match(mlxQwenEdit, /\("builtInAdapters", "count", loaded_adapters as u64\)/);
   assert.match(mlxQwenEdit, /if loaded_adapters == 0 \{\s*protocol::settle_plain_overlay_scenario\(/);
   // A hand-rolled `"status": "gated"` object is what must not silently ship with `overlay` left at
-  // `not_run`. One arm builds its fragment by hand for a real reason — sc-22726's bespoke PuLID
-  // capture, whose route opens no memory-strategy request scope — so the claim is named rather than
-  // blanket: that arm and no other, and it must still settle its own overlay scenario.
+  // `not_run`. Two arms build their fragment by hand for a real reason — sc-22726's bespoke PuLID
+  // capture, whose route opens no memory-strategy request scope, and sc-22734's SenseNova resident
+  // anchor, which is not a five-rung record at all — so the claim is named rather than blanket:
+  // those arms and no others, and each must still SETTLE its own overlay verdict. Settling is what
+  // is checked, not the spelling: PuLID writes the verdict into the object it builds, SenseNova
+  // hands the finished fragment to `settle_plain_overlay_scenario`. An arm that does neither leaves
+  // `overlay` at `not_run`, which is the failure this gate exists for.
   const handRolled = [...candleFunctions]
     .filter(([, body]) => /"status":\s*"gated"/.test(body))
     .map(([name]) => name);
   assert.deepEqual(
-    handRolled,
-    ["run_pulid_flux_capture"],
+    handRolled.sort(),
+    ["run_pulid_flux_capture", "run_sensenova_capture"],
     "a hand-rolled gated fragment bypasses the overlay-settling builders",
   );
   for (const name of handRolled) {
-    assert.match(
-      candleFunctions.get(name),
-      /\{ "name": "overlay", "result": "(passed|failed)"/,
+    const body = candleFunctions.get(name);
+    assert.ok(
+      /\{ "name": "overlay", "result": "(passed|failed)"/.test(body) ||
+        /protocol::settle_plain_overlay_scenario\(/.test(body),
       `${name} hand-rolls a gated fragment and leaves its overlay verdict unsettled`,
     );
   }

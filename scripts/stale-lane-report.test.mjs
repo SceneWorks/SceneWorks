@@ -831,6 +831,50 @@ fn load(request: &Value) -> Result<Loaded, String> {
   );
 });
 
+// sc-22734. A family whose several engine ids share ONE arm body is spelled as a Rust OR-PATTERN
+// (`SENSENOVA_ID | SENSENOVA_FAST_ID`). The parser used to see the whole alternation as a single
+// pattern, match none of its shapes, and throw — so adding a shared arm to an adapter made the
+// WHOLE report unbuildable rather than reporting one more capturable lane.
+test("an or-pattern arm admits every engine id it names, by literal or by const", () => {
+  const source = `
+const SENSENOVA_ID: &str = "sensenova_u1_8b";
+const SENSENOVA_FAST_ID: &str = "sensenova_u1_8b_fast";
+fn entry(request: &Value) -> Result<&'static str, String> {
+    match planned_provider(request)? {
+        "alpha" => Ok(ALPHA_PATH),
+        SENSENOVA_ID | SENSENOVA_FAST_ID => sensenova_arm(request),
+        provider => Err(format!(
+            "synthetic five-rung calibration does not implement provider {provider:?}"
+        )),
+    }
+}
+`;
+  assert.deepEqual(
+    adapterCapturableProviders(source, "synthetic"),
+    ["alpha", "sensenova_u1_8b", "sensenova_u1_8b_fast"],
+  );
+  // The literal spelling, and rustfmt's leading-`|` multi-line spelling, resolve identically.
+  assert.deepEqual(
+    adapterCapturableProviders(
+      source.replace(
+        "SENSENOVA_ID | SENSENOVA_FAST_ID =>",
+        '| "sensenova_u1_8b"\n        | "sensenova_u1_8b_fast" =>',
+      ),
+      "synthetic",
+    ),
+    ["alpha", "sensenova_u1_8b", "sensenova_u1_8b_fast"],
+  );
+  // An alternative is held to exactly the rules a lone pattern is: an undeclared const inside an
+  // or-pattern is still refused by name rather than silently dropped.
+  assert.throws(
+    () => adapterCapturableProviders(
+      source.replace("SENSENOVA_FAST_ID =>", "UNDECLARED_CONST =>"),
+      "synthetic",
+    ),
+    /UNDECLARED_CONST does not resolve to a &str const/,
+  );
+});
+
 test("losing the dispatch anchor is loud, never an empty (or full) capturable set", () => {
   assert.throws(
     () => adapterCapturableProviders("fn run() -> u32 { 42 }", "synthetic"),

@@ -391,13 +391,14 @@ export function adapterCapturableProviders(source, label) {
     const providers = new Set();
     for (const arm of matchArms(block.inner)) {
       // An OR-pattern (`A | B => …`) is one arm serving several providers — the Candle FLUX.2 arm
-      // dispatches `FLUX2_DEV_ID | FLUX2_KLEIN_ID` (sc-22727). Each alternative is then the same
-      // shape the single-pattern arms are, so split first and judge each half by the same rules;
-      // a `|` inside a string literal cannot reach here because a literal arm has no `|` outside
-      // its quotes.
+      // dispatches `FLUX2_DEV_ID | FLUX2_KLEIN_ID` (sc-22727), and the SenseNova arms dispatch
+      // `SENSENOVA_ID | SENSENOVA_FAST_ID` (sc-22734). Each alternative is then the same shape the
+      // single-pattern arms are, so split first and judge each half by the same rules; a `|` inside
+      // a string literal cannot reach here because a literal arm has no `|` outside its quotes, and
+      // a leading `|` (rustfmt's multi-line spelling) yields an empty alternative, which is dropped.
       const alternatives = /^"((?:\\.|[^"\\])*)"$/.test(arm.pattern)
         ? [arm.pattern]
-        : arm.pattern.split("|").map((part) => part.trim());
+        : arm.pattern.split("|").map((part) => part.trim()).filter(Boolean);
       for (const pattern of alternatives) {
         const literal = /^"((?:\\.|[^"\\])*)"$/.exec(pattern);
         if (literal) {
