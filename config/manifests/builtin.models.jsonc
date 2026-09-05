@@ -8935,6 +8935,11 @@
           // 8B Qwen3 text encoder stays DENSE bf16 in every tier (epic 8506: quantize the
           // transformer, keep the TE bf16), so the worker loads each tier with Quant::None
           // (`mlx.denseTextEncoderTier`). Replaces the old gated 49 GiB whole-repo + load-time quantize.
+          // sc-22727: the q4/ and q8/ `text_encoder/config.json` at acf05e8d nonetheless carry a STALE
+          // `quantization` marker left over from the packing run — the shards under it are dense, the
+          // engine verifies that (`KleinArtifactInventory::verify_turnkey_with_contracts` reads the real
+          // tensor headers, admits the tier as dense under that allowance, and derives the TE quant from
+          // the validated source) and disregards the marker (inference PR 949).
           "provider": "huggingface",
           "repo": "SceneWorks/flux2-klein-9b-mlx",
           "revision": "acf05e8d5103838baba6a5e32dc91d6997a56023",
@@ -9311,6 +9316,11 @@
           // black-forest-labs/FLUX.2-klein-9b-kv. Per-tier subdirs q4/ (default), q8/, bf16/ — only
           // the transformer is packed; the Qwen3 TE stays DENSE bf16 in every tier (Quant::None at
           // load via `mlx.denseTextEncoderTier`). Replaces the old gated whole-repo + load-time quantize.
+          // sc-22727: the q4/ and q8/ `text_encoder/config.json` at 406265be nonetheless carry a STALE
+          // `quantization` marker left over from the packing run — the shards under it are dense, the
+          // engine verifies that (`KleinArtifactInventory::verify_turnkey_with_contracts` reads the real
+          // tensor headers, admits the tier as dense under that allowance, and derives the TE quant from
+          // the validated source) and disregards the marker (inference PR 949).
           "provider": "huggingface",
           "repo": "SceneWorks/flux2-klein-9b-kv-mlx",
           "revision": "406265beebe141024a06e24038c3713cf7af87d8",

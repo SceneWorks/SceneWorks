@@ -30,6 +30,17 @@ pub const QWEN_EDIT_LIGHTNING_REPOSITORY: &str = "lightx2v/Qwen-Image-Edit-2511-
 pub const QWEN_EDIT_LIGHTNING_FILE: &str =
     "Qwen-Image-Edit-2511-Lightning-4steps-V1.0-bf16.safetensors";
 pub const FLUX2_REPOSITORY: &str = "SceneWorks/flux2-dev-mlx";
+/// The FLUX.2-klein-9B tiered rehost (sc-22727) — the `flux2_klein_9b` catalog model's artifact,
+/// bound through `SCENEWORKS_FLUX2_KLEIN_*`. The engine discriminates it from the KV rehost by the
+/// snapshot path AND by `LoadSpec::resolved_route` (`turnkey_identity` /
+/// `KleinArtifactInventory::validate_resolved_route` in `mlx-gen-flux2/src/artifact_inventory.rs`),
+/// which is why the two variants get separate env families rather than one shared "klein" family.
+pub const FLUX2_KLEIN_REPOSITORY: &str = "SceneWorks/flux2-klein-9b-mlx";
+/// The FLUX.2-klein-9B **KV-cache** rehost (sc-22727): a separately distilled checkpoint of the same
+/// architecture, loaded through the SAME engine provider id `flux2_klein_9b`
+/// (`crates/sceneworks-worker/src/engines.rs` — `sceneworks_id: flux2_klein_9b_kv`,
+/// `engine_id: flux2_klein_9b`) from its own artifact, through `SCENEWORKS_FLUX2_KLEIN_KV_*`.
+pub const FLUX2_KLEIN_KV_REPOSITORY: &str = "SceneWorks/flux2-klein-9b-kv-mlx";
 pub const KREA_REPOSITORY: &str = "SceneWorks/krea-2-turbo-mlx";
 /// The UNDISTILLED Krea 2 base rehost (sc-22735) — the `krea_2_raw` provider's own artifact, on
 /// BOTH lanes. Bound through the separate `SCENEWORKS_KREA_RAW_*` family for the same reason
