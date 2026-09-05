@@ -1163,6 +1163,12 @@ mod tests {
             "ltx_2_5",
             // sc-18663: and the second video arm.
             "minimax_h3",
+            // sc-22731: the SANA and Chroma1 families.
+            "sana_1600m",
+            "sana_sprint_1600m",
+            "chroma1_hd",
+            "chroma1_base",
+            "chroma1_flash",
         ] {
             let request = json!({ "planned": { "target": { "provider": provider } } });
             let error = run(&request)
@@ -1186,6 +1192,11 @@ mod tests {
         assert_eq!(LTX_PROVIDER, "ltx_2_3");
         assert_eq!(LTX25_PROVIDER, "ltx_2_5");
         assert_eq!(MINIMAX_PROVIDER, "minimax_h3");
+        assert_eq!(SANA_PROVIDER, "sana_1600m");
+        assert_eq!(SANA_SPRINT_PROVIDER, "sana_sprint_1600m");
+        assert_eq!(CHROMA1_HD_PROVIDER, "chroma1_hd");
+        assert_eq!(CHROMA1_BASE_PROVIDER, "chroma1_base");
+        assert_eq!(CHROMA1_FLASH_PROVIDER, "chroma1_flash");
     }
 
     #[test]
@@ -4990,6 +5001,749 @@ fn run_turnkey_still(request: &Value) -> Result<Value, String> {
     });
     protocol::settle_plain_overlay_scenario(request, &mut fragment, arm.execution_path)?;
     Ok(fragment)
+}
+
+// ---------------------------------------------------------------------------------------------
+// The SANA and Chroma1 family arm (sc-22731): `sana_1600m`, `sana_sprint_1600m`, `chroma1_hd`,
+// `chroma1_base`, `chroma1_flash`.
+// ---------------------------------------------------------------------------------------------
+
+/// Which engine crate a member belongs to. The two families share one arm because the measurement
+/// is the same shape — a plain, reference-free, still text-to-image resident capture off a per-tier
+/// SceneWorks turnkey — but they publish their production identities from different tables and
+/// their loads are shaped differently, so the family stays in the type rather than being inferred
+/// from the provider id at each use.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SanaChromaFamily {
+    /// `mlx-gen-sana`. Its identity key carries the OFFLOAD POLICY as well as (route, tier) —
+    /// rung 4 is declared only on `Sequential`, so the two policies publish genuinely different
+    /// ladders (inference PR 951).
+    Sana,
+    /// `mlx-gen-chroma`. Its identity key is (route, tier) alone; the policy and the load shape are
+    /// deliberately not in it.
+    Chroma,
+}
+
+/// One member of the two families this arm measures, resolved from the plan's `target.provider`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct SanaChromaArm {
+    family: SanaChromaFamily,
+    /// The registry id handed to `catalog.media().load` — the production loader (E4), and the same
+    /// id the worker passes to `inference_runtime::load` (these five catalog ids ARE their engine
+    /// ids, `engines.rs` MODEL_TABLE).
+    provider: &'static str,
+    /// The route segment the engine's identity table interpolates: `base`/`sprint` for SANA,
+    /// `hd`/`base`/`flash` for Chroma1.
+    route: &'static str,
+    execution_path: &'static str,
+    /// The still-geometry refusal label (sc-18808).
+    still_calibration: &'static str,
+    repository_env: &'static str,
+    revision_env: &'static str,
+    root_env: &'static str,
+    expected_repository: &'static str,
+    /// The record's diagnostics source and fixture prefix, `<slug>-mlx-<tier>-<edge>-seed…`.
+    slug: &'static str,
+    /// The materialization shape every plan row of this member names, and the one the loaded
+    /// generator's calibration identity must carry (sc-22731 review). The two families genuinely
+    /// differ: `mlx-gen-sana` publishes its resident ladder EAGER — the windowed rung 4 is declared
+    /// only under `OffloadPolicy::Sequential`, which no anchor plans — while `mlx-gen-chroma`'s
+    /// shared ladder is deferred at every route and tier. Carried as a FIELD so the plan rows, the
+    /// LoadSpec and the capture cannot each spell it independently.
+    load_shape: LoadShape,
+}
+
+const SANA_PROVIDER: &str = "sana_1600m";
+const SANA_SPRINT_PROVIDER: &str = "sana_sprint_1600m";
+const CHROMA1_HD_PROVIDER: &str = "chroma1_hd";
+const CHROMA1_BASE_PROVIDER: &str = "chroma1_base";
+const CHROMA1_FLASH_PROVIDER: &str = "chroma1_flash";
+/// One seed for both families: the fixture binds route, tier and edge, so the seed does not also
+/// have to carry the route.
+const SANA_CHROMA_SEED: u64 = 22731;
+
+const SANA_ARM: SanaChromaArm = SanaChromaArm {
+    family: SanaChromaFamily::Sana,
+    provider: SANA_PROVIDER,
+    route: "base",
+    execution_path: "the MLX SANA 1.6B base-only text-to-image path",
+    still_calibration: "MLX SANA 1.6B calibration",
+    repository_env: "SCENEWORKS_SANA_REPOSITORY",
+    revision_env: "SCENEWORKS_SANA_REVISION",
+    root_env: "SCENEWORKS_SANA_ROOT",
+    expected_repository: protocol::SANA_REPOSITORY,
+    slug: "sana-1600m",
+    load_shape: LoadShape::EagerMaterialization,
+};
+
+const SANA_SPRINT_ARM: SanaChromaArm = SanaChromaArm {
+    family: SanaChromaFamily::Sana,
+    provider: SANA_SPRINT_PROVIDER,
+    route: "sprint",
+    execution_path: "the MLX SANA-Sprint 1.6B base-only text-to-image path",
+    still_calibration: "MLX SANA-Sprint 1.6B calibration",
+    repository_env: "SCENEWORKS_SANA_SPRINT_REPOSITORY",
+    revision_env: "SCENEWORKS_SANA_SPRINT_REVISION",
+    root_env: "SCENEWORKS_SANA_SPRINT_ROOT",
+    expected_repository: protocol::SANA_SPRINT_REPOSITORY,
+    slug: "sana-sprint",
+    load_shape: LoadShape::EagerMaterialization,
+};
+
+const CHROMA1_HD_ARM: SanaChromaArm = SanaChromaArm {
+    family: SanaChromaFamily::Chroma,
+    provider: CHROMA1_HD_PROVIDER,
+    route: "hd",
+    execution_path: "the MLX Chroma1-HD base-only text-to-image path",
+    still_calibration: "MLX Chroma1-HD calibration",
+    repository_env: "SCENEWORKS_CHROMA1_HD_REPOSITORY",
+    revision_env: "SCENEWORKS_CHROMA1_HD_REVISION",
+    root_env: "SCENEWORKS_CHROMA1_HD_ROOT",
+    expected_repository: protocol::CHROMA1_HD_REPOSITORY,
+    slug: "chroma1-hd",
+    load_shape: LoadShape::DeferredMaterialization,
+};
+
+const CHROMA1_BASE_ARM: SanaChromaArm = SanaChromaArm {
+    family: SanaChromaFamily::Chroma,
+    provider: CHROMA1_BASE_PROVIDER,
+    route: "base",
+    execution_path: "the MLX Chroma1-Base base-only text-to-image path",
+    still_calibration: "MLX Chroma1-Base calibration",
+    repository_env: "SCENEWORKS_CHROMA1_BASE_REPOSITORY",
+    revision_env: "SCENEWORKS_CHROMA1_BASE_REVISION",
+    root_env: "SCENEWORKS_CHROMA1_BASE_ROOT",
+    expected_repository: protocol::CHROMA1_BASE_REPOSITORY,
+    slug: "chroma1-base",
+    load_shape: LoadShape::DeferredMaterialization,
+};
+
+const CHROMA1_FLASH_ARM: SanaChromaArm = SanaChromaArm {
+    family: SanaChromaFamily::Chroma,
+    provider: CHROMA1_FLASH_PROVIDER,
+    route: "flash",
+    execution_path: "the MLX Chroma1-Flash base-only text-to-image path",
+    still_calibration: "MLX Chroma1-Flash calibration",
+    repository_env: "SCENEWORKS_CHROMA1_FLASH_REPOSITORY",
+    revision_env: "SCENEWORKS_CHROMA1_FLASH_REVISION",
+    root_env: "SCENEWORKS_CHROMA1_FLASH_ROOT",
+    expected_repository: protocol::CHROMA1_FLASH_REPOSITORY,
+    slug: "chroma1-flash",
+    load_shape: LoadShape::DeferredMaterialization,
+};
+
+/// Every member this arm serves, in one place so the tables and the tests cannot disagree about
+/// which five cells exist.
+const SANA_CHROMA_ARMS: [SanaChromaArm; 5] = [
+    SANA_ARM,
+    SANA_SPRINT_ARM,
+    CHROMA1_HD_ARM,
+    CHROMA1_BASE_ARM,
+    CHROMA1_FLASH_ARM,
+];
+
+/// Which family member the plan asks for, refused by name. Unlike the FLUX.1 arm the key is the
+/// provider alone: neither family has a second mode on this lane that loads a different artifact
+/// (Chroma is `text_to_image` only, and SANA's `image_to_image` is the same base load driven from
+/// a reference, which no anchor plans).
+fn sana_chroma_arm(request: &Value) -> Result<SanaChromaArm, String> {
+    let provider = protocol::planned(request)?
+        .pointer("/target/provider")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "planned.target.provider must be a string".to_owned())?;
+    SANA_CHROMA_ARMS
+        .iter()
+        .copied()
+        .find(|arm| arm.provider == provider)
+        .ok_or_else(|| format!("the MLX SANA/Chroma1 arm does not implement provider {provider:?}"))
+}
+
+/// The artifact one SANA/Chroma1 capture loads: the env-bound repository and revision, the PLANNED
+/// tier, and the `LoadSpec` that opens exactly that tier.
+#[derive(Debug)]
+struct SanaChromaArtifact {
+    arm: SanaChromaArm,
+    repository: String,
+    revision: String,
+    tier: &'static str,
+    spec: LoadSpec,
+}
+
+impl SanaChromaArtifact {
+    fn loadability_fingerprint(&self) -> String {
+        format!("{}@{}:{}", self.repository, self.revision, self.tier)
+    }
+
+    fn artifact_json(&self) -> Value {
+        json!({
+            "repository": self.repository,
+            "resolvedRevision": self.revision,
+            "variant": self.tier,
+        })
+    }
+}
+
+/// The production calibration identity the loaded generator publishes for one `(member, tier)`
+/// cell — the tables `mlx-gen-sana::memory_strategy::production_calibration_fingerprint` and
+/// `mlx-gen-chroma::memory_strategy::production_calibration_fingerprint` mint (inference PR 951).
+///
+/// The two MEASURED keys are read off the engine constants byte-for-byte rather than spelled here,
+/// so this table cannot drift off the crates it mirrors; every other cell is the format string the
+/// engine interpolates. SANA's key carries `-resident` because that is the policy this arm — and
+/// the worker's MLX still-image path — loads under; Chroma's key carries no policy at all.
+///
+/// Written here as well as in the engines so the plan/arm binding is weights-free and can be proven
+/// on a CPU-only host. The capture refuses a loaded contract whose identity differs from this
+/// table, so the two copies cannot drift unnoticed once the epic's pin bump lands.
+fn sana_chroma_calibration_fingerprint(arm: SanaChromaArm, tier: &str) -> String {
+    match (arm.family, arm.provider, tier) {
+        (SanaChromaFamily::Sana, SANA_PROVIDER, "q4") => {
+            runtime_macos::providers::sana::memory_strategy::RESIDENT_MEMORY_CALIBRATION_FINGERPRINT
+                .to_owned()
+        }
+        (SanaChromaFamily::Chroma, CHROMA1_BASE_PROVIDER, "q4") => {
+            runtime_macos::providers::chroma::memory_strategy::MEMORY_CALIBRATION_FINGERPRINT
+                .to_owned()
+        }
+        (SanaChromaFamily::Sana, _, tier) => {
+            format!("sana-{}-{tier}-mlx-full-ladder-v1-resident", arm.route)
+        }
+        (SanaChromaFamily::Chroma, _, tier) => {
+            format!("chroma1-{}-{tier}-mlx-shared-ladder-v1", arm.route)
+        }
+    }
+}
+
+/// The weights-free conformance identities the two MLX engines publish for a registry-behaviour
+/// contract that loaded no weights (`sana-<route>-<tier>-mlx-weights-free-conformance-v1-<policy>`
+/// and `chroma1-mlx-registry-behavior-v1-<route>`). A plan row naming one of these could never be
+/// satisfied by a production load. Test-only: the sole caller is the plan-identity conformance
+/// test in `sana_chroma_tests`.
+///
+/// `_mlx_` in the name, and not extended to cover the Candle lane, because the Candle lane has NO
+/// such namespace to guard at inference `c6d6a4db`: `candle-gen-sana::memory_strategy` mints the
+/// single identity `sana-candle-dense-<route>-full-ladder-v1` (its `memory_strategy.rs:581`)
+/// whether or not asset facts were injected — the weights-free fixture differs only in publishing
+/// no `resident_components` — and `candle-gen-chroma` publishes no conformance string at all. A
+/// shared predicate would therefore have been a guard over an empty set, which reads as coverage.
+#[cfg(test)]
+fn is_sana_chroma_mlx_weights_free_fingerprint(fingerprint: &str) -> bool {
+    fingerprint.contains("-mlx-weights-free-conformance-")
+        || fingerprint.starts_with("chroma1-mlx-registry-behavior-")
+}
+
+/// The env-free half of [`sana_chroma_load_spec`], so the tier and root bindings are unit-testable
+/// without weights. The root must end in the PLANNED tier's directory
+/// (`.../snapshots/<revision>/<tier>`) — both engines then re-prove that answer against the
+/// transformer's own packed marker and withhold the identity if the two disagree, so a stale
+/// `…/q4` export can never satisfy a q8 or bf16 plan.
+fn sana_chroma_load_spec_at(
+    request: &Value,
+    load_shape: LoadShape,
+    repository: String,
+    revision: String,
+    root: PathBuf,
+) -> Result<SanaChromaArtifact, String> {
+    let arm = sana_chroma_arm(request)?;
+    protocol::validate_plain_overlay_target(request, arm.execution_path)?;
+    let tier = match planned_qwen_tier(request)? {
+        "bf16" => "bf16",
+        "q4" => "q4",
+        "q8" => "q8",
+        _ => unreachable!("planned_qwen_tier returned an unsupported tier"),
+    };
+    protocol::validate_artifact_identity(&repository, &revision, arm.expected_repository)?;
+    let root = std::fs::canonicalize(&root)
+        .map_err(|error| format!("canonicalize {}: {error}", arm.root_env))?;
+    protocol::validate_huggingface_snapshot_root(
+        &root,
+        &repository,
+        &revision,
+        tier,
+        arm.expected_repository,
+    )?;
+    // Resident, like every other MLX still-image arm: the anchor rung is `resident`
+    // (`memory-calibration-harness.mjs` `ANCHOR_STRATEGY.mlx`), and that is the policy the worker
+    // loads both families under at that rung — `apply_declared_mlx_load_policy_for_request` finds
+    // no `requiredOffloadPolicy` on either manifest's resident implementation, so gen-core's
+    // `Resident` default stands. It matters more here than on FLUX.1: SANA's identity key CARRIES
+    // the policy, so a Sequential load would publish a different string for the same cell.
+    let mut spec = LoadSpec::new(WeightsSource::Dir(root))
+        .with_offload_policy(OffloadPolicy::Resident)
+        .with_load_shape(load_shape);
+    // The tier the worker requests, exactly as `image_jobs/base.rs` sends it: neither family is in
+    // `mlx_load_quant_for_resolved_artifact`'s strip list, so the resolved tier rides
+    // `LoadSpec::quantize` (`None` at bf16). Both engines then compare it to the artifact's own
+    // packed marker before publishing an identity.
+    if let (_, Some(quant)) = tier_precision_quant(tier) {
+        spec = spec.with_quant(quant);
+    }
+    // P9: the worker binds the exact resolved route on every MLX image load
+    // (`image_jobs/base.rs`: `.with_resolved_route(request.model.clone())`). These five catalog ids
+    // are their own engine ids, so the route is the provider.
+    let spec = spec.with_resolved_route(arm.provider.to_owned());
+    Ok(SanaChromaArtifact {
+        arm,
+        repository,
+        revision,
+        tier,
+        spec,
+    })
+}
+
+fn sana_chroma_load_spec(
+    request: &Value,
+    load_shape: LoadShape,
+) -> Result<SanaChromaArtifact, String> {
+    let arm = sana_chroma_arm(request)?;
+    let repository = protocol::required_env(arm.repository_env)?;
+    let revision = protocol::required_env(arm.revision_env)?;
+    let root = PathBuf::from(protocol::required_env(arm.root_env)?);
+    sana_chroma_load_spec_at(request, load_shape, repository, revision, root)
+}
+
+/// The one fresh planned request every SANA/Chroma1 capture renders. Two steps, for the same reason
+/// the FLUX.1 and Z-Image arms use two: a resident route has no provider loading boundary between
+/// text encode and denoise, so the first Step callback closes a conservative conditioning envelope
+/// and the second gives denoise its own measured interval before Decoding.
+fn sana_chroma_request(width: u32, height: u32) -> GenerationRequest {
+    GenerationRequest {
+        prompt: "a portrait of a person in a sunlit studio, editorial photograph".to_owned(),
+        width,
+        height,
+        count: 1,
+        seed: Some(SANA_CHROMA_SEED),
+        steps: Some(2),
+        ..Default::default()
+    }
+}
+
+/// Bind the fixture to the planned member, tier AND geometry edge, so a bf16 record can never be
+/// emitted against a q4 capture that merely reused the fixture string.
+fn validate_sana_chroma_fixture(
+    request: &Value,
+    arm: SanaChromaArm,
+    tier: &str,
+) -> Result<(), String> {
+    let fixture = protocol::planned(request)?
+        .get("fixture")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "planned.fixture must be a string".to_owned())?;
+    let (width, _) = protocol::target_geometry(request)?;
+    let prefix = format!("{}-mlx-{tier}-{width}-seed", arm.slug);
+    let remainder = fixture
+        .strip_prefix(&prefix)
+        .ok_or_else(|| format!("planned.fixture {fixture:?} must start with {prefix:?}"))?;
+    let (seed, steps) = remainder
+        .split_once("-step")
+        .ok_or_else(|| format!("planned.fixture {fixture:?} must end with -step<count>"))?;
+    let seed = seed
+        .parse::<u64>()
+        .map_err(|error| format!("parse SANA/Chroma1 fixture seed {seed:?}: {error}"))?;
+    if seed != SANA_CHROMA_SEED {
+        return Err(format!(
+            "planned.fixture seed {seed} does not match the SANA/Chroma1 calibration seed \
+             {SANA_CHROMA_SEED}"
+        ));
+    }
+    let steps = steps
+        .parse::<u32>()
+        .map_err(|error| format!("parse SANA/Chroma1 fixture step count {steps:?}: {error}"))?;
+    if steps != 2 {
+        return Err(format!(
+            "planned.fixture {fixture:?} must use the two-step calibration request"
+        ));
+    }
+    Ok(())
+}
+
+/// The admission context for the SANA/Chroma1 safety scenarios, in the shape the worker admits
+/// these routes under: plain, reference-free, still text-to-image.
+#[allow(clippy::too_many_arguments)]
+fn sana_chroma_context(
+    selection: &MemorySelection,
+    calibration: &MemoryCalibrationIdentity,
+    fingerprint: &str,
+    width: u32,
+    height: u32,
+    total_bytes: u64,
+    predicted_peak_bytes: u64,
+) -> MemoryRunContext {
+    MemoryRunContext {
+        selection: *selection,
+        optimization_authority: MemoryOptimizationAuthority::Calibrated,
+        calibration_abi: calibration.abi,
+        // A parameter only so the stale-evidence probe can pass a deliberate mismatch; the real
+        // call sites pass `calibration.fingerprint` (the Krea-arm lesson at `krea_context`).
+        calibration_fingerprint: fingerprint.to_owned(),
+        load_shape: calibration.load_shape,
+        mode: MemoryMode::TextToImage,
+        has_reference: false,
+        use_pid: false,
+        has_phases: false,
+        geometry: MemoryGeometry {
+            width,
+            height,
+            batch: 1,
+            frames: 1,
+            reference_count: 0,
+        },
+        overlay: None,
+        budget: MemoryBudget {
+            total_bytes,
+            committed_bytes: 0,
+            reclaimable_bytes: 0,
+            reserved_headroom_bytes: 0,
+        },
+        predicted_peak_bytes,
+        cache_state: MemoryCacheState::Cold,
+        evidence_revision: format!("sc-22731@{}", protocol::INFERENCE_PIN),
+    }
+}
+
+/// The `mlx:sana_1600m` / `mlx:sana_sprint_1600m` / `mlx:chroma1_{hd,base,flash}` arm (sc-22731).
+///
+/// Loads through the SAME seam the worker loads these five routes through —
+/// `runtime_macos::catalog().media().load(engine_id, &spec)`, which is exactly what
+/// `crates/sceneworks-worker/src/inference_runtime.rs` wraps — reads the LOADED generator's own
+/// contract, and measures the resident anchor composition against it.
+fn run_sana_chroma(request: &Value) -> Result<Value, String> {
+    // Before the load, not inside it: a non-still target must be refused without paying for
+    // weights. The arm is resolved first so the refusal carries the member's own label.
+    let arm = sana_chroma_arm(request)?;
+    protocol::validate_still_geometry(request, arm.still_calibration)?;
+    let load_shape = planned_load_shape(request)?;
+    // The member's materialization shape, refused BEFORE the load (sc-22731 review): the two
+    // families genuinely differ, and a row carrying the other family's shape would otherwise pay
+    // for a multi-gigabyte load before the identity comparison below could notice.
+    if load_shape != arm.load_shape {
+        return Err(format!(
+            "plan/provider load-shape mismatch: plan={}, the {} route is captured {}",
+            load_shape_key(load_shape),
+            arm.provider,
+            load_shape_key(arm.load_shape)
+        ));
+    }
+    let selection = planned_selection(request)?;
+    let tier = planned_qwen_tier(request)?;
+    validate_sana_chroma_fixture(request, arm, tier)?;
+    let (width, height) = protocol::target_geometry(request)?;
+    // The plan row must name the production identity this cell's loaded generator publishes —
+    // checked against the weights-free table BEFORE the load, so a row still carrying a
+    // conformance string fails in milliseconds rather than after a multi-gigabyte load.
+    let planned_fingerprint = protocol::planned(request)?
+        .get("calibrationFingerprint")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "planned.calibrationFingerprint must be a string".to_owned())?
+        .to_owned();
+    let expected_fingerprint = sana_chroma_calibration_fingerprint(arm, tier);
+    if planned_fingerprint != expected_fingerprint {
+        return Err(format!(
+            "plan/provider calibration mismatch: plan={planned_fingerprint}, the {} {tier} \
+             production identity is {expected_fingerprint}",
+            arm.provider
+        ));
+    }
+    let artifact = sana_chroma_load_spec(request, load_shape)?;
+    // From the ARTIFACT, so the member that was actually bound to a root is the member that is
+    // measured — not a second, independent resolution of the same plan.
+    let arm = artifact.arm;
+
+    let catalog =
+        runtime_macos::catalog().map_err(|error| format!("build MLX catalog: {error}"))?;
+    let generator = catalog
+        .media()
+        .load(arm.provider, &artifact.spec)
+        .map_err(|error| format!("load real {} {tier} provider: {error}", arm.provider))?;
+    let contract = generator.memory_strategy_contract().ok_or_else(|| {
+        format!(
+            "loaded {} exposed no memory-strategy contract",
+            arm.provider
+        )
+    })?;
+    contract.validate_selection(&selection).map_err(|error| {
+        format!(
+            "pinned {} provider rejected planned selection: {error}",
+            arm.provider
+        )
+    })?;
+    let strategy = attested_strategy(
+        request,
+        &selection,
+        &contract.engaged_composition(selection.strategy),
+    )?;
+    // The LOADED generator's own identity is what the record attests. An absent one is refused by
+    // name — an anchor recorded against no identity would claim measured authority the engine
+    // never granted — and so is one that differs from the table the plan was bound to above.
+    let calibration = contract.calibration.as_ref().ok_or_else(|| {
+        format!(
+            "the loaded {} provider at inference {} published no calibration identity for the \
+             {tier} artifact; the production identity for this cell is {expected_fingerprint} \
+             (inference PR 951 publishes one per (provider, tier) for every shipped cell), so this \
+             cell captures only at a pin that carries it",
+            arm.provider,
+            protocol::INFERENCE_PIN
+        )
+    })?;
+    if calibration.fingerprint != expected_fingerprint {
+        return Err(format!(
+            "plan/provider calibration mismatch: plan={planned_fingerprint}, pinned provider={}",
+            calibration.fingerprint
+        ));
+    }
+    // ...and the identity's SHAPE, beside its name (sc-22731 review), as `mlx.rs`'s other arms do.
+    // `MemoryCalibrationIdentity` carries the load shape it was minted under, so a plan row that
+    // asked for SANA's eager resident ladder but reached a deferred contract — or a Chroma row the
+    // other way round — would otherwise record a peak under an identity minted for a different
+    // materialization.
+    if calibration.load_shape != load_shape {
+        return Err(format!(
+            "plan/provider load-shape mismatch: plan={}, pinned provider={}",
+            load_shape_key(load_shape),
+            load_shape_key(calibration.load_shape)
+        ));
+    }
+    let hardware_bytes = request
+        .pointer("/hardware/memoryBytes")
+        .and_then(Value::as_u64)
+        .ok_or_else(|| "run request.hardware.memoryBytes must be an integer".to_owned())?;
+    let safety = |fingerprint: &str, total_bytes: u64, predicted: u64| {
+        generator.memory_strategy_safety_check(&sana_chroma_context(
+            &selection,
+            calibration,
+            fingerprint,
+            width,
+            height,
+            total_bytes,
+            predicted,
+        ))
+    };
+    // Admission mutation hygiene: the gate must ACCEPT a fitting request, so the two rejections
+    // below cannot pass through a blanket refusal.
+    if !matches!(
+        safety(&calibration.fingerprint, hardware_bytes, 1),
+        MemorySafetyDecision::Accept
+    ) {
+        return Err(format!(
+            "{} admission rejected a fitting probe budget; the scenario rejections below would be \
+             a blanket refusal, not evidence",
+            arm.provider
+        ));
+    }
+    if !matches!(
+        safety(&calibration.fingerprint, 0, 1),
+        MemorySafetyDecision::Reject { .. }
+    ) {
+        return Err(format!(
+            "{} admission accepted an unknown/zero memory budget",
+            arm.provider
+        ));
+    }
+    if !matches!(
+        safety("stale-sana-chroma-fingerprint", hardware_bytes, 1),
+        MemorySafetyDecision::Reject { .. }
+    ) {
+        return Err(format!(
+            "{} admission accepted stale calibration evidence",
+            arm.provider
+        ));
+    }
+
+    let conditioning = Cell::new(PhaseMemory {
+        active: 0,
+        cache: 0,
+    });
+    let denoise = Cell::new(PhaseMemory {
+        active: 0,
+        cache: 0,
+    });
+    clear_cache();
+    reset_peak_memory();
+    let pre_rung_active = get_active_memory() as u64;
+    let pre_rung_cache = get_cache_memory() as u64;
+    let selected = one_image(
+        generator
+            .generate(
+                &sana_chroma_request(width, height),
+                &mut |progress| match progress {
+                    Progress::Step { current: 1, .. } => {
+                        conditioning.set(PhaseMemory::capture());
+                        reset_peak_memory();
+                    }
+                    Progress::Decoding => {
+                        denoise.set(PhaseMemory::capture());
+                        reset_peak_memory();
+                    }
+                    _ => {}
+                },
+            )
+            .map_err(|error| format!("generate measured {} render: {error}", arm.provider))?,
+    )?;
+    let decode = PhaseMemory::capture();
+    let conditioning = conditioning.get();
+    let denoise = denoise.get();
+    if [conditioning.active, denoise.active, decode.active].contains(&0) {
+        return Err(format!(
+            "a synchronized {} lifecycle phase reported a zero active peak",
+            arm.provider
+        ));
+    }
+    let overall = PhaseMemory::overall(&[conditioning, denoise, decode]);
+    let predicted_peaks = image_predicted_peak_bytes(conditioning, denoise, decode);
+    let predicted = predicted_peaks.overall;
+    if !matches!(
+        safety(&calibration.fingerprint, predicted, predicted),
+        MemorySafetyDecision::Accept
+    ) {
+        return Err(format!(
+            "{} admission rejected an exact-fit calibrated budget",
+            arm.provider
+        ));
+    }
+
+    // Warm-repeat determinism and allocator cleanup bounds on this exact loaded provider.
+    clear_cache();
+    reset_peak_memory();
+    let baseline = one_image(
+        generator
+            .generate(&sana_chroma_request(width, height), &mut |_| {})
+            .map_err(|error| format!("generate warm {} control: {error}", arm.provider))?,
+    )?;
+    let clean_warm_peak = get_peak_memory() as u64;
+    clear_cache();
+    let clean_post_cleanup = AllocatorState::capture_current();
+    let cleanup_bounds =
+        LifecycleMemoryBounds::from_clean_warm(clean_warm_peak, clean_post_cleanup);
+    let (maximum_error, mean_error, rms_error) = image_max_mean_rms_abs(&selected, &baseline)?;
+    if !flux2_quality_passes(maximum_error, mean_error, rms_error) {
+        return Err(format!(
+            "{} warm repeat exceeded the determinism envelope: max={maximum_error:.6}, \
+             mean={mean_error:.6}, rms={rms_error:.6}",
+            arm.provider
+        ));
+    }
+    reset_peak_memory();
+    let warm = one_image(
+        generator
+            .generate(&sana_chroma_request(width, height), &mut |_| {})
+            .map_err(|error| format!("generate warm {} repeat: {error}", arm.provider))?,
+    )?;
+    let warm_peak = get_peak_memory() as u64;
+    if !cleanup_bounds.allows_warm_peak(warm_peak) {
+        return Err(format!(
+            "{} warm repeat peaked at {warm_peak} bytes, above the clean warm control \
+             {clean_warm_peak} bytes plus 2%",
+            arm.provider
+        ));
+    }
+    clear_cache();
+    let warm_post_cleanup = AllocatorState::capture_current();
+    if !cleanup_bounds.allows_retained(warm_post_cleanup) {
+        return Err(format!(
+            "{} warm repeat retained active/cache bytes {warm_post_cleanup:?} above the clean warm \
+             cleanup {clean_post_cleanup:?} plus {} bytes",
+            arm.provider, cleanup_bounds.tolerance_bytes,
+        ));
+    }
+    let (warm_maximum, warm_mean, warm_rms) = image_max_mean_rms_abs(&selected, &warm)?;
+    if !flux2_quality_passes(warm_maximum, warm_mean, warm_rms) {
+        return Err(format!(
+            "{} second warm repeat changed the deterministic output",
+            arm.provider
+        ));
+    }
+
+    // Arm-internal negative-mutation falsifiability check: a runtime_complete record must keep
+    // `negativeMutation` null, so the breach is verified here and the numbers land in diagnostics.
+    let mutated = qwen_negative_mutation(&selected);
+    let (mutated_maximum, mutated_mean, mutated_rms) = image_max_mean_rms_abs(&mutated, &baseline)?;
+    if flux2_quality_passes(mutated_maximum, mutated_mean, mutated_rms) {
+        return Err(format!(
+            "{} output mutation did not breach the determinism envelope",
+            arm.provider
+        ));
+    }
+
+    let lifecycle_blocker = concat!(
+        "the pinned SANA/Chroma1 crates open no memory-strategy request scope for the resident ",
+        "anchor composition and expose no calibration fault-injection site, so the scoped ",
+        "lifecycle scenarios cannot execute; unscoped repeat determinism and allocator cleanup ",
+        "bounds are attested in quality and diagnostics instead"
+    );
+    let mut fragment = json!({
+        "status": "runtime_complete",
+        "strategy": strategy,
+        "loadShape": load_shape_key(calibration.load_shape),
+        "artifact": artifact.artifact_json(),
+        "sweep": sana_chroma_complete_sweep(request)?,
+        "scenarios": [
+            { "name": "exact_fit", "result": "passed", "predictedBytes": predicted, "effectiveBudgetBytes": predicted },
+            { "name": "unknown_budget", "result": "passed" },
+            { "name": "stale_evidence", "result": "passed" },
+            { "name": "warm_repeat", "result": "not_run", "reason": lifecycle_blocker },
+            { "name": "cancel", "result": "not_run", "reason": lifecycle_blocker },
+            { "name": "error", "result": "not_run", "reason": lifecycle_blocker },
+            { "name": "loadability", "result": "passed" },
+            { "name": "overlay", "result": "not_applicable", "reason": "settled below from the declared target" }
+        ],
+        "predictedPeakBytes": predicted_peaks.json(),
+        "observedMemory": {
+            "conditioning": conditioning.json(),
+            "denoise": denoise.json(),
+            "decode": decode.json(),
+            "overall": overall.json(),
+        },
+        "quality": {
+            "contract": "identical artifact, prompt, seed, geometry, steps, tier, and loaded provider; cold measured render versus warm unscoped repeats",
+            "identicalInputs": true,
+            "result": "passed",
+            "maximumError": maximum_error,
+            "meanError": mean_error,
+            "rootMeanSquareError": rms_error,
+            "maximumErrorThreshold": FLUX2_MAX_THRESHOLD,
+            "meanErrorThreshold": FLUX2_MEAN_THRESHOLD,
+            "rootMeanSquareErrorThreshold": FLUX2_RMS_THRESHOLD,
+        },
+        "negativeMutation": null,
+        "loadability": {
+            "result": "passed",
+            "resolvedPathFingerprint": artifact.loadability_fingerprint(),
+        },
+        "diagnostics": protocol::diagnostics(
+            &format!("memory-mlx-adapter:{}-shared-ladder", arm.slug),
+            "executed",
+            [lifecycle_blocker.to_owned()],
+            [
+                ("preRungActiveAfterClear", "bytes", pre_rung_active),
+                ("preRungCacheAfterClear", "bytes", pre_rung_cache),
+                ("conditioningActivePeak", "bytes", conditioning.active),
+                ("denoiseActivePeak", "bytes", denoise.active),
+                ("decodeActivePeak", "bytes", decode.active),
+                ("overallAllocatorEnvelope", "bytes", overall.allocator_bytes()),
+                ("lifecycleCleanWarmPeak", "bytes", clean_warm_peak),
+                ("lifecycleCleanPostCleanupActive", "bytes", clean_post_cleanup.active),
+                ("lifecycleCleanPostCleanupCache", "bytes", clean_post_cleanup.cache),
+                ("lifecycleCleanupTolerance", "bytes", cleanup_bounds.tolerance_bytes),
+                ("lifecycleWarmRepeatPeak", "bytes", warm_peak),
+                ("lifecycleWarmRepeatPostCleanupActive", "bytes", warm_post_cleanup.active),
+                ("lifecycleWarmRepeatPostCleanupCache", "bytes", warm_post_cleanup.cache),
+                ("negativeMutationMaximumErrorPer255", "count", (mutated_maximum * 255.0).round() as u64),
+                ("negativeMutationMeanErrorPer255", "count", (mutated_mean * 255.0).round() as u64),
+                ("loadShapeDeferred", "count", u64::from(calibration.load_shape == LoadShape::DeferredMaterialization)),
+            ],
+        ),
+        "capturedAt": protocol::captured_at(),
+    });
+    protocol::settle_plain_overlay_scenario(request, &mut fragment, arm.execution_path)?;
+    Ok(fragment)
+}
+
+fn sana_chroma_complete_sweep(request: &Value) -> Result<Value, String> {
+    let mut sweep = protocol::reference_sweep(request, "passed")?;
+    // One exact tuple per plan row; marking it range-verified promotes no sibling tuple (the
+    // generated matrix still requires a matching manifest binding per cell).
+    sweep["rangeVerified"] = json!(true);
+    Ok(sweep)
 }
 
 /// Maximum, mean, and root-mean-square absolute error between two images, in [0,1] units. The
@@ -13507,6 +14261,15 @@ fn run(request: &Value) -> Result<Value, String> {
         FLUX1_DEV_PROVIDER => run_flux_one(request),
         FLUX1_SCHNELL_PROVIDER => run_flux_one(request),
         PULID_FLUX_PROVIDER => run_flux_one(request),
+        // sc-22731: the SANA and Chroma1 families. Five registry ids on one arm — the two
+        // `mlx-gen-sana` routes and the three `mlx-gen-chroma` ones. One arm per line, for the
+        // same reason the FLUX.1 block above is: `stale-lane-report.mjs#adapterCapturableProviders`
+        // parses these arms and accepts only a bare literal or a single `&str` const per arm.
+        SANA_PROVIDER => run_sana_chroma(request),
+        SANA_SPRINT_PROVIDER => run_sana_chroma(request),
+        CHROMA1_HD_PROVIDER => run_sana_chroma(request),
+        CHROMA1_BASE_PROVIDER => run_sana_chroma(request),
+        CHROMA1_FLASH_PROVIDER => run_sana_chroma(request),
         // sc-22732: the turnkey still family. Five registry ids on one arm, over three engine
         // crates — `mlx-gen-kolors`, `mlx-gen-ideogram` and `mlx-gen-lens`. The arm resolves which
         // member from `(provider, mode)`, and the member carries its own artifact family (Ideogram's
@@ -13814,7 +14577,10 @@ mod flux_one_tests {
                 "{provider} was not dispatched into the FLUX.1 arm: {error}"
             );
         }
-        for provider in ["flux1_dev_control", "chroma1_hd"] {
+        // Two ids no MLX arm serves: a control route the engine does not register, and the CANDLE
+        // LTX-2.3 engine id. `chroma1_hd` used to stand here; sc-22731 armed it, which is exactly
+        // the drift this loop exists to catch.
+        for provider in ["flux1_dev_control", "ltx_2_3_distilled"] {
             let error = run(&flux_one_planned(provider, "text_to_image", "q4")).unwrap_err();
             assert_eq!(
                 error,
@@ -14459,6 +15225,391 @@ mod flux_one_tests {
         );
         // Not an env error: the refusal fired before `SCENEWORKS_FLUX1_SCHNELL_*` was read.
         assert!(!error.contains("required environment variable"), "{error}");
+    }
+}
+
+/// sc-22731 — the SANA and Chroma1 family arm.
+///
+/// Everything here is env-free and weights-free, which is the point: the arm's plan binding
+/// (member resolution, tier, root suffix, request shape, LoadSpec shape) is decided before a single
+/// weight file is opened, so it can be proven on a CPU-only host. The measured render itself
+/// belongs to the terminal capture campaign.
+#[cfg(test)]
+mod sana_chroma_tests {
+    use super::*;
+
+    /// The three shipped tiers of this lane. One spelling, so the expectation below and the tables
+    /// it is compared against cannot disagree about which cells exist.
+    const SANA_CHROMA_MLX_TIERS: [&str; 3] = ["q4", "q8", "bf16"];
+
+    /// The plan keys this arm must serve, DERIVED from `SANA_CHROMA_ARMS` rather than counted.
+    /// A member added to the table without a plan row (or a plan row without a member) names itself
+    /// in the diff; a frozen `15` only ever said "there are sixteen, not fifteen".
+    fn expected_sana_chroma_mlx_keys() -> std::collections::BTreeSet<String> {
+        SANA_CHROMA_ARMS
+            .iter()
+            .flat_map(|arm| {
+                SANA_CHROMA_MLX_TIERS
+                    .iter()
+                    .map(move |tier| format!("{}:{tier}:mlx", arm.provider))
+            })
+            .collect()
+    }
+
+    /// The shape this member's plan rows carry, so no fixture spells a materialization the arm
+    /// would refuse. Foreign providers (the misroute cases) keep the deferred default.
+    fn planned_load_shape_key(provider: &str) -> &'static str {
+        load_shape_key(
+            SANA_CHROMA_ARMS
+                .iter()
+                .find(|arm| arm.provider == provider)
+                .map(|arm| arm.load_shape)
+                .unwrap_or(LoadShape::DeferredMaterialization),
+        )
+    }
+
+    fn sana_chroma_planned(provider: &str, tier: &str) -> Value {
+        json!({
+            "planned": {
+                "target": {
+                    "provider": provider,
+                    "modelId": provider,
+                    "tier": tier,
+                    "mode": "text_to_image",
+                    "overlay": "none",
+                    "geometry": { "width": 1024, "height": 1024, "batch": 1, "frames": 1 }
+                },
+                "backend": "mlx",
+                "loadShape": planned_load_shape_key(provider),
+                "strategy": { "rung": "resident", "engagedRungs": ["resident"], "parameters": {} },
+                "calibrationFingerprint": "unused",
+                "fixture": "unused"
+            }
+        })
+    }
+
+    fn sana_chroma_snapshot_root(repository: &str, revision: &str, tier: &str) -> PathBuf {
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir()
+            .join(format!("sc-22731-{}-{nonce}", std::process::id()))
+            .join(format!("models--{}", repository.replace('/', "--")))
+            .join("snapshots")
+            .join(revision)
+            .join(tier);
+        std::fs::create_dir_all(&root).unwrap();
+        root
+    }
+
+    const REVISION: &str = "ac421696dd6eb0b41f446f4c45a53ccc057d82a1";
+
+    /// Every SANA/Chroma1 MLX plan row names the production calibration identity its loaded
+    /// generator publishes (inference PR 951's per-(provider, tier) tables): the two measured keys
+    /// are the engine constants byte-for-byte, no row names a weights-free conformance string, and
+    /// the fifteen identities are distinct.
+    #[test]
+    fn every_planned_sana_chroma_mlx_cell_names_the_identity_its_loaded_generator_publishes() {
+        let plan: Value = serde_json::from_str(include_str!(
+            "../../../../config/memory-calibration-plan.json"
+        ))
+        .expect("the anchor plan parses");
+        let mut identities = std::collections::BTreeMap::new();
+        let mut visited = std::collections::BTreeSet::new();
+        for (key, entry) in plan["anchors"].as_object().expect("anchors object") {
+            let provider = entry["provider"].as_str().unwrap();
+            if !key.ends_with(":mlx")
+                || !SANA_CHROMA_ARMS.iter().any(|arm| arm.provider == provider)
+            {
+                continue;
+            }
+            visited.insert(key.clone());
+            let tier = key.split(':').nth(1).unwrap();
+            let arm = sana_chroma_arm(&sana_chroma_planned(provider, tier)).unwrap();
+            let planned = entry["calibrationFingerprint"]
+                .as_str()
+                .unwrap_or_else(|| panic!("{key}: calibrationFingerprint must be a string"));
+            assert!(
+                !is_sana_chroma_mlx_weights_free_fingerprint(planned),
+                "{key}: {planned} is a weights-free conformance identity no production load returns"
+            );
+            assert_eq!(
+                planned,
+                sana_chroma_calibration_fingerprint(arm, tier),
+                "{key}: the plan row must name the loaded generator's production identity"
+            );
+            assert!(
+                identities.insert(planned.to_owned(), key.clone()).is_none(),
+                "{key}: {planned} is already claimed by {}",
+                identities[planned]
+            );
+        }
+        // A SET, not a count (sc-22731 review): the expectation is derived from `SANA_CHROMA_ARMS`
+        // x the shipped tiers, so a missing or extra plan row names ITSELF rather than reporting
+        // "there are fourteen, not fifteen".
+        assert_eq!(
+            visited,
+            expected_sana_chroma_mlx_keys(),
+            "the MLX plan rows must be exactly the arm table's members x the shipped tiers"
+        );
+        // ...and every one of them carries a DISTINCT identity, so the map covers the same set.
+        assert_eq!(
+            identities
+                .values()
+                .cloned()
+                .collect::<std::collections::BTreeSet<_>>(),
+            expected_sana_chroma_mlx_keys()
+        );
+        // The preserved measured keys, byte-for-byte, so the table cannot drift off the engines.
+        assert_eq!(
+            identities["sana-mlx-full-ladder-2026-08-06-v1-resident"],
+            "sana_1600m:q4:mlx"
+        );
+        assert_eq!(
+            identities["chroma1-base-q4-mlx-shared-ladder-2026-08-05-v1"],
+            "chroma1_base:q4:mlx"
+        );
+        assert_eq!(
+            runtime_macos::providers::sana::memory_strategy::RESIDENT_MEMORY_CALIBRATION_FINGERPRINT,
+            "sana-mlx-full-ladder-2026-08-06-v1-resident"
+        );
+        assert_eq!(
+            runtime_macos::providers::chroma::memory_strategy::MEMORY_CALIBRATION_FINGERPRINT,
+            "chroma1-base-q4-mlx-shared-ladder-2026-08-05-v1"
+        );
+        // The thirteen new cells, spelled out: the strings inference PR 951 mints.
+        for (key, identity) in [
+            (
+                "sana_1600m:q8:mlx",
+                "sana-base-q8-mlx-full-ladder-v1-resident",
+            ),
+            (
+                "sana_1600m:bf16:mlx",
+                "sana-base-bf16-mlx-full-ladder-v1-resident",
+            ),
+            (
+                "sana_sprint_1600m:q4:mlx",
+                "sana-sprint-q4-mlx-full-ladder-v1-resident",
+            ),
+            (
+                "sana_sprint_1600m:q8:mlx",
+                "sana-sprint-q8-mlx-full-ladder-v1-resident",
+            ),
+            (
+                "sana_sprint_1600m:bf16:mlx",
+                "sana-sprint-bf16-mlx-full-ladder-v1-resident",
+            ),
+            ("chroma1_hd:q4:mlx", "chroma1-hd-q4-mlx-shared-ladder-v1"),
+            ("chroma1_hd:q8:mlx", "chroma1-hd-q8-mlx-shared-ladder-v1"),
+            (
+                "chroma1_hd:bf16:mlx",
+                "chroma1-hd-bf16-mlx-shared-ladder-v1",
+            ),
+            (
+                "chroma1_base:q8:mlx",
+                "chroma1-base-q8-mlx-shared-ladder-v1",
+            ),
+            (
+                "chroma1_base:bf16:mlx",
+                "chroma1-base-bf16-mlx-shared-ladder-v1",
+            ),
+            (
+                "chroma1_flash:q4:mlx",
+                "chroma1-flash-q4-mlx-shared-ladder-v1",
+            ),
+            (
+                "chroma1_flash:q8:mlx",
+                "chroma1-flash-q8-mlx-shared-ladder-v1",
+            ),
+            (
+                "chroma1_flash:bf16:mlx",
+                "chroma1-flash-bf16-mlx-shared-ladder-v1",
+            ),
+        ] {
+            assert_eq!(identities[identity], key);
+        }
+    }
+
+    /// The arm binds the plan row to the table BEFORE any environment or weight work, naming both
+    /// strings, so a stale row cannot cost a load.
+    #[test]
+    fn a_plan_row_naming_a_foreign_identity_is_refused_before_the_load() {
+        let mut request = sana_chroma_planned(CHROMA1_FLASH_PROVIDER, "q8");
+        request["planned"]["fixture"] = json!(format!(
+            "chroma1-flash-mlx-q8-1024-seed{SANA_CHROMA_SEED}-step2"
+        ));
+        request["planned"]["calibrationFingerprint"] =
+            json!("chroma1-mlx-registry-behavior-v1-chroma1-flash");
+        let error = run(&request).expect_err("a conformance identity is not capturable");
+        assert!(
+            error.contains("plan=chroma1-mlx-registry-behavior-v1-chroma1-flash")
+                && error.contains("chroma1-flash-q8-mlx-shared-ladder-v1"),
+            "{error}"
+        );
+        // Not an env error: the refusal fired before `SCENEWORKS_CHROMA1_FLASH_*` was read.
+        assert!(!error.contains("required environment variable"), "{error}");
+    }
+
+    /// A provider no member serves is refused by name, and the refusal does not read as a malformed
+    /// plan entry (the sc-18104 misroute lesson).
+    #[test]
+    fn a_provider_no_member_serves_is_refused_by_name() {
+        for provider in ["sana", "chroma1", "chroma1_hd_edit"] {
+            let error = sana_chroma_arm(&sana_chroma_planned(provider, "q4"))
+                .expect_err("a foreign provider must not resolve to a member");
+            assert_eq!(
+                error,
+                format!("the MLX SANA/Chroma1 arm does not implement provider {provider:?}")
+            );
+        }
+    }
+
+    /// The LoadSpec is the shape the WORKER loads: Resident, the planned tier on `quantize`, the
+    /// exact resolved route, and the planned materialization shape.
+    #[test]
+    fn the_load_spec_is_resident_and_carries_the_planned_tier_and_route() {
+        for (arm, tier, quant) in [
+            (SANA_ARM, "q4", Some(Quant::Q4)),
+            (SANA_ARM, "q8", Some(Quant::Q8)),
+            (SANA_ARM, "bf16", None),
+            (CHROMA1_HD_ARM, "q4", Some(Quant::Q4)),
+            (CHROMA1_FLASH_ARM, "bf16", None),
+        ] {
+            let root = sana_chroma_snapshot_root(arm.expected_repository, REVISION, tier);
+            let artifact = sana_chroma_load_spec_at(
+                &sana_chroma_planned(arm.provider, tier),
+                arm.load_shape,
+                arm.expected_repository.to_owned(),
+                REVISION.to_owned(),
+                root,
+            )
+            .unwrap_or_else(|error| panic!("{}:{tier}: {error}", arm.provider));
+            assert_eq!(artifact.tier, tier);
+            assert_eq!(artifact.spec.offload_policy, OffloadPolicy::Resident);
+            assert_eq!(artifact.spec.quantize, quant);
+            assert_eq!(
+                artifact.spec.resolved_route.as_deref(),
+                Some(arm.provider),
+                "candle-gen-chroma's twin refuses a spec without it; the worker sets it on both lanes"
+            );
+            // The member's OWN shape reaches the spec — SANA eager, Chroma deferred — so the two
+            // families can never be loaded under one another's materialization.
+            assert_eq!(artifact.spec.load_shape, arm.load_shape);
+        }
+    }
+
+    /// A root exported for ANOTHER tier is refused naming the tier, so a stale `…/q4` export can
+    /// never satisfy a q8 or bf16 plan and quietly re-label another tier's peaks.
+    #[test]
+    fn a_root_of_another_tier_is_refused_naming_the_tier() {
+        for arm in SANA_CHROMA_ARMS {
+            let root = sana_chroma_snapshot_root(arm.expected_repository, REVISION, "q4");
+            let error = sana_chroma_load_spec_at(
+                &sana_chroma_planned(arm.provider, "q8"),
+                LoadShape::DeferredMaterialization,
+                arm.expected_repository.to_owned(),
+                REVISION.to_owned(),
+                root,
+            )
+            .expect_err("a q4 root must not satisfy a q8 plan");
+            assert!(
+                error.contains("q8"),
+                "{}: the refusal must name the planned tier: {error}",
+                arm.provider
+            );
+        }
+    }
+
+    /// ...and the companion direction: a root exported for a DIFFERENT repository is refused too,
+    /// so a Flash plan can never be satisfied by HD weights.
+    #[test]
+    fn a_root_of_another_route_is_refused() {
+        let root = sana_chroma_snapshot_root(protocol::CHROMA1_HD_REPOSITORY, REVISION, "q4");
+        let error = sana_chroma_load_spec_at(
+            &sana_chroma_planned(CHROMA1_FLASH_PROVIDER, "q4"),
+            LoadShape::DeferredMaterialization,
+            protocol::CHROMA1_HD_REPOSITORY.to_owned(),
+            REVISION.to_owned(),
+            root,
+        )
+        .expect_err("HD weights must not satisfy a Flash plan");
+        assert!(
+            error.contains(protocol::CHROMA1_FLASH_REPOSITORY),
+            "{error}"
+        );
+    }
+
+    /// The fixture binds the member, the tier, the edge, the seed and the step count.
+    #[test]
+    fn the_fixture_must_name_the_member_tier_edge_and_seed() {
+        let request = sana_chroma_planned(SANA_SPRINT_PROVIDER, "q8");
+        for (fixture, needle) in [
+            // another member's fixture
+            ("sana-1600m-mlx-q8-1024-seed22731-step2", "must start with"),
+            // another tier
+            ("sana-sprint-mlx-q4-1024-seed22731-step2", "must start with"),
+            // another edge
+            ("sana-sprint-mlx-q8-768-seed22731-step2", "must start with"),
+            // another seed
+            ("sana-sprint-mlx-q8-1024-seed16402-step2", "does not match"),
+            // another step count
+            ("sana-sprint-mlx-q8-1024-seed22731-step4", "two-step"),
+        ] {
+            let mut request = request.clone();
+            request["planned"]["fixture"] = json!(fixture);
+            let error = validate_sana_chroma_fixture(&request, SANA_SPRINT_ARM, "q8")
+                .expect_err("a mislabelled fixture must be refused");
+            assert!(error.contains(needle), "{fixture}: {error}");
+        }
+        let mut request = request;
+        request["planned"]["fixture"] = json!("sana-sprint-mlx-q8-1024-seed22731-step2");
+        validate_sana_chroma_fixture(&request, SANA_SPRINT_ARM, "q8")
+            .expect("the planned fixture must be accepted");
+    }
+
+    /// Every plan row's fixture is the one this arm accepts, so the plan and the arm cannot drift.
+    #[test]
+    fn every_planned_mlx_fixture_is_accepted_by_the_arm() {
+        let plan: Value = serde_json::from_str(include_str!(
+            "../../../../config/memory-calibration-plan.json"
+        ))
+        .expect("the anchor plan parses");
+        let mut checked = std::collections::BTreeSet::new();
+        for (key, entry) in plan["anchors"].as_object().expect("anchors object") {
+            let provider = entry["provider"].as_str().unwrap();
+            let Some(arm) = SANA_CHROMA_ARMS
+                .iter()
+                .copied()
+                .find(|arm| arm.provider == provider)
+            else {
+                continue;
+            };
+            if !key.ends_with(":mlx") {
+                continue;
+            }
+            let tier = key.split(':').nth(1).unwrap();
+            let mut request = sana_chroma_planned(provider, tier);
+            request["planned"]["fixture"] = entry["fixture"].clone();
+            request["planned"]["target"]["geometry"] = entry["geometry"].clone();
+            // The plan row's OWN materialization shape, copied in rather than assumed (sc-22731
+            // review): `sana_chroma_planned` derives its shape from the arm table, so the plan's
+            // own `loadShape` would otherwise never be read by any test at all.
+            // `planned_load_shape` is the same parse `run_sana_chroma` performs.
+            request["planned"]["loadShape"] = entry["loadShape"].clone();
+            assert_eq!(
+                planned_load_shape(&request).unwrap_or_else(|error| panic!("{key}: {error}")),
+                arm.load_shape,
+                "{key}: the plan row must name the shape this member is captured under — \
+                 mlx-gen-sana publishes its resident ladder EAGER (the windowed rung is declared \
+                 only under Sequential, which no anchor plans), mlx-gen-chroma's is DEFERRED"
+            );
+            validate_sana_chroma_fixture(&request, arm, tier)
+                .unwrap_or_else(|error| panic!("{key}: {error}"));
+            checked.insert(key.clone());
+        }
+        // Set equality, not a count: see `expected_sana_chroma_mlx_keys`.
+        assert_eq!(checked, expected_sana_chroma_mlx_keys());
     }
 }
 
