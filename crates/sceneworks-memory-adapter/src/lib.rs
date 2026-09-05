@@ -6,7 +6,7 @@
 
 use serde_json::{json, Map, Value};
 use std::io::{self, Read};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 pub const INFERENCE_PIN: &str = "c6d6a4dbd61ab09c26ff5526632cae2cefea60ed";
@@ -24,6 +24,14 @@ pub const FLUX2_KLEIN_REPOSITORY: &str = "SceneWorks/flux2-klein-9b-mlx";
 /// `engine_id: flux2_klein_9b`) from its own artifact, through `SCENEWORKS_FLUX2_KLEIN_KV_*`.
 pub const FLUX2_KLEIN_KV_REPOSITORY: &str = "SceneWorks/flux2-klein-9b-kv-mlx";
 pub const KREA_REPOSITORY: &str = "SceneWorks/krea-2-turbo-mlx";
+/// The FLUX.1 [dev] tiered rehost (sc-22726). It serves BOTH the `flux1_dev` text-to-image provider
+/// and the `pulid_flux` character route, on both lanes: the worker resolves the PuLID backbone from
+/// exactly this repo (`image_jobs/pulid.rs` `PULID_FLUX_REPO`, `image_jobs/pulid_candle.rs`
+/// `PULID_CANDLE_FLUX_REPO`), so both bind the one `SCENEWORKS_FLUX1_DEV_*` family — the way
+/// `z_image_edit` rides the Turbo family.
+pub const FLUX1_DEV_REPOSITORY: &str = "SceneWorks/flux1-dev-mlx";
+/// The FLUX.1 [schnell] tiered rehost (sc-22726), the `flux1_schnell` provider's own artifact.
+pub const FLUX1_SCHNELL_REPOSITORY: &str = "SceneWorks/flux1-schnell-mlx";
 pub const SDXL_REPOSITORY: &str = "SceneWorks/sdxl-base-mlx";
 /// The Z-Image-Turbo tiered rehost. Serves the `z_image_turbo` provider AND the `z_image_edit`
 /// catalog alias (the worker routes `z_image_edit` to the Turbo weights driven in `edit_image`
@@ -704,6 +712,134 @@ pub fn required_env(name: &str) -> Result<String, String> {
         .ok()
         .filter(|value| !value.trim().is_empty())
         .ok_or_else(|| format!("required environment variable {name} is not set"))
+}
+
+/// The env var both PuLID-FLUX worker lanes read for a pre-staged identity bundle, under TWO
+/// semantics. The Candle lane (`image_jobs/pulid_candle.rs` `ensure_pulid_candle_weights`) takes
+/// it as a complete bundle: a directory holding all five files, used as-is, and ignored if any
+/// file is missing. The MLX lane (`image_jobs/pulid.rs` `ensure_pulid_weights`) takes it as the
+/// directory to FILL — missing files are downloaded into it — and it is outranked by a fully-set
+/// `PULID_FLUX_WEIGHTS` / `PULID_EVA_WEIGHTS` / `PULID_FACE_WEIGHTS_DIR` preset
+/// (`pulid_weights_env_preset`). The identity stack is fetched on first use rather than declared
+/// as a manifest download, so an anchor binds the operator's staged copy through this same seam,
+/// and it uses the strict Candle reading on both lanes: every file present, nothing downloaded.
+pub const PULID_IDENTITY_BUNDLE_ENV: &str = "SCENEWORKS_PULID_WEIGHTS";
+/// The five loose files both lanes require in ONE directory, which doubles as the provider's
+/// `face_dir`: the adapter checkpoint, the EVA tower, and the three face models both engines read
+/// out of `face_dir` by name. `measure-memory-catalog.mjs` `PROVIDER_FAMILIES.pulid_flux.bundle`
+/// carries the same list in the same order, and its test parses this file to prove it.
+pub const PULID_ADAPTER_FILE: &str = "pulid_flux_v0.9.1.safetensors";
+pub const PULID_EVA_FILE: &str = "eva02_clip_l_336.safetensors";
+pub const PULID_SCRFD_FILE: &str = "scrfd_10g.safetensors";
+pub const PULID_ARCFACE_FILE: &str = "arcface_iresnet100.safetensors";
+pub const PULID_BISENET_FILE: &str = "bisenet_parsing.safetensors";
+/// Every file the bundle must carry.
+pub const PULID_IDENTITY_BUNDLE_FILES: [&str; 5] = [
+    PULID_ADAPTER_FILE,
+    PULID_EVA_FILE,
+    PULID_SCRFD_FILE,
+    PULID_ARCFACE_FILE,
+    PULID_BISENET_FILE,
+];
+
+/// The PuLID identity stack an anchor binds: `(adapter, eva, face_dir)`.
+///
+/// Both lanes take exactly these three handles — MLX through `LoadSpec::identity`
+/// (`IdentityWeights { encoder, eva, face_dir }`), Candle through `PulidFluxPaths`
+/// `{ pulid_weights, eva_weights, face_dir }` — and both engines then read the three face models
+/// out of `face_dir` BY NAME. So a bundle missing any one of the five is refused HERE, naming the
+/// files, rather than surfacing as an opaque loader error several gigabytes into a capture.
+///
+/// The record names the stack by CONTENT — the SHA-256 of each of the five files and one composite
+/// over them — never by the host path it was staged at: two hosts staging the same upstream files
+/// measured the same identity stack, and the same host restaging different files did not.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PulidIdentityBundle {
+    pub root: PathBuf,
+    pub adapter: PathBuf,
+    pub eva: PathBuf,
+    pub face_dir: PathBuf,
+    /// `(file name, lowercase SHA-256 of its bytes)` for every file in
+    /// [`PULID_IDENTITY_BUNDLE_FILES`], in that order.
+    pub file_sha256: Vec<(&'static str, String)>,
+    /// SHA-256 over the `<file>:<sha256>\n` lines of `file_sha256`, in order — the one token a
+    /// loadability fingerprint carries for the whole stack.
+    pub composite_sha256: String,
+}
+
+impl PulidIdentityBundle {
+    /// The record's `artifact.identityBundle`: `{ "<file>": "<sha256>", ... }` plus the composite.
+    pub fn artifact_json(&self) -> Value {
+        let mut files = Map::new();
+        for (file, sha256) in &self.file_sha256 {
+            files.insert((*file).to_owned(), Value::String(sha256.clone()));
+        }
+        json!({
+            "files": files,
+            "compositeSha256": self.composite_sha256,
+        })
+    }
+}
+
+fn sha256_hex_of_file(path: &Path) -> Result<String, String> {
+    use sha2::Digest;
+    let mut file = std::fs::File::open(path)
+        .map_err(|error| format!("open {} for hashing: {error}", path.display()))?;
+    let mut hasher = sha2::Sha256::new();
+    io::copy(&mut file, &mut hasher)
+        .map_err(|error| format!("hash {}: {error}", path.display()))?;
+    Ok(format!("{:x}", hasher.finalize()))
+}
+
+/// The env-free half of [`pulid_identity_bundle`], so the file contract is unit-testable. Hashes
+/// the five files, so a bundle that is present but unreadable is refused here too.
+pub fn pulid_identity_bundle_at(root: PathBuf) -> Result<PulidIdentityBundle, String> {
+    let missing: Vec<&str> = PULID_IDENTITY_BUNDLE_FILES
+        .iter()
+        .copied()
+        .filter(|file| !root.join(file).is_file())
+        .collect();
+    if !missing.is_empty() {
+        return Err(format!(
+            "{PULID_IDENTITY_BUNDLE_ENV} bundle {} is missing {}; the PuLID identity stack is one \
+             directory holding all five files (it IS the provider's face_dir)",
+            root.display(),
+            missing.join(", ")
+        ));
+    }
+    let mut file_sha256 = Vec::with_capacity(PULID_IDENTITY_BUNDLE_FILES.len());
+    let mut composite = {
+        use sha2::Digest;
+        sha2::Sha256::new()
+    };
+    for file in PULID_IDENTITY_BUNDLE_FILES {
+        let sha256 = sha256_hex_of_file(&root.join(file))?;
+        {
+            use sha2::Digest;
+            composite.update(format!("{file}:{sha256}\n").as_bytes());
+        }
+        file_sha256.push((file, sha256));
+    }
+    let composite_sha256 = {
+        use sha2::Digest;
+        format!("{:x}", composite.finalize())
+    };
+    Ok(PulidIdentityBundle {
+        adapter: root.join(PULID_ADAPTER_FILE),
+        eva: root.join(PULID_EVA_FILE),
+        face_dir: root.clone(),
+        root,
+        file_sha256,
+        composite_sha256,
+    })
+}
+
+/// Resolve the staged bundle from [`PULID_IDENTITY_BUNDLE_ENV`], canonicalized so the record's
+/// fingerprint names a real path rather than whatever spelling the operator exported.
+pub fn pulid_identity_bundle() -> Result<PulidIdentityBundle, String> {
+    let root = std::fs::canonicalize(PathBuf::from(required_env(PULID_IDENTITY_BUNDLE_ENV)?))
+        .map_err(|error| format!("canonicalize {PULID_IDENTITY_BUNDLE_ENV}: {error}"))?;
+    pulid_identity_bundle_at(root)
 }
 
 pub fn validate_artifact_identity(

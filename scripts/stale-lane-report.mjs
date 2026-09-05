@@ -319,7 +319,11 @@ function matchBlockBody(text, matchStart) {
   throw new Error("unbalanced braces while extracting an adapter dispatch match block");
 }
 
-/** Top-level arms of a match body: `{ pattern, hasArrow }` split on depth-0 commas. */
+/**
+ * Top-level arms of a match body: `{ pattern, hasArrow }`. An arm ends at a depth-0 comma, or at
+ * the depth-0 `}` that closes a block body — rustfmt drops the trailing comma after a braced arm,
+ * so splitting on commas alone made a block-bodied arm swallow the NEXT arm's pattern (sc-22726).
+ */
 function matchArms(inner) {
   const arms = [];
   let depth = 0;
@@ -334,8 +338,16 @@ function matchArms(inner) {
     }
     const char = inner[i];
     if ("([{".includes(char)) depth += 1;
-    else if (")]}".includes(char)) depth -= 1;
-    else if (depth === 0 && char === "=" && inner[i + 1] === ">") {
+    else if (")]}".includes(char)) {
+      depth -= 1;
+      // A depth-0 `}` after the arrow closes a block body: the arm ends here whether or not a
+      // comma follows. Before the arrow it is a struct/brace PATTERN and the arm continues.
+      if (depth === 0 && char === "}" && arrow !== -1) {
+        arms.push({ pattern: inner.slice(start, arrow).trim(), hasArrow: true });
+        start = i + 1;
+        arrow = -1;
+      }
+    } else if (depth === 0 && char === "=" && inner[i + 1] === ">") {
       if (arrow === -1) arrow = i;
       i += 2;
       continue;
