@@ -103,6 +103,25 @@ const Z_IMAGE_EDIT_STEPS: u32 = 4;
 const FLUX2_PROVIDER: &str = "flux2_dev";
 const FLUX2_CALIBRATION_FINGERPRINT: &str = "sc-18218-flux2-dev-t2i-resident-evidence-v1";
 const FLUX2_PLAIN_EXECUTION_PATH: &str = "the MLX FLUX.2-dev base-only text-to-image path";
+/// The FLUX.2-klein-9B text-to-image provider (sc-22727). BOTH klein catalog models —
+/// `flux2_klein_9b` and the separately distilled `flux2_klein_9b_kv` — load through this ONE engine
+/// registry id (`crates/sceneworks-worker/src/engines.rs`); they differ only in the artifact, which
+/// the engine discriminates by snapshot path and `LoadSpec::resolved_route`.
+const FLUX2_KLEIN_PROVIDER: &str = "flux2_klein_9b";
+const FLUX2_KLEIN_PLAIN_EXECUTION_PATH: &str =
+    "the MLX FLUX.2-klein-9B base-only text-to-image path";
+const FLUX2_KLEIN_KV_PLAIN_EXECUTION_PATH: &str =
+    "the MLX FLUX.2-klein-9B KV-cache base-only text-to-image path";
+/// A klein turnkey rehost carries no `calibration_tag`, so
+/// `mlx-gen-flux2::memory_strategy::klein_contract_for` publishes the STATIC behaviour fingerprint
+/// suffixed with the provider id (`KLEIN_STATIC_BEHAVIOR_FINGERPRINT` +
+/// `provider_id.replace('_', "-")`). This is the same string
+/// `config/manifests/builtin.models.jsonc` declares for every klein rung on both klein models.
+const FLUX2_KLEIN_CALIBRATION_FINGERPRINT: &str =
+    "flux2-klein-static-registry-behavior-v2-flux2-klein-9b";
+/// One fixed seed for every `mlx:flux2_klein_9b*` fixture. Distinct from [`FLUX2_SEED`] so a klein
+/// receipt can never be traced to the dev lane's calibration seed.
+const FLUX2_KLEIN_SEED: u64 = 22727;
 /// FLUX.2-dev quality here is repeat determinism on one loaded provider: the resident rung selects
 /// no alternate code path, so the cold measured render and its warm unscoped repeats must agree to
 /// within Metal allocator jitter. 3/255 max and 1/255 mean sit far above observed same-process
@@ -1037,12 +1056,14 @@ mod tests {
     /// vocabulary appears, which is what distinguishes a dispatch refusal from a misroute.
     #[test]
     fn run_refuses_a_provider_the_mlx_adapter_does_not_implement() {
-        // `flux2_dev` left this list when sc-18218 landed its arm; `flux2_dev_edit` stays — the
-        // contract provider is not a dispatchable lane.
+        // `flux2_dev` left this list when sc-18218 landed its arm, and `flux2_klein_9b` when
+        // sc-22727 landed the klein members; `flux2_dev_edit` and the klein edit routes stay — a
+        // contract-only provider is not a dispatchable lane.
         // `ltx_2_3` left this class when sc-18808 landed the video arm; `ltx_2_3_distilled` (the
         // CANDLE LTX engine id) and `ltx_2_3_eros` stay — neither is a dispatchable MLX lane.
         for provider in [
-            "flux2_klein_9b",
+            "flux2_klein_9b_edit",
+            "flux2_klein_9b_kv_edit",
             "flux2_dev_edit",
             "sana",
             "ltx_2_3_distilled",
@@ -1088,6 +1109,8 @@ mod tests {
             "sdxl",
             "krea_2_turbo_control",
             "flux2_dev",
+            // sc-22727: both klein catalog models ride this ONE registry id.
+            "flux2_klein_9b",
             // sc-18808: the video arm rides the same dispatch, so it is covered by the same proof.
             "ltx_2_3",
             "ltx_2_5",
@@ -1109,6 +1132,7 @@ mod tests {
         assert_eq!(SDXL_PROVIDER, "sdxl");
         assert_eq!(KREA_PROVIDER, "krea_2_turbo_control");
         assert_eq!(FLUX2_PROVIDER, "flux2_dev");
+        assert_eq!(FLUX2_KLEIN_PROVIDER, "flux2_klein_9b");
         assert_eq!(LTX_PROVIDER, "ltx_2_3");
         assert_eq!(LTX25_PROVIDER, "ltx_2_5");
         assert_eq!(MINIMAX_PROVIDER, "minimax_h3");
@@ -3141,31 +3165,167 @@ fn ltx_quality_passes(maximum: f64, mean: f64, rms: f64) -> bool {
     maximum <= LTX_MAX_THRESHOLD && mean <= LTX_MEAN_THRESHOLD && rms <= LTX_RMS_THRESHOLD
 }
 
+/// One member of the FLUX.2 family this arm measures, resolved from the plan's
+/// `(target.provider, target.modelId)` — never assumed (sc-22727). Three members today: the 32B
+/// `flux2_dev` flagship and the two klein-9B catalog models, which share ONE engine provider id
+/// and are told apart by their artifact family and `LoadSpec::resolved_route`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Flux2Arm {
+    /// The registry id handed to the production catalog loader (E4).
+    provider: &'static str,
+    /// The CATALOG model id. It is the anchor key's `modelId`, and it is also what the worker binds
+    /// as `LoadSpec::resolved_route` (`image_jobs/base.rs` — `spec.with_resolved_route(request.model)`),
+    /// which is the discriminator `KleinArtifactInventory::validate_resolved_route` refuses a
+    /// cross-variant artifact with. Two members share `provider` and differ only here.
+    model_id: &'static str,
+    execution_path: &'static str,
+    /// The still-geometry refusal label (sc-18808).
+    still_calibration: &'static str,
+    repository_env: &'static str,
+    revision_env: &'static str,
+    root_env: &'static str,
+    expected_repository: &'static str,
+    /// The fixture's family segment: `flux2-<fixture_slug>-mlx-<tier>-<edge>-seed<seed>-step2`.
+    fixture_slug: &'static str,
+    /// The record's diagnostics source, `memory-mlx-adapter:<slug>-resident`.
+    slug: &'static str,
+    /// The calibration fingerprint the pinned crate must publish for this member.
+    calibration_fingerprint: &'static str,
+    /// The load shape this member's contract is calibrated under. Dev is measured eager; the klein
+    /// routes publish a calibration identity ONLY on a streamable load
+    /// (`klein_streamable` requires `DeferredMaterialization`), so they are measured deferred.
+    load_shape: LoadShape,
+    seed: u64,
+    /// The story that established this member's evidence, as it appears in
+    /// `MemoryRunContext::evidence_revision`. Per member, so a klein receipt never claims the
+    /// dev lane's provenance.
+    evidence_tag: &'static str,
+    /// Whether the pinned crate implements the resident rung and nothing else. True on dev (every
+    /// other strategy is declared `Missing` at the pin); the klein ladder publishes five rungs, so
+    /// its selection is left to `contract.validate_selection`.
+    resident_only: bool,
+    /// Whether the planned tier's quant reaches the loader as `LoadSpec::quantize`.
+    ///
+    /// The dev route takes it: its loader folds the requested width. The klein TURNKEY rehosts do
+    /// NOT — their tier is declared by the snapshot directory itself
+    /// (`turnkey_identity` reads `…/snapshots/<rev>/<tier>` and
+    /// `verify_turnkey_with_contracts` validates the transformer headers against it), and the same
+    /// function refuses any spec that also carries a quant: "flux2 Klein turnkey tiers require BF16
+    /// execution with LoadSpec.quantize=None"
+    /// (`mlx-gen-flux2/src/artifact_inventory.rs`). Measured, not assumed: the sc-22727 proof
+    /// capture of `flux2_klein_9b:q4:mlx` failed on exactly that sentence while reading the
+    /// contract, before any weights were loaded.
+    ///
+    /// The tier is still DERIVED from the plan and still binds the artifact — through the root
+    /// suffix check, which for these rehosts is the tier declaration the engine itself reads.
+    tier_quant_reaches_the_loader: bool,
+}
+
+const FLUX2_DEV_ARM: Flux2Arm = Flux2Arm {
+    provider: FLUX2_PROVIDER,
+    model_id: "flux2_dev",
+    execution_path: FLUX2_PLAIN_EXECUTION_PATH,
+    still_calibration: "MLX FLUX.2-dev calibration",
+    repository_env: "SCENEWORKS_FLUX2_REPOSITORY",
+    revision_env: "SCENEWORKS_FLUX2_REVISION",
+    root_env: "SCENEWORKS_FLUX2_ROOT",
+    expected_repository: protocol::FLUX2_REPOSITORY,
+    fixture_slug: "dev",
+    slug: "flux2-dev",
+    calibration_fingerprint: FLUX2_CALIBRATION_FINGERPRINT,
+    load_shape: LoadShape::EagerMaterialization,
+    seed: FLUX2_SEED,
+    evidence_tag: "sc-18218",
+    resident_only: true,
+    tier_quant_reaches_the_loader: true,
+};
+
+const FLUX2_KLEIN_ARM: Flux2Arm = Flux2Arm {
+    provider: FLUX2_KLEIN_PROVIDER,
+    model_id: "flux2_klein_9b",
+    execution_path: FLUX2_KLEIN_PLAIN_EXECUTION_PATH,
+    still_calibration: "MLX FLUX.2-klein-9B calibration",
+    repository_env: "SCENEWORKS_FLUX2_KLEIN_REPOSITORY",
+    revision_env: "SCENEWORKS_FLUX2_KLEIN_REVISION",
+    root_env: "SCENEWORKS_FLUX2_KLEIN_ROOT",
+    expected_repository: protocol::FLUX2_KLEIN_REPOSITORY,
+    fixture_slug: "klein-9b",
+    slug: "flux2-klein-9b",
+    calibration_fingerprint: FLUX2_KLEIN_CALIBRATION_FINGERPRINT,
+    load_shape: LoadShape::DeferredMaterialization,
+    seed: FLUX2_KLEIN_SEED,
+    evidence_tag: "sc-22727",
+    resident_only: false,
+    tier_quant_reaches_the_loader: false,
+};
+
+const FLUX2_KLEIN_KV_ARM: Flux2Arm = Flux2Arm {
+    provider: FLUX2_KLEIN_PROVIDER,
+    model_id: "flux2_klein_9b_kv",
+    execution_path: FLUX2_KLEIN_KV_PLAIN_EXECUTION_PATH,
+    still_calibration: "MLX FLUX.2-klein-9B KV calibration",
+    repository_env: "SCENEWORKS_FLUX2_KLEIN_KV_REPOSITORY",
+    revision_env: "SCENEWORKS_FLUX2_KLEIN_KV_REVISION",
+    root_env: "SCENEWORKS_FLUX2_KLEIN_KV_ROOT",
+    expected_repository: protocol::FLUX2_KLEIN_KV_REPOSITORY,
+    fixture_slug: "klein-9b-kv",
+    slug: "flux2-klein-9b-kv",
+    calibration_fingerprint: FLUX2_KLEIN_CALIBRATION_FINGERPRINT,
+    load_shape: LoadShape::DeferredMaterialization,
+    seed: FLUX2_KLEIN_SEED,
+    evidence_tag: "sc-22727",
+    resident_only: false,
+    tier_quant_reaches_the_loader: false,
+};
+
+/// Which family member the plan asks for. Refuses by name: a `(provider, modelId)` pair no member
+/// serves must not be measured as its nearest neighbour — in particular a KV plan must never be
+/// satisfied by the base klein artifact, which shares the provider id.
+///
 /// Defense-in-depth mirror of the provider-mismatch guard `validate_z_image_batch` carries
-/// (sc-18104): `run` dispatches by name today, but this arm hardcodes the FLUX.2-dev contract, so a
-/// future caller must be refused by name here rather than misrouted into that contract.
-fn validate_flux2_target(request: &Value) -> Result<(), String> {
-    let provider = protocol::planned(request)?
+/// (sc-18104): `run` dispatches by provider name today, so a future caller must be refused here
+/// rather than misrouted into another member's contract.
+fn flux2_arm(request: &Value) -> Result<Flux2Arm, String> {
+    let planned = protocol::planned(request)?;
+    let provider = planned
         .pointer("/target/provider")
         .and_then(Value::as_str)
         .ok_or_else(|| "planned.target.provider must be a string".to_owned())?;
-    if provider != FLUX2_PROVIDER {
-        return Err(format!(
-            "MLX FLUX.2-dev calibration does not implement provider {provider:?}"
-        ));
+    let model_id = planned
+        .pointer("/target/modelId")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "planned.target.modelId must be a string".to_owned())?;
+    for arm in [FLUX2_DEV_ARM, FLUX2_KLEIN_ARM, FLUX2_KLEIN_KV_ARM] {
+        if arm.provider == provider && arm.model_id == model_id {
+            return Ok(arm);
+        }
     }
-    protocol::validate_still_geometry(request, "MLX FLUX.2-dev calibration")
+    Err(format!(
+        "the MLX FLUX.2 arm does not implement provider {provider:?} for model {model_id:?}"
+    ))
 }
 
-/// Bind the fixture to the planned tier AND geometry edge, deriving the seed — the same
-/// fixture-to-plan binding `planned_qwen_seed` enforces, extended to the edge because this lane's
-/// plan carries each of its q4 and q8 tiers at two geometries (768² and 1024²).
-fn planned_flux2_seed(request: &Value, tier: &str, width: u32) -> Result<u64, String> {
+fn validate_flux2_target(request: &Value) -> Result<Flux2Arm, String> {
+    let arm = flux2_arm(request)?;
+    protocol::validate_still_geometry(request, arm.still_calibration)?;
+    Ok(arm)
+}
+
+/// Bind the fixture to the planned FAMILY MEMBER, tier AND geometry edge, deriving the seed — the
+/// same fixture-to-plan binding `planned_qwen_seed` enforces, extended to the edge because this
+/// lane's plan carries tiers at more than one geometry, and to the member because the two klein
+/// models are indistinguishable by provider id alone.
+fn planned_flux2_seed(
+    request: &Value,
+    arm: Flux2Arm,
+    tier: &str,
+    width: u32,
+) -> Result<u64, String> {
     let fixture = protocol::planned(request)?
         .get("fixture")
         .and_then(Value::as_str)
         .ok_or_else(|| "planned.fixture must be a string".to_owned())?;
-    let prefix = format!("flux2-dev-mlx-{tier}-{width}-seed");
+    let prefix = format!("flux2-{}-mlx-{tier}-{width}-seed", arm.fixture_slug);
     let remainder = fixture
         .strip_prefix(&prefix)
         .ok_or_else(|| format!("planned.fixture {fixture:?} must start with {prefix:?}"))?;
@@ -3174,10 +3334,10 @@ fn planned_flux2_seed(request: &Value, tier: &str, width: u32) -> Result<u64, St
         .ok_or_else(|| format!("planned.fixture {fixture:?} must end with -step<count>"))?;
     let seed = seed
         .parse::<u64>()
-        .map_err(|error| format!("parse FLUX.2-dev fixture seed {seed:?}: {error}"))?;
+        .map_err(|error| format!("parse FLUX.2 fixture seed {seed:?}: {error}"))?;
     let steps = steps
         .parse::<u32>()
-        .map_err(|error| format!("parse FLUX.2-dev fixture step count {steps:?}: {error}"))?;
+        .map_err(|error| format!("parse FLUX.2 fixture step count {steps:?}: {error}"))?;
     if steps != 2 {
         return Err(format!(
             "planned.fixture {fixture:?} must use the two-step calibration request"
@@ -3200,40 +3360,63 @@ fn flux2_request(width: u32, height: u32, seed: u64) -> GenerationRequest {
     }
 }
 
-/// Resolve and validate the `SCENEWORKS_FLUX2_*` environment family into a tier-exact load spec.
-/// The tier is DERIVED from `/target/tier` and threads through the per-tier ROOT suffix check and
-/// `spec.quantize` — never hardcoded (sc-17097 fixed exactly that hardcoding on the Candle side).
+/// Resolve and validate the member's `SCENEWORKS_FLUX2*_*` environment family into a tier-exact
+/// load spec. The tier is DERIVED from `/target/tier` and threads through the per-tier ROOT suffix
+/// check and `spec.quantize` — never hardcoded (sc-17097 fixed exactly that hardcoding on the
+/// Candle side).
 fn flux2_load_spec(
     request: &Value,
+    arm: Flux2Arm,
     tier: &str,
     selection: &MemorySelection,
 ) -> Result<(String, String, LoadSpec), String> {
-    protocol::validate_plain_overlay_target(request, FLUX2_PLAIN_EXECUTION_PATH)?;
-    let repository = protocol::required_env("SCENEWORKS_FLUX2_REPOSITORY")?;
-    let revision = protocol::required_env("SCENEWORKS_FLUX2_REVISION")?;
-    protocol::validate_artifact_identity(&repository, &revision, protocol::FLUX2_REPOSITORY)?;
-    let root = std::fs::canonicalize(PathBuf::from(protocol::required_env(
-        "SCENEWORKS_FLUX2_ROOT",
-    )?))
-    .map_err(|error| format!("canonicalize SCENEWORKS_FLUX2_ROOT: {error}"))?;
+    protocol::validate_plain_overlay_target(request, arm.execution_path)?;
+    let repository = protocol::required_env(arm.repository_env)?;
+    let revision = protocol::required_env(arm.revision_env)?;
+    protocol::validate_artifact_identity(&repository, &revision, arm.expected_repository)?;
+    let root = std::fs::canonicalize(PathBuf::from(protocol::required_env(arm.root_env)?))
+        .map_err(|error| format!("canonicalize {}: {error}", arm.root_env))?;
+    flux2_load_spec_at(arm, tier, selection, repository, revision, root)
+}
+
+/// The env-free half of [`flux2_load_spec`], so the artifact binding is unit-testable without the
+/// process environment: the root must end in the PLANNED tier's directory under the member's OWN
+/// repository, so a stale `…/q4` export can never satisfy a q8 or bf16 plan, and the KV artifact
+/// can never satisfy a base-klein plan.
+fn flux2_load_spec_at(
+    arm: Flux2Arm,
+    tier: &str,
+    selection: &MemorySelection,
+    repository: String,
+    revision: String,
+    root: PathBuf,
+) -> Result<(String, String, LoadSpec), String> {
+    protocol::validate_artifact_identity(&repository, &revision, arm.expected_repository)?;
     protocol::validate_huggingface_snapshot_root(
         &root,
         &repository,
         &revision,
         tier,
-        protocol::FLUX2_REPOSITORY,
+        arm.expected_repository,
     )?;
-    Ok((repository, revision, flux2_spec(root, selection)))
+    Ok((repository, revision, flux2_spec(arm, root, selection)))
 }
 
-/// The tier-exact FLUX.2-dev load spec: resident offload, eager materialization (the contract's
-/// calibrated load shape), and the quant DERIVED from the planned selection.
-fn flux2_spec(root: PathBuf, selection: &MemorySelection) -> LoadSpec {
+/// The tier-exact FLUX.2 load spec: resident offload, the member's calibrated load shape,
+/// `resolved_route` bound to the CATALOG model id, and — on the members whose loader takes it — the
+/// quant DERIVED from the planned selection. Those are the levers the worker sets
+/// (`image_jobs/base.rs` `load_spec` + `with_resolved_route`); see
+/// [`Flux2Arm::tier_quant_reaches_the_loader`] for why the klein rehosts take the tier through the
+/// snapshot path alone.
+fn flux2_spec(arm: Flux2Arm, root: PathBuf, selection: &MemorySelection) -> LoadSpec {
     let mut spec = LoadSpec::new(WeightsSource::Dir(root))
         .with_offload_policy(OffloadPolicy::Resident)
-        .with_load_shape(LoadShape::EagerMaterialization);
-    if let Some(quant) = selection.tier.quant {
-        spec = spec.with_quant(quant);
+        .with_load_shape(arm.load_shape)
+        .with_resolved_route(arm.model_id);
+    if arm.tier_quant_reaches_the_loader {
+        if let Some(quant) = selection.tier.quant {
+            spec = spec.with_quant(quant);
+        }
     }
     spec
 }
@@ -3241,15 +3424,42 @@ fn flux2_spec(root: PathBuf, selection: &MemorySelection) -> LoadSpec {
 /// The admission context for the FLUX.2-dev safety scenarios. It exactly describes the base
 /// text-to-image route: `MemoryMode::TextToImage`, no reference, and `reference_count == 0`.
 /// `overlay` stays `None` because this authoritative lane is base-only.
-fn flux2_admission_context(
-    selection: &MemorySelection,
-    calibration: &MemoryCalibrationIdentity,
-    fingerprint: &str,
-    width: u32,
-    height: u32,
+/// The three levers an admission SCENARIO varies, bundled so the context builder keeps one
+/// parameter per concern. `fingerprint` is a parameter at all only so the stale-evidence probe can
+/// pass a deliberate mismatch; every real call site passes `calibration.fingerprint` (the Krea-arm
+/// lesson at `krea_context`).
+#[derive(Clone, Copy, Debug)]
+struct Flux2AdmissionProbe<'a> {
+    fingerprint: &'a str,
     total_bytes: u64,
     predicted_peak_bytes: u64,
+}
+
+impl<'a> Flux2AdmissionProbe<'a> {
+    /// The exact-fit probe: the calibrated fingerprint, and the measured peak as both the budget
+    /// and the prediction.
+    fn exact_fit(calibration: &'a MemoryCalibrationIdentity, predicted: u64) -> Self {
+        Self {
+            fingerprint: &calibration.fingerprint,
+            total_bytes: predicted,
+            predicted_peak_bytes: predicted,
+        }
+    }
+}
+
+fn flux2_admission_context(
+    arm: Flux2Arm,
+    selection: &MemorySelection,
+    calibration: &MemoryCalibrationIdentity,
+    geometry: (u32, u32),
+    probe: Flux2AdmissionProbe<'_>,
 ) -> MemoryRunContext {
+    let (width, height) = geometry;
+    let Flux2AdmissionProbe {
+        fingerprint,
+        total_bytes,
+        predicted_peak_bytes,
+    } = probe;
     MemoryRunContext {
         selection: *selection,
         optimization_authority: MemoryOptimizationAuthority::Calibrated,
@@ -3278,7 +3488,7 @@ fn flux2_admission_context(
         },
         predicted_peak_bytes,
         cache_state: MemoryCacheState::Cold,
-        evidence_revision: format!("sc-18218@{}", protocol::INFERENCE_PIN),
+        evidence_revision: format!("{}@{}", arm.evidence_tag, protocol::INFERENCE_PIN),
     }
 }
 
@@ -3290,57 +3500,71 @@ fn flux2_complete_sweep(request: &Value) -> Result<Value, String> {
     Ok(sweep)
 }
 
-/// The `mlx:flux2_dev` arm (sc-18218) — RESIDENT ONLY, deliberately.
+/// The `mlx:flux2_*` arm (sc-18218, extended to the whole family by sc-22727).
 ///
-/// At the interim inference PR #531 head, `flux2_dev` owns a distinct reference-free T2I contract.
-/// Every non-Resident strategy remains `Missing`; this arm refuses those rungs, reads the registry
-/// contract under the exact T2I provider id, and then proves that the loaded generator exposes the
-/// byte-for-byte same contract before measuring it. No edit-provider declaration or edit-shaped
-/// context participates in this lane.
-fn run_flux2_dev(request: &Value) -> Result<Value, String> {
-    validate_flux2_target(request)?;
-    protocol::validate_plain_overlay_target(request, FLUX2_PLAIN_EXECUTION_PATH)?;
+/// `flux2_dev` owns a distinct reference-free T2I contract in which every non-Resident strategy
+/// remains `Missing`; the two klein catalog models share one engine provider whose ladder publishes
+/// five rungs, and are told apart by their artifact and `LoadSpec::resolved_route`. In both cases
+/// this arm reads the registry contract under the exact T2I provider id, then proves that the
+/// loaded generator exposes the byte-for-byte same contract before measuring it. No edit-provider
+/// declaration or edit-shaped context participates in this lane.
+fn run_flux2(request: &Value) -> Result<Value, String> {
+    let arm = validate_flux2_target(request)?;
+    protocol::validate_plain_overlay_target(request, arm.execution_path)?;
     let rung = protocol::planned_rung(request)?;
-    if rung != "resident" {
+    if arm.resident_only && rung != "resident" {
         return Err(format!(
-            "the pinned MLX FLUX.2-dev provider implements only the resident strategy (every other \
-             strategy is declared Missing at the pin); rung {rung:?} is not capturable"
+            "the pinned MLX {} provider implements only the resident strategy (every other \
+             strategy is declared Missing at the pin); rung {rung:?} is not capturable",
+            arm.provider
         ));
     }
     let selection = planned_selection(request)?;
     let tier = planned_qwen_tier(request)?; // shared numeric-tier parser
-    if !matches!(tier, "q4" | "q8") {
-        return Err(format!(
-            "the authoritative MLX FLUX.2-dev plan supports only q4 and q8; tier {tier:?} is not capturable"
-        ));
-    }
     let (width, height) = protocol::target_geometry(request)?;
-    let seed = planned_flux2_seed(request, tier, width)?;
-    let (repository, revision, spec) = flux2_load_spec(request, tier, &selection)?;
-    let registry = mlx_gen_flux2::provider_registry()
-        .map_err(|error| format!("build FLUX.2 registry: {error}"))?;
+    let seed = planned_flux2_seed(request, arm, tier, width)?;
+    let (repository, revision, spec) = flux2_load_spec(request, arm, tier, &selection)?;
+    // The PRODUCTION catalog (E4): the same explicit MLX media registry `runtime_macos::catalog()`
+    // composes for the worker, not a crate-local replica. A member the bundle does not register is
+    // not routed on this lane and fails here by name.
+    let catalog =
+        runtime_macos::catalog().map_err(|error| format!("build MLX catalog: {error}"))?;
+    let registry = catalog.media();
     let contract = registry
-        .memory_strategy_contract(FLUX2_PROVIDER, &spec)
-        .map_err(|error| format!("read {FLUX2_PROVIDER} T2I memory-strategy contract: {error}"))?
+        .memory_strategy_contract(arm.provider, &spec)
+        .map_err(|error| {
+            format!(
+                "read {} T2I memory-strategy contract: {error}",
+                arm.provider
+            )
+        })?
         .ok_or_else(|| {
-            format!("{FLUX2_PROVIDER} has no T2I memory-strategy contract at the pin")
+            format!(
+                "{} has no T2I memory-strategy contract at the pin",
+                arm.provider
+            )
         })?;
     contract.validate_selection(&selection).map_err(|error| {
-        format!("pinned FLUX.2-dev contract rejected planned selection: {error}")
+        format!(
+            "pinned {} contract rejected planned selection: {error}",
+            arm.model_id
+        )
     })?;
     let strategy = attested_strategy(
         request,
         &selection,
         &contract.engaged_composition(selection.strategy),
     )?;
-    let calibration = contract
-        .calibration
-        .as_ref()
-        .ok_or_else(|| "pinned FLUX.2-dev contract has no calibration identity".to_owned())?;
-    if calibration.fingerprint != FLUX2_CALIBRATION_FINGERPRINT {
+    let calibration = contract.calibration.as_ref().ok_or_else(|| {
+        format!(
+            "pinned {} contract has no calibration identity",
+            arm.model_id
+        )
+    })?;
+    if calibration.fingerprint != arm.calibration_fingerprint {
         return Err(format!(
-            "pinned FLUX.2-dev T2I contract fingerprint changed: expected {FLUX2_CALIBRATION_FINGERPRINT}, got {}",
-            calibration.fingerprint
+            "pinned {} T2I contract fingerprint changed: expected {}, got {}",
+            arm.model_id, arm.calibration_fingerprint, calibration.fingerprint
         ));
     }
     let planned_fingerprint = protocol::planned(request)?
@@ -3353,66 +3577,107 @@ fn run_flux2_dev(request: &Value) -> Result<Value, String> {
             calibration.fingerprint
         ));
     }
-    if seed != FLUX2_SEED {
+    if seed != arm.seed {
         return Err(format!(
-            "planned.fixture seed {seed} does not match the FLUX.2-dev calibration seed {FLUX2_SEED}"
+            "planned.fixture seed {seed} does not match the {} calibration seed {}",
+            arm.model_id, arm.seed
         ));
     }
     let hardware_bytes = request
         .pointer("/hardware/memoryBytes")
         .and_then(Value::as_u64)
         .ok_or_else(|| "run request.hardware.memoryBytes must be an integer".to_owned())?;
-    let safety = |fingerprint: &str, total_bytes: u64, predicted: u64| {
-        mlx_gen_flux2::memory_strategy::registered_dev_t2i_safety_check(
-            &spec,
-            &contract,
-            &flux2_admission_context(
-                &selection,
-                calibration,
+    let admission_context = |fingerprint: &str, total_bytes: u64, predicted_peak_bytes: u64| {
+        flux2_admission_context(
+            arm,
+            &selection,
+            calibration,
+            (width, height),
+            Flux2AdmissionProbe {
                 fingerprint,
-                width,
-                height,
                 total_bytes,
-                predicted,
-            ),
+                predicted_peak_bytes,
+            },
         )
     };
-    // Admission mutation hygiene BEFORE the expensive load: the gate must accept a fitting
-    // request (so the two rejections below cannot pass via a blanket refusal), reject an
-    // unknown/zero budget, and reject a mutated calibration fingerprint.
-    if !matches!(
-        safety(&calibration.fingerprint, hardware_bytes, 1),
-        MemorySafetyDecision::Accept
-    ) {
-        return Err(
-            "FLUX.2-dev admission rejected a fitting probe budget; the scenario rejections below \
-             would be a blanket refusal, not evidence"
-                .to_owned(),
-        );
-    }
-    if !matches!(
-        safety(&calibration.fingerprint, 0, 1),
-        MemorySafetyDecision::Reject { .. }
-    ) {
-        return Err("FLUX.2-dev admission accepted an unknown/zero memory budget".to_owned());
-    }
-    if !matches!(
-        safety("stale-flux2-dev-fingerprint", hardware_bytes, 1),
-        MemorySafetyDecision::Reject { .. }
-    ) {
-        return Err("FLUX.2-dev admission accepted stale calibration evidence".to_owned());
+    // Admission mutation hygiene: the gate must accept a fitting request (so the two rejections
+    // cannot pass via a blanket refusal), reject an unknown/zero budget, and reject a mutated
+    // calibration fingerprint.
+    //
+    // On the dev arm the registered T2I check is a PUBLIC crate function, so all three run BEFORE
+    // the expensive load, exactly as sc-18218 wrote them. The klein routes expose their registered
+    // check (`registered_klein_safety_check`) only through the loaded generator - it is
+    // crate-private - so their identical three scenarios run immediately after the load instead.
+    // Same scenarios, same record; only the moment differs, and it differs because of the pinned
+    // crate's visibility, not a weaker claim.
+    let scenarios = |check: &dyn Fn(&str, u64, u64) -> MemorySafetyDecision| -> Result<(), String> {
+        if !matches!(
+            check(&calibration.fingerprint, hardware_bytes, 1),
+            MemorySafetyDecision::Accept
+        ) {
+            return Err(format!(
+                "{} admission rejected a fitting probe budget; the scenario rejections below \
+                 would be a blanket refusal, not evidence",
+                arm.model_id
+            ));
+        }
+        if !matches!(
+            check(&calibration.fingerprint, 0, 1),
+            MemorySafetyDecision::Reject { .. }
+        ) {
+            return Err(format!(
+                "{} admission accepted an unknown/zero memory budget",
+                arm.model_id
+            ));
+        }
+        if !matches!(
+            check(
+                &format!("stale-{}-fingerprint", arm.slug),
+                hardware_bytes,
+                1
+            ),
+            MemorySafetyDecision::Reject { .. }
+        ) {
+            return Err(format!(
+                "{} admission accepted stale calibration evidence",
+                arm.model_id
+            ));
+        }
+        Ok(())
+    };
+    if arm.provider == FLUX2_PROVIDER {
+        scenarios(&|fingerprint, total_bytes, predicted| {
+            mlx_gen_flux2::memory_strategy::registered_dev_t2i_safety_check(
+                &spec,
+                &contract,
+                &admission_context(fingerprint, total_bytes, predicted),
+            )
+        })?;
     }
 
     let generator = registry
-        .load(FLUX2_PROVIDER, &spec)
-        .map_err(|error| format!("load real FLUX.2-dev {tier} provider: {error}"))?;
-    let loaded_contract = generator
-        .memory_strategy_contract()
-        .ok_or_else(|| "loaded FLUX.2-dev generator exposed no T2I memory contract".to_owned())?;
+        .load(arm.provider, &spec)
+        .map_err(|error| format!("load real {} {tier} provider: {error}", arm.model_id))?;
+    let loaded_contract = generator.memory_strategy_contract().ok_or_else(|| {
+        format!(
+            "loaded {} generator exposed no T2I memory contract",
+            arm.model_id
+        )
+    })?;
     if loaded_contract != &contract {
-        return Err(
-            "loaded FLUX.2-dev generator contract differs from the registry contract".to_owned(),
-        );
+        return Err(format!(
+            "loaded {} generator contract differs from the registry contract",
+            arm.model_id
+        ));
+    }
+    if arm.provider != FLUX2_PROVIDER {
+        scenarios(&|fingerprint, total_bytes, predicted| {
+            generator.memory_strategy_safety_check(&admission_context(
+                fingerprint,
+                total_bytes,
+                predicted,
+            ))
+        })?;
     }
     let conditioning = Cell::new(PhaseMemory {
         active: 0,
@@ -3448,27 +3713,29 @@ fn run_flux2_dev(request: &Value) -> Result<Value, String> {
     let conditioning = conditioning.get();
     let denoise = denoise.get();
     if [conditioning.active, denoise.active, decode.active].contains(&0) {
-        return Err(
-            "a synchronized FLUX.2-dev lifecycle phase reported a zero active peak".to_owned(),
-        );
+        return Err(format!(
+            "a synchronized {} lifecycle phase reported a zero active peak",
+            arm.model_id
+        ));
     }
     let overall = PhaseMemory::overall(&[conditioning, denoise, decode]);
     let predicted_peaks = image_predicted_peak_bytes(conditioning, denoise, decode);
     let predicted = predicted_peaks.overall;
     let exact_fit = flux2_admission_context(
+        arm,
         &selection,
         calibration,
-        &calibration.fingerprint,
-        width,
-        height,
-        predicted,
-        predicted,
+        (width, height),
+        Flux2AdmissionProbe::exact_fit(calibration, predicted),
     );
     if !matches!(
         generator.memory_strategy_safety_check(&exact_fit),
         MemorySafetyDecision::Accept
     ) {
-        return Err("FLUX.2-dev admission rejected an exact-fit calibrated budget".to_owned());
+        return Err(format!(
+            "{} admission rejected an exact-fit calibrated budget",
+            arm.model_id
+        ));
     }
 
     // Warm repeat determinism + cleanup bounds on this exact loaded provider. The scoped
@@ -3479,7 +3746,7 @@ fn run_flux2_dev(request: &Value) -> Result<Value, String> {
     let baseline = one_image(
         generator
             .generate(&flux2_request(width, height, seed), &mut |_| {})
-            .map_err(|error| format!("generate warm FLUX.2-dev control: {error}"))?,
+            .map_err(|error| format!("generate warm {} control: {error}", arm.model_id))?,
     )?;
     let clean_warm_peak = get_peak_memory() as u64;
     clear_cache();
@@ -3489,35 +3756,40 @@ fn run_flux2_dev(request: &Value) -> Result<Value, String> {
     let (maximum_error, mean_error, rms_error) = image_max_mean_rms_abs(&selected, &baseline)?;
     if !flux2_quality_passes(maximum_error, mean_error, rms_error) {
         return Err(format!(
-            "FLUX.2-dev warm repeat exceeded the determinism envelope: max={maximum_error:.6}, \
-             mean={mean_error:.6}, rms={rms_error:.6}"
+            "{} warm repeat exceeded the determinism envelope: max={maximum_error:.6}, \
+             mean={mean_error:.6}, rms={rms_error:.6}",
+            arm.model_id
         ));
     }
     reset_peak_memory();
     let warm = one_image(
         generator
             .generate(&flux2_request(width, height, seed), &mut |_| {})
-            .map_err(|error| format!("generate warm FLUX.2-dev repeat: {error}"))?,
+            .map_err(|error| format!("generate warm {} repeat: {error}", arm.model_id))?,
     )?;
     let warm_peak = get_peak_memory() as u64;
     if !cleanup_bounds.allows_warm_peak(warm_peak) {
         return Err(format!(
-            "FLUX.2-dev warm repeat peaked at {warm_peak} bytes, above the clean warm control \
-             {clean_warm_peak} bytes plus 2%"
+            "{} warm repeat peaked at {warm_peak} bytes, above the clean warm control \
+             {clean_warm_peak} bytes plus 2%",
+            arm.model_id
         ));
     }
     clear_cache();
     let warm_post_cleanup = AllocatorState::capture_current();
     if !cleanup_bounds.allows_retained(warm_post_cleanup) {
         return Err(format!(
-            "FLUX.2-dev warm repeat retained active/cache bytes {warm_post_cleanup:?} above the \
+            "{} warm repeat retained active/cache bytes {warm_post_cleanup:?} above the \
              clean warm cleanup {clean_post_cleanup:?} plus {} bytes",
-            cleanup_bounds.tolerance_bytes,
+            arm.model_id, cleanup_bounds.tolerance_bytes,
         ));
     }
     let (warm_maximum, warm_mean, warm_rms) = image_max_mean_rms_abs(&selected, &warm)?;
     if !flux2_quality_passes(warm_maximum, warm_mean, warm_rms) {
-        return Err("FLUX.2-dev second warm repeat changed the deterministic output".to_owned());
+        return Err(format!(
+            "{} second warm repeat changed the deterministic output",
+            arm.model_id
+        ));
     }
 
     // Arm-internal negative-mutation falsifiability check. A runtime_complete record must keep
@@ -3527,16 +3799,17 @@ fn run_flux2_dev(request: &Value) -> Result<Value, String> {
     let mutated = qwen_negative_mutation(&selected);
     let (mutated_maximum, mutated_mean, mutated_rms) = image_max_mean_rms_abs(&mutated, &baseline)?;
     if flux2_quality_passes(mutated_maximum, mutated_mean, mutated_rms) {
-        return Err(
-            "FLUX.2-dev output mutation did not breach the determinism envelope".to_owned(),
-        );
+        return Err(format!(
+            "{} output mutation did not breach the determinism envelope",
+            arm.model_id
+        ));
     }
 
     let lifecycle_blocker = concat!(
-        "the pinned mlx-gen-flux2 crate opens no memory-strategy request scope for the dev ",
-        "variants and has no calibration fault-injection site, so the scoped lifecycle scenario ",
-        "cannot execute; unscoped repeat determinism and allocator cleanup bounds are attested in ",
-        "quality and diagnostics instead"
+        "the pinned mlx-gen-flux2 crate opens no memory-strategy request scope for the FLUX.2 ",
+        "text-to-image routes and has no calibration fault-injection site, so the scoped lifecycle ",
+        "scenario cannot execute; unscoped repeat determinism and allocator cleanup bounds are ",
+        "attested in quality and diagnostics instead"
     );
     let mut fragment = json!({
         "status": "runtime_complete",
@@ -3550,8 +3823,8 @@ fn run_flux2_dev(request: &Value) -> Result<Value, String> {
         "sweep": flux2_complete_sweep(request)?,
         "scenarios": [
             { "name": "exact_fit", "result": "passed", "predictedBytes": predicted, "effectiveBudgetBytes": predicted },
-            { "name": "unknown_budget", "result": "passed", "reason": "the registered FLUX.2-dev admission check rejected a zero/unknown budget before load" },
-            { "name": "stale_evidence", "result": "passed", "reason": "the registered FLUX.2-dev admission check rejected a mutated calibration fingerprint before load" },
+            { "name": "unknown_budget", "result": "passed", "reason": format!("the registered {} admission check rejected a zero/unknown budget", arm.model_id) },
+            { "name": "stale_evidence", "result": "passed", "reason": format!("the registered {} admission check rejected a mutated calibration fingerprint", arm.model_id) },
             { "name": "warm_repeat", "result": "not_run", "reason": lifecycle_blocker },
             { "name": "cancel", "result": "not_run", "reason": lifecycle_blocker },
             { "name": "error", "result": "not_run", "reason": lifecycle_blocker },
@@ -3582,7 +3855,7 @@ fn run_flux2_dev(request: &Value) -> Result<Value, String> {
             "resolvedPathFingerprint": format!("{repository}@{revision}:{tier}"),
         },
         "diagnostics": protocol::diagnostics(
-            "memory-mlx-adapter:flux2-dev-resident",
+            &format!("memory-mlx-adapter:{}-resident", arm.slug),
             "executed",
             [lifecycle_blocker.to_owned()],
             [
@@ -3606,7 +3879,7 @@ fn run_flux2_dev(request: &Value) -> Result<Value, String> {
         ),
         "capturedAt": protocol::captured_at(),
     });
-    protocol::settle_plain_overlay_scenario(request, &mut fragment, FLUX2_PLAIN_EXECUTION_PATH)?;
+    protocol::settle_plain_overlay_scenario(request, &mut fragment, arm.execution_path)?;
     Ok(fragment)
 }
 
@@ -10679,7 +10952,11 @@ fn run(request: &Value) -> Result<Value, String> {
         SDXL_PROVIDER => run_sdxl(request),
         KREA_PROVIDER => run_krea_control(request),
         QWEN_PROVIDER => run_qwen_provider(request),
-        FLUX2_PROVIDER => run_flux2_dev(request),
+        FLUX2_PROVIDER => run_flux2(request),
+        // sc-22727: both klein catalog models (`flux2_klein_9b`, `flux2_klein_9b_kv`) load through
+        // this ONE engine provider id; `flux2_arm` resolves which from `(provider, modelId)` and
+        // refuses an unknown pair by name.
+        FLUX2_KLEIN_PROVIDER => run_flux2(request),
         // sc-18808: the first VIDEO arm. Every arm above it refuses `geometry.frames != 1`; this one
         // validates against LTX's own resolution/temporal envelope instead.
         LTX_PROVIDER => run_ltx(request),
@@ -10823,10 +11100,17 @@ mod flux2_tests {
     /// alongside a foreign provider, so a request that omits the axis entirely can no longer reach
     /// the rung gate this module's tests are aiming at.
     fn minimal_request(provider: &str, rung: &str) -> Value {
+        minimal_request_for(provider, provider, rung)
+    }
+
+    /// The same shape with the CATALOG model id spelled independently of the provider — the axis
+    /// the two klein models differ on (sc-22727).
+    fn minimal_request_for(provider: &str, model_id: &str, rung: &str) -> Value {
         json!({
             "planned": {
                 "target": {
                     "provider": provider,
+                    "modelId": model_id,
                     "overlay": "none",
                     "geometry": { "width": 768, "height": 768, "batch": 1, "frames": 1 }
                 },
@@ -10835,49 +11119,127 @@ mod flux2_tests {
         })
     }
 
-    /// The per-arm twin of `validate_z_image_batch`'s provider guard (sc-18104): dispatch routes by
-    /// name today, but this arm hardcodes the FLUX.2-dev contract, so a misrouted target must be
-    /// refused by name INSIDE the arm, and the refusal must not read like a missing-field complaint.
+    /// The per-arm twin of `validate_z_image_batch`'s provider guard (sc-18104), extended to the
+    /// `(provider, modelId)` pair by sc-22727: dispatch routes by provider name today, and two
+    /// catalog models share one provider id, so a misrouted target must be refused by name INSIDE
+    /// the arm, and the refusal must not read like a missing-field complaint.
     #[test]
-    fn the_flux2_arm_refuses_a_foreign_provider_by_name() {
-        for provider in [
-            "z_image_turbo",
-            "qwen_image",
-            "flux2_dev_edit",
-            "flux2_klein_9b",
+    fn the_flux2_arm_refuses_a_foreign_provider_or_model_by_name() {
+        for (provider, model_id) in [
+            ("z_image_turbo", "z_image_turbo"),
+            ("qwen_image", "qwen_image"),
+            ("flux2_dev_edit", "flux2_dev_edit"),
+            ("flux2_klein_9b_kv_edit", "flux2_klein_9b_kv_edit"),
+            // The engine's third klein artifact route: a real catalog model on this provider that
+            // this arm does NOT serve (its snapshot is an assembled convert dir, not a tiered
+            // rehost), so it must be refused rather than measured as the base klein.
+            ("flux2_klein_9b", "flux2_klein_9b_true_v2"),
+            // The KV artifact must never be served by the base klein plan, or vice versa: the two
+            // differ ONLY in this field.
+            ("flux2_dev", "flux2_klein_9b"),
         ] {
-            let error = run_flux2_dev(&minimal_request(provider, "resident"))
-                .expect_err("a foreign provider must not reach the FLUX.2-dev contract");
+            let error = run_flux2(&minimal_request_for(provider, model_id, "resident"))
+                .expect_err("a foreign (provider, modelId) pair must not reach a FLUX.2 contract");
             assert_eq!(
                 error,
-                format!("MLX FLUX.2-dev calibration does not implement provider {provider:?}")
+                format!(
+                    "the MLX FLUX.2 arm does not implement provider {provider:?} for model {model_id:?}"
+                )
             );
             assert!(
                 !error.contains("must be a string") && !error.contains("fingerprint"),
                 "refusal came from deeper in the arm, so the guard let it through: {error}"
             );
         }
+        // And the guard is not a blanket refusal: every shipped member resolves.
+        for (provider, model_id, expected) in [
+            (FLUX2_PROVIDER, "flux2_dev", FLUX2_DEV_ARM),
+            (FLUX2_KLEIN_PROVIDER, "flux2_klein_9b", FLUX2_KLEIN_ARM),
+            (
+                FLUX2_KLEIN_PROVIDER,
+                "flux2_klein_9b_kv",
+                FLUX2_KLEIN_KV_ARM,
+            ),
+        ] {
+            let arm = flux2_arm(&minimal_request_for(provider, model_id, "resident")).unwrap();
+            assert_eq!(arm, expected, "{provider}/{model_id}");
+            assert_eq!(arm.model_id, model_id);
+        }
+        assert!(
+            flux2_arm(&json!({ "planned": { "target": { "provider": FLUX2_PROVIDER } } }))
+                .unwrap_err()
+                .contains("planned.target.modelId")
+        );
+    }
+
+    /// Every member carries its OWN artifact family, execution path, refusal label, diagnostics
+    /// slug and fixture prefix. Two members sharing any of them would make their records
+    /// indistinguishable, and two members sharing an env family would let one artifact satisfy the
+    /// other's plan (sc-22727).
+    #[test]
+    fn every_flux2_member_is_distinguishable_from_every_other() {
+        let arms = [FLUX2_DEV_ARM, FLUX2_KLEIN_ARM, FLUX2_KLEIN_KV_ARM];
+        for field in [
+            arms.map(|arm| arm.model_id),
+            arms.map(|arm| arm.execution_path),
+            arms.map(|arm| arm.still_calibration),
+            arms.map(|arm| arm.repository_env),
+            arms.map(|arm| arm.revision_env),
+            arms.map(|arm| arm.root_env),
+            arms.map(|arm| arm.expected_repository),
+            arms.map(|arm| arm.fixture_slug),
+            arms.map(|arm| arm.slug),
+        ] {
+            let mut unique = field.to_vec();
+            unique.sort_unstable();
+            unique.dedup();
+            assert_eq!(unique.len(), arms.len(), "collision in {field:?}");
+        }
+        // The KV rehost and the base rehost are separate repositories, and neither is the dev one.
+        assert_eq!(
+            FLUX2_KLEIN_ARM.expected_repository,
+            protocol::FLUX2_KLEIN_REPOSITORY
+        );
+        assert_eq!(
+            FLUX2_KLEIN_KV_ARM.expected_repository,
+            protocol::FLUX2_KLEIN_KV_REPOSITORY
+        );
+        // But they DO share the engine provider id: that is the whole reason `modelId` is the
+        // discriminator rather than `provider`.
+        assert_eq!(FLUX2_KLEIN_ARM.provider, FLUX2_KLEIN_KV_ARM.provider);
     }
 
     /// sc-18218's scope correction (story comment activity-18225): at the pin, mlx-gen-flux2 marks
-    /// every non-Resident strategy `Missing`, so the arm is resident-only BY REFUSAL, not by
-    /// accident of the plan. Each of the other four rungs must be named back.
+    /// every non-Resident strategy `Missing` on the DEV route, so that arm is resident-only BY
+    /// REFUSAL, not by accident of the plan. Each of the other four rungs must be named back. The
+    /// klein ladder publishes five rungs, so it is NOT refused here — its selection is settled by
+    /// the pinned contract instead.
     #[test]
-    fn the_flux2_arm_is_resident_only_by_refusal() {
+    fn the_flux2_dev_arm_is_resident_only_by_refusal() {
         for rung in [
             "staged_residency",
             "bounded_decode",
             "bounded_attention",
             "bounded_transformer_residency",
         ] {
-            let error = run_flux2_dev(&minimal_request(FLUX2_PROVIDER, rung))
+            let error = run_flux2(&minimal_request(FLUX2_PROVIDER, rung))
                 .expect_err("a non-resident rung must be refused");
             assert!(
                 error.contains(rung) && error.contains("resident"),
                 "refusal must name the rung and the resident-only contract: {error}"
             );
+            let klein = run_flux2(&minimal_request_for(
+                FLUX2_KLEIN_PROVIDER,
+                "flux2_klein_9b",
+                rung,
+            ))
+            .expect_err("the minimal klein request is still incomplete");
+            assert!(
+                !klein.contains("implements only the resident strategy"),
+                "the klein ladder must not borrow the dev route's resident-only refusal: {klein}"
+            );
         }
-        let resident = run_flux2_dev(&minimal_request(FLUX2_PROVIDER, "resident"))
+        let resident = run_flux2(&minimal_request(FLUX2_PROVIDER, "resident"))
             .expect_err("the minimal resident request is still incomplete");
         assert!(
             !resident.contains("not capturable"),
@@ -10886,40 +11248,182 @@ mod flux2_tests {
     }
 
     #[test]
-    fn flux2_fixture_is_bound_to_tier_geometry_and_step_count() {
+    fn flux2_fixture_is_bound_to_member_tier_geometry_and_step_count() {
         let request = json!({
             "planned": { "fixture": "flux2-dev-mlx-q4-768-seed18218-step2" }
         });
-        assert_eq!(planned_flux2_seed(&request, "q4", 768).unwrap(), 18218);
-        assert!(planned_flux2_seed(&request, "q8", 768)
+        assert_eq!(
+            planned_flux2_seed(&request, FLUX2_DEV_ARM, "q4", 768).unwrap(),
+            18218
+        );
+        assert!(planned_flux2_seed(&request, FLUX2_DEV_ARM, "q8", 768)
             .unwrap_err()
             .contains("must start with"));
-        assert!(planned_flux2_seed(&request, "q4", 1024)
+        assert!(planned_flux2_seed(&request, FLUX2_DEV_ARM, "q4", 1024)
+            .unwrap_err()
+            .contains("must start with"));
+        // A dev fixture must not satisfy a klein plan, and the two klein members must not satisfy
+        // each other's: the family segment is part of the binding (sc-22727).
+        for arm in [FLUX2_KLEIN_ARM, FLUX2_KLEIN_KV_ARM] {
+            assert!(planned_flux2_seed(&request, arm, "q4", 768)
+                .unwrap_err()
+                .contains("must start with"));
+        }
+        let klein = json!({
+            "planned": { "fixture": "flux2-klein-9b-mlx-bf16-768-seed22727-step2" }
+        });
+        assert_eq!(
+            planned_flux2_seed(&klein, FLUX2_KLEIN_ARM, "bf16", 768).unwrap(),
+            FLUX2_KLEIN_SEED
+        );
+        assert!(planned_flux2_seed(&klein, FLUX2_KLEIN_KV_ARM, "bf16", 768)
+            .unwrap_err()
+            .contains("must start with"));
+        let kv = json!({
+            "planned": { "fixture": "flux2-klein-9b-kv-mlx-bf16-768-seed22727-step2" }
+        });
+        assert_eq!(
+            planned_flux2_seed(&kv, FLUX2_KLEIN_KV_ARM, "bf16", 768).unwrap(),
+            FLUX2_KLEIN_SEED
+        );
+        assert!(planned_flux2_seed(&kv, FLUX2_KLEIN_ARM, "bf16", 768)
             .unwrap_err()
             .contains("must start with"));
         let three_step = json!({
             "planned": { "fixture": "flux2-dev-mlx-q4-768-seed18218-step3" }
         });
-        assert!(planned_flux2_seed(&three_step, "q4", 768)
+        assert!(planned_flux2_seed(&three_step, FLUX2_DEV_ARM, "q4", 768)
             .unwrap_err()
             .contains("two-step"));
     }
 
-    /// sc-17097's lesson applied to this arm: the tier is derived from the planned target and each
-    /// declared authoritative tier maps to its own quant, never a hardcoded q4.
+    /// sc-17097's lesson applied to this arm: the tier is derived from the planned target, never a
+    /// hardcoded q4 (sc-22727 widened this arm from q4/q8 to the full shipped ladder). WHERE the
+    /// tier reaches the loader is per member: the dev route folds it through `LoadSpec::quantize`
+    /// (bf16 is the dense base and carries none — the worker's `tier_to_quant` shape), while the
+    /// klein turnkey rehosts declare their tier in the snapshot path and REFUSE a spec that also
+    /// carries a quant — "flux2 Klein turnkey tiers require BF16 execution with
+    /// LoadSpec.quantize=None" (`mlx-gen-flux2/src/artifact_inventory.rs`), which the sc-22727
+    /// proof capture hit for real before this flag existed.
     #[test]
-    fn flux2_load_spec_preserves_every_planned_numeric_tier() {
-        for (tier, expected_quant) in [("q4", Quant::Q4), ("q8", Quant::Q8)] {
-            let request = json!({
-                "planned": {
-                    "strategy": { "rung": "resident", "parameters": {} },
-                    "target": { "tier": tier }
-                }
-            });
-            let selection = planned_selection(&request).unwrap();
-            let spec = flux2_spec(PathBuf::from(format!("/tmp/flux2-dev-{tier}")), &selection);
-            assert_eq!(spec.quantize, Some(expected_quant), "numeric tier {tier}");
+    fn flux2_load_spec_carries_the_planned_tier_the_way_each_member_takes_it() {
+        for arm in [FLUX2_DEV_ARM, FLUX2_KLEIN_ARM, FLUX2_KLEIN_KV_ARM] {
+            for (tier, folded_quant) in [
+                ("q4", Some(Quant::Q4)),
+                ("q8", Some(Quant::Q8)),
+                ("bf16", None),
+            ] {
+                let request = json!({
+                    "planned": {
+                        "strategy": { "rung": "resident", "parameters": {} },
+                        "target": { "tier": tier }
+                    }
+                });
+                let selection = planned_selection(&request).unwrap();
+                // The PLANNED tier is derived identically on every member; only whether it is
+                // handed to the loader differs.
+                assert_eq!(selection.tier.quant, folded_quant, "planned tier {tier}");
+                let spec = flux2_spec(
+                    arm,
+                    PathBuf::from(format!("/tmp/{}-{tier}", arm.slug)),
+                    &selection,
+                );
+                let expected = if arm.tier_quant_reaches_the_loader {
+                    folded_quant
+                } else {
+                    None
+                };
+                assert_eq!(spec.quantize, expected, "{} tier {tier}", arm.model_id);
+                assert_eq!(spec.load_shape, arm.load_shape);
+                // The catalog model id reaches the engine as `resolved_route`: it is what
+                // `KleinArtifactInventory::validate_resolved_route` refuses a cross-variant
+                // artifact with (mlx-gen-flux2/src/artifact_inventory.rs).
+                assert_eq!(spec.resolved_route.as_deref(), Some(arm.model_id));
+            }
         }
+        // Which member takes the fold, stated as data so the loop above cannot pass vacuously by
+        // every member happening to answer the same way.
+        assert_eq!(
+            [FLUX2_DEV_ARM, FLUX2_KLEIN_ARM, FLUX2_KLEIN_KV_ARM]
+                .map(|arm| arm.tier_quant_reaches_the_loader),
+            [true, false, false],
+            "only the dev route folds the planned tier into LoadSpec::quantize"
+        );
+    }
+
+    /// The PLANNED tier must be carried by the root, and the member's OWN repository must be the
+    /// one bound — a q4 export cannot satisfy a q8 or bf16 plan, and the KV artifact cannot satisfy
+    /// a base-klein plan even though both load through `flux2_klein_9b`.
+    #[test]
+    fn flux2_root_must_carry_the_planned_tier_and_the_members_own_repository() {
+        const REVISION: &str = "acf05e8d5103838baba6a5e32dc91d6997a56023";
+        for arm in [FLUX2_DEV_ARM, FLUX2_KLEIN_ARM, FLUX2_KLEIN_KV_ARM] {
+            let selection = resident_selection(Some(Quant::Q4));
+            let q4_root = flux2_snapshot_root(arm.expected_repository, REVISION, "q4");
+            let error = flux2_load_spec_at(
+                arm,
+                "q8",
+                &selection,
+                arm.expected_repository.to_owned(),
+                REVISION.to_owned(),
+                q4_root.clone(),
+            )
+            .expect_err("a q8 plan must not be satisfied by a q4 root");
+            assert!(
+                error.ends_with(&format!("/snapshots/{REVISION}/q8")),
+                "{}: {error}",
+                arm.model_id
+            );
+            for tier in ["q4", "q8", "bf16"] {
+                let root = flux2_snapshot_root(arm.expected_repository, REVISION, tier);
+                let (repository, revision, _) = flux2_load_spec_at(
+                    arm,
+                    tier,
+                    &selection,
+                    arm.expected_repository.to_owned(),
+                    REVISION.to_owned(),
+                    root,
+                )
+                .unwrap_or_else(|error| panic!("{}/{tier}: {error}", arm.model_id));
+                assert_eq!(repository, arm.expected_repository);
+                assert_eq!(revision, REVISION);
+            }
+            for other in [FLUX2_DEV_ARM, FLUX2_KLEIN_ARM, FLUX2_KLEIN_KV_ARM] {
+                if other == arm {
+                    continue;
+                }
+                let error = flux2_load_spec_at(
+                    arm,
+                    "q4",
+                    &selection,
+                    other.expected_repository.to_owned(),
+                    REVISION.to_owned(),
+                    q4_root.clone(),
+                )
+                .expect_err("another member's repository must be refused");
+                assert!(
+                    error.contains(arm.expected_repository),
+                    "{} vs {}: {error}",
+                    arm.model_id,
+                    other.model_id
+                );
+            }
+        }
+    }
+
+    fn flux2_snapshot_root(repository: &str, revision: &str, tier: &str) -> PathBuf {
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir()
+            .join(format!("sc-22727-flux2-{}-{nonce}", std::process::id()))
+            .join(format!("models--{}", repository.replace('/', "--")))
+            .join("snapshots")
+            .join(revision)
+            .join(tier);
+        std::fs::create_dir_all(&root).unwrap();
+        root
     }
 
     #[test]
@@ -10930,13 +11434,15 @@ mod flux2_tests {
         .unwrap();
         let calibration = contract.calibration.as_ref().unwrap();
         let context = flux2_admission_context(
+            FLUX2_DEV_ARM,
             &resident_selection(Some(Quant::Q4)),
             calibration,
-            &calibration.fingerprint,
-            768,
-            768,
-            1_000_000,
-            1_000_000,
+            (768, 768),
+            Flux2AdmissionProbe {
+                fingerprint: &calibration.fingerprint,
+                total_bytes: 1_000_000,
+                predicted_peak_bytes: 1_000_000,
+            },
         );
         assert_eq!(context.mode, MemoryMode::TextToImage);
         assert!(!context.has_reference);
@@ -11052,6 +11558,51 @@ mod flux2_tests {
         );
     }
 
+    /// sc-22727 moved the arm from the crate-local `mlx_gen_flux2::provider_registry()` onto the
+    /// PRODUCTION catalog the worker composes (`runtime_macos::catalog()`, E4). That is only a
+    /// safe move if the two resolve the SAME contract — `mlx-gen-catalog` calls the same
+    /// `register_providers`, but nothing in this repo asserted it, and a bundle that wrapped or
+    /// re-registered a provider would silently change what every FLUX.2 capture measures.
+    ///
+    /// Weights-free: both sides are asked for the contract over one placeholder spec, so this
+    /// costs no GPU and no snapshot, and it covers every member the arm serves.
+    #[test]
+    fn the_production_catalog_resolves_the_same_flux2_contracts_as_the_provider_crate() {
+        let crate_registry = mlx_gen_flux2::provider_registry().unwrap();
+        let catalog = runtime_macos::catalog().expect("the production MLX catalog builds");
+        for arm in [FLUX2_DEV_ARM, FLUX2_KLEIN_ARM, FLUX2_KLEIN_KV_ARM] {
+            let spec = weights_free_spec(if arm.tier_quant_reaches_the_loader {
+                Some(Quant::Q4)
+            } else {
+                None
+            });
+            let direct = crate_registry.memory_strategy_contract(arm.provider, &spec);
+            let production = catalog
+                .media()
+                .memory_strategy_contract(arm.provider, &spec);
+            match (direct, production) {
+                (Ok(direct), Ok(production)) => assert_eq!(
+                    direct, production,
+                    "{}: the production catalog resolves a different contract",
+                    arm.model_id
+                ),
+                // A weights-free spec is a placeholder, so a member whose contract wants a real
+                // snapshot refuses on BOTH sides. The claim is that they agree, including on the
+                // refusal text — that is what rules out a bundle-side wrapper.
+                (Err(direct), Err(production)) => assert_eq!(
+                    direct.to_string(),
+                    production.to_string(),
+                    "{}: the two registries refuse for different reasons",
+                    arm.model_id
+                ),
+                (direct, production) => panic!(
+                    "{}: one registry answered and the other did not: {direct:?} vs {production:?}",
+                    arm.model_id
+                ),
+            }
+        }
+    }
+
     /// The admission-scenario legs the capture will run, exercised weights-free through the SAME
     /// registered function the loaded T2I generator delegates to. Mutation-verified in both
     /// directions: the accept leg proves the two rejects are not a blanket refusal, and the
@@ -11073,13 +11624,15 @@ mod flux2_tests {
         };
 
         let exact = flux2_admission_context(
+            FLUX2_DEV_ARM,
             &selection,
             calibration,
-            &calibration.fingerprint,
-            1024,
-            1024,
-            1_000_000,
-            1_000_000,
+            (1024, 1024),
+            Flux2AdmissionProbe {
+                fingerprint: &calibration.fingerprint,
+                total_bytes: 1_000_000,
+                predicted_peak_bytes: 1_000_000,
+            },
         );
         assert!(
             matches!(check(&exact), MemorySafetyDecision::Accept),
@@ -11088,13 +11641,15 @@ mod flux2_tests {
         );
 
         let unknown = flux2_admission_context(
+            FLUX2_DEV_ARM,
             &selection,
             calibration,
-            &calibration.fingerprint,
-            1024,
-            1024,
-            0,
-            1,
+            (1024, 1024),
+            Flux2AdmissionProbe {
+                fingerprint: &calibration.fingerprint,
+                total_bytes: 0,
+                predicted_peak_bytes: 1,
+            },
         );
         assert!(matches!(
             check(&unknown),
@@ -11102,26 +11657,30 @@ mod flux2_tests {
         ));
 
         let stale = flux2_admission_context(
+            FLUX2_DEV_ARM,
             &selection,
             calibration,
-            "stale-flux2-dev-fingerprint",
-            1024,
-            1024,
-            1_000_000,
-            1,
+            (1024, 1024),
+            Flux2AdmissionProbe {
+                fingerprint: "stale-flux2-dev-fingerprint",
+                total_bytes: 1_000_000,
+                predicted_peak_bytes: 1,
+            },
         );
         assert!(matches!(check(&stale), MemorySafetyDecision::Reject { .. }));
 
         // The route-gate mutation: the same fitting budget in an edit shape must be refused — the
         // T2I contract admits only reference-free text-to-image.
         let mut edit_shaped = flux2_admission_context(
+            FLUX2_DEV_ARM,
             &selection,
             calibration,
-            &calibration.fingerprint,
-            1024,
-            1024,
-            1_000_000,
-            1_000_000,
+            (1024, 1024),
+            Flux2AdmissionProbe {
+                fingerprint: &calibration.fingerprint,
+                total_bytes: 1_000_000,
+                predicted_peak_bytes: 1_000_000,
+            },
         );
         edit_shaped.mode = MemoryMode::Edit;
         edit_shaped.has_reference = true;
@@ -11134,13 +11693,15 @@ mod flux2_tests {
         // NVFP4 is the one tier the route gate refuses by name.
         let nvfp4_spec = weights_free_spec(Some(Quant::Nvfp4));
         let nvfp4 = flux2_admission_context(
+            FLUX2_DEV_ARM,
             &resident_selection(Some(Quant::Nvfp4)),
             calibration,
-            &calibration.fingerprint,
-            1024,
-            1024,
-            1_000_000,
-            1_000_000,
+            (1024, 1024),
+            Flux2AdmissionProbe {
+                fingerprint: &calibration.fingerprint,
+                total_bytes: 1_000_000,
+                predicted_peak_bytes: 1_000_000,
+            },
         );
         assert!(matches!(
             mlx_gen_flux2::memory_strategy::registered_dev_t2i_safety_check(
@@ -13890,14 +14451,23 @@ mod ltx_tests {
     #[test]
     fn every_image_arm_still_refuses_a_multi_frame_geometry() {
         type Arm = fn(&Value) -> Result<Value, String>;
-        let arms: [(&str, &str, Arm); 7] = [
+        // `(provider, modelId, refusal label, arm)`. The model id is spelled independently of the
+        // provider because two FLUX.2 catalog models share one engine provider id (sc-22727).
+        let arms: [(&str, &str, &str, Arm); 9] = [
             (
+                KREA_BASE_PROVIDER,
                 KREA_BASE_PROVIDER,
                 "MLX Krea base calibration",
                 run_krea_base,
             ),
-            (SDXL_PROVIDER, "MLX SDXL base calibration", run_sdxl),
             (
+                SDXL_PROVIDER,
+                SDXL_PROVIDER,
+                "MLX SDXL base calibration",
+                run_sdxl,
+            ),
+            (
+                Z_IMAGE_PROVIDER,
                 Z_IMAGE_PROVIDER,
                 "MLX Z-Image base calibration",
                 run_z_image_reference,
@@ -13905,28 +14475,50 @@ mod ltx_tests {
             // sc-22724: the base model shares the arm; its refusal carries its own label.
             (
                 Z_IMAGE_BASE_PROVIDER,
+                Z_IMAGE_BASE_PROVIDER,
                 "MLX Z-Image base-model calibration",
                 run_z_image_reference,
             ),
             (
+                KREA_PROVIDER,
                 KREA_PROVIDER,
                 "MLX Krea pose-control calibration",
                 run_krea_control,
             ),
             (
                 QWEN_PROVIDER,
+                QWEN_PROVIDER,
                 "MLX Qwen base calibration",
                 run_qwen_provider,
             ),
-            (FLUX2_PROVIDER, "MLX FLUX.2-dev calibration", run_flux2_dev),
+            (
+                FLUX2_PROVIDER,
+                "flux2_dev",
+                "MLX FLUX.2-dev calibration",
+                run_flux2,
+            ),
+            // sc-22727: the two klein catalog models share `flux2_klein_9b` and each refuses under
+            // its OWN label, so neither can be mistaken for the other in a failure report.
+            (
+                FLUX2_KLEIN_PROVIDER,
+                "flux2_klein_9b",
+                "MLX FLUX.2-klein-9B calibration",
+                run_flux2,
+            ),
+            (
+                FLUX2_KLEIN_PROVIDER,
+                "flux2_klein_9b_kv",
+                "MLX FLUX.2-klein-9B KV calibration",
+                run_flux2,
+            ),
         ];
-        for (provider, label, arm) in arms {
+        for (provider, model_id, label, arm) in arms {
             for frames in [0_u64, 2, 97] {
                 let request = json!({
                     "planned": {
                         "target": {
                             "provider": provider,
-                            "modelId": provider,
+                            "modelId": model_id,
                             "tier": "q4",
                             "mode": "text_to_image",
                             "overlay": if provider == KREA_PROVIDER { "control:1" } else { "none" },
@@ -13948,7 +14540,7 @@ mod ltx_tests {
                 assert_eq!(
                     error,
                     format!("{label} requires geometry.frames == 1, got {frames}"),
-                    "{provider} at frames={frames}"
+                    "{provider}/{model_id} at frames={frames}"
                 );
             }
         }
@@ -13966,6 +14558,8 @@ mod ltx_tests {
             "MLX Z-Image edit calibration",
             "MLX Krea pose-control calibration",
             "MLX Qwen base calibration",
+            "MLX FLUX.2-klein-9B calibration",
+            "MLX FLUX.2-klein-9B KV calibration",
             "MLX FLUX.2-dev calibration",
         ] {
             let request = json!({

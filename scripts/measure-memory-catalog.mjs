@@ -70,7 +70,18 @@ export const PROVIDER_FAMILIES = Object.freeze({
   z_image: { env: "Z_IMAGE_BASE", repo: "SceneWorks/z-image-mlx", arms: ["mlx", "candle"] },
   krea_2_turbo: { env: "KREA", repo: "SceneWorks/krea-2-turbo-mlx", arms: ["mlx", "candle"] },
   sdxl: { env: "SDXL", repo: "SceneWorks/sdxl-base-mlx", arms: ["mlx"] },
-  flux2_dev: { env: "FLUX2", repo: "SceneWorks/flux2-dev-mlx", arms: ["mlx"] },
+  flux2_dev: { env: "FLUX2", repo: "SceneWorks/flux2-dev-mlx", arms: ["mlx", "candle"] },
+  // sc-22727. TWO catalog models ride this ONE engine provider id (worker engines.rs:
+  // `flux2_klein_9b_kv` declares `engine_id: flux2_klein_9b`), and they load DIFFERENT artifacts —
+  // the engine tells them apart by the snapshot path and by `LoadSpec::resolved_route`. So the
+  // family carries a per-modelId override: a KV plan resolved through the base rehost's env would
+  // re-label the base checkpoint's peaks as the KV variant's.
+  flux2_klein_9b: {
+    env: "FLUX2_KLEIN", repo: "SceneWorks/flux2-klein-9b-mlx", arms: ["mlx", "candle"],
+    variants: {
+      flux2_klein_9b_kv: { env: "FLUX2_KLEIN_KV", repo: "SceneWorks/flux2-klein-9b-kv-mlx" },
+    },
+  },
   minimax_h3: {
     env: "MINIMAX_H3", repo: "SceneWorks/minimax-h3-mlx", arms: ["mlx"],
     upstream: { env: "MINIMAX_H3_UPSTREAM", repo: "MiniMaxAI/MiniMax-H3" },
@@ -85,6 +96,18 @@ export const PROVIDER_FAMILIES = Object.freeze({
 
 export function fail(message) {
   throw new Error(message);
+}
+
+/**
+ * The artifact family one anchor binds: the provider's row, with any per-modelId override applied.
+ * A provider that serves several catalog models from ONE registry id (sc-22727's two klein models)
+ * declares the divergent members under `variants`; everything else is the row itself.
+ */
+export function providerFamily(provider, modelId) {
+  const family = PROVIDER_FAMILIES[provider];
+  if (!family) return undefined;
+  const variant = family.variants?.[modelId];
+  return variant ? { ...family, ...variant, variants: undefined } : family;
 }
 
 export function anchorParts(key) {
@@ -239,7 +262,7 @@ export async function classifyAnchor(key, planned, { models, backend, hubs, curr
   const parts = anchorParts(key);
   const row = { key, ...parts, provider: planned.provider, status: "runnable", reason: null, env: {}, roots: [] };
   if (parts.backend !== backend) return { ...row, status: "other_backend", reason: `${parts.backend} lane` };
-  const family = PROVIDER_FAMILIES[planned.provider];
+  const family = providerFamily(planned.provider, parts.modelId);
   if (family?.harnessUnsupported) return { ...row, status: "harness_unsupported", reason: family.harnessUnsupported };
   if (!family || !family.arms.includes(backend)) {
     return {

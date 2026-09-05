@@ -162,8 +162,8 @@ ids they cover today:
 
 | binary | providers covered | how it dispatches an unknown provider |
 | --- | --- | --- |
-| `memory-mlx-adapter` | `qwen_image`, `z_image_turbo` (text-to-image, and in `edit_image` mode the `z_image_edit` catalog alias — sc-22724), `z_image` (the undistilled base, sc-22724), `krea_2_turbo`, `sdxl`, `krea_2_turbo_control`, `flux2_dev` (SDXL exposes only Resident, Staged, and bounded-transformer residency; its decode/attention rungs are measured `Missing`. FLUX.2-dev is **resident rung only**.) | `mlx.rs` `run` — `MLX five-rung calibration does not implement provider "<id>"`; `validate_z_image_batch` (`assess_batch`) — `…five-rung batch assessment does not implement provider "<id>"` (cited by function name; the line numbers this table used to carry went stale the first time the file grew) |
-| `memory-candle-adapter` | `qwen_image`, `krea_2_turbo`, `z_image_turbo` (sc-15859; five-rung reference path only, no inline arm; in `edit_image` mode it is the `z_image_edit` catalog alias — sc-22724), `z_image` (the undistilled base, sc-22724) | `plain_execution_path` / `still_calibration_label` / `load_five_rung_generator` — `Candle five-rung calibration does not implement provider "<id>"` |
+| `memory-mlx-adapter` | `qwen_image`, `z_image_turbo` (text-to-image, and in `edit_image` mode the `z_image_edit` catalog alias — sc-22724), `z_image` (the undistilled base, sc-22724), `krea_2_turbo`, `sdxl`, `krea_2_turbo_control`, `flux2_dev`, `flux2_klein_9b` (sc-22727; serving BOTH the `flux2_klein_9b` and `flux2_klein_9b_kv` catalog models, told apart by `target.modelId`) (SDXL exposes only Resident, Staged, and bounded-transformer residency; its decode/attention rungs are measured `Missing`. FLUX.2-dev is **resident rung only**; the klein ladder publishes five rungs.) | `mlx.rs` `run` — `MLX five-rung calibration does not implement provider "<id>"`; `validate_z_image_batch` (`assess_batch`) — `…five-rung batch assessment does not implement provider "<id>"` (cited by function name; the line numbers this table used to carry went stale the first time the file grew) |
+| `memory-candle-adapter` | `qwen_image`, `krea_2_turbo`, `z_image_turbo` (sc-15859; five-rung reference path only, no inline arm; in `edit_image` mode it is the `z_image_edit` catalog alias — sc-22724), `z_image` (the undistilled base, sc-22724), `flux2_dev` and `flux2_klein_9b` (sc-22727; five-rung reference path, no inline arm; the klein id serves `flux2_klein_9b` and `flux2_klein_9b_kv`) | `plain_execution_path` / `still_calibration_label` / `load_five_rung_generator` — `Candle five-rung calibration does not implement provider "<id>"` |
 
 Since sc-18212 the stale-lane report answers this gate for you: its `CAPTURE` column and
 "DECLARED/PLANNED BUT UNCAPTURABLE" section are derived by parsing these dispatch matches
@@ -526,6 +526,18 @@ SCENEWORKS_Z_IMAGE_BASE_REPOSITORY=SceneWorks/z-image-mlx    # fixed; validated 
 SCENEWORKS_Z_IMAGE_BASE_REVISION=<exact artifact revision>
 SCENEWORKS_Z_IMAGE_BASE_ROOT=/abs/path/.../snapshots/<rev>/<tier>  # bf16 | q4 | q8, derived from the plan target
 
+# memory-mlx-adapter — flux2_klein_9b   (the base klein rehost; sc-22727)
+SCENEWORKS_FLUX2_KLEIN_REPOSITORY=SceneWorks/flux2-klein-9b-mlx  # fixed; validated against FLUX2_KLEIN_REPOSITORY
+SCENEWORKS_FLUX2_KLEIN_REVISION=<exact artifact revision>
+SCENEWORKS_FLUX2_KLEIN_ROOT=/abs/path/.../snapshots/<rev>/<tier>  # bf16 | q4 | q8, derived from the plan target
+
+# memory-mlx-adapter — flux2_klein_9b, driven for the flux2_klein_9b_kv CATALOG MODEL (sc-22727).
+# The SAME engine provider id loads a DIFFERENT artifact; the engine discriminates on the snapshot
+# path and on LoadSpec::resolved_route, so the two get separate env families rather than one.
+SCENEWORKS_FLUX2_KLEIN_KV_REPOSITORY=SceneWorks/flux2-klein-9b-kv-mlx  # fixed; validated against FLUX2_KLEIN_KV_REPOSITORY
+SCENEWORKS_FLUX2_KLEIN_KV_REVISION=<exact artifact revision>
+SCENEWORKS_FLUX2_KLEIN_KV_ROOT=/abs/path/.../snapshots/<rev>/<tier>  # bf16 | q4 | q8, derived from the plan target
+
 # memory-mlx-adapter — krea_2_turbo (plain text-to-image)
 SCENEWORKS_KREA_REPOSITORY=SceneWorks/krea-2-turbo-mlx       # fixed; validated against KREA_REPOSITORY
 SCENEWORKS_KREA_REVISION=<exact base artifact revision>
@@ -581,7 +593,56 @@ SCENEWORKS_Z_IMAGE_ROOT=/abs/path/.../snapshots/<rev>/<tier>  # bf16 | q4 | q8, 
 SCENEWORKS_Z_IMAGE_BASE_REPOSITORY=SceneWorks/z-image-mlx    # fixed; validated against Z_IMAGE_BASE_REPOSITORY
 SCENEWORKS_Z_IMAGE_BASE_REVISION=<exact artifact revision>
 SCENEWORKS_Z_IMAGE_BASE_ROOT=/abs/path/.../snapshots/<rev>/<tier>  # bf16 | q4 | q8, derived from the plan target
+
+# memory-candle-adapter — flux2_dev, flux2_klein_9b and the flux2_klein_9b_kv catalog model
+# (sc-22727). The SAME three env families as the MLX arms: one artifact family per catalog model.
+SCENEWORKS_FLUX2_REPOSITORY=SceneWorks/flux2-dev-mlx
+SCENEWORKS_FLUX2_REVISION=<exact artifact revision>
+SCENEWORKS_FLUX2_ROOT=/abs/path/.../snapshots/<rev>/<tier>        # bf16 | q4 | q8
+SCENEWORKS_FLUX2_KLEIN_REPOSITORY=SceneWorks/flux2-klein-9b-mlx
+SCENEWORKS_FLUX2_KLEIN_REVISION=<exact artifact revision>
+SCENEWORKS_FLUX2_KLEIN_ROOT=/abs/path/.../snapshots/<rev>/<tier>  # bf16 | q4 | q8
+SCENEWORKS_FLUX2_KLEIN_KV_REPOSITORY=SceneWorks/flux2-klein-9b-kv-mlx
+SCENEWORKS_FLUX2_KLEIN_KV_REVISION=<exact artifact revision>
+SCENEWORKS_FLUX2_KLEIN_KV_ROOT=/abs/path/.../snapshots/<rev>/<tier>  # bf16 | q4 | q8
 ```
+
+The FLUX.2 anchors resolve their family member from `(target.provider, target.modelId)`, not from
+the provider alone: `flux2_klein_9b` and `flux2_klein_9b_kv` are two catalog models over ONE engine
+provider id (`crates/sceneworks-worker/src/engines.rs`), and the adapter binds the catalog id as
+`LoadSpec::resolved_route` — the same lever the worker sets, and the one
+`KleinArtifactInventory::validate_resolved_route` refuses a cross-variant artifact with. The KV
+model's loader-closure declaration therefore names `engineId: "flux2_klein_9b"` (§7c-bis).
+
+**The MLX klein cells are declared but NOT capturable at pin `c6d6a4db`**, and the reason is the
+engine and the shipped artifact, not the adapter. Measured by three sc-22727 proof runs of
+`measure-memory-catalog.mjs --no-commit`, each of which failed while READING the contract, before
+any weights were materialized:
+
+1. `flux2_klein_9b:{q4,q8}:mlx` — the shipped rehost quantizes its text encoder
+   (`text_encoder/config.json` carries `{"bits": 4|8, "group_size": 64}` in both
+   `SceneWorks/flux2-klein-9b-mlx@acf05e8d` and `SceneWorks/flux2-klein-9b-kv-mlx@406265be`), and
+   `verify_turnkey_with_contracts` refuses it: *"flux2 Klein text_encoder must stay dense at every
+   turnkey tier"* (`inference:crates/media/mlx-gen/mlx-gen-flux2/src/artifact_inventory.rs:1019-1030`).
+2. `flux2_klein_9b:bf16:mlx` — clears that gate, then the encoder-discovery confinement refuses the
+   HF cache layout: the authorized roots are `discovery_roots(&root)` = the TIER directory only
+   (`artifact_inventory.rs:24-30`, used at `:1031-1034`), while a HF snapshot's
+   `text_encoder/*.safetensors` are symlinks into the sibling `blobs/` tree, so
+   `ValidatedEncoderSource::ensure_confined_to` reports *"validated text encoder canonical target
+   escapes authorized model roots"* (`inference:crates/contracts/gen-core/src/encoder_contract.rs:355-375`).
+
+Both are one-sided: they are load-path refusals inside the pinned engine, reachable from any caller
+that binds a HF-cache snapshot root — which is the only root shape this harness produces
+(`protocol::validate_huggingface_snapshot_root`). The anchors, the adapter arm and both closure
+declarations are in place, so the day either the artifact or the pin moves, the cells capture with
+no SceneWorks change. Do not "fix" this by copying weights into a flattened root: that would
+measure a tree the worker never opens.
+
+`flux2_dev:bf16:mlx` is planned at **512²** rather than the lane's usual 768². §6c records that the
+113 GB dense FLUX.2-dev export does not fit a 128 GB Mac at 1024²; the plan geometry is a free plan
+choice (§2b), so the bf16 anchor is declared at the smallest square this arm measures and its
+fixture name (`flux2-dev-mlx-bf16-512-seed18218-step2`) carries the edge. Nothing derives the
+capture geometry from a sibling tier's.
 
 `scripts/measure-memory-catalog.mjs` derives every one of these from the plan and the manifest
 (`PROVIDER_FAMILIES`); `--list --backend <lane>` is the oracle for whether a cell is measurable on
