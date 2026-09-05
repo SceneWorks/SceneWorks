@@ -227,6 +227,96 @@
       "calibrationFingerprint": "flux1-schnell-q8-mlx-shared-ladder-v1",
       "fixture": "flux1-schnell-mlx-q8-1024-seed22726-step2"
     },
+    "krea_2_raw:bf16:candle": {
+      "provider": "krea_2_raw",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 768,
+        "height": 768,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "deferred_materialization",
+      "calibrationFingerprint": "krea-2-raw-bf16-cuda-staged-residency-v1",
+      "fixture": "fresh-five-rung-krea-raw-bf16-768-seed22735-step2"
+    },
+    "krea_2_raw:bf16:mlx": {
+      "provider": "krea_2_raw",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 768,
+        "height": 768,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "eager_materialization",
+      "calibrationFingerprint": "krea-2-raw-bf16-mlx-shared-ladder-v1",
+      "fixture": "krea-raw-mlx-bf16-768-seed22735-step2"
+    },
+    "krea_2_raw:q4:candle": {
+      "provider": "krea_2_raw",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 768,
+        "height": 768,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "deferred_materialization",
+      "calibrationFingerprint": "krea-2-raw-q4-cuda-staged-residency-v1",
+      "fixture": "fresh-five-rung-krea-raw-q4-768-seed22735-step2"
+    },
+    "krea_2_raw:q4:mlx": {
+      "provider": "krea_2_raw",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 768,
+        "height": 768,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "eager_materialization",
+      "calibrationFingerprint": "krea-2-raw-q4-mlx-shared-ladder-v1",
+      "fixture": "krea-raw-mlx-q4-768-seed22735-step2"
+    },
+    "krea_2_raw:q8:candle": {
+      "provider": "krea_2_raw",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 768,
+        "height": 768,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "deferred_materialization",
+      "calibrationFingerprint": "krea-2-raw-q8-cuda-staged-residency-v1",
+      "fixture": "fresh-five-rung-krea-raw-q8-768-seed22735-step2"
+    },
+    "krea_2_raw:q8:mlx": {
+      "provider": "krea_2_raw",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 768,
+        "height": 768,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "eager_materialization",
+      "calibrationFingerprint": "krea-2-raw-q8-mlx-shared-ladder-v1",
+      "fixture": "krea-raw-mlx-q8-768-seed22735-step2"
+    },
     "krea_2_turbo:bf16:candle": {
       "provider": "krea_2_turbo",
       "mode": "text_to_image",
@@ -316,6 +406,51 @@
       "loadShape": "deferred_materialization",
       "calibrationFingerprint": "krea-2-mlx-full-ladder-native-pid-attn64m-window1-2026-08-03-v3",
       "fixture": "krea-base-mlx-q8-1024-seed18377-step2"
+    },
+    "krea_realtime_14b:bf16:mlx": {
+      "provider": "krea_realtime_14b",
+      "mode": "text_to_video",
+      "overlay": "none",
+      "geometry": {
+        "width": 832,
+        "height": 480,
+        "batch": 1,
+        "frames": 45
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "eager_materialization",
+      "calibrationFingerprint": "krea-realtime-14b-bf16-mlx-resident-ladder-v1",
+      "fixture": "krea-realtime-14b-mlx-bf16-832x480-f45-fps24-seed22735"
+    },
+    "krea_realtime_14b:q4:mlx": {
+      "provider": "krea_realtime_14b",
+      "mode": "text_to_video",
+      "overlay": "none",
+      "geometry": {
+        "width": 832,
+        "height": 480,
+        "batch": 1,
+        "frames": 45
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "eager_materialization",
+      "calibrationFingerprint": "krea-realtime-14b-q4-mlx-resident-ladder-v1",
+      "fixture": "krea-realtime-14b-mlx-q4-832x480-f45-fps24-seed22735"
+    },
+    "krea_realtime_14b:q8:mlx": {
+      "provider": "krea_realtime_14b",
+      "mode": "text_to_video",
+      "overlay": "none",
+      "geometry": {
+        "width": 832,
+        "height": 480,
+        "batch": 1,
+        "frames": 45
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "eager_materialization",
+      "calibrationFingerprint": "krea-realtime-14b-q8-mlx-resident-ladder-v1",
+      "fixture": "krea-realtime-14b-mlx-q8-832x480-f45-fps24-seed22735"
     },
     "ltx_2_5:bf16:candle": {
       "provider": "ltx_2_5_distilled",

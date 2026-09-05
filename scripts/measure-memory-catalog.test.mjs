@@ -694,6 +694,64 @@ test("the flux.1 family is measurable on every shipped tier of every routed lane
   assert.equal(gaps.length, 0, gapReport(gaps));
 });
 
+// sc-22735. The Krea family widening. `krea_2_raw` is the undistilled base of the SAME two engine
+// crates Turbo rides, off its own tiered rehost, on BOTH lanes; `krea_realtime_14b` is the
+// autoregressive VIDEO member, MLX-only. The lane axis is DERIVED from the matrix here rather than
+// asserted as a count per model, so a routing change moves the expectation with it: the assertion
+// is that every routed lane of every shipped tier is measurable, whichever lanes those are.
+test("the krea family is measurable on every shipped tier of every routed lane", async () => {
+  const family = ["krea_2_turbo", "krea_2_raw", "krea_realtime_14b"];
+  const cells = (await shippedTieredCells()).filter((cell) => family.includes(cell.modelId));
+  const lanes = new Map();
+  for (const cell of cells) lanes.set(cell.modelId, (lanes.get(cell.modelId) ?? new Set()).add(cell.backend));
+  assert.deepEqual(
+    [...lanes].map(([id, backends]) => [id, [...backends].sort()]).sort(),
+    [
+      ["krea_2_raw", ["candle", "mlx"]],
+      ["krea_2_turbo", ["candle", "mlx"]],
+      // MLX-only by routing, not by omission: `mlx-gen-krea-realtime` is the only engine that
+      // registers this provider and every shipped download is `platforms: ["macos"]`.
+      ["krea_realtime_14b", ["mlx"]],
+    ],
+    "the matrix routes the two image members on both lanes and the video member on mlx alone",
+  );
+  assert.equal(cells.length, 3 + 3 * 2 + 3 * 2, "three shipped tiers per routed lane, per member");
+  const gaps = (await measurabilityGaps()).filter((gap) => family.includes(gap.modelId));
+  assert.equal(gaps.length, 0, gapReport(gaps));
+});
+
+// sc-22735. `krea_realtime_14b` declares ONE adapter arm, and the AC that scopes this story to MLX
+// rests on three independent facts that could each move on their own. This case pins all three so
+// the day any of them changes, the family table is what fails rather than a capture booked against
+// an arm that does not exist:
+//
+//  * the CATALOG: every shipped download is macOS-only, so no non-Mac host can install a tier;
+//  * the ROUTING: the memory matrix — derived from the worker's own route resolvers — lists `mlx`
+//    and nothing else for this id;
+//  * the TABLE: `PROVIDER_FAMILIES` declares the `mlx` arm alone, so `classifyAnchor` reports
+//    `no_adapter_arm` rather than routing a candle plan row at an arm the candle adapter lacks.
+//
+// A manifest that ever shipped a windows/linux download for this id, or a route resolver that ever
+// gave it a candle lane, reds this case rather than silently widening the measurable surface.
+test("krea_realtime_14b is an MLX-only lane in the catalog, the routing and the family table", async () => {
+  const models = await readManifestModels();
+  const realtime = models.find((model) => model.id === "krea_realtime_14b");
+  assert.ok(realtime, "the manifest still ships krea_realtime_14b");
+  const platforms = [...new Set((realtime.downloads ?? []).flatMap((download) => download.platforms ?? []))].sort();
+  assert.deepEqual(platforms, ["macos"], "every krea_realtime_14b download is macOS-only");
+  const matrix = JSON.parse(await readFile(path.join(ROOT, MATRIX_PATH), "utf8"));
+  const routed = matrix.models.find((model) => model.id === "krea_realtime_14b");
+  assert.deepEqual(routed?.backends ?? [], ["mlx"], "the worker routes krea_realtime_14b on mlx alone");
+  assert.deepEqual(PROVIDER_FAMILIES.krea_realtime_14b.arms, ["mlx"]);
+  // And the refusal itself: a candle plan row for this provider is classified as a missing arm,
+  // naming the backend and the provider, rather than being silently served by another family.
+  const candle = await classifyAnchor("krea_realtime_14b:q4:candle", { provider: "krea_realtime_14b" }, {
+    models, backend: "candle", hubs: [], current: new Map(), captured: new Map(),
+  });
+  assert.equal(candle.status, "no_adapter_arm");
+  assert.match(candle.reason, /candle adapter implements no provider arm for krea_realtime_14b/);
+});
+
 // The catalog-wide burndown. `todo` until the terminal story of epic 22723 (sc-22738) promotes it:
 // node:test reports a failing todo without failing the run, so the gap set is printed on every
 // `npm run check` while the other families are brought in, and the assertion itself is already

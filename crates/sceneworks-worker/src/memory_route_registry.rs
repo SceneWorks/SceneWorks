@@ -3307,15 +3307,16 @@ mod tests {
     }
 
     fn request_strategy_declaration() -> JsonObject<String, Value> {
-        serde_json::json!({
-            "id": "krea_2_raw",
-            "candle": { "memoryStrategyContract": {
-                "abi": 1,
-                "provider": "krea_2_raw",
-                "implementations": [{
+        // sc-22735: the shipped rows are per-(route, tier), so the fixture is too — a fixture that
+        // still spanned three tiers under one shared key would exercise a shape the manifest no
+        // longer has, and the row-selection path under test is the one that must pick per tier.
+        let implementations = ["bf16", "q4", "q8"]
+            .into_iter()
+            .map(|tier| {
+                serde_json::json!({
                     "rung": "staged_residency",
-                    "fingerprint": "krea-candle-request-scoped-staged-residency-v1",
-                    "tiers": ["bf16", "q4", "q8"],
+                    "fingerprint": format!("krea-2-raw-{tier}-cuda-staged-residency-v1"),
+                    "tiers": [tier],
                     "modes": ["text_to_image"],
                     "overlays": ["none", "lora"],
                     "loadProfiles": ["plain", "lora", "lora_pid", "pid"],
@@ -3328,7 +3329,15 @@ mod tests {
                     ],
                     "engagedRungs": ["resident", "staged_residency"],
                     "parameters": {}, "parameterRanges": {}, "source": "fixture"
-                }]
+                })
+            })
+            .collect::<Vec<_>>();
+        serde_json::json!({
+            "id": "krea_2_raw",
+            "candle": { "memoryStrategyContract": {
+                "abi": 1,
+                "provider": "krea_2_raw",
+                "implementations": implementations
             }}
         })
         .as_object()
@@ -3545,6 +3554,70 @@ mod tests {
     }
 
     #[test]
+    fn krea_raw_candle_declaration_publishes_per_route_tier_calibration_identity() {
+        // sc-22735: the candle block used to publish one fingerprint across both Raw routes and all
+        // three tiers, so a measured anchor could not be attributed to the cell it came from. Derive
+        // the {route} x {tier} product here rather than counting rows.
+        let manifest = shipped_model("krea_2_raw");
+        let contract = &manifest["candle"]["memoryStrategyContract"];
+        assert_eq!(contract["provider"], "krea_2_raw");
+        assert_eq!(
+            contract["exhaustive"], true,
+            "the candle declaration stays exhaustive: an undeclared cell must fail closed"
+        );
+        let implementations = contract["implementations"]
+            .as_array()
+            .expect("Raw candle implementation rows");
+        let expected = [("krea_2_raw", "krea-2-raw"), ("krea_2_edit", "krea-2-edit")]
+            .into_iter()
+            .flat_map(|(route, prefix)| {
+                ["bf16", "q4", "q8"].into_iter().map(move |tier| {
+                    (
+                        route.to_owned(),
+                        tier.to_owned(),
+                        format!("{prefix}-{tier}-cuda-staged-residency-v1"),
+                    )
+                })
+            })
+            .collect::<std::collections::BTreeSet<_>>();
+        let declared = implementations
+            .iter()
+            .map(|implementation| {
+                assert_eq!(
+                    implementation["rung"], "staged_residency",
+                    "request-scoped staging is the only candle rung Raw declares"
+                );
+                let tiers = implementation["tiers"]
+                    .as_array()
+                    .expect("Raw candle tiers");
+                assert_eq!(
+                    tiers.len(),
+                    1,
+                    "each row must own exactly one tier so its calibration identity is unambiguous"
+                );
+                (
+                    implementation
+                        .get("runtimeProvider")
+                        .and_then(Value::as_str)
+                        .unwrap_or("krea_2_raw")
+                        .to_owned(),
+                    tiers[0].as_str().expect("Raw candle tier").to_owned(),
+                    implementation["fingerprint"]
+                        .as_str()
+                        .expect("Raw candle fingerprint")
+                        .to_owned(),
+                )
+            })
+            .collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(declared, expected);
+        assert_eq!(
+            implementations.len(),
+            declared.len(),
+            "no duplicate (route, tier) rows"
+        );
+    }
+
+    #[test]
     fn krea_raw_declaration_is_exact_true_cfg_generation_authority() {
         let manifest = shipped_model("krea_2_raw");
         let contract = manifest["mlx"]["memoryStrategyContract"]
@@ -3560,49 +3633,105 @@ mod tests {
         let implementations = contract["implementations"]
             .as_array()
             .expect("Raw implementation rows");
-        assert_eq!(implementations.len(), 6);
-        let (native, edit) = implementations.split_at(3);
-        for implementation in native {
-            assert_eq!(
-                implementation["fingerprint"],
-                "krea-2-mlx-full-ladder-native-pid-attn64m-window1-2026-08-03-v3"
-            );
-            assert_eq!(
-                implementation["tiers"],
-                serde_json::json!(["bf16", "q4", "q8"])
-            );
+        // sc-22735: the row set is the {route} x {rung} x {tier} product, and each cell publishes its
+        // own calibration identity. Derive the expectation from that product rather than freezing a
+        // count — a frozen `len()` accepts any 18 rows, including eighteen copies of one cell, and
+        // silently re-passes if a tier or a rung is dropped and another duplicated.
+        let expected_mlx_rows = ["krea_2_raw", "krea_2_edit"]
+            .into_iter()
+            .flat_map(|route| {
+                [
+                    "bounded_decode",
+                    "bounded_attention",
+                    "bounded_transformer_residency",
+                ]
+                .into_iter()
+                .flat_map(move |rung| {
+                    ["bf16", "q4", "q8"].into_iter().map(move |tier| {
+                        let prefix = if route == "krea_2_raw" {
+                            "krea-2-raw"
+                        } else {
+                            "krea-2-edit"
+                        };
+                        (
+                            route.to_owned(),
+                            rung.to_owned(),
+                            tier.to_owned(),
+                            format!("{prefix}-{tier}-mlx-shared-ladder-v1"),
+                        )
+                    })
+                })
+            })
+            .collect::<std::collections::BTreeSet<_>>();
+        let declared_mlx_rows = implementations
+            .iter()
+            .map(|implementation| {
+                let tiers = implementation["tiers"]
+                    .as_array()
+                    .expect("Raw declares tiers");
+                assert_eq!(
+                    tiers.len(),
+                    1,
+                    "each Raw row must own exactly one tier so its calibration identity is unambiguous"
+                );
+                (
+                    implementation
+                        .get("runtimeProvider")
+                        .and_then(Value::as_str)
+                        .unwrap_or("krea_2_raw")
+                        .to_owned(),
+                    implementation["rung"]
+                        .as_str()
+                        .expect("Raw rung")
+                        .to_owned(),
+                    tiers[0].as_str().expect("Raw tier").to_owned(),
+                    implementation["fingerprint"]
+                        .as_str()
+                        .expect("Raw fingerprint")
+                        .to_owned(),
+                )
+            })
+            .collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(
+            declared_mlx_rows, expected_mlx_rows,
+            "Raw must publish one per-(route, tier) production identity per rung, never Turbo's shared key"
+        );
+        assert_eq!(
+            implementations.len(),
+            declared_mlx_rows.len(),
+            "no duplicate (route, rung, tier) rows"
+        );
+        for implementation in implementations {
+            let native = implementation.get("runtimeProvider").is_none();
             assert_eq!(
                 implementation["modes"],
-                serde_json::json!(["text_to_image"])
+                if native {
+                    serde_json::json!(["text_to_image"])
+                } else {
+                    serde_json::json!(["edit_image"])
+                }
             );
             assert_eq!(
                 implementation["overlays"],
-                serde_json::json!(["none", "lora"])
+                if native {
+                    serde_json::json!(["none", "lora"])
+                } else {
+                    serde_json::json!(["lora"])
+                }
             );
+            if implementation["rung"] == "bounded_transformer_residency" {
+                assert_eq!(
+                    implementation["engagedRungs"],
+                    serde_json::json!([
+                        "resident",
+                        "staged_residency",
+                        "bounded_decode",
+                        "bounded_attention",
+                        "bounded_transformer_residency"
+                    ])
+                );
+            }
         }
-        for implementation in edit {
-            assert_eq!(implementation["runtimeProvider"], "krea_2_edit");
-            assert_eq!(
-                implementation["fingerprint"],
-                "krea-2-mlx-full-ladder-native-pid-attn64m-window1-2026-08-03-v3"
-            );
-            assert_eq!(
-                implementation["tiers"],
-                serde_json::json!(["bf16", "q4", "q8"])
-            );
-            assert_eq!(implementation["modes"], serde_json::json!(["edit_image"]));
-            assert_eq!(implementation["overlays"], serde_json::json!(["lora"]));
-        }
-        assert_eq!(
-            implementations[2]["engagedRungs"],
-            serde_json::json!([
-                "resident",
-                "staged_residency",
-                "bounded_decode",
-                "bounded_attention",
-                "bounded_transformer_residency"
-            ])
-        );
         let raw = include_str!("../../../config/manifests/builtin.models.jsonc");
         let shipped: Value =
             serde_json::from_str(&sceneworks_core::jsonc::strip_jsonc_comments(raw))
@@ -3941,8 +4070,23 @@ mod tests {
             LoadShapeDeclarationResult::Refused
         );
 
+        // sc-22735: the rows are per-(route, tier), so index 2 no longer names the native BTR row a
+        // q4 request resolves through — a mutation planted there would sit on a tier this request
+        // never reads and the refusal would pass without the guard ever running. Locate the row.
         let mut malformed = manifest.clone();
-        malformed["mlx"]["memoryStrategyContract"]["implementations"][2]["engagedRungs"] =
+        let btr_q4 = malformed["mlx"]["memoryStrategyContract"]["implementations"]
+            .as_array()
+            .expect("implementation rows")
+            .iter()
+            .position(|row| {
+                row["rung"] == "bounded_transformer_residency"
+                    && row.get("runtimeProvider").is_none()
+                    && row["tiers"]
+                        .as_array()
+                        .is_some_and(|tiers| tiers.iter().any(|tier| tier == "q4"))
+            })
+            .expect("the native q4 BTR row");
+        malformed["mlx"]["memoryStrategyContract"]["implementations"][btr_q4]["engagedRungs"] =
             Value::String("staged_residency".to_owned());
         assert_eq!(
             apply(
@@ -7718,8 +7862,25 @@ mod tests {
             assert!(matches!(refused, DeclaredCandleStrategyContract::Refused));
         }
 
+        // sc-22735: rows are per-tier now, so a mutation planted at a fixed index can land on a tier
+        // the request never selects and pass without ever being read. Locate the row the q4 requests
+        // below actually resolve through.
+        let q4_row = |declaration: &JsonObject<String, Value>| {
+            declaration["candle"]["memoryStrategyContract"]["implementations"]
+                .as_array()
+                .expect("implementation rows")
+                .iter()
+                .position(|row| {
+                    row["tiers"]
+                        .as_array()
+                        .is_some_and(|tiers| tiers.iter().any(|tier| tier == "q4"))
+                })
+                .expect("a q4 row")
+        };
+
         let mut missing_provider_mode = manifest.clone();
-        missing_provider_mode["candle"]["memoryStrategyContract"]["implementations"][0]
+        let index = q4_row(&missing_provider_mode);
+        missing_provider_mode["candle"]["memoryStrategyContract"]["implementations"][index]
             ["requestContexts"][1]
             .as_object_mut()
             .expect("reference context")
@@ -7737,10 +7898,11 @@ mod tests {
         ));
 
         let mut duplicate_context = manifest.clone();
-        let repeated = duplicate_context["candle"]["memoryStrategyContract"]["implementations"][0]
-            ["requestContexts"][1]
+        let index = q4_row(&duplicate_context);
+        let repeated = duplicate_context["candle"]["memoryStrategyContract"]["implementations"]
+            [index]["requestContexts"][1]
             .clone();
-        duplicate_context["candle"]["memoryStrategyContract"]["implementations"][0]
+        duplicate_context["candle"]["memoryStrategyContract"]["implementations"][index]
             ["requestContexts"]
             .as_array_mut()
             .expect("request contexts")

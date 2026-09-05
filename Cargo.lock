@@ -6757,6 +6757,7 @@ dependencies = [
  "mlx-gen",
  "mlx-gen-flux2",
  "mlx-gen-krea",
+ "mlx-gen-krea-realtime",
  "mlx-gen-ltx",
  "mlx-gen-minimax-h3",
  "mlx-gen-sdxl",

@@ -8360,16 +8360,64 @@
         // domain. The route-local `krea_2_edit` rows own Kontext edit without widening native Raw;
         // dense diff patches, control, identity, File sources, and load-time quantization remain
         // outside this declaration and fail closed in the typed intersection.
-        // Raw has no promoted calibration binding: these implementation rows enable conservative
-        // estimate-backed admission only and do not inherit Turbo measurements.
+        // sc-22735: Raw publishes its OWN per-(route, tier) production identity rather than sharing
+        // Turbo's. One fingerprint spanning four MLX routes x three tiers made a Raw bf16 anchor
+        // indistinguishable by calibration identity from a Turbo q4 anchor, so a measurement taken
+        // against one could be read back as authority for the other. The per-tier rows below mirror
+        // what the engine now emits
+        // (inference:crates/media/mlx-gen/mlx-gen-krea/src/block_memory_strategy.rs); a declaration
+        // the engine does not emit is a false key, and admission would consume it as if measured.
+        // The native rows key on `krea-2-raw-<tier>-mlx-shared-ladder-v1` and the route-local Kontext
+        // rows on `krea-2-edit-<tier>-mlx-shared-ladder-v1`, so neither can inherit nor collide with
+        // Turbo's measured key. Raw still has no promoted calibration binding of its own: until a Raw
+        // anchor is captured against one of these keys, these rows enable conservative
+        // estimate-backed admission only.
         "memoryStrategyContract": {
           "abi": 1,
           "provider": "krea_2_raw",
           "implementations": [
             {
               "rung": "bounded_decode",
-              "fingerprint": "krea-2-mlx-full-ladder-native-pid-attn64m-window1-2026-08-03-v3",
-              "tiers": ["bf16", "q4", "q8"],
+              "fingerprint": "krea-2-raw-bf16-mlx-shared-ladder-v1",
+              "tiers": ["bf16"],
+              "modes": ["text_to_image"],
+              "overlays": ["none", "lora"],
+              "loadProfiles": ["plain", "lora", "lora_pid", "pid"],
+              "sourceKinds": ["dir"],
+              "providerOverlay": "none",
+              "requestContexts": [
+                { "mode": "text_to_image", "providerMode": "text_to_image", "referenceCounts": [0], "pid": [false, true], "hasPhases": false },
+                { "mode": "text_to_image", "providerMode": "image_to_image", "referenceCounts": [1], "pid": [false, true], "hasPhases": false },
+                { "mode": "text_to_image", "providerMode": "text_to_image", "referenceCounts": [0], "pid": [false], "hasPhases": true }
+              ],
+              "engagedRungs": ["resident", "bounded_decode"],
+              "parameters": { "decodeTileEdge": 512, "decodeOverlap": 64 },
+              "parameterRanges": { "decodeTileEdges": [2048, 512], "decodeOverlaps": [256, 64] },
+              "source": "inference:crates/media/mlx-gen/mlx-gen-krea/src/block_memory_strategy.rs"
+            },
+            {
+              "rung": "bounded_decode",
+              "fingerprint": "krea-2-raw-q4-mlx-shared-ladder-v1",
+              "tiers": ["q4"],
+              "modes": ["text_to_image"],
+              "overlays": ["none", "lora"],
+              "loadProfiles": ["plain", "lora", "lora_pid", "pid"],
+              "sourceKinds": ["dir"],
+              "providerOverlay": "none",
+              "requestContexts": [
+                { "mode": "text_to_image", "providerMode": "text_to_image", "referenceCounts": [0], "pid": [false, true], "hasPhases": false },
+                { "mode": "text_to_image", "providerMode": "image_to_image", "referenceCounts": [1], "pid": [false, true], "hasPhases": false },
+                { "mode": "text_to_image", "providerMode": "text_to_image", "referenceCounts": [0], "pid": [false], "hasPhases": true }
+              ],
+              "engagedRungs": ["resident", "bounded_decode"],
+              "parameters": { "decodeTileEdge": 512, "decodeOverlap": 64 },
+              "parameterRanges": { "decodeTileEdges": [2048, 512], "decodeOverlaps": [256, 64] },
+              "source": "inference:crates/media/mlx-gen/mlx-gen-krea/src/block_memory_strategy.rs"
+            },
+            {
+              "rung": "bounded_decode",
+              "fingerprint": "krea-2-raw-q8-mlx-shared-ladder-v1",
+              "tiers": ["q8"],
               "modes": ["text_to_image"],
               "overlays": ["none", "lora"],
               "loadProfiles": ["plain", "lora", "lora_pid", "pid"],
@@ -8387,8 +8435,46 @@
             },
             {
               "rung": "bounded_attention",
-              "fingerprint": "krea-2-mlx-full-ladder-native-pid-attn64m-window1-2026-08-03-v3",
-              "tiers": ["bf16", "q4", "q8"],
+              "fingerprint": "krea-2-raw-bf16-mlx-shared-ladder-v1",
+              "tiers": ["bf16"],
+              "modes": ["text_to_image"],
+              "overlays": ["none", "lora"],
+              "loadProfiles": ["plain", "lora", "lora_pid", "pid"],
+              "sourceKinds": ["dir"],
+              "providerOverlay": "none",
+              "requestContexts": [
+                { "mode": "text_to_image", "providerMode": "text_to_image", "referenceCounts": [0], "pid": [false, true], "hasPhases": false },
+                { "mode": "text_to_image", "providerMode": "image_to_image", "referenceCounts": [1], "pid": [false, true], "hasPhases": false },
+                { "mode": "text_to_image", "providerMode": "text_to_image", "referenceCounts": [0], "pid": [false], "hasPhases": true }
+              ],
+              "engagedRungs": ["resident", "bounded_decode", "bounded_attention"],
+              "parameters": { "decodeTileEdge": 512, "decodeOverlap": 64, "attentionChunkSize": 67108864 },
+              "parameterRanges": { "decodeTileEdges": [2048, 512], "decodeOverlaps": [256, 64], "attentionChunkSizes": [67108864] },
+              "source": "inference:crates/media/mlx-gen/mlx-gen-krea/src/block_memory_strategy.rs"
+            },
+            {
+              "rung": "bounded_attention",
+              "fingerprint": "krea-2-raw-q4-mlx-shared-ladder-v1",
+              "tiers": ["q4"],
+              "modes": ["text_to_image"],
+              "overlays": ["none", "lora"],
+              "loadProfiles": ["plain", "lora", "lora_pid", "pid"],
+              "sourceKinds": ["dir"],
+              "providerOverlay": "none",
+              "requestContexts": [
+                { "mode": "text_to_image", "providerMode": "text_to_image", "referenceCounts": [0], "pid": [false, true], "hasPhases": false },
+                { "mode": "text_to_image", "providerMode": "image_to_image", "referenceCounts": [1], "pid": [false, true], "hasPhases": false },
+                { "mode": "text_to_image", "providerMode": "text_to_image", "referenceCounts": [0], "pid": [false], "hasPhases": true }
+              ],
+              "engagedRungs": ["resident", "bounded_decode", "bounded_attention"],
+              "parameters": { "decodeTileEdge": 512, "decodeOverlap": 64, "attentionChunkSize": 67108864 },
+              "parameterRanges": { "decodeTileEdges": [2048, 512], "decodeOverlaps": [256, 64], "attentionChunkSizes": [67108864] },
+              "source": "inference:crates/media/mlx-gen/mlx-gen-krea/src/block_memory_strategy.rs"
+            },
+            {
+              "rung": "bounded_attention",
+              "fingerprint": "krea-2-raw-q8-mlx-shared-ladder-v1",
+              "tiers": ["q8"],
               "modes": ["text_to_image"],
               "overlays": ["none", "lora"],
               "loadProfiles": ["plain", "lora", "lora_pid", "pid"],
@@ -8406,8 +8492,46 @@
             },
             {
               "rung": "bounded_transformer_residency", "requiredOffloadPolicy": "sequential",
-              "fingerprint": "krea-2-mlx-full-ladder-native-pid-attn64m-window1-2026-08-03-v3",
-              "tiers": ["bf16", "q4", "q8"],
+              "fingerprint": "krea-2-raw-bf16-mlx-shared-ladder-v1",
+              "tiers": ["bf16"],
+              "modes": ["text_to_image"],
+              "overlays": ["none", "lora"],
+              "loadProfiles": ["plain", "lora", "lora_pid", "pid"],
+              "sourceKinds": ["dir"],
+              "providerOverlay": "none",
+              "requestContexts": [
+                { "mode": "text_to_image", "providerMode": "text_to_image", "referenceCounts": [0], "pid": [false, true], "hasPhases": false },
+                { "mode": "text_to_image", "providerMode": "image_to_image", "referenceCounts": [1], "pid": [false, true], "hasPhases": false },
+                { "mode": "text_to_image", "providerMode": "text_to_image", "referenceCounts": [0], "pid": [false], "hasPhases": true }
+              ],
+              "engagedRungs": ["resident", "staged_residency", "bounded_decode", "bounded_attention", "bounded_transformer_residency"],
+              "parameters": { "decodeTileEdge": 512, "decodeOverlap": 64, "attentionChunkSize": 67108864, "transformerWindowSize": 1, "transformerWindowComponent": "Dit" },
+              "parameterRanges": { "decodeTileEdges": [2048, 512], "decodeOverlaps": [256, 64], "attentionChunkSizes": [67108864], "transformerWindowSizes": [1], "transformerWindowComponents": ["Dit"] },
+              "source": "inference:crates/media/mlx-gen/mlx-gen-krea/src/block_memory_strategy.rs"
+            },
+            {
+              "rung": "bounded_transformer_residency", "requiredOffloadPolicy": "sequential",
+              "fingerprint": "krea-2-raw-q4-mlx-shared-ladder-v1",
+              "tiers": ["q4"],
+              "modes": ["text_to_image"],
+              "overlays": ["none", "lora"],
+              "loadProfiles": ["plain", "lora", "lora_pid", "pid"],
+              "sourceKinds": ["dir"],
+              "providerOverlay": "none",
+              "requestContexts": [
+                { "mode": "text_to_image", "providerMode": "text_to_image", "referenceCounts": [0], "pid": [false, true], "hasPhases": false },
+                { "mode": "text_to_image", "providerMode": "image_to_image", "referenceCounts": [1], "pid": [false, true], "hasPhases": false },
+                { "mode": "text_to_image", "providerMode": "text_to_image", "referenceCounts": [0], "pid": [false], "hasPhases": true }
+              ],
+              "engagedRungs": ["resident", "staged_residency", "bounded_decode", "bounded_attention", "bounded_transformer_residency"],
+              "parameters": { "decodeTileEdge": 512, "decodeOverlap": 64, "attentionChunkSize": 67108864, "transformerWindowSize": 1, "transformerWindowComponent": "Dit" },
+              "parameterRanges": { "decodeTileEdges": [2048, 512], "decodeOverlaps": [256, 64], "attentionChunkSizes": [67108864], "transformerWindowSizes": [1], "transformerWindowComponents": ["Dit"] },
+              "source": "inference:crates/media/mlx-gen/mlx-gen-krea/src/block_memory_strategy.rs"
+            },
+            {
+              "rung": "bounded_transformer_residency", "requiredOffloadPolicy": "sequential",
+              "fingerprint": "krea-2-raw-q8-mlx-shared-ladder-v1",
+              "tiers": ["q8"],
               "modes": ["text_to_image"],
               "overlays": ["none", "lora"],
               "loadProfiles": ["plain", "lora", "lora_pid", "pid"],
@@ -8426,8 +8550,44 @@
             {
               "rung": "bounded_decode",
               "runtimeProvider": "krea_2_edit",
-              "fingerprint": "krea-2-mlx-full-ladder-native-pid-attn64m-window1-2026-08-03-v3",
-              "tiers": ["bf16", "q4", "q8"],
+              "fingerprint": "krea-2-edit-bf16-mlx-shared-ladder-v1",
+              "tiers": ["bf16"],
+              "modes": ["edit_image"],
+              "overlays": ["lora"],
+              "loadProfiles": ["lora", "lora_pid"],
+              "sourceKinds": ["dir"],
+              "providerOverlay": "none",
+              "requestContexts": [
+                { "mode": "edit_image", "providerMode": "edit_image", "referenceCounts": [1, 2], "pid": [false, true], "hasPhases": false }
+              ],
+              "engagedRungs": ["resident", "bounded_decode"],
+              "parameters": { "decodeTileEdge": 512, "decodeOverlap": 64 },
+              "parameterRanges": { "decodeTileEdges": [2048, 512], "decodeOverlaps": [256, 64] },
+              "source": "inference:crates/media/mlx-gen/mlx-gen-krea/src/block_memory_strategy.rs"
+            },
+            {
+              "rung": "bounded_decode",
+              "runtimeProvider": "krea_2_edit",
+              "fingerprint": "krea-2-edit-q4-mlx-shared-ladder-v1",
+              "tiers": ["q4"],
+              "modes": ["edit_image"],
+              "overlays": ["lora"],
+              "loadProfiles": ["lora", "lora_pid"],
+              "sourceKinds": ["dir"],
+              "providerOverlay": "none",
+              "requestContexts": [
+                { "mode": "edit_image", "providerMode": "edit_image", "referenceCounts": [1, 2], "pid": [false, true], "hasPhases": false }
+              ],
+              "engagedRungs": ["resident", "bounded_decode"],
+              "parameters": { "decodeTileEdge": 512, "decodeOverlap": 64 },
+              "parameterRanges": { "decodeTileEdges": [2048, 512], "decodeOverlaps": [256, 64] },
+              "source": "inference:crates/media/mlx-gen/mlx-gen-krea/src/block_memory_strategy.rs"
+            },
+            {
+              "rung": "bounded_decode",
+              "runtimeProvider": "krea_2_edit",
+              "fingerprint": "krea-2-edit-q8-mlx-shared-ladder-v1",
+              "tiers": ["q8"],
               "modes": ["edit_image"],
               "overlays": ["lora"],
               "loadProfiles": ["lora", "lora_pid"],
@@ -8444,8 +8604,44 @@
             {
               "rung": "bounded_attention",
               "runtimeProvider": "krea_2_edit",
-              "fingerprint": "krea-2-mlx-full-ladder-native-pid-attn64m-window1-2026-08-03-v3",
-              "tiers": ["bf16", "q4", "q8"],
+              "fingerprint": "krea-2-edit-bf16-mlx-shared-ladder-v1",
+              "tiers": ["bf16"],
+              "modes": ["edit_image"],
+              "overlays": ["lora"],
+              "loadProfiles": ["lora", "lora_pid"],
+              "sourceKinds": ["dir"],
+              "providerOverlay": "none",
+              "requestContexts": [
+                { "mode": "edit_image", "providerMode": "edit_image", "referenceCounts": [1, 2], "pid": [false, true], "hasPhases": false }
+              ],
+              "engagedRungs": ["resident", "bounded_decode", "bounded_attention"],
+              "parameters": { "decodeTileEdge": 512, "decodeOverlap": 64, "attentionChunkSize": 67108864 },
+              "parameterRanges": { "decodeTileEdges": [2048, 512], "decodeOverlaps": [256, 64], "attentionChunkSizes": [67108864] },
+              "source": "inference:crates/media/mlx-gen/mlx-gen-krea/src/block_memory_strategy.rs"
+            },
+            {
+              "rung": "bounded_attention",
+              "runtimeProvider": "krea_2_edit",
+              "fingerprint": "krea-2-edit-q4-mlx-shared-ladder-v1",
+              "tiers": ["q4"],
+              "modes": ["edit_image"],
+              "overlays": ["lora"],
+              "loadProfiles": ["lora", "lora_pid"],
+              "sourceKinds": ["dir"],
+              "providerOverlay": "none",
+              "requestContexts": [
+                { "mode": "edit_image", "providerMode": "edit_image", "referenceCounts": [1, 2], "pid": [false, true], "hasPhases": false }
+              ],
+              "engagedRungs": ["resident", "bounded_decode", "bounded_attention"],
+              "parameters": { "decodeTileEdge": 512, "decodeOverlap": 64, "attentionChunkSize": 67108864 },
+              "parameterRanges": { "decodeTileEdges": [2048, 512], "decodeOverlaps": [256, 64], "attentionChunkSizes": [67108864] },
+              "source": "inference:crates/media/mlx-gen/mlx-gen-krea/src/block_memory_strategy.rs"
+            },
+            {
+              "rung": "bounded_attention",
+              "runtimeProvider": "krea_2_edit",
+              "fingerprint": "krea-2-edit-q8-mlx-shared-ladder-v1",
+              "tiers": ["q8"],
               "modes": ["edit_image"],
               "overlays": ["lora"],
               "loadProfiles": ["lora", "lora_pid"],
@@ -8462,8 +8658,44 @@
             {
               "rung": "bounded_transformer_residency", "requiredOffloadPolicy": "sequential",
               "runtimeProvider": "krea_2_edit",
-              "fingerprint": "krea-2-mlx-full-ladder-native-pid-attn64m-window1-2026-08-03-v3",
-              "tiers": ["bf16", "q4", "q8"],
+              "fingerprint": "krea-2-edit-bf16-mlx-shared-ladder-v1",
+              "tiers": ["bf16"],
+              "modes": ["edit_image"],
+              "overlays": ["lora"],
+              "loadProfiles": ["lora", "lora_pid"],
+              "sourceKinds": ["dir"],
+              "providerOverlay": "none",
+              "requestContexts": [
+                { "mode": "edit_image", "providerMode": "edit_image", "referenceCounts": [1, 2], "pid": [false, true], "hasPhases": false }
+              ],
+              "engagedRungs": ["resident", "staged_residency", "bounded_decode", "bounded_attention", "bounded_transformer_residency"],
+              "parameters": { "decodeTileEdge": 512, "decodeOverlap": 64, "attentionChunkSize": 67108864, "transformerWindowSize": 1, "transformerWindowComponent": "Dit" },
+              "parameterRanges": { "decodeTileEdges": [2048, 512], "decodeOverlaps": [256, 64], "attentionChunkSizes": [67108864], "transformerWindowSizes": [1], "transformerWindowComponents": ["Dit"] },
+              "source": "inference:crates/media/mlx-gen/mlx-gen-krea/src/block_memory_strategy.rs"
+            },
+            {
+              "rung": "bounded_transformer_residency", "requiredOffloadPolicy": "sequential",
+              "runtimeProvider": "krea_2_edit",
+              "fingerprint": "krea-2-edit-q4-mlx-shared-ladder-v1",
+              "tiers": ["q4"],
+              "modes": ["edit_image"],
+              "overlays": ["lora"],
+              "loadProfiles": ["lora", "lora_pid"],
+              "sourceKinds": ["dir"],
+              "providerOverlay": "none",
+              "requestContexts": [
+                { "mode": "edit_image", "providerMode": "edit_image", "referenceCounts": [1, 2], "pid": [false, true], "hasPhases": false }
+              ],
+              "engagedRungs": ["resident", "staged_residency", "bounded_decode", "bounded_attention", "bounded_transformer_residency"],
+              "parameters": { "decodeTileEdge": 512, "decodeOverlap": 64, "attentionChunkSize": 67108864, "transformerWindowSize": 1, "transformerWindowComponent": "Dit" },
+              "parameterRanges": { "decodeTileEdges": [2048, 512], "decodeOverlaps": [256, 64], "attentionChunkSizes": [67108864], "transformerWindowSizes": [1], "transformerWindowComponents": ["Dit"] },
+              "source": "inference:crates/media/mlx-gen/mlx-gen-krea/src/block_memory_strategy.rs"
+            },
+            {
+              "rung": "bounded_transformer_residency", "requiredOffloadPolicy": "sequential",
+              "runtimeProvider": "krea_2_edit",
+              "fingerprint": "krea-2-edit-q8-mlx-shared-ladder-v1",
+              "tiers": ["q8"],
               "modes": ["edit_image"],
               "overlays": ["lora"],
               "loadProfiles": ["lora", "lora_pid"],
@@ -8497,6 +8729,11 @@
         // deferred/BTR load shaping. The ordinary Raw route and its registered Kontext edit sibling
         // keep their existing LoadSpec shape; the worker intersects these rows with the pinned provider
         // predicate and only then passes a StagedResidency selection into the request scope.
+        // sc-22735: like the MLX block above, the calibration identity is now per (route, tier) rather
+        // than one string shared across every candle Krea route. A shared key cannot tell a Raw anchor
+        // from an Edit one, or bf16 from q4, which is exactly the ambiguity that lets an anchor be read
+        // back as authority for a cell it was never measured on. These keys mirror what the engine
+        // emits (inference:crates/media/candle-gen/candle-gen-krea/src/lib.rs).
         "memoryStrategyContract": {
           "abi": 1,
           "provider": "krea_2_raw",
@@ -8504,8 +8741,46 @@
           "implementations": [
             {
               "rung": "staged_residency",
-              "fingerprint": "krea-candle-request-scoped-staged-residency-v1",
-              "tiers": ["bf16", "q4", "q8"],
+              "fingerprint": "krea-2-raw-bf16-cuda-staged-residency-v1",
+              "tiers": ["bf16"],
+              "modes": ["text_to_image"],
+              "overlays": ["none", "lora"],
+              "loadProfiles": ["plain", "lora", "lora_pid", "pid"],
+              "sourceKinds": ["dir"],
+              "providerOverlay": "none",
+              "requestContexts": [
+                { "mode": "text_to_image", "providerMode": "text_to_image", "referenceCounts": [0], "pid": [false, true], "hasPhases": false },
+                { "mode": "text_to_image", "providerMode": "image_to_image", "referenceCounts": [1], "pid": [false, true], "hasPhases": false },
+                { "mode": "text_to_image", "providerMode": "text_to_image", "referenceCounts": [0], "pid": [false], "hasPhases": true }
+              ],
+              "engagedRungs": ["resident", "staged_residency"],
+              "parameters": {},
+              "parameterRanges": {},
+              "source": "inference:crates/media/candle-gen/candle-gen-krea/src/lib.rs"
+            },
+            {
+              "rung": "staged_residency",
+              "fingerprint": "krea-2-raw-q4-cuda-staged-residency-v1",
+              "tiers": ["q4"],
+              "modes": ["text_to_image"],
+              "overlays": ["none", "lora"],
+              "loadProfiles": ["plain", "lora", "lora_pid", "pid"],
+              "sourceKinds": ["dir"],
+              "providerOverlay": "none",
+              "requestContexts": [
+                { "mode": "text_to_image", "providerMode": "text_to_image", "referenceCounts": [0], "pid": [false, true], "hasPhases": false },
+                { "mode": "text_to_image", "providerMode": "image_to_image", "referenceCounts": [1], "pid": [false, true], "hasPhases": false },
+                { "mode": "text_to_image", "providerMode": "text_to_image", "referenceCounts": [0], "pid": [false], "hasPhases": true }
+              ],
+              "engagedRungs": ["resident", "staged_residency"],
+              "parameters": {},
+              "parameterRanges": {},
+              "source": "inference:crates/media/candle-gen/candle-gen-krea/src/lib.rs"
+            },
+            {
+              "rung": "staged_residency",
+              "fingerprint": "krea-2-raw-q8-cuda-staged-residency-v1",
+              "tiers": ["q8"],
               "modes": ["text_to_image"],
               "overlays": ["none", "lora"],
               "loadProfiles": ["plain", "lora", "lora_pid", "pid"],
@@ -8524,8 +8799,44 @@
             {
               "rung": "staged_residency",
               "runtimeProvider": "krea_2_edit",
-              "fingerprint": "krea-candle-request-scoped-staged-residency-v1",
-              "tiers": ["bf16", "q4", "q8"],
+              "fingerprint": "krea-2-edit-bf16-cuda-staged-residency-v1",
+              "tiers": ["bf16"],
+              "modes": ["edit_image"],
+              "overlays": ["lora"],
+              "loadProfiles": ["lora", "lora_pid"],
+              "sourceKinds": ["dir"],
+              "providerOverlay": "none",
+              "requestContexts": [
+                { "mode": "edit_image", "providerMode": "edit_image", "referenceCounts": [1, 2], "pid": [false, true], "hasPhases": false }
+              ],
+              "engagedRungs": ["resident", "staged_residency"],
+              "parameters": {},
+              "parameterRanges": {},
+              "source": "inference:crates/media/candle-gen/candle-gen-krea/src/lib.rs"
+            },
+            {
+              "rung": "staged_residency",
+              "runtimeProvider": "krea_2_edit",
+              "fingerprint": "krea-2-edit-q4-cuda-staged-residency-v1",
+              "tiers": ["q4"],
+              "modes": ["edit_image"],
+              "overlays": ["lora"],
+              "loadProfiles": ["lora", "lora_pid"],
+              "sourceKinds": ["dir"],
+              "providerOverlay": "none",
+              "requestContexts": [
+                { "mode": "edit_image", "providerMode": "edit_image", "referenceCounts": [1, 2], "pid": [false, true], "hasPhases": false }
+              ],
+              "engagedRungs": ["resident", "staged_residency"],
+              "parameters": {},
+              "parameterRanges": {},
+              "source": "inference:crates/media/candle-gen/candle-gen-krea/src/lib.rs"
+            },
+            {
+              "rung": "staged_residency",
+              "runtimeProvider": "krea_2_edit",
+              "fingerprint": "krea-2-edit-q8-cuda-staged-residency-v1",
+              "tiers": ["q8"],
               "modes": ["edit_image"],
               "overlays": ["lora"],
               "loadProfiles": ["lora", "lora_pid"],

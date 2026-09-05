@@ -59,6 +59,13 @@ const KREA_BASE_PROVIDER: &str = "krea_2_turbo";
 const KREA_BASE_CALIBRATION_FINGERPRINT: &str =
     "krea-2-mlx-full-ladder-native-pid-attn64m-window1-2026-08-03-v3";
 const KREA_BASE_SEED: u64 = 18377;
+/// The undistilled full-CFG Krea 2 base (`mlx_gen_krea::KREA_2_RAW_ID`), the second member of the
+/// Krea base arm's family table (sc-22735). Same engine crate and same shipped text-to-image route
+/// as Turbo, a DIFFERENT artifact family (`SceneWorks/krea-2-raw-mlx`), a different planned load
+/// shape, and — unlike Turbo — no `LoadSpec` quant at any tier.
+const KREA_RAW_PROVIDER: &str = "krea_2_raw";
+const KREA_RAW_PLAIN_EXECUTION_PATH: &str = "the MLX Krea 2 Raw base-only text-to-image path";
+const KREA_RAW_SEED: u64 = 22735;
 /// Recommended, reference-free SDXL base text-to-image. Rungs 2 and 3 are measured Missing at the
 /// pinned provider, so this apparatus intentionally exposes only Resident, Staged, and rung 4.
 const SDXL_PROVIDER: &str = "sdxl";
@@ -496,6 +503,120 @@ const MINIMAX_STEPS: u32 = 2;
 const MINIMAX_MAX_THRESHOLD: f64 = 3.0 / 255.0;
 const MINIMAX_MEAN_THRESHOLD: f64 = 1.0 / 255.0;
 const MINIMAX_RMS_THRESHOLD: f64 = 1.5 / 255.0;
+
+/// The `mlx:krea_realtime_14b` arm (sc-22735) — the third MLX video lane, and the first
+/// AUTOREGRESSIVE one.
+///
+/// Krea Realtime 14B is Wan 2.1 T2V 14B weight-for-weight; what makes it its own lane is the
+/// inference regime, not the weights: a short per-block few-step denoise driven by a rolling causal
+/// KV cache. The KV cache is what makes this arm's peaks unlike every other video lane's — it holds
+/// bf16 ACTIVATIONS, so a q4 DiT does not shrink it, and it scales with the read window rather than
+/// with the tier.
+const KREA_REALTIME_PROVIDER: &str = "krea_realtime_14b";
+const KREA_REALTIME_PLAIN_EXECUTION_PATH: &str =
+    "the MLX Krea Realtime 14B reference-free text-to-video path";
+/// How this arm names itself in a geometry, target or output-shape refusal.
+const KREA_REALTIME_LABEL: &str = "MLX Krea Realtime 14B calibration";
+/// How [`diagnostic_video_frames`] names this lane when it refuses a non-video output.
+const KREA_REALTIME_VIDEO_LABEL: &str = "MLX Krea Realtime 14B";
+/// One fixed seed for every `mlx:krea_realtime_14b` fixture
+/// (`krea-realtime-14b-mlx-<tier>-<width>x<height>-f<frames>-fps<fps>-seed22735`).
+const KREA_REALTIME_SEED: u64 = 22735;
+/// The ONLY cadence this checkpoint generates at. Unlike MiniMax-H3 the engine crate exports no fps
+/// symbol, so this is TRANSCRIBED from the shipped manifest's `limits.fps: [24]` for
+/// `krea_realtime_14b` (`config/builtin.models.jsonc`) — the same single-valued cadence declaration
+/// `MINIMAX_H3_FPS` makes in code. A fixture that declares any other cadence is refused, so a record
+/// cannot silently carry a playback rate the model never produced.
+const KREA_REALTIME_FPS: u32 = 24;
+/// Model evaluations per calibration render, overriding the config's `denoising_step_list` length.
+/// Two is the smallest count that still produces a real denoise interval between the first `Step`
+/// and `Decoding`, which is what makes the middle phase boundary a measurement rather than an
+/// artifact — the same reason [`MINIMAX_STEPS`] is 2.
+const KREA_REALTIME_STEPS: u32 = 2;
+/// z16 Wan VAE temporal compression. TRANSCRIBED from
+/// `mlx-gen-krea-realtime/src/t2v.rs:74-75` (`TEMPORAL_STRIDE = VAE_TILING.temporal_scale`) and
+/// `t2v.rs:124-131` (`latent_frame_count(n) = (n − 1) / TEMPORAL_STRIDE + 1`): both `TEMPORAL_STRIDE`
+/// and `latent_frame_count` are `pub(crate)` in the pinned crate, so there is no symbol to read.
+/// `the_realtime_latent_derivation_matches_the_engines_own_arithmetic` re-derives the same values
+/// from the documented formula so a transcription drift is caught locally.
+const KREA_REALTIME_TEMPORAL_STRIDE: u32 = 4;
+/// Model-local ceiling on the full latent clip the AR loop allocates. TRANSCRIBED from
+/// `mlx-gen-krea-realtime/src/t2v.rs:78` (`pub(crate) const MAX_LATENT_FRAMES: usize = 257`),
+/// enforced by `bounded_latent_frame_count` at `t2v.rs:134-143`. `pub(crate)`, so unreadable from
+/// here; 257 latent frames is 1,028 source/output frames.
+const KREA_REALTIME_MAX_LATENT_FRAMES: u32 = 257;
+/// Latent frames the autoregressive loop denoises as ONE chunk. TRANSCRIBED from
+/// `mlx-gen-krea-realtime/src/config.rs:165` + `:268`
+/// (`KreaArConfig::num_frames_per_block: 3`), which is a field on a config this arm does not build
+/// and therefore cannot read without constructing the engine's preset. Reported as
+/// `autoregressiveBlocks`, never asserted away: the planned 45 frames is 12 latent frames, exactly
+/// four whole blocks.
+const KREA_REALTIME_LATENT_FRAMES_PER_BLOCK: u32 = 3;
+/// Krea Realtime 14B determinism thresholds, in [0,1] units. Spelled as their own literals for the
+/// reason stated at [`MINIMAX_MAX_THRESHOLD`]: the record embeds them, and a
+/// `mlx:krea_realtime_14b` receipt must not be traceable to a constant asserting another provider's
+/// provenance. The claim is the same kind — repeat determinism on one loaded provider — so the
+/// magnitudes match, but a fully-seeded few-step AR render is expected to be bit-identical while the
+/// mandatory broad-bias mutation must breach all three.
+const KREA_REALTIME_MAX_THRESHOLD: f64 = 3.0 / 255.0;
+const KREA_REALTIME_MEAN_THRESHOLD: f64 = 1.0 / 255.0;
+const KREA_REALTIME_RMS_THRESHOLD: f64 = 1.5 / 255.0;
+
+/// The calibration identity the PRODUCTION MLX contract can emit for one `(provider, tier)` cell, or
+/// `None` for a provider whose identity this adapter does not model. The MLX mirror of
+/// [`candle_production_fingerprint`](../candle.rs) — same shape, same wording, same reason.
+///
+/// sc-22735. Both engines used to publish ONE calibration string per PROVIDER, so a bf16 record was
+/// indistinguishable by calibration identity from a q4 one at the same provider. The engines now key
+/// the identity on (route, artifact-proven tier) — the tier read out of the staged snapshot, NOT
+/// `spec.quantize`, which is recipe-only on a directory load. This table is the SceneWorks half of
+/// that binding.
+///
+/// **`krea_2_turbo` is deliberately absent.** Its measured MLX key
+/// [`KREA_BASE_CALIBRATION_FINGERPRINT`] is a real, already-priced anchor identity that the pinned
+/// provider still publishes unchanged; re-keying it here would invalidate evidence this story has no
+/// business touching. `None` for Turbo means this check is silent for it and its existing exact
+/// post-load comparison is the whole binding, exactly as before.
+///
+/// It is a PRE-LOAD check on purpose. Both arms already compare the plan's fingerprint against the
+/// LOADED contract's, but that comparison happens after a multi-tens-of-GB load; a plan row naming a
+/// string no production contract can ever emit is a fixture defect, and the operator should learn
+/// that before the weights are opened, not after. The post-load comparison is what actually binds
+/// the record — this only makes the diagnosis local.
+fn mlx_production_fingerprint(provider_id: &str, tier: &str) -> Option<String> {
+    if !matches!(tier, "bf16" | "q4" | "q8") {
+        return None;
+    }
+    match provider_id {
+        KREA_RAW_PROVIDER => Some(format!("krea-2-raw-{tier}-mlx-shared-ladder-v1")),
+        KREA_REALTIME_PROVIDER => Some(format!("krea-realtime-14b-{tier}-mlx-resident-ladder-v1")),
+        _ => None,
+    }
+}
+
+/// Refuse a plan row whose `calibrationFingerprint` is not the string the production contract
+/// publishes for that `(provider, tier)`. Silent for a provider [`mlx_production_fingerprint`] does
+/// not model, so it can never turn into a blanket gate on providers this table has not learned.
+fn validate_planned_fingerprint_is_producible(
+    provider_id: &str,
+    tier: &str,
+    request: &Value,
+) -> Result<(), String> {
+    let Some(expected) = mlx_production_fingerprint(provider_id, tier) else {
+        return Ok(());
+    };
+    let planned = protocol::planned(request)?
+        .get("calibrationFingerprint")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "planned.calibrationFingerprint must be a string".to_owned())?;
+    if planned != expected {
+        return Err(format!(
+            "planned.calibrationFingerprint {planned:?} is not the identity the pinned \
+             {provider_id} contract publishes at tier {tier:?}; expected {expected:?}"
+        ));
+    }
+    Ok(())
+}
 
 fn command(program: &str, args: &[&str]) -> Result<String, String> {
     let output = Command::new(program)
@@ -4856,27 +4977,120 @@ fn assess_z_image_batch(request: &Value) -> Result<Value, String> {
     }))
 }
 
-fn validate_krea_base_target(request: &Value) -> Result<(), String> {
+/// One member of the Krea 2 base family this arm measures, resolved from the plan's
+/// `target.provider` — never assumed. Two members today: the distilled Turbo text-to-image lane and
+/// the undistilled Raw base (sc-22735). Both live in `mlx-gen-krea` and share the shipped
+/// reference-free text-to-image route; everything that differs between them is a field here.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct KreaBaseArm {
+    /// The registry id handed to `registry.load` — the production loader (E4).
+    provider: &'static str,
+    execution_path: &'static str,
+    /// The still-geometry and target refusal label.
+    still_calibration: &'static str,
+    repository_env: &'static str,
+    revision_env: &'static str,
+    root_env: &'static str,
+    expected_repository: &'static str,
+    /// The record's diagnostics source, `memory-mlx-adapter:<slug>`.
+    slug: &'static str,
+    seed: u64,
+    /// The fixture prefix stem: `<stem>-<tier>-<width>-seed<seed>-step2`.
+    fixture_stem: &'static str,
+    /// The materialization shape the PLAN must declare for this member, and the one this arm
+    /// executes. A property of the member rather than a constant: Turbo's shipped route defers, Raw's
+    /// materializes eagerly, and a plan row naming the other shape is refused by name.
+    load_shape: LoadShape,
+    /// Whether [`krea_base_load_spec`] puts the planned tier's `Quant` on the `LoadSpec`.
+    ///
+    /// **FALSE for Raw, and that is the point of this field.** The shipped worker passes
+    /// `LoadSpec::quantize = None` for the Krea image engines at EVERY tier —
+    /// `crates/sceneworks-worker/src/image_jobs/base.rs`,
+    /// `mlx_load_quant_for_resolved_artifact` returns `None` for
+    /// `"krea_2_raw" | "krea_2_turbo" | "krea_2_edit" | …` — and the tier travels instead on
+    /// `MlxRequestPlan::with_resolved_artifact_tier`, i.e. on the directory the spec opens. Turbo
+    /// keeps `true` because its cells are already-priced anchors measured under that spec and are not
+    /// this story's to re-measure; Raw is captured in the worker's own shape.
+    load_spec_carries_quant: bool,
+    /// A member whose pinned calibration identity is ONE frozen string across all three tiers.
+    /// `None` means the identity is tier-keyed and comes from [`mlx_production_fingerprint`].
+    frozen_fingerprint: Option<&'static str>,
+}
+
+const KREA_TURBO_ARM: KreaBaseArm = KreaBaseArm {
+    provider: KREA_BASE_PROVIDER,
+    execution_path: KREA_PLAIN_EXECUTION_PATH,
+    still_calibration: "MLX Krea base calibration",
+    repository_env: "SCENEWORKS_KREA_REPOSITORY",
+    revision_env: "SCENEWORKS_KREA_REVISION",
+    root_env: "SCENEWORKS_KREA_ROOT",
+    expected_repository: protocol::KREA_REPOSITORY,
+    slug: "krea-base-shared-ladder",
+    seed: KREA_BASE_SEED,
+    fixture_stem: "krea-base-mlx",
+    load_shape: LoadShape::DeferredMaterialization,
+    load_spec_carries_quant: true,
+    frozen_fingerprint: Some(KREA_BASE_CALIBRATION_FINGERPRINT),
+};
+
+const KREA_RAW_ARM: KreaBaseArm = KreaBaseArm {
+    provider: KREA_RAW_PROVIDER,
+    execution_path: KREA_RAW_PLAIN_EXECUTION_PATH,
+    still_calibration: "MLX Krea 2 Raw calibration",
+    repository_env: "SCENEWORKS_KREA_RAW_REPOSITORY",
+    revision_env: "SCENEWORKS_KREA_RAW_REVISION",
+    root_env: "SCENEWORKS_KREA_RAW_ROOT",
+    expected_repository: protocol::KREA_RAW_REPOSITORY,
+    slug: "krea-raw-shared-ladder",
+    seed: KREA_RAW_SEED,
+    fixture_stem: "krea-raw-mlx",
+    load_shape: LoadShape::EagerMaterialization,
+    load_spec_carries_quant: false,
+    frozen_fingerprint: None,
+};
+
+/// Which family member the plan asks for. Refuses an unimplemented provider BY NAME, before any
+/// environment variable is read or any path canonicalized — the same defense-in-depth `run`'s
+/// dispatch already provides, restated here so a direct caller cannot measure one member's weights
+/// against another member's contract.
+fn krea_base_arm(request: &Value) -> Result<KreaBaseArm, String> {
+    let provider = protocol::planned(request)?
+        .pointer("/target/provider")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "planned.target.provider must be a string".to_owned())?;
+    match provider {
+        KREA_BASE_PROVIDER => Ok(KREA_TURBO_ARM),
+        KREA_RAW_PROVIDER => Ok(KREA_RAW_ARM),
+        provider => Err(format!(
+            "the MLX Krea base arm does not implement provider {provider:?}"
+        )),
+    }
+}
+
+/// The pinned calibration identity this arm expects the loaded provider to publish for
+/// `(member, tier)`: a frozen per-provider string where the member declares one, otherwise the
+/// tier-keyed identity from [`mlx_production_fingerprint`].
+fn krea_base_pinned_fingerprint(arm: KreaBaseArm, tier: &str) -> Option<String> {
+    arm.frozen_fingerprint
+        .map(str::to_owned)
+        .or_else(|| mlx_production_fingerprint(arm.provider, tier))
+}
+
+fn validate_krea_base_target(request: &Value) -> Result<KreaBaseArm, String> {
+    let arm = krea_base_arm(request)?;
+    let label = arm.still_calibration;
     let target = protocol::planned(request)?
         .get("target")
         .and_then(Value::as_object)
         .ok_or_else(|| "planned.target must be an object".to_owned())?;
-    let provider = target
-        .get("provider")
-        .and_then(Value::as_str)
-        .ok_or_else(|| "planned.target.provider must be a string".to_owned())?;
-    if provider != KREA_BASE_PROVIDER {
-        return Err(format!(
-            "MLX Krea base calibration does not implement provider {provider:?}"
-        ));
-    }
     let model_id = target
         .get("modelId")
         .and_then(Value::as_str)
         .ok_or_else(|| "planned.target.modelId must be a string".to_owned())?;
-    if model_id != KREA_BASE_PROVIDER {
+    if model_id != arm.provider {
         return Err(format!(
-            "MLX Krea base calibration requires modelId {KREA_BASE_PROVIDER:?}, got {model_id:?}"
+            "{label} requires modelId {:?}, got {model_id:?}",
+            arm.provider
         ));
     }
     let mode = target
@@ -4885,37 +5099,39 @@ fn validate_krea_base_target(request: &Value) -> Result<(), String> {
         .ok_or_else(|| "planned.target.mode must be a string".to_owned())?;
     if mode != "text_to_image" {
         return Err(format!(
-            "MLX Krea base calibration requires reference-free text_to_image mode, got {mode:?}"
+            "{label} requires reference-free text_to_image mode, got {mode:?}"
         ));
     }
-    protocol::validate_still_geometry(request, "MLX Krea base calibration")?;
+    protocol::validate_still_geometry(request, label)?;
     for field in ["referenceCount", "reference_count"] {
         if let Some(value) = target.get(field) {
             if value.as_u64() != Some(0) {
-                return Err(format!(
-                    "MLX Krea base calibration requires {field} == 0 when declared"
-                ));
+                return Err(format!("{label} requires {field} == 0 when declared"));
             }
         }
     }
     for field in ["hasReference", "has_reference"] {
         if let Some(value) = target.get(field) {
             if value.as_bool() != Some(false) {
-                return Err(format!(
-                    "MLX Krea base calibration requires {field} == false when declared"
-                ));
+                return Err(format!("{label} requires {field} == false when declared"));
             }
         }
     }
-    protocol::validate_plain_overlay_target(request, KREA_PLAIN_EXECUTION_PATH)
+    protocol::validate_plain_overlay_target(request, arm.execution_path)?;
+    Ok(arm)
 }
 
-fn planned_krea_base_seed(request: &Value, tier: &str, width: u32) -> Result<u64, String> {
+fn planned_krea_base_seed(
+    request: &Value,
+    arm: KreaBaseArm,
+    tier: &str,
+    width: u32,
+) -> Result<u64, String> {
     let fixture = protocol::planned(request)?
         .get("fixture")
         .and_then(Value::as_str)
         .ok_or_else(|| "planned.fixture must be a string".to_owned())?;
-    let prefix = format!("krea-base-mlx-{tier}-{width}-seed");
+    let prefix = format!("{}-{tier}-{width}-seed", arm.fixture_stem);
     let remainder = fixture
         .strip_prefix(&prefix)
         .ok_or_else(|| format!("planned.fixture {fixture:?} must start with {prefix:?}"))?;
@@ -4961,23 +5177,39 @@ fn krea_base_request(width: u32, height: u32, seed: u64) -> GenerationRequest {
 
 fn krea_base_load_spec(
     request: &Value,
+    arm: KreaBaseArm,
     tier: &str,
     selection: &MemorySelection,
 ) -> Result<(String, String, LoadSpec), String> {
     validate_krea_base_target(request)?;
-    let repository = protocol::required_env("SCENEWORKS_KREA_REPOSITORY")?;
-    let revision = protocol::required_env("SCENEWORKS_KREA_REVISION")?;
-    protocol::validate_artifact_identity(&repository, &revision, protocol::KREA_REPOSITORY)?;
-    let root = std::fs::canonicalize(PathBuf::from(protocol::required_env(
-        "SCENEWORKS_KREA_ROOT",
-    )?))
-    .map_err(|error| format!("canonicalize SCENEWORKS_KREA_ROOT: {error}"))?;
+    let repository = protocol::required_env(arm.repository_env)?;
+    let revision = protocol::required_env(arm.revision_env)?;
+    protocol::validate_artifact_identity(&repository, &revision, arm.expected_repository)?;
+    let root = std::fs::canonicalize(PathBuf::from(protocol::required_env(arm.root_env)?))
+        .map_err(|error| format!("canonicalize {}: {error}", arm.root_env))?;
+    krea_base_spec_at(arm, tier, &repository, &revision, root, selection)
+        .map(|spec| (repository, revision, spec))
+}
+
+/// The env-free half of [`krea_base_load_spec`], so the tier binding and the member's quant policy
+/// are unit-testable without an environment (the shape `z_image_load_spec_at` established).
+///
+/// The root must end in the PLANNED tier's directory (`.../snapshots/<revision>/<tier>`), so a stale
+/// `…/q4` export can never satisfy a q8 or bf16 plan and quietly re-label another tier's peaks.
+fn krea_base_spec_at(
+    arm: KreaBaseArm,
+    tier: &str,
+    repository: &str,
+    revision: &str,
+    root: PathBuf,
+    selection: &MemorySelection,
+) -> Result<LoadSpec, String> {
     protocol::validate_huggingface_snapshot_root(
         &root,
-        &repository,
-        &revision,
+        repository,
+        revision,
         tier,
-        protocol::KREA_REPOSITORY,
+        arm.expected_repository,
     )?;
     let offload = if selection.strategy == MemoryStrategy::Resident {
         OffloadPolicy::Resident
@@ -4986,11 +5218,13 @@ fn krea_base_load_spec(
     };
     let mut spec = LoadSpec::new(WeightsSource::Dir(root))
         .with_offload_policy(offload)
-        .with_load_shape(LoadShape::DeferredMaterialization);
-    if let Some(quant) = selection.tier.quant {
-        spec = spec.with_quant(quant);
+        .with_load_shape(arm.load_shape);
+    if arm.load_spec_carries_quant {
+        if let Some(quant) = selection.tier.quant {
+            spec = spec.with_quant(quant);
+        }
     }
-    Ok((repository, revision, spec))
+    Ok(spec)
 }
 
 fn krea_base_context(
@@ -5043,6 +5277,7 @@ struct KreaBaseLifecycleMetrics {
 
 fn verify_krea_base_lifecycle(
     generator: &dyn Generator,
+    label: &str,
     context: &MemoryRunContext,
     selected: &Image,
     width: u32,
@@ -5064,7 +5299,7 @@ fn verify_krea_base_lifecycle(
     let bounds = LifecycleMemoryBounds::from_clean_warm(clean_warm_peak, clean_post_cleanup);
     let (warm_maximum, warm_mean) = image_max_mean_abs(selected, &clean_warm)?;
     if warm_maximum > KREA_MAX_THRESHOLD || warm_mean > KREA_MEAN_THRESHOLD {
-        return Err("Krea base clean warm control changed the deterministic output".to_owned());
+        return Err("{label} clean warm control changed the deterministic output".to_owned());
     }
 
     let mut metrics = KreaBaseLifecycleMetrics {
@@ -5095,12 +5330,12 @@ fn verify_krea_base_lifecycle(
             Err(error) if error.to_ascii_lowercase().contains("cancel") => {}
             Err(error) => {
                 return Err(format!(
-                    "Krea base {phase:?} cancellation returned the wrong error: {error}"
+                    "{label} {phase:?} cancellation returned the wrong error: {error}"
                 ));
             }
             Ok(_) => {
                 return Err(format!(
-                    "Krea base {phase:?} cancellation returned images instead of the typed cancellation path"
+                    "{label} {phase:?} cancellation returned images instead of the typed cancellation path"
                 ));
             }
         }
@@ -5116,7 +5351,7 @@ fn verify_krea_base_lifecycle(
             .max(fault_cleanup.cache);
         if !bounds.allows_retained(fault_cleanup) {
             return Err(format!(
-                "Krea base {phase:?} cancellation retained active/cache bytes {fault_cleanup:?} above the clean warm cleanup {clean_post_cleanup:?} plus {} bytes",
+                "{label} {phase:?} cancellation retained active/cache bytes {fault_cleanup:?} above the clean warm cleanup {clean_post_cleanup:?} plus {} bytes",
                 bounds.tolerance_bytes,
             ));
         }
@@ -5132,7 +5367,7 @@ fn verify_krea_base_lifecycle(
         metrics.max_recovery_peak = metrics.max_recovery_peak.max(recovery_peak);
         if !bounds.allows_warm_peak(recovery_peak) {
             return Err(format!(
-                "Krea base {phase:?} cancellation left the warm follow-up peak at {recovery_peak} bytes, above the clean warm control {clean_warm_peak} bytes plus 2%"
+                "{label} {phase:?} cancellation left the warm follow-up peak at {recovery_peak} bytes, above the clean warm control {clean_warm_peak} bytes plus 2%"
             ));
         }
         clear_cache();
@@ -5147,14 +5382,14 @@ fn verify_krea_base_lifecycle(
             .max(recovery_cleanup.cache);
         if !bounds.allows_retained(recovery_cleanup) {
             return Err(format!(
-                "Krea base {phase:?} cancellation warm follow-up retained active/cache bytes {recovery_cleanup:?} above the clean warm cleanup {clean_post_cleanup:?} plus {} bytes",
+                "{label} {phase:?} cancellation warm follow-up retained active/cache bytes {recovery_cleanup:?} above the clean warm cleanup {clean_post_cleanup:?} plus {} bytes",
                 bounds.tolerance_bytes,
             ));
         }
         let (maximum, mean) = image_max_mean_abs(selected, &recovery)?;
         if maximum > KREA_MAX_THRESHOLD || mean > KREA_MEAN_THRESHOLD {
             return Err(format!(
-                "Krea base {phase:?} cancellation cleanup changed the warm follow-up"
+                "{label} {phase:?} cancellation cleanup changed the warm follow-up"
             ));
         }
     }
@@ -5175,12 +5410,12 @@ fn verify_krea_base_lifecycle(
             Err(error) if error.contains("injected memory-strategy calibration error") => {}
             Err(error) => {
                 return Err(format!(
-                    "Krea base {phase:?} error injection returned the wrong error: {error}"
+                    "{label} {phase:?} error injection returned the wrong error: {error}"
                 ));
             }
             Ok(_) => {
                 return Err(format!(
-                    "Krea base {phase:?} error injection returned images instead of failing at its physical boundary"
+                    "{label} {phase:?} error injection returned images instead of failing at its physical boundary"
                 ));
             }
         }
@@ -5196,7 +5431,7 @@ fn verify_krea_base_lifecycle(
             .max(fault_cleanup.cache);
         if !bounds.allows_retained(fault_cleanup) {
             return Err(format!(
-                "Krea base {phase:?} injected error retained active/cache bytes {fault_cleanup:?} above the clean warm cleanup {clean_post_cleanup:?} plus {} bytes",
+                "{label} {phase:?} injected error retained active/cache bytes {fault_cleanup:?} above the clean warm cleanup {clean_post_cleanup:?} plus {} bytes",
                 bounds.tolerance_bytes,
             ));
         }
@@ -5212,7 +5447,7 @@ fn verify_krea_base_lifecycle(
         metrics.max_recovery_peak = metrics.max_recovery_peak.max(recovery_peak);
         if !bounds.allows_warm_peak(recovery_peak) {
             return Err(format!(
-                "Krea base {phase:?} injected error left the warm follow-up peak at {recovery_peak} bytes, above the clean warm control {clean_warm_peak} bytes plus 2%"
+                "{label} {phase:?} injected error left the warm follow-up peak at {recovery_peak} bytes, above the clean warm control {clean_warm_peak} bytes plus 2%"
             ));
         }
         clear_cache();
@@ -5227,14 +5462,14 @@ fn verify_krea_base_lifecycle(
             .max(recovery_cleanup.cache);
         if !bounds.allows_retained(recovery_cleanup) {
             return Err(format!(
-                "Krea base {phase:?} injected-error warm follow-up retained active/cache bytes {recovery_cleanup:?} above the clean warm cleanup {clean_post_cleanup:?} plus {} bytes",
+                "{label} {phase:?} injected-error warm follow-up retained active/cache bytes {recovery_cleanup:?} above the clean warm cleanup {clean_post_cleanup:?} plus {} bytes",
                 bounds.tolerance_bytes,
             ));
         }
         let (maximum, mean) = image_max_mean_abs(selected, &recovery)?;
         if maximum > KREA_MAX_THRESHOLD || mean > KREA_MEAN_THRESHOLD {
             return Err(format!(
-                "Krea base {phase:?} error cleanup changed the warm follow-up"
+                "{label} {phase:?} error cleanup changed the warm follow-up"
             ));
         }
     }
@@ -5244,49 +5479,64 @@ fn verify_krea_base_lifecycle(
 /// Capture arm for the shipped, reference-free `mlx:krea_2_turbo` lane. The pose-control arm is
 /// intentionally separate: its overlay, geometry and provider fingerprint are not interchangeable.
 fn run_krea_base(request: &Value) -> Result<Value, String> {
-    validate_krea_base_target(request)?;
+    let arm = validate_krea_base_target(request)?;
     let planned_shape = planned_load_shape(request)?;
-    if planned_shape != LoadShape::DeferredMaterialization {
-        return Err(
-            "plain Krea calibration must use the production deferred_materialization load shape"
-                .to_owned(),
-        );
+    if planned_shape != arm.load_shape {
+        return Err(format!(
+            "{} must use the production {} load shape, but the plan declares {}",
+            arm.still_calibration,
+            load_shape_key(arm.load_shape),
+            load_shape_key(planned_shape)
+        ));
     }
     let selection = planned_selection(request)?;
     let tier = planned_qwen_tier(request)?;
+    // PRE-LOAD fingerprint conformance, before any environment or weight work.
+    validate_planned_fingerprint_is_producible(arm.provider, tier, request)?;
     let (width, height) = protocol::target_geometry(request)?;
-    let seed = planned_krea_base_seed(request, tier, width)?;
-    if seed != KREA_BASE_SEED {
+    let seed = planned_krea_base_seed(request, arm, tier, width)?;
+    if seed != arm.seed {
         return Err(format!(
-            "planned.fixture seed {seed} does not match the Krea base calibration seed {KREA_BASE_SEED}"
+            "planned.fixture seed {seed} does not match the {} calibration seed {}",
+            arm.still_calibration, arm.seed
         ));
     }
-    let (repository, revision, spec) = krea_base_load_spec(request, tier, &selection)?;
+    let (repository, revision, spec) = krea_base_load_spec(request, arm, tier, &selection)?;
     let registry = mlx_gen_krea::provider_registry()
         .map_err(|error| format!("build Krea registry: {error}"))?;
     let contract = registry
-        .memory_strategy_contract(KREA_BASE_PROVIDER, &spec)
-        .map_err(|error| format!("read {KREA_BASE_PROVIDER} memory-strategy contract: {error}"))?
+        .memory_strategy_contract(arm.provider, &spec)
+        .map_err(|error| format!("read {} memory-strategy contract: {error}", arm.provider))?
         .ok_or_else(|| {
-            format!("{KREA_BASE_PROVIDER} has no memory-strategy contract at the pin")
+            format!(
+                "{} has no memory-strategy contract at the pin",
+                arm.provider
+            )
         })?;
     contract.validate_selection(&selection).map_err(|error| {
-        format!("pinned Krea base contract rejected planned selection: {error}")
+        format!(
+            "pinned {} contract rejected planned selection: {error}",
+            arm.provider
+        )
     })?;
     let strategy = attested_strategy(
         request,
         &selection,
         &contract.engaged_composition(selection.strategy),
     )?;
-    let calibration = contract
-        .calibration
-        .as_ref()
-        .ok_or_else(|| "pinned Krea base contract has no calibration identity".to_owned())?;
-    if calibration.fingerprint != KREA_BASE_CALIBRATION_FINGERPRINT {
-        return Err(format!(
-            "pinned Krea base fingerprint changed: expected {KREA_BASE_CALIBRATION_FINGERPRINT}, got {}",
-            calibration.fingerprint
-        ));
+    let calibration = contract.calibration.as_ref().ok_or_else(|| {
+        format!(
+            "pinned {} contract has no calibration identity",
+            arm.provider
+        )
+    })?;
+    if let Some(expected) = krea_base_pinned_fingerprint(arm, tier) {
+        if calibration.fingerprint != expected {
+            return Err(format!(
+                "pinned {} fingerprint changed at tier {tier:?}: expected {expected}, got {}",
+                arm.provider, calibration.fingerprint
+            ));
+        }
     }
     let planned_fingerprint = protocol::planned(request)?
         .get("calibrationFingerprint")
@@ -5311,15 +5561,19 @@ fn run_krea_base(request: &Value) -> Result<Value, String> {
         .and_then(Value::as_u64)
         .ok_or_else(|| "run request.hardware.memoryBytes must be an integer".to_owned())?;
     let generator = registry
-        .load(KREA_BASE_PROVIDER, &spec)
-        .map_err(|error| format!("load real Krea base {tier} provider: {error}"))?;
-    let loaded_contract = generator
-        .memory_strategy_contract()
-        .ok_or_else(|| "loaded Krea base generator exposed no memory contract".to_owned())?;
+        .load(arm.provider, &spec)
+        .map_err(|error| format!("load real {} {tier} provider: {error}", arm.provider))?;
+    let loaded_contract = generator.memory_strategy_contract().ok_or_else(|| {
+        format!(
+            "loaded {} generator exposed no memory contract",
+            arm.provider
+        )
+    })?;
     if loaded_contract != &contract {
-        return Err(
-            "loaded Krea base generator contract differs from the registry contract".to_owned(),
-        );
+        return Err(format!(
+            "loaded {} generator contract differs from the registry contract",
+            arm.provider
+        ));
     }
     let context = krea_base_context(
         selection,
@@ -5363,9 +5617,10 @@ fn run_krea_base(request: &Value) -> Result<Value, String> {
     let conditioning = conditioning.get();
     let denoise = denoise.get();
     if [conditioning.active, denoise.active, decode.active].contains(&0) {
-        return Err(
-            "a synchronized Krea base lifecycle phase reported a zero active peak".to_owned(),
-        );
+        return Err(format!(
+            "a synchronized {} lifecycle phase reported a zero active peak",
+            arm.provider
+        ));
     }
     let overall = PhaseMemory::overall(&[conditioning, denoise, decode]);
     let predicted_peaks = image_predicted_peak_bytes(conditioning, denoise, decode);
@@ -5378,7 +5633,10 @@ fn run_krea_base(request: &Value) -> Result<Value, String> {
         generator.memory_strategy_safety_check(&exact),
         MemorySafetyDecision::Accept
     ) {
-        return Err("Krea base provider rejected an exact-fit calibrated budget".to_owned());
+        return Err(format!(
+            "{} provider rejected an exact-fit calibrated budget",
+            arm.provider
+        ));
     }
     let mut unknown = context.clone();
     unknown.budget.total_bytes = 0;
@@ -5386,7 +5644,10 @@ fn run_krea_base(request: &Value) -> Result<Value, String> {
         generator.memory_strategy_safety_check(&unknown),
         MemorySafetyDecision::Reject { .. }
     ) {
-        return Err("Krea base provider accepted an unknown/zero memory budget".to_owned());
+        return Err(format!(
+            "{} provider accepted an unknown/zero memory budget",
+            arm.provider
+        ));
     }
     let mut stale = context.clone();
     stale.calibration_fingerprint = "stale-krea-base-fingerprint".to_owned();
@@ -5394,26 +5655,40 @@ fn run_krea_base(request: &Value) -> Result<Value, String> {
         generator.memory_strategy_safety_check(&stale),
         MemorySafetyDecision::Reject { .. }
     ) {
-        return Err("Krea base provider accepted stale calibration evidence".to_owned());
+        return Err(format!(
+            "{} provider accepted stale calibration evidence",
+            arm.provider
+        ));
     }
 
     let baseline = one_image(
         generator
             .generate(&krea_base_request(width, height, seed), &mut |_| {})
-            .map_err(|error| format!("generate unselected Krea base reference: {error}"))?,
+            .map_err(|error| format!("generate unselected {} reference: {error}", arm.provider))?,
     )?;
     let (maximum_error, mean_error) = image_max_mean_abs(&selected, &baseline)?;
     if maximum_error > KREA_MAX_THRESHOLD || mean_error > KREA_MEAN_THRESHOLD {
         return Err(format!(
-            "Krea base selected rung exceeded unselected parity: max={maximum_error:.6}, mean={mean_error:.6}"
+            "{} selected rung exceeded unselected parity: max={maximum_error:.6}, mean={mean_error:.6}",
+            arm.provider
         ));
     }
-    let lifecycle =
-        verify_krea_base_lifecycle(generator.as_ref(), &context, &selected, width, height, seed)?;
+    let lifecycle = verify_krea_base_lifecycle(
+        generator.as_ref(),
+        arm.provider,
+        &context,
+        &selected,
+        width,
+        height,
+        seed,
+    )?;
     let mutated = qwen_negative_mutation(&selected);
     let (mutated_maximum, mutated_mean) = image_max_mean_abs(&mutated, &baseline)?;
     if mutated_maximum <= KREA_MAX_THRESHOLD && mutated_mean <= KREA_MEAN_THRESHOLD {
-        return Err("Krea base output mutation did not breach the parity envelope".to_owned());
+        return Err(format!(
+            "{} output mutation did not breach the parity envelope",
+            arm.provider
+        ));
     }
 
     let mut fragment = json!({
@@ -5464,7 +5739,7 @@ fn run_krea_base(request: &Value) -> Result<Value, String> {
             "resolvedPathFingerprint": format!("{repository}@{revision}:{tier}"),
         },
         "diagnostics": protocol::diagnostics(
-            "memory-mlx-adapter:krea-base-shared-ladder",
+            &format!("memory-mlx-adapter:{}", arm.slug),
             "executed",
             [],
             [
@@ -5484,12 +5759,13 @@ fn run_krea_base(request: &Value) -> Result<Value, String> {
                 ("lifecycleMaximumRecoveryPostCleanupCache", "bytes", lifecycle.max_recovery_post_cleanup.cache),
                 ("negativeMutationMaximumErrorPer255", "count", (mutated_maximum * 255.0).round() as u64),
                 ("negativeMutationMeanErrorPer255", "count", (mutated_mean * 255.0).round() as u64),
-                ("loadShapeDeferred", "count", 1),
+                ("loadShapeDeferred", "count", u64::from(planned_shape == LoadShape::DeferredMaterialization)),
+                ("loadSpecCarriesQuant", "count", u64::from(arm.load_spec_carries_quant)),
             ],
         ),
         "capturedAt": protocol::captured_at(),
     });
-    protocol::settle_plain_overlay_scenario(request, &mut fragment, KREA_PLAIN_EXECUTION_PATH)?;
+    protocol::settle_plain_overlay_scenario(request, &mut fragment, arm.execution_path)?;
     Ok(fragment)
 }
 
@@ -12365,6 +12641,821 @@ fn run_minimax_h3(request: &Value) -> Result<Value, String> {
     Ok(fragment)
 }
 
+/// The geometry one `mlx:krea_realtime_14b` capture renders, with the AR loop's own derived
+/// quantities carried beside the declared axes rather than asserted away.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct KreaRealtimeGeometry {
+    width: u32,
+    height: u32,
+    frames: u32,
+    /// `(frames − 1) / 4 + 1` — the z16 Wan VAE's 4x temporal compression.
+    latent_frames: u32,
+    /// Autoregressive chunks the AR loop denoises to cover `latent_frames`, at
+    /// [`KREA_REALTIME_LATENT_FRAMES_PER_BLOCK`] latent frames per chunk. REPORTED, not gated: a clip
+    /// whose latent count is not a whole multiple of the block size renders — the final chunk is
+    /// short — so refusing one here would be a gate the engine does not have.
+    autoregressive_blocks: u32,
+}
+
+/// Krea Realtime 14B's own geometry envelope, which replaces the image arms' `frames == 1` refusal
+/// for this arm. Every spatial clause is READ off the pinned engine crate's own advertised
+/// descriptor ([`mlx_gen_krea_realtime::descriptor`]) rather than transcribed, so it cannot drift
+/// from the provider a capture actually loads:
+///
+/// * the spatial grid — `Capabilities::size_floor`, which this engine declares as
+///   `SizeFloor::RangeCheckedOnGrid { multiple: 16 }` (the z16 VAE's spatial stride of 8 times the
+///   Wan DiT's 2x2 latent patch). An off-grid edge would survive the VAE and then render a silently
+///   smaller clip through integer division;
+/// * the per-edge range — `Capabilities::min_size ..= Capabilities::max_size`. This is a PER-EDGE
+///   bound, not an area budget, and it is applied as one. **The engine has NO area/pixel cap**:
+///   `crates/sceneworks-core/src/pinned_engine_geometry.rs` lists `krea_realtime_14b` as
+///   `PinnedAreaCap::EngineHasNone`. Refusing a large area here would be an invented gate that made
+///   this harness reject geometries the shipped engine renders, so nothing below multiplies the
+///   edges together;
+/// * the temporal lattice — `4k + 1` frames with a floor of 5, the rule
+///   `sceneworks_core::video_request::wan_frame_count` floors a raw count to
+///   (`crates/sceneworks-core/src/video_request.rs:522-525`). `sceneworks-core` is a DEV-dependency
+///   of this crate, so the arm cannot call that function; the test
+///   `the_realtime_frame_lattice_is_sceneworks_cores_own_wan_rule` drives the real symbol over the
+///   whole accepted and refused range so the transcription cannot drift;
+/// * the latent ceiling — [`KREA_REALTIME_MAX_LATENT_FRAMES`], the `pub(crate)` `MAX_LATENT_FRAMES`
+///   the crate enforces in `bounded_latent_frame_count`;
+/// * `batch == 1` — read from `Capabilities::max_count`, which this engine declares as 1.
+fn validate_krea_realtime_geometry(
+    width: u32,
+    height: u32,
+    frames: u32,
+) -> Result<KreaRealtimeGeometry, String> {
+    let capabilities = mlx_gen_krea_realtime::descriptor().capabilities;
+    let multiple = match capabilities.size_floor {
+        mlx_gen::gen_core::SizeFloor::RangeCheckedOnGrid { multiple } => multiple,
+        other => {
+            return Err(format!(
+                "{KREA_REALTIME_LABEL} expects the pinned engine to advertise a grid size floor, \
+                 got {other:?}"
+            ))
+        }
+    };
+    if multiple == 0 || !width.is_multiple_of(multiple) || !height.is_multiple_of(multiple) {
+        return Err(format!(
+            "{KREA_REALTIME_LABEL} requires geometry on the engine's {multiple}px grid, got \
+             {width}x{height}"
+        ));
+    }
+    for (axis, value) in [("width", width), ("height", height)] {
+        if value < capabilities.min_size || value > capabilities.max_size {
+            return Err(format!(
+                "{KREA_REALTIME_LABEL} requires geometry.{axis} within the engine's per-edge range \
+                 {}..={}, got {value}",
+                capabilities.min_size, capabilities.max_size
+            ));
+        }
+    }
+    let stride = KREA_REALTIME_TEMPORAL_STRIDE;
+    if frames < stride + 1 || !(frames - 1).is_multiple_of(stride) {
+        return Err(format!(
+            "{KREA_REALTIME_LABEL} requires geometry.frames on the {stride}k+1 Wan lattice at or \
+             above {}, got {frames}",
+            stride + 1
+        ));
+    }
+    let latent_frames = (frames - 1) / stride + 1;
+    if latent_frames > KREA_REALTIME_MAX_LATENT_FRAMES {
+        return Err(format!(
+            "{KREA_REALTIME_LABEL} requires geometry.frames within the engine's \
+             {KREA_REALTIME_MAX_LATENT_FRAMES} latent-frame maximum, but {frames} frames resolve to \
+             {latent_frames} latent frames"
+        ));
+    }
+    Ok(KreaRealtimeGeometry {
+        width,
+        height,
+        frames,
+        latent_frames,
+        autoregressive_blocks: latent_frames.div_ceil(KREA_REALTIME_LATENT_FRAMES_PER_BLOCK),
+    })
+}
+
+/// Read the four declared geometry axes. Like the LTX and MiniMax arms this reads `frames` as a real
+/// value rather than asserting it away, and pins `batch` to the engine's own advertised `max_count`
+/// before anything derived is computed.
+fn krea_realtime_target_geometry(request: &Value) -> Result<KreaRealtimeGeometry, String> {
+    let geometry = protocol::planned(request)?
+        .pointer("/target/geometry")
+        .and_then(Value::as_object)
+        .ok_or_else(|| "planned.target.geometry must be an object".to_owned())?;
+    let axis = |name: &str| {
+        geometry
+            .get(name)
+            .and_then(Value::as_u64)
+            .and_then(|value| u32::try_from(value).ok())
+            .ok_or_else(|| format!("planned.target.geometry.{name} must fit u32"))
+    };
+    let max_count = mlx_gen_krea_realtime::descriptor().capabilities.max_count;
+    let batch = axis("batch")?;
+    if batch != max_count {
+        return Err(format!(
+            "{KREA_REALTIME_LABEL} requires geometry.batch == {max_count} (the engine's advertised \
+             max_count; it renders one clip per request), got {batch}"
+        ));
+    }
+    validate_krea_realtime_geometry(axis("width")?, axis("height")?, axis("frames")?)
+}
+
+/// Defense-in-depth mirror of `validate_minimax_target`, plus this engine's t2v-specific target
+/// shape.
+///
+/// `run` dispatches by provider id today, but this arm hardcodes the Krea Realtime contract, so a
+/// foreign caller must be refused BY NAME here — before any environment variable is read, any path
+/// canonicalized, or any weight file opened.
+///
+/// The reference surfaces are refused for a sharper reason than tidiness: this engine routes purely
+/// on CONDITIONING (`pipeline::run`) — nothing routes to t2v, a `Conditioning::Reference` still
+/// routes to i2v, a `Conditioning::VideoClip` routes to v2v. i2v additionally warms the causal KV
+/// cache from the encoded reference and prepends it to the output, and v2v runs a
+/// strength-controlled init, so both have a materially different memory profile from the t2v route
+/// this plan declares. A record measured on t2v may never be filed against a reference-carrying
+/// target.
+fn validate_krea_realtime_target(request: &Value) -> Result<KreaRealtimeGeometry, String> {
+    let target = protocol::planned(request)?
+        .get("target")
+        .and_then(Value::as_object)
+        .ok_or_else(|| "planned.target must be an object".to_owned())?;
+    let provider = target
+        .get("provider")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "planned.target.provider must be a string".to_owned())?;
+    if provider != KREA_REALTIME_PROVIDER {
+        return Err(format!(
+            "{KREA_REALTIME_LABEL} does not implement provider {provider:?}"
+        ));
+    }
+    let model_id = target
+        .get("modelId")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "planned.target.modelId must be a string".to_owned())?;
+    if model_id != KREA_REALTIME_PROVIDER {
+        return Err(format!(
+            "{KREA_REALTIME_LABEL} requires modelId {KREA_REALTIME_PROVIDER:?}, got {model_id:?}"
+        ));
+    }
+    let mode = target
+        .get("mode")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "planned.target.mode must be a string".to_owned())?;
+    if mode != "text_to_video" {
+        return Err(format!(
+            "{KREA_REALTIME_LABEL} requires reference-free text_to_video mode, got {mode:?}"
+        ));
+    }
+    for field in ["referenceCount", "reference_count"] {
+        if let Some(value) = target.get(field) {
+            if value.as_u64() != Some(0) {
+                return Err(format!(
+                    "{KREA_REALTIME_LABEL} requires {field} == 0 when declared; a reference routes \
+                     the engine to i2v, which warms the causal KV cache from the encoded still and \
+                     cannot be recorded from the t2v route"
+                ));
+            }
+        }
+    }
+    for field in ["hasReference", "has_reference"] {
+        if let Some(value) = target.get(field) {
+            if value.as_bool() != Some(false) {
+                return Err(format!(
+                    "{KREA_REALTIME_LABEL} requires {field} == false when declared; a reference \
+                     routes the engine to i2v, which warms the causal KV cache from the encoded \
+                     still and cannot be recorded from the t2v route"
+                ));
+            }
+        }
+    }
+    krea_realtime_target_geometry(request)
+}
+
+/// Bind the fixture to the planned tier AND the full rendered geometry, recovering the cadence and
+/// the seed. Like MiniMax's, this arm's `fps` has exactly one legal value, so the fixture cannot
+/// declare a cadence the engine would never produce.
+fn planned_krea_realtime_capture(
+    request: &Value,
+    tier: &str,
+    geometry: KreaRealtimeGeometry,
+) -> Result<(u32, u64), String> {
+    let fixture = protocol::planned(request)?
+        .get("fixture")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "planned.fixture must be a string".to_owned())?;
+    let prefix = format!(
+        "krea-realtime-14b-mlx-{tier}-{}x{}-f{}-fps",
+        geometry.width, geometry.height, geometry.frames
+    );
+    let remainder = fixture
+        .strip_prefix(&prefix)
+        .ok_or_else(|| format!("planned.fixture {fixture:?} must start with {prefix:?}"))?;
+    let (fps, seed) = remainder
+        .split_once("-seed")
+        .ok_or_else(|| format!("planned.fixture {fixture:?} must end with -seed<seed>"))?;
+    let fps = fps
+        .parse::<u32>()
+        .map_err(|error| format!("parse Krea Realtime fixture fps {fps:?}: {error}"))?;
+    let seed = seed
+        .parse::<u64>()
+        .map_err(|error| format!("parse Krea Realtime fixture seed {seed:?}: {error}"))?;
+    if fps != KREA_REALTIME_FPS {
+        return Err(format!(
+            "planned.fixture declares fps {fps}, but the released Krea Realtime 14B checkpoint \
+             generates at {KREA_REALTIME_FPS} fps only"
+        ));
+    }
+    if seed != KREA_REALTIME_SEED {
+        return Err(format!(
+            "planned.fixture seed {seed} does not match the Krea Realtime calibration seed \
+             {KREA_REALTIME_SEED}"
+        ));
+    }
+    Ok((fps, seed))
+}
+
+/// The artifact one Krea Realtime capture loads.
+#[derive(Debug)]
+struct KreaRealtimeArtifact {
+    repository: String,
+    revision: String,
+    root: PathBuf,
+    spec: LoadSpec,
+}
+
+impl KreaRealtimeArtifact {
+    fn resolved_path_fingerprint(&self, tier: &str) -> String {
+        format!("{}@{}:{tier}", self.repository, self.revision)
+    }
+}
+
+/// Resolve `SCENEWORKS_KREA_REALTIME_{REPOSITORY,REVISION,ROOT}` into a tier-exact load spec, in the
+/// shape the SHIPPED WORKER builds.
+///
+/// The spec is `crates/sceneworks-worker/src/video_jobs/wan.rs::video_load_spec` applied to the
+/// directory `crates/sceneworks-worker/src/video_jobs/krea_realtime.rs`'s
+/// `resolve_krea_realtime_tier_dir_and_quant` resolves: a single tier subdirectory of the turnkey
+/// snapshot, `Precision::Bf16`, and — the load-bearing part —
+/// **`quantize = None` AT EVERY TIER**. That resolver states the reason in one line: *the tier on
+/// disk IS the quantization*. Every published Krea Realtime file lives under a `q4/`/`q8/`/`bf16/`
+/// prefix carrying its own packed `dit.safetensors` and quantization manifest, so passing a
+/// `LoadSpec::quantize` would be a load-time recipe asserted over already-packed weights rather
+/// than a description of what is being measured. There is no external text encoder and no adapter:
+/// the tier tree is self-contained (`t2v::load_text_encoder` / `load_vae` open the stock dense Wan
+/// companions from the same directory).
+///
+/// The root must end in the PLANNED tier's directory, so a stale `…/q4` export can never satisfy a
+/// q8 or bf16 plan.
+fn krea_realtime_load_spec(tier: &str) -> Result<KreaRealtimeArtifact, String> {
+    let repository = protocol::required_env("SCENEWORKS_KREA_REALTIME_REPOSITORY")?;
+    let revision = protocol::required_env("SCENEWORKS_KREA_REALTIME_REVISION")?;
+    protocol::validate_artifact_identity(
+        &repository,
+        &revision,
+        protocol::KREA_REALTIME_REPOSITORY,
+    )?;
+    let root = std::fs::canonicalize(PathBuf::from(protocol::required_env(
+        "SCENEWORKS_KREA_REALTIME_ROOT",
+    )?))
+    .map_err(|error| format!("canonicalize SCENEWORKS_KREA_REALTIME_ROOT: {error}"))?;
+    protocol::validate_huggingface_snapshot_root(
+        &root,
+        &repository,
+        &revision,
+        tier,
+        protocol::KREA_REALTIME_REPOSITORY,
+    )?;
+    let mut spec = LoadSpec::new(WeightsSource::Dir(root.clone()))
+        .with_offload_policy(OffloadPolicy::Resident)
+        .with_load_shape(LoadShape::EagerMaterialization);
+    spec.precision = Precision::Bf16;
+    Ok(KreaRealtimeArtifact {
+        repository,
+        revision,
+        root,
+        spec,
+    })
+}
+
+/// The admission context for the Krea Realtime safety scenarios.
+///
+/// `mode` IS AN EVIDENCE KEY, not a label, for the reason spelled out at [`minimax_context`]: the
+/// shipped video funnel asks under `"text_to_video"` and types it with `memory_mode_from_mode_key`,
+/// which maps every non-canonical key to [`MemoryMode::Other`]. This capture carries that spelling
+/// so a probe run here answers the question the runtime actually asks.
+fn krea_realtime_context(
+    selection: MemorySelection,
+    calibration: &MemoryCalibrationIdentity,
+    fingerprint: &str,
+    geometry: KreaRealtimeGeometry,
+    total_bytes: u64,
+    predicted_peak_bytes: u64,
+) -> MemoryRunContext {
+    MemoryRunContext {
+        selection,
+        optimization_authority: MemoryOptimizationAuthority::Calibrated,
+        calibration_abi: calibration.abi,
+        // A parameter only so the stale-evidence probe can pass a deliberate mismatch; every real
+        // call site passes `calibration.fingerprint`.
+        calibration_fingerprint: fingerprint.to_owned(),
+        load_shape: calibration.load_shape,
+        mode: MemoryMode::Other("text_to_video".to_owned()),
+        has_reference: false,
+        use_pid: false,
+        has_phases: true,
+        geometry: MemoryGeometry {
+            width: geometry.width,
+            height: geometry.height,
+            batch: 1,
+            frames: geometry.frames,
+            reference_count: 0,
+        },
+        overlay: None,
+        budget: MemoryBudget {
+            total_bytes,
+            committed_bytes: 0,
+            reclaimable_bytes: 0,
+            reserved_headroom_bytes: 0,
+        },
+        predicted_peak_bytes,
+        cache_state: MemoryCacheState::Cold,
+        evidence_revision: format!("sc-22735@{}", protocol::INFERENCE_PIN),
+    }
+}
+
+fn krea_realtime_request(geometry: KreaRealtimeGeometry, fps: u32, seed: u64) -> GenerationRequest {
+    GenerationRequest {
+        prompt: "a handheld shot drifting through a neon arcade at night, reflections on wet tile"
+            .to_owned(),
+        width: geometry.width,
+        height: geometry.height,
+        count: 1,
+        seed: Some(seed),
+        frames: Some(geometry.frames),
+        fps: Some(fps),
+        steps: Some(KREA_REALTIME_STEPS),
+        ..Default::default()
+    }
+}
+
+fn krea_realtime_quality_passes(maximum: f64, mean: f64, rms: f64) -> bool {
+    maximum <= KREA_REALTIME_MAX_THRESHOLD
+        && mean <= KREA_REALTIME_MEAN_THRESHOLD
+        && rms <= KREA_REALTIME_RMS_THRESHOLD
+}
+
+/// One exact tuple per plan row, the shape `minimax_complete_sweep` established.
+fn krea_realtime_complete_sweep(request: &Value) -> Result<Value, String> {
+    let parameters = protocol::strategy_parameters(request)?;
+    let axes = parameters
+        .iter()
+        .filter_map(|(name, value)| value.as_u64().map(|value| (name, value)))
+        .map(|(name, value)| json!({ "parameter": name, "testedValues": [value] }))
+        .collect::<Vec<_>>();
+    Ok(json!({
+        "axes": axes,
+        "cases": [{ "parameters": parameters, "result": "passed" }],
+        "rangeVerified": true,
+    }))
+}
+
+/// The `mlx:krea_realtime_14b` arm (sc-22735) — the third MLX video lane.
+///
+/// It reads the registry contract under the exact provider id, proves the loaded generator exposes
+/// the byte-for-byte same contract, runs the admission probes against the provider's own registered
+/// `safety_check`, and measures three phase peaks off the boundaries the shipped `generate` already
+/// emits (`t2v.rs` emits `Loading(TextEncoder)`, `Loading(Renderer)`, per-step `Step`, and
+/// `Decoding`). No rung allowlist is hardcoded: the pinned contract's own `validate_selection`
+/// decides which rungs are capturable, and this provider registers a resident-only witness.
+fn run_krea_realtime(request: &Value) -> Result<Value, String> {
+    let geometry = validate_krea_realtime_target(request)?;
+    protocol::validate_plain_overlay_target(request, KREA_REALTIME_PLAIN_EXECUTION_PATH)?;
+    let load_shape = planned_load_shape(request)?;
+    if load_shape != LoadShape::EagerMaterialization {
+        return Err(format!(
+            "{KREA_REALTIME_LABEL} must use the production {} load shape, but the plan declares {}",
+            protocol::LOAD_SHAPE_EAGER,
+            load_shape_key(load_shape)
+        ));
+    }
+    let selection = planned_selection(request)?;
+    let tier = planned_qwen_tier(request)?; // shared numeric-tier parser
+                                            // PRE-LOAD fingerprint conformance, before any environment or weight work.
+    validate_planned_fingerprint_is_producible(KREA_REALTIME_PROVIDER, tier, request)?;
+    let (fps, seed) = planned_krea_realtime_capture(request, tier, geometry)?;
+    let planned_fingerprint = protocol::planned(request)?
+        .get("calibrationFingerprint")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "planned.calibrationFingerprint must be a string".to_owned())?
+        .to_owned();
+
+    let artifact = krea_realtime_load_spec(tier)?;
+    let spec = &artifact.spec;
+    // Read the on-disk footprint BEFORE the load, for the same reason the LTX and MiniMax arms do:
+    // grounded in the artifact rather than in an allocator reading a broken staging would itself
+    // corrupt, and a mis-staged tier fails here rather than after three full renders.
+    let staged_tier_bytes = safetensors_bytes(&artifact.root)?;
+
+    let registry = mlx_gen_krea_realtime::provider_registry()
+        .map_err(|error| format!("build Krea Realtime registry: {error}"))?;
+    let contract = registry
+        .memory_strategy_contract(KREA_REALTIME_PROVIDER, spec)
+        .map_err(|error| {
+            format!("read {KREA_REALTIME_PROVIDER} memory-strategy contract: {error}")
+        })?
+        .ok_or_else(|| {
+            "pinned MLX Krea Realtime provider has no memory-strategy contract".to_owned()
+        })?;
+    contract.validate_selection(&selection).map_err(|error| {
+        format!("pinned Krea Realtime contract rejected planned selection: {error}")
+    })?;
+    let strategy = attested_strategy(
+        request,
+        &selection,
+        &contract.engaged_composition(selection.strategy),
+    )?;
+    let calibration = contract
+        .calibration
+        .as_ref()
+        .ok_or_else(|| "pinned Krea Realtime contract has no calibration identity".to_owned())?;
+    // The POST-LOAD binding the pre-load table only makes locally diagnosable: what the pinned
+    // provider actually publishes for this `(provider, tier)`, compared against both the arm's own
+    // expectation and the plan, so the two cannot agree with the arm separately while disagreeing
+    // with each other.
+    if let Some(expected) = mlx_production_fingerprint(KREA_REALTIME_PROVIDER, tier) {
+        if calibration.fingerprint != expected {
+            return Err(format!(
+                "pinned Krea Realtime contract fingerprint changed at tier {tier:?}: expected \
+                 {expected}, got {}",
+                calibration.fingerprint
+            ));
+        }
+    }
+    if planned_fingerprint != calibration.fingerprint {
+        return Err(format!(
+            "plan/provider calibration mismatch: plan={planned_fingerprint}, pinned provider={}",
+            calibration.fingerprint
+        ));
+    }
+    if calibration.load_shape != load_shape {
+        return Err(format!(
+            "pinned Krea Realtime contract resolved load shape {:?} for a plan that declares {:?}",
+            calibration.load_shape, load_shape
+        ));
+    }
+
+    let hardware_bytes = request
+        .pointer("/hardware/memoryBytes")
+        .and_then(Value::as_u64)
+        .ok_or_else(|| "run request.hardware.memoryBytes must be an integer".to_owned())?;
+    let wired_limit_bytes = request
+        .pointer("/hardware/wiredLimitBytes")
+        .and_then(Value::as_u64)
+        .ok_or_else(|| "run request.hardware.wiredLimitBytes must be an integer".to_owned())?;
+
+    let generator = registry
+        .load(KREA_REALTIME_PROVIDER, spec)
+        .map_err(|error| format!("load real Krea Realtime {tier} provider: {error}"))?;
+    let loaded_contract = generator
+        .memory_strategy_contract()
+        .ok_or_else(|| "loaded Krea Realtime generator exposed no memory contract".to_owned())?;
+    if loaded_contract != &contract {
+        return Err(
+            "loaded Krea Realtime generator contract differs from the registry contract".to_owned(),
+        );
+    }
+
+    // Admission hygiene on the LOADED provider, through its OWN registered check: it must accept a
+    // fitting probe (so the two rejections below are evidence rather than a blanket refusal), reject
+    // an unknown/zero budget, and reject a mutated calibration fingerprint.
+    let probe = |fingerprint: &str, total_bytes: u64, predicted: u64| {
+        generator.memory_strategy_safety_check(&krea_realtime_context(
+            selection,
+            calibration,
+            fingerprint,
+            geometry,
+            total_bytes,
+            predicted,
+        ))
+    };
+    if !matches!(
+        probe(&calibration.fingerprint, hardware_bytes, 1),
+        MemorySafetyDecision::Accept
+    ) {
+        return Err(
+            "Krea Realtime admission rejected a fitting probe budget; the scenario rejections \
+             below would be a blanket refusal, not evidence"
+                .to_owned(),
+        );
+    }
+    if !matches!(
+        probe(&calibration.fingerprint, 0, 1),
+        MemorySafetyDecision::Reject { .. }
+    ) {
+        return Err("Krea Realtime admission accepted an unknown/zero memory budget".to_owned());
+    }
+    if !matches!(
+        probe("stale-krea-realtime-fingerprint", hardware_bytes, 1),
+        MemorySafetyDecision::Reject { .. }
+    ) {
+        return Err("Krea Realtime admission accepted stale calibration evidence".to_owned());
+    }
+
+    // Three phase peaks off the boundaries the shipped `generate` already emits, cut exactly the way
+    // the MiniMax arm cuts them, and for the same reason: each recorded phase is exactly one of the
+    // contract's declared `[Conditioning, Denoise, Decode]`.
+    //
+    // * conditioning = the UMT5 map, prompt encode, and release, closed at `Loading(Renderer)`;
+    // * denoise = the DiT map plus every autoregressive chunk's few-step denoise AND the rolling
+    //   causal KV cache the AR loop threads across chunks, closed at `Decoding`;
+    // * decode = the z16 VAE, closed when `generate` returns.
+    //
+    // ORDERING IS LOAD-BEARING at every boundary: read `get_peak_memory()` AND the `active + cache`
+    // footprint FIRST, and only then `reset_peak_memory()`. Reset early and the closing stage's
+    // high-water leaks into the next one. `get_peak_memory` reports ACTIVE only, so the footprint is
+    // read alongside it rather than instead — the KV cache is the largest elastic term this lane
+    // has, and a drain that turns into a no-op migrates it from active into the allocator cache
+    // where active alone cannot see it.
+    let pre_generate = Cell::new(PhaseMemory {
+        active: 0,
+        cache: 0,
+    });
+    let conditioning = Cell::new(PhaseMemory {
+        active: 0,
+        cache: 0,
+    });
+    let denoise = Cell::new(PhaseMemory {
+        active: 0,
+        cache: 0,
+    });
+    let conditioning_close = Cell::new(AllocatorState::default());
+    let denoise_close = Cell::new(AllocatorState::default());
+    clear_cache();
+    reset_peak_memory();
+    let pre_rung_active = get_active_memory() as u64;
+    let pre_rung_cache = get_cache_memory() as u64;
+    let (measured, output_fps, audio) = diagnostic_video_frames(
+        generator
+            .generate(
+                &krea_realtime_request(geometry, fps, seed),
+                &mut |progress| match progress {
+                    Progress::Loading(LoadPhase::TextEncoder) => {
+                        pre_generate.set(PhaseMemory::capture());
+                        reset_peak_memory();
+                    }
+                    Progress::Loading(LoadPhase::Renderer) => {
+                        conditioning.set(PhaseMemory::capture());
+                        conditioning_close.set(AllocatorState::capture_current());
+                        reset_peak_memory();
+                    }
+                    Progress::Decoding => {
+                        denoise.set(PhaseMemory::capture());
+                        denoise_close.set(AllocatorState::capture_current());
+                        reset_peak_memory();
+                    }
+                    _ => {}
+                },
+            )
+            .map_err(|error| format!("generate measured Krea Realtime render: {error}"))?,
+        KREA_REALTIME_VIDEO_LABEL,
+    )?;
+    let decode = PhaseMemory::capture();
+    let decode_close = AllocatorState::capture_current();
+    let pre_generate = pre_generate.get();
+    let conditioning = conditioning.get();
+    let denoise = denoise.get();
+    let conditioning_close = conditioning_close.get();
+    let denoise_close = denoise_close.get();
+    if [conditioning.active, denoise.active, decode.active].contains(&0) {
+        return Err(
+            "a synchronized Krea Realtime lifecycle phase reported a zero active peak; the engine \
+             stopped emitting a boundary and the attribution collapsed"
+                .to_owned(),
+        );
+    }
+    if measured.len() as u64 != u64::from(geometry.frames) {
+        return Err(format!(
+            "Krea Realtime rendered {} frames for a {}-frame request",
+            measured.len(),
+            geometry.frames
+        ));
+    }
+    if output_fps != fps {
+        return Err(format!(
+            "Krea Realtime returned fps {output_fps} for a {fps} fps request"
+        ));
+    }
+    // A pure video model: an audio track here would mean the output shape is not what this record
+    // describes.
+    if audio.is_some() {
+        return Err(
+            "Krea Realtime render returned an audio track; this engine is video-only".to_owned(),
+        );
+    }
+    let first = measured
+        .first()
+        .ok_or_else(|| "Krea Realtime render returned no first frame".to_owned())?;
+    if first.pixels.is_empty() || first.pixels.iter().all(|pixel| *pixel == first.pixels[0]) {
+        return Err("Krea Realtime render returned a degenerate first frame".to_owned());
+    }
+
+    let overall = PhaseMemory::overall(&[conditioning, denoise, decode]);
+    // Video evidence charges the RESIDENT ACTIVE peak, for the reason stated at the MiniMax arm.
+    let predicted_peaks = video_predicted_peak_bytes(conditioning, denoise, decode);
+    let predicted = predicted_peaks.overall;
+    // The same two ceilings `memory-calibration-harness.mjs#assertResidencyFitsHardware` applies,
+    // checked HERE so a capture that cannot be admitted fails loudly during the campaign rather
+    // than producing a well-formed record the harness rejects afterwards.
+    if overall.active > hardware_bytes {
+        return Err(format!(
+            "Krea Realtime observed overall active {} bytes above the probed hardware memory \
+             {hardware_bytes} bytes",
+            overall.active
+        ));
+    }
+    if overall.active > wired_limit_bytes {
+        return Err(format!(
+            "Krea Realtime observed overall active {} bytes above the probed wired ceiling \
+             {wired_limit_bytes} bytes",
+            overall.active
+        ));
+    }
+    // The exact-fit probe, on the LOADED generator and against the MEASURED evidence.
+    if !matches!(
+        probe(&calibration.fingerprint, predicted, predicted),
+        MemorySafetyDecision::Accept
+    ) {
+        return Err("Krea Realtime admission rejected an exact-fit calibrated budget".to_owned());
+    }
+
+    // Warm repeat determinism + cleanup bounds on this exact loaded provider.
+    clear_cache();
+    reset_peak_memory();
+    let (baseline, _, _) = diagnostic_video_frames(
+        generator
+            .generate(&krea_realtime_request(geometry, fps, seed), &mut |_| {})
+            .map_err(|error| format!("generate warm Krea Realtime control: {error}"))?,
+        KREA_REALTIME_VIDEO_LABEL,
+    )?;
+    let clean_warm_peak = get_peak_memory() as u64;
+    clear_cache();
+    let clean_post_cleanup = AllocatorState::capture_current();
+    let cleanup_bounds =
+        LifecycleMemoryBounds::from_clean_warm(clean_warm_peak, clean_post_cleanup);
+    let (maximum_error, mean_error, rms_error) = video_max_mean_rms_abs(&measured, &baseline)?;
+    if !krea_realtime_quality_passes(maximum_error, mean_error, rms_error) {
+        return Err(format!(
+            "Krea Realtime warm repeat exceeded the determinism envelope: max={maximum_error:.6}, \
+             mean={mean_error:.6}, rms={rms_error:.6}"
+        ));
+    }
+    reset_peak_memory();
+    let (warm, _, _) = diagnostic_video_frames(
+        generator
+            .generate(&krea_realtime_request(geometry, fps, seed), &mut |_| {})
+            .map_err(|error| format!("generate warm Krea Realtime repeat: {error}"))?,
+        KREA_REALTIME_VIDEO_LABEL,
+    )?;
+    let warm_peak = get_peak_memory() as u64;
+    if !cleanup_bounds.allows_warm_peak(warm_peak) {
+        return Err(format!(
+            "Krea Realtime warm repeat peaked at {warm_peak} bytes, above the clean warm control \
+             {clean_warm_peak} bytes plus 2%"
+        ));
+    }
+    clear_cache();
+    let warm_post_cleanup = AllocatorState::capture_current();
+    if !cleanup_bounds.allows_retained(warm_post_cleanup) {
+        return Err(format!(
+            "Krea Realtime warm repeat retained active/cache bytes {warm_post_cleanup:?} above the \
+             clean warm cleanup {clean_post_cleanup:?} plus {} bytes",
+            cleanup_bounds.tolerance_bytes,
+        ));
+    }
+    let (warm_maximum, warm_mean, warm_rms) = video_max_mean_rms_abs(&measured, &warm)?;
+    if !krea_realtime_quality_passes(warm_maximum, warm_mean, warm_rms) {
+        return Err("Krea Realtime second warm repeat changed the deterministic output".to_owned());
+    }
+
+    // Arm-internal negative-mutation falsifiability check: the capture FAILS if the envelope cannot
+    // be breached, and the measured numbers land in diagnostics rather than in the field.
+    let mutated = measured
+        .iter()
+        .map(qwen_negative_mutation)
+        .collect::<Vec<_>>();
+    let (mutated_maximum, mutated_mean, mutated_rms) = video_max_mean_rms_abs(&mutated, &baseline)?;
+    if krea_realtime_quality_passes(mutated_maximum, mutated_mean, mutated_rms) {
+        return Err(
+            "Krea Realtime output mutation did not breach the determinism envelope".to_owned(),
+        );
+    }
+
+    let lifecycle_blocker = concat!(
+        "this arm executes the measured render plus two unscoped warm repeats on the loaded ",
+        "provider; it opens no memory-strategy request scope and injects no calibration fault, so ",
+        "the scoped cancellation and authorized-error scenarios and their recovery renders are ",
+        "unexecuted. This record claims nothing about them"
+    );
+    let mut fragment = json!({
+        "status": "runtime_complete",
+        "strategy": strategy,
+        // From the CONTRACT's own calibration identity, never copied from the plan: a receipt may
+        // only testify to the materialization shape its own run used (sc-16482).
+        "loadShape": load_shape_key(calibration.load_shape),
+        "artifact": {
+            "repository": artifact.repository,
+            "resolvedRevision": artifact.revision,
+            "variant": tier,
+        },
+        "sweep": krea_realtime_complete_sweep(request)?,
+        "scenarios": [
+            { "name": "exact_fit", "result": "passed", "predictedBytes": predicted, "effectiveBudgetBytes": predicted },
+            { "name": "unknown_budget", "result": "passed", "reason": "the loaded Krea Realtime generator rejected a zero/unknown budget" },
+            { "name": "stale_evidence", "result": "passed", "reason": "the loaded Krea Realtime generator rejected a mutated calibration fingerprint" },
+            { "name": "warm_repeat", "result": "passed", "reason": "two warm repeats on the loaded provider reproduced the measured clip frame-for-frame inside the declared envelope, within the clean warm peak and cleanup bounds" },
+            { "name": "cancel", "result": "not_run", "reason": lifecycle_blocker },
+            { "name": "error", "result": "not_run", "reason": lifecycle_blocker },
+            { "name": "loadability", "result": "passed" },
+            { "name": "overlay", "result": "not_applicable", "reason": "settled below from the declared reference-free target" }
+        ],
+        "predictedPeakBytes": predicted_peaks.json(),
+        "observedMemory": {
+            "conditioning": conditioning.json(),
+            "denoise": denoise.json(),
+            "decode": decode.json(),
+            "overall": overall.json(),
+        },
+        "quality": {
+            "contract": "identical artifact, prompt, seed, geometry, frames, fps, steps, tier and loaded provider contract; cold measured clip versus two warm unscoped repeats, compared over every frame",
+            "identicalInputs": true,
+            "result": "passed",
+            "maximumError": maximum_error,
+            "meanError": mean_error,
+            "rootMeanSquareError": rms_error,
+            "maximumErrorThreshold": KREA_REALTIME_MAX_THRESHOLD,
+            "meanErrorThreshold": KREA_REALTIME_MEAN_THRESHOLD,
+            "rootMeanSquareErrorThreshold": KREA_REALTIME_RMS_THRESHOLD,
+        },
+        "negativeMutation": null,
+        "loadability": {
+            "result": "passed",
+            "resolvedPathFingerprint": artifact.resolved_path_fingerprint(tier),
+        },
+        "output": {
+            "frames": geometry.frames,
+            "fps": fps,
+            "latentFrames": geometry.latent_frames,
+            "autoregressiveBlocks": geometry.autoregressive_blocks,
+            "audio": { "present": false },
+            "firstFrameNondegenerate": true,
+        },
+        "diagnostics": protocol::diagnostics(
+            &format!("memory-mlx-adapter:krea-realtime-{}", tier),
+            "executed",
+            [lifecycle_blocker.to_owned()],
+            [
+                ("preRungActiveAfterClear", "bytes", pre_rung_active),
+                ("preRungCacheAfterClear", "bytes", pre_rung_cache),
+                ("preGenerateActivePeak", "bytes", pre_generate.active),
+                ("conditioningActivePeak", "bytes", conditioning.active),
+                ("conditioningCloseActive", "bytes", conditioning_close.active),
+                ("conditioningCloseCache", "bytes", conditioning_close.cache),
+                ("denoiseActivePeak", "bytes", denoise.active),
+                ("denoiseCloseActive", "bytes", denoise_close.active),
+                ("denoiseCloseCache", "bytes", denoise_close.cache),
+                ("decodeActivePeak", "bytes", decode.active),
+                ("decodeCloseActive", "bytes", decode_close.active),
+                ("decodeCloseCache", "bytes", decode_close.cache),
+                ("overallAllocatorEnvelope", "bytes", overall.allocator_bytes()),
+                ("predictedOverallCeiling", "bytes", predicted),
+                ("lifecycleCleanWarmPeak", "bytes", clean_warm_peak),
+                ("lifecycleCleanPostCleanupActive", "bytes", clean_post_cleanup.active),
+                ("lifecycleCleanPostCleanupCache", "bytes", clean_post_cleanup.cache),
+                ("lifecycleCleanupTolerance", "bytes", cleanup_bounds.tolerance_bytes),
+                ("lifecycleWarmRepeatPeak", "bytes", warm_peak),
+                ("lifecycleWarmRepeatPostCleanupActive", "bytes", warm_post_cleanup.active),
+                ("lifecycleWarmRepeatPostCleanupCache", "bytes", warm_post_cleanup.cache),
+                ("negativeMutationMaximumErrorPer255", "count", (mutated_maximum * 255.0).round() as u64),
+                ("negativeMutationMeanErrorPer255", "count", (mutated_mean * 255.0).round() as u64),
+                ("negativeMutationRootMeanSquareErrorPer255", "count", (mutated_rms * 255.0).round() as u64),
+                ("latentFrames", "count", u64::from(geometry.latent_frames)),
+                ("autoregressiveBlocks", "count", u64::from(geometry.autoregressive_blocks)),
+                ("loadSpecCarriesQuant", "count", u64::from(spec.quantize.is_some())),
+                ("stagedTierBytes", "bytes", staged_tier_bytes),
+            ],
+        ),
+        "capturedAt": protocol::captured_at(),
+    });
+    protocol::settle_plain_overlay_scenario(
+        request,
+        &mut fragment,
+        KREA_REALTIME_PLAIN_EXECUTION_PATH,
+    )?;
+    Ok(fragment)
+}
+
 fn run(request: &Value) -> Result<Value, String> {
     let provider = protocol::planned(request)?
         .pointer("/target/provider")
@@ -12383,6 +13474,10 @@ fn run(request: &Value) -> Result<Value, String> {
         // family and execution path; the arm resolves which member from `(provider, mode)`.
         Z_IMAGE_BASE_PROVIDER => run_z_image_reference(request),
         KREA_BASE_PROVIDER => run_krea_base(request),
+        // sc-22735: the undistilled Krea 2 Raw base rides the same arm under its own registry id,
+        // artifact family, planned load shape and — unlike Turbo — no `LoadSpec` quant at any tier.
+        // The arm resolves which member from `target.provider`.
+        KREA_RAW_PROVIDER => run_krea_base(request),
         SDXL_PROVIDER => run_sdxl(request),
         KREA_PROVIDER => run_krea_control(request),
         QWEN_PROVIDER => run_qwen_provider(request),
@@ -12409,6 +13504,11 @@ fn run(request: &Value) -> Result<Value, String> {
         // it accepts a multi-frame geometry only by validating against MiniMax-H3's own lattice,
         // stride and canvas budget, read off the pinned engine crate.
         MINIMAX_PROVIDER => run_minimax_h3(request),
+        // sc-22735: the third video arm, and the first AUTOREGRESSIVE one. Same rule as LTX and
+        // MiniMax — it accepts a multi-frame geometry only by validating against Krea Realtime's own
+        // spatial grid, per-edge range and temporal lattice, read off the pinned engine crate's
+        // advertised descriptor. It deliberately applies NO area cap: the engine has none.
+        KREA_REALTIME_PROVIDER => run_krea_realtime(request),
         other => Err(format!(
             "MLX five-rung calibration does not implement provider {other:?}"
         )),
@@ -13694,7 +14794,9 @@ mod krea_base_tests {
             "planned": {
                 "target": {
                     "provider": provider,
-                    "modelId": "krea_2_turbo",
+                    // `modelId` tracks the provider so a member-resolution test is not silently
+                    // answering the `requires modelId` clause instead (sc-22735).
+                    "modelId": provider,
                     "mode": "text_to_image",
                     "overlay": "none",
                     "geometry": { "width": 768, "height": 768, "batch": 1, "frames": 1 }
@@ -13702,6 +14804,21 @@ mod krea_base_tests {
                 "strategy": { "rung": rung, "engagedRungs": ["resident"], "parameters": {} }
             }
         })
+    }
+
+    /// A fully-formed plan row for one member at one tier, matching the checked-in plan's shape.
+    fn planned_row(arm: KreaBaseArm, tier: &str) -> Value {
+        let mut request = minimal_request(arm.provider, "resident");
+        request["planned"]["target"]["tier"] = json!(tier);
+        request["planned"]["loadShape"] = json!(load_shape_key(arm.load_shape));
+        request["planned"]["fixture"] = json!(format!(
+            "{}-{tier}-768-seed{}-step2",
+            arm.fixture_stem, arm.seed
+        ));
+        request["planned"]["calibrationFingerprint"] =
+            json!(krea_base_pinned_fingerprint(arm, tier)
+                .expect("both members resolve a pinned fingerprint at every numeric tier"));
+        request
     }
 
     fn fixture_spec(root: &std::path::Path) -> LoadSpec {
@@ -13737,13 +14854,184 @@ mod krea_base_tests {
 
     #[test]
     fn the_base_arm_refuses_a_foreign_provider_before_environment_or_weight_work() {
-        for provider in ["krea_2_turbo_edit", "krea_2_turbo_control", "qwen_image"] {
+        // sc-22735: the refusal moved from the (then only) member's own label onto the FAMILY
+        // resolver, because with two members "which member" is a question that must be answered
+        // before any member-specific validation runs. The guarantee is unchanged and strengthened
+        // below: the provider is named, and nothing about the environment or a contract is
+        // mentioned, so no env read or path work happened first.
+        for provider in [
+            "krea_2_turbo_edit",
+            "krea_2_turbo_control",
+            "qwen_image",
+            "krea_2_edit",
+        ] {
             let error = run_krea_base(&minimal_request(provider, "resident"))
                 .expect_err("a foreign provider must not reach the Krea base arm");
             assert_eq!(
                 error,
-                format!("MLX Krea base calibration does not implement provider {provider:?}")
+                format!("the MLX Krea base arm does not implement provider {provider:?}")
             );
+            for leaked in ["SCENEWORKS_", "contract", "canonicalize", "fingerprint"] {
+                assert!(
+                    !error.contains(leaked),
+                    "the refusal must precede every environment and contract read, saw \
+                     {leaked:?} in {error}"
+                );
+            }
+        }
+    }
+
+    /// Both shipped members resolve to their own row, and every field that differentiates them is
+    /// the one the plan and the shipped worker require.
+    #[test]
+    fn each_shipped_provider_resolves_its_own_family_member() {
+        let turbo = krea_base_arm(&minimal_request(KREA_BASE_PROVIDER, "resident")).unwrap();
+        assert_eq!(turbo, KREA_TURBO_ARM);
+        let raw = krea_base_arm(&minimal_request(KREA_RAW_PROVIDER, "resident")).unwrap();
+        assert_eq!(raw, KREA_RAW_ARM);
+
+        assert_eq!(turbo.provider, "krea_2_turbo");
+        assert_eq!(turbo.load_shape, LoadShape::DeferredMaterialization);
+        assert!(turbo.load_spec_carries_quant);
+        assert_eq!(turbo.expected_repository, protocol::KREA_REPOSITORY);
+        assert_eq!(turbo.seed, KREA_BASE_SEED);
+
+        assert_eq!(raw.provider, "krea_2_raw");
+        // The Raw plan rows declare EAGER; Turbo's declare deferred. Neither is a constant.
+        assert_eq!(raw.load_shape, LoadShape::EagerMaterialization);
+        // THE POINT OF THE STORY: the shipped worker passes `quantize = None` for the Krea image
+        // engines at every tier (`image_jobs/base.rs::mlx_load_quant_for_resolved_artifact`).
+        assert!(!raw.load_spec_carries_quant);
+        assert_eq!(raw.expected_repository, protocol::KREA_RAW_REPOSITORY);
+        assert_eq!(raw.seed, 22735);
+        assert_ne!(turbo.slug, raw.slug);
+        assert_ne!(turbo.execution_path, raw.execution_path);
+        assert_ne!(turbo.repository_env, raw.repository_env);
+    }
+
+    /// The three literal environment-variable names `measure-memory-catalog.mjs` exports for the
+    /// Raw artifact family, read back from the arm table rather than restated.
+    #[test]
+    fn the_raw_member_reads_the_catalogs_own_environment_family() {
+        assert_eq!(
+            KREA_RAW_ARM.repository_env,
+            "SCENEWORKS_KREA_RAW_REPOSITORY"
+        );
+        assert_eq!(KREA_RAW_ARM.revision_env, "SCENEWORKS_KREA_RAW_REVISION");
+        assert_eq!(KREA_RAW_ARM.root_env, "SCENEWORKS_KREA_RAW_ROOT");
+    }
+
+    /// A plan row that names the OTHER member's load shape is refused by name, at both members —
+    /// the accepted shape is a property of the arm, not a hardcoded `deferred_materialization`.
+    #[test]
+    fn each_member_refuses_the_other_members_load_shape() {
+        for (arm, wrong) in [
+            (KREA_TURBO_ARM, protocol::LOAD_SHAPE_EAGER),
+            (KREA_RAW_ARM, protocol::LOAD_SHAPE_DEFERRED),
+        ] {
+            let mut request = planned_row(arm, "q4");
+            request["planned"]["loadShape"] = json!(wrong);
+            let error = run_krea_base(&request).expect_err("the wrong load shape must be refused");
+            assert!(
+                error.contains(&format!(
+                    "must use the production {}",
+                    load_shape_key(arm.load_shape)
+                )) && error.contains(wrong),
+                "{}: {error}",
+                arm.provider
+            );
+        }
+    }
+
+    /// The tier-exact snapshot root every member binds against, built the way a real export lays
+    /// one out.
+    fn snapshot_root(repository: &str, revision: &str, tier: &str, tag: &str) -> PathBuf {
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir()
+            .join(format!("sc-22735-{tag}-{}-{nonce}", std::process::id()))
+            .join(format!("models--{}", repository.replace('/', "--")))
+            .join("snapshots")
+            .join(revision)
+            .join(tier);
+        std::fs::create_dir_all(&root).unwrap();
+        root
+    }
+
+    /// The Raw load spec carries NO quant at ANY tier, and still binds the tier-exact root — driven
+    /// env-free through [`krea_base_spec_at`], the way `z_image_load_spec_at` is unit-tested.
+    #[test]
+    fn the_raw_load_spec_carries_no_quant_and_binds_the_planned_tier() {
+        let repository = "SceneWorks/krea-2-raw-mlx";
+        let revision = "a".repeat(40);
+        for tier in ["bf16", "q4", "q8"] {
+            let root = snapshot_root(repository, &revision, tier, "raw");
+            let selection = planned_selection(&planned_row(KREA_RAW_ARM, tier)).unwrap();
+            let spec = krea_base_spec_at(
+                KREA_RAW_ARM,
+                tier,
+                repository,
+                &revision,
+                root.clone(),
+                &selection,
+            )
+            .expect("the tier-exact Raw root resolves");
+            assert!(
+                spec.quantize.is_none(),
+                "{tier}: the worker passes no LoadSpec quant for krea_2_raw at any tier"
+            );
+            assert_eq!(spec.load_shape, LoadShape::EagerMaterialization);
+
+            // A stale export of ANOTHER tier can never satisfy this plan row.
+            for stale in ["bf16", "q4", "q8"] {
+                if stale == tier {
+                    continue;
+                }
+                let stale_root = root.parent().unwrap().join(stale);
+                std::fs::create_dir_all(&stale_root).unwrap();
+                krea_base_spec_at(
+                    KREA_RAW_ARM,
+                    tier,
+                    repository,
+                    &revision,
+                    stale_root,
+                    &selection,
+                )
+                .expect_err(&format!(
+                    "a .../{stale} root must not satisfy a {tier} plan"
+                ));
+            }
+            std::fs::remove_dir_all(root.parent().unwrap()).ok();
+        }
+    }
+
+    /// Turbo's spec is untouched by the generalization: its already-priced cells were measured with
+    /// the planned tier's quant on the spec, and this story does not re-measure them.
+    #[test]
+    fn the_turbo_load_spec_still_carries_its_tier_quant() {
+        let repository = "SceneWorks/krea-2-turbo-mlx";
+        let revision = "b".repeat(40);
+        for (tier, expected) in [
+            ("bf16", None),
+            ("q4", Some(Quant::Q4)),
+            ("q8", Some(Quant::Q8)),
+        ] {
+            let root = snapshot_root(repository, &revision, tier, "turbo");
+            let selection = planned_selection(&planned_row(KREA_TURBO_ARM, tier)).unwrap();
+            let spec = krea_base_spec_at(
+                KREA_TURBO_ARM,
+                tier,
+                repository,
+                &revision,
+                root.clone(),
+                &selection,
+            )
+            .unwrap();
+            assert_eq!(spec.quantize, expected, "{tier}");
+            assert_eq!(spec.load_shape, LoadShape::DeferredMaterialization);
+            std::fs::remove_dir_all(root.parent().unwrap()).ok();
         }
     }
 
@@ -13917,6 +15205,383 @@ mod krea_base_tests {
             ]
         );
         std::fs::remove_dir_all(root).ok();
+    }
+}
+
+#[cfg(test)]
+mod krea_realtime_tests {
+    use super::*;
+
+    /// The geometry the plan declares for all three `krea_realtime_14b:*:mlx` rows.
+    const PLANNED: (u32, u32, u32) = (832, 480, 45);
+
+    fn minimal_request(provider: &str, width: u32, height: u32, frames: u32, batch: u32) -> Value {
+        json!({
+            "planned": {
+                "target": {
+                    "provider": provider,
+                    "modelId": provider,
+                    "tier": "q4",
+                    "mode": "text_to_video",
+                    "overlay": "none",
+                    "geometry": {
+                        "width": width, "height": height, "batch": batch, "frames": frames
+                    }
+                },
+                "loadShape": "eager_materialization",
+                "calibrationFingerprint": "krea-realtime-14b-q4-mlx-resident-ladder-v1",
+                "fixture": format!(
+                    "krea-realtime-14b-mlx-q4-{width}x{height}-f{frames}-fps24-seed22735"
+                ),
+                "strategy": { "rung": "resident", "engagedRungs": ["resident"], "parameters": {} }
+            }
+        })
+    }
+
+    fn planned_request() -> Value {
+        minimal_request(KREA_REALTIME_PROVIDER, PLANNED.0, PLANNED.1, PLANNED.2, 1)
+    }
+
+    /// (e) The plan's own geometry is ACCEPTED, and every derived quantity the record reports is the
+    /// engine's own arithmetic rather than a restated literal.
+    #[test]
+    fn the_planned_video_geometry_is_accepted_and_derives_the_engines_own_latents() {
+        let geometry =
+            validate_krea_realtime_target(&planned_request()).expect("the planned row renders");
+        assert_eq!((geometry.width, geometry.height), (832, 480));
+        assert_eq!(geometry.frames, 45);
+        // 45 output frames ⇒ (45 − 1)/4 + 1 = 12 latent frames ⇒ exactly four whole AR blocks.
+        assert_eq!(geometry.latent_frames, 12);
+        assert_eq!(geometry.autoregressive_blocks, 4);
+    }
+
+    /// The frame lattice this arm transcribes is SceneWorks-core's own Wan rule, driven over the
+    /// whole accepted and refused range through the real symbol (a dev-dependency, so the arm itself
+    /// cannot call it). A transcription drift reds here.
+    #[test]
+    fn the_realtime_frame_lattice_is_sceneworks_cores_own_wan_rule() {
+        for frames in 1..=200_u32 {
+            let accepted = validate_krea_realtime_geometry(PLANNED.0, PLANNED.1, frames).is_ok();
+            let on_lattice = sceneworks_core::video_request::wan_frame_count(frames) == frames;
+            assert_eq!(
+                accepted, on_lattice,
+                "frames={frames}: the arm and wan_frame_count must agree on the lattice"
+            );
+        }
+    }
+
+    /// The latent derivation matches the formula the engine documents on `KreaRealtimeJob` and
+    /// implements in the `pub(crate)` `latent_frame_count` — re-derived here because there is no
+    /// symbol to read.
+    #[test]
+    fn the_realtime_latent_derivation_matches_the_engines_own_arithmetic() {
+        for frames in (5..=997_u32).step_by(4) {
+            let Ok(geometry) = validate_krea_realtime_geometry(PLANNED.0, PLANNED.1, frames) else {
+                continue;
+            };
+            assert_eq!(
+                geometry.latent_frames,
+                (frames - 1) / KREA_REALTIME_TEMPORAL_STRIDE + 1,
+                "frames={frames}"
+            );
+            assert!(geometry.latent_frames <= KREA_REALTIME_MAX_LATENT_FRAMES);
+        }
+        // 1,028 output frames is exactly the 257-latent maximum; the next lattice step is over it.
+        assert_eq!(
+            validate_krea_realtime_geometry(PLANNED.0, PLANNED.1, 1_025)
+                .unwrap()
+                .latent_frames,
+            257
+        );
+    }
+
+    /// (e) Each geometry refusal fires with its OWN message, and the guard is not a blanket one.
+    #[test]
+    fn each_geometry_clause_refuses_with_its_own_message() {
+        let capabilities = mlx_gen_krea_realtime::descriptor().capabilities;
+        // Off the 4k+1 lattice.
+        let error = validate_krea_realtime_geometry(PLANNED.0, PLANNED.1, 46).unwrap_err();
+        assert!(error.contains("Wan lattice"), "{error}");
+        // On the lattice, but past the engine's own latent ceiling.
+        let error = validate_krea_realtime_geometry(PLANNED.0, PLANNED.1, 1_029).unwrap_err();
+        assert!(error.contains("latent-frame maximum"), "{error}");
+        // An edge off the engine's advertised grid.
+        let error = validate_krea_realtime_geometry(840, PLANNED.1, PLANNED.2).unwrap_err();
+        assert!(error.contains("grid"), "{error}");
+        // An on-grid edge above the engine's advertised per-edge maximum.
+        let over = capabilities.max_size + 16;
+        let error = validate_krea_realtime_geometry(over, PLANNED.1, PLANNED.2).unwrap_err();
+        assert!(
+            error.contains("per-edge range") && error.contains("width"),
+            "{error}"
+        );
+        // ...and below its advertised minimum, on the same clause but the other axis.
+        let error = validate_krea_realtime_geometry(PLANNED.0, 0, PLANNED.2).unwrap_err();
+        assert!(
+            error.contains("per-edge range") && error.contains("height"),
+            "{error}"
+        );
+        // batch != 1.
+        let error = validate_krea_realtime_target(&minimal_request(
+            KREA_REALTIME_PROVIDER,
+            PLANNED.0,
+            PLANNED.1,
+            PLANNED.2,
+            2,
+        ))
+        .unwrap_err();
+        assert!(error.contains("geometry.batch"), "{error}");
+    }
+
+    /// (e) THE ENGINE HAS NO AREA CAP (`pinned_engine_geometry.rs` lists `krea_realtime_14b` as
+    /// `PinnedAreaCap::EngineHasNone`), so a large-area geometry inside the per-edge range must be
+    /// ACCEPTED. A refusal here would be an invented gate that made this harness reject geometries
+    /// the shipped engine renders.
+    #[test]
+    fn a_large_area_geometry_is_not_refused_because_the_engine_has_no_area_cap() {
+        let max = mlx_gen_krea_realtime::descriptor().capabilities.max_size;
+        assert!(max.is_multiple_of(16), "the advertised maximum is on-grid");
+        let geometry = validate_krea_realtime_geometry(max, max, PLANNED.2)
+            .expect("the maximum square canvas is inside the engine's own envelope");
+        assert_eq!((geometry.width, geometry.height), (max, max));
+        // Far above MiniMax-H3's canvas budget, which this arm deliberately does not apply.
+        assert!(u64::from(max) * u64::from(max) > 1_000_000);
+    }
+
+    /// (c/f) A foreign provider, a foreign mode and a declared reference are each refused BY NAME,
+    /// before any environment variable is read or any path canonicalized.
+    #[test]
+    fn the_realtime_arm_refuses_a_foreign_target_before_environment_or_weight_work() {
+        for provider in ["krea_2_raw", "minimax_h3", "ltx_video", "wan_2_1_t2v_14b"] {
+            let request = minimal_request(provider, PLANNED.0, PLANNED.1, PLANNED.2, 1);
+            let error = run_krea_realtime(&request)
+                .expect_err("a foreign provider must not reach the Krea Realtime arm");
+            assert_eq!(
+                error,
+                format!("{KREA_REALTIME_LABEL} does not implement provider {provider:?}")
+            );
+            for leaked in ["SCENEWORKS_", "canonicalize", "contract"] {
+                assert!(!error.contains(leaked), "{leaked:?} leaked into {error}");
+            }
+        }
+
+        for mode in [
+            "image_to_video",
+            "video_to_video",
+            "text_to_image",
+            "edit_image",
+        ] {
+            let mut request = planned_request();
+            request["planned"]["target"]["mode"] = json!(mode);
+            let error = run_krea_realtime(&request).expect_err("only t2v is capturable here");
+            assert_eq!(
+                error,
+                format!(
+                    "{KREA_REALTIME_LABEL} requires reference-free text_to_video mode, got {mode:?}"
+                )
+            );
+        }
+
+        for (field, value) in [
+            ("referenceCount", json!(1)),
+            ("reference_count", json!(2)),
+            ("hasReference", json!(true)),
+            ("has_reference", json!(true)),
+        ] {
+            let mut request = planned_request();
+            request["planned"]["target"][field] = value;
+            let error = run_krea_realtime(&request)
+                .expect_err("a reference routes the engine to i2v and is not this record");
+            assert!(
+                error.contains(field) && error.contains("i2v"),
+                "{field}: {error}"
+            );
+        }
+    }
+
+    /// The load-shape guard: the plan must declare the eager shape the worker executes.
+    #[test]
+    fn the_realtime_arm_refuses_a_deferred_plan_row() {
+        let mut request = planned_request();
+        request["planned"]["loadShape"] = json!(protocol::LOAD_SHAPE_DEFERRED);
+        let error = run_krea_realtime(&request).expect_err("the plan declares the wrong shape");
+        assert!(
+            error.contains("must use the production eager_materialization"),
+            "{error}"
+        );
+    }
+
+    /// (Part 3) The pre-load fingerprint check fires inside the arm, before any environment read.
+    #[test]
+    fn the_realtime_arm_refuses_an_unproducible_planned_identity_before_weight_work() {
+        let mut request = planned_request();
+        request["planned"]["calibrationFingerprint"] =
+            json!("krea-realtime-14b-bf16-mlx-resident-ladder-v1");
+        let error = run_krea_realtime(&request)
+            .expect_err("a bf16 identity must not satisfy a q4 plan row");
+        assert!(
+            error.contains("krea-realtime-14b-q4-mlx-resident-ladder-v1"),
+            "{error}"
+        );
+        assert!(!error.contains("SCENEWORKS_"), "{error}");
+    }
+
+    /// The fixture binds the tier, the full rendered geometry, the single legal cadence and the
+    /// seed.
+    #[test]
+    fn the_realtime_fixture_binds_the_tier_geometry_cadence_and_seed() {
+        let geometry = validate_krea_realtime_target(&planned_request()).unwrap();
+        assert_eq!(
+            planned_krea_realtime_capture(&planned_request(), "q4", geometry).unwrap(),
+            (KREA_REALTIME_FPS, KREA_REALTIME_SEED)
+        );
+        for (fixture, expected) in [
+            (
+                "krea-realtime-14b-mlx-bf16-832x480-f45-fps24-seed22735",
+                "must start with",
+            ),
+            (
+                "krea-realtime-14b-mlx-q4-832x480-f45-fps30-seed22735",
+                "generates at 24 fps only",
+            ),
+            (
+                "krea-realtime-14b-mlx-q4-832x480-f45-fps24-seed17137",
+                "does not match the Krea Realtime calibration seed",
+            ),
+        ] {
+            let mut request = planned_request();
+            request["planned"]["fixture"] = json!(fixture);
+            let error = planned_krea_realtime_capture(&request, "q4", geometry)
+                .expect_err("a mis-bound fixture must be refused");
+            assert!(error.contains(expected), "{fixture}: {error}");
+        }
+    }
+
+    /// The arm is reachable through `run`'s dispatch under exactly the plan's provider id.
+    #[test]
+    fn the_realtime_provider_id_is_the_engines_own() {
+        assert_eq!(KREA_REALTIME_PROVIDER, mlx_gen_krea_realtime::MODEL_ID);
+        assert_eq!(KREA_REALTIME_PROVIDER, "krea_realtime_14b");
+    }
+}
+
+/// The plan/adapter agreement sc-22735 exists to make undriftable: every planned MLX row of the two
+/// widened models must name a calibration identity the production contract can actually emit, and
+/// none of those identities may collide with Turbo's already-priced key.
+#[cfg(test)]
+mod mlx_production_fingerprint_tests {
+    use super::*;
+
+    /// The tiers the plan is required to cover for both models. DERIVED from what the checked-in
+    /// plan carries and asserted to equal this set, rather than a frozen row count.
+    const NUMERIC_TIERS: [&str; 3] = ["bf16", "q4", "q8"];
+
+    fn plan() -> Value {
+        serde_json::from_str(include_str!(
+            "../../../../config/memory-calibration-plan.json"
+        ))
+        .expect("the anchor plan parses")
+    }
+
+    /// (a) Every planned `mlx` row of `krea_2_raw` and `krea_realtime_14b` names exactly the string
+    /// [`mlx_production_fingerprint`] resolves for its own `(provider, tier)`, and between them the
+    /// two models cover exactly `{bf16, q4, q8}`. This needs no weights and no environment, and it
+    /// is what makes a plan/adapter drift impossible in either direction: a plan row this table
+    /// cannot produce reds here, and a table entry the plan does not use is caught by the coverage
+    /// assertion below.
+    #[test]
+    fn every_planned_mlx_row_of_the_widened_models_is_producible() {
+        let plan = plan();
+        let anchors = plan["anchors"].as_object().expect("anchors object");
+        let mut covered: std::collections::BTreeMap<&str, std::collections::BTreeSet<String>> =
+            std::collections::BTreeMap::new();
+        for (key, entry) in anchors {
+            if !key.ends_with(":mlx") {
+                continue;
+            }
+            let provider = entry["provider"].as_str().expect("provider string");
+            if !matches!(provider, KREA_RAW_PROVIDER | KREA_REALTIME_PROVIDER) {
+                continue;
+            }
+            // `<provider>:<tier>:<backend>` — read the tier from the key rather than assuming it.
+            let tier = key
+                .split(':')
+                .nth(1)
+                .expect("an anchor key carries provider:tier:backend");
+            let expected = mlx_production_fingerprint(provider, tier).unwrap_or_else(|| {
+                panic!("{key}: no production MLX identity is modelled for ({provider}, {tier})")
+            });
+            assert_eq!(
+                entry["calibrationFingerprint"].as_str(),
+                Some(expected.as_str()),
+                "{key}"
+            );
+            covered.entry(provider).or_default().insert(tier.to_owned());
+        }
+        let wanted: std::collections::BTreeSet<String> = NUMERIC_TIERS
+            .iter()
+            .map(|tier| (*tier).to_owned())
+            .collect();
+        for provider in [KREA_RAW_PROVIDER, KREA_REALTIME_PROVIDER] {
+            assert_eq!(
+                covered.get(provider),
+                Some(&wanted),
+                "{provider} must carry exactly one planned MLX row per numeric tier"
+            );
+        }
+    }
+
+    /// (b) All six cells are pairwise distinct, and none of them collides with Turbo's measured MLX
+    /// key — the collision this story exists to close. Turbo itself is deliberately NOT in the
+    /// table, so the pre-load check stays silent for it and its own frozen comparison is unchanged.
+    #[test]
+    fn the_six_widened_cells_are_pairwise_distinct_and_never_collide_with_turbo() {
+        let mut seen = std::collections::BTreeSet::new();
+        for provider in [KREA_RAW_PROVIDER, KREA_REALTIME_PROVIDER] {
+            for tier in NUMERIC_TIERS {
+                let identity = mlx_production_fingerprint(provider, tier)
+                    .unwrap_or_else(|| panic!("({provider}, {tier}) must be modelled"));
+                assert_ne!(
+                    identity, KREA_BASE_CALIBRATION_FINGERPRINT,
+                    "({provider}, {tier}) collides with the Krea 2 Turbo measured key"
+                );
+                assert!(
+                    identity.contains(tier),
+                    "({provider}, {tier}) must key on its own tier, got {identity}"
+                );
+                assert!(
+                    seen.insert(identity.clone()),
+                    "duplicate identity {identity} across the widened cells"
+                );
+            }
+        }
+        assert_eq!(seen.len(), 6);
+        // Turbo is absent by design, and an unmodelled tier resolves to nothing rather than to a
+        // fabricated string.
+        assert_eq!(mlx_production_fingerprint(KREA_BASE_PROVIDER, "q4"), None);
+        assert_eq!(mlx_production_fingerprint("qwen_image", "q4"), None);
+        assert_eq!(mlx_production_fingerprint(KREA_RAW_PROVIDER, "q6"), None);
+    }
+
+    /// The pre-load check refuses a plan row naming an unproducible identity, and is SILENT for a
+    /// provider the table does not model — so it can never become a blanket gate.
+    #[test]
+    fn the_preload_check_refuses_only_a_modelled_providers_wrong_identity() {
+        let request = json!({
+            "planned": { "calibrationFingerprint": "krea-2-raw-q4-mlx-shared-ladder-v1" }
+        });
+        validate_planned_fingerprint_is_producible(KREA_RAW_PROVIDER, "q4", &request)
+            .expect("the plan's own identity is producible");
+        let error = validate_planned_fingerprint_is_producible(KREA_RAW_PROVIDER, "q8", &request)
+            .expect_err("a q4 identity must not satisfy a q8 plan row");
+        assert!(
+            error.contains("krea-2-raw-q8-mlx-shared-ladder-v1"),
+            "{error}"
+        );
+        assert!(error.contains(KREA_RAW_PROVIDER), "{error}");
+        // Silent for Turbo, whose measured key this story preserves untouched.
+        validate_planned_fingerprint_is_producible(KREA_BASE_PROVIDER, "q4", &request)
+            .expect("the table must stay silent for a provider it does not model");
     }
 }
 
@@ -16425,12 +18090,22 @@ mod ltx_tests {
         // columns because sc-22728 added a family whose two members share one provider and differ in
         // exactly those two axes; every other row still carries `modelId == provider`, `overlay`
         // "none" (or Krea's control overlay).
-        let arms: [(&str, &str, &str, &str, Arm); 9] = [
+        let arms: [(&str, &str, &str, &str, Arm); 10] = [
             (
                 KREA_BASE_PROVIDER,
                 KREA_BASE_PROVIDER,
                 "none",
                 "MLX Krea base calibration",
+                run_krea_base,
+            ),
+            // sc-22735: the second member of the Krea base family. It shares the arm, so it must
+            // also still refuse a multi-frame geometry under its OWN refusal label — the video
+            // widening in this story is the separate `krea_realtime_14b` arm, not this one.
+            (
+                KREA_RAW_PROVIDER,
+                KREA_RAW_PROVIDER,
+                "none",
+                "MLX Krea 2 Raw calibration",
                 run_krea_base,
             ),
             (
@@ -16532,6 +18207,7 @@ mod ltx_tests {
     fn the_still_geometry_guard_is_not_a_blanket_refusal() {
         for label in [
             "MLX Krea base calibration",
+            "MLX Krea 2 Raw calibration",
             "MLX SDXL base calibration",
             "MLX Z-Image base calibration",
             "MLX Z-Image base-model calibration",
