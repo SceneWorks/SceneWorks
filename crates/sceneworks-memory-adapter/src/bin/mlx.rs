@@ -83,6 +83,22 @@ const QWEN_PLAIN_EXECUTION_PATH: &str = "the MLX Qwen VAE-only path";
 const QWEN_PROVIDER_EXECUTION_PATH: &str = "the pinned MLX Qwen base provider path";
 const Z_IMAGE_PROVIDER: &str = "z_image_turbo";
 const Z_IMAGE_PLAIN_EXECUTION_PATH: &str = "the MLX Z-Image base-only text-to-image path";
+/// The undistilled Z-Image BASE provider (sc-22724): the same engine crate as Turbo
+/// (`mlx-gen-z-image`, registry id `model_base::MODEL_ID`), a distinct artifact family
+/// (`SceneWorks/z-image-mlx`, `SCENEWORKS_Z_IMAGE_BASE_*`), and real CFG in the denoise loop.
+const Z_IMAGE_BASE_PROVIDER: &str = "z_image";
+const Z_IMAGE_BASE_PLAIN_EXECUTION_PATH: &str = "the MLX Z-Image base-model text-to-image path";
+/// `z_image_edit` is a catalog alias for the Turbo provider driven in `edit_image` mode (worker
+/// `engines.rs`), so its anchors plan `provider: z_image_turbo, mode: edit_image` and this arm
+/// conditions the SAME loaded Turbo generator on one reference image.
+const Z_IMAGE_EDIT_EXECUTION_PATH: &str =
+    "the MLX Z-Image-Turbo reference-conditioned edit path (the z_image_edit route)";
+/// The worker's production edit strength default (`resolve_zimage_edit_init`, `advanced.strength`).
+const Z_IMAGE_EDIT_STRENGTH: f32 = 0.6;
+/// Edit captures run four steps: the img2img start step is `floor(steps * strength)` (shared
+/// `img2img::init_time_step`), so `4 * 0.6` starts at step 2 and leaves two executed denoise steps
+/// — the same two-step conditioning/denoise phase shape the text-to-image captures use.
+const Z_IMAGE_EDIT_STEPS: u32 = 4;
 /// The `mlx:flux2_dev` lane: the FLUX.2-dev text-to-image provider the measured renders load.
 const FLUX2_PROVIDER: &str = "flux2_dev";
 const FLUX2_CALIBRATION_FINGERPRINT: &str = "sc-18218-flux2-dev-t2i-resident-evidence-v1";
@@ -1066,6 +1082,8 @@ mod tests {
         for provider in [
             "qwen_image",
             "z_image_turbo",
+            // sc-22724: the undistilled base is its own registry id on the same arm.
+            "z_image",
             "krea_2_turbo",
             "sdxl",
             "krea_2_turbo_control",
@@ -1086,6 +1104,7 @@ mod tests {
         }
         assert_eq!(QWEN_PROVIDER, "qwen_image");
         assert_eq!(Z_IMAGE_PROVIDER, "z_image_turbo");
+        assert_eq!(Z_IMAGE_BASE_PROVIDER, "z_image");
         assert_eq!(KREA_BASE_PROVIDER, "krea_2_turbo");
         assert_eq!(SDXL_PROVIDER, "sdxl");
         assert_eq!(KREA_PROVIDER, "krea_2_turbo_control");
@@ -1136,6 +1155,187 @@ mod tests {
             sweep["cases"][0]["parameters"],
             request["planned"]["strategy"]["parameters"]
         );
+    }
+
+    fn z_image_planned(provider: &str, mode: &str, tier: &str) -> Value {
+        json!({
+            "planned": {
+                "target": {
+                    "provider": provider,
+                    "modelId": if mode == "edit_image" { "z_image_edit" } else { provider },
+                    "tier": tier,
+                    "mode": mode,
+                    "overlay": "none",
+                    "geometry": { "width": 768, "height": 768, "batch": 1, "frames": 1 }
+                },
+                "backend": "mlx",
+                "loadShape": "eager_materialization",
+                "strategy": { "rung": "resident", "engagedRungs": ["resident"], "parameters": {} },
+                "calibrationFingerprint": "unused",
+                "fixture": "unused"
+            }
+        })
+    }
+
+    /// sc-22724: the family member is read off the plan's `(provider, mode)`, and a pair no member
+    /// serves is refused by name rather than measured as its nearest neighbour.
+    #[test]
+    fn z_image_arm_is_resolved_from_the_plans_provider_and_mode() {
+        let turbo = z_image_arm(&z_image_planned("z_image_turbo", "text_to_image", "q4")).unwrap();
+        assert_eq!(turbo, Z_IMAGE_TURBO_ARM);
+        assert!(!turbo.edit);
+        let edit = z_image_arm(&z_image_planned("z_image_turbo", "edit_image", "q4")).unwrap();
+        assert_eq!(edit, Z_IMAGE_EDIT_ARM);
+        assert!(edit.edit);
+        assert_eq!(
+            edit.provider, Z_IMAGE_PROVIDER,
+            "the edit alias loads the Turbo provider"
+        );
+        assert_eq!(edit.expected_repository, protocol::Z_IMAGE_REPOSITORY);
+        let base = z_image_arm(&z_image_planned("z_image", "text_to_image", "q4")).unwrap();
+        assert_eq!(base, Z_IMAGE_BASE_ARM);
+        assert_eq!(base.expected_repository, protocol::Z_IMAGE_BASE_REPOSITORY);
+        assert_eq!(base.root_env, "SCENEWORKS_Z_IMAGE_BASE_ROOT");
+        for (provider, mode) in [
+            ("z_image", "edit_image"),
+            ("z_image_turbo", "image_to_image"),
+            ("z_image_control", "text_to_image"),
+        ] {
+            let error = z_image_arm(&z_image_planned(provider, mode, "q4")).unwrap_err();
+            assert!(
+                error.contains(&format!("provider {provider:?} in mode {mode:?}")),
+                "{provider}/{mode}: {error}"
+            );
+        }
+        assert!(
+            z_image_arm(&json!({ "planned": { "target": { "provider": "z_image_turbo" } } }))
+                .unwrap_err()
+                .contains("planned.target.mode")
+        );
+    }
+
+    fn z_image_snapshot_root(repository: &str, revision: &str, tier: &str) -> PathBuf {
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir()
+            .join(format!("sc-22724-z-image-{}-{nonce}", std::process::id()))
+            .join(format!("models--{}", repository.replace('/', "--")))
+            .join("snapshots")
+            .join(revision)
+            .join(tier);
+        std::fs::create_dir_all(&root).unwrap();
+        root
+    }
+
+    /// sc-22724: the tier is the PLAN's, the root must carry it, and the `LoadSpec` re-asserts it
+    /// — a q8 plan against a q4 export is refused naming q8, on every family member. This used to
+    /// be a literal `"q4"` in both the validator and the `LoadSpec`, which capped the MLX Z-Image
+    /// lane at one tier (the sc-17097 defect class on the other adapter).
+    #[test]
+    fn z_image_root_must_carry_the_planned_tier_and_the_spec_binds_it() {
+        const REVISION: &str = "bb2bc9893b3c49ae96c813350775f791a2e8bc80";
+        for (provider, mode, repository) in [
+            (
+                "z_image_turbo",
+                "text_to_image",
+                protocol::Z_IMAGE_REPOSITORY,
+            ),
+            ("z_image_turbo", "edit_image", protocol::Z_IMAGE_REPOSITORY),
+            (
+                "z_image",
+                "text_to_image",
+                protocol::Z_IMAGE_BASE_REPOSITORY,
+            ),
+        ] {
+            let q4_root = z_image_snapshot_root(repository, REVISION, "q4");
+            let error = z_image_load_spec_at(
+                &z_image_planned(provider, mode, "q8"),
+                LoadShape::EagerMaterialization,
+                repository.to_owned(),
+                REVISION.to_owned(),
+                q4_root.clone(),
+            )
+            .expect_err("a q8 plan must not be satisfied by a q4 root");
+            assert!(
+                error.ends_with(&format!("/snapshots/{REVISION}/q8")),
+                "{provider}/{mode}: {error}"
+            );
+            for (tier, quant) in [
+                ("q4", Some(Quant::Q4)),
+                ("q8", Some(Quant::Q8)),
+                ("bf16", None),
+            ] {
+                let root = z_image_snapshot_root(repository, REVISION, tier);
+                let artifact = z_image_load_spec_at(
+                    &z_image_planned(provider, mode, tier),
+                    LoadShape::DeferredMaterialization,
+                    repository.to_owned(),
+                    REVISION.to_owned(),
+                    root.clone(),
+                )
+                .unwrap_or_else(|error| panic!("{provider}/{mode}/{tier}: {error}"));
+                assert_eq!(artifact.tier, tier);
+                assert_eq!(artifact.spec.quantize, quant, "{tier} load quant");
+                assert_eq!(artifact.spec.load_shape, LoadShape::DeferredMaterialization);
+                assert_eq!(
+                    artifact.loadability_fingerprint(),
+                    format!("{repository}@{REVISION}:{tier}")
+                );
+                assert_eq!(
+                    artifact.arm.provider,
+                    if provider == "z_image" {
+                        "z_image"
+                    } else {
+                        "z_image_turbo"
+                    }
+                );
+            }
+            // The wrong artifact family is refused before the root is even looked at.
+            let other = if repository == protocol::Z_IMAGE_REPOSITORY {
+                protocol::Z_IMAGE_BASE_REPOSITORY
+            } else {
+                protocol::Z_IMAGE_REPOSITORY
+            };
+            let error = z_image_load_spec_at(
+                &z_image_planned(provider, mode, "q4"),
+                LoadShape::EagerMaterialization,
+                other.to_owned(),
+                REVISION.to_owned(),
+                q4_root,
+            )
+            .expect_err("the other family's repository must be refused");
+            assert!(error.contains(repository), "{provider}: {error}");
+        }
+    }
+
+    /// sc-22724: an edit capture is the worker's edit request — one reference at the target
+    /// geometry plus the production strength — and a text-to-image capture carries none.
+    #[test]
+    fn z_image_edit_request_carries_one_reference_at_the_target_geometry() {
+        let edit = z_image_request(Z_IMAGE_EDIT_ARM, 768, 512);
+        assert_eq!(edit.conditioning.len(), 1);
+        match &edit.conditioning[0] {
+            Conditioning::Reference { image, strength } => {
+                assert_eq!((image.width, image.height), (768, 512));
+                assert_eq!(image.pixels.len(), 768 * 512 * 3);
+                assert_eq!(*strength, Some(Z_IMAGE_EDIT_STRENGTH));
+            }
+            other => panic!("expected one Reference, got {other:?}"),
+        }
+        // The worker sets ONLY the per-reference strength (`build_lane_conditioning`,
+        // image_jobs/base.rs:7136); the request-level lever stays unset, and so does this arm's.
+        assert_eq!(edit.strength, None);
+        // floor(4 * 0.6) = 2, so two executed denoise steps remain behind the conditioning
+        // boundary — the engine's `init_time_step` law (mlx-gen/src/img2img.rs), not this arm's.
+        assert_eq!(edit.steps, Some(Z_IMAGE_EDIT_STEPS));
+        for arm in [Z_IMAGE_TURBO_ARM, Z_IMAGE_BASE_ARM] {
+            let plain = z_image_request(arm, 768, 768);
+            assert!(plain.conditioning.is_empty());
+            assert_eq!(plain.strength, None);
+            assert_eq!(plain.steps, Some(2));
+        }
     }
 
     #[test]
@@ -2120,6 +2320,17 @@ fn planned_qwen_seed(request: &Value, tier: &str) -> Result<u64, String> {
     Ok(seed)
 }
 
+/// The numeric tier's load shape: bf16 is the dense base and carries no quant (the worker's
+/// `tier_to_quant`); q4/q8 name the packed tier, which `with_quant` re-asserts against the
+/// snapshot's own packed width at load (`needs_load_time_quant` — a mismatch hard-errors).
+fn tier_precision_quant(tier: &str) -> (Precision, Option<Quant>) {
+    match tier {
+        "q4" => (Precision::Bf16, Some(Quant::Q4)),
+        "q8" => (Precision::Bf16, Some(Quant::Q8)),
+        _ => (Precision::Bf16, None),
+    }
+}
+
 fn planned_selection(request: &Value) -> Result<MemorySelection, String> {
     let strategy = planned_memory_strategy(request)?;
     let parameters = protocol::strategy_parameters(request)?;
@@ -2150,12 +2361,7 @@ fn planned_selection(request: &Value) -> Result<MemorySelection, String> {
             }
         },
     };
-    let (precision, quant) = match planned_qwen_tier(request)? {
-        "bf16" => (Precision::Bf16, None),
-        "q4" => (Precision::Bf16, Some(Quant::Q4)),
-        "q8" => (Precision::Bf16, Some(Quant::Q8)),
-        _ => unreachable!("planned_qwen_tier returned an unsupported tier"),
-    };
+    let (precision, quant) = tier_precision_quant(planned_qwen_tier(request)?);
     Ok(MemorySelection {
         strategy,
         parameters: MemoryStrategyParameters {
@@ -2248,49 +2454,177 @@ fn planned_load_shape(request: &Value) -> Result<LoadShape, String> {
     }
 }
 
-fn z_image_load_spec(
+/// One member of the Z-Image family this arm measures, resolved from the plan's
+/// `(target.provider, target.mode)` — never assumed. Three members today: Turbo text-to-image,
+/// Turbo edit (the `z_image_edit` catalog alias) and the undistilled base (sc-22724).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct ZImageArm {
+    /// The registry id handed to `catalog.media().load` — the production loader (E4).
+    provider: &'static str,
+    execution_path: &'static str,
+    /// The still-geometry refusal label (sc-18808).
+    still_calibration: &'static str,
+    repository_env: &'static str,
+    revision_env: &'static str,
+    root_env: &'static str,
+    expected_repository: &'static str,
+    /// The record's diagnostics source, `memory-mlx-adapter:<slug>-shared-ladder`.
+    slug: &'static str,
+    /// Condition every request on one reference image (`Conditioning::Reference`) and measure
+    /// under `MemoryMode::Edit`.
+    edit: bool,
+}
+
+const Z_IMAGE_TURBO_ARM: ZImageArm = ZImageArm {
+    provider: Z_IMAGE_PROVIDER,
+    execution_path: Z_IMAGE_PLAIN_EXECUTION_PATH,
+    still_calibration: "MLX Z-Image base calibration",
+    repository_env: "SCENEWORKS_Z_IMAGE_REPOSITORY",
+    revision_env: "SCENEWORKS_Z_IMAGE_REVISION",
+    root_env: "SCENEWORKS_Z_IMAGE_ROOT",
+    expected_repository: protocol::Z_IMAGE_REPOSITORY,
+    slug: "z-image",
+    edit: false,
+};
+
+const Z_IMAGE_EDIT_ARM: ZImageArm = ZImageArm {
+    provider: Z_IMAGE_PROVIDER,
+    execution_path: Z_IMAGE_EDIT_EXECUTION_PATH,
+    still_calibration: "MLX Z-Image edit calibration",
+    repository_env: "SCENEWORKS_Z_IMAGE_REPOSITORY",
+    revision_env: "SCENEWORKS_Z_IMAGE_REVISION",
+    root_env: "SCENEWORKS_Z_IMAGE_ROOT",
+    expected_repository: protocol::Z_IMAGE_REPOSITORY,
+    slug: "z-image-edit",
+    edit: true,
+};
+
+const Z_IMAGE_BASE_ARM: ZImageArm = ZImageArm {
+    provider: Z_IMAGE_BASE_PROVIDER,
+    execution_path: Z_IMAGE_BASE_PLAIN_EXECUTION_PATH,
+    still_calibration: "MLX Z-Image base-model calibration",
+    repository_env: "SCENEWORKS_Z_IMAGE_BASE_REPOSITORY",
+    revision_env: "SCENEWORKS_Z_IMAGE_BASE_REVISION",
+    root_env: "SCENEWORKS_Z_IMAGE_BASE_ROOT",
+    expected_repository: protocol::Z_IMAGE_BASE_REPOSITORY,
+    slug: "z-image-base",
+    edit: false,
+};
+
+/// Which family member the plan asks for. Refuses by name: a `(provider, mode)` pair no member
+/// serves (the base has no edit route, `image_to_image` is not planned anywhere) must not be
+/// measured as its nearest neighbour.
+fn z_image_arm(request: &Value) -> Result<ZImageArm, String> {
+    let planned = protocol::planned(request)?;
+    let provider = planned
+        .pointer("/target/provider")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "planned.target.provider must be a string".to_owned())?;
+    let mode = planned
+        .pointer("/target/mode")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "planned.target.mode must be a string".to_owned())?;
+    match (provider, mode) {
+        (Z_IMAGE_PROVIDER, "text_to_image") => Ok(Z_IMAGE_TURBO_ARM),
+        (Z_IMAGE_PROVIDER, "edit_image") => Ok(Z_IMAGE_EDIT_ARM),
+        (Z_IMAGE_BASE_PROVIDER, "text_to_image") => Ok(Z_IMAGE_BASE_ARM),
+        (provider, mode) => Err(format!(
+            "the MLX Z-Image arm does not implement provider {provider:?} in mode {mode:?}"
+        )),
+    }
+}
+
+/// The artifact one Z-Image capture loads: the env-bound repository and revision, the PLANNED
+/// tier, and the `LoadSpec` that opens exactly that tier's snapshot directory.
+#[derive(Debug)]
+struct ZImageArtifact {
+    arm: ZImageArm,
+    repository: String,
+    revision: String,
+    tier: &'static str,
+    spec: LoadSpec,
+}
+
+impl ZImageArtifact {
+    fn loadability_fingerprint(&self) -> String {
+        format!("{}@{}:{}", self.repository, self.revision, self.tier)
+    }
+}
+
+/// The env-free half of [`z_image_load_spec`], so the tier binding is unit-testable: the root must
+/// end in the PLANNED tier's directory (`.../snapshots/<revision>/<tier>`), so a stale `…/q4`
+/// export can never satisfy a q8 or bf16 plan and quietly re-label another tier's peaks — the
+/// sc-17097 defect class the Candle arm closed, which this arm carried as a literal `"q4"` until
+/// sc-22724.
+fn z_image_load_spec_at(
     request: &Value,
     load_shape: LoadShape,
-) -> Result<(String, String, LoadSpec), String> {
-    protocol::validate_plain_overlay_target(request, Z_IMAGE_PLAIN_EXECUTION_PATH)?;
-    let repository = protocol::required_env("SCENEWORKS_Z_IMAGE_REPOSITORY")?;
-    let revision = protocol::required_env("SCENEWORKS_Z_IMAGE_REVISION")?;
-    protocol::validate_artifact_identity(&repository, &revision, protocol::Z_IMAGE_REPOSITORY)?;
-    let root = std::fs::canonicalize(PathBuf::from(protocol::required_env(
-        "SCENEWORKS_Z_IMAGE_ROOT",
-    )?))
-    .map_err(|error| format!("canonicalize SCENEWORKS_Z_IMAGE_ROOT: {error}"))?;
+    repository: String,
+    revision: String,
+    root: PathBuf,
+) -> Result<ZImageArtifact, String> {
+    let arm = z_image_arm(request)?;
+    protocol::validate_plain_overlay_target(request, arm.execution_path)?;
+    let tier = match planned_qwen_tier(request)? {
+        "bf16" => "bf16",
+        "q4" => "q4",
+        "q8" => "q8",
+        _ => unreachable!("planned_qwen_tier returned an unsupported tier"),
+    };
+    protocol::validate_artifact_identity(&repository, &revision, arm.expected_repository)?;
+    let root = std::fs::canonicalize(&root)
+        .map_err(|error| format!("canonicalize {}: {error}", arm.root_env))?;
     protocol::validate_huggingface_snapshot_root(
         &root,
         &repository,
         &revision,
-        "q4",
-        protocol::Z_IMAGE_REPOSITORY,
+        tier,
+        arm.expected_repository,
     )?;
-
-    let spec = LoadSpec::new(WeightsSource::Dir(root))
-        .with_quant(Quant::Q4)
+    let mut spec = LoadSpec::new(WeightsSource::Dir(root))
         .with_offload_policy(OffloadPolicy::Resident)
         .with_load_shape(load_shape);
-    Ok((repository, revision, spec))
+    if let (_, Some(quant)) = tier_precision_quant(tier) {
+        spec = spec.with_quant(quant);
+    }
+    Ok(ZImageArtifact {
+        arm,
+        repository,
+        revision,
+        tier,
+        spec,
+    })
+}
+
+fn z_image_load_spec(request: &Value, load_shape: LoadShape) -> Result<ZImageArtifact, String> {
+    let arm = z_image_arm(request)?;
+    let repository = protocol::required_env(arm.repository_env)?;
+    let revision = protocol::required_env(arm.revision_env)?;
+    let root = PathBuf::from(protocol::required_env(arm.root_env)?);
+    z_image_load_spec_at(request, load_shape, repository, revision, root)
 }
 
 fn load_z_image_generator(
     request: &Value,
     load_shape: LoadShape,
-) -> Result<(String, String, Box<dyn Generator>), String> {
-    let (repository, revision, spec) = z_image_load_spec(request, load_shape)?;
+) -> Result<(ZImageArtifact, Box<dyn Generator>), String> {
+    let artifact = z_image_load_spec(request, load_shape)?;
     let catalog =
         runtime_macos::catalog().map_err(|error| format!("build MLX catalog: {error}"))?;
     let generator = catalog
         .media()
-        .load(Z_IMAGE_PROVIDER, &spec)
-        .map_err(|error| format!("load real Z-Image Turbo q4 provider: {error}"))?;
-    Ok((repository, revision, generator))
+        .load(artifact.arm.provider, &artifact.spec)
+        .map_err(|error| {
+            format!(
+                "load real {} {} provider: {error}",
+                artifact.arm.provider, artifact.tier
+            )
+        })?;
+    Ok((artifact, generator))
 }
 
-fn z_image_request(width: u32, height: u32) -> GenerationRequest {
-    GenerationRequest {
+fn z_image_request(arm: ZImageArm, width: u32, height: u32) -> GenerationRequest {
+    let mut request = GenerationRequest {
         prompt: "a photorealistic red apple on a wooden table, studio lighting".to_owned(),
         width,
         height,
@@ -2300,7 +2634,27 @@ fn z_image_request(width: u32, height: u32) -> GenerationRequest {
         // step then supplies a real denoise-only interval before Decoding.
         steps: Some(2),
         ..Default::default()
+    };
+    if arm.edit {
+        // The worker's edit route: one `Conditioning::Reference` fitted to the request geometry
+        // plus the strength lever (`resolve_zimage_edit_init`). The start step is derived from
+        // `steps * strength` by the engine, so the step count is raised to keep two executed
+        // denoise steps behind the conditioning boundary.
+        request.steps = Some(Z_IMAGE_EDIT_STEPS);
+        // `request.strength` stays None: the worker sets ONLY the per-reference strength
+        // (`build_lane_conditioning`, image_jobs/base.rs:7136) and leaves the request-level lever —
+        // gen-core's documented fallback for a single `Reference` with no strength of its own —
+        // unset. This arm reproduces the worker's request shape, so it does the same (sc-22724).
+        request.conditioning = vec![Conditioning::Reference {
+            image: Image {
+                width,
+                height,
+                pixels: protocol::synthetic_reference_rgb(width, height),
+            },
+            strength: Some(Z_IMAGE_EDIT_STRENGTH),
+        }];
     }
+    request
 }
 
 fn z_image_complete_sweep(request: &Value) -> Result<Value, String> {
@@ -2315,16 +2669,17 @@ fn z_image_complete_sweep(request: &Value) -> Result<Value, String> {
 fn run_z_image_reference_loaded(
     request: &Value,
     generator: &dyn Generator,
-    repository: &str,
-    revision: &str,
+    artifact: &ZImageArtifact,
     load_shape: LoadShape,
 ) -> Result<Value, String> {
-    protocol::validate_plain_overlay_target(request, Z_IMAGE_PLAIN_EXECUTION_PATH)?;
+    let arm = artifact.arm;
+    let (repository, revision) = (artifact.repository.as_str(), artifact.revision.as_str());
+    protocol::validate_plain_overlay_target(request, arm.execution_path)?;
     let (width, height) = protocol::target_geometry(request)?;
     let selection = planned_selection(request)?;
     let contract = generator
         .memory_strategy_contract()
-        .ok_or_else(|| format!("loaded {Z_IMAGE_PROVIDER} has no memory-strategy contract"))?;
+        .ok_or_else(|| format!("loaded {} has no memory-strategy contract", arm.provider))?;
     contract
         .validate_selection(&selection)
         .map_err(|error| format!("pinned Z-Image provider rejected planned selection: {error}"))?;
@@ -2357,8 +2712,15 @@ fn run_z_image_reference_loaded(
         calibration_abi: calibration.abi,
         calibration_fingerprint: calibration.fingerprint.clone(),
         load_shape: calibration.load_shape,
-        mode: MemoryMode::TextToImage,
-        has_reference: false,
+        // The mode the plan declared, as the worker would admit it: an edit request carries one
+        // reference and is admitted under `MemoryMode::Edit` (the contract the `z_image_edit`
+        // manifest entry declares for the Turbo provider).
+        mode: if arm.edit {
+            MemoryMode::Edit
+        } else {
+            MemoryMode::TextToImage
+        },
+        has_reference: arm.edit,
         use_pid: false,
         has_phases: true,
         geometry: MemoryGeometry {
@@ -2366,7 +2728,7 @@ fn run_z_image_reference_loaded(
             height,
             batch: 1,
             frames: 1,
-            reference_count: 0,
+            reference_count: u32::from(arm.edit),
         },
         overlay: None,
         budget: MemoryBudget {
@@ -2399,7 +2761,7 @@ fn run_z_image_reference_loaded(
     let opening = protocol::open_resident_phase_window(&mut MlxResidencyCounters, || {
         one_image(scoped_generate(
             generator,
-            z_image_request(width, height),
+            z_image_request(arm, width, height),
             &context,
             None,
             &mut |_| {},
@@ -2411,7 +2773,7 @@ fn run_z_image_reference_loaded(
     let peak_after_reset = opening.peak_after_reset;
     let selected = one_image(scoped_generate(
         generator,
-        z_image_request(width, height),
+        z_image_request(arm, width, height),
         &context,
         None,
         &mut |progress| match progress {
@@ -2466,7 +2828,7 @@ fn run_z_image_reference_loaded(
 
     let baseline = one_image(
         generator
-            .generate(&z_image_request(width, height), &mut |_| {})
+            .generate(&z_image_request(arm, width, height), &mut |_| {})
             .map_err(|error| format!("generate unselected Z-Image reference: {error}"))?,
     )?;
     let (maximum_error, mean_error) = image_max_mean_abs(&selected, &baseline)?;
@@ -2483,7 +2845,7 @@ fn run_z_image_reference_loaded(
     reset_peak_memory();
     let warm = one_image(scoped_generate(
         generator,
-        z_image_request(width, height),
+        z_image_request(arm, width, height),
         &context,
         None,
         &mut |_| {},
@@ -2506,7 +2868,7 @@ fn run_z_image_reference_loaded(
     let mut lifecycle_max_recovery_cache = 0_u64;
     let mut lifecycle_max_recovery_peak = 0_u64;
 
-    let cancelled = z_image_request(width, height);
+    let cancelled = z_image_request(arm, width, height);
     let cancel_signal = cancelled.cancel.clone();
     let cancel_during_decode = selection.strategy == MemoryStrategy::BoundedDecode;
     let mut cancel_triggered = false;
@@ -2554,7 +2916,7 @@ fn run_z_image_reference_loaded(
     reset_peak_memory();
     let cancel_recovery = one_image(scoped_generate(
         generator,
-        z_image_request(width, height),
+        z_image_request(arm, width, height),
         &context,
         None,
         &mut |_| {},
@@ -2592,7 +2954,7 @@ fn run_z_image_reference_loaded(
     };
     let injected = scoped_generate(
         generator,
-        z_image_request(width, height),
+        z_image_request(arm, width, height),
         &context,
         Some(injected_phase),
         &mut |_| {},
@@ -2618,7 +2980,7 @@ fn run_z_image_reference_loaded(
     reset_peak_memory();
     let error_recovery = one_image(scoped_generate(
         generator,
-        z_image_request(width, height),
+        z_image_request(arm, width, height),
         &context,
         None,
         &mut |_| {},
@@ -2664,7 +3026,7 @@ fn run_z_image_reference_loaded(
         "artifact": {
             "repository": repository,
             "resolvedRevision": revision,
-            "variant": "q4",
+            "variant": artifact.tier,
         },
         "sweep": z_image_complete_sweep(request)?,
         "scenarios": [
@@ -2703,10 +3065,10 @@ fn run_z_image_reference_loaded(
         },
         "loadability": {
             "result": "passed",
-            "resolvedPathFingerprint": format!("{repository}@{revision}:q4"),
+            "resolvedPathFingerprint": artifact.loadability_fingerprint(),
         },
         "diagnostics": protocol::diagnostics(
-            "memory-mlx-adapter:z-image-shared-ladder",
+            &format!("memory-mlx-adapter:{}-shared-ladder", arm.slug),
             "executed",
             [],
             [
@@ -2730,27 +3092,25 @@ fn run_z_image_reference_loaded(
                 // The window opened ABOVE the materialized resident set (sc-22667 D3); a record
                 // without this measurement was captured on a cold first request.
                 ("residentSetMaterializedBeforeWindow", "count", 1),
+                // sc-22724: the edit arm conditions every request on one reference image.
+                ("referenceImages", "count", u64::from(arm.edit)),
             ],
         ),
         "capturedAt": protocol::captured_at(),
     });
-    protocol::settle_plain_overlay_scenario(request, &mut fragment, Z_IMAGE_PLAIN_EXECUTION_PATH)?;
+    protocol::settle_plain_overlay_scenario(request, &mut fragment, arm.execution_path)?;
     Ok(fragment)
 }
 
 fn run_z_image_reference(request: &Value) -> Result<Value, String> {
     // Before the load, not inside `..._loaded`: a non-still target must be refused without paying
-    // for weights, the same ordering every other image arm now has.
-    protocol::validate_still_geometry(request, "MLX Z-Image base calibration")?;
+    // for weights, the same ordering every other image arm now has. The arm is resolved first so
+    // the refusal carries the member's own label.
+    let arm = z_image_arm(request)?;
+    protocol::validate_still_geometry(request, arm.still_calibration)?;
     let load_shape = planned_load_shape(request)?;
-    let (repository, revision, generator) = load_z_image_generator(request, load_shape)?;
-    run_z_image_reference_loaded(
-        request,
-        generator.as_ref(),
-        &repository,
-        &revision,
-        load_shape,
-    )
+    let (artifact, generator) = load_z_image_generator(request, load_shape)?;
+    run_z_image_reference_loaded(request, generator.as_ref(), &artifact, load_shape)
 }
 
 /// Maximum, mean, and root-mean-square absolute error between two images, in [0,1] units. The
@@ -3283,7 +3643,7 @@ fn validate_z_image_batch(request: &Value) -> Result<&[Value], String> {
         .and_then(|case| case.pointer("/target/provider"))
         .and_then(Value::as_str)
     {
-        if provider != Z_IMAGE_PROVIDER {
+        if provider != Z_IMAGE_PROVIDER && provider != Z_IMAGE_BASE_PROVIDER {
             return Err(format!(
                 "MLX five-rung batch assessment does not implement provider {provider:?}"
             ));
@@ -3335,12 +3695,13 @@ fn assess_z_image_batch(request: &Value) -> Result<Value, String> {
         LoadShape::EagerMaterialization,
         LoadShape::DeferredMaterialization,
     ] {
-        let (_, _, spec) = z_image_load_spec(&representative, load_shape)?;
+        let artifact = z_image_load_spec(&representative, load_shape)?;
+        let provider = artifact.arm.provider;
         let contract = catalog
             .media()
-            .memory_strategy_contract(Z_IMAGE_PROVIDER, &spec)
-            .map_err(|error| format!("read {Z_IMAGE_PROVIDER} memory-strategy contract: {error}"))?
-            .ok_or_else(|| format!("{Z_IMAGE_PROVIDER} has no memory-strategy contract"))?;
+            .memory_strategy_contract(provider, &artifact.spec)
+            .map_err(|error| format!("read {provider} memory-strategy contract: {error}"))?
+            .ok_or_else(|| format!("{provider} has no memory-strategy contract"))?;
         let calibration = contract
             .calibration
             .as_ref()
@@ -10311,6 +10672,9 @@ fn run(request: &Value) -> Result<Value, String> {
     // instead, mirroring the Candle adapter's `plain_execution_path` (candle.rs:540-548).
     match provider {
         Z_IMAGE_PROVIDER => run_z_image_reference(request),
+        // sc-22724: the undistilled base rides the same arm under its own registry id, artifact
+        // family and execution path; the arm resolves which member from `(provider, mode)`.
+        Z_IMAGE_BASE_PROVIDER => run_z_image_reference(request),
         KREA_BASE_PROVIDER => run_krea_base(request),
         SDXL_PROVIDER => run_sdxl(request),
         KREA_PROVIDER => run_krea_control(request),
@@ -13526,7 +13890,7 @@ mod ltx_tests {
     #[test]
     fn every_image_arm_still_refuses_a_multi_frame_geometry() {
         type Arm = fn(&Value) -> Result<Value, String>;
-        let arms: [(&str, &str, Arm); 6] = [
+        let arms: [(&str, &str, Arm); 7] = [
             (
                 KREA_BASE_PROVIDER,
                 "MLX Krea base calibration",
@@ -13536,6 +13900,12 @@ mod ltx_tests {
             (
                 Z_IMAGE_PROVIDER,
                 "MLX Z-Image base calibration",
+                run_z_image_reference,
+            ),
+            // sc-22724: the base model shares the arm; its refusal carries its own label.
+            (
+                Z_IMAGE_BASE_PROVIDER,
+                "MLX Z-Image base-model calibration",
                 run_z_image_reference,
             ),
             (
@@ -13592,6 +13962,8 @@ mod ltx_tests {
             "MLX Krea base calibration",
             "MLX SDXL base calibration",
             "MLX Z-Image base calibration",
+            "MLX Z-Image base-model calibration",
+            "MLX Z-Image edit calibration",
             "MLX Krea pose-control calibration",
             "MLX Qwen base calibration",
             "MLX FLUX.2-dev calibration",

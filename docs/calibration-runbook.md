@@ -162,8 +162,8 @@ ids they cover today:
 
 | binary | providers covered | how it dispatches an unknown provider |
 | --- | --- | --- |
-| `memory-mlx-adapter` | `qwen_image`, `z_image_turbo`, `krea_2_turbo`, `sdxl`, `krea_2_turbo_control`, `flux2_dev` (SDXL exposes only Resident, Staged, and bounded-transformer residency; its decode/attention rungs are measured `Missing`. FLUX.2-dev is **resident rung only**.) | `mlx.rs` `run` — `MLX five-rung calibration does not implement provider "<id>"`; `validate_z_image_batch` (`assess_batch`) — `…five-rung batch assessment does not implement provider "<id>"` (cited by function name; the line numbers this table used to carry went stale the first time the file grew) |
-| `memory-candle-adapter` | `qwen_image`, `krea_2_turbo`, `z_image_turbo` (sc-15859; five-rung reference path only, no inline arm) | `plain_execution_path` / `still_calibration_label` / `load_five_rung_generator` — `Candle five-rung calibration does not implement provider "<id>"` |
+| `memory-mlx-adapter` | `qwen_image`, `z_image_turbo` (text-to-image, and in `edit_image` mode the `z_image_edit` catalog alias — sc-22724), `z_image` (the undistilled base, sc-22724), `krea_2_turbo`, `sdxl`, `krea_2_turbo_control`, `flux2_dev` (SDXL exposes only Resident, Staged, and bounded-transformer residency; its decode/attention rungs are measured `Missing`. FLUX.2-dev is **resident rung only**.) | `mlx.rs` `run` — `MLX five-rung calibration does not implement provider "<id>"`; `validate_z_image_batch` (`assess_batch`) — `…five-rung batch assessment does not implement provider "<id>"` (cited by function name; the line numbers this table used to carry went stale the first time the file grew) |
+| `memory-candle-adapter` | `qwen_image`, `krea_2_turbo`, `z_image_turbo` (sc-15859; five-rung reference path only, no inline arm; in `edit_image` mode it is the `z_image_edit` catalog alias — sc-22724), `z_image` (the undistilled base, sc-22724) | `plain_execution_path` / `still_calibration_label` / `load_five_rung_generator` — `Candle five-rung calibration does not implement provider "<id>"` |
 
 Since sc-18212 the stale-lane report answers this gate for you: its `CAPTURE` column and
 "DECLARED/PLANNED BUT UNCAPTURABLE" section are derived by parsing these dispatch matches
@@ -497,7 +497,7 @@ Each also honours an optional repository-secret override (`SCENEWORKS_QWEN_IMAGE
 `SCENEWORKS_Z_IMAGE_ROOT`, …), used only when it canonicalizes to a path ending in that lane's exact
 suffix.
 
-### Adapter environment — seven families, one per provider arm
+### Adapter environment — one family per provider arm
 
 The derivation rule: **each provider arm reads `SCENEWORKS_<ARTIFACT>_{REPOSITORY,REVISION,ROOT}`**,
 where `<ARTIFACT>` names the artifact family the arm loads, not the provider id verbatim
@@ -516,10 +516,15 @@ SCENEWORKS_QWEN_IMAGE_REPOSITORY=SceneWorks/qwen-image-mlx   # fixed; validated 
 SCENEWORKS_QWEN_IMAGE_REVISION=<exact artifact revision>
 SCENEWORKS_QWEN_IMAGE_ROOT=/abs/path/.../snapshots/<rev>/<tier>    # bf16 | q4 | q8
 
-# memory-mlx-adapter — z_image_turbo   (mlx.rs:1063-1076)
+# memory-mlx-adapter — z_image_turbo, and the z_image_edit alias (`mode: edit_image`, same weights)
 SCENEWORKS_Z_IMAGE_REPOSITORY=SceneWorks/z-image-turbo-mlx   # fixed; validated against Z_IMAGE_REPOSITORY
 SCENEWORKS_Z_IMAGE_REVISION=<exact artifact revision>
-SCENEWORKS_Z_IMAGE_ROOT=/abs/path/.../snapshots/<rev>/q4     # tier hardcoded q4
+SCENEWORKS_Z_IMAGE_ROOT=/abs/path/.../snapshots/<rev>/<tier>  # bf16 | q4 | q8, derived from the plan target (sc-22724; was hardcoded q4)
+
+# memory-mlx-adapter — z_image (the undistilled base; sc-22724)
+SCENEWORKS_Z_IMAGE_BASE_REPOSITORY=SceneWorks/z-image-mlx    # fixed; validated against Z_IMAGE_BASE_REPOSITORY
+SCENEWORKS_Z_IMAGE_BASE_REVISION=<exact artifact revision>
+SCENEWORKS_Z_IMAGE_BASE_ROOT=/abs/path/.../snapshots/<rev>/<tier>  # bf16 | q4 | q8, derived from the plan target
 
 # memory-mlx-adapter — krea_2_turbo (plain text-to-image)
 SCENEWORKS_KREA_REPOSITORY=SceneWorks/krea-2-turbo-mlx       # fixed; validated against KREA_REPOSITORY
@@ -566,11 +571,25 @@ SCENEWORKS_KREA_REPOSITORY=SceneWorks/krea-2-turbo-mlx
 SCENEWORKS_KREA_REVISION=<exact artifact revision>
 SCENEWORKS_KREA_ROOT=/abs/path/.../snapshots/<rev>/q4
 
-# memory-candle-adapter — z_image_turbo   (sc-15859; same artifact family as the MLX arm)
+# memory-candle-adapter — z_image_turbo   (sc-15859; same artifact family as the MLX arm), and the
+#                          z_image_edit alias (`mode: edit_image`, same weights; sc-22724)
 SCENEWORKS_Z_IMAGE_REPOSITORY=SceneWorks/z-image-turbo-mlx   # fixed; validated against Z_IMAGE_REPOSITORY
 SCENEWORKS_Z_IMAGE_REVISION=<exact artifact revision>
 SCENEWORKS_Z_IMAGE_ROOT=/abs/path/.../snapshots/<rev>/<tier>  # bf16 | q4 | q8, derived from the plan target
+
+# memory-candle-adapter — z_image (the undistilled base; sc-22724; same family as the MLX base arm)
+SCENEWORKS_Z_IMAGE_BASE_REPOSITORY=SceneWorks/z-image-mlx    # fixed; validated against Z_IMAGE_BASE_REPOSITORY
+SCENEWORKS_Z_IMAGE_BASE_REVISION=<exact artifact revision>
+SCENEWORKS_Z_IMAGE_BASE_ROOT=/abs/path/.../snapshots/<rev>/<tier>  # bf16 | q4 | q8, derived from the plan target
 ```
+
+`scripts/measure-memory-catalog.mjs` derives every one of these from the plan and the manifest
+(`PROVIDER_FAMILIES`); `--list --backend <lane>` is the oracle for whether a cell is measurable on
+this host (`runnable` / `weights_missing`) — epic 22723. The `z_image_edit` anchors plan
+`provider: z_image_turbo, mode: edit_image`: the catalog id is a worker-side alias for the Turbo
+provider (`crates/sceneworks-worker/src/engines.rs`), so the adapter loads the Turbo provider and
+conditions the request on one reference image; its loader-closure declaration names that alias
+explicitly (`engineId` in `config/anchor-loader-closures.json`, §7c-bis).
 
 All three of each family are **required** (`protocol::required_env`) — a missing one fails before
 model load, not after. The plain MLX Krea arm is reference-free, rejects overlays and PiD, and runs
@@ -1352,6 +1371,10 @@ It has the same seed-then-derive shape, and the same two invocations:
 #      "<modelId>:<backend>": { "entryPoints": ["crates/…/src/model.rs", …] }
 #    digest / closureFileCount / closureFiles are all derived. An entry point that never carries
 #    the model id as a string literal is REFUSED — a wrong entry point digests the wrong loader.
+#    A CATALOG ALIAS the inference tree never names (z_image_edit → z_image_turbo) declares the
+#    engine id it resolves to as "engineId"; the literal rule is then asked of that id and the
+#    alias is hashed into the closure text (sc-22724):
+#      "z_image_edit:mlx": { "engineId": "z_image_turbo", "entryPoints": [ …the Turbo loader… ] }
 #
 # 2. Derive every declared model's digest from a real clone.
 node scripts/anchor-loader-closure.mjs --repo <inference clone> --write

@@ -27,14 +27,19 @@ import {
   ANCHOR_CURRENCY_ATTESTATIONS_PATH,
   ANCHOR_LOADER_CLOSURE_VERSION,
   anchorCurrencyRevision,
+  anchorLoaderDigests,
   anchorMeasurementRevision,
+  assertEngineIdMatchesPlan,
+  assertModelIsNamedByEntryPoints,
   buildAnchorLoaderConfig,
+  calibrationPlanAnchors,
   indexCurrencyAttestations,
   expandUsePath,
   firstPartyCrates,
   gitTree,
   loaderClosureDigest,
   loaderClosureFiles,
+  loaderClosureText,
   moduleDirOf,
   overlayTree,
   referencesIn,
@@ -664,6 +669,97 @@ test("an entry point that never names the model is refused", { skip }, () => {
       }),
     /never carry the literal "ltx_2_5"/,
   );
+});
+
+// sc-22724: `z_image_edit` is a SceneWorks catalog id for the `z_image_turbo` provider driven in
+// `edit_image` mode (worker engines.rs); the inference tree never spells "z_image_edit". The alias
+// is declared EXPLICITLY as `engineId`, the literal rule is asked of the engine id, and the engine
+// id is hashed into the closure text — so an alias is never a way around the check.
+test("a catalog alias declares the engine id it resolves to, and that id must be named by the entry points", () => {
+  const tree = {
+    read: (files) => new Map(files.map((file) => [
+      file,
+      file.endsWith("model.rs") ? 'pub const MODEL_ID: &str = "z_image_turbo";' : "// nothing named here",
+    ])),
+  };
+  const entryPoints = ["crates/x/src/model.rs", "crates/x/src/memory_strategy.rs"];
+  assert.throws(
+    () => assertModelIsNamedByEntryPoints({ model: "z_image_edit:mlx", entryPoints, tree }),
+    /never carry the literal "z_image_edit"/,
+  );
+  assertModelIsNamedByEntryPoints({ model: "z_image_edit:mlx", engineId: "z_image_turbo", entryPoints, tree });
+  // The alias is not a wildcard: an engine id the entry points never name is refused the same way.
+  assert.throws(
+    () => assertModelIsNamedByEntryPoints({ model: "z_image_edit:mlx", engineId: "z_image", entryPoints, tree }),
+    /never carry the literal "z_image"/,
+  );
+  // And it is for aliases only.
+  assert.throws(
+    () => assertModelIsNamedByEntryPoints({ model: "z_image_turbo:mlx", engineId: "z_image_turbo", entryPoints, tree }),
+    /its own model id/,
+  );
+  assert.throws(
+    () => assertModelIsNamedByEntryPoints({ model: "z_image_edit:mlx", engineId: "Z-Image Turbo", entryPoints, tree }),
+    /malformed engineId/,
+  );
+  // The engine id is part of the hashed text; a declaration without one hashes exactly as before.
+  const files = [["crates/x/src/model.rs", "s:abc"]];
+  const plain = loaderClosureText({ model: "z_image_turbo:mlx", entryPoints, files });
+  assert.ok(!plain.includes("# engine:"), "no alias line for a model that is its own engine");
+  const aliased = loaderClosureText({ model: "z_image_edit:mlx", engineId: "z_image_turbo", entryPoints, files });
+  assert.ok(aliased.includes("\n# engine: z_image_turbo\n"));
+  assert.notEqual(aliased.replace("z_image_edit", "z_image_turbo"), plain, "the alias line keeps the two closures distinct even over identical files");
+});
+
+// The alias is a REDIRECT of the literal rule at another model's loader, so the shape checks above
+// are not enough on their own: `krea_2_turbo:mlx` naming `engineId: "z_image_turbo"` with the
+// Z-Image entry points satisfies every one of them while keying Krea's currency to the Z-Image
+// loader. The anchor plan is the ground truth that closes it, and it is the SHIPPED plan here — a
+// fixture could be made to agree with a rule that is wrong about the catalog.
+test("an engineId the anchor plan does not measure that model under is refused", () => {
+  const plan = calibrationPlanAnchors();
+  // Ground truth, so the cases below are about the rule rather than about a stale plan.
+  assert.equal(plan["krea_2_turbo:q4:mlx"].provider, "krea_2_turbo");
+  assert.equal(plan["z_image_edit:q4:mlx"].provider, "z_image_turbo");
+
+  assert.throws(
+    () => assertEngineIdMatchesPlan({ model: "krea_2_turbo:mlx", engineId: "z_image_turbo", planAnchors: plan }),
+    /measures krea_2_turbo on mlx with provider\(s\) "krea_2_turbo"/,
+  );
+  // A missing alias on a model the plan measures under someone else's id is the same defect.
+  assert.throws(
+    () => assertEngineIdMatchesPlan({ model: "z_image_edit:mlx", planAnchors: plan }),
+    /declares no engineId.*provider\(s\) "z_image_turbo"/s,
+  );
+  // The two shipped shapes pass, and a lane the plan carries no row for has nothing to check.
+  assertEngineIdMatchesPlan({ model: "z_image_edit:mlx", engineId: "z_image_turbo", planAnchors: plan });
+  assertEngineIdMatchesPlan({ model: "krea_2_turbo:mlx", planAnchors: plan });
+  assertEngineIdMatchesPlan({ model: "ltx_2_3:mlx", engineId: "made_up_engine", planAnchors: plan });
+
+  // And it is wired into the derivation, not merely exported: a mis-pointed declaration whose entry
+  // points DO carry the engine id's literal — the false green in full — is still refused.
+  const tree = {
+    paths: () => [],
+    contentId: () => "c",
+    read: (files) => new Map(files.map((file) => [file, 'pub const MODEL_ID: &str = "z_image_turbo";'])),
+  };
+  assert.throws(
+    () =>
+      anchorLoaderDigests({
+        declared: { "krea_2_turbo:mlx": { engineId: "z_image_turbo", entryPoints: ["crates/x/src/model.rs"] } },
+        tree,
+      }),
+    /measures krea_2_turbo on mlx with provider\(s\) "krea_2_turbo"/,
+  );
+});
+
+// Every shipped declaration agrees with the plan, so the rule above is a live gate on this repo and
+// not a rule the catalog would have to grow into.
+test("every shipped loader declaration agrees with the anchor plan", () => {
+  const plan = calibrationPlanAnchors();
+  for (const [model, entry] of Object.entries(config.models)) {
+    assertEngineIdMatchesPlan({ model, engineId: entry.engineId, planAnchors: plan });
+  }
 });
 
 test("a declared entry point that is not shipped source is refused", { skip }, () => {

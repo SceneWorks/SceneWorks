@@ -8,6 +8,8 @@ import test from "node:test";
 
 import {
   ROOT,
+  MATRIX_PATH,
+  PLAN_PATH,
   PACKAGED_SOURCES_PATH,
   PROVIDER_FAMILIES,
   anchorParts,
@@ -53,6 +55,11 @@ function fakeModels() {
     },
     { id: "ltx_2_5", downloads: [{ repo: "SceneWorks/ltx-2.5-mlx", revision: REVISION, variant: "q4", files: ["distilled/q4/*"] }] },
     { id: "z_image_turbo", downloads: [{ repo: "SceneWorks/z-image-turbo-mlx", revision: REVISION, variant: "q4", files: ["q4/*"] }] },
+    // The base model is a distinct engine provider with its own artifact family.
+    { id: "z_image", downloads: [{ repo: "SceneWorks/z-image-mlx", revision: UPSTREAM, variant: "q8", files: ["q8/*"] }] },
+    // The edit model is a catalog alias for the Turbo provider driven in edit_image mode: it ships
+    // the Turbo weights (worker engines.rs `z_image_edit → z_image_turbo`).
+    { id: "z_image_edit", downloads: [{ repo: "SceneWorks/z-image-turbo-mlx", revision: REVISION, variant: "q4", files: ["q4/*"] }] },
   ];
 }
 
@@ -133,6 +140,38 @@ test("classification: runnable anchors carry the adapter env family and the cano
   assert.match(missingTier.reason, /q8 on this host/);
 });
 
+test("the z-image family: the base model has its own env family, and the edit alias loads the Turbo artifact", async () => {
+  const hub = await fakeHub([
+    ["SceneWorks/z-image-mlx", UPSTREAM, "q8"],
+    ["SceneWorks/z-image-turbo-mlx", REVISION, "q4"],
+  ]);
+  for (const backend of ["mlx", "candle"]) {
+    const context = { models: fakeModels(), backend, hubs: [hub], current: new Map(), captured: new Map() };
+    const base = await classifyAnchor(`z_image:q8:${backend}`, { provider: "z_image" }, context);
+    assert.equal(base.status, "runnable", `${backend}: ${base.reason}`);
+    assert.equal(base.physical, false);
+    assert.deepEqual(base.env, {
+      SCENEWORKS_Z_IMAGE_BASE_REPOSITORY: "SceneWorks/z-image-mlx",
+      SCENEWORKS_Z_IMAGE_BASE_REVISION: UPSTREAM,
+      SCENEWORKS_Z_IMAGE_BASE_ROOT: snapshotPath(hub, "SceneWorks/z-image-mlx", UPSTREAM, "q8"),
+    }, "the base model must never be served from the Turbo family's env or artifact");
+    const baseMissing = await classifyAnchor(`z_image:q4:${backend}`, { provider: "z_image" }, context);
+    assert.equal(baseMissing.status, "weights_missing");
+    assert.match(baseMissing.reason, /z-image-mlx@.*\/q4 on this host/);
+
+    // The edit anchor's provider is the Turbo engine id; the tier root resolves through the
+    // z_image_edit MANIFEST entry (which ships the Turbo weights), not through z_image_turbo's.
+    const edit = await classifyAnchor(`z_image_edit:q4:${backend}`, { provider: "z_image_turbo", mode: "edit_image" }, context);
+    assert.equal(edit.status, "runnable", `${backend}: ${edit.reason}`);
+    assert.equal(edit.modelId, "z_image_edit");
+    assert.deepEqual(edit.env, {
+      SCENEWORKS_Z_IMAGE_REPOSITORY: "SceneWorks/z-image-turbo-mlx",
+      SCENEWORKS_Z_IMAGE_REVISION: REVISION,
+      SCENEWORKS_Z_IMAGE_ROOT: snapshotPath(hub, "SceneWorks/z-image-turbo-mlx", REVISION, "q4"),
+    });
+  }
+});
+
 test("classification refuses what no adapter arm or the harness cannot serve, and skips what is done", async () => {
   const hub = await fakeHub([["SceneWorks/z-image-turbo-mlx", REVISION, "q4"]]);
   const base = { models: fakeModels(), backend: "candle", hubs: [hub], current: new Map(), captured: new Map() };
@@ -159,6 +198,16 @@ test("classification refuses what no adapter arm or the harness cannot serve, an
     ...base, declaredLanes: new Set(["z_image_turbo:candle"]),
   });
   assert.equal(declared.status, "runnable");
+  // E1's second declaration: the provider's crate closure in config/inference-provider-closures.json.
+  const providerUndeclared = await classifyAnchor("z_image_turbo:q4:candle", { provider: "z_image_turbo" }, {
+    ...base, declaredProviders: new Set(["mlx:z_image_turbo"]),
+  });
+  assert.equal(providerUndeclared.status, "provider_undeclared");
+  assert.match(providerUndeclared.reason, /inference-provider-closures\.json/);
+  const providerDeclared = await classifyAnchor("z_image_turbo:q4:candle", { provider: "z_image_turbo" }, {
+    ...base, declaredProviders: new Set(["candle:z_image_turbo"]),
+  });
+  assert.equal(providerDeclared.status, "runnable");
 });
 
 test("appending to PACKAGED_MEMORY_ANCHOR_SOURCES is idempotent and keeps the rustfmt tuple shape", async () => {
@@ -199,11 +248,12 @@ test("every provider the committed plan declares is either served by a family ro
     const keys = Object.keys(plan.anchors).filter((key) => key.endsWith(`:${backend}`));
     assert.deepEqual(rows.map((row) => row.key), keys.sort(), `${backend}: one row per plan anchor`);
     for (const row of rows) {
-      assert.ok(["runnable", "weights_missing", "no_adapter_arm", "harness_unsupported", "lane_undeclared"].includes(row.status), `${row.key}: ${row.status}`);
+      assert.ok(["runnable", "weights_missing", "no_adapter_arm", "harness_unsupported", "lane_undeclared", "provider_undeclared"].includes(row.status), `${row.key}: ${row.status}`);
       if (row.status === "lane_undeclared") assert.match(row.reason, /anchor-loader-closures\.json/);
+      if (row.status === "provider_undeclared") assert.match(row.reason, /inference-provider-closures\.json/);
       if (row.status === "no_adapter_arm") {
         assert.equal(PROVIDER_FAMILIES[row.provider]?.arms.includes(backend) ?? false, false);
-      } else if (!["harness_unsupported", "lane_undeclared"].includes(row.status)) {
+      } else if (!["harness_unsupported", "lane_undeclared", "provider_undeclared"].includes(row.status)) {
         // A served provider must resolve a manifest download, or the classification could not name a root.
         tierDownload(models, row.modelId, PROVIDER_FAMILIES[row.provider].repo, row.tier);
         assert.ok(row.roots.length > 0, `${row.key} names the root it would load`);
@@ -211,6 +261,102 @@ test("every provider the committed plan declares is either served by a family ro
     }
   }
   assert.match(await compiledInferencePin(), /^[0-9a-f]{40}$/);
+});
+
+/**
+ * Every shipped tier of every routed model, as a `<modelId>:<tier>:<backend>` key.
+ *
+ * - SHIPPED tier: a non-corequisite manifest download whose `variant` is a numeric tier. The
+ *   manifest (`config/manifests/builtin.models.jsonc`) is the only artifact that says what a user
+ *   can download, so it is the only source for the tier axis.
+ * - ROUTED lane: `models[].backends` in `docs/generated/memory-matrix.json`, which
+ *   `generate-memory-matrix.mjs` derives from the worker's route resolvers
+ *   (`crates/sceneworks-worker/src/memory_route_registry.rs`, the same `CANDLE_BESPOKE_REQUEST_PROVIDERS`
+ *   and per-family engine tables the worker dispatches with). A lane that does not route the
+ *   model is the ONLY exemption; a "structurally N/A" matrix cell is not one (epic 22723 E1).
+ */
+async function computeShippedTieredCells() {
+  const models = await readManifestModels();
+  const matrix = JSON.parse(await readFile(path.join(ROOT, MATRIX_PATH), "utf8"));
+  const routed = new Map(matrix.models.map((model) => [model.id, model.backends ?? []]));
+  const cells = [];
+  for (const model of models) {
+    const tiers = [...new Set(
+      (model.downloads ?? [])
+        .filter((download) => !download.coRequisite && ["q4", "q8", "bf16"].includes(download.variant))
+        .map((download) => download.variant),
+    )];
+    if (tiers.length === 0) continue;
+    for (const backend of routed.get(model.id) ?? []) {
+      for (const tier of tiers) cells.push({ modelId: model.id, tier, backend, key: `${model.id}:${tier}:${backend}` });
+    }
+  }
+  return cells;
+}
+
+/**
+ * Both derivations are pure over the checked-in manifest, matrix and plan, and both are asked for by
+ * more than one case — `measurabilityGaps()` alone is two full `planRun`s with per-anchor filesystem
+ * probes. Memoized as module-level promises so the whole file pays for each exactly once.
+ */
+let shippedTieredCellsPromise;
+function shippedTieredCells() {
+  shippedTieredCellsPromise ??= computeShippedTieredCells();
+  return shippedTieredCellsPromise;
+}
+
+let measurabilityGapsPromise;
+function measurabilityGaps() {
+  measurabilityGapsPromise ??= computeMeasurabilityGaps();
+  return measurabilityGapsPromise;
+}
+
+/** The measurability gap set: shipped cells `--list` does not classify runnable / weights_missing. */
+async function computeMeasurabilityGaps() {
+  const plan = await readPlan();
+  const rows = new Map();
+  for (const backend of ["mlx", "candle"]) {
+    const run = await planRun({ backend, anchors: null, campaign: "sc-catalog-test", hfCache: [], skipCurrent: false });
+    for (const row of run.rows) rows.set(row.key, row);
+  }
+  const gaps = [];
+  for (const cell of await shippedTieredCells()) {
+    const row = rows.get(cell.key);
+    const status = row?.status ?? (plan.anchors[cell.key] ? "unclassified" : "no_plan_anchor");
+    if (!["runnable", "weights_missing"].includes(status)) {
+      gaps.push({ ...cell, status, reason: row?.reason ?? `${PLAN_PATH} declares no anchor ${cell.key}` });
+    }
+  }
+  return gaps;
+}
+
+function gapReport(gaps) {
+  const perModel = new Map();
+  for (const gap of gaps) perModel.set(gap.modelId, (perModel.get(gap.modelId) ?? 0) + 1);
+  return [
+    `${gaps.length} shipped tier×lane cell(s) are not measurable (per model: ${[...perModel].map(([id, n]) => `${id}=${n}`).join(", ") || "none"})`,
+    ...gaps.map((gap) => `  ${gap.key.padEnd(44)} ${gap.status.padEnd(20)} ${gap.reason}`),
+  ].join("\n");
+}
+
+// Epic 22723 E1/E2: measurability is a SHAPE claim over the manifest and the plan — no weights, no
+// GPU, no frozen count. `weights_missing` is measurable (the host merely lacks the snapshot);
+// anything else names work: a missing plan anchor, a missing adapter arm, a missing closure
+// declaration, or a harness that cannot bind the lane.
+test("the z-image family is measurable on every shipped tier of every routed lane", async () => {
+  const cells = (await shippedTieredCells()).filter((cell) => ["z_image", "z_image_edit", "z_image_turbo"].includes(cell.modelId));
+  assert.ok(cells.length >= 3 * 3 * 2, "z_image / z_image_edit / z_image_turbo × three tiers × two lanes are all shipped and routed");
+  const gaps = (await measurabilityGaps()).filter((gap) => ["z_image", "z_image_edit", "z_image_turbo"].includes(gap.modelId));
+  assert.equal(gaps.length, 0, gapReport(gaps));
+});
+
+// The catalog-wide burndown. `todo` until the terminal story of epic 22723 (sc-22738) promotes it:
+// node:test reports a failing todo without failing the run, so the gap set is printed on every
+// `npm run check` while the other families are brought in, and the assertion itself is already
+// the one that will gate. Remove the `todo` option to promote; do not add a count.
+test("every shipped tiered model is measurable", { todo: "epic 22723 burndown; sc-22738 promotes this to a hard assertion" }, async () => {
+  const gaps = await measurabilityGaps();
+  assert.equal(gaps.length, 0, gapReport(gaps));
 });
 
 test("failure reasons name the thrown error, not the Node banner after it", () => {
@@ -329,6 +475,18 @@ test("one anchor lands as one commit carrying the evidence, the packaged-source 
   const evidence = JSON.parse(await readFile(path.join(checkout.root, "docs/calibration/sc-stub/z-image-turbo-q4-mlx-evidence.json"), "utf8"));
   assert.equal(evidence.records[0].env, tierRoot, "the derived adapter environment reached the provider");
   assert.ok((await stat(result.log)).size > 0, "the per-anchor log was written");
+});
+
+test("a --no-commit run captures and checks, then stops with a clean tree so the next anchor can still be captured", async () => {
+  const checkout = await stubCheckout();
+  const row = { key: "z_image_turbo:q4:mlx", physical: false, env: {} };
+  const context = stubContext(checkout, { args: { ...stubContext(checkout).args, commit: false } });
+  const result = await measureAnchor(row, context);
+  assert.equal(result.status, "captured", result.reason);
+  assert.equal(context.state.commits.length, 0);
+  assert.equal((await checkout.git("status", "--porcelain")).stdout, "", "nothing ingested, nothing derived: the tree is clean for the next anchor");
+  assert.ok((await stat(path.join(checkout.workDir, "captures", "z-image-turbo-q4-mlx.json"))).size > 0, "the raw bundle is retained");
+  await assert.rejects(stat(path.join(checkout.root, "docs/calibration/sc-stub")), "no evidence directory was created");
 });
 
 test("a failed derivation step rolls the tree back to HEAD and keeps the raw capture; a failed capture just logs", async () => {

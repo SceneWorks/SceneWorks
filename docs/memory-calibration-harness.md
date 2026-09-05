@@ -240,9 +240,15 @@ session (the Qwen MLX arm, the only one that emits a `sourceCapture`). `--list` 
 classify every anchor as `runnable`, `weights_missing` (no snapshot at the manifest revision under
 any hub root), `no_adapter_arm`, `harness_unsupported` (candle `ltx_2_5`), `lane_undeclared`
 (`<model>:<backend>` has no entry in `config/anchor-loader-closures.json`, so `--stamp-anchors`
-would refuse the anchor after the render — runbook §7c declares a lane) or `already_captured` (an
-evidence bundle for the key is already under `docs/calibration/<campaign>/`), and print the roots
-and env a run would use.
+would refuse the anchor after the render — runbook §7c declares a lane), `provider_undeclared`
+(`<backend>:<provider>` has no entry in `config/inference-provider-closures.json`, so the record
+would carry no closure digest — runbook §7c) or `already_captured` (an evidence bundle for the key
+is already under `docs/calibration/<campaign>/`), and print the roots and env a run would use.
+
+`--no-commit` captures and checks each anchor and stops there (status `captured`, raw bundle kept in
+`<work-dir>/captures`): the harness refuses complete evidence from a dirty checkout, so ingesting the
+first anchor would leave every later anchor in the same run uncapturable. Ingest a retained bundle by
+hand with the harness, or run without the flag to land it.
 
 A freshly captured record always produces a NEW anchor id, and `extract-memory-anchors.mjs` refuses
 an id it has never carried (a new anchor must not borrow the pin's digest). The script seeds the new

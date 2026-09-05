@@ -1506,6 +1506,12 @@ pub const ANCHOR_LOADER_CLOSURE_VERSION: &str = "anchor-loader-closure v2";
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct AnchorLoaderClosure {
+    /// For a CATALOG ALIAS only (sc-22724): the engine provider id this model id resolves to
+    /// (`z_image_edit` → `z_image_turbo`). The inference tree never names the alias, so the
+    /// derivation asks its literal rule of the engine id and hashes it into the closure text.
+    /// Absent for every model that is its own engine.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub engine_id: Option<String>,
     /// The loader entry points the closure is rooted at, repo-relative in the inference tree.
     pub entry_points: Vec<String>,
     /// The digest of the closure's source content. This is what an anchor is compared against.
@@ -3248,6 +3254,32 @@ mod tests {
     fn packaged_closures() -> AnchorLoaderClosures {
         load_anchor_loader_closures(PACKAGED_ANCHOR_LOADER_CLOSURES)
             .expect("the packaged loader closures parse")
+    }
+
+    /// sc-22724: a catalog alias declares the engine id it resolves to, and the strict parse
+    /// keeps the field (`deny_unknown_fields` would otherwise demote every anchor to the floor
+    /// the moment the derivation wrote it). A model that is its own engine carries none.
+    #[test]
+    fn a_catalog_alias_declaration_carries_its_engine_id() {
+        let closures = packaged_closures();
+        let alias = closures
+            .models
+            .get("z_image_edit:mlx")
+            .expect("z_image_edit:mlx is declared");
+        assert_eq!(alias.engine_id.as_deref(), Some("z_image_turbo"));
+        let own = closures
+            .models
+            .get("z_image_turbo:mlx")
+            .expect("z_image_turbo:mlx is declared");
+        assert_eq!(own.engine_id, None);
+        // The field round-trips through serde exactly as the derivation wrote it.
+        let raw: serde_json::Value =
+            serde_json::from_str(PACKAGED_ANCHOR_LOADER_CLOSURES).expect("closures parse");
+        assert_eq!(
+            raw["models"]["z_image_edit:mlx"]["engineId"],
+            "z_image_turbo"
+        );
+        assert!(raw["models"]["z_image_turbo:mlx"].get("engineId").is_none());
     }
 
     #[test]

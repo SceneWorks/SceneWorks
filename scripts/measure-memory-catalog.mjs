@@ -18,6 +18,11 @@
 //     --work-dir /abs/OUTSIDE/the/repo/calib --campaign sc-NNNN [--model sdxl ...] [--anchors a,b]
 //     [--skip-current]
 //     [--dry-run] [--no-commit] [--hf-cache DIR ...]   (--hf-cache is repeatable)
+//
+// `--no-commit` captures and checks each anchor and stops there (status `captured`, raw bundle in
+// <work-dir>/captures): the harness refuses complete evidence from a dirty checkout, so the first
+// anchor's ingest would leave every later anchor in the same run uncapturable (sc-22724). Ingest a
+// retained bundle by hand with the harness, or run without the flag to land it.
 import process from "node:process";
 import path from "node:path";
 import os from "node:os";
@@ -36,6 +41,7 @@ export const ADAPTER_LIB_PATH = "crates/sceneworks-memory-adapter/src/lib.rs";
 export const PACKAGED_SOURCES_PATH = "crates/sceneworks-core/src/memory_anchor.rs";
 export const ANCHOR_STORE_PATH = "config/memory-anchors.json";
 export const ANCHOR_LOADER_CONFIG_PATH = "config/anchor-loader-closures.json";
+export const PROVIDER_CLOSURE_CONFIG_PATH = "config/inference-provider-closures.json";
 export const MATRIX_MD_PATH = "docs/generated/memory-matrix.md";
 /** A well-formed but meaningless key the extractor accepts for a NEW anchor; `--stamp-anchors`
  *  re-derives every key at its record's own revision right after, before anything is committed. */
@@ -55,7 +61,13 @@ export const LTX25_REPOSITORY = "SceneWorks/ltx-2.5-mlx";
  */
 export const PROVIDER_FAMILIES = Object.freeze({
   qwen_image: { env: "QWEN_IMAGE", repo: "SceneWorks/qwen-image-mlx", arms: ["mlx", "candle"], physical: true },
+  // `z_image_edit` anchors ride this family too (sc-22724): the catalog id is an alias for the
+  // Turbo provider driven in `edit_image` mode (worker engines.rs `z_image_edit → z_image_turbo`),
+  // and its manifest entry ships the same Turbo tiers, which `tierDownload` resolves by model id.
   z_image_turbo: { env: "Z_IMAGE", repo: "SceneWorks/z-image-turbo-mlx", arms: ["mlx", "candle"] },
+  // The undistilled base is a distinct engine provider (`z_image`) with its own artifact family
+  // (sc-22724). Never the Turbo env: a base plan satisfied by Turbo weights re-labels Turbo's peaks.
+  z_image: { env: "Z_IMAGE_BASE", repo: "SceneWorks/z-image-mlx", arms: ["mlx", "candle"] },
   krea_2_turbo: { env: "KREA", repo: "SceneWorks/krea-2-turbo-mlx", arms: ["mlx", "candle"] },
   sdxl: { env: "SDXL", repo: "SceneWorks/sdxl-base-mlx", arms: ["mlx"] },
   flux2_dev: { env: "FLUX2", repo: "SceneWorks/flux2-dev-mlx", arms: ["mlx"] },
@@ -153,6 +165,12 @@ export async function readDeclaredLanes(root = ROOT) {
   return new Set(Object.keys(config.models ?? {}));
 }
 
+/** `<backend>:<provider>` keys with a crate-closure declaration (runbook §7c). */
+export async function readDeclaredProviders(root = ROOT) {
+  const config = JSON.parse(await readFile(path.join(root, PROVIDER_CLOSURE_CONFIG_PATH), "utf8"));
+  return new Set(Object.keys(config.providers ?? {}));
+}
+
 export async function readMatrixCurrency(root = ROOT) {
   let matrix;
   try {
@@ -217,7 +235,7 @@ async function firstExistingDirectory(candidates) {
  * Decide what the run can do with one plan anchor: which adapter arm serves it, which weights
  * root it loads, and why it would be skipped. Pure apart from the directory probes.
  */
-export async function classifyAnchor(key, planned, { models, backend, hubs, current, captured, declaredLanes }) {
+export async function classifyAnchor(key, planned, { models, backend, hubs, current, captured, declaredLanes, declaredProviders }) {
   const parts = anchorParts(key);
   const row = { key, ...parts, provider: planned.provider, status: "runnable", reason: null, env: {}, roots: [] };
   if (parts.backend !== backend) return { ...row, status: "other_backend", reason: `${parts.backend} lane` };
@@ -234,6 +252,12 @@ export async function classifyAnchor(key, planned, { models, backend, hubs, curr
     return {
       ...row, status: "lane_undeclared",
       reason: `${parts.modelId}:${backend} has no loader-closure declaration in ${ANCHOR_LOADER_CONFIG_PATH}; --stamp-anchors would refuse it (runbook §7c)`,
+    };
+  }
+  if (declaredProviders && !declaredProviders.has(`${backend}:${planned.provider}`)) {
+    return {
+      ...row, status: "provider_undeclared",
+      reason: `${backend}:${planned.provider} has no crate-closure declaration in ${PROVIDER_CLOSURE_CONFIG_PATH}; the record would carry no closure digest (runbook §7c)`,
     };
   }
   if (current.get(key) === true) row.current = true;
@@ -450,6 +474,9 @@ export async function measureAnchor(row, context) {
   } catch (error) {
     return finish("check_failed", failureReason(error));
   }
+  // A no-commit run ends here: ingesting would dirty the tree and make the harness refuse every
+  // later anchor in the same run (`complete evidence cannot come from a dirty repository`).
+  if (!args.commit) return finish("captured");
 
   // 3..7. ingest + derive + commit. Any failure rolls the tree back to HEAD so the next anchor
   //       still starts clean; the raw capture stays in the work dir for a by-hand ingest.
@@ -494,7 +521,7 @@ export async function measureAnchor(row, context) {
         `Evidence: ${evidenceRelative}; anchor store, currency stamp and matrix regenerated.`]);
       state.commits.push(await gitAt(["rev-parse", "--short", "HEAD"]));
     }
-    return finish(args.commit ? "committed" : "ingested");
+    return finish("committed");
   } catch (error) {
     log.write(`\nROLLBACK: ${error.message}\n`);
     try {
@@ -522,6 +549,7 @@ export async function planRun(args, root = ROOT) {
   const campaignDir = `docs/calibration/${campaign}`;
   const captured = await capturedInCampaign(root, campaignDir);
   const declaredLanes = await readDeclaredLanes(root);
+  const declaredProviders = await readDeclaredProviders(root);
   const hubs = hubRoots(args.hfCache);
   const keys = Object.keys(plan.anchors).sort();
   if (args.anchors) {
@@ -534,7 +562,7 @@ export async function planRun(args, root = ROOT) {
   for (const key of keys) {
     if (args.anchors && !args.anchors.includes(key)) continue;
     if ((args.models ?? []).length > 0 && !args.models.includes(anchorParts(key).modelId)) continue;
-    const row = await classifyAnchor(key, plan.anchors[key], { models, backend: args.backend, hubs, current, captured, declaredLanes });
+    const row = await classifyAnchor(key, plan.anchors[key], { models, backend: args.backend, hubs, current, captured, declaredLanes, declaredProviders });
     if (row.status === "other_backend" && !args.anchors) continue;
     if (row.status === "runnable" && args.skipCurrent && row.current) {
       row.status = "current";
@@ -626,7 +654,7 @@ export async function main(argv = process.argv.slice(2)) {
   process.stdout.write(`\n${table(results, ["key", "status", "seconds", "reason"])}\n`);
   process.stdout.write(`\ncommits: ${state.commits.length ? state.commits.join(" ") : "none"}\nsummary: ${summaryPath}\n`);
   if (state.halt) fail(state.halt);
-  const failed = results.filter((result) => !["committed", "ingested"].includes(result.status));
+  const failed = results.filter((result) => !["committed", "captured"].includes(result.status));
   if (failed.length > 0) process.exitCode = 2;
 }
 
