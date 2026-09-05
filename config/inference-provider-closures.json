@@ -155,6 +155,26 @@
       "sharedContractFileCount": 83,
       "lockedPackageCount": 238
     },
+    "candle:qwen_image": {
+      "crate": "crates/media/candle-gen/candle-gen-qwen-image",
+      "digest": "b94f8358c5c4a5e7e501abe8f1384b5a5c1684056e7f6b05f7b719692b39bc83",
+      "sharedContractDigest": "0db42a4d6362d5449e53e1e122cbc3c7a934bfffb350b99e5001fa43033661ce",
+      "closureCrates": [
+        "crates/contracts/core-llm",
+        "crates/contracts/gen-core",
+        "crates/media/candle-gen/candle-gen",
+        "crates/media/candle-gen/candle-gen-pid",
+        "crates/media/candle-gen/candle-gen-qwen-image",
+        "crates/media/candle-gen/vendor/candle-kernels"
+      ],
+      "universalCrates": [
+        "crates/contracts/core-llm",
+        "crates/contracts/gen-core"
+      ],
+      "sourceFileCount": 126,
+      "sharedContractFileCount": 83,
+      "lockedPackageCount": 236
+    },
     "candle:z_image": {
       "crate": "crates/media/candle-gen/candle-gen-z-image",
       "digest": "aa8a98ee5aebee1e62fd0c01ae6b5553465d0492cb7ce9a78a107ad381953edc",

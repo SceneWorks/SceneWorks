@@ -76,8 +76,9 @@ planned lane with no arm as **uncapturable**, in its own section, visibly distin
 capture". `candle:z_image` — declared, 90 authoritative plan entries, no arm — used to print as
 "declared but never captured", which read as pending measurement work; it is an
 adapter-implementation task, and the report now says so. Planned-but-undeclared lanes
-(`candle:qwen_image_edit`, `candle:qwen_image`) are enumerated too. **§2c/§2d below remain the
-diagnosis**; the report is now an index into them, not a substitute for them.
+(`candle:qwen_image_edit`; `candle:qwen_image` was one until sc-22725 declared it) are enumerated
+too. **§2c/§2d below remain the diagnosis**; the report is now an index into them, not a substitute
+for them.
 
 🔴 **This report enumerates DECLARED and PLANNED lanes only, so it still cannot tell you a lane does
 not exist.** A lane is keyed exactly as `config/inference-provider-closures.json` keys it
@@ -216,9 +217,14 @@ with no records to be stale.
 
 Two more traps in the same area:
 
-- **A named arm is not automatically a current-evidence lane.** `candle:qwen_image` has an adapter arm
-  but its 5 plan entries are all `candidate` scope, so no capture through it can ever be `current`
-  (§2b). Check the arm *and* the scope.
+- **A named arm is not automatically a current-evidence lane.** Scope is a second, independent gate:
+  only `authoritative` plan entries reach the currency comparison, so a lane whose entries are all
+  `candidate` can never produce `current` evidence no matter how complete its arm and closure
+  declaration are (§2b). `candle:qwen_image` used to be the standing example — arm, no closure entry,
+  all-`candidate` entries — and sc-22725 closed it out: the lane now carries a
+  `candle:qwen_image` closure declaration and **3 `authoritative` plan entries** (q4/q8/bf16), and is
+  reported as *pending capture* rather than permanently non-current. The remaining candidate-scope
+  rows in the plan are `candle:qwen_image_edit`'s (§2d row four). Check the arm *and* the scope.
 - **A closure-table entry is not an arm.** `candle:flux2_dev` is declared, digested and has committed
   records, and still has no arm. Declaration, evidence and capturability are three separate facts.
 
@@ -240,7 +246,8 @@ only in §2b**, and mistaking one for the other prescribes writing plan entries 
 | `NOT DECLARED` | OK | empty | planned but never declared **or** implemented — usually a lane whose entries are all `candidate` scope, which no closure entry would make current anyway | adapter arm, then decide whether the entries should be re-scoped `authoritative`; only then a closure stub |
 | declared | OK | non-empty | capturable | continue to §3 |
 
-Row four is instantiated today: `candle:qwen_image_edit` has **9 plan entries, all `candidate`**, is
+Row four is instantiated today: `candle:qwen_image_edit` has **2 plan entries, all `candidate`** (it
+carried 9 when this section was written; the anchor-per-cell rewrite of epic 22505 collapsed them), is
 absent from the 10 declared lanes, and has no adapter arm (its rejection is pinned by
 `candle.rs:1668-1673`). Its plan entries being candidate-scope is why nobody has missed the closure
 entry — per §2b, candidate scope can never become current evidence.
@@ -804,7 +811,17 @@ Flag notes, all from the `capture` arm of `main`:
   refinement adapter file once when the anchor is a dev variant, and sets their byte counts and
   digests on the provider invocation. It re-hashes all of them around the invocation, so a mutation
   during the render is caught rather than recorded. The adapter refuses a missing shared inventory
-  before provider construction.
+  before provider construction. **Both lanes** are served from that one snapshot (sc-22725), under
+  each lane's own engine id — `ltx_2_5` on MLX, `ltx_2_5_distilled` on Candle — so the plan row's
+  `provider` selects which arm is prepared, and a row naming the other lane's id is refused rather
+  than prepared against a loader that never asked for it. A `dev` anchor also binds
+  `SCENEWORKS_LTX25_DISTILL_LORA_ROOT`, the snapshot root the Candle arm's
+  `ltx25_official_dev_adapter` (`candle.rs`) joins `distilled_lora/…` against. **That binding is in
+  place for a future Candle `dev` anchor and reaches nothing today**: no plan row is both `candle`
+  and `transformerVariant: "dev"` — every MLX row is `dev` (and MLX never reads this variable, it
+  takes the adapter file's bytes and digest instead) and every Candle row is `distilled`. Do not read
+  the binding as evidence that a Candle dev capture has been exercised; adding such a plan row is
+  what would first exercise it.
 - The composition is NOT a flag. An anchor is the `resident` composition on MLX and the shallow
   optimized one (`staged_residency`, nothing deeper) on candle, fixed by the harness to match what
   `scripts/extract-memory-anchors.mjs` can actually price.

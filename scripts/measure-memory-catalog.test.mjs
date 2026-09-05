@@ -32,6 +32,7 @@ import {
   snapshotPath,
   tierDownload,
 } from "./measure-memory-catalog.mjs";
+import { LTX25_LANE_PROVIDERS } from "./memory-calibration-harness.mjs";
 
 const execFileAsync = promisify(execFile);
 const REVISION = "0123456789abcdef0123456789abcdef01234567";
@@ -210,6 +211,53 @@ test("the flux2-klein family: two catalog models on one provider id resolve thei
   }
 });
 
+// sc-22725: LTX-2.5 reaches the two lanes under two engine ids off ONE public snapshot. Both
+// families must therefore derive the same snapshot root, on their own lane and on no other.
+test("the LTX-2.5 family derives the same snapshot root on both lanes, under each lane's engine id", async () => {
+  const hub = await fakeHub([["SceneWorks/ltx-2.5-mlx", REVISION, "distilled"]]);
+  const expected = snapshotPath(hub, "SceneWorks/ltx-2.5-mlx", REVISION);
+  for (const [backend, provider] of [["mlx", "ltx_2_5"], ["candle", "ltx_2_5_distilled"]]) {
+    const context = { models: fakeModels(), backend, hubs: [hub], current: new Map(), captured: new Map() };
+    for (const tier of ["q4", "q8", "bf16"]) {
+      const row = await classifyAnchor(`ltx_2_5:${tier}:${backend}`, { provider }, context);
+      assert.equal(row.status, "runnable", `${backend} ${tier}: ${row.reason}`);
+      assert.equal(row.ltx25SnapshotRoot, expected, "the harness is handed the snapshot, not a tier root");
+      assert.deepEqual(row.env, {}, "LTX-2.5 carries no adapter env family; the harness binds it");
+      assert.equal(row.physical, false);
+    }
+    // The other lane's engine id must NOT be served here: an arm is per-family, not per-model.
+    const crossed = await classifyAnchor(
+      `ltx_2_5:q4:${backend}`,
+      { provider: backend === "mlx" ? "ltx_2_5_distilled" : "ltx_2_5" },
+      context,
+    );
+    assert.equal(crossed.status, "no_adapter_arm", `${backend} must not serve the other lane's engine id`);
+  }
+});
+
+// sc-22725 review: the lane→engine-id mapping is written down TWICE — the harness refuses a plan row
+// through `LTX25_LANE_PROVIDERS` (memory-calibration-harness.mjs), the catalog runner classifies one
+// through `PROVIDER_FAMILIES[*].arms` — and nothing bound the two. Editing either alone produces a
+// lane the harness will prepare but the runner will not schedule, or the reverse, with every test in
+// both files still green. This is that binding.
+test("LTX25_LANE_PROVIDERS and PROVIDER_FAMILIES agree on which lane serves which LTX-2.5 engine id", () => {
+  for (const [backend, provider] of Object.entries(LTX25_LANE_PROVIDERS)) {
+    const family = PROVIDER_FAMILIES[provider];
+    assert.ok(family, `the harness routes ${backend} to ${provider}, which is not a provider family`);
+    assert.equal(family.ltx25, true, `${provider} must be an LTX-2.5 family`);
+    assert.deepEqual(
+      family.arms,
+      [backend],
+      `${provider} must be served by exactly the lane the harness binds its snapshot for`,
+    );
+  }
+  assert.deepEqual(
+    Object.entries(PROVIDER_FAMILIES).filter(([, family]) => family.ltx25).map(([id]) => id).sort(),
+    Object.values(LTX25_LANE_PROVIDERS).slice().sort(),
+    "no family may claim the LTX-2.5 snapshot without a lane in LTX25_LANE_PROVIDERS to bind it",
+  );
+});
+
 test("classification refuses what no adapter arm or the harness cannot serve, and skips what is done", async () => {
   const hub = await fakeHub([["SceneWorks/z-image-turbo-mlx", REVISION, "q4"]]);
   const base = { models: fakeModels(), backend: "candle", hubs: [hub], current: new Map(), captured: new Map() };
@@ -218,8 +266,20 @@ test("classification refuses what no adapter arm or the harness cannot serve, an
   const sdxl = await classifyAnchor("sdxl:q4:candle", { provider: "sdxl" }, base);
   assert.equal(sdxl.status, "no_adapter_arm");
   assert.match(sdxl.reason, /candle adapter implements no provider arm for sdxl/);
-  const ltx = await classifyAnchor("ltx_2_5:q4:candle", { provider: "ltx_2_5_distilled" }, base);
-  assert.equal(ltx.status, "harness_unsupported");
+  // `harness_unsupported` is the refusal for a provider whose adapter arm exists but whose
+  // artifacts the harness cannot bind. No SHIPPED family is in that state since sc-22725 gave
+  // LTX-2.5's candle engine id a real row, so the branch is driven through a synthetic family.
+  const unsupported = await classifyAnchor("ltx_2_5:q4:candle", { provider: "ltx_2_5_distilled" }, {
+    ...base,
+    families: { ...PROVIDER_FAMILIES, ltx_2_5_distilled: { ltx25: true, repo: "SceneWorks/ltx-2.5-mlx", arms: ["candle"], harnessUnsupported: "a synthetic unbindable family" } },
+  });
+  assert.equal(unsupported.status, "harness_unsupported");
+  assert.equal(unsupported.reason, "a synthetic unbindable family");
+  assert.equal(
+    Object.values(PROVIDER_FAMILIES).filter((family) => family.harnessUnsupported).length,
+    0,
+    "no shipped provider family is unbindable by the harness",
+  );
   const other = await classifyAnchor("qwen_image:q4:mlx", { provider: "qwen_image" }, base);
   assert.equal(other.status, "other_backend");
   const done = await classifyAnchor("z_image_turbo:q4:candle", { provider: "z_image_turbo" }, {
@@ -399,6 +459,17 @@ test("the flux2 family is measurable on every shipped tier of every routed lane"
   const cells = (await shippedTieredCells()).filter((cell) => family.includes(cell.modelId));
   assert.ok(cells.length >= 3 * 3 * 2, "three models x three tiers x two lanes are all shipped and routed");
   const gaps = (await measurabilityGaps()).filter((gap) => family.includes(gap.modelId));
+  assert.equal(gaps.length, 0, gapReport(gaps));
+});
+
+// sc-22725: the two families that already had one candle arm each — Qwen-Image (an ordinary tier
+// root) and LTX-2.5 (a harness-bound snapshot under a second engine id) — on every shipped tier of
+// every routed lane. Same shape claim as the z-image case above: manifest + plan + declarations.
+test("qwen_image and ltx_2_5 are measurable on every shipped tier of every routed lane", async () => {
+  const families = ["qwen_image", "ltx_2_5"];
+  const cells = (await shippedTieredCells()).filter((cell) => families.includes(cell.modelId));
+  assert.ok(cells.length >= 2 * 3 * 2, "both models × three tiers × two lanes are shipped and routed");
+  const gaps = (await measurabilityGaps()).filter((gap) => families.includes(gap.modelId));
   assert.equal(gaps.length, 0, gapReport(gaps));
 });
 

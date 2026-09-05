@@ -392,6 +392,23 @@
       "calibrationFingerprint": "krea-2-mlx-full-ladder-native-pid-attn64m-window1-2026-08-03-v3",
       "fixture": "krea-base-mlx-q8-1024-seed18377-step2"
     },
+    "ltx_2_5:bf16:candle": {
+      "provider": "ltx_2_5_distilled",
+      "mode": "text_to_video",
+      "overlay": "none",
+      "transformerVariant": "distilled",
+      "decoder": "conv",
+      "geometry": {
+        "width": 768,
+        "height": 512,
+        "batch": 1,
+        "frames": 145
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "deferred_materialization",
+      "calibrationFingerprint": "sc-18797-ltx-2-5-candle-ladder-v1",
+      "fixture": "ltx-2-5-candle-bf16-768x512-f145-fps24-seed18755"
+    },
     "ltx_2_5:bf16:mlx": {
       "provider": "ltx_2_5",
       "mode": "text_to_video",
@@ -442,6 +459,23 @@
       "loadShape": "eager_materialization",
       "calibrationFingerprint": "sc-18797-ltx-2-5-mlx-ladder-v1",
       "fixture": "ltx-2-5-mlx-q4-dev-conv-512x768-f145-fps24-seed18755"
+    },
+    "ltx_2_5:q8:candle": {
+      "provider": "ltx_2_5_distilled",
+      "mode": "text_to_video",
+      "overlay": "none",
+      "transformerVariant": "distilled",
+      "decoder": "conv",
+      "geometry": {
+        "width": 768,
+        "height": 512,
+        "batch": 1,
+        "frames": 145
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "deferred_materialization",
+      "calibrationFingerprint": "sc-18797-ltx-2-5-candle-ladder-v1",
+      "fixture": "ltx-2-5-candle-q8-768x512-f145-fps24-seed18755"
     },
     "ltx_2_5:q8:mlx": {
       "provider": "ltx_2_5",
@@ -505,6 +539,21 @@
       "calibrationFingerprint": "minimax-h3-mlx-staged-joint-av-eager-abi3-v1",
       "fixture": "minimax-h3-mlx-q8-576x320-f124-fps24-seed17137"
     },
+    "qwen_image:bf16:candle": {
+      "provider": "qwen_image",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "deferred_materialization",
+      "calibrationFingerprint": "qwen-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v1",
+      "fixture": "qwen-image-candle-bf16-seed15817-step2"
+    },
     "qwen_image:bf16:mlx": {
       "provider": "qwen_image",
       "mode": "text_to_image",
@@ -531,7 +580,7 @@
         "batch": 1,
         "frames": 1
       },
-      "evidenceScope": "candidate",
+      "evidenceScope": "authoritative",
       "loadShape": "deferred_materialization",
       "calibrationFingerprint": "qwen-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v1",
       "fixture": "qwen-image-candle-q4-seed15817-step2"
@@ -551,6 +600,21 @@
       "sourceProvenance": "physical_mlx_v1",
       "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1",
       "fixture": "qwen-image-q4-seed16353-step2"
+    },
+    "qwen_image:q8:candle": {
+      "provider": "qwen_image",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "deferred_materialization",
+      "calibrationFingerprint": "qwen-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v1",
+      "fixture": "qwen-image-candle-q8-seed15817-step2"
     },
     "qwen_image:q8:mlx": {
       "provider": "qwen_image",
