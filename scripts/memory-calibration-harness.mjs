@@ -1544,7 +1544,7 @@ const LTX25_CAPTURE_TIERS = ["q4", "q8", "bf16"];
  * honest: a lane not listed here, or a plan row naming some other provider on a listed lane, is
  * still refused rather than silently prepared against the wrong artifact family.
  */
-const LTX25_LANE_PROVIDERS = Object.freeze({ mlx: "ltx_2_5", candle: "ltx_2_5_distilled" });
+export const LTX25_LANE_PROVIDERS = Object.freeze({ mlx: "ltx_2_5", candle: "ltx_2_5_distilled" });
 function ltx25ArtifactKey(planned) {
   const variant = planned?.target?.transformerVariant;
   const tier = planned?.target?.tier;
@@ -1771,8 +1771,13 @@ export function ltx25ProviderEnvironment(prepared, planned, baseEnvironment = pr
       environment.SCENEWORKS_LTX25_DEV_ADAPTER_SHA256 = prepared.devAdapter.sha256;
       // The Candle arm resolves the official stage-two refinement LoRA from the snapshot ROOT
       // (candle.rs `ltx25_official_dev_adapter` → `SCENEWORKS_LTX25_DISTILL_LORA_ROOT`, joined with
-      // `distilled_lora/…`), where the MLX arm takes the file's bytes/digest. Both are bound for a
-      // dev anchor so either lane's dev capture is served by the same prepared, re-hashed snapshot.
+      // `distilled_lora/…`), where the MLX arm takes the file's bytes/digest.
+      //
+      // Reachability, stated plainly: NO plan row is served by this line today. The variable is read
+      // only by the Candle arm, and only a `dev` anchor binds it — but every candle plan row is
+      // `distilled` and every mlx plan row is `dev` (where mlx ignores the variable). The binding is
+      // in place so that a future candle `dev` anchor is served by the same prepared, re-hashed
+      // snapshot as the mlx one; adding that plan row is what would first exercise it.
       environment.SCENEWORKS_LTX25_DISTILL_LORA_ROOT = prepared.snapshotRoot;
     }
   }

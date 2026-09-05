@@ -245,7 +245,13 @@ export async function classifyAnchor(key, planned, { models, backend, hubs, curr
   // No shipped family carries `harnessUnsupported` today (sc-22725 gave LTX-2.5's candle engine id
   // a real row). The status stays for the next provider whose adapter arm exists but whose
   // artifacts the harness cannot bind: it is the one refusal that is neither a missing arm nor a
-  // missing declaration, and `families` is injectable so the branch stays covered.
+  // missing declaration.
+  //
+  // KEPT DELIBERATELY (sc-22725 review): the `families` parameter above is a test seam and nothing
+  // else — no caller passes it — and it exists so this otherwise-unreachable branch is driven by a
+  // synthetic family rather than left uncovered. The alternative considered and rejected was
+  // deleting the branch and the parameter together; that would make the next unbindable provider
+  // report as `no_adapter_arm`, which is the wrong diagnosis and sends the reader to adapter work.
   if (family?.harnessUnsupported) return { ...row, status: "harness_unsupported", reason: family.harnessUnsupported };
   if (!family || !family.arms.includes(backend)) {
     return {

@@ -31,6 +31,7 @@ import {
   snapshotPath,
   tierDownload,
 } from "./measure-memory-catalog.mjs";
+import { LTX25_LANE_PROVIDERS } from "./memory-calibration-harness.mjs";
 
 const execFileAsync = promisify(execFile);
 const REVISION = "0123456789abcdef0123456789abcdef01234567";
@@ -194,6 +195,29 @@ test("the LTX-2.5 family derives the same snapshot root on both lanes, under eac
     );
     assert.equal(crossed.status, "no_adapter_arm", `${backend} must not serve the other lane's engine id`);
   }
+});
+
+// sc-22725 review: the lane→engine-id mapping is written down TWICE — the harness refuses a plan row
+// through `LTX25_LANE_PROVIDERS` (memory-calibration-harness.mjs), the catalog runner classifies one
+// through `PROVIDER_FAMILIES[*].arms` — and nothing bound the two. Editing either alone produces a
+// lane the harness will prepare but the runner will not schedule, or the reverse, with every test in
+// both files still green. This is that binding.
+test("LTX25_LANE_PROVIDERS and PROVIDER_FAMILIES agree on which lane serves which LTX-2.5 engine id", () => {
+  for (const [backend, provider] of Object.entries(LTX25_LANE_PROVIDERS)) {
+    const family = PROVIDER_FAMILIES[provider];
+    assert.ok(family, `the harness routes ${backend} to ${provider}, which is not a provider family`);
+    assert.equal(family.ltx25, true, `${provider} must be an LTX-2.5 family`);
+    assert.deepEqual(
+      family.arms,
+      [backend],
+      `${provider} must be served by exactly the lane the harness binds its snapshot for`,
+    );
+  }
+  assert.deepEqual(
+    Object.entries(PROVIDER_FAMILIES).filter(([, family]) => family.ltx25).map(([id]) => id).sort(),
+    Object.values(LTX25_LANE_PROVIDERS).slice().sort(),
+    "no family may claim the LTX-2.5 snapshot without a lane in LTX25_LANE_PROVIDERS to bind it",
+  );
 });
 
 test("classification refuses what no adapter arm or the harness cannot serve, and skips what is done", async () => {
