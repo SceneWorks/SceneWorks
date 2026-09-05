@@ -315,8 +315,22 @@ export function catalogAxes(model, backend, poseFamilies, baseProvider) {
   // through `vramGbByTier`; MLX also counts download variants and a single-dense `quantize`
   // declaration. `tiersFor`'s InstantID override is not mirrored: `instantid` publishes no engine
   // memory contract, so no projected row can ever reach it.
+  //
+  // sc-22731: including `tiersFor`'s lane filter, so the projection cannot declare a tier the
+  // matrix has no cell for. A download this lane's HOST would never fetch is not a tier this lane
+  // advertises — unless the lane also fetches an UNTIERED bundle, whose tiers live inside it
+  // (`SceneWorks/bernini`, LTX-2.3's dense co-requisite). `tiersFor`'s third test, the route
+  // registry floor, is not mirrored and does not need to be: it only ever ADDS a tier, and every
+  // tier it would add is already in `downloads` here.
+  const lanePlatform = backend === "mlx" ? "macos" : "linux";
+  const servesLane = (download) =>
+    !download.platforms || download.platforms.includes(lanePlatform);
+  const bundled = (model.downloads ?? []).some(
+    (download) => typeof download.variant !== "string" && servesLane(download),
+  );
   const measured = Object.keys(model[backend]?.vramGbByTier ?? {});
   const downloads = (model.downloads ?? [])
+    .filter((download) => bundled || servesLane(download))
     .map((download) => download.variant)
     .filter((variant) => typeof variant === "string" && /^(bf16|fp16|q\d+|nvfp4|int\d+)/.test(variant));
   const dense =

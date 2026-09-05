@@ -1,7 +1,7 @@
 {
   "schemaVersion": 11,
   "generatedFrom": {
-    "sceneWorksRevision": "source-tree:0c5cdfd2cfb98735226a1baf56511433c4eab07c553911e0c32613412c9bb032",
+    "sceneWorksRevision": "source-tree:8437997ac1aeb6cf5968cf7c107646498e50f3ed9a72ff1f2826f9728fb8afd0",
     "sources": {
       "manifest": {
         "path": "config/manifests/builtin.models.jsonc",
@@ -61,7 +61,7 @@
       },
       "memoryRouteRegistry": {
         "path": "crates/sceneworks-worker/src/memory_route_registry.rs",
-        "sha256": "38879d8193524e58a496fe10206c80fbfe0bbddff6c160ceddfb9ba8419e6c0d"
+        "sha256": "3413e12f1d40cf3cf4f5191636d00f9d246c82388daa513fdc21a046a89f62bd"
       },
       "instantId": {
         "path": "crates/sceneworks-worker/src/image_jobs/instantid.rs",
@@ -69,11 +69,11 @@
       },
       "anchorStore": {
         "path": "config/memory-anchors.json",
-        "sha256": "a6179d6213b46fca37e8f99493ab3cde19e07b9c61e370470bf962cedf4c31d6"
+        "sha256": "f286a52a3a21a36f52a50a2b0d7de851590f2654bbcba92bf2b6d2048841d34d"
       },
       "anchorLoaderClosures": {
         "path": "config/anchor-loader-closures.json",
-        "sha256": "97c3f8b863b94b7d35604af9e503717f0c1850d749a232fa720d5dbd8afa1f77"
+        "sha256": "4fd8c8ad5c38b50dbf7b5839212be82b8ed51b46eba5357ad43defac7ecfecb9"
       },
       "anchorDerivation": {
         "path": "crates/sceneworks-core/src/memory_anchor.rs",
@@ -137,12 +137,12 @@
       "image": 53,
       "video": 11
     },
-    "cells": 9305,
+    "cells": 9265,
     "publishedCells": 762,
-    "elidedCells": 8543,
+    "elidedCells": 8503,
     "elidedByState": {
       "Implemented": 4122,
-      "Missing": 4421
+      "Missing": 4381
     },
     "publicationPredicate": "A coordinate is published when it carries a claim a per-lane census cannot: a measured memory anchor covers its (model, tier, backend lane), or it is structurally exempt. A bare `Implemented` or `Missing` state is a property of the whole lane, replicated across every tier x mode x overlay, and is counted in `summary.elidedByState` and the per-(entry, backend, rung) `coverage` census instead of restated thousands of times.",
     "mlxStagedStaticCoverage": 47,
@@ -163,7 +163,7 @@
       }
     ],
     "anchors": 15,
-    "analyticOnlyCells": 326,
+    "analyticOnlyCells": 322,
     "anchoredCells": 299,
     "staleAnchors": 10,
     "attestedAnchors": 5,
@@ -3244,9 +3244,7 @@
         },
         "candle": {
           "tiers": [
-            "bf16",
-            "q4",
-            "q8"
+            "bf16"
           ],
           "modes": [
             "image_to_image",
@@ -3313,9 +3311,7 @@
         },
         "candle": {
           "tiers": [
-            "bf16",
-            "q4",
-            "q8"
+            "bf16"
           ],
           "modes": [
             "image_to_image",
@@ -12393,135 +12389,60 @@
       "modelId": "sana_1600m",
       "backend": "candle",
       "rung": "bounded_attention",
-      "coordinates": 6,
+      "coordinates": 2,
       "published": 0,
-      "elided": 6,
+      "elided": 2,
       "implemented": 2,
       "states": {
-        "Implemented": 2,
-        "Missing": 4
-      },
-      "implementedBy": {
-        "tier": {
-          "bf16": 2,
-          "q4": 0,
-          "q8": 0
-        },
-        "mode": {
-          "image_to_image": 1,
-          "text_to_image": 1
-        },
-        "overlay": {
-          "none": 2
-        }
+        "Implemented": 2
       }
     },
     {
       "modelId": "sana_1600m",
       "backend": "candle",
       "rung": "bounded_decode",
-      "coordinates": 6,
+      "coordinates": 2,
       "published": 0,
-      "elided": 6,
+      "elided": 2,
       "implemented": 2,
       "states": {
-        "Implemented": 2,
-        "Missing": 4
-      },
-      "implementedBy": {
-        "tier": {
-          "bf16": 2,
-          "q4": 0,
-          "q8": 0
-        },
-        "mode": {
-          "image_to_image": 1,
-          "text_to_image": 1
-        },
-        "overlay": {
-          "none": 2
-        }
+        "Implemented": 2
       }
     },
     {
       "modelId": "sana_1600m",
       "backend": "candle",
       "rung": "bounded_transformer_residency",
-      "coordinates": 6,
+      "coordinates": 2,
       "published": 0,
-      "elided": 6,
+      "elided": 2,
       "implemented": 2,
       "states": {
-        "Implemented": 2,
-        "Missing": 4
-      },
-      "implementedBy": {
-        "tier": {
-          "bf16": 2,
-          "q4": 0,
-          "q8": 0
-        },
-        "mode": {
-          "image_to_image": 1,
-          "text_to_image": 1
-        },
-        "overlay": {
-          "none": 2
-        }
+        "Implemented": 2
       }
     },
     {
       "modelId": "sana_1600m",
       "backend": "candle",
       "rung": "resident",
-      "coordinates": 6,
+      "coordinates": 2,
       "published": 0,
-      "elided": 6,
+      "elided": 2,
       "implemented": 2,
       "states": {
-        "Implemented": 2,
-        "Missing": 4
-      },
-      "implementedBy": {
-        "tier": {
-          "bf16": 2,
-          "q4": 0,
-          "q8": 0
-        },
-        "mode": {
-          "image_to_image": 1,
-          "text_to_image": 1
-        },
-        "overlay": {
-          "none": 2
-        }
+        "Implemented": 2
       }
     },
     {
       "modelId": "sana_1600m",
       "backend": "candle",
       "rung": "staged_residency",
-      "coordinates": 6,
+      "coordinates": 2,
       "published": 0,
-      "elided": 6,
+      "elided": 2,
       "implemented": 2,
       "states": {
-        "Implemented": 2,
-        "Missing": 4
-      },
-      "implementedBy": {
-        "tier": {
-          "bf16": 2,
-          "q4": 0,
-          "q8": 0
-        },
-        "mode": {
-          "image_to_image": 1,
-          "text_to_image": 1
-        },
-        "overlay": {
-          "none": 2
-        }
+        "Implemented": 2
       }
     },
     {
@@ -12588,135 +12509,60 @@
       "modelId": "sana_sprint_1600m",
       "backend": "candle",
       "rung": "bounded_attention",
-      "coordinates": 6,
+      "coordinates": 2,
       "published": 0,
-      "elided": 6,
+      "elided": 2,
       "implemented": 2,
       "states": {
-        "Implemented": 2,
-        "Missing": 4
-      },
-      "implementedBy": {
-        "tier": {
-          "bf16": 2,
-          "q4": 0,
-          "q8": 0
-        },
-        "mode": {
-          "image_to_image": 1,
-          "text_to_image": 1
-        },
-        "overlay": {
-          "none": 2
-        }
+        "Implemented": 2
       }
     },
     {
       "modelId": "sana_sprint_1600m",
       "backend": "candle",
       "rung": "bounded_decode",
-      "coordinates": 6,
+      "coordinates": 2,
       "published": 0,
-      "elided": 6,
+      "elided": 2,
       "implemented": 2,
       "states": {
-        "Implemented": 2,
-        "Missing": 4
-      },
-      "implementedBy": {
-        "tier": {
-          "bf16": 2,
-          "q4": 0,
-          "q8": 0
-        },
-        "mode": {
-          "image_to_image": 1,
-          "text_to_image": 1
-        },
-        "overlay": {
-          "none": 2
-        }
+        "Implemented": 2
       }
     },
     {
       "modelId": "sana_sprint_1600m",
       "backend": "candle",
       "rung": "bounded_transformer_residency",
-      "coordinates": 6,
+      "coordinates": 2,
       "published": 0,
-      "elided": 6,
+      "elided": 2,
       "implemented": 2,
       "states": {
-        "Implemented": 2,
-        "Missing": 4
-      },
-      "implementedBy": {
-        "tier": {
-          "bf16": 2,
-          "q4": 0,
-          "q8": 0
-        },
-        "mode": {
-          "image_to_image": 1,
-          "text_to_image": 1
-        },
-        "overlay": {
-          "none": 2
-        }
+        "Implemented": 2
       }
     },
     {
       "modelId": "sana_sprint_1600m",
       "backend": "candle",
       "rung": "resident",
-      "coordinates": 6,
+      "coordinates": 2,
       "published": 0,
-      "elided": 6,
+      "elided": 2,
       "implemented": 2,
       "states": {
-        "Implemented": 2,
-        "Missing": 4
-      },
-      "implementedBy": {
-        "tier": {
-          "bf16": 2,
-          "q4": 0,
-          "q8": 0
-        },
-        "mode": {
-          "image_to_image": 1,
-          "text_to_image": 1
-        },
-        "overlay": {
-          "none": 2
-        }
+        "Implemented": 2
       }
     },
     {
       "modelId": "sana_sprint_1600m",
       "backend": "candle",
       "rung": "staged_residency",
-      "coordinates": 6,
+      "coordinates": 2,
       "published": 0,
-      "elided": 6,
+      "elided": 2,
       "implemented": 2,
       "states": {
-        "Implemented": 2,
-        "Missing": 4
-      },
-      "implementedBy": {
-        "tier": {
-          "bf16": 2,
-          "q4": 0,
-          "q8": 0
-        },
-        "mode": {
-          "image_to_image": 1,
-          "text_to_image": 1
-        },
-        "overlay": {
-          "none": 2
-        }
+        "Implemented": 2
       }
     },
     {

@@ -51,6 +51,31 @@ pub const FLUX1_DEV_REPOSITORY: &str = "SceneWorks/flux1-dev-mlx";
 /// The FLUX.1 [schnell] tiered rehost (sc-22726), the `flux1_schnell` provider's own artifact.
 pub const FLUX1_SCHNELL_REPOSITORY: &str = "SceneWorks/flux1-schnell-mlx";
 pub const SDXL_REPOSITORY: &str = "SceneWorks/sdxl-base-mlx";
+/// The SANA 1.6B tiered rehost (sc-22731) — the `sana_1600m` provider's MLX artifact. The three
+/// packed tiers are `platforms: ["macos"]` turnkeys, so this repository serves the MLX lane ONLY;
+/// the Candle lane loads [`SANA_DENSE_REPOSITORY`] instead.
+pub const SANA_REPOSITORY: &str = "SceneWorks/Sana_1600M_1024px_mlx";
+/// The SANA-Sprint 1.6B tiered rehost (sc-22731), the `sana_sprint_1600m` provider's MLX artifact.
+pub const SANA_SPRINT_REPOSITORY: &str = "SceneWorks/Sana_Sprint_1.6B_1024px_mlx";
+/// The upstream dense diffusers snapshot the CANDLE `sana_1600m` route loads
+/// (`crates/sceneworks-worker/src/image_jobs/base.rs` `SANA_CANDLE_DIFFUSERS_REPO`). It has no tier
+/// sub-directory and ships one variant, so it is bound through
+/// [`validate_huggingface_revision_root`] and only ever at `bf16` — `candle-gen-sana`'s
+/// `validate_load_spec` refuses any `LoadSpec::quantize`, and there is no packed SANA artifact
+/// off-Mac to point it at.
+pub const SANA_DENSE_REPOSITORY: &str = "Efficient-Large-Model/Sana_1600M_1024px_diffusers";
+/// The Sprint route's upstream dense diffusers snapshot (`SANA_SPRINT_CANDLE_DIFFUSERS_REPO`).
+pub const SANA_SPRINT_DENSE_REPOSITORY: &str =
+    "Efficient-Large-Model/Sana_Sprint_1.6B_1024px_diffusers";
+/// The three Chroma1 tiered rehosts (sc-22731). One per route, on BOTH lanes: the Candle lane
+/// packed-loads the same SceneWorks turnkey the macOS path does, and `candle-gen-chroma`'s
+/// `ChromaLoadReceipt::capture` pins each route to its own repository and revision by name — so a
+/// Flash plan can never be satisfied by HD weights.
+pub const CHROMA1_HD_REPOSITORY: &str = "SceneWorks/chroma1-hd-mlx";
+/// See [`CHROMA1_HD_REPOSITORY`].
+pub const CHROMA1_BASE_REPOSITORY: &str = "SceneWorks/chroma1-base-mlx";
+/// See [`CHROMA1_HD_REPOSITORY`].
+pub const CHROMA1_FLASH_REPOSITORY: &str = "SceneWorks/chroma1-flash-mlx";
 /// The Z-Image-Turbo tiered rehost. Serves the `z_image_turbo` provider AND the `z_image_edit`
 /// catalog alias (the worker routes `z_image_edit` to the Turbo weights driven in `edit_image`
 /// mode — `crates/sceneworks-worker/src/engines.rs`), on both adapters, through the
