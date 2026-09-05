@@ -182,8 +182,15 @@ An `ltx_2_5` anchor additionally requires `--ltx25-snapshot-root`, the canonical
 repository/revision snapshot path. The harness checks the snapshot suffix, the shared enhancer, the
 dev refinement adapter and the anchor's own `<transformerVariant>/<tier>` layout, hashes each once,
 and re-hashes them around every provider invocation so a mutation during the render is caught. It
-then injects the tier and shared-component inventory variables the MLX adapter requires, preserving
-the capture-directory and raw-provenance environment.
+then injects the tier and shared-component inventory variables the adapter requires, preserving the
+capture-directory and raw-provenance environment.
+
+The binding serves **both lanes** (sc-22725). One public snapshot reaches two engine ids — MLX loads
+it as `ltx_2_5`, Candle as `ltx_2_5_distilled` (candle.rs `LTX25_ID`) — so the plan's `provider` for
+an `ltx_2_5` anchor must be its lane's engine id, and `--ltx25-snapshot-root` is refused for
+anything else. A `dev`-variant anchor additionally binds `SCENEWORKS_LTX25_DISTILL_LORA_ROOT` (the
+snapshot root), which is how the Candle arm resolves the official stage-two refinement LoRA where
+the MLX arm takes its bytes and digest.
 
 Validate a captured bundle, and normalize an externally captured session file. Pass `--source-root`
 alongside `--input` whenever the capture wrote raw logs, or the physical source-session derivation

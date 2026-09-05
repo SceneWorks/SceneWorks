@@ -101,12 +101,14 @@ export const PROVIDER_FAMILIES = Object.freeze({
     env: "MINIMAX_H3", repo: "SceneWorks/minimax-h3-mlx", arms: ["mlx"],
     upstream: { env: "MINIMAX_H3_UPSTREAM", repo: "MiniMaxAI/MiniMax-H3" },
   },
-  // The harness prepares and binds the LTX-2.5 snapshot itself, and only for the mlx plan
-  // (`prepareLtx25CaptureArtifacts` refuses backend !== "mlx").
+  // The harness prepares and binds the LTX-2.5 snapshot itself (`--ltx25-snapshot-root`), for
+  // whichever lane the plan routes: BOTH engine ids below are served from the same public snapshot,
+  // and both are declared here because the plan row's `provider` is what selects the family.
   ltx_2_5: { ltx25: true, repo: LTX25_REPOSITORY, arms: ["mlx"] },
-  // The candle adapter does implement `ltx_2_5_distilled` (candle.rs LTX25_ID), but the harness
-  // binds the snapshot only for the mlx plan, so the anchor is not capturable through it today.
-  ltx_2_5_distilled: { ltx25: true, repo: LTX25_REPOSITORY, arms: [], harnessUnsupported: "the harness prepares LTX-2.5 artifacts (--ltx25-snapshot-root) for the mlx plan only" },
+  // The Candle arm loads LTX-2.5 under its own engine id (candle.rs `LTX25_ID`, `candle-gen-ltx`
+  // `MODEL_25_ID`), so the candle plan rows name `ltx_2_5_distilled` while the anchor key — and
+  // therefore the manifest download the snapshot root resolves through — stays `ltx_2_5`.
+  ltx_2_5_distilled: { ltx25: true, repo: LTX25_REPOSITORY, arms: ["candle"] },
 });
 
 export function fail(message) {
@@ -261,11 +263,21 @@ async function firstExistingDirectory(candidates) {
  * Decide what the run can do with one plan anchor: which adapter arm serves it, which weights
  * root it loads, and why it would be skipped. Pure apart from the directory probes.
  */
-export async function classifyAnchor(key, planned, { models, backend, hubs, current, captured, declaredLanes, declaredProviders }) {
+export async function classifyAnchor(key, planned, { models, backend, hubs, current, captured, declaredLanes, declaredProviders, families = PROVIDER_FAMILIES }) {
   const parts = anchorParts(key);
   const row = { key, ...parts, provider: planned.provider, status: "runnable", reason: null, env: {}, roots: [] };
   if (parts.backend !== backend) return { ...row, status: "other_backend", reason: `${parts.backend} lane` };
-  const family = PROVIDER_FAMILIES[planned.provider];
+  const family = families[planned.provider];
+  // No shipped family carries `harnessUnsupported` today (sc-22725 gave LTX-2.5's candle engine id
+  // a real row). The status stays for the next provider whose adapter arm exists but whose
+  // artifacts the harness cannot bind: it is the one refusal that is neither a missing arm nor a
+  // missing declaration.
+  //
+  // KEPT DELIBERATELY (sc-22725 review): the `families` parameter above is a test seam and nothing
+  // else — no caller passes it — and it exists so this otherwise-unreachable branch is driven by a
+  // synthetic family rather than left uncovered. The alternative considered and rejected was
+  // deleting the branch and the parameter together; that would make the next unbindable provider
+  // report as `no_adapter_arm`, which is the wrong diagnosis and sends the reader to adapter work.
   if (family?.harnessUnsupported) return { ...row, status: "harness_unsupported", reason: family.harnessUnsupported };
   if (!family || !family.arms.includes(backend)) {
     return {
