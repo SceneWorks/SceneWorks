@@ -9,8 +9,9 @@ use mlx_gen::gen_core::{
 };
 use mlx_gen::tiling::{SpatialTiling, TilingConfig, VaeTiling};
 use mlx_gen::{
-    Conditioning, ControlKind, GenerationOutput, GenerationRequest, Generator, IdentityWeights,
-    Image, LoadShape, LoadSpec, OffloadPolicy, Precision, Progress, Quant, WeightsSource,
+    AdapterKind, AdapterSpec, Conditioning, ControlKind, GenerationOutput, GenerationRequest,
+    Generator, IdentityWeights, Image, LoadShape, LoadSpec, OffloadPolicy, Precision, Progress,
+    Quant, WeightsSource,
 };
 use mlx_rs::memory::{
     clear_cache, get_active_memory, get_cache_memory, get_memory_limit, get_peak_memory,
@@ -81,6 +82,32 @@ const QWEN_VAE_PROBE_LOAD_SHAPE: LoadShape = LoadShape::EagerMaterialization;
 const QWEN_PROVIDER: &str = "qwen_image";
 const QWEN_PLAIN_EXECUTION_PATH: &str = "the MLX Qwen VAE-only path";
 const QWEN_PROVIDER_EXECUTION_PATH: &str = "the pinned MLX Qwen base provider path";
+/// The Qwen-Image-**Edit** engine provider (sc-22728): `mlx-gen-qwen-image`'s `model_edit::MODEL_ID`,
+/// the registry id the worker loads for BOTH shipped edit catalog ids
+/// (`image_jobs/qwen.rs` `qwen_edit_engine_id`). Reference-conditioned: the engine refuses a request
+/// that carries no `Conditioning::Reference` at all (`model_edit.rs` `validate`).
+const QWEN_EDIT_PROVIDER: &str = "qwen_image_edit";
+/// The two catalog ids that provider serves. They are ONE checkpoint on ONE artifact family; the
+/// Lightning id differs only in the built-in distill LoRA it stacks and the `lightning` sampler
+/// recipe that LoRA was distilled for — not in the engine model.
+const QWEN_EDIT_MODEL: &str = "qwen_image_edit_2511";
+const QWEN_EDIT_LIGHTNING_MODEL: &str = "qwen_image_edit_2511_lightning";
+const QWEN_EDIT_EXECUTION_PATH: &str = "the pinned MLX Qwen-Image-Edit-2511 provider path";
+const QWEN_EDIT_LIGHTNING_EXECUTION_PATH: &str =
+    "the pinned MLX Qwen-Image-Edit-2511 Lightning distill provider path";
+/// The engine recipe the distill LoRA was trained for (`model_edit.rs`: `req.sampler == "lightning"`
+/// selects the CFG-off few-step schedule, and the matching LoRA must be supplied via `spec.adapters`).
+const QWEN_EDIT_LIGHTNING_SAMPLER: &str = "lightning";
+/// Two steps for the production edit path — the first `Step` callback closes the conditioning
+/// envelope and the second gives denoise its own measured interval before `Decoding`, the shape
+/// every other image arm here uses. The Lightning path runs the distill's own FOUR steps: its
+/// schedule (`lightning_sigmas`) is the official 4-step lightx2v recipe and the worker's default,
+/// so a 2-step capture would measure a request the product never issues.
+const QWEN_EDIT_STEPS: u32 = 2;
+const QWEN_EDIT_LIGHTNING_STEPS: u32 = 4;
+/// The edit prompt every Qwen edit capture renders. Fixed with the seed and the reference so two
+/// captures of one anchor are the same request.
+const QWEN_EDIT_PROMPT: &str = "replace the background with a plain grey studio backdrop";
 const Z_IMAGE_PROVIDER: &str = "z_image_turbo";
 const Z_IMAGE_PLAIN_EXECUTION_PATH: &str = "the MLX Z-Image base-only text-to-image path";
 /// The undistilled Z-Image BASE provider (sc-22724): the same engine crate as Turbo
@@ -774,17 +801,32 @@ mod tests {
     #[test]
     fn every_receipt_builder_is_bound_to_its_lane_prediction_wrapper() {
         let source = include_str!("mlx.rs");
-        let image_receipts = source
+        // A SHAPE claim, not a count: EVERY `predicted_peaks` binding in this file must come from
+        // the image policy wrapper. Asserting a fixed number instead made adding an image arm
+        // (sc-22728 added the Qwen edit one) fail this test for the right reason with the wrong
+        // message — "there are seven, not six" — while a new arm that bypassed the wrapper entirely
+        // would have kept the count and gone unnoticed.
+        let receipts: Vec<&str> = source
             .lines()
-            .filter(|line| {
-                line.trim_start()
-                    .starts_with("let predicted_peaks = image_predicted_peak_bytes(")
-            })
-            .count();
-        assert_eq!(
-            image_receipts, 7,
-            "all seven MLX image receipt builders must use the image policy wrapper \
-             (sc-22726 added the FLUX.1 family arm)"
+            .map(str::trim_start)
+            .filter(|line| line.starts_with("let predicted_peaks = "))
+            .collect();
+        assert!(
+            !receipts.is_empty(),
+            "the image receipt builders are gone; this test no longer guards anything"
+        );
+        for line in &receipts {
+            assert!(
+                line.starts_with("let predicted_peaks = image_predicted_peak_bytes(")
+                    || line.starts_with("let predicted_peaks = video_predicted_peak_bytes("),
+                "an MLX receipt builder bypasses both lane policy wrappers: {line}"
+            );
+        }
+        assert!(
+            receipts
+                .iter()
+                .any(|line| line.starts_with("let predicted_peaks = image_predicted_peak_bytes(")),
+            "no image receipt builder is left; this test no longer guards the image lane"
         );
         assert_eq!(
             source
@@ -1082,6 +1124,8 @@ mod tests {
     fn every_implemented_provider_still_reaches_its_own_arm_through_dispatch() {
         for provider in [
             "qwen_image",
+            // sc-22728: the edit engine provider, which serves both shipped edit catalog ids.
+            "qwen_image_edit",
             "z_image_turbo",
             // sc-22724: the undistilled base is its own registry id on the same arm.
             "z_image",
@@ -1104,6 +1148,9 @@ mod tests {
             );
         }
         assert_eq!(QWEN_PROVIDER, "qwen_image");
+        assert_eq!(QWEN_EDIT_PROVIDER, "qwen_image_edit");
+        assert_eq!(QWEN_EDIT_MODEL, "qwen_image_edit_2511");
+        assert_eq!(QWEN_EDIT_LIGHTNING_MODEL, "qwen_image_edit_2511_lightning");
         assert_eq!(Z_IMAGE_PROVIDER, "z_image_turbo");
         assert_eq!(Z_IMAGE_BASE_PROVIDER, "z_image");
         assert_eq!(KREA_BASE_PROVIDER, "krea_2_turbo");
@@ -1339,6 +1386,164 @@ mod tests {
         }
     }
 
+    fn qwen_edit_planned(model_id: &str, tier: &str, overlay: &str, fixture: &str) -> Value {
+        json!({
+            "planned": {
+                "target": {
+                    "provider": "qwen_image_edit",
+                    "modelId": model_id,
+                    "tier": tier,
+                    "mode": "edit_image",
+                    "overlay": overlay,
+                    "geometry": { "width": 768, "height": 768, "batch": 1, "frames": 1 }
+                },
+                "backend": "mlx",
+                "loadShape": "deferred_materialization",
+                "strategy": { "rung": "resident", "engagedRungs": ["resident"], "parameters": {} },
+                "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1",
+                "fixture": fixture
+            }
+        })
+    }
+
+    /// sc-22728: the two shipped edit catalog ids are ONE engine provider, so nothing in the request
+    /// but the model id separates them. The arm is resolved from `(provider, modelId)` and any other
+    /// pair is refused by name rather than measured as its nearest neighbour — which here would mean
+    /// publishing the distilled stack's peaks as the production path's.
+    #[test]
+    fn the_qwen_edit_arm_is_resolved_from_the_plans_provider_and_model_id() {
+        let base = qwen_edit_arm(&qwen_edit_planned(
+            "qwen_image_edit_2511",
+            "q4",
+            "none",
+            "qwen-edit-mlx-q4-seed16353-step2",
+        ))
+        .unwrap();
+        assert_eq!(base, QWEN_EDIT_ARM);
+        assert!(!base.lightning);
+        assert_eq!(base.steps, 2);
+        assert_eq!(base.overlay, "none");
+        let lightning = qwen_edit_arm(&qwen_edit_planned(
+            "qwen_image_edit_2511_lightning",
+            "q4",
+            "lora",
+            "qwen-edit-lightning-mlx-q4-seed16353-step4",
+        ))
+        .unwrap();
+        assert_eq!(lightning, QWEN_EDIT_LIGHTNING_ARM);
+        assert!(lightning.lightning);
+        assert_eq!(lightning.steps, 4, "the official lightx2v 4-step recipe");
+        assert_eq!(lightning.overlay, "lora");
+        assert_ne!(base.slug, lightning.slug, "one diagnostics source each");
+        for (provider, model_id) in [
+            ("qwen_image_edit", "qwen_image_edit_2509"),
+            ("qwen_image_edit", "qwen_image"),
+            ("qwen_image", "qwen_image_edit_2511"),
+        ] {
+            let mut request = qwen_edit_planned(model_id, "q4", "none", "unused");
+            request["planned"]["target"]["provider"] = json!(provider);
+            let error = qwen_edit_arm(&request).unwrap_err();
+            assert!(
+                error.contains(&format!("provider {provider:?} for model {model_id:?}")),
+                "{provider}/{model_id}: {error}"
+            );
+        }
+        assert!(qwen_edit_arm(
+            &json!({ "planned": { "target": { "provider": "qwen_image_edit" } } })
+        )
+        .unwrap_err()
+        .contains("planned.target.modelId"));
+    }
+
+    /// sc-22728: the fixture binds the tier, the seed AND the recipe's step count, per member. The
+    /// production id's fixture cannot name the Lightning arm's four steps and vice versa, and neither
+    /// can borrow the other's prefix — the `planned_qwen_seed` rule, extended across the family.
+    #[test]
+    fn the_qwen_edit_fixture_binds_the_member_the_tier_and_the_step_count() {
+        for (arm, model_id, prefix, steps) in [
+            (
+                QWEN_EDIT_ARM,
+                "qwen_image_edit_2511",
+                "qwen-edit-mlx",
+                2_u32,
+            ),
+            (
+                QWEN_EDIT_LIGHTNING_ARM,
+                "qwen_image_edit_2511_lightning",
+                "qwen-edit-lightning-mlx",
+                4,
+            ),
+        ] {
+            for tier in ["q4", "q8", "bf16"] {
+                let fixture = format!("{prefix}-{tier}-seed16353-step{steps}");
+                let request = qwen_edit_planned(model_id, tier, arm.overlay, &fixture);
+                assert_eq!(
+                    planned_qwen_edit_seed(&request, arm, tier).unwrap(),
+                    16353,
+                    "{fixture}"
+                );
+                // The same fixture under another tier is refused naming the tier it belongs to.
+                let other = if tier == "q4" { "q8" } else { "q4" };
+                let error = planned_qwen_edit_seed(&request, arm, other).unwrap_err();
+                assert!(error.contains(&format!("{prefix}-{other}-seed")), "{error}");
+            }
+            // The other member's step count is refused, so a 4-step distilled capture can never be
+            // recorded under the 2-step production fixture.
+            let wrong_steps = if steps == 2 { 4 } else { 2 };
+            let fixture = format!("{prefix}-q4-seed16353-step{wrong_steps}");
+            let error = planned_qwen_edit_seed(
+                &qwen_edit_planned(model_id, "q4", arm.overlay, &fixture),
+                arm,
+                "q4",
+            )
+            .unwrap_err();
+            assert!(error.contains(&format!("{steps}-step")), "{error}");
+        }
+        // And the members' prefixes do not overlap: the Lightning fixture is not a production one.
+        let error = planned_qwen_edit_seed(
+            &qwen_edit_planned(
+                "qwen_image_edit_2511",
+                "q4",
+                "none",
+                "qwen-edit-lightning-mlx-q4-seed16353-step2",
+            ),
+            QWEN_EDIT_ARM,
+            "q4",
+        )
+        .unwrap_err();
+        assert!(error.contains("qwen-edit-mlx-q4-seed"), "{error}");
+    }
+
+    /// sc-22728: every Qwen edit capture is an EDIT request — one `Conditioning::Reference` at the
+    /// target geometry, which the pinned engine hard-requires (`model_edit.rs` refuses a request with
+    /// no reference) — and only the Lightning member selects the distill's sampler and drops the
+    /// negative branch the distill was CFG-distilled away from.
+    #[test]
+    fn the_qwen_edit_request_carries_one_reference_and_only_lightning_selects_the_distill_recipe() {
+        for arm in [QWEN_EDIT_ARM, QWEN_EDIT_LIGHTNING_ARM] {
+            let request = qwen_edit_request(arm, 768, 512, 16353);
+            assert_eq!(request.conditioning.len(), 1);
+            match &request.conditioning[0] {
+                Conditioning::Reference { image, strength } => {
+                    assert_eq!((image.width, image.height), (768, 512));
+                    assert_eq!(image.pixels.len(), 768 * 512 * 3);
+                    assert_eq!(
+                        *strength, None,
+                        "Qwen edit is dual-latent conditioning, not an img2img strength lever"
+                    );
+                }
+                other => panic!("expected one Reference, got {other:?}"),
+            }
+            assert_eq!(request.seed, Some(16353));
+            assert_eq!(request.steps, Some(arm.steps));
+            assert_eq!(
+                request.sampler.as_deref(),
+                arm.lightning.then_some("lightning")
+            );
+            assert_eq!(request.negative_prompt.is_some(), !arm.lightning);
+        }
+    }
+
     #[test]
     fn z_image_parity_envelope_accepts_published_decode_and_rejects_mutation() {
         assert!(z_image_quality_passes(48.0 / 255.0, 2.82 / 255.0));
@@ -1405,6 +1610,167 @@ mod tests {
 
         let error = planned_qwen_seed(&request, "q8").unwrap_err();
         assert!(error.contains("must start with"));
+    }
+
+    const QWEN_EDIT_TEST_REVISION: &str = "bb2bc9893b3c49ae96c813350775f791a2e8bc80";
+
+    fn scratch_dir(label: &str) -> PathBuf {
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        std::env::temp_dir().join(format!("sc-22728-{label}-{}-{nonce}", std::process::id()))
+    }
+
+    /// A `models--<repo>/snapshots/<revision>/<tier>` root laid out exactly as the HF cache does, so
+    /// the tier suffix the validator pins is real rather than mocked.
+    fn qwen_edit_snapshot_root(tier: &str) -> PathBuf {
+        let root = scratch_dir("qwen-edit-root")
+            .join(format!(
+                "models--{}",
+                protocol::QWEN_EDIT_REPOSITORY.replace('/', "--")
+            ))
+            .join("snapshots")
+            .join(QWEN_EDIT_TEST_REVISION)
+            .join(tier);
+        std::fs::create_dir_all(&root).unwrap();
+        root
+    }
+
+    /// The distill snapshot, with the one pinned file actually on disk — the adapter helper refuses
+    /// any other file name, so a fixture that skipped this would assert nothing.
+    fn qwen_edit_lightning_fixture() -> QwenEditLightningSource {
+        let root = scratch_dir("qwen-edit-lightning");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join(protocol::QWEN_EDIT_LIGHTNING_FILE), b"distill").unwrap();
+        QwenEditLightningSource {
+            repository: protocol::QWEN_EDIT_LIGHTNING_REPOSITORY.to_owned(),
+            revision: QWEN_EDIT_TEST_REVISION.to_owned(),
+            root,
+        }
+    }
+
+    fn qwen_edit_source(arm: QwenEditArm, tier: &str) -> QwenEditArtifactSource {
+        QwenEditArtifactSource {
+            repository: protocol::QWEN_EDIT_REPOSITORY.to_owned(),
+            revision: QWEN_EDIT_TEST_REVISION.to_owned(),
+            root: qwen_edit_snapshot_root(tier),
+            lightning: arm.lightning.then(qwen_edit_lightning_fixture),
+        }
+    }
+
+    fn qwen_edit_request_for(arm: QwenEditArm, model_id: &str, tier: &str) -> Value {
+        let fixture = format!("{}-{tier}-seed16353-step{}", arm.fixture_prefix, arm.steps);
+        qwen_edit_planned(model_id, tier, arm.overlay, &fixture)
+    }
+
+    const QWEN_EDIT_MEMBERS: [(QwenEditArm, &str); 2] = [
+        (QWEN_EDIT_ARM, "qwen_image_edit_2511"),
+        (QWEN_EDIT_LIGHTNING_ARM, "qwen_image_edit_2511_lightning"),
+    ];
+
+    /// sc-22728: the ONE thing that makes the Lightning member Lightning at load time. Every
+    /// downstream claim — the record's `builtInAdapters` count, the overlay scenario's verdict, and
+    /// the run context's `overlay` — is read off `spec.adapters`, so if this attachment were lost the
+    /// arm would publish an authoritative record asserting a distill that never participated. The
+    /// stack itself is therefore asserted here, on BOTH members and at every shipped tier.
+    #[test]
+    fn the_qwen_edit_load_spec_carries_the_distill_on_exactly_the_lightning_member() {
+        for (arm, model_id) in QWEN_EDIT_MEMBERS {
+            for (tier, quant) in [
+                ("q4", Some(Quant::Q4)),
+                ("q8", Some(Quant::Q8)),
+                ("bf16", None),
+            ] {
+                let request = qwen_edit_request_for(arm, model_id, tier);
+                let selection = planned_selection(&request).unwrap();
+                let source = qwen_edit_source(arm, tier);
+                let artifact = qwen_edit_load_spec(
+                    arm,
+                    tier,
+                    &source,
+                    &selection,
+                    OffloadPolicy::Resident,
+                    LoadShape::EagerMaterialization,
+                )
+                .unwrap_or_else(|error| panic!("{model_id}/{tier}: {error}"));
+                assert_eq!(
+                    artifact.spec.quantize, quant,
+                    "{model_id}/{tier} load quant"
+                );
+                assert_eq!(
+                    artifact.spec.adapters.len(),
+                    usize::from(arm.lightning),
+                    "{model_id}/{tier}: the distill stack must be exactly the member's"
+                );
+                if arm.lightning {
+                    let expected = source
+                        .lightning
+                        .as_ref()
+                        .unwrap()
+                        .root
+                        .canonicalize()
+                        .unwrap()
+                        .join(protocol::QWEN_EDIT_LIGHTNING_FILE);
+                    let adapter = &artifact.spec.adapters[0];
+                    assert_eq!(adapter.path, expected, "{model_id}/{tier} distill path");
+                    assert!(
+                        adapter.path.ends_with(protocol::QWEN_EDIT_LIGHTNING_FILE),
+                        "{model_id}/{tier}: {}",
+                        adapter.path.display()
+                    );
+                    assert_eq!(adapter.scale, 1.0, "{model_id}/{tier} distill scale");
+                    assert!(
+                        matches!(adapter.kind, AdapterKind::Lora),
+                        "{model_id}/{tier}: {:?}",
+                        adapter.kind
+                    );
+                }
+            }
+        }
+    }
+
+    /// sc-22728: the root the capture opens must end in the PLANNED tier's directory, per member —
+    /// a stale `…/q4` export cannot satisfy a q8 plan and quietly re-label another tier's peaks
+    /// (the sc-17097 defect class). Modelled on
+    /// `z_image_root_must_carry_the_planned_tier_and_the_spec_binds_it`.
+    #[test]
+    fn a_qwen_edit_root_of_another_tier_is_refused_naming_the_planned_tier() {
+        for (arm, model_id) in QWEN_EDIT_MEMBERS {
+            let request = qwen_edit_request_for(arm, model_id, "q8");
+            let selection = planned_selection(&request).unwrap();
+            // The plan is q8; the root on disk is the q4 export.
+            let source = qwen_edit_source(arm, "q4");
+            let error = qwen_edit_load_spec(
+                arm,
+                "q8",
+                &source,
+                &selection,
+                OffloadPolicy::Resident,
+                LoadShape::EagerMaterialization,
+            )
+            .expect_err("a q8 plan must not be satisfied by a q4 root");
+            assert!(
+                error.ends_with(&format!("/snapshots/{QWEN_EDIT_TEST_REVISION}/q8")),
+                "{model_id}: {error}"
+            );
+            // The wrong artifact family is refused before the root is even looked at.
+            let mut foreign = qwen_edit_source(arm, "q8");
+            foreign.repository = protocol::QWEN_EDIT_LIGHTNING_REPOSITORY.to_owned();
+            let error = qwen_edit_load_spec(
+                arm,
+                "q8",
+                &foreign,
+                &selection,
+                OffloadPolicy::Resident,
+                LoadShape::EagerMaterialization,
+            )
+            .expect_err("the distill repository is not the base artifact");
+            assert!(
+                error.contains(protocol::QWEN_EDIT_REPOSITORY),
+                "{model_id}: {error}"
+            );
+        }
     }
 
     #[test]
@@ -6643,6 +7009,612 @@ fn run_qwen_provider(request: &Value) -> Result<Value, String> {
     Ok(fragment)
 }
 
+// ---------------------------------------------------------------------------------------------
+// Qwen-Image-Edit-2511 (sc-22728) — one engine provider, two shipped catalog ids
+// ---------------------------------------------------------------------------------------------
+
+/// One member of the Qwen edit family this arm measures, resolved from the plan's
+/// `(target.provider, target.modelId)` — never assumed. Both members load the SAME engine provider
+/// from the SAME artifact family; the Lightning member additionally stacks the built-in distill LoRA
+/// and runs the recipe that LoRA was distilled for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct QwenEditArm {
+    /// The catalog id, which is what the anchor key is keyed on.
+    model_id: &'static str,
+    execution_path: &'static str,
+    /// The still-geometry refusal label (sc-18808).
+    still_calibration: &'static str,
+    /// The `<prefix>-<tier>-seed<n>-step<n>` fixture spelling this member's plan rows must use, so a
+    /// Lightning capture can never be recorded under the production id's fixture and vice versa.
+    fixture_prefix: &'static str,
+    /// The overlay the plan must declare for this member.
+    overlay: &'static str,
+    /// Stack the built-in distill LoRA and select the `lightning` engine recipe.
+    lightning: bool,
+    steps: u32,
+    /// The record's diagnostics source, `memory-mlx-adapter:<slug>-shared-ladder`.
+    slug: &'static str,
+}
+
+const QWEN_EDIT_ARM: QwenEditArm = QwenEditArm {
+    model_id: QWEN_EDIT_MODEL,
+    execution_path: QWEN_EDIT_EXECUTION_PATH,
+    still_calibration: "MLX Qwen edit calibration",
+    fixture_prefix: "qwen-edit-mlx",
+    overlay: "none",
+    lightning: false,
+    steps: QWEN_EDIT_STEPS,
+    slug: "qwen-edit",
+};
+
+const QWEN_EDIT_LIGHTNING_ARM: QwenEditArm = QwenEditArm {
+    model_id: QWEN_EDIT_LIGHTNING_MODEL,
+    execution_path: QWEN_EDIT_LIGHTNING_EXECUTION_PATH,
+    still_calibration: "MLX Qwen edit Lightning calibration",
+    fixture_prefix: "qwen-edit-lightning-mlx",
+    overlay: "lora",
+    lightning: true,
+    steps: QWEN_EDIT_LIGHTNING_STEPS,
+    slug: "qwen-edit-lightning",
+};
+
+/// Which family member the plan asks for. Refuses by name: the two ids share one engine provider, so
+/// nothing else in the request distinguishes them, and measuring one under the other's key would
+/// publish the distilled stack's peaks as the production path's (or the reverse).
+fn qwen_edit_arm(request: &Value) -> Result<QwenEditArm, String> {
+    let planned = protocol::planned(request)?;
+    let provider = planned
+        .pointer("/target/provider")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "planned.target.provider must be a string".to_owned())?;
+    let model_id = planned
+        .pointer("/target/modelId")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "planned.target.modelId must be a string".to_owned())?;
+    match (provider, model_id) {
+        (QWEN_EDIT_PROVIDER, QWEN_EDIT_MODEL) => Ok(QWEN_EDIT_ARM),
+        (QWEN_EDIT_PROVIDER, QWEN_EDIT_LIGHTNING_MODEL) => Ok(QWEN_EDIT_LIGHTNING_ARM),
+        (provider, model_id) => Err(format!(
+            "the MLX Qwen edit arm does not implement provider {provider:?} for model {model_id:?}"
+        )),
+    }
+}
+
+/// The seed and step count this member's fixture binds, checked against the arm's own prefix, the
+/// planned tier and the recipe's step count — the `planned_qwen_seed` rule, extended to a family
+/// whose two members differ in exactly those two axes.
+fn planned_qwen_edit_seed(request: &Value, arm: QwenEditArm, tier: &str) -> Result<u64, String> {
+    let fixture = protocol::planned(request)?
+        .get("fixture")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "planned.fixture must be a string".to_owned())?;
+    let prefix = format!("{}-{tier}-seed", arm.fixture_prefix);
+    let remainder = fixture
+        .strip_prefix(&prefix)
+        .ok_or_else(|| format!("planned.fixture {fixture:?} must start with {prefix:?}"))?;
+    let (seed, steps) = remainder
+        .split_once("-step")
+        .ok_or_else(|| format!("planned.fixture {fixture:?} must end with -step<count>"))?;
+    let seed = seed
+        .parse::<u64>()
+        .map_err(|error| format!("parse Qwen edit fixture seed {seed:?}: {error}"))?;
+    let steps = steps
+        .parse::<u32>()
+        .map_err(|error| format!("parse Qwen edit fixture step count {steps:?}: {error}"))?;
+    if steps != arm.steps {
+        return Err(format!(
+            "planned.fixture {fixture:?} must use this arm's {}-step calibration request",
+            arm.steps
+        ));
+    }
+    Ok(seed)
+}
+
+/// Where the built-in Lightning distill snapshot lives, as the three
+/// `SCENEWORKS_QWEN_EDIT_LIGHTNING_LORA_*` values name it — lifted out of the environment so the
+/// attachment that makes the Lightning member Lightning is unit-testable.
+#[derive(Clone, Debug)]
+struct QwenEditLightningSource {
+    repository: String,
+    revision: String,
+    root: PathBuf,
+}
+
+fn qwen_edit_lightning_source() -> Result<QwenEditLightningSource, String> {
+    Ok(QwenEditLightningSource {
+        repository: protocol::required_env("SCENEWORKS_QWEN_EDIT_LIGHTNING_LORA_REPOSITORY")?,
+        revision: protocol::required_env("SCENEWORKS_QWEN_EDIT_LIGHTNING_LORA_REVISION")?,
+        root: PathBuf::from(protocol::required_env(
+            "SCENEWORKS_QWEN_EDIT_LIGHTNING_LORA_ROOT",
+        )?),
+    })
+}
+
+/// The built-in Lightning distill adapter, exactly as the worker stacks it: the one pinned file in
+/// the pinned snapshot, as a single LoRA at scale 1.0 ahead of any user adapters (of which a
+/// calibration capture has none). The Candle engine refuses any other path, scale or kind by name;
+/// the MLX engine consumes whatever `spec.adapters` carries, so the pin is asserted HERE too rather
+/// than assumed from the environment.
+fn qwen_edit_lightning_adapter(source: &QwenEditLightningSource) -> Result<AdapterSpec, String> {
+    protocol::validate_artifact_identity(
+        &source.repository,
+        &source.revision,
+        protocol::QWEN_EDIT_LIGHTNING_REPOSITORY,
+    )?;
+    let root = std::fs::canonicalize(&source.root).map_err(|error| {
+        format!("canonicalize SCENEWORKS_QWEN_EDIT_LIGHTNING_LORA_ROOT: {error}")
+    })?;
+    let path = root.join(protocol::QWEN_EDIT_LIGHTNING_FILE);
+    if !path.is_file() {
+        return Err(format!(
+            "the Lightning distill LoRA is not at {}",
+            path.display()
+        ));
+    }
+    Ok(AdapterSpec::new(path, 1.0, AdapterKind::Lora))
+}
+
+/// The three `SCENEWORKS_QWEN_IMAGE_EDIT_*` values naming the base snapshot one capture opens, plus
+/// the distill snapshot the Lightning member stacks — lifted out of the environment so both the tier
+/// binding and the adapter attachment are unit-testable.
+#[derive(Clone, Debug)]
+struct QwenEditArtifactSource {
+    repository: String,
+    revision: String,
+    root: PathBuf,
+    lightning: Option<QwenEditLightningSource>,
+}
+
+fn qwen_edit_artifact_source(arm: QwenEditArm) -> Result<QwenEditArtifactSource, String> {
+    Ok(QwenEditArtifactSource {
+        repository: protocol::required_env("SCENEWORKS_QWEN_IMAGE_EDIT_REPOSITORY")?,
+        revision: protocol::required_env("SCENEWORKS_QWEN_IMAGE_EDIT_REVISION")?,
+        root: PathBuf::from(protocol::required_env("SCENEWORKS_QWEN_IMAGE_EDIT_ROOT")?),
+        lightning: arm.lightning.then(qwen_edit_lightning_source).transpose()?,
+    })
+}
+
+/// The artifact one Qwen edit capture loads: the canonical snapshot root, and the `LoadSpec` that
+/// opens it.
+#[derive(Debug)]
+struct QwenEditArtifact {
+    root: PathBuf,
+    spec: LoadSpec,
+}
+
+/// The env-free half of the Qwen edit load, so both of its load-time bindings are unit-testable:
+///
+/// * the root must end in the PLANNED tier's directory, so a stale `…/q4` export cannot satisfy a q8
+///   or bf16 plan and quietly re-label another tier's peaks (the sc-17097 defect class); and
+/// * the built-in distill lands in `spec.adapters` exactly when the arm is the Lightning member —
+///   the ONE thing that makes that member Lightning at load time. Every downstream overlay claim in
+///   [`run_qwen_edit_provider`] is read back off `spec.adapters` rather than off `arm.lightning`, so
+///   a record can never assert an overlay the load did not carry.
+fn qwen_edit_load_spec(
+    arm: QwenEditArm,
+    tier: &str,
+    source: &QwenEditArtifactSource,
+    selection: &MemorySelection,
+    offload: OffloadPolicy,
+    load_shape: LoadShape,
+) -> Result<QwenEditArtifact, String> {
+    protocol::validate_artifact_identity(
+        &source.repository,
+        &source.revision,
+        protocol::QWEN_EDIT_REPOSITORY,
+    )?;
+    let root = std::fs::canonicalize(&source.root)
+        .map_err(|error| format!("canonicalize SCENEWORKS_QWEN_IMAGE_EDIT_ROOT: {error}"))?;
+    protocol::validate_huggingface_snapshot_root(
+        &root,
+        &source.repository,
+        &source.revision,
+        tier,
+        protocol::QWEN_EDIT_REPOSITORY,
+    )?;
+    let mut spec = qwen_load_spec(root.clone(), selection, offload, load_shape);
+    if arm.lightning {
+        let lightning = source.lightning.as_ref().ok_or_else(|| {
+            format!(
+                "{} is the Lightning member but no distill snapshot was supplied",
+                arm.model_id
+            )
+        })?;
+        spec = spec.with_adapters(vec![qwen_edit_lightning_adapter(lightning)?]);
+    }
+    Ok(QwenEditArtifact { root, spec })
+}
+
+/// The generation request one Qwen edit capture renders: the worker's edit request shape — one
+/// `Conditioning::Reference` fitted to the target geometry (`fit_engine_image` does that fit in
+/// `image_jobs/base.rs`, so the engine always sees the request geometry) plus, on the Lightning
+/// member, the distill's own sampler. The engine REFUSES a reference-free edit request
+/// (`model_edit.rs` `validate`), so this is what makes the capture measure the edit path — the VL
+/// vision tower and the dual-latent VAE encode — rather than text-to-image under an edit label.
+fn qwen_edit_request(arm: QwenEditArm, width: u32, height: u32, seed: u64) -> GenerationRequest {
+    GenerationRequest {
+        prompt: QWEN_EDIT_PROMPT.to_owned(),
+        negative_prompt: (!arm.lightning).then(|| "blurry, distorted, text".to_owned()),
+        width,
+        height,
+        count: 1,
+        seed: Some(seed),
+        steps: Some(arm.steps),
+        sampler: arm
+            .lightning
+            .then(|| QWEN_EDIT_LIGHTNING_SAMPLER.to_owned()),
+        conditioning: vec![Conditioning::Reference {
+            image: Image {
+                width,
+                height,
+                pixels: protocol::synthetic_reference_rgb(width, height),
+            },
+            strength: None,
+        }],
+        ..Default::default()
+    }
+}
+
+fn qwen_edit_complete_sweep(request: &Value) -> Result<Value, String> {
+    let mut sweep = protocol::reference_sweep(request, "passed")?;
+    sweep["rangeVerified"] = json!(true);
+    Ok(sweep)
+}
+
+/// One Qwen-Image-Edit-2511 anchor capture, on either catalog id, at any shipped tier.
+///
+/// E4: the generator comes from `catalog.media().load(QWEN_EDIT_PROVIDER, &spec)` — the same
+/// registry load the worker performs for this lane (`image_jobs/qwen.rs` builds a `LoadSpec` with
+/// the tier quant plus the Lightning adapter stack and hands it to the cached-gen stream) — never a
+/// re-implementation of the loader.
+fn run_qwen_edit_provider(request: &Value) -> Result<Value, String> {
+    let arm = qwen_edit_arm(request)?;
+    protocol::validate_exact_overlay_target(request, arm.overlay, arm.execution_path)?;
+    protocol::validate_still_geometry(request, arm.still_calibration)?;
+    let selection = planned_selection(request)?;
+    let tier = planned_qwen_tier(request)?;
+    let seed = planned_qwen_edit_seed(request, arm, tier)?;
+    let load_shape = planned_load_shape(request)?;
+    let offload = if matches!(
+        selection.strategy,
+        MemoryStrategy::StagedResidency | MemoryStrategy::BoundedTransformerResidency
+    ) {
+        OffloadPolicy::Sequential
+    } else {
+        OffloadPolicy::Resident
+    };
+    let (width, height) = protocol::target_geometry(request)?;
+    let source = qwen_edit_artifact_source(arm)?;
+    let repository = source.repository.clone();
+    let revision = source.revision.clone();
+    // The root must end in the PLANNED tier's directory, so a stale `…/q4` export cannot satisfy a
+    // q8 or bf16 plan and quietly re-label another tier's peaks; and the distill is attached here,
+    // on exactly the Lightning member.
+    let QwenEditArtifact { root: _root, spec } =
+        qwen_edit_load_spec(arm, tier, &source, &selection, offload, load_shape)?;
+    // Every overlay claim below is read off the stack the LOAD carries, never off `arm.lightning`:
+    // if the attachment above were ever lost, the record must say so rather than assert a distill
+    // that never participated.
+    let loaded_adapters = spec.adapters.len();
+    let catalog =
+        runtime_macos::catalog().map_err(|error| format!("build MLX catalog: {error}"))?;
+    let generator = catalog
+        .media()
+        .load(QWEN_EDIT_PROVIDER, &spec)
+        .map_err(|error| format!("load real {} {tier} provider: {error}", arm.model_id))?;
+    let contract = generator
+        .memory_strategy_contract()
+        .ok_or_else(|| format!("loaded {QWEN_EDIT_PROVIDER} has no memory-strategy contract"))?;
+    contract.validate_selection(&selection).map_err(|error| {
+        format!("pinned Qwen edit provider rejected planned selection: {error}")
+    })?;
+    let strategy = attested_strategy(
+        request,
+        &selection,
+        &contract.engaged_composition(selection.strategy),
+    )?;
+    let calibration = contract
+        .calibration
+        .as_ref()
+        .ok_or_else(|| "pinned Qwen edit provider has no calibration identity".to_owned())?;
+    let planned_fingerprint = protocol::planned(request)?
+        .get("calibrationFingerprint")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "planned.calibrationFingerprint must be a string".to_owned())?;
+    if planned_fingerprint != calibration.fingerprint {
+        return Err(format!(
+            "plan/provider calibration mismatch: plan={planned_fingerprint}, pinned provider={}",
+            calibration.fingerprint
+        ));
+    }
+    if load_shape != calibration.load_shape {
+        return Err(format!(
+            "plan/provider load-shape mismatch: plan={}, pinned provider={}",
+            load_shape_key(load_shape),
+            load_shape_key(calibration.load_shape)
+        ));
+    }
+    let hardware_bytes = request
+        .pointer("/hardware/memoryBytes")
+        .and_then(Value::as_u64)
+        .ok_or_else(|| "run request.hardware.memoryBytes must be an integer".to_owned())?;
+    let mut context = qwen_provider_context(
+        selection,
+        calibration,
+        width,
+        height,
+        hardware_bytes,
+        1,
+        22728,
+    );
+    // The mode the worker admits an edit job under, with the one reference the request carries, and
+    // the overlay the target declares — the Lightning member really does load a second network, so
+    // recording it under a reference-free, overlay-free context would be a false claim about what
+    // the measured peaks contain.
+    context.mode = MemoryMode::Edit;
+    context.has_reference = true;
+    context.geometry.reference_count = 1;
+    context.overlay = (loaded_adapters > 0).then(|| arm.overlay.to_owned());
+
+    let conditioning = Cell::new(PhaseMemory {
+        active: 0,
+        cache: 0,
+    });
+    let denoise = Cell::new(PhaseMemory {
+        active: 0,
+        cache: 0,
+    });
+    clear_cache();
+    reset_peak_memory();
+    let selected = one_image(scoped_generate(
+        generator.as_ref(),
+        qwen_edit_request(arm, width, height, seed),
+        &context,
+        None,
+        &mut |progress| match progress {
+            Progress::Step { current: 1, .. } => {
+                conditioning.set(PhaseMemory::capture());
+                reset_peak_memory();
+            }
+            Progress::Decoding => {
+                denoise.set(PhaseMemory::capture());
+                reset_peak_memory();
+            }
+            _ => {}
+        },
+    )?)?;
+    let decode = PhaseMemory::capture();
+    let conditioning = conditioning.get();
+    let denoise = denoise.get();
+    if [conditioning.active, denoise.active, decode.active].contains(&0) {
+        return Err(
+            "a synchronized Qwen edit lifecycle phase reported a zero active peak".to_owned(),
+        );
+    }
+    let phases = [conditioning, denoise, decode];
+    let overall = PhaseMemory::overall(&phases);
+    let predicted_peaks = image_predicted_peak_bytes(conditioning, denoise, decode);
+    let predicted = predicted_peaks.overall;
+
+    let mut exact = context.clone();
+    exact.predicted_peak_bytes = predicted;
+    exact.budget.total_bytes = predicted;
+    if !matches!(
+        generator.memory_strategy_safety_check(&exact),
+        MemorySafetyDecision::Accept
+    ) {
+        return Err("Qwen edit provider rejected an exact-fit calibrated budget".to_owned());
+    }
+    let mut unknown = context.clone();
+    unknown.budget.total_bytes = 0;
+    if !matches!(
+        generator.memory_strategy_safety_check(&unknown),
+        MemorySafetyDecision::Reject { .. }
+    ) {
+        return Err("Qwen edit provider accepted an unknown/zero memory budget".to_owned());
+    }
+    let mut stale = context.clone();
+    stale.calibration_fingerprint = "stale-qwen-edit-fingerprint".to_owned();
+    if !matches!(
+        generator.memory_strategy_safety_check(&stale),
+        MemorySafetyDecision::Reject { .. }
+    ) {
+        return Err("Qwen edit provider accepted stale calibration evidence".to_owned());
+    }
+
+    let baseline = one_image(
+        generator
+            .generate(&qwen_edit_request(arm, width, height, seed), &mut |_| {})
+            .map_err(|error| format!("generate unselected Qwen edit reference: {error}"))?,
+    )?;
+    let (maximum_error, mean_error) = image_max_mean_abs(&selected, &baseline)?;
+    if !qwen_quality_passes(maximum_error, mean_error) {
+        return Err(format!(
+            "Qwen edit selected rung exceeded unselected parity: max={maximum_error:.6}, mean={mean_error:.6}"
+        ));
+    }
+    let warm = one_image(scoped_generate(
+        generator.as_ref(),
+        qwen_edit_request(arm, width, height, seed),
+        &context,
+        None,
+        &mut |_| {},
+    )?)?;
+    let (warm_maximum, warm_mean) = image_max_mean_abs(&selected, &warm)?;
+    if !qwen_quality_passes(warm_maximum, warm_mean) {
+        return Err("Qwen edit warm repeat changed the deterministic output".to_owned());
+    }
+
+    let cancelled = qwen_edit_request(arm, width, height, seed);
+    let cancel_signal = cancelled.cancel.clone();
+    let cancel_during_decode = selection.strategy == MemoryStrategy::BoundedDecode;
+    let mut cancel_triggered = false;
+    let cancel_error = scoped_generate(
+        generator.as_ref(),
+        cancelled,
+        &context,
+        None,
+        &mut |progress| {
+            if cancel_triggered {
+                return;
+            }
+            match progress {
+                Progress::Step { current: 1, .. } if !cancel_during_decode => {
+                    cancel_triggered = true;
+                    cancel_signal.cancel();
+                }
+                Progress::Decoding if cancel_during_decode => {
+                    cancel_triggered = true;
+                    let signal = cancel_signal.clone();
+                    std::thread::spawn(move || {
+                        std::thread::sleep(std::time::Duration::from_millis(1));
+                        signal.cancel();
+                    });
+                }
+                _ => {}
+            }
+        },
+    )
+    .expect_err("in-flight Qwen edit cancellation must fail");
+    if !cancel_triggered {
+        return Err(
+            "Qwen edit cancellation probe never reached the active rung boundary".to_owned(),
+        );
+    }
+    if !cancel_error.to_ascii_lowercase().contains("cancel") {
+        return Err(format!(
+            "Qwen edit cancellation returned the wrong error: {cancel_error}"
+        ));
+    }
+    let cancel_recovery = one_image(scoped_generate(
+        generator.as_ref(),
+        qwen_edit_request(arm, width, height, seed),
+        &context,
+        None,
+        &mut |_| {},
+    )?)?;
+    let (cancel_maximum, cancel_mean) = image_max_mean_abs(&selected, &cancel_recovery)?;
+    if !qwen_quality_passes(cancel_maximum, cancel_mean) {
+        return Err("Qwen edit cancellation cleanup changed the warm follow-up".to_owned());
+    }
+
+    let injected_phase = if selection.strategy == MemoryStrategy::BoundedDecode {
+        MemoryPhase::Decode
+    } else {
+        MemoryPhase::Denoise
+    };
+    let injected = scoped_generate(
+        generator.as_ref(),
+        qwen_edit_request(arm, width, height, seed),
+        &context,
+        Some(injected_phase),
+        &mut |_| {},
+    )
+    .expect_err("injected Qwen edit error must fail");
+    if !injected.contains("injected memory-strategy calibration error") {
+        return Err(format!(
+            "Qwen edit error injection returned the wrong error: {injected}"
+        ));
+    }
+    let error_recovery = one_image(scoped_generate(
+        generator.as_ref(),
+        qwen_edit_request(arm, width, height, seed),
+        &context,
+        None,
+        &mut |_| {},
+    )?)?;
+    let (recovery_maximum, recovery_mean) = image_max_mean_abs(&selected, &error_recovery)?;
+    if !qwen_quality_passes(recovery_maximum, recovery_mean) {
+        return Err("Qwen edit error cleanup changed the warm follow-up".to_owned());
+    }
+
+    let mutated = qwen_negative_mutation(&selected);
+    let (mutated_maximum, mutated_mean) = image_max_mean_abs(&mutated, &baseline)?;
+    if qwen_quality_passes(mutated_maximum, mutated_mean) {
+        return Err(
+            "Qwen edit output mutation did not breach the production parity envelope".to_owned(),
+        );
+    }
+    let overlay_scenario = if loaded_adapters > 0 {
+        json!({
+            "name": "overlay",
+            "result": "passed",
+            "reason": "the built-in lightx2v Lightning distill LoRA was folded into the MMDiT at load and participated in every measured render",
+        })
+    } else {
+        json!({ "name": "overlay", "result": "not_applicable", "reason": "settled below from the declared target" })
+    };
+    let mut fragment = json!({
+        "status": "complete",
+        "strategy": strategy,
+        "loadShape": load_shape_key(calibration.load_shape),
+        "artifact": {
+            "repository": repository,
+            "resolvedRevision": revision,
+            "variant": tier,
+        },
+        "sweep": qwen_edit_complete_sweep(request)?,
+        "scenarios": [
+            { "name": "exact_fit", "result": "passed", "predictedBytes": predicted, "effectiveBudgetBytes": predicted },
+            { "name": "unknown_budget", "result": "passed" },
+            { "name": "stale_evidence", "result": "passed" },
+            { "name": "warm_repeat", "result": "passed" },
+            { "name": "cancel", "result": "passed", "cleanupVerified": true, "warmFollowUpPassed": true },
+            { "name": "error", "result": "passed", "cleanupVerified": true, "warmFollowUpPassed": true },
+            { "name": "loadability", "result": "passed" },
+            overlay_scenario
+        ],
+        "predictedPeakBytes": predicted_peaks.json(),
+        "observedMemory": {
+            "conditioning": conditioning.json(),
+            "denoise": denoise.json(),
+            "decode": decode.json(),
+            "overall": overall.json(),
+        },
+        "quality": {
+            "contract": "same seed, reference, prompt, sampling, precision, and loaded provider; selected rung versus unselected request",
+            "identicalInputs": true,
+            "identicalLatents": false,
+            "result": "passed",
+            "maximumError": maximum_error,
+            "meanError": mean_error,
+            "maximumErrorThreshold": QWEN_MAX_THRESHOLD,
+            "meanErrorThreshold": QWEN_MEAN_THRESHOLD,
+        },
+        "negativeMutation": {
+            "parameters": protocol::strategy_parameters(request)?,
+            "measured": true,
+            "result": "failed_as_expected",
+            "maximumError": mutated_maximum,
+            "meanError": mutated_mean,
+        },
+        "loadability": {
+            "result": "passed",
+            "resolvedPathFingerprint": format!("{repository}@{revision}:{tier}"),
+        },
+        "diagnostics": protocol::diagnostics(
+            &format!("memory-mlx-adapter:{}-shared-ladder", arm.slug),
+            "executed",
+            [],
+            [
+                ("conditioningActivePeak", "bytes", conditioning.active),
+                ("denoiseActivePeak", "bytes", denoise.active),
+                ("decodeActivePeak", "bytes", decode.active),
+                ("overallAllocatorEnvelope", "bytes", overall.allocator_bytes()),
+                // Every Qwen edit capture conditions on exactly one reference image, and the
+                // Lightning member additionally carries exactly one built-in distill adapter.
+                ("referenceImages", "count", 1),
+                ("builtInAdapters", "count", loaded_adapters as u64),
+            ],
+        ),
+        "capturedAt": protocol::captured_at(),
+    });
+    if loaded_adapters == 0 {
+        protocol::settle_plain_overlay_scenario(request, &mut fragment, arm.execution_path)?;
+    }
+    Ok(fragment)
+}
+
 /// The exact target geometry an `mlx:ltx_2_3` calibration case renders. `fps` is NOT part of it:
 /// `GeometryEnvelope` has no temporal-cadence axis, so the arm binds fps through the fixture name
 /// instead (see [`planned_ltx_capture`]). That gap is real and is reported rather than papered over —
@@ -11414,6 +12386,9 @@ fn run(request: &Value) -> Result<Value, String> {
         SDXL_PROVIDER => run_sdxl(request),
         KREA_PROVIDER => run_krea_control(request),
         QWEN_PROVIDER => run_qwen_provider(request),
+        // sc-22728: the Qwen edit lane. One engine provider serves both shipped catalog ids, so the
+        // arm resolves which from `(provider, modelId)` and refuses any other pair by name.
+        QWEN_EDIT_PROVIDER => run_qwen_edit_provider(request),
         FLUX2_PROVIDER => run_flux2_dev(request),
         // sc-22726: the FLUX.1 family. Three registry ids on one arm — the two base text-to-image
         // providers of `mlx-gen-flux`, and `mlx-gen-pulid`'s identity route over the same
@@ -15446,46 +16421,87 @@ mod ltx_tests {
     #[test]
     fn every_image_arm_still_refuses_a_multi_frame_geometry() {
         type Arm = fn(&Value) -> Result<Value, String>;
-        let arms: [(&str, &str, Arm); 7] = [
+        // (provider, model id, declared overlay, refusal label, arm). The model id and overlay are
+        // columns because sc-22728 added a family whose two members share one provider and differ in
+        // exactly those two axes; every other row still carries `modelId == provider`, `overlay`
+        // "none" (or Krea's control overlay).
+        let arms: [(&str, &str, &str, &str, Arm); 9] = [
             (
                 KREA_BASE_PROVIDER,
+                KREA_BASE_PROVIDER,
+                "none",
                 "MLX Krea base calibration",
                 run_krea_base,
             ),
-            (SDXL_PROVIDER, "MLX SDXL base calibration", run_sdxl),
+            (
+                SDXL_PROVIDER,
+                SDXL_PROVIDER,
+                "none",
+                "MLX SDXL base calibration",
+                run_sdxl,
+            ),
             (
                 Z_IMAGE_PROVIDER,
+                Z_IMAGE_PROVIDER,
+                "none",
                 "MLX Z-Image base calibration",
                 run_z_image_reference,
             ),
             // sc-22724: the base model shares the arm; its refusal carries its own label.
             (
                 Z_IMAGE_BASE_PROVIDER,
+                Z_IMAGE_BASE_PROVIDER,
+                "none",
                 "MLX Z-Image base-model calibration",
                 run_z_image_reference,
             ),
             (
                 KREA_PROVIDER,
+                KREA_PROVIDER,
+                "control:1",
                 "MLX Krea pose-control calibration",
                 run_krea_control,
             ),
             (
                 QWEN_PROVIDER,
+                QWEN_PROVIDER,
+                "none",
                 "MLX Qwen base calibration",
                 run_qwen_provider,
             ),
-            (FLUX2_PROVIDER, "MLX FLUX.2-dev calibration", run_flux2_dev),
+            // sc-22728: both Qwen edit catalog ids, each with its own label and declared overlay.
+            (
+                QWEN_EDIT_PROVIDER,
+                QWEN_EDIT_MODEL,
+                "none",
+                "MLX Qwen edit calibration",
+                run_qwen_edit_provider,
+            ),
+            (
+                QWEN_EDIT_PROVIDER,
+                QWEN_EDIT_LIGHTNING_MODEL,
+                "lora",
+                "MLX Qwen edit Lightning calibration",
+                run_qwen_edit_provider,
+            ),
+            (
+                FLUX2_PROVIDER,
+                FLUX2_PROVIDER,
+                "none",
+                "MLX FLUX.2-dev calibration",
+                run_flux2_dev,
+            ),
         ];
-        for (provider, label, arm) in arms {
+        for (provider, model_id, overlay, label, arm) in arms {
             for frames in [0_u64, 2, 97] {
                 let request = json!({
                     "planned": {
                         "target": {
                             "provider": provider,
-                            "modelId": provider,
+                            "modelId": model_id,
                             "tier": "q4",
-                            "mode": "text_to_image",
-                            "overlay": if provider == KREA_PROVIDER { "control:1" } else { "none" },
+                            "mode": if provider == QWEN_EDIT_PROVIDER { "edit_image" } else { "text_to_image" },
+                            "overlay": overlay,
                             "geometry": { "width": 768, "height": 768, "batch": 1, "frames": frames }
                         },
                         "backend": "mlx",
@@ -15522,6 +16538,8 @@ mod ltx_tests {
             "MLX Z-Image edit calibration",
             "MLX Krea pose-control calibration",
             "MLX Qwen base calibration",
+            "MLX Qwen edit calibration",
+            "MLX Qwen edit Lightning calibration",
             "MLX FLUX.2-dev calibration",
         ] {
             let request = json!({
