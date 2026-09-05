@@ -726,6 +726,47 @@ fn load(request: &Value) -> Result<Loaded, String> {
   assert.deepEqual(adapterCapturableProviders(source, "synthetic"), ["alpha"]);
 });
 
+// sc-22729: the counterpart rule. A BESPOKE arm — one whose crate registers no generator, so the
+// adapter dispatches it with an early `if provider == <ID> { return … }` before the gated matches —
+// never reaches those gates, and intersecting them out reported a real working arm as
+// "uncapturable". `candle:instantid` (sc-22729) and `candle:ltx_2_5_distilled` (sc-22725) are both
+// dispatched that way; before this, a capture host booked for either was reported as wasted.
+test("a bespoke arm dispatched before the gated matches is capturable, not intersected away", () => {
+  const source = `
+const BESPOKE_ID: &str = "gamma";
+fn run(request: &Value) -> Result<Value, String> {
+    if provider == BESPOKE_ID {
+        return run_gamma(request);
+    }
+    if provider == "delta" {
+        return run_delta(request);
+    }
+    match planned_provider(request)? {
+        "alpha" => Ok(ALPHA_PATH),
+        provider => Err(format!(
+            "synthetic five-rung calibration does not implement provider {provider:?}"
+        )),
+    }
+}
+fn load(request: &Value) -> Result<Loaded, String> {
+    match planned_provider(request)? {
+        "alpha" => Ok(load_alpha()),
+        provider => {
+            return Err(format!(
+                "synthetic five-rung calibration does not implement provider {provider:?}"
+            ))
+        }
+    }
+}
+`;
+  assert.deepEqual(adapterCapturableProviders(source, "synthetic"), ["alpha", "delta", "gamma"]);
+  // An unresolvable bespoke id is loud, exactly as an unresolvable gate arm is — never guessed.
+  assert.throws(
+    () => adapterCapturableProviders(source.replace("BESPOKE_ID: &str", "BESPOKE_ID: &u32"), "synthetic"),
+    /bespoke dispatch on BESPOKE_ID does not resolve to a &str const/,
+  );
+});
+
 test("losing the dispatch anchor is loud, never an empty (or full) capturable set", () => {
   assert.throws(
     () => adapterCapturableProviders("fn run() -> u32 { 42 }", "synthetic"),

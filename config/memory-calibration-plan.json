@@ -750,6 +750,381 @@
       "loadShape": "eager_materialization",
       "calibrationFingerprint": "z-image-mlx-independent-materialization-v4",
       "fixture": "fresh-five-rung-z-image-q8-768-seed16402-step2"
+    },
+    "sdxl:q4:candle": {
+      "provider": "sdxl",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 768,
+        "height": 768,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "deferred_materialization",
+      "calibrationFingerprint": "sdxl-candle-sdxl-staged-decode-attention-v1",
+      "fixture": "sdxl-base-candle-q4-768-seed18379-step2"
+    },
+    "sdxl:q8:candle": {
+      "provider": "sdxl",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "deferred_materialization",
+      "calibrationFingerprint": "sdxl-candle-sdxl-staged-decode-attention-v1",
+      "fixture": "sdxl-base-candle-q8-1024-seed18379-step2"
+    },
+    "sdxl:bf16:candle": {
+      "provider": "sdxl",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "deferred_materialization",
+      "calibrationFingerprint": "sdxl-candle-sdxl-staged-decode-attention-v1",
+      "fixture": "sdxl-base-candle-bf16-1024-seed18379-step2"
+    },
+    "realvisxl:q4:mlx": {
+      "provider": "sdxl",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 768,
+        "height": 768,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "deferred_materialization",
+      "calibrationFingerprint": "sdxl-mlx-unet-shared-ladder-v3",
+      "fixture": "realvisxl-mlx-q4-768-seed18379-step2"
+    },
+    "realvisxl:q8:mlx": {
+      "provider": "sdxl",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "deferred_materialization",
+      "calibrationFingerprint": "sdxl-mlx-unet-shared-ladder-v3",
+      "fixture": "realvisxl-mlx-q8-1024-seed18379-step2"
+    },
+    "realvisxl:bf16:mlx": {
+      "provider": "sdxl",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "deferred_materialization",
+      "calibrationFingerprint": "sdxl-mlx-unet-shared-ladder-v3",
+      "fixture": "realvisxl-mlx-bf16-1024-seed18379-step2"
+    },
+    "realvisxl:q4:candle": {
+      "provider": "sdxl",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 768,
+        "height": 768,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "deferred_materialization",
+      "calibrationFingerprint": "sdxl-candle-realvisxl-staged-decode-attention-v1",
+      "fixture": "realvisxl-candle-q4-768-seed18379-step2"
+    },
+    "realvisxl:q8:candle": {
+      "provider": "sdxl",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "deferred_materialization",
+      "calibrationFingerprint": "sdxl-candle-realvisxl-staged-decode-attention-v1",
+      "fixture": "realvisxl-candle-q8-1024-seed18379-step2"
+    },
+    "realvisxl:bf16:candle": {
+      "provider": "sdxl",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "deferred_materialization",
+      "calibrationFingerprint": "sdxl-candle-realvisxl-staged-decode-attention-v1",
+      "fixture": "realvisxl-candle-bf16-1024-seed18379-step2"
+    },
+    "realvisxl_lightning:q4:mlx": {
+      "provider": "sdxl",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 768,
+        "height": 768,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "deferred_materialization",
+      "calibrationFingerprint": "sdxl-mlx-unet-shared-ladder-v3",
+      "fixture": "realvisxl-lightning-mlx-q4-768-seed18379-step2"
+    },
+    "realvisxl_lightning:q8:mlx": {
+      "provider": "sdxl",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "deferred_materialization",
+      "calibrationFingerprint": "sdxl-mlx-unet-shared-ladder-v3",
+      "fixture": "realvisxl-lightning-mlx-q8-1024-seed18379-step2"
+    },
+    "realvisxl_lightning:bf16:mlx": {
+      "provider": "sdxl",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "deferred_materialization",
+      "calibrationFingerprint": "sdxl-mlx-unet-shared-ladder-v3",
+      "fixture": "realvisxl-lightning-mlx-bf16-1024-seed18379-step2"
+    },
+    "realvisxl_lightning:q4:candle": {
+      "provider": "sdxl",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 768,
+        "height": 768,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "deferred_materialization",
+      "calibrationFingerprint": "sdxl-candle-realvisxl-lightning-staged-decode-attention-v1",
+      "fixture": "realvisxl-lightning-candle-q4-768-seed18379-step2"
+    },
+    "realvisxl_lightning:q8:candle": {
+      "provider": "sdxl",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "deferred_materialization",
+      "calibrationFingerprint": "sdxl-candle-realvisxl-lightning-staged-decode-attention-v1",
+      "fixture": "realvisxl-lightning-candle-q8-1024-seed18379-step2"
+    },
+    "realvisxl_lightning:bf16:candle": {
+      "provider": "sdxl",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "deferred_materialization",
+      "calibrationFingerprint": "sdxl-candle-realvisxl-lightning-staged-decode-attention-v1",
+      "fixture": "realvisxl-lightning-candle-bf16-1024-seed18379-step2"
+    },
+    "illustrious_xl_v1:q4:mlx": {
+      "provider": "sdxl",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 768,
+        "height": 768,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "deferred_materialization",
+      "calibrationFingerprint": "sdxl-mlx-unet-shared-ladder-v3",
+      "fixture": "illustrious-xl-v1-mlx-q4-768-seed18379-step2"
+    },
+    "illustrious_xl_v1:q8:mlx": {
+      "provider": "sdxl",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "deferred_materialization",
+      "calibrationFingerprint": "sdxl-mlx-unet-shared-ladder-v3",
+      "fixture": "illustrious-xl-v1-mlx-q8-1024-seed18379-step2"
+    },
+    "illustrious_xl_v1:bf16:mlx": {
+      "provider": "sdxl",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "deferred_materialization",
+      "calibrationFingerprint": "sdxl-mlx-unet-shared-ladder-v3",
+      "fixture": "illustrious-xl-v1-mlx-bf16-1024-seed18379-step2"
+    },
+    "illustrious_xl_v2:q4:mlx": {
+      "provider": "sdxl",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 768,
+        "height": 768,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "deferred_materialization",
+      "calibrationFingerprint": "sdxl-mlx-unet-shared-ladder-v3",
+      "fixture": "illustrious-xl-v2-mlx-q4-768-seed18379-step2"
+    },
+    "illustrious_xl_v2:q8:mlx": {
+      "provider": "sdxl",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "deferred_materialization",
+      "calibrationFingerprint": "sdxl-mlx-unet-shared-ladder-v3",
+      "fixture": "illustrious-xl-v2-mlx-q8-1024-seed18379-step2"
+    },
+    "illustrious_xl_v2:bf16:mlx": {
+      "provider": "sdxl",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "deferred_materialization",
+      "calibrationFingerprint": "sdxl-mlx-unet-shared-ladder-v3",
+      "fixture": "illustrious-xl-v2-mlx-bf16-1024-seed18379-step2"
+    },
+    "instantid_realvisxl:q4:mlx": {
+      "provider": "instantid",
+      "mode": "character_image",
+      "overlay": "identity",
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "eager_materialization",
+      "calibrationFingerprint": "instantid-request-contract-v1",
+      "fixture": "instantid-realvisxl-mlx-q4-1024-seed18381-step2"
+    },
+    "instantid_realvisxl:q8:mlx": {
+      "provider": "instantid",
+      "mode": "character_image",
+      "overlay": "identity",
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "eager_materialization",
+      "calibrationFingerprint": "instantid-request-contract-v1",
+      "fixture": "instantid-realvisxl-mlx-q8-1024-seed18381-step2"
+    },
+    "instantid_realvisxl:bf16:mlx": {
+      "provider": "instantid",
+      "mode": "character_image",
+      "overlay": "identity",
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "eager_materialization",
+      "calibrationFingerprint": "instantid-request-contract-v1",
+      "fixture": "instantid-realvisxl-mlx-bf16-1024-seed18381-step2"
+    },
+    "instantid_realvisxl:bf16:candle": {
+      "provider": "instantid",
+      "mode": "character_image",
+      "overlay": "identity",
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "eager_materialization",
+      "calibrationFingerprint": "instantid-candle-staged-conditioning-v1",
+      "fixture": "instantid-realvisxl-candle-bf16-1024-seed18381-step2"
     }
   }
 }

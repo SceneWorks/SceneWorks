@@ -163,8 +163,49 @@ ids they cover today:
 
 | binary | providers covered | how it dispatches an unknown provider |
 | --- | --- | --- |
-| `memory-mlx-adapter` | `qwen_image`, `z_image_turbo` (text-to-image, and in `edit_image` mode the `z_image_edit` catalog alias — sc-22724), `z_image` (the undistilled base, sc-22724), `krea_2_turbo`, `sdxl`, `krea_2_turbo_control`, `flux2_dev` (SDXL exposes only Resident, Staged, and bounded-transformer residency; its decode/attention rungs are measured `Missing`. FLUX.2-dev is **resident rung only**.) | `mlx.rs` `run` — `MLX five-rung calibration does not implement provider "<id>"`; `validate_z_image_batch` (`assess_batch`) — `…five-rung batch assessment does not implement provider "<id>"` (cited by function name; the line numbers this table used to carry went stale the first time the file grew) |
-| `memory-candle-adapter` | `qwen_image`, `krea_2_turbo`, `z_image_turbo` (sc-15859; five-rung reference path only, no inline arm; in `edit_image` mode it is the `z_image_edit` catalog alias — sc-22724), `z_image` (the undistilled base, sc-22724) | `plain_execution_path` / `still_calibration_label` / `load_five_rung_generator` — `Candle five-rung calibration does not implement provider "<id>"` |
+| `memory-mlx-adapter` | `qwen_image`, `z_image_turbo` (text-to-image, and in `edit_image` mode the `z_image_edit` catalog alias — sc-22724), `z_image` (the undistilled base, sc-22724), `krea_2_turbo`, `sdxl` (all five catalog routes — sc-22729), `instantid` (sc-22729), `krea_2_turbo_control`, `flux2_dev` (SDXL exposes only Resident, Staged, and bounded-transformer residency; its decode/attention rungs are measured `Missing`. InstantID exposes only Resident and Staged. FLUX.2-dev is **resident rung only**.) | `mlx.rs` `run` — `MLX five-rung calibration does not implement provider "<id>"`; `sdxl_arm` — `the MLX SDXL arm does not implement modelId "<id>" on provider "sdxl"`; `validate_z_image_batch` (`assess_batch`) — `…five-rung batch assessment does not implement provider "<id>"` (cited by function name; the line numbers this table used to carry went stale the first time the file grew) |
+| `memory-candle-adapter` | `qwen_image`, `krea_2_turbo`, `z_image_turbo` (sc-15859; five-rung reference path only, no inline arm; in `edit_image` mode it is the `z_image_edit` catalog alias — sc-22724), `z_image` (the undistilled base, sc-22724), `sdxl` (sc-22729; five-rung reference path, three of the five routes — see below), `instantid` (sc-22729; bf16 only) | `plain_execution_path` / `still_calibration_label` / `load_five_rung_generator` — `Candle five-rung calibration does not implement provider "<id>"`; `sdxl_candle_arm` — `the Candle SDXL arm does not implement modelId "<id>"` |
+
+🔴 **The SDXL family is keyed on `(provider, modelId)`, not on the provider alone** (sc-22729). The
+worker routes five catalog models — `sdxl`, `realvisxl`, `realvisxl_lightning`,
+`illustrious_xl_v1`, `illustrious_xl_v2` — onto the single `sdxl` engine id on BOTH lanes
+(`crates/sceneworks-worker/src/engines.rs` `MODEL_TABLE`), each with its own independently pinned
+tiered rehost. The engine id is not an artifact identity: `candle-gen-sdxl` seals a per-route
+repository/revision and mints a per-route calibration fingerprint
+(`sdxl-candle-<route>-staged-decode-attention-v1`), while `mlx-gen-sdxl` mints ONE route-independent
+string (`sdxl-mlx-unet-shared-ladder-v3`) for all five. Each model therefore has its own
+`SCENEWORKS_<MODEL>_{REPOSITORY,REVISION,ROOT}` triple, and both adapters refuse a `modelId` no
+family member serves by name. `instantid_realvisxl` rides the separate bespoke `instantid` provider
+on the SAME `SceneWorks/realvisxl-mlx` backbone, bound through its own
+`SCENEWORKS_INSTANTID_REALVISXL_*` triple so the two can never satisfy each other's plans.
+
+**Two engine-side exclusions at inference `c6d6a4db`, neither of them adapter work:**
+
+- `illustrious_xl_v1` / `illustrious_xl_v2` on **candle**. `candle-gen-sdxl`'s `SDXL_ROUTES`
+  (`crates/media/candle-gen/candle-gen-sdxl/src/memory_strategy.rs:66-79`) pins those two routes at
+  `c5a92a90…` / `7c5c8b2b…`, but `config/manifests/builtin.models.jsonc` ships `778c3f02…` /
+  `672e9851…`. `path_has_snapshot` (same file, `:198-224`) matches that literal before
+  `SdxlArtifactSeal::capture` will seal, and `candle_gen_sdxl::load` propagates the failure
+  (`lib.rs:681-685`), so **no root the manifest can resolve can ever load these two on candle**. The
+  adapter arm exists and refuses them naming both revisions. Six cells; the fix is an inference-side
+  route-revision bump, not a plan or adapter change.
+- `instantid_realvisxl` q4/q8 on **candle**. The candle InstantID stack is dense-only: the worker
+  hard-pins its tier subdir to `bf16/` on the non-macOS branch
+  (`crates/sceneworks-worker/src/image_jobs/instantid.rs:234-253`) and the provider declares
+  `resolved_numeric_tier()` as Bf16/no-quant. `docs/generated/memory-matrix.json` already says so in
+  `axes.candle.tiers`, so these are not cells at all — a packed candle anchor could only ever measure
+  bf16 weights.
+
+**Adapter environment for the SDXL family.** The three caller-staged SDXL components
+(`tokenizer_clip_l`, `tokenizer_clip_bigg`, `vae_fp16_fix`) are REQUIRED by `candle-gen-sdxl` at
+exact upstream revisions, and the catalog binds them from each model's own manifest corequisites as
+`SCENEWORKS_SDXL_COMPONENT_TOKENIZER_CLIP_L` / `_TOKENIZER_CLIP_BIGG` / `_VAE_FP16_FIX`. InstantID
+additionally needs its identity stack, which the worker fetches on FIRST USE rather than declaring
+as a manifest download — so there is nothing for the harness to resolve and the operator stages it,
+exactly as `image_jobs/instantid.rs` reads it: `SCENEWORKS_INSTANTID_WEIGHTS` (a directory holding
+`ip-adapter.safetensors`, `scrfd_10g.safetensors`, `arcface_iresnet100.safetensors`) and
+`SCENEWORKS_INSTANTID_CONTROLNET` (the IdentityNet `ControlNetModel` directory). `--list` reports an
+unset or absent one as `weights_missing` naming the variable.
 
 Since sc-18212 the stale-lane report answers this gate for you: its `CAPTURE` column and
 "DECLARED/PLANNED BUT UNCAPTURABLE" section are derived by parsing these dispatch matches

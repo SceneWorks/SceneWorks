@@ -515,7 +515,9 @@ test("windows-candle captures and schema-checks the SC-21714 Krea anchor record"
 
   const adapter = await source("crates/sceneworks-memory-adapter/src/bin/candle.rs");
   assert.match(adapter, /StableIdleConfig::new\(2\.0, 5, 64, 200\)/);
-  assert.equal(adapter.match(/let mut vram = certifying_vram_probe\(\);/g)?.length, 2);
+  // sc-22729 raised this from two to three: the bespoke Candle InstantID arm is the third capture
+  // site, and it must use the same certifying probe rather than an ad-hoc one.
+  assert.equal(adapter.match(/let mut vram = certifying_vram_probe\(\);/g)?.length, 3);
 });
 
 test("windows-candle routes weights dispatches to a real-weights runner, like the MLX lane", async () => {

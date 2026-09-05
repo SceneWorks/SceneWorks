@@ -7149,6 +7149,26 @@ mod tests {
                 }
             };
 
+            // sc-22729: a BESPOKE provider registers no `ModelDescriptor` and no memory-strategy
+            // registration at all (`mlx_gen_catalog::BESPOKE_UTILITY_CRATES` lists `instantid`), so
+            // there is no weights-free REGISTRY contract for this guard to resolve — the adapter
+            // arm calls the crate's own `InstantId::load_with_memory_context`, which needs resolved
+            // paths, not a fixture `LoadSpec`. Skipping silently would let a genuinely registered
+            // provider take the same exit and lose its coverage, so the absence is ASSERTED here
+            // rather than assumed, and the lane is not counted toward `checked`.
+            const BESPOKE_MLX_PROVIDERS: [&str; 1] = ["instantid"];
+            if BESPOKE_MLX_PROVIDERS.contains(&provider) {
+                assert!(
+                    registry
+                        .memory_strategy_registrations()
+                        .all(|registration| registration.provider_id != provider),
+                    "planned MLX lane {provider}/{mode} IS registered in the shipped runtime \
+                     registry, so it must resolve a weights-free contract like every other lane \
+                     instead of taking the bespoke exit"
+                );
+                continue;
+            }
+
             let mut spec = LoadSpec::new(WeightsSource::Dir(std::path::PathBuf::from("fixture")))
                 .with_load_shape(load_shape);
             spec = match *tier {
