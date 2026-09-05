@@ -734,7 +734,17 @@ test("an engineId the anchor plan does not measure that model under is refused",
   // The two shipped shapes pass, and a lane the plan carries no row for has nothing to check.
   assertEngineIdMatchesPlan({ model: "z_image_edit:mlx", engineId: "z_image_turbo", planAnchors: plan });
   assertEngineIdMatchesPlan({ model: "krea_2_turbo:mlx", planAnchors: plan });
-  assertEngineIdMatchesPlan({ model: "ltx_2_3:mlx", engineId: "made_up_engine", planAnchors: plan });
+  // sc-22737: this case used to name `ltx_2_3:mlx`, which the plan carried no row for until this
+  // story planned all three of its MLX tiers — at which point the rule correctly began refusing the
+  // made-up id and the case stopped testing what it was written to test. `sdxl:candle` is the
+  // unplanned lane now: SDXL is an MLX-only arm (`PROVIDER_FAMILIES.sdxl.arms == ["mlx"]`), asserted
+  // below so this case cannot silently go vacuous the same way a second time.
+  assert.equal(
+    Object.keys(plan).some((key) => key.startsWith("sdxl:") && key.endsWith(":candle")),
+    false,
+    "sdxl:candle must stay unplanned for this case to exercise the no-row branch",
+  );
+  assertEngineIdMatchesPlan({ model: "sdxl:candle", engineId: "made_up_engine", planAnchors: plan });
 
   // And it is wired into the derivation, not merely exported: a mis-pointed declaration whose entry
   // points DO carry the engine id's literal — the false green in full — is still refused.
