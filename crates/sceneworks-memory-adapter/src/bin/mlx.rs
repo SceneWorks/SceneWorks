@@ -11381,9 +11381,9 @@ mod flux2_tests {
         );
     }
 
-    /// The klein arms load the WORKER's plain-T2I shape — `Sequential` + `DeferredMaterialization`
-    /// + no quant — which is exactly the predicate the pinned engine publishes a calibration
-    /// identity under: `klein_contract_for` sets `calibration` iff `klein_streamable(spec)`
+    /// The klein arms load the WORKER's plain-T2I shape (`Sequential`, `DeferredMaterialization`,
+    /// no quant), which is exactly the predicate the pinned engine publishes a calibration identity
+    /// under: `klein_contract_for` sets `calibration` iff `klein_streamable(spec)`
     /// (`mlx-gen-flux2/src/memory_strategy.rs`). That predicate is crate-private at the pin, so it
     /// is transcribed here term by term, the way the worker's own registry test transcribes it.
     /// The dev arm is the opposite shape — resident and eager, as sc-18218 measured it — and must
