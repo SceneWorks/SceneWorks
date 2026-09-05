@@ -8,9 +8,10 @@ import { copyFile, lstat, mkdir, readFile, readdir, realpath, rename, rm, writeF
 import { promisify } from "node:util";
 import { setTimeout as delay } from "node:timers/promises";
 import path from "node:path";
+import { pathToFileURL } from "node:url";
 import { inventory } from "./starvector-terminal-producer.mjs";
 import { isExecutedModule } from "./starvector-terminal-cli.mjs";
-import { readPlanAndLock } from "./starvector-terminal-campaign.mjs";
+import { INFERENCE_REVISION, readPlanAndLock } from "./starvector-terminal-campaign.mjs";
 import { fileSha256 } from "./lib/file-sha256.mjs";
 import { assertTerminalPhysicalContainment, assertTerminalPinPhysicalContainment, ensureTerminalPhysicalDirectory } from "./lib/starvector-terminal-pin-paths.mjs";
 import { sortTerminalTreeEntries, terminalTreeEntry, terminalTreeSha256 } from "./lib/terminal-tree-identity.mjs";
@@ -113,7 +114,20 @@ async function writeExact(file, bytes) {
   await mkdir(path.dirname(file), { recursive: true }); await writeFile(file, bytes, { flag: "wx" });
 }
 
-export async function downloadExact(url, destination, expected) {
+export function downloadTransportCodes(error) {
+  const allowed = new Set(["ENOTFOUND", "EAI_AGAIN", "ECONNREFUSED", "ECONNRESET", "ETIMEDOUT", "EHOSTUNREACH", "ENETUNREACH", "DEPTH_ZERO_SELF_SIGNED_CERT", "SELF_SIGNED_CERT_IN_CHAIN", "UNABLE_TO_VERIFY_LEAF_SIGNATURE", "CERT_HAS_EXPIRED", "ERR_TLS_CERT_ALTNAME_INVALID", "UND_ERR_CONNECT_TIMEOUT", "UND_ERR_HEADERS_TIMEOUT", "UND_ERR_BODY_TIMEOUT", "UND_ERR_SOCKET"]);
+  const codes = new Set();
+  const visit = (value, depth) => {
+    if (!value || depth > 4) return;
+    if (allowed.has(value.code)) codes.add(value.code);
+    visit(value.cause, depth + 1);
+    if (Array.isArray(value.errors)) for (const item of value.errors.slice(0, 16)) visit(item, depth + 1);
+  };
+  visit(error, 0);
+  return [...codes].sort();
+}
+
+export async function downloadExact(url, destination, expected, fetcher = fetch) {
   if (!SHA256.test(expected)) die("download requires an exact SHA-256");
   const existing = await lstat(destination).catch(() => null);
   if (existing) {
@@ -121,9 +135,40 @@ export async function downloadExact(url, destination, expected) {
     return destination;
   }
   const parsed = new URL(url); if (parsed.protocol !== "https:") die("only HTTPS download sources are allowed");
-  const response = await fetch(parsed, { redirect: "follow" }); if (!response.ok) die(`download failed ${response.status}: ${url}`);
-  const bytes = Buffer.from(await response.arrayBuffer()); if (sha(bytes) !== expected) die(`download digest mismatch: ${url}`);
+  let response, bytes;
+  try {
+    response = await fetcher(parsed, { redirect: "follow" });
+    if (response.ok) bytes = Buffer.from(await response.arrayBuffer());
+  } catch (error) {
+    const codes = downloadTransportCodes(error);
+    die(`HTTPS acquisition failed: transport_codes=${codes.length ? codes.join(",") : "unreported"}`);
+  }
+  if (!response.ok) die(`download failed HTTP ${response.status}`);
+  if (sha(bytes) !== expected) die("download digest mismatch");
   await mkdir(path.dirname(destination), { recursive: true }); await writeFile(destination, bytes, { flag: "wx" }); return destination;
+}
+
+export async function prepareCorpusInputs({ inferenceRoot, assetsRoot, permanentPin, parquetRoot, corpusRelative = "release/starvector-terminal-corpus-v1.json" }, acquire = downloadExact) {
+  if (permanentPin !== INFERENCE_REVISION) die("corpus inputs require the exact permanent inference pin");
+  if (!/^release\/[A-Za-z0-9_.-]+\.json$/.test(corpusRelative)) die("invalid corpus contract path");
+  const existing = await lstat(assetsRoot).catch(error => { if (error.code === "ENOENT") return null; throw error; });
+  if (existing) {
+    await assertTerminalPhysicalContainment(assetsRoot, assetsRoot);
+    const { validateCorpusAssets } = await import("./starvector-terminal-readiness.mjs");
+    // Existing partial or drifted assets are evidence, never an overwrite target.
+    await validateCorpusAssets(inferenceRoot, corpusRelative, assetsRoot, permanentPin);
+    return "reuse";
+  }
+  const corpus = await json(path.join(inferenceRoot, ...corpusRelative.split("/")));
+  const validator = await import(pathToFileURL(path.join(inferenceRoot, "scripts/release/starvector_terminal_evidence.mjs")).href);
+  validator.validatePlan(corpus);
+  const sources = corpus.upstream_image_quality_cases.sources;
+  if (sources.length !== 4) die("corpus requires four immutable source datasets");
+  for (const [index, source] of sources.entries()) {
+    if (!/^starvector\/[a-z0-9-]+$/.test(source.dataset) || !REVISION.test(source.revision) || source.parquet_path !== "data/test-00000-of-00001.parquet" || !SHA256.test(source.parquet_sha256)) die("corpus source download identity is invalid");
+    await acquire(`https://huggingface.co/datasets/${source.dataset}/resolve/${source.revision}/${source.parquet_path}`, path.join(parquetRoot, `source-${index}.parquet`), source.parquet_sha256);
+  }
+  return "materialize";
 }
 
 async function validatePublishedCheckout(destination, revision) {
@@ -579,6 +624,14 @@ export async function provisionUpstream({ sceneWorksRoot, hostRoot, python, asse
 
 async function main(argv) {
   const [command, ...args] = argv;
+  if (command === "corpus-inputs" && args.length === 4) {
+    const state = await prepareCorpusInputs({ inferenceRoot: args[0], assetsRoot: args[1], permanentPin: args[2], parquetRoot: args[3] });
+    console.log(state); return state;
+  }
+  if (command === "corpus-validate" && args.length === 3) {
+    const { validateCorpusAssets } = await import("./starvector-terminal-readiness.mjs");
+    return validateCorpusAssets(args[0], "release/starvector-terminal-corpus-v1.json", args[1], args[2]);
+  }
   if (command === "upstream" && args.length === 5) return provisionUpstream({ sceneWorksRoot: args[0], hostRoot: args[1], python: args[2], assetsRoot: args[3], sanitizer: args[4] });
   if (command === "download" && args.length === 3) return downloadExact(args[0], args[1], args[2]);
   if (command === "checkout" && args.length === 3) return installPinnedCheckout(args[0], args[1], args[2]);

@@ -11,7 +11,7 @@ import { fileSha256 } from "./lib/file-sha256.mjs";
 import { terminalPinPaths } from "./lib/starvector-terminal-pin-paths.mjs";
 import { terminalTreeEntry, terminalTreeSha256 } from "./lib/terminal-tree-identity.mjs";
 import { removeStarVectorMacMetricsTree, selectStarVectorMacPython, validateStarVectorMacVenv } from "./select-starvector-macos-python.mjs";
-import { assemblePreflight, assembleWeights, downloadExact, installCheckout, installPinnedCheckout, installUpstreamPackages, prepareUpstreamSource, runUpstreamPip, upstreamPipProgress, pinnedCheckoutLockPath, tree, validatePreflightMetadata, validatePreflightTransport, validateSealedPreflightIndex } from "./starvector-terminal-provision.mjs";
+import { assemblePreflight, assembleWeights, downloadExact, downloadTransportCodes, installCheckout, installPinnedCheckout, installUpstreamPackages, prepareUpstreamSource, runUpstreamPip, upstreamPipProgress, pinnedCheckoutLockPath, tree, validatePreflightMetadata, validatePreflightTransport, validateSealedPreflightIndex } from "./starvector-terminal-provision.mjs";
 import { validateTerminalServiceClosure } from "./starvector-terminal-readiness.mjs";
 
 const execFile = promisify(execFileCallback);
@@ -1154,4 +1154,74 @@ test("upstream pip process deadline remains explicit after installation starts",
   await assert.rejects(() => runUpstreamPip(process.execPath, ["-e", script], { timeout: 1000, maxBuffer: 4096 }, { emit: line => events.push(JSON.parse(line)), heartbeatMs: 20, noProgressMs: 300 }), /process_deadline/);
   assert.equal(events.at(-1).failure, "process_deadline");
   assert.equal(events.at(-1).killed, true);
+});
+
+
+test("download diagnostics expose allowlisted transport causes without URLs or credentials", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "starvector-download-error-"));
+  try {
+    const error = new TypeError("fetch failed FIXTURE_PRIVATE");
+    error.cause = new AggregateError([Object.assign(new Error("private proxy credential FIXTURE_PRIVATE"), { code: "ECONNRESET" }), { code: "FIXTURE_PRIVATE" }]);
+    assert.deepEqual(downloadTransportCodes(error), ["ECONNRESET"]);
+    await assert.rejects(() => downloadExact("https://example.invalid/file?token=FIXTURE_PRIVATE", path.join(root, "input"), digest("input"), async () => { throw error; }), failure => {
+      assert.match(failure.message, /transport_codes=ECONNRESET/);
+      assert.doesNotMatch(failure.message, /FIXTURE_PRIVATE|https:|proxy|credential/);
+      return true;
+    });
+    await assert.rejects(() => downloadExact("https://example.invalid/file?token=FIXTURE_PRIVATE", path.join(root, "input"), digest("input"), async () => new Response("private response FIXTURE_PRIVATE", { status: 403 })), failure => {
+      assert.match(failure.message, /HTTP 403/);
+      assert.doesNotMatch(failure.message, /FIXTURE_PRIVATE|https:|response/);
+      return true;
+    });
+    assert.equal(await lstat(path.join(root, "input")).catch(() => null), null);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+
+function assertCorpusReuseBeforeAcquisition(source) {
+  const blocks = source.split("- name: Materialize the exact pinned 120-row corpus").slice(1).map(block => block.slice(0, block.indexOf("      - name:")));
+  assert.equal(blocks.length, 2);
+  for (const block of blocks) {
+    const prepare = block.indexOf("provision.mjs corpus-inputs");
+    const guard = block.search(/if (?:\[ "\$corpus_state" = materialize \]|\(\$corpusState -eq 'materialize'\))/);
+    const cargo = block.indexOf("cargo run --release --locked -p sceneworks-worker --bin starvector_terminal_corpus");
+    const validate = block.indexOf("provision.mjs corpus-validate");
+    assert.ok(prepare >= 0 && guard > prepare && cargo > guard && validate > cargo);
+    assert.doesNotMatch(block, /provision\.mjs download|Test-Path|\[ ! -e/);
+  }
+}
+
+test("both corpus workflows validate reuse before acquisition and validate new materialization", () => {
+  assertCorpusReuseBeforeAcquisition(workflow);
+  for (const mutation of [
+    value => value.replace("provision.mjs corpus-inputs", "provision.mjs presence-only"),
+    value => value.replace("provision.mjs corpus-validate", "provision.mjs presence-only"),
+    value => value.replace('          corpus_state=', '          node scripts/starvector-terminal-provision.mjs download https://example.invalid/file target hash\n          corpus_state='),
+  ]) assert.throws(() => assertCorpusReuseBeforeAcquisition(mutation(workflow)), { name: "AssertionError" });
+});
+
+
+test("upstream pip resets progress for a smaller second wheel without masking a stalled transfer", async () => {
+  const events = [];
+  // pip25.0.1 logs Downloading before each response and its raw renderer starts
+  // current at zero for each wheel. Keep wheel2 advancing longer than the
+  // watchdog interval, with every count smaller than wheel1's final count.
+  const script = `
+    console.log('Downloading https://download-r2.pytorch.org/whl/cu128/torch-2.7.1%2Bcu128-cp312-cp312-win_amd64.whl');
+    console.log('Progress 5000 of 5000');
+    setTimeout(() => {
+      console.log('Downloading https://download-r2.pytorch.org/whl/cu128/torchvision-0.22.1%2Bcu128-cp312-cp312-win_amd64.whl');
+      console.log('Progress 0 of 10');
+      let bytes = 0;
+      const timer = setInterval(() => {
+        console.log('Progress '+(++bytes)+' of 10');
+        if (bytes === 10) { clearInterval(timer); console.log('Installing collected packages: torch, torchvision'); }
+      }, 80);
+    }, 80);`;
+  await runUpstreamPip(process.execPath, ["-e", script], { timeout: 5000, maxBuffer: 16384 }, { emit: line => events.push(JSON.parse(line)), heartbeatMs: 25, noProgressMs: 400 });
+  assert.deepEqual(events.filter(event => event.event === "download_started").map(event => event.package), ["torch", "torchvision"]);
+  assert.ok(events.some(event => event.last_progress?.bytes === 5 && event.last_progress?.total_bytes === 10));
+  assert.equal(events.at(-1).event, "completed");
+  assert.equal(events.at(-1).last_transfer.bytes, 10);
+  assert.equal(events.at(-1).last_transfer.total_bytes, 10);
 });

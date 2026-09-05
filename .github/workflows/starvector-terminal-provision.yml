@@ -156,13 +156,10 @@ jobs:
           node scripts/starvector-terminal-provision.mjs metrics "$GITHUB_WORKSPACE/sceneworks" "$STARVECTOR_TERMINAL_ROOT/metrics" "$STARVECTOR_TERMINAL_ROOT/metrics/bin/python" "$STARVECTOR_CLIP_REVISION"
       - name: Materialize the exact pinned 120-row corpus
         run: |
-          mkdir -p "$RUNNER_TEMP/starvector-parquet"
-          node scripts/starvector-terminal-provision.mjs download https://huggingface.co/datasets/starvector/svg-stack-simple/resolve/1d2a96a17cc0c4c1f337b7631adc8c5885bc72ea/data/test-00000-of-00001.parquet "$RUNNER_TEMP/starvector-parquet/source-0.parquet" ed6b73f3c92277e81b244c6ab3071d0831c4820178aed072182246bab402b004
-          node scripts/starvector-terminal-provision.mjs download https://huggingface.co/datasets/starvector/svg-icons-simple/resolve/e1918a27ba6649e856e5db0710d8a6c7046762c1/data/test-00000-of-00001.parquet "$RUNNER_TEMP/starvector-parquet/source-1.parquet" 02cd88a8b8f5234975024a948c80a19f7a83092247685b1bef63c3db0b957227
-          node scripts/starvector-terminal-provision.mjs download https://huggingface.co/datasets/starvector/svg-emoji-simple/resolve/fa75b3617872ae57e6f3cb450aee65dbccbd69e0/data/test-00000-of-00001.parquet "$RUNNER_TEMP/starvector-parquet/source-2.parquet" be192dfce16b45605df62eebffeb00db2f0b80e6f4919e10cea68c311af97807
-          node scripts/starvector-terminal-provision.mjs download https://huggingface.co/datasets/starvector/svg-fonts-simple/resolve/453c739ea13ad2685127f721c333f14d99485299/data/test-00000-of-00001.parquet "$RUNNER_TEMP/starvector-parquet/source-3.parquet" 86db32ae45896a18b938baba088b69d797ae2d5f6d3d79742753a0e2ea89d86d
-          if [ ! -e "$STARVECTOR_TERMINAL_CORPUS_ASSETS_ROOT" ]; then
+          corpus_state="$(node scripts/starvector-terminal-provision.mjs corpus-inputs "$STARVECTOR_TERMINAL_INFERENCE_ROOT" "$STARVECTOR_TERMINAL_CORPUS_ASSETS_ROOT" "$STARVECTOR_INFERENCE_REVISION" "$RUNNER_TEMP/starvector-parquet")"
+          if [ "$corpus_state" = materialize ]; then
             cargo run --release --locked -p sceneworks-worker --bin starvector_terminal_corpus -- "$STARVECTOR_TERMINAL_INFERENCE_ROOT/release/starvector-terminal-corpus-v1.json" "$RUNNER_TEMP/starvector-parquet" "$STARVECTOR_TERMINAL_CORPUS_ASSETS_ROOT" "$STARVECTOR_INFERENCE_REVISION" "$STARVECTOR_PROMPT_PROVIDER" "$STARVECTOR_PROMPT_MODEL" "$STARVECTOR_PROMPT_REVISION" "$(shasum -a 256 "$STARVECTOR_TERMINAL_ROOT/weights/inventories/prompt-raster-inventory-v1.json" | cut -d ' ' -f 1)"
+            node scripts/starvector-terminal-provision.mjs corpus-validate "$STARVECTOR_TERMINAL_INFERENCE_ROOT" "$STARVECTOR_TERMINAL_CORPUS_ASSETS_ROOT" "$STARVECTOR_INFERENCE_REVISION"
           fi
       - name: Read-only readiness validation
         if: ${{ always() }}
@@ -288,17 +285,17 @@ jobs:
       - name: Materialize the exact pinned 120-row corpus
         shell: powershell
         run: |
-          New-Item -ItemType Directory -Force "$env:RUNNER_TEMP\starvector-parquet" | Out-Null
-          node scripts/starvector-terminal-provision.mjs download https://huggingface.co/datasets/starvector/svg-stack-simple/resolve/1d2a96a17cc0c4c1f337b7631adc8c5885bc72ea/data/test-00000-of-00001.parquet "$env:RUNNER_TEMP\starvector-parquet\source-0.parquet" ed6b73f3c92277e81b244c6ab3071d0831c4820178aed072182246bab402b004
-          node scripts/starvector-terminal-provision.mjs download https://huggingface.co/datasets/starvector/svg-icons-simple/resolve/e1918a27ba6649e856e5db0710d8a6c7046762c1/data/test-00000-of-00001.parquet "$env:RUNNER_TEMP\starvector-parquet\source-1.parquet" 02cd88a8b8f5234975024a948c80a19f7a83092247685b1bef63c3db0b957227
-          node scripts/starvector-terminal-provision.mjs download https://huggingface.co/datasets/starvector/svg-emoji-simple/resolve/fa75b3617872ae57e6f3cb450aee65dbccbd69e0/data/test-00000-of-00001.parquet "$env:RUNNER_TEMP\starvector-parquet\source-2.parquet" be192dfce16b45605df62eebffeb00db2f0b80e6f4919e10cea68c311af97807
-          node scripts/starvector-terminal-provision.mjs download https://huggingface.co/datasets/starvector/svg-fonts-simple/resolve/453c739ea13ad2685127f721c333f14d99485299/data/test-00000-of-00001.parquet "$env:RUNNER_TEMP\starvector-parquet\source-3.parquet" 86db32ae45896a18b938baba088b69d797ae2d5f6d3d79742753a0e2ea89d86d
-          if (-not (Test-Path $env:STARVECTOR_TERMINAL_CORPUS_ASSETS_ROOT)) {
+          $corpusState = node scripts/starvector-terminal-provision.mjs corpus-inputs $env:STARVECTOR_TERMINAL_INFERENCE_ROOT $env:STARVECTOR_TERMINAL_CORPUS_ASSETS_ROOT $env:STARVECTOR_INFERENCE_REVISION "$env:RUNNER_TEMP\starvector-parquet"
+          if ($LASTEXITCODE -ne 0) { throw 'pinned corpus reuse validation or input acquisition failed' }
+          if ($corpusState -eq 'materialize') {
             $inventory = (Get-FileHash -Algorithm SHA256 "$env:STARVECTOR_TERMINAL_ROOT\weights\inventories\prompt-raster-inventory-v1.json").Hash.ToLowerInvariant()
             # The persistent runner exports sccache through RUSTC_WRAPPER. Compile this
             # deterministic provisioning artifact directly so stale daemon state cannot abort it.
             Remove-Item Env:RUSTC_WRAPPER -ErrorAction SilentlyContinue
             cargo run --release --locked -p sceneworks-worker --bin starvector_terminal_corpus -- "$env:STARVECTOR_TERMINAL_INFERENCE_ROOT\release\starvector-terminal-corpus-v1.json" "$env:RUNNER_TEMP\starvector-parquet" $env:STARVECTOR_TERMINAL_CORPUS_ASSETS_ROOT $env:STARVECTOR_INFERENCE_REVISION $env:STARVECTOR_PROMPT_PROVIDER $env:STARVECTOR_PROMPT_MODEL $env:STARVECTOR_PROMPT_REVISION $inventory
+            if ($LASTEXITCODE -ne 0) { throw 'pinned corpus materialization failed' }
+            node scripts/starvector-terminal-provision.mjs corpus-validate $env:STARVECTOR_TERMINAL_INFERENCE_ROOT $env:STARVECTOR_TERMINAL_CORPUS_ASSETS_ROOT $env:STARVECTOR_INFERENCE_REVISION
+            if ($LASTEXITCODE -ne 0) { throw 'materialized corpus identity validation failed' }
           }
       - name: Materialize authorized offline component configs from confidential transport
         shell: powershell
