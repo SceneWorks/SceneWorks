@@ -2848,6 +2848,44 @@ test("the FLUX.2 composition audit still runs, and is still wired into a lane", 
 // binding lives here, where the manifest reader already exists and `npm run check` runs it on every
 // PR. Every extraction below asserts it MATCHED before it compares — a renamed constant must red,
 // not silently pass with nothing to check.
+// sc-22727 review: the Candle FLUX.2 arm decides PER MEMBER whether the planned tier reaches the
+// loader as `LoadSpec::quantize`. The worker takes that decision from the manifest —
+// `is_dense_te_tier` is `mlx.denseTextEncoderTier: true`, and `candle_quant_for_resolved_tier`
+// then returns `(None, resolved_bits)` — so the flag must be that declaration's negation for every
+// member. The Rust binding of the arm table to the manifest lives in a `#[test]` inside
+// `candle.rs`, which cannot RUN on a Mac (the binary is `compile_error!` on macOS and
+// `rust:check:candle` only typechecks), so the same binding is parsed out of the source text here,
+// where it runs and can be mutation-killed on the host that writes the arm.
+test("the Candle FLUX.2 arm table's tier-quant flags negate the manifest's denseTextEncoderTier", async () => {
+  const manifest = JSON.parse(
+    stripJsoncComments(await source("config/manifests/builtin.models.jsonc")),
+  );
+  const adapter = await source("crates/sceneworks-memory-adapter/src/bin/candle.rs");
+  const arms = [...adapter.matchAll(/const FLUX2_[A-Z_]+_ARM: Flux2Arm = Flux2Arm \{([\s\S]*?)\n\};/g)]
+    .map(([, body]) => ({
+      modelId: /\bmodel_id: "([^"]+)"/.exec(body)?.[1],
+      quantReachesLoader: /\btier_quant_reaches_the_loader: (true|false)/.exec(body)?.[1],
+    }));
+  assert.deepEqual(
+    arms.map((arm) => arm.modelId),
+    ["flux2_dev", "flux2_klein_9b", "flux2_klein_9b_kv"],
+    "the three FLUX.2 members, in table order",
+  );
+  for (const arm of arms) {
+    assert.ok(arm.quantReachesLoader, `${arm.modelId} must declare tier_quant_reaches_the_loader`);
+    const entry = manifest.models.find((model) => model.id === arm.modelId);
+    assert.ok(entry, `${arm.modelId} must be a shipped model`);
+    const denseTe = entry.mlx?.denseTextEncoderTier === true;
+    assert.equal(
+      arm.quantReachesLoader === "true",
+      !denseTe,
+      `${arm.modelId}: the worker loads a dense-TE tier with Quant::None, so the fold must be off`,
+    );
+  }
+  // Stated as data too, so the loop cannot pass by every member answering the same way.
+  assert.deepEqual(arms.map((arm) => arm.quantReachesLoader), ["true", "false", "false"]);
+});
+
 test("the MLX LTX arm's manifest constants match the shipped ltx_2_3 limits", async () => {
   const manifest = JSON.parse(
     stripJsoncComments(await source("config/manifests/builtin.models.jsonc")),

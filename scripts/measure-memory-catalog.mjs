@@ -72,10 +72,13 @@ export const PROVIDER_FAMILIES = Object.freeze({
   sdxl: { env: "SDXL", repo: "SceneWorks/sdxl-base-mlx", arms: ["mlx"] },
   flux2_dev: { env: "FLUX2", repo: "SceneWorks/flux2-dev-mlx", arms: ["mlx", "candle"] },
   // sc-22727. TWO catalog models ride this ONE engine provider id (worker engines.rs:
-  // `flux2_klein_9b_kv` declares `engine_id: flux2_klein_9b`), and they load DIFFERENT artifacts —
-  // the engine tells them apart by the snapshot path and by `LoadSpec::resolved_route`. So the
-  // family carries a per-modelId override: a KV plan resolved through the base rehost's env would
-  // re-label the base checkpoint's peaks as the KV variant's.
+  // `flux2_klein_9b_kv` declares `engine_id: flux2_klein_9b`), and they load DIFFERENT artifacts.
+  // On MLX the engine tells them apart by the snapshot path AND by `LoadSpec::resolved_route`
+  // (`KleinArtifactInventory::validate_resolved_route`, mlx-gen-flux2/src/artifact_inventory.rs);
+  // on Candle ONLY by the snapshot path — `candle-gen-flux2` never reads `resolved_route`. Either
+  // way the artifact is the discriminator, so the family carries a per-modelId override: a KV plan
+  // resolved through the base rehost's env would re-label the base checkpoint's peaks as the KV
+  // variant's.
   flux2_klein_9b: {
     env: "FLUX2_KLEIN", repo: "SceneWorks/flux2-klein-9b-mlx", arms: ["mlx", "candle"],
     variants: {

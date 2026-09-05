@@ -616,34 +616,77 @@ SCENEWORKS_FLUX2_KLEIN_KV_ROOT=/abs/path/.../snapshots/<rev>/<tier>  # bf16 | q4
 
 The FLUX.2 anchors resolve their family member from `(target.provider, target.modelId)`, not from
 the provider alone: `flux2_klein_9b` and `flux2_klein_9b_kv` are two catalog models over ONE engine
-provider id (`crates/sceneworks-worker/src/engines.rs`), and the adapter binds the catalog id as
-`LoadSpec::resolved_route` — the same lever the worker sets, and the one
-`KleinArtifactInventory::validate_resolved_route` refuses a cross-variant artifact with. The KV
-model's loader-closure declaration therefore names `engineId: "flux2_klein_9b"` (§7c-bis).
+provider id (`crates/sceneworks-worker/src/engines.rs`), and both adapters bind the catalog id as
+`LoadSpec::resolved_route` — the same lever the worker sets. What the engine does with it is
+per lane: on MLX `KleinArtifactInventory::validate_resolved_route` refuses a cross-variant artifact
+with it (`mlx-gen-flux2/src/artifact_inventory.rs`); on Candle the binding is inert —
+`candle-gen-flux2` never reads `resolved_route` (its probe labels are hardcoded), so there the
+per-model env family is the ONLY thing that keeps a KV plan off the base rehost. The KV model's
+loader-closure declaration names `engineId: "flux2_klein_9b"` on both lanes (§7c-bis).
 
-**The MLX klein cells are declared but NOT capturable at pin `c6d6a4db`**, and the reason is the
-engine and the shipped artifact, not the adapter. Measured by three sc-22727 proof runs of
-`measure-memory-catalog.mjs --no-commit`, each of which failed while READING the contract, before
-any weights were materialized:
+**The MLX klein cells are declared but NOT capturable at pin `c6d6a4db`.** What follows is what
+the arm does at the pin, with the shape it loads and the gate it stops at, so nobody re-derives it.
 
-1. `flux2_klein_9b:{q4,q8}:mlx` — the shipped rehost quantizes its text encoder
-   (`text_encoder/config.json` carries `{"bits": 4|8, "group_size": 64}` in both
-   `SceneWorks/flux2-klein-9b-mlx@acf05e8d` and `SceneWorks/flux2-klein-9b-kv-mlx@406265be`), and
-   `verify_turnkey_with_contracts` refuses it: *"flux2 Klein text_encoder must stay dense at every
-   turnkey tier"* (`inference:crates/media/mlx-gen/mlx-gen-flux2/src/artifact_inventory.rs:1019-1030`).
-2. `flux2_klein_9b:bf16:mlx` — clears that gate, then the encoder-discovery confinement refuses the
-   HF cache layout: the authorized roots are `discovery_roots(&root)` = the TIER directory only
-   (`artifact_inventory.rs:24-30`, used at `:1031-1034`), while a HF snapshot's
-   `text_encoder/*.safetensors` are symlinks into the sibling `blobs/` tree, so
-   `ValidatedEncoderSource::ensure_confined_to` reports *"validated text encoder canonical target
-   escapes authorized model roots"* (`inference:crates/contracts/gen-core/src/encoder_contract.rs:355-375`).
+*The shape.* The klein arms load `Sequential` + `DeferredMaterialization` + `quantize: None`. That
+is the worker's own plain-T2I shape — both klein manifest entries declare an MLX
+`bounded_transformer_residency` row with `requiredOffloadPolicy: "sequential"` for every tier, and
+`memory_route_registry.rs`'s `flux2_klein_aliases_bind_exact_plain_pid_routes_and_refuse_crossed_shapes`
+asserts `Applied` + `Sequential` at every tier for both klein routes — and it is the ONLY shape the
+pinned engine publishes a calibration identity under: `klein_contract_for` sets `calibration` iff
+`klein_streamable(spec)` (`inference:crates/media/mlx-gen/mlx-gen-flux2/src/memory_strategy.rs:736-742`,
+`:937-947`), and that predicate requires exactly `Sequential && DeferredMaterialization &&
+quantize.is_none()`. A resident klein spec — what the arm's first draft hardcoded (sc-22727 review)
+— yields `calibration: None`, so the plan's `flux2-klein-static-registry-behavior-v2-flux2-klein-9b`
+was unreachable even on a perfect artifact. The dev arm is the opposite and stays `Resident` +
+`Eager` (no BTR row, every other strategy `Missing` at the pin). The MLX adapter's
+`the_flux2_arm_table_agrees_with_the_shipped_manifest_and_the_anchor_plan` binds the table to both
+documents.
 
-Both are one-sided: they are load-path refusals inside the pinned engine, reachable from any caller
-that binds a HF-cache snapshot root — which is the only root shape this harness produces
-(`protocol::validate_huggingface_snapshot_root`). The anchors, the adapter arm and both closure
-declarations are in place, so the day either the artifact or the pin moves, the cells capture with
-no SceneWorks change. Do not "fix" this by copying weights into a flattened root: that would
-measure a tree the worker never opens.
+*The gate.* With that shape, two sc-22727 proof runs of `measure-memory-catalog.mjs --backend mlx
+--no-commit` on this Mac (clean trees, work dir outside the repo) each failed while READING the
+contract, before any weights were materialized. The contract read is `klein_contract_for` →
+`KleinArtifactInventory::verify_for_provider` (`memory_strategy.rs:936`), which verifies the
+inventory UNCONDITIONALLY — before, and regardless of, the streamability question:
+
+1. `flux2_klein_9b:q4:mlx` (81 s) → *"read flux2_klein_9b T2I memory-strategy contract:
+   unsupported: flux2 Klein text_encoder must stay dense at every turnkey tier"*. The shipped rehost
+   quantizes its text encoder: `text_encoder/config.json` carries `{"quantization": {"bits": 4|8,
+   "group_size": 64}}` on the q4 and q8 tiers of BOTH `SceneWorks/flux2-klein-9b-mlx@acf05e8d` and
+   `SceneWorks/flux2-klein-9b-kv-mlx@406265be` (confirmed on disk), while the manifest and the engine
+   say the Qwen3 TE stays dense in every tier. `verify_turnkey_with_contracts` refuses it at
+   `inference:crates/media/mlx-gen/mlx-gen-flux2/src/artifact_inventory.rs:1017-1030` (the
+   `text_encoder`/`vae` dense check; the function starts at `:982`, reached from
+   `verify_for_provider` at `:877`). The q8 cell was not re-run; it carries the same marker.
+2. `flux2_klein_9b:bf16:mlx` (125 s) → *"read flux2_klein_9b T2I memory-strategy contract:
+   unsupported: validated text encoder canonical target escapes authorized model roots:
+   /Volumes/Models/huggingface/hub/models--SceneWorks--flux2-klein-9b-mlx/blobs/dd0d909c…"*. The
+   bf16 tier clears the dense check, then `verify_turnkey_with_contracts` calls
+   `encoder_contract.validate_source_for_discovery` (`artifact_inventory.rs:1032-1035`) with
+   `discovery_roots(&root)` = the TIER directory only (`:25-30`). A HF snapshot's
+   `text_encoder/*` are symlinks into the sibling `blobs/` tree, so the canonical-path confinement
+   in `ensure_discovery_paths_confined` refuses
+   (`inference:crates/contracts/gen-core/src/encoder_contract.rs:3483-3502`, reached through
+   `validate_source_for_discovery` at `:1338` and `inspect_encoder_source_for_discovery` at
+   `:3312-3324`). The first escaping path is the config blob, so no weights were touched.
+   (`ValidatedEncoderSource::ensure_confined_to` at `:355-375` emits a different sentence and is not
+   on this path — an earlier revision of this section cited it wrongly.)
+
+*Why the app does not see this.* The worker asks the same question and swallows the answer:
+`evaluate_declared_mlx_load_shape_for_request` proves the BTR row against a Sequential + Deferred
+candidate through `memory_strategy_contract(provider, candidate).ok().flatten()`
+(`crates/sceneworks-worker/src/memory_route_registry.rs:2311-2325`), so the `Err` above becomes
+"not implemented", the declaration is `Refused`, and the worker falls back to `Resident` + `Eager`.
+That load never enters the streamable branch (`mlx-gen-flux2/src/model.rs:317-334`), so the
+inventory is never verified, the model loads, and it runs with NO calibration identity. In other
+words: at `c6d6a4db` the shipped klein rehosts cannot be admitted by the engine's own inventory, the
+worker silently downgrades to the uncalibrated resident shape, and the adapter — which refuses to
+measure a shape the engine publishes no identity for — stops at the gate the worker skips. This is
+an inference/artifact defect (both the q4/q8 TE marker and the tier-only discovery roots), not an
+adapter one, and it is owned inside epic 22723; this story neither touches the inference repo nor
+bumps the pin. The anchors, the arm and both closure declarations are in place: the day the artifact
+is re-hosted with a dense TE and the pin admits the HF cache layout, the six cells capture with no
+SceneWorks change. Do not "fix" this by copying weights into a flattened root: that would measure a
+tree the worker never opens.
 
 `flux2_dev:bf16:mlx` is planned at **512²** rather than the lane's usual 768². §6c records that the
 113 GB dense FLUX.2-dev export does not fit a 128 GB Mac at 1024²; the plan geometry is a free plan

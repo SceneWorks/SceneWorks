@@ -93,6 +93,15 @@ struct Flux2Arm {
     expected_repository: &'static str,
     /// The record's diagnostics source, `memory-candle-adapter:<slug>-five-rung-reference`.
     slug: &'static str,
+    /// Whether the planned tier's quant reaches the loader as `LoadSpec::quantize` — the same
+    /// per-member fact the MLX arm carries, and the worker's own Candle decision:
+    /// `candle_quant_for_resolved_tier` (`image_jobs/base.rs`) returns `(None, resolved_bits)` for
+    /// a dense-TE turnkey (`is_dense_te_tier`, gated on the manifest's
+    /// `mlx.denseTextEncoderTier: true`, which BOTH klein entries declare), and folds the tier
+    /// otherwise. `candle-gen-flux2` quantizes the DiT on-the-fly whenever `spec.quantize` is set,
+    /// so a klein q4/q8 spec carrying the quant would re-quantize an already-packed transformer and
+    /// measure a load the app never performs (E4). Dev takes the fold; both klein members do not.
+    tier_quant_reaches_the_loader: bool,
 }
 
 const FLUX2_DEV_ARM: Flux2Arm = Flux2Arm {
@@ -105,6 +114,7 @@ const FLUX2_DEV_ARM: Flux2Arm = Flux2Arm {
     root_env: "SCENEWORKS_FLUX2_ROOT",
     expected_repository: protocol::FLUX2_REPOSITORY,
     slug: "flux2-dev",
+    tier_quant_reaches_the_loader: true,
 };
 
 const FLUX2_KLEIN_ARM: Flux2Arm = Flux2Arm {
@@ -117,6 +127,7 @@ const FLUX2_KLEIN_ARM: Flux2Arm = Flux2Arm {
     root_env: "SCENEWORKS_FLUX2_KLEIN_ROOT",
     expected_repository: protocol::FLUX2_KLEIN_REPOSITORY,
     slug: "flux2-klein-9b",
+    tier_quant_reaches_the_loader: false,
 };
 
 const FLUX2_KLEIN_KV_ARM: Flux2Arm = Flux2Arm {
@@ -129,6 +140,7 @@ const FLUX2_KLEIN_KV_ARM: Flux2Arm = Flux2Arm {
     root_env: "SCENEWORKS_FLUX2_KLEIN_KV_ROOT",
     expected_repository: protocol::FLUX2_KLEIN_KV_REPOSITORY,
     slug: "flux2-klein-9b-kv",
+    tier_quant_reaches_the_loader: false,
 };
 
 const FLUX2_ARMS: [Flux2Arm; 3] = [FLUX2_DEV_ARM, FLUX2_KLEIN_ARM, FLUX2_KLEIN_KV_ARM];
@@ -1020,12 +1032,21 @@ fn load_five_rung_generator(request: &Value) -> Result<LoadedFiveRungGenerator, 
         // carry no quant at all (`Quant::None` — the same shape the worker's `tier_to_quant` uses).
         (KREA_ID, Some(quant)) => spec.with_quant(quant),
         (KREA_ID, None) => spec,
-        // Both FLUX.2 variants honor `LoadSpec.quantize` explicitly (candle-gen-flux2 lib.rs:
-        // "spec.quantize (Q4/Q8) is honored by BOTH variants"): on a packed tier the fold is a
-        // no-op over the already-packed rows, and on the klein snapshot — whose q4/q8 pack ONLY the
-        // transformer — it folds the 9B DiT and leaves the Qwen3 tower dense bf16, which is exactly
-        // the shipped artifact's shape. bf16 carries `Quant::None`, the worker's `tier_to_quant`.
-        (FLUX2_DEV_ID | FLUX2_KLEIN_ID, Some(quant)) => spec.with_quant(quant),
+        // FLUX.2 is per MEMBER (sc-22727 review): the dev route folds the planned tier the way the
+        // worker's `candle_quant_for_resolved_tier` does, while both klein turnkeys are dense-TE
+        // tiers the worker loads with `(None, resolved_bits)` — `candle-gen-flux2` quantizes the DiT
+        // on-the-fly whenever `spec.quantize` is set, so folding it on a packed klein tier would
+        // re-quantize the transformer and measure a load the app never performs. bf16 carries
+        // `Quant::None` on every member, the worker's `tier_to_quant`.
+        (FLUX2_DEV_ID | FLUX2_KLEIN_ID, Some(quant)) => {
+            let arm =
+                flux2_arm(request)?.expect("a FLUX.2 provider always resolves a member or errors");
+            if arm.tier_quant_reaches_the_loader {
+                spec.with_quant(quant)
+            } else {
+                spec
+            }
+        }
         (FLUX2_DEV_ID | FLUX2_KLEIN_ID, None) => spec,
         // Qwen, Z-Image-Turbo and the Z-Image base packed Diffusers snapshots declare their
         // device-format quantization in transformer/config.json (`snapshot_quant_tier` in
@@ -3115,6 +3136,34 @@ mod tests {
             FLUX2_KLEIN_KV_ARM.expected_repository,
             protocol::FLUX2_KLEIN_KV_REPOSITORY
         );
+        // Which member hands the planned tier to the loader, stated as data (sc-22727 review):
+        // only dev folds it; both klein turnkeys are dense-TE tiers the worker loads with
+        // `Quant::None`, and candle-gen-flux2 would otherwise re-quantize their packed DiT.
+        assert_eq!(
+            FLUX2_ARMS.map(|arm| arm.tier_quant_reaches_the_loader),
+            [true, false, false],
+            "only the dev route folds the planned tier into LoadSpec::quantize"
+        );
+        // ...and bound to the manifest the worker reads that decision from: `is_dense_te_tier` is
+        // exactly `mlx.denseTextEncoderTier == true`, so the flag must be its negation per member.
+        let manifest: Value = serde_json::from_str(&sceneworks_core::jsonc::strip_jsonc_comments(
+            include_str!("../../../../config/manifests/builtin.models.jsonc"),
+        ))
+        .expect("the shipped models manifest parses");
+        for arm in FLUX2_ARMS {
+            let entry = manifest["models"]
+                .as_array()
+                .expect("models")
+                .iter()
+                .find(|entry| entry["id"] == arm.model_id)
+                .unwrap_or_else(|| panic!("{} is not a shipped model", arm.model_id));
+            let dense_te = entry["mlx"]["denseTextEncoderTier"] == json!(true);
+            assert_eq!(
+                arm.tier_quant_reaches_the_loader, !dense_te,
+                "{}: the worker loads a dense-TE tier with Quant::None (is_dense_te_tier)",
+                arm.model_id
+            );
+        }
     }
 
     /// sc-22724: the `z_image_edit` route is the Turbo provider in `edit_image` mode — the same
