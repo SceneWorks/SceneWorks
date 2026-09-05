@@ -73,6 +73,32 @@ pub const MINIMAX_REPOSITORY: &str = "SceneWorks/minimax-h3-mlx";
 /// [`validate_huggingface_revision_root`] rather than being forced through the rehost's
 /// variant-suffixed validator.
 pub const MINIMAX_UPSTREAM_REPOSITORY: &str = "MiniMaxAI/MiniMax-H3";
+/// The six Mage-Flow variant rehosts (sc-22733). Unlike every other image family in this file, a
+/// Mage variant repository ships the DiT ALONE: `<snapshot>/<tier>/transformer/`. The text encoder
+/// and the VAE are bit-identical across all six variants and are hosted ONCE in
+/// [`MAGE_COMPONENTS_REPOSITORY`], which the manifest declares as a per-tier co-requisite of every
+/// Mage entry (`config/manifests/builtin.models.jsonc`). Both engines resolve that split through
+/// `LoadSpec::components` (`mlx-gen-mage` `model::resolve_component_dirs`, `candle-gen-mage`
+/// `resolved_component_dirs`), so a Mage capture binds TWO artifact triples: the variant's own tier
+/// root and the shared components snapshot.
+///
+/// One constant per variant rather than a derived string: the anchor key, the engine provider id and
+/// the artifact are three separate namespaces, and a capture that resolved the repository by
+/// transforming the provider id would silently follow any future rename.
+pub const MAGE_FLOW_REPOSITORY: &str = "SceneWorks/Mage-Flow";
+pub const MAGE_FLOW_BASE_REPOSITORY: &str = "SceneWorks/Mage-Flow-Base";
+pub const MAGE_FLOW_TURBO_REPOSITORY: &str = "SceneWorks/Mage-Flow-Turbo";
+pub const MAGE_FLOW_EDIT_REPOSITORY: &str = "SceneWorks/Mage-Flow-Edit";
+pub const MAGE_FLOW_EDIT_BASE_REPOSITORY: &str = "SceneWorks/Mage-Flow-Edit-Base";
+pub const MAGE_FLOW_EDIT_TURBO_REPOSITORY: &str = "SceneWorks/Mage-Flow-Edit-Turbo";
+/// The shared Mage text-encoder + VAE rehost. Named `-mlx` upstream but consumed by BOTH lanes: the
+/// manifest ships exactly these co-requisite downloads for every Mage entry regardless of backend,
+/// and `candle-gen-mage` reads the same `text_encoder`/`vae` component ids.
+pub const MAGE_COMPONENTS_REPOSITORY: &str = "SceneWorks/Mage-Flow-Components-mlx";
+/// The two component ids both Mage engines advertise, in descriptor order (`mlx-gen-mage`
+/// `model::REQUIRED_COMPONENTS`, `candle-gen-mage` `REQUIRED_COMPONENTS`).
+pub const MAGE_COMPONENT_TEXT_ENCODER: &str = "text_encoder";
+pub const MAGE_COMPONENT_VAE: &str = "vae";
 pub const COMPARISON_OUTPUT_BIAS_PARAMETER: &str = "comparisonOutputBias";
 /// Persisted-JSON spellings of `gen_core::LoadShape`. Every emitted fragment must state the
 /// materialization shape its run actually used; the harness rejects a fragment that omits it, and

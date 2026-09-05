@@ -7615,6 +7615,1195 @@ fn run_qwen_edit_provider(request: &Value) -> Result<Value, String> {
     Ok(fragment)
 }
 
+// ---------------------------------------------------------------------------------------------
+// Mage-Flow (sc-22733) — six registered engine providers on ONE arm
+// ---------------------------------------------------------------------------------------------
+
+/// Every Mage capture renders at 768². `mlx-gen-mage`'s `config::MIN_SIZE` is 512 and both sides
+/// must be multiples of `SIZE_MULTIPLE` (16), so 768 is a legal native resolution — and it is the
+/// edge the provider's own published calibration identity was measured at (`model.rs`
+/// `MEMORY_CALIBRATION_FINGERPRINT`: "At 768²/one step, …").
+const MAGE_EDGE: u32 = 768;
+/// One fixed seed for every `mlx:mage_flow*` fixture (`<prefix>-<tier>-768-seed22733-step<n>`).
+const MAGE_SEED: u64 = 22733;
+/// Mage's quality claim is the same KIND as FLUX.2-dev's: the resident anchor selects no alternate
+/// code path, so the selected render and the unselected reference are the same computation on one
+/// loaded provider and must agree to within Metal allocator jitter. The envelope is restated under
+/// Mage names because the record embeds it as `maximumErrorThreshold`/`meanErrorThreshold` — a
+/// `mage_flow` receipt must not be traceable to a constant asserting a FLUX.2 provenance.
+const MAGE_MAX_THRESHOLD: f64 = 3.0 / 255.0;
+const MAGE_MEAN_THRESHOLD: f64 = 1.0 / 255.0;
+
+fn mage_quality_passes(maximum: f64, mean: f64) -> bool {
+    maximum <= MAGE_MAX_THRESHOLD && mean <= MAGE_MEAN_THRESHOLD
+}
+
+/// One member of the Mage-Flow family this arm measures.
+///
+/// Unlike the Qwen edit family (one engine provider, two catalog ids), Mage is SIX registered
+/// engine providers — `mlx-gen-mage` `model::MODEL_IDS`, registered one `Generator` each in
+/// `lib.rs::register_providers` — whose catalog ids are identical to their provider ids
+/// (`crates/sceneworks-worker/src/engines.rs` `MODEL_TABLE`: `sceneworks_id == engine_id` on all
+/// six rows). The arm still resolves from `(provider, modelId)` and refuses any other pair by name:
+/// the two are separate namespaces, and a plan that crossed them would measure one checkpoint under
+/// another's anchor key.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct MageArm {
+    /// The engine provider id AND the catalog model id — asserted equal, never assumed.
+    provider: &'static str,
+    execution_path: &'static str,
+    /// The still-geometry refusal label (sc-18808).
+    still_calibration: &'static str,
+    /// The `<prefix>-<tier>-<edge>-seed<n>-step<n>` fixture spelling this member's plan rows must
+    /// use, so a Turbo capture can never be recorded under the Base id's fixture.
+    fixture_prefix: &'static str,
+    /// The variant's OWN tiered rehost. Each of the six ships only the DiT; the shared text encoder
+    /// and VAE come from [`protocol::MAGE_COMPONENTS_REPOSITORY`].
+    repository: &'static str,
+    /// The `SCENEWORKS_<env>_{REPOSITORY,REVISION,ROOT}` family naming that rehost. Spelled out as
+    /// three literals rather than composed from a prefix: `measure-memory-catalog.mjs`
+    /// `PROVIDER_FAMILIES` derives these exact names and exports them into this process, and its
+    /// test binds the two sides by searching THIS source for each literal — a `format!`-composed
+    /// name would leave a renamed family green here and fail mid-campaign, after the weights are
+    /// staged.
+    repository_env: &'static str,
+    revision_env: &'static str,
+    root_env: &'static str,
+    /// The instruction-editing checkpoints consume exactly one reference image
+    /// (`model.rs` `MageVariant::is_edit`, `edit_references`).
+    edit: bool,
+    /// The engine's own published default step count for this variant (`MageVariant::default_steps`)
+    /// for the distilled members, whose 4-step Decoupled-DMD schedule IS the recipe the product
+    /// issues; two steps for the undistilled members, the shape every other image arm here uses
+    /// (the first `Step` closes conditioning, the second gives denoise its own measured interval).
+    steps: u32,
+    /// `MageVariant::default_cfg`: 1.0 on the distilled members, at which the reference builds no
+    /// unconditional branch at all, and 5.0 on the rest. Passed explicitly so a capture cannot
+    /// silently measure a CFG branch the product does not run (or omit one it does).
+    guidance: f32,
+    /// The record's diagnostics source, `memory-mlx-adapter:<slug>-shared-ladder`.
+    slug: &'static str,
+}
+
+const MAGE_ARMS: [MageArm; 6] = [
+    MageArm {
+        provider: "mage_flow",
+        execution_path: "the pinned MLX Mage-Flow RL text-to-image path",
+        still_calibration: "MLX Mage-Flow calibration",
+        fixture_prefix: "mage-flow-mlx",
+        repository: protocol::MAGE_FLOW_REPOSITORY,
+        repository_env: "SCENEWORKS_MAGE_FLOW_REPOSITORY",
+        revision_env: "SCENEWORKS_MAGE_FLOW_REVISION",
+        root_env: "SCENEWORKS_MAGE_FLOW_ROOT",
+        edit: false,
+        steps: 2,
+        guidance: 5.0,
+        slug: "mage-flow",
+    },
+    MageArm {
+        provider: "mage_flow_base",
+        execution_path: "the pinned MLX Mage-Flow-Base text-to-image path",
+        still_calibration: "MLX Mage-Flow-Base calibration",
+        fixture_prefix: "mage-flow-base-mlx",
+        repository: protocol::MAGE_FLOW_BASE_REPOSITORY,
+        repository_env: "SCENEWORKS_MAGE_FLOW_BASE_REPOSITORY",
+        revision_env: "SCENEWORKS_MAGE_FLOW_BASE_REVISION",
+        root_env: "SCENEWORKS_MAGE_FLOW_BASE_ROOT",
+        edit: false,
+        steps: 2,
+        guidance: 5.0,
+        slug: "mage-flow-base",
+    },
+    MageArm {
+        provider: "mage_flow_turbo",
+        execution_path: "the pinned MLX Mage-Flow-Turbo distilled text-to-image path",
+        still_calibration: "MLX Mage-Flow-Turbo calibration",
+        fixture_prefix: "mage-flow-turbo-mlx",
+        repository: protocol::MAGE_FLOW_TURBO_REPOSITORY,
+        repository_env: "SCENEWORKS_MAGE_FLOW_TURBO_REPOSITORY",
+        revision_env: "SCENEWORKS_MAGE_FLOW_TURBO_REVISION",
+        root_env: "SCENEWORKS_MAGE_FLOW_TURBO_ROOT",
+        edit: false,
+        steps: 4,
+        guidance: 1.0,
+        slug: "mage-flow-turbo",
+    },
+    MageArm {
+        provider: "mage_flow_edit",
+        execution_path: "the pinned MLX Mage-Flow-Edit instruction-editing path",
+        still_calibration: "MLX Mage-Flow-Edit calibration",
+        fixture_prefix: "mage-flow-edit-mlx",
+        repository: protocol::MAGE_FLOW_EDIT_REPOSITORY,
+        repository_env: "SCENEWORKS_MAGE_FLOW_EDIT_REPOSITORY",
+        revision_env: "SCENEWORKS_MAGE_FLOW_EDIT_REVISION",
+        root_env: "SCENEWORKS_MAGE_FLOW_EDIT_ROOT",
+        edit: true,
+        steps: 2,
+        guidance: 5.0,
+        slug: "mage-flow-edit",
+    },
+    MageArm {
+        provider: "mage_flow_edit_base",
+        execution_path: "the pinned MLX Mage-Flow-Edit-Base instruction-editing path",
+        still_calibration: "MLX Mage-Flow-Edit-Base calibration",
+        fixture_prefix: "mage-flow-edit-base-mlx",
+        repository: protocol::MAGE_FLOW_EDIT_BASE_REPOSITORY,
+        repository_env: "SCENEWORKS_MAGE_FLOW_EDIT_BASE_REPOSITORY",
+        revision_env: "SCENEWORKS_MAGE_FLOW_EDIT_BASE_REVISION",
+        root_env: "SCENEWORKS_MAGE_FLOW_EDIT_BASE_ROOT",
+        edit: true,
+        steps: 2,
+        guidance: 5.0,
+        slug: "mage-flow-edit-base",
+    },
+    MageArm {
+        provider: "mage_flow_edit_turbo",
+        execution_path: "the pinned MLX Mage-Flow-Edit-Turbo distilled instruction-editing path",
+        still_calibration: "MLX Mage-Flow-Edit-Turbo calibration",
+        fixture_prefix: "mage-flow-edit-turbo-mlx",
+        repository: protocol::MAGE_FLOW_EDIT_TURBO_REPOSITORY,
+        repository_env: "SCENEWORKS_MAGE_FLOW_EDIT_TURBO_REPOSITORY",
+        revision_env: "SCENEWORKS_MAGE_FLOW_EDIT_TURBO_REVISION",
+        root_env: "SCENEWORKS_MAGE_FLOW_EDIT_TURBO_ROOT",
+        edit: true,
+        steps: 4,
+        guidance: 1.0,
+        slug: "mage-flow-edit-turbo",
+    },
+];
+
+/// The prompt every Mage text-to-image capture renders, and the edit instruction every Mage edit
+/// capture applies. Fixed with the seed, the geometry and (on the edit members) the reference, so
+/// two captures of one anchor are the same request.
+const MAGE_PROMPT: &str = "a weathered brass astrolabe on a linen cloth, soft window light";
+const MAGE_EDIT_PROMPT: &str = "replace the background with a plain grey studio backdrop";
+
+/// Which family member the plan asks for. Refuses by name: the six checkpoints are
+/// architecturally identical (byte-identical configs and tensor schemas — `model.rs`
+/// `verify_checkpoint_identity` exists precisely because of that), so nothing downstream of a
+/// mis-keyed plan row could notice that Turbo's peaks had been recorded as Base's.
+fn mage_arm(request: &Value) -> Result<MageArm, String> {
+    let planned = protocol::planned(request)?;
+    let provider = planned
+        .pointer("/target/provider")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "planned.target.provider must be a string".to_owned())?;
+    let model_id = planned
+        .pointer("/target/modelId")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "planned.target.modelId must be a string".to_owned())?;
+    MAGE_ARMS
+        .into_iter()
+        .find(|arm| arm.provider == provider && arm.provider == model_id)
+        .ok_or_else(|| {
+            format!(
+                "the MLX Mage-Flow arm does not implement provider {provider:?} for model \
+                 {model_id:?}"
+            )
+        })
+}
+
+/// The seed and step count this member's fixture binds, checked against the arm's own prefix, the
+/// planned tier, the rendered edge and the recipe's step count.
+fn planned_mage_seed(request: &Value, arm: MageArm, tier: &str) -> Result<u64, String> {
+    let fixture = protocol::planned(request)?
+        .get("fixture")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "planned.fixture must be a string".to_owned())?;
+    let (width, _) = protocol::target_geometry(request)?;
+    let prefix = format!("{}-{tier}-{width}-seed", arm.fixture_prefix);
+    let remainder = fixture
+        .strip_prefix(&prefix)
+        .ok_or_else(|| format!("planned.fixture {fixture:?} must start with {prefix:?}"))?;
+    let (seed, steps) = remainder
+        .split_once("-step")
+        .ok_or_else(|| format!("planned.fixture {fixture:?} must end with -step<count>"))?;
+    let seed = seed
+        .parse::<u64>()
+        .map_err(|error| format!("parse Mage-Flow fixture seed {seed:?}: {error}"))?;
+    let steps = steps
+        .parse::<u32>()
+        .map_err(|error| format!("parse Mage-Flow fixture step count {steps:?}: {error}"))?;
+    if steps != arm.steps {
+        return Err(format!(
+            "planned.fixture {fixture:?} must use this arm's {}-step calibration request",
+            arm.steps
+        ));
+    }
+    Ok(seed)
+}
+
+/// The mode the ARM will actually render — `edit_image` on the three instruction editors and
+/// `text_to_image` on the other three, from `MageVariant::is_edit`.
+fn mage_mode(arm: MageArm) -> &'static str {
+    if arm.edit {
+        "edit_image"
+    } else {
+        "text_to_image"
+    }
+}
+
+/// The plan's declared mode must be the one this member renders.
+///
+/// The record's `mode` comes from the PLAN, while the reference this arm attaches and the
+/// `MemoryMode` it admits under come from the ARM. Left unchecked, a row declaring `text_to_image`
+/// for an edit member would emit a reference-conditioned render's peaks under a reference-free
+/// label — and the pinned provider would not object, because the context it grades is built from the
+/// arm and is internally consistent.
+fn validate_mage_mode(request: &Value, arm: MageArm) -> Result<(), String> {
+    let declared = protocol::planned(request)?
+        .pointer("/target/mode")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "planned.target.mode must be a string".to_owned())?;
+    let expected = mage_mode(arm);
+    if declared != expected {
+        return Err(format!(
+            "{} renders {expected:?}, but the plan declares mode {declared:?}",
+            arm.provider
+        ));
+    }
+    Ok(())
+}
+
+/// The two artifact triples one Mage capture opens: the variant's own tier root, and the shared
+/// text-encoder/VAE components snapshot.
+#[derive(Clone, Debug)]
+struct MageArtifactSource {
+    repository: String,
+    revision: String,
+    root: PathBuf,
+    components_repository: String,
+    components_revision: String,
+    components_root: PathBuf,
+}
+
+fn mage_artifact_source(arm: MageArm) -> Result<MageArtifactSource, String> {
+    Ok(MageArtifactSource {
+        repository: protocol::required_env(arm.repository_env)?,
+        revision: protocol::required_env(arm.revision_env)?,
+        root: PathBuf::from(protocol::required_env(arm.root_env)?),
+        components_repository: protocol::required_env(
+            "SCENEWORKS_MAGE_FLOW_COMPONENTS_REPOSITORY",
+        )?,
+        components_revision: protocol::required_env("SCENEWORKS_MAGE_FLOW_COMPONENTS_REVISION")?,
+        components_root: PathBuf::from(protocol::required_env(
+            "SCENEWORKS_MAGE_FLOW_COMPONENTS_ROOT",
+        )?),
+    })
+}
+
+/// The artifact one Mage capture loads: the canonical variant tier root, and the `LoadSpec` that
+/// opens it.
+#[derive(Debug)]
+struct MageArtifact {
+    root: PathBuf,
+    spec: LoadSpec,
+}
+
+/// The env-free half of the Mage load, so every load-time binding is unit-testable:
+///
+/// * the variant root must end in `<repository>/snapshots/<revision>/<PLANNED tier>`, so a stale
+///   `…/q4` export cannot satisfy a q8 or bf16 plan and quietly re-label another tier's peaks;
+/// * the components root must be the components snapshot ITSELF (it has no tier component of its
+///   own at the root — the tier is the FIRST path element inside it), and both component dirs are
+///   staged EXPLICITLY rather than left to `resolve_component_dirs`'s flat-layout fallback: the
+///   variant rehost has no `text_encoder/` or `vae/` sibling at all, so the fallback would resolve
+///   two directories that do not exist; and
+/// * `spec.quantize` carries the planned tier. It packs nothing at load — every shipped Mage tier is
+///   PREPACKED under `<snapshot>/<tier>/` and `pipeline::load_time_quant_bits` returns `None` — but
+///   the provider's declaration surface requires the selector and the spec to agree
+///   (`model.rs` `surface_selector_matches_spec`), so it is an assertion about the directory on
+///   disk rather than a conversion request.
+fn mage_load_spec(
+    arm: MageArm,
+    tier: &str,
+    source: &MageArtifactSource,
+    selection: &MemorySelection,
+    offload: OffloadPolicy,
+    load_shape: LoadShape,
+) -> Result<MageArtifact, String> {
+    protocol::validate_artifact_identity(&source.repository, &source.revision, arm.repository)?;
+    protocol::validate_artifact_identity(
+        &source.components_repository,
+        &source.components_revision,
+        protocol::MAGE_COMPONENTS_REPOSITORY,
+    )?;
+    let root = std::fs::canonicalize(&source.root)
+        .map_err(|error| format!("canonicalize {}: {error}", arm.root_env))?;
+    protocol::validate_huggingface_snapshot_root(
+        &root,
+        &source.repository,
+        &source.revision,
+        tier,
+        arm.repository,
+    )?;
+    let components_root = std::fs::canonicalize(&source.components_root)
+        .map_err(|error| format!("canonicalize SCENEWORKS_MAGE_FLOW_COMPONENTS_ROOT: {error}"))?;
+    protocol::validate_huggingface_revision_root(
+        &components_root,
+        &source.components_repository,
+        &source.components_revision,
+        protocol::MAGE_COMPONENTS_REPOSITORY,
+    )?;
+    let tier_components = components_root.join(tier);
+    let mut spec = LoadSpec::new(WeightsSource::Dir(root.clone()))
+        .with_offload_policy(offload)
+        .with_load_shape(load_shape)
+        .with_component(
+            protocol::MAGE_COMPONENT_TEXT_ENCODER,
+            WeightsSource::Dir(tier_components.join(protocol::MAGE_COMPONENT_TEXT_ENCODER)),
+        )
+        .with_component(
+            protocol::MAGE_COMPONENT_VAE,
+            WeightsSource::Dir(tier_components.join(protocol::MAGE_COMPONENT_VAE)),
+        );
+    if let Some(quant) = selection.tier.quant {
+        spec = spec.with_quant(quant);
+    }
+    Ok(MageArtifact { root, spec })
+}
+
+/// The generation request one Mage capture renders: the worker's request shape for this member.
+///
+/// The edit members REFUSE a reference-free request (`model.rs` `edit_references`), so the single
+/// `Conditioning::Reference` is what makes an edit capture measure the multimodal conditioning path
+/// and the encode half of the CoD autoencoder (`assemble` selects `VaePart::Both` on an edit
+/// variant) rather than text-to-image under an edit label. The reference is fitted to the target
+/// geometry, exactly as `image_jobs/base.rs` `fit_engine_image` fits it in production.
+fn mage_request(arm: MageArm, width: u32, height: u32, seed: u64) -> GenerationRequest {
+    GenerationRequest {
+        prompt: if arm.edit {
+            MAGE_EDIT_PROMPT.to_owned()
+        } else {
+            MAGE_PROMPT.to_owned()
+        },
+        // The distilled members run with CFG genuinely off (`default_cfg` 1.0), at which the engine
+        // builds no unconditional branch — a negative prompt there would be a claim about a branch
+        // the render does not execute.
+        negative_prompt: (arm.guidance > 1.0).then(|| "blurry, distorted, text".to_owned()),
+        width,
+        height,
+        count: 1,
+        seed: Some(seed),
+        steps: Some(arm.steps),
+        guidance: Some(arm.guidance),
+        conditioning: if arm.edit {
+            vec![Conditioning::Reference {
+                image: Image {
+                    width,
+                    height,
+                    pixels: protocol::synthetic_reference_rgb(width, height),
+                },
+                strength: None,
+            }]
+        } else {
+            Vec::new()
+        },
+        ..Default::default()
+    }
+}
+
+/// The `MemoryRunContext` the pinned Mage provider admits this member under.
+///
+/// `mode`, `has_reference` and `reference_count` are derived from the ARM, and the provider gates on
+/// exactly those (`model.rs` `request_context_error`: the request mode must equal the variant's own
+/// `MemoryMode`). `has_phases` is false on every Mage route — Mage has no multi-phase request shape
+/// — and `overlay` is `None`, which is what a plain load carries and what the provider's
+/// declaration surface publishes for it.
+#[allow(clippy::too_many_arguments)]
+fn mage_run_context(
+    arm: MageArm,
+    selection: MemorySelection,
+    calibration: &MemoryCalibrationIdentity,
+    width: u32,
+    height: u32,
+    total_bytes: u64,
+    predicted_peak_bytes: u64,
+) -> MemoryRunContext {
+    MemoryRunContext {
+        selection,
+        optimization_authority: MemoryOptimizationAuthority::Calibrated,
+        calibration_abi: calibration.abi,
+        calibration_fingerprint: calibration.fingerprint.clone(),
+        // From the LOADED provider's own identity, never the plan: the safety check compares abi,
+        // fingerprint AND load shape.
+        load_shape: calibration.load_shape,
+        mode: if arm.edit {
+            MemoryMode::Edit
+        } else {
+            MemoryMode::TextToImage
+        },
+        has_reference: arm.edit,
+        use_pid: false,
+        has_phases: false,
+        geometry: MemoryGeometry {
+            width,
+            height,
+            batch: 1,
+            frames: 1,
+            reference_count: u32::from(arm.edit),
+        },
+        overlay: None,
+        budget: MemoryBudget {
+            total_bytes,
+            committed_bytes: 0,
+            reclaimable_bytes: 0,
+            reserved_headroom_bytes: 0,
+        },
+        predicted_peak_bytes,
+        cache_state: MemoryCacheState::Cold,
+        evidence_revision: format!("sc-22733@{}", protocol::INFERENCE_PIN),
+    }
+}
+
+fn mage_complete_sweep(request: &Value) -> Result<Value, String> {
+    let mut sweep = protocol::reference_sweep(request, "passed")?;
+    sweep["rangeVerified"] = json!(true);
+    Ok(sweep)
+}
+
+/// One Mage-Flow anchor capture, on any of the six catalog ids, at any shipped tier.
+///
+/// E4: the generator comes from `catalog.media().load(arm.provider, &spec)` — the same registry load
+/// the worker performs for this lane (`engines.rs` `MODEL_TABLE` maps each catalog id onto the
+/// identically-named engine id, and the generic MLX stream hands the registry a `LoadSpec` carrying
+/// the tier quant plus the two staged component dirs) — never a re-implementation of the loader.
+fn run_mage_provider(request: &Value) -> Result<Value, String> {
+    let arm = mage_arm(request)?;
+    validate_mage_mode(request, arm)?;
+    protocol::validate_plain_overlay_target(request, arm.execution_path)?;
+    protocol::validate_still_geometry(request, arm.still_calibration)?;
+    let selection = planned_selection(request)?;
+    let tier = planned_qwen_tier(request)?;
+    let seed = planned_mage_seed(request, arm, tier)?;
+    let load_shape = planned_load_shape(request)?;
+    // Mage never reads `LoadSpec::offload_policy` — `assemble` builds a `Residency::request_scoped`
+    // pipeline and staging is selected per request by `GenerationRequest::memory` — but the spec
+    // still records which policy the worker asked for, and the resident anchor asks for Resident.
+    let offload = if matches!(
+        selection.strategy,
+        MemoryStrategy::StagedResidency | MemoryStrategy::BoundedTransformerResidency
+    ) {
+        OffloadPolicy::Sequential
+    } else {
+        OffloadPolicy::Resident
+    };
+    let (width, height) = protocol::target_geometry(request)?;
+    let source = mage_artifact_source(arm)?;
+    let repository = source.repository.clone();
+    let revision = source.revision.clone();
+    let components_repository = source.components_repository.clone();
+    let components_revision = source.components_revision.clone();
+    let MageArtifact { root: _root, spec } =
+        mage_load_spec(arm, tier, &source, &selection, offload, load_shape)?;
+    let catalog =
+        runtime_macos::catalog().map_err(|error| format!("build MLX catalog: {error}"))?;
+    let generator = catalog
+        .media()
+        .load(arm.provider, &spec)
+        .map_err(|error| format!("load real {} {tier} provider: {error}", arm.provider))?;
+    let contract = generator
+        .memory_strategy_contract()
+        .ok_or_else(|| format!("loaded {} has no memory-strategy contract", arm.provider))?;
+    contract.validate_selection(&selection).map_err(|error| {
+        format!(
+            "pinned {} provider rejected planned selection: {error}",
+            arm.provider
+        )
+    })?;
+    let strategy = attested_strategy(
+        request,
+        &selection,
+        &contract.engaged_composition(selection.strategy),
+    )?;
+    let calibration = contract.calibration.as_ref().ok_or_else(|| {
+        format!(
+            "pinned {} provider has no calibration identity",
+            arm.provider
+        )
+    })?;
+    let planned_fingerprint = protocol::planned(request)?
+        .get("calibrationFingerprint")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "planned.calibrationFingerprint must be a string".to_owned())?;
+    if planned_fingerprint != calibration.fingerprint {
+        return Err(format!(
+            "plan/provider calibration mismatch: plan={planned_fingerprint}, pinned provider={}",
+            calibration.fingerprint
+        ));
+    }
+    if load_shape != calibration.load_shape {
+        return Err(format!(
+            "plan/provider load-shape mismatch: plan={}, pinned provider={}",
+            load_shape_key(load_shape),
+            load_shape_key(calibration.load_shape)
+        ));
+    }
+    let hardware_bytes = request
+        .pointer("/hardware/memoryBytes")
+        .and_then(Value::as_u64)
+        .ok_or_else(|| "run request.hardware.memoryBytes must be an integer".to_owned())?;
+    let context = mage_run_context(
+        arm,
+        selection,
+        calibration,
+        width,
+        height,
+        hardware_bytes,
+        1,
+    );
+
+    let conditioning = Cell::new(PhaseMemory {
+        active: 0,
+        cache: 0,
+    });
+    let denoise = Cell::new(PhaseMemory {
+        active: 0,
+        cache: 0,
+    });
+    clear_cache();
+    reset_peak_memory();
+    let selected = one_image(scoped_generate(
+        generator.as_ref(),
+        mage_request(arm, width, height, seed),
+        &context,
+        None,
+        &mut |progress| match progress {
+            Progress::Step { current: 1, .. } => {
+                conditioning.set(PhaseMemory::capture());
+                reset_peak_memory();
+            }
+            Progress::Decoding => {
+                denoise.set(PhaseMemory::capture());
+                reset_peak_memory();
+            }
+            _ => {}
+        },
+    )?)?;
+    let decode = PhaseMemory::capture();
+    let conditioning = conditioning.get();
+    let denoise = denoise.get();
+    if [conditioning.active, denoise.active, decode.active].contains(&0) {
+        return Err(
+            "a synchronized Mage-Flow lifecycle phase reported a zero active peak".to_owned(),
+        );
+    }
+    let phases = [conditioning, denoise, decode];
+    let overall = PhaseMemory::overall(&phases);
+    let predicted_peaks = image_predicted_peak_bytes(conditioning, denoise, decode);
+    let predicted = predicted_peaks.overall;
+
+    let mut exact = context.clone();
+    exact.predicted_peak_bytes = predicted;
+    exact.budget.total_bytes = predicted;
+    if !matches!(
+        generator.memory_strategy_safety_check(&exact),
+        MemorySafetyDecision::Accept
+    ) {
+        return Err("Mage-Flow provider rejected an exact-fit calibrated budget".to_owned());
+    }
+    let mut unknown = context.clone();
+    unknown.budget.total_bytes = 0;
+    if !matches!(
+        generator.memory_strategy_safety_check(&unknown),
+        MemorySafetyDecision::Reject { .. }
+    ) {
+        return Err("Mage-Flow provider accepted an unknown/zero memory budget".to_owned());
+    }
+    let mut stale = context.clone();
+    stale.calibration_fingerprint = "stale-mage-flow-fingerprint".to_owned();
+    if !matches!(
+        generator.memory_strategy_safety_check(&stale),
+        MemorySafetyDecision::Reject { .. }
+    ) {
+        return Err("Mage-Flow provider accepted stale calibration evidence".to_owned());
+    }
+    // The six checkpoints are architecturally identical, so the provider's own route gate is the
+    // only thing standing between an edit anchor and a text-to-image render recorded under it.
+    // Prove it is live on THIS loaded generator rather than trusting the contract's declaration.
+    let mut crossed = context.clone();
+    crossed.mode = if arm.edit {
+        MemoryMode::TextToImage
+    } else {
+        MemoryMode::Edit
+    };
+    crossed.has_reference = !arm.edit;
+    crossed.geometry.reference_count = u32::from(!arm.edit);
+    if !matches!(
+        generator.memory_strategy_safety_check(&crossed),
+        MemorySafetyDecision::Reject { .. }
+    ) {
+        return Err(format!(
+            "pinned {} provider accepted the opposite request mode",
+            arm.provider
+        ));
+    }
+
+    let baseline = one_image(
+        generator
+            .generate(&mage_request(arm, width, height, seed), &mut |_| {})
+            .map_err(|error| format!("generate unselected Mage-Flow reference: {error}"))?,
+    )?;
+    let (maximum_error, mean_error) = image_max_mean_abs(&selected, &baseline)?;
+    if !mage_quality_passes(maximum_error, mean_error) {
+        return Err(format!(
+            "Mage-Flow selected rung exceeded unselected parity: max={maximum_error:.6}, \
+             mean={mean_error:.6}"
+        ));
+    }
+    let warm = one_image(scoped_generate(
+        generator.as_ref(),
+        mage_request(arm, width, height, seed),
+        &context,
+        None,
+        &mut |_| {},
+    )?)?;
+    let (warm_maximum, warm_mean) = image_max_mean_abs(&selected, &warm)?;
+    if !mage_quality_passes(warm_maximum, warm_mean) {
+        return Err("Mage-Flow warm repeat changed the deterministic output".to_owned());
+    }
+
+    let cancelled = mage_request(arm, width, height, seed);
+    let cancel_signal = cancelled.cancel.clone();
+    let mut cancel_triggered = false;
+    let cancel_error = scoped_generate(
+        generator.as_ref(),
+        cancelled,
+        &context,
+        None,
+        &mut |progress| {
+            if cancel_triggered {
+                return;
+            }
+            if let Progress::Step { current: 1, .. } = progress {
+                cancel_triggered = true;
+                cancel_signal.cancel();
+            }
+        },
+    )
+    .expect_err("in-flight Mage-Flow cancellation must fail");
+    if !cancel_triggered {
+        return Err(
+            "Mage-Flow cancellation probe never reached the active rung boundary".to_owned(),
+        );
+    }
+    if !cancel_error.to_ascii_lowercase().contains("cancel") {
+        return Err(format!(
+            "Mage-Flow cancellation returned the wrong error: {cancel_error}"
+        ));
+    }
+    let cancel_recovery = one_image(scoped_generate(
+        generator.as_ref(),
+        mage_request(arm, width, height, seed),
+        &context,
+        None,
+        &mut |_| {},
+    )?)?;
+    let (cancel_maximum, cancel_mean) = image_max_mean_abs(&selected, &cancel_recovery)?;
+    if !mage_quality_passes(cancel_maximum, cancel_mean) {
+        return Err("Mage-Flow cancellation cleanup changed the warm follow-up".to_owned());
+    }
+
+    let injected = scoped_generate(
+        generator.as_ref(),
+        mage_request(arm, width, height, seed),
+        &context,
+        Some(MemoryPhase::Denoise),
+        &mut |_| {},
+    )
+    .expect_err("injected Mage-Flow error must fail");
+    if !injected.contains("authorized calibration fault") {
+        return Err(format!(
+            "Mage-Flow error injection returned the wrong error: {injected}"
+        ));
+    }
+    let error_recovery = one_image(scoped_generate(
+        generator.as_ref(),
+        mage_request(arm, width, height, seed),
+        &context,
+        None,
+        &mut |_| {},
+    )?)?;
+    let (recovery_maximum, recovery_mean) = image_max_mean_abs(&selected, &error_recovery)?;
+    if !mage_quality_passes(recovery_maximum, recovery_mean) {
+        return Err("Mage-Flow error cleanup changed the warm follow-up".to_owned());
+    }
+
+    let mutated = qwen_negative_mutation(&selected);
+    let (mutated_maximum, mutated_mean) = image_max_mean_abs(&mutated, &baseline)?;
+    if mage_quality_passes(mutated_maximum, mutated_mean) {
+        return Err(
+            "Mage-Flow output mutation did not breach the production parity envelope".to_owned(),
+        );
+    }
+
+    let mut fragment = json!({
+        "status": "complete",
+        "strategy": strategy,
+        "loadShape": load_shape_key(calibration.load_shape),
+        "artifact": {
+            "repository": repository,
+            "resolvedRevision": revision,
+            "variant": tier,
+        },
+        "sweep": mage_complete_sweep(request)?,
+        "scenarios": [
+            { "name": "exact_fit", "result": "passed", "predictedBytes": predicted, "effectiveBudgetBytes": predicted },
+            { "name": "unknown_budget", "result": "passed" },
+            { "name": "stale_evidence", "result": "passed" },
+            { "name": "warm_repeat", "result": "passed" },
+            { "name": "cancel", "result": "passed", "cleanupVerified": true, "warmFollowUpPassed": true },
+            { "name": "error", "result": "passed", "cleanupVerified": true, "warmFollowUpPassed": true },
+            { "name": "loadability", "result": "passed" }
+        ],
+        "predictedPeakBytes": predicted_peaks.json(),
+        "observedMemory": {
+            "conditioning": conditioning.json(),
+            "denoise": denoise.json(),
+            "decode": decode.json(),
+            "overall": overall.json(),
+        },
+        "quality": {
+            "contract": "same seed, prompt, sampling, precision, staged components, and loaded provider; selected rung versus unselected request",
+            "identicalInputs": true,
+            "identicalLatents": false,
+            "result": "passed",
+            "maximumError": maximum_error,
+            "meanError": mean_error,
+            "maximumErrorThreshold": MAGE_MAX_THRESHOLD,
+            "meanErrorThreshold": MAGE_MEAN_THRESHOLD,
+        },
+        "negativeMutation": {
+            "parameters": protocol::strategy_parameters(request)?,
+            "measured": true,
+            "result": "failed_as_expected",
+            "maximumError": mutated_maximum,
+            "meanError": mutated_mean,
+        },
+        "loadability": {
+            "result": "passed",
+            // BOTH artifact triples: a Mage load that resolved the DiT from the planned variant
+            // but the text encoder from another tier's components would otherwise leave no trace.
+            "resolvedPathFingerprint": format!(
+                "{repository}@{revision}:{tier}+{components_repository}@{components_revision}:{tier}"
+            ),
+        },
+        "diagnostics": protocol::diagnostics(
+            &format!("memory-mlx-adapter:{}-shared-ladder", arm.slug),
+            "executed",
+            [],
+            [
+                ("conditioningActivePeak", "bytes", conditioning.active),
+                ("denoiseActivePeak", "bytes", denoise.active),
+                ("decodeActivePeak", "bytes", decode.active),
+                ("overallAllocatorEnvelope", "bytes", overall.allocator_bytes()),
+                // An edit capture conditions on exactly one reference image; a text-to-image
+                // capture on none. Read off the arm the LOAD resolved, so a record can never claim
+                // a reference the request did not carry.
+                ("referenceImages", "count", u64::from(arm.edit)),
+                // Both shared components are staged explicitly — never left to the loader's
+                // flat-layout fallback, which the split rehost cannot satisfy.
+                ("stagedComponents", "count", 2),
+            ],
+        ),
+        "capturedAt": protocol::captured_at(),
+    });
+    protocol::settle_plain_overlay_scenario(request, &mut fragment, arm.execution_path)?;
+    Ok(fragment)
+}
+
+#[cfg(test)]
+mod mage_tests {
+    use super::*;
+
+    fn mage_planned(provider: &str, model_id: &str, tier: &str, steps: u32) -> Value {
+        let mode = if provider.contains("edit") {
+            "edit_image"
+        } else {
+            "text_to_image"
+        };
+        let slug = provider.replace('_', "-");
+        json!({
+            "planned": {
+                "target": {
+                    "provider": provider,
+                    "modelId": model_id,
+                    "tier": tier,
+                    "mode": mode,
+                    "overlay": "none",
+                    "geometry": { "width": MAGE_EDGE, "height": MAGE_EDGE, "batch": 1, "frames": 1 }
+                },
+                "backend": "mlx",
+                "loadShape": "eager_materialization",
+                "strategy": { "rung": "resident", "engagedRungs": ["resident"], "parameters": {} },
+                "calibrationFingerprint": "mage-flow-mlx-shared-ladder-2026-08-03-v1",
+                "fixture": format!("{slug}-mlx-{tier}-{}-seed{MAGE_SEED}-step{steps}", MAGE_EDGE),
+            }
+        })
+    }
+
+    /// Every registered Mage id reaches the arm, and a foreign one is refused BY NAME rather than
+    /// misrouted into it (the sc-18104 defect class).
+    #[test]
+    fn run_dispatches_every_mage_id_and_still_refuses_a_foreign_one() {
+        for arm in MAGE_ARMS {
+            let error = run(&mage_planned(arm.provider, arm.provider, "q4", arm.steps))
+                .expect_err("the weights-free plan cannot complete a real capture");
+            assert!(
+                !error.contains("does not implement provider"),
+                "{} was not dispatched into the Mage arm: {error}",
+                arm.provider
+            );
+        }
+        for provider in ["mage_flow_lora", "mage_flow_edit_rl"] {
+            let error = run(&mage_planned(provider, provider, "q4", 2)).unwrap_err();
+            assert_eq!(
+                error,
+                format!("MLX five-rung calibration does not implement provider {provider:?}")
+            );
+        }
+    }
+
+    /// The six checkpoints are architecturally identical, so a plan whose `modelId` names a
+    /// different member than its `provider` must be refused before anything is loaded — nothing
+    /// downstream could notice that one variant's peaks had been recorded as another's.
+    #[test]
+    fn a_crossed_provider_and_model_pair_is_refused_by_name() {
+        let request = mage_planned("mage_flow_turbo", "mage_flow_base", "q4", 4);
+        let error = mage_arm(&request).unwrap_err();
+        assert_eq!(
+            error,
+            "the MLX Mage-Flow arm does not implement provider \"mage_flow_turbo\" for model \
+             \"mage_flow_base\""
+        );
+    }
+
+    /// Every arm's table row is self-consistent, and no two rows share an artifact, an env family, a
+    /// fixture prefix or an execution path — the four things that keep two members' captures apart.
+    #[test]
+    fn every_mage_arm_row_is_unique_on_every_identifying_axis() {
+        assert_eq!(MAGE_ARMS.len(), 6);
+        for axis in [
+            MAGE_ARMS.map(|arm| arm.provider),
+            MAGE_ARMS.map(|arm| arm.repository),
+            MAGE_ARMS.map(|arm| arm.repository_env),
+            MAGE_ARMS.map(|arm| arm.fixture_prefix),
+            MAGE_ARMS.map(|arm| arm.execution_path),
+            MAGE_ARMS.map(|arm| arm.still_calibration),
+            MAGE_ARMS.map(|arm| arm.slug),
+        ] {
+            let mut sorted = axis.to_vec();
+            sorted.sort_unstable();
+            sorted.dedup();
+            assert_eq!(
+                sorted.len(),
+                6,
+                "an identifying axis is shared by two Mage arms"
+            );
+        }
+        for arm in MAGE_ARMS {
+            assert_eq!(arm.edit, arm.provider.contains("edit"));
+            // The distilled members run the distill's own four-step CFG-off recipe.
+            let distilled = arm.provider.ends_with("turbo");
+            assert_eq!(arm.steps, if distilled { 4 } else { 2 });
+            assert_eq!(arm.guidance, if distilled { 1.0 } else { 5.0 });
+            assert!(arm.repository_env.ends_with("_REPOSITORY"));
+            assert!(arm.revision_env.ends_with("_REVISION"));
+            assert!(arm.root_env.ends_with("_ROOT"));
+        }
+    }
+
+    /// The fixture binds member, tier, edge and the recipe's step count. A fixture naming another
+    /// member's prefix, another tier, or another step count is refused.
+    #[test]
+    fn the_fixture_binds_the_member_the_tier_and_the_step_count() {
+        let arm = MAGE_ARMS[2];
+        let good = mage_planned(arm.provider, arm.provider, "q8", arm.steps);
+        assert_eq!(planned_mage_seed(&good, arm, "q8").unwrap(), MAGE_SEED);
+        // Another member's fixture prefix.
+        let crossed = mage_planned(MAGE_ARMS[1].provider, arm.provider, "q8", arm.steps);
+        let mut request = good.clone();
+        request["planned"]["fixture"] = crossed["planned"]["fixture"].clone();
+        assert!(planned_mage_seed(&request, arm, "q8")
+            .unwrap_err()
+            .contains("must start with"));
+        // Another tier.
+        assert!(planned_mage_seed(&good, arm, "q4")
+            .unwrap_err()
+            .contains("must start with"));
+        // Another step count.
+        let wrong_steps = mage_planned(arm.provider, arm.provider, "q8", 2);
+        let error = planned_mage_seed(&wrong_steps, arm, "q8").unwrap_err();
+        assert!(
+            error.contains("4-step calibration request"),
+            "the refusal must name the recipe this member renders, got: {error}"
+        );
+    }
+
+    /// A plan row declaring the OTHER mode for a member is refused before any environment work: the
+    /// record's `mode` comes from the plan while the reference comes from the arm, so an unchecked
+    /// mismatch would label a reference-conditioned render reference-free.
+    #[test]
+    fn a_plan_declaring_the_wrong_mode_for_a_member_is_refused() {
+        for arm in MAGE_ARMS {
+            let mut request = mage_planned(arm.provider, arm.provider, "q4", arm.steps);
+            let wrong = if arm.edit {
+                "text_to_image"
+            } else {
+                "edit_image"
+            };
+            request["planned"]["target"]["mode"] = json!(wrong);
+            let error = run(&request).expect_err("a crossed mode must be refused");
+            assert_eq!(
+                error,
+                format!(
+                    "{} renders {:?}, but the plan declares mode {wrong:?}",
+                    arm.provider,
+                    mage_mode(arm)
+                )
+            );
+        }
+    }
+
+    /// The still-geometry guard fires under each member's own label, before any environment work.
+    #[test]
+    fn every_mage_member_refuses_a_multi_frame_geometry_under_its_own_label() {
+        for arm in MAGE_ARMS {
+            for frames in [0_u64, 2, 145] {
+                let mut request = mage_planned(arm.provider, arm.provider, "q4", arm.steps);
+                request["planned"]["target"]["geometry"]["frames"] = json!(frames);
+                let error = run(&request).expect_err("a video geometry must be refused");
+                assert_eq!(
+                    error,
+                    format!(
+                        "{} requires geometry.frames == 1, got {frames}",
+                        arm.still_calibration
+                    )
+                );
+            }
+        }
+    }
+
+    fn mage_temp_root(label: &str) -> PathBuf {
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        std::env::temp_dir().join(format!("sc-22733-{label}-{}-{nonce}", std::process::id()))
+    }
+
+    fn staged_snapshot(repository: &str, revision: &str, tier: &str, components: bool) -> PathBuf {
+        let root = mage_temp_root(&repository.replace('/', "-"))
+            .join(format!("models--{}", repository.replace('/', "--")))
+            .join("snapshots")
+            .join(revision);
+        if components {
+            for component in [
+                protocol::MAGE_COMPONENT_TEXT_ENCODER,
+                protocol::MAGE_COMPONENT_VAE,
+            ] {
+                std::fs::create_dir_all(root.join(tier).join(component)).unwrap();
+            }
+            root
+        } else {
+            let tier_root = root.join(tier);
+            std::fs::create_dir_all(tier_root.join("transformer")).unwrap();
+            tier_root
+        }
+    }
+
+    const MAGE_TEST_REVISION: &str = "5f6455818d8ca80ce780e9c01b9e0de1d8c5f9db";
+    const MAGE_TEST_COMPONENTS_REVISION: &str = "c936de2a107ee8d0869137e73943f6414f23adaa";
+
+    fn mage_source(arm: MageArm, tier: &str) -> MageArtifactSource {
+        MageArtifactSource {
+            repository: arm.repository.to_owned(),
+            revision: MAGE_TEST_REVISION.to_owned(),
+            root: staged_snapshot(arm.repository, MAGE_TEST_REVISION, tier, false),
+            components_repository: protocol::MAGE_COMPONENTS_REPOSITORY.to_owned(),
+            components_revision: MAGE_TEST_COMPONENTS_REVISION.to_owned(),
+            components_root: staged_snapshot(
+                protocol::MAGE_COMPONENTS_REPOSITORY,
+                MAGE_TEST_COMPONENTS_REVISION,
+                tier,
+                true,
+            ),
+        }
+    }
+
+    fn resident_selection(tier: &str) -> MemorySelection {
+        MemorySelection {
+            strategy: MemoryStrategy::Resident,
+            parameters: MemoryStrategyParameters::default(),
+            tier: MemoryNumericTier {
+                precision: Precision::Bf16,
+                quant: match tier {
+                    "q4" => Some(Quant::Q4),
+                    "q8" => Some(Quant::Q8),
+                    _ => None,
+                },
+                component_precision_floors: &[],
+            },
+        }
+    }
+
+    /// The composed `LoadSpec` is the shape the WORKER loads at the planned rung: the variant's own
+    /// tier root, both shared components staged EXPLICITLY (the variant rehost has no
+    /// `text_encoder/` or `vae/` sibling for the loader's flat-layout fallback to find), the planned
+    /// tier's quant, `Resident`, and eager materialization.
+    #[test]
+    fn the_load_spec_binds_the_tier_root_both_components_and_the_planned_quant() {
+        for arm in MAGE_ARMS {
+            for tier in ["bf16", "q4", "q8"] {
+                let source = mage_source(arm, tier);
+                let selection = resident_selection(tier);
+                let MageArtifact { root, spec } = mage_load_spec(
+                    arm,
+                    tier,
+                    &source,
+                    &selection,
+                    OffloadPolicy::Resident,
+                    LoadShape::EagerMaterialization,
+                )
+                .unwrap();
+                assert_eq!(
+                    spec.weights,
+                    WeightsSource::Dir(root.clone()),
+                    "the DiT root is the variant's own tier directory"
+                );
+                assert!(root.ends_with(tier));
+                assert_eq!(spec.offload_policy, OffloadPolicy::Resident);
+                assert_eq!(spec.load_shape, LoadShape::EagerMaterialization);
+                assert_eq!(spec.quantize, selection.tier.quant);
+                for component in [
+                    protocol::MAGE_COMPONENT_TEXT_ENCODER,
+                    protocol::MAGE_COMPONENT_VAE,
+                ] {
+                    let Some(WeightsSource::Dir(dir)) = spec.components.get(component) else {
+                        panic!("{} did not stage the {component} component", arm.provider);
+                    };
+                    assert!(
+                        dir.ends_with(std::path::Path::new(tier).join(component)),
+                        "the {component} component must come from the components snapshot's own \
+                         {tier} directory, got {}",
+                        dir.display()
+                    );
+                    // And never from the variant rehost, which does not ship it.
+                    assert!(!dir.starts_with(&root));
+                }
+            }
+        }
+    }
+
+    /// A stale export of ANOTHER tier cannot satisfy this plan: the root suffix is checked against
+    /// the planned tier before the load is paid for (the sc-17097 defect class).
+    #[test]
+    fn another_tiers_root_cannot_satisfy_the_planned_tier() {
+        let arm = MAGE_ARMS[0];
+        let mut source = mage_source(arm, "q4");
+        source.root = staged_snapshot(arm.repository, MAGE_TEST_REVISION, "q8", false);
+        let error = mage_load_spec(
+            arm,
+            "q4",
+            &source,
+            &resident_selection("q4"),
+            OffloadPolicy::Resident,
+            LoadShape::EagerMaterialization,
+        )
+        .unwrap_err();
+        assert!(error.contains("q4"), "{error}");
+    }
+
+    /// Each member binds its OWN rehost. A components root pointing at a variant repository — or a
+    /// variant root pointing at a sibling's — is refused by repository name.
+    #[test]
+    fn each_member_refuses_another_repositorys_root() {
+        let arm = MAGE_ARMS[3];
+        let mut crossed = mage_source(arm, "q4");
+        crossed.repository = MAGE_ARMS[4].repository.to_owned();
+        let error = mage_load_spec(
+            arm,
+            "q4",
+            &crossed,
+            &resident_selection("q4"),
+            OffloadPolicy::Resident,
+            LoadShape::EagerMaterialization,
+        )
+        .unwrap_err();
+        assert!(error.contains(arm.repository), "{error}");
+
+        let mut crossed_components = mage_source(arm, "q4");
+        crossed_components.components_repository = arm.repository.to_owned();
+        let error = mage_load_spec(
+            arm,
+            "q4",
+            &crossed_components,
+            &resident_selection("q4"),
+            OffloadPolicy::Resident,
+            LoadShape::EagerMaterialization,
+        )
+        .unwrap_err();
+        assert!(
+            error.contains(protocol::MAGE_COMPONENTS_REPOSITORY),
+            "{error}"
+        );
+    }
+
+    /// The edit members condition on exactly one reference and the text-to-image members on none —
+    /// the one thing that makes an edit capture measure the edit path (`edit_references` refuses a
+    /// reference-free edit request outright).
+    #[test]
+    fn only_the_edit_members_carry_a_reference_and_only_the_undistilled_a_negative_prompt() {
+        for arm in MAGE_ARMS {
+            let request = mage_request(arm, MAGE_EDGE, MAGE_EDGE, MAGE_SEED);
+            assert_eq!(request.conditioning.len(), usize::from(arm.edit));
+            if arm.edit {
+                assert!(matches!(
+                    request.conditioning[0],
+                    Conditioning::Reference { .. }
+                ));
+            }
+            assert_eq!(request.steps, Some(arm.steps));
+            assert_eq!(request.guidance, Some(arm.guidance));
+            assert_eq!(request.negative_prompt.is_some(), arm.guidance > 1.0);
+            assert_eq!(request.seed, Some(MAGE_SEED));
+        }
+    }
+
+    /// The run context is the coordinate the provider's own route gate admits this member under
+    /// (`model.rs` `request_context_error`), and never the opposite one.
+    #[test]
+    fn the_run_context_carries_each_members_own_mode_and_reference_count() {
+        for arm in MAGE_ARMS {
+            let calibration = MemoryCalibrationIdentity::new(
+                "mage-flow-mlx-shared-ladder-2026-08-03-v1",
+                LoadShape::EagerMaterialization,
+            );
+            let context = mage_run_context(
+                arm,
+                resident_selection("q4"),
+                &calibration,
+                MAGE_EDGE,
+                MAGE_EDGE,
+                1_024,
+                1,
+            );
+            let expected = if arm.edit {
+                MemoryMode::Edit
+            } else {
+                MemoryMode::TextToImage
+            };
+            assert_eq!(context.mode, expected);
+            assert_eq!(context.has_reference, arm.edit);
+            assert_eq!(context.geometry.reference_count, u32::from(arm.edit));
+            assert_eq!(context.overlay, None);
+            assert!(!context.has_phases);
+            assert!(!context.use_pid);
+            assert_eq!(context.load_shape, LoadShape::EagerMaterialization);
+        }
+    }
+}
+
 /// The exact target geometry an `mlx:ltx_2_3` calibration case renders. `fps` is NOT part of it:
 /// `GeometryEnvelope` has no temporal-cadence axis, so the arm binds fps through the fixture name
 /// instead (see [`planned_ltx_capture`]). That gap is real and is reported rather than papered over —
@@ -12399,6 +13588,18 @@ fn run(request: &Value) -> Result<Value, String> {
         FLUX1_DEV_PROVIDER => run_flux_one(request),
         FLUX1_SCHNELL_PROVIDER => run_flux_one(request),
         PULID_FLUX_PROVIDER => run_flux_one(request),
+        // sc-22733: the Mage-Flow family. SIX registered engine providers on one arm — the three
+        // text-to-image checkpoints and the three instruction editors of `mlx-gen-mage`
+        // (`model::MODEL_IDS`) — each with its own tiered rehost, all sharing one text-encoder/VAE
+        // components snapshot. The arm resolves which member from `(provider, modelId)`.
+        // One arm per line, bare literals: see the FLUX.1 note above — the derived capturable set
+        // in `stale-lane-report.mjs#adapterCapturableProviders` parses these arms.
+        "mage_flow" => run_mage_provider(request),
+        "mage_flow_base" => run_mage_provider(request),
+        "mage_flow_turbo" => run_mage_provider(request),
+        "mage_flow_edit" => run_mage_provider(request),
+        "mage_flow_edit_base" => run_mage_provider(request),
+        "mage_flow_edit_turbo" => run_mage_provider(request),
         // sc-18808: the first VIDEO arm. Every arm above it refuses `geometry.frames != 1`; this one
         // validates against LTX's own resolution/temporal envelope instead.
         LTX_PROVIDER => run_ltx(request),

@@ -13,6 +13,8 @@ import {
   PLAN_PATH,
   PACKAGED_SOURCES_PATH,
   PROVIDER_FAMILIES,
+  MAGE_COMPONENTS,
+  MAGE_COMPONENT_IDS,
   anchorParts,
   anchorSlug,
   appendPackagedSource,
@@ -295,6 +297,9 @@ test("every family's derived env names are read back by each arm it declares", a
     const envFamilies = [
       family.env,
       family.upstream?.env,
+      // sc-22733: the shared component snapshot a split-layout family stages its text encoder and
+      // VAE from is exported the same way and must be read back the same way.
+      family.components?.env,
       ...Object.values(family.sideArtifact ?? {}).map((side) => side.env),
     ].filter(Boolean);
     if (envFamilies.length === 0) {
@@ -692,6 +697,93 @@ test("the flux.1 family is measurable on every shipped tier of every routed lane
   assert.equal(cells.length, 3 * 3 * 2, "three models x three shipped tiers x two routed lanes");
   const gaps = (await measurabilityGaps()).filter((gap) => family.includes(gap.modelId));
   assert.equal(gaps.length, 0, gapReport(gaps));
+});
+
+// sc-22733. Same shape claim, for the Mage-Flow family: SIX registered engine providers (three
+// text-to-image checkpoints and three instruction editors), each with its own tiered rehost, all
+// sharing ONE text-encoder/VAE components snapshot. Key sets, never a frozen count.
+test("the mage-flow family is measurable on every shipped tier of every routed lane", async () => {
+  const family = [
+    "mage_flow", "mage_flow_base", "mage_flow_turbo",
+    "mage_flow_edit", "mage_flow_edit_base", "mage_flow_edit_turbo",
+  ];
+  const cells = (await shippedTieredCells()).filter((cell) => family.includes(cell.modelId));
+  assert.equal(cells.length, 6 * 3 * 2, "six models x three shipped tiers x two routed lanes");
+  const gaps = (await measurabilityGaps()).filter((gap) => family.includes(gap.modelId));
+  assert.equal(gaps.length, 0, gapReport(gaps));
+});
+
+// Each Mage variant binds TWO artifact triples: its OWN tiered rehost (never a sibling's — the six
+// checkpoints are architecturally identical, so a crossed root would be caught by nothing else) and
+// the ONE shared components snapshot. This asserts the derivation produces exactly that.
+test("every mage-flow member binds its own rehost plus the one shared components snapshot", async () => {
+  const models = await readManifestModels();
+  const seenComponents = new Set();
+  for (const [modelId, family] of Object.entries(PROVIDER_FAMILIES)) {
+    if (!modelId.startsWith("mage_flow")) continue;
+    assert.deepEqual(family.arms, ["mlx", "candle"], `${modelId} is routed on both lanes`);
+    assert.equal(family.components, MAGE_COMPONENTS, `${modelId} shares the one components row`);
+    // The variant repo is this member's own, and it is the repo the manifest ships the tiers from.
+    const download = tierDownload(models, modelId, family.repo, "q4");
+    assert.equal(download.variant, "q4", `${modelId} ships a q4 tier from ${family.repo}`);
+    assert.ok(!download.coRequisite, `${modelId}'s tier download is the primary, not a co-requisite`);
+    // The components repo is shared: same repo AND same revision for every member.
+    const components = tierDownload(models, modelId, MAGE_COMPONENTS.repo, "q4");
+    assert.ok(components.coRequisite, "the components rows are declared as co-requisites");
+    seenComponents.add(components.revision);
+    // No two members may claim the same variant rehost.
+    const others = Object.entries(PROVIDER_FAMILIES).filter(
+      ([id, other]) => id !== modelId && id.startsWith("mage_flow") && other.repo === family.repo,
+    );
+    assert.deepEqual(others, [], `${modelId} shares its variant rehost with ${others.map(([id]) => id).join(", ")}`);
+  }
+  assert.equal(seenComponents.size, 1, "every Mage entry co-requires the SAME components revision");
+});
+
+// The component directory names this script probes must be the ones the adapters actually stage, or
+// a cell reports `runnable` while the load cannot open its text encoder.
+test("MAGE_COMPONENT_IDS are the adapter's own component-id constants", async () => {
+  const source = await readFile(path.join(ROOT, "crates/sceneworks-memory-adapter/src/lib.rs"), "utf8");
+  const declared = [
+    ["MAGE_COMPONENT_TEXT_ENCODER", "text_encoder"],
+    ["MAGE_COMPONENT_VAE", "vae"],
+  ];
+  for (const [name, value] of declared) {
+    assert.match(source, new RegExp(`pub const ${name}: &str =\\s*"${value}"`));
+  }
+  assert.deepEqual(MAGE_COMPONENT_IDS, declared.map(([, value]) => value));
+  // And both adapter arms stage exactly those two components rather than composing a path.
+  for (const backend of ["mlx", "candle"]) {
+    const arm = await readFile(path.join(ROOT, `crates/sceneworks-memory-adapter/src/bin/${backend}.rs`), "utf8");
+    for (const [name] of declared) {
+      assert.ok(arm.includes(`protocol::${name}`), `${backend}.rs never stages ${name}`);
+    }
+  }
+});
+
+// Every Mage plan row's `calibrationFingerprint` must be a string the PRODUCTION contract can emit
+// for that lane: `mlx-gen-mage` publishes ONE shared identity across all six routes and all tiers
+// (`model.rs` MEMORY_CALIBRATION_FINGERPRINT), while `candle-gen-mage` derives a per-provider one
+// (`memory_strategy.rs` `fingerprint`). A plan row naming anything else is a capture that loads real
+// weights and then fails on the fingerprint comparison inside the arm.
+test("every mage-flow plan row names a fingerprint its engine can emit", async () => {
+  const plan = await readPlan();
+  const mage = Object.entries(plan.anchors).filter(([, row]) => row.provider.startsWith("mage_flow"));
+  assert.equal(mage.length, 36, "six members x three tiers x two lanes are planned");
+  for (const [key, row] of mage) {
+    const { backend } = anchorParts(key);
+    const expected = backend === "mlx"
+      ? "mage-flow-mlx-shared-ladder-2026-08-03-v1"
+      : `mage-flow-cuda-shared-ladder-provider-abi-v2-${row.provider.replaceAll("_", "-")}`;
+    assert.equal(row.calibrationFingerprint, expected, `${key} names a fingerprint ${backend} cannot emit`);
+    // Both lanes load the anchor eagerly: MLX composes the resident rung, and the worker leaves the
+    // candle shape at its `EagerMaterialization` default (Mage has no `memory_route_registry` rule
+    // and its manifest `candle` block declares no load shape). The candle contract keys its
+    // calibration identity on `spec.load_shape`, so a deferred plan row would name an identity the
+    // worker's own load never emits.
+    assert.equal(row.loadShape, "eager_materialization", `${key} must plan the shape the worker loads`);
+    assert.equal(row.overlay, "none", `${key} carries no overlay`);
+  }
 });
 
 // The catalog-wide burndown. `todo` until the terminal story of epic 22723 (sc-22738) promotes it:

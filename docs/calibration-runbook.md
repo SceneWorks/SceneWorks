@@ -560,6 +560,38 @@ SCENEWORKS_FLUX1_SCHNELL_REPOSITORY=SceneWorks/flux1-schnell-mlx  # fixed; valid
 SCENEWORKS_FLUX1_SCHNELL_REVISION=<exact artifact revision>
 SCENEWORKS_FLUX1_SCHNELL_ROOT=/abs/path/.../snapshots/<rev>/<tier>   # bf16 | q4 | q8
 
+# BOTH adapters — the six Mage-Flow variants (sc-22733). Each variant ships the DiT ALONE under
+# `<snapshot>/<tier>/transformer/`, so a Mage capture binds TWO artifact triples: the variant's own
+# tier root, and the SHARED text-encoder/VAE components snapshot below. Both engines resolve that
+# split through `LoadSpec::components` (mlx-gen-mage `resolve_component_dirs`, candle-gen-mage
+# `resolved_component_dirs`); neither rehost can satisfy the other's role, and the variant rehost has
+# no `text_encoder/` or `vae/` sibling for the loader's flat-layout fallback to find.
+SCENEWORKS_MAGE_FLOW_REPOSITORY=SceneWorks/Mage-Flow                    # fixed; MAGE_FLOW_REPOSITORY
+SCENEWORKS_MAGE_FLOW_REVISION=<exact artifact revision>
+SCENEWORKS_MAGE_FLOW_ROOT=/abs/path/.../snapshots/<rev>/<tier>          # bf16 | q4 | q8
+SCENEWORKS_MAGE_FLOW_BASE_REPOSITORY=SceneWorks/Mage-Flow-Base          # fixed; MAGE_FLOW_BASE_REPOSITORY
+SCENEWORKS_MAGE_FLOW_BASE_REVISION=<exact artifact revision>
+SCENEWORKS_MAGE_FLOW_BASE_ROOT=/abs/path/.../snapshots/<rev>/<tier>
+SCENEWORKS_MAGE_FLOW_TURBO_REPOSITORY=SceneWorks/Mage-Flow-Turbo        # fixed; MAGE_FLOW_TURBO_REPOSITORY
+SCENEWORKS_MAGE_FLOW_TURBO_REVISION=<exact artifact revision>
+SCENEWORKS_MAGE_FLOW_TURBO_ROOT=/abs/path/.../snapshots/<rev>/<tier>
+SCENEWORKS_MAGE_FLOW_EDIT_REPOSITORY=SceneWorks/Mage-Flow-Edit          # fixed; MAGE_FLOW_EDIT_REPOSITORY
+SCENEWORKS_MAGE_FLOW_EDIT_REVISION=<exact artifact revision>
+SCENEWORKS_MAGE_FLOW_EDIT_ROOT=/abs/path/.../snapshots/<rev>/<tier>
+SCENEWORKS_MAGE_FLOW_EDIT_BASE_REPOSITORY=SceneWorks/Mage-Flow-Edit-Base       # MAGE_FLOW_EDIT_BASE_REPOSITORY
+SCENEWORKS_MAGE_FLOW_EDIT_BASE_REVISION=<exact artifact revision>
+SCENEWORKS_MAGE_FLOW_EDIT_BASE_ROOT=/abs/path/.../snapshots/<rev>/<tier>
+SCENEWORKS_MAGE_FLOW_EDIT_TURBO_REPOSITORY=SceneWorks/Mage-Flow-Edit-Turbo     # MAGE_FLOW_EDIT_TURBO_REPOSITORY
+SCENEWORKS_MAGE_FLOW_EDIT_TURBO_REVISION=<exact artifact revision>
+SCENEWORKS_MAGE_FLOW_EDIT_TURBO_ROOT=/abs/path/.../snapshots/<rev>/<tier>
+
+# BOTH adapters — the SHARED Mage text encoder + VAE, co-required by every Mage manifest entry at the
+# SAME revision. Unlike every root above, this one is the SNAPSHOT: the tier is the first path element
+# INSIDE it, and each arm joins `<tier>/text_encoder` and `<tier>/vae` itself.
+SCENEWORKS_MAGE_FLOW_COMPONENTS_REPOSITORY=SceneWorks/Mage-Flow-Components-mlx  # MAGE_COMPONENTS_REPOSITORY
+SCENEWORKS_MAGE_FLOW_COMPONENTS_REVISION=<exact artifact revision>
+SCENEWORKS_MAGE_FLOW_COMPONENTS_ROOT=/abs/path/.../snapshots/<rev>
+
 # BOTH adapters — the pulid_flux IDENTITY STACK (sc-22726). NOT a manifest download on either lane:
 # the worker fetches it on first use, so an anchor binds the operator's pre-staged copy through the
 # same env var both worker lanes already honour (image_jobs/pulid.rs `ensure_pulid_weights`,

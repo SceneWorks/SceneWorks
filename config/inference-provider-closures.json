@@ -134,6 +134,144 @@
       "sharedContractFileCount": 83,
       "lockedPackageCount": 238
     },
+    "candle:mage_flow": {
+      "crate": "crates/media/candle-gen/candle-gen-mage",
+      "digest": "ef764fe86a8065a494c2226f196059a3a77f9e7001ea54de3c97a92a1357b49d",
+      "sharedContractDigest": "0db42a4d6362d5449e53e1e122cbc3c7a934bfffb350b99e5001fa43033661ce",
+      "closureCrates": [
+        "crates/contracts/core-llm",
+        "crates/contracts/gen-core",
+        "crates/media/candle-gen/candle-gen",
+        "crates/media/candle-gen/candle-gen-boogu",
+        "crates/media/candle-gen/candle-gen-flux",
+        "crates/media/candle-gen/candle-gen-mage",
+        "crates/media/candle-gen/candle-gen-pid",
+        "crates/media/candle-gen/candle-gen-sdxl",
+        "crates/media/candle-gen/vendor/candle-kernels"
+      ],
+      "universalCrates": [
+        "crates/contracts/core-llm",
+        "crates/contracts/gen-core"
+      ],
+      "sourceFileCount": 185,
+      "sharedContractFileCount": 83,
+      "lockedPackageCount": 247
+    },
+    "candle:mage_flow_base": {
+      "crate": "crates/media/candle-gen/candle-gen-mage",
+      "digest": "2e436208883d75ade40c520276000793699167e014e66a3986030f34275837a9",
+      "sharedContractDigest": "0db42a4d6362d5449e53e1e122cbc3c7a934bfffb350b99e5001fa43033661ce",
+      "closureCrates": [
+        "crates/contracts/core-llm",
+        "crates/contracts/gen-core",
+        "crates/media/candle-gen/candle-gen",
+        "crates/media/candle-gen/candle-gen-boogu",
+        "crates/media/candle-gen/candle-gen-flux",
+        "crates/media/candle-gen/candle-gen-mage",
+        "crates/media/candle-gen/candle-gen-pid",
+        "crates/media/candle-gen/candle-gen-sdxl",
+        "crates/media/candle-gen/vendor/candle-kernels"
+      ],
+      "universalCrates": [
+        "crates/contracts/core-llm",
+        "crates/contracts/gen-core"
+      ],
+      "sourceFileCount": 185,
+      "sharedContractFileCount": 83,
+      "lockedPackageCount": 247
+    },
+    "candle:mage_flow_edit": {
+      "crate": "crates/media/candle-gen/candle-gen-mage",
+      "digest": "bca77d49e6eb60723db3cde132708c5ae5242ce739864b8b6acd0c60cc579843",
+      "sharedContractDigest": "0db42a4d6362d5449e53e1e122cbc3c7a934bfffb350b99e5001fa43033661ce",
+      "closureCrates": [
+        "crates/contracts/core-llm",
+        "crates/contracts/gen-core",
+        "crates/media/candle-gen/candle-gen",
+        "crates/media/candle-gen/candle-gen-boogu",
+        "crates/media/candle-gen/candle-gen-flux",
+        "crates/media/candle-gen/candle-gen-mage",
+        "crates/media/candle-gen/candle-gen-pid",
+        "crates/media/candle-gen/candle-gen-sdxl",
+        "crates/media/candle-gen/vendor/candle-kernels"
+      ],
+      "universalCrates": [
+        "crates/contracts/core-llm",
+        "crates/contracts/gen-core"
+      ],
+      "sourceFileCount": 185,
+      "sharedContractFileCount": 83,
+      "lockedPackageCount": 247
+    },
+    "candle:mage_flow_edit_base": {
+      "crate": "crates/media/candle-gen/candle-gen-mage",
+      "digest": "6728958172c90aa126c15fdf01dfa382b91b3f3ba4b4fb85555bd21c9804ec5a",
+      "sharedContractDigest": "0db42a4d6362d5449e53e1e122cbc3c7a934bfffb350b99e5001fa43033661ce",
+      "closureCrates": [
+        "crates/contracts/core-llm",
+        "crates/contracts/gen-core",
+        "crates/media/candle-gen/candle-gen",
+        "crates/media/candle-gen/candle-gen-boogu",
+        "crates/media/candle-gen/candle-gen-flux",
+        "crates/media/candle-gen/candle-gen-mage",
+        "crates/media/candle-gen/candle-gen-pid",
+        "crates/media/candle-gen/candle-gen-sdxl",
+        "crates/media/candle-gen/vendor/candle-kernels"
+      ],
+      "universalCrates": [
+        "crates/contracts/core-llm",
+        "crates/contracts/gen-core"
+      ],
+      "sourceFileCount": 185,
+      "sharedContractFileCount": 83,
+      "lockedPackageCount": 247
+    },
+    "candle:mage_flow_edit_turbo": {
+      "crate": "crates/media/candle-gen/candle-gen-mage",
+      "digest": "63dc7d6f8abbadd46dbf223625cd2ae06ca8a3e6635557a0148b3bc2d97abcd9",
+      "sharedContractDigest": "0db42a4d6362d5449e53e1e122cbc3c7a934bfffb350b99e5001fa43033661ce",
+      "closureCrates": [
+        "crates/contracts/core-llm",
+        "crates/contracts/gen-core",
+        "crates/media/candle-gen/candle-gen",
+        "crates/media/candle-gen/candle-gen-boogu",
+        "crates/media/candle-gen/candle-gen-flux",
+        "crates/media/candle-gen/candle-gen-mage",
+        "crates/media/candle-gen/candle-gen-pid",
+        "crates/media/candle-gen/candle-gen-sdxl",
+        "crates/media/candle-gen/vendor/candle-kernels"
+      ],
+      "universalCrates": [
+        "crates/contracts/core-llm",
+        "crates/contracts/gen-core"
+      ],
+      "sourceFileCount": 185,
+      "sharedContractFileCount": 83,
+      "lockedPackageCount": 247
+    },
+    "candle:mage_flow_turbo": {
+      "crate": "crates/media/candle-gen/candle-gen-mage",
+      "digest": "f74f5a52fca78ef84dc321200428cdef28c27198b0384cc08fd421018299323e",
+      "sharedContractDigest": "0db42a4d6362d5449e53e1e122cbc3c7a934bfffb350b99e5001fa43033661ce",
+      "closureCrates": [
+        "crates/contracts/core-llm",
+        "crates/contracts/gen-core",
+        "crates/media/candle-gen/candle-gen",
+        "crates/media/candle-gen/candle-gen-boogu",
+        "crates/media/candle-gen/candle-gen-flux",
+        "crates/media/candle-gen/candle-gen-mage",
+        "crates/media/candle-gen/candle-gen-pid",
+        "crates/media/candle-gen/candle-gen-sdxl",
+        "crates/media/candle-gen/vendor/candle-kernels"
+      ],
+      "universalCrates": [
+        "crates/contracts/core-llm",
+        "crates/contracts/gen-core"
+      ],
+      "sourceFileCount": 185,
+      "sharedContractFileCount": 83,
+      "lockedPackageCount": 247
+    },
     "candle:pulid_flux": {
       "crate": "crates/media/candle-gen/candle-gen-pulid",
       "digest": "b78f060053407a72aeaac97d6878b618129f1d50c45a15470cbd2ff4177481c9",
@@ -402,6 +540,132 @@
       "sourceFileCount": 138,
       "sharedContractFileCount": 83,
       "lockedPackageCount": 182
+    },
+    "mlx:mage_flow": {
+      "crate": "crates/media/mlx-gen/mlx-gen-mage",
+      "digest": "f71aaf126c37a58b399afbe440f69e74449eda54da28402a60f4bdeca365e70d",
+      "sharedContractDigest": "0db42a4d6362d5449e53e1e122cbc3c7a934bfffb350b99e5001fa43033661ce",
+      "closureCrates": [
+        "crates/contracts/core-llm",
+        "crates/contracts/gen-core",
+        "crates/media/mlx-gen",
+        "crates/media/mlx-gen/mlx-gen-boogu",
+        "crates/media/mlx-gen/mlx-gen-mage",
+        "crates/media/mlx-gen/mlx-gen-pid",
+        "crates/media/mlx-gen/mlx-gen-z-image"
+      ],
+      "universalCrates": [
+        "crates/contracts/core-llm",
+        "crates/contracts/gen-core"
+      ],
+      "sourceFileCount": 155,
+      "sharedContractFileCount": 83,
+      "lockedPackageCount": 183
+    },
+    "mlx:mage_flow_base": {
+      "crate": "crates/media/mlx-gen/mlx-gen-mage",
+      "digest": "81c3551af2a1d509e3d1bbca1e913c8356ef978d4932c8df1ac53db7ef414eea",
+      "sharedContractDigest": "0db42a4d6362d5449e53e1e122cbc3c7a934bfffb350b99e5001fa43033661ce",
+      "closureCrates": [
+        "crates/contracts/core-llm",
+        "crates/contracts/gen-core",
+        "crates/media/mlx-gen",
+        "crates/media/mlx-gen/mlx-gen-boogu",
+        "crates/media/mlx-gen/mlx-gen-mage",
+        "crates/media/mlx-gen/mlx-gen-pid",
+        "crates/media/mlx-gen/mlx-gen-z-image"
+      ],
+      "universalCrates": [
+        "crates/contracts/core-llm",
+        "crates/contracts/gen-core"
+      ],
+      "sourceFileCount": 155,
+      "sharedContractFileCount": 83,
+      "lockedPackageCount": 183
+    },
+    "mlx:mage_flow_edit": {
+      "crate": "crates/media/mlx-gen/mlx-gen-mage",
+      "digest": "264c1cc6f74c214daaae62ee25eb5590d9f88be8b4880f60df6994fe523e550b",
+      "sharedContractDigest": "0db42a4d6362d5449e53e1e122cbc3c7a934bfffb350b99e5001fa43033661ce",
+      "closureCrates": [
+        "crates/contracts/core-llm",
+        "crates/contracts/gen-core",
+        "crates/media/mlx-gen",
+        "crates/media/mlx-gen/mlx-gen-boogu",
+        "crates/media/mlx-gen/mlx-gen-mage",
+        "crates/media/mlx-gen/mlx-gen-pid",
+        "crates/media/mlx-gen/mlx-gen-z-image"
+      ],
+      "universalCrates": [
+        "crates/contracts/core-llm",
+        "crates/contracts/gen-core"
+      ],
+      "sourceFileCount": 155,
+      "sharedContractFileCount": 83,
+      "lockedPackageCount": 183
+    },
+    "mlx:mage_flow_edit_base": {
+      "crate": "crates/media/mlx-gen/mlx-gen-mage",
+      "digest": "ed9fb85b56aa31f754523724f0304dbfe80712a94294377ffcee3c11d1455850",
+      "sharedContractDigest": "0db42a4d6362d5449e53e1e122cbc3c7a934bfffb350b99e5001fa43033661ce",
+      "closureCrates": [
+        "crates/contracts/core-llm",
+        "crates/contracts/gen-core",
+        "crates/media/mlx-gen",
+        "crates/media/mlx-gen/mlx-gen-boogu",
+        "crates/media/mlx-gen/mlx-gen-mage",
+        "crates/media/mlx-gen/mlx-gen-pid",
+        "crates/media/mlx-gen/mlx-gen-z-image"
+      ],
+      "universalCrates": [
+        "crates/contracts/core-llm",
+        "crates/contracts/gen-core"
+      ],
+      "sourceFileCount": 155,
+      "sharedContractFileCount": 83,
+      "lockedPackageCount": 183
+    },
+    "mlx:mage_flow_edit_turbo": {
+      "crate": "crates/media/mlx-gen/mlx-gen-mage",
+      "digest": "1d64c170317d806eb68beb00634f5e2aa7b69ade33a93d87328faf85f8cc5007",
+      "sharedContractDigest": "0db42a4d6362d5449e53e1e122cbc3c7a934bfffb350b99e5001fa43033661ce",
+      "closureCrates": [
+        "crates/contracts/core-llm",
+        "crates/contracts/gen-core",
+        "crates/media/mlx-gen",
+        "crates/media/mlx-gen/mlx-gen-boogu",
+        "crates/media/mlx-gen/mlx-gen-mage",
+        "crates/media/mlx-gen/mlx-gen-pid",
+        "crates/media/mlx-gen/mlx-gen-z-image"
+      ],
+      "universalCrates": [
+        "crates/contracts/core-llm",
+        "crates/contracts/gen-core"
+      ],
+      "sourceFileCount": 155,
+      "sharedContractFileCount": 83,
+      "lockedPackageCount": 183
+    },
+    "mlx:mage_flow_turbo": {
+      "crate": "crates/media/mlx-gen/mlx-gen-mage",
+      "digest": "5ca44846880ad3bdca79b6870ad00d1bc26c465713f636fa4037d42ffbe99820",
+      "sharedContractDigest": "0db42a4d6362d5449e53e1e122cbc3c7a934bfffb350b99e5001fa43033661ce",
+      "closureCrates": [
+        "crates/contracts/core-llm",
+        "crates/contracts/gen-core",
+        "crates/media/mlx-gen",
+        "crates/media/mlx-gen/mlx-gen-boogu",
+        "crates/media/mlx-gen/mlx-gen-mage",
+        "crates/media/mlx-gen/mlx-gen-pid",
+        "crates/media/mlx-gen/mlx-gen-z-image"
+      ],
+      "universalCrates": [
+        "crates/contracts/core-llm",
+        "crates/contracts/gen-core"
+      ],
+      "sourceFileCount": 155,
+      "sharedContractFileCount": 83,
+      "lockedPackageCount": 183
     },
     "mlx:minimax_h3": {
       "crate": "crates/media/mlx-gen/mlx-gen-minimax-h3",

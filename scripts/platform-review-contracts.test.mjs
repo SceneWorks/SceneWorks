@@ -527,9 +527,10 @@ test("windows-candle captures and schema-checks the SC-21714 Krea anchor record"
   assert.deepEqual(
     [...counts.entries()].sort(([a], [b]) => a.localeCompare(b)),
     [
-      // Krea five-rung reference, PuLID-FLUX bespoke, the Qwen edit bespoke arm (sc-22728), and the
-      // inline Krea arm.
-      ["certifying_vram_probe()", 4],
+      // Krea five-rung reference, PuLID-FLUX bespoke, the Qwen edit bespoke arm (sc-22728), the
+      // Mage-Flow loader (sc-22733 — its own loader because a Mage load binds two artifact triples),
+      // and the inline Krea arm.
+      ["certifying_vram_probe()", 5],
       // LTX-2.5: renders first, then proves idle on the rendered baseline.
       ["VramProbe::start_rendered().assert_idle(1.0)", 1],
     ],
