@@ -518,17 +518,18 @@ test("windows-candle captures and schema-checks the SC-21714 Krea anchor record"
   // Every `vram` binding the adapter builds, as a MULTISET against an explicit allowlist
   // (sc-22726 review): a set-of-distinct-spellings claim let a probe be deleted, a raw
   // `VramProbe::new()` be added alongside, and the one known non-certifying probe hide, all green.
-  // Each entry is a probe expression and the number of arms that build it; the only non-certifying
-  // probe is the LTX-2.5 capture's, which certifies idleness through its own
-  // `start_rendered().assert_idle(1.0)` proof because that arm renders before it samples.
+  // Each entry is a probe expression and the number of arms that build it; the only probe that does
+  // not certify an idle GPU BEFORE it samples is the LTX-2.5 capture's, which proves idleness on
+  // its own rendered baseline instead because that arm renders first.
   const probes = [...adapter.matchAll(/let mut vram\s*=\s*([^;]+);/g)].map((match) => match[1].trim());
   const counts = new Map();
   for (const probe of probes) counts.set(probe, (counts.get(probe) ?? 0) + 1);
   assert.deepEqual(
     [...counts.entries()].sort(([a], [b]) => a.localeCompare(b)),
     [
-      // Krea five-rung reference, PuLID-FLUX bespoke, and the inline Krea arm.
-      ["certifying_vram_probe()", 3],
+      // Krea five-rung reference, PuLID-FLUX bespoke, the Qwen edit bespoke arm (sc-22728), and the
+      // inline Krea arm.
+      ["certifying_vram_probe()", 4],
       // LTX-2.5: renders first, then proves idle on the rendered baseline.
       ["VramProbe::start_rendered().assert_idle(1.0)", 1],
     ],
@@ -1466,9 +1467,78 @@ test("memory adapters bind every emitted overlay verdict to the requested target
       candleReference.lastIndexOf("load_five_rung_generator(&first_request)?"),
     "the Candle batch must validate every target before its one model load",
   );
-  // The inline Krea arm emits a complete receipt after SC-21714; only the two pre-execution and
-  // five-rung paths remain gated. LTX-2.5 adds its own pre-execution fragment.
-  assert.equal(candle.match(/protocol::plain_gated_fragment\(/g)?.length, 3);
+  // Every gated fragment the Candle adapter emits must come from a protocol builder that settles the
+  // overlay scenario against the DECLARED target — `plain_gated_fragment` for an overlay-free path,
+  // `overlay_gated_fragment` for one that actually loaded an overlay (sc-22728's Qwen edit Lightning
+  // distill). A whole-file COUNT is the wrong claim in both directions: a frozen `3` breaks on every
+  // new arm, and a `>= 1` per builder stops noticing one specific arm's builder call being dropped.
+  // So the claim is PER ARM: each function that assembles a `PlainGatedFragment` must reach a
+  // builder in its OWN body.
+  const candleFunctions = new Map();
+  for (const match of candle.matchAll(/^fn ([a-z0-9_]+)[(<]/gm)) {
+    const start = match.index;
+    const next = candle.indexOf("\nfn ", start + 1);
+    candleFunctions.set(
+      match[1],
+      candle.slice(start, next === -1 ? candle.length : next),
+    );
+  }
+  const gatedEmitters = [...candleFunctions].filter(([, body]) =>
+    body.includes("protocol::PlainGatedFragment {"),
+  );
+  assert.ok(
+    gatedEmitters.length >= 4,
+    `expected every gated-fragment arm to be discovered, found ${gatedEmitters.length}`,
+  );
+  for (const [name, body] of gatedEmitters) {
+    assert.ok(
+      /protocol::(plain|overlay)_gated_fragment\(/.test(body),
+      `${name} assembles a gated fragment but never reaches an overlay-settling builder`,
+    );
+  }
+  // sc-22728's Qwen edit arm is the only one that emits BOTH shapes — the plain member and the
+  // Lightning member — so each of its two builder calls is named rather than counted.
+  const qwenEdit = candleFunctions.get("run_qwen_edit");
+  assert.ok(qwenEdit, "run_qwen_edit must exist on the Candle adapter");
+  assert.match(qwenEdit, /protocol::overlay_gated_fragment\(/);
+  assert.match(qwenEdit, /protocol::plain_gated_fragment\(/);
+  // And the Lightning branch is selected from the stack the LOAD carried, never from the arm flag,
+  // so a record can never claim an overlay the load did not fold in.
+  assert.match(qwenEdit, /let loaded_adapters = adapters\.len\(\);/);
+  assert.match(
+    qwenEdit,
+    /let mut fragment = if loaded_adapters > 0 \{\s*protocol::overlay_gated_fragment\(/,
+  );
+  assert.match(qwenEdit, /\("builtInAdapters", "count", loaded_adapters as u64\)/);
+  assert.match(qwenEdit, /overlay: \(loaded_adapters > 0\)\.then\(\|\| "lora"\.to_owned\(\)\)/);
+  // The MLX twin publishes the same claims off its own loaded stack.
+  const mlxQwenEdit = mlx.slice(
+    mlx.indexOf("fn run_qwen_edit_provider("),
+    mlx.indexOf("\nfn ", mlx.indexOf("fn run_qwen_edit_provider(") + 1),
+  );
+  assert.match(mlxQwenEdit, /let loaded_adapters = spec\.adapters\.len\(\);/);
+  assert.match(mlxQwenEdit, /let overlay_scenario = if loaded_adapters > 0 \{/);
+  assert.match(mlxQwenEdit, /\("builtInAdapters", "count", loaded_adapters as u64\)/);
+  assert.match(mlxQwenEdit, /if loaded_adapters == 0 \{\s*protocol::settle_plain_overlay_scenario\(/);
+  // A hand-rolled `"status": "gated"` object is what must not silently ship with `overlay` left at
+  // `not_run`. One arm builds its fragment by hand for a real reason — sc-22726's bespoke PuLID
+  // capture, whose route opens no memory-strategy request scope — so the claim is named rather than
+  // blanket: that arm and no other, and it must still settle its own overlay scenario.
+  const handRolled = [...candleFunctions]
+    .filter(([, body]) => /"status":\s*"gated"/.test(body))
+    .map(([name]) => name);
+  assert.deepEqual(
+    handRolled,
+    ["run_pulid_flux_capture"],
+    "a hand-rolled gated fragment bypasses the overlay-settling builders",
+  );
+  for (const name of handRolled) {
+    assert.match(
+      candleFunctions.get(name),
+      /\{ "name": "overlay", "result": "(passed|failed)"/,
+      `${name} hand-rolls a gated fragment and leaves its overlay verdict unsettled`,
+    );
+  }
   assert.match(
     candle,
     /settle_plain_overlay_scenario\(request, &mut fragment, KREA_PLAIN_EXECUTION_PATH\)\?/,
