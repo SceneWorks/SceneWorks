@@ -33,6 +33,12 @@ use std::time::Duration;
 #[path = "mlx_ltx25.rs"]
 mod mlx_ltx25;
 
+// sc-22736: the Wan 2.2 family and SCAIL-2. Four engine providers on one arm, kept in their own
+// module for the same reason LTX-2.5 is — a video family's carrier, rate menu and per-tier identity
+// table are a self-contained apparatus, not another still-image variation.
+#[path = "mlx_wan_scail2.rs"]
+mod mlx_wan_scail2;
+
 const EDGES: [u32; 7] = [768, 640, 512, 448, 384, 320, 256];
 const MAX_THRESHOLD: f64 = 3e-2;
 const MEAN_THRESHOLD: f64 = 3e-3;
@@ -178,6 +184,12 @@ const LTX_RMS_THRESHOLD: f64 = FLUX2_RMS_THRESHOLD;
 /// validating against LTX's OWN declared envelope instead of accepting any frame count at all.
 const LTX_PROVIDER: &str = "ltx_2_3";
 const LTX25_PROVIDER: &str = "ltx_2_5";
+// sc-22736. Engine registry ids, not catalog ids: `wan_2_2` is the SceneWorks name for the TI2V-5B
+// route (worker `engines.rs` `video_engine_ids`), and SCAIL-2's two names coincide.
+const WAN_TI2V_5B_PROVIDER: &str = "wan2_2_ti2v_5b";
+const WAN_T2V_A14B_PROVIDER: &str = "wan2_2_t2v_14b";
+const WAN_I2V_A14B_PROVIDER: &str = "wan2_2_i2v_14b";
+const SCAIL2_PROVIDER: &str = "scail2_14b";
 const LTX_PLAIN_EXECUTION_PATH: &str = "the MLX LTX-2.3 base-only text-to-video path";
 /// How [`diagnostic_video_frames`] names this lane when it refuses a non-video output. Extracted
 /// verbatim from that function's own messages when the second video arm made the label a parameter
@@ -16470,6 +16482,15 @@ fn run(request: &Value) -> Result<Value, String> {
         SD3_LARGE_PROVIDER => run_sd3(request),
         SD3_LARGE_TURBO_PROVIDER => run_sd3(request),
         SD3_MEDIUM_PROVIDER => run_sd3(request),
+        // sc-22736: the Wan 2.2 family and SCAIL-2 — the third video block, and the first with a
+        // CARRIER (I2V's Reference, SCAIL-2's character + driving clip). One arm per line, for the
+        // same reason the FLUX.1 and SANA blocks above are: `stale-lane-report.mjs`'s
+        // `adapterCapturableProviders` parses these arms and accepts only a bare literal or a
+        // single `&str` const per arm.
+        WAN_TI2V_5B_PROVIDER => mlx_wan_scail2::run(request),
+        WAN_T2V_A14B_PROVIDER => mlx_wan_scail2::run(request),
+        WAN_I2V_A14B_PROVIDER => mlx_wan_scail2::run(request),
+        SCAIL2_PROVIDER => mlx_wan_scail2::run(request),
         // sc-22737: the third video arm, and the only one that also serves a STILL catalog entry —
         // `bernini` and `bernini_image` are two SceneWorks entries on ONE engine provider id, and
         // `bernini_target` resolves which from `(provider, modelId)` and refuses an unknown pair by

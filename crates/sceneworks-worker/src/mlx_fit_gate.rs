@@ -7112,7 +7112,9 @@ mod tests {
     /// weights-free provider contract. This is deliberately derived from the plan rather than a
     /// hand-maintained provider list: adding a planned lane without registering its contract must
     /// fail in CI before the calibration adapter reaches a physical capture. Provider-owned
-    /// contract fixtures avoid filesystem-shaped test doubles where providers expose them;
+    /// contract fixtures avoid filesystem-shaped test doubles where providers expose them — or,
+    /// for a route with no optimized surface, the typed resident-only witness, which is the same
+    /// weights-free builder on the other of the two mutually exclusive seams (sc-22736);
     /// SDXL and FLUX.2-dev intentionally fall back to their normal registrations, whose contract
     /// builders are themselves weights-free.
     #[test]
@@ -7208,11 +7210,25 @@ mod tests {
                          the shipped runtime registry"
                     )
                 });
-            let contract = match registry
+            // sc-22736: a provider publishes its weights-free contract on exactly ONE of two
+            // seams, and the registry builder refuses both at once ("has both a contract-surface
+            // fixture and a resident-only witness"). A route with no optimized surface — SCAIL-2 on
+            // both lanes — publishes the typed RESIDENT-ONLY WITNESS instead of a fixture, and it
+            // is the same weights-free builder; reading only the fixture seam skipped it and fell
+            // through to the normal registration, whose builder opens the artifact and fails with
+            // the snapshot's own io error.
+            let weights_free = registry
                 .memory_contract_fixture_registrations()
                 .find(|fixture| fixture.provider_id == provider)
-            {
-                Some(fixture) => (fixture.contract)(&spec),
+                .map(|fixture| fixture.contract)
+                .or_else(|| {
+                    registry
+                        .resident_only_memory_contract_registrations()
+                        .find(|witness| witness.provider_id == provider)
+                        .map(|witness| witness.contract)
+                });
+            let contract = match weights_free {
+                Some(build) => build(&spec),
                 None => (registration.contract)(&spec),
             }
             .unwrap_or_else(|error| {

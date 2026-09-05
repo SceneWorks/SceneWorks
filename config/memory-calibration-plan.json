@@ -1861,6 +1861,96 @@
       "calibrationFingerprint": "sd3-5-medium-q8-mlx-shared-ladder-v1",
       "fixture": "sd3-5-medium-mlx-q8-1024-seed22730-step2"
     },
+    "scail2_14b:bf16:candle": {
+      "provider": "scail2_14b",
+      "mode": "animation",
+      "overlay": "none",
+      "geometry": {
+        "width": 832,
+        "height": 480,
+        "batch": 1,
+        "frames": 77
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "eager_materialization",
+      "calibrationFingerprint": "scail2-14b-bf16-candle-resident-eager-v1",
+      "fixture": "scail2-14b-candle-bf16-832x480-f77-fps16-seed22736"
+    },
+    "scail2_14b:bf16:mlx": {
+      "provider": "scail2_14b",
+      "mode": "animation",
+      "overlay": "none",
+      "geometry": {
+        "width": 832,
+        "height": 480,
+        "batch": 1,
+        "frames": 77
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "eager_materialization",
+      "calibrationFingerprint": "scail2-14b-bf16-mlx-resident-eager-v1",
+      "fixture": "scail2-14b-mlx-bf16-832x480-f77-fps16-seed22736"
+    },
+    "scail2_14b:q4:candle": {
+      "provider": "scail2_14b",
+      "mode": "animation",
+      "overlay": "none",
+      "geometry": {
+        "width": 832,
+        "height": 480,
+        "batch": 1,
+        "frames": 77
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "eager_materialization",
+      "calibrationFingerprint": "scail2-14b-q4-candle-resident-eager-v1",
+      "fixture": "scail2-14b-candle-q4-832x480-f77-fps16-seed22736"
+    },
+    "scail2_14b:q4:mlx": {
+      "provider": "scail2_14b",
+      "mode": "animation",
+      "overlay": "none",
+      "geometry": {
+        "width": 832,
+        "height": 480,
+        "batch": 1,
+        "frames": 77
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "eager_materialization",
+      "calibrationFingerprint": "scail2-14b-q4-mlx-resident-eager-v1",
+      "fixture": "scail2-14b-mlx-q4-832x480-f77-fps16-seed22736"
+    },
+    "scail2_14b:q8:candle": {
+      "provider": "scail2_14b",
+      "mode": "animation",
+      "overlay": "none",
+      "geometry": {
+        "width": 832,
+        "height": 480,
+        "batch": 1,
+        "frames": 77
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "eager_materialization",
+      "calibrationFingerprint": "scail2-14b-q8-candle-resident-eager-v1",
+      "fixture": "scail2-14b-candle-q8-832x480-f77-fps16-seed22736"
+    },
+    "scail2_14b:q8:mlx": {
+      "provider": "scail2_14b",
+      "mode": "animation",
+      "overlay": "none",
+      "geometry": {
+        "width": 832,
+        "height": 480,
+        "batch": 1,
+        "frames": 77
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "eager_materialization",
+      "calibrationFingerprint": "scail2-14b-q8-mlx-resident-eager-v1",
+      "fixture": "scail2-14b-mlx-q8-832x480-f77-fps16-seed22736"
+    },
     "sdxl:bf16:mlx": {
       "provider": "sdxl",
       "mode": "text_to_image",
@@ -1905,6 +1995,276 @@
       "loadShape": "deferred_materialization",
       "calibrationFingerprint": "sdxl-mlx-unet-shared-ladder-v3",
       "fixture": "sdxl-base-mlx-q8-1024-seed18379-step2"
+    },
+    "wan_2_2:bf16:candle": {
+      "provider": "wan2_2_ti2v_5b",
+      "mode": "text_to_video",
+      "overlay": "none",
+      "geometry": {
+        "width": 832,
+        "height": 480,
+        "batch": 1,
+        "frames": 121
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "eager_materialization",
+      "calibrationFingerprint": "sc-19223-wan2-2-ti2v-5b-candle-sequential-load-v1",
+      "fixture": "wan-2-2-ti2v-5b-candle-bf16-832x480-f121-fps24-seed22736"
+    },
+    "wan_2_2:bf16:mlx": {
+      "provider": "wan2_2_ti2v_5b",
+      "mode": "text_to_video",
+      "overlay": "none",
+      "geometry": {
+        "width": 832,
+        "height": 480,
+        "batch": 1,
+        "frames": 121
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "eager_materialization",
+      "calibrationFingerprint": "sc-19236-wan2-2-ti2v-5b-mlx-dense-v1",
+      "fixture": "wan-2-2-ti2v-5b-mlx-bf16-832x480-f121-fps24-seed22736"
+    },
+    "wan_2_2:q4:candle": {
+      "provider": "wan2_2_ti2v_5b",
+      "mode": "text_to_video",
+      "overlay": "none",
+      "geometry": {
+        "width": 832,
+        "height": 480,
+        "batch": 1,
+        "frames": 121
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "eager_materialization",
+      "calibrationFingerprint": "sc-19223-wan2-2-ti2v-5b-candle-q4-sequential-load-v1",
+      "fixture": "wan-2-2-ti2v-5b-candle-q4-832x480-f121-fps24-seed22736"
+    },
+    "wan_2_2:q4:mlx": {
+      "provider": "wan2_2_ti2v_5b",
+      "mode": "text_to_video",
+      "overlay": "none",
+      "geometry": {
+        "width": 832,
+        "height": 480,
+        "batch": 1,
+        "frames": 121
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "eager_materialization",
+      "calibrationFingerprint": "sc-19236-wan2-2-ti2v-5b-mlx-q4-g64-teq8-v1",
+      "fixture": "wan-2-2-ti2v-5b-mlx-q4-832x480-f121-fps24-seed22736"
+    },
+    "wan_2_2:q8:candle": {
+      "provider": "wan2_2_ti2v_5b",
+      "mode": "text_to_video",
+      "overlay": "none",
+      "geometry": {
+        "width": 832,
+        "height": 480,
+        "batch": 1,
+        "frames": 121
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "eager_materialization",
+      "calibrationFingerprint": "sc-19223-wan2-2-ti2v-5b-candle-q8-sequential-load-v1",
+      "fixture": "wan-2-2-ti2v-5b-candle-q8-832x480-f121-fps24-seed22736"
+    },
+    "wan_2_2:q8:mlx": {
+      "provider": "wan2_2_ti2v_5b",
+      "mode": "text_to_video",
+      "overlay": "none",
+      "geometry": {
+        "width": 832,
+        "height": 480,
+        "batch": 1,
+        "frames": 121
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "eager_materialization",
+      "calibrationFingerprint": "sc-19236-wan2-2-ti2v-5b-mlx-q8-g64-teq8-v1",
+      "fixture": "wan-2-2-ti2v-5b-mlx-q8-832x480-f121-fps24-seed22736"
+    },
+    "wan_2_2_i2v_14b:bf16:candle": {
+      "provider": "wan2_2_i2v_14b",
+      "mode": "image_to_video",
+      "overlay": "none",
+      "geometry": {
+        "width": 1280,
+        "height": 720,
+        "batch": 1,
+        "frames": 77
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "eager_materialization",
+      "calibrationFingerprint": "sc-22736-wan2-2-i2v-a14b-candle-dense-v1",
+      "fixture": "wan-2-2-i2v-a14b-candle-bf16-1280x720-f77-fps16-seed22736"
+    },
+    "wan_2_2_i2v_14b:bf16:mlx": {
+      "provider": "wan2_2_i2v_14b",
+      "mode": "image_to_video",
+      "overlay": "none",
+      "geometry": {
+        "width": 1280,
+        "height": 720,
+        "batch": 1,
+        "frames": 77
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "eager_materialization",
+      "calibrationFingerprint": "sc-22736-wan2-2-i2v-a14b-mlx-dense-v1",
+      "fixture": "wan-2-2-i2v-a14b-mlx-bf16-1280x720-f77-fps16-seed22736"
+    },
+    "wan_2_2_i2v_14b:q4:candle": {
+      "provider": "wan2_2_i2v_14b",
+      "mode": "image_to_video",
+      "overlay": "none",
+      "geometry": {
+        "width": 1280,
+        "height": 720,
+        "batch": 1,
+        "frames": 77
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "eager_materialization",
+      "calibrationFingerprint": "sc-22736-wan2-2-i2v-a14b-candle-q4-v1",
+      "fixture": "wan-2-2-i2v-a14b-candle-q4-1280x720-f77-fps16-seed22736"
+    },
+    "wan_2_2_i2v_14b:q4:mlx": {
+      "provider": "wan2_2_i2v_14b",
+      "mode": "image_to_video",
+      "overlay": "none",
+      "geometry": {
+        "width": 1280,
+        "height": 720,
+        "batch": 1,
+        "frames": 77
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "eager_materialization",
+      "calibrationFingerprint": "sc-22736-wan2-2-i2v-a14b-mlx-q4-v1",
+      "fixture": "wan-2-2-i2v-a14b-mlx-q4-1280x720-f77-fps16-seed22736"
+    },
+    "wan_2_2_i2v_14b:q8:candle": {
+      "provider": "wan2_2_i2v_14b",
+      "mode": "image_to_video",
+      "overlay": "none",
+      "geometry": {
+        "width": 1280,
+        "height": 720,
+        "batch": 1,
+        "frames": 77
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "eager_materialization",
+      "calibrationFingerprint": "sc-22736-wan2-2-i2v-a14b-candle-q8-v1",
+      "fixture": "wan-2-2-i2v-a14b-candle-q8-1280x720-f77-fps16-seed22736"
+    },
+    "wan_2_2_i2v_14b:q8:mlx": {
+      "provider": "wan2_2_i2v_14b",
+      "mode": "image_to_video",
+      "overlay": "none",
+      "geometry": {
+        "width": 1280,
+        "height": 720,
+        "batch": 1,
+        "frames": 77
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "eager_materialization",
+      "calibrationFingerprint": "sc-22736-wan2-2-i2v-a14b-mlx-q8-v1",
+      "fixture": "wan-2-2-i2v-a14b-mlx-q8-1280x720-f77-fps16-seed22736"
+    },
+    "wan_2_2_t2v_14b:bf16:candle": {
+      "provider": "wan2_2_t2v_14b",
+      "mode": "text_to_video",
+      "overlay": "none",
+      "geometry": {
+        "width": 1280,
+        "height": 720,
+        "batch": 1,
+        "frames": 77
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "eager_materialization",
+      "calibrationFingerprint": "sc-22736-wan2-2-t2v-a14b-candle-dense-v1",
+      "fixture": "wan-2-2-t2v-a14b-candle-bf16-1280x720-f77-fps16-seed22736"
+    },
+    "wan_2_2_t2v_14b:bf16:mlx": {
+      "provider": "wan2_2_t2v_14b",
+      "mode": "text_to_video",
+      "overlay": "none",
+      "geometry": {
+        "width": 1280,
+        "height": 720,
+        "batch": 1,
+        "frames": 77
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "eager_materialization",
+      "calibrationFingerprint": "sc-22736-wan2-2-t2v-a14b-mlx-dense-v1",
+      "fixture": "wan-2-2-t2v-a14b-mlx-bf16-1280x720-f77-fps16-seed22736"
+    },
+    "wan_2_2_t2v_14b:q4:candle": {
+      "provider": "wan2_2_t2v_14b",
+      "mode": "text_to_video",
+      "overlay": "none",
+      "geometry": {
+        "width": 1280,
+        "height": 720,
+        "batch": 1,
+        "frames": 77
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "eager_materialization",
+      "calibrationFingerprint": "sc-22736-wan2-2-t2v-a14b-candle-q4-v1",
+      "fixture": "wan-2-2-t2v-a14b-candle-q4-1280x720-f77-fps16-seed22736"
+    },
+    "wan_2_2_t2v_14b:q4:mlx": {
+      "provider": "wan2_2_t2v_14b",
+      "mode": "text_to_video",
+      "overlay": "none",
+      "geometry": {
+        "width": 1280,
+        "height": 720,
+        "batch": 1,
+        "frames": 77
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "eager_materialization",
+      "calibrationFingerprint": "sc-22736-wan2-2-t2v-a14b-mlx-q4-v1",
+      "fixture": "wan-2-2-t2v-a14b-mlx-q4-1280x720-f77-fps16-seed22736"
+    },
+    "wan_2_2_t2v_14b:q8:candle": {
+      "provider": "wan2_2_t2v_14b",
+      "mode": "text_to_video",
+      "overlay": "none",
+      "geometry": {
+        "width": 1280,
+        "height": 720,
+        "batch": 1,
+        "frames": 77
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "eager_materialization",
+      "calibrationFingerprint": "sc-22736-wan2-2-t2v-a14b-candle-q8-v1",
+      "fixture": "wan-2-2-t2v-a14b-candle-q8-1280x720-f77-fps16-seed22736"
+    },
+    "wan_2_2_t2v_14b:q8:mlx": {
+      "provider": "wan2_2_t2v_14b",
+      "mode": "text_to_video",
+      "overlay": "none",
+      "geometry": {
+        "width": 1280,
+        "height": 720,
+        "batch": 1,
+        "frames": 77
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "eager_materialization",
+      "calibrationFingerprint": "sc-22736-wan2-2-t2v-a14b-mlx-q8-v1",
+      "fixture": "wan-2-2-t2v-a14b-mlx-q8-1280x720-f77-fps16-seed22736"
     },
     "z_image:bf16:candle": {
       "provider": "z_image",

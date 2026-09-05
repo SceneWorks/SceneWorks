@@ -143,6 +143,30 @@ pub const MAGE_COMPONENTS_REPOSITORY: &str = "SceneWorks/Mage-Flow-Components-ml
 /// `model::REQUIRED_COMPONENTS`, `candle-gen-mage` `REQUIRED_COMPONENTS`).
 pub const MAGE_COMPONENT_TEXT_ENCODER: &str = "text_encoder";
 pub const MAGE_COMPONENT_VAE: &str = "vae";
+/// The Wan 2.2 artifacts (sc-22736). The first family whose artifact is per (lane, TIER) rather
+/// than per lane, so each route names THREE repositories: the MLX rehost the macOS lane opens for
+/// every tier, the Candle rehost the Windows/Linux lane opens for `q4` and `q8`, and the upstream
+/// dense Diffusers checkpoint that lane's `bf16` leg opens instead — the manifest ships that one
+/// with the weights at the snapshot ROOT and no pinned revision.
+///
+/// One constant per (route, lane, layout) rather than one shared `WAN22`: the three routes are
+/// three different checkpoints, and a capture satisfied by a sibling's weights would re-label its
+/// peaks. `measure-memory-catalog.test.mjs` derives the same set from `PROVIDER_FAMILIES` and
+/// asserts each appears here, so editing either side alone is a red test rather than a runner that
+/// stages a root the adapter refuses by name mid-campaign.
+pub const WAN22_TI2V_5B_MLX_REPOSITORY: &str = "SceneWorks/wan2.2-ti2v-5b-mlx";
+pub const WAN22_TI2V_5B_CANDLE_REPOSITORY: &str = "SceneWorks/wan2.2-ti2v-5b-candle";
+pub const WAN22_TI2V_5B_DENSE_REPOSITORY: &str = "Wan-AI/Wan2.2-TI2V-5B-Diffusers";
+pub const WAN22_T2V_A14B_MLX_REPOSITORY: &str = "SceneWorks/wan2.2-t2v-a14b-mlx";
+pub const WAN22_T2V_A14B_CANDLE_REPOSITORY: &str = "SceneWorks/wan2.2-t2v-a14b-candle";
+pub const WAN22_T2V_A14B_DENSE_REPOSITORY: &str = "Wan-AI/Wan2.2-T2V-A14B-Diffusers";
+pub const WAN22_I2V_A14B_MLX_REPOSITORY: &str = "SceneWorks/wan2.2-i2v-a14b-mlx";
+pub const WAN22_I2V_A14B_CANDLE_REPOSITORY: &str = "SceneWorks/wan2.2-i2v-a14b-candle";
+pub const WAN22_I2V_A14B_DENSE_REPOSITORY: &str = "Wan-AI/Wan2.2-I2V-A14B-Diffusers";
+/// SCAIL-2 (sc-22736) is the opposite shape: ONE repository, all three tiers, and BOTH engine
+/// lanes open it — which is exactly why the two lanes' calibration identities carry a backend
+/// token. Named `-mlx` upstream and consumed by Candle too, like the Mage components rehost above.
+pub const SCAIL2_REPOSITORY: &str = "SceneWorks/scail2-mlx";
 /// The Bernini MLX artifact (sc-22737). ONE tiered rehost serves BOTH shipped catalog entries —
 /// `bernini` (the Wan2.2-A14B video renderer) and `bernini_image` (the still route over the same
 /// block stack) — because they are not two providers: `crates/sceneworks-worker/src/engines.rs`

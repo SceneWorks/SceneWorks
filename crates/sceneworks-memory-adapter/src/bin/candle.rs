@@ -19,6 +19,19 @@ use serde_json::{json, Map, Value};
 use std::path::PathBuf;
 use std::process::Command;
 
+// sc-22736: the Wan 2.2 family and SCAIL-2. Four engine providers on one arm, kept in their own
+// module for the same reason LTX-2.5's would be — a video family's carrier, rate menu and per-tier
+// identity table are a self-contained apparatus.
+#[path = "candle_wan_scail2.rs"]
+mod candle_wan_scail2;
+
+/// Engine registry ids, not catalog ids: `wan_2_2` is the SceneWorks name for the TI2V-5B route
+/// (worker `engines.rs` `video_engine_ids`), and SCAIL-2's two names coincide.
+const WAN_TI2V_5B_ID: &str = "wan2_2_ti2v_5b";
+const WAN_T2V_A14B_ID: &str = "wan2_2_t2v_14b";
+const WAN_I2V_A14B_ID: &str = "wan2_2_i2v_14b";
+const SCAIL2_ID: &str = "scail2_14b";
+
 const KREA_ID: &str = "krea_2_turbo";
 const KREA_PLAIN_EXECUTION_PATH: &str = "the Candle Krea base-only text-to-image path";
 /// The label the Krea arm refuses a non-still geometry under (sc-18808); see
@@ -3125,6 +3138,24 @@ fn loaded_contract_facts(contract: &runtime_cuda::gen_core::MemoryProviderContra
     })
 }
 
+/// The declared materialization shape, with no per-provider variant rule (sc-22736).
+///
+/// [`ltx25_planned_load_shape`] asks LTX-2.5's transformer variant first, because that family's two
+/// variants genuinely differ. Every other Candle video route declares no bounded-transformer
+/// residency, so `memory_route_registry::evaluate_declared_candle_load_shape` hands its spec
+/// straight back and the shape is simply what the plan says.
+fn planned_video_load_shape(request: &Value) -> Result<LoadShape, String> {
+    match protocol::planned(request)?
+        .get("loadShape")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "planned.loadShape must be a string".to_owned())?
+    {
+        protocol::LOAD_SHAPE_EAGER => Ok(LoadShape::EagerMaterialization),
+        protocol::LOAD_SHAPE_DEFERRED => Ok(LoadShape::DeferredMaterialization),
+        other => Err(format!("unsupported Candle video loadShape {other:?}")),
+    }
+}
+
 fn ltx25_planned_load_shape(
     request: &Value,
     transformer_variant: protocol::Ltx25TransformerVariant,
@@ -5126,6 +5157,12 @@ fn run(request: &Value) -> Result<Value, String> {
     let provider = planned_provider(request)?;
     if provider == LTX25_ID {
         return run_ltx25_capture(request);
+    }
+    // sc-22736: the Wan 2.2 family and SCAIL-2 dispatch ABOVE the shared still gate, like LTX-2.5 —
+    // they are VIDEO arms, and `validate_still_geometry` would refuse the multi-frame geometry they
+    // exist to measure.
+    if candle_wan_scail2::implements(provider) {
+        return candle_wan_scail2::run(request);
     }
     // sc-22726: PuLID-FLUX dispatches ABOVE the shared plain-overlay gate, like LTX-2.5. Its
     // declared overlay is `identity`, so routing it through `validate_plain_overlay_target` would
