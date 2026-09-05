@@ -3294,7 +3294,9 @@ fn flux_one_calibration_fingerprint(arm: FluxOneArm, tier: &str) -> String {
 /// The weights-free conformance identities (`mlx-gen-flux` `STATIC_BEHAVIOR_FINGERPRINT` and
 /// its `-<route>` suffixes, `mlx-gen-pulid` `STATIC_CALIBRATION`) the engines publish for a
 /// registry-behaviour contract that loaded no weights. A plan row naming one of these could never
-/// be satisfied by a production load.
+/// be satisfied by a production load. Test-only: the sole caller is the plan-identity
+/// conformance test in `flux_one_tests`.
+#[cfg(test)]
 fn is_flux_one_weights_free_fingerprint(fingerprint: &str) -> bool {
     fingerprint
         .starts_with(runtime_macos::providers::flux::memory_strategy::STATIC_BEHAVIOR_FINGERPRINT)
