@@ -13747,6 +13747,615 @@ fn run_minimax_h3(request: &Value) -> Result<Value, String> {
     Ok(fragment)
 }
 
+// -------------------------------------------------------------------------------------------
+// SD3.5 family (sc-22730, epic 22723 S7)
+// -------------------------------------------------------------------------------------------
+
+/// One member of the SD3.5 family this arm measures.
+///
+/// The three routes are DISTINCT engine providers with the same ids on both lanes and no aliasing
+/// (`crates/sceneworks-worker/src/engines.rs` sets `engine_id == sceneworks_id` for all three), and
+/// each has its OWN tiered rehost. Serving one route from another's artifact would re-label that
+/// route's peaks, so the env family, the expected repository literal and the published calibration
+/// identity are all per member and the arm refuses an unknown `(provider, mode)` by name.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct Sd3Arm {
+    provider: &'static str,
+    execution_path: &'static str,
+    still_calibration: &'static str,
+    repository_env: &'static str,
+    revision_env: &'static str,
+    root_env: &'static str,
+    expected_repository: &'static str,
+    /// The record's diagnostics source, `memory-mlx-adapter:<slug>-shared-ladder`, and the route
+    /// half of the published calibration identity — see [`sd3_calibration_fingerprint`].
+    slug: &'static str,
+    /// True-CFG routes forward guidance and a negative prompt; the ADD-distilled Turbo advertises
+    /// `supports_guidance = false`, so `resolve_guidance` returns `None` and the worker never
+    /// forwards either. The request shape this arm measures is the worker's.
+    guidance: Option<f32>,
+}
+
+const SD3_LARGE_PROVIDER: &str = "sd3_5_large";
+const SD3_LARGE_TURBO_PROVIDER: &str = "sd3_5_large_turbo";
+const SD3_MEDIUM_PROVIDER: &str = "sd3_5_medium";
+
+const SD3_LARGE_ARM: Sd3Arm = Sd3Arm {
+    provider: SD3_LARGE_PROVIDER,
+    execution_path: "the MLX SD3.5 Large base-only text-to-image path",
+    still_calibration: "MLX SD3.5 Large base calibration",
+    repository_env: "SCENEWORKS_SD3_5_LARGE_REPOSITORY",
+    revision_env: "SCENEWORKS_SD3_5_LARGE_REVISION",
+    root_env: "SCENEWORKS_SD3_5_LARGE_ROOT",
+    expected_repository: protocol::SD3_5_LARGE_REPOSITORY,
+    slug: "sd3-5-large",
+    guidance: Some(3.5),
+};
+
+const SD3_LARGE_TURBO_ARM: Sd3Arm = Sd3Arm {
+    provider: SD3_LARGE_TURBO_PROVIDER,
+    execution_path: "the MLX SD3.5 Large Turbo base-only text-to-image path",
+    still_calibration: "MLX SD3.5 Large Turbo base calibration",
+    repository_env: "SCENEWORKS_SD3_5_LARGE_TURBO_REPOSITORY",
+    revision_env: "SCENEWORKS_SD3_5_LARGE_TURBO_REVISION",
+    root_env: "SCENEWORKS_SD3_5_LARGE_TURBO_ROOT",
+    expected_repository: protocol::SD3_5_LARGE_TURBO_REPOSITORY,
+    slug: "sd3-5-large-turbo",
+    guidance: None,
+};
+
+const SD3_MEDIUM_ARM: Sd3Arm = Sd3Arm {
+    provider: SD3_MEDIUM_PROVIDER,
+    execution_path: "the MLX SD3.5 Medium base-only text-to-image path",
+    still_calibration: "MLX SD3.5 Medium base calibration",
+    repository_env: "SCENEWORKS_SD3_5_MEDIUM_REPOSITORY",
+    revision_env: "SCENEWORKS_SD3_5_MEDIUM_REVISION",
+    root_env: "SCENEWORKS_SD3_5_MEDIUM_ROOT",
+    expected_repository: protocol::SD3_5_MEDIUM_REPOSITORY,
+    slug: "sd3-5-medium",
+    guidance: Some(5.0),
+};
+
+/// The production calibration identity `mlx-gen-sd3` publishes for a clean base load of one
+/// `(route, tier)` cell of the shipped turnkey — the string
+/// `mlx-gen-sd3::memory_strategy::production_calibration_fingerprint` mints (inference PR 950,
+/// `crates/media/mlx-gen/mlx-gen-sd3/src/memory_strategy.rs:269-288` at `d606395b5`), where the
+/// merged engine keys the identity on the PROVEN ARTIFACT TIER and not on the route alone: the
+/// three tiers of one route are three different resident sets, so one string cannot price all
+/// three.
+///
+/// Written here as well so the plan/arm binding is weights-free and holds at inference
+/// `c6d6a4db`, whose `mlx-gen-sd3` publishes no production identity at all. The measured
+/// `sd3-5-large-bf16-mlx-shared-ladder-2026-08-03-v1` is deliberately NOT reachable from this
+/// table: it belongs only to the content-pinned SC-15522 snapshot loaded with `quantize == None`,
+/// which is not a shipped turnkey and which no anchor plans. A capture that loads a different
+/// identity — that measured string, or the weights-free registry string
+/// `sd3-5-mlx-registry-behavior-v2-*` — is refused by name in `run_sd3` rather than emitted as
+/// this cell's evidence, so the two copies cannot drift unnoticed once the pin bump lands.
+fn sd3_calibration_fingerprint(arm: Sd3Arm, tier: &str) -> String {
+    format!("{}-{tier}-mlx-shared-ladder-v1", arm.slug)
+}
+
+const SD3_ARMS: [Sd3Arm; 3] = [SD3_LARGE_ARM, SD3_LARGE_TURBO_ARM, SD3_MEDIUM_ARM];
+
+/// Which family member the plan asks for, from `(target.provider, target.mode)` — never assumed.
+/// SD3.5 declares an `image_to_image` route on both lanes, which no anchor plans and this arm does
+/// not implement; measuring it as its nearest text-to-image neighbour would be a mislabelled record.
+fn sd3_arm(request: &Value) -> Result<Sd3Arm, String> {
+    let planned = protocol::planned(request)?;
+    let provider = planned
+        .pointer("/target/provider")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "planned.target.provider must be a string".to_owned())?;
+    let mode = planned
+        .pointer("/target/mode")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "planned.target.mode must be a string".to_owned())?;
+    SD3_ARMS
+        .into_iter()
+        .find(|arm| arm.provider == provider && mode == "text_to_image")
+        .ok_or_else(|| {
+            format!("the MLX SD3.5 arm does not implement provider {provider:?} in mode {mode:?}")
+        })
+}
+
+/// The artifact one SD3.5 capture loads, and the `LoadSpec` that opens exactly that tier.
+#[derive(Debug)]
+struct Sd3Artifact {
+    arm: Sd3Arm,
+    repository: String,
+    revision: String,
+    tier: &'static str,
+    spec: LoadSpec,
+}
+
+/// The env-free half of [`sd3_load_spec`], so the tier and shape bindings are unit-testable without
+/// a snapshot on disk.
+///
+/// The `LoadSpec` is the WORKER's still-image shape, not the engine's calibration-gate preference:
+/// `image_jobs/base.rs` builds `LoadSpec::new(Dir(standard_tier_subdir(...)))` with the load quant
+/// settled onto the resolved tier and then never touches `offload_policy` or `load_shape` — sd3 has
+/// no `mlx.memoryStrategyContract`, so `evaluate_declared_mlx_load_shape_for_request` returns early,
+/// `apply_declared_mlx_load_policy_for_request` early-returns on `NotEvaluated`, and
+/// `memory_route_registry::RULES` carries no MLX sd3 row. The defaults are therefore what production
+/// loads: `OffloadPolicy::Resident` + `LoadShape::EagerMaterialization`, which is also the MLX anchor
+/// composition (`ANCHOR_STRATEGY.mlx`, `isDerivable`). Both are set EXPLICITLY here so a gen-core
+/// default change cannot silently move the measured shape.
+fn sd3_load_spec_at(
+    request: &Value,
+    load_shape: LoadShape,
+    repository: String,
+    revision: String,
+    root: PathBuf,
+) -> Result<Sd3Artifact, String> {
+    let arm = sd3_arm(request)?;
+    protocol::validate_plain_overlay_target(request, arm.execution_path)?;
+    protocol::validate_still_geometry(request, arm.still_calibration)?;
+    let tier = match planned_qwen_tier(request)? {
+        "bf16" => "bf16",
+        "q4" => "q4",
+        "q8" => "q8",
+        _ => unreachable!("planned_qwen_tier returned an unsupported tier"),
+    };
+    protocol::validate_artifact_identity(&repository, &revision, arm.expected_repository)?;
+    let root = std::fs::canonicalize(&root)
+        .map_err(|error| format!("canonicalize {}: {error}", arm.root_env))?;
+    // The root must end in the PLANNED tier's directory, so a stale `…/q4` export can never satisfy
+    // a q8 or bf16 plan and quietly re-label another tier's peaks.
+    protocol::validate_huggingface_snapshot_root(
+        &root,
+        &repository,
+        &revision,
+        tier,
+        arm.expected_repository,
+    )?;
+    let (precision, quant) = tier_precision_quant(tier);
+    let mut spec = LoadSpec::new(WeightsSource::Dir(root))
+        .with_offload_policy(OffloadPolicy::Resident)
+        .with_load_shape(load_shape);
+    spec.precision = precision;
+    if let Some(quant) = quant {
+        spec = spec.with_quant(quant);
+    }
+    Ok(Sd3Artifact {
+        arm,
+        repository,
+        revision,
+        tier,
+        spec,
+    })
+}
+
+fn sd3_load_spec(request: &Value, load_shape: LoadShape) -> Result<Sd3Artifact, String> {
+    let arm = sd3_arm(request)?;
+    let repository = protocol::required_env(arm.repository_env)?;
+    let revision = protocol::required_env(arm.revision_env)?;
+    let root = PathBuf::from(protocol::required_env(arm.root_env)?);
+    sd3_load_spec_at(request, load_shape, repository, revision, root)
+}
+
+/// The two-step calibration request, in the worker's own shape: SD3.5 is a true-CFG family, so the
+/// guidance-carrying routes forward guidance and a negative prompt and Turbo forwards neither.
+fn sd3_request(arm: Sd3Arm, width: u32, height: u32) -> GenerationRequest {
+    GenerationRequest {
+        prompt: "a photorealistic red apple on a wooden table, studio lighting".to_owned(),
+        negative_prompt: arm
+            .guidance
+            .map(|_| "low quality, blurry, distorted".to_owned()),
+        width,
+        height,
+        count: 1,
+        seed: Some(SD3_SEED),
+        // The first `Step` callback closes a conservative conditioning envelope; the second gives
+        // denoise its own measured interval before `Decoding`.
+        steps: Some(2),
+        guidance: arm.guidance,
+        ..Default::default()
+    }
+}
+
+const SD3_SEED: u64 = 22730;
+
+/// The fixture must name the member, tier and geometry it measured, so a Medium q8 record can never
+/// be attributed to a Large bf16 capture that merely reused the string.
+fn planned_sd3_seed(arm: Sd3Arm, request: &Value, tier: &str, width: u32) -> Result<u64, String> {
+    let fixture = protocol::planned(request)?
+        .get("fixture")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "planned.fixture must be a string".to_owned())?;
+    let prefix = format!("{}-mlx-{tier}-{width}-seed", arm.slug);
+    let remainder = fixture
+        .strip_prefix(&prefix)
+        .ok_or_else(|| format!("planned.fixture {fixture:?} must start with {prefix:?}"))?;
+    let (seed, steps) = remainder
+        .split_once("-step")
+        .ok_or_else(|| format!("planned.fixture {fixture:?} must end with -step<count>"))?;
+    let seed = seed
+        .parse::<u64>()
+        .map_err(|error| format!("parse SD3.5 fixture seed {seed:?}: {error}"))?;
+    if steps != "2" {
+        return Err(format!(
+            "planned.fixture {fixture:?} must use the two-step calibration request"
+        ));
+    }
+    Ok(seed)
+}
+
+fn sd3_context(
+    selection: MemorySelection,
+    calibration: &MemoryCalibrationIdentity,
+    fingerprint: &str,
+    width: u32,
+    height: u32,
+    total_bytes: u64,
+) -> MemoryRunContext {
+    MemoryRunContext {
+        selection,
+        optimization_authority: MemoryOptimizationAuthority::Calibrated,
+        calibration_abi: calibration.abi,
+        calibration_fingerprint: fingerprint.to_owned(),
+        load_shape: calibration.load_shape,
+        mode: MemoryMode::TextToImage,
+        has_reference: false,
+        use_pid: false,
+        has_phases: false,
+        geometry: MemoryGeometry {
+            width,
+            height,
+            batch: 1,
+            frames: 1,
+            reference_count: 0,
+        },
+        overlay: None,
+        budget: MemoryBudget {
+            total_bytes,
+            committed_bytes: 0,
+            reclaimable_bytes: 0,
+            reserved_headroom_bytes: 0,
+        },
+        predicted_peak_bytes: 1,
+        cache_state: MemoryCacheState::Cold,
+        evidence_revision: format!("sc-22730@{}", protocol::INFERENCE_PIN),
+    }
+}
+
+/// Real capture arm for the three SD3.5 base text-to-image routes, on every shipped tier.
+///
+/// Loads through the production catalog (`runtime_macos::catalog().media()`) — the same seam the
+/// worker's `inference_runtime::load` uses — never a replica of the engine's loader.
+fn run_sd3(request: &Value) -> Result<Value, String> {
+    // Refuse an unimplemented `(provider, mode)` BEFORE any environment or weight work — the arm
+    // itself is taken off the resolved artifact below, once the tier and repository are bound.
+    sd3_arm(request)?;
+    let planned_shape = planned_load_shape(request)?;
+    let selection = planned_selection(request)?;
+    if selection.strategy != MemoryStrategy::Resident {
+        return Err(format!(
+            "MLX SD3.5 anchor capture measures the resident composition the worker loads, got {:?}",
+            selection.strategy
+        ));
+    }
+    let (width, height) = protocol::target_geometry(request)?;
+    let artifact = sd3_load_spec(request, planned_shape)?;
+    // Attribute the record to the arm the ARTIFACT was resolved for, not to the one the request
+    // was matched against before any of the env or tier binding ran. They cannot differ — both go
+    // through `sd3_arm` — but reading it off the artifact is what makes that a fact of the code
+    // rather than of this function's ordering.
+    let arm = artifact.arm;
+    let tier = artifact.tier;
+    let seed = planned_sd3_seed(arm, request, tier, width)?;
+    if seed != SD3_SEED {
+        return Err(format!(
+            "planned.fixture seed {seed} does not match the SD3.5 calibration seed {SD3_SEED}"
+        ));
+    }
+    let catalog =
+        runtime_macos::catalog().map_err(|error| format!("build MLX catalog: {error}"))?;
+    let generator = catalog
+        .media()
+        .load(arm.provider, &artifact.spec)
+        .map_err(|error| format!("load real {} {tier} provider: {error}", arm.provider))?;
+    let contract = generator
+        .memory_strategy_contract()
+        .ok_or_else(|| format!("loaded {} has no memory-strategy contract", arm.provider))?;
+    contract.validate_selection(&selection).map_err(|error| {
+        format!(
+            "pinned {} provider rejected planned selection: {error}",
+            arm.provider
+        )
+    })?;
+    let strategy = attested_strategy(
+        request,
+        &selection,
+        &contract.engaged_composition(selection.strategy),
+    )?;
+    let calibration = contract.calibration.as_ref().ok_or_else(|| {
+        format!(
+            "pinned {} provider has no calibration identity for the shipped turnkey; \
+             mlx-gen-sd3 publishes one only from `production_calibration_fingerprint` (sc-22730)",
+            arm.provider
+        )
+    })?;
+    let expected_fingerprint = sd3_calibration_fingerprint(arm, artifact.tier);
+    if calibration.fingerprint != expected_fingerprint {
+        return Err(format!(
+            "pinned {} published calibration {:?}, not this route's {} production identity {:?}",
+            arm.provider, calibration.fingerprint, artifact.tier, expected_fingerprint
+        ));
+    }
+    let planned_fingerprint = protocol::planned(request)?
+        .get("calibrationFingerprint")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "planned.calibrationFingerprint must be a string".to_owned())?;
+    if planned_fingerprint != calibration.fingerprint {
+        return Err(format!(
+            "plan/provider calibration mismatch: plan={planned_fingerprint}, pinned provider={}",
+            calibration.fingerprint
+        ));
+    }
+    if calibration.load_shape != planned_shape {
+        return Err(format!(
+            "plan/provider load-shape mismatch: plan={}, pinned provider={}",
+            load_shape_key(planned_shape),
+            load_shape_key(calibration.load_shape)
+        ));
+    }
+    let hardware_bytes = request
+        .pointer("/hardware/memoryBytes")
+        .and_then(Value::as_u64)
+        .ok_or_else(|| "run request.hardware.memoryBytes must be an integer".to_owned())?;
+    let context = sd3_context(
+        selection,
+        calibration,
+        &calibration.fingerprint,
+        width,
+        height,
+        hardware_bytes,
+    );
+
+    let conditioning = Cell::new(PhaseMemory {
+        active: 0,
+        cache: 0,
+    });
+    let denoise = Cell::new(PhaseMemory {
+        active: 0,
+        cache: 0,
+    });
+    clear_cache();
+    reset_peak_memory();
+    let pre_rung_active = get_active_memory() as u64;
+    let pre_rung_cache = get_cache_memory() as u64;
+    let selected = one_image(scoped_generate(
+        generator.as_ref(),
+        sd3_request(arm, width, height),
+        &context,
+        None,
+        &mut |progress| match progress {
+            Progress::Step { current: 1, .. } => {
+                conditioning.set(PhaseMemory::capture());
+                reset_peak_memory();
+            }
+            Progress::Decoding => {
+                denoise.set(PhaseMemory::capture());
+                reset_peak_memory();
+            }
+            _ => {}
+        },
+    )?)?;
+    let decode = PhaseMemory::capture();
+    let conditioning = conditioning.get();
+    let denoise = denoise.get();
+    if [conditioning.active, denoise.active, decode.active].contains(&0) {
+        return Err(format!(
+            "a synchronized {} lifecycle phase reported a zero active peak",
+            arm.provider
+        ));
+    }
+    let overall = PhaseMemory::overall(&[conditioning, denoise, decode]);
+    let predicted_peaks = image_predicted_peak_bytes(conditioning, denoise, decode);
+    let predicted = predicted_peaks.overall;
+
+    // Admission hygiene at the loaded provider's OWN gate: an exact fit is accepted (so the two
+    // rejections below are evidence, not a blanket refusal), an unknown budget and a mutated
+    // fingerprint are refused.
+    let mut exact = context.clone();
+    exact.predicted_peak_bytes = predicted;
+    exact.budget.total_bytes = predicted;
+    if !matches!(
+        generator.memory_strategy_safety_check(&exact),
+        MemorySafetyDecision::Accept
+    ) {
+        return Err(format!(
+            "{} provider rejected an exact-fit calibrated budget",
+            arm.provider
+        ));
+    }
+    let mut unknown = context.clone();
+    unknown.budget.total_bytes = 0;
+    if !matches!(
+        generator.memory_strategy_safety_check(&unknown),
+        MemorySafetyDecision::Reject { .. }
+    ) {
+        return Err(format!(
+            "{} provider accepted an unknown/zero memory budget",
+            arm.provider
+        ));
+    }
+    let mut stale = context.clone();
+    stale.calibration_fingerprint = "stale-sd3-5-fingerprint".to_owned();
+    if !matches!(
+        generator.memory_strategy_safety_check(&stale),
+        MemorySafetyDecision::Reject { .. }
+    ) {
+        return Err(format!(
+            "{} provider accepted stale calibration evidence",
+            arm.provider
+        ));
+    }
+
+    let baseline = one_image(
+        generator
+            .generate(&sd3_request(arm, width, height), &mut |_| {})
+            .map_err(|error| format!("generate unselected {} reference: {error}", arm.provider))?,
+    )?;
+    let (maximum_error, mean_error) = image_max_mean_abs(&selected, &baseline)?;
+    if maximum_error > MAX_THRESHOLD || mean_error > MEAN_THRESHOLD {
+        return Err(format!(
+            "{} selected rung exceeded unselected parity: max={maximum_error:.6}, mean={mean_error:.6}",
+            arm.provider
+        ));
+    }
+    let mutated = qwen_negative_mutation(&selected);
+    let (mutated_maximum, mutated_mean) = image_max_mean_abs(&mutated, &baseline)?;
+    if mutated_maximum <= MAX_THRESHOLD && mutated_mean <= MEAN_THRESHOLD {
+        return Err(format!(
+            "{} output mutation did not breach the parity envelope",
+            arm.provider
+        ));
+    }
+
+    let lifecycle_blocker = concat!(
+        "sc-22730 anchor capture measures exact per-phase memory, strategy identity and admission ",
+        "for the SD3.5 base routes; the formal warm/cancel/error lifecycle scenarios remain not_run ",
+        "because this run does not repeat the full promotion-quality and lifecycle certification suite"
+    );
+    let mut fragment = json!({
+        "status": "runtime_complete",
+        "strategy": strategy,
+        "loadShape": load_shape_key(calibration.load_shape),
+        "artifact": {
+            "repository": artifact.repository,
+            "resolvedRevision": artifact.revision,
+            "variant": tier,
+        },
+        "sweep": sdxl_runtime_complete_sweep(request)?,
+        "scenarios": [
+            { "name": "exact_fit", "result": "passed", "predictedBytes": predicted, "effectiveBudgetBytes": predicted },
+            { "name": "unknown_budget", "result": "passed" },
+            { "name": "stale_evidence", "result": "passed" },
+            { "name": "warm_repeat", "result": "not_run", "reason": lifecycle_blocker },
+            { "name": "cancel", "result": "not_run", "reason": lifecycle_blocker },
+            { "name": "error", "result": "not_run", "reason": lifecycle_blocker },
+            { "name": "loadability", "result": "passed" },
+            { "name": "overlay", "result": "not_applicable", "reason": "settled below from the declared target" }
+        ],
+        "predictedPeakBytes": predicted_peaks.json(),
+        "observedMemory": {
+            "conditioning": conditioning.json(),
+            "denoise": denoise.json(),
+            "decode": decode.json(),
+            "overall": overall.json(),
+        },
+        "quality": {
+            "contract": "identical artifact, prompt, negative prompt, guidance, seed, geometry, steps and tier; selected SD3.5 rung versus unselected request",
+            "identicalInputs": true,
+            "result": "passed",
+            "maximumError": maximum_error,
+            "meanError": mean_error,
+            "maximumErrorThreshold": MAX_THRESHOLD,
+            "meanErrorThreshold": MEAN_THRESHOLD,
+        },
+        "negativeMutation": null,
+        "loadability": {
+            "result": "passed",
+            "resolvedPathFingerprint": format!("{}@{}:{tier}", artifact.repository, artifact.revision),
+        },
+        "diagnostics": protocol::diagnostics(
+            &format!("memory-mlx-adapter:{}-shared-ladder", arm.slug),
+            "executed",
+            [lifecycle_blocker.to_owned()],
+            [
+                ("preRungActiveAfterClear", "bytes", pre_rung_active),
+                ("preRungCacheAfterClear", "bytes", pre_rung_cache),
+                ("conditioningActivePeak", "bytes", conditioning.active),
+                ("denoiseActivePeak", "bytes", denoise.active),
+                ("decodeActivePeak", "bytes", decode.active),
+                ("overallAllocatorEnvelope", "bytes", overall.allocator_bytes()),
+                ("negativeMutationMaximumErrorPer255", "count", (mutated_maximum * 255.0).round() as u64),
+                ("negativeMutationMeanErrorPer255", "count", (mutated_mean * 255.0).round() as u64),
+            ],
+        ),
+        "capturedAt": protocol::captured_at(),
+    });
+    protocol::settle_plain_overlay_scenario(request, &mut fragment, arm.execution_path)?;
+    Ok(fragment)
+}
+
+fn run(request: &Value) -> Result<Value, String> {
+    let provider = protocol::planned(request)?
+        .pointer("/target/provider")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "planned.target.provider must be a string".to_owned())?;
+    // sc-18104: this used to be `else { run_qwen_provider(request) }`, so ANY provider the MLX
+    // adapter does not implement was silently routed to the Qwen arm rather than refused. It then
+    // failed further in on a Qwen-shaped complaint that named neither the provider nor the missing
+    // arm — measured by reverting this match, capturing `flux2_dev` reported
+    // `planned.target.overlay must be a string`, which reads as a malformed plan entry and sends the
+    // operator off fixing fixtures or provisioning weights for the wrong model. Refuse by name
+    // instead, mirroring the Candle adapter's `plain_execution_path` (candle.rs:540-548).
+    match provider {
+        Z_IMAGE_PROVIDER => run_z_image_reference(request),
+        // sc-22724: the undistilled base rides the same arm under its own registry id, artifact
+        // family and execution path; the arm resolves which member from `(provider, mode)`.
+        Z_IMAGE_BASE_PROVIDER => run_z_image_reference(request),
+        KREA_BASE_PROVIDER => run_krea_base(request),
+        SDXL_PROVIDER => run_sdxl(request),
+        KREA_PROVIDER => run_krea_control(request),
+        QWEN_PROVIDER => run_qwen_provider(request),
+        // sc-22728: the Qwen edit lane. One engine provider serves both shipped catalog ids, so the
+        // arm resolves which from `(provider, modelId)` and refuses any other pair by name.
+        QWEN_EDIT_PROVIDER => run_qwen_edit_provider(request),
+        FLUX2_PROVIDER => run_flux2(request),
+        // sc-22727: both klein catalog models (`flux2_klein_9b`, `flux2_klein_9b_kv`) load through
+        // this ONE engine provider id; `flux2_arm` resolves which from `(provider, modelId)` and
+        // refuses an unknown pair by name.
+        FLUX2_KLEIN_PROVIDER => run_flux2(request),
+        // sc-22726: the FLUX.1 family. Three registry ids on one arm — the two base text-to-image
+        // providers of `mlx-gen-flux`, and `mlx-gen-pulid`'s identity route over the same
+        // FLUX.1-dev backbone. The arm resolves which member from `(provider, mode)`.
+        // One arm per line: `stale-lane-report.mjs#adapterCapturableProviders` derives the
+        // capturable provider set by parsing these arms, and only accepts a bare literal or a
+        // single `&str` const per arm — an or-pattern would make it throw.
+        FLUX1_DEV_PROVIDER => run_flux_one(request),
+        FLUX1_SCHNELL_PROVIDER => run_flux_one(request),
+        PULID_FLUX_PROVIDER => run_flux_one(request),
+        // sc-22731: the SANA and Chroma1 families. Five registry ids on one arm — the two
+        // `mlx-gen-sana` routes and the three `mlx-gen-chroma` ones. One arm per line, for the
+        // same reason the FLUX.1 block above is: `stale-lane-report.mjs#adapterCapturableProviders`
+        // parses these arms and accepts only a bare literal or a single `&str` const per arm.
+        SANA_PROVIDER => run_sana_chroma(request),
+        SANA_SPRINT_PROVIDER => run_sana_chroma(request),
+        CHROMA1_HD_PROVIDER => run_sana_chroma(request),
+        CHROMA1_BASE_PROVIDER => run_sana_chroma(request),
+        CHROMA1_FLASH_PROVIDER => run_sana_chroma(request),
+        // sc-18808: the first VIDEO arm. Every arm above it refuses `geometry.frames != 1`; this one
+        // validates against LTX's own resolution/temporal envelope instead.
+        LTX_PROVIDER => run_ltx(request),
+        // SC-18783: LTX-2.5 is a separate provider contract. Its variant and decoder axes are
+        // validated inside the arm rather than being folded into the legacy 2.3 route.
+        LTX25_PROVIDER => mlx_ltx25::run(request),
+        // sc-18663: the second video arm, and the first joint audio+video one. Same rule as LTX —
+        // it accepts a multi-frame geometry only by validating against MiniMax-H3's own lattice,
+        // stride and canvas budget, read off the pinned engine crate.
+        MINIMAX_PROVIDER => run_minimax_h3(request),
+        // sc-22730: the SD3.5 family. Three distinct engine providers sharing one arm, each with
+        // its own artifact family and published identity; `sd3_arm` resolves which from
+        // `(provider, mode)` and refuses every other pair by name.
+        //
+        // THREE SEPARATE ARMS ON PURPOSE, like the FLUX.1 members above. The derived capturability
+        // report parses this block arm by arm
+        // (`stale-lane-report.mjs#adapterCapturableProviders`) and recognizes a string literal, a
+        // single `&str` const, or the refusal arm's binding — never an or-pattern, which it refuses
+        // to guess about rather than silently reading this lane as having no arm for the family.
+        SD3_LARGE_PROVIDER => run_sd3(request),
+        SD3_LARGE_TURBO_PROVIDER => run_sd3(request),
+        SD3_MEDIUM_PROVIDER => run_sd3(request),
+        other => Err(format!(
+            "MLX five-rung calibration does not implement provider {other:?}"
+        )),
+    }
+}
+
 /// The geometry one `mlx:krea_realtime_14b` capture renders, with the AR loop's own derived
 /// quantities carried beside the declared axes rather than asserted away.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -15564,6 +16173,281 @@ mod flux_one_tests {
         );
         // Not an env error: the refusal fired before `SCENEWORKS_FLUX1_SCHNELL_*` was read.
         assert!(!error.contains("required environment variable"), "{error}");
+    }
+}
+
+/// sc-22730 — the SD3.5 family on the MLX lane.
+///
+/// Every claim here is settled from the plan, the arm table and a staged directory tree, BEFORE a
+/// single weight file is opened, so the whole family is provable on a CPU-only host. The measured
+/// render itself belongs to the terminal capture campaign.
+#[cfg(test)]
+mod sd3_tests {
+    use super::*;
+
+    fn sd3_snapshot_root(repository: &str, revision: &str, tier: &str) -> PathBuf {
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir()
+            .join(format!("sc-22730-mlx-{}-{nonce}", std::process::id()))
+            .join(format!("models--{}", repository.replace('/', "--")))
+            .join("snapshots")
+            .join(revision)
+            .join(tier);
+        std::fs::create_dir_all(&root).unwrap();
+        root
+    }
+
+    fn sd3_planned(provider: &str, mode: &str, tier: &str, fixture: &str) -> Value {
+        json!({
+            "planned": {
+                "target": {
+                    "provider": provider,
+                    "modelId": provider,
+                    "tier": tier,
+                    "mode": mode,
+                    "overlay": "none",
+                    "geometry": { "width": 1024, "height": 1024, "batch": 1, "frames": 1 }
+                },
+                "backend": "mlx",
+                "loadShape": "eager_materialization",
+                "strategy": { "rung": "resident", "engagedRungs": ["resident"], "parameters": {} },
+                "calibrationFingerprint": "unused",
+                "fixture": fixture
+            }
+        })
+    }
+
+    /// The arm resolves on `(provider, mode)` and refuses every other pair BY NAME. SD3.5 declares
+    /// an `image_to_image` route on both lanes which no anchor plans and this arm does not
+    /// implement; measuring it as its nearest text-to-image neighbour would be a mislabelled
+    /// record, so it is refused rather than silently served.
+    #[test]
+    fn the_sd3_arm_resolves_on_provider_and_mode_and_refuses_everything_else() {
+        for arm in SD3_ARMS {
+            let request = sd3_planned(arm.provider, "text_to_image", "q4", "unused");
+            assert_eq!(sd3_arm(&request).unwrap(), arm, "{}", arm.provider);
+        }
+        for (provider, mode) in [
+            (SD3_LARGE_PROVIDER, "image_to_image"),
+            (SD3_MEDIUM_PROVIDER, "edit_image"),
+            ("sd3_5_enormous", "text_to_image"),
+        ] {
+            let request = sd3_planned(provider, mode, "q4", "unused");
+            let error = sd3_arm(&request).expect_err("an unimplemented pair must be refused");
+            assert!(error.contains(provider), "{error} must name {provider}");
+            assert!(error.contains(mode), "{error} must name {mode}");
+        }
+    }
+
+    /// Each member binds its OWN artifact family, and the root must end in the PLANNED tier's
+    /// directory: a staged `…/q4` export can never satisfy a q8 or bf16 plan, and one member's
+    /// repository can never satisfy another's.
+    #[test]
+    fn the_sd3_load_spec_binds_the_member_and_the_planned_tier() {
+        for arm in SD3_ARMS {
+            for tier in ["q4", "q8", "bf16"] {
+                let revision = "0".repeat(40);
+                let root = sd3_snapshot_root(arm.expected_repository, &revision, tier);
+                let fixture = format!("{}-mlx-{tier}-1024-seed{SD3_SEED}-step2", arm.slug);
+                let request = sd3_planned(arm.provider, "text_to_image", tier, &fixture);
+                let artifact = sd3_load_spec_at(
+                    &request,
+                    LoadShape::EagerMaterialization,
+                    arm.expected_repository.to_owned(),
+                    revision.clone(),
+                    root.clone(),
+                )
+                .unwrap_or_else(|error| panic!("{} {tier}: {error}", arm.provider));
+                assert_eq!(artifact.arm, arm, "{} {tier}", arm.provider);
+                assert_eq!(artifact.tier, tier, "{}", arm.provider);
+                // The worker's still-image shape: Resident, eager, and the load quant settled onto
+                // the resolved tier — which is exactly what `mlx-gen-sd3` requires before it will
+                // publish a production identity at all (`artifact_tier != spec.quantize` → none).
+                assert_eq!(artifact.spec.offload_policy, OffloadPolicy::Resident);
+                assert_eq!(artifact.spec.load_shape, LoadShape::EagerMaterialization);
+                assert_eq!(artifact.spec.precision, Precision::Bf16);
+                assert_eq!(artifact.spec.quantize, tier_precision_quant(tier).1);
+
+                // Another tier's plan against this root is refused.
+                for other in ["q4", "q8", "bf16"] {
+                    if other == tier {
+                        continue;
+                    }
+                    let other_fixture =
+                        format!("{}-mlx-{other}-1024-seed{SD3_SEED}-step2", arm.slug);
+                    let crossed = sd3_planned(arm.provider, "text_to_image", other, &other_fixture);
+                    let error = sd3_load_spec_at(
+                        &crossed,
+                        LoadShape::EagerMaterialization,
+                        arm.expected_repository.to_owned(),
+                        revision.clone(),
+                        root.clone(),
+                    )
+                    .expect_err(&format!(
+                        "{} must refuse a {other} plan against a {tier} root",
+                        arm.provider
+                    ));
+                    // The refusal must be ABOUT the crossed tier: `.is_err()` alone would be
+                    // satisfied by an unrelated failure (a missing subdir, a bad fixture) and
+                    // would keep passing if the tier check itself were deleted.
+                    assert!(
+                        error.contains(other),
+                        "{} refused a {other} plan against a {tier} root for the wrong reason: \
+                         {error}",
+                        arm.provider
+                    );
+                }
+
+                // A SIBLING member's repository is refused before any weight work.
+                for other in SD3_ARMS {
+                    if other.provider == arm.provider {
+                        continue;
+                    }
+                    let error = sd3_load_spec_at(
+                        &request,
+                        LoadShape::EagerMaterialization,
+                        other.expected_repository.to_owned(),
+                        revision.clone(),
+                        root.clone(),
+                    )
+                    .expect_err(&format!(
+                        "{} must refuse {}'s repository",
+                        arm.provider, other.provider
+                    ));
+                    // And it must name the repository it was handed, not fail for some other
+                    // reason that would survive deleting `validate_artifact_identity`.
+                    assert!(
+                        error.contains(other.expected_repository),
+                        "{} refused {}'s repository for the wrong reason: {error}",
+                        arm.provider,
+                        other.provider
+                    );
+                }
+            }
+        }
+    }
+
+    /// The fixture names the member, tier, geometry edge, seed and step count it measured.
+    #[test]
+    fn the_mlx_sd3_fixture_binds_member_tier_edge_seed_and_steps() {
+        for arm in SD3_ARMS {
+            for tier in ["q4", "q8", "bf16"] {
+                let good = format!("{}-mlx-{tier}-1024-seed{SD3_SEED}-step2", arm.slug);
+                let request = sd3_planned(arm.provider, "text_to_image", tier, &good);
+                assert_eq!(
+                    planned_sd3_seed(arm, &request, tier, 1024).unwrap(),
+                    SD3_SEED,
+                    "{} {tier}",
+                    arm.provider
+                );
+                for bad in [
+                    format!("{}-mlx-{tier}-768-seed{SD3_SEED}-step2", arm.slug),
+                    format!("{}-mlx-{tier}-1024-seed{SD3_SEED}-step3", arm.slug),
+                    format!("{}-candle-{tier}-1024-seed{SD3_SEED}-step2", arm.slug),
+                ] {
+                    let request = sd3_planned(arm.provider, "text_to_image", tier, &bad);
+                    assert!(
+                        planned_sd3_seed(arm, &request, tier, 1024).is_err(),
+                        "{} {tier} must refuse {bad}",
+                        arm.provider
+                    );
+                }
+                // A sibling member's fixture is refused: the slug is part of the prefix, and
+                // `sd3-5-large` is a PREFIX of `sd3-5-large-turbo`, so the tier token that follows
+                // it is what actually separates the two.
+                for other in SD3_ARMS {
+                    if other.provider == arm.provider {
+                        continue;
+                    }
+                    let crossed = format!("{}-mlx-{tier}-1024-seed{SD3_SEED}-step2", other.slug);
+                    let request = sd3_planned(arm.provider, "text_to_image", tier, &crossed);
+                    assert!(
+                        planned_sd3_seed(arm, &request, tier, 1024).is_err(),
+                        "{} must refuse {}'s fixture {crossed}",
+                        arm.provider,
+                        other.provider
+                    );
+                }
+            }
+        }
+    }
+
+    /// Every SD3.5 MLX cell the committed plan declares resolves to an implemented member, and its
+    /// `calibrationFingerprint` is BYTE-FOR-BYTE the production identity this arm demands of the
+    /// loaded provider.
+    ///
+    /// This is the JS↔Rust↔plan binding for the one claim a weights-free host cannot re-derive.
+    /// At the COMPILED PIN `mlx-gen-sd3` publishes no production identity at all — that is what
+    /// inference PR 950 adds — so there is no engine constant for CI at the old pin to read, and
+    /// the arm table is the authority the plan is checked against here. The remaining half of the
+    /// binding, plan-string == LOADED-contract-string, is enforced inside `run_sd3`, which refuses
+    /// a provider whose published identity differs from `sd3_calibration_fingerprint(arm, artifact.tier)`.
+    #[test]
+    fn every_planned_sd3_mlx_cell_is_priced_at_the_arms_production_identity() {
+        let plan: Value = serde_json::from_str(include_str!(
+            "../../../../config/memory-calibration-plan.json"
+        ))
+        .expect("the anchor plan parses");
+        let mut seen = std::collections::BTreeSet::new();
+        for (key, entry) in plan["anchors"].as_object().expect("anchors object") {
+            if !key.ends_with(":mlx") {
+                continue;
+            }
+            let provider = entry["provider"].as_str().unwrap();
+            let Some(arm) = SD3_ARMS.into_iter().find(|arm| arm.provider == provider) else {
+                continue;
+            };
+            seen.insert(key.clone());
+            let (_, rest) = key.split_once(':').unwrap();
+            let tier = rest.split_once(':').unwrap().0;
+            let request = json!({ "planned": {
+                "backend": "mlx",
+                "target": {
+                    "provider": provider,
+                    "modelId": provider,
+                    "tier": tier,
+                    "mode": entry["mode"].clone(),
+                    "overlay": entry["overlay"].clone(),
+                    "geometry": entry["geometry"].clone(),
+                },
+                "loadShape": entry["loadShape"].clone(),
+                "strategy": { "rung": "resident", "engagedRungs": ["resident"], "parameters": {} },
+                "calibrationFingerprint": entry["calibrationFingerprint"].clone(),
+                "fixture": entry["fixture"].clone(),
+            }});
+            assert_eq!(sd3_arm(&request).unwrap(), arm, "{key}");
+            assert_eq!(planned_qwen_tier(&request).unwrap(), tier, "{key}");
+            assert_eq!(
+                entry["calibrationFingerprint"].as_str().unwrap(),
+                sd3_calibration_fingerprint(arm, tier),
+                "{key}"
+            );
+            // The MLX anchor composition is the resident/eager shape the worker loads.
+            assert_eq!(
+                entry["loadShape"].as_str().unwrap(),
+                "eager_materialization",
+                "{key}"
+            );
+            let (width, _) = protocol::target_geometry(&request).unwrap();
+            assert_eq!(
+                planned_sd3_seed(arm, &request, tier, width).unwrap(),
+                SD3_SEED,
+                "{key}"
+            );
+        }
+        let expected: std::collections::BTreeSet<String> =
+            ["sd3_5_large", "sd3_5_large_turbo", "sd3_5_medium"]
+                .iter()
+                .flat_map(|model| {
+                    ["bf16", "q4", "q8"]
+                        .iter()
+                        .map(move |tier| format!("{model}:{tier}:mlx"))
+                })
+                .collect();
+        assert_eq!(seen, expected);
     }
 }
 
