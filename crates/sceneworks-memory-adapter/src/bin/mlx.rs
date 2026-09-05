@@ -69,6 +69,22 @@ const SDXL_SEED: u64 = 18379;
 // harness's runtime-complete quality contract explicit and mutation-sensitive.
 const SDXL_RMS_THRESHOLD: f64 = MAX_THRESHOLD;
 const SDXL_PLAIN_EXECUTION_PATH: &str = "the MLX SDXL base-only text-to-image path";
+/// sc-22729. The InstantID identity route — a BESPOKE provider, not a registry id. `mlx-gen-catalog`
+/// lists `instantid` in `BESPOKE_UTILITY_CRATES` and registers no `ModelDescriptor` for it, so this
+/// arm loads through the crate's own production entry point (`InstantId::load_with_memory_context`,
+/// the one `image_jobs/instantid.rs` calls) rather than through `registry.load`.
+const INSTANTID_PROVIDER: &str = "instantid";
+const INSTANTID_MODEL_ID: &str = "instantid_realvisxl";
+/// `mlx-gen-instantid` publishes its request-contract revision AS the calibration fingerprint
+/// (`memory_strategy.rs:16,88` at the pin) — unlike the candle twin, which mints a separate string.
+const INSTANTID_CALIBRATION_FINGERPRINT: &str = "instantid-request-contract-v1";
+const INSTANTID_EXECUTION_PATH: &str = "the MLX InstantID identity-conditioned character path";
+const INSTANTID_STILL_CALIBRATION: &str = "MLX InstantID identity calibration";
+/// The worker's production identity-route defaults (`image_jobs/instantid.rs`
+/// `INSTANTID_IP_SCALE` / `INSTANTID_CONTROLNET_SCALE`).
+const INSTANTID_IP_SCALE: f32 = 0.8;
+const INSTANTID_CONTROLNET_SCALE: f32 = 0.8;
+const INSTANTID_SEED: u64 = 18381;
 const KREA_PROVIDER: &str = "krea_2_turbo_control";
 const KREA_OVERLAY_REPOSITORY: &str = "SceneWorks/krea2-pose-controlnet-beta";
 const KREA_OVERLAY_FILE: &str = "control_step5000.safetensors";
@@ -1154,6 +1170,8 @@ mod tests {
             "z_image",
             "krea_2_turbo",
             "sdxl",
+            // sc-22729: the bespoke InstantID route is its own provider id on its own arm.
+            "instantid",
             "krea_2_turbo_control",
             "flux2_dev",
             // sc-22727: both klein catalog models ride this ONE registry id.
@@ -1186,6 +1204,7 @@ mod tests {
         assert_eq!(Z_IMAGE_BASE_PROVIDER, "z_image");
         assert_eq!(KREA_BASE_PROVIDER, "krea_2_turbo");
         assert_eq!(SDXL_PROVIDER, "sdxl");
+        assert_eq!(INSTANTID_PROVIDER, "instantid");
         assert_eq!(KREA_PROVIDER, "krea_2_turbo_control");
         assert_eq!(FLUX2_PROVIDER, "flux2_dev");
         assert_eq!(FLUX2_KLEIN_PROVIDER, "flux2_klein_9b");
@@ -1197,6 +1216,441 @@ mod tests {
         assert_eq!(CHROMA1_HD_PROVIDER, "chroma1_hd");
         assert_eq!(CHROMA1_BASE_PROVIDER, "chroma1_base");
         assert_eq!(CHROMA1_FLASH_PROVIDER, "chroma1_flash");
+    }
+
+    fn sdxl_planned(model_id: &str, tier: &str, width: u32) -> Value {
+        json!({
+            "planned": {
+                "target": {
+                    "provider": "sdxl",
+                    "modelId": model_id,
+                    "tier": tier,
+                    "mode": "text_to_image",
+                    "overlay": "none",
+                    "geometry": { "width": width, "height": width, "batch": 1, "frames": 1 }
+                },
+                "backend": "mlx",
+                "loadShape": "deferred_materialization",
+                "strategy": { "rung": "resident", "engagedRungs": ["resident"], "parameters": {} },
+                "calibrationFingerprint": SDXL_CALIBRATION_FINGERPRINT,
+                "fixture": "unused"
+            }
+        })
+    }
+
+    fn sdxl_snapshot_root(repository: &str, revision: &str, tier: &str) -> PathBuf {
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir()
+            .join(format!("sc-22729-sdxl-{}-{nonce}", std::process::id()))
+            .join(format!("models--{}", repository.replace('/', "--")))
+            .join("snapshots")
+            .join(revision)
+            .join(tier);
+        std::fs::create_dir_all(&root).unwrap();
+        root
+    }
+
+    /// sc-22729: the family member is read off the plan's `modelId`, and a model id no member
+    /// serves is refused BY NAME rather than measured as base SDXL. The engine id alone is not an
+    /// artifact identity — all five load through the same `sdxl` provider.
+    #[test]
+    fn sdxl_arm_is_resolved_from_the_plans_model_id() {
+        for (model_id, repository, prefix) in [
+            ("sdxl", protocol::SDXL_REPOSITORY, "sdxl-base-mlx"),
+            ("realvisxl", protocol::REALVISXL_REPOSITORY, "realvisxl-mlx"),
+            (
+                "realvisxl_lightning",
+                protocol::REALVISXL_LIGHTNING_REPOSITORY,
+                "realvisxl-lightning-mlx",
+            ),
+            (
+                "illustrious_xl_v1",
+                protocol::ILLUSTRIOUS_XL_V1_REPOSITORY,
+                "illustrious-xl-v1-mlx",
+            ),
+            (
+                "illustrious_xl_v2",
+                protocol::ILLUSTRIOUS_XL_V2_REPOSITORY,
+                "illustrious-xl-v2-mlx",
+            ),
+        ] {
+            let arm = sdxl_arm(&sdxl_planned(model_id, "q4", 768)).unwrap();
+            assert_eq!(arm.model_id, model_id);
+            assert_eq!(arm.expected_repository, repository);
+            assert_eq!(arm.fixture_prefix, prefix);
+        }
+        // Every arm's env family, execution path, calibration label and slug is its OWN, so one
+        // member's plan can never be satisfied by another member's staged weights.
+        for field in [
+            SDXL_FAMILY.map(|arm| arm.repository_env).to_vec(),
+            SDXL_FAMILY.map(|arm| arm.revision_env).to_vec(),
+            SDXL_FAMILY.map(|arm| arm.root_env).to_vec(),
+            SDXL_FAMILY.map(|arm| arm.expected_repository).to_vec(),
+            SDXL_FAMILY.map(|arm| arm.execution_path).to_vec(),
+            SDXL_FAMILY.map(|arm| arm.still_calibration).to_vec(),
+            SDXL_FAMILY.map(|arm| arm.fixture_prefix).to_vec(),
+            SDXL_FAMILY.map(|arm| arm.slug).to_vec(),
+        ] {
+            let mut unique = field.clone();
+            unique.sort_unstable();
+            unique.dedup();
+            assert_eq!(unique.len(), field.len(), "collision in {field:?}");
+        }
+        for absent in ["instantid_realvisxl", "sdxl_turbo", "z_image"] {
+            let error = sdxl_arm(&sdxl_planned(absent, "q4", 768)).unwrap_err();
+            assert!(error.contains(&format!("modelId {absent:?}")), "{error}");
+        }
+        let error = sdxl_arm(&json!({
+            "planned": { "target": { "provider": "krea_2_turbo", "modelId": "sdxl" } }
+        }))
+        .unwrap_err();
+        assert!(error.contains("does not implement provider"), "{error}");
+    }
+
+    /// sc-22729: the LoadSpec mirrors the worker's MLX still-image shape — the resolved catalog
+    /// route (`image_jobs/base.rs:8785`), the deferred load shape the registry's legacy shaper
+    /// applies to every MLX `sdxl` rule, and the tier's advisory quant
+    /// (`mlx_load_quant_for_resolved_artifact` forwards it for `sdxl`). A q8 plan is never
+    /// satisfied by a q4 export.
+    #[test]
+    fn sdxl_spec_binds_the_route_the_tier_and_the_worker_load_shape() {
+        const REVISION: &str = "36699bb8a6353e61c920e3bf19f0e6f8e4151c55";
+        for arm in SDXL_FAMILY {
+            for (tier, quant) in [
+                ("q4", Some(Quant::Q4)),
+                ("q8", Some(Quant::Q8)),
+                ("bf16", None),
+            ] {
+                let root = sdxl_snapshot_root(arm.expected_repository, REVISION, tier);
+                let selection = MemorySelection {
+                    strategy: MemoryStrategy::Resident,
+                    parameters: MemoryStrategyParameters::default(),
+                    tier: MemoryNumericTier {
+                        precision: Precision::Bf16,
+                        quant,
+                        component_precision_floors: &[],
+                    },
+                };
+                let spec = sdxl_spec_at(arm, root, tier, &selection)
+                    .unwrap_or_else(|error| panic!("{}/{tier}: {error}", arm.model_id));
+                assert_eq!(spec.quantize, quant, "{}/{tier} load quant", arm.model_id);
+                assert_eq!(spec.load_shape, LoadShape::DeferredMaterialization);
+                assert_eq!(spec.offload_policy, OffloadPolicy::Resident);
+                assert_eq!(
+                    spec.resolved_route.as_deref(),
+                    Some(arm.model_id),
+                    "the capture must bind the CATALOG route, not the engine id"
+                );
+            }
+            // A selection whose quant disagrees with the planned tier is refused, so a q8 plan can
+            // never be satisfied by a q4 selection that merely reused the tier string.
+            let root = sdxl_snapshot_root(arm.expected_repository, REVISION, "q8");
+            let mismatched = MemorySelection {
+                strategy: MemoryStrategy::Resident,
+                parameters: MemoryStrategyParameters::default(),
+                tier: MemoryNumericTier {
+                    precision: Precision::Bf16,
+                    quant: Some(Quant::Q4),
+                    component_precision_floors: &[],
+                },
+            };
+            let error = sdxl_spec_at(arm, root, "q8", &mismatched).unwrap_err();
+            assert!(error.contains("q8"), "{}: {error}", arm.model_id);
+        }
+        // A non-resident rung asks the loader to release components in phase order, exactly as the
+        // fit gate's `apply_residency_policy` would settle it.
+        let root = sdxl_snapshot_root(protocol::REALVISXL_REPOSITORY, REVISION, "bf16");
+        let staged = MemorySelection {
+            strategy: MemoryStrategy::StagedResidency,
+            parameters: MemoryStrategyParameters::default(),
+            tier: MemoryNumericTier {
+                precision: Precision::Bf16,
+                quant: None,
+                component_precision_floors: &[],
+            },
+        };
+        let spec = sdxl_spec_at(REALVISXL_ARM, root, "bf16", &staged).unwrap();
+        assert_eq!(spec.offload_policy, OffloadPolicy::Sequential);
+    }
+
+    /// sc-22729: the fixture stem names the MODEL. Reusing base SDXL's fixture on a `realvisxl`
+    /// plan is refused, which is the only thing that keeps a finetune's peaks from being filed
+    /// under the base model when both load through the same provider id.
+    #[test]
+    fn sdxl_fixture_binds_the_family_member_not_just_the_engine() {
+        let fixture = |name: &str| json!({ "planned": { "target": { "provider": "sdxl", "modelId": "realvisxl" }, "fixture": name } });
+        assert_eq!(
+            planned_sdxl_seed(
+                &fixture("realvisxl-mlx-q4-768-seed18379-step2"),
+                REALVISXL_ARM,
+                "q4",
+                768
+            )
+            .unwrap(),
+            SDXL_SEED
+        );
+        for wrong in [
+            "sdxl-base-mlx-q4-768-seed18379-step2",
+            "realvisxl-mlx-q8-768-seed18379-step2",
+            "realvisxl-mlx-q4-1024-seed18379-step2",
+        ] {
+            assert!(
+                planned_sdxl_seed(&fixture(wrong), REALVISXL_ARM, "q4", 768).is_err(),
+                "{wrong} was accepted for realvisxl/q4/768"
+            );
+        }
+        assert!(planned_sdxl_seed(
+            &fixture("realvisxl-mlx-q4-768-seed18379-step30"),
+            REALVISXL_ARM,
+            "q4",
+            768
+        )
+        .is_err());
+    }
+
+    /// sc-22729: the InstantID arm is the bespoke identity route and refuses every other identity
+    /// — a different provider, a different catalog model, a non-character mode, or a plan that
+    /// asks for the deferred shape the pinned provider can never publish.
+    #[test]
+    fn instantid_target_binds_the_bespoke_identity_route() {
+        let planned = |provider: &str, model_id: &str, mode: &str, overlay: &str| {
+            json!({
+                "planned": {
+                    "target": {
+                        "provider": provider, "modelId": model_id, "tier": "bf16", "mode": mode,
+                        "overlay": overlay,
+                        "geometry": { "width": 1024, "height": 1024, "batch": 1, "frames": 1 }
+                    },
+                    "backend": "mlx",
+                    "loadShape": "eager_materialization",
+                    "strategy": { "rung": "resident", "engagedRungs": ["resident"], "parameters": {} },
+                    "calibrationFingerprint": INSTANTID_CALIBRATION_FINGERPRINT,
+                    "fixture": "instantid-realvisxl-mlx-bf16-1024-seed18381-step2"
+                }
+            })
+        };
+        validate_instantid_target(&planned(
+            "instantid",
+            "instantid_realvisxl",
+            "character_image",
+            "identity",
+        ))
+        .unwrap();
+        for (provider, model_id, mode, overlay, needle) in [
+            (
+                "sdxl",
+                "instantid_realvisxl",
+                "character_image",
+                "identity",
+                "does not implement provider",
+            ),
+            (
+                "instantid",
+                "realvisxl",
+                "character_image",
+                "identity",
+                "requires modelId",
+            ),
+            (
+                "instantid",
+                "instantid_realvisxl",
+                "text_to_image",
+                "identity",
+                "character_image mode",
+            ),
+            (
+                "instantid",
+                "instantid_realvisxl",
+                "character_image",
+                "none",
+                "identity",
+            ),
+        ] {
+            let error =
+                validate_instantid_target(&planned(provider, model_id, mode, overlay)).unwrap_err();
+            assert!(
+                error.contains(needle),
+                "{provider}/{model_id}/{mode}/{overlay}: {error}"
+            );
+        }
+        // The provider hard-codes `LoadShape::EagerMaterialization` on its calibration identity, so
+        // a deferred plan is refused before any weight is opened.
+        let mut deferred = planned(
+            "instantid",
+            "instantid_realvisxl",
+            "character_image",
+            "identity",
+        );
+        deferred["planned"]["loadShape"] = json!("deferred_materialization");
+        let error = run_instantid(&deferred).unwrap_err();
+        assert!(error.contains("eager_materialization"), "{error}");
+        // The MLX lane honours all three packed tiers (the candle lane is dense-only).
+        assert_eq!(instantid_numeric_tier("q4").quant, Some(Quant::Q4));
+        assert_eq!(instantid_numeric_tier("q8").quant, Some(Quant::Q8));
+        assert_eq!(instantid_numeric_tier("bf16").quant, None);
+    }
+
+    /// sc-22729: the artifact digest is over the ORDERED paths with a record separator, so a swap
+    /// between two roles changes it and two different splits of the same text cannot collide. This
+    /// is the axis the provider's `overlay_key()` carries, so it is what stops one InstantID
+    /// artifact set from pricing another.
+    #[test]
+    fn instantid_artifact_fingerprint_is_ordered_and_separated() {
+        let a = Path::new("/w/a");
+        let b = Path::new("/w/b");
+        assert_ne!(
+            instantid_artifact_fingerprint(&[a, b]),
+            instantid_artifact_fingerprint(&[b, a]),
+            "role order must be part of the digest"
+        );
+        assert_ne!(
+            instantid_artifact_fingerprint(&[Path::new("/ab"), Path::new("/c")]),
+            instantid_artifact_fingerprint(&[Path::new("/a"), Path::new("/bc")]),
+            "the record separator must stop a split collision"
+        );
+        let digest = instantid_artifact_fingerprint(&[a, b]);
+        assert_eq!(digest.len(), 64);
+        assert!(digest.chars().all(|c| c.is_ascii_hexdigit()));
+        assert!(
+            !digest.contains('='),
+            "the shared safety gate rejects = in an overlay"
+        );
+    }
+
+    /// sc-22729 review: the MLX identity arm driven END TO END on a synthetic tree — the twin of
+    /// `candle.rs`'s `instantid_candle_identity_names_the_missing_identitynet_weight`, which can
+    /// only be COMPILE-checked on this host. Nothing used to reach past the environment reads, so
+    /// deleting `protocol::instantid_controlnet_dir()?`, or a file out of the identity bundle, or a
+    /// path out of the digest, reddened nothing.
+    #[test]
+    fn instantid_binding_names_the_missing_identitynet_weight_and_covers_five_ordered_paths() {
+        use protocol::staging::StagedInstantId;
+
+        let staged =
+            StagedInstantId::install("mlx-instantid", protocol::REALVISXL_REPOSITORY, "bf16");
+        let error = match instantid_binding("bf16") {
+            Err(error) => error,
+            Ok(_) => panic!("an IdentityNet directory carrying no weight file must be refused"),
+        };
+        assert!(
+            error.contains(protocol::INSTANTID_CONTROLNET_WEIGHT_FILE),
+            "{error}"
+        );
+
+        staged.stage_identitynet_weight();
+        let binding = match instantid_binding("bf16") {
+            Ok(binding) => binding,
+            Err(error) => panic!("a complete staged tree must bind: {error}"),
+        };
+        assert_eq!(binding.repository, protocol::REALVISXL_REPOSITORY);
+        assert_eq!(binding.revision, StagedInstantId::REVISION);
+
+        let digest_of = |paths: &[PathBuf]| {
+            instantid_artifact_fingerprint(&paths.iter().map(PathBuf::as_path).collect::<Vec<_>>())
+        };
+        // The digest covers EXACTLY these five, in exactly this order: a permutation and every
+        // four-path subset both differ.
+        let ordered = staged.ordered_paths();
+        assert_eq!(binding.artifact_fingerprint, digest_of(&ordered));
+        let mut swapped = ordered.clone();
+        swapped.swap(3, 4);
+        assert_ne!(
+            binding.artifact_fingerprint,
+            digest_of(&swapped),
+            "the digest must be order-sensitive across the face stack"
+        );
+        for dropped in 0..ordered.len() {
+            let mut short = ordered.clone();
+            short.remove(dropped);
+            assert_ne!(
+                binding.artifact_fingerprint,
+                digest_of(&short),
+                "path {dropped} is not covered by the digest"
+            );
+        }
+        // …and the bundle the binding resolved is the staged one, so a missing bundle file would
+        // have refused above rather than silently binding an empty face stack.
+        assert_eq!(
+            binding.bundle.face_dir,
+            std::fs::canonicalize(&staged.bundle).unwrap()
+        );
+    }
+
+    /// sc-22729: the calibration fingerprints the plan may cite are exactly the strings the pinned
+    /// crates publish — never a hand-written label. `mlx-gen-sdxl` mints ONE route-independent
+    /// string for the whole family; `mlx-gen-instantid` reuses its request-contract revision.
+    ///
+    /// The second half walks the COMMITTED plan: every MLX SDXL-family and InstantID row must cite
+    /// the string its crate can actually emit, and must declare the load shape that crate publishes
+    /// (SDXL takes it from the spec — the worker's deferred shape; InstantID hard-codes eager). A
+    /// plan row that cites a registry-conformance label or the wrong shape would be refused at
+    /// capture time, on a booked host, instead of here.
+    #[test]
+    fn planned_fingerprints_are_the_pinned_crates_own_strings() {
+        assert_eq!(
+            SDXL_CALIBRATION_FINGERPRINT,
+            mlx_gen_sdxl::memory_strategy::MEMORY_CALIBRATION_FINGERPRINT
+        );
+        assert_eq!(
+            INSTANTID_CALIBRATION_FINGERPRINT,
+            mlx_gen_instantid::memory_strategy::REQUEST_EVIDENCE_REVISION
+        );
+        let plan: Value = serde_json::from_str(include_str!(
+            "../../../../config/memory-calibration-plan.json"
+        ))
+        .expect("the anchor plan is valid JSON");
+        let mut checked: Vec<String> = Vec::new();
+        for (key, anchor) in plan["anchors"].as_object().expect("anchors is an object") {
+            if !key.ends_with(":mlx") {
+                continue;
+            }
+            let (fingerprint, load_shape, mode) = match anchor["provider"].as_str() {
+                Some(SDXL_PROVIDER) => (
+                    SDXL_CALIBRATION_FINGERPRINT,
+                    protocol::LOAD_SHAPE_DEFERRED,
+                    "text_to_image",
+                ),
+                Some(INSTANTID_PROVIDER) => (
+                    INSTANTID_CALIBRATION_FINGERPRINT,
+                    protocol::LOAD_SHAPE_EAGER,
+                    "character_image",
+                ),
+                _ => continue,
+            };
+            assert_eq!(
+                anchor["calibrationFingerprint"],
+                json!(fingerprint),
+                "{key}"
+            );
+            assert_eq!(anchor["loadShape"], json!(load_shape), "{key}");
+            assert_eq!(anchor["mode"], json!(mode), "{key}");
+            let model_id = key.split(':').next().expect("anchor key shape");
+            assert!(
+                SDXL_FAMILY.iter().any(|arm| arm.model_id == model_id)
+                    || model_id == INSTANTID_MODEL_ID,
+                "{key} names a model no arm serves"
+            );
+            checked.push(key.clone());
+        }
+        // Not a floor (the candle twin's `>= 6` had the same defect, sc-22729 review): the EXACT
+        // set of MLX keys the family plans. A floor stayed green with a whole member deleted from
+        // the plan, which is the one thing this case is here to notice.
+        checked.sort();
+        let mut expected = SDXL_FAMILY
+            .iter()
+            .map(|arm| arm.model_id)
+            .chain(std::iter::once(INSTANTID_MODEL_ID))
+            .flat_map(|model_id| {
+                ["bf16", "q4", "q8"]
+                    .into_iter()
+                    .map(move |tier| format!("{model_id}:{tier}:mlx"))
+            })
+            .collect::<Vec<_>>();
+        expected.sort();
+        assert_eq!(checked, expected);
     }
 
     #[test]
@@ -6599,7 +7053,104 @@ fn run_krea_base(request: &Value) -> Result<Value, String> {
     Ok(fragment)
 }
 
-fn validate_sdxl_target(request: &Value) -> Result<(), String> {
+/// One member of the MLX SDXL family (sc-22729).
+///
+/// The worker routes five catalog models onto the single `sdxl` engine id
+/// (`crates/sceneworks-worker/src/engines.rs` `MODEL_TABLE`), each with its own independently
+/// pinned tiered rehost. `mlx-gen-sdxl` registers only `MODEL_ID = "sdxl"` and mints ONE
+/// route-independent fingerprint, so the arm is keyed on `(provider, modelId)`: the provider names
+/// the engine, the model id names the artifact family the capture must actually open. Binding the
+/// engine id alone would let a `realvisxl` plan be satisfied by base-SDXL weights and re-label base
+/// SDXL's peaks as the finetune's.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct SdxlArm {
+    /// The catalog model id — `planned.target.modelId`, and the spec's `resolved_route` (the
+    /// worker binds exactly this at `image_jobs/base.rs:8785`).
+    model_id: &'static str,
+    execution_path: &'static str,
+    still_calibration: &'static str,
+    repository_env: &'static str,
+    revision_env: &'static str,
+    root_env: &'static str,
+    expected_repository: &'static str,
+    /// The `planned.fixture` stem, so a capture of one family member can never be attributed to
+    /// another (`<prefix>-<tier>-<width>-seed<n>-step2`).
+    fixture_prefix: &'static str,
+    /// The record's diagnostics source, `memory-mlx-adapter:<slug>-shared-ladder`.
+    slug: &'static str,
+}
+
+const SDXL_BASE_ARM: SdxlArm = SdxlArm {
+    model_id: "sdxl",
+    execution_path: SDXL_PLAIN_EXECUTION_PATH,
+    still_calibration: "MLX SDXL base calibration",
+    repository_env: "SCENEWORKS_SDXL_REPOSITORY",
+    revision_env: "SCENEWORKS_SDXL_REVISION",
+    root_env: "SCENEWORKS_SDXL_ROOT",
+    expected_repository: protocol::SDXL_REPOSITORY,
+    fixture_prefix: "sdxl-base-mlx",
+    slug: "sdxl",
+};
+
+const REALVISXL_ARM: SdxlArm = SdxlArm {
+    model_id: "realvisxl",
+    execution_path: "the MLX RealVisXL base-only text-to-image path",
+    still_calibration: "MLX RealVisXL base calibration",
+    repository_env: "SCENEWORKS_REALVISXL_REPOSITORY",
+    revision_env: "SCENEWORKS_REALVISXL_REVISION",
+    root_env: "SCENEWORKS_REALVISXL_ROOT",
+    expected_repository: protocol::REALVISXL_REPOSITORY,
+    fixture_prefix: "realvisxl-mlx",
+    slug: "realvisxl",
+};
+
+const REALVISXL_LIGHTNING_ARM: SdxlArm = SdxlArm {
+    model_id: "realvisxl_lightning",
+    execution_path: "the MLX RealVisXL Lightning base-only text-to-image path",
+    still_calibration: "MLX RealVisXL Lightning base calibration",
+    repository_env: "SCENEWORKS_REALVISXL_LIGHTNING_REPOSITORY",
+    revision_env: "SCENEWORKS_REALVISXL_LIGHTNING_REVISION",
+    root_env: "SCENEWORKS_REALVISXL_LIGHTNING_ROOT",
+    expected_repository: protocol::REALVISXL_LIGHTNING_REPOSITORY,
+    fixture_prefix: "realvisxl-lightning-mlx",
+    slug: "realvisxl-lightning",
+};
+
+const ILLUSTRIOUS_XL_V1_ARM: SdxlArm = SdxlArm {
+    model_id: "illustrious_xl_v1",
+    execution_path: "the MLX Illustrious-XL v1 base-only text-to-image path",
+    still_calibration: "MLX Illustrious-XL v1 base calibration",
+    repository_env: "SCENEWORKS_ILLUSTRIOUS_XL_V1_REPOSITORY",
+    revision_env: "SCENEWORKS_ILLUSTRIOUS_XL_V1_REVISION",
+    root_env: "SCENEWORKS_ILLUSTRIOUS_XL_V1_ROOT",
+    expected_repository: protocol::ILLUSTRIOUS_XL_V1_REPOSITORY,
+    fixture_prefix: "illustrious-xl-v1-mlx",
+    slug: "illustrious-xl-v1",
+};
+
+const ILLUSTRIOUS_XL_V2_ARM: SdxlArm = SdxlArm {
+    model_id: "illustrious_xl_v2",
+    execution_path: "the MLX Illustrious-XL v2 base-only text-to-image path",
+    still_calibration: "MLX Illustrious-XL v2 base calibration",
+    repository_env: "SCENEWORKS_ILLUSTRIOUS_XL_V2_REPOSITORY",
+    revision_env: "SCENEWORKS_ILLUSTRIOUS_XL_V2_REVISION",
+    root_env: "SCENEWORKS_ILLUSTRIOUS_XL_V2_ROOT",
+    expected_repository: protocol::ILLUSTRIOUS_XL_V2_REPOSITORY,
+    fixture_prefix: "illustrious-xl-v2-mlx",
+    slug: "illustrious-xl-v2",
+};
+
+const SDXL_FAMILY: [SdxlArm; 5] = [
+    SDXL_BASE_ARM,
+    REALVISXL_ARM,
+    REALVISXL_LIGHTNING_ARM,
+    ILLUSTRIOUS_XL_V1_ARM,
+    ILLUSTRIOUS_XL_V2_ARM,
+];
+
+/// Which family member the plan asks for. Refuses by name — a model id no member serves must not
+/// be measured as its nearest neighbour, and the engine id alone is NOT an artifact identity.
+fn sdxl_arm(request: &Value) -> Result<SdxlArm, String> {
     let target = protocol::planned(request)?
         .get("target")
         .and_then(Value::as_object)
@@ -6617,26 +7168,45 @@ fn validate_sdxl_target(request: &Value) -> Result<(), String> {
         .get("modelId")
         .and_then(Value::as_str)
         .ok_or_else(|| "planned.target.modelId must be a string".to_owned())?;
-    if model_id != SDXL_PROVIDER {
-        return Err(format!(
-            "MLX SDXL base calibration requires modelId {SDXL_PROVIDER:?}, got {model_id:?}"
-        ));
-    }
+    SDXL_FAMILY
+        .into_iter()
+        .find(|arm| arm.model_id == model_id)
+        .ok_or_else(|| {
+            format!(
+                "the MLX SDXL arm does not implement modelId {model_id:?} on provider \
+                 {SDXL_PROVIDER:?} (family: {})",
+                SDXL_FAMILY
+                    .iter()
+                    .map(|arm| arm.model_id)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )
+        })
+}
+
+fn validate_sdxl_target(request: &Value) -> Result<SdxlArm, String> {
+    let arm = sdxl_arm(request)?;
+    let target = protocol::planned(request)?
+        .get("target")
+        .and_then(Value::as_object)
+        .ok_or_else(|| "planned.target must be an object".to_owned())?;
     let mode = target
         .get("mode")
         .and_then(Value::as_str)
         .ok_or_else(|| "planned.target.mode must be a string".to_owned())?;
     if mode != "text_to_image" {
         return Err(format!(
-            "MLX SDXL base calibration requires reference-free text_to_image mode, got {mode:?}"
+            "{} requires reference-free text_to_image mode, got {mode:?}",
+            arm.still_calibration
         ));
     }
-    protocol::validate_still_geometry(request, "MLX SDXL base calibration")?;
+    protocol::validate_still_geometry(request, arm.still_calibration)?;
     for field in ["referenceCount", "reference_count"] {
         if let Some(value) = target.get(field) {
             if value.as_u64() != Some(0) {
                 return Err(format!(
-                    "MLX SDXL base calibration requires {field} == 0 when declared"
+                    "{} requires {field} == 0 when declared",
+                    arm.still_calibration
                 ));
             }
         }
@@ -6645,12 +7215,14 @@ fn validate_sdxl_target(request: &Value) -> Result<(), String> {
         if let Some(value) = target.get(field) {
             if value.as_bool() != Some(false) {
                 return Err(format!(
-                    "MLX SDXL base calibration requires {field} == false when declared"
+                    "{} requires {field} == false when declared",
+                    arm.still_calibration
                 ));
             }
         }
     }
-    protocol::validate_plain_overlay_target(request, SDXL_PLAIN_EXECUTION_PATH)
+    protocol::validate_plain_overlay_target(request, arm.execution_path)?;
+    Ok(arm)
 }
 
 fn validate_sdxl_selection_parameters(
@@ -6695,12 +7267,14 @@ fn validate_sdxl_selection_parameters(
     Ok(())
 }
 
-fn planned_sdxl_seed(request: &Value, tier: &str, width: u32) -> Result<u64, String> {
+fn planned_sdxl_seed(request: &Value, arm: SdxlArm, tier: &str, width: u32) -> Result<u64, String> {
     let fixture = protocol::planned(request)?
         .get("fixture")
         .and_then(Value::as_str)
         .ok_or_else(|| "planned.fixture must be a string".to_owned())?;
-    let prefix = format!("sdxl-base-mlx-{tier}-{width}-seed");
+    // sc-22729: the fixture stem names the MODEL, not the engine, so a `realvisxl` capture can
+    // never be attributed to `sdxl` (both load through the same `sdxl` provider id).
+    let prefix = format!("{}-{tier}-{width}-seed", arm.fixture_prefix);
     let remainder = fixture
         .strip_prefix(&prefix)
         .ok_or_else(|| format!("planned.fixture {fixture:?} must start with {prefix:?}"))?;
@@ -6750,25 +7324,52 @@ fn sdxl_request(width: u32, height: u32, seed: u64) -> GenerationRequest {
 }
 
 fn sdxl_load_spec(
-    request: &Value,
+    arm: SdxlArm,
     tier: &str,
     selection: &MemorySelection,
 ) -> Result<(String, String, LoadSpec), String> {
-    validate_sdxl_target(request)?;
-    let repository = protocol::required_env("SCENEWORKS_SDXL_REPOSITORY")?;
-    let revision = protocol::required_env("SCENEWORKS_SDXL_REVISION")?;
-    protocol::validate_artifact_identity(&repository, &revision, protocol::SDXL_REPOSITORY)?;
-    let root = std::fs::canonicalize(PathBuf::from(protocol::required_env(
-        "SCENEWORKS_SDXL_ROOT",
-    )?))
-    .map_err(|error| format!("canonicalize SCENEWORKS_SDXL_ROOT: {error}"))?;
+    let repository = protocol::required_env(arm.repository_env)?;
+    let revision = protocol::required_env(arm.revision_env)?;
+    protocol::validate_artifact_identity(&repository, &revision, arm.expected_repository)?;
+    let root = std::fs::canonicalize(PathBuf::from(protocol::required_env(arm.root_env)?))
+        .map_err(|error| format!("canonicalize {}: {error}", arm.root_env))?;
     protocol::validate_huggingface_snapshot_root(
         &root,
         &repository,
         &revision,
         tier,
-        protocol::SDXL_REPOSITORY,
+        arm.expected_repository,
     )?;
+    Ok((
+        repository,
+        revision,
+        sdxl_spec_at(arm, root, tier, selection)?,
+    ))
+}
+
+/// The env-free half of [`sdxl_load_spec`], so the tier and route binding are unit-testable.
+///
+/// Mirrors the worker's still-image MLX shape: `load_spec` + the resolved tier's advisory quant
+/// (`mlx_load_quant_for_resolved_artifact` returns the quant for `sdxl` — it suppresses it only for
+/// the krea/klein turnkeys), `DeferredMaterialization` from the registry's legacy shaper
+/// (`memory_route_registry.rs` MLX `sdxl` rules are `legacy_shaping: true`), and
+/// `with_resolved_route(request.model)` (`image_jobs/base.rs:8785`, "a shared engine such as `sdxl`
+/// serves several independently pinned catalog routes"). The offload policy is not set on the
+/// worker's MLX branch — it is decided later by `mlx_fit_gate::apply_residency_policy` — so the arm
+/// binds the policy the SELECTED rung implies, which is what that gate would settle on.
+fn sdxl_spec_at(
+    arm: SdxlArm,
+    root: PathBuf,
+    tier: &str,
+    selection: &MemorySelection,
+) -> Result<LoadSpec, String> {
+    let (_, expected_quant) = tier_precision_quant(tier);
+    if selection.tier.quant != expected_quant {
+        return Err(format!(
+            "{}: planned tier {tier} implies quant {expected_quant:?}, selection carries {:?}",
+            arm.still_calibration, selection.tier.quant
+        ));
+    }
     let offload = if selection.strategy == MemoryStrategy::Resident {
         OffloadPolicy::Resident
     } else {
@@ -6776,11 +7377,12 @@ fn sdxl_load_spec(
     };
     let mut spec = LoadSpec::new(WeightsSource::Dir(root))
         .with_offload_policy(offload)
-        .with_load_shape(LoadShape::DeferredMaterialization);
-    if let Some(quant) = selection.tier.quant {
+        .with_load_shape(LoadShape::DeferredMaterialization)
+        .with_resolved_route(arm.model_id);
+    if let Some(quant) = expected_quant {
         spec = spec.with_quant(quant);
     }
-    Ok((repository, revision, spec))
+    Ok(spec)
 }
 
 fn sdxl_context(
@@ -6825,7 +7427,7 @@ fn sdxl_context(
 /// Real capture arm for the exact recommended `mlx:sdxl` base T2I identity. It deliberately does
 /// not expose SDXL edit/reference/adapter surfaces or the provider's measured-Missing rungs 2/3.
 fn run_sdxl(request: &Value) -> Result<Value, String> {
-    validate_sdxl_target(request)?;
+    let arm = validate_sdxl_target(request)?;
     let planned_shape = planned_load_shape(request)?;
     if planned_shape != LoadShape::DeferredMaterialization {
         return Err(
@@ -6837,13 +7439,13 @@ fn run_sdxl(request: &Value) -> Result<Value, String> {
     validate_sdxl_selection_parameters(request, &selection)?;
     let tier = planned_qwen_tier(request)?;
     let (width, height) = protocol::target_geometry(request)?;
-    let seed = planned_sdxl_seed(request, tier, width)?;
+    let seed = planned_sdxl_seed(request, arm, tier, width)?;
     if seed != SDXL_SEED {
         return Err(format!(
             "planned.fixture seed {seed} does not match the SDXL calibration seed {SDXL_SEED}"
         ));
     }
-    let (repository, revision, spec) = sdxl_load_spec(request, tier, &selection)?;
+    let (repository, revision, spec) = sdxl_load_spec(arm, tier, &selection)?;
     let registry = mlx_gen_sdxl::provider_registry()
         .map_err(|error| format!("build SDXL registry: {error}"))?;
     let contract = registry
@@ -7052,7 +7654,7 @@ fn run_sdxl(request: &Value) -> Result<Value, String> {
             "resolvedPathFingerprint": format!("{repository}@{revision}:{tier}"),
         },
         "diagnostics": protocol::diagnostics(
-            "memory-mlx-adapter:sdxl-shared-ladder",
+            &format!("memory-mlx-adapter:{}-shared-ladder", arm.slug),
             "executed",
             [lifecycle_blocker.to_owned()],
             [
@@ -7070,7 +7672,514 @@ fn run_sdxl(request: &Value) -> Result<Value, String> {
         ),
         "capturedAt": protocol::captured_at(),
     });
-    protocol::settle_plain_overlay_scenario(request, &mut fragment, SDXL_PLAIN_EXECUTION_PATH)?;
+    protocol::settle_plain_overlay_scenario(request, &mut fragment, arm.execution_path)?;
+    Ok(fragment)
+}
+
+// ----------------------------------------------------------------------------------------------
+// InstantID (sc-22729)
+// ----------------------------------------------------------------------------------------------
+
+/// The ORDERED artifact set one InstantID capture consumes, hashed exactly as the worker hashes it
+/// (`crates/sceneworks-worker/src/image_jobs/instantid.rs` `instantid_artifact_entries` /
+/// `instantid_artifact_fingerprint`): the paths in role order, record-separated, hex sha256. The
+/// role tag is positional, so it is not part of the hashed stream. The digest lands verbatim inside
+/// the provider's `overlay_key()`, which is the axis `validate_context` checks — two different
+/// artifact sets can therefore never price each other.
+fn instantid_artifact_fingerprint(paths: &[&Path]) -> String {
+    let mut hasher = Sha256::new();
+    for path in paths {
+        hasher.update(path.to_string_lossy().as_bytes());
+        hasher.update(b"\x1e");
+    }
+    format!("{:x}", hasher.finalize())
+}
+
+/// The plan's InstantID target: the bespoke `instantid` provider on the `instantid_realvisxl`
+/// catalog model, in the only mode the worker's route serves (`character_image`), under the
+/// `identity` overlay the provider's own `overlay_key()` names.
+fn validate_instantid_target(request: &Value) -> Result<(), String> {
+    let target = protocol::planned(request)?
+        .get("target")
+        .and_then(Value::as_object)
+        .ok_or_else(|| "planned.target must be an object".to_owned())?;
+    let provider = target
+        .get("provider")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "planned.target.provider must be a string".to_owned())?;
+    if provider != INSTANTID_PROVIDER {
+        return Err(format!(
+            "{INSTANTID_STILL_CALIBRATION} does not implement provider {provider:?}"
+        ));
+    }
+    let model_id = target
+        .get("modelId")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "planned.target.modelId must be a string".to_owned())?;
+    if model_id != INSTANTID_MODEL_ID {
+        return Err(format!(
+            "{INSTANTID_STILL_CALIBRATION} requires modelId {INSTANTID_MODEL_ID:?}, got {model_id:?}"
+        ));
+    }
+    let mode = target
+        .get("mode")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "planned.target.mode must be a string".to_owned())?;
+    if mode != "character_image" {
+        return Err(format!(
+            "{INSTANTID_STILL_CALIBRATION} requires character_image mode, got {mode:?}"
+        ));
+    }
+    protocol::validate_still_geometry(request, INSTANTID_STILL_CALIBRATION)?;
+    protocol::validate_exact_overlay_target(request, "identity", INSTANTID_EXECUTION_PATH)
+}
+
+/// Everything one InstantID capture loads, resolved from the environment. The backbone is the
+/// PLAIN `realvisxl` tiered rehost (`image_jobs/instantid.rs` `INSTANTID_SDXL_REPO`); the identity
+/// stack is fetched on first use by the worker rather than declared as a manifest download, so both
+/// halves are bound through the same env seams the worker itself reads.
+struct InstantIdBinding {
+    repository: String,
+    revision: String,
+    paths: mlx_gen_instantid::InstantIdPaths,
+    bundle: protocol::InstantIdIdentityBundle,
+    artifact_fingerprint: String,
+}
+
+fn instantid_binding(tier: &str) -> Result<InstantIdBinding, String> {
+    let repository = protocol::required_env("SCENEWORKS_INSTANTID_REALVISXL_REPOSITORY")?;
+    let revision = protocol::required_env("SCENEWORKS_INSTANTID_REALVISXL_REVISION")?;
+    protocol::validate_artifact_identity(&repository, &revision, protocol::REALVISXL_REPOSITORY)?;
+    let root = std::fs::canonicalize(PathBuf::from(protocol::required_env(
+        "SCENEWORKS_INSTANTID_REALVISXL_ROOT",
+    )?))
+    .map_err(|error| format!("canonicalize SCENEWORKS_INSTANTID_REALVISXL_ROOT: {error}"))?;
+    protocol::validate_huggingface_snapshot_root(
+        &root,
+        &repository,
+        &revision,
+        tier,
+        protocol::REALVISXL_REPOSITORY,
+    )?;
+    let bundle = protocol::instantid_identity_bundle()?;
+    let identitynet = protocol::instantid_controlnet_dir()?;
+    let artifact_fingerprint = instantid_artifact_fingerprint(&[
+        root.as_path(),
+        identitynet.as_path(),
+        bundle.ip_adapter.as_path(),
+        bundle.scrfd.as_path(),
+        bundle.arcface.as_path(),
+    ]);
+    Ok(InstantIdBinding {
+        repository,
+        revision,
+        paths: mlx_gen_instantid::InstantIdPaths {
+            sdxl_base: root,
+            identitynet: WeightsSource::Dir(identitynet),
+            ip_adapter: bundle.ip_adapter.clone(),
+            adapters: Vec::new(),
+        },
+        bundle,
+        artifact_fingerprint,
+    })
+}
+
+/// The MLX InstantID numeric tier, mirroring the worker's `instantid_memory_tier`: the crate's own
+/// dense sentinel with the packed quant the resolved tier selected (MLX honours q4/q8/bf16 —
+/// `image_jobs/instantid.rs` `instantid_memory_backend_keys`).
+fn instantid_numeric_tier(tier: &str) -> MemoryNumericTier {
+    MemoryNumericTier {
+        quant: tier_precision_quant(tier).1,
+        ..mlx_gen_instantid::memory_strategy::dense_numeric_tier()
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn instantid_context(
+    selection: MemorySelection,
+    calibration: &MemoryCalibrationIdentity,
+    fingerprint: &str,
+    overlay: String,
+    width: u32,
+    height: u32,
+    total_bytes: u64,
+    predicted_peak_bytes: u64,
+) -> MemoryRunContext {
+    MemoryRunContext {
+        selection,
+        optimization_authority: MemoryOptimizationAuthority::Calibrated,
+        calibration_abi: calibration.abi,
+        calibration_fingerprint: fingerprint.to_owned(),
+        load_shape: calibration.load_shape,
+        mode: MemoryMode::Other("character_image".into()),
+        has_reference: true,
+        use_pid: false,
+        has_phases: false,
+        geometry: MemoryGeometry {
+            width,
+            height,
+            batch: 1,
+            frames: 1,
+            reference_count: 1,
+        },
+        overlay: Some(overlay),
+        budget: MemoryBudget {
+            total_bytes,
+            committed_bytes: 0,
+            reclaimable_bytes: 0,
+            reserved_headroom_bytes: 0,
+        },
+        predicted_peak_bytes,
+        cache_state: MemoryCacheState::Cold,
+        evidence_revision: mlx_gen_instantid::memory_strategy::REQUEST_EVIDENCE_REVISION.to_owned(),
+    }
+}
+
+/// A deterministic 512-d ArcFace-shaped embedding. `InstantId::generate_with` is the engine's own
+/// "face-stack-independent path": the identity VALUE never changes what the denoise and decode
+/// phases materialize, so a fixed embedding makes the capture reproducible without needing a real
+/// face photograph on the capture host. The face stack itself is still attached and resident (the
+/// worker attaches it too), so the composition the peaks describe is production's.
+fn instantid_reference_embedding() -> Vec<f32> {
+    (0..512)
+        .map(|index| ((index as f32) * 0.017_f32).sin() * 0.05)
+        .collect()
+}
+
+/// Five landmarks in the canonical `draw_kps` order (both eyes, nose, both mouth corners), scaled
+/// from the normalized square the worker's angle presets use to output-canvas pixels.
+fn instantid_kps(side: u32) -> Vec<(f32, f32)> {
+    let side = side as f32;
+    [
+        (0.37_f32, 0.42_f32),
+        (0.63, 0.42),
+        (0.50, 0.55),
+        (0.40, 0.68),
+        (0.60, 0.68),
+    ]
+    .into_iter()
+    .map(|(x, y)| (x * side, y * side))
+    .collect()
+}
+
+fn instantid_request(width: u32, height: u32, seed: u64) -> mlx_gen_instantid::InstantIdRequest {
+    mlx_gen_instantid::InstantIdRequest {
+        prompt: "a studio portrait of a person, soft key light".to_owned(),
+        negative: "low quality, blurry, distorted".to_owned(),
+        width,
+        height,
+        // Two executed denoise steps — the same conditioning/denoise/decode phase split every other
+        // still arm captures at.
+        steps: 2,
+        guidance: 3.0,
+        ip_adapter_scale: INSTANTID_IP_SCALE,
+        controlnet_scale: INSTANTID_CONTROLNET_SCALE,
+        seed,
+        ..Default::default()
+    }
+}
+
+fn planned_instantid_seed(request: &Value, tier: &str, width: u32) -> Result<u64, String> {
+    let fixture = protocol::planned(request)?
+        .get("fixture")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "planned.fixture must be a string".to_owned())?;
+    let prefix = format!("instantid-realvisxl-mlx-{tier}-{width}-seed");
+    let remainder = fixture
+        .strip_prefix(&prefix)
+        .ok_or_else(|| format!("planned.fixture {fixture:?} must start with {prefix:?}"))?;
+    let (seed, steps) = remainder
+        .split_once("-step")
+        .ok_or_else(|| format!("planned.fixture {fixture:?} must end with -step<count>"))?;
+    if steps != "2" {
+        return Err(format!(
+            "planned.fixture {fixture:?} must use the two-step calibration request"
+        ));
+    }
+    seed.parse::<u64>()
+        .map_err(|error| format!("parse InstantID fixture seed {seed:?}: {error}"))
+}
+
+/// Real capture arm for the `mlx:instantid` identity route on `instantid_realvisxl`.
+///
+/// InstantID is a BESPOKE crate: `mlx-gen-catalog` lists it in `BESPOKE_UTILITY_CRATES` and
+/// registers no `ModelDescriptor`, so there is no `registry.load` to call. The production loader is
+/// `InstantId::load_with_memory_context` — literally the call `image_jobs/instantid.rs` makes — and
+/// that is what this arm drives. The pinned provider implements only Resident and StagedResidency
+/// (`memory_strategy.rs` declares the three bounded rungs Missing), and publishes its calibration
+/// identity with a HARD-CODED `LoadShape::EagerMaterialization` that no spec can move.
+fn run_instantid(request: &Value) -> Result<Value, String> {
+    validate_instantid_target(request)?;
+    let planned_shape = planned_load_shape(request)?;
+    if planned_shape != LoadShape::EagerMaterialization {
+        return Err(
+            "InstantID calibration must use the eager_materialization load shape the pinned \
+             provider publishes"
+                .to_owned(),
+        );
+    }
+    let selection = planned_selection(request)?;
+    if !matches!(
+        selection.strategy,
+        MemoryStrategy::Resident | MemoryStrategy::StagedResidency
+    ) {
+        return Err(format!(
+            "MLX InstantID {:?} is declared Missing at the pinned provider and is not capturable",
+            selection.strategy
+        ));
+    }
+    let parameters = protocol::strategy_parameters(request)?;
+    if !parameters.is_empty() {
+        return Err(format!(
+            "MLX InstantID calibration requires no strategy parameters, got {parameters:?}"
+        ));
+    }
+    let tier = planned_qwen_tier(request)?;
+    let (width, height) = protocol::target_geometry(request)?;
+    if width != height {
+        return Err(format!(
+            "the InstantID identity route renders a SQUARE canvas (kps are normalized to a square); \
+             planned geometry is {width}x{height}"
+        ));
+    }
+    let seed = planned_instantid_seed(request, tier, width)?;
+    if seed != INSTANTID_SEED {
+        return Err(format!(
+            "planned.fixture seed {seed} does not match the InstantID calibration seed {INSTANTID_SEED}"
+        ));
+    }
+    let binding = instantid_binding(tier)?;
+    let numeric_tier = instantid_numeric_tier(tier);
+    if selection.tier.quant != numeric_tier.quant {
+        return Err(format!(
+            "planned tier {tier} implies quant {:?}, selection carries {:?}",
+            numeric_tier.quant, selection.tier.quant
+        ));
+    }
+    let identity = mlx_gen_instantid::memory_strategy::InstantIdMemoryIdentity {
+        route: mlx_gen_instantid::memory_strategy::InstantIdRoute::Identity,
+        adapter_count: 0,
+        use_pid: false,
+        face_restore: false,
+        artifact_fingerprint: binding.artifact_fingerprint.clone(),
+    };
+    let overlay = identity.overlay_key();
+    let contract = mlx_gen_instantid::memory_strategy::provider_contract_for_paths(
+        &binding.paths,
+        numeric_tier,
+    );
+    contract.validate_selection(&selection).map_err(|error| {
+        format!("pinned InstantID contract rejected planned selection: {error}")
+    })?;
+    let strategy = attested_strategy(
+        request,
+        &selection,
+        &contract.engaged_composition(selection.strategy),
+    )?;
+    let calibration = contract
+        .calibration
+        .as_ref()
+        .ok_or_else(|| "pinned InstantID contract has no calibration identity".to_owned())?;
+    if calibration.fingerprint != INSTANTID_CALIBRATION_FINGERPRINT {
+        return Err(format!(
+            "pinned InstantID fingerprint changed: expected {INSTANTID_CALIBRATION_FINGERPRINT}, got {}",
+            calibration.fingerprint
+        ));
+    }
+    let planned_fingerprint = protocol::planned(request)?
+        .get("calibrationFingerprint")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "planned.calibrationFingerprint must be a string".to_owned())?;
+    if planned_fingerprint != calibration.fingerprint {
+        return Err(format!(
+            "plan/provider calibration mismatch: plan={planned_fingerprint}, pinned provider={}",
+            calibration.fingerprint
+        ));
+    }
+    if calibration.load_shape != planned_shape {
+        return Err(format!(
+            "plan/provider load-shape mismatch: plan={}, pinned provider={}",
+            load_shape_key(planned_shape),
+            load_shape_key(calibration.load_shape)
+        ));
+    }
+    let hardware_bytes = request
+        .pointer("/hardware/memoryBytes")
+        .and_then(Value::as_u64)
+        .ok_or_else(|| "run request.hardware.memoryBytes must be an integer".to_owned())?;
+
+    // Admission hygiene BEFORE the expensive load: the gate must accept a fitting request (so the
+    // refusals below are evidence rather than a blanket no), reject a zero budget, and reject a
+    // mutated calibration fingerprint.
+    let safety = |fingerprint: &str, total_bytes: u64, predicted: u64| {
+        mlx_gen_instantid::memory_strategy::safety_check(
+            &contract,
+            numeric_tier,
+            &identity,
+            &instantid_context(
+                selection,
+                calibration,
+                fingerprint,
+                overlay.clone(),
+                width,
+                height,
+                total_bytes,
+                predicted,
+            ),
+        )
+    };
+    if !matches!(
+        safety(&calibration.fingerprint, hardware_bytes, 1),
+        MemorySafetyDecision::Accept
+    ) {
+        return Err(
+            "InstantID admission rejected a fitting probe budget; the rejections below would be a \
+             blanket refusal, not evidence"
+                .to_owned(),
+        );
+    }
+    if !matches!(
+        safety(&calibration.fingerprint, 0, 1),
+        MemorySafetyDecision::Reject { .. }
+    ) {
+        return Err("InstantID admission accepted an unknown/zero memory budget".to_owned());
+    }
+    if !matches!(
+        safety("stale-instantid-fingerprint", hardware_bytes, 1),
+        MemorySafetyDecision::Reject { .. }
+    ) {
+        return Err("InstantID admission accepted stale calibration evidence".to_owned());
+    }
+
+    clear_cache();
+    reset_peak_memory();
+    let pre_rung_active = get_active_memory() as u64;
+    let pre_rung_cache = get_cache_memory() as u64;
+    let load_context = instantid_context(
+        selection,
+        calibration,
+        &calibration.fingerprint,
+        overlay.clone(),
+        width,
+        height,
+        hardware_bytes,
+        1,
+    );
+    // THE production loader: the exact call `image_jobs/instantid.rs` makes.
+    let model = mlx_gen_instantid::InstantId::load_with_memory_context(
+        &binding.paths,
+        numeric_tier,
+        identity.clone(),
+        load_context,
+    )
+    .map_err(|error| format!("load real InstantID {tier} stack: {error}"))?;
+    // The worker attaches the SCRFD/ArcFace stack too; `with_face_paths` is the reloadable seam
+    // staged residency requires, so the same call serves both rungs.
+    let mut model = model
+        .with_face_paths(&binding.bundle.scrfd, &binding.bundle.arcface)
+        .map_err(|error| format!("attach the InstantID face stack: {error}"))?;
+
+    let conditioning = Cell::new(PhaseMemory {
+        active: 0,
+        cache: 0,
+    });
+    let denoise = Cell::new(PhaseMemory {
+        active: 0,
+        cache: 0,
+    });
+    reset_peak_memory();
+    let embedding = instantid_reference_embedding();
+    let kps = instantid_kps(width);
+    model
+        .generate_with(
+            &instantid_request(width, height, seed),
+            &embedding,
+            &kps,
+            &mut |progress| match progress {
+                Progress::Step { current: 1, .. } => {
+                    conditioning.set(PhaseMemory::capture());
+                    reset_peak_memory();
+                }
+                Progress::Decoding => {
+                    denoise.set(PhaseMemory::capture());
+                    reset_peak_memory();
+                }
+                _ => {}
+            },
+        )
+        .map_err(|error| format!("generate measured InstantID render: {error}"))?;
+    let decode = PhaseMemory::capture();
+    let conditioning = conditioning.get();
+    let denoise = denoise.get();
+    if [conditioning.active, denoise.active, decode.active].contains(&0) {
+        return Err(
+            "a synchronized InstantID lifecycle phase reported a zero active peak".to_owned(),
+        );
+    }
+    let overall = PhaseMemory::overall(&[conditioning, denoise, decode]);
+    let predicted_peaks = image_predicted_peak_bytes(conditioning, denoise, decode);
+
+    // The pinned InstantID crates expose no calibration error injection and no request-scope
+    // handle, so the runtime-complete and fault-injection scenarios stay unexecuted rather than
+    // being reported as passed.
+    let blocker = concat!(
+        "the pinned mlx-gen-instantid provider is a bespoke crate with no registered generator, no ",
+        "calibration error injection and no synchronized request scope, so the runtime-complete ",
+        "sweep and the fault-injection lifecycle scenarios are not executable at this pin"
+    );
+    let mut fragment = json!({
+        "strategy": strategy,
+        "loadShape": protocol::LOAD_SHAPE_EAGER,
+        "memory": {
+            "conditioningPeakBytes": conditioning.active,
+            "denoisePeakBytes": denoise.active,
+            "decodePeakBytes": decode.active,
+            "overallPeakBytes": overall.active,
+            "predictedPeakBytes": predicted_peaks.overall,
+        },
+        "sweep": null,
+        "quality": null,
+        "negativeMutation": null,
+        "loadability": {
+            "result": "passed",
+            "resolvedPathFingerprint": format!(
+                "{}@{}:{tier}+identity:{}",
+                binding.repository, binding.revision, binding.artifact_fingerprint
+            ),
+        },
+        "diagnostics": protocol::diagnostics(
+            "memory-mlx-adapter:instantid-identity-ladder",
+            "executed",
+            [blocker.to_owned()],
+            [
+                ("preRungActiveAfterClear", "bytes", pre_rung_active),
+                ("preRungCacheAfterClear", "bytes", pre_rung_cache),
+                ("conditioningActivePeak", "bytes", conditioning.active),
+                ("denoiseActivePeak", "bytes", denoise.active),
+                ("decodeActivePeak", "bytes", decode.active),
+                ("overallAllocatorEnvelope", "bytes", overall.allocator_bytes()),
+                ("loadShapeEager", "count", 1),
+            ],
+        ),
+        "capturedAt": protocol::captured_at(),
+    });
+    // The identity overlay is MATERIAL, so the plain-overlay settler (which only ever settles an
+    // `overlay: none` target) must not run here. `validate_instantid_target` already proved the
+    // declared overlay is exactly `identity`, and the overlay key the provider admitted is its own
+    // artifact-bound `overlay_key()`, so the scenario is settled from that instead.
+    fragment["scenarios"] = json!([
+        { "name": "exact_fit", "result": "passed", "predictedBytes": predicted_peaks.overall },
+        { "name": "unknown_budget", "result": "passed" },
+        { "name": "stale_evidence", "result": "passed" },
+        { "name": "loadability", "result": "passed" },
+        {
+            "name": "overlay",
+            "result": "passed",
+            "reason": "the identity overlay is the declared target, and the pinned provider admitted \
+                       the composition under its own artifact-bound overlay key",
+            "overlayKey": overlay,
+        }
+    ]);
     Ok(fragment)
 }
 
@@ -16062,7 +17171,11 @@ fn run(request: &Value) -> Result<Value, String> {
         // family and execution path; the arm resolves which member from `(provider, mode)`.
         Z_IMAGE_BASE_PROVIDER => run_z_image_reference(request),
         KREA_BASE_PROVIDER => run_krea_base(request),
+        // sc-22729: the whole SDXL family rides one engine id; the arm resolves the member from
+        // `planned.target.modelId` and refuses an id no member serves.
         SDXL_PROVIDER => run_sdxl(request),
+        // sc-22729: the bespoke identity route — its own crate, its own loader, no registry entry.
+        INSTANTID_PROVIDER => run_instantid(request),
         KREA_PROVIDER => run_krea_control(request),
         QWEN_PROVIDER => run_qwen_provider(request),
         // sc-22728: the Qwen edit lane. One engine provider serves both shipped catalog ids, so the
@@ -18914,7 +20027,9 @@ mod sdxl_tests {
         let base = minimal_request(SDXL_PROVIDER);
         assert!(validate_sdxl_target(&base).is_ok());
         for (pointer, value) in [
-            ("/planned/target/modelId", json!("realvisxl")),
+            // sc-22729: `realvisxl` used to be the mutation here, and it is now a REAL family
+            // member with its own artifact family. A model id no member serves is still refused.
+            ("/planned/target/modelId", json!("sdxl_turbo")),
             ("/planned/target/mode", json!("image_to_image")),
             ("/planned/target/geometry/batch", json!(2)),
             ("/planned/target/geometry/frames", json!(2)),

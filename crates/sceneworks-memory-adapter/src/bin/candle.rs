@@ -16,6 +16,7 @@ use runtime_cuda::providers::pulid::PulidFluxRequest;
 use runtime_cuda::providers::qwen_image::{QwenEdit, QwenEditPaths, QwenEditRequest};
 use sceneworks_memory_adapter as protocol;
 use serde_json::{json, Map, Value};
+use sha2::{Digest, Sha256};
 use std::path::PathBuf;
 use std::process::Command;
 
@@ -62,6 +63,135 @@ const Z_IMAGE_PLAIN_EXECUTION_PATH: &str = "the Candle Z-Image base-model text-t
 /// The label the Z-Image base arm refuses a non-still geometry under; see
 /// [`still_calibration_label`].
 const Z_IMAGE_STILL_CALIBRATION: &str = "Candle Z-Image base-model calibration";
+
+// ----------------------------------------------------------------------------------------------
+// The SDXL family (sc-22729)
+// ----------------------------------------------------------------------------------------------
+
+/// The single engine id `candle-gen-sdxl` registers (`lib.rs` `MODEL_ID`). Five catalog models ride
+/// it; the member is named by `LoadSpec::resolved_route`, which the worker binds to `request.model`
+/// (`image_jobs/base.rs:8785`) and which `candle-gen-sdxl`'s `route()` REQUIRES — a spec with no
+/// resolved route is refused ("optimized memory admission requires an exact resolved catalog route").
+const SDXL_ID: &str = "sdxl";
+
+/// The three caller-staged SDXL components. `candle-gen-sdxl` `validate_shared_component_revisions`
+/// requires all three at EXACT pinned upstream revisions, so a capture stages the same corequisite
+/// snapshots the worker's `attach_required_components` stages. Each is bound by its own env var.
+const SDXL_COMPONENTS: [(&str, &str); 3] = [
+    (
+        "tokenizer_clip_l",
+        "SCENEWORKS_SDXL_COMPONENT_TOKENIZER_CLIP_L",
+    ),
+    (
+        "tokenizer_clip_bigg",
+        "SCENEWORKS_SDXL_COMPONENT_TOKENIZER_CLIP_BIGG",
+    ),
+    ("vae_fp16_fix", "SCENEWORKS_SDXL_COMPONENT_VAE_FP16_FIX"),
+];
+
+/// One member of the Candle SDXL family.
+///
+/// `route_revision` is the revision `candle-gen-sdxl`'s own `SDXL_ROUTES` table pins for this
+/// member. It is recorded here — rather than only in the env — because the engine's
+/// `path_has_snapshot` matches the staged root against that literal, so a member whose route
+/// revision has drifted from the shipped manifest cannot seal a contract and cannot load at all.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct SdxlCandleArm {
+    model_id: &'static str,
+    execution_path: &'static str,
+    still_calibration: &'static str,
+    repository_env: &'static str,
+    revision_env: &'static str,
+    root_env: &'static str,
+    expected_repository: &'static str,
+    route_revision: &'static str,
+}
+
+const SDXL_CANDLE_BASE_ARM: SdxlCandleArm = SdxlCandleArm {
+    model_id: "sdxl",
+    execution_path: "the Candle SDXL base-only text-to-image path",
+    still_calibration: "Candle SDXL base calibration",
+    repository_env: "SCENEWORKS_SDXL_REPOSITORY",
+    revision_env: "SCENEWORKS_SDXL_REVISION",
+    root_env: "SCENEWORKS_SDXL_ROOT",
+    expected_repository: protocol::SDXL_REPOSITORY,
+    route_revision: "36699bb8a6353e61c920e3bf19f0e6f8e4151c55",
+};
+
+const SDXL_CANDLE_REALVISXL_ARM: SdxlCandleArm = SdxlCandleArm {
+    model_id: "realvisxl",
+    execution_path: "the Candle RealVisXL base-only text-to-image path",
+    still_calibration: "Candle RealVisXL base calibration",
+    repository_env: "SCENEWORKS_REALVISXL_REPOSITORY",
+    revision_env: "SCENEWORKS_REALVISXL_REVISION",
+    root_env: "SCENEWORKS_REALVISXL_ROOT",
+    expected_repository: protocol::REALVISXL_REPOSITORY,
+    route_revision: "e40202d63baef826c7df95a639a811698c1178d2",
+};
+
+const SDXL_CANDLE_LIGHTNING_ARM: SdxlCandleArm = SdxlCandleArm {
+    model_id: "realvisxl_lightning",
+    execution_path: "the Candle RealVisXL Lightning base-only text-to-image path",
+    still_calibration: "Candle RealVisXL Lightning base calibration",
+    repository_env: "SCENEWORKS_REALVISXL_LIGHTNING_REPOSITORY",
+    revision_env: "SCENEWORKS_REALVISXL_LIGHTNING_REVISION",
+    root_env: "SCENEWORKS_REALVISXL_LIGHTNING_ROOT",
+    expected_repository: protocol::REALVISXL_LIGHTNING_REPOSITORY,
+    route_revision: "c09fd586989bdc3c658d4acd03e8ae81677ade8e",
+};
+
+const SDXL_CANDLE_ILLUSTRIOUS_V1_ARM: SdxlCandleArm = SdxlCandleArm {
+    model_id: "illustrious_xl_v1",
+    execution_path: "the Candle Illustrious-XL v1 base-only text-to-image path",
+    still_calibration: "Candle Illustrious-XL v1 base calibration",
+    repository_env: "SCENEWORKS_ILLUSTRIOUS_XL_V1_REPOSITORY",
+    revision_env: "SCENEWORKS_ILLUSTRIOUS_XL_V1_REVISION",
+    root_env: "SCENEWORKS_ILLUSTRIOUS_XL_V1_ROOT",
+    expected_repository: protocol::ILLUSTRIOUS_XL_V1_REPOSITORY,
+    route_revision: "c5a92a902dd4e6ee99c2a57981ecf66209905dd1",
+};
+
+const SDXL_CANDLE_ILLUSTRIOUS_V2_ARM: SdxlCandleArm = SdxlCandleArm {
+    model_id: "illustrious_xl_v2",
+    execution_path: "the Candle Illustrious-XL v2 base-only text-to-image path",
+    still_calibration: "Candle Illustrious-XL v2 base calibration",
+    repository_env: "SCENEWORKS_ILLUSTRIOUS_XL_V2_REPOSITORY",
+    revision_env: "SCENEWORKS_ILLUSTRIOUS_XL_V2_REVISION",
+    root_env: "SCENEWORKS_ILLUSTRIOUS_XL_V2_ROOT",
+    expected_repository: protocol::ILLUSTRIOUS_XL_V2_REPOSITORY,
+    route_revision: "7c5c8b2bb75a8f38a7365e70bdf84d38d6204473",
+};
+
+const SDXL_CANDLE_FAMILY: [SdxlCandleArm; 5] = [
+    SDXL_CANDLE_BASE_ARM,
+    SDXL_CANDLE_REALVISXL_ARM,
+    SDXL_CANDLE_LIGHTNING_ARM,
+    SDXL_CANDLE_ILLUSTRIOUS_V1_ARM,
+    SDXL_CANDLE_ILLUSTRIOUS_V2_ARM,
+];
+
+// ----------------------------------------------------------------------------------------------
+// InstantID (sc-22729)
+// ----------------------------------------------------------------------------------------------
+
+/// The bespoke identity provider. `candle-gen-catalog` registers no descriptor for it, so this
+/// adapter loads through the crate's own `InstantId::load_with_memory_context` — the exact call
+/// `image_jobs/instantid.rs` makes — instead of `catalog.media().load`.
+const INSTANTID_ID: &str = "instantid";
+const INSTANTID_MODEL_ID: &str = "instantid_realvisxl";
+/// `candle-gen-instantid` mints its OWN calibration string, deliberately distinct from the
+/// request-contract revision it shares with the MLX twin (`memory_strategy.rs:22-26` at the pin).
+const INSTANTID_CALIBRATION_FINGERPRINT: &str = "instantid-candle-staged-conditioning-v1";
+const INSTANTID_EXECUTION_PATH: &str = "the Candle InstantID identity-conditioned character path";
+const INSTANTID_STILL_CALIBRATION: &str = "Candle InstantID identity calibration";
+/// The candle InstantID stack is DENSE-ONLY: the worker hard-pins its tier subdir to `bf16/`
+/// (`image_jobs/instantid.rs` `instantid_memory_backend_keys` / `instantid_tier_subdir` on the
+/// non-macOS branch) and the provider declares `resolved_numeric_tier()` as Bf16 with no quant. A
+/// q4/q8 candle plan would measure bf16 weights and file the peaks under a packed tier.
+const INSTANTID_CANDLE_TIER: &str = "bf16";
+const INSTANTID_IP_SCALE: f32 = 0.8;
+const INSTANTID_CONTROLNET_SCALE: f32 = 0.8;
+const INSTANTID_SEED: u64 = 18381;
 /// The FLUX.2 family on Candle (sc-22727). `candle-gen-flux2` registers exactly two txt2img
 /// providers — the 32B `flux2_dev` flagship and the distilled `flux2_klein_9b` — and the worker
 /// routes THREE catalog models onto them (`crates/sceneworks-worker/src/engines.rs`):
@@ -845,9 +975,216 @@ fn is_z_image_edit(request: &Value) -> Result<bool, String> {
     Ok(planned_provider(request)? == Z_IMAGE_TURBO_ID && planned_mode(request)? == "edit_image")
 }
 
+/// Which SDXL family member the plan asks for, from `planned.target.modelId`.
+///
+/// Refuses by name: the engine id is not an artifact identity — all five members load through the
+/// same `sdxl` provider — so a model id no member serves must not be measured as base SDXL.
+fn sdxl_candle_arm(request: &Value) -> Result<SdxlCandleArm, String> {
+    let model_id = protocol::planned(request)?
+        .pointer("/target/modelId")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "planned.target.modelId must be a string".to_owned())?;
+    let arm = SDXL_CANDLE_FAMILY
+        .into_iter()
+        .find(|arm| arm.model_id == model_id)
+        .ok_or_else(|| {
+            format!(
+                "the Candle SDXL arm does not implement modelId {model_id:?} on provider \
+                 {SDXL_ID:?} (family: {})",
+                SDXL_CANDLE_FAMILY
+                    .iter()
+                    .map(|arm| arm.model_id)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )
+        })?;
+    Ok(arm)
+}
+
+/// The exact calibration fingerprint `candle-gen-sdxl` mints for one route
+/// (`memory_strategy.rs` `route_fingerprint` / `route_identity_tokens` at the pin): the route id in
+/// kebab tokens, with a trailing `vN` token rewritten to `revN` so the shared
+/// `validate_calibration_fingerprint` still sees exactly one version token.
+///
+/// This is derived rather than transcribed so a plan row can be checked against it without a
+/// weights root, and `run_five_rung_reference_loaded` still compares the LOADED contract's own
+/// string — this function is never the authority, only the plan-time expectation.
+fn sdxl_candle_route_fingerprint(model_id: &str) -> String {
+    let tokens = model_id
+        .replace('_', "-")
+        .split('-')
+        .map(|token| match token.strip_prefix('v') {
+            Some(digits) if !digits.is_empty() && digits.bytes().all(|b| b.is_ascii_digit()) => {
+                format!("rev{digits}")
+            }
+            _ => token.to_owned(),
+        })
+        .collect::<Vec<_>>()
+        .join("-");
+    format!("sdxl-candle-{tokens}-staged-decode-attention-v1")
+}
+
+/// The SDXL-specific half of the shared five-rung spec: the resolved catalog route the engine
+/// requires, and the three caller-staged components it validates at exact upstream revisions.
+///
+/// Also the seam that refuses a member whose engine-side route revision has drifted from the
+/// revision this repository ships. `candle-gen-sdxl`'s `path_has_snapshot` matches the staged root
+/// against `SdxlRoute::revision` verbatim, so for such a member NO root that the manifest can
+/// resolve will ever seal — the load fails inside the engine with a message about the engine's own
+/// pinned revision. Refusing here says which two revisions disagree instead.
+fn sdxl_candle_spec(request: &Value, spec: LoadSpec) -> Result<LoadSpec, String> {
+    let arm = sdxl_candle_arm(request)?;
+    let revision = protocol::required_env(arm.revision_env)?;
+    if revision != arm.route_revision {
+        return Err(format!(
+            "candle-gen-sdxl pins route {:?} at {} ({}), but {} names {revision}; the engine's \
+             `path_has_snapshot` matches that literal, so no staged root can seal this route at \
+             {}. This cell is not capturable until the two revisions agree.",
+            arm.model_id,
+            arm.route_revision,
+            arm.expected_repository,
+            arm.revision_env,
+            protocol::INFERENCE_PIN
+        ));
+    }
+    let mut spec = spec.with_resolved_route(arm.model_id);
+    for (component, env) in SDXL_COMPONENTS {
+        let root = std::fs::canonicalize(PathBuf::from(protocol::required_env(env)?))
+            .map_err(|error| format!("canonicalize {env}: {error}"))?;
+        spec = spec.with_component(component, WeightsSource::Dir(root));
+    }
+    Ok(spec)
+}
+
+/// The ORDERED artifact set one InstantID capture consumes, hashed exactly as the worker hashes it
+/// (`crates/sceneworks-worker/src/image_jobs/instantid.rs` `instantid_artifact_fingerprint`): the
+/// paths in role order, record-separated, hex sha256. The digest lands verbatim inside the
+/// provider's `overlay_key()`, the axis `validate_context` checks.
+fn instantid_artifact_fingerprint(paths: &[&std::path::Path]) -> String {
+    let mut hasher = Sha256::new();
+    for path in paths {
+        hasher.update(path.to_string_lossy().as_bytes());
+        hasher.update(b"\x1e");
+    }
+    format!("{:x}", hasher.finalize())
+}
+
+/// Everything one Candle InstantID capture loads. The backbone is the PLAIN `realvisxl` rehost at
+/// its `bf16/` tier — the candle stack is dense-only — plus the identity bundle and IdentityNet the
+/// worker stages through the same env seams, plus the three SDXL components
+/// `SdxlComponents::from_spec` requires.
+struct InstantIdCandleBinding {
+    repository: String,
+    revision: String,
+    /// The candle `InstantIdPaths` carries the whole priced composition — including `face_dir`,
+    /// which is the identity bundle's own root — so the resolved bundle needs no separate field.
+    paths: runtime_cuda::providers::instantid::InstantIdPaths,
+    artifact_fingerprint: String,
+}
+
+/// The half of a Candle InstantID binding that is resolved purely from the ENVIRONMENT: the tier
+/// guard, the backbone artifact identity, the staged identity bundle, the IdentityNet directory and
+/// the ordered artifact digest over all five.
+///
+/// Split out of [`instantid_candle_binding`] (sc-22729 review) because the remainder —
+/// `SdxlComponents::from_spec` — reads real component weights, so nothing past it is drivable on a
+/// synthetic tree. Every env seam this arm honours therefore has a test that actually executes it
+/// (`instantid_candle_identity_names_the_missing_identitynet_weight`), instead of a tier guard whose
+/// refusal is the only thing anything ever reaches.
+struct InstantIdCandleIdentity {
+    repository: String,
+    revision: String,
+    root: PathBuf,
+    identitynet: PathBuf,
+    bundle: protocol::InstantIdIdentityBundle,
+    artifact_fingerprint: String,
+}
+
+fn instantid_candle_identity(tier: &str) -> Result<InstantIdCandleIdentity, String> {
+    if tier != INSTANTID_CANDLE_TIER {
+        return Err(format!(
+            "the Candle InstantID stack is dense-only and always loads {INSTANTID_CANDLE_TIER:?} \
+             (the worker's non-macOS `instantid_tier_subdir`, and the provider's own \
+             `resolved_numeric_tier()`); tier {tier:?} is not capturable on this lane"
+        ));
+    }
+    let repository = protocol::required_env("SCENEWORKS_INSTANTID_REALVISXL_REPOSITORY")?;
+    let revision = protocol::required_env("SCENEWORKS_INSTANTID_REALVISXL_REVISION")?;
+    protocol::validate_artifact_identity(&repository, &revision, protocol::REALVISXL_REPOSITORY)?;
+    let root = std::fs::canonicalize(PathBuf::from(protocol::required_env(
+        "SCENEWORKS_INSTANTID_REALVISXL_ROOT",
+    )?))
+    .map_err(|error| format!("canonicalize SCENEWORKS_INSTANTID_REALVISXL_ROOT: {error}"))?;
+    protocol::validate_huggingface_snapshot_root(
+        &root,
+        &repository,
+        &revision,
+        tier,
+        protocol::REALVISXL_REPOSITORY,
+    )?;
+    let bundle = protocol::instantid_identity_bundle()?;
+    let identitynet = protocol::instantid_controlnet_dir()?;
+    let artifact_fingerprint = instantid_artifact_fingerprint(&[
+        root.as_path(),
+        identitynet.as_path(),
+        bundle.ip_adapter.as_path(),
+        bundle.scrfd.as_path(),
+        bundle.arcface.as_path(),
+    ]);
+    Ok(InstantIdCandleIdentity {
+        repository,
+        revision,
+        root,
+        identitynet,
+        bundle,
+        artifact_fingerprint,
+    })
+}
+
+fn instantid_candle_binding(tier: &str) -> Result<InstantIdCandleBinding, String> {
+    let InstantIdCandleIdentity {
+        repository,
+        revision,
+        root,
+        identitynet,
+        bundle,
+        artifact_fingerprint,
+    } = instantid_candle_identity(tier)?;
+    // `SdxlComponents` is built only from a `LoadSpec`, so the three staged components ride a spec
+    // that exists purely to carry them — the same three ids, from the same corequisite snapshots,
+    // the worker's `attach_required_components` stages.
+    let mut component_spec = LoadSpec::new(WeightsSource::Dir(root.clone()));
+    for (component, env) in SDXL_COMPONENTS {
+        let component_root = std::fs::canonicalize(PathBuf::from(protocol::required_env(env)?))
+            .map_err(|error| format!("canonicalize {env}: {error}"))?;
+        component_spec =
+            component_spec.with_component(component, WeightsSource::Dir(component_root));
+    }
+    let sdxl = runtime_cuda::providers::instantid::SdxlComponents::from_spec(&component_spec)
+        .map_err(|error| format!("stage the InstantID SDXL components: {error}"))?;
+    Ok(InstantIdCandleBinding {
+        repository,
+        revision,
+        paths: runtime_cuda::providers::instantid::InstantIdPaths {
+            sdxl_base: root,
+            identitynet: WeightsSource::Dir(identitynet),
+            ip_adapter: bundle.ip_adapter.clone(),
+            adapters: Vec::new(),
+            sdxl,
+            // The identity route never loads the pose ControlNet; only `generate_pose` does.
+            openpose: None,
+            face_dir: Some(bundle.face_dir.clone()),
+        },
+        artifact_fingerprint,
+    })
+}
+
 fn plain_execution_path(request: &Value) -> Result<&'static str, String> {
     match planned_provider(request)? {
         "qwen_image" => Ok(QWEN_PLAIN_EXECUTION_PATH),
+        // sc-22729: five catalog models on one engine id; the member is named by the model id.
+        SDXL_ID => Ok(sdxl_candle_arm(request)?.execution_path),
+        INSTANTID_ID => Ok(INSTANTID_EXECUTION_PATH),
         "krea_2_turbo" => Ok(KREA_PLAIN_EXECUTION_PATH),
         "z_image_turbo" => Ok(if is_z_image_edit(request)? {
             Z_IMAGE_TURBO_EDIT_EXECUTION_PATH
@@ -919,6 +1256,8 @@ fn still_calibration_label(request: &Value) -> Result<&'static str, String> {
             Z_IMAGE_TURBO_STILL_CALIBRATION
         }),
         Z_IMAGE_ID => Ok(Z_IMAGE_STILL_CALIBRATION),
+        SDXL_ID => Ok(sdxl_candle_arm(request)?.still_calibration),
+        INSTANTID_ID => Ok(INSTANTID_STILL_CALIBRATION),
         FLUX2_DEV_ID | FLUX2_KLEIN_ID => Ok(flux2_arm(request)?
             .expect("a FLUX.2 provider always resolves a member or errors")
             .still_calibration),
@@ -1501,6 +1840,20 @@ fn load_five_rung_generator(request: &Value) -> Result<LoadedFiveRungGenerator, 
                 "SCENEWORKS_FLUX1_SCHNELL_ROOT",
                 protocol::FLUX1_SCHNELL_REPOSITORY,
             ),
+            // sc-22729. Five catalog models share this registry id; the member — and therefore the
+            // artifact family, the env triple and the fingerprint the engine mints — is named by
+            // `planned.target.modelId`, and bound onto the spec as `resolved_route` below.
+            SDXL_ID => {
+                let arm = sdxl_candle_arm(request)?;
+                (
+                    SDXL_ID,
+                    arm.execution_path,
+                    arm.repository_env,
+                    arm.revision_env,
+                    arm.root_env,
+                    arm.expected_repository,
+                )
+            }
             // sc-22733. Each Mage variant binds TWO artifact triples (its own tiered rehost plus
             // the shared text-encoder/VAE components snapshot) and stages two components, which
             // the single-root tuple above cannot express — so the early return at the top of this
@@ -1663,6 +2016,12 @@ fn load_five_rung_generator(request: &Value) -> Result<LoadedFiveRungGenerator, 
         // carry no quant at all (`Quant::None` — the same shape the worker's `tier_to_quant` uses).
         (KREA_ID, Some(quant)) => spec.with_quant(quant),
         (KREA_ID, None) => spec,
+        // sc-22729. SDXL is NOT a dense-TE tier: the worker's `candle_quant_for_resolved_tier`
+        // falls through to `q4 -> Quant::Q4 / q8 -> Quant::Q8 / bf16 -> none` for it, and
+        // `SdxlArtifactSeal::capture` hard-requires `spec.quantize == tier.quant`, so an omitted
+        // quant on a packed tier refuses the seal rather than loading the packed artifact.
+        (SDXL_ID, Some(quant)) => sdxl_candle_spec(request, spec.with_quant(quant))?,
+        (SDXL_ID, None) => sdxl_candle_spec(request, spec)?,
         // FLUX.2 is per MEMBER (sc-22727 review): the dev route folds the planned tier the way the
         // worker's `candle_quant_for_resolved_tier` does, while both klein turnkeys are dense-TE
         // tiers the worker loads with `(None, resolved_bits)` — `candle-gen-flux2` quantizes the DiT
@@ -4125,6 +4484,9 @@ fn routes_to_five_rung_reference(request: &Value) -> Result<bool, String> {
         || provider == QWEN_ID
         || provider == Z_IMAGE_TURBO_ID
         || provider == Z_IMAGE_ID
+        // sc-22729: the whole SDXL family has no inline arm on this lane either — every member is
+        // a five-rung reference capture through the registered `sdxl` generator.
+        || provider == SDXL_ID
         // sc-22727: neither FLUX.2 provider has an inline arm on this adapter either.
         || provider == FLUX2_DEV_ID
         || provider == FLUX2_KLEIN_ID
@@ -4134,6 +4496,388 @@ fn routes_to_five_rung_reference(request: &Value) -> Result<bool, String> {
         || provider == SD3_5_LARGE_ID
         || provider == SD3_5_LARGE_TURBO_ID
         || provider == SD3_5_MEDIUM_ID)
+}
+/// The plan's Candle InstantID target — the bespoke identity route, its one catalog model, its one
+/// mode, and the `identity` overlay the provider's own `overlay_key()` names.
+fn validate_instantid_candle_target(request: &Value) -> Result<(), String> {
+    let provider = planned_provider(request)?;
+    if provider != INSTANTID_ID {
+        return Err(format!(
+            "{INSTANTID_STILL_CALIBRATION} does not implement provider {provider:?}"
+        ));
+    }
+    let model_id = protocol::planned(request)?
+        .pointer("/target/modelId")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "planned.target.modelId must be a string".to_owned())?;
+    if model_id != INSTANTID_MODEL_ID {
+        return Err(format!(
+            "{INSTANTID_STILL_CALIBRATION} requires modelId {INSTANTID_MODEL_ID:?}, got {model_id:?}"
+        ));
+    }
+    let mode = planned_mode(request)?;
+    if mode != "character_image" {
+        return Err(format!(
+            "{INSTANTID_STILL_CALIBRATION} requires character_image mode, got {mode:?}"
+        ));
+    }
+    protocol::validate_still_geometry(request, INSTANTID_STILL_CALIBRATION)?;
+    protocol::validate_exact_overlay_target(request, "identity", INSTANTID_EXECUTION_PATH)
+}
+
+/// A deterministic 512-d ArcFace-shaped embedding. `InstantId::generate_with` is the engine's own
+/// face-stack-independent path: the identity VALUE never changes what the denoise and decode phases
+/// materialize, so a fixed embedding makes the capture reproducible without a face photograph on
+/// the capture host. The face stack is still staged on `paths.face_dir`, and therefore priced and
+/// resident, exactly as in production.
+fn instantid_reference_embedding() -> Vec<f32> {
+    (0..512)
+        .map(|index| ((index as f32) * 0.017_f32).sin() * 0.05)
+        .collect()
+}
+
+fn instantid_kps(side: u32) -> Vec<(f32, f32)> {
+    let side = side as f32;
+    [
+        (0.37_f32, 0.42_f32),
+        (0.63, 0.42),
+        (0.50, 0.55),
+        (0.40, 0.68),
+        (0.60, 0.68),
+    ]
+    .into_iter()
+    .map(|(x, y)| (x * side, y * side))
+    .collect()
+}
+
+fn planned_instantid_seed(request: &Value, width: u32) -> Result<u64, String> {
+    let fixture = protocol::planned(request)?
+        .get("fixture")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "planned.fixture must be a string".to_owned())?;
+    let prefix = format!("instantid-realvisxl-candle-{INSTANTID_CANDLE_TIER}-{width}-seed");
+    let remainder = fixture
+        .strip_prefix(&prefix)
+        .ok_or_else(|| format!("planned.fixture {fixture:?} must start with {prefix:?}"))?;
+    let (seed, steps) = remainder
+        .split_once("-step")
+        .ok_or_else(|| format!("planned.fixture {fixture:?} must end with -step<count>"))?;
+    if steps != "2" {
+        return Err(format!(
+            "planned.fixture {fixture:?} must use the two-step calibration request"
+        ));
+    }
+    seed.parse::<u64>()
+        .map_err(|error| format!("parse InstantID fixture seed {seed:?}: {error}"))
+}
+
+/// Real capture arm for the `candle:instantid` identity route on `instantid_realvisxl`.
+///
+/// `candle-gen-catalog` registers no descriptor for InstantID, so there is no `catalog.media().load`
+/// to call; the production loader is `InstantId::load_with_memory_context`, the exact call
+/// `image_jobs/instantid.rs` makes on this lane. The pinned provider implements only Resident and
+/// StagedResidency and publishes a HARD-CODED `LoadShape::EagerMaterialization`.
+fn run_instantid_candle(request: &Value) -> Result<Value, String> {
+    validate_instantid_candle_target(request)?;
+    let planned_shape = protocol::planned(request)?
+        .get("loadShape")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "planned.loadShape must be a string".to_owned())?;
+    if planned_shape != protocol::LOAD_SHAPE_EAGER {
+        return Err(format!(
+            "InstantID calibration must use the {} load shape the pinned provider publishes, not \
+             {planned_shape}",
+            protocol::LOAD_SHAPE_EAGER
+        ));
+    }
+    let selection = planned_selection(request)?;
+    if !matches!(
+        selection.strategy,
+        MemoryStrategy::Resident | MemoryStrategy::StagedResidency
+    ) {
+        return Err(format!(
+            "Candle InstantID {:?} is declared Missing at the pinned provider and is not capturable",
+            selection.strategy
+        ));
+    }
+    let parameters = protocol::strategy_parameters(request)?;
+    if !parameters.is_empty() {
+        return Err(format!(
+            "Candle InstantID calibration requires no strategy parameters, got {parameters:?}"
+        ));
+    }
+    let tier = planned_tier(request)?;
+    let (width, height) = protocol::target_geometry(request)?;
+    if width != height {
+        return Err(format!(
+            "the InstantID identity route renders a SQUARE canvas; planned geometry is {width}x{height}"
+        ));
+    }
+    let seed = planned_instantid_seed(request, width)?;
+    if seed != INSTANTID_SEED {
+        return Err(format!(
+            "planned.fixture seed {seed} does not match the InstantID calibration seed {INSTANTID_SEED}"
+        ));
+    }
+    let binding = instantid_candle_binding(tier)?;
+    if selection.tier
+        != runtime_cuda::providers::instantid::memory_strategy::resolved_numeric_tier()
+    {
+        return Err(
+            "the Candle InstantID stack resolves one dense numeric tier; the planned selection \
+             carries another"
+                .to_owned(),
+        );
+    }
+    let identity = runtime_cuda::providers::instantid::memory_strategy::InstantIdMemoryIdentity {
+        route: runtime_cuda::providers::instantid::memory_strategy::InstantIdRoute::Identity,
+        adapter_count: 0,
+        use_pid: false,
+        face_restore: false,
+        artifact_fingerprint: binding.artifact_fingerprint.clone(),
+    };
+    let overlay = identity.overlay_key();
+    let contract =
+        runtime_cuda::providers::instantid::memory_strategy::provider_contract_for_paths(
+            &binding.paths,
+        )
+        .map_err(|error| format!("read the pinned InstantID contract: {error}"))?;
+    contract.validate_selection(&selection).map_err(|error| {
+        format!("pinned InstantID contract rejected planned selection: {error}")
+    })?;
+    let strategy = measured_strategy(
+        request,
+        &selection,
+        &contract.engaged_composition(selection.strategy),
+    )?;
+    let calibration = contract
+        .calibration
+        .as_ref()
+        .ok_or_else(|| "pinned InstantID contract has no calibration identity".to_owned())?;
+    if calibration.fingerprint != INSTANTID_CALIBRATION_FINGERPRINT {
+        return Err(format!(
+            "pinned InstantID fingerprint changed: expected {INSTANTID_CALIBRATION_FINGERPRINT}, got {}",
+            calibration.fingerprint
+        ));
+    }
+    let planned_fingerprint = protocol::planned(request)?
+        .get("calibrationFingerprint")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "planned.calibrationFingerprint must be a string".to_owned())?;
+    if planned_fingerprint != calibration.fingerprint {
+        return Err(format!(
+            "plan/provider calibration mismatch: plan={planned_fingerprint}, pinned provider={}",
+            calibration.fingerprint
+        ));
+    }
+    if load_shape_key(calibration.load_shape) != planned_shape {
+        return Err(format!(
+            "plan/provider load-shape mismatch: plan={planned_shape}, pinned provider={}",
+            load_shape_key(calibration.load_shape)
+        ));
+    }
+    let total_bytes = request
+        .pointer("/hardware/memoryBytes")
+        .and_then(Value::as_u64)
+        .ok_or_else(|| "run request.hardware.memoryBytes must be an integer".to_owned())?;
+    let context = |fingerprint: &str, budget_bytes: u64, predicted: u64| MemoryRunContext {
+        selection,
+        optimization_authority: MemoryOptimizationAuthority::Calibrated,
+        calibration_abi: calibration.abi,
+        calibration_fingerprint: fingerprint.to_owned(),
+        load_shape: calibration.load_shape,
+        mode: MemoryMode::Other("character_image".into()),
+        has_reference: true,
+        use_pid: false,
+        has_phases: false,
+        geometry: MemoryGeometry {
+            width,
+            height,
+            batch: 1,
+            frames: 1,
+            reference_count: 1,
+        },
+        overlay: Some(overlay.clone()),
+        budget: MemoryBudget {
+            total_bytes: budget_bytes,
+            committed_bytes: 0,
+            reclaimable_bytes: 0,
+            reserved_headroom_bytes: 0,
+        },
+        predicted_peak_bytes: predicted,
+        cache_state: MemoryCacheState::Cold,
+        evidence_revision:
+            runtime_cuda::providers::instantid::memory_strategy::REQUEST_EVIDENCE_REVISION
+                .to_owned(),
+    };
+    // Admission hygiene BEFORE the expensive load, so the two refusals below are evidence rather
+    // than a blanket no.
+    let safety = |fingerprint: &str, budget_bytes: u64| {
+        runtime_cuda::providers::instantid::memory_strategy::safety_check(
+            &contract,
+            &identity,
+            &context(fingerprint, budget_bytes, 1),
+        )
+    };
+    if !matches!(
+        safety(&calibration.fingerprint, total_bytes),
+        MemorySafetyDecision::Accept
+    ) {
+        return Err(
+            "Candle InstantID admission rejected a fitting probe budget; the rejections below \
+             would be a blanket refusal, not evidence"
+                .to_owned(),
+        );
+    }
+    if !matches!(
+        safety(&calibration.fingerprint, 0),
+        MemorySafetyDecision::Reject { .. }
+    ) {
+        return Err("Candle InstantID admission accepted an unknown/zero memory budget".to_owned());
+    }
+    if !matches!(
+        safety("stale-instantid-candle-fingerprint", total_bytes),
+        MemorySafetyDecision::Reject { .. }
+    ) {
+        return Err("Candle InstantID admission accepted stale calibration evidence".to_owned());
+    }
+
+    let mut vram = certifying_vram_probe();
+    let load_sample = vram.phase();
+    // THE production loader.
+    let mut model = runtime_cuda::providers::instantid::InstantId::load_with_memory_context(
+        &binding.paths,
+        identity,
+        context(&calibration.fingerprint, total_bytes, 1),
+    )
+    .map_err(|error| format!("load real Candle InstantID {tier} stack: {error}"))?;
+    vram.end_load(load_sample);
+
+    let generation_sample = vram.phase();
+    let mut phase_sample = Some(vram.phase());
+    let mut phase = MemoryPhase::Conditioning;
+    let mut conditioning_peak_gb = None;
+    let mut denoise_peak_gb = None;
+    let mut decode_peak_gb = None;
+    let embedding = instantid_reference_embedding();
+    let kps = instantid_kps(width);
+    let generated = model.generate_with(
+        &runtime_cuda::providers::instantid::InstantIdRequest {
+            prompt: "a studio portrait of a person, soft key light".to_owned(),
+            negative: "low quality, blurry, distorted".to_owned(),
+            width,
+            height,
+            steps: 2,
+            guidance: 3.0,
+            ip_adapter_scale: INSTANTID_IP_SCALE,
+            controlnet_scale: INSTANTID_CONTROLNET_SCALE,
+            seed,
+            ..Default::default()
+        },
+        &embedding,
+        &kps,
+        &mut |progress| match progress {
+            Progress::Step { current: 1, .. } if phase == MemoryPhase::Conditioning => {
+                conditioning_peak_gb = phase_sample.take().map(|sample| vram.end_observed(sample));
+                phase = MemoryPhase::Denoise;
+                phase_sample = Some(vram.phase());
+            }
+            Progress::Decoding if phase == MemoryPhase::Denoise => {
+                denoise_peak_gb = phase_sample.take().map(|sample| vram.end_observed(sample));
+                phase = MemoryPhase::Decode;
+                phase_sample = Some(vram.phase());
+            }
+            _ => {}
+        },
+    );
+    if let Some(sample) = phase_sample.take() {
+        let terminal = vram.end_observed(sample);
+        match phase {
+            MemoryPhase::Conditioning => conditioning_peak_gb = Some(terminal),
+            MemoryPhase::Denoise => denoise_peak_gb = Some(terminal),
+            MemoryPhase::Decode => decode_peak_gb = Some(terminal),
+        }
+    }
+    vram.end_gen(generation_sample);
+    let report = vram.report();
+    generated.map_err(|error| format!("generate measured Candle InstantID render: {error}"))?;
+
+    let conditioning_bytes = decimal_gb_to_bytes(conditioning_peak_gb.ok_or_else(|| {
+        "the InstantID run did not expose a conditioning-to-denoise phase boundary".to_owned()
+    })?);
+    let denoise_bytes = decimal_gb_to_bytes(denoise_peak_gb.ok_or_else(|| {
+        "the InstantID run did not expose a denoise-to-decode phase boundary".to_owned()
+    })?);
+    let decode_bytes = decimal_gb_to_bytes(
+        decode_peak_gb
+            .ok_or_else(|| "the InstantID run did not complete decode sampling".to_owned())?,
+    );
+    let overall_bytes = decimal_gb_to_bytes(report.peak_gb)
+        .max(conditioning_bytes)
+        .max(denoise_bytes)
+        .max(decode_bytes);
+
+    // The pinned InstantID crate is bespoke: no registered generator, no calibration error
+    // injection, no synchronized request scope. The runtime-complete sweep and the fault-injection
+    // lifecycle scenarios stay unexecuted rather than being reported as passed.
+    let blocker = concat!(
+        "the pinned candle-gen-instantid provider is a bespoke crate with no registered generator, ",
+        "no calibration error injection and no synchronized request scope, so the runtime-complete ",
+        "sweep and the fault-injection lifecycle scenarios are not executable at this pin"
+    );
+    let mut fragment = json!({
+        "strategy": strategy,
+        "loadShape": load_shape_key(calibration.load_shape),
+        "artifact": artifact(&binding.repository, &binding.revision, tier),
+        "sweep": null,
+        "quality": null,
+        "negativeMutation": null,
+        "predictedPeakBytes": {
+            "conditioning": conditioning_bytes,
+            "denoise": denoise_bytes,
+            "decode": decode_bytes,
+            "overall": overall_bytes,
+        },
+        "observedMemory": {
+            "conditioning": cuda_phase_metrics(conditioning_bytes),
+            "denoise": cuda_phase_metrics(denoise_bytes),
+            "decode": cuda_phase_metrics(decode_bytes),
+            "overall": cuda_phase_metrics(overall_bytes),
+        },
+        "loadability": {
+            "result": "passed",
+            "resolvedPathFingerprint": format!(
+                "{}+identity:{}",
+                loadability_fingerprint(&binding.repository, &binding.revision, tier),
+                binding.artifact_fingerprint
+            ),
+        },
+        "diagnostics": protocol::diagnostics(
+            "memory-candle-adapter:instantid-identity-ladder",
+            "executed",
+            [blocker.to_owned()],
+            [
+                ("preLoadDeviceUsed", "bytes", decimal_gb_to_bytes(report.baseline_gb)),
+                ("loadDevicePeakDelta", "bytes", decimal_gb_to_bytes(report.load_peak_gb)),
+                ("conditioningDevicePeakDelta", "bytes", conditioning_bytes),
+                ("denoiseDevicePeakDelta", "bytes", denoise_bytes),
+                ("decodeDevicePeakDelta", "bytes", decode_bytes),
+                ("overallDevicePeakDelta", "bytes", overall_bytes),
+                ("loadShapeEager", "count", 1),
+            ],
+        ),
+        "capturedAt": protocol::captured_at(),
+    });
+    // The identity overlay is material and settled by the exact-overlay guard above, so the plain
+    // settler is deliberately not applied here.
+    fragment["scenarios"] = json!([
+        { "name": "exact_fit", "result": "passed", "predictedBytes": overall_bytes, "effectiveBudgetBytes": overall_bytes },
+        { "name": "unknown_budget", "result": "passed" },
+        { "name": "stale_evidence", "result": "passed" },
+        { "name": "loadability", "result": "passed" },
+        { "name": "overlay", "result": "passed", "reason": "the identity overlay is the declared target and its overlay key is the provider's own artifact-bound `overlay_key()`" }
+    ]);
+    Ok(fragment)
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -4692,6 +5436,11 @@ fn run(request: &Value) -> Result<Value, String> {
     // a material `lora` overlay — its built-in distill — and validates it exactly instead.
     if provider == QWEN_EDIT_ID {
         return run_qwen_edit(request);
+    }
+    // sc-22729: the bespoke identity route carries a MATERIAL overlay, so it must be dispatched
+    // before the plain-overlay guard below, which refuses anything but `none`.
+    if provider == INSTANTID_ID {
+        return run_instantid_candle(request);
     }
     // sc-22734: the SenseNova family has its own arm rather than the shared five-rung path — the
     // engine classifies StagedResidency structurally not applicable, so the five-rung
@@ -5293,6 +6042,262 @@ fn main() {
     }
     .unwrap_or_else(|error| protocol::fail(error));
     protocol::write_response(&response).unwrap_or_else(|error| protocol::fail(error));
+}
+
+#[cfg(test)]
+mod sdxl_family_tests {
+    use super::*;
+
+    fn planned(provider: &str, model_id: &str) -> Value {
+        json!({ "planned": { "target": { "provider": provider, "modelId": model_id } } })
+    }
+
+    /// sc-22729: the member is read off `modelId`, and a model id no member serves is refused BY
+    /// NAME. All five load through the same `sdxl` provider, so the engine id alone cannot select
+    /// an artifact family.
+    #[test]
+    fn sdxl_arm_is_resolved_from_the_plans_model_id() {
+        for (model_id, repository) in [
+            ("sdxl", protocol::SDXL_REPOSITORY),
+            ("realvisxl", protocol::REALVISXL_REPOSITORY),
+            (
+                "realvisxl_lightning",
+                protocol::REALVISXL_LIGHTNING_REPOSITORY,
+            ),
+            ("illustrious_xl_v1", protocol::ILLUSTRIOUS_XL_V1_REPOSITORY),
+            ("illustrious_xl_v2", protocol::ILLUSTRIOUS_XL_V2_REPOSITORY),
+        ] {
+            let arm = sdxl_candle_arm(&planned(SDXL_ID, model_id)).unwrap();
+            assert_eq!(arm.model_id, model_id);
+            assert_eq!(arm.expected_repository, repository);
+            assert_eq!(arm.route_revision.len(), 40, "{model_id} route revision");
+        }
+        // Every member's env family and execution path is its own.
+        for field in [
+            SDXL_CANDLE_FAMILY.map(|arm| arm.root_env).to_vec(),
+            SDXL_CANDLE_FAMILY.map(|arm| arm.repository_env).to_vec(),
+            SDXL_CANDLE_FAMILY.map(|arm| arm.revision_env).to_vec(),
+            SDXL_CANDLE_FAMILY
+                .map(|arm| arm.expected_repository)
+                .to_vec(),
+            SDXL_CANDLE_FAMILY.map(|arm| arm.execution_path).to_vec(),
+            SDXL_CANDLE_FAMILY.map(|arm| arm.still_calibration).to_vec(),
+            SDXL_CANDLE_FAMILY.map(|arm| arm.route_revision).to_vec(),
+        ] {
+            let mut unique = field.clone();
+            unique.sort_unstable();
+            unique.dedup();
+            assert_eq!(unique.len(), field.len(), "collision in {field:?}");
+        }
+        for absent in ["instantid_realvisxl", "sdxl_turbo", "z_image"] {
+            let error = sdxl_candle_arm(&planned(SDXL_ID, absent)).unwrap_err();
+            assert!(error.contains(&format!("modelId {absent:?}")), "{error}");
+        }
+    }
+
+    /// sc-22729: the fingerprints the plan may cite are exactly the strings `candle-gen-sdxl`
+    /// mints, including the `v1 -> rev1` rewrite that keeps a single version token in an id that
+    /// already ends in one. `realvisxl` and `realvisxl_lightning` are the pair a PREFIX comparison
+    /// would confuse, which is why the whole string is the identity.
+    #[test]
+    fn candle_route_fingerprints_are_the_engines_own_strings() {
+        for (model_id, expected) in [
+            ("sdxl", "sdxl-candle-sdxl-staged-decode-attention-v1"),
+            (
+                "realvisxl",
+                "sdxl-candle-realvisxl-staged-decode-attention-v1",
+            ),
+            (
+                "realvisxl_lightning",
+                "sdxl-candle-realvisxl-lightning-staged-decode-attention-v1",
+            ),
+            (
+                "illustrious_xl_v1",
+                "sdxl-candle-illustrious-xl-rev1-staged-decode-attention-v1",
+            ),
+            (
+                "illustrious_xl_v2",
+                "sdxl-candle-illustrious-xl-rev2-staged-decode-attention-v1",
+            ),
+        ] {
+            assert_eq!(sdxl_candle_route_fingerprint(model_id), expected);
+            // Exactly one `vN` token, which is what `validate_calibration_fingerprint` requires.
+            let versions = expected
+                .split('-')
+                .filter(|token| {
+                    token.strip_prefix('v').is_some_and(|rest| {
+                        !rest.is_empty() && rest.bytes().all(|b| b.is_ascii_digit())
+                    })
+                })
+                .count();
+            assert_eq!(versions, 1, "{expected}");
+        }
+        assert_ne!(
+            sdxl_candle_route_fingerprint("realvisxl"),
+            sdxl_candle_route_fingerprint("realvisxl_lightning"),
+            "the lightning route must never resolve to the edit-capable realvisxl route"
+        );
+    }
+
+    /// sc-22729: every planned SDXL-family candle row cites a fingerprint the engine can actually
+    /// emit, and every planned MLX row cites the one route-independent string `mlx-gen-sdxl` mints.
+    /// A plan row carrying a hand-written label would never match the loaded contract.
+    #[test]
+    fn every_planned_sdxl_row_cites_an_emittable_fingerprint() {
+        let plan: Value = serde_json::from_str(include_str!(
+            "../../../../config/memory-calibration-plan.json"
+        ))
+        .expect("the anchor plan is valid JSON");
+        let anchors = plan["anchors"].as_object().expect("anchors is an object");
+        let mut checked: Vec<(String, String)> = Vec::new();
+        for (key, anchor) in anchors {
+            if anchor["provider"] != json!(SDXL_ID) {
+                continue;
+            }
+            let (model_id, rest) = key.split_once(':').expect("anchor key shape");
+            let backend = rest.rsplit(':').next().expect("anchor key backend");
+            let fingerprint = anchor["calibrationFingerprint"]
+                .as_str()
+                .expect("calibrationFingerprint is a string");
+            let expected = match backend {
+                "mlx" => "sdxl-mlx-unet-shared-ladder-v3".to_owned(),
+                _ => sdxl_candle_route_fingerprint(model_id),
+            };
+            assert_eq!(fingerprint, expected, "{key}");
+            assert!(
+                SDXL_CANDLE_FAMILY
+                    .iter()
+                    .any(|arm| arm.model_id == model_id),
+                "{key} names a model no family member serves"
+            );
+            checked.push((model_id.to_owned(), backend.to_owned()));
+        }
+        // Not a floor: the EXACT set of `(modelId, lane)` pairs the family plans. A floor stayed
+        // green with a whole member's lane deleted from the plan, which is the one thing this case
+        // is here to notice — every family member is planned on BOTH lanes (the candle lane routes
+        // all five, `routing/candle.rs` `is_sdxl_family_candle_model` / `SDXL_CONTROL_MODELS`), and
+        // an engine defect that blocks a CAPTURE never removes the DECLARATION.
+        checked.sort();
+        checked.dedup();
+        let expected = SDXL_CANDLE_FAMILY
+            .iter()
+            .flat_map(|arm| {
+                ["candle", "mlx"]
+                    .into_iter()
+                    .map(|backend| (arm.model_id.to_owned(), backend.to_owned()))
+            })
+            .collect::<std::collections::BTreeSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>();
+        assert_eq!(checked, expected);
+    }
+
+    /// sc-22729: the candle InstantID lane is dense-only, so a packed tier is refused before any
+    /// environment work — it could only ever measure bf16 weights.
+    #[test]
+    fn candle_instantid_refuses_a_packed_tier() {
+        for tier in ["q4", "q8"] {
+            let error = match instantid_candle_binding(tier) {
+                Err(error) => error,
+                Ok(_) => panic!("{tier} must be refused before any environment work"),
+            };
+            assert!(error.contains("dense-only"), "{tier}: {error}");
+            assert!(error.contains(INSTANTID_CANDLE_TIER), "{tier}: {error}");
+        }
+    }
+
+    use protocol::staging::StagedInstantId;
+
+    fn digest_of(paths: &[PathBuf]) -> String {
+        instantid_artifact_fingerprint(&paths.iter().map(PathBuf::as_path).collect::<Vec<_>>())
+    }
+
+    /// sc-22729 review: the identity arm driven PAST the tier guard on a synthetic tree.
+    ///
+    /// Until this existed, the tier guard's refusal was the only thing any test reached, so
+    /// deleting `protocol::instantid_controlnet_dir()?` — or a file out of the identity bundle, or
+    /// a path out of the digest — reddened nothing at all.
+    #[test]
+    fn instantid_candle_identity_names_the_missing_identitynet_weight() {
+        let staged = StagedInstantId::install(
+            "candle-instantid",
+            protocol::REALVISXL_REPOSITORY,
+            INSTANTID_CANDLE_TIER,
+        );
+        let error = match instantid_candle_identity(INSTANTID_CANDLE_TIER) {
+            Err(error) => error,
+            Ok(_) => panic!("an IdentityNet directory carrying no weight file must be refused"),
+        };
+        assert!(
+            error.contains(protocol::INSTANTID_CONTROLNET_WEIGHT_FILE),
+            "{error}"
+        );
+        assert!(
+            error.contains(&staged.identitynet.display().to_string())
+                || error.contains(
+                    &std::fs::canonicalize(&staged.identitynet)
+                        .unwrap()
+                        .display()
+                        .to_string()
+                ),
+            "the refusal must name the directory it looked in: {error}"
+        );
+
+        staged.stage_identitynet_weight();
+        let identity = match instantid_candle_identity(INSTANTID_CANDLE_TIER) {
+            Ok(identity) => identity,
+            Err(error) => panic!("a complete staged tree must bind: {error}"),
+        };
+        assert_eq!(identity.repository, protocol::REALVISXL_REPOSITORY);
+        assert_eq!(identity.revision, StagedInstantId::REVISION);
+
+        // The digest covers EXACTLY these five, in exactly this order: a permutation and every
+        // four-path subset both differ.
+        let ordered = staged.ordered_paths();
+        assert_eq!(identity.artifact_fingerprint, digest_of(&ordered));
+        let mut swapped = ordered.clone();
+        swapped.swap(3, 4);
+        assert_ne!(
+            identity.artifact_fingerprint,
+            digest_of(&swapped),
+            "the digest must be order-sensitive across the face stack"
+        );
+        for dropped in 0..ordered.len() {
+            let mut short = ordered.clone();
+            short.remove(dropped);
+            assert_ne!(
+                identity.artifact_fingerprint,
+                digest_of(&short),
+                "path {dropped} is not covered by the digest"
+            );
+        }
+    }
+
+    /// sc-22729: the artifact digest is over the ORDERED paths with a record separator, the axis the
+    /// provider's `overlay_key()` carries.
+    #[test]
+    fn instantid_artifact_fingerprint_is_ordered_and_separated() {
+        let a = std::path::Path::new("/w/a");
+        let b = std::path::Path::new("/w/b");
+        assert_ne!(
+            instantid_artifact_fingerprint(&[a, b]),
+            instantid_artifact_fingerprint(&[b, a])
+        );
+        assert_ne!(
+            instantid_artifact_fingerprint(&[
+                std::path::Path::new("/ab"),
+                std::path::Path::new("/c")
+            ]),
+            instantid_artifact_fingerprint(&[
+                std::path::Path::new("/a"),
+                std::path::Path::new("/bc")
+            ])
+        );
+        let digest = instantid_artifact_fingerprint(&[a, b]);
+        assert_eq!(digest.len(), 64);
+        assert!(digest.chars().all(|c| c.is_ascii_hexdigit()));
+        assert!(!digest.contains('='));
+    }
 }
 
 #[cfg(test)]

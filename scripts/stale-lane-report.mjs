@@ -426,7 +426,24 @@ export function adapterCapturableProviders(source, label) {
         "has moved, so capturability can no longer be derived from this adapter",
     );
   }
-  return [...gates.reduce((acc, gate) => new Set([...acc].filter((id) => gate.has(id))))].sort();
+  // sc-22729: a BESPOKE arm is dispatched by an early `if provider == <ID> { return … }` and never
+  // reaches the gated match blocks at all, so intersecting the gates would veto it and report a
+  // real, working arm as uncapturable. `candle:instantid` (this story) and `candle:ltx_2_5_distilled`
+  // (sc-22725) are both dispatched that way. Union those in instead of intersecting them out.
+  const bespoke = new Set();
+  for (const item of cleaned.matchAll(/\bif\s+provider\s*==\s*(?:([A-Z][A-Z0-9_]*)|"((?:\\.|[^"\\])*)")\s*\{/g)) {
+    const [, ident, literal] = item;
+    if (literal !== undefined) {
+      bespoke.add(literal);
+      continue;
+    }
+    if (!consts.has(ident)) {
+      throw new Error(`${label}: bespoke dispatch on ${ident} does not resolve to a &str const`);
+    }
+    bespoke.add(consts.get(ident));
+  }
+  const gated = gates.reduce((acc, gate) => new Set([...acc].filter((id) => gate.has(id))));
+  return [...new Set([...gated, ...bespoke])].sort();
 }
 
 /**

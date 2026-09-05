@@ -2,6 +2,276 @@
   "$schema": "../packages/schemas/memory-anchor-plan.schema.json",
   "schemaVersion": 1,
   "anchors": {
+    "chroma1_base:bf16:candle": {
+      "provider": "chroma1_base",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "deferred_materialization",
+      "calibrationFingerprint": "chroma1-base-bf16-cuda-request-scoped-staged-residency-v1",
+      "fixture": "fresh-five-rung-chroma1-base-bf16-1024-seed16402-step2"
+    },
+    "chroma1_base:bf16:mlx": {
+      "provider": "chroma1_base",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "deferred_materialization",
+      "calibrationFingerprint": "chroma1-base-bf16-mlx-shared-ladder-v1",
+      "fixture": "chroma1-base-mlx-bf16-1024-seed22731-step2"
+    },
+    "chroma1_base:q4:candle": {
+      "provider": "chroma1_base",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "deferred_materialization",
+      "calibrationFingerprint": "chroma1-base-q4-cuda-request-scoped-staged-residency-v1",
+      "fixture": "fresh-five-rung-chroma1-base-q4-1024-seed16402-step2"
+    },
+    "chroma1_base:q4:mlx": {
+      "provider": "chroma1_base",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "deferred_materialization",
+      "calibrationFingerprint": "chroma1-base-q4-mlx-shared-ladder-2026-08-05-v1",
+      "fixture": "chroma1-base-mlx-q4-1024-seed22731-step2"
+    },
+    "chroma1_base:q8:candle": {
+      "provider": "chroma1_base",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "deferred_materialization",
+      "calibrationFingerprint": "chroma1-base-q8-cuda-request-scoped-staged-residency-v1",
+      "fixture": "fresh-five-rung-chroma1-base-q8-1024-seed16402-step2"
+    },
+    "chroma1_base:q8:mlx": {
+      "provider": "chroma1_base",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "deferred_materialization",
+      "calibrationFingerprint": "chroma1-base-q8-mlx-shared-ladder-v1",
+      "fixture": "chroma1-base-mlx-q8-1024-seed22731-step2"
+    },
+    "chroma1_flash:bf16:candle": {
+      "provider": "chroma1_flash",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "deferred_materialization",
+      "calibrationFingerprint": "chroma1-flash-bf16-cuda-request-scoped-staged-residency-v1",
+      "fixture": "fresh-five-rung-chroma1-flash-bf16-1024-seed16402-step2"
+    },
+    "chroma1_flash:bf16:mlx": {
+      "provider": "chroma1_flash",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "deferred_materialization",
+      "calibrationFingerprint": "chroma1-flash-bf16-mlx-shared-ladder-v1",
+      "fixture": "chroma1-flash-mlx-bf16-1024-seed22731-step2"
+    },
+    "chroma1_flash:q4:candle": {
+      "provider": "chroma1_flash",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "deferred_materialization",
+      "calibrationFingerprint": "chroma1-flash-q4-cuda-request-scoped-staged-residency-v1",
+      "fixture": "fresh-five-rung-chroma1-flash-q4-1024-seed16402-step2"
+    },
+    "chroma1_flash:q4:mlx": {
+      "provider": "chroma1_flash",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "deferred_materialization",
+      "calibrationFingerprint": "chroma1-flash-q4-mlx-shared-ladder-v1",
+      "fixture": "chroma1-flash-mlx-q4-1024-seed22731-step2"
+    },
+    "chroma1_flash:q8:candle": {
+      "provider": "chroma1_flash",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "deferred_materialization",
+      "calibrationFingerprint": "chroma1-flash-q8-cuda-request-scoped-staged-residency-v1",
+      "fixture": "fresh-five-rung-chroma1-flash-q8-1024-seed16402-step2"
+    },
+    "chroma1_flash:q8:mlx": {
+      "provider": "chroma1_flash",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "deferred_materialization",
+      "calibrationFingerprint": "chroma1-flash-q8-mlx-shared-ladder-v1",
+      "fixture": "chroma1-flash-mlx-q8-1024-seed22731-step2"
+    },
+    "chroma1_hd:bf16:candle": {
+      "provider": "chroma1_hd",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "deferred_materialization",
+      "calibrationFingerprint": "chroma1-hd-bf16-cuda-request-scoped-staged-residency-v1",
+      "fixture": "fresh-five-rung-chroma1-hd-bf16-1024-seed16402-step2"
+    },
+    "chroma1_hd:bf16:mlx": {
+      "provider": "chroma1_hd",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "deferred_materialization",
+      "calibrationFingerprint": "chroma1-hd-bf16-mlx-shared-ladder-v1",
+      "fixture": "chroma1-hd-mlx-bf16-1024-seed22731-step2"
+    },
+    "chroma1_hd:q4:candle": {
+      "provider": "chroma1_hd",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "deferred_materialization",
+      "calibrationFingerprint": "chroma1-hd-q4-cuda-request-scoped-staged-residency-v1",
+      "fixture": "fresh-five-rung-chroma1-hd-q4-1024-seed16402-step2"
+    },
+    "chroma1_hd:q4:mlx": {
+      "provider": "chroma1_hd",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "deferred_materialization",
+      "calibrationFingerprint": "chroma1-hd-q4-mlx-shared-ladder-v1",
+      "fixture": "chroma1-hd-mlx-q4-1024-seed22731-step2"
+    },
+    "chroma1_hd:q8:candle": {
+      "provider": "chroma1_hd",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "deferred_materialization",
+      "calibrationFingerprint": "chroma1-hd-q8-cuda-request-scoped-staged-residency-v1",
+      "fixture": "fresh-five-rung-chroma1-hd-q8-1024-seed16402-step2"
+    },
+    "chroma1_hd:q8:mlx": {
+      "provider": "chroma1_hd",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "deferred_materialization",
+      "calibrationFingerprint": "chroma1-hd-q8-mlx-shared-ladder-v1",
+      "fixture": "chroma1-hd-mlx-q8-1024-seed22731-step2"
+    },
     "flux2_dev:bf16:candle": {
       "provider": "flux2_dev",
       "mode": "text_to_image",
@@ -1591,8 +1861,8 @@
       "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1",
       "fixture": "qwen-edit-lightning-mlx-q8-seed16353-step4"
     },
-    "sd3_5_large:bf16:candle": {
-      "provider": "sd3_5_large",
+    "sana_1600m:bf16:candle": {
+      "provider": "sana_1600m",
       "mode": "text_to_image",
       "overlay": "none",
       "geometry": {
@@ -1603,11 +1873,11 @@
       },
       "evidenceScope": "authoritative",
       "loadShape": "deferred_materialization",
-      "calibrationFingerprint": "sd35-large-candle-resident-staged-v1",
-      "fixture": "fresh-five-rung-sd3-5-large-bf16-1024-seed16402-step2"
+      "calibrationFingerprint": "sana-candle-dense-base-full-ladder-v1",
+      "fixture": "fresh-five-rung-sana-1600m-bf16-1024-seed16402-step2"
     },
-    "sd3_5_large:bf16:mlx": {
-      "provider": "sd3_5_large",
+    "sana_1600m:bf16:mlx": {
+      "provider": "sana_1600m",
       "mode": "text_to_image",
       "overlay": "none",
       "geometry": {
@@ -1618,11 +1888,41 @@
       },
       "evidenceScope": "authoritative",
       "loadShape": "eager_materialization",
-      "calibrationFingerprint": "sd3-5-large-bf16-mlx-shared-ladder-v1",
-      "fixture": "sd3-5-large-mlx-bf16-1024-seed22730-step2"
+      "calibrationFingerprint": "sana-base-bf16-mlx-full-ladder-v1-resident",
+      "fixture": "sana-1600m-mlx-bf16-1024-seed22731-step2"
     },
-    "sd3_5_large:q4:candle": {
-      "provider": "sd3_5_large",
+    "sana_1600m:q4:mlx": {
+      "provider": "sana_1600m",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "eager_materialization",
+      "calibrationFingerprint": "sana-mlx-full-ladder-2026-08-06-v1-resident",
+      "fixture": "sana-1600m-mlx-q4-1024-seed22731-step2"
+    },
+    "sana_1600m:q8:mlx": {
+      "provider": "sana_1600m",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "eager_materialization",
+      "calibrationFingerprint": "sana-base-q8-mlx-full-ladder-v1-resident",
+      "fixture": "sana-1600m-mlx-q8-1024-seed22731-step2"
+    },
+    "sana_sprint_1600m:bf16:candle": {
+      "provider": "sana_sprint_1600m",
       "mode": "text_to_image",
       "overlay": "none",
       "geometry": {
@@ -1633,11 +1933,11 @@
       },
       "evidenceScope": "authoritative",
       "loadShape": "deferred_materialization",
-      "calibrationFingerprint": "sd35-large-candle-resident-staged-v1",
-      "fixture": "fresh-five-rung-sd3-5-large-q4-1024-seed16402-step2"
+      "calibrationFingerprint": "sana-candle-dense-sprint-full-ladder-v1",
+      "fixture": "fresh-five-rung-sana-sprint-bf16-1024-seed16402-step2"
     },
-    "sd3_5_large:q4:mlx": {
-      "provider": "sd3_5_large",
+    "sana_sprint_1600m:bf16:mlx": {
+      "provider": "sana_sprint_1600m",
       "mode": "text_to_image",
       "overlay": "none",
       "geometry": {
@@ -1648,26 +1948,11 @@
       },
       "evidenceScope": "authoritative",
       "loadShape": "eager_materialization",
-      "calibrationFingerprint": "sd3-5-large-q4-mlx-shared-ladder-v1",
-      "fixture": "sd3-5-large-mlx-q4-1024-seed22730-step2"
+      "calibrationFingerprint": "sana-sprint-bf16-mlx-full-ladder-v1-resident",
+      "fixture": "sana-sprint-mlx-bf16-1024-seed22731-step2"
     },
-    "sd3_5_large:q8:candle": {
-      "provider": "sd3_5_large",
-      "mode": "text_to_image",
-      "overlay": "none",
-      "geometry": {
-        "width": 1024,
-        "height": 1024,
-        "batch": 1,
-        "frames": 1
-      },
-      "evidenceScope": "authoritative",
-      "loadShape": "deferred_materialization",
-      "calibrationFingerprint": "sd35-large-candle-resident-staged-v1",
-      "fixture": "fresh-five-rung-sd3-5-large-q8-1024-seed16402-step2"
-    },
-    "sd3_5_large:q8:mlx": {
-      "provider": "sd3_5_large",
+    "sana_sprint_1600m:q4:mlx": {
+      "provider": "sana_sprint_1600m",
       "mode": "text_to_image",
       "overlay": "none",
       "geometry": {
@@ -1678,26 +1963,11 @@
       },
       "evidenceScope": "authoritative",
       "loadShape": "eager_materialization",
-      "calibrationFingerprint": "sd3-5-large-q8-mlx-shared-ladder-v1",
-      "fixture": "sd3-5-large-mlx-q8-1024-seed22730-step2"
+      "calibrationFingerprint": "sana-sprint-q4-mlx-full-ladder-v1-resident",
+      "fixture": "sana-sprint-mlx-q4-1024-seed22731-step2"
     },
-    "sd3_5_large_turbo:bf16:candle": {
-      "provider": "sd3_5_large_turbo",
-      "mode": "text_to_image",
-      "overlay": "none",
-      "geometry": {
-        "width": 1024,
-        "height": 1024,
-        "batch": 1,
-        "frames": 1
-      },
-      "evidenceScope": "authoritative",
-      "loadShape": "deferred_materialization",
-      "calibrationFingerprint": "sd35-large-turbo-candle-resident-staged-v1",
-      "fixture": "fresh-five-rung-sd3-5-large-turbo-bf16-1024-seed16402-step2"
-    },
-    "sd3_5_large_turbo:bf16:mlx": {
-      "provider": "sd3_5_large_turbo",
+    "sana_sprint_1600m:q8:mlx": {
+      "provider": "sana_sprint_1600m",
       "mode": "text_to_image",
       "overlay": "none",
       "geometry": {
@@ -1708,158 +1978,8 @@
       },
       "evidenceScope": "authoritative",
       "loadShape": "eager_materialization",
-      "calibrationFingerprint": "sd3-5-large-turbo-bf16-mlx-shared-ladder-v1",
-      "fixture": "sd3-5-large-turbo-mlx-bf16-1024-seed22730-step2"
-    },
-    "sd3_5_large_turbo:q4:candle": {
-      "provider": "sd3_5_large_turbo",
-      "mode": "text_to_image",
-      "overlay": "none",
-      "geometry": {
-        "width": 1024,
-        "height": 1024,
-        "batch": 1,
-        "frames": 1
-      },
-      "evidenceScope": "authoritative",
-      "loadShape": "deferred_materialization",
-      "calibrationFingerprint": "sd35-large-turbo-candle-resident-staged-v1",
-      "fixture": "fresh-five-rung-sd3-5-large-turbo-q4-1024-seed16402-step2"
-    },
-    "sd3_5_large_turbo:q4:mlx": {
-      "provider": "sd3_5_large_turbo",
-      "mode": "text_to_image",
-      "overlay": "none",
-      "geometry": {
-        "width": 1024,
-        "height": 1024,
-        "batch": 1,
-        "frames": 1
-      },
-      "evidenceScope": "authoritative",
-      "loadShape": "eager_materialization",
-      "calibrationFingerprint": "sd3-5-large-turbo-q4-mlx-shared-ladder-v1",
-      "fixture": "sd3-5-large-turbo-mlx-q4-1024-seed22730-step2"
-    },
-    "sd3_5_large_turbo:q8:candle": {
-      "provider": "sd3_5_large_turbo",
-      "mode": "text_to_image",
-      "overlay": "none",
-      "geometry": {
-        "width": 1024,
-        "height": 1024,
-        "batch": 1,
-        "frames": 1
-      },
-      "evidenceScope": "authoritative",
-      "loadShape": "deferred_materialization",
-      "calibrationFingerprint": "sd35-large-turbo-candle-resident-staged-v1",
-      "fixture": "fresh-five-rung-sd3-5-large-turbo-q8-1024-seed16402-step2"
-    },
-    "sd3_5_large_turbo:q8:mlx": {
-      "provider": "sd3_5_large_turbo",
-      "mode": "text_to_image",
-      "overlay": "none",
-      "geometry": {
-        "width": 1024,
-        "height": 1024,
-        "batch": 1,
-        "frames": 1
-      },
-      "evidenceScope": "authoritative",
-      "loadShape": "eager_materialization",
-      "calibrationFingerprint": "sd3-5-large-turbo-q8-mlx-shared-ladder-v1",
-      "fixture": "sd3-5-large-turbo-mlx-q8-1024-seed22730-step2"
-    },
-    "sd3_5_medium:bf16:candle": {
-      "provider": "sd3_5_medium",
-      "mode": "text_to_image",
-      "overlay": "none",
-      "geometry": {
-        "width": 1024,
-        "height": 1024,
-        "batch": 1,
-        "frames": 1
-      },
-      "evidenceScope": "authoritative",
-      "loadShape": "deferred_materialization",
-      "calibrationFingerprint": "sd35-medium-candle-resident-staged-v1",
-      "fixture": "fresh-five-rung-sd3-5-medium-bf16-1024-seed16402-step2"
-    },
-    "sd3_5_medium:bf16:mlx": {
-      "provider": "sd3_5_medium",
-      "mode": "text_to_image",
-      "overlay": "none",
-      "geometry": {
-        "width": 1024,
-        "height": 1024,
-        "batch": 1,
-        "frames": 1
-      },
-      "evidenceScope": "authoritative",
-      "loadShape": "eager_materialization",
-      "calibrationFingerprint": "sd3-5-medium-bf16-mlx-shared-ladder-v1",
-      "fixture": "sd3-5-medium-mlx-bf16-1024-seed22730-step2"
-    },
-    "sd3_5_medium:q4:candle": {
-      "provider": "sd3_5_medium",
-      "mode": "text_to_image",
-      "overlay": "none",
-      "geometry": {
-        "width": 1024,
-        "height": 1024,
-        "batch": 1,
-        "frames": 1
-      },
-      "evidenceScope": "authoritative",
-      "loadShape": "deferred_materialization",
-      "calibrationFingerprint": "sd35-medium-candle-resident-staged-v1",
-      "fixture": "fresh-five-rung-sd3-5-medium-q4-1024-seed16402-step2"
-    },
-    "sd3_5_medium:q4:mlx": {
-      "provider": "sd3_5_medium",
-      "mode": "text_to_image",
-      "overlay": "none",
-      "geometry": {
-        "width": 1024,
-        "height": 1024,
-        "batch": 1,
-        "frames": 1
-      },
-      "evidenceScope": "authoritative",
-      "loadShape": "eager_materialization",
-      "calibrationFingerprint": "sd3-5-medium-q4-mlx-shared-ladder-v1",
-      "fixture": "sd3-5-medium-mlx-q4-1024-seed22730-step2"
-    },
-    "sd3_5_medium:q8:candle": {
-      "provider": "sd3_5_medium",
-      "mode": "text_to_image",
-      "overlay": "none",
-      "geometry": {
-        "width": 1024,
-        "height": 1024,
-        "batch": 1,
-        "frames": 1
-      },
-      "evidenceScope": "authoritative",
-      "loadShape": "deferred_materialization",
-      "calibrationFingerprint": "sd35-medium-candle-resident-staged-v1",
-      "fixture": "fresh-five-rung-sd3-5-medium-q8-1024-seed16402-step2"
-    },
-    "sd3_5_medium:q8:mlx": {
-      "provider": "sd3_5_medium",
-      "mode": "text_to_image",
-      "overlay": "none",
-      "geometry": {
-        "width": 1024,
-        "height": 1024,
-        "batch": 1,
-        "frames": 1
-      },
-      "evidenceScope": "authoritative",
-      "loadShape": "eager_materialization",
-      "calibrationFingerprint": "sd3-5-medium-q8-mlx-shared-ladder-v1",
-      "fixture": "sd3-5-medium-mlx-q8-1024-seed22730-step2"
+      "calibrationFingerprint": "sana-sprint-q8-mlx-full-ladder-v1-resident",
+      "fixture": "sana-sprint-mlx-q8-1024-seed22731-step2"
     },
     "sdxl:bf16:mlx": {
       "provider": "sdxl",
@@ -2932,8 +3052,23 @@
       "calibrationFingerprint": "z-image-mlx-independent-materialization-v4",
       "fixture": "fresh-five-rung-z-image-q8-768-seed16402-step2"
     },
-    "chroma1_base:bf16:candle": {
-      "provider": "chroma1_base",
+    "sdxl:q4:candle": {
+      "provider": "sdxl",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 768,
+        "height": 768,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "deferred_materialization",
+      "calibrationFingerprint": "sdxl-candle-sdxl-staged-decode-attention-v1",
+      "fixture": "sdxl-base-candle-q4-768-seed18379-step2"
+    },
+    "sdxl:q8:candle": {
+      "provider": "sdxl",
       "mode": "text_to_image",
       "overlay": "none",
       "geometry": {
@@ -2944,11 +3079,11 @@
       },
       "evidenceScope": "authoritative",
       "loadShape": "deferred_materialization",
-      "calibrationFingerprint": "chroma1-base-bf16-cuda-request-scoped-staged-residency-v1",
-      "fixture": "fresh-five-rung-chroma1-base-bf16-1024-seed16402-step2"
+      "calibrationFingerprint": "sdxl-candle-sdxl-staged-decode-attention-v1",
+      "fixture": "sdxl-base-candle-q8-1024-seed18379-step2"
     },
-    "chroma1_base:bf16:mlx": {
-      "provider": "chroma1_base",
+    "sdxl:bf16:candle": {
+      "provider": "sdxl",
       "mode": "text_to_image",
       "overlay": "none",
       "geometry": {
@@ -2959,11 +3094,26 @@
       },
       "evidenceScope": "authoritative",
       "loadShape": "deferred_materialization",
-      "calibrationFingerprint": "chroma1-base-bf16-mlx-shared-ladder-v1",
-      "fixture": "chroma1-base-mlx-bf16-1024-seed22731-step2"
+      "calibrationFingerprint": "sdxl-candle-sdxl-staged-decode-attention-v1",
+      "fixture": "sdxl-base-candle-bf16-1024-seed18379-step2"
     },
-    "chroma1_base:q4:candle": {
-      "provider": "chroma1_base",
+    "realvisxl:q4:mlx": {
+      "provider": "sdxl",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 768,
+        "height": 768,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "deferred_materialization",
+      "calibrationFingerprint": "sdxl-mlx-unet-shared-ladder-v3",
+      "fixture": "realvisxl-mlx-q4-768-seed18379-step2"
+    },
+    "realvisxl:q8:mlx": {
+      "provider": "sdxl",
       "mode": "text_to_image",
       "overlay": "none",
       "geometry": {
@@ -2974,11 +3124,11 @@
       },
       "evidenceScope": "authoritative",
       "loadShape": "deferred_materialization",
-      "calibrationFingerprint": "chroma1-base-q4-cuda-request-scoped-staged-residency-v1",
-      "fixture": "fresh-five-rung-chroma1-base-q4-1024-seed16402-step2"
+      "calibrationFingerprint": "sdxl-mlx-unet-shared-ladder-v3",
+      "fixture": "realvisxl-mlx-q8-1024-seed18379-step2"
     },
-    "chroma1_base:q4:mlx": {
-      "provider": "chroma1_base",
+    "realvisxl:bf16:mlx": {
+      "provider": "sdxl",
       "mode": "text_to_image",
       "overlay": "none",
       "geometry": {
@@ -2989,11 +3139,26 @@
       },
       "evidenceScope": "authoritative",
       "loadShape": "deferred_materialization",
-      "calibrationFingerprint": "chroma1-base-q4-mlx-shared-ladder-2026-08-05-v1",
-      "fixture": "chroma1-base-mlx-q4-1024-seed22731-step2"
+      "calibrationFingerprint": "sdxl-mlx-unet-shared-ladder-v3",
+      "fixture": "realvisxl-mlx-bf16-1024-seed18379-step2"
     },
-    "chroma1_base:q8:candle": {
-      "provider": "chroma1_base",
+    "realvisxl:q4:candle": {
+      "provider": "sdxl",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 768,
+        "height": 768,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "deferred_materialization",
+      "calibrationFingerprint": "sdxl-candle-realvisxl-staged-decode-attention-v1",
+      "fixture": "realvisxl-candle-q4-768-seed18379-step2"
+    },
+    "realvisxl:q8:candle": {
+      "provider": "sdxl",
       "mode": "text_to_image",
       "overlay": "none",
       "geometry": {
@@ -3004,11 +3169,11 @@
       },
       "evidenceScope": "authoritative",
       "loadShape": "deferred_materialization",
-      "calibrationFingerprint": "chroma1-base-q8-cuda-request-scoped-staged-residency-v1",
-      "fixture": "fresh-five-rung-chroma1-base-q8-1024-seed16402-step2"
+      "calibrationFingerprint": "sdxl-candle-realvisxl-staged-decode-attention-v1",
+      "fixture": "realvisxl-candle-q8-1024-seed18379-step2"
     },
-    "chroma1_base:q8:mlx": {
-      "provider": "chroma1_base",
+    "realvisxl:bf16:candle": {
+      "provider": "sdxl",
       "mode": "text_to_image",
       "overlay": "none",
       "geometry": {
@@ -3019,11 +3184,26 @@
       },
       "evidenceScope": "authoritative",
       "loadShape": "deferred_materialization",
-      "calibrationFingerprint": "chroma1-base-q8-mlx-shared-ladder-v1",
-      "fixture": "chroma1-base-mlx-q8-1024-seed22731-step2"
+      "calibrationFingerprint": "sdxl-candle-realvisxl-staged-decode-attention-v1",
+      "fixture": "realvisxl-candle-bf16-1024-seed18379-step2"
     },
-    "chroma1_flash:bf16:candle": {
-      "provider": "chroma1_flash",
+    "realvisxl_lightning:q4:mlx": {
+      "provider": "sdxl",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 768,
+        "height": 768,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "deferred_materialization",
+      "calibrationFingerprint": "sdxl-mlx-unet-shared-ladder-v3",
+      "fixture": "realvisxl-lightning-mlx-q4-768-seed18379-step2"
+    },
+    "realvisxl_lightning:q8:mlx": {
+      "provider": "sdxl",
       "mode": "text_to_image",
       "overlay": "none",
       "geometry": {
@@ -3034,11 +3214,11 @@
       },
       "evidenceScope": "authoritative",
       "loadShape": "deferred_materialization",
-      "calibrationFingerprint": "chroma1-flash-bf16-cuda-request-scoped-staged-residency-v1",
-      "fixture": "fresh-five-rung-chroma1-flash-bf16-1024-seed16402-step2"
+      "calibrationFingerprint": "sdxl-mlx-unet-shared-ladder-v3",
+      "fixture": "realvisxl-lightning-mlx-q8-1024-seed18379-step2"
     },
-    "chroma1_flash:bf16:mlx": {
-      "provider": "chroma1_flash",
+    "realvisxl_lightning:bf16:mlx": {
+      "provider": "sdxl",
       "mode": "text_to_image",
       "overlay": "none",
       "geometry": {
@@ -3049,11 +3229,26 @@
       },
       "evidenceScope": "authoritative",
       "loadShape": "deferred_materialization",
-      "calibrationFingerprint": "chroma1-flash-bf16-mlx-shared-ladder-v1",
-      "fixture": "chroma1-flash-mlx-bf16-1024-seed22731-step2"
+      "calibrationFingerprint": "sdxl-mlx-unet-shared-ladder-v3",
+      "fixture": "realvisxl-lightning-mlx-bf16-1024-seed18379-step2"
     },
-    "chroma1_flash:q4:candle": {
-      "provider": "chroma1_flash",
+    "realvisxl_lightning:q4:candle": {
+      "provider": "sdxl",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 768,
+        "height": 768,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "deferred_materialization",
+      "calibrationFingerprint": "sdxl-candle-realvisxl-lightning-staged-decode-attention-v1",
+      "fixture": "realvisxl-lightning-candle-q4-768-seed18379-step2"
+    },
+    "realvisxl_lightning:q8:candle": {
+      "provider": "sdxl",
       "mode": "text_to_image",
       "overlay": "none",
       "geometry": {
@@ -3064,11 +3259,11 @@
       },
       "evidenceScope": "authoritative",
       "loadShape": "deferred_materialization",
-      "calibrationFingerprint": "chroma1-flash-q4-cuda-request-scoped-staged-residency-v1",
-      "fixture": "fresh-five-rung-chroma1-flash-q4-1024-seed16402-step2"
+      "calibrationFingerprint": "sdxl-candle-realvisxl-lightning-staged-decode-attention-v1",
+      "fixture": "realvisxl-lightning-candle-q8-1024-seed18379-step2"
     },
-    "chroma1_flash:q4:mlx": {
-      "provider": "chroma1_flash",
+    "realvisxl_lightning:bf16:candle": {
+      "provider": "sdxl",
       "mode": "text_to_image",
       "overlay": "none",
       "geometry": {
@@ -3079,11 +3274,26 @@
       },
       "evidenceScope": "authoritative",
       "loadShape": "deferred_materialization",
-      "calibrationFingerprint": "chroma1-flash-q4-mlx-shared-ladder-v1",
-      "fixture": "chroma1-flash-mlx-q4-1024-seed22731-step2"
+      "calibrationFingerprint": "sdxl-candle-realvisxl-lightning-staged-decode-attention-v1",
+      "fixture": "realvisxl-lightning-candle-bf16-1024-seed18379-step2"
     },
-    "chroma1_flash:q8:candle": {
-      "provider": "chroma1_flash",
+    "illustrious_xl_v1:q4:mlx": {
+      "provider": "sdxl",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 768,
+        "height": 768,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "deferred_materialization",
+      "calibrationFingerprint": "sdxl-mlx-unet-shared-ladder-v3",
+      "fixture": "illustrious-xl-v1-mlx-q4-768-seed18379-step2"
+    },
+    "illustrious_xl_v1:q8:mlx": {
+      "provider": "sdxl",
       "mode": "text_to_image",
       "overlay": "none",
       "geometry": {
@@ -3094,11 +3304,11 @@
       },
       "evidenceScope": "authoritative",
       "loadShape": "deferred_materialization",
-      "calibrationFingerprint": "chroma1-flash-q8-cuda-request-scoped-staged-residency-v1",
-      "fixture": "fresh-five-rung-chroma1-flash-q8-1024-seed16402-step2"
+      "calibrationFingerprint": "sdxl-mlx-unet-shared-ladder-v3",
+      "fixture": "illustrious-xl-v1-mlx-q8-1024-seed18379-step2"
     },
-    "chroma1_flash:q8:mlx": {
-      "provider": "chroma1_flash",
+    "illustrious_xl_v1:bf16:mlx": {
+      "provider": "sdxl",
       "mode": "text_to_image",
       "overlay": "none",
       "geometry": {
@@ -3109,11 +3319,26 @@
       },
       "evidenceScope": "authoritative",
       "loadShape": "deferred_materialization",
-      "calibrationFingerprint": "chroma1-flash-q8-mlx-shared-ladder-v1",
-      "fixture": "chroma1-flash-mlx-q8-1024-seed22731-step2"
+      "calibrationFingerprint": "sdxl-mlx-unet-shared-ladder-v3",
+      "fixture": "illustrious-xl-v1-mlx-bf16-1024-seed18379-step2"
     },
-    "chroma1_hd:bf16:candle": {
-      "provider": "chroma1_hd",
+    "illustrious_xl_v1:q4:candle": {
+      "provider": "sdxl",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 768,
+        "height": 768,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "deferred_materialization",
+      "calibrationFingerprint": "sdxl-candle-illustrious-xl-rev1-staged-decode-attention-v1",
+      "fixture": "illustrious-xl-v1-candle-q4-768-seed18379-step2"
+    },
+    "illustrious_xl_v1:q8:candle": {
+      "provider": "sdxl",
       "mode": "text_to_image",
       "overlay": "none",
       "geometry": {
@@ -3124,11 +3349,11 @@
       },
       "evidenceScope": "authoritative",
       "loadShape": "deferred_materialization",
-      "calibrationFingerprint": "chroma1-hd-bf16-cuda-request-scoped-staged-residency-v1",
-      "fixture": "fresh-five-rung-chroma1-hd-bf16-1024-seed16402-step2"
+      "calibrationFingerprint": "sdxl-candle-illustrious-xl-rev1-staged-decode-attention-v1",
+      "fixture": "illustrious-xl-v1-candle-q8-1024-seed18379-step2"
     },
-    "chroma1_hd:bf16:mlx": {
-      "provider": "chroma1_hd",
+    "illustrious_xl_v1:bf16:candle": {
+      "provider": "sdxl",
       "mode": "text_to_image",
       "overlay": "none",
       "geometry": {
@@ -3139,11 +3364,26 @@
       },
       "evidenceScope": "authoritative",
       "loadShape": "deferred_materialization",
-      "calibrationFingerprint": "chroma1-hd-bf16-mlx-shared-ladder-v1",
-      "fixture": "chroma1-hd-mlx-bf16-1024-seed22731-step2"
+      "calibrationFingerprint": "sdxl-candle-illustrious-xl-rev1-staged-decode-attention-v1",
+      "fixture": "illustrious-xl-v1-candle-bf16-1024-seed18379-step2"
     },
-    "chroma1_hd:q4:candle": {
-      "provider": "chroma1_hd",
+    "illustrious_xl_v2:q4:mlx": {
+      "provider": "sdxl",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 768,
+        "height": 768,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "deferred_materialization",
+      "calibrationFingerprint": "sdxl-mlx-unet-shared-ladder-v3",
+      "fixture": "illustrious-xl-v2-mlx-q4-768-seed18379-step2"
+    },
+    "illustrious_xl_v2:q8:mlx": {
+      "provider": "sdxl",
       "mode": "text_to_image",
       "overlay": "none",
       "geometry": {
@@ -3154,11 +3394,11 @@
       },
       "evidenceScope": "authoritative",
       "loadShape": "deferred_materialization",
-      "calibrationFingerprint": "chroma1-hd-q4-cuda-request-scoped-staged-residency-v1",
-      "fixture": "fresh-five-rung-chroma1-hd-q4-1024-seed16402-step2"
+      "calibrationFingerprint": "sdxl-mlx-unet-shared-ladder-v3",
+      "fixture": "illustrious-xl-v2-mlx-q8-1024-seed18379-step2"
     },
-    "chroma1_hd:q4:mlx": {
-      "provider": "chroma1_hd",
+    "illustrious_xl_v2:bf16:mlx": {
+      "provider": "sdxl",
       "mode": "text_to_image",
       "overlay": "none",
       "geometry": {
@@ -3169,11 +3409,26 @@
       },
       "evidenceScope": "authoritative",
       "loadShape": "deferred_materialization",
-      "calibrationFingerprint": "chroma1-hd-q4-mlx-shared-ladder-v1",
-      "fixture": "chroma1-hd-mlx-q4-1024-seed22731-step2"
+      "calibrationFingerprint": "sdxl-mlx-unet-shared-ladder-v3",
+      "fixture": "illustrious-xl-v2-mlx-bf16-1024-seed18379-step2"
     },
-    "chroma1_hd:q8:candle": {
-      "provider": "chroma1_hd",
+    "illustrious_xl_v2:q4:candle": {
+      "provider": "sdxl",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 768,
+        "height": 768,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "deferred_materialization",
+      "calibrationFingerprint": "sdxl-candle-illustrious-xl-rev2-staged-decode-attention-v1",
+      "fixture": "illustrious-xl-v2-candle-q4-768-seed18379-step2"
+    },
+    "illustrious_xl_v2:q8:candle": {
+      "provider": "sdxl",
       "mode": "text_to_image",
       "overlay": "none",
       "geometry": {
@@ -3184,11 +3439,11 @@
       },
       "evidenceScope": "authoritative",
       "loadShape": "deferred_materialization",
-      "calibrationFingerprint": "chroma1-hd-q8-cuda-request-scoped-staged-residency-v1",
-      "fixture": "fresh-five-rung-chroma1-hd-q8-1024-seed16402-step2"
+      "calibrationFingerprint": "sdxl-candle-illustrious-xl-rev2-staged-decode-attention-v1",
+      "fixture": "illustrious-xl-v2-candle-q8-1024-seed18379-step2"
     },
-    "chroma1_hd:q8:mlx": {
-      "provider": "chroma1_hd",
+    "illustrious_xl_v2:bf16:candle": {
+      "provider": "sdxl",
       "mode": "text_to_image",
       "overlay": "none",
       "geometry": {
@@ -3199,11 +3454,71 @@
       },
       "evidenceScope": "authoritative",
       "loadShape": "deferred_materialization",
-      "calibrationFingerprint": "chroma1-hd-q8-mlx-shared-ladder-v1",
-      "fixture": "chroma1-hd-mlx-q8-1024-seed22731-step2"
+      "calibrationFingerprint": "sdxl-candle-illustrious-xl-rev2-staged-decode-attention-v1",
+      "fixture": "illustrious-xl-v2-candle-bf16-1024-seed18379-step2"
     },
-    "sana_1600m:bf16:candle": {
-      "provider": "sana_1600m",
+    "instantid_realvisxl:q4:mlx": {
+      "provider": "instantid",
+      "mode": "character_image",
+      "overlay": "identity",
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "eager_materialization",
+      "calibrationFingerprint": "instantid-request-contract-v1",
+      "fixture": "instantid-realvisxl-mlx-q4-1024-seed18381-step2"
+    },
+    "instantid_realvisxl:q8:mlx": {
+      "provider": "instantid",
+      "mode": "character_image",
+      "overlay": "identity",
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "eager_materialization",
+      "calibrationFingerprint": "instantid-request-contract-v1",
+      "fixture": "instantid-realvisxl-mlx-q8-1024-seed18381-step2"
+    },
+    "instantid_realvisxl:bf16:mlx": {
+      "provider": "instantid",
+      "mode": "character_image",
+      "overlay": "identity",
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "eager_materialization",
+      "calibrationFingerprint": "instantid-request-contract-v1",
+      "fixture": "instantid-realvisxl-mlx-bf16-1024-seed18381-step2"
+    },
+    "instantid_realvisxl:bf16:candle": {
+      "provider": "instantid",
+      "mode": "character_image",
+      "overlay": "identity",
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "eager_materialization",
+      "calibrationFingerprint": "instantid-candle-staged-conditioning-v1",
+      "fixture": "instantid-realvisxl-candle-bf16-1024-seed18381-step2"
+    },
+    "sd3_5_large:bf16:candle": {
+      "provider": "sd3_5_large",
       "mode": "text_to_image",
       "overlay": "none",
       "geometry": {
@@ -3214,11 +3529,11 @@
       },
       "evidenceScope": "authoritative",
       "loadShape": "deferred_materialization",
-      "calibrationFingerprint": "sana-candle-dense-base-full-ladder-v1",
-      "fixture": "fresh-five-rung-sana-1600m-bf16-1024-seed16402-step2"
+      "calibrationFingerprint": "sd35-large-candle-resident-staged-v1",
+      "fixture": "fresh-five-rung-sd3-5-large-bf16-1024-seed16402-step2"
     },
-    "sana_1600m:bf16:mlx": {
-      "provider": "sana_1600m",
+    "sd3_5_large:bf16:mlx": {
+      "provider": "sd3_5_large",
       "mode": "text_to_image",
       "overlay": "none",
       "geometry": {
@@ -3229,41 +3544,11 @@
       },
       "evidenceScope": "authoritative",
       "loadShape": "eager_materialization",
-      "calibrationFingerprint": "sana-base-bf16-mlx-full-ladder-v1-resident",
-      "fixture": "sana-1600m-mlx-bf16-1024-seed22731-step2"
+      "calibrationFingerprint": "sd3-5-large-bf16-mlx-shared-ladder-v1",
+      "fixture": "sd3-5-large-mlx-bf16-1024-seed22730-step2"
     },
-    "sana_1600m:q4:mlx": {
-      "provider": "sana_1600m",
-      "mode": "text_to_image",
-      "overlay": "none",
-      "geometry": {
-        "width": 1024,
-        "height": 1024,
-        "batch": 1,
-        "frames": 1
-      },
-      "evidenceScope": "authoritative",
-      "loadShape": "eager_materialization",
-      "calibrationFingerprint": "sana-mlx-full-ladder-2026-08-06-v1-resident",
-      "fixture": "sana-1600m-mlx-q4-1024-seed22731-step2"
-    },
-    "sana_1600m:q8:mlx": {
-      "provider": "sana_1600m",
-      "mode": "text_to_image",
-      "overlay": "none",
-      "geometry": {
-        "width": 1024,
-        "height": 1024,
-        "batch": 1,
-        "frames": 1
-      },
-      "evidenceScope": "authoritative",
-      "loadShape": "eager_materialization",
-      "calibrationFingerprint": "sana-base-q8-mlx-full-ladder-v1-resident",
-      "fixture": "sana-1600m-mlx-q8-1024-seed22731-step2"
-    },
-    "sana_sprint_1600m:bf16:candle": {
-      "provider": "sana_sprint_1600m",
+    "sd3_5_large:q4:candle": {
+      "provider": "sd3_5_large",
       "mode": "text_to_image",
       "overlay": "none",
       "geometry": {
@@ -3274,11 +3559,11 @@
       },
       "evidenceScope": "authoritative",
       "loadShape": "deferred_materialization",
-      "calibrationFingerprint": "sana-candle-dense-sprint-full-ladder-v1",
-      "fixture": "fresh-five-rung-sana-sprint-bf16-1024-seed16402-step2"
+      "calibrationFingerprint": "sd35-large-candle-resident-staged-v1",
+      "fixture": "fresh-five-rung-sd3-5-large-q4-1024-seed16402-step2"
     },
-    "sana_sprint_1600m:bf16:mlx": {
-      "provider": "sana_sprint_1600m",
+    "sd3_5_large:q4:mlx": {
+      "provider": "sd3_5_large",
       "mode": "text_to_image",
       "overlay": "none",
       "geometry": {
@@ -3289,11 +3574,26 @@
       },
       "evidenceScope": "authoritative",
       "loadShape": "eager_materialization",
-      "calibrationFingerprint": "sana-sprint-bf16-mlx-full-ladder-v1-resident",
-      "fixture": "sana-sprint-mlx-bf16-1024-seed22731-step2"
+      "calibrationFingerprint": "sd3-5-large-q4-mlx-shared-ladder-v1",
+      "fixture": "sd3-5-large-mlx-q4-1024-seed22730-step2"
     },
-    "sana_sprint_1600m:q4:mlx": {
-      "provider": "sana_sprint_1600m",
+    "sd3_5_large:q8:candle": {
+      "provider": "sd3_5_large",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "deferred_materialization",
+      "calibrationFingerprint": "sd35-large-candle-resident-staged-v1",
+      "fixture": "fresh-five-rung-sd3-5-large-q8-1024-seed16402-step2"
+    },
+    "sd3_5_large:q8:mlx": {
+      "provider": "sd3_5_large",
       "mode": "text_to_image",
       "overlay": "none",
       "geometry": {
@@ -3304,11 +3604,26 @@
       },
       "evidenceScope": "authoritative",
       "loadShape": "eager_materialization",
-      "calibrationFingerprint": "sana-sprint-q4-mlx-full-ladder-v1-resident",
-      "fixture": "sana-sprint-mlx-q4-1024-seed22731-step2"
+      "calibrationFingerprint": "sd3-5-large-q8-mlx-shared-ladder-v1",
+      "fixture": "sd3-5-large-mlx-q8-1024-seed22730-step2"
     },
-    "sana_sprint_1600m:q8:mlx": {
-      "provider": "sana_sprint_1600m",
+    "sd3_5_large_turbo:bf16:candle": {
+      "provider": "sd3_5_large_turbo",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "deferred_materialization",
+      "calibrationFingerprint": "sd35-large-turbo-candle-resident-staged-v1",
+      "fixture": "fresh-five-rung-sd3-5-large-turbo-bf16-1024-seed16402-step2"
+    },
+    "sd3_5_large_turbo:bf16:mlx": {
+      "provider": "sd3_5_large_turbo",
       "mode": "text_to_image",
       "overlay": "none",
       "geometry": {
@@ -3319,8 +3634,158 @@
       },
       "evidenceScope": "authoritative",
       "loadShape": "eager_materialization",
-      "calibrationFingerprint": "sana-sprint-q8-mlx-full-ladder-v1-resident",
-      "fixture": "sana-sprint-mlx-q8-1024-seed22731-step2"
+      "calibrationFingerprint": "sd3-5-large-turbo-bf16-mlx-shared-ladder-v1",
+      "fixture": "sd3-5-large-turbo-mlx-bf16-1024-seed22730-step2"
+    },
+    "sd3_5_large_turbo:q4:candle": {
+      "provider": "sd3_5_large_turbo",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "deferred_materialization",
+      "calibrationFingerprint": "sd35-large-turbo-candle-resident-staged-v1",
+      "fixture": "fresh-five-rung-sd3-5-large-turbo-q4-1024-seed16402-step2"
+    },
+    "sd3_5_large_turbo:q4:mlx": {
+      "provider": "sd3_5_large_turbo",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "eager_materialization",
+      "calibrationFingerprint": "sd3-5-large-turbo-q4-mlx-shared-ladder-v1",
+      "fixture": "sd3-5-large-turbo-mlx-q4-1024-seed22730-step2"
+    },
+    "sd3_5_large_turbo:q8:candle": {
+      "provider": "sd3_5_large_turbo",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "deferred_materialization",
+      "calibrationFingerprint": "sd35-large-turbo-candle-resident-staged-v1",
+      "fixture": "fresh-five-rung-sd3-5-large-turbo-q8-1024-seed16402-step2"
+    },
+    "sd3_5_large_turbo:q8:mlx": {
+      "provider": "sd3_5_large_turbo",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "eager_materialization",
+      "calibrationFingerprint": "sd3-5-large-turbo-q8-mlx-shared-ladder-v1",
+      "fixture": "sd3-5-large-turbo-mlx-q8-1024-seed22730-step2"
+    },
+    "sd3_5_medium:bf16:candle": {
+      "provider": "sd3_5_medium",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "deferred_materialization",
+      "calibrationFingerprint": "sd35-medium-candle-resident-staged-v1",
+      "fixture": "fresh-five-rung-sd3-5-medium-bf16-1024-seed16402-step2"
+    },
+    "sd3_5_medium:bf16:mlx": {
+      "provider": "sd3_5_medium",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "eager_materialization",
+      "calibrationFingerprint": "sd3-5-medium-bf16-mlx-shared-ladder-v1",
+      "fixture": "sd3-5-medium-mlx-bf16-1024-seed22730-step2"
+    },
+    "sd3_5_medium:q4:candle": {
+      "provider": "sd3_5_medium",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "deferred_materialization",
+      "calibrationFingerprint": "sd35-medium-candle-resident-staged-v1",
+      "fixture": "fresh-five-rung-sd3-5-medium-q4-1024-seed16402-step2"
+    },
+    "sd3_5_medium:q4:mlx": {
+      "provider": "sd3_5_medium",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "eager_materialization",
+      "calibrationFingerprint": "sd3-5-medium-q4-mlx-shared-ladder-v1",
+      "fixture": "sd3-5-medium-mlx-q4-1024-seed22730-step2"
+    },
+    "sd3_5_medium:q8:candle": {
+      "provider": "sd3_5_medium",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "deferred_materialization",
+      "calibrationFingerprint": "sd35-medium-candle-resident-staged-v1",
+      "fixture": "fresh-five-rung-sd3-5-medium-q8-1024-seed16402-step2"
+    },
+    "sd3_5_medium:q8:mlx": {
+      "provider": "sd3_5_medium",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "eager_materialization",
+      "calibrationFingerprint": "sd3-5-medium-q8-mlx-shared-ladder-v1",
+      "fixture": "sd3-5-medium-mlx-q8-1024-seed22730-step2"
     }
   }
 }
