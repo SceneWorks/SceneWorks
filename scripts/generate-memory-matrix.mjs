@@ -1231,7 +1231,18 @@ function tiersFor(model, backend, backendTierOverrides, routeLaneTiers, route) {
     : ["default"];
 }
 
-function parseBackendTierOverrides(instantIdSource) {
+/**
+ * The per-lane tier overrides that come from CODE rather than from a manifest declaration: the
+ * InstantID Candle dense tier, read out of the worker's own `instantid.rs`, plus the converter
+ * families' packed tier sets. These are ROUTING facts — what the lane can load at all.
+ *
+ * Exported (sc-22729) so the measurability gap set can narrow a model's tier axis by exactly these
+ * and nothing else. `tiersFor` also consults `model[backend].vramGbByTier`, which is a MEASUREMENT
+ * declaration: a missing key there says a peak has not been recorded, never that the lane refuses
+ * the tier, so a gap set that intersected against it would delete the very cells it exists to
+ * count.
+ */
+export function parseBackendTierOverrides(instantIdSource) {
   const candleDense = instantIdSource.match(
     /#\[cfg\(not\(target_os = "macos"\)\)\]\s*let preferred = \{[\s\S]*?"([^"]+)"\s*\};/,
   )?.[1];

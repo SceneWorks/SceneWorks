@@ -449,7 +449,7 @@ export function bespokePreGateProviders(cleaned, consts, label) {
     if (literal) return literal[1];
     if (/^[A-Z][A-Z0-9_]*$/.test(pattern)) {
       if (!consts.has(pattern)) {
-        throw new Error(`${label}: bespoke pre-gate ${pattern} does not resolve to a &str const`);
+        throw new Error(`${label}: bespoke dispatch on ${pattern} does not resolve to a &str const`);
       }
       return consts.get(pattern);
     }

@@ -8,7 +8,9 @@ autobins = false
 
 [dependencies]
 serde_json = "1.0"
-# Shared by both lanes: the PuLID identity bundle is named by content digest in every record.
+# Shared by both lanes: the PuLID identity bundle is named by content digest in every record, and
+# sc-22729's InstantID artifact digest is the worker's own sha256 over the ordered artifact paths,
+# which BOTH adapters compute. Neither is macOS-only.
 sha2 = "0.10"
 
 [target.'cfg(target_os = "macos")'.dependencies]
@@ -19,6 +21,7 @@ mlx-gen-krea = { git = "https://github.com/SceneWorks/inference", rev = "c6d6a4d
 mlx-gen-ltx = { git = "https://github.com/SceneWorks/inference", rev = "c6d6a4dbd61ab09c26ff5526632cae2cefea60ed", optional = true }
 mlx-gen-minimax-h3 = { git = "https://github.com/SceneWorks/inference", rev = "c6d6a4dbd61ab09c26ff5526632cae2cefea60ed", optional = true }
 mlx-gen-scail2 = { git = "https://github.com/SceneWorks/inference", rev = "c6d6a4dbd61ab09c26ff5526632cae2cefea60ed", optional = true }
+mlx-gen-instantid = { git = "https://github.com/SceneWorks/inference", rev = "c6d6a4dbd61ab09c26ff5526632cae2cefea60ed", optional = true }
 mlx-gen-sdxl = { git = "https://github.com/SceneWorks/inference", rev = "c6d6a4dbd61ab09c26ff5526632cae2cefea60ed", optional = true }
 mlx-gen-wan = { git = "https://github.com/SceneWorks/inference", rev = "c6d6a4dbd61ab09c26ff5526632cae2cefea60ed", optional = true }
 mlx-rs = { package = "pmetal-mlx-rs", git = "https://github.com/michaeltrefry/mlx-rs", rev = "bd8f0e3c757195b17b2c34fae3073ab826fb7bc1", optional = true }
@@ -43,7 +46,7 @@ sceneworks-core = { path = "../sceneworks-core" }
 
 [features]
 default = []
-mlx = ["dep:mlx-gen", "dep:mlx-gen-flux2", "dep:mlx-gen-krea", "dep:mlx-gen-ltx", "dep:mlx-gen-minimax-h3", "dep:mlx-gen-scail2", "dep:mlx-gen-sdxl", "dep:mlx-gen-wan", "dep:mlx-rs", "dep:runtime-macos"]
+mlx = ["dep:mlx-gen", "dep:mlx-gen-flux2", "dep:mlx-gen-instantid", "dep:mlx-gen-krea", "dep:mlx-gen-ltx", "dep:mlx-gen-minimax-h3", "dep:mlx-gen-scail2", "dep:mlx-gen-sdxl", "dep:mlx-gen-wan", "dep:mlx-rs", "dep:runtime-macos"]
 candle = ["dep:candle-gen", "dep:candle-gen-scail2", "dep:candle-gen-wan", "dep:runtime-cuda"]
 
 [[bin]]

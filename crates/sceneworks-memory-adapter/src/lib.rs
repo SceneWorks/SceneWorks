@@ -51,6 +51,18 @@ pub const FLUX1_DEV_REPOSITORY: &str = "SceneWorks/flux1-dev-mlx";
 /// The FLUX.1 [schnell] tiered rehost (sc-22726), the `flux1_schnell` provider's own artifact.
 pub const FLUX1_SCHNELL_REPOSITORY: &str = "SceneWorks/flux1-schnell-mlx";
 pub const SDXL_REPOSITORY: &str = "SceneWorks/sdxl-base-mlx";
+// sc-22729. The SDXL FAMILY: five catalog models the worker routes onto ONE engine id (`sdxl`) on
+// both lanes (`crates/sceneworks-worker/src/engines.rs` `MODEL_TABLE`, and
+// `crates/sceneworks-core/src/jobs_store/routing/candle.rs`), each with its own independently
+// pinned tiered rehost. The engine id is NOT the artifact identity: `candle-gen-sdxl`'s
+// `SDXL_ROUTES` seals a per-route repository/revision and mints a per-route calibration
+// fingerprint, so an anchor must bind the exact model's artifact family, never the engine's.
+/// RealVisXL V5.0 — also the InstantID backbone (`image_jobs/instantid.rs` `INSTANTID_SDXL_REPO`).
+pub const REALVISXL_REPOSITORY: &str = "SceneWorks/realvisxl-mlx";
+/// The step-distilled RealVisXL Lightning finetune (5 steps / guidance 1.0 in the worker's row).
+pub const REALVISXL_LIGHTNING_REPOSITORY: &str = "SceneWorks/realvisxl-lightning-mlx";
+pub const ILLUSTRIOUS_XL_V1_REPOSITORY: &str = "SceneWorks/illustrious-xl-v1-mlx";
+pub const ILLUSTRIOUS_XL_V2_REPOSITORY: &str = "SceneWorks/illustrious-xl-v2-mlx";
 /// The SANA 1.6B tiered rehost (sc-22731) — the `sana_1600m` provider's MLX artifact. The three
 /// packed tiers are `platforms: ["macos"]` turnkeys, so this repository serves the MLX lane ONLY;
 /// the Candle lane loads [`SANA_DENSE_REPOSITORY`] instead.
@@ -837,6 +849,96 @@ pub fn synthetic_reference_rgb(width: u32, height: u32) -> Vec<u8> {
     pixels
 }
 
+// ------------------------------------------------------------------------------------------
+// InstantID identity stack (sc-22729)
+// ------------------------------------------------------------------------------------------
+
+/// The env var BOTH InstantID worker lanes honour for a pre-staged converted bundle
+/// (`crates/sceneworks-worker/src/image_jobs/instantid.rs` `ensure_instantid_weights`). The
+/// IP-Adapter and the SCRFD/ArcFace face stack are fetched on first use from a pinned repo rather
+/// than declared as manifest downloads, so an anchor binds the operator's staged copy through the
+/// same seam the worker reads — never by re-deriving the fetch.
+pub const INSTANTID_IDENTITY_BUNDLE_ENV: &str = "SCENEWORKS_INSTANTID_WEIGHTS";
+/// The IdentityNet `ControlNetModel` directory (`SCENEWORKS_INSTANTID_CONTROLNET` in the worker).
+pub const INSTANTID_CONTROLNET_ENV: &str = "SCENEWORKS_INSTANTID_CONTROLNET";
+pub const INSTANTID_IP_ADAPTER_FILE: &str = "ip-adapter.safetensors";
+pub const INSTANTID_SCRFD_FILE: &str = "scrfd_10g.safetensors";
+pub const INSTANTID_ARCFACE_FILE: &str = "arcface_iresnet100.safetensors";
+/// Every file the staged bundle must carry. Duplicated from the worker's own private constants;
+/// `instantid_bundle_filenames_match_the_worker` reads that source and proves the two agree.
+pub const INSTANTID_IDENTITY_BUNDLE_FILES: [&str; 3] = [
+    INSTANTID_IP_ADAPTER_FILE,
+    INSTANTID_SCRFD_FILE,
+    INSTANTID_ARCFACE_FILE,
+];
+/// The IdentityNet weight file inside the ControlNet directory.
+pub const INSTANTID_CONTROLNET_WEIGHT_FILE: &str = "diffusion_pytorch_model.safetensors";
+
+/// The resolved InstantID identity stack one capture loads.
+///
+/// `face_dir` is the bundle root itself, exactly as the worker stages it: the candle lane passes
+/// `scrfd_path.parent()` and the MLX lane joins the two face files out of the same directory.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct InstantIdIdentityBundle {
+    pub root: std::path::PathBuf,
+    pub ip_adapter: std::path::PathBuf,
+    pub scrfd: std::path::PathBuf,
+    pub arcface: std::path::PathBuf,
+    pub face_dir: std::path::PathBuf,
+}
+
+/// Resolve the bundle under `root`, refusing up front and naming EVERY missing file rather than
+/// failing later inside the loader with one file's error.
+pub fn instantid_identity_bundle_at(
+    root: std::path::PathBuf,
+) -> Result<InstantIdIdentityBundle, String> {
+    let missing = INSTANTID_IDENTITY_BUNDLE_FILES
+        .iter()
+        .filter(|file| !root.join(file).is_file())
+        .copied()
+        .collect::<Vec<_>>();
+    if !missing.is_empty() {
+        return Err(format!(
+            "the InstantID identity bundle at {} is missing {} (expected {})",
+            root.display(),
+            missing.join(", "),
+            INSTANTID_IDENTITY_BUNDLE_FILES.join(", ")
+        ));
+    }
+    Ok(InstantIdIdentityBundle {
+        ip_adapter: root.join(INSTANTID_IP_ADAPTER_FILE),
+        scrfd: root.join(INSTANTID_SCRFD_FILE),
+        arcface: root.join(INSTANTID_ARCFACE_FILE),
+        face_dir: root.clone(),
+        root,
+    })
+}
+
+/// The bundle named by [`INSTANTID_IDENTITY_BUNDLE_ENV`], canonicalized.
+pub fn instantid_identity_bundle() -> Result<InstantIdIdentityBundle, String> {
+    let root = std::fs::canonicalize(std::path::PathBuf::from(required_env(
+        INSTANTID_IDENTITY_BUNDLE_ENV,
+    )?))
+    .map_err(|error| format!("canonicalize {INSTANTID_IDENTITY_BUNDLE_ENV}: {error}"))?;
+    instantid_identity_bundle_at(root)
+}
+
+/// The IdentityNet ControlNet directory named by [`INSTANTID_CONTROLNET_ENV`], canonicalized and
+/// proven to carry the weight file the loader opens.
+pub fn instantid_controlnet_dir() -> Result<std::path::PathBuf, String> {
+    let root = std::fs::canonicalize(std::path::PathBuf::from(required_env(
+        INSTANTID_CONTROLNET_ENV,
+    )?))
+    .map_err(|error| format!("canonicalize {INSTANTID_CONTROLNET_ENV}: {error}"))?;
+    if !root.join(INSTANTID_CONTROLNET_WEIGHT_FILE).is_file() {
+        return Err(format!(
+            "the InstantID IdentityNet directory at {} carries no {INSTANTID_CONTROLNET_WEIGHT_FILE}",
+            root.display()
+        ));
+    }
+    Ok(root)
+}
+
 pub fn required_env(name: &str) -> Result<String, String> {
     std::env::var(name)
         .ok()
@@ -1309,6 +1411,129 @@ pub fn open_resident_phase_window<C: ResidencyCounters>(
         );
     }
     Ok(opening)
+}
+
+/// Test support shared by BOTH adapter binaries (sc-22729 review).
+///
+/// Ordinary public API rather than `#[cfg(test)]`: the binaries are separate compilation units that
+/// merely DEPEND on this crate, so nothing gated on this crate's own `test` cfg is visible to them.
+/// The alternative was the same hundred lines copied into `mlx.rs` and `candle.rs`, where the two
+/// copies would drift — and the whole point of the fixture is that both lanes stage the identity
+/// stack the same way.
+pub mod staging {
+    use super::{
+        INSTANTID_CONTROLNET_ENV, INSTANTID_CONTROLNET_WEIGHT_FILE, INSTANTID_IDENTITY_BUNDLE_ENV,
+        INSTANTID_IDENTITY_BUNDLE_FILES,
+    };
+    use std::path::PathBuf;
+    use std::sync::{Mutex, MutexGuard, PoisonError};
+
+    /// Serializes the process-global `SCENEWORKS_INSTANTID_*` swap. Both `instantid_binding` and
+    /// `instantid_candle_identity` read five environment variables; two tests mutating them
+    /// concurrently would each resolve half of the other's tree.
+    static INSTANTID_ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    pub const INSTANTID_ENV_NAMES: [&str; 5] = [
+        "SCENEWORKS_INSTANTID_REALVISXL_REPOSITORY",
+        "SCENEWORKS_INSTANTID_REALVISXL_REVISION",
+        "SCENEWORKS_INSTANTID_REALVISXL_ROOT",
+        INSTANTID_IDENTITY_BUNDLE_ENV,
+        INSTANTID_CONTROLNET_ENV,
+    ];
+
+    /// A synthetic InstantID staging tree, installed into the process environment for as long as
+    /// this value lives. RAII rather than a restore statement so a panicking assertion cannot leak
+    /// the injected environment into every later test in the process.
+    pub struct StagedInstantId {
+        root: PathBuf,
+        /// The tiered backbone snapshot root, in the exact Hugging Face layout the validators want.
+        pub snapshot: PathBuf,
+        /// The IdentityNet `ControlNetModel` directory. Created EMPTY — call
+        /// [`StagedInstantId::stage_identitynet_weight`] to complete it.
+        pub identitynet: PathBuf,
+        /// The identity bundle root, carrying all three of `INSTANTID_IDENTITY_BUNDLE_FILES`.
+        pub bundle: PathBuf,
+        _guard: MutexGuard<'static, ()>,
+    }
+
+    impl StagedInstantId {
+        /// A well-formed 40-hex revision. Any value works: the validators check SHAPE and the path
+        /// suffix, never that the revision exists anywhere.
+        pub const REVISION: &'static str = "e40202d63baef826c7df95a639a811698c1178d2";
+
+        pub fn install(tag: &str, repository: &str, tier: &str) -> Self {
+            let guard = INSTANTID_ENV_LOCK
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            let root = std::env::temp_dir().join(format!(
+                "sc-22729-{tag}-{}-{}",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .expect("the clock is after the epoch")
+                    .as_nanos()
+            ));
+            let snapshot = root
+                .join(format!("models--{}", repository.replace('/', "--")))
+                .join("snapshots")
+                .join(Self::REVISION)
+                .join(tier);
+            let identitynet = root.join("identitynet");
+            let bundle = root.join("bundle");
+            for dir in [&snapshot, &identitynet, &bundle] {
+                std::fs::create_dir_all(dir).expect("create the staged tree");
+            }
+            for file in INSTANTID_IDENTITY_BUNDLE_FILES {
+                std::fs::write(bundle.join(file), b"x").expect("stage a bundle file");
+            }
+            for (name, value) in [
+                (INSTANTID_ENV_NAMES[0], repository.to_owned()),
+                (INSTANTID_ENV_NAMES[1], Self::REVISION.to_owned()),
+                (INSTANTID_ENV_NAMES[2], snapshot.display().to_string()),
+                (INSTANTID_ENV_NAMES[3], bundle.display().to_string()),
+                (INSTANTID_ENV_NAMES[4], identitynet.display().to_string()),
+            ] {
+                std::env::set_var(name, value);
+            }
+            Self {
+                root,
+                snapshot,
+                identitynet,
+                bundle,
+                _guard: guard,
+            }
+        }
+
+        pub fn stage_identitynet_weight(&self) {
+            std::fs::write(
+                self.identitynet.join(INSTANTID_CONTROLNET_WEIGHT_FILE),
+                b"x",
+            )
+            .expect("stage the IdentityNet weight");
+        }
+
+        /// The five artifact paths, canonicalized, in the role order the worker's
+        /// `instantid_artifact_fingerprint` hashes them: backbone, IdentityNet, IP-Adapter, SCRFD,
+        /// ArcFace.
+        pub fn ordered_paths(&self) -> Vec<PathBuf> {
+            let bundle = std::fs::canonicalize(&self.bundle).expect("canonicalize the bundle");
+            let mut paths = vec![
+                std::fs::canonicalize(&self.snapshot).expect("canonicalize the snapshot"),
+                std::fs::canonicalize(&self.identitynet).expect("canonicalize the IdentityNet dir"),
+            ];
+            paths.extend(INSTANTID_IDENTITY_BUNDLE_FILES.map(|file| bundle.join(file)));
+            paths
+        }
+    }
+
+    impl Drop for StagedInstantId {
+        fn drop(&mut self) {
+            for name in INSTANTID_ENV_NAMES {
+                std::env::remove_var(name);
+            }
+            std::fs::remove_dir_all(&self.root).ok();
+        }
+    }
 }
 
 #[cfg(test)]
@@ -2231,6 +2456,72 @@ mod tests {
             MINIMAX_UPSTREAM_REPOSITORY
         )
         .is_err());
+    }
+
+    /// sc-22729: the InstantID bundle filenames are declared in TWO places — here, and privately
+    /// in the worker's `image_jobs/instantid.rs`. The worker's constants are `pub(crate)`/private
+    /// so they cannot be imported; this reads the worker source instead, so a rename there reds
+    /// this crate rather than silently making an anchor bind a file the worker never stages.
+    #[test]
+    fn instantid_bundle_filenames_match_the_worker() {
+        let worker = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../sceneworks-worker/src/image_jobs/instantid.rs");
+        let source = std::fs::read_to_string(&worker)
+            .unwrap_or_else(|error| panic!("read {}: {error}", worker.display()));
+        for file in INSTANTID_IDENTITY_BUNDLE_FILES
+            .iter()
+            .chain([&INSTANTID_CONTROLNET_WEIGHT_FILE])
+        {
+            assert!(
+                source.contains(&format!("\"{file}\"")),
+                "{file} is not a literal in {}",
+                worker.display()
+            );
+        }
+        for env in [INSTANTID_IDENTITY_BUNDLE_ENV, INSTANTID_CONTROLNET_ENV] {
+            assert!(
+                source.contains(env),
+                "{env} is not read by {}",
+                worker.display()
+            );
+        }
+        // The InstantID backbone IS the plain `realvisxl` rehost, so an anchor for either model
+        // resolves the same tiered artifact family.
+        assert!(source.contains(&format!("\"{REALVISXL_REPOSITORY}\"")));
+    }
+
+    /// sc-22729: the bundle refuses up front and names every missing file, so an operator staging
+    /// the identity stack is told the whole gap once instead of one file per attempt.
+    #[test]
+    fn instantid_identity_bundle_names_every_missing_file() {
+        let root = std::env::temp_dir().join(format!(
+            "sc-22729-instantid-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let error = instantid_identity_bundle_at(root.clone()).unwrap_err();
+        for file in INSTANTID_IDENTITY_BUNDLE_FILES {
+            assert!(error.contains(file), "{file} unnamed in {error}");
+        }
+        std::fs::write(root.join(INSTANTID_IP_ADAPTER_FILE), b"x").unwrap();
+        let error = instantid_identity_bundle_at(root.clone()).unwrap_err();
+        assert!(!error.contains(INSTANTID_IP_ADAPTER_FILE) || error.contains("expected"));
+        for file in [INSTANTID_SCRFD_FILE, INSTANTID_ARCFACE_FILE] {
+            std::fs::write(root.join(file), b"x").unwrap();
+        }
+        let bundle = instantid_identity_bundle_at(root.clone()).unwrap();
+        assert_eq!(
+            bundle.face_dir, root,
+            "the bundle dir IS the face stack dir"
+        );
+        assert_eq!(bundle.ip_adapter, root.join(INSTANTID_IP_ADAPTER_FILE));
+        assert_eq!(bundle.scrfd, root.join(INSTANTID_SCRFD_FILE));
+        assert_eq!(bundle.arcface, root.join(INSTANTID_ARCFACE_FILE));
+        std::fs::remove_dir_all(&root).ok();
     }
 
     /// sc-22724: the edit reference is one interleaved RGB frame at the request geometry, and it
