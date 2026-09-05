@@ -132,6 +132,23 @@ export function sdxlCandleRouteDrift(modelId, tier, routes, models) {
 }
 
 /**
+ * The built-in Qwen-Image-Edit-2511 Lightning distill LoRA (sc-22728). It is NOT a manifest
+ * download — the worker fetches it lazily into the HF cache on first use — so its repository,
+ * revision and file are pinned in the worker's own source on both lanes
+ * (`crates/sceneworks-worker/src/image_jobs/qwen.rs` `QWEN_LIGHTNING_LORA_{REPO,REVISION}` and
+ * `image_jobs/qwen_edit_candle.rs` `QWEN_EDIT_CANDLE_LIGHTNING_LORA_*`), and the candle engine
+ * refuses any other path by exact suffix (`edit.rs` `is_exact_lightning_path`). The values below are
+ * bound to those constants by a test rather than trusted, because a drift here would send the
+ * capture at a LoRA the engine will reject after the load.
+ */
+export const QWEN_EDIT_LIGHTNING_LORA = Object.freeze({
+  env: "QWEN_EDIT_LIGHTNING_LORA",
+  repo: "lightx2v/Qwen-Image-Edit-2511-Lightning",
+  revision: "d74eba145674fd7e31b949324e148e21e7118abd",
+  file: "Qwen-Image-Edit-2511-Lightning-4steps-V1.0-bf16.safetensors",
+});
+
+/**
  * One row per provider arm an adapter implements, mirroring `match provider` in
  * crates/sceneworks-memory-adapter/src/bin/{mlx,candle}.rs and the env families the runbook lists
  * under "Adapter environment". `physical` marks the one arm that emits a provider `sourceCapture`
@@ -141,12 +158,31 @@ export function sdxlCandleRouteDrift(modelId, tier, routes, models) {
  *
  * Rows are keyed by PROVIDER by default; sc-22729 adds MODEL-keyed rows (which must declare their
  * `provider`) for the case where several catalog models ride one engine id. See `familyFor`.
+ *
+ * passed for that arm and for no other. `physical` is NOT inherited by a sibling family: the harness
+ * scopes the receipt requirement to `modelId === "qwen_image"` alone
+ * (`requiresPhysicalMlxProvenanceForCurrency`, memory-calibration-harness.mjs), and a test below
+ * binds this table to that predicate.
+ *
+ * `sideArtifact` is a second root a family member needs that the MANIFEST does not ship — today only
+ * the Qwen edit Lightning distill LoRA, which the worker fetches lazily at a pinned revision. It is
+ * keyed by model id because it belongs to one member of a shared-provider family, not to the family.
  */
 export const PROVIDER_FAMILIES = Object.freeze({
   qwen_image: { env: "QWEN_IMAGE", repo: "SceneWorks/qwen-image-mlx", arms: ["mlx", "candle"], physical: true },
   // `z_image_edit` anchors ride this family too (sc-22724): the catalog id is an alias for the
   // Turbo provider driven in `edit_image` mode (worker engines.rs `z_image_edit → z_image_turbo`),
   // and its manifest entry ships the same Turbo tiers, which `tierDownload` resolves by model id.
+  // Both Qwen edit catalog ids (`qwen_image_edit_2511` and `..._lightning`) plan this ONE engine
+  // provider (worker `qwen.rs` `qwen_edit_engine_id`, `qwen_edit_candle.rs` `QWEN_EDIT_PROVIDER_ID`)
+  // and ship the SAME per-tier rehost, which `tierDownload` resolves per model id. The Lightning id
+  // additionally loads the pinned distill LoRA, declared as its `sideArtifact` below.
+  qwen_image_edit: {
+    env: "QWEN_IMAGE_EDIT",
+    repo: "SceneWorks/qwen-image-edit-2511-mlx",
+    arms: ["mlx", "candle"],
+    sideArtifact: { qwen_image_edit_2511_lightning: QWEN_EDIT_LIGHTNING_LORA },
+  },
   z_image_turbo: { env: "Z_IMAGE", repo: "SceneWorks/z-image-turbo-mlx", arms: ["mlx", "candle"] },
   // The undistilled base is a distinct engine provider (`z_image`) with its own artifact family
   // (sc-22724). Never the Turbo env: a base plan satisfied by Turbo weights re-labels Turbo's peaks.
@@ -198,7 +234,51 @@ export const PROVIDER_FAMILIES = Object.freeze({
     components: SDXL_COMPONENTS,
     stagedEnv: ["SCENEWORKS_INSTANTID_WEIGHTS", "SCENEWORKS_INSTANTID_CONTROLNET"],
   },
-  flux2_dev: { env: "FLUX2", repo: "SceneWorks/flux2-dev-mlx", arms: ["mlx"] },
+  flux2_dev: { env: "FLUX2", repo: "SceneWorks/flux2-dev-mlx", arms: ["mlx", "candle"] },
+  // sc-22727. TWO catalog models ride this ONE engine provider id (worker engines.rs:
+  // `flux2_klein_9b_kv` declares `engine_id: flux2_klein_9b`), and they load DIFFERENT artifacts.
+  // On MLX the engine tells them apart by the snapshot path AND by `LoadSpec::resolved_route`
+  // (`KleinArtifactInventory::validate_resolved_route`, mlx-gen-flux2/src/artifact_inventory.rs);
+  // on Candle ONLY by the snapshot path — `candle-gen-flux2` never reads `resolved_route`. Either
+  // way the artifact is the discriminator, so the family carries a per-modelId override: a KV plan
+  // resolved through the base rehost's env would re-label the base checkpoint's peaks as the KV
+  // variant's.
+  flux2_klein_9b: {
+    env: "FLUX2_KLEIN", repo: "SceneWorks/flux2-klein-9b-mlx", arms: ["mlx", "candle"],
+    variants: {
+      flux2_klein_9b_kv: { env: "FLUX2_KLEIN_KV", repo: "SceneWorks/flux2-klein-9b-kv-mlx" },
+    },
+  },
+  // The FLUX.1 family (sc-22726). `flux_dev`/`flux_schnell` are the two base text-to-image
+  // providers; `pulid_flux` is the PuLID-FLUX character route, which loads the SAME
+  // `SceneWorks/flux1-dev-mlx` backbone (worker image_jobs/pulid.rs `PULID_FLUX_REPO` and
+  // pulid_candle.rs `PULID_CANDLE_FLUX_REPO`) and therefore shares the FLUX1_DEV env family, the
+  // way `z_image_edit` shares the Turbo family. Its own manifest entry ships the same three tiers,
+  // which `tierDownload` resolves by model id.
+  flux1_dev: { env: "FLUX1_DEV", repo: "SceneWorks/flux1-dev-mlx", arms: ["mlx", "candle"] },
+  flux1_schnell: { env: "FLUX1_SCHNELL", repo: "SceneWorks/flux1-schnell-mlx", arms: ["mlx", "candle"] },
+  pulid_flux: {
+    env: "FLUX1_DEV", repo: "SceneWorks/flux1-dev-mlx", arms: ["mlx", "candle"],
+    // The identity stack is NOT a manifest download on either lane — the worker fetches it on first
+    // use — so the anchor binds the operator's pre-staged bundle instead, through the env var both
+    // worker lanes read (`SCENEWORKS_PULID_WEIGHTS`), under its strict Candle reading: a directory
+    // already holding all five files (pulid_candle.rs `ensure_pulid_candle_weights`; the MLX lane
+    // treats it as the directory to fill and outranks it with the `PULID_*` preset — see
+    // `PULID_IDENTITY_BUNDLE_ENV` in the adapter's lib.rs). The list below is the adapter's
+    // `PULID_IDENTITY_BUNDLE_FILES`, in the same order: the adapter checkpoint, the EVA tower, and
+    // the three face models both engines read out of `face_dir` by name. The test parses lib.rs
+    // and asserts the two lists are equal, so neither can drift alone.
+    bundle: {
+      env: "SCENEWORKS_PULID_WEIGHTS",
+      files: [
+        "pulid_flux_v0.9.1.safetensors",
+        "eva02_clip_l_336.safetensors",
+        "scrfd_10g.safetensors",
+        "arcface_iresnet100.safetensors",
+        "bisenet_parsing.safetensors",
+      ],
+    },
+  },
   minimax_h3: {
     env: "MINIMAX_H3", repo: "SceneWorks/minimax-h3-mlx", arms: ["mlx"],
     upstream: { env: "MINIMAX_H3_UPSTREAM", repo: "MiniMaxAI/MiniMax-H3" },
@@ -226,11 +306,25 @@ export const PROVIDER_FAMILIES = Object.freeze({
 export function familyFor(modelId, provider, families = PROVIDER_FAMILIES) {
   const scoped = families[modelId];
   if (scoped?.provider !== undefined && scoped.provider === provider) return scoped;
-  return families[provider];
+  // Not `families[provider]`: a provider-keyed family may still carry a per-modelId `variants`
+  // override (sc-22727's FLUX.2 klein pair), and that resolution belongs to `providerFamily`.
+  return providerFamily(provider, modelId, families);
 }
 
 export function fail(message) {
   throw new Error(message);
+}
+
+/**
+ * The artifact family one anchor binds: the provider's row, with any per-modelId override applied.
+ * A provider that serves several catalog models from ONE registry id (sc-22727's two klein models)
+ * declares the divergent members under `variants`; everything else is the row itself.
+ */
+export function providerFamily(provider, modelId, families = PROVIDER_FAMILIES) {
+  const family = families[provider];
+  if (!family) return undefined;
+  const variant = family.variants?.[modelId];
+  return variant ? { ...family, ...variant, variants: undefined } : family;
 }
 
 export function anchorParts(key) {
@@ -451,6 +545,30 @@ export async function classifyAnchor(key, planned, { models, backend, hubs, curr
   row.env[`SCENEWORKS_${family.env}_REVISION`] = download.revision;
   row.env[`SCENEWORKS_${family.env}_ROOT`] = tierRoot;
   row.tierRoot = tierRoot;
+  if (family.bundle) {
+    // A pre-staged loose-file bundle rather than an HF snapshot, so it is probed through the
+    // operator env the worker itself honours. Absent or incomplete is `weights_missing` — the same
+    // class as a missing tier root, and NOT "runnable" (a cell whose identity stack cannot be bound
+    // is not measurable on this host, and saying otherwise sends an operator to book a capture).
+    // Absolute before it is probed or handed on: the adapter canonicalizes the value from the
+    // HARNESS's cwd (lib.rs `pulid_identity_bundle`), so a relative export that resolved here
+    // against node's cwd would be probed in one directory and opened in another.
+    const bundleRoot = process.env[family.bundle.env] ? path.resolve(process.env[family.bundle.env]) : undefined;
+    row.roots.push({ label: "pulid bundle", path: bundleRoot ?? `$${family.bundle.env}` });
+    if (!bundleRoot) {
+      return { ...row, status: "weights_missing", reason: `${family.bundle.env} is unset; the PuLID identity bundle is not staged on this host` };
+    }
+    const missing = [];
+    for (const file of family.bundle.files) {
+      try {
+        if (!(await stat(path.join(bundleRoot, file))).isFile()) missing.push(file);
+      } catch { missing.push(file); }
+    }
+    if (missing.length > 0) {
+      return { ...row, status: "weights_missing", reason: `${family.bundle.env} bundle ${bundleRoot} is missing ${missing.join(", ")}` };
+    }
+    row.env[family.bundle.env] = bundleRoot;
+  }
   if (family.upstream) {
     const upstream = tierDownload(models, parts.modelId, family.upstream.repo, parts.tier);
     const upstreamRoot = await firstExistingDirectory(hubs.map((hub) => snapshotPath(hub, family.upstream.repo, upstream.revision)));
@@ -484,6 +602,19 @@ export async function classifyAnchor(key, planned, { models, backend, hubs, curr
       return { ...row, status: "weights_missing", reason: `${name} is unset or names no directory on this host` };
     }
     row.env[name] = root;
+  }
+  // A member-specific artifact the manifest does not ship (the Qwen edit Lightning distill LoRA):
+  // its repository and revision are pinned in the family row, so the root is the snapshot itself.
+  const side = family.sideArtifact?.[parts.modelId];
+  if (side) {
+    const sideRoot = await firstExistingDirectory(hubs.map((hub) => snapshotPath(hub, side.repo, side.revision)));
+    row.roots.push({ label: "side artifact", path: sideRoot ?? snapshotPath(hubs[0], side.repo, side.revision) });
+    if (!sideRoot) {
+      return { ...row, status: "weights_missing", reason: `no ${side.repo}@${side.revision.slice(0, 8)} snapshot on this host` };
+    }
+    row.env[`SCENEWORKS_${side.env}_REPOSITORY`] = side.repo;
+    row.env[`SCENEWORKS_${side.env}_REVISION`] = side.revision;
+    row.env[`SCENEWORKS_${side.env}_ROOT`] = sideRoot;
   }
   row.physical = backend === "mlx" && family.physical === true;
   return row;

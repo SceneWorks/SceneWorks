@@ -590,7 +590,13 @@ function assertEveryVramProbeIsCertifying(adapter) {
   // The certifying arms are exactly the capture sites, and one of them is the new InstantID arm.
   assert.deepEqual(
     [...certifying].sort(),
-    ["load_five_rung_generator", "run", "run_instantid_candle"],
+    [
+      "load_five_rung_generator",
+      "run",
+      "run_instantid_candle",
+      "run_pulid_flux_capture",
+      "run_qwen_edit",
+    ],
   );
   // The exception list is not allowed to quietly grow: exactly one site, and it is the LTX-2.5 arm.
   assert.deepEqual([...NON_CERTIFYING_PROBE_SITES.keys()], ["run_ltx25_capture"]);
@@ -1526,9 +1532,78 @@ test("memory adapters bind every emitted overlay verdict to the requested target
       candleReference.lastIndexOf("load_five_rung_generator(&first_request)?"),
     "the Candle batch must validate every target before its one model load",
   );
-  // The inline Krea arm emits a complete receipt after SC-21714; only the two pre-execution and
-  // five-rung paths remain gated. LTX-2.5 adds its own pre-execution fragment.
-  assert.equal(candle.match(/protocol::plain_gated_fragment\(/g)?.length, 3);
+  // Every gated fragment the Candle adapter emits must come from a protocol builder that settles the
+  // overlay scenario against the DECLARED target — `plain_gated_fragment` for an overlay-free path,
+  // `overlay_gated_fragment` for one that actually loaded an overlay (sc-22728's Qwen edit Lightning
+  // distill). A whole-file COUNT is the wrong claim in both directions: a frozen `3` breaks on every
+  // new arm, and a `>= 1` per builder stops noticing one specific arm's builder call being dropped.
+  // So the claim is PER ARM: each function that assembles a `PlainGatedFragment` must reach a
+  // builder in its OWN body.
+  const candleFunctions = new Map();
+  for (const match of candle.matchAll(/^fn ([a-z0-9_]+)[(<]/gm)) {
+    const start = match.index;
+    const next = candle.indexOf("\nfn ", start + 1);
+    candleFunctions.set(
+      match[1],
+      candle.slice(start, next === -1 ? candle.length : next),
+    );
+  }
+  const gatedEmitters = [...candleFunctions].filter(([, body]) =>
+    body.includes("protocol::PlainGatedFragment {"),
+  );
+  assert.ok(
+    gatedEmitters.length >= 4,
+    `expected every gated-fragment arm to be discovered, found ${gatedEmitters.length}`,
+  );
+  for (const [name, body] of gatedEmitters) {
+    assert.ok(
+      /protocol::(plain|overlay)_gated_fragment\(/.test(body),
+      `${name} assembles a gated fragment but never reaches an overlay-settling builder`,
+    );
+  }
+  // sc-22728's Qwen edit arm is the only one that emits BOTH shapes — the plain member and the
+  // Lightning member — so each of its two builder calls is named rather than counted.
+  const qwenEdit = candleFunctions.get("run_qwen_edit");
+  assert.ok(qwenEdit, "run_qwen_edit must exist on the Candle adapter");
+  assert.match(qwenEdit, /protocol::overlay_gated_fragment\(/);
+  assert.match(qwenEdit, /protocol::plain_gated_fragment\(/);
+  // And the Lightning branch is selected from the stack the LOAD carried, never from the arm flag,
+  // so a record can never claim an overlay the load did not fold in.
+  assert.match(qwenEdit, /let loaded_adapters = adapters\.len\(\);/);
+  assert.match(
+    qwenEdit,
+    /let mut fragment = if loaded_adapters > 0 \{\s*protocol::overlay_gated_fragment\(/,
+  );
+  assert.match(qwenEdit, /\("builtInAdapters", "count", loaded_adapters as u64\)/);
+  assert.match(qwenEdit, /overlay: \(loaded_adapters > 0\)\.then\(\|\| "lora"\.to_owned\(\)\)/);
+  // The MLX twin publishes the same claims off its own loaded stack.
+  const mlxQwenEdit = mlx.slice(
+    mlx.indexOf("fn run_qwen_edit_provider("),
+    mlx.indexOf("\nfn ", mlx.indexOf("fn run_qwen_edit_provider(") + 1),
+  );
+  assert.match(mlxQwenEdit, /let loaded_adapters = spec\.adapters\.len\(\);/);
+  assert.match(mlxQwenEdit, /let overlay_scenario = if loaded_adapters > 0 \{/);
+  assert.match(mlxQwenEdit, /\("builtInAdapters", "count", loaded_adapters as u64\)/);
+  assert.match(mlxQwenEdit, /if loaded_adapters == 0 \{\s*protocol::settle_plain_overlay_scenario\(/);
+  // A hand-rolled `"status": "gated"` object is what must not silently ship with `overlay` left at
+  // `not_run`. One arm builds its fragment by hand for a real reason — sc-22726's bespoke PuLID
+  // capture, whose route opens no memory-strategy request scope — so the claim is named rather than
+  // blanket: that arm and no other, and it must still settle its own overlay scenario.
+  const handRolled = [...candleFunctions]
+    .filter(([, body]) => /"status":\s*"gated"/.test(body))
+    .map(([name]) => name);
+  assert.deepEqual(
+    handRolled,
+    ["run_pulid_flux_capture"],
+    "a hand-rolled gated fragment bypasses the overlay-settling builders",
+  );
+  for (const name of handRolled) {
+    assert.match(
+      candleFunctions.get(name),
+      /\{ "name": "overlay", "result": "(passed|failed)"/,
+      `${name} hand-rolls a gated fragment and leaves its overlay verdict unsettled`,
+    );
+  }
   assert.match(
     candle,
     /settle_plain_overlay_scenario\(request, &mut fragment, KREA_PLAIN_EXECUTION_PATH\)\?/,
@@ -2926,6 +3001,44 @@ test("the FLUX.2 composition audit still runs, and is still wired into a lane", 
 // binding lives here, where the manifest reader already exists and `npm run check` runs it on every
 // PR. Every extraction below asserts it MATCHED before it compares — a renamed constant must red,
 // not silently pass with nothing to check.
+// sc-22727 review: the Candle FLUX.2 arm decides PER MEMBER whether the planned tier reaches the
+// loader as `LoadSpec::quantize`. The worker takes that decision from the manifest —
+// `is_dense_te_tier` is `mlx.denseTextEncoderTier: true`, and `candle_quant_for_resolved_tier`
+// then returns `(None, resolved_bits)` — so the flag must be that declaration's negation for every
+// member. The Rust binding of the arm table to the manifest lives in a `#[test]` inside
+// `candle.rs`, which cannot RUN on a Mac (the binary is `compile_error!` on macOS and
+// `rust:check:candle` only typechecks), so the same binding is parsed out of the source text here,
+// where it runs and can be mutation-killed on the host that writes the arm.
+test("the Candle FLUX.2 arm table's tier-quant flags negate the manifest's denseTextEncoderTier", async () => {
+  const manifest = JSON.parse(
+    stripJsoncComments(await source("config/manifests/builtin.models.jsonc")),
+  );
+  const adapter = await source("crates/sceneworks-memory-adapter/src/bin/candle.rs");
+  const arms = [...adapter.matchAll(/const FLUX2_[A-Z_]+_ARM: Flux2Arm = Flux2Arm \{([\s\S]*?)\n\};/g)]
+    .map(([, body]) => ({
+      modelId: /\bmodel_id: "([^"]+)"/.exec(body)?.[1],
+      quantReachesLoader: /\btier_quant_reaches_the_loader: (true|false)/.exec(body)?.[1],
+    }));
+  assert.deepEqual(
+    arms.map((arm) => arm.modelId),
+    ["flux2_dev", "flux2_klein_9b", "flux2_klein_9b_kv"],
+    "the three FLUX.2 members, in table order",
+  );
+  for (const arm of arms) {
+    assert.ok(arm.quantReachesLoader, `${arm.modelId} must declare tier_quant_reaches_the_loader`);
+    const entry = manifest.models.find((model) => model.id === arm.modelId);
+    assert.ok(entry, `${arm.modelId} must be a shipped model`);
+    const denseTe = entry.mlx?.denseTextEncoderTier === true;
+    assert.equal(
+      arm.quantReachesLoader === "true",
+      !denseTe,
+      `${arm.modelId}: the worker loads a dense-TE tier with Quant::None, so the fold must be off`,
+    );
+  }
+  // Stated as data too, so the loop cannot pass by every member answering the same way.
+  assert.deepEqual(arms.map((arm) => arm.quantReachesLoader), ["true", "false", "false"]);
+});
+
 test("the MLX LTX arm's manifest constants match the shipped ltx_2_3 limits", async () => {
   const manifest = JSON.parse(
     stripJsoncComments(await source("config/manifests/builtin.models.jsonc")),
@@ -3405,28 +3518,59 @@ test("the SC-20318 provider phase profile is exact across runner, watchdog and a
     /Some\(LTX_BOUNDED_CAMPAIGN_ACTION\) => Some\(\(\n\s*LTX_BOUNDED_CAMPAIGN_PHASE_PROFILE,\n\s*&LTX_BOUNDED_CARRIER_PHASE_NAMES,/);
 });
 
-test("the MLX FLUX.2-dev calibration arm is bound to the direct reference-free T2I contract", async () => {
+test("the MLX FLUX.2 calibration arm is bound to the direct reference-free T2I contract", async () => {
   const adapter = await source("crates/sceneworks-memory-adapter/src/bin/mlx.rs");
   const context = adapter.slice(
     adapter.indexOf("fn flux2_admission_context("),
     adapter.indexOf("fn flux2_complete_sweep("),
   );
+  // sc-22727 generalized `run_flux2_dev` to the whole family (`run_flux2`), resolved from the
+  // plan's `(provider, modelId)`; the reference-free T2I claim below is unchanged and now covers
+  // every member.
   const arm = adapter.slice(
-    adapter.indexOf("fn run_flux2_dev("),
+    adapter.indexOf("fn run_flux2("),
     adapter.indexOf("fn validate_z_image_batch("),
   );
+  const table = adapter.slice(
+    adapter.indexOf("struct Flux2Arm {"),
+    adapter.indexOf("fn validate_flux2_target("),
+  );
 
-  assert.ok(context.length > 0 && arm.length > 0, "FLUX.2-dev adapter seams must exist");
+  assert.ok(context.length > 0 && arm.length > 0 && table.length > 0, "FLUX.2 adapter seams must exist");
   assert.match(context, /mode: MemoryMode::TextToImage/);
   assert.match(context, /has_reference: false/);
   assert.match(context, /reference_count: 0/);
   assert.doesNotMatch(context, /MemoryMode::Edit|reference_count: 2/);
 
-  assert.match(arm, /memory_strategy_contract\(FLUX2_PROVIDER, &spec\)/);
+  // The contract, the load and the admission scenarios are all keyed on the RESOLVED member, never
+  // on a hardcoded provider id: that is what keeps a KV plan off the base klein artifact.
+  assert.match(arm, /memory_strategy_contract\(arm\.provider, &spec\)/);
+  assert.match(arm, /registry\s*\.load\(arm\.provider, &spec\)/);
   assert.match(arm, /registered_dev_t2i_safety_check\(/);
-  assert.match(arm, /generator\s*\.memory_strategy_contract\(\)/);
+  assert.match(arm, /generator\.memory_strategy_safety_check\(&admission_context\(/);
+  assert.match(arm, /generator\.memory_strategy_contract\(\)/);
   assert.match(arm, /loaded_contract != &contract/);
   assert.doesNotMatch(arm, /registered_dev_safety_check|FLUX2_CONTRACT_PROVIDER/);
+
+  // E4: the load goes through the production catalog the worker composes, not a crate-local
+  // replica registry.
+  assert.match(arm, /runtime_macos::catalog\(\)/);
+  assert.doesNotMatch(arm, /mlx_gen_flux2::provider_registry\(\)/);
+
+  // Exactly three members, each binding its own artifact family. Two share the klein provider id,
+  // so `model_id` — which reaches the engine as `resolved_route` — is the discriminator.
+  for (const constant of ["FLUX2_DEV_ARM", "FLUX2_KLEIN_ARM", "FLUX2_KLEIN_KV_ARM"]) {
+    assert.match(adapter, new RegExp(`const ${constant}: Flux2Arm = Flux2Arm \\{`));
+  }
+  assert.match(table, /model_id: &'static str/);
+  assert.match(adapter, /\.with_resolved_route\(arm\.model_id\)/);
+  for (const env of [
+    "SCENEWORKS_FLUX2_ROOT",
+    "SCENEWORKS_FLUX2_KLEIN_ROOT",
+    "SCENEWORKS_FLUX2_KLEIN_KV_ROOT",
+  ]) {
+    assert.ok(adapter.includes(`"${env}"`), `${env} must bind exactly one member's artifact`);
+  }
 });
 
 // =====================================================================================

@@ -9,8 +9,9 @@ use mlx_gen::gen_core::{
 };
 use mlx_gen::tiling::{SpatialTiling, TilingConfig, VaeTiling};
 use mlx_gen::{
-    Conditioning, ControlKind, GenerationOutput, GenerationRequest, Generator, Image, LoadShape,
-    LoadSpec, OffloadPolicy, Precision, Progress, Quant, WeightsSource,
+    AdapterKind, AdapterSpec, Conditioning, ControlKind, GenerationOutput, GenerationRequest,
+    Generator, IdentityWeights, Image, LoadShape, LoadSpec, OffloadPolicy, Precision, Progress,
+    Quant, WeightsSource,
 };
 use mlx_rs::memory::{
     clear_cache, get_active_memory, get_cache_memory, get_memory_limit, get_peak_memory,
@@ -97,6 +98,32 @@ const QWEN_VAE_PROBE_LOAD_SHAPE: LoadShape = LoadShape::EagerMaterialization;
 const QWEN_PROVIDER: &str = "qwen_image";
 const QWEN_PLAIN_EXECUTION_PATH: &str = "the MLX Qwen VAE-only path";
 const QWEN_PROVIDER_EXECUTION_PATH: &str = "the pinned MLX Qwen base provider path";
+/// The Qwen-Image-**Edit** engine provider (sc-22728): `mlx-gen-qwen-image`'s `model_edit::MODEL_ID`,
+/// the registry id the worker loads for BOTH shipped edit catalog ids
+/// (`image_jobs/qwen.rs` `qwen_edit_engine_id`). Reference-conditioned: the engine refuses a request
+/// that carries no `Conditioning::Reference` at all (`model_edit.rs` `validate`).
+const QWEN_EDIT_PROVIDER: &str = "qwen_image_edit";
+/// The two catalog ids that provider serves. They are ONE checkpoint on ONE artifact family; the
+/// Lightning id differs only in the built-in distill LoRA it stacks and the `lightning` sampler
+/// recipe that LoRA was distilled for — not in the engine model.
+const QWEN_EDIT_MODEL: &str = "qwen_image_edit_2511";
+const QWEN_EDIT_LIGHTNING_MODEL: &str = "qwen_image_edit_2511_lightning";
+const QWEN_EDIT_EXECUTION_PATH: &str = "the pinned MLX Qwen-Image-Edit-2511 provider path";
+const QWEN_EDIT_LIGHTNING_EXECUTION_PATH: &str =
+    "the pinned MLX Qwen-Image-Edit-2511 Lightning distill provider path";
+/// The engine recipe the distill LoRA was trained for (`model_edit.rs`: `req.sampler == "lightning"`
+/// selects the CFG-off few-step schedule, and the matching LoRA must be supplied via `spec.adapters`).
+const QWEN_EDIT_LIGHTNING_SAMPLER: &str = "lightning";
+/// Two steps for the production edit path — the first `Step` callback closes the conditioning
+/// envelope and the second gives denoise its own measured interval before `Decoding`, the shape
+/// every other image arm here uses. The Lightning path runs the distill's own FOUR steps: its
+/// schedule (`lightning_sigmas`) is the official 4-step lightx2v recipe and the worker's default,
+/// so a 2-step capture would measure a request the product never issues.
+const QWEN_EDIT_STEPS: u32 = 2;
+const QWEN_EDIT_LIGHTNING_STEPS: u32 = 4;
+/// The edit prompt every Qwen edit capture renders. Fixed with the seed and the reference so two
+/// captures of one anchor are the same request.
+const QWEN_EDIT_PROMPT: &str = "replace the background with a plain grey studio backdrop";
 const Z_IMAGE_PROVIDER: &str = "z_image_turbo";
 const Z_IMAGE_PLAIN_EXECUTION_PATH: &str = "the MLX Z-Image base-only text-to-image path";
 /// The undistilled Z-Image BASE provider (sc-22724): the same engine crate as Turbo
@@ -119,6 +146,27 @@ const Z_IMAGE_EDIT_STEPS: u32 = 4;
 const FLUX2_PROVIDER: &str = "flux2_dev";
 const FLUX2_CALIBRATION_FINGERPRINT: &str = "sc-18218-flux2-dev-t2i-resident-evidence-v1";
 const FLUX2_PLAIN_EXECUTION_PATH: &str = "the MLX FLUX.2-dev base-only text-to-image path";
+/// The FLUX.2-klein-9B text-to-image provider (sc-22727). BOTH klein catalog models —
+/// `flux2_klein_9b` and the separately distilled `flux2_klein_9b_kv` — load through this ONE engine
+/// registry id (`crates/sceneworks-worker/src/engines.rs`); they differ only in the artifact, which
+/// the engine discriminates by snapshot path and `LoadSpec::resolved_route`.
+const FLUX2_KLEIN_PROVIDER: &str = "flux2_klein_9b";
+const FLUX2_KLEIN_PLAIN_EXECUTION_PATH: &str =
+    "the MLX FLUX.2-klein-9B base-only text-to-image path";
+const FLUX2_KLEIN_KV_PLAIN_EXECUTION_PATH: &str =
+    "the MLX FLUX.2-klein-9B KV-cache base-only text-to-image path";
+/// The WEIGHTS-FREE registry declaration identity for the klein T2I provider:
+/// `KLEIN_STATIC_BEHAVIOR_FINGERPRINT` suffixed with the provider id
+/// (`provider_id.replace('_', "-")`), published by
+/// `mlx-gen-flux2::memory_strategy::weights_free_klein_contract`. This is the string
+/// `config/manifests/builtin.models.jsonc` declares for every klein rung on both klein models —
+/// a DECLARATION, not the identity a load of real weights publishes. sc-22727: the two are no
+/// longer the same string; see [`flux2_calibration_fingerprint`].
+const FLUX2_KLEIN_REGISTRY_FINGERPRINT: &str =
+    "flux2-klein-static-registry-behavior-v2-flux2-klein-9b";
+/// One fixed seed for every `mlx:flux2_klein_9b*` fixture. Distinct from [`FLUX2_SEED`] so a klein
+/// receipt can never be traced to the dev lane's calibration seed.
+const FLUX2_KLEIN_SEED: u64 = 22727;
 /// FLUX.2-dev quality here is repeat determinism on one loaded provider: the resident rung selects
 /// no alternate code path, so the cold measured render and its warm unscoped repeats must agree to
 /// within Metal allocator jitter. 3/255 max and 1/255 mean sit far above observed same-process
@@ -790,18 +838,32 @@ mod tests {
     #[test]
     fn every_receipt_builder_is_bound_to_its_lane_prediction_wrapper() {
         let source = include_str!("mlx.rs");
-        let image_receipts = source
+        // A SHAPE claim, not a count: EVERY `predicted_peaks` binding in this file must come from
+        // the image policy wrapper. Asserting a fixed number instead made adding an image arm
+        // (sc-22728 added the Qwen edit one) fail this test for the right reason with the wrong
+        // message — "there are seven, not six" — while a new arm that bypassed the wrapper entirely
+        // would have kept the count and gone unnoticed.
+        let receipts: Vec<&str> = source
             .lines()
-            .filter(|line| {
-                line.trim_start()
-                    .starts_with("let predicted_peaks = image_predicted_peak_bytes(")
-            })
-            .count();
-        // sc-22729 raised this from six to seven: the bespoke InstantID arm is the seventh image
-        // receipt builder, and it goes through the same image policy wrapper as the rest.
-        assert_eq!(
-            image_receipts, 7,
-            "all seven MLX image receipt builders must use the image policy wrapper"
+            .map(str::trim_start)
+            .filter(|line| line.starts_with("let predicted_peaks = "))
+            .collect();
+        assert!(
+            !receipts.is_empty(),
+            "the image receipt builders are gone; this test no longer guards anything"
+        );
+        for line in &receipts {
+            assert!(
+                line.starts_with("let predicted_peaks = image_predicted_peak_bytes(")
+                    || line.starts_with("let predicted_peaks = video_predicted_peak_bytes("),
+                "an MLX receipt builder bypasses both lane policy wrappers: {line}"
+            );
+        }
+        assert!(
+            receipts
+                .iter()
+                .any(|line| line.starts_with("let predicted_peaks = image_predicted_peak_bytes(")),
+            "no image receipt builder is left; this test no longer guards the image lane"
         );
         assert_eq!(
             source
@@ -1055,12 +1117,14 @@ mod tests {
     /// vocabulary appears, which is what distinguishes a dispatch refusal from a misroute.
     #[test]
     fn run_refuses_a_provider_the_mlx_adapter_does_not_implement() {
-        // `flux2_dev` left this list when sc-18218 landed its arm; `flux2_dev_edit` stays — the
-        // contract provider is not a dispatchable lane.
+        // `flux2_dev` left this list when sc-18218 landed its arm, and `flux2_klein_9b` when
+        // sc-22727 landed the klein members; `flux2_dev_edit` and the klein edit routes stay — a
+        // contract-only provider is not a dispatchable lane.
         // `ltx_2_3` left this class when sc-18808 landed the video arm; `ltx_2_3_distilled` (the
         // CANDLE LTX engine id) and `ltx_2_3_eros` stay — neither is a dispatchable MLX lane.
         for provider in [
-            "flux2_klein_9b",
+            "flux2_klein_9b_edit",
+            "flux2_klein_9b_kv_edit",
             "flux2_dev_edit",
             "sana",
             "ltx_2_3_distilled",
@@ -1099,6 +1163,8 @@ mod tests {
     fn every_implemented_provider_still_reaches_its_own_arm_through_dispatch() {
         for provider in [
             "qwen_image",
+            // sc-22728: the edit engine provider, which serves both shipped edit catalog ids.
+            "qwen_image_edit",
             "z_image_turbo",
             // sc-22724: the undistilled base is its own registry id on the same arm.
             "z_image",
@@ -1108,6 +1174,8 @@ mod tests {
             "instantid",
             "krea_2_turbo_control",
             "flux2_dev",
+            // sc-22727: both klein catalog models ride this ONE registry id.
+            "flux2_klein_9b",
             // sc-18808: the video arm rides the same dispatch, so it is covered by the same proof.
             "ltx_2_3",
             "ltx_2_5",
@@ -1123,6 +1191,9 @@ mod tests {
             );
         }
         assert_eq!(QWEN_PROVIDER, "qwen_image");
+        assert_eq!(QWEN_EDIT_PROVIDER, "qwen_image_edit");
+        assert_eq!(QWEN_EDIT_MODEL, "qwen_image_edit_2511");
+        assert_eq!(QWEN_EDIT_LIGHTNING_MODEL, "qwen_image_edit_2511_lightning");
         assert_eq!(Z_IMAGE_PROVIDER, "z_image_turbo");
         assert_eq!(Z_IMAGE_BASE_PROVIDER, "z_image");
         assert_eq!(KREA_BASE_PROVIDER, "krea_2_turbo");
@@ -1130,6 +1201,7 @@ mod tests {
         assert_eq!(INSTANTID_PROVIDER, "instantid");
         assert_eq!(KREA_PROVIDER, "krea_2_turbo_control");
         assert_eq!(FLUX2_PROVIDER, "flux2_dev");
+        assert_eq!(FLUX2_KLEIN_PROVIDER, "flux2_klein_9b");
         assert_eq!(LTX_PROVIDER, "ltx_2_3");
         assert_eq!(LTX25_PROVIDER, "ltx_2_5");
         assert_eq!(MINIMAX_PROVIDER, "minimax_h3");
@@ -1794,6 +1866,164 @@ mod tests {
         }
     }
 
+    fn qwen_edit_planned(model_id: &str, tier: &str, overlay: &str, fixture: &str) -> Value {
+        json!({
+            "planned": {
+                "target": {
+                    "provider": "qwen_image_edit",
+                    "modelId": model_id,
+                    "tier": tier,
+                    "mode": "edit_image",
+                    "overlay": overlay,
+                    "geometry": { "width": 768, "height": 768, "batch": 1, "frames": 1 }
+                },
+                "backend": "mlx",
+                "loadShape": "deferred_materialization",
+                "strategy": { "rung": "resident", "engagedRungs": ["resident"], "parameters": {} },
+                "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1",
+                "fixture": fixture
+            }
+        })
+    }
+
+    /// sc-22728: the two shipped edit catalog ids are ONE engine provider, so nothing in the request
+    /// but the model id separates them. The arm is resolved from `(provider, modelId)` and any other
+    /// pair is refused by name rather than measured as its nearest neighbour — which here would mean
+    /// publishing the distilled stack's peaks as the production path's.
+    #[test]
+    fn the_qwen_edit_arm_is_resolved_from_the_plans_provider_and_model_id() {
+        let base = qwen_edit_arm(&qwen_edit_planned(
+            "qwen_image_edit_2511",
+            "q4",
+            "none",
+            "qwen-edit-mlx-q4-seed16353-step2",
+        ))
+        .unwrap();
+        assert_eq!(base, QWEN_EDIT_ARM);
+        assert!(!base.lightning);
+        assert_eq!(base.steps, 2);
+        assert_eq!(base.overlay, "none");
+        let lightning = qwen_edit_arm(&qwen_edit_planned(
+            "qwen_image_edit_2511_lightning",
+            "q4",
+            "lora",
+            "qwen-edit-lightning-mlx-q4-seed16353-step4",
+        ))
+        .unwrap();
+        assert_eq!(lightning, QWEN_EDIT_LIGHTNING_ARM);
+        assert!(lightning.lightning);
+        assert_eq!(lightning.steps, 4, "the official lightx2v 4-step recipe");
+        assert_eq!(lightning.overlay, "lora");
+        assert_ne!(base.slug, lightning.slug, "one diagnostics source each");
+        for (provider, model_id) in [
+            ("qwen_image_edit", "qwen_image_edit_2509"),
+            ("qwen_image_edit", "qwen_image"),
+            ("qwen_image", "qwen_image_edit_2511"),
+        ] {
+            let mut request = qwen_edit_planned(model_id, "q4", "none", "unused");
+            request["planned"]["target"]["provider"] = json!(provider);
+            let error = qwen_edit_arm(&request).unwrap_err();
+            assert!(
+                error.contains(&format!("provider {provider:?} for model {model_id:?}")),
+                "{provider}/{model_id}: {error}"
+            );
+        }
+        assert!(qwen_edit_arm(
+            &json!({ "planned": { "target": { "provider": "qwen_image_edit" } } })
+        )
+        .unwrap_err()
+        .contains("planned.target.modelId"));
+    }
+
+    /// sc-22728: the fixture binds the tier, the seed AND the recipe's step count, per member. The
+    /// production id's fixture cannot name the Lightning arm's four steps and vice versa, and neither
+    /// can borrow the other's prefix — the `planned_qwen_seed` rule, extended across the family.
+    #[test]
+    fn the_qwen_edit_fixture_binds_the_member_the_tier_and_the_step_count() {
+        for (arm, model_id, prefix, steps) in [
+            (
+                QWEN_EDIT_ARM,
+                "qwen_image_edit_2511",
+                "qwen-edit-mlx",
+                2_u32,
+            ),
+            (
+                QWEN_EDIT_LIGHTNING_ARM,
+                "qwen_image_edit_2511_lightning",
+                "qwen-edit-lightning-mlx",
+                4,
+            ),
+        ] {
+            for tier in ["q4", "q8", "bf16"] {
+                let fixture = format!("{prefix}-{tier}-seed16353-step{steps}");
+                let request = qwen_edit_planned(model_id, tier, arm.overlay, &fixture);
+                assert_eq!(
+                    planned_qwen_edit_seed(&request, arm, tier).unwrap(),
+                    16353,
+                    "{fixture}"
+                );
+                // The same fixture under another tier is refused naming the tier it belongs to.
+                let other = if tier == "q4" { "q8" } else { "q4" };
+                let error = planned_qwen_edit_seed(&request, arm, other).unwrap_err();
+                assert!(error.contains(&format!("{prefix}-{other}-seed")), "{error}");
+            }
+            // The other member's step count is refused, so a 4-step distilled capture can never be
+            // recorded under the 2-step production fixture.
+            let wrong_steps = if steps == 2 { 4 } else { 2 };
+            let fixture = format!("{prefix}-q4-seed16353-step{wrong_steps}");
+            let error = planned_qwen_edit_seed(
+                &qwen_edit_planned(model_id, "q4", arm.overlay, &fixture),
+                arm,
+                "q4",
+            )
+            .unwrap_err();
+            assert!(error.contains(&format!("{steps}-step")), "{error}");
+        }
+        // And the members' prefixes do not overlap: the Lightning fixture is not a production one.
+        let error = planned_qwen_edit_seed(
+            &qwen_edit_planned(
+                "qwen_image_edit_2511",
+                "q4",
+                "none",
+                "qwen-edit-lightning-mlx-q4-seed16353-step2",
+            ),
+            QWEN_EDIT_ARM,
+            "q4",
+        )
+        .unwrap_err();
+        assert!(error.contains("qwen-edit-mlx-q4-seed"), "{error}");
+    }
+
+    /// sc-22728: every Qwen edit capture is an EDIT request — one `Conditioning::Reference` at the
+    /// target geometry, which the pinned engine hard-requires (`model_edit.rs` refuses a request with
+    /// no reference) — and only the Lightning member selects the distill's sampler and drops the
+    /// negative branch the distill was CFG-distilled away from.
+    #[test]
+    fn the_qwen_edit_request_carries_one_reference_and_only_lightning_selects_the_distill_recipe() {
+        for arm in [QWEN_EDIT_ARM, QWEN_EDIT_LIGHTNING_ARM] {
+            let request = qwen_edit_request(arm, 768, 512, 16353);
+            assert_eq!(request.conditioning.len(), 1);
+            match &request.conditioning[0] {
+                Conditioning::Reference { image, strength } => {
+                    assert_eq!((image.width, image.height), (768, 512));
+                    assert_eq!(image.pixels.len(), 768 * 512 * 3);
+                    assert_eq!(
+                        *strength, None,
+                        "Qwen edit is dual-latent conditioning, not an img2img strength lever"
+                    );
+                }
+                other => panic!("expected one Reference, got {other:?}"),
+            }
+            assert_eq!(request.seed, Some(16353));
+            assert_eq!(request.steps, Some(arm.steps));
+            assert_eq!(
+                request.sampler.as_deref(),
+                arm.lightning.then_some("lightning")
+            );
+            assert_eq!(request.negative_prompt.is_some(), !arm.lightning);
+        }
+    }
+
     #[test]
     fn z_image_parity_envelope_accepts_published_decode_and_rejects_mutation() {
         assert!(z_image_quality_passes(48.0 / 255.0, 2.82 / 255.0));
@@ -1860,6 +2090,167 @@ mod tests {
 
         let error = planned_qwen_seed(&request, "q8").unwrap_err();
         assert!(error.contains("must start with"));
+    }
+
+    const QWEN_EDIT_TEST_REVISION: &str = "bb2bc9893b3c49ae96c813350775f791a2e8bc80";
+
+    fn scratch_dir(label: &str) -> PathBuf {
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        std::env::temp_dir().join(format!("sc-22728-{label}-{}-{nonce}", std::process::id()))
+    }
+
+    /// A `models--<repo>/snapshots/<revision>/<tier>` root laid out exactly as the HF cache does, so
+    /// the tier suffix the validator pins is real rather than mocked.
+    fn qwen_edit_snapshot_root(tier: &str) -> PathBuf {
+        let root = scratch_dir("qwen-edit-root")
+            .join(format!(
+                "models--{}",
+                protocol::QWEN_EDIT_REPOSITORY.replace('/', "--")
+            ))
+            .join("snapshots")
+            .join(QWEN_EDIT_TEST_REVISION)
+            .join(tier);
+        std::fs::create_dir_all(&root).unwrap();
+        root
+    }
+
+    /// The distill snapshot, with the one pinned file actually on disk — the adapter helper refuses
+    /// any other file name, so a fixture that skipped this would assert nothing.
+    fn qwen_edit_lightning_fixture() -> QwenEditLightningSource {
+        let root = scratch_dir("qwen-edit-lightning");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join(protocol::QWEN_EDIT_LIGHTNING_FILE), b"distill").unwrap();
+        QwenEditLightningSource {
+            repository: protocol::QWEN_EDIT_LIGHTNING_REPOSITORY.to_owned(),
+            revision: QWEN_EDIT_TEST_REVISION.to_owned(),
+            root,
+        }
+    }
+
+    fn qwen_edit_source(arm: QwenEditArm, tier: &str) -> QwenEditArtifactSource {
+        QwenEditArtifactSource {
+            repository: protocol::QWEN_EDIT_REPOSITORY.to_owned(),
+            revision: QWEN_EDIT_TEST_REVISION.to_owned(),
+            root: qwen_edit_snapshot_root(tier),
+            lightning: arm.lightning.then(qwen_edit_lightning_fixture),
+        }
+    }
+
+    fn qwen_edit_request_for(arm: QwenEditArm, model_id: &str, tier: &str) -> Value {
+        let fixture = format!("{}-{tier}-seed16353-step{}", arm.fixture_prefix, arm.steps);
+        qwen_edit_planned(model_id, tier, arm.overlay, &fixture)
+    }
+
+    const QWEN_EDIT_MEMBERS: [(QwenEditArm, &str); 2] = [
+        (QWEN_EDIT_ARM, "qwen_image_edit_2511"),
+        (QWEN_EDIT_LIGHTNING_ARM, "qwen_image_edit_2511_lightning"),
+    ];
+
+    /// sc-22728: the ONE thing that makes the Lightning member Lightning at load time. Every
+    /// downstream claim — the record's `builtInAdapters` count, the overlay scenario's verdict, and
+    /// the run context's `overlay` — is read off `spec.adapters`, so if this attachment were lost the
+    /// arm would publish an authoritative record asserting a distill that never participated. The
+    /// stack itself is therefore asserted here, on BOTH members and at every shipped tier.
+    #[test]
+    fn the_qwen_edit_load_spec_carries_the_distill_on_exactly_the_lightning_member() {
+        for (arm, model_id) in QWEN_EDIT_MEMBERS {
+            for (tier, quant) in [
+                ("q4", Some(Quant::Q4)),
+                ("q8", Some(Quant::Q8)),
+                ("bf16", None),
+            ] {
+                let request = qwen_edit_request_for(arm, model_id, tier);
+                let selection = planned_selection(&request).unwrap();
+                let source = qwen_edit_source(arm, tier);
+                let artifact = qwen_edit_load_spec(
+                    arm,
+                    tier,
+                    &source,
+                    &selection,
+                    OffloadPolicy::Resident,
+                    LoadShape::EagerMaterialization,
+                )
+                .unwrap_or_else(|error| panic!("{model_id}/{tier}: {error}"));
+                assert_eq!(
+                    artifact.spec.quantize, quant,
+                    "{model_id}/{tier} load quant"
+                );
+                assert_eq!(
+                    artifact.spec.adapters.len(),
+                    usize::from(arm.lightning),
+                    "{model_id}/{tier}: the distill stack must be exactly the member's"
+                );
+                if arm.lightning {
+                    let expected = source
+                        .lightning
+                        .as_ref()
+                        .unwrap()
+                        .root
+                        .canonicalize()
+                        .unwrap()
+                        .join(protocol::QWEN_EDIT_LIGHTNING_FILE);
+                    let adapter = &artifact.spec.adapters[0];
+                    assert_eq!(adapter.path, expected, "{model_id}/{tier} distill path");
+                    assert!(
+                        adapter.path.ends_with(protocol::QWEN_EDIT_LIGHTNING_FILE),
+                        "{model_id}/{tier}: {}",
+                        adapter.path.display()
+                    );
+                    assert_eq!(adapter.scale, 1.0, "{model_id}/{tier} distill scale");
+                    assert!(
+                        matches!(adapter.kind, AdapterKind::Lora),
+                        "{model_id}/{tier}: {:?}",
+                        adapter.kind
+                    );
+                }
+            }
+        }
+    }
+
+    /// sc-22728: the root the capture opens must end in the PLANNED tier's directory, per member —
+    /// a stale `…/q4` export cannot satisfy a q8 plan and quietly re-label another tier's peaks
+    /// (the sc-17097 defect class). Modelled on
+    /// `z_image_root_must_carry_the_planned_tier_and_the_spec_binds_it`.
+    #[test]
+    fn a_qwen_edit_root_of_another_tier_is_refused_naming_the_planned_tier() {
+        for (arm, model_id) in QWEN_EDIT_MEMBERS {
+            let request = qwen_edit_request_for(arm, model_id, "q8");
+            let selection = planned_selection(&request).unwrap();
+            // The plan is q8; the root on disk is the q4 export.
+            let source = qwen_edit_source(arm, "q4");
+            let error = qwen_edit_load_spec(
+                arm,
+                "q8",
+                &source,
+                &selection,
+                OffloadPolicy::Resident,
+                LoadShape::EagerMaterialization,
+            )
+            .expect_err("a q8 plan must not be satisfied by a q4 root");
+            assert!(
+                error.ends_with(&format!("/snapshots/{QWEN_EDIT_TEST_REVISION}/q8")),
+                "{model_id}: {error}"
+            );
+            // The wrong artifact family is refused before the root is even looked at.
+            let mut foreign = qwen_edit_source(arm, "q8");
+            foreign.repository = protocol::QWEN_EDIT_LIGHTNING_REPOSITORY.to_owned();
+            let error = qwen_edit_load_spec(
+                arm,
+                "q8",
+                &foreign,
+                &selection,
+                OffloadPolicy::Resident,
+                LoadShape::EagerMaterialization,
+            )
+            .expect_err("the distill repository is not the base artifact");
+            assert!(
+                error.contains(protocol::QWEN_EDIT_REPOSITORY),
+                "{model_id}: {error}"
+            );
+        }
     }
 
     #[test]
@@ -3569,6 +3960,740 @@ fn run_z_image_reference(request: &Value) -> Result<Value, String> {
     run_z_image_reference_loaded(request, generator.as_ref(), &artifact, load_shape)
 }
 
+// ---------------------------------------------------------------------------------------------
+// The FLUX.1 family arm (sc-22726): `flux_dev`, `flux_schnell` and `pulid_flux_dev`.
+// ---------------------------------------------------------------------------------------------
+
+/// One member of the FLUX.1 family this arm measures, resolved from the plan's
+/// `(target.provider, target.mode)` — never assumed. Three members: the two base text-to-image
+/// providers of `mlx-gen-flux`, and the PuLID-FLUX character route of `mlx-gen-pulid`, which loads
+/// the SAME FLUX.1-dev backbone artifact with an identity stack threaded through
+/// `LoadSpec::identity` (worker `image_jobs/pulid.rs:448`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct FluxOneArm {
+    /// The registry id handed to `catalog.media().load` — the production loader (E4). This is the
+    /// id the worker passes to `inference_runtime::load` (`engines.rs` MODEL_TABLE `engine_id`,
+    /// `image_jobs/pulid.rs` `PULID_ENGINE_ID`).
+    provider: &'static str,
+    /// The plan `target.mode` this member serves.
+    mode: &'static str,
+    execution_path: &'static str,
+    /// The still-geometry refusal label (sc-18808).
+    still_calibration: &'static str,
+    repository_env: &'static str,
+    revision_env: &'static str,
+    root_env: &'static str,
+    expected_repository: &'static str,
+    /// The record's diagnostics source, `memory-mlx-adapter:<slug>-shared-ladder`.
+    slug: &'static str,
+    /// The PuLID character route: `overlay: identity`, one reference, and an identity stack on the
+    /// `LoadSpec`. The base routes are plain reference-free text-to-image.
+    identity: bool,
+}
+
+const FLUX1_DEV_PROVIDER: &str = "flux1_dev";
+const FLUX1_SCHNELL_PROVIDER: &str = "flux1_schnell";
+/// The PuLID-FLUX registry id. The CATALOG model id is `pulid_flux_dev`; the ENGINE id is the bare
+/// `pulid_flux` (`mlx-gen-pulid` `pulid_flux::MODEL_ID`), which is why the anchor-loader closure
+/// declares it as an `engineId` alias.
+const PULID_FLUX_PROVIDER: &str = "pulid_flux";
+/// The base-route seed. One constant for the family: the fixture binds tier and edge, so the seed
+/// does not also have to carry the route.
+const FLUX1_SEED: u64 = 22726;
+/// The identity route's `character_image` reference strength — the manifest's
+/// `ui.referenceStrengthDefault` for `pulid_flux_dev`, which is what the worker sends.
+const PULID_REFERENCE_STRENGTH: f32 = 1.0;
+
+const FLUX1_DEV_ARM: FluxOneArm = FluxOneArm {
+    provider: FLUX1_DEV_PROVIDER,
+    mode: "text_to_image",
+    execution_path: "the MLX FLUX.1-dev base-only text-to-image path",
+    still_calibration: "MLX FLUX.1-dev calibration",
+    repository_env: "SCENEWORKS_FLUX1_DEV_REPOSITORY",
+    revision_env: "SCENEWORKS_FLUX1_DEV_REVISION",
+    root_env: "SCENEWORKS_FLUX1_DEV_ROOT",
+    expected_repository: protocol::FLUX1_DEV_REPOSITORY,
+    slug: "flux1-dev",
+    identity: false,
+};
+
+const FLUX1_SCHNELL_ARM: FluxOneArm = FluxOneArm {
+    provider: FLUX1_SCHNELL_PROVIDER,
+    mode: "text_to_image",
+    execution_path: "the MLX FLUX.1-schnell base-only text-to-image path",
+    still_calibration: "MLX FLUX.1-schnell calibration",
+    repository_env: "SCENEWORKS_FLUX1_SCHNELL_REPOSITORY",
+    revision_env: "SCENEWORKS_FLUX1_SCHNELL_REVISION",
+    root_env: "SCENEWORKS_FLUX1_SCHNELL_ROOT",
+    expected_repository: protocol::FLUX1_SCHNELL_REPOSITORY,
+    slug: "flux1-schnell",
+    identity: false,
+};
+
+const PULID_FLUX_ARM: FluxOneArm = FluxOneArm {
+    provider: PULID_FLUX_PROVIDER,
+    mode: "character_image",
+    execution_path: "the MLX PuLID-FLUX identity-conditioned character path",
+    still_calibration: "MLX PuLID-FLUX calibration",
+    // The backbone IS `SceneWorks/flux1-dev-mlx` on this route too, so it binds the same env
+    // family. What makes it a different measurement is the identity stack, which rides the
+    // `LoadSpec` from its own bundle env and is priced as a separate resident component.
+    repository_env: "SCENEWORKS_FLUX1_DEV_REPOSITORY",
+    revision_env: "SCENEWORKS_FLUX1_DEV_REVISION",
+    root_env: "SCENEWORKS_FLUX1_DEV_ROOT",
+    expected_repository: protocol::FLUX1_DEV_REPOSITORY,
+    slug: "pulid-flux",
+    identity: true,
+};
+
+/// Which family member the plan asks for. Refuses by name: a `(provider, mode)` pair no member
+/// serves — `flux1_schnell` in `character_image` (schnell has no identity route at all),
+/// `pulid_flux` in `text_to_image` (PuLID is text-to-image-WITH-A-FACE only; the worker's
+/// `pulid_flux_available` requires `character_image` plus a reference) — must not be measured as
+/// its nearest neighbour.
+fn flux_one_arm(request: &Value) -> Result<FluxOneArm, String> {
+    let planned = protocol::planned(request)?;
+    let provider = planned
+        .pointer("/target/provider")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "planned.target.provider must be a string".to_owned())?;
+    let mode = planned
+        .pointer("/target/mode")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "planned.target.mode must be a string".to_owned())?;
+    match (provider, mode) {
+        (FLUX1_DEV_PROVIDER, "text_to_image") => Ok(FLUX1_DEV_ARM),
+        (FLUX1_SCHNELL_PROVIDER, "text_to_image") => Ok(FLUX1_SCHNELL_ARM),
+        (PULID_FLUX_PROVIDER, "character_image") => Ok(PULID_FLUX_ARM),
+        (provider, mode) => Err(format!(
+            "the MLX FLUX.1 arm does not implement provider {provider:?} in mode {mode:?}"
+        )),
+    }
+}
+
+/// The artifact one FLUX.1 capture loads: the env-bound repository and revision, the PLANNED tier,
+/// the identity bundle on the character route, and the `LoadSpec` that opens exactly that tier.
+#[derive(Debug)]
+struct FluxOneArtifact {
+    arm: FluxOneArm,
+    repository: String,
+    revision: String,
+    tier: &'static str,
+    /// `Some` on the identity route only; the CONTENT digest of its five files is part of the
+    /// loadability fingerprint (never the host path it was staged at), because two different
+    /// identity stacks over the same backbone are two different measurements and a record must
+    /// name which one it measured on any host.
+    identity: Option<protocol::PulidIdentityBundle>,
+    spec: LoadSpec,
+}
+
+impl FluxOneArtifact {
+    fn loadability_fingerprint(&self) -> String {
+        let base = format!("{}@{}:{}", self.repository, self.revision, self.tier);
+        match &self.identity {
+            Some(bundle) => format!("{base}+identity:{}", bundle.composite_sha256),
+            None => base,
+        }
+    }
+
+    /// The record's `artifact`: the backbone snapshot, plus on the identity route the per-file
+    /// SHA-256 of the staged bundle, so the record carries the identity stack it measured.
+    fn artifact_json(&self) -> Value {
+        let mut artifact = json!({
+            "repository": self.repository,
+            "resolvedRevision": self.revision,
+            "variant": self.tier,
+        });
+        if let Some(bundle) = &self.identity {
+            artifact["identityBundle"] = bundle.artifact_json();
+        }
+        artifact
+    }
+}
+
+/// The production calibration identity the loaded FLUX.1 generator publishes for one
+/// `(member, tier)` cell — the table `mlx-gen-flux::memory_strategy::production_calibration_fingerprint`
+/// and `mlx-gen-pulid::memory_strategy::production_calibration_fingerprint` mint (inference PR
+/// 943): the two measured keys are preserved byte-for-byte and read off the engine constants, and
+/// every other cell is `flux1-<route>-<tier>-mlx-shared-ladder-v1` /
+/// `pulid-flux-dev-<tier>-mlx-shared-ladder-v1`. Written here as well so the plan/arm binding is
+/// weights-free and holds at inference `c6d6a4db`, whose engines publish the two preserved keys
+/// only; the capture refuses a loaded contract whose identity differs from this table, so the two
+/// copies cannot drift unnoticed once the epic's pin bump lands.
+fn flux_one_calibration_fingerprint(arm: FluxOneArm, tier: &str) -> String {
+    match (arm.provider, tier) {
+        (FLUX1_DEV_PROVIDER, "q4") => {
+            runtime_macos::providers::flux::memory_strategy::MEMORY_CALIBRATION_FINGERPRINT
+                .to_owned()
+        }
+        (PULID_FLUX_PROVIDER, "q4") => {
+            runtime_macos::providers::pulid::memory_strategy::MEMORY_CALIBRATION_FINGERPRINT
+                .to_owned()
+        }
+        (FLUX1_DEV_PROVIDER, tier) => format!("flux1-dev-{tier}-mlx-shared-ladder-v1"),
+        (FLUX1_SCHNELL_PROVIDER, tier) => format!("flux1-schnell-{tier}-mlx-shared-ladder-v1"),
+        (PULID_FLUX_PROVIDER, tier) => format!("pulid-flux-dev-{tier}-mlx-shared-ladder-v1"),
+        (provider, tier) => unreachable!("no FLUX.1 member {provider} at tier {tier}"),
+    }
+}
+
+/// The weights-free conformance identities (`mlx-gen-flux` `STATIC_BEHAVIOR_FINGERPRINT` and
+/// its `-<route>` suffixes, `mlx-gen-pulid` `STATIC_CALIBRATION`) the engines publish for a
+/// registry-behaviour contract that loaded no weights. A plan row naming one of these could never
+/// be satisfied by a production load. Test-only: the sole caller is the plan-identity
+/// conformance test in `flux_one_tests`.
+#[cfg(test)]
+fn is_flux_one_weights_free_fingerprint(fingerprint: &str) -> bool {
+    fingerprint
+        .starts_with(runtime_macos::providers::flux::memory_strategy::STATIC_BEHAVIOR_FINGERPRINT)
+        || fingerprint == "pulid-flux-static-registry-behavior-v2"
+}
+
+/// The env-free half of [`flux_one_load_spec`], so the tier and identity bindings are unit-testable
+/// without weights. The root must end in the PLANNED tier's directory
+/// (`.../snapshots/<revision>/<tier>`), so a stale `…/q4` export can never satisfy a q8 or bf16
+/// plan and quietly re-label another tier's peaks (the sc-17097 defect class).
+fn flux_one_load_spec_at(
+    request: &Value,
+    load_shape: LoadShape,
+    repository: String,
+    revision: String,
+    root: PathBuf,
+    identity: Option<protocol::PulidIdentityBundle>,
+) -> Result<FluxOneArtifact, String> {
+    let arm = flux_one_arm(request)?;
+    if arm.identity {
+        protocol::validate_exact_overlay_target(request, "identity", arm.execution_path)?;
+    } else {
+        protocol::validate_plain_overlay_target(request, arm.execution_path)?;
+    }
+    if arm.identity != identity.is_some() {
+        return Err(format!(
+            "{} requires an identity stack iff it is the PuLID route (identity route: {}, bundle \
+             supplied: {})",
+            arm.execution_path,
+            arm.identity,
+            identity.is_some()
+        ));
+    }
+    let tier = match planned_qwen_tier(request)? {
+        "bf16" => "bf16",
+        "q4" => "q4",
+        "q8" => "q8",
+        _ => unreachable!("planned_qwen_tier returned an unsupported tier"),
+    };
+    protocol::validate_artifact_identity(&repository, &revision, arm.expected_repository)?;
+    let root = std::fs::canonicalize(&root)
+        .map_err(|error| format!("canonicalize {}: {error}", arm.root_env))?;
+    protocol::validate_huggingface_snapshot_root(
+        &root,
+        &repository,
+        &revision,
+        tier,
+        arm.expected_repository,
+    )?;
+    // Resident, like every other MLX still-image arm (flux2, qwen, krea-control): the anchor rung
+    // is `resident` (`memory-calibration-harness.mjs` `ANCHOR_STRATEGY.mlx`), and that is the
+    // policy the worker loads all three routes under at that rung. The base providers go through
+    // `image_jobs/base.rs`, whose declared-policy pass
+    // (`apply_declared_mlx_load_policy_for_request`) finds no `requiredOffloadPolicy` on the
+    // FLUX.1 manifests' `resident` implementation and leaves gen-core's `Resident` default; PuLID's
+    // own pass (`image_jobs/pulid.rs` `pulid_declared_load_policy`) reads the same shape off the
+    // `pulid_flux_dev` manifest. Only the `staged_residency` rows declare `sequential`, and no
+    // anchor is captured there. The calibration identity is a property of the loaded artifact and
+    // tier (inference PR 943), so the policy does not decide whether one is published.
+    let mut spec = LoadSpec::new(WeightsSource::Dir(root))
+        .with_offload_policy(OffloadPolicy::Resident)
+        .with_load_shape(load_shape);
+    if let (_, Some(quant)) = tier_precision_quant(tier) {
+        spec = spec.with_quant(quant);
+    }
+    if let Some(bundle) = &identity {
+        // The typed weight seam the `pulid_flux` loader reads (sc-8827): the adapter checkpoint,
+        // the EVA tower, and the directory it then reads the three face models out of by name. The
+        // worker builds exactly this (`image_jobs/pulid.rs` `pulid_identity_weights`) — no env is
+        // consulted inside the engine.
+        spec.identity = Some(IdentityWeights {
+            encoder: Some(WeightsSource::File(bundle.adapter.clone())),
+            eva: Some(WeightsSource::File(bundle.eva.clone())),
+            face_dir: Some(WeightsSource::Dir(bundle.face_dir.clone())),
+        });
+    }
+    Ok(FluxOneArtifact {
+        arm,
+        repository,
+        revision,
+        tier,
+        identity,
+        spec,
+    })
+}
+
+fn flux_one_load_spec(request: &Value, load_shape: LoadShape) -> Result<FluxOneArtifact, String> {
+    let arm = flux_one_arm(request)?;
+    let repository = protocol::required_env(arm.repository_env)?;
+    let revision = protocol::required_env(arm.revision_env)?;
+    let root = PathBuf::from(protocol::required_env(arm.root_env)?);
+    let identity = if arm.identity {
+        Some(protocol::pulid_identity_bundle()?)
+    } else {
+        None
+    };
+    flux_one_load_spec_at(request, load_shape, repository, revision, root, identity)
+}
+
+/// The one fresh planned request every FLUX.1 capture renders. Two steps are intentional: a
+/// resident FLUX.1 route has no provider loading boundary between text encode and denoise, so the
+/// first Step callback closes a conservative conditioning envelope and the second gives denoise its
+/// own measured interval before Decoding — the shared z_image/qwen/flux2 phase-boundary pattern.
+/// The identity route additionally carries the one reference face the worker requires
+/// (`pulid_flux_available`), at the manifest's default reference strength.
+fn flux_one_request(arm: FluxOneArm, width: u32, height: u32) -> GenerationRequest {
+    let mut request = GenerationRequest {
+        prompt: "a portrait of a person in a sunlit studio, editorial photograph".to_owned(),
+        width,
+        height,
+        count: 1,
+        seed: Some(FLUX1_SEED),
+        steps: Some(2),
+        ..Default::default()
+    };
+    if arm.identity {
+        request.conditioning = vec![Conditioning::Reference {
+            image: Image {
+                width,
+                height,
+                pixels: protocol::synthetic_reference_rgb(width, height),
+            },
+            strength: Some(PULID_REFERENCE_STRENGTH),
+        }];
+    }
+    request
+}
+
+/// Bind the fixture to the planned tier AND geometry edge, the same fixture-to-plan binding
+/// `planned_flux2_seed` enforces, so a bf16 record can never be emitted against a q4 capture that
+/// merely reused the fixture string.
+fn validate_flux_one_fixture(request: &Value, arm: FluxOneArm, tier: &str) -> Result<(), String> {
+    let fixture = protocol::planned(request)?
+        .get("fixture")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "planned.fixture must be a string".to_owned())?;
+    let (width, _) = protocol::target_geometry(request)?;
+    let prefix = format!("{}-mlx-{tier}-{width}-seed", arm.slug);
+    let remainder = fixture
+        .strip_prefix(&prefix)
+        .ok_or_else(|| format!("planned.fixture {fixture:?} must start with {prefix:?}"))?;
+    let (seed, steps) = remainder
+        .split_once("-step")
+        .ok_or_else(|| format!("planned.fixture {fixture:?} must end with -step<count>"))?;
+    let seed = seed
+        .parse::<u64>()
+        .map_err(|error| format!("parse FLUX.1 fixture seed {seed:?}: {error}"))?;
+    if seed != FLUX1_SEED {
+        return Err(format!(
+            "planned.fixture seed {seed} does not match the FLUX.1 calibration seed {FLUX1_SEED}"
+        ));
+    }
+    let steps = steps
+        .parse::<u32>()
+        .map_err(|error| format!("parse FLUX.1 fixture step count {steps:?}: {error}"))?;
+    if steps != 2 {
+        return Err(format!(
+            "planned.fixture {fixture:?} must use the two-step calibration request"
+        ));
+    }
+    Ok(())
+}
+
+/// The admission context for the FLUX.1 safety scenarios, in the shape the worker admits each
+/// route under. The identity route is `MemoryMode::ImageToImage` with one reference and
+/// `overlay: identity` — the PROVIDER mode, which is what `mlx-gen-pulid`'s route gate checks
+/// (`memory_strategy::safety_check`), and which the manifest's `requestContexts` declare beside the
+/// catalog mode `character_image`.
+#[allow(clippy::too_many_arguments)]
+fn flux_one_context(
+    arm: FluxOneArm,
+    selection: &MemorySelection,
+    calibration: &MemoryCalibrationIdentity,
+    fingerprint: &str,
+    width: u32,
+    height: u32,
+    total_bytes: u64,
+    predicted_peak_bytes: u64,
+) -> MemoryRunContext {
+    MemoryRunContext {
+        selection: *selection,
+        optimization_authority: MemoryOptimizationAuthority::Calibrated,
+        calibration_abi: calibration.abi,
+        // A parameter only so the stale-evidence probe can pass a deliberate mismatch; the real
+        // call sites pass `calibration.fingerprint` (the Krea-arm lesson at `krea_context`).
+        calibration_fingerprint: fingerprint.to_owned(),
+        load_shape: calibration.load_shape,
+        mode: if arm.identity {
+            MemoryMode::ImageToImage
+        } else {
+            MemoryMode::TextToImage
+        },
+        has_reference: arm.identity,
+        use_pid: false,
+        has_phases: false,
+        geometry: MemoryGeometry {
+            width,
+            height,
+            batch: 1,
+            frames: 1,
+            reference_count: u32::from(arm.identity),
+        },
+        overlay: arm.identity.then(|| "identity".to_owned()),
+        budget: MemoryBudget {
+            total_bytes,
+            committed_bytes: 0,
+            reclaimable_bytes: 0,
+            reserved_headroom_bytes: 0,
+        },
+        predicted_peak_bytes,
+        cache_state: MemoryCacheState::Cold,
+        evidence_revision: format!("sc-22726@{}", protocol::INFERENCE_PIN),
+    }
+}
+
+fn flux_one_complete_sweep(request: &Value) -> Result<Value, String> {
+    let mut sweep = protocol::reference_sweep(request, "passed")?;
+    // One exact tuple per plan row; marking it range-verified promotes no sibling tuple (the
+    // generated matrix still requires a matching manifest binding per cell).
+    sweep["rangeVerified"] = json!(true);
+    Ok(sweep)
+}
+
+/// The `mlx:flux1_dev` / `mlx:flux1_schnell` / `mlx:pulid_flux` arm (sc-22726).
+///
+/// Loads through the SAME seam the worker loads these three routes through —
+/// `runtime_macos::catalog().media().load(engine_id, &spec)`, which is exactly what
+/// `crates/sceneworks-worker/src/inference_runtime.rs:356-358` wraps — reads the LOADED
+/// generator's own contract, and measures the resident anchor composition against it.
+fn run_flux_one(request: &Value) -> Result<Value, String> {
+    // Before the load, not inside it: a non-still target must be refused without paying for
+    // weights. The arm is resolved first so the refusal carries the member's own label.
+    let arm = flux_one_arm(request)?;
+    protocol::validate_still_geometry(request, arm.still_calibration)?;
+    let load_shape = planned_load_shape(request)?;
+    let selection = planned_selection(request)?;
+    let tier = planned_qwen_tier(request)?;
+    validate_flux_one_fixture(request, arm, tier)?;
+    let (width, height) = protocol::target_geometry(request)?;
+    // The plan row must name the production identity this cell's loaded generator publishes —
+    // checked against the weights-free table BEFORE the load, so a row still carrying a
+    // conformance string fails in milliseconds rather than after a multi-gigabyte load.
+    let planned_fingerprint = protocol::planned(request)?
+        .get("calibrationFingerprint")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "planned.calibrationFingerprint must be a string".to_owned())?
+        .to_owned();
+    let expected_fingerprint = flux_one_calibration_fingerprint(arm, tier);
+    if planned_fingerprint != expected_fingerprint {
+        return Err(format!(
+            "plan/provider calibration mismatch: plan={planned_fingerprint}, the {} {tier} \
+             production identity is {expected_fingerprint}",
+            arm.provider
+        ));
+    }
+    let artifact = flux_one_load_spec(request, load_shape)?;
+    // From the ARTIFACT, so the member that was actually bound to a root and an identity stack is
+    // the member that is measured — not a second, independent resolution of the same plan.
+    let arm = artifact.arm;
+
+    let catalog =
+        runtime_macos::catalog().map_err(|error| format!("build MLX catalog: {error}"))?;
+    let generator = catalog
+        .media()
+        .load(arm.provider, &artifact.spec)
+        .map_err(|error| format!("load real {} {tier} provider: {error}", arm.provider))?;
+    let contract = generator.memory_strategy_contract().ok_or_else(|| {
+        format!(
+            "loaded {} exposed no memory-strategy contract",
+            arm.provider
+        )
+    })?;
+    contract.validate_selection(&selection).map_err(|error| {
+        format!(
+            "pinned {} provider rejected planned selection: {error}",
+            arm.provider
+        )
+    })?;
+    let strategy = attested_strategy(
+        request,
+        &selection,
+        &contract.engaged_composition(selection.strategy),
+    )?;
+    // The LOADED generator's own identity is what the record attests. An absent one is refused by
+    // name — an anchor recorded against no identity would claim measured authority the engine
+    // never granted — and so is one that differs from the table the plan was bound to above.
+    let calibration = contract.calibration.as_ref().ok_or_else(|| {
+        format!(
+            "the loaded {} provider at inference {} published no calibration identity for the \
+             {tier} artifact; the production identity for this cell is {expected_fingerprint} \
+             (inference PR 943 publishes one per (route, tier) for every load shape), so this \
+             cell captures only at a pin that carries it",
+            arm.provider,
+            protocol::INFERENCE_PIN
+        )
+    })?;
+    if calibration.fingerprint != expected_fingerprint {
+        return Err(format!(
+            "plan/provider calibration mismatch: plan={planned_fingerprint}, pinned provider={}",
+            calibration.fingerprint
+        ));
+    }
+    let hardware_bytes = request
+        .pointer("/hardware/memoryBytes")
+        .and_then(Value::as_u64)
+        .ok_or_else(|| "run request.hardware.memoryBytes must be an integer".to_owned())?;
+    let safety = |fingerprint: &str, total_bytes: u64, predicted: u64| {
+        generator.memory_strategy_safety_check(&flux_one_context(
+            arm,
+            &selection,
+            calibration,
+            fingerprint,
+            width,
+            height,
+            total_bytes,
+            predicted,
+        ))
+    };
+    // Admission mutation hygiene: the gate must ACCEPT a fitting request, so the two rejections
+    // below cannot pass through a blanket refusal.
+    if !matches!(
+        safety(&calibration.fingerprint, hardware_bytes, 1),
+        MemorySafetyDecision::Accept
+    ) {
+        return Err(format!(
+            "{} admission rejected a fitting probe budget; the scenario rejections below would be \
+             a blanket refusal, not evidence",
+            arm.provider
+        ));
+    }
+    if !matches!(
+        safety(&calibration.fingerprint, 0, 1),
+        MemorySafetyDecision::Reject { .. }
+    ) {
+        return Err(format!(
+            "{} admission accepted an unknown/zero memory budget",
+            arm.provider
+        ));
+    }
+    if !matches!(
+        safety("stale-flux1-fingerprint", hardware_bytes, 1),
+        MemorySafetyDecision::Reject { .. }
+    ) {
+        return Err(format!(
+            "{} admission accepted stale calibration evidence",
+            arm.provider
+        ));
+    }
+
+    let conditioning = Cell::new(PhaseMemory {
+        active: 0,
+        cache: 0,
+    });
+    let denoise = Cell::new(PhaseMemory {
+        active: 0,
+        cache: 0,
+    });
+    clear_cache();
+    reset_peak_memory();
+    let pre_rung_active = get_active_memory() as u64;
+    let pre_rung_cache = get_cache_memory() as u64;
+    let selected = one_image(
+        generator
+            .generate(
+                &flux_one_request(arm, width, height),
+                &mut |progress| match progress {
+                    Progress::Step { current: 1, .. } => {
+                        conditioning.set(PhaseMemory::capture());
+                        reset_peak_memory();
+                    }
+                    Progress::Decoding => {
+                        denoise.set(PhaseMemory::capture());
+                        reset_peak_memory();
+                    }
+                    _ => {}
+                },
+            )
+            .map_err(|error| format!("generate measured {} render: {error}", arm.provider))?,
+    )?;
+    let decode = PhaseMemory::capture();
+    let conditioning = conditioning.get();
+    let denoise = denoise.get();
+    if [conditioning.active, denoise.active, decode.active].contains(&0) {
+        return Err(format!(
+            "a synchronized {} lifecycle phase reported a zero active peak",
+            arm.provider
+        ));
+    }
+    let overall = PhaseMemory::overall(&[conditioning, denoise, decode]);
+    let predicted_peaks = image_predicted_peak_bytes(conditioning, denoise, decode);
+    let predicted = predicted_peaks.overall;
+    if !matches!(
+        safety(&calibration.fingerprint, predicted, predicted),
+        MemorySafetyDecision::Accept
+    ) {
+        return Err(format!(
+            "{} admission rejected an exact-fit calibrated budget",
+            arm.provider
+        ));
+    }
+
+    // Warm-repeat determinism and allocator cleanup bounds on this exact loaded provider.
+    clear_cache();
+    reset_peak_memory();
+    let baseline = one_image(
+        generator
+            .generate(&flux_one_request(arm, width, height), &mut |_| {})
+            .map_err(|error| format!("generate warm {} control: {error}", arm.provider))?,
+    )?;
+    let clean_warm_peak = get_peak_memory() as u64;
+    clear_cache();
+    let clean_post_cleanup = AllocatorState::capture_current();
+    let cleanup_bounds =
+        LifecycleMemoryBounds::from_clean_warm(clean_warm_peak, clean_post_cleanup);
+    let (maximum_error, mean_error, rms_error) = image_max_mean_rms_abs(&selected, &baseline)?;
+    if !flux2_quality_passes(maximum_error, mean_error, rms_error) {
+        return Err(format!(
+            "{} warm repeat exceeded the determinism envelope: max={maximum_error:.6}, \
+             mean={mean_error:.6}, rms={rms_error:.6}",
+            arm.provider
+        ));
+    }
+    reset_peak_memory();
+    let warm = one_image(
+        generator
+            .generate(&flux_one_request(arm, width, height), &mut |_| {})
+            .map_err(|error| format!("generate warm {} repeat: {error}", arm.provider))?,
+    )?;
+    let warm_peak = get_peak_memory() as u64;
+    if !cleanup_bounds.allows_warm_peak(warm_peak) {
+        return Err(format!(
+            "{} warm repeat peaked at {warm_peak} bytes, above the clean warm control \
+             {clean_warm_peak} bytes plus 2%",
+            arm.provider
+        ));
+    }
+    clear_cache();
+    let warm_post_cleanup = AllocatorState::capture_current();
+    if !cleanup_bounds.allows_retained(warm_post_cleanup) {
+        return Err(format!(
+            "{} warm repeat retained active/cache bytes {warm_post_cleanup:?} above the clean warm \
+             cleanup {clean_post_cleanup:?} plus {} bytes",
+            arm.provider, cleanup_bounds.tolerance_bytes,
+        ));
+    }
+    let (warm_maximum, warm_mean, warm_rms) = image_max_mean_rms_abs(&selected, &warm)?;
+    if !flux2_quality_passes(warm_maximum, warm_mean, warm_rms) {
+        return Err(format!(
+            "{} second warm repeat changed the deterministic output",
+            arm.provider
+        ));
+    }
+
+    // Arm-internal negative-mutation falsifiability check: a runtime_complete record must keep
+    // `negativeMutation` null, so the breach is verified here and the numbers land in diagnostics.
+    let mutated = qwen_negative_mutation(&selected);
+    let (mutated_maximum, mutated_mean, mutated_rms) = image_max_mean_rms_abs(&mutated, &baseline)?;
+    if flux2_quality_passes(mutated_maximum, mutated_mean, mutated_rms) {
+        return Err(format!(
+            "{} output mutation did not breach the determinism envelope",
+            arm.provider
+        ));
+    }
+
+    let lifecycle_blocker = concat!(
+        "the pinned FLUX.1 crates open no memory-strategy request scope for the resident anchor ",
+        "composition and expose no calibration fault-injection site, so the scoped lifecycle ",
+        "scenarios cannot execute; unscoped repeat determinism and allocator cleanup bounds are ",
+        "attested in quality and diagnostics instead"
+    );
+    let overlay_scenario = if arm.identity {
+        json!({
+            "name": "overlay",
+            "result": "passed",
+            "reason": "the PuLID identity stack (adapter, EVA tower, and the three face models) was resident for every measured render and is declared as its own resident component by the pinned contract",
+        })
+    } else {
+        json!({ "name": "overlay", "result": "not_applicable", "reason": "settled below from the declared target" })
+    };
+    let mut fragment = json!({
+        "status": "runtime_complete",
+        "strategy": strategy,
+        "loadShape": load_shape_key(calibration.load_shape),
+        "artifact": artifact.artifact_json(),
+        "sweep": flux_one_complete_sweep(request)?,
+        "scenarios": [
+            { "name": "exact_fit", "result": "passed", "predictedBytes": predicted, "effectiveBudgetBytes": predicted },
+            { "name": "unknown_budget", "result": "passed" },
+            { "name": "stale_evidence", "result": "passed" },
+            { "name": "warm_repeat", "result": "not_run", "reason": lifecycle_blocker },
+            { "name": "cancel", "result": "not_run", "reason": lifecycle_blocker },
+            { "name": "error", "result": "not_run", "reason": lifecycle_blocker },
+            { "name": "loadability", "result": "passed" },
+            overlay_scenario
+        ],
+        "predictedPeakBytes": predicted_peaks.json(),
+        "observedMemory": {
+            "conditioning": conditioning.json(),
+            "denoise": denoise.json(),
+            "decode": decode.json(),
+            "overall": overall.json(),
+        },
+        "quality": {
+            "contract": "identical artifact, prompt, seed, geometry, steps, tier, and loaded provider; cold measured render versus warm unscoped repeats",
+            "identicalInputs": true,
+            "result": "passed",
+            "maximumError": maximum_error,
+            "meanError": mean_error,
+            "rootMeanSquareError": rms_error,
+            "maximumErrorThreshold": FLUX2_MAX_THRESHOLD,
+            "meanErrorThreshold": FLUX2_MEAN_THRESHOLD,
+            "rootMeanSquareErrorThreshold": FLUX2_RMS_THRESHOLD,
+        },
+        "negativeMutation": null,
+        "loadability": {
+            "result": "passed",
+            "resolvedPathFingerprint": artifact.loadability_fingerprint(),
+        },
+        "diagnostics": protocol::diagnostics(
+            &format!("memory-mlx-adapter:{}-shared-ladder", arm.slug),
+            "executed",
+            [lifecycle_blocker.to_owned()],
+            [
+                ("preRungActiveAfterClear", "bytes", pre_rung_active),
+                ("preRungCacheAfterClear", "bytes", pre_rung_cache),
+                ("conditioningActivePeak", "bytes", conditioning.active),
+                ("denoiseActivePeak", "bytes", denoise.active),
+                ("decodeActivePeak", "bytes", decode.active),
+                ("overallAllocatorEnvelope", "bytes", overall.allocator_bytes()),
+                ("lifecycleCleanWarmPeak", "bytes", clean_warm_peak),
+                ("lifecycleCleanPostCleanupActive", "bytes", clean_post_cleanup.active),
+                ("lifecycleCleanPostCleanupCache", "bytes", clean_post_cleanup.cache),
+                ("lifecycleCleanupTolerance", "bytes", cleanup_bounds.tolerance_bytes),
+                ("lifecycleWarmRepeatPeak", "bytes", warm_peak),
+                ("lifecycleWarmRepeatPostCleanupActive", "bytes", warm_post_cleanup.active),
+                ("lifecycleWarmRepeatPostCleanupCache", "bytes", warm_post_cleanup.cache),
+                ("negativeMutationMaximumErrorPer255", "count", (mutated_maximum * 255.0).round() as u64),
+                ("negativeMutationMeanErrorPer255", "count", (mutated_mean * 255.0).round() as u64),
+                ("loadShapeDeferred", "count", u64::from(calibration.load_shape == LoadShape::DeferredMaterialization)),
+                // The identity route conditions every request on one reference face.
+                ("referenceImages", "count", u64::from(arm.identity)),
+            ],
+        ),
+        "capturedAt": protocol::captured_at(),
+    });
+    if !arm.identity {
+        protocol::settle_plain_overlay_scenario(request, &mut fragment, arm.execution_path)?;
+    }
+    Ok(fragment)
+}
+
 /// Maximum, mean, and root-mean-square absolute error between two images, in [0,1] units. The
 /// runtime_complete quality shape requires the RMS metric alongside max/mean
 /// (`memory-calibration-harness.mjs#validateRuntimeComplete`), which is why this exists next to
@@ -3597,31 +4722,233 @@ fn ltx_quality_passes(maximum: f64, mean: f64, rms: f64) -> bool {
     maximum <= LTX_MAX_THRESHOLD && mean <= LTX_MEAN_THRESHOLD && rms <= LTX_RMS_THRESHOLD
 }
 
+/// One member of the FLUX.2 family this arm measures, resolved from the plan's
+/// `(target.provider, target.modelId)` — never assumed (sc-22727). Three members today: the 32B
+/// `flux2_dev` flagship and the two klein-9B catalog models, which share ONE engine provider id
+/// and are told apart by their artifact family and `LoadSpec::resolved_route`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Flux2Arm {
+    /// The registry id handed to the production catalog loader (E4).
+    provider: &'static str,
+    /// The CATALOG model id. It is the anchor key's `modelId`, and it is also what the worker binds
+    /// as `LoadSpec::resolved_route` (`image_jobs/base.rs` — `spec.with_resolved_route(request.model)`),
+    /// which is the discriminator `KleinArtifactInventory::validate_resolved_route` refuses a
+    /// cross-variant artifact with. Two members share `provider` and differ only here.
+    model_id: &'static str,
+    execution_path: &'static str,
+    /// The still-geometry refusal label (sc-18808).
+    still_calibration: &'static str,
+    repository_env: &'static str,
+    revision_env: &'static str,
+    root_env: &'static str,
+    expected_repository: &'static str,
+    /// The fixture's family segment: `flux2-<fixture_slug>-mlx-<tier>-<edge>-seed<seed>-step2`.
+    fixture_slug: &'static str,
+    /// The record's diagnostics source, `memory-mlx-adapter:<slug>-resident`.
+    slug: &'static str,
+    /// The WEIGHTS-FREE registry declaration identity for this member's provider — the string
+    /// `config/manifests/builtin.models.jsonc` declares on every rung row. Distinct from the
+    /// identity a load of real weights publishes on the klein routes (sc-22727); see
+    /// [`flux2_calibration_fingerprint`], which is what the plan row and the capture bind.
+    registry_fingerprint: &'static str,
+    /// The load shape and offload policy this member is loaded under — the WORKER's shape for the
+    /// plain T2I route, never a hand-picked pair.
+    ///
+    /// Dev: `Resident` + `EagerMaterialization`. Its manifest declares no MLX
+    /// `bounded_transformer_residency` row for the plain provider and every non-resident strategy
+    /// is `Missing` at the pin, so the worker's declaration evaluator refuses the staged candidate
+    /// and keeps the eager default (`memory_route_registry.rs`,
+    /// `evaluate_declared_mlx_load_shape_for_request_with_strategy`).
+    ///
+    /// Klein: `Resident` + `EagerMaterialization` — the shape of the RUNG THIS ANCHOR PRICES.
+    ///
+    /// Both klein manifest entries also declare an MLX `bounded_transformer_residency` row with
+    /// `requiredOffloadPolicy: "sequential"` for every tier of the plain T2I route, and
+    /// `evaluate_declared_mlx_load_shape_for_request` + `apply_declared_mlx_load_policy_for_request`
+    /// bind `Applied` + Deferred + Sequential when that rung is the one being engaged. That is the
+    /// BTR rung's shape, not the resident rung's: a deferred klein transformer CANNOT render
+    /// without a window — `mlx-gen-flux2/src/transformer.rs:949-955` refuses with "flux2: a
+    /// deferred transformer requires an explicit block window" the moment `block_stream` is set and
+    /// no window is selected. Measured, not reasoned: the sc-22727 proof capture of
+    /// `flux2_klein_9b:q4:mlx` at inference `d5270c68` cleared the whole contract-and-load path
+    /// under `Sequential` + `Deferred` and then died on exactly that sentence, 123 s in, at the
+    /// resident-rung render. The resident rung therefore loads eager, which is what this arm
+    /// mirrors.
+    ///
+    /// sc-22727 / inference PR 948 is what makes that measurable at all: `klein_contract_from_parts`
+    /// now publishes a production identity for EVERY load shape, keyed on the admitted inventory
+    /// and `resolved_quant()`, while rung 4 stays gated on `klein_streamable` (exactly
+    /// `Sequential && DeferredMaterialization && quantize.is_none()`). Before it, a resident klein
+    /// spec yielded `calibration: None` and this arm had no identity to bind.
+    load_shape: LoadShape,
+    offload_policy: OffloadPolicy,
+    seed: u64,
+    /// The story that established this member's evidence, as it appears in
+    /// `MemoryRunContext::evidence_revision`. Per member, so a klein receipt never claims the
+    /// dev lane's provenance.
+    evidence_tag: &'static str,
+    /// Whether the pinned crate implements the resident rung and nothing else. True on dev (every
+    /// other strategy is declared `Missing` at the pin). False on klein: its manifest declares five
+    /// rungs, and under the eager shape this arm loads (sc-22727) the contract implements resident
+    /// plus bounded decode/attention while staged residency and rung 4 stay `Missing` — they need
+    /// the streamable shape. Which of those a plan may select is left to
+    /// `contract.validate_selection` rather than being second-guessed here.
+    resident_only: bool,
+    /// Whether the planned tier's quant reaches the loader as `LoadSpec::quantize`.
+    ///
+    /// The dev route takes it: its loader folds the requested width. The klein TURNKEY rehosts do
+    /// NOT — their tier is declared by the snapshot directory itself
+    /// (`turnkey_identity` reads `…/snapshots/<rev>/<tier>` and
+    /// `verify_turnkey_with_contracts` validates the transformer headers against it), and the same
+    /// function refuses any spec that also carries a quant: "flux2 Klein turnkey tiers require BF16
+    /// execution with LoadSpec.quantize=None"
+    /// (`mlx-gen-flux2/src/artifact_inventory.rs`). Measured, not assumed: the sc-22727 proof
+    /// capture of `flux2_klein_9b:q4:mlx` failed on exactly that sentence while reading the
+    /// contract, before any weights were loaded.
+    ///
+    /// The tier is still DERIVED from the plan and still binds the artifact — through the root
+    /// suffix check, which for these rehosts is the tier declaration the engine itself reads.
+    tier_quant_reaches_the_loader: bool,
+}
+
+const FLUX2_DEV_ARM: Flux2Arm = Flux2Arm {
+    provider: FLUX2_PROVIDER,
+    model_id: "flux2_dev",
+    execution_path: FLUX2_PLAIN_EXECUTION_PATH,
+    still_calibration: "MLX FLUX.2-dev calibration",
+    repository_env: "SCENEWORKS_FLUX2_REPOSITORY",
+    revision_env: "SCENEWORKS_FLUX2_REVISION",
+    root_env: "SCENEWORKS_FLUX2_ROOT",
+    expected_repository: protocol::FLUX2_REPOSITORY,
+    fixture_slug: "dev",
+    slug: "flux2-dev",
+    registry_fingerprint: FLUX2_CALIBRATION_FINGERPRINT,
+    load_shape: LoadShape::EagerMaterialization,
+    offload_policy: OffloadPolicy::Resident,
+    seed: FLUX2_SEED,
+    evidence_tag: "sc-18218",
+    resident_only: true,
+    tier_quant_reaches_the_loader: true,
+};
+
+const FLUX2_KLEIN_ARM: Flux2Arm = Flux2Arm {
+    provider: FLUX2_KLEIN_PROVIDER,
+    model_id: "flux2_klein_9b",
+    execution_path: FLUX2_KLEIN_PLAIN_EXECUTION_PATH,
+    still_calibration: "MLX FLUX.2-klein-9B calibration",
+    repository_env: "SCENEWORKS_FLUX2_KLEIN_REPOSITORY",
+    revision_env: "SCENEWORKS_FLUX2_KLEIN_REVISION",
+    root_env: "SCENEWORKS_FLUX2_KLEIN_ROOT",
+    expected_repository: protocol::FLUX2_KLEIN_REPOSITORY,
+    fixture_slug: "klein-9b",
+    slug: "flux2-klein-9b",
+    registry_fingerprint: FLUX2_KLEIN_REGISTRY_FINGERPRINT,
+    load_shape: LoadShape::EagerMaterialization,
+    offload_policy: OffloadPolicy::Resident,
+    seed: FLUX2_KLEIN_SEED,
+    evidence_tag: "sc-22727",
+    resident_only: false,
+    tier_quant_reaches_the_loader: false,
+};
+
+const FLUX2_KLEIN_KV_ARM: Flux2Arm = Flux2Arm {
+    provider: FLUX2_KLEIN_PROVIDER,
+    model_id: "flux2_klein_9b_kv",
+    execution_path: FLUX2_KLEIN_KV_PLAIN_EXECUTION_PATH,
+    still_calibration: "MLX FLUX.2-klein-9B KV calibration",
+    repository_env: "SCENEWORKS_FLUX2_KLEIN_KV_REPOSITORY",
+    revision_env: "SCENEWORKS_FLUX2_KLEIN_KV_REVISION",
+    root_env: "SCENEWORKS_FLUX2_KLEIN_KV_ROOT",
+    expected_repository: protocol::FLUX2_KLEIN_KV_REPOSITORY,
+    fixture_slug: "klein-9b-kv",
+    slug: "flux2-klein-9b-kv",
+    registry_fingerprint: FLUX2_KLEIN_REGISTRY_FINGERPRINT,
+    load_shape: LoadShape::EagerMaterialization,
+    offload_policy: OffloadPolicy::Resident,
+    seed: FLUX2_KLEIN_SEED,
+    evidence_tag: "sc-22727",
+    resident_only: false,
+    tier_quant_reaches_the_loader: false,
+};
+
+/// Which family member the plan asks for. Refuses by name: a `(provider, modelId)` pair no member
+/// serves must not be measured as its nearest neighbour — in particular a KV plan must never be
+/// satisfied by the base klein artifact, which shares the provider id.
+///
 /// Defense-in-depth mirror of the provider-mismatch guard `validate_z_image_batch` carries
-/// (sc-18104): `run` dispatches by name today, but this arm hardcodes the FLUX.2-dev contract, so a
-/// future caller must be refused by name here rather than misrouted into that contract.
-fn validate_flux2_target(request: &Value) -> Result<(), String> {
-    let provider = protocol::planned(request)?
+/// (sc-18104): `run` dispatches by provider name today, so a future caller must be refused here
+/// rather than misrouted into another member's contract.
+fn flux2_arm(request: &Value) -> Result<Flux2Arm, String> {
+    let planned = protocol::planned(request)?;
+    let provider = planned
         .pointer("/target/provider")
         .and_then(Value::as_str)
         .ok_or_else(|| "planned.target.provider must be a string".to_owned())?;
-    if provider != FLUX2_PROVIDER {
-        return Err(format!(
-            "MLX FLUX.2-dev calibration does not implement provider {provider:?}"
-        ));
+    let model_id = planned
+        .pointer("/target/modelId")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "planned.target.modelId must be a string".to_owned())?;
+    for arm in [FLUX2_DEV_ARM, FLUX2_KLEIN_ARM, FLUX2_KLEIN_KV_ARM] {
+        if arm.provider == provider && arm.model_id == model_id {
+            return Ok(arm);
+        }
     }
-    protocol::validate_still_geometry(request, "MLX FLUX.2-dev calibration")
+    Err(format!(
+        "the MLX FLUX.2 arm does not implement provider {provider:?} for model {model_id:?}"
+    ))
 }
 
-/// Bind the fixture to the planned tier AND geometry edge, deriving the seed — the same
-/// fixture-to-plan binding `planned_qwen_seed` enforces, extended to the edge because this lane's
-/// plan carries each of its q4 and q8 tiers at two geometries (768² and 1024²).
-fn planned_flux2_seed(request: &Value, tier: &str, width: u32) -> Result<u64, String> {
+/// The PRODUCTION calibration identity the loaded generator publishes for one `(member, tier)`
+/// cell — what the plan row must name and what the capture verifies against the loaded contract.
+///
+/// sc-22727 (inference PR 948). Klein's identity used to be published only for a streamable load,
+/// and a turnkey rehost was handed the weights-free registry string
+/// ([`FLUX2_KLEIN_REGISTRY_FINGERPRINT`]) in production. It is now a property of the ADMITTED
+/// ARTIFACT and its tier, minted by `mlx-gen-flux2::memory_strategy::klein_production_calibration`
+/// as `flux2-klein-9b-<tier>-mlx-shared-ladder-<artifact_tag>-<route>-v1`, where:
+///
+/// * `artifact_tag` comes from `KleinArtifactInventory::artifact_tag` — `rehost` for the
+///   `SceneWorks/flux2-klein-9b-mlx` turnkeys and `kv-rehost` for `…-kv-mlx`
+///   (`turnkey_identity` reads the cache dir out of the snapshot path, so the two shipped repos
+///   land on different tags even though they share a provider id), and
+/// * `route` is `t2i` for `FLUX2_KLEIN_9B_ID`, which is the ONLY klein provider this text-to-image
+///   lane loads. (`edit` / `kv-edit` belong to the edit providers, which this arm never drives.)
+///
+/// Written here as literals rather than read off the pinned crate on purpose: the constants and
+/// the minting function do not exist at inference `c6d6a4db`, which is what CI builds, so the
+/// plan/arm binding has to be weights-free and pin-independent. The capture refuses a loaded
+/// contract whose identity differs from this table (`run_flux2`), so the two copies cannot drift
+/// unnoticed once the epic's pin bump (sc-22738) lands.
+fn flux2_calibration_fingerprint(arm: Flux2Arm, tier: &str) -> String {
+    match arm.model_id {
+        "flux2_dev" => FLUX2_CALIBRATION_FINGERPRINT.to_owned(),
+        "flux2_klein_9b" => format!("flux2-klein-9b-{tier}-mlx-shared-ladder-rehost-t2i-v1"),
+        "flux2_klein_9b_kv" => format!("flux2-klein-9b-{tier}-mlx-shared-ladder-kv-rehost-t2i-v1"),
+        model_id => unreachable!("no FLUX.2 member {model_id} at tier {tier}"),
+    }
+}
+
+fn validate_flux2_target(request: &Value) -> Result<Flux2Arm, String> {
+    let arm = flux2_arm(request)?;
+    protocol::validate_still_geometry(request, arm.still_calibration)?;
+    Ok(arm)
+}
+
+/// Bind the fixture to the planned FAMILY MEMBER, tier AND geometry edge, deriving the seed — the
+/// same fixture-to-plan binding `planned_qwen_seed` enforces, extended to the edge because this
+/// lane's plan carries tiers at more than one geometry, and to the member because the two klein
+/// models are indistinguishable by provider id alone.
+fn planned_flux2_seed(
+    request: &Value,
+    arm: Flux2Arm,
+    tier: &str,
+    width: u32,
+) -> Result<u64, String> {
     let fixture = protocol::planned(request)?
         .get("fixture")
         .and_then(Value::as_str)
         .ok_or_else(|| "planned.fixture must be a string".to_owned())?;
-    let prefix = format!("flux2-dev-mlx-{tier}-{width}-seed");
+    let prefix = format!("flux2-{}-mlx-{tier}-{width}-seed", arm.fixture_slug);
     let remainder = fixture
         .strip_prefix(&prefix)
         .ok_or_else(|| format!("planned.fixture {fixture:?} must start with {prefix:?}"))?;
@@ -3630,10 +4957,10 @@ fn planned_flux2_seed(request: &Value, tier: &str, width: u32) -> Result<u64, St
         .ok_or_else(|| format!("planned.fixture {fixture:?} must end with -step<count>"))?;
     let seed = seed
         .parse::<u64>()
-        .map_err(|error| format!("parse FLUX.2-dev fixture seed {seed:?}: {error}"))?;
+        .map_err(|error| format!("parse FLUX.2 fixture seed {seed:?}: {error}"))?;
     let steps = steps
         .parse::<u32>()
-        .map_err(|error| format!("parse FLUX.2-dev fixture step count {steps:?}: {error}"))?;
+        .map_err(|error| format!("parse FLUX.2 fixture step count {steps:?}: {error}"))?;
     if steps != 2 {
         return Err(format!(
             "planned.fixture {fixture:?} must use the two-step calibration request"
@@ -3656,40 +4983,63 @@ fn flux2_request(width: u32, height: u32, seed: u64) -> GenerationRequest {
     }
 }
 
-/// Resolve and validate the `SCENEWORKS_FLUX2_*` environment family into a tier-exact load spec.
-/// The tier is DERIVED from `/target/tier` and threads through the per-tier ROOT suffix check and
-/// `spec.quantize` — never hardcoded (sc-17097 fixed exactly that hardcoding on the Candle side).
+/// Resolve and validate the member's `SCENEWORKS_FLUX2*_*` environment family into a tier-exact
+/// load spec. The tier is DERIVED from `/target/tier` and threads through the per-tier ROOT suffix
+/// check and `spec.quantize` — never hardcoded (sc-17097 fixed exactly that hardcoding on the
+/// Candle side).
 fn flux2_load_spec(
     request: &Value,
+    arm: Flux2Arm,
     tier: &str,
     selection: &MemorySelection,
 ) -> Result<(String, String, LoadSpec), String> {
-    protocol::validate_plain_overlay_target(request, FLUX2_PLAIN_EXECUTION_PATH)?;
-    let repository = protocol::required_env("SCENEWORKS_FLUX2_REPOSITORY")?;
-    let revision = protocol::required_env("SCENEWORKS_FLUX2_REVISION")?;
-    protocol::validate_artifact_identity(&repository, &revision, protocol::FLUX2_REPOSITORY)?;
-    let root = std::fs::canonicalize(PathBuf::from(protocol::required_env(
-        "SCENEWORKS_FLUX2_ROOT",
-    )?))
-    .map_err(|error| format!("canonicalize SCENEWORKS_FLUX2_ROOT: {error}"))?;
+    protocol::validate_plain_overlay_target(request, arm.execution_path)?;
+    let repository = protocol::required_env(arm.repository_env)?;
+    let revision = protocol::required_env(arm.revision_env)?;
+    // The identity check lives in `flux2_load_spec_at`, once, over these same values.
+    let root = std::fs::canonicalize(PathBuf::from(protocol::required_env(arm.root_env)?))
+        .map_err(|error| format!("canonicalize {}: {error}", arm.root_env))?;
+    flux2_load_spec_at(arm, tier, selection, repository, revision, root)
+}
+
+/// The env-free half of [`flux2_load_spec`], so the artifact binding is unit-testable without the
+/// process environment: the root must end in the PLANNED tier's directory under the member's OWN
+/// repository, so a stale `…/q4` export can never satisfy a q8 or bf16 plan, and the KV artifact
+/// can never satisfy a base-klein plan.
+fn flux2_load_spec_at(
+    arm: Flux2Arm,
+    tier: &str,
+    selection: &MemorySelection,
+    repository: String,
+    revision: String,
+    root: PathBuf,
+) -> Result<(String, String, LoadSpec), String> {
+    protocol::validate_artifact_identity(&repository, &revision, arm.expected_repository)?;
     protocol::validate_huggingface_snapshot_root(
         &root,
         &repository,
         &revision,
         tier,
-        protocol::FLUX2_REPOSITORY,
+        arm.expected_repository,
     )?;
-    Ok((repository, revision, flux2_spec(root, selection)))
+    Ok((repository, revision, flux2_spec(arm, root, selection)))
 }
 
-/// The tier-exact FLUX.2-dev load spec: resident offload, eager materialization (the contract's
-/// calibrated load shape), and the quant DERIVED from the planned selection.
-fn flux2_spec(root: PathBuf, selection: &MemorySelection) -> LoadSpec {
+/// The tier-exact FLUX.2 load spec: the member's WORKER shape (offload policy + load shape, see
+/// [`Flux2Arm::load_shape`]), `resolved_route` bound to the CATALOG model id, and — on the members
+/// whose loader takes it — the quant DERIVED from the planned selection. Those are the levers the
+/// worker sets (`image_jobs/base.rs` `load_spec` + `with_resolved_route`, then the manifest-declared
+/// shape and policy); see [`Flux2Arm::tier_quant_reaches_the_loader`] for why the klein rehosts
+/// take the tier through the snapshot path alone.
+fn flux2_spec(arm: Flux2Arm, root: PathBuf, selection: &MemorySelection) -> LoadSpec {
     let mut spec = LoadSpec::new(WeightsSource::Dir(root))
-        .with_offload_policy(OffloadPolicy::Resident)
-        .with_load_shape(LoadShape::EagerMaterialization);
-    if let Some(quant) = selection.tier.quant {
-        spec = spec.with_quant(quant);
+        .with_offload_policy(arm.offload_policy)
+        .with_load_shape(arm.load_shape)
+        .with_resolved_route(arm.model_id);
+    if arm.tier_quant_reaches_the_loader {
+        if let Some(quant) = selection.tier.quant {
+            spec = spec.with_quant(quant);
+        }
     }
     spec
 }
@@ -3697,15 +5047,42 @@ fn flux2_spec(root: PathBuf, selection: &MemorySelection) -> LoadSpec {
 /// The admission context for the FLUX.2-dev safety scenarios. It exactly describes the base
 /// text-to-image route: `MemoryMode::TextToImage`, no reference, and `reference_count == 0`.
 /// `overlay` stays `None` because this authoritative lane is base-only.
-fn flux2_admission_context(
-    selection: &MemorySelection,
-    calibration: &MemoryCalibrationIdentity,
-    fingerprint: &str,
-    width: u32,
-    height: u32,
+/// The three levers an admission SCENARIO varies, bundled so the context builder keeps one
+/// parameter per concern. `fingerprint` is a parameter at all only so the stale-evidence probe can
+/// pass a deliberate mismatch; every real call site passes `calibration.fingerprint` (the Krea-arm
+/// lesson at `krea_context`).
+#[derive(Clone, Copy, Debug)]
+struct Flux2AdmissionProbe<'a> {
+    fingerprint: &'a str,
     total_bytes: u64,
     predicted_peak_bytes: u64,
+}
+
+impl<'a> Flux2AdmissionProbe<'a> {
+    /// The exact-fit probe: the calibrated fingerprint, and the measured peak as both the budget
+    /// and the prediction.
+    fn exact_fit(calibration: &'a MemoryCalibrationIdentity, predicted: u64) -> Self {
+        Self {
+            fingerprint: &calibration.fingerprint,
+            total_bytes: predicted,
+            predicted_peak_bytes: predicted,
+        }
+    }
+}
+
+fn flux2_admission_context(
+    arm: Flux2Arm,
+    selection: &MemorySelection,
+    calibration: &MemoryCalibrationIdentity,
+    geometry: (u32, u32),
+    probe: Flux2AdmissionProbe<'_>,
 ) -> MemoryRunContext {
+    let (width, height) = geometry;
+    let Flux2AdmissionProbe {
+        fingerprint,
+        total_bytes,
+        predicted_peak_bytes,
+    } = probe;
     MemoryRunContext {
         selection: *selection,
         optimization_authority: MemoryOptimizationAuthority::Calibrated,
@@ -3734,7 +5111,7 @@ fn flux2_admission_context(
         },
         predicted_peak_bytes,
         cache_state: MemoryCacheState::Cold,
-        evidence_revision: format!("sc-18218@{}", protocol::INFERENCE_PIN),
+        evidence_revision: format!("{}@{}", arm.evidence_tag, protocol::INFERENCE_PIN),
     }
 }
 
@@ -3746,57 +5123,82 @@ fn flux2_complete_sweep(request: &Value) -> Result<Value, String> {
     Ok(sweep)
 }
 
-/// The `mlx:flux2_dev` arm (sc-18218) — RESIDENT ONLY, deliberately.
+/// The `mlx:flux2_*` arm (sc-18218, extended to the whole family by sc-22727).
 ///
-/// At the interim inference PR #531 head, `flux2_dev` owns a distinct reference-free T2I contract.
-/// Every non-Resident strategy remains `Missing`; this arm refuses those rungs, reads the registry
-/// contract under the exact T2I provider id, and then proves that the loaded generator exposes the
-/// byte-for-byte same contract before measuring it. No edit-provider declaration or edit-shaped
-/// context participates in this lane.
-fn run_flux2_dev(request: &Value) -> Result<Value, String> {
-    validate_flux2_target(request)?;
-    protocol::validate_plain_overlay_target(request, FLUX2_PLAIN_EXECUTION_PATH)?;
+/// `flux2_dev` owns a distinct reference-free T2I contract in which every non-Resident strategy
+/// remains `Missing`; the two klein catalog models share one engine provider whose ladder publishes
+/// five rungs, and are told apart by their artifact and `LoadSpec::resolved_route`. In both cases
+/// this arm reads the registry contract under the exact T2I provider id, then proves that the
+/// loaded generator exposes the byte-for-byte same contract before measuring it. No edit-provider
+/// declaration or edit-shaped context participates in this lane.
+fn run_flux2(request: &Value) -> Result<Value, String> {
+    let arm = validate_flux2_target(request)?;
+    protocol::validate_plain_overlay_target(request, arm.execution_path)?;
     let rung = protocol::planned_rung(request)?;
-    if rung != "resident" {
+    if arm.resident_only && rung != "resident" {
         return Err(format!(
-            "the pinned MLX FLUX.2-dev provider implements only the resident strategy (every other \
-             strategy is declared Missing at the pin); rung {rung:?} is not capturable"
+            "the pinned MLX {} provider implements only the resident strategy (every other \
+             strategy is declared Missing at the pin); rung {rung:?} is not capturable",
+            arm.provider
+        ));
+    }
+    // The plan's `loadShape` is what the record is checked against (the harness refuses a fragment
+    // whose measured loadShape differs from the plan's), and the member's shape is fixed by the
+    // worker, so a plan row spelling another shape is refused here by name, before weight work.
+    let planned_shape = planned_load_shape(request)?;
+    if planned_shape != arm.load_shape {
+        return Err(format!(
+            "planned.loadShape {planned_shape:?} is not the {} worker load shape {:?}",
+            arm.model_id, arm.load_shape
         ));
     }
     let selection = planned_selection(request)?;
     let tier = planned_qwen_tier(request)?; // shared numeric-tier parser
-    if !matches!(tier, "q4" | "q8") {
-        return Err(format!(
-            "the authoritative MLX FLUX.2-dev plan supports only q4 and q8; tier {tier:?} is not capturable"
-        ));
-    }
     let (width, height) = protocol::target_geometry(request)?;
-    let seed = planned_flux2_seed(request, tier, width)?;
-    let (repository, revision, spec) = flux2_load_spec(request, tier, &selection)?;
-    let registry = mlx_gen_flux2::provider_registry()
-        .map_err(|error| format!("build FLUX.2 registry: {error}"))?;
+    let seed = planned_flux2_seed(request, arm, tier, width)?;
+    let (repository, revision, spec) = flux2_load_spec(request, arm, tier, &selection)?;
+    // The PRODUCTION catalog (E4): the same explicit MLX media registry `runtime_macos::catalog()`
+    // composes for the worker, not a crate-local replica. A member the bundle does not register is
+    // not routed on this lane and fails here by name.
+    let catalog =
+        runtime_macos::catalog().map_err(|error| format!("build MLX catalog: {error}"))?;
+    let registry = catalog.media();
     let contract = registry
-        .memory_strategy_contract(FLUX2_PROVIDER, &spec)
-        .map_err(|error| format!("read {FLUX2_PROVIDER} T2I memory-strategy contract: {error}"))?
+        .memory_strategy_contract(arm.provider, &spec)
+        .map_err(|error| {
+            format!(
+                "read {} T2I memory-strategy contract: {error}",
+                arm.provider
+            )
+        })?
         .ok_or_else(|| {
-            format!("{FLUX2_PROVIDER} has no T2I memory-strategy contract at the pin")
+            format!(
+                "{} has no T2I memory-strategy contract at the pin",
+                arm.provider
+            )
         })?;
     contract.validate_selection(&selection).map_err(|error| {
-        format!("pinned FLUX.2-dev contract rejected planned selection: {error}")
+        format!(
+            "pinned {} contract rejected planned selection: {error}",
+            arm.model_id
+        )
     })?;
     let strategy = attested_strategy(
         request,
         &selection,
         &contract.engaged_composition(selection.strategy),
     )?;
-    let calibration = contract
-        .calibration
-        .as_ref()
-        .ok_or_else(|| "pinned FLUX.2-dev contract has no calibration identity".to_owned())?;
-    if calibration.fingerprint != FLUX2_CALIBRATION_FINGERPRINT {
+    let calibration = contract.calibration.as_ref().ok_or_else(|| {
+        format!(
+            "pinned {} contract has no calibration identity",
+            arm.model_id
+        )
+    })?;
+    let expected_fingerprint = flux2_calibration_fingerprint(arm, tier);
+    if calibration.fingerprint != expected_fingerprint {
         return Err(format!(
-            "pinned FLUX.2-dev T2I contract fingerprint changed: expected {FLUX2_CALIBRATION_FINGERPRINT}, got {}",
-            calibration.fingerprint
+            "pinned {} T2I contract fingerprint changed: expected {expected_fingerprint}, got {}",
+            arm.model_id, calibration.fingerprint
         ));
     }
     let planned_fingerprint = protocol::planned(request)?
@@ -3809,66 +5211,107 @@ fn run_flux2_dev(request: &Value) -> Result<Value, String> {
             calibration.fingerprint
         ));
     }
-    if seed != FLUX2_SEED {
+    if seed != arm.seed {
         return Err(format!(
-            "planned.fixture seed {seed} does not match the FLUX.2-dev calibration seed {FLUX2_SEED}"
+            "planned.fixture seed {seed} does not match the {} calibration seed {}",
+            arm.model_id, arm.seed
         ));
     }
     let hardware_bytes = request
         .pointer("/hardware/memoryBytes")
         .and_then(Value::as_u64)
         .ok_or_else(|| "run request.hardware.memoryBytes must be an integer".to_owned())?;
-    let safety = |fingerprint: &str, total_bytes: u64, predicted: u64| {
-        mlx_gen_flux2::memory_strategy::registered_dev_t2i_safety_check(
-            &spec,
-            &contract,
-            &flux2_admission_context(
-                &selection,
-                calibration,
+    let admission_context = |fingerprint: &str, total_bytes: u64, predicted_peak_bytes: u64| {
+        flux2_admission_context(
+            arm,
+            &selection,
+            calibration,
+            (width, height),
+            Flux2AdmissionProbe {
                 fingerprint,
-                width,
-                height,
                 total_bytes,
-                predicted,
-            ),
+                predicted_peak_bytes,
+            },
         )
     };
-    // Admission mutation hygiene BEFORE the expensive load: the gate must accept a fitting
-    // request (so the two rejections below cannot pass via a blanket refusal), reject an
-    // unknown/zero budget, and reject a mutated calibration fingerprint.
-    if !matches!(
-        safety(&calibration.fingerprint, hardware_bytes, 1),
-        MemorySafetyDecision::Accept
-    ) {
-        return Err(
-            "FLUX.2-dev admission rejected a fitting probe budget; the scenario rejections below \
-             would be a blanket refusal, not evidence"
-                .to_owned(),
-        );
-    }
-    if !matches!(
-        safety(&calibration.fingerprint, 0, 1),
-        MemorySafetyDecision::Reject { .. }
-    ) {
-        return Err("FLUX.2-dev admission accepted an unknown/zero memory budget".to_owned());
-    }
-    if !matches!(
-        safety("stale-flux2-dev-fingerprint", hardware_bytes, 1),
-        MemorySafetyDecision::Reject { .. }
-    ) {
-        return Err("FLUX.2-dev admission accepted stale calibration evidence".to_owned());
+    // Admission mutation hygiene: the gate must accept a fitting request (so the two rejections
+    // cannot pass via a blanket refusal), reject an unknown/zero budget, and reject a mutated
+    // calibration fingerprint.
+    //
+    // On the dev arm the registered T2I check is a PUBLIC crate function, so all three run BEFORE
+    // the expensive load, exactly as sc-18218 wrote them. The klein routes expose their registered
+    // check (`registered_klein_safety_check`) only through the loaded generator - it is
+    // crate-private - so their identical three scenarios run immediately after the load instead.
+    // Same scenarios, same record; only the moment differs, and it differs because of the pinned
+    // crate's visibility, not a weaker claim.
+    let scenarios = |check: &dyn Fn(&str, u64, u64) -> MemorySafetyDecision| -> Result<(), String> {
+        if !matches!(
+            check(&calibration.fingerprint, hardware_bytes, 1),
+            MemorySafetyDecision::Accept
+        ) {
+            return Err(format!(
+                "{} admission rejected a fitting probe budget; the scenario rejections below \
+                 would be a blanket refusal, not evidence",
+                arm.model_id
+            ));
+        }
+        if !matches!(
+            check(&calibration.fingerprint, 0, 1),
+            MemorySafetyDecision::Reject { .. }
+        ) {
+            return Err(format!(
+                "{} admission accepted an unknown/zero memory budget",
+                arm.model_id
+            ));
+        }
+        if !matches!(
+            check(
+                &format!("stale-{}-fingerprint", arm.slug),
+                hardware_bytes,
+                1
+            ),
+            MemorySafetyDecision::Reject { .. }
+        ) {
+            return Err(format!(
+                "{} admission accepted stale calibration evidence",
+                arm.model_id
+            ));
+        }
+        Ok(())
+    };
+    if arm.provider == FLUX2_PROVIDER {
+        scenarios(&|fingerprint, total_bytes, predicted| {
+            mlx_gen_flux2::memory_strategy::registered_dev_t2i_safety_check(
+                &spec,
+                &contract,
+                &admission_context(fingerprint, total_bytes, predicted),
+            )
+        })?;
     }
 
     let generator = registry
-        .load(FLUX2_PROVIDER, &spec)
-        .map_err(|error| format!("load real FLUX.2-dev {tier} provider: {error}"))?;
-    let loaded_contract = generator
-        .memory_strategy_contract()
-        .ok_or_else(|| "loaded FLUX.2-dev generator exposed no T2I memory contract".to_owned())?;
+        .load(arm.provider, &spec)
+        .map_err(|error| format!("load real {} {tier} provider: {error}", arm.model_id))?;
+    let loaded_contract = generator.memory_strategy_contract().ok_or_else(|| {
+        format!(
+            "loaded {} generator exposed no T2I memory contract",
+            arm.model_id
+        )
+    })?;
     if loaded_contract != &contract {
-        return Err(
-            "loaded FLUX.2-dev generator contract differs from the registry contract".to_owned(),
-        );
+        return Err(format!(
+            "loaded {} generator contract differs from the registry contract",
+            arm.model_id
+        ));
+    }
+    if arm.provider != FLUX2_PROVIDER {
+        scenarios(&|fingerprint, total_bytes, predicted| {
+            generator.memory_strategy_safety_check(&admission_context(
+                fingerprint,
+                total_bytes,
+                predicted,
+            ))
+        })?;
     }
     let conditioning = Cell::new(PhaseMemory {
         active: 0,
@@ -3904,27 +5347,29 @@ fn run_flux2_dev(request: &Value) -> Result<Value, String> {
     let conditioning = conditioning.get();
     let denoise = denoise.get();
     if [conditioning.active, denoise.active, decode.active].contains(&0) {
-        return Err(
-            "a synchronized FLUX.2-dev lifecycle phase reported a zero active peak".to_owned(),
-        );
+        return Err(format!(
+            "a synchronized {} lifecycle phase reported a zero active peak",
+            arm.model_id
+        ));
     }
     let overall = PhaseMemory::overall(&[conditioning, denoise, decode]);
     let predicted_peaks = image_predicted_peak_bytes(conditioning, denoise, decode);
     let predicted = predicted_peaks.overall;
     let exact_fit = flux2_admission_context(
+        arm,
         &selection,
         calibration,
-        &calibration.fingerprint,
-        width,
-        height,
-        predicted,
-        predicted,
+        (width, height),
+        Flux2AdmissionProbe::exact_fit(calibration, predicted),
     );
     if !matches!(
         generator.memory_strategy_safety_check(&exact_fit),
         MemorySafetyDecision::Accept
     ) {
-        return Err("FLUX.2-dev admission rejected an exact-fit calibrated budget".to_owned());
+        return Err(format!(
+            "{} admission rejected an exact-fit calibrated budget",
+            arm.model_id
+        ));
     }
 
     // Warm repeat determinism + cleanup bounds on this exact loaded provider. The scoped
@@ -3935,7 +5380,7 @@ fn run_flux2_dev(request: &Value) -> Result<Value, String> {
     let baseline = one_image(
         generator
             .generate(&flux2_request(width, height, seed), &mut |_| {})
-            .map_err(|error| format!("generate warm FLUX.2-dev control: {error}"))?,
+            .map_err(|error| format!("generate warm {} control: {error}", arm.model_id))?,
     )?;
     let clean_warm_peak = get_peak_memory() as u64;
     clear_cache();
@@ -3945,35 +5390,40 @@ fn run_flux2_dev(request: &Value) -> Result<Value, String> {
     let (maximum_error, mean_error, rms_error) = image_max_mean_rms_abs(&selected, &baseline)?;
     if !flux2_quality_passes(maximum_error, mean_error, rms_error) {
         return Err(format!(
-            "FLUX.2-dev warm repeat exceeded the determinism envelope: max={maximum_error:.6}, \
-             mean={mean_error:.6}, rms={rms_error:.6}"
+            "{} warm repeat exceeded the determinism envelope: max={maximum_error:.6}, \
+             mean={mean_error:.6}, rms={rms_error:.6}",
+            arm.model_id
         ));
     }
     reset_peak_memory();
     let warm = one_image(
         generator
             .generate(&flux2_request(width, height, seed), &mut |_| {})
-            .map_err(|error| format!("generate warm FLUX.2-dev repeat: {error}"))?,
+            .map_err(|error| format!("generate warm {} repeat: {error}", arm.model_id))?,
     )?;
     let warm_peak = get_peak_memory() as u64;
     if !cleanup_bounds.allows_warm_peak(warm_peak) {
         return Err(format!(
-            "FLUX.2-dev warm repeat peaked at {warm_peak} bytes, above the clean warm control \
-             {clean_warm_peak} bytes plus 2%"
+            "{} warm repeat peaked at {warm_peak} bytes, above the clean warm control \
+             {clean_warm_peak} bytes plus 2%",
+            arm.model_id
         ));
     }
     clear_cache();
     let warm_post_cleanup = AllocatorState::capture_current();
     if !cleanup_bounds.allows_retained(warm_post_cleanup) {
         return Err(format!(
-            "FLUX.2-dev warm repeat retained active/cache bytes {warm_post_cleanup:?} above the \
+            "{} warm repeat retained active/cache bytes {warm_post_cleanup:?} above the \
              clean warm cleanup {clean_post_cleanup:?} plus {} bytes",
-            cleanup_bounds.tolerance_bytes,
+            arm.model_id, cleanup_bounds.tolerance_bytes,
         ));
     }
     let (warm_maximum, warm_mean, warm_rms) = image_max_mean_rms_abs(&selected, &warm)?;
     if !flux2_quality_passes(warm_maximum, warm_mean, warm_rms) {
-        return Err("FLUX.2-dev second warm repeat changed the deterministic output".to_owned());
+        return Err(format!(
+            "{} second warm repeat changed the deterministic output",
+            arm.model_id
+        ));
     }
 
     // Arm-internal negative-mutation falsifiability check. A runtime_complete record must keep
@@ -3983,16 +5433,17 @@ fn run_flux2_dev(request: &Value) -> Result<Value, String> {
     let mutated = qwen_negative_mutation(&selected);
     let (mutated_maximum, mutated_mean, mutated_rms) = image_max_mean_rms_abs(&mutated, &baseline)?;
     if flux2_quality_passes(mutated_maximum, mutated_mean, mutated_rms) {
-        return Err(
-            "FLUX.2-dev output mutation did not breach the determinism envelope".to_owned(),
-        );
+        return Err(format!(
+            "{} output mutation did not breach the determinism envelope",
+            arm.model_id
+        ));
     }
 
     let lifecycle_blocker = concat!(
-        "the pinned mlx-gen-flux2 crate opens no memory-strategy request scope for the dev ",
-        "variants and has no calibration fault-injection site, so the scoped lifecycle scenario ",
-        "cannot execute; unscoped repeat determinism and allocator cleanup bounds are attested in ",
-        "quality and diagnostics instead"
+        "the pinned mlx-gen-flux2 crate opens no memory-strategy request scope for the FLUX.2 ",
+        "text-to-image routes and has no calibration fault-injection site, so the scoped lifecycle ",
+        "scenario cannot execute; unscoped repeat determinism and allocator cleanup bounds are ",
+        "attested in quality and diagnostics instead"
     );
     let mut fragment = json!({
         "status": "runtime_complete",
@@ -4006,8 +5457,8 @@ fn run_flux2_dev(request: &Value) -> Result<Value, String> {
         "sweep": flux2_complete_sweep(request)?,
         "scenarios": [
             { "name": "exact_fit", "result": "passed", "predictedBytes": predicted, "effectiveBudgetBytes": predicted },
-            { "name": "unknown_budget", "result": "passed", "reason": "the registered FLUX.2-dev admission check rejected a zero/unknown budget before load" },
-            { "name": "stale_evidence", "result": "passed", "reason": "the registered FLUX.2-dev admission check rejected a mutated calibration fingerprint before load" },
+            { "name": "unknown_budget", "result": "passed", "reason": format!("the registered {} admission check rejected a zero/unknown budget", arm.model_id) },
+            { "name": "stale_evidence", "result": "passed", "reason": format!("the registered {} admission check rejected a mutated calibration fingerprint", arm.model_id) },
             { "name": "warm_repeat", "result": "not_run", "reason": lifecycle_blocker },
             { "name": "cancel", "result": "not_run", "reason": lifecycle_blocker },
             { "name": "error", "result": "not_run", "reason": lifecycle_blocker },
@@ -4038,7 +5489,7 @@ fn run_flux2_dev(request: &Value) -> Result<Value, String> {
             "resolvedPathFingerprint": format!("{repository}@{revision}:{tier}"),
         },
         "diagnostics": protocol::diagnostics(
-            "memory-mlx-adapter:flux2-dev-resident",
+            &format!("memory-mlx-adapter:{}-resident", arm.slug),
             "executed",
             [lifecycle_blocker.to_owned()],
             [
@@ -4062,7 +5513,7 @@ fn run_flux2_dev(request: &Value) -> Result<Value, String> {
         ),
         "capturedAt": protocol::captured_at(),
     });
-    protocol::settle_plain_overlay_scenario(request, &mut fragment, FLUX2_PLAIN_EXECUTION_PATH)?;
+    protocol::settle_plain_overlay_scenario(request, &mut fragment, arm.execution_path)?;
     Ok(fragment)
 }
 
@@ -7016,6 +8467,612 @@ fn run_qwen_provider(request: &Value) -> Result<Value, String> {
         &baseline,
     )?;
     protocol::settle_plain_overlay_scenario(request, &mut fragment, QWEN_PROVIDER_EXECUTION_PATH)?;
+    Ok(fragment)
+}
+
+// ---------------------------------------------------------------------------------------------
+// Qwen-Image-Edit-2511 (sc-22728) — one engine provider, two shipped catalog ids
+// ---------------------------------------------------------------------------------------------
+
+/// One member of the Qwen edit family this arm measures, resolved from the plan's
+/// `(target.provider, target.modelId)` — never assumed. Both members load the SAME engine provider
+/// from the SAME artifact family; the Lightning member additionally stacks the built-in distill LoRA
+/// and runs the recipe that LoRA was distilled for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct QwenEditArm {
+    /// The catalog id, which is what the anchor key is keyed on.
+    model_id: &'static str,
+    execution_path: &'static str,
+    /// The still-geometry refusal label (sc-18808).
+    still_calibration: &'static str,
+    /// The `<prefix>-<tier>-seed<n>-step<n>` fixture spelling this member's plan rows must use, so a
+    /// Lightning capture can never be recorded under the production id's fixture and vice versa.
+    fixture_prefix: &'static str,
+    /// The overlay the plan must declare for this member.
+    overlay: &'static str,
+    /// Stack the built-in distill LoRA and select the `lightning` engine recipe.
+    lightning: bool,
+    steps: u32,
+    /// The record's diagnostics source, `memory-mlx-adapter:<slug>-shared-ladder`.
+    slug: &'static str,
+}
+
+const QWEN_EDIT_ARM: QwenEditArm = QwenEditArm {
+    model_id: QWEN_EDIT_MODEL,
+    execution_path: QWEN_EDIT_EXECUTION_PATH,
+    still_calibration: "MLX Qwen edit calibration",
+    fixture_prefix: "qwen-edit-mlx",
+    overlay: "none",
+    lightning: false,
+    steps: QWEN_EDIT_STEPS,
+    slug: "qwen-edit",
+};
+
+const QWEN_EDIT_LIGHTNING_ARM: QwenEditArm = QwenEditArm {
+    model_id: QWEN_EDIT_LIGHTNING_MODEL,
+    execution_path: QWEN_EDIT_LIGHTNING_EXECUTION_PATH,
+    still_calibration: "MLX Qwen edit Lightning calibration",
+    fixture_prefix: "qwen-edit-lightning-mlx",
+    overlay: "lora",
+    lightning: true,
+    steps: QWEN_EDIT_LIGHTNING_STEPS,
+    slug: "qwen-edit-lightning",
+};
+
+/// Which family member the plan asks for. Refuses by name: the two ids share one engine provider, so
+/// nothing else in the request distinguishes them, and measuring one under the other's key would
+/// publish the distilled stack's peaks as the production path's (or the reverse).
+fn qwen_edit_arm(request: &Value) -> Result<QwenEditArm, String> {
+    let planned = protocol::planned(request)?;
+    let provider = planned
+        .pointer("/target/provider")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "planned.target.provider must be a string".to_owned())?;
+    let model_id = planned
+        .pointer("/target/modelId")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "planned.target.modelId must be a string".to_owned())?;
+    match (provider, model_id) {
+        (QWEN_EDIT_PROVIDER, QWEN_EDIT_MODEL) => Ok(QWEN_EDIT_ARM),
+        (QWEN_EDIT_PROVIDER, QWEN_EDIT_LIGHTNING_MODEL) => Ok(QWEN_EDIT_LIGHTNING_ARM),
+        (provider, model_id) => Err(format!(
+            "the MLX Qwen edit arm does not implement provider {provider:?} for model {model_id:?}"
+        )),
+    }
+}
+
+/// The seed and step count this member's fixture binds, checked against the arm's own prefix, the
+/// planned tier and the recipe's step count — the `planned_qwen_seed` rule, extended to a family
+/// whose two members differ in exactly those two axes.
+fn planned_qwen_edit_seed(request: &Value, arm: QwenEditArm, tier: &str) -> Result<u64, String> {
+    let fixture = protocol::planned(request)?
+        .get("fixture")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "planned.fixture must be a string".to_owned())?;
+    let prefix = format!("{}-{tier}-seed", arm.fixture_prefix);
+    let remainder = fixture
+        .strip_prefix(&prefix)
+        .ok_or_else(|| format!("planned.fixture {fixture:?} must start with {prefix:?}"))?;
+    let (seed, steps) = remainder
+        .split_once("-step")
+        .ok_or_else(|| format!("planned.fixture {fixture:?} must end with -step<count>"))?;
+    let seed = seed
+        .parse::<u64>()
+        .map_err(|error| format!("parse Qwen edit fixture seed {seed:?}: {error}"))?;
+    let steps = steps
+        .parse::<u32>()
+        .map_err(|error| format!("parse Qwen edit fixture step count {steps:?}: {error}"))?;
+    if steps != arm.steps {
+        return Err(format!(
+            "planned.fixture {fixture:?} must use this arm's {}-step calibration request",
+            arm.steps
+        ));
+    }
+    Ok(seed)
+}
+
+/// Where the built-in Lightning distill snapshot lives, as the three
+/// `SCENEWORKS_QWEN_EDIT_LIGHTNING_LORA_*` values name it — lifted out of the environment so the
+/// attachment that makes the Lightning member Lightning is unit-testable.
+#[derive(Clone, Debug)]
+struct QwenEditLightningSource {
+    repository: String,
+    revision: String,
+    root: PathBuf,
+}
+
+fn qwen_edit_lightning_source() -> Result<QwenEditLightningSource, String> {
+    Ok(QwenEditLightningSource {
+        repository: protocol::required_env("SCENEWORKS_QWEN_EDIT_LIGHTNING_LORA_REPOSITORY")?,
+        revision: protocol::required_env("SCENEWORKS_QWEN_EDIT_LIGHTNING_LORA_REVISION")?,
+        root: PathBuf::from(protocol::required_env(
+            "SCENEWORKS_QWEN_EDIT_LIGHTNING_LORA_ROOT",
+        )?),
+    })
+}
+
+/// The built-in Lightning distill adapter, exactly as the worker stacks it: the one pinned file in
+/// the pinned snapshot, as a single LoRA at scale 1.0 ahead of any user adapters (of which a
+/// calibration capture has none). The Candle engine refuses any other path, scale or kind by name;
+/// the MLX engine consumes whatever `spec.adapters` carries, so the pin is asserted HERE too rather
+/// than assumed from the environment.
+fn qwen_edit_lightning_adapter(source: &QwenEditLightningSource) -> Result<AdapterSpec, String> {
+    protocol::validate_artifact_identity(
+        &source.repository,
+        &source.revision,
+        protocol::QWEN_EDIT_LIGHTNING_REPOSITORY,
+    )?;
+    let root = std::fs::canonicalize(&source.root).map_err(|error| {
+        format!("canonicalize SCENEWORKS_QWEN_EDIT_LIGHTNING_LORA_ROOT: {error}")
+    })?;
+    let path = root.join(protocol::QWEN_EDIT_LIGHTNING_FILE);
+    if !path.is_file() {
+        return Err(format!(
+            "the Lightning distill LoRA is not at {}",
+            path.display()
+        ));
+    }
+    Ok(AdapterSpec::new(path, 1.0, AdapterKind::Lora))
+}
+
+/// The three `SCENEWORKS_QWEN_IMAGE_EDIT_*` values naming the base snapshot one capture opens, plus
+/// the distill snapshot the Lightning member stacks — lifted out of the environment so both the tier
+/// binding and the adapter attachment are unit-testable.
+#[derive(Clone, Debug)]
+struct QwenEditArtifactSource {
+    repository: String,
+    revision: String,
+    root: PathBuf,
+    lightning: Option<QwenEditLightningSource>,
+}
+
+fn qwen_edit_artifact_source(arm: QwenEditArm) -> Result<QwenEditArtifactSource, String> {
+    Ok(QwenEditArtifactSource {
+        repository: protocol::required_env("SCENEWORKS_QWEN_IMAGE_EDIT_REPOSITORY")?,
+        revision: protocol::required_env("SCENEWORKS_QWEN_IMAGE_EDIT_REVISION")?,
+        root: PathBuf::from(protocol::required_env("SCENEWORKS_QWEN_IMAGE_EDIT_ROOT")?),
+        lightning: arm.lightning.then(qwen_edit_lightning_source).transpose()?,
+    })
+}
+
+/// The artifact one Qwen edit capture loads: the canonical snapshot root, and the `LoadSpec` that
+/// opens it.
+#[derive(Debug)]
+struct QwenEditArtifact {
+    root: PathBuf,
+    spec: LoadSpec,
+}
+
+/// The env-free half of the Qwen edit load, so both of its load-time bindings are unit-testable:
+///
+/// * the root must end in the PLANNED tier's directory, so a stale `…/q4` export cannot satisfy a q8
+///   or bf16 plan and quietly re-label another tier's peaks (the sc-17097 defect class); and
+/// * the built-in distill lands in `spec.adapters` exactly when the arm is the Lightning member —
+///   the ONE thing that makes that member Lightning at load time. Every downstream overlay claim in
+///   [`run_qwen_edit_provider`] is read back off `spec.adapters` rather than off `arm.lightning`, so
+///   a record can never assert an overlay the load did not carry.
+fn qwen_edit_load_spec(
+    arm: QwenEditArm,
+    tier: &str,
+    source: &QwenEditArtifactSource,
+    selection: &MemorySelection,
+    offload: OffloadPolicy,
+    load_shape: LoadShape,
+) -> Result<QwenEditArtifact, String> {
+    protocol::validate_artifact_identity(
+        &source.repository,
+        &source.revision,
+        protocol::QWEN_EDIT_REPOSITORY,
+    )?;
+    let root = std::fs::canonicalize(&source.root)
+        .map_err(|error| format!("canonicalize SCENEWORKS_QWEN_IMAGE_EDIT_ROOT: {error}"))?;
+    protocol::validate_huggingface_snapshot_root(
+        &root,
+        &source.repository,
+        &source.revision,
+        tier,
+        protocol::QWEN_EDIT_REPOSITORY,
+    )?;
+    let mut spec = qwen_load_spec(root.clone(), selection, offload, load_shape);
+    if arm.lightning {
+        let lightning = source.lightning.as_ref().ok_or_else(|| {
+            format!(
+                "{} is the Lightning member but no distill snapshot was supplied",
+                arm.model_id
+            )
+        })?;
+        spec = spec.with_adapters(vec![qwen_edit_lightning_adapter(lightning)?]);
+    }
+    Ok(QwenEditArtifact { root, spec })
+}
+
+/// The generation request one Qwen edit capture renders: the worker's edit request shape — one
+/// `Conditioning::Reference` fitted to the target geometry (`fit_engine_image` does that fit in
+/// `image_jobs/base.rs`, so the engine always sees the request geometry) plus, on the Lightning
+/// member, the distill's own sampler. The engine REFUSES a reference-free edit request
+/// (`model_edit.rs` `validate`), so this is what makes the capture measure the edit path — the VL
+/// vision tower and the dual-latent VAE encode — rather than text-to-image under an edit label.
+fn qwen_edit_request(arm: QwenEditArm, width: u32, height: u32, seed: u64) -> GenerationRequest {
+    GenerationRequest {
+        prompt: QWEN_EDIT_PROMPT.to_owned(),
+        negative_prompt: (!arm.lightning).then(|| "blurry, distorted, text".to_owned()),
+        width,
+        height,
+        count: 1,
+        seed: Some(seed),
+        steps: Some(arm.steps),
+        sampler: arm
+            .lightning
+            .then(|| QWEN_EDIT_LIGHTNING_SAMPLER.to_owned()),
+        conditioning: vec![Conditioning::Reference {
+            image: Image {
+                width,
+                height,
+                pixels: protocol::synthetic_reference_rgb(width, height),
+            },
+            strength: None,
+        }],
+        ..Default::default()
+    }
+}
+
+fn qwen_edit_complete_sweep(request: &Value) -> Result<Value, String> {
+    let mut sweep = protocol::reference_sweep(request, "passed")?;
+    sweep["rangeVerified"] = json!(true);
+    Ok(sweep)
+}
+
+/// One Qwen-Image-Edit-2511 anchor capture, on either catalog id, at any shipped tier.
+///
+/// E4: the generator comes from `catalog.media().load(QWEN_EDIT_PROVIDER, &spec)` — the same
+/// registry load the worker performs for this lane (`image_jobs/qwen.rs` builds a `LoadSpec` with
+/// the tier quant plus the Lightning adapter stack and hands it to the cached-gen stream) — never a
+/// re-implementation of the loader.
+fn run_qwen_edit_provider(request: &Value) -> Result<Value, String> {
+    let arm = qwen_edit_arm(request)?;
+    protocol::validate_exact_overlay_target(request, arm.overlay, arm.execution_path)?;
+    protocol::validate_still_geometry(request, arm.still_calibration)?;
+    let selection = planned_selection(request)?;
+    let tier = planned_qwen_tier(request)?;
+    let seed = planned_qwen_edit_seed(request, arm, tier)?;
+    let load_shape = planned_load_shape(request)?;
+    let offload = if matches!(
+        selection.strategy,
+        MemoryStrategy::StagedResidency | MemoryStrategy::BoundedTransformerResidency
+    ) {
+        OffloadPolicy::Sequential
+    } else {
+        OffloadPolicy::Resident
+    };
+    let (width, height) = protocol::target_geometry(request)?;
+    let source = qwen_edit_artifact_source(arm)?;
+    let repository = source.repository.clone();
+    let revision = source.revision.clone();
+    // The root must end in the PLANNED tier's directory, so a stale `…/q4` export cannot satisfy a
+    // q8 or bf16 plan and quietly re-label another tier's peaks; and the distill is attached here,
+    // on exactly the Lightning member.
+    let QwenEditArtifact { root: _root, spec } =
+        qwen_edit_load_spec(arm, tier, &source, &selection, offload, load_shape)?;
+    // Every overlay claim below is read off the stack the LOAD carries, never off `arm.lightning`:
+    // if the attachment above were ever lost, the record must say so rather than assert a distill
+    // that never participated.
+    let loaded_adapters = spec.adapters.len();
+    let catalog =
+        runtime_macos::catalog().map_err(|error| format!("build MLX catalog: {error}"))?;
+    let generator = catalog
+        .media()
+        .load(QWEN_EDIT_PROVIDER, &spec)
+        .map_err(|error| format!("load real {} {tier} provider: {error}", arm.model_id))?;
+    let contract = generator
+        .memory_strategy_contract()
+        .ok_or_else(|| format!("loaded {QWEN_EDIT_PROVIDER} has no memory-strategy contract"))?;
+    contract.validate_selection(&selection).map_err(|error| {
+        format!("pinned Qwen edit provider rejected planned selection: {error}")
+    })?;
+    let strategy = attested_strategy(
+        request,
+        &selection,
+        &contract.engaged_composition(selection.strategy),
+    )?;
+    let calibration = contract
+        .calibration
+        .as_ref()
+        .ok_or_else(|| "pinned Qwen edit provider has no calibration identity".to_owned())?;
+    let planned_fingerprint = protocol::planned(request)?
+        .get("calibrationFingerprint")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "planned.calibrationFingerprint must be a string".to_owned())?;
+    if planned_fingerprint != calibration.fingerprint {
+        return Err(format!(
+            "plan/provider calibration mismatch: plan={planned_fingerprint}, pinned provider={}",
+            calibration.fingerprint
+        ));
+    }
+    if load_shape != calibration.load_shape {
+        return Err(format!(
+            "plan/provider load-shape mismatch: plan={}, pinned provider={}",
+            load_shape_key(load_shape),
+            load_shape_key(calibration.load_shape)
+        ));
+    }
+    let hardware_bytes = request
+        .pointer("/hardware/memoryBytes")
+        .and_then(Value::as_u64)
+        .ok_or_else(|| "run request.hardware.memoryBytes must be an integer".to_owned())?;
+    let mut context = qwen_provider_context(
+        selection,
+        calibration,
+        width,
+        height,
+        hardware_bytes,
+        1,
+        22728,
+    );
+    // The mode the worker admits an edit job under, with the one reference the request carries, and
+    // the overlay the target declares — the Lightning member really does load a second network, so
+    // recording it under a reference-free, overlay-free context would be a false claim about what
+    // the measured peaks contain.
+    context.mode = MemoryMode::Edit;
+    context.has_reference = true;
+    context.geometry.reference_count = 1;
+    context.overlay = (loaded_adapters > 0).then(|| arm.overlay.to_owned());
+
+    let conditioning = Cell::new(PhaseMemory {
+        active: 0,
+        cache: 0,
+    });
+    let denoise = Cell::new(PhaseMemory {
+        active: 0,
+        cache: 0,
+    });
+    clear_cache();
+    reset_peak_memory();
+    let selected = one_image(scoped_generate(
+        generator.as_ref(),
+        qwen_edit_request(arm, width, height, seed),
+        &context,
+        None,
+        &mut |progress| match progress {
+            Progress::Step { current: 1, .. } => {
+                conditioning.set(PhaseMemory::capture());
+                reset_peak_memory();
+            }
+            Progress::Decoding => {
+                denoise.set(PhaseMemory::capture());
+                reset_peak_memory();
+            }
+            _ => {}
+        },
+    )?)?;
+    let decode = PhaseMemory::capture();
+    let conditioning = conditioning.get();
+    let denoise = denoise.get();
+    if [conditioning.active, denoise.active, decode.active].contains(&0) {
+        return Err(
+            "a synchronized Qwen edit lifecycle phase reported a zero active peak".to_owned(),
+        );
+    }
+    let phases = [conditioning, denoise, decode];
+    let overall = PhaseMemory::overall(&phases);
+    let predicted_peaks = image_predicted_peak_bytes(conditioning, denoise, decode);
+    let predicted = predicted_peaks.overall;
+
+    let mut exact = context.clone();
+    exact.predicted_peak_bytes = predicted;
+    exact.budget.total_bytes = predicted;
+    if !matches!(
+        generator.memory_strategy_safety_check(&exact),
+        MemorySafetyDecision::Accept
+    ) {
+        return Err("Qwen edit provider rejected an exact-fit calibrated budget".to_owned());
+    }
+    let mut unknown = context.clone();
+    unknown.budget.total_bytes = 0;
+    if !matches!(
+        generator.memory_strategy_safety_check(&unknown),
+        MemorySafetyDecision::Reject { .. }
+    ) {
+        return Err("Qwen edit provider accepted an unknown/zero memory budget".to_owned());
+    }
+    let mut stale = context.clone();
+    stale.calibration_fingerprint = "stale-qwen-edit-fingerprint".to_owned();
+    if !matches!(
+        generator.memory_strategy_safety_check(&stale),
+        MemorySafetyDecision::Reject { .. }
+    ) {
+        return Err("Qwen edit provider accepted stale calibration evidence".to_owned());
+    }
+
+    let baseline = one_image(
+        generator
+            .generate(&qwen_edit_request(arm, width, height, seed), &mut |_| {})
+            .map_err(|error| format!("generate unselected Qwen edit reference: {error}"))?,
+    )?;
+    let (maximum_error, mean_error) = image_max_mean_abs(&selected, &baseline)?;
+    if !qwen_quality_passes(maximum_error, mean_error) {
+        return Err(format!(
+            "Qwen edit selected rung exceeded unselected parity: max={maximum_error:.6}, mean={mean_error:.6}"
+        ));
+    }
+    let warm = one_image(scoped_generate(
+        generator.as_ref(),
+        qwen_edit_request(arm, width, height, seed),
+        &context,
+        None,
+        &mut |_| {},
+    )?)?;
+    let (warm_maximum, warm_mean) = image_max_mean_abs(&selected, &warm)?;
+    if !qwen_quality_passes(warm_maximum, warm_mean) {
+        return Err("Qwen edit warm repeat changed the deterministic output".to_owned());
+    }
+
+    let cancelled = qwen_edit_request(arm, width, height, seed);
+    let cancel_signal = cancelled.cancel.clone();
+    let cancel_during_decode = selection.strategy == MemoryStrategy::BoundedDecode;
+    let mut cancel_triggered = false;
+    let cancel_error = scoped_generate(
+        generator.as_ref(),
+        cancelled,
+        &context,
+        None,
+        &mut |progress| {
+            if cancel_triggered {
+                return;
+            }
+            match progress {
+                Progress::Step { current: 1, .. } if !cancel_during_decode => {
+                    cancel_triggered = true;
+                    cancel_signal.cancel();
+                }
+                Progress::Decoding if cancel_during_decode => {
+                    cancel_triggered = true;
+                    let signal = cancel_signal.clone();
+                    std::thread::spawn(move || {
+                        std::thread::sleep(std::time::Duration::from_millis(1));
+                        signal.cancel();
+                    });
+                }
+                _ => {}
+            }
+        },
+    )
+    .expect_err("in-flight Qwen edit cancellation must fail");
+    if !cancel_triggered {
+        return Err(
+            "Qwen edit cancellation probe never reached the active rung boundary".to_owned(),
+        );
+    }
+    if !cancel_error.to_ascii_lowercase().contains("cancel") {
+        return Err(format!(
+            "Qwen edit cancellation returned the wrong error: {cancel_error}"
+        ));
+    }
+    let cancel_recovery = one_image(scoped_generate(
+        generator.as_ref(),
+        qwen_edit_request(arm, width, height, seed),
+        &context,
+        None,
+        &mut |_| {},
+    )?)?;
+    let (cancel_maximum, cancel_mean) = image_max_mean_abs(&selected, &cancel_recovery)?;
+    if !qwen_quality_passes(cancel_maximum, cancel_mean) {
+        return Err("Qwen edit cancellation cleanup changed the warm follow-up".to_owned());
+    }
+
+    let injected_phase = if selection.strategy == MemoryStrategy::BoundedDecode {
+        MemoryPhase::Decode
+    } else {
+        MemoryPhase::Denoise
+    };
+    let injected = scoped_generate(
+        generator.as_ref(),
+        qwen_edit_request(arm, width, height, seed),
+        &context,
+        Some(injected_phase),
+        &mut |_| {},
+    )
+    .expect_err("injected Qwen edit error must fail");
+    if !injected.contains("injected memory-strategy calibration error") {
+        return Err(format!(
+            "Qwen edit error injection returned the wrong error: {injected}"
+        ));
+    }
+    let error_recovery = one_image(scoped_generate(
+        generator.as_ref(),
+        qwen_edit_request(arm, width, height, seed),
+        &context,
+        None,
+        &mut |_| {},
+    )?)?;
+    let (recovery_maximum, recovery_mean) = image_max_mean_abs(&selected, &error_recovery)?;
+    if !qwen_quality_passes(recovery_maximum, recovery_mean) {
+        return Err("Qwen edit error cleanup changed the warm follow-up".to_owned());
+    }
+
+    let mutated = qwen_negative_mutation(&selected);
+    let (mutated_maximum, mutated_mean) = image_max_mean_abs(&mutated, &baseline)?;
+    if qwen_quality_passes(mutated_maximum, mutated_mean) {
+        return Err(
+            "Qwen edit output mutation did not breach the production parity envelope".to_owned(),
+        );
+    }
+    let overlay_scenario = if loaded_adapters > 0 {
+        json!({
+            "name": "overlay",
+            "result": "passed",
+            "reason": "the built-in lightx2v Lightning distill LoRA was folded into the MMDiT at load and participated in every measured render",
+        })
+    } else {
+        json!({ "name": "overlay", "result": "not_applicable", "reason": "settled below from the declared target" })
+    };
+    let mut fragment = json!({
+        "status": "complete",
+        "strategy": strategy,
+        "loadShape": load_shape_key(calibration.load_shape),
+        "artifact": {
+            "repository": repository,
+            "resolvedRevision": revision,
+            "variant": tier,
+        },
+        "sweep": qwen_edit_complete_sweep(request)?,
+        "scenarios": [
+            { "name": "exact_fit", "result": "passed", "predictedBytes": predicted, "effectiveBudgetBytes": predicted },
+            { "name": "unknown_budget", "result": "passed" },
+            { "name": "stale_evidence", "result": "passed" },
+            { "name": "warm_repeat", "result": "passed" },
+            { "name": "cancel", "result": "passed", "cleanupVerified": true, "warmFollowUpPassed": true },
+            { "name": "error", "result": "passed", "cleanupVerified": true, "warmFollowUpPassed": true },
+            { "name": "loadability", "result": "passed" },
+            overlay_scenario
+        ],
+        "predictedPeakBytes": predicted_peaks.json(),
+        "observedMemory": {
+            "conditioning": conditioning.json(),
+            "denoise": denoise.json(),
+            "decode": decode.json(),
+            "overall": overall.json(),
+        },
+        "quality": {
+            "contract": "same seed, reference, prompt, sampling, precision, and loaded provider; selected rung versus unselected request",
+            "identicalInputs": true,
+            "identicalLatents": false,
+            "result": "passed",
+            "maximumError": maximum_error,
+            "meanError": mean_error,
+            "maximumErrorThreshold": QWEN_MAX_THRESHOLD,
+            "meanErrorThreshold": QWEN_MEAN_THRESHOLD,
+        },
+        "negativeMutation": {
+            "parameters": protocol::strategy_parameters(request)?,
+            "measured": true,
+            "result": "failed_as_expected",
+            "maximumError": mutated_maximum,
+            "meanError": mutated_mean,
+        },
+        "loadability": {
+            "result": "passed",
+            "resolvedPathFingerprint": format!("{repository}@{revision}:{tier}"),
+        },
+        "diagnostics": protocol::diagnostics(
+            &format!("memory-mlx-adapter:{}-shared-ladder", arm.slug),
+            "executed",
+            [],
+            [
+                ("conditioningActivePeak", "bytes", conditioning.active),
+                ("denoiseActivePeak", "bytes", denoise.active),
+                ("decodeActivePeak", "bytes", decode.active),
+                ("overallAllocatorEnvelope", "bytes", overall.allocator_bytes()),
+                // Every Qwen edit capture conditions on exactly one reference image, and the
+                // Lightning member additionally carries exactly one built-in distill adapter.
+                ("referenceImages", "count", 1),
+                ("builtInAdapters", "count", loaded_adapters as u64),
+            ],
+        ),
+        "capturedAt": protocol::captured_at(),
+    });
+    if loaded_adapters == 0 {
+        protocol::settle_plain_overlay_scenario(request, &mut fragment, arm.execution_path)?;
+    }
     Ok(fragment)
 }
 
@@ -11794,7 +13851,23 @@ fn run(request: &Value) -> Result<Value, String> {
         INSTANTID_PROVIDER => run_instantid(request),
         KREA_PROVIDER => run_krea_control(request),
         QWEN_PROVIDER => run_qwen_provider(request),
-        FLUX2_PROVIDER => run_flux2_dev(request),
+        // sc-22728: the Qwen edit lane. One engine provider serves both shipped catalog ids, so the
+        // arm resolves which from `(provider, modelId)` and refuses any other pair by name.
+        QWEN_EDIT_PROVIDER => run_qwen_edit_provider(request),
+        FLUX2_PROVIDER => run_flux2(request),
+        // sc-22727: both klein catalog models (`flux2_klein_9b`, `flux2_klein_9b_kv`) load through
+        // this ONE engine provider id; `flux2_arm` resolves which from `(provider, modelId)` and
+        // refuses an unknown pair by name.
+        FLUX2_KLEIN_PROVIDER => run_flux2(request),
+        // sc-22726: the FLUX.1 family. Three registry ids on one arm — the two base text-to-image
+        // providers of `mlx-gen-flux`, and `mlx-gen-pulid`'s identity route over the same
+        // FLUX.1-dev backbone. The arm resolves which member from `(provider, mode)`.
+        // One arm per line: `stale-lane-report.mjs#adapterCapturableProviders` derives the
+        // capturable provider set by parsing these arms, and only accepts a bare literal or a
+        // single `&str` const per arm — an or-pattern would make it throw.
+        FLUX1_DEV_PROVIDER => run_flux_one(request),
+        FLUX1_SCHNELL_PROVIDER => run_flux_one(request),
+        PULID_FLUX_PROVIDER => run_flux_one(request),
         // sc-18808: the first VIDEO arm. Every arm above it refuses `geometry.frames != 1`; this one
         // validates against LTX's own resolution/temporal envelope instead.
         LTX_PROVIDER => run_ltx(request),
@@ -11929,6 +14002,818 @@ mod z_image_reuse_tests {
     }
 }
 
+/// sc-22726 — the FLUX.1 family arm: `flux_dev`, `flux_schnell` and `pulid_flux_dev`.
+///
+/// Everything here is env-free and weights-free, which is the point: the arm's plan binding (member
+/// resolution, tier, root suffix, identity stack, request shape, admission context) is decided
+/// before a single weight file is opened, so it can be proven on a CPU-only host. The measured
+/// render itself belongs to the terminal capture campaign.
+#[cfg(test)]
+mod flux_one_tests {
+    use super::*;
+
+    fn flux_one_planned(provider: &str, mode: &str, tier: &str) -> Value {
+        let overlay = if provider == PULID_FLUX_PROVIDER {
+            "identity"
+        } else {
+            "none"
+        };
+        let model_id = match provider {
+            FLUX1_DEV_PROVIDER => "flux_dev",
+            FLUX1_SCHNELL_PROVIDER => "flux_schnell",
+            PULID_FLUX_PROVIDER => "pulid_flux_dev",
+            other => other,
+        };
+        json!({
+            "planned": {
+                "target": {
+                    "provider": provider,
+                    "modelId": model_id,
+                    "tier": tier,
+                    "mode": mode,
+                    "overlay": overlay,
+                    "geometry": { "width": 1024, "height": 1024, "batch": 1, "frames": 1 }
+                },
+                "backend": "mlx",
+                "loadShape": "deferred_materialization",
+                "strategy": { "rung": "resident", "engagedRungs": ["resident"], "parameters": {} },
+                "calibrationFingerprint": "unused",
+                "fixture": "unused"
+            }
+        })
+    }
+
+    fn flux_one_temp_dir(label: &str) -> PathBuf {
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        std::env::temp_dir().join(format!("sc-22726-{label}-{}-{nonce}", std::process::id()))
+    }
+
+    fn flux_one_snapshot_root(repository: &str, revision: &str, tier: &str) -> PathBuf {
+        let root = flux_one_temp_dir("flux1")
+            .join(format!("models--{}", repository.replace('/', "--")))
+            .join("snapshots")
+            .join(revision)
+            .join(tier);
+        std::fs::create_dir_all(&root).unwrap();
+        root
+    }
+
+    /// A complete staged PuLID bundle: all five loose files in ONE directory, which is what both
+    /// worker lanes stage under `SCENEWORKS_PULID_WEIGHTS` and what both engines require.
+    fn staged_pulid_bundle() -> protocol::PulidIdentityBundle {
+        let root = flux_one_temp_dir("pulid-bundle");
+        std::fs::create_dir_all(&root).unwrap();
+        for file in protocol::PULID_IDENTITY_BUNDLE_FILES {
+            std::fs::write(root.join(file), b"weights").unwrap();
+        }
+        protocol::pulid_identity_bundle_at(root).unwrap()
+    }
+
+    /// The family member is read off the plan's `(provider, mode)`, and a pair no member serves is
+    /// refused by name rather than measured as its nearest neighbour. `flux1_schnell` has no
+    /// identity route at all, and PuLID is text-to-image-WITH-A-FACE only (the worker's
+    /// `pulid_flux_available` requires `character_image` plus a reference), so both of those
+    /// crossings must fail.
+    #[test]
+    fn the_flux_one_arm_is_resolved_from_the_planned_provider_and_mode() {
+        let dev =
+            flux_one_arm(&flux_one_planned(FLUX1_DEV_PROVIDER, "text_to_image", "q4")).unwrap();
+        assert_eq!(dev, FLUX1_DEV_ARM);
+        assert_eq!(dev.expected_repository, protocol::FLUX1_DEV_REPOSITORY);
+        assert!(!dev.identity);
+        // Each base member binds ITS OWN env family — the one `measure-memory-catalog.mjs`
+        // exports for it (`PROVIDER_FAMILIES.flux1_dev.env` / `.flux1_schnell.env`).
+        assert_eq!(dev.repository_env, "SCENEWORKS_FLUX1_DEV_REPOSITORY");
+        assert_eq!(dev.revision_env, "SCENEWORKS_FLUX1_DEV_REVISION");
+        assert_eq!(dev.root_env, "SCENEWORKS_FLUX1_DEV_ROOT");
+        let schnell = flux_one_arm(&flux_one_planned(
+            FLUX1_SCHNELL_PROVIDER,
+            "text_to_image",
+            "q8",
+        ))
+        .unwrap();
+        assert_eq!(schnell, FLUX1_SCHNELL_ARM);
+        assert_eq!(
+            schnell.expected_repository,
+            protocol::FLUX1_SCHNELL_REPOSITORY
+        );
+        assert_eq!(
+            schnell.repository_env,
+            "SCENEWORKS_FLUX1_SCHNELL_REPOSITORY"
+        );
+        assert_eq!(schnell.revision_env, "SCENEWORKS_FLUX1_SCHNELL_REVISION");
+        assert_eq!(schnell.root_env, "SCENEWORKS_FLUX1_SCHNELL_ROOT");
+        let pulid = flux_one_arm(&flux_one_planned(
+            PULID_FLUX_PROVIDER,
+            "character_image",
+            "bf16",
+        ))
+        .unwrap();
+        assert_eq!(pulid, PULID_FLUX_ARM);
+        assert!(pulid.identity);
+        // The PuLID backbone IS the FLUX.1-dev artifact, so it binds the same env family — that is
+        // the fact the closure's `engineId` alias and the shared PROVIDER_FAMILIES row encode.
+        assert_eq!(pulid.expected_repository, protocol::FLUX1_DEV_REPOSITORY);
+        assert_eq!(pulid.repository_env, "SCENEWORKS_FLUX1_DEV_REPOSITORY");
+        assert_eq!(pulid.revision_env, "SCENEWORKS_FLUX1_DEV_REVISION");
+        assert_eq!(pulid.root_env, "SCENEWORKS_FLUX1_DEV_ROOT");
+        // ...but never the same record: the diagnostics source and the execution path differ.
+        assert_ne!(pulid.slug, FLUX1_DEV_ARM.slug);
+        assert_ne!(pulid.execution_path, FLUX1_DEV_ARM.execution_path);
+        assert_ne!(pulid.still_calibration, FLUX1_DEV_ARM.still_calibration);
+
+        for (provider, mode) in [
+            (FLUX1_SCHNELL_PROVIDER, "character_image"),
+            (PULID_FLUX_PROVIDER, "text_to_image"),
+            (FLUX1_DEV_PROVIDER, "edit_image"),
+            ("flux1_dev_control", "text_to_image"),
+        ] {
+            let error = flux_one_arm(&flux_one_planned(provider, mode, "q4")).unwrap_err();
+            assert!(
+                error.contains(&format!("provider {provider:?} in mode {mode:?}")),
+                "{provider}/{mode}: {error}"
+            );
+        }
+        assert!(flux_one_arm(
+            &json!({ "planned": { "target": { "provider": FLUX1_DEV_PROVIDER } } })
+        )
+        .unwrap_err()
+        .contains("planned.target.mode"));
+    }
+
+    /// The dispatcher routes all three ids into this arm, and still refuses everything else by
+    /// name. `run` used to send an unimplemented provider into the Qwen arm (sc-18104), so the
+    /// refusal sentence is asserted rather than assumed.
+    #[test]
+    fn run_dispatches_every_flux_one_id_and_still_refuses_a_foreign_one() {
+        for provider in [
+            FLUX1_DEV_PROVIDER,
+            FLUX1_SCHNELL_PROVIDER,
+            PULID_FLUX_PROVIDER,
+        ] {
+            let mode = if provider == PULID_FLUX_PROVIDER {
+                "character_image"
+            } else {
+                "text_to_image"
+            };
+            let error = run(&flux_one_planned(provider, mode, "q4"))
+                .expect_err("the weights-free plan cannot complete a real capture");
+            assert!(
+                !error.contains("does not implement provider"),
+                "{provider} was not dispatched into the FLUX.1 arm: {error}"
+            );
+        }
+        for provider in ["flux1_dev_control", "chroma1_hd"] {
+            let error = run(&flux_one_planned(provider, "text_to_image", "q4")).unwrap_err();
+            assert_eq!(
+                error,
+                format!("MLX five-rung calibration does not implement provider {provider:?}")
+            );
+        }
+    }
+
+    /// The still-geometry guard fires BEFORE any environment or weight work, under each member's
+    /// own label — so a video geometry can never reach a FLUX.1 load (sc-18808).
+    #[test]
+    fn every_flux_one_member_refuses_a_multi_frame_geometry_under_its_own_label() {
+        for arm in [FLUX1_DEV_ARM, FLUX1_SCHNELL_ARM, PULID_FLUX_ARM] {
+            for frames in [0_u64, 2, 97] {
+                let mut request = flux_one_planned(arm.provider, arm.mode, "q4");
+                request["planned"]["target"]["geometry"]["frames"] = json!(frames);
+                let error = run(&request).expect_err("a video geometry must be refused");
+                assert_eq!(
+                    error,
+                    format!(
+                        "{} requires geometry.frames == 1, got {frames}",
+                        arm.still_calibration
+                    ),
+                    "{}/{frames}",
+                    arm.provider
+                );
+            }
+        }
+    }
+
+    /// The tier is the PLAN's on every member, the root must carry it, and the `LoadSpec` re-asserts
+    /// it — a q8 plan against a q4 export is refused NAMING the tier it wanted (the sc-17097 defect
+    /// class). All three tiers must round-trip, so the arm cannot be quietly capped at one.
+    #[test]
+    fn flux_one_root_must_carry_the_planned_tier_and_the_spec_binds_it() {
+        const REVISION: &str = "323fd12d79f78ad444e882e8d8e871914584f2b9";
+        for arm in [FLUX1_DEV_ARM, FLUX1_SCHNELL_ARM, PULID_FLUX_ARM] {
+            let repository = arm.expected_repository;
+            let identity = || arm.identity.then(staged_pulid_bundle);
+            let q4_root = flux_one_snapshot_root(repository, REVISION, "q4");
+            let error = flux_one_load_spec_at(
+                &flux_one_planned(arm.provider, arm.mode, "q8"),
+                LoadShape::DeferredMaterialization,
+                repository.to_owned(),
+                REVISION.to_owned(),
+                q4_root.clone(),
+                identity(),
+            )
+            .expect_err("a q8 plan must not be satisfied by a q4 root");
+            assert!(
+                error.ends_with(&format!("/snapshots/{REVISION}/q8")),
+                "{}: {error}",
+                arm.provider
+            );
+            for (tier, quant) in [
+                ("q4", Some(Quant::Q4)),
+                ("q8", Some(Quant::Q8)),
+                ("bf16", None),
+            ] {
+                let root = flux_one_snapshot_root(repository, REVISION, tier);
+                let artifact = flux_one_load_spec_at(
+                    &flux_one_planned(arm.provider, arm.mode, tier),
+                    LoadShape::DeferredMaterialization,
+                    repository.to_owned(),
+                    REVISION.to_owned(),
+                    root,
+                    identity(),
+                )
+                .unwrap_or_else(|error| panic!("{}/{tier}: {error}", arm.provider));
+                assert_eq!(artifact.tier, tier);
+                assert_eq!(artifact.spec.quantize, quant, "{tier} load quant");
+                // Resident: the anchor rung, and the policy the worker loads every FLUX.1 route
+                // under at that rung (no `requiredOffloadPolicy` on the manifests' `resident`
+                // implementation). The identity is per (route, tier) and does not depend on it.
+                assert_eq!(artifact.spec.offload_policy, OffloadPolicy::Resident);
+                assert_eq!(artifact.spec.load_shape, LoadShape::DeferredMaterialization);
+                assert_eq!(artifact.arm, arm);
+                assert!(artifact
+                    .loadability_fingerprint()
+                    .starts_with(&format!("{repository}@{REVISION}:{tier}")));
+            }
+            // The wrong artifact family is refused before the root is even looked at.
+            let other = if repository == protocol::FLUX1_DEV_REPOSITORY {
+                protocol::FLUX1_SCHNELL_REPOSITORY
+            } else {
+                protocol::FLUX1_DEV_REPOSITORY
+            };
+            let error = flux_one_load_spec_at(
+                &flux_one_planned(arm.provider, arm.mode, "q4"),
+                LoadShape::DeferredMaterialization,
+                other.to_owned(),
+                REVISION.to_owned(),
+                q4_root,
+                identity(),
+            )
+            .expect_err("the other family's repository must be refused");
+            assert!(error.contains(repository), "{}: {error}", arm.provider);
+        }
+    }
+
+    /// The identity stack rides the `LoadSpec` exactly as the worker threads it
+    /// (`image_jobs/pulid.rs` `pulid_identity_weights`), the base routes carry none, and the
+    /// resolved bundle is part of the loadability fingerprint — two identity stacks over one
+    /// backbone are two different measurements.
+    #[test]
+    fn the_pulid_route_binds_the_identity_stack_and_the_base_routes_do_not() {
+        const REVISION: &str = "323fd12d79f78ad444e882e8d8e871914584f2b9";
+        let bundle = staged_pulid_bundle();
+        let root = flux_one_snapshot_root(protocol::FLUX1_DEV_REPOSITORY, REVISION, "q4");
+        let artifact = flux_one_load_spec_at(
+            &flux_one_planned(PULID_FLUX_PROVIDER, "character_image", "q4"),
+            LoadShape::DeferredMaterialization,
+            protocol::FLUX1_DEV_REPOSITORY.to_owned(),
+            REVISION.to_owned(),
+            root.clone(),
+            Some(bundle.clone()),
+        )
+        .unwrap();
+        let identity = artifact.spec.identity.as_ref().expect("identity stack");
+        assert_eq!(
+            identity.encoder,
+            Some(WeightsSource::File(
+                bundle.root.join(protocol::PULID_ADAPTER_FILE)
+            ))
+        );
+        assert_eq!(
+            identity.eva,
+            Some(WeightsSource::File(
+                bundle.root.join(protocol::PULID_EVA_FILE)
+            ))
+        );
+        // The engine reads scrfd / arcface / bisenet out of `face_dir` BY NAME, so the bundle root
+        // IS the face dir — not a sibling of it.
+        assert_eq!(
+            identity.face_dir,
+            Some(WeightsSource::Dir(bundle.root.clone()))
+        );
+        // The fingerprint names the stack by CONTENT, never by the host path it was staged at.
+        assert!(
+            artifact
+                .loadability_fingerprint()
+                .ends_with(&format!("+identity:{}", bundle.composite_sha256)),
+            "{}",
+            artifact.loadability_fingerprint()
+        );
+        assert!(!artifact
+            .loadability_fingerprint()
+            .contains(&bundle.root.display().to_string()));
+        // ...and the record's artifact carries every file's digest.
+        let identity_bundle = &artifact.artifact_json()["identityBundle"];
+        assert_eq!(
+            identity_bundle["compositeSha256"].as_str(),
+            Some(bundle.composite_sha256.as_str())
+        );
+        for (file, sha256) in &bundle.file_sha256 {
+            assert_eq!(
+                identity_bundle["files"][*file].as_str(),
+                Some(sha256.as_str())
+            );
+        }
+        // Same bytes at another path: the same identity. Different bytes: a different one.
+        let restaged = staged_pulid_bundle();
+        assert_ne!(restaged.root, bundle.root);
+        assert_eq!(restaged.composite_sha256, bundle.composite_sha256);
+        std::fs::write(restaged.root.join(protocol::PULID_BISENET_FILE), b"other").unwrap();
+        let restaged = protocol::pulid_identity_bundle_at(restaged.root).unwrap();
+        assert_ne!(restaged.composite_sha256, bundle.composite_sha256);
+        assert_ne!(
+            restaged.file_sha256[4].1, bundle.file_sha256[4].1,
+            "the bisenet digest is the one that moved"
+        );
+        assert_eq!(restaged.file_sha256[..4], bundle.file_sha256[..4]);
+
+        let base = flux_one_load_spec_at(
+            &flux_one_planned(FLUX1_DEV_PROVIDER, "text_to_image", "q4"),
+            LoadShape::DeferredMaterialization,
+            protocol::FLUX1_DEV_REPOSITORY.to_owned(),
+            REVISION.to_owned(),
+            root.clone(),
+            None,
+        )
+        .unwrap();
+        assert!(base.spec.identity.is_none());
+        assert!(!base.loadability_fingerprint().contains("+identity"));
+
+        // Neither crossing is expressible: an identity stack on a base route, or a PuLID plan with
+        // no stack, is refused rather than measured as the other route.
+        for (provider, mode, supplied) in [
+            (FLUX1_DEV_PROVIDER, "text_to_image", Some(bundle.clone())),
+            (PULID_FLUX_PROVIDER, "character_image", None),
+        ] {
+            let error = flux_one_load_spec_at(
+                &flux_one_planned(provider, mode, "q4"),
+                LoadShape::DeferredMaterialization,
+                protocol::FLUX1_DEV_REPOSITORY.to_owned(),
+                REVISION.to_owned(),
+                root.clone(),
+                supplied,
+            )
+            .expect_err("the identity stack and the route must agree");
+            assert!(error.contains("identity"), "{provider}: {error}");
+        }
+    }
+
+    /// `flux_one_load_spec` reads the identity bundle from `SCENEWORKS_PULID_WEIGHTS` on the
+    /// PuLID route and from nothing on a base route. Serialized on [`FLUX_ONE_ENV_LOCK`]: the
+    /// process environment is global, and every other FLUX.1 test in this binary fails before it
+    /// reads an env var, so nothing else needs the lock.
+    #[test]
+    fn the_env_bound_load_spec_reads_the_identity_bundle_from_its_env_on_the_pulid_route_only() {
+        const REVISION: &str = "323fd12d79f78ad444e882e8d8e871914584f2b9";
+        let _guard = FLUX_ONE_ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let restore = FluxOneEnv::capture();
+        let bundle = staged_pulid_bundle();
+        let root = flux_one_snapshot_root(protocol::FLUX1_DEV_REPOSITORY, REVISION, "q4");
+        std::env::set_var(
+            "SCENEWORKS_FLUX1_DEV_REPOSITORY",
+            protocol::FLUX1_DEV_REPOSITORY,
+        );
+        std::env::set_var("SCENEWORKS_FLUX1_DEV_REVISION", REVISION);
+        std::env::set_var("SCENEWORKS_FLUX1_DEV_ROOT", &root);
+        std::env::remove_var(protocol::PULID_IDENTITY_BUNDLE_ENV);
+        let pulid = flux_one_planned(PULID_FLUX_PROVIDER, "character_image", "q4");
+        let error = flux_one_load_spec(&pulid, LoadShape::DeferredMaterialization)
+            .expect_err("the PuLID route must require the bundle env");
+        assert!(
+            error.contains(protocol::PULID_IDENTITY_BUNDLE_ENV),
+            "{error}"
+        );
+        // A base route reads no bundle env at all: it binds with the variable absent.
+        let dev = flux_one_planned(FLUX1_DEV_PROVIDER, "text_to_image", "q4");
+        let base = flux_one_load_spec(&dev, LoadShape::DeferredMaterialization).unwrap();
+        assert!(base.identity.is_none());
+
+        std::env::set_var(protocol::PULID_IDENTITY_BUNDLE_ENV, &bundle.root);
+        let artifact = flux_one_load_spec(&pulid, LoadShape::DeferredMaterialization).unwrap();
+        let identity = artifact.identity.as_ref().expect("the bundle env was read");
+        assert_eq!(identity.composite_sha256, bundle.composite_sha256);
+        assert_eq!(
+            identity.root,
+            std::fs::canonicalize(&bundle.root).unwrap(),
+            "the env value is canonicalized, not used as spelled"
+        );
+        // The schnell family's env is NOT consulted on the dev backbone: pointing it somewhere
+        // unusable changes nothing for either dev-backed member.
+        std::env::set_var("SCENEWORKS_FLUX1_SCHNELL_ROOT", "/nonexistent/sc-22726");
+        std::env::set_var("SCENEWORKS_FLUX1_SCHNELL_REPOSITORY", "not/a-repo");
+        std::env::set_var("SCENEWORKS_FLUX1_SCHNELL_REVISION", "junk");
+        flux_one_load_spec(&pulid, LoadShape::DeferredMaterialization).unwrap();
+        flux_one_load_spec(&dev, LoadShape::DeferredMaterialization).unwrap();
+        // ...and a schnell plan reads ITS family, so it is refused on those values by name.
+        let schnell = flux_one_planned(FLUX1_SCHNELL_PROVIDER, "text_to_image", "q4");
+        let error = flux_one_load_spec(&schnell, LoadShape::DeferredMaterialization)
+            .expect_err("the schnell env family is the one a schnell plan reads");
+        assert!(
+            error.contains(protocol::FLUX1_SCHNELL_REPOSITORY),
+            "{error}"
+        );
+        drop(restore);
+    }
+
+    /// Serializes the tests that mutate the FLUX.1 env families and the PuLID bundle env.
+    static FLUX_ONE_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// Every env var the FLUX.1 arm reads, restored on drop — including on a panic, so a failing
+    /// assertion cannot leak a binding into a later test.
+    struct FluxOneEnv(Vec<(&'static str, Option<std::ffi::OsString>)>);
+
+    impl FluxOneEnv {
+        const NAMES: [&'static str; 7] = [
+            "SCENEWORKS_FLUX1_DEV_REPOSITORY",
+            "SCENEWORKS_FLUX1_DEV_REVISION",
+            "SCENEWORKS_FLUX1_DEV_ROOT",
+            "SCENEWORKS_FLUX1_SCHNELL_REPOSITORY",
+            "SCENEWORKS_FLUX1_SCHNELL_REVISION",
+            "SCENEWORKS_FLUX1_SCHNELL_ROOT",
+            protocol::PULID_IDENTITY_BUNDLE_ENV,
+        ];
+
+        fn capture() -> Self {
+            Self(
+                Self::NAMES
+                    .iter()
+                    .map(|name| (*name, std::env::var_os(name)))
+                    .collect(),
+            )
+        }
+    }
+
+    impl Drop for FluxOneEnv {
+        fn drop(&mut self) {
+            for (name, value) in &self.0 {
+                match value {
+                    Some(value) => std::env::set_var(name, value),
+                    None => std::env::remove_var(name),
+                }
+            }
+        }
+    }
+
+    /// An incomplete staged bundle is refused HERE, naming the missing files, rather than several
+    /// gigabytes into a capture as an opaque loader error.
+    #[test]
+    fn an_incomplete_pulid_bundle_is_refused_naming_the_missing_files() {
+        let root = flux_one_temp_dir("pulid-partial");
+        std::fs::create_dir_all(&root).unwrap();
+        for skipped in protocol::PULID_IDENTITY_BUNDLE_FILES {
+            for file in protocol::PULID_IDENTITY_BUNDLE_FILES {
+                let path = root.join(file);
+                if file == skipped {
+                    let _ = std::fs::remove_file(&path);
+                } else {
+                    std::fs::write(&path, b"weights").unwrap();
+                }
+            }
+            let error = protocol::pulid_identity_bundle_at(root.clone())
+                .expect_err("an incomplete bundle must be refused");
+            assert!(error.contains(skipped), "{skipped}: {error}");
+            assert!(error.contains(protocol::PULID_IDENTITY_BUNDLE_ENV));
+        }
+    }
+
+    /// The overlay axis is read off the declared target on both routes: a base plan that declares
+    /// `identity` is refused, and a PuLID plan that declares `none` is too — neither may acquire
+    /// the other's overlay coverage.
+    #[test]
+    fn the_flux_one_overlay_axis_is_bound_to_the_declared_target() {
+        const REVISION: &str = "323fd12d79f78ad444e882e8d8e871914584f2b9";
+        let root = flux_one_snapshot_root(protocol::FLUX1_DEV_REPOSITORY, REVISION, "q4");
+        let mut base = flux_one_planned(FLUX1_DEV_PROVIDER, "text_to_image", "q4");
+        base["planned"]["target"]["overlay"] = json!("identity");
+        let error = flux_one_load_spec_at(
+            &base,
+            LoadShape::DeferredMaterialization,
+            protocol::FLUX1_DEV_REPOSITORY.to_owned(),
+            REVISION.to_owned(),
+            root.clone(),
+            None,
+        )
+        .expect_err("a base route must refuse a declared overlay");
+        assert!(error.contains("only executes the base target"), "{error}");
+
+        let mut pulid = flux_one_planned(PULID_FLUX_PROVIDER, "character_image", "q4");
+        pulid["planned"]["target"]["overlay"] = json!("none");
+        let error = flux_one_load_spec_at(
+            &pulid,
+            LoadShape::DeferredMaterialization,
+            protocol::FLUX1_DEV_REPOSITORY.to_owned(),
+            REVISION.to_owned(),
+            root,
+            Some(staged_pulid_bundle()),
+        )
+        .expect_err("the identity route must require its own overlay");
+        assert!(error.contains("executes exactly \"identity\""), "{error}");
+    }
+
+    /// The measured request is the worker's: two steps on every member, and exactly one reference
+    /// face at the target geometry on the identity route (never on a base route).
+    #[test]
+    fn the_flux_one_request_carries_a_reference_only_on_the_identity_route() {
+        let pulid = flux_one_request(PULID_FLUX_ARM, 1024, 768);
+        assert_eq!(pulid.conditioning.len(), 1);
+        match &pulid.conditioning[0] {
+            Conditioning::Reference { image, strength } => {
+                assert_eq!((image.width, image.height), (1024, 768));
+                assert_eq!(image.pixels.len(), 1024 * 768 * 3);
+                assert_eq!(*strength, Some(PULID_REFERENCE_STRENGTH));
+            }
+            other => panic!("expected one Reference, got {other:?}"),
+        }
+        assert_eq!(pulid.steps, Some(2));
+        assert_eq!(pulid.seed, Some(FLUX1_SEED));
+        for arm in [FLUX1_DEV_ARM, FLUX1_SCHNELL_ARM] {
+            let base = flux_one_request(arm, 1024, 1024);
+            assert!(base.conditioning.is_empty(), "{}", arm.provider);
+            assert_eq!(base.steps, Some(2));
+            assert_eq!(base.seed, Some(FLUX1_SEED));
+        }
+    }
+
+    /// The admission context is the shape each route is admitted under. The identity route is the
+    /// PROVIDER mode `image_to_image` with one reference and `overlay: identity` — exactly what
+    /// `mlx-gen-pulid`'s route gate checks and what the manifest's `requestContexts` declare — and
+    /// the base routes are reference-free text-to-image.
+    #[test]
+    fn the_flux_one_admission_context_matches_each_declared_route() {
+        let calibration = MemoryCalibrationIdentity::new(
+            "flux-one-static-registry-behavior-v2-dev",
+            LoadShape::DeferredMaterialization,
+        );
+        let selection =
+            planned_selection(&flux_one_planned(FLUX1_DEV_PROVIDER, "text_to_image", "q4"))
+                .unwrap();
+        let pulid = flux_one_context(
+            PULID_FLUX_ARM,
+            &selection,
+            &calibration,
+            &calibration.fingerprint,
+            1024,
+            1024,
+            1,
+            1,
+        );
+        assert_eq!(pulid.mode, MemoryMode::ImageToImage);
+        assert!(pulid.has_reference);
+        assert_eq!(pulid.geometry.reference_count, 1);
+        assert_eq!(pulid.overlay.as_deref(), Some("identity"));
+        assert!(!pulid.use_pid);
+        assert!(!pulid.has_phases);
+        for arm in [FLUX1_DEV_ARM, FLUX1_SCHNELL_ARM] {
+            let base = flux_one_context(
+                arm,
+                &selection,
+                &calibration,
+                &calibration.fingerprint,
+                1024,
+                1024,
+                1,
+                1,
+            );
+            assert_eq!(base.mode, MemoryMode::TextToImage, "{}", arm.provider);
+            assert!(!base.has_reference);
+            assert_eq!(base.geometry.reference_count, 0);
+            assert_eq!(base.overlay, None);
+        }
+    }
+
+    /// The fixture names the member, the tier, the edge and the step count, so a bf16 record can
+    /// never be emitted against a q4 capture that merely reused the fixture string.
+    #[test]
+    fn the_flux_one_fixture_binds_the_member_tier_geometry_and_step_count() {
+        let request = flux_one_planned(FLUX1_DEV_PROVIDER, "text_to_image", "q4");
+        validate_flux_one_fixture(
+            &json!({ "planned": {
+                "fixture": format!("flux1-dev-mlx-q4-1024-seed{FLUX1_SEED}-step2"),
+                "target": request["planned"]["target"].clone(),
+            }}),
+            FLUX1_DEV_ARM,
+            "q4",
+        )
+        .unwrap();
+        for (fixture, expected) in [
+            (
+                format!("flux1-dev-mlx-q8-1024-seed{FLUX1_SEED}-step2"),
+                "must start with",
+            ),
+            (
+                format!("pulid-flux-mlx-q4-1024-seed{FLUX1_SEED}-step2"),
+                "must start with",
+            ),
+            (
+                format!("flux1-dev-mlx-q4-768-seed{FLUX1_SEED}-step2"),
+                "must start with",
+            ),
+            (
+                format!("flux1-dev-mlx-q4-1024-seed{FLUX1_SEED}-step3"),
+                "two-step",
+            ),
+            (
+                "flux1-dev-mlx-q4-1024-seed1-step2".to_owned(),
+                "does not match",
+            ),
+        ] {
+            let error = validate_flux_one_fixture(
+                &json!({ "planned": {
+                    "fixture": fixture,
+                    "target": request["planned"]["target"].clone(),
+                }}),
+                FLUX1_DEV_ARM,
+                "q4",
+            )
+            .expect_err("the fixture must be bound to its cell");
+            assert!(error.contains(expected), "{fixture}: {error}");
+        }
+    }
+
+    /// Every FLUX.1 cell the committed plan declares must resolve to an implemented member, and its
+    /// fixture must satisfy the same binding a capture would apply. This is the plan/arm agreement
+    /// E3 asks for, checked against the checked-in plan rather than a hand-written sample.
+    #[test]
+    fn every_planned_flux_one_mlx_cell_resolves_to_an_implemented_member() {
+        let plan: Value = serde_json::from_str(include_str!(
+            "../../../../config/memory-calibration-plan.json"
+        ))
+        .expect("the anchor plan parses");
+        let anchors = plan["anchors"].as_object().expect("anchors object");
+        let mut seen = std::collections::BTreeSet::new();
+        for (key, entry) in anchors {
+            if !key.ends_with(":mlx") {
+                continue;
+            }
+            let provider = entry["provider"].as_str().unwrap();
+            if !matches!(
+                provider,
+                FLUX1_DEV_PROVIDER | FLUX1_SCHNELL_PROVIDER | PULID_FLUX_PROVIDER
+            ) {
+                continue;
+            }
+            seen.insert(key.clone());
+            let (_, rest) = key.split_once(':').unwrap();
+            let tier = rest.split_once(':').unwrap().0;
+            let request = json!({ "planned": {
+                "target": {
+                    "provider": provider,
+                    "tier": tier,
+                    "mode": entry["mode"].clone(),
+                    "overlay": entry["overlay"].clone(),
+                    "geometry": entry["geometry"].clone(),
+                },
+                "loadShape": entry["loadShape"].clone(),
+                "fixture": entry["fixture"].clone(),
+            }});
+            let arm = flux_one_arm(&request).unwrap_or_else(|error| panic!("{key}: {error}"));
+            validate_flux_one_fixture(&request, arm, tier)
+                .unwrap_or_else(|error| panic!("{key}: {error}"));
+            assert_eq!(
+                planned_load_shape(&request).unwrap(),
+                LoadShape::DeferredMaterialization,
+                "{key}: the FLUX.1 arm attests the deferred load shape"
+            );
+        }
+        // The exact cell set, not a count: three members x three tiers, each named once.
+        let expected: std::collections::BTreeSet<String> =
+            ["flux_dev", "flux_schnell", "pulid_flux_dev"]
+                .iter()
+                .flat_map(|model| {
+                    ["bf16", "q4", "q8"]
+                        .iter()
+                        .map(move |tier| format!("{model}:{tier}:mlx"))
+                })
+                .collect();
+        assert_eq!(seen, expected);
+    }
+
+    /// Every FLUX.1 MLX plan row names the production calibration identity its loaded generator
+    /// publishes (inference PR 943's per-(route, tier) table): the two measured keys are the
+    /// engine constants byte-for-byte, no row names a weights-free conformance string, and the
+    /// nine identities are distinct. The existing member-resolution test never looked at
+    /// `calibrationFingerprint`, which is how seven rows shipped naming strings no production load
+    /// can return.
+    #[test]
+    fn every_planned_flux_one_mlx_cell_names_the_identity_its_loaded_generator_publishes() {
+        let plan: Value = serde_json::from_str(include_str!(
+            "../../../../config/memory-calibration-plan.json"
+        ))
+        .expect("the anchor plan parses");
+        let mut identities = std::collections::BTreeMap::new();
+        for (key, entry) in plan["anchors"].as_object().expect("anchors object") {
+            let provider = entry["provider"].as_str().unwrap();
+            if !key.ends_with(":mlx")
+                || !matches!(
+                    provider,
+                    FLUX1_DEV_PROVIDER | FLUX1_SCHNELL_PROVIDER | PULID_FLUX_PROVIDER
+                )
+            {
+                continue;
+            }
+            let tier = key.split(':').nth(1).unwrap();
+            let mode = entry["mode"].as_str().unwrap();
+            let arm = flux_one_arm(&flux_one_planned(provider, mode, tier)).unwrap();
+            let planned = entry["calibrationFingerprint"]
+                .as_str()
+                .unwrap_or_else(|| panic!("{key}: calibrationFingerprint must be a string"));
+            assert!(
+                !is_flux_one_weights_free_fingerprint(planned),
+                "{key}: {planned} is a weights-free conformance identity no production load returns"
+            );
+            assert_eq!(
+                planned,
+                flux_one_calibration_fingerprint(arm, tier),
+                "{key}: the plan row must name the loaded generator's production identity"
+            );
+            assert!(
+                identities.insert(planned.to_owned(), key.clone()).is_none(),
+                "{key}: {planned} is already claimed by {}",
+                identities[planned]
+            );
+        }
+        assert_eq!(identities.len(), 9, "nine distinct FLUX.1 MLX identities");
+        // The preserved measured keys, byte-for-byte, so the table cannot drift off the engine.
+        assert_eq!(
+            identities["flux1-dev-q4-mlx-shared-ladder-2026-08-03-v1"],
+            "flux_dev:q4:mlx"
+        );
+        assert_eq!(
+            identities["pulid-flux-dev-q4-mlx-shared-ladder-2026-08-04-v1"],
+            "pulid_flux_dev:q4:mlx"
+        );
+        assert_eq!(
+            runtime_macos::providers::flux::memory_strategy::MEMORY_CALIBRATION_FINGERPRINT,
+            "flux1-dev-q4-mlx-shared-ladder-2026-08-03-v1"
+        );
+        assert_eq!(
+            runtime_macos::providers::pulid::memory_strategy::MEMORY_CALIBRATION_FINGERPRINT,
+            "pulid-flux-dev-q4-mlx-shared-ladder-2026-08-04-v1"
+        );
+        // The seven new cells, spelled out: the strings inference PR 943 mints.
+        for (key, identity) in [
+            ("flux_dev:q8:mlx", "flux1-dev-q8-mlx-shared-ladder-v1"),
+            ("flux_dev:bf16:mlx", "flux1-dev-bf16-mlx-shared-ladder-v1"),
+            (
+                "flux_schnell:q4:mlx",
+                "flux1-schnell-q4-mlx-shared-ladder-v1",
+            ),
+            (
+                "flux_schnell:q8:mlx",
+                "flux1-schnell-q8-mlx-shared-ladder-v1",
+            ),
+            (
+                "flux_schnell:bf16:mlx",
+                "flux1-schnell-bf16-mlx-shared-ladder-v1",
+            ),
+            (
+                "pulid_flux_dev:q8:mlx",
+                "pulid-flux-dev-q8-mlx-shared-ladder-v1",
+            ),
+            (
+                "pulid_flux_dev:bf16:mlx",
+                "pulid-flux-dev-bf16-mlx-shared-ladder-v1",
+            ),
+        ] {
+            assert_eq!(identities[identity], key);
+        }
+    }
+
+    /// The arm binds the plan row to the table BEFORE any environment or weight work, naming
+    /// both strings, so a stale row cannot cost a load.
+    #[test]
+    fn a_plan_row_naming_a_foreign_identity_is_refused_before_the_load() {
+        let mut request = flux_one_planned(FLUX1_SCHNELL_PROVIDER, "text_to_image", "q8");
+        request["planned"]["fixture"] =
+            json!(format!("flux1-schnell-mlx-q8-1024-seed{FLUX1_SEED}-step2"));
+        request["planned"]["calibrationFingerprint"] =
+            json!("flux-one-static-registry-behavior-v2-schnell");
+        let error = run(&request).expect_err("a conformance identity is not capturable");
+        assert!(
+            error.contains("plan=flux-one-static-registry-behavior-v2-schnell")
+                && error.contains("flux1-schnell-q8-mlx-shared-ladder-v1"),
+            "{error}"
+        );
+        // Not an env error: the refusal fired before `SCENEWORKS_FLUX1_SCHNELL_*` was read.
+        assert!(!error.contains("required environment variable"), "{error}");
+    }
+}
+
 #[cfg(test)]
 mod flux2_tests {
     use super::*;
@@ -11938,10 +14823,17 @@ mod flux2_tests {
     /// alongside a foreign provider, so a request that omits the axis entirely can no longer reach
     /// the rung gate this module's tests are aiming at.
     fn minimal_request(provider: &str, rung: &str) -> Value {
+        minimal_request_for(provider, provider, rung)
+    }
+
+    /// The same shape with the CATALOG model id spelled independently of the provider — the axis
+    /// the two klein models differ on (sc-22727).
+    fn minimal_request_for(provider: &str, model_id: &str, rung: &str) -> Value {
         json!({
             "planned": {
                 "target": {
                     "provider": provider,
+                    "modelId": model_id,
                     "overlay": "none",
                     "geometry": { "width": 768, "height": 768, "batch": 1, "frames": 1 }
                 },
@@ -11950,49 +14842,127 @@ mod flux2_tests {
         })
     }
 
-    /// The per-arm twin of `validate_z_image_batch`'s provider guard (sc-18104): dispatch routes by
-    /// name today, but this arm hardcodes the FLUX.2-dev contract, so a misrouted target must be
-    /// refused by name INSIDE the arm, and the refusal must not read like a missing-field complaint.
+    /// The per-arm twin of `validate_z_image_batch`'s provider guard (sc-18104), extended to the
+    /// `(provider, modelId)` pair by sc-22727: dispatch routes by provider name today, and two
+    /// catalog models share one provider id, so a misrouted target must be refused by name INSIDE
+    /// the arm, and the refusal must not read like a missing-field complaint.
     #[test]
-    fn the_flux2_arm_refuses_a_foreign_provider_by_name() {
-        for provider in [
-            "z_image_turbo",
-            "qwen_image",
-            "flux2_dev_edit",
-            "flux2_klein_9b",
+    fn the_flux2_arm_refuses_a_foreign_provider_or_model_by_name() {
+        for (provider, model_id) in [
+            ("z_image_turbo", "z_image_turbo"),
+            ("qwen_image", "qwen_image"),
+            ("flux2_dev_edit", "flux2_dev_edit"),
+            ("flux2_klein_9b_kv_edit", "flux2_klein_9b_kv_edit"),
+            // The engine's third klein artifact route: a real catalog model on this provider that
+            // this arm does NOT serve (its snapshot is an assembled convert dir, not a tiered
+            // rehost), so it must be refused rather than measured as the base klein.
+            ("flux2_klein_9b", "flux2_klein_9b_true_v2"),
+            // The KV artifact must never be served by the base klein plan, or vice versa: the two
+            // differ ONLY in this field.
+            ("flux2_dev", "flux2_klein_9b"),
         ] {
-            let error = run_flux2_dev(&minimal_request(provider, "resident"))
-                .expect_err("a foreign provider must not reach the FLUX.2-dev contract");
+            let error = run_flux2(&minimal_request_for(provider, model_id, "resident"))
+                .expect_err("a foreign (provider, modelId) pair must not reach a FLUX.2 contract");
             assert_eq!(
                 error,
-                format!("MLX FLUX.2-dev calibration does not implement provider {provider:?}")
+                format!(
+                    "the MLX FLUX.2 arm does not implement provider {provider:?} for model {model_id:?}"
+                )
             );
             assert!(
                 !error.contains("must be a string") && !error.contains("fingerprint"),
                 "refusal came from deeper in the arm, so the guard let it through: {error}"
             );
         }
+        // And the guard is not a blanket refusal: every shipped member resolves.
+        for (provider, model_id, expected) in [
+            (FLUX2_PROVIDER, "flux2_dev", FLUX2_DEV_ARM),
+            (FLUX2_KLEIN_PROVIDER, "flux2_klein_9b", FLUX2_KLEIN_ARM),
+            (
+                FLUX2_KLEIN_PROVIDER,
+                "flux2_klein_9b_kv",
+                FLUX2_KLEIN_KV_ARM,
+            ),
+        ] {
+            let arm = flux2_arm(&minimal_request_for(provider, model_id, "resident")).unwrap();
+            assert_eq!(arm, expected, "{provider}/{model_id}");
+            assert_eq!(arm.model_id, model_id);
+        }
+        assert!(
+            flux2_arm(&json!({ "planned": { "target": { "provider": FLUX2_PROVIDER } } }))
+                .unwrap_err()
+                .contains("planned.target.modelId")
+        );
+    }
+
+    /// Every member carries its OWN artifact family, execution path, refusal label, diagnostics
+    /// slug and fixture prefix. Two members sharing any of them would make their records
+    /// indistinguishable, and two members sharing an env family would let one artifact satisfy the
+    /// other's plan (sc-22727).
+    #[test]
+    fn every_flux2_member_is_distinguishable_from_every_other() {
+        let arms = [FLUX2_DEV_ARM, FLUX2_KLEIN_ARM, FLUX2_KLEIN_KV_ARM];
+        for field in [
+            arms.map(|arm| arm.model_id),
+            arms.map(|arm| arm.execution_path),
+            arms.map(|arm| arm.still_calibration),
+            arms.map(|arm| arm.repository_env),
+            arms.map(|arm| arm.revision_env),
+            arms.map(|arm| arm.root_env),
+            arms.map(|arm| arm.expected_repository),
+            arms.map(|arm| arm.fixture_slug),
+            arms.map(|arm| arm.slug),
+        ] {
+            let mut unique = field.to_vec();
+            unique.sort_unstable();
+            unique.dedup();
+            assert_eq!(unique.len(), arms.len(), "collision in {field:?}");
+        }
+        // The KV rehost and the base rehost are separate repositories, and neither is the dev one.
+        assert_eq!(
+            FLUX2_KLEIN_ARM.expected_repository,
+            protocol::FLUX2_KLEIN_REPOSITORY
+        );
+        assert_eq!(
+            FLUX2_KLEIN_KV_ARM.expected_repository,
+            protocol::FLUX2_KLEIN_KV_REPOSITORY
+        );
+        // But they DO share the engine provider id: that is the whole reason `modelId` is the
+        // discriminator rather than `provider`.
+        assert_eq!(FLUX2_KLEIN_ARM.provider, FLUX2_KLEIN_KV_ARM.provider);
     }
 
     /// sc-18218's scope correction (story comment activity-18225): at the pin, mlx-gen-flux2 marks
-    /// every non-Resident strategy `Missing`, so the arm is resident-only BY REFUSAL, not by
-    /// accident of the plan. Each of the other four rungs must be named back.
+    /// every non-Resident strategy `Missing` on the DEV route, so that arm is resident-only BY
+    /// REFUSAL, not by accident of the plan. Each of the other four rungs must be named back. The
+    /// klein ladder publishes five rungs, so it is NOT refused here — its selection is settled by
+    /// the pinned contract instead.
     #[test]
-    fn the_flux2_arm_is_resident_only_by_refusal() {
+    fn the_flux2_dev_arm_is_resident_only_by_refusal() {
         for rung in [
             "staged_residency",
             "bounded_decode",
             "bounded_attention",
             "bounded_transformer_residency",
         ] {
-            let error = run_flux2_dev(&minimal_request(FLUX2_PROVIDER, rung))
+            let error = run_flux2(&minimal_request(FLUX2_PROVIDER, rung))
                 .expect_err("a non-resident rung must be refused");
             assert!(
                 error.contains(rung) && error.contains("resident"),
                 "refusal must name the rung and the resident-only contract: {error}"
             );
+            let klein = run_flux2(&minimal_request_for(
+                FLUX2_KLEIN_PROVIDER,
+                "flux2_klein_9b",
+                rung,
+            ))
+            .expect_err("the minimal klein request is still incomplete");
+            assert!(
+                !klein.contains("implements only the resident strategy"),
+                "the klein ladder must not borrow the dev route's resident-only refusal: {klein}"
+            );
         }
-        let resident = run_flux2_dev(&minimal_request(FLUX2_PROVIDER, "resident"))
+        let resident = run_flux2(&minimal_request(FLUX2_PROVIDER, "resident"))
             .expect_err("the minimal resident request is still incomplete");
         assert!(
             !resident.contains("not capturable"),
@@ -12001,30 +14971,138 @@ mod flux2_tests {
     }
 
     #[test]
-    fn flux2_fixture_is_bound_to_tier_geometry_and_step_count() {
+    fn flux2_fixture_is_bound_to_member_tier_geometry_and_step_count() {
         let request = json!({
             "planned": { "fixture": "flux2-dev-mlx-q4-768-seed18218-step2" }
         });
-        assert_eq!(planned_flux2_seed(&request, "q4", 768).unwrap(), 18218);
-        assert!(planned_flux2_seed(&request, "q8", 768)
+        assert_eq!(
+            planned_flux2_seed(&request, FLUX2_DEV_ARM, "q4", 768).unwrap(),
+            18218
+        );
+        assert!(planned_flux2_seed(&request, FLUX2_DEV_ARM, "q8", 768)
             .unwrap_err()
             .contains("must start with"));
-        assert!(planned_flux2_seed(&request, "q4", 1024)
+        assert!(planned_flux2_seed(&request, FLUX2_DEV_ARM, "q4", 1024)
+            .unwrap_err()
+            .contains("must start with"));
+        // A dev fixture must not satisfy a klein plan, and the two klein members must not satisfy
+        // each other's: the family segment is part of the binding (sc-22727).
+        for arm in [FLUX2_KLEIN_ARM, FLUX2_KLEIN_KV_ARM] {
+            assert!(planned_flux2_seed(&request, arm, "q4", 768)
+                .unwrap_err()
+                .contains("must start with"));
+        }
+        let klein = json!({
+            "planned": { "fixture": "flux2-klein-9b-mlx-bf16-768-seed22727-step2" }
+        });
+        assert_eq!(
+            planned_flux2_seed(&klein, FLUX2_KLEIN_ARM, "bf16", 768).unwrap(),
+            FLUX2_KLEIN_SEED
+        );
+        assert!(planned_flux2_seed(&klein, FLUX2_KLEIN_KV_ARM, "bf16", 768)
+            .unwrap_err()
+            .contains("must start with"));
+        let kv = json!({
+            "planned": { "fixture": "flux2-klein-9b-kv-mlx-bf16-768-seed22727-step2" }
+        });
+        assert_eq!(
+            planned_flux2_seed(&kv, FLUX2_KLEIN_KV_ARM, "bf16", 768).unwrap(),
+            FLUX2_KLEIN_SEED
+        );
+        assert!(planned_flux2_seed(&kv, FLUX2_KLEIN_ARM, "bf16", 768)
             .unwrap_err()
             .contains("must start with"));
         let three_step = json!({
             "planned": { "fixture": "flux2-dev-mlx-q4-768-seed18218-step3" }
         });
-        assert!(planned_flux2_seed(&three_step, "q4", 768)
+        assert!(planned_flux2_seed(&three_step, FLUX2_DEV_ARM, "q4", 768)
             .unwrap_err()
             .contains("two-step"));
     }
 
-    /// sc-17097's lesson applied to this arm: the tier is derived from the planned target and each
-    /// declared authoritative tier maps to its own quant, never a hardcoded q4.
+    /// sc-17097's lesson applied to this arm: the tier is derived from the planned target, never a
+    /// hardcoded q4 (sc-22727 widened this arm from q4/q8 to the full shipped ladder). WHERE the
+    /// tier reaches the loader is per member: the dev route folds it through `LoadSpec::quantize`
+    /// (bf16 is the dense base and carries none — the worker's `tier_to_quant` shape), while the
+    /// klein turnkey rehosts declare their tier in the snapshot path and REFUSE a spec that also
+    /// carries a quant — "flux2 Klein turnkey tiers require BF16 execution with
+    /// LoadSpec.quantize=None" (`mlx-gen-flux2/src/artifact_inventory.rs`), which the sc-22727
+    /// proof capture hit for real before this flag existed.
     #[test]
-    fn flux2_load_spec_preserves_every_planned_numeric_tier() {
-        for (tier, expected_quant) in [("q4", Quant::Q4), ("q8", Quant::Q8)] {
+    fn flux2_load_spec_carries_the_planned_tier_the_way_each_member_takes_it() {
+        for arm in [FLUX2_DEV_ARM, FLUX2_KLEIN_ARM, FLUX2_KLEIN_KV_ARM] {
+            for (tier, folded_quant) in [
+                ("q4", Some(Quant::Q4)),
+                ("q8", Some(Quant::Q8)),
+                ("bf16", None),
+            ] {
+                let request = json!({
+                    "planned": {
+                        "strategy": { "rung": "resident", "parameters": {} },
+                        "target": { "tier": tier }
+                    }
+                });
+                let selection = planned_selection(&request).unwrap();
+                // The PLANNED tier is derived identically on every member; only whether it is
+                // handed to the loader differs.
+                assert_eq!(selection.tier.quant, folded_quant, "planned tier {tier}");
+                let spec = flux2_spec(
+                    arm,
+                    PathBuf::from(format!("/tmp/{}-{tier}", arm.slug)),
+                    &selection,
+                );
+                let expected = if arm.tier_quant_reaches_the_loader {
+                    folded_quant
+                } else {
+                    None
+                };
+                assert_eq!(spec.quantize, expected, "{} tier {tier}", arm.model_id);
+                assert_eq!(spec.load_shape, arm.load_shape);
+                // The catalog model id reaches the engine as `resolved_route`: it is what
+                // `KleinArtifactInventory::validate_resolved_route` refuses a cross-variant
+                // artifact with (mlx-gen-flux2/src/artifact_inventory.rs).
+                assert_eq!(spec.resolved_route.as_deref(), Some(arm.model_id));
+            }
+        }
+        // Which member takes the fold, stated as data so the loop above cannot pass vacuously by
+        // every member happening to answer the same way.
+        assert_eq!(
+            [FLUX2_DEV_ARM, FLUX2_KLEIN_ARM, FLUX2_KLEIN_KV_ARM]
+                .map(|arm| arm.tier_quant_reaches_the_loader),
+            [true, false, false],
+            "only the dev route folds the planned tier into LoadSpec::quantize"
+        );
+    }
+
+    /// Every FLUX.2 arm loads the shape of the RUNG IT PRICES: `Resident` + `EagerMaterialization`,
+    /// no quant on the klein turnkeys.
+    ///
+    /// sc-22727 rewrote this. The klein arms used to load `Sequential` + `DeferredMaterialization`
+    /// because that was the only shape the pinned engine published a calibration identity under —
+    /// `klein_contract_for` set `calibration` iff `klein_streamable(spec)`. Inference PR 948
+    /// decoupled the two: the identity is now a property of the admitted artifact and its tier and
+    /// is published for every load shape, while `klein_streamable` still gates rung 4 alone. The
+    /// streamable shape is therefore no longer required for an identity — and it is not RENDERABLE
+    /// at this rung either: a deferred klein transformer refuses without an explicit block window
+    /// (`mlx-gen-flux2/src/transformer.rs`), which is where the sc-22727 proof capture died, 123 s
+    /// in, after clearing the whole contract-and-load path. The predicate is transcribed here term
+    /// by term (it is crate-private at the pin) so the arms can assert they are OUTSIDE it.
+    #[test]
+    fn flux2_specs_are_the_resident_rungs_shape_and_are_deliberately_not_streamable() {
+        let klein_streamable = |spec: &LoadSpec| {
+            spec.offload_policy == OffloadPolicy::Sequential
+                && spec.load_shape == LoadShape::DeferredMaterialization
+                && spec.quantize.is_none()
+                && spec.adapters.is_empty()
+                && spec.control.is_none()
+                && spec.extra_controls.is_empty()
+                && spec.ip_adapter.is_none()
+                && spec.identity.is_none()
+                && spec.text_encoder.is_none()
+                && spec.components.is_empty()
+                && matches!(spec.weights, WeightsSource::Dir(_))
+        };
+        for tier in ["q4", "q8", "bf16"] {
             let request = json!({
                 "planned": {
                     "strategy": { "rung": "resident", "parameters": {} },
@@ -12032,9 +15110,277 @@ mod flux2_tests {
                 }
             });
             let selection = planned_selection(&request).unwrap();
-            let spec = flux2_spec(PathBuf::from(format!("/tmp/flux2-dev-{tier}")), &selection);
-            assert_eq!(spec.quantize, Some(expected_quant), "numeric tier {tier}");
+            for arm in [FLUX2_DEV_ARM, FLUX2_KLEIN_ARM, FLUX2_KLEIN_KV_ARM] {
+                let spec = flux2_spec(
+                    arm,
+                    PathBuf::from(format!("/tmp/{}-{tier}", arm.slug)),
+                    &selection,
+                );
+                assert_eq!(
+                    spec.offload_policy,
+                    OffloadPolicy::Resident,
+                    "{} {tier}",
+                    arm.model_id
+                );
+                assert_eq!(
+                    spec.load_shape,
+                    LoadShape::EagerMaterialization,
+                    "{} {tier}",
+                    arm.model_id
+                );
+                assert!(
+                    !klein_streamable(&spec),
+                    "{} {tier}: the resident rung must not load the rung-4 streamable shape: \
+                     {spec:?}",
+                    arm.model_id
+                );
+            }
+            // The klein turnkeys carry no load-time quant at all; the dev route folds the tier.
+            for arm in [FLUX2_KLEIN_ARM, FLUX2_KLEIN_KV_ARM] {
+                let spec = flux2_spec(
+                    arm,
+                    PathBuf::from(format!("/tmp/{}-{tier}", arm.slug)),
+                    &selection,
+                );
+                assert!(spec.quantize.is_none(), "{} {tier}", arm.model_id);
+            }
         }
+        // Stated as data, so the loop cannot pass by every member answering the same way.
+        assert_eq!(
+            [FLUX2_DEV_ARM, FLUX2_KLEIN_ARM, FLUX2_KLEIN_KV_ARM].map(|arm| arm.offload_policy),
+            [
+                OffloadPolicy::Resident,
+                OffloadPolicy::Resident,
+                OffloadPolicy::Resident
+            ],
+        );
+    }
+
+    /// The arm table is bound to the two documents the worker and the harness actually read.
+    ///
+    /// * The shipped manifest, where the worker takes both facts from: `mlx.denseTextEncoderTier`
+    ///   (`is_dense_te_tier` — its reason to load a klein tier with `Quant::None`, so the flag must
+    ///   equal `!tier_quant_reaches_the_loader`), and the MLX `bounded_transformer_residency` row's
+    ///   `requiredOffloadPolicy` under the plain provider (`apply_declared_mlx_load_policy_for_request`
+    ///   — its reason to bind Sequential; a member with no such row stays Resident). Every rung
+    ///   row's `fingerprint` is the WEIGHTS-FREE registry declaration
+    ///   ([`Flux2Arm::registry_fingerprint`]) — sc-22727: on the klein routes that is no longer
+    ///   the identity a load of real weights publishes, so the manifest is bound to the
+    ///   declaration and the plan to the production identity, separately.
+    /// * The anchor plan, whose `loadShape` the harness checks the measured record against and
+    ///   whose `calibrationFingerprint` `run_flux2` checks the pinned contract against: every MLX
+    ///   row of every member must spell the member's shape and its per-tier PRODUCTION identity
+    ///   ([`flux2_calibration_fingerprint`]).
+    ///
+    /// Flip any arm flag without the manifest or the plan moving and this reds.
+    #[test]
+    fn the_flux2_arm_table_agrees_with_the_shipped_manifest_and_the_anchor_plan() {
+        let manifest: Value = serde_json::from_str(&sceneworks_core::jsonc::strip_jsonc_comments(
+            include_str!("../../../../config/manifests/builtin.models.jsonc"),
+        ))
+        .expect("the shipped models manifest parses");
+        let plan: Value = serde_json::from_str(include_str!(
+            "../../../../config/memory-calibration-plan.json"
+        ))
+        .expect("the anchor plan parses");
+        let mut klein_identities = std::collections::BTreeMap::<String, String>::new();
+        for arm in [FLUX2_DEV_ARM, FLUX2_KLEIN_ARM, FLUX2_KLEIN_KV_ARM] {
+            let entry = manifest["models"]
+                .as_array()
+                .expect("models")
+                .iter()
+                .find(|entry| entry["id"] == arm.model_id)
+                .unwrap_or_else(|| panic!("{} is not a shipped model", arm.model_id));
+            let mlx = &entry["mlx"];
+            let dense_te = mlx["denseTextEncoderTier"] == json!(true);
+            assert_eq!(
+                arm.tier_quant_reaches_the_loader, !dense_te,
+                "{}: the worker loads a dense-TE tier with Quant::None (is_dense_te_tier)",
+                arm.model_id
+            );
+            let contract = &mlx["memoryStrategyContract"];
+            assert_eq!(contract["provider"], arm.provider, "{}", arm.model_id);
+            // The RESIDENT rung's row - the rung this anchor prices. sc-22727: it is deliberately
+            // NOT the `bounded_transformer_residency` row. Both klein entries carry a BTR row with
+            // `requiredOffloadPolicy: "sequential"`, but that row describes rung 4's load, and a
+            // deferred klein transformer cannot render at all without a block window
+            // (`mlx-gen-flux2/src/transformer.rs`, proved by the sc-22727 proof capture). The
+            // resident rung declares no `requiredOffloadPolicy` at all, which is the worker's
+            // Resident + Eager default, and that is what this arm loads.
+            let resident_rows = contract["implementations"]
+                .as_array()
+                .expect("implementations")
+                .iter()
+                .filter(|row| {
+                    row["rung"] == "resident"
+                        && row
+                            .get("runtimeProvider")
+                            .and_then(Value::as_str)
+                            .unwrap_or(arm.provider)
+                            == arm.provider
+                })
+                .collect::<Vec<_>>();
+            let [resident_row] = resident_rows.as_slice() else {
+                panic!(
+                    "{}: {} resident rows for one provider",
+                    arm.model_id,
+                    resident_rows.len()
+                )
+            };
+            assert!(
+                resident_row.get("requiredOffloadPolicy").is_none(),
+                "{}: the resident rung declares no offload policy; it is the eager default",
+                arm.model_id
+            );
+            assert_eq!(
+                resident_row["fingerprint"], arm.registry_fingerprint,
+                "{}: the manifest fingerprint is the weights-free registry declaration",
+                arm.model_id
+            );
+            assert_eq!(
+                arm.offload_policy,
+                OffloadPolicy::Resident,
+                "{}: the resident rung is a Resident load",
+                arm.model_id
+            );
+            assert_eq!(
+                arm.load_shape,
+                LoadShape::EagerMaterialization,
+                "{}: a Resident policy keeps the eager default",
+                arm.model_id
+            );
+            let expected_shape = protocol::LOAD_SHAPE_EAGER;
+            for tier in ["q4", "q8", "bf16"] {
+                let key = format!("{}:{tier}:mlx", arm.model_id);
+                let row = &plan["anchors"][&key];
+                assert!(row.is_object(), "{key} is not a planned anchor");
+                assert_eq!(row["loadShape"], expected_shape, "{key}");
+                assert_eq!(row["provider"], arm.provider, "{key}");
+                // The PRODUCTION identity, per tier — not the manifest's registry declaration.
+                assert_eq!(
+                    row["calibrationFingerprint"],
+                    json!(flux2_calibration_fingerprint(arm, tier)),
+                    "{key}"
+                );
+                if arm.provider == FLUX2_KLEIN_PROVIDER {
+                    // sc-22727: a klein plan row still carrying the weights-free declaration would
+                    // bind a cell no load of real weights ever returns, and the six klein cells
+                    // are six DISTINCT measured cells — two artifact families times three tiers.
+                    assert_ne!(
+                        flux2_calibration_fingerprint(arm, tier),
+                        arm.registry_fingerprint,
+                        "{key}: the registry declaration is not a production identity"
+                    );
+                    assert!(
+                        klein_identities
+                            .insert(flux2_calibration_fingerprint(arm, tier), key.clone())
+                            .is_none(),
+                        "{key}: this identity is already claimed by another klein cell"
+                    );
+                }
+            }
+        }
+        assert_eq!(
+            klein_identities.len(),
+            6,
+            "six distinct FLUX.2 klein MLX identities: two artifact families times three tiers"
+        );
+    }
+
+    /// A plan row spelling a load shape other than the member's worker shape is refused by name
+    /// before any environment or weight work — the harness would refuse the record afterwards, but
+    /// only after a full load.
+    #[test]
+    fn run_flux2_refuses_a_plan_whose_load_shape_is_not_the_members_worker_shape() {
+        for (arm, wrong) in [
+            (FLUX2_DEV_ARM, protocol::LOAD_SHAPE_DEFERRED),
+            (FLUX2_KLEIN_ARM, protocol::LOAD_SHAPE_DEFERRED),
+            (FLUX2_KLEIN_KV_ARM, protocol::LOAD_SHAPE_DEFERRED),
+        ] {
+            let mut request = minimal_request_for(arm.provider, arm.model_id, "resident");
+            request["planned"]["loadShape"] = json!(wrong);
+            let error = run_flux2(&request).expect_err("a crossed load shape must be refused");
+            assert!(
+                error.contains("worker load shape"),
+                "{}: {error}",
+                arm.model_id
+            );
+        }
+    }
+
+    /// The PLANNED tier must be carried by the root, and the member's OWN repository must be the
+    /// one bound — a q4 export cannot satisfy a q8 or bf16 plan, and the KV artifact cannot satisfy
+    /// a base-klein plan even though both load through `flux2_klein_9b`.
+    #[test]
+    fn flux2_root_must_carry_the_planned_tier_and_the_members_own_repository() {
+        const REVISION: &str = "acf05e8d5103838baba6a5e32dc91d6997a56023";
+        for arm in [FLUX2_DEV_ARM, FLUX2_KLEIN_ARM, FLUX2_KLEIN_KV_ARM] {
+            let selection = resident_selection(Some(Quant::Q4));
+            let q4_root = flux2_snapshot_root(arm.expected_repository, REVISION, "q4");
+            let error = flux2_load_spec_at(
+                arm,
+                "q8",
+                &selection,
+                arm.expected_repository.to_owned(),
+                REVISION.to_owned(),
+                q4_root.clone(),
+            )
+            .expect_err("a q8 plan must not be satisfied by a q4 root");
+            assert!(
+                error.ends_with(&format!("/snapshots/{REVISION}/q8")),
+                "{}: {error}",
+                arm.model_id
+            );
+            for tier in ["q4", "q8", "bf16"] {
+                let root = flux2_snapshot_root(arm.expected_repository, REVISION, tier);
+                let (repository, revision, _) = flux2_load_spec_at(
+                    arm,
+                    tier,
+                    &selection,
+                    arm.expected_repository.to_owned(),
+                    REVISION.to_owned(),
+                    root,
+                )
+                .unwrap_or_else(|error| panic!("{}/{tier}: {error}", arm.model_id));
+                assert_eq!(repository, arm.expected_repository);
+                assert_eq!(revision, REVISION);
+            }
+            for other in [FLUX2_DEV_ARM, FLUX2_KLEIN_ARM, FLUX2_KLEIN_KV_ARM] {
+                if other == arm {
+                    continue;
+                }
+                let error = flux2_load_spec_at(
+                    arm,
+                    "q4",
+                    &selection,
+                    other.expected_repository.to_owned(),
+                    REVISION.to_owned(),
+                    q4_root.clone(),
+                )
+                .expect_err("another member's repository must be refused");
+                assert!(
+                    error.contains(arm.expected_repository),
+                    "{} vs {}: {error}",
+                    arm.model_id,
+                    other.model_id
+                );
+            }
+        }
+    }
+
+    fn flux2_snapshot_root(repository: &str, revision: &str, tier: &str) -> PathBuf {
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir()
+            .join(format!("sc-22727-flux2-{}-{nonce}", std::process::id()))
+            .join(format!("models--{}", repository.replace('/', "--")))
+            .join("snapshots")
+            .join(revision)
+            .join(tier);
+        std::fs::create_dir_all(&root).unwrap();
+        root
     }
 
     #[test]
@@ -12045,13 +15391,15 @@ mod flux2_tests {
         .unwrap();
         let calibration = contract.calibration.as_ref().unwrap();
         let context = flux2_admission_context(
+            FLUX2_DEV_ARM,
             &resident_selection(Some(Quant::Q4)),
             calibration,
-            &calibration.fingerprint,
-            768,
-            768,
-            1_000_000,
-            1_000_000,
+            (768, 768),
+            Flux2AdmissionProbe {
+                fingerprint: &calibration.fingerprint,
+                total_bytes: 1_000_000,
+                predicted_peak_bytes: 1_000_000,
+            },
         );
         assert_eq!(context.mode, MemoryMode::TextToImage);
         assert!(!context.has_reference);
@@ -12167,6 +15515,51 @@ mod flux2_tests {
         );
     }
 
+    /// sc-22727 moved the arm from the crate-local `mlx_gen_flux2::provider_registry()` onto the
+    /// PRODUCTION catalog the worker composes (`runtime_macos::catalog()`, E4). That is only a
+    /// safe move if the two resolve the SAME contract — `mlx-gen-catalog` calls the same
+    /// `register_providers`, but nothing in this repo asserted it, and a bundle that wrapped or
+    /// re-registered a provider would silently change what every FLUX.2 capture measures.
+    ///
+    /// Weights-free: both sides are asked for the contract over one placeholder spec, so this
+    /// costs no GPU and no snapshot, and it covers every member the arm serves.
+    #[test]
+    fn the_production_catalog_resolves_the_same_flux2_contracts_as_the_provider_crate() {
+        let crate_registry = mlx_gen_flux2::provider_registry().unwrap();
+        let catalog = runtime_macos::catalog().expect("the production MLX catalog builds");
+        for arm in [FLUX2_DEV_ARM, FLUX2_KLEIN_ARM, FLUX2_KLEIN_KV_ARM] {
+            let spec = weights_free_spec(if arm.tier_quant_reaches_the_loader {
+                Some(Quant::Q4)
+            } else {
+                None
+            });
+            let direct = crate_registry.memory_strategy_contract(arm.provider, &spec);
+            let production = catalog
+                .media()
+                .memory_strategy_contract(arm.provider, &spec);
+            match (direct, production) {
+                (Ok(direct), Ok(production)) => assert_eq!(
+                    direct, production,
+                    "{}: the production catalog resolves a different contract",
+                    arm.model_id
+                ),
+                // A weights-free spec is a placeholder, so a member whose contract wants a real
+                // snapshot refuses on BOTH sides. The claim is that they agree, including on the
+                // refusal text — that is what rules out a bundle-side wrapper.
+                (Err(direct), Err(production)) => assert_eq!(
+                    direct.to_string(),
+                    production.to_string(),
+                    "{}: the two registries refuse for different reasons",
+                    arm.model_id
+                ),
+                (direct, production) => panic!(
+                    "{}: one registry answered and the other did not: {direct:?} vs {production:?}",
+                    arm.model_id
+                ),
+            }
+        }
+    }
+
     /// The admission-scenario legs the capture will run, exercised weights-free through the SAME
     /// registered function the loaded T2I generator delegates to. Mutation-verified in both
     /// directions: the accept leg proves the two rejects are not a blanket refusal, and the
@@ -12188,13 +15581,15 @@ mod flux2_tests {
         };
 
         let exact = flux2_admission_context(
+            FLUX2_DEV_ARM,
             &selection,
             calibration,
-            &calibration.fingerprint,
-            1024,
-            1024,
-            1_000_000,
-            1_000_000,
+            (1024, 1024),
+            Flux2AdmissionProbe {
+                fingerprint: &calibration.fingerprint,
+                total_bytes: 1_000_000,
+                predicted_peak_bytes: 1_000_000,
+            },
         );
         assert!(
             matches!(check(&exact), MemorySafetyDecision::Accept),
@@ -12203,13 +15598,15 @@ mod flux2_tests {
         );
 
         let unknown = flux2_admission_context(
+            FLUX2_DEV_ARM,
             &selection,
             calibration,
-            &calibration.fingerprint,
-            1024,
-            1024,
-            0,
-            1,
+            (1024, 1024),
+            Flux2AdmissionProbe {
+                fingerprint: &calibration.fingerprint,
+                total_bytes: 0,
+                predicted_peak_bytes: 1,
+            },
         );
         assert!(matches!(
             check(&unknown),
@@ -12217,26 +15614,30 @@ mod flux2_tests {
         ));
 
         let stale = flux2_admission_context(
+            FLUX2_DEV_ARM,
             &selection,
             calibration,
-            "stale-flux2-dev-fingerprint",
-            1024,
-            1024,
-            1_000_000,
-            1,
+            (1024, 1024),
+            Flux2AdmissionProbe {
+                fingerprint: "stale-flux2-dev-fingerprint",
+                total_bytes: 1_000_000,
+                predicted_peak_bytes: 1,
+            },
         );
         assert!(matches!(check(&stale), MemorySafetyDecision::Reject { .. }));
 
         // The route-gate mutation: the same fitting budget in an edit shape must be refused — the
         // T2I contract admits only reference-free text-to-image.
         let mut edit_shaped = flux2_admission_context(
+            FLUX2_DEV_ARM,
             &selection,
             calibration,
-            &calibration.fingerprint,
-            1024,
-            1024,
-            1_000_000,
-            1_000_000,
+            (1024, 1024),
+            Flux2AdmissionProbe {
+                fingerprint: &calibration.fingerprint,
+                total_bytes: 1_000_000,
+                predicted_peak_bytes: 1_000_000,
+            },
         );
         edit_shaped.mode = MemoryMode::Edit;
         edit_shaped.has_reference = true;
@@ -12249,13 +15650,15 @@ mod flux2_tests {
         // NVFP4 is the one tier the route gate refuses by name.
         let nvfp4_spec = weights_free_spec(Some(Quant::Nvfp4));
         let nvfp4 = flux2_admission_context(
+            FLUX2_DEV_ARM,
             &resident_selection(Some(Quant::Nvfp4)),
             calibration,
-            &calibration.fingerprint,
-            1024,
-            1024,
-            1_000_000,
-            1_000_000,
+            (1024, 1024),
+            Flux2AdmissionProbe {
+                fingerprint: &calibration.fingerprint,
+                total_bytes: 1_000_000,
+                predicted_peak_bytes: 1_000_000,
+            },
         );
         assert!(matches!(
             mlx_gen_flux2::memory_strategy::registered_dev_t2i_safety_check(
@@ -15007,46 +18410,103 @@ mod ltx_tests {
     #[test]
     fn every_image_arm_still_refuses_a_multi_frame_geometry() {
         type Arm = fn(&Value) -> Result<Value, String>;
-        let arms: [(&str, &str, Arm); 7] = [
+        // (provider, model id, declared overlay, refusal label, arm). The model id and overlay are
+        // columns because sc-22728 and sc-22727 each added a family whose members share one provider
+        // and differ in exactly those two axes; every other row still carries `modelId == provider`,
+        // `overlay` "none" (or Krea's control overlay).
+        let arms: [(&str, &str, &str, &str, Arm); 11] = [
             (
                 KREA_BASE_PROVIDER,
+                KREA_BASE_PROVIDER,
+                "none",
                 "MLX Krea base calibration",
                 run_krea_base,
             ),
-            (SDXL_PROVIDER, "MLX SDXL base calibration", run_sdxl),
+            (
+                SDXL_PROVIDER,
+                SDXL_PROVIDER,
+                "none",
+                "MLX SDXL base calibration",
+                run_sdxl,
+            ),
             (
                 Z_IMAGE_PROVIDER,
+                Z_IMAGE_PROVIDER,
+                "none",
                 "MLX Z-Image base calibration",
                 run_z_image_reference,
             ),
             // sc-22724: the base model shares the arm; its refusal carries its own label.
             (
                 Z_IMAGE_BASE_PROVIDER,
+                Z_IMAGE_BASE_PROVIDER,
+                "none",
                 "MLX Z-Image base-model calibration",
                 run_z_image_reference,
             ),
             (
                 KREA_PROVIDER,
+                KREA_PROVIDER,
+                "control:1",
                 "MLX Krea pose-control calibration",
                 run_krea_control,
             ),
             (
                 QWEN_PROVIDER,
+                QWEN_PROVIDER,
+                "none",
                 "MLX Qwen base calibration",
                 run_qwen_provider,
             ),
-            (FLUX2_PROVIDER, "MLX FLUX.2-dev calibration", run_flux2_dev),
+            // sc-22728: both Qwen edit catalog ids, each with its own label and declared overlay.
+            (
+                QWEN_EDIT_PROVIDER,
+                QWEN_EDIT_MODEL,
+                "none",
+                "MLX Qwen edit calibration",
+                run_qwen_edit_provider,
+            ),
+            (
+                QWEN_EDIT_PROVIDER,
+                QWEN_EDIT_LIGHTNING_MODEL,
+                "lora",
+                "MLX Qwen edit Lightning calibration",
+                run_qwen_edit_provider,
+            ),
+            (
+                FLUX2_PROVIDER,
+                FLUX2_PROVIDER,
+                "none",
+                "MLX FLUX.2-dev calibration",
+                run_flux2,
+            ),
+            // sc-22727: the two klein catalog models share `flux2_klein_9b` and each refuses under
+            // its OWN label, so neither can be mistaken for the other in a failure report.
+            (
+                FLUX2_KLEIN_PROVIDER,
+                "flux2_klein_9b",
+                "none",
+                "MLX FLUX.2-klein-9B calibration",
+                run_flux2,
+            ),
+            (
+                FLUX2_KLEIN_PROVIDER,
+                "flux2_klein_9b_kv",
+                "none",
+                "MLX FLUX.2-klein-9B KV calibration",
+                run_flux2,
+            ),
         ];
-        for (provider, label, arm) in arms {
+        for (provider, model_id, overlay, label, arm) in arms {
             for frames in [0_u64, 2, 97] {
                 let request = json!({
                     "planned": {
                         "target": {
                             "provider": provider,
-                            "modelId": provider,
+                            "modelId": model_id,
                             "tier": "q4",
-                            "mode": "text_to_image",
-                            "overlay": if provider == KREA_PROVIDER { "control:1" } else { "none" },
+                            "mode": if provider == QWEN_EDIT_PROVIDER { "edit_image" } else { "text_to_image" },
+                            "overlay": overlay,
                             "geometry": { "width": 768, "height": 768, "batch": 1, "frames": frames }
                         },
                         "backend": "mlx",
@@ -15065,7 +18525,7 @@ mod ltx_tests {
                 assert_eq!(
                     error,
                     format!("{label} requires geometry.frames == 1, got {frames}"),
-                    "{provider} at frames={frames}"
+                    "{provider}/{model_id} at frames={frames}"
                 );
             }
         }
@@ -15083,6 +18543,10 @@ mod ltx_tests {
             "MLX Z-Image edit calibration",
             "MLX Krea pose-control calibration",
             "MLX Qwen base calibration",
+            "MLX Qwen edit calibration",
+            "MLX Qwen edit Lightning calibration",
+            "MLX FLUX.2-klein-9B calibration",
+            "MLX FLUX.2-klein-9B KV calibration",
             "MLX FLUX.2-dev calibration",
         ] {
             let request = json!({

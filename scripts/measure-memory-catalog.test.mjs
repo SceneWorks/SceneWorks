@@ -8,11 +8,13 @@ import test from "node:test";
 
 import {
   ROOT,
+  ADAPTER_LIB_PATH,
   MATRIX_PATH,
   PLAN_PATH,
   PACKAGED_SOURCES_PATH,
   PROVIDER_FAMILIES,
   SDXL_COMPONENTS,
+  providerFamily,
   anchorParts,
   anchorSlug,
   appendPackagedSource,
@@ -69,6 +71,17 @@ function fakeModels() {
     // The edit model is a catalog alias for the Turbo provider driven in edit_image mode: it ships
     // the Turbo weights (worker engines.rs `z_image_edit → z_image_turbo`).
     { id: "z_image_edit", downloads: [{ repo: "SceneWorks/z-image-turbo-mlx", revision: REVISION, variant: "q4", files: ["q4/*"] }] },
+    // sc-22727: two catalog models over ONE engine provider id, each with its own rehost.
+    { id: "flux2_klein_9b", downloads: [{ repo: "SceneWorks/flux2-klein-9b-mlx", revision: REVISION, variant: "q8", files: ["q8/*"] }] },
+    { id: "flux2_klein_9b_kv", downloads: [{ repo: "SceneWorks/flux2-klein-9b-kv-mlx", revision: UPSTREAM, variant: "q8", files: ["q8/*"] }] },
+    // The two Qwen edit ids are ONE checkpoint on ONE rehost, routed to one engine provider; only
+    // the Lightning id additionally loads the pinned distill LoRA, which no download ships.
+    { id: "qwen_image_edit_2511", downloads: [{ repo: "SceneWorks/qwen-image-edit-2511-mlx", revision: REVISION, variant: "q4", files: ["q4/*"] }] },
+    { id: "qwen_image_edit_2511_lightning", downloads: [{ repo: "SceneWorks/qwen-image-edit-2511-mlx", revision: REVISION, variant: "q4", files: ["q4/*"] }] },
+    // The FLUX.1 family (sc-22726). `pulid_flux_dev` ships the SAME flux1-dev backbone downloads as
+    // `flux_dev`; its identity stack is fetched on first use and is not a manifest download at all.
+    { id: "flux_dev", downloads: [{ repo: "SceneWorks/flux1-dev-mlx", revision: REVISION, variant: "q4", files: ["q4/*"] }] },
+    { id: "pulid_flux_dev", downloads: [{ repo: "SceneWorks/flux1-dev-mlx", revision: REVISION, variant: "q4", files: ["q4/*"] }] },
   ];
 }
 
@@ -181,6 +194,232 @@ test("the z-image family: the base model has its own env family, and the edit al
   }
 });
 
+test("the flux2-klein family: two catalog models on one provider id resolve their OWN artifacts", async () => {
+  const hub = await fakeHub([
+    ["SceneWorks/flux2-klein-9b-mlx", REVISION, "q8"],
+    ["SceneWorks/flux2-klein-9b-kv-mlx", UPSTREAM, "q8"],
+  ]);
+  for (const backend of ["mlx", "candle"]) {
+    const context = { models: fakeModels(), backend, hubs: [hub], current: new Map(), captured: new Map() };
+    const base = await classifyAnchor(`flux2_klein_9b:q8:${backend}`, { provider: "flux2_klein_9b" }, context);
+    assert.equal(base.status, "runnable", `${backend}: ${base.reason}`);
+    assert.deepEqual(base.env, {
+      SCENEWORKS_FLUX2_KLEIN_REPOSITORY: "SceneWorks/flux2-klein-9b-mlx",
+      SCENEWORKS_FLUX2_KLEIN_REVISION: REVISION,
+      SCENEWORKS_FLUX2_KLEIN_ROOT: snapshotPath(hub, "SceneWorks/flux2-klein-9b-mlx", REVISION, "q8"),
+    });
+    // The KV model shares `provider` with the row above and MUST NOT share its artifact family:
+    // a KV plan served from the base rehost would re-label the base checkpoint's peaks.
+    const kv = await classifyAnchor(`flux2_klein_9b_kv:q8:${backend}`, { provider: "flux2_klein_9b" }, context);
+    assert.equal(kv.status, "runnable", `${backend}: ${kv.reason}`);
+    assert.equal(kv.provider, "flux2_klein_9b", "both models load through one engine provider id");
+    assert.deepEqual(kv.env, {
+      SCENEWORKS_FLUX2_KLEIN_KV_REPOSITORY: "SceneWorks/flux2-klein-9b-kv-mlx",
+      SCENEWORKS_FLUX2_KLEIN_KV_REVISION: UPSTREAM,
+      SCENEWORKS_FLUX2_KLEIN_KV_ROOT: snapshotPath(hub, "SceneWorks/flux2-klein-9b-kv-mlx", UPSTREAM, "q8"),
+    });
+    // And the per-model override never leaks back into the shared row.
+    assert.equal(providerFamily("flux2_klein_9b", "flux2_klein_9b").env, "FLUX2_KLEIN");
+    assert.equal(providerFamily("flux2_klein_9b", "flux2_klein_9b_kv").env, "FLUX2_KLEIN_KV");
+    assert.equal(providerFamily("flux2_klein_9b", "flux2_klein_9b_kv").variants, undefined);
+    const missing = await classifyAnchor(`flux2_klein_9b_kv:q4:${backend}`, { provider: "flux2_klein_9b" }, context);
+    assert.equal(missing.status, "weights_missing");
+    assert.match(missing.reason, /flux2-klein-9b-kv-mlx@.*\/q4 on this host/);
+  }
+});
+
+// sc-22728: the Qwen edit family is two catalog ids on ONE engine provider and ONE rehost, and the
+// Lightning id needs a SECOND root the manifest does not ship (the pinned distill LoRA). Both roots
+// must be derived, on both lanes, and neither id may be served without its own.
+test("the qwen edit family derives the tier root on both lanes, and Lightning also derives its pinned distill LoRA", async () => {
+  const lora = PROVIDER_FAMILIES.qwen_image_edit.sideArtifact.qwen_image_edit_2511_lightning;
+  const hub = await fakeHub([
+    ["SceneWorks/qwen-image-edit-2511-mlx", REVISION, "q4"],
+    [lora.repo, lora.revision],
+  ]);
+  for (const backend of ["mlx", "candle"]) {
+    const context = { models: fakeModels(), backend, hubs: [hub], current: new Map(), captured: new Map() };
+    const planned = { provider: "qwen_image_edit", mode: "edit_image" };
+    const base = await classifyAnchor(`qwen_image_edit_2511:q4:${backend}`, planned, context);
+    assert.equal(base.status, "runnable", `${backend}: ${base.reason}`);
+    assert.equal(base.physical, false, "only the qwen_image MLX arm emits a sourceCapture");
+    assert.deepEqual(base.env, {
+      SCENEWORKS_QWEN_IMAGE_EDIT_REPOSITORY: "SceneWorks/qwen-image-edit-2511-mlx",
+      SCENEWORKS_QWEN_IMAGE_EDIT_REVISION: REVISION,
+      SCENEWORKS_QWEN_IMAGE_EDIT_ROOT: snapshotPath(hub, "SceneWorks/qwen-image-edit-2511-mlx", REVISION, "q4"),
+    }, "the production id loads the tier root and nothing else");
+
+    const lightning = await classifyAnchor(`qwen_image_edit_2511_lightning:q4:${backend}`, planned, context);
+    assert.equal(lightning.status, "runnable", `${backend}: ${lightning.reason}`);
+    assert.equal(lightning.env.SCENEWORKS_QWEN_IMAGE_EDIT_ROOT, base.env.SCENEWORKS_QWEN_IMAGE_EDIT_ROOT, "one shared checkpoint");
+    assert.equal(lightning.env.SCENEWORKS_QWEN_EDIT_LIGHTNING_LORA_REPOSITORY, lora.repo);
+    assert.equal(lightning.env.SCENEWORKS_QWEN_EDIT_LIGHTNING_LORA_REVISION, lora.revision);
+    assert.equal(
+      lightning.env.SCENEWORKS_QWEN_EDIT_LIGHTNING_LORA_ROOT,
+      snapshotPath(hub, lora.repo, lora.revision),
+      "the distill LoRA snapshot, at the revision the engine pins",
+    );
+  }
+  // Without the distill snapshot the Lightning cell is `weights_missing` — measurable, but not
+  // runnable on this host — while the production id stays runnable off the same tier root.
+  const tierOnly = await fakeHub([["SceneWorks/qwen-image-edit-2511-mlx", REVISION, "q4"]]);
+  const context = { models: fakeModels(), backend: "mlx", hubs: [tierOnly], current: new Map(), captured: new Map() };
+  const planned = { provider: "qwen_image_edit", mode: "edit_image" };
+  assert.equal((await classifyAnchor("qwen_image_edit_2511:q4:mlx", planned, context)).status, "runnable");
+  const missing = await classifyAnchor("qwen_image_edit_2511_lightning:q4:mlx", planned, context);
+  assert.equal(missing.status, "weights_missing");
+  assert.match(missing.reason, /Qwen-Image-Edit-2511-Lightning@/);
+});
+
+// The catalog's `physical` flag and the harness's receipt predicate are two spellings of one rule,
+// and sc-22728 added a family that LOOKS like Qwen and must not inherit it. Bind them: the harness
+// requires a physical source session for `qwen_image` alone, so exactly that family may carry the
+// flag — passing `--raw-log-dir` for any other arm makes the harness refuse the render outright.
+test("only the family the harness demands a physical receipt for is marked physical", async () => {
+  const harness = await readFile(path.join(ROOT, "scripts/memory-calibration-harness.mjs"), "utf8");
+  const predicate = /function requiresPhysicalMlxProvenanceForCurrency\(record\) \{([\s\S]*?)\n\}/.exec(harness);
+  assert.ok(predicate, "the harness still declares requiresPhysicalMlxProvenanceForCurrency");
+  const named = [...predicate[1].matchAll(/record\.target\.modelId === "([a-z0-9_]+)"/g)].map((match) => match[1]);
+  assert.deepEqual(named, ["qwen_image"], "the harness scopes the receipt to exactly one model id");
+  assert.deepEqual(
+    Object.entries(PROVIDER_FAMILIES).filter(([, family]) => family.physical).map(([id]) => id),
+    named,
+    "a family marked physical that the harness does not demand a receipt for would make every capture of it fail",
+  );
+});
+
+// The Lightning distill LoRA is the one artifact in this table the MANIFEST does not ship, so the
+// repository, revision and file name below are a COPY of the worker's own pinned constants. Nothing
+// derives one from the other, and a drift would send the capture at a LoRA the Candle engine rejects
+// by exact path after a 28-57 GB load. This is that binding, read from both lanes' worker source.
+test("the pinned Lightning distill LoRA matches the worker constants on both lanes", async () => {
+  const lora = PROVIDER_FAMILIES.qwen_image_edit.sideArtifact.qwen_image_edit_2511_lightning;
+  for (const file of [
+    "crates/sceneworks-worker/src/image_jobs/qwen.rs",
+    "crates/sceneworks-worker/src/image_jobs/qwen_edit_candle.rs",
+  ]) {
+    const source = await readFile(path.join(ROOT, file), "utf8");
+    for (const [label, value] of Object.entries(lora)) {
+      if (label === "env") continue;
+      assert.ok(
+        source.includes(`"${value}"`),
+        `${file} does not name the ${label} ${JSON.stringify(value)} this table pins`,
+      );
+    }
+  }
+  // And the adapters resolve the file name from the shared protocol constant rather than a literal.
+  const protocolSource = await readFile(path.join(ROOT, "crates/sceneworks-memory-adapter/src/lib.rs"), "utf8");
+  // rustfmt may wrap a long const onto its own line, so match the declaration and its literal
+  // rather than one exact source line.
+  for (const [name, value] of [
+    ["QWEN_EDIT_LIGHTNING_REPOSITORY", lora.repo],
+    ["QWEN_EDIT_LIGHTNING_FILE", lora.file],
+  ]) {
+    const declaration = new RegExp(`pub const ${name}: &str =\\s*"${value.replaceAll(".", "\\.")}"`);
+    assert.match(protocolSource, declaration);
+  }
+});
+
+// The env FAMILY names in `PROVIDER_FAMILIES` are the other half of the same hand-duplication: this
+// table derives `SCENEWORKS_<env>_{REPOSITORY,REVISION,ROOT}` and exports them into the adapter, and
+// each adapter arm reads those exact names back as its own source literals. Nothing bound the two,
+// on ANY family — renaming one side (or adding a family whose arm never reads it) leaves every test
+// in both files green and fails only mid-campaign, after the weights are staged. This is that
+// binding, per family, per declared arm, including the `upstream` and `sideArtifact` sub-families.
+test("every family's derived env names are read back by each arm it declares", async () => {
+  const lanes = new Map();
+  for (const backend of ["mlx", "candle"]) {
+    lanes.set(
+      backend,
+      await readFile(path.join(ROOT, `crates/sceneworks-memory-adapter/src/bin/${backend}.rs`), "utf8"),
+    );
+  }
+  let checked = 0;
+  for (const [id, family] of Object.entries(PROVIDER_FAMILIES)) {
+    // The LTX-2.5 families carry no env family at all: the harness binds their snapshot root
+    // directly (`--ltx25-snapshot-root`), which `classifyAnchor` asserts by leaving `row.env` empty.
+    const envFamilies = [
+      family.env,
+      family.upstream?.env,
+      // sc-22727: a per-modelId variant is a derived env family too — the KV klein row exports
+      // `SCENEWORKS_FLUX2_KLEIN_KV_*` and each declared arm must read those names back.
+      ...Object.values(family.variants ?? {}).map((variant) => variant.env),
+      ...Object.values(family.sideArtifact ?? {}).map((side) => side.env),
+    ].filter(Boolean);
+    if (envFamilies.length === 0) {
+      assert.ok(family.ltx25, `${id} declares neither an env family nor the LTX-2.5 harness binding`);
+      continue;
+    }
+    for (const arm of family.arms) {
+      const source = lanes.get(arm);
+      assert.ok(source, `${id} declares an unknown adapter arm ${arm}`);
+      for (const env of envFamilies) {
+        for (const suffix of ["REPOSITORY", "REVISION", "ROOT"]) {
+          const name = `SCENEWORKS_${env}_${suffix}`;
+          assert.ok(
+            source.includes(`"${name}"`),
+            `${arm}.rs never reads ${name}, which ${id} exports into it`,
+          );
+          checked += 1;
+        }
+      }
+    }
+  }
+  assert.ok(checked >= 45, `expected the whole table to be covered, checked ${checked} names`);
+});
+
+test("the flux.1 family: the two base providers bind their own artifacts, and PuLID rides the dev backbone plus a staged identity bundle", async () => {
+  const hub = await fakeHub([["SceneWorks/flux1-dev-mlx", REVISION, "q4"]]);
+  const previous = process.env.SCENEWORKS_PULID_WEIGHTS;
+  try {
+    for (const backend of ["mlx", "candle"]) {
+      // A FRESH bundle per lane: the staging steps below are cumulative, so a shared directory
+      // would let the second lane skip straight past the two `weights_missing` cases.
+      const bundle = await mkdtemp(path.join(tmpdir(), "catalog-pulid-"));
+      const context = { models: fakeModels(), backend, hubs: [hub], current: new Map(), captured: new Map() };
+      const dev = await classifyAnchor(`flux_dev:q4:${backend}`, { provider: "flux1_dev" }, context);
+      assert.equal(dev.status, "runnable", `${backend}: ${dev.reason}`);
+      assert.deepEqual(dev.env, {
+        SCENEWORKS_FLUX1_DEV_REPOSITORY: "SceneWorks/flux1-dev-mlx",
+        SCENEWORKS_FLUX1_DEV_REVISION: REVISION,
+        SCENEWORKS_FLUX1_DEV_ROOT: snapshotPath(hub, "SceneWorks/flux1-dev-mlx", REVISION, "q4"),
+      });
+
+      // The identity stack is not a manifest download on either lane, so the anchor binds the
+      // operator's staged bundle through the same env both worker lanes honour. Unset or
+      // incomplete is `weights_missing` — never a "runnable" cell that cannot actually run.
+      delete process.env.SCENEWORKS_PULID_WEIGHTS;
+      const unstaged = await classifyAnchor(`pulid_flux_dev:q4:${backend}`, { provider: "pulid_flux" }, context);
+      assert.equal(unstaged.status, "weights_missing");
+      assert.match(unstaged.reason, /SCENEWORKS_PULID_WEIGHTS is unset/);
+
+      process.env.SCENEWORKS_PULID_WEIGHTS = bundle;
+      const partial = await classifyAnchor(`pulid_flux_dev:q4:${backend}`, { provider: "pulid_flux" }, context);
+      assert.equal(partial.status, "weights_missing");
+      assert.match(partial.reason, /is missing pulid_flux_v0\.9\.1\.safetensors/);
+
+      for (const file of PROVIDER_FAMILIES.pulid_flux.bundle.files) {
+        await writeFile(path.join(bundle, file), "weights");
+      }
+      const pulid = await classifyAnchor(`pulid_flux_dev:q4:${backend}`, { provider: "pulid_flux" }, context);
+      assert.equal(pulid.status, "runnable", `${backend}: ${pulid.reason}`);
+      assert.equal(pulid.physical, false);
+      assert.deepEqual(pulid.env, {
+        // The PuLID backbone IS the FLUX.1-dev artifact, so it shares that env family — the way
+        // z_image_edit shares the Turbo family — and its tier root resolves through the
+        // `pulid_flux_dev` MANIFEST entry, not through `flux_dev`'s.
+        SCENEWORKS_FLUX1_DEV_REPOSITORY: "SceneWorks/flux1-dev-mlx",
+        SCENEWORKS_FLUX1_DEV_REVISION: REVISION,
+        SCENEWORKS_FLUX1_DEV_ROOT: snapshotPath(hub, "SceneWorks/flux1-dev-mlx", REVISION, "q4"),
+        SCENEWORKS_PULID_WEIGHTS: bundle,
+      });
+    }
+  } finally {
+    if (previous === undefined) delete process.env.SCENEWORKS_PULID_WEIGHTS;
+    else process.env.SCENEWORKS_PULID_WEIGHTS = previous;
+  }
+});
+
 // sc-22725: LTX-2.5 reaches the two lanes under two engine ids off ONE public snapshot. Both
 // families must therefore derive the same snapshot root, on their own lane and on no other.
 test("the LTX-2.5 family derives the same snapshot root on both lanes, under each lane's engine id", async () => {
@@ -231,8 +470,14 @@ test("LTX25_LANE_PROVIDERS and PROVIDER_FAMILIES agree on which lane serves whic
 test("classification refuses what no adapter arm or the harness cannot serve, and skips what is done", async () => {
   const hub = await fakeHub([["SceneWorks/z-image-turbo-mlx", REVISION, "q4"]]);
   const base = { models: fakeModels(), backend: "candle", hubs: [hub], current: new Map(), captured: new Map() };
-  const flux = await classifyAnchor("flux2_dev:q4:candle", { provider: "flux2_dev" }, base);
-  assert.equal(flux.status, "no_adapter_arm");
+  // sc-22727 gave `flux2_dev` a Candle arm and sc-22729 gave the whole `sdxl` family one, so the
+  // no-arm probe moved again — to `minimax_h3`, which is still declared `arms: ["mlx"]`. Asserted
+  // rather than assumed, so this probe cannot silently stop asking its question the next time a
+  // lane is added.
+  assert.deepEqual(PROVIDER_FAMILIES.minimax_h3.arms, ["mlx"], "the no-arm probe needs an mlx-only family");
+  const noArm = await classifyAnchor("minimax_h3:q4:candle", { provider: "minimax_h3" }, base);
+  assert.equal(noArm.status, "no_adapter_arm");
+  assert.match(noArm.reason, /candle adapter implements no provider arm for minimax_h3/);
   // `harness_unsupported` is the refusal for a provider whose adapter arm exists but whose
   // artifacts the harness cannot bind. No SHIPPED family is in that state since sc-22725 gave
   // LTX-2.5's candle engine id a real row, so the branch is driven through a synthetic family.
@@ -276,6 +521,59 @@ test("classification refuses what no adapter arm or the harness cannot serve, an
     ...base, declaredProviders: new Set(["candle:z_image_turbo"]),
   });
   assert.equal(providerDeclared.status, "runnable");
+});
+
+// sc-22726 review: the five PuLID bundle file names were hand-duplicated between this runner and
+// the adapter's lib.rs with nothing binding them. This parses the Rust constants — the per-file
+// `pub const PULID_*_FILE: &str = "…";` declarations and the `PULID_IDENTITY_BUNDLE_FILES` array
+// that orders them — and asserts the runner's list is that list, in that order, under that env var.
+test("PROVIDER_FAMILIES.pulid_flux.bundle is the adapter's PULID_IDENTITY_BUNDLE_FILES, in order", async () => {
+  const lib = await readFile(path.join(ROOT, ADAPTER_LIB_PATH), "utf8");
+  const consts = new Map();
+  for (const match of lib.matchAll(/pub const (PULID_[A-Z_]+_FILE): &str = "([^"]+)";/g)) {
+    consts.set(match[1], match[2]);
+  }
+  const array = lib.match(/pub const PULID_IDENTITY_BUNDLE_FILES: \[&str; (\d+)\] = \[([\s\S]*?)\];/);
+  assert.ok(array, "lib.rs declares PULID_IDENTITY_BUNDLE_FILES");
+  const names = array[2].split(",").map((name) => name.trim()).filter(Boolean);
+  assert.equal(names.length, Number(array[1]), "the array literal carries every declared entry");
+  const files = names.map((name) => {
+    assert.ok(consts.has(name), `${name} resolves to a PULID_*_FILE const`);
+    return consts.get(name);
+  });
+  assert.deepEqual(PROVIDER_FAMILIES.pulid_flux.bundle.files, files);
+  const env = lib.match(/pub const PULID_IDENTITY_BUNDLE_ENV: &str = "([^"]+)";/);
+  assert.ok(env, "lib.rs declares PULID_IDENTITY_BUNDLE_ENV");
+  assert.equal(PROVIDER_FAMILIES.pulid_flux.bundle.env, env[1]);
+});
+
+// sc-22726 review: the adapter canonicalizes the bundle path from the HARNESS's cwd, so a relative
+// export must already be absolute by the time this runner probes or forwards it.
+test("a relative SCENEWORKS_PULID_WEIGHTS is resolved to an absolute path before it is probed or forwarded", async () => {
+  const hub = await fakeHub([["SceneWorks/flux1-dev-mlx", REVISION, "q4"]]);
+  const previous = process.env.SCENEWORKS_PULID_WEIGHTS;
+  const cwd = process.cwd();
+  try {
+    const bundle = await mkdtemp(path.join(tmpdir(), "catalog-pulid-relative-"));
+    for (const file of PROVIDER_FAMILIES.pulid_flux.bundle.files) {
+      await writeFile(path.join(bundle, file), "weights");
+    }
+    process.chdir(path.dirname(bundle));
+    process.env.SCENEWORKS_PULID_WEIGHTS = path.basename(bundle);
+    // `process.cwd()` is the real path (macOS `/var` -> `/private/var`), so the expectation is
+    // built from it rather than from the tmpdir spelling.
+    const expected = path.join(process.cwd(), path.basename(bundle));
+    const context = { models: fakeModels(), backend: "mlx", hubs: [hub], current: new Map(), captured: new Map() };
+    const pulid = await classifyAnchor("pulid_flux_dev:q4:mlx", { provider: "pulid_flux" }, context);
+    assert.equal(pulid.status, "runnable", pulid.reason);
+    assert.ok(path.isAbsolute(pulid.env.SCENEWORKS_PULID_WEIGHTS));
+    assert.equal(pulid.env.SCENEWORKS_PULID_WEIGHTS, expected);
+    assert.equal(pulid.roots.find((root) => root.label === "pulid bundle").path, expected);
+  } finally {
+    process.chdir(cwd);
+    if (previous === undefined) delete process.env.SCENEWORKS_PULID_WEIGHTS;
+    else process.env.SCENEWORKS_PULID_WEIGHTS = previous;
+  }
 });
 
 test("appending to PACKAGED_MEMORY_ANCHOR_SOURCES is idempotent and keeps the rustfmt tuple shape", async () => {
@@ -501,6 +799,17 @@ test("the z-image family is measurable on every shipped tier of every routed lan
   assert.equal(gaps.length, 0, gapReport(gaps));
 });
 
+// Epic 22723 E1/E2, story sc-22727: the whole FLUX.2 family, on every shipped tier of both lanes.
+// `flux2_klein_9b_true_v2` is deliberately not here — it ships no tiered download (its manifest
+// binds one converted single-file snapshot), so it is not a shipped TIERED cell at all.
+test("the flux2 family is measurable on every shipped tier of every routed lane", async () => {
+  const family = ["flux2_dev", "flux2_klein_9b", "flux2_klein_9b_kv"];
+  const cells = (await shippedTieredCells()).filter((cell) => family.includes(cell.modelId));
+  assert.ok(cells.length >= 3 * 3 * 2, "three models x three tiers x two lanes are all shipped and routed");
+  const gaps = (await measurabilityGaps()).filter((gap) => family.includes(gap.modelId));
+  assert.equal(gaps.length, 0, gapReport(gaps));
+});
+
 // sc-22725: the two families that already had one candle arm each — Qwen-Image (an ordinary tier
 // root) and LTX-2.5 (a harness-bound snapshot under a second engine id) — on every shipped tier of
 // every routed lane. Same shape claim as the z-image case above: manifest + plan + declarations.
@@ -690,6 +999,28 @@ test("the staged SDXL component env vars agree between the catalog and the candl
       assert.equal(download.coRequisite, true, `${modelId}/${component.repo} must be a corequisite`);
     }
   }
+});
+
+// sc-22728: the Qwen EDIT family — two catalog ids on one engine provider, one of which loads a
+// built-in distill LoRA — on every shipped tier of every routed lane. Same shape claim as the two
+// cases above: manifest tiers + matrix lanes + plan anchors + both closure declarations.
+test("the qwen edit family is measurable on every shipped tier of every routed lane", async () => {
+  const families = ["qwen_image_edit_2511", "qwen_image_edit_2511_lightning"];
+  const cells = (await shippedTieredCells()).filter((cell) => families.includes(cell.modelId));
+  assert.ok(cells.length >= 2 * 3 * 2, "both edit ids × three tiers × two lanes are shipped and routed");
+  const gaps = (await measurabilityGaps()).filter((gap) => families.includes(gap.modelId));
+  assert.equal(gaps.length, 0, gapReport(gaps));
+});
+
+// sc-22726. Same shape claim, for the FLUX.1 family: `flux_dev` and `flux_schnell` are the two base
+// text-to-image providers of the shared FLUX.1 engine crates, and `pulid_flux_dev` is the identity
+// route over the same FLUX.1-dev backbone — a REGISTRY route on mlx and a BESPOKE one on candle.
+test("the flux.1 family is measurable on every shipped tier of every routed lane", async () => {
+  const family = ["flux_dev", "flux_schnell", "pulid_flux_dev"];
+  const cells = (await shippedTieredCells()).filter((cell) => family.includes(cell.modelId));
+  assert.equal(cells.length, 3 * 3 * 2, "three models x three shipped tiers x two routed lanes");
+  const gaps = (await measurabilityGaps()).filter((gap) => family.includes(gap.modelId));
+  assert.equal(gaps.length, 0, gapReport(gaps));
 });
 
 // The catalog-wide burndown. `todo` until the terminal story of epic 22723 (sc-22738) promotes it:

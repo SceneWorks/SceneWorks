@@ -8,8 +8,9 @@ autobins = false
 
 [dependencies]
 serde_json = "1.0"
-# sc-22729: the InstantID artifact digest is the worker's own sha256 over the ordered artifact
-# paths, and BOTH adapters compute it, so this is shared rather than macOS-only.
+# Shared by both lanes: the PuLID identity bundle is named by content digest in every record, and
+# sc-22729's InstantID artifact digest is the worker's own sha256 over the ordered artifact paths,
+# which BOTH adapters compute. Neither is macOS-only.
 sha2 = "0.10"
 
 [target.'cfg(target_os = "macos")'.dependencies]

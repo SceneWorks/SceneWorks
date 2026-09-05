@@ -319,7 +319,11 @@ function matchBlockBody(text, matchStart) {
   throw new Error("unbalanced braces while extracting an adapter dispatch match block");
 }
 
-/** Top-level arms of a match body: `{ pattern, hasArrow }` split on depth-0 commas. */
+/**
+ * Top-level arms of a match body: `{ pattern, hasArrow }`. An arm ends at a depth-0 comma, or at
+ * the depth-0 `}` that closes a block body — rustfmt drops the trailing comma after a braced arm,
+ * so splitting on commas alone made a block-bodied arm swallow the NEXT arm's pattern (sc-22726).
+ */
 function matchArms(inner) {
   const arms = [];
   let depth = 0;
@@ -334,8 +338,16 @@ function matchArms(inner) {
     }
     const char = inner[i];
     if ("([{".includes(char)) depth += 1;
-    else if (")]}".includes(char)) depth -= 1;
-    else if (depth === 0 && char === "=" && inner[i + 1] === ">") {
+    else if (")]}".includes(char)) {
+      depth -= 1;
+      // A depth-0 `}` after the arrow closes a block body: the arm ends here whether or not a
+      // comma follows. Before the arrow it is a struct/brace PATTERN and the arm continues.
+      if (depth === 0 && char === "}" && arrow !== -1) {
+        arms.push({ pattern: inner.slice(start, arrow).trim(), hasArrow: true });
+        start = i + 1;
+        arrow = -1;
+      }
+    } else if (depth === 0 && char === "=" && inner[i + 1] === ">") {
       if (arrow === -1) arrow = i;
       i += 2;
       continue;
@@ -378,18 +390,28 @@ export function adapterCapturableProviders(source, label) {
     }
     const providers = new Set();
     for (const arm of matchArms(block.inner)) {
-      const literal = /^"((?:\\.|[^"\\])*)"$/.exec(arm.pattern);
-      if (literal) {
-        providers.add(literal[1]);
-      } else if (/^[A-Z][A-Z0-9_]*$/.test(arm.pattern)) {
-        if (!consts.has(arm.pattern)) {
-          throw new Error(`${label}: dispatch arm ${arm.pattern} does not resolve to a &str const`);
+      // An OR-pattern (`A | B => …`) is one arm serving several providers — the Candle FLUX.2 arm
+      // dispatches `FLUX2_DEV_ID | FLUX2_KLEIN_ID` (sc-22727). Each alternative is then the same
+      // shape the single-pattern arms are, so split first and judge each half by the same rules;
+      // a `|` inside a string literal cannot reach here because a literal arm has no `|` outside
+      // its quotes.
+      const alternatives = /^"((?:\\.|[^"\\])*)"$/.test(arm.pattern)
+        ? [arm.pattern]
+        : arm.pattern.split("|").map((part) => part.trim());
+      for (const pattern of alternatives) {
+        const literal = /^"((?:\\.|[^"\\])*)"$/.exec(pattern);
+        if (literal) {
+          providers.add(literal[1]);
+        } else if (/^[A-Z][A-Z0-9_]*$/.test(pattern)) {
+          if (!consts.has(pattern)) {
+            throw new Error(`${label}: dispatch arm ${pattern} does not resolve to a &str const`);
+          }
+          providers.add(consts.get(pattern));
+        } else if (!/^[a-z_][A-Za-z0-9_]*$/.test(pattern)) {
+          // Lower-case identifiers are the fallback binding of the refusal arm itself; anything
+          // else is a dispatch shape this parser has never seen and must not guess about.
+          throw new Error(`${label}: unrecognized dispatch arm pattern ${JSON.stringify(pattern)}`);
         }
-        providers.add(consts.get(arm.pattern));
-      } else if (!/^[a-z_][A-Za-z0-9_]*$/.test(arm.pattern)) {
-        // Lower-case identifiers are the fallback binding of the refusal arm itself; anything else
-        // is a dispatch shape this parser has never seen and must not guess about.
-        throw new Error(`${label}: unrecognized dispatch arm pattern ${JSON.stringify(arm.pattern)}`);
       }
     }
     if (providers.size === 0) {

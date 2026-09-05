@@ -6,13 +6,50 @@
 
 use serde_json::{json, Map, Value};
 use std::io::{self, Read};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 pub const INFERENCE_PIN: &str = "c6d6a4dbd61ab09c26ff5526632cae2cefea60ed";
 pub const QWEN_REPOSITORY: &str = "SceneWorks/qwen-image-mlx";
+/// The Qwen-Image-Edit-2511 tiered rehost (sc-22728). Serves BOTH shipped edit catalog ids —
+/// `qwen_image_edit_2511` and `qwen_image_edit_2511_lightning` — on both lanes, because they are one
+/// checkpoint routed to one engine provider (`qwen_image_edit`; worker `image_jobs/qwen.rs`
+/// `qwen_edit_engine_id` and `image_jobs/qwen_edit_candle.rs`). The Candle engine additionally pins
+/// this exact repository directory and revision by path suffix (`candle-gen-qwen-image` `edit.rs`
+/// `exact_base_tier`), so a re-host under any other name cannot satisfy an edit capture at all.
+pub const QWEN_EDIT_REPOSITORY: &str = "SceneWorks/qwen-image-edit-2511-mlx";
+/// The built-in Lightning distill LoRA the `qwen_image_edit_2511_lightning` id folds into the MMDiT
+/// at load. It is NOT a manifest download — the worker fetches it lazily into the HF cache at a
+/// pinned revision (`QWEN_LIGHTNING_LORA_REPO` in the worker's `image_jobs/qwen.rs`, and
+/// `QWEN_EDIT_CANDLE_LIGHTNING_LORA_REPO` on the Candle lane) — so the capture is handed its
+/// snapshot through its own `SCENEWORKS_QWEN_EDIT_LIGHTNING_LORA_*` family.
+pub const QWEN_EDIT_LIGHTNING_REPOSITORY: &str = "lightx2v/Qwen-Image-Edit-2511-Lightning";
+/// The one distill file inside that snapshot. The Candle engine refuses any other file name by exact
+/// suffix (`edit.rs` `is_exact_lightning_path`), and the MLX worker names the same file, so this is a
+/// pinned artifact identity rather than a convenience default.
+pub const QWEN_EDIT_LIGHTNING_FILE: &str =
+    "Qwen-Image-Edit-2511-Lightning-4steps-V1.0-bf16.safetensors";
 pub const FLUX2_REPOSITORY: &str = "SceneWorks/flux2-dev-mlx";
+/// The FLUX.2-klein-9B tiered rehost (sc-22727) — the `flux2_klein_9b` catalog model's artifact,
+/// bound through `SCENEWORKS_FLUX2_KLEIN_*`. The engine discriminates it from the KV rehost by the
+/// snapshot path AND by `LoadSpec::resolved_route` (`turnkey_identity` /
+/// `KleinArtifactInventory::validate_resolved_route` in `mlx-gen-flux2/src/artifact_inventory.rs`),
+/// which is why the two variants get separate env families rather than one shared "klein" family.
+pub const FLUX2_KLEIN_REPOSITORY: &str = "SceneWorks/flux2-klein-9b-mlx";
+/// The FLUX.2-klein-9B **KV-cache** rehost (sc-22727): a separately distilled checkpoint of the same
+/// architecture, loaded through the SAME engine provider id `flux2_klein_9b`
+/// (`crates/sceneworks-worker/src/engines.rs` — `sceneworks_id: flux2_klein_9b_kv`,
+/// `engine_id: flux2_klein_9b`) from its own artifact, through `SCENEWORKS_FLUX2_KLEIN_KV_*`.
+pub const FLUX2_KLEIN_KV_REPOSITORY: &str = "SceneWorks/flux2-klein-9b-kv-mlx";
 pub const KREA_REPOSITORY: &str = "SceneWorks/krea-2-turbo-mlx";
+/// The FLUX.1 [dev] tiered rehost (sc-22726). It serves BOTH the `flux1_dev` text-to-image provider
+/// and the `pulid_flux` character route, on both lanes: the worker resolves the PuLID backbone from
+/// exactly this repo (`image_jobs/pulid.rs` `PULID_FLUX_REPO`, `image_jobs/pulid_candle.rs`
+/// `PULID_CANDLE_FLUX_REPO`), so both bind the one `SCENEWORKS_FLUX1_DEV_*` family — the way
+/// `z_image_edit` rides the Turbo family.
+pub const FLUX1_DEV_REPOSITORY: &str = "SceneWorks/flux1-dev-mlx";
+/// The FLUX.1 [schnell] tiered rehost (sc-22726), the `flux1_schnell` provider's own artifact.
+pub const FLUX1_SCHNELL_REPOSITORY: &str = "SceneWorks/flux1-schnell-mlx";
 pub const SDXL_REPOSITORY: &str = "SceneWorks/sdxl-base-mlx";
 // sc-22729. The SDXL FAMILY: five catalog models the worker routes onto ONE engine id (`sdxl`) on
 // both lanes (`crates/sceneworks-worker/src/engines.rs` `MODEL_TABLE`, and
@@ -797,6 +834,134 @@ pub fn required_env(name: &str) -> Result<String, String> {
         .ok_or_else(|| format!("required environment variable {name} is not set"))
 }
 
+/// The env var both PuLID-FLUX worker lanes read for a pre-staged identity bundle, under TWO
+/// semantics. The Candle lane (`image_jobs/pulid_candle.rs` `ensure_pulid_candle_weights`) takes
+/// it as a complete bundle: a directory holding all five files, used as-is, and ignored if any
+/// file is missing. The MLX lane (`image_jobs/pulid.rs` `ensure_pulid_weights`) takes it as the
+/// directory to FILL — missing files are downloaded into it — and it is outranked by a fully-set
+/// `PULID_FLUX_WEIGHTS` / `PULID_EVA_WEIGHTS` / `PULID_FACE_WEIGHTS_DIR` preset
+/// (`pulid_weights_env_preset`). The identity stack is fetched on first use rather than declared
+/// as a manifest download, so an anchor binds the operator's staged copy through this same seam,
+/// and it uses the strict Candle reading on both lanes: every file present, nothing downloaded.
+pub const PULID_IDENTITY_BUNDLE_ENV: &str = "SCENEWORKS_PULID_WEIGHTS";
+/// The five loose files both lanes require in ONE directory, which doubles as the provider's
+/// `face_dir`: the adapter checkpoint, the EVA tower, and the three face models both engines read
+/// out of `face_dir` by name. `measure-memory-catalog.mjs` `PROVIDER_FAMILIES.pulid_flux.bundle`
+/// carries the same list in the same order, and its test parses this file to prove it.
+pub const PULID_ADAPTER_FILE: &str = "pulid_flux_v0.9.1.safetensors";
+pub const PULID_EVA_FILE: &str = "eva02_clip_l_336.safetensors";
+pub const PULID_SCRFD_FILE: &str = "scrfd_10g.safetensors";
+pub const PULID_ARCFACE_FILE: &str = "arcface_iresnet100.safetensors";
+pub const PULID_BISENET_FILE: &str = "bisenet_parsing.safetensors";
+/// Every file the bundle must carry.
+pub const PULID_IDENTITY_BUNDLE_FILES: [&str; 5] = [
+    PULID_ADAPTER_FILE,
+    PULID_EVA_FILE,
+    PULID_SCRFD_FILE,
+    PULID_ARCFACE_FILE,
+    PULID_BISENET_FILE,
+];
+
+/// The PuLID identity stack an anchor binds: `(adapter, eva, face_dir)`.
+///
+/// Both lanes take exactly these three handles — MLX through `LoadSpec::identity`
+/// (`IdentityWeights { encoder, eva, face_dir }`), Candle through `PulidFluxPaths`
+/// `{ pulid_weights, eva_weights, face_dir }` — and both engines then read the three face models
+/// out of `face_dir` BY NAME. So a bundle missing any one of the five is refused HERE, naming the
+/// files, rather than surfacing as an opaque loader error several gigabytes into a capture.
+///
+/// The record names the stack by CONTENT — the SHA-256 of each of the five files and one composite
+/// over them — never by the host path it was staged at: two hosts staging the same upstream files
+/// measured the same identity stack, and the same host restaging different files did not.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PulidIdentityBundle {
+    pub root: PathBuf,
+    pub adapter: PathBuf,
+    pub eva: PathBuf,
+    pub face_dir: PathBuf,
+    /// `(file name, lowercase SHA-256 of its bytes)` for every file in
+    /// [`PULID_IDENTITY_BUNDLE_FILES`], in that order.
+    pub file_sha256: Vec<(&'static str, String)>,
+    /// SHA-256 over the `<file>:<sha256>\n` lines of `file_sha256`, in order — the one token a
+    /// loadability fingerprint carries for the whole stack.
+    pub composite_sha256: String,
+}
+
+impl PulidIdentityBundle {
+    /// The record's `artifact.identityBundle`: `{ "<file>": "<sha256>", ... }` plus the composite.
+    pub fn artifact_json(&self) -> Value {
+        let mut files = Map::new();
+        for (file, sha256) in &self.file_sha256 {
+            files.insert((*file).to_owned(), Value::String(sha256.clone()));
+        }
+        json!({
+            "files": files,
+            "compositeSha256": self.composite_sha256,
+        })
+    }
+}
+
+fn sha256_hex_of_file(path: &Path) -> Result<String, String> {
+    use sha2::Digest;
+    let mut file = std::fs::File::open(path)
+        .map_err(|error| format!("open {} for hashing: {error}", path.display()))?;
+    let mut hasher = sha2::Sha256::new();
+    io::copy(&mut file, &mut hasher)
+        .map_err(|error| format!("hash {}: {error}", path.display()))?;
+    Ok(format!("{:x}", hasher.finalize()))
+}
+
+/// The env-free half of [`pulid_identity_bundle`], so the file contract is unit-testable. Hashes
+/// the five files, so a bundle that is present but unreadable is refused here too.
+pub fn pulid_identity_bundle_at(root: PathBuf) -> Result<PulidIdentityBundle, String> {
+    let missing: Vec<&str> = PULID_IDENTITY_BUNDLE_FILES
+        .iter()
+        .copied()
+        .filter(|file| !root.join(file).is_file())
+        .collect();
+    if !missing.is_empty() {
+        return Err(format!(
+            "{PULID_IDENTITY_BUNDLE_ENV} bundle {} is missing {}; the PuLID identity stack is one \
+             directory holding all five files (it IS the provider's face_dir)",
+            root.display(),
+            missing.join(", ")
+        ));
+    }
+    let mut file_sha256 = Vec::with_capacity(PULID_IDENTITY_BUNDLE_FILES.len());
+    let mut composite = {
+        use sha2::Digest;
+        sha2::Sha256::new()
+    };
+    for file in PULID_IDENTITY_BUNDLE_FILES {
+        let sha256 = sha256_hex_of_file(&root.join(file))?;
+        {
+            use sha2::Digest;
+            composite.update(format!("{file}:{sha256}\n").as_bytes());
+        }
+        file_sha256.push((file, sha256));
+    }
+    let composite_sha256 = {
+        use sha2::Digest;
+        format!("{:x}", composite.finalize())
+    };
+    Ok(PulidIdentityBundle {
+        adapter: root.join(PULID_ADAPTER_FILE),
+        eva: root.join(PULID_EVA_FILE),
+        face_dir: root.clone(),
+        root,
+        file_sha256,
+        composite_sha256,
+    })
+}
+
+/// Resolve the staged bundle from [`PULID_IDENTITY_BUNDLE_ENV`], canonicalized so the record's
+/// fingerprint names a real path rather than whatever spelling the operator exported.
+pub fn pulid_identity_bundle() -> Result<PulidIdentityBundle, String> {
+    let root = std::fs::canonicalize(PathBuf::from(required_env(PULID_IDENTITY_BUNDLE_ENV)?))
+        .map_err(|error| format!("canonicalize {PULID_IDENTITY_BUNDLE_ENV}: {error}"))?;
+    pulid_identity_bundle_at(root)
+}
+
 pub fn validate_artifact_identity(
     repository: &str,
     revision: &str,
@@ -999,7 +1164,43 @@ pub fn plain_gated_fragment(
     parts: PlainGatedFragment<'_>,
 ) -> Result<Value, String> {
     validate_plain_overlay_target(request, execution_path)?;
-    let mut fragment = json!({
+    let mut fragment = gated_fragment_body(parts);
+    settle_plain_overlay_scenario(request, &mut fragment, execution_path)?;
+    Ok(fragment)
+}
+
+/// The same gated fragment for a provider path that DID load and exercise a material overlay
+/// (sc-22728: the Qwen edit Lightning distill is one built-in LoRA folded into the MMDiT at load).
+/// The declared target is required to be exactly that overlay, so an overlay-free plan can never
+/// pick up a `passed` overlay verdict, and a differently-overlaid one can never be recorded here.
+/// `overlay_reason` states what actually participated in the measured renders.
+pub fn overlay_gated_fragment(
+    request: &Value,
+    expected_overlay: &str,
+    execution_path: &str,
+    overlay_reason: &str,
+    parts: PlainGatedFragment<'_>,
+) -> Result<Value, String> {
+    validate_exact_overlay_target(request, expected_overlay, execution_path)?;
+    let mut fragment = gated_fragment_body(parts);
+    let scenarios = fragment
+        .get_mut("scenarios")
+        .and_then(Value::as_array_mut)
+        .ok_or_else(|| "provider fragment.scenarios must be an array".to_owned())?;
+    let overlay_index = scenarios
+        .iter()
+        .position(|scenario| scenario.get("name").and_then(Value::as_str) == Some("overlay"))
+        .ok_or_else(|| "provider fragment is missing the required overlay scenario".to_owned())?;
+    scenarios[overlay_index] = json!({
+        "name": "overlay",
+        "result": "passed",
+        "reason": overlay_reason,
+    });
+    Ok(fragment)
+}
+
+fn gated_fragment_body(parts: PlainGatedFragment<'_>) -> Value {
+    json!({
         "status": "gated",
         "artifact": parts.artifact,
         "sweep": parts.sweep,
@@ -1011,9 +1212,7 @@ pub fn plain_gated_fragment(
         "loadability": parts.loadability,
         "diagnostics": parts.diagnostics,
         "capturedAt": captured_at(),
-    });
-    settle_plain_overlay_scenario(request, &mut fragment, execution_path)?;
-    Ok(fragment)
+    })
 }
 
 pub fn fail(message: impl AsRef<str>) -> ! {
@@ -1553,6 +1752,61 @@ mod tests {
             assert!(error.contains("refusing"));
             assert_eq!(fragment, before, "a refusal must not become false coverage");
         }
+    }
+
+    /// sc-22728: the overlay-carrying gated fragment records `passed` for exactly the overlay the
+    /// target declares and refuses every other declaration — including `"none"`, so a plan with no
+    /// overlay can never collect a `passed` overlay verdict from a path that loaded one.
+    #[test]
+    fn an_overlay_gated_fragment_settles_only_the_overlay_its_target_declares() {
+        let parts = || PlainGatedFragment {
+            artifact: json!({}),
+            sweep: json!({}),
+            blocker: "gated",
+            quality: json!({ "result": "not_run" }),
+            negative_mutation: Value::Null,
+            loadability: json!({ "result": "passed" }),
+            diagnostics: json!({}),
+        };
+        let request = json!({ "planned": { "target": { "overlay": "lora" } } });
+        let fragment = overlay_gated_fragment(
+            &request,
+            "lora",
+            "the edit path",
+            "the distill ran",
+            parts(),
+        )
+        .unwrap();
+        let overlay = fragment["scenarios"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|scenario| scenario["name"] == "overlay")
+            .unwrap()
+            .clone();
+        assert_eq!(overlay["result"], "passed");
+        assert_eq!(overlay["reason"], "the distill ran");
+        assert_eq!(fragment["status"], "gated");
+        for declared in ["none", "identity", "control:1"] {
+            let request = json!({ "planned": { "target": { "overlay": declared } } });
+            let error = overlay_gated_fragment(
+                &request,
+                "lora",
+                "the edit path",
+                "the distill ran",
+                parts(),
+            )
+            .unwrap_err();
+            assert!(error.contains(declared), "{error}");
+            assert!(error.contains("refusing"), "{error}");
+        }
+        // And the plain builder still refuses a material overlay, so the two are not interchangeable.
+        assert!(plain_gated_fragment(
+            &json!({ "planned": { "target": { "overlay": "lora" } } }),
+            "the edit path",
+            parts(),
+        )
+        .is_err());
     }
 
     #[test]

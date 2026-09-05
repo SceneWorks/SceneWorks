@@ -163,8 +163,8 @@ ids they cover today:
 
 | binary | providers covered | how it dispatches an unknown provider |
 | --- | --- | --- |
-| `memory-mlx-adapter` | `qwen_image`, `z_image_turbo` (text-to-image, and in `edit_image` mode the `z_image_edit` catalog alias — sc-22724), `z_image` (the undistilled base, sc-22724), `krea_2_turbo`, `sdxl` (all five catalog routes — sc-22729), `instantid` (sc-22729), `krea_2_turbo_control`, `flux2_dev` (SDXL exposes only Resident, Staged, and bounded-transformer residency; its decode/attention rungs are measured `Missing`. InstantID exposes only Resident and Staged. FLUX.2-dev is **resident rung only**.) | `mlx.rs` `run` — `MLX five-rung calibration does not implement provider "<id>"`; `sdxl_arm` — `the MLX SDXL arm does not implement modelId "<id>" on provider "sdxl"`; `validate_z_image_batch` (`assess_batch`) — `…five-rung batch assessment does not implement provider "<id>"` (cited by function name; the line numbers this table used to carry went stale the first time the file grew) |
-| `memory-candle-adapter` | `qwen_image`, `krea_2_turbo`, `z_image_turbo` (sc-15859; five-rung reference path only, no inline arm; in `edit_image` mode it is the `z_image_edit` catalog alias — sc-22724), `z_image` (the undistilled base, sc-22724), `sdxl` (sc-22729; five-rung reference path, three of the five routes — see below), `instantid` (sc-22729; bf16 only) | `plain_execution_path` / `still_calibration_label` / `load_five_rung_generator` — `Candle five-rung calibration does not implement provider "<id>"`; `sdxl_candle_arm` — `the Candle SDXL arm does not implement modelId "<id>"` |
+| `memory-mlx-adapter` | `qwen_image`, `qwen_image_edit` (BOTH shipped edit catalog ids — `qwen_image_edit_2511` and `..._lightning` — resolved from `(provider, modelId)`; sc-22728), `z_image_turbo` (text-to-image, and in `edit_image` mode the `z_image_edit` catalog alias — sc-22724), `z_image` (the undistilled base, sc-22724), `krea_2_turbo`, `sdxl` (all five catalog routes, keyed on `(provider, modelId)` — sc-22729), `instantid` (sc-22729), `krea_2_turbo_control`, `flux2_dev`, `flux2_klein_9b` (sc-22727; serving BOTH the `flux2_klein_9b` and `flux2_klein_9b_kv` catalog models, told apart by `target.modelId`), `flux1_dev`, `flux1_schnell`, `pulid_flux` (the FLUX.1 family, sc-22726 — one arm, member resolved from `(provider, mode)`; PuLID is `character_image` only and carries the identity stack on `LoadSpec::identity`) (SDXL exposes only Resident, Staged, and bounded-transformer residency; its decode/attention rungs are measured `Missing`. InstantID exposes only Resident and Staged. FLUX.2-dev is **resident rung only**; the klein manifest declares five rungs, but the shape this arm loads (`Resident` + `Eager`, sc-22727) implements resident + bounded decode/attention and leaves staged residency and rung 4 `Missing` — those two require the streamable shape. The FLUX.1 rows bind the per-(route, tier) identities of inference PR 943 — see the note below.) | `mlx.rs` `run` — `MLX five-rung calibration does not implement provider "<id>"`; `sdxl_arm` — `the MLX SDXL arm does not implement modelId "<id>" on provider "sdxl"`; `validate_z_image_batch` (`assess_batch`) — `…five-rung batch assessment does not implement provider "<id>"` (cited by function name; the line numbers this table used to carry went stale the first time the file grew) |
+| `memory-candle-adapter` | `qwen_image`, `qwen_image_edit` (the BESPOKE edit provider, dispatched ahead of the five-rung path because it is not a registered generator; both edit catalog ids, sc-22728), `krea_2_turbo`, `z_image_turbo` (sc-15859; five-rung reference path only, no inline arm; in `edit_image` mode it is the `z_image_edit` catalog alias — sc-22724), `z_image` (the undistilled base, sc-22724), `sdxl` (sc-22729; five-rung reference path, all five catalog routes, no inline arm), `instantid` (sc-22729; a **bespoke** arm, bf16 only), `flux2_dev` and `flux2_klein_9b` (sc-22727; five-rung reference path, no inline arm; the klein id serves `flux2_klein_9b` and `flux2_klein_9b_kv`), `flux1_dev`, `flux1_schnell` (sc-22726; five-rung reference path, no inline arm), `pulid_flux` (sc-22726; a **bespoke** arm — `candle-gen-pulid` registers no `Generator` at all, so this one loads `PulidFlux::load_with_memory_context(&PulidFluxPaths, ctx)` exactly as `image_jobs/pulid_candle.rs` does, and dispatches above the shared plain-overlay gate because its overlay is `identity`) | `plain_execution_path` / `still_calibration_label` / `load_five_rung_generator` — `Candle five-rung calibration does not implement provider "<id>"`; `qwen_edit_arm` — `the Candle Qwen edit arm does not implement provider "<id>" for model "<id>"`; `sdxl_candle_arm` — `the Candle SDXL arm does not implement modelId "<id>"` |
 
 🔴 **The SDXL family is keyed on `(provider, modelId)`, not on the provider alone** (sc-22729). The
 worker routes five catalog models — `sdxl`, `realvisxl`, `realvisxl_lightning`,
@@ -179,21 +179,28 @@ family member serves by name. `instantid_realvisxl` rides the separate bespoke `
 on the SAME `SceneWorks/realvisxl-mlx` backbone, bound through its own
 `SCENEWORKS_INSTANTID_REALVISXL_*` triple so the two can never satisfy each other's plans.
 
-**Two engine-side exclusions at inference `c6d6a4db`, neither of them adapter work:**
+**Every cell in the family is DECLARED — a plan anchor and both loader-closure declarations on
+every routed lane. Two engine-side facts keep some of them from being CAPTURABLE at inference
+`c6d6a4db`, and neither is adapter or plan work:**
 
-- `illustrious_xl_v1` / `illustrious_xl_v2` on **candle**. `candle-gen-sdxl`'s `SDXL_ROUTES`
-  (`crates/media/candle-gen/candle-gen-sdxl/src/memory_strategy.rs:66-79`) pins those two routes at
-  `c5a92a90…` / `7c5c8b2b…`, but `config/manifests/builtin.models.jsonc` ships `778c3f02…` /
-  `672e9851…`. `path_has_snapshot` (same file, `:198-224`) matches that literal before
-  `SdxlArtifactSeal::capture` will seal, and `candle_gen_sdxl::load` propagates the failure
-  (`lib.rs:681-685`), so **no root the manifest can resolve can ever load these two on candle**. The
-  adapter arm exists and refuses them naming both revisions. Six cells; the fix is an inference-side
-  route-revision bump, not a plan or adapter change.
+- `illustrious_xl_v1` / `illustrious_xl_v2` on **candle**, all three tiers — six cells.
+  `candle-gen-sdxl`'s `SDXL_ROUTES`
+  (`crates/media/candle-gen/candle-gen-sdxl/src/memory_strategy.rs`) pins those two routes at
+  revisions `config/manifests/builtin.models.jsonc` no longer ships. `path_has_snapshot` matches
+  that literal before `SdxlArtifactSeal::capture` will seal, and `candle_gen_sdxl::load` propagates
+  the failure, so **no root the manifest can resolve can ever load these two on candle**. All six
+  cells are planned and both closures are declared; `measure-memory-catalog.mjs --list` reports them
+  `harness_unsupported` for the engine's own reason. NOTHING is hard-coded: both halves of the
+  comparison are READ — the engine revision out of the pinned inference checkout, the shipped one
+  out of the manifest — so the refusal clears itself the moment the engine agrees. With no
+  inference checkout to read (`--inference-repo` / `$INFERENCE_REPO`), the cells classify normally
+  and say the comparison did not happen. The fix is inference-side (PR 946), not a plan or adapter
+  change.
 - `instantid_realvisxl` q4/q8 on **candle**. The candle InstantID stack is dense-only: the worker
   hard-pins its tier subdir to `bf16/` on the non-macOS branch
   (`crates/sceneworks-worker/src/image_jobs/instantid.rs:234-253`) and the provider declares
-  `resolved_numeric_tier()` as Bf16/no-quant. `docs/generated/memory-matrix.json` already says so in
-  `axes.candle.tiers`, so these are not cells at all — a packed candle anchor could only ever measure
+  `resolved_numeric_tier()` as Bf16/no-quant. `scripts/generate-memory-matrix.mjs`'s
+  `parseBackendTierOverrides` reads that same worker source, so these are not cells at all — a packed candle anchor could only ever measure
   bf16 weights.
 
 **Adapter environment for the SDXL family.** The three caller-staged SDXL components
@@ -216,6 +223,10 @@ human copy; the report is the derived one. Grep before you schedule anyway:
 ```bash
 grep -n '<provider>' crates/sceneworks-memory-adapter/src/bin/<backend>.rs
 ```
+
+The FLUX.1 MLX plan rows (sc-22726) name the per-(route, tier) production calibration identities
+that inference PR 943 (`story/sc-22726-flux-calibration-identity`) makes `mlx-gen-flux` and
+`mlx-gen-pulid` publish for every worker load shape; the arm binds them after the epic's pin bump.
 
 Both adapters now refuse an unimplemented provider **by name, before any environment or model work**,
 on **both** MLX actions — `run`, and `assess_batch`, where the check lives inside
@@ -564,6 +575,19 @@ SCENEWORKS_QWEN_IMAGE_REPOSITORY=SceneWorks/qwen-image-mlx   # fixed; validated 
 SCENEWORKS_QWEN_IMAGE_REVISION=<exact artifact revision>
 SCENEWORKS_QWEN_IMAGE_ROOT=/abs/path/.../snapshots/<rev>/<tier>    # bf16 | q4 | q8
 
+# memory-mlx-adapter — qwen_image_edit: BOTH edit catalog ids, one engine provider (sc-22728)
+SCENEWORKS_QWEN_IMAGE_EDIT_REPOSITORY=SceneWorks/qwen-image-edit-2511-mlx  # fixed; validated against QWEN_EDIT_REPOSITORY
+SCENEWORKS_QWEN_IMAGE_EDIT_REVISION=<exact artifact revision>
+SCENEWORKS_QWEN_IMAGE_EDIT_ROOT=/abs/path/.../snapshots/<rev>/<tier>       # bf16 | q4 | q8, derived from the plan target
+
+# memory-mlx-adapter — the qwen_image_edit_2511_lightning built-in distill LoRA ONLY (sc-22728).
+# NOT a manifest download: the worker fetches it lazily at a pinned revision, so the catalog runner
+# derives this family from `PROVIDER_FAMILIES.qwen_image_edit.sideArtifact` rather than from a
+# `downloads[]` entry. The production id `qwen_image_edit_2511` must NOT be given these.
+SCENEWORKS_QWEN_EDIT_LIGHTNING_LORA_REPOSITORY=lightx2v/Qwen-Image-Edit-2511-Lightning
+SCENEWORKS_QWEN_EDIT_LIGHTNING_LORA_REVISION=<exact artifact revision>
+SCENEWORKS_QWEN_EDIT_LIGHTNING_LORA_ROOT=/abs/path/.../snapshots/<rev>     # the snapshot; the arm joins QWEN_EDIT_LIGHTNING_FILE
+
 # memory-mlx-adapter — z_image_turbo, and the z_image_edit alias (`mode: edit_image`, same weights)
 SCENEWORKS_Z_IMAGE_REPOSITORY=SceneWorks/z-image-turbo-mlx   # fixed; validated against Z_IMAGE_REPOSITORY
 SCENEWORKS_Z_IMAGE_REVISION=<exact artifact revision>
@@ -573,6 +597,41 @@ SCENEWORKS_Z_IMAGE_ROOT=/abs/path/.../snapshots/<rev>/<tier>  # bf16 | q4 | q8, 
 SCENEWORKS_Z_IMAGE_BASE_REPOSITORY=SceneWorks/z-image-mlx    # fixed; validated against Z_IMAGE_BASE_REPOSITORY
 SCENEWORKS_Z_IMAGE_BASE_REVISION=<exact artifact revision>
 SCENEWORKS_Z_IMAGE_BASE_ROOT=/abs/path/.../snapshots/<rev>/<tier>  # bf16 | q4 | q8, derived from the plan target
+
+# memory-mlx-adapter — flux2_klein_9b   (the base klein rehost; sc-22727)
+SCENEWORKS_FLUX2_KLEIN_REPOSITORY=SceneWorks/flux2-klein-9b-mlx  # fixed; validated against FLUX2_KLEIN_REPOSITORY
+SCENEWORKS_FLUX2_KLEIN_REVISION=<exact artifact revision>
+SCENEWORKS_FLUX2_KLEIN_ROOT=/abs/path/.../snapshots/<rev>/<tier>  # bf16 | q4 | q8, derived from the plan target
+
+# memory-mlx-adapter — flux2_klein_9b, driven for the flux2_klein_9b_kv CATALOG MODEL (sc-22727).
+# The SAME engine provider id loads a DIFFERENT artifact; the engine discriminates on the snapshot
+# path and on LoadSpec::resolved_route, so the two get separate env families rather than one.
+SCENEWORKS_FLUX2_KLEIN_KV_REPOSITORY=SceneWorks/flux2-klein-9b-kv-mlx  # fixed; validated against FLUX2_KLEIN_KV_REPOSITORY
+SCENEWORKS_FLUX2_KLEIN_KV_REVISION=<exact artifact revision>
+SCENEWORKS_FLUX2_KLEIN_KV_ROOT=/abs/path/.../snapshots/<rev>/<tier>  # bf16 | q4 | q8, derived from the plan target
+
+# BOTH adapters — flux1_dev, and the pulid_flux character route over the SAME backbone (sc-22726)
+SCENEWORKS_FLUX1_DEV_REPOSITORY=SceneWorks/flux1-dev-mlx     # fixed; validated against FLUX1_DEV_REPOSITORY
+SCENEWORKS_FLUX1_DEV_REVISION=<exact artifact revision>
+SCENEWORKS_FLUX1_DEV_ROOT=/abs/path/.../snapshots/<rev>/<tier>   # bf16 | q4 | q8, derived from the plan target
+
+# BOTH adapters — flux1_schnell
+SCENEWORKS_FLUX1_SCHNELL_REPOSITORY=SceneWorks/flux1-schnell-mlx  # fixed; validated against FLUX1_SCHNELL_REPOSITORY
+SCENEWORKS_FLUX1_SCHNELL_REVISION=<exact artifact revision>
+SCENEWORKS_FLUX1_SCHNELL_ROOT=/abs/path/.../snapshots/<rev>/<tier>   # bf16 | q4 | q8
+
+# BOTH adapters — the pulid_flux IDENTITY STACK (sc-22726). NOT a manifest download on either lane:
+# the worker fetches it on first use, so an anchor binds the operator's pre-staged copy through the
+# same env var both worker lanes already honour (image_jobs/pulid.rs `ensure_pulid_weights`,
+# image_jobs/pulid_candle.rs `ensure_pulid_candle_weights`). ONE directory holding all five loose
+# files — it IS the provider's `face_dir`, which both engines read scrfd/arcface/bisenet out of by
+# name. A missing file is refused before the load, naming it.
+SCENEWORKS_PULID_WEIGHTS=/abs/path/to/pulid-flux-bundle
+#   pulid_flux_v0.9.1.safetensors   (guozinan/PuLID)
+#   eva02_clip_l_336.safetensors    (SceneWorks/pulid-flux-mlx)
+#   bisenet_parsing.safetensors     (SceneWorks/pulid-flux-mlx)
+#   scrfd_10g.safetensors           (SceneWorks/instantid-mlx)
+#   arcface_iresnet100.safetensors  (SceneWorks/instantid-mlx)
 
 # memory-mlx-adapter — krea_2_turbo (plain text-to-image)
 SCENEWORKS_KREA_REPOSITORY=SceneWorks/krea-2-turbo-mlx       # fixed; validated against KREA_REPOSITORY
@@ -619,6 +678,15 @@ SCENEWORKS_KREA_REPOSITORY=SceneWorks/krea-2-turbo-mlx
 SCENEWORKS_KREA_REVISION=<exact artifact revision>
 SCENEWORKS_KREA_ROOT=/abs/path/.../snapshots/<rev>/q4
 
+# memory-candle-adapter — qwen_image_edit (sc-22728; the SAME two families as the MLX arm, because
+#                          both lanes load the same rehost and the same pinned distill LoRA)
+SCENEWORKS_QWEN_IMAGE_EDIT_REPOSITORY=SceneWorks/qwen-image-edit-2511-mlx
+SCENEWORKS_QWEN_IMAGE_EDIT_REVISION=<exact artifact revision>
+SCENEWORKS_QWEN_IMAGE_EDIT_ROOT=/abs/path/.../snapshots/<rev>/<tier>       # bf16 | q4 | q8, derived from the plan target
+SCENEWORKS_QWEN_EDIT_LIGHTNING_LORA_REPOSITORY=lightx2v/Qwen-Image-Edit-2511-Lightning   # Lightning id only
+SCENEWORKS_QWEN_EDIT_LIGHTNING_LORA_REVISION=<exact artifact revision>
+SCENEWORKS_QWEN_EDIT_LIGHTNING_LORA_ROOT=/abs/path/.../snapshots/<rev>
+
 # memory-candle-adapter — z_image_turbo   (sc-15859; same artifact family as the MLX arm), and the
 #                          z_image_edit alias (`mode: edit_image`, same weights; sc-22724)
 SCENEWORKS_Z_IMAGE_REPOSITORY=SceneWorks/z-image-turbo-mlx   # fixed; validated against Z_IMAGE_REPOSITORY
@@ -629,7 +697,125 @@ SCENEWORKS_Z_IMAGE_ROOT=/abs/path/.../snapshots/<rev>/<tier>  # bf16 | q4 | q8, 
 SCENEWORKS_Z_IMAGE_BASE_REPOSITORY=SceneWorks/z-image-mlx    # fixed; validated against Z_IMAGE_BASE_REPOSITORY
 SCENEWORKS_Z_IMAGE_BASE_REVISION=<exact artifact revision>
 SCENEWORKS_Z_IMAGE_BASE_ROOT=/abs/path/.../snapshots/<rev>/<tier>  # bf16 | q4 | q8, derived from the plan target
+
+# memory-candle-adapter — flux2_dev, flux2_klein_9b and the flux2_klein_9b_kv catalog model
+# (sc-22727). The SAME three env families as the MLX arms: one artifact family per catalog model.
+SCENEWORKS_FLUX2_REPOSITORY=SceneWorks/flux2-dev-mlx
+SCENEWORKS_FLUX2_REVISION=<exact artifact revision>
+SCENEWORKS_FLUX2_ROOT=/abs/path/.../snapshots/<rev>/<tier>        # bf16 | q4 | q8
+SCENEWORKS_FLUX2_KLEIN_REPOSITORY=SceneWorks/flux2-klein-9b-mlx
+SCENEWORKS_FLUX2_KLEIN_REVISION=<exact artifact revision>
+SCENEWORKS_FLUX2_KLEIN_ROOT=/abs/path/.../snapshots/<rev>/<tier>  # bf16 | q4 | q8
+SCENEWORKS_FLUX2_KLEIN_KV_REPOSITORY=SceneWorks/flux2-klein-9b-kv-mlx
+SCENEWORKS_FLUX2_KLEIN_KV_REVISION=<exact artifact revision>
+SCENEWORKS_FLUX2_KLEIN_KV_ROOT=/abs/path/.../snapshots/<rev>/<tier>  # bf16 | q4 | q8
 ```
+
+The FLUX.2 anchors resolve their family member from `(target.provider, target.modelId)`, not from
+the provider alone: `flux2_klein_9b` and `flux2_klein_9b_kv` are two catalog models over ONE engine
+provider id (`crates/sceneworks-worker/src/engines.rs`), and both adapters bind the catalog id as
+`LoadSpec::resolved_route` — the same lever the worker sets. What the engine does with it is
+per lane: on MLX `KleinArtifactInventory::validate_resolved_route` refuses a cross-variant artifact
+with it (`mlx-gen-flux2/src/artifact_inventory.rs`); on Candle the binding is inert —
+`candle-gen-flux2` never reads `resolved_route` (its probe labels are hardcoded), so there the
+per-model env family is the ONLY thing that keeps a KV plan off the base rehost. The KV model's
+loader-closure declaration names `engineId: "flux2_klein_9b"` on both lanes (§7c-bis).
+
+**The MLX klein cells capture, and need the epic's pin bump (sc-22738) to do it in CI.** They were
+recorded here as "declared but NOT capturable" while the pin was `c6d6a4db`. Inference PRs 948 and
+949 (both on `feature/sc-22723-memory-anchor-measurability`, merged at `d5270c68`) removed both
+halves of that, and the shape the arm loads changed with them. This is the state after those PRs,
+measured on this Mac, so nobody re-derives it.
+
+*What the engine now accepts (PR 949).* The shipped q4 and q8 klein rehosts carry a STALE
+`quantization` marker in `text_encoder/config.json` — on both
+`SceneWorks/flux2-klein-9b-mlx@acf05e8d` and `SceneWorks/flux2-klein-9b-kv-mlx@406265be` — while the
+Qwen3 shards under it are dense, exactly as the manifest and `config/tier-integrity.jsonc` say. The
+engine no longer trusts the marker: `KleinArtifactInventory::verify_turnkey_with_contracts` reads the
+real tensor headers, admits the tier as dense under that stale-marker allowance, and the text-encoder
+load derives its quant from the validated source. The same PR admits sharded bf16 components and HF
+cache `blobs/` symlink targets, which is what the tier-only discovery-root confinement used to refuse
+on the bf16 tier. `verify_for_provider` now accepts the shipped q4/q8/bf16 for both `Resident +
+Eager` and `Sequential + Deferred` with `LoadSpec.quantize = None`. Both old refusals are gone.
+
+*The shape: the RESIDENT rung's, which is eager.* The klein arms load `Resident` +
+`EagerMaterialization` + `quantize: None`. They used to load `Sequential` +
+`DeferredMaterialization`, for a reason that PR 948 retired: at `c6d6a4db` that was the ONLY shape
+the engine published a calibration identity under (`klein_contract_for` set `calibration` iff
+`klein_streamable(spec)`). PR 948 made the identity a property of the ADMITTED ARTIFACT and its
+tier — published for every load shape, `Resident + Eager` included — and left `klein_streamable`
+gating rung 4 alone. With the identity no longer forcing the choice, the shape follows the rung the
+anchor prices, and at the resident rung it MUST be eager: a deferred klein transformer cannot render
+without a block window. `mlx-gen-flux2/src/transformer.rs` refuses with *"flux2: a deferred
+transformer requires an explicit block window"* the moment `block_stream` is set and no window is
+selected. That is not a deduction — it is the first sc-22727 proof capture below. Both klein manifest
+entries still declare an MLX `bounded_transformer_residency` row with
+`requiredOffloadPolicy: "sequential"`, and the worker still binds `Applied` + Deferred + Sequential
+when THAT rung is the one being engaged; the resident rung's own row declares no
+`requiredOffloadPolicy` at all, which is the worker's eager default. The MLX adapter's
+`the_flux2_arm_table_agrees_with_the_shipped_manifest_and_the_anchor_plan` binds the arm to the
+RESIDENT row for exactly this reason, and
+`flux2_specs_are_the_resident_rungs_shape_and_are_deliberately_not_streamable` transcribes
+`klein_streamable` term by term so the arms can assert they are outside it. The dev arm is unchanged
+and was always `Resident` + `Eager`.
+
+*The identities the plan binds.* The manifest's rung rows carry the WEIGHTS-FREE registry
+declaration (`flux2-klein-static-registry-behavior-v2-flux2-klein-9b`), which is a declaration and
+not what a load of real weights returns. The plan rows carry the PRODUCTION identity PR 948 mints:
+`flux2-klein-9b-<tier>-mlx-shared-ladder-<artifact_tag>-t2i-v1`, where `artifact_tag` is `rehost` for
+the base repo and `kv-rehost` for the KV repo (`KleinArtifactInventory::artifact_tag`, resolved from
+the snapshot path, so the two shipped repos differ even though they share a provider id) and the
+route is `t2i` because `flux2_klein_9b` is the only klein provider this text-to-image lane loads
+(`edit` / `kv-edit` belong to the edit providers). The bf16 turnkey is `BaseRehost(None)`, NOT
+`CalibratedBase`, so it takes `rehost` too — measured, not assumed. The adapter's
+`flux2_calibration_fingerprint` writes all six as literals rather than reading the pinned crate,
+because the minting function does not exist at `c6d6a4db` and CI builds `c6d6a4db`; the capture
+refuses a loaded contract whose identity differs, so the copies cannot drift once the pin moves.
+
+*The proof captures.* `measure-memory-catalog.mjs --backend mlx --no-commit`, one anchor at a time,
+against an inference checkout at `d5270c68` and a locally bumped pin, on this Mac, clean trees, work
+dir outside the repo, `--hf-cache /Volumes/Models/huggingface/hub`. The bump and the evidence were
+reverted afterwards; nothing here is committed.
+
+1. `flux2_klein_9b:q4:mlx` under the OLD `Sequential` + `Deferred` shape → **failed at 123 s** with
+   *"generate measured FLUX.2-dev render: unsupported: flux2: a deferred transformer requires an
+   explicit block window"*. It cleared the contract read, the inventory verification and the full
+   load — both PR 949 gates — and died at the render. This is the measurement that chose the shape.
+2. `flux2_klein_9b:q4:mlx` under `Resident` + `Eager` → **captured in 125 s**, `runtime_complete`,
+   `evidenceScope: authoritative`, `loadShape: eager_materialization`, rung `resident`, identity
+   `flux2-klein-9b-q4-mlx-shared-ladder-rehost-t2i-v1`. Observed overall: 30.93 GB active,
+   61.91 GB allocator envelope.
+3. `flux2_klein_9b_kv:q4:mlx` → **captured in 118 s**, identity
+   `flux2-klein-9b-q4-mlx-shared-ladder-kv-rehost-t2i-v1`, 30.93 GB active / 61.96 GB allocator.
+   The KV repo resolves its own artifact tag through its own env family, as designed.
+4. `flux2_klein_9b:bf16:mlx` → **captured in 293 s**, identity
+   `flux2-klein-9b-bf16-mlx-shared-ladder-rehost-t2i-v1`, 43.98 GB active / 73.89 GB allocator.
+
+The q8 cells and `flux2_klein_9b_kv:bf16:mlx` were not run; they are the same code path with a
+different tier segment, and the campaign will capture them.
+
+*What CI builds.* SceneWorks is still pinned to `c6d6a4db` on this branch, where the engine refuses
+the shipped rehosts and publishes no production identity, so these six cells are not capturable in CI
+yet. The epic's pin bump (sc-22738) is what makes them capturable; the arm, the plan rows, both
+closure declarations and the manifest reconciliation are already in place, so no SceneWorks change is
+needed when it lands. Do not "fix" the interim by copying weights into a flattened root: that would
+measure a tree the worker never opens.
+
+*The seam that hid all of this.* `evaluate_declared_mlx_load_shape_for_request` proves the BTR row
+against a candidate through `memory_strategy_contract(provider, candidate)`, and used to collapse an
+`Err` to `false` with `.ok().flatten()` (`crates/sceneworks-worker/src/memory_route_registry.rs`). At
+`c6d6a4db` that turned the inventory refusal into "not implemented": the declaration was `Refused`,
+the worker fell back to an eager resident load, the streamable branch was never entered, the
+inventory was never verified, and the model ran with NO calibration identity — silently. The
+downgrade is still the right fallback (a load that cannot prove its rung must not claim it), so
+sc-22727 kept it and added a `tracing::warn!` naming the provider and the error at that seam
+(`provider_implements_declared_strategy`, with a weights-free unit test).
+
+`flux2_dev:bf16:mlx` is planned at **512²** rather than the lane's usual 768². §6c records that the
+113 GB dense FLUX.2-dev export does not fit a 128 GB Mac at 1024²; the plan geometry is a free plan
+choice (§2b), so the bf16 anchor is declared at the smallest square this arm measures and its
+fixture name (`flux2-dev-mlx-bf16-512-seed18218-step2`) carries the edge. Nothing derives the
+capture geometry from a sibling tier's.
 
 `scripts/measure-memory-catalog.mjs` derives every one of these from the plan and the manifest
 (`PROVIDER_FAMILIES`); `--list --backend <lane>` is the oracle for whether a cell is measurable on
@@ -638,6 +824,28 @@ this host (`runnable` / `weights_missing`) — epic 22723. The `z_image_edit` an
 provider (`crates/sceneworks-worker/src/engines.rs`), so the adapter loads the Turbo provider and
 conditions the request on one reference image; its loader-closure declaration names that alias
 explicitly (`engineId` in `config/anchor-loader-closures.json`, §7c-bis).
+
+The two Qwen EDIT ids are the other shape of the same thing (sc-22728), and the differences are worth
+stating because they are the ones that bite:
+
+* `qwen_image_edit_2511` and `qwen_image_edit_2511_lightning` both plan `provider: qwen_image_edit,
+  mode: edit_image` and both load the SAME rehost — so neither the provider nor the artifact
+  distinguishes them. The adapter arm is resolved from `(target.provider, target.modelId)` on both
+  lanes, and each member's fixture prefix and step count are bound to it, so a 4-step distilled
+  capture cannot be recorded under the production id.
+* The Lightning id declares `overlay: lora`: its built-in lightx2v distill LoRA is a real second
+  network folded into the MMDiT at load. It is the ONE artifact in `PROVIDER_FAMILIES` that no
+  manifest download ships (the worker fetches it lazily at a pinned revision), so it is declared as a
+  model-keyed `sideArtifact` and reaches the arm through `SCENEWORKS_QWEN_EDIT_LIGHTNING_LORA_*`.
+* On **Candle** the edit provider is BESPOKE — `edit.rs`'s own words: "driven directly by the worker
+  … the registered `qwen_image` descriptor stays txt2img-only" — so the arm calls
+  `QwenEdit::load_with_memory_context` + `generate_with_memory_context`, the worker's exact pair, and
+  is dispatched ahead of the five-rung path. Going through the catalog there would load the txt2img
+  provider and record it under an edit id.
+* The edit models do **not** carry the physical-receipt requirement. The harness scopes it to
+  `record.target.modelId === "qwen_image"` (`requiresPhysicalMlxProvenanceForCurrency`), and a test
+  binds `PROVIDER_FAMILIES[*].physical` to exactly that set — passing `--raw-log-dir` for an arm that
+  emits no `sourceCapture` makes the harness refuse the render.
 
 All three of each family are **required** (`protocol::required_env`) — a missing one fails before
 model load, not after. The plain MLX Krea arm is reference-free, rejects overlays and PiD, and runs
