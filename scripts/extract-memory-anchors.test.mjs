@@ -12,6 +12,7 @@ import {
   ANCHOR_LOADER_CLOSURES_PATH,
   CONTRACT_LADDER_BACKENDS,
   MANIFEST_PATH,
+  stagedResidencyExemptLanes,
   MEMORY_ANCHOR_SCHEMA_VERSION,
   PACKAGED_SOURCES_PATH,
   STORE_PATH,
@@ -623,6 +624,117 @@ test("derivability outranks envelope, so a cell is never anchored by a render it
   // The MLX video law rejects no composition outright — its regime guards are anchor-vs-request —
   // so this rule must not silently withdraw MLX rows.
   assert.equal(isDerivable({ backend: "mlx", measuredRegime: {} }), true);
+});
+
+test("a candle lane whose engine has no staged composition is anchored by its resident render", async () => {
+  // sc-22734. `staged_residency` is a STRUCTURAL exemption for SenseNova on both lanes: one fused
+  // dual-path checkpoint with no separable conditioning component, so no staged render exists to
+  // anchor from and the resident one is the only composition the cell can ever be captured in.
+  // Before this the extractor discarded those captures and the cells fell to analytic-only, which
+  // would have spent a real GPU campaign producing renders nothing could use.
+  const manifest = {
+    models: [
+      {
+        id: "sensenova_u1_8b",
+        candle: {
+          memoryStrategyStructuralExemptions: {
+            staged_residency: { overlays: ["none"], evidence: [] },
+          },
+        },
+        mlx: {
+          memoryStrategyStructuralExemptions: {
+            staged_residency: { overlays: ["none"], evidence: [] },
+          },
+        },
+      },
+      { id: "qwen_image", candle: {} },
+    ],
+  };
+  const lanes = stagedResidencyExemptLanes(manifest);
+  assert.deepEqual(
+    [...lanes].sort(),
+    ["sensenova_u1_8b:candle", "sensenova_u1_8b:mlx"],
+    "the exempt lanes are derived from the manifest, never hand-kept",
+  );
+
+  const candle = (modelId, regime) => ({
+    modelId,
+    backend: "candle",
+    transformerVariant: null,
+    decoder: null,
+    geometry: { width: 1024, height: 1024, frames: 1, fps: null },
+    measuredRegime: {
+      decodeTiled: false,
+      transformerWindowed: false,
+      staged: false,
+      attentionChunked: false,
+      ...regime,
+    },
+    overallAllocatorEnvelopeBytes: 1,
+    recordId: modelId,
+    sourcePath: "docs/generated/example.json",
+  });
+
+  // The exempt cell: resident derives, and the staged shape it can never actually be measured in
+  // is refused rather than silently preferred.
+  assert.equal(isDerivable(candle("sensenova_u1_8b", {}), lanes), true);
+  assert.equal(
+    isDerivable(candle("sensenova_u1_8b", { staged: true }), lanes),
+    false,
+    "a staged anchor on a cell that declares staging impossible is not a record the law can price",
+  );
+  // Deeper rungs stay refused on the exempt lane too.
+  for (const deeper of ["decodeTiled", "attentionChunked", "transformerWindowed"]) {
+    assert.equal(
+      isDerivable(candle("sensenova_u1_8b", { [deeper]: true }), lanes),
+      false,
+      `${deeper} is deeper than the law prices, exemption or not`,
+    );
+  }
+  // And NOTHING moves for an ordinary cell — the exemption is per (model, lane), not a mode.
+  assert.equal(isDerivable(candle("qwen_image", {}), lanes), false);
+  assert.equal(isDerivable(candle("qwen_image", { staged: true }), lanes), true);
+  // The default argument is what every existing caller and every packaged row still takes.
+  assert.equal(isDerivable(candle("sensenova_u1_8b", {})), false);
+  assert.equal(isDerivable(candle("sensenova_u1_8b", { staged: true })), true);
+
+  // Representative selection follows the same rule, so an exempt cell's resident capture wins.
+  assert.equal(
+    selectRepresentative(
+      [candle("sensenova_u1_8b", { staged: true }), candle("sensenova_u1_8b", {})],
+      lanes,
+    ).measuredRegime.staged,
+    false,
+  );
+
+  // The real manifest declares the exemption for all six SenseNova ids on both lanes, and for
+  // nothing that already has a packaged candle anchor.
+  const realManifest = JSON.parse(
+    stripJsoncComments(await readFile(path.join(ROOT, MANIFEST_PATH), "utf8")),
+  );
+  const realLanes = stagedResidencyExemptLanes(realManifest);
+  for (const modelId of realManifest.models
+    .filter((model) => model.id.startsWith("sensenova_u1_8b"))
+    .map((model) => model.id)) {
+    for (const backend of ["mlx", "candle"]) {
+      assert.ok(
+        realLanes.has(`${modelId}:${backend}`),
+        `${modelId}:${backend} must carry the structural exemption the arm relies on`,
+      );
+    }
+  }
+  const store = await buildAnchorStore({ matrix });
+  for (const anchor of store.anchors) {
+    assert.ok(
+      !realLanes.has(`${anchor.modelId}:${anchor.backend}`),
+      `${anchor.id}: no packaged anchor is on an exempt lane yet, so no packaged row moved`,
+    );
+    assert.equal(
+      anchor.stagedResidencyStructurallyNotApplicable,
+      undefined,
+      `${anchor.id}: the new field is emitted only when true, so packaged rows stay byte-identical`,
+    );
+  }
 });
 
 test("every emitted anchor cites a compiled-in corpus, and every retained corpus is compiled in", async () => {

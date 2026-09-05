@@ -527,9 +527,9 @@ test("windows-candle captures and schema-checks the SC-21714 Krea anchor record"
   assert.deepEqual(
     [...counts.entries()].sort(([a], [b]) => a.localeCompare(b)),
     [
-      // Krea five-rung reference, PuLID-FLUX bespoke, the Qwen edit bespoke arm (sc-22728), and the
-      // inline Krea arm.
-      ["certifying_vram_probe()", 4],
+      // Krea five-rung reference, PuLID-FLUX bespoke, the Qwen edit bespoke arm (sc-22728), the
+      // inline Krea arm, and the SenseNova family arm (sc-22734).
+      ["certifying_vram_probe()", 5],
       // LTX-2.5: renders first, then proves idle on the rendered baseline.
       ["VramProbe::start_rendered().assert_idle(1.0)", 1],
     ],
@@ -1521,21 +1521,26 @@ test("memory adapters bind every emitted overlay verdict to the requested target
   assert.match(mlxQwenEdit, /\("builtInAdapters", "count", loaded_adapters as u64\)/);
   assert.match(mlxQwenEdit, /if loaded_adapters == 0 \{\s*protocol::settle_plain_overlay_scenario\(/);
   // A hand-rolled `"status": "gated"` object is what must not silently ship with `overlay` left at
-  // `not_run`. One arm builds its fragment by hand for a real reason — sc-22726's bespoke PuLID
-  // capture, whose route opens no memory-strategy request scope — so the claim is named rather than
-  // blanket: that arm and no other, and it must still settle its own overlay scenario.
+  // `not_run`. Two arms build their fragment by hand for a real reason — sc-22726's bespoke PuLID
+  // capture, whose route opens no memory-strategy request scope, and sc-22734's SenseNova resident
+  // anchor, which is not a five-rung record at all — so the claim is named rather than blanket:
+  // those arms and no others, and each must still SETTLE its own overlay verdict. Settling is what
+  // is checked, not the spelling: PuLID writes the verdict into the object it builds, SenseNova
+  // hands the finished fragment to `settle_plain_overlay_scenario`. An arm that does neither leaves
+  // `overlay` at `not_run`, which is the failure this gate exists for.
   const handRolled = [...candleFunctions]
     .filter(([, body]) => /"status":\s*"gated"/.test(body))
     .map(([name]) => name);
   assert.deepEqual(
-    handRolled,
-    ["run_pulid_flux_capture"],
+    handRolled.sort(),
+    ["run_pulid_flux_capture", "run_sensenova_capture"],
     "a hand-rolled gated fragment bypasses the overlay-settling builders",
   );
   for (const name of handRolled) {
-    assert.match(
-      candleFunctions.get(name),
-      /\{ "name": "overlay", "result": "(passed|failed)"/,
+    const body = candleFunctions.get(name);
+    assert.ok(
+      /\{ "name": "overlay", "result": "(passed|failed)"/.test(body) ||
+        /protocol::settle_plain_overlay_scenario\(/.test(body),
       `${name} hand-rolls a gated fragment and leaves its overlay verdict unsettled`,
     );
   }

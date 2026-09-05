@@ -390,18 +390,26 @@ export function adapterCapturableProviders(source, label) {
     }
     const providers = new Set();
     for (const arm of matchArms(block.inner)) {
-      const literal = /^"((?:\\.|[^"\\])*)"$/.exec(arm.pattern);
-      if (literal) {
-        providers.add(literal[1]);
-      } else if (/^[A-Z][A-Z0-9_]*$/.test(arm.pattern)) {
-        if (!consts.has(arm.pattern)) {
-          throw new Error(`${label}: dispatch arm ${arm.pattern} does not resolve to a &str const`);
+      // sc-22734: an arm may be a Rust OR-PATTERN — `SENSENOVA_ID | SENSENOVA_FAST_ID`, the
+      // spelling a family whose several engine ids share ONE arm body takes. Each alternative is
+      // resolved by exactly the rules a lone pattern takes, so an or-pattern can never admit a
+      // shape a single pattern would be refused for; splitting is safe because these dispatch
+      // patterns are string literals and const paths, neither of which can contain a `|`. A
+      // leading `|` (rustfmt's multi-line spelling) yields an empty alternative, which is dropped.
+      for (const alternative of arm.pattern.split("|").map((part) => part.trim()).filter(Boolean)) {
+        const literal = /^"((?:\\.|[^"\\])*)"$/.exec(alternative);
+        if (literal) {
+          providers.add(literal[1]);
+        } else if (/^[A-Z][A-Z0-9_]*$/.test(alternative)) {
+          if (!consts.has(alternative)) {
+            throw new Error(`${label}: dispatch arm ${alternative} does not resolve to a &str const`);
+          }
+          providers.add(consts.get(alternative));
+        } else if (!/^[a-z_][A-Za-z0-9_]*$/.test(alternative)) {
+          // Lower-case identifiers are the fallback binding of the refusal arm itself; anything else
+          // is a dispatch shape this parser has never seen and must not guess about.
+          throw new Error(`${label}: unrecognized dispatch arm pattern ${JSON.stringify(alternative)}`);
         }
-        providers.add(consts.get(arm.pattern));
-      } else if (!/^[a-z_][A-Za-z0-9_]*$/.test(arm.pattern)) {
-        // Lower-case identifiers are the fallback binding of the refusal arm itself; anything else
-        // is a dispatch shape this parser has never seen and must not guess about.
-        throw new Error(`${label}: unrecognized dispatch arm pattern ${JSON.stringify(arm.pattern)}`);
       }
     }
     if (providers.size === 0) {

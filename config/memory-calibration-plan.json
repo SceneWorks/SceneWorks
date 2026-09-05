@@ -871,6 +871,762 @@
       "calibrationFingerprint": "sdxl-mlx-unet-shared-ladder-v3",
       "fixture": "sdxl-base-mlx-q8-1024-seed18379-step2"
     },
+    "sensenova_u1_8b:bf16:candle": {
+      "provider": "sensenova_u1_8b",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "eager_materialization",
+      "strategy": {
+        "rung": "resident",
+        "engagedRungs": [
+          "resident"
+        ]
+      },
+      "calibrationFingerprint": "sensenova-u1-quality-bf16-candle-request-memory-ladder-v1",
+      "fixture": "quality-candle-bf16-1024-seed22734-step2"
+    },
+    "sensenova_u1_8b:bf16:mlx": {
+      "provider": "sensenova_u1_8b",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "eager_materialization",
+      "strategy": {
+        "rung": "resident",
+        "engagedRungs": [
+          "resident"
+        ]
+      },
+      "calibrationFingerprint": "sensenova-u1-quality-bf16-mlx-shared-ladder-v1",
+      "fixture": "quality-mlx-bf16-1024-seed22734-step2"
+    },
+    "sensenova_u1_8b:q4:candle": {
+      "provider": "sensenova_u1_8b",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "eager_materialization",
+      "strategy": {
+        "rung": "resident",
+        "engagedRungs": [
+          "resident"
+        ]
+      },
+      "calibrationFingerprint": "sensenova-u1-quality-q4-candle-request-memory-ladder-v1",
+      "fixture": "quality-candle-q4-1024-seed22734-step2"
+    },
+    "sensenova_u1_8b:q4:mlx": {
+      "provider": "sensenova_u1_8b",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "eager_materialization",
+      "strategy": {
+        "rung": "resident",
+        "engagedRungs": [
+          "resident"
+        ]
+      },
+      "calibrationFingerprint": "sensenova-u1-quality-q4-mlx-shared-ladder-v1",
+      "fixture": "quality-mlx-q4-1024-seed22734-step2"
+    },
+    "sensenova_u1_8b:q8:candle": {
+      "provider": "sensenova_u1_8b",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "eager_materialization",
+      "strategy": {
+        "rung": "resident",
+        "engagedRungs": [
+          "resident"
+        ]
+      },
+      "calibrationFingerprint": "sensenova-u1-quality-q8-candle-request-memory-ladder-v1",
+      "fixture": "quality-candle-q8-1024-seed22734-step2"
+    },
+    "sensenova_u1_8b:q8:mlx": {
+      "provider": "sensenova_u1_8b",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "eager_materialization",
+      "strategy": {
+        "rung": "resident",
+        "engagedRungs": [
+          "resident"
+        ]
+      },
+      "calibrationFingerprint": "sensenova-u1-quality-q8-mlx-shared-ladder-2026-08-03-v1",
+      "fixture": "quality-mlx-q8-1024-seed22734-step2"
+    },
+    "sensenova_u1_8b_fast:bf16:candle": {
+      "provider": "sensenova_u1_8b_fast",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "eager_materialization",
+      "strategy": {
+        "rung": "resident",
+        "engagedRungs": [
+          "resident"
+        ]
+      },
+      "calibrationFingerprint": "sensenova-u1-fast-bf16-candle-request-memory-ladder-v1",
+      "fixture": "fast-candle-bf16-1024-seed22734-step2"
+    },
+    "sensenova_u1_8b_fast:bf16:mlx": {
+      "provider": "sensenova_u1_8b_fast",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "eager_materialization",
+      "strategy": {
+        "rung": "resident",
+        "engagedRungs": [
+          "resident"
+        ]
+      },
+      "calibrationFingerprint": "sensenova-u1-fast-bf16-mlx-shared-ladder-v1",
+      "fixture": "fast-mlx-bf16-1024-seed22734-step2"
+    },
+    "sensenova_u1_8b_fast:q4:candle": {
+      "provider": "sensenova_u1_8b_fast",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "eager_materialization",
+      "strategy": {
+        "rung": "resident",
+        "engagedRungs": [
+          "resident"
+        ]
+      },
+      "calibrationFingerprint": "sensenova-u1-fast-q4-candle-request-memory-ladder-v1",
+      "fixture": "fast-candle-q4-1024-seed22734-step2"
+    },
+    "sensenova_u1_8b_fast:q4:mlx": {
+      "provider": "sensenova_u1_8b_fast",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "eager_materialization",
+      "strategy": {
+        "rung": "resident",
+        "engagedRungs": [
+          "resident"
+        ]
+      },
+      "calibrationFingerprint": "sensenova-u1-fast-q4-mlx-shared-ladder-v1",
+      "fixture": "fast-mlx-q4-1024-seed22734-step2"
+    },
+    "sensenova_u1_8b_fast:q8:candle": {
+      "provider": "sensenova_u1_8b_fast",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "eager_materialization",
+      "strategy": {
+        "rung": "resident",
+        "engagedRungs": [
+          "resident"
+        ]
+      },
+      "calibrationFingerprint": "sensenova-u1-fast-q8-candle-request-memory-ladder-v1",
+      "fixture": "fast-candle-q8-1024-seed22734-step2"
+    },
+    "sensenova_u1_8b_fast:q8:mlx": {
+      "provider": "sensenova_u1_8b_fast",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "eager_materialization",
+      "strategy": {
+        "rung": "resident",
+        "engagedRungs": [
+          "resident"
+        ]
+      },
+      "calibrationFingerprint": "sensenova-u1-fast-q8-mlx-shared-ladder-2026-08-03-v1",
+      "fixture": "fast-mlx-q8-1024-seed22734-step2"
+    },
+    "sensenova_u1_8b_infographic_v2:bf16:candle": {
+      "provider": "sensenova_u1_8b",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "eager_materialization",
+      "strategy": {
+        "rung": "resident",
+        "engagedRungs": [
+          "resident"
+        ]
+      },
+      "calibrationFingerprint": "sensenova-u1-infographic-v2-bf16-candle-request-memory-ladder-v1",
+      "fixture": "infographic-v2-candle-bf16-1024-seed22734-step2"
+    },
+    "sensenova_u1_8b_infographic_v2:bf16:mlx": {
+      "provider": "sensenova_u1_8b",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "eager_materialization",
+      "strategy": {
+        "rung": "resident",
+        "engagedRungs": [
+          "resident"
+        ]
+      },
+      "calibrationFingerprint": "sensenova-u1-infographic-v2-bf16-mlx-shared-ladder-v1",
+      "fixture": "infographic-v2-mlx-bf16-1024-seed22734-step2"
+    },
+    "sensenova_u1_8b_infographic_v2:q4:candle": {
+      "provider": "sensenova_u1_8b",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "eager_materialization",
+      "strategy": {
+        "rung": "resident",
+        "engagedRungs": [
+          "resident"
+        ]
+      },
+      "calibrationFingerprint": "sensenova-u1-infographic-v2-q4-candle-request-memory-ladder-v1",
+      "fixture": "infographic-v2-candle-q4-1024-seed22734-step2"
+    },
+    "sensenova_u1_8b_infographic_v2:q4:mlx": {
+      "provider": "sensenova_u1_8b",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "eager_materialization",
+      "strategy": {
+        "rung": "resident",
+        "engagedRungs": [
+          "resident"
+        ]
+      },
+      "calibrationFingerprint": "sensenova-u1-infographic-v2-q4-mlx-shared-ladder-v1",
+      "fixture": "infographic-v2-mlx-q4-1024-seed22734-step2"
+    },
+    "sensenova_u1_8b_infographic_v2:q8:candle": {
+      "provider": "sensenova_u1_8b",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "eager_materialization",
+      "strategy": {
+        "rung": "resident",
+        "engagedRungs": [
+          "resident"
+        ]
+      },
+      "calibrationFingerprint": "sensenova-u1-infographic-v2-q8-candle-request-memory-ladder-v1",
+      "fixture": "infographic-v2-candle-q8-1024-seed22734-step2"
+    },
+    "sensenova_u1_8b_infographic_v2:q8:mlx": {
+      "provider": "sensenova_u1_8b",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "eager_materialization",
+      "strategy": {
+        "rung": "resident",
+        "engagedRungs": [
+          "resident"
+        ]
+      },
+      "calibrationFingerprint": "sensenova-u1-infographic-v2-q8-mlx-shared-ladder-v1",
+      "fixture": "infographic-v2-mlx-q8-1024-seed22734-step2"
+    },
+    "sensenova_u1_8b_infographic_v2_fast:bf16:candle": {
+      "provider": "sensenova_u1_8b_fast",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "eager_materialization",
+      "strategy": {
+        "rung": "resident",
+        "engagedRungs": [
+          "resident"
+        ]
+      },
+      "calibrationFingerprint": "sensenova-u1-infographic-v2-fast-bf16-candle-request-memory-ladder-v1",
+      "fixture": "infographic-v2-fast-candle-bf16-1024-seed22734-step2"
+    },
+    "sensenova_u1_8b_infographic_v2_fast:bf16:mlx": {
+      "provider": "sensenova_u1_8b_fast",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "eager_materialization",
+      "strategy": {
+        "rung": "resident",
+        "engagedRungs": [
+          "resident"
+        ]
+      },
+      "calibrationFingerprint": "sensenova-u1-infographic-v2-fast-bf16-mlx-shared-ladder-v1",
+      "fixture": "infographic-v2-fast-mlx-bf16-1024-seed22734-step2"
+    },
+    "sensenova_u1_8b_infographic_v2_fast:q4:candle": {
+      "provider": "sensenova_u1_8b_fast",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "eager_materialization",
+      "strategy": {
+        "rung": "resident",
+        "engagedRungs": [
+          "resident"
+        ]
+      },
+      "calibrationFingerprint": "sensenova-u1-infographic-v2-fast-q4-candle-request-memory-ladder-v1",
+      "fixture": "infographic-v2-fast-candle-q4-1024-seed22734-step2"
+    },
+    "sensenova_u1_8b_infographic_v2_fast:q4:mlx": {
+      "provider": "sensenova_u1_8b_fast",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "eager_materialization",
+      "strategy": {
+        "rung": "resident",
+        "engagedRungs": [
+          "resident"
+        ]
+      },
+      "calibrationFingerprint": "sensenova-u1-infographic-v2-fast-q4-mlx-shared-ladder-v1",
+      "fixture": "infographic-v2-fast-mlx-q4-1024-seed22734-step2"
+    },
+    "sensenova_u1_8b_infographic_v2_fast:q8:candle": {
+      "provider": "sensenova_u1_8b_fast",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "eager_materialization",
+      "strategy": {
+        "rung": "resident",
+        "engagedRungs": [
+          "resident"
+        ]
+      },
+      "calibrationFingerprint": "sensenova-u1-infographic-v2-fast-q8-candle-request-memory-ladder-v1",
+      "fixture": "infographic-v2-fast-candle-q8-1024-seed22734-step2"
+    },
+    "sensenova_u1_8b_infographic_v2_fast:q8:mlx": {
+      "provider": "sensenova_u1_8b_fast",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "eager_materialization",
+      "strategy": {
+        "rung": "resident",
+        "engagedRungs": [
+          "resident"
+        ]
+      },
+      "calibrationFingerprint": "sensenova-u1-infographic-v2-fast-q8-mlx-shared-ladder-v1",
+      "fixture": "infographic-v2-fast-mlx-q8-1024-seed22734-step2"
+    },
+    "sensenova_u1_8b_infographic_v3:bf16:candle": {
+      "provider": "sensenova_u1_8b",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "eager_materialization",
+      "strategy": {
+        "rung": "resident",
+        "engagedRungs": [
+          "resident"
+        ]
+      },
+      "calibrationFingerprint": "sensenova-u1-infographic-v3-bf16-candle-request-memory-ladder-v1",
+      "fixture": "infographic-v3-candle-bf16-1024-seed22734-step2"
+    },
+    "sensenova_u1_8b_infographic_v3:bf16:mlx": {
+      "provider": "sensenova_u1_8b",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "eager_materialization",
+      "strategy": {
+        "rung": "resident",
+        "engagedRungs": [
+          "resident"
+        ]
+      },
+      "calibrationFingerprint": "sensenova-u1-infographic-v3-bf16-mlx-shared-ladder-v1",
+      "fixture": "infographic-v3-mlx-bf16-1024-seed22734-step2"
+    },
+    "sensenova_u1_8b_infographic_v3:q4:candle": {
+      "provider": "sensenova_u1_8b",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "eager_materialization",
+      "strategy": {
+        "rung": "resident",
+        "engagedRungs": [
+          "resident"
+        ]
+      },
+      "calibrationFingerprint": "sensenova-u1-infographic-v3-q4-candle-request-memory-ladder-v1",
+      "fixture": "infographic-v3-candle-q4-1024-seed22734-step2"
+    },
+    "sensenova_u1_8b_infographic_v3:q4:mlx": {
+      "provider": "sensenova_u1_8b",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "eager_materialization",
+      "strategy": {
+        "rung": "resident",
+        "engagedRungs": [
+          "resident"
+        ]
+      },
+      "calibrationFingerprint": "sensenova-u1-infographic-v3-q4-mlx-shared-ladder-v1",
+      "fixture": "infographic-v3-mlx-q4-1024-seed22734-step2"
+    },
+    "sensenova_u1_8b_infographic_v3:q8:candle": {
+      "provider": "sensenova_u1_8b",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "eager_materialization",
+      "strategy": {
+        "rung": "resident",
+        "engagedRungs": [
+          "resident"
+        ]
+      },
+      "calibrationFingerprint": "sensenova-u1-infographic-v3-q8-candle-request-memory-ladder-v1",
+      "fixture": "infographic-v3-candle-q8-1024-seed22734-step2"
+    },
+    "sensenova_u1_8b_infographic_v3:q8:mlx": {
+      "provider": "sensenova_u1_8b",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "eager_materialization",
+      "strategy": {
+        "rung": "resident",
+        "engagedRungs": [
+          "resident"
+        ]
+      },
+      "calibrationFingerprint": "sensenova-u1-infographic-v3-q8-mlx-shared-ladder-v1",
+      "fixture": "infographic-v3-mlx-q8-1024-seed22734-step2"
+    },
+    "sensenova_u1_8b_infographic_v3_fast:bf16:candle": {
+      "provider": "sensenova_u1_8b_fast",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "eager_materialization",
+      "strategy": {
+        "rung": "resident",
+        "engagedRungs": [
+          "resident"
+        ]
+      },
+      "calibrationFingerprint": "sensenova-u1-infographic-v3-fast-bf16-candle-request-memory-ladder-v1",
+      "fixture": "infographic-v3-fast-candle-bf16-1024-seed22734-step2"
+    },
+    "sensenova_u1_8b_infographic_v3_fast:bf16:mlx": {
+      "provider": "sensenova_u1_8b_fast",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "eager_materialization",
+      "strategy": {
+        "rung": "resident",
+        "engagedRungs": [
+          "resident"
+        ]
+      },
+      "calibrationFingerprint": "sensenova-u1-infographic-v3-fast-bf16-mlx-shared-ladder-v1",
+      "fixture": "infographic-v3-fast-mlx-bf16-1024-seed22734-step2"
+    },
+    "sensenova_u1_8b_infographic_v3_fast:q4:candle": {
+      "provider": "sensenova_u1_8b_fast",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "eager_materialization",
+      "strategy": {
+        "rung": "resident",
+        "engagedRungs": [
+          "resident"
+        ]
+      },
+      "calibrationFingerprint": "sensenova-u1-infographic-v3-fast-q4-candle-request-memory-ladder-v1",
+      "fixture": "infographic-v3-fast-candle-q4-1024-seed22734-step2"
+    },
+    "sensenova_u1_8b_infographic_v3_fast:q4:mlx": {
+      "provider": "sensenova_u1_8b_fast",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "eager_materialization",
+      "strategy": {
+        "rung": "resident",
+        "engagedRungs": [
+          "resident"
+        ]
+      },
+      "calibrationFingerprint": "sensenova-u1-infographic-v3-fast-q4-mlx-shared-ladder-v1",
+      "fixture": "infographic-v3-fast-mlx-q4-1024-seed22734-step2"
+    },
+    "sensenova_u1_8b_infographic_v3_fast:q8:candle": {
+      "provider": "sensenova_u1_8b_fast",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "eager_materialization",
+      "strategy": {
+        "rung": "resident",
+        "engagedRungs": [
+          "resident"
+        ]
+      },
+      "calibrationFingerprint": "sensenova-u1-infographic-v3-fast-q8-candle-request-memory-ladder-v1",
+      "fixture": "infographic-v3-fast-candle-q8-1024-seed22734-step2"
+    },
+    "sensenova_u1_8b_infographic_v3_fast:q8:mlx": {
+      "provider": "sensenova_u1_8b_fast",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "eager_materialization",
+      "strategy": {
+        "rung": "resident",
+        "engagedRungs": [
+          "resident"
+        ]
+      },
+      "calibrationFingerprint": "sensenova-u1-infographic-v3-fast-q8-mlx-shared-ladder-v1",
+      "fixture": "infographic-v3-fast-mlx-q8-1024-seed22734-step2"
+    },
     "z_image:bf16:candle": {
       "provider": "z_image",
       "mode": "text_to_image",
