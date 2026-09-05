@@ -1275,7 +1275,14 @@ fn krea_turbo_fit_priced(
 
     let budget = budget?;
     let turbo_fit = manifest_entry.get("candle")?.get("turboFit")?;
-    let calibration_fingerprint = turbo_fit.get("calibrationFingerprint")?.as_str()?;
+    // sc-22735: the identity the LOADED contract publishes is keyed on the artifact-proven tier, so
+    // the fingerprint this fit is graded against has to be read per tier. The scalar remains the
+    // measured q4 string and is the fallback for a manifest that declares no per-tier map.
+    let calibration_fingerprint = turbo_fit
+        .get("calibrationFingerprintByTier")
+        .and_then(|by_tier| by_tier.get(tier))
+        .or_else(|| turbo_fit.get("calibrationFingerprint"))?
+        .as_str()?;
     let calibration_abi = turbo_fit.get("calibrationAbi")?.as_u64()? as u32;
     // sc-17097: calibration ABI 2 added the typed load shape, but this route never read it - the
     // worker took the shape from the provider alone, so the axis could not detect drift here. The
@@ -4743,6 +4750,129 @@ mod tests {
                 reason: gen_core::MemoryEvidenceVerdict::FingerprintMismatch,
             }),
             "a fingerprint drifted from the loaded identity loses the fitted bases"
+        );
+    }
+
+    /// sc-22735. The turbo fit is graded against the identity for the tier it is PRICING, read out
+    /// of `turboFit.calibrationFingerprintByTier`, not against the single scalar three times.
+    ///
+    /// The engine keys `krea_2_turbo`'s calibration identity on the artifact-proven tier now, so a
+    /// bf16 or q8 fit graded against the measured q4 string would compare two different cells: it
+    /// would either refuse every non-q4 admission or — the direction that actually costs something —
+    /// accept a bf16 load whose curves were measured at q4. The scalar is deliberately still the
+    /// measured q4 identity and is still the fallback, so a manifest that declares no map keeps its
+    /// previous meaning exactly.
+    ///
+    /// Graded through the real `krea_turbo_fit` against the real loaded contract per tier: a drifted
+    /// entry for the tier under test must lose the fitted bases, and a drifted entry for a DIFFERENT
+    /// tier must not — that second half is what fails if the lookup ignores the tier and reads any
+    /// entry, or the scalar, regardless.
+    #[test]
+    fn the_turbo_fit_grades_each_tier_against_its_own_declared_identity() {
+        // (a) The cross-source binding, over the SHIPPED manifest: at every tier the declared
+        // per-tier identity is exactly the one the pinned contract publishes for that tier. This is
+        // the claim a capture cannot re-derive, and it needs no fit to state.
+        let shipped = builtin_krea_turbo_manifest_at_live_closure();
+        let by_tier = shipped["candle"]["turboFit"]["calibrationFingerprintByTier"]
+            .as_object()
+            .expect("the shipped turbo fit declares a per-tier identity map");
+        let mut declared_identities = std::collections::BTreeSet::new();
+        for tier in ["q4", "q8", "bf16"] {
+            let declared = by_tier
+                .get(tier)
+                .and_then(Value::as_str)
+                .unwrap_or_else(|| panic!("{tier}: no declared per-tier identity"));
+            let loaded = krea_test_provider_contract(tier)
+                .calibration
+                .as_ref()
+                .unwrap_or_else(|| panic!("{tier}: the loaded contract declares no calibration"))
+                .fingerprint
+                .as_str();
+            assert_eq!(
+                declared, loaded,
+                "{tier}: the manifest must declare the identity the pinned contract publishes"
+            );
+            assert!(
+                declared_identities.insert(declared.to_owned()),
+                "{tier}: reuses another tier's identity ({declared})"
+            );
+        }
+        // The scalar stays the MEASURED q4 cell, so a manifest with no map keeps its old meaning.
+        assert_eq!(
+            shipped["candle"]["turboFit"]["calibrationFingerprint"].as_str(),
+            Some("krea-turbo-cuda-phase-curves-v1")
+        );
+
+        // (b) The lookup semantics, over the synthetic q4 ladder fixture: the entry read is the one
+        // for the tier being priced, and the scalar is the fallback.
+        let admit = |manifest: &JsonObject| {
+            krea_turbo_fit(
+                manifest,
+                "q4",
+                896,
+                896,
+                Some(VramBudget {
+                    free_gb: 20.0,
+                    total_gb: 20.0,
+                }),
+                true,
+            )
+        };
+        let mut mapped = krea_fit_manifest();
+        mapped["candle"]["turboFit"]["calibrationFingerprintByTier"] = json!({
+            "bf16": "krea-2-turbo-bf16-cuda-phase-curves-v1",
+            "q4": "krea-turbo-cuda-phase-curves-v1",
+            "q8": "krea-2-turbo-q8-cuda-phase-curves-v1",
+        });
+        assert!(
+            matches!(admit(&mapped), Some(KreaTurboFit::Fits { .. })),
+            "the mapped fixture must admit q4, or the arms below prove nothing"
+        );
+
+        // Drifting the q4 entry — the tier being priced — loses the fitted bases.
+        let mut drifted_q4 = mapped.clone();
+        drifted_q4["candle"]["turboFit"]["calibrationFingerprintByTier"]["q4"] =
+            Value::String("krea-turbo-cuda-phase-curves-v99".into());
+        assert_eq!(
+            admit(&drifted_q4),
+            Some(KreaTurboFit::Unverified {
+                reason: gen_core::MemoryEvidenceVerdict::FingerprintMismatch,
+            }),
+            "a q4 identity drifted from the loaded contract must lose the fitted bases"
+        );
+
+        // Drifting the OTHER tiers' entries does not disturb the q4 fit. A lookup that ignored the
+        // tier and took any entry would refuse here.
+        for other in ["q8", "bf16"] {
+            let mut crossed = mapped.clone();
+            crossed["candle"]["turboFit"]["calibrationFingerprintByTier"][other] =
+                Value::String(format!("krea-2-turbo-{other}-cuda-phase-curves-v99"));
+            assert!(
+                matches!(admit(&crossed), Some(KreaTurboFit::Fits { .. })),
+                "a drifted {other} identity must not disturb the q4 fit"
+            );
+        }
+
+        // With no map at all the scalar is the fallback, so the pre-sc-22735 manifest shape keeps
+        // grading exactly as it did.
+        let mut unmapped = mapped.clone();
+        unmapped["candle"]["turboFit"]
+            .as_object_mut()
+            .expect("turbo fit")
+            .remove("calibrationFingerprintByTier");
+        assert!(
+            matches!(admit(&unmapped), Some(KreaTurboFit::Fits { .. })),
+            "a manifest declaring no per-tier map must fall back to the scalar"
+        );
+        let mut unmapped_drifted = unmapped.clone();
+        unmapped_drifted["candle"]["turboFit"]["calibrationFingerprint"] =
+            Value::String("krea-turbo-cuda-phase-curves-v99".into());
+        assert_eq!(
+            admit(&unmapped_drifted),
+            Some(KreaTurboFit::Unverified {
+                reason: gen_core::MemoryEvidenceVerdict::FingerprintMismatch,
+            }),
+            "the scalar fallback is still graded, not merely accepted"
         );
     }
 

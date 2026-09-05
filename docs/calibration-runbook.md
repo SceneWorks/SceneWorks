@@ -626,6 +626,24 @@ SCENEWORKS_KREA_REPOSITORY=SceneWorks/krea-2-turbo-mlx       # fixed; validated 
 SCENEWORKS_KREA_REVISION=<exact base artifact revision>
 SCENEWORKS_KREA_ROOT=/abs/path/.../snapshots/<rev>/<tier>    # bf16 | q4 | q8, derived from the plan target
 
+# memory-mlx-adapter AND memory-candle-adapter — krea_2_raw (plain text-to-image, sc-22735)
+# The UNDISTILLED Krea 2 base: the same engine crates as Turbo (mlx-gen-krea / candle-gen-krea)
+# under its own registry id, off its OWN tiered rehost. Its own family on purpose — a Raw plan
+# satisfied by Turbo weights would file the distilled model's peaks under the true-CFG base's name.
+SCENEWORKS_KREA_RAW_REPOSITORY=SceneWorks/krea-2-raw-mlx     # fixed; validated against KREA_RAW_REPOSITORY
+SCENEWORKS_KREA_RAW_REVISION=<exact base artifact revision>
+SCENEWORKS_KREA_RAW_ROOT=/abs/path/.../snapshots/<rev>/<tier>  # bf16 | q4 | q8, derived from the plan target
+
+# memory-mlx-adapter — krea_realtime_14b (text-to-video, sc-22735; MLX-ONLY)
+# The autoregressive VIDEO member of the family. There is no candle-gen-krea-realtime at all, the
+# worker refuses the job off macOS by name (video_jobs/mod.rs), and every shipped download is
+# platforms:["macos"] — so this family is never exported for a candle capture. Each <tier>/ subdir
+# is a COMPLETE self-contained tree (the Krea DiT at that tier plus the stock Wan 2.1 z16 VAE, UMT5
+# encoder and tokenizer), so this is three vars, not four: there is no separate co-requisite root.
+SCENEWORKS_KREA_REALTIME_REPOSITORY=SceneWorks/krea-realtime-14b-mlx  # validated against KREA_REALTIME_REPOSITORY
+SCENEWORKS_KREA_REALTIME_REVISION=<exact artifact revision>
+SCENEWORKS_KREA_REALTIME_ROOT=/abs/path/.../snapshots/<rev>/<tier>    # bf16 | q4 | q8, derived from the plan target
+
 # memory-mlx-adapter — sdxl (plain text-to-image)
 SCENEWORKS_SDXL_REPOSITORY=SceneWorks/sdxl-base-mlx          # fixed; validated against SDXL_REPOSITORY
 SCENEWORKS_SDXL_REVISION=<exact base artifact revision>

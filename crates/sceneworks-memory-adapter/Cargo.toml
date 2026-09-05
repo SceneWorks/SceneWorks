@@ -16,6 +16,7 @@ sha2 = "0.10"
 mlx-gen = { git = "https://github.com/SceneWorks/inference", rev = "c6d6a4dbd61ab09c26ff5526632cae2cefea60ed", optional = true }
 mlx-gen-flux2 = { git = "https://github.com/SceneWorks/inference", rev = "c6d6a4dbd61ab09c26ff5526632cae2cefea60ed", optional = true }
 mlx-gen-krea = { git = "https://github.com/SceneWorks/inference", rev = "c6d6a4dbd61ab09c26ff5526632cae2cefea60ed", optional = true }
+mlx-gen-krea-realtime = { git = "https://github.com/SceneWorks/inference", rev = "c6d6a4dbd61ab09c26ff5526632cae2cefea60ed", optional = true }
 mlx-gen-ltx = { git = "https://github.com/SceneWorks/inference", rev = "c6d6a4dbd61ab09c26ff5526632cae2cefea60ed", optional = true }
 mlx-gen-minimax-h3 = { git = "https://github.com/SceneWorks/inference", rev = "c6d6a4dbd61ab09c26ff5526632cae2cefea60ed", optional = true }
 mlx-gen-sdxl = { git = "https://github.com/SceneWorks/inference", rev = "c6d6a4dbd61ab09c26ff5526632cae2cefea60ed", optional = true }
@@ -36,7 +37,7 @@ sceneworks-core = { path = "../sceneworks-core" }
 
 [features]
 default = []
-mlx = ["dep:mlx-gen", "dep:mlx-gen-flux2", "dep:mlx-gen-krea", "dep:mlx-gen-ltx", "dep:mlx-gen-minimax-h3", "dep:mlx-gen-sdxl", "dep:mlx-rs", "dep:runtime-macos"]
+mlx = ["dep:mlx-gen", "dep:mlx-gen-flux2", "dep:mlx-gen-krea", "dep:mlx-gen-krea-realtime", "dep:mlx-gen-ltx", "dep:mlx-gen-minimax-h3", "dep:mlx-gen-sdxl", "dep:mlx-rs", "dep:runtime-macos"]
 candle = ["dep:candle-gen", "dep:runtime-cuda"]
 
 [[bin]]

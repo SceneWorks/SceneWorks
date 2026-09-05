@@ -24,6 +24,15 @@ const KREA_PLAIN_EXECUTION_PATH: &str = "the Candle Krea base-only text-to-image
 /// The label the Krea arm refuses a non-still geometry under (sc-18808); see
 /// [`still_calibration_label`].
 const KREA_STILL_CALIBRATION: &str = "Candle Krea base calibration";
+/// The UNDISTILLED Krea 2 base (sc-22735): the same engine crate as Turbo (`candle-gen-krea`,
+/// `KREA_2_RAW_ID`) on a DIFFERENT execution seam — Turbo rides the phase-curve contract, Raw the
+/// request-scoped staged-residency one (`build_krea_request_scoped_memory_strategy_contract`) —
+/// and off its own tiered rehost. Its own env family, so a Raw plan can never be satisfied by
+/// Turbo weights.
+const KREA_RAW_ID: &str = "krea_2_raw";
+const KREA_RAW_PLAIN_EXECUTION_PATH: &str = "the Candle Krea 2 Raw base-only text-to-image path";
+/// The label the Raw arm refuses a non-still geometry under; see [`still_calibration_label`].
+const KREA_RAW_STILL_CALIBRATION: &str = "Candle Krea 2 Raw calibration";
 const QWEN_ID: &str = "qwen_image";
 const QWEN_PLAIN_EXECUTION_PATH: &str = "the Candle Qwen-Image base-only text-to-image path";
 /// The label the Qwen arm refuses a non-still geometry under (sc-18808); see
@@ -849,6 +858,8 @@ fn plain_execution_path(request: &Value) -> Result<&'static str, String> {
     match planned_provider(request)? {
         "qwen_image" => Ok(QWEN_PLAIN_EXECUTION_PATH),
         "krea_2_turbo" => Ok(KREA_PLAIN_EXECUTION_PATH),
+        // sc-22735: the undistilled base is its own registry id with its own artifact family.
+        "krea_2_raw" => Ok(KREA_RAW_PLAIN_EXECUTION_PATH),
         "z_image_turbo" => Ok(if is_z_image_edit(request)? {
             Z_IMAGE_TURBO_EDIT_EXECUTION_PATH
         } else {
@@ -899,6 +910,7 @@ fn still_calibration_label(request: &Value) -> Result<&'static str, String> {
     match planned_provider(request)? {
         QWEN_ID => Ok(QWEN_STILL_CALIBRATION),
         KREA_ID => Ok(KREA_STILL_CALIBRATION),
+        KREA_RAW_ID => Ok(KREA_RAW_STILL_CALIBRATION),
         Z_IMAGE_TURBO_ID => Ok(if is_z_image_edit(request)? {
             Z_IMAGE_TURBO_EDIT_STILL_CALIBRATION
         } else {
@@ -1046,7 +1058,9 @@ fn validate_fixture_binds_tier_and_geometry(request: &Value) -> Result<(), Strin
     if SD3_5_FIXTURE_SLUGS.iter().any(|(id, _)| *id == provider) {
         return validate_sd35_fixture(request, provider, planned_tier(request)?);
     }
-    if provider != KREA_ID {
+    // sc-22735: the Raw legs use the same fixture convention (`…-<tier>-<edge>-…`) and span the
+    // same six (tier, lane) cells, so they take the same binding rather than a bespoke one.
+    if !matches!(provider, KREA_ID | KREA_RAW_ID) {
         return Ok(());
     }
     let planned = protocol::planned(request)?;
@@ -1300,6 +1314,57 @@ fn measured_strategy(
     Ok(measured)
 }
 
+/// The calibration identity the PRODUCTION Candle contract can emit for one `(provider, tier)`
+/// cell, or `None` for a provider whose identity this adapter does not model.
+///
+/// sc-22735. `candle-gen-krea` used to publish ONE string
+/// (`krea-candle-request-scoped-staged-residency-v1`) for `krea_2_raw`, `krea_2_edit` and
+/// `krea_2_turbo_edit` at all three tiers, so a bf16 Raw record was indistinguishable by
+/// calibration identity from a q4 edit record. The engine now keys the identity on
+/// (route, artifact-proven tier) — the tier it reads out of `transformer/config.json`, NOT
+/// `spec.quantize`, which is recipe-only on a directory load. This table is the SceneWorks half of
+/// that binding.
+///
+/// It is a PRE-LOAD check on purpose. [`run_five_rung_reference_loaded`] already compares the
+/// plan's fingerprint against the LOADED contract's, but that comparison happens after a
+/// multi-tens-of-GB load; a plan row naming a string no production contract can ever emit is a
+/// fixture defect, and the operator should learn that before the weights are opened, not after.
+/// The post-load comparison is what actually binds the record — this only makes the diagnosis
+/// local, the same way [`validate_fixture_binds_tier_and_geometry`] does.
+fn candle_production_fingerprint(provider_id: &str, tier: &str) -> Option<String> {
+    let route = match provider_id {
+        KREA_RAW_ID => "raw",
+        _ => return None,
+    };
+    matches!(tier, "bf16" | "q4" | "q8")
+        .then(|| format!("krea-2-{route}-{tier}-cuda-staged-residency-v1"))
+}
+
+/// Refuse a plan row whose `calibrationFingerprint` is not the string the production contract
+/// publishes for that `(provider, tier)`. Silent for a provider [`candle_production_fingerprint`]
+/// does not model, so it can never turn into a blanket gate on providers this table has not
+/// learned.
+fn validate_planned_fingerprint_is_producible(
+    provider_id: &str,
+    tier: &str,
+    request: &Value,
+) -> Result<(), String> {
+    let Some(expected) = candle_production_fingerprint(provider_id, tier) else {
+        return Ok(());
+    };
+    let planned = protocol::planned(request)?
+        .get("calibrationFingerprint")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "planned.calibrationFingerprint must be a string".to_owned())?;
+    if planned != expected {
+        return Err(format!(
+            "planned.calibrationFingerprint {planned:?} is not the identity the pinned \
+             {provider_id} contract publishes at tier {tier:?}; expected {expected:?}"
+        ));
+    }
+    Ok(())
+}
+
 /// Everything one five-rung capture needs after the artifact identity is validated and the real
 /// generator is resident: `(provider id, plain execution path, repository, resolved revision,
 /// generator, VRAM probe already holding the load sample)`.
@@ -1330,6 +1395,17 @@ fn load_five_rung_generator(request: &Value) -> Result<LoadedFiveRungGenerator, 
                 "SCENEWORKS_KREA_REVISION",
                 "SCENEWORKS_KREA_ROOT",
                 protocol::KREA_REPOSITORY,
+            ),
+            // sc-22735. Raw's own tiered rehost, bound through its own env family so a Raw plan
+            // can never be satisfied by Turbo weights and re-label the distilled model's peaks as
+            // the true-CFG base's.
+            "krea_2_raw" => (
+                KREA_RAW_ID,
+                KREA_RAW_PLAIN_EXECUTION_PATH,
+                "SCENEWORKS_KREA_RAW_REPOSITORY",
+                "SCENEWORKS_KREA_RAW_REVISION",
+                "SCENEWORKS_KREA_RAW_ROOT",
+                protocol::KREA_RAW_REPOSITORY,
             ),
             // sc-15859. The artifact family is `SceneWorks/z-image-turbo-mlx` (`Z_IMAGE_REPOSITORY`),
             // the same per-tier `q4/ q8/ bf16/` re-host the MLX arm measures, so the env family is
@@ -1487,6 +1563,7 @@ fn load_five_rung_generator(request: &Value) -> Result<LoadedFiveRungGenerator, 
         };
     let tier = planned_tier(request)?;
     validate_fixture_binds_tier_and_geometry(request)?;
+    validate_planned_fingerprint_is_producible(provider_id, tier, request)?;
     validate_five_rung_lane_tier(provider_id, tier)?;
     // The plan row must name the identity the LOADED contract publishes for this cell — checked
     // against the weights-free table BEFORE the load, so a stale row fails in milliseconds instead
@@ -1549,8 +1626,13 @@ fn load_five_rung_generator(request: &Value) -> Result<LoadedFiveRungGenerator, 
     let spec = match (provider_id, numeric_tier(tier)?.quant) {
         // Krea's loader takes the packed tier's quant explicitly; bf16 is the dense base and must
         // carry no quant at all (`Quant::None` — the same shape the worker's `tier_to_quant` uses).
-        (KREA_ID, Some(quant)) => spec.with_quant(quant),
-        (KREA_ID, None) => spec,
+        // sc-22735: Raw is the same loader on the same packed turnkeys, so it takes the same rule.
+        // The worker forwards the resolved quant on this lane (`image_jobs/base.rs` keeps
+        // `load_quant` off macOS), and `candle-gen-krea` treats it as recipe-only on a directory
+        // load — it reads the real tier out of `transformer/config.json`. Passing it anyway is
+        // what the worker does, so it is what the capture must do.
+        (KREA_ID | KREA_RAW_ID, Some(quant)) => spec.with_quant(quant),
+        (KREA_ID | KREA_RAW_ID, None) => spec,
         // FLUX.2 is per MEMBER (sc-22727 review): the dev route folds the planned tier the way the
         // worker's `candle_quant_for_resolved_tier` does, while both klein turnkeys are dense-TE
         // tiers the worker loads with `(None, resolved_bits)` — `candle-gen-flux2` quantizes the DiT
@@ -3070,7 +3152,12 @@ fn routes_to_five_rung_reference(request: &Value) -> Result<bool, String> {
         || provider == FLUX1_SCHNELL_ID
         || provider == SD3_5_LARGE_ID
         || provider == SD3_5_LARGE_TURBO_ID
-        || provider == SD3_5_MEDIUM_ID)
+        || provider == SD3_5_MEDIUM_ID
+        // sc-22735: the undistilled Krea base has no inline arm either — unlike Turbo, which keeps
+        // its own certifying arm below. Named here as well as matched by fixture prefix, so a
+        // future Raw fixture spelled differently still routes to the arm that implements it
+        // instead of falling into Turbo's `provider != KREA_ID` refusal.
+        || provider == KREA_RAW_ID)
 }
 
 // ---------------------------------------------------------------------------------------------
