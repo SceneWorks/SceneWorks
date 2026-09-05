@@ -1250,7 +1250,15 @@
                             }
                           },
                           "else": {
-                            "required": ["fingerprint", "engagedRungs", "parameters", "parameterRanges"]
+                            "description": "A MEASURED row names its engaged ladder composition and parameter shape unconditionally. `fingerprint` is the production calibration identity the engine publishes for this coordinate, and an engine may WITHHOLD it for an overlay-bearing load shape it still serves: candle-gen-sd3's production_calibration_identity returns None the moment `!receipt.adapters.is_empty()`, because a loaded adapter stack adds resident bytes no anchor measured (sc-22730). Such a row must therefore be authorable WITHOUT a fingerprint — naming one would promise a string the engine never publishes. A CLEAN BASE row (every declared overlay is `none` and no providerOverlay widens it) has no such escape: it must name its identity. Which providers actually withhold is a per-engine fact this schema cannot see; tests/test_builtin_manifest_audit.py pins the exact committed set and scripts/manifest-memory-declarations.test.mjs derives the withholding rule from the engine source.",
+                            "required": ["engagedRungs", "parameters", "parameterRanges"],
+                            "if": {
+                              "properties": {
+                                "overlays": { "items": { "const": "none" } },
+                                "providerOverlay": { "const": "none" }
+                              }
+                            },
+                            "then": { "required": ["fingerprint"] }
                           }
                         }
                       ],

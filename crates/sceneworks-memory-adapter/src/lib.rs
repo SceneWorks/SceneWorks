@@ -114,6 +114,14 @@ pub const Z_IMAGE_REPOSITORY: &str = "SceneWorks/z-image-turbo-mlx";
 /// bound through the separate `SCENEWORKS_Z_IMAGE_BASE_*` family so a base plan can never be
 /// satisfied by Turbo weights and re-label Turbo's peaks as the base model's.
 pub const Z_IMAGE_BASE_REPOSITORY: &str = "SceneWorks/z-image-mlx";
+/// The three SD3.5 tiered rehosts (sc-22730). Unlike the Z-Image pair these are three DISTINCT
+/// engine providers (`sd3_5_large`, `sd3_5_large_turbo`, `sd3_5_medium` — the same ids on both
+/// lanes, with no aliasing), each with its own artifact family, so each gets its own
+/// `SCENEWORKS_SD3_5_*` env triple. Serving one route from another's weights would re-label that
+/// route's peaks; the arms validate the repository literal before any weight work.
+pub const SD3_5_LARGE_REPOSITORY: &str = "SceneWorks/sd3.5-large-mlx";
+pub const SD3_5_LARGE_TURBO_REPOSITORY: &str = "SceneWorks/sd3.5-large-turbo-mlx";
+pub const SD3_5_MEDIUM_REPOSITORY: &str = "SceneWorks/sd3.5-medium-mlx";
 /// The `mlx:ltx_2_3` calibration artifact (sc-18808). Its `gemma/` co-requisite text encoder is a
 /// hard load-time requirement of the pinned provider, not a fallback, so a capture resolves TWO
 /// roots under this one repository: the numeric tier and `gemma`.
@@ -920,8 +928,12 @@ pub fn validate_artifact_identity(
     expected_repository: &str,
 ) -> Result<(), String> {
     if repository != expected_repository {
+        // The OFFENDING repository is named as well as the expected one: a sibling-member root
+        // handed to the wrong arm is the failure this check exists for, and an operator (or a
+        // test) cannot tell that refusal apart from any other without seeing what was passed.
         return Err(format!(
-            "artifact repository must be the fixed {expected_repository} calibration artifact"
+            "artifact repository must be the fixed {expected_repository} calibration artifact, \
+             not {repository}"
         ));
     }
     if revision.len() != 40

@@ -1,11 +1,11 @@
 {
   "schemaVersion": 11,
   "generatedFrom": {
-    "sceneWorksRevision": "source-tree:147926bec69182b904283ee04e2ab8e487d19f3bdb5694a5af27ee3bcdac5c8f",
+    "sceneWorksRevision": "source-tree:c9221acf0969e9c91c65a27cee1224ec36442a3bcc8d5a8ef2087f2d7e664ab3",
     "sources": {
       "manifest": {
         "path": "config/manifests/builtin.models.jsonc",
-        "sha256": "2738a6258adc3ef06d4916d965b55afdaa2c0d01b90a339476f0efbede29de92"
+        "sha256": "4518b956bcc7135b92b2a8229ad6632d1022e293fb2abaf58fb3a1a834f9cf5a"
       },
       "routingCatalog": {
         "path": "crates/sceneworks-core/src/jobs_store/routing/catalog.rs",
@@ -69,15 +69,15 @@
       },
       "anchorStore": {
         "path": "config/memory-anchors.json",
-        "sha256": "926a184ad1ab31fb274603ca87d924d6eba856ae2c34a3e258a0e4227cc305fe"
+        "sha256": "23c7a23b3e7fa0bb0ef7319d9724441b7ce890dab4f8eb0f6285601be060acd9"
       },
       "anchorLoaderClosures": {
         "path": "config/anchor-loader-closures.json",
-        "sha256": "b42ae55b020570f13c666b498766daf2bd3ce0db2188e09ccf18eaf7755f049d"
+        "sha256": "a3cd1721edaa3534acfed0bc4cc5379349115879704291bd8902ca6320e08a90"
       },
       "anchorDerivation": {
         "path": "crates/sceneworks-core/src/memory_anchor.rs",
-        "sha256": "001d836cb33b8291a07bda86dc2686dfefd1dc7d1a16d633cddefc5e982c5ecb"
+        "sha256": "6b2aeeb9e383d4a003d56e635de7fa428cec33fd4f26c684353063977391e218"
       },
       "anchorAdmission": {
         "path": "crates/sceneworks-worker/src/video_admission.rs",
@@ -89,11 +89,11 @@
       },
       "anchorAdmissionImageCandle": {
         "path": "crates/sceneworks-worker/src/candle_memory_strategy.rs",
-        "sha256": "162884ad7f4465e72ee5811a335f1bf10ed64885ce34445916f11f3f053d0d5f"
+        "sha256": "0c20230ff45efb00d599d3c69bd9000dc5686d716ab0ee14b401650b03049739"
       },
       "anchorExtractor": {
         "path": "scripts/extract-memory-anchors.mjs",
-        "sha256": "39ac782417a1d7aea31b3dfa5f5b35ee06f82e8058fd45365223f7e7d7e9aca3"
+        "sha256": "c6914eaeb8e6fd77ceab49d0e877b03e1b489cfcba34e9e756608f87cbe9a328"
       }
     }
   },
