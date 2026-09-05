@@ -734,17 +734,24 @@ test("an engineId the anchor plan does not measure that model under is refused",
   // The two shipped shapes pass, and a lane the plan carries no row for has nothing to check.
   assertEngineIdMatchesPlan({ model: "z_image_edit:mlx", engineId: "z_image_turbo", planAnchors: plan });
   assertEngineIdMatchesPlan({ model: "krea_2_turbo:mlx", planAnchors: plan });
-  // sc-22737: this case used to name `ltx_2_3:mlx`, which the plan carried no row for until this
-  // story planned all three of its MLX tiers — at which point the rule correctly began refusing the
-  // made-up id and the case stopped testing what it was written to test. `sdxl:candle` is the
-  // unplanned lane now: SDXL is an MLX-only arm (`PROVIDER_FAMILIES.sdxl.arms == ["mlx"]`), asserted
-  // below so this case cannot silently go vacuous the same way a second time.
-  assert.equal(
-    Object.keys(plan).some((key) => key.startsWith("sdxl:") && key.endsWith(":candle")),
-    false,
-    "sdxl:candle must stay unplanned for this case to exercise the no-row branch",
+  // sc-22737: this case used to name a SHIPPED lane the plan carried no row for (`ltx_2_3:mlx`,
+  // then `sdxl:candle`), and each time a story planned that lane the rule correctly began refusing
+  // the made-up id and the case stopped testing what it was written to test. The no-row branch is
+  // about ABSENCE, so it is driven from the shipped plan with one lane's rows removed — asserted to
+  // have been present, so the removal is real and the case cannot go vacuous a third time.
+  const withoutLane = Object.fromEntries(
+    Object.entries(plan).filter(([key]) => !(key.startsWith("sdxl:") && key.endsWith(":candle"))),
   );
-  assertEngineIdMatchesPlan({ model: "sdxl:candle", engineId: "made_up_engine", planAnchors: plan });
+  assert.ok(
+    Object.keys(plan).length > Object.keys(withoutLane).length,
+    "the shipped plan must carry sdxl:candle rows for their removal to exercise the no-row branch",
+  );
+  assertEngineIdMatchesPlan({ model: "sdxl:candle", engineId: "made_up_engine", planAnchors: withoutLane });
+  assert.throws(
+    () => assertEngineIdMatchesPlan({ model: "sdxl:candle", engineId: "made_up_engine", planAnchors: plan }),
+    /measures sdxl on candle with provider\(s\) "sdxl"/,
+    "with the rows present the same declaration is refused, so the branch under test is the row lookup",
+  );
 
   // And it is wired into the derivation, not merely exported: a mis-pointed declaration whose entry
   // points DO carry the engine id's literal — the false green in full — is still refused.

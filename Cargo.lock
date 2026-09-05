@@ -6758,6 +6758,7 @@ dependencies = [
  "candle-gen-wan",
  "mlx-gen",
  "mlx-gen-flux2",
+ "mlx-gen-instantid",
  "mlx-gen-krea",
  "mlx-gen-ltx",
  "mlx-gen-minimax-h3",

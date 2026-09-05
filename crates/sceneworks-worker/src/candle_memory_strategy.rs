@@ -1731,6 +1731,9 @@ fn floor_pseudo_anchor(
         overall_allocator_envelope_bytes: staged_floor_bytes,
         underived_reason: None,
         component_bytes: None,
+        // sc-22734: an ordinary staged candle cell, not one whose engine declares staged
+        // residency structurally impossible, so it keeps the staged-only derivation law.
+        staged_residency_structurally_not_applicable: false,
     }
 }
 
@@ -5855,6 +5858,9 @@ mod tests {
             overall_allocator_envelope_bytes: Z_IMAGE_Q4_STAGED_PEAKS.decode,
             underived_reason: None,
             component_bytes: None,
+            // sc-22734: an ordinary staged candle cell, not one whose engine declares staged
+            // residency structurally impossible, so it keeps the staged-only derivation law.
+            staged_residency_structurally_not_applicable: false,
         }
     }
 
@@ -7360,6 +7366,9 @@ mod tests {
             overall_allocator_envelope_bytes: 4_000_000_000,
             underived_reason: None,
             component_bytes: None,
+            // sc-22734: an ordinary staged candle cell, not one whose engine declares staged
+            // residency structurally impossible, so it keeps the staged-only derivation law.
+            staged_residency_structurally_not_applicable: false,
         };
         // Under the DEFAULT architecture facts (this pin — `architecture_facts_from_contract`)
         // every ratio the law could apply is inert, so each rung's derivation is the anchor's own

@@ -6604,6 +6604,123 @@ mod tests {
         }
     }
 
+    /// **The eighteen shipped Candle SenseNova cells load Resident + Eager, read off the REAL
+    /// manifest** (sc-22734 review).
+    ///
+    /// `memory-candle-adapter`'s `sensenova_candle_spec_at` hard-codes `OffloadPolicy::Resident` +
+    /// `LoadShape::EagerMaterialization`, and its own test asserts those constants straight back —
+    /// so the claim that this is the WORKER's shape rested on a doc comment. This case asks the
+    /// production function instead: `evaluate_declared_candle_load_shape_with` over each of the six
+    /// catalog models' shipped manifest blocks. None declares a `memoryStrategyContract`, so the
+    /// declaration is `NotEvaluated`, the provider predicate is never consulted, and the spec comes
+    /// back with the shape it went in with. The moment a SenseNova block gains a BTR route entry,
+    /// the adapter's captured shape stops being the worker's and this reds.
+    ///
+    /// The second half is the positive control: a FIXTURE COPY of one shipped block with a
+    /// declaration spliced in DOES reach the predicate and DOES leave `NotEvaluated` behind, so the
+    /// first half is reading the manifest rather than restating a constant.
+    #[test]
+    fn shipped_sensenova_candle_routes_load_resident_and_eager() {
+        const SENSENOVA_CATALOG: [(&str, &str); 6] = [
+            ("sensenova_u1_8b", "sensenova_u1_8b"),
+            ("sensenova_u1_8b_infographic_v2", "sensenova_u1_8b"),
+            ("sensenova_u1_8b_infographic_v3", "sensenova_u1_8b"),
+            ("sensenova_u1_8b_fast", "sensenova_u1_8b_fast"),
+            (
+                "sensenova_u1_8b_infographic_v2_fast",
+                "sensenova_u1_8b_fast",
+            ),
+            (
+                "sensenova_u1_8b_infographic_v3_fast",
+                "sensenova_u1_8b_fast",
+            ),
+        ];
+        for (model_id, runtime_provider) in SENSENOVA_CATALOG {
+            let manifest = shipped_model(model_id);
+            for tier in ["q4", "q8", "bf16"] {
+                let input = LoadSpec::new(WeightsSource::Dir("sensenova-fixture".into()))
+                    .with_resolved_route(model_id)
+                    .with_offload_policy(OffloadPolicy::Resident)
+                    .with_load_shape(LoadShape::EagerMaterialization);
+                let evaluated = evaluate_declared_candle_load_shape_with(
+                    runtime_provider,
+                    Some(tier),
+                    Some(MemoryRouteMode::TextToImage),
+                    &manifest,
+                    input,
+                    false,
+                    |_| {
+                        panic!(
+                            "{model_id}:{tier}: no shipped SenseNova block declares a BTR route \
+                             entry, so the provider predicate must never be consulted"
+                        )
+                    },
+                );
+                assert_eq!(
+                    evaluated.load_shape_declaration_result,
+                    LoadShapeDeclarationResult::NotEvaluated,
+                    "{model_id}:{tier}"
+                );
+                assert_eq!(
+                    evaluated.load_shape,
+                    LoadShape::EagerMaterialization,
+                    "{model_id}:{tier}"
+                );
+                assert_eq!(
+                    evaluated.offload_policy,
+                    OffloadPolicy::Resident,
+                    "{model_id}:{tier}"
+                );
+            }
+        }
+
+        // Positive control: a FIXTURE COPY of one shipped block with a BTR route entry spliced in
+        // stops being `NotEvaluated`. Without this, the case above could not tell "no declaration"
+        // apart from "this function ignores the manifest".
+        //
+        // It lands on `Refused` rather than `Applied` because SenseNova also has no Candle entry in
+        // `RULES` — a manifest declaration alone never shapes a route the registry does not route,
+        // which is the second, independent reason the adapter's Resident + Eager spec is the
+        // worker's. Both would have to change for a SenseNova Candle load to defer.
+        let mut declared = shipped_model("sensenova_u1_8b");
+        declared.insert(
+            "candle".to_owned(),
+            candle_declaration(
+                "sensenova_u1_8b",
+                "sensenova_u1_8b",
+                "sensenova_u1_8b",
+                &["q4"],
+                &["text_to_image"],
+                &["none"],
+            )["candle"]
+                .clone(),
+        );
+        let shaped = evaluate_declared_candle_load_shape_with(
+            "sensenova_u1_8b",
+            Some("q4"),
+            Some(MemoryRouteMode::TextToImage),
+            &declared,
+            LoadSpec::new(WeightsSource::Dir("sensenova-fixture".into()))
+                .with_resolved_route("sensenova_u1_8b")
+                .with_offload_policy(OffloadPolicy::Resident)
+                .with_load_shape(LoadShape::EagerMaterialization),
+            false,
+            |_| panic!("SenseNova has no Candle RULES entry, so no candidate can reach a provider"),
+        );
+        assert_eq!(
+            shaped.load_shape_declaration_result,
+            LoadShapeDeclarationResult::Refused,
+            "a spliced declaration is SEEN — the shipped blocks' NotEvaluated is a real absence",
+        );
+        assert!(
+            !RULES
+                .iter()
+                .any(|rule| rule.backend == MemoryRouteBackend::Candle
+                    && rule.provider.starts_with("sensenova_u1_8b")),
+            "no SenseNova Candle route rule: the second reason the adapter's shape is the worker's",
+        );
+    }
+
     #[test]
     fn shipped_candle_population_is_manifest_derived_and_mode_exact() {
         let raw = include_str!("../../../config/manifests/builtin.models.jsonc");

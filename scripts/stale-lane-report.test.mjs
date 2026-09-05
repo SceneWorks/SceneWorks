@@ -726,6 +726,47 @@ fn load(request: &Value) -> Result<Loaded, String> {
   assert.deepEqual(adapterCapturableProviders(source, "synthetic"), ["alpha"]);
 });
 
+// sc-22729: the counterpart rule. A BESPOKE arm — one whose crate registers no generator, so the
+// adapter dispatches it with an early `if provider == <ID> { return … }` before the gated matches —
+// never reaches those gates, and intersecting them out reported a real working arm as
+// "uncapturable". `candle:instantid` (sc-22729) and `candle:ltx_2_5_distilled` (sc-22725) are both
+// dispatched that way; before this, a capture host booked for either was reported as wasted.
+test("a bespoke arm dispatched before the gated matches is capturable, not intersected away", () => {
+  const source = `
+const BESPOKE_ID: &str = "gamma";
+fn run(request: &Value) -> Result<Value, String> {
+    if provider == BESPOKE_ID {
+        return run_gamma(request);
+    }
+    if provider == "delta" {
+        return run_delta(request);
+    }
+    match planned_provider(request)? {
+        "alpha" => Ok(ALPHA_PATH),
+        provider => Err(format!(
+            "synthetic five-rung calibration does not implement provider {provider:?}"
+        )),
+    }
+}
+fn load(request: &Value) -> Result<Loaded, String> {
+    match planned_provider(request)? {
+        "alpha" => Ok(load_alpha()),
+        provider => {
+            return Err(format!(
+                "synthetic five-rung calibration does not implement provider {provider:?}"
+            ))
+        }
+    }
+}
+`;
+  assert.deepEqual(adapterCapturableProviders(source, "synthetic"), ["alpha", "delta", "gamma"]);
+  // An unresolvable bespoke id is loud, exactly as an unresolvable gate arm is — never guessed.
+  assert.throws(
+    () => adapterCapturableProviders(source.replace("BESPOKE_ID: &str", "BESPOKE_ID: &u32"), "synthetic"),
+    /bespoke dispatch on BESPOKE_ID does not resolve to a &str const/,
+  );
+});
+
 // sc-22726. A BLOCK-bodied match arm carries no trailing comma after rustfmt, and this parser used
 // to split arms on depth-0 commas only — so a braced arm in the middle of a dispatch swallowed the
 // NEXT arm's pattern and silently dropped a real provider from the capturable set. The report then
@@ -787,6 +828,50 @@ fn load(request: &Value) -> Result<Loaded, String> {
       "synthetic",
     ),
     ["alpha", "bespoke", "zeta"],
+  );
+});
+
+// sc-22734. A family whose several engine ids share ONE arm body is spelled as a Rust OR-PATTERN
+// (`SENSENOVA_ID | SENSENOVA_FAST_ID`). The parser used to see the whole alternation as a single
+// pattern, match none of its shapes, and throw — so adding a shared arm to an adapter made the
+// WHOLE report unbuildable rather than reporting one more capturable lane.
+test("an or-pattern arm admits every engine id it names, by literal or by const", () => {
+  const source = `
+const SENSENOVA_ID: &str = "sensenova_u1_8b";
+const SENSENOVA_FAST_ID: &str = "sensenova_u1_8b_fast";
+fn entry(request: &Value) -> Result<&'static str, String> {
+    match planned_provider(request)? {
+        "alpha" => Ok(ALPHA_PATH),
+        SENSENOVA_ID | SENSENOVA_FAST_ID => sensenova_arm(request),
+        provider => Err(format!(
+            "synthetic five-rung calibration does not implement provider {provider:?}"
+        )),
+    }
+}
+`;
+  assert.deepEqual(
+    adapterCapturableProviders(source, "synthetic"),
+    ["alpha", "sensenova_u1_8b", "sensenova_u1_8b_fast"],
+  );
+  // The literal spelling, and rustfmt's leading-`|` multi-line spelling, resolve identically.
+  assert.deepEqual(
+    adapterCapturableProviders(
+      source.replace(
+        "SENSENOVA_ID | SENSENOVA_FAST_ID =>",
+        '| "sensenova_u1_8b"\n        | "sensenova_u1_8b_fast" =>',
+      ),
+      "synthetic",
+    ),
+    ["alpha", "sensenova_u1_8b", "sensenova_u1_8b_fast"],
+  );
+  // An alternative is held to exactly the rules a lone pattern is: an undeclared const inside an
+  // or-pattern is still refused by name rather than silently dropped.
+  assert.throws(
+    () => adapterCapturableProviders(
+      source.replace("SENSENOVA_FAST_ID =>", "UNDECLARED_CONST =>"),
+      "synthetic",
+    ),
+    /UNDECLARED_CONST does not resolve to a &str const/,
   );
 });
 
