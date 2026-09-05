@@ -4597,8 +4597,17 @@ fn validate_turnkey_fixture(request: &Value, arm: TurnkeyArm, tier: &str) -> Res
 /// string names the SC-15800 narrowed text-encoder envelope, reachable only under
 /// `Sequential + DeferredMaterialization` (`is_streamable_spec`), and this arm loads every member
 /// `Resident` + the plan's eager shape, where the engine publishes the full-ladder key.
-fn turnkey_calibration_fingerprint(arm: TurnkeyArm, tier: &str) -> String {
-    match (arm.provider, tier) {
+///
+/// FAIL-CLOSED on the tier axis too (sc-22732 review). The per-member arms below bind `tier` as a
+/// free variable, so before this guard any string at all — `"q2"`, `"nvfp4"`, a typo in a plan row —
+/// minted a plausible-looking identity no engine publishes, and the caller's equality check would
+/// then accept it. Only the three tiers the turnkey family ships are nameable; every other tier is
+/// `None`, which the caller turns into a refusal before any weight work.
+fn turnkey_calibration_fingerprint(arm: TurnkeyArm, tier: &str) -> Option<String> {
+    if !matches!(tier, "bf16" | "q4" | "q8") {
+        return None;
+    }
+    Some(match (arm.provider, tier) {
         (KOLORS_PROVIDER, "q4") => {
             runtime_macos::providers::kolors::memory_strategy::MEMORY_CALIBRATION_FINGERPRINT
                 .to_owned()
@@ -4612,8 +4621,9 @@ fn turnkey_calibration_fingerprint(arm: TurnkeyArm, tier: &str) -> String {
         (IDEOGRAM_TURBO_PROVIDER, tier) => format!("ideogram-4-turbo-{tier}-mlx-shared-ladder-v1"),
         (LENS_PROVIDER, tier) => format!("lens-{tier}-mlx-shared-ladder-v1"),
         (LENS_TURBO_PROVIDER, tier) => format!("lens-turbo-{tier}-mlx-shared-ladder-v1"),
-        (provider, tier) => unreachable!("no turnkey member {provider} at tier {tier}"),
-    }
+        // A provider that is not a turnkey member is unnameable rather than collapsed onto one.
+        _ => return None,
+    })
 }
 
 /// The weights-free conformance identities the three engines publish for a registry-behaviour
@@ -4708,7 +4718,12 @@ fn run_turnkey_still(request: &Value) -> Result<Value, String> {
         .and_then(Value::as_str)
         .ok_or_else(|| "planned.calibrationFingerprint must be a string".to_owned())?
         .to_owned();
-    let expected_fingerprint = turnkey_calibration_fingerprint(arm, tier);
+    let expected_fingerprint = turnkey_calibration_fingerprint(arm, tier).ok_or_else(|| {
+        format!(
+            "no turnkey member {} at tier {tier}: the turnkey family ships bf16, q4 and q8 only",
+            arm.provider
+        )
+    })?;
     if planned_fingerprint != expected_fingerprint {
         return Err(format!(
             "plan/provider calibration mismatch: plan={planned_fingerprint}, the {} {tier} \
@@ -21288,6 +21303,34 @@ mod turnkey_still_tests {
         assert_eq!(seen, expected);
     }
 
+    /// sc-22732 review: the identity table must REFUSE an unknown coordinate, not synthesize one.
+    /// The per-member arms bind `tier` as a free variable, so before the guard
+    /// `turnkey_calibration_fingerprint(kolors_arm, "q2")` returned
+    /// `"kolors-q2-mlx-shared-ladder-v1"` — a well-formed identity no engine publishes — and the
+    /// plan check compared a plan row against it instead of refusing the coordinate.
+    #[test]
+    fn the_turnkey_mlx_identity_table_refuses_an_unshipped_tier() {
+        for (provider, _) in MEMBERS {
+            // Every shipped tier stays nameable, so the guard cannot pass by refusing everything.
+            for tier in ["bf16", "q4", "q8"] {
+                let arm = turnkey_arm(&turnkey_planned(provider, "text_to_image", tier)).unwrap();
+                assert!(
+                    turnkey_calibration_fingerprint(arm, tier).is_some(),
+                    "{provider} {tier} is a shipped turnkey cell"
+                );
+            }
+            // Tiers this family does not ship: the axis the free variable let through.
+            let arm = turnkey_arm(&turnkey_planned(provider, "text_to_image", "q4")).unwrap();
+            for tier in ["q2", "q6", "nvfp4", "fp8", "bf16 ", "", "Q4"] {
+                assert_eq!(
+                    turnkey_calibration_fingerprint(arm, tier),
+                    None,
+                    "{provider} {tier:?} is not a shipped turnkey tier"
+                );
+            }
+        }
+    }
+
     /// Every turnkey MLX plan row names the production calibration identity its loaded generator
     /// publishes (the sc-22732 inference head's per-(route, tier) tables): the two measured keys
     /// are the engine constants byte-for-byte, no row names a weights-free conformance string or
@@ -21318,7 +21361,9 @@ mod turnkey_still_tests {
             );
             assert_eq!(
                 planned,
-                turnkey_calibration_fingerprint(arm, tier),
+                turnkey_calibration_fingerprint(arm, tier)
+                    .unwrap_or_else(|| panic!("{key}: no turnkey identity"))
+                    .as_str(),
                 "{key}: the plan row must name the loaded generator's production identity"
             );
             assert!(
@@ -21420,7 +21465,10 @@ mod turnkey_still_tests {
             let arm = turnkey_arm(&request).unwrap();
             assert!(
                 error.contains(&format!("plan={foreign}"))
-                    && error.contains(&turnkey_calibration_fingerprint(arm, "bf16")),
+                    && error.contains(
+                        &turnkey_calibration_fingerprint(arm, "bf16")
+                            .expect("bf16 is a shipped turnkey tier")
+                    ),
                 "{provider}: {error}"
             );
             // Not an env error: the refusal fired before `SCENEWORKS_<MEMBER>_*` was read.

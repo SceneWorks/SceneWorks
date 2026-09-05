@@ -3760,6 +3760,44 @@
           "abi": 1,
           "provider": "lens",
           "implementations": [
+            // sc-22732 review: the bf16 tier of the SAME `candle-gen-lens` ladder implementation.
+            // The three optimized rungs below are tier-independent code paths — the q4 and q8 rows
+            // above declare them with identical parameters — but the tier axis stopped at q4/q8, so
+            // the plan's bf16 candle anchor named an identity the shipped declaration never
+            // promised. Nothing new is IMPLEMENTED here; the declared tier set is completed.
+            {
+              "rung": "bounded_decode",
+              "fingerprint": "lens-base-bf16-candle-cuda-shared-ladder-v1",
+              "tiers": ["bf16"],
+              "modes": ["text_to_image"],
+              "overlays": ["none"],
+              "engagedRungs": ["resident", "staged_residency", "bounded_decode"],
+              "parameters": { "decodeTileEdge": 512, "decodeOverlap": 128 },
+              "parameterRanges": { "decodeTileEdges": [768, 640, 512, 448, 384, 320, 256], "decodeOverlaps": [128] },
+              "source": "inference:crates/media/candle-gen/candle-gen-lens/src/lib.rs"
+            },
+            {
+              "rung": "bounded_attention",
+              "fingerprint": "lens-base-bf16-candle-cuda-shared-ladder-v1",
+              "tiers": ["bf16"],
+              "modes": ["text_to_image"],
+              "overlays": ["none"],
+              "engagedRungs": ["resident", "staged_residency", "bounded_decode", "bounded_attention"],
+              "parameters": { "decodeTileEdge": 512, "decodeOverlap": 128, "attentionChunkSize": 16777216 },
+              "parameterRanges": { "decodeTileEdges": [768, 640, 512, 448, 384, 320, 256], "decodeOverlaps": [128], "attentionChunkSizes": [16777216] },
+              "source": "inference:crates/media/candle-gen/candle-gen-lens/src/lib.rs"
+            },
+            {
+              "rung": "bounded_transformer_residency",
+              "fingerprint": "lens-base-bf16-candle-cuda-shared-ladder-v1",
+              "tiers": ["bf16"],
+              "modes": ["text_to_image"],
+              "overlays": ["none"],
+              "engagedRungs": ["resident", "staged_residency", "bounded_decode", "bounded_attention", "bounded_transformer_residency"],
+              "parameters": { "decodeTileEdge": 512, "decodeOverlap": 128, "attentionChunkSize": 16777216, "transformerWindowSize": 1, "transformerWindowComponent": "Dit" },
+              "parameterRanges": { "decodeTileEdges": [768, 640, 512, 448, 384, 320, 256], "decodeOverlaps": [128], "attentionChunkSizes": [16777216], "transformerWindowSizes": [1, 2, 4, 8, 12, 24], "transformerWindowComponents": ["Dit"] },
+              "source": "inference:crates/media/candle-gen/candle-gen-lens/src/lib.rs"
+            },
             {
               "rung": "bounded_decode",
               "fingerprint": "lens-base-q4-candle-cuda-shared-ladder-v1",
@@ -4024,6 +4062,44 @@
           "abi": 1,
           "provider": "lens_turbo",
           "implementations": [
+            // sc-22732 review: the bf16 tier of the SAME `candle-gen-lens` ladder implementation.
+            // The three optimized rungs below are tier-independent code paths — the q4 and q8 rows
+            // above declare them with identical parameters — but the tier axis stopped at q4/q8, so
+            // the plan's bf16 candle anchor named an identity the shipped declaration never
+            // promised. Nothing new is IMPLEMENTED here; the declared tier set is completed.
+            {
+              "rung": "bounded_decode",
+              "fingerprint": "lens-turbo-bf16-candle-cuda-shared-ladder-v1",
+              "tiers": ["bf16"],
+              "modes": ["text_to_image"],
+              "overlays": ["none"],
+              "engagedRungs": ["resident", "staged_residency", "bounded_decode"],
+              "parameters": { "decodeTileEdge": 512, "decodeOverlap": 128 },
+              "parameterRanges": { "decodeTileEdges": [768, 640, 512, 448, 384, 320, 256], "decodeOverlaps": [128] },
+              "source": "inference:crates/media/candle-gen/candle-gen-lens/src/lib.rs"
+            },
+            {
+              "rung": "bounded_attention",
+              "fingerprint": "lens-turbo-bf16-candle-cuda-shared-ladder-v1",
+              "tiers": ["bf16"],
+              "modes": ["text_to_image"],
+              "overlays": ["none"],
+              "engagedRungs": ["resident", "staged_residency", "bounded_decode", "bounded_attention"],
+              "parameters": { "decodeTileEdge": 512, "decodeOverlap": 128, "attentionChunkSize": 16777216 },
+              "parameterRanges": { "decodeTileEdges": [768, 640, 512, 448, 384, 320, 256], "decodeOverlaps": [128], "attentionChunkSizes": [16777216] },
+              "source": "inference:crates/media/candle-gen/candle-gen-lens/src/lib.rs"
+            },
+            {
+              "rung": "bounded_transformer_residency",
+              "fingerprint": "lens-turbo-bf16-candle-cuda-shared-ladder-v1",
+              "tiers": ["bf16"],
+              "modes": ["text_to_image"],
+              "overlays": ["none"],
+              "engagedRungs": ["resident", "staged_residency", "bounded_decode", "bounded_attention", "bounded_transformer_residency"],
+              "parameters": { "decodeTileEdge": 512, "decodeOverlap": 128, "attentionChunkSize": 16777216, "transformerWindowSize": 1, "transformerWindowComponent": "Dit" },
+              "parameterRanges": { "decodeTileEdges": [768, 640, 512, 448, 384, 320, 256], "decodeOverlaps": [128], "attentionChunkSizes": [16777216], "transformerWindowSizes": [1, 2, 4, 8, 12, 24], "transformerWindowComponents": ["Dit"] },
+              "source": "inference:crates/media/candle-gen/candle-gen-lens/src/lib.rs"
+            },
             {
               "rung": "bounded_decode",
               "fingerprint": "lens-candle-cuda-shared-ladder-device-format-blocks-v1",
@@ -12432,7 +12508,19 @@
           // a future dump adds under a verdict that never considered it.
           "rungs": ["staged_residency"],
           "story": "SC-20790",
-          "reason": "The Kolors IP-Adapter and strict-control lanes are admitted by request-authoritative structural staged phase contracts selected pre-load, not by a manifest declaration. Declaring the base provider here would grant the undelivered plain overlay an optimized candidate it has no receipt for."
+          // sc-22732 review resolved the apparent contradiction between this withhold and the three
+          // `kolors:{bf16,q4,q8}:candle` anchors the plan now stages, DECIDED FROM THE ARTIFACTS:
+          // at the sc-22732 inference head `candle-gen-kolors::provider_contract_for_load` seals a
+          // per-(route, PROVEN artifact tier) production identity on the BASE route, so the base
+          // plain overlay is no longer undelivered and its identity is publishable — the half of
+          // SC-20790's sentence that has expired. What has NOT changed is the receipt: no measured
+          // record prices the base staged cell yet, and the three anchors are exactly the plan to
+          // capture one. So the DECLARATION stays withheld (declaring the rung now would grant an
+          // optimized candidate off a plan rather than a measurement) and the reason names the
+          // anchors that lift it. `measure-memory-catalog.test.mjs` fails closed on this: a plan
+          // anchor with no manifest fingerprint is an error unless a withhold covers that lane and
+          // names its anchors, so this pairing can never go silent.
+          "reason": "The Kolors IP-Adapter and strict-control lanes are admitted by request-authoritative structural staged phase contracts selected pre-load, not by a manifest declaration. The base route now publishes a per-(route, artifact tier) production identity (sc-22732), but no measured record prices its staged cell yet: the anchors kolors:bf16:candle, kolors:q4:candle and kolors:q8:candle in config/memory-calibration-plan.json are the capture that lifts this withhold, and until one lands declaring the rung would grant the plain overlay an optimized candidate it has no receipt for."
         }
       },
       "ui": {

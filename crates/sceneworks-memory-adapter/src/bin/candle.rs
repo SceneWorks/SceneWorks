@@ -1303,7 +1303,15 @@ fn turnkey_candle_member(provider_id: &str) -> Option<TurnkeyCandleMember> {
 /// `candle-gen-ideogram` publishes nothing; the five-rung capture refuses a loaded contract whose
 /// identity differs from this table (`contractFingerprintMismatch`), so the two copies cannot
 /// drift unnoticed once the epic's pin bump lands.
+/// FAIL-CLOSED on BOTH axes (sc-22732 review). The tier arms used to bind `tier` as a free
+/// variable, so any string at all — `"q2"`, `"nvfp4"`, a typo — minted a plausible-looking identity
+/// this family's engines never publish, and `validate_turnkey_identity` would then accept a plan row
+/// naming it. Only the three tiers the turnkey family ships are nameable; everything else is `None`,
+/// which every caller turns into a refusal.
 fn turnkey_calibration_fingerprint(provider_id: &str, tier: &str) -> Option<String> {
+    if !matches!(tier, "bf16" | "q4" | "q8") {
+        return None;
+    }
     let identity = match (provider_id, tier) {
         (LENS_TURBO_ID, "q4") => {
             "lens-candle-cuda-shared-ladder-device-format-blocks-v1".to_owned()
@@ -1560,6 +1568,120 @@ type LoadedFiveRungGenerator = (
     Box<dyn runtime_cuda::gen_core::Generator>,
     VramProbe,
 );
+
+/// The exact [`LoadSpec`] the five-rung Candle capture hands `catalog.media().load`.
+///
+/// Split out of [`load_five_rung_generator`] so the SHAPE of the spec is a pure function of
+/// `(request, provider_id, tier, root)` and can be asserted directly (sc-22732 review). Everything
+/// this binary decides about a load — offload policy, load shape, the per-family `resolved_route`,
+/// and above all the per-member tier-quant fold — lives here, so a test that builds the spec is
+/// testing the thing the loader actually receives rather than a table the loader happens to read.
+///
+/// Pure: it touches neither the filesystem nor the environment. `root` is already canonicalized and
+/// validated by the caller.
+fn five_rung_load_spec(
+    request: &Value,
+    provider_id: &str,
+    tier: &str,
+    root: PathBuf,
+) -> Result<LoadSpec, String> {
+    let spec = LoadSpec::new(WeightsSource::Dir(root))
+        .with_offload_policy(OffloadPolicy::Sequential)
+        .with_load_shape(LoadShape::DeferredMaterialization);
+    // sc-22731: the worker binds the exact resolved route on every Candle image load
+    // (`image_jobs/base.rs`: `.with_resolved_route(request.model.clone())`), and
+    // `candle-gen-chroma`'s `validate_load_shape` refuses a spec without it by name. Set for the
+    // two families whose engines were ported against that shape; the older arms keep the spec they
+    // have always been measured with.
+    let spec = if matches!(
+        provider_id,
+        SANA_ID | SANA_SPRINT_ID | CHROMA1_HD_ID | CHROMA1_BASE_ID | CHROMA1_FLASH_ID
+    ) {
+        spec.with_resolved_route(provider_id.to_owned())
+    } else {
+        spec
+    };
+    let spec = match (provider_id, numeric_tier(tier)?.quant) {
+        // Krea's loader takes the packed tier's quant explicitly; bf16 is the dense base and must
+        // carry no quant at all (`Quant::None` — the same shape the worker's `tier_to_quant` uses).
+        (KREA_ID, Some(quant)) => spec.with_quant(quant),
+        (KREA_ID, None) => spec,
+        // FLUX.2 is per MEMBER (sc-22727 review): the dev route folds the planned tier the way the
+        // worker's `candle_quant_for_resolved_tier` does, while both klein turnkeys are dense-TE
+        // tiers the worker loads with `(None, resolved_bits)` — `candle-gen-flux2` quantizes the DiT
+        // on-the-fly whenever `spec.quantize` is set, so folding it on a packed klein tier would
+        // re-quantize the transformer and measure a load the app never performs. bf16 carries
+        // `Quant::None` on every member, the worker's `tier_to_quant`.
+        (FLUX2_DEV_ID | FLUX2_KLEIN_ID, Some(quant)) => {
+            let arm =
+                flux2_arm(request)?.expect("a FLUX.2 provider always resolves a member or errors");
+            if arm.tier_quant_reaches_the_loader {
+                spec.with_quant(quant)
+            } else {
+                spec
+            }
+        }
+        (FLUX2_DEV_ID | FLUX2_KLEIN_ID, None) => spec,
+        // sc-22732: the turnkey still family, PER MEMBER (`TURNKEY_CANDLE_MEMBERS`). Kolors and both
+        // Lens routes take the packed tier's quant EXPLICITLY, because the worker does:
+        // `candle_quant_for_resolved_tier` (`image_jobs/base.rs`) carves out sana, dense-TE tiers,
+        // chroma, sd3.5 and the two FLUX.1 routes to `None`, none of these declares
+        // `mlx.denseTextEncoderTier`, and every descriptor advertises `supported_quants: [Q4, Q8]`.
+        // `candle-gen-kolors` treats it as an advisory no-op on the packed tier; `candle-gen-lens`
+        // proves the artifact tier from disk and withholds its identity unless `spec.quantize`
+        // EQUALS it, so binding `None` on a packed Lens tier would withhold the identity this cell
+        // is measured under. The two Ideogram routes are the exception: `candle-gen-ideogram`'s
+        // exact directory route (`validate_load_shape`, reached from the production loader through
+        // `IdeogramLoadReceipt::capture`) REFUSES `quantize: Some(_)` outright and proves the tier
+        // off the packed safetensors headers instead, so the quant never reaches that loader.
+        // bf16 is the dense base and carries no quant on any member.
+        (KOLORS_ID | IDEOGRAM_ID | IDEOGRAM_TURBO_ID | LENS_ID | LENS_TURBO_ID, Some(quant)) => {
+            if turnkey_candle_member(provider_id)
+                .expect("a turnkey provider always resolves a member")
+                .tier_quant_reaches_the_loader
+            {
+                spec.with_quant(quant)
+            } else {
+                spec
+            }
+        }
+        (KOLORS_ID | IDEOGRAM_ID | IDEOGRAM_TURBO_ID | LENS_ID | LENS_TURBO_ID, None) => spec,
+        // Qwen, Z-Image-Turbo and the Z-Image base packed Diffusers snapshots declare their
+        // device-format quantization in transformer/config.json (`snapshot_quant_tier` in
+        // candle-gen-z-image's memory_strategy.rs). Passing LoadSpec.quant would request a second,
+        // unsupported runtime quantization pass — every one of those loaders rejects it by name —
+        // instead of loading the packed artifact as authored.
+        //
+        // sc-22730: the SD3.5 turnkeys are packed the same way, and `candle-gen-sd3`'s
+        // `validate_load_shape` refuses `LoadSpec::quantize` on them OUTRIGHT — a request knob can
+        // never outrank the artifact. `Sd35LoadReceipt::capture` then reads the transformer's
+        // packing off the safetensors headers and cross-checks it against the path tier, so the
+        // tier in the published identity is the tier on disk. Falling through here is therefore
+        // what the worker does, not an omission.
+        //
+        // sc-22731 puts SANA and Chroma1 in the same class, from the worker itself:
+        // `candle_quant_for_resolved_tier` returns `(None, _)` for both families at EVERY tier, so
+        // `LoadSpec::quantize` is `None` on every shipped Candle render of them. Both engines
+        // refuse a quant by name (`"Candle supports only the dense physical tier"`,
+        // `"turnkey q4/q8/bf16 all require precision=Bf16 and LoadSpec.quantize=None"`), and
+        // Chroma's tier comes from the artifact path plus the transformer's own packed marker.
+        _ => spec,
+    };
+    // The catalog model id reaches the engine as `resolved_route` — the same lever the worker
+    // sets (`image_jobs/base.rs`, `spec.with_resolved_route(request.model)`), and the only thing
+    // that distinguishes two catalog models sharing one registry id (sc-22727).
+    let spec = match flux2_arm(request)? {
+        Some(arm) => spec.with_resolved_route(arm.model_id),
+        // sc-22732: the worker sets it on EVERY candle load, and `candle-gen-ideogram`'s exact
+        // directory route refuses a spec whose `resolved_route` is not its own id
+        // (`validate_load_shape`), so the turnkey members carry it too.
+        None if turnkey_candle_member(provider_id).is_some() => {
+            spec.with_resolved_route(provider_id)
+        }
+        None => spec,
+    };
+    Ok(spec)
+}
 
 fn load_five_rung_generator(request: &Value) -> Result<LoadedFiveRungGenerator, String> {
     // Resolved BEFORE the family match: Ideogram's bf16 tier is a different repository, so the tier
@@ -1819,101 +1941,7 @@ fn load_five_rung_generator(request: &Value) -> Result<LoadedFiveRungGenerator, 
             expected_repository,
         )?;
     }
-    let spec = LoadSpec::new(WeightsSource::Dir(root))
-        .with_offload_policy(OffloadPolicy::Sequential)
-        .with_load_shape(LoadShape::DeferredMaterialization);
-    // sc-22731: the worker binds the exact resolved route on every Candle image load
-    // (`image_jobs/base.rs`: `.with_resolved_route(request.model.clone())`), and
-    // `candle-gen-chroma`'s `validate_load_shape` refuses a spec without it by name. Set for the
-    // two families whose engines were ported against that shape; the older arms keep the spec they
-    // have always been measured with.
-    let spec = if matches!(
-        provider_id,
-        SANA_ID | SANA_SPRINT_ID | CHROMA1_HD_ID | CHROMA1_BASE_ID | CHROMA1_FLASH_ID
-    ) {
-        spec.with_resolved_route(provider_id.to_owned())
-    } else {
-        spec
-    };
-    let spec = match (provider_id, numeric_tier(tier)?.quant) {
-        // Krea's loader takes the packed tier's quant explicitly; bf16 is the dense base and must
-        // carry no quant at all (`Quant::None` — the same shape the worker's `tier_to_quant` uses).
-        (KREA_ID, Some(quant)) => spec.with_quant(quant),
-        (KREA_ID, None) => spec,
-        // FLUX.2 is per MEMBER (sc-22727 review): the dev route folds the planned tier the way the
-        // worker's `candle_quant_for_resolved_tier` does, while both klein turnkeys are dense-TE
-        // tiers the worker loads with `(None, resolved_bits)` — `candle-gen-flux2` quantizes the DiT
-        // on-the-fly whenever `spec.quantize` is set, so folding it on a packed klein tier would
-        // re-quantize the transformer and measure a load the app never performs. bf16 carries
-        // `Quant::None` on every member, the worker's `tier_to_quant`.
-        (FLUX2_DEV_ID | FLUX2_KLEIN_ID, Some(quant)) => {
-            let arm =
-                flux2_arm(request)?.expect("a FLUX.2 provider always resolves a member or errors");
-            if arm.tier_quant_reaches_the_loader {
-                spec.with_quant(quant)
-            } else {
-                spec
-            }
-        }
-        (FLUX2_DEV_ID | FLUX2_KLEIN_ID, None) => spec,
-        // sc-22732: the turnkey still family, PER MEMBER (`TURNKEY_CANDLE_MEMBERS`). Kolors and both
-        // Lens routes take the packed tier's quant EXPLICITLY, because the worker does:
-        // `candle_quant_for_resolved_tier` (`image_jobs/base.rs`) carves out sana, dense-TE tiers,
-        // chroma, sd3.5 and the two FLUX.1 routes to `None`, none of these declares
-        // `mlx.denseTextEncoderTier`, and every descriptor advertises `supported_quants: [Q4, Q8]`.
-        // `candle-gen-kolors` treats it as an advisory no-op on the packed tier; `candle-gen-lens`
-        // proves the artifact tier from disk and withholds its identity unless `spec.quantize`
-        // EQUALS it, so binding `None` on a packed Lens tier would withhold the identity this cell
-        // is measured under. The two Ideogram routes are the exception: `candle-gen-ideogram`'s
-        // exact directory route (`validate_load_shape`, reached from the production loader through
-        // `IdeogramLoadReceipt::capture`) REFUSES `quantize: Some(_)` outright and proves the tier
-        // off the packed safetensors headers instead, so the quant never reaches that loader.
-        // bf16 is the dense base and carries no quant on any member.
-        (KOLORS_ID | IDEOGRAM_ID | IDEOGRAM_TURBO_ID | LENS_ID | LENS_TURBO_ID, Some(quant)) => {
-            if turnkey_candle_member(provider_id)
-                .expect("a turnkey provider always resolves a member")
-                .tier_quant_reaches_the_loader
-            {
-                spec.with_quant(quant)
-            } else {
-                spec
-            }
-        }
-        (KOLORS_ID | IDEOGRAM_ID | IDEOGRAM_TURBO_ID | LENS_ID | LENS_TURBO_ID, None) => spec,
-        // Qwen, Z-Image-Turbo and the Z-Image base packed Diffusers snapshots declare their
-        // device-format quantization in transformer/config.json (`snapshot_quant_tier` in
-        // candle-gen-z-image's memory_strategy.rs). Passing LoadSpec.quant would request a second,
-        // unsupported runtime quantization pass — every one of those loaders rejects it by name —
-        // instead of loading the packed artifact as authored.
-        //
-        // sc-22730: the SD3.5 turnkeys are packed the same way, and `candle-gen-sd3`'s
-        // `validate_load_shape` refuses `LoadSpec::quantize` on them OUTRIGHT — a request knob can
-        // never outrank the artifact. `Sd35LoadReceipt::capture` then reads the transformer's
-        // packing off the safetensors headers and cross-checks it against the path tier, so the
-        // tier in the published identity is the tier on disk. Falling through here is therefore
-        // what the worker does, not an omission.
-        //
-        // sc-22731 puts SANA and Chroma1 in the same class, from the worker itself:
-        // `candle_quant_for_resolved_tier` returns `(None, _)` for both families at EVERY tier, so
-        // `LoadSpec::quantize` is `None` on every shipped Candle render of them. Both engines
-        // refuse a quant by name (`"Candle supports only the dense physical tier"`,
-        // `"turnkey q4/q8/bf16 all require precision=Bf16 and LoadSpec.quantize=None"`), and
-        // Chroma's tier comes from the artifact path plus the transformer's own packed marker.
-        _ => spec,
-    };
-    // The catalog model id reaches the engine as `resolved_route` — the same lever the worker
-    // sets (`image_jobs/base.rs`, `spec.with_resolved_route(request.model)`), and the only thing
-    // that distinguishes two catalog models sharing one registry id (sc-22727).
-    let spec = match flux2_arm(request)? {
-        Some(arm) => spec.with_resolved_route(arm.model_id),
-        // sc-22732: the worker sets it on EVERY candle load, and `candle-gen-ideogram`'s exact
-        // directory route refuses a spec whose `resolved_route` is not its own id
-        // (`validate_load_shape`), so the turnkey members carry it too.
-        None if turnkey_candle_member(provider_id).is_some() => {
-            spec.with_resolved_route(provider_id)
-        }
-        None => spec,
-    };
+    let spec = five_rung_load_spec(request, provider_id, tier, root)?;
     // sc-22726: the FLUX.1 base snapshots declare their packed tier the same way; the directory
     // name proved nothing about the weights, so read the tier off the transformer config before
     // paying for the load.
@@ -6344,6 +6372,71 @@ mod tests {
         assert_eq!(seen, expected);
     }
 
+    /// sc-22732 review: the identity table must REFUSE an unknown coordinate, not synthesize one.
+    /// The per-member arms bind `tier` as a free variable, so before the guard
+    /// `turnkey_calibration_fingerprint("kolors", "q2")` happily returned
+    /// `"kolors-candle-kolors-q2-staged-chatglm-unet-f32-vae-v1"` — a well-formed identity no
+    /// engine publishes — and `validate_turnkey_identity` would have accepted a plan row naming it,
+    /// then carried a capture all the way to a real load under a fabricated key.
+    #[test]
+    fn the_turnkey_candle_identity_table_refuses_an_unshipped_coordinate() {
+        // Every shipped coordinate is nameable, so the guard cannot pass by refusing everything.
+        for provider in [
+            KOLORS_ID,
+            IDEOGRAM_ID,
+            IDEOGRAM_TURBO_ID,
+            LENS_ID,
+            LENS_TURBO_ID,
+        ] {
+            for tier in ["bf16", "q4", "q8"] {
+                assert!(
+                    turnkey_calibration_fingerprint(provider, tier).is_some(),
+                    "{provider} {tier} is a shipped turnkey cell"
+                );
+            }
+        }
+        // Tiers this family does not ship, on a member it DOES ship: the axis the free variable let
+        // through.
+        for tier in ["q2", "q6", "nvfp4", "fp8", "bf16 ", "", "Q4"] {
+            for provider in [
+                KOLORS_ID,
+                IDEOGRAM_ID,
+                IDEOGRAM_TURBO_ID,
+                LENS_ID,
+                LENS_TURBO_ID,
+            ] {
+                assert_eq!(
+                    turnkey_calibration_fingerprint(provider, tier),
+                    None,
+                    "{provider} {tier:?} is not a shipped turnkey tier"
+                );
+            }
+        }
+        // A provider outside the family stays unnameable at every shipped tier, including the
+        // composed Kolors routes, which are separate evidence identities.
+        for provider in ["candle_kolors_ipadapter", "candle_kolors_control", "sdxl"] {
+            for tier in ["bf16", "q4", "q8"] {
+                assert_eq!(
+                    turnkey_calibration_fingerprint(provider, tier),
+                    None,
+                    "{provider} is not a turnkey member"
+                );
+            }
+        }
+        // The refusal reaches the plan check as an error rather than a silent pass.
+        let request = turnkey_request(
+            KOLORS_ID,
+            "q2",
+            "fresh-five-rung-kolors-q2-1024-seed16402-step2",
+        );
+        let error = validate_turnkey_identity(&request, KOLORS_ID, "q2")
+            .expect_err("an unshipped tier has no identity to match");
+        assert!(
+            error.contains("no turnkey member kolors at tier q2"),
+            "{error}"
+        );
+    }
+
     /// Every turnkey Candle plan row names the production calibration identity its loaded
     /// generator publishes (the sc-22732 inference head's per-(route, tier) tables): the one
     /// measured key is preserved byte-for-byte at `lens_turbo` q4, no row names a weights-free
@@ -6518,6 +6611,87 @@ mod tests {
             ]
         );
         assert_eq!(turnkey_candle_member("candle_kolors_ipadapter"), None);
+    }
+
+    /// The table above is only a declaration. THIS is the binding: the `LoadSpec` the capture hands
+    /// `catalog.media().load` ([`five_rung_load_spec`]) is built for every planned member x tier and
+    /// its `quantize` read back.
+    ///
+    /// sc-22732 review: the fold was reachable only through `load_five_rung_generator`, which loads
+    /// real weights on a CUDA host, so nothing tied `tier_quant_reaches_the_loader` to the produced
+    /// spec — an unconditional `spec.with_quant(quant)` would have left both the table test above
+    /// and the JS mirror green while every Ideogram capture died inside
+    /// `candle-gen-ideogram::validate_load_shape`. Mirrors the MLX arm's
+    /// `the_turnkey_root_must_carry_the_planned_tier_and_the_spec_binds_it`.
+    ///
+    /// The tiers are the ones the plan actually declares for this lane, filtered by the arm's own
+    /// `validate_five_rung_lane_tier`, so a lane that gains or loses a tier is covered without a
+    /// second list to keep in step.
+    #[test]
+    fn the_turnkey_candle_spec_binds_the_tier_quant_per_member() {
+        let mut seen = Vec::new();
+        for (provider, slug) in TURNKEY_MEMBERS {
+            for tier in ["bf16", "q4", "q8"] {
+                if validate_five_rung_lane_tier(provider, tier).is_err() {
+                    continue;
+                }
+                let request = turnkey_request(
+                    provider,
+                    tier,
+                    &format!("fresh-five-rung-{slug}-{tier}-1024-seed16402-step2"),
+                );
+                let spec = five_rung_load_spec(
+                    &request,
+                    provider,
+                    tier,
+                    PathBuf::from("/nonexistent/turnkey").join(tier),
+                )
+                .unwrap_or_else(|error| panic!("{provider} {tier}: {error}"));
+                // The engine reads the route off the spec: `candle-gen-ideogram`'s
+                // `validate_load_shape` refuses a spec whose `resolved_route` is not its own id.
+                assert_eq!(
+                    spec.resolved_route.as_deref(),
+                    Some(provider),
+                    "{provider} {tier}: the resolved route must reach the loader"
+                );
+                // bf16 is dense on every member; a packed tier reaches the loader only when the
+                // member says so. Ideogram is the one that must not: its exact directory route
+                // refuses `quantize: Some(_)` outright and proves the tier off the shards.
+                let expected = match (tier, provider.starts_with("ideogram_4")) {
+                    ("bf16", _) | (_, true) => None,
+                    ("q4", false) => Some(Quant::Q4),
+                    ("q8", false) => Some(Quant::Q8),
+                    _ => unreachable!("the three shipped tiers"),
+                };
+                assert_eq!(
+                    spec.quantize, expected,
+                    "{provider} {tier}: LoadSpec::quantize"
+                );
+                seen.push((provider, tier, spec.quantize));
+            }
+        }
+        // Stated as data too, so the loop cannot pass by every cell answering the same way — and so
+        // a member or tier silently dropped from the walk fails here rather than vacuously passing.
+        assert_eq!(
+            seen,
+            vec![
+                (KOLORS_ID, "bf16", None),
+                (KOLORS_ID, "q4", Some(Quant::Q4)),
+                (KOLORS_ID, "q8", Some(Quant::Q8)),
+                (IDEOGRAM_ID, "bf16", None),
+                (IDEOGRAM_ID, "q4", None),
+                (IDEOGRAM_ID, "q8", None),
+                (IDEOGRAM_TURBO_ID, "bf16", None),
+                (IDEOGRAM_TURBO_ID, "q4", None),
+                (IDEOGRAM_TURBO_ID, "q8", None),
+                (LENS_ID, "bf16", None),
+                (LENS_ID, "q4", Some(Quant::Q4)),
+                (LENS_ID, "q8", Some(Quant::Q8)),
+                (LENS_TURBO_ID, "bf16", None),
+                (LENS_TURBO_ID, "q4", Some(Quant::Q4)),
+                (LENS_TURBO_ID, "q8", Some(Quant::Q8)),
+            ]
+        );
     }
 }
 

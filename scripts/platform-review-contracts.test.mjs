@@ -2983,6 +2983,13 @@ test("the Candle FLUX.2 arm table's tier-quant flags negate the manifest's dense
 // binding lives in a `#[test]` inside `candle.rs`, which cannot RUN on a Mac, so the same table is
 // parsed out of the source text here, where it runs and can be mutation-killed on the host that
 // writes the arm.
+//
+// sc-22732 review item 6: the two sides DISAGREED. The adapter table said the Ideogram quant must
+// not reach the loader, while `candle_quant_for_resolved_tier` did not carve the two routes out —
+// their descriptor advertises `supported_quants: [Q4, Q8]`, so production sent `Some(Q4)` into
+// `validate_load_shape` and every candle Ideogram q4/q8 load failed at the loader. The worker now
+// carves them out beside the Chroma/SD3.5/FLUX.1 turnkeys, and the two copies are read against each
+// other below, because that is the seam that let them drift.
 test("the Candle turnkey member table folds the tier quant per member, and never for Ideogram", async () => {
   const manifest = JSON.parse(
     stripJsoncComments(await source("config/manifests/builtin.models.jsonc")),
@@ -3017,6 +3024,101 @@ test("the Candle turnkey member table folds the tier quant per member, and never
   }
   // Stated as data too, so the loop cannot pass by every member answering the same way.
   assert.deepEqual(members.map((member) => member.flag), ["true", "false", "false", "true", "true"]);
+
+  // The table is only a declaration; this is the FOLD that consumes it. sc-22732 review: nothing
+  // bound the flag to the produced `LoadSpec`, so an unconditional `spec.with_quant(quant)` left
+  // every assertion above green while each Ideogram capture died inside the engine's
+  // `validate_load_shape`. `candle.rs#the_turnkey_candle_spec_binds_the_tier_quant_per_member` now
+  // builds the spec and reads `quantize` back, but that binary is `compile_error!` on macOS and its
+  // tests first RUN on the windows-candle lane — so the fold is ALSO read as source text here,
+  // where it runs on the host that writes the arm and the mutation is killable before a push.
+  const foldArm =
+    /\(KOLORS_ID \| IDEOGRAM_ID \| IDEOGRAM_TURBO_ID \| LENS_ID \| LENS_TURBO_ID, Some\(quant\)\) => \{([\s\S]*?)\n        \}/
+      .exec(adapter);
+  assert.ok(foldArm, "candle.rs must still fold the turnkey tier quant in five_rung_load_spec");
+  assert.match(
+    foldArm[1],
+    /turnkey_candle_member\(provider_id\)[\s\S]*\.tier_quant_reaches_the_loader[\s\S]*spec\.with_quant\(quant\)[\s\S]*else[\s\S]*spec/,
+    "the turnkey fold must be GATED on the member's tier_quant_reaches_the_loader, not unconditional",
+  );
+  // bf16 carries no quant on any member: the `None` arm hands the spec through untouched.
+  assert.match(
+    adapter,
+    /\(KOLORS_ID \| IDEOGRAM_ID \| IDEOGRAM_TURBO_ID \| LENS_ID \| LENS_TURBO_ID, None\) => spec,/,
+    "the dense turnkey tier must bind no quant",
+  );
+  // The spec builder must be the pure function the Rust test can call — if the fold moves back
+  // inside the loader, that test stops covering the shipped path and this says so.
+  assert.match(
+    adapter,
+    /fn five_rung_load_spec\(\n\s+request: &Value,\n\s+provider_id: &str,\n\s+tier: &str,\n\s+root: PathBuf,\n\) -> Result<LoadSpec, String> \{/,
+    "the five-rung LoadSpec must stay a pure function so its shape is directly assertable",
+  );
+  assert.match(
+    adapter,
+    /let spec = five_rung_load_spec\(request, provider_id, tier, root\)\?;/,
+    "load_five_rung_generator must hand the loader exactly that spec",
+  );
+
+  // sc-22732 review item 6. The adapter's per-member flag claims what PRODUCTION does; the worker is
+  // where production actually decides. Read the worker's carve-out and require it to answer the same
+  // way for every one of the five members, so neither copy can be edited alone. The Rust guard
+  // (`packed_turnkeys_keep_load_quantization_none_for_every_public_route`) is cfg'd to a non-macOS
+  // candle build and cannot run on the host that writes either file.
+  const worker = await source("crates/sceneworks-worker/src/image_jobs/base.rs");
+  const carveOut =
+    /\/\/ Keep the load instruction empty while retaining the resolved artifact bits for the recipe\n[\s\S]*?if matches!\(\n\s+request\.model\.as_str\(\),\n([\s\S]*?)\n\s+\) \{\n\s+return \(None, resolved_bits\);/
+      .exec(worker);
+  assert.ok(carveOut, "image_jobs/base.rs must still carve packed turnkeys out of the quant fold");
+  const carved = new Set([...carveOut[1].matchAll(/"([a-z0-9_]+)"/g)].map(([, id]) => id));
+  assert.ok(carved.has("chroma1_hd"), "the parsed carve-out is the packed-turnkey list");
+  for (const member of members) {
+    assert.equal(
+      carved.has(member.providerId),
+      member.flag === "false",
+      `${member.providerId}: the worker carve-out and TURNKEY_CANDLE_MEMBERS.tier_quant_reaches_the_loader disagree about whether LoadSpec::quantize reaches the loader`,
+    );
+  }
+});
+
+// sc-22732 review item 5: both identity tables bind `tier` as a FREE VARIABLE inside their
+// per-member arms, so before these guards `("kolors", "q2")` minted
+// `kolors-candle-kolors-q2-staged-chatglm-unet-f32-vae-v1` — a well-formed identity no engine
+// publishes — and the plan check then compared a row against it instead of refusing the coordinate.
+// The Rust tests that exercise the functions cannot run here (`candle.rs` is `compile_error!` on
+// macOS; `mlx.rs` needs the Metal runtime), so the guard is read as source text on the host that
+// writes both arms.
+test("the turnkey identity tables refuse a tier the family does not ship", async () => {
+  for (const [file, signature] of [
+    [
+      "crates/sceneworks-memory-adapter/src/bin/candle.rs",
+      /fn turnkey_calibration_fingerprint\(provider_id: &str, tier: &str\) -> Option<String> \{\n(\s+if !matches!\(tier, "bf16" \| "q4" \| "q8"\) \{\n\s+return None;\n\s+\}\n)/,
+    ],
+    [
+      "crates/sceneworks-memory-adapter/src/bin/mlx.rs",
+      /fn turnkey_calibration_fingerprint\(arm: TurnkeyArm, tier: &str\) -> Option<String> \{\n(\s+if !matches!\(tier, "bf16" \| "q4" \| "q8"\) \{\n\s+return None;\n\s+\}\n)/,
+    ],
+  ]) {
+    const text = await source(file);
+    assert.match(
+      text,
+      signature,
+      `${file}: turnkey_calibration_fingerprint must return Option and refuse an unshipped tier BEFORE the per-member arms`,
+    );
+    // No arm may fall through to a synthesized identity for an unknown provider either.
+    assert.ok(
+      !/no turnkey member \{provider\} at tier \{tier\}"\)/.test(text)
+        || /_ => return None,/.test(text),
+      `${file}: an unknown turnkey provider must refuse rather than panic past the table`,
+    );
+  }
+  // The MLX caller must consume the Option as a refusal, not unwrap it into the old String.
+  const mlx = await source("crates/sceneworks-memory-adapter/src/bin/mlx.rs");
+  assert.match(
+    mlx,
+    /let expected_fingerprint = turnkey_calibration_fingerprint\(arm, tier\)\.ok_or_else\(\|\| \{/,
+    "the MLX plan check must turn a refused coordinate into an error before any weight work",
+  );
 });
 
 test("the MLX LTX arm's manifest constants match the shipped ltx_2_3 limits", async () => {

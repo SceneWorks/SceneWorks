@@ -1044,6 +1044,10 @@ test("the kolors, ideogram and lens families are measurable on every shipped tie
     ["bf16", "q4", "q8"].flatMap((tier) => [`${id}:${tier}:candle`, `${id}:${tier}:mlx`]),
   );
   assert.deepEqual(cells.map((cell) => cell.key).sort(), expected.sort());
+  const gaps = (await measurabilityGaps()).filter((gap) => family.includes(gap.modelId));
+  assert.equal(gaps.length, 0, gapReport(gaps));
+});
+
 // sc-22730. Same shape claim, for the SD3.5 family: three DISTINCT base text-to-image providers of
 // the shared SD3.5 engine crates, each with its OWN tiered rehost, on the registry path of BOTH
 // lanes. `sd3_5_*` is the catalog model id AND the engine provider id, so no alias is involved.
@@ -1190,6 +1194,80 @@ test("every planned sd3.5 fingerprint is one its lane's declaration can emit", a
     }
   }
   assert.equal(seen, 3 * 3 * 2, "every SD3.5 cell is priced by the plan");
+});
+
+// sc-22732 review item 4: NOTHING cross-checked the plan's turnkey fingerprints against the shipped
+// manifest, so the two could name different identities for the same cell with every test green. The
+// sc-22730 case above is the precedent; this is the same claim for the five turnkey still members,
+// and it is FAIL-CLOSED — there is no third outcome for a cell.
+//
+// The CANDLE half is a real cross-source binding: the plan's string must be one the model's own
+// `candle.memoryStrategyContract` declares. A cell whose lane declares NOTHING is not silently
+// skipped; it is an error UNLESS that backend block carries a `memoryDeclarationWithhold` whose
+// reason NAMES this anchor key. `kolors:*:candle` is the one such cell: SC-20790 withholds the
+// `staged_residency` declaration because no measured record prices the base staged cell yet, while
+// the sc-22732 inference head does publish a per-(route, artifact tier) identity for it. Requiring
+// the withhold to name the anchors is what keeps that pairing visible instead of prose.
+//
+// The MLX half cannot be bound to a manifest constant for every member: `mlx-gen-ideogram` has no
+// memory strategy at the compiled pin (inference PR 954 adds it) and the lens blocks carry only the
+// engine-derived region, whose fingerprints arrive with the next capability dump. It is bound to the
+// (route, TIER) shape the merged engines mint — and WHERE the manifest does declare a fingerprint
+// for a planned mlx cell (kolors), that string must agree too, so the half that CAN be bound is.
+test("every planned turnkey-still fingerprint is one its lane's declaration can emit", async () => {
+  const plan = await readPlan();
+  const models = await readManifestModels();
+  // (model id -> the shape its MLX identity takes). `kolors` q4 and `lens` q4 are the preserved
+  // measured keys, so they are named rather than derived.
+  const mlxIdentity = {
+    kolors: (tier) => (tier === "q4" ? "kolors-mlx-chatglm3-sdxl-unet-ladder-v1" : `kolors-${tier}-mlx-shared-ladder-v1`),
+    ideogram_4: (tier) => `ideogram-4-${tier}-mlx-shared-ladder-v1`,
+    ideogram_4_turbo: (tier) => `ideogram-4-turbo-${tier}-mlx-shared-ladder-v1`,
+    lens: (tier) => (tier === "q4" ? "lens-mlx-shared-ladder-2026-08-03-v1" : `lens-${tier}-mlx-shared-ladder-v1`),
+    lens_turbo: (tier) => `lens-turbo-${tier}-mlx-shared-ladder-v1`,
+  };
+  const withheld = [];
+  let seen = 0;
+  for (const [key, entry] of Object.entries(plan.anchors)) {
+    const { modelId, tier, backend } = anchorParts(key);
+    if (!(modelId in mlxIdentity)) continue;
+    seen += 1;
+    const model = models.find((candidate) => candidate.id === modelId);
+    const declared = new Set(
+      (model?.[backend]?.memoryStrategyContract?.implementations ?? [])
+        .filter((impl) => impl.fingerprint && (impl.tiers ?? []).includes(tier))
+        .map((impl) => impl.fingerprint),
+    );
+    if (backend === "mlx") {
+      assert.equal(entry.calibrationFingerprint, mlxIdentity[modelId](tier), key);
+      // Bound where it CAN be bound: a declared mlx fingerprint for a planned cell must agree.
+      if (declared.size > 0) {
+        assert.ok(
+          declared.has(entry.calibrationFingerprint),
+          `${key}: plan names ${entry.calibrationFingerprint}, manifest declares ${[...declared].join(", ")}`,
+        );
+      }
+      continue;
+    }
+    if (declared.size > 0) {
+      assert.ok(
+        declared.has(entry.calibrationFingerprint),
+        `${key}: plan names ${entry.calibrationFingerprint}, manifest declares ${[...declared].join(", ")}`,
+      );
+      continue;
+    }
+    // Fail-closed: an undeclared candle cell needs a cited withhold that NAMES this anchor.
+    const reason = model?.[backend]?.memoryDeclarationWithhold?.reason ?? "";
+    assert.ok(
+      reason.includes(key),
+      `${key}: the candle lane declares no fingerprint for this tier and no memoryDeclarationWithhold names the anchor`,
+    );
+    withheld.push(key);
+  }
+  assert.equal(seen, 5 * 3 * 2, "every turnkey still cell is priced by the plan");
+  // Stated as data: the withheld set is exactly the three Kolors candle cells, so a lane that
+  // silently loses its declarations cannot hide behind a broadly-worded withhold.
+  assert.deepEqual(withheld.sort(), ["kolors:bf16:candle", "kolors:q4:candle", "kolors:q8:candle"]);
 });
 
 // sc-22726 left this binding open and sc-22730 closes it: the artifact repository of every family
