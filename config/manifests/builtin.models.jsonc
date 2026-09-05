@@ -25612,7 +25612,7 @@
             },
             "productionClosure": {
               "schemaVersion": 1,
-              "sha256": "ffe8083737660e1eeb3149d57a623ed122b24de27975040679006717ed94d74e",
+              "sha256": "47d72a7d6629b7c390799034117fa07ba0a1b6ec11bd169caa9d5b50b25fb103",
               "entries": [
                 {
                   "path": ".github/workflows/starvector-terminal-provision.yml",
@@ -25801,8 +25801,8 @@
                 },
                 {
                   "path": "scripts/starvector-terminal-provision.mjs",
-                  "byteSize": 30053,
-                  "sha256": "19cbe16adedfc831b00b3a993bd2bea8707dd0c5f338b619843bdf084ea2abf2"
+                  "byteSize": 33753,
+                  "sha256": "780e2c76f9d419c518f192deff0515788a1951d0337bd187d777a14894683e12"
                 },
                 {
                   "path": "scripts/starvector-terminal-recovery.mjs",

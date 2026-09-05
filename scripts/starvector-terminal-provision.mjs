@@ -413,16 +413,64 @@ export async function prepareUpstreamSource(source, lock) {
     await execFile("git", ["clone", "--config", "core.autocrlf=false", "--config", "core.eol=lf", "--no-checkout", `${lock.implementation_repository}.git`, source]);
     await execFile("git", ["-C", source, "checkout", "--detach", lock.implementation_revision]);
   }
+  await assertTerminalPhysicalContainment(source, source);
   const head = (await execFile("git", ["-C", source, "rev-parse", "HEAD"])).stdout.trim();
   const dirty = (await execFile("git", ["-C", source, "status", "--porcelain"])).stdout.trim();
   if (head !== lock.implementation_revision || dirty) die("upstream source must be exact and clean");
-  // A clean Windows checkout can still contain CRLF bytes. The oracle hashes exact
-  // audited source bytes, so rematerialize this owned, verified checkout from its
-  // unchanged index; config alone would leave an existing CRLF worktree intact.
+  // Host attributes and smudge filters can override checkout newline settings.
+  // Read the audited blobs directly, without checkout conversion, and validate
+  // the complete identity before replacing any bytes in this owned checkout.
+  const listing = (await execFile("git", ["-C", source, "ls-tree", "-r", "-z", head, "--", "starvector"])).stdout;
+  const files = [];
+  for (const record of listing.split("\0").filter(Boolean)) {
+    const match = /^(\d{6}) (\w+) ([a-f0-9]{40})\t([\s\S]+)$/.exec(record);
+    if (!match) die("invalid upstream Git tree entry");
+    const [, mode, kind, oid, relative] = match;
+    if (!relative.startsWith("starvector/") || !relative.endsWith(".py")) continue;
+    if (!/^100(644|755)$/.test(mode) || kind !== "blob" || /[\\:\x00-\x1f\x7f]/.test(relative)
+        || relative.split("/").some(part => !part || part === "." || part === "..")) die("upstream Python source must be an ordinary contained Git blob");
+    const file = path.join(source, ...relative.split("/"));
+    await assertTerminalPhysicalContainment(source, path.dirname(file));
+    const info = await lstat(file);
+    if (!info.isFile() || info.isSymbolicLink() || info.nlink !== 1) die("upstream Python source must be an ordinary unlinked file");
+    const bytes = (await execFile("git", ["-C", source, "cat-file", "blob", oid], { encoding: "buffer", maxBuffer: 4 * 1024 * 1024 })).stdout;
+    files.push({ path: relative, file, bytes, mode, oid, sha256: sha(bytes) });
+  }
+  files.sort((left, right) => Buffer.compare(Buffer.from(left.path), Buffer.from(right.path)));
+  const identity = entries => sha(JSON.stringify(entries.map(({ path, sha256 }) => ({ path, sha256 }))));
+  const observed = identity(files);
+  if (!files.length || observed !== lock.python_source_sha256) die(`upstream Git blob identity mismatch: expected=${lock.python_source_sha256} actual=${observed} files=${files.length}`);
   await execFile("git", ["-C", source, "config", "core.autocrlf", "false"]);
   await execFile("git", ["-C", source, "config", "core.eol", "lf"]);
-  await execFile("git", ["-C", source, "checkout-index", "--force", "--all", "--index"]);
+  // Keep later cleanliness checks meaningful under host conversion policies too.
+  // info/attributes is clone-local and takes precedence over global/repo rules;
+  // retain existing rules and override only the audited Python paths.
+  const infoRoot = path.join(source, ".git", "info");
+  await assertTerminalPhysicalContainment(source, infoRoot);
+  await mkdir(infoRoot, { recursive: true });
+  const attributesPath = path.join(infoRoot, "attributes");
+  const attributesInfo = await lstat(attributesPath).catch(error => { if (error.code === "ENOENT") return null; throw error; });
+  if (attributesInfo && (!attributesInfo.isFile() || attributesInfo.isSymbolicLink() || attributesInfo.nlink !== 1)) die("upstream local attributes must be an ordinary unlinked file");
+  const previous = attributesInfo ? await readFile(attributesPath, "utf8") : "";
+  const rules = files.map(entry => `${JSON.stringify(`/${entry.path}`)} -text -filter -ident`).join("\n") + "\n";
+  if (!previous.endsWith(rules)) await writeFile(attributesPath, `${previous}${previous.endsWith("\n") || !previous ? "" : "\n"}${rules}`);
+  for (const { file, bytes } of files) await writeFile(file, bytes);
+  const materialized = await Promise.all(files.map(async entry => ({ path: entry.path, sha256: sha(await readFile(entry.file)) })));
+  if (identity(materialized) !== observed) die("materialized upstream source differs from audited Git blobs");
+  // Discard conversion-dependent cached stat data without changing index blobs.
+  for (const { mode, oid, path: relative } of files) await execFile("git", ["-C", source, "update-index", "--cacheinfo", `${mode},${oid},${relative}`]);
+  if ((await execFile("git", ["-C", source, "status", "--porcelain"])).stdout.trim()) die("materialized upstream source must remain clean");
   return source;
+}
+
+export async function installUpstreamPackages(python, lock, execute = execFile) {
+  if (lock.torch_index_url !== "https://download.pytorch.org/whl/cu128") die("oracle requires the locked CUDA 12.8 wheel index");
+  // pip's timeout is a socket timeout, independent of the bounded process time.
+  // Do not restart a failed multi-gigabyte install or discard its reusable cache.
+  const base = ["-m", "pip", "install", "--disable-pip-version-check", "--timeout", "120", "--retries", "3"];
+  const bounds = { timeout: 60 * 60 * 1000, maxBuffer: 4 * 1024 * 1024 };
+  await execute(python, [...base, "--index-url", lock.torch_index_url, ...["torch", "torchvision"].map(name => `${name}==${lock.required_packages[name]}`)], bounds);
+  await execute(python, [...base, ...Object.entries(lock.required_packages).map(([name, version]) => `${name}==${version}`)], bounds);
 }
 
 // Provisioning may acquire dependencies; the campaign validation/execution is offline.
@@ -432,9 +480,7 @@ export async function provisionUpstream({ sceneWorksRoot, hostRoot, python, asse
   await prepareUpstreamSource(source, lock);
   const oraclePython = path.join(environment, process.platform === "win32" ? "Scripts" : "bin", process.platform === "win32" ? "python.exe" : "python");
   if (!await lstat(oraclePython).catch(() => null)) await execFile(python, ["-m", "venv", environment]);
-  if (lock.torch_index_url !== "https://download.pytorch.org/whl/cu128") die("oracle requires the locked CUDA 12.8 wheel index");
-  await execFile(oraclePython, ["-m", "pip", "install", "--disable-pip-version-check", "--index-url", lock.torch_index_url, ...["torch", "torchvision"].map(name => `${name}==${lock.required_packages[name]}`)], { timeout: 60 * 60 * 1000, maxBuffer: 4 * 1024 * 1024 });
-  await execFile(oraclePython, ["-m", "pip", "install", "--disable-pip-version-check", ...Object.entries(lock.required_packages).map(([name, version]) => `${name}==${version}`)], { timeout: 60 * 60 * 1000, maxBuffer: 4 * 1024 * 1024 });
+  await installUpstreamPackages(oraclePython, lock);
   const { validateUpstreamInputs } = await import("./starvector-terminal-upstream.mjs");
   // Authenticated component configs are provisioned separately with immutable
   // repository/revision/hash metadata; never synthesize missing backbone defaults.

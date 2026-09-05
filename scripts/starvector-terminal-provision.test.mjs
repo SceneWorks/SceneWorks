@@ -11,7 +11,7 @@ import { fileSha256 } from "./lib/file-sha256.mjs";
 import { terminalPinPaths } from "./lib/starvector-terminal-pin-paths.mjs";
 import { terminalTreeEntry, terminalTreeSha256 } from "./lib/terminal-tree-identity.mjs";
 import { removeStarVectorMacMetricsTree, selectStarVectorMacPython, validateStarVectorMacVenv } from "./select-starvector-macos-python.mjs";
-import { assemblePreflight, assembleWeights, downloadExact, installCheckout, installPinnedCheckout, prepareUpstreamSource, pinnedCheckoutLockPath, tree, validatePreflightMetadata, validatePreflightTransport, validateSealedPreflightIndex } from "./starvector-terminal-provision.mjs";
+import { assemblePreflight, assembleWeights, downloadExact, installCheckout, installPinnedCheckout, installUpstreamPackages, prepareUpstreamSource, pinnedCheckoutLockPath, tree, validatePreflightMetadata, validatePreflightTransport, validateSealedPreflightIndex } from "./starvector-terminal-provision.mjs";
 import { validateTerminalServiceClosure } from "./starvector-terminal-readiness.mjs";
 
 const execFile = promisify(execFileCallback);
@@ -1006,35 +1006,101 @@ test("upstream source restores canonical bytes from an exact clean CRLF checkout
   try {
     const source = path.join(root, "source.git"), destination = path.join(root, "upstream-source");
     const bytes = "def upstream():\n    return 1\n";
-    await mkdir(source);
+    await mkdir(path.join(source, "starvector"), { recursive: true });
     await execFile("git", ["init", source]);
     await execFile("git", ["-C", source, "config", "core.autocrlf", "false"]);
-    await writeFile(path.join(source, "source.py"), bytes);
+    await writeFile(path.join(source, "starvector/source.py"), bytes);
     await execFile("git", ["-C", source, "add", "."]);
     await execFile("git", ["-C", source, "-c", "user.name=fixture", "-c", "user.email=fixture@example.com", "commit", "-m", "fixture"]);
     const revision = (await execFile("git", ["-C", source, "rev-parse", "HEAD"])).stdout.trim();
     await execFile("git", ["clone", "--config", "core.autocrlf=true", source, destination]);
-    assert.equal(await readFile(path.join(destination, "source.py"), "utf8"), bytes.replaceAll("\n", "\r\n"));
+    assert.equal(await readFile(path.join(destination, "starvector/source.py"), "utf8"), bytes.replaceAll("\n", "\r\n"));
     assert.equal((await execFile("git", ["-C", destination, "status", "--porcelain"])).stdout, "");
-    const lock = { implementation_repository: source.slice(0, -4), implementation_revision: revision };
+    // This host attribute overrides core.autocrlf=false/core.eol=lf, including
+    // checkout-index. Exercise actual Git conversion, not a mocked file read.
+    const attributes = path.join(root, "host-attributes");
+    await writeFile(attributes, "*.py text eol=crlf\n");
+    await execFile("git", ["-C", destination, "config", "core.attributesFile", attributes]);
+    const lock = { implementation_repository: source.slice(0, -4), implementation_revision: revision,
+      python_source_sha256: digest(JSON.stringify([{ path: "starvector/source.py", sha256: digest(bytes) }])) };
     await prepareUpstreamSource(destination, lock);
-    assert.equal(await readFile(path.join(destination, "source.py"), "utf8"), bytes);
+    assert.equal(await readFile(path.join(destination, "starvector/source.py"), "utf8"), bytes);
     assert.equal((await execFile("git", ["-C", destination, "status", "--porcelain"])).stdout, "");
     assert.equal((await execFile("git", ["-C", destination, "rev-parse", "HEAD"])).stdout.trim(), revision);
     await prepareUpstreamSource(destination, lock);
-    assert.equal(await readFile(path.join(destination, "source.py"), "utf8"), bytes);
+    assert.equal(await readFile(path.join(destination, "starvector/source.py"), "utf8"), bytes);
     const fresh = path.join(root, "fresh-source");
     await prepareUpstreamSource(fresh, lock);
-    assert.equal(await readFile(path.join(fresh, "source.py"), "utf8"), bytes);
+    assert.equal(await readFile(path.join(fresh, "starvector/source.py"), "utf8"), bytes);
+
+    const attributesBefore = await readFile(path.join(destination, ".git/info/attributes"));
+    await assert.rejects(() => prepareUpstreamSource(destination, { ...lock, python_source_sha256: "0".repeat(64) }), /Git blob identity mismatch/);
+    assert.equal(await readFile(path.join(destination, "starvector/source.py"), "utf8"), bytes);
+    assert.deepEqual(await readFile(path.join(destination, ".git/info/attributes")), attributesBefore);
 
     const dirty = bytes + "# unauthorized edit\n";
-    await writeFile(path.join(destination, "source.py"), dirty);
+    await writeFile(path.join(destination, "starvector/source.py"), dirty);
     await assert.rejects(() => prepareUpstreamSource(destination, lock), /exact and clean/);
-    assert.equal(await readFile(path.join(destination, "source.py"), "utf8"), dirty);
-    await writeFile(path.join(destination, "source.py"), bytes);
+    assert.equal(await readFile(path.join(destination, "starvector/source.py"), "utf8"), dirty);
+    await writeFile(path.join(destination, "starvector/source.py"), bytes);
     await assert.rejects(() => prepareUpstreamSource(destination, { ...lock, implementation_revision: "a".repeat(40) }), /exact and clean/);
-    assert.equal(await readFile(path.join(destination, "source.py"), "utf8"), bytes);
+    assert.equal(await readFile(path.join(destination, "starvector/source.py"), "utf8"), bytes);
   } finally {
     await rm(root, { recursive: true, force: true });
   }
+});
+
+
+test("upstream source rejects a clean Git symlink before modifying ordinary files", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "starvector-upstream-symlink-"));
+  try {
+    await mkdir(path.join(root, "starvector"));
+    await execFile("git", ["init", root]);
+    await execFile("git", ["-C", root, "config", "core.autocrlf", "false"]);
+    // core.symlinks=false is the normal Windows representation and makes this
+    // real symlink-mode Git fixture portable without elevated OS privileges.
+    await execFile("git", ["-C", root, "config", "core.symlinks", "false"]);
+    const target = "../../outside.py";
+    await writeFile(path.join(root, "starvector/danger.py"), target);
+    await writeFile(path.join(root, "starvector/source.py"), "audited = True\n");
+    await execFile("git", ["-C", root, "add", "."]);
+    const oid = (await execFile("git", ["-C", root, "hash-object", "-w", "starvector/danger.py"])).stdout.trim();
+    await execFile("git", ["-C", root, "update-index", "--cacheinfo", `120000,${oid},starvector/danger.py`]);
+    await execFile("git", ["-C", root, "-c", "user.name=fixture", "-c", "user.email=fixture@example.com", "commit", "-m", "symlink fixture"]);
+    assert.equal((await execFile("git", ["-C", root, "status", "--porcelain"])).stdout, "");
+    const revision = (await execFile("git", ["-C", root, "rev-parse", "HEAD"])).stdout.trim();
+    await assert.rejects(() => prepareUpstreamSource(root, { implementation_revision: revision }), /ordinary contained Git blob/);
+    assert.equal(await readFile(path.join(root, "starvector/danger.py"), "utf8"), target);
+    assert.equal(await readFile(path.join(root, "starvector/source.py"), "utf8"), "audited = True\n");
+    assert.equal(await lstat(path.join(root, ".git/info/attributes")).catch(() => null), null);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("upstream pip downloads retain exact CUDA builds and stop within finite retry bounds", async () => {
+  const lock = JSON.parse(await readFile("release/starvector-terminal-upstream-lock-v1.json", "utf8"));
+  const calls = [];
+  await installUpstreamPackages("fixture-python", lock, async (...args) => { calls.push(args); });
+  assert.equal(calls.length, 2);
+  for (const [python, args, bounds] of calls) {
+    assert.equal(python, "fixture-python");
+    assert.equal(args[args.indexOf("--timeout") + 1], "120");
+    assert.equal(args[args.indexOf("--retries") + 1], "3");
+    assert.equal(bounds.timeout, 60 * 60 * 1000);
+    assert.ok(args.includes("torch==2.7.1+cu128"));
+    assert.ok(args.includes("torchvision==0.22.1+cu128"));
+    assert.ok(!args.includes("--no-cache-dir"));
+  }
+  assert.equal(calls[0][1][calls[0][1].indexOf("--index-url") + 1], "https://download.pytorch.org/whl/cu128");
+  assert.deepEqual(calls[1][1].filter(arg => arg.includes("==")), Object.entries(lock.required_packages).map(([name, version]) => `${name}==${version}`));
+  for (const failAt of [1, 2]) {
+    let attempts = 0;
+    const failure = new Error("fixture socket timeout");
+    await assert.rejects(() => installUpstreamPackages("fixture-python", lock, async () => {
+      if (++attempts === failAt) throw failure;
+    }), error => error === failure);
+    assert.equal(attempts, failAt, "failed install must not restart or advance to the next stage");
+  }
+  let attempts = 0;
+  await assert.rejects(() => installUpstreamPackages("fixture-python", { ...lock, torch_index_url: "https://wrong.invalid" }, async () => { attempts++; }), /locked CUDA/);
+  assert.equal(attempts, 0);
 });
