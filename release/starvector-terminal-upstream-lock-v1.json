@@ -24,7 +24,8 @@
   "components": {
     "starcoder1": {
       "repository": "bigcode/starcoderbase-1b",
-      "revision": "182f0165fdf8da9c9935901eec65c94337f01c11"
+      "revision": "182f0165fdf8da9c9935901eec65c94337f01c11",
+      "config_sha256": "f3b3bb241cb4ddac62b18c4e968c982d93aba751fa8b3066892fb289332d45a4"
     },
     "starcoder2": {
       "repository": "bigcode/starcoder2-7b",

@@ -25612,7 +25612,7 @@
             },
             "productionClosure": {
               "schemaVersion": 1,
-              "sha256": "65dc878d897c8d4bc16a8eb8510ab98d42abe6091a42a8b39af519ad9b1ee1c5",
+              "sha256": "5f9a0e6bad555790513b3829550896095de4416f880e02d433f14f2c6fea7565",
               "entries": [
                 {
                   "path": ".github/workflows/starvector-terminal-provision.yml",
@@ -25721,8 +25721,8 @@
                 },
                 {
                   "path": "release/starvector-terminal-upstream-lock-v1.json",
-                  "byteSize": 2234,
-                  "sha256": "24f66d9b2b85e4a1a8dcf695c8d0351f6c0205bf09a0cc3de1e073a391275684"
+                  "byteSize": 2325,
+                  "sha256": "c0383d2905cae1511e3cf094a18f1ace3c292d260eac30076bc8b11beca3ae43"
                 },
                 {
                   "path": "scripts/lib/file-sha256.mjs",
