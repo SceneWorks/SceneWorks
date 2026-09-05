@@ -84,6 +84,32 @@ pub const MINIMAX_REPOSITORY: &str = "SceneWorks/minimax-h3-mlx";
 /// [`validate_huggingface_revision_root`] rather than being forced through the rehost's
 /// variant-suffixed validator.
 pub const MINIMAX_UPSTREAM_REPOSITORY: &str = "MiniMaxAI/MiniMax-H3";
+/// The Kolors tiered rehost (sc-22732) — the `kolors` provider's own artifact on BOTH lanes. The
+/// ChatGLM3-6B text encoder is packed INSIDE each tier subdir alongside the SDXL-style U-Net and the
+/// dense SDXL VAE, and the derived fast tokenizer is baked in too
+/// (`crates/sceneworks-worker/src/engines.rs`, `image_jobs/base.rs`), so this one root is the whole
+/// load: the arm binds no second repository. Kolors' IP-Adapter and strict-pose ControlNet stacks
+/// live in their own upstream repos, but those are the two BESPOKE routes, and no anchor measures
+/// them.
+pub const KOLORS_REPOSITORY: &str = "SceneWorks/kolors-mlx";
+/// The base Lens tiered rehost (sc-22732). The gpt-oss-20b MoE text encoder and the FLUX.2
+/// autoencoder are packed per tier, so a Lens capture opens exactly one root.
+pub const LENS_REPOSITORY: &str = "SceneWorks/lens-mlx";
+/// The distilled Lens-Turbo tiered rehost (sc-22732) — a DIFFERENT repository at a DIFFERENT
+/// revision from [`LENS_REPOSITORY`], bound through its own `SCENEWORKS_LENS_TURBO_*` family the way
+/// `flux1_schnell` is split from `flux1_dev`, so a turbo plan can never be satisfied by base weights.
+pub const LENS_TURBO_REPOSITORY: &str = "SceneWorks/lens-turbo-mlx";
+/// The PACKED Ideogram 4 turnkey (sc-22732). It carries the `q4/` and `q8/` tiers ONLY, and it
+/// serves both catalog models — `ideogram_4` and `ideogram_4_turbo` share this repo AND this
+/// revision, differing by the `turbo_lora.safetensors` the turbo tier ships beside the glob.
+pub const IDEOGRAM_REPOSITORY: &str = "SceneWorks/ideogram-4-mlx";
+/// The Ideogram 4 bf16 tier, which lives in a SEPARATE repository at a separate revision
+/// (`crates/sceneworks-worker/src/image_jobs/base.rs` `IDEOGRAM_BF16_REPO`) because the MLX-quantized
+/// turnkey above is not bf16. Bound through its own `SCENEWORKS_IDEOGRAM_BF16_*` family: a bf16 plan
+/// resolved against the packed family would name the wrong artifact and the wrong revision, and the
+/// record's loadability fingerprint is the one claim about the snapshot nothing downstream can
+/// re-derive.
+pub const IDEOGRAM_BF16_REPOSITORY: &str = "SceneWorks/ideogram-4";
 pub const COMPARISON_OUTPUT_BIAS_PARAMETER: &str = "comparisonOutputBias";
 /// Persisted-JSON spellings of `gen_core::LoadShape`. Every emitted fragment must state the
 /// materialization shape its run actually used; the harness rejects a fragment that omits it, and

@@ -74,6 +74,27 @@ function fakeModels() {
     // `flux_dev`; its identity stack is fetched on first use and is not a manifest download at all.
     { id: "flux_dev", downloads: [{ repo: "SceneWorks/flux1-dev-mlx", revision: REVISION, variant: "q4", files: ["q4/*"] }] },
     { id: "pulid_flux_dev", downloads: [{ repo: "SceneWorks/flux1-dev-mlx", revision: REVISION, variant: "q4", files: ["q4/*"] }] },
+    // The turnkey still family (sc-22732). Kolors and the two Lens models each ship every tier from
+    // one repository; the two Ideogram models ship q4/q8 from the packed turnkey and bf16 from a
+    // SECOND repository at a SECOND revision, which is the case the family's `tiers` override
+    // exists for. Both Ideogram members carry both downloads, exactly as the manifest does.
+    { id: "kolors", downloads: [{ repo: "SceneWorks/kolors-mlx", revision: REVISION, variant: "q4", files: ["q4/*"] }] },
+    { id: "lens", downloads: [{ repo: "SceneWorks/lens-mlx", revision: REVISION, variant: "q4", files: ["q4/*"] }] },
+    { id: "lens_turbo", downloads: [{ repo: "SceneWorks/lens-turbo-mlx", revision: UPSTREAM, variant: "q4", files: ["q4/*"] }] },
+    {
+      id: "ideogram_4",
+      downloads: [
+        { repo: "SceneWorks/ideogram-4-mlx", revision: REVISION, variant: "q4", files: ["q4/*"] },
+        { repo: "SceneWorks/ideogram-4", revision: UPSTREAM, variant: "bf16", files: ["bf16/*"] },
+      ],
+    },
+    {
+      id: "ideogram_4_turbo",
+      downloads: [
+        { repo: "SceneWorks/ideogram-4-mlx", revision: REVISION, variant: "q4", files: ["q4/*"] },
+        { repo: "SceneWorks/ideogram-4", revision: UPSTREAM, variant: "bf16", files: ["bf16/*"] },
+      ],
+    },
   ];
 }
 
@@ -747,6 +768,83 @@ test("the flux.1 family is measurable on every shipped tier of every routed lane
   assert.equal(cells.length, 3 * 3 * 2, "three models x three shipped tiers x two routed lanes");
   const gaps = (await measurabilityGaps()).filter((gap) => family.includes(gap.modelId));
   assert.equal(gaps.length, 0, gapReport(gaps));
+});
+
+// sc-22732. Same shape claim, for the turnkey still family: five catalog models over three engine
+// crate pairs (`*-gen-kolors`, `*-gen-ideogram`, `*-gen-lens`), every one a plain reference-free
+// text-to-image route whose engine id equals its catalog model id.
+test("the kolors, ideogram and lens families are measurable on every shipped tier of every routed lane", async () => {
+  const family = ["kolors", "ideogram_4", "ideogram_4_turbo", "lens", "lens_turbo"];
+  const cells = (await shippedTieredCells()).filter((cell) => family.includes(cell.modelId));
+  assert.equal(cells.length, 5 * 3 * 2, "five models x three shipped tiers x two routed lanes");
+  const gaps = (await measurabilityGaps()).filter((gap) => family.includes(gap.modelId));
+  assert.equal(gaps.length, 0, gapReport(gaps));
+});
+
+// The Ideogram bf16 tier is the only shipped cell whose artifact is NOT the family's default
+// repository, so the `tiers` override is exercised end to end rather than only asserted as data:
+// the wrong binding would still classify `runnable`, and would only ever show up as a wrong
+// repository and a wrong revision inside a captured record's loadability fingerprint.
+test("the turnkey still family binds one artifact per member, and Ideogram's bf16 tier binds its own repository", async () => {
+  const hub = await fakeHub([
+    ["SceneWorks/kolors-mlx", REVISION, "q4"],
+    ["SceneWorks/lens-mlx", REVISION, "q4"],
+    ["SceneWorks/lens-turbo-mlx", UPSTREAM, "q4"],
+    ["SceneWorks/ideogram-4-mlx", REVISION, "q4"],
+    ["SceneWorks/ideogram-4", UPSTREAM, "bf16"],
+  ]);
+  for (const backend of ["mlx", "candle"]) {
+    const context = { models: fakeModels(), backend, hubs: [hub], current: new Map(), captured: new Map() };
+
+    const kolors = await classifyAnchor(`kolors:q4:${backend}`, { provider: "kolors" }, context);
+    assert.equal(kolors.status, "runnable", `${backend}: ${kolors.reason}`);
+    assert.deepEqual(kolors.env, {
+      SCENEWORKS_KOLORS_REPOSITORY: "SceneWorks/kolors-mlx",
+      SCENEWORKS_KOLORS_REVISION: REVISION,
+      SCENEWORKS_KOLORS_ROOT: snapshotPath(hub, "SceneWorks/kolors-mlx", REVISION, "q4"),
+    });
+
+    // Base Lens and Lens-Turbo are separate repositories at separate revisions: a turbo plan bound
+    // to the base family would re-label the base model's peaks as the distilled model's.
+    const lens = await classifyAnchor(`lens:q4:${backend}`, { provider: "lens" }, context);
+    assert.equal(lens.status, "runnable", `${backend}: ${lens.reason}`);
+    assert.deepEqual(lens.env, {
+      SCENEWORKS_LENS_REPOSITORY: "SceneWorks/lens-mlx",
+      SCENEWORKS_LENS_REVISION: REVISION,
+      SCENEWORKS_LENS_ROOT: snapshotPath(hub, "SceneWorks/lens-mlx", REVISION, "q4"),
+    });
+    const turbo = await classifyAnchor(`lens_turbo:q4:${backend}`, { provider: "lens_turbo" }, context);
+    assert.equal(turbo.status, "runnable", `${backend}: ${turbo.reason}`);
+    assert.deepEqual(turbo.env, {
+      SCENEWORKS_LENS_TURBO_REPOSITORY: "SceneWorks/lens-turbo-mlx",
+      SCENEWORKS_LENS_TURBO_REVISION: UPSTREAM,
+      SCENEWORKS_LENS_TURBO_ROOT: snapshotPath(hub, "SceneWorks/lens-turbo-mlx", UPSTREAM, "q4"),
+    });
+
+    // Both Ideogram members: q4 from the packed turnkey, bf16 from the second repository.
+    for (const [modelId, provider] of [["ideogram_4", "ideogram_4"], ["ideogram_4_turbo", "ideogram_4_turbo"]]) {
+      const packed = await classifyAnchor(`${modelId}:q4:${backend}`, { provider }, context);
+      assert.equal(packed.status, "runnable", `${backend} ${modelId}: ${packed.reason}`);
+      assert.deepEqual(packed.env, {
+        SCENEWORKS_IDEOGRAM_REPOSITORY: "SceneWorks/ideogram-4-mlx",
+        SCENEWORKS_IDEOGRAM_REVISION: REVISION,
+        SCENEWORKS_IDEOGRAM_ROOT: snapshotPath(hub, "SceneWorks/ideogram-4-mlx", REVISION, "q4"),
+      });
+      const dense = await classifyAnchor(`${modelId}:bf16:${backend}`, { provider }, context);
+      assert.equal(dense.status, "runnable", `${backend} ${modelId}: ${dense.reason}`);
+      assert.deepEqual(dense.env, {
+        SCENEWORKS_IDEOGRAM_BF16_REPOSITORY: "SceneWorks/ideogram-4",
+        SCENEWORKS_IDEOGRAM_BF16_REVISION: UPSTREAM,
+        SCENEWORKS_IDEOGRAM_BF16_ROOT: snapshotPath(hub, "SceneWorks/ideogram-4", UPSTREAM, "bf16"),
+      });
+    }
+
+    // A tier the host does not hold is `weights_missing`, and the reason names the repository the
+    // tier actually ships from — the packed one for q8, never the bf16 repo.
+    const missing = await classifyAnchor(`ideogram_4:q8:${backend}`, { provider: "ideogram_4" }, context);
+    assert.equal(missing.status, "weights_missing");
+    assert.match(missing.reason, /ideogram-4-mlx@.*\/q8 on this host/);
+  }
 });
 
 // The catalog-wide burndown. `todo` until the terminal story of epic 22723 (sc-22738) promotes it:

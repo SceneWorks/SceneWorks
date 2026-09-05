@@ -2974,6 +2974,51 @@ test("the Candle FLUX.2 arm table's tier-quant flags negate the manifest's dense
   assert.deepEqual(arms.map((arm) => arm.quantReachesLoader), ["true", "false", "false"]);
 });
 
+// sc-22732: the Candle turnkey still family decides PER MEMBER whether the planned tier reaches the
+// loader as `LoadSpec::quantize` (`TURNKEY_CANDLE_MEMBERS`). Three members mirror the worker's
+// `candle_quant_for_resolved_tier` — they are not carved out and declare no
+// `mlx.denseTextEncoderTier`, so the worker forwards `Some(Q4)`/`Some(Q8)`; the two Ideogram routes
+// are the exception for an ENGINE reason, not a manifest one: `candle-gen-ideogram`'s exact directory
+// route refuses `quantize: Some(_)` and proves the tier off the packed safetensors headers. The Rust
+// binding lives in a `#[test]` inside `candle.rs`, which cannot RUN on a Mac, so the same table is
+// parsed out of the source text here, where it runs and can be mutation-killed on the host that
+// writes the arm.
+test("the Candle turnkey member table folds the tier quant per member, and never for Ideogram", async () => {
+  const manifest = JSON.parse(
+    stripJsoncComments(await source("config/manifests/builtin.models.jsonc")),
+  );
+  const adapter = await source("crates/sceneworks-memory-adapter/src/bin/candle.rs");
+  const table = /const TURNKEY_CANDLE_MEMBERS: \[TurnkeyCandleMember; 5\] = \[([\s\S]*?)\n\];/.exec(adapter);
+  assert.ok(table, "candle.rs must still declare TURNKEY_CANDLE_MEMBERS");
+  const consts = new Map(
+    [...adapter.matchAll(/\bconst ([A-Z_]+_ID): &str = "([^"]+)";/g)].map(([, name, value]) => [name, value]),
+  );
+  const members = [...table[1].matchAll(/provider_id: ([A-Z_]+),\s*tier_quant_reaches_the_loader: (true|false)/g)]
+    .map(([, name, flag]) => ({ providerId: consts.get(name), flag }));
+  assert.deepEqual(
+    members.map((member) => member.providerId),
+    ["kolors", "ideogram_4", "ideogram_4_turbo", "lens", "lens_turbo"],
+    "the five turnkey members, in table order",
+  );
+  for (const member of members) {
+    const entry = manifest.models.find((model) => model.id === member.providerId);
+    assert.ok(entry, `${member.providerId} must be a shipped model`);
+    assert.notEqual(
+      entry.mlx?.denseTextEncoderTier,
+      true,
+      `${member.providerId}: a dense-TE declaration would change the worker's fold; none is declared`,
+    );
+    const ideogram = member.providerId.startsWith("ideogram_4");
+    assert.equal(
+      member.flag === "true",
+      !ideogram,
+      `${member.providerId}: only the Ideogram routes keep the quant off the loader`,
+    );
+  }
+  // Stated as data too, so the loop cannot pass by every member answering the same way.
+  assert.deepEqual(members.map((member) => member.flag), ["true", "false", "false", "true", "true"]);
+});
+
 test("the MLX LTX arm's manifest constants match the shipped ltx_2_3 limits", async () => {
   const manifest = JSON.parse(
     stripJsoncComments(await source("config/manifests/builtin.models.jsonc")),

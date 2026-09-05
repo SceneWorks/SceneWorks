@@ -205,6 +205,29 @@ const FLUX1_SEED: u64 = 22726;
 /// The seed every five-rung reference render uses (`five_rung_generation_request`), and the
 /// number the `fresh-five-rung-*-seed16402-step2` fixtures carry.
 const FIVE_RUNG_SEED: u64 = 16402;
+// sc-22732: the turnkey still family. Five catalog models over three engine crates, every one a
+// plain reference-free text-to-image route on the shared five-rung reference path. The engine id
+// EQUALS the catalog model id for all five (`crates/sceneworks-worker/src/engines.rs` MODEL_TABLE
+// and `sceneworks-core`'s candle routing catalog), which is why no anchor-loader closure row needs
+// an `engineId` alias. Kolors' IP-Adapter and strict-pose ControlNet routes are separate candle
+// providers (`candle_kolors_ipadapter`, `candle_kolors_control`) and are deliberately NOT served
+// here: they are different measurements with different overlays, and no anchor plans them.
+const KOLORS_ID: &str = "kolors";
+const KOLORS_PLAIN_EXECUTION_PATH: &str = "the Candle Kolors base-only text-to-image path";
+const KOLORS_STILL_CALIBRATION: &str = "Candle Kolors calibration";
+const IDEOGRAM_ID: &str = "ideogram_4";
+const IDEOGRAM_PLAIN_EXECUTION_PATH: &str = "the Candle Ideogram 4 base-only text-to-image path";
+const IDEOGRAM_STILL_CALIBRATION: &str = "Candle Ideogram 4 calibration";
+const IDEOGRAM_TURBO_ID: &str = "ideogram_4_turbo";
+const IDEOGRAM_TURBO_PLAIN_EXECUTION_PATH: &str =
+    "the Candle Ideogram 4 Turbo base-only text-to-image path";
+const IDEOGRAM_TURBO_STILL_CALIBRATION: &str = "Candle Ideogram 4 Turbo calibration";
+const LENS_ID: &str = "lens";
+const LENS_PLAIN_EXECUTION_PATH: &str = "the Candle Lens base-only text-to-image path";
+const LENS_STILL_CALIBRATION: &str = "Candle Lens calibration";
+const LENS_TURBO_ID: &str = "lens_turbo";
+const LENS_TURBO_PLAIN_EXECUTION_PATH: &str = "the Candle Lens-Turbo base-only text-to-image path";
+const LENS_TURBO_STILL_CALIBRATION: &str = "Candle Lens-Turbo calibration";
 const LTX25_ID: &str = "ltx_2_5_distilled";
 const LTX25_EXECUTION_PATH: &str =
     "the Candle LTX-2.5 text-to-video base recipe (including the official dev refinement LoRA)";
@@ -813,6 +836,12 @@ fn plain_execution_path(request: &Value) -> Result<&'static str, String> {
         // sc-22726: PuLID-FLUX is a bespoke route with its own arm; it is named here so the shared
         // refusal cannot claim this adapter does not implement it.
         "pulid_flux" => Ok(PULID_FLUX_EXECUTION_PATH),
+        // sc-22732: the five turnkey still members ride the same five-rung reference path.
+        KOLORS_ID => Ok(KOLORS_PLAIN_EXECUTION_PATH),
+        IDEOGRAM_ID => Ok(IDEOGRAM_PLAIN_EXECUTION_PATH),
+        IDEOGRAM_TURBO_ID => Ok(IDEOGRAM_TURBO_PLAIN_EXECUTION_PATH),
+        LENS_ID => Ok(LENS_PLAIN_EXECUTION_PATH),
+        LENS_TURBO_ID => Ok(LENS_TURBO_PLAIN_EXECUTION_PATH),
         provider => Err(format!(
             "Candle five-rung calibration does not implement provider {provider:?}"
         )),
@@ -848,6 +877,11 @@ fn still_calibration_label(request: &Value) -> Result<&'static str, String> {
         FLUX1_DEV_ID => Ok(FLUX1_DEV_STILL_CALIBRATION),
         FLUX1_SCHNELL_ID => Ok(FLUX1_SCHNELL_STILL_CALIBRATION),
         PULID_FLUX_ID => Ok(PULID_FLUX_STILL_CALIBRATION),
+        KOLORS_ID => Ok(KOLORS_STILL_CALIBRATION),
+        IDEOGRAM_ID => Ok(IDEOGRAM_STILL_CALIBRATION),
+        IDEOGRAM_TURBO_ID => Ok(IDEOGRAM_TURBO_STILL_CALIBRATION),
+        LENS_ID => Ok(LENS_STILL_CALIBRATION),
+        LENS_TURBO_ID => Ok(LENS_TURBO_STILL_CALIBRATION),
         provider => Err(format!(
             "Candle five-rung calibration does not implement provider {provider:?}"
         )),
@@ -887,6 +921,10 @@ fn validate_fixture_binds_tier_and_geometry(request: &Value) -> Result<(), Strin
     let provider = planned_provider(request)?;
     if matches!(provider, FLUX1_DEV_ID | FLUX1_SCHNELL_ID | PULID_FLUX_ID) {
         return validate_flux_one_fixture(request, provider, planned_tier(request)?);
+    }
+    // sc-22732: the turnkey still family gets the same member/tier/edge/seed/step binding.
+    if let Some(slug) = turnkey_fixture_slug(provider) {
+        return validate_turnkey_fixture(request, slug, planned_tier(request)?);
     }
     if provider != KREA_ID {
         return Ok(());
@@ -955,6 +993,171 @@ fn validate_flux_one_fixture(request: &Value, provider: &str, tier: &str) -> Res
     let steps = steps
         .parse::<u32>()
         .map_err(|error| format!("parse FLUX.1 fixture step count {steps:?}: {error}"))?;
+    if steps != 2 {
+        return Err(format!(
+            "planned.fixture {fixture:?} must use the two-step calibration request"
+        ));
+    }
+    Ok(())
+}
+
+/// One member of the turnkey still family on this lane (sc-22732): the per-member decision the
+/// shared five-rung path cannot make for itself.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct TurnkeyCandleMember {
+    provider_id: &'static str,
+    /// Whether the PLANNED packed tier reaches the loader as `LoadSpec::quantize`. `true` mirrors
+    /// the worker's `candle_quant_for_resolved_tier` for a member it does not carve out; `false`
+    /// is the two Ideogram routes, whose exact directory route refuses `quantize: Some(_)` and
+    /// proves the tier off the packed safetensors headers instead.
+    tier_quant_reaches_the_loader: bool,
+}
+
+const TURNKEY_CANDLE_MEMBERS: [TurnkeyCandleMember; 5] = [
+    TurnkeyCandleMember {
+        provider_id: KOLORS_ID,
+        tier_quant_reaches_the_loader: true,
+    },
+    TurnkeyCandleMember {
+        provider_id: IDEOGRAM_ID,
+        tier_quant_reaches_the_loader: false,
+    },
+    TurnkeyCandleMember {
+        provider_id: IDEOGRAM_TURBO_ID,
+        tier_quant_reaches_the_loader: false,
+    },
+    TurnkeyCandleMember {
+        provider_id: LENS_ID,
+        tier_quant_reaches_the_loader: true,
+    },
+    TurnkeyCandleMember {
+        provider_id: LENS_TURBO_ID,
+        tier_quant_reaches_the_loader: true,
+    },
+];
+
+fn turnkey_candle_member(provider_id: &str) -> Option<TurnkeyCandleMember> {
+    TURNKEY_CANDLE_MEMBERS
+        .iter()
+        .copied()
+        .find(|member| member.provider_id == provider_id)
+}
+
+/// The production calibration identity the loaded turnkey generator publishes for one
+/// `(member, tier)` cell on this lane — the tables `candle-gen-kolors::memory_strategy`,
+/// `candle-gen-ideogram::memory_strategy` and `candle-gen-lens` `production_calibration_fingerprint`
+/// mint (inference PR `story/sc-22732-epic-22723-memory-anchor-measurability`). The one measured
+/// key, `lens_turbo` q4, is preserved byte-for-byte; every other cell is
+/// `kolors-candle-kolors-<tier>-staged-chatglm-unet-f32-vae-v1`,
+/// `ideogram4-candle-request-scoped-staged-residency-v1-<base|turbo>-<tier>` or
+/// `lens-<base|turbo>-<tier>-candle-cuda-shared-ladder-v1`.
+///
+/// Written here as literals rather than read off the engines: the binary is `compile_error!` on
+/// macOS and the candle crates are reachable only through `runtime_cuda`, so the plan/arm binding
+/// has to be provable on the CPU-only host that writes the arm. At inference `c6d6a4db`
+/// `candle-gen-lens` publishes the preserved key for every tier of BOTH routes,
+/// `candle-gen-kolors` publishes `kolors-candle-staged-chatglm-unet-f32-vae-v1` for every tier and
+/// `candle-gen-ideogram` publishes nothing; the five-rung capture refuses a loaded contract whose
+/// identity differs from this table (`contractFingerprintMismatch`), so the two copies cannot
+/// drift unnoticed once the epic's pin bump lands.
+fn turnkey_calibration_fingerprint(provider_id: &str, tier: &str) -> Option<String> {
+    let identity = match (provider_id, tier) {
+        (LENS_TURBO_ID, "q4") => {
+            "lens-candle-cuda-shared-ladder-device-format-blocks-v1".to_owned()
+        }
+        (KOLORS_ID, tier) => format!("kolors-candle-kolors-{tier}-staged-chatglm-unet-f32-vae-v1"),
+        (IDEOGRAM_ID, tier) => {
+            format!("ideogram4-candle-request-scoped-staged-residency-v1-base-{tier}")
+        }
+        (IDEOGRAM_TURBO_ID, tier) => {
+            format!("ideogram4-candle-request-scoped-staged-residency-v1-turbo-{tier}")
+        }
+        (LENS_ID, tier) => format!("lens-base-{tier}-candle-cuda-shared-ladder-v1"),
+        (LENS_TURBO_ID, tier) => format!("lens-turbo-{tier}-candle-cuda-shared-ladder-v1"),
+        _ => return None,
+    };
+    Some(identity)
+}
+
+/// The weights-free conformance identities the three engines publish for a registry-behaviour
+/// contract that loaded no weights (`kolors-candle-registry-behavior-v1` and
+/// `lens-candle-registry-behavior-v1` with their `-<route>-…` suffixes; `candle-gen-ideogram`'s
+/// weights-free paths publish no identity, and the `…-static-v1-<route>` literals the manifest used
+/// to carry exist in no engine), plus the pre-sc-22732 Kolors constant that named every tier at
+/// once. A plan row naming any of these could never be satisfied by a production load at the
+/// inference head this table binds. Test-only: the sole caller is the plan-identity conformance
+/// test.
+#[cfg(test)]
+fn is_turnkey_weights_free_fingerprint(fingerprint: &str) -> bool {
+    fingerprint.starts_with("kolors-candle-registry-behavior-v1")
+        || fingerprint.starts_with("lens-candle-registry-behavior-v1")
+        || fingerprint.starts_with("ideogram4-candle-request-scoped-staged-residency-static-v1")
+        || fingerprint == "kolors-candle-staged-chatglm-unet-f32-vae-v1"
+}
+
+/// The plan row must name the production identity this cell's loaded generator publishes —
+/// checked against the weights-free table BEFORE any environment or weight work, so a row still
+/// carrying a conformance string fails in milliseconds rather than after a multi-gigabyte load.
+fn validate_turnkey_identity(request: &Value, provider_id: &str, tier: &str) -> Result<(), String> {
+    let planned_fingerprint = protocol::planned(request)?
+        .get("calibrationFingerprint")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "planned.calibrationFingerprint must be a string".to_owned())?;
+    let expected_fingerprint = turnkey_calibration_fingerprint(provider_id, tier)
+        .ok_or_else(|| format!("no turnkey member {provider_id} at tier {tier}"))?;
+    if planned_fingerprint != expected_fingerprint {
+        return Err(format!(
+            "plan/provider calibration mismatch: plan={planned_fingerprint}, the {provider_id} \
+             {tier} production identity is {expected_fingerprint}"
+        ));
+    }
+    Ok(())
+}
+
+/// The fixture slug one turnkey still member's Candle fixtures carry, or `None` for a provider that
+/// is not a member (sc-22732). Written as a lookup rather than folded into
+/// [`validate_flux_one_fixture`] so a FLUX.1 fixture can never satisfy a turnkey plan by accident:
+/// the two families bind different prefixes at different seeds.
+fn turnkey_fixture_slug(provider: &str) -> Option<&'static str> {
+    match provider {
+        KOLORS_ID => Some("kolors"),
+        IDEOGRAM_ID => Some("ideogram-4"),
+        IDEOGRAM_TURBO_ID => Some("ideogram-4-turbo"),
+        LENS_ID => Some("lens"),
+        LENS_TURBO_ID => Some("lens-turbo"),
+        _ => None,
+    }
+}
+
+/// The turnkey fixture binds the member, the tier, the geometry edge, the seed and the step count.
+/// Every member rides the shared five-rung reference render, so the seed is [`FIVE_RUNG_SEED`] and
+/// the prefix is the five-rung one — a fixture naming the PuLID/FLUX.1 seed is refused, because the
+/// record's fixture is the one claim about the render nothing downstream can re-derive.
+fn validate_turnkey_fixture(request: &Value, slug: &str, tier: &str) -> Result<(), String> {
+    let fixture = protocol::planned(request)?
+        .get("fixture")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "planned.fixture must be a string".to_owned())?;
+    let (width, _) = protocol::target_geometry(request)?;
+    let prefix = format!("{FIVE_RUNG_FIXTURE_PREFIX}{slug}-{tier}-{width}-seed");
+    let remainder = fixture
+        .strip_prefix(&prefix)
+        .ok_or_else(|| format!("planned.fixture {fixture:?} must start with {prefix:?}"))?;
+    let (seed, steps) = remainder
+        .split_once("-step")
+        .ok_or_else(|| format!("planned.fixture {fixture:?} must end with -step<count>"))?;
+    let seed = seed
+        .parse::<u64>()
+        .map_err(|error| format!("parse turnkey fixture seed {seed:?}: {error}"))?;
+    if seed != FIVE_RUNG_SEED {
+        return Err(format!(
+            "planned.fixture seed {seed} does not match the seed the five-rung reference renders \
+             at ({FIVE_RUNG_SEED})"
+        ));
+    }
+    let steps = steps
+        .parse::<u32>()
+        .map_err(|error| format!("parse turnkey fixture step count {steps:?}: {error}"))?;
     if steps != 2 {
         return Err(format!(
             "planned.fixture {fixture:?} must use the two-step calibration request"
@@ -1060,6 +1263,52 @@ fn measured_strategy(
 /// Everything one five-rung capture needs after the artifact identity is validated and the real
 /// generator is resident: `(provider id, plain execution path, repository, resolved revision,
 /// generator, VRAM probe already holding the load sample)`.
+/// The `(env family, expected repository)` binding for one Ideogram member at one tier (sc-22732).
+///
+/// Ideogram is the only member of the turnkey family whose tiers do not all come from one
+/// repository: `q4` and `q8` are the packed `SceneWorks/ideogram-4-mlx` turnkey, and `bf16` is the
+/// separate `SceneWorks/ideogram-4` repo at a separate revision (`image_jobs/base.rs`
+/// `IDEOGRAM_BF16_REPO`, and the manifest's own third `downloads[]` entry). Resolving bf16 through
+/// the packed family would name the wrong repository AND the wrong revision in the record's
+/// loadability fingerprint.
+///
+/// Written as a function returning the same six-tuple the match arms produce so the dispatch arm
+/// stays an EXPRESSION with a bare `&str` const pattern: `stale-lane-report.mjs`'s
+/// `adapterCapturableProviders` parses these arms to derive the capturable provider set, and it
+/// accepts only a bare literal or a single `&str` const per pattern.
+fn ideogram_five_rung_family(
+    provider_id: &'static str,
+    execution_path: &'static str,
+    tier: &str,
+) -> (
+    &'static str,
+    &'static str,
+    &'static str,
+    &'static str,
+    &'static str,
+    &'static str,
+) {
+    if tier == "bf16" {
+        (
+            provider_id,
+            execution_path,
+            "SCENEWORKS_IDEOGRAM_BF16_REPOSITORY",
+            "SCENEWORKS_IDEOGRAM_BF16_REVISION",
+            "SCENEWORKS_IDEOGRAM_BF16_ROOT",
+            protocol::IDEOGRAM_BF16_REPOSITORY,
+        )
+    } else {
+        (
+            provider_id,
+            execution_path,
+            "SCENEWORKS_IDEOGRAM_REPOSITORY",
+            "SCENEWORKS_IDEOGRAM_REVISION",
+            "SCENEWORKS_IDEOGRAM_ROOT",
+            protocol::IDEOGRAM_REPOSITORY,
+        )
+    }
+}
+
 type LoadedFiveRungGenerator = (
     &'static str,
     &'static str,
@@ -1070,6 +1319,9 @@ type LoadedFiveRungGenerator = (
 );
 
 fn load_five_rung_generator(request: &Value) -> Result<LoadedFiveRungGenerator, String> {
+    // Resolved BEFORE the family match: Ideogram's bf16 tier is a different repository, so the tier
+    // is an input to the binding rather than something checked after it.
+    let tier = planned_tier(request)?;
     let (provider_id, execution_path, repository_env, revision_env, root_env, expected_repository) =
         match planned_provider(request)? {
             "qwen_image" => (
@@ -1160,14 +1412,51 @@ fn load_five_rung_generator(request: &Value) -> Result<LoadedFiveRungGenerator, 
                 "SCENEWORKS_FLUX1_SCHNELL_ROOT",
                 protocol::FLUX1_SCHNELL_REPOSITORY,
             ),
+            // sc-22732: the turnkey still family. Each member binds its own artifact family, so a
+            // Lens-Turbo plan can never be satisfied by base Lens weights; the two Ideogram members
+            // share one packed repo AND one bf16 repo, and differ by provider.
+            KOLORS_ID => (
+                KOLORS_ID,
+                KOLORS_PLAIN_EXECUTION_PATH,
+                "SCENEWORKS_KOLORS_REPOSITORY",
+                "SCENEWORKS_KOLORS_REVISION",
+                "SCENEWORKS_KOLORS_ROOT",
+                protocol::KOLORS_REPOSITORY,
+            ),
+            IDEOGRAM_ID => {
+                ideogram_five_rung_family(IDEOGRAM_ID, IDEOGRAM_PLAIN_EXECUTION_PATH, tier)
+            }
+            IDEOGRAM_TURBO_ID => ideogram_five_rung_family(
+                IDEOGRAM_TURBO_ID,
+                IDEOGRAM_TURBO_PLAIN_EXECUTION_PATH,
+                tier,
+            ),
+            LENS_ID => (
+                LENS_ID,
+                LENS_PLAIN_EXECUTION_PATH,
+                "SCENEWORKS_LENS_REPOSITORY",
+                "SCENEWORKS_LENS_REVISION",
+                "SCENEWORKS_LENS_ROOT",
+                protocol::LENS_REPOSITORY,
+            ),
+            LENS_TURBO_ID => (
+                LENS_TURBO_ID,
+                LENS_TURBO_PLAIN_EXECUTION_PATH,
+                "SCENEWORKS_LENS_TURBO_REPOSITORY",
+                "SCENEWORKS_LENS_TURBO_REVISION",
+                "SCENEWORKS_LENS_TURBO_ROOT",
+                protocol::LENS_TURBO_REPOSITORY,
+            ),
             provider => {
                 return Err(format!(
                     "Candle five-rung calibration does not implement provider {provider:?}"
                 ))
             }
         };
-    let tier = planned_tier(request)?;
     validate_fixture_binds_tier_and_geometry(request)?;
+    if turnkey_candle_member(provider_id).is_some() {
+        validate_turnkey_identity(request, provider_id, tier)?;
+    }
     let repository = protocol::required_env(repository_env)?;
     let revision = protocol::required_env(revision_env)?;
     protocol::validate_artifact_identity(&repository, &revision, expected_repository)?;
@@ -1206,6 +1495,30 @@ fn load_five_rung_generator(request: &Value) -> Result<LoadedFiveRungGenerator, 
             }
         }
         (FLUX2_DEV_ID | FLUX2_KLEIN_ID, None) => spec,
+        // sc-22732: the turnkey still family, PER MEMBER (`TURNKEY_CANDLE_MEMBERS`). Kolors and both
+        // Lens routes take the packed tier's quant EXPLICITLY, because the worker does:
+        // `candle_quant_for_resolved_tier` (`image_jobs/base.rs`) carves out sana, dense-TE tiers,
+        // chroma, sd3.5 and the two FLUX.1 routes to `None`, none of these declares
+        // `mlx.denseTextEncoderTier`, and every descriptor advertises `supported_quants: [Q4, Q8]`.
+        // `candle-gen-kolors` treats it as an advisory no-op on the packed tier; `candle-gen-lens`
+        // proves the artifact tier from disk and withholds its identity unless `spec.quantize`
+        // EQUALS it, so binding `None` on a packed Lens tier would withhold the identity this cell
+        // is measured under. The two Ideogram routes are the exception: `candle-gen-ideogram`'s
+        // exact directory route (`validate_load_shape`, reached from the production loader through
+        // `IdeogramLoadReceipt::capture`) REFUSES `quantize: Some(_)` outright and proves the tier
+        // off the packed safetensors headers instead, so the quant never reaches that loader.
+        // bf16 is the dense base and carries no quant on any member.
+        (KOLORS_ID | IDEOGRAM_ID | IDEOGRAM_TURBO_ID | LENS_ID | LENS_TURBO_ID, Some(quant)) => {
+            if turnkey_candle_member(provider_id)
+                .expect("a turnkey provider always resolves a member")
+                .tier_quant_reaches_the_loader
+            {
+                spec.with_quant(quant)
+            } else {
+                spec
+            }
+        }
+        (KOLORS_ID | IDEOGRAM_ID | IDEOGRAM_TURBO_ID | LENS_ID | LENS_TURBO_ID, None) => spec,
         // Qwen, Z-Image-Turbo and the Z-Image base packed Diffusers snapshots declare their
         // device-format quantization in transformer/config.json (`snapshot_quant_tier` in
         // candle-gen-z-image's memory_strategy.rs). Passing LoadSpec.quant would request a second,
@@ -1218,6 +1531,12 @@ fn load_five_rung_generator(request: &Value) -> Result<LoadedFiveRungGenerator, 
     // that distinguishes two catalog models sharing one registry id (sc-22727).
     let spec = match flux2_arm(request)? {
         Some(arm) => spec.with_resolved_route(arm.model_id),
+        // sc-22732: the worker sets it on EVERY candle load, and `candle-gen-ideogram`'s exact
+        // directory route refuses a spec whose `resolved_route` is not its own id
+        // (`validate_load_shape`), so the turnkey members carry it too.
+        None if turnkey_candle_member(provider_id).is_some() => {
+            spec.with_resolved_route(provider_id)
+        }
         None => spec,
     };
     // sc-22726: the FLUX.1 base snapshots declare their packed tier the same way; the directory
@@ -2025,6 +2344,7 @@ fn run_pulid_flux_capture(request: &Value) -> Result<Value, String> {
 fn five_rung_evidence_story(provider_id: &str) -> &'static str {
     match provider_id {
         FLUX1_DEV_ID | FLUX1_SCHNELL_ID => "sc-22726",
+        KOLORS_ID | IDEOGRAM_ID | IDEOGRAM_TURBO_ID | LENS_ID | LENS_TURBO_ID => "sc-22732",
         _ => "sc-16402",
     }
 }
@@ -2665,7 +2985,13 @@ fn routes_to_five_rung_reference(request: &Value) -> Result<bool, String> {
         || provider == FLUX2_DEV_ID
         || provider == FLUX2_KLEIN_ID
         || provider == FLUX1_DEV_ID
-        || provider == FLUX1_SCHNELL_ID)
+        || provider == FLUX1_SCHNELL_ID
+        // sc-22732: none of the five turnkey members has an inline arm either.
+        || provider == KOLORS_ID
+        || provider == IDEOGRAM_ID
+        || provider == IDEOGRAM_TURBO_ID
+        || provider == LENS_ID
+        || provider == LENS_TURBO_ID)
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -5206,5 +5532,385 @@ mod tests {
                 );
             }
         }
+    }
+
+    // ------------------------------------------------------------------------------------------
+    // sc-22732 — the turnkey still family on this lane: `kolors`, `ideogram_4`,
+    // `ideogram_4_turbo`, `lens` and `lens_turbo`. All five ride the shared five-rung reference
+    // path, so what is proven here is the plan binding: execution path, calibration label, fixture,
+    // artifact family (including Ideogram's split bf16 repository) and quant rule.
+    // ------------------------------------------------------------------------------------------
+
+    const TURNKEY_MEMBERS: [(&str, &str); 5] = [
+        (KOLORS_ID, "kolors"),
+        (IDEOGRAM_ID, "ideogram-4"),
+        (IDEOGRAM_TURBO_ID, "ideogram-4-turbo"),
+        (LENS_ID, "lens"),
+        (LENS_TURBO_ID, "lens-turbo"),
+    ];
+
+    fn turnkey_request(provider: &str, tier: &str, fixture: &str) -> Value {
+        json!({ "planned": {
+            "backend": "candle",
+            "target": {
+                "provider": provider,
+                "tier": tier,
+                "mode": "text_to_image",
+                "overlay": "none",
+                "geometry": { "width": 1024, "height": 1024, "batch": 1, "frames": 1 },
+            },
+            "loadShape": "deferred_materialization",
+            "strategy": { "rung": "staged_residency", "parameters": {} },
+            "calibrationFingerprint": "unused",
+            "fixture": fixture,
+        }})
+    }
+
+    /// Every member is served by the five-rung reference path under its OWN execution path and
+    /// calibration label, and a provider no member serves is refused by the shared sentence.
+    #[test]
+    fn every_turnkey_member_rides_the_five_rung_path_under_its_own_labels() {
+        let mut paths = std::collections::BTreeSet::new();
+        let mut labels = std::collections::BTreeSet::new();
+        for (provider, slug) in TURNKEY_MEMBERS {
+            let request = turnkey_request(
+                provider,
+                "q4",
+                &format!("fresh-five-rung-{slug}-q4-1024-seed16402-step2"),
+            );
+            let path = plain_execution_path(&request).unwrap();
+            let label = still_calibration_label(&request).unwrap();
+            assert!(
+                routes_to_five_rung_reference(&request).unwrap(),
+                "{provider}"
+            );
+            assert_eq!(turnkey_fixture_slug(provider), Some(slug));
+            // Each member's own sentence — a shared one would let a record name the wrong route.
+            assert!(paths.insert(path), "{provider} reuses {path:?}");
+            assert!(labels.insert(label), "{provider} reuses {label:?}");
+        }
+        // Kolors' two bespoke candle routes are NOT served here: they are different providers with
+        // different overlays, and this arm measures only the plain base route.
+        for provider in ["candle_kolors_ipadapter", "candle_kolors_control"] {
+            let request = turnkey_request(provider, "q4", "unused");
+            let error = plain_execution_path(&request).expect_err("a bespoke route is not served");
+            assert_eq!(
+                error,
+                format!("Candle five-rung calibration does not implement provider {provider:?}")
+            );
+            assert_eq!(turnkey_fixture_slug(provider), None);
+        }
+    }
+
+    /// Ideogram is the only member whose tiers span two repositories: q4/q8 bind the packed family,
+    /// bf16 the separate one. Both members share both.
+    #[test]
+    fn the_ideogram_five_rung_family_splits_bf16_onto_its_own_repository() {
+        for (provider, path) in [
+            (IDEOGRAM_ID, IDEOGRAM_PLAIN_EXECUTION_PATH),
+            (IDEOGRAM_TURBO_ID, IDEOGRAM_TURBO_PLAIN_EXECUTION_PATH),
+        ] {
+            for tier in ["q4", "q8"] {
+                let bound = ideogram_five_rung_family(provider, path, tier);
+                assert_eq!(bound.2, "SCENEWORKS_IDEOGRAM_REPOSITORY", "{tier}");
+                assert_eq!(bound.3, "SCENEWORKS_IDEOGRAM_REVISION", "{tier}");
+                assert_eq!(bound.4, "SCENEWORKS_IDEOGRAM_ROOT", "{tier}");
+                assert_eq!(bound.5, protocol::IDEOGRAM_REPOSITORY, "{tier}");
+            }
+            let dense = ideogram_five_rung_family(provider, path, "bf16");
+            assert_eq!(dense.2, "SCENEWORKS_IDEOGRAM_BF16_REPOSITORY");
+            assert_eq!(dense.3, "SCENEWORKS_IDEOGRAM_BF16_REVISION");
+            assert_eq!(dense.4, "SCENEWORKS_IDEOGRAM_BF16_ROOT");
+            assert_eq!(dense.5, protocol::IDEOGRAM_BF16_REPOSITORY);
+            // The two repositories are genuinely different, which is the whole reason for the split.
+            assert_ne!(
+                protocol::IDEOGRAM_REPOSITORY,
+                protocol::IDEOGRAM_BF16_REPOSITORY
+            );
+            // The provider and its execution path ride through unchanged on both branches.
+            assert_eq!((dense.0, dense.1), (provider, path));
+        }
+    }
+
+    /// The turnkey fixture binds member, tier, edge, seed and step count on this lane too — at the
+    /// FIVE-RUNG seed, because that is what the shared reference render uses. A fixture naming the
+    /// MLX turnkey seed, or another member's slug, is refused.
+    #[test]
+    fn the_candle_turnkey_fixture_binds_member_tier_edge_seed_and_steps() {
+        for (provider, slug) in TURNKEY_MEMBERS {
+            let case = |fixture: &str, tier: &str| {
+                validate_fixture_binds_tier_and_geometry(&turnkey_request(provider, tier, fixture))
+            };
+            case(
+                &format!("fresh-five-rung-{slug}-q4-1024-seed16402-step2"),
+                "q4",
+            )
+            .unwrap();
+            for bad in [
+                format!("fresh-five-rung-{slug}-q8-1024-seed16402-step2"),
+                format!("fresh-five-rung-{slug}-q4-768-seed16402-step2"),
+                // 22726 is the seed the PuLID/MLX-turnkey fixtures name, never this one.
+                format!("fresh-five-rung-{slug}-q4-1024-seed22726-step2"),
+                format!("fresh-five-rung-{slug}-q4-1024-seed16402-step4"),
+                format!("{slug}-q4-1024-seed16402-step2"),
+            ] {
+                assert!(
+                    case(&bad, "q4").is_err(),
+                    "{provider}: {bad} must be refused"
+                );
+            }
+        }
+        // One member's fixture never satisfies another member's plan.
+        assert!(validate_fixture_binds_tier_and_geometry(&turnkey_request(
+            LENS_ID,
+            "q4",
+            "fresh-five-rung-lens-turbo-q4-1024-seed16402-step2"
+        ))
+        .is_err());
+    }
+
+    /// The committed plan's Candle turnkey cells, as an exact key set: five members x three tiers,
+    /// each served by an arm whose execution path, label, tier, fixture and route all bind.
+    #[test]
+    fn every_planned_turnkey_candle_cell_is_served_by_an_arm() {
+        let plan: Value = serde_json::from_str(include_str!(
+            "../../../../config/memory-calibration-plan.json"
+        ))
+        .expect("the anchor plan parses");
+        let mut seen = std::collections::BTreeSet::new();
+        for (key, entry) in plan["anchors"].as_object().expect("anchors object") {
+            if !key.ends_with(":candle") {
+                continue;
+            }
+            let provider = entry["provider"].as_str().unwrap();
+            if !TURNKEY_MEMBERS
+                .iter()
+                .any(|(member, _)| *member == provider)
+            {
+                continue;
+            }
+            seen.insert(key.clone());
+            let (_, rest) = key.split_once(':').unwrap();
+            let tier = rest.split_once(':').unwrap().0;
+            let request = json!({ "planned": {
+                "backend": "candle",
+                "target": {
+                    "provider": provider,
+                    "tier": tier,
+                    "mode": entry["mode"].clone(),
+                    "overlay": entry["overlay"].clone(),
+                    "geometry": entry["geometry"].clone(),
+                },
+                "loadShape": entry["loadShape"].clone(),
+                "strategy": { "rung": "staged_residency", "parameters": {} },
+                "calibrationFingerprint": entry["calibrationFingerprint"].clone(),
+                "fixture": entry["fixture"].clone(),
+            }});
+            plain_execution_path(&request).unwrap_or_else(|error| panic!("{key}: {error}"));
+            still_calibration_label(&request).unwrap_or_else(|error| panic!("{key}: {error}"));
+            assert_eq!(planned_tier(&request).unwrap(), tier, "{key}");
+            validate_fixture_binds_tier_and_geometry(&request)
+                .unwrap_or_else(|error| panic!("{key}: {error}"));
+            assert!(routes_to_five_rung_reference(&request).unwrap(), "{key}");
+            // The worker resolves a real `Quant` from the tier for all five
+            // (`candle_quant_for_resolved_tier` carves out sana, dense-TE tiers, chroma, sd3.5 and
+            // the two FLUX.1 routes — none of these), so the anchor must load the same shape.
+            assert_eq!(
+                numeric_tier(tier).unwrap().quant.is_some(),
+                tier != "bf16",
+                "{key}"
+            );
+        }
+        let expected: std::collections::BTreeSet<String> = [
+            "kolors",
+            "ideogram_4",
+            "ideogram_4_turbo",
+            "lens",
+            "lens_turbo",
+        ]
+        .iter()
+        .flat_map(|model| {
+            ["bf16", "q4", "q8"]
+                .iter()
+                .map(move |tier| format!("{model}:{tier}:candle"))
+        })
+        .collect();
+        assert_eq!(seen, expected);
+    }
+
+    /// Every turnkey Candle plan row names the production calibration identity its loaded
+    /// generator publishes (the sc-22732 inference head's per-(route, tier) tables): the one
+    /// measured key is preserved byte-for-byte at `lens_turbo` q4, no row names a weights-free
+    /// conformance string or the old every-tier Kolors constant, and the fifteen identities are
+    /// distinct. `every_planned_turnkey_candle_cell_is_served_by_an_arm` never looks at
+    /// `calibrationFingerprint`, which is how the first draft of this plan shipped nine rows
+    /// naming the `…-static-v1-<route>` literals no engine has ever published.
+    #[test]
+    fn every_planned_turnkey_candle_cell_names_the_identity_its_loaded_generator_publishes() {
+        let plan: Value = serde_json::from_str(include_str!(
+            "../../../../config/memory-calibration-plan.json"
+        ))
+        .expect("the anchor plan parses");
+        let mut identities = std::collections::BTreeMap::new();
+        for (key, entry) in plan["anchors"].as_object().expect("anchors object") {
+            let provider = entry["provider"].as_str().unwrap();
+            if !key.ends_with(":candle") || turnkey_candle_member(provider).is_none() {
+                continue;
+            }
+            let tier = key.split(':').nth(1).unwrap();
+            let planned = entry["calibrationFingerprint"]
+                .as_str()
+                .unwrap_or_else(|| panic!("{key}: calibrationFingerprint must be a string"));
+            assert!(
+                !is_turnkey_weights_free_fingerprint(planned),
+                "{key}: {planned} is a weights-free conformance identity no production load returns"
+            );
+            assert_eq!(
+                Some(planned.to_owned()),
+                turnkey_calibration_fingerprint(provider, tier),
+                "{key}: the plan row must name the loaded generator's production identity"
+            );
+            assert!(
+                identities.insert(planned.to_owned(), key.clone()).is_none(),
+                "{key}: {planned} is already claimed by {}",
+                identities[planned]
+            );
+        }
+        assert_eq!(
+            identities.len(),
+            15,
+            "fifteen distinct turnkey Candle identities"
+        );
+        // The preserved measured key, at exactly the cell `candle-gen-lens` documents as measured.
+        assert_eq!(
+            identities["lens-candle-cuda-shared-ladder-device-format-blocks-v1"],
+            "lens_turbo:q4:candle"
+        );
+        // The fourteen new cells, spelled out: the strings the sc-22732 inference head mints.
+        for (key, identity) in [
+            (
+                "kolors:q4:candle",
+                "kolors-candle-kolors-q4-staged-chatglm-unet-f32-vae-v1",
+            ),
+            (
+                "kolors:q8:candle",
+                "kolors-candle-kolors-q8-staged-chatglm-unet-f32-vae-v1",
+            ),
+            (
+                "kolors:bf16:candle",
+                "kolors-candle-kolors-bf16-staged-chatglm-unet-f32-vae-v1",
+            ),
+            (
+                "ideogram_4:q4:candle",
+                "ideogram4-candle-request-scoped-staged-residency-v1-base-q4",
+            ),
+            (
+                "ideogram_4:q8:candle",
+                "ideogram4-candle-request-scoped-staged-residency-v1-base-q8",
+            ),
+            (
+                "ideogram_4:bf16:candle",
+                "ideogram4-candle-request-scoped-staged-residency-v1-base-bf16",
+            ),
+            (
+                "ideogram_4_turbo:q4:candle",
+                "ideogram4-candle-request-scoped-staged-residency-v1-turbo-q4",
+            ),
+            (
+                "ideogram_4_turbo:q8:candle",
+                "ideogram4-candle-request-scoped-staged-residency-v1-turbo-q8",
+            ),
+            (
+                "ideogram_4_turbo:bf16:candle",
+                "ideogram4-candle-request-scoped-staged-residency-v1-turbo-bf16",
+            ),
+            (
+                "lens:q4:candle",
+                "lens-base-q4-candle-cuda-shared-ladder-v1",
+            ),
+            (
+                "lens:q8:candle",
+                "lens-base-q8-candle-cuda-shared-ladder-v1",
+            ),
+            (
+                "lens:bf16:candle",
+                "lens-base-bf16-candle-cuda-shared-ladder-v1",
+            ),
+            (
+                "lens_turbo:q8:candle",
+                "lens-turbo-q8-candle-cuda-shared-ladder-v1",
+            ),
+            (
+                "lens_turbo:bf16:candle",
+                "lens-turbo-bf16-candle-cuda-shared-ladder-v1",
+            ),
+        ] {
+            assert_eq!(identities[identity], key);
+        }
+    }
+
+    /// The arm binds the plan row to the table BEFORE any environment or weight work, naming
+    /// both strings, so a stale row cannot cost a load.
+    #[test]
+    fn a_turnkey_plan_row_naming_a_foreign_identity_is_refused_before_the_load() {
+        for (provider, slug, foreign) in [
+            (
+                IDEOGRAM_ID,
+                "ideogram-4",
+                "ideogram4-candle-request-scoped-staged-residency-static-v1-base",
+            ),
+            (
+                KOLORS_ID,
+                "kolors",
+                "kolors-candle-staged-chatglm-unet-f32-vae-v1",
+            ),
+            (
+                LENS_ID,
+                "lens",
+                "lens-candle-cuda-shared-ladder-device-format-blocks-v1",
+            ),
+        ] {
+            let mut request = turnkey_request(
+                provider,
+                "q8",
+                &format!("fresh-five-rung-{slug}-q8-1024-seed16402-step2"),
+            );
+            request["planned"]["calibrationFingerprint"] = json!(foreign);
+            // `Err` is matched by hand: the `Ok` side carries a loaded generator, which has no
+            // `Debug` for `expect_err` to print.
+            let error = match load_five_rung_generator(&request) {
+                Err(error) => error,
+                Ok(_) => panic!("{provider}: a conformance identity is not capturable"),
+            };
+            assert!(
+                error.contains(&format!("plan={foreign}"))
+                    && error.contains(&turnkey_calibration_fingerprint(provider, "q8").unwrap()),
+                "{provider}: {error}"
+            );
+            // Not an env error: the refusal fired before `SCENEWORKS_<MEMBER>_*` was read.
+            assert!(!error.contains("required environment variable"), "{error}");
+        }
+    }
+
+    /// The per-member quant decision, stated as data: the two Ideogram routes are the only members
+    /// whose packed tier must NOT reach the loader, because `candle-gen-ideogram`'s exact route
+    /// refuses `quantize: Some(_)`; the other three mirror the worker's
+    /// `candle_quant_for_resolved_tier`, which forwards `Some(Q4)`/`Some(Q8)` for them.
+    #[test]
+    fn the_turnkey_candle_members_fold_the_tier_quant_per_member() {
+        assert_eq!(
+            TURNKEY_CANDLE_MEMBERS
+                .iter()
+                .map(|member| (member.provider_id, member.tier_quant_reaches_the_loader))
+                .collect::<Vec<_>>(),
+            vec![
+                (KOLORS_ID, true),
+                (IDEOGRAM_ID, false),
+                (IDEOGRAM_TURBO_ID, false),
+                (LENS_ID, true),
+                (LENS_TURBO_ID, true),
+            ]
+        );
+        assert_eq!(turnkey_candle_member("candle_kolors_ipadapter"), None);
     }
 }

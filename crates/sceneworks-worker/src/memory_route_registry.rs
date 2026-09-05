@@ -7497,8 +7497,16 @@ mod tests {
                         "modes": ["text_to_image", "edit_image", "character_image"],
                         "overlays": ["none", "identity"],
                     }),
+                    // sc-22732: q4 and q8 are separate rows because `mlx-gen-kolors` publishes a
+                    // distinct production identity per artifact tier and a row carries one
+                    // `fingerprint`; the packed-tier axes are otherwise identical.
                     serde_json::json!({
-                        "tiers": ["q4", "q8"],
+                        "tiers": ["q4"],
+                        "modes": ["text_to_image", "edit_image", "character_image"],
+                        "overlays": ["none", "lora", "identity"],
+                    }),
+                    serde_json::json!({
+                        "tiers": ["q8"],
                         "modes": ["text_to_image", "edit_image", "character_image"],
                         "overlays": ["none", "lora", "identity"],
                     }),
@@ -8636,7 +8644,18 @@ mod tests {
             let implementations = manifest["candle"]["memoryStrategyContract"]["implementations"]
                 .as_array()
                 .expect("Ideogram implementations");
-            for (profile, overlay) in [("plain", "none"), ("lora", "lora")] {
+            // sc-22732: the rows are per TIER — `candle-gen-ideogram` publishes a distinct
+            // production identity per (route, artifact-proven tier), and a row carries one
+            // `fingerprint` — so exactness is claimed per (profile, rung, tier) and the three tier
+            // rows of one (profile, rung) must be disjoint, which the walk below proves.
+            for (profile, overlay, tier) in [
+                ("plain", "none", "bf16"),
+                ("plain", "none", "q4"),
+                ("plain", "none", "q8"),
+                ("lora", "lora", "bf16"),
+                ("lora", "lora", "q4"),
+                ("lora", "lora", "q8"),
+            ] {
                 for (rung, engaged) in [
                     (
                         "bounded_decode",
@@ -8673,11 +8692,28 @@ mod tests {
                                     && implementation["overlays"].as_array().is_some_and(|values| {
                                         values.iter().any(|value| value == overlay)
                                     })
+                                    && implementation["tiers"].as_array().is_some_and(|values| {
+                                        values.iter().any(|value| value == tier)
+                                    })
                             })
                             .collect::<Vec<_>>();
                     let [implementation] = matching.as_slice() else {
-                        panic!("{provider}:{profile}:{rung} must have exactly one declaration");
+                        panic!(
+                            "{provider}:{profile}:{rung}:{tier} must have exactly one declaration"
+                        );
                     };
+                    assert_eq!(implementation["tiers"], serde_json::json!([tier]));
+                    assert_eq!(
+                        implementation["fingerprint"],
+                        serde_json::json!(format!(
+                            "ideogram4-candle-request-scoped-staged-residency-v1-{}-{tier}",
+                            if provider == "ideogram_4" {
+                                "base"
+                            } else {
+                                "turbo"
+                            }
+                        ))
+                    );
                     assert_eq!(implementation["engagedRungs"], serde_json::json!(engaged));
                 }
             }
