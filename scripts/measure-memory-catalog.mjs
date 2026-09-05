@@ -181,6 +181,48 @@ export const PROVIDER_FAMILIES = Object.freeze({
   // `MODEL_25_ID`), so the candle plan rows name `ltx_2_5_distilled` while the anchor key — and
   // therefore the manifest download the snapshot root resolves through — stays `ltx_2_5`.
   ltx_2_5_distilled: { ltx25: true, repo: LTX25_REPOSITORY, arms: ["candle"] },
+  // The Wan 2.2 family (sc-22736). The FIRST families whose artifact is per (lane, TIER) rather
+  // than per lane, which is why `familyArtifact` exists: each route ships a `SceneWorks/…-mlx`
+  // rehost on macOS and a separate `SceneWorks/…-candle` rehost on Windows/Linux, and the candle
+  // rehosts carry `q4` and `q8` ONLY — the candle dense leg is the upstream `Wan-AI/…-Diffusers`
+  // checkpoint, which the manifest ships with no pinned revision and with the weights at the
+  // snapshot ROOT rather than under a `bf16/` subtree (`layout: "flat"`).
+  //
+  // One env family per (route, lane, layout), never one shared `WAN22`: the three routes are three
+  // different checkpoints, and a plan for one satisfied by another's weights would re-label its
+  // peaks.
+  wan2_2_ti2v_5b: {
+    env: "WAN22_TI2V_5B_MLX", repo: "SceneWorks/wan2.2-ti2v-5b-mlx", arms: ["mlx", "candle"],
+    artifacts: {
+      candle: {
+        "*": { env: "WAN22_TI2V_5B_CANDLE", repo: "SceneWorks/wan2.2-ti2v-5b-candle" },
+        bf16: { env: "WAN22_TI2V_5B_DENSE", repo: "Wan-AI/Wan2.2-TI2V-5B-Diffusers", layout: "flat" },
+      },
+    },
+  },
+  wan2_2_t2v_14b: {
+    env: "WAN22_T2V_A14B_MLX", repo: "SceneWorks/wan2.2-t2v-a14b-mlx", arms: ["mlx", "candle"],
+    artifacts: {
+      candle: {
+        "*": { env: "WAN22_T2V_A14B_CANDLE", repo: "SceneWorks/wan2.2-t2v-a14b-candle" },
+        bf16: { env: "WAN22_T2V_A14B_DENSE", repo: "Wan-AI/Wan2.2-T2V-A14B-Diffusers", layout: "flat" },
+      },
+    },
+  },
+  wan2_2_i2v_14b: {
+    env: "WAN22_I2V_A14B_MLX", repo: "SceneWorks/wan2.2-i2v-a14b-mlx", arms: ["mlx", "candle"],
+    artifacts: {
+      candle: {
+        "*": { env: "WAN22_I2V_A14B_CANDLE", repo: "SceneWorks/wan2.2-i2v-a14b-candle" },
+        bf16: { env: "WAN22_I2V_A14B_DENSE", repo: "Wan-AI/Wan2.2-I2V-A14B-Diffusers", layout: "flat" },
+      },
+    },
+  },
+  // SCAIL-2 (sc-22736) is the opposite shape and the reason `artifacts` is an override rather than
+  // the rule: the manifest ships ONE `SceneWorks/scail2-mlx` repository, with all three tiers, on
+  // `platforms: ["macos", "windows", "linux"]`, and BOTH engine lanes open that same per-tier
+  // turnkey — which is exactly why the two lanes' calibration identities carry a backend token.
+  scail2_14b: { env: "SCAIL2", repo: "SceneWorks/scail2-mlx", arms: ["mlx", "candle"] },
 });
 
 export function fail(message) {

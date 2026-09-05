@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, mkdir, writeFile, readFile, stat } from "node:fs/promises";
+import { mkdtemp, mkdir, readdir, writeFile, readFile, stat } from "node:fs/promises";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { tmpdir } from "node:os";
@@ -425,11 +425,23 @@ test("the pinned Lightning distill LoRA matches the worker constants on both lan
 // in both files green and fails only mid-campaign, after the weights are staged. This is that
 // binding, per family, per declared arm, including the `upstream` and `sideArtifact` sub-families.
 test("every family's derived env names are read back by each arm it declares", async () => {
+  // A lane's SOURCE SET, not just its bin: an arm may live in a `#[path]` sibling module
+  // (`mlx_ltx25.rs`, `mlx_wan_scail2.rs`, `candle_wan_scail2.rs`), and reading only `<backend>.rs`
+  // would report a real arm's env family as unread. The sibling files are exactly the ones the bin
+  // pulls in, and the directory holds nothing else.
+  const binDir = path.join(ROOT, "crates/sceneworks-memory-adapter/src/bin");
   const lanes = new Map();
+  const binFiles = (await readdir(binDir)).filter((name) => name.endsWith(".rs"));
   for (const backend of ["mlx", "candle"]) {
+    const members = binFiles.filter(
+      (name) => name === `${backend}.rs` || name.startsWith(`${backend}_`),
+    );
+    assert.ok(members.length >= 2, `${backend}: expected the bin plus its arm modules`);
     lanes.set(
       backend,
-      await readFile(path.join(ROOT, `crates/sceneworks-memory-adapter/src/bin/${backend}.rs`), "utf8"),
+      (await Promise.all(members.map((name) => readFile(path.join(binDir, name), "utf8")))).join(
+        "\n",
+      ),
     );
   }
   let checked = 0;
@@ -451,14 +463,25 @@ test("every family's derived env names are read back by each arm it declares", a
     for (const arm of family.arms) {
       const source = lanes.get(arm);
       assert.ok(source, `${id} declares an unknown adapter arm ${arm}`);
-      // Per LANE (sc-22731): a family may bind a DIFFERENT artifact on each arm, and then only that
-      // arm's env family is the one that arm reads. The two SANA routes are the case — MLX opens
-      // the packed `SceneWorks/*_mlx` turnkey through `SCENEWORKS_SANA_*`, Candle the upstream
-      // dense diffusers snapshot through `SCENEWORKS_SANA_DENSE_*` — so asserting the shared
-      // `family.env` against candle.rs would demand an env that binary must never read.
-      const laneEnvFamilies = family.lanes?.[arm]
-        ? [family.lanes[arm].env].filter(Boolean)
-        : envFamilies;
+      // Per (LANE, TIER), through the one function that already knows the rule (sc-22736). A family
+      // may bind a different artifact on each arm — the two SANA routes do, MLX opening the packed
+      // `SceneWorks/*_mlx` turnkey through `SCENEWORKS_SANA_*` and Candle the upstream dense
+      // diffusers snapshot through `SCENEWORKS_SANA_DENSE_*` — and, since the Wan 2.2 family, on
+      // each (lane, TIER): its candle q4/q8 open a `SceneWorks/…-candle` rehost while its candle
+      // bf16 opens the upstream `Wan-AI/…-Diffusers` checkpoint. Asserting the shared `family.env`
+      // against candle.rs would demand env names that binary must never read, and asserting only
+      // the lane override would miss the second family entirely.
+      //
+      // `familyArtifact` is the production resolver, so this cannot drift from what a capture
+      // actually exports: a new override shape is covered the moment that function honours it.
+      const laneEnvFamilies = [
+        ...new Set(
+          ["bf16", "q4", "q8"]
+            .map((tier) => familyArtifact(family, arm, tier).env)
+            .filter(Boolean),
+        ),
+        ...envFamilies.filter((env) => env !== family.env),
+      ];
       for (const env of laneEnvFamilies) {
         for (const suffix of ["REPOSITORY", "REVISION", "ROOT"]) {
           const name = `SCENEWORKS_${env}_${suffix}`;
@@ -1088,6 +1111,62 @@ test("the sana and chroma1 families are measurable on every shipped tier of ever
   assert.deepEqual(cells.map((cell) => cell.key).sort(), expected.sort());
   const gaps = (await measurabilityGaps()).filter((gap) => family.includes(gap.modelId));
   assert.equal(gaps.length, 0, gapReport(gaps));
+});
+
+// sc-22736. Same shape claim, for the Wan 2.2 family and SCAIL-2 — the first families whose
+// ARTIFACT is per (lane, TIER) rather than per lane. Each Wan route ships a `SceneWorks/…-mlx`
+// rehost on macOS and a separate `SceneWorks/…-candle` rehost on Windows/Linux, and the candle
+// rehosts carry `q4` and `q8` only: the candle dense leg is the upstream `Wan-AI/…-Diffusers`
+// checkpoint, at the snapshot ROOT and with no pinned revision. SCAIL-2 is the opposite shape —
+// ONE repository, all three tiers, both lanes — which is why every one of its 24 sibling cells is
+// still claimed on both lanes. The KEY SET is spelled out for the sc-22731 reason: a count alone
+// would stay green if one route silently lost a lane while another gained one.
+test("the wan 2.2 family and scail-2 are measurable on every shipped tier of every routed lane", async () => {
+  const family = ["wan_2_2", "wan_2_2_t2v_14b", "wan_2_2_i2v_14b", "scail2_14b"];
+  const cells = (await shippedTieredCells()).filter((cell) => family.includes(cell.modelId));
+  const expected = family.flatMap((id) =>
+    ["bf16", "q4", "q8"].flatMap((tier) => [`${id}:${tier}:candle`, `${id}:${tier}:mlx`]),
+  );
+  assert.deepEqual(cells.map((cell) => cell.key).sort(), expected.sort());
+  const gaps = (await measurabilityGaps()).filter((gap) => family.includes(gap.modelId));
+  assert.equal(gaps.length, 0, gapReport(gaps));
+});
+
+// The Wan candle bf16 leg is the one cell in the whole table whose repository the manifest ships
+// WITHOUT a revision, so `resolveArtifactRoot` reads the revision off whatever snapshot is staged
+// instead of probing a pinned one. That is a real difference in how a root is bound, and it is
+// asserted here rather than left to the sibling case above, which would report only "measurable".
+test("the wan candle dense leg binds the upstream snapshot flat and unpinned", async () => {
+  const models = await readManifestModels();
+  for (const [id, repo] of [
+    ["wan_2_2", "Wan-AI/Wan2.2-TI2V-5B-Diffusers"],
+    ["wan_2_2_t2v_14b", "Wan-AI/Wan2.2-T2V-A14B-Diffusers"],
+    ["wan_2_2_i2v_14b", "Wan-AI/Wan2.2-I2V-A14B-Diffusers"],
+  ]) {
+    const provider = id === "wan_2_2" ? "wan2_2_ti2v_5b" : id.replace("wan_2_2", "wan2_2");
+    const artifact = familyArtifact(PROVIDER_FAMILIES[provider], "candle", "bf16");
+    assert.equal(artifact.repo, repo, `${id}: the candle dense leg is the upstream checkpoint`);
+    assert.equal(artifact.layout, "flat", `${id}: the upstream checkpoint has no tier subtree`);
+    // ...and the manifest really does ship it unpinned, which is what makes the flat, host-read
+    // binding necessary rather than a convenience.
+    const download = (models.find((model) => model.id === id)?.downloads ?? []).find(
+      (entry) => entry.repo === repo,
+    );
+    assert.ok(download, `${id} ships ${repo}`);
+    assert.equal(download.revision, undefined, `${id}: ${repo} is shipped without a revision`);
+    // The packed siblings are the opposite: a pinned, tier-suffixed SceneWorks rehost.
+    for (const tier of ["q4", "q8"]) {
+      const packed = familyArtifact(PROVIDER_FAMILIES[provider], "candle", tier);
+      assert.match(packed.repo, /^SceneWorks\/.*-candle$/, `${id}:${tier}`);
+      assert.equal(packed.layout, "tiered", `${id}:${tier}`);
+    }
+    // And the MLX lane opens its own rehost for every tier.
+    for (const tier of ["bf16", "q4", "q8"]) {
+      const mlx = familyArtifact(PROVIDER_FAMILIES[provider], "mlx", tier);
+      assert.match(mlx.repo, /^SceneWorks\/.*-mlx$/, `${id}:${tier}:mlx`);
+      assert.equal(mlx.layout, "tiered", `${id}:${tier}:mlx`);
+    }
+  }
 });
 
 // The catalog-wide burndown. `todo` until the terminal story of epic 22723 (sc-22738) promotes it:
