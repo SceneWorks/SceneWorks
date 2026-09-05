@@ -516,6 +516,41 @@ test("windows-candle captures and schema-checks the SC-21714 Krea anchor record"
   const adapter = await source("crates/sceneworks-memory-adapter/src/bin/candle.rs");
   assert.match(adapter, /StableIdleConfig::new\(2\.0, 5, 64, 200\)/);
   assertEveryVramProbeIsCertifying(adapter);
+  // Every `vram` binding the adapter builds, keyed by the ARM (the enclosing `fn`) that builds it,
+  // against an explicit allowlist (sc-22726 review, sc-22733 review): a set-of-distinct-spellings
+  // claim let a probe be deleted, a raw `VramProbe::new()` be added alongside, and the one known
+  // non-certifying probe hide, all green; a frozen per-spelling tally then let one arm lose its
+  // probe while another gained a second, still green. Naming the owner closes both. The only probe
+  // that does not certify an idle GPU BEFORE it samples is the LTX-2.5 capture's, which proves
+  // idleness on its own rendered baseline instead because that arm renders first.
+  const owners = [];
+  let owner = null;
+  for (const line of adapter.split("\n")) {
+    const fn = /^(?:pub(?:\([a-z]+\))? )?fn ([a-z_0-9]+)/.exec(line);
+    if (fn) owner = fn[1];
+    const probe = /let mut vram\s*=\s*([^;]+);/.exec(line);
+    if (probe) owners.push([owner, probe[1].trim()]);
+  }
+  assert.deepEqual(
+    owners.sort(([a], [b]) => a.localeCompare(b)),
+    [
+      // Krea five-rung reference (and the registry-loaded providers that ride it).
+      ["load_five_rung_generator", "certifying_vram_probe()"],
+      // The Mage-Flow loader (sc-22733 — its own loader because a Mage load binds two artifact triples).
+      ["load_mage_generator", "certifying_vram_probe()"],
+      // The inline Krea arm.
+      ["run", "certifying_vram_probe()"],
+      // The InstantID bespoke arm (sc-22729).
+      ["run_instantid_candle", "certifying_vram_probe()"],
+      // LTX-2.5: renders first, then proves idle on the rendered baseline.
+      ["run_ltx25_capture", "VramProbe::start_rendered().assert_idle(1.0)"],
+      // PuLID-FLUX bespoke.
+      ["run_pulid_flux_capture", "certifying_vram_probe()"],
+      // The Qwen edit bespoke arm (sc-22728).
+      ["run_qwen_edit", "certifying_vram_probe()"],
+    ],
+    "every Candle VRAM probe must be an allowlisted certifying spelling, built once by its named arm",
+  );
 });
 
 /**
@@ -587,11 +622,13 @@ function assertEveryVramProbeIsCertifying(adapter) {
     [],
     "a function constructing a VRAM probe must sample a phase with it",
   );
-  // The certifying arms are exactly the capture sites, and one of them is the new InstantID arm.
+  // The certifying arms are exactly the capture sites: the InstantID arm (sc-22729) and the
+  // Mage-Flow loader (sc-22733) are both among them.
   assert.deepEqual(
     [...certifying].sort(),
     [
       "load_five_rung_generator",
+      "load_mage_generator",
       "run",
       "run_instantid_candle",
       "run_pulid_flux_capture",
