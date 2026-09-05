@@ -515,10 +515,86 @@ test("windows-candle captures and schema-checks the SC-21714 Krea anchor record"
 
   const adapter = await source("crates/sceneworks-memory-adapter/src/bin/candle.rs");
   assert.match(adapter, /StableIdleConfig::new\(2\.0, 5, 64, 200\)/);
-  // sc-22729 raised this from two to three: the bespoke Candle InstantID arm is the third capture
-  // site, and it must use the same certifying probe rather than an ad-hoc one.
-  assert.equal(adapter.match(/let mut vram = certifying_vram_probe\(\);/g)?.length, 3);
+  assertEveryVramProbeIsCertifying(adapter);
 });
+
+/**
+ * Every VRAM probe the Candle adapter constructs, mapped to the function that constructs it.
+ *
+ * sc-22729 review replaced a frozen occurrence count (`… === 3`) with this. The count did not
+ * discriminate: it was equally satisfied by three certifying probes in the right arms and by two
+ * plus one in a helper nothing captures through, and it had to be hand-renewed 2 → 3 for a new arm,
+ * which is exactly the moment the guard should have been asking a question instead.
+ */
+const NON_CERTIFYING_PROBE_SITES = new Map([
+  // The LTX-2.5 arm is the ONE documented exception. It asserts a plain 1.0 GB idle ceiling rather
+  // than the WDDM stable-idle proof: `certifying_wddm_idle_config` is calibrated against GPU 1's
+  // 1.6 GB idle graphics residency on the Windows capture host, and the LTX-2.5 capture runs the
+  // ladder the harness pins itself. Widening it here would change what that anchor certifies, so
+  // the exception is named rather than quietly folded in.
+  ["run_ltx25_capture", /VramProbe::start_rendered\(\)\.assert_idle\(1\.0\)/],
+]);
+
+function enclosingFunctions(source) {
+  const starts = [...source.matchAll(/^(?:pub )?fn ([a-z_][a-z0-9_]*)/gm)]
+    .map((match) => ({ name: match[1], at: match.index }));
+  return (index) => starts.filter((entry) => entry.at <= index).at(-1)?.name ?? "(top level)";
+}
+
+function assertEveryVramProbeIsCertifying(adapter) {
+  const nameAt = enclosingFunctions(adapter);
+  // Every probe CONSTRUCTION in the file, whichever spelling it uses.
+  const constructions = [...adapter.matchAll(/VramProbe::start_rendered\(\)[^;]*|certifying_vram_probe\(\)/g)]
+    .map((match) => ({ text: match[0], fn: nameAt(match.index) }));
+  assert.ok(constructions.length > 0, "the adapter constructs no VRAM probe at all");
+
+  const certifying = new Set();
+  for (const site of constructions) {
+    // The certifying constructor's own definition is the one place `start_rendered` may appear
+    // without being a capture arm's ad-hoc probe.
+    if (site.fn === "certifying_vram_probe") continue;
+    if (site.text.startsWith("certifying_vram_probe")) {
+      certifying.add(site.fn);
+      continue;
+    }
+    const allowed = NON_CERTIFYING_PROBE_SITES.get(site.fn);
+    assert.ok(
+      allowed,
+      `${site.fn} constructs a VRAM probe directly (${site.text.trim()}) instead of calling ` +
+        "certifying_vram_probe(); a capture arm must not mint its own idle policy",
+    );
+    assert.match(site.text, allowed, `${site.fn}'s documented non-certifying probe changed shape`);
+  }
+
+  // …and every function that SAMPLES a phase either OWNS a probe or is HANDED one it did not mint,
+  // so a new capture arm cannot appear sampling a probe with no policy behind it.
+  const samplers = new Set(
+    [...adapter.matchAll(/vram\.phase\(\)/g)].map((match) => nameAt(match.index)),
+  );
+  const owners = new Set([...certifying, ...NON_CERTIFYING_PROBE_SITES.keys()]);
+  for (const sampler of samplers) {
+    if (owners.has(sampler)) continue;
+    const signature = new RegExp(`fn ${sampler}\\(([\\s\\S]*?)\\) -> `).exec(adapter)?.[1] ?? "";
+    assert.match(
+      signature,
+      /vram: &mut VramProbe/,
+      `${sampler} samples vram.phase() without constructing a probe or being handed one`,
+    );
+  }
+  // No owner may be a function that never samples: a probe minted and dropped certifies nothing.
+  assert.deepEqual(
+    [...owners].filter((owner) => !samplers.has(owner)),
+    [],
+    "a function constructing a VRAM probe must sample a phase with it",
+  );
+  // The certifying arms are exactly the capture sites, and one of them is the new InstantID arm.
+  assert.deepEqual(
+    [...certifying].sort(),
+    ["load_five_rung_generator", "run", "run_instantid_candle"],
+  );
+  // The exception list is not allowed to quietly grow: exactly one site, and it is the LTX-2.5 arm.
+  assert.deepEqual([...NON_CERTIFYING_PROBE_SITES.keys()], ["run_ltx25_capture"]);
+}
 
 test("windows-candle routes weights dispatches to a real-weights runner, like the MLX lane", async () => {
   const candle = await source(".github/workflows/windows-candle.yml");

@@ -1098,6 +1098,129 @@ pub fn open_resident_phase_window<C: ResidencyCounters>(
     Ok(opening)
 }
 
+/// Test support shared by BOTH adapter binaries (sc-22729 review).
+///
+/// Ordinary public API rather than `#[cfg(test)]`: the binaries are separate compilation units that
+/// merely DEPEND on this crate, so nothing gated on this crate's own `test` cfg is visible to them.
+/// The alternative was the same hundred lines copied into `mlx.rs` and `candle.rs`, where the two
+/// copies would drift — and the whole point of the fixture is that both lanes stage the identity
+/// stack the same way.
+pub mod staging {
+    use super::{
+        INSTANTID_CONTROLNET_ENV, INSTANTID_CONTROLNET_WEIGHT_FILE, INSTANTID_IDENTITY_BUNDLE_ENV,
+        INSTANTID_IDENTITY_BUNDLE_FILES,
+    };
+    use std::path::PathBuf;
+    use std::sync::{Mutex, MutexGuard, PoisonError};
+
+    /// Serializes the process-global `SCENEWORKS_INSTANTID_*` swap. Both `instantid_binding` and
+    /// `instantid_candle_identity` read five environment variables; two tests mutating them
+    /// concurrently would each resolve half of the other's tree.
+    static INSTANTID_ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    pub const INSTANTID_ENV_NAMES: [&str; 5] = [
+        "SCENEWORKS_INSTANTID_REALVISXL_REPOSITORY",
+        "SCENEWORKS_INSTANTID_REALVISXL_REVISION",
+        "SCENEWORKS_INSTANTID_REALVISXL_ROOT",
+        INSTANTID_IDENTITY_BUNDLE_ENV,
+        INSTANTID_CONTROLNET_ENV,
+    ];
+
+    /// A synthetic InstantID staging tree, installed into the process environment for as long as
+    /// this value lives. RAII rather than a restore statement so a panicking assertion cannot leak
+    /// the injected environment into every later test in the process.
+    pub struct StagedInstantId {
+        root: PathBuf,
+        /// The tiered backbone snapshot root, in the exact Hugging Face layout the validators want.
+        pub snapshot: PathBuf,
+        /// The IdentityNet `ControlNetModel` directory. Created EMPTY — call
+        /// [`StagedInstantId::stage_identitynet_weight`] to complete it.
+        pub identitynet: PathBuf,
+        /// The identity bundle root, carrying all three of `INSTANTID_IDENTITY_BUNDLE_FILES`.
+        pub bundle: PathBuf,
+        _guard: MutexGuard<'static, ()>,
+    }
+
+    impl StagedInstantId {
+        /// A well-formed 40-hex revision. Any value works: the validators check SHAPE and the path
+        /// suffix, never that the revision exists anywhere.
+        pub const REVISION: &'static str = "e40202d63baef826c7df95a639a811698c1178d2";
+
+        pub fn install(tag: &str, repository: &str, tier: &str) -> Self {
+            let guard = INSTANTID_ENV_LOCK
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            let root = std::env::temp_dir().join(format!(
+                "sc-22729-{tag}-{}-{}",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .expect("the clock is after the epoch")
+                    .as_nanos()
+            ));
+            let snapshot = root
+                .join(format!("models--{}", repository.replace('/', "--")))
+                .join("snapshots")
+                .join(Self::REVISION)
+                .join(tier);
+            let identitynet = root.join("identitynet");
+            let bundle = root.join("bundle");
+            for dir in [&snapshot, &identitynet, &bundle] {
+                std::fs::create_dir_all(dir).expect("create the staged tree");
+            }
+            for file in INSTANTID_IDENTITY_BUNDLE_FILES {
+                std::fs::write(bundle.join(file), b"x").expect("stage a bundle file");
+            }
+            for (name, value) in [
+                (INSTANTID_ENV_NAMES[0], repository.to_owned()),
+                (INSTANTID_ENV_NAMES[1], Self::REVISION.to_owned()),
+                (INSTANTID_ENV_NAMES[2], snapshot.display().to_string()),
+                (INSTANTID_ENV_NAMES[3], bundle.display().to_string()),
+                (INSTANTID_ENV_NAMES[4], identitynet.display().to_string()),
+            ] {
+                std::env::set_var(name, value);
+            }
+            Self {
+                root,
+                snapshot,
+                identitynet,
+                bundle,
+                _guard: guard,
+            }
+        }
+
+        pub fn stage_identitynet_weight(&self) {
+            std::fs::write(
+                self.identitynet.join(INSTANTID_CONTROLNET_WEIGHT_FILE),
+                b"x",
+            )
+            .expect("stage the IdentityNet weight");
+        }
+
+        /// The five artifact paths, canonicalized, in the role order the worker's
+        /// `instantid_artifact_fingerprint` hashes them: backbone, IdentityNet, IP-Adapter, SCRFD,
+        /// ArcFace.
+        pub fn ordered_paths(&self) -> Vec<PathBuf> {
+            let bundle = std::fs::canonicalize(&self.bundle).expect("canonicalize the bundle");
+            let mut paths = vec![
+                std::fs::canonicalize(&self.snapshot).expect("canonicalize the snapshot"),
+                std::fs::canonicalize(&self.identitynet).expect("canonicalize the IdentityNet dir"),
+            ];
+            paths.extend(INSTANTID_IDENTITY_BUNDLE_FILES.map(|file| bundle.join(file)));
+            paths
+        }
+    }
+
+    impl Drop for StagedInstantId {
+        fn drop(&mut self) {
+            for name in INSTANTID_ENV_NAMES {
+                std::env::remove_var(name);
+            }
+            std::fs::remove_dir_all(&self.root).ok();
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -66,16 +66,70 @@ export const SDXL_COMPONENTS = Object.freeze([
 /**
  * sc-22729. `candle-gen-sdxl`'s `SDXL_ROUTES` pins each route's repository AND revision, and its
  * `path_has_snapshot` matches a staged root against that literal before `SdxlArtifactSeal::capture`
- * will seal a contract. For the two Illustrious routes the pinned revision is not the one this
- * repository ships, so no root the manifest can resolve can ever seal — `candle_gen_sdxl::load`
- * errors before reading a weight. That is an INFERENCE-side divergence, not adapter work.
+ * will seal a contract. When the pinned revision is not the one this repository ships, no root the
+ * manifest can resolve can ever seal — `candle_gen_sdxl::load` errors before reading a weight. That
+ * is an INFERENCE-side divergence, not adapter work.
+ *
+ * NOTHING here is a literal: both halves of the comparison are READ (the engine revision out of the
+ * pinned inference checkout, the shipped revision out of the manifest), so the refusal disappears by
+ * itself the moment the engine agrees — no edit to this file, and no stale exclusion outliving the
+ * fix. The inference-side repair lives on `story/sc-22729-sdxl-route-revisions`.
  */
-const ILLUSTRIOUS_CANDLE_ROUTE_DRIFT = (modelId, engineRevision, manifestRevision) =>
-  `candle-gen-sdxl pins route ${modelId} at ${engineRevision.slice(0, 8)} `
-  + `(crates/media/candle-gen/candle-gen-sdxl/src/memory_strategy.rs SDXL_ROUTES), but this `
-  + `repository ships ${manifestRevision.slice(0, 8)}; path_has_snapshot matches that literal, so `
-  + `no staged root can seal the contract and the load fails before any weight is read. `
-  + `The candle lane does not route this model at inference c6d6a4db.`;
+export const SDXL_ROUTES_PATH = "crates/media/candle-gen/candle-gen-sdxl/src/memory_strategy.rs";
+
+/** `SDXL_ROUTES` as `id → { repository, revision }`. Throws if the table can no longer be read. */
+export function parseSdxlRoutes(source) {
+  const table = /pub const SDXL_ROUTES: &\[SdxlRoute\] = &\[([\s\S]*?)\n\];/.exec(source);
+  if (!table) fail(`${SDXL_ROUTES_PATH} no longer declares a parsable SDXL_ROUTES table`);
+  const routes = new Map();
+  for (const entry of table[1].matchAll(/SdxlRoute\s*\{([\s\S]*?)\}/g)) {
+    const field = (name) => new RegExp(`\\b${name}:\\s*"([^"]+)"`).exec(entry[1])?.[1];
+    const [id, repository, revision] = [field("id"), field("repository"), field("revision")];
+    if (!id || !repository || !revision) fail(`an SDXL_ROUTES entry declares no id/repository/revision: ${entry[0]}`);
+    routes.set(id, { repository, revision });
+  }
+  if (routes.size === 0) fail(`${SDXL_ROUTES_PATH} declares an empty SDXL_ROUTES table`);
+  return routes;
+}
+
+/**
+ * The engine's route table at `inferenceRepo`, or `null` when no inference checkout is reachable.
+ * `null` is NOT a refusal: with nothing to compare against, a cell classifies as it would if the
+ * engine agreed, and says so.
+ */
+export async function readSdxlCandleRoutes(inferenceRepo = process.env.INFERENCE_REPO) {
+  if (!inferenceRepo) return null;
+  try {
+    return parseSdxlRoutes(await readFile(path.join(inferenceRepo, SDXL_ROUTES_PATH), "utf8"));
+  } catch (error) {
+    if (error.code === "ENOENT" || error.code === "ENOTDIR") return null;
+    throw error;
+  }
+}
+
+export const SDXL_ROUTES_UNCHECKED =
+  `no inference checkout (--inference-repo / $INFERENCE_REPO) supplies ${SDXL_ROUTES_PATH}, so the `
+  + "engine's route revision was not compared with the shipped one; classified as if the engine agrees";
+
+/**
+ * Why the candle lane cannot route `modelId` today, or `null` when it can.
+ *
+ * Both revisions are derived: the engine's from `SDXL_ROUTES` at the pinned inference checkout, the
+ * shipped one from the manifest download the route's own repository names.
+ */
+export function sdxlCandleRouteDrift(modelId, tier, routes, models) {
+  const route = routes.get(modelId);
+  if (!route) {
+    return `candle-gen-sdxl's SDXL_ROUTES (${SDXL_ROUTES_PATH}) declares no route ${modelId}, so the `
+      + "candle lane has no artifact identity to seal for it";
+  }
+  const shipped = tierDownload(models, modelId, route.repository, tier).revision;
+  if (shipped === route.revision) return null;
+  return `candle-gen-sdxl pins route ${modelId} at ${route.revision.slice(0, 8)} `
+    + `(${SDXL_ROUTES_PATH} SDXL_ROUTES), but this repository ships ${shipped.slice(0, 8)}; `
+    + "path_has_snapshot matches that literal, so no staged root can seal the contract and the load "
+    + "fails before any weight is read. The candle lane does not route this model at this pin.";
+}
 
 /**
  * One row per provider arm an adapter implements, mirroring `match provider` in
@@ -110,27 +164,28 @@ export const PROVIDER_FAMILIES = Object.freeze({
   // REQUIRES all three at exact upstream revisions, so a candle capture stages the same corequisite
   // snapshots the worker's `attach_required_components` stages. The MLX turnkey is self-contained
   // and ignores them, so they are bound on both lanes and simply unused on one.
-  sdxl: { provider: "sdxl", env: "SDXL", repo: "SceneWorks/sdxl-base-mlx", arms: ["mlx", "candle"], components: SDXL_COMPONENTS },
-  realvisxl: { provider: "sdxl", env: "REALVISXL", repo: "SceneWorks/realvisxl-mlx", arms: ["mlx", "candle"], components: SDXL_COMPONENTS },
+  //
+  // `sdxlRoute` marks the members `candle-gen-sdxl` seals through `SDXL_ROUTES`. It is carried by
+  // ALL FIVE, not only the two that disagree today: the check is over the engine's declaration, so
+  // a future revision drift on any member is caught the same way rather than needing a new entry.
+  sdxl: { provider: "sdxl", env: "SDXL", repo: "SceneWorks/sdxl-base-mlx", arms: ["mlx", "candle"], components: SDXL_COMPONENTS, sdxlRoute: true },
+  realvisxl: { provider: "sdxl", env: "REALVISXL", repo: "SceneWorks/realvisxl-mlx", arms: ["mlx", "candle"], components: SDXL_COMPONENTS, sdxlRoute: true },
   realvisxl_lightning: {
     provider: "sdxl", env: "REALVISXL_LIGHTNING", repo: "SceneWorks/realvisxl-lightning-mlx",
-    arms: ["mlx", "candle"], components: SDXL_COMPONENTS,
+    arms: ["mlx", "candle"], components: SDXL_COMPONENTS, sdxlRoute: true,
   },
-  // MLX ONLY at inference c6d6a4db. `candle-gen-sdxl`'s `SDXL_ROUTES` pins these two routes at
-  // revisions this repository no longer ships (`c5a92a90…` / `7c5c8b2b…` against the manifest's
-  // `778c3f02…` / `672e9851…`), and `path_has_snapshot` matches that literal — so no root the
-  // manifest can resolve will ever seal the contract, and `candle_gen_sdxl::load` errors before any
-  // weight is read. The candle lane therefore does not route these two models at this pin; the
-  // adapter arm exists and refuses them by naming both revisions.
+  // The candle lane routes all five `sdxl` members (`routing/candle.rs` `is_sdxl_family_candle_model`
+  // / `SDXL_CONTROL_MODELS`), so all five are DECLARED on both lanes. Whether a member's candle cell
+  // is capturable TODAY is a derived fact, not a table entry: `sdxlRoute` asks `sdxlCandleRouteDrift`
+  // to compare the engine's own `SDXL_ROUTES` revision with the one the manifest ships. Only the two
+  // Illustrious routes disagree at inference c6d6a4db, and only for as long as they disagree.
   illustrious_xl_v1: {
     provider: "sdxl", env: "ILLUSTRIOUS_XL_V1", repo: "SceneWorks/illustrious-xl-v1-mlx",
-    arms: ["mlx", "candle"], components: SDXL_COMPONENTS,
-    laneUnsupported: { candle: ILLUSTRIOUS_CANDLE_ROUTE_DRIFT("illustrious_xl_v1", "c5a92a902dd4e6ee99c2a57981ecf66209905dd1", "778c3f02b7703b0c2755d0c0447592897193c6b5") },
+    arms: ["mlx", "candle"], components: SDXL_COMPONENTS, sdxlRoute: true,
   },
   illustrious_xl_v2: {
     provider: "sdxl", env: "ILLUSTRIOUS_XL_V2", repo: "SceneWorks/illustrious-xl-v2-mlx",
-    arms: ["mlx", "candle"], components: SDXL_COMPONENTS,
-    laneUnsupported: { candle: ILLUSTRIOUS_CANDLE_ROUTE_DRIFT("illustrious_xl_v2", "7c5c8b2bb75a8f38a7365e70bdf84d38d6204473", "672e9851ede4dc856fa945649b6691975c9d74a3") },
+    arms: ["mlx", "candle"], components: SDXL_COMPONENTS, sdxlRoute: true,
   },
   // The InstantID backbone IS the plain RealVisXL rehost (`image_jobs/instantid.rs`
   // `INSTANTID_SDXL_REPO`), bound through its own env family so an InstantID plan can never be
@@ -326,7 +381,7 @@ async function firstExistingDirectory(candidates) {
  * Decide what the run can do with one plan anchor: which adapter arm serves it, which weights
  * root it loads, and why it would be skipped. Pure apart from the directory probes.
  */
-export async function classifyAnchor(key, planned, { models, backend, hubs, current, captured, declaredLanes, declaredProviders, families = PROVIDER_FAMILIES }) {
+export async function classifyAnchor(key, planned, { models, backend, hubs, current, captured, declaredLanes, declaredProviders, sdxlRoutes = null, families = PROVIDER_FAMILIES }) {
   const parts = anchorParts(key);
   const row = { key, ...parts, provider: planned.provider, status: "runnable", reason: null, env: {}, roots: [] };
   if (parts.backend !== backend) return { ...row, status: "other_backend", reason: `${parts.backend} lane` };
@@ -342,11 +397,18 @@ export async function classifyAnchor(key, planned, { models, backend, hubs, curr
   // deleting the branch and the parameter together; that would make the next unbindable provider
   // report as `no_adapter_arm`, which is the wrong diagnosis and sends the reader to adapter work.
   if (family?.harnessUnsupported) return { ...row, status: "harness_unsupported", reason: family.harnessUnsupported };
-  // sc-22729: the same refusal, scoped to ONE lane. A model whose engine cannot serve it on a lane
-  // is not a missing arm and not a missing declaration — the arm exists and refuses it by name —
-  // so it reports the engine-side reason rather than sending the reader to adapter work.
-  if (family?.laneUnsupported?.[backend]) {
-    return { ...row, status: "harness_unsupported", reason: family.laneUnsupported[backend] };
+  // sc-22729: the same refusal, scoped to ONE lane and DERIVED. A model whose engine cannot seal an
+  // artifact identity for it on a lane is not a missing arm and not a missing declaration — the arm
+  // exists and the plan declares the cell — so it reports the engine-side reason rather than
+  // sending the reader to adapter work. With no inference checkout to read, there is no refusal at
+  // all: the cell classifies normally and carries the note saying the comparison did not happen.
+  if (family?.sdxlRoute && backend === "candle") {
+    if (sdxlRoutes === null) {
+      row.routeCheck = SDXL_ROUTES_UNCHECKED;
+    } else {
+      const drift = sdxlCandleRouteDrift(parts.modelId, parts.tier, sdxlRoutes, models);
+      if (drift) return { ...row, status: "harness_unsupported", reason: drift };
+    }
   }
   if (!family || !family.arms.includes(backend)) {
     return {
@@ -681,6 +743,9 @@ export async function planRun(args, root = ROOT) {
   const declaredLanes = await readDeclaredLanes(root);
   const declaredProviders = await readDeclaredProviders(root);
   const hubs = hubRoots(args.hfCache);
+  // sc-22729: the engine's own SDXL route table, read from the pinned inference checkout. `null`
+  // when there is none to read — see `SDXL_ROUTES_UNCHECKED`.
+  const sdxlRoutes = await readSdxlCandleRoutes(args.inferenceRepo ?? process.env.INFERENCE_REPO);
   const keys = Object.keys(plan.anchors).sort();
   if (args.anchors) {
     for (const key of args.anchors) if (!plan.anchors[key]) fail(`--anchors names ${key}, which the plan does not declare`);
@@ -692,8 +757,13 @@ export async function planRun(args, root = ROOT) {
   for (const key of keys) {
     if (args.anchors && !args.anchors.includes(key)) continue;
     if ((args.models ?? []).length > 0 && !args.models.includes(anchorParts(key).modelId)) continue;
-    const row = await classifyAnchor(key, plan.anchors[key], { models, backend: args.backend, hubs, current, captured, declaredLanes, declaredProviders });
+    const row = await classifyAnchor(key, plan.anchors[key], { models, backend: args.backend, hubs, current, captured, declaredLanes, declaredProviders, sdxlRoutes });
     if (row.status === "other_backend" && !args.anchors) continue;
+    // An unperformed route-revision comparison is reported on the row it did not happen for, so a
+    // run without an inference checkout cannot silently look like a run that proved the engine agrees.
+    if (row.routeCheck && ["runnable", "weights_missing"].includes(row.status)) {
+      row.reason = row.reason ? `${row.reason}; ${row.routeCheck}` : row.routeCheck;
+    }
     if (row.status === "runnable" && args.skipCurrent && row.current) {
       row.status = "current";
       row.reason = "anchor is current at the pinned inference revision (--skip-current)";

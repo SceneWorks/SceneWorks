@@ -1437,6 +1437,65 @@ mod tests {
         );
     }
 
+    /// sc-22729 review: the MLX identity arm driven END TO END on a synthetic tree — the twin of
+    /// `candle.rs`'s `instantid_candle_identity_names_the_missing_identitynet_weight`, which can
+    /// only be COMPILE-checked on this host. Nothing used to reach past the environment reads, so
+    /// deleting `protocol::instantid_controlnet_dir()?`, or a file out of the identity bundle, or a
+    /// path out of the digest, reddened nothing.
+    #[test]
+    fn instantid_binding_names_the_missing_identitynet_weight_and_covers_five_ordered_paths() {
+        use protocol::staging::StagedInstantId;
+
+        let staged =
+            StagedInstantId::install("mlx-instantid", protocol::REALVISXL_REPOSITORY, "bf16");
+        let error = match instantid_binding("bf16") {
+            Err(error) => error,
+            Ok(_) => panic!("an IdentityNet directory carrying no weight file must be refused"),
+        };
+        assert!(
+            error.contains(protocol::INSTANTID_CONTROLNET_WEIGHT_FILE),
+            "{error}"
+        );
+
+        staged.stage_identitynet_weight();
+        let binding = match instantid_binding("bf16") {
+            Ok(binding) => binding,
+            Err(error) => panic!("a complete staged tree must bind: {error}"),
+        };
+        assert_eq!(binding.repository, protocol::REALVISXL_REPOSITORY);
+        assert_eq!(binding.revision, StagedInstantId::REVISION);
+
+        let digest_of = |paths: &[PathBuf]| {
+            instantid_artifact_fingerprint(&paths.iter().map(PathBuf::as_path).collect::<Vec<_>>())
+        };
+        // The digest covers EXACTLY these five, in exactly this order: a permutation and every
+        // four-path subset both differ.
+        let ordered = staged.ordered_paths();
+        assert_eq!(binding.artifact_fingerprint, digest_of(&ordered));
+        let mut swapped = ordered.clone();
+        swapped.swap(3, 4);
+        assert_ne!(
+            binding.artifact_fingerprint,
+            digest_of(&swapped),
+            "the digest must be order-sensitive across the face stack"
+        );
+        for dropped in 0..ordered.len() {
+            let mut short = ordered.clone();
+            short.remove(dropped);
+            assert_ne!(
+                binding.artifact_fingerprint,
+                digest_of(&short),
+                "path {dropped} is not covered by the digest"
+            );
+        }
+        // …and the bundle the binding resolved is the staged one, so a missing bundle file would
+        // have refused above rather than silently binding an empty face stack.
+        assert_eq!(
+            binding.bundle.face_dir,
+            std::fs::canonicalize(&staged.bundle).unwrap()
+        );
+    }
+
     /// sc-22729: the calibration fingerprints the plan may cite are exactly the strings the pinned
     /// crates publish — never a hand-written label. `mlx-gen-sdxl` mints ONE route-independent
     /// string for the whole family; `mlx-gen-instantid` reuses its request-contract revision.
@@ -1460,7 +1519,7 @@ mod tests {
             "../../../../config/memory-calibration-plan.json"
         ))
         .expect("the anchor plan is valid JSON");
-        let mut checked = 0;
+        let mut checked: Vec<String> = Vec::new();
         for (key, anchor) in plan["anchors"].as_object().expect("anchors is an object") {
             if !key.ends_with(":mlx") {
                 continue;
@@ -1491,12 +1550,24 @@ mod tests {
                     || model_id == INSTANTID_MODEL_ID,
                 "{key} names a model no arm serves"
             );
-            checked += 1;
+            checked.push(key.clone());
         }
-        assert!(
-            checked >= 18,
-            "the plan must carry the whole MLX SDXL family plus InstantID, got {checked}"
-        );
+        // Not a floor (the candle twin's `>= 6` had the same defect, sc-22729 review): the EXACT
+        // set of MLX keys the family plans. A floor stayed green with a whole member deleted from
+        // the plan, which is the one thing this case is here to notice.
+        checked.sort();
+        let mut expected = SDXL_FAMILY
+            .iter()
+            .map(|arm| arm.model_id)
+            .chain(std::iter::once(INSTANTID_MODEL_ID))
+            .flat_map(|model_id| {
+                ["bf16", "q4", "q8"]
+                    .into_iter()
+                    .map(move |tier| format!("{model_id}:{tier}:mlx"))
+            })
+            .collect::<Vec<_>>();
+        expected.sort();
+        assert_eq!(checked, expected);
     }
 
     #[test]

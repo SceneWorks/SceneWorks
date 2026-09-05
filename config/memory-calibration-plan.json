@@ -1021,6 +1021,51 @@
       "calibrationFingerprint": "sdxl-mlx-unet-shared-ladder-v3",
       "fixture": "illustrious-xl-v1-mlx-bf16-1024-seed18379-step2"
     },
+    "illustrious_xl_v1:q4:candle": {
+      "provider": "sdxl",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 768,
+        "height": 768,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "deferred_materialization",
+      "calibrationFingerprint": "sdxl-candle-illustrious-xl-rev1-staged-decode-attention-v1",
+      "fixture": "illustrious-xl-v1-candle-q4-768-seed18379-step2"
+    },
+    "illustrious_xl_v1:q8:candle": {
+      "provider": "sdxl",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "deferred_materialization",
+      "calibrationFingerprint": "sdxl-candle-illustrious-xl-rev1-staged-decode-attention-v1",
+      "fixture": "illustrious-xl-v1-candle-q8-1024-seed18379-step2"
+    },
+    "illustrious_xl_v1:bf16:candle": {
+      "provider": "sdxl",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "deferred_materialization",
+      "calibrationFingerprint": "sdxl-candle-illustrious-xl-rev1-staged-decode-attention-v1",
+      "fixture": "illustrious-xl-v1-candle-bf16-1024-seed18379-step2"
+    },
     "illustrious_xl_v2:q4:mlx": {
       "provider": "sdxl",
       "mode": "text_to_image",
@@ -1065,6 +1110,51 @@
       "loadShape": "deferred_materialization",
       "calibrationFingerprint": "sdxl-mlx-unet-shared-ladder-v3",
       "fixture": "illustrious-xl-v2-mlx-bf16-1024-seed18379-step2"
+    },
+    "illustrious_xl_v2:q4:candle": {
+      "provider": "sdxl",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 768,
+        "height": 768,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "deferred_materialization",
+      "calibrationFingerprint": "sdxl-candle-illustrious-xl-rev2-staged-decode-attention-v1",
+      "fixture": "illustrious-xl-v2-candle-q4-768-seed18379-step2"
+    },
+    "illustrious_xl_v2:q8:candle": {
+      "provider": "sdxl",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "deferred_materialization",
+      "calibrationFingerprint": "sdxl-candle-illustrious-xl-rev2-staged-decode-attention-v1",
+      "fixture": "illustrious-xl-v2-candle-q8-1024-seed18379-step2"
+    },
+    "illustrious_xl_v2:bf16:candle": {
+      "provider": "sdxl",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "deferred_materialization",
+      "calibrationFingerprint": "sdxl-candle-illustrious-xl-rev2-staged-decode-attention-v1",
+      "fixture": "illustrious-xl-v2-candle-bf16-1024-seed18379-step2"
     },
     "instantid_realvisxl:q4:mlx": {
       "provider": "instantid",

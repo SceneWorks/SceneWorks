@@ -882,7 +882,25 @@ struct InstantIdCandleBinding {
     artifact_fingerprint: String,
 }
 
-fn instantid_candle_binding(tier: &str) -> Result<InstantIdCandleBinding, String> {
+/// The half of a Candle InstantID binding that is resolved purely from the ENVIRONMENT: the tier
+/// guard, the backbone artifact identity, the staged identity bundle, the IdentityNet directory and
+/// the ordered artifact digest over all five.
+///
+/// Split out of [`instantid_candle_binding`] (sc-22729 review) because the remainder —
+/// `SdxlComponents::from_spec` — reads real component weights, so nothing past it is drivable on a
+/// synthetic tree. Every env seam this arm honours therefore has a test that actually executes it
+/// (`instantid_candle_identity_names_the_missing_identitynet_weight`), instead of a tier guard whose
+/// refusal is the only thing anything ever reaches.
+struct InstantIdCandleIdentity {
+    repository: String,
+    revision: String,
+    root: PathBuf,
+    identitynet: PathBuf,
+    bundle: protocol::InstantIdIdentityBundle,
+    artifact_fingerprint: String,
+}
+
+fn instantid_candle_identity(tier: &str) -> Result<InstantIdCandleIdentity, String> {
     if tier != INSTANTID_CANDLE_TIER {
         return Err(format!(
             "the Candle InstantID stack is dense-only and always loads {INSTANTID_CANDLE_TIER:?} \
@@ -906,6 +924,32 @@ fn instantid_candle_binding(tier: &str) -> Result<InstantIdCandleBinding, String
     )?;
     let bundle = protocol::instantid_identity_bundle()?;
     let identitynet = protocol::instantid_controlnet_dir()?;
+    let artifact_fingerprint = instantid_artifact_fingerprint(&[
+        root.as_path(),
+        identitynet.as_path(),
+        bundle.ip_adapter.as_path(),
+        bundle.scrfd.as_path(),
+        bundle.arcface.as_path(),
+    ]);
+    Ok(InstantIdCandleIdentity {
+        repository,
+        revision,
+        root,
+        identitynet,
+        bundle,
+        artifact_fingerprint,
+    })
+}
+
+fn instantid_candle_binding(tier: &str) -> Result<InstantIdCandleBinding, String> {
+    let InstantIdCandleIdentity {
+        repository,
+        revision,
+        root,
+        identitynet,
+        bundle,
+        artifact_fingerprint,
+    } = instantid_candle_identity(tier)?;
     // `SdxlComponents` is built only from a `LoadSpec`, so the three staged components ride a spec
     // that exists purely to carry them — the same three ids, from the same corequisite snapshots,
     // the worker's `attach_required_components` stages.
@@ -918,13 +962,6 @@ fn instantid_candle_binding(tier: &str) -> Result<InstantIdCandleBinding, String
     }
     let sdxl = runtime_cuda::providers::instantid::SdxlComponents::from_spec(&component_spec)
         .map_err(|error| format!("stage the InstantID SDXL components: {error}"))?;
-    let artifact_fingerprint = instantid_artifact_fingerprint(&[
-        root.as_path(),
-        identitynet.as_path(),
-        bundle.ip_adapter.as_path(),
-        bundle.scrfd.as_path(),
-        bundle.arcface.as_path(),
-    ]);
     Ok(InstantIdCandleBinding {
         repository,
         revision,
@@ -3318,7 +3355,7 @@ mod sdxl_family_tests {
         ))
         .expect("the anchor plan is valid JSON");
         let anchors = plan["anchors"].as_object().expect("anchors is an object");
-        let mut checked = 0;
+        let mut checked: Vec<(String, String)> = Vec::new();
         for (key, anchor) in anchors {
             if anchor["provider"] != json!(SDXL_ID) {
                 continue;
@@ -3339,12 +3376,26 @@ mod sdxl_family_tests {
                     .any(|arm| arm.model_id == model_id),
                 "{key} names a model no family member serves"
             );
-            checked += 1;
+            checked.push((model_id.to_owned(), backend.to_owned()));
         }
-        assert!(
-            checked >= 6,
-            "the plan must carry SDXL-family rows to check"
-        );
+        // Not a floor: the EXACT set of `(modelId, lane)` pairs the family plans. A floor stayed
+        // green with a whole member's lane deleted from the plan, which is the one thing this case
+        // is here to notice — every family member is planned on BOTH lanes (the candle lane routes
+        // all five, `routing/candle.rs` `is_sdxl_family_candle_model` / `SDXL_CONTROL_MODELS`), and
+        // an engine defect that blocks a CAPTURE never removes the DECLARATION.
+        checked.sort();
+        checked.dedup();
+        let expected = SDXL_CANDLE_FAMILY
+            .iter()
+            .flat_map(|arm| {
+                ["candle", "mlx"]
+                    .into_iter()
+                    .map(|backend| (arm.model_id.to_owned(), backend.to_owned()))
+            })
+            .collect::<std::collections::BTreeSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>();
+        assert_eq!(checked, expected);
     }
 
     /// sc-22729: the candle InstantID lane is dense-only, so a packed tier is refused before any
@@ -3358,6 +3409,73 @@ mod sdxl_family_tests {
             };
             assert!(error.contains("dense-only"), "{tier}: {error}");
             assert!(error.contains(INSTANTID_CANDLE_TIER), "{tier}: {error}");
+        }
+    }
+
+    use protocol::staging::StagedInstantId;
+
+    fn digest_of(paths: &[PathBuf]) -> String {
+        instantid_artifact_fingerprint(&paths.iter().map(PathBuf::as_path).collect::<Vec<_>>())
+    }
+
+    /// sc-22729 review: the identity arm driven PAST the tier guard on a synthetic tree.
+    ///
+    /// Until this existed, the tier guard's refusal was the only thing any test reached, so
+    /// deleting `protocol::instantid_controlnet_dir()?` — or a file out of the identity bundle, or
+    /// a path out of the digest — reddened nothing at all.
+    #[test]
+    fn instantid_candle_identity_names_the_missing_identitynet_weight() {
+        let staged = StagedInstantId::install(
+            "candle-instantid",
+            protocol::REALVISXL_REPOSITORY,
+            INSTANTID_CANDLE_TIER,
+        );
+        let error = match instantid_candle_identity(INSTANTID_CANDLE_TIER) {
+            Err(error) => error,
+            Ok(_) => panic!("an IdentityNet directory carrying no weight file must be refused"),
+        };
+        assert!(
+            error.contains(protocol::INSTANTID_CONTROLNET_WEIGHT_FILE),
+            "{error}"
+        );
+        assert!(
+            error.contains(&staged.identitynet.display().to_string())
+                || error.contains(
+                    &std::fs::canonicalize(&staged.identitynet)
+                        .unwrap()
+                        .display()
+                        .to_string()
+                ),
+            "the refusal must name the directory it looked in: {error}"
+        );
+
+        staged.stage_identitynet_weight();
+        let identity = match instantid_candle_identity(INSTANTID_CANDLE_TIER) {
+            Ok(identity) => identity,
+            Err(error) => panic!("a complete staged tree must bind: {error}"),
+        };
+        assert_eq!(identity.repository, protocol::REALVISXL_REPOSITORY);
+        assert_eq!(identity.revision, StagedInstantId::REVISION);
+
+        // The digest covers EXACTLY these five, in exactly this order: a permutation and every
+        // four-path subset both differ.
+        let ordered = staged.ordered_paths();
+        assert_eq!(identity.artifact_fingerprint, digest_of(&ordered));
+        let mut swapped = ordered.clone();
+        swapped.swap(3, 4);
+        assert_ne!(
+            identity.artifact_fingerprint,
+            digest_of(&swapped),
+            "the digest must be order-sensitive across the face stack"
+        );
+        for dropped in 0..ordered.len() {
+            let mut short = ordered.clone();
+            short.remove(dropped);
+            assert_ne!(
+                identity.artifact_fingerprint,
+                digest_of(&short),
+                "path {dropped} is not covered by the digest"
+            );
         }
     }
 
