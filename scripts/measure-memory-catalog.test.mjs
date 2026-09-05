@@ -15,6 +15,7 @@ import {
   PROVIDER_FAMILIES,
   MAGE_COMPONENTS,
   MAGE_COMPONENT_IDS,
+  providerFamily,
   anchorParts,
   anchorSlug,
   appendPackagedSource,
@@ -64,6 +65,9 @@ function fakeModels() {
     // The edit model is a catalog alias for the Turbo provider driven in edit_image mode: it ships
     // the Turbo weights (worker engines.rs `z_image_edit → z_image_turbo`).
     { id: "z_image_edit", downloads: [{ repo: "SceneWorks/z-image-turbo-mlx", revision: REVISION, variant: "q4", files: ["q4/*"] }] },
+    // sc-22727: two catalog models over ONE engine provider id, each with its own rehost.
+    { id: "flux2_klein_9b", downloads: [{ repo: "SceneWorks/flux2-klein-9b-mlx", revision: REVISION, variant: "q8", files: ["q8/*"] }] },
+    { id: "flux2_klein_9b_kv", downloads: [{ repo: "SceneWorks/flux2-klein-9b-kv-mlx", revision: UPSTREAM, variant: "q8", files: ["q8/*"] }] },
     // The two Qwen edit ids are ONE checkpoint on ONE rehost, routed to one engine provider; only
     // the Lightning id additionally loads the pinned distill LoRA, which no download ships.
     { id: "qwen_image_edit_2511", downloads: [{ repo: "SceneWorks/qwen-image-edit-2511-mlx", revision: REVISION, variant: "q4", files: ["q4/*"] }] },
@@ -184,6 +188,40 @@ test("the z-image family: the base model has its own env family, and the edit al
   }
 });
 
+test("the flux2-klein family: two catalog models on one provider id resolve their OWN artifacts", async () => {
+  const hub = await fakeHub([
+    ["SceneWorks/flux2-klein-9b-mlx", REVISION, "q8"],
+    ["SceneWorks/flux2-klein-9b-kv-mlx", UPSTREAM, "q8"],
+  ]);
+  for (const backend of ["mlx", "candle"]) {
+    const context = { models: fakeModels(), backend, hubs: [hub], current: new Map(), captured: new Map() };
+    const base = await classifyAnchor(`flux2_klein_9b:q8:${backend}`, { provider: "flux2_klein_9b" }, context);
+    assert.equal(base.status, "runnable", `${backend}: ${base.reason}`);
+    assert.deepEqual(base.env, {
+      SCENEWORKS_FLUX2_KLEIN_REPOSITORY: "SceneWorks/flux2-klein-9b-mlx",
+      SCENEWORKS_FLUX2_KLEIN_REVISION: REVISION,
+      SCENEWORKS_FLUX2_KLEIN_ROOT: snapshotPath(hub, "SceneWorks/flux2-klein-9b-mlx", REVISION, "q8"),
+    });
+    // The KV model shares `provider` with the row above and MUST NOT share its artifact family:
+    // a KV plan served from the base rehost would re-label the base checkpoint's peaks.
+    const kv = await classifyAnchor(`flux2_klein_9b_kv:q8:${backend}`, { provider: "flux2_klein_9b" }, context);
+    assert.equal(kv.status, "runnable", `${backend}: ${kv.reason}`);
+    assert.equal(kv.provider, "flux2_klein_9b", "both models load through one engine provider id");
+    assert.deepEqual(kv.env, {
+      SCENEWORKS_FLUX2_KLEIN_KV_REPOSITORY: "SceneWorks/flux2-klein-9b-kv-mlx",
+      SCENEWORKS_FLUX2_KLEIN_KV_REVISION: UPSTREAM,
+      SCENEWORKS_FLUX2_KLEIN_KV_ROOT: snapshotPath(hub, "SceneWorks/flux2-klein-9b-kv-mlx", UPSTREAM, "q8"),
+    });
+    // And the per-model override never leaks back into the shared row.
+    assert.equal(providerFamily("flux2_klein_9b", "flux2_klein_9b").env, "FLUX2_KLEIN");
+    assert.equal(providerFamily("flux2_klein_9b", "flux2_klein_9b_kv").env, "FLUX2_KLEIN_KV");
+    assert.equal(providerFamily("flux2_klein_9b", "flux2_klein_9b_kv").variants, undefined);
+    const missing = await classifyAnchor(`flux2_klein_9b_kv:q4:${backend}`, { provider: "flux2_klein_9b" }, context);
+    assert.equal(missing.status, "weights_missing");
+    assert.match(missing.reason, /flux2-klein-9b-kv-mlx@.*\/q4 on this host/);
+  }
+});
+
 // sc-22728: the Qwen edit family is two catalog ids on ONE engine provider and ONE rehost, and the
 // Lightning id needs a SECOND root the manifest does not ship (the pinned distill LoRA). Both roots
 // must be derived, on both lanes, and neither id may be served without its own.
@@ -300,6 +338,9 @@ test("every family's derived env names are read back by each arm it declares", a
       // sc-22733: the shared component snapshot a split-layout family stages its text encoder and
       // VAE from is exported the same way and must be read back the same way.
       family.components?.env,
+      // sc-22727: a per-modelId variant is a derived env family too — the KV klein row exports
+      // `SCENEWORKS_FLUX2_KLEIN_KV_*` and each declared arm must read those names back.
+      ...Object.values(family.variants ?? {}).map((variant) => variant.env),
       ...Object.values(family.sideArtifact ?? {}).map((side) => side.env),
     ].filter(Boolean);
     if (envFamilies.length === 0) {
@@ -426,8 +467,11 @@ test("LTX25_LANE_PROVIDERS and PROVIDER_FAMILIES agree on which lane serves whic
 test("classification refuses what no adapter arm or the harness cannot serve, and skips what is done", async () => {
   const hub = await fakeHub([["SceneWorks/z-image-turbo-mlx", REVISION, "q4"]]);
   const base = { models: fakeModels(), backend: "candle", hubs: [hub], current: new Map(), captured: new Map() };
-  const flux = await classifyAnchor("flux2_dev:q4:candle", { provider: "flux2_dev" }, base);
-  assert.equal(flux.status, "no_adapter_arm");
+  // sc-22727 gave `flux2_dev` a Candle arm, so the no-arm probe moved to a provider that still
+  // has none: `sdxl` is declared `arms: ["mlx"]`.
+  const sdxl = await classifyAnchor("sdxl:q4:candle", { provider: "sdxl" }, base);
+  assert.equal(sdxl.status, "no_adapter_arm");
+  assert.match(sdxl.reason, /candle adapter implements no provider arm for sdxl/);
   // `harness_unsupported` is the refusal for a provider whose adapter arm exists but whose
   // artifacts the harness cannot bind. No SHIPPED family is in that state since sc-22725 gave
   // LTX-2.5's candle engine id a real row, so the branch is driven through a synthetic family.
@@ -571,7 +615,7 @@ test("every provider the committed plan declares is either served by a family ro
         assert.equal(PROVIDER_FAMILIES[row.provider]?.arms.includes(backend) ?? false, false);
       } else if (!["harness_unsupported", "lane_undeclared", "provider_undeclared"].includes(row.status)) {
         // A served provider must resolve a manifest download, or the classification could not name a root.
-        tierDownload(models, row.modelId, PROVIDER_FAMILIES[row.provider].repo, row.tier);
+        tierDownload(models, row.modelId, providerFamily(row.provider, row.modelId).repo, row.tier);
         assert.ok(row.roots.length > 0, `${row.key} names the root it would load`);
       }
     }
@@ -663,6 +707,17 @@ test("the z-image family is measurable on every shipped tier of every routed lan
   const cells = (await shippedTieredCells()).filter((cell) => ["z_image", "z_image_edit", "z_image_turbo"].includes(cell.modelId));
   assert.ok(cells.length >= 3 * 3 * 2, "z_image / z_image_edit / z_image_turbo × three tiers × two lanes are all shipped and routed");
   const gaps = (await measurabilityGaps()).filter((gap) => ["z_image", "z_image_edit", "z_image_turbo"].includes(gap.modelId));
+  assert.equal(gaps.length, 0, gapReport(gaps));
+});
+
+// Epic 22723 E1/E2, story sc-22727: the whole FLUX.2 family, on every shipped tier of both lanes.
+// `flux2_klein_9b_true_v2` is deliberately not here — it ships no tiered download (its manifest
+// binds one converted single-file snapshot), so it is not a shipped TIERED cell at all.
+test("the flux2 family is measurable on every shipped tier of every routed lane", async () => {
+  const family = ["flux2_dev", "flux2_klein_9b", "flux2_klein_9b_kv"];
+  const cells = (await shippedTieredCells()).filter((cell) => family.includes(cell.modelId));
+  assert.ok(cells.length >= 3 * 3 * 2, "three models x three tiers x two lanes are all shipped and routed");
+  const gaps = (await measurabilityGaps()).filter((gap) => family.includes(gap.modelId));
   assert.equal(gaps.length, 0, gapReport(gaps));
 });
 
