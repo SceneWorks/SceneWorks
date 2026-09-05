@@ -1679,6 +1679,33 @@ impl MemoryAnchorStore {
         })
     }
 
+    /// The unique VIDEO anchor for one `(model, backend lane, tier, transformer variant, decoder)`
+    /// coordinate where the pipeline axes are OPTIONAL on both sides (sc-22736): an LTX-2.5
+    /// request carries both and resolves exactly as [`Self::anchor_for`] does; a request on a
+    /// video route that has no such axes at all (Wan 2.2, SCAIL-2, LTX-2.3) resolves the axis-free
+    /// multi-frame anchor of its cell. The match is on `Option` EQUALITY, never on a wildcard: an
+    /// axis-free anchor still answers no variant-keyed lookup, and an axis-keyed anchor answers no
+    /// axis-free one. A single-frame axis-free row is an IMAGE anchor and is not a video anchor
+    /// under any spelling — the mirror of [`Self::image_anchor_for`]'s refusal to hand a video
+    /// anchor to an image request.
+    pub fn video_anchor_for(
+        &self,
+        model_id: &str,
+        backend: AnchorBackend,
+        tier: &str,
+        transformer_variant: Option<Ltx25TransformerVariant>,
+        decoder: Option<Ltx25Decoder>,
+    ) -> Option<&MemoryAnchor> {
+        self.anchors.iter().find(|anchor| {
+            anchor.model_id == model_id
+                && anchor.backend == backend
+                && anchor.tier == tier
+                && anchor.transformer_variant == transformer_variant
+                && anchor.decoder == decoder
+                && anchor.geometry.frames > 1
+        })
+    }
+
     /// The unique anchor for one `(model, backend lane, tier)` coordinate on a lane whose pipeline
     /// has no transformer-variant / decoder axis — the candle image lane (sc-22509).
     ///
@@ -1871,23 +1898,24 @@ impl MemoryAnchor {
         if request.width == 0 || request.height == 0 || request.frames == 0 {
             return None;
         }
+        // Every per-token coefficient in this law is an LTX-2.5 pipeline fact keyed on the
+        // transformer variant and decoder. An anchor that states no such axes has no fitted law
+        // (sc-22736): a video route without those axes (Wan 2.2, SCAIL-2, LTX-2.3) is priced ONLY at
+        // and below its own measured point, and an image anchor (single frame, sc-22509) is not a
+        // video anchor at all. Consulted BEFORE the underived flag below, because the ONLY reason
+        // a video anchor is stamped underived is this very absence of axes — and the measured-point
+        // bound is exactly the "validates its measured point and prices nothing beyond it" the
+        // reason states. It fits nothing, so, like the image law, it does not consult the flag.
+        if self.transformer_variant.is_none() || self.decoder.is_none() {
+            return self.measured_point_bound_raw(request);
+        }
         // An anchor marked underived validates its measured point and prices nothing (epic 22505
         // feature-end fix round): every lane law carries this refusal so the store's statement and
         // the runtime behaviour cannot disagree.
         if self.underived_reason.is_some() {
             return None;
         }
-        // Every coefficient in this law is an LTX-2.5 pipeline fact keyed on the transformer
-        // variant and decoder. An anchor from a lane that has no such axes (the candle image
-        // anchors, sc-22509) is refused here rather than silently priced by video coefficients.
-        if self.transformer_variant.is_none() || self.decoder.is_none() {
-            return None;
-        }
-        let anchor_deferred = self.load_shape == AnchorLoadShape::DeferredMaterialization;
-        if (!request.deferred_materialization && anchor_deferred)
-            || (!request.transformer_windowed && self.measured_regime.transformer_windowed)
-            || (!request.decode_tiled && self.measured_regime.decode_tiled)
-        {
+        if !self.measured_regime_prices(request) {
             return None;
         }
         let anchor_tokens = latent_tokens(
@@ -1938,6 +1966,73 @@ impl MemoryAnchor {
             conditioning,
             denoise,
             decode,
+        })
+    }
+
+    /// REGIME GUARD (anchor vs request), shared by the fitted video law and the measured-point
+    /// bound: a phase priced from the anchor's own measured intercept requires the anchor to have
+    /// run that phase UNBOUNDED. A deferred-materialization anchor carries no transformer
+    /// residency in its conditioning peak; a windowed anchor carries one block instead of the
+    /// whole transformer in its denoise peak; a tiled anchor carries a tile workspace instead of
+    /// the full decode working set. Reusing any of those for an unbounded request would
+    /// under-estimate by the whole omitted residency.
+    fn measured_regime_prices(&self, request: AnchorDeriveRequest) -> bool {
+        let anchor_deferred = self.load_shape == AnchorLoadShape::DeferredMaterialization;
+        !((!request.deferred_materialization && anchor_deferred)
+            || (!request.transformer_windowed && self.measured_regime.transformer_windowed)
+            || (!request.decode_tiled && self.measured_regime.decode_tiled))
+    }
+
+    /// The MEASURED-POINT BOUND for a video anchor that states no pipeline axes (sc-22736): Wan 2.2,
+    /// SCAIL-2 and LTX-2.3 anchors, whose routes have no `(transformer variant, decoder)` and for
+    /// which no per-token coefficient has been measured.
+    ///
+    /// Such an anchor prices nothing BEYOND its measured point — the law above has no slope for it
+    /// and none is invented here — but it does bound every request the measured render DOMINATES:
+    /// a request at no more output pixels and no more frames than the anchor, under a regime the
+    /// anchor's measured intercepts price ([`Self::measured_regime_prices`]), cannot exceed the
+    /// anchor's own per-phase peaks, so each phase is estimated AT the anchor's measured intercept
+    /// (widened by the shared allocator margin by the caller, like every anchored term). Pixels
+    /// rather than latent tokens because the token lattice is a per-model fact this law does not
+    /// know, and pixels are lattice-free and aspect-symmetric — a portrait bucket is bounded by
+    /// its landscape twin; frames per axis because the temporal lattice is likewise unknown.
+    ///
+    /// A request bounding a phase the anchor measured unbounded (a tiled decode against an untiled
+    /// anchor, a deferred request against an eager one) is still priced at the unbounded measured
+    /// intercept: bounding only shrinks that phase's working set, so the measured peak remains an
+    /// upper bound — no architecture constant is substituted, because every such constant in this
+    /// module is an LTX-2.5 fact.
+    ///
+    /// `None` for a single-frame anchor (an image anchor is not a video anchor), a degenerate
+    /// geometry, a request the anchor does not dominate, or a regime it cannot price — each of
+    /// which leaves the caller on its analytic floor.
+    fn measured_point_bound_raw(
+        &self,
+        request: AnchorDeriveRequest,
+    ) -> Option<RawVideoPhaseEstimates> {
+        if self.geometry.frames <= 1
+            || request.width == 0
+            || request.height == 0
+            || request.frames == 0
+        {
+            return None;
+        }
+        let request_pixels = u64::from(request.width) * u64::from(request.height);
+        let anchor_pixels = u64::from(self.geometry.width) * u64::from(self.geometry.height);
+        if request_pixels > anchor_pixels || request.frames > self.geometry.frames {
+            return None;
+        }
+        if !self.measured_regime_prices(request) {
+            return None;
+        }
+        let phase = |bytes: u64| RawPhaseEstimate {
+            bytes: i128::from(bytes),
+            anchored: true,
+        };
+        Some(RawVideoPhaseEstimates {
+            conditioning: phase(self.phase_active_peak_bytes.conditioning),
+            denoise: phase(self.phase_active_peak_bytes.denoise),
+            decode: phase(self.phase_active_peak_bytes.decode),
         })
     }
 
@@ -2439,16 +2534,23 @@ impl MemoryAnchorStore {
     /// bytes, which is a priced crossing that happens to cost nothing and is taken normally: the
     /// distilled variant materializes no component its dev sibling lacks, and refusing that
     /// crossing would discard a derivation the evidence fully supports.
+    ///
+    /// The pipeline axes are OPTIONAL (sc-22736): a request on a route without them resolves its
+    /// axis-free anchor through [`Self::video_anchor_for`] and is priced by that anchor's
+    /// measured-point bound; the sibling+delta fall-through below is LTX-2.5's — it crosses
+    /// `(variant, decoder)` axes — so an axis-free request that has no exact anchor takes no
+    /// sibling and keeps its floor.
     pub fn derive_video_phase_peaks_for_cell(
         &self,
         model_id: &str,
         backend: AnchorBackend,
         tier: &str,
-        transformer_variant: Ltx25TransformerVariant,
-        decoder: Ltx25Decoder,
+        transformer_variant: Option<Ltx25TransformerVariant>,
+        decoder: Option<Ltx25Decoder>,
         request: AnchorDeriveRequest,
     ) -> Option<AnchorCellDerivation<'_>> {
-        if let Some(anchor) = self.anchor_for(model_id, backend, tier, transformer_variant, decoder)
+        if let Some(anchor) =
+            self.video_anchor_for(model_id, backend, tier, transformer_variant, decoder)
         {
             return Some(AnchorCellDerivation {
                 phases: anchor.derive_video_phase_peaks(request)?,
@@ -2456,6 +2558,9 @@ impl MemoryAnchorStore {
                 delta_bytes: 0,
             });
         }
+        let (Some(transformer_variant), Some(decoder)) = (transformer_variant, decoder) else {
+            return None;
+        };
         let mut candidates: Vec<(u32, &MemoryAnchor, u64)> = Vec::new();
         for anchor in self.anchors.iter().filter(|anchor| {
             anchor.model_id == model_id
@@ -5894,6 +5999,246 @@ mod tests {
     }
 
     // -------------------------------------------------------------------------------------
+    // sc-22736: axis-free VIDEO anchors (Wan 2.2, SCAIL-2, LTX-2.3) — the measured-point bound.
+    // -------------------------------------------------------------------------------------
+
+    /// A synthetic Wan 2.2 I2V candle anchor: multi-frame, no pipeline axes, one reference, and
+    /// stamped with the axis-free underived reason exactly as the extractor writes it.
+    fn axis_free_video_anchor() -> MemoryAnchor {
+        MemoryAnchor {
+            id: "wan_2_2_i2v_14b:candle:bf16:-:-:sc-22736-wan2-2-i2v-a14b-candle-dense-v1:imc-test"
+                .to_owned(),
+            model_id: "wan_2_2_i2v_14b".to_owned(),
+            model_family: "wan-video".to_owned(),
+            route: "wan2_2_i2v_14b".to_owned(),
+            provider: "wan2_2_i2v_14b".to_owned(),
+            backend: AnchorBackend::Candle,
+            tier: "bf16".to_owned(),
+            transformer_variant: None,
+            decoder: None,
+            mode: "image_to_video".to_owned(),
+            overlay: None,
+            reference_count: 1,
+            load_shape: AnchorLoadShape::EagerMaterialization,
+            measured_regime: AnchorMeasuredRegime {
+                decode_tiled: false,
+                transformer_windowed: false,
+                staged: true,
+                attention_chunked: false,
+            },
+            source: AnchorSource {
+                path: String::new(),
+                sha256: String::new(),
+                record_id: "imc-test".to_owned(),
+                calibration_fingerprint: "sc-22736-wan2-2-i2v-a14b-candle-dense-v1".to_owned(),
+                loader_closure_digest: "0".repeat(64),
+                currency_attestation: None,
+            },
+            geometry: AnchorGeometry {
+                width: 1280,
+                height: 720,
+                frames: 77,
+                fps: Some(16),
+            },
+            phase_active_peak_bytes: AnchorPhaseBytes {
+                conditioning: 30_000_000_000,
+                denoise: 62_000_000_000,
+                decode: 48_000_000_000,
+            },
+            phase_allocator_envelope_bytes: None,
+            overall_allocator_envelope_bytes: 62_000_000_000,
+            underived_reason: Some(
+                "the source record states no (transformer variant, decoder) pipeline axes and the \
+                 video law's per-token coefficients are keyed on them; this anchor validates its \
+                 measured point and prices nothing beyond it"
+                    .to_owned(),
+            ),
+            component_bytes: None,
+            staged_residency_structurally_not_applicable: false,
+        }
+    }
+
+    fn widened_measured(anchor: &MemoryAnchor) -> AnchorDerivedPhases {
+        let expect = |measured: u64| {
+            ((measured as f64) * (1.0 + ANCHOR_ALLOCATOR_ENVELOPE_MARGIN)).ceil() as u64
+        };
+        AnchorDerivedPhases {
+            conditioning: expect(anchor.phase_active_peak_bytes.conditioning),
+            denoise: expect(anchor.phase_active_peak_bytes.denoise),
+            decode: expect(anchor.phase_active_peak_bytes.decode),
+        }
+    }
+
+    /// An axis-free video anchor prices every request it dominates AT its measured point — no
+    /// per-token slope, none invented — and refuses everything beyond it. Mutations this kills:
+    /// dropping the pixel or the frame dominance check (the beyond-anchor rows derive); restoring
+    /// the axis-free `return None` (nothing derives); scaling the intercepts by any coefficient
+    /// (the equality against the widened measured peaks fails).
+    #[test]
+    fn an_axis_free_video_anchor_bounds_every_request_it_dominates_at_its_measured_point() {
+        let anchor = axis_free_video_anchor();
+        let expected = widened_measured(&anchor);
+        // At the measured point itself.
+        assert_eq!(
+            anchor.derive_video_phase_peaks(plain_request(1280, 720, 77)),
+            Some(expected)
+        );
+        // Dominated: fewer frames, fewer pixels, the portrait twin — each bounded by the same
+        // measured peaks, never scaled down (no lower clamp is a per-token law's property; this
+        // one has no slope).
+        for (width, height, frames) in [
+            (1280, 720, 45),
+            (832, 480, 77),
+            (720, 1280, 77),
+            (16, 16, 1),
+        ] {
+            assert_eq!(
+                anchor.derive_video_phase_peaks(plain_request(width, height, frames)),
+                Some(expected),
+                "{width}x{height} f{frames}"
+            );
+        }
+        // Beyond the measured point in either axis: refused, the caller keeps its floor.
+        assert_eq!(
+            anchor.derive_video_phase_peaks(plain_request(1280, 720, 81)),
+            None
+        );
+        assert_eq!(
+            anchor.derive_video_phase_peaks(plain_request(1280, 736, 77)),
+            None
+        );
+        assert_eq!(
+            anchor.derive_video_phase_peaks(plain_request(1920, 1080, 45)),
+            None
+        );
+        // Degenerate geometry is refused, as everywhere.
+        assert_eq!(
+            anchor.derive_video_phase_peaks(plain_request(0, 720, 77)),
+            None
+        );
+        // A request bounding a phase the anchor measured UNBOUNDED is still priced at the
+        // unbounded intercept: no LTX architecture constant is substituted for a Wan phase.
+        let mut tiled = plain_request(832, 480, 45);
+        tiled.decode_tiled = true;
+        assert_eq!(anchor.derive_video_phase_peaks(tiled), Some(expected));
+        // ...and the mirror is refused: a tiled anchor cannot price an untiled request.
+        let mut tiled_anchor = anchor.clone();
+        tiled_anchor.measured_regime.decode_tiled = true;
+        assert_eq!(
+            tiled_anchor.derive_video_phase_peaks(plain_request(832, 480, 45)),
+            None
+        );
+        let mut deferred_anchor = anchor.clone();
+        deferred_anchor.load_shape = AnchorLoadShape::DeferredMaterialization;
+        assert_eq!(
+            deferred_anchor.derive_video_phase_peaks(plain_request(832, 480, 45)),
+            None
+        );
+        // The axis-free underived reason is the STATEMENT of this bound, not a refusal of it:
+        // without the reason the answer is identical.
+        let mut unstated = anchor.clone();
+        unstated.underived_reason = None;
+        assert_eq!(
+            unstated.derive_video_phase_peaks(plain_request(832, 480, 45)),
+            Some(expected)
+        );
+        // An axis-free SINGLE-FRAME row is an image anchor and is not a video anchor under any
+        // spelling.
+        let mut still = anchor.clone();
+        still.geometry.frames = 1;
+        assert_eq!(
+            still.derive_video_phase_peaks(plain_request(832, 480, 1)),
+            None
+        );
+    }
+
+    /// The store resolves an axis-free video anchor for an axis-free request and for nothing
+    /// else, and the cell derivation goes through it with no sibling crossing. Mutation this kills:
+    /// dropping the `frames > 1` guard in `video_anchor_for` (the image row resolves as video), or
+    /// matching the axes as wildcards (the variant-keyed lookups resolve).
+    #[test]
+    fn the_store_resolves_an_axis_free_video_anchor_only_for_an_axis_free_request() {
+        let anchor = axis_free_video_anchor();
+        let mut image = anchor.clone();
+        image.id = "z_image_turbo:candle:q4:-:-:x:imc-image".to_owned();
+        image.model_id = "z_image_turbo".to_owned();
+        image.geometry.frames = 1;
+        let store = MemoryAnchorStore {
+            schema_version: 1,
+            anchors: vec![anchor.clone(), image],
+            analytic_only: Vec::new(),
+            component_deltas: Vec::new(),
+        };
+        assert_eq!(
+            store
+                .video_anchor_for("wan_2_2_i2v_14b", AnchorBackend::Candle, "bf16", None, None)
+                .map(|found| found.id.as_str()),
+            Some(anchor.id.as_str())
+        );
+        // Wrong lane, wrong tier, a variant-keyed request: nothing.
+        assert!(store
+            .video_anchor_for("wan_2_2_i2v_14b", AnchorBackend::Mlx, "bf16", None, None)
+            .is_none());
+        assert!(store
+            .video_anchor_for("wan_2_2_i2v_14b", AnchorBackend::Candle, "q4", None, None)
+            .is_none());
+        for variant in [
+            Ltx25TransformerVariant::Dev,
+            Ltx25TransformerVariant::Distilled,
+        ] {
+            for decoder in [Ltx25Decoder::Conv, Ltx25Decoder::DiffVae] {
+                assert!(store
+                    .video_anchor_for(
+                        "wan_2_2_i2v_14b",
+                        AnchorBackend::Candle,
+                        "bf16",
+                        Some(variant),
+                        Some(decoder)
+                    )
+                    .is_none());
+                assert!(store
+                    .anchor_for(
+                        "wan_2_2_i2v_14b",
+                        AnchorBackend::Candle,
+                        "bf16",
+                        variant,
+                        decoder
+                    )
+                    .is_none());
+            }
+        }
+        // The image row answers no video lookup even though it is axis-free.
+        assert!(store
+            .video_anchor_for("z_image_turbo", AnchorBackend::Candle, "bf16", None, None)
+            .is_none());
+        // Cell derivation: the exact anchor, delta 0, the measured-point bound.
+        let derived = store
+            .derive_video_phase_peaks_for_cell(
+                "wan_2_2_i2v_14b",
+                AnchorBackend::Candle,
+                "bf16",
+                None,
+                None,
+                plain_request(832, 480, 45),
+            )
+            .expect("the dominated request derives");
+        assert_eq!(derived.anchor.id, anchor.id);
+        assert_eq!(derived.delta_bytes, 0);
+        assert_eq!(derived.phases, widened_measured(&anchor));
+        // No sibling crossing exists for an axis-free cell: an unanchored tier keeps its floor.
+        assert!(store
+            .derive_video_phase_peaks_for_cell(
+                "wan_2_2_i2v_14b",
+                AnchorBackend::Candle,
+                "q4",
+                None,
+                None,
+                plain_request(832, 480, 45),
+            )
+            .is_none());
+    }
+
+    // -------------------------------------------------------------------------------------
     // Variant/decoder component deltas (epic 22505 E2, feature-end fix round).
     // -------------------------------------------------------------------------------------
 
@@ -5939,8 +6284,8 @@ mod tests {
                 "ltx_2_5",
                 AnchorBackend::Mlx,
                 "bf16",
-                Ltx25TransformerVariant::Dev,
-                Ltx25Decoder::DiffVae,
+                Some(Ltx25TransformerVariant::Dev),
+                Some(Ltx25Decoder::DiffVae),
                 request,
             )
             .expect("the unmeasured variant cell derives from its sibling");
@@ -6034,8 +6379,8 @@ mod tests {
                 "ltx_2_5",
                 AnchorBackend::Mlx,
                 "q8",
-                Ltx25TransformerVariant::Distilled,
-                Ltx25Decoder::DiffVae,
+                Some(Ltx25TransformerVariant::Distilled),
+                Some(Ltx25Decoder::DiffVae),
                 request,
             )
             .expect("a zero crossing still derives — a zero delta is priced, not missing");
@@ -6079,8 +6424,8 @@ mod tests {
                 "ltx_2_5",
                 AnchorBackend::Mlx,
                 "q8",
-                Ltx25TransformerVariant::Dev,
-                Ltx25Decoder::DiffVae,
+                Some(Ltx25TransformerVariant::Dev),
+                Some(Ltx25Decoder::DiffVae),
                 request,
             )
             .expect("the exact cell derives");
@@ -6104,8 +6449,8 @@ mod tests {
                 "ltx_2_5",
                 AnchorBackend::Mlx,
                 "bf16",
-                Ltx25TransformerVariant::Distilled,
-                Ltx25Decoder::DiffVae,
+                Some(Ltx25TransformerVariant::Distilled),
+                Some(Ltx25Decoder::DiffVae),
                 request,
             )
             .expect("the doctored store still derives the cell via a sibling");
@@ -6124,8 +6469,8 @@ mod tests {
                     "ltx_2_5",
                     AnchorBackend::Mlx,
                     "bf16",
-                    Ltx25TransformerVariant::Distilled,
-                    Ltx25Decoder::DiffVae,
+                    Some(Ltx25TransformerVariant::Distilled),
+                    Some(Ltx25Decoder::DiffVae),
                     request,
                 )
                 .is_none(),
@@ -6177,8 +6522,8 @@ mod tests {
                     "ltx_2_5",
                     AnchorBackend::Mlx,
                     &record.tier,
-                    record.transformer_variant,
-                    record.decoder,
+                    Some(record.transformer_variant),
+                    Some(record.decoder),
                     AnchorDeriveRequest {
                         width: record.width,
                         height: record.height,
@@ -6351,8 +6696,8 @@ mod tests {
                 "ltx_2_5",
                 AnchorBackend::Mlx,
                 &record.tier,
-                record.transformer_variant,
-                record.decoder,
+                Some(record.transformer_variant),
+                Some(record.decoder),
                 AnchorDeriveRequest {
                     width: record.width,
                     height: record.height,

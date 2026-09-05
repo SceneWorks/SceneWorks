@@ -1328,11 +1328,6 @@ fn anchor_derived_phase_peaks<'a>(
 
     let store = selector.anchors?;
     let identity = &selector.identity;
-    // The anchors were measured overlay-free with zero references; a differently-conditioned
-    // surface must not borrow them.
-    if identity.overlay.is_some() || identity.reference_count != 0 {
-        return None;
-    }
     let backend = match identity.lane {
         VideoLane::Mlx => AnchorBackend::Mlx,
         VideoLane::Candle => AnchorBackend::Candle,
@@ -1343,6 +1338,11 @@ fn anchor_derived_phase_peaks<'a>(
     // SIBLING anchor of the same (model, tier, lane) plus the bound component deltas (the
     // variant's adapter/refiner file sizes, the decoder's weight file sizes, from the shipped
     // inventory), and refuses — floor again — whenever an axis has no bound delta.
+    //
+    // The pipeline axes travel as the request states them (sc-22736): an LTX-2.5 request carries
+    // both and resolves its exact or sibling cell as before; a Wan 2.2 / SCAIL-2 / LTX-2.3 request
+    // carries neither and resolves the axis-free anchor of its `(model, tier, lane)`, which the core
+    // law prices at and below its measured point only.
     //
     // `decode_tiled` is keyed on the ENGAGED RUNG, not on `geometry.decode_pass`, because the rung
     // is what actually bounds the decoder's working set: the rung is the selected memory strategy
@@ -1355,8 +1355,8 @@ fn anchor_derived_phase_peaks<'a>(
         identity.model_id,
         backend,
         crate::mlx_fit_gate::plan_tier_key(identity.tier),
-        identity.transformer_variant?,
-        identity.decoder?,
+        identity.transformer_variant,
+        identity.decoder,
         AnchorDeriveRequest {
             width: geometry.width,
             height: geometry.height,
@@ -1370,11 +1370,18 @@ fn anchor_derived_phase_peaks<'a>(
     // The identity conjuncts are graded on the anchor the derivation actually priced from — the
     // exact anchor, or the sibling the delta path crossed to — so a sibling can no more launder a
     // foreign provider/route/currency than the exact anchor could.
+    //
+    // The conditioning surface is an identity conjunct graded against the ANCHOR'S OWN record
+    // (sc-22736), not a blanket refusal of every conditioned request: a Wan 2.2 I2V or SCAIL-2
+    // anchor is measured WITH its one reference and prices exactly that surface, while the
+    // overlay-free, zero-reference LTX anchors still refuse every other surface as before.
     let anchor = derivation.anchor;
     if anchor.model_family != identity.model_family
         || anchor.mode != identity.mode
         || anchor.route != identity.route
         || anchor.provider != selector.contract.provider_id
+        || anchor.overlay.as_deref() != identity.overlay
+        || anchor.reference_count != identity.reference_count
         || !anchor_currency_matches(anchor)
     {
         return None;
@@ -1804,7 +1811,8 @@ pub(crate) fn packaged_video_evidence_covers_request(
 }
 
 /// Whether the packaged anchor store carries the measured anchor this request's
-/// `(model, tier, lane, transformer variant, decoder)` coordinate derives from (sc-22507).
+/// `(model, tier, lane, transformer variant, decoder)` coordinate derives from (sc-22507) — the
+/// axes optional, so an axis-free video route resolves its axis-free anchor (sc-22736).
 /// Coverage is identity-only — no geometry hull — so a never-measured `(geometry, frames)` request
 /// still reaches the ladder and its anchor-derived candidate instead of bypassing the gate.
 ///
@@ -1819,30 +1827,27 @@ fn anchor_evidence_covers_request(
     let Some(anchors) = anchors else {
         return false;
     };
-    if request.overlay.is_some() || request.reference_count != 0 {
-        return false;
-    }
-    let (Some(transformer_variant), Some(decoder)) = (request.transformer_variant, request.decoder)
-    else {
-        return false;
-    };
     let backend = match request.lane {
         VideoLane::Mlx => sceneworks_core::memory_anchor::AnchorBackend::Mlx,
         VideoLane::Candle => sceneworks_core::memory_anchor::AnchorBackend::Candle,
     };
+    // Same identity conjuncts as `anchor_derived_phase_peaks`, including the conditioning surface
+    // graded against the anchor's own record (sc-22736) and the optional pipeline axes.
     anchors
-        .anchor_for(
+        .video_anchor_for(
             request.model_id,
             backend,
             crate::mlx_fit_gate::plan_tier_key(request.tier),
-            transformer_variant,
-            decoder,
+            request.transformer_variant,
+            request.decoder,
         )
         .is_some_and(|anchor| {
             anchor.model_family == request.model_family
                 && anchor.mode == request.mode
                 && anchor.route == request.route
                 && anchor.provider == contract.provider_id
+                && anchor.overlay.as_deref() == request.overlay
+                && anchor.reference_count == request.reference_count
                 && anchor_currency_matches(anchor)
         })
 }

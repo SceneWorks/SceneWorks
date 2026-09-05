@@ -20,6 +20,19 @@ use sha2::{Digest, Sha256};
 use std::path::PathBuf;
 use std::process::Command;
 
+// sc-22736: the Wan 2.2 family and SCAIL-2. Four engine providers on one arm, kept in their own
+// module for the same reason LTX-2.5's would be — a video family's carrier, rate menu and per-tier
+// identity table are a self-contained apparatus.
+#[path = "candle_wan_scail2.rs"]
+mod candle_wan_scail2;
+
+/// Engine registry ids, not catalog ids: `wan_2_2` is the SceneWorks name for the TI2V-5B route
+/// (worker `engines.rs` `video_engine_ids`), and SCAIL-2's two names coincide.
+const WAN_TI2V_5B_ID: &str = "wan2_2_ti2v_5b";
+const WAN_T2V_A14B_ID: &str = "wan2_2_t2v_14b";
+const WAN_I2V_A14B_ID: &str = "wan2_2_i2v_14b";
+const SCAIL2_ID: &str = "scail2_14b";
+
 const KREA_ID: &str = "krea_2_turbo";
 const KREA_PLAIN_EXECUTION_PATH: &str = "the Candle Krea base-only text-to-image path";
 /// The label the Krea arm refuses a non-still geometry under (sc-18808); see
@@ -4035,6 +4048,24 @@ fn loaded_contract_facts(contract: &runtime_cuda::gen_core::MemoryProviderContra
     })
 }
 
+/// The declared materialization shape, with no per-provider variant rule (sc-22736).
+///
+/// [`ltx25_planned_load_shape`] asks LTX-2.5's transformer variant first, because that family's two
+/// variants genuinely differ. Every other Candle video route declares no bounded-transformer
+/// residency, so `memory_route_registry::evaluate_declared_candle_load_shape` hands its spec
+/// straight back and the shape is simply what the plan says.
+fn planned_video_load_shape(request: &Value) -> Result<LoadShape, String> {
+    match protocol::planned(request)?
+        .get("loadShape")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "planned.loadShape must be a string".to_owned())?
+    {
+        protocol::LOAD_SHAPE_EAGER => Ok(LoadShape::EagerMaterialization),
+        protocol::LOAD_SHAPE_DEFERRED => Ok(LoadShape::DeferredMaterialization),
+        other => Err(format!("unsupported Candle video loadShape {other:?}")),
+    }
+}
+
 fn ltx25_planned_load_shape(
     request: &Value,
     transformer_variant: protocol::Ltx25TransformerVariant,
@@ -5425,6 +5456,19 @@ fn run(request: &Value) -> Result<Value, String> {
     let provider = planned_provider(request)?;
     if provider == LTX25_ID {
         return run_ltx25_capture(request);
+    }
+    // sc-22736: the Wan 2.2 family and SCAIL-2 dispatch ABOVE the shared still gate, like LTX-2.5 —
+    // they are VIDEO arms, and `validate_still_geometry` would refuse the multi-frame geometry they
+    // exist to measure. The four ids are spelled HERE, as consts, rather than asked of the module:
+    // `scripts/stale-lane-report.mjs::adapterCapturableProviders` reads this bespoke pre-gate
+    // (`if matches!(provider, …) { return …(request); }`) off the source, and a call into the
+    // module would hide them from it. `candle_wan_scail2::implements` is held to the same four by
+    // `the_pre_gate_names_exactly_the_providers_the_module_implements`.
+    if matches!(
+        provider,
+        WAN_TI2V_5B_ID | WAN_T2V_A14B_ID | WAN_I2V_A14B_ID | SCAIL2_ID
+    ) {
+        return candle_wan_scail2::run(request);
     }
     // sc-22726: PuLID-FLUX dispatches ABOVE the shared plain-overlay gate, like LTX-2.5. Its
     // declared overlay is `identity`, so routing it through `validate_plain_overlay_target` would
@@ -8011,6 +8055,24 @@ mod tests {
         assert_eq!(context.overlay.as_deref(), Some("identity"));
         assert!(!context.use_pid);
         assert!(!context.has_phases);
+    }
+
+    /// The Wan 2.2 / SCAIL-2 pre-gate in `run` spells its four ids as consts so
+    /// `scripts/stale-lane-report.mjs` can read them off the source (sc-22736); this pins the
+    /// spelled set to the set the module actually implements, in both directions.
+    #[test]
+    fn the_pre_gate_names_exactly_the_providers_the_module_implements() {
+        let spelled = [WAN_TI2V_5B_ID, WAN_T2V_A14B_ID, WAN_I2V_A14B_ID, SCAIL2_ID];
+        for provider in spelled {
+            assert!(candle_wan_scail2::implements(provider), "{provider}");
+        }
+        let mut implemented = candle_wan_scail2::providers().to_vec();
+        implemented.sort_unstable();
+        let mut spelled = spelled.to_vec();
+        spelled.sort_unstable();
+        assert_eq!(implemented, spelled);
+        assert!(!candle_wan_scail2::implements(LTX25_ID));
+        assert!(!candle_wan_scail2::implements(KREA_ID));
     }
 
     /// Every FLUX.1 cell the committed plan declares for this lane must name a provider this

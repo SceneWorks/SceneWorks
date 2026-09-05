@@ -1219,6 +1219,49 @@ test("the anchor plan schema cannot express a duplicate cell or any sweep", asyn
   assert.throws(() => validatePlan(batched), /anchor plan is invalid/);
 });
 
+// sc-22736: the three Candle SCAIL-2 rows ride sc-22734's single-composition `strategy` override —
+// the provider implements `Resident` alone, so the candle default `staged_residency` would fail
+// `contract.validate_selection` on every attempt — and `planAnchor` is what sends that override to
+// the adapter. Mutations this kills: `planAnchor` reading the lane default instead of
+// `anchor.strategy` (the SCAIL-2 candle rows plan `staged_residency` again); the plan losing the
+// override on any of the three rows. The rule for WHEN a row may override lives in
+// scripts/measure-memory-catalog.test.mjs (manifest exemption or capability-dump evidence) and
+// crates/sceneworks-worker/src/inference_runtime.rs (the contract itself, on both lanes).
+test("the candle SCAIL-2 rows plan the resident composition through the strategy override", async () => {
+  const video = { geometry: { width: 832, height: 480, batch: 1, frames: 77 }, mode: "animation" };
+  const resident = anchorPlanFixture("fixture_model:q4:candle", {
+    ...video,
+    strategy: { rung: "resident", engagedRungs: ["resident"] },
+  });
+  assert.equal(validatePlan(resident), resident);
+  assert.deepEqual(planAnchor(resident, "fixture_model:q4:candle").strategy, {
+    rung: "resident",
+    engagedRungs: ["resident"],
+    parameters: {},
+  });
+  // The lane default still applies when the row states nothing.
+  assert.deepEqual(planAnchor(anchorPlanFixture("fixture_model:q4:candle", video), "fixture_model:q4:candle").strategy, {
+    rung: ANCHOR_STRATEGY.candle.rung,
+    engagedRungs: [...ANCHOR_STRATEGY.candle.engagedRungs],
+    parameters: {},
+  });
+  // The shipped plan: every candle SCAIL-2 cell plans resident, engaged set resident alone — and so
+  // does every candle LTX-2.5 cell, whose contract likewise implements no `staged_residency`
+  // (`memory_strategy_2_5.rs` `strategies`), a defect of the same class the capability-dump rule
+  // in scripts/measure-memory-catalog.test.mjs surfaced on sc-22725's rows.
+  const plan = JSON.parse(await readFile(new URL("../config/memory-calibration-plan.json", import.meta.url)));
+  for (const key of ["bf16", "q4", "q8"].flatMap((tier) => [`scail2_14b:${tier}:candle`, `ltx_2_5:${tier}:candle`])) {
+    assert.deepEqual(plan.anchors[key].strategy, { rung: "resident", engagedRungs: ["resident"] }, key);
+    assert.deepEqual(planAnchor(plan, key).strategy, { rung: "resident", engagedRungs: ["resident"], parameters: {} }, key);
+  }
+  // …and no other candle row overrides on contract grounds today: SenseNova's six ride the manifest exemption.
+  const residentCandle = Object.keys(plan.anchors).filter((key) => key.endsWith(":candle") && plan.anchors[key].strategy?.rung === "resident").sort();
+  assert.deepEqual(residentCandle.filter((key) => !key.startsWith("sensenova_u1_8b")), [
+    "ltx_2_5:bf16:candle", "ltx_2_5:q4:candle", "ltx_2_5:q8:candle",
+    "scail2_14b:bf16:candle", "scail2_14b:q4:candle", "scail2_14b:q8:candle",
+  ]);
+});
+
 // sc-22514 / epic acceptance test 1, second half: ONE command captures ONE anchor and writes ONE
 // record, with no campaign, resume or currency ceremony — and the record it writes is one the
 // anchor extractor can consume.

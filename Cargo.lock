@@ -6754,13 +6754,17 @@ name = "sceneworks-memory-adapter"
 version = "0.8.7"
 dependencies = [
  "candle-gen",
+ "candle-gen-scail2",
+ "candle-gen-wan",
  "mlx-gen",
  "mlx-gen-flux2",
  "mlx-gen-instantid",
  "mlx-gen-krea",
  "mlx-gen-ltx",
  "mlx-gen-minimax-h3",
+ "mlx-gen-scail2",
  "mlx-gen-sdxl",
+ "mlx-gen-wan",
  "pmetal-mlx-rs",
  "runtime-cuda",
  "runtime-macos",
