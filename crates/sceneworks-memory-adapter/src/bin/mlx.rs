@@ -8725,13 +8725,29 @@ fn run_qwen_edit_provider(request: &Value) -> Result<Value, String> {
 // Mage-Flow (sc-22733) — six registered engine providers on ONE arm
 // ---------------------------------------------------------------------------------------------
 
-/// Every Mage capture renders at 768². `mlx-gen-mage`'s `config::MIN_SIZE` is 512 and both sides
+/// The square edge every checked-in `mage_flow*:*:mlx` plan row declares, restated here so the
+/// tests can drive the arm at the geometry the campaign will.
+///
+/// It is NOT a production input: [`run_mage_provider`] takes width and height from the plan row
+/// (`protocol::target_geometry`) and never from a constant, so an anchor re-planned at another
+/// legal edge is measured at that edge rather than silently relabelled.
+///
+/// 768 is what the plan declares because `mlx-gen-mage`'s `config::MIN_SIZE` is 512 and both sides
 /// must be multiples of `SIZE_MULTIPLE` (16), so 768 is a legal native resolution — and it is the
 /// edge the family's retired SC-15509 identity was measured at (`model.rs`
 /// `production_calibration_fingerprint` doc: "At 768²/one step, …"), kept so the per-tier cells
 /// this arm measures are comparable with that record.
+/// `every_planned_mage_mlx_row_names_the_production_identity_and_is_checked_before_the_load` binds
+/// this constant to all 18 plan rows, so the claim cannot go stale in prose.
+#[cfg(test)]
 const MAGE_EDGE: u32 = 768;
-/// One fixed seed for every `mlx:mage_flow*` fixture (`<prefix>-<tier>-768-seed22733-step<n>`).
+/// The seed every checked-in `mage_flow*:*:mlx` plan row spells into its fixture
+/// (`<prefix>-<tier>-768-seed22733-step<n>`), bound to those rows by the same test.
+///
+/// Also not a production input: [`planned_mage_seed`] PARSES the seed out of the plan's own
+/// fixture name — the fixture is the single source — and only checks that the fixture's prefix
+/// names this member, this tier and the rendered edge, and that its step count is the arm's recipe.
+#[cfg(test)]
 const MAGE_SEED: u64 = 22733;
 /// Mage's quality claim is the same KIND as FLUX.2-dev's: the resident anchor selects no alternate
 /// code path, so the selected render and the unselected reference are the same computation on one
@@ -9815,6 +9831,10 @@ mod mage_tests {
     /// names a weights-free conformance string or the retired single string, every row binds the
     /// deferred shape the worker loads, and the pre-load check refuses a row that names anything
     /// else — before any env or weights are touched.
+    ///
+    /// It also binds [`MAGE_EDGE`] and [`MAGE_SEED`] to those rows: the arm reads geometry and seed
+    /// from the PLAN, so the two constants are only true of the campaign while every checked-in row
+    /// declares them, and `planned_mage_seed` must accept each row as written.
     #[test]
     fn every_planned_mage_mlx_row_names_the_production_identity_and_is_checked_before_the_load() {
         let plan: Value = serde_json::from_str(include_str!(
@@ -9844,6 +9864,39 @@ mod mage_tests {
                     row["loadShape"].as_str(),
                     Some(protocol::LOAD_SHAPE_DEFERRED),
                     "{key}: the worker loads Mage deferred on MLX"
+                );
+                assert_eq!(
+                    row["geometry"]["width"].as_u64(),
+                    Some(u64::from(MAGE_EDGE)),
+                    "{key}: every Mage anchor is planned at MAGE_EDGE²"
+                );
+                assert_eq!(
+                    row["geometry"]["height"].as_u64(),
+                    Some(u64::from(MAGE_EDGE)),
+                    "{key}: every Mage anchor is planned at MAGE_EDGE²"
+                );
+                assert_eq!(
+                    row["fixture"].as_str(),
+                    Some(
+                        format!(
+                            "{}-{tier}-{MAGE_EDGE}-seed{MAGE_SEED}-step{}",
+                            arm.fixture_prefix, arm.steps
+                        )
+                        .as_str()
+                    ),
+                    "{key}: the row's fixture must be the member/tier/edge/seed/step spelling"
+                );
+                // …and `planned_mage_seed` must accept the row exactly as it is written, so the
+                // spelling asserted above is the one the arm parses rather than a parallel claim.
+                let planned_row = json!({ "planned": {
+                    "target": { "provider": arm.provider, "modelId": arm.provider, "tier": tier,
+                                "geometry": row["geometry"].clone() },
+                    "fixture": row["fixture"].clone(),
+                }});
+                assert_eq!(
+                    planned_mage_seed(&planned_row, arm, tier).unwrap(),
+                    MAGE_SEED,
+                    "{key}"
                 );
                 seen.insert(key.clone());
                 let request = json!({ "planned": {
