@@ -2896,6 +2896,1002 @@ fn run_ltx25_capture(request: &Value) -> Result<Value, String> {
     Ok(fragment)
 }
 
+// ---------------------------------------------------------------------------------------------
+// sc-22737 — the Bernini, LTX-2.3 and MiniMax-H3 Candle arms
+//
+// Three families, one shared capture. Each is a VIDEO route, so each dispatches ABOVE the shared
+// still-geometry gate the way `run_ltx25_capture` does, and each validates against its own engine's
+// geometry envelope instead. What differs between them is exactly two things — how the load spec is
+// STAGED, and what the target's geometry envelope admits — so those are the two function-pointer
+// fields of [`Sc22737VideoArm`], and everything else is shared.
+//
+// Deliberately its own table and its own capture rather than a generalisation of
+// `run_ltx25_capture`: sc-22736 is adding the Wan/SCAIL-2 arms against the same precedent at the
+// same time, and refactoring the shared dispatch would turn two additive changes into one conflict.
+// ---------------------------------------------------------------------------------------------
+
+/// The Bernini engine provider id — ONE id for BOTH SceneWorks catalog entries. `engines.rs` maps
+/// the still entry `bernini_image` onto it and `video_jobs/bernini.rs` calls
+/// `inference_runtime::load("bernini")` for the video entry, so the engine's `renderer` identity
+/// route (`bernini_renderer`) is never reached from this repository on either lane.
+const BERNINI_CANDLE_ID: &str = "bernini";
+const BERNINI_CANDLE_VIDEO_MODEL_ID: &str = "bernini";
+const BERNINI_CANDLE_IMAGE_MODEL_ID: &str = "bernini_image";
+const BERNINI_CANDLE_VIDEO_EXECUTION_PATH: &str =
+    "the Candle Bernini dual-expert text-to-video path";
+const BERNINI_CANDLE_IMAGE_EXECUTION_PATH: &str = "the Candle Bernini still text-to-image path";
+const BERNINI_CANDLE_STILL_CALIBRATION: &str = "Candle Bernini still calibration";
+/// The single cadence the shipped `bernini` manifest entry publishes (`limits.fps: [16]`).
+const BERNINI_CANDLE_FPS: u32 = 16;
+/// 3 s at [`BERNINI_CANDLE_FPS`], coerced onto the Wan `1 mod 4` lattice the A14B renderer requires.
+/// The manifest's shortest published duration, because this is the cell's ONE capture.
+const BERNINI_CANDLE_FRAMES: u32 = 49;
+/// One seed for every sc-22737 Candle fixture. The fixture binds the family, member, tier and full
+/// geometry, so the seed does not also have to carry the route.
+const SC22737_CANDLE_SEED: u64 = 22737;
+
+/// The LTX-2.3 Candle engine id. DIFFERENT from the MLX one (`ltx_2_3`), the same way LTX-2.5's two
+/// lanes differ: `candle-gen-ltx` registers the 2.3 route as `ltx_2_3_distilled`, which is what
+/// `video_jobs/candle.rs#candle_video_engine_id` resolves and therefore what a candle plan row's
+/// `provider` must name.
+const LTX23_CANDLE_ID: &str = "ltx_2_3_distilled";
+const LTX23_CANDLE_MODEL_ID: &str = "ltx_2_3";
+const LTX23_CANDLE_EXECUTION_PATH: &str = "the Candle LTX-2.3 base text-to-video path";
+/// `limits.requiresDimensionsMultipleOf` of the shipped `ltx_2_3` entry, mirroring the engine's
+/// `SIZE_MULTIPLE = 2 * SPATIAL_SCALE`.
+const LTX23_CANDLE_DIMENSION_MULTIPLE: u32 = 64;
+/// `limits.resolutions` of the shipped `ltx_2_3` entry, verbatim.
+const LTX23_CANDLE_RESOLUTIONS: [(u32, u32); 5] =
+    [(768, 512), (512, 768), (640, 640), (1280, 704), (704, 1280)];
+/// `limits.fps` of the shipped `ltx_2_3` entry, verbatim.
+const LTX23_CANDLE_FPS: [u32; 3] = [24, 25, 30];
+/// The LTX video VAE is 8x causal in time, so the engine's `validate_request` hard-rejects any
+/// `num_frames` that is not `1 + 8k`.
+const LTX23_CANDLE_TEMPORAL_SCALE: u32 = 8;
+/// The frame count this lane's anchor renders: 4 s at 24 fps snapped onto the `1 + 8k` lattice by
+/// the shipped ladder (`sceneworks_core::video_request::ltx_frame_count`), i.e. the SHORTEST cell of
+/// the declared `durations x fps` cross product. The four constants above and this one are copies of
+/// the manifest's `limits` block, bound to it by `the sc-22737 Candle video arms' manifest constants
+/// match their shipped limits` in `scripts/platform-review-contracts.test.mjs` — this crate carries
+/// two dependencies on purpose and cannot reach a JSONC reader at test time, so the binding lives on
+/// the node side exactly as the MLX LTX arm's does.
+const LTX23_CANDLE_FRAMES: u32 = 97;
+
+/// The MiniMax-H3 Candle engine id — one id for both catalog entries, the same way MLX has one.
+const MINIMAX_CANDLE_ID: &str = "minimax_h3";
+const MINIMAX_CANDLE_BASE_MODEL_ID: &str = "minimax_h3";
+const MINIMAX_CANDLE_REFERENCE_MODEL_ID: &str = "minimax_h3_ref";
+const MINIMAX_CANDLE_BASE_EXECUTION_PATH: &str =
+    "the Candle MiniMax-H3 joint audio+video text-to-video path";
+const MINIMAX_CANDLE_REFERENCE_EXECUTION_PATH: &str =
+    "the Candle MiniMax-H3 joint audio+video reference-to-video path";
+/// The released checkpoint generates at 24 fps and nothing else.
+const MINIMAX_CANDLE_FPS: u32 = 24;
+/// The shortest cell of the `17n + 5` lattice the released checkpoint admits.
+const MINIMAX_CANDLE_FRAMES: u32 = 124;
+/// The manifest's `limits.hardMinSteps` for both MiniMax entries.
+const MINIMAX_CANDLE_STEPS: u32 = 2;
+
+/// Everything one sc-22737 Candle capture STAGED, in the shape the record needs it.
+struct Sc22737LoadPlan {
+    /// The `artifact` block of the emitted fragment — a family may name more than one triple.
+    artifact: Value,
+    /// The `loadability.resolvedPathFingerprint` stem. Two records that opened different trees must
+    /// be distinguishable from this string alone.
+    resolved_path_fingerprint: String,
+    spec: LoadSpec,
+}
+
+/// One `(catalog entry, engine provider)` cell this block measures.
+#[derive(Clone, Copy)]
+struct Sc22737VideoArm {
+    /// The id handed to `catalog.media().load`.
+    engine_id: &'static str,
+    /// The SceneWorks catalog entry the record is filed under.
+    model_id: &'static str,
+    execution_path: &'static str,
+    /// `<fixture_prefix>-<tier>-<w>x<h>-f<frames>-fps<fps>-seed<seed>`.
+    fixture_prefix: &'static str,
+    /// The `MemoryMode` key the runtime asks admission under. An EVIDENCE KEY, not a label:
+    /// gen-core matches it against each adopted decode-geometry record's own mode, so a probe run
+    /// under one spelling cannot answer a request asked under another.
+    mode: &'static str,
+    /// How many references the measured request carries. Non-zero selects a different conditioning
+    /// — and, for MiniMax-H3, a different DiT partition.
+    reference_count: u32,
+    /// The cadences the family's manifest entry publishes. One value for the families whose engine
+    /// admits exactly one.
+    legal_fps: &'static [u32],
+    /// The clip this arm renders. Fixed per family so the measured render and the record describe
+    /// the same work.
+    frames: u32,
+    /// Whether the family denoises a soundtrack jointly with the video. A joint A/V record that did
+    /// not observe an audio track is not a record of the render it claims.
+    requires_audio: bool,
+    prompt: &'static str,
+    /// The label the emitted `diagnostics.source` carries.
+    diagnostics_lane: &'static str,
+    /// The family's geometry envelope, read off the pinned engine crate.
+    validate_geometry: fn(u32, u32, u32) -> Result<(), String>,
+    /// How the family stages its load. The one thing that genuinely differs between the three.
+    load_plan: fn(&Value, &Sc22737VideoTarget) -> Result<Sc22737LoadPlan, String>,
+}
+
+/// The exact cell a plan row asks for, after the target and the fixture have been reconciled.
+struct Sc22737VideoTarget {
+    tier: String,
+    width: u32,
+    height: u32,
+    frames: u32,
+    fps: u32,
+    seed: u64,
+}
+
+const BERNINI_CANDLE_VIDEO_ARM: Sc22737VideoArm = Sc22737VideoArm {
+    engine_id: BERNINI_CANDLE_ID,
+    model_id: BERNINI_CANDLE_VIDEO_MODEL_ID,
+    execution_path: BERNINI_CANDLE_VIDEO_EXECUTION_PATH,
+    fixture_prefix: "bernini-video-candle",
+    mode: "text_to_video",
+    reference_count: 0,
+    legal_fps: &[BERNINI_CANDLE_FPS],
+    frames: BERNINI_CANDLE_FRAMES,
+    requires_audio: false,
+    prompt: "a slow crane over a terracotta rooftop at golden hour, swallows turning, cinematic",
+    diagnostics_lane: "memory-candle-adapter:bernini-dual-expert",
+    validate_geometry: validate_bernini_candle_geometry,
+    load_plan: bernini_candle_load_plan,
+};
+
+const LTX23_CANDLE_ARM: Sc22737VideoArm = Sc22737VideoArm {
+    engine_id: LTX23_CANDLE_ID,
+    model_id: LTX23_CANDLE_MODEL_ID,
+    execution_path: LTX23_CANDLE_EXECUTION_PATH,
+    fixture_prefix: "ltx-2-3-candle",
+    mode: "text_to_video",
+    reference_count: 0,
+    legal_fps: &LTX23_CANDLE_FPS,
+    frames: LTX23_CANDLE_FRAMES,
+    requires_audio: false,
+    prompt: "a slow dolly through a sunlit pine forest, drifting motes of pollen, cinematic",
+    diagnostics_lane: "memory-candle-adapter:ltx-2.3",
+    validate_geometry: validate_ltx23_candle_geometry,
+    load_plan: ltx23_candle_load_plan,
+};
+
+const MINIMAX_CANDLE_BASE_ARM: Sc22737VideoArm = Sc22737VideoArm {
+    engine_id: MINIMAX_CANDLE_ID,
+    model_id: MINIMAX_CANDLE_BASE_MODEL_ID,
+    execution_path: MINIMAX_CANDLE_BASE_EXECUTION_PATH,
+    fixture_prefix: "minimax-h3-candle",
+    mode: "text_to_video",
+    reference_count: 0,
+    legal_fps: &[MINIMAX_CANDLE_FPS],
+    frames: MINIMAX_CANDLE_FRAMES,
+    requires_audio: true,
+    prompt: "a slow dolly along a rain-slick harbour wall at dusk, gulls calling, cinematic",
+    diagnostics_lane: "memory-candle-adapter:minimax-h3-joint-av",
+    validate_geometry: validate_minimax_candle_geometry,
+    load_plan: minimax_candle_load_plan,
+};
+
+/// The reference partition. ONE image reference — the smallest set the shared verdict
+/// (`sceneworks_core::video_request::classify_reference_set`) calls `Conditionable`: an empty set
+/// would resolve t2va on the BASE checkpoint, which is not the one this entry loads, and an
+/// audio-only set never reaches the reference conditioner and is refused by the worker, the API and
+/// the MCP tool alike.
+const MINIMAX_CANDLE_REFERENCE_ARM: Sc22737VideoArm = Sc22737VideoArm {
+    engine_id: MINIMAX_CANDLE_ID,
+    model_id: MINIMAX_CANDLE_REFERENCE_MODEL_ID,
+    execution_path: MINIMAX_CANDLE_REFERENCE_EXECUTION_PATH,
+    fixture_prefix: "minimax-h3-ref-candle",
+    mode: "reference_to_video",
+    reference_count: 1,
+    legal_fps: &[MINIMAX_CANDLE_FPS],
+    frames: MINIMAX_CANDLE_FRAMES,
+    requires_audio: true,
+    prompt: "a slow dolly along a rain-slick harbour wall at dusk, gulls calling, cinematic",
+    diagnostics_lane: "memory-candle-adapter:minimax-h3-joint-av",
+    validate_geometry: validate_minimax_candle_geometry,
+    load_plan: minimax_candle_load_plan,
+};
+
+/// Every cell this block serves, in one place so the tables and the tests cannot disagree.
+const SC22737_VIDEO_ARMS: [Sc22737VideoArm; 4] = [
+    BERNINI_CANDLE_VIDEO_ARM,
+    LTX23_CANDLE_ARM,
+    MINIMAX_CANDLE_BASE_ARM,
+    MINIMAX_CANDLE_REFERENCE_ARM,
+];
+
+/// Which cell the plan asks for, resolved from `(target.provider, target.modelId)`.
+///
+/// `None` — not an error — when the plan names a provider this block does not serve, so the caller
+/// falls through to the arms below it. A provider this block DOES serve with an unknown model id is
+/// an error: one engine id per family serves several catalog entries whose records are filed
+/// separately, and nothing else distinguishes them.
+fn sc22737_video_arm(request: &Value) -> Result<Option<Sc22737VideoArm>, String> {
+    let provider = planned_provider(request)?;
+    if !SC22737_VIDEO_ARMS
+        .iter()
+        .any(|arm| arm.engine_id == provider)
+    {
+        return Ok(None);
+    }
+    let model_id = protocol::planned(request)?
+        .pointer("/target/modelId")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "planned.target.modelId must be a string".to_owned())?;
+    // The still Bernini entry rides the shared five-rung reference arm below, not this one: it is an
+    // image route with an image geometry, and `run_five_rung_reference` already implements exactly
+    // that shape. Reported as "no video arm" so the caller falls through rather than erroring.
+    if provider == BERNINI_CANDLE_ID && model_id == BERNINI_CANDLE_IMAGE_MODEL_ID {
+        return Ok(None);
+    }
+    SC22737_VIDEO_ARMS
+        .iter()
+        .copied()
+        .find(|arm| arm.engine_id == provider && arm.model_id == model_id)
+        .map(Some)
+        .ok_or_else(|| {
+            format!(
+                "the Candle {provider} arm serves catalog entries {:?}, got modelId {model_id:?}",
+                SC22737_VIDEO_ARMS
+                    .iter()
+                    .filter(|arm| arm.engine_id == provider)
+                    .map(|arm| arm.model_id)
+                    .collect::<Vec<_>>()
+            )
+        })
+}
+
+/// Bernini's own geometry envelope: the engine's `validate_geometry`, which is an exact membership
+/// test against `ADVERTISED_GEOMETRIES` and is PROVIDER-WIDE — `candle-gen-bernini` applies it to
+/// the still route and the video route alike. Read off the crate rather than transcribed.
+fn validate_bernini_candle_geometry(width: u32, height: u32, frames: u32) -> Result<(), String> {
+    let advertised = runtime_cuda::providers::bernini::memory_strategy::ADVERTISED_GEOMETRIES;
+    if !advertised.contains(&(width, height)) {
+        return Err(format!(
+            "Candle Bernini memory evidence requires one of the advertised geometries \
+             {advertised:?}, got {width}x{height}"
+        ));
+    }
+    // The renderer is Wan2.2-A14B, whose frame count is `1 mod 4` (`video_jobs/wan.rs`'s
+    // `wan_frame_count`, which the Bernini video path calls for exactly that reason).
+    if frames % 4 != 1 || frames < 5 {
+        return Err(format!(
+            "Candle Bernini requires geometry.frames on the Wan 1 mod 4 lattice (>= 5), got {frames}"
+        ));
+    }
+    Ok(())
+}
+
+/// LTX-2.3's own geometry envelope, the same three constraints the MLX arm applies: the declared
+/// `limits.resolutions`, `limits.requiresDimensionsMultipleOf`, and the `1 + 8k` temporal lattice
+/// the engine's `validate_request` hard-rejects outside of. A still geometry is on the lattice but
+/// below the floor, so it is refused here too — this arm may not capture a single-frame record for
+/// a video model.
+fn validate_ltx23_candle_geometry(width: u32, height: u32, frames: u32) -> Result<(), String> {
+    if !LTX23_CANDLE_RESOLUTIONS.contains(&(width, height)) {
+        return Err(format!(
+            "Candle LTX-2.3 calibration requires one of the declared limits.resolutions \
+             {LTX23_CANDLE_RESOLUTIONS:?}, got {width}x{height}"
+        ));
+    }
+    if !width.is_multiple_of(LTX23_CANDLE_DIMENSION_MULTIPLE)
+        || !height.is_multiple_of(LTX23_CANDLE_DIMENSION_MULTIPLE)
+    {
+        return Err(format!(
+            "Candle LTX-2.3 calibration requires geometry divisible by \
+             {LTX23_CANDLE_DIMENSION_MULTIPLE}, got {width}x{height}"
+        ));
+    }
+    if frames % LTX23_CANDLE_TEMPORAL_SCALE != 1 || frames < 9 {
+        return Err(format!(
+            "Candle LTX-2.3 calibration requires geometry.frames == 1 + \
+             {LTX23_CANDLE_TEMPORAL_SCALE}k (>= 9; the LTX video VAE is \
+             {LTX23_CANDLE_TEMPORAL_SCALE}x causal in time), got {frames}"
+        ));
+    }
+    Ok(())
+}
+
+/// MiniMax-H3's own geometry envelope, read off the pinned Candle crate: the `17n + 5` temporal
+/// lattice, the spatial stride, and the canvas budget as a PRODUCT rather than per edge — the
+/// published resolution list contains 1536x672 and 1344x768, whose long edges differ by 192 px and
+/// whose areas are identical, so a per-edge cap would refuse the first and admit the second while
+/// both sit exactly at the budget.
+fn validate_minimax_candle_geometry(width: u32, height: u32, frames: u32) -> Result<(), String> {
+    let lattice = runtime_cuda::providers::minimax_h3::denoise::geometry::LEGAL_FRAME_COUNTS;
+    let frames_usize =
+        usize::try_from(frames).map_err(|_| "MiniMax-H3 frame count must fit usize".to_owned())?;
+    if !lattice.contains(&frames_usize) {
+        return Err(format!(
+            "Candle MiniMax-H3 requires geometry.frames on the 17n+5 lattice {lattice:?}, got \
+             {frames}"
+        ));
+    }
+    let stride = runtime_cuda::providers::minimax_h3::pipeline::SPATIAL_STRIDE;
+    if !width.is_multiple_of(stride) || !height.is_multiple_of(stride) {
+        return Err(format!(
+            "Candle MiniMax-H3 requires geometry divisible by the {stride}px stride, got \
+             {width}x{height}"
+        ));
+    }
+    let budget = runtime_cuda::providers::minimax_h3::pipeline::CANVAS_MAX_PIXELS;
+    let pixels = width.saturating_mul(height);
+    if pixels > budget {
+        return Err(format!(
+            "Candle MiniMax-H3 requires width*height within the {budget}px canvas budget, got \
+             {width}x{height} ({pixels}px)"
+        ));
+    }
+    Ok(())
+}
+
+/// Bernini's Candle staging: ONE tier directory inside the off-Mac bundle.
+///
+/// `SceneWorks/bernini` is the only download either Bernini entry ships for
+/// `platforms: ["windows", "linux"]`, and it carries the three tier sub-directories INSIDE it —
+/// which is why `memory_route_registry.rs` declares `BF16_Q4_Q8` for `candle:bernini` while the
+/// download row names no `variant` at all. `quantize` stays unset: the tiers ship pre-packed, so the
+/// worker's own resolver returns no load-time quant for a resolved tier, and `production_assets`
+/// reconciles the packing against the transformer's own `quantize_config.json` before the identity
+/// is minted.
+fn bernini_candle_load_plan(
+    _request: &Value,
+    target: &Sc22737VideoTarget,
+) -> Result<Sc22737LoadPlan, String> {
+    let repository = protocol::required_env("SCENEWORKS_BERNINI_CANDLE_REPOSITORY")?;
+    let revision = protocol::required_env("SCENEWORKS_BERNINI_CANDLE_REVISION")?;
+    protocol::validate_artifact_identity(
+        &repository,
+        &revision,
+        protocol::BERNINI_CANDLE_REPOSITORY,
+    )?;
+    let root = std::fs::canonicalize(PathBuf::from(protocol::required_env(
+        "SCENEWORKS_BERNINI_CANDLE_ROOT",
+    )?))
+    .map_err(|error| format!("canonicalize SCENEWORKS_BERNINI_CANDLE_ROOT: {error}"))?;
+    protocol::validate_huggingface_snapshot_root(
+        &root,
+        &repository,
+        &revision,
+        &target.tier,
+        protocol::BERNINI_CANDLE_REPOSITORY,
+    )?;
+    Ok(Sc22737LoadPlan {
+        artifact: artifact(&repository, &revision, &target.tier),
+        resolved_path_fingerprint: loadability_fingerprint(&repository, &revision, &target.tier),
+        spec: LoadSpec::new(WeightsSource::Dir(root))
+            .with_offload_policy(OffloadPolicy::Sequential)
+            .with_load_shape(LoadShape::DeferredMaterialization)
+            .with_resolved_route(BERNINI_CANDLE_VIDEO_MODEL_ID.to_owned()),
+    })
+}
+
+/// LTX-2.3's Candle staging: the packed tier sub-directory plus the separate Gemma-3-12B encoder.
+///
+/// TWO roots under ONE repository, exactly as the MLX arm resolves them. The encoder is a hard
+/// load-time requirement — `video_jobs/candle.rs` resolves `ltx_gemma_dir` for every non-2.5 LTX
+/// load and the provider surfaces a required-`text_encoder` error without it — so it is threaded
+/// through `LoadSpec::text_encoder` and snapshot-validated with the same identity check as the tier
+/// root: a mismatched TE would silently change the measured conditioning peak.
+///
+/// `quantize` stays unset because the worker's own resolver leaves it unset:
+/// `candle_ltx_tier_subdir` returns `(dir, None)` for LTX-2.3 ("LTX-2.3 keeps its legacy `None`
+/// marker"), and the tier is carried by the directory the load opens.
+fn ltx23_candle_load_plan(
+    _request: &Value,
+    target: &Sc22737VideoTarget,
+) -> Result<Sc22737LoadPlan, String> {
+    let repository = protocol::required_env("SCENEWORKS_LTX_REPOSITORY")?;
+    let revision = protocol::required_env("SCENEWORKS_LTX_REVISION")?;
+    protocol::validate_artifact_identity(&repository, &revision, protocol::LTX_REPOSITORY)?;
+    let root = std::fs::canonicalize(PathBuf::from(protocol::required_env(
+        "SCENEWORKS_LTX_ROOT",
+    )?))
+    .map_err(|error| format!("canonicalize SCENEWORKS_LTX_ROOT: {error}"))?;
+    protocol::validate_huggingface_snapshot_root(
+        &root,
+        &repository,
+        &revision,
+        &target.tier,
+        protocol::LTX_REPOSITORY,
+    )?;
+    let text_encoder = std::fs::canonicalize(PathBuf::from(protocol::required_env(
+        "SCENEWORKS_LTX_TEXT_ENCODER_ROOT",
+    )?))
+    .map_err(|error| format!("canonicalize SCENEWORKS_LTX_TEXT_ENCODER_ROOT: {error}"))?;
+    protocol::validate_huggingface_snapshot_root(
+        &text_encoder,
+        &repository,
+        &revision,
+        "gemma",
+        protocol::LTX_REPOSITORY,
+    )?;
+    let mut spec = LoadSpec::new(WeightsSource::Dir(root))
+        .with_offload_policy(OffloadPolicy::Sequential)
+        .with_load_shape(LoadShape::DeferredMaterialization);
+    spec.text_encoder = Some(WeightsSource::Dir(text_encoder));
+    Ok(Sc22737LoadPlan {
+        artifact: artifact(&repository, &revision, &target.tier),
+        resolved_path_fingerprint: format!(
+            "{}:gemma",
+            loadability_fingerprint(&repository, &revision, &target.tier)
+        ),
+        spec,
+    })
+}
+
+/// MiniMax-H3's Candle staging: the UPSTREAM snapshot root, with the packed components redirected
+/// onto the tiered rehost.
+///
+/// The direction is the opposite of what the repository names suggest, and it is the worker's:
+/// `resolve_candle_minimax_h3_load` makes `MiniMaxAI/MiniMax-H3` the load ROOT on every tier — it is
+/// the only tree carrying `vae/`, `audio_vae/`, `tokenizer/` and the `FL2VA/` documents — and stages
+/// `transformer/` and `text_encoder/` out of `SceneWorks/minimax-h3-mlx/<tier>` when the tier is
+/// packed. `bf16` on the BASE entry stages neither, because the dense partitions live in the
+/// upstream root already; `minimax_h3_ref` stages the tier tree at every tier, because the reference
+/// partition is only published in the rehost.
+///
+/// The `transformer` component is ALWAYS the base partition, even for the reference entry: the
+/// provider derives `transformer_ref/` as its sibling, so the worker validates both halves and
+/// stages only the base. This arm does the same, and its `resolved_path_fingerprint` names the
+/// partition the CONDITIONING will select so two records over one triple stay distinguishable.
+fn minimax_candle_load_plan(
+    request: &Value,
+    target: &Sc22737VideoTarget,
+) -> Result<Sc22737LoadPlan, String> {
+    let arm = sc22737_video_arm(request)?
+        .ok_or_else(|| "the MiniMax-H3 Candle plan resolved no member".to_owned())?;
+    let upstream_repository = protocol::required_env("SCENEWORKS_MINIMAX_H3_UPSTREAM_REPOSITORY")?;
+    let upstream_revision = protocol::required_env("SCENEWORKS_MINIMAX_H3_UPSTREAM_REVISION")?;
+    protocol::validate_artifact_identity(
+        &upstream_repository,
+        &upstream_revision,
+        protocol::MINIMAX_UPSTREAM_REPOSITORY,
+    )?;
+    let upstream_root = std::fs::canonicalize(PathBuf::from(protocol::required_env(
+        "SCENEWORKS_MINIMAX_H3_UPSTREAM_ROOT",
+    )?))
+    .map_err(|error| format!("canonicalize SCENEWORKS_MINIMAX_H3_UPSTREAM_ROOT: {error}"))?;
+    protocol::validate_huggingface_revision_root(
+        &upstream_root,
+        &upstream_repository,
+        &upstream_revision,
+        protocol::MINIMAX_UPSTREAM_REPOSITORY,
+    )?;
+
+    let mut spec = LoadSpec::new(WeightsSource::Dir(upstream_root))
+        .with_offload_policy(OffloadPolicy::Sequential)
+        .with_load_shape(LoadShape::DeferredMaterialization);
+    let quant = numeric_tier(&target.tier)?.quant;
+    let is_reference = arm.model_id == MINIMAX_CANDLE_REFERENCE_MODEL_ID;
+    let staged = if quant.is_some() || is_reference {
+        let repository = protocol::required_env("SCENEWORKS_MINIMAX_H3_REPOSITORY")?;
+        let revision = protocol::required_env("SCENEWORKS_MINIMAX_H3_REVISION")?;
+        protocol::validate_artifact_identity(&repository, &revision, protocol::MINIMAX_REPOSITORY)?;
+        let tier_root = std::fs::canonicalize(PathBuf::from(protocol::required_env(
+            "SCENEWORKS_MINIMAX_H3_ROOT",
+        )?))
+        .map_err(|error| format!("canonicalize SCENEWORKS_MINIMAX_H3_ROOT: {error}"))?;
+        protocol::validate_huggingface_snapshot_root(
+            &tier_root,
+            &repository,
+            &revision,
+            &target.tier,
+            protocol::MINIMAX_REPOSITORY,
+        )?;
+        spec = spec.with_component(
+            "transformer",
+            WeightsSource::Dir(tier_root.join("transformer")),
+        );
+        // The packed text encoder ships beside the packed DiT; the dense one lives upstream and the
+        // loader resolves it from the spec's own weights root, so it is not redirected.
+        if quant.is_some() {
+            spec = spec.with_component(
+                "text_encoder",
+                WeightsSource::Dir(tier_root.join("text_encoder")),
+            );
+        }
+        Some((repository, revision))
+    } else {
+        None
+    };
+    if let Some(quant) = quant {
+        // Never a load-time pack: the loader RECONCILES `spec.quantize` against the staged tier's
+        // own marker and refuses a disagreement, so passing it is an assertion about the directory
+        // on disk rather than an instruction.
+        spec = spec.with_quant(quant);
+    }
+    let partition = if is_reference {
+        "transformer_ref"
+    } else {
+        "transformer"
+    };
+    let tier_artifact = staged
+        .as_ref()
+        .map(|(repository, revision)| artifact(repository, revision, &target.tier));
+    Ok(Sc22737LoadPlan {
+        artifact: json!({
+            "repository": upstream_repository,
+            "resolvedRevision": upstream_revision,
+            "variant": target.tier,
+            "stagedTierArtifact": tier_artifact,
+        }),
+        resolved_path_fingerprint: format!(
+            "{upstream_repository}@{upstream_revision}:{}+partition:{partition}+staged:{}",
+            target.tier,
+            staged
+                .as_ref()
+                .map(|(repository, revision)| format!("{repository}@{revision}/{}", target.tier))
+                .unwrap_or_else(|| "upstream-dense".to_owned()),
+        ),
+        spec,
+    })
+}
+
+/// Reconcile the plan's target with its fixture into the exact cell this capture renders.
+///
+/// The fixture carries the cadence and the seed, which `planned.target.geometry` has no axis for
+/// (`GeometryEnvelope` has no temporal-cadence field), and it repeats the tier and every geometry
+/// axis so a bf16 record can never be emitted against a q4 capture that merely reused the string.
+fn sc22737_video_target(
+    request: &Value,
+    arm: Sc22737VideoArm,
+) -> Result<Sc22737VideoTarget, String> {
+    let planned = protocol::planned(request)?;
+    let target = planned
+        .get("target")
+        .and_then(Value::as_object)
+        .ok_or_else(|| "planned.target must be an object".to_owned())?;
+    let mode = target
+        .get("mode")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "planned.target.mode must be a string".to_owned())?;
+    if mode != arm.mode {
+        return Err(format!(
+            "{} is measured in {:?} mode, got {mode:?}",
+            arm.model_id, arm.mode
+        ));
+    }
+    for field in ["referenceCount", "reference_count"] {
+        if let Some(value) = target.get(field) {
+            if value.as_u64() != Some(u64::from(arm.reference_count)) {
+                return Err(format!(
+                    "{} requires {field} == {}; a record measured with a different reference set \
+                     describes a different conditioning and, for MiniMax-H3, a different DiT \
+                     partition",
+                    arm.model_id, arm.reference_count
+                ));
+            }
+        }
+    }
+    let tier = planned_tier(request)?.to_owned();
+    let geometry = target
+        .get("geometry")
+        .and_then(Value::as_object)
+        .ok_or_else(|| "planned.target.geometry must be an object".to_owned())?;
+    let axis = |name: &str| {
+        geometry
+            .get(name)
+            .and_then(Value::as_u64)
+            .and_then(|value| u32::try_from(value).ok())
+            .ok_or_else(|| format!("planned.target.geometry.{name} must fit u32"))
+    };
+    let batch = axis("batch")?;
+    if batch != 1 {
+        return Err(format!(
+            "{} renders one clip per request; got geometry.batch {batch}",
+            arm.model_id
+        ));
+    }
+    let width = axis("width")?;
+    let height = axis("height")?;
+    let frames = axis("frames")?;
+    if frames != arm.frames {
+        return Err(format!(
+            "{} is measured at {} frames, got {frames}",
+            arm.model_id, arm.frames
+        ));
+    }
+    (arm.validate_geometry)(width, height, frames)?;
+    let fixture = planned
+        .get("fixture")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "planned.fixture must be a string".to_owned())?;
+    let prefix = format!(
+        "{}-{tier}-{width}x{height}-f{frames}-fps",
+        arm.fixture_prefix
+    );
+    let remainder = fixture
+        .strip_prefix(&prefix)
+        .ok_or_else(|| format!("planned.fixture {fixture:?} must start with {prefix:?}"))?;
+    let (fps, seed) = remainder
+        .split_once("-seed")
+        .ok_or_else(|| format!("planned.fixture {fixture:?} must end with -seed<seed>"))?;
+    let fps = fps
+        .parse::<u32>()
+        .map_err(|error| format!("parse {} fixture fps {fps:?}: {error}", arm.model_id))?;
+    if !arm.legal_fps.contains(&fps) {
+        return Err(format!(
+            "planned.fixture declares fps {fps}, but {} publishes {:?} only",
+            arm.model_id, arm.legal_fps
+        ));
+    }
+    let seed = seed
+        .parse::<u64>()
+        .map_err(|error| format!("parse {} fixture seed {seed:?}: {error}", arm.model_id))?;
+    if seed != SC22737_CANDLE_SEED {
+        return Err(format!(
+            "planned.fixture seed {seed} does not match the sc-22737 Candle calibration seed \
+             {SC22737_CANDLE_SEED}"
+        ));
+    }
+    Ok(Sc22737VideoTarget {
+        tier,
+        width,
+        height,
+        frames,
+        fps,
+        seed,
+    })
+}
+
+/// The measured request. The CONDITIONING is what selects a reference route — and, for MiniMax-H3,
+/// which DiT partition the engine resolves — so the reference member carries exactly one synthetic
+/// image reference at the target geometry and every other member carries none.
+fn sc22737_generation_request(
+    arm: Sc22737VideoArm,
+    target: &Sc22737VideoTarget,
+) -> GenerationRequest {
+    let mut request = GenerationRequest {
+        prompt: arm.prompt.to_owned(),
+        width: target.width,
+        height: target.height,
+        count: 1,
+        seed: Some(target.seed),
+        frames: Some(target.frames),
+        fps: Some(target.fps),
+        // Left unset for the two families whose engine owns the recipe; MiniMax-H3 renders at the
+        // manifest's `limits.hardMinSteps`, which is the cheapest admissible cell of the one
+        // capture this anchor is allowed.
+        steps: (arm.engine_id == MINIMAX_CANDLE_ID).then_some(MINIMAX_CANDLE_STEPS),
+        ..Default::default()
+    };
+    if arm.reference_count > 0 {
+        request.conditioning = vec![Conditioning::Reference {
+            image: Image {
+                width: target.width,
+                height: target.height,
+                pixels: protocol::synthetic_reference_rgb(target.width, target.height),
+            },
+            // The engine owns the reference conditioning strength; the request-level lever stays
+            // unset, exactly as the worker's own conditioning resolver leaves it.
+            strength: None,
+        }];
+    }
+    request
+}
+
+/// Execute one sc-22737 Candle video cell: stage the family's load, prove the plan and the loaded
+/// contract name the same calibration identity, then measure three phase peaks off the boundaries
+/// the shipped `generate` already emits.
+///
+/// The shape is `run_ltx25_capture`'s, which is the established Candle video precedent: a real
+/// selected provider path, a memory-strategy request scope around the render, and the
+/// frames/fps/audio result validation that keeps a record from claiming a clip the engine did not
+/// produce.
+fn run_sc22737_video_capture(request: &Value, arm: Sc22737VideoArm) -> Result<Value, String> {
+    protocol::validate_plain_overlay_target(request, arm.execution_path)?;
+    let target = sc22737_video_target(request, arm)?;
+    let Sc22737LoadPlan {
+        artifact,
+        resolved_path_fingerprint,
+        spec,
+    } = (arm.load_plan)(request, &target)?;
+    let load_shape = spec.load_shape;
+    let catalog =
+        runtime_cuda::catalog().map_err(|error| format!("build CUDA catalog: {error}"))?;
+    let mut vram = certifying_vram_probe();
+    let load_sample = vram.phase();
+    let generator = catalog.media().load(arm.engine_id, &spec).map_err(|error| {
+        format!(
+            "load real {} {} {} generator: {error}",
+            arm.engine_id, arm.model_id, target.tier
+        )
+    })?;
+    vram.end_load(load_sample);
+    let contract = generator
+        .memory_strategy_contract()
+        .ok_or_else(|| format!("loaded {} has no memory-strategy contract", arm.engine_id))?;
+    let selection = planned_selection(request)?;
+    contract.validate_selection(&selection).map_err(|error| {
+        format!(
+            "pinned {} provider rejected planned selection: {error}",
+            arm.engine_id
+        )
+    })?;
+    let strategy = measured_strategy(
+        request,
+        &selection,
+        &contract.engaged_composition(selection.strategy),
+    )?;
+    let calibration = contract.calibration.as_ref().ok_or_else(|| {
+        format!(
+            "loaded {} has no calibration identity; the cell cannot be recorded",
+            arm.engine_id
+        )
+    })?;
+    let planned_fingerprint = protocol::planned(request)?
+        .get("calibrationFingerprint")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "planned.calibrationFingerprint must be a string".to_owned())?;
+    if planned_fingerprint != calibration.fingerprint {
+        return Err(format!(
+            "plan/provider calibration mismatch: plan={planned_fingerprint}, pinned provider={}",
+            calibration.fingerprint
+        ));
+    }
+    if load_shape != calibration.load_shape {
+        return Err(format!(
+            "plan/provider load-shape mismatch: plan={}, pinned provider={}",
+            load_shape_key(load_shape),
+            load_shape_key(calibration.load_shape)
+        ));
+    }
+    let hardware_bytes = request
+        .pointer("/hardware/memoryBytes")
+        .and_then(Value::as_u64)
+        .ok_or_else(|| "run request.hardware.memoryBytes must be an integer".to_owned())?;
+    let context = MemoryRunContext {
+        selection,
+        optimization_authority: MemoryOptimizationAuthority::Calibrated,
+        calibration_abi: calibration.abi,
+        calibration_fingerprint: calibration.fingerprint.clone(),
+        load_shape: calibration.load_shape,
+        mode: MemoryMode::Other(arm.mode.to_owned()),
+        has_reference: arm.reference_count > 0,
+        use_pid: false,
+        has_phases: false,
+        geometry: MemoryGeometry {
+            width: target.width,
+            height: target.height,
+            batch: 1,
+            frames: target.frames,
+            reference_count: arm.reference_count,
+        },
+        overlay: None,
+        budget: MemoryBudget {
+            total_bytes: hardware_bytes,
+            committed_bytes: 0,
+            reclaimable_bytes: 0,
+            reserved_headroom_bytes: 0,
+        },
+        predicted_peak_bytes: 1,
+        cache_state: MemoryCacheState::Cold,
+        evidence_revision: format!("sc-22737-adapter@{}", protocol::INFERENCE_PIN),
+    };
+    let mut scope = generator
+        .begin_memory_strategy_request(&context)
+        .map_err(|error| format!("begin {} capture scope: {error}", arm.engine_id))?
+        .ok_or_else(|| format!("{} selection did not create a provider scope", arm.engine_id))?;
+    let parameters = context.selection.parameters;
+    match (parameters.decode_tile_edge, parameters.decode_overlap) {
+        (Some(edge), Some(overlap)) => scope
+            .configure_decode(edge, overlap, context.geometry)
+            .map_err(|error| format!("configure {} decode: {error}", arm.engine_id))?,
+        (None, None) => {}
+        _ => {
+            return Err(format!(
+                "{} decode edge and overlap must be selected together",
+                arm.engine_id
+            ))
+        }
+    }
+    if let Some(attention) = parameters.attention_chunk_size {
+        scope
+            .configure_attention(attention)
+            .map_err(|error| format!("configure {} attention: {error}", arm.engine_id))?;
+    }
+    if let Some(window) = parameters.transformer_window_size {
+        scope
+            .materialize_transformer_window(0, window)
+            .map_err(|error| format!("configure {} transformer window: {error}", arm.engine_id))?;
+    }
+    let mut generation = sc22737_generation_request(arm, &target);
+    scope
+        .configure_request(&mut generation)
+        .map_err(|error| format!("apply {} capture strategy: {error}", arm.engine_id))?;
+    scope
+        .enter_phase(MemoryPhase::Conditioning)
+        .map_err(|error| format!("enter {} conditioning: {error}", arm.engine_id))?;
+    let generation_sample = vram.phase();
+    let mut phase_sample = Some(vram.phase());
+    let mut phase = MemoryPhase::Conditioning;
+    let mut peaks = [None, None, None];
+    let mut phase_error = None;
+    let result = generator.generate(&generation, &mut |progress| {
+        if phase_error.is_some() {
+            return;
+        }
+        let boundary = match progress {
+            Progress::Loading(runtime_cuda::gen_core::LoadPhase::Renderer) => {
+                protocol::ReferenceBoundary::RendererLoad
+            }
+            Progress::Step { current: 1, .. } => protocol::ReferenceBoundary::FirstDenoiseStep,
+            Progress::Decoding => protocol::ReferenceBoundary::Decoding,
+            _ => return,
+        };
+        let Some(next) = protocol::next_reference_phase(reference_phase(phase), boundary) else {
+            return;
+        };
+        let index = match phase {
+            MemoryPhase::Conditioning => 0,
+            MemoryPhase::Denoise => 1,
+            MemoryPhase::Decode => 2,
+        };
+        peaks[index] = phase_sample.take().map(|sample| vram.end_observed(sample));
+        if let Err(error) = scope.leave_phase(phase) {
+            phase_error = Some(format!("leave {} {phase:?}: {error}", arm.engine_id));
+            return;
+        }
+        let next = memory_phase(next);
+        if let Err(error) = scope.enter_phase(next) {
+            phase_error = Some(format!("enter {} {next:?}: {error}", arm.engine_id));
+            return;
+        }
+        phase = next;
+        phase_sample = Some(vram.phase());
+    });
+    if let Some(sample) = phase_sample.take() {
+        let index = match phase {
+            MemoryPhase::Conditioning => 0,
+            MemoryPhase::Denoise => 1,
+            MemoryPhase::Decode => 2,
+        };
+        peaks[index] = Some(vram.end_observed(sample));
+    }
+    vram.end_gen(generation_sample);
+    let cumulative_run_peak_bytes = decimal_gb_to_bytes(vram.report().peak_gb);
+    if let Some(message) = phase_error {
+        let _ = scope.finish(MemoryRunOutcome::Error {
+            message: message.clone(),
+        });
+        return Err(message);
+    }
+    let output = match result {
+        Ok(output) => output,
+        Err(error) => {
+            let message = error.to_string();
+            let _ = scope.finish(MemoryRunOutcome::Error {
+                message: message.clone(),
+            });
+            return Err(format!("{} generation failed: {message}", arm.engine_id));
+        }
+    };
+    scope
+        .leave_phase(phase)
+        .map_err(|error| format!("leave {} terminal phase: {error}", arm.engine_id))?;
+    scope
+        .finish(MemoryRunOutcome::Complete)
+        .map_err(|error| format!("finish {} capture scope: {error}", arm.engine_id))?;
+    let (frames, fps, audio) = match output {
+        GenerationOutput::Video { frames, fps, audio } => (frames, fps, audio),
+        GenerationOutput::Images(_) => {
+            return Err(format!("{} returned images, not a video clip", arm.model_id))
+        }
+        GenerationOutput::Audio(_) => {
+            return Err(format!(
+                "{} returned audio without video frames",
+                arm.model_id
+            ))
+        }
+    };
+    if fps != target.fps {
+        return Err(format!(
+            "{} returned {fps} fps for a {} fps request",
+            arm.model_id, target.fps
+        ));
+    }
+    // The soundtrack is half of what a joint A/V family denoises; a record that did not observe one
+    // is not a record of the render it claims.
+    let audio =
+        audio.filter(|track| !track.samples.is_empty() && track.sample_rate > 0 && track.channels > 0);
+    if arm.requires_audio && audio.is_none() {
+        return Err(format!(
+            "{} render returned no non-empty audio track, but this family denoises video and audio \
+             jointly",
+            arm.model_id
+        ));
+    }
+    let rendered = u32::try_from(frames.len())
+        .map_err(|_| format!("{} frame count does not fit u32", arm.model_id))?;
+    if rendered != target.frames {
+        return Err(format!(
+            "{} rendered {rendered} frames for a {}-frame request",
+            arm.model_id, target.frames
+        ));
+    }
+    let frame_shapes = frames
+        .iter()
+        .map(|frame| (frame.width, frame.height, frame.pixels.len()))
+        .collect::<Vec<_>>();
+    protocol::validate_ltx25_rgb_frames(
+        usize::try_from(target.frames)
+            .map_err(|_| format!("{} frame count does not fit usize", arm.model_id))?,
+        target.width,
+        target.height,
+        &frame_shapes,
+    )?;
+    let conditioning_bytes = decimal_gb_to_bytes(
+        peaks[0]
+            .ok_or_else(|| format!("{} did not expose the conditioning boundary", arm.engine_id))?,
+    );
+    let denoise_bytes = decimal_gb_to_bytes(
+        peaks[1].ok_or_else(|| format!("{} did not expose the denoise boundary", arm.engine_id))?,
+    );
+    let decode_bytes = decimal_gb_to_bytes(
+        peaks[2].ok_or_else(|| format!("{} did not complete decode sampling", arm.engine_id))?,
+    );
+    let overall_bytes = protocol::validated_cumulative_peak(
+        cumulative_run_peak_bytes,
+        [conditioning_bytes, denoise_bytes, decode_bytes],
+    )?;
+    let blocker = concat!(
+        "sc-22737 capture measured the selected real provider path on this cell; promotion remains ",
+        "gated on terminal CUDA repetition/quality evidence, which this arm does not produce"
+    );
+    let mut fragment = protocol::plain_gated_fragment(
+        request,
+        arm.execution_path,
+        protocol::PlainGatedFragment {
+            artifact,
+            sweep: protocol::reference_sweep(request, "passed")?,
+            blocker,
+            quality: json!({ "result": "not_run" }),
+            negative_mutation: Value::Null,
+            loadability: json!({
+                "result": "passed",
+                "resolvedPathFingerprint": format!(
+                    "{resolved_path_fingerprint}:{}:f{}:{}x{}:fps{}:seed{}",
+                    arm.model_id,
+                    target.frames,
+                    target.width,
+                    target.height,
+                    target.fps,
+                    target.seed,
+                ),
+            }),
+            diagnostics: protocol::diagnostics(
+                arm.diagnostics_lane,
+                "executed",
+                [blocker.to_owned()],
+                [
+                    ("conditioningDevicePeakDelta", "bytes", conditioning_bytes),
+                    ("denoiseDevicePeakDelta", "bytes", denoise_bytes),
+                    ("decodeDevicePeakDelta", "bytes", decode_bytes),
+                    ("overallDevicePeakDelta", "bytes", overall_bytes),
+                    ("renderedFrames", "count", u64::from(rendered)),
+                    ("renderedFps", "fps", u64::from(fps)),
+                    ("renderedAudio", "count", u64::from(audio.is_some())),
+                    ("referenceCount", "count", u64::from(arm.reference_count)),
+                ],
+            ),
+        },
+    )?;
+    fragment["strategy"] = strategy;
+    fragment["loadShape"] = json!(load_shape_key(calibration.load_shape));
+    fragment["observedMemory"] = json!({
+        "conditioning": cuda_phase_metrics(conditioning_bytes),
+        "denoise": cuda_phase_metrics(denoise_bytes),
+        "decode": cuda_phase_metrics(decode_bytes),
+        "overall": cuda_phase_metrics(overall_bytes),
+    });
+    Ok(fragment)
+}
+
 /// The fixture prefix that marks a plan row as a five-rung reference capture.
 const FIVE_RUNG_FIXTURE_PREFIX: &str = "fresh-five-rung-";
 

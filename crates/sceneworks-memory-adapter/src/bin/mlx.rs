@@ -12629,14 +12629,73 @@ fn minimax_target_geometry(request: &Value) -> Result<MinimaxGeometry, String> {
     validate_minimax_geometry(axis("width")?, axis("height")?, axis("frames")?)
 }
 
-/// Defense-in-depth mirror of `validate_ltx_target`, plus the t2va-specific target shape.
+/// Which MiniMax-H3 catalog entry — that is, which DiT PARTITION — a plan row measures.
+///
+/// `minimax_h3` and `minimax_h3_ref` are NOT two providers (`video_jobs/minimax_h3.rs`, fact 1):
+/// `mlx-gen-minimax-h3` registers one `MODEL_ID`, and the two entries are two partition directories
+/// of it. The engine picks between them from the CONDITIONING — upstream's
+/// `MiniMaxH3Task::resolve(has_keyframes, has_references)` maps `(false, false)` to t2va on
+/// `transformer/` and `(false, true)` to ref2va on `transformer_ref/` — so the request's reference
+/// set is the only thing that selects the checkpoint a capture actually denoises on.
+///
+/// That is why this is a table rather than a boolean: the two checkpoints ship the SAME
+/// `config.json` and the SAME 638 tensor names, so a capture routed at the wrong one RUNS, produces
+/// plausible video, and files a record for a partition it never touched. The member fixes the mode
+/// key, the reference count and the fixture slug together, and [`minimax_request`] builds the
+/// conditioning from the same row — so the three cannot disagree.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct MinimaxMember {
+    model_id: &'static str,
+    /// The DiT partition the engine resolves for this member's conditioning. Recorded in the
+    /// loadability fingerprint so two records over one artifact triple stay distinguishable.
+    partition: &'static str,
+    /// The `MemoryMode` key the runtime asks admission under for this member.
+    mode: &'static str,
+    /// The fixture name's leading token: `<fixture_prefix>-<tier>-<w>x<h>-f<frames>-fps<fps>-seed…`.
+    ///
+    /// Spelled per member rather than composed from a slug so the BASE entry keeps the exact
+    /// `minimax-h3-mlx-…` names its plan rows already carry (sc-18663). A composed slug would have
+    /// renamed three committed fixtures for no measurement reason.
+    fixture_prefix: &'static str,
+    /// How many references the measured request carries. `0` selects t2va, `1` selects ref2va.
+    reference_count: u32,
+}
+
+/// The base t2va entry, on `transformer/`.
+const MINIMAX_BASE_MEMBER: MinimaxMember = MinimaxMember {
+    model_id: "minimax_h3",
+    partition: "transformer",
+    mode: "text_to_video",
+    fixture_prefix: "minimax-h3-mlx",
+    reference_count: 0,
+};
+
+/// The reference-to-video entry, on `transformer_ref/` (sc-19508).
+///
+/// ONE image reference, which is the smallest set `classify_reference_set` calls
+/// `Conditionable`: an empty set would resolve t2va on the base checkpoint (the wrong partition for
+/// this record), and an audio-only set is refused by the worker, the API and the MCP tool alike
+/// because an audio reference never reaches the reference conditioner.
+const MINIMAX_REFERENCE_MEMBER: MinimaxMember = MinimaxMember {
+    model_id: "minimax_h3_ref",
+    partition: "transformer_ref",
+    mode: "reference_to_video",
+    fixture_prefix: "minimax-h3-ref-mlx",
+    reference_count: 1,
+};
+
+const MINIMAX_MEMBERS: [MinimaxMember; 2] = [MINIMAX_BASE_MEMBER, MINIMAX_REFERENCE_MEMBER];
+
+/// Defense-in-depth mirror of `validate_ltx_target`, plus the per-member target shape.
 ///
 /// `run` dispatches by provider id today, but this arm hardcodes the MiniMax-H3 contract, so a
 /// foreign caller must be refused BY NAME here — before any environment variable is read, any path
-/// canonicalized, or any weight file opened. The reference surfaces are refused for a sharper
-/// reason than tidiness: `ref2va` is a DIFFERENT CHECKPOINT (`transformer_ref/`), so a record
-/// measured on the base partition may never be filed against a reference-carrying target.
-fn validate_minimax_target(request: &Value) -> Result<MinimaxGeometry, String> {
+/// canonicalized, or any weight file opened. The reference surfaces are checked against the
+/// MEMBER's declared count rather than pinned to zero: `ref2va` is a different checkpoint, so a
+/// base record may never be filed against a reference-carrying target, and a `minimax_h3_ref`
+/// record may never be filed against a reference-free one — which would silently be a second base
+/// measurement wearing the reference entry's key.
+fn validate_minimax_target(request: &Value) -> Result<(MinimaxMember, MinimaxGeometry), String> {
     let target = protocol::planned(request)?
         .get("target")
         .and_then(Value::as_object)
@@ -12654,41 +12713,51 @@ fn validate_minimax_target(request: &Value) -> Result<MinimaxGeometry, String> {
         .get("modelId")
         .and_then(Value::as_str)
         .ok_or_else(|| "planned.target.modelId must be a string".to_owned())?;
-    if model_id != MINIMAX_PROVIDER {
-        return Err(format!(
-            "{MINIMAX_LABEL} requires modelId {MINIMAX_PROVIDER:?}, got {model_id:?}"
-        ));
-    }
+    let member = MINIMAX_MEMBERS
+        .iter()
+        .copied()
+        .find(|member| member.model_id == model_id)
+        .ok_or_else(|| {
+            format!(
+                "{MINIMAX_LABEL} serves catalog entries {:?}, got modelId {model_id:?}",
+                MINIMAX_MEMBERS.map(|member| member.model_id)
+            )
+        })?;
     let mode = target
         .get("mode")
         .and_then(Value::as_str)
         .ok_or_else(|| "planned.target.mode must be a string".to_owned())?;
-    if mode != "text_to_video" {
+    if mode != member.mode {
         return Err(format!(
-            "{MINIMAX_LABEL} requires reference-free text_to_video (t2va) mode, got {mode:?}"
+            "{MINIMAX_LABEL} measures {model_id} in {:?} mode, got {mode:?}",
+            member.mode
         ));
     }
     for field in ["referenceCount", "reference_count"] {
         if let Some(value) = target.get(field) {
-            if value.as_u64() != Some(0) {
+            if value.as_u64() != Some(u64::from(member.reference_count)) {
                 return Err(format!(
-                    "{MINIMAX_LABEL} requires {field} == 0 when declared; ref2va runs a different \
-                     DiT partition and cannot be recorded from this one"
+                    "{MINIMAX_LABEL} requires {field} == {} for {model_id}; the two catalog \
+                     entries denoise on different DiT partitions and a record measured on one \
+                     cannot be filed against the other",
+                    member.reference_count
                 ));
             }
         }
     }
     for field in ["hasReference", "has_reference"] {
         if let Some(value) = target.get(field) {
-            if value.as_bool() != Some(false) {
+            if value.as_bool() != Some(member.reference_count > 0) {
                 return Err(format!(
-                    "{MINIMAX_LABEL} requires {field} == false when declared; ref2va runs a \
-                     different DiT partition and cannot be recorded from this one"
+                    "{MINIMAX_LABEL} requires {field} == {} for {model_id}; the two catalog \
+                     entries denoise on different DiT partitions and a record measured on one \
+                     cannot be filed against the other",
+                    member.reference_count > 0
                 ));
             }
         }
     }
-    minimax_target_geometry(request)
+    Ok((member, minimax_target_geometry(request)?))
 }
 
 /// Bind the fixture to the planned tier AND the full rendered geometry, recovering the cadence and
@@ -12696,6 +12765,7 @@ fn validate_minimax_target(request: &Value) -> Result<MinimaxGeometry, String> {
 /// declare a cadence the engine would refuse.
 fn planned_minimax_capture(
     request: &Value,
+    member: MinimaxMember,
     tier: &str,
     geometry: MinimaxGeometry,
 ) -> Result<(u32, u64), String> {
@@ -12704,8 +12774,8 @@ fn planned_minimax_capture(
         .and_then(Value::as_str)
         .ok_or_else(|| "planned.fixture must be a string".to_owned())?;
     let prefix = format!(
-        "minimax-h3-mlx-{tier}-{}x{}-f{}-fps",
-        geometry.width, geometry.height, geometry.frames
+        "{}-{tier}-{}x{}-f{}-fps",
+        member.fixture_prefix, geometry.width, geometry.height, geometry.frames
     );
     let remainder = fixture
         .strip_prefix(&prefix)
@@ -12770,11 +12840,18 @@ impl MinimaxArtifact {
     /// record CANNOT be identified by the rehost triple alone: two captures at the same
     /// repository, revision and tier differ materially if one took its conditioning stage from the
     /// packed tier and the other from the dense upstream snapshot.
-    fn resolved_path_fingerprint(&self, tier: &str) -> String {
+    ///
+    /// The PARTITION is part of it too (sc-22737): `minimax_h3` and `minimax_h3_ref` are two
+    /// checkpoints inside one tier tree that ship identical `config.json` files and identical
+    /// tensor names, so two records over the same repository, revision and tier are otherwise
+    /// indistinguishable — and the engine picks between them from the conditioning rather than from
+    /// anything the artifact triple can show.
+    fn resolved_path_fingerprint(&self, member: MinimaxMember, tier: &str) -> String {
         format!(
-            "{}@{}:{tier}+text_encoder:{}+shared:{}@{}",
+            "{}@{}:{tier}+partition:{}+text_encoder:{}+shared:{}@{}",
             self.repository,
             self.revision,
+            member.partition,
             self.text_encoder_source,
             self.upstream_repository,
             self.upstream_revision
@@ -12916,6 +12993,7 @@ fn minimax_load_spec(
 /// would measure under one key and the runtime ask under the other, silently. Pinned by
 /// `the_minimax_capture_context_binds_the_mode_key_the_runtime_video_route_sends`.
 fn minimax_context(
+    member: MinimaxMember,
     selection: MemorySelection,
     calibration: &MemoryCalibrationIdentity,
     fingerprint: &str,
@@ -12931,8 +13009,11 @@ fn minimax_context(
         // call site passes `calibration.fingerprint`.
         calibration_fingerprint: fingerprint.to_owned(),
         load_shape: calibration.load_shape,
-        mode: MemoryMode::Other("text_to_video".to_owned()),
-        has_reference: false,
+        // Both members' keys go through `MemoryMode::Other`: `video_admission` types every video
+        // mode key with `memory_mode_from_mode_key`, which maps every non-canonical key — both
+        // `text_to_video` and `reference_to_video` — to this variant.
+        mode: MemoryMode::Other(member.mode.to_owned()),
+        has_reference: member.reference_count > 0,
         use_pid: false,
         has_phases: true,
         geometry: MemoryGeometry {
@@ -12940,7 +13021,7 @@ fn minimax_context(
             height: geometry.height,
             batch: 1,
             frames: geometry.frames,
-            reference_count: 0,
+            reference_count: member.reference_count,
         },
         overlay: None,
         budget: MemoryBudget {
@@ -12955,8 +13036,20 @@ fn minimax_context(
     }
 }
 
-fn minimax_request(geometry: MinimaxGeometry, fps: u32, seed: u64) -> GenerationRequest {
-    GenerationRequest {
+/// The measured request.
+///
+/// The CONDITIONING is what selects the DiT partition (upstream `MiniMaxH3Task::resolve`), so the
+/// reference member carries exactly one image reference and the base member carries none. The
+/// reference is synthetic and content-independent by construction — this measures residency, not
+/// fidelity — and it is presented at the target geometry, which is the shape a real
+/// reference-to-video request carries after the worker's own decode.
+fn minimax_request(
+    member: MinimaxMember,
+    geometry: MinimaxGeometry,
+    fps: u32,
+    seed: u64,
+) -> GenerationRequest {
+    let mut request = GenerationRequest {
         prompt: "a slow dolly along a rain-slick harbour wall at dusk, gulls calling, cinematic"
             .to_owned(),
         width: geometry.width,
@@ -12967,7 +13060,20 @@ fn minimax_request(geometry: MinimaxGeometry, fps: u32, seed: u64) -> Generation
         fps: Some(fps),
         steps: Some(MINIMAX_STEPS),
         ..Default::default()
+    };
+    if member.reference_count > 0 {
+        request.conditioning = vec![Conditioning::Reference {
+            image: Image {
+                width: geometry.width,
+                height: geometry.height,
+                pixels: protocol::synthetic_reference_rgb(geometry.width, geometry.height),
+            },
+            // The engine owns the ref2va conditioning strength; the request-level lever stays
+            // unset, exactly as `resolve_minimax_h3_conditioning` leaves it.
+            strength: None,
+        }];
     }
+    request
 }
 
 fn minimax_quality_passes(maximum: f64, mean: f64, rms: f64) -> bool {
@@ -13002,7 +13108,7 @@ fn minimax_complete_sweep(request: &Value) -> Result<Value, String> {
 /// `validate_selection` decides which rungs are capturable, and it answers differently for the two
 /// load shapes (rung 4 is `Implemented` only under `deferred_materialization`).
 fn run_minimax_h3(request: &Value) -> Result<Value, String> {
-    let geometry = validate_minimax_target(request)?;
+    let (member, geometry) = validate_minimax_target(request)?;
     protocol::validate_plain_overlay_target(request, MINIMAX_PLAIN_EXECUTION_PATH)?;
     let load_shape = planned_load_shape(request)?;
     let selection = planned_selection(request)?;
@@ -13013,7 +13119,7 @@ fn run_minimax_h3(request: &Value) -> Result<Value, String> {
              {tier:?} is not capturable"
         ));
     }
-    let (fps, seed) = planned_minimax_capture(request, tier, geometry)?;
+    let (fps, seed) = planned_minimax_capture(request, member, tier, geometry)?;
     // Fingerprint check 1 of 3: the PLAN against this arm's own expectation, before any environment
     // or weight work. A provider re-fingerprint must not silently reuse the epic's plan.
     let planned_fingerprint = protocol::planned(request)?
@@ -13099,6 +13205,7 @@ fn run_minimax_h3(request: &Value) -> Result<Value, String> {
             spec,
             &contract,
             &minimax_context(
+                member,
                 selection,
                 calibration,
                 fingerprint,
@@ -13180,7 +13287,7 @@ fn run_minimax_h3(request: &Value) -> Result<Value, String> {
     let (measured, output_fps, audio) = diagnostic_video_frames(
         generator
             .generate(
-                &minimax_request(geometry, fps, seed),
+                &minimax_request(member, geometry, fps, seed),
                 &mut |progress| match progress {
                     Progress::Loading(LoadPhase::TextEncoder) => {
                         pre_generate.set(PhaseMemory::capture());
@@ -13266,6 +13373,7 @@ fn run_minimax_h3(request: &Value) -> Result<Value, String> {
     // Probe 4 of 4, on the LOADED generator and against the measured evidence: the calibrated
     // budget admits a request predicted to consume exactly it.
     let exact_fit = minimax_context(
+        member,
         selection,
         calibration,
         &calibration.fingerprint,
@@ -13303,7 +13411,7 @@ fn run_minimax_h3(request: &Value) -> Result<Value, String> {
     reset_peak_memory();
     let (baseline, _, _) = diagnostic_video_frames(
         generator
-            .generate(&minimax_request(geometry, fps, seed), &mut |_| {})
+            .generate(&minimax_request(member, geometry, fps, seed), &mut |_| {})
             .map_err(|error| format!("generate warm MiniMax-H3 control: {error}"))?,
         MINIMAX_VIDEO_LABEL,
     )?;
@@ -13322,7 +13430,7 @@ fn run_minimax_h3(request: &Value) -> Result<Value, String> {
     reset_peak_memory();
     let (warm, _, _) = diagnostic_video_frames(
         generator
-            .generate(&minimax_request(geometry, fps, seed), &mut |_| {})
+            .generate(&minimax_request(member, geometry, fps, seed), &mut |_| {})
             .map_err(|error| format!("generate warm MiniMax-H3 repeat: {error}"))?,
         MINIMAX_VIDEO_LABEL,
     )?;
@@ -13411,7 +13519,7 @@ fn run_minimax_h3(request: &Value) -> Result<Value, String> {
         "negativeMutation": null,
         "loadability": {
             "result": "passed",
-            "resolvedPathFingerprint": artifact.resolved_path_fingerprint(tier),
+            "resolvedPathFingerprint": artifact.resolved_path_fingerprint(member, tier),
         },
         "output": {
             "frames": geometry.frames,
@@ -13468,6 +13576,911 @@ fn run_minimax_h3(request: &Value) -> Result<Value, String> {
         "capturedAt": protocol::captured_at(),
     });
     protocol::settle_plain_overlay_scenario(request, &mut fragment, MINIMAX_PLAIN_EXECUTION_PATH)?;
+    Ok(fragment)
+}
+
+// ==== mlx:bernini (sc-22737) ====================================================================
+//
+// The THIRD video arm, and the first that also serves a STILL catalog entry from the same engine
+// provider. Three facts shape the whole block:
+//
+//  1. **ONE engine id, TWO catalog entries.** `mlx-gen-bernini` registers the full pipeline under
+//     `crate::bernini::MODEL_ID == "bernini"`, and BOTH shipped SceneWorks entries resolve to it:
+//     `video_jobs/bernini.rs#bernini_engine_id` maps the video entry `bernini`, and
+//     `engines.rs`'s MODEL_TABLE maps the still entry `bernini_image` (`engine_id: "bernini"`).
+//     The renderer-only sibling `bernini_renderer` (`crate::pipeline::MODEL_ID`) is registered by
+//     the engine and published as its own identity family, but NO SceneWorks load path names it —
+//     `video_jobs/bernini.rs` calls `inference_runtime::load("bernini")` — so this arm binds the
+//     `image` identity route on both members and never the `renderer` one.
+//
+//  2. **The geometry envelope is the ENGINE's, and it is shared by both members.**
+//     `memory_strategy::validate_geometry` admits exactly `ADVERTISED_GEOMETRIES` for either
+//     provider id, so a still anchor is constrained to the same four canvases the video route
+//     publishes rather than to `bernini_image`'s wider manifest resolution list. Read off the
+//     engine constant, never transcribed.
+//
+//  3. **The tier is proven by the ARTIFACT, not asked for.** The rehost ships pre-packed `q4/`,
+//     `q8/` and `bf16/` sub-directories, so the worker loads a resolved tier with `quant = None`
+//     (`video_jobs/bernini.rs#resolve_bernini_tier_dir_and_quant`: "a pre-packed tier loads with
+//     `quant = None`; config sidecars authoritative"). This arm does the same, and the engine's
+//     `production_calibration_fingerprint` then reads the tier back out of the renderer/planner
+//     manifests and the safetensors headers — which is what makes the published identity a claim
+//     about the bytes on disk rather than about the plan row.
+const BERNINI_PROVIDER: &str = "bernini";
+/// The video catalog entry (`VideoModelCaps::new("bernini", …)`).
+const BERNINI_VIDEO_MODEL_ID: &str = "bernini";
+/// The still catalog entry, which loads [`BERNINI_PROVIDER`] with `frames == 1`.
+const BERNINI_IMAGE_MODEL_ID: &str = "bernini_image";
+/// One fixed seed for every `mlx:bernini` fixture, on both members. The fixture binds the member,
+/// tier and full geometry, so the seed does not also have to carry the route.
+const BERNINI_SEED: u64 = 22737;
+/// The single cadence the manifest publishes for the video entry (`limits.fps: [16]`). Bernini has
+/// no second legal rate, so — like MiniMax-H3 and unlike LTX — the fixture's declared cadence is
+/// checked against one value and cannot silently vary a record.
+const BERNINI_FPS: u32 = 16;
+/// The video anchor's frame count: 3 s at [`BERNINI_FPS`] coerced onto the Wan `1 mod 4` lattice
+/// the renderer requires (`video_jobs/wan.rs#wan_frame_count`, which the Bernini video path calls
+/// because the renderer IS Wan2.2-A14B). The manifest's shortest published duration, because this
+/// is the cell's ONE capture and a dual-expert A14B render is the most expensive in the catalog.
+const BERNINI_VIDEO_FRAMES: u32 = 49;
+const BERNINI_VIDEO_LABEL: &str = "Bernini";
+/// Warm-repeat determinism envelope, shared with the other MLX video arms: an identical seed,
+/// prompt, geometry and loaded provider must reproduce the clip, and the mandatory output mutation
+/// must breach the same bound.
+const BERNINI_MAX_THRESHOLD: f64 = 3e-2;
+const BERNINI_MEAN_THRESHOLD: f64 = 3e-3;
+const BERNINI_RMS_THRESHOLD: f64 = 3e-3;
+
+/// Which Bernini catalog entry the plan asks for. Both members load the SAME engine provider from
+/// the SAME artifact family; they differ only in the modality of the render and therefore in the
+/// mode key the record is filed under.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct BerniniArm {
+    model_id: &'static str,
+    /// The `MemoryMode` key the runtime asks admission under for this member — an EVIDENCE KEY, not
+    /// a label, for the reason [`minimax_context`] documents at length.
+    mode: &'static str,
+    execution_path: &'static str,
+    /// `<slug>` in the fixture name `bernini-<slug>-mlx-<tier>-<w>x<h>-f<frames>-fps<fps>-seed…`.
+    slug: &'static str,
+    /// `frames` this member renders. The still entry is `1`; the video entry is the Wan lattice.
+    frames: u32,
+}
+
+const BERNINI_VIDEO_ARM: BerniniArm = BerniniArm {
+    model_id: BERNINI_VIDEO_MODEL_ID,
+    mode: "text_to_video",
+    execution_path: "the MLX Bernini dual-expert text-to-video path",
+    slug: "video",
+    frames: BERNINI_VIDEO_FRAMES,
+};
+
+const BERNINI_IMAGE_ARM: BerniniArm = BerniniArm {
+    model_id: BERNINI_IMAGE_MODEL_ID,
+    mode: "text_to_image",
+    execution_path: "the MLX Bernini still text-to-image path",
+    slug: "image",
+    frames: 1,
+};
+
+/// Every member this arm serves, in one place so the tables and the tests cannot disagree about
+/// which two catalog entries exist.
+const BERNINI_ARMS: [BerniniArm; 2] = [BERNINI_VIDEO_ARM, BERNINI_IMAGE_ARM];
+
+/// The production calibration identity `mlx-gen-bernini` mints for one `(route, tier)` cell.
+///
+/// The engine keys on `(provider, ARTIFACT-proven tier)` and interpolates
+/// `bernini-{route}-{tier}-mlx-dual-expert-ladder-v1`. Every SceneWorks load resolves the `image`
+/// route (see the block comment above), so the route token is constant here and the tier is the
+/// only axis. The `q4` cell reproduces
+/// `mlx_gen_bernini::memory_strategy::MEMORY_CALIBRATION_FINGERPRINT` byte-for-byte, which is what
+/// keeps the retained key of the family's existing record valid; that constant is read off the
+/// engine rather than spelled, so the two copies cannot drift.
+///
+/// Written here as well as in the engine so the plan/arm binding is weights-free and provable on a
+/// CPU-only host. The capture then refuses a loaded contract whose identity differs from this
+/// table, so a drift is caught at the pin bump rather than in a record.
+fn bernini_calibration_fingerprint(tier: &str) -> String {
+    if tier == BERNINI_CALIBRATED_TIER {
+        runtime_macos::providers::bernini::memory_strategy::MEMORY_CALIBRATION_FINGERPRINT.to_owned()
+    } else {
+        format!("bernini-image-{tier}-mlx-dual-expert-ladder-v1")
+    }
+}
+
+/// The tier the engine's retained [`MEMORY_CALIBRATION_FINGERPRINT`] names.
+///
+/// Spelled here rather than read from the engine's own `CALIBRATED_TIER` because that constant
+/// arrives with the epic's pin bump and this adapter must compile at the CURRENT pin as well
+/// (`c6d6a4db` publishes `MEMORY_CALIBRATION_FINGERPRINT` and no per-tier family). It is not a free
+/// literal: `the_bernini_identity_family_reproduces_the_engines_retained_key` derives it from the
+/// engine constant by parsing the key's tier token, so a re-tiered retained string reds here.
+const BERNINI_CALIBRATED_TIER: &str = "q4";
+
+/// The exact target geometry a `mlx:bernini` calibration case renders.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct BerniniGeometry {
+    width: u32,
+    height: u32,
+    frames: u32,
+}
+
+/// Bernini's own geometry envelope, replacing the image arms' blanket `frames == 1` refusal.
+///
+/// The canvas half is the engine's `validate_geometry` — an exact membership test against
+/// [`ADVERTISED_GEOMETRIES`](runtime_macos::providers::bernini::memory_strategy::ADVERTISED_GEOMETRIES),
+/// read off the crate rather than transcribed — and it is PROVIDER-WIDE: `memory_strategy` applies
+/// it to the still route and the video route alike, so a `bernini_image` anchor may not use one of
+/// that entry's wider manifest resolutions (512², 768², 1024²) either. The temporal half is the
+/// member's: the still entry renders exactly one frame, and the video entry renders the Wan
+/// `1 mod 4` lattice count this arm plans.
+fn validate_bernini_geometry(
+    arm: BerniniArm,
+    width: u32,
+    height: u32,
+    frames: u32,
+) -> Result<BerniniGeometry, String> {
+    let advertised = runtime_macos::providers::bernini::memory_strategy::ADVERTISED_GEOMETRIES;
+    if !advertised.contains(&(width, height)) {
+        return Err(format!(
+            "{BERNINI_VIDEO_LABEL} memory evidence requires one of the advertised geometries \
+             {advertised:?}, got {width}x{height}"
+        ));
+    }
+    if frames != arm.frames {
+        return Err(format!(
+            "{BERNINI_VIDEO_LABEL} {} renders {} frame(s); got geometry.frames {frames}",
+            arm.model_id, arm.frames
+        ));
+    }
+    Ok(BerniniGeometry {
+        width,
+        height,
+        frames,
+    })
+}
+
+/// Resolve the member and its geometry, refusing a foreign target BY NAME before any environment
+/// variable is read, any path canonicalized, or any weight file opened.
+///
+/// `run` already dispatches by provider id, so the provider check here is defense in depth — but
+/// the MODEL ID check is not: one provider serves two catalog entries whose records are filed
+/// separately, and nothing else in this arm distinguishes them.
+fn bernini_target(request: &Value) -> Result<(BerniniArm, BerniniGeometry), String> {
+    let target = protocol::planned(request)?
+        .get("target")
+        .and_then(Value::as_object)
+        .ok_or_else(|| "planned.target must be an object".to_owned())?;
+    let string = |field: &str| {
+        target
+            .get(field)
+            .and_then(Value::as_str)
+            .ok_or_else(|| format!("planned.target.{field} must be a string"))
+    };
+    let provider = string("provider")?;
+    if provider != BERNINI_PROVIDER {
+        return Err(format!(
+            "the MLX Bernini arm does not implement provider {provider:?}"
+        ));
+    }
+    let model_id = string("modelId")?;
+    let arm = BERNINI_ARMS
+        .iter()
+        .copied()
+        .find(|arm| arm.model_id == model_id)
+        .ok_or_else(|| {
+            format!(
+                "the MLX Bernini arm serves catalog entries {:?}, got modelId {model_id:?}",
+                BERNINI_ARMS.map(|arm| arm.model_id)
+            )
+        })?;
+    let mode = string("mode")?;
+    if mode != arm.mode {
+        return Err(format!(
+            "{model_id} is measured in {:?} mode, got {mode:?}",
+            arm.mode
+        ));
+    }
+    // The published ladder is the PLAIN one. A reference-carrying Bernini target loads the same
+    // block stack but seals its sources into a different evidence identity
+    // (`R2V_REFERENCE_RECEIPT_DOMAIN` and its MV2V/ADS2V siblings), so a plain anchor may never be
+    // filed against one.
+    for field in ["referenceCount", "reference_count"] {
+        if let Some(value) = target.get(field) {
+            if value.as_u64() != Some(0) {
+                return Err(format!(
+                    "{model_id}: this arm measures the reference-free ladder; a non-zero {field} \
+                     seals a different Bernini evidence identity and cannot be recorded from it"
+                ));
+            }
+        }
+    }
+    let geometry = target
+        .get("geometry")
+        .and_then(Value::as_object)
+        .ok_or_else(|| "planned.target.geometry must be an object".to_owned())?;
+    let axis = |name: &str| {
+        geometry
+            .get(name)
+            .and_then(Value::as_u64)
+            .and_then(|value| u32::try_from(value).ok())
+            .ok_or_else(|| format!("planned.target.geometry.{name} must fit u32"))
+    };
+    let batch = axis("batch")?;
+    if batch != 1 {
+        return Err(format!(
+            "{BERNINI_VIDEO_LABEL} requires geometry.batch == 1, got {batch}"
+        ));
+    }
+    let geometry = validate_bernini_geometry(arm, axis("width")?, axis("height")?, axis("frames")?)?;
+    Ok((arm, geometry))
+}
+
+/// Bind the fixture to the member, the planned tier and the full rendered geometry, recovering the
+/// cadence and the seed. Like MiniMax-H3's, this arm's `fps` has exactly one legal value, so the
+/// fixture cannot declare a cadence the engine would refuse.
+fn planned_bernini_capture(
+    request: &Value,
+    arm: BerniniArm,
+    tier: &str,
+    geometry: BerniniGeometry,
+) -> Result<(u32, u64), String> {
+    let fixture = protocol::planned(request)?
+        .get("fixture")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "planned.fixture must be a string".to_owned())?;
+    let prefix = format!(
+        "bernini-{}-mlx-{tier}-{}x{}-f{}-fps",
+        arm.slug, geometry.width, geometry.height, geometry.frames
+    );
+    let remainder = fixture
+        .strip_prefix(&prefix)
+        .ok_or_else(|| format!("planned.fixture {fixture:?} must start with {prefix:?}"))?;
+    let (fps, seed) = remainder
+        .split_once("-seed")
+        .ok_or_else(|| format!("planned.fixture {fixture:?} must end with -seed<seed>"))?;
+    let fps = fps
+        .parse::<u32>()
+        .map_err(|error| format!("parse Bernini fixture fps {fps:?}: {error}"))?;
+    if fps != BERNINI_FPS {
+        return Err(format!(
+            "planned.fixture declares fps {fps}, but the shipped Bernini manifest publishes \
+             {BERNINI_FPS} fps only"
+        ));
+    }
+    let seed = seed
+        .parse::<u64>()
+        .map_err(|error| format!("parse Bernini fixture seed {seed:?}: {error}"))?;
+    if seed != BERNINI_SEED {
+        return Err(format!(
+            "planned.fixture seed {seed} does not match the Bernini calibration seed {BERNINI_SEED}"
+        ));
+    }
+    Ok((fps, seed))
+}
+
+/// Everything a Bernini capture resolved, kept together so the record's provenance is built from
+/// the values the load actually used rather than from the plan.
+struct BerniniArtifact {
+    repository: String,
+    revision: String,
+    tier_root: PathBuf,
+    spec: LoadSpec,
+}
+
+impl BerniniArtifact {
+    fn resolved_path_fingerprint(&self, arm: BerniniArm, tier: &str) -> String {
+        format!(
+            "{}@{}:{tier}+route:{}",
+            self.repository, self.revision, arm.slug
+        )
+    }
+}
+
+/// Resolve and validate the `SCENEWORKS_BERNINI_*` environment family into a tier-exact load spec.
+///
+/// ONE triple, unlike MiniMax-H3's two: the `SceneWorks/bernini-mlx` rehost is self-contained
+/// (`video_jobs/bernini.rs`: "the turnkey `SceneWorks/bernini-mlx` snapshot is self-contained"), so
+/// `_ROOT` is the tier directory and nothing is redirected onto a second tree.
+///
+/// **`Resident` + `EagerMaterialization`, and no `quantize`.** All three are the worker's own
+/// shape, not a choice made here:
+///
+/// * the tiers ship PRE-PACKED, so `resolve_bernini_tier_dir_and_quant` returns `quant = None` for
+///   a resolved tier subdir and only a legacy flat snapshot keeps a load-time quant. Passing the
+///   planned tier's `Quant` would ask the engine to re-quantize already-packed weights;
+/// * the still lane builds its spec with no adapters and the MLX route rule
+///   (`memory_route_registry.rs`, `backend: Mlx`, `provider: "bernini"`) declares `PLAIN`, so no
+///   overlay is in scope;
+/// * `structurally_streamable` — the engine's own gate on the deferred block stream — requires
+///   `DeferredMaterialization`, which the registry rule reaches only through the worker's
+///   declaration evaluator. The ANCHOR is the plain resident cell, so this arm executes the eager
+///   resident shape the cold load actually takes and attests the loaded contract's own
+///   `load_shape` back against it.
+fn bernini_load_spec(request: &Value, tier: &str, load_shape: LoadShape) -> Result<BerniniArtifact, String> {
+    let repository = protocol::required_env("SCENEWORKS_BERNINI_REPOSITORY")?;
+    let revision = protocol::required_env("SCENEWORKS_BERNINI_REVISION")?;
+    protocol::validate_artifact_identity(&repository, &revision, protocol::BERNINI_REPOSITORY)?;
+    let tier_root = std::fs::canonicalize(PathBuf::from(protocol::required_env(
+        "SCENEWORKS_BERNINI_ROOT",
+    )?))
+    .map_err(|error| format!("canonicalize SCENEWORKS_BERNINI_ROOT: {error}"))?;
+    protocol::validate_huggingface_snapshot_root(
+        &tier_root,
+        &repository,
+        &revision,
+        tier,
+        protocol::BERNINI_REPOSITORY,
+    )?;
+    protocol::validate_plain_overlay_target(request, bernini_target(request)?.0.execution_path)?;
+    let spec = LoadSpec::new(WeightsSource::Dir(tier_root.clone()))
+        .with_offload_policy(OffloadPolicy::Resident)
+        .with_load_shape(load_shape);
+    Ok(BerniniArtifact {
+        repository,
+        revision,
+        tier_root,
+        spec,
+    })
+}
+
+/// The admission context for the Bernini safety scenarios.
+///
+/// `mode` IS AN EVIDENCE KEY: gen-core's `standard_memory_strategy_safety_check` matches
+/// `context.mode.as_key()` against each adopted decode-geometry record's own mode, so a probe run
+/// under one spelling cannot answer a request asked under another. The two members ask under the
+/// two keys their runtime funnels use — `video_admission` types the video route's `text_to_video`
+/// through `memory_mode_from_mode_key` (which maps every non-canonical key to
+/// [`MemoryMode::Other`]), and the still route asks under the canonical
+/// [`MemoryMode::TextToImage`].
+fn bernini_context(
+    arm: BerniniArm,
+    selection: MemorySelection,
+    calibration: &MemoryCalibrationIdentity,
+    fingerprint: &str,
+    geometry: BerniniGeometry,
+    total_bytes: u64,
+    predicted_peak_bytes: u64,
+) -> MemoryRunContext {
+    MemoryRunContext {
+        selection,
+        optimization_authority: MemoryOptimizationAuthority::Calibrated,
+        calibration_abi: calibration.abi,
+        // A parameter only so the stale-evidence probe can pass a deliberate mismatch; every real
+        // call site passes `calibration.fingerprint`.
+        calibration_fingerprint: fingerprint.to_owned(),
+        load_shape: calibration.load_shape,
+        mode: if arm.model_id == BERNINI_IMAGE_MODEL_ID {
+            MemoryMode::TextToImage
+        } else {
+            MemoryMode::Other(arm.mode.to_owned())
+        },
+        has_reference: false,
+        use_pid: false,
+        has_phases: true,
+        geometry: MemoryGeometry {
+            width: geometry.width,
+            height: geometry.height,
+            batch: 1,
+            frames: geometry.frames,
+            reference_count: 0,
+        },
+        overlay: None,
+        budget: MemoryBudget {
+            total_bytes,
+            committed_bytes: 0,
+            reclaimable_bytes: 0,
+            reserved_headroom_bytes: 0,
+        },
+        predicted_peak_bytes,
+        cache_state: MemoryCacheState::Cold,
+        evidence_revision: format!("sc-22737@{}", protocol::INFERENCE_PIN),
+    }
+}
+
+/// The measured request.
+///
+/// `steps` and `guidance` are left UNSET on purpose. `mlx-gen-bernini`'s `FullDefaults` is private,
+/// so a literal here would be a second, unbindable copy of the engine's own default that could
+/// drift silently at a pin bump; `None` executes exactly what the worker's cold render executes
+/// (`video_jobs/bernini.rs` leaves both at the engine defaults too) and is identical across the
+/// measured render and its warm repeats, which is all the determinism comparison needs.
+fn bernini_request(arm: BerniniArm, geometry: BerniniGeometry, fps: u32, seed: u64) -> GenerationRequest {
+    GenerationRequest {
+        prompt: "a slow crane over a terracotta rooftop at golden hour, swallows turning, cinematic"
+            .to_owned(),
+        width: geometry.width,
+        height: geometry.height,
+        count: 1,
+        seed: Some(seed),
+        frames: Some(geometry.frames),
+        fps: (arm.model_id == BERNINI_VIDEO_MODEL_ID).then_some(fps),
+        ..Default::default()
+    }
+}
+
+fn bernini_quality_passes(maximum: f64, mean: f64, rms: f64) -> bool {
+    maximum <= BERNINI_MAX_THRESHOLD
+        && mean <= BERNINI_MEAN_THRESHOLD
+        && rms <= BERNINI_RMS_THRESHOLD
+}
+
+/// Unwrap the member's own output shape into the frame list every downstream comparison uses. The
+/// still member returns `Images`; the video member returns `Video` and its cadence is asserted
+/// against the fixture's, so a record can never claim a rate the engine did not produce.
+fn bernini_output_frames(
+    arm: BerniniArm,
+    output: GenerationOutput,
+    fps: u32,
+) -> Result<Vec<Image>, String> {
+    match (arm.model_id, output) {
+        (BERNINI_IMAGE_MODEL_ID, GenerationOutput::Images(images)) => {
+            if images.len() != 1 {
+                return Err(format!(
+                    "{BERNINI_IMAGE_MODEL_ID} returned {} images for a count=1 request",
+                    images.len()
+                ));
+            }
+            Ok(images)
+        }
+        (
+            BERNINI_VIDEO_MODEL_ID,
+            GenerationOutput::Video {
+                frames,
+                fps: rendered,
+                ..
+            },
+        ) => {
+            if rendered != fps {
+                return Err(format!(
+                    "{BERNINI_VIDEO_MODEL_ID} returned {rendered} fps for a {fps} fps request"
+                ));
+            }
+            if frames.is_empty() {
+                return Err(format!("{BERNINI_VIDEO_MODEL_ID} returned no frames"));
+            }
+            Ok(frames)
+        }
+        (model_id, other) => Err(format!(
+            "{model_id} returned an output shape this arm cannot record: {other:?}"
+        )),
+    }
+}
+
+/// The `mlx:bernini` arm — one measured render plus two warm repeats on the loaded provider, with
+/// the four admission probes taken against the provider's own registered `safety_check`.
+///
+/// Structurally the MiniMax-H3 arm without the audio half: same three fingerprint checks (plan vs
+/// arm, provider vs arm, plan vs provider), same pre-load admission hygiene, same three phase peaks
+/// cut on the boundaries the shipped `generate` already emits.
+fn run_bernini(request: &Value) -> Result<Value, String> {
+    let (arm, geometry) = bernini_target(request)?;
+    protocol::validate_plain_overlay_target(request, arm.execution_path)?;
+    let load_shape = planned_load_shape(request)?;
+    let selection = planned_selection(request)?;
+    let tier = planned_qwen_tier(request)?; // shared numeric-tier parser
+    let (fps, seed) = planned_bernini_capture(request, arm, tier, geometry)?;
+    let expected_fingerprint = bernini_calibration_fingerprint(tier);
+    // Fingerprint check 1 of 3: the PLAN against this arm's own expectation, before any environment
+    // or weight work. A provider re-fingerprint must not silently reuse the epic's plan.
+    let planned_fingerprint = protocol::planned(request)?
+        .get("calibrationFingerprint")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "planned.calibrationFingerprint must be a string".to_owned())?;
+    if planned_fingerprint != expected_fingerprint {
+        return Err(format!(
+            "plan/adapter calibration mismatch: plan={planned_fingerprint}, MLX Bernini arm \
+             implements {expected_fingerprint}"
+        ));
+    }
+    let artifact = bernini_load_spec(request, tier, load_shape)?;
+    let spec = &artifact.spec;
+    // The on-disk footprint of the staged tier, read BEFORE the load for the reason the LTX and
+    // MiniMax arms do it: a mis-staged directory fails here, before any GPU work, rather than after
+    // three full dual-expert renders.
+    let staged_tier_bytes = safetensors_bytes(&artifact.tier_root)?;
+
+    let registry = runtime_macos::providers::bernini::provider_registry()
+        .map_err(|error| format!("build Bernini registry: {error}"))?;
+    let contract = registry
+        .memory_strategy_contract(BERNINI_PROVIDER, spec)
+        .map_err(|error| format!("read {BERNINI_PROVIDER} memory-strategy contract: {error}"))?
+        .ok_or_else(|| "pinned MLX Bernini provider has no memory-strategy contract".to_owned())?;
+    contract
+        .validate_selection(&selection)
+        .map_err(|error| format!("pinned Bernini contract rejected planned selection: {error}"))?;
+    let strategy = attested_strategy(
+        request,
+        &selection,
+        &contract.engaged_composition(selection.strategy),
+    )?;
+    let calibration = contract
+        .calibration
+        .as_ref()
+        .ok_or_else(|| "pinned Bernini contract has no calibration identity".to_owned())?;
+    // Fingerprint check 2 of 3: the PROVIDER contract against this arm's expectation.
+    if calibration.fingerprint != expected_fingerprint {
+        return Err(format!(
+            "pinned Bernini contract fingerprint changed: expected {expected_fingerprint}, got {}",
+            calibration.fingerprint
+        ));
+    }
+    // Fingerprint check 3 of 3: the plan against the provider, so the two cannot agree with the arm
+    // separately while disagreeing with each other.
+    if planned_fingerprint != calibration.fingerprint {
+        return Err(format!(
+            "plan/provider calibration mismatch: plan={planned_fingerprint}, pinned provider={}",
+            calibration.fingerprint
+        ));
+    }
+    if calibration.load_shape != load_shape {
+        return Err(format!(
+            "pinned Bernini contract resolved load shape {:?} for a plan that declares {:?}",
+            calibration.load_shape, load_shape
+        ));
+    }
+
+    let hardware_bytes = request
+        .pointer("/hardware/memoryBytes")
+        .and_then(Value::as_u64)
+        .ok_or_else(|| "run request.hardware.memoryBytes must be an integer".to_owned())?;
+    let wired_limit_bytes = request
+        .pointer("/hardware/wiredLimitBytes")
+        .and_then(Value::as_u64)
+        .ok_or_else(|| "run request.hardware.wiredLimitBytes must be an integer".to_owned())?;
+
+    // Admission mutation hygiene BEFORE the expensive load, through the provider's OWN registered
+    // check: it must accept a fitting request (so the two rejections below are not a blanket
+    // refusal), reject an unknown/zero budget, and reject a mutated calibration fingerprint.
+    //
+    // Through `loaded_safety_check` and not the crate-private `safety_check`: the public entry
+    // point is the one the loaded generator's own check delegates to, and it takes the snapshot's
+    // expert depth so a rung-4 plan row would be gated on the real block count. `trunk_blocks() / 2`
+    // is the engine's OWN declared per-expert depth (`trunk_blocks() == 2 * expert_blocks()`),
+    // derived from the public symbol rather than written as a literal. On this arm's resident
+    // anchor the depth is never consulted — `check_loaded_expert_depth` runs only when the contract
+    // engages bounded transformer residency — so passing the declared value asserts nothing the
+    // load has not already proven.
+    let expert_blocks = runtime_macos::providers::bernini::memory_strategy::trunk_blocks() / 2;
+    let safety = |fingerprint: &str, total_bytes: u64, predicted: u64| {
+        runtime_macos::providers::bernini::memory_strategy::loaded_safety_check(
+            BERNINI_PROVIDER,
+            spec,
+            &contract,
+            &bernini_context(
+                arm,
+                selection,
+                calibration,
+                fingerprint,
+                geometry,
+                total_bytes,
+                predicted,
+            ),
+            expert_blocks,
+        )
+    };
+    if !matches!(
+        safety(&calibration.fingerprint, hardware_bytes, 1),
+        MemorySafetyDecision::Accept
+    ) {
+        return Err(
+            "Bernini admission rejected a fitting probe budget; the scenario rejections below \
+             would be a blanket refusal, not evidence"
+                .to_owned(),
+        );
+    }
+    if !matches!(
+        safety(&calibration.fingerprint, 0, 1),
+        MemorySafetyDecision::Reject { .. }
+    ) {
+        return Err("Bernini admission accepted an unknown/zero memory budget".to_owned());
+    }
+    if !matches!(
+        safety("stale-bernini-fingerprint", hardware_bytes, 1),
+        MemorySafetyDecision::Reject { .. }
+    ) {
+        return Err("Bernini admission accepted stale calibration evidence".to_owned());
+    }
+
+    let generator = registry
+        .load(BERNINI_PROVIDER, spec)
+        .map_err(|error| format!("load real Bernini {tier} provider: {error}"))?;
+    let loaded_contract = generator
+        .memory_strategy_contract()
+        .ok_or_else(|| "loaded Bernini generator exposed no memory contract".to_owned())?;
+    if loaded_contract != &contract {
+        return Err(
+            "loaded Bernini generator contract differs from the registry contract".to_owned(),
+        );
+    }
+
+    // Three phase peaks cut on the boundaries the shipped `generate` already emits, in the ordering
+    // the engine's own staged tests use: read the peak AND the footprint first, reset only after.
+    let pre_generate = Cell::new(PhaseMemory {
+        active: 0,
+        cache: 0,
+    });
+    let conditioning = Cell::new(PhaseMemory {
+        active: 0,
+        cache: 0,
+    });
+    let denoise = Cell::new(PhaseMemory {
+        active: 0,
+        cache: 0,
+    });
+    let conditioning_close = Cell::new(AllocatorState::default());
+    let denoise_close = Cell::new(AllocatorState::default());
+    clear_cache();
+    reset_peak_memory();
+    let pre_rung_active = get_active_memory() as u64;
+    let pre_rung_cache = get_cache_memory() as u64;
+    let measured = bernini_output_frames(
+        arm,
+        generator
+            .generate(
+                &bernini_request(arm, geometry, fps, seed),
+                &mut |progress| match progress {
+                    Progress::Loading(LoadPhase::TextEncoder) => {
+                        pre_generate.set(PhaseMemory::capture());
+                        reset_peak_memory();
+                    }
+                    Progress::Loading(LoadPhase::Renderer) => {
+                        conditioning.set(PhaseMemory::capture());
+                        conditioning_close.set(AllocatorState::capture_current());
+                        reset_peak_memory();
+                    }
+                    Progress::Decoding => {
+                        denoise.set(PhaseMemory::capture());
+                        denoise_close.set(AllocatorState::capture_current());
+                        reset_peak_memory();
+                    }
+                    _ => {}
+                },
+            )
+            .map_err(|error| format!("generate measured Bernini render: {error}"))?,
+        fps,
+    )?;
+    let decode = PhaseMemory::capture();
+    let decode_close = AllocatorState::capture_current();
+    let pre_generate = pre_generate.get();
+    let conditioning = conditioning.get();
+    let denoise = denoise.get();
+    let conditioning_close = conditioning_close.get();
+    let denoise_close = denoise_close.get();
+    if [conditioning.active, denoise.active, decode.active].contains(&0) {
+        return Err(
+            "a synchronized Bernini lifecycle phase reported a zero active peak; the engine \
+             stopped emitting a boundary and the attribution collapsed"
+                .to_owned(),
+        );
+    }
+    if measured.len() as u64 != u64::from(geometry.frames) {
+        return Err(format!(
+            "Bernini rendered {} frames for a {}-frame request",
+            measured.len(),
+            geometry.frames
+        ));
+    }
+    let first = measured
+        .first()
+        .ok_or_else(|| "Bernini render returned no first frame".to_owned())?;
+    if first.pixels.is_empty() || first.pixels.iter().all(|pixel| *pixel == first.pixels[0]) {
+        return Err("Bernini render returned a degenerate first frame".to_owned());
+    }
+
+    let overall = PhaseMemory::overall(&[conditioning, denoise, decode]);
+    // The video member charges the RESIDENT ACTIVE peak for the reason every video lane does; the
+    // still member keeps the historical componentwise image bound, so a `bernini_image` record is
+    // admissible under exactly the arithmetic shipped image admission already applies.
+    let predicted_peaks = if arm.model_id == BERNINI_IMAGE_MODEL_ID {
+        image_predicted_peak_bytes(conditioning, denoise, decode)
+    } else {
+        video_predicted_peak_bytes(conditioning, denoise, decode)
+    };
+    let predicted = predicted_peaks.overall;
+    // The same two ceilings `memory-calibration-harness.mjs#assertResidencyFitsHardware` applies —
+    // checked HERE so a capture that cannot be admitted fails loudly during the campaign rather
+    // than producing a well-formed record the harness rejects afterwards.
+    if overall.active > hardware_bytes {
+        return Err(format!(
+            "Bernini observed overall active {} bytes above the probed hardware memory \
+             {hardware_bytes} bytes",
+            overall.active
+        ));
+    }
+    if overall.active > wired_limit_bytes {
+        return Err(format!(
+            "Bernini observed overall active {} bytes above the probed wired ceiling \
+             {wired_limit_bytes} bytes",
+            overall.active
+        ));
+    }
+    // Probe 4 of 4, on the LOADED generator and against the measured evidence.
+    let exact_fit = bernini_context(
+        arm,
+        selection,
+        calibration,
+        &calibration.fingerprint,
+        geometry,
+        predicted,
+        predicted,
+    );
+    if !matches!(
+        generator.memory_strategy_safety_check(&exact_fit),
+        MemorySafetyDecision::Accept
+    ) {
+        return Err("Bernini admission rejected an exact-fit calibrated budget".to_owned());
+    }
+    // THE EXACT-FIT ACCEPT IS NOT SELF-VALIDATING: the same loaded generator must REJECT a zero
+    // budget, or its accept is a blanket accept rather than admission evidence.
+    let mut unknown_budget = exact_fit.clone();
+    unknown_budget.budget.total_bytes = 0;
+    if !matches!(
+        generator.memory_strategy_safety_check(&unknown_budget),
+        MemorySafetyDecision::Reject { .. }
+    ) {
+        return Err(
+            "the loaded Bernini generator accepted a zero/unknown budget, so its exact-fit accept \
+             is a blanket accept rather than admission evidence"
+                .to_owned(),
+        );
+    }
+
+    // Warm repeat determinism + cleanup bounds on this exact loaded provider.
+    clear_cache();
+    reset_peak_memory();
+    let baseline = bernini_output_frames(
+        arm,
+        generator
+            .generate(&bernini_request(arm, geometry, fps, seed), &mut |_| {})
+            .map_err(|error| format!("generate warm Bernini control: {error}"))?,
+        fps,
+    )?;
+    let clean_warm_peak = get_peak_memory() as u64;
+    clear_cache();
+    let clean_post_cleanup = AllocatorState::capture_current();
+    let cleanup_bounds =
+        LifecycleMemoryBounds::from_clean_warm(clean_warm_peak, clean_post_cleanup);
+    let (maximum_error, mean_error, rms_error) = video_max_mean_rms_abs(&measured, &baseline)?;
+    if !bernini_quality_passes(maximum_error, mean_error, rms_error) {
+        return Err(format!(
+            "Bernini warm repeat exceeded the determinism envelope: max={maximum_error:.6}, \
+             mean={mean_error:.6}, rms={rms_error:.6}"
+        ));
+    }
+    reset_peak_memory();
+    let warm = bernini_output_frames(
+        arm,
+        generator
+            .generate(&bernini_request(arm, geometry, fps, seed), &mut |_| {})
+            .map_err(|error| format!("generate warm Bernini repeat: {error}"))?,
+        fps,
+    )?;
+    let warm_peak = get_peak_memory() as u64;
+    if !cleanup_bounds.allows_warm_peak(warm_peak) {
+        return Err(format!(
+            "Bernini warm repeat peaked at {warm_peak} bytes, above the clean warm control \
+             {clean_warm_peak} bytes plus 2%"
+        ));
+    }
+    clear_cache();
+    let warm_post_cleanup = AllocatorState::capture_current();
+    if !cleanup_bounds.allows_retained(warm_post_cleanup) {
+        return Err(format!(
+            "Bernini warm repeat retained active/cache bytes {warm_post_cleanup:?} above the \
+             clean warm cleanup {clean_post_cleanup:?} plus {} bytes",
+            cleanup_bounds.tolerance_bytes,
+        ));
+    }
+    let (warm_maximum, warm_mean, warm_rms) = video_max_mean_rms_abs(&measured, &warm)?;
+    if !bernini_quality_passes(warm_maximum, warm_mean, warm_rms) {
+        return Err("Bernini second warm repeat changed the deterministic output".to_owned());
+    }
+
+    // Arm-internal negative-mutation falsifiability check: a runtime_complete record keeps
+    // `negativeMutation` null, so the breach is verified here and the numbers land in diagnostics.
+    let mutated = measured
+        .iter()
+        .map(qwen_negative_mutation)
+        .collect::<Vec<_>>();
+    let (mutated_maximum, mutated_mean, mutated_rms) = video_max_mean_rms_abs(&mutated, &baseline)?;
+    if bernini_quality_passes(mutated_maximum, mutated_mean, mutated_rms) {
+        return Err("Bernini output mutation did not breach the determinism envelope".to_owned());
+    }
+
+    let lifecycle_blocker = concat!(
+        "this arm executes the measured render plus two unscoped warm repeats on the loaded ",
+        "provider; it opens no memory-strategy request scope and injects no calibration fault, so ",
+        "the scoped cancellation and authorized-error scenarios and their recovery renders are ",
+        "unexecuted. The pinned provider does register begin_request, so they are implementable — ",
+        "they are not run here, and this record claims nothing about them"
+    );
+    let mut fragment = json!({
+        "status": "runtime_complete",
+        "strategy": strategy,
+        // From the CONTRACT's own calibration identity, never copied from the plan (sc-16482).
+        "loadShape": load_shape_key(calibration.load_shape),
+        "artifact": {
+            "repository": artifact.repository,
+            "resolvedRevision": artifact.revision,
+            "variant": tier,
+        },
+        "sweep": minimax_complete_sweep(request)?,
+        "scenarios": [
+            { "name": "exact_fit", "result": "passed", "predictedBytes": predicted, "effectiveBudgetBytes": predicted },
+            { "name": "unknown_budget", "result": "passed", "reason": "the registered Bernini admission check rejected a zero/unknown budget before load" },
+            { "name": "stale_evidence", "result": "passed", "reason": "the registered Bernini admission check rejected a mutated calibration fingerprint before load" },
+            { "name": "warm_repeat", "result": "passed", "reason": "two warm repeats on the loaded provider reproduced the measured output frame-for-frame inside the declared envelope, within the clean warm peak and cleanup bounds" },
+            { "name": "cancel", "result": "not_run", "reason": lifecycle_blocker },
+            { "name": "error", "result": "not_run", "reason": lifecycle_blocker },
+            { "name": "loadability", "result": "passed" },
+            { "name": "overlay", "result": "not_applicable", "reason": "settled below from the declared reference-free target" }
+        ],
+        "predictedPeakBytes": predicted_peaks.json(),
+        "observedMemory": {
+            "conditioning": conditioning.json(),
+            "denoise": denoise.json(),
+            "decode": decode.json(),
+            "overall": overall.json(),
+        },
+        "quality": {
+            "contract": "identical artifact, prompt, seed, geometry, frames, fps, tier and loaded provider contract; cold measured output versus two warm unscoped repeats, compared over every frame",
+            "identicalInputs": true,
+            "result": "passed",
+            "maximumError": maximum_error,
+            "meanError": mean_error,
+            "rootMeanSquareError": rms_error,
+            "maximumErrorThreshold": BERNINI_MAX_THRESHOLD,
+            "meanErrorThreshold": BERNINI_MEAN_THRESHOLD,
+            "rootMeanSquareErrorThreshold": BERNINI_RMS_THRESHOLD,
+        },
+        "negativeMutation": null,
+        "loadability": {
+            "result": "passed",
+            "resolvedPathFingerprint": artifact.resolved_path_fingerprint(arm, tier),
+        },
+        "output": {
+            "modelId": arm.model_id,
+            "frames": geometry.frames,
+            "fps": fps,
+            "firstFrameNondegenerate": true,
+        },
+        "diagnostics": protocol::diagnostics(
+            "memory-mlx-adapter:bernini-dual-expert",
+            "executed",
+            [lifecycle_blocker.to_owned()],
+            [
+                ("preRungActiveAfterClear", "bytes", pre_rung_active),
+                ("preRungCacheAfterClear", "bytes", pre_rung_cache),
+                ("preGenerateActivePeak", "bytes", pre_generate.active),
+                ("conditioningActivePeak", "bytes", conditioning.active),
+                ("conditioningCloseActive", "bytes", conditioning_close.active),
+                ("conditioningCloseCache", "bytes", conditioning_close.cache),
+                ("denoiseActivePeak", "bytes", denoise.active),
+                ("denoiseCloseActive", "bytes", denoise_close.active),
+                ("denoiseCloseCache", "bytes", denoise_close.cache),
+                ("decodeActivePeak", "bytes", decode.active),
+                ("decodeCloseActive", "bytes", decode_close.active),
+                ("decodeCloseCache", "bytes", decode_close.cache),
+                ("overallAllocatorEnvelope", "bytes", overall.allocator_bytes()),
+                ("predictedOverallCeiling", "bytes", predicted),
+                ("lifecycleCleanWarmPeak", "bytes", clean_warm_peak),
+                ("lifecycleCleanPostCleanupActive", "bytes", clean_post_cleanup.active),
+                ("lifecycleCleanPostCleanupCache", "bytes", clean_post_cleanup.cache),
+                ("lifecycleCleanupTolerance", "bytes", cleanup_bounds.tolerance_bytes),
+                ("lifecycleWarmRepeatPeak", "bytes", warm_peak),
+                ("lifecycleWarmRepeatPostCleanupActive", "bytes", warm_post_cleanup.active),
+                ("lifecycleWarmRepeatPostCleanupCache", "bytes", warm_post_cleanup.cache),
+                ("negativeMutationMaximumErrorPer255", "count", (mutated_maximum * 255.0).round() as u64),
+                ("negativeMutationMeanErrorPer255", "count", (mutated_mean * 255.0).round() as u64),
+                ("negativeMutationRootMeanSquareErrorPer255", "count", (mutated_rms * 255.0).round() as u64),
+                ("loadShapeDeferred", "count", u64::from(load_shape == LoadShape::DeferredMaterialization)),
+                ("stagedTierBytes", "bytes", staged_tier_bytes),
+            ],
+        ),
+        "capturedAt": protocol::captured_at(),
+    });
+    protocol::settle_plain_overlay_scenario(request, &mut fragment, arm.execution_path)?;
     Ok(fragment)
 }
 
@@ -13528,6 +14541,12 @@ fn run(request: &Value) -> Result<Value, String> {
         // it accepts a multi-frame geometry only by validating against MiniMax-H3's own lattice,
         // stride and canvas budget, read off the pinned engine crate.
         MINIMAX_PROVIDER => run_minimax_h3(request),
+        // sc-22737: the third video arm, and the only one that also serves a STILL catalog entry —
+        // `bernini` and `bernini_image` are two SceneWorks entries on ONE engine provider id, and
+        // `bernini_target` resolves which from `(provider, modelId)` and refuses an unknown pair by
+        // name. Validates against Bernini's own advertised canvases rather than refusing multi-frame
+        // geometry, exactly as the two video arms above it do.
+        BERNINI_PROVIDER => run_bernini(request),
         other => Err(format!(
             "MLX five-rung calibration does not implement provider {other:?}"
         )),
@@ -18801,6 +19820,7 @@ mod minimax_tests {
         let contract = fixture_contract(Some(Quant::Q4), LoadShape::EagerMaterialization);
         let calibration = contract.calibration.as_ref().unwrap();
         let context = minimax_context(
+            MINIMAX_BASE_MEMBER,
             planned_selection(&minimal_request(MINIMAX_PROVIDER)).unwrap(),
             calibration,
             &calibration.fingerprint,
@@ -18987,29 +20007,30 @@ mod minimax_tests {
     #[test]
     fn the_fixture_binds_the_tier_geometry_cadence_and_seed() {
         let request = minimal_request(MINIMAX_PROVIDER);
-        let geometry = validate_minimax_target(&request).unwrap();
+        let (member, geometry) = validate_minimax_target(&request).unwrap();
+        assert_eq!(member, MINIMAX_BASE_MEMBER);
         assert_eq!(
-            planned_minimax_capture(&request, "q4", geometry).unwrap(),
+            planned_minimax_capture(&request, member, "q4", geometry).unwrap(),
             (24, MINIMAX_SEED)
         );
         // The tier and every geometry axis are part of the binding.
         for tier in ["q8", "bf16"] {
-            assert!(planned_minimax_capture(&request, tier, geometry)
+            assert!(planned_minimax_capture(&request, member, tier, geometry)
                 .unwrap_err()
                 .contains("must start with"));
         }
         let mut off = request.clone();
         off["planned"]["fixture"] = json!("minimax-h3-mlx-q4-1344x768-f141-fps24-seed17137");
-        assert!(planned_minimax_capture(&off, "q4", geometry)
+        assert!(planned_minimax_capture(&off, member, "q4", geometry)
             .unwrap_err()
             .contains("must start with"));
         // The cadence axis the geometry envelope cannot carry has exactly one legal value here.
         off["planned"]["fixture"] = json!("minimax-h3-mlx-q4-1344x768-f124-fps30-seed17137");
-        assert!(planned_minimax_capture(&off, "q4", geometry)
+        assert!(planned_minimax_capture(&off, member, "q4", geometry)
             .unwrap_err()
             .contains("24 fps only"));
         off["planned"]["fixture"] = json!("minimax-h3-mlx-q4-1344x768-f124-fps24-seed1234");
-        assert!(planned_minimax_capture(&off, "q4", geometry)
+        assert!(planned_minimax_capture(&off, member, "q4", geometry)
             .unwrap_err()
             .contains("does not match the MiniMax-H3 calibration seed"));
     }
@@ -19229,7 +20250,15 @@ mod minimax_tests {
         let calibration = contract.calibration.as_ref().unwrap();
         let geometry = validate_minimax_geometry(1344, 768, 124).unwrap();
         let context = |fingerprint: &str, total: u64| {
-            minimax_context(selection, calibration, fingerprint, geometry, total, 1)
+            minimax_context(
+                MINIMAX_BASE_MEMBER,
+                selection,
+                calibration,
+                fingerprint,
+                geometry,
+                total,
+                1,
+            )
         };
         assert!(matches!(
             mlx_gen_minimax_h3::memory_strategy::safety_check(
