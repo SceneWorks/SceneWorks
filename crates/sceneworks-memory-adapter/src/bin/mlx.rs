@@ -130,6 +130,27 @@ const Z_IMAGE_EDIT_STEPS: u32 = 4;
 const FLUX2_PROVIDER: &str = "flux2_dev";
 const FLUX2_CALIBRATION_FINGERPRINT: &str = "sc-18218-flux2-dev-t2i-resident-evidence-v1";
 const FLUX2_PLAIN_EXECUTION_PATH: &str = "the MLX FLUX.2-dev base-only text-to-image path";
+/// The FLUX.2-klein-9B text-to-image provider (sc-22727). BOTH klein catalog models —
+/// `flux2_klein_9b` and the separately distilled `flux2_klein_9b_kv` — load through this ONE engine
+/// registry id (`crates/sceneworks-worker/src/engines.rs`); they differ only in the artifact, which
+/// the engine discriminates by snapshot path and `LoadSpec::resolved_route`.
+const FLUX2_KLEIN_PROVIDER: &str = "flux2_klein_9b";
+const FLUX2_KLEIN_PLAIN_EXECUTION_PATH: &str =
+    "the MLX FLUX.2-klein-9B base-only text-to-image path";
+const FLUX2_KLEIN_KV_PLAIN_EXECUTION_PATH: &str =
+    "the MLX FLUX.2-klein-9B KV-cache base-only text-to-image path";
+/// The WEIGHTS-FREE registry declaration identity for the klein T2I provider:
+/// `KLEIN_STATIC_BEHAVIOR_FINGERPRINT` suffixed with the provider id
+/// (`provider_id.replace('_', "-")`), published by
+/// `mlx-gen-flux2::memory_strategy::weights_free_klein_contract`. This is the string
+/// `config/manifests/builtin.models.jsonc` declares for every klein rung on both klein models —
+/// a DECLARATION, not the identity a load of real weights publishes. sc-22727: the two are no
+/// longer the same string; see [`flux2_calibration_fingerprint`].
+const FLUX2_KLEIN_REGISTRY_FINGERPRINT: &str =
+    "flux2-klein-static-registry-behavior-v2-flux2-klein-9b";
+/// One fixed seed for every `mlx:flux2_klein_9b*` fixture. Distinct from [`FLUX2_SEED`] so a klein
+/// receipt can never be traced to the dev lane's calibration seed.
+const FLUX2_KLEIN_SEED: u64 = 22727;
 /// FLUX.2-dev quality here is repeat determinism on one loaded provider: the resident rung selects
 /// no alternate code path, so the cold measured render and its warm unscoped repeats must agree to
 /// within Metal allocator jitter. 3/255 max and 1/255 mean sit far above observed same-process
@@ -1080,12 +1101,14 @@ mod tests {
     /// vocabulary appears, which is what distinguishes a dispatch refusal from a misroute.
     #[test]
     fn run_refuses_a_provider_the_mlx_adapter_does_not_implement() {
-        // `flux2_dev` left this list when sc-18218 landed its arm; `flux2_dev_edit` stays — the
-        // contract provider is not a dispatchable lane.
+        // `flux2_dev` left this list when sc-18218 landed its arm, and `flux2_klein_9b` when
+        // sc-22727 landed the klein members; `flux2_dev_edit` and the klein edit routes stay — a
+        // contract-only provider is not a dispatchable lane.
         // `ltx_2_3` left this class when sc-18808 landed the video arm; `ltx_2_3_distilled` (the
         // CANDLE LTX engine id) and `ltx_2_3_eros` stay — neither is a dispatchable MLX lane.
         for provider in [
-            "flux2_klein_9b",
+            "flux2_klein_9b_edit",
+            "flux2_klein_9b_kv_edit",
             "flux2_dev_edit",
             "sana",
             "ltx_2_3_distilled",
@@ -1133,11 +1156,19 @@ mod tests {
             "sdxl",
             "krea_2_turbo_control",
             "flux2_dev",
+            // sc-22727: both klein catalog models ride this ONE registry id.
+            "flux2_klein_9b",
             // sc-18808: the video arm rides the same dispatch, so it is covered by the same proof.
             "ltx_2_3",
             "ltx_2_5",
             // sc-18663: and the second video arm.
             "minimax_h3",
+            // sc-22731: the SANA and Chroma1 families.
+            "sana_1600m",
+            "sana_sprint_1600m",
+            "chroma1_hd",
+            "chroma1_base",
+            "chroma1_flash",
         ] {
             let request = json!({ "planned": { "target": { "provider": provider } } });
             let error = run(&request)
@@ -1157,9 +1188,15 @@ mod tests {
         assert_eq!(SDXL_PROVIDER, "sdxl");
         assert_eq!(KREA_PROVIDER, "krea_2_turbo_control");
         assert_eq!(FLUX2_PROVIDER, "flux2_dev");
+        assert_eq!(FLUX2_KLEIN_PROVIDER, "flux2_klein_9b");
         assert_eq!(LTX_PROVIDER, "ltx_2_3");
         assert_eq!(LTX25_PROVIDER, "ltx_2_5");
         assert_eq!(MINIMAX_PROVIDER, "minimax_h3");
+        assert_eq!(SANA_PROVIDER, "sana_1600m");
+        assert_eq!(SANA_SPRINT_PROVIDER, "sana_sprint_1600m");
+        assert_eq!(CHROMA1_HD_PROVIDER, "chroma1_hd");
+        assert_eq!(CHROMA1_BASE_PROVIDER, "chroma1_base");
+        assert_eq!(CHROMA1_FLASH_PROVIDER, "chroma1_flash");
     }
 
     #[test]
@@ -4214,59 +4251,334 @@ fn run_flux_one(request: &Value) -> Result<Value, String> {
     Ok(fragment)
 }
 
-/// Maximum, mean, and root-mean-square absolute error between two images, in [0,1] units. The
-/// runtime_complete quality shape requires the RMS metric alongside max/mean
-/// (`memory-calibration-harness.mjs#validateRuntimeComplete`), which is why this exists next to
-/// `image_max_mean_abs` instead of replacing it.
-fn image_max_mean_rms_abs(left: &Image, right: &Image) -> Result<(f64, f64, f64), String> {
-    let (maximum, mean) = image_max_mean_abs(left, right)?;
-    let mut sum_squares = 0.0_f64;
-    for (&left, &right) in left.pixels.iter().zip(&right.pixels) {
-        let difference = (f64::from(left) - f64::from(right)).abs() / 255.0;
-        sum_squares += difference * difference;
-    }
-    Ok((
-        maximum,
-        mean,
-        (sum_squares / left.pixels.len() as f64).sqrt(),
-    ))
+// ---------------------------------------------------------------------------------------------
+// The SANA and Chroma1 family arm (sc-22731): `sana_1600m`, `sana_sprint_1600m`, `chroma1_hd`,
+// `chroma1_base`, `chroma1_flash`.
+// ---------------------------------------------------------------------------------------------
+
+/// Which engine crate a member belongs to. The two families share one arm because the measurement
+/// is the same shape — a plain, reference-free, still text-to-image resident capture off a per-tier
+/// SceneWorks turnkey — but they publish their production identities from different tables and
+/// their loads are shaped differently, so the family stays in the type rather than being inferred
+/// from the provider id at each use.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SanaChromaFamily {
+    /// `mlx-gen-sana`. Its identity key carries the OFFLOAD POLICY as well as (route, tier) —
+    /// rung 4 is declared only on `Sequential`, so the two policies publish genuinely different
+    /// ladders (inference PR 951).
+    Sana,
+    /// `mlx-gen-chroma`. Its identity key is (route, tier) alone; the policy and the load shape are
+    /// deliberately not in it.
+    Chroma,
 }
 
-fn flux2_quality_passes(maximum: f64, mean: f64, rms: f64) -> bool {
-    maximum <= FLUX2_MAX_THRESHOLD && mean <= FLUX2_MEAN_THRESHOLD && rms <= FLUX2_RMS_THRESHOLD
+/// One member of the two families this arm measures, resolved from the plan's `target.provider`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct SanaChromaArm {
+    family: SanaChromaFamily,
+    /// The registry id handed to `catalog.media().load` — the production loader (E4), and the same
+    /// id the worker passes to `inference_runtime::load` (these five catalog ids ARE their engine
+    /// ids, `engines.rs` MODEL_TABLE).
+    provider: &'static str,
+    /// The route segment the engine's identity table interpolates: `base`/`sprint` for SANA,
+    /// `hd`/`base`/`flash` for Chroma1.
+    route: &'static str,
+    execution_path: &'static str,
+    /// The still-geometry refusal label (sc-18808).
+    still_calibration: &'static str,
+    repository_env: &'static str,
+    revision_env: &'static str,
+    root_env: &'static str,
+    expected_repository: &'static str,
+    /// The record's diagnostics source and fixture prefix, `<slug>-mlx-<tier>-<edge>-seed…`.
+    slug: &'static str,
+    /// The materialization shape every plan row of this member names, and the one the loaded
+    /// generator's calibration identity must carry (sc-22731 review). The two families genuinely
+    /// differ: `mlx-gen-sana` publishes its resident ladder EAGER — the windowed rung 4 is declared
+    /// only under `OffloadPolicy::Sequential`, which no anchor plans — while `mlx-gen-chroma`'s
+    /// shared ladder is deferred at every route and tier. Carried as a FIELD so the plan rows, the
+    /// LoadSpec and the capture cannot each spell it independently.
+    load_shape: LoadShape,
 }
 
-/// The LTX-2.3 twin of [`flux2_quality_passes`], over the LTX-named thresholds so an `mlx:ltx_2_3`
-/// receipt's numbers trace to an LTX constant.
-fn ltx_quality_passes(maximum: f64, mean: f64, rms: f64) -> bool {
-    maximum <= LTX_MAX_THRESHOLD && mean <= LTX_MEAN_THRESHOLD && rms <= LTX_RMS_THRESHOLD
-}
+const SANA_PROVIDER: &str = "sana_1600m";
+const SANA_SPRINT_PROVIDER: &str = "sana_sprint_1600m";
+const CHROMA1_HD_PROVIDER: &str = "chroma1_hd";
+const CHROMA1_BASE_PROVIDER: &str = "chroma1_base";
+const CHROMA1_FLASH_PROVIDER: &str = "chroma1_flash";
+/// One seed for both families: the fixture binds route, tier and edge, so the seed does not also
+/// have to carry the route.
+const SANA_CHROMA_SEED: u64 = 22731;
 
-/// Defense-in-depth mirror of the provider-mismatch guard `validate_z_image_batch` carries
-/// (sc-18104): `run` dispatches by name today, but this arm hardcodes the FLUX.2-dev contract, so a
-/// future caller must be refused by name here rather than misrouted into that contract.
-fn validate_flux2_target(request: &Value) -> Result<(), String> {
+const SANA_ARM: SanaChromaArm = SanaChromaArm {
+    family: SanaChromaFamily::Sana,
+    provider: SANA_PROVIDER,
+    route: "base",
+    execution_path: "the MLX SANA 1.6B base-only text-to-image path",
+    still_calibration: "MLX SANA 1.6B calibration",
+    repository_env: "SCENEWORKS_SANA_REPOSITORY",
+    revision_env: "SCENEWORKS_SANA_REVISION",
+    root_env: "SCENEWORKS_SANA_ROOT",
+    expected_repository: protocol::SANA_REPOSITORY,
+    slug: "sana-1600m",
+    load_shape: LoadShape::EagerMaterialization,
+};
+
+const SANA_SPRINT_ARM: SanaChromaArm = SanaChromaArm {
+    family: SanaChromaFamily::Sana,
+    provider: SANA_SPRINT_PROVIDER,
+    route: "sprint",
+    execution_path: "the MLX SANA-Sprint 1.6B base-only text-to-image path",
+    still_calibration: "MLX SANA-Sprint 1.6B calibration",
+    repository_env: "SCENEWORKS_SANA_SPRINT_REPOSITORY",
+    revision_env: "SCENEWORKS_SANA_SPRINT_REVISION",
+    root_env: "SCENEWORKS_SANA_SPRINT_ROOT",
+    expected_repository: protocol::SANA_SPRINT_REPOSITORY,
+    slug: "sana-sprint",
+    load_shape: LoadShape::EagerMaterialization,
+};
+
+const CHROMA1_HD_ARM: SanaChromaArm = SanaChromaArm {
+    family: SanaChromaFamily::Chroma,
+    provider: CHROMA1_HD_PROVIDER,
+    route: "hd",
+    execution_path: "the MLX Chroma1-HD base-only text-to-image path",
+    still_calibration: "MLX Chroma1-HD calibration",
+    repository_env: "SCENEWORKS_CHROMA1_HD_REPOSITORY",
+    revision_env: "SCENEWORKS_CHROMA1_HD_REVISION",
+    root_env: "SCENEWORKS_CHROMA1_HD_ROOT",
+    expected_repository: protocol::CHROMA1_HD_REPOSITORY,
+    slug: "chroma1-hd",
+    load_shape: LoadShape::DeferredMaterialization,
+};
+
+const CHROMA1_BASE_ARM: SanaChromaArm = SanaChromaArm {
+    family: SanaChromaFamily::Chroma,
+    provider: CHROMA1_BASE_PROVIDER,
+    route: "base",
+    execution_path: "the MLX Chroma1-Base base-only text-to-image path",
+    still_calibration: "MLX Chroma1-Base calibration",
+    repository_env: "SCENEWORKS_CHROMA1_BASE_REPOSITORY",
+    revision_env: "SCENEWORKS_CHROMA1_BASE_REVISION",
+    root_env: "SCENEWORKS_CHROMA1_BASE_ROOT",
+    expected_repository: protocol::CHROMA1_BASE_REPOSITORY,
+    slug: "chroma1-base",
+    load_shape: LoadShape::DeferredMaterialization,
+};
+
+const CHROMA1_FLASH_ARM: SanaChromaArm = SanaChromaArm {
+    family: SanaChromaFamily::Chroma,
+    provider: CHROMA1_FLASH_PROVIDER,
+    route: "flash",
+    execution_path: "the MLX Chroma1-Flash base-only text-to-image path",
+    still_calibration: "MLX Chroma1-Flash calibration",
+    repository_env: "SCENEWORKS_CHROMA1_FLASH_REPOSITORY",
+    revision_env: "SCENEWORKS_CHROMA1_FLASH_REVISION",
+    root_env: "SCENEWORKS_CHROMA1_FLASH_ROOT",
+    expected_repository: protocol::CHROMA1_FLASH_REPOSITORY,
+    slug: "chroma1-flash",
+    load_shape: LoadShape::DeferredMaterialization,
+};
+
+/// Every member this arm serves, in one place so the tables and the tests cannot disagree about
+/// which five cells exist.
+const SANA_CHROMA_ARMS: [SanaChromaArm; 5] = [
+    SANA_ARM,
+    SANA_SPRINT_ARM,
+    CHROMA1_HD_ARM,
+    CHROMA1_BASE_ARM,
+    CHROMA1_FLASH_ARM,
+];
+
+/// Which family member the plan asks for, refused by name. Unlike the FLUX.1 arm the key is the
+/// provider alone: neither family has a second mode on this lane that loads a different artifact
+/// (Chroma is `text_to_image` only, and SANA's `image_to_image` is the same base load driven from
+/// a reference, which no anchor plans).
+fn sana_chroma_arm(request: &Value) -> Result<SanaChromaArm, String> {
     let provider = protocol::planned(request)?
         .pointer("/target/provider")
         .and_then(Value::as_str)
         .ok_or_else(|| "planned.target.provider must be a string".to_owned())?;
-    if provider != FLUX2_PROVIDER {
-        return Err(format!(
-            "MLX FLUX.2-dev calibration does not implement provider {provider:?}"
-        ));
-    }
-    protocol::validate_still_geometry(request, "MLX FLUX.2-dev calibration")
+    SANA_CHROMA_ARMS
+        .iter()
+        .copied()
+        .find(|arm| arm.provider == provider)
+        .ok_or_else(|| format!("the MLX SANA/Chroma1 arm does not implement provider {provider:?}"))
 }
 
-/// Bind the fixture to the planned tier AND geometry edge, deriving the seed — the same
-/// fixture-to-plan binding `planned_qwen_seed` enforces, extended to the edge because this lane's
-/// plan carries each of its q4 and q8 tiers at two geometries (768² and 1024²).
-fn planned_flux2_seed(request: &Value, tier: &str, width: u32) -> Result<u64, String> {
+/// The artifact one SANA/Chroma1 capture loads: the env-bound repository and revision, the PLANNED
+/// tier, and the `LoadSpec` that opens exactly that tier.
+#[derive(Debug)]
+struct SanaChromaArtifact {
+    arm: SanaChromaArm,
+    repository: String,
+    revision: String,
+    tier: &'static str,
+    spec: LoadSpec,
+}
+
+impl SanaChromaArtifact {
+    fn loadability_fingerprint(&self) -> String {
+        format!("{}@{}:{}", self.repository, self.revision, self.tier)
+    }
+
+    fn artifact_json(&self) -> Value {
+        json!({
+            "repository": self.repository,
+            "resolvedRevision": self.revision,
+            "variant": self.tier,
+        })
+    }
+}
+
+/// The production calibration identity the loaded generator publishes for one `(member, tier)`
+/// cell — the tables `mlx-gen-sana::memory_strategy::production_calibration_fingerprint` and
+/// `mlx-gen-chroma::memory_strategy::production_calibration_fingerprint` mint (inference PR 951).
+///
+/// The two MEASURED keys are read off the engine constants byte-for-byte rather than spelled here,
+/// so this table cannot drift off the crates it mirrors; every other cell is the format string the
+/// engine interpolates. SANA's key carries `-resident` because that is the policy this arm — and
+/// the worker's MLX still-image path — loads under; Chroma's key carries no policy at all.
+///
+/// Written here as well as in the engines so the plan/arm binding is weights-free and can be proven
+/// on a CPU-only host. The capture refuses a loaded contract whose identity differs from this
+/// table, so the two copies cannot drift unnoticed once the epic's pin bump lands.
+fn sana_chroma_calibration_fingerprint(arm: SanaChromaArm, tier: &str) -> String {
+    match (arm.family, arm.provider, tier) {
+        (SanaChromaFamily::Sana, SANA_PROVIDER, "q4") => {
+            runtime_macos::providers::sana::memory_strategy::RESIDENT_MEMORY_CALIBRATION_FINGERPRINT
+                .to_owned()
+        }
+        (SanaChromaFamily::Chroma, CHROMA1_BASE_PROVIDER, "q4") => {
+            runtime_macos::providers::chroma::memory_strategy::MEMORY_CALIBRATION_FINGERPRINT
+                .to_owned()
+        }
+        (SanaChromaFamily::Sana, _, tier) => {
+            format!("sana-{}-{tier}-mlx-full-ladder-v1-resident", arm.route)
+        }
+        (SanaChromaFamily::Chroma, _, tier) => {
+            format!("chroma1-{}-{tier}-mlx-shared-ladder-v1", arm.route)
+        }
+    }
+}
+
+/// The weights-free conformance identities the two MLX engines publish for a registry-behaviour
+/// contract that loaded no weights (`sana-<route>-<tier>-mlx-weights-free-conformance-v1-<policy>`
+/// and `chroma1-mlx-registry-behavior-v1-<route>`). A plan row naming one of these could never be
+/// satisfied by a production load. Test-only: the sole caller is the plan-identity conformance
+/// test in `sana_chroma_tests`.
+///
+/// `_mlx_` in the name, and not extended to cover the Candle lane, because the Candle lane has NO
+/// such namespace to guard at inference `c6d6a4db`: `candle-gen-sana::memory_strategy` mints the
+/// single identity `sana-candle-dense-<route>-full-ladder-v1` (its `memory_strategy.rs:581`)
+/// whether or not asset facts were injected — the weights-free fixture differs only in publishing
+/// no `resident_components` — and `candle-gen-chroma` publishes no conformance string at all. A
+/// shared predicate would therefore have been a guard over an empty set, which reads as coverage.
+#[cfg(test)]
+fn is_sana_chroma_mlx_weights_free_fingerprint(fingerprint: &str) -> bool {
+    fingerprint.contains("-mlx-weights-free-conformance-")
+        || fingerprint.starts_with("chroma1-mlx-registry-behavior-")
+}
+
+/// The env-free half of [`sana_chroma_load_spec`], so the tier and root bindings are unit-testable
+/// without weights. The root must end in the PLANNED tier's directory
+/// (`.../snapshots/<revision>/<tier>`) — both engines then re-prove that answer against the
+/// transformer's own packed marker and withhold the identity if the two disagree, so a stale
+/// `…/q4` export can never satisfy a q8 or bf16 plan.
+fn sana_chroma_load_spec_at(
+    request: &Value,
+    load_shape: LoadShape,
+    repository: String,
+    revision: String,
+    root: PathBuf,
+) -> Result<SanaChromaArtifact, String> {
+    let arm = sana_chroma_arm(request)?;
+    protocol::validate_plain_overlay_target(request, arm.execution_path)?;
+    let tier = match planned_qwen_tier(request)? {
+        "bf16" => "bf16",
+        "q4" => "q4",
+        "q8" => "q8",
+        _ => unreachable!("planned_qwen_tier returned an unsupported tier"),
+    };
+    protocol::validate_artifact_identity(&repository, &revision, arm.expected_repository)?;
+    let root = std::fs::canonicalize(&root)
+        .map_err(|error| format!("canonicalize {}: {error}", arm.root_env))?;
+    protocol::validate_huggingface_snapshot_root(
+        &root,
+        &repository,
+        &revision,
+        tier,
+        arm.expected_repository,
+    )?;
+    // Resident, like every other MLX still-image arm: the anchor rung is `resident`
+    // (`memory-calibration-harness.mjs` `ANCHOR_STRATEGY.mlx`), and that is the policy the worker
+    // loads both families under at that rung — `apply_declared_mlx_load_policy_for_request` finds
+    // no `requiredOffloadPolicy` on either manifest's resident implementation, so gen-core's
+    // `Resident` default stands. It matters more here than on FLUX.1: SANA's identity key CARRIES
+    // the policy, so a Sequential load would publish a different string for the same cell.
+    let mut spec = LoadSpec::new(WeightsSource::Dir(root))
+        .with_offload_policy(OffloadPolicy::Resident)
+        .with_load_shape(load_shape);
+    // The tier the worker requests, exactly as `image_jobs/base.rs` sends it: neither family is in
+    // `mlx_load_quant_for_resolved_artifact`'s strip list, so the resolved tier rides
+    // `LoadSpec::quantize` (`None` at bf16). Both engines then compare it to the artifact's own
+    // packed marker before publishing an identity.
+    if let (_, Some(quant)) = tier_precision_quant(tier) {
+        spec = spec.with_quant(quant);
+    }
+    // P9: the worker binds the exact resolved route on every MLX image load
+    // (`image_jobs/base.rs`: `.with_resolved_route(request.model.clone())`). These five catalog ids
+    // are their own engine ids, so the route is the provider.
+    let spec = spec.with_resolved_route(arm.provider.to_owned());
+    Ok(SanaChromaArtifact {
+        arm,
+        repository,
+        revision,
+        tier,
+        spec,
+    })
+}
+
+fn sana_chroma_load_spec(
+    request: &Value,
+    load_shape: LoadShape,
+) -> Result<SanaChromaArtifact, String> {
+    let arm = sana_chroma_arm(request)?;
+    let repository = protocol::required_env(arm.repository_env)?;
+    let revision = protocol::required_env(arm.revision_env)?;
+    let root = PathBuf::from(protocol::required_env(arm.root_env)?);
+    sana_chroma_load_spec_at(request, load_shape, repository, revision, root)
+}
+
+/// The one fresh planned request every SANA/Chroma1 capture renders. Two steps, for the same reason
+/// the FLUX.1 and Z-Image arms use two: a resident route has no provider loading boundary between
+/// text encode and denoise, so the first Step callback closes a conservative conditioning envelope
+/// and the second gives denoise its own measured interval before Decoding.
+fn sana_chroma_request(width: u32, height: u32) -> GenerationRequest {
+    GenerationRequest {
+        prompt: "a portrait of a person in a sunlit studio, editorial photograph".to_owned(),
+        width,
+        height,
+        count: 1,
+        seed: Some(SANA_CHROMA_SEED),
+        steps: Some(2),
+        ..Default::default()
+    }
+}
+
+/// Bind the fixture to the planned member, tier AND geometry edge, so a bf16 record can never be
+/// emitted against a q4 capture that merely reused the fixture string.
+fn validate_sana_chroma_fixture(
+    request: &Value,
+    arm: SanaChromaArm,
+    tier: &str,
+) -> Result<(), String> {
     let fixture = protocol::planned(request)?
         .get("fixture")
         .and_then(Value::as_str)
         .ok_or_else(|| "planned.fixture must be a string".to_owned())?;
-    let prefix = format!("flux2-dev-mlx-{tier}-{width}-seed");
+    let (width, _) = protocol::target_geometry(request)?;
+    let prefix = format!("{}-mlx-{tier}-{width}-seed", arm.slug);
     let remainder = fixture
         .strip_prefix(&prefix)
         .ok_or_else(|| format!("planned.fixture {fixture:?} must start with {prefix:?}"))?;
@@ -4275,74 +4587,28 @@ fn planned_flux2_seed(request: &Value, tier: &str, width: u32) -> Result<u64, St
         .ok_or_else(|| format!("planned.fixture {fixture:?} must end with -step<count>"))?;
     let seed = seed
         .parse::<u64>()
-        .map_err(|error| format!("parse FLUX.2-dev fixture seed {seed:?}: {error}"))?;
+        .map_err(|error| format!("parse SANA/Chroma1 fixture seed {seed:?}: {error}"))?;
+    if seed != SANA_CHROMA_SEED {
+        return Err(format!(
+            "planned.fixture seed {seed} does not match the SANA/Chroma1 calibration seed \
+             {SANA_CHROMA_SEED}"
+        ));
+    }
     let steps = steps
         .parse::<u32>()
-        .map_err(|error| format!("parse FLUX.2-dev fixture step count {steps:?}: {error}"))?;
+        .map_err(|error| format!("parse SANA/Chroma1 fixture step count {steps:?}: {error}"))?;
     if steps != 2 {
         return Err(format!(
             "planned.fixture {fixture:?} must use the two-step calibration request"
         ));
     }
-    Ok(seed)
+    Ok(())
 }
 
-fn flux2_request(width: u32, height: u32, seed: u64) -> GenerationRequest {
-    GenerationRequest {
-        prompt: "a lighthouse on a rocky coastline at golden hour, photorealistic".to_owned(),
-        width,
-        height,
-        count: 1,
-        seed: Some(seed),
-        // The first Step callback closes the conditioning envelope; the second supplies a real
-        // denoise-only interval before Decoding — the z_image/qwen phase-boundary pattern.
-        steps: Some(2),
-        ..Default::default()
-    }
-}
-
-/// Resolve and validate the `SCENEWORKS_FLUX2_*` environment family into a tier-exact load spec.
-/// The tier is DERIVED from `/target/tier` and threads through the per-tier ROOT suffix check and
-/// `spec.quantize` — never hardcoded (sc-17097 fixed exactly that hardcoding on the Candle side).
-fn flux2_load_spec(
-    request: &Value,
-    tier: &str,
-    selection: &MemorySelection,
-) -> Result<(String, String, LoadSpec), String> {
-    protocol::validate_plain_overlay_target(request, FLUX2_PLAIN_EXECUTION_PATH)?;
-    let repository = protocol::required_env("SCENEWORKS_FLUX2_REPOSITORY")?;
-    let revision = protocol::required_env("SCENEWORKS_FLUX2_REVISION")?;
-    protocol::validate_artifact_identity(&repository, &revision, protocol::FLUX2_REPOSITORY)?;
-    let root = std::fs::canonicalize(PathBuf::from(protocol::required_env(
-        "SCENEWORKS_FLUX2_ROOT",
-    )?))
-    .map_err(|error| format!("canonicalize SCENEWORKS_FLUX2_ROOT: {error}"))?;
-    protocol::validate_huggingface_snapshot_root(
-        &root,
-        &repository,
-        &revision,
-        tier,
-        protocol::FLUX2_REPOSITORY,
-    )?;
-    Ok((repository, revision, flux2_spec(root, selection)))
-}
-
-/// The tier-exact FLUX.2-dev load spec: resident offload, eager materialization (the contract's
-/// calibrated load shape), and the quant DERIVED from the planned selection.
-fn flux2_spec(root: PathBuf, selection: &MemorySelection) -> LoadSpec {
-    let mut spec = LoadSpec::new(WeightsSource::Dir(root))
-        .with_offload_policy(OffloadPolicy::Resident)
-        .with_load_shape(LoadShape::EagerMaterialization);
-    if let Some(quant) = selection.tier.quant {
-        spec = spec.with_quant(quant);
-    }
-    spec
-}
-
-/// The admission context for the FLUX.2-dev safety scenarios. It exactly describes the base
-/// text-to-image route: `MemoryMode::TextToImage`, no reference, and `reference_count == 0`.
-/// `overlay` stays `None` because this authoritative lane is base-only.
-fn flux2_admission_context(
+/// The admission context for the SANA/Chroma1 safety scenarios, in the shape the worker admits
+/// these routes under: plain, reference-free, still text-to-image.
+#[allow(clippy::too_many_arguments)]
+fn sana_chroma_context(
     selection: &MemorySelection,
     calibration: &MemoryCalibrationIdentity,
     fingerprint: &str,
@@ -4379,7 +4645,773 @@ fn flux2_admission_context(
         },
         predicted_peak_bytes,
         cache_state: MemoryCacheState::Cold,
-        evidence_revision: format!("sc-18218@{}", protocol::INFERENCE_PIN),
+        evidence_revision: format!("sc-22731@{}", protocol::INFERENCE_PIN),
+    }
+}
+
+/// The `mlx:sana_1600m` / `mlx:sana_sprint_1600m` / `mlx:chroma1_{hd,base,flash}` arm (sc-22731).
+///
+/// Loads through the SAME seam the worker loads these five routes through —
+/// `runtime_macos::catalog().media().load(engine_id, &spec)`, which is exactly what
+/// `crates/sceneworks-worker/src/inference_runtime.rs` wraps — reads the LOADED generator's own
+/// contract, and measures the resident anchor composition against it.
+fn run_sana_chroma(request: &Value) -> Result<Value, String> {
+    // Before the load, not inside it: a non-still target must be refused without paying for
+    // weights. The arm is resolved first so the refusal carries the member's own label.
+    let arm = sana_chroma_arm(request)?;
+    protocol::validate_still_geometry(request, arm.still_calibration)?;
+    let load_shape = planned_load_shape(request)?;
+    // The member's materialization shape, refused BEFORE the load (sc-22731 review): the two
+    // families genuinely differ, and a row carrying the other family's shape would otherwise pay
+    // for a multi-gigabyte load before the identity comparison below could notice.
+    if load_shape != arm.load_shape {
+        return Err(format!(
+            "plan/provider load-shape mismatch: plan={}, the {} route is captured {}",
+            load_shape_key(load_shape),
+            arm.provider,
+            load_shape_key(arm.load_shape)
+        ));
+    }
+    let selection = planned_selection(request)?;
+    let tier = planned_qwen_tier(request)?;
+    validate_sana_chroma_fixture(request, arm, tier)?;
+    let (width, height) = protocol::target_geometry(request)?;
+    // The plan row must name the production identity this cell's loaded generator publishes —
+    // checked against the weights-free table BEFORE the load, so a row still carrying a
+    // conformance string fails in milliseconds rather than after a multi-gigabyte load.
+    let planned_fingerprint = protocol::planned(request)?
+        .get("calibrationFingerprint")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "planned.calibrationFingerprint must be a string".to_owned())?
+        .to_owned();
+    let expected_fingerprint = sana_chroma_calibration_fingerprint(arm, tier);
+    if planned_fingerprint != expected_fingerprint {
+        return Err(format!(
+            "plan/provider calibration mismatch: plan={planned_fingerprint}, the {} {tier} \
+             production identity is {expected_fingerprint}",
+            arm.provider
+        ));
+    }
+    let artifact = sana_chroma_load_spec(request, load_shape)?;
+    // From the ARTIFACT, so the member that was actually bound to a root is the member that is
+    // measured — not a second, independent resolution of the same plan.
+    let arm = artifact.arm;
+
+    let catalog =
+        runtime_macos::catalog().map_err(|error| format!("build MLX catalog: {error}"))?;
+    let generator = catalog
+        .media()
+        .load(arm.provider, &artifact.spec)
+        .map_err(|error| format!("load real {} {tier} provider: {error}", arm.provider))?;
+    let contract = generator.memory_strategy_contract().ok_or_else(|| {
+        format!(
+            "loaded {} exposed no memory-strategy contract",
+            arm.provider
+        )
+    })?;
+    contract.validate_selection(&selection).map_err(|error| {
+        format!(
+            "pinned {} provider rejected planned selection: {error}",
+            arm.provider
+        )
+    })?;
+    let strategy = attested_strategy(
+        request,
+        &selection,
+        &contract.engaged_composition(selection.strategy),
+    )?;
+    // The LOADED generator's own identity is what the record attests. An absent one is refused by
+    // name — an anchor recorded against no identity would claim measured authority the engine
+    // never granted — and so is one that differs from the table the plan was bound to above.
+    let calibration = contract.calibration.as_ref().ok_or_else(|| {
+        format!(
+            "the loaded {} provider at inference {} published no calibration identity for the \
+             {tier} artifact; the production identity for this cell is {expected_fingerprint} \
+             (inference PR 951 publishes one per (provider, tier) for every shipped cell), so this \
+             cell captures only at a pin that carries it",
+            arm.provider,
+            protocol::INFERENCE_PIN
+        )
+    })?;
+    if calibration.fingerprint != expected_fingerprint {
+        return Err(format!(
+            "plan/provider calibration mismatch: plan={planned_fingerprint}, pinned provider={}",
+            calibration.fingerprint
+        ));
+    }
+    // ...and the identity's SHAPE, beside its name (sc-22731 review), as `mlx.rs`'s other arms do.
+    // `MemoryCalibrationIdentity` carries the load shape it was minted under, so a plan row that
+    // asked for SANA's eager resident ladder but reached a deferred contract — or a Chroma row the
+    // other way round — would otherwise record a peak under an identity minted for a different
+    // materialization.
+    if calibration.load_shape != load_shape {
+        return Err(format!(
+            "plan/provider load-shape mismatch: plan={}, pinned provider={}",
+            load_shape_key(load_shape),
+            load_shape_key(calibration.load_shape)
+        ));
+    }
+    let hardware_bytes = request
+        .pointer("/hardware/memoryBytes")
+        .and_then(Value::as_u64)
+        .ok_or_else(|| "run request.hardware.memoryBytes must be an integer".to_owned())?;
+    let safety = |fingerprint: &str, total_bytes: u64, predicted: u64| {
+        generator.memory_strategy_safety_check(&sana_chroma_context(
+            &selection,
+            calibration,
+            fingerprint,
+            width,
+            height,
+            total_bytes,
+            predicted,
+        ))
+    };
+    // Admission mutation hygiene: the gate must ACCEPT a fitting request, so the two rejections
+    // below cannot pass through a blanket refusal.
+    if !matches!(
+        safety(&calibration.fingerprint, hardware_bytes, 1),
+        MemorySafetyDecision::Accept
+    ) {
+        return Err(format!(
+            "{} admission rejected a fitting probe budget; the scenario rejections below would be \
+             a blanket refusal, not evidence",
+            arm.provider
+        ));
+    }
+    if !matches!(
+        safety(&calibration.fingerprint, 0, 1),
+        MemorySafetyDecision::Reject { .. }
+    ) {
+        return Err(format!(
+            "{} admission accepted an unknown/zero memory budget",
+            arm.provider
+        ));
+    }
+    if !matches!(
+        safety("stale-sana-chroma-fingerprint", hardware_bytes, 1),
+        MemorySafetyDecision::Reject { .. }
+    ) {
+        return Err(format!(
+            "{} admission accepted stale calibration evidence",
+            arm.provider
+        ));
+    }
+
+    let conditioning = Cell::new(PhaseMemory {
+        active: 0,
+        cache: 0,
+    });
+    let denoise = Cell::new(PhaseMemory {
+        active: 0,
+        cache: 0,
+    });
+    clear_cache();
+    reset_peak_memory();
+    let pre_rung_active = get_active_memory() as u64;
+    let pre_rung_cache = get_cache_memory() as u64;
+    let selected = one_image(
+        generator
+            .generate(
+                &sana_chroma_request(width, height),
+                &mut |progress| match progress {
+                    Progress::Step { current: 1, .. } => {
+                        conditioning.set(PhaseMemory::capture());
+                        reset_peak_memory();
+                    }
+                    Progress::Decoding => {
+                        denoise.set(PhaseMemory::capture());
+                        reset_peak_memory();
+                    }
+                    _ => {}
+                },
+            )
+            .map_err(|error| format!("generate measured {} render: {error}", arm.provider))?,
+    )?;
+    let decode = PhaseMemory::capture();
+    let conditioning = conditioning.get();
+    let denoise = denoise.get();
+    if [conditioning.active, denoise.active, decode.active].contains(&0) {
+        return Err(format!(
+            "a synchronized {} lifecycle phase reported a zero active peak",
+            arm.provider
+        ));
+    }
+    let overall = PhaseMemory::overall(&[conditioning, denoise, decode]);
+    let predicted_peaks = image_predicted_peak_bytes(conditioning, denoise, decode);
+    let predicted = predicted_peaks.overall;
+    if !matches!(
+        safety(&calibration.fingerprint, predicted, predicted),
+        MemorySafetyDecision::Accept
+    ) {
+        return Err(format!(
+            "{} admission rejected an exact-fit calibrated budget",
+            arm.provider
+        ));
+    }
+
+    // Warm-repeat determinism and allocator cleanup bounds on this exact loaded provider.
+    clear_cache();
+    reset_peak_memory();
+    let baseline = one_image(
+        generator
+            .generate(&sana_chroma_request(width, height), &mut |_| {})
+            .map_err(|error| format!("generate warm {} control: {error}", arm.provider))?,
+    )?;
+    let clean_warm_peak = get_peak_memory() as u64;
+    clear_cache();
+    let clean_post_cleanup = AllocatorState::capture_current();
+    let cleanup_bounds =
+        LifecycleMemoryBounds::from_clean_warm(clean_warm_peak, clean_post_cleanup);
+    let (maximum_error, mean_error, rms_error) = image_max_mean_rms_abs(&selected, &baseline)?;
+    if !flux2_quality_passes(maximum_error, mean_error, rms_error) {
+        return Err(format!(
+            "{} warm repeat exceeded the determinism envelope: max={maximum_error:.6}, \
+             mean={mean_error:.6}, rms={rms_error:.6}",
+            arm.provider
+        ));
+    }
+    reset_peak_memory();
+    let warm = one_image(
+        generator
+            .generate(&sana_chroma_request(width, height), &mut |_| {})
+            .map_err(|error| format!("generate warm {} repeat: {error}", arm.provider))?,
+    )?;
+    let warm_peak = get_peak_memory() as u64;
+    if !cleanup_bounds.allows_warm_peak(warm_peak) {
+        return Err(format!(
+            "{} warm repeat peaked at {warm_peak} bytes, above the clean warm control \
+             {clean_warm_peak} bytes plus 2%",
+            arm.provider
+        ));
+    }
+    clear_cache();
+    let warm_post_cleanup = AllocatorState::capture_current();
+    if !cleanup_bounds.allows_retained(warm_post_cleanup) {
+        return Err(format!(
+            "{} warm repeat retained active/cache bytes {warm_post_cleanup:?} above the clean warm \
+             cleanup {clean_post_cleanup:?} plus {} bytes",
+            arm.provider, cleanup_bounds.tolerance_bytes,
+        ));
+    }
+    let (warm_maximum, warm_mean, warm_rms) = image_max_mean_rms_abs(&selected, &warm)?;
+    if !flux2_quality_passes(warm_maximum, warm_mean, warm_rms) {
+        return Err(format!(
+            "{} second warm repeat changed the deterministic output",
+            arm.provider
+        ));
+    }
+
+    // Arm-internal negative-mutation falsifiability check: a runtime_complete record must keep
+    // `negativeMutation` null, so the breach is verified here and the numbers land in diagnostics.
+    let mutated = qwen_negative_mutation(&selected);
+    let (mutated_maximum, mutated_mean, mutated_rms) = image_max_mean_rms_abs(&mutated, &baseline)?;
+    if flux2_quality_passes(mutated_maximum, mutated_mean, mutated_rms) {
+        return Err(format!(
+            "{} output mutation did not breach the determinism envelope",
+            arm.provider
+        ));
+    }
+
+    let lifecycle_blocker = concat!(
+        "the pinned SANA/Chroma1 crates open no memory-strategy request scope for the resident ",
+        "anchor composition and expose no calibration fault-injection site, so the scoped ",
+        "lifecycle scenarios cannot execute; unscoped repeat determinism and allocator cleanup ",
+        "bounds are attested in quality and diagnostics instead"
+    );
+    let mut fragment = json!({
+        "status": "runtime_complete",
+        "strategy": strategy,
+        "loadShape": load_shape_key(calibration.load_shape),
+        "artifact": artifact.artifact_json(),
+        "sweep": sana_chroma_complete_sweep(request)?,
+        "scenarios": [
+            { "name": "exact_fit", "result": "passed", "predictedBytes": predicted, "effectiveBudgetBytes": predicted },
+            { "name": "unknown_budget", "result": "passed" },
+            { "name": "stale_evidence", "result": "passed" },
+            { "name": "warm_repeat", "result": "not_run", "reason": lifecycle_blocker },
+            { "name": "cancel", "result": "not_run", "reason": lifecycle_blocker },
+            { "name": "error", "result": "not_run", "reason": lifecycle_blocker },
+            { "name": "loadability", "result": "passed" },
+            { "name": "overlay", "result": "not_applicable", "reason": "settled below from the declared target" }
+        ],
+        "predictedPeakBytes": predicted_peaks.json(),
+        "observedMemory": {
+            "conditioning": conditioning.json(),
+            "denoise": denoise.json(),
+            "decode": decode.json(),
+            "overall": overall.json(),
+        },
+        "quality": {
+            "contract": "identical artifact, prompt, seed, geometry, steps, tier, and loaded provider; cold measured render versus warm unscoped repeats",
+            "identicalInputs": true,
+            "result": "passed",
+            "maximumError": maximum_error,
+            "meanError": mean_error,
+            "rootMeanSquareError": rms_error,
+            "maximumErrorThreshold": FLUX2_MAX_THRESHOLD,
+            "meanErrorThreshold": FLUX2_MEAN_THRESHOLD,
+            "rootMeanSquareErrorThreshold": FLUX2_RMS_THRESHOLD,
+        },
+        "negativeMutation": null,
+        "loadability": {
+            "result": "passed",
+            "resolvedPathFingerprint": artifact.loadability_fingerprint(),
+        },
+        "diagnostics": protocol::diagnostics(
+            &format!("memory-mlx-adapter:{}-shared-ladder", arm.slug),
+            "executed",
+            [lifecycle_blocker.to_owned()],
+            [
+                ("preRungActiveAfterClear", "bytes", pre_rung_active),
+                ("preRungCacheAfterClear", "bytes", pre_rung_cache),
+                ("conditioningActivePeak", "bytes", conditioning.active),
+                ("denoiseActivePeak", "bytes", denoise.active),
+                ("decodeActivePeak", "bytes", decode.active),
+                ("overallAllocatorEnvelope", "bytes", overall.allocator_bytes()),
+                ("lifecycleCleanWarmPeak", "bytes", clean_warm_peak),
+                ("lifecycleCleanPostCleanupActive", "bytes", clean_post_cleanup.active),
+                ("lifecycleCleanPostCleanupCache", "bytes", clean_post_cleanup.cache),
+                ("lifecycleCleanupTolerance", "bytes", cleanup_bounds.tolerance_bytes),
+                ("lifecycleWarmRepeatPeak", "bytes", warm_peak),
+                ("lifecycleWarmRepeatPostCleanupActive", "bytes", warm_post_cleanup.active),
+                ("lifecycleWarmRepeatPostCleanupCache", "bytes", warm_post_cleanup.cache),
+                ("negativeMutationMaximumErrorPer255", "count", (mutated_maximum * 255.0).round() as u64),
+                ("negativeMutationMeanErrorPer255", "count", (mutated_mean * 255.0).round() as u64),
+                ("loadShapeDeferred", "count", u64::from(calibration.load_shape == LoadShape::DeferredMaterialization)),
+            ],
+        ),
+        "capturedAt": protocol::captured_at(),
+    });
+    protocol::settle_plain_overlay_scenario(request, &mut fragment, arm.execution_path)?;
+    Ok(fragment)
+}
+
+fn sana_chroma_complete_sweep(request: &Value) -> Result<Value, String> {
+    let mut sweep = protocol::reference_sweep(request, "passed")?;
+    // One exact tuple per plan row; marking it range-verified promotes no sibling tuple (the
+    // generated matrix still requires a matching manifest binding per cell).
+    sweep["rangeVerified"] = json!(true);
+    Ok(sweep)
+}
+
+/// Maximum, mean, and root-mean-square absolute error between two images, in [0,1] units. The
+/// runtime_complete quality shape requires the RMS metric alongside max/mean
+/// (`memory-calibration-harness.mjs#validateRuntimeComplete`), which is why this exists next to
+/// `image_max_mean_abs` instead of replacing it.
+fn image_max_mean_rms_abs(left: &Image, right: &Image) -> Result<(f64, f64, f64), String> {
+    let (maximum, mean) = image_max_mean_abs(left, right)?;
+    let mut sum_squares = 0.0_f64;
+    for (&left, &right) in left.pixels.iter().zip(&right.pixels) {
+        let difference = (f64::from(left) - f64::from(right)).abs() / 255.0;
+        sum_squares += difference * difference;
+    }
+    Ok((
+        maximum,
+        mean,
+        (sum_squares / left.pixels.len() as f64).sqrt(),
+    ))
+}
+
+fn flux2_quality_passes(maximum: f64, mean: f64, rms: f64) -> bool {
+    maximum <= FLUX2_MAX_THRESHOLD && mean <= FLUX2_MEAN_THRESHOLD && rms <= FLUX2_RMS_THRESHOLD
+}
+
+/// The LTX-2.3 twin of [`flux2_quality_passes`], over the LTX-named thresholds so an `mlx:ltx_2_3`
+/// receipt's numbers trace to an LTX constant.
+fn ltx_quality_passes(maximum: f64, mean: f64, rms: f64) -> bool {
+    maximum <= LTX_MAX_THRESHOLD && mean <= LTX_MEAN_THRESHOLD && rms <= LTX_RMS_THRESHOLD
+}
+
+/// One member of the FLUX.2 family this arm measures, resolved from the plan's
+/// `(target.provider, target.modelId)` — never assumed (sc-22727). Three members today: the 32B
+/// `flux2_dev` flagship and the two klein-9B catalog models, which share ONE engine provider id
+/// and are told apart by their artifact family and `LoadSpec::resolved_route`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Flux2Arm {
+    /// The registry id handed to the production catalog loader (E4).
+    provider: &'static str,
+    /// The CATALOG model id. It is the anchor key's `modelId`, and it is also what the worker binds
+    /// as `LoadSpec::resolved_route` (`image_jobs/base.rs` — `spec.with_resolved_route(request.model)`),
+    /// which is the discriminator `KleinArtifactInventory::validate_resolved_route` refuses a
+    /// cross-variant artifact with. Two members share `provider` and differ only here.
+    model_id: &'static str,
+    execution_path: &'static str,
+    /// The still-geometry refusal label (sc-18808).
+    still_calibration: &'static str,
+    repository_env: &'static str,
+    revision_env: &'static str,
+    root_env: &'static str,
+    expected_repository: &'static str,
+    /// The fixture's family segment: `flux2-<fixture_slug>-mlx-<tier>-<edge>-seed<seed>-step2`.
+    fixture_slug: &'static str,
+    /// The record's diagnostics source, `memory-mlx-adapter:<slug>-resident`.
+    slug: &'static str,
+    /// The WEIGHTS-FREE registry declaration identity for this member's provider — the string
+    /// `config/manifests/builtin.models.jsonc` declares on every rung row. Distinct from the
+    /// identity a load of real weights publishes on the klein routes (sc-22727); see
+    /// [`flux2_calibration_fingerprint`], which is what the plan row and the capture bind.
+    registry_fingerprint: &'static str,
+    /// The load shape and offload policy this member is loaded under — the WORKER's shape for the
+    /// plain T2I route, never a hand-picked pair.
+    ///
+    /// Dev: `Resident` + `EagerMaterialization`. Its manifest declares no MLX
+    /// `bounded_transformer_residency` row for the plain provider and every non-resident strategy
+    /// is `Missing` at the pin, so the worker's declaration evaluator refuses the staged candidate
+    /// and keeps the eager default (`memory_route_registry.rs`,
+    /// `evaluate_declared_mlx_load_shape_for_request_with_strategy`).
+    ///
+    /// Klein: `Resident` + `EagerMaterialization` — the shape of the RUNG THIS ANCHOR PRICES.
+    ///
+    /// Both klein manifest entries also declare an MLX `bounded_transformer_residency` row with
+    /// `requiredOffloadPolicy: "sequential"` for every tier of the plain T2I route, and
+    /// `evaluate_declared_mlx_load_shape_for_request` + `apply_declared_mlx_load_policy_for_request`
+    /// bind `Applied` + Deferred + Sequential when that rung is the one being engaged. That is the
+    /// BTR rung's shape, not the resident rung's: a deferred klein transformer CANNOT render
+    /// without a window — `mlx-gen-flux2/src/transformer.rs:949-955` refuses with "flux2: a
+    /// deferred transformer requires an explicit block window" the moment `block_stream` is set and
+    /// no window is selected. Measured, not reasoned: the sc-22727 proof capture of
+    /// `flux2_klein_9b:q4:mlx` at inference `d5270c68` cleared the whole contract-and-load path
+    /// under `Sequential` + `Deferred` and then died on exactly that sentence, 123 s in, at the
+    /// resident-rung render. The resident rung therefore loads eager, which is what this arm
+    /// mirrors.
+    ///
+    /// sc-22727 / inference PR 948 is what makes that measurable at all: `klein_contract_from_parts`
+    /// now publishes a production identity for EVERY load shape, keyed on the admitted inventory
+    /// and `resolved_quant()`, while rung 4 stays gated on `klein_streamable` (exactly
+    /// `Sequential && DeferredMaterialization && quantize.is_none()`). Before it, a resident klein
+    /// spec yielded `calibration: None` and this arm had no identity to bind.
+    load_shape: LoadShape,
+    offload_policy: OffloadPolicy,
+    seed: u64,
+    /// The story that established this member's evidence, as it appears in
+    /// `MemoryRunContext::evidence_revision`. Per member, so a klein receipt never claims the
+    /// dev lane's provenance.
+    evidence_tag: &'static str,
+    /// Whether the pinned crate implements the resident rung and nothing else. True on dev (every
+    /// other strategy is declared `Missing` at the pin). False on klein: its manifest declares five
+    /// rungs, and under the eager shape this arm loads (sc-22727) the contract implements resident
+    /// plus bounded decode/attention while staged residency and rung 4 stay `Missing` — they need
+    /// the streamable shape. Which of those a plan may select is left to
+    /// `contract.validate_selection` rather than being second-guessed here.
+    resident_only: bool,
+    /// Whether the planned tier's quant reaches the loader as `LoadSpec::quantize`.
+    ///
+    /// The dev route takes it: its loader folds the requested width. The klein TURNKEY rehosts do
+    /// NOT — their tier is declared by the snapshot directory itself
+    /// (`turnkey_identity` reads `…/snapshots/<rev>/<tier>` and
+    /// `verify_turnkey_with_contracts` validates the transformer headers against it), and the same
+    /// function refuses any spec that also carries a quant: "flux2 Klein turnkey tiers require BF16
+    /// execution with LoadSpec.quantize=None"
+    /// (`mlx-gen-flux2/src/artifact_inventory.rs`). Measured, not assumed: the sc-22727 proof
+    /// capture of `flux2_klein_9b:q4:mlx` failed on exactly that sentence while reading the
+    /// contract, before any weights were loaded.
+    ///
+    /// The tier is still DERIVED from the plan and still binds the artifact — through the root
+    /// suffix check, which for these rehosts is the tier declaration the engine itself reads.
+    tier_quant_reaches_the_loader: bool,
+}
+
+const FLUX2_DEV_ARM: Flux2Arm = Flux2Arm {
+    provider: FLUX2_PROVIDER,
+    model_id: "flux2_dev",
+    execution_path: FLUX2_PLAIN_EXECUTION_PATH,
+    still_calibration: "MLX FLUX.2-dev calibration",
+    repository_env: "SCENEWORKS_FLUX2_REPOSITORY",
+    revision_env: "SCENEWORKS_FLUX2_REVISION",
+    root_env: "SCENEWORKS_FLUX2_ROOT",
+    expected_repository: protocol::FLUX2_REPOSITORY,
+    fixture_slug: "dev",
+    slug: "flux2-dev",
+    registry_fingerprint: FLUX2_CALIBRATION_FINGERPRINT,
+    load_shape: LoadShape::EagerMaterialization,
+    offload_policy: OffloadPolicy::Resident,
+    seed: FLUX2_SEED,
+    evidence_tag: "sc-18218",
+    resident_only: true,
+    tier_quant_reaches_the_loader: true,
+};
+
+const FLUX2_KLEIN_ARM: Flux2Arm = Flux2Arm {
+    provider: FLUX2_KLEIN_PROVIDER,
+    model_id: "flux2_klein_9b",
+    execution_path: FLUX2_KLEIN_PLAIN_EXECUTION_PATH,
+    still_calibration: "MLX FLUX.2-klein-9B calibration",
+    repository_env: "SCENEWORKS_FLUX2_KLEIN_REPOSITORY",
+    revision_env: "SCENEWORKS_FLUX2_KLEIN_REVISION",
+    root_env: "SCENEWORKS_FLUX2_KLEIN_ROOT",
+    expected_repository: protocol::FLUX2_KLEIN_REPOSITORY,
+    fixture_slug: "klein-9b",
+    slug: "flux2-klein-9b",
+    registry_fingerprint: FLUX2_KLEIN_REGISTRY_FINGERPRINT,
+    load_shape: LoadShape::EagerMaterialization,
+    offload_policy: OffloadPolicy::Resident,
+    seed: FLUX2_KLEIN_SEED,
+    evidence_tag: "sc-22727",
+    resident_only: false,
+    tier_quant_reaches_the_loader: false,
+};
+
+const FLUX2_KLEIN_KV_ARM: Flux2Arm = Flux2Arm {
+    provider: FLUX2_KLEIN_PROVIDER,
+    model_id: "flux2_klein_9b_kv",
+    execution_path: FLUX2_KLEIN_KV_PLAIN_EXECUTION_PATH,
+    still_calibration: "MLX FLUX.2-klein-9B KV calibration",
+    repository_env: "SCENEWORKS_FLUX2_KLEIN_KV_REPOSITORY",
+    revision_env: "SCENEWORKS_FLUX2_KLEIN_KV_REVISION",
+    root_env: "SCENEWORKS_FLUX2_KLEIN_KV_ROOT",
+    expected_repository: protocol::FLUX2_KLEIN_KV_REPOSITORY,
+    fixture_slug: "klein-9b-kv",
+    slug: "flux2-klein-9b-kv",
+    registry_fingerprint: FLUX2_KLEIN_REGISTRY_FINGERPRINT,
+    load_shape: LoadShape::EagerMaterialization,
+    offload_policy: OffloadPolicy::Resident,
+    seed: FLUX2_KLEIN_SEED,
+    evidence_tag: "sc-22727",
+    resident_only: false,
+    tier_quant_reaches_the_loader: false,
+};
+
+/// Which family member the plan asks for. Refuses by name: a `(provider, modelId)` pair no member
+/// serves must not be measured as its nearest neighbour — in particular a KV plan must never be
+/// satisfied by the base klein artifact, which shares the provider id.
+///
+/// Defense-in-depth mirror of the provider-mismatch guard `validate_z_image_batch` carries
+/// (sc-18104): `run` dispatches by provider name today, so a future caller must be refused here
+/// rather than misrouted into another member's contract.
+fn flux2_arm(request: &Value) -> Result<Flux2Arm, String> {
+    let planned = protocol::planned(request)?;
+    let provider = planned
+        .pointer("/target/provider")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "planned.target.provider must be a string".to_owned())?;
+    let model_id = planned
+        .pointer("/target/modelId")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "planned.target.modelId must be a string".to_owned())?;
+    for arm in [FLUX2_DEV_ARM, FLUX2_KLEIN_ARM, FLUX2_KLEIN_KV_ARM] {
+        if arm.provider == provider && arm.model_id == model_id {
+            return Ok(arm);
+        }
+    }
+    Err(format!(
+        "the MLX FLUX.2 arm does not implement provider {provider:?} for model {model_id:?}"
+    ))
+}
+
+/// The PRODUCTION calibration identity the loaded generator publishes for one `(member, tier)`
+/// cell — what the plan row must name and what the capture verifies against the loaded contract.
+///
+/// sc-22727 (inference PR 948). Klein's identity used to be published only for a streamable load,
+/// and a turnkey rehost was handed the weights-free registry string
+/// ([`FLUX2_KLEIN_REGISTRY_FINGERPRINT`]) in production. It is now a property of the ADMITTED
+/// ARTIFACT and its tier, minted by `mlx-gen-flux2::memory_strategy::klein_production_calibration`
+/// as `flux2-klein-9b-<tier>-mlx-shared-ladder-<artifact_tag>-<route>-v1`, where:
+///
+/// * `artifact_tag` comes from `KleinArtifactInventory::artifact_tag` — `rehost` for the
+///   `SceneWorks/flux2-klein-9b-mlx` turnkeys and `kv-rehost` for `…-kv-mlx`
+///   (`turnkey_identity` reads the cache dir out of the snapshot path, so the two shipped repos
+///   land on different tags even though they share a provider id), and
+/// * `route` is `t2i` for `FLUX2_KLEIN_9B_ID`, which is the ONLY klein provider this text-to-image
+///   lane loads. (`edit` / `kv-edit` belong to the edit providers, which this arm never drives.)
+///
+/// Written here as literals rather than read off the pinned crate on purpose: the constants and
+/// the minting function do not exist at inference `c6d6a4db`, which is what CI builds, so the
+/// plan/arm binding has to be weights-free and pin-independent. The capture refuses a loaded
+/// contract whose identity differs from this table (`run_flux2`), so the two copies cannot drift
+/// unnoticed once the epic's pin bump (sc-22738) lands.
+fn flux2_calibration_fingerprint(arm: Flux2Arm, tier: &str) -> String {
+    match arm.model_id {
+        "flux2_dev" => FLUX2_CALIBRATION_FINGERPRINT.to_owned(),
+        "flux2_klein_9b" => format!("flux2-klein-9b-{tier}-mlx-shared-ladder-rehost-t2i-v1"),
+        "flux2_klein_9b_kv" => format!("flux2-klein-9b-{tier}-mlx-shared-ladder-kv-rehost-t2i-v1"),
+        model_id => unreachable!("no FLUX.2 member {model_id} at tier {tier}"),
+    }
+}
+
+fn validate_flux2_target(request: &Value) -> Result<Flux2Arm, String> {
+    let arm = flux2_arm(request)?;
+    protocol::validate_still_geometry(request, arm.still_calibration)?;
+    Ok(arm)
+}
+
+/// Bind the fixture to the planned FAMILY MEMBER, tier AND geometry edge, deriving the seed — the
+/// same fixture-to-plan binding `planned_qwen_seed` enforces, extended to the edge because this
+/// lane's plan carries tiers at more than one geometry, and to the member because the two klein
+/// models are indistinguishable by provider id alone.
+fn planned_flux2_seed(
+    request: &Value,
+    arm: Flux2Arm,
+    tier: &str,
+    width: u32,
+) -> Result<u64, String> {
+    let fixture = protocol::planned(request)?
+        .get("fixture")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "planned.fixture must be a string".to_owned())?;
+    let prefix = format!("flux2-{}-mlx-{tier}-{width}-seed", arm.fixture_slug);
+    let remainder = fixture
+        .strip_prefix(&prefix)
+        .ok_or_else(|| format!("planned.fixture {fixture:?} must start with {prefix:?}"))?;
+    let (seed, steps) = remainder
+        .split_once("-step")
+        .ok_or_else(|| format!("planned.fixture {fixture:?} must end with -step<count>"))?;
+    let seed = seed
+        .parse::<u64>()
+        .map_err(|error| format!("parse FLUX.2 fixture seed {seed:?}: {error}"))?;
+    let steps = steps
+        .parse::<u32>()
+        .map_err(|error| format!("parse FLUX.2 fixture step count {steps:?}: {error}"))?;
+    if steps != 2 {
+        return Err(format!(
+            "planned.fixture {fixture:?} must use the two-step calibration request"
+        ));
+    }
+    Ok(seed)
+}
+
+fn flux2_request(width: u32, height: u32, seed: u64) -> GenerationRequest {
+    GenerationRequest {
+        prompt: "a lighthouse on a rocky coastline at golden hour, photorealistic".to_owned(),
+        width,
+        height,
+        count: 1,
+        seed: Some(seed),
+        // The first Step callback closes the conditioning envelope; the second supplies a real
+        // denoise-only interval before Decoding — the z_image/qwen phase-boundary pattern.
+        steps: Some(2),
+        ..Default::default()
+    }
+}
+
+/// Resolve and validate the member's `SCENEWORKS_FLUX2*_*` environment family into a tier-exact
+/// load spec. The tier is DERIVED from `/target/tier` and threads through the per-tier ROOT suffix
+/// check and `spec.quantize` — never hardcoded (sc-17097 fixed exactly that hardcoding on the
+/// Candle side).
+fn flux2_load_spec(
+    request: &Value,
+    arm: Flux2Arm,
+    tier: &str,
+    selection: &MemorySelection,
+) -> Result<(String, String, LoadSpec), String> {
+    protocol::validate_plain_overlay_target(request, arm.execution_path)?;
+    let repository = protocol::required_env(arm.repository_env)?;
+    let revision = protocol::required_env(arm.revision_env)?;
+    // The identity check lives in `flux2_load_spec_at`, once, over these same values.
+    let root = std::fs::canonicalize(PathBuf::from(protocol::required_env(arm.root_env)?))
+        .map_err(|error| format!("canonicalize {}: {error}", arm.root_env))?;
+    flux2_load_spec_at(arm, tier, selection, repository, revision, root)
+}
+
+/// The env-free half of [`flux2_load_spec`], so the artifact binding is unit-testable without the
+/// process environment: the root must end in the PLANNED tier's directory under the member's OWN
+/// repository, so a stale `…/q4` export can never satisfy a q8 or bf16 plan, and the KV artifact
+/// can never satisfy a base-klein plan.
+fn flux2_load_spec_at(
+    arm: Flux2Arm,
+    tier: &str,
+    selection: &MemorySelection,
+    repository: String,
+    revision: String,
+    root: PathBuf,
+) -> Result<(String, String, LoadSpec), String> {
+    protocol::validate_artifact_identity(&repository, &revision, arm.expected_repository)?;
+    protocol::validate_huggingface_snapshot_root(
+        &root,
+        &repository,
+        &revision,
+        tier,
+        arm.expected_repository,
+    )?;
+    Ok((repository, revision, flux2_spec(arm, root, selection)))
+}
+
+/// The tier-exact FLUX.2 load spec: the member's WORKER shape (offload policy + load shape, see
+/// [`Flux2Arm::load_shape`]), `resolved_route` bound to the CATALOG model id, and — on the members
+/// whose loader takes it — the quant DERIVED from the planned selection. Those are the levers the
+/// worker sets (`image_jobs/base.rs` `load_spec` + `with_resolved_route`, then the manifest-declared
+/// shape and policy); see [`Flux2Arm::tier_quant_reaches_the_loader`] for why the klein rehosts
+/// take the tier through the snapshot path alone.
+fn flux2_spec(arm: Flux2Arm, root: PathBuf, selection: &MemorySelection) -> LoadSpec {
+    let mut spec = LoadSpec::new(WeightsSource::Dir(root))
+        .with_offload_policy(arm.offload_policy)
+        .with_load_shape(arm.load_shape)
+        .with_resolved_route(arm.model_id);
+    if arm.tier_quant_reaches_the_loader {
+        if let Some(quant) = selection.tier.quant {
+            spec = spec.with_quant(quant);
+        }
+    }
+    spec
+}
+
+/// The admission context for the FLUX.2-dev safety scenarios. It exactly describes the base
+/// text-to-image route: `MemoryMode::TextToImage`, no reference, and `reference_count == 0`.
+/// `overlay` stays `None` because this authoritative lane is base-only.
+/// The three levers an admission SCENARIO varies, bundled so the context builder keeps one
+/// parameter per concern. `fingerprint` is a parameter at all only so the stale-evidence probe can
+/// pass a deliberate mismatch; every real call site passes `calibration.fingerprint` (the Krea-arm
+/// lesson at `krea_context`).
+#[derive(Clone, Copy, Debug)]
+struct Flux2AdmissionProbe<'a> {
+    fingerprint: &'a str,
+    total_bytes: u64,
+    predicted_peak_bytes: u64,
+}
+
+impl<'a> Flux2AdmissionProbe<'a> {
+    /// The exact-fit probe: the calibrated fingerprint, and the measured peak as both the budget
+    /// and the prediction.
+    fn exact_fit(calibration: &'a MemoryCalibrationIdentity, predicted: u64) -> Self {
+        Self {
+            fingerprint: &calibration.fingerprint,
+            total_bytes: predicted,
+            predicted_peak_bytes: predicted,
+        }
+    }
+}
+
+fn flux2_admission_context(
+    arm: Flux2Arm,
+    selection: &MemorySelection,
+    calibration: &MemoryCalibrationIdentity,
+    geometry: (u32, u32),
+    probe: Flux2AdmissionProbe<'_>,
+) -> MemoryRunContext {
+    let (width, height) = geometry;
+    let Flux2AdmissionProbe {
+        fingerprint,
+        total_bytes,
+        predicted_peak_bytes,
+    } = probe;
+    MemoryRunContext {
+        selection: *selection,
+        optimization_authority: MemoryOptimizationAuthority::Calibrated,
+        calibration_abi: calibration.abi,
+        // A parameter only so the stale-evidence probe can pass a deliberate mismatch; the real
+        // call sites pass `calibration.fingerprint` (the Krea-arm lesson at `krea_context`).
+        calibration_fingerprint: fingerprint.to_owned(),
+        load_shape: calibration.load_shape,
+        mode: MemoryMode::TextToImage,
+        has_reference: false,
+        use_pid: false,
+        has_phases: false,
+        geometry: MemoryGeometry {
+            width,
+            height,
+            batch: 1,
+            frames: 1,
+            reference_count: 0,
+        },
+        overlay: None,
+        budget: MemoryBudget {
+            total_bytes,
+            committed_bytes: 0,
+            reclaimable_bytes: 0,
+            reserved_headroom_bytes: 0,
+        },
+        predicted_peak_bytes,
+        cache_state: MemoryCacheState::Cold,
+        evidence_revision: format!("{}@{}", arm.evidence_tag, protocol::INFERENCE_PIN),
     }
 }
 
@@ -4391,57 +5423,82 @@ fn flux2_complete_sweep(request: &Value) -> Result<Value, String> {
     Ok(sweep)
 }
 
-/// The `mlx:flux2_dev` arm (sc-18218) — RESIDENT ONLY, deliberately.
+/// The `mlx:flux2_*` arm (sc-18218, extended to the whole family by sc-22727).
 ///
-/// At the interim inference PR #531 head, `flux2_dev` owns a distinct reference-free T2I contract.
-/// Every non-Resident strategy remains `Missing`; this arm refuses those rungs, reads the registry
-/// contract under the exact T2I provider id, and then proves that the loaded generator exposes the
-/// byte-for-byte same contract before measuring it. No edit-provider declaration or edit-shaped
-/// context participates in this lane.
-fn run_flux2_dev(request: &Value) -> Result<Value, String> {
-    validate_flux2_target(request)?;
-    protocol::validate_plain_overlay_target(request, FLUX2_PLAIN_EXECUTION_PATH)?;
+/// `flux2_dev` owns a distinct reference-free T2I contract in which every non-Resident strategy
+/// remains `Missing`; the two klein catalog models share one engine provider whose ladder publishes
+/// five rungs, and are told apart by their artifact and `LoadSpec::resolved_route`. In both cases
+/// this arm reads the registry contract under the exact T2I provider id, then proves that the
+/// loaded generator exposes the byte-for-byte same contract before measuring it. No edit-provider
+/// declaration or edit-shaped context participates in this lane.
+fn run_flux2(request: &Value) -> Result<Value, String> {
+    let arm = validate_flux2_target(request)?;
+    protocol::validate_plain_overlay_target(request, arm.execution_path)?;
     let rung = protocol::planned_rung(request)?;
-    if rung != "resident" {
+    if arm.resident_only && rung != "resident" {
         return Err(format!(
-            "the pinned MLX FLUX.2-dev provider implements only the resident strategy (every other \
-             strategy is declared Missing at the pin); rung {rung:?} is not capturable"
+            "the pinned MLX {} provider implements only the resident strategy (every other \
+             strategy is declared Missing at the pin); rung {rung:?} is not capturable",
+            arm.provider
+        ));
+    }
+    // The plan's `loadShape` is what the record is checked against (the harness refuses a fragment
+    // whose measured loadShape differs from the plan's), and the member's shape is fixed by the
+    // worker, so a plan row spelling another shape is refused here by name, before weight work.
+    let planned_shape = planned_load_shape(request)?;
+    if planned_shape != arm.load_shape {
+        return Err(format!(
+            "planned.loadShape {planned_shape:?} is not the {} worker load shape {:?}",
+            arm.model_id, arm.load_shape
         ));
     }
     let selection = planned_selection(request)?;
     let tier = planned_qwen_tier(request)?; // shared numeric-tier parser
-    if !matches!(tier, "q4" | "q8") {
-        return Err(format!(
-            "the authoritative MLX FLUX.2-dev plan supports only q4 and q8; tier {tier:?} is not capturable"
-        ));
-    }
     let (width, height) = protocol::target_geometry(request)?;
-    let seed = planned_flux2_seed(request, tier, width)?;
-    let (repository, revision, spec) = flux2_load_spec(request, tier, &selection)?;
-    let registry = mlx_gen_flux2::provider_registry()
-        .map_err(|error| format!("build FLUX.2 registry: {error}"))?;
+    let seed = planned_flux2_seed(request, arm, tier, width)?;
+    let (repository, revision, spec) = flux2_load_spec(request, arm, tier, &selection)?;
+    // The PRODUCTION catalog (E4): the same explicit MLX media registry `runtime_macos::catalog()`
+    // composes for the worker, not a crate-local replica. A member the bundle does not register is
+    // not routed on this lane and fails here by name.
+    let catalog =
+        runtime_macos::catalog().map_err(|error| format!("build MLX catalog: {error}"))?;
+    let registry = catalog.media();
     let contract = registry
-        .memory_strategy_contract(FLUX2_PROVIDER, &spec)
-        .map_err(|error| format!("read {FLUX2_PROVIDER} T2I memory-strategy contract: {error}"))?
+        .memory_strategy_contract(arm.provider, &spec)
+        .map_err(|error| {
+            format!(
+                "read {} T2I memory-strategy contract: {error}",
+                arm.provider
+            )
+        })?
         .ok_or_else(|| {
-            format!("{FLUX2_PROVIDER} has no T2I memory-strategy contract at the pin")
+            format!(
+                "{} has no T2I memory-strategy contract at the pin",
+                arm.provider
+            )
         })?;
     contract.validate_selection(&selection).map_err(|error| {
-        format!("pinned FLUX.2-dev contract rejected planned selection: {error}")
+        format!(
+            "pinned {} contract rejected planned selection: {error}",
+            arm.model_id
+        )
     })?;
     let strategy = attested_strategy(
         request,
         &selection,
         &contract.engaged_composition(selection.strategy),
     )?;
-    let calibration = contract
-        .calibration
-        .as_ref()
-        .ok_or_else(|| "pinned FLUX.2-dev contract has no calibration identity".to_owned())?;
-    if calibration.fingerprint != FLUX2_CALIBRATION_FINGERPRINT {
+    let calibration = contract.calibration.as_ref().ok_or_else(|| {
+        format!(
+            "pinned {} contract has no calibration identity",
+            arm.model_id
+        )
+    })?;
+    let expected_fingerprint = flux2_calibration_fingerprint(arm, tier);
+    if calibration.fingerprint != expected_fingerprint {
         return Err(format!(
-            "pinned FLUX.2-dev T2I contract fingerprint changed: expected {FLUX2_CALIBRATION_FINGERPRINT}, got {}",
-            calibration.fingerprint
+            "pinned {} T2I contract fingerprint changed: expected {expected_fingerprint}, got {}",
+            arm.model_id, calibration.fingerprint
         ));
     }
     let planned_fingerprint = protocol::planned(request)?
@@ -4454,66 +5511,107 @@ fn run_flux2_dev(request: &Value) -> Result<Value, String> {
             calibration.fingerprint
         ));
     }
-    if seed != FLUX2_SEED {
+    if seed != arm.seed {
         return Err(format!(
-            "planned.fixture seed {seed} does not match the FLUX.2-dev calibration seed {FLUX2_SEED}"
+            "planned.fixture seed {seed} does not match the {} calibration seed {}",
+            arm.model_id, arm.seed
         ));
     }
     let hardware_bytes = request
         .pointer("/hardware/memoryBytes")
         .and_then(Value::as_u64)
         .ok_or_else(|| "run request.hardware.memoryBytes must be an integer".to_owned())?;
-    let safety = |fingerprint: &str, total_bytes: u64, predicted: u64| {
-        mlx_gen_flux2::memory_strategy::registered_dev_t2i_safety_check(
-            &spec,
-            &contract,
-            &flux2_admission_context(
-                &selection,
-                calibration,
+    let admission_context = |fingerprint: &str, total_bytes: u64, predicted_peak_bytes: u64| {
+        flux2_admission_context(
+            arm,
+            &selection,
+            calibration,
+            (width, height),
+            Flux2AdmissionProbe {
                 fingerprint,
-                width,
-                height,
                 total_bytes,
-                predicted,
-            ),
+                predicted_peak_bytes,
+            },
         )
     };
-    // Admission mutation hygiene BEFORE the expensive load: the gate must accept a fitting
-    // request (so the two rejections below cannot pass via a blanket refusal), reject an
-    // unknown/zero budget, and reject a mutated calibration fingerprint.
-    if !matches!(
-        safety(&calibration.fingerprint, hardware_bytes, 1),
-        MemorySafetyDecision::Accept
-    ) {
-        return Err(
-            "FLUX.2-dev admission rejected a fitting probe budget; the scenario rejections below \
-             would be a blanket refusal, not evidence"
-                .to_owned(),
-        );
-    }
-    if !matches!(
-        safety(&calibration.fingerprint, 0, 1),
-        MemorySafetyDecision::Reject { .. }
-    ) {
-        return Err("FLUX.2-dev admission accepted an unknown/zero memory budget".to_owned());
-    }
-    if !matches!(
-        safety("stale-flux2-dev-fingerprint", hardware_bytes, 1),
-        MemorySafetyDecision::Reject { .. }
-    ) {
-        return Err("FLUX.2-dev admission accepted stale calibration evidence".to_owned());
+    // Admission mutation hygiene: the gate must accept a fitting request (so the two rejections
+    // cannot pass via a blanket refusal), reject an unknown/zero budget, and reject a mutated
+    // calibration fingerprint.
+    //
+    // On the dev arm the registered T2I check is a PUBLIC crate function, so all three run BEFORE
+    // the expensive load, exactly as sc-18218 wrote them. The klein routes expose their registered
+    // check (`registered_klein_safety_check`) only through the loaded generator - it is
+    // crate-private - so their identical three scenarios run immediately after the load instead.
+    // Same scenarios, same record; only the moment differs, and it differs because of the pinned
+    // crate's visibility, not a weaker claim.
+    let scenarios = |check: &dyn Fn(&str, u64, u64) -> MemorySafetyDecision| -> Result<(), String> {
+        if !matches!(
+            check(&calibration.fingerprint, hardware_bytes, 1),
+            MemorySafetyDecision::Accept
+        ) {
+            return Err(format!(
+                "{} admission rejected a fitting probe budget; the scenario rejections below \
+                 would be a blanket refusal, not evidence",
+                arm.model_id
+            ));
+        }
+        if !matches!(
+            check(&calibration.fingerprint, 0, 1),
+            MemorySafetyDecision::Reject { .. }
+        ) {
+            return Err(format!(
+                "{} admission accepted an unknown/zero memory budget",
+                arm.model_id
+            ));
+        }
+        if !matches!(
+            check(
+                &format!("stale-{}-fingerprint", arm.slug),
+                hardware_bytes,
+                1
+            ),
+            MemorySafetyDecision::Reject { .. }
+        ) {
+            return Err(format!(
+                "{} admission accepted stale calibration evidence",
+                arm.model_id
+            ));
+        }
+        Ok(())
+    };
+    if arm.provider == FLUX2_PROVIDER {
+        scenarios(&|fingerprint, total_bytes, predicted| {
+            mlx_gen_flux2::memory_strategy::registered_dev_t2i_safety_check(
+                &spec,
+                &contract,
+                &admission_context(fingerprint, total_bytes, predicted),
+            )
+        })?;
     }
 
     let generator = registry
-        .load(FLUX2_PROVIDER, &spec)
-        .map_err(|error| format!("load real FLUX.2-dev {tier} provider: {error}"))?;
-    let loaded_contract = generator
-        .memory_strategy_contract()
-        .ok_or_else(|| "loaded FLUX.2-dev generator exposed no T2I memory contract".to_owned())?;
+        .load(arm.provider, &spec)
+        .map_err(|error| format!("load real {} {tier} provider: {error}", arm.model_id))?;
+    let loaded_contract = generator.memory_strategy_contract().ok_or_else(|| {
+        format!(
+            "loaded {} generator exposed no T2I memory contract",
+            arm.model_id
+        )
+    })?;
     if loaded_contract != &contract {
-        return Err(
-            "loaded FLUX.2-dev generator contract differs from the registry contract".to_owned(),
-        );
+        return Err(format!(
+            "loaded {} generator contract differs from the registry contract",
+            arm.model_id
+        ));
+    }
+    if arm.provider != FLUX2_PROVIDER {
+        scenarios(&|fingerprint, total_bytes, predicted| {
+            generator.memory_strategy_safety_check(&admission_context(
+                fingerprint,
+                total_bytes,
+                predicted,
+            ))
+        })?;
     }
     let conditioning = Cell::new(PhaseMemory {
         active: 0,
@@ -4549,27 +5647,29 @@ fn run_flux2_dev(request: &Value) -> Result<Value, String> {
     let conditioning = conditioning.get();
     let denoise = denoise.get();
     if [conditioning.active, denoise.active, decode.active].contains(&0) {
-        return Err(
-            "a synchronized FLUX.2-dev lifecycle phase reported a zero active peak".to_owned(),
-        );
+        return Err(format!(
+            "a synchronized {} lifecycle phase reported a zero active peak",
+            arm.model_id
+        ));
     }
     let overall = PhaseMemory::overall(&[conditioning, denoise, decode]);
     let predicted_peaks = image_predicted_peak_bytes(conditioning, denoise, decode);
     let predicted = predicted_peaks.overall;
     let exact_fit = flux2_admission_context(
+        arm,
         &selection,
         calibration,
-        &calibration.fingerprint,
-        width,
-        height,
-        predicted,
-        predicted,
+        (width, height),
+        Flux2AdmissionProbe::exact_fit(calibration, predicted),
     );
     if !matches!(
         generator.memory_strategy_safety_check(&exact_fit),
         MemorySafetyDecision::Accept
     ) {
-        return Err("FLUX.2-dev admission rejected an exact-fit calibrated budget".to_owned());
+        return Err(format!(
+            "{} admission rejected an exact-fit calibrated budget",
+            arm.model_id
+        ));
     }
 
     // Warm repeat determinism + cleanup bounds on this exact loaded provider. The scoped
@@ -4580,7 +5680,7 @@ fn run_flux2_dev(request: &Value) -> Result<Value, String> {
     let baseline = one_image(
         generator
             .generate(&flux2_request(width, height, seed), &mut |_| {})
-            .map_err(|error| format!("generate warm FLUX.2-dev control: {error}"))?,
+            .map_err(|error| format!("generate warm {} control: {error}", arm.model_id))?,
     )?;
     let clean_warm_peak = get_peak_memory() as u64;
     clear_cache();
@@ -4590,35 +5690,40 @@ fn run_flux2_dev(request: &Value) -> Result<Value, String> {
     let (maximum_error, mean_error, rms_error) = image_max_mean_rms_abs(&selected, &baseline)?;
     if !flux2_quality_passes(maximum_error, mean_error, rms_error) {
         return Err(format!(
-            "FLUX.2-dev warm repeat exceeded the determinism envelope: max={maximum_error:.6}, \
-             mean={mean_error:.6}, rms={rms_error:.6}"
+            "{} warm repeat exceeded the determinism envelope: max={maximum_error:.6}, \
+             mean={mean_error:.6}, rms={rms_error:.6}",
+            arm.model_id
         ));
     }
     reset_peak_memory();
     let warm = one_image(
         generator
             .generate(&flux2_request(width, height, seed), &mut |_| {})
-            .map_err(|error| format!("generate warm FLUX.2-dev repeat: {error}"))?,
+            .map_err(|error| format!("generate warm {} repeat: {error}", arm.model_id))?,
     )?;
     let warm_peak = get_peak_memory() as u64;
     if !cleanup_bounds.allows_warm_peak(warm_peak) {
         return Err(format!(
-            "FLUX.2-dev warm repeat peaked at {warm_peak} bytes, above the clean warm control \
-             {clean_warm_peak} bytes plus 2%"
+            "{} warm repeat peaked at {warm_peak} bytes, above the clean warm control \
+             {clean_warm_peak} bytes plus 2%",
+            arm.model_id
         ));
     }
     clear_cache();
     let warm_post_cleanup = AllocatorState::capture_current();
     if !cleanup_bounds.allows_retained(warm_post_cleanup) {
         return Err(format!(
-            "FLUX.2-dev warm repeat retained active/cache bytes {warm_post_cleanup:?} above the \
+            "{} warm repeat retained active/cache bytes {warm_post_cleanup:?} above the \
              clean warm cleanup {clean_post_cleanup:?} plus {} bytes",
-            cleanup_bounds.tolerance_bytes,
+            arm.model_id, cleanup_bounds.tolerance_bytes,
         ));
     }
     let (warm_maximum, warm_mean, warm_rms) = image_max_mean_rms_abs(&selected, &warm)?;
     if !flux2_quality_passes(warm_maximum, warm_mean, warm_rms) {
-        return Err("FLUX.2-dev second warm repeat changed the deterministic output".to_owned());
+        return Err(format!(
+            "{} second warm repeat changed the deterministic output",
+            arm.model_id
+        ));
     }
 
     // Arm-internal negative-mutation falsifiability check. A runtime_complete record must keep
@@ -4628,16 +5733,17 @@ fn run_flux2_dev(request: &Value) -> Result<Value, String> {
     let mutated = qwen_negative_mutation(&selected);
     let (mutated_maximum, mutated_mean, mutated_rms) = image_max_mean_rms_abs(&mutated, &baseline)?;
     if flux2_quality_passes(mutated_maximum, mutated_mean, mutated_rms) {
-        return Err(
-            "FLUX.2-dev output mutation did not breach the determinism envelope".to_owned(),
-        );
+        return Err(format!(
+            "{} output mutation did not breach the determinism envelope",
+            arm.model_id
+        ));
     }
 
     let lifecycle_blocker = concat!(
-        "the pinned mlx-gen-flux2 crate opens no memory-strategy request scope for the dev ",
-        "variants and has no calibration fault-injection site, so the scoped lifecycle scenario ",
-        "cannot execute; unscoped repeat determinism and allocator cleanup bounds are attested in ",
-        "quality and diagnostics instead"
+        "the pinned mlx-gen-flux2 crate opens no memory-strategy request scope for the FLUX.2 ",
+        "text-to-image routes and has no calibration fault-injection site, so the scoped lifecycle ",
+        "scenario cannot execute; unscoped repeat determinism and allocator cleanup bounds are ",
+        "attested in quality and diagnostics instead"
     );
     let mut fragment = json!({
         "status": "runtime_complete",
@@ -4651,8 +5757,8 @@ fn run_flux2_dev(request: &Value) -> Result<Value, String> {
         "sweep": flux2_complete_sweep(request)?,
         "scenarios": [
             { "name": "exact_fit", "result": "passed", "predictedBytes": predicted, "effectiveBudgetBytes": predicted },
-            { "name": "unknown_budget", "result": "passed", "reason": "the registered FLUX.2-dev admission check rejected a zero/unknown budget before load" },
-            { "name": "stale_evidence", "result": "passed", "reason": "the registered FLUX.2-dev admission check rejected a mutated calibration fingerprint before load" },
+            { "name": "unknown_budget", "result": "passed", "reason": format!("the registered {} admission check rejected a zero/unknown budget", arm.model_id) },
+            { "name": "stale_evidence", "result": "passed", "reason": format!("the registered {} admission check rejected a mutated calibration fingerprint", arm.model_id) },
             { "name": "warm_repeat", "result": "not_run", "reason": lifecycle_blocker },
             { "name": "cancel", "result": "not_run", "reason": lifecycle_blocker },
             { "name": "error", "result": "not_run", "reason": lifecycle_blocker },
@@ -4683,7 +5789,7 @@ fn run_flux2_dev(request: &Value) -> Result<Value, String> {
             "resolvedPathFingerprint": format!("{repository}@{revision}:{tier}"),
         },
         "diagnostics": protocol::diagnostics(
-            "memory-mlx-adapter:flux2-dev-resident",
+            &format!("memory-mlx-adapter:{}-resident", arm.slug),
             "executed",
             [lifecycle_blocker.to_owned()],
             [
@@ -4707,7 +5813,7 @@ fn run_flux2_dev(request: &Value) -> Result<Value, String> {
         ),
         "capturedAt": protocol::captured_at(),
     });
-    protocol::settle_plain_overlay_scenario(request, &mut fragment, FLUX2_PLAIN_EXECUTION_PATH)?;
+    protocol::settle_plain_overlay_scenario(request, &mut fragment, arm.execution_path)?;
     Ok(fragment)
 }
 
@@ -13057,7 +14163,11 @@ fn run(request: &Value) -> Result<Value, String> {
         // sc-22728: the Qwen edit lane. One engine provider serves both shipped catalog ids, so the
         // arm resolves which from `(provider, modelId)` and refuses any other pair by name.
         QWEN_EDIT_PROVIDER => run_qwen_edit_provider(request),
-        FLUX2_PROVIDER => run_flux2_dev(request),
+        FLUX2_PROVIDER => run_flux2(request),
+        // sc-22727: both klein catalog models (`flux2_klein_9b`, `flux2_klein_9b_kv`) load through
+        // this ONE engine provider id; `flux2_arm` resolves which from `(provider, modelId)` and
+        // refuses an unknown pair by name.
+        FLUX2_KLEIN_PROVIDER => run_flux2(request),
         // sc-22734: the SenseNova-U1 family. Six catalog models over two registry ids; the arm
         // resolves which member from `(provider, modelId)` and refuses any other pair by name.
         // One arm per line: `stale-lane-report.mjs#adapterCapturableProviders` parses these arms
@@ -13073,6 +14183,15 @@ fn run(request: &Value) -> Result<Value, String> {
         FLUX1_DEV_PROVIDER => run_flux_one(request),
         FLUX1_SCHNELL_PROVIDER => run_flux_one(request),
         PULID_FLUX_PROVIDER => run_flux_one(request),
+        // sc-22731: the SANA and Chroma1 families. Five registry ids on one arm — the two
+        // `mlx-gen-sana` routes and the three `mlx-gen-chroma` ones. One arm per line, for the
+        // same reason the FLUX.1 block above is: `stale-lane-report.mjs#adapterCapturableProviders`
+        // parses these arms and accepts only a bare literal or a single `&str` const per arm.
+        SANA_PROVIDER => run_sana_chroma(request),
+        SANA_SPRINT_PROVIDER => run_sana_chroma(request),
+        CHROMA1_HD_PROVIDER => run_sana_chroma(request),
+        CHROMA1_BASE_PROVIDER => run_sana_chroma(request),
+        CHROMA1_FLASH_PROVIDER => run_sana_chroma(request),
         // sc-18808: the first VIDEO arm. Every arm above it refuses `geometry.frames != 1`; this one
         // validates against LTX's own resolution/temporal envelope instead.
         LTX_PROVIDER => run_ltx(request),
@@ -13371,7 +14490,10 @@ mod flux_one_tests {
                 "{provider} was not dispatched into the FLUX.1 arm: {error}"
             );
         }
-        for provider in ["flux1_dev_control", "chroma1_hd"] {
+        // Two ids no MLX arm serves: a control route the engine does not register, and the CANDLE
+        // LTX-2.3 engine id. `chroma1_hd` used to stand here; sc-22731 armed it, which is exactly
+        // the drift this loop exists to catch.
+        for provider in ["flux1_dev_control", "ltx_2_3_distilled"] {
             let error = run(&flux_one_planned(provider, "text_to_image", "q4")).unwrap_err();
             assert_eq!(
                 error,
@@ -14019,6 +15141,391 @@ mod flux_one_tests {
     }
 }
 
+/// sc-22731 — the SANA and Chroma1 family arm.
+///
+/// Everything here is env-free and weights-free, which is the point: the arm's plan binding
+/// (member resolution, tier, root suffix, request shape, LoadSpec shape) is decided before a single
+/// weight file is opened, so it can be proven on a CPU-only host. The measured render itself
+/// belongs to the terminal capture campaign.
+#[cfg(test)]
+mod sana_chroma_tests {
+    use super::*;
+
+    /// The three shipped tiers of this lane. One spelling, so the expectation below and the tables
+    /// it is compared against cannot disagree about which cells exist.
+    const SANA_CHROMA_MLX_TIERS: [&str; 3] = ["q4", "q8", "bf16"];
+
+    /// The plan keys this arm must serve, DERIVED from `SANA_CHROMA_ARMS` rather than counted.
+    /// A member added to the table without a plan row (or a plan row without a member) names itself
+    /// in the diff; a frozen `15` only ever said "there are sixteen, not fifteen".
+    fn expected_sana_chroma_mlx_keys() -> std::collections::BTreeSet<String> {
+        SANA_CHROMA_ARMS
+            .iter()
+            .flat_map(|arm| {
+                SANA_CHROMA_MLX_TIERS
+                    .iter()
+                    .map(move |tier| format!("{}:{tier}:mlx", arm.provider))
+            })
+            .collect()
+    }
+
+    /// The shape this member's plan rows carry, so no fixture spells a materialization the arm
+    /// would refuse. Foreign providers (the misroute cases) keep the deferred default.
+    fn planned_load_shape_key(provider: &str) -> &'static str {
+        load_shape_key(
+            SANA_CHROMA_ARMS
+                .iter()
+                .find(|arm| arm.provider == provider)
+                .map(|arm| arm.load_shape)
+                .unwrap_or(LoadShape::DeferredMaterialization),
+        )
+    }
+
+    fn sana_chroma_planned(provider: &str, tier: &str) -> Value {
+        json!({
+            "planned": {
+                "target": {
+                    "provider": provider,
+                    "modelId": provider,
+                    "tier": tier,
+                    "mode": "text_to_image",
+                    "overlay": "none",
+                    "geometry": { "width": 1024, "height": 1024, "batch": 1, "frames": 1 }
+                },
+                "backend": "mlx",
+                "loadShape": planned_load_shape_key(provider),
+                "strategy": { "rung": "resident", "engagedRungs": ["resident"], "parameters": {} },
+                "calibrationFingerprint": "unused",
+                "fixture": "unused"
+            }
+        })
+    }
+
+    fn sana_chroma_snapshot_root(repository: &str, revision: &str, tier: &str) -> PathBuf {
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir()
+            .join(format!("sc-22731-{}-{nonce}", std::process::id()))
+            .join(format!("models--{}", repository.replace('/', "--")))
+            .join("snapshots")
+            .join(revision)
+            .join(tier);
+        std::fs::create_dir_all(&root).unwrap();
+        root
+    }
+
+    const REVISION: &str = "ac421696dd6eb0b41f446f4c45a53ccc057d82a1";
+
+    /// Every SANA/Chroma1 MLX plan row names the production calibration identity its loaded
+    /// generator publishes (inference PR 951's per-(provider, tier) tables): the two measured keys
+    /// are the engine constants byte-for-byte, no row names a weights-free conformance string, and
+    /// the fifteen identities are distinct.
+    #[test]
+    fn every_planned_sana_chroma_mlx_cell_names_the_identity_its_loaded_generator_publishes() {
+        let plan: Value = serde_json::from_str(include_str!(
+            "../../../../config/memory-calibration-plan.json"
+        ))
+        .expect("the anchor plan parses");
+        let mut identities = std::collections::BTreeMap::new();
+        let mut visited = std::collections::BTreeSet::new();
+        for (key, entry) in plan["anchors"].as_object().expect("anchors object") {
+            let provider = entry["provider"].as_str().unwrap();
+            if !key.ends_with(":mlx")
+                || !SANA_CHROMA_ARMS.iter().any(|arm| arm.provider == provider)
+            {
+                continue;
+            }
+            visited.insert(key.clone());
+            let tier = key.split(':').nth(1).unwrap();
+            let arm = sana_chroma_arm(&sana_chroma_planned(provider, tier)).unwrap();
+            let planned = entry["calibrationFingerprint"]
+                .as_str()
+                .unwrap_or_else(|| panic!("{key}: calibrationFingerprint must be a string"));
+            assert!(
+                !is_sana_chroma_mlx_weights_free_fingerprint(planned),
+                "{key}: {planned} is a weights-free conformance identity no production load returns"
+            );
+            assert_eq!(
+                planned,
+                sana_chroma_calibration_fingerprint(arm, tier),
+                "{key}: the plan row must name the loaded generator's production identity"
+            );
+            assert!(
+                identities.insert(planned.to_owned(), key.clone()).is_none(),
+                "{key}: {planned} is already claimed by {}",
+                identities[planned]
+            );
+        }
+        // A SET, not a count (sc-22731 review): the expectation is derived from `SANA_CHROMA_ARMS`
+        // x the shipped tiers, so a missing or extra plan row names ITSELF rather than reporting
+        // "there are fourteen, not fifteen".
+        assert_eq!(
+            visited,
+            expected_sana_chroma_mlx_keys(),
+            "the MLX plan rows must be exactly the arm table's members x the shipped tiers"
+        );
+        // ...and every one of them carries a DISTINCT identity, so the map covers the same set.
+        assert_eq!(
+            identities
+                .values()
+                .cloned()
+                .collect::<std::collections::BTreeSet<_>>(),
+            expected_sana_chroma_mlx_keys()
+        );
+        // The preserved measured keys, byte-for-byte, so the table cannot drift off the engines.
+        assert_eq!(
+            identities["sana-mlx-full-ladder-2026-08-06-v1-resident"],
+            "sana_1600m:q4:mlx"
+        );
+        assert_eq!(
+            identities["chroma1-base-q4-mlx-shared-ladder-2026-08-05-v1"],
+            "chroma1_base:q4:mlx"
+        );
+        assert_eq!(
+            runtime_macos::providers::sana::memory_strategy::RESIDENT_MEMORY_CALIBRATION_FINGERPRINT,
+            "sana-mlx-full-ladder-2026-08-06-v1-resident"
+        );
+        assert_eq!(
+            runtime_macos::providers::chroma::memory_strategy::MEMORY_CALIBRATION_FINGERPRINT,
+            "chroma1-base-q4-mlx-shared-ladder-2026-08-05-v1"
+        );
+        // The thirteen new cells, spelled out: the strings inference PR 951 mints.
+        for (key, identity) in [
+            (
+                "sana_1600m:q8:mlx",
+                "sana-base-q8-mlx-full-ladder-v1-resident",
+            ),
+            (
+                "sana_1600m:bf16:mlx",
+                "sana-base-bf16-mlx-full-ladder-v1-resident",
+            ),
+            (
+                "sana_sprint_1600m:q4:mlx",
+                "sana-sprint-q4-mlx-full-ladder-v1-resident",
+            ),
+            (
+                "sana_sprint_1600m:q8:mlx",
+                "sana-sprint-q8-mlx-full-ladder-v1-resident",
+            ),
+            (
+                "sana_sprint_1600m:bf16:mlx",
+                "sana-sprint-bf16-mlx-full-ladder-v1-resident",
+            ),
+            ("chroma1_hd:q4:mlx", "chroma1-hd-q4-mlx-shared-ladder-v1"),
+            ("chroma1_hd:q8:mlx", "chroma1-hd-q8-mlx-shared-ladder-v1"),
+            (
+                "chroma1_hd:bf16:mlx",
+                "chroma1-hd-bf16-mlx-shared-ladder-v1",
+            ),
+            (
+                "chroma1_base:q8:mlx",
+                "chroma1-base-q8-mlx-shared-ladder-v1",
+            ),
+            (
+                "chroma1_base:bf16:mlx",
+                "chroma1-base-bf16-mlx-shared-ladder-v1",
+            ),
+            (
+                "chroma1_flash:q4:mlx",
+                "chroma1-flash-q4-mlx-shared-ladder-v1",
+            ),
+            (
+                "chroma1_flash:q8:mlx",
+                "chroma1-flash-q8-mlx-shared-ladder-v1",
+            ),
+            (
+                "chroma1_flash:bf16:mlx",
+                "chroma1-flash-bf16-mlx-shared-ladder-v1",
+            ),
+        ] {
+            assert_eq!(identities[identity], key);
+        }
+    }
+
+    /// The arm binds the plan row to the table BEFORE any environment or weight work, naming both
+    /// strings, so a stale row cannot cost a load.
+    #[test]
+    fn a_plan_row_naming_a_foreign_identity_is_refused_before_the_load() {
+        let mut request = sana_chroma_planned(CHROMA1_FLASH_PROVIDER, "q8");
+        request["planned"]["fixture"] = json!(format!(
+            "chroma1-flash-mlx-q8-1024-seed{SANA_CHROMA_SEED}-step2"
+        ));
+        request["planned"]["calibrationFingerprint"] =
+            json!("chroma1-mlx-registry-behavior-v1-chroma1-flash");
+        let error = run(&request).expect_err("a conformance identity is not capturable");
+        assert!(
+            error.contains("plan=chroma1-mlx-registry-behavior-v1-chroma1-flash")
+                && error.contains("chroma1-flash-q8-mlx-shared-ladder-v1"),
+            "{error}"
+        );
+        // Not an env error: the refusal fired before `SCENEWORKS_CHROMA1_FLASH_*` was read.
+        assert!(!error.contains("required environment variable"), "{error}");
+    }
+
+    /// A provider no member serves is refused by name, and the refusal does not read as a malformed
+    /// plan entry (the sc-18104 misroute lesson).
+    #[test]
+    fn a_provider_no_member_serves_is_refused_by_name() {
+        for provider in ["sana", "chroma1", "chroma1_hd_edit"] {
+            let error = sana_chroma_arm(&sana_chroma_planned(provider, "q4"))
+                .expect_err("a foreign provider must not resolve to a member");
+            assert_eq!(
+                error,
+                format!("the MLX SANA/Chroma1 arm does not implement provider {provider:?}")
+            );
+        }
+    }
+
+    /// The LoadSpec is the shape the WORKER loads: Resident, the planned tier on `quantize`, the
+    /// exact resolved route, and the planned materialization shape.
+    #[test]
+    fn the_load_spec_is_resident_and_carries_the_planned_tier_and_route() {
+        for (arm, tier, quant) in [
+            (SANA_ARM, "q4", Some(Quant::Q4)),
+            (SANA_ARM, "q8", Some(Quant::Q8)),
+            (SANA_ARM, "bf16", None),
+            (CHROMA1_HD_ARM, "q4", Some(Quant::Q4)),
+            (CHROMA1_FLASH_ARM, "bf16", None),
+        ] {
+            let root = sana_chroma_snapshot_root(arm.expected_repository, REVISION, tier);
+            let artifact = sana_chroma_load_spec_at(
+                &sana_chroma_planned(arm.provider, tier),
+                arm.load_shape,
+                arm.expected_repository.to_owned(),
+                REVISION.to_owned(),
+                root,
+            )
+            .unwrap_or_else(|error| panic!("{}:{tier}: {error}", arm.provider));
+            assert_eq!(artifact.tier, tier);
+            assert_eq!(artifact.spec.offload_policy, OffloadPolicy::Resident);
+            assert_eq!(artifact.spec.quantize, quant);
+            assert_eq!(
+                artifact.spec.resolved_route.as_deref(),
+                Some(arm.provider),
+                "candle-gen-chroma's twin refuses a spec without it; the worker sets it on both lanes"
+            );
+            // The member's OWN shape reaches the spec — SANA eager, Chroma deferred — so the two
+            // families can never be loaded under one another's materialization.
+            assert_eq!(artifact.spec.load_shape, arm.load_shape);
+        }
+    }
+
+    /// A root exported for ANOTHER tier is refused naming the tier, so a stale `…/q4` export can
+    /// never satisfy a q8 or bf16 plan and quietly re-label another tier's peaks.
+    #[test]
+    fn a_root_of_another_tier_is_refused_naming_the_tier() {
+        for arm in SANA_CHROMA_ARMS {
+            let root = sana_chroma_snapshot_root(arm.expected_repository, REVISION, "q4");
+            let error = sana_chroma_load_spec_at(
+                &sana_chroma_planned(arm.provider, "q8"),
+                LoadShape::DeferredMaterialization,
+                arm.expected_repository.to_owned(),
+                REVISION.to_owned(),
+                root,
+            )
+            .expect_err("a q4 root must not satisfy a q8 plan");
+            assert!(
+                error.contains("q8"),
+                "{}: the refusal must name the planned tier: {error}",
+                arm.provider
+            );
+        }
+    }
+
+    /// ...and the companion direction: a root exported for a DIFFERENT repository is refused too,
+    /// so a Flash plan can never be satisfied by HD weights.
+    #[test]
+    fn a_root_of_another_route_is_refused() {
+        let root = sana_chroma_snapshot_root(protocol::CHROMA1_HD_REPOSITORY, REVISION, "q4");
+        let error = sana_chroma_load_spec_at(
+            &sana_chroma_planned(CHROMA1_FLASH_PROVIDER, "q4"),
+            LoadShape::DeferredMaterialization,
+            protocol::CHROMA1_HD_REPOSITORY.to_owned(),
+            REVISION.to_owned(),
+            root,
+        )
+        .expect_err("HD weights must not satisfy a Flash plan");
+        assert!(
+            error.contains(protocol::CHROMA1_FLASH_REPOSITORY),
+            "{error}"
+        );
+    }
+
+    /// The fixture binds the member, the tier, the edge, the seed and the step count.
+    #[test]
+    fn the_fixture_must_name_the_member_tier_edge_and_seed() {
+        let request = sana_chroma_planned(SANA_SPRINT_PROVIDER, "q8");
+        for (fixture, needle) in [
+            // another member's fixture
+            ("sana-1600m-mlx-q8-1024-seed22731-step2", "must start with"),
+            // another tier
+            ("sana-sprint-mlx-q4-1024-seed22731-step2", "must start with"),
+            // another edge
+            ("sana-sprint-mlx-q8-768-seed22731-step2", "must start with"),
+            // another seed
+            ("sana-sprint-mlx-q8-1024-seed16402-step2", "does not match"),
+            // another step count
+            ("sana-sprint-mlx-q8-1024-seed22731-step4", "two-step"),
+        ] {
+            let mut request = request.clone();
+            request["planned"]["fixture"] = json!(fixture);
+            let error = validate_sana_chroma_fixture(&request, SANA_SPRINT_ARM, "q8")
+                .expect_err("a mislabelled fixture must be refused");
+            assert!(error.contains(needle), "{fixture}: {error}");
+        }
+        let mut request = request;
+        request["planned"]["fixture"] = json!("sana-sprint-mlx-q8-1024-seed22731-step2");
+        validate_sana_chroma_fixture(&request, SANA_SPRINT_ARM, "q8")
+            .expect("the planned fixture must be accepted");
+    }
+
+    /// Every plan row's fixture is the one this arm accepts, so the plan and the arm cannot drift.
+    #[test]
+    fn every_planned_mlx_fixture_is_accepted_by_the_arm() {
+        let plan: Value = serde_json::from_str(include_str!(
+            "../../../../config/memory-calibration-plan.json"
+        ))
+        .expect("the anchor plan parses");
+        let mut checked = std::collections::BTreeSet::new();
+        for (key, entry) in plan["anchors"].as_object().expect("anchors object") {
+            let provider = entry["provider"].as_str().unwrap();
+            let Some(arm) = SANA_CHROMA_ARMS
+                .iter()
+                .copied()
+                .find(|arm| arm.provider == provider)
+            else {
+                continue;
+            };
+            if !key.ends_with(":mlx") {
+                continue;
+            }
+            let tier = key.split(':').nth(1).unwrap();
+            let mut request = sana_chroma_planned(provider, tier);
+            request["planned"]["fixture"] = entry["fixture"].clone();
+            request["planned"]["target"]["geometry"] = entry["geometry"].clone();
+            // The plan row's OWN materialization shape, copied in rather than assumed (sc-22731
+            // review): `sana_chroma_planned` derives its shape from the arm table, so the plan's
+            // own `loadShape` would otherwise never be read by any test at all.
+            // `planned_load_shape` is the same parse `run_sana_chroma` performs.
+            request["planned"]["loadShape"] = entry["loadShape"].clone();
+            assert_eq!(
+                planned_load_shape(&request).unwrap_or_else(|error| panic!("{key}: {error}")),
+                arm.load_shape,
+                "{key}: the plan row must name the shape this member is captured under — \
+                 mlx-gen-sana publishes its resident ladder EAGER (the windowed rung is declared \
+                 only under Sequential, which no anchor plans), mlx-gen-chroma's is DEFERRED"
+            );
+            validate_sana_chroma_fixture(&request, arm, tier)
+                .unwrap_or_else(|error| panic!("{key}: {error}"));
+            checked.insert(key.clone());
+        }
+        // Set equality, not a count: see `expected_sana_chroma_mlx_keys`.
+        assert_eq!(checked, expected_sana_chroma_mlx_keys());
+    }
+}
+
 #[cfg(test)]
 mod flux2_tests {
     use super::*;
@@ -14028,10 +15535,17 @@ mod flux2_tests {
     /// alongside a foreign provider, so a request that omits the axis entirely can no longer reach
     /// the rung gate this module's tests are aiming at.
     fn minimal_request(provider: &str, rung: &str) -> Value {
+        minimal_request_for(provider, provider, rung)
+    }
+
+    /// The same shape with the CATALOG model id spelled independently of the provider — the axis
+    /// the two klein models differ on (sc-22727).
+    fn minimal_request_for(provider: &str, model_id: &str, rung: &str) -> Value {
         json!({
             "planned": {
                 "target": {
                     "provider": provider,
+                    "modelId": model_id,
                     "overlay": "none",
                     "geometry": { "width": 768, "height": 768, "batch": 1, "frames": 1 }
                 },
@@ -14040,49 +15554,127 @@ mod flux2_tests {
         })
     }
 
-    /// The per-arm twin of `validate_z_image_batch`'s provider guard (sc-18104): dispatch routes by
-    /// name today, but this arm hardcodes the FLUX.2-dev contract, so a misrouted target must be
-    /// refused by name INSIDE the arm, and the refusal must not read like a missing-field complaint.
+    /// The per-arm twin of `validate_z_image_batch`'s provider guard (sc-18104), extended to the
+    /// `(provider, modelId)` pair by sc-22727: dispatch routes by provider name today, and two
+    /// catalog models share one provider id, so a misrouted target must be refused by name INSIDE
+    /// the arm, and the refusal must not read like a missing-field complaint.
     #[test]
-    fn the_flux2_arm_refuses_a_foreign_provider_by_name() {
-        for provider in [
-            "z_image_turbo",
-            "qwen_image",
-            "flux2_dev_edit",
-            "flux2_klein_9b",
+    fn the_flux2_arm_refuses_a_foreign_provider_or_model_by_name() {
+        for (provider, model_id) in [
+            ("z_image_turbo", "z_image_turbo"),
+            ("qwen_image", "qwen_image"),
+            ("flux2_dev_edit", "flux2_dev_edit"),
+            ("flux2_klein_9b_kv_edit", "flux2_klein_9b_kv_edit"),
+            // The engine's third klein artifact route: a real catalog model on this provider that
+            // this arm does NOT serve (its snapshot is an assembled convert dir, not a tiered
+            // rehost), so it must be refused rather than measured as the base klein.
+            ("flux2_klein_9b", "flux2_klein_9b_true_v2"),
+            // The KV artifact must never be served by the base klein plan, or vice versa: the two
+            // differ ONLY in this field.
+            ("flux2_dev", "flux2_klein_9b"),
         ] {
-            let error = run_flux2_dev(&minimal_request(provider, "resident"))
-                .expect_err("a foreign provider must not reach the FLUX.2-dev contract");
+            let error = run_flux2(&minimal_request_for(provider, model_id, "resident"))
+                .expect_err("a foreign (provider, modelId) pair must not reach a FLUX.2 contract");
             assert_eq!(
                 error,
-                format!("MLX FLUX.2-dev calibration does not implement provider {provider:?}")
+                format!(
+                    "the MLX FLUX.2 arm does not implement provider {provider:?} for model {model_id:?}"
+                )
             );
             assert!(
                 !error.contains("must be a string") && !error.contains("fingerprint"),
                 "refusal came from deeper in the arm, so the guard let it through: {error}"
             );
         }
+        // And the guard is not a blanket refusal: every shipped member resolves.
+        for (provider, model_id, expected) in [
+            (FLUX2_PROVIDER, "flux2_dev", FLUX2_DEV_ARM),
+            (FLUX2_KLEIN_PROVIDER, "flux2_klein_9b", FLUX2_KLEIN_ARM),
+            (
+                FLUX2_KLEIN_PROVIDER,
+                "flux2_klein_9b_kv",
+                FLUX2_KLEIN_KV_ARM,
+            ),
+        ] {
+            let arm = flux2_arm(&minimal_request_for(provider, model_id, "resident")).unwrap();
+            assert_eq!(arm, expected, "{provider}/{model_id}");
+            assert_eq!(arm.model_id, model_id);
+        }
+        assert!(
+            flux2_arm(&json!({ "planned": { "target": { "provider": FLUX2_PROVIDER } } }))
+                .unwrap_err()
+                .contains("planned.target.modelId")
+        );
+    }
+
+    /// Every member carries its OWN artifact family, execution path, refusal label, diagnostics
+    /// slug and fixture prefix. Two members sharing any of them would make their records
+    /// indistinguishable, and two members sharing an env family would let one artifact satisfy the
+    /// other's plan (sc-22727).
+    #[test]
+    fn every_flux2_member_is_distinguishable_from_every_other() {
+        let arms = [FLUX2_DEV_ARM, FLUX2_KLEIN_ARM, FLUX2_KLEIN_KV_ARM];
+        for field in [
+            arms.map(|arm| arm.model_id),
+            arms.map(|arm| arm.execution_path),
+            arms.map(|arm| arm.still_calibration),
+            arms.map(|arm| arm.repository_env),
+            arms.map(|arm| arm.revision_env),
+            arms.map(|arm| arm.root_env),
+            arms.map(|arm| arm.expected_repository),
+            arms.map(|arm| arm.fixture_slug),
+            arms.map(|arm| arm.slug),
+        ] {
+            let mut unique = field.to_vec();
+            unique.sort_unstable();
+            unique.dedup();
+            assert_eq!(unique.len(), arms.len(), "collision in {field:?}");
+        }
+        // The KV rehost and the base rehost are separate repositories, and neither is the dev one.
+        assert_eq!(
+            FLUX2_KLEIN_ARM.expected_repository,
+            protocol::FLUX2_KLEIN_REPOSITORY
+        );
+        assert_eq!(
+            FLUX2_KLEIN_KV_ARM.expected_repository,
+            protocol::FLUX2_KLEIN_KV_REPOSITORY
+        );
+        // But they DO share the engine provider id: that is the whole reason `modelId` is the
+        // discriminator rather than `provider`.
+        assert_eq!(FLUX2_KLEIN_ARM.provider, FLUX2_KLEIN_KV_ARM.provider);
     }
 
     /// sc-18218's scope correction (story comment activity-18225): at the pin, mlx-gen-flux2 marks
-    /// every non-Resident strategy `Missing`, so the arm is resident-only BY REFUSAL, not by
-    /// accident of the plan. Each of the other four rungs must be named back.
+    /// every non-Resident strategy `Missing` on the DEV route, so that arm is resident-only BY
+    /// REFUSAL, not by accident of the plan. Each of the other four rungs must be named back. The
+    /// klein ladder publishes five rungs, so it is NOT refused here — its selection is settled by
+    /// the pinned contract instead.
     #[test]
-    fn the_flux2_arm_is_resident_only_by_refusal() {
+    fn the_flux2_dev_arm_is_resident_only_by_refusal() {
         for rung in [
             "staged_residency",
             "bounded_decode",
             "bounded_attention",
             "bounded_transformer_residency",
         ] {
-            let error = run_flux2_dev(&minimal_request(FLUX2_PROVIDER, rung))
+            let error = run_flux2(&minimal_request(FLUX2_PROVIDER, rung))
                 .expect_err("a non-resident rung must be refused");
             assert!(
                 error.contains(rung) && error.contains("resident"),
                 "refusal must name the rung and the resident-only contract: {error}"
             );
+            let klein = run_flux2(&minimal_request_for(
+                FLUX2_KLEIN_PROVIDER,
+                "flux2_klein_9b",
+                rung,
+            ))
+            .expect_err("the minimal klein request is still incomplete");
+            assert!(
+                !klein.contains("implements only the resident strategy"),
+                "the klein ladder must not borrow the dev route's resident-only refusal: {klein}"
+            );
         }
-        let resident = run_flux2_dev(&minimal_request(FLUX2_PROVIDER, "resident"))
+        let resident = run_flux2(&minimal_request(FLUX2_PROVIDER, "resident"))
             .expect_err("the minimal resident request is still incomplete");
         assert!(
             !resident.contains("not capturable"),
@@ -14091,30 +15683,138 @@ mod flux2_tests {
     }
 
     #[test]
-    fn flux2_fixture_is_bound_to_tier_geometry_and_step_count() {
+    fn flux2_fixture_is_bound_to_member_tier_geometry_and_step_count() {
         let request = json!({
             "planned": { "fixture": "flux2-dev-mlx-q4-768-seed18218-step2" }
         });
-        assert_eq!(planned_flux2_seed(&request, "q4", 768).unwrap(), 18218);
-        assert!(planned_flux2_seed(&request, "q8", 768)
+        assert_eq!(
+            planned_flux2_seed(&request, FLUX2_DEV_ARM, "q4", 768).unwrap(),
+            18218
+        );
+        assert!(planned_flux2_seed(&request, FLUX2_DEV_ARM, "q8", 768)
             .unwrap_err()
             .contains("must start with"));
-        assert!(planned_flux2_seed(&request, "q4", 1024)
+        assert!(planned_flux2_seed(&request, FLUX2_DEV_ARM, "q4", 1024)
+            .unwrap_err()
+            .contains("must start with"));
+        // A dev fixture must not satisfy a klein plan, and the two klein members must not satisfy
+        // each other's: the family segment is part of the binding (sc-22727).
+        for arm in [FLUX2_KLEIN_ARM, FLUX2_KLEIN_KV_ARM] {
+            assert!(planned_flux2_seed(&request, arm, "q4", 768)
+                .unwrap_err()
+                .contains("must start with"));
+        }
+        let klein = json!({
+            "planned": { "fixture": "flux2-klein-9b-mlx-bf16-768-seed22727-step2" }
+        });
+        assert_eq!(
+            planned_flux2_seed(&klein, FLUX2_KLEIN_ARM, "bf16", 768).unwrap(),
+            FLUX2_KLEIN_SEED
+        );
+        assert!(planned_flux2_seed(&klein, FLUX2_KLEIN_KV_ARM, "bf16", 768)
+            .unwrap_err()
+            .contains("must start with"));
+        let kv = json!({
+            "planned": { "fixture": "flux2-klein-9b-kv-mlx-bf16-768-seed22727-step2" }
+        });
+        assert_eq!(
+            planned_flux2_seed(&kv, FLUX2_KLEIN_KV_ARM, "bf16", 768).unwrap(),
+            FLUX2_KLEIN_SEED
+        );
+        assert!(planned_flux2_seed(&kv, FLUX2_KLEIN_ARM, "bf16", 768)
             .unwrap_err()
             .contains("must start with"));
         let three_step = json!({
             "planned": { "fixture": "flux2-dev-mlx-q4-768-seed18218-step3" }
         });
-        assert!(planned_flux2_seed(&three_step, "q4", 768)
+        assert!(planned_flux2_seed(&three_step, FLUX2_DEV_ARM, "q4", 768)
             .unwrap_err()
             .contains("two-step"));
     }
 
-    /// sc-17097's lesson applied to this arm: the tier is derived from the planned target and each
-    /// declared authoritative tier maps to its own quant, never a hardcoded q4.
+    /// sc-17097's lesson applied to this arm: the tier is derived from the planned target, never a
+    /// hardcoded q4 (sc-22727 widened this arm from q4/q8 to the full shipped ladder). WHERE the
+    /// tier reaches the loader is per member: the dev route folds it through `LoadSpec::quantize`
+    /// (bf16 is the dense base and carries none — the worker's `tier_to_quant` shape), while the
+    /// klein turnkey rehosts declare their tier in the snapshot path and REFUSE a spec that also
+    /// carries a quant — "flux2 Klein turnkey tiers require BF16 execution with
+    /// LoadSpec.quantize=None" (`mlx-gen-flux2/src/artifact_inventory.rs`), which the sc-22727
+    /// proof capture hit for real before this flag existed.
     #[test]
-    fn flux2_load_spec_preserves_every_planned_numeric_tier() {
-        for (tier, expected_quant) in [("q4", Quant::Q4), ("q8", Quant::Q8)] {
+    fn flux2_load_spec_carries_the_planned_tier_the_way_each_member_takes_it() {
+        for arm in [FLUX2_DEV_ARM, FLUX2_KLEIN_ARM, FLUX2_KLEIN_KV_ARM] {
+            for (tier, folded_quant) in [
+                ("q4", Some(Quant::Q4)),
+                ("q8", Some(Quant::Q8)),
+                ("bf16", None),
+            ] {
+                let request = json!({
+                    "planned": {
+                        "strategy": { "rung": "resident", "parameters": {} },
+                        "target": { "tier": tier }
+                    }
+                });
+                let selection = planned_selection(&request).unwrap();
+                // The PLANNED tier is derived identically on every member; only whether it is
+                // handed to the loader differs.
+                assert_eq!(selection.tier.quant, folded_quant, "planned tier {tier}");
+                let spec = flux2_spec(
+                    arm,
+                    PathBuf::from(format!("/tmp/{}-{tier}", arm.slug)),
+                    &selection,
+                );
+                let expected = if arm.tier_quant_reaches_the_loader {
+                    folded_quant
+                } else {
+                    None
+                };
+                assert_eq!(spec.quantize, expected, "{} tier {tier}", arm.model_id);
+                assert_eq!(spec.load_shape, arm.load_shape);
+                // The catalog model id reaches the engine as `resolved_route`: it is what
+                // `KleinArtifactInventory::validate_resolved_route` refuses a cross-variant
+                // artifact with (mlx-gen-flux2/src/artifact_inventory.rs).
+                assert_eq!(spec.resolved_route.as_deref(), Some(arm.model_id));
+            }
+        }
+        // Which member takes the fold, stated as data so the loop above cannot pass vacuously by
+        // every member happening to answer the same way.
+        assert_eq!(
+            [FLUX2_DEV_ARM, FLUX2_KLEIN_ARM, FLUX2_KLEIN_KV_ARM]
+                .map(|arm| arm.tier_quant_reaches_the_loader),
+            [true, false, false],
+            "only the dev route folds the planned tier into LoadSpec::quantize"
+        );
+    }
+
+    /// Every FLUX.2 arm loads the shape of the RUNG IT PRICES: `Resident` + `EagerMaterialization`,
+    /// no quant on the klein turnkeys.
+    ///
+    /// sc-22727 rewrote this. The klein arms used to load `Sequential` + `DeferredMaterialization`
+    /// because that was the only shape the pinned engine published a calibration identity under —
+    /// `klein_contract_for` set `calibration` iff `klein_streamable(spec)`. Inference PR 948
+    /// decoupled the two: the identity is now a property of the admitted artifact and its tier and
+    /// is published for every load shape, while `klein_streamable` still gates rung 4 alone. The
+    /// streamable shape is therefore no longer required for an identity — and it is not RENDERABLE
+    /// at this rung either: a deferred klein transformer refuses without an explicit block window
+    /// (`mlx-gen-flux2/src/transformer.rs`), which is where the sc-22727 proof capture died, 123 s
+    /// in, after clearing the whole contract-and-load path. The predicate is transcribed here term
+    /// by term (it is crate-private at the pin) so the arms can assert they are OUTSIDE it.
+    #[test]
+    fn flux2_specs_are_the_resident_rungs_shape_and_are_deliberately_not_streamable() {
+        let klein_streamable = |spec: &LoadSpec| {
+            spec.offload_policy == OffloadPolicy::Sequential
+                && spec.load_shape == LoadShape::DeferredMaterialization
+                && spec.quantize.is_none()
+                && spec.adapters.is_empty()
+                && spec.control.is_none()
+                && spec.extra_controls.is_empty()
+                && spec.ip_adapter.is_none()
+                && spec.identity.is_none()
+                && spec.text_encoder.is_none()
+                && spec.components.is_empty()
+                && matches!(spec.weights, WeightsSource::Dir(_))
+        };
+        for tier in ["q4", "q8", "bf16"] {
             let request = json!({
                 "planned": {
                     "strategy": { "rung": "resident", "parameters": {} },
@@ -14122,9 +15822,277 @@ mod flux2_tests {
                 }
             });
             let selection = planned_selection(&request).unwrap();
-            let spec = flux2_spec(PathBuf::from(format!("/tmp/flux2-dev-{tier}")), &selection);
-            assert_eq!(spec.quantize, Some(expected_quant), "numeric tier {tier}");
+            for arm in [FLUX2_DEV_ARM, FLUX2_KLEIN_ARM, FLUX2_KLEIN_KV_ARM] {
+                let spec = flux2_spec(
+                    arm,
+                    PathBuf::from(format!("/tmp/{}-{tier}", arm.slug)),
+                    &selection,
+                );
+                assert_eq!(
+                    spec.offload_policy,
+                    OffloadPolicy::Resident,
+                    "{} {tier}",
+                    arm.model_id
+                );
+                assert_eq!(
+                    spec.load_shape,
+                    LoadShape::EagerMaterialization,
+                    "{} {tier}",
+                    arm.model_id
+                );
+                assert!(
+                    !klein_streamable(&spec),
+                    "{} {tier}: the resident rung must not load the rung-4 streamable shape: \
+                     {spec:?}",
+                    arm.model_id
+                );
+            }
+            // The klein turnkeys carry no load-time quant at all; the dev route folds the tier.
+            for arm in [FLUX2_KLEIN_ARM, FLUX2_KLEIN_KV_ARM] {
+                let spec = flux2_spec(
+                    arm,
+                    PathBuf::from(format!("/tmp/{}-{tier}", arm.slug)),
+                    &selection,
+                );
+                assert!(spec.quantize.is_none(), "{} {tier}", arm.model_id);
+            }
         }
+        // Stated as data, so the loop cannot pass by every member answering the same way.
+        assert_eq!(
+            [FLUX2_DEV_ARM, FLUX2_KLEIN_ARM, FLUX2_KLEIN_KV_ARM].map(|arm| arm.offload_policy),
+            [
+                OffloadPolicy::Resident,
+                OffloadPolicy::Resident,
+                OffloadPolicy::Resident
+            ],
+        );
+    }
+
+    /// The arm table is bound to the two documents the worker and the harness actually read.
+    ///
+    /// * The shipped manifest, where the worker takes both facts from: `mlx.denseTextEncoderTier`
+    ///   (`is_dense_te_tier` — its reason to load a klein tier with `Quant::None`, so the flag must
+    ///   equal `!tier_quant_reaches_the_loader`), and the MLX `bounded_transformer_residency` row's
+    ///   `requiredOffloadPolicy` under the plain provider (`apply_declared_mlx_load_policy_for_request`
+    ///   — its reason to bind Sequential; a member with no such row stays Resident). Every rung
+    ///   row's `fingerprint` is the WEIGHTS-FREE registry declaration
+    ///   ([`Flux2Arm::registry_fingerprint`]) — sc-22727: on the klein routes that is no longer
+    ///   the identity a load of real weights publishes, so the manifest is bound to the
+    ///   declaration and the plan to the production identity, separately.
+    /// * The anchor plan, whose `loadShape` the harness checks the measured record against and
+    ///   whose `calibrationFingerprint` `run_flux2` checks the pinned contract against: every MLX
+    ///   row of every member must spell the member's shape and its per-tier PRODUCTION identity
+    ///   ([`flux2_calibration_fingerprint`]).
+    ///
+    /// Flip any arm flag without the manifest or the plan moving and this reds.
+    #[test]
+    fn the_flux2_arm_table_agrees_with_the_shipped_manifest_and_the_anchor_plan() {
+        let manifest: Value = serde_json::from_str(&sceneworks_core::jsonc::strip_jsonc_comments(
+            include_str!("../../../../config/manifests/builtin.models.jsonc"),
+        ))
+        .expect("the shipped models manifest parses");
+        let plan: Value = serde_json::from_str(include_str!(
+            "../../../../config/memory-calibration-plan.json"
+        ))
+        .expect("the anchor plan parses");
+        let mut klein_identities = std::collections::BTreeMap::<String, String>::new();
+        for arm in [FLUX2_DEV_ARM, FLUX2_KLEIN_ARM, FLUX2_KLEIN_KV_ARM] {
+            let entry = manifest["models"]
+                .as_array()
+                .expect("models")
+                .iter()
+                .find(|entry| entry["id"] == arm.model_id)
+                .unwrap_or_else(|| panic!("{} is not a shipped model", arm.model_id));
+            let mlx = &entry["mlx"];
+            let dense_te = mlx["denseTextEncoderTier"] == json!(true);
+            assert_eq!(
+                arm.tier_quant_reaches_the_loader, !dense_te,
+                "{}: the worker loads a dense-TE tier with Quant::None (is_dense_te_tier)",
+                arm.model_id
+            );
+            let contract = &mlx["memoryStrategyContract"];
+            assert_eq!(contract["provider"], arm.provider, "{}", arm.model_id);
+            // The RESIDENT rung's row - the rung this anchor prices. sc-22727: it is deliberately
+            // NOT the `bounded_transformer_residency` row. Both klein entries carry a BTR row with
+            // `requiredOffloadPolicy: "sequential"`, but that row describes rung 4's load, and a
+            // deferred klein transformer cannot render at all without a block window
+            // (`mlx-gen-flux2/src/transformer.rs`, proved by the sc-22727 proof capture). The
+            // resident rung declares no `requiredOffloadPolicy` at all, which is the worker's
+            // Resident + Eager default, and that is what this arm loads.
+            let resident_rows = contract["implementations"]
+                .as_array()
+                .expect("implementations")
+                .iter()
+                .filter(|row| {
+                    row["rung"] == "resident"
+                        && row
+                            .get("runtimeProvider")
+                            .and_then(Value::as_str)
+                            .unwrap_or(arm.provider)
+                            == arm.provider
+                })
+                .collect::<Vec<_>>();
+            let [resident_row] = resident_rows.as_slice() else {
+                panic!(
+                    "{}: {} resident rows for one provider",
+                    arm.model_id,
+                    resident_rows.len()
+                )
+            };
+            assert!(
+                resident_row.get("requiredOffloadPolicy").is_none(),
+                "{}: the resident rung declares no offload policy; it is the eager default",
+                arm.model_id
+            );
+            assert_eq!(
+                resident_row["fingerprint"], arm.registry_fingerprint,
+                "{}: the manifest fingerprint is the weights-free registry declaration",
+                arm.model_id
+            );
+            assert_eq!(
+                arm.offload_policy,
+                OffloadPolicy::Resident,
+                "{}: the resident rung is a Resident load",
+                arm.model_id
+            );
+            assert_eq!(
+                arm.load_shape,
+                LoadShape::EagerMaterialization,
+                "{}: a Resident policy keeps the eager default",
+                arm.model_id
+            );
+            let expected_shape = protocol::LOAD_SHAPE_EAGER;
+            for tier in ["q4", "q8", "bf16"] {
+                let key = format!("{}:{tier}:mlx", arm.model_id);
+                let row = &plan["anchors"][&key];
+                assert!(row.is_object(), "{key} is not a planned anchor");
+                assert_eq!(row["loadShape"], expected_shape, "{key}");
+                assert_eq!(row["provider"], arm.provider, "{key}");
+                // The PRODUCTION identity, per tier — not the manifest's registry declaration.
+                assert_eq!(
+                    row["calibrationFingerprint"],
+                    json!(flux2_calibration_fingerprint(arm, tier)),
+                    "{key}"
+                );
+                if arm.provider == FLUX2_KLEIN_PROVIDER {
+                    // sc-22727: a klein plan row still carrying the weights-free declaration would
+                    // bind a cell no load of real weights ever returns, and the six klein cells
+                    // are six DISTINCT measured cells — two artifact families times three tiers.
+                    assert_ne!(
+                        flux2_calibration_fingerprint(arm, tier),
+                        arm.registry_fingerprint,
+                        "{key}: the registry declaration is not a production identity"
+                    );
+                    assert!(
+                        klein_identities
+                            .insert(flux2_calibration_fingerprint(arm, tier), key.clone())
+                            .is_none(),
+                        "{key}: this identity is already claimed by another klein cell"
+                    );
+                }
+            }
+        }
+        assert_eq!(
+            klein_identities.len(),
+            6,
+            "six distinct FLUX.2 klein MLX identities: two artifact families times three tiers"
+        );
+    }
+
+    /// A plan row spelling a load shape other than the member's worker shape is refused by name
+    /// before any environment or weight work — the harness would refuse the record afterwards, but
+    /// only after a full load.
+    #[test]
+    fn run_flux2_refuses_a_plan_whose_load_shape_is_not_the_members_worker_shape() {
+        for (arm, wrong) in [
+            (FLUX2_DEV_ARM, protocol::LOAD_SHAPE_DEFERRED),
+            (FLUX2_KLEIN_ARM, protocol::LOAD_SHAPE_DEFERRED),
+            (FLUX2_KLEIN_KV_ARM, protocol::LOAD_SHAPE_DEFERRED),
+        ] {
+            let mut request = minimal_request_for(arm.provider, arm.model_id, "resident");
+            request["planned"]["loadShape"] = json!(wrong);
+            let error = run_flux2(&request).expect_err("a crossed load shape must be refused");
+            assert!(
+                error.contains("worker load shape"),
+                "{}: {error}",
+                arm.model_id
+            );
+        }
+    }
+
+    /// The PLANNED tier must be carried by the root, and the member's OWN repository must be the
+    /// one bound — a q4 export cannot satisfy a q8 or bf16 plan, and the KV artifact cannot satisfy
+    /// a base-klein plan even though both load through `flux2_klein_9b`.
+    #[test]
+    fn flux2_root_must_carry_the_planned_tier_and_the_members_own_repository() {
+        const REVISION: &str = "acf05e8d5103838baba6a5e32dc91d6997a56023";
+        for arm in [FLUX2_DEV_ARM, FLUX2_KLEIN_ARM, FLUX2_KLEIN_KV_ARM] {
+            let selection = resident_selection(Some(Quant::Q4));
+            let q4_root = flux2_snapshot_root(arm.expected_repository, REVISION, "q4");
+            let error = flux2_load_spec_at(
+                arm,
+                "q8",
+                &selection,
+                arm.expected_repository.to_owned(),
+                REVISION.to_owned(),
+                q4_root.clone(),
+            )
+            .expect_err("a q8 plan must not be satisfied by a q4 root");
+            assert!(
+                error.ends_with(&format!("/snapshots/{REVISION}/q8")),
+                "{}: {error}",
+                arm.model_id
+            );
+            for tier in ["q4", "q8", "bf16"] {
+                let root = flux2_snapshot_root(arm.expected_repository, REVISION, tier);
+                let (repository, revision, _) = flux2_load_spec_at(
+                    arm,
+                    tier,
+                    &selection,
+                    arm.expected_repository.to_owned(),
+                    REVISION.to_owned(),
+                    root,
+                )
+                .unwrap_or_else(|error| panic!("{}/{tier}: {error}", arm.model_id));
+                assert_eq!(repository, arm.expected_repository);
+                assert_eq!(revision, REVISION);
+            }
+            for other in [FLUX2_DEV_ARM, FLUX2_KLEIN_ARM, FLUX2_KLEIN_KV_ARM] {
+                if other == arm {
+                    continue;
+                }
+                let error = flux2_load_spec_at(
+                    arm,
+                    "q4",
+                    &selection,
+                    other.expected_repository.to_owned(),
+                    REVISION.to_owned(),
+                    q4_root.clone(),
+                )
+                .expect_err("another member's repository must be refused");
+                assert!(
+                    error.contains(arm.expected_repository),
+                    "{} vs {}: {error}",
+                    arm.model_id,
+                    other.model_id
+                );
+            }
+        }
+    }
+
+    fn flux2_snapshot_root(repository: &str, revision: &str, tier: &str) -> PathBuf {
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir()
+            .join(format!("sc-22727-flux2-{}-{nonce}", std::process::id()))
+            .join(format!("models--{}", repository.replace('/', "--")))
+            .join("snapshots")
+            .join(revision)
+            .join(tier);
+        std::fs::create_dir_all(&root).unwrap();
+        root
     }
 
     #[test]
@@ -14135,13 +16103,15 @@ mod flux2_tests {
         .unwrap();
         let calibration = contract.calibration.as_ref().unwrap();
         let context = flux2_admission_context(
+            FLUX2_DEV_ARM,
             &resident_selection(Some(Quant::Q4)),
             calibration,
-            &calibration.fingerprint,
-            768,
-            768,
-            1_000_000,
-            1_000_000,
+            (768, 768),
+            Flux2AdmissionProbe {
+                fingerprint: &calibration.fingerprint,
+                total_bytes: 1_000_000,
+                predicted_peak_bytes: 1_000_000,
+            },
         );
         assert_eq!(context.mode, MemoryMode::TextToImage);
         assert!(!context.has_reference);
@@ -14257,6 +16227,51 @@ mod flux2_tests {
         );
     }
 
+    /// sc-22727 moved the arm from the crate-local `mlx_gen_flux2::provider_registry()` onto the
+    /// PRODUCTION catalog the worker composes (`runtime_macos::catalog()`, E4). That is only a
+    /// safe move if the two resolve the SAME contract — `mlx-gen-catalog` calls the same
+    /// `register_providers`, but nothing in this repo asserted it, and a bundle that wrapped or
+    /// re-registered a provider would silently change what every FLUX.2 capture measures.
+    ///
+    /// Weights-free: both sides are asked for the contract over one placeholder spec, so this
+    /// costs no GPU and no snapshot, and it covers every member the arm serves.
+    #[test]
+    fn the_production_catalog_resolves_the_same_flux2_contracts_as_the_provider_crate() {
+        let crate_registry = mlx_gen_flux2::provider_registry().unwrap();
+        let catalog = runtime_macos::catalog().expect("the production MLX catalog builds");
+        for arm in [FLUX2_DEV_ARM, FLUX2_KLEIN_ARM, FLUX2_KLEIN_KV_ARM] {
+            let spec = weights_free_spec(if arm.tier_quant_reaches_the_loader {
+                Some(Quant::Q4)
+            } else {
+                None
+            });
+            let direct = crate_registry.memory_strategy_contract(arm.provider, &spec);
+            let production = catalog
+                .media()
+                .memory_strategy_contract(arm.provider, &spec);
+            match (direct, production) {
+                (Ok(direct), Ok(production)) => assert_eq!(
+                    direct, production,
+                    "{}: the production catalog resolves a different contract",
+                    arm.model_id
+                ),
+                // A weights-free spec is a placeholder, so a member whose contract wants a real
+                // snapshot refuses on BOTH sides. The claim is that they agree, including on the
+                // refusal text — that is what rules out a bundle-side wrapper.
+                (Err(direct), Err(production)) => assert_eq!(
+                    direct.to_string(),
+                    production.to_string(),
+                    "{}: the two registries refuse for different reasons",
+                    arm.model_id
+                ),
+                (direct, production) => panic!(
+                    "{}: one registry answered and the other did not: {direct:?} vs {production:?}",
+                    arm.model_id
+                ),
+            }
+        }
+    }
+
     /// The admission-scenario legs the capture will run, exercised weights-free through the SAME
     /// registered function the loaded T2I generator delegates to. Mutation-verified in both
     /// directions: the accept leg proves the two rejects are not a blanket refusal, and the
@@ -14278,13 +16293,15 @@ mod flux2_tests {
         };
 
         let exact = flux2_admission_context(
+            FLUX2_DEV_ARM,
             &selection,
             calibration,
-            &calibration.fingerprint,
-            1024,
-            1024,
-            1_000_000,
-            1_000_000,
+            (1024, 1024),
+            Flux2AdmissionProbe {
+                fingerprint: &calibration.fingerprint,
+                total_bytes: 1_000_000,
+                predicted_peak_bytes: 1_000_000,
+            },
         );
         assert!(
             matches!(check(&exact), MemorySafetyDecision::Accept),
@@ -14293,13 +16310,15 @@ mod flux2_tests {
         );
 
         let unknown = flux2_admission_context(
+            FLUX2_DEV_ARM,
             &selection,
             calibration,
-            &calibration.fingerprint,
-            1024,
-            1024,
-            0,
-            1,
+            (1024, 1024),
+            Flux2AdmissionProbe {
+                fingerprint: &calibration.fingerprint,
+                total_bytes: 0,
+                predicted_peak_bytes: 1,
+            },
         );
         assert!(matches!(
             check(&unknown),
@@ -14307,26 +16326,30 @@ mod flux2_tests {
         ));
 
         let stale = flux2_admission_context(
+            FLUX2_DEV_ARM,
             &selection,
             calibration,
-            "stale-flux2-dev-fingerprint",
-            1024,
-            1024,
-            1_000_000,
-            1,
+            (1024, 1024),
+            Flux2AdmissionProbe {
+                fingerprint: "stale-flux2-dev-fingerprint",
+                total_bytes: 1_000_000,
+                predicted_peak_bytes: 1,
+            },
         );
         assert!(matches!(check(&stale), MemorySafetyDecision::Reject { .. }));
 
         // The route-gate mutation: the same fitting budget in an edit shape must be refused — the
         // T2I contract admits only reference-free text-to-image.
         let mut edit_shaped = flux2_admission_context(
+            FLUX2_DEV_ARM,
             &selection,
             calibration,
-            &calibration.fingerprint,
-            1024,
-            1024,
-            1_000_000,
-            1_000_000,
+            (1024, 1024),
+            Flux2AdmissionProbe {
+                fingerprint: &calibration.fingerprint,
+                total_bytes: 1_000_000,
+                predicted_peak_bytes: 1_000_000,
+            },
         );
         edit_shaped.mode = MemoryMode::Edit;
         edit_shaped.has_reference = true;
@@ -14339,13 +16362,15 @@ mod flux2_tests {
         // NVFP4 is the one tier the route gate refuses by name.
         let nvfp4_spec = weights_free_spec(Some(Quant::Nvfp4));
         let nvfp4 = flux2_admission_context(
+            FLUX2_DEV_ARM,
             &resident_selection(Some(Quant::Nvfp4)),
             calibration,
-            &calibration.fingerprint,
-            1024,
-            1024,
-            1_000_000,
-            1_000_000,
+            (1024, 1024),
+            Flux2AdmissionProbe {
+                fingerprint: &calibration.fingerprint,
+                total_bytes: 1_000_000,
+                predicted_peak_bytes: 1_000_000,
+            },
         );
         assert!(matches!(
             mlx_gen_flux2::memory_strategy::registered_dev_t2i_safety_check(
@@ -17096,10 +19121,10 @@ mod ltx_tests {
     fn every_image_arm_still_refuses_a_multi_frame_geometry() {
         type Arm = fn(&Value) -> Result<Value, String>;
         // (provider, model id, declared overlay, refusal label, arm). The model id and overlay are
-        // columns because sc-22728 added a family whose two members share one provider and differ in
-        // exactly those two axes; every other row still carries `modelId == provider`, `overlay`
-        // "none" (or Krea's control overlay).
-        let arms: [(&str, &str, &str, &str, Arm); 9] = [
+        // columns because sc-22728 and sc-22727 each added a family whose members share one provider
+        // and differ in exactly those two axes; every other row still carries `modelId == provider`,
+        // `overlay` "none" (or Krea's control overlay).
+        let arms: [(&str, &str, &str, &str, Arm); 11] = [
             (
                 KREA_BASE_PROVIDER,
                 KREA_BASE_PROVIDER,
@@ -17163,7 +19188,23 @@ mod ltx_tests {
                 FLUX2_PROVIDER,
                 "none",
                 "MLX FLUX.2-dev calibration",
-                run_flux2_dev,
+                run_flux2,
+            ),
+            // sc-22727: the two klein catalog models share `flux2_klein_9b` and each refuses under
+            // its OWN label, so neither can be mistaken for the other in a failure report.
+            (
+                FLUX2_KLEIN_PROVIDER,
+                "flux2_klein_9b",
+                "none",
+                "MLX FLUX.2-klein-9B calibration",
+                run_flux2,
+            ),
+            (
+                FLUX2_KLEIN_PROVIDER,
+                "flux2_klein_9b_kv",
+                "none",
+                "MLX FLUX.2-klein-9B KV calibration",
+                run_flux2,
             ),
         ];
         for (provider, model_id, overlay, label, arm) in arms {
@@ -17194,7 +19235,7 @@ mod ltx_tests {
                 assert_eq!(
                     error,
                     format!("{label} requires geometry.frames == 1, got {frames}"),
-                    "{provider} at frames={frames}"
+                    "{provider}/{model_id} at frames={frames}"
                 );
             }
         }
@@ -17214,6 +19255,8 @@ mod ltx_tests {
             "MLX Qwen base calibration",
             "MLX Qwen edit calibration",
             "MLX Qwen edit Lightning calibration",
+            "MLX FLUX.2-klein-9B calibration",
+            "MLX FLUX.2-klein-9B KV calibration",
             "MLX FLUX.2-dev calibration",
         ] {
             let request = json!({

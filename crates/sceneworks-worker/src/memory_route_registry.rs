@@ -922,6 +922,45 @@ const RULES: &[MemoryRouteRule] = &[
         requires_sequential_selection: false,
         legacy_shaping: true,
     },
+    // sc-22731: the MLX twins of the two Candle SANA rows above. Until these existed the registry
+    // named 37 MLX providers and NEITHER SANA route, so `mlx-gen-sana`'s windowed rung 4
+    // (`bounded_transformer_residency` over `TRANSFORMER_WINDOW_COMPONENT::Dit`, inference PR 951)
+    // was unroutable by construction: `evaluate_declared_mlx_load_shape_for_request_with_strategy`
+    // refuses any provider with no `Mlx` rule, so no MLX SANA declaration could ever be consulted.
+    //
+    // `ALL_TIERS` like the three MLX Chroma1 rows above — the packed macOS turnkeys ship q4, q8 and
+    // bf16 and `mlx-gen-sana` opens each. `SANA_MODES` and `PLAIN`, exactly as the Candle rows: the
+    // engine's route gate admits text_to_image and image_to_image, and the MLX still lane builds its
+    // spec with no adapters. `requires_sequential_selection: true` because PR 951's
+    // `contract_with_asset_facts` declares the windowed rung ONLY under `OffloadPolicy::Sequential`
+    // — a Resident load must therefore keep the shape it came in with, which is what the
+    // `matching.all(|rule| rule.requires_sequential_selection)` short-circuit below guarantees, and
+    // why the six `sana_*:*:mlx` RESIDENT anchors keep `eager_materialization`.
+    //
+    // `legacy_shaping: false` and NOT the `true` the MLX Chroma1 rows carry: these coordinates did
+    // not exist in the pre-declaration shaper, so they must not become reachable through
+    // `apply_registered_load_shape` merely because a manifest declaration is absent. The cost is
+    // that the lane is request-context-owned (`requires_request_context` below), so it stays
+    // refused-and-eager — exactly what it is today with no rule at all — until the
+    // `sana_*.mlx` `memoryStrategyContract` blocks carry `requestContexts`.
+    MemoryRouteRule {
+        backend: MemoryRouteBackend::Mlx,
+        provider: "sana_1600m",
+        tiers: ALL_TIERS,
+        modes: SANA_MODES,
+        load_profiles: PLAIN,
+        requires_sequential_selection: true,
+        legacy_shaping: false,
+    },
+    MemoryRouteRule {
+        backend: MemoryRouteBackend::Mlx,
+        provider: "sana_sprint_1600m",
+        tiers: ALL_TIERS,
+        modes: SANA_MODES,
+        load_profiles: PLAIN,
+        requires_sequential_selection: true,
+        legacy_shaping: false,
+    },
     MemoryRouteRule {
         backend: MemoryRouteBackend::Mlx,
         provider: "kolors",
@@ -2289,6 +2328,40 @@ pub fn evaluate_declared_mlx_load_shape(
     )
 }
 
+/// Does the pinned provider implement `strategy` for the candidate whose contract this is?
+///
+/// A contract-read ERROR is not the same fact as "the provider does not implement it", and the
+/// declaration evaluator can only act on the latter. sc-22727 measured the cost of conflating them:
+/// the shipped FLUX.2 Klein rehosts failed `KleinArtifactInventory::verify_for_provider` while the
+/// contract was being read, the `Err` collapsed to `false` here, the BTR declaration was refused,
+/// and the route silently downgraded to an eager resident load carrying NO calibration identity —
+/// with nothing in the log to say an artifact had been rejected. The downgrade is still the right
+/// fallback (a load that cannot prove its rung must not claim it), so this keeps returning `false`;
+/// it just stops doing it silently.
+fn provider_implements_declared_strategy(
+    contract: gen_core::Result<Option<gen_core::MemoryProviderContract>>,
+    provider: &str,
+    strategy: MemoryStrategy,
+) -> bool {
+    match contract {
+        Ok(contract) => contract.is_some_and(|contract| {
+            contract
+                .capability(strategy)
+                .is_some_and(|capability| capability.support == MemoryStrategySupport::Implemented)
+        }),
+        Err(error) => {
+            tracing::warn!(
+                provider,
+                strategy = ?strategy,
+                %error,
+                "memory-strategy contract read failed; treating the declared strategy as \
+                 unimplemented and falling back to the eager resident load shape"
+            );
+            false
+        }
+    }
+}
+
 /// Request-exact MLX declaration intersection. Full BTR rows authorize `Applied + Deferred`;
 /// exact lower-only staged rows authorize only `Eligible + Eager` under their declared load policy.
 /// `Eligible` remains non-authorizing for BTR and is ignored by every legacy shaper. Krea and FLUX
@@ -2311,15 +2384,11 @@ pub fn evaluate_declared_mlx_load_shape_for_request(
         spec,
         context,
         |candidate, strategy| {
-            crate::inference_runtime::media()
-                .memory_strategy_contract(provider, candidate)
-                .ok()
-                .flatten()
-                .is_some_and(|contract| {
-                    contract.capability(strategy).is_some_and(|capability| {
-                        capability.support == MemoryStrategySupport::Implemented
-                    })
-                })
+            provider_implements_declared_strategy(
+                crate::inference_runtime::media().memory_strategy_contract(provider, candidate),
+                provider,
+                strategy,
+            )
         },
     )
 }
@@ -3243,6 +3312,95 @@ mod tests {
             };
         }
         contract
+    }
+
+    /// sc-22727: a contract-read ERROR downgrades the declaration (it is not proof of the rung),
+    /// but it must not do so silently — it is how the shipped FLUX.2 Klein rehosts came to run
+    /// uncalibrated with nothing in the log. Weights-free: the seam is a pure function of the
+    /// `Result` the registry hands back.
+    #[test]
+    fn a_failed_contract_read_downgrades_the_declared_strategy_and_is_not_silent() {
+        let implemented = provider_implements_declared_strategy(
+            Ok(Some(staged_contract("flux2_klein_9b"))),
+            "flux2_klein_9b",
+            MemoryStrategy::StagedResidency,
+        );
+        assert!(
+            implemented,
+            "an implemented rung must still read as implemented"
+        );
+        assert!(
+            !provider_implements_declared_strategy(
+                Ok(Some(staged_contract("flux2_klein_9b"))),
+                "flux2_klein_9b",
+                MemoryStrategy::BoundedTransformerResidency,
+            ),
+            "a Missing rung must read as unimplemented"
+        );
+        assert!(
+            !provider_implements_declared_strategy(
+                Ok(None),
+                "flux2_klein_9b",
+                MemoryStrategy::BoundedTransformerResidency,
+            ),
+            "no contract is not an implemented rung"
+        );
+        let logs = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let captured = std::sync::Arc::clone(&logs);
+        let refused =
+            tracing::subscriber::with_default(CapturingSubscriber { messages: captured }, || {
+                provider_implements_declared_strategy(
+                    Err(gen_core::Error::Unsupported(
+                        "flux2 Klein turnkey text encoder is not dense".to_owned(),
+                    )),
+                    "flux2_klein_9b",
+                    MemoryStrategy::BoundedTransformerResidency,
+                )
+            });
+        assert!(!refused, "an unreadable contract cannot authorize the rung");
+        let logs = logs.lock().expect("log buffer");
+        assert_eq!(logs.len(), 1, "exactly one warning: {logs:?}");
+        assert!(
+            logs[0].contains("flux2_klein_9b")
+                && logs[0].contains("flux2 Klein turnkey text encoder is not dense"),
+            "the warning must name the provider AND the error: {}",
+            logs[0]
+        );
+    }
+
+    /// A minimal `tracing` subscriber that records every event's rendered fields, so the seam's
+    /// warning can be asserted without a global subscriber or a log-capture dependency.
+    struct CapturingSubscriber {
+        messages: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+    }
+
+    impl tracing::Subscriber for CapturingSubscriber {
+        fn enabled(&self, _: &tracing::Metadata<'_>) -> bool {
+            true
+        }
+        fn new_span(&self, _: &tracing::span::Attributes<'_>) -> tracing::Id {
+            tracing::Id::from_u64(1)
+        }
+        fn record(&self, _: &tracing::Id, _: &tracing::span::Record<'_>) {}
+        fn record_follows_from(&self, _: &tracing::Id, _: &tracing::Id) {}
+        fn event(&self, event: &tracing::Event<'_>) {
+            struct Render<'a>(&'a mut String);
+            impl tracing::field::Visit for Render<'_> {
+                fn record_debug(
+                    &mut self,
+                    field: &tracing::field::Field,
+                    value: &dyn std::fmt::Debug,
+                ) {
+                    use std::fmt::Write;
+                    let _ = write!(self.0, "{}={value:?} ", field.name());
+                }
+            }
+            let mut rendered = String::new();
+            event.record(&mut Render(&mut rendered));
+            self.messages.lock().expect("log buffer").push(rendered);
+        }
+        fn enter(&self, _: &tracing::Id) {}
+        fn exit(&self, _: &tracing::Id) {}
     }
 
     fn sana_contract(provider: &str) -> gen_core::MemoryProviderContract {
@@ -6968,6 +7126,100 @@ mod tests {
             .load_shape,
             LoadShape::EagerMaterialization
         );
+    }
+
+    /// sc-22731. The two MLX SANA rows exist at exactly the coordinates `mlx-gen-sana` serves, and
+    /// at no others. Deleting either row turns this red on its first `rule_coordinates_match`.
+    #[test]
+    fn mlx_sana_rules_cover_exact_tiers_modes_and_load_profiles() {
+        for provider in ["sana_1600m", "sana_sprint_1600m"] {
+            for tier in MemoryRouteTier::ALL {
+                for mode in [MemoryRouteMode::TextToImage, MemoryRouteMode::ImageToImage] {
+                    let selector = MemoryRouteSelector {
+                        backend: MemoryRouteBackend::Mlx,
+                        provider,
+                        tier,
+                        mode,
+                        overlay: MemoryRouteLoadProfile::Plain.overlay(),
+                        load_profile: MemoryRouteLoadProfile::Plain,
+                    };
+                    assert!(rule_coordinates_match(selector), "missing {selector:?}");
+                }
+            }
+            // The MLX still lane builds its spec with no adapters at all, and the engine's route
+            // gate admits neither of these modes: an overlaid or edit coordinate here would be
+            // fiction.
+            for crossed in [
+                MemoryRouteSelector {
+                    backend: MemoryRouteBackend::Mlx,
+                    provider,
+                    tier: MemoryRouteTier::Q4,
+                    mode: MemoryRouteMode::TextToImage,
+                    overlay: MemoryRouteLoadProfile::Lora.overlay(),
+                    load_profile: MemoryRouteLoadProfile::Lora,
+                },
+                MemoryRouteSelector {
+                    backend: MemoryRouteBackend::Mlx,
+                    provider,
+                    tier: MemoryRouteTier::Q4,
+                    mode: MemoryRouteMode::EditImage,
+                    overlay: MemoryRouteLoadProfile::Plain.overlay(),
+                    load_profile: MemoryRouteLoadProfile::Plain,
+                },
+                MemoryRouteSelector {
+                    backend: MemoryRouteBackend::Mlx,
+                    provider,
+                    tier: MemoryRouteTier::Q4,
+                    mode: MemoryRouteMode::StyleVariations,
+                    overlay: MemoryRouteLoadProfile::Plain.overlay(),
+                    load_profile: MemoryRouteLoadProfile::Plain,
+                },
+            ] {
+                assert!(!rule_coordinates_match(crossed), "accepted {crossed:?}");
+            }
+        }
+    }
+
+    /// sc-22731 ripple. The MLX SANA rows are Sequential-only and declaration-owned, so they must
+    /// NOT hand a Resident load a deferred shape: `apply_registered_load_shape` only consults
+    /// `legacy_shaping: true` rows, and the request-scoped evaluator short-circuits on
+    /// `requires_sequential_selection`. This is what keeps the six `sana_*:*:mlx` RESIDENT anchors
+    /// at `eager_materialization` — flipping either new row's `legacy_shaping` to `true` or its
+    /// `requires_sequential_selection` to `false` reds this.
+    #[test]
+    fn the_new_mlx_sana_rows_never_shape_a_resident_load_deferred() {
+        for provider in ["sana_1600m", "sana_sprint_1600m"] {
+            for tier in [
+                MemoryRouteTier::Bf16,
+                MemoryRouteTier::Q4,
+                MemoryRouteTier::Q8,
+            ] {
+                for sequential_selected in [false, true] {
+                    assert_eq!(
+                        apply_registered_load_shape(
+                            MemoryRouteBackend::Mlx,
+                            provider,
+                            MemoryRouteMode::TextToImage,
+                            spec(tier, MemoryRouteLoadProfile::Plain),
+                            sequential_selected,
+                        )
+                        .load_shape,
+                        LoadShape::EagerMaterialization,
+                        "{provider}:{tier:?}:{sequential_selected}"
+                    );
+                }
+            }
+            // ...and the rows are declaration-owned, so nothing else can claim they are legacy.
+            assert!(
+                RULES
+                    .iter()
+                    .any(|rule| rule.backend == MemoryRouteBackend::Mlx
+                        && rule.provider == provider
+                        && !rule.legacy_shaping
+                        && rule.requires_sequential_selection),
+                "{provider} must have a declaration-owned, sequential-only MLX row"
+            );
+        }
     }
 
     #[test]

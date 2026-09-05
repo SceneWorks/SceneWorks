@@ -2941,6 +2941,44 @@ test("the FLUX.2 composition audit still runs, and is still wired into a lane", 
 // binding lives here, where the manifest reader already exists and `npm run check` runs it on every
 // PR. Every extraction below asserts it MATCHED before it compares — a renamed constant must red,
 // not silently pass with nothing to check.
+// sc-22727 review: the Candle FLUX.2 arm decides PER MEMBER whether the planned tier reaches the
+// loader as `LoadSpec::quantize`. The worker takes that decision from the manifest —
+// `is_dense_te_tier` is `mlx.denseTextEncoderTier: true`, and `candle_quant_for_resolved_tier`
+// then returns `(None, resolved_bits)` — so the flag must be that declaration's negation for every
+// member. The Rust binding of the arm table to the manifest lives in a `#[test]` inside
+// `candle.rs`, which cannot RUN on a Mac (the binary is `compile_error!` on macOS and
+// `rust:check:candle` only typechecks), so the same binding is parsed out of the source text here,
+// where it runs and can be mutation-killed on the host that writes the arm.
+test("the Candle FLUX.2 arm table's tier-quant flags negate the manifest's denseTextEncoderTier", async () => {
+  const manifest = JSON.parse(
+    stripJsoncComments(await source("config/manifests/builtin.models.jsonc")),
+  );
+  const adapter = await source("crates/sceneworks-memory-adapter/src/bin/candle.rs");
+  const arms = [...adapter.matchAll(/const FLUX2_[A-Z_]+_ARM: Flux2Arm = Flux2Arm \{([\s\S]*?)\n\};/g)]
+    .map(([, body]) => ({
+      modelId: /\bmodel_id: "([^"]+)"/.exec(body)?.[1],
+      quantReachesLoader: /\btier_quant_reaches_the_loader: (true|false)/.exec(body)?.[1],
+    }));
+  assert.deepEqual(
+    arms.map((arm) => arm.modelId),
+    ["flux2_dev", "flux2_klein_9b", "flux2_klein_9b_kv"],
+    "the three FLUX.2 members, in table order",
+  );
+  for (const arm of arms) {
+    assert.ok(arm.quantReachesLoader, `${arm.modelId} must declare tier_quant_reaches_the_loader`);
+    const entry = manifest.models.find((model) => model.id === arm.modelId);
+    assert.ok(entry, `${arm.modelId} must be a shipped model`);
+    const denseTe = entry.mlx?.denseTextEncoderTier === true;
+    assert.equal(
+      arm.quantReachesLoader === "true",
+      !denseTe,
+      `${arm.modelId}: the worker loads a dense-TE tier with Quant::None, so the fold must be off`,
+    );
+  }
+  // Stated as data too, so the loop cannot pass by every member answering the same way.
+  assert.deepEqual(arms.map((arm) => arm.quantReachesLoader), ["true", "false", "false"]);
+});
+
 test("the MLX LTX arm's manifest constants match the shipped ltx_2_3 limits", async () => {
   const manifest = JSON.parse(
     stripJsoncComments(await source("config/manifests/builtin.models.jsonc")),
@@ -3420,28 +3458,59 @@ test("the SC-20318 provider phase profile is exact across runner, watchdog and a
     /Some\(LTX_BOUNDED_CAMPAIGN_ACTION\) => Some\(\(\n\s*LTX_BOUNDED_CAMPAIGN_PHASE_PROFILE,\n\s*&LTX_BOUNDED_CARRIER_PHASE_NAMES,/);
 });
 
-test("the MLX FLUX.2-dev calibration arm is bound to the direct reference-free T2I contract", async () => {
+test("the MLX FLUX.2 calibration arm is bound to the direct reference-free T2I contract", async () => {
   const adapter = await source("crates/sceneworks-memory-adapter/src/bin/mlx.rs");
   const context = adapter.slice(
     adapter.indexOf("fn flux2_admission_context("),
     adapter.indexOf("fn flux2_complete_sweep("),
   );
+  // sc-22727 generalized `run_flux2_dev` to the whole family (`run_flux2`), resolved from the
+  // plan's `(provider, modelId)`; the reference-free T2I claim below is unchanged and now covers
+  // every member.
   const arm = adapter.slice(
-    adapter.indexOf("fn run_flux2_dev("),
+    adapter.indexOf("fn run_flux2("),
     adapter.indexOf("fn validate_z_image_batch("),
   );
+  const table = adapter.slice(
+    adapter.indexOf("struct Flux2Arm {"),
+    adapter.indexOf("fn validate_flux2_target("),
+  );
 
-  assert.ok(context.length > 0 && arm.length > 0, "FLUX.2-dev adapter seams must exist");
+  assert.ok(context.length > 0 && arm.length > 0 && table.length > 0, "FLUX.2 adapter seams must exist");
   assert.match(context, /mode: MemoryMode::TextToImage/);
   assert.match(context, /has_reference: false/);
   assert.match(context, /reference_count: 0/);
   assert.doesNotMatch(context, /MemoryMode::Edit|reference_count: 2/);
 
-  assert.match(arm, /memory_strategy_contract\(FLUX2_PROVIDER, &spec\)/);
+  // The contract, the load and the admission scenarios are all keyed on the RESOLVED member, never
+  // on a hardcoded provider id: that is what keeps a KV plan off the base klein artifact.
+  assert.match(arm, /memory_strategy_contract\(arm\.provider, &spec\)/);
+  assert.match(arm, /registry\s*\.load\(arm\.provider, &spec\)/);
   assert.match(arm, /registered_dev_t2i_safety_check\(/);
-  assert.match(arm, /generator\s*\.memory_strategy_contract\(\)/);
+  assert.match(arm, /generator\.memory_strategy_safety_check\(&admission_context\(/);
+  assert.match(arm, /generator\.memory_strategy_contract\(\)/);
   assert.match(arm, /loaded_contract != &contract/);
   assert.doesNotMatch(arm, /registered_dev_safety_check|FLUX2_CONTRACT_PROVIDER/);
+
+  // E4: the load goes through the production catalog the worker composes, not a crate-local
+  // replica registry.
+  assert.match(arm, /runtime_macos::catalog\(\)/);
+  assert.doesNotMatch(arm, /mlx_gen_flux2::provider_registry\(\)/);
+
+  // Exactly three members, each binding its own artifact family. Two share the klein provider id,
+  // so `model_id` — which reaches the engine as `resolved_route` — is the discriminator.
+  for (const constant of ["FLUX2_DEV_ARM", "FLUX2_KLEIN_ARM", "FLUX2_KLEIN_KV_ARM"]) {
+    assert.match(adapter, new RegExp(`const ${constant}: Flux2Arm = Flux2Arm \\{`));
+  }
+  assert.match(table, /model_id: &'static str/);
+  assert.match(adapter, /\.with_resolved_route\(arm\.model_id\)/);
+  for (const env of [
+    "SCENEWORKS_FLUX2_ROOT",
+    "SCENEWORKS_FLUX2_KLEIN_ROOT",
+    "SCENEWORKS_FLUX2_KLEIN_KV_ROOT",
+  ]) {
+    assert.ok(adapter.includes(`"${env}"`), `${env} must bind exactly one member's artifact`);
+  }
 });
 
 // =====================================================================================

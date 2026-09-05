@@ -30,6 +30,17 @@ pub const QWEN_EDIT_LIGHTNING_REPOSITORY: &str = "lightx2v/Qwen-Image-Edit-2511-
 pub const QWEN_EDIT_LIGHTNING_FILE: &str =
     "Qwen-Image-Edit-2511-Lightning-4steps-V1.0-bf16.safetensors";
 pub const FLUX2_REPOSITORY: &str = "SceneWorks/flux2-dev-mlx";
+/// The FLUX.2-klein-9B tiered rehost (sc-22727) — the `flux2_klein_9b` catalog model's artifact,
+/// bound through `SCENEWORKS_FLUX2_KLEIN_*`. The engine discriminates it from the KV rehost by the
+/// snapshot path AND by `LoadSpec::resolved_route` (`turnkey_identity` /
+/// `KleinArtifactInventory::validate_resolved_route` in `mlx-gen-flux2/src/artifact_inventory.rs`),
+/// which is why the two variants get separate env families rather than one shared "klein" family.
+pub const FLUX2_KLEIN_REPOSITORY: &str = "SceneWorks/flux2-klein-9b-mlx";
+/// The FLUX.2-klein-9B **KV-cache** rehost (sc-22727): a separately distilled checkpoint of the same
+/// architecture, loaded through the SAME engine provider id `flux2_klein_9b`
+/// (`crates/sceneworks-worker/src/engines.rs` — `sceneworks_id: flux2_klein_9b_kv`,
+/// `engine_id: flux2_klein_9b`) from its own artifact, through `SCENEWORKS_FLUX2_KLEIN_KV_*`.
+pub const FLUX2_KLEIN_KV_REPOSITORY: &str = "SceneWorks/flux2-klein-9b-kv-mlx";
 pub const KREA_REPOSITORY: &str = "SceneWorks/krea-2-turbo-mlx";
 /// The FLUX.1 [dev] tiered rehost (sc-22726). It serves BOTH the `flux1_dev` text-to-image provider
 /// and the `pulid_flux` character route, on both lanes: the worker resolves the PuLID backbone from
@@ -40,6 +51,31 @@ pub const FLUX1_DEV_REPOSITORY: &str = "SceneWorks/flux1-dev-mlx";
 /// The FLUX.1 [schnell] tiered rehost (sc-22726), the `flux1_schnell` provider's own artifact.
 pub const FLUX1_SCHNELL_REPOSITORY: &str = "SceneWorks/flux1-schnell-mlx";
 pub const SDXL_REPOSITORY: &str = "SceneWorks/sdxl-base-mlx";
+/// The SANA 1.6B tiered rehost (sc-22731) — the `sana_1600m` provider's MLX artifact. The three
+/// packed tiers are `platforms: ["macos"]` turnkeys, so this repository serves the MLX lane ONLY;
+/// the Candle lane loads [`SANA_DENSE_REPOSITORY`] instead.
+pub const SANA_REPOSITORY: &str = "SceneWorks/Sana_1600M_1024px_mlx";
+/// The SANA-Sprint 1.6B tiered rehost (sc-22731), the `sana_sprint_1600m` provider's MLX artifact.
+pub const SANA_SPRINT_REPOSITORY: &str = "SceneWorks/Sana_Sprint_1.6B_1024px_mlx";
+/// The upstream dense diffusers snapshot the CANDLE `sana_1600m` route loads
+/// (`crates/sceneworks-worker/src/image_jobs/base.rs` `SANA_CANDLE_DIFFUSERS_REPO`). It has no tier
+/// sub-directory and ships one variant, so it is bound through
+/// [`validate_huggingface_revision_root`] and only ever at `bf16` — `candle-gen-sana`'s
+/// `validate_load_spec` refuses any `LoadSpec::quantize`, and there is no packed SANA artifact
+/// off-Mac to point it at.
+pub const SANA_DENSE_REPOSITORY: &str = "Efficient-Large-Model/Sana_1600M_1024px_diffusers";
+/// The Sprint route's upstream dense diffusers snapshot (`SANA_SPRINT_CANDLE_DIFFUSERS_REPO`).
+pub const SANA_SPRINT_DENSE_REPOSITORY: &str =
+    "Efficient-Large-Model/Sana_Sprint_1.6B_1024px_diffusers";
+/// The three Chroma1 tiered rehosts (sc-22731). One per route, on BOTH lanes: the Candle lane
+/// packed-loads the same SceneWorks turnkey the macOS path does, and `candle-gen-chroma`'s
+/// `ChromaLoadReceipt::capture` pins each route to its own repository and revision by name — so a
+/// Flash plan can never be satisfied by HD weights.
+pub const CHROMA1_HD_REPOSITORY: &str = "SceneWorks/chroma1-hd-mlx";
+/// See [`CHROMA1_HD_REPOSITORY`].
+pub const CHROMA1_BASE_REPOSITORY: &str = "SceneWorks/chroma1-base-mlx";
+/// See [`CHROMA1_HD_REPOSITORY`].
+pub const CHROMA1_FLASH_REPOSITORY: &str = "SceneWorks/chroma1-flash-mlx";
 // sc-22734. The SenseNova-U1 FAMILY: SIX catalog models the worker routes onto TWO engine ids on
 // both lanes — `sensenova_u1_8b` for the quality trio and `sensenova_u1_8b_fast` for the 8-step
 // distilled trio (`crates/sceneworks-worker/src/engines.rs` `MODEL_TABLE`) — each with its own

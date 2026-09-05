@@ -390,25 +390,28 @@ export function adapterCapturableProviders(source, label) {
     }
     const providers = new Set();
     for (const arm of matchArms(block.inner)) {
-      // sc-22734: an arm may be a Rust OR-PATTERN — `SENSENOVA_ID | SENSENOVA_FAST_ID`, the
-      // spelling a family whose several engine ids share ONE arm body takes. Each alternative is
-      // resolved by exactly the rules a lone pattern takes, so an or-pattern can never admit a
-      // shape a single pattern would be refused for; splitting is safe because these dispatch
-      // patterns are string literals and const paths, neither of which can contain a `|`. A
-      // leading `|` (rustfmt's multi-line spelling) yields an empty alternative, which is dropped.
-      for (const alternative of arm.pattern.split("|").map((part) => part.trim()).filter(Boolean)) {
-        const literal = /^"((?:\\.|[^"\\])*)"$/.exec(alternative);
+      // An OR-pattern (`A | B => …`) is one arm serving several providers — the Candle FLUX.2 arm
+      // dispatches `FLUX2_DEV_ID | FLUX2_KLEIN_ID` (sc-22727), and the SenseNova arms dispatch
+      // `SENSENOVA_ID | SENSENOVA_FAST_ID` (sc-22734). Each alternative is then the same shape the
+      // single-pattern arms are, so split first and judge each half by the same rules; a `|` inside
+      // a string literal cannot reach here because a literal arm has no `|` outside its quotes, and
+      // a leading `|` (rustfmt's multi-line spelling) yields an empty alternative, which is dropped.
+      const alternatives = /^"((?:\\.|[^"\\])*)"$/.test(arm.pattern)
+        ? [arm.pattern]
+        : arm.pattern.split("|").map((part) => part.trim()).filter(Boolean);
+      for (const pattern of alternatives) {
+        const literal = /^"((?:\\.|[^"\\])*)"$/.exec(pattern);
         if (literal) {
           providers.add(literal[1]);
-        } else if (/^[A-Z][A-Z0-9_]*$/.test(alternative)) {
-          if (!consts.has(alternative)) {
-            throw new Error(`${label}: dispatch arm ${alternative} does not resolve to a &str const`);
+        } else if (/^[A-Z][A-Z0-9_]*$/.test(pattern)) {
+          if (!consts.has(pattern)) {
+            throw new Error(`${label}: dispatch arm ${pattern} does not resolve to a &str const`);
           }
-          providers.add(consts.get(alternative));
-        } else if (!/^[a-z_][A-Za-z0-9_]*$/.test(alternative)) {
-          // Lower-case identifiers are the fallback binding of the refusal arm itself; anything else
-          // is a dispatch shape this parser has never seen and must not guess about.
-          throw new Error(`${label}: unrecognized dispatch arm pattern ${JSON.stringify(alternative)}`);
+          providers.add(consts.get(pattern));
+        } else if (!/^[a-z_][A-Za-z0-9_]*$/.test(pattern)) {
+          // Lower-case identifiers are the fallback binding of the refusal arm itself; anything
+          // else is a dispatch shape this parser has never seen and must not guess about.
+          throw new Error(`${label}: unrecognized dispatch arm pattern ${JSON.stringify(pattern)}`);
         }
       }
     }

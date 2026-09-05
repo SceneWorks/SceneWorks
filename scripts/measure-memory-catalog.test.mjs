@@ -6,6 +6,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
 
+import { parseRouteRegistryLaneTiers } from "./generate-memory-matrix.mjs";
 import {
   ROOT,
   ADAPTER_LIB_PATH,
@@ -13,6 +14,7 @@ import {
   PLAN_PATH,
   PACKAGED_SOURCES_PATH,
   PROVIDER_FAMILIES,
+  providerFamily,
   anchorParts,
   anchorSlug,
   appendPackagedSource,
@@ -63,6 +65,9 @@ function fakeModels() {
     // The edit model is a catalog alias for the Turbo provider driven in edit_image mode: it ships
     // the Turbo weights (worker engines.rs `z_image_edit → z_image_turbo`).
     { id: "z_image_edit", downloads: [{ repo: "SceneWorks/z-image-turbo-mlx", revision: REVISION, variant: "q4", files: ["q4/*"] }] },
+    // sc-22727: two catalog models over ONE engine provider id, each with its own rehost.
+    { id: "flux2_klein_9b", downloads: [{ repo: "SceneWorks/flux2-klein-9b-mlx", revision: REVISION, variant: "q8", files: ["q8/*"] }] },
+    { id: "flux2_klein_9b_kv", downloads: [{ repo: "SceneWorks/flux2-klein-9b-kv-mlx", revision: UPSTREAM, variant: "q8", files: ["q8/*"] }] },
     // The two Qwen edit ids are ONE checkpoint on ONE rehost, routed to one engine provider; only
     // the Lightning id additionally loads the pinned distill LoRA, which no download ships.
     { id: "qwen_image_edit_2511", downloads: [{ repo: "SceneWorks/qwen-image-edit-2511-mlx", revision: REVISION, variant: "q4", files: ["q4/*"] }] },
@@ -71,6 +76,18 @@ function fakeModels() {
     // `flux_dev`; its identity stack is fetched on first use and is not a manifest download at all.
     { id: "flux_dev", downloads: [{ repo: "SceneWorks/flux1-dev-mlx", revision: REVISION, variant: "q4", files: ["q4/*"] }] },
     { id: "pulid_flux_dev", downloads: [{ repo: "SceneWorks/flux1-dev-mlx", revision: REVISION, variant: "q4", files: ["q4/*"] }] },
+    // sc-22731. SANA is the one family whose two lanes load DIFFERENT repositories: the MLX lane
+    // opens the per-tier SceneWorks turnkey, the Candle lane the upstream dense diffusers snapshot
+    // at its root. Chroma1 is the ordinary shape — one per-tier turnkey serving both lanes — and is
+    // here so the lane override is proven to be a per-family override and not a global change.
+    {
+      id: "sana_1600m",
+      downloads: [
+        { repo: "SceneWorks/Sana_1600M_1024px_mlx", revision: REVISION, variant: "q4", files: ["q4/*"], platforms: ["macos"] },
+        { repo: "Efficient-Large-Model/Sana_1600M_1024px_diffusers", revision: UPSTREAM, variant: "bf16", files: [], platforms: ["windows", "linux"] },
+      ],
+    },
+    { id: "chroma1_hd", downloads: [{ repo: "SceneWorks/chroma1-hd-mlx", revision: REVISION, variant: "q4", files: ["q4/*"] }] },
   ];
 }
 
@@ -180,6 +197,40 @@ test("the z-image family: the base model has its own env family, and the edit al
       SCENEWORKS_Z_IMAGE_REVISION: REVISION,
       SCENEWORKS_Z_IMAGE_ROOT: snapshotPath(hub, "SceneWorks/z-image-turbo-mlx", REVISION, "q4"),
     });
+  }
+});
+
+test("the flux2-klein family: two catalog models on one provider id resolve their OWN artifacts", async () => {
+  const hub = await fakeHub([
+    ["SceneWorks/flux2-klein-9b-mlx", REVISION, "q8"],
+    ["SceneWorks/flux2-klein-9b-kv-mlx", UPSTREAM, "q8"],
+  ]);
+  for (const backend of ["mlx", "candle"]) {
+    const context = { models: fakeModels(), backend, hubs: [hub], current: new Map(), captured: new Map() };
+    const base = await classifyAnchor(`flux2_klein_9b:q8:${backend}`, { provider: "flux2_klein_9b" }, context);
+    assert.equal(base.status, "runnable", `${backend}: ${base.reason}`);
+    assert.deepEqual(base.env, {
+      SCENEWORKS_FLUX2_KLEIN_REPOSITORY: "SceneWorks/flux2-klein-9b-mlx",
+      SCENEWORKS_FLUX2_KLEIN_REVISION: REVISION,
+      SCENEWORKS_FLUX2_KLEIN_ROOT: snapshotPath(hub, "SceneWorks/flux2-klein-9b-mlx", REVISION, "q8"),
+    });
+    // The KV model shares `provider` with the row above and MUST NOT share its artifact family:
+    // a KV plan served from the base rehost would re-label the base checkpoint's peaks.
+    const kv = await classifyAnchor(`flux2_klein_9b_kv:q8:${backend}`, { provider: "flux2_klein_9b" }, context);
+    assert.equal(kv.status, "runnable", `${backend}: ${kv.reason}`);
+    assert.equal(kv.provider, "flux2_klein_9b", "both models load through one engine provider id");
+    assert.deepEqual(kv.env, {
+      SCENEWORKS_FLUX2_KLEIN_KV_REPOSITORY: "SceneWorks/flux2-klein-9b-kv-mlx",
+      SCENEWORKS_FLUX2_KLEIN_KV_REVISION: UPSTREAM,
+      SCENEWORKS_FLUX2_KLEIN_KV_ROOT: snapshotPath(hub, "SceneWorks/flux2-klein-9b-kv-mlx", UPSTREAM, "q8"),
+    });
+    // And the per-model override never leaks back into the shared row.
+    assert.equal(providerFamily("flux2_klein_9b", "flux2_klein_9b").env, "FLUX2_KLEIN");
+    assert.equal(providerFamily("flux2_klein_9b", "flux2_klein_9b_kv").env, "FLUX2_KLEIN_KV");
+    assert.equal(providerFamily("flux2_klein_9b", "flux2_klein_9b_kv").variants, undefined);
+    const missing = await classifyAnchor(`flux2_klein_9b_kv:q4:${backend}`, { provider: "flux2_klein_9b" }, context);
+    assert.equal(missing.status, "weights_missing");
+    assert.match(missing.reason, /flux2-klein-9b-kv-mlx@.*\/q4 on this host/);
   }
 });
 
@@ -296,6 +347,9 @@ test("every family's derived env names are read back by each arm it declares", a
     const envFamilies = [
       family.env,
       family.upstream?.env,
+      // sc-22727: a per-modelId variant is a derived env family too — the KV klein row exports
+      // `SCENEWORKS_FLUX2_KLEIN_KV_*` and each declared arm must read those names back.
+      ...Object.values(family.variants ?? {}).map((variant) => variant.env),
       ...Object.values(family.sideArtifact ?? {}).map((side) => side.env),
     ].filter(Boolean);
     if (envFamilies.length === 0) {
@@ -305,7 +359,15 @@ test("every family's derived env names are read back by each arm it declares", a
     for (const arm of family.arms) {
       const source = lanes.get(arm);
       assert.ok(source, `${id} declares an unknown adapter arm ${arm}`);
-      for (const env of envFamilies) {
+      // Per LANE (sc-22731): a family may bind a DIFFERENT artifact on each arm, and then only that
+      // arm's env family is the one that arm reads. The two SANA routes are the case — MLX opens
+      // the packed `SceneWorks/*_mlx` turnkey through `SCENEWORKS_SANA_*`, Candle the upstream
+      // dense diffusers snapshot through `SCENEWORKS_SANA_DENSE_*` — so asserting the shared
+      // `family.env` against candle.rs would demand an env that binary must never read.
+      const laneEnvFamilies = family.lanes?.[arm]
+        ? [family.lanes[arm].env].filter(Boolean)
+        : envFamilies;
+      for (const env of laneEnvFamilies) {
         for (const suffix of ["REPOSITORY", "REVISION", "ROOT"]) {
           const name = `SCENEWORKS_${env}_${suffix}`;
           assert.ok(
@@ -372,6 +434,89 @@ test("the flux.1 family: the two base providers bind their own artifacts, and Pu
   }
 });
 
+test("the sana family binds a different artifact per lane, and chroma1 binds one turnkey on both", async () => {
+  const hub = await fakeHub([
+    ["SceneWorks/Sana_1600M_1024px_mlx", REVISION, "q4"],
+    ["Efficient-Large-Model/Sana_1600M_1024px_diffusers", UPSTREAM],
+    ["SceneWorks/chroma1-hd-mlx", REVISION, "q4"],
+  ]);
+  const context = (backend) => ({ models: fakeModels(), backend, hubs: [hub], current: new Map(), captured: new Map() });
+
+  // MLX: the packed turnkey, descended into the planned tier.
+  const mlx = await classifyAnchor("sana_1600m:q4:mlx", { provider: "sana_1600m" }, context("mlx"));
+  assert.equal(mlx.status, "runnable", mlx.reason);
+  assert.deepEqual(mlx.env, {
+    SCENEWORKS_SANA_REPOSITORY: "SceneWorks/Sana_1600M_1024px_mlx",
+    SCENEWORKS_SANA_REVISION: REVISION,
+    SCENEWORKS_SANA_ROOT: snapshotPath(hub, "SceneWorks/Sana_1600M_1024px_mlx", REVISION, "q4"),
+  });
+
+  // Candle: the upstream dense snapshot, at its ROOT — no tier component, because that is what
+  // `resolve_weights_dir` hands `candle-gen-sana` and what its `validate_immutable_root` requires.
+  const candle = await classifyAnchor("sana_1600m:bf16:candle", { provider: "sana_1600m" }, context("candle"));
+  assert.equal(candle.status, "runnable", candle.reason);
+  assert.deepEqual(candle.env, {
+    SCENEWORKS_SANA_DENSE_REPOSITORY: "Efficient-Large-Model/Sana_1600M_1024px_diffusers",
+    SCENEWORKS_SANA_DENSE_REVISION: UPSTREAM,
+    SCENEWORKS_SANA_DENSE_ROOT: snapshotPath(hub, "Efficient-Large-Model/Sana_1600M_1024px_diffusers", UPSTREAM),
+  });
+  assert.equal(candle.roots.find((root) => root.label === "snapshot root").path, candle.env.SCENEWORKS_SANA_DENSE_ROOT);
+
+  // ...and the override is per family: Chroma1 derives the same per-tier root on both lanes.
+  for (const backend of ["mlx", "candle"]) {
+    const chroma = await classifyAnchor(`chroma1_hd:q4:${backend}`, { provider: "chroma1_hd" }, context(backend));
+    assert.equal(chroma.status, "runnable", `${backend}: ${chroma.reason}`);
+    assert.deepEqual(chroma.env, {
+      SCENEWORKS_CHROMA1_HD_REPOSITORY: "SceneWorks/chroma1-hd-mlx",
+      SCENEWORKS_CHROMA1_HD_REVISION: REVISION,
+      SCENEWORKS_CHROMA1_HD_ROOT: snapshotPath(hub, "SceneWorks/chroma1-hd-mlx", REVISION, "q4"),
+    });
+  }
+});
+
+// sc-22731 review guard: the repository literal each family names is duplicated in the adapter's
+// lib.rs, and the env family label is duplicated in whichever adapter binary serves that lane.
+// Nothing bound the three copies. This parses the Rust and asserts they agree, so editing one alone
+// reds here instead of on a capture host with the weights already staged.
+test("every sana/chroma env family and repository is the one the adapter binaries actually read", async () => {
+  const lib = await readFile(path.join(ROOT, ADAPTER_LIB_PATH), "utf8");
+  const repositories = new Map(
+    [...lib.matchAll(/pub const ([A-Z0-9_]+_REPOSITORY): &str =\s*"([^"]+)";/g)].map((match) => [match[2], match[1]]),
+  );
+  const binaries = {
+    mlx: await readFile(path.join(ROOT, "crates/sceneworks-memory-adapter/src/bin/mlx.rs"), "utf8"),
+    candle: await readFile(path.join(ROOT, "crates/sceneworks-memory-adapter/src/bin/candle.rs"), "utf8"),
+  };
+  const family = (id) => PROVIDER_FAMILIES[id];
+  const expected = new Set(
+    ["sana_1600m", "sana_sprint_1600m", "chroma1_hd", "chroma1_base", "chroma1_flash"].flatMap((id) =>
+      family(id).arms.map((backend) => `${id}:${backend}`),
+    ),
+  );
+  const checked = new Set();
+  for (const id of ["sana_1600m", "sana_sprint_1600m", "chroma1_hd", "chroma1_base", "chroma1_flash"]) {
+    for (const backend of family(id).arms) {
+      const artifact = family(id).lanes?.[backend] ?? family(id);
+      assert.ok(
+        repositories.has(artifact.repo),
+        `${id}:${backend}: ${artifact.repo} is not a *_REPOSITORY const in ${ADAPTER_LIB_PATH}`,
+      );
+      for (const suffix of ["REPOSITORY", "REVISION", "ROOT"]) {
+        const name = `SCENEWORKS_${artifact.env}_${suffix}`;
+        assert.ok(
+          binaries[backend].includes(`"${name}"`),
+          `${id}:${backend}: the ${backend} adapter never reads ${name}`,
+        );
+      }
+      checked.add(`${id}:${backend}`);
+    }
+  }
+  // A SET, not a count (sc-22731 review): derived from each family's own declared `arms`, so a
+  // route that loses a lane — or gains one — names ITSELF here instead of reporting "nine, not ten".
+  assert.deepEqual([...checked].sort(), [...expected].sort());
+  assert.ok(expected.size > 0, "the sweep must actually visit the two families");
+});
+
 // sc-22725: LTX-2.5 reaches the two lanes under two engine ids off ONE public snapshot. Both
 // families must therefore derive the same snapshot root, on their own lane and on no other.
 test("the LTX-2.5 family derives the same snapshot root on both lanes, under each lane's engine id", async () => {
@@ -422,8 +567,11 @@ test("LTX25_LANE_PROVIDERS and PROVIDER_FAMILIES agree on which lane serves whic
 test("classification refuses what no adapter arm or the harness cannot serve, and skips what is done", async () => {
   const hub = await fakeHub([["SceneWorks/z-image-turbo-mlx", REVISION, "q4"]]);
   const base = { models: fakeModels(), backend: "candle", hubs: [hub], current: new Map(), captured: new Map() };
-  const flux = await classifyAnchor("flux2_dev:q4:candle", { provider: "flux2_dev" }, base);
-  assert.equal(flux.status, "no_adapter_arm");
+  // sc-22727 gave `flux2_dev` a Candle arm, so the no-arm probe moved to a provider that still
+  // has none: `sdxl` is declared `arms: ["mlx"]`.
+  const sdxl = await classifyAnchor("sdxl:q4:candle", { provider: "sdxl" }, base);
+  assert.equal(sdxl.status, "no_adapter_arm");
+  assert.match(sdxl.reason, /candle adapter implements no provider arm for sdxl/);
   // `harness_unsupported` is the refusal for a provider whose adapter arm exists but whose
   // artifacts the harness cannot bind. No SHIPPED family is in that state since sc-22725 gave
   // LTX-2.5's candle engine id a real row, so the branch is driven through a synthetic family.
@@ -571,7 +719,7 @@ test("every provider the committed plan declares is either served by a family ro
         assert.equal(family?.arms.includes(backend) ?? false, false);
       } else if (!["harness_unsupported", "lane_undeclared", "provider_undeclared"].includes(row.status)) {
         // A served provider must resolve a manifest download, or the classification could not name a root.
-        tierDownload(models, row.modelId, family.repo, row.tier);
+        tierDownload(models, row.modelId, providerFamily(row.provider, row.modelId).repo, row.tier);
         assert.ok(row.roots.length > 0, `${row.key} names the root it would load`);
       }
     }
@@ -588,22 +736,78 @@ test("every provider the committed plan declares is either served by a family ro
  * - ROUTED lane: `models[].backends` in `docs/generated/memory-matrix.json`, which
  *   `generate-memory-matrix.mjs` derives from the worker's route resolvers
  *   (`crates/sceneworks-worker/src/memory_route_registry.rs`, the same `CANDLE_BESPOKE_REQUEST_PROVIDERS`
- *   and per-family engine tables the worker dispatches with). A lane that does not route the
- *   model is the ONLY exemption; a "structurally N/A" matrix cell is not one (epic 22723 E1).
+ *   and per-family engine tables the worker dispatches with).
+ *
+ * **The tier axis is per LANE (sc-22731).** It used to be per model: every tier any download ships
+ * was claimed on every routed lane. That over-claimed cells no lane can ever load — `sana_1600m`
+ * routes on Candle, but its q4/q8 tiers are `platforms: ["macos"]` MLX turnkeys and the Candle arm
+ * loads the upstream dense diffusers snapshot instead ("there is no packed q4/q8 tier off-Mac; the
+ * worker resolves this repo's snapshot ROOT, never a tier subdir", and
+ * `candle-gen-sana`'s `validate_load_spec` refuses any `quantize`, while
+ * `crates/sceneworks-worker/src/memory_route_registry.rs` routes candle `sana_1600m` /
+ * `sana_sprint_1600m` as `BF16_ONLY`). A cell with no artifact on the lane is not measurement work
+ * that has been skipped; it is an unrouted (lane, tier), which is epic 22723 E1's ONE exemption.
+ * A "structurally N/A" matrix cell is still not an exemption.
+ *
+ * The lane test is the same three-way rule `tiersFor` applies (sc-22731 review), and its registry
+ * half is IMPORTED from the generator rather than respelled. The first version tested only
+ * `download.platforms`, and that was wrong in both directions: it claimed `bernini`/`bernini_image`
+ * had no candle tiers at all, although their only off-Mac download is one UNTIERED
+ * `SceneWorks/bernini` bundle whose tier subdirs live inside it and whose Candle route rule declares
+ * `BF16_Q4_Q8`.
+ *
+ * The denominator is deliberately NOT read off the matrix's published axes. It is the broader,
+ * manifest-derived claim, and the difference is load-bearing in one direction: `flux_dev` and
+ * `flux_schnell` ship an ungated bf16 download while their candle blocks declare only
+ * `vramGbByTier: {q4, q8}`, so the matrix publishes no `flux_dev:bf16:candle` cell — and the
+ * burndown must still ask about it, because "the matrix under-declares a lane that ships a tier" is
+ * exactly the false green epic 22723 exists to catch. Narrowing this to the matrix would delete the
+ * question instead of answering it.
  */
+const LANE_PLATFORM = Object.freeze({ mlx: "macos", candle: "linux" });
+
+/** Whether a manifest download is one this lane's host would ever fetch. */
+function downloadServesLane(download, backend) {
+  return !download.platforms || download.platforms.includes(LANE_PLATFORM[backend]);
+}
+
+let routeLaneTiersPromise;
+/** The registry's per-lane tier FLOOR, from the generator's own parser — never a second spelling. */
+function routeLaneTiers() {
+  routeLaneTiersPromise ??= readFile(
+    path.join(ROOT, "crates/sceneworks-worker/src/memory_route_registry.rs"),
+    "utf8",
+  ).then(parseRouteRegistryLaneTiers);
+  return routeLaneTiersPromise;
+}
+
 async function computeShippedTieredCells() {
   const models = await readManifestModels();
   const matrix = JSON.parse(await readFile(path.join(ROOT, MATRIX_PATH), "utf8"));
   const routed = new Map(matrix.models.map((model) => [model.id, model.backends ?? []]));
+  const laneTiers = await routeLaneTiers();
   const cells = [];
   for (const model of models) {
-    const tiers = [...new Set(
-      (model.downloads ?? [])
-        .filter((download) => !download.coRequisite && ["q4", "q8", "bf16"].includes(download.variant))
-        .map((download) => download.variant),
-    )];
-    if (tiers.length === 0) continue;
+    const shipped = (model.downloads ?? []).filter(
+      (download) => !download.coRequisite && ["q4", "q8", "bf16"].includes(download.variant),
+    );
+    if (shipped.length === 0) continue;
     for (const backend of routed.get(model.id) ?? []) {
+      // An untiered download this lane's host fetches is a BUNDLE whose tiers live inside it, so it
+      // serves every tier the model ships. `SceneWorks/bernini` is that repo; LTX-2.3's dense
+      // co-requisite is another.
+      const bundled = (model.downloads ?? []).some(
+        (download) => typeof download.variant !== "string" && downloadServesLane(download, backend),
+      );
+      const floor = laneTiers.get(`${backend}:${model.id}`) ?? new Set();
+      const tiers = [...new Set(
+        shipped
+          .filter(
+            (download) =>
+              bundled || downloadServesLane(download, backend) || floor.has(download.variant),
+          )
+          .map((download) => download.variant),
+      )];
       for (const tier of tiers) cells.push({ modelId: model.id, tier, backend, key: `${model.id}:${tier}:${backend}` });
     }
   }
@@ -655,6 +859,64 @@ function gapReport(gaps) {
   ].join("\n");
 }
 
+// sc-22731: the tier axis is per LANE, and the rule is the manifest's own `platforms` selection —
+// not a hand-kept list of exempt cells. Asserted as a KEY SET on the one family that instantiates
+// it today, plus the invariant that drives it, so a new platform-gated download is covered without
+// editing this test and a cell can never be exempted by being forgotten.
+test("a lane only claims the tiers whose downloads that lane's host would fetch", async () => {
+  const models = await readManifestModels();
+  const cells = await shippedTieredCells();
+  const keys = new Set(cells.map((cell) => cell.key));
+
+  // SANA: three MLX turnkey tiers (`platforms: ["macos"]`) and ONE dense Candle snapshot
+  // (`platforms: ["windows", "linux"]`), so the two lanes claim different tier sets for one model.
+  for (const modelId of ["sana_1600m", "sana_sprint_1600m"]) {
+    assert.deepEqual(
+      cells.filter((cell) => cell.modelId === modelId).map((cell) => cell.key).sort(),
+      [`${modelId}:bf16:candle`, `${modelId}:bf16:mlx`, `${modelId}:q4:mlx`, `${modelId}:q8:mlx`].sort(),
+      `${modelId}: the packed tiers are macOS turnkeys; Candle loads the upstream dense snapshot`,
+    );
+  }
+  // Chroma's downloads carry no `platforms` key at all, so every tier is claimed on both lanes —
+  // the case that proves the rule above is a filter and not a blanket narrowing.
+  for (const modelId of ["chroma1_hd", "chroma1_base", "chroma1_flash"]) {
+    assert.deepEqual(
+      cells.filter((cell) => cell.modelId === modelId).map((cell) => cell.key).sort(),
+      ["bf16", "q4", "q8"].flatMap((tier) => [`${modelId}:${tier}:candle`, `${modelId}:${tier}:mlx`]).sort(),
+      `${modelId}: an ungated download ships to both lanes`,
+    );
+  }
+  // And the invariant itself, over the whole catalog: a claimed cell is exactly one whose tier
+  // something on this lane can open — a download the host fetches, an untiered bundle it fetches,
+  // or a route rule that declares the tier — and an unclaimed (routed model, shipped tier) has none
+  // of the three.
+  const matrix = JSON.parse(await readFile(path.join(ROOT, MATRIX_PATH), "utf8"));
+  const routed = new Map(matrix.models.map((model) => [model.id, model.backends ?? []]));
+  const laneTiers = await routeLaneTiers();
+  for (const model of models) {
+    const shipped = (model.downloads ?? []).filter(
+      (download) => !download.coRequisite && ["q4", "q8", "bf16"].includes(download.variant),
+    );
+    for (const backend of routed.get(model.id) ?? []) {
+      const bundled = (model.downloads ?? []).some(
+        (download) => typeof download.variant !== "string" && downloadServesLane(download, backend),
+      );
+      const floor = laneTiers.get(`${backend}:${model.id}`) ?? new Set();
+      for (const tier of new Set(shipped.map((download) => download.variant))) {
+        const serves =
+          bundled ||
+          floor.has(tier) ||
+          shipped.some((download) => download.variant === tier && downloadServesLane(download, backend));
+        assert.equal(
+          keys.has(`${model.id}:${tier}:${backend}`),
+          serves,
+          `${model.id}:${tier}:${backend} is claimed iff something on that lane can open the tier`,
+        );
+      }
+    }
+  }
+});
+
 // Epic 22723 E1/E2: measurability is a SHAPE claim over the manifest and the plan — no weights, no
 // GPU, no frozen count. `weights_missing` is measurable (the host merely lacks the snapshot);
 // anything else names work: a missing plan anchor, a missing adapter arm, a missing closure
@@ -663,6 +925,17 @@ test("the z-image family is measurable on every shipped tier of every routed lan
   const cells = (await shippedTieredCells()).filter((cell) => ["z_image", "z_image_edit", "z_image_turbo"].includes(cell.modelId));
   assert.ok(cells.length >= 3 * 3 * 2, "z_image / z_image_edit / z_image_turbo × three tiers × two lanes are all shipped and routed");
   const gaps = (await measurabilityGaps()).filter((gap) => ["z_image", "z_image_edit", "z_image_turbo"].includes(gap.modelId));
+  assert.equal(gaps.length, 0, gapReport(gaps));
+});
+
+// Epic 22723 E1/E2, story sc-22727: the whole FLUX.2 family, on every shipped tier of both lanes.
+// `flux2_klein_9b_true_v2` is deliberately not here — it ships no tiered download (its manifest
+// binds one converted single-file snapshot), so it is not a shipped TIERED cell at all.
+test("the flux2 family is measurable on every shipped tier of every routed lane", async () => {
+  const family = ["flux2_dev", "flux2_klein_9b", "flux2_klein_9b_kv"];
+  const cells = (await shippedTieredCells()).filter((cell) => family.includes(cell.modelId));
+  assert.ok(cells.length >= 3 * 3 * 2, "three models x three tiers x two lanes are all shipped and routed");
+  const gaps = (await measurabilityGaps()).filter((gap) => family.includes(gap.modelId));
   assert.equal(gaps.length, 0, gapReport(gaps));
 });
 
@@ -695,6 +968,36 @@ test("the flux.1 family is measurable on every shipped tier of every routed lane
   const family = ["flux_dev", "flux_schnell", "pulid_flux_dev"];
   const cells = (await shippedTieredCells()).filter((cell) => family.includes(cell.modelId));
   assert.equal(cells.length, 3 * 3 * 2, "three models x three shipped tiers x two routed lanes");
+  const gaps = (await measurabilityGaps()).filter((gap) => family.includes(gap.modelId));
+  assert.equal(gaps.length, 0, gapReport(gaps));
+});
+
+// sc-22731. Same shape claim, for the SANA and Chroma1 families. Chroma1 is the ordinary case —
+// three routes x three shipped tiers x two routed lanes. SANA is not: its packed tiers are
+// `platforms: ["macos"]` turnkeys and the Candle lane has ONE dense cell per route, which is an
+// unrouted (lane, tier) rather than a measurement that has been skipped.
+test("the sana and chroma1 families are measurable on every shipped tier of every routed lane", async () => {
+  const family = ["sana_1600m", "sana_sprint_1600m", "chroma1_hd", "chroma1_base", "chroma1_flash"];
+  const cells = (await shippedTieredCells()).filter((cell) => family.includes(cell.modelId));
+  // The expected KEY SET, spelled out (sc-22731 review). A frozen `2 * 4 + 3 * 3 * 2` said only how
+  // MANY cells there should be: if the Candle SANA axis silently regained q4/q8 while some Chroma1
+  // lane lost a tier, the count still came to 26 and this case stayed green. Every member below is
+  // derivable from the manifest — SANA's packed tiers are `platforms: ["macos"]` turnkeys and its
+  // only off-Mac download is the untiered dense diffusers snapshot, so its Candle lane has ONE cell
+  // per route; Chroma1's downloads carry no `platforms` key at all, so every tier is real on both
+  // lanes — and naming them is what makes a lost or gained cell say WHICH.
+  const expected = [
+    ...["sana_1600m", "sana_sprint_1600m"].flatMap((id) => [
+      `${id}:bf16:candle`,
+      `${id}:bf16:mlx`,
+      `${id}:q4:mlx`,
+      `${id}:q8:mlx`,
+    ]),
+    ...["chroma1_hd", "chroma1_base", "chroma1_flash"].flatMap((id) =>
+      ["bf16", "q4", "q8"].flatMap((tier) => [`${id}:${tier}:candle`, `${id}:${tier}:mlx`]),
+    ),
+  ];
+  assert.deepEqual(cells.map((cell) => cell.key).sort(), expected.sort());
   const gaps = (await measurabilityGaps()).filter((gap) => family.includes(gap.modelId));
   assert.equal(gaps.length, 0, gapReport(gaps));
 });

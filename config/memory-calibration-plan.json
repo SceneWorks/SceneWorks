@@ -2,6 +2,306 @@
   "$schema": "../packages/schemas/memory-anchor-plan.schema.json",
   "schemaVersion": 1,
   "anchors": {
+    "chroma1_base:bf16:candle": {
+      "provider": "chroma1_base",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "deferred_materialization",
+      "calibrationFingerprint": "chroma1-base-bf16-cuda-request-scoped-staged-residency-v1",
+      "fixture": "fresh-five-rung-chroma1-base-bf16-1024-seed16402-step2"
+    },
+    "chroma1_base:bf16:mlx": {
+      "provider": "chroma1_base",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "deferred_materialization",
+      "calibrationFingerprint": "chroma1-base-bf16-mlx-shared-ladder-v1",
+      "fixture": "chroma1-base-mlx-bf16-1024-seed22731-step2"
+    },
+    "chroma1_base:q4:candle": {
+      "provider": "chroma1_base",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "deferred_materialization",
+      "calibrationFingerprint": "chroma1-base-q4-cuda-request-scoped-staged-residency-v1",
+      "fixture": "fresh-five-rung-chroma1-base-q4-1024-seed16402-step2"
+    },
+    "chroma1_base:q4:mlx": {
+      "provider": "chroma1_base",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "deferred_materialization",
+      "calibrationFingerprint": "chroma1-base-q4-mlx-shared-ladder-2026-08-05-v1",
+      "fixture": "chroma1-base-mlx-q4-1024-seed22731-step2"
+    },
+    "chroma1_base:q8:candle": {
+      "provider": "chroma1_base",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "deferred_materialization",
+      "calibrationFingerprint": "chroma1-base-q8-cuda-request-scoped-staged-residency-v1",
+      "fixture": "fresh-five-rung-chroma1-base-q8-1024-seed16402-step2"
+    },
+    "chroma1_base:q8:mlx": {
+      "provider": "chroma1_base",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "deferred_materialization",
+      "calibrationFingerprint": "chroma1-base-q8-mlx-shared-ladder-v1",
+      "fixture": "chroma1-base-mlx-q8-1024-seed22731-step2"
+    },
+    "chroma1_flash:bf16:candle": {
+      "provider": "chroma1_flash",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "deferred_materialization",
+      "calibrationFingerprint": "chroma1-flash-bf16-cuda-request-scoped-staged-residency-v1",
+      "fixture": "fresh-five-rung-chroma1-flash-bf16-1024-seed16402-step2"
+    },
+    "chroma1_flash:bf16:mlx": {
+      "provider": "chroma1_flash",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "deferred_materialization",
+      "calibrationFingerprint": "chroma1-flash-bf16-mlx-shared-ladder-v1",
+      "fixture": "chroma1-flash-mlx-bf16-1024-seed22731-step2"
+    },
+    "chroma1_flash:q4:candle": {
+      "provider": "chroma1_flash",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "deferred_materialization",
+      "calibrationFingerprint": "chroma1-flash-q4-cuda-request-scoped-staged-residency-v1",
+      "fixture": "fresh-five-rung-chroma1-flash-q4-1024-seed16402-step2"
+    },
+    "chroma1_flash:q4:mlx": {
+      "provider": "chroma1_flash",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "deferred_materialization",
+      "calibrationFingerprint": "chroma1-flash-q4-mlx-shared-ladder-v1",
+      "fixture": "chroma1-flash-mlx-q4-1024-seed22731-step2"
+    },
+    "chroma1_flash:q8:candle": {
+      "provider": "chroma1_flash",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "deferred_materialization",
+      "calibrationFingerprint": "chroma1-flash-q8-cuda-request-scoped-staged-residency-v1",
+      "fixture": "fresh-five-rung-chroma1-flash-q8-1024-seed16402-step2"
+    },
+    "chroma1_flash:q8:mlx": {
+      "provider": "chroma1_flash",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "deferred_materialization",
+      "calibrationFingerprint": "chroma1-flash-q8-mlx-shared-ladder-v1",
+      "fixture": "chroma1-flash-mlx-q8-1024-seed22731-step2"
+    },
+    "chroma1_hd:bf16:candle": {
+      "provider": "chroma1_hd",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "deferred_materialization",
+      "calibrationFingerprint": "chroma1-hd-bf16-cuda-request-scoped-staged-residency-v1",
+      "fixture": "fresh-five-rung-chroma1-hd-bf16-1024-seed16402-step2"
+    },
+    "chroma1_hd:bf16:mlx": {
+      "provider": "chroma1_hd",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "deferred_materialization",
+      "calibrationFingerprint": "chroma1-hd-bf16-mlx-shared-ladder-v1",
+      "fixture": "chroma1-hd-mlx-bf16-1024-seed22731-step2"
+    },
+    "chroma1_hd:q4:candle": {
+      "provider": "chroma1_hd",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "deferred_materialization",
+      "calibrationFingerprint": "chroma1-hd-q4-cuda-request-scoped-staged-residency-v1",
+      "fixture": "fresh-five-rung-chroma1-hd-q4-1024-seed16402-step2"
+    },
+    "chroma1_hd:q4:mlx": {
+      "provider": "chroma1_hd",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "deferred_materialization",
+      "calibrationFingerprint": "chroma1-hd-q4-mlx-shared-ladder-v1",
+      "fixture": "chroma1-hd-mlx-q4-1024-seed22731-step2"
+    },
+    "chroma1_hd:q8:candle": {
+      "provider": "chroma1_hd",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "deferred_materialization",
+      "calibrationFingerprint": "chroma1-hd-q8-cuda-request-scoped-staged-residency-v1",
+      "fixture": "fresh-five-rung-chroma1-hd-q8-1024-seed16402-step2"
+    },
+    "chroma1_hd:q8:mlx": {
+      "provider": "chroma1_hd",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "deferred_materialization",
+      "calibrationFingerprint": "chroma1-hd-q8-mlx-shared-ladder-v1",
+      "fixture": "chroma1-hd-mlx-q8-1024-seed22731-step2"
+    },
+    "flux2_dev:bf16:candle": {
+      "provider": "flux2_dev",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "deferred_materialization",
+      "calibrationFingerprint": "flux2-dev-cuda-caption-upsample-staged-host-full-edge-decode-bounded-attention-device-format-blocks-v3",
+      "fixture": "fresh-five-rung-flux2-dev-bf16-1024-seed16402-step2"
+    },
+    "flux2_dev:bf16:mlx": {
+      "provider": "flux2_dev",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 512,
+        "height": 512,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "eager_materialization",
+      "calibrationFingerprint": "sc-18218-flux2-dev-t2i-resident-evidence-v1",
+      "fixture": "flux2-dev-mlx-bf16-512-seed18218-step2"
+    },
     "flux2_dev:q4:candle": {
       "provider": "flux2_dev",
       "mode": "text_to_image",
@@ -14,8 +314,8 @@
       },
       "evidenceScope": "authoritative",
       "loadShape": "deferred_materialization",
-      "calibrationFingerprint": "flux2-dev-cuda-staged-host-full-edge-decode-bounded-attention-device-format-blocks-v2",
-      "fixture": "flux2-dev-q4-seed42-1024x1024-output-1e284e748f8da7321950c03e2516fcfe148282645740bdf32db7c8fbd0c28977"
+      "calibrationFingerprint": "flux2-dev-cuda-caption-upsample-staged-host-full-edge-decode-bounded-attention-device-format-blocks-v3",
+      "fixture": "fresh-five-rung-flux2-dev-q4-1024-seed16402-step2"
     },
     "flux2_dev:q4:mlx": {
       "provider": "flux2_dev",
@@ -32,6 +332,21 @@
       "calibrationFingerprint": "sc-18218-flux2-dev-t2i-resident-evidence-v1",
       "fixture": "flux2-dev-mlx-q4-768-seed18218-step2"
     },
+    "flux2_dev:q8:candle": {
+      "provider": "flux2_dev",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "deferred_materialization",
+      "calibrationFingerprint": "flux2-dev-cuda-caption-upsample-staged-host-full-edge-decode-bounded-attention-device-format-blocks-v3",
+      "fixture": "fresh-five-rung-flux2-dev-q8-1024-seed16402-step2"
+    },
     "flux2_dev:q8:mlx": {
       "provider": "flux2_dev",
       "mode": "text_to_image",
@@ -46,6 +361,186 @@
       "loadShape": "eager_materialization",
       "calibrationFingerprint": "sc-18218-flux2-dev-t2i-resident-evidence-v1",
       "fixture": "flux2-dev-mlx-q8-768-seed18218-step2"
+    },
+    "flux2_klein_9b:bf16:candle": {
+      "provider": "flux2_klein_9b",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "deferred_materialization",
+      "calibrationFingerprint": "flux2-klein-cuda-shared-ladder-provider-abi-v2",
+      "fixture": "fresh-five-rung-flux2-klein-9b-bf16-1024-seed16402-step2"
+    },
+    "flux2_klein_9b:bf16:mlx": {
+      "provider": "flux2_klein_9b",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 768,
+        "height": 768,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "eager_materialization",
+      "calibrationFingerprint": "flux2-klein-9b-bf16-mlx-shared-ladder-rehost-t2i-v1",
+      "fixture": "flux2-klein-9b-mlx-bf16-768-seed22727-step2"
+    },
+    "flux2_klein_9b:q4:candle": {
+      "provider": "flux2_klein_9b",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "deferred_materialization",
+      "calibrationFingerprint": "flux2-klein-cuda-shared-ladder-provider-abi-v2",
+      "fixture": "fresh-five-rung-flux2-klein-9b-q4-1024-seed16402-step2"
+    },
+    "flux2_klein_9b:q4:mlx": {
+      "provider": "flux2_klein_9b",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 768,
+        "height": 768,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "eager_materialization",
+      "calibrationFingerprint": "flux2-klein-9b-q4-mlx-shared-ladder-rehost-t2i-v1",
+      "fixture": "flux2-klein-9b-mlx-q4-768-seed22727-step2"
+    },
+    "flux2_klein_9b:q8:candle": {
+      "provider": "flux2_klein_9b",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "deferred_materialization",
+      "calibrationFingerprint": "flux2-klein-cuda-shared-ladder-provider-abi-v2",
+      "fixture": "fresh-five-rung-flux2-klein-9b-q8-1024-seed16402-step2"
+    },
+    "flux2_klein_9b:q8:mlx": {
+      "provider": "flux2_klein_9b",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 768,
+        "height": 768,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "eager_materialization",
+      "calibrationFingerprint": "flux2-klein-9b-q8-mlx-shared-ladder-rehost-t2i-v1",
+      "fixture": "flux2-klein-9b-mlx-q8-768-seed22727-step2"
+    },
+    "flux2_klein_9b_kv:bf16:candle": {
+      "provider": "flux2_klein_9b",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "deferred_materialization",
+      "calibrationFingerprint": "flux2-klein-cuda-shared-ladder-provider-abi-v2",
+      "fixture": "fresh-five-rung-flux2-klein-9b-kv-bf16-1024-seed16402-step2"
+    },
+    "flux2_klein_9b_kv:bf16:mlx": {
+      "provider": "flux2_klein_9b",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 768,
+        "height": 768,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "eager_materialization",
+      "calibrationFingerprint": "flux2-klein-9b-bf16-mlx-shared-ladder-kv-rehost-t2i-v1",
+      "fixture": "flux2-klein-9b-kv-mlx-bf16-768-seed22727-step2"
+    },
+    "flux2_klein_9b_kv:q4:candle": {
+      "provider": "flux2_klein_9b",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "deferred_materialization",
+      "calibrationFingerprint": "flux2-klein-cuda-shared-ladder-provider-abi-v2",
+      "fixture": "fresh-five-rung-flux2-klein-9b-kv-q4-1024-seed16402-step2"
+    },
+    "flux2_klein_9b_kv:q4:mlx": {
+      "provider": "flux2_klein_9b",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 768,
+        "height": 768,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "eager_materialization",
+      "calibrationFingerprint": "flux2-klein-9b-q4-mlx-shared-ladder-kv-rehost-t2i-v1",
+      "fixture": "flux2-klein-9b-kv-mlx-q4-768-seed22727-step2"
+    },
+    "flux2_klein_9b_kv:q8:candle": {
+      "provider": "flux2_klein_9b",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "deferred_materialization",
+      "calibrationFingerprint": "flux2-klein-cuda-shared-ladder-provider-abi-v2",
+      "fixture": "fresh-five-rung-flux2-klein-9b-kv-q8-1024-seed16402-step2"
+    },
+    "flux2_klein_9b_kv:q8:mlx": {
+      "provider": "flux2_klein_9b",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 768,
+        "height": 768,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "eager_materialization",
+      "calibrationFingerprint": "flux2-klein-9b-q8-mlx-shared-ladder-kv-rehost-t2i-v1",
+      "fixture": "flux2-klein-9b-kv-mlx-q8-768-seed22727-step2"
     },
     "flux_dev:bf16:candle": {
       "provider": "flux1_dev",
@@ -825,6 +1320,126 @@
       "loadShape": "deferred_materialization",
       "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1",
       "fixture": "qwen-edit-lightning-mlx-q8-seed16353-step4"
+    },
+    "sana_1600m:bf16:candle": {
+      "provider": "sana_1600m",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "deferred_materialization",
+      "calibrationFingerprint": "sana-candle-dense-base-full-ladder-v1",
+      "fixture": "fresh-five-rung-sana-1600m-bf16-1024-seed16402-step2"
+    },
+    "sana_1600m:bf16:mlx": {
+      "provider": "sana_1600m",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "eager_materialization",
+      "calibrationFingerprint": "sana-base-bf16-mlx-full-ladder-v1-resident",
+      "fixture": "sana-1600m-mlx-bf16-1024-seed22731-step2"
+    },
+    "sana_1600m:q4:mlx": {
+      "provider": "sana_1600m",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "eager_materialization",
+      "calibrationFingerprint": "sana-mlx-full-ladder-2026-08-06-v1-resident",
+      "fixture": "sana-1600m-mlx-q4-1024-seed22731-step2"
+    },
+    "sana_1600m:q8:mlx": {
+      "provider": "sana_1600m",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "eager_materialization",
+      "calibrationFingerprint": "sana-base-q8-mlx-full-ladder-v1-resident",
+      "fixture": "sana-1600m-mlx-q8-1024-seed22731-step2"
+    },
+    "sana_sprint_1600m:bf16:candle": {
+      "provider": "sana_sprint_1600m",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "deferred_materialization",
+      "calibrationFingerprint": "sana-candle-dense-sprint-full-ladder-v1",
+      "fixture": "fresh-five-rung-sana-sprint-bf16-1024-seed16402-step2"
+    },
+    "sana_sprint_1600m:bf16:mlx": {
+      "provider": "sana_sprint_1600m",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "eager_materialization",
+      "calibrationFingerprint": "sana-sprint-bf16-mlx-full-ladder-v1-resident",
+      "fixture": "sana-sprint-mlx-bf16-1024-seed22731-step2"
+    },
+    "sana_sprint_1600m:q4:mlx": {
+      "provider": "sana_sprint_1600m",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "eager_materialization",
+      "calibrationFingerprint": "sana-sprint-q4-mlx-full-ladder-v1-resident",
+      "fixture": "sana-sprint-mlx-q4-1024-seed22731-step2"
+    },
+    "sana_sprint_1600m:q8:mlx": {
+      "provider": "sana_sprint_1600m",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "eager_materialization",
+      "calibrationFingerprint": "sana-sprint-q8-mlx-full-ladder-v1-resident",
+      "fixture": "sana-sprint-mlx-q8-1024-seed22731-step2"
     },
     "sdxl:bf16:mlx": {
       "provider": "sdxl",
