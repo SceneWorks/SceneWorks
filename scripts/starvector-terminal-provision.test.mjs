@@ -930,6 +930,53 @@ test("pinned inference checkout publication is same-pin idempotent and derives t
   assert.equal(await readFile(path.join(outside, "sentinel"), "utf8"), "outside");
 });
 
+test("pinned checkout retries when the owner releases between contention and inspection", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "starvector-checkout-lock-release-"));
+  const source = path.join(root, "source"), hostRoot = path.join(root, "host");
+  try {
+    await mkdir(hostRoot);
+    for (const relative of ["release/starvector-terminal-receipt-v1.schema.json", "release/starvector-terminal-corpus-v1.json", "scripts/release/starvector_terminal_evidence.mjs"]) {
+      await mkdir(path.dirname(path.join(source, relative)), { recursive: true });
+      await writeFile(path.join(source, relative), relative);
+    }
+    await execFile("git", ["init", source]);
+    await execFile("git", ["-C", source, "add", "."]);
+    await execFile("git", ["-C", source, "-c", "user.name=fixture", "-c", "user.email=fixture@example.com", "commit", "-m", "fixture"]);
+    const revision = (await execFile("git", ["-C", source, "rev-parse", "HEAD"])).stdout.trim();
+    // Isolate the filesystem interleaving in a child; no global mocks affect other tests.
+    const child = `
+      import assert from "node:assert/strict";
+      import fs from "node:fs/promises";
+      import { syncBuiltinESMExports } from "node:module";
+      const [moduleUrl, source, hostRoot, revision, lockRoot] = process.argv.slice(1);
+      await fs.mkdir(lockRoot, { recursive: true });
+      const mkdir = fs.mkdir;
+      let released = false;
+      fs.mkdir = async (target, options) => {
+        try { return await mkdir(target, options); }
+        catch (error) {
+          if (target === lockRoot && error.code === "EEXIST" && !released) {
+            released = true;
+            // The previous owner releases after our failed mkdir, before our lstat.
+            await fs.rm(lockRoot, { recursive: true });
+          }
+          throw error;
+        }
+      };
+      syncBuiltinESMExports();
+      const { installPinnedCheckout } = await import(moduleUrl);
+      assert.equal(await installPinnedCheckout(source, hostRoot, revision), revision);
+      assert.equal(released, true);
+      await assert.rejects(fs.lstat(lockRoot), { code: "ENOENT" });
+    `;
+    await execFile(process.execPath, ["--input-type=module", "-e", child,
+      new URL("./starvector-terminal-provision.mjs", import.meta.url).href,
+      source, hostRoot, revision, pinnedCheckoutLockPath(hostRoot, revision)]);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("checkout concurrency guards are exact-pin scoped", async () => {
   const root = path.resolve(path.join(tmpdir(), "starvector-lock-scope"));
   const first = pinnedCheckoutLockPath(root, "1".repeat(40));

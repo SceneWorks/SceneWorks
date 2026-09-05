@@ -204,8 +204,13 @@ async function withPinnedCheckoutLock(hostRoot, revision, callback, { timeoutMs 
         await rm(lockRoot, { recursive: true, force: true }).catch(() => {});
         throw error;
       }
-      const lockInfo = await lstat(lockRoot).catch(() => null);
-      if (!lockInfo?.isDirectory() || lockInfo.isSymbolicLink()) die(`checkout lock is not an ordinary directory: ${lockRoot}`);
+      const lockInfo = await lstat(lockRoot).catch((error) => error?.code === "ENOENT" ? null : Promise.reject(error));
+      // An owner may release after our mkdir reports contention, before inspection.
+      if (!lockInfo) {
+        if (Date.now() >= deadline) die(`timed out waiting for exact-pin checkout lock: ${lockRoot}`);
+        continue;
+      }
+      if (!lockInfo.isDirectory() || lockInfo.isSymbolicLink()) die(`checkout lock is not an ordinary directory: ${lockRoot}`);
       const owner = await json(path.join(lockRoot, "owner.json")).catch(() => null);
       const ownerAgeMs = Date.now() - lockInfo.mtimeMs;
       if ((owner && !processIsAlive(owner.pid)) || (!owner && ownerAgeMs > 5_000)) {
