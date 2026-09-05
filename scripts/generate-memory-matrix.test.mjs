@@ -37,6 +37,7 @@ import {
   IMAGE_MLX_DERIVATION_ENTRY_POINTS,
   parseAnchorDerivationLanes,
   parseCandleBespokeStagedLanes,
+  parseRouteRegistryLaneTiers,
   parseInternalCandleVideoRoutes,
   parseVideoEngineIds,
   parseVideoRoutes,
@@ -2328,20 +2329,29 @@ test("a current-by-attestation anchor publishes its attestation everywhere it is
 //
 // Asserted as the INVARIANT over the whole published matrix rather than as a list of fixed cells,
 // so a newly platform-gated download is covered without editing this test.
-test("no lane advertises a tier whose only downloads that lane's host would never fetch", async () => {
+test("no lane advertises a tier that nothing routes", async () => {
   const matrix = JSON.parse(await readFile("docs/generated/memory-matrix.json", "utf8"));
   const manifest = JSON.parse(
     stripJsoncComments(await readFile("config/manifests/builtin.models.jsonc", "utf8")),
   );
   const models = new Map((manifest.models ?? manifest).map((model) => [model.id, model]));
+  const routeLaneTiers = parseRouteRegistryLaneTiers(
+    await readFile("crates/sceneworks-worker/src/memory_route_registry.rs", "utf8"),
+  );
   // MLX is macOS-only by construction; Candle is the off-Mac lane. `platforms` selection itself is
   // the shipped rule (`model_artifacts/artifact_selection.rs`) — a row with no `platforms` key
   // applies everywhere; this map is only which OS stands for which lane.
   const lanePlatform = { mlx: "macos", candle: "linux" };
-  let checked = 0;
+  const exercised = new Set();
   for (const model of matrix.models) {
-    const downloads = models.get(model.id)?.downloads ?? [];
+    const entry = models.get(model.id);
+    const downloads = entry?.downloads ?? [];
     for (const [backend, axes] of Object.entries(model.axes ?? {})) {
+      const serves = (download) =>
+        !download.platforms || download.platforms.includes(lanePlatform[backend]);
+      // A row with NO `variant` that this lane's host fetches is an untiered bundle whose tiers live
+      // inside it — `SceneWorks/bernini` is the case, and LTX-2.3's dense co-requisite is another.
+      const bundled = downloads.some((download) => typeof download.variant !== "string" && serves(download));
       for (const tier of axes.tiers) {
         // `default` is the generator's "this lane advertises no tier axis" sentinel, and a tier the
         // BACKEND block declares (`vramGbByTier`, `quantize`) is a lane-local claim rather than a
@@ -2349,17 +2359,105 @@ test("no lane advertises a tier whose only downloads that lane's host would neve
         if (tier === "default") continue;
         const variants = downloads.filter((download) => download.variant === tier);
         if (variants.length === 0) continue;
-        const laneDeclares = Object.keys(models.get(model.id)?.[backend]?.vramGbByTier ?? {}).includes(tier);
+        const laneDeclares = Object.keys(entry?.[backend]?.vramGbByTier ?? {}).includes(tier);
         assert.ok(
           laneDeclares ||
-            variants.some(
-              (download) => !download.platforms || download.platforms.includes(lanePlatform[backend]),
-            ),
-          `${model.id}:${backend} advertises ${tier}, but every ${tier} download is gated away from this lane`,
+            bundled ||
+            variants.some(serves) ||
+            (routeLaneTiers.get(`${backend}:${model.id}`)?.has(tier) ?? false),
+          `${model.id}:${backend} advertises ${tier}, but nothing routes it: no lane-local ` +
+            "declaration, no untiered bundle, no download this host fetches, no route rule",
         );
-        checked += 1;
+        exercised.add(`${model.id}:${backend}:${tier}`);
       }
     }
   }
-  assert.ok(checked > 100, `the invariant must actually be exercised (checked ${checked})`);
+  // A SET, not a `checked > 100` floor (sc-22731 review): the scope is re-derived independently
+  // from the same two artifacts, so a regression that stopped VISITING coordinates — an `axes` key
+  // renamed, a manifest join broken — fails naming the coordinates it lost instead of quietly
+  // sliding under a magic number.
+  const expected = new Set();
+  for (const model of matrix.models) {
+    const downloads = models.get(model.id)?.downloads ?? [];
+    for (const [backend, axes] of Object.entries(model.axes ?? {})) {
+      for (const tier of axes.tiers) {
+        if (tier === "default") continue;
+        if (!downloads.some((download) => download.variant === tier)) continue;
+        expected.add(`${model.id}:${backend}:${tier}`);
+      }
+    }
+  }
+  assert.deepEqual([...exercised].sort(), [...expected].sort());
+  assert.ok(expected.size > 0, "the invariant must actually be exercised");
+  // The coordinates this story armed are inside that scope, so the invariant is not vacuous for
+  // the two families sc-22731 added.
+  for (const key of ["sana_1600m:mlx:q4", "chroma1_hd:candle:q8", "bernini_image:candle:q4"]) {
+    assert.ok(expected.has(key), `${key} must be inside the invariant's scope`);
+  }
+});
+
+// sc-22731 review. The companion DIRECTION, and the one that caught the regression: `tiersFor`'s
+// `platforms` filter must never remove a tier `memory_route_registry.rs` declares for that exact
+// (backend, provider). The registry is a FLOOR, not a ceiling — a rule's `tiers` is the scope at
+// which that memory-route rule shapes a load, not an enumeration of what the lane can open
+// (`ltx_2_3` has no rule at all and routes three tiers, `lens` is `Q4_ONLY` on MLX and advertises
+// three), so this asserts containment one way only.
+//
+// `bernini`/`bernini_image` is the case: their only off-Mac download is one UNTIERED
+// `SceneWorks/bernini` tree, so a bare `platforms` test sent both candle axes to `["default"]` and
+// deleted six analytic anchors and six burndown cells for a lane whose Candle route rule declares
+// `BF16_Q4_Q8`. Under epic 22723 E1 only a (lane, tier) the worker does NOT route is exempt.
+test("every tier a route rule declares, and a download ships, survives onto the published axis", async () => {
+  const matrix = JSON.parse(await readFile("docs/generated/memory-matrix.json", "utf8"));
+  const manifest = JSON.parse(
+    stripJsoncComments(await readFile("config/manifests/builtin.models.jsonc", "utf8")),
+  );
+  const models = new Map((manifest.models ?? manifest).map((model) => [model.id, model]));
+  const routeLaneTiers = parseRouteRegistryLaneTiers(
+    await readFile("crates/sceneworks-worker/src/memory_route_registry.rs", "utf8"),
+  );
+  const checked = new Set();
+  for (const model of matrix.models) {
+    const downloads = models.get(model.id)?.downloads ?? [];
+    for (const [backend, axes] of Object.entries(model.axes ?? {})) {
+      // The floor binds only where the axis was DERIVED FROM DOWNLOADS. A lane that declares its
+      // own `vramGbByTier` has stated its tier set directly — `flux2_dev`'s candle block declares
+      // q4/q8 although the registry rule spans bf16 too — and `tiersFor` short-circuits on it
+      // before any download is read, so the registry is not what that axis contradicts.
+      if (Object.keys(models.get(model.id)?.[backend]?.vramGbByTier ?? {}).length) continue;
+      // Keyed on the catalog id, which is the registry provider for every id that has a rule under
+      // its own name; ids whose ENGINE provider differs (`bernini_image` -> `bernini`) are covered
+      // through that engine id's own catalog entry, and a miss here is simply an empty floor.
+      const routed = routeLaneTiers.get(`${backend}:${model.id}`);
+      if (!routed) continue;
+      for (const tier of routed) {
+        if (!downloads.some((download) => download.variant === tier)) continue;
+        assert.ok(
+          axes.tiers.includes(tier),
+          `${model.id}:${backend} routes ${tier} and ships a ${tier} download, but the published ` +
+            `axis is [${axes.tiers.join(", ")}] — a filter narrowed a lane the worker routes`,
+        );
+        checked.add(`${model.id}:${backend}:${tier}`);
+      }
+    }
+  }
+  assert.ok(checked.size > 0, "no (model, backend) joined a route rule; the parse is broken");
+  // The regression cell itself, by name.
+  assert.ok(checked.has("bernini:candle:q4"), "the bernini candle floor must be exercised");
+  assert.deepEqual(
+    matrix.models.find((model) => model.id === "bernini_image")?.axes?.candle?.tiers,
+    ["bf16", "q4", "q8"],
+    "bernini_image's candle axis is the registry's BF16_Q4_Q8, not the `default` sentinel",
+  );
+  assert.deepEqual(
+    matrix.models.find((model) => model.id === "ltx_2_3")?.axes?.candle?.tiers,
+    ["bf16", "q4", "q8"],
+    "candle_ltx_requested_tier resolves mlxQuantize <= 0 to CandleLtxTier::Bf16, so the routed " +
+      "bf16 cell must survive even though its own download row is platforms: [macos]",
+  );
+  assert.deepEqual(
+    matrix.models.find((model) => model.id === "sana_1600m")?.axes?.candle?.tiers,
+    ["bf16"],
+    "...and the narrowing this story exists for still holds: no packed SANA turnkey off-Mac",
+  );
 });

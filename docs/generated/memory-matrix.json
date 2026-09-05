@@ -1,7 +1,7 @@
 {
   "schemaVersion": 11,
   "generatedFrom": {
-    "sceneWorksRevision": "source-tree:fd19dd3b9ccef14b06242a721e126e07c97723b2abbd252fecded92ef166f341",
+    "sceneWorksRevision": "source-tree:2858f582af5b08aadeb42f9cf47f031fc213516413918a00c6ed38664851bbe0",
     "sources": {
       "manifest": {
         "path": "config/manifests/builtin.models.jsonc",
@@ -57,11 +57,11 @@
       },
       "mlxFitGate": {
         "path": "crates/sceneworks-worker/src/mlx_fit_gate.rs",
-        "sha256": "5bc0439bc193c21b214903013e2ef26eddbddd85976fa200072cedde7be7ce76"
+        "sha256": "f47b6397ca11423d78f679bb0b3b26d270b29f52b85e537944cd3c244b1228e0"
       },
       "memoryRouteRegistry": {
         "path": "crates/sceneworks-worker/src/memory_route_registry.rs",
-        "sha256": "d775336ce6c65ac830b16bbe366598fc31f66b12b01e98e37d4deebbe59dc8b4"
+        "sha256": "23048f731d2542d79ab178a55979b58f317413567278b22ad37beade0d3eda91"
       },
       "instantId": {
         "path": "crates/sceneworks-worker/src/image_jobs/instantid.rs",
@@ -69,11 +69,11 @@
       },
       "anchorStore": {
         "path": "config/memory-anchors.json",
-        "sha256": "33fbb2eca48e49076617df19a827ff85517a42f755e3aec3fb816aaeda23e35c"
+        "sha256": "99a16428f80e8a9d02c3b32e56d41f8220ae7c185b2a298f2d08f6f781583c3c"
       },
       "anchorLoaderClosures": {
         "path": "config/anchor-loader-closures.json",
-        "sha256": "4566f3da07d63299445f3a1e1fa8dd3a30852ad3fa6c25886599780b87ef5ac8"
+        "sha256": "bf928039cf9f97b0c59ac710d7e1a227f25611ab97fbb2da622d760d24d14000"
       },
       "anchorDerivation": {
         "path": "crates/sceneworks-core/src/memory_anchor.rs",
@@ -137,12 +137,12 @@
       "image": 53,
       "video": 11
     },
-    "cells": 9045,
+    "cells": 9265,
     "publishedCells": 762,
-    "elidedCells": 8283,
+    "elidedCells": 8503,
     "elidedByState": {
-      "Implemented": 4098,
-      "Missing": 4185
+      "Implemented": 4122,
+      "Missing": 4381
     },
     "publicationPredicate": "A coordinate is published when it carries a claim a per-lane census cannot: a measured memory anchor covers its (model, tier, backend lane), or it is structurally exempt. A bare `Implemented` or `Missing` state is a property of the whole lane, replicated across every tier x mode x overlay, and is counted in `summary.elidedByState` and the per-(entry, backend, rung) `coverage` census instead of restated thousands of times.",
     "mlxStagedStaticCoverage": 47,
@@ -163,7 +163,7 @@
       }
     ],
     "anchors": 15,
-    "analyticOnlyCells": 317,
+    "analyticOnlyCells": 322,
     "anchoredCells": 299,
     "staleAnchors": 10,
     "attestedAnchors": 5,
@@ -424,7 +424,9 @@
         },
         "candle": {
           "tiers": [
-            "default"
+            "bf16",
+            "q4",
+            "q8"
           ],
           "modes": [
             "ads2v",
@@ -497,7 +499,9 @@
         },
         "candle": {
           "tiers": [
-            "default"
+            "bf16",
+            "q4",
+            "q8"
           ],
           "modes": [
             "edit_image",
@@ -2197,6 +2201,7 @@
         },
         "candle": {
           "tiers": [
+            "bf16",
             "q4",
             "q8"
           ],
@@ -5336,60 +5341,60 @@
       "modelId": "bernini_image",
       "backend": "candle",
       "rung": "bounded_attention",
-      "coordinates": 4,
+      "coordinates": 12,
       "published": 0,
-      "elided": 4,
+      "elided": 12,
       "implemented": 0,
       "states": {
-        "Missing": 4
+        "Missing": 12
       }
     },
     {
       "modelId": "bernini_image",
       "backend": "candle",
       "rung": "bounded_decode",
-      "coordinates": 4,
+      "coordinates": 12,
       "published": 0,
-      "elided": 4,
-      "implemented": 0,
+      "elided": 12,
+      "implemented": 12,
       "states": {
-        "Missing": 4
+        "Implemented": 12
       }
     },
     {
       "modelId": "bernini_image",
       "backend": "candle",
       "rung": "bounded_transformer_residency",
-      "coordinates": 4,
+      "coordinates": 12,
       "published": 0,
-      "elided": 4,
+      "elided": 12,
       "implemented": 0,
       "states": {
-        "Missing": 4
+        "Missing": 12
       }
     },
     {
       "modelId": "bernini_image",
       "backend": "candle",
       "rung": "resident",
-      "coordinates": 4,
+      "coordinates": 12,
       "published": 0,
-      "elided": 4,
-      "implemented": 0,
+      "elided": 12,
+      "implemented": 12,
       "states": {
-        "Missing": 4
+        "Implemented": 12
       }
     },
     {
       "modelId": "bernini_image",
       "backend": "candle",
       "rung": "staged_residency",
-      "coordinates": 4,
+      "coordinates": 12,
       "published": 0,
-      "elided": 4,
+      "elided": 12,
       "implemented": 0,
       "states": {
-        "Missing": 4
+        "Missing": 12
       }
     },
     {
@@ -5504,60 +5509,60 @@
       "modelId": "bernini",
       "backend": "candle",
       "rung": "bounded_attention",
-      "coordinates": 12,
+      "coordinates": 36,
       "published": 0,
-      "elided": 12,
+      "elided": 36,
       "implemented": 0,
       "states": {
-        "Missing": 12
+        "Missing": 36
       }
     },
     {
       "modelId": "bernini",
       "backend": "candle",
       "rung": "bounded_decode",
-      "coordinates": 12,
+      "coordinates": 36,
       "published": 0,
-      "elided": 12,
+      "elided": 36,
       "implemented": 0,
       "states": {
-        "Missing": 12
+        "Missing": 36
       }
     },
     {
       "modelId": "bernini",
       "backend": "candle",
       "rung": "bounded_transformer_residency",
-      "coordinates": 12,
+      "coordinates": 36,
       "published": 0,
-      "elided": 12,
+      "elided": 36,
       "implemented": 0,
       "states": {
-        "Missing": 12
+        "Missing": 36
       }
     },
     {
       "modelId": "bernini",
       "backend": "candle",
       "rung": "resident",
-      "coordinates": 12,
+      "coordinates": 36,
       "published": 0,
-      "elided": 12,
+      "elided": 36,
       "implemented": 0,
       "states": {
-        "Missing": 12
+        "Missing": 36
       }
     },
     {
       "modelId": "bernini",
       "backend": "candle",
       "rung": "staged_residency",
-      "coordinates": 12,
+      "coordinates": 36,
       "published": 0,
-      "elided": 12,
+      "elided": 36,
       "implemented": 0,
       "states": {
-        "Missing": 12
+        "Missing": 36
       }
     },
     {
@@ -9960,60 +9965,60 @@
       "modelId": "ltx_2_3",
       "backend": "candle",
       "rung": "bounded_attention",
-      "coordinates": 24,
+      "coordinates": 36,
       "published": 0,
-      "elided": 24,
+      "elided": 36,
       "implemented": 0,
       "states": {
-        "Missing": 24
+        "Missing": 36
       }
     },
     {
       "modelId": "ltx_2_3",
       "backend": "candle",
       "rung": "bounded_decode",
-      "coordinates": 24,
+      "coordinates": 36,
       "published": 0,
-      "elided": 24,
+      "elided": 36,
       "implemented": 0,
       "states": {
-        "Missing": 24
+        "Missing": 36
       }
     },
     {
       "modelId": "ltx_2_3",
       "backend": "candle",
       "rung": "bounded_transformer_residency",
-      "coordinates": 24,
+      "coordinates": 36,
       "published": 0,
-      "elided": 24,
+      "elided": 36,
       "implemented": 0,
       "states": {
-        "Missing": 24
+        "Missing": 36
       }
     },
     {
       "modelId": "ltx_2_3",
       "backend": "candle",
       "rung": "resident",
-      "coordinates": 24,
+      "coordinates": 36,
       "published": 0,
-      "elided": 24,
+      "elided": 36,
       "implemented": 0,
       "states": {
-        "Missing": 24
+        "Missing": 36
       }
     },
     {
       "modelId": "ltx_2_3",
       "backend": "candle",
       "rung": "staged_residency",
-      "coordinates": 24,
+      "coordinates": 36,
       "published": 0,
-      "elided": 24,
+      "elided": 36,
       "implemented": 0,
       "states": {
-        "Missing": 24
+        "Missing": 36
       }
     },
     {

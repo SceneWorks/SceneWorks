@@ -163,8 +163,8 @@ ids they cover today:
 
 | binary | providers covered | how it dispatches an unknown provider |
 | --- | --- | --- |
-| `memory-mlx-adapter` | `qwen_image`, `z_image_turbo` (text-to-image, and in `edit_image` mode the `z_image_edit` catalog alias — sc-22724), `z_image` (the undistilled base, sc-22724), `krea_2_turbo`, `sdxl`, `krea_2_turbo_control`, `flux2_dev`, `flux1_dev`, `flux1_schnell`, `pulid_flux` (the FLUX.1 family, sc-22726 — one arm, member resolved from `(provider, mode)`; PuLID is `character_image` only and carries the identity stack on `LoadSpec::identity`) (SDXL exposes only Resident, Staged, and bounded-transformer residency; its decode/attention rungs are measured `Missing`. FLUX.2-dev is **resident rung only**. The FLUX.1 rows bind the per-(route, tier) identities of inference PR 943 — see the note below.) | `mlx.rs` `run` — `MLX five-rung calibration does not implement provider "<id>"`; `validate_z_image_batch` (`assess_batch`) — `…five-rung batch assessment does not implement provider "<id>"` (cited by function name; the line numbers this table used to carry went stale the first time the file grew) |
-| `memory-candle-adapter` | `qwen_image`, `krea_2_turbo`, `z_image_turbo` (sc-15859; five-rung reference path only, no inline arm; in `edit_image` mode it is the `z_image_edit` catalog alias — sc-22724), `z_image` (the undistilled base, sc-22724), `flux1_dev`, `flux1_schnell` (sc-22726; five-rung reference path, no inline arm), `pulid_flux` (sc-22726; a **bespoke** arm — `candle-gen-pulid` registers no `Generator` at all, so this one loads `PulidFlux::load_with_memory_context(&PulidFluxPaths, ctx)` exactly as `image_jobs/pulid_candle.rs` does, and dispatches above the shared plain-overlay gate because its overlay is `identity`) | `plain_execution_path` / `still_calibration_label` / `load_five_rung_generator` — `Candle five-rung calibration does not implement provider "<id>"` |
+| `memory-mlx-adapter` | `qwen_image`, `qwen_image_edit` (BOTH shipped edit catalog ids — `qwen_image_edit_2511` and `..._lightning` — resolved from `(provider, modelId)`; sc-22728), `z_image_turbo` (text-to-image, and in `edit_image` mode the `z_image_edit` catalog alias — sc-22724), `z_image` (the undistilled base, sc-22724), `krea_2_turbo`, `sdxl`, `krea_2_turbo_control`, `flux2_dev`, `flux1_dev`, `flux1_schnell`, `pulid_flux` (the FLUX.1 family, sc-22726 — one arm, member resolved from `(provider, mode)`; PuLID is `character_image` only and carries the identity stack on `LoadSpec::identity`) (SDXL exposes only Resident, Staged, and bounded-transformer residency; its decode/attention rungs are measured `Missing`. FLUX.2-dev is **resident rung only**. The FLUX.1 rows bind the per-(route, tier) identities of inference PR 943 — see the note below.) | `mlx.rs` `run` — `MLX five-rung calibration does not implement provider "<id>"`; `validate_z_image_batch` (`assess_batch`) — `…five-rung batch assessment does not implement provider "<id>"` (cited by function name; the line numbers this table used to carry went stale the first time the file grew) |
+| `memory-candle-adapter` | `qwen_image`, `qwen_image_edit` (the BESPOKE edit provider, dispatched ahead of the five-rung path because it is not a registered generator; both edit catalog ids, sc-22728), `krea_2_turbo`, `z_image_turbo` (sc-15859; five-rung reference path only, no inline arm; in `edit_image` mode it is the `z_image_edit` catalog alias — sc-22724), `z_image` (the undistilled base, sc-22724), `flux1_dev`, `flux1_schnell` (sc-22726; five-rung reference path, no inline arm), `pulid_flux` (sc-22726; a **bespoke** arm — `candle-gen-pulid` registers no `Generator` at all, so this one loads `PulidFlux::load_with_memory_context(&PulidFluxPaths, ctx)` exactly as `image_jobs/pulid_candle.rs` does, and dispatches above the shared plain-overlay gate because its overlay is `identity`) | `plain_execution_path` / `still_calibration_label` / `load_five_rung_generator` — `Candle five-rung calibration does not implement provider "<id>"`; `qwen_edit_arm` — `the Candle Qwen edit arm does not implement provider "<id>" for model "<id>"` |
 
 Since sc-18212 the stale-lane report answers this gate for you: its `CAPTURE` column and
 "DECLARED/PLANNED BUT UNCAPTURABLE" section are derived by parsing these dispatch matches
@@ -527,6 +527,19 @@ SCENEWORKS_QWEN_IMAGE_REPOSITORY=SceneWorks/qwen-image-mlx   # fixed; validated 
 SCENEWORKS_QWEN_IMAGE_REVISION=<exact artifact revision>
 SCENEWORKS_QWEN_IMAGE_ROOT=/abs/path/.../snapshots/<rev>/<tier>    # bf16 | q4 | q8
 
+# memory-mlx-adapter — qwen_image_edit: BOTH edit catalog ids, one engine provider (sc-22728)
+SCENEWORKS_QWEN_IMAGE_EDIT_REPOSITORY=SceneWorks/qwen-image-edit-2511-mlx  # fixed; validated against QWEN_EDIT_REPOSITORY
+SCENEWORKS_QWEN_IMAGE_EDIT_REVISION=<exact artifact revision>
+SCENEWORKS_QWEN_IMAGE_EDIT_ROOT=/abs/path/.../snapshots/<rev>/<tier>       # bf16 | q4 | q8, derived from the plan target
+
+# memory-mlx-adapter — the qwen_image_edit_2511_lightning built-in distill LoRA ONLY (sc-22728).
+# NOT a manifest download: the worker fetches it lazily at a pinned revision, so the catalog runner
+# derives this family from `PROVIDER_FAMILIES.qwen_image_edit.sideArtifact` rather than from a
+# `downloads[]` entry. The production id `qwen_image_edit_2511` must NOT be given these.
+SCENEWORKS_QWEN_EDIT_LIGHTNING_LORA_REPOSITORY=lightx2v/Qwen-Image-Edit-2511-Lightning
+SCENEWORKS_QWEN_EDIT_LIGHTNING_LORA_REVISION=<exact artifact revision>
+SCENEWORKS_QWEN_EDIT_LIGHTNING_LORA_ROOT=/abs/path/.../snapshots/<rev>     # the snapshot; the arm joins QWEN_EDIT_LIGHTNING_FILE
+
 # memory-mlx-adapter — z_image_turbo, and the z_image_edit alias (`mode: edit_image`, same weights)
 SCENEWORKS_Z_IMAGE_REPOSITORY=SceneWorks/z-image-turbo-mlx   # fixed; validated against Z_IMAGE_REPOSITORY
 SCENEWORKS_Z_IMAGE_REVISION=<exact artifact revision>
@@ -641,6 +654,15 @@ SCENEWORKS_KREA_REPOSITORY=SceneWorks/krea-2-turbo-mlx
 SCENEWORKS_KREA_REVISION=<exact artifact revision>
 SCENEWORKS_KREA_ROOT=/abs/path/.../snapshots/<rev>/q4
 
+# memory-candle-adapter — qwen_image_edit (sc-22728; the SAME two families as the MLX arm, because
+#                          both lanes load the same rehost and the same pinned distill LoRA)
+SCENEWORKS_QWEN_IMAGE_EDIT_REPOSITORY=SceneWorks/qwen-image-edit-2511-mlx
+SCENEWORKS_QWEN_IMAGE_EDIT_REVISION=<exact artifact revision>
+SCENEWORKS_QWEN_IMAGE_EDIT_ROOT=/abs/path/.../snapshots/<rev>/<tier>       # bf16 | q4 | q8, derived from the plan target
+SCENEWORKS_QWEN_EDIT_LIGHTNING_LORA_REPOSITORY=lightx2v/Qwen-Image-Edit-2511-Lightning   # Lightning id only
+SCENEWORKS_QWEN_EDIT_LIGHTNING_LORA_REVISION=<exact artifact revision>
+SCENEWORKS_QWEN_EDIT_LIGHTNING_LORA_ROOT=/abs/path/.../snapshots/<rev>
+
 # memory-candle-adapter — z_image_turbo   (sc-15859; same artifact family as the MLX arm), and the
 #                          z_image_edit alias (`mode: edit_image`, same weights; sc-22724)
 SCENEWORKS_Z_IMAGE_REPOSITORY=SceneWorks/z-image-turbo-mlx   # fixed; validated against Z_IMAGE_REPOSITORY
@@ -660,6 +682,28 @@ this host (`runnable` / `weights_missing`) — epic 22723. The `z_image_edit` an
 provider (`crates/sceneworks-worker/src/engines.rs`), so the adapter loads the Turbo provider and
 conditions the request on one reference image; its loader-closure declaration names that alias
 explicitly (`engineId` in `config/anchor-loader-closures.json`, §7c-bis).
+
+The two Qwen EDIT ids are the other shape of the same thing (sc-22728), and the differences are worth
+stating because they are the ones that bite:
+
+* `qwen_image_edit_2511` and `qwen_image_edit_2511_lightning` both plan `provider: qwen_image_edit,
+  mode: edit_image` and both load the SAME rehost — so neither the provider nor the artifact
+  distinguishes them. The adapter arm is resolved from `(target.provider, target.modelId)` on both
+  lanes, and each member's fixture prefix and step count are bound to it, so a 4-step distilled
+  capture cannot be recorded under the production id.
+* The Lightning id declares `overlay: lora`: its built-in lightx2v distill LoRA is a real second
+  network folded into the MMDiT at load. It is the ONE artifact in `PROVIDER_FAMILIES` that no
+  manifest download ships (the worker fetches it lazily at a pinned revision), so it is declared as a
+  model-keyed `sideArtifact` and reaches the arm through `SCENEWORKS_QWEN_EDIT_LIGHTNING_LORA_*`.
+* On **Candle** the edit provider is BESPOKE — `edit.rs`'s own words: "driven directly by the worker
+  … the registered `qwen_image` descriptor stays txt2img-only" — so the arm calls
+  `QwenEdit::load_with_memory_context` + `generate_with_memory_context`, the worker's exact pair, and
+  is dispatched ahead of the five-rung path. Going through the catalog there would load the txt2img
+  provider and record it under an edit id.
+* The edit models do **not** carry the physical-receipt requirement. The harness scopes it to
+  `record.target.modelId === "qwen_image"` (`requiresPhysicalMlxProvenanceForCurrency`), and a test
+  binds `PROVIDER_FAMILIES[*].physical` to exactly that set — passing `--raw-log-dir` for an arm that
+  emits no `sourceCapture` makes the harness refuse the render.
 
 All three of each family are **required** (`protocol::required_env`) — a missing one fails before
 model load, not after. The plain MLX Krea arm is reference-free, rejects overlays and PiD, and runs

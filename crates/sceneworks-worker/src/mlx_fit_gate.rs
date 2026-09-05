@@ -7164,6 +7164,17 @@ mod tests {
                         "fixture-control",
                     )));
                 }
+                // sc-22728: production represents a `lora` overlay as an adapter stack on the
+                // LoadSpec — the built-in Qwen edit Lightning distill is one LoRA at scale 1.0
+                // ahead of any user adapters (`image_jobs/qwen.rs`), which is exactly the shape
+                // the memory adapter's Lightning arm builds.
+                "lora" => {
+                    spec = spec.with_adapters(vec![gen_core::AdapterSpec::new(
+                        std::path::PathBuf::from("fixture-lora.safetensors"),
+                        1.0,
+                        gen_core::AdapterKind::Lora,
+                    )]);
+                }
                 // sc-22726: production represents the PuLID identity overlay as the typed
                 // `LoadSpec::identity` seam — the adapter checkpoint, the EVA tower, and the
                 // directory the three face models are read out of by name
