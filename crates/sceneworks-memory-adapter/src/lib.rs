@@ -703,20 +703,26 @@ pub fn required_env(name: &str) -> Result<String, String> {
         .ok_or_else(|| format!("required environment variable {name} is not set"))
 }
 
-/// The env var BOTH PuLID-FLUX worker lanes honour for a pre-staged identity bundle
-/// (`image_jobs/pulid.rs` `ensure_pulid_weights`, `image_jobs/pulid_candle.rs`
-/// `ensure_pulid_candle_weights`). The identity stack is fetched on first use rather than declared
-/// as a manifest download, so an anchor binds the operator's staged copy through this same seam.
+/// The env var both PuLID-FLUX worker lanes read for a pre-staged identity bundle, under TWO
+/// semantics. The Candle lane (`image_jobs/pulid_candle.rs` `ensure_pulid_candle_weights`) takes
+/// it as a complete bundle: a directory holding all five files, used as-is, and ignored if any
+/// file is missing. The MLX lane (`image_jobs/pulid.rs` `ensure_pulid_weights`) takes it as the
+/// directory to FILL — missing files are downloaded into it — and it is outranked by a fully-set
+/// `PULID_FLUX_WEIGHTS` / `PULID_EVA_WEIGHTS` / `PULID_FACE_WEIGHTS_DIR` preset
+/// (`pulid_weights_env_preset`). The identity stack is fetched on first use rather than declared
+/// as a manifest download, so an anchor binds the operator's staged copy through this same seam,
+/// and it uses the strict Candle reading on both lanes: every file present, nothing downloaded.
 pub const PULID_IDENTITY_BUNDLE_ENV: &str = "SCENEWORKS_PULID_WEIGHTS";
 /// The five loose files both lanes require in ONE directory, which doubles as the provider's
-/// `face_dir`. Order is the engine's own admission order (`mlx-gen-pulid` `identity_paths`):
-/// encoder, EVA tower, then the three face models read out of `face_dir` by name.
+/// `face_dir`: the adapter checkpoint, the EVA tower, and the three face models both engines read
+/// out of `face_dir` by name. `measure-memory-catalog.mjs` `PROVIDER_FAMILIES.pulid_flux.bundle`
+/// carries the same list in the same order, and its test parses this file to prove it.
 pub const PULID_ADAPTER_FILE: &str = "pulid_flux_v0.9.1.safetensors";
 pub const PULID_EVA_FILE: &str = "eva02_clip_l_336.safetensors";
 pub const PULID_SCRFD_FILE: &str = "scrfd_10g.safetensors";
 pub const PULID_ARCFACE_FILE: &str = "arcface_iresnet100.safetensors";
 pub const PULID_BISENET_FILE: &str = "bisenet_parsing.safetensors";
-/// Every file the bundle must carry, in admission order.
+/// Every file the bundle must carry.
 pub const PULID_IDENTITY_BUNDLE_FILES: [&str; 5] = [
     PULID_ADAPTER_FILE,
     PULID_EVA_FILE,
@@ -732,15 +738,50 @@ pub const PULID_IDENTITY_BUNDLE_FILES: [&str; 5] = [
 /// `{ pulid_weights, eva_weights, face_dir }` — and both engines then read the three face models
 /// out of `face_dir` BY NAME. So a bundle missing any one of the five is refused HERE, naming the
 /// files, rather than surfacing as an opaque loader error several gigabytes into a capture.
+///
+/// The record names the stack by CONTENT — the SHA-256 of each of the five files and one composite
+/// over them — never by the host path it was staged at: two hosts staging the same upstream files
+/// measured the same identity stack, and the same host restaging different files did not.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PulidIdentityBundle {
     pub root: PathBuf,
     pub adapter: PathBuf,
     pub eva: PathBuf,
     pub face_dir: PathBuf,
+    /// `(file name, lowercase SHA-256 of its bytes)` for every file in
+    /// [`PULID_IDENTITY_BUNDLE_FILES`], in that order.
+    pub file_sha256: Vec<(&'static str, String)>,
+    /// SHA-256 over the `<file>:<sha256>\n` lines of `file_sha256`, in order — the one token a
+    /// loadability fingerprint carries for the whole stack.
+    pub composite_sha256: String,
 }
 
-/// The env-free half of [`pulid_identity_bundle`], so the file contract is unit-testable.
+impl PulidIdentityBundle {
+    /// The record's `artifact.identityBundle`: `{ "<file>": "<sha256>", ... }` plus the composite.
+    pub fn artifact_json(&self) -> Value {
+        let mut files = Map::new();
+        for (file, sha256) in &self.file_sha256 {
+            files.insert((*file).to_owned(), Value::String(sha256.clone()));
+        }
+        json!({
+            "files": files,
+            "compositeSha256": self.composite_sha256,
+        })
+    }
+}
+
+fn sha256_hex_of_file(path: &Path) -> Result<String, String> {
+    use sha2::Digest;
+    let mut file = std::fs::File::open(path)
+        .map_err(|error| format!("open {} for hashing: {error}", path.display()))?;
+    let mut hasher = sha2::Sha256::new();
+    io::copy(&mut file, &mut hasher)
+        .map_err(|error| format!("hash {}: {error}", path.display()))?;
+    Ok(format!("{:x}", hasher.finalize()))
+}
+
+/// The env-free half of [`pulid_identity_bundle`], so the file contract is unit-testable. Hashes
+/// the five files, so a bundle that is present but unreadable is refused here too.
 pub fn pulid_identity_bundle_at(root: PathBuf) -> Result<PulidIdentityBundle, String> {
     let missing: Vec<&str> = PULID_IDENTITY_BUNDLE_FILES
         .iter()
@@ -755,11 +796,30 @@ pub fn pulid_identity_bundle_at(root: PathBuf) -> Result<PulidIdentityBundle, St
             missing.join(", ")
         ));
     }
+    let mut file_sha256 = Vec::with_capacity(PULID_IDENTITY_BUNDLE_FILES.len());
+    let mut composite = {
+        use sha2::Digest;
+        sha2::Sha256::new()
+    };
+    for file in PULID_IDENTITY_BUNDLE_FILES {
+        let sha256 = sha256_hex_of_file(&root.join(file))?;
+        {
+            use sha2::Digest;
+            composite.update(format!("{file}:{sha256}\n").as_bytes());
+        }
+        file_sha256.push((file, sha256));
+    }
+    let composite_sha256 = {
+        use sha2::Digest;
+        format!("{:x}", composite.finalize())
+    };
     Ok(PulidIdentityBundle {
         adapter: root.join(PULID_ADAPTER_FILE),
         eva: root.join(PULID_EVA_FILE),
         face_dir: root.clone(),
         root,
+        file_sha256,
+        composite_sha256,
     })
 }
 

@@ -8,6 +8,7 @@ import test from "node:test";
 
 import {
   ROOT,
+  ADAPTER_LIB_PATH,
   MATRIX_PATH,
   PLAN_PATH,
   PACKAGED_SOURCES_PATH,
@@ -324,6 +325,59 @@ test("classification refuses what no adapter arm or the harness cannot serve, an
     ...base, declaredProviders: new Set(["candle:z_image_turbo"]),
   });
   assert.equal(providerDeclared.status, "runnable");
+});
+
+// sc-22726 review: the five PuLID bundle file names were hand-duplicated between this runner and
+// the adapter's lib.rs with nothing binding them. This parses the Rust constants — the per-file
+// `pub const PULID_*_FILE: &str = "…";` declarations and the `PULID_IDENTITY_BUNDLE_FILES` array
+// that orders them — and asserts the runner's list is that list, in that order, under that env var.
+test("PROVIDER_FAMILIES.pulid_flux.bundle is the adapter's PULID_IDENTITY_BUNDLE_FILES, in order", async () => {
+  const lib = await readFile(path.join(ROOT, ADAPTER_LIB_PATH), "utf8");
+  const consts = new Map();
+  for (const match of lib.matchAll(/pub const (PULID_[A-Z_]+_FILE): &str = "([^"]+)";/g)) {
+    consts.set(match[1], match[2]);
+  }
+  const array = lib.match(/pub const PULID_IDENTITY_BUNDLE_FILES: \[&str; (\d+)\] = \[([\s\S]*?)\];/);
+  assert.ok(array, "lib.rs declares PULID_IDENTITY_BUNDLE_FILES");
+  const names = array[2].split(",").map((name) => name.trim()).filter(Boolean);
+  assert.equal(names.length, Number(array[1]), "the array literal carries every declared entry");
+  const files = names.map((name) => {
+    assert.ok(consts.has(name), `${name} resolves to a PULID_*_FILE const`);
+    return consts.get(name);
+  });
+  assert.deepEqual(PROVIDER_FAMILIES.pulid_flux.bundle.files, files);
+  const env = lib.match(/pub const PULID_IDENTITY_BUNDLE_ENV: &str = "([^"]+)";/);
+  assert.ok(env, "lib.rs declares PULID_IDENTITY_BUNDLE_ENV");
+  assert.equal(PROVIDER_FAMILIES.pulid_flux.bundle.env, env[1]);
+});
+
+// sc-22726 review: the adapter canonicalizes the bundle path from the HARNESS's cwd, so a relative
+// export must already be absolute by the time this runner probes or forwards it.
+test("a relative SCENEWORKS_PULID_WEIGHTS is resolved to an absolute path before it is probed or forwarded", async () => {
+  const hub = await fakeHub([["SceneWorks/flux1-dev-mlx", REVISION, "q4"]]);
+  const previous = process.env.SCENEWORKS_PULID_WEIGHTS;
+  const cwd = process.cwd();
+  try {
+    const bundle = await mkdtemp(path.join(tmpdir(), "catalog-pulid-relative-"));
+    for (const file of PROVIDER_FAMILIES.pulid_flux.bundle.files) {
+      await writeFile(path.join(bundle, file), "weights");
+    }
+    process.chdir(path.dirname(bundle));
+    process.env.SCENEWORKS_PULID_WEIGHTS = path.basename(bundle);
+    // `process.cwd()` is the real path (macOS `/var` -> `/private/var`), so the expectation is
+    // built from it rather than from the tmpdir spelling.
+    const expected = path.join(process.cwd(), path.basename(bundle));
+    const context = { models: fakeModels(), backend: "mlx", hubs: [hub], current: new Map(), captured: new Map() };
+    const pulid = await classifyAnchor("pulid_flux_dev:q4:mlx", { provider: "pulid_flux" }, context);
+    assert.equal(pulid.status, "runnable", pulid.reason);
+    assert.ok(path.isAbsolute(pulid.env.SCENEWORKS_PULID_WEIGHTS));
+    assert.equal(pulid.env.SCENEWORKS_PULID_WEIGHTS, expected);
+    assert.equal(pulid.roots.find((root) => root.label === "pulid bundle").path, expected);
+  } finally {
+    process.chdir(cwd);
+    if (previous === undefined) delete process.env.SCENEWORKS_PULID_WEIGHTS;
+    else process.env.SCENEWORKS_PULID_WEIGHTS = previous;
+  }
 });
 
 test("appending to PACKAGED_MEMORY_ANCHOR_SOURCES is idempotent and keeps the rustfmt tuple shape", async () => {

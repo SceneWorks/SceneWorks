@@ -3233,8 +3233,10 @@ struct FluxOneArtifact {
     repository: String,
     revision: String,
     tier: &'static str,
-    /// `Some` on the identity route only; its root is part of the loadability fingerprint, because
-    /// two different identity stacks over the same backbone are two different measurements.
+    /// `Some` on the identity route only; the CONTENT digest of its five files is part of the
+    /// loadability fingerprint (never the host path it was staged at), because two different
+    /// identity stacks over the same backbone are two different measurements and a record must
+    /// name which one it measured on any host.
     identity: Option<protocol::PulidIdentityBundle>,
     spec: LoadSpec,
 }
@@ -3243,10 +3245,60 @@ impl FluxOneArtifact {
     fn loadability_fingerprint(&self) -> String {
         let base = format!("{}@{}:{}", self.repository, self.revision, self.tier);
         match &self.identity {
-            Some(bundle) => format!("{base}+identity:{}", bundle.root.display()),
+            Some(bundle) => format!("{base}+identity:{}", bundle.composite_sha256),
             None => base,
         }
     }
+
+    /// The record's `artifact`: the backbone snapshot, plus on the identity route the per-file
+    /// SHA-256 of the staged bundle, so the record carries the identity stack it measured.
+    fn artifact_json(&self) -> Value {
+        let mut artifact = json!({
+            "repository": self.repository,
+            "resolvedRevision": self.revision,
+            "variant": self.tier,
+        });
+        if let Some(bundle) = &self.identity {
+            artifact["identityBundle"] = bundle.artifact_json();
+        }
+        artifact
+    }
+}
+
+/// The production calibration identity the loaded FLUX.1 generator publishes for one
+/// `(member, tier)` cell — the table `mlx-gen-flux::memory_strategy::production_calibration_fingerprint`
+/// and `mlx-gen-pulid::memory_strategy::production_calibration_fingerprint` mint (inference PR
+/// 943): the two measured keys are preserved byte-for-byte and read off the engine constants, and
+/// every other cell is `flux1-<route>-<tier>-mlx-shared-ladder-v1` /
+/// `pulid-flux-dev-<tier>-mlx-shared-ladder-v1`. Written here as well so the plan/arm binding is
+/// weights-free and holds at inference `c6d6a4db`, whose engines publish the two preserved keys
+/// only; the capture refuses a loaded contract whose identity differs from this table, so the two
+/// copies cannot drift unnoticed once the epic's pin bump lands.
+fn flux_one_calibration_fingerprint(arm: FluxOneArm, tier: &str) -> String {
+    match (arm.provider, tier) {
+        (FLUX1_DEV_PROVIDER, "q4") => {
+            runtime_macos::providers::flux::memory_strategy::MEMORY_CALIBRATION_FINGERPRINT
+                .to_owned()
+        }
+        (PULID_FLUX_PROVIDER, "q4") => {
+            runtime_macos::providers::pulid::memory_strategy::MEMORY_CALIBRATION_FINGERPRINT
+                .to_owned()
+        }
+        (FLUX1_DEV_PROVIDER, tier) => format!("flux1-dev-{tier}-mlx-shared-ladder-v1"),
+        (FLUX1_SCHNELL_PROVIDER, tier) => format!("flux1-schnell-{tier}-mlx-shared-ladder-v1"),
+        (PULID_FLUX_PROVIDER, tier) => format!("pulid-flux-dev-{tier}-mlx-shared-ladder-v1"),
+        (provider, tier) => unreachable!("no FLUX.1 member {provider} at tier {tier}"),
+    }
+}
+
+/// The weights-free conformance identities (`mlx-gen-flux` `STATIC_BEHAVIOR_FINGERPRINT` and
+/// its `-<route>` suffixes, `mlx-gen-pulid` `STATIC_CALIBRATION`) the engines publish for a
+/// registry-behaviour contract that loaded no weights. A plan row naming one of these could never
+/// be satisfied by a production load.
+fn is_flux_one_weights_free_fingerprint(fingerprint: &str) -> bool {
+    fingerprint
+        .starts_with(runtime_macos::providers::flux::memory_strategy::STATIC_BEHAVIOR_FINGERPRINT)
+        || fingerprint == "pulid-flux-static-registry-behavior-v2"
 }
 
 /// The env-free half of [`flux_one_load_spec`], so the tier and identity bindings are unit-testable
@@ -3292,15 +3344,18 @@ fn flux_one_load_spec_at(
         tier,
         arm.expected_repository,
     )?;
-    // Sequential + Deferred is the FLUX.1 streaming route, and it is not a free choice: the pinned
-    // `mlx-gen-flux` publishes a production calibration identity ONLY on it
-    // (`memory_strategy.rs::production_calibration_fingerprint`, which additionally requires the
-    // exact pinned Q4 composite SHA), and it is the load policy the worker's own declared FLUX.1
-    // rung-4 route binds (`memory_route_registry` FLUX1 rules). Any other policy loads fine and
-    // then reports `calibration: None`, which this arm refuses by name below rather than measuring
-    // against an absent identity.
+    // Resident, like every other MLX still-image arm (flux2, qwen, krea-control): the anchor rung
+    // is `resident` (`memory-calibration-harness.mjs` `ANCHOR_STRATEGY.mlx`), and that is the
+    // policy the worker loads all three routes under at that rung. The base providers go through
+    // `image_jobs/base.rs`, whose declared-policy pass
+    // (`apply_declared_mlx_load_policy_for_request`) finds no `requiredOffloadPolicy` on the
+    // FLUX.1 manifests' `resident` implementation and leaves gen-core's `Resident` default; PuLID's
+    // own pass (`image_jobs/pulid.rs` `pulid_declared_load_policy`) reads the same shape off the
+    // `pulid_flux_dev` manifest. Only the `staged_residency` rows declare `sequential`, and no
+    // anchor is captured there. The calibration identity is a property of the loaded artifact and
+    // tier (inference PR 943), so the policy does not decide whether one is published.
     let mut spec = LoadSpec::new(WeightsSource::Dir(root))
-        .with_offload_policy(OffloadPolicy::Sequential)
+        .with_offload_policy(OffloadPolicy::Resident)
         .with_load_shape(load_shape);
     if let (_, Some(quant)) = tier_precision_quant(tier) {
         spec = spec.with_quant(quant);
@@ -3479,6 +3534,22 @@ fn run_flux_one(request: &Value) -> Result<Value, String> {
     let tier = planned_qwen_tier(request)?;
     validate_flux_one_fixture(request, arm, tier)?;
     let (width, height) = protocol::target_geometry(request)?;
+    // The plan row must name the production identity this cell's loaded generator publishes —
+    // checked against the weights-free table BEFORE the load, so a row still carrying a
+    // conformance string fails in milliseconds rather than after a multi-gigabyte load.
+    let planned_fingerprint = protocol::planned(request)?
+        .get("calibrationFingerprint")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "planned.calibrationFingerprint must be a string".to_owned())?
+        .to_owned();
+    let expected_fingerprint = flux_one_calibration_fingerprint(arm, tier);
+    if planned_fingerprint != expected_fingerprint {
+        return Err(format!(
+            "plan/provider calibration mismatch: plan={planned_fingerprint}, the {} {tier} \
+             production identity is {expected_fingerprint}",
+            arm.provider
+        ));
+    }
     let artifact = flux_one_load_spec(request, load_shape)?;
     // From the ARTIFACT, so the member that was actually bound to a root and an identity stack is
     // the member that is measured — not a second, independent resolution of the same plan.
@@ -3507,26 +3578,20 @@ fn run_flux_one(request: &Value) -> Result<Value, String> {
         &selection,
         &contract.engaged_composition(selection.strategy),
     )?;
-    // The pinned FLUX.1 engines publish a production calibration identity only for the exact
-    // measured artifact (`mlx-gen-flux/src/memory_strategy.rs:551-564`: `flux1_dev` + the pinned Q4
-    // composite SHA + Sequential + Deferred; `mlx-gen-pulid/src/memory_strategy.rs:278-290` adds
-    // the pinned identity-stack SHAs on top). Every other route/tier loads and then reports
-    // `calibration: None`. Refuse THAT by name — an anchor recorded against an absent identity
-    // would claim measured authority the engine never granted.
+    // The LOADED generator's own identity is what the record attests. An absent one is refused by
+    // name — an anchor recorded against no identity would claim measured authority the engine
+    // never granted — and so is one that differs from the table the plan was bound to above.
     let calibration = contract.calibration.as_ref().ok_or_else(|| {
         format!(
-            "the pinned {} provider publishes no calibration identity for the {tier} artifact at \
-             this route; only the exact pinned artifact the engine names is capturable, so this \
-             cell cannot be recorded as measured evidence at inference {}",
+            "the loaded {} provider at inference {} published no calibration identity for the \
+             {tier} artifact; the production identity for this cell is {expected_fingerprint} \
+             (inference PR 943 publishes one per (route, tier) for every load shape), so this \
+             cell captures only at a pin that carries it",
             arm.provider,
             protocol::INFERENCE_PIN
         )
     })?;
-    let planned_fingerprint = protocol::planned(request)?
-        .get("calibrationFingerprint")
-        .and_then(Value::as_str)
-        .ok_or_else(|| "planned.calibrationFingerprint must be a string".to_owned())?;
-    if planned_fingerprint != calibration.fingerprint {
+    if calibration.fingerprint != expected_fingerprint {
         return Err(format!(
             "plan/provider calibration mismatch: plan={planned_fingerprint}, pinned provider={}",
             calibration.fingerprint
@@ -3713,11 +3778,7 @@ fn run_flux_one(request: &Value) -> Result<Value, String> {
         "status": "runtime_complete",
         "strategy": strategy,
         "loadShape": load_shape_key(calibration.load_shape),
-        "artifact": {
-            "repository": artifact.repository,
-            "resolvedRevision": artifact.revision,
-            "variant": artifact.tier,
-        },
+        "artifact": artifact.artifact_json(),
         "sweep": flux_one_complete_sweep(request)?,
         "scenarios": [
             { "name": "exact_fit", "result": "passed", "predictedBytes": predicted, "effectiveBudgetBytes": predicted },
@@ -11577,6 +11638,11 @@ mod flux_one_tests {
         assert_eq!(dev, FLUX1_DEV_ARM);
         assert_eq!(dev.expected_repository, protocol::FLUX1_DEV_REPOSITORY);
         assert!(!dev.identity);
+        // Each base member binds ITS OWN env family — the one `measure-memory-catalog.mjs`
+        // exports for it (`PROVIDER_FAMILIES.flux1_dev.env` / `.flux1_schnell.env`).
+        assert_eq!(dev.repository_env, "SCENEWORKS_FLUX1_DEV_REPOSITORY");
+        assert_eq!(dev.revision_env, "SCENEWORKS_FLUX1_DEV_REVISION");
+        assert_eq!(dev.root_env, "SCENEWORKS_FLUX1_DEV_ROOT");
         let schnell = flux_one_arm(&flux_one_planned(
             FLUX1_SCHNELL_PROVIDER,
             "text_to_image",
@@ -11588,6 +11654,12 @@ mod flux_one_tests {
             schnell.expected_repository,
             protocol::FLUX1_SCHNELL_REPOSITORY
         );
+        assert_eq!(
+            schnell.repository_env,
+            "SCENEWORKS_FLUX1_SCHNELL_REPOSITORY"
+        );
+        assert_eq!(schnell.revision_env, "SCENEWORKS_FLUX1_SCHNELL_REVISION");
+        assert_eq!(schnell.root_env, "SCENEWORKS_FLUX1_SCHNELL_ROOT");
         let pulid = flux_one_arm(&flux_one_planned(
             PULID_FLUX_PROVIDER,
             "character_image",
@@ -11599,7 +11671,9 @@ mod flux_one_tests {
         // The PuLID backbone IS the FLUX.1-dev artifact, so it binds the same env family — that is
         // the fact the closure's `engineId` alias and the shared PROVIDER_FAMILIES row encode.
         assert_eq!(pulid.expected_repository, protocol::FLUX1_DEV_REPOSITORY);
-        assert_eq!(pulid.root_env, FLUX1_DEV_ARM.root_env);
+        assert_eq!(pulid.repository_env, "SCENEWORKS_FLUX1_DEV_REPOSITORY");
+        assert_eq!(pulid.revision_env, "SCENEWORKS_FLUX1_DEV_REVISION");
+        assert_eq!(pulid.root_env, "SCENEWORKS_FLUX1_DEV_ROOT");
         // ...but never the same record: the diagnostics source and the execution path differ.
         assert_ne!(pulid.slug, FLUX1_DEV_ARM.slug);
         assert_ne!(pulid.execution_path, FLUX1_DEV_ARM.execution_path);
@@ -11718,10 +11792,10 @@ mod flux_one_tests {
                 .unwrap_or_else(|error| panic!("{}/{tier}: {error}", arm.provider));
                 assert_eq!(artifact.tier, tier);
                 assert_eq!(artifact.spec.quantize, quant, "{tier} load quant");
-                // Sequential + Deferred is the FLUX.1 streaming route the pinned engine calibrates
-                // on and the worker's rung-4 policy binds; a resident/eager spec would load and
-                // then publish no calibration identity at all.
-                assert_eq!(artifact.spec.offload_policy, OffloadPolicy::Sequential);
+                // Resident: the anchor rung, and the policy the worker loads every FLUX.1 route
+                // under at that rung (no `requiredOffloadPolicy` on the manifests' `resident`
+                // implementation). The identity is per (route, tier) and does not depend on it.
+                assert_eq!(artifact.spec.offload_policy, OffloadPolicy::Resident);
                 assert_eq!(artifact.spec.load_shape, LoadShape::DeferredMaterialization);
                 assert_eq!(artifact.arm, arm);
                 assert!(artifact
@@ -11784,9 +11858,41 @@ mod flux_one_tests {
             identity.face_dir,
             Some(WeightsSource::Dir(bundle.root.clone()))
         );
-        assert!(artifact
+        // The fingerprint names the stack by CONTENT, never by the host path it was staged at.
+        assert!(
+            artifact
+                .loadability_fingerprint()
+                .ends_with(&format!("+identity:{}", bundle.composite_sha256)),
+            "{}",
+            artifact.loadability_fingerprint()
+        );
+        assert!(!artifact
             .loadability_fingerprint()
-            .ends_with(&format!("+identity:{}", bundle.root.display())));
+            .contains(&bundle.root.display().to_string()));
+        // ...and the record's artifact carries every file's digest.
+        let identity_bundle = &artifact.artifact_json()["identityBundle"];
+        assert_eq!(
+            identity_bundle["compositeSha256"].as_str(),
+            Some(bundle.composite_sha256.as_str())
+        );
+        for (file, sha256) in &bundle.file_sha256 {
+            assert_eq!(
+                identity_bundle["files"][*file].as_str(),
+                Some(sha256.as_str())
+            );
+        }
+        // Same bytes at another path: the same identity. Different bytes: a different one.
+        let restaged = staged_pulid_bundle();
+        assert_ne!(restaged.root, bundle.root);
+        assert_eq!(restaged.composite_sha256, bundle.composite_sha256);
+        std::fs::write(restaged.root.join(protocol::PULID_BISENET_FILE), b"other").unwrap();
+        let restaged = protocol::pulid_identity_bundle_at(restaged.root).unwrap();
+        assert_ne!(restaged.composite_sha256, bundle.composite_sha256);
+        assert_ne!(
+            restaged.file_sha256[4].1, bundle.file_sha256[4].1,
+            "the bisenet digest is the one that moved"
+        );
+        assert_eq!(restaged.file_sha256[..4], bundle.file_sha256[..4]);
 
         let base = flux_one_load_spec_at(
             &flux_one_planned(FLUX1_DEV_PROVIDER, "text_to_image", "q4"),
@@ -11816,6 +11922,104 @@ mod flux_one_tests {
             )
             .expect_err("the identity stack and the route must agree");
             assert!(error.contains("identity"), "{provider}: {error}");
+        }
+    }
+
+    /// `flux_one_load_spec` reads the identity bundle from `SCENEWORKS_PULID_WEIGHTS` on the
+    /// PuLID route and from nothing on a base route. Serialized on [`FLUX_ONE_ENV_LOCK`]: the
+    /// process environment is global, and every other FLUX.1 test in this binary fails before it
+    /// reads an env var, so nothing else needs the lock.
+    #[test]
+    fn the_env_bound_load_spec_reads_the_identity_bundle_from_its_env_on_the_pulid_route_only() {
+        const REVISION: &str = "323fd12d79f78ad444e882e8d8e871914584f2b9";
+        let _guard = FLUX_ONE_ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let restore = FluxOneEnv::capture();
+        let bundle = staged_pulid_bundle();
+        let root = flux_one_snapshot_root(protocol::FLUX1_DEV_REPOSITORY, REVISION, "q4");
+        std::env::set_var(
+            "SCENEWORKS_FLUX1_DEV_REPOSITORY",
+            protocol::FLUX1_DEV_REPOSITORY,
+        );
+        std::env::set_var("SCENEWORKS_FLUX1_DEV_REVISION", REVISION);
+        std::env::set_var("SCENEWORKS_FLUX1_DEV_ROOT", &root);
+        std::env::remove_var(protocol::PULID_IDENTITY_BUNDLE_ENV);
+        let pulid = flux_one_planned(PULID_FLUX_PROVIDER, "character_image", "q4");
+        let error = flux_one_load_spec(&pulid, LoadShape::DeferredMaterialization)
+            .expect_err("the PuLID route must require the bundle env");
+        assert!(
+            error.contains(protocol::PULID_IDENTITY_BUNDLE_ENV),
+            "{error}"
+        );
+        // A base route reads no bundle env at all: it binds with the variable absent.
+        let dev = flux_one_planned(FLUX1_DEV_PROVIDER, "text_to_image", "q4");
+        let base = flux_one_load_spec(&dev, LoadShape::DeferredMaterialization).unwrap();
+        assert!(base.identity.is_none());
+
+        std::env::set_var(protocol::PULID_IDENTITY_BUNDLE_ENV, &bundle.root);
+        let artifact = flux_one_load_spec(&pulid, LoadShape::DeferredMaterialization).unwrap();
+        let identity = artifact.identity.as_ref().expect("the bundle env was read");
+        assert_eq!(identity.composite_sha256, bundle.composite_sha256);
+        assert_eq!(
+            identity.root,
+            std::fs::canonicalize(&bundle.root).unwrap(),
+            "the env value is canonicalized, not used as spelled"
+        );
+        // The schnell family's env is NOT consulted on the dev backbone: pointing it somewhere
+        // unusable changes nothing for either dev-backed member.
+        std::env::set_var("SCENEWORKS_FLUX1_SCHNELL_ROOT", "/nonexistent/sc-22726");
+        std::env::set_var("SCENEWORKS_FLUX1_SCHNELL_REPOSITORY", "not/a-repo");
+        std::env::set_var("SCENEWORKS_FLUX1_SCHNELL_REVISION", "junk");
+        flux_one_load_spec(&pulid, LoadShape::DeferredMaterialization).unwrap();
+        flux_one_load_spec(&dev, LoadShape::DeferredMaterialization).unwrap();
+        // ...and a schnell plan reads ITS family, so it is refused on those values by name.
+        let schnell = flux_one_planned(FLUX1_SCHNELL_PROVIDER, "text_to_image", "q4");
+        let error = flux_one_load_spec(&schnell, LoadShape::DeferredMaterialization)
+            .expect_err("the schnell env family is the one a schnell plan reads");
+        assert!(
+            error.contains(protocol::FLUX1_SCHNELL_REPOSITORY),
+            "{error}"
+        );
+        drop(restore);
+    }
+
+    /// Serializes the tests that mutate the FLUX.1 env families and the PuLID bundle env.
+    static FLUX_ONE_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// Every env var the FLUX.1 arm reads, restored on drop — including on a panic, so a failing
+    /// assertion cannot leak a binding into a later test.
+    struct FluxOneEnv(Vec<(&'static str, Option<std::ffi::OsString>)>);
+
+    impl FluxOneEnv {
+        const NAMES: [&'static str; 7] = [
+            "SCENEWORKS_FLUX1_DEV_REPOSITORY",
+            "SCENEWORKS_FLUX1_DEV_REVISION",
+            "SCENEWORKS_FLUX1_DEV_ROOT",
+            "SCENEWORKS_FLUX1_SCHNELL_REPOSITORY",
+            "SCENEWORKS_FLUX1_SCHNELL_REVISION",
+            "SCENEWORKS_FLUX1_SCHNELL_ROOT",
+            protocol::PULID_IDENTITY_BUNDLE_ENV,
+        ];
+
+        fn capture() -> Self {
+            Self(
+                Self::NAMES
+                    .iter()
+                    .map(|name| (*name, std::env::var_os(name)))
+                    .collect(),
+            )
+        }
+    }
+
+    impl Drop for FluxOneEnv {
+        fn drop(&mut self) {
+            for (name, value) in &self.0 {
+                match value {
+                    Some(value) => std::env::set_var(name, value),
+                    None => std::env::remove_var(name),
+                }
+            }
         }
     }
 
@@ -12005,7 +12209,7 @@ mod flux_one_tests {
         ))
         .expect("the anchor plan parses");
         let anchors = plan["anchors"].as_object().expect("anchors object");
-        let mut seen = 0;
+        let mut seen = std::collections::BTreeSet::new();
         for (key, entry) in anchors {
             if !key.ends_with(":mlx") {
                 continue;
@@ -12017,7 +12221,7 @@ mod flux_one_tests {
             ) {
                 continue;
             }
-            seen += 1;
+            seen.insert(key.clone());
             let (_, rest) = key.split_once(':').unwrap();
             let tier = rest.split_once(':').unwrap().0;
             let request = json!({ "planned": {
@@ -12034,17 +12238,133 @@ mod flux_one_tests {
             let arm = flux_one_arm(&request).unwrap_or_else(|error| panic!("{key}: {error}"));
             validate_flux_one_fixture(&request, arm, tier)
                 .unwrap_or_else(|error| panic!("{key}: {error}"));
-            // The anchor is captured under the streaming route, so the plan must declare it.
             assert_eq!(
                 planned_load_shape(&request).unwrap(),
                 LoadShape::DeferredMaterialization,
-                "{key}: the FLUX.1 arm loads Sequential + Deferred"
+                "{key}: the FLUX.1 arm attests the deferred load shape"
             );
         }
+        // The exact cell set, not a count: three members x three tiers, each named once.
+        let expected: std::collections::BTreeSet<String> =
+            ["flux_dev", "flux_schnell", "pulid_flux_dev"]
+                .iter()
+                .flat_map(|model| {
+                    ["bf16", "q4", "q8"]
+                        .iter()
+                        .map(move |tier| format!("{model}:{tier}:mlx"))
+                })
+                .collect();
+        assert_eq!(seen, expected);
+    }
+
+    /// Every FLUX.1 MLX plan row names the production calibration identity its loaded generator
+    /// publishes (inference PR 943's per-(route, tier) table): the two measured keys are the
+    /// engine constants byte-for-byte, no row names a weights-free conformance string, and the
+    /// nine identities are distinct. The existing member-resolution test never looked at
+    /// `calibrationFingerprint`, which is how seven rows shipped naming strings no production load
+    /// can return.
+    #[test]
+    fn every_planned_flux_one_mlx_cell_names_the_identity_its_loaded_generator_publishes() {
+        let plan: Value = serde_json::from_str(include_str!(
+            "../../../../config/memory-calibration-plan.json"
+        ))
+        .expect("the anchor plan parses");
+        let mut identities = std::collections::BTreeMap::new();
+        for (key, entry) in plan["anchors"].as_object().expect("anchors object") {
+            let provider = entry["provider"].as_str().unwrap();
+            if !key.ends_with(":mlx")
+                || !matches!(
+                    provider,
+                    FLUX1_DEV_PROVIDER | FLUX1_SCHNELL_PROVIDER | PULID_FLUX_PROVIDER
+                )
+            {
+                continue;
+            }
+            let tier = key.split(':').nth(1).unwrap();
+            let mode = entry["mode"].as_str().unwrap();
+            let arm = flux_one_arm(&flux_one_planned(provider, mode, tier)).unwrap();
+            let planned = entry["calibrationFingerprint"]
+                .as_str()
+                .unwrap_or_else(|| panic!("{key}: calibrationFingerprint must be a string"));
+            assert!(
+                !is_flux_one_weights_free_fingerprint(planned),
+                "{key}: {planned} is a weights-free conformance identity no production load returns"
+            );
+            assert_eq!(
+                planned,
+                flux_one_calibration_fingerprint(arm, tier),
+                "{key}: the plan row must name the loaded generator's production identity"
+            );
+            assert!(
+                identities.insert(planned.to_owned(), key.clone()).is_none(),
+                "{key}: {planned} is already claimed by {}",
+                identities[planned]
+            );
+        }
+        assert_eq!(identities.len(), 9, "nine distinct FLUX.1 MLX identities");
+        // The preserved measured keys, byte-for-byte, so the table cannot drift off the engine.
         assert_eq!(
-            seen, 9,
-            "three FLUX.1 members x three tiers on the mlx lane"
+            identities["flux1-dev-q4-mlx-shared-ladder-2026-08-03-v1"],
+            "flux_dev:q4:mlx"
         );
+        assert_eq!(
+            identities["pulid-flux-dev-q4-mlx-shared-ladder-2026-08-04-v1"],
+            "pulid_flux_dev:q4:mlx"
+        );
+        assert_eq!(
+            runtime_macos::providers::flux::memory_strategy::MEMORY_CALIBRATION_FINGERPRINT,
+            "flux1-dev-q4-mlx-shared-ladder-2026-08-03-v1"
+        );
+        assert_eq!(
+            runtime_macos::providers::pulid::memory_strategy::MEMORY_CALIBRATION_FINGERPRINT,
+            "pulid-flux-dev-q4-mlx-shared-ladder-2026-08-04-v1"
+        );
+        // The seven new cells, spelled out: the strings inference PR 943 mints.
+        for (key, identity) in [
+            ("flux_dev:q8:mlx", "flux1-dev-q8-mlx-shared-ladder-v1"),
+            ("flux_dev:bf16:mlx", "flux1-dev-bf16-mlx-shared-ladder-v1"),
+            (
+                "flux_schnell:q4:mlx",
+                "flux1-schnell-q4-mlx-shared-ladder-v1",
+            ),
+            (
+                "flux_schnell:q8:mlx",
+                "flux1-schnell-q8-mlx-shared-ladder-v1",
+            ),
+            (
+                "flux_schnell:bf16:mlx",
+                "flux1-schnell-bf16-mlx-shared-ladder-v1",
+            ),
+            (
+                "pulid_flux_dev:q8:mlx",
+                "pulid-flux-dev-q8-mlx-shared-ladder-v1",
+            ),
+            (
+                "pulid_flux_dev:bf16:mlx",
+                "pulid-flux-dev-bf16-mlx-shared-ladder-v1",
+            ),
+        ] {
+            assert_eq!(identities[identity], key);
+        }
+    }
+
+    /// The arm binds the plan row to the table BEFORE any environment or weight work, naming
+    /// both strings, so a stale row cannot cost a load.
+    #[test]
+    fn a_plan_row_naming_a_foreign_identity_is_refused_before_the_load() {
+        let mut request = flux_one_planned(FLUX1_SCHNELL_PROVIDER, "text_to_image", "q8");
+        request["planned"]["fixture"] =
+            json!(format!("flux1-schnell-mlx-q8-1024-seed{FLUX1_SEED}-step2"));
+        request["planned"]["calibrationFingerprint"] =
+            json!("flux-one-static-registry-behavior-v2-schnell");
+        let error = run(&request).expect_err("a conformance identity is not capturable");
+        assert!(
+            error.contains("plan=flux-one-static-registry-behavior-v2-schnell")
+                && error.contains("flux1-schnell-q8-mlx-shared-ladder-v1"),
+            "{error}"
+        );
+        // Not an env error: the refusal fired before `SCENEWORKS_FLUX1_SCHNELL_*` was read.
+        assert!(!error.contains("required environment variable"), "{error}");
     }
 }
 

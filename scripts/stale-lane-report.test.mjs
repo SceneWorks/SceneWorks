@@ -726,10 +726,11 @@ fn load(request: &Value) -> Result<Loaded, String> {
   assert.deepEqual(adapterCapturableProviders(source, "synthetic"), ["alpha"]);
 });
 
-// sc-22726. A BLOCK-bodied match arm carries no trailing comma after rustfmt, and this parser
-// splits arms on depth-0 commas — so a braced arm in the middle of a dispatch swallowed the NEXT
-// arm's pattern and silently dropped a real provider from the capturable set. The report then read
-// that lane as "NO ARM" and would have sent an operator to build an arm that already existed.
+// sc-22726. A BLOCK-bodied match arm carries no trailing comma after rustfmt, and this parser used
+// to split arms on depth-0 commas only — so a braced arm in the middle of a dispatch swallowed the
+// NEXT arm's pattern and silently dropped a real provider from the capturable set. The report then
+// read that lane as "NO ARM" and would have sent an operator to build an arm that already existed.
+// An arm now also ends at the depth-0 `}` that closes its block body, so every arm survives.
 test("a block-bodied arm in the middle of a dispatch does not swallow the arm after it", () => {
   const source = `
 fn entry(request: &Value) -> Result<&'static str, String> {
@@ -757,8 +758,22 @@ fn load(request: &Value) -> Result<Loaded, String> {
 `;
   assert.deepEqual(
     adapterCapturableProviders(source, "synthetic"),
-    ["alpha", "bespoke"],
-    "the braced arm consumed the `zeta` arm that followed it",
+    ["alpha", "bespoke", "zeta"],
+    "the braced arm must not consume the `zeta` arm that follows it",
+  );
+  // A block body that is itself followed by a comma (`=> { ... },`, the hand-written spelling)
+  // must not produce a phantom empty arm either.
+  assert.deepEqual(
+    adapterCapturableProviders(
+      source.replace(
+        `            return Err("bespoke is served by its own arm".to_owned())
+        }`,
+        `            return Err("bespoke is served by its own arm".to_owned())
+        },`,
+      ),
+      "synthetic",
+    ),
+    ["alpha", "bespoke", "zeta"],
   );
   // The expression-bodied spelling (`=> return Err(...),`) keeps its comma, so every arm survives.
   assert.deepEqual(

@@ -515,16 +515,24 @@ test("windows-candle captures and schema-checks the SC-21714 Krea anchor record"
 
   const adapter = await source("crates/sceneworks-memory-adapter/src/bin/candle.rs");
   assert.match(adapter, /StableIdleConfig::new\(2\.0, 5, 64, 200\)/);
-  // SHAPE, not population (sc-22726): what this protects is that EVERY VRAM probe the adapter
-  // builds is the certifying one — a raw `VramProbe::new` would measure without the stable-idle
-  // proof. Pinning the count instead made adding an arm look like a regression, so assert that
-  // every `vram` binding is certifying and that there is at least one.
-  const probes = adapter.match(/let mut vram = [a-z_]+\(\);/g) ?? [];
-  assert.ok(probes.length > 0, "the Candle adapter builds at least one VRAM probe");
+  // Every `vram` binding the adapter builds, as a MULTISET against an explicit allowlist
+  // (sc-22726 review): a set-of-distinct-spellings claim let a probe be deleted, a raw
+  // `VramProbe::new()` be added alongside, and the one known non-certifying probe hide, all green.
+  // Each entry is a probe expression and the number of arms that build it; the only non-certifying
+  // probe is the LTX-2.5 capture's, which certifies idleness through its own
+  // `start_rendered().assert_idle(1.0)` proof because that arm renders before it samples.
+  const probes = [...adapter.matchAll(/let mut vram\s*=\s*([^;]+);/g)].map((match) => match[1].trim());
+  const counts = new Map();
+  for (const probe of probes) counts.set(probe, (counts.get(probe) ?? 0) + 1);
   assert.deepEqual(
-    [...new Set(probes)],
-    ["let mut vram = certifying_vram_probe();"],
-    "every Candle VRAM probe must be the certifying one",
+    [...counts.entries()].sort(([a], [b]) => a.localeCompare(b)),
+    [
+      // Krea five-rung reference, PuLID-FLUX bespoke, and the inline Krea arm.
+      ["certifying_vram_probe()", 3],
+      // LTX-2.5: renders first, then proves idle on the rendered baseline.
+      ["VramProbe::start_rendered().assert_idle(1.0)", 1],
+    ],
+    "every Candle VRAM probe must be an allowlisted certifying spelling, at its expected count",
   );
 });
 

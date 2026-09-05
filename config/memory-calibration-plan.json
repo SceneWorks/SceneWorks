@@ -74,7 +74,7 @@
       },
       "evidenceScope": "authoritative",
       "loadShape": "deferred_materialization",
-      "calibrationFingerprint": "flux-one-static-registry-behavior-v2-dev",
+      "calibrationFingerprint": "flux1-dev-bf16-mlx-shared-ladder-v1",
       "fixture": "flux1-dev-mlx-bf16-1024-seed22726-step2"
     },
     "flux_dev:q4:candle": {
@@ -134,7 +134,7 @@
       },
       "evidenceScope": "authoritative",
       "loadShape": "deferred_materialization",
-      "calibrationFingerprint": "flux-one-static-registry-behavior-v2-dev",
+      "calibrationFingerprint": "flux1-dev-q8-mlx-shared-ladder-v1",
       "fixture": "flux1-dev-mlx-q8-1024-seed22726-step2"
     },
     "flux_schnell:bf16:candle": {
@@ -164,7 +164,7 @@
       },
       "evidenceScope": "authoritative",
       "loadShape": "deferred_materialization",
-      "calibrationFingerprint": "flux-one-static-registry-behavior-v2-schnell",
+      "calibrationFingerprint": "flux1-schnell-bf16-mlx-shared-ladder-v1",
       "fixture": "flux1-schnell-mlx-bf16-1024-seed22726-step2"
     },
     "flux_schnell:q4:candle": {
@@ -194,7 +194,7 @@
       },
       "evidenceScope": "authoritative",
       "loadShape": "deferred_materialization",
-      "calibrationFingerprint": "flux-one-static-registry-behavior-v2-schnell",
+      "calibrationFingerprint": "flux1-schnell-q4-mlx-shared-ladder-v1",
       "fixture": "flux1-schnell-mlx-q4-1024-seed22726-step2"
     },
     "flux_schnell:q8:candle": {
@@ -224,7 +224,7 @@
       },
       "evidenceScope": "authoritative",
       "loadShape": "deferred_materialization",
-      "calibrationFingerprint": "flux-one-static-registry-behavior-v2-schnell",
+      "calibrationFingerprint": "flux1-schnell-q8-mlx-shared-ladder-v1",
       "fixture": "flux1-schnell-mlx-q8-1024-seed22726-step2"
     },
     "krea_2_turbo:bf16:candle": {
@@ -477,7 +477,7 @@
       "evidenceScope": "authoritative",
       "loadShape": "deferred_materialization",
       "calibrationFingerprint": "pulid-flux-cuda-identity-stack-staged-decode-attention-block-window-v1",
-      "fixture": "fresh-five-rung-pulid-flux-bf16-1024-seed16402-step2"
+      "fixture": "pulid-flux-candle-bf16-1024-seed22726-step2"
     },
     "pulid_flux_dev:bf16:mlx": {
       "provider": "pulid_flux",
@@ -491,7 +491,7 @@
       },
       "evidenceScope": "authoritative",
       "loadShape": "deferred_materialization",
-      "calibrationFingerprint": "pulid-flux-static-registry-behavior-v2",
+      "calibrationFingerprint": "pulid-flux-dev-bf16-mlx-shared-ladder-v1",
       "fixture": "pulid-flux-mlx-bf16-1024-seed22726-step2"
     },
     "pulid_flux_dev:q4:candle": {
@@ -507,7 +507,7 @@
       "evidenceScope": "authoritative",
       "loadShape": "deferred_materialization",
       "calibrationFingerprint": "pulid-flux-cuda-identity-stack-staged-decode-attention-block-window-v1",
-      "fixture": "fresh-five-rung-pulid-flux-q4-1024-seed16402-step2"
+      "fixture": "pulid-flux-candle-q4-1024-seed22726-step2"
     },
     "pulid_flux_dev:q4:mlx": {
       "provider": "pulid_flux",
@@ -537,7 +537,7 @@
       "evidenceScope": "authoritative",
       "loadShape": "deferred_materialization",
       "calibrationFingerprint": "pulid-flux-cuda-identity-stack-staged-decode-attention-block-window-v1",
-      "fixture": "fresh-five-rung-pulid-flux-q8-1024-seed16402-step2"
+      "fixture": "pulid-flux-candle-q8-1024-seed22726-step2"
     },
     "pulid_flux_dev:q8:mlx": {
       "provider": "pulid_flux",
@@ -551,7 +551,7 @@
       },
       "evidenceScope": "authoritative",
       "loadShape": "deferred_materialization",
-      "calibrationFingerprint": "pulid-flux-static-registry-behavior-v2",
+      "calibrationFingerprint": "pulid-flux-dev-q8-mlx-shared-ladder-v1",
       "fixture": "pulid-flux-mlx-q8-1024-seed22726-step2"
     },
     "qwen_image:bf16:candle": {

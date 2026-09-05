@@ -8,6 +8,8 @@ autobins = false
 
 [dependencies]
 serde_json = "1.0"
+# Shared by both lanes: the PuLID identity bundle is named by content digest in every record.
+sha2 = "0.10"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 # Keep every first-party adapter crate on the exact pinned inference revision.
@@ -19,7 +21,6 @@ mlx-gen-minimax-h3 = { git = "https://github.com/SceneWorks/inference", rev = "c
 mlx-gen-sdxl = { git = "https://github.com/SceneWorks/inference", rev = "c6d6a4dbd61ab09c26ff5526632cae2cefea60ed", optional = true }
 mlx-rs = { package = "pmetal-mlx-rs", git = "https://github.com/michaeltrefry/mlx-rs", rev = "bd8f0e3c757195b17b2c34fae3073ab826fb7bc1", optional = true }
 runtime-macos = { git = "https://github.com/SceneWorks/inference", rev = "c6d6a4dbd61ab09c26ff5526632cae2cefea60ed", optional = true }
-sha2 = "0.10"
 
 [target.'cfg(not(target_os = "macos"))'.dependencies]
 candle-gen = { git = "https://github.com/SceneWorks/inference", rev = "c6d6a4dbd61ab09c26ff5526632cae2cefea60ed", features = ["cuda", "testkit"], optional = true }

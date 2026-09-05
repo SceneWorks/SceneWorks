@@ -82,18 +82,22 @@ export const PROVIDER_FAMILIES = Object.freeze({
   pulid_flux: {
     env: "FLUX1_DEV", repo: "SceneWorks/flux1-dev-mlx", arms: ["mlx", "candle"],
     // The identity stack is NOT a manifest download on either lane — the worker fetches it on first
-    // use — so the anchor binds the operator's pre-staged bundle instead, through the SAME env var
-    // both worker lanes already honour (`SCENEWORKS_PULID_WEIGHTS`; image_jobs/pulid.rs
-    // `ensure_pulid_weights`, pulid_candle.rs `ensure_pulid_candle_weights`). Both lanes require
-    // exactly these five loose files in one directory, which doubles as the provider's `face_dir`.
+    // use — so the anchor binds the operator's pre-staged bundle instead, through the env var both
+    // worker lanes read (`SCENEWORKS_PULID_WEIGHTS`), under its strict Candle reading: a directory
+    // already holding all five files (pulid_candle.rs `ensure_pulid_candle_weights`; the MLX lane
+    // treats it as the directory to fill and outranks it with the `PULID_*` preset — see
+    // `PULID_IDENTITY_BUNDLE_ENV` in the adapter's lib.rs). The list below is the adapter's
+    // `PULID_IDENTITY_BUNDLE_FILES`, in the same order: the adapter checkpoint, the EVA tower, and
+    // the three face models both engines read out of `face_dir` by name. The test parses lib.rs
+    // and asserts the two lists are equal, so neither can drift alone.
     bundle: {
       env: "SCENEWORKS_PULID_WEIGHTS",
       files: [
         "pulid_flux_v0.9.1.safetensors",
         "eva02_clip_l_336.safetensors",
-        "bisenet_parsing.safetensors",
         "scrfd_10g.safetensors",
         "arcface_iresnet100.safetensors",
+        "bisenet_parsing.safetensors",
       ],
     },
   },
@@ -325,7 +329,10 @@ export async function classifyAnchor(key, planned, { models, backend, hubs, curr
     // operator env the worker itself honours. Absent or incomplete is `weights_missing` — the same
     // class as a missing tier root, and NOT "runnable" (a cell whose identity stack cannot be bound
     // is not measurable on this host, and saying otherwise sends an operator to book a capture).
-    const bundleRoot = process.env[family.bundle.env];
+    // Absolute before it is probed or handed on: the adapter canonicalizes the value from the
+    // HARNESS's cwd (lib.rs `pulid_identity_bundle`), so a relative export that resolved here
+    // against node's cwd would be probed in one directory and opened in another.
+    const bundleRoot = process.env[family.bundle.env] ? path.resolve(process.env[family.bundle.env]) : undefined;
     row.roots.push({ label: "pulid bundle", path: bundleRoot ?? `$${family.bundle.env}` });
     if (!bundleRoot) {
       return { ...row, status: "weights_missing", reason: `${family.bundle.env} is unset; the PuLID identity bundle is not staged on this host` };
