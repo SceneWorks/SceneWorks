@@ -1387,17 +1387,21 @@ export function evidenceSemantics(record, revisions) {
  *
  * An anchor is the one render a lane's derivation law can price everything else from, so the
  * composition is a property of the LAW, not an operator choice: `isDerivable` in
- * scripts/extract-memory-anchors.mjs accepts any MLX composition but accepts a candle STILL anchor
- * ONLY when `staged_residency` is engaged and nothing deeper is. Planning the rung freely would let
- * a capture spend hours producing a render the extractor then refuses, and would reopen the rung
- * grid this story closed.
+ * scripts/extract-memory-anchors.mjs accepts any MLX composition but accepts a candle anchor ONLY
+ * when `staged_residency` is engaged and nothing deeper is. Planning the rung would let a capture
+ * spend hours producing a render the extractor then refuses, and would reopen the rung grid this
+ * story closed.
  *
- * The one per-anchor override (sc-22736): a plan row may state `rung: "resident"` for a candle
- * VIDEO cell whose provider implements no `staged_residency` at all — Candle SCAIL-2 declares
- * `Resident` alone and `MemoryProviderContract::validate_selection` refuses every other rung — and
- * `isDerivable` admits every candle video composition, so that anchor is still one the law prices.
- * `validatePlan` refuses the override on a still, where the candle image law would refuse the
- * render. `planAnchor` derives `engagedRungs` from the rung, so the two cannot disagree.
+ * ONE ESCAPE, and it is not an operator knob either (sc-22734): a plan row may carry its own
+ * `strategy`, and it exists for a provider whose CONTRACT refuses the lane default. SenseNova
+ * classifies `StagedResidency` as `StructurallyNotApplicable` on both lanes — it is one fused
+ * dual-path transformer with no separable conditioning component, so there is no phase boundary to
+ * release — and `contract.validate_selection` therefore rejects the candle default rung before any
+ * weight is read. The override makes those rows plan the RESIDENT rung, which the contract admits.
+ * It is derived, not chosen: a test in scripts/measure-memory-catalog.test.mjs requires a row's
+ * effective rung to be `resident` exactly when the model's manifest lane block declares a
+ * `memoryStrategyStructuralExemptions.staged_residency`, so this cannot be used to pick a rung the
+ * architecture does not force.
  */
 export const ANCHOR_STRATEGY = Object.freeze({
   mlx: Object.freeze({ rung: "resident", engagedRungs: Object.freeze(["resident"]), parameters: Object.freeze({}) }),
@@ -1484,31 +1488,8 @@ export function validatePlan(plan) {
     if (modelId !== "ltx_2_5" && (anchor.transformerVariant || anchor.decoder)) {
       fail(`${key}: transformerVariant/decoder are LTX-2.5 axes only`);
     }
-    const { backend } = parseAnchorKey(key);
-    if (anchor.rung === "resident" && backend === "candle" && anchor.geometry.frames === 1) {
-      fail(
-        `${key}: a candle STILL anchor must engage staged_residency — the candle image law ` +
-          "(isDerivable in scripts/extract-memory-anchors.mjs) prices only the staged composition, " +
-          "so a resident still capture would be refused by the extractor after the render",
-      );
-    }
   }
   return plan;
-}
-
-/**
- * The engaged composition of one anchor rung: the rung itself plus the resident baseline. Derived,
- * never planned, so a row cannot state a rung and a contradicting engaged set.
- */
-export function anchorEngagedRungs(rung) {
-  switch (rung) {
-    case "resident":
-      return ["resident"];
-    case "staged_residency":
-      return ["resident", "staged_residency"];
-    default:
-      return fail(`anchor rung ${JSON.stringify(rung)} is not a residency shape an anchor may plan`);
-  }
 }
 
 /** Every planned anchor, in key order. */
@@ -1547,8 +1528,8 @@ export function planAnchor(plan, key) {
       geometry: anchor.geometry,
     },
     strategy: {
-      rung: anchor.rung ?? ANCHOR_STRATEGY[backend].rung,
-      engagedRungs: anchorEngagedRungs(anchor.rung ?? ANCHOR_STRATEGY[backend].rung),
+      rung: (anchor.strategy ?? ANCHOR_STRATEGY[backend]).rung,
+      engagedRungs: [...(anchor.strategy ?? ANCHOR_STRATEGY[backend]).engagedRungs],
       parameters: {},
     },
     ...(anchor.sourceProvenance ? { sourceProvenance: anchor.sourceProvenance } : {}),

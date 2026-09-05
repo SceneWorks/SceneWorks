@@ -14854,6 +14854,674 @@ fn run_minimax_h3(request: &Value) -> Result<Value, String> {
     Ok(fragment)
 }
 
+// ---------------------------------------------------------------------------------------------
+// The SenseNova-U1 family arm (sc-22734): six catalog models over two engine ids.
+// ---------------------------------------------------------------------------------------------
+
+/// One member of the MLX SenseNova-U1 family.
+///
+/// The worker routes SIX catalog models onto TWO engine ids (`crates/sceneworks-worker/src/
+/// engines.rs` `MODEL_TABLE`): the quality trio on `sensenova_u1_8b` and the 8-step distilled trio
+/// on `sensenova_u1_8b_fast`. Each of the six has its OWN independently pinned tiered rehost, so
+/// the arm is keyed on `(provider, modelId)`: the provider names the engine to load through, the
+/// model id names the artifact family the capture must actually open and the route the engine
+/// mints its per-route identity for. Binding the engine id alone would let an
+/// `sensenova_u1_8b_infographic_v3` plan be satisfied by base-SenseNova weights and re-label the
+/// base model's peaks as the finetune's.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct SenseNovaArm {
+    /// The catalog model id — `planned.target.modelId`, and the spec's `resolved_route`. The
+    /// worker binds exactly this (`image_jobs/base.rs` `.with_resolved_route(request.model)`), and
+    /// `mlx-gen-sensenova`'s `validate_resolved_artifact_binding` refuses a route whose repository
+    /// identity the weights path does not carry.
+    model_id: &'static str,
+    /// The registry id handed to `catalog.media().load` — the production loader (E4), the same id
+    /// the worker passes to `inference_runtime::load`.
+    provider: &'static str,
+    /// The route slug the engine's per-route calibration identity is spelled with, and the
+    /// record's diagnostics source (`memory-mlx-adapter:sensenova-u1-<slug>-shared-ladder`).
+    slug: &'static str,
+    execution_path: &'static str,
+    /// The still-geometry refusal label (sc-18808).
+    still_calibration: &'static str,
+    repository_env: &'static str,
+    revision_env: &'static str,
+    root_env: &'static str,
+    expected_repository: &'static str,
+}
+
+/// The quality engine id (`mlx_gen_sensenova::MODEL_ID`).
+const SENSENOVA_PROVIDER: &str = "sensenova_u1_8b";
+/// The 8-step distilled engine id (`mlx_gen_sensenova::MODEL_ID_FAST`). A SEPARATE registry id, not
+/// a mode of the quality one: the distill LoRA is pre-merged into each `_fast` rehost at convert
+/// time and the tier subdir carries the `distill_merged.json` marker `load_fast` reads, so the
+/// worker attaches nothing and selects the engine instead (`engines.rs`, `image_jobs/sensenova.rs`
+/// "No user adapters by design").
+const SENSENOVA_FAST_PROVIDER: &str = "sensenova_u1_8b_fast";
+/// The family seed. The fixture binds tier and edge, so the seed does not also carry the route.
+const SENSENOVA_SEED: u64 = 22734;
+
+const SENSENOVA_BASE_ARM: SenseNovaArm = SenseNovaArm {
+    model_id: "sensenova_u1_8b",
+    provider: SENSENOVA_PROVIDER,
+    slug: "quality",
+    execution_path: "the MLX SenseNova-U1 8B base text-to-image path",
+    still_calibration: "MLX SenseNova-U1 8B calibration",
+    repository_env: "SCENEWORKS_SENSENOVA_U1_8B_REPOSITORY",
+    revision_env: "SCENEWORKS_SENSENOVA_U1_8B_REVISION",
+    root_env: "SCENEWORKS_SENSENOVA_U1_8B_ROOT",
+    expected_repository: protocol::SENSENOVA_U1_8B_REPOSITORY,
+};
+
+const SENSENOVA_INFOGRAPHIC_V2_ARM: SenseNovaArm = SenseNovaArm {
+    model_id: "sensenova_u1_8b_infographic_v2",
+    provider: SENSENOVA_PROVIDER,
+    slug: "infographic-v2",
+    execution_path: "the MLX SenseNova-U1 Infographic V2 text-to-image path",
+    still_calibration: "MLX SenseNova-U1 Infographic V2 calibration",
+    repository_env: "SCENEWORKS_SENSENOVA_U1_8B_INFOGRAPHIC_V2_REPOSITORY",
+    revision_env: "SCENEWORKS_SENSENOVA_U1_8B_INFOGRAPHIC_V2_REVISION",
+    root_env: "SCENEWORKS_SENSENOVA_U1_8B_INFOGRAPHIC_V2_ROOT",
+    expected_repository: protocol::SENSENOVA_U1_8B_INFOGRAPHIC_V2_REPOSITORY,
+};
+
+const SENSENOVA_INFOGRAPHIC_V3_ARM: SenseNovaArm = SenseNovaArm {
+    model_id: "sensenova_u1_8b_infographic_v3",
+    provider: SENSENOVA_PROVIDER,
+    slug: "infographic-v3",
+    execution_path: "the MLX SenseNova-U1 Infographic V3 text-to-image path",
+    still_calibration: "MLX SenseNova-U1 Infographic V3 calibration",
+    repository_env: "SCENEWORKS_SENSENOVA_U1_8B_INFOGRAPHIC_V3_REPOSITORY",
+    revision_env: "SCENEWORKS_SENSENOVA_U1_8B_INFOGRAPHIC_V3_REVISION",
+    root_env: "SCENEWORKS_SENSENOVA_U1_8B_INFOGRAPHIC_V3_ROOT",
+    expected_repository: protocol::SENSENOVA_U1_8B_INFOGRAPHIC_V3_REPOSITORY,
+};
+
+const SENSENOVA_FAST_ARM: SenseNovaArm = SenseNovaArm {
+    model_id: "sensenova_u1_8b_fast",
+    provider: SENSENOVA_FAST_PROVIDER,
+    slug: "fast",
+    execution_path: "the MLX SenseNova-U1 8B distilled text-to-image path",
+    still_calibration: "MLX SenseNova-U1 8B distilled calibration",
+    repository_env: "SCENEWORKS_SENSENOVA_U1_8B_FAST_REPOSITORY",
+    revision_env: "SCENEWORKS_SENSENOVA_U1_8B_FAST_REVISION",
+    root_env: "SCENEWORKS_SENSENOVA_U1_8B_FAST_ROOT",
+    expected_repository: protocol::SENSENOVA_U1_8B_FAST_REPOSITORY,
+};
+
+const SENSENOVA_INFOGRAPHIC_V2_FAST_ARM: SenseNovaArm = SenseNovaArm {
+    model_id: "sensenova_u1_8b_infographic_v2_fast",
+    provider: SENSENOVA_FAST_PROVIDER,
+    slug: "infographic-v2-fast",
+    execution_path: "the MLX SenseNova-U1 Infographic V2 distilled text-to-image path",
+    still_calibration: "MLX SenseNova-U1 Infographic V2 distilled calibration",
+    repository_env: "SCENEWORKS_SENSENOVA_U1_8B_INFOGRAPHIC_V2_FAST_REPOSITORY",
+    revision_env: "SCENEWORKS_SENSENOVA_U1_8B_INFOGRAPHIC_V2_FAST_REVISION",
+    root_env: "SCENEWORKS_SENSENOVA_U1_8B_INFOGRAPHIC_V2_FAST_ROOT",
+    expected_repository: protocol::SENSENOVA_U1_8B_INFOGRAPHIC_V2_FAST_REPOSITORY,
+};
+
+const SENSENOVA_INFOGRAPHIC_V3_FAST_ARM: SenseNovaArm = SenseNovaArm {
+    model_id: "sensenova_u1_8b_infographic_v3_fast",
+    provider: SENSENOVA_FAST_PROVIDER,
+    slug: "infographic-v3-fast",
+    execution_path: "the MLX SenseNova-U1 Infographic V3 distilled text-to-image path",
+    still_calibration: "MLX SenseNova-U1 Infographic V3 distilled calibration",
+    repository_env: "SCENEWORKS_SENSENOVA_U1_8B_INFOGRAPHIC_V3_FAST_REPOSITORY",
+    revision_env: "SCENEWORKS_SENSENOVA_U1_8B_INFOGRAPHIC_V3_FAST_REVISION",
+    root_env: "SCENEWORKS_SENSENOVA_U1_8B_INFOGRAPHIC_V3_FAST_ROOT",
+    expected_repository: protocol::SENSENOVA_U1_8B_INFOGRAPHIC_V3_FAST_REPOSITORY,
+};
+
+const SENSENOVA_FAMILY: [SenseNovaArm; 6] = [
+    SENSENOVA_BASE_ARM,
+    SENSENOVA_INFOGRAPHIC_V2_ARM,
+    SENSENOVA_INFOGRAPHIC_V3_ARM,
+    SENSENOVA_FAST_ARM,
+    SENSENOVA_INFOGRAPHIC_V2_FAST_ARM,
+    SENSENOVA_INFOGRAPHIC_V3_FAST_ARM,
+];
+
+/// Which family member the plan asks for. Refuses by name — a model id no member serves must not be
+/// measured as its nearest neighbour, and the engine id alone is NOT an artifact identity, so a
+/// `(provider, modelId)` pair that crosses the quality/fast split is refused too.
+fn sensenova_arm(request: &Value) -> Result<SenseNovaArm, String> {
+    let planned = protocol::planned(request)?;
+    let provider = planned
+        .pointer("/target/provider")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "planned.target.provider must be a string".to_owned())?;
+    let model_id = planned
+        .pointer("/target/modelId")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "planned.target.modelId must be a string".to_owned())?;
+    SENSENOVA_FAMILY
+        .into_iter()
+        .find(|arm| arm.model_id == model_id && arm.provider == provider)
+        .ok_or_else(|| {
+            format!(
+                "the MLX SenseNova arm does not implement modelId {model_id:?} on provider \
+                 {provider:?} (family: {})",
+                SENSENOVA_FAMILY
+                    .iter()
+                    .map(|arm| format!("{}:{}", arm.provider, arm.model_id))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )
+        })
+}
+
+/// The production calibration identity `mlx-gen-sensenova` publishes for one `(route, tier)` cell.
+///
+/// The engine keys the identity on the resolved route and the ARTIFACT-PROVEN tier (never
+/// `spec.quantize` alone), and deliberately not on the offload policy: SenseNova's rung 4 keys off
+/// `LoadSpec::load_shape`, which `MemoryCalibrationIdentity::load_shape` already carries. The two
+/// q8 cells of the two base routes keep the strings their `2026-08-03` campaign measured, bound
+/// here to the engine's own constants rather than re-spelled, so a rename cannot drift the plan.
+/// The capture refuses a loaded contract whose identity differs from this table, so the two copies
+/// cannot drift unnoticed.
+fn sensenova_calibration_fingerprint(arm: SenseNovaArm, tier: &str) -> String {
+    match (arm.model_id, tier) {
+        ("sensenova_u1_8b", "q8") => {
+            runtime_macos::providers::sensenova::memory_strategy::QUALITY_CALIBRATION_FINGERPRINT
+                .to_owned()
+        }
+        ("sensenova_u1_8b_fast", "q8") => {
+            runtime_macos::providers::sensenova::memory_strategy::FAST_CALIBRATION_FINGERPRINT
+                .to_owned()
+        }
+        (_, tier) => format!("sensenova-u1-{}-{tier}-mlx-shared-ladder-v1", arm.slug),
+    }
+}
+
+/// Bind the fixture to the planned tier AND geometry edge, so a bf16 record can never be emitted
+/// against a q4 capture that merely reused the fixture string.
+fn validate_sensenova_fixture(
+    request: &Value,
+    arm: SenseNovaArm,
+    tier: &str,
+) -> Result<(), String> {
+    let fixture = protocol::planned(request)?
+        .get("fixture")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "planned.fixture must be a string".to_owned())?;
+    let (width, _) = protocol::target_geometry(request)?;
+    let prefix = format!("{}-mlx-{tier}-{width}-seed", arm.slug);
+    let remainder = fixture
+        .strip_prefix(&prefix)
+        .ok_or_else(|| format!("planned.fixture {fixture:?} must start with {prefix:?}"))?;
+    let (seed, steps) = remainder
+        .split_once("-step")
+        .ok_or_else(|| format!("planned.fixture {fixture:?} must end with -step<count>"))?;
+    let seed = seed
+        .parse::<u64>()
+        .map_err(|error| format!("parse SenseNova fixture seed {seed:?}: {error}"))?;
+    if seed != SENSENOVA_SEED {
+        return Err(format!(
+            "planned.fixture seed {seed} does not match the SenseNova calibration seed \
+             {SENSENOVA_SEED}"
+        ));
+    }
+    let steps = steps
+        .parse::<u32>()
+        .map_err(|error| format!("parse SenseNova fixture step count {steps:?}: {error}"))?;
+    if steps != 2 {
+        return Err(format!(
+            "planned.fixture {fixture:?} must use the two-step calibration request"
+        ));
+    }
+    Ok(())
+}
+
+/// The env-free half of [`sensenova_load_spec`], so the tier and route bindings are unit-testable
+/// without weights. The root must end in the PLANNED tier's directory
+/// (`.../snapshots/<revision>/<tier>`), so a stale `…/q4` export can never satisfy a q8 or bf16 plan
+/// and quietly re-label another tier's peaks.
+fn sensenova_load_spec_at(
+    arm: SenseNovaArm,
+    repository: &str,
+    revision: &str,
+    root: PathBuf,
+    tier: &str,
+) -> Result<LoadSpec, String> {
+    protocol::validate_artifact_identity(repository, revision, arm.expected_repository)?;
+    protocol::validate_huggingface_snapshot_root(
+        &root,
+        repository,
+        revision,
+        tier,
+        arm.expected_repository,
+    )?;
+    // Exactly the worker's MLX still-image shape for this family. `Resident` + eager is what
+    // `image_jobs/base.rs` settles on: SenseNova is off the shared `Residency` seam
+    // (`engine_supports_sequential("sensenova_u1_8b")` is false), so nothing ever moves it to
+    // `Sequential`, and no SenseNova manifest declares a `requiredOffloadPolicy`. The quant is the
+    // RESOLVED tier's — `reconcile_resolved_tier_quant` rewrites the requested quant to the tier
+    // the directory actually is, and the engine's `validate_artifact_tier` hard-errors on any other
+    // pairing — so bf16 carries no quant at all and the packed tiers carry theirs.
+    let mut spec = LoadSpec::new(WeightsSource::Dir(root))
+        .with_offload_policy(OffloadPolicy::Resident)
+        .with_load_shape(LoadShape::EagerMaterialization)
+        .with_resolved_route(arm.model_id);
+    if let (_, Some(quant)) = tier_precision_quant(tier) {
+        spec = spec.with_quant(quant);
+    }
+    Ok(spec)
+}
+
+fn sensenova_load_spec(
+    arm: SenseNovaArm,
+    tier: &str,
+) -> Result<(String, String, LoadSpec), String> {
+    let repository = protocol::required_env(arm.repository_env)?;
+    let revision = protocol::required_env(arm.revision_env)?;
+    let root = std::fs::canonicalize(PathBuf::from(protocol::required_env(arm.root_env)?))
+        .map_err(|error| format!("canonicalize {}: {error}", arm.root_env))?;
+    let spec = sensenova_load_spec_at(arm, &repository, &revision, root, tier)?;
+    Ok((repository, revision, spec))
+}
+
+/// The one fresh planned request every SenseNova capture renders. Two steps: the first Step
+/// callback closes a conservative conditioning envelope and the second gives denoise its own
+/// measured interval before Decoding — the shared z_image/qwen/flux phase-boundary pattern. The
+/// family takes a guidance scale and no negative prompt (`image.supportsNegativePrompt: false`).
+fn sensenova_request(width: u32, height: u32) -> GenerationRequest {
+    GenerationRequest {
+        prompt: "an annotated infographic of a coastal lighthouse, crisp dense labels".to_owned(),
+        width,
+        height,
+        count: 1,
+        seed: Some(SENSENOVA_SEED),
+        steps: Some(2),
+        ..Default::default()
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn sensenova_context(
+    selection: &MemorySelection,
+    calibration: &MemoryCalibrationIdentity,
+    fingerprint: &str,
+    width: u32,
+    height: u32,
+    total_bytes: u64,
+    predicted_peak_bytes: u64,
+) -> MemoryRunContext {
+    MemoryRunContext {
+        selection: *selection,
+        optimization_authority: MemoryOptimizationAuthority::Calibrated,
+        calibration_abi: calibration.abi,
+        // A parameter only so the stale-evidence probe can pass a deliberate mismatch; the real
+        // call sites pass `calibration.fingerprint`.
+        calibration_fingerprint: fingerprint.to_owned(),
+        load_shape: calibration.load_shape,
+        mode: MemoryMode::TextToImage,
+        has_reference: false,
+        use_pid: false,
+        // The pinned SenseNova route gate fails a phase-bearing context closed on the registry
+        // fixture surface; the anchor is the plain single-phase text-to-image route.
+        has_phases: false,
+        geometry: MemoryGeometry {
+            width,
+            height,
+            batch: 1,
+            frames: 1,
+            reference_count: 0,
+        },
+        overlay: None,
+        budget: MemoryBudget {
+            total_bytes,
+            committed_bytes: 0,
+            reclaimable_bytes: 0,
+            reserved_headroom_bytes: 0,
+        },
+        predicted_peak_bytes,
+        cache_state: MemoryCacheState::Cold,
+        evidence_revision: format!("sc-22734@{}", protocol::INFERENCE_PIN),
+    }
+}
+
+/// The `mlx:sensenova_u1_8b` / `mlx:sensenova_u1_8b_fast` family arm (sc-22734).
+///
+/// Loads through the SAME seam the worker loads all six routes through —
+/// `runtime_macos::catalog().media().load(engine_id, &spec)`, which is what
+/// `crates/sceneworks-worker/src/inference_runtime.rs` wraps — reads the LOADED generator's own
+/// contract, and measures the resident anchor composition against it. `StagedResidency` and
+/// `BoundedDecode` are structurally not applicable on this family (one flat fused dual-path
+/// checkpoint, no separable conditioning component and no VAE decode phase), which is why the
+/// anchor is the resident rung on this lane AND on Candle rather than the usual staged one.
+fn run_sensenova(request: &Value) -> Result<Value, String> {
+    // Before the load, not inside it: a non-still target must be refused without paying for
+    // weights. The arm is resolved first so the refusal carries the member's own label.
+    let arm = sensenova_arm(request)?;
+    protocol::validate_still_geometry(request, arm.still_calibration)?;
+    protocol::validate_plain_overlay_target(request, arm.execution_path)?;
+    let planned_shape = planned_load_shape(request)?;
+    if planned_shape != LoadShape::EagerMaterialization {
+        return Err(format!(
+            "{} must use the eager_materialization load shape the worker loads this family under; \
+             deferred materialization is the rung-4 (bounded transformer residency) shape, not the \
+             resident anchor's",
+            arm.still_calibration
+        ));
+    }
+    let selection = planned_selection(request)?;
+    if selection.strategy != MemoryStrategy::Resident {
+        return Err(format!(
+            "{} measures the resident anchor: the pinned SenseNova contract classifies \
+             StagedResidency and BoundedDecode StructurallyNotApplicable, so no other rung is a \
+             capturable anchor on this family",
+            arm.still_calibration
+        ));
+    }
+    let tier = planned_qwen_tier(request)?;
+    validate_sensenova_fixture(request, arm, tier)?;
+    let (width, height) = protocol::target_geometry(request)?;
+    // The plan row must name the production identity this cell's loaded generator publishes —
+    // checked against the table BEFORE the load, so a row still carrying a conformance string
+    // fails in milliseconds rather than after a multi-gigabyte load.
+    let planned_fingerprint = protocol::planned(request)?
+        .get("calibrationFingerprint")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "planned.calibrationFingerprint must be a string".to_owned())?
+        .to_owned();
+    let expected_fingerprint = sensenova_calibration_fingerprint(arm, tier);
+    if planned_fingerprint != expected_fingerprint {
+        return Err(format!(
+            "plan/provider calibration mismatch: plan={planned_fingerprint}, the {} {tier} \
+             production identity is {expected_fingerprint}",
+            arm.model_id
+        ));
+    }
+    let (repository, revision, spec) = sensenova_load_spec(arm, tier)?;
+
+    let catalog =
+        runtime_macos::catalog().map_err(|error| format!("build MLX catalog: {error}"))?;
+    let generator = catalog.media().load(arm.provider, &spec).map_err(|error| {
+        format!(
+            "load real {} {tier} provider on {}: {error}",
+            arm.provider, arm.model_id
+        )
+    })?;
+    let contract = generator.memory_strategy_contract().ok_or_else(|| {
+        format!(
+            "loaded {} exposed no memory-strategy contract",
+            arm.provider
+        )
+    })?;
+    contract.validate_selection(&selection).map_err(|error| {
+        format!(
+            "pinned {} provider rejected planned selection: {error}",
+            arm.provider
+        )
+    })?;
+    let strategy = attested_strategy(
+        request,
+        &selection,
+        &contract.engaged_composition(selection.strategy),
+    )?;
+    // The LOADED generator's own identity is what the record attests. An absent one is refused by
+    // name — an anchor recorded against no identity would claim measured authority the engine
+    // never granted — and so is one that differs from the table the plan was bound to above.
+    let calibration = contract.calibration.as_ref().ok_or_else(|| {
+        format!(
+            "the loaded {} provider at inference {} published no calibration identity for the {} \
+             {tier} artifact; the production identity for this cell is {expected_fingerprint} \
+             (the engines publish one per (route, artifact-proven tier)), so this cell captures \
+             only at a pin that carries it",
+            arm.provider,
+            protocol::INFERENCE_PIN,
+            arm.model_id,
+        )
+    })?;
+    if calibration.fingerprint != expected_fingerprint {
+        return Err(format!(
+            "plan/provider calibration mismatch: plan={planned_fingerprint}, pinned provider={}",
+            calibration.fingerprint
+        ));
+    }
+    if calibration.load_shape != planned_shape {
+        return Err(format!(
+            "plan/provider load-shape mismatch: plan={}, pinned provider={}",
+            load_shape_key(planned_shape),
+            load_shape_key(calibration.load_shape)
+        ));
+    }
+    let hardware_bytes = request
+        .pointer("/hardware/memoryBytes")
+        .and_then(Value::as_u64)
+        .ok_or_else(|| "run request.hardware.memoryBytes must be an integer".to_owned())?;
+    let safety = |fingerprint: &str, total_bytes: u64, predicted: u64| {
+        generator.memory_strategy_safety_check(&sensenova_context(
+            &selection,
+            calibration,
+            fingerprint,
+            width,
+            height,
+            total_bytes,
+            predicted,
+        ))
+    };
+    // Admission mutation hygiene: the gate must ACCEPT a fitting request, so the two rejections
+    // below cannot pass through a blanket refusal.
+    if !matches!(
+        safety(&calibration.fingerprint, hardware_bytes, 1),
+        MemorySafetyDecision::Accept
+    ) {
+        return Err(format!(
+            "{} admission rejected a fitting probe budget; the scenario rejections below would be \
+             a blanket refusal, not evidence",
+            arm.provider
+        ));
+    }
+    if !matches!(
+        safety(&calibration.fingerprint, 0, 1),
+        MemorySafetyDecision::Reject { .. }
+    ) {
+        return Err(format!(
+            "{} admission accepted an unknown/zero memory budget",
+            arm.provider
+        ));
+    }
+    if !matches!(
+        safety("stale-sensenova-fingerprint", hardware_bytes, 1),
+        MemorySafetyDecision::Reject { .. }
+    ) {
+        return Err(format!(
+            "{} admission accepted stale calibration evidence",
+            arm.provider
+        ));
+    }
+
+    let conditioning = Cell::new(PhaseMemory {
+        active: 0,
+        cache: 0,
+    });
+    let denoise = Cell::new(PhaseMemory {
+        active: 0,
+        cache: 0,
+    });
+    clear_cache();
+    reset_peak_memory();
+    let pre_rung_active = get_active_memory() as u64;
+    let pre_rung_cache = get_cache_memory() as u64;
+    let selected = one_image(
+        generator
+            .generate(
+                &sensenova_request(width, height),
+                &mut |progress| match progress {
+                    Progress::Step { current: 1, .. } => {
+                        conditioning.set(PhaseMemory::capture());
+                        reset_peak_memory();
+                    }
+                    Progress::Decoding => {
+                        denoise.set(PhaseMemory::capture());
+                        reset_peak_memory();
+                    }
+                    _ => {}
+                },
+            )
+            .map_err(|error| format!("generate measured {} render: {error}", arm.model_id))?,
+    )?;
+    let decode = PhaseMemory::capture();
+    let conditioning = conditioning.get();
+    let denoise = denoise.get();
+    if [conditioning.active, denoise.active, decode.active].contains(&0) {
+        return Err(format!(
+            "a synchronized {} lifecycle phase reported a zero active peak",
+            arm.model_id
+        ));
+    }
+    let overall = PhaseMemory::overall(&[conditioning, denoise, decode]);
+    let predicted_peaks = image_predicted_peak_bytes(conditioning, denoise, decode);
+    let predicted = predicted_peaks.overall;
+    if !matches!(
+        safety(&calibration.fingerprint, predicted, predicted),
+        MemorySafetyDecision::Accept
+    ) {
+        return Err(format!(
+            "{} admission rejected an exact-fit calibrated budget",
+            arm.provider
+        ));
+    }
+
+    // Warm-repeat determinism and allocator cleanup bounds on this exact loaded provider.
+    clear_cache();
+    reset_peak_memory();
+    let baseline = one_image(
+        generator
+            .generate(&sensenova_request(width, height), &mut |_| {})
+            .map_err(|error| format!("generate warm {} control: {error}", arm.model_id))?,
+    )?;
+    let clean_warm_peak = get_peak_memory() as u64;
+    clear_cache();
+    let clean_post_cleanup = AllocatorState::capture_current();
+    let cleanup_bounds =
+        LifecycleMemoryBounds::from_clean_warm(clean_warm_peak, clean_post_cleanup);
+    let (maximum_error, mean_error, rms_error) = image_max_mean_rms_abs(&selected, &baseline)?;
+    if !flux2_quality_passes(maximum_error, mean_error, rms_error) {
+        return Err(format!(
+            "{} warm repeat exceeded the determinism envelope: max={maximum_error:.6}, \
+             mean={mean_error:.6}, rms={rms_error:.6}",
+            arm.model_id
+        ));
+    }
+    reset_peak_memory();
+    let warm = one_image(
+        generator
+            .generate(&sensenova_request(width, height), &mut |_| {})
+            .map_err(|error| format!("generate warm {} repeat: {error}", arm.model_id))?,
+    )?;
+    let warm_peak = get_peak_memory() as u64;
+    if !cleanup_bounds.allows_warm_peak(warm_peak) {
+        return Err(format!(
+            "{} warm repeat peaked at {warm_peak} bytes, above the clean warm control \
+             {clean_warm_peak} bytes plus 2%",
+            arm.model_id
+        ));
+    }
+    clear_cache();
+    let warm_post_cleanup = AllocatorState::capture_current();
+    if !cleanup_bounds.allows_retained(warm_post_cleanup) {
+        return Err(format!(
+            "{} warm repeat retained active/cache bytes {warm_post_cleanup:?} above the clean warm \
+             cleanup {clean_post_cleanup:?} plus {} bytes",
+            arm.model_id, cleanup_bounds.tolerance_bytes,
+        ));
+    }
+    let (warm_maximum, warm_mean, warm_rms) = image_max_mean_rms_abs(&selected, &warm)?;
+    if !flux2_quality_passes(warm_maximum, warm_mean, warm_rms) {
+        return Err(format!(
+            "{} second warm repeat changed the deterministic output",
+            arm.model_id
+        ));
+    }
+
+    // Arm-internal negative-mutation falsifiability check: a runtime_complete record must keep
+    // `negativeMutation` null, so the breach is verified here and the numbers land in diagnostics.
+    let mutated = qwen_negative_mutation(&selected);
+    let (mutated_maximum, mutated_mean, mutated_rms) = image_max_mean_rms_abs(&mutated, &baseline)?;
+    if flux2_quality_passes(mutated_maximum, mutated_mean, mutated_rms) {
+        return Err(format!(
+            "{} output mutation did not breach the determinism envelope",
+            arm.model_id
+        ));
+    }
+
+    let lifecycle_blocker = concat!(
+        "the pinned SenseNova crate opens no memory-strategy request scope for the resident anchor ",
+        "composition and exposes no calibration fault-injection site, so the scoped lifecycle ",
+        "scenarios cannot execute; unscoped repeat determinism and allocator cleanup bounds are ",
+        "attested in quality and diagnostics instead"
+    );
+    let mut fragment = json!({
+        "status": "runtime_complete",
+        "strategy": strategy,
+        "loadShape": load_shape_key(calibration.load_shape),
+        "artifact": { "repository": repository, "resolvedRevision": revision, "variant": tier },
+        "sweep": flux_one_complete_sweep(request)?,
+        "scenarios": [
+            { "name": "exact_fit", "result": "passed", "predictedBytes": predicted, "effectiveBudgetBytes": predicted },
+            { "name": "unknown_budget", "result": "passed" },
+            { "name": "stale_evidence", "result": "passed" },
+            { "name": "warm_repeat", "result": "not_run", "reason": lifecycle_blocker },
+            { "name": "cancel", "result": "not_run", "reason": lifecycle_blocker },
+            { "name": "error", "result": "not_run", "reason": lifecycle_blocker },
+            { "name": "loadability", "result": "passed" },
+            { "name": "overlay", "result": "not_applicable", "reason": "settled below from the declared target" }
+        ],
+        "predictedPeakBytes": predicted_peaks.json(),
+        "observedMemory": {
+            "conditioning": conditioning.json(),
+            "denoise": denoise.json(),
+            "decode": decode.json(),
+            "overall": overall.json(),
+        },
+        "quality": {
+            "contract": "identical artifact, prompt, guidance, seed, geometry, steps, tier, and loaded provider; cold measured render versus warm unscoped repeats",
+            "identicalInputs": true,
+            "result": "passed",
+            "maximumError": maximum_error,
+            "meanError": mean_error,
+            "rootMeanSquareError": rms_error,
+            "maximumErrorThreshold": FLUX2_MAX_THRESHOLD,
+            "meanErrorThreshold": FLUX2_MEAN_THRESHOLD,
+            "rootMeanSquareErrorThreshold": FLUX2_RMS_THRESHOLD,
+        },
+        "negativeMutation": null,
+        "loadability": {
+            "result": "passed",
+            "resolvedPathFingerprint": format!("{repository}@{revision}:{tier}"),
+        },
+        "diagnostics": protocol::diagnostics(
+            &format!("memory-mlx-adapter:sensenova-u1-{}-shared-ladder", arm.slug),
+            "executed",
+            [lifecycle_blocker.to_owned()],
+            [
+                ("preRungActiveAfterClear", "bytes", pre_rung_active),
+                ("preRungCacheAfterClear", "bytes", pre_rung_cache),
+                ("conditioningActivePeak", "bytes", conditioning.active),
+                ("denoiseActivePeak", "bytes", denoise.active),
+                ("decodeActivePeak", "bytes", decode.active),
+                ("overallAllocatorEnvelope", "bytes", overall.allocator_bytes()),
+                ("lifecycleCleanWarmPeak", "bytes", clean_warm_peak),
+                ("lifecycleCleanPostCleanupActive", "bytes", clean_post_cleanup.active),
+                ("lifecycleCleanPostCleanupCache", "bytes", clean_post_cleanup.cache),
+                ("lifecycleCleanupTolerance", "bytes", cleanup_bounds.tolerance_bytes),
+                ("lifecycleWarmRepeatPeak", "bytes", warm_peak),
+                ("lifecycleWarmRepeatPostCleanupActive", "bytes", warm_post_cleanup.active),
+                ("lifecycleWarmRepeatPostCleanupCache", "bytes", warm_post_cleanup.cache),
+                ("negativeMutationMaximumErrorPer255", "count", (mutated_maximum * 255.0).round() as u64),
+                ("negativeMutationMeanErrorPer255", "count", (mutated_mean * 255.0).round() as u64),
+                ("loadShapeDeferred", "count", u64::from(calibration.load_shape == LoadShape::DeferredMaterialization)),
+            ],
+        ),
+        "capturedAt": protocol::captured_at(),
+    });
+    protocol::settle_plain_overlay_scenario(request, &mut fragment, arm.execution_path)?;
+    Ok(fragment)
+}
+
 // -------------------------------------------------------------------------------------------
 // SD3.5 family (sc-22730, epic 22723 S7)
 // -------------------------------------------------------------------------------------------
@@ -15417,6 +16085,12 @@ fn run(request: &Value) -> Result<Value, String> {
         // this ONE engine provider id; `flux2_arm` resolves which from `(provider, modelId)` and
         // refuses an unknown pair by name.
         FLUX2_KLEIN_PROVIDER => run_flux2(request),
+        // sc-22734: the SenseNova-U1 family. Six catalog models over two registry ids; the arm
+        // resolves which member from `(provider, modelId)` and refuses any other pair by name.
+        // One arm per line: `stale-lane-report.mjs#adapterCapturableProviders` parses these arms
+        // and accepts only a bare literal or a single `&str` const per arm.
+        SENSENOVA_PROVIDER => run_sensenova(request),
+        SENSENOVA_FAST_PROVIDER => run_sensenova(request),
         // sc-22726: the FLUX.1 family. Three registry ids on one arm — the two base text-to-image
         // providers of `mlx-gen-flux`, and `mlx-gen-pulid`'s identity route over the same
         // FLUX.1-dev backbone. The arm resolves which member from `(provider, mode)`.
@@ -21617,5 +22291,307 @@ mod minimax_tests {
             ),
             (3, 1, 2)
         );
+    }
+}
+
+/// sc-22734 — the SenseNova-U1 family arm: six catalog models over the `sensenova_u1_8b` and
+/// `sensenova_u1_8b_fast` registry ids.
+///
+/// Everything here is env-free and weights-free, which is the point: the arm's plan binding
+/// (member resolution, tier, root suffix, load composition, request shape) is decided before a
+/// single weight file is opened, so it can be proven on a CPU-only host. The measured render
+/// belongs to the terminal capture campaign.
+#[cfg(test)]
+mod sensenova_tests {
+    use super::*;
+
+    fn sensenova_planned(provider: &str, model_id: &str, tier: &str) -> Value {
+        json!({
+            "planned": {
+                "target": {
+                    "provider": provider,
+                    "modelId": model_id,
+                    "tier": tier,
+                    "mode": "text_to_image",
+                    "overlay": "none",
+                    "geometry": { "width": 1024, "height": 1024, "batch": 1, "frames": 1 }
+                },
+                "backend": "mlx",
+                "loadShape": "eager_materialization",
+                "strategy": { "rung": "resident", "engagedRungs": ["resident"], "parameters": {} },
+                "calibrationFingerprint": "unused",
+                "fixture": "unused"
+            }
+        })
+    }
+
+    /// The member is resolved from the PAIR, and every per-member field is unique across the
+    /// family — two members sharing an env family, a repository or a slug would let one member's
+    /// capture be recorded as another's.
+    #[test]
+    fn sensenova_arm_is_resolved_from_the_plans_provider_and_model_id() {
+        for arm in SENSENOVA_FAMILY {
+            let resolved =
+                sensenova_arm(&sensenova_planned(arm.provider, arm.model_id, "q4")).unwrap();
+            assert_eq!(resolved, arm);
+        }
+        for field in [
+            SENSENOVA_FAMILY.map(|arm| arm.model_id).to_vec(),
+            SENSENOVA_FAMILY.map(|arm| arm.slug).to_vec(),
+            SENSENOVA_FAMILY.map(|arm| arm.repository_env).to_vec(),
+            SENSENOVA_FAMILY.map(|arm| arm.revision_env).to_vec(),
+            SENSENOVA_FAMILY.map(|arm| arm.root_env).to_vec(),
+            SENSENOVA_FAMILY.map(|arm| arm.expected_repository).to_vec(),
+            SENSENOVA_FAMILY.map(|arm| arm.execution_path).to_vec(),
+            SENSENOVA_FAMILY.map(|arm| arm.still_calibration).to_vec(),
+        ] {
+            let mut unique = field.clone();
+            unique.sort_unstable();
+            unique.dedup();
+            assert_eq!(unique.len(), field.len(), "collision in {field:?}");
+        }
+        // A model id no member serves is refused BY NAME, never measured as its neighbour.
+        for absent in ["sensenova_u1_8b_infographic_v4", "z_image", "qwen_image"] {
+            let error = sensenova_arm(&sensenova_planned(SENSENOVA_PROVIDER, absent, "q4"))
+                .expect_err("an unserved model id must be refused");
+            assert!(error.contains(&format!("modelId {absent:?}")), "{error}");
+        }
+        // And so is a pair that crosses the quality/fast split: the distilled trio is a separate
+        // engine over separate weights, not a mode of the quality one.
+        let crossed = sensenova_arm(&sensenova_planned(
+            SENSENOVA_FAST_PROVIDER,
+            "sensenova_u1_8b",
+            "q4",
+        ))
+        .expect_err("a crossed (provider, modelId) pair must be refused");
+        assert!(crossed.contains("sensenova_u1_8b"), "{crossed}");
+        assert!(crossed.contains(SENSENOVA_FAST_PROVIDER), "{crossed}");
+    }
+
+    /// The spec is the shape the WORKER loads: resident, eagerly materialized, the resolved route
+    /// bound, and the tier's own quant (none at bf16).
+    #[test]
+    fn sensenova_load_spec_binds_the_worker_shape_and_the_planned_tier() {
+        let revision = "0123456789abcdef0123456789abcdef01234567";
+        for arm in SENSENOVA_FAMILY {
+            for (tier, expected) in [
+                ("bf16", None),
+                ("q4", Some(Quant::Q4)),
+                ("q8", Some(Quant::Q8)),
+            ] {
+                let repository = arm.expected_repository;
+                let root = PathBuf::from(format!(
+                    "/cache/models--{}/snapshots/{revision}/{tier}",
+                    repository.replace('/', "--")
+                ));
+                let spec =
+                    sensenova_load_spec_at(arm, repository, revision, root.clone(), tier).unwrap();
+                assert_eq!(spec.offload_policy, OffloadPolicy::Resident, "{repository}");
+                assert_eq!(
+                    spec.load_shape,
+                    LoadShape::EagerMaterialization,
+                    "{repository}"
+                );
+                assert_eq!(spec.quantize, expected, "{repository}:{tier}");
+                assert_eq!(spec.resolved_route.as_deref(), Some(arm.model_id));
+                assert!(matches!(&spec.weights, WeightsSource::Dir(dir) if dir == &root));
+                assert!(spec.adapters.is_empty(), "SenseNova attaches no adapters");
+                assert!(spec.components.is_empty(), "the distill LoRA is pre-merged");
+                assert!(
+                    spec.text_encoder.is_none(),
+                    "the MoT backbone has no external TE"
+                );
+            }
+            // A root at another tier cannot satisfy this plan, and neither can another repository.
+            let root = PathBuf::from(format!(
+                "/cache/models--{}/snapshots/{revision}/q4",
+                arm.expected_repository.replace('/', "--")
+            ));
+            assert!(
+                sensenova_load_spec_at(arm, arm.expected_repository, revision, root.clone(), "q8")
+                    .is_err(),
+                "a q4 root must not satisfy a q8 plan"
+            );
+            assert!(
+                sensenova_load_spec_at(arm, "sensenova/SenseNova-U1-8B-MoT", revision, root, "q4")
+                    .is_err(),
+                "the upstream snapshot must not satisfy the tiered rehost plan"
+            );
+        }
+    }
+
+    /// Every SenseNova cell the committed plan declares resolves to an implemented member, and its
+    /// fixture satisfies the same binding a capture would apply. The expected set is DERIVED from
+    /// the family and the shipped tiers, never a count.
+    #[test]
+    fn every_planned_sensenova_mlx_cell_resolves_to_an_implemented_member() {
+        let plan: Value = serde_json::from_str(include_str!(
+            "../../../../config/memory-calibration-plan.json"
+        ))
+        .expect("the anchor plan parses");
+        let mut seen = std::collections::BTreeSet::new();
+        for (key, entry) in plan["anchors"].as_object().expect("anchors object") {
+            let provider = entry["provider"].as_str().unwrap();
+            if !key.ends_with(":mlx")
+                || !matches!(provider, SENSENOVA_PROVIDER | SENSENOVA_FAST_PROVIDER)
+            {
+                continue;
+            }
+            seen.insert(key.clone());
+            let model_id = key.split(':').next().unwrap();
+            let tier = key.split(':').nth(1).unwrap();
+            let request = json!({ "planned": {
+                "target": {
+                    "provider": provider,
+                    "modelId": model_id,
+                    "tier": tier,
+                    "mode": entry["mode"].clone(),
+                    "overlay": entry["overlay"].clone(),
+                    "geometry": entry["geometry"].clone(),
+                },
+                "loadShape": entry["loadShape"].clone(),
+                "fixture": entry["fixture"].clone(),
+            }});
+            let arm = sensenova_arm(&request).unwrap_or_else(|error| panic!("{key}: {error}"));
+            validate_sensenova_fixture(&request, arm, tier)
+                .unwrap_or_else(|error| panic!("{key}: {error}"));
+            assert_eq!(
+                planned_load_shape(&request).unwrap(),
+                LoadShape::EagerMaterialization,
+                "{key}: the worker loads this family eagerly; deferred is the rung-4 shape"
+            );
+        }
+        let expected: std::collections::BTreeSet<String> = SENSENOVA_FAMILY
+            .iter()
+            .flat_map(|arm| {
+                ["bf16", "q4", "q8"]
+                    .iter()
+                    .map(move |tier| format!("{}:{tier}:mlx", arm.model_id))
+            })
+            .collect();
+        assert_eq!(
+            seen, expected,
+            "every shipped SenseNova MLX cell, exactly once"
+        );
+    }
+
+    /// Every SenseNova MLX plan row names the production identity its loaded generator publishes.
+    /// The two measured keys are the engine's own constants byte-for-byte, no row names the
+    /// weights-free conformance namespace, and every cell's identity is distinct — a shared string
+    /// would let one cell's anchor bind another's measured evidence.
+    #[test]
+    fn every_planned_sensenova_mlx_cell_names_the_identity_its_loaded_generator_publishes() {
+        let plan: Value = serde_json::from_str(include_str!(
+            "../../../../config/memory-calibration-plan.json"
+        ))
+        .expect("the anchor plan parses");
+        let mut identities = std::collections::BTreeMap::new();
+        for (key, entry) in plan["anchors"].as_object().expect("anchors object") {
+            let provider = entry["provider"].as_str().unwrap();
+            if !key.ends_with(":mlx")
+                || !matches!(provider, SENSENOVA_PROVIDER | SENSENOVA_FAST_PROVIDER)
+            {
+                continue;
+            }
+            let model_id = key.split(':').next().unwrap();
+            let tier = key.split(':').nth(1).unwrap();
+            let arm = sensenova_arm(&sensenova_planned(provider, model_id, tier)).unwrap();
+            let planned = entry["calibrationFingerprint"]
+                .as_str()
+                .unwrap_or_else(|| panic!("{key}: calibrationFingerprint must be a string"));
+            assert!(
+                !planned.starts_with("sensenova-static-registry-behavior"),
+                "{key}: {planned} is the weights-free registry-behaviour identity, which no \
+                 production load returns"
+            );
+            assert_eq!(
+                planned,
+                sensenova_calibration_fingerprint(arm, tier),
+                "{key}: the plan row must name the loaded generator's production identity"
+            );
+            assert!(
+                identities.insert(planned.to_owned(), key.clone()).is_none(),
+                "{key}: {planned} is already claimed by {}",
+                identities[planned]
+            );
+        }
+        assert_eq!(
+            identities.len(),
+            SENSENOVA_FAMILY.len() * 3,
+            "one distinct identity per (route, shipped tier)"
+        );
+        // The preserved measured keys, bound to the engine's constants so the table cannot drift.
+        assert_eq!(
+            identities[runtime_macos::providers::sensenova::memory_strategy::
+                QUALITY_CALIBRATION_FINGERPRINT],
+            "sensenova_u1_8b:q8:mlx"
+        );
+        assert_eq!(
+            identities
+                [runtime_macos::providers::sensenova::memory_strategy::FAST_CALIBRATION_FINGERPRINT],
+            "sensenova_u1_8b_fast:q8:mlx"
+        );
+    }
+
+    /// The anchor is the RESIDENT rung under the eager load shape. The pinned contract classifies
+    /// `StagedResidency` and `BoundedDecode` structurally not applicable on this family, and rung 4
+    /// keys off the deferred load shape, so neither is a capturable anchor here — both are refused
+    /// before any weights are opened.
+    #[test]
+    fn sensenova_refuses_a_non_resident_rung_and_a_deferred_load_shape() {
+        let mut deferred = sensenova_planned(SENSENOVA_PROVIDER, "sensenova_u1_8b", "q8");
+        deferred["planned"]["loadShape"] = json!("deferred_materialization");
+        let error = run_sensenova(&deferred).expect_err("the deferred shape is not the anchor's");
+        assert!(error.contains("eager_materialization"), "{error}");
+
+        let mut staged = sensenova_planned(SENSENOVA_PROVIDER, "sensenova_u1_8b", "q8");
+        staged["planned"]["strategy"] = json!({
+            "rung": "staged_residency",
+            "engagedRungs": ["resident", "staged_residency"],
+            "parameters": {}
+        });
+        let error = run_sensenova(&staged).expect_err("staged residency is structurally N/A here");
+        assert!(error.contains("StructurallyNotApplicable"), "{error}");
+    }
+
+    /// The fixture is bound to the member, the tier and the geometry edge.
+    #[test]
+    fn sensenova_fixture_is_bound_to_the_member_tier_and_edge() {
+        let request = sensenova_planned(SENSENOVA_PROVIDER, "sensenova_u1_8b", "q4");
+        let bind = |fixture: &str, arm, tier| {
+            validate_sensenova_fixture(
+                &json!({ "planned": {
+                    "fixture": fixture,
+                    "target": request["planned"]["target"].clone(),
+                }}),
+                arm,
+                tier,
+            )
+        };
+        assert!(bind(
+            "quality-mlx-q4-1024-seed22734-step2",
+            SENSENOVA_BASE_ARM,
+            "q4"
+        )
+        .is_ok());
+        for (fixture, expected) in [
+            // another member's stem
+            (
+                "infographic-v2-mlx-q4-1024-seed22734-step2",
+                "must start with",
+            ),
+            // another tier
+            ("quality-mlx-q8-1024-seed22734-step2", "must start with"),
+            // another edge
+            ("quality-mlx-q4-768-seed22734-step2", "must start with"),
+            // another seed
+            ("quality-mlx-q4-1024-seed1-step2", "does not match"),
+            // another step count
+            ("quality-mlx-q4-1024-seed22734-step4", "two-step"),
+        ] {
+            let error = bind(fixture, SENSENOVA_BASE_ARM, "q4")
+                .expect_err("the fixture must be bound to its cell");
+            assert!(error.contains(expected), "{fixture}: {error}");
+        }
     }
 }

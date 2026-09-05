@@ -902,6 +902,28 @@ pub struct MemoryAnchor {
     /// packaged row is `None`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub component_bytes: Option<ComponentBytes>,
+    /// The provider contract classifies `staged_residency` STRUCTURALLY NOT APPLICABLE on this
+    /// anchor's lane (sc-22734), so the cell has no staged composition to be measured in.
+    ///
+    /// This is an architecture fact about the engine, not a property of the render: SenseNova-U1 is
+    /// one fused dual-path checkpoint whose conditioning and denoise weights are interleaved in
+    /// every resident layer, so there is no separable conditioning component to release and no
+    /// phase boundary to stage at. The extractor writes it from the model's own manifest
+    /// (`<lane>.memoryStrategyStructuralExemptions.staged_residency`, whose `evidence[].source`
+    /// names the engine's `memory_strategy.rs`), never as a blanket switch.
+    ///
+    /// [`MemoryAnchor::derive_image_phase_peaks`] reads it to admit the ONE composition such a cell
+    /// can be captured in. Its ordinary refusal of a resident candle anchor rests on the staged
+    /// anchor being the SHALLOWER of two real compositions — a resident render additionally holds
+    /// the text encoder through denoise and decode, which the staged intercepts do not price. Where
+    /// staging is structurally impossible that asymmetry does not exist: resident IS the shallowest
+    /// composition, there is no co-resident encoder above it, and the law prices it exactly as the
+    /// MLX lane already prices its resident anchors.
+    ///
+    /// `#[serde(default)]` + `skip_serializing_if`: every packaged row predates this field, stays
+    /// byte-identical, and keeps the old behaviour (`false` → the staged-only guard, unchanged).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub staged_residency_structurally_not_applicable: bool,
 }
 
 /// Store-key spelling of the LTX-2.5 transformer variant, matching the retained evidence.
@@ -2282,6 +2304,14 @@ impl MemoryAnchor {
     /// parameters and no facts the law prices every composition containing the anchor's at the
     /// shallow staged working set, which upper-bounds the deeper rungs. An anchor carrying
     /// [`MemoryAnchor::underived_reason`] is refused, as before.
+    ///
+    /// sc-22734 adds the one cell shape that asymmetry does not describe: a provider whose contract
+    /// classifies `staged_residency` STRUCTURALLY NOT APPLICABLE has no staged composition at all,
+    /// so its anchor is resident and prices a resident candidate. See
+    /// [`MemoryAnchor::staged_residency_structurally_not_applicable`] for why that is sound rather
+    /// than the refused resident case. The two shapes are mutually exclusive and a row that mixes
+    /// them (staged anchor on an exempt cell, resident anchor on a non-exempt one) is still
+    /// refused, so no packaged row's disposition moves.
     pub fn derive_image_phase_peaks(
         &self,
         request: AnchorImageDeriveRequest,
@@ -2290,16 +2320,42 @@ impl MemoryAnchor {
         if self.underived_reason.is_some() || self.backend != AnchorBackend::Candle {
             return None;
         }
-        if !self.measured_regime.staged
-            || self.measured_regime.decode_tiled
+        if self.measured_regime.decode_tiled
             || self.measured_regime.attention_chunked
             || self.measured_regime.transformer_windowed
-            || !request.staged_residency
         {
             return None;
         }
+        // Two admissible shapes, and a cell is only ever one of them
+        // ([`MemoryAnchor::staged_residency_structurally_not_applicable`]).
+        let regime = match (
+            self.measured_regime.staged,
+            self.staged_residency_structurally_not_applicable,
+        ) {
+            // The ordinary cell: a staged anchor prices a staged candidate.
+            (true, false) => {
+                if !request.staged_residency {
+                    return None;
+                }
+                RequestRegime::staged()
+            }
+            // sc-22734: a cell whose engine has NO staged composition. Its anchor is the resident
+            // render — the only one that exists — and it prices a resident candidate. There is no
+            // co-resident encoder above it to go unpriced, which is the whole reason the staged
+            // asymmetry exists, so the law prices it the way the MLX lane prices its residents.
+            (false, true) => {
+                if request.staged_residency {
+                    return None;
+                }
+                RequestRegime::resident()
+            }
+            // A staged anchor on a cell that declares staging impossible, or a resident anchor on a
+            // cell that has a staged composition it should have been captured in: both are records
+            // the law cannot honestly price, so both stay refused.
+            _ => return None,
+        };
         self.derive_phase_peaks(
-            &ImageDeriveRequest::new(request.width, request.height, RequestRegime::staged()),
+            &ImageDeriveRequest::new(request.width, request.height, regime),
             components,
             ArchitectureFacts::default(),
         )
@@ -4180,6 +4236,9 @@ mod tests {
             overall_allocator_envelope_bytes: measured["overallDevicePeakDelta"],
             underived_reason: None,
             component_bytes: None,
+            // The retained corpus this fixture replays predates the structural-exemption fact and
+            // carries no structurally-exempt cell, so every replayed row keeps the staged-only law.
+            staged_residency_structurally_not_applicable: false,
         }
     }
 
@@ -5147,6 +5206,139 @@ mod tests {
         );
     }
 
+    /// sc-22734. A candle cell whose provider contract classifies `staged_residency`
+    /// STRUCTURALLY NOT APPLICABLE has no staged composition to have been captured in, so its
+    /// anchor is the RESIDENT render and the entry point prices it. The two shapes are mutually
+    /// exclusive, so no packaged row's disposition moves: the flag defaults to `false` and every
+    /// existing anchor keeps the staged-only guard exactly.
+    #[test]
+    fn a_structurally_staging_free_candle_cell_is_priced_from_its_resident_anchor() {
+        let staged_anchor = krea_candle_anchor();
+        // The exempt cell's anchor is a RESIDENT render, so the fixture must be one: the
+        // re-captured z_image_turbo q4 row is the packaged anchor whose every phase level carries
+        // the whole resident set (`the_recaptured_z_image_mlx_anchor_is_inside_the_laws_domain`),
+        // which is exactly the domain a resident derivation needs. Re-labelled onto the candle
+        // lane, because no candle capture of a structurally staging-free family exists yet — the
+        // sc-22734 arms are what will produce the first one.
+        let resident_capture = |exempt: bool| {
+            let mut anchor = store()
+                .image_anchor_for("z_image_turbo", AnchorBackend::Mlx, "q4")
+                .expect("the z_image_turbo q4 MLX anchor is packaged")
+                .clone();
+            anchor.backend = AnchorBackend::Candle;
+            anchor.staged_residency_structurally_not_applicable = exempt;
+            anchor
+        };
+        let components = Z_IMAGE_Q4_MLX_RESIDENT_COMPONENTS;
+        let resident = AnchorImageDeriveRequest {
+            width: 768,
+            height: 768,
+            staged_residency: false,
+        };
+        let staged = AnchorImageDeriveRequest {
+            staged_residency: true,
+            ..resident
+        };
+
+        // The flag defaults off, so the packaged shape is untouched: staged anchor + staged
+        // request prices, resident request does not.
+        assert!(!staged_anchor.staged_residency_structurally_not_applicable);
+        let krea = AnchorImageDeriveRequest {
+            width: 1024,
+            height: 1024,
+            staged_residency: true,
+        };
+        assert!(staged_anchor
+            .derive_image_phase_peaks(krea, KREA_Q4_COMPONENTS)
+            .is_some());
+        assert!(staged_anchor
+            .derive_image_phase_peaks(
+                AnchorImageDeriveRequest {
+                    staged_residency: false,
+                    ..krea
+                },
+                KREA_Q4_COMPONENTS,
+            )
+            .is_none());
+
+        // The exempt cell: a resident anchor, which the law otherwise refuses outright.
+        let exempt = resident_capture(true);
+        assert!(!exempt.measured_regime.staged);
+        let derived = exempt
+            .derive_image_phase_peaks(resident, components)
+            .expect("a staging-free cell prices from its resident anchor");
+        assert_eq!(
+            derived,
+            AnchorDerivedPhases {
+                conditioning: exempt.phase_active_peak_bytes.conditioning,
+                denoise: exempt.phase_active_peak_bytes.denoise,
+                decode: exempt.phase_active_peak_bytes.decode,
+            },
+            "at the anchor's own geometry the resident derivation is the anchor"
+        );
+        // ...and it answers ONLY the resident candidate. A staged candidate on a cell with no
+        // staged composition is not a request this engine can be asked to honour.
+        assert!(exempt
+            .derive_image_phase_peaks(staged, components)
+            .is_none());
+
+        // The two mixed shapes stay refused, so the flag can never launder a record the law
+        // cannot honestly price: a STAGED anchor on an exempt cell, and a RESIDENT anchor on a
+        // cell that has a staged composition it should have been captured in.
+        let mut staged_on_exempt = resident_capture(true);
+        staged_on_exempt.measured_regime.staged = true;
+        for request in [staged, resident] {
+            assert!(staged_on_exempt
+                .derive_image_phase_peaks(request, components)
+                .is_none());
+        }
+        let resident_on_ordinary = resident_capture(false);
+        assert!(!resident_on_ordinary.measured_regime.staged);
+        for request in [staged, resident] {
+            assert!(resident_on_ordinary
+                .derive_image_phase_peaks(request, components)
+                .is_none());
+        }
+
+        // Every deeper rung is still refused on the exempt lane, and so is an underived row.
+        for deeper in ["decode_tiled", "attention_chunked", "transformer_windowed"] {
+            let mut anchor = exempt.clone();
+            match deeper {
+                "decode_tiled" => anchor.measured_regime.decode_tiled = true,
+                "attention_chunked" => anchor.measured_regime.attention_chunked = true,
+                _ => anchor.measured_regime.transformer_windowed = true,
+            }
+            assert!(
+                anchor
+                    .derive_image_phase_peaks(resident, components)
+                    .is_none(),
+                "{deeper} is deeper than the law prices, exemption or not"
+            );
+        }
+        let mut underived = exempt.clone();
+        underived.underived_reason = Some("measured_envelope".to_owned());
+        assert!(underived
+            .derive_image_phase_peaks(resident, components)
+            .is_none());
+
+        // The flag rides the store round trip, and is absent from a row that does not set it.
+        let json = serde_json::to_string(&exempt).expect("serialize");
+        assert!(json.contains("\"stagedResidencyStructurallyNotApplicable\":true"));
+        assert_eq!(
+            serde_json::from_str::<MemoryAnchor>(&json).expect("round trip"),
+            exempt.clone()
+        );
+        let packaged = serde_json::to_string(&staged_anchor).expect("serialize");
+        assert!(
+            !packaged.contains("stagedResidencyStructurallyNotApplicable"),
+            "a row that does not set it stays byte-identical to the packaged shape"
+        );
+        assert_eq!(
+            serde_json::from_str::<MemoryAnchor>(&packaged).expect("round trip"),
+            staged_anchor.clone()
+        );
+    }
+
     /// The candle lane's entry point is the same law: at the anchor's geometry the staged
     /// derivation equals the anchor, and it keeps the shallow-anchor guards its consumers were
     /// written against — a resident request, a deeper-measured anchor, another lane, an
@@ -5862,6 +6054,7 @@ mod tests {
                     .to_owned(),
             ),
             component_bytes: None,
+            staged_residency_structurally_not_applicable: false,
         }
     }
 

@@ -3948,6 +3948,7 @@ fn wan_i2v_candle_anchor_store() -> sceneworks_core::memory_anchor::MemoryAnchor
             overall_allocator_envelope_bytes: 62 * GIB,
             underived_reason: Some("axis-free (sc-22736)".to_owned()),
             component_bytes: None,
+            staged_residency_structurally_not_applicable: false,
         }],
         analytic_only: Vec::new(),
         component_deltas: Vec::new(),

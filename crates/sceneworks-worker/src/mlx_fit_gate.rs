@@ -18515,7 +18515,33 @@ mod tests {
         // into a unified MoT (`footprint` te=0) — no separable text encoder to drop, so residency buys
         // nothing and Sequential would be a no-op that OOMs. This proves the query reads the descriptor
         // BIT, not mere registry membership.
-        assert!(!engine_supports_sequential("sensenova_u1_8b"));
+        //
+        // BOTH SenseNova engine ids, and REGISTRATION IS ASSERTED FIRST (sc-22734 review):
+        // `engine_supports_sequential` is `is_some_and`, so it answers `false` for an id that is not
+        // in the registry at all. Asserting only the `false` would therefore stay green if the
+        // provider were renamed, dropped from the pinned bundle, or misspelled here — the exact
+        // failure this case claims to rule out. Look the descriptor up by name, prove BOTH bits are
+        // clear on it, and only then ask the predicate.
+        //
+        // The 8-step distill (`sensenova_u1_8b_fast`) is a separate registration with the same fused
+        // MoT encoder, so it must answer the same way; the adapter's Candle spec builder cites this
+        // fact for BOTH ids to justify `OffloadPolicy::Resident`.
+        for id in ["sensenova_u1_8b", "sensenova_u1_8b_fast"] {
+            let capabilities = crate::inference_runtime::media()
+                .generators()
+                .find(|reg| (reg.descriptor)().id == id)
+                .map(|reg| (reg.descriptor)().capabilities)
+                .unwrap_or_else(|| panic!("{id} is registered in the pinned bundle"));
+            assert!(
+                !capabilities.supports_sequential_offload,
+                "{id}: the fused MoT exposes no separable text encoder to offload"
+            );
+            assert!(
+                !capabilities.unconditionally_engages_staged_residency,
+                "{id}: nor does it stage unconditionally — neither bit of the disjunction is set"
+            );
+            assert!(!engine_supports_sequential(id));
+        }
 
         // sc-19721: WHICH engines reach `true` through the second bit rather than the first, pinned
         // as a set so the disjunction cannot quietly widen. Every one of these declares

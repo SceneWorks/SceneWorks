@@ -1082,6 +1082,52 @@ test("LTX-2.5 evidence identity requires and hashes transformer and decoder axes
 // packages/memory-anchor-plan.schema.json, not a review convention, so it is asserted against the
 // schema itself and against the checked-in plan the capture commands read.
 // -----------------------------------------------------------------------------------------------
+// sc-22734. The per-anchor `strategy` override: a plan row may name its own single composition,
+// for a provider whose contract classifies the lane default as StructurallyNotApplicable (SenseNova
+// on candle). It stays a single composition — a rung GRID is still unwritable — and a row without
+// one still takes `ANCHOR_STRATEGY[backend]`.
+test("a plan row's strategy override replaces the lane default, and is still one composition", () => {
+  const key = "fixture_model:q4:candle";
+  const defaulted = planAnchor(anchorPlanFixture(key), key);
+  assert.deepEqual(defaulted.strategy, {
+    rung: ANCHOR_STRATEGY.candle.rung,
+    engagedRungs: [...ANCHOR_STRATEGY.candle.engagedRungs],
+    parameters: {},
+  });
+
+  const override = { rung: "resident", engagedRungs: ["resident"] };
+  const overridden = anchorPlanFixture(key, { strategy: override });
+  assert.equal(validatePlan(overridden), overridden);
+  assert.deepEqual(planAnchor(overridden, key).strategy, { ...override, parameters: {} });
+  // …and the override changes the case identity, so an overridden capture can never be mistaken
+  // for a default-composition one.
+  assert.notEqual(planAnchor(overridden, key).logicalCaseId, defaulted.logicalCaseId);
+
+  // The MLX row of the same shape is unchanged by an override that names the lane default.
+  const mlxKey = "fixture_model:q4:mlx";
+  assert.deepEqual(
+    planAnchor(anchorPlanFixture(mlxKey, { strategy: override }), mlxKey).strategy,
+    planAnchor(anchorPlanFixture(mlxKey), mlxKey).strategy,
+  );
+
+  // A grid, an unknown rung, a missing member and a stray parameter block are all unwritable.
+  for (const strategy of [
+    { rung: "resident" },
+    { engagedRungs: ["resident"] },
+    { rung: "sequential", engagedRungs: ["resident"] },
+    { rung: "resident", engagedRungs: ["resident", "resident"] },
+    { rung: "resident", engagedRungs: [] },
+    { rung: ["resident", "staged_residency"], engagedRungs: ["resident"] },
+    { rung: "resident", engagedRungs: ["resident"], parameters: { decodeTileEdge: 512 } },
+  ]) {
+    assert.throws(
+      () => validatePlan(anchorPlanFixture(key, { strategy })),
+      /anchor plan is invalid/,
+      JSON.stringify(strategy),
+    );
+  }
+});
+
 test("the anchor plan schema cannot express a duplicate cell or any sweep", async () => {
   const plan = JSON.parse(await readFile(new URL("../config/memory-calibration-plan.json", import.meta.url)));
   assert.equal(validatePlan(plan), plan);
@@ -1173,15 +1219,20 @@ test("the anchor plan schema cannot express a duplicate cell or any sweep", asyn
   assert.throws(() => validatePlan(batched), /anchor plan is invalid/);
 });
 
-// sc-22736: the ONE per-anchor composition freedom — `rung: "resident"` on a candle VIDEO cell whose
-// provider implements no staged residency (Candle SCAIL-2) — and its boundaries. Mutations this
-// kills: `planAnchor` ignoring `anchor.rung` (the SCAIL-2 candle rows would plan `staged_residency`
-// again and fail `validate_selection` on every attempt); deriving `engagedRungs` from the lane
-// default instead of the rung; dropping the still refusal in `validatePlan`; widening the schema
-// enum to a bounded rung.
-test("a candle VIDEO anchor may plan the resident composition, a still may not, and nothing deeper is expressible", async () => {
+// sc-22736: the three Candle SCAIL-2 rows ride sc-22734's single-composition `strategy` override —
+// the provider implements `Resident` alone, so the candle default `staged_residency` would fail
+// `contract.validate_selection` on every attempt — and `planAnchor` is what sends that override to
+// the adapter. Mutations this kills: `planAnchor` reading the lane default instead of
+// `anchor.strategy` (the SCAIL-2 candle rows plan `staged_residency` again); the plan losing the
+// override on any of the three rows. The rule for WHEN a row may override lives in
+// scripts/measure-memory-catalog.test.mjs (manifest exemption or capability-dump evidence) and
+// crates/sceneworks-worker/src/inference_runtime.rs (the contract itself, on both lanes).
+test("the candle SCAIL-2 rows plan the resident composition through the strategy override", async () => {
   const video = { geometry: { width: 832, height: 480, batch: 1, frames: 77 }, mode: "animation" };
-  const resident = anchorPlanFixture("fixture_model:q4:candle", { ...video, rung: "resident" });
+  const resident = anchorPlanFixture("fixture_model:q4:candle", {
+    ...video,
+    strategy: { rung: "resident", engagedRungs: ["resident"] },
+  });
   assert.equal(validatePlan(resident), resident);
   assert.deepEqual(planAnchor(resident, "fixture_model:q4:candle").strategy, {
     rung: "resident",
@@ -1189,44 +1240,26 @@ test("a candle VIDEO anchor may plan the resident composition, a still may not, 
     parameters: {},
   });
   // The lane default still applies when the row states nothing.
-  const defaulted = anchorPlanFixture("fixture_model:q4:candle", video);
-  assert.deepEqual(planAnchor(defaulted, "fixture_model:q4:candle").strategy, {
+  assert.deepEqual(planAnchor(anchorPlanFixture("fixture_model:q4:candle", video), "fixture_model:q4:candle").strategy, {
     rung: ANCHOR_STRATEGY.candle.rung,
     engagedRungs: [...ANCHOR_STRATEGY.candle.engagedRungs],
     parameters: {},
   });
-  // Stating the lane default explicitly is the same plan.
-  const explicit = anchorPlanFixture("fixture_model:q4:candle", { ...video, rung: "staged_residency" });
-  assert.deepEqual(
-    planAnchor(explicit, "fixture_model:q4:candle").strategy,
-    planAnchor(defaulted, "fixture_model:q4:candle").strategy,
-  );
-  // A candle STILL may not plan resident: the candle image law prices only the staged composition.
-  assert.throws(
-    () => validatePlan(anchorPlanFixture("fixture_model:q4:candle", { rung: "resident" })),
-    /candle STILL anchor must engage staged_residency/,
-  );
-  // An MLX still may (its law accepts every composition), and it is the MLX default anyway.
-  const mlxStill = anchorPlanFixture("fixture_model:q4:mlx", { rung: "resident" });
-  assert.equal(planAnchor(mlxStill, "fixture_model:q4:mlx").strategy.rung, "resident");
-  // No bounded rung is expressible, on either lane, still or video.
-  for (const rung of ["bounded_decode", "bounded_attention", "bounded_transformer_residency", "none"]) {
-    assert.throws(
-      () => validatePlan(anchorPlanFixture("fixture_model:q4:candle", { ...video, rung })),
-      /anchor plan is invalid/,
-      rung,
-    );
-  }
-  // The shipped plan: every candle SCAIL-2 cell plans resident, and it is the ONLY candle cell
-  // that does — a second resident candle row would need its own contract-level reason.
+  // The shipped plan: every candle SCAIL-2 cell plans resident, engaged set resident alone — and so
+  // does every candle LTX-2.5 cell, whose contract likewise implements no `staged_residency`
+  // (`memory_strategy_2_5.rs` `strategies`), a defect of the same class the capability-dump rule
+  // in scripts/measure-memory-catalog.test.mjs surfaced on sc-22725's rows.
   const plan = JSON.parse(await readFile(new URL("../config/memory-calibration-plan.json", import.meta.url)));
-  const residentCandle = Object.keys(plan.anchors)
-    .filter((key) => key.endsWith(":candle") && plan.anchors[key].rung === "resident")
-    .sort();
-  assert.deepEqual(residentCandle, ["scail2_14b:bf16:candle", "scail2_14b:q4:candle", "scail2_14b:q8:candle"]);
-  for (const key of residentCandle) {
-    assert.deepEqual(planAnchor(plan, key).strategy.engagedRungs, ["resident"], key);
+  for (const key of ["bf16", "q4", "q8"].flatMap((tier) => [`scail2_14b:${tier}:candle`, `ltx_2_5:${tier}:candle`])) {
+    assert.deepEqual(plan.anchors[key].strategy, { rung: "resident", engagedRungs: ["resident"] }, key);
+    assert.deepEqual(planAnchor(plan, key).strategy, { rung: "resident", engagedRungs: ["resident"], parameters: {} }, key);
   }
+  // …and no other candle row overrides on contract grounds today: SenseNova's six ride the manifest exemption.
+  const residentCandle = Object.keys(plan.anchors).filter((key) => key.endsWith(":candle") && plan.anchors[key].strategy?.rung === "resident").sort();
+  assert.deepEqual(residentCandle.filter((key) => !key.startsWith("sensenova_u1_8b")), [
+    "ltx_2_5:bf16:candle", "ltx_2_5:q4:candle", "ltx_2_5:q8:candle",
+    "scail2_14b:bf16:candle", "scail2_14b:q4:candle", "scail2_14b:q8:candle",
+  ]);
 });
 
 // sc-22514 / epic acceptance test 1, second half: ONE command captures ONE anchor and writes ONE

@@ -69,6 +69,16 @@ export const QWEN_EDIT_LIGHTNING_LORA = Object.freeze({
 });
 
 /**
+ * The converter-written marker every SenseNova `_fast` rehost tier subdir carries (sc-22734). Both
+ * engines read it by this exact name (`DISTILL_MERGED_MARKER` in `mlx-gen-sensenova` and
+ * `candle-gen-sensenova`), and both WITHHOLD the production calibration identity when it is absent —
+ * so a `_fast` tier root without it is not a capturable cell, it is a cell whose capture would fail
+ * on an identity mismatch after the load. Declared as `requiredTierFiles` on the three `_fast`
+ * family rows so `classifyAnchor` refuses it by name.
+ */
+export const SENSENOVA_DISTILL_MERGED_MARKER = "distill_merged.json";
+
+/**
  * The shared Mage-Flow text-encoder + VAE rehost (sc-22733). Declared once and referenced by all six
  * Mage family rows: it is the SAME repository and the SAME revision for every variant and both
  * lanes, and both adapters read it through one `SCENEWORKS_MAGE_FLOW_COMPONENTS_*` family. The
@@ -101,6 +111,10 @@ export const MAGE_COMPONENT_IDS = Object.freeze(["text_encoder", "vae"]);
  * `sideArtifact` is a second root a family member needs that the MANIFEST does not ship — today only
  * the Qwen edit Lightning distill LoRA, which the worker fetches lazily at a pinned revision. It is
  * keyed by model id because it belongs to one member of a shared-provider family, not to the family.
+ *
+ * Rows are keyed by PROVIDER by default; sc-22734 adds MODEL-keyed rows (which must declare their
+ * `provider`) for the case where several catalog models ride one engine id but ship their own
+ * independently pinned artifacts. See `familyFor`.
  */
 export const PROVIDER_FAMILIES = Object.freeze({
   qwen_image: { env: "QWEN_IMAGE", repo: "SceneWorks/qwen-image-mlx", arms: ["mlx", "candle"], physical: true },
@@ -275,7 +289,60 @@ export const PROVIDER_FAMILIES = Object.freeze({
   // `platforms: ["macos", "windows", "linux"]`, and BOTH engine lanes open that same per-tier
   // turnkey — which is exactly why the two lanes' calibration identities carry a backend token.
   scail2_14b: { env: "SCAIL2", repo: "SceneWorks/scail2-mlx", arms: ["mlx", "candle"] },
+  // sc-22734. The SenseNova-U1 FAMILY: six catalog models the worker routes onto TWO engine ids on
+  // both lanes — `sensenova_u1_8b` (the 50-step quality path) and `sensenova_u1_8b_fast` (the
+  // 8-step distill), each carrying a base id and two infographic finetunes.
+  //
+  // These rows are keyed by MODEL id rather than provider id — `familyFor` prefers a model-keyed
+  // row that declares the plan's provider — because the engine id is NOT the artifact identity
+  // here. The six models ship six INDEPENDENTLY PINNED tiered rehosts (six repositories, six
+  // revisions), and both engines mint a per-ROUTE calibration fingerprint, so an infographic anchor
+  // bound to the base SenseNova env family would load base weights and re-label base SenseNova's
+  // peaks as the finetune's. A provider-keyed table cannot express that: it has one repo per engine
+  // id, and `tierDownload` would be asked for a base-repo download the finetune's manifest entry
+  // does not ship.
+  sensenova_u1_8b: {
+    provider: "sensenova_u1_8b", env: "SENSENOVA_U1_8B",
+    repo: "SceneWorks/sensenova-u1-8b-mlx", arms: ["mlx", "candle"],
+  },
+  sensenova_u1_8b_infographic_v2: {
+    provider: "sensenova_u1_8b", env: "SENSENOVA_U1_8B_INFOGRAPHIC_V2",
+    repo: "SceneWorks/sensenova-u1-8b-infographic-v2-mlx", arms: ["mlx", "candle"],
+  },
+  sensenova_u1_8b_infographic_v3: {
+    provider: "sensenova_u1_8b", env: "SENSENOVA_U1_8B_INFOGRAPHIC_V3",
+    repo: "SceneWorks/sensenova-u1-8b-infographic-v3-mlx", arms: ["mlx", "candle"],
+  },
+  sensenova_u1_8b_fast: {
+    requiredTierFiles: [SENSENOVA_DISTILL_MERGED_MARKER],
+    provider: "sensenova_u1_8b_fast", env: "SENSENOVA_U1_8B_FAST",
+    repo: "SceneWorks/sensenova-u1-8b-fast-mlx", arms: ["mlx", "candle"],
+  },
+  sensenova_u1_8b_infographic_v2_fast: {
+    requiredTierFiles: [SENSENOVA_DISTILL_MERGED_MARKER],
+    provider: "sensenova_u1_8b_fast", env: "SENSENOVA_U1_8B_INFOGRAPHIC_V2_FAST",
+    repo: "SceneWorks/sensenova-u1-8b-infographic-v2-fast-mlx", arms: ["mlx", "candle"],
+  },
+  sensenova_u1_8b_infographic_v3_fast: {
+    requiredTierFiles: [SENSENOVA_DISTILL_MERGED_MARKER],
+    provider: "sensenova_u1_8b_fast", env: "SENSENOVA_U1_8B_INFOGRAPHIC_V3_FAST",
+    repo: "SceneWorks/sensenova-u1-8b-infographic-v3-fast-mlx", arms: ["mlx", "candle"],
+  },
 });
+
+/**
+ * The family row that serves one anchor.
+ *
+ * The default key is the PROVIDER, so a catalog alias rides its engine's row (`z_image_edit` on
+ * `z_image_turbo`) and a lane-specific engine id keeps selecting the family (LTX-2.5's two ids).
+ * sc-22734 adds the inverse case: several catalog models on ONE engine id, each with its own
+ * artifact family. A MODEL-keyed row wins for those — but ONLY when it declares the provider it
+ * belongs to and that provider is the one the plan named, so a model-keyed row can never capture
+ * an anchor that some other engine serves.
+ */
+export function familyFor(modelId, provider, families = PROVIDER_FAMILIES) {
+  return providerFamily(provider, modelId, families);
+}
 
 export function fail(message) {
   throw new Error(message);
@@ -287,6 +354,11 @@ export function fail(message) {
  * declares the divergent members under `variants`; everything else is the row itself.
  */
 export function providerFamily(provider, modelId, families = PROVIDER_FAMILIES) {
+  // sc-22734's MODEL-keyed rows win first, but ONLY when the row declares the provider it belongs
+  // to and that provider is the one the plan named — so a model-keyed row can never capture an
+  // anchor some other engine serves.
+  const scoped = families[modelId];
+  if (scoped?.provider !== undefined && scoped.provider === provider) return scoped;
   const family = families[provider];
   if (!family) return undefined;
   const variant = family.variants?.[modelId];
@@ -619,10 +691,32 @@ export async function classifyAnchor(key, planned, { models, backend, hubs, curr
   if (!resolved.root) {
     return { ...row, status: "weights_missing", reason: resolved.reason };
   }
+  const tierRoot = resolved.root;
   row.env[`SCENEWORKS_${artifact.env}_REPOSITORY`] = artifact.repo;
   row.env[`SCENEWORKS_${artifact.env}_REVISION`] = resolved.revision;
-  row.env[`SCENEWORKS_${artifact.env}_ROOT`] = resolved.root;
-  row.tierRoot = resolved.root;
+  row.env[`SCENEWORKS_${artifact.env}_ROOT`] = tierRoot;
+  row.tierRoot = tierRoot;
+  // A converter-written file the ENGINE requires INSIDE the resolved tier root, beyond the weights
+  // the manifest download ships (sc-22734 review). The SenseNova `_fast` rehosts are the live case:
+  // `mlx-gen-sensenova`'s `production_calibration_identity` and `candle-gen-sensenova`'s
+  // `fast_spec_is_the_premerged_turnkey` both WITHHOLD the production identity when a `_fast` tier
+  // root carries no `distill_merged.json`, because without the marker the loader merges the distill
+  // LoRA at load and the resident shape is not the one the anchor prices. Nine `_fast` MLX cells
+  // would therefore hard-fail at capture with an identity mismatch, hours into a booked session,
+  // over a fact this probe can read in a millisecond. Classified by name instead.
+  const requiredTierFiles = artifact.requiredTierFiles ?? family.requiredTierFiles ?? [];
+  const missingTierFiles = [];
+  for (const file of requiredTierFiles) {
+    try {
+      if (!(await stat(path.join(tierRoot, file))).isFile()) missingTierFiles.push(file);
+    } catch { missingTierFiles.push(file); }
+  }
+  if (missingTierFiles.length > 0) {
+    return {
+      ...row, status: "weights_missing",
+      reason: `tier root ${tierRoot} is missing ${missingTierFiles.join(", ")}, which the engine requires before it will publish this cell's calibration identity`,
+    };
+  }
   if (family.bundle) {
     // A pre-staged loose-file bundle rather than an HF snapshot, so it is probed through the
     // operator env the worker itself honours. Absent or incomplete is `weights_missing` — the same

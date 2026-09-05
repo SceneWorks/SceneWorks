@@ -498,6 +498,7 @@ pub(crate) fn every_planned_lane_row_resolves_a_weights_free_contract_implementi
     };
     let mut checked = 0_usize;
     let mut overridden = 0_usize;
+    let mut forced = 0_usize;
 
     for (key, row) in anchors.iter() {
         let coordinates: Vec<&str> = key.split(':').collect();
@@ -633,20 +634,19 @@ pub(crate) fn every_planned_lane_row_resolves_a_weights_free_contract_implementi
              load shape"
         );
 
-        // The planned rung — the row's own `rung`, else the lane default `planAnchor` applies —
-        // must be one this contract EXECUTES. `validate_selection` is the production refusal the
-        // adapter hits after the load; asking it here, weights-free, is what makes every planned
-        // cell non-vacuous rather than three of them unrunnable by construction.
-        let planned_rung = row["rung"].as_str().unwrap_or(lane_default_rung);
-        if row["rung"].is_string() {
-            overridden += 1;
-        }
-        let strategy = match planned_rung {
+        // The planned rung — the row's own `strategy.rung` (sc-22734's single-composition
+        // override), else the lane default `planAnchor` applies — must be one this contract
+        // EXECUTES. `validate_selection` is the production refusal the adapter hits after the load;
+        // asking it here, weights-free, is what makes every planned cell non-vacuous rather than
+        // three of them unrunnable by construction.
+        let override_rung = row["strategy"]["rung"].as_str();
+        let planned_rung = override_rung.unwrap_or(lane_default_rung);
+        let as_strategy = |rung: &str| match rung {
             "resident" => MemoryStrategy::Resident,
             "staged_residency" => MemoryStrategy::StagedResidency,
             other => panic!("{key}: plans a rung an anchor may not plan: {other}"),
         };
-        let selection = MemorySelection {
+        let selection_for = |strategy: MemoryStrategy| MemorySelection {
             strategy,
             parameters: gen_core::MemoryStrategyParameters::default(),
             tier: gen_core::MemoryNumericTier {
@@ -656,13 +656,34 @@ pub(crate) fn every_planned_lane_row_resolves_a_weights_free_contract_implementi
             },
         };
         contract
-            .validate_selection(&selection)
+            .validate_selection(&selection_for(as_strategy(planned_rung)))
             .unwrap_or_else(|error| {
                 panic!(
                 "{key}: the plan selects {planned_rung} but the {provider} contract refuses it — \
                  the anchor would fail at `contract.validate_selection` on every attempt: {error}"
             )
             });
+        // An override is DERIVED, never picked (sc-22734, sc-22736): a row may move off the lane
+        // default only because the contract refuses that default — SenseNova classifies
+        // `StagedResidency` structurally not applicable, Candle SCAIL-2 implements `Resident`
+        // alone — so an override that names a rung other than the default is legitimate exactly
+        // when the default itself fails `validate_selection`. Same rung as the default (the MLX
+        // SenseNova rows) moves nothing and proves nothing.
+        if override_rung.is_some() {
+            overridden += 1;
+        }
+        if planned_rung != lane_default_rung {
+            let default_refused = contract
+                .validate_selection(&selection_for(as_strategy(lane_default_rung)))
+                .is_err();
+            assert!(
+                default_refused,
+                "{key}: overrides the {lane} lane default {lane_default_rung} with {planned_rung}, \
+                 but the {provider} contract would have executed the default — an override must be \
+                 forced by the contract, not chosen"
+            );
+            forced += 1;
+        }
         checked += 1;
     }
 
@@ -670,13 +691,23 @@ pub(crate) fn every_planned_lane_row_resolves_a_weights_free_contract_implementi
         checked > 0,
         "the shipped plan must contain at least one {lane} anchor"
     );
-    // The override is real on the candle lane (the three SCAIL-2 cells) and absent on MLX, whose
-    // default is already `resident`; a lane whose count disagrees has either lost the override or
-    // grown one without a contract-level reason.
-    assert_eq!(
-        overridden,
-        if lane == "candle" { 3 } else { 0 },
-        "{lane}: planned rung overrides"
+    // The mechanism is exercised, not merely tolerated: the candle lane carries at least one
+    // contract-forced override (SenseNova's six and SCAIL-2's three today); on MLX the default is
+    // already `resident`, so any override there is a no-op and nothing is forced.
+    if lane == "candle" {
+        assert!(
+            forced > 0,
+            "candle: the plan must carry at least one contract-forced rung override"
+        );
+    } else {
+        assert_eq!(
+            forced, 0,
+            "{lane}: no override can move off a resident default"
+        );
+    }
+    assert!(
+        overridden > 0,
+        "{lane}: the plan exercises the strategy override at least once"
     );
 }
 
