@@ -695,3 +695,88 @@ test("every model object in the committed manifest is locatable by the text walk
     assert.deepEqual(parse(body.slice(span.start, span.end)), model);
   }
 });
+
+// sc-22730. A candle engine may WITHHOLD the production calibration identity for a load shape it
+// still supports. `candle-gen-sd3`'s `production_calibration_identity` returns `None` the moment
+// `!receipt.adapters.is_empty()` (inference `crates/media/candle-gen/candle-gen-sd3/src/
+// memory_strategy.rs:876-886`, merged at `63056d4e9`): a loaded adapter stack adds resident bytes
+// no anchor measured, so only the clean base cell carries an identity.
+//
+// A manifest row that declares a `fingerprint` for an overlay-bearing implementation therefore
+// promises a string the shipped engine will never publish. Nothing else catches it — the row is
+// structurally valid, the reconciliation walks fingerprints that EXIST, and the mismatch surfaces
+// only as a mid-campaign refusal after a 28-57 GB load.
+//
+// The rule is read from the engine source when INFERENCE_REPO points at a checkout that carries it;
+// otherwise it is asserted for the sd3_5 family explicitly, against the file:line cited above.
+test("no overlay-bearing manifest row promises an identity its candle engine withholds under adapters", () => {
+  // model id -> the engine crate whose `production_calibration_identity` we are claiming about.
+  const withholding = {
+    sd3_5_large: "candle-gen-sd3",
+    sd3_5_large_turbo: "candle-gen-sd3",
+    sd3_5_medium: "candle-gen-sd3",
+  };
+
+  // Derive the rule from the engine when the configured checkout has it, so a future engine that
+  // starts publishing under adapters makes this test fail instead of silently over-asserting.
+  const inferenceRepo = process.env.INFERENCE_REPO;
+  let derived = false;
+  if (inferenceRepo) {
+    const enginePath = path.join(
+      inferenceRepo,
+      "crates/media/candle-gen/candle-gen-sd3/src/memory_strategy.rs",
+    );
+    let source = "";
+    try {
+      source = readFileSync(enginePath, "utf8");
+    } catch {
+      source = "";
+    }
+    const fn = /fn production_calibration_identity\([\s\S]*?\n\}/.exec(source);
+    if (fn) {
+      derived = true;
+      assert.match(
+        fn[0],
+        /if !receipt\.adapters\.is_empty\(\) \{\s*return None;/,
+        "candle-gen-sd3 no longer withholds the identity under adapters; this table is stale",
+      );
+    }
+  }
+  // At the COMPILED PIN the function does not exist yet, so a non-derived run is expected and the
+  // citation above is the authority. Either way the manifest claim below is asserted.
+  assert.equal(typeof derived, "boolean");
+
+  const models = parse(read("config/manifests/builtin.models.jsonc")).models;
+  let withheld = 0;
+  let published = 0;
+  for (const [id, crate] of Object.entries(withholding)) {
+    const model = models.find((candidate) => candidate.id === id);
+    assert.ok(model, `${id} is still a shipped model`);
+    const rows = model.candle?.memoryStrategyContract?.implementations ?? [];
+    assert.ok(rows.length > 0, `${id} still declares a candle memoryStrategyContract`);
+    for (const row of rows) {
+      const overlays = (row.overlays ?? []).filter((overlay) => overlay !== "none");
+      const adapterBearing = overlays.length > 0 || (row.providerOverlay ?? "none") !== "none";
+      if (adapterBearing) {
+        assert.equal(
+          row.fingerprint,
+          undefined,
+          `${id}: ${crate} publishes no identity under adapters, but the ${row.rung} ` +
+            `${JSON.stringify(row.overlays)} row declares ${row.fingerprint}`,
+        );
+        withheld += 1;
+      } else {
+        assert.equal(
+          typeof row.fingerprint,
+          "string",
+          `${id}: the clean base ${row.rung} row must still declare its identity`,
+        );
+        published += 1;
+      }
+    }
+  }
+  // Shape, not a frozen count: both halves of the split must be non-empty or the test asserts
+  // nothing about one of them.
+  assert.ok(withheld > 0, "no overlay-bearing row is covered; this test guards nothing");
+  assert.ok(published > 0, "no clean base row is covered; this test guards nothing");
+});
