@@ -229,6 +229,35 @@ const FLUX1_SEED: u64 = 22726;
 /// The seed every five-rung reference render uses (`five_rung_generation_request`), and the
 /// number the `fresh-five-rung-*-seed16402-step2` fixtures carry.
 const FIVE_RUNG_SEED: u64 = 16402;
+/// The two SANA routes (sc-22731). Registry ids of `candle-gen-sana`'s registered generators
+/// (`candle_gen_sana::MODEL_ID` / `SPRINT_MODEL_ID`), which are also the catalog model ids.
+///
+/// **bf16 is the only tier this lane has.** `candle-gen-sana`'s `validate_load_spec` refuses any
+/// `LoadSpec::quantize` by name ("Candle supports only the dense physical tier"), the worker pins
+/// the candle SANA tier label to `bf16` outright, and there is no packed SANA artifact off-Mac at
+/// all — the only `platforms: ["windows", "linux"]` download is the upstream dense diffusers
+/// snapshot. So `sana_1600m:q4:candle` is not an unmeasured cell; it is not a cell.
+const SANA_ID: &str = "sana_1600m";
+const SANA_PLAIN_EXECUTION_PATH: &str = "the Candle SANA 1.6B dense text-to-image path";
+const SANA_STILL_CALIBRATION: &str = "Candle SANA 1.6B calibration";
+const SANA_SPRINT_ID: &str = "sana_sprint_1600m";
+const SANA_SPRINT_PLAIN_EXECUTION_PATH: &str =
+    "the Candle SANA-Sprint 1.6B dense text-to-image path";
+const SANA_SPRINT_STILL_CALIBRATION: &str = "Candle SANA-Sprint 1.6B calibration";
+/// The three Chroma1 routes (sc-22731). `candle-gen-chroma` registers one generator per route and
+/// keeps them as three separate receipt/evidence domains (SC-20788), so each binds its own artifact
+/// family and publishes its own per-tier identity.
+const CHROMA1_HD_ID: &str = "chroma1_hd";
+const CHROMA1_HD_PLAIN_EXECUTION_PATH: &str = "the Candle Chroma1-HD base-only text-to-image path";
+const CHROMA1_HD_STILL_CALIBRATION: &str = "Candle Chroma1-HD calibration";
+const CHROMA1_BASE_ID: &str = "chroma1_base";
+const CHROMA1_BASE_PLAIN_EXECUTION_PATH: &str =
+    "the Candle Chroma1-Base base-only text-to-image path";
+const CHROMA1_BASE_STILL_CALIBRATION: &str = "Candle Chroma1-Base calibration";
+const CHROMA1_FLASH_ID: &str = "chroma1_flash";
+const CHROMA1_FLASH_PLAIN_EXECUTION_PATH: &str =
+    "the Candle Chroma1-Flash base-only text-to-image path";
+const CHROMA1_FLASH_STILL_CALIBRATION: &str = "Candle Chroma1-Flash calibration";
 const LTX25_ID: &str = "ltx_2_5_distilled";
 const LTX25_EXECUTION_PATH: &str =
     "the Candle LTX-2.5 text-to-video base recipe (including the official dev refinement LoRA)";
@@ -841,6 +870,12 @@ fn plain_execution_path(request: &Value) -> Result<&'static str, String> {
         SD3_5_LARGE_ID => Ok(SD3_5_LARGE_PLAIN_EXECUTION_PATH),
         SD3_5_LARGE_TURBO_ID => Ok(SD3_5_LARGE_TURBO_PLAIN_EXECUTION_PATH),
         SD3_5_MEDIUM_ID => Ok(SD3_5_MEDIUM_PLAIN_EXECUTION_PATH),
+        // sc-22731: the SANA and Chroma1 families ride the same five-rung reference path.
+        "sana_1600m" => Ok(SANA_PLAIN_EXECUTION_PATH),
+        "sana_sprint_1600m" => Ok(SANA_SPRINT_PLAIN_EXECUTION_PATH),
+        "chroma1_hd" => Ok(CHROMA1_HD_PLAIN_EXECUTION_PATH),
+        "chroma1_base" => Ok(CHROMA1_BASE_PLAIN_EXECUTION_PATH),
+        "chroma1_flash" => Ok(CHROMA1_FLASH_PLAIN_EXECUTION_PATH),
         provider => Err(format!(
             "Candle five-rung calibration does not implement provider {provider:?}"
         )),
@@ -879,6 +914,11 @@ fn still_calibration_label(request: &Value) -> Result<&'static str, String> {
         SD3_5_LARGE_ID => Ok(SD3_5_LARGE_STILL_CALIBRATION),
         SD3_5_LARGE_TURBO_ID => Ok(SD3_5_LARGE_TURBO_STILL_CALIBRATION),
         SD3_5_MEDIUM_ID => Ok(SD3_5_MEDIUM_STILL_CALIBRATION),
+        SANA_ID => Ok(SANA_STILL_CALIBRATION),
+        SANA_SPRINT_ID => Ok(SANA_SPRINT_STILL_CALIBRATION),
+        CHROMA1_HD_ID => Ok(CHROMA1_HD_STILL_CALIBRATION),
+        CHROMA1_BASE_ID => Ok(CHROMA1_BASE_STILL_CALIBRATION),
+        CHROMA1_FLASH_ID => Ok(CHROMA1_FLASH_STILL_CALIBRATION),
         provider => Err(format!(
             "Candle five-rung calibration does not implement provider {provider:?}"
         )),
@@ -914,10 +954,92 @@ fn planned_tier(request: &Value) -> Result<&str, String> {
 /// (`qwen-image-candle-q4-seed15817-step2`) predate this convention: applying the geometry token
 /// requirement to them would reject five plan rows that measure correctly today. Widen this when
 /// those fixtures are renamed, not before.
+/// Whether this Candle route's weights root descends into a `<tier>` sub-directory.
+///
+/// True for every packed SceneWorks turnkey. False for the two SANA routes alone (sc-22731): the
+/// worker resolves the UPSTREAM dense diffusers snapshot root for them, which has no tier
+/// component, and `candle-gen-sana` requires exactly that root.
+fn five_rung_root_is_tiered(provider_id: &str) -> bool {
+    !matches!(provider_id, SANA_ID | SANA_SPRINT_ID)
+}
+
+/// Refuse a planned tier this LANE cannot open, by name, before any environment is read.
+///
+/// Only SANA constrains this today: `candle-gen-sana`'s `validate_load_spec` refuses any
+/// `LoadSpec::quantize`, the worker pins the candle SANA tier to `bf16`, and no packed SANA
+/// artifact ships off-Mac. A `sana_1600m:q4:candle` plan row would otherwise reach the engine and
+/// come back as a quantization complaint, which reads as a spec bug rather than as a cell that
+/// does not exist.
+///
+/// HAND-WRITTEN, and deliberately so: it is a REFUSAL that must fire before any environment read,
+/// on a host with no manifest loaded, so it cannot be derived from the manifest at the point of
+/// use. It is therefore a second spelling of a fact the manifest also states, and the binding that
+/// keeps the two honest is on the JS side —
+/// `scripts/generate-memory-matrix.test.mjs`'s "every published lane tier is one that lane's route
+/// rules admit" and "no lane advertises a tier whose only downloads that lane's host would never
+/// fetch". Between them, the manifest's `sana_*` off-Mac download (the untiered
+/// `Efficient-Large-Model/Sana_1600M_1024px_diffusers` snapshot, `platforms: ["windows","linux"]`)
+/// and `memory_route_registry.rs`'s `BF16_ONLY` candle SANA rows must keep agreeing with the
+/// bf16-only rule below; publishing a packed candle SANA tier reds there, and the plan-row set
+/// derived from this function in `sana_chroma_candle_tests` reds here.
+fn validate_five_rung_lane_tier(provider_id: &str, tier: &str) -> Result<(), String> {
+    if matches!(provider_id, SANA_ID | SANA_SPRINT_ID) && tier != "bf16" {
+        return Err(format!(
+            "the Candle {provider_id} route loads the upstream dense snapshot only; there is no \
+             {tier} artifact on this lane and candle-gen-sana refuses a LoadSpec quant"
+        ));
+    }
+    Ok(())
+}
+
+/// The production calibration identity the loaded Candle generator publishes for one
+/// `(provider, tier)` cell of the two families sc-22731 armed.
+///
+/// `candle-gen-sana` mints `sana-candle-dense-<route>-full-ladder-v1` per route (bf16 is its only
+/// tier). `candle-gen-chroma` mints `<route>-<tier>-cuda-<ladder revision>` per (route, tier) from
+/// the LOAD RECEIPT's tier — inference PR 951; before it, `build_contract` hard-coded
+/// `calibration: None` and no Chroma anchor could be recorded on this lane at all.
+///
+/// `None` for every other provider: their arms predate this pre-load binding and are still checked
+/// against the loaded contract in `run_five_rung_reference_loaded`.
+fn five_rung_calibration_fingerprint(provider_id: &str, tier: &str) -> Option<String> {
+    match provider_id {
+        SANA_ID => Some("sana-candle-dense-base-full-ladder-v1".to_owned()),
+        SANA_SPRINT_ID => Some("sana-candle-dense-sprint-full-ladder-v1".to_owned()),
+        CHROMA1_HD_ID | CHROMA1_BASE_ID | CHROMA1_FLASH_ID => Some(format!(
+            "{}-{tier}-cuda-{CHROMA1_CANDLE_LADDER_REVISION}",
+            provider_id.replace('_', "-")
+        )),
+        _ => None,
+    }
+}
+
+/// `candle-gen-chroma`'s `CANDLE_LADDER_REVISION`: the shape every Chroma1 Candle identity names.
+/// Bumped upstream when the request-scoped Resident/Staged surface changes, which is what makes
+/// every Chroma anchor recaptured rather than silently re-bound.
+const CHROMA1_CANDLE_LADDER_REVISION: &str = "request-scoped-staged-residency-v1";
+
+/// The five-rung fixture slug of each sc-22731 route: `fresh-five-rung-<slug>-<tier>-<edge>-seed…`.
+fn five_rung_family_slug(provider_id: &str) -> Option<&'static str> {
+    match provider_id {
+        SANA_ID => Some("sana-1600m"),
+        SANA_SPRINT_ID => Some("sana-sprint"),
+        CHROMA1_HD_ID => Some("chroma1-hd"),
+        CHROMA1_BASE_ID => Some("chroma1-base"),
+        CHROMA1_FLASH_ID => Some("chroma1-flash"),
+        _ => None,
+    }
+}
+
 fn validate_fixture_binds_tier_and_geometry(request: &Value) -> Result<(), String> {
     let provider = planned_provider(request)?;
     if matches!(provider, FLUX1_DEV_ID | FLUX1_SCHNELL_ID | PULID_FLUX_ID) {
         return validate_flux_one_fixture(request, provider, planned_tier(request)?);
+    }
+    // sc-22731: the SANA and Chroma1 fixtures get the same member/tier/edge/seed/step binding, so a
+    // bf16 record can never be emitted against a q4 capture that merely reused the fixture string.
+    if let Some(slug) = five_rung_family_slug(provider) {
+        return validate_five_rung_family_fixture(request, slug, planned_tier(request)?);
     }
     // sc-22730: the SD3.5 members get the same member/tier/edge/seed/step binding, so a Medium q8
     // record can never be attributed to a Large bf16 capture that merely reused the string.
@@ -1034,6 +1156,48 @@ fn validate_flux_one_fixture(request: &Value, provider: &str, tier: &str) -> Res
     let steps = steps
         .parse::<u32>()
         .map_err(|error| format!("parse FLUX.1 fixture step count {steps:?}: {error}"))?;
+    if steps != 2 {
+        return Err(format!(
+            "planned.fixture {fixture:?} must use the two-step calibration request"
+        ));
+    }
+    Ok(())
+}
+
+/// The sc-22731 five-rung fixture binding: `fresh-five-rung-<slug>-<tier>-<edge>-seed16402-step2`.
+///
+/// Same claim `validate_flux_one_fixture` makes on the FLUX.1 base routes, on this family's
+/// spellings — the record's fixture is the one claim about the render that nothing downstream can
+/// re-derive, so it must name the route, the tier, the geometry edge, the seed and the step count.
+fn validate_five_rung_family_fixture(
+    request: &Value,
+    slug: &str,
+    tier: &str,
+) -> Result<(), String> {
+    let fixture = protocol::planned(request)?
+        .get("fixture")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "planned.fixture must be a string".to_owned())?;
+    let (width, _) = protocol::target_geometry(request)?;
+    let prefix = format!("{FIVE_RUNG_FIXTURE_PREFIX}{slug}-{tier}-{width}-seed");
+    let remainder = fixture
+        .strip_prefix(&prefix)
+        .ok_or_else(|| format!("planned.fixture {fixture:?} must start with {prefix:?}"))?;
+    let (seed, steps) = remainder
+        .split_once("-step")
+        .ok_or_else(|| format!("planned.fixture {fixture:?} must end with -step<count>"))?;
+    let seed = seed
+        .parse::<u64>()
+        .map_err(|error| format!("parse {slug} fixture seed {seed:?}: {error}"))?;
+    if seed != FIVE_RUNG_SEED {
+        return Err(format!(
+            "planned.fixture seed {seed} does not match the five-rung reference seed \
+             {FIVE_RUNG_SEED}"
+        ));
+    }
+    let steps = steps
+        .parse::<u32>()
+        .map_err(|error| format!("parse {slug} fixture step count {steps:?}: {error}"))?;
     if steps != 2 {
         return Err(format!(
             "planned.fixture {fixture:?} must use the two-step calibration request"
@@ -1267,6 +1431,54 @@ fn load_five_rung_generator(request: &Value) -> Result<LoadedFiveRungGenerator, 
                 "SCENEWORKS_SD3_5_MEDIUM_ROOT",
                 protocol::SD3_5_MEDIUM_REPOSITORY,
             ),
+            // sc-22731. The SANA routes bind the UPSTREAM DENSE diffusers snapshot, not the
+            // SceneWorks MLX turnkey: `resolve_weights_dir` returns
+            // `huggingface_pinned_snapshot_dir(SANA_CANDLE_DIFFUSERS_REPO, …)` for this lane, whose
+            // root has no tier component at all. Their own env families keep a base plan from
+            // being satisfied by Sprint weights.
+            "sana_1600m" => (
+                SANA_ID,
+                SANA_PLAIN_EXECUTION_PATH,
+                "SCENEWORKS_SANA_DENSE_REPOSITORY",
+                "SCENEWORKS_SANA_DENSE_REVISION",
+                "SCENEWORKS_SANA_DENSE_ROOT",
+                protocol::SANA_DENSE_REPOSITORY,
+            ),
+            "sana_sprint_1600m" => (
+                SANA_SPRINT_ID,
+                SANA_SPRINT_PLAIN_EXECUTION_PATH,
+                "SCENEWORKS_SANA_SPRINT_DENSE_REPOSITORY",
+                "SCENEWORKS_SANA_SPRINT_DENSE_REVISION",
+                "SCENEWORKS_SANA_SPRINT_DENSE_ROOT",
+                protocol::SANA_SPRINT_DENSE_REPOSITORY,
+            ),
+            // sc-22731. Each Chroma1 route binds its OWN rehost — `candle-gen-chroma`'s `ROUTES`
+            // table pins one repository and revision per provider and refuses a root bound to
+            // another, so an HD plan can never be satisfied by Flash weights.
+            "chroma1_hd" => (
+                CHROMA1_HD_ID,
+                CHROMA1_HD_PLAIN_EXECUTION_PATH,
+                "SCENEWORKS_CHROMA1_HD_REPOSITORY",
+                "SCENEWORKS_CHROMA1_HD_REVISION",
+                "SCENEWORKS_CHROMA1_HD_ROOT",
+                protocol::CHROMA1_HD_REPOSITORY,
+            ),
+            "chroma1_base" => (
+                CHROMA1_BASE_ID,
+                CHROMA1_BASE_PLAIN_EXECUTION_PATH,
+                "SCENEWORKS_CHROMA1_BASE_REPOSITORY",
+                "SCENEWORKS_CHROMA1_BASE_REVISION",
+                "SCENEWORKS_CHROMA1_BASE_ROOT",
+                protocol::CHROMA1_BASE_REPOSITORY,
+            ),
+            "chroma1_flash" => (
+                CHROMA1_FLASH_ID,
+                CHROMA1_FLASH_PLAIN_EXECUTION_PATH,
+                "SCENEWORKS_CHROMA1_FLASH_REPOSITORY",
+                "SCENEWORKS_CHROMA1_FLASH_REVISION",
+                "SCENEWORKS_CHROMA1_FLASH_ROOT",
+                protocol::CHROMA1_FLASH_REPOSITORY,
+            ),
             provider => {
                 return Err(format!(
                     "Candle five-rung calibration does not implement provider {provider:?}"
@@ -1275,23 +1487,65 @@ fn load_five_rung_generator(request: &Value) -> Result<LoadedFiveRungGenerator, 
         };
     let tier = planned_tier(request)?;
     validate_fixture_binds_tier_and_geometry(request)?;
+    validate_five_rung_lane_tier(provider_id, tier)?;
+    // The plan row must name the identity the LOADED contract publishes for this cell — checked
+    // against the weights-free table BEFORE the load, so a stale row fails in milliseconds instead
+    // of after a multi-gigabyte load (`run_five_rung_reference_loaded` still re-checks it against
+    // the real contract afterwards, which is what keeps the two copies from drifting).
+    if let Some(expected) = five_rung_calibration_fingerprint(provider_id, tier) {
+        let planned = protocol::planned(request)?
+            .get("calibrationFingerprint")
+            .and_then(Value::as_str)
+            .ok_or_else(|| "planned.calibrationFingerprint must be a string".to_owned())?;
+        if planned != expected {
+            return Err(format!(
+                "plan/provider calibration mismatch: plan={planned}, the {provider_id} {tier} \
+                 production identity is {expected}"
+            ));
+        }
+    }
     let repository = protocol::required_env(repository_env)?;
     let revision = protocol::required_env(revision_env)?;
     protocol::validate_artifact_identity(&repository, &revision, expected_repository)?;
     let root = std::fs::canonicalize(PathBuf::from(protocol::required_env(root_env)?))
         .map_err(|error| format!("canonicalize {root_env}: {error}"))?;
-    // The root must end in the PLANNED tier's directory, so a stale `…/q4` export cannot satisfy a
-    // q8 or bf16 plan and quietly re-label another tier's peaks.
-    protocol::validate_huggingface_snapshot_root(
-        &root,
-        &repository,
-        &revision,
-        tier,
-        expected_repository,
-    )?;
+    if five_rung_root_is_tiered(provider_id) {
+        // The root must end in the PLANNED tier's directory, so a stale `…/q4` export cannot satisfy a
+        // q8 or bf16 plan and quietly re-label another tier's peaks.
+        protocol::validate_huggingface_snapshot_root(
+            &root,
+            &repository,
+            &revision,
+            tier,
+            expected_repository,
+        )?;
+    } else {
+        // The SANA dense snapshot has no tier sub-directory: the worker hands the engine the
+        // snapshot root itself, and `candle-gen-sana`'s `validate_immutable_root` requires exactly
+        // that. Inventing a `bf16/` component here would bind a path no production load opens.
+        protocol::validate_huggingface_revision_root(
+            &root,
+            &repository,
+            &revision,
+            expected_repository,
+        )?;
+    }
     let spec = LoadSpec::new(WeightsSource::Dir(root))
         .with_offload_policy(OffloadPolicy::Sequential)
         .with_load_shape(LoadShape::DeferredMaterialization);
+    // sc-22731: the worker binds the exact resolved route on every Candle image load
+    // (`image_jobs/base.rs`: `.with_resolved_route(request.model.clone())`), and
+    // `candle-gen-chroma`'s `validate_load_shape` refuses a spec without it by name. Set for the
+    // two families whose engines were ported against that shape; the older arms keep the spec they
+    // have always been measured with.
+    let spec = if matches!(
+        provider_id,
+        SANA_ID | SANA_SPRINT_ID | CHROMA1_HD_ID | CHROMA1_BASE_ID | CHROMA1_FLASH_ID
+    ) {
+        spec.with_resolved_route(provider_id.to_owned())
+    } else {
+        spec
+    };
     let spec = match (provider_id, numeric_tier(tier)?.quant) {
         // Krea's loader takes the packed tier's quant explicitly; bf16 is the dense base and must
         // carry no quant at all (`Quant::None` — the same shape the worker's `tier_to_quant` uses).
@@ -1325,6 +1579,13 @@ fn load_five_rung_generator(request: &Value) -> Result<LoadedFiveRungGenerator, 
         // packing off the safetensors headers and cross-checks it against the path tier, so the
         // tier in the published identity is the tier on disk. Falling through here is therefore
         // what the worker does, not an omission.
+        //
+        // sc-22731 puts SANA and Chroma1 in the same class, from the worker itself:
+        // `candle_quant_for_resolved_tier` returns `(None, _)` for both families at EVERY tier, so
+        // `LoadSpec::quantize` is `None` on every shipped Candle render of them. Both engines
+        // refuse a quant by name (`"Candle supports only the dense physical tier"`,
+        // `"turnkey q4/q8/bf16 all require precision=Bf16 and LoadSpec.quantize=None"`), and
+        // Chroma's tier comes from the artifact path plus the transformer's own packed marker.
         _ => spec,
     };
     // The catalog model id reaches the engine as `resolved_route` — the same lever the worker
@@ -5551,5 +5812,263 @@ mod tests {
                 );
             }
         }
+    }
+}
+
+/// sc-22731 — the SANA and Chroma1 Candle arms. Weights-free and env-free: everything asserted
+/// here is decided before a snapshot is opened, so it holds on any host.
+#[cfg(test)]
+mod sana_chroma_candle_tests {
+    use super::*;
+
+    const SANA_CHROMA_PROVIDERS: [&str; 5] = [
+        SANA_ID,
+        SANA_SPRINT_ID,
+        CHROMA1_HD_ID,
+        CHROMA1_BASE_ID,
+        CHROMA1_FLASH_ID,
+    ];
+
+    /// The three shipped tiers of the packed turnkeys, one spelling for every expectation below.
+    const SANA_CHROMA_CANDLE_TIERS: [&str; 3] = ["q4", "q8", "bf16"];
+
+    /// The Candle plan keys these two families must serve, DERIVED: the five routes crossed with
+    /// the shipped tiers, MINUS every (route, tier) `validate_five_rung_lane_tier` refuses — which
+    /// is SANA's q4/q8 alone, because there is no packed SANA artifact off-Mac. A frozen `11` said
+    /// nothing about WHICH eleven; this fails naming the cell that appeared or vanished, and it
+    /// re-derives itself the moment the lane's tier rule changes.
+    fn expected_sana_chroma_candle_keys() -> std::collections::BTreeSet<String> {
+        SANA_CHROMA_PROVIDERS
+            .iter()
+            .flat_map(|provider| {
+                SANA_CHROMA_CANDLE_TIERS
+                    .iter()
+                    .map(move |tier| (*provider, *tier))
+            })
+            .filter(|(provider, tier)| validate_five_rung_lane_tier(provider, tier).is_ok())
+            .map(|(provider, tier)| format!("{provider}:{tier}:candle"))
+            .collect()
+    }
+
+    fn planned(provider: &str, tier: &str, fixture: &str) -> Value {
+        json!({
+            "planned": {
+                "target": {
+                    "provider": provider,
+                    "tier": tier,
+                    "mode": "text_to_image",
+                    "overlay": "none",
+                    "geometry": { "width": 1024, "height": 1024, "batch": 1, "frames": 1 }
+                },
+                "backend": "candle",
+                "loadShape": "deferred_materialization",
+                "strategy": { "rung": "staged_residency", "engagedRungs": ["resident", "staged_residency"], "parameters": {} },
+                "calibrationFingerprint": "unused",
+                "fixture": fixture
+            }
+        })
+    }
+
+    /// Every SANA/Chroma1 CANDLE plan row names the identity its loaded generator publishes, and
+    /// the identities are distinct. `candle-gen-sana` mints one per route (bf16 is its only tier);
+    /// `candle-gen-chroma` mints one per (route, tier) from the load receipt (inference PR 951 —
+    /// before it, `build_contract` hard-coded `calibration: None` and no Chroma anchor could be
+    /// recorded on this lane at all).
+    #[test]
+    fn every_planned_sana_chroma_candle_cell_names_the_identity_its_loaded_generator_publishes() {
+        let plan: Value = serde_json::from_str(include_str!(
+            "../../../../config/memory-calibration-plan.json"
+        ))
+        .expect("the anchor plan parses");
+        let mut identities = std::collections::BTreeMap::new();
+        let mut visited = std::collections::BTreeSet::new();
+        for (key, entry) in plan["anchors"].as_object().expect("anchors object") {
+            let provider = entry["provider"].as_str().unwrap();
+            if !key.ends_with(":candle") || !SANA_CHROMA_PROVIDERS.contains(&provider) {
+                continue;
+            }
+            visited.insert(key.clone());
+            let tier = key.split(':').nth(1).unwrap();
+            let planned = entry["calibrationFingerprint"]
+                .as_str()
+                .unwrap_or_else(|| panic!("{key}: calibrationFingerprint must be a string"));
+            assert_eq!(
+                Some(planned.to_owned()),
+                five_rung_calibration_fingerprint(provider, tier),
+                "{key}: the plan row must name the loaded generator's production identity"
+            );
+            assert!(
+                identities.insert(planned.to_owned(), key.clone()).is_none(),
+                "{key}: {planned} is already claimed by {}",
+                identities[planned]
+            );
+        }
+        // A SET, not a count (sc-22731 review): see `expected_sana_chroma_candle_keys`.
+        assert_eq!(
+            visited,
+            expected_sana_chroma_candle_keys(),
+            "the Candle plan rows must be exactly the routes x tiers this lane can open"
+        );
+        // ...and every one carries a DISTINCT identity, so the map covers the same set.
+        assert_eq!(
+            identities
+                .values()
+                .cloned()
+                .collect::<std::collections::BTreeSet<_>>(),
+            expected_sana_chroma_candle_keys()
+        );
+        for (key, identity) in [
+            (
+                "sana_1600m:bf16:candle",
+                "sana-candle-dense-base-full-ladder-v1",
+            ),
+            (
+                "sana_sprint_1600m:bf16:candle",
+                "sana-candle-dense-sprint-full-ladder-v1",
+            ),
+            (
+                "chroma1_hd:q4:candle",
+                "chroma1-hd-q4-cuda-request-scoped-staged-residency-v1",
+            ),
+            (
+                "chroma1_base:q8:candle",
+                "chroma1-base-q8-cuda-request-scoped-staged-residency-v1",
+            ),
+            (
+                "chroma1_flash:bf16:candle",
+                "chroma1-flash-bf16-cuda-request-scoped-staged-residency-v1",
+            ),
+        ] {
+            assert_eq!(identities[identity], key);
+        }
+    }
+
+    /// The Candle SANA lane has ONE tier. A packed plan row is refused by name, before any
+    /// environment is read, rather than reaching `candle-gen-sana` and coming back as a
+    /// quantization complaint that reads like a spec bug.
+    #[test]
+    fn the_candle_sana_lane_refuses_a_packed_tier_by_name() {
+        for provider in [SANA_ID, SANA_SPRINT_ID] {
+            for tier in ["q4", "q8"] {
+                let error = validate_five_rung_lane_tier(provider, tier)
+                    .expect_err("there is no packed SANA artifact off-Mac");
+                assert!(error.contains(provider) && error.contains(tier), "{error}");
+            }
+            validate_five_rung_lane_tier(provider, "bf16").expect("bf16 is the dense lane tier");
+        }
+        // ...and the constraint is SANA's alone: every Chroma1 tier is a real Candle cell.
+        for provider in [CHROMA1_HD_ID, CHROMA1_BASE_ID, CHROMA1_FLASH_ID] {
+            for tier in ["q4", "q8", "bf16"] {
+                validate_five_rung_lane_tier(provider, tier).unwrap();
+            }
+        }
+    }
+
+    /// The SANA routes load the upstream dense SNAPSHOT ROOT — no tier component — because that is
+    /// what the worker resolves for them (`huggingface_pinned_snapshot_dir`) and what
+    /// `candle-gen-sana`'s `validate_immutable_root` requires. Every other route is tiered.
+    #[test]
+    fn only_the_sana_routes_load_an_untiered_snapshot_root() {
+        assert!(!five_rung_root_is_tiered(SANA_ID));
+        assert!(!five_rung_root_is_tiered(SANA_SPRINT_ID));
+        for provider in [
+            CHROMA1_HD_ID,
+            CHROMA1_BASE_ID,
+            CHROMA1_FLASH_ID,
+            FLUX1_DEV_ID,
+            QWEN_ID,
+            KREA_ID,
+        ] {
+            assert!(five_rung_root_is_tiered(provider), "{provider}");
+        }
+    }
+
+    /// Every one of the five routes is named by BOTH shared dispatch tables, so neither the plain
+    /// execution path nor the still-geometry refusal can claim this adapter does not implement it.
+    #[test]
+    fn every_route_is_named_by_both_shared_dispatch_tables() {
+        for provider in SANA_CHROMA_PROVIDERS {
+            let request = planned(provider, "bf16", "unused");
+            let path = plain_execution_path(&request)
+                .unwrap_or_else(|error| panic!("{provider}: {error}"));
+            assert!(path.starts_with("the Candle "), "{provider}: {path}");
+            let label = still_calibration_label(&request)
+                .unwrap_or_else(|error| panic!("{provider}: {error}"));
+            assert!(label.starts_with("Candle "), "{provider}: {label}");
+            assert!(five_rung_family_slug(provider).is_some(), "{provider}");
+        }
+    }
+
+    /// The fixture binds the route, the tier, the geometry edge, the seed and the step count.
+    #[test]
+    fn the_candle_fixture_must_name_the_route_tier_edge_and_seed() {
+        for (fixture, needle) in [
+            // another route
+            (
+                "fresh-five-rung-chroma1-base-q8-1024-seed16402-step2",
+                "must start with",
+            ),
+            // another tier
+            (
+                "fresh-five-rung-chroma1-hd-q4-1024-seed16402-step2",
+                "must start with",
+            ),
+            // another edge
+            (
+                "fresh-five-rung-chroma1-hd-q8-768-seed16402-step2",
+                "must start with",
+            ),
+            // another seed
+            (
+                "fresh-five-rung-chroma1-hd-q8-1024-seed22726-step2",
+                "does not match",
+            ),
+            // another step count
+            (
+                "fresh-five-rung-chroma1-hd-q8-1024-seed16402-step4",
+                "two-step",
+            ),
+        ] {
+            let request = planned(CHROMA1_HD_ID, "q8", fixture);
+            let error = validate_fixture_binds_tier_and_geometry(&request)
+                .expect_err("a mislabelled fixture must be refused");
+            assert!(error.contains(needle), "{fixture}: {error}");
+        }
+        validate_fixture_binds_tier_and_geometry(&planned(
+            CHROMA1_HD_ID,
+            "q8",
+            "fresh-five-rung-chroma1-hd-q8-1024-seed16402-step2",
+        ))
+        .expect("the planned fixture must be accepted");
+    }
+
+    /// Every plan row's fixture is one this arm accepts AND one that routes to the five-rung
+    /// reference path, so a plan row can never land in the Krea arm's catch-all.
+    #[test]
+    fn every_planned_candle_fixture_is_accepted_and_routes_to_the_five_rung_path() {
+        let plan: Value = serde_json::from_str(include_str!(
+            "../../../../config/memory-calibration-plan.json"
+        ))
+        .expect("the anchor plan parses");
+        let mut checked = std::collections::BTreeSet::new();
+        for (key, entry) in plan["anchors"].as_object().expect("anchors object") {
+            let provider = entry["provider"].as_str().unwrap();
+            if !key.ends_with(":candle") || !SANA_CHROMA_PROVIDERS.contains(&provider) {
+                continue;
+            }
+            let tier = key.split(':').nth(1).unwrap();
+            let request = planned(provider, tier, entry["fixture"].as_str().unwrap());
+            assert!(
+                routes_to_five_rung_reference(&request).unwrap(),
+                "{key}: the fixture must route to the five-rung reference arm"
+            );
+            validate_fixture_binds_tier_and_geometry(&request)
+                .unwrap_or_else(|error| panic!("{key}: {error}"));
+            validate_five_rung_lane_tier(provider, tier)
+                .unwrap_or_else(|error| panic!("{key}: {error}"));
+            checked.insert(key.clone());
+        }
+        // Set equality, not a count: see `expected_sana_chroma_candle_keys`.
+        assert_eq!(checked, expected_sana_chroma_candle_keys());
     }
 }

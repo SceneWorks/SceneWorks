@@ -3827,28 +3827,6 @@
       "evidence": null
     },
     {
-      "id": "analytic:sana_1600m:candle:q4",
-      "modelId": "sana_1600m",
-      "modelFamily": "sana",
-      "route": "sana_1600m",
-      "backend": "candle",
-      "tier": "q4",
-      "basis": "no_retained_evidence",
-      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
-      "evidence": null
-    },
-    {
-      "id": "analytic:sana_1600m:candle:q8",
-      "modelId": "sana_1600m",
-      "modelFamily": "sana",
-      "route": "sana_1600m",
-      "backend": "candle",
-      "tier": "q8",
-      "basis": "no_retained_evidence",
-      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
-      "evidence": null
-    },
-    {
       "id": "analytic:sana_1600m:mlx:bf16",
       "modelId": "sana_1600m",
       "modelFamily": "sana",
@@ -3888,28 +3866,6 @@
       "route": "sana_sprint_1600m",
       "backend": "candle",
       "tier": "bf16",
-      "basis": "no_retained_evidence",
-      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
-      "evidence": null
-    },
-    {
-      "id": "analytic:sana_sprint_1600m:candle:q4",
-      "modelId": "sana_sprint_1600m",
-      "modelFamily": "sana",
-      "route": "sana_sprint_1600m",
-      "backend": "candle",
-      "tier": "q4",
-      "basis": "no_retained_evidence",
-      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
-      "evidence": null
-    },
-    {
-      "id": "analytic:sana_sprint_1600m:candle:q8",
-      "modelId": "sana_sprint_1600m",
-      "modelFamily": "sana",
-      "route": "sana_sprint_1600m",
-      "backend": "candle",
-      "tier": "q8",
       "basis": "no_retained_evidence",
       "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
       "evidence": null
