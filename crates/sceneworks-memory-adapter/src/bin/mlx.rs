@@ -195,10 +195,49 @@ const LTX_PLAIN_EXECUTION_PATH: &str = "the MLX LTX-2.3 base-only text-to-video 
 /// verbatim from that function's own messages when the second video arm made the label a parameter
 /// (sc-18663), so LTX's refusals are unchanged.
 const LTX_VIDEO_LABEL: &str = "MLX LTX-2.3";
-/// Expected provider-owned identity at the permanent inference pin. The adapter always reads the
-/// loaded registry contract and refuses any mismatch; this local expectation merely prevents a
-/// provider re-fingerprint from silently reusing SC-18946's plan and fixtures.
-const LTX_CALIBRATION_FINGERPRINT: &str = "sc-19109-ltx-2-3-mlx-memory-ladder-v1";
+/// Every numeric tier the `mlx:ltx_2_3` family ships, and therefore every tier that has a
+/// production calibration identity. Kept beside [`ltx_calibration_fingerprint`] so the identity
+/// family and the plan parser cannot disagree about the inventory.
+const LTX_TIERS: [&str; 3] = ["bf16", "q4", "q8"];
+/// The tier the engine's retained [`mlx_gen_ltx::memory_strategy::CALIBRATION_FINGERPRINT`] names.
+///
+/// Spelled here rather than read from the engine's own `CALIBRATED_TIER` because that constant
+/// arrives with the epic's pin bump and this adapter must compile at the CURRENT pin as well
+/// (`c6d6a4db` publishes one bare `CALIBRATION_FINGERPRINT` and no per-tier family). Unlike the
+/// Bernini family, LTX's retained key carries NO tier token
+/// (`sc-20772-ltx-2-3-mlx-memory-ladder-v2`), so nothing at the current pin can derive which tier
+/// it belongs to; `the_ltx_identity_family_is_the_engines_retained_key_with_a_tier_token` derives
+/// everything that IS derivable — the stem, the version, and both uncalibrated members — from the
+/// engine constant, so a re-fingerprinted or re-versioned retained string reds here.
+const LTX_CALIBRATED_TIER: &str = "q8";
+
+/// The production calibration identity `mlx-gen-ltx` mints for one `mlx:ltx_2_3` numeric tier.
+///
+/// The engine keys on `(provider, ARTIFACT-proven tier)`: the calibrated tier retains the bare
+/// `CALIBRATION_FINGERPRINT` and every other shipped tier receives that same key with its tier
+/// token inserted after the family stem. The calibrated cell reproduces
+/// [`mlx_gen_ltx::memory_strategy::CALIBRATION_FINGERPRINT`] byte-for-byte — read off the engine
+/// rather than spelled, so the two copies cannot drift — which is what keeps the retained key of
+/// the family's existing record valid.
+///
+/// Written here as well as in the engine so the plan/arm binding is weights-free and provable on a
+/// CPU-only host. The capture then refuses a loaded contract whose identity differs from this
+/// table, so a drift is caught at the pin bump rather than in a record.
+///
+/// A tier outside [`LTX_TIERS`] is refused BY NAME rather than interpolated into a plausible
+/// identity no production load can return.
+fn ltx_calibration_fingerprint(tier: &str) -> Result<String, String> {
+    if !LTX_TIERS.contains(&tier) {
+        return Err(format!(
+            "the MLX LTX-2.3 calibration family ships {LTX_TIERS:?}; tier {tier:?} has no \
+             production identity"
+        ));
+    }
+    if tier == LTX_CALIBRATED_TIER {
+        return Ok(mlx_gen_ltx::memory_strategy::CALIBRATION_FINGERPRINT.to_owned());
+    }
+    Ok(format!("sc-20772-ltx-2-3-{tier}-mlx-memory-ladder-v2"))
+}
 /// One fixed seed for every `mlx:ltx_2_3` fixture
 /// (`ltx-2-3-mlx-<tier>-<width>x<height>-f<frames>-fps<fps>-seed18946`). Historical SC-18810
 /// evidence remains bound to seed 18808 and is never relabelled.
@@ -10459,9 +10498,11 @@ fn validate_ltx_campaign_entry(
         &json!(["resident", "staged_residency"]),
     )?;
     exact("/strategy/parameters", &json!({}))?;
+    // `tier` is the plan's own `target.tier`, which the pinned check above already fixed to the
+    // frozen q4 row, so the identity this row must name is derived rather than transcribed.
     exact(
         "/calibrationFingerprint",
-        &json!(LTX_CALIBRATION_FINGERPRINT),
+        &json!(ltx_calibration_fingerprint(tier)?),
     )?;
     exact("/fixture", &json!(LTX_CAMPAIGN_ENTRY_FIXTURE))?;
     exact("/negative", &json!(false))?;
@@ -10584,9 +10625,10 @@ fn validate_ltx_bounded_carrier_proof(
             "decodeOverlap": LTX_CANARY_OVERLAP,
         }),
     )?;
+    // Plan-derived, and pinned to the frozen q4 carrier by the `/target/tier` check above.
     exact(
         "/calibrationFingerprint",
-        &json!(LTX_CALIBRATION_FINGERPRINT),
+        &json!(ltx_calibration_fingerprint(tier)?),
     )?;
     exact("/fixture", &json!(LTX_BOUNDED_CARRIER_FIXTURE))?;
     exact("/negative", &json!(false))?;
@@ -10737,9 +10779,11 @@ fn validate_ltx_bounded_campaign_entry(
             "decodeOverlap": LTX_CANARY_OVERLAP,
         }),
     )?;
+    // The three bounded campaign rows span q4, q8 and bf16, so the identity is resolved from the
+    // row's own tier: a bf16 row may not name the q4 cell's fingerprint.
     exact(
         "/calibrationFingerprint",
-        &json!(LTX_CALIBRATION_FINGERPRINT),
+        &json!(ltx_calibration_fingerprint(spec.tier)?),
     )?;
     exact("/fixture", &json!(spec.fixture))?;
     exact("/negative", &json!(false))?;
@@ -12080,12 +12124,17 @@ fn validate_ltx_canary_plan_for(
             profile.fixture()
         ));
     }
-    if planned
+    // The canary is the frozen q4 row — the `target.tier` check above refuses anything else — so
+    // the identity it must name is the q4 member of the family, never the calibrated tier's key.
+    let expected_fingerprint = ltx_calibration_fingerprint("q4")?;
+    let planned_fingerprint = planned
         .get("calibrationFingerprint")
         .and_then(Value::as_str)
-        != Some(LTX_CALIBRATION_FINGERPRINT)
-    {
-        return Err("LTX safety canary fingerprint does not match the pinned provider".to_owned());
+        .ok_or_else(|| "planned.calibrationFingerprint must be a string".to_owned())?;
+    if planned_fingerprint != expected_fingerprint {
+        return Err(format!(
+            "LTX safety canary fingerprint does not match the pinned provider: plan={planned_fingerprint}, q4 identity={expected_fingerprint}"
+        ));
     }
     if planned_load_shape(request)? != LoadShape::EagerMaterialization {
         return Err("LTX safety canary requires eager_materialization".to_owned());
@@ -12588,9 +12637,12 @@ fn run_ltx_canary_for(request: &Value, profile: LtxCanaryProfile) -> Result<Valu
         .calibration
         .as_ref()
         .ok_or_else(|| "pinned LTX-2.3 contract has no calibration identity".to_owned())?;
-    if calibration.fingerprint != LTX_CALIBRATION_FINGERPRINT {
+    // The canary loads the frozen q4 artifact (`ltx_load_spec(request, "q4", ..)` above), so the
+    // loaded contract must publish the q4 member of the identity family.
+    let expected_fingerprint = ltx_calibration_fingerprint("q4")?;
+    if calibration.fingerprint != expected_fingerprint {
         return Err(format!(
-            "pinned LTX-2.3 contract fingerprint changed: expected {LTX_CALIBRATION_FINGERPRINT}, got {}",
+            "pinned LTX-2.3 contract fingerprint changed: expected {expected_fingerprint}, got {}",
             calibration.fingerprint
         ));
     }
@@ -12817,14 +12869,17 @@ fn run_ltx_with_admission(
         ));
     }
     let (fps, seed) = planned_ltx_capture(request, tier, geometry)?;
+    // The identity is derived from the PLANNED tier: the engine keys calibration on
+    // `(provider, artifact-proven tier)`, so a q4 plan may not name the q8 cell's key.
+    let expected_fingerprint = ltx_calibration_fingerprint(tier)?;
     let planned_fingerprint = protocol::planned(request)?
         .get("calibrationFingerprint")
         .and_then(Value::as_str)
         .ok_or_else(|| "planned.calibrationFingerprint must be a string".to_owned())?;
-    if planned_fingerprint != LTX_CALIBRATION_FINGERPRINT {
+    if planned_fingerprint != expected_fingerprint {
         return Err(format!(
             "plan/adapter calibration mismatch: plan={planned_fingerprint}, MLX LTX-2.3 arm \
-             implements {LTX_CALIBRATION_FINGERPRINT}"
+             implements {expected_fingerprint} for tier {tier}"
         ));
     }
     match admission {
@@ -12870,9 +12925,9 @@ fn run_ltx_with_admission(
         .calibration
         .as_ref()
         .ok_or_else(|| "pinned LTX-2.3 contract has no calibration identity".to_owned())?;
-    if calibration.fingerprint != LTX_CALIBRATION_FINGERPRINT {
+    if calibration.fingerprint != expected_fingerprint {
         return Err(format!(
-            "pinned LTX-2.3 contract fingerprint changed: expected {LTX_CALIBRATION_FINGERPRINT}, got {}",
+            "pinned LTX-2.3 contract fingerprint changed for tier {tier}: expected {expected_fingerprint}, got {}",
             calibration.fingerprint
         ));
     }
@@ -13505,8 +13560,12 @@ fn prevalidate_ltx_campaign_entry(request: &Value) -> Result<(), String> {
         .get("calibrationFingerprint")
         .and_then(Value::as_str)
         .ok_or_else(|| "planned.calibrationFingerprint must be a string".to_owned())?;
-    if planned_fingerprint != LTX_CALIBRATION_FINGERPRINT {
-        return Err("SC-20191 campaign entry calibration fingerprint changed".to_owned());
+    let expected_fingerprint = ltx_calibration_fingerprint(tier)?;
+    if planned_fingerprint != expected_fingerprint {
+        return Err(format!(
+            "SC-20191 campaign entry calibration fingerprint changed: plan={planned_fingerprint}, \
+             tier {tier} identity={expected_fingerprint}"
+        ));
     }
     validate_ltx_campaign_entry(request, tier, geometry, &selection)
 }
@@ -13523,8 +13582,12 @@ fn prevalidate_ltx_bounded_campaign_entry(request: &Value) -> Result<(), String>
         .get("calibrationFingerprint")
         .and_then(Value::as_str)
         .ok_or_else(|| "planned.calibrationFingerprint must be a string".to_owned())?;
-    if planned_fingerprint != LTX_CALIBRATION_FINGERPRINT {
-        return Err("SC-20318 bounded campaign calibration fingerprint changed".to_owned());
+    let expected_fingerprint = ltx_calibration_fingerprint(tier)?;
+    if planned_fingerprint != expected_fingerprint {
+        return Err(format!(
+            "SC-20318 bounded campaign calibration fingerprint changed: plan={planned_fingerprint}, \
+             tier {tier} identity={expected_fingerprint}"
+        ));
     }
     validate_ltx_bounded_campaign_entry(request, tier, geometry, &selection)
 }
@@ -13543,8 +13606,12 @@ fn prevalidate_ltx_bounded_carrier_proof(
         .get("calibrationFingerprint")
         .and_then(Value::as_str)
         .ok_or_else(|| "planned.calibrationFingerprint must be a string".to_owned())?;
-    if planned_fingerprint != LTX_CALIBRATION_FINGERPRINT {
-        return Err("SC-20254 bounded-carrier calibration fingerprint changed".to_owned());
+    let expected_fingerprint = ltx_calibration_fingerprint(tier)?;
+    if planned_fingerprint != expected_fingerprint {
+        return Err(format!(
+            "SC-20254 bounded-carrier calibration fingerprint changed: plan={planned_fingerprint}, \
+             tier {tier} identity={expected_fingerprint}"
+        ));
     }
     validate_ltx_bounded_carrier_proof(request, tier, geometry, &selection)?;
     let host_memory = request
@@ -13589,8 +13656,14 @@ fn run_ltx_bounded_carrier_proof(request: &Value) -> Result<Value, String> {
         .calibration
         .as_ref()
         .ok_or_else(|| "pinned LTX-2.3 contract has no calibration identity".to_owned())?;
-    if calibration.fingerprint != LTX_CALIBRATION_FINGERPRINT {
-        return Err("SC-20254 pinned provider calibration identity changed".to_owned());
+    // The carrier proof loads the frozen q4 artifact above, so the loaded contract must publish the
+    // q4 member of the identity family.
+    let expected_fingerprint = ltx_calibration_fingerprint("q4")?;
+    if calibration.fingerprint != expected_fingerprint {
+        return Err(format!(
+            "SC-20254 pinned provider calibration identity changed: expected {expected_fingerprint}, got {}",
+            calibration.fingerprint
+        ));
     }
     let decode_plan = LtxDecodePlan::resolve_for_selection(&selection, geometry)?;
     decode_plan.validate_selected_strategy(&selection)?;
@@ -15065,7 +15138,8 @@ const BERNINI_ARMS: [BerniniArm; 2] = [BERNINI_VIDEO_ARM, BERNINI_IMAGE_ARM];
 /// table, so a drift is caught at the pin bump rather than in a record.
 fn bernini_calibration_fingerprint(tier: &str) -> String {
     if tier == BERNINI_CALIBRATED_TIER {
-        runtime_macos::providers::bernini::memory_strategy::MEMORY_CALIBRATION_FINGERPRINT.to_owned()
+        runtime_macos::providers::bernini::memory_strategy::MEMORY_CALIBRATION_FINGERPRINT
+            .to_owned()
     } else {
         format!("bernini-image-{tier}-mlx-dual-expert-ladder-v1")
     }
@@ -15195,7 +15269,8 @@ fn bernini_target(request: &Value) -> Result<(BerniniArm, BerniniGeometry), Stri
             "{BERNINI_VIDEO_LABEL} requires geometry.batch == 1, got {batch}"
         ));
     }
-    let geometry = validate_bernini_geometry(arm, axis("width")?, axis("height")?, axis("frames")?)?;
+    let geometry =
+        validate_bernini_geometry(arm, axis("width")?, axis("height")?, axis("frames")?)?;
     Ok((arm, geometry))
 }
 
@@ -15280,7 +15355,11 @@ impl BerniniArtifact {
 ///   declaration evaluator. The ANCHOR is the plain resident cell, so this arm executes the eager
 ///   resident shape the cold load actually takes and attests the loaded contract's own
 ///   `load_shape` back against it.
-fn bernini_load_spec(request: &Value, tier: &str, load_shape: LoadShape) -> Result<BerniniArtifact, String> {
+fn bernini_load_spec(
+    request: &Value,
+    tier: &str,
+    load_shape: LoadShape,
+) -> Result<BerniniArtifact, String> {
     let repository = protocol::required_env("SCENEWORKS_BERNINI_REPOSITORY")?;
     let revision = protocol::required_env("SCENEWORKS_BERNINI_REVISION")?;
     protocol::validate_artifact_identity(&repository, &revision, protocol::BERNINI_REPOSITORY)?;
@@ -15368,10 +15447,16 @@ fn bernini_context(
 /// drift silently at a pin bump; `None` executes exactly what the worker's cold render executes
 /// (`video_jobs/bernini.rs` leaves both at the engine defaults too) and is identical across the
 /// measured render and its warm repeats, which is all the determinism comparison needs.
-fn bernini_request(arm: BerniniArm, geometry: BerniniGeometry, fps: u32, seed: u64) -> GenerationRequest {
+fn bernini_request(
+    arm: BerniniArm,
+    geometry: BerniniGeometry,
+    fps: u32,
+    seed: u64,
+) -> GenerationRequest {
     GenerationRequest {
-        prompt: "a slow crane over a terracotta rooftop at golden hour, swallows turning, cinematic"
-            .to_owned(),
+        prompt:
+            "a slow crane over a terracotta rooftop at golden hour, swallows turning, cinematic"
+                .to_owned(),
         width: geometry.width,
         height: geometry.height,
         count: 1,
@@ -19623,7 +19708,8 @@ mod ltx_tests {
                     "engagedRungs": ["resident", "staged_residency"],
                     "parameters": {}
                 },
-                "calibrationFingerprint": LTX_CALIBRATION_FINGERPRINT,
+                "calibrationFingerprint": ltx_calibration_fingerprint("q8")
+                    .expect("q8 is a shipped LTX tier"),
                 "_measurementSafety": {
                     "disposition": LTX_SAFETY_REFUSED_OPEN,
                     "tierInventoryBytes": LTX_Q8_INVENTORY_BYTES,
@@ -19670,7 +19756,8 @@ mod ltx_tests {
                         "decodeOverlap": LTX_CANARY_OVERLAP,
                     },
                 },
-                "calibrationFingerprint": LTX_CALIBRATION_FINGERPRINT,
+                "calibrationFingerprint": ltx_calibration_fingerprint("q4")
+                    .expect("q4 is a shipped LTX tier"),
                 "fixture": LTX_CANARY_FIXTURE,
                 "_watchdog": {
                     "maxFootprintBytes": LTX_CANARY_MAX_FOOTPRINT_BYTES,
@@ -19852,6 +19939,10 @@ mod ltx_tests {
         let mut request = ltx_bounded_campaign_request_json();
         let spec = ltx_bounded_campaign_spec(tier).expect("test tier must be allowlisted");
         request["planned"]["target"]["tier"] = json!(spec.tier);
+        // The identity is keyed on (provider, tier): a q8 or bf16 row carries its OWN member of the
+        // family, never the q4 key the base carrier request was built with.
+        request["planned"]["calibrationFingerprint"] =
+            json!(ltx_calibration_fingerprint(spec.tier).expect("allowlisted tier"));
         request["planned"]["logicalCaseId"] = json!(spec.logical_case_id);
         request["planned"]["fixture"] = json!(spec.fixture);
         request["planned"]["_boundedCampaignEntry"]["identity"] = json!(spec.identity);
@@ -19960,6 +20051,13 @@ mod ltx_tests {
             for (pointer, mutation) in [
                 ("/action", json!("run")),
                 ("/planned/target/tier", json!("q4")),
+                // The q4 cell's identity is FOREIGN to a q8 or bf16 row: calibration is keyed on
+                // (provider, artifact-proven tier), so borrowing the calibrated family's other
+                // member must be refused before the row can cost a load.
+                (
+                    "/planned/calibrationFingerprint",
+                    json!(ltx_calibration_fingerprint("q4").unwrap()),
+                ),
                 (
                     "/planned/logicalCaseId",
                     json!(LTX_BOUNDED_CAMPAIGN_LOGICAL_CASE_ID),
@@ -21077,6 +21175,79 @@ mod ltx_tests {
         let error = run_ltx(&ltx_request_json(768, 512, 1))
             .expect_err("a video arm must not capture a still");
         assert!(error.contains("duration/fps envelope"), "{error}");
+    }
+
+    /// The three `mlx:ltx_2_3` identities are ONE family minted off the engine's retained key: the
+    /// calibrated tier IS that key byte-for-byte, and each other shipped tier is the same stem and
+    /// version with its own tier token. Everything derivable at the pin is derived from
+    /// [`mlx_gen_ltx::memory_strategy::CALIBRATION_FINGERPRINT`], so a re-fingerprinted or
+    /// re-versioned engine key reds here rather than in a capture.
+    #[test]
+    fn the_ltx_identity_family_is_the_engines_retained_key_with_a_tier_token() {
+        let retained = mlx_gen_ltx::memory_strategy::CALIBRATION_FINGERPRINT;
+        assert_eq!(
+            ltx_calibration_fingerprint(LTX_CALIBRATED_TIER).unwrap(),
+            retained,
+            "the calibrated cell must reproduce the engine's retained key byte-for-byte"
+        );
+        let (stem, version) = retained
+            .rsplit_once("-mlx-memory-ladder-")
+            .unwrap_or_else(|| panic!("{retained} is not an LTX memory-ladder key"));
+        assert!(
+            !stem.ends_with(&format!("-{LTX_CALIBRATED_TIER}")),
+            "the retained key carries no tier token, so it is the family's bare member: {retained}"
+        );
+        let mut identities = std::collections::BTreeSet::new();
+        for tier in LTX_TIERS {
+            let expected = if tier == LTX_CALIBRATED_TIER {
+                retained.to_owned()
+            } else {
+                format!("{stem}-{tier}-mlx-memory-ladder-{version}")
+            };
+            assert_eq!(
+                ltx_calibration_fingerprint(tier).unwrap(),
+                expected,
+                "the {tier} cell must be the engine's key carrying its own tier token"
+            );
+            assert!(
+                identities.insert(expected),
+                "{tier} reuses another tier's identity"
+            );
+        }
+        assert_eq!(identities.len(), LTX_TIERS.len());
+    }
+
+    /// A tier the family does not ship has no identity and is refused BY NAME, rather than
+    /// interpolated into a plausible key no production load can return.
+    #[test]
+    fn a_tier_the_ltx_family_does_not_ship_has_no_identity() {
+        for tier in ["fp8", "q6", "", "Q4"] {
+            let error = ltx_calibration_fingerprint(tier)
+                .expect_err("an unshipped tier must not mint an identity");
+            assert!(
+                error.contains(&format!("{tier:?}")) && error.contains("no production identity"),
+                "{error}"
+            );
+        }
+    }
+
+    /// The plan's tier chooses the identity: a q8 plan naming the q4 cell's key is refused before
+    /// any environment or weight work, naming both strings and the tier.
+    #[test]
+    fn a_plan_naming_another_tiers_ltx_identity_is_refused_before_the_load() {
+        let mut request = ltx_request_json(768, 512, 97);
+        let foreign = ltx_calibration_fingerprint("q4").unwrap();
+        request["planned"]["calibrationFingerprint"] = json!(foreign);
+        let error = run_ltx(&request).expect_err("a foreign tier identity is not capturable");
+        assert!(
+            error.contains("plan/adapter calibration mismatch")
+                && error.contains(&foreign)
+                && error.contains(&ltx_calibration_fingerprint("q8").unwrap())
+                && error.contains("tier q8"),
+            "{error}"
+        );
+        // Not an env error: the refusal fired before `SCENEWORKS_LTX_*` was read.
+        assert!(!error.contains("required environment variable"), "{error}");
     }
 
     #[test]
