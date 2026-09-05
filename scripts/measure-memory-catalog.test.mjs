@@ -23,10 +23,12 @@ import {
   capturedInCampaign,
   classifyAnchor,
   compiledInferencePin,
+  familyFor,
   hubRoots,
   failureReason,
   extractSeedingNewAnchors,
   SEED_DIGEST,
+  SENSENOVA_DISTILL_MERGED_MARKER,
   measureAnchor,
   parseArgs,
   providerCommand,
@@ -36,7 +38,7 @@ import {
   snapshotPath,
   tierDownload,
 } from "./measure-memory-catalog.mjs";
-import { LTX25_LANE_PROVIDERS } from "./memory-calibration-harness.mjs";
+import { ANCHOR_STRATEGY, LTX25_LANE_PROVIDERS } from "./memory-calibration-harness.mjs";
 
 const execFileAsync = promisify(execFile);
 const REVISION = "0123456789abcdef0123456789abcdef01234567";
@@ -239,6 +241,67 @@ test("each SD3.5 member binds its OWN artifact family on both lanes", async () =
     const medium = await classifyAnchor(`sd3_5_medium:q8:${backend}`, { provider: "sd3_5_medium" }, context);
     assert.equal(medium.status, "weights_missing", `${backend}: ${medium.reason}`);
     assert.match(medium.reason, /SceneWorks\/sd3\.5-medium-mlx@[0-9a-f]{8}\/q8/);
+  }
+});
+
+// sc-22734 review. Nine `_fast` MLX cells hard-fail at capture — after the load, hours into a
+// booked session — when a `_fast` tier root carries no `distill_merged.json`: both engines withhold
+// the production calibration identity without it, so the harness sees an identity mismatch rather
+// than a classification. `classifyAnchor` now reads the marker off the resolved tier root and
+// refuses the cell by name before anything is scheduled.
+test("a _fast sensenova tier root without the pre-merge marker is refused by name, not scheduled", async () => {
+  const REPO = "SceneWorks/sensenova-u1-8b-fast-mlx";
+  const models = [
+    { id: "sensenova_u1_8b_fast", downloads: [{ repo: REPO, revision: REVISION, variant: "q4", files: ["q4/*"] }] },
+    { id: "sensenova_u1_8b", downloads: [{ repo: "SceneWorks/sensenova-u1-8b-mlx", revision: REVISION, variant: "q4", files: ["q4/*"] }] },
+  ];
+  const hub = await fakeHub([
+    [REPO, REVISION, "q4"],
+    ["SceneWorks/sensenova-u1-8b-mlx", REVISION, "q4"],
+  ]);
+  const planned = { provider: "sensenova_u1_8b_fast" };
+  for (const backend of ["mlx", "candle"]) {
+    const context = { models, backend, hubs: [hub], current: new Map(), captured: new Map() };
+
+    // The marker is absent: refused by NAME, and the reason cites the file and the root.
+    const refused = await classifyAnchor(`sensenova_u1_8b_fast:q4:${backend}`, planned, context);
+    assert.equal(refused.status, "weights_missing", `${backend}: ${refused.reason}`);
+    assert.match(refused.reason, new RegExp(SENSENOVA_DISTILL_MERGED_MARKER.replace(".", "\\.")));
+    assert.match(refused.reason, /calibration identity/);
+    assert.ok(
+      refused.reason.includes(snapshotPath(hub, REPO, REVISION, "q4")),
+      `${backend}: the refusal names the tier root it probed`,
+    );
+
+    // The QUALITY route declares no marker requirement, so the same hub runs it — proving the
+    // probe is scoped to the `_fast` rows and is not a new blanket requirement.
+    const quality = await classifyAnchor(
+      `sensenova_u1_8b:q4:${backend}`,
+      { provider: "sensenova_u1_8b" },
+      context,
+    );
+    assert.equal(quality.status, "runnable", `${backend}: ${quality.reason}`);
+  }
+
+  // Write the marker and the same cell becomes runnable on both lanes.
+  await writeFile(path.join(snapshotPath(hub, REPO, REVISION, "q4"), SENSENOVA_DISTILL_MERGED_MARKER), "{}\n");
+  for (const backend of ["mlx", "candle"]) {
+    const context = { models, backend, hubs: [hub], current: new Map(), captured: new Map() };
+    const runnable = await classifyAnchor(`sensenova_u1_8b_fast:q4:${backend}`, planned, context);
+    assert.equal(runnable.status, "runnable", `${backend}: ${runnable.reason}`);
+    assert.equal(runnable.env.SCENEWORKS_SENSENOVA_U1_8B_FAST_ROOT, snapshotPath(hub, REPO, REVISION, "q4"));
+  }
+});
+
+// Every `_fast` family row declares the marker requirement, and no quality row does — derived from
+// the table, so a seventh route added to either half is covered with no edit here.
+test("the marker requirement is declared on exactly the _fast sensenova family rows", () => {
+  const sensenova = Object.entries(PROVIDER_FAMILIES).filter(([, row]) =>
+    typeof row.provider === "string" && row.provider.startsWith("sensenova_u1_8b"));
+  assert.ok(sensenova.length > 0, "the table declares SenseNova rows");
+  for (const [modelId, row] of sensenova) {
+    const expected = row.provider === "sensenova_u1_8b_fast" ? [SENSENOVA_DISTILL_MERGED_MARKER] : undefined;
+    assert.deepEqual(row.requiredTierFiles, expected, modelId);
   }
 });
 
@@ -756,8 +819,12 @@ test("every provider the committed plan declares is either served by a family ro
       assert.ok(["runnable", "weights_missing", "no_adapter_arm", "harness_unsupported", "lane_undeclared", "provider_undeclared"].includes(row.status), `${row.key}: ${row.status}`);
       if (row.status === "lane_undeclared") assert.match(row.reason, /anchor-loader-closures\.json/);
       if (row.status === "provider_undeclared") assert.match(row.reason, /inference-provider-closures\.json/);
+      // sc-22734: the family is resolved by the SAME rule classification uses — model-keyed when
+      // the row declares the plan's provider, provider-keyed otherwise — so this coverage check
+      // cannot drift from what `--list` actually did.
+      const family = familyFor(row.modelId, row.provider);
       if (row.status === "no_adapter_arm") {
-        assert.equal(PROVIDER_FAMILIES[row.provider]?.arms.includes(backend) ?? false, false);
+        assert.equal(family?.arms.includes(backend) ?? false, false);
       } else if (!["harness_unsupported", "lane_undeclared", "provider_undeclared"].includes(row.status)) {
         // A served provider must resolve a manifest download, or the classification could not name a root.
         tierDownload(models, row.modelId, providerFamily(row.provider, row.modelId).repo, row.tier);
@@ -1068,6 +1135,115 @@ test("the sana and chroma1 families are measurable on every shipped tier of ever
   assert.equal(gaps.length, 0, gapReport(gaps));
 });
 
+// sc-22734. Same shape claim, for the SenseNova-U1 family: six catalog models on TWO engine ids
+// (`sensenova_u1_8b` and its 8-step distill `sensenova_u1_8b_fast`), each shipping its own
+// independently pinned tiered rehost, all six routed on both lanes.
+const SENSENOVA_FAMILY = Object.freeze([
+  "sensenova_u1_8b",
+  "sensenova_u1_8b_infographic_v2",
+  "sensenova_u1_8b_infographic_v3",
+  "sensenova_u1_8b_fast",
+  "sensenova_u1_8b_infographic_v2_fast",
+  "sensenova_u1_8b_infographic_v3_fast",
+]);
+
+test("the sensenova family is measurable on every shipped tier of every routed lane", async () => {
+  const family = SENSENOVA_FAMILY;
+  const cells = (await shippedTieredCells()).filter((cell) => family.includes(cell.modelId));
+  assert.equal(cells.length, family.length * 3 * 2, "six routes x three shipped tiers x two routed lanes");
+  const gaps = (await measurabilityGaps()).filter((gap) => family.includes(gap.modelId));
+  assert.equal(gaps.length, 0, gapReport(gaps));
+});
+
+// The JS table and the Rust adapters are two spellings of ONE binding. A drift between them sends a
+// capture at the wrong artifact family — the infographic ids all ride a shared engine id, so a wrong
+// env would silently load the base SenseNova rehost and re-label its peaks — and nothing downstream
+// would notice, because the record would be well-formed. Bound here rather than trusted.
+test("every sensenova env family and repository is the one the adapter binaries actually read", async () => {
+  const lib = await readFile(path.join(ROOT, ADAPTER_LIB_PATH), "utf8");
+  const repositories = new Map(
+    [...lib.matchAll(/pub const ([A-Z0-9_]+_REPOSITORY): &str =\s*"([^"]+)";/g)].map((match) => [match[2], match[1]]),
+  );
+  const binaries = {
+    mlx: await readFile(path.join(ROOT, "crates/sceneworks-memory-adapter/src/bin/mlx.rs"), "utf8"),
+    candle: await readFile(path.join(ROOT, "crates/sceneworks-memory-adapter/src/bin/candle.rs"), "utf8"),
+  };
+  let checked = 0;
+  for (const id of SENSENOVA_FAMILY) {
+    const family = PROVIDER_FAMILIES[id];
+    assert.ok(family, `${id} has no PROVIDER_FAMILIES row`);
+    for (const backend of family.arms) {
+      assert.ok(
+        repositories.has(family.repo),
+        `${id}:${backend}: ${family.repo} is not a *_REPOSITORY const in ${ADAPTER_LIB_PATH}`,
+      );
+      for (const suffix of ["REPOSITORY", "REVISION", "ROOT"]) {
+        const name = `SCENEWORKS_${family.env}_${suffix}`;
+        assert.ok(
+          binaries[backend].includes(`"${name}"`),
+          `${id}:${backend}: the ${backend} adapter never reads ${name}`,
+        );
+      }
+      checked += 1;
+    }
+  }
+  assert.equal(checked, SENSENOVA_FAMILY.length * 2, "six routes, two lanes each");
+});
+
+/**
+ * sc-22734. The anchor composition is fixed per lane by the harness (`ANCHOR_STRATEGY`), and a plan
+ * row may override it only where the provider CONTRACT refuses the lane default: SenseNova
+ * classifies `StagedResidency` as `StructurallyNotApplicable` on both lanes, so
+ * `contract.validate_selection` would reject the candle default rung before any weight is read.
+ *
+ * The override is therefore DERIVED, not curated: the manifest's own
+ * `<lane>.memoryStrategyStructuralExemptions` is the architecture evidence, and the rule below
+ * reads the whole plan against it — a row's effective rung must be the lane default UNLESS the
+ * manifest exempts that default, in which case it must be `resident`. On the candle lane that is
+ * exactly "resident if and only if `staged_residency` is exempted"; on MLX the default is already
+ * resident, so an exemption moves nothing. No list of model ids and no count lives here: a newly
+ * exempt model, or a withdrawn exemption, moves the requirement on its own.
+ */
+test("an anchor row plans the lane's default rung unless the manifest exempts it", async () => {
+  const plan = await readPlan();
+  const models = new Map((await readManifestModels()).map((model) => [model.id, model]));
+  let overridden = 0;
+  let candleExempt = 0;
+  for (const [key, anchor] of Object.entries(plan.anchors)) {
+    const { modelId, backend } = anchorParts(key);
+    const model = models.get(modelId);
+    // A plan row for a model the manifest does not ship cannot be judged against manifest evidence;
+    // `validatePlan` already refuses an invented model id, so this only skips fixture rows.
+    if (!model) continue;
+    const exemptions = model[backend]?.memoryStrategyStructuralExemptions ?? {};
+    const exempt = Object.hasOwn(exemptions, "staged_residency");
+    // The exemption is scoped to the overlays it names, and an anchor renders exactly one.
+    if (exempt) {
+      assert.ok(
+        (exemptions.staged_residency.overlays ?? []).includes(anchor.overlay),
+        `${key}: the manifest exempts staged_residency only for overlays ` +
+          `${JSON.stringify(exemptions.staged_residency.overlays)}, not ${JSON.stringify(anchor.overlay)}`,
+      );
+    }
+    const fallback = ANCHOR_STRATEGY[backend];
+    const expected = exempt && fallback.rung === "staged_residency"
+      ? { rung: "resident", engagedRungs: ["resident"] }
+      : { rung: fallback.rung, engagedRungs: [...fallback.engagedRungs] };
+    const effective = anchor.strategy ?? fallback;
+    assert.equal(
+      effective.rung,
+      expected.rung,
+      `${key}: manifest ${backend}.memoryStrategyStructuralExemptions ${exempt ? "declares" : "does not declare"} ` +
+        `staged_residency, so the anchor must plan rung ${JSON.stringify(expected.rung)}`,
+    );
+    assert.deepEqual([...effective.engagedRungs], expected.engagedRungs, `${key}: engaged rung set`);
+    if (anchor.strategy) overridden += 1;
+    if (exempt && backend === "candle") candleExempt += 1;
+  }
+  assert.ok(overridden > 0, "the plan exercises the override at least once");
+  assert.ok(candleExempt > 0, "at least one candle row is exempted from the lane's default rung");
+});
+
 // Each Mage variant binds TWO artifact triples: its OWN tiered rehost (never a sibling's — the six
 // checkpoints are architecturally identical, so a crossed root would be caught by nothing else) and
 // the ONE shared components snapshot. This asserts the derivation produces exactly that.
@@ -1272,7 +1448,11 @@ test("every planned sd3.5 fingerprint is one its lane's declaration can emit", a
 test("PROVIDER_FAMILIES repos are the adapter's *_REPOSITORY constants", async () => {
   const lib = await readFile(path.join(ROOT, ADAPTER_LIB_PATH), "utf8");
   const declared = new Set();
-  for (const match of lib.matchAll(/pub const [A-Z0-9_]+_REPOSITORY: &str = "([^"]+)";/g)) {
+  // `\s*` after the `=`, not a space (sc-22734): rustfmt wraps the initializer onto its own line
+  // whenever the declaration exceeds the width, which four of the six SenseNova repository consts
+  // do. A single-space pattern reads those four as UNDECLARED and fails a lane that is in fact
+  // bound — the binding this case exists to check is the const's VALUE, not its line breaks.
+  for (const match of lib.matchAll(/pub const [A-Z0-9_]+_REPOSITORY: &str =\s*"([^"]+)";/g)) {
     declared.add(match[1]);
   }
   assert.ok(declared.size > 0, "lib.rs declares repository constants");

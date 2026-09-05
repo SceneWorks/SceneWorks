@@ -76,6 +76,35 @@ pub const CHROMA1_HD_REPOSITORY: &str = "SceneWorks/chroma1-hd-mlx";
 pub const CHROMA1_BASE_REPOSITORY: &str = "SceneWorks/chroma1-base-mlx";
 /// See [`CHROMA1_HD_REPOSITORY`].
 pub const CHROMA1_FLASH_REPOSITORY: &str = "SceneWorks/chroma1-flash-mlx";
+// sc-22734. The SenseNova-U1 FAMILY: SIX catalog models the worker routes onto TWO engine ids on
+// both lanes — `sensenova_u1_8b` for the quality trio and `sensenova_u1_8b_fast` for the 8-step
+// distilled trio (`crates/sceneworks-worker/src/engines.rs` `MODEL_TABLE`) — each with its own
+// independently pinned tiered rehost (`q4/ q8/ bf16/`, `mlx.standardTierLayout`). The engine id is
+// NOT the artifact identity here: both engines already enumerate all six public routes
+// (`QUALITY_PUBLIC_ROUTES` / `FAST_PUBLIC_ROUTES`) and refuse a `LoadSpec` whose
+// `resolved_route` names a repository the path does not carry
+// (`validate_resolved_artifact_binding`), so an anchor must bind the exact model's artifact family
+// or it would re-label the base model's peaks as an infographic finetune's.
+/// The base SenseNova-U1 8B tiered rehost — the `sensenova_u1_8b` route of the quality engine.
+pub const SENSENOVA_U1_8B_REPOSITORY: &str = "SceneWorks/sensenova-u1-8b-mlx";
+/// The Infographic V2 finetune's own rehost. Tensor-compatible with the base checkpoint but an
+/// independently resolved artifact, so it binds its own `SCENEWORKS_SENSENOVA_U1_8B_INFOGRAPHIC_V2_*`
+/// family.
+pub const SENSENOVA_U1_8B_INFOGRAPHIC_V2_REPOSITORY: &str =
+    "SceneWorks/sensenova-u1-8b-infographic-v2-mlx";
+/// The Infographic V3 finetune's own rehost.
+pub const SENSENOVA_U1_8B_INFOGRAPHIC_V3_REPOSITORY: &str =
+    "SceneWorks/sensenova-u1-8b-infographic-v3-mlx";
+/// The 8-step distilled base variant. A SEPARATE re-host, not the base weights plus an adapter:
+/// the distill LoRA is pre-merged at convert time and each tier subdir carries the
+/// `distill_merged.json` marker the engine's `load_fast` reads, so nothing is attached at load.
+pub const SENSENOVA_U1_8B_FAST_REPOSITORY: &str = "SceneWorks/sensenova-u1-8b-fast-mlx";
+/// The distilled Infographic V2 variant's own rehost.
+pub const SENSENOVA_U1_8B_INFOGRAPHIC_V2_FAST_REPOSITORY: &str =
+    "SceneWorks/sensenova-u1-8b-infographic-v2-fast-mlx";
+/// The distilled Infographic V3 variant's own rehost.
+pub const SENSENOVA_U1_8B_INFOGRAPHIC_V3_FAST_REPOSITORY: &str =
+    "SceneWorks/sensenova-u1-8b-infographic-v3-fast-mlx";
 /// The Z-Image-Turbo tiered rehost. Serves the `z_image_turbo` provider AND the `z_image_edit`
 /// catalog alias (the worker routes `z_image_edit` to the Turbo weights driven in `edit_image`
 /// mode — `crates/sceneworks-worker/src/engines.rs`), on both adapters, through the
@@ -2032,6 +2061,78 @@ mod tests {
             SDXL_REPOSITORY
         )
         .is_err());
+    }
+
+    /// sc-22734. Each of the SIX SenseNova rehosts is its own artifact identity: a root under one
+    /// member's repository can never satisfy another member's plan, and a wrong tier suffix can
+    /// never satisfy this one. Six independently pinned rehosts behind two engine ids is exactly
+    /// the shape where binding the ENGINE would let one member's peaks be recorded as another's.
+    #[test]
+    fn every_sensenova_member_identity_rejects_a_sibling_repository_and_a_wrong_tier() {
+        let revision = "0123456789abcdef0123456789abcdef01234567";
+        let family = [
+            SENSENOVA_U1_8B_REPOSITORY,
+            SENSENOVA_U1_8B_INFOGRAPHIC_V2_REPOSITORY,
+            SENSENOVA_U1_8B_INFOGRAPHIC_V3_REPOSITORY,
+            SENSENOVA_U1_8B_FAST_REPOSITORY,
+            SENSENOVA_U1_8B_INFOGRAPHIC_V2_FAST_REPOSITORY,
+            SENSENOVA_U1_8B_INFOGRAPHIC_V3_FAST_REPOSITORY,
+        ];
+        let mut unique = family.to_vec();
+        unique.sort_unstable();
+        unique.dedup();
+        assert_eq!(
+            unique.len(),
+            family.len(),
+            "two SenseNova members share a rehost, so one member's anchor could bind the other's"
+        );
+        for repository in family {
+            let root = PathBuf::from(format!(
+                "/cache/models--{}/snapshots/{revision}/q8",
+                repository.replace('/', "--")
+            ));
+            assert!(
+                validate_huggingface_snapshot_root(&root, repository, revision, "q8", repository)
+                    .is_ok(),
+                "{repository}"
+            );
+            // The upstream ungated snapshot is not the tiered rehost the anchor measures.
+            assert!(
+                validate_huggingface_snapshot_root(
+                    &root,
+                    "sensenova/SenseNova-U1-8B-MoT",
+                    revision,
+                    "q8",
+                    repository
+                )
+                .is_err(),
+                "{repository}"
+            );
+            // A q8 root cannot satisfy a q4 plan.
+            assert!(
+                validate_huggingface_snapshot_root(&root, repository, revision, "q4", repository)
+                    .is_err(),
+                "{repository}"
+            );
+            // And no SIBLING member's root can satisfy this member's plan.
+            for sibling in family.iter().filter(|other| **other != repository) {
+                let sibling_root = PathBuf::from(format!(
+                    "/cache/models--{}/snapshots/{revision}/q8",
+                    sibling.replace('/', "--")
+                ));
+                assert!(
+                    validate_huggingface_snapshot_root(
+                        &sibling_root,
+                        repository,
+                        revision,
+                        "q8",
+                        repository
+                    )
+                    .is_err(),
+                    "{sibling} must not satisfy a {repository} plan"
+                );
+            }
+        }
     }
 
     /// The `mlx:minimax_h3` capture resolves TWO artifact triples, and the two are validated by

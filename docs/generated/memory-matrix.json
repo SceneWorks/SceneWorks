@@ -1,7 +1,7 @@
 {
   "schemaVersion": 11,
   "generatedFrom": {
-    "sceneWorksRevision": "source-tree:ae9ce4003bc95e3c3af21ac7ca6f946d42702a4aa907e03d26e2763bf96395a2",
+    "sceneWorksRevision": "source-tree:24281fec799329b09d8c3549617f3f78ca1ed39550615a20fbdc158b3c086764",
     "sources": {
       "manifest": {
         "path": "config/manifests/builtin.models.jsonc",
@@ -57,11 +57,11 @@
       },
       "mlxFitGate": {
         "path": "crates/sceneworks-worker/src/mlx_fit_gate.rs",
-        "sha256": "f47b6397ca11423d78f679bb0b3b26d270b29f52b85e537944cd3c244b1228e0"
+        "sha256": "b695a98e2ab0f4b00a724cc4584f7e874331d6a3ee1e9996ceda9723bd33b9ef"
       },
       "memoryRouteRegistry": {
         "path": "crates/sceneworks-worker/src/memory_route_registry.rs",
-        "sha256": "3413e12f1d40cf3cf4f5191636d00f9d246c82388daa513fdc21a046a89f62bd"
+        "sha256": "557836c3ff734d351e991c6cf3b3c684ea058eb44a03b7cc87ff280a14997257"
       },
       "instantId": {
         "path": "crates/sceneworks-worker/src/image_jobs/instantid.rs",
@@ -73,11 +73,11 @@
       },
       "anchorLoaderClosures": {
         "path": "config/anchor-loader-closures.json",
-        "sha256": "40899500d7e5ad1f8611c0819efaa0f779c4c6f78d2e67b9bb88c2b29325039a"
+        "sha256": "155506a77d4dc292eedf08644694c36f26e1af43d130389deb488c2ab29ac78e"
       },
       "anchorDerivation": {
         "path": "crates/sceneworks-core/src/memory_anchor.rs",
-        "sha256": "6b2aeeb9e383d4a003d56e635de7fa428cec33fd4f26c684353063977391e218"
+        "sha256": "001d836cb33b8291a07bda86dc2686dfefd1dc7d1a16d633cddefc5e982c5ecb"
       },
       "anchorAdmission": {
         "path": "crates/sceneworks-worker/src/video_admission.rs",
@@ -89,11 +89,11 @@
       },
       "anchorAdmissionImageCandle": {
         "path": "crates/sceneworks-worker/src/candle_memory_strategy.rs",
-        "sha256": "0c20230ff45efb00d599d3c69bd9000dc5686d716ab0ee14b401650b03049739"
+        "sha256": "162884ad7f4465e72ee5811a335f1bf10ed64885ce34445916f11f3f053d0d5f"
       },
       "anchorExtractor": {
         "path": "scripts/extract-memory-anchors.mjs",
-        "sha256": "c6914eaeb8e6fd77ceab49d0e877b03e1b489cfcba34e9e756608f87cbe9a328"
+        "sha256": "39ac782417a1d7aea31b3dfa5f5b35ee06f82e8058fd45365223f7e7d7e9aca3"
       }
     }
   },

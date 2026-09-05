@@ -400,23 +400,60 @@ export function phaseAllocatorEnvelopes(record) {
  *
  * An unknown lane has no law to mirror and gets no opinion.
  */
-export function isDerivable(candidate) {
+export function isDerivable(candidate, stagedExemptLanes = EMPTY_LANE_SET) {
   const regime = candidate.measuredRegime;
   if (candidate.backend === "mlx") {
     return true;
   }
   if (candidate.backend === "candle") {
+    // sc-22734: a provider whose contract classifies `staged_residency` STRUCTURALLY NOT
+    // APPLICABLE has no staged composition to have been measured in, so for those cells the law's
+    // admissible anchor is the RESIDENT render instead — and only the resident one. The asymmetry
+    // above rests on the staged anchor being the shallower of two real compositions; where staging
+    // is structurally impossible there is no co-resident encoder above the anchor to go unpriced,
+    // which is exactly the case `MemoryAnchor::derive_image_phase_peaks` now admits.
+    const stagedExempt = stagedExemptLanes.has(
+      `${candidate.modelId}:${candidate.backend}`,
+    );
     return (
       candidate.transformerVariant === null &&
       candidate.decoder === null &&
       candidate.geometry?.frames === 1 &&
-      regime?.staged === true &&
+      regime?.staged === !stagedExempt &&
       regime?.decodeTiled === false &&
       regime?.attentionChunked === false &&
       regime?.transformerWindowed === false
     );
   }
   return true;
+}
+
+/** Shared empty set, so the default argument allocates nothing per call. */
+const EMPTY_LANE_SET = new Set();
+
+/**
+ * The `<modelId>:<backend>` lanes whose manifest declares `staged_residency` a STRUCTURAL
+ * exemption — the architecture evidence behind
+ * `MemoryAnchor::staged_residency_structurally_not_applicable`.
+ *
+ * Derived from the checked-in manifest, never a hand-kept list: each exemption carries
+ * `evidence[].source` naming the engine's own `memory_strategy.rs`, which is where the
+ * classification actually lives. A model that later gains a separable conditioning component loses
+ * its exemption in the manifest and its cells go back to needing a staged anchor, with no second
+ * edit here.
+ */
+export function stagedResidencyExemptLanes(manifest) {
+  const lanes = new Set();
+  for (const model of manifest?.models ?? []) {
+    for (const backend of ["mlx", "candle"]) {
+      if (
+        model[backend]?.memoryStrategyStructuralExemptions?.staged_residency
+      ) {
+        lanes.add(`${model.id}:${backend}`);
+      }
+    }
+  }
+  return lanes;
 }
 
 /**
@@ -432,11 +469,14 @@ export function isDerivable(candidate) {
  * which reads as coverage and admits nothing: krea's resident-only capture is the largest envelope
  * its corpus retains AND the one composition `derive_image_phase_peaks` refuses.
  */
-export function selectRepresentative(candidates) {
+export function selectRepresentative(
+  candidates,
+  stagedExemptLanes = EMPTY_LANE_SET,
+) {
   return candidates.reduce((best, candidate) => {
     if (best === null) return candidate;
-    const candidateDerivable = isDerivable(candidate);
-    if (candidateDerivable !== isDerivable(best))
+    const candidateDerivable = isDerivable(candidate, stagedExemptLanes);
+    if (candidateDerivable !== isDerivable(best, stagedExemptLanes))
       return candidateDerivable ? candidate : best;
     // sc-22667 (D3): an MLX render whose window opened above its materialized resident set
     // outranks one measured on a cold first request, whatever their envelopes — the cold record's
@@ -525,8 +565,17 @@ export function currencyAttestationFor(previousStore, anchorId) {
 }
 
 /** Serialise one candidate into the store's anchor shape (field order is the file's field order). */
-function anchorRow(candidate, catalogCell, previousStore, underivedReason) {
+function anchorRow(
+  candidate,
+  catalogCell,
+  previousStore,
+  underivedReason,
+  stagedExemptLanes = EMPTY_LANE_SET,
+) {
   const id = anchorId(candidate);
+  const stagedExempt = stagedExemptLanes.has(
+    `${candidate.modelId}:${candidate.backend}`,
+  );
   const loaderClosureDigest = loaderClosureDigestFor(previousStore, id);
   const currencyAttestation = currencyAttestationFor(previousStore, id);
   return {
@@ -583,6 +632,11 @@ function anchorRow(candidate, catalogCell, previousStore, underivedReason) {
     // `Some` when the anchor validates its measured point but no lane law may derive from it,
     // with the stated per-model reason (epic 22505 feature-end fix round). Absent otherwise.
     ...(underivedReason === null ? {} : { underivedReason }),
+    // sc-22734: the engine's own structural classification, from the manifest exemption whose
+    // evidence names its `memory_strategy.rs`. Emitted only when true, so every row that predates
+    // the field stays byte-identical and keeps the staged-only law (`#[serde(default)]` on the
+    // Rust side). Last, matching `MemoryAnchor`'s field order.
+    ...(stagedExempt ? { stagedResidencyStructurallyNotApplicable: true } : {}),
   };
 }
 
@@ -606,7 +660,9 @@ function anchorRow(candidate, catalogCell, previousStore, underivedReason) {
  * is about WHICH composition was measured, not about fitting anything.
  *
  * Candle anchors take no reason here: `isDerivable` already refuses to ANCHOR a candle cell from
- * a composition the candle law rejects, so every candle anchor that exists is derivable.
+ * a composition the candle law rejects, so every candle anchor that exists is derivable. That
+ * stays true after sc-22734 widened WHICH composition the law accepts on a structurally
+ * staging-free lane: `isDerivable` was widened in lockstep, so the two still agree exactly.
  */
 export function underivedReasonFor(candidate) {
   if (candidate.backend !== "mlx") return null;
@@ -1011,6 +1067,7 @@ export function assertEveryDerivableCorpusIsPackaged(
   corpora,
   packaged,
   catalogByCell,
+  stagedExemptLanes = EMPTY_LANE_SET,
 ) {
   const lapsed = [];
   for (const corpus of corpora) {
@@ -1019,7 +1076,7 @@ export function assertEveryDerivableCorpusIsPackaged(
     for (const record of corpus.records) {
       const candidate = anchorCandidate(record, corpus);
       if (candidate === null || candidate.overlay !== null) continue;
-      if (!isDerivable(candidate)) continue;
+      if (!isDerivable(candidate, stagedExemptLanes)) continue;
       const key = cellKey(
         candidate.modelId,
         candidate.backend,
@@ -1351,6 +1408,10 @@ export async function buildAnchorStore({
   const manifestBody = await readFile(path.join(root, MANIFEST_PATH), "utf8");
   const manifest = JSON.parse(stripJsoncComments(manifestBody));
   const manifestSha256 = sha256(manifestBody);
+  // sc-22734: the lanes whose engine has no staged composition at all, derived from the manifest's
+  // own structural exemptions. Threaded into every derivability decision below so the ONE anchor
+  // such a cell can be captured in — the resident render — is admitted rather than discarded.
+  const stagedExemptLanes = stagedResidencyExemptLanes(manifest);
   const pin = inferencePin(await readFile(path.join(root, PIN_PATH), "utf8"));
   // The store's own previous content, read for ONE field: each anchor's frozen currency key. See
   // `loaderClosureDigestFor` for why that field is carried rather than re-derived.
@@ -1396,7 +1457,12 @@ export async function buildAnchorStore({
   const packagedSources = packagedAnchorSources(
     await readFile(path.join(root, PACKAGED_SOURCES_PATH), "utf8"),
   );
-  assertEveryDerivableCorpusIsPackaged(corpora, packagedSources, catalogByCell);
+  assertEveryDerivableCorpusIsPackaged(
+    corpora,
+    packagedSources,
+    catalogByCell,
+    stagedExemptLanes,
+  );
   const byIdentity = new Map();
   for (const corpus of corpora) {
     if (!packagedSources.has(corpus.path)) continue;
@@ -1423,12 +1489,12 @@ export async function buildAnchorStore({
   }
   const extracted = new Map();
   for (const [key, candidates] of byIdentity) {
-    const chosen = selectRepresentative(candidates);
+    const chosen = selectRepresentative(candidates, stagedExemptLanes);
     // A cell whose every retained render is in a composition the lane's law refuses is NOT
     // anchored: the row would be rejected on every lookup, so it would read as coverage while
     // admitting nothing. It falls through to the analytic-only pass below, where its largest
     // envelope is cited as `measured_envelope` — the honest classification for it.
-    if (!isDerivable(chosen)) continue;
+    if (!isDerivable(chosen, stagedExemptLanes)) continue;
     const cell = catalogByCell.get(
       cellKey(chosen.modelId, chosen.backend, chosen.tier),
     );
@@ -1439,6 +1505,7 @@ export async function buildAnchorStore({
         cell,
         previousStore,
         underivedReasonFor(chosen),
+        stagedExemptLanes,
       ),
     );
   }
