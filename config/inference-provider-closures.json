@@ -66,6 +66,27 @@
       "sharedContractFileCount": 83,
       "lockedPackageCount": 247
     },
+    "candle:flux2_klein_9b": {
+      "crate": "crates/media/candle-gen/candle-gen-flux2",
+      "digest": "85eee72aeb0f64b2a5dc5778498f3162fb3fb4fbcf41adf6b5c8afde556d340f",
+      "sharedContractDigest": "0db42a4d6362d5449e53e1e122cbc3c7a934bfffb350b99e5001fa43033661ce",
+      "closureCrates": [
+        "crates/contracts/core-llm",
+        "crates/contracts/gen-core",
+        "crates/llm/candle-llm",
+        "crates/media/candle-gen/candle-gen",
+        "crates/media/candle-gen/candle-gen-flux2",
+        "crates/media/candle-gen/candle-gen-pid",
+        "crates/media/candle-gen/vendor/candle-kernels"
+      ],
+      "universalCrates": [
+        "crates/contracts/core-llm",
+        "crates/contracts/gen-core"
+      ],
+      "sourceFileCount": 167,
+      "sharedContractFileCount": 83,
+      "lockedPackageCount": 247
+    },
     "candle:krea_2_turbo": {
       "crate": "crates/media/candle-gen/candle-gen-krea",
       "digest": "b390d132cb02c2bc66a2e12aa894d8153d58761fe314f31183641e4d6c266777",
@@ -302,6 +323,26 @@
     "mlx:flux2_dev": {
       "crate": "crates/media/mlx-gen/mlx-gen-flux2",
       "digest": "2cfbffcc3f4e6b3dd9d8a41c4b09f6dd0b5d61f982977dadc73dfbfc384964ad",
+      "sharedContractDigest": "0db42a4d6362d5449e53e1e122cbc3c7a934bfffb350b99e5001fa43033661ce",
+      "closureCrates": [
+        "crates/contracts/core-llm",
+        "crates/contracts/gen-core",
+        "crates/llm/mlx-llm",
+        "crates/media/mlx-gen",
+        "crates/media/mlx-gen/mlx-gen-flux2",
+        "crates/media/mlx-gen/mlx-gen-pid"
+      ],
+      "universalCrates": [
+        "crates/contracts/core-llm",
+        "crates/contracts/gen-core"
+      ],
+      "sourceFileCount": 147,
+      "sharedContractFileCount": 83,
+      "lockedPackageCount": 183
+    },
+    "mlx:flux2_klein_9b": {
+      "crate": "crates/media/mlx-gen/mlx-gen-flux2",
+      "digest": "d8cee1d0ebd0e0596f4cc078f91da76ba3e91ebe7283162222a7e25d521d3c87",
       "sharedContractDigest": "0db42a4d6362d5449e53e1e122cbc3c7a934bfffb350b99e5001fa43033661ce",
       "closureCrates": [
         "crates/contracts/core-llm",

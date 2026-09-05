@@ -62,6 +62,117 @@ const Z_IMAGE_PLAIN_EXECUTION_PATH: &str = "the Candle Z-Image base-model text-t
 /// The label the Z-Image base arm refuses a non-still geometry under; see
 /// [`still_calibration_label`].
 const Z_IMAGE_STILL_CALIBRATION: &str = "Candle Z-Image base-model calibration";
+/// The FLUX.2 family on Candle (sc-22727). `candle-gen-flux2` registers exactly two txt2img
+/// providers — the 32B `flux2_dev` flagship and the distilled `flux2_klein_9b` — and the worker
+/// routes THREE catalog models onto them (`crates/sceneworks-worker/src/engines.rs`):
+/// `flux2_dev`, `flux2_klein_9b`, and the separately distilled `flux2_klein_9b_kv`, which shares
+/// the klein engine id and differs only in its artifact. There is no inline arm: every FLUX.2
+/// anchor is a five-rung reference capture.
+const FLUX2_DEV_ID: &str = "flux2_dev";
+const FLUX2_KLEIN_ID: &str = "flux2_klein_9b";
+const FLUX2_DEV_PLAIN_EXECUTION_PATH: &str = "the Candle FLUX.2-dev base-only text-to-image path";
+const FLUX2_KLEIN_PLAIN_EXECUTION_PATH: &str =
+    "the Candle FLUX.2-klein-9B base-only text-to-image path";
+const FLUX2_KLEIN_KV_PLAIN_EXECUTION_PATH: &str =
+    "the Candle FLUX.2-klein-9B KV-cache base-only text-to-image path";
+const FLUX2_DEV_STILL_CALIBRATION: &str = "Candle FLUX.2-dev base calibration";
+const FLUX2_KLEIN_STILL_CALIBRATION: &str = "Candle FLUX.2-klein-9B base calibration";
+const FLUX2_KLEIN_KV_STILL_CALIBRATION: &str = "Candle FLUX.2-klein-9B KV calibration";
+
+/// One member of the Candle FLUX.2 family, resolved from the plan's `(target.provider,
+/// target.modelId)`. Two members share `provider` and are told apart ONLY by `model_id`, which is
+/// also what the worker binds as `LoadSpec::resolved_route`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Flux2Arm {
+    /// The registry id handed to `catalog.media().load` — the production loader (E4).
+    provider: &'static str,
+    /// The catalog model id: the anchor key's `modelId` and the load spec's `resolved_route`.
+    model_id: &'static str,
+    execution_path: &'static str,
+    /// The still-geometry refusal label (sc-18808).
+    still_calibration: &'static str,
+    repository_env: &'static str,
+    revision_env: &'static str,
+    root_env: &'static str,
+    expected_repository: &'static str,
+    /// The record's diagnostics source, `memory-candle-adapter:<slug>-five-rung-reference`.
+    slug: &'static str,
+    /// Whether the planned tier's quant reaches the loader as `LoadSpec::quantize` — the same
+    /// per-member fact the MLX arm carries, and the worker's own Candle decision:
+    /// `candle_quant_for_resolved_tier` (`image_jobs/base.rs`) returns `(None, resolved_bits)` for
+    /// a dense-TE turnkey (`is_dense_te_tier`, gated on the manifest's
+    /// `mlx.denseTextEncoderTier: true`, which BOTH klein entries declare), and folds the tier
+    /// otherwise. `candle-gen-flux2` quantizes the DiT on-the-fly whenever `spec.quantize` is set,
+    /// so a klein q4/q8 spec carrying the quant would re-quantize an already-packed transformer and
+    /// measure a load the app never performs (E4). Dev takes the fold; both klein members do not.
+    tier_quant_reaches_the_loader: bool,
+}
+
+const FLUX2_DEV_ARM: Flux2Arm = Flux2Arm {
+    provider: FLUX2_DEV_ID,
+    model_id: "flux2_dev",
+    execution_path: FLUX2_DEV_PLAIN_EXECUTION_PATH,
+    still_calibration: FLUX2_DEV_STILL_CALIBRATION,
+    repository_env: "SCENEWORKS_FLUX2_REPOSITORY",
+    revision_env: "SCENEWORKS_FLUX2_REVISION",
+    root_env: "SCENEWORKS_FLUX2_ROOT",
+    expected_repository: protocol::FLUX2_REPOSITORY,
+    slug: "flux2-dev",
+    tier_quant_reaches_the_loader: true,
+};
+
+const FLUX2_KLEIN_ARM: Flux2Arm = Flux2Arm {
+    provider: FLUX2_KLEIN_ID,
+    model_id: "flux2_klein_9b",
+    execution_path: FLUX2_KLEIN_PLAIN_EXECUTION_PATH,
+    still_calibration: FLUX2_KLEIN_STILL_CALIBRATION,
+    repository_env: "SCENEWORKS_FLUX2_KLEIN_REPOSITORY",
+    revision_env: "SCENEWORKS_FLUX2_KLEIN_REVISION",
+    root_env: "SCENEWORKS_FLUX2_KLEIN_ROOT",
+    expected_repository: protocol::FLUX2_KLEIN_REPOSITORY,
+    slug: "flux2-klein-9b",
+    tier_quant_reaches_the_loader: false,
+};
+
+const FLUX2_KLEIN_KV_ARM: Flux2Arm = Flux2Arm {
+    provider: FLUX2_KLEIN_ID,
+    model_id: "flux2_klein_9b_kv",
+    execution_path: FLUX2_KLEIN_KV_PLAIN_EXECUTION_PATH,
+    still_calibration: FLUX2_KLEIN_KV_STILL_CALIBRATION,
+    repository_env: "SCENEWORKS_FLUX2_KLEIN_KV_REPOSITORY",
+    revision_env: "SCENEWORKS_FLUX2_KLEIN_KV_REVISION",
+    root_env: "SCENEWORKS_FLUX2_KLEIN_KV_ROOT",
+    expected_repository: protocol::FLUX2_KLEIN_KV_REPOSITORY,
+    slug: "flux2-klein-9b-kv",
+    tier_quant_reaches_the_loader: false,
+};
+
+const FLUX2_ARMS: [Flux2Arm; 3] = [FLUX2_DEV_ARM, FLUX2_KLEIN_ARM, FLUX2_KLEIN_KV_ARM];
+
+/// Which FLUX.2 member the plan asks for, or `None` when the plan is not a FLUX.2 one at all.
+/// A FLUX.2 provider with a model id no member serves is an ERROR, not a `None`: the KV plan must
+/// never be satisfied by the base klein artifact, which shares the provider id.
+fn flux2_arm(request: &Value) -> Result<Option<Flux2Arm>, String> {
+    let provider = planned_provider(request)?;
+    if !FLUX2_ARMS.iter().any(|arm| arm.provider == provider) {
+        return Ok(None);
+    }
+    let model_id = protocol::planned(request)?
+        .pointer("/target/modelId")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "planned.target.modelId must be a string".to_owned())?;
+    FLUX2_ARMS
+        .into_iter()
+        .find(|arm| arm.provider == provider && arm.model_id == model_id)
+        .map(Some)
+        .ok_or_else(|| {
+            format!(
+                "the Candle FLUX.2 arm does not implement provider {provider:?} for model \
+                 {model_id:?}"
+            )
+        })
+}
+
 /// The two FLUX.1 base text-to-image providers (sc-22726). Registry ids of `candle-gen-flux`'s
 /// registered generators (`candle_gen_flux::FLUX1_DEV_ID` / `FLUX1_SCHNELL_ID`) — the same ids the
 /// worker hands `inference_runtime::load` for the `flux_dev` / `flux_schnell` catalog models
@@ -692,6 +803,10 @@ fn plain_execution_path(request: &Value) -> Result<&'static str, String> {
         }),
         // sc-22724: the undistilled base is its own registry id with its own artifact family.
         "z_image" => Ok(Z_IMAGE_PLAIN_EXECUTION_PATH),
+        // sc-22727: three catalog models over two registry ids; the member decides the path.
+        FLUX2_DEV_ID | FLUX2_KLEIN_ID => Ok(flux2_arm(request)?
+            .expect("a FLUX.2 provider always resolves a member or errors")
+            .execution_path),
         // sc-22726: the two FLUX.1 base providers ride the same five-rung reference path.
         "flux1_dev" => Ok(FLUX1_DEV_PLAIN_EXECUTION_PATH),
         "flux1_schnell" => Ok(FLUX1_SCHNELL_PLAIN_EXECUTION_PATH),
@@ -727,6 +842,9 @@ fn still_calibration_label(request: &Value) -> Result<&'static str, String> {
             Z_IMAGE_TURBO_STILL_CALIBRATION
         }),
         Z_IMAGE_ID => Ok(Z_IMAGE_STILL_CALIBRATION),
+        FLUX2_DEV_ID | FLUX2_KLEIN_ID => Ok(flux2_arm(request)?
+            .expect("a FLUX.2 provider always resolves a member or errors")
+            .still_calibration),
         FLUX1_DEV_ID => Ok(FLUX1_DEV_STILL_CALIBRATION),
         FLUX1_SCHNELL_ID => Ok(FLUX1_SCHNELL_STILL_CALIBRATION),
         PULID_FLUX_ID => Ok(PULID_FLUX_STILL_CALIBRATION),
@@ -994,6 +1112,21 @@ fn load_five_rung_generator(request: &Value) -> Result<LoadedFiveRungGenerator, 
                 "SCENEWORKS_Z_IMAGE_BASE_ROOT",
                 protocol::Z_IMAGE_BASE_REPOSITORY,
             ),
+            // sc-22727. Each FLUX.2 catalog model binds its OWN artifact family, so a KV plan can
+            // never be satisfied by the base klein rehost even though both load through
+            // `flux2_klein_9b`.
+            FLUX2_DEV_ID | FLUX2_KLEIN_ID => {
+                let arm = flux2_arm(request)?
+                    .expect("a FLUX.2 provider always resolves a member or errors");
+                (
+                    arm.provider,
+                    arm.execution_path,
+                    arm.repository_env,
+                    arm.revision_env,
+                    arm.root_env,
+                    arm.expected_repository,
+                )
+            }
             // sc-22726. PuLID is a BESPOKE route: `candle-gen-pulid` registers no `Generator`, so
             // there is nothing for `catalog.media().load` to return and reaching here at all means
             // the dispatch in `run` was bypassed. Named rather than left to the catch-all so the
@@ -1057,12 +1190,35 @@ fn load_five_rung_generator(request: &Value) -> Result<LoadedFiveRungGenerator, 
         // carry no quant at all (`Quant::None` — the same shape the worker's `tier_to_quant` uses).
         (KREA_ID, Some(quant)) => spec.with_quant(quant),
         (KREA_ID, None) => spec,
+        // FLUX.2 is per MEMBER (sc-22727 review): the dev route folds the planned tier the way the
+        // worker's `candle_quant_for_resolved_tier` does, while both klein turnkeys are dense-TE
+        // tiers the worker loads with `(None, resolved_bits)` — `candle-gen-flux2` quantizes the DiT
+        // on-the-fly whenever `spec.quantize` is set, so folding it on a packed klein tier would
+        // re-quantize the transformer and measure a load the app never performs. bf16 carries
+        // `Quant::None` on every member, the worker's `tier_to_quant`.
+        (FLUX2_DEV_ID | FLUX2_KLEIN_ID, Some(quant)) => {
+            let arm =
+                flux2_arm(request)?.expect("a FLUX.2 provider always resolves a member or errors");
+            if arm.tier_quant_reaches_the_loader {
+                spec.with_quant(quant)
+            } else {
+                spec
+            }
+        }
+        (FLUX2_DEV_ID | FLUX2_KLEIN_ID, None) => spec,
         // Qwen, Z-Image-Turbo and the Z-Image base packed Diffusers snapshots declare their
         // device-format quantization in transformer/config.json (`snapshot_quant_tier` in
         // candle-gen-z-image's memory_strategy.rs). Passing LoadSpec.quant would request a second,
         // unsupported runtime quantization pass — every one of those loaders rejects it by name —
         // instead of loading the packed artifact as authored.
         _ => spec,
+    };
+    // The catalog model id reaches the engine as `resolved_route` — the same lever the worker
+    // sets (`image_jobs/base.rs`, `spec.with_resolved_route(request.model)`), and the only thing
+    // that distinguishes two catalog models sharing one registry id (sc-22727).
+    let spec = match flux2_arm(request)? {
+        Some(arm) => spec.with_resolved_route(arm.model_id),
+        None => spec,
     };
     // sc-22726: the FLUX.1 base snapshots declare their packed tier the same way; the directory
     // name proved nothing about the weights, so read the tier off the transformer config before
@@ -1335,6 +1491,12 @@ fn run_five_rung_reference_loaded(
             "the Candle Z-Image base lane; it intentionally remains gated because this run does ",
             "not repeat the full promotion-quality, negative-mutation, and lifecycle scenario suite"
         )
+    } else if provider_id == FLUX2_DEV_ID || provider_id == FLUX2_KLEIN_ID {
+        concat!(
+            "sc-22727 anchor capture measures exact per-phase memory and strategy identity for ",
+            "the Candle FLUX.2 lanes; it intentionally remains gated because this run does not ",
+            "repeat the full promotion-quality, negative-mutation, and lifecycle scenario suite"
+        )
     } else if provider_id == FLUX1_DEV_ID {
         concat!(
             "sc-22726 anchor capture measures exact per-phase memory and strategy identity for ",
@@ -1375,10 +1537,17 @@ fn run_five_rung_reference_loaded(
                 // sc-22724: `provider_id` is `z_image_turbo` for BOTH the text-to-image and the
                 // edit capture, so the route has to be in the source or the two records are
                 // indistinguishable by their own diagnostics. Mirrors `ZImageArm::slug` on MLX.
-                &format!(
-                    "memory-candle-adapter:{provider_id}{}-five-rung-reference",
-                    if edit { "-edit" } else { "" }
-                ),
+                // `provider_id` is `z_image_turbo` for BOTH the Turbo text-to-image and the edit
+                // capture (sc-22724), and `flux2_klein_9b` for BOTH klein catalog models
+                // (sc-22727), so the route has to be in the source or the records are
+                // indistinguishable by their own diagnostics. Mirrors the MLX arms' slugs.
+                &match flux2_arm(request)? {
+                    Some(arm) => format!("memory-candle-adapter:{}-five-rung-reference", arm.slug),
+                    None => format!(
+                        "memory-candle-adapter:{provider_id}{}-five-rung-reference",
+                        if edit { "-edit" } else { "" }
+                    ),
+                },
                 "executed",
                 [blocker.to_owned()],
                 [
@@ -2492,6 +2661,9 @@ fn routes_to_five_rung_reference(request: &Value) -> Result<bool, String> {
         || provider == QWEN_ID
         || provider == Z_IMAGE_TURBO_ID
         || provider == Z_IMAGE_ID
+        // sc-22727: neither FLUX.2 provider has an inline arm on this adapter either.
+        || provider == FLUX2_DEV_ID
+        || provider == FLUX2_KLEIN_ID
         || provider == FLUX1_DEV_ID
         || provider == FLUX1_SCHNELL_ID)
 }
@@ -4069,6 +4241,14 @@ mod tests {
         still_planned_case_with_fixture(provider, rung, frames, "fresh-five-rung-unused")
     }
 
+    /// The same shape with the CATALOG model id spelled independently of the provider — the axis
+    /// the two klein models differ on (sc-22727).
+    fn still_planned_case_for(provider: &str, model_id: &str, rung: &str, frames: u64) -> Value {
+        let mut planned = still_planned_case(provider, rung, frames);
+        planned["target"]["modelId"] = json!(model_id);
+        planned
+    }
+
     /// The same shape in a declared plan mode. `edit_image` on the Turbo provider is the
     /// `z_image_edit` route (sc-22724), which is its own execution path with its own refusal label.
     fn still_planned_case_in_mode(provider: &str, rung: &str, frames: u64, mode: &str) -> Value {
@@ -4125,8 +4305,9 @@ mod tests {
     /// `run_five_rung_batch`'s on the strength of them still being there.
     #[test]
     fn every_candle_arm_still_refuses_a_multi_frame_geometry() {
-        for (provider, mode, label, fixture) in [
+        for (provider, model_id, mode, label, fixture) in [
             (
+                QWEN_ID,
                 QWEN_ID,
                 "text_to_image",
                 QWEN_STILL_CALIBRATION,
@@ -4134,11 +4315,13 @@ mod tests {
             ),
             (
                 KREA_ID,
+                KREA_ID,
                 "text_to_image",
                 KREA_STILL_CALIBRATION,
                 "fresh-five-rung-unused",
             ),
             (
+                Z_IMAGE_TURBO_ID,
                 Z_IMAGE_TURBO_ID,
                 "text_to_image",
                 Z_IMAGE_TURBO_STILL_CALIBRATION,
@@ -4148,19 +4331,45 @@ mod tests {
             // (sc-22724): the two Turbo rows must not report the same sentence.
             (
                 Z_IMAGE_TURBO_ID,
+                Z_IMAGE_TURBO_ID,
                 "edit_image",
                 Z_IMAGE_TURBO_EDIT_STILL_CALIBRATION,
                 "fresh-five-rung-unused",
             ),
             (
                 Z_IMAGE_ID,
+                Z_IMAGE_ID,
                 "text_to_image",
                 Z_IMAGE_STILL_CALIBRATION,
+                "fresh-five-rung-unused",
+            ),
+            // sc-22727: three FLUX.2 catalog models over two registry ids. The two klein rows share
+            // `flux2_klein_9b` and must NOT report the same sentence.
+            (
+                FLUX2_DEV_ID,
+                "flux2_dev",
+                "text_to_image",
+                FLUX2_DEV_STILL_CALIBRATION,
+                "fresh-five-rung-unused",
+            ),
+            (
+                FLUX2_KLEIN_ID,
+                "flux2_klein_9b",
+                "text_to_image",
+                FLUX2_KLEIN_STILL_CALIBRATION,
+                "fresh-five-rung-unused",
+            ),
+            (
+                FLUX2_KLEIN_ID,
+                "flux2_klein_9b_kv",
+                "text_to_image",
+                FLUX2_KLEIN_KV_STILL_CALIBRATION,
                 "fresh-five-rung-unused",
             ),
             // The inline Krea arm — a real shipped plan fixture, which the rows above cannot
             // reach.
             (
+                KREA_ID,
                 KREA_ID,
                 "text_to_image",
                 KREA_STILL_CALIBRATION,
@@ -4171,12 +4380,13 @@ mod tests {
                 let expected = format!("{label} requires geometry.frames == 1, got {frames}");
                 let mut planned =
                     still_planned_case_with_fixture(provider, "resident", frames, fixture);
+                planned["target"]["modelId"] = json!(model_id);
                 planned["target"]["mode"] = json!(mode);
                 let request = json!({ "action": "run", "planned": planned });
                 assert_eq!(
                     run(&request).expect_err("the Candle dispatcher must refuse a video geometry"),
                     expected,
-                    "run: {provider}/{mode} at frames={frames} via fixture {fixture:?}"
+                    "run: {provider}/{model_id}/{mode} at frames={frames} via fixture {fixture:?}"
                 );
             }
         }
@@ -4257,6 +4467,111 @@ mod tests {
         }
     }
 
+    /// sc-22727: the FLUX.2 family is three catalog models over two registry ids, and each member
+    /// carries its OWN execution path, refusal label, artifact family and diagnostics slug. Two
+    /// members share `flux2_klein_9b`, so `modelId` — never `provider` — is the discriminator, and
+    /// a pair no member serves is refused by name rather than measured as its nearest neighbour.
+    #[test]
+    fn the_candle_flux2_family_is_resolved_from_the_plans_provider_and_model_id() {
+        for (provider, model_id, expected) in [
+            (FLUX2_DEV_ID, "flux2_dev", FLUX2_DEV_ARM),
+            (FLUX2_KLEIN_ID, "flux2_klein_9b", FLUX2_KLEIN_ARM),
+            (FLUX2_KLEIN_ID, "flux2_klein_9b_kv", FLUX2_KLEIN_KV_ARM),
+        ] {
+            let request =
+                json!({ "planned": still_planned_case_for(provider, model_id, "resident", 1) });
+            assert_eq!(flux2_arm(&request).unwrap(), Some(expected));
+            assert_eq!(
+                plain_execution_path(&request).unwrap(),
+                expected.execution_path
+            );
+            assert_eq!(
+                still_calibration_label(&request).unwrap(),
+                expected.still_calibration
+            );
+            // No inline arm exists for FLUX.2, so every fixture routes to the five-rung path.
+            assert!(routes_to_five_rung_reference(&request).unwrap());
+        }
+        for (provider, model_id) in [
+            (FLUX2_DEV_ID, "flux2_klein_9b"),
+            (FLUX2_KLEIN_ID, "flux2_dev"),
+            // A real catalog model on the klein provider that this adapter does NOT serve: its
+            // snapshot is an assembled convert dir, not a tiered rehost.
+            (FLUX2_KLEIN_ID, "flux2_klein_9b_true_v2"),
+        ] {
+            let request =
+                json!({ "planned": still_planned_case_for(provider, model_id, "resident", 1) });
+            let error = flux2_arm(&request).expect_err("an unserved pair must be refused by name");
+            assert!(
+                error.contains(&format!("provider {provider:?} for model {model_id:?}")),
+                "{provider}/{model_id}: {error}"
+            );
+            // And the refusal reaches the callers rather than being swallowed into a default path.
+            assert_eq!(plain_execution_path(&request).unwrap_err(), error);
+            assert_eq!(still_calibration_label(&request).unwrap_err(), error);
+        }
+        // A non-FLUX.2 plan resolves no member at all, and says so without erroring.
+        assert_eq!(
+            flux2_arm(&json!({ "planned": still_planned_case(Z_IMAGE_ID, "resident", 1) }))
+                .unwrap(),
+            None
+        );
+        // Every member is distinguishable from every other on every identity axis: a collision
+        // would let one artifact satisfy another's plan, or make two records indistinguishable.
+        for field in [
+            FLUX2_ARMS.map(|arm| arm.model_id),
+            FLUX2_ARMS.map(|arm| arm.execution_path),
+            FLUX2_ARMS.map(|arm| arm.still_calibration),
+            FLUX2_ARMS.map(|arm| arm.repository_env),
+            FLUX2_ARMS.map(|arm| arm.revision_env),
+            FLUX2_ARMS.map(|arm| arm.root_env),
+            FLUX2_ARMS.map(|arm| arm.expected_repository),
+            FLUX2_ARMS.map(|arm| arm.slug),
+        ] {
+            let mut unique = field.to_vec();
+            unique.sort_unstable();
+            unique.dedup();
+            assert_eq!(unique.len(), FLUX2_ARMS.len(), "collision in {field:?}");
+        }
+        assert_eq!(FLUX2_KLEIN_ARM.provider, FLUX2_KLEIN_KV_ARM.provider);
+        assert_eq!(
+            FLUX2_KLEIN_ARM.expected_repository,
+            protocol::FLUX2_KLEIN_REPOSITORY
+        );
+        assert_eq!(
+            FLUX2_KLEIN_KV_ARM.expected_repository,
+            protocol::FLUX2_KLEIN_KV_REPOSITORY
+        );
+        // Which member hands the planned tier to the loader, stated as data (sc-22727 review):
+        // only dev folds it; both klein turnkeys are dense-TE tiers the worker loads with
+        // `Quant::None`, and candle-gen-flux2 would otherwise re-quantize their packed DiT.
+        assert_eq!(
+            FLUX2_ARMS.map(|arm| arm.tier_quant_reaches_the_loader),
+            [true, false, false],
+            "only the dev route folds the planned tier into LoadSpec::quantize"
+        );
+        // ...and bound to the manifest the worker reads that decision from: `is_dense_te_tier` is
+        // exactly `mlx.denseTextEncoderTier == true`, so the flag must be its negation per member.
+        let manifest: Value = serde_json::from_str(&sceneworks_core::jsonc::strip_jsonc_comments(
+            include_str!("../../../../config/manifests/builtin.models.jsonc"),
+        ))
+        .expect("the shipped models manifest parses");
+        for arm in FLUX2_ARMS {
+            let entry = manifest["models"]
+                .as_array()
+                .expect("models")
+                .iter()
+                .find(|entry| entry["id"] == arm.model_id)
+                .unwrap_or_else(|| panic!("{} is not a shipped model", arm.model_id));
+            let dense_te = entry["mlx"]["denseTextEncoderTier"] == json!(true);
+            assert_eq!(
+                arm.tier_quant_reaches_the_loader, !dense_te,
+                "{}: the worker loads a dense-TE tier with Quant::None (is_dense_te_tier)",
+                arm.model_id
+            );
+        }
+    }
+
     /// sc-22724: the `z_image_edit` route is the Turbo provider in `edit_image` mode — the same
     /// loader, a distinct execution path, and one reference on the request — and only the Turbo
     /// arm has that second mode.
@@ -4319,16 +4634,20 @@ mod tests {
     /// passes it on both Candle labels, so the refusals above cannot be an unconditional error.
     #[test]
     fn the_candle_still_geometry_guard_is_not_a_blanket_refusal() {
-        for provider in [
-            QWEN_ID,
-            KREA_ID,
-            Z_IMAGE_TURBO_ID,
-            Z_IMAGE_ID,
-            FLUX1_DEV_ID,
-            FLUX1_SCHNELL_ID,
-            PULID_FLUX_ID,
+        for (provider, model_id) in [
+            (QWEN_ID, QWEN_ID),
+            (KREA_ID, KREA_ID),
+            (Z_IMAGE_TURBO_ID, Z_IMAGE_TURBO_ID),
+            (Z_IMAGE_ID, Z_IMAGE_ID),
+            (FLUX2_DEV_ID, "flux2_dev"),
+            (FLUX2_KLEIN_ID, "flux2_klein_9b"),
+            (FLUX2_KLEIN_ID, "flux2_klein_9b_kv"),
+            (FLUX1_DEV_ID, FLUX1_DEV_ID),
+            (FLUX1_SCHNELL_ID, FLUX1_SCHNELL_ID),
+            (PULID_FLUX_ID, PULID_FLUX_ID),
         ] {
-            let request = json!({ "planned": still_planned_case(provider, "resident", 1) });
+            let request =
+                json!({ "planned": still_planned_case_for(provider, model_id, "resident", 1) });
             let label = still_calibration_label(&request).unwrap();
             protocol::validate_still_geometry(&request, label)
                 .unwrap_or_else(|error| panic!("{provider}: {error}"));
