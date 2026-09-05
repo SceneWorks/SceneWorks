@@ -101,6 +101,16 @@ export const PROVIDER_FAMILIES = Object.freeze({
       ],
     },
   },
+  // The SD3.5 family (sc-22730). Three DISTINCT engine providers, each with its own tiered rehost
+  // and therefore its own env family — unlike `z_image_edit`/`pulid_flux`, none of them is an alias
+  // for another's backbone, so serving one from another's artifact would re-label that route's
+  // peaks. The catalog model id equals the engine provider id on BOTH lanes (worker engines.rs sets
+  // `engine_id == sceneworks_id` for all three), so the anchor key's modelId and the plan row's
+  // provider are the same token and `tierDownload` resolves the same manifest entry either way.
+  // One `SceneWorks/sd3.5-<route>-mlx` repo serves both lanes at all three tiers.
+  sd3_5_large: { env: "SD3_5_LARGE", repo: "SceneWorks/sd3.5-large-mlx", arms: ["mlx", "candle"] },
+  sd3_5_large_turbo: { env: "SD3_5_LARGE_TURBO", repo: "SceneWorks/sd3.5-large-turbo-mlx", arms: ["mlx", "candle"] },
+  sd3_5_medium: { env: "SD3_5_MEDIUM", repo: "SceneWorks/sd3.5-medium-mlx", arms: ["mlx", "candle"] },
   minimax_h3: {
     env: "MINIMAX_H3", repo: "SceneWorks/minimax-h3-mlx", arms: ["mlx"],
     upstream: { env: "MINIMAX_H3_UPSTREAM", repo: "MiniMaxAI/MiniMax-H3" },

@@ -1,7 +1,7 @@
 {
   "schemaVersion": 11,
   "generatedFrom": {
-    "sceneWorksRevision": "source-tree:f8d73ca2ad6319cc8d215b8a647f31426a35fcad97c72ae82bfb84e60b49300d",
+    "sceneWorksRevision": "source-tree:90055cf52f6c5871e5132eab3f55aa38a300e9e8839ae0cdc5e3514c92619699",
     "sources": {
       "manifest": {
         "path": "config/manifests/builtin.models.jsonc",
@@ -73,7 +73,7 @@
       },
       "anchorLoaderClosures": {
         "path": "config/anchor-loader-closures.json",
-        "sha256": "13cdf54ebf06d36fc3bea62b9219d7a8de344cf0e1dc5ace7bc96b16f5a6a899"
+        "sha256": "026e6871b99f91509e3f2f1acf9debb6e8aa59ff6b074d7b595c0cd13853123c"
       },
       "anchorDerivation": {
         "path": "crates/sceneworks-core/src/memory_anchor.rs",
