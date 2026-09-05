@@ -7175,6 +7175,24 @@ mod tests {
                         gen_core::AdapterKind::Lora,
                     )]);
                 }
+                // sc-22726: production represents the PuLID identity overlay as the typed
+                // `LoadSpec::identity` seam — the adapter checkpoint, the EVA tower, and the
+                // directory the three face models are read out of by name
+                // (`image_jobs/pulid.rs::pulid_identity_weights`). All three slots are required by
+                // the loader, so a fixture must fill all three or the contract builder refuses.
+                "identity" => {
+                    spec.identity = Some(gen_core::IdentityWeights {
+                        encoder: Some(WeightsSource::File(std::path::PathBuf::from(
+                            "fixture-identity-encoder",
+                        ))),
+                        eva: Some(WeightsSource::File(std::path::PathBuf::from(
+                            "fixture-identity-eva",
+                        ))),
+                        face_dir: Some(WeightsSource::Dir(std::path::PathBuf::from(
+                            "fixture-identity-face",
+                        ))),
+                    });
+                }
                 other => panic!(
                     "planned MLX lane {provider}/{mode} names unmapped overlay {other}; teach the \
                      generic contract guard how production represents it"

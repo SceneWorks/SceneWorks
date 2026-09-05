@@ -515,23 +515,26 @@ test("windows-candle captures and schema-checks the SC-21714 Krea anchor record"
 
   const adapter = await source("crates/sceneworks-memory-adapter/src/bin/candle.rs");
   assert.match(adapter, /StableIdleConfig::new\(2\.0, 5, 64, 200\)/);
-  // A SHAPE claim, not a count (sc-22728 added a third capture path): EVERY VRAM probe in the
-  // Candle adapter must be the certifying one, which asserts a stable idle GPU before it samples.
-  // A frozen count would have let a new capture path introduce a bare `VramProbe::start_rendered()`
-  // as long as it also added a certifying one somewhere.
-  const probes = adapter.match(/let mut vram = [A-Za-z_:]+\(/g) ?? [];
-  const uncertified = probes.filter((probe) => probe !== "let mut vram = certifying_vram_probe(");
-  assert.ok(probes.length > 0, "the Candle adapter no longer probes VRAM at all");
-  // Every image-lane capture path certifies its idle GPU; LTX-2.5 is the one deliberate exception
-  // (`assert_idle(1.0)` — a video capture on a host it does not share). Asserting "all but that one"
-  // is the shape claim; the old exact count would have passed a NEW uncertified path as long as a
-  // certified one was added alongside it, which is how a contaminated anchor would ship.
+  // Every `vram` binding the adapter builds, as a MULTISET against an explicit allowlist
+  // (sc-22726 review): a set-of-distinct-spellings claim let a probe be deleted, a raw
+  // `VramProbe::new()` be added alongside, and the one known non-certifying probe hide, all green.
+  // Each entry is a probe expression and the number of arms that build it; the only probe that does
+  // not certify an idle GPU BEFORE it samples is the LTX-2.5 capture's, which proves idleness on
+  // its own rendered baseline instead because that arm renders first.
+  const probes = [...adapter.matchAll(/let mut vram\s*=\s*([^;]+);/g)].map((match) => match[1].trim());
+  const counts = new Map();
+  for (const probe of probes) counts.set(probe, (counts.get(probe) ?? 0) + 1);
   assert.deepEqual(
-    uncertified,
-    ["let mut vram = VramProbe::start_rendered("],
-    "a capture path samples VRAM without certifying an idle GPU first",
+    [...counts.entries()].sort(([a], [b]) => a.localeCompare(b)),
+    [
+      // Krea five-rung reference, PuLID-FLUX bespoke, the Qwen edit bespoke arm (sc-22728), and the
+      // inline Krea arm.
+      ["certifying_vram_probe()", 4],
+      // LTX-2.5: renders first, then proves idle on the rendered baseline.
+      ["VramProbe::start_rendered().assert_idle(1.0)", 1],
+    ],
+    "every Candle VRAM probe must be an allowlisted certifying spelling, at its expected count",
   );
-  assert.match(adapter, /VramProbe::start_rendered\(\)\.assert_idle\(1\.0\)/);
 });
 
 test("windows-candle routes weights dispatches to a real-weights runner, like the MLX lane", async () => {
@@ -1517,11 +1520,25 @@ test("memory adapters bind every emitted overlay verdict to the requested target
   assert.match(mlxQwenEdit, /let overlay_scenario = if loaded_adapters > 0 \{/);
   assert.match(mlxQwenEdit, /\("builtInAdapters", "count", loaded_adapters as u64\)/);
   assert.match(mlxQwenEdit, /if loaded_adapters == 0 \{\s*protocol::settle_plain_overlay_scenario\(/);
-  assert.doesNotMatch(
-    candle,
-    /"status":\s*"gated"/,
+  // A hand-rolled `"status": "gated"` object is what must not silently ship with `overlay` left at
+  // `not_run`. One arm builds its fragment by hand for a real reason — sc-22726's bespoke PuLID
+  // capture, whose route opens no memory-strategy request scope — so the claim is named rather than
+  // blanket: that arm and no other, and it must still settle its own overlay scenario.
+  const handRolled = [...candleFunctions]
+    .filter(([, body]) => /"status":\s*"gated"/.test(body))
+    .map(([name]) => name);
+  assert.deepEqual(
+    handRolled,
+    ["run_pulid_flux_capture"],
     "a hand-rolled gated fragment bypasses the overlay-settling builders",
   );
+  for (const name of handRolled) {
+    assert.match(
+      candleFunctions.get(name),
+      /\{ "name": "overlay", "result": "(passed|failed)"/,
+      `${name} hand-rolls a gated fragment and leaves its overlay verdict unsettled`,
+    );
+  }
   assert.match(
     candle,
     /settle_plain_overlay_scenario\(request, &mut fragment, KREA_PLAIN_EXECUTION_PATH\)\?/,

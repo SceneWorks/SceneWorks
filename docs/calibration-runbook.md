@@ -163,8 +163,8 @@ ids they cover today:
 
 | binary | providers covered | how it dispatches an unknown provider |
 | --- | --- | --- |
-| `memory-mlx-adapter` | `qwen_image`, `qwen_image_edit` (BOTH shipped edit catalog ids — `qwen_image_edit_2511` and `..._lightning` — resolved from `(provider, modelId)`; sc-22728), `z_image_turbo` (text-to-image, and in `edit_image` mode the `z_image_edit` catalog alias — sc-22724), `z_image` (the undistilled base, sc-22724), `krea_2_turbo`, `sdxl`, `krea_2_turbo_control`, `flux2_dev` (SDXL exposes only Resident, Staged, and bounded-transformer residency; its decode/attention rungs are measured `Missing`. FLUX.2-dev is **resident rung only**.) | `mlx.rs` `run` — `MLX five-rung calibration does not implement provider "<id>"`; `validate_z_image_batch` (`assess_batch`) — `…five-rung batch assessment does not implement provider "<id>"` (cited by function name; the line numbers this table used to carry went stale the first time the file grew) |
-| `memory-candle-adapter` | `qwen_image`, `qwen_image_edit` (the BESPOKE edit provider, dispatched ahead of the five-rung path because it is not a registered generator; both edit catalog ids, sc-22728), `krea_2_turbo`, `z_image_turbo` (sc-15859; five-rung reference path only, no inline arm; in `edit_image` mode it is the `z_image_edit` catalog alias — sc-22724), `z_image` (the undistilled base, sc-22724) | `plain_execution_path` / `still_calibration_label` / `load_five_rung_generator` — `Candle five-rung calibration does not implement provider "<id>"`; `qwen_edit_arm` — `the Candle Qwen edit arm does not implement provider "<id>" for model "<id>"` |
+| `memory-mlx-adapter` | `qwen_image`, `qwen_image_edit` (BOTH shipped edit catalog ids — `qwen_image_edit_2511` and `..._lightning` — resolved from `(provider, modelId)`; sc-22728), `z_image_turbo` (text-to-image, and in `edit_image` mode the `z_image_edit` catalog alias — sc-22724), `z_image` (the undistilled base, sc-22724), `krea_2_turbo`, `sdxl`, `krea_2_turbo_control`, `flux2_dev`, `flux1_dev`, `flux1_schnell`, `pulid_flux` (the FLUX.1 family, sc-22726 — one arm, member resolved from `(provider, mode)`; PuLID is `character_image` only and carries the identity stack on `LoadSpec::identity`) (SDXL exposes only Resident, Staged, and bounded-transformer residency; its decode/attention rungs are measured `Missing`. FLUX.2-dev is **resident rung only**. The FLUX.1 rows bind the per-(route, tier) identities of inference PR 943 — see the note below.) | `mlx.rs` `run` — `MLX five-rung calibration does not implement provider "<id>"`; `validate_z_image_batch` (`assess_batch`) — `…five-rung batch assessment does not implement provider "<id>"` (cited by function name; the line numbers this table used to carry went stale the first time the file grew) |
+| `memory-candle-adapter` | `qwen_image`, `qwen_image_edit` (the BESPOKE edit provider, dispatched ahead of the five-rung path because it is not a registered generator; both edit catalog ids, sc-22728), `krea_2_turbo`, `z_image_turbo` (sc-15859; five-rung reference path only, no inline arm; in `edit_image` mode it is the `z_image_edit` catalog alias — sc-22724), `z_image` (the undistilled base, sc-22724), `flux1_dev`, `flux1_schnell` (sc-22726; five-rung reference path, no inline arm), `pulid_flux` (sc-22726; a **bespoke** arm — `candle-gen-pulid` registers no `Generator` at all, so this one loads `PulidFlux::load_with_memory_context(&PulidFluxPaths, ctx)` exactly as `image_jobs/pulid_candle.rs` does, and dispatches above the shared plain-overlay gate because its overlay is `identity`) | `plain_execution_path` / `still_calibration_label` / `load_five_rung_generator` — `Candle five-rung calibration does not implement provider "<id>"`; `qwen_edit_arm` — `the Candle Qwen edit arm does not implement provider "<id>" for model "<id>"` |
 
 Since sc-18212 the stale-lane report answers this gate for you: its `CAPTURE` column and
 "DECLARED/PLANNED BUT UNCAPTURABLE" section are derived by parsing these dispatch matches
@@ -175,6 +175,10 @@ human copy; the report is the derived one. Grep before you schedule anyway:
 ```bash
 grep -n '<provider>' crates/sceneworks-memory-adapter/src/bin/<backend>.rs
 ```
+
+The FLUX.1 MLX plan rows (sc-22726) name the per-(route, tier) production calibration identities
+that inference PR 943 (`story/sc-22726-flux-calibration-identity`) makes `mlx-gen-flux` and
+`mlx-gen-pulid` publish for every worker load shape; the arm binds them after the epic's pin bump.
 
 Both adapters now refuse an unimplemented provider **by name, before any environment or model work**,
 on **both** MLX actions — `run`, and `assess_batch`, where the check lives inside
@@ -545,6 +549,29 @@ SCENEWORKS_Z_IMAGE_ROOT=/abs/path/.../snapshots/<rev>/<tier>  # bf16 | q4 | q8, 
 SCENEWORKS_Z_IMAGE_BASE_REPOSITORY=SceneWorks/z-image-mlx    # fixed; validated against Z_IMAGE_BASE_REPOSITORY
 SCENEWORKS_Z_IMAGE_BASE_REVISION=<exact artifact revision>
 SCENEWORKS_Z_IMAGE_BASE_ROOT=/abs/path/.../snapshots/<rev>/<tier>  # bf16 | q4 | q8, derived from the plan target
+
+# BOTH adapters — flux1_dev, and the pulid_flux character route over the SAME backbone (sc-22726)
+SCENEWORKS_FLUX1_DEV_REPOSITORY=SceneWorks/flux1-dev-mlx     # fixed; validated against FLUX1_DEV_REPOSITORY
+SCENEWORKS_FLUX1_DEV_REVISION=<exact artifact revision>
+SCENEWORKS_FLUX1_DEV_ROOT=/abs/path/.../snapshots/<rev>/<tier>   # bf16 | q4 | q8, derived from the plan target
+
+# BOTH adapters — flux1_schnell
+SCENEWORKS_FLUX1_SCHNELL_REPOSITORY=SceneWorks/flux1-schnell-mlx  # fixed; validated against FLUX1_SCHNELL_REPOSITORY
+SCENEWORKS_FLUX1_SCHNELL_REVISION=<exact artifact revision>
+SCENEWORKS_FLUX1_SCHNELL_ROOT=/abs/path/.../snapshots/<rev>/<tier>   # bf16 | q4 | q8
+
+# BOTH adapters — the pulid_flux IDENTITY STACK (sc-22726). NOT a manifest download on either lane:
+# the worker fetches it on first use, so an anchor binds the operator's pre-staged copy through the
+# same env var both worker lanes already honour (image_jobs/pulid.rs `ensure_pulid_weights`,
+# image_jobs/pulid_candle.rs `ensure_pulid_candle_weights`). ONE directory holding all five loose
+# files — it IS the provider's `face_dir`, which both engines read scrfd/arcface/bisenet out of by
+# name. A missing file is refused before the load, naming it.
+SCENEWORKS_PULID_WEIGHTS=/abs/path/to/pulid-flux-bundle
+#   pulid_flux_v0.9.1.safetensors   (guozinan/PuLID)
+#   eva02_clip_l_336.safetensors    (SceneWorks/pulid-flux-mlx)
+#   bisenet_parsing.safetensors     (SceneWorks/pulid-flux-mlx)
+#   scrfd_10g.safetensors           (SceneWorks/instantid-mlx)
+#   arcface_iresnet100.safetensors  (SceneWorks/instantid-mlx)
 
 # memory-mlx-adapter — krea_2_turbo (plain text-to-image)
 SCENEWORKS_KREA_REPOSITORY=SceneWorks/krea-2-turbo-mlx       # fixed; validated against KREA_REPOSITORY

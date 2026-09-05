@@ -8,6 +8,7 @@ import test from "node:test";
 
 import {
   ROOT,
+  ADAPTER_LIB_PATH,
   MATRIX_PATH,
   PLAN_PATH,
   PACKAGED_SOURCES_PATH,
@@ -65,6 +66,10 @@ function fakeModels() {
     // the Lightning id additionally loads the pinned distill LoRA, which no download ships.
     { id: "qwen_image_edit_2511", downloads: [{ repo: "SceneWorks/qwen-image-edit-2511-mlx", revision: REVISION, variant: "q4", files: ["q4/*"] }] },
     { id: "qwen_image_edit_2511_lightning", downloads: [{ repo: "SceneWorks/qwen-image-edit-2511-mlx", revision: REVISION, variant: "q4", files: ["q4/*"] }] },
+    // The FLUX.1 family (sc-22726). `pulid_flux_dev` ships the SAME flux1-dev backbone downloads as
+    // `flux_dev`; its identity stack is fetched on first use and is not a manifest download at all.
+    { id: "flux_dev", downloads: [{ repo: "SceneWorks/flux1-dev-mlx", revision: REVISION, variant: "q4", files: ["q4/*"] }] },
+    { id: "pulid_flux_dev", downloads: [{ repo: "SceneWorks/flux1-dev-mlx", revision: REVISION, variant: "q4", files: ["q4/*"] }] },
   ];
 }
 
@@ -314,6 +319,58 @@ test("every family's derived env names are read back by each arm it declares", a
   assert.ok(checked >= 45, `expected the whole table to be covered, checked ${checked} names`);
 });
 
+test("the flux.1 family: the two base providers bind their own artifacts, and PuLID rides the dev backbone plus a staged identity bundle", async () => {
+  const hub = await fakeHub([["SceneWorks/flux1-dev-mlx", REVISION, "q4"]]);
+  const previous = process.env.SCENEWORKS_PULID_WEIGHTS;
+  try {
+    for (const backend of ["mlx", "candle"]) {
+      // A FRESH bundle per lane: the staging steps below are cumulative, so a shared directory
+      // would let the second lane skip straight past the two `weights_missing` cases.
+      const bundle = await mkdtemp(path.join(tmpdir(), "catalog-pulid-"));
+      const context = { models: fakeModels(), backend, hubs: [hub], current: new Map(), captured: new Map() };
+      const dev = await classifyAnchor(`flux_dev:q4:${backend}`, { provider: "flux1_dev" }, context);
+      assert.equal(dev.status, "runnable", `${backend}: ${dev.reason}`);
+      assert.deepEqual(dev.env, {
+        SCENEWORKS_FLUX1_DEV_REPOSITORY: "SceneWorks/flux1-dev-mlx",
+        SCENEWORKS_FLUX1_DEV_REVISION: REVISION,
+        SCENEWORKS_FLUX1_DEV_ROOT: snapshotPath(hub, "SceneWorks/flux1-dev-mlx", REVISION, "q4"),
+      });
+
+      // The identity stack is not a manifest download on either lane, so the anchor binds the
+      // operator's staged bundle through the same env both worker lanes honour. Unset or
+      // incomplete is `weights_missing` — never a "runnable" cell that cannot actually run.
+      delete process.env.SCENEWORKS_PULID_WEIGHTS;
+      const unstaged = await classifyAnchor(`pulid_flux_dev:q4:${backend}`, { provider: "pulid_flux" }, context);
+      assert.equal(unstaged.status, "weights_missing");
+      assert.match(unstaged.reason, /SCENEWORKS_PULID_WEIGHTS is unset/);
+
+      process.env.SCENEWORKS_PULID_WEIGHTS = bundle;
+      const partial = await classifyAnchor(`pulid_flux_dev:q4:${backend}`, { provider: "pulid_flux" }, context);
+      assert.equal(partial.status, "weights_missing");
+      assert.match(partial.reason, /is missing pulid_flux_v0\.9\.1\.safetensors/);
+
+      for (const file of PROVIDER_FAMILIES.pulid_flux.bundle.files) {
+        await writeFile(path.join(bundle, file), "weights");
+      }
+      const pulid = await classifyAnchor(`pulid_flux_dev:q4:${backend}`, { provider: "pulid_flux" }, context);
+      assert.equal(pulid.status, "runnable", `${backend}: ${pulid.reason}`);
+      assert.equal(pulid.physical, false);
+      assert.deepEqual(pulid.env, {
+        // The PuLID backbone IS the FLUX.1-dev artifact, so it shares that env family — the way
+        // z_image_edit shares the Turbo family — and its tier root resolves through the
+        // `pulid_flux_dev` MANIFEST entry, not through `flux_dev`'s.
+        SCENEWORKS_FLUX1_DEV_REPOSITORY: "SceneWorks/flux1-dev-mlx",
+        SCENEWORKS_FLUX1_DEV_REVISION: REVISION,
+        SCENEWORKS_FLUX1_DEV_ROOT: snapshotPath(hub, "SceneWorks/flux1-dev-mlx", REVISION, "q4"),
+        SCENEWORKS_PULID_WEIGHTS: bundle,
+      });
+    }
+  } finally {
+    if (previous === undefined) delete process.env.SCENEWORKS_PULID_WEIGHTS;
+    else process.env.SCENEWORKS_PULID_WEIGHTS = previous;
+  }
+});
+
 // sc-22725: LTX-2.5 reaches the two lanes under two engine ids off ONE public snapshot. Both
 // families must therefore derive the same snapshot root, on their own lane and on no other.
 test("the LTX-2.5 family derives the same snapshot root on both lanes, under each lane's engine id", async () => {
@@ -409,6 +466,59 @@ test("classification refuses what no adapter arm or the harness cannot serve, an
     ...base, declaredProviders: new Set(["candle:z_image_turbo"]),
   });
   assert.equal(providerDeclared.status, "runnable");
+});
+
+// sc-22726 review: the five PuLID bundle file names were hand-duplicated between this runner and
+// the adapter's lib.rs with nothing binding them. This parses the Rust constants — the per-file
+// `pub const PULID_*_FILE: &str = "…";` declarations and the `PULID_IDENTITY_BUNDLE_FILES` array
+// that orders them — and asserts the runner's list is that list, in that order, under that env var.
+test("PROVIDER_FAMILIES.pulid_flux.bundle is the adapter's PULID_IDENTITY_BUNDLE_FILES, in order", async () => {
+  const lib = await readFile(path.join(ROOT, ADAPTER_LIB_PATH), "utf8");
+  const consts = new Map();
+  for (const match of lib.matchAll(/pub const (PULID_[A-Z_]+_FILE): &str = "([^"]+)";/g)) {
+    consts.set(match[1], match[2]);
+  }
+  const array = lib.match(/pub const PULID_IDENTITY_BUNDLE_FILES: \[&str; (\d+)\] = \[([\s\S]*?)\];/);
+  assert.ok(array, "lib.rs declares PULID_IDENTITY_BUNDLE_FILES");
+  const names = array[2].split(",").map((name) => name.trim()).filter(Boolean);
+  assert.equal(names.length, Number(array[1]), "the array literal carries every declared entry");
+  const files = names.map((name) => {
+    assert.ok(consts.has(name), `${name} resolves to a PULID_*_FILE const`);
+    return consts.get(name);
+  });
+  assert.deepEqual(PROVIDER_FAMILIES.pulid_flux.bundle.files, files);
+  const env = lib.match(/pub const PULID_IDENTITY_BUNDLE_ENV: &str = "([^"]+)";/);
+  assert.ok(env, "lib.rs declares PULID_IDENTITY_BUNDLE_ENV");
+  assert.equal(PROVIDER_FAMILIES.pulid_flux.bundle.env, env[1]);
+});
+
+// sc-22726 review: the adapter canonicalizes the bundle path from the HARNESS's cwd, so a relative
+// export must already be absolute by the time this runner probes or forwards it.
+test("a relative SCENEWORKS_PULID_WEIGHTS is resolved to an absolute path before it is probed or forwarded", async () => {
+  const hub = await fakeHub([["SceneWorks/flux1-dev-mlx", REVISION, "q4"]]);
+  const previous = process.env.SCENEWORKS_PULID_WEIGHTS;
+  const cwd = process.cwd();
+  try {
+    const bundle = await mkdtemp(path.join(tmpdir(), "catalog-pulid-relative-"));
+    for (const file of PROVIDER_FAMILIES.pulid_flux.bundle.files) {
+      await writeFile(path.join(bundle, file), "weights");
+    }
+    process.chdir(path.dirname(bundle));
+    process.env.SCENEWORKS_PULID_WEIGHTS = path.basename(bundle);
+    // `process.cwd()` is the real path (macOS `/var` -> `/private/var`), so the expectation is
+    // built from it rather than from the tmpdir spelling.
+    const expected = path.join(process.cwd(), path.basename(bundle));
+    const context = { models: fakeModels(), backend: "mlx", hubs: [hub], current: new Map(), captured: new Map() };
+    const pulid = await classifyAnchor("pulid_flux_dev:q4:mlx", { provider: "pulid_flux" }, context);
+    assert.equal(pulid.status, "runnable", pulid.reason);
+    assert.ok(path.isAbsolute(pulid.env.SCENEWORKS_PULID_WEIGHTS));
+    assert.equal(pulid.env.SCENEWORKS_PULID_WEIGHTS, expected);
+    assert.equal(pulid.roots.find((root) => root.label === "pulid bundle").path, expected);
+  } finally {
+    process.chdir(cwd);
+    if (previous === undefined) delete process.env.SCENEWORKS_PULID_WEIGHTS;
+    else process.env.SCENEWORKS_PULID_WEIGHTS = previous;
+  }
 });
 
 test("appending to PACKAGED_MEMORY_ANCHOR_SOURCES is idempotent and keeps the rustfmt tuple shape", async () => {
@@ -570,6 +680,17 @@ test("the qwen edit family is measurable on every shipped tier of every routed l
   const cells = (await shippedTieredCells()).filter((cell) => families.includes(cell.modelId));
   assert.ok(cells.length >= 2 * 3 * 2, "both edit ids × three tiers × two lanes are shipped and routed");
   const gaps = (await measurabilityGaps()).filter((gap) => families.includes(gap.modelId));
+  assert.equal(gaps.length, 0, gapReport(gaps));
+});
+
+// sc-22726. Same shape claim, for the FLUX.1 family: `flux_dev` and `flux_schnell` are the two base
+// text-to-image providers of the shared FLUX.1 engine crates, and `pulid_flux_dev` is the identity
+// route over the same FLUX.1-dev backbone — a REGISTRY route on mlx and a BESPOKE one on candle.
+test("the flux.1 family is measurable on every shipped tier of every routed lane", async () => {
+  const family = ["flux_dev", "flux_schnell", "pulid_flux_dev"];
+  const cells = (await shippedTieredCells()).filter((cell) => family.includes(cell.modelId));
+  assert.equal(cells.length, 3 * 3 * 2, "three models x three shipped tiers x two routed lanes");
+  const gaps = (await measurabilityGaps()).filter((gap) => family.includes(gap.modelId));
   assert.equal(gaps.length, 0, gapReport(gaps));
 });
 
