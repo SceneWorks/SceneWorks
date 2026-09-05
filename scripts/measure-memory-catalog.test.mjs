@@ -77,6 +77,11 @@ function fakeModels() {
     // `flux_dev`; its identity stack is fetched on first use and is not a manifest download at all.
     { id: "flux_dev", downloads: [{ repo: "SceneWorks/flux1-dev-mlx", revision: REVISION, variant: "q4", files: ["q4/*"] }] },
     { id: "pulid_flux_dev", downloads: [{ repo: "SceneWorks/flux1-dev-mlx", revision: REVISION, variant: "q4", files: ["q4/*"] }] },
+    // The SD3.5 family (sc-22730). Three DISTINCT engine providers, each with its own tiered
+    // rehost — none is an alias for another's backbone, so each resolves its own env family.
+    { id: "sd3_5_large", downloads: [{ repo: "SceneWorks/sd3.5-large-mlx", revision: REVISION, variant: "q4", files: ["q4/*"] }] },
+    { id: "sd3_5_large_turbo", downloads: [{ repo: "SceneWorks/sd3.5-large-turbo-mlx", revision: REVISION, variant: "q4", files: ["q4/*"] }] },
+    { id: "sd3_5_medium", downloads: [{ repo: "SceneWorks/sd3.5-medium-mlx", revision: UPSTREAM, variant: "q8", files: ["q8/*"] }] },
     // sc-22731. SANA is the one family whose two lanes load DIFFERENT repositories: the MLX lane
     // opens the per-tier SceneWorks turnkey, the Candle lane the upstream dense diffusers snapshot
     // at its root. Chroma1 is the ordinary shape — one per-tier turnkey serving both lanes — and is
@@ -198,6 +203,42 @@ test("the z-image family: the base model has its own env family, and the edit al
       SCENEWORKS_Z_IMAGE_REVISION: REVISION,
       SCENEWORKS_Z_IMAGE_ROOT: snapshotPath(hub, "SceneWorks/z-image-turbo-mlx", REVISION, "q4"),
     });
+  }
+});
+
+test("each SD3.5 member binds its OWN artifact family on both lanes", async () => {
+  // The three members share an engine crate but NOT an artifact: serving a Medium plan from Large
+  // weights would re-label Large's peaks as Medium's. A member whose snapshot is absent must be
+  // `weights_missing` — never satisfied by a sibling's staged root.
+  const hub = await fakeHub([
+    ["SceneWorks/sd3.5-large-mlx", REVISION, "q4"],
+    ["SceneWorks/sd3.5-large-turbo-mlx", REVISION, "q4"],
+  ]);
+  for (const backend of ["mlx", "candle"]) {
+    const context = { models: fakeModels(), backend, hubs: [hub], current: new Map(), captured: new Map() };
+    const large = await classifyAnchor(`sd3_5_large:q4:${backend}`, { provider: "sd3_5_large" }, context);
+    assert.equal(large.status, "runnable", `${backend}: ${large.reason}`);
+    assert.deepEqual(large.env, {
+      SCENEWORKS_SD3_5_LARGE_REPOSITORY: "SceneWorks/sd3.5-large-mlx",
+      SCENEWORKS_SD3_5_LARGE_REVISION: REVISION,
+      SCENEWORKS_SD3_5_LARGE_ROOT: snapshotPath(hub, "SceneWorks/sd3.5-large-mlx", REVISION, "q4"),
+    });
+
+    const turbo = await classifyAnchor(`sd3_5_large_turbo:q4:${backend}`, { provider: "sd3_5_large_turbo" }, context);
+    assert.equal(turbo.status, "runnable", `${backend}: ${turbo.reason}`);
+    assert.deepEqual(turbo.env, {
+      SCENEWORKS_SD3_5_LARGE_TURBO_REPOSITORY: "SceneWorks/sd3.5-large-turbo-mlx",
+      SCENEWORKS_SD3_5_LARGE_TURBO_REVISION: REVISION,
+      SCENEWORKS_SD3_5_LARGE_TURBO_ROOT: snapshotPath(hub, "SceneWorks/sd3.5-large-turbo-mlx", REVISION, "q4"),
+    });
+    // Turbo is its own env family, so a Large root can never stand in for it.
+    assert.notDeepEqual(Object.keys(turbo.env), Object.keys(large.env));
+
+    // Medium's snapshot is NOT staged on this fake hub: it must report missing under its OWN
+    // repository, not fall back to a sibling's.
+    const medium = await classifyAnchor(`sd3_5_medium:q8:${backend}`, { provider: "sd3_5_medium" }, context);
+    assert.equal(medium.status, "weights_missing", `${backend}: ${medium.reason}`);
+    assert.match(medium.reason, /SceneWorks\/sd3\.5-medium-mlx@[0-9a-f]{8}\/q8/);
   }
 });
 
@@ -986,6 +1027,17 @@ test("the mage-flow family is measurable on every shipped tier of every routed l
   assert.equal(gaps.length, 0, gapReport(gaps));
 });
 
+// sc-22730. Same shape claim, for the SD3.5 family: three DISTINCT base text-to-image providers of
+// the shared SD3.5 engine crates, each with its OWN tiered rehost, on the registry path of BOTH
+// lanes. `sd3_5_*` is the catalog model id AND the engine provider id, so no alias is involved.
+test("the sd3.5 family is measurable on every shipped tier of every routed lane", async () => {
+  const family = ["sd3_5_large", "sd3_5_large_turbo", "sd3_5_medium"];
+  const cells = (await shippedTieredCells()).filter((cell) => family.includes(cell.modelId));
+  assert.equal(cells.length, 3 * 3 * 2, "three models x three shipped tiers x two routed lanes");
+  const gaps = (await measurabilityGaps()).filter((gap) => family.includes(gap.modelId));
+  assert.equal(gaps.length, 0, gapReport(gaps));
+});
+
 // sc-22731. Same shape claim, for the SANA and Chroma1 families. Chroma1 is the ordinary case —
 // three routes x three shipped tiers x two routed lanes. SANA is not: its packed tiers are
 // `platforms: ["macos"]` turnkeys and the Candle lane has ONE dense cell per route, which is an
@@ -1171,6 +1223,69 @@ test("a mage-flow cell with no components row for its tier is weights_missing, n
   assert.match(noRows.reason, /mage_flow_base declares no .* components row for tier q4/);
 });
 
+// sc-22730. The plan's SD3.5 fingerprints are the one claim a capture cannot re-derive on a host
+// with no weights, and they are duplicated across three artifacts: the plan, the engine (through
+// inference PR 950) and — on the candle lane only — the shipped manifest's declared contract.
+//
+// The CANDLE half is a real cross-source binding, and it holds AT THE OLD PIN: the manifest already
+// declares `sd35-<route>-candle-resident-staged-v1` for every tier of every member, so a plan row
+// naming anything else would name an identity the shipped declaration never promises.
+//
+// The MLX half CANNOT be bound to a constant here: `mlx-gen-sd3` at the compiled pin publishes no
+// production identity at all (that is exactly what inference PR 950 adds), so there is nothing for
+// CI at the old pin to read. It is bound to the (route, TIER) shape the merged engine mints instead
+// — `mlx-gen-sd3/src/memory_strategy.rs:269-288` at `d606395b5` keys the identity on the proven
+// artifact tier, because the three tiers of one route are three different resident sets and one
+// anchor cannot price all three. The byte-for-byte binding to the LOADED contract is enforced where
+// it can be — inside the capture, by `run_sd3`, which refuses a provider whose published string
+// differs from `sd3_calibration_fingerprint(arm, artifact.tier)`.
+test("every planned sd3.5 fingerprint is one its lane's declaration can emit", async () => {
+  const plan = await readPlan();
+  const models = await readManifestModels();
+  const slugs = { sd3_5_large: "large", sd3_5_large_turbo: "large-turbo", sd3_5_medium: "medium" };
+  let seen = 0;
+  for (const [key, entry] of Object.entries(plan.anchors)) {
+    const { modelId, tier, backend } = anchorParts(key);
+    if (!(modelId in slugs)) continue;
+    seen += 1;
+    if (backend === "candle") {
+      const model = models.find((candidate) => candidate.id === modelId);
+      const declared = new Set(
+        (model?.candle?.memoryStrategyContract?.implementations ?? []).map((impl) => impl.fingerprint),
+      );
+      assert.ok(
+        declared.has(entry.calibrationFingerprint),
+        `${key}: plan names ${entry.calibrationFingerprint}, manifest declares ${[...declared].join(", ")}`,
+      );
+    } else {
+      assert.equal(entry.calibrationFingerprint, `sd3-5-${slugs[modelId]}-${tier}-mlx-shared-ladder-v1`, key);
+    }
+  }
+  assert.equal(seen, 3 * 3 * 2, "every SD3.5 cell is priced by the plan");
+});
+
+// sc-22726 left this binding open and sc-22730 closes it: the artifact repository of every family
+// is written down TWICE — as `PROVIDER_FAMILIES[*].repo` here and as a `pub const *_REPOSITORY` in
+// the adapter's lib.rs, which is what both arms validate the operator's env against
+// (`validate_artifact_identity`). Editing either alone yields a runner that stages a root the
+// adapter then refuses by name, with every test in both languages still green.
+test("PROVIDER_FAMILIES repos are the adapter's *_REPOSITORY constants", async () => {
+  const lib = await readFile(path.join(ROOT, ADAPTER_LIB_PATH), "utf8");
+  const declared = new Set();
+  for (const match of lib.matchAll(/pub const [A-Z0-9_]+_REPOSITORY: &str = "([^"]+)";/g)) {
+    declared.add(match[1]);
+  }
+  assert.ok(declared.size > 0, "lib.rs declares repository constants");
+  for (const [provider, family] of Object.entries(PROVIDER_FAMILIES)) {
+    // LTX-2.5 is bound by the harness itself rather than by an adapter env family, so its repo
+    // literal lives in this module (`LTX25_REPOSITORY`) and not in lib.rs.
+    if (family.ltx25) continue;
+    assert.ok(
+      declared.has(family.repo),
+      `${provider}: ${family.repo} is not declared as a *_REPOSITORY const in ${ADAPTER_LIB_PATH}`,
+    );
+  }
+});
 // The catalog-wide burndown. `todo` until the terminal story of epic 22723 (sc-22738) promotes it:
 // node:test reports a failing todo without failing the run, so the gap set is printed on every
 // `npm run check` while the other families are brought in, and the assertion itself is already
