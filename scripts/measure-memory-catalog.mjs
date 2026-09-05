@@ -159,6 +159,26 @@ export const PROVIDER_FAMILIES = Object.freeze({
       ],
     },
   },
+  // The SANA family (sc-22731). Two routes, and the ONE family in this table whose two lanes load
+  // DIFFERENT repositories: the MLX lane opens the per-tier SceneWorks turnkey, the Candle lane
+  // opens the upstream dense diffusers snapshot at its ROOT (worker `image_jobs/base.rs`
+  // `SANA_CANDLE_DIFFUSERS_REPO` / `SANA_SPRINT_CANDLE_DIFFUSERS_REPO`, resolved through
+  // `huggingface_pinned_snapshot_dir`, which never descends into a tier sub-directory). That is
+  // what `lanes` expresses; `tiered: false` is why the root carries no `<tier>` component.
+  sana_1600m: {
+    env: "SANA", repo: "SceneWorks/Sana_1600M_1024px_mlx", arms: ["mlx", "candle"],
+    lanes: { candle: { env: "SANA_DENSE", repo: "Efficient-Large-Model/Sana_1600M_1024px_diffusers", tiered: false } },
+  },
+  sana_sprint_1600m: {
+    env: "SANA_SPRINT", repo: "SceneWorks/Sana_Sprint_1.6B_1024px_mlx", arms: ["mlx", "candle"],
+    lanes: { candle: { env: "SANA_SPRINT_DENSE", repo: "Efficient-Large-Model/Sana_Sprint_1.6B_1024px_diffusers", tiered: false } },
+  },
+  // The three Chroma1 routes (sc-22731). Separate receipt/evidence domains (SC-20788) over three
+  // separate rehosts, so three env families — never one shared `CHROMA1`, which would let a Flash
+  // plan be satisfied by HD weights. Both lanes open the SAME per-tier turnkey.
+  chroma1_hd: { env: "CHROMA1_HD", repo: "SceneWorks/chroma1-hd-mlx", arms: ["mlx", "candle"] },
+  chroma1_base: { env: "CHROMA1_BASE", repo: "SceneWorks/chroma1-base-mlx", arms: ["mlx", "candle"] },
+  chroma1_flash: { env: "CHROMA1_FLASH", repo: "SceneWorks/chroma1-flash-mlx", arms: ["mlx", "candle"] },
   minimax_h3: {
     env: "MINIMAX_H3", repo: "SceneWorks/minimax-h3-mlx", arms: ["mlx"],
     upstream: { env: "MINIMAX_H3_UPSTREAM", repo: "MiniMaxAI/MiniMax-H3" },
@@ -384,15 +404,24 @@ export async function classifyAnchor(key, planned, { models, backend, hubs, curr
     return row;
   }
 
-  const download = tierDownload(models, parts.modelId, family.repo, parts.tier);
-  const tierRoot = await firstExistingDirectory(hubs.map((hub) => snapshotPath(hub, family.repo, download.revision, parts.tier)));
-  row.roots.push({ label: "tier root", path: tierRoot ?? snapshotPath(hubs[0], family.repo, download.revision, parts.tier) });
+  // Which artifact THIS lane opens. Almost every family loads one repository on both lanes, so the
+  // family row IS the artifact; `lanes[backend]` overrides it for a family whose lanes load
+  // different artifacts (sc-22731: SANA's MLX turnkey vs its upstream dense Candle snapshot).
+  // `tiered: false` means the load root is the snapshot ITSELF — no `<tier>` component — which is
+  // what the worker resolves for such a repository and what the adapter validates against
+  // (`validate_huggingface_revision_root`).
+  const artifact = family.lanes?.[backend] ?? family;
+  const tiered = artifact.tiered !== false;
+  const download = tierDownload(models, parts.modelId, artifact.repo, parts.tier);
+  const suffix = tiered ? [parts.tier] : [];
+  const tierRoot = await firstExistingDirectory(hubs.map((hub) => snapshotPath(hub, artifact.repo, download.revision, ...suffix)));
+  row.roots.push({ label: tiered ? "tier root" : "snapshot root", path: tierRoot ?? snapshotPath(hubs[0], artifact.repo, download.revision, ...suffix) });
   if (!tierRoot) {
-    return { ...row, status: "weights_missing", reason: `no ${family.repo}@${download.revision.slice(0, 8)}/${parts.tier} on this host` };
+    return { ...row, status: "weights_missing", reason: `no ${artifact.repo}@${download.revision.slice(0, 8)}${tiered ? `/${parts.tier}` : ""} on this host` };
   }
-  row.env[`SCENEWORKS_${family.env}_REPOSITORY`] = family.repo;
-  row.env[`SCENEWORKS_${family.env}_REVISION`] = download.revision;
-  row.env[`SCENEWORKS_${family.env}_ROOT`] = tierRoot;
+  row.env[`SCENEWORKS_${artifact.env}_REPOSITORY`] = artifact.repo;
+  row.env[`SCENEWORKS_${artifact.env}_REVISION`] = download.revision;
+  row.env[`SCENEWORKS_${artifact.env}_ROOT`] = tierRoot;
   row.tierRoot = tierRoot;
   if (family.bundle) {
     // A pre-staged loose-file bundle rather than an HF snapshot, so it is probed through the
