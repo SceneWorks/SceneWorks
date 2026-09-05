@@ -2302,9 +2302,110 @@ test("the LTX-2.5 anchor capture injects the selected root only after the hardwa
   if (capturedPlanned.target.transformerVariant === "dev") {
     assert.ok(Number(capturedEnvironment.SCENEWORKS_LTX25_DEV_ADAPTER_BYTES) > 0);
     assert.match(capturedEnvironment.SCENEWORKS_LTX25_DEV_ADAPTER_SHA256, /^[0-9a-f]{64}$/);
+    // The Candle arm resolves the same adapter from the snapshot ROOT rather than by digest, so a
+    // dev anchor binds both spellings (sc-22725).
+    assert.equal(capturedEnvironment.SCENEWORKS_LTX25_DISTILL_LORA_ROOT, snapshot);
   } else {
     assert.equal(capturedEnvironment.SCENEWORKS_LTX25_DEV_ADAPTER_BYTES, undefined);
     assert.equal(capturedEnvironment.SCENEWORKS_LTX25_DEV_ADAPTER_SHA256, undefined);
+    assert.equal(capturedEnvironment.SCENEWORKS_LTX25_DISTILL_LORA_ROOT, undefined);
+  }
+});
+
+// -----------------------------------------------------------------------------------------------
+// sc-22725: the SAME snapshot binding serves the CANDLE lane. LTX-2.5 reaches Candle under a
+// different engine id (`ltx_2_5_distilled`, candle.rs `LTX25_ID`), which is the only reason
+// `prepareLtx25CaptureArtifacts` used to refuse it — the artifacts, the layout and the env family
+// are identical. These cases prove the candle plan rows reach the adapter's `run` action with the
+// LTX-2.5 environment bound, and that the widened refusal is still a refusal.
+// -----------------------------------------------------------------------------------------------
+test("the LTX-2.5 candle anchors bind the same prepared snapshot and reach the adapter's run action", async () => {
+  const plan = JSON.parse(
+    await readFile(new URL("../config/memory-calibration-plan.json", import.meta.url)),
+  );
+  const candleKeys = Object.keys(plan.anchors)
+    .filter((key) => key.startsWith("ltx_2_5:") && key.endsWith(":candle"))
+    .sort();
+  assert.deepEqual(candleKeys, ["ltx_2_5:bf16:candle", "ltx_2_5:q4:candle", "ltx_2_5:q8:candle"],
+    "every shipped tier of the candle lane is planned");
+  const snapshot = await ltx25FixtureSnapshot();
+  const cleanRepo = await cleanFixtureRepo();
+  for (const anchorKey of candleKeys) {
+    let runEnvironment;
+    let runPlanned;
+    await assert.rejects(
+      captureAnchor({
+        closureDigestFor: stubClosureDigest,
+        plan,
+        anchorKey,
+        providerCommand: ["fixture-ltx25-candle-provider"],
+        sceneWorksRepo: cleanRepo,
+        inferenceRepo: cleanRepo,
+        ltx25SnapshotRoot: snapshot,
+        executeProvider: async (_command, _args, input, options) => {
+          const request = JSON.parse(input);
+          if (request.action === "probe") {
+            // The snapshot is prepared BEFORE the hardware probe, but the per-anchor root is
+            // injected only for the run — the same ordering the MLX lane keeps.
+            assert.equal(options.env.SCENEWORKS_LTX25_REPOSITORY, LTX25_CAPTURE_REPOSITORY);
+            assert.equal(options.env.SCENEWORKS_LTX25_ROOT, undefined);
+            return JSON.stringify({
+              hardware: {
+                probe: "fixture CUDA probe",
+                memoryBytes: 96 * 1024 ** 3,
+                deviceId: "0",
+                name: "Fixture CUDA",
+                computeCapability: "9.0",
+                driverVersion: "999.1",
+                runtimeVersion: "12.8",
+              },
+            });
+          }
+          assert.equal(request.action, "run", "the capture reaches the adapter's run action");
+          runPlanned = request.planned;
+          runEnvironment = options.env;
+          throw new Error("stop after LTX-2.5 candle invocation environment capture");
+        },
+      }),
+      /stop after LTX-2\.5 candle invocation environment capture/,
+    );
+    assert.equal(runPlanned.backend, "candle");
+    assert.equal(runPlanned.target.provider, "ltx_2_5_distilled");
+    assert.equal(runPlanned.target.transformerVariant, "distilled");
+    assert.equal(
+      runEnvironment.SCENEWORKS_LTX25_ROOT,
+      path.join(snapshot, runPlanned.target.transformerVariant, runPlanned.target.tier),
+      "the candle arm canonicalizes SCENEWORKS_LTX25_ROOT as <snapshot>/<variant>/<tier>",
+    );
+    assert.equal(runEnvironment.SCENEWORKS_LTX25_REPOSITORY, LTX25_CAPTURE_REPOSITORY);
+    assert.equal(runEnvironment.SCENEWORKS_LTX25_REVISION, LTX25_CAPTURE_REVISION);
+    // candle.rs `ltx25_load_spec` reads exactly these; a missing one is a hard `required_env` error.
+    assert.match(runEnvironment.SCENEWORKS_MEMORY_MODEL_INVENTORY_SHA256, /^[0-9a-f]{64}$/);
+    assert.ok(Number(runEnvironment.SCENEWORKS_MEMORY_MODEL_BYTES) > 0);
+    assert.ok(Number(runEnvironment.SCENEWORKS_LTX25_ENHANCER_BYTES) > 0);
+    // The distilled variant needs no official refinement LoRA, so its root is deliberately unbound.
+    assert.equal(runEnvironment.SCENEWORKS_LTX25_DISTILL_LORA_ROOT, undefined);
+  }
+});
+
+test("the widened LTX-2.5 snapshot binding still refuses a lane that does not load LTX-2.5", async () => {
+  const snapshot = await ltx25FixtureSnapshot();
+  const planned = planAnchor(
+    JSON.parse(await readFile(new URL("../config/memory-calibration-plan.json", import.meta.url))),
+    "ltx_2_5:q4:candle",
+  );
+  for (const wrong of [
+    // The candle engine id on the MLX lane, and the MLX engine id on the candle lane: each is a
+    // real provider, and each would prepare this snapshot for a loader that never asked for it.
+    { ...planned, backend: "mlx" },
+    { ...planned, target: { ...planned.target, provider: "ltx_2_5" } },
+    { ...planned, target: { ...planned.target, modelId: "ltx_2_3" } },
+    { ...planned, backend: "cuda" },
+  ]) {
+    await assert.rejects(
+      prepareLtx25CaptureArtifacts(snapshot, [wrong]),
+      /--ltx25-snapshot-root is valid only for the ltx_2_5 plan/,
+    );
   }
 });
 

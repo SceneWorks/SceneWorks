@@ -743,7 +743,12 @@ Flag notes, all from the `capture` arm of `main`:
   refinement adapter file once when the anchor is a dev variant, and sets their byte counts and
   digests on the provider invocation. It re-hashes all of them around the invocation, so a mutation
   during the render is caught rather than recorded. The adapter refuses a missing shared inventory
-  before provider construction.
+  before provider construction. **Both lanes** are served from that one snapshot (sc-22725), under
+  each lane's own engine id — `ltx_2_5` on MLX, `ltx_2_5_distilled` on Candle — so the plan row's
+  `provider` selects which arm is prepared, and a row naming the other lane's id is refused rather
+  than prepared against a loader that never asked for it. A `dev` anchor also binds
+  `SCENEWORKS_LTX25_DISTILL_LORA_ROOT`, which is how the Candle arm reaches the official stage-two
+  refinement LoRA.
 - The composition is NOT a flag. An anchor is the `resident` composition on MLX and the shallow
   optimized one (`staged_residency`, nothing deeper) on candle, fixed by the harness to match what
   `scripts/extract-memory-anchors.mjs` can actually price.

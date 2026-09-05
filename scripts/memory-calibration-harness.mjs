@@ -1536,6 +1536,15 @@ export function planAnchor(plan, key) {
 }
 
 const LTX25_CAPTURE_TIERS = ["q4", "q8", "bf16"];
+/**
+ * The engine provider each lane's adapter loads LTX-2.5 through — the SAME public snapshot, under
+ * two different engine ids (sc-22725). MLX's arm is `ltx_2_5` (mlx.rs); Candle's is
+ * `ltx_2_5_distilled` (candle.rs `LTX25_ID`, `candle-gen-ltx` `MODEL_25_ID`). The snapshot binding
+ * is therefore a MODEL-level fact, not an MLX-only one, and this table is what keeps the refusal
+ * honest: a lane not listed here, or a plan row naming some other provider on a listed lane, is
+ * still refused rather than silently prepared against the wrong artifact family.
+ */
+const LTX25_LANE_PROVIDERS = Object.freeze({ mlx: "ltx_2_5", candle: "ltx_2_5_distilled" });
 function ltx25ArtifactKey(planned) {
   const variant = planned?.target?.transformerVariant;
   const tier = planned?.target?.tier;
@@ -1592,10 +1601,14 @@ export async function prepareLtx25CaptureArtifacts(
     fail("LTX-2.5 snapshot preparation requires at least one selected case");
   }
   if (plannedCases.some((planned) =>
-    planned.backend !== "mlx" ||
     planned.target?.modelId !== "ltx_2_5" ||
-    planned.target?.provider !== "ltx_2_5")) {
-    fail("--ltx25-snapshot-root is valid only for the mlx:ltx_2_5 plan");
+    planned.target?.provider !== LTX25_LANE_PROVIDERS[planned.backend])) {
+    fail(
+      "--ltx25-snapshot-root is valid only for the ltx_2_5 plan on a lane that loads its own " +
+        `LTX-2.5 provider (${Object.entries(LTX25_LANE_PROVIDERS)
+          .map(([backend, provider]) => `${backend}:${provider}`)
+          .join(", ")})`,
+    );
   }
 
   const requested = path.resolve(snapshotRoot);
@@ -1739,6 +1752,7 @@ export function ltx25ProviderEnvironment(prepared, planned, baseEnvironment = pr
     "SCENEWORKS_LTX25_ENHANCER_INVENTORY_SHA256",
     "SCENEWORKS_LTX25_DEV_ADAPTER_BYTES",
     "SCENEWORKS_LTX25_DEV_ADAPTER_SHA256",
+    "SCENEWORKS_LTX25_DISTILL_LORA_ROOT",
   ]) delete environment[name];
   environment.SCENEWORKS_LTX25_REPOSITORY = prepared.repository;
   environment.SCENEWORKS_LTX25_REVISION = prepared.revision;
@@ -1755,6 +1769,11 @@ export function ltx25ProviderEnvironment(prepared, planned, baseEnvironment = pr
       if (!prepared.devAdapter) fail("LTX-2.5 prepared snapshot has no dev adapter inventory");
       environment.SCENEWORKS_LTX25_DEV_ADAPTER_BYTES = String(prepared.devAdapter.bytes);
       environment.SCENEWORKS_LTX25_DEV_ADAPTER_SHA256 = prepared.devAdapter.sha256;
+      // The Candle arm resolves the official stage-two refinement LoRA from the snapshot ROOT
+      // (candle.rs `ltx25_official_dev_adapter` → `SCENEWORKS_LTX25_DISTILL_LORA_ROOT`, joined with
+      // `distilled_lora/…`), where the MLX arm takes the file's bytes/digest. Both are bound for a
+      // dev anchor so either lane's dev capture is served by the same prepared, re-hashed snapshot.
+      environment.SCENEWORKS_LTX25_DISTILL_LORA_ROOT = prepared.snapshotRoot;
     }
   }
   return environment;
