@@ -1402,10 +1402,15 @@ test("MLX calibration probe derives the production wired ceiling without guessin
     /u64::try_from\(mlx_default_memory_limit\)[\s\S]*?\/ 3[\s\S]*?\* 2/,
   );
   assert.match(adapter, /source: "mlx_default_memory_limit\/1\.5"/);
-  const probe = adapter.slice(
-    adapter.indexOf("fn probe()"),
-    adapter.indexOf("#[cfg(test)]"),
-  );
+  // Bind the window to the production `fn probe()` body: from its signature to the FIRST
+  // `#[cfg(test)]` that FOLLOWS it. Anchoring the end at the file's first `#[cfg(test)]` was wrong
+  // — sc-22735 put a test-only const above `probe`, which made the end index precede the start and
+  // silently produced an EMPTY window (an empty window fails this count, it does not pass it).
+  const probeStart = adapter.indexOf("fn probe()");
+  assert.notEqual(probeStart, -1, "mlx.rs must still declare `fn probe()`");
+  const probeEnd = adapter.indexOf("#[cfg(test)]", probeStart);
+  assert.notEqual(probeEnd, -1);
+  const probe = adapter.slice(probeStart, probeEnd);
   assert.equal(probe.match(/get_memory_limit\(\)/g)?.length, 1);
   assert.match(
     probe,
