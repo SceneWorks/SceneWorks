@@ -9,8 +9,8 @@ use mlx_gen::gen_core::{
 };
 use mlx_gen::tiling::{SpatialTiling, TilingConfig, VaeTiling};
 use mlx_gen::{
-    Conditioning, ControlKind, GenerationOutput, GenerationRequest, Generator, Image, LoadShape,
-    LoadSpec, OffloadPolicy, Precision, Progress, Quant, WeightsSource,
+    Conditioning, ControlKind, GenerationOutput, GenerationRequest, Generator, IdentityWeights,
+    Image, LoadShape, LoadSpec, OffloadPolicy, Precision, Progress, Quant, WeightsSource,
 };
 use mlx_rs::memory::{
     clear_cache, get_active_memory, get_cache_memory, get_memory_limit, get_peak_memory,
@@ -782,8 +782,9 @@ mod tests {
             })
             .count();
         assert_eq!(
-            image_receipts, 6,
-            "all six MLX image receipt builders must use the image policy wrapper"
+            image_receipts, 7,
+            "all seven MLX image receipt builders must use the image policy wrapper \
+             (sc-22726 added the FLUX.1 family arm)"
         );
         assert_eq!(
             source
@@ -3111,6 +3112,740 @@ fn run_z_image_reference(request: &Value) -> Result<Value, String> {
     let load_shape = planned_load_shape(request)?;
     let (artifact, generator) = load_z_image_generator(request, load_shape)?;
     run_z_image_reference_loaded(request, generator.as_ref(), &artifact, load_shape)
+}
+
+// ---------------------------------------------------------------------------------------------
+// The FLUX.1 family arm (sc-22726): `flux_dev`, `flux_schnell` and `pulid_flux_dev`.
+// ---------------------------------------------------------------------------------------------
+
+/// One member of the FLUX.1 family this arm measures, resolved from the plan's
+/// `(target.provider, target.mode)` — never assumed. Three members: the two base text-to-image
+/// providers of `mlx-gen-flux`, and the PuLID-FLUX character route of `mlx-gen-pulid`, which loads
+/// the SAME FLUX.1-dev backbone artifact with an identity stack threaded through
+/// `LoadSpec::identity` (worker `image_jobs/pulid.rs:448`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct FluxOneArm {
+    /// The registry id handed to `catalog.media().load` — the production loader (E4). This is the
+    /// id the worker passes to `inference_runtime::load` (`engines.rs` MODEL_TABLE `engine_id`,
+    /// `image_jobs/pulid.rs` `PULID_ENGINE_ID`).
+    provider: &'static str,
+    /// The plan `target.mode` this member serves.
+    mode: &'static str,
+    execution_path: &'static str,
+    /// The still-geometry refusal label (sc-18808).
+    still_calibration: &'static str,
+    repository_env: &'static str,
+    revision_env: &'static str,
+    root_env: &'static str,
+    expected_repository: &'static str,
+    /// The record's diagnostics source, `memory-mlx-adapter:<slug>-shared-ladder`.
+    slug: &'static str,
+    /// The PuLID character route: `overlay: identity`, one reference, and an identity stack on the
+    /// `LoadSpec`. The base routes are plain reference-free text-to-image.
+    identity: bool,
+}
+
+const FLUX1_DEV_PROVIDER: &str = "flux1_dev";
+const FLUX1_SCHNELL_PROVIDER: &str = "flux1_schnell";
+/// The PuLID-FLUX registry id. The CATALOG model id is `pulid_flux_dev`; the ENGINE id is the bare
+/// `pulid_flux` (`mlx-gen-pulid` `pulid_flux::MODEL_ID`), which is why the anchor-loader closure
+/// declares it as an `engineId` alias.
+const PULID_FLUX_PROVIDER: &str = "pulid_flux";
+/// The base-route seed. One constant for the family: the fixture binds tier and edge, so the seed
+/// does not also have to carry the route.
+const FLUX1_SEED: u64 = 22726;
+/// The identity route's `character_image` reference strength — the manifest's
+/// `ui.referenceStrengthDefault` for `pulid_flux_dev`, which is what the worker sends.
+const PULID_REFERENCE_STRENGTH: f32 = 1.0;
+
+const FLUX1_DEV_ARM: FluxOneArm = FluxOneArm {
+    provider: FLUX1_DEV_PROVIDER,
+    mode: "text_to_image",
+    execution_path: "the MLX FLUX.1-dev base-only text-to-image path",
+    still_calibration: "MLX FLUX.1-dev calibration",
+    repository_env: "SCENEWORKS_FLUX1_DEV_REPOSITORY",
+    revision_env: "SCENEWORKS_FLUX1_DEV_REVISION",
+    root_env: "SCENEWORKS_FLUX1_DEV_ROOT",
+    expected_repository: protocol::FLUX1_DEV_REPOSITORY,
+    slug: "flux1-dev",
+    identity: false,
+};
+
+const FLUX1_SCHNELL_ARM: FluxOneArm = FluxOneArm {
+    provider: FLUX1_SCHNELL_PROVIDER,
+    mode: "text_to_image",
+    execution_path: "the MLX FLUX.1-schnell base-only text-to-image path",
+    still_calibration: "MLX FLUX.1-schnell calibration",
+    repository_env: "SCENEWORKS_FLUX1_SCHNELL_REPOSITORY",
+    revision_env: "SCENEWORKS_FLUX1_SCHNELL_REVISION",
+    root_env: "SCENEWORKS_FLUX1_SCHNELL_ROOT",
+    expected_repository: protocol::FLUX1_SCHNELL_REPOSITORY,
+    slug: "flux1-schnell",
+    identity: false,
+};
+
+const PULID_FLUX_ARM: FluxOneArm = FluxOneArm {
+    provider: PULID_FLUX_PROVIDER,
+    mode: "character_image",
+    execution_path: "the MLX PuLID-FLUX identity-conditioned character path",
+    still_calibration: "MLX PuLID-FLUX calibration",
+    // The backbone IS `SceneWorks/flux1-dev-mlx` on this route too, so it binds the same env
+    // family. What makes it a different measurement is the identity stack, which rides the
+    // `LoadSpec` from its own bundle env and is priced as a separate resident component.
+    repository_env: "SCENEWORKS_FLUX1_DEV_REPOSITORY",
+    revision_env: "SCENEWORKS_FLUX1_DEV_REVISION",
+    root_env: "SCENEWORKS_FLUX1_DEV_ROOT",
+    expected_repository: protocol::FLUX1_DEV_REPOSITORY,
+    slug: "pulid-flux",
+    identity: true,
+};
+
+/// Which family member the plan asks for. Refuses by name: a `(provider, mode)` pair no member
+/// serves — `flux1_schnell` in `character_image` (schnell has no identity route at all),
+/// `pulid_flux` in `text_to_image` (PuLID is text-to-image-WITH-A-FACE only; the worker's
+/// `pulid_flux_available` requires `character_image` plus a reference) — must not be measured as
+/// its nearest neighbour.
+fn flux_one_arm(request: &Value) -> Result<FluxOneArm, String> {
+    let planned = protocol::planned(request)?;
+    let provider = planned
+        .pointer("/target/provider")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "planned.target.provider must be a string".to_owned())?;
+    let mode = planned
+        .pointer("/target/mode")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "planned.target.mode must be a string".to_owned())?;
+    match (provider, mode) {
+        (FLUX1_DEV_PROVIDER, "text_to_image") => Ok(FLUX1_DEV_ARM),
+        (FLUX1_SCHNELL_PROVIDER, "text_to_image") => Ok(FLUX1_SCHNELL_ARM),
+        (PULID_FLUX_PROVIDER, "character_image") => Ok(PULID_FLUX_ARM),
+        (provider, mode) => Err(format!(
+            "the MLX FLUX.1 arm does not implement provider {provider:?} in mode {mode:?}"
+        )),
+    }
+}
+
+/// The artifact one FLUX.1 capture loads: the env-bound repository and revision, the PLANNED tier,
+/// the identity bundle on the character route, and the `LoadSpec` that opens exactly that tier.
+#[derive(Debug)]
+struct FluxOneArtifact {
+    arm: FluxOneArm,
+    repository: String,
+    revision: String,
+    tier: &'static str,
+    /// `Some` on the identity route only; the CONTENT digest of its five files is part of the
+    /// loadability fingerprint (never the host path it was staged at), because two different
+    /// identity stacks over the same backbone are two different measurements and a record must
+    /// name which one it measured on any host.
+    identity: Option<protocol::PulidIdentityBundle>,
+    spec: LoadSpec,
+}
+
+impl FluxOneArtifact {
+    fn loadability_fingerprint(&self) -> String {
+        let base = format!("{}@{}:{}", self.repository, self.revision, self.tier);
+        match &self.identity {
+            Some(bundle) => format!("{base}+identity:{}", bundle.composite_sha256),
+            None => base,
+        }
+    }
+
+    /// The record's `artifact`: the backbone snapshot, plus on the identity route the per-file
+    /// SHA-256 of the staged bundle, so the record carries the identity stack it measured.
+    fn artifact_json(&self) -> Value {
+        let mut artifact = json!({
+            "repository": self.repository,
+            "resolvedRevision": self.revision,
+            "variant": self.tier,
+        });
+        if let Some(bundle) = &self.identity {
+            artifact["identityBundle"] = bundle.artifact_json();
+        }
+        artifact
+    }
+}
+
+/// The production calibration identity the loaded FLUX.1 generator publishes for one
+/// `(member, tier)` cell — the table `mlx-gen-flux::memory_strategy::production_calibration_fingerprint`
+/// and `mlx-gen-pulid::memory_strategy::production_calibration_fingerprint` mint (inference PR
+/// 943): the two measured keys are preserved byte-for-byte and read off the engine constants, and
+/// every other cell is `flux1-<route>-<tier>-mlx-shared-ladder-v1` /
+/// `pulid-flux-dev-<tier>-mlx-shared-ladder-v1`. Written here as well so the plan/arm binding is
+/// weights-free and holds at inference `c6d6a4db`, whose engines publish the two preserved keys
+/// only; the capture refuses a loaded contract whose identity differs from this table, so the two
+/// copies cannot drift unnoticed once the epic's pin bump lands.
+fn flux_one_calibration_fingerprint(arm: FluxOneArm, tier: &str) -> String {
+    match (arm.provider, tier) {
+        (FLUX1_DEV_PROVIDER, "q4") => {
+            runtime_macos::providers::flux::memory_strategy::MEMORY_CALIBRATION_FINGERPRINT
+                .to_owned()
+        }
+        (PULID_FLUX_PROVIDER, "q4") => {
+            runtime_macos::providers::pulid::memory_strategy::MEMORY_CALIBRATION_FINGERPRINT
+                .to_owned()
+        }
+        (FLUX1_DEV_PROVIDER, tier) => format!("flux1-dev-{tier}-mlx-shared-ladder-v1"),
+        (FLUX1_SCHNELL_PROVIDER, tier) => format!("flux1-schnell-{tier}-mlx-shared-ladder-v1"),
+        (PULID_FLUX_PROVIDER, tier) => format!("pulid-flux-dev-{tier}-mlx-shared-ladder-v1"),
+        (provider, tier) => unreachable!("no FLUX.1 member {provider} at tier {tier}"),
+    }
+}
+
+/// The weights-free conformance identities (`mlx-gen-flux` `STATIC_BEHAVIOR_FINGERPRINT` and
+/// its `-<route>` suffixes, `mlx-gen-pulid` `STATIC_CALIBRATION`) the engines publish for a
+/// registry-behaviour contract that loaded no weights. A plan row naming one of these could never
+/// be satisfied by a production load. Test-only: the sole caller is the plan-identity
+/// conformance test in `flux_one_tests`.
+#[cfg(test)]
+fn is_flux_one_weights_free_fingerprint(fingerprint: &str) -> bool {
+    fingerprint
+        .starts_with(runtime_macos::providers::flux::memory_strategy::STATIC_BEHAVIOR_FINGERPRINT)
+        || fingerprint == "pulid-flux-static-registry-behavior-v2"
+}
+
+/// The env-free half of [`flux_one_load_spec`], so the tier and identity bindings are unit-testable
+/// without weights. The root must end in the PLANNED tier's directory
+/// (`.../snapshots/<revision>/<tier>`), so a stale `…/q4` export can never satisfy a q8 or bf16
+/// plan and quietly re-label another tier's peaks (the sc-17097 defect class).
+fn flux_one_load_spec_at(
+    request: &Value,
+    load_shape: LoadShape,
+    repository: String,
+    revision: String,
+    root: PathBuf,
+    identity: Option<protocol::PulidIdentityBundle>,
+) -> Result<FluxOneArtifact, String> {
+    let arm = flux_one_arm(request)?;
+    if arm.identity {
+        protocol::validate_exact_overlay_target(request, "identity", arm.execution_path)?;
+    } else {
+        protocol::validate_plain_overlay_target(request, arm.execution_path)?;
+    }
+    if arm.identity != identity.is_some() {
+        return Err(format!(
+            "{} requires an identity stack iff it is the PuLID route (identity route: {}, bundle \
+             supplied: {})",
+            arm.execution_path,
+            arm.identity,
+            identity.is_some()
+        ));
+    }
+    let tier = match planned_qwen_tier(request)? {
+        "bf16" => "bf16",
+        "q4" => "q4",
+        "q8" => "q8",
+        _ => unreachable!("planned_qwen_tier returned an unsupported tier"),
+    };
+    protocol::validate_artifact_identity(&repository, &revision, arm.expected_repository)?;
+    let root = std::fs::canonicalize(&root)
+        .map_err(|error| format!("canonicalize {}: {error}", arm.root_env))?;
+    protocol::validate_huggingface_snapshot_root(
+        &root,
+        &repository,
+        &revision,
+        tier,
+        arm.expected_repository,
+    )?;
+    // Resident, like every other MLX still-image arm (flux2, qwen, krea-control): the anchor rung
+    // is `resident` (`memory-calibration-harness.mjs` `ANCHOR_STRATEGY.mlx`), and that is the
+    // policy the worker loads all three routes under at that rung. The base providers go through
+    // `image_jobs/base.rs`, whose declared-policy pass
+    // (`apply_declared_mlx_load_policy_for_request`) finds no `requiredOffloadPolicy` on the
+    // FLUX.1 manifests' `resident` implementation and leaves gen-core's `Resident` default; PuLID's
+    // own pass (`image_jobs/pulid.rs` `pulid_declared_load_policy`) reads the same shape off the
+    // `pulid_flux_dev` manifest. Only the `staged_residency` rows declare `sequential`, and no
+    // anchor is captured there. The calibration identity is a property of the loaded artifact and
+    // tier (inference PR 943), so the policy does not decide whether one is published.
+    let mut spec = LoadSpec::new(WeightsSource::Dir(root))
+        .with_offload_policy(OffloadPolicy::Resident)
+        .with_load_shape(load_shape);
+    if let (_, Some(quant)) = tier_precision_quant(tier) {
+        spec = spec.with_quant(quant);
+    }
+    if let Some(bundle) = &identity {
+        // The typed weight seam the `pulid_flux` loader reads (sc-8827): the adapter checkpoint,
+        // the EVA tower, and the directory it then reads the three face models out of by name. The
+        // worker builds exactly this (`image_jobs/pulid.rs` `pulid_identity_weights`) — no env is
+        // consulted inside the engine.
+        spec.identity = Some(IdentityWeights {
+            encoder: Some(WeightsSource::File(bundle.adapter.clone())),
+            eva: Some(WeightsSource::File(bundle.eva.clone())),
+            face_dir: Some(WeightsSource::Dir(bundle.face_dir.clone())),
+        });
+    }
+    Ok(FluxOneArtifact {
+        arm,
+        repository,
+        revision,
+        tier,
+        identity,
+        spec,
+    })
+}
+
+fn flux_one_load_spec(request: &Value, load_shape: LoadShape) -> Result<FluxOneArtifact, String> {
+    let arm = flux_one_arm(request)?;
+    let repository = protocol::required_env(arm.repository_env)?;
+    let revision = protocol::required_env(arm.revision_env)?;
+    let root = PathBuf::from(protocol::required_env(arm.root_env)?);
+    let identity = if arm.identity {
+        Some(protocol::pulid_identity_bundle()?)
+    } else {
+        None
+    };
+    flux_one_load_spec_at(request, load_shape, repository, revision, root, identity)
+}
+
+/// The one fresh planned request every FLUX.1 capture renders. Two steps are intentional: a
+/// resident FLUX.1 route has no provider loading boundary between text encode and denoise, so the
+/// first Step callback closes a conservative conditioning envelope and the second gives denoise its
+/// own measured interval before Decoding — the shared z_image/qwen/flux2 phase-boundary pattern.
+/// The identity route additionally carries the one reference face the worker requires
+/// (`pulid_flux_available`), at the manifest's default reference strength.
+fn flux_one_request(arm: FluxOneArm, width: u32, height: u32) -> GenerationRequest {
+    let mut request = GenerationRequest {
+        prompt: "a portrait of a person in a sunlit studio, editorial photograph".to_owned(),
+        width,
+        height,
+        count: 1,
+        seed: Some(FLUX1_SEED),
+        steps: Some(2),
+        ..Default::default()
+    };
+    if arm.identity {
+        request.conditioning = vec![Conditioning::Reference {
+            image: Image {
+                width,
+                height,
+                pixels: protocol::synthetic_reference_rgb(width, height),
+            },
+            strength: Some(PULID_REFERENCE_STRENGTH),
+        }];
+    }
+    request
+}
+
+/// Bind the fixture to the planned tier AND geometry edge, the same fixture-to-plan binding
+/// `planned_flux2_seed` enforces, so a bf16 record can never be emitted against a q4 capture that
+/// merely reused the fixture string.
+fn validate_flux_one_fixture(request: &Value, arm: FluxOneArm, tier: &str) -> Result<(), String> {
+    let fixture = protocol::planned(request)?
+        .get("fixture")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "planned.fixture must be a string".to_owned())?;
+    let (width, _) = protocol::target_geometry(request)?;
+    let prefix = format!("{}-mlx-{tier}-{width}-seed", arm.slug);
+    let remainder = fixture
+        .strip_prefix(&prefix)
+        .ok_or_else(|| format!("planned.fixture {fixture:?} must start with {prefix:?}"))?;
+    let (seed, steps) = remainder
+        .split_once("-step")
+        .ok_or_else(|| format!("planned.fixture {fixture:?} must end with -step<count>"))?;
+    let seed = seed
+        .parse::<u64>()
+        .map_err(|error| format!("parse FLUX.1 fixture seed {seed:?}: {error}"))?;
+    if seed != FLUX1_SEED {
+        return Err(format!(
+            "planned.fixture seed {seed} does not match the FLUX.1 calibration seed {FLUX1_SEED}"
+        ));
+    }
+    let steps = steps
+        .parse::<u32>()
+        .map_err(|error| format!("parse FLUX.1 fixture step count {steps:?}: {error}"))?;
+    if steps != 2 {
+        return Err(format!(
+            "planned.fixture {fixture:?} must use the two-step calibration request"
+        ));
+    }
+    Ok(())
+}
+
+/// The admission context for the FLUX.1 safety scenarios, in the shape the worker admits each
+/// route under. The identity route is `MemoryMode::ImageToImage` with one reference and
+/// `overlay: identity` — the PROVIDER mode, which is what `mlx-gen-pulid`'s route gate checks
+/// (`memory_strategy::safety_check`), and which the manifest's `requestContexts` declare beside the
+/// catalog mode `character_image`.
+#[allow(clippy::too_many_arguments)]
+fn flux_one_context(
+    arm: FluxOneArm,
+    selection: &MemorySelection,
+    calibration: &MemoryCalibrationIdentity,
+    fingerprint: &str,
+    width: u32,
+    height: u32,
+    total_bytes: u64,
+    predicted_peak_bytes: u64,
+) -> MemoryRunContext {
+    MemoryRunContext {
+        selection: *selection,
+        optimization_authority: MemoryOptimizationAuthority::Calibrated,
+        calibration_abi: calibration.abi,
+        // A parameter only so the stale-evidence probe can pass a deliberate mismatch; the real
+        // call sites pass `calibration.fingerprint` (the Krea-arm lesson at `krea_context`).
+        calibration_fingerprint: fingerprint.to_owned(),
+        load_shape: calibration.load_shape,
+        mode: if arm.identity {
+            MemoryMode::ImageToImage
+        } else {
+            MemoryMode::TextToImage
+        },
+        has_reference: arm.identity,
+        use_pid: false,
+        has_phases: false,
+        geometry: MemoryGeometry {
+            width,
+            height,
+            batch: 1,
+            frames: 1,
+            reference_count: u32::from(arm.identity),
+        },
+        overlay: arm.identity.then(|| "identity".to_owned()),
+        budget: MemoryBudget {
+            total_bytes,
+            committed_bytes: 0,
+            reclaimable_bytes: 0,
+            reserved_headroom_bytes: 0,
+        },
+        predicted_peak_bytes,
+        cache_state: MemoryCacheState::Cold,
+        evidence_revision: format!("sc-22726@{}", protocol::INFERENCE_PIN),
+    }
+}
+
+fn flux_one_complete_sweep(request: &Value) -> Result<Value, String> {
+    let mut sweep = protocol::reference_sweep(request, "passed")?;
+    // One exact tuple per plan row; marking it range-verified promotes no sibling tuple (the
+    // generated matrix still requires a matching manifest binding per cell).
+    sweep["rangeVerified"] = json!(true);
+    Ok(sweep)
+}
+
+/// The `mlx:flux1_dev` / `mlx:flux1_schnell` / `mlx:pulid_flux` arm (sc-22726).
+///
+/// Loads through the SAME seam the worker loads these three routes through —
+/// `runtime_macos::catalog().media().load(engine_id, &spec)`, which is exactly what
+/// `crates/sceneworks-worker/src/inference_runtime.rs:356-358` wraps — reads the LOADED
+/// generator's own contract, and measures the resident anchor composition against it.
+fn run_flux_one(request: &Value) -> Result<Value, String> {
+    // Before the load, not inside it: a non-still target must be refused without paying for
+    // weights. The arm is resolved first so the refusal carries the member's own label.
+    let arm = flux_one_arm(request)?;
+    protocol::validate_still_geometry(request, arm.still_calibration)?;
+    let load_shape = planned_load_shape(request)?;
+    let selection = planned_selection(request)?;
+    let tier = planned_qwen_tier(request)?;
+    validate_flux_one_fixture(request, arm, tier)?;
+    let (width, height) = protocol::target_geometry(request)?;
+    // The plan row must name the production identity this cell's loaded generator publishes —
+    // checked against the weights-free table BEFORE the load, so a row still carrying a
+    // conformance string fails in milliseconds rather than after a multi-gigabyte load.
+    let planned_fingerprint = protocol::planned(request)?
+        .get("calibrationFingerprint")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "planned.calibrationFingerprint must be a string".to_owned())?
+        .to_owned();
+    let expected_fingerprint = flux_one_calibration_fingerprint(arm, tier);
+    if planned_fingerprint != expected_fingerprint {
+        return Err(format!(
+            "plan/provider calibration mismatch: plan={planned_fingerprint}, the {} {tier} \
+             production identity is {expected_fingerprint}",
+            arm.provider
+        ));
+    }
+    let artifact = flux_one_load_spec(request, load_shape)?;
+    // From the ARTIFACT, so the member that was actually bound to a root and an identity stack is
+    // the member that is measured — not a second, independent resolution of the same plan.
+    let arm = artifact.arm;
+
+    let catalog =
+        runtime_macos::catalog().map_err(|error| format!("build MLX catalog: {error}"))?;
+    let generator = catalog
+        .media()
+        .load(arm.provider, &artifact.spec)
+        .map_err(|error| format!("load real {} {tier} provider: {error}", arm.provider))?;
+    let contract = generator.memory_strategy_contract().ok_or_else(|| {
+        format!(
+            "loaded {} exposed no memory-strategy contract",
+            arm.provider
+        )
+    })?;
+    contract.validate_selection(&selection).map_err(|error| {
+        format!(
+            "pinned {} provider rejected planned selection: {error}",
+            arm.provider
+        )
+    })?;
+    let strategy = attested_strategy(
+        request,
+        &selection,
+        &contract.engaged_composition(selection.strategy),
+    )?;
+    // The LOADED generator's own identity is what the record attests. An absent one is refused by
+    // name — an anchor recorded against no identity would claim measured authority the engine
+    // never granted — and so is one that differs from the table the plan was bound to above.
+    let calibration = contract.calibration.as_ref().ok_or_else(|| {
+        format!(
+            "the loaded {} provider at inference {} published no calibration identity for the \
+             {tier} artifact; the production identity for this cell is {expected_fingerprint} \
+             (inference PR 943 publishes one per (route, tier) for every load shape), so this \
+             cell captures only at a pin that carries it",
+            arm.provider,
+            protocol::INFERENCE_PIN
+        )
+    })?;
+    if calibration.fingerprint != expected_fingerprint {
+        return Err(format!(
+            "plan/provider calibration mismatch: plan={planned_fingerprint}, pinned provider={}",
+            calibration.fingerprint
+        ));
+    }
+    let hardware_bytes = request
+        .pointer("/hardware/memoryBytes")
+        .and_then(Value::as_u64)
+        .ok_or_else(|| "run request.hardware.memoryBytes must be an integer".to_owned())?;
+    let safety = |fingerprint: &str, total_bytes: u64, predicted: u64| {
+        generator.memory_strategy_safety_check(&flux_one_context(
+            arm,
+            &selection,
+            calibration,
+            fingerprint,
+            width,
+            height,
+            total_bytes,
+            predicted,
+        ))
+    };
+    // Admission mutation hygiene: the gate must ACCEPT a fitting request, so the two rejections
+    // below cannot pass through a blanket refusal.
+    if !matches!(
+        safety(&calibration.fingerprint, hardware_bytes, 1),
+        MemorySafetyDecision::Accept
+    ) {
+        return Err(format!(
+            "{} admission rejected a fitting probe budget; the scenario rejections below would be \
+             a blanket refusal, not evidence",
+            arm.provider
+        ));
+    }
+    if !matches!(
+        safety(&calibration.fingerprint, 0, 1),
+        MemorySafetyDecision::Reject { .. }
+    ) {
+        return Err(format!(
+            "{} admission accepted an unknown/zero memory budget",
+            arm.provider
+        ));
+    }
+    if !matches!(
+        safety("stale-flux1-fingerprint", hardware_bytes, 1),
+        MemorySafetyDecision::Reject { .. }
+    ) {
+        return Err(format!(
+            "{} admission accepted stale calibration evidence",
+            arm.provider
+        ));
+    }
+
+    let conditioning = Cell::new(PhaseMemory {
+        active: 0,
+        cache: 0,
+    });
+    let denoise = Cell::new(PhaseMemory {
+        active: 0,
+        cache: 0,
+    });
+    clear_cache();
+    reset_peak_memory();
+    let pre_rung_active = get_active_memory() as u64;
+    let pre_rung_cache = get_cache_memory() as u64;
+    let selected = one_image(
+        generator
+            .generate(
+                &flux_one_request(arm, width, height),
+                &mut |progress| match progress {
+                    Progress::Step { current: 1, .. } => {
+                        conditioning.set(PhaseMemory::capture());
+                        reset_peak_memory();
+                    }
+                    Progress::Decoding => {
+                        denoise.set(PhaseMemory::capture());
+                        reset_peak_memory();
+                    }
+                    _ => {}
+                },
+            )
+            .map_err(|error| format!("generate measured {} render: {error}", arm.provider))?,
+    )?;
+    let decode = PhaseMemory::capture();
+    let conditioning = conditioning.get();
+    let denoise = denoise.get();
+    if [conditioning.active, denoise.active, decode.active].contains(&0) {
+        return Err(format!(
+            "a synchronized {} lifecycle phase reported a zero active peak",
+            arm.provider
+        ));
+    }
+    let overall = PhaseMemory::overall(&[conditioning, denoise, decode]);
+    let predicted_peaks = image_predicted_peak_bytes(conditioning, denoise, decode);
+    let predicted = predicted_peaks.overall;
+    if !matches!(
+        safety(&calibration.fingerprint, predicted, predicted),
+        MemorySafetyDecision::Accept
+    ) {
+        return Err(format!(
+            "{} admission rejected an exact-fit calibrated budget",
+            arm.provider
+        ));
+    }
+
+    // Warm-repeat determinism and allocator cleanup bounds on this exact loaded provider.
+    clear_cache();
+    reset_peak_memory();
+    let baseline = one_image(
+        generator
+            .generate(&flux_one_request(arm, width, height), &mut |_| {})
+            .map_err(|error| format!("generate warm {} control: {error}", arm.provider))?,
+    )?;
+    let clean_warm_peak = get_peak_memory() as u64;
+    clear_cache();
+    let clean_post_cleanup = AllocatorState::capture_current();
+    let cleanup_bounds =
+        LifecycleMemoryBounds::from_clean_warm(clean_warm_peak, clean_post_cleanup);
+    let (maximum_error, mean_error, rms_error) = image_max_mean_rms_abs(&selected, &baseline)?;
+    if !flux2_quality_passes(maximum_error, mean_error, rms_error) {
+        return Err(format!(
+            "{} warm repeat exceeded the determinism envelope: max={maximum_error:.6}, \
+             mean={mean_error:.6}, rms={rms_error:.6}",
+            arm.provider
+        ));
+    }
+    reset_peak_memory();
+    let warm = one_image(
+        generator
+            .generate(&flux_one_request(arm, width, height), &mut |_| {})
+            .map_err(|error| format!("generate warm {} repeat: {error}", arm.provider))?,
+    )?;
+    let warm_peak = get_peak_memory() as u64;
+    if !cleanup_bounds.allows_warm_peak(warm_peak) {
+        return Err(format!(
+            "{} warm repeat peaked at {warm_peak} bytes, above the clean warm control \
+             {clean_warm_peak} bytes plus 2%",
+            arm.provider
+        ));
+    }
+    clear_cache();
+    let warm_post_cleanup = AllocatorState::capture_current();
+    if !cleanup_bounds.allows_retained(warm_post_cleanup) {
+        return Err(format!(
+            "{} warm repeat retained active/cache bytes {warm_post_cleanup:?} above the clean warm \
+             cleanup {clean_post_cleanup:?} plus {} bytes",
+            arm.provider, cleanup_bounds.tolerance_bytes,
+        ));
+    }
+    let (warm_maximum, warm_mean, warm_rms) = image_max_mean_rms_abs(&selected, &warm)?;
+    if !flux2_quality_passes(warm_maximum, warm_mean, warm_rms) {
+        return Err(format!(
+            "{} second warm repeat changed the deterministic output",
+            arm.provider
+        ));
+    }
+
+    // Arm-internal negative-mutation falsifiability check: a runtime_complete record must keep
+    // `negativeMutation` null, so the breach is verified here and the numbers land in diagnostics.
+    let mutated = qwen_negative_mutation(&selected);
+    let (mutated_maximum, mutated_mean, mutated_rms) = image_max_mean_rms_abs(&mutated, &baseline)?;
+    if flux2_quality_passes(mutated_maximum, mutated_mean, mutated_rms) {
+        return Err(format!(
+            "{} output mutation did not breach the determinism envelope",
+            arm.provider
+        ));
+    }
+
+    let lifecycle_blocker = concat!(
+        "the pinned FLUX.1 crates open no memory-strategy request scope for the resident anchor ",
+        "composition and expose no calibration fault-injection site, so the scoped lifecycle ",
+        "scenarios cannot execute; unscoped repeat determinism and allocator cleanup bounds are ",
+        "attested in quality and diagnostics instead"
+    );
+    let overlay_scenario = if arm.identity {
+        json!({
+            "name": "overlay",
+            "result": "passed",
+            "reason": "the PuLID identity stack (adapter, EVA tower, and the three face models) was resident for every measured render and is declared as its own resident component by the pinned contract",
+        })
+    } else {
+        json!({ "name": "overlay", "result": "not_applicable", "reason": "settled below from the declared target" })
+    };
+    let mut fragment = json!({
+        "status": "runtime_complete",
+        "strategy": strategy,
+        "loadShape": load_shape_key(calibration.load_shape),
+        "artifact": artifact.artifact_json(),
+        "sweep": flux_one_complete_sweep(request)?,
+        "scenarios": [
+            { "name": "exact_fit", "result": "passed", "predictedBytes": predicted, "effectiveBudgetBytes": predicted },
+            { "name": "unknown_budget", "result": "passed" },
+            { "name": "stale_evidence", "result": "passed" },
+            { "name": "warm_repeat", "result": "not_run", "reason": lifecycle_blocker },
+            { "name": "cancel", "result": "not_run", "reason": lifecycle_blocker },
+            { "name": "error", "result": "not_run", "reason": lifecycle_blocker },
+            { "name": "loadability", "result": "passed" },
+            overlay_scenario
+        ],
+        "predictedPeakBytes": predicted_peaks.json(),
+        "observedMemory": {
+            "conditioning": conditioning.json(),
+            "denoise": denoise.json(),
+            "decode": decode.json(),
+            "overall": overall.json(),
+        },
+        "quality": {
+            "contract": "identical artifact, prompt, seed, geometry, steps, tier, and loaded provider; cold measured render versus warm unscoped repeats",
+            "identicalInputs": true,
+            "result": "passed",
+            "maximumError": maximum_error,
+            "meanError": mean_error,
+            "rootMeanSquareError": rms_error,
+            "maximumErrorThreshold": FLUX2_MAX_THRESHOLD,
+            "meanErrorThreshold": FLUX2_MEAN_THRESHOLD,
+            "rootMeanSquareErrorThreshold": FLUX2_RMS_THRESHOLD,
+        },
+        "negativeMutation": null,
+        "loadability": {
+            "result": "passed",
+            "resolvedPathFingerprint": artifact.loadability_fingerprint(),
+        },
+        "diagnostics": protocol::diagnostics(
+            &format!("memory-mlx-adapter:{}-shared-ladder", arm.slug),
+            "executed",
+            [lifecycle_blocker.to_owned()],
+            [
+                ("preRungActiveAfterClear", "bytes", pre_rung_active),
+                ("preRungCacheAfterClear", "bytes", pre_rung_cache),
+                ("conditioningActivePeak", "bytes", conditioning.active),
+                ("denoiseActivePeak", "bytes", denoise.active),
+                ("decodeActivePeak", "bytes", decode.active),
+                ("overallAllocatorEnvelope", "bytes", overall.allocator_bytes()),
+                ("lifecycleCleanWarmPeak", "bytes", clean_warm_peak),
+                ("lifecycleCleanPostCleanupActive", "bytes", clean_post_cleanup.active),
+                ("lifecycleCleanPostCleanupCache", "bytes", clean_post_cleanup.cache),
+                ("lifecycleCleanupTolerance", "bytes", cleanup_bounds.tolerance_bytes),
+                ("lifecycleWarmRepeatPeak", "bytes", warm_peak),
+                ("lifecycleWarmRepeatPostCleanupActive", "bytes", warm_post_cleanup.active),
+                ("lifecycleWarmRepeatPostCleanupCache", "bytes", warm_post_cleanup.cache),
+                ("negativeMutationMaximumErrorPer255", "count", (mutated_maximum * 255.0).round() as u64),
+                ("negativeMutationMeanErrorPer255", "count", (mutated_mean * 255.0).round() as u64),
+                ("loadShapeDeferred", "count", u64::from(calibration.load_shape == LoadShape::DeferredMaterialization)),
+                // The identity route conditions every request on one reference face.
+                ("referenceImages", "count", u64::from(arm.identity)),
+            ],
+        ),
+        "capturedAt": protocol::captured_at(),
+    });
+    if !arm.identity {
+        protocol::settle_plain_overlay_scenario(request, &mut fragment, arm.execution_path)?;
+    }
+    Ok(fragment)
 }
 
 /// Maximum, mean, and root-mean-square absolute error between two images, in [0,1] units. The
@@ -10680,6 +11415,15 @@ fn run(request: &Value) -> Result<Value, String> {
         KREA_PROVIDER => run_krea_control(request),
         QWEN_PROVIDER => run_qwen_provider(request),
         FLUX2_PROVIDER => run_flux2_dev(request),
+        // sc-22726: the FLUX.1 family. Three registry ids on one arm — the two base text-to-image
+        // providers of `mlx-gen-flux`, and `mlx-gen-pulid`'s identity route over the same
+        // FLUX.1-dev backbone. The arm resolves which member from `(provider, mode)`.
+        // One arm per line: `stale-lane-report.mjs#adapterCapturableProviders` derives the
+        // capturable provider set by parsing these arms, and only accepts a bare literal or a
+        // single `&str` const per arm — an or-pattern would make it throw.
+        FLUX1_DEV_PROVIDER => run_flux_one(request),
+        FLUX1_SCHNELL_PROVIDER => run_flux_one(request),
+        PULID_FLUX_PROVIDER => run_flux_one(request),
         // sc-18808: the first VIDEO arm. Every arm above it refuses `geometry.frames != 1`; this one
         // validates against LTX's own resolution/temporal envelope instead.
         LTX_PROVIDER => run_ltx(request),
@@ -10811,6 +11555,818 @@ mod z_image_reuse_tests {
             error,
             "Z-Image rung batch must contain exactly 5 cases, got 3"
         );
+    }
+}
+
+/// sc-22726 — the FLUX.1 family arm: `flux_dev`, `flux_schnell` and `pulid_flux_dev`.
+///
+/// Everything here is env-free and weights-free, which is the point: the arm's plan binding (member
+/// resolution, tier, root suffix, identity stack, request shape, admission context) is decided
+/// before a single weight file is opened, so it can be proven on a CPU-only host. The measured
+/// render itself belongs to the terminal capture campaign.
+#[cfg(test)]
+mod flux_one_tests {
+    use super::*;
+
+    fn flux_one_planned(provider: &str, mode: &str, tier: &str) -> Value {
+        let overlay = if provider == PULID_FLUX_PROVIDER {
+            "identity"
+        } else {
+            "none"
+        };
+        let model_id = match provider {
+            FLUX1_DEV_PROVIDER => "flux_dev",
+            FLUX1_SCHNELL_PROVIDER => "flux_schnell",
+            PULID_FLUX_PROVIDER => "pulid_flux_dev",
+            other => other,
+        };
+        json!({
+            "planned": {
+                "target": {
+                    "provider": provider,
+                    "modelId": model_id,
+                    "tier": tier,
+                    "mode": mode,
+                    "overlay": overlay,
+                    "geometry": { "width": 1024, "height": 1024, "batch": 1, "frames": 1 }
+                },
+                "backend": "mlx",
+                "loadShape": "deferred_materialization",
+                "strategy": { "rung": "resident", "engagedRungs": ["resident"], "parameters": {} },
+                "calibrationFingerprint": "unused",
+                "fixture": "unused"
+            }
+        })
+    }
+
+    fn flux_one_temp_dir(label: &str) -> PathBuf {
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        std::env::temp_dir().join(format!("sc-22726-{label}-{}-{nonce}", std::process::id()))
+    }
+
+    fn flux_one_snapshot_root(repository: &str, revision: &str, tier: &str) -> PathBuf {
+        let root = flux_one_temp_dir("flux1")
+            .join(format!("models--{}", repository.replace('/', "--")))
+            .join("snapshots")
+            .join(revision)
+            .join(tier);
+        std::fs::create_dir_all(&root).unwrap();
+        root
+    }
+
+    /// A complete staged PuLID bundle: all five loose files in ONE directory, which is what both
+    /// worker lanes stage under `SCENEWORKS_PULID_WEIGHTS` and what both engines require.
+    fn staged_pulid_bundle() -> protocol::PulidIdentityBundle {
+        let root = flux_one_temp_dir("pulid-bundle");
+        std::fs::create_dir_all(&root).unwrap();
+        for file in protocol::PULID_IDENTITY_BUNDLE_FILES {
+            std::fs::write(root.join(file), b"weights").unwrap();
+        }
+        protocol::pulid_identity_bundle_at(root).unwrap()
+    }
+
+    /// The family member is read off the plan's `(provider, mode)`, and a pair no member serves is
+    /// refused by name rather than measured as its nearest neighbour. `flux1_schnell` has no
+    /// identity route at all, and PuLID is text-to-image-WITH-A-FACE only (the worker's
+    /// `pulid_flux_available` requires `character_image` plus a reference), so both of those
+    /// crossings must fail.
+    #[test]
+    fn the_flux_one_arm_is_resolved_from_the_planned_provider_and_mode() {
+        let dev =
+            flux_one_arm(&flux_one_planned(FLUX1_DEV_PROVIDER, "text_to_image", "q4")).unwrap();
+        assert_eq!(dev, FLUX1_DEV_ARM);
+        assert_eq!(dev.expected_repository, protocol::FLUX1_DEV_REPOSITORY);
+        assert!(!dev.identity);
+        // Each base member binds ITS OWN env family — the one `measure-memory-catalog.mjs`
+        // exports for it (`PROVIDER_FAMILIES.flux1_dev.env` / `.flux1_schnell.env`).
+        assert_eq!(dev.repository_env, "SCENEWORKS_FLUX1_DEV_REPOSITORY");
+        assert_eq!(dev.revision_env, "SCENEWORKS_FLUX1_DEV_REVISION");
+        assert_eq!(dev.root_env, "SCENEWORKS_FLUX1_DEV_ROOT");
+        let schnell = flux_one_arm(&flux_one_planned(
+            FLUX1_SCHNELL_PROVIDER,
+            "text_to_image",
+            "q8",
+        ))
+        .unwrap();
+        assert_eq!(schnell, FLUX1_SCHNELL_ARM);
+        assert_eq!(
+            schnell.expected_repository,
+            protocol::FLUX1_SCHNELL_REPOSITORY
+        );
+        assert_eq!(
+            schnell.repository_env,
+            "SCENEWORKS_FLUX1_SCHNELL_REPOSITORY"
+        );
+        assert_eq!(schnell.revision_env, "SCENEWORKS_FLUX1_SCHNELL_REVISION");
+        assert_eq!(schnell.root_env, "SCENEWORKS_FLUX1_SCHNELL_ROOT");
+        let pulid = flux_one_arm(&flux_one_planned(
+            PULID_FLUX_PROVIDER,
+            "character_image",
+            "bf16",
+        ))
+        .unwrap();
+        assert_eq!(pulid, PULID_FLUX_ARM);
+        assert!(pulid.identity);
+        // The PuLID backbone IS the FLUX.1-dev artifact, so it binds the same env family — that is
+        // the fact the closure's `engineId` alias and the shared PROVIDER_FAMILIES row encode.
+        assert_eq!(pulid.expected_repository, protocol::FLUX1_DEV_REPOSITORY);
+        assert_eq!(pulid.repository_env, "SCENEWORKS_FLUX1_DEV_REPOSITORY");
+        assert_eq!(pulid.revision_env, "SCENEWORKS_FLUX1_DEV_REVISION");
+        assert_eq!(pulid.root_env, "SCENEWORKS_FLUX1_DEV_ROOT");
+        // ...but never the same record: the diagnostics source and the execution path differ.
+        assert_ne!(pulid.slug, FLUX1_DEV_ARM.slug);
+        assert_ne!(pulid.execution_path, FLUX1_DEV_ARM.execution_path);
+        assert_ne!(pulid.still_calibration, FLUX1_DEV_ARM.still_calibration);
+
+        for (provider, mode) in [
+            (FLUX1_SCHNELL_PROVIDER, "character_image"),
+            (PULID_FLUX_PROVIDER, "text_to_image"),
+            (FLUX1_DEV_PROVIDER, "edit_image"),
+            ("flux1_dev_control", "text_to_image"),
+        ] {
+            let error = flux_one_arm(&flux_one_planned(provider, mode, "q4")).unwrap_err();
+            assert!(
+                error.contains(&format!("provider {provider:?} in mode {mode:?}")),
+                "{provider}/{mode}: {error}"
+            );
+        }
+        assert!(flux_one_arm(
+            &json!({ "planned": { "target": { "provider": FLUX1_DEV_PROVIDER } } })
+        )
+        .unwrap_err()
+        .contains("planned.target.mode"));
+    }
+
+    /// The dispatcher routes all three ids into this arm, and still refuses everything else by
+    /// name. `run` used to send an unimplemented provider into the Qwen arm (sc-18104), so the
+    /// refusal sentence is asserted rather than assumed.
+    #[test]
+    fn run_dispatches_every_flux_one_id_and_still_refuses_a_foreign_one() {
+        for provider in [
+            FLUX1_DEV_PROVIDER,
+            FLUX1_SCHNELL_PROVIDER,
+            PULID_FLUX_PROVIDER,
+        ] {
+            let mode = if provider == PULID_FLUX_PROVIDER {
+                "character_image"
+            } else {
+                "text_to_image"
+            };
+            let error = run(&flux_one_planned(provider, mode, "q4"))
+                .expect_err("the weights-free plan cannot complete a real capture");
+            assert!(
+                !error.contains("does not implement provider"),
+                "{provider} was not dispatched into the FLUX.1 arm: {error}"
+            );
+        }
+        for provider in ["flux1_dev_control", "chroma1_hd"] {
+            let error = run(&flux_one_planned(provider, "text_to_image", "q4")).unwrap_err();
+            assert_eq!(
+                error,
+                format!("MLX five-rung calibration does not implement provider {provider:?}")
+            );
+        }
+    }
+
+    /// The still-geometry guard fires BEFORE any environment or weight work, under each member's
+    /// own label — so a video geometry can never reach a FLUX.1 load (sc-18808).
+    #[test]
+    fn every_flux_one_member_refuses_a_multi_frame_geometry_under_its_own_label() {
+        for arm in [FLUX1_DEV_ARM, FLUX1_SCHNELL_ARM, PULID_FLUX_ARM] {
+            for frames in [0_u64, 2, 97] {
+                let mut request = flux_one_planned(arm.provider, arm.mode, "q4");
+                request["planned"]["target"]["geometry"]["frames"] = json!(frames);
+                let error = run(&request).expect_err("a video geometry must be refused");
+                assert_eq!(
+                    error,
+                    format!(
+                        "{} requires geometry.frames == 1, got {frames}",
+                        arm.still_calibration
+                    ),
+                    "{}/{frames}",
+                    arm.provider
+                );
+            }
+        }
+    }
+
+    /// The tier is the PLAN's on every member, the root must carry it, and the `LoadSpec` re-asserts
+    /// it — a q8 plan against a q4 export is refused NAMING the tier it wanted (the sc-17097 defect
+    /// class). All three tiers must round-trip, so the arm cannot be quietly capped at one.
+    #[test]
+    fn flux_one_root_must_carry_the_planned_tier_and_the_spec_binds_it() {
+        const REVISION: &str = "323fd12d79f78ad444e882e8d8e871914584f2b9";
+        for arm in [FLUX1_DEV_ARM, FLUX1_SCHNELL_ARM, PULID_FLUX_ARM] {
+            let repository = arm.expected_repository;
+            let identity = || arm.identity.then(staged_pulid_bundle);
+            let q4_root = flux_one_snapshot_root(repository, REVISION, "q4");
+            let error = flux_one_load_spec_at(
+                &flux_one_planned(arm.provider, arm.mode, "q8"),
+                LoadShape::DeferredMaterialization,
+                repository.to_owned(),
+                REVISION.to_owned(),
+                q4_root.clone(),
+                identity(),
+            )
+            .expect_err("a q8 plan must not be satisfied by a q4 root");
+            assert!(
+                error.ends_with(&format!("/snapshots/{REVISION}/q8")),
+                "{}: {error}",
+                arm.provider
+            );
+            for (tier, quant) in [
+                ("q4", Some(Quant::Q4)),
+                ("q8", Some(Quant::Q8)),
+                ("bf16", None),
+            ] {
+                let root = flux_one_snapshot_root(repository, REVISION, tier);
+                let artifact = flux_one_load_spec_at(
+                    &flux_one_planned(arm.provider, arm.mode, tier),
+                    LoadShape::DeferredMaterialization,
+                    repository.to_owned(),
+                    REVISION.to_owned(),
+                    root,
+                    identity(),
+                )
+                .unwrap_or_else(|error| panic!("{}/{tier}: {error}", arm.provider));
+                assert_eq!(artifact.tier, tier);
+                assert_eq!(artifact.spec.quantize, quant, "{tier} load quant");
+                // Resident: the anchor rung, and the policy the worker loads every FLUX.1 route
+                // under at that rung (no `requiredOffloadPolicy` on the manifests' `resident`
+                // implementation). The identity is per (route, tier) and does not depend on it.
+                assert_eq!(artifact.spec.offload_policy, OffloadPolicy::Resident);
+                assert_eq!(artifact.spec.load_shape, LoadShape::DeferredMaterialization);
+                assert_eq!(artifact.arm, arm);
+                assert!(artifact
+                    .loadability_fingerprint()
+                    .starts_with(&format!("{repository}@{REVISION}:{tier}")));
+            }
+            // The wrong artifact family is refused before the root is even looked at.
+            let other = if repository == protocol::FLUX1_DEV_REPOSITORY {
+                protocol::FLUX1_SCHNELL_REPOSITORY
+            } else {
+                protocol::FLUX1_DEV_REPOSITORY
+            };
+            let error = flux_one_load_spec_at(
+                &flux_one_planned(arm.provider, arm.mode, "q4"),
+                LoadShape::DeferredMaterialization,
+                other.to_owned(),
+                REVISION.to_owned(),
+                q4_root,
+                identity(),
+            )
+            .expect_err("the other family's repository must be refused");
+            assert!(error.contains(repository), "{}: {error}", arm.provider);
+        }
+    }
+
+    /// The identity stack rides the `LoadSpec` exactly as the worker threads it
+    /// (`image_jobs/pulid.rs` `pulid_identity_weights`), the base routes carry none, and the
+    /// resolved bundle is part of the loadability fingerprint — two identity stacks over one
+    /// backbone are two different measurements.
+    #[test]
+    fn the_pulid_route_binds_the_identity_stack_and_the_base_routes_do_not() {
+        const REVISION: &str = "323fd12d79f78ad444e882e8d8e871914584f2b9";
+        let bundle = staged_pulid_bundle();
+        let root = flux_one_snapshot_root(protocol::FLUX1_DEV_REPOSITORY, REVISION, "q4");
+        let artifact = flux_one_load_spec_at(
+            &flux_one_planned(PULID_FLUX_PROVIDER, "character_image", "q4"),
+            LoadShape::DeferredMaterialization,
+            protocol::FLUX1_DEV_REPOSITORY.to_owned(),
+            REVISION.to_owned(),
+            root.clone(),
+            Some(bundle.clone()),
+        )
+        .unwrap();
+        let identity = artifact.spec.identity.as_ref().expect("identity stack");
+        assert_eq!(
+            identity.encoder,
+            Some(WeightsSource::File(
+                bundle.root.join(protocol::PULID_ADAPTER_FILE)
+            ))
+        );
+        assert_eq!(
+            identity.eva,
+            Some(WeightsSource::File(
+                bundle.root.join(protocol::PULID_EVA_FILE)
+            ))
+        );
+        // The engine reads scrfd / arcface / bisenet out of `face_dir` BY NAME, so the bundle root
+        // IS the face dir — not a sibling of it.
+        assert_eq!(
+            identity.face_dir,
+            Some(WeightsSource::Dir(bundle.root.clone()))
+        );
+        // The fingerprint names the stack by CONTENT, never by the host path it was staged at.
+        assert!(
+            artifact
+                .loadability_fingerprint()
+                .ends_with(&format!("+identity:{}", bundle.composite_sha256)),
+            "{}",
+            artifact.loadability_fingerprint()
+        );
+        assert!(!artifact
+            .loadability_fingerprint()
+            .contains(&bundle.root.display().to_string()));
+        // ...and the record's artifact carries every file's digest.
+        let identity_bundle = &artifact.artifact_json()["identityBundle"];
+        assert_eq!(
+            identity_bundle["compositeSha256"].as_str(),
+            Some(bundle.composite_sha256.as_str())
+        );
+        for (file, sha256) in &bundle.file_sha256 {
+            assert_eq!(
+                identity_bundle["files"][*file].as_str(),
+                Some(sha256.as_str())
+            );
+        }
+        // Same bytes at another path: the same identity. Different bytes: a different one.
+        let restaged = staged_pulid_bundle();
+        assert_ne!(restaged.root, bundle.root);
+        assert_eq!(restaged.composite_sha256, bundle.composite_sha256);
+        std::fs::write(restaged.root.join(protocol::PULID_BISENET_FILE), b"other").unwrap();
+        let restaged = protocol::pulid_identity_bundle_at(restaged.root).unwrap();
+        assert_ne!(restaged.composite_sha256, bundle.composite_sha256);
+        assert_ne!(
+            restaged.file_sha256[4].1, bundle.file_sha256[4].1,
+            "the bisenet digest is the one that moved"
+        );
+        assert_eq!(restaged.file_sha256[..4], bundle.file_sha256[..4]);
+
+        let base = flux_one_load_spec_at(
+            &flux_one_planned(FLUX1_DEV_PROVIDER, "text_to_image", "q4"),
+            LoadShape::DeferredMaterialization,
+            protocol::FLUX1_DEV_REPOSITORY.to_owned(),
+            REVISION.to_owned(),
+            root.clone(),
+            None,
+        )
+        .unwrap();
+        assert!(base.spec.identity.is_none());
+        assert!(!base.loadability_fingerprint().contains("+identity"));
+
+        // Neither crossing is expressible: an identity stack on a base route, or a PuLID plan with
+        // no stack, is refused rather than measured as the other route.
+        for (provider, mode, supplied) in [
+            (FLUX1_DEV_PROVIDER, "text_to_image", Some(bundle.clone())),
+            (PULID_FLUX_PROVIDER, "character_image", None),
+        ] {
+            let error = flux_one_load_spec_at(
+                &flux_one_planned(provider, mode, "q4"),
+                LoadShape::DeferredMaterialization,
+                protocol::FLUX1_DEV_REPOSITORY.to_owned(),
+                REVISION.to_owned(),
+                root.clone(),
+                supplied,
+            )
+            .expect_err("the identity stack and the route must agree");
+            assert!(error.contains("identity"), "{provider}: {error}");
+        }
+    }
+
+    /// `flux_one_load_spec` reads the identity bundle from `SCENEWORKS_PULID_WEIGHTS` on the
+    /// PuLID route and from nothing on a base route. Serialized on [`FLUX_ONE_ENV_LOCK`]: the
+    /// process environment is global, and every other FLUX.1 test in this binary fails before it
+    /// reads an env var, so nothing else needs the lock.
+    #[test]
+    fn the_env_bound_load_spec_reads_the_identity_bundle_from_its_env_on_the_pulid_route_only() {
+        const REVISION: &str = "323fd12d79f78ad444e882e8d8e871914584f2b9";
+        let _guard = FLUX_ONE_ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let restore = FluxOneEnv::capture();
+        let bundle = staged_pulid_bundle();
+        let root = flux_one_snapshot_root(protocol::FLUX1_DEV_REPOSITORY, REVISION, "q4");
+        std::env::set_var(
+            "SCENEWORKS_FLUX1_DEV_REPOSITORY",
+            protocol::FLUX1_DEV_REPOSITORY,
+        );
+        std::env::set_var("SCENEWORKS_FLUX1_DEV_REVISION", REVISION);
+        std::env::set_var("SCENEWORKS_FLUX1_DEV_ROOT", &root);
+        std::env::remove_var(protocol::PULID_IDENTITY_BUNDLE_ENV);
+        let pulid = flux_one_planned(PULID_FLUX_PROVIDER, "character_image", "q4");
+        let error = flux_one_load_spec(&pulid, LoadShape::DeferredMaterialization)
+            .expect_err("the PuLID route must require the bundle env");
+        assert!(
+            error.contains(protocol::PULID_IDENTITY_BUNDLE_ENV),
+            "{error}"
+        );
+        // A base route reads no bundle env at all: it binds with the variable absent.
+        let dev = flux_one_planned(FLUX1_DEV_PROVIDER, "text_to_image", "q4");
+        let base = flux_one_load_spec(&dev, LoadShape::DeferredMaterialization).unwrap();
+        assert!(base.identity.is_none());
+
+        std::env::set_var(protocol::PULID_IDENTITY_BUNDLE_ENV, &bundle.root);
+        let artifact = flux_one_load_spec(&pulid, LoadShape::DeferredMaterialization).unwrap();
+        let identity = artifact.identity.as_ref().expect("the bundle env was read");
+        assert_eq!(identity.composite_sha256, bundle.composite_sha256);
+        assert_eq!(
+            identity.root,
+            std::fs::canonicalize(&bundle.root).unwrap(),
+            "the env value is canonicalized, not used as spelled"
+        );
+        // The schnell family's env is NOT consulted on the dev backbone: pointing it somewhere
+        // unusable changes nothing for either dev-backed member.
+        std::env::set_var("SCENEWORKS_FLUX1_SCHNELL_ROOT", "/nonexistent/sc-22726");
+        std::env::set_var("SCENEWORKS_FLUX1_SCHNELL_REPOSITORY", "not/a-repo");
+        std::env::set_var("SCENEWORKS_FLUX1_SCHNELL_REVISION", "junk");
+        flux_one_load_spec(&pulid, LoadShape::DeferredMaterialization).unwrap();
+        flux_one_load_spec(&dev, LoadShape::DeferredMaterialization).unwrap();
+        // ...and a schnell plan reads ITS family, so it is refused on those values by name.
+        let schnell = flux_one_planned(FLUX1_SCHNELL_PROVIDER, "text_to_image", "q4");
+        let error = flux_one_load_spec(&schnell, LoadShape::DeferredMaterialization)
+            .expect_err("the schnell env family is the one a schnell plan reads");
+        assert!(
+            error.contains(protocol::FLUX1_SCHNELL_REPOSITORY),
+            "{error}"
+        );
+        drop(restore);
+    }
+
+    /// Serializes the tests that mutate the FLUX.1 env families and the PuLID bundle env.
+    static FLUX_ONE_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// Every env var the FLUX.1 arm reads, restored on drop — including on a panic, so a failing
+    /// assertion cannot leak a binding into a later test.
+    struct FluxOneEnv(Vec<(&'static str, Option<std::ffi::OsString>)>);
+
+    impl FluxOneEnv {
+        const NAMES: [&'static str; 7] = [
+            "SCENEWORKS_FLUX1_DEV_REPOSITORY",
+            "SCENEWORKS_FLUX1_DEV_REVISION",
+            "SCENEWORKS_FLUX1_DEV_ROOT",
+            "SCENEWORKS_FLUX1_SCHNELL_REPOSITORY",
+            "SCENEWORKS_FLUX1_SCHNELL_REVISION",
+            "SCENEWORKS_FLUX1_SCHNELL_ROOT",
+            protocol::PULID_IDENTITY_BUNDLE_ENV,
+        ];
+
+        fn capture() -> Self {
+            Self(
+                Self::NAMES
+                    .iter()
+                    .map(|name| (*name, std::env::var_os(name)))
+                    .collect(),
+            )
+        }
+    }
+
+    impl Drop for FluxOneEnv {
+        fn drop(&mut self) {
+            for (name, value) in &self.0 {
+                match value {
+                    Some(value) => std::env::set_var(name, value),
+                    None => std::env::remove_var(name),
+                }
+            }
+        }
+    }
+
+    /// An incomplete staged bundle is refused HERE, naming the missing files, rather than several
+    /// gigabytes into a capture as an opaque loader error.
+    #[test]
+    fn an_incomplete_pulid_bundle_is_refused_naming_the_missing_files() {
+        let root = flux_one_temp_dir("pulid-partial");
+        std::fs::create_dir_all(&root).unwrap();
+        for skipped in protocol::PULID_IDENTITY_BUNDLE_FILES {
+            for file in protocol::PULID_IDENTITY_BUNDLE_FILES {
+                let path = root.join(file);
+                if file == skipped {
+                    let _ = std::fs::remove_file(&path);
+                } else {
+                    std::fs::write(&path, b"weights").unwrap();
+                }
+            }
+            let error = protocol::pulid_identity_bundle_at(root.clone())
+                .expect_err("an incomplete bundle must be refused");
+            assert!(error.contains(skipped), "{skipped}: {error}");
+            assert!(error.contains(protocol::PULID_IDENTITY_BUNDLE_ENV));
+        }
+    }
+
+    /// The overlay axis is read off the declared target on both routes: a base plan that declares
+    /// `identity` is refused, and a PuLID plan that declares `none` is too — neither may acquire
+    /// the other's overlay coverage.
+    #[test]
+    fn the_flux_one_overlay_axis_is_bound_to_the_declared_target() {
+        const REVISION: &str = "323fd12d79f78ad444e882e8d8e871914584f2b9";
+        let root = flux_one_snapshot_root(protocol::FLUX1_DEV_REPOSITORY, REVISION, "q4");
+        let mut base = flux_one_planned(FLUX1_DEV_PROVIDER, "text_to_image", "q4");
+        base["planned"]["target"]["overlay"] = json!("identity");
+        let error = flux_one_load_spec_at(
+            &base,
+            LoadShape::DeferredMaterialization,
+            protocol::FLUX1_DEV_REPOSITORY.to_owned(),
+            REVISION.to_owned(),
+            root.clone(),
+            None,
+        )
+        .expect_err("a base route must refuse a declared overlay");
+        assert!(error.contains("only executes the base target"), "{error}");
+
+        let mut pulid = flux_one_planned(PULID_FLUX_PROVIDER, "character_image", "q4");
+        pulid["planned"]["target"]["overlay"] = json!("none");
+        let error = flux_one_load_spec_at(
+            &pulid,
+            LoadShape::DeferredMaterialization,
+            protocol::FLUX1_DEV_REPOSITORY.to_owned(),
+            REVISION.to_owned(),
+            root,
+            Some(staged_pulid_bundle()),
+        )
+        .expect_err("the identity route must require its own overlay");
+        assert!(error.contains("executes exactly \"identity\""), "{error}");
+    }
+
+    /// The measured request is the worker's: two steps on every member, and exactly one reference
+    /// face at the target geometry on the identity route (never on a base route).
+    #[test]
+    fn the_flux_one_request_carries_a_reference_only_on_the_identity_route() {
+        let pulid = flux_one_request(PULID_FLUX_ARM, 1024, 768);
+        assert_eq!(pulid.conditioning.len(), 1);
+        match &pulid.conditioning[0] {
+            Conditioning::Reference { image, strength } => {
+                assert_eq!((image.width, image.height), (1024, 768));
+                assert_eq!(image.pixels.len(), 1024 * 768 * 3);
+                assert_eq!(*strength, Some(PULID_REFERENCE_STRENGTH));
+            }
+            other => panic!("expected one Reference, got {other:?}"),
+        }
+        assert_eq!(pulid.steps, Some(2));
+        assert_eq!(pulid.seed, Some(FLUX1_SEED));
+        for arm in [FLUX1_DEV_ARM, FLUX1_SCHNELL_ARM] {
+            let base = flux_one_request(arm, 1024, 1024);
+            assert!(base.conditioning.is_empty(), "{}", arm.provider);
+            assert_eq!(base.steps, Some(2));
+            assert_eq!(base.seed, Some(FLUX1_SEED));
+        }
+    }
+
+    /// The admission context is the shape each route is admitted under. The identity route is the
+    /// PROVIDER mode `image_to_image` with one reference and `overlay: identity` — exactly what
+    /// `mlx-gen-pulid`'s route gate checks and what the manifest's `requestContexts` declare — and
+    /// the base routes are reference-free text-to-image.
+    #[test]
+    fn the_flux_one_admission_context_matches_each_declared_route() {
+        let calibration = MemoryCalibrationIdentity::new(
+            "flux-one-static-registry-behavior-v2-dev",
+            LoadShape::DeferredMaterialization,
+        );
+        let selection =
+            planned_selection(&flux_one_planned(FLUX1_DEV_PROVIDER, "text_to_image", "q4"))
+                .unwrap();
+        let pulid = flux_one_context(
+            PULID_FLUX_ARM,
+            &selection,
+            &calibration,
+            &calibration.fingerprint,
+            1024,
+            1024,
+            1,
+            1,
+        );
+        assert_eq!(pulid.mode, MemoryMode::ImageToImage);
+        assert!(pulid.has_reference);
+        assert_eq!(pulid.geometry.reference_count, 1);
+        assert_eq!(pulid.overlay.as_deref(), Some("identity"));
+        assert!(!pulid.use_pid);
+        assert!(!pulid.has_phases);
+        for arm in [FLUX1_DEV_ARM, FLUX1_SCHNELL_ARM] {
+            let base = flux_one_context(
+                arm,
+                &selection,
+                &calibration,
+                &calibration.fingerprint,
+                1024,
+                1024,
+                1,
+                1,
+            );
+            assert_eq!(base.mode, MemoryMode::TextToImage, "{}", arm.provider);
+            assert!(!base.has_reference);
+            assert_eq!(base.geometry.reference_count, 0);
+            assert_eq!(base.overlay, None);
+        }
+    }
+
+    /// The fixture names the member, the tier, the edge and the step count, so a bf16 record can
+    /// never be emitted against a q4 capture that merely reused the fixture string.
+    #[test]
+    fn the_flux_one_fixture_binds_the_member_tier_geometry_and_step_count() {
+        let request = flux_one_planned(FLUX1_DEV_PROVIDER, "text_to_image", "q4");
+        validate_flux_one_fixture(
+            &json!({ "planned": {
+                "fixture": format!("flux1-dev-mlx-q4-1024-seed{FLUX1_SEED}-step2"),
+                "target": request["planned"]["target"].clone(),
+            }}),
+            FLUX1_DEV_ARM,
+            "q4",
+        )
+        .unwrap();
+        for (fixture, expected) in [
+            (
+                format!("flux1-dev-mlx-q8-1024-seed{FLUX1_SEED}-step2"),
+                "must start with",
+            ),
+            (
+                format!("pulid-flux-mlx-q4-1024-seed{FLUX1_SEED}-step2"),
+                "must start with",
+            ),
+            (
+                format!("flux1-dev-mlx-q4-768-seed{FLUX1_SEED}-step2"),
+                "must start with",
+            ),
+            (
+                format!("flux1-dev-mlx-q4-1024-seed{FLUX1_SEED}-step3"),
+                "two-step",
+            ),
+            (
+                "flux1-dev-mlx-q4-1024-seed1-step2".to_owned(),
+                "does not match",
+            ),
+        ] {
+            let error = validate_flux_one_fixture(
+                &json!({ "planned": {
+                    "fixture": fixture,
+                    "target": request["planned"]["target"].clone(),
+                }}),
+                FLUX1_DEV_ARM,
+                "q4",
+            )
+            .expect_err("the fixture must be bound to its cell");
+            assert!(error.contains(expected), "{fixture}: {error}");
+        }
+    }
+
+    /// Every FLUX.1 cell the committed plan declares must resolve to an implemented member, and its
+    /// fixture must satisfy the same binding a capture would apply. This is the plan/arm agreement
+    /// E3 asks for, checked against the checked-in plan rather than a hand-written sample.
+    #[test]
+    fn every_planned_flux_one_mlx_cell_resolves_to_an_implemented_member() {
+        let plan: Value = serde_json::from_str(include_str!(
+            "../../../../config/memory-calibration-plan.json"
+        ))
+        .expect("the anchor plan parses");
+        let anchors = plan["anchors"].as_object().expect("anchors object");
+        let mut seen = std::collections::BTreeSet::new();
+        for (key, entry) in anchors {
+            if !key.ends_with(":mlx") {
+                continue;
+            }
+            let provider = entry["provider"].as_str().unwrap();
+            if !matches!(
+                provider,
+                FLUX1_DEV_PROVIDER | FLUX1_SCHNELL_PROVIDER | PULID_FLUX_PROVIDER
+            ) {
+                continue;
+            }
+            seen.insert(key.clone());
+            let (_, rest) = key.split_once(':').unwrap();
+            let tier = rest.split_once(':').unwrap().0;
+            let request = json!({ "planned": {
+                "target": {
+                    "provider": provider,
+                    "tier": tier,
+                    "mode": entry["mode"].clone(),
+                    "overlay": entry["overlay"].clone(),
+                    "geometry": entry["geometry"].clone(),
+                },
+                "loadShape": entry["loadShape"].clone(),
+                "fixture": entry["fixture"].clone(),
+            }});
+            let arm = flux_one_arm(&request).unwrap_or_else(|error| panic!("{key}: {error}"));
+            validate_flux_one_fixture(&request, arm, tier)
+                .unwrap_or_else(|error| panic!("{key}: {error}"));
+            assert_eq!(
+                planned_load_shape(&request).unwrap(),
+                LoadShape::DeferredMaterialization,
+                "{key}: the FLUX.1 arm attests the deferred load shape"
+            );
+        }
+        // The exact cell set, not a count: three members x three tiers, each named once.
+        let expected: std::collections::BTreeSet<String> =
+            ["flux_dev", "flux_schnell", "pulid_flux_dev"]
+                .iter()
+                .flat_map(|model| {
+                    ["bf16", "q4", "q8"]
+                        .iter()
+                        .map(move |tier| format!("{model}:{tier}:mlx"))
+                })
+                .collect();
+        assert_eq!(seen, expected);
+    }
+
+    /// Every FLUX.1 MLX plan row names the production calibration identity its loaded generator
+    /// publishes (inference PR 943's per-(route, tier) table): the two measured keys are the
+    /// engine constants byte-for-byte, no row names a weights-free conformance string, and the
+    /// nine identities are distinct. The existing member-resolution test never looked at
+    /// `calibrationFingerprint`, which is how seven rows shipped naming strings no production load
+    /// can return.
+    #[test]
+    fn every_planned_flux_one_mlx_cell_names_the_identity_its_loaded_generator_publishes() {
+        let plan: Value = serde_json::from_str(include_str!(
+            "../../../../config/memory-calibration-plan.json"
+        ))
+        .expect("the anchor plan parses");
+        let mut identities = std::collections::BTreeMap::new();
+        for (key, entry) in plan["anchors"].as_object().expect("anchors object") {
+            let provider = entry["provider"].as_str().unwrap();
+            if !key.ends_with(":mlx")
+                || !matches!(
+                    provider,
+                    FLUX1_DEV_PROVIDER | FLUX1_SCHNELL_PROVIDER | PULID_FLUX_PROVIDER
+                )
+            {
+                continue;
+            }
+            let tier = key.split(':').nth(1).unwrap();
+            let mode = entry["mode"].as_str().unwrap();
+            let arm = flux_one_arm(&flux_one_planned(provider, mode, tier)).unwrap();
+            let planned = entry["calibrationFingerprint"]
+                .as_str()
+                .unwrap_or_else(|| panic!("{key}: calibrationFingerprint must be a string"));
+            assert!(
+                !is_flux_one_weights_free_fingerprint(planned),
+                "{key}: {planned} is a weights-free conformance identity no production load returns"
+            );
+            assert_eq!(
+                planned,
+                flux_one_calibration_fingerprint(arm, tier),
+                "{key}: the plan row must name the loaded generator's production identity"
+            );
+            assert!(
+                identities.insert(planned.to_owned(), key.clone()).is_none(),
+                "{key}: {planned} is already claimed by {}",
+                identities[planned]
+            );
+        }
+        assert_eq!(identities.len(), 9, "nine distinct FLUX.1 MLX identities");
+        // The preserved measured keys, byte-for-byte, so the table cannot drift off the engine.
+        assert_eq!(
+            identities["flux1-dev-q4-mlx-shared-ladder-2026-08-03-v1"],
+            "flux_dev:q4:mlx"
+        );
+        assert_eq!(
+            identities["pulid-flux-dev-q4-mlx-shared-ladder-2026-08-04-v1"],
+            "pulid_flux_dev:q4:mlx"
+        );
+        assert_eq!(
+            runtime_macos::providers::flux::memory_strategy::MEMORY_CALIBRATION_FINGERPRINT,
+            "flux1-dev-q4-mlx-shared-ladder-2026-08-03-v1"
+        );
+        assert_eq!(
+            runtime_macos::providers::pulid::memory_strategy::MEMORY_CALIBRATION_FINGERPRINT,
+            "pulid-flux-dev-q4-mlx-shared-ladder-2026-08-04-v1"
+        );
+        // The seven new cells, spelled out: the strings inference PR 943 mints.
+        for (key, identity) in [
+            ("flux_dev:q8:mlx", "flux1-dev-q8-mlx-shared-ladder-v1"),
+            ("flux_dev:bf16:mlx", "flux1-dev-bf16-mlx-shared-ladder-v1"),
+            (
+                "flux_schnell:q4:mlx",
+                "flux1-schnell-q4-mlx-shared-ladder-v1",
+            ),
+            (
+                "flux_schnell:q8:mlx",
+                "flux1-schnell-q8-mlx-shared-ladder-v1",
+            ),
+            (
+                "flux_schnell:bf16:mlx",
+                "flux1-schnell-bf16-mlx-shared-ladder-v1",
+            ),
+            (
+                "pulid_flux_dev:q8:mlx",
+                "pulid-flux-dev-q8-mlx-shared-ladder-v1",
+            ),
+            (
+                "pulid_flux_dev:bf16:mlx",
+                "pulid-flux-dev-bf16-mlx-shared-ladder-v1",
+            ),
+        ] {
+            assert_eq!(identities[identity], key);
+        }
+    }
+
+    /// The arm binds the plan row to the table BEFORE any environment or weight work, naming
+    /// both strings, so a stale row cannot cost a load.
+    #[test]
+    fn a_plan_row_naming_a_foreign_identity_is_refused_before_the_load() {
+        let mut request = flux_one_planned(FLUX1_SCHNELL_PROVIDER, "text_to_image", "q8");
+        request["planned"]["fixture"] =
+            json!(format!("flux1-schnell-mlx-q8-1024-seed{FLUX1_SEED}-step2"));
+        request["planned"]["calibrationFingerprint"] =
+            json!("flux-one-static-registry-behavior-v2-schnell");
+        let error = run(&request).expect_err("a conformance identity is not capturable");
+        assert!(
+            error.contains("plan=flux-one-static-registry-behavior-v2-schnell")
+                && error.contains("flux1-schnell-q8-mlx-shared-ladder-v1"),
+            "{error}"
+        );
+        // Not an env error: the refusal fired before `SCENEWORKS_FLUX1_SCHNELL_*` was read.
+        assert!(!error.contains("required environment variable"), "{error}");
     }
 }
 

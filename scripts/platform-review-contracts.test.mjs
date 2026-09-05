@@ -515,7 +515,25 @@ test("windows-candle captures and schema-checks the SC-21714 Krea anchor record"
 
   const adapter = await source("crates/sceneworks-memory-adapter/src/bin/candle.rs");
   assert.match(adapter, /StableIdleConfig::new\(2\.0, 5, 64, 200\)/);
-  assert.equal(adapter.match(/let mut vram = certifying_vram_probe\(\);/g)?.length, 2);
+  // Every `vram` binding the adapter builds, as a MULTISET against an explicit allowlist
+  // (sc-22726 review): a set-of-distinct-spellings claim let a probe be deleted, a raw
+  // `VramProbe::new()` be added alongside, and the one known non-certifying probe hide, all green.
+  // Each entry is a probe expression and the number of arms that build it; the only non-certifying
+  // probe is the LTX-2.5 capture's, which certifies idleness through its own
+  // `start_rendered().assert_idle(1.0)` proof because that arm renders before it samples.
+  const probes = [...adapter.matchAll(/let mut vram\s*=\s*([^;]+);/g)].map((match) => match[1].trim());
+  const counts = new Map();
+  for (const probe of probes) counts.set(probe, (counts.get(probe) ?? 0) + 1);
+  assert.deepEqual(
+    [...counts.entries()].sort(([a], [b]) => a.localeCompare(b)),
+    [
+      // Krea five-rung reference, PuLID-FLUX bespoke, and the inline Krea arm.
+      ["certifying_vram_probe()", 3],
+      // LTX-2.5: renders first, then proves idle on the rendered baseline.
+      ["VramProbe::start_rendered().assert_idle(1.0)", 1],
+    ],
+    "every Candle VRAM probe must be an allowlisted certifying spelling, at its expected count",
+  );
 });
 
 test("windows-candle routes weights dispatches to a real-weights runner, like the MLX lane", async () => {
