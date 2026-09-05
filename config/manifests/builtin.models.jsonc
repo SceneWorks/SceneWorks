@@ -8626,7 +8626,7 @@
           // (`mlx.denseTextEncoderTier`). Replaces the old gated 49 GiB whole-repo + load-time quantize.
           "provider": "huggingface",
           "repo": "SceneWorks/flux2-klein-9b-mlx",
-          "revision": "acf05e8d5103838baba6a5e32dc91d6997a56023",
+          "revision": "1902693279fcfb828919370dfac2b8922d99499a",
           "variant": "q4",
           "default": true,
           "files": ["q4/*"],
@@ -8636,7 +8636,7 @@
         {
           "provider": "huggingface",
           "repo": "SceneWorks/flux2-klein-9b-mlx",
-          "revision": "acf05e8d5103838baba6a5e32dc91d6997a56023",
+          "revision": "1902693279fcfb828919370dfac2b8922d99499a",
           "variant": "q8",
           "files": ["q8/*"],
           "estimatedSizeBytes": 26100000000,
@@ -8647,7 +8647,7 @@
           // per-variant tracking (sc-8508/8509).
           "provider": "huggingface",
           "repo": "SceneWorks/flux2-klein-9b-mlx",
-          "revision": "acf05e8d5103838baba6a5e32dc91d6997a56023",
+          "revision": "1902693279fcfb828919370dfac2b8922d99499a",
           "variant": "bf16",
           "files": ["bf16/*"],
           "estimatedSizeBytes": 34600000000,
@@ -9002,7 +9002,7 @@
           // load via `mlx.denseTextEncoderTier`). Replaces the old gated whole-repo + load-time quantize.
           "provider": "huggingface",
           "repo": "SceneWorks/flux2-klein-9b-kv-mlx",
-          "revision": "406265beebe141024a06e24038c3713cf7af87d8",
+          "revision": "bbf22de8d654789de3b177632d2e283cc4f77729",
           "variant": "q4",
           "default": true,
           "files": ["q4/*"],
@@ -9012,7 +9012,7 @@
         {
           "provider": "huggingface",
           "repo": "SceneWorks/flux2-klein-9b-kv-mlx",
-          "revision": "406265beebe141024a06e24038c3713cf7af87d8",
+          "revision": "bbf22de8d654789de3b177632d2e283cc4f77729",
           "variant": "q8",
           "files": ["q8/*"],
           "estimatedSizeBytes": 26100000000,
@@ -9021,7 +9021,7 @@
         {
           "provider": "huggingface",
           "repo": "SceneWorks/flux2-klein-9b-kv-mlx",
-          "revision": "406265beebe141024a06e24038c3713cf7af87d8",
+          "revision": "bbf22de8d654789de3b177632d2e283cc4f77729",
           "variant": "bf16",
           "files": ["bf16/*"],
           "estimatedSizeBytes": 34600000000,
