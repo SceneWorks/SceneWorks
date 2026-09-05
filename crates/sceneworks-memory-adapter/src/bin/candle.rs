@@ -2660,7 +2660,7 @@ fn routes_to_five_rung_reference(request: &Value) -> Result<bool, String> {
         || provider == Z_IMAGE_ID
         // sc-22727: neither FLUX.2 provider has an inline arm on this adapter either.
         || provider == FLUX2_DEV_ID
-        || provider == FLUX2_KLEIN_ID)
+        || provider == FLUX2_KLEIN_ID
         || provider == FLUX1_DEV_ID
         || provider == FLUX1_SCHNELL_ID)
 }

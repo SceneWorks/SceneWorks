@@ -118,8 +118,8 @@
         "frames": 1
       },
       "evidenceScope": "authoritative",
-      "loadShape": "deferred_materialization",
-      "calibrationFingerprint": "flux2-klein-static-registry-behavior-v2-flux2-klein-9b",
+      "loadShape": "eager_materialization",
+      "calibrationFingerprint": "flux2-klein-9b-bf16-mlx-shared-ladder-rehost-t2i-v1",
       "fixture": "flux2-klein-9b-mlx-bf16-768-seed22727-step2"
     },
     "flux2_klein_9b:q4:candle": {
@@ -148,8 +148,8 @@
         "frames": 1
       },
       "evidenceScope": "authoritative",
-      "loadShape": "deferred_materialization",
-      "calibrationFingerprint": "flux2-klein-static-registry-behavior-v2-flux2-klein-9b",
+      "loadShape": "eager_materialization",
+      "calibrationFingerprint": "flux2-klein-9b-q4-mlx-shared-ladder-rehost-t2i-v1",
       "fixture": "flux2-klein-9b-mlx-q4-768-seed22727-step2"
     },
     "flux2_klein_9b:q8:candle": {
@@ -178,8 +178,8 @@
         "frames": 1
       },
       "evidenceScope": "authoritative",
-      "loadShape": "deferred_materialization",
-      "calibrationFingerprint": "flux2-klein-static-registry-behavior-v2-flux2-klein-9b",
+      "loadShape": "eager_materialization",
+      "calibrationFingerprint": "flux2-klein-9b-q8-mlx-shared-ladder-rehost-t2i-v1",
       "fixture": "flux2-klein-9b-mlx-q8-768-seed22727-step2"
     },
     "flux2_klein_9b_kv:bf16:candle": {
@@ -208,8 +208,8 @@
         "frames": 1
       },
       "evidenceScope": "authoritative",
-      "loadShape": "deferred_materialization",
-      "calibrationFingerprint": "flux2-klein-static-registry-behavior-v2-flux2-klein-9b",
+      "loadShape": "eager_materialization",
+      "calibrationFingerprint": "flux2-klein-9b-bf16-mlx-shared-ladder-kv-rehost-t2i-v1",
       "fixture": "flux2-klein-9b-kv-mlx-bf16-768-seed22727-step2"
     },
     "flux2_klein_9b_kv:q4:candle": {
@@ -238,8 +238,8 @@
         "frames": 1
       },
       "evidenceScope": "authoritative",
-      "loadShape": "deferred_materialization",
-      "calibrationFingerprint": "flux2-klein-static-registry-behavior-v2-flux2-klein-9b",
+      "loadShape": "eager_materialization",
+      "calibrationFingerprint": "flux2-klein-9b-q4-mlx-shared-ladder-kv-rehost-t2i-v1",
       "fixture": "flux2-klein-9b-kv-mlx-q4-768-seed22727-step2"
     },
     "flux2_klein_9b_kv:q8:candle": {
@@ -268,8 +268,8 @@
         "frames": 1
       },
       "evidenceScope": "authoritative",
-      "loadShape": "deferred_materialization",
-      "calibrationFingerprint": "flux2-klein-static-registry-behavior-v2-flux2-klein-9b",
+      "loadShape": "eager_materialization",
+      "calibrationFingerprint": "flux2-klein-9b-q8-mlx-shared-ladder-kv-rehost-t2i-v1",
       "fixture": "flux2-klein-9b-kv-mlx-q8-768-seed22727-step2"
     },
     "flux_dev:bf16:candle": {

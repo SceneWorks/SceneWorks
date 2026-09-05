@@ -112,12 +112,14 @@ const FLUX2_KLEIN_PLAIN_EXECUTION_PATH: &str =
     "the MLX FLUX.2-klein-9B base-only text-to-image path";
 const FLUX2_KLEIN_KV_PLAIN_EXECUTION_PATH: &str =
     "the MLX FLUX.2-klein-9B KV-cache base-only text-to-image path";
-/// A klein turnkey rehost carries no `calibration_tag`, so
-/// `mlx-gen-flux2::memory_strategy::klein_contract_for` publishes the STATIC behaviour fingerprint
-/// suffixed with the provider id (`KLEIN_STATIC_BEHAVIOR_FINGERPRINT` +
-/// `provider_id.replace('_', "-")`). This is the same string
-/// `config/manifests/builtin.models.jsonc` declares for every klein rung on both klein models.
-const FLUX2_KLEIN_CALIBRATION_FINGERPRINT: &str =
+/// The WEIGHTS-FREE registry declaration identity for the klein T2I provider:
+/// `KLEIN_STATIC_BEHAVIOR_FINGERPRINT` suffixed with the provider id
+/// (`provider_id.replace('_', "-")`), published by
+/// `mlx-gen-flux2::memory_strategy::weights_free_klein_contract`. This is the string
+/// `config/manifests/builtin.models.jsonc` declares for every klein rung on both klein models —
+/// a DECLARATION, not the identity a load of real weights publishes. sc-22727: the two are no
+/// longer the same string; see [`flux2_calibration_fingerprint`].
+const FLUX2_KLEIN_REGISTRY_FINGERPRINT: &str =
     "flux2-klein-static-registry-behavior-v2-flux2-klein-9b";
 /// One fixed seed for every `mlx:flux2_klein_9b*` fixture. Distinct from [`FLUX2_SEED`] so a klein
 /// receipt can never be traced to the dev lane's calibration seed.
@@ -3924,8 +3926,11 @@ struct Flux2Arm {
     fixture_slug: &'static str,
     /// The record's diagnostics source, `memory-mlx-adapter:<slug>-resident`.
     slug: &'static str,
-    /// The calibration fingerprint the pinned crate must publish for this member.
-    calibration_fingerprint: &'static str,
+    /// The WEIGHTS-FREE registry declaration identity for this member's provider — the string
+    /// `config/manifests/builtin.models.jsonc` declares on every rung row. Distinct from the
+    /// identity a load of real weights publishes on the klein routes (sc-22727); see
+    /// [`flux2_calibration_fingerprint`], which is what the plan row and the capture bind.
+    registry_fingerprint: &'static str,
     /// The load shape and offload policy this member is loaded under — the WORKER's shape for the
     /// plain T2I route, never a hand-picked pair.
     ///
@@ -3935,16 +3940,26 @@ struct Flux2Arm {
     /// and keeps the eager default (`memory_route_registry.rs`,
     /// `evaluate_declared_mlx_load_shape_for_request_with_strategy`).
     ///
-    /// Klein: `Sequential` + `DeferredMaterialization`. Both klein manifest entries declare an MLX
-    /// `bounded_transformer_residency` row with `requiredOffloadPolicy: "sequential"` for every
-    /// tier of the plain T2I route; the worker applies it (`Applied` + Deferred, then
-    /// `apply_declared_mlx_load_policy_for_request` binds Sequential — the shape the worker's own
-    /// `flux2_klein_aliases_bind_exact_plain_pid_routes_and_refuse_crossed_shapes` asserts at every
-    /// tier for both klein routes). It is also the ONLY shape the pinned engine publishes a
-    /// calibration identity for: `klein_contract_for` sets `calibration` iff
-    /// `klein_streamable(spec)`, which requires exactly `Sequential && DeferredMaterialization &&
-    /// quantize.is_none()` (`mlx-gen-flux2/src/memory_strategy.rs`). A resident klein spec yields
-    /// `calibration: None`, and this arm refuses it before the load.
+    /// Klein: `Resident` + `EagerMaterialization` — the shape of the RUNG THIS ANCHOR PRICES.
+    ///
+    /// Both klein manifest entries also declare an MLX `bounded_transformer_residency` row with
+    /// `requiredOffloadPolicy: "sequential"` for every tier of the plain T2I route, and
+    /// `evaluate_declared_mlx_load_shape_for_request` + `apply_declared_mlx_load_policy_for_request`
+    /// bind `Applied` + Deferred + Sequential when that rung is the one being engaged. That is the
+    /// BTR rung's shape, not the resident rung's: a deferred klein transformer CANNOT render
+    /// without a window — `mlx-gen-flux2/src/transformer.rs:949-955` refuses with "flux2: a
+    /// deferred transformer requires an explicit block window" the moment `block_stream` is set and
+    /// no window is selected. Measured, not reasoned: the sc-22727 proof capture of
+    /// `flux2_klein_9b:q4:mlx` at inference `d5270c68` cleared the whole contract-and-load path
+    /// under `Sequential` + `Deferred` and then died on exactly that sentence, 123 s in, at the
+    /// resident-rung render. The resident rung therefore loads eager, which is what this arm
+    /// mirrors.
+    ///
+    /// sc-22727 / inference PR 948 is what makes that measurable at all: `klein_contract_from_parts`
+    /// now publishes a production identity for EVERY load shape, keyed on the admitted inventory
+    /// and `resolved_quant()`, while rung 4 stays gated on `klein_streamable` (exactly
+    /// `Sequential && DeferredMaterialization && quantize.is_none()`). Before it, a resident klein
+    /// spec yielded `calibration: None` and this arm had no identity to bind.
     load_shape: LoadShape,
     offload_policy: OffloadPolicy,
     seed: u64,
@@ -3953,8 +3968,11 @@ struct Flux2Arm {
     /// dev lane's provenance.
     evidence_tag: &'static str,
     /// Whether the pinned crate implements the resident rung and nothing else. True on dev (every
-    /// other strategy is declared `Missing` at the pin); the klein ladder publishes five rungs, so
-    /// its selection is left to `contract.validate_selection`.
+    /// other strategy is declared `Missing` at the pin). False on klein: its manifest declares five
+    /// rungs, and under the eager shape this arm loads (sc-22727) the contract implements resident
+    /// plus bounded decode/attention while staged residency and rung 4 stay `Missing` — they need
+    /// the streamable shape. Which of those a plan may select is left to
+    /// `contract.validate_selection` rather than being second-guessed here.
     resident_only: bool,
     /// Whether the planned tier's quant reaches the loader as `LoadSpec::quantize`.
     ///
@@ -3984,7 +4002,7 @@ const FLUX2_DEV_ARM: Flux2Arm = Flux2Arm {
     expected_repository: protocol::FLUX2_REPOSITORY,
     fixture_slug: "dev",
     slug: "flux2-dev",
-    calibration_fingerprint: FLUX2_CALIBRATION_FINGERPRINT,
+    registry_fingerprint: FLUX2_CALIBRATION_FINGERPRINT,
     load_shape: LoadShape::EagerMaterialization,
     offload_policy: OffloadPolicy::Resident,
     seed: FLUX2_SEED,
@@ -4004,9 +4022,9 @@ const FLUX2_KLEIN_ARM: Flux2Arm = Flux2Arm {
     expected_repository: protocol::FLUX2_KLEIN_REPOSITORY,
     fixture_slug: "klein-9b",
     slug: "flux2-klein-9b",
-    calibration_fingerprint: FLUX2_KLEIN_CALIBRATION_FINGERPRINT,
-    load_shape: LoadShape::DeferredMaterialization,
-    offload_policy: OffloadPolicy::Sequential,
+    registry_fingerprint: FLUX2_KLEIN_REGISTRY_FINGERPRINT,
+    load_shape: LoadShape::EagerMaterialization,
+    offload_policy: OffloadPolicy::Resident,
     seed: FLUX2_KLEIN_SEED,
     evidence_tag: "sc-22727",
     resident_only: false,
@@ -4024,9 +4042,9 @@ const FLUX2_KLEIN_KV_ARM: Flux2Arm = Flux2Arm {
     expected_repository: protocol::FLUX2_KLEIN_KV_REPOSITORY,
     fixture_slug: "klein-9b-kv",
     slug: "flux2-klein-9b-kv",
-    calibration_fingerprint: FLUX2_KLEIN_CALIBRATION_FINGERPRINT,
-    load_shape: LoadShape::DeferredMaterialization,
-    offload_policy: OffloadPolicy::Sequential,
+    registry_fingerprint: FLUX2_KLEIN_REGISTRY_FINGERPRINT,
+    load_shape: LoadShape::EagerMaterialization,
+    offload_policy: OffloadPolicy::Resident,
     seed: FLUX2_KLEIN_SEED,
     evidence_tag: "sc-22727",
     resident_only: false,
@@ -4058,6 +4076,36 @@ fn flux2_arm(request: &Value) -> Result<Flux2Arm, String> {
     Err(format!(
         "the MLX FLUX.2 arm does not implement provider {provider:?} for model {model_id:?}"
     ))
+}
+
+/// The PRODUCTION calibration identity the loaded generator publishes for one `(member, tier)`
+/// cell — what the plan row must name and what the capture verifies against the loaded contract.
+///
+/// sc-22727 (inference PR 948). Klein's identity used to be published only for a streamable load,
+/// and a turnkey rehost was handed the weights-free registry string
+/// ([`FLUX2_KLEIN_REGISTRY_FINGERPRINT`]) in production. It is now a property of the ADMITTED
+/// ARTIFACT and its tier, minted by `mlx-gen-flux2::memory_strategy::klein_production_calibration`
+/// as `flux2-klein-9b-<tier>-mlx-shared-ladder-<artifact_tag>-<route>-v1`, where:
+///
+/// * `artifact_tag` comes from `KleinArtifactInventory::artifact_tag` — `rehost` for the
+///   `SceneWorks/flux2-klein-9b-mlx` turnkeys and `kv-rehost` for `…-kv-mlx`
+///   (`turnkey_identity` reads the cache dir out of the snapshot path, so the two shipped repos
+///   land on different tags even though they share a provider id), and
+/// * `route` is `t2i` for `FLUX2_KLEIN_9B_ID`, which is the ONLY klein provider this text-to-image
+///   lane loads. (`edit` / `kv-edit` belong to the edit providers, which this arm never drives.)
+///
+/// Written here as literals rather than read off the pinned crate on purpose: the constants and
+/// the minting function do not exist at inference `c6d6a4db`, which is what CI builds, so the
+/// plan/arm binding has to be weights-free and pin-independent. The capture refuses a loaded
+/// contract whose identity differs from this table (`run_flux2`), so the two copies cannot drift
+/// unnoticed once the epic's pin bump (sc-22738) lands.
+fn flux2_calibration_fingerprint(arm: Flux2Arm, tier: &str) -> String {
+    match arm.model_id {
+        "flux2_dev" => FLUX2_CALIBRATION_FINGERPRINT.to_owned(),
+        "flux2_klein_9b" => format!("flux2-klein-9b-{tier}-mlx-shared-ladder-rehost-t2i-v1"),
+        "flux2_klein_9b_kv" => format!("flux2-klein-9b-{tier}-mlx-shared-ladder-kv-rehost-t2i-v1"),
+        model_id => unreachable!("no FLUX.2 member {model_id} at tier {tier}"),
+    }
 }
 
 fn validate_flux2_target(request: &Value) -> Result<Flux2Arm, String> {
@@ -4326,10 +4374,11 @@ fn run_flux2(request: &Value) -> Result<Value, String> {
             arm.model_id
         )
     })?;
-    if calibration.fingerprint != arm.calibration_fingerprint {
+    let expected_fingerprint = flux2_calibration_fingerprint(arm, tier);
+    if calibration.fingerprint != expected_fingerprint {
         return Err(format!(
-            "pinned {} T2I contract fingerprint changed: expected {}, got {}",
-            arm.model_id, arm.calibration_fingerprint, calibration.fingerprint
+            "pinned {} T2I contract fingerprint changed: expected {expected_fingerprint}, got {}",
+            arm.model_id, calibration.fingerprint
         ));
     }
     let planned_fingerprint = protocol::planned(request)?
@@ -12937,16 +12986,21 @@ mod flux2_tests {
         );
     }
 
-    /// The klein arms load the WORKER's plain-T2I shape (`Sequential`, `DeferredMaterialization`,
-    /// no quant), which is exactly the predicate the pinned engine publishes a calibration identity
-    /// under: `klein_contract_for` sets `calibration` iff `klein_streamable(spec)`
-    /// (`mlx-gen-flux2/src/memory_strategy.rs`). That predicate is crate-private at the pin, so it
-    /// is transcribed here term by term, the way the worker's own registry test transcribes it.
-    /// The dev arm is the opposite shape — resident and eager, as sc-18218 measured it — and must
-    /// not borrow the klein one. (sc-22727 review: a resident klein spec yields `calibration:
-    /// None`, so the declared fingerprint was unreachable on a perfect artifact.)
+    /// Every FLUX.2 arm loads the shape of the RUNG IT PRICES: `Resident` + `EagerMaterialization`,
+    /// no quant on the klein turnkeys.
+    ///
+    /// sc-22727 rewrote this. The klein arms used to load `Sequential` + `DeferredMaterialization`
+    /// because that was the only shape the pinned engine published a calibration identity under —
+    /// `klein_contract_for` set `calibration` iff `klein_streamable(spec)`. Inference PR 948
+    /// decoupled the two: the identity is now a property of the admitted artifact and its tier and
+    /// is published for every load shape, while `klein_streamable` still gates rung 4 alone. The
+    /// streamable shape is therefore no longer required for an identity — and it is not RENDERABLE
+    /// at this rung either: a deferred klein transformer refuses without an explicit block window
+    /// (`mlx-gen-flux2/src/transformer.rs`), which is where the sc-22727 proof capture died, 123 s
+    /// in, after clearing the whole contract-and-load path. The predicate is transcribed here term
+    /// by term (it is crate-private at the pin) so the arms can assert they are OUTSIDE it.
     #[test]
-    fn flux2_klein_specs_are_the_streamable_shape_the_pin_publishes_a_calibration_for() {
+    fn flux2_specs_are_the_resident_rungs_shape_and_are_deliberately_not_streamable() {
         let klein_streamable = |spec: &LoadSpec| {
             spec.offload_policy == OffloadPolicy::Sequential
                 && spec.load_shape == LoadShape::DeferredMaterialization
@@ -12968,41 +13022,48 @@ mod flux2_tests {
                 }
             });
             let selection = planned_selection(&request).unwrap();
+            for arm in [FLUX2_DEV_ARM, FLUX2_KLEIN_ARM, FLUX2_KLEIN_KV_ARM] {
+                let spec = flux2_spec(
+                    arm,
+                    PathBuf::from(format!("/tmp/{}-{tier}", arm.slug)),
+                    &selection,
+                );
+                assert_eq!(
+                    spec.offload_policy,
+                    OffloadPolicy::Resident,
+                    "{} {tier}",
+                    arm.model_id
+                );
+                assert_eq!(
+                    spec.load_shape,
+                    LoadShape::EagerMaterialization,
+                    "{} {tier}",
+                    arm.model_id
+                );
+                assert!(
+                    !klein_streamable(&spec),
+                    "{} {tier}: the resident rung must not load the rung-4 streamable shape: \
+                     {spec:?}",
+                    arm.model_id
+                );
+            }
+            // The klein turnkeys carry no load-time quant at all; the dev route folds the tier.
             for arm in [FLUX2_KLEIN_ARM, FLUX2_KLEIN_KV_ARM] {
                 let spec = flux2_spec(
                     arm,
                     PathBuf::from(format!("/tmp/{}-{tier}", arm.slug)),
                     &selection,
                 );
-                assert!(
-                    klein_streamable(&spec),
-                    "{} {tier} must be the streamable shape: {spec:?}",
-                    arm.model_id
-                );
+                assert!(spec.quantize.is_none(), "{} {tier}", arm.model_id);
             }
-            let dev = flux2_spec(
-                FLUX2_DEV_ARM,
-                PathBuf::from(format!("/tmp/flux2-dev-{tier}")),
-                &selection,
-            );
-            assert_eq!(dev.offload_policy, OffloadPolicy::Resident, "dev {tier}");
-            assert_eq!(
-                dev.load_shape,
-                LoadShape::EagerMaterialization,
-                "dev {tier}"
-            );
-            assert!(
-                !klein_streamable(&dev),
-                "the dev arm must not borrow the klein shape: {dev:?}"
-            );
         }
         // Stated as data, so the loop cannot pass by every member answering the same way.
         assert_eq!(
             [FLUX2_DEV_ARM, FLUX2_KLEIN_ARM, FLUX2_KLEIN_KV_ARM].map(|arm| arm.offload_policy),
             [
                 OffloadPolicy::Resident,
-                OffloadPolicy::Sequential,
-                OffloadPolicy::Sequential
+                OffloadPolicy::Resident,
+                OffloadPolicy::Resident
             ],
         );
     }
@@ -13013,11 +13074,15 @@ mod flux2_tests {
     ///   (`is_dense_te_tier` — its reason to load a klein tier with `Quant::None`, so the flag must
     ///   equal `!tier_quant_reaches_the_loader`), and the MLX `bounded_transformer_residency` row's
     ///   `requiredOffloadPolicy` under the plain provider (`apply_declared_mlx_load_policy_for_request`
-    ///   — its reason to bind Sequential; a member with no such row stays Resident). The klein
-    ///   rows' `fingerprint` is the identity the arm expects the pin to publish.
+    ///   — its reason to bind Sequential; a member with no such row stays Resident). Every rung
+    ///   row's `fingerprint` is the WEIGHTS-FREE registry declaration
+    ///   ([`Flux2Arm::registry_fingerprint`]) — sc-22727: on the klein routes that is no longer
+    ///   the identity a load of real weights publishes, so the manifest is bound to the
+    ///   declaration and the plan to the production identity, separately.
     /// * The anchor plan, whose `loadShape` the harness checks the measured record against and
     ///   whose `calibrationFingerprint` `run_flux2` checks the pinned contract against: every MLX
-    ///   row of every member must spell the member's shape and fingerprint.
+    ///   row of every member must spell the member's shape and its per-tier PRODUCTION identity
+    ///   ([`flux2_calibration_fingerprint`]).
     ///
     /// Flip any arm flag without the manifest or the plan moving and this reds.
     #[test]
@@ -13030,6 +13095,7 @@ mod flux2_tests {
             "../../../../config/memory-calibration-plan.json"
         ))
         .expect("the anchor plan parses");
+        let mut klein_identities = std::collections::BTreeMap::<String, String>::new();
         for arm in [FLUX2_DEV_ARM, FLUX2_KLEIN_ARM, FLUX2_KLEIN_KV_ARM] {
             let entry = manifest["models"]
                 .as_array()
@@ -13046,12 +13112,19 @@ mod flux2_tests {
             );
             let contract = &mlx["memoryStrategyContract"];
             assert_eq!(contract["provider"], arm.provider, "{}", arm.model_id);
-            let btr_rows = contract["implementations"]
+            // The RESIDENT rung's row - the rung this anchor prices. sc-22727: it is deliberately
+            // NOT the `bounded_transformer_residency` row. Both klein entries carry a BTR row with
+            // `requiredOffloadPolicy: "sequential"`, but that row describes rung 4's load, and a
+            // deferred klein transformer cannot render at all without a block window
+            // (`mlx-gen-flux2/src/transformer.rs`, proved by the sc-22727 proof capture). The
+            // resident rung declares no `requiredOffloadPolicy` at all, which is the worker's
+            // Resident + Eager default, and that is what this arm loads.
+            let resident_rows = contract["implementations"]
                 .as_array()
                 .expect("implementations")
                 .iter()
                 .filter(|row| {
-                    row["rung"] == "bounded_transformer_residency"
+                    row["rung"] == "resident"
                         && row
                             .get("runtimeProvider")
                             .and_then(Value::as_str)
@@ -13059,53 +13132,71 @@ mod flux2_tests {
                             == arm.provider
                 })
                 .collect::<Vec<_>>();
-            let expected_policy = match btr_rows.as_slice() {
-                [] => OffloadPolicy::Resident,
-                [row] => {
-                    assert_eq!(
-                        row["requiredOffloadPolicy"], "sequential",
-                        "{}: the BTR row must bind the sequential policy",
-                        arm.model_id
-                    );
-                    assert_eq!(
-                        row["fingerprint"], arm.calibration_fingerprint,
-                        "{}: the manifest fingerprint is the identity the pin publishes",
-                        arm.model_id
-                    );
-                    OffloadPolicy::Sequential
-                }
-                rows => panic!("{}: {} BTR rows for one provider", arm.model_id, rows.len()),
+            let [resident_row] = resident_rows.as_slice() else {
+                panic!(
+                    "{}: {} resident rows for one provider",
+                    arm.model_id,
+                    resident_rows.len()
+                )
             };
-            assert_eq!(
-                arm.offload_policy, expected_policy,
-                "{}: the arm's offload policy must be the manifest-declared one",
+            assert!(
+                resident_row.get("requiredOffloadPolicy").is_none(),
+                "{}: the resident rung declares no offload policy; it is the eager default",
                 arm.model_id
             );
-            // The shape follows the policy: a Sequential row is the BTR-authorized deferred load,
-            // a Resident member keeps the eager default. The ARM's shape is bound here too, so the
-            // plan rows below cannot agree with a derived value the arm itself does not carry.
-            let (expected_shape, expected_load_shape) = match expected_policy {
-                OffloadPolicy::Sequential => (
-                    protocol::LOAD_SHAPE_DEFERRED,
-                    LoadShape::DeferredMaterialization,
-                ),
-                OffloadPolicy::Resident => {
-                    (protocol::LOAD_SHAPE_EAGER, LoadShape::EagerMaterialization)
-                }
-            };
-            assert_eq!(arm.load_shape, expected_load_shape, "{}", arm.model_id);
+            assert_eq!(
+                resident_row["fingerprint"], arm.registry_fingerprint,
+                "{}: the manifest fingerprint is the weights-free registry declaration",
+                arm.model_id
+            );
+            assert_eq!(
+                arm.offload_policy,
+                OffloadPolicy::Resident,
+                "{}: the resident rung is a Resident load",
+                arm.model_id
+            );
+            assert_eq!(
+                arm.load_shape,
+                LoadShape::EagerMaterialization,
+                "{}: a Resident policy keeps the eager default",
+                arm.model_id
+            );
+            let expected_shape = protocol::LOAD_SHAPE_EAGER;
             for tier in ["q4", "q8", "bf16"] {
                 let key = format!("{}:{tier}:mlx", arm.model_id);
                 let row = &plan["anchors"][&key];
                 assert!(row.is_object(), "{key} is not a planned anchor");
                 assert_eq!(row["loadShape"], expected_shape, "{key}");
                 assert_eq!(row["provider"], arm.provider, "{key}");
+                // The PRODUCTION identity, per tier — not the manifest's registry declaration.
                 assert_eq!(
-                    row["calibrationFingerprint"], arm.calibration_fingerprint,
+                    row["calibrationFingerprint"],
+                    json!(flux2_calibration_fingerprint(arm, tier)),
                     "{key}"
                 );
+                if arm.provider == FLUX2_KLEIN_PROVIDER {
+                    // sc-22727: a klein plan row still carrying the weights-free declaration would
+                    // bind a cell no load of real weights ever returns, and the six klein cells
+                    // are six DISTINCT measured cells — two artifact families times three tiers.
+                    assert_ne!(
+                        flux2_calibration_fingerprint(arm, tier),
+                        arm.registry_fingerprint,
+                        "{key}: the registry declaration is not a production identity"
+                    );
+                    assert!(
+                        klein_identities
+                            .insert(flux2_calibration_fingerprint(arm, tier), key.clone())
+                            .is_none(),
+                        "{key}: this identity is already claimed by another klein cell"
+                    );
+                }
             }
         }
+        assert_eq!(
+            klein_identities.len(),
+            6,
+            "six distinct FLUX.2 klein MLX identities: two artifact families times three tiers"
+        );
     }
 
     /// A plan row spelling a load shape other than the member's worker shape is refused by name
@@ -13115,8 +13206,8 @@ mod flux2_tests {
     fn run_flux2_refuses_a_plan_whose_load_shape_is_not_the_members_worker_shape() {
         for (arm, wrong) in [
             (FLUX2_DEV_ARM, protocol::LOAD_SHAPE_DEFERRED),
-            (FLUX2_KLEIN_ARM, protocol::LOAD_SHAPE_EAGER),
-            (FLUX2_KLEIN_KV_ARM, protocol::LOAD_SHAPE_EAGER),
+            (FLUX2_KLEIN_ARM, protocol::LOAD_SHAPE_DEFERRED),
+            (FLUX2_KLEIN_KV_ARM, protocol::LOAD_SHAPE_DEFERRED),
         ] {
             let mut request = minimal_request_for(arm.provider, arm.model_id, "resident");
             request["planned"]["loadShape"] = json!(wrong);
