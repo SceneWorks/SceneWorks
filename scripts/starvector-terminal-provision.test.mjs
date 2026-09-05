@@ -128,8 +128,8 @@ test("provision workflow is dispatch-only and never runs a model, service, campa
   assert.match(workflow, /runs-on: \[self-hosted, Windows, X64, cuda, real-weights\]/);
   assert.match(workflow, /inference_revision:[\s\S]*required: true/);
   assert.match(workflow, /inference_preflight_run_id:[\s\S]*required: true/);
-  assert.match(workflow, /default: "33928871038"/);
-  assert.match(workflow, /default: starvector-terminal-preflight-42ab6f2b8b9815205bc215c6d19c2b7714c908fe-33928871038-1/);
+  assert.match(workflow, /default: "33999207731"/);
+  assert.match(workflow, /default: starvector-terminal-preflight-1cd0e393863f7d3d880400e409519bcadfb43959-33999207731-1/);
   assert.equal((workflow.match(/starvector-terminal-pin-paths\.mjs/g) ?? []).length, 2);
   assert.equal((workflow.match(/preflight-transport release[\\/]starvector-terminal-campaign-v1\.json/g) ?? []).length, 2);
   assert.equal((workflow.match(/preflight-metadata release[\\/]starvector-terminal-campaign-v1\.json/g) ?? []).length, 2);
@@ -169,17 +169,17 @@ test("workflow shell blocks consume untrusted dispatch inputs only through quote
 
 test("provision transport accepts only the sealed current native-preflight run and artifact", async () => {
   const accepted = await validatePreflightTransport("release/starvector-terminal-campaign-v1.json", {
-    revision: "42ab6f2b8b9815205bc215c6d19c2b7714c908fe",
-    workflowRunId: "33928871038",
-    artifactName: "starvector-terminal-preflight-42ab6f2b8b9815205bc215c6d19c2b7714c908fe-33928871038-1",
+    revision: "1cd0e393863f7d3d880400e409519bcadfb43959",
+    workflowRunId: "33999207731",
+    artifactName: "starvector-terminal-preflight-1cd0e393863f7d3d880400e409519bcadfb43959-33999207731-1",
   });
   assert.deepEqual(accepted, {
-    revision: "42ab6f2b8b9815205bc215c6d19c2b7714c908fe",
-    workflow_run_id: "33928871038",
-    artifact_name: "starvector-terminal-preflight-42ab6f2b8b9815205bc215c6d19c2b7714c908fe-33928871038-1",
+    revision: "1cd0e393863f7d3d880400e409519bcadfb43959",
+    workflow_run_id: "33999207731",
+    artifact_name: "starvector-terminal-preflight-1cd0e393863f7d3d880400e409519bcadfb43959-33999207731-1",
     workflow_run_attempt: 1,
-    artifact_id: 9957850431,
-    artifact_digest: "sha256:609a2850118c206a4a38698e1680e81b78666d6b72be07d66ba677b0f50a9831",
+    artifact_id: 9979002999,
+    artifact_digest: "sha256:c70a0ffe4a8951a7caf24f95e2cbfca1f3d71a295cb2196265a27eac483955f1",
   });
   for (const [label, mutation] of [
     ["revision", { revision: "0".repeat(40) }],
@@ -197,9 +197,9 @@ test("provision transport accepts only the sealed current native-preflight run a
 
 test("live preflight artifact and run metadata must match every sealed transport identity", async () => {
   const run = {
-    id: 33928871038,
+    id: 33999207731,
     run_attempt: 1,
-    head_sha: "42ab6f2b8b9815205bc215c6d19c2b7714c908fe",
+    head_sha: "1cd0e393863f7d3d880400e409519bcadfb43959",
     workflow_id: 312370029,
     name: "Real-weight validation",
     path: ".github/workflows/real-weights.yml",
@@ -210,14 +210,14 @@ test("live preflight artifact and run metadata must match every sealed transport
     head_repository: { id: 1299380446, full_name: "SceneWorks/inference" },
   };
   const artifact = {
-    id: 9957850431,
-    name: "starvector-terminal-preflight-42ab6f2b8b9815205bc215c6d19c2b7714c908fe-33928871038-1",
-    size_in_bytes: 6456,
-    digest: "sha256:609a2850118c206a4a38698e1680e81b78666d6b72be07d66ba677b0f50a9831",
+    id: 9979002999,
+    name: "starvector-terminal-preflight-1cd0e393863f7d3d880400e409519bcadfb43959-33999207731-1",
+    size_in_bytes: 6355,
+    digest: "sha256:c70a0ffe4a8951a7caf24f95e2cbfca1f3d71a295cb2196265a27eac483955f1",
     expired: false,
     workflow_run: {
-      id: 33928871038,
-      head_sha: "42ab6f2b8b9815205bc215c6d19c2b7714c908fe",
+      id: 33999207731,
+      head_sha: "1cd0e393863f7d3d880400e409519bcadfb43959",
       repository_id: 1299380446,
       head_repository_id: 1299380446,
     },
@@ -1129,18 +1129,33 @@ test("upstream pip child reports byte progress while suppressing secret-like std
   assert.doesNotMatch(JSON.stringify(events), /FIXTURE_PRIVATE|Authorization|config.json/);
 });
 
-test("upstream pip watchdog closes its owned child on repeated or decreasing transfer counts", async () => {
+test("upstream pip watchdog closes its owned child on repeated or decreasing transfer counts", async (t) => {
   const root = await mkdtemp(path.join(tmpdir(), "starvector-pip-watchdog-"));
+  // Keep the real child startup bound separate from the simulated stall clock.
+  // Concurrent CI may take longer to start Node than the short watchdog fixture.
+  t.mock.timers.enable({ apis: ["Date", "setInterval"] });
   try {
-    for (const [name, script, reason] of [
-      ["stalled", "let count=0; setInterval(() => console.log('Progress '+(++count%2)+' of 10'), 20);", "download_stalled"],
-      ["unsupported", "setInterval(() => console.log('Unrecognized progress FIXTURE_PRIVATE'), 20);", "no_observable_download_progress"],
+    for (const [name, output, reason] of [
+      ["stalled", "Progress 1 of 10\nProgress 1 of 10\nProgress 0 of 10\n", "download_stalled"],
+      ["unsupported", "Unrecognized progress FIXTURE_PRIVATE\n", "no_observable_download_progress"],
     ]) {
       const pidPath = path.join(root, name), events = [];
-      const code = `require('node:fs').writeFileSync(${JSON.stringify(pidPath)}, String(process.pid)); ${script}`;
-      await assert.rejects(() => runUpstreamPip(process.execPath, ["-e", code], { timeout: 5000, maxBuffer: 16384 }, { emit: line => events.push(JSON.parse(line)), heartbeatMs: 30, noProgressMs: 600 }), new RegExp(reason));
+      const ready = "Downloading https://download.pytorch.org/fixture.whl\n";
+      const code = `require('node:fs').writeFileSync(${JSON.stringify(pidPath)}, String(process.pid)); process.stdout.write(${JSON.stringify(ready + output)}); setInterval(() => {}, 20);`;
+      await assert.rejects(() => runUpstreamPip(process.execPath, ["-e", code], { timeout: 10000, maxBuffer: 16384 }, {
+        emit: line => {
+          const event = JSON.parse(line); events.push(event);
+          // Wait for the same output chunk's byte counters to be consumed first.
+          if (event.event === "download_started") setImmediate(() => t.mock.timers.tick(630));
+        },
+        heartbeatMs: 30, noProgressMs: 600,
+      }), new RegExp(reason));
       assert.equal(events.at(-1).failure, reason);
       assert.equal(events.at(-1).killed, true);
+      if (name === "stalled") {
+        assert.equal(events.at(-1).last_transfer.bytes, 1);
+        assert.equal(events.at(-1).last_progress.bytes, 0);
+      }
       const pid = Number(await readFile(pidPath, "utf8"));
       assert.throws(() => process.kill(pid, 0), /ESRCH/);
       assert.doesNotMatch(JSON.stringify(events), /FIXTURE_PRIVATE/);
@@ -1148,10 +1163,20 @@ test("upstream pip watchdog closes its owned child on repeated or decreasing tra
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 
-test("upstream pip process deadline remains explicit after installation starts", async () => {
+test("upstream pip process deadline remains explicit after installation starts", async (t) => {
   const events = [];
+  // Freeze only the watchdog's clock until the real child reaches installation.
+  // execFile still owns the independent, real ten-second process deadline.
+  t.mock.timers.enable({ apis: ["Date"] });
   const script = "console.log('Installing collected packages: fixture'); setInterval(() => {}, 100);";
-  await assert.rejects(() => runUpstreamPip(process.execPath, ["-e", script], { timeout: 1000, maxBuffer: 4096 }, { emit: line => events.push(JSON.parse(line)), heartbeatMs: 20, noProgressMs: 300 }), /process_deadline/);
+  await assert.rejects(() => runUpstreamPip(process.execPath, ["-e", script], { timeout: 10000, maxBuffer: 4096 }, {
+    emit: line => {
+      const event = JSON.parse(line); events.push(event);
+      if (event.event === "installing") t.mock.timers.tick(10000);
+    },
+    heartbeatMs: 20, noProgressMs: 300,
+  }), /process_deadline/);
+  assert.ok(events.some(event => event.event === "installing"));
   assert.equal(events.at(-1).failure, "process_deadline");
   assert.equal(events.at(-1).killed, true);
 });

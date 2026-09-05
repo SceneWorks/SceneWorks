@@ -25584,7 +25584,7 @@
           // campaign must re-verify these checked-in facts live in its same-run receipt.
           "terminalCandidate": {
             "schemaVersion": 1,
-            "inferenceRevision": "42ab6f2b8b9815205bc215c6d19c2b7714c908fe",
+            "inferenceRevision": "1cd0e393863f7d3d880400e409519bcadfb43959",
             "corpusSha256": "757370c4eed38a52a29ac80c258fdedd7e437ab891637bcb1c916aa608bf32b5",
             "model": {
               "repository": "starvector/starvector-8b-im2svg",
@@ -25612,12 +25612,12 @@
             },
             "productionClosure": {
               "schemaVersion": 1,
-              "sha256": "3719d40aa3ec6a99a17e7debca2c378fe19b5772dfd6a4cf9d566186b39715aa",
+              "sha256": "c6a3b0fa30469fdab64b5c004532cc4cf6c03cbacbdd539de16c10de1b730e1a",
               "entries": [
                 {
                   "path": ".github/workflows/starvector-terminal-provision.yml",
                   "byteSize": 25433,
-                  "sha256": "d74e5363048db8786bfc6a8b383a037c925ce4dbd4821aeec81e29d07a0ed5bc"
+                  "sha256": "951af9712c96a0ee2b72fae3b6adb99b3f127936e5d12936735f53fe7305bd90"
                 },
                 {
                   "path": ".github/workflows/starvector-terminal.yml",
@@ -25707,7 +25707,7 @@
                 {
                   "path": "release/starvector-terminal-campaign-v1.json",
                   "byteSize": 2815,
-                  "sha256": "1f47d43e9154dc19a78291e42691c05e757980466753f5b098d4e63ab557c4e2"
+                  "sha256": "bb516a4cf013042b3f51bfc3ea3224f23e3776adbb8e1daae67a009edc4a376b"
                 },
                 {
                   "path": "release/starvector-terminal-metrics-lock-v1.json",

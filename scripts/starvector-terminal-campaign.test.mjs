@@ -8,7 +8,7 @@ const lock = JSON.parse(readFileSync("release/starvector-terminal-metrics-lock-v
 
 test("terminal campaign is fixed, serial, and fail closed", async () => {
   const validated = validatePlan(plan);
-  assert.equal(validated.inference_contract.revision, "42ab6f2b8b9815205bc215c6d19c2b7714c908fe");
+  assert.equal(validated.inference_contract.revision, "1cd0e393863f7d3d880400e409519bcadfb43959");
   assert.deepEqual(validated.inference_preflight, {
     repository: "SceneWorks/inference",
     workflow: {
@@ -17,24 +17,24 @@ test("terminal campaign is fixed, serial, and fail closed", async () => {
       path: ".github/workflows/real-weights.yml",
       event: "workflow_dispatch",
     },
-    workflow_run_id: "33928871038",
+    workflow_run_id: "33999207731",
     workflow_run_attempt: 1,
-    head_sha: "42ab6f2b8b9815205bc215c6d19c2b7714c908fe",
+    head_sha: "1cd0e393863f7d3d880400e409519bcadfb43959",
     artifact: {
-      id: 9957850431,
-      name: "starvector-terminal-preflight-42ab6f2b8b9815205bc215c6d19c2b7714c908fe-33928871038-1",
-      size_in_bytes: 6456,
-      digest: "sha256:609a2850118c206a4a38698e1680e81b78666d6b72be07d66ba677b0f50a9831",
+      id: 9979002999,
+      name: "starvector-terminal-preflight-1cd0e393863f7d3d880400e409519bcadfb43959-33999207731-1",
+      size_in_bytes: 6355,
+      digest: "sha256:c70a0ffe4a8951a7caf24f95e2cbfca1f3d71a295cb2196265a27eac483955f1",
     },
     inventory_artifacts: [
       { tier: "1b", path: "inventory/starvector-1b-inventory.json", sha256: "f4b8345ae7b6aa535080191c05694bba68fb3bbfe0391ff95f5bfd9b381812da" },
       { tier: "8b", path: "inventory/starvector-8b-inventory.json", sha256: "af1bcb4c38b86bbe1a973aedcba2ca72b03485d2c5877457192878beeb5989a2" },
     ],
     hook_logs: [
-      { backend: "mlx", tier: "1b", path: "hooks/mlx-starvector-1b.log", sha256: "61fa4d975619bf4fd5fe7935f328926ec1f1454f43b8fcce10c20cc6d7182f5d" },
-      { backend: "mlx", tier: "8b", path: "hooks/mlx-starvector-8b.log", sha256: "63ddfbaf05a9f299de3e5688586e4e3ac2cdb91053131192771c4754d672bc7d" },
-      { backend: "candle-cuda", tier: "1b", path: "hooks/candle-cuda-starvector-1b.log", sha256: "9dfec9f0651396e8e9d0e92cabde7ea9b0c6af393694647e7cc3fd8d855d7da6" },
-      { backend: "candle-cuda", tier: "8b", path: "hooks/candle-cuda-starvector-8b.log", sha256: "86b069670b6515227a6e7a016f6c5bb3c27f701dee5b799d24f9a53c8feaf9b2" },
+      { backend: "mlx", tier: "1b", path: "hooks/mlx-starvector-1b.log", sha256: "f5ca9ff987c3aa43d16c227025b5bc5ccd108b77ec4313b2d0d24157282871b0" },
+      { backend: "mlx", tier: "8b", path: "hooks/mlx-starvector-8b.log", sha256: "b7dabfd4a0a65faf5420f18e6985b0fc4a5c9753c275d15cf105347dc0a8769c" },
+      { backend: "candle-cuda", tier: "1b", path: "hooks/candle-cuda-starvector-1b.log", sha256: "0cc32c25bc9108b1595d15ab9878df48e855dc7f89f1f2a595a0dc812372d412" },
+      { backend: "candle-cuda", tier: "8b", path: "hooks/candle-cuda-starvector-8b.log", sha256: "119a6380aa7af1fe796c14cc6c6b74e30fe6c97df4886db6cf839812ec0ba387" },
     ],
   });
   assert.match((await readPlanAndLock("release/starvector-terminal-campaign-v1.json")).metrics_lock_sha256, /^[0-9a-f]{64}$/);
@@ -58,10 +58,10 @@ test("plan validates preflight structure while allowing newly recorded exact evi
 });
 
 test("dispatch identities reject Bash and PowerShell injection-shaped payloads", () => {
-  const pin = "42ab6f2b8b9815205bc215c6d19c2b7714c908fe";
-  assert.deepEqual(validateTerminalDispatchInputs(plan, pin, "campaign-33928871038"), {
+  const pin = "1cd0e393863f7d3d880400e409519bcadfb43959";
+  assert.deepEqual(validateTerminalDispatchInputs(plan, pin, "campaign-33999207731"), {
     permanent_pin: pin,
-    campaign_run_id: "campaign-33928871038",
+    campaign_run_id: "campaign-33999207731",
   });
   for (const value of [
     "$(touch /tmp/starvector-shell-injection)",
