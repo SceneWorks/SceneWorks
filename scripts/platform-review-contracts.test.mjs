@@ -515,7 +515,17 @@ test("windows-candle captures and schema-checks the SC-21714 Krea anchor record"
 
   const adapter = await source("crates/sceneworks-memory-adapter/src/bin/candle.rs");
   assert.match(adapter, /StableIdleConfig::new\(2\.0, 5, 64, 200\)/);
-  assert.equal(adapter.match(/let mut vram = certifying_vram_probe\(\);/g)?.length, 2);
+  // SHAPE, not population (sc-22726): what this protects is that EVERY VRAM probe the adapter
+  // builds is the certifying one — a raw `VramProbe::new` would measure without the stable-idle
+  // proof. Pinning the count instead made adding an arm look like a regression, so assert that
+  // every `vram` binding is certifying and that there is at least one.
+  const probes = adapter.match(/let mut vram = [a-z_]+\(\);/g) ?? [];
+  assert.ok(probes.length > 0, "the Candle adapter builds at least one VRAM probe");
+  assert.deepEqual(
+    [...new Set(probes)],
+    ["let mut vram = certifying_vram_probe();"],
+    "every Candle VRAM probe must be the certifying one",
+  );
 });
 
 test("windows-candle routes weights dispatches to a real-weights runner, like the MLX lane", async () => {

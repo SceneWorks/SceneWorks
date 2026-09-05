@@ -6,13 +6,21 @@
 
 use serde_json::{json, Map, Value};
 use std::io::{self, Read};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 pub const INFERENCE_PIN: &str = "c6d6a4dbd61ab09c26ff5526632cae2cefea60ed";
 pub const QWEN_REPOSITORY: &str = "SceneWorks/qwen-image-mlx";
 pub const FLUX2_REPOSITORY: &str = "SceneWorks/flux2-dev-mlx";
 pub const KREA_REPOSITORY: &str = "SceneWorks/krea-2-turbo-mlx";
+/// The FLUX.1 [dev] tiered rehost (sc-22726). It serves BOTH the `flux1_dev` text-to-image provider
+/// and the `pulid_flux` character route, on both lanes: the worker resolves the PuLID backbone from
+/// exactly this repo (`image_jobs/pulid.rs` `PULID_FLUX_REPO`, `image_jobs/pulid_candle.rs`
+/// `PULID_CANDLE_FLUX_REPO`), so both bind the one `SCENEWORKS_FLUX1_DEV_*` family — the way
+/// `z_image_edit` rides the Turbo family.
+pub const FLUX1_DEV_REPOSITORY: &str = "SceneWorks/flux1-dev-mlx";
+/// The FLUX.1 [schnell] tiered rehost (sc-22726), the `flux1_schnell` provider's own artifact.
+pub const FLUX1_SCHNELL_REPOSITORY: &str = "SceneWorks/flux1-schnell-mlx";
 pub const SDXL_REPOSITORY: &str = "SceneWorks/sdxl-base-mlx";
 /// The Z-Image-Turbo tiered rehost. Serves the `z_image_turbo` provider AND the `z_image_edit`
 /// catalog alias (the worker routes `z_image_edit` to the Turbo weights driven in `edit_image`
@@ -693,6 +701,74 @@ pub fn required_env(name: &str) -> Result<String, String> {
         .ok()
         .filter(|value| !value.trim().is_empty())
         .ok_or_else(|| format!("required environment variable {name} is not set"))
+}
+
+/// The env var BOTH PuLID-FLUX worker lanes honour for a pre-staged identity bundle
+/// (`image_jobs/pulid.rs` `ensure_pulid_weights`, `image_jobs/pulid_candle.rs`
+/// `ensure_pulid_candle_weights`). The identity stack is fetched on first use rather than declared
+/// as a manifest download, so an anchor binds the operator's staged copy through this same seam.
+pub const PULID_IDENTITY_BUNDLE_ENV: &str = "SCENEWORKS_PULID_WEIGHTS";
+/// The five loose files both lanes require in ONE directory, which doubles as the provider's
+/// `face_dir`. Order is the engine's own admission order (`mlx-gen-pulid` `identity_paths`):
+/// encoder, EVA tower, then the three face models read out of `face_dir` by name.
+pub const PULID_ADAPTER_FILE: &str = "pulid_flux_v0.9.1.safetensors";
+pub const PULID_EVA_FILE: &str = "eva02_clip_l_336.safetensors";
+pub const PULID_SCRFD_FILE: &str = "scrfd_10g.safetensors";
+pub const PULID_ARCFACE_FILE: &str = "arcface_iresnet100.safetensors";
+pub const PULID_BISENET_FILE: &str = "bisenet_parsing.safetensors";
+/// Every file the bundle must carry, in admission order.
+pub const PULID_IDENTITY_BUNDLE_FILES: [&str; 5] = [
+    PULID_ADAPTER_FILE,
+    PULID_EVA_FILE,
+    PULID_SCRFD_FILE,
+    PULID_ARCFACE_FILE,
+    PULID_BISENET_FILE,
+];
+
+/// The PuLID identity stack an anchor binds: `(adapter, eva, face_dir)`.
+///
+/// Both lanes take exactly these three handles — MLX through `LoadSpec::identity`
+/// (`IdentityWeights { encoder, eva, face_dir }`), Candle through `PulidFluxPaths`
+/// `{ pulid_weights, eva_weights, face_dir }` — and both engines then read the three face models
+/// out of `face_dir` BY NAME. So a bundle missing any one of the five is refused HERE, naming the
+/// files, rather than surfacing as an opaque loader error several gigabytes into a capture.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PulidIdentityBundle {
+    pub root: PathBuf,
+    pub adapter: PathBuf,
+    pub eva: PathBuf,
+    pub face_dir: PathBuf,
+}
+
+/// The env-free half of [`pulid_identity_bundle`], so the file contract is unit-testable.
+pub fn pulid_identity_bundle_at(root: PathBuf) -> Result<PulidIdentityBundle, String> {
+    let missing: Vec<&str> = PULID_IDENTITY_BUNDLE_FILES
+        .iter()
+        .copied()
+        .filter(|file| !root.join(file).is_file())
+        .collect();
+    if !missing.is_empty() {
+        return Err(format!(
+            "{PULID_IDENTITY_BUNDLE_ENV} bundle {} is missing {}; the PuLID identity stack is one \
+             directory holding all five files (it IS the provider's face_dir)",
+            root.display(),
+            missing.join(", ")
+        ));
+    }
+    Ok(PulidIdentityBundle {
+        adapter: root.join(PULID_ADAPTER_FILE),
+        eva: root.join(PULID_EVA_FILE),
+        face_dir: root.clone(),
+        root,
+    })
+}
+
+/// Resolve the staged bundle from [`PULID_IDENTITY_BUNDLE_ENV`], canonicalized so the record's
+/// fingerprint names a real path rather than whatever spelling the operator exported.
+pub fn pulid_identity_bundle() -> Result<PulidIdentityBundle, String> {
+    let root = std::fs::canonicalize(PathBuf::from(required_env(PULID_IDENTITY_BUNDLE_ENV)?))
+        .map_err(|error| format!("canonicalize {PULID_IDENTITY_BUNDLE_ENV}: {error}"))?;
+    pulid_identity_bundle_at(root)
 }
 
 pub fn validate_artifact_identity(

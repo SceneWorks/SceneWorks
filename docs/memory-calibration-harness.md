@@ -238,7 +238,9 @@ the MiniMax upstream root, `--ltx25-snapshot-root` for `ltx_2_5`, and the raw-lo
 `SCENEWORKS_MEMORY_CAPTURE_DIR` for the arms whose authoritative record needs the physical receipt
 session (the Qwen MLX arm, the only one that emits a `sourceCapture`). `--list` / `--dry-run`
 classify every anchor as `runnable`, `weights_missing` (no snapshot at the manifest revision under
-any hub root), `no_adapter_arm`, `harness_unsupported` (candle `ltx_2_5`), `lane_undeclared`
+any hub root — or, for a family whose weights are not all manifest downloads, an unstaged or
+incomplete operator bundle: `pulid_flux_dev` needs the five loose identity-stack files under
+`SCENEWORKS_PULID_WEIGHTS`, sc-22726), `no_adapter_arm`, `harness_unsupported` (candle `ltx_2_5`), `lane_undeclared`
 (`<model>:<backend>` has no entry in `config/anchor-loader-closures.json`, so `--stamp-anchors`
 would refuse the anchor after the render — runbook §7c declares a lane), `provider_undeclared`
 (`<backend>:<provider>` has no entry in `config/inference-provider-closures.json`, so the record

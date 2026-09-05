@@ -726,6 +726,55 @@ fn load(request: &Value) -> Result<Loaded, String> {
   assert.deepEqual(adapterCapturableProviders(source, "synthetic"), ["alpha"]);
 });
 
+// sc-22726. A BLOCK-bodied match arm carries no trailing comma after rustfmt, and this parser
+// splits arms on depth-0 commas — so a braced arm in the middle of a dispatch swallowed the NEXT
+// arm's pattern and silently dropped a real provider from the capturable set. The report then read
+// that lane as "NO ARM" and would have sent an operator to build an arm that already existed.
+test("a block-bodied arm in the middle of a dispatch does not swallow the arm after it", () => {
+  const source = `
+fn entry(request: &Value) -> Result<&'static str, String> {
+    match planned_provider(request)? {
+        "alpha" => Ok(ALPHA_PATH),
+        "bespoke" => Ok(BESPOKE_PATH),
+        "zeta" => Ok(ZETA_PATH),
+        provider => Err(format!(
+            "synthetic five-rung calibration does not implement provider {provider:?}"
+        )),
+    }
+}
+fn load(request: &Value) -> Result<Loaded, String> {
+    match planned_provider(request)? {
+        "alpha" => Ok(load_alpha()),
+        "bespoke" => {
+            return Err("bespoke is served by its own arm".to_owned())
+        }
+        "zeta" => Ok(load_zeta()),
+        provider => Err(format!(
+            "synthetic five-rung calibration does not implement provider {provider:?}"
+        )),
+    }
+}
+`;
+  assert.deepEqual(
+    adapterCapturableProviders(source, "synthetic"),
+    ["alpha", "bespoke"],
+    "the braced arm consumed the `zeta` arm that followed it",
+  );
+  // The expression-bodied spelling (`=> return Err(...),`) keeps its comma, so every arm survives.
+  assert.deepEqual(
+    adapterCapturableProviders(
+      source.replace(
+        `        "bespoke" => {
+            return Err("bespoke is served by its own arm".to_owned())
+        }`,
+        `        "bespoke" => return Err("bespoke is served by its own arm".to_owned()),`,
+      ),
+      "synthetic",
+    ),
+    ["alpha", "bespoke", "zeta"],
+  );
+});
+
 test("losing the dispatch anchor is loud, never an empty (or full) capturable set", () => {
   assert.throws(
     () => adapterCapturableProviders("fn run() -> u32 { 42 }", "synthetic"),

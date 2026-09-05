@@ -71,6 +71,32 @@ export const PROVIDER_FAMILIES = Object.freeze({
   krea_2_turbo: { env: "KREA", repo: "SceneWorks/krea-2-turbo-mlx", arms: ["mlx", "candle"] },
   sdxl: { env: "SDXL", repo: "SceneWorks/sdxl-base-mlx", arms: ["mlx"] },
   flux2_dev: { env: "FLUX2", repo: "SceneWorks/flux2-dev-mlx", arms: ["mlx"] },
+  // The FLUX.1 family (sc-22726). `flux_dev`/`flux_schnell` are the two base text-to-image
+  // providers; `pulid_flux` is the PuLID-FLUX character route, which loads the SAME
+  // `SceneWorks/flux1-dev-mlx` backbone (worker image_jobs/pulid.rs `PULID_FLUX_REPO` and
+  // pulid_candle.rs `PULID_CANDLE_FLUX_REPO`) and therefore shares the FLUX1_DEV env family, the
+  // way `z_image_edit` shares the Turbo family. Its own manifest entry ships the same three tiers,
+  // which `tierDownload` resolves by model id.
+  flux1_dev: { env: "FLUX1_DEV", repo: "SceneWorks/flux1-dev-mlx", arms: ["mlx", "candle"] },
+  flux1_schnell: { env: "FLUX1_SCHNELL", repo: "SceneWorks/flux1-schnell-mlx", arms: ["mlx", "candle"] },
+  pulid_flux: {
+    env: "FLUX1_DEV", repo: "SceneWorks/flux1-dev-mlx", arms: ["mlx", "candle"],
+    // The identity stack is NOT a manifest download on either lane — the worker fetches it on first
+    // use — so the anchor binds the operator's pre-staged bundle instead, through the SAME env var
+    // both worker lanes already honour (`SCENEWORKS_PULID_WEIGHTS`; image_jobs/pulid.rs
+    // `ensure_pulid_weights`, pulid_candle.rs `ensure_pulid_candle_weights`). Both lanes require
+    // exactly these five loose files in one directory, which doubles as the provider's `face_dir`.
+    bundle: {
+      env: "SCENEWORKS_PULID_WEIGHTS",
+      files: [
+        "pulid_flux_v0.9.1.safetensors",
+        "eva02_clip_l_336.safetensors",
+        "bisenet_parsing.safetensors",
+        "scrfd_10g.safetensors",
+        "arcface_iresnet100.safetensors",
+      ],
+    },
+  },
   minimax_h3: {
     env: "MINIMAX_H3", repo: "SceneWorks/minimax-h3-mlx", arms: ["mlx"],
     upstream: { env: "MINIMAX_H3_UPSTREAM", repo: "MiniMaxAI/MiniMax-H3" },
@@ -282,6 +308,27 @@ export async function classifyAnchor(key, planned, { models, backend, hubs, curr
   row.env[`SCENEWORKS_${family.env}_REVISION`] = download.revision;
   row.env[`SCENEWORKS_${family.env}_ROOT`] = tierRoot;
   row.tierRoot = tierRoot;
+  if (family.bundle) {
+    // A pre-staged loose-file bundle rather than an HF snapshot, so it is probed through the
+    // operator env the worker itself honours. Absent or incomplete is `weights_missing` — the same
+    // class as a missing tier root, and NOT "runnable" (a cell whose identity stack cannot be bound
+    // is not measurable on this host, and saying otherwise sends an operator to book a capture).
+    const bundleRoot = process.env[family.bundle.env];
+    row.roots.push({ label: "pulid bundle", path: bundleRoot ?? `$${family.bundle.env}` });
+    if (!bundleRoot) {
+      return { ...row, status: "weights_missing", reason: `${family.bundle.env} is unset; the PuLID identity bundle is not staged on this host` };
+    }
+    const missing = [];
+    for (const file of family.bundle.files) {
+      try {
+        if (!(await stat(path.join(bundleRoot, file))).isFile()) missing.push(file);
+      } catch { missing.push(file); }
+    }
+    if (missing.length > 0) {
+      return { ...row, status: "weights_missing", reason: `${family.bundle.env} bundle ${bundleRoot} is missing ${missing.join(", ")}` };
+    }
+    row.env[family.bundle.env] = bundleRoot;
+  }
   if (family.upstream) {
     const upstream = tierDownload(models, parts.modelId, family.upstream.repo, parts.tier);
     const upstreamRoot = await firstExistingDirectory(hubs.map((hub) => snapshotPath(hub, family.upstream.repo, upstream.revision)));

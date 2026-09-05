@@ -10,6 +10,7 @@ use runtime_cuda::gen_core::{
     MemoryStrategyParameters, OffloadPolicy, Precision, Progress, Quant, TransformerComponent,
     WeightsSource,
 };
+use runtime_cuda::providers::pulid::PulidFluxRequest;
 use sceneworks_memory_adapter as protocol;
 use serde_json::{json, Map, Value};
 use std::path::PathBuf;
@@ -58,6 +59,33 @@ const Z_IMAGE_PLAIN_EXECUTION_PATH: &str = "the Candle Z-Image base-model text-t
 /// The label the Z-Image base arm refuses a non-still geometry under; see
 /// [`still_calibration_label`].
 const Z_IMAGE_STILL_CALIBRATION: &str = "Candle Z-Image base-model calibration";
+/// The two FLUX.1 base text-to-image providers (sc-22726). Registry ids of `candle-gen-flux`'s
+/// registered generators (`candle_gen_flux::FLUX1_DEV_ID` / `FLUX1_SCHNELL_ID`) — the same ids the
+/// worker hands `inference_runtime::load` for the `flux_dev` / `flux_schnell` catalog models
+/// (`engines.rs` MODEL_TABLE `engine_id`).
+const FLUX1_DEV_ID: &str = "flux1_dev";
+const FLUX1_DEV_PLAIN_EXECUTION_PATH: &str = "the Candle FLUX.1-dev base-only text-to-image path";
+const FLUX1_DEV_STILL_CALIBRATION: &str = "Candle FLUX.1-dev calibration";
+const FLUX1_SCHNELL_ID: &str = "flux1_schnell";
+const FLUX1_SCHNELL_PLAIN_EXECUTION_PATH: &str =
+    "the Candle FLUX.1-schnell base-only text-to-image path";
+const FLUX1_SCHNELL_STILL_CALIBRATION: &str = "Candle FLUX.1-schnell calibration";
+/// PuLID-FLUX (sc-22726). On this lane it is NOT a registered generator: `candle-gen-pulid`
+/// registers nothing (its `lib.rs` says so in as many words, and the checked-in capability dump
+/// lists it under `bespokeMemoryRouteWaivers`). The worker loads it as
+/// `runtime_cuda::providers::pulid::PulidFlux::load_with_memory_context(&PulidFluxPaths, ctx)`
+/// (`image_jobs/pulid_candle.rs`), so this arm does exactly that — going through the registry
+/// would be a different code path, not the production one (E4).
+const PULID_FLUX_ID: &str = "pulid_flux";
+const PULID_FLUX_EXECUTION_PATH: &str = "the Candle PuLID-FLUX identity-conditioned character path";
+const PULID_FLUX_STILL_CALIBRATION: &str = "Candle PuLID-FLUX calibration";
+/// The manifest's `ui.referenceStrengthDefault` for `pulid_flux_dev` — the `id_weight` the worker
+/// sends when the user leaves the reference strength alone (`pulid_candle_id_weight`).
+const PULID_FLUX_ID_WEIGHT: f32 = 1.0;
+/// Torch/MLX-parity guidance for the `pulid_flux_dev` "photoreal" preset (`pulid_candle_guidance`).
+const PULID_FLUX_GUIDANCE: f32 = 4.0;
+/// The capture seed, shared with the MLX arm so both lanes' FLUX.1 fixtures name one number.
+const FLUX1_SEED: u64 = 22726;
 const LTX25_ID: &str = "ltx_2_5_distilled";
 const LTX25_EXECUTION_PATH: &str =
     "the Candle LTX-2.5 text-to-video base recipe (including the official dev refinement LoRA)";
@@ -656,6 +684,12 @@ fn plain_execution_path(request: &Value) -> Result<&'static str, String> {
         }),
         // sc-22724: the undistilled base is its own registry id with its own artifact family.
         "z_image" => Ok(Z_IMAGE_PLAIN_EXECUTION_PATH),
+        // sc-22726: the two FLUX.1 base providers ride the same five-rung reference path.
+        "flux1_dev" => Ok(FLUX1_DEV_PLAIN_EXECUTION_PATH),
+        "flux1_schnell" => Ok(FLUX1_SCHNELL_PLAIN_EXECUTION_PATH),
+        // sc-22726: PuLID-FLUX is a bespoke route with its own arm; it is named here so the shared
+        // refusal cannot claim this adapter does not implement it.
+        "pulid_flux" => Ok(PULID_FLUX_EXECUTION_PATH),
         provider => Err(format!(
             "Candle five-rung calibration does not implement provider {provider:?}"
         )),
@@ -685,6 +719,9 @@ fn still_calibration_label(request: &Value) -> Result<&'static str, String> {
             Z_IMAGE_TURBO_STILL_CALIBRATION
         }),
         Z_IMAGE_ID => Ok(Z_IMAGE_STILL_CALIBRATION),
+        FLUX1_DEV_ID => Ok(FLUX1_DEV_STILL_CALIBRATION),
+        FLUX1_SCHNELL_ID => Ok(FLUX1_SCHNELL_STILL_CALIBRATION),
+        PULID_FLUX_ID => Ok(PULID_FLUX_STILL_CALIBRATION),
         provider => Err(format!(
             "Candle five-rung calibration does not implement provider {provider:?}"
         )),
@@ -868,6 +905,39 @@ fn load_five_rung_generator(request: &Value) -> Result<LoadedFiveRungGenerator, 
                 "SCENEWORKS_Z_IMAGE_BASE_REVISION",
                 "SCENEWORKS_Z_IMAGE_BASE_ROOT",
                 protocol::Z_IMAGE_BASE_REPOSITORY,
+            ),
+            // sc-22726. PuLID is a BESPOKE route: `candle-gen-pulid` registers no `Generator`, so
+            // there is nothing for `catalog.media().load` to return and reaching here at all means
+            // the dispatch in `run` was bypassed. Named rather than left to the catch-all so the
+            // refusal says which arm owns it — and so the derived capturability report
+            // (`stale-lane-report.mjs#adapterCapturableProviders`, which intersects every dispatch
+            // gate carrying the refusal phrase) does not read this lane as having no arm.
+            // Expression-bodied ON PURPOSE: a block-bodied arm carries no trailing comma after
+            // rustfmt, and the report's arm parser splits on depth-0 commas — a braced arm here
+            // silently swallowed the NEXT arm's pattern and dropped `flux1_dev` from the derived
+            // capturable set.
+            "pulid_flux" => return Err(
+                "pulid_flux is a bespoke Candle route and must not reach the provider registry; \
+                 it is served by run_pulid_flux_capture"
+                    .to_owned(),
+            ),
+            // Each FLUX.1 base provider binds its OWN tiered rehost, so a schnell plan can never be
+            // satisfied by dev weights.
+            "flux1_dev" => (
+                FLUX1_DEV_ID,
+                FLUX1_DEV_PLAIN_EXECUTION_PATH,
+                "SCENEWORKS_FLUX1_DEV_REPOSITORY",
+                "SCENEWORKS_FLUX1_DEV_REVISION",
+                "SCENEWORKS_FLUX1_DEV_ROOT",
+                protocol::FLUX1_DEV_REPOSITORY,
+            ),
+            "flux1_schnell" => (
+                FLUX1_SCHNELL_ID,
+                FLUX1_SCHNELL_PLAIN_EXECUTION_PATH,
+                "SCENEWORKS_FLUX1_SCHNELL_REPOSITORY",
+                "SCENEWORKS_FLUX1_SCHNELL_REVISION",
+                "SCENEWORKS_FLUX1_SCHNELL_ROOT",
+                protocol::FLUX1_SCHNELL_REPOSITORY,
             ),
             provider => {
                 return Err(format!(
@@ -1256,6 +1326,411 @@ fn five_rung_generation_request(width: u32, height: u32, edit: bool) -> Generati
         }];
     }
     generation
+}
+
+// ---------------------------------------------------------------------------------------------
+// The bespoke Candle PuLID-FLUX arm (sc-22726).
+// ---------------------------------------------------------------------------------------------
+
+/// Everything one PuLID capture binds before a weight file is opened: the FLUX.1-dev backbone at
+/// the PLANNED tier, the staged identity stack, and the paths struct the bespoke provider takes.
+struct PulidFluxBinding {
+    repository: String,
+    revision: String,
+    tier: &'static str,
+    bundle: protocol::PulidIdentityBundle,
+    paths: runtime_cuda::providers::pulid::PulidFluxPaths,
+}
+
+/// Hand-written because `PulidFluxPaths` (an inference type) derives no `Debug`; the fingerprint
+/// already names every path the binding resolved, so it is the whole useful content.
+impl std::fmt::Debug for PulidFluxBinding {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("PulidFluxBinding")
+            .field("fingerprint", &self.loadability_fingerprint())
+            .finish()
+    }
+}
+
+impl PulidFluxBinding {
+    fn loadability_fingerprint(&self) -> String {
+        format!(
+            "{}@{}:{}+identity:{}",
+            self.repository,
+            self.revision,
+            self.tier,
+            self.bundle.root.display()
+        )
+    }
+}
+
+/// The env-free half of [`pulid_flux_binding`], so the tier and identity bindings are provable
+/// without weights or a GPU.
+fn pulid_flux_binding_at(
+    request: &Value,
+    repository: String,
+    revision: String,
+    root: PathBuf,
+    bundle: protocol::PulidIdentityBundle,
+) -> Result<PulidFluxBinding, String> {
+    if planned_provider(request)? != PULID_FLUX_ID {
+        return Err(format!(
+            "the Candle PuLID-FLUX arm does not implement provider {:?}",
+            planned_provider(request)?
+        ));
+    }
+    // PuLID is text-to-image-WITH-A-FACE only: the worker's `pulid_candle_available` requires
+    // `character_image` and a reference, and the provider's own route gate refuses anything else.
+    let mode = planned_mode(request)?;
+    if mode != "character_image" {
+        return Err(format!(
+            "the Candle PuLID-FLUX arm does not implement mode {mode:?}; the route is \
+             character_image only"
+        ));
+    }
+    protocol::validate_exact_overlay_target(request, "identity", PULID_FLUX_EXECUTION_PATH)?;
+    let tier = match planned_tier(request)? {
+        "bf16" => "bf16",
+        "q4" => "q4",
+        "q8" => "q8",
+        _ => unreachable!("planned_tier returned an unsupported tier"),
+    };
+    // The backbone IS the FLUX.1-dev artifact on this route (`PULID_CANDLE_FLUX_REPO`), so it binds
+    // the FLUX1_DEV family — and the root must still end in the PLANNED tier's directory, so a
+    // stale `…/q4` export cannot satisfy a q8 or bf16 plan.
+    protocol::validate_artifact_identity(&repository, &revision, protocol::FLUX1_DEV_REPOSITORY)?;
+    let root = std::fs::canonicalize(&root)
+        .map_err(|error| format!("canonicalize SCENEWORKS_FLUX1_DEV_ROOT: {error}"))?;
+    protocol::validate_huggingface_snapshot_root(
+        &root,
+        &repository,
+        &revision,
+        tier,
+        protocol::FLUX1_DEV_REPOSITORY,
+    )?;
+    let paths = runtime_cuda::providers::pulid::PulidFluxPaths {
+        flux_base: root,
+        pulid_weights: bundle.adapter.clone(),
+        eva_weights: bundle.eva.clone(),
+        face_dir: bundle.face_dir.clone(),
+        // No LoRA adapters: the worker gates the PuLID memory ladder on
+        // `request.loras.is_empty()` (`pulid_memory_ladder_eligible`), so a ladder-admitted PuLID
+        // render carries none, and an anchor must measure the admitted shape.
+        adapters: Vec::new(),
+    };
+    Ok(PulidFluxBinding {
+        repository,
+        revision,
+        tier,
+        bundle,
+        paths,
+    })
+}
+
+fn pulid_flux_binding(request: &Value) -> Result<PulidFluxBinding, String> {
+    let repository = protocol::required_env("SCENEWORKS_FLUX1_DEV_REPOSITORY")?;
+    let revision = protocol::required_env("SCENEWORKS_FLUX1_DEV_REVISION")?;
+    let root = PathBuf::from(protocol::required_env("SCENEWORKS_FLUX1_DEV_ROOT")?);
+    let bundle = protocol::pulid_identity_bundle()?;
+    pulid_flux_binding_at(request, repository, revision, root, bundle)
+}
+
+/// The one request every PuLID capture renders, in the worker's shape: the manifest's photoreal
+/// preset guidance and id_weight, the native sampler/scheduler defaults, and two steps so the first
+/// Step callback closes a conservative conditioning envelope and the second gives denoise its own
+/// measured interval before Decoding.
+fn pulid_flux_generation_request(width: u32, height: u32) -> PulidFluxRequest {
+    PulidFluxRequest {
+        prompt: "a portrait of a person in a sunlit studio, editorial photograph".to_owned(),
+        width,
+        height,
+        steps: 2,
+        guidance: PULID_FLUX_GUIDANCE,
+        id_weight: PULID_FLUX_ID_WEIGHT,
+        seed: FLUX1_SEED,
+        use_pid: false,
+        ..Default::default()
+    }
+}
+
+/// The admission context the worker admits this route under (`evaluate_shared_bespoke_image`,
+/// `pulid_candle.rs`): the PROVIDER mode `character_image` with exactly one reference and
+/// `overlay: identity`, no PiD, no request phases. `candle-gen-pulid`'s `safety_check` refuses
+/// anything else by name, so this shape is not a choice.
+fn pulid_flux_context(
+    selection: MemorySelection,
+    calibration: &runtime_cuda::gen_core::MemoryCalibrationIdentity,
+    fingerprint: &str,
+    width: u32,
+    height: u32,
+    total_bytes: u64,
+    predicted_peak_bytes: u64,
+) -> MemoryRunContext {
+    MemoryRunContext {
+        selection,
+        optimization_authority: MemoryOptimizationAuthority::Calibrated,
+        calibration_abi: calibration.abi,
+        calibration_fingerprint: fingerprint.to_owned(),
+        load_shape: calibration.load_shape,
+        mode: MemoryMode::Other("character_image".to_owned()),
+        has_reference: true,
+        use_pid: false,
+        has_phases: false,
+        geometry: MemoryGeometry {
+            width,
+            height,
+            batch: 1,
+            frames: 1,
+            reference_count: 1,
+        },
+        overlay: Some("identity".to_owned()),
+        budget: MemoryBudget {
+            total_bytes,
+            committed_bytes: 0,
+            reclaimable_bytes: 0,
+            reserved_headroom_bytes: 0,
+        },
+        predicted_peak_bytes,
+        cache_state: MemoryCacheState::Cold,
+        evidence_revision: format!("sc-22726@{}", protocol::INFERENCE_PIN),
+    }
+}
+
+/// The `candle:pulid_flux` arm. Unlike every other Candle arm this one never touches the provider
+/// registry: `candle-gen-pulid` registers no `Generator` at all, and the worker loads it as
+/// `PulidFlux::load_with_memory_context(&PulidFluxPaths, ctx)` — so that is the load path measured
+/// here (E4). The memory contract is likewise path-shaped rather than spec-shaped
+/// (`memory_strategy::provider_contract(&paths)`).
+fn run_pulid_flux_capture(request: &Value) -> Result<Value, String> {
+    use runtime_cuda::providers::pulid::{memory_strategy as pulid_memory, PulidFlux};
+
+    // Before any environment or weight work, under this route's own label.
+    protocol::validate_still_geometry(request, PULID_FLUX_STILL_CALIBRATION)?;
+    let binding = pulid_flux_binding(request)?;
+    let (width, height) = protocol::target_geometry(request)?;
+    let selection = planned_selection(request)?;
+
+    // The tier the SNAPSHOT actually declares (`transformer/config.json`), read through the
+    // provider's own resolver. The root suffix already proved the plan and the export agree on the
+    // directory NAME; this proves the weights inside it agree too, which is the half a renamed
+    // directory could otherwise fake.
+    let resolved = pulid_memory::resolved_numeric_tier(&binding.paths)
+        .map_err(|error| format!("resolve PuLID-FLUX numeric tier: {error}"))?;
+    let expected = numeric_tier(binding.tier)?;
+    if (resolved.precision, resolved.quant) != (expected.precision, expected.quant) {
+        return Err(format!(
+            "planned tier {} does not match the tier the PuLID backbone snapshot declares \
+             (precision={:?}, quant={:?})",
+            binding.tier, resolved.precision, resolved.quant
+        ));
+    }
+
+    let contract = pulid_memory::provider_contract(&binding.paths)
+        .map_err(|error| format!("read the pinned PuLID-FLUX memory contract: {error}"))?;
+    contract.validate_selection(&selection).map_err(|error| {
+        format!("pinned PuLID-FLUX provider rejected planned selection: {error}")
+    })?;
+    let strategy = measured_strategy(
+        request,
+        &selection,
+        &contract.engaged_composition(selection.strategy),
+    )?;
+    let calibration = contract
+        .calibration
+        .as_ref()
+        .ok_or_else(|| "the pinned PuLID-FLUX contract has no calibration identity".to_owned())?;
+    let planned_fingerprint = protocol::planned(request)?
+        .get("calibrationFingerprint")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "planned.calibrationFingerprint must be a string".to_owned())?;
+    if planned_fingerprint != calibration.fingerprint {
+        return Err(format!(
+            "plan/provider calibration mismatch: plan={planned_fingerprint}, pinned provider={}",
+            calibration.fingerprint
+        ));
+    }
+    let planned_load_shape = protocol::planned(request)?
+        .get("loadShape")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "planned.loadShape must be a string".to_owned())?;
+    if planned_load_shape != load_shape_key(calibration.load_shape) {
+        return Err(format!(
+            "plan/provider load-shape mismatch: plan={planned_load_shape}, pinned provider={}",
+            load_shape_key(calibration.load_shape)
+        ));
+    }
+    let hardware_bytes = request
+        .pointer("/hardware/memoryBytes")
+        .and_then(Value::as_u64)
+        .ok_or_else(|| "run request.hardware.memoryBytes must be an integer".to_owned())?;
+    let safety = |fingerprint: &str, total_bytes: u64, predicted: u64| {
+        pulid_memory::safety_check(
+            &binding.paths,
+            &contract,
+            &pulid_flux_context(
+                selection,
+                calibration,
+                fingerprint,
+                width,
+                height,
+                total_bytes,
+                predicted,
+            ),
+        )
+    };
+    // Admission mutation hygiene BEFORE the expensive load: the gate must ACCEPT a fitting request,
+    // so the two rejections below cannot pass through a blanket refusal.
+    if !matches!(
+        safety(&calibration.fingerprint, hardware_bytes, 1),
+        MemorySafetyDecision::Accept
+    ) {
+        return Err(
+            "PuLID-FLUX admission rejected a fitting probe budget; the scenario rejections below \
+             would be a blanket refusal, not evidence"
+                .to_owned(),
+        );
+    }
+    if !matches!(
+        safety(&calibration.fingerprint, 0, 1),
+        MemorySafetyDecision::Reject { .. }
+    ) {
+        return Err("PuLID-FLUX admission accepted an unknown/zero memory budget".to_owned());
+    }
+    if !matches!(
+        safety("stale-pulid-flux-fingerprint", hardware_bytes, 1),
+        MemorySafetyDecision::Reject { .. }
+    ) {
+        return Err("PuLID-FLUX admission accepted stale calibration evidence".to_owned());
+    }
+
+    let context = pulid_flux_context(
+        selection,
+        calibration,
+        &calibration.fingerprint,
+        width,
+        height,
+        hardware_bytes,
+        1,
+    );
+    let mut vram = certifying_vram_probe();
+    let load_sample = vram.phase();
+    // The production load path: the bespoke provider, admitted at load with the exact context it
+    // will then be asked to honour. `generate_with_memory_context` refuses a context that differs.
+    let model = PulidFlux::load_with_memory_context(&binding.paths, context.clone())
+        .map_err(|error| format!("load real pulid_flux {} provider: {error}", binding.tier))?;
+    vram.end_load(load_sample);
+
+    let reference = runtime_cuda::gen_core::Image {
+        width,
+        height,
+        pixels: protocol::synthetic_reference_rgb(width, height),
+    };
+    let generation = pulid_flux_generation_request(width, height);
+    let generation_sample = vram.phase();
+    let mut phase_sample = Some(vram.phase());
+    let mut phase = MemoryPhase::Conditioning;
+    let mut conditioning_peak_gb = None;
+    let mut denoise_peak_gb = None;
+    let mut decode_peak_gb = None;
+    // No `MemoryRequestScope` exists on this route — the provider admits at load rather than
+    // opening a per-request scope — so the phase boundaries are driven by the progress stream
+    // alone, exactly as the MLX image arms drive theirs.
+    let result =
+        model.generate_with_memory_context(&context, &generation, &reference, &mut |progress| {
+            let boundary = match progress {
+                Progress::Loading(runtime_cuda::gen_core::LoadPhase::Renderer) => {
+                    protocol::ReferenceBoundary::RendererLoad
+                }
+                Progress::Step { current: 1, .. } => protocol::ReferenceBoundary::FirstDenoiseStep,
+                Progress::Decoding => protocol::ReferenceBoundary::Decoding,
+                _ => return,
+            };
+            let Some(next) = protocol::next_reference_phase(reference_phase(phase), boundary)
+            else {
+                return;
+            };
+            let peak = phase_sample.take().map(|sample| vram.end_observed(sample));
+            match phase {
+                MemoryPhase::Conditioning => conditioning_peak_gb = peak,
+                MemoryPhase::Denoise => denoise_peak_gb = peak,
+                MemoryPhase::Decode => decode_peak_gb = peak,
+            }
+            phase = memory_phase(next);
+            phase_sample = Some(vram.phase());
+        });
+    if let Some(sample) = phase_sample.take() {
+        let terminal_peak_gb = vram.end_observed(sample);
+        match phase {
+            MemoryPhase::Conditioning => conditioning_peak_gb = Some(terminal_peak_gb),
+            MemoryPhase::Denoise => denoise_peak_gb = Some(terminal_peak_gb),
+            MemoryPhase::Decode => decode_peak_gb = Some(terminal_peak_gb),
+        }
+    }
+    vram.end_gen(generation_sample);
+    result.map_err(|error| format!("pulid_flux measured generation failed: {error}"))?;
+
+    let conditioning_bytes = decimal_gb_to_bytes(
+        conditioning_peak_gb
+            .ok_or_else(|| "pulid_flux did not expose a conditioning boundary".to_owned())?,
+    );
+    let denoise_bytes = decimal_gb_to_bytes(
+        denoise_peak_gb.ok_or_else(|| "pulid_flux did not expose a denoise boundary".to_owned())?,
+    );
+    let decode_bytes = decimal_gb_to_bytes(
+        decode_peak_gb.ok_or_else(|| "pulid_flux did not complete decode".to_owned())?,
+    );
+    let overall_bytes = conditioning_bytes.max(denoise_bytes).max(decode_bytes);
+
+    let blocker = concat!(
+        "sc-22726 anchor capture measures exact per-phase memory and strategy identity for the ",
+        "Candle PuLID-FLUX lane; it intentionally remains gated because this run does not repeat ",
+        "the full promotion-quality, negative-mutation, and lifecycle scenario suite, and the ",
+        "bespoke route opens no memory-strategy request scope to inject a calibration fault into"
+    );
+    Ok(json!({
+        "status": "gated",
+        "strategy": strategy,
+        "loadShape": load_shape_key(calibration.load_shape),
+        "artifact": artifact(&binding.repository, &binding.revision, binding.tier),
+        "sweep": protocol::reference_sweep(request, "passed")?,
+        "scenarios": [
+            { "name": "exact_fit", "result": "not_run", "reason": blocker },
+            { "name": "unknown_budget", "result": "passed", "reason": "the pinned PuLID-FLUX admission check rejected a zero/unknown budget before load" },
+            { "name": "stale_evidence", "result": "passed", "reason": "the pinned PuLID-FLUX admission check rejected a mutated calibration fingerprint before load" },
+            { "name": "warm_repeat", "result": "not_run", "reason": blocker },
+            { "name": "cancel", "result": "not_run", "reason": blocker },
+            { "name": "error", "result": "not_run", "reason": blocker },
+            { "name": "loadability", "result": "passed" },
+            { "name": "overlay", "result": "passed", "reason": "the PuLID identity stack (adapter, EVA tower, and the three face models) was resident for the measured render and is declared as its own resident component by the pinned contract" }
+        ],
+        "predictedPeakBytes": null,
+        "observedMemory": {
+            "conditioning": cuda_phase_metrics(conditioning_bytes),
+            "denoise": cuda_phase_metrics(denoise_bytes),
+            "decode": cuda_phase_metrics(decode_bytes),
+            "overall": cuda_phase_metrics(overall_bytes),
+        },
+        "quality": { "result": "not_run" },
+        "negativeMutation": Value::Null,
+        "loadability": {
+            "result": "passed",
+            "resolvedPathFingerprint": binding.loadability_fingerprint(),
+        },
+        "diagnostics": protocol::diagnostics(
+            "memory-candle-adapter:pulid-flux-bespoke-reference",
+            "executed",
+            [blocker.to_owned()],
+            [
+                ("conditioningDevicePeakDelta", "bytes", conditioning_bytes),
+                ("denoiseDevicePeakDelta", "bytes", denoise_bytes),
+                ("decodeDevicePeakDelta", "bytes", decode_bytes),
+                ("overallDevicePeakDelta", "bytes", overall_bytes),
+                ("referenceImages", "count", 1),
+            ],
+        ),
+        "capturedAt": protocol::captured_at(),
+    }))
 }
 
 fn run_five_rung_reference(request: &Value) -> Result<Value, String> {
@@ -1884,10 +2359,14 @@ fn routes_to_five_rung_reference(request: &Value) -> Result<bool, String> {
     // Qwen, Z-Image-Turbo and the Z-Image base have no inline arm at all, so every fixture on
     // them is a five-rung reference capture regardless of its spelling.
     let provider = planned_provider(request)?;
+    // sc-22726: the FLUX.1 BASE providers have no inline arm either. PuLID is deliberately absent —
+    // it is a bespoke route with its own arm, dispatched before this is ever consulted.
     Ok(is_five_rung_fixture
         || provider == QWEN_ID
         || provider == Z_IMAGE_TURBO_ID
-        || provider == Z_IMAGE_ID)
+        || provider == Z_IMAGE_ID
+        || provider == FLUX1_DEV_ID
+        || provider == FLUX1_SCHNELL_ID)
 }
 
 fn run(request: &Value) -> Result<Value, String> {
@@ -1904,6 +2383,12 @@ fn run(request: &Value) -> Result<Value, String> {
     let provider = planned_provider(request)?;
     if provider == LTX25_ID {
         return run_ltx25_capture(request);
+    }
+    // sc-22726: PuLID-FLUX dispatches ABOVE the shared plain-overlay gate, like LTX-2.5. Its
+    // declared overlay is `identity`, so routing it through `validate_plain_overlay_target` would
+    // refuse the one target it exists to measure.
+    if provider == PULID_FLUX_ID {
+        return run_pulid_flux_capture(request);
     }
     let execution_path = plain_execution_path(request)?;
     protocol::validate_plain_overlay_target(request, execution_path)?;
@@ -2913,11 +3398,335 @@ mod tests {
     /// passes it on both Candle labels, so the refusals above cannot be an unconditional error.
     #[test]
     fn the_candle_still_geometry_guard_is_not_a_blanket_refusal() {
-        for provider in [QWEN_ID, KREA_ID, Z_IMAGE_TURBO_ID, Z_IMAGE_ID] {
+        for provider in [
+            QWEN_ID,
+            KREA_ID,
+            Z_IMAGE_TURBO_ID,
+            Z_IMAGE_ID,
+            FLUX1_DEV_ID,
+            FLUX1_SCHNELL_ID,
+            PULID_FLUX_ID,
+        ] {
             let request = json!({ "planned": still_planned_case(provider, "resident", 1) });
             let label = still_calibration_label(&request).unwrap();
             protocol::validate_still_geometry(&request, label)
                 .unwrap_or_else(|error| panic!("{provider}: {error}"));
         }
+    }
+
+    // -----------------------------------------------------------------------------------------
+    // sc-22726 — the FLUX.1 family on the Candle lane.
+    // -----------------------------------------------------------------------------------------
+
+    fn flux_one_temp_dir(label: &str) -> PathBuf {
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        std::env::temp_dir().join(format!(
+            "sc-22726-candle-{label}-{}-{nonce}",
+            std::process::id()
+        ))
+    }
+
+    fn flux_one_snapshot_root(repository: &str, revision: &str, tier: &str) -> PathBuf {
+        let root = flux_one_temp_dir("flux1")
+            .join(format!("models--{}", repository.replace('/', "--")))
+            .join("snapshots")
+            .join(revision)
+            .join(tier);
+        std::fs::create_dir_all(&root).unwrap();
+        root
+    }
+
+    fn staged_pulid_bundle() -> protocol::PulidIdentityBundle {
+        let root = flux_one_temp_dir("pulid-bundle");
+        std::fs::create_dir_all(&root).unwrap();
+        for file in protocol::PULID_IDENTITY_BUNDLE_FILES {
+            std::fs::write(root.join(file), b"weights").unwrap();
+        }
+        protocol::pulid_identity_bundle_at(root).unwrap()
+    }
+
+    /// The two FLUX.1 BASE providers reach the shared five-rung reference path under their own
+    /// execution paths and refusal labels; PuLID deliberately does NOT, because it is a bespoke
+    /// route that never touches the provider registry.
+    #[test]
+    fn the_flux_one_base_providers_route_to_the_five_rung_reference_and_pulid_does_not() {
+        for (provider, path, label) in [
+            (
+                FLUX1_DEV_ID,
+                FLUX1_DEV_PLAIN_EXECUTION_PATH,
+                FLUX1_DEV_STILL_CALIBRATION,
+            ),
+            (
+                FLUX1_SCHNELL_ID,
+                FLUX1_SCHNELL_PLAIN_EXECUTION_PATH,
+                FLUX1_SCHNELL_STILL_CALIBRATION,
+            ),
+        ] {
+            // An off-prefix fixture must still route here: these providers have no inline arm.
+            let request = json!({
+                "planned": still_planned_case_with_fixture(provider, "staged_residency", 1, "sc-22726-off-prefix")
+            });
+            assert!(
+                routes_to_five_rung_reference(&request).unwrap(),
+                "{provider}"
+            );
+            assert_eq!(plain_execution_path(&request).unwrap(), path);
+            assert_eq!(still_calibration_label(&request).unwrap(), label);
+        }
+        let pulid = json!({
+            "planned": still_planned_case_with_fixture(PULID_FLUX_ID, "staged_residency", 1, "sc-22726-pulid")
+        });
+        assert!(
+            !routes_to_five_rung_reference(&pulid).unwrap(),
+            "PuLID must not be served by the registry five-rung path"
+        );
+        assert_eq!(
+            plain_execution_path(&pulid).unwrap(),
+            PULID_FLUX_EXECUTION_PATH
+        );
+        assert_eq!(
+            still_calibration_label(&pulid).unwrap(),
+            PULID_FLUX_STILL_CALIBRATION
+        );
+    }
+
+    /// Every FLUX.1 member still refuses a video geometry under its OWN label, before it resolves
+    /// an environment variable or opens a snapshot (sc-18808). PuLID goes through its own
+    /// dispatch, so it is checked through `run` too.
+    #[test]
+    fn every_candle_flux_one_member_refuses_a_multi_frame_geometry() {
+        for (provider, mode, label) in [
+            (FLUX1_DEV_ID, "text_to_image", FLUX1_DEV_STILL_CALIBRATION),
+            (
+                FLUX1_SCHNELL_ID,
+                "text_to_image",
+                FLUX1_SCHNELL_STILL_CALIBRATION,
+            ),
+            (
+                PULID_FLUX_ID,
+                "character_image",
+                PULID_FLUX_STILL_CALIBRATION,
+            ),
+        ] {
+            for frames in [0_u64, 2, 97] {
+                let mut planned = still_planned_case_in_mode(provider, "resident", frames, mode);
+                if provider == PULID_FLUX_ID {
+                    planned["target"]["overlay"] = json!("identity");
+                }
+                let error = run(&json!({ "action": "run", "planned": planned }))
+                    .expect_err("a video geometry must be refused");
+                assert_eq!(
+                    error,
+                    format!("{label} requires geometry.frames == 1, got {frames}"),
+                    "{provider}/{frames}"
+                );
+            }
+        }
+    }
+
+    /// The PuLID arm binds the FLUX.1-dev backbone at the PLANNED tier and the staged identity
+    /// stack into the exact `PulidFluxPaths` the worker builds — a q8 plan against a q4 export is
+    /// refused naming the tier, and all three tiers round-trip.
+    #[test]
+    fn the_candle_pulid_binding_carries_the_planned_tier_and_the_identity_stack() {
+        const REVISION: &str = "323fd12d79f78ad444e882e8d8e871914584f2b9";
+        let pulid_case = |tier: &str| {
+            let mut planned =
+                still_planned_case_in_mode(PULID_FLUX_ID, "staged_residency", 1, "character_image");
+            planned["target"]["tier"] = json!(tier);
+            planned["target"]["overlay"] = json!("identity");
+            planned["target"]["modelId"] = json!("pulid_flux_dev");
+            json!({ "planned": planned })
+        };
+        let q4_root = flux_one_snapshot_root(protocol::FLUX1_DEV_REPOSITORY, REVISION, "q4");
+        let error = pulid_flux_binding_at(
+            &pulid_case("q8"),
+            protocol::FLUX1_DEV_REPOSITORY.to_owned(),
+            REVISION.to_owned(),
+            q4_root.clone(),
+            staged_pulid_bundle(),
+        )
+        .expect_err("a q8 plan must not be satisfied by a q4 root");
+        assert!(
+            error.ends_with(&format!("/snapshots/{REVISION}/q8")),
+            "{error}"
+        );
+
+        for tier in ["q4", "q8", "bf16"] {
+            let bundle = staged_pulid_bundle();
+            let root = flux_one_snapshot_root(protocol::FLUX1_DEV_REPOSITORY, REVISION, tier);
+            let binding = pulid_flux_binding_at(
+                &pulid_case(tier),
+                protocol::FLUX1_DEV_REPOSITORY.to_owned(),
+                REVISION.to_owned(),
+                root,
+                bundle.clone(),
+            )
+            .unwrap_or_else(|error| panic!("{tier}: {error}"));
+            assert_eq!(binding.tier, tier);
+            assert!(binding.paths.flux_base.ends_with(tier));
+            assert_eq!(binding.paths.pulid_weights, bundle.adapter);
+            assert_eq!(binding.paths.eva_weights, bundle.eva);
+            // The engine reads scrfd / arcface / bisenet out of `face_dir` BY NAME, so the bundle
+            // root IS the face dir.
+            assert_eq!(binding.paths.face_dir, bundle.root);
+            // A ladder-admitted PuLID render carries no LoRA (`pulid_memory_ladder_eligible`).
+            assert!(binding.paths.adapters.is_empty());
+            assert!(binding.loadability_fingerprint().starts_with(&format!(
+                "{}@{REVISION}:{tier}",
+                protocol::FLUX1_DEV_REPOSITORY
+            )));
+            assert!(binding
+                .loadability_fingerprint()
+                .ends_with(&format!("+identity:{}", bundle.root.display())));
+        }
+
+        // The wrong artifact family is refused before the root is looked at.
+        let error = pulid_flux_binding_at(
+            &pulid_case("q4"),
+            protocol::FLUX1_SCHNELL_REPOSITORY.to_owned(),
+            REVISION.to_owned(),
+            q4_root.clone(),
+            staged_pulid_bundle(),
+        )
+        .expect_err("the schnell artifact must be refused");
+        assert!(error.contains(protocol::FLUX1_DEV_REPOSITORY), "{error}");
+
+        // PuLID is character_image only, and its overlay is exactly `identity`.
+        let mut wrong_mode = pulid_case("q4");
+        wrong_mode["planned"]["target"]["mode"] = json!("text_to_image");
+        let error = pulid_flux_binding_at(
+            &wrong_mode,
+            protocol::FLUX1_DEV_REPOSITORY.to_owned(),
+            REVISION.to_owned(),
+            q4_root.clone(),
+            staged_pulid_bundle(),
+        )
+        .expect_err("PuLID has no text-to-image route");
+        assert!(error.contains("character_image only"), "{error}");
+        let mut wrong_overlay = pulid_case("q4");
+        wrong_overlay["planned"]["target"]["overlay"] = json!("none");
+        let error = pulid_flux_binding_at(
+            &wrong_overlay,
+            protocol::FLUX1_DEV_REPOSITORY.to_owned(),
+            REVISION.to_owned(),
+            q4_root,
+            staged_pulid_bundle(),
+        )
+        .expect_err("the identity route must require its own overlay");
+        assert!(error.contains("executes exactly \"identity\""), "{error}");
+    }
+
+    /// An incomplete staged bundle is refused before the load, naming the missing files.
+    #[test]
+    fn an_incomplete_candle_pulid_bundle_is_refused_naming_the_missing_files() {
+        let root = flux_one_temp_dir("pulid-partial");
+        std::fs::create_dir_all(&root).unwrap();
+        for file in protocol::PULID_IDENTITY_BUNDLE_FILES.iter().skip(1) {
+            std::fs::write(root.join(file), b"weights").unwrap();
+        }
+        let error = protocol::pulid_identity_bundle_at(root)
+            .expect_err("an incomplete bundle must be refused");
+        assert!(error.contains(protocol::PULID_ADAPTER_FILE), "{error}");
+        assert!(
+            error.contains(protocol::PULID_IDENTITY_BUNDLE_ENV),
+            "{error}"
+        );
+    }
+
+    /// The PuLID request and admission context are the worker's: the photoreal preset, one
+    /// reference at the target geometry, `overlay: identity`, and the provider mode
+    /// `character_image` the pinned route gate checks.
+    #[test]
+    fn the_candle_pulid_request_and_context_match_the_worker_route() {
+        let generation = pulid_flux_generation_request(1024, 768);
+        assert_eq!((generation.width, generation.height), (1024, 768));
+        assert_eq!(generation.steps, 2);
+        assert_eq!(generation.guidance, PULID_FLUX_GUIDANCE);
+        assert_eq!(generation.id_weight, PULID_FLUX_ID_WEIGHT);
+        assert_eq!(generation.seed, FLUX1_SEED);
+        assert!(!generation.use_pid);
+        assert!(generation.sampler.is_none() && generation.scheduler.is_none());
+
+        let calibration = runtime_cuda::gen_core::MemoryCalibrationIdentity::new(
+            "pulid-flux-cuda-identity-stack-staged-decode-attention-block-window-v1",
+            LoadShape::DeferredMaterialization,
+        );
+        let mut planned =
+            still_planned_case_in_mode(PULID_FLUX_ID, "staged_residency", 1, "character_image");
+        planned["target"]["overlay"] = json!("identity");
+        let selection = planned_selection(&json!({ "planned": planned })).unwrap();
+        let context = pulid_flux_context(
+            selection,
+            &calibration,
+            &calibration.fingerprint,
+            1024,
+            1024,
+            1,
+            1,
+        );
+        assert_eq!(
+            context.mode,
+            MemoryMode::Other("character_image".to_owned())
+        );
+        assert!(context.has_reference);
+        assert_eq!(context.geometry.reference_count, 1);
+        assert_eq!(context.overlay.as_deref(), Some("identity"));
+        assert!(!context.use_pid);
+        assert!(!context.has_phases);
+    }
+
+    /// Every FLUX.1 cell the committed plan declares for this lane must name a provider this
+    /// adapter implements and a mode its arm serves — the plan/arm agreement E3 asks for, checked
+    /// against the checked-in plan rather than a hand-written sample.
+    #[test]
+    fn every_planned_flux_one_candle_cell_is_served_by_an_arm() {
+        let plan: Value = serde_json::from_str(include_str!(
+            "../../../../config/memory-calibration-plan.json"
+        ))
+        .expect("the anchor plan parses");
+        let mut seen = 0;
+        for (key, entry) in plan["anchors"].as_object().expect("anchors object") {
+            if !key.ends_with(":candle") {
+                continue;
+            }
+            let provider = entry["provider"].as_str().unwrap();
+            if !matches!(provider, FLUX1_DEV_ID | FLUX1_SCHNELL_ID | PULID_FLUX_ID) {
+                continue;
+            }
+            seen += 1;
+            let (_, rest) = key.split_once(':').unwrap();
+            let tier = rest.split_once(':').unwrap().0;
+            let request = json!({ "planned": {
+                "backend": "candle",
+                "target": {
+                    "provider": provider,
+                    "tier": tier,
+                    "mode": entry["mode"].clone(),
+                    "overlay": entry["overlay"].clone(),
+                    "geometry": entry["geometry"].clone(),
+                },
+                "loadShape": entry["loadShape"].clone(),
+                "strategy": { "rung": "staged_residency", "parameters": {} },
+                "calibrationFingerprint": entry["calibrationFingerprint"].clone(),
+                "fixture": entry["fixture"].clone(),
+            }});
+            plain_execution_path(&request).unwrap_or_else(|error| panic!("{key}: {error}"));
+            still_calibration_label(&request).unwrap_or_else(|error| panic!("{key}: {error}"));
+            assert_eq!(planned_tier(&request).unwrap(), tier, "{key}");
+            // The base providers ride the registry five-rung path; PuLID is bespoke.
+            assert_eq!(
+                routes_to_five_rung_reference(&request).unwrap(),
+                provider != PULID_FLUX_ID,
+                "{key}"
+            );
+        }
+        assert_eq!(
+            seen, 9,
+            "three FLUX.1 members x three tiers on the candle lane"
+        );
     }
 }
