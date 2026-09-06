@@ -1,7 +1,7 @@
 {
   "schemaVersion": 11,
   "generatedFrom": {
-    "sceneWorksRevision": "source-tree:ee35851de3ec034fbe50790131ed5afa92f002dedda573542017a2feec5f3591",
+    "sceneWorksRevision": "source-tree:1ec0c876143366c8a77e7c2816197e28c19bfb1615aad7a338988f7f8fab845c",
     "sources": {
       "manifest": {
         "path": "config/manifests/builtin.models.jsonc",
@@ -69,7 +69,7 @@
       },
       "anchorStore": {
         "path": "config/memory-anchors.json",
-        "sha256": "e85608ebb55e1086757e5eed87d92cd325e6b798594e9819dc354f340bf33274"
+        "sha256": "8c75bcb898cb067bceab88788caa0bd4ffe61f52486f62ab72f1d3720e69901a"
       },
       "anchorLoaderClosures": {
         "path": "config/anchor-loader-closures.json",
@@ -77,7 +77,7 @@
       },
       "anchorDerivation": {
         "path": "crates/sceneworks-core/src/memory_anchor.rs",
-        "sha256": "d5b7e3fb97b3a3a5f481628a6d5a0384df354ffd9a7a692f68020da91abd79ed"
+        "sha256": "f8f40755a3d7f5e7aa3da6c085f4ab6c7207513ccd4110abe675ee2f60fb8826"
       },
       "anchorAdmission": {
         "path": "crates/sceneworks-worker/src/video_admission.rs",
@@ -138,10 +138,10 @@
       "video": 11
     },
     "cells": 9265,
-    "publishedCells": 778,
-    "elidedCells": 8487,
+    "publishedCells": 783,
+    "elidedCells": 8482,
     "elidedByState": {
-      "Implemented": 4113,
+      "Implemented": 4108,
       "Missing": 4374
     },
     "publicationPredicate": "A coordinate is published when it carries a claim a per-lane census cannot: a measured memory anchor covers its (model, tier, backend lane), or it is structurally exempt. A bare `Implemented` or `Missing` state is a property of the whole lane, replicated across every tier x mode x overlay, and is counted in `summary.elidedByState` and the per-(entry, backend, rung) `coverage` census instead of restated thousands of times.",
@@ -162,9 +162,9 @@
         "reason": "both lanes ARE routed (VideoModelCaps mlx+candle, resolve_candle_video_route's MiniMaxH3 arm), but this generator's route parsers cannot enumerate either: the MLX resolver is a PREFIX PREDICATE and the Candle arm lives outside candle_video_engine_id. Matrix-only — the E1 measurability burndown reads the routing catalog and DOES claim these cells"
       }
     ],
-    "anchors": 18,
-    "analyticOnlyCells": 319,
-    "anchoredCells": 315,
+    "anchors": 19,
+    "analyticOnlyCells": 318,
+    "anchoredCells": 320,
     "staleAnchors": 10,
     "attestedAnchors": 5,
     "fullModels": 0
@@ -4720,6 +4720,24 @@
       "cells": 5
     },
     {
+      "id": "chroma1_flash:mlx:bf16:base:base:chroma1-flash-bf16-mlx-shared-ladder-v1:imc-bf8c2372019a3a78c9bd",
+      "modelId": "chroma1_flash",
+      "backend": "mlx",
+      "tier": "bf16",
+      "provider": "chroma1_flash",
+      "mode": "text_to_image",
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "frames": 1,
+        "fps": null
+      },
+      "source": "docs/calibration/sc-22738/chroma1-flash-bf16-mlx-evidence.json",
+      "current": true,
+      "currencyAttestation": null,
+      "cells": 5
+    },
+    {
       "id": "flux2_dev:mlx:q4:base:base:sc-18218-flux2-dev-t2i-resident-evidence-v1:imc-b6537074420d51413b38",
       "modelId": "flux2_dev",
       "backend": "mlx",
@@ -6373,11 +6391,12 @@
       "backend": "mlx",
       "rung": "bounded_transformer_residency",
       "coordinates": 6,
-      "published": 0,
-      "elided": 6,
+      "published": 1,
+      "elided": 5,
       "implemented": 3,
       "states": {
-        "Implemented": 3,
+        "Anchored/underived": 1,
+        "Implemented": 2,
         "Missing": 3
       },
       "implementedBy": {
@@ -6400,11 +6419,12 @@
       "backend": "mlx",
       "rung": "resident",
       "coordinates": 6,
-      "published": 0,
-      "elided": 6,
+      "published": 2,
+      "elided": 4,
       "implemented": 6,
       "states": {
-        "Implemented": 6
+        "Anchored/underived": 2,
+        "Implemented": 4
       }
     },
     {
@@ -6412,11 +6432,12 @@
       "backend": "mlx",
       "rung": "staged_residency",
       "coordinates": 6,
-      "published": 0,
-      "elided": 6,
+      "published": 2,
+      "elided": 4,
       "implemented": 6,
       "states": {
-        "Implemented": 6
+        "Anchored/underived": 2,
+        "Implemented": 4
       }
     },
     {
@@ -15816,6 +15837,274 @@
         "anchor": [
           {
             "source": "config/memory-anchors.json#chroma1_base:mlx:q8:base:base:chroma1-base-q8-mlx-shared-ladder-v1:imc-acb97371328f45034b33"
+          }
+        ]
+      }
+    },
+    {
+      "id": "chroma1_flash:chroma1_flash:mlx:bf16:text_to_image:lora:resident",
+      "modelId": "chroma1_flash",
+      "resolvedRoute": "chroma1_flash",
+      "provider": "chroma1_flash",
+      "backend": "mlx",
+      "tier": "bf16",
+      "mode": "text_to_image",
+      "overlay": "lora",
+      "rung": "resident",
+      "geometryEnvelope": {
+        "defaultResolution": "768x768",
+        "resolutions": [
+          "768x768",
+          "1024x1024",
+          "1280x720",
+          "720x1280"
+        ]
+      },
+      "strategyParameters": {},
+      "implementation": "implemented",
+      "anchor": {
+        "id": "chroma1_flash:mlx:bf16:base:base:chroma1-flash-bf16-mlx-shared-ladder-v1:imc-bf8c2372019a3a78c9bd",
+        "tier": "bf16",
+        "source": "config/memory-anchors.json#chroma1_flash:mlx:bf16:base:base:chroma1-flash-bf16-mlx-shared-ladder-v1:imc-bf8c2372019a3a78c9bd",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": false,
+        "underivedReason": "the anchor render engaged bounded rungs (or deferred materialization), so it does not measure the widest composition the MLX image law upper-bounds the ladder from; this anchor validates its measured point and prices nothing beyond it"
+      },
+      "derivationDefined": true,
+      "state": "Anchored/underived",
+      "owningFamilyStory": 15520,
+      "owningModelStory": 15485,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "crates/sceneworks-worker/src/engines.rs#MODEL_TABLE"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#chroma1_flash:mlx:bf16:base:base:chroma1-flash-bf16-mlx-shared-ladder-v1:imc-bf8c2372019a3a78c9bd"
+          }
+        ]
+      }
+    },
+    {
+      "id": "chroma1_flash:chroma1_flash:mlx:bf16:text_to_image:lora:staged_residency",
+      "modelId": "chroma1_flash",
+      "resolvedRoute": "chroma1_flash",
+      "provider": "chroma1_flash",
+      "backend": "mlx",
+      "tier": "bf16",
+      "mode": "text_to_image",
+      "overlay": "lora",
+      "rung": "staged_residency",
+      "geometryEnvelope": {
+        "defaultResolution": "768x768",
+        "resolutions": [
+          "768x768",
+          "1024x1024",
+          "1280x720",
+          "720x1280"
+        ]
+      },
+      "strategyParameters": {
+        "phaseOrder": [
+          "conditioning",
+          "denoise",
+          "decode"
+        ]
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "chroma1_flash:mlx:bf16:base:base:chroma1-flash-bf16-mlx-shared-ladder-v1:imc-bf8c2372019a3a78c9bd",
+        "tier": "bf16",
+        "source": "config/memory-anchors.json#chroma1_flash:mlx:bf16:base:base:chroma1-flash-bf16-mlx-shared-ladder-v1:imc-bf8c2372019a3a78c9bd",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": false,
+        "underivedReason": "the anchor render engaged bounded rungs (or deferred materialization), so it does not measure the widest composition the MLX image law upper-bounds the ladder from; this anchor validates its measured point and prices nothing beyond it"
+      },
+      "derivationDefined": true,
+      "state": "Anchored/underived",
+      "owningFamilyStory": 15520,
+      "owningModelStory": 15485,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "crates/sceneworks-worker/src/mlx_fit_gate.rs#engine_engages_staged_residency"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#chroma1_flash:mlx:bf16:base:base:chroma1-flash-bf16-mlx-shared-ladder-v1:imc-bf8c2372019a3a78c9bd"
+          }
+        ]
+      }
+    },
+    {
+      "id": "chroma1_flash:chroma1_flash:mlx:bf16:text_to_image:none:bounded_transformer_residency",
+      "modelId": "chroma1_flash",
+      "resolvedRoute": "chroma1_flash",
+      "provider": "chroma1_flash",
+      "backend": "mlx",
+      "tier": "bf16",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "rung": "bounded_transformer_residency",
+      "geometryEnvelope": {
+        "defaultResolution": "768x768",
+        "resolutions": [
+          "768x768",
+          "1024x1024",
+          "1280x720",
+          "720x1280"
+        ]
+      },
+      "strategyParameters": {
+        "transformerWindowSize": 1,
+        "transformerWindowComponent": "Dit",
+        "publishedRanges": {
+          "transformerWindowSizes": [
+            1,
+            2,
+            5,
+            10
+          ],
+          "transformerWindowComponents": [
+            "Dit",
+            "TextEncoder",
+            "Both"
+          ]
+        }
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "chroma1_flash:mlx:bf16:base:base:chroma1-flash-bf16-mlx-shared-ladder-v1:imc-bf8c2372019a3a78c9bd",
+        "tier": "bf16",
+        "source": "config/memory-anchors.json#chroma1_flash:mlx:bf16:base:base:chroma1-flash-bf16-mlx-shared-ladder-v1:imc-bf8c2372019a3a78c9bd",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": false,
+        "underivedReason": "the anchor render engaged bounded rungs (or deferred materialization), so it does not measure the widest composition the MLX image law upper-bounds the ladder from; this anchor validates its measured point and prices nothing beyond it"
+      },
+      "derivationDefined": true,
+      "state": "Anchored/underived",
+      "owningFamilyStory": 15520,
+      "owningModelStory": 15485,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "inference:crates/media/mlx-gen/mlx-gen-chroma/src/memory_strategy.rs"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#chroma1_flash:mlx:bf16:base:base:chroma1-flash-bf16-mlx-shared-ladder-v1:imc-bf8c2372019a3a78c9bd"
+          }
+        ]
+      }
+    },
+    {
+      "id": "chroma1_flash:chroma1_flash:mlx:bf16:text_to_image:none:resident",
+      "modelId": "chroma1_flash",
+      "resolvedRoute": "chroma1_flash",
+      "provider": "chroma1_flash",
+      "backend": "mlx",
+      "tier": "bf16",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "rung": "resident",
+      "geometryEnvelope": {
+        "defaultResolution": "768x768",
+        "resolutions": [
+          "768x768",
+          "1024x1024",
+          "1280x720",
+          "720x1280"
+        ]
+      },
+      "strategyParameters": {},
+      "implementation": "implemented",
+      "anchor": {
+        "id": "chroma1_flash:mlx:bf16:base:base:chroma1-flash-bf16-mlx-shared-ladder-v1:imc-bf8c2372019a3a78c9bd",
+        "tier": "bf16",
+        "source": "config/memory-anchors.json#chroma1_flash:mlx:bf16:base:base:chroma1-flash-bf16-mlx-shared-ladder-v1:imc-bf8c2372019a3a78c9bd",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": false,
+        "underivedReason": "the anchor render engaged bounded rungs (or deferred materialization), so it does not measure the widest composition the MLX image law upper-bounds the ladder from; this anchor validates its measured point and prices nothing beyond it"
+      },
+      "derivationDefined": true,
+      "state": "Anchored/underived",
+      "owningFamilyStory": 15520,
+      "owningModelStory": 15485,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "crates/sceneworks-worker/src/engines.rs#MODEL_TABLE"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#chroma1_flash:mlx:bf16:base:base:chroma1-flash-bf16-mlx-shared-ladder-v1:imc-bf8c2372019a3a78c9bd"
+          }
+        ]
+      }
+    },
+    {
+      "id": "chroma1_flash:chroma1_flash:mlx:bf16:text_to_image:none:staged_residency",
+      "modelId": "chroma1_flash",
+      "resolvedRoute": "chroma1_flash",
+      "provider": "chroma1_flash",
+      "backend": "mlx",
+      "tier": "bf16",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "rung": "staged_residency",
+      "geometryEnvelope": {
+        "defaultResolution": "768x768",
+        "resolutions": [
+          "768x768",
+          "1024x1024",
+          "1280x720",
+          "720x1280"
+        ]
+      },
+      "strategyParameters": {
+        "phaseOrder": [
+          "conditioning",
+          "denoise",
+          "decode"
+        ]
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "chroma1_flash:mlx:bf16:base:base:chroma1-flash-bf16-mlx-shared-ladder-v1:imc-bf8c2372019a3a78c9bd",
+        "tier": "bf16",
+        "source": "config/memory-anchors.json#chroma1_flash:mlx:bf16:base:base:chroma1-flash-bf16-mlx-shared-ladder-v1:imc-bf8c2372019a3a78c9bd",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": false,
+        "underivedReason": "the anchor render engaged bounded rungs (or deferred materialization), so it does not measure the widest composition the MLX image law upper-bounds the ladder from; this anchor validates its measured point and prices nothing beyond it"
+      },
+      "derivationDefined": true,
+      "state": "Anchored/underived",
+      "owningFamilyStory": 15520,
+      "owningModelStory": 15485,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "crates/sceneworks-worker/src/mlx_fit_gate.rs#engine_engages_staged_residency"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#chroma1_flash:mlx:bf16:base:base:chroma1-flash-bf16-mlx-shared-ladder-v1:imc-bf8c2372019a3a78c9bd"
           }
         ]
       }
@@ -55507,7 +55796,13 @@
       "chroma1_base:chroma1_base:mlx:q8:text_to_image:none:resident",
       "chroma1_base:chroma1_base:mlx:q8:text_to_image:none:staged_residency"
     ],
-    "chroma1_flash": [],
+    "chroma1_flash": [
+      "chroma1_flash:chroma1_flash:mlx:bf16:text_to_image:lora:resident",
+      "chroma1_flash:chroma1_flash:mlx:bf16:text_to_image:lora:staged_residency",
+      "chroma1_flash:chroma1_flash:mlx:bf16:text_to_image:none:bounded_transformer_residency",
+      "chroma1_flash:chroma1_flash:mlx:bf16:text_to_image:none:resident",
+      "chroma1_flash:chroma1_flash:mlx:bf16:text_to_image:none:staged_residency"
+    ],
     "chroma1_hd": [],
     "flux_dev": [],
     "flux_schnell": [],
