@@ -12,6 +12,7 @@ import {
   ANCHOR_LOADER_CLOSURES_PATH,
   CONTRACT_LADDER_BACKENDS,
   MANIFEST_PATH,
+  stagedResidencyExemptLanes,
   MEMORY_ANCHOR_SCHEMA_VERSION,
   PACKAGED_SOURCES_PATH,
   STORE_PATH,
@@ -623,6 +624,258 @@ test("derivability outranks envelope, so a cell is never anchored by a render it
   // The MLX video law rejects no composition outright — its regime guards are anchor-vs-request —
   // so this rule must not silently withdraw MLX rows.
   assert.equal(isDerivable({ backend: "mlx", measuredRegime: {} }), true);
+});
+
+test("a candle lane whose engine has no staged composition is anchored by its resident render", async () => {
+  // sc-22734. `staged_residency` is a STRUCTURAL exemption for SenseNova on both lanes: one fused
+  // dual-path checkpoint with no separable conditioning component, so no staged render exists to
+  // anchor from and the resident one is the only composition the cell can ever be captured in.
+  // Before this the extractor discarded those captures and the cells fell to analytic-only, which
+  // would have spent a real GPU campaign producing renders nothing could use.
+  const manifest = {
+    models: [
+      {
+        id: "sensenova_u1_8b",
+        candle: {
+          memoryStrategyStructuralExemptions: {
+            staged_residency: { overlays: ["none"], evidence: [] },
+          },
+        },
+        mlx: {
+          memoryStrategyStructuralExemptions: {
+            staged_residency: { overlays: ["none"], evidence: [] },
+          },
+        },
+      },
+      { id: "qwen_image", candle: {} },
+    ],
+  };
+  const lanes = stagedResidencyExemptLanes(manifest);
+  assert.deepEqual(
+    [...lanes].sort(),
+    ["sensenova_u1_8b:candle", "sensenova_u1_8b:mlx"],
+    "the exempt lanes are derived from the manifest, never hand-kept",
+  );
+
+  const candle = (modelId, regime) => ({
+    modelId,
+    backend: "candle",
+    transformerVariant: null,
+    decoder: null,
+    geometry: { width: 1024, height: 1024, frames: 1, fps: null },
+    measuredRegime: {
+      decodeTiled: false,
+      transformerWindowed: false,
+      staged: false,
+      attentionChunked: false,
+      ...regime,
+    },
+    overallAllocatorEnvelopeBytes: 1,
+    recordId: modelId,
+    sourcePath: "docs/generated/example.json",
+  });
+
+  // The exempt cell: resident derives, and the staged shape it can never actually be measured in
+  // is refused rather than silently preferred.
+  assert.equal(isDerivable(candle("sensenova_u1_8b", {}), lanes), true);
+  assert.equal(
+    isDerivable(candle("sensenova_u1_8b", { staged: true }), lanes),
+    false,
+    "a staged anchor on a cell that declares staging impossible is not a record the law can price",
+  );
+  // Deeper rungs stay refused on the exempt lane too.
+  for (const deeper of ["decodeTiled", "attentionChunked", "transformerWindowed"]) {
+    assert.equal(
+      isDerivable(candle("sensenova_u1_8b", { [deeper]: true }), lanes),
+      false,
+      `${deeper} is deeper than the law prices, exemption or not`,
+    );
+  }
+  // And NOTHING moves for an ordinary cell — the exemption is per (model, lane), not a mode.
+  assert.equal(isDerivable(candle("qwen_image", {}), lanes), false);
+  assert.equal(isDerivable(candle("qwen_image", { staged: true }), lanes), true);
+  // The default argument is what every existing caller and every packaged row still takes.
+  assert.equal(isDerivable(candle("sensenova_u1_8b", {})), false);
+  assert.equal(isDerivable(candle("sensenova_u1_8b", { staged: true })), true);
+
+  // Representative selection follows the same rule, so an exempt cell's resident capture wins.
+  assert.equal(
+    selectRepresentative(
+      [candle("sensenova_u1_8b", { staged: true }), candle("sensenova_u1_8b", {})],
+      lanes,
+    ).measuredRegime.staged,
+    false,
+  );
+
+  // The real manifest declares the exemption for all six SenseNova ids on both lanes, and for
+  // nothing that already has a packaged candle anchor.
+  const realManifest = JSON.parse(
+    stripJsoncComments(await readFile(path.join(ROOT, MANIFEST_PATH), "utf8")),
+  );
+  const realLanes = stagedResidencyExemptLanes(realManifest);
+  for (const modelId of realManifest.models
+    .filter((model) => model.id.startsWith("sensenova_u1_8b"))
+    .map((model) => model.id)) {
+    for (const backend of ["mlx", "candle"]) {
+      assert.ok(
+        realLanes.has(`${modelId}:${backend}`),
+        `${modelId}:${backend} must carry the structural exemption the arm relies on`,
+      );
+    }
+  }
+  const store = await buildAnchorStore({ matrix });
+  for (const anchor of store.anchors) {
+    assert.ok(
+      !realLanes.has(`${anchor.modelId}:${anchor.backend}`),
+      `${anchor.id}: no packaged anchor is on an exempt lane yet, so no packaged row moved`,
+    );
+    assert.equal(
+      anchor.stagedResidencyStructurallyNotApplicable,
+      undefined,
+      `${anchor.id}: the new field is emitted only when true, so packaged rows stay byte-identical`,
+    );
+  }
+});
+
+// sc-22734 review. The `regime?.staged === !stagedExempt` inversion in `isDerivable` is NOT a
+// SenseNova rule: it governs every candle lane whose manifest declares a `staged_residency`
+// structural exemption, and the shipped manifest declares six such lanes that have nothing to do
+// with SenseNova (the Boogu trio and the Anima trio). The case above only ever drove SenseNova ids,
+// so a change that scoped the inversion to the SenseNova family — or an exemption silently
+// appearing on, or vanishing from, one of these six — stayed green. This one names them.
+test("the staged-residency inversion governs every exempt candle lane, not only the SenseNova family", async () => {
+  const realManifest = JSON.parse(
+    stripJsoncComments(await readFile(path.join(ROOT, MANIFEST_PATH), "utf8")),
+  );
+  const lanes = stagedResidencyExemptLanes(realManifest);
+
+  // The expected set is DERIVED from the manifest — no frozen count, no hand-kept list — so a
+  // model that gains or loses the declaration moves this with no second edit here.
+  const expectedCandle = realManifest.models
+    .filter(
+      (model) => model.candle?.memoryStrategyStructuralExemptions?.staged_residency,
+    )
+    .map((model) => `${model.id}:candle`)
+    .sort();
+  assert.deepEqual(
+    [...lanes].filter((lane) => lane.endsWith(":candle")).sort(),
+    expectedCandle,
+  );
+
+  // The six lanes the review named: they carry the exemption today and are the ones the
+  // SenseNova-only coverage left unspoken.
+  const NON_SENSENOVA_EXEMPT = [
+    "boogu_image",
+    "boogu_image_turbo",
+    "boogu_image_edit",
+    "anima_base",
+    "anima_aesthetic",
+    "anima_turbo",
+  ];
+  for (const modelId of NON_SENSENOVA_EXEMPT) {
+    assert.ok(
+      lanes.has(`${modelId}:candle`),
+      `${modelId}:candle declares staged_residency structurally not applicable`,
+    );
+  }
+  assert.deepEqual(
+    expectedCandle.filter((lane) => !lane.startsWith("sensenova_u1_8b")).sort(),
+    NON_SENSENOVA_EXEMPT.map((modelId) => `${modelId}:candle`).sort(),
+    "the exempt candle lanes outside the SenseNova family are exactly these six",
+  );
+
+  const candidate = (modelId, regime) => ({
+    modelId,
+    backend: "candle",
+    transformerVariant: null,
+    decoder: null,
+    geometry: { width: 1024, height: 1024, frames: 1, fps: null },
+    measuredRegime: {
+      decodeTiled: false,
+      transformerWindowed: false,
+      staged: false,
+      attentionChunked: false,
+      ...regime,
+    },
+    overallAllocatorEnvelopeBytes: 1,
+    recordId: modelId,
+    sourcePath: "docs/generated/example.json",
+  });
+
+  // The inversion, on each of the six: the RESIDENT render is the admissible anchor, and a staged
+  // corpus on a lane that declares staging structurally impossible is refused rather than
+  // preferred — which is the same claim the SenseNova case makes, on lanes it never drove.
+  for (const modelId of NON_SENSENOVA_EXEMPT) {
+    assert.equal(
+      isDerivable(candidate(modelId, {}), lanes),
+      true,
+      `${modelId}: the resident render is the exempt lane's admissible anchor`,
+    );
+    assert.equal(
+      isDerivable(candidate(modelId, { staged: true }), lanes),
+      false,
+      `${modelId}: a staged corpus on a structurally-exempt lane is not a record the law can price`,
+    );
+  }
+});
+
+/**
+ * sc-22736. The candle branch of `isDerivable` mirrors `derive_image_phase_peaks`, which is a STILL
+ * law: it demands `frames == 1` and a pipeline-axis-free record. A candle VIDEO cell is priced by
+ * the video law instead — `video_admission.rs::anchor_derived_phase_peaks` maps the request's own
+ * lane onto `AnchorBackend` and calls `derive_video_phase_peaks_for_cell` for BOTH lanes, and
+ * `MemoryAnchor::derive_video_phase_peaks` carries no backend gate — so applying the still law to a
+ * video row refuses records the law would happily price, and leaves the cell unanchored.
+ *
+ * Mutations this kills:
+ * - deleting the `frames > 1` branch (every candle video row becomes underivable again);
+ * - widening it to `frames >= 1` (a still would stop being held to the shallow-staged rule);
+ * - reading `frames` without the still-defaulting `?? 1` (an axis-free record would flip lanes).
+ */
+test("a candle VIDEO record is derivable under the video law, not the still image law", () => {
+  const candleVideo = (frames, regime = {}, axes = {}) => ({
+    backend: "candle",
+    // The LTX-2.5 candle rows the plan has declared since sc-22725 state both pipeline axes; the
+    // Wan and SCAIL-2 rows sc-22736 adds state neither (`axisFree` below). Both must be derivable.
+    transformerVariant: "distilled",
+    decoder: "conv",
+    ...axes,
+    geometry: { width: 768, height: 512, frames, fps: 24 },
+    measuredRegime: {
+      decodeTiled: false,
+      transformerWindowed: false,
+      staged: true,
+      attentionChunked: false,
+      ...regime,
+    },
+    overallAllocatorEnvelopeBytes: 1,
+    recordId: `candle-video-f${frames}`,
+    sourcePath: "docs/generated/example.json",
+  });
+  const axisFree = { transformerVariant: null, decoder: null };
+  assert.equal(isDerivable(candleVideo(145)), true, "the shipped LTX-2.5 candle geometry");
+  assert.equal(isDerivable(candleVideo(81)), true, "an axis-keyed row at the Wan geometry");
+  // The Wan 2.2 / SCAIL-2 candle rows: multi-frame and AXIS-FREE. Explicit, because the helper's
+  // default axes would otherwise leave the axis-free shape unexercised (sc-22736 review).
+  assert.equal(
+    isDerivable(candleVideo(81, {}, axisFree)),
+    true,
+    "the Wan / SCAIL-2 candle geometry with no pipeline axes",
+  );
+  assert.equal(isDerivable(candleVideo(77, { staged: false }, axisFree)), true, "resident SCAIL-2");
+  assert.equal(isDerivable(candleVideo(121, { decodeTiled: true }, axisFree)), true);
+  // The video law's regime guards are all anchor-vs-request, so a bounded video capture is still a
+  // usable row — exactly as it is on MLX.
+  assert.equal(isDerivable(candleVideo(81, { decodeTiled: true })), true);
+  assert.equal(isDerivable(candleVideo(81, { staged: false })), true);
+  // A STILL keeps the image law, pipeline axes and all.
+  assert.equal(isDerivable({ ...candleVideo(1) }), false, "a still with pipeline axes");
+  // A record that states no frames axis at all is classified as the still it is, not promoted.
+  assert.equal(
+    isDerivable({ ...candleVideo(145), geometry: { width: 1024, height: 1024, fps: null } }),
+    false,
+    "an axis-free candle record stays under the still law",
+  );
 });
 
 test("every emitted anchor cites a compiled-in corpus, and every retained corpus is compiled in", async () => {
@@ -1252,9 +1505,37 @@ test("an underived reason names the measured REGIME, never a missing geometry sp
     ),
     null,
   );
-  // A candle anchor takes no reason at all: `isDerivable` already refused the compositions the
-  // candle law rejects, so every candle anchor that exists derives.
+  // A candle STILL anchor takes no reason at all: `isDerivable` already refused the compositions
+  // the candle image law rejects, so every candle image anchor that exists derives.
   assert.equal(underivedReasonFor(candidate({ backend: "candle" })), null);
+  // A candle VIDEO anchor is held to the same axis rule as MLX (sc-22736): the video law refuses
+  // an axis-free row on both lanes, so the twelve Wan 2.2 / SCAIL-2 candle anchors carry the same
+  // reason the MLX twelve do. Mutation this kills: the old `backend !== "mlx"` early return ahead
+  // of the video branch, which emitted `null` for every candle video row.
+  const candleWan = candidate({
+    backend: "candle",
+    geometry: { width: 1280, height: 720, frames: 81, fps: 16 },
+    transformerVariant: null,
+    decoder: null,
+  });
+  assert.match(underivedReasonFor(candleWan), /pipeline axes/);
+  assert.equal(
+    underivedReasonFor(candleWan),
+    underivedReasonFor(candidate({ geometry: { frames: 81 } })),
+    "one reason text on both lanes",
+  );
+  // ...and a candle video row WITH stated axes (the LTX-2.5 candle cells) still takes none.
+  assert.equal(
+    underivedReasonFor(
+      candidate({
+        backend: "candle",
+        geometry: { frames: 145 },
+        transformerVariant: "distilled",
+        decoder: "conv",
+      }),
+    ),
+    null,
+  );
 });
 
 test("the LTX-2.5 component deltas are priced from the committed weights inventory, per tier and axis", async () => {

@@ -1082,6 +1082,52 @@ test("LTX-2.5 evidence identity requires and hashes transformer and decoder axes
 // packages/memory-anchor-plan.schema.json, not a review convention, so it is asserted against the
 // schema itself and against the checked-in plan the capture commands read.
 // -----------------------------------------------------------------------------------------------
+// sc-22734. The per-anchor `strategy` override: a plan row may name its own single composition,
+// for a provider whose contract classifies the lane default as StructurallyNotApplicable (SenseNova
+// on candle). It stays a single composition — a rung GRID is still unwritable — and a row without
+// one still takes `ANCHOR_STRATEGY[backend]`.
+test("a plan row's strategy override replaces the lane default, and is still one composition", () => {
+  const key = "fixture_model:q4:candle";
+  const defaulted = planAnchor(anchorPlanFixture(key), key);
+  assert.deepEqual(defaulted.strategy, {
+    rung: ANCHOR_STRATEGY.candle.rung,
+    engagedRungs: [...ANCHOR_STRATEGY.candle.engagedRungs],
+    parameters: {},
+  });
+
+  const override = { rung: "resident", engagedRungs: ["resident"] };
+  const overridden = anchorPlanFixture(key, { strategy: override });
+  assert.equal(validatePlan(overridden), overridden);
+  assert.deepEqual(planAnchor(overridden, key).strategy, { ...override, parameters: {} });
+  // …and the override changes the case identity, so an overridden capture can never be mistaken
+  // for a default-composition one.
+  assert.notEqual(planAnchor(overridden, key).logicalCaseId, defaulted.logicalCaseId);
+
+  // The MLX row of the same shape is unchanged by an override that names the lane default.
+  const mlxKey = "fixture_model:q4:mlx";
+  assert.deepEqual(
+    planAnchor(anchorPlanFixture(mlxKey, { strategy: override }), mlxKey).strategy,
+    planAnchor(anchorPlanFixture(mlxKey), mlxKey).strategy,
+  );
+
+  // A grid, an unknown rung, a missing member and a stray parameter block are all unwritable.
+  for (const strategy of [
+    { rung: "resident" },
+    { engagedRungs: ["resident"] },
+    { rung: "sequential", engagedRungs: ["resident"] },
+    { rung: "resident", engagedRungs: ["resident", "resident"] },
+    { rung: "resident", engagedRungs: [] },
+    { rung: ["resident", "staged_residency"], engagedRungs: ["resident"] },
+    { rung: "resident", engagedRungs: ["resident"], parameters: { decodeTileEdge: 512 } },
+  ]) {
+    assert.throws(
+      () => validatePlan(anchorPlanFixture(key, { strategy })),
+      /anchor plan is invalid/,
+      JSON.stringify(strategy),
+    );
+  }
+});
+
 test("the anchor plan schema cannot express a duplicate cell or any sweep", async () => {
   const plan = JSON.parse(await readFile(new URL("../config/memory-calibration-plan.json", import.meta.url)));
   assert.equal(validatePlan(plan), plan);
@@ -1171,6 +1217,79 @@ test("the anchor plan schema cannot express a duplicate cell or any sweep", asyn
   const batched = structuredClone(plan);
   batched.anchors["krea_2_turbo:q4:mlx"].geometry.batch = 2;
   assert.throws(() => validatePlan(batched), /anchor plan is invalid/);
+});
+
+// sc-22736: the three Candle SCAIL-2 rows ride sc-22734's single-composition `strategy` override —
+// the provider implements `Resident` alone, so the candle default `staged_residency` would fail
+// `contract.validate_selection` on every attempt — and `planAnchor` is what sends that override to
+// the adapter. Mutations this kills: `planAnchor` reading the lane default instead of
+// `anchor.strategy` (the SCAIL-2 candle rows plan `staged_residency` again); the plan losing the
+// override on any of the three rows. The rule for WHEN a row may override lives in
+// scripts/measure-memory-catalog.test.mjs (manifest exemption or capability-dump evidence) and
+// crates/sceneworks-worker/src/inference_runtime.rs (the contract itself, on both lanes).
+test("the candle SCAIL-2 rows plan the resident composition through the strategy override", async () => {
+  const video = { geometry: { width: 832, height: 480, batch: 1, frames: 77 }, mode: "animation" };
+  const resident = anchorPlanFixture("fixture_model:q4:candle", {
+    ...video,
+    strategy: { rung: "resident", engagedRungs: ["resident"] },
+  });
+  assert.equal(validatePlan(resident), resident);
+  assert.deepEqual(planAnchor(resident, "fixture_model:q4:candle").strategy, {
+    rung: "resident",
+    engagedRungs: ["resident"],
+    parameters: {},
+  });
+  // The lane default still applies when the row states nothing.
+  assert.deepEqual(planAnchor(anchorPlanFixture("fixture_model:q4:candle", video), "fixture_model:q4:candle").strategy, {
+    rung: ANCHOR_STRATEGY.candle.rung,
+    engagedRungs: [...ANCHOR_STRATEGY.candle.engagedRungs],
+    parameters: {},
+  });
+  // The shipped plan: every candle SCAIL-2 cell plans resident, engaged set resident alone — and so
+  // does every candle LTX-2.5 cell, whose contract likewise implements no `staged_residency`
+  // (`memory_strategy_2_5.rs` `strategies`), a defect of the same class the capability-dump rule
+  // in scripts/measure-memory-catalog.test.mjs surfaced on sc-22725's rows.
+  //
+  // sc-22737 adds MiniMax-H3's six candle rows (both catalog entries, three tiers each) on exactly
+  // the same grounds: at the 8a65db2a pin the candle capability dump publishes `minimax_h3` with
+  // `implementedRungs: ["resident"]` at every (tier, load shape), so the lane default is a rung the
+  // contract does not implement.
+  //
+  // …and Bernini's six plus LTX-2.3's two on the THIRD derived source, because the dump cannot speak
+  // for them: both plan a `deferred_materialization` load shape and the dump publishes only
+  // `eager_materialization` surfaces for those contracts, so it has no surface to answer with. Their
+  // engine declarations do — `candle-gen-bernini` and `candle-gen-ltx`'s `memory_strategy.rs` both
+  // publish `StagedResidency` as `Missing` — and `readDeclaredStrategySupport` reads exactly that off
+  // the pinned checkout. This was invisible until sc-22737 taught the parser Bernini's declaration
+  // shape: before that the rule died on the unreadable shape instead of judging these eight rows.
+  const plan = JSON.parse(await readFile(new URL("../config/memory-calibration-plan.json", import.meta.url)));
+  for (const key of [
+    ...["bf16", "q4", "q8"].flatMap((tier) => [
+      `scail2_14b:${tier}:candle`,
+      `ltx_2_5:${tier}:candle`,
+      `minimax_h3:${tier}:candle`,
+      `minimax_h3_ref:${tier}:candle`,
+      `bernini:${tier}:candle`,
+      `bernini_image:${tier}:candle`,
+    ]),
+    // LTX-2.3 ships only the two quantized tiers on candle.
+    "ltx_2_3:q4:candle",
+    "ltx_2_3:q8:candle",
+  ]) {
+    assert.deepEqual(plan.anchors[key].strategy, { rung: "resident", engagedRungs: ["resident"] }, key);
+    assert.deepEqual(planAnchor(plan, key).strategy, { rung: "resident", engagedRungs: ["resident"], parameters: {} }, key);
+  }
+  // …and no other candle row overrides on contract grounds today: SenseNova's six ride the manifest exemption.
+  const residentCandle = Object.keys(plan.anchors).filter((key) => key.endsWith(":candle") && plan.anchors[key].strategy?.rung === "resident").sort();
+  assert.deepEqual(residentCandle.filter((key) => !key.startsWith("sensenova_u1_8b")), [
+    "bernini:bf16:candle", "bernini:q4:candle", "bernini:q8:candle",
+    "bernini_image:bf16:candle", "bernini_image:q4:candle", "bernini_image:q8:candle",
+    "ltx_2_3:q4:candle", "ltx_2_3:q8:candle",
+    "ltx_2_5:bf16:candle", "ltx_2_5:q4:candle", "ltx_2_5:q8:candle",
+    "minimax_h3:bf16:candle", "minimax_h3:q4:candle", "minimax_h3:q8:candle",
+    "minimax_h3_ref:bf16:candle", "minimax_h3_ref:q4:candle", "minimax_h3_ref:q8:candle",
+    "scail2_14b:bf16:candle", "scail2_14b:q4:candle", "scail2_14b:q8:candle",
+  ]);
 });
 
 // sc-22514 / epic acceptance test 1, second half: ONE command captures ONE anchor and writes ONE
@@ -2302,9 +2421,110 @@ test("the LTX-2.5 anchor capture injects the selected root only after the hardwa
   if (capturedPlanned.target.transformerVariant === "dev") {
     assert.ok(Number(capturedEnvironment.SCENEWORKS_LTX25_DEV_ADAPTER_BYTES) > 0);
     assert.match(capturedEnvironment.SCENEWORKS_LTX25_DEV_ADAPTER_SHA256, /^[0-9a-f]{64}$/);
+    // The Candle arm resolves the same adapter from the snapshot ROOT rather than by digest, so a
+    // dev anchor binds both spellings (sc-22725).
+    assert.equal(capturedEnvironment.SCENEWORKS_LTX25_DISTILL_LORA_ROOT, snapshot);
   } else {
     assert.equal(capturedEnvironment.SCENEWORKS_LTX25_DEV_ADAPTER_BYTES, undefined);
     assert.equal(capturedEnvironment.SCENEWORKS_LTX25_DEV_ADAPTER_SHA256, undefined);
+    assert.equal(capturedEnvironment.SCENEWORKS_LTX25_DISTILL_LORA_ROOT, undefined);
+  }
+});
+
+// -----------------------------------------------------------------------------------------------
+// sc-22725: the SAME snapshot binding serves the CANDLE lane. LTX-2.5 reaches Candle under a
+// different engine id (`ltx_2_5_distilled`, candle.rs `LTX25_ID`), which is the only reason
+// `prepareLtx25CaptureArtifacts` used to refuse it — the artifacts, the layout and the env family
+// are identical. These cases prove the candle plan rows reach the adapter's `run` action with the
+// LTX-2.5 environment bound, and that the widened refusal is still a refusal.
+// -----------------------------------------------------------------------------------------------
+test("the LTX-2.5 candle anchors bind the same prepared snapshot and reach the adapter's run action", async () => {
+  const plan = JSON.parse(
+    await readFile(new URL("../config/memory-calibration-plan.json", import.meta.url)),
+  );
+  const candleKeys = Object.keys(plan.anchors)
+    .filter((key) => key.startsWith("ltx_2_5:") && key.endsWith(":candle"))
+    .sort();
+  assert.deepEqual(candleKeys, ["ltx_2_5:bf16:candle", "ltx_2_5:q4:candle", "ltx_2_5:q8:candle"],
+    "every shipped tier of the candle lane is planned");
+  const snapshot = await ltx25FixtureSnapshot();
+  const cleanRepo = await cleanFixtureRepo();
+  for (const anchorKey of candleKeys) {
+    let runEnvironment;
+    let runPlanned;
+    await assert.rejects(
+      captureAnchor({
+        closureDigestFor: stubClosureDigest,
+        plan,
+        anchorKey,
+        providerCommand: ["fixture-ltx25-candle-provider"],
+        sceneWorksRepo: cleanRepo,
+        inferenceRepo: cleanRepo,
+        ltx25SnapshotRoot: snapshot,
+        executeProvider: async (_command, _args, input, options) => {
+          const request = JSON.parse(input);
+          if (request.action === "probe") {
+            // The snapshot is prepared BEFORE the hardware probe, but the per-anchor root is
+            // injected only for the run — the same ordering the MLX lane keeps.
+            assert.equal(options.env.SCENEWORKS_LTX25_REPOSITORY, LTX25_CAPTURE_REPOSITORY);
+            assert.equal(options.env.SCENEWORKS_LTX25_ROOT, undefined);
+            return JSON.stringify({
+              hardware: {
+                probe: "fixture CUDA probe",
+                memoryBytes: 96 * 1024 ** 3,
+                deviceId: "0",
+                name: "Fixture CUDA",
+                computeCapability: "9.0",
+                driverVersion: "999.1",
+                runtimeVersion: "12.8",
+              },
+            });
+          }
+          assert.equal(request.action, "run", "the capture reaches the adapter's run action");
+          runPlanned = request.planned;
+          runEnvironment = options.env;
+          throw new Error("stop after LTX-2.5 candle invocation environment capture");
+        },
+      }),
+      /stop after LTX-2\.5 candle invocation environment capture/,
+    );
+    assert.equal(runPlanned.backend, "candle");
+    assert.equal(runPlanned.target.provider, "ltx_2_5_distilled");
+    assert.equal(runPlanned.target.transformerVariant, "distilled");
+    assert.equal(
+      runEnvironment.SCENEWORKS_LTX25_ROOT,
+      path.join(snapshot, runPlanned.target.transformerVariant, runPlanned.target.tier),
+      "the candle arm canonicalizes SCENEWORKS_LTX25_ROOT as <snapshot>/<variant>/<tier>",
+    );
+    assert.equal(runEnvironment.SCENEWORKS_LTX25_REPOSITORY, LTX25_CAPTURE_REPOSITORY);
+    assert.equal(runEnvironment.SCENEWORKS_LTX25_REVISION, LTX25_CAPTURE_REVISION);
+    // candle.rs `ltx25_load_spec` reads exactly these; a missing one is a hard `required_env` error.
+    assert.match(runEnvironment.SCENEWORKS_MEMORY_MODEL_INVENTORY_SHA256, /^[0-9a-f]{64}$/);
+    assert.ok(Number(runEnvironment.SCENEWORKS_MEMORY_MODEL_BYTES) > 0);
+    assert.ok(Number(runEnvironment.SCENEWORKS_LTX25_ENHANCER_BYTES) > 0);
+    // The distilled variant needs no official refinement LoRA, so its root is deliberately unbound.
+    assert.equal(runEnvironment.SCENEWORKS_LTX25_DISTILL_LORA_ROOT, undefined);
+  }
+});
+
+test("the widened LTX-2.5 snapshot binding still refuses a lane that does not load LTX-2.5", async () => {
+  const snapshot = await ltx25FixtureSnapshot();
+  const planned = planAnchor(
+    JSON.parse(await readFile(new URL("../config/memory-calibration-plan.json", import.meta.url))),
+    "ltx_2_5:q4:candle",
+  );
+  for (const wrong of [
+    // The candle engine id on the MLX lane, and the MLX engine id on the candle lane: each is a
+    // real provider, and each would prepare this snapshot for a loader that never asked for it.
+    { ...planned, backend: "mlx" },
+    { ...planned, target: { ...planned.target, provider: "ltx_2_5" } },
+    { ...planned, target: { ...planned.target, modelId: "ltx_2_3" } },
+    { ...planned, backend: "cuda" },
+  ]) {
+    await assert.rejects(
+      prepareLtx25CaptureArtifacts(snapshot, [wrong]),
+      /--ltx25-snapshot-root is valid only for the ltx_2_5 plan/,
+    );
   }
 });
 
@@ -2525,4 +2745,115 @@ test("every checked-in capture invocation names a declared anchor", async () => 
       `${label}: names no anchor the plan declares`,
     );
   }
+});
+
+// sc-22738. The MLX catalog campaign lost a MiniMax-H3 q4 render to
+// `schema validation failed: $.records[0].output: unexpected property`: the adapter's video arms
+// had grown a top-level `output` descriptor, and `capturePlannedCase` spreads the provider fragment
+// into the record VERBATIM (`{ ...fragment }`), so every key an arm invents is a record property.
+// `$defs.record` is `additionalProperties: false`, and the render is already paid for by the time
+// the bundle is validated — the most expensive place in the system to learn the shape is wrong.
+//
+// Two tests, because there are two claims. This one drives the REAL validator over a REAL record
+// and proves the schema forbids the property rather than that some transcription of it does.
+test("the real validator refuses a record that carries an output descriptor", () => {
+  const record = runtimeComplete();
+  validateBundle({ schemaVersion: SCHEMA_VERSION, harnessVersion: HARNESS_VERSION, records: [record] });
+
+  const withOutput = structuredClone(record);
+  withOutput.output = { frames: 121, fps: 24, firstFrameNondegenerate: true };
+  assert.throws(
+    () => validateBundle({ schemaVersion: SCHEMA_VERSION, harnessVersion: HARNESS_VERSION, records: [withOutput] }),
+    /\$\.records\[0\]\.output: unexpected property/,
+  );
+});
+
+/**
+ * Every calibration record fragment the adapters build, keyed by `<bin>:<enclosing fn>`.
+ *
+ * The idiom is uniform across both adapters and is what makes this readable without a Rust parser:
+ * a record arm opens `let mut fragment = json!({` at four spaces, closes at `});` at four spaces,
+ * and its top-level keys are the eight-space `"name":` lines between. A payload that is NOT a
+ * calibration record — the LTX safety/product canaries, the campaign entries and the bounded
+ * carrier proof, which `main()` dispatches under their own actions and which legitimately carry
+ * `output` and `_campaignEntry` — is returned as `Ok(json!({…}))` and never binds `fragment`, so
+ * the idiom excludes them. The signature filter below is the belt to that suspenders: a fragment
+ * is only judged against the record schema if it carries the four keys every capture record has.
+ */
+async function adapterRecordFragments() {
+  const bins = ["mlx.rs", "mlx_ltx25.rs", "mlx_wan_scail2.rs", "candle.rs", "candle_wan_scail2.rs"];
+  const fragments = new Map();
+  for (const bin of bins) {
+    const lines = (await readFile(
+      fileURLToPath(new URL(`../crates/sceneworks-memory-adapter/src/bin/${bin}`, import.meta.url)),
+      "utf8",
+    )).split("\n");
+    let fn = null;
+    for (let i = 0; i < lines.length; i += 1) {
+      const declaration = /^(?:pub(?:\([a-z]+\))? )?fn ([a-z0-9_]+)/.exec(lines[i]);
+      if (declaration) fn = declaration[1];
+      if (!/^ {4}let (?:mut )?fragment = json!\(\{$/.test(lines[i])) continue;
+      const keys = [];
+      for (let j = i + 1; j < lines.length; j += 1) {
+        if (/^ {4}\}\);$/.test(lines[j])) break;
+        const key = /^ {8}"([A-Za-z_]+)":/.exec(lines[j]);
+        if (key) keys.push(key[1]);
+      }
+      fragments.set(`${bin}:${fn}`, keys);
+    }
+  }
+  return fragments;
+}
+
+// The second claim: no shipped arm emits such a property today, MiniMax-H3 and the four other video
+// arms included. Universally quantified over the arms the sources actually contain — a new arm is
+// covered with no edit here — with the five video arms named so the check cannot go quietly vacuous.
+test("every adapter calibration record fragment carries only properties the record schema allows", async () => {
+  const schema = JSON.parse(await readFile(
+    fileURLToPath(new URL("../packages/schemas/memory-calibration.schema.json", import.meta.url)),
+    "utf8",
+  ));
+  const record = schema.$defs.record;
+  assert.equal(record.additionalProperties, false, "an open record would make this test prove nothing");
+  // `sourceCapture` is the one fragment key that is NOT a record property by design: the harness
+  // lifts it into `sourceSessions` and deletes it before the record is assembled.
+  const allowed = new Set([...Object.keys(record.properties), "sourceCapture"]);
+  // The keys every capture record carries. A `fragment` without all four is a different payload
+  // (the InstantID arms' legacy `memory` shape), and judging it against this schema would be wrong.
+  const signature = ["status", "artifact", "observedMemory", "scenarios"];
+
+  const fragments = await adapterRecordFragments();
+  const judged = [];
+  for (const [arm, keys] of fragments) {
+    if (!signature.every((key) => keys.includes(key))) continue;
+    judged.push(arm);
+    const forbidden = keys.filter((key) => !allowed.has(key));
+    assert.deepEqual(forbidden, [], `${arm} emits record properties the schema rejects: ${forbidden}`);
+    assert.equal(new Set(keys).size, keys.length, `${arm} repeats a record property`);
+  }
+
+  for (const arm of [
+    "mlx.rs:run_minimax_h3",
+    "mlx.rs:run_bernini",
+    "mlx.rs:run_krea_realtime",
+    "mlx.rs:run_ltx_with_admission",
+    "mlx_wan_scail2.rs:run",
+    "mlx_ltx25.rs:run",
+  ]) {
+    assert.ok(judged.includes(arm), `${arm} is a video record arm this check must cover`);
+  }
+  assert.ok(judged.length >= 18, `too few record arms recognized (${judged.length}) — the idiom moved`);
+
+  // The other half of the same decision: the LTX CAMPAIGN carriers keep their `output` descriptor,
+  // because `validate_ltx_campaign_entry_fragment` cross-checks `/output/*` against the diagnostics
+  // of the same run. It is published for the campaign admissions and for nothing else.
+  const mlx = await readFile(
+    fileURLToPath(new URL("../crates/sceneworks-memory-adapter/src/bin/mlx.rs", import.meta.url)),
+    "utf8",
+  );
+  assert.match(
+    mlx,
+    /if !matches!\(admission, LtxRunAdmission::Ordinary\) \{\n\s+fragment\["output"\] = json!\(\{/,
+    "the LTX campaign carrier must still publish the output descriptor its own validator reads",
+  );
 });

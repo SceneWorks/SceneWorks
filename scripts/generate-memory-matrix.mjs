@@ -1080,11 +1080,143 @@ export function backendScopes(model, routedBackends) {
   return ["mlx", "candle"].filter((backend) => served.has(backend));
 }
 
-function tiersFor(model, backend, backendTierOverrides) {
+/**
+ * The per-lane tier sets `crates/sceneworks-worker/src/memory_route_registry.rs#RULES` declares,
+ * keyed `backend:provider` — read off the Rust SOURCE, the way `parseBackendTierOverrides` reads
+ * InstantID's dense tier, so a rule the worker changes cannot silently stop matching the matrix.
+ *
+ * Why it exists (sc-22731 review): `tiersFor`'s `platforms` filter answers "could this lane's HOST
+ * fetch this download", which is NOT the same question as "does the worker route this lane at this
+ * tier". `bernini`/`bernini_image` is the case that separated them — the only off-Mac download is
+ * the untiered `SceneWorks/bernini` tree, yet the Candle route rule declares `BF16_Q4_Q8` because
+ * `expected_packing` and the published tier subdirs are inside that one repo. Filtering on
+ * `platforms` alone deleted three real Candle tiers on two model ids: six analytic anchors and six
+ * burndown cells for a lane the worker demonstrably routes, which epic 22723 E1 does not exempt
+ * (only a lane/tier the worker does NOT route is exempt).
+ *
+ * Consumed as a FLOOR and never as a ceiling. A rule's `tiers` is the scope at which that
+ * memory-route rule SHAPES a load, not an enumeration of what the lane can open: `ltx_2_3` has no
+ * rule at all and routes three tiers, and `lens` is `Q4_ONLY` on MLX while advertising three. So
+ * this may only keep a tier the `platforms` test would have dropped; it may never drop one.
+ */
+export function parseRouteRegistryLaneTiers(registrySource) {
+  const table = registrySource.match(/const RULES: &\[MemoryRouteRule\] = &\[([\s\S]*?)\n\];/);
+  if (!table) {
+    throw new Error("memory-matrix: could not locate RULES in memory_route_registry.rs");
+  }
+  // Scoped to `impl MemoryRouteTier`: several enums in this file declare a `pub const ALL`, and an
+  // unanchored match would resolve `ALL_TIERS` to whichever one happened to come first.
+  const tierImpl = registrySource.match(/impl MemoryRouteTier \{([\s\S]*?)\n\}/);
+  const all = tierImpl?.[1].match(/pub const ALL: \[Self; \d+\] = \[([^\]]*)\];/);
+  if (!all) {
+    throw new Error("memory-matrix: could not derive MemoryRouteTier::ALL from memory_route_registry.rs");
+  }
+  const variant = (name) => name.replace(/^Self::|^MemoryRouteTier::/, "").toLowerCase();
+  const tierConstants = new Map([
+    ["ALL_TIERS", all[1].split(",").map((entry) => entry.trim()).filter(Boolean).map(variant)],
+  ]);
+  const KNOWN_TIERS = new Set(["bf16", "q4", "q8", "nvfp4"]);
+  for (const tier of tierConstants.get("ALL_TIERS")) {
+    if (!KNOWN_TIERS.has(tier)) {
+      throw new Error(`memory-matrix: MemoryRouteTier::ALL parsed an unknown tier ${tier}`);
+    }
+  }
+  for (const constant of registrySource.matchAll(
+    /const (\w+): &\[MemoryRouteTier\] = &\[([\s\S]*?)\];/g,
+  )) {
+    tierConstants.set(
+      constant[1],
+      [...constant[2].matchAll(/MemoryRouteTier::(\w+)/g)].map((entry) => variant(entry[1])),
+    );
+  }
+  const lanes = new Map();
+  let seen = 0;
+  for (const row of table[1].matchAll(/MemoryRouteRule \{([\s\S]*?)\n {4}\},/g)) {
+    seen += 1;
+    const backend = row[1].match(/backend: MemoryRouteBackend::(\w+)/)?.[1];
+    const provider = row[1].match(/provider: "([a-z0-9_]+)"/)?.[1];
+    const tiers = row[1].match(/tiers: (\w+)/)?.[1];
+    if (!backend || !provider || !tiers) {
+      throw new Error(`memory-matrix: memory-route rule ${seen} is under-keyed for tiers`);
+    }
+    const resolved = tierConstants.get(tiers);
+    if (!resolved) {
+      throw new Error(`memory-matrix: memory-route rule ${seen} names unknown tier set ${tiers}`);
+    }
+    const key = `${backend.toLowerCase()}:${provider}`;
+    const set = lanes.get(key) ?? new Set();
+    for (const tier of resolved) set.add(tier);
+    lanes.set(key, set);
+  }
+  if (seen === 0) throw new Error("memory-matrix: RULES parsed to zero memory-route rules");
+  return lanes;
+}
+
+/**
+ * The tiers `memory_route_registry.rs` admits for the ENGINE provider this catalog entry routes to
+ * on this lane — `bernini_image` resolves to the engine id `bernini`, which is what the rules are
+ * keyed on. Empty when the registry names no rule for it: silence is not a denial, it just means
+ * this floor contributes nothing and the other two tests in `tiersFor` decide the tier.
+ */
+function routedLaneTiers(routeLaneTiers, route, backend) {
+  if (!routeLaneTiers || !route) return new Set();
+  let provider;
+  try {
+    provider = route.engineFor(backend);
+  } catch {
+    return new Set();
+  }
+  return routeLaneTiers.get(`${backend}:${provider}`) ?? new Set();
+}
+
+function tiersFor(model, backend, backendTierOverrides, routeLaneTiers, route) {
   const override = backendTierOverrides.get(`${model.id}:${backend}`);
   if (override) return override;
   const backendTiers = Object.keys(model[backend]?.vramGbByTier ?? {});
+  // sc-22731: a download this lane's HOST would never fetch is not a tier this lane advertises.
+  // The manifest's own `platforms` selection is the rule
+  // (`crates/sceneworks-core/src/model_artifacts/artifact_selection.rs`; a row with no `platforms`
+  // key applies everywhere), and MLX is macOS-only by construction while Candle is the off-Mac
+  // lane. Without the filter, `sana_1600m` — whose three packed tiers are `platforms: ["macos"]`
+  // turnkeys and whose only off-Mac download is the dense diffusers snapshot — advertised a
+  // three-tier Candle axis: 20 coordinates no Candle load can reach, contradicting its own shipped
+  // contract (every `sana_1600m` candle implementation declares `"tiers": ["bf16"]`), the worker
+  // (`base.rs` pins the candle SANA tier to `bf16`) and the route registry (`BF16_ONLY`).
+  //
+  // The filter NARROWS ONLY, and only where nothing routes the tier. Epic 22723 E1 exempts exactly
+  // one thing — a (lane, tier) the WORKER DOES NOT ROUTE — so a tier that survives any of the three
+  // tests below stays on the axis even when its own download row is gated away (sc-22731 review;
+  // the first spelling of this filter had only the `platforms` test and got two families wrong):
+  //
+  //   1. An UNTIERED download this lane's host fetches. A row with no `variant` is a bundle whose
+  //      tiers live INSIDE it, so it serves every tier the lane advertises. `bernini`/
+  //      `bernini_image`'s only off-Mac download is exactly that — one untiered `SceneWorks/bernini`
+  //      tree — which is why the Candle route rule declares `BF16_Q4_Q8` ("matches
+  //      `expected_packing` and the published tier subdirs"). Filtering on `platforms` alone sent
+  //      both ids to `["default"]`, deleting six analytic anchors and six burndown cells for a lane
+  //      the worker demonstrably routes. `ltx_2_3` is the same shape from the other direction: its
+  //      bf16 row is `platforms: ["macos"]`, but `video_jobs/candle.rs` resolves `mlxQuantize <= 0`
+  //      to `CandleLtxTier::Bf16` and `candle_ltx_bundle_tier_across_revisions` returns `None` for
+  //      it BECAUSE bf16 is the untiered dense bundle root rather than a packed tier subdir — and
+  //      that bundle is the co-requisite download, which serves every platform.
+  //   2. A tier `crates/sceneworks-worker/src/memory_route_registry.rs#RULES` declares for this
+  //      exact (backend, provider). The registry is consulted as a FLOOR and never as a ceiling: a
+  //      rule's `tiers` is the scope at which that memory-route rule shapes a load, not an
+  //      enumeration of the tiers the lane can open (`ltx_2_3` has no rule at all and loads three),
+  //      so it can only keep a tier, never remove one.
+  //   3. The lane's own `vramGbByTier` / `quantize` block, which is a lane-local claim rather than a
+  //      download claim, and is unioned in below regardless.
+  const lanePlatform = backend === "mlx" ? "macos" : "linux";
+  const servesLane = (download) =>
+    !download.platforms || download.platforms.includes(lanePlatform);
+  const routedTiers = routedLaneTiers(routeLaneTiers, route, backend);
+  const bundledLane = (model.downloads ?? []).some(
+    (download) => typeof download.variant !== "string" && servesLane(download),
+  );
   const downloadTiers = (model.downloads ?? [])
+    .filter(
+      (download) => bundledLane || servesLane(download) || routedTiers.has(download.variant),
+    )
     .map((download) => download.variant)
     .filter((variant) => typeof variant === "string" && /^(bf16|fp16|q\d+|nvfp4|int\d+)/.test(variant));
   const inferred = model[backend]?.quantize === 4 ? ["q4"] : model[backend]?.quantize === 8 ? ["q8"] : [];
@@ -1099,7 +1231,18 @@ function tiersFor(model, backend, backendTierOverrides) {
     : ["default"];
 }
 
-function parseBackendTierOverrides(instantIdSource) {
+/**
+ * The per-lane tier overrides that come from CODE rather than from a manifest declaration: the
+ * InstantID Candle dense tier, read out of the worker's own `instantid.rs`, plus the converter
+ * families' packed tier sets. These are ROUTING facts — what the lane can load at all.
+ *
+ * Exported (sc-22729) so the measurability gap set can narrow a model's tier axis by exactly these
+ * and nothing else. `tiersFor` also consults `model[backend].vramGbByTier`, which is a MEASUREMENT
+ * declaration: a missing key there says a peak has not been recorded, never that the lane refuses
+ * the tier, so a gap set that intersected against it would delete the very cells it exists to
+ * count.
+ */
+export function parseBackendTierOverrides(instantIdSource) {
   const candleDense = instantIdSource.match(
     /#\[cfg\(not\(target_os = "macos"\)\)\]\s*let preferred = \{[\s\S]*?"([^"]+)"\s*\};/,
   )?.[1];
@@ -2207,15 +2350,66 @@ export const IMAGE_MLX_DERIVATION_ENTRY_POINTS = Object.freeze([
  *
  * This used to be read from the rung-4 survey, which has left the fingerprint with the rest of the
  * measurement-absence machinery. The fact itself survives the collapse and is not a memory fact at
- * all: `familyGroup` has no arm for MiniMax-H3 and no video-route resolver row exists, so admitting
- * these entries fails generation at `resolveRoute` rather than producing a row. Declared here, in
- * the generator, exactly like `UNROUTED_CATALOG_ENTRIES` — and it fails LOUDLY the day the family is
- * routed, because `assertOutOfMatrixEntriesAreStillUnroutable` refuses an entry the generator can
- * now resolve.
+ * all. Declared here, in the generator, exactly like `UNROUTED_CATALOG_ENTRIES` — and it fails
+ * LOUDLY the day the family is routed, because `assertOutOfMatrixEntriesAreStillUnroutable` refuses
+ * an entry the generator can now resolve.
+ *
+ * ## sc-22737: the recorded reason was STALE, and the true one is narrower
+ *
+ * The old reason read "no familyGroup arm and no video-route resolver row exists". Only the first
+ * clause was ever a fact about this generator, and the second was wrong about the WORKER:
+ * `video_jobs/minimax_h3.rs#minimax_h3_engine_id` exists and `resolve_video_route` consults it, so
+ * the MLX lane IS routed. Re-examined against both sources, the two conditions that actually keep
+ * these entries out are:
+ *
+ * 1. **MLX — the resolver is not in a shape this generator can read.** Every other family's
+ *    `*_engine_id` enumerates its catalog ids (`match model { "a" => Some("x"), … }`, `model == …`,
+ *    or `matches!(model, …)`), and `parseVideoEngineIds` parses exactly those three forms into a
+ *    model -> engine map. MiniMax-H3's is
+ *    `is_minimax_h3_model(model).then_some(MINIMAX_H3_ENGINE_ID)`, and that predicate
+ *    (`sceneworks_core::video_request::is_minimax_h3_model`) is `model.starts_with("minimax_h3")` —
+ *    a PREFIX test, which enumerates nothing. Admitting the family therefore needs the parser to
+ *    grow a fourth form that resolves a prefix predicate out of another crate and expands it
+ *    against the manifest, not merely a `VIDEO_ROUTE_RESOLVERS` row; adding the row alone throws
+ *    `minimax_h3_engine_id declared no model -> engine arm`, which is how this was measured.
+ *
+ * 2. **Candle — the generator's PUBLIC route parser cannot see the arm either.** `parseVideoRoutes`
+ *    reads `video_jobs/candle.rs#candle_video_engine_id`, which has no `minimax_h3` arm; the Candle
+ *    dispatch is deliberately kept OUT of it, in `video_jobs/mod.rs#resolve_candle_video_route`
+ *    (`} else if let Some(engine_id) = minimax_h3_engine_id(&request.model) { CandleVideoRoute::
+ *    MiniMaxH3(engine_id) }`), and is parsed separately by `parseInternalCandleVideoRoutes` for
+ *    exactly that reason. So this half is the SAME parser fact as (1), on the other lane.
+ *
+ * ## sc-22738: reason 2 used to claim the Candle LANE was unrouted. It is not.
+ *
+ * The previous wording read "Candle — the lane is not routed at all", and cited the absent
+ * `candle_video_engine_id` arm as proof. That confused this generator's parser with the ROUTER:
+ * `resolve_candle_video_route` has selected `CandleVideoRoute::MiniMaxH3` since sc-19508, and the
+ * routing catalog declares `VideoModelCaps::new("minimax_h3", true, true, …)` and the same for
+ * `minimax_h3_ref` (`crates/sceneworks-core/src/jobs_store/routing/catalog.rs`), so BOTH lanes are
+ * routed and neither is epic 22723 E1's unrouted-lane exemption.
+ *
+ * That mattered beyond the comment: `measure-memory-catalog.test.mjs` used to take its routed-lane
+ * axis from this generator's `models[].backends`, so the subtraction below silently removed all
+ * twelve MiniMax-H3 cells from the E1 burndown — deleting their plan rows left the measurability
+ * test green. The burndown now reads the routing catalog directly (`routedCatalogLanes`), so this
+ * subtraction is scoped to the MATRIX and cannot exempt a cell from measurability.
+ *
+ * The `minimax_h3` / `minimax_h3_ref` ANCHORS are planned, armed and closed over on BOTH lanes by
+ * sc-22737 (`config/memory-calibration-plan.json`,
+ * `crates/sceneworks-memory-adapter/src/bin/{mlx,candle}.rs`), so the cells are measurable through
+ * `measure-memory-catalog.mjs` — the oracle epic 22723 E2 names — even while this generator still
+ * subtracts them from the MATRIX universe.
  */
+const MINIMAX_OUT_OF_MATRIX_REASON =
+  "both lanes ARE routed (VideoModelCaps mlx+candle, resolve_candle_video_route's MiniMaxH3 arm), " +
+  "but this generator's route parsers cannot enumerate either: the MLX resolver is a PREFIX " +
+  "PREDICATE and the Candle arm lives outside candle_video_engine_id. Matrix-only — the E1 " +
+  "measurability burndown reads the routing catalog and DOES claim these cells";
+
 export const OUT_OF_MATRIX_CATALOG_ENTRIES = new Map([
-  ["minimax_h3", { epic: 17137, reason: "no familyGroup arm and no video-route resolver row" }],
-  ["minimax_h3_ref", { epic: 17137, reason: "no familyGroup arm and no video-route resolver row" }],
+  ["minimax_h3", { epic: 17137, reason: MINIMAX_OUT_OF_MATRIX_REASON }],
+  ["minimax_h3_ref", { epic: 17137, reason: MINIMAX_OUT_OF_MATRIX_REASON }],
 ]);
 
 /**
@@ -2408,6 +2602,7 @@ export async function buildMatrix({ sourceOverrides = {}, cellFilter = null, pub
   const stagedResidencyEngines = parseMlxStagedResidencyEngines(mlxFitBody);
   const candleBespokeStagedLanes = parseCandleBespokeStagedLanes(bodies.memoryRouteRegistry);
   const backendTierOverrides = parseBackendTierOverrides(bodies.instantId);
+  const routeLaneTiers = parseRouteRegistryLaneTiers(bodies.memoryRouteRegistry);
   assertOutOfMatrixEntriesAreStillUnroutable(manifest.models, (model) =>
     resolveRoute(model, routes, videoRoutes, backendScopes(model, routedBackends)),
   );
@@ -2473,7 +2668,7 @@ export async function buildMatrix({ sourceOverrides = {}, cellFilter = null, pub
     modelSummary.axes = {};
     const axesRoute = resolveRoute(model, routes, videoRoutes, modelSummary.backends);
     for (const backend of modelSummary.backends) {
-      const tiers = tiersFor(model, backend, backendTierOverrides);
+      const tiers = tiersFor(model, backend, backendTierOverrides, routeLaneTiers, axesRoute);
       const modes = modesFor(model);
       const overlays = overlaysFor(model, backend, axesRoute);
       modelSummary.axes[backend] = { tiers, modes, overlays, rungs: [...RUNGS] };
@@ -2501,7 +2696,7 @@ export async function buildMatrix({ sourceOverrides = {}, cellFilter = null, pub
       // never of the rung, the mode or the overlay — so it is resolved once per tier here and the
       // rung loop below cannot make it depend on anything narrower.
       const derivationDefined = derivationLanes.has(`${modelSummary.modality}:${backend}`);
-      for (const tier of tiersFor(model, backend, backendTierOverrides)) {
+      for (const tier of tiersFor(model, backend, backendTierOverrides, routeLaneTiers, route)) {
         const anchor = anchorStore.anchors.get(`${model.id}:${backend}:${tier}`) ?? null;
         const anchorRow = anchor
           ? {

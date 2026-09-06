@@ -1391,15 +1391,55 @@ export function evidenceSemantics(record, revisions) {
  * when `staged_residency` is engaged and nothing deeper is. Planning the rung would let a capture
  * spend hours producing a render the extractor then refuses, and would reopen the rung grid this
  * story closed.
+ *
+ * ONE ESCAPE, and it is not an operator knob either (sc-22734): a plan row may carry its own
+ * `strategy`, and it exists for a provider whose CONTRACT refuses the lane default. SenseNova
+ * classifies `StagedResidency` as `StructurallyNotApplicable` on both lanes — it is one fused
+ * dual-path transformer with no separable conditioning component, so there is no phase boundary to
+ * release — and `contract.validate_selection` therefore rejects the candle default rung before any
+ * weight is read. The override makes those rows plan the RESIDENT rung, which the contract admits.
+ * It is derived, not chosen: a test in scripts/measure-memory-catalog.test.mjs requires a row's
+ * effective rung to be `resident` exactly when the model's manifest lane block declares a
+ * `memoryStrategyStructuralExemptions.staged_residency`, so this cannot be used to pick a rung the
+ * architecture does not force.
+ *
+ * ## Where the values live (sc-22738)
+ *
+ * NOT here. `crates/sceneworks-worker/src/inference_runtime.rs` walks this same plan and asks each
+ * row's contract to `validate_selection` the rung it will be captured at, and it used to RESPELL
+ * these two defaults in Rust (`lane_default_rung`: mlx -> "resident", candle -> "staged_residency")
+ * with nothing binding the two spellings — a lane default changed here would have left the Rust
+ * walk asserting the OLD rung and still green. Both sides now read
+ * `config/anchor-lane-default-strategy.json`, the Rust one through `include_str!`, so a change to
+ * the composition is a change to one file and reds the walk unless the contracts follow.
+ *
+ * Read synchronously at module load and fail-closed: a missing lane, rung or engaged-rung list
+ * throws here rather than degrading to a default composition no law authorized.
  */
-export const ANCHOR_STRATEGY = Object.freeze({
-  mlx: Object.freeze({ rung: "resident", engagedRungs: Object.freeze(["resident"]), parameters: Object.freeze({}) }),
-  candle: Object.freeze({
-    rung: "staged_residency",
-    engagedRungs: Object.freeze(["resident", "staged_residency"]),
-    parameters: Object.freeze({}),
-  }),
-});
+export const ANCHOR_LANE_DEFAULT_STRATEGY_PATH = "config/anchor-lane-default-strategy.json";
+
+function loadAnchorStrategy() {
+  const declared = JSON.parse(
+    readFileSync(path.join(ROOT, ANCHOR_LANE_DEFAULT_STRATEGY_PATH), "utf8"),
+  ).lanes;
+  const lanes = {};
+  for (const backend of ["mlx", "candle"]) {
+    const entry = declared?.[backend];
+    if (typeof entry?.rung !== "string" || !Array.isArray(entry.engagedRungs) || entry.engagedRungs.length === 0) {
+      fail(
+        `${ANCHOR_LANE_DEFAULT_STRATEGY_PATH} declares no usable default composition for the ${backend} lane`,
+      );
+    }
+    lanes[backend] = Object.freeze({
+      rung: entry.rung,
+      engagedRungs: Object.freeze([...entry.engagedRungs]),
+      parameters: Object.freeze({}),
+    });
+  }
+  return Object.freeze(lanes);
+}
+
+export const ANCHOR_STRATEGY = loadAnchorStrategy();
 
 /** `<modelId>:<tier>:<backend>` — the anchor plan's key, and the cell identity itself. */
 const ANCHOR_KEY = /^([a-z][a-z0-9_]*):(q4|q8|bf16):(mlx|candle)$/;
@@ -1517,8 +1557,8 @@ export function planAnchor(plan, key) {
       geometry: anchor.geometry,
     },
     strategy: {
-      rung: ANCHOR_STRATEGY[backend].rung,
-      engagedRungs: [...ANCHOR_STRATEGY[backend].engagedRungs],
+      rung: (anchor.strategy ?? ANCHOR_STRATEGY[backend]).rung,
+      engagedRungs: [...(anchor.strategy ?? ANCHOR_STRATEGY[backend]).engagedRungs],
       parameters: {},
     },
     ...(anchor.sourceProvenance ? { sourceProvenance: anchor.sourceProvenance } : {}),
@@ -1536,6 +1576,15 @@ export function planAnchor(plan, key) {
 }
 
 const LTX25_CAPTURE_TIERS = ["q4", "q8", "bf16"];
+/**
+ * The engine provider each lane's adapter loads LTX-2.5 through — the SAME public snapshot, under
+ * two different engine ids (sc-22725). MLX's arm is `ltx_2_5` (mlx.rs); Candle's is
+ * `ltx_2_5_distilled` (candle.rs `LTX25_ID`, `candle-gen-ltx` `MODEL_25_ID`). The snapshot binding
+ * is therefore a MODEL-level fact, not an MLX-only one, and this table is what keeps the refusal
+ * honest: a lane not listed here, or a plan row naming some other provider on a listed lane, is
+ * still refused rather than silently prepared against the wrong artifact family.
+ */
+export const LTX25_LANE_PROVIDERS = Object.freeze({ mlx: "ltx_2_5", candle: "ltx_2_5_distilled" });
 function ltx25ArtifactKey(planned) {
   const variant = planned?.target?.transformerVariant;
   const tier = planned?.target?.tier;
@@ -1592,10 +1641,14 @@ export async function prepareLtx25CaptureArtifacts(
     fail("LTX-2.5 snapshot preparation requires at least one selected case");
   }
   if (plannedCases.some((planned) =>
-    planned.backend !== "mlx" ||
     planned.target?.modelId !== "ltx_2_5" ||
-    planned.target?.provider !== "ltx_2_5")) {
-    fail("--ltx25-snapshot-root is valid only for the mlx:ltx_2_5 plan");
+    planned.target?.provider !== LTX25_LANE_PROVIDERS[planned.backend])) {
+    fail(
+      "--ltx25-snapshot-root is valid only for the ltx_2_5 plan on a lane that loads its own " +
+        `LTX-2.5 provider (${Object.entries(LTX25_LANE_PROVIDERS)
+          .map(([backend, provider]) => `${backend}:${provider}`)
+          .join(", ")})`,
+    );
   }
 
   const requested = path.resolve(snapshotRoot);
@@ -1739,6 +1792,7 @@ export function ltx25ProviderEnvironment(prepared, planned, baseEnvironment = pr
     "SCENEWORKS_LTX25_ENHANCER_INVENTORY_SHA256",
     "SCENEWORKS_LTX25_DEV_ADAPTER_BYTES",
     "SCENEWORKS_LTX25_DEV_ADAPTER_SHA256",
+    "SCENEWORKS_LTX25_DISTILL_LORA_ROOT",
   ]) delete environment[name];
   environment.SCENEWORKS_LTX25_REPOSITORY = prepared.repository;
   environment.SCENEWORKS_LTX25_REVISION = prepared.revision;
@@ -1755,6 +1809,16 @@ export function ltx25ProviderEnvironment(prepared, planned, baseEnvironment = pr
       if (!prepared.devAdapter) fail("LTX-2.5 prepared snapshot has no dev adapter inventory");
       environment.SCENEWORKS_LTX25_DEV_ADAPTER_BYTES = String(prepared.devAdapter.bytes);
       environment.SCENEWORKS_LTX25_DEV_ADAPTER_SHA256 = prepared.devAdapter.sha256;
+      // The Candle arm resolves the official stage-two refinement LoRA from the snapshot ROOT
+      // (candle.rs `ltx25_official_dev_adapter` → `SCENEWORKS_LTX25_DISTILL_LORA_ROOT`, joined with
+      // `distilled_lora/…`), where the MLX arm takes the file's bytes/digest.
+      //
+      // Reachability, stated plainly: NO plan row is served by this line today. The variable is read
+      // only by the Candle arm, and only a `dev` anchor binds it — but every candle plan row is
+      // `distilled` and every mlx plan row is `dev` (where mlx ignores the variable). The binding is
+      // in place so that a future candle `dev` anchor is served by the same prepared, re-hashed
+      // snapshot as the mlx one; adding that plan row is what would first exercise it.
+      environment.SCENEWORKS_LTX25_DISTILL_LORA_ROOT = prepared.snapshotRoot;
     }
   }
   return environment;

@@ -18,6 +18,11 @@
 //     --work-dir /abs/OUTSIDE/the/repo/calib --campaign sc-NNNN [--model sdxl ...] [--anchors a,b]
 //     [--skip-current]
 //     [--dry-run] [--no-commit] [--hf-cache DIR ...]   (--hf-cache is repeatable)
+//
+// `--no-commit` captures and checks each anchor and stops there (status `captured`, raw bundle in
+// <work-dir>/captures): the harness refuses complete evidence from a dirty checkout, so the first
+// anchor's ingest would leave every later anchor in the same run uncapturable (sc-22724). Ingest a
+// retained bundle by hand with the harness, or run without the flag to land it.
 import process from "node:process";
 import path from "node:path";
 import os from "node:os";
@@ -36,6 +41,7 @@ export const ADAPTER_LIB_PATH = "crates/sceneworks-memory-adapter/src/lib.rs";
 export const PACKAGED_SOURCES_PATH = "crates/sceneworks-core/src/memory_anchor.rs";
 export const ANCHOR_STORE_PATH = "config/memory-anchors.json";
 export const ANCHOR_LOADER_CONFIG_PATH = "config/anchor-loader-closures.json";
+export const PROVIDER_CLOSURE_CONFIG_PATH = "config/inference-provider-closures.json";
 export const MATRIX_MD_PATH = "docs/generated/memory-matrix.md";
 /** A well-formed but meaningless key the extractor accepts for a NEW anchor; `--stamp-anchors`
  *  re-derives every key at its record's own revision right after, before anything is committed. */
@@ -44,6 +50,570 @@ export const HARNESS = "scripts/memory-calibration-harness.mjs";
 
 // LTX-2.5 is bound by the harness itself (`--ltx25-snapshot-root`), at the revision it hard-codes.
 export const LTX25_REPOSITORY = "SceneWorks/ltx-2.5-mlx";
+/** The ONE LTX-2.3 rehost, which the manifest ships to all three platforms (sc-22737). */
+export const LTX_2_3_REPOSITORY = "SceneWorks/ltx-2.3-mlx";
+
+/**
+ * The three caller-staged SDXL components, as `{ env, repo }` pairs. Declared once: every SDXL-family
+ * model — and InstantID, which composes the same SDXL base — stages exactly these, and the Rust side
+ * declares the same three ids in `candle.rs` `SDXL_COMPONENTS`. `sdxl_component_env_matches_the_catalog`
+ * proves the two lists agree.
+ */
+export const SDXL_COMPONENTS = Object.freeze([
+  { env: "SCENEWORKS_SDXL_COMPONENT_TOKENIZER_CLIP_L", repo: "openai/clip-vit-large-patch14" },
+  { env: "SCENEWORKS_SDXL_COMPONENT_TOKENIZER_CLIP_BIGG", repo: "laion/CLIP-ViT-bigG-14-laion2B-39B-b160k" },
+  { env: "SCENEWORKS_SDXL_COMPONENT_VAE_FP16_FIX", repo: "madebyollin/sdxl-vae-fp16-fix" },
+]);
+
+/**
+ * sc-22729. `candle-gen-sdxl`'s `SDXL_ROUTES` pins each route's repository AND revision, and its
+ * `path_has_snapshot` matches a staged root against that literal before `SdxlArtifactSeal::capture`
+ * will seal a contract. When the pinned revision is not the one this repository ships, no root the
+ * manifest can resolve can ever seal — `candle_gen_sdxl::load` errors before reading a weight. That
+ * is an INFERENCE-side divergence, not adapter work.
+ *
+ * NOTHING here is a literal: both halves of the comparison are READ (the engine revision out of the
+ * pinned inference checkout, the shipped revision out of the manifest), so the refusal disappears by
+ * itself the moment the engine agrees — no edit to this file, and no stale exclusion outliving the
+ * fix. The inference-side repair lives on `story/sc-22729-sdxl-route-revisions`.
+ */
+export const SDXL_ROUTES_PATH = "crates/media/candle-gen/candle-gen-sdxl/src/memory_strategy.rs";
+
+/** `SDXL_ROUTES` as `id → { repository, revision }`. Throws if the table can no longer be read. */
+export function parseSdxlRoutes(source) {
+  const table = /pub const SDXL_ROUTES: &\[SdxlRoute\] = &\[([\s\S]*?)\n\];/.exec(source);
+  if (!table) fail(`${SDXL_ROUTES_PATH} no longer declares a parsable SDXL_ROUTES table`);
+  const routes = new Map();
+  for (const entry of table[1].matchAll(/SdxlRoute\s*\{([\s\S]*?)\}/g)) {
+    const field = (name) => new RegExp(`\\b${name}:\\s*"([^"]+)"`).exec(entry[1])?.[1];
+    const [id, repository, revision] = [field("id"), field("repository"), field("revision")];
+    if (!id || !repository || !revision) fail(`an SDXL_ROUTES entry declares no id/repository/revision: ${entry[0]}`);
+    routes.set(id, { repository, revision });
+  }
+  if (routes.size === 0) fail(`${SDXL_ROUTES_PATH} declares an empty SDXL_ROUTES table`);
+  return routes;
+}
+
+/**
+ * The engine's route table at `inferenceRepo`, or `null` when no inference checkout is reachable.
+ * `null` is NOT a refusal: with nothing to compare against, a cell classifies as it would if the
+ * engine agreed, and says so.
+ */
+export async function readSdxlCandleRoutes(inferenceRepo = process.env.INFERENCE_REPO) {
+  if (!inferenceRepo) return null;
+  try {
+    return parseSdxlRoutes(await readFile(path.join(inferenceRepo, SDXL_ROUTES_PATH), "utf8"));
+  } catch (error) {
+    if (error.code === "ENOENT" || error.code === "ENOTDIR") return null;
+    throw error;
+  }
+}
+
+export const SDXL_ROUTES_UNCHECKED =
+  `no inference checkout (--inference-repo / $INFERENCE_REPO) supplies ${SDXL_ROUTES_PATH}, so the `
+  + "engine's route revision was not compared with the shipped one; classified as if the engine agrees";
+
+/**
+ * Why the candle lane cannot route `modelId` today, or `null` when it can.
+ *
+ * Both revisions are derived: the engine's from `SDXL_ROUTES` at the pinned inference checkout, the
+ * shipped one from the manifest download the route's own repository names.
+ */
+export function sdxlCandleRouteDrift(modelId, tier, routes, models) {
+  const route = routes.get(modelId);
+  if (!route) {
+    return `candle-gen-sdxl's SDXL_ROUTES (${SDXL_ROUTES_PATH}) declares no route ${modelId}, so the `
+      + "candle lane has no artifact identity to seal for it";
+  }
+  const shipped = tierDownload(models, modelId, route.repository, tier).revision;
+  if (shipped === route.revision) return null;
+  return `candle-gen-sdxl pins route ${modelId} at ${route.revision.slice(0, 8)} `
+    + `(${SDXL_ROUTES_PATH} SDXL_ROUTES), but this repository ships ${shipped.slice(0, 8)}; `
+    + "path_has_snapshot matches that literal, so no staged root can seal the contract and the load "
+    + "fails before any weight is read. The candle lane does not route this model at this pin.";
+}
+
+/**
+ * sc-22736 (pin 8a65db2a). A plan row may override the lane's default anchor rung only where the
+ * provider CONTRACT refuses that rung, and the evidence for the refusal must be DERIVED. Two derived
+ * sources already exist — the manifest's `memoryStrategyStructuralExemptions` and the checked-in
+ * capability dump's `implementedRungs` — and neither can speak for candle SCAIL-2:
+ *
+ *   - the manifest key means `StructurallyNotApplicable`, and `candle-gen-scail2` classifies every
+ *     non-resident rung as `Missing` (not implemented yet), so an exemption there would be a lie;
+ *   - `config/engine-capabilities/capabilities.candle.json` carries no `scail2_14b` contract at all,
+ *     because the dump enumerates `ProviderRegistry::memory_contract_surfaces()` and the crate
+ *     registers a strategy without a weights-free surface resolver. That is an inference-side gap;
+ *     regenerating the dump at this pin (or any pin) would not conjure the surface.
+ *
+ * So the THIRD derived source is the engine's own declaration, read as source text out of the
+ * pinned inference checkout at the path the anchor loader closure already names as that
+ * (model, lane)'s memory-strategy entry point — a path that is itself derived at the pin and
+ * `--check`ed by `scripts/anchor-loader-closure.mjs`. Nothing here is a curated list of model ids:
+ * a provider that grows a dump surface stops consulting this, and a provider that stops declaring
+ * the rung as unimplemented moves the requirement on its own.
+ *
+ * It is fail-closed in both directions. A `strategies:` expression this parser does not recognize
+ * THROWS rather than returning "no evidence", so a refactor upstream reds the rule instead of
+ * quietly re-admitting every override; and a provider whose declaration is absent yields `null`,
+ * which the caller refuses.
+ */
+const STRATEGY_ENTRY_POINT_RE = /memory_strategy[^/]*\.rs$/;
+
+/** snake_case rung (`staged_residency`) → the Rust `MemoryStrategy` variant (`StagedResidency`). */
+function strategyVariant(rung) {
+  return rung.split("_").map((part) => part.charAt(0).toUpperCase() + part.slice(1)).join("");
+}
+
+function unreadable(sourcePath, detail) {
+  return fail(
+    `${sourcePath} declares a strategies: field in a shape scripts/measure-memory-catalog.mjs cannot `
+      + "read, so it cannot say which rungs the contract implements. Teach parseDeclaredStrategySupport "
+      + `the new shape — an unreadable declaration must never be treated as 'no evidence'. (${detail})`,
+  );
+}
+
+/**
+ * Rust source with line and block comments blanked out (newlines kept so offsets and line breaks
+ * survive). Every scan below runs over this, because the declarations carry paragraphs of prose that
+ * contain `=>`, `MemoryStrategy::…`, braces and quotes, and a scanner that reads them as code is a
+ * scanner that reads the wrong arm.
+ */
+function stripRustComments(source) {
+  let out = "";
+  let i = 0;
+  while (i < source.length) {
+    const two = source.slice(i, i + 2);
+    if (two === "//") {
+      while (i < source.length && source[i] !== "\n") { out += " "; i += 1; }
+      continue;
+    }
+    if (two === "/*") {
+      let depth = 0;
+      while (i < source.length) {
+        if (source.slice(i, i + 2) === "/*") { depth += 1; out += "  "; i += 2; continue; }
+        if (source.slice(i, i + 2) === "*/") {
+          depth -= 1; out += "  "; i += 2;
+          if (depth === 0) break;
+          continue;
+        }
+        out += source[i] === "\n" ? "\n" : " ";
+        i += 1;
+      }
+      continue;
+    }
+    if (source[i] === '"') {
+      out += source[i]; i += 1;
+      while (i < source.length && source[i] !== '"') {
+        if (source[i] === "\\") { out += source.slice(i, i + 2); i += 2; continue; }
+        out += source[i]; i += 1;
+      }
+      out += source[i] ?? ""; i += 1;
+      continue;
+    }
+    out += source[i]; i += 1;
+  }
+  return out;
+}
+
+/** The text from `start` up to the first depth-0 occurrence of any `stops` character, or `null`. */
+function scanTo(source, start, stops) {
+  let depth = 0;
+  for (let i = start; i < source.length; i += 1) {
+    const ch = source[i];
+    if (ch === "(" || ch === "[" || ch === "{") depth += 1;
+    else if (ch === ")" || ch === "]" || ch === "}") {
+      if (depth === 0) return stops.includes(ch) ? source.slice(start, i) : null;
+      depth -= 1;
+    } else if (depth === 0 && stops.includes(ch)) return source.slice(start, i);
+  }
+  return null;
+}
+
+/** The `{ … }` block that opens at or after `from`, contents only, or `null`. */
+function braceBody(source, from) {
+  const open = source.indexOf("{", from);
+  if (open === -1) return null;
+  let depth = 0;
+  for (let i = open; i < source.length; i += 1) {
+    if (source[i] === "{") depth += 1;
+    else if (source[i] === "}") {
+      depth -= 1;
+      if (depth === 0) return source.slice(open + 1, i);
+    }
+  }
+  return null;
+}
+
+/** `MemoryStrategySupport::Variant` (struct-variant payload allowed) as a bare variant name. */
+function supportVariant(body, sourcePath) {
+  let text = body.trim();
+  if (text.startsWith("{")) text = (braceBody(text, 0) ?? "").trim();
+  const named = /^MemoryStrategySupport::(\w+)\s*/.exec(text);
+  if (!named) return unreadable(sourcePath, `support arm "${body.trim().slice(0, 60)}" names no MemoryStrategySupport variant`);
+  const rest = text.slice(named[0].length).trim();
+  // `StructurallyNotApplicable { reason: … }` carries a payload; anything else trailing is a shape
+  // this parser has not been taught, and guessing at it would invent evidence.
+  if (rest !== "" && !(rest.startsWith("{") && braceBody(rest, 0) !== null && rest.slice(rest.lastIndexOf("}") + 1).trim() === "")) {
+    return unreadable(sourcePath, `support arm "${body.trim().slice(0, 60)}" carries an expression this parser cannot read`);
+  }
+  return named[1];
+}
+
+/**
+ * Whether an `if` condition holds for `variant`: `true`, `false`, or `null` when the source text
+ * does not decide it.
+ *
+ * The conditions that ship are disjunctions of conjunctions over `strategy == MemoryStrategy::X`
+ * and non-strategy terms (`candle-gen-sdxl` gates `StagedResidency` on `surface ==
+ * SdxlSurface::Bespoke`). A conjunct naming a DIFFERENT variant makes its term statically false, so
+ * most rungs still resolve; only the rung the runtime term actually gates comes back `null`.
+ */
+function evaluateStrategyCondition(condition, variant) {
+  let unknown = false;
+  for (const term of condition.split("||")) {
+    let text = term.trim();
+    if (text.startsWith("(") && text.endsWith(")")) text = text.slice(1, -1).trim();
+    let termFalse = false;
+    let termUnknown = false;
+    for (const conjunct of text.split("&&")) {
+      const named = /^\s*\(?\s*strategy\s*==\s*MemoryStrategy::(\w+)\s*\)?\s*$/.exec(conjunct);
+      if (named) {
+        if (named[1] !== variant) termFalse = true;
+      } else {
+        termUnknown = true;
+      }
+    }
+    if (termFalse) continue;
+    if (termUnknown) { unknown = true; continue; }
+    return true;
+  }
+  return unknown ? null : false;
+}
+
+/**
+ * `match strategy { … }` arms as `{ variants, guarded, support }`, in source order. `variants` is
+ * `null` for the `_` catch-all.
+ */
+function parseMatchArms(armsText, sourcePath) {
+  const arms = [];
+  let i = 0;
+  while (i < armsText.length) {
+    if (/\s/.test(armsText[i])) { i += 1; continue; }
+    const pattern = scanTo(armsText, i, "=");
+    if (pattern === null || armsText[i + pattern.length + 1] !== ">") {
+      return unreadable(sourcePath, `match arm near "${armsText.slice(i, i + 60).trim()}" has no => `);
+    }
+    i += pattern.length + 2;
+    while (i < armsText.length && /\s/.test(armsText[i])) i += 1;
+    let body;
+    if (armsText[i] === "{") {
+      const inner = braceBody(armsText, i);
+      if (inner === null) return unreadable(sourcePath, "unbalanced match-arm block");
+      body = inner;
+      i += 1 + inner.length + 1;
+      while (i < armsText.length && /[\s,]/.test(armsText[i])) i += 1;
+    } else {
+      const value = scanTo(armsText, i, ",");
+      body = value ?? armsText.slice(i);
+      i += body.length + 1;
+    }
+    const [patterns, ...guard] = pattern.split(/\bif\b/);
+    const variants = [];
+    let catchAll = false;
+    for (const alternative of patterns.split("|")) {
+      const text = alternative.trim();
+      if (text === "_") { catchAll = true; continue; }
+      const variant = /^MemoryStrategy::(\w+)$/.exec(text);
+      if (!variant) return unreadable(sourcePath, `match pattern "${text}" is not a MemoryStrategy variant`);
+      variants.push(variant[1]);
+    }
+    arms.push({
+      variants: catchAll && variants.length === 0 ? null : variants,
+      guarded: guard.length > 0,
+      support: supportVariant(body, sourcePath),
+    });
+  }
+  return arms;
+}
+
+/**
+ * `rung → MemoryStrategySupport` for a provider whose contract declares support over
+ * `MemoryStrategy::ALL`, or `null` when the file declares no `strategies:` field at all.
+ *
+ * Throws when a `strategies:` field IS declared in a shape this parser cannot read: an unrecognized
+ * declaration is NOT evidence that a rung is unimplemented.
+ *
+ * Three shapes are read, because all three ship at the pin (sc-22737):
+ *
+ *   - `strategies: MemoryStrategy::ALL … .map(…)` — the declaration inline in `build_contract`
+ *     (`candle-gen-scail2`, `candle-gen-sdxl`, `mlx-gen-krea`, `mlx-gen-z-image`, …);
+ *   - `strategies: strategies()` / `strategies(spec)` / `strategies(streamable)` — the SAME
+ *     expression hoisted into a file-local helper (`candle-gen-bernini`, both LTX modules, both
+ *     MiniMax-H3 modules, both Wan modules). The call is followed to that `fn`'s body; a call whose
+ *     helper is not in the file is unreadable, not "no evidence";
+ *   - inside the closure, `support:` as either the `if strategy == … { … } else { … }` form or a
+ *     `match strategy { … }` with `|`-alternatives, `_`, and guarded arms.
+ *
+ * A rung whose FIRST matching arm carries an `if` guard is condition-dependent — `mlx-gen-minimax-h3`
+ * declares `BoundedTransformerResidency` `Implemented` only when `streamable` — so asking for it
+ * throws rather than picking one side. Guessing either way would state a rung's support as fact when
+ * the source text does not decide it.
+ */
+export function parseDeclaredStrategySupport(rawSource, sourcePath) {
+  const source = stripRustComments(rawSource);
+  const field = /\bstrategies:/.exec(source);
+  if (!field) return null;
+  const valueStart = field.index + field[0].length;
+  const value = scanTo(source, valueStart, ",") ?? source.slice(valueStart);
+  // A helper call (`strategies(spec)`) is followed to the file-local `fn` it names; the inline form
+  // is its own body. Anything else — a const, a method call, a builder — is refused.
+  let body;
+  const call = /^\s*(\w+)\s*\(/.exec(value);
+  if (/^\s*MemoryStrategy::ALL\b/.test(value)) {
+    body = value;
+  } else if (call) {
+    const helper = new RegExp(`\\bfn\\s+${call[1]}\\s*\\(`).exec(source);
+    if (!helper) {
+      return unreadable(sourcePath, `strategies: calls ${call[1]}(…), which this file does not define`);
+    }
+    body = braceBody(source, helper.index + helper[0].length);
+    if (body === null) return unreadable(sourcePath, `fn ${call[1]} has no readable body`);
+  } else {
+    return unreadable(sourcePath, `strategies: value "${value.trim().slice(0, 60)}" is neither MemoryStrategy::ALL nor a local helper call`);
+  }
+
+  const closure = /\.map\(\s*\|\s*strategy\s*\|\s*MemoryStrategyCapability\s*\{/.exec(body);
+  if (!closure) return unreadable(sourcePath, "no .map(|strategy| MemoryStrategyCapability { … }) over MemoryStrategy::ALL");
+  const fields = body.slice(closure.index + closure[0].length);
+  const supportAt = /\bsupport:\s*/.exec(fields);
+  if (!supportAt) return unreadable(sourcePath, "the capability closure declares no support: field");
+  const supportStart = supportAt.index + supportAt[0].length;
+  const supportExpr = (scanTo(fields, supportStart, ",") ?? fields.slice(supportStart)).trim();
+
+  // The `if <condition over strategy> { A } else { B }` form.
+  if (/^if\b/.test(supportExpr)) {
+    let depth = 0;
+    let condEnd = -1;
+    for (let i = 2; i < supportExpr.length; i += 1) {
+      const ch = supportExpr[i];
+      if (ch === "(" || ch === "[") depth += 1;
+      else if (ch === ")" || ch === "]") depth -= 1;
+      else if (ch === "{" && depth === 0) { condEnd = i; break; }
+    }
+    if (condEnd === -1) return unreadable(sourcePath, "support: if with no block");
+    const condition = supportExpr.slice(2, condEnd);
+    const thenBody = braceBody(supportExpr, condEnd);
+    if (thenBody === null) return unreadable(sourcePath, "support: if has an unbalanced then-block");
+    const afterThen = supportExpr.slice(condEnd + 1 + thenBody.length + 1);
+    if (!/^\s*else\s*\{/.test(afterThen)) {
+      return unreadable(sourcePath, "support: if has no plain else block (an else-if chain is not read)");
+    }
+    const elseBody = braceBody(afterThen, 0);
+    if (elseBody === null) return unreadable(sourcePath, "support: else has an unbalanced block");
+    if (afterThen.slice(afterThen.indexOf("{") + elseBody.length + 2).trim() !== "") {
+      return unreadable(sourcePath, "support: if/else is followed by an expression this parser cannot read");
+    }
+    const thenSupport = supportVariant(thenBody, sourcePath);
+    const elseSupport = supportVariant(elseBody, sourcePath);
+    return (rung) => {
+      const variant = strategyVariant(rung);
+      const holds = evaluateStrategyCondition(condition, variant);
+      if (holds === null) {
+        return fail(
+          `${sourcePath} gates MemoryStrategy::${variant} on a condition that is not about the strategy `
+            + "itself, so its support is a runtime value rather than a fact this source text states. Read "
+            + "the rung from the engine capability dump instead of guessing which side of the branch holds.",
+        );
+      }
+      return holds ? thenSupport : elseSupport;
+    };
+  }
+
+  if (/^match\s+strategy\s*\{/.test(supportExpr)) {
+    const armsText = braceBody(supportExpr, 0);
+    if (armsText === null) return unreadable(sourcePath, "unbalanced match strategy { … }");
+    const arms = parseMatchArms(armsText, sourcePath);
+    return (rung) => {
+      const variant = strategyVariant(rung);
+      const arm = arms.find((candidate) => candidate.variants === null || candidate.variants.includes(variant));
+      if (!arm) {
+        return unreadable(sourcePath, `match strategy { … } has no arm for MemoryStrategy::${variant}`);
+      }
+      if (arm.guarded) {
+        return fail(
+          `${sourcePath} declares MemoryStrategy::${variant} behind an \`if\` guard, so its support is a `
+            + "runtime condition rather than a fact this source text states. Read the rung from the engine "
+            + "capability dump instead of guessing which side of the guard holds.",
+        );
+      }
+      return arm.support;
+    };
+  }
+
+  return unreadable(sourcePath, `support: expression "${supportExpr.slice(0, 60)}" is neither the if/else nor the match form`);
+}
+
+/**
+ * The support declaration for one `(modelId, backend)` from the pinned inference checkout, or `null`
+ * when no checkout is reachable, the closure names no memory-strategy entry point, or the file
+ * declares no `strategies:` field. `null` is a REFUSAL at every call site, never an assumption.
+ */
+export async function readDeclaredStrategySupport(
+  modelId,
+  backend,
+  closures,
+  inferenceRepo = process.env.INFERENCE_REPO,
+) {
+  if (!inferenceRepo) return null;
+  const entryPoints = closures.models?.[`${modelId}:${backend}`]?.entryPoints ?? [];
+  const entry = entryPoints.find((candidate) => STRATEGY_ENTRY_POINT_RE.test(candidate));
+  if (!entry) return null;
+  let source;
+  try {
+    source = await readFile(path.join(inferenceRepo, entry), "utf8");
+  } catch (error) {
+    if (error.code === "ENOENT" || error.code === "ENOTDIR") return null;
+    throw error;
+  }
+  return parseDeclaredStrategySupport(source, entry);
+}
+
+/**
+ * The built-in Qwen-Image-Edit-2511 Lightning distill LoRA (sc-22728). It is NOT a manifest
+ * download — the worker fetches it lazily into the HF cache on first use — so its repository,
+ * revision and file are pinned in the worker's own source on both lanes
+ * (`crates/sceneworks-worker/src/image_jobs/qwen.rs` `QWEN_LIGHTNING_LORA_{REPO,REVISION}` and
+ * `image_jobs/qwen_edit_candle.rs` `QWEN_EDIT_CANDLE_LIGHTNING_LORA_*`), and the candle engine
+ * refuses any other path by exact suffix (`edit.rs` `is_exact_lightning_path`). The values below are
+ * bound to those constants by a test rather than trusted, because a drift here would send the
+ * capture at a LoRA the engine will reject after the load.
+ */
+export const QWEN_EDIT_LIGHTNING_LORA = Object.freeze({
+  env: "QWEN_EDIT_LIGHTNING_LORA",
+  repo: "lightx2v/Qwen-Image-Edit-2511-Lightning",
+  revision: "d74eba145674fd7e31b949324e148e21e7118abd",
+  file: "Qwen-Image-Edit-2511-Lightning-4steps-V1.0-bf16.safetensors",
+});
+
+/**
+ * The converter-written marker every SenseNova `_fast` rehost tier subdir carries (sc-22734). Both
+ * engines read it by this exact name (`DISTILL_MERGED_MARKER` in `mlx-gen-sensenova` and
+ * `candle-gen-sensenova`), and both WITHHOLD the production calibration identity when it is absent —
+ * so a `_fast` tier root without it is not a capturable cell, it is a cell whose capture would fail
+ * on an identity mismatch after the load. Declared as `requiredTierFiles` on the three `_fast`
+ * family rows so `classifyAnchor` refuses it by name.
+ */
+export const SENSENOVA_DISTILL_MERGED_MARKER = "distill_merged.json";
+
+/**
+ * The files the InstantID identity stack must carry, per staged directory (sc-22738).
+ *
+ * `SCENEWORKS_INSTANTID_WEIGHTS` is a bundle DIRECTORY and `SCENEWORKS_INSTANTID_CONTROLNET` an
+ * IdentityNet directory, and the adapter refuses each by name when a file is absent
+ * (`lib.rs` `instantid_identity_bundle_at` over `INSTANTID_IDENTITY_BUNDLE_FILES`, and
+ * `instantid_controlnet_dir` over `INSTANTID_CONTROLNET_WEIGHT_FILE`). `--list` asked only whether
+ * the two directories existed, so a half-staged identity stack classified `runnable` and the
+ * capture died on the missing file — the same shape of miss the Qwen Lightning LoRA cost. Bound to
+ * those Rust constants by a test rather than restated, so neither list can drift alone.
+ */
+export const INSTANTID_IDENTITY_BUNDLE_FILES = Object.freeze([
+  "ip-adapter.safetensors",
+  "scrfd_10g.safetensors",
+  "arcface_iresnet100.safetensors",
+]);
+export const INSTANTID_CONTROLNET_WEIGHT_FILE = "diffusion_pytorch_model.safetensors";
+
+/**
+ * The stage-two official refinement LoRA both LTX-2.5 arms attach, relative to the SNAPSHOT root
+ * (sc-22738) — `mlx_ltx25.rs` `DEV_ADAPTER` and `candle.rs` `LTX25_DISTILL_LORA_RELATIVE_PATH`,
+ * which are the same string and are bound to this one by a test. It sits BESIDE the
+ * `<variant>/<tier>` load root rather than inside it, so nothing the tier probe reads can see it.
+ */
+export const LTX25_DEV_REFINEMENT_LORA = "distilled_lora/ltx-2.5-22b-distilled-lora-450-bf16.safetensors";
+
+/** The stock enhancer co-requisite the MLX LTX-2.5 arm requires beside the load root
+ *  (`mlx_ltx25.rs` `load_artifact`); the Candle arm never opens it. */
+export const LTX25_ENHANCER_DIR = "enhancer";
+
+/**
+ * What `mlx_gen_minimax_h3::model::load` opens in the UPSTREAM snapshot root, at the pinned
+ * revision (`crates/media/mlx-gen/mlx-gen-minimax-h3/src/model.rs`), read off the loader rather
+ * than guessed from the manifest's download globs.
+ *
+ * `spec.weights` for BOTH MiniMax entries is the dense `MiniMaxAI/MiniMax-H3` snapshot — only the
+ * DiT and (at q4/q8) the text encoder are redirected onto the rehost — and the loader probes these
+ * six documents under it before it will build the generator. `FL2VA/audio_vae` carries the audio
+ * VAE's constructor arguments, which the repackaged root config does not.
+ *
+ * sc-22738 declares them because the campaign found the hard way what an undeclared read costs:
+ * this host holds a `MiniMaxAI/MiniMax-H3` snapshot with `FL2VA/`, `audio_vae/`, `tokenizer/` and
+ * `vae/` and NO `text_encoder/`, `--list` called `minimax_h3:bf16:mlx` runnable, and the booked
+ * capture died on `read …/text_encoder: No such file or directory` before it rendered anything.
+ */
+export const MINIMAX_UPSTREAM_ROOT_FILES = Object.freeze([
+  "vae/config.json",
+  "audio_vae/config.json",
+  "tokenizer/tokenizer.json",
+  "FL2VA/audio_vae/config.json",
+  "FL2VA/audio_vae/config.yaml",
+  "FL2VA/audio_vae/metadata.json",
+]);
+
+/**
+ * The text encoder's config, wherever the tier puts it.
+ *
+ * The TE's tier is DERIVED from the DiT's rather than being a free axis (`mlx.rs`
+ * `minimax_text_encoder_source`, and the manifest's three `componentId: "text_encoder"`
+ * co-requisite rows): `q4`/`q8` stage `<tier>/text_encoder` from the rehost, `bf16` takes the dense
+ * `text_encoder/` from the upstream root. So the SAME probe is declared against two different roots
+ * depending on the tier — which is exactly what the per-tier form of a required-file declaration is
+ * for, and why one flat list could not express it.
+ */
+export const MINIMAX_TEXT_ENCODER_CONFIG = "text_encoder/config.json";
+
+/**
+ * The two DiT partitions the loader probes inside the resolved tier root: the base one, and
+ * `transformer_ref/` — which is probed as the base partition's SIBLING at load time for EVERY
+ * entry, not only for `minimax_h3_ref`, because `ref2va` is a first-class task of the engine.
+ */
+export const MINIMAX_TIER_DIT_FILES = Object.freeze([
+  "transformer/config.json",
+  "transformer_ref/config.json",
+]);
+
+/**
+ * The files a required-file declaration demands for `tier`.
+ *
+ * A declaration is either a flat list (every tier needs the same files — the SenseNova `_fast`
+ * marker) or a per-tier object `{ all, q4, q8, bf16 }` whose `all` entry applies to every tier and
+ * whose tier entry is added on top. Absent is the empty list: a family that declares nothing keeps
+ * classifying exactly as it did.
+ */
+export function requiredFilesFor(declaration, tier) {
+  if (!declaration) return [];
+  if (Array.isArray(declaration)) return declaration;
+  return [...(declaration.all ?? []), ...(declaration[tier] ?? [])];
+}
+
+/**
+ * The shared Mage-Flow text-encoder + VAE rehost (sc-22733). Declared once and referenced by all six
+ * Mage family rows: it is the SAME repository and the SAME revision for every variant and both
+ * lanes, and both adapters read it through one `SCENEWORKS_MAGE_FLOW_COMPONENTS_*` family. The
+ * revision is NOT pinned here — it is read from the manifest's own `coRequisite` download rows, so
+ * a components re-host lands by editing the manifest alone.
+ */
+export const MAGE_COMPONENTS = Object.freeze({
+  env: "MAGE_FLOW_COMPONENTS",
+  repo: "SceneWorks/Mage-Flow-Components-mlx",
+});
+
+/**
+ * The two component ids both Mage engines advertise, in descriptor order. Bound to the adapter's own
+ * `MAGE_COMPONENT_TEXT_ENCODER` / `MAGE_COMPONENT_VAE` constants by a test, so the directories this
+ * script probes are the ones the adapters actually stage.
+ */
+export const MAGE_COMPONENT_IDS = Object.freeze(["text_encoder", "vae"]);
 
 /**
  * One row per provider arm an adapter implements, mirroring `match provider` in
@@ -52,27 +622,476 @@ export const LTX25_REPOSITORY = "SceneWorks/ltx-2.5-mlx";
  * (the Qwen MLX source capture, mlx.rs `qwen_source_capture`): the harness REQUIRES a sourceCapture
  * whenever `--raw-log-dir` is given, so the raw-log pair and `SCENEWORKS_MEMORY_CAPTURE_DIR` must be
  * passed for that arm and for no other.
+ *
+ * Rows are keyed by PROVIDER by default; sc-22729 adds MODEL-keyed rows (which must declare their
+ * `provider`) for the case where several catalog models ride one engine id. See `familyFor`.
+ *
+ * passed for that arm and for no other. `physical` is NOT inherited by a sibling family: the harness
+ * scopes the receipt requirement to `modelId === "qwen_image"` alone
+ * (`requiresPhysicalMlxProvenanceForCurrency`, memory-calibration-harness.mjs), and a test below
+ * binds this table to that predicate.
+ *
+ * `sideArtifact` is a second root a family member needs that the MANIFEST does not ship — today only
+ * the Qwen edit Lightning distill LoRA, which the worker fetches lazily at a pinned revision. It is
+ * keyed by model id because it belongs to one member of a shared-provider family, not to the family.
+ *
+ * Rows are keyed by PROVIDER by default; sc-22734 adds MODEL-keyed rows (which must declare their
+ * `provider`) for the case where several catalog models ride one engine id but ship their own
+ * independently pinned artifacts. See `familyFor`.
+ *
+ * ## What is NOT in this table, and why that is not a gap (sc-22738)
+ *
+ * STRICT-CONTROL OVERLAY PROVIDERS — `z_image_control`, `z_image_turbo_control`,
+ * `krea_2_turbo_control` and their siblings in `SHIPPED_CONTROL_WEIGHTS`
+ * (`crates/sceneworks-core/src/control_weights.rs`) — are engine ids for a base catalog entry
+ * loaded WITH a ControlNet attached. They ship no tiered downloads because they are not manifest
+ * models at all, so they can never be one of epic 22723 E1's `<modelId>:<tier>:<backend>` cells and
+ * `--list` has nothing to ask about them. `config/inference-provider-closures.json` declares four
+ * such lanes and those declarations must STAY — production control renders load under the `_control`
+ * provider id and their route currency is graded per (backend, provider) — so the closure table and
+ * this table are DELIBERATELY not in bijection. `scripts/stale-lane-report.mjs` reports them under
+ * their own heading (`shippedControlOverlayProviders`) rather than as "uncapturable".
+ *
+ * `arms` is bound to the Rust dispatch by `every declared adapter arm is a provider that lane's
+ * adapter really dispatches` (scripts/measure-memory-catalog.test.mjs): a declared arm with no
+ * `match provider` arm behind it reds, so `no_adapter_arm` is derived from the adapter and not from
+ * this table's spelling.
  */
 export const PROVIDER_FAMILIES = Object.freeze({
   qwen_image: { env: "QWEN_IMAGE", repo: "SceneWorks/qwen-image-mlx", arms: ["mlx", "candle"], physical: true },
-  z_image_turbo: { env: "Z_IMAGE", repo: "SceneWorks/z-image-turbo-mlx", arms: ["mlx", "candle"] },
-  krea_2_turbo: { env: "KREA", repo: "SceneWorks/krea-2-turbo-mlx", arms: ["mlx", "candle"] },
-  sdxl: { env: "SDXL", repo: "SceneWorks/sdxl-base-mlx", arms: ["mlx"] },
-  flux2_dev: { env: "FLUX2", repo: "SceneWorks/flux2-dev-mlx", arms: ["mlx"] },
-  minimax_h3: {
-    env: "MINIMAX_H3", repo: "SceneWorks/minimax-h3-mlx", arms: ["mlx"],
-    upstream: { env: "MINIMAX_H3_UPSTREAM", repo: "MiniMaxAI/MiniMax-H3" },
+  // `z_image_edit` anchors ride this family too (sc-22724): the catalog id is an alias for the
+  // Turbo provider driven in `edit_image` mode (worker engines.rs `z_image_edit → z_image_turbo`),
+  // and its manifest entry ships the same Turbo tiers, which `tierDownload` resolves by model id.
+  // Both Qwen edit catalog ids (`qwen_image_edit_2511` and `..._lightning`) plan this ONE engine
+  // provider (worker `qwen.rs` `qwen_edit_engine_id`, `qwen_edit_candle.rs` `QWEN_EDIT_PROVIDER_ID`)
+  // and ship the SAME per-tier rehost, which `tierDownload` resolves per model id. The Lightning id
+  // additionally loads the pinned distill LoRA, declared as its `sideArtifact` below.
+  qwen_image_edit: {
+    env: "QWEN_IMAGE_EDIT",
+    repo: "SceneWorks/qwen-image-edit-2511-mlx",
+    arms: ["mlx", "candle"],
+    sideArtifact: { qwen_image_edit_2511_lightning: QWEN_EDIT_LIGHTNING_LORA },
   },
-  // The harness prepares and binds the LTX-2.5 snapshot itself, and only for the mlx plan
-  // (`prepareLtx25CaptureArtifacts` refuses backend !== "mlx").
-  ltx_2_5: { ltx25: true, repo: LTX25_REPOSITORY, arms: ["mlx"] },
-  // The candle adapter does implement `ltx_2_5_distilled` (candle.rs LTX25_ID), but the harness
-  // binds the snapshot only for the mlx plan, so the anchor is not capturable through it today.
-  ltx_2_5_distilled: { ltx25: true, repo: LTX25_REPOSITORY, arms: [], harnessUnsupported: "the harness prepares LTX-2.5 artifacts (--ltx25-snapshot-root) for the mlx plan only" },
+  z_image_turbo: { env: "Z_IMAGE", repo: "SceneWorks/z-image-turbo-mlx", arms: ["mlx", "candle"] },
+  // The undistilled base is a distinct engine provider (`z_image`) with its own artifact family
+  // (sc-22724). Never the Turbo env: a base plan satisfied by Turbo weights re-labels Turbo's peaks.
+  z_image: { env: "Z_IMAGE_BASE", repo: "SceneWorks/z-image-mlx", arms: ["mlx", "candle"] },
+  krea_2_turbo: { env: "KREA", repo: "SceneWorks/krea-2-turbo-mlx", arms: ["mlx", "candle"] },
+  // sc-22735. The UNDISTILLED Krea 2 base is a separate engine provider (`krea_2_raw`) served by
+  // the same two crates as Turbo (`mlx-gen-krea` / `candle-gen-krea`) off its OWN tiered rehost, so
+  // it gets its own env family: a raw plan satisfied by Turbo weights would re-label Turbo's peaks
+  // as the true-CFG base model's, the `z_image` / `z_image_turbo` split for the same reason.
+  krea_2_raw: { env: "KREA_RAW", repo: "SceneWorks/krea-2-raw-mlx", arms: ["mlx", "candle"] },
+  // sc-22735. The VIDEO member of the family, and MLX-ONLY: `mlx-gen-krea-realtime` is the only
+  // engine that registers it, the worker's video route table has no candle arm for it, and every
+  // manifest download is `platforms: ["macos"]`. The tier root is the `<tier>/` subdir of the one
+  // rehost, the same shape as every other tiered family here.
+  krea_realtime_14b: { env: "KREA_REALTIME", repo: "SceneWorks/krea-realtime-14b-mlx", arms: ["mlx"] },
+  // sc-22729. The SDXL FAMILY: five catalog models the worker routes onto ONE engine id (`sdxl`)
+  // on both lanes, each with its own independently pinned tiered rehost. These rows are keyed by
+  // MODEL id rather than provider id — `classifyAnchor` prefers a model-keyed family — because the
+  // engine id is not an artifact identity: `candle-gen-sdxl` seals a per-route repository and mints
+  // a per-route calibration fingerprint, so a `realvisxl` anchor bound to the base-SDXL env family
+  // would re-label base SDXL's peaks as the finetune's.
+  //
+  // `components` are the three caller-staged SDXL corequisites (`tokenizer_clip_l`,
+  // `tokenizer_clip_bigg`, `vae_fp16_fix`). `candle-gen-sdxl`'s `validate_shared_component_revisions`
+  // REQUIRES all three at exact upstream revisions, so a candle capture stages the same corequisite
+  // snapshots the worker's `attach_required_components` stages. The MLX turnkey is self-contained
+  // and ignores them, so they are bound on both lanes and simply unused on one.
+  //
+  // `sdxlRoute` marks the members `candle-gen-sdxl` seals through `SDXL_ROUTES`. It is carried by
+  // ALL FIVE, not only the two that disagree today: the check is over the engine's declaration, so
+  // a future revision drift on any member is caught the same way rather than needing a new entry.
+  sdxl: { provider: "sdxl", env: "SDXL", repo: "SceneWorks/sdxl-base-mlx", arms: ["mlx", "candle"], components: SDXL_COMPONENTS, sdxlRoute: true },
+  realvisxl: { provider: "sdxl", env: "REALVISXL", repo: "SceneWorks/realvisxl-mlx", arms: ["mlx", "candle"], components: SDXL_COMPONENTS, sdxlRoute: true },
+  realvisxl_lightning: {
+    provider: "sdxl", env: "REALVISXL_LIGHTNING", repo: "SceneWorks/realvisxl-lightning-mlx",
+    arms: ["mlx", "candle"], components: SDXL_COMPONENTS, sdxlRoute: true,
+  },
+  // The candle lane routes all five `sdxl` members (`routing/candle.rs` `is_sdxl_family_candle_model`
+  // / `SDXL_CONTROL_MODELS`), so all five are DECLARED on both lanes. Whether a member's candle cell
+  // is capturable TODAY is a derived fact, not a table entry: `sdxlRoute` asks `sdxlCandleRouteDrift`
+  // to compare the engine's own `SDXL_ROUTES` revision with the one the manifest ships. Only the two
+  // Illustrious routes disagree at inference c6d6a4db, and only for as long as they disagree.
+  illustrious_xl_v1: {
+    provider: "sdxl", env: "ILLUSTRIOUS_XL_V1", repo: "SceneWorks/illustrious-xl-v1-mlx",
+    arms: ["mlx", "candle"], components: SDXL_COMPONENTS, sdxlRoute: true,
+  },
+  illustrious_xl_v2: {
+    provider: "sdxl", env: "ILLUSTRIOUS_XL_V2", repo: "SceneWorks/illustrious-xl-v2-mlx",
+    arms: ["mlx", "candle"], components: SDXL_COMPONENTS, sdxlRoute: true,
+  },
+  // The InstantID backbone IS the plain RealVisXL rehost (`image_jobs/instantid.rs`
+  // `INSTANTID_SDXL_REPO`), bound through its own env family so an InstantID plan can never be
+  // satisfied by a plain `realvisxl` root and vice versa. `stagedEnv` is the identity stack: the
+  // worker fetches it on first use from a pinned repo rather than declaring it as a manifest
+  // download, so there is nothing for the harness to resolve — the operator stages it and the
+  // capture binds the staged copy through the same env seams the worker reads.
+  instantid_realvisxl: {
+    provider: "instantid", env: "INSTANTID_REALVISXL", repo: "SceneWorks/realvisxl-mlx", arms: ["mlx", "candle"],
+    components: SDXL_COMPONENTS,
+    // Each staged directory declares the files the adapter opens INSIDE it (sc-22738): a directory
+    // that exists but is half-staged is exactly as unloadable as an absent one.
+    stagedEnv: [
+      { env: "SCENEWORKS_INSTANTID_WEIGHTS", files: INSTANTID_IDENTITY_BUNDLE_FILES },
+      { env: "SCENEWORKS_INSTANTID_CONTROLNET", files: [INSTANTID_CONTROLNET_WEIGHT_FILE] },
+    ],
+  },
+  flux2_dev: { env: "FLUX2", repo: "SceneWorks/flux2-dev-mlx", arms: ["mlx", "candle"] },
+  // sc-22727. TWO catalog models ride this ONE engine provider id (worker engines.rs:
+  // `flux2_klein_9b_kv` declares `engine_id: flux2_klein_9b`), and they load DIFFERENT artifacts.
+  // On MLX the engine tells them apart by the snapshot path AND by `LoadSpec::resolved_route`
+  // (`KleinArtifactInventory::validate_resolved_route`, mlx-gen-flux2/src/artifact_inventory.rs);
+  // on Candle ONLY by the snapshot path — `candle-gen-flux2` never reads `resolved_route`. Either
+  // way the artifact is the discriminator, so the family carries a per-modelId override: a KV plan
+  // resolved through the base rehost's env would re-label the base checkpoint's peaks as the KV
+  // variant's.
+  flux2_klein_9b: {
+    env: "FLUX2_KLEIN", repo: "SceneWorks/flux2-klein-9b-mlx", arms: ["mlx", "candle"],
+    variants: {
+      flux2_klein_9b_kv: { env: "FLUX2_KLEIN_KV", repo: "SceneWorks/flux2-klein-9b-kv-mlx" },
+    },
+  },
+  // The FLUX.1 family (sc-22726). `flux_dev`/`flux_schnell` are the two base text-to-image
+  // providers; `pulid_flux` is the PuLID-FLUX character route, which loads the SAME
+  // `SceneWorks/flux1-dev-mlx` backbone (worker image_jobs/pulid.rs `PULID_FLUX_REPO` and
+  // pulid_candle.rs `PULID_CANDLE_FLUX_REPO`) and therefore shares the FLUX1_DEV env family, the
+  // way `z_image_edit` shares the Turbo family. Its own manifest entry ships the same three tiers,
+  // which `tierDownload` resolves by model id.
+  flux1_dev: { env: "FLUX1_DEV", repo: "SceneWorks/flux1-dev-mlx", arms: ["mlx", "candle"] },
+  flux1_schnell: { env: "FLUX1_SCHNELL", repo: "SceneWorks/flux1-schnell-mlx", arms: ["mlx", "candle"] },
+  pulid_flux: {
+    env: "FLUX1_DEV", repo: "SceneWorks/flux1-dev-mlx", arms: ["mlx", "candle"],
+    // The identity stack is NOT a manifest download on either lane — the worker fetches it on first
+    // use — so the anchor binds the operator's pre-staged bundle instead, through the env var both
+    // worker lanes read (`SCENEWORKS_PULID_WEIGHTS`), under its strict Candle reading: a directory
+    // already holding all five files (pulid_candle.rs `ensure_pulid_candle_weights`; the MLX lane
+    // treats it as the directory to fill and outranks it with the `PULID_*` preset — see
+    // `PULID_IDENTITY_BUNDLE_ENV` in the adapter's lib.rs). The list below is the adapter's
+    // `PULID_IDENTITY_BUNDLE_FILES`, in the same order: the adapter checkpoint, the EVA tower, and
+    // the three face models both engines read out of `face_dir` by name. The test parses lib.rs
+    // and asserts the two lists are equal, so neither can drift alone.
+    bundle: {
+      env: "SCENEWORKS_PULID_WEIGHTS",
+      files: [
+        "pulid_flux_v0.9.1.safetensors",
+        "eva02_clip_l_336.safetensors",
+        "scrfd_10g.safetensors",
+        "arcface_iresnet100.safetensors",
+        "bisenet_parsing.safetensors",
+      ],
+    },
+  },
+  // The Mage-Flow family (sc-22733). SIX registered engine providers whose catalog ids are
+  // identical to their engine ids (worker `engines.rs` MODEL_TABLE), each with its OWN tiered
+  // rehost — so six rows rather than one shared family. What they DO share is the text encoder and
+  // the VAE: those are bit-identical across all six variants and are hosted once in
+  // `SceneWorks/Mage-Flow-Components-mlx`, which every Mage manifest entry declares as per-tier
+  // `coRequisite` downloads. Both engines resolve that split through `LoadSpec::components`
+  // (`mlx-gen-mage` `resolve_component_dirs`, `candle-gen-mage` `resolved_component_dirs`), so a
+  // Mage anchor binds TWO roots: the variant's tier root and the components SNAPSHOT (the tier is
+  // the first path element INSIDE it, which is why `components` resolves the snapshot rather than a
+  // tier root).
+  ...Object.fromEntries(
+    [
+      ["mage_flow", "MAGE_FLOW", "SceneWorks/Mage-Flow"],
+      ["mage_flow_base", "MAGE_FLOW_BASE", "SceneWorks/Mage-Flow-Base"],
+      ["mage_flow_turbo", "MAGE_FLOW_TURBO", "SceneWorks/Mage-Flow-Turbo"],
+      ["mage_flow_edit", "MAGE_FLOW_EDIT", "SceneWorks/Mage-Flow-Edit"],
+      ["mage_flow_edit_base", "MAGE_FLOW_EDIT_BASE", "SceneWorks/Mage-Flow-Edit-Base"],
+      ["mage_flow_edit_turbo", "MAGE_FLOW_EDIT_TURBO", "SceneWorks/Mage-Flow-Edit-Turbo"],
+    ].map(([provider, env, repo]) => [
+      provider,
+      { env, repo, arms: ["mlx", "candle"], components: MAGE_COMPONENTS },
+    ]),
+  ),
+  // The SD3.5 family (sc-22730). Three DISTINCT engine providers, each with its own tiered rehost
+  // and therefore its own env family — unlike `z_image_edit`/`pulid_flux`, none of them is an alias
+  // for another's backbone, so serving one from another's artifact would re-label that route's
+  // peaks. The catalog model id equals the engine provider id on BOTH lanes (worker engines.rs sets
+  // `engine_id == sceneworks_id` for all three), so the anchor key's modelId and the plan row's
+  // provider are the same token and `tierDownload` resolves the same manifest entry either way.
+  // One `SceneWorks/sd3.5-<route>-mlx` repo serves both lanes at all three tiers.
+  sd3_5_large: { env: "SD3_5_LARGE", repo: "SceneWorks/sd3.5-large-mlx", arms: ["mlx", "candle"] },
+  sd3_5_large_turbo: { env: "SD3_5_LARGE_TURBO", repo: "SceneWorks/sd3.5-large-turbo-mlx", arms: ["mlx", "candle"] },
+  sd3_5_medium: { env: "SD3_5_MEDIUM", repo: "SceneWorks/sd3.5-medium-mlx", arms: ["mlx", "candle"] },
+  // The SANA family (sc-22731). Two routes, and the ONE family in this table whose two lanes load
+  // DIFFERENT repositories: the MLX lane opens the per-tier SceneWorks turnkey, the Candle lane
+  // opens the upstream dense diffusers snapshot at its ROOT (worker `image_jobs/base.rs`
+  // `SANA_CANDLE_DIFFUSERS_REPO` / `SANA_SPRINT_CANDLE_DIFFUSERS_REPO`, resolved through
+  // `huggingface_pinned_snapshot_dir`, which never descends into a tier sub-directory). That is
+  // what `lanes` expresses; `tiered: false` is why the root carries no `<tier>` component.
+  sana_1600m: {
+    env: "SANA", repo: "SceneWorks/Sana_1600M_1024px_mlx", arms: ["mlx", "candle"],
+    lanes: { candle: { env: "SANA_DENSE", repo: "Efficient-Large-Model/Sana_1600M_1024px_diffusers", tiered: false } },
+  },
+  sana_sprint_1600m: {
+    env: "SANA_SPRINT", repo: "SceneWorks/Sana_Sprint_1.6B_1024px_mlx", arms: ["mlx", "candle"],
+    lanes: { candle: { env: "SANA_SPRINT_DENSE", repo: "Efficient-Large-Model/Sana_Sprint_1.6B_1024px_diffusers", tiered: false } },
+  },
+  // The three Chroma1 routes (sc-22731). Separate receipt/evidence domains (SC-20788) over three
+  // separate rehosts, so three env families — never one shared `CHROMA1`, which would let a Flash
+  // plan be satisfied by HD weights. Both lanes open the SAME per-tier turnkey.
+  chroma1_hd: { env: "CHROMA1_HD", repo: "SceneWorks/chroma1-hd-mlx", arms: ["mlx", "candle"] },
+  chroma1_base: { env: "CHROMA1_BASE", repo: "SceneWorks/chroma1-base-mlx", arms: ["mlx", "candle"] },
+  chroma1_flash: { env: "CHROMA1_FLASH", repo: "SceneWorks/chroma1-flash-mlx", arms: ["mlx", "candle"] },
+  // MiniMax-H3 (sc-18663; the Candle lane and the reference entry added by sc-22737). ONE engine
+  // provider id serves BOTH catalog entries — `mlx-gen-minimax-h3` and `candle-gen-minimax-h3` each
+  // register a single `MODEL_ID`, and the two entries are two DiT partitions of it (`transformer/`
+  // and `transformer_ref/`) which the engine selects from the CONDITIONING, not from the spec. So
+  // one family row keyed on the provider, with the reference entry as a `variants` override.
+  //
+  // `upstream` is the dense `MiniMaxAI/MiniMax-H3` snapshot the manifest ships as a co-requisite:
+  // it is the only tree carrying `vae/`, `audio_vae/`, `tokenizer/` and the `FL2VA/` documents, and
+  // BOTH adapters make it the load ROOT while redirecting `transformer/` and `text_encoder/` onto
+  // the packed rehost.
+  //
+  // The candle `bf16` leg of the BASE entry is the one cell that binds no rehost tier at all: the
+  // manifest ships `SceneWorks/minimax-h3-mlx` `bf16` as `platforms: ["macos"]`, and the off-Mac
+  // dense leg is `MiniMaxAI/MiniMax-H3` `bf16` shipped for `["windows","linux"]` with the weights
+  // at the snapshot ROOT. `candle_load_plan` stages nothing for it (`quant.is_some() || is_reference`
+  // is false), so declaring the rehost here would report `weights_missing` for a cell that is in
+  // fact stageable from the upstream snapshot alone — wrong in the direction that hides work.
+  minimax_h3: {
+    env: "MINIMAX_H3", repo: "SceneWorks/minimax-h3-mlx", arms: ["mlx", "candle"],
+    upstream: {
+      env: "MINIMAX_H3_UPSTREAM", repo: "MiniMaxAI/MiniMax-H3",
+      // sc-22738: what the load READS in this root, per tier. `bf16` adds the dense text encoder,
+      // which is the file this host does not hold and which the classifier called runnable.
+      requiredFiles: { all: MINIMAX_UPSTREAM_ROOT_FILES, bf16: [MINIMAX_TEXT_ENCODER_CONFIG] },
+    },
+    // The two DiT partitions live in the tier root on every rehost-backed cell, and `q4`/`q8` take
+    // the packed text encoder from it as well (`bf16` takes the dense one from upstream above).
+    requiredTierFiles: {
+      all: MINIMAX_TIER_DIT_FILES,
+      q4: [MINIMAX_TEXT_ENCODER_CONFIG],
+      q8: [MINIMAX_TEXT_ENCODER_CONFIG],
+    },
+    artifacts: {
+      candle: {
+        // The one cell whose tier root IS the upstream snapshot root: everything the load opens is
+        // in that flat tree, so the DiT partitions are required THERE. The text encoder and the
+        // root documents are already covered by the `upstream` declaration above, which probes the
+        // same directory — declaring them twice would only duplicate the reason string.
+        bf16: {
+          env: "MINIMAX_H3_UPSTREAM", repo: "MiniMaxAI/MiniMax-H3", layout: "flat",
+          requiredTierFiles: MINIMAX_TIER_DIT_FILES,
+        },
+      },
+    },
+    // The reference entry stages the tier tree at EVERY tier, on both lanes, because
+    // `transformer_ref/` is published only in the rehost — which is why the manifest ships its
+    // `bf16` rehost download for `["macos","windows","linux"]` while the base entry's is macOS-only.
+    // Dropping the base entry's candle-bf16 override is therefore not a tidy-up: it is the whole
+    // difference between the two entries' artifact axes.
+    variants: { minimax_h3_ref: { artifacts: undefined } },
+  },
+  // The harness prepares and binds the LTX-2.5 snapshot itself (`--ltx25-snapshot-root`), for
+  // whichever lane the plan routes: BOTH engine ids below are served from the same public snapshot,
+  // and both are declared here because the plan row's `provider` is what selects the family.
+  // `requiredSnapshotEntries` (sc-22738) are what each arm opens BESIDE `<variant>/<tier>`: the
+  // official stage-two refinement LoRA the dev variant attaches on both lanes, and — MLX only —
+  // the stock enhancer co-requisite `load_artifact` demands of every load. Neither is inside the
+  // load root, so the snapshot probe above cannot see them; without these an anchor whose planned
+  // cases include the dev variant classified `runnable` and failed after the booked session opened.
+  ltx_2_5: {
+    ltx25: true, repo: LTX25_REPOSITORY, arms: ["mlx"],
+    requiredSnapshotEntries: [
+      { path: LTX25_DEV_REFINEMENT_LORA },
+      { path: LTX25_ENHANCER_DIR, dir: true },
+    ],
+  },
+  // The Candle arm loads LTX-2.5 under its own engine id (candle.rs `LTX25_ID`, `candle-gen-ltx`
+  // `MODEL_25_ID`), so the candle plan rows name `ltx_2_5_distilled` while the anchor key — and
+  // therefore the manifest download the snapshot root resolves through — stays `ltx_2_5`.
+  ltx_2_5_distilled: {
+    ltx25: true, repo: LTX25_REPOSITORY, arms: ["candle"],
+    requiredSnapshotEntries: [{ path: LTX25_DEV_REFINEMENT_LORA }],
+  },
+  // The turnkey still family (sc-22732). Five catalog models over three engine crates, each a plain
+  // reference-free text-to-image route with its text encoder, transformer and decoder packed inside
+  // the per-tier snapshot — so one root is the whole load and no `upstream` or `bundle` is needed.
+  // The engine id equals the catalog model id for all five, so the family key, the plan row's
+  // `provider` and the anchor key's modelId are the same token.
+  kolors: { env: "KOLORS", repo: "SceneWorks/kolors-mlx", arms: ["mlx", "candle"] },
+  lens: { env: "LENS", repo: "SceneWorks/lens-mlx", arms: ["mlx", "candle"] },
+  // Its OWN rehost at its OWN revision, split from base Lens the way `flux1_schnell` is split from
+  // `flux1_dev`: a turbo plan satisfied by base weights would re-label the base model's peaks.
+  lens_turbo: { env: "LENS_TURBO", repo: "SceneWorks/lens-turbo-mlx", arms: ["mlx", "candle"] },
+  // Ideogram is the only shipped family whose tiers do NOT all come from one repository, which is
+  // what `tiers` exists for: `q4`/`q8` are the packed `SceneWorks/ideogram-4-mlx` turnkey, and
+  // `bf16` is the separate `SceneWorks/ideogram-4` repo at a separate revision (worker
+  // `image_jobs/base.rs` `IDEOGRAM_BF16_REPO`, and the manifest's own third `downloads[]` entry).
+  // Without the override `tierDownload` would fall back to the packed repo's q4 download — its
+  // "any download from this repo" arm — and bind bf16 to the wrong repository AND the wrong
+  // revision, which the record's loadability fingerprint is the only place that would ever show.
+  // Both Ideogram members share both repositories at both revisions and differ by provider.
+  ideogram_4: {
+    env: "IDEOGRAM", repo: "SceneWorks/ideogram-4-mlx", arms: ["mlx", "candle"],
+    tiers: { bf16: { env: "IDEOGRAM_BF16", repo: "SceneWorks/ideogram-4" } },
+  },
+  ideogram_4_turbo: {
+    env: "IDEOGRAM", repo: "SceneWorks/ideogram-4-mlx", arms: ["mlx", "candle"],
+    tiers: { bf16: { env: "IDEOGRAM_BF16", repo: "SceneWorks/ideogram-4" } },
+  },
+  // The Wan 2.2 family (sc-22736). The FIRST families whose artifact is per (lane, TIER) rather
+  // than per lane, which is why `familyArtifact` exists: each route ships a `SceneWorks/…-mlx`
+  // rehost on macOS and a separate `SceneWorks/…-candle` rehost on Windows/Linux, and the candle
+  // rehosts carry `q4` and `q8` ONLY — the candle dense leg is the upstream `Wan-AI/…-Diffusers`
+  // checkpoint, which the manifest ships with no pinned revision and with the weights at the
+  // snapshot ROOT rather than under a `bf16/` subtree (`layout: "flat"`).
+  //
+  // One env family per (route, lane, layout), never one shared `WAN22`: the three routes are three
+  // different checkpoints, and a plan for one satisfied by another's weights would re-label its
+  // peaks.
+  wan2_2_ti2v_5b: {
+    env: "WAN22_TI2V_5B_MLX", repo: "SceneWorks/wan2.2-ti2v-5b-mlx", arms: ["mlx", "candle"],
+    artifacts: {
+      candle: {
+        "*": { env: "WAN22_TI2V_5B_CANDLE", repo: "SceneWorks/wan2.2-ti2v-5b-candle" },
+        bf16: { env: "WAN22_TI2V_5B_DENSE", repo: "Wan-AI/Wan2.2-TI2V-5B-Diffusers", layout: "flat" },
+      },
+    },
+  },
+  wan2_2_t2v_14b: {
+    env: "WAN22_T2V_A14B_MLX", repo: "SceneWorks/wan2.2-t2v-a14b-mlx", arms: ["mlx", "candle"],
+    artifacts: {
+      candle: {
+        "*": { env: "WAN22_T2V_A14B_CANDLE", repo: "SceneWorks/wan2.2-t2v-a14b-candle" },
+        bf16: { env: "WAN22_T2V_A14B_DENSE", repo: "Wan-AI/Wan2.2-T2V-A14B-Diffusers", layout: "flat" },
+      },
+    },
+  },
+  wan2_2_i2v_14b: {
+    env: "WAN22_I2V_A14B_MLX", repo: "SceneWorks/wan2.2-i2v-a14b-mlx", arms: ["mlx", "candle"],
+    artifacts: {
+      candle: {
+        "*": { env: "WAN22_I2V_A14B_CANDLE", repo: "SceneWorks/wan2.2-i2v-a14b-candle" },
+        bf16: { env: "WAN22_I2V_A14B_DENSE", repo: "Wan-AI/Wan2.2-I2V-A14B-Diffusers", layout: "flat" },
+      },
+    },
+  },
+  // SCAIL-2 (sc-22736) is the opposite shape and the reason `artifacts` is an override rather than
+  // the rule: the manifest ships ONE `SceneWorks/scail2-mlx` repository, with all three tiers, on
+  // `platforms: ["macos", "windows", "linux"]`, and BOTH engine lanes open that same per-tier
+  // turnkey — which is exactly why the two lanes' calibration identities carry a backend token.
+  scail2_14b: { env: "SCAIL2", repo: "SceneWorks/scail2-mlx", arms: ["mlx", "candle"] },
+  // Bernini (sc-22737). ONE engine provider id (`bernini`) serves BOTH shipped catalog entries —
+  // the video entry `bernini` and the still entry `bernini_image` — because they are not two
+  // providers: `crates/sceneworks-worker/src/engines.rs` maps `bernini_image` onto `engine_id:
+  // "bernini"`, and `video_jobs/bernini.rs` calls `inference_runtime::load("bernini")` for the
+  // video entry. The plan row's `provider` is what selects the family, so ONE row serves both, and
+  // no `variants` override is needed: the two entries load the SAME artifact at the same tier and
+  // differ only in the modality of the render.
+  //
+  // The two lanes load DIFFERENT repositories, which is why this needs the per-lane override: the
+  // manifest ships `SceneWorks/bernini-mlx` per-tier on `["macos"]` and `SceneWorks/bernini` — a
+  // single untiered download — on `["windows","linux"]`. The off-Mac download names no `variant`
+  // because the tier subtrees (`q4/`, `q8/`, `bf16/`) live INSIDE that one snapshot, so the load
+  // root is still the tier directory and the layout stays `tiered`.
+  bernini: {
+    env: "BERNINI", repo: "SceneWorks/bernini-mlx", arms: ["mlx", "candle"],
+    artifacts: { candle: { "*": { env: "BERNINI_CANDLE", repo: "SceneWorks/bernini" } } },
+  },
+  // LTX-2.3 (sc-22737). Like LTX-2.5 above, the Candle arm loads this family under its OWN engine
+  // id (`candle-gen-ltx`'s distilled `MODEL_ID`, spelled `ltx_2_3_distilled` in candle.rs), so the
+  // Candle plan rows name that provider while the anchor key — and therefore the manifest download
+  // the root resolves through — stays `ltx_2_3`. Both rows point at the ONE rehost the manifest
+  // ships for all three platforms.
+  //
+  // The Candle lane additionally binds the DENSE GEMMA text encoder, which is a sibling directory
+  // of the same snapshot rather than a separate repository (`SCENEWORKS_LTX_TEXT_ENCODER_ROOT`,
+  // validated by candle.rs against `<snapshot>/gemma`). That is what `siblingRoots` declares — see
+  // its use in `describeAnchor`. The MLX arm reads no such root, so its row declares none.
+  //
+  // There is no `ltx_2_3:bf16:candle` cell, and its absence is a ROUTING fact rather than an
+  // omission: the manifest ships LTX-2.3's `bf16` download as `platforms: ["macos"]`, and the
+  // worker's own Candle tier resolver
+  // (`video_jobs/candle.rs#candle_ltx_bundle_tier_across_revisions`) returns `None` for
+  // `CandleLtxTier::Bf16`. `measure-memory-catalog.test.mjs` asserts that exemption against BOTH
+  // of those sources, so it cannot outlive either reason.
+  ltx_2_3: { env: "LTX", repo: LTX_2_3_REPOSITORY, arms: ["mlx"] },
+  ltx_2_3_distilled: {
+    env: "LTX", repo: LTX_2_3_REPOSITORY, arms: ["candle"],
+    siblingRoots: [{ env: "LTX_TEXT_ENCODER", dir: "gemma" }],
+  },
+  // sc-22734. The SenseNova-U1 FAMILY: six catalog models the worker routes onto TWO engine ids on
+  // both lanes — `sensenova_u1_8b` (the 50-step quality path) and `sensenova_u1_8b_fast` (the
+  // 8-step distill), each carrying a base id and two infographic finetunes.
+  //
+  // These rows are keyed by MODEL id rather than provider id — `familyFor` prefers a model-keyed
+  // row that declares the plan's provider — because the engine id is NOT the artifact identity
+  // here. The six models ship six INDEPENDENTLY PINNED tiered rehosts (six repositories, six
+  // revisions), and both engines mint a per-ROUTE calibration fingerprint, so an infographic anchor
+  // bound to the base SenseNova env family would load base weights and re-label base SenseNova's
+  // peaks as the finetune's. A provider-keyed table cannot express that: it has one repo per engine
+  // id, and `tierDownload` would be asked for a base-repo download the finetune's manifest entry
+  // does not ship.
+  sensenova_u1_8b: {
+    provider: "sensenova_u1_8b", env: "SENSENOVA_U1_8B",
+    repo: "SceneWorks/sensenova-u1-8b-mlx", arms: ["mlx", "candle"],
+  },
+  sensenova_u1_8b_infographic_v2: {
+    provider: "sensenova_u1_8b", env: "SENSENOVA_U1_8B_INFOGRAPHIC_V2",
+    repo: "SceneWorks/sensenova-u1-8b-infographic-v2-mlx", arms: ["mlx", "candle"],
+  },
+  sensenova_u1_8b_infographic_v3: {
+    provider: "sensenova_u1_8b", env: "SENSENOVA_U1_8B_INFOGRAPHIC_V3",
+    repo: "SceneWorks/sensenova-u1-8b-infographic-v3-mlx", arms: ["mlx", "candle"],
+  },
+  sensenova_u1_8b_fast: {
+    requiredTierFiles: [SENSENOVA_DISTILL_MERGED_MARKER],
+    provider: "sensenova_u1_8b_fast", env: "SENSENOVA_U1_8B_FAST",
+    repo: "SceneWorks/sensenova-u1-8b-fast-mlx", arms: ["mlx", "candle"],
+  },
+  sensenova_u1_8b_infographic_v2_fast: {
+    requiredTierFiles: [SENSENOVA_DISTILL_MERGED_MARKER],
+    provider: "sensenova_u1_8b_fast", env: "SENSENOVA_U1_8B_INFOGRAPHIC_V2_FAST",
+    repo: "SceneWorks/sensenova-u1-8b-infographic-v2-fast-mlx", arms: ["mlx", "candle"],
+  },
+  sensenova_u1_8b_infographic_v3_fast: {
+    requiredTierFiles: [SENSENOVA_DISTILL_MERGED_MARKER],
+    provider: "sensenova_u1_8b_fast", env: "SENSENOVA_U1_8B_INFOGRAPHIC_V3_FAST",
+    repo: "SceneWorks/sensenova-u1-8b-infographic-v3-fast-mlx", arms: ["mlx", "candle"],
+  },
 });
+
+/**
+ * The family row that serves one anchor.
+ *
+ * The default key is the PROVIDER, so a catalog alias rides its engine's row (`z_image_edit` on
+ * `z_image_turbo`) and a lane-specific engine id keeps selecting the family (LTX-2.5's two ids).
+ * sc-22729 and sc-22734 add the inverse case: several catalog models on ONE engine id, each with its own
+ * artifact family. A MODEL-keyed row wins for those — but ONLY when it declares the provider it
+ * belongs to and that provider is the one the plan named, so a model-keyed row can never capture
+ * an anchor that some other engine serves.
+ */
+export function familyFor(modelId, provider, families = PROVIDER_FAMILIES) {
+  // Model-keyed resolution — and the provider-keyed `variants` override (sc-22727's FLUX.2 klein
+  // pair) — both live in `providerFamily`, so this is a single delegation.
+  return providerFamily(provider, modelId, families);
+}
 
 export function fail(message) {
   throw new Error(message);
+}
+
+/**
+ * The artifact family one anchor binds: the provider's row, with any per-modelId override applied.
+ * A provider that serves several catalog models from ONE registry id (sc-22727's two klein models)
+ * declares the divergent members under `variants`; everything else is the row itself.
+ */
+export function providerFamily(provider, modelId, families = PROVIDER_FAMILIES) {
+  // sc-22729/sc-22734's MODEL-keyed rows win first, but ONLY when the row declares the provider it belongs
+  // to and that provider is the one the plan named — so a model-keyed row can never capture an
+  // anchor some other engine serves.
+  const scoped = families[modelId];
+  if (scoped?.provider !== undefined && scoped.provider === provider) return scoped;
+  const family = families[provider];
+  if (!family) return undefined;
+  const variant = family.variants?.[modelId];
+  return variant ? { ...family, ...variant, variants: undefined } : family;
 }
 
 export function anchorParts(key) {
@@ -153,6 +1172,12 @@ export async function readDeclaredLanes(root = ROOT) {
   return new Set(Object.keys(config.models ?? {}));
 }
 
+/** `<backend>:<provider>` keys with a crate-closure declaration (runbook §7c). */
+export async function readDeclaredProviders(root = ROOT) {
+  const config = JSON.parse(await readFile(path.join(root, PROVIDER_CLOSURE_CONFIG_PATH), "utf8"));
+  return new Set(Object.keys(config.providers ?? {}));
+}
+
 export async function readMatrixCurrency(root = ROOT) {
   let matrix;
   try {
@@ -186,6 +1211,134 @@ export function tierDownload(models, modelId, repo, tier) {
   return any;
 }
 
+/**
+ * The manifest download that ships EXACTLY `tier` of `repo` for `modelId`, or `undefined`.
+ *
+ * [`tierDownload`] deliberately falls back to any pinned download of the repository, because every
+ * family before sc-22736 rehosted all three tiers under ONE revision and the fallback merely names
+ * that revision. A per-(lane, tier) artifact cannot use it: the question there is whether this
+ * repository ships this tier at all, and the fallback answers "yes" for every tier of every
+ * repository that ships one.
+ */
+export function tierVariantDownload(models, modelId, repo, tier) {
+  const model = models.find((entry) => entry.id === modelId);
+  if (!model) fail(`manifest has no model ${modelId}`);
+  return (model.downloads ?? []).find(
+    (download) => download.repo === repo && download.variant === tier && !download.coRequisite,
+  );
+}
+
+/**
+ * The ARTIFACT one anchor binds, resolved per (lane, tier).
+ *
+ * Every family before sc-22736 rehosts all three tiers of both lanes in ONE repository under a
+ * `<tier>/` subtree, so the family row's `env`/`repo` is the whole answer. The Wan 2.2 family is
+ * not shaped that way, and the manifest is where that shows:
+ *
+ * * each model ships a `SceneWorks/…-mlx` rehost on `platforms: ["macos"]` and a separate
+ *   `SceneWorks/…-candle` rehost on `["windows","linux"]`, so the two lanes load DIFFERENT
+ *   repositories at different revisions, and
+ * * the candle rehosts ship `q4` and `q8` only — the candle bf16 leg is the UPSTREAM
+ *   `Wan-AI/Wan2.2-*-Diffusers` checkpoint, which the manifest ships with NO pinned revision and
+ *   with the weights at the snapshot root rather than under a `bf16/` subtree.
+ *
+ * A row therefore declares `artifacts[backend][tier]`, or `artifacts[backend]["*"]` for a whole
+ * lane; anything an override omits falls back to the row itself. `layout: "flat"` marks the second
+ * shape above — probing `<snapshot>/bf16` there would report `weights_missing` for a cell that is
+ * staged, which is the wrong answer in the direction that hides work.
+ */
+export function familyArtifact(family, backend, tier) {
+  // Two override shapes stack, narrowest last:
+  //
+  // * `lanes[backend]` (sc-22731) — a whole lane loads a different repository, and `tiered: false`
+  //   there means the load root is the snapshot ITSELF, with no `<tier>` component.
+  // * `artifacts[backend][tier]`, or `artifacts[backend]["*"]` (sc-22736) — one CELL loads a
+  //   different repository, which is what the Wan 2.2 candle bf16 leg needs.
+  // * `tiers[tier]` (sc-22732) — one TIER loads a different repository on BOTH lanes, which is what
+  //   `ideogram_4`'s bf16 leg needs: it ships from `SceneWorks/ideogram-4` at its own revision while
+  //   its q4/q8 siblings come from the packed `SceneWorks/ideogram-4-mlx` turnkey.
+  //
+  // Anything an override omits falls back to the family row.
+  const lane = family.lanes?.[backend];
+  const perTier = family.artifacts?.[backend];
+  const override = perTier?.[tier] ?? perTier?.["*"];
+  const merged = {
+    env: family.env,
+    repo: family.repo,
+    ...(lane ?? {}),
+    ...(family.tiers?.[tier] ?? {}),
+    ...(override ?? {}),
+  };
+  // `layout: "flat"` and `tiered: false` say the same thing; the first is this function's word for
+  // it and the second is the family table's.
+  return { ...merged, layout: merged.layout ?? (merged.tiered === false ? "flat" : "tiered") };
+}
+
+/** Snapshot revision directories of `repo` staged under one hub root. */
+async function hostSnapshotRevisions(hub, repo) {
+  try {
+    return await readdir(path.join(hub, `models--${repo.replaceAll("/", "--")}`, "snapshots"));
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Where `tier` of `artifact` lives on this host, the revision that names it, and why it is absent.
+ *
+ * A download the manifest pins resolves the way every family always has. A download the manifest
+ * ships WITHOUT a revision (the upstream Wan Diffusers checkpoints) has no revision to probe with,
+ * so the revision is read off whatever snapshot of that repository is staged here. That is not a
+ * weaker binding than the pinned case in the only place it matters — the adapter arm still
+ * validates the repository it was handed and the resolved revision is written into the record —
+ * but it IS host-dependent, so the reason string says so rather than reporting a missing pin as a
+ * missing snapshot.
+ */
+export async function resolveArtifactRoot(models, modelId, tier, artifact, hubs) {
+  const suffix = artifact.layout === "flat" ? [] : [tier];
+  const label = suffix.length > 0 ? `/${tier}` : "";
+  const declared = tierVariantDownload(models, modelId, artifact.repo, tier);
+  const revision = tierDownloadRevision(models, modelId, artifact.repo, tier, declared);
+  if (revision) {
+    const root = await firstExistingDirectory(
+      hubs.map((hub) => snapshotPath(hub, artifact.repo, revision, ...suffix)),
+    );
+    return {
+      root,
+      revision,
+      expected: snapshotPath(hubs[0], artifact.repo, revision, ...suffix),
+      reason: `no ${artifact.repo}@${revision.slice(0, 8)}${label} on this host`,
+    };
+  }
+  for (const hub of hubs) {
+    for (const candidate of await hostSnapshotRevisions(hub, artifact.repo)) {
+      const root = snapshotPath(hub, artifact.repo, candidate, ...suffix);
+      if (await firstExistingDirectory([root])) return { root, revision: candidate, expected: root, reason: null };
+    }
+  }
+  return {
+    root: null,
+    revision: null,
+    expected: snapshotPath(hubs[0], artifact.repo, "<revision>", ...suffix),
+    reason:
+      `${artifact.repo} is shipped without a pinned revision and no snapshot of it is staged on ` +
+      `this host, so ${modelId}:${tier} has no root to bind`,
+  };
+}
+
+/**
+ * The revision of a pinned rehost that ships this tier under one revision for all of them.
+ *
+ * Only consulted when the manifest declares no download for exactly `(repo, tier)`: a rehost that
+ * ships `q4`, `q8` and `bf16` under one revision is still resolvable through [`tierDownload`], and
+ * a repository that ships NO tier of this model at all is a declaration error rather than a host
+ * one, so it fails loudly here instead of reporting `weights_missing`.
+ */
+function tierDownloadRevision(models, modelId, repo, tier, declared) {
+  if (declared) return declared.revision ?? null;
+  return tierDownload(models, modelId, repo, tier).revision ?? null;
+}
+
 export function hubRoots(hfCache = []) {
   // Explicit --hf-cache roots first (repeatable), then the HF env convention, then the app cache.
   const roots = [
@@ -204,6 +1357,15 @@ export function snapshotPath(hub, repo, revision, ...rest) {
   return path.join(hub, `models--${repo.replaceAll("/", "--")}`, "snapshots", revision, ...rest);
 }
 
+/** Whether `candidate` is a readable regular file (a symlink into the HF blob store counts). */
+async function isFile(candidate) {
+  try {
+    return (await stat(candidate)).isFile();
+  } catch {
+    return false;
+  }
+}
+
 async function firstExistingDirectory(candidates) {
   for (const candidate of candidates) {
     try {
@@ -217,12 +1379,35 @@ async function firstExistingDirectory(candidates) {
  * Decide what the run can do with one plan anchor: which adapter arm serves it, which weights
  * root it loads, and why it would be skipped. Pure apart from the directory probes.
  */
-export async function classifyAnchor(key, planned, { models, backend, hubs, current, captured, declaredLanes }) {
+export async function classifyAnchor(key, planned, { models, backend, hubs, current, captured, declaredLanes, declaredProviders, sdxlRoutes = null, families = PROVIDER_FAMILIES }) {
   const parts = anchorParts(key);
   const row = { key, ...parts, provider: planned.provider, status: "runnable", reason: null, env: {}, roots: [] };
   if (parts.backend !== backend) return { ...row, status: "other_backend", reason: `${parts.backend} lane` };
-  const family = PROVIDER_FAMILIES[planned.provider];
+  const family = familyFor(parts.modelId, planned.provider, families);
+  // No shipped family carries `harnessUnsupported` today (sc-22725 gave LTX-2.5's candle engine id
+  // a real row). The status stays for the next provider whose adapter arm exists but whose
+  // artifacts the harness cannot bind: it is the one refusal that is neither a missing arm nor a
+  // missing declaration.
+  //
+  // KEPT DELIBERATELY (sc-22725 review): the `families` parameter above is a test seam and nothing
+  // else — no caller passes it — and it exists so this otherwise-unreachable branch is driven by a
+  // synthetic family rather than left uncovered. The alternative considered and rejected was
+  // deleting the branch and the parameter together; that would make the next unbindable provider
+  // report as `no_adapter_arm`, which is the wrong diagnosis and sends the reader to adapter work.
   if (family?.harnessUnsupported) return { ...row, status: "harness_unsupported", reason: family.harnessUnsupported };
+  // sc-22729: the same refusal, scoped to ONE lane and DERIVED. A model whose engine cannot seal an
+  // artifact identity for it on a lane is not a missing arm and not a missing declaration — the arm
+  // exists and the plan declares the cell — so it reports the engine-side reason rather than
+  // sending the reader to adapter work. With no inference checkout to read, there is no refusal at
+  // all: the cell classifies normally and carries the note saying the comparison did not happen.
+  if (family?.sdxlRoute && backend === "candle") {
+    if (sdxlRoutes === null) {
+      row.routeCheck = SDXL_ROUTES_UNCHECKED;
+    } else {
+      const drift = sdxlCandleRouteDrift(parts.modelId, parts.tier, sdxlRoutes, models);
+      if (drift) return { ...row, status: "harness_unsupported", reason: drift };
+    }
+  }
   if (!family || !family.arms.includes(backend)) {
     return {
       ...row, status: "no_adapter_arm",
@@ -236,6 +1421,12 @@ export async function classifyAnchor(key, planned, { models, backend, hubs, curr
       reason: `${parts.modelId}:${backend} has no loader-closure declaration in ${ANCHOR_LOADER_CONFIG_PATH}; --stamp-anchors would refuse it (runbook §7c)`,
     };
   }
+  if (declaredProviders && !declaredProviders.has(`${backend}:${planned.provider}`)) {
+    return {
+      ...row, status: "provider_undeclared",
+      reason: `${backend}:${planned.provider} has no crate-closure declaration in ${PROVIDER_CLOSURE_CONFIG_PATH}; the record would carry no closure digest (runbook §7c)`,
+    };
+  }
   if (current.get(key) === true) row.current = true;
 
   if (family.ltx25) {
@@ -243,21 +1434,112 @@ export async function classifyAnchor(key, planned, { models, backend, hubs, curr
     const snapshot = await firstExistingDirectory(hubs.map((hub) => snapshotPath(hub, family.repo, download.revision)));
     row.roots.push({ label: "ltx25 snapshot", path: snapshot ?? snapshotPath(hubs[0], family.repo, download.revision) });
     if (!snapshot) return { ...row, status: "weights_missing", reason: `no ${family.repo}@${download.revision.slice(0, 8)} snapshot on this host` };
+    const missingSnapshot = [];
+    for (const entry of family.requiredSnapshotEntries ?? []) {
+      const candidate = path.join(snapshot, entry.path);
+      const present = entry.dir
+        ? (await firstExistingDirectory([candidate])) !== null
+        : await isFile(candidate);
+      if (!present) missingSnapshot.push(entry.path);
+    }
+    if (missingSnapshot.length > 0) {
+      return {
+        ...row, status: "weights_missing",
+        reason: `${family.repo} snapshot ${snapshot} is missing ${missingSnapshot.join(", ")}, which the ${backend} arm opens beside the load root`,
+      };
+    }
     row.ltx25SnapshotRoot = snapshot;
     row.physical = false;
     return row;
   }
 
-  const download = tierDownload(models, parts.modelId, family.repo, parts.tier);
-  const tierRoot = await firstExistingDirectory(hubs.map((hub) => snapshotPath(hub, family.repo, download.revision, parts.tier)));
-  row.roots.push({ label: "tier root", path: tierRoot ?? snapshotPath(hubs[0], family.repo, download.revision, parts.tier) });
-  if (!tierRoot) {
-    return { ...row, status: "weights_missing", reason: `no ${family.repo}@${download.revision.slice(0, 8)}/${parts.tier} on this host` };
+  // The artifact is resolved per (lane, tier), not per family: SANA's two lanes load different
+  // repositories (sc-22731) and a Wan 2.2 candle bf16 cell loads the upstream Diffusers checkpoint
+  // rather than the packed rehost its q4/q8 siblings live in (sc-22736).
+  const artifact = familyArtifact(family, backend, parts.tier);
+  const resolved = await resolveArtifactRoot(models, parts.modelId, parts.tier, artifact, hubs);
+  row.roots.push({
+    label: artifact.layout === "flat" ? "snapshot root" : "tier root",
+    path: resolved.root ?? resolved.expected,
+  });
+  if (!resolved.root) {
+    return { ...row, status: "weights_missing", reason: resolved.reason };
   }
-  row.env[`SCENEWORKS_${family.env}_REPOSITORY`] = family.repo;
-  row.env[`SCENEWORKS_${family.env}_REVISION`] = download.revision;
-  row.env[`SCENEWORKS_${family.env}_ROOT`] = tierRoot;
+  const tierRoot = resolved.root;
+  row.env[`SCENEWORKS_${artifact.env}_REPOSITORY`] = artifact.repo;
+  row.env[`SCENEWORKS_${artifact.env}_REVISION`] = resolved.revision;
+  row.env[`SCENEWORKS_${artifact.env}_ROOT`] = tierRoot;
   row.tierRoot = tierRoot;
+  // A converter-written file the ENGINE requires INSIDE the resolved tier root, beyond the weights
+  // the manifest download ships (sc-22734 review). The SenseNova `_fast` rehosts are the live case:
+  // `mlx-gen-sensenova`'s `production_calibration_identity` and `candle-gen-sensenova`'s
+  // `fast_spec_is_the_premerged_turnkey` both WITHHOLD the production identity when a `_fast` tier
+  // root carries no `distill_merged.json`, because without the marker the loader merges the distill
+  // LoRA at load and the resident shape is not the one the anchor prices. Nine `_fast` MLX cells
+  // would therefore hard-fail at capture with an identity mismatch, hours into a booked session,
+  // over a fact this probe can read in a millisecond. Classified by name instead.
+  // sc-22738 generalized the declaration from a flat list to a per-tier one: MiniMax-H3's text
+  // encoder is packed inside the tier root at q4/q8 and taken from the dense upstream root at bf16,
+  // so which file a root must carry depends on the tier being classified.
+  const requiredTierFiles = requiredFilesFor(artifact.requiredTierFiles ?? family.requiredTierFiles, parts.tier);
+  const missingTierFiles = [];
+  for (const file of requiredTierFiles) {
+    try {
+      if (!(await stat(path.join(resolved.root, file))).isFile()) missingTierFiles.push(file);
+    } catch { missingTierFiles.push(file); }
+  }
+  if (missingTierFiles.length > 0) {
+    return {
+      ...row, status: "weights_missing",
+      reason: `tier root ${resolved.root} is missing ${missingTierFiles.join(", ")}, which the engine requires before it will publish this cell's calibration identity`,
+    };
+  }
+  if (family.bundle) {
+    // A pre-staged loose-file bundle rather than an HF snapshot, so it is probed through the
+    // operator env the worker itself honours. Absent or incomplete is `weights_missing` — the same
+    // class as a missing tier root, and NOT "runnable" (a cell whose identity stack cannot be bound
+    // is not measurable on this host, and saying otherwise sends an operator to book a capture).
+    // Absolute before it is probed or handed on: the adapter canonicalizes the value from the
+    // HARNESS's cwd (lib.rs `pulid_identity_bundle`), so a relative export that resolved here
+    // against node's cwd would be probed in one directory and opened in another.
+    const bundleRoot = process.env[family.bundle.env] ? path.resolve(process.env[family.bundle.env]) : undefined;
+    row.roots.push({ label: "pulid bundle", path: bundleRoot ?? `$${family.bundle.env}` });
+    if (!bundleRoot) {
+      return { ...row, status: "weights_missing", reason: `${family.bundle.env} is unset; the PuLID identity bundle is not staged on this host` };
+    }
+    const missing = [];
+    for (const file of family.bundle.files) {
+      try {
+        if (!(await stat(path.join(bundleRoot, file))).isFile()) missing.push(file);
+      } catch { missing.push(file); }
+    }
+    if (missing.length > 0) {
+      return { ...row, status: "weights_missing", reason: `${family.bundle.env} bundle ${bundleRoot} is missing ${missing.join(", ")}` };
+    }
+    row.env[family.bundle.env] = bundleRoot;
+  }
+  // A directory of the artifact's OWN snapshot that the adapter binds through its own env var,
+  // beside the tier root (sc-22737, LTX-2.3's dense Gemma text encoder). Unlike `upstream` it is
+  // not a second repository and unlike `components` it is not a co-requisite download: it is a
+  // SIBLING of `<snapshot>/<tier>`, shipped inside the same snapshot at the same revision, which
+  // is exactly how candle.rs validates it (`validate_huggingface_snapshot_root(root, repo, rev,
+  // "gemma", …)`). Absent is `weights_missing` for the same reason a missing tier root is: the
+  // load cannot open, and calling the cell `runnable` would send an operator to book a capture
+  // that fails on its text encoder.
+  for (const sibling of family.siblingRoots ?? []) {
+    const siblingRoot = await firstExistingDirectory([path.join(path.dirname(resolved.root), sibling.dir)]);
+    row.roots.push({
+      label: `${sibling.dir} root`,
+      path: siblingRoot ?? path.join(path.dirname(resolved.root), sibling.dir),
+    });
+    if (!siblingRoot) {
+      return {
+        ...row, status: "weights_missing",
+        reason: `no ${sibling.dir}/ beside ${artifact.repo}@${resolved.revision.slice(0, 8)}/${parts.tier} on this host`,
+      };
+    }
+    row.env[`SCENEWORKS_${sibling.env}_ROOT`] = siblingRoot;
+  }
   if (family.upstream) {
     const upstream = tierDownload(models, parts.modelId, family.upstream.repo, parts.tier);
     const upstreamRoot = await firstExistingDirectory(hubs.map((hub) => snapshotPath(hub, family.upstream.repo, upstream.revision)));
@@ -265,9 +1547,140 @@ export async function classifyAnchor(key, planned, { models, backend, hubs, curr
     if (!upstreamRoot) {
       return { ...row, status: "weights_missing", reason: `no ${family.upstream.repo}@${upstream.revision.slice(0, 8)} snapshot on this host` };
     }
+    // sc-22738. A PRESENT snapshot is not a complete one. The dense MiniMax-H3 tree staged on the
+    // capture host carried `vae/`, `audio_vae/`, `tokenizer/` and `FL2VA/` but no `text_encoder/`,
+    // and because this branch only asked whether the snapshot directory existed, `--list` reported
+    // `minimax_h3:bf16:mlx` runnable and the booked capture died on the missing directory instead.
+    // The declared files are the ones the pinned loader opens under this root, so an incomplete
+    // mirror is `weights_missing` — named file by file — exactly like an absent one.
+    const missingUpstream = [];
+    for (const file of requiredFilesFor(family.upstream.requiredFiles, parts.tier)) {
+      try {
+        if (!(await stat(path.join(upstreamRoot, file))).isFile()) missingUpstream.push(file);
+      } catch { missingUpstream.push(file); }
+    }
+    if (missingUpstream.length > 0) {
+      return {
+        ...row, status: "weights_missing",
+        reason: `${family.upstream.repo} snapshot ${upstreamRoot} is missing ${missingUpstream.join(", ")}, which the pinned loader opens under the snapshot root`,
+      };
+    }
     row.env[`SCENEWORKS_${family.upstream.env}_REPOSITORY`] = family.upstream.repo;
     row.env[`SCENEWORKS_${family.upstream.env}_REVISION`] = upstream.revision;
     row.env[`SCENEWORKS_${family.upstream.env}_ROOT`] = upstreamRoot;
+  }
+  // sc-22729: the caller-staged SDXL components. Their revisions come from the model's own
+  // corequisite downloads, which are exactly the revisions `candle-gen-sdxl` validates against.
+  for (const component of Array.isArray(family.components) ? family.components : []) {
+    const download = tierDownload(models, parts.modelId, component.repo, parts.tier);
+    const root = await firstExistingDirectory(hubs.map((hub) => snapshotPath(hub, component.repo, download.revision)));
+    row.roots.push({ label: `component ${component.env}`, path: root ?? snapshotPath(hubs[0], component.repo, download.revision) });
+    if (!root) {
+      return { ...row, status: "weights_missing", reason: `no ${component.repo}@${download.revision.slice(0, 8)} snapshot on this host` };
+    }
+    row.env[component.env] = root;
+  }
+  // The shared component snapshot a split-layout family stages its text encoder and VAE from
+  // (sc-22733, Mage-Flow). Unlike `upstream`, this root is a co-requisite the MANIFEST ships, and
+  // unlike the tier root above it is the SNAPSHOT: the tier is the first path element inside it,
+  // and the adapters join `<tier>/text_encoder` and `<tier>/vae` themselves. Absent is
+  // `weights_missing` — a Mage load whose components are not staged cannot open at all, because the
+  // variant rehost carries no `text_encoder/` or `vae/` sibling for the loader to fall back to.
+  if (family.components && !Array.isArray(family.components)) {
+    // The components are declared PER TIER (one co-requisite row per component per tier), so the
+    // row for THIS tier is what says the tier's text encoder and VAE are shipped at all. No row is
+    // `weights_missing` — the cell is planned and the arm exists, the host merely cannot bind the
+    // artifact — never a thrown error that aborts the whole `--list` (sc-22733 review).
+    const download = (models.find((entry) => entry.id === parts.modelId)?.downloads ?? []).find(
+      (row) => row.repo === family.components.repo && row.coRequisite && row.variant === parts.tier,
+    );
+    if (!download) {
+      row.roots.push({ label: "components snapshot", path: `$SCENEWORKS_${family.components.env}_ROOT` });
+      return {
+        ...row, status: "weights_missing",
+        reason: `manifest ${parts.modelId} declares no ${family.components.repo} components row for tier ${parts.tier}`,
+      };
+    }
+    const root = await firstExistingDirectory(
+      hubs.map((hub) => snapshotPath(hub, family.components.repo, download.revision)),
+    );
+    row.roots.push({
+      label: "components snapshot",
+      path: root ?? snapshotPath(hubs[0], family.components.repo, download.revision),
+    });
+    if (!root) {
+      return {
+        ...row, status: "weights_missing",
+        reason: `no ${family.components.repo}@${download.revision.slice(0, 8)} snapshot on this host`,
+      };
+    }
+    // The tier's own two component directories, not just the snapshot: a partially-fetched
+    // components mirror is exactly as unloadable as an absent one, and reporting the cell
+    // `runnable` would send an operator to book a capture that cannot open its text encoder.
+    const missing = [];
+    for (const component of MAGE_COMPONENT_IDS) {
+      if (!(await firstExistingDirectory([path.join(root, parts.tier, component)]))) {
+        missing.push(`${parts.tier}/${component}`);
+      }
+    }
+    if (missing.length > 0) {
+      return {
+        ...row, status: "weights_missing",
+        reason: `${family.components.repo} snapshot ${root} is missing ${missing.join(", ")}`,
+      };
+    }
+    row.env[`SCENEWORKS_${family.components.env}_REPOSITORY`] = family.components.repo;
+    row.env[`SCENEWORKS_${family.components.env}_REVISION`] = download.revision;
+    row.env[`SCENEWORKS_${family.components.env}_ROOT`] = root;
+  }
+  // An identity stack the worker fetches on first use rather than declaring as a manifest download
+  // has nothing for the harness to resolve, so the operator stages it and names it here. An unset
+  // or absent path is `weights_missing` — the host simply lacks the artifact — not a gap.
+  for (const staging of family.stagedEnv ?? []) {
+    const name = staging.env;
+    const staged = process.env[name];
+    const root = staged ? await firstExistingDirectory([staged]) : null;
+    row.roots.push({ label: `staged ${name}`, path: staged ?? `(${name} unset)` });
+    if (!root) {
+      return { ...row, status: "weights_missing", reason: `${name} is unset or names no directory on this host` };
+    }
+    const missingStaged = [];
+    for (const file of staging.files ?? []) {
+      if (!(await isFile(path.join(root, file)))) missingStaged.push(file);
+    }
+    if (missingStaged.length > 0) {
+      return {
+        ...row, status: "weights_missing",
+        reason: `${name} directory ${root} is missing ${missingStaged.join(", ")}, which the adapter arm opens under it`,
+      };
+    }
+    row.env[name] = root;
+  }
+  // A member-specific artifact the manifest does not ship (the Qwen edit Lightning distill LoRA):
+  // its repository and revision are pinned in the family row, so the root is the snapshot itself.
+  const side = family.sideArtifact?.[parts.modelId];
+  if (side) {
+    const sideRoot = await firstExistingDirectory(hubs.map((hub) => snapshotPath(hub, side.repo, side.revision)));
+    row.roots.push({ label: "side artifact", path: sideRoot ?? snapshotPath(hubs[0], side.repo, side.revision) });
+    if (!sideRoot) {
+      return { ...row, status: "weights_missing", reason: `no ${side.repo}@${side.revision.slice(0, 8)} snapshot on this host` };
+    }
+    // sc-22738. A PRESENT snapshot is not the pinned FILE. The Lightning snapshot staged on this
+    // capture host holds the 8-step distill and NOT the pinned 4-step one the arm joins
+    // (mlx.rs / candle.rs `qwen_edit_lightning_adapter`, `protocol::QWEN_EDIT_LIGHTNING_FILE`), so
+    // asking only whether the snapshot directory existed reported all three
+    // `qwen_image_edit_2511_lightning` cells runnable and every booked capture died on
+    // `the Lightning distill LoRA is not at …`. The declared file IS the one the arm opens, so an
+    // incomplete mirror is `weights_missing` — named — exactly like an absent one.
+    if (side.file && !(await isFile(path.join(sideRoot, side.file)))) {
+      return {
+        ...row, status: "weights_missing",
+        reason: `${side.repo} snapshot ${sideRoot} is missing ${side.file}, which the adapter arm attaches as this member's distill LoRA`,
+      };
+    }
+    row.env[`SCENEWORKS_${side.env}_REPOSITORY`] = side.repo;
+    row.env[`SCENEWORKS_${side.env}_REVISION`] = side.revision;
+    row.env[`SCENEWORKS_${side.env}_ROOT`] = sideRoot;
   }
   row.physical = backend === "mlx" && family.physical === true;
   return row;
@@ -450,6 +1863,9 @@ export async function measureAnchor(row, context) {
   } catch (error) {
     return finish("check_failed", failureReason(error));
   }
+  // A no-commit run ends here: ingesting would dirty the tree and make the harness refuse every
+  // later anchor in the same run (`complete evidence cannot come from a dirty repository`).
+  if (!args.commit) return finish("captured");
 
   // 3..7. ingest + derive + commit. Any failure rolls the tree back to HEAD so the next anchor
   //       still starts clean; the raw capture stays in the work dir for a by-hand ingest.
@@ -494,7 +1910,7 @@ export async function measureAnchor(row, context) {
         `Evidence: ${evidenceRelative}; anchor store, currency stamp and matrix regenerated.`]);
       state.commits.push(await gitAt(["rev-parse", "--short", "HEAD"]));
     }
-    return finish(args.commit ? "committed" : "ingested");
+    return finish("committed");
   } catch (error) {
     log.write(`\nROLLBACK: ${error.message}\n`);
     try {
@@ -522,7 +1938,11 @@ export async function planRun(args, root = ROOT) {
   const campaignDir = `docs/calibration/${campaign}`;
   const captured = await capturedInCampaign(root, campaignDir);
   const declaredLanes = await readDeclaredLanes(root);
+  const declaredProviders = await readDeclaredProviders(root);
   const hubs = hubRoots(args.hfCache);
+  // sc-22729: the engine's own SDXL route table, read from the pinned inference checkout. `null`
+  // when there is none to read — see `SDXL_ROUTES_UNCHECKED`.
+  const sdxlRoutes = await readSdxlCandleRoutes(args.inferenceRepo ?? process.env.INFERENCE_REPO);
   const keys = Object.keys(plan.anchors).sort();
   if (args.anchors) {
     for (const key of args.anchors) if (!plan.anchors[key]) fail(`--anchors names ${key}, which the plan does not declare`);
@@ -534,8 +1954,13 @@ export async function planRun(args, root = ROOT) {
   for (const key of keys) {
     if (args.anchors && !args.anchors.includes(key)) continue;
     if ((args.models ?? []).length > 0 && !args.models.includes(anchorParts(key).modelId)) continue;
-    const row = await classifyAnchor(key, plan.anchors[key], { models, backend: args.backend, hubs, current, captured, declaredLanes });
+    const row = await classifyAnchor(key, plan.anchors[key], { models, backend: args.backend, hubs, current, captured, declaredLanes, declaredProviders, sdxlRoutes });
     if (row.status === "other_backend" && !args.anchors) continue;
+    // An unperformed route-revision comparison is reported on the row it did not happen for, so a
+    // run without an inference checkout cannot silently look like a run that proved the engine agrees.
+    if (row.routeCheck && ["runnable", "weights_missing"].includes(row.status)) {
+      row.reason = row.reason ? `${row.reason}; ${row.routeCheck}` : row.routeCheck;
+    }
     if (row.status === "runnable" && args.skipCurrent && row.current) {
       row.status = "current";
       row.reason = "anchor is current at the pinned inference revision (--skip-current)";
@@ -626,7 +2051,7 @@ export async function main(argv = process.argv.slice(2)) {
   process.stdout.write(`\n${table(results, ["key", "status", "seconds", "reason"])}\n`);
   process.stdout.write(`\ncommits: ${state.commits.length ? state.commits.join(" ") : "none"}\nsummary: ${summaryPath}\n`);
   if (state.halt) fail(state.halt);
-  const failed = results.filter((result) => !["committed", "ingested"].includes(result.status));
+  const failed = results.filter((result) => !["committed", "captured"].includes(result.status));
   if (failed.length > 0) process.exitCode = 2;
 }
 

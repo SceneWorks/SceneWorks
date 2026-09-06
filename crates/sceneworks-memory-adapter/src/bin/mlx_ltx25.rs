@@ -279,49 +279,87 @@ fn validate_target(request: &Value) -> Result<Target, String> {
     })
 }
 
+/// The bounded-control law, mirrored from the pinned engine rather than re-spelled (sc-22738).
+///
+/// `mlx-gen-ltx/src/memory_strategy_2_5.rs::validate_request_memory` makes every bounded control
+/// **conditional on its rung engaging**, in both directions: `chunk_attention` *requires*
+/// `attention_chunk_size` and its absence *forbids* the parameter ("attention_chunk_size requires
+/// chunk_attention=true"); the decode tile pair and the transformer window are governed the same
+/// way. `begin_with_cleanup` only forwards a control at all when
+/// `contract.engages_selection(selection, rung)`, so a selection that carries a control its rung
+/// does not engage is refused by the engine before a weight is read.
+///
+/// This function used to demand the DEEPEST composition unconditionally — `attentionChunkSize`
+/// always, `bounded_transformer_residency` for distilled, `bounded_attention` for dev. That was
+/// correct while epic 18755 swept the whole ladder per plan row and the fixture named the rung.
+/// sc-22505 replaced that with ONE anchor per (model, tier, lane) planned at the lane's default
+/// composition — `resident` with no parameters on MLX, declared once in
+/// `config/anchor-lane-default-strategy.json` — which left this arm demanding a shape no anchor row
+/// can lawfully carry: the ltx_2_5 MLX rows were the only cells in the catalog whose capture could
+/// not start. The demands themselves are unchanged; only their guard is now the engine's.
+///
+/// `MemoryStrategy::engages` is the contract's own cost-order rule, so the rung a row plans decides
+/// which controls it must carry, and the deep ladder compositions this arm accepted before are
+/// still accepted with exactly the same parameter values.
 fn validate_selection_shape(selection: &MemorySelection, target: Target) -> Result<(), String> {
     let parameters = selection.parameters;
-    if parameters.attention_chunk_size != Some(ATTENTION_CHUNK_SIZE) {
+    let engages = |rung: MemoryStrategy| selection.strategy.engages(rung);
+
+    let expected_chunk = engages(MemoryStrategy::BoundedAttention).then_some(ATTENTION_CHUNK_SIZE);
+    if parameters.attention_chunk_size != expected_chunk {
+        return Err(match expected_chunk {
+            Some(size) => format!("{LABEL} requires attentionChunkSize={size}"),
+            None => format!(
+                "{LABEL} must omit attentionChunkSize unless the selection engages bounded_attention"
+            ),
+        });
+    }
+
+    // `bounded_decode` is `Missing` on the diffusion decoder — it has no tiled path to bound — so
+    // the tile pair is expected only where the conv decoder is loaded AND the rung engages it.
+    let tiled = engages(MemoryStrategy::BoundedDecode) && target.decoder == Decoder::Conv;
+    let expected_tile = tiled.then_some(DECODE_TILE_EDGE);
+    let expected_overlap = tiled.then_some(DECODE_OVERLAP);
+    if parameters.decode_tile_edge != expected_tile || parameters.decode_overlap != expected_overlap
+    {
+        return Err(if tiled {
+            format!("{LABEL} conv requires decode tile {DECODE_TILE_EDGE}/{DECODE_OVERLAP}")
+        } else if target.decoder == Decoder::DiffVae {
+            format!("{LABEL} diffvae must omit conv-only decode tile parameters")
+        } else {
+            format!(
+                "{LABEL} must omit decode tile parameters unless the selection engages bounded_decode"
+            )
+        });
+    }
+
+    // Rung 4 declares `LoadShape::DeferredMaterialization` as a prerequisite, and only the
+    // distilled variant loads deferred; the dev variant additionally installs its refinement
+    // adapter, which the engine's `streamable()` refuses outright. So dev can never plan it.
+    if target.variant == TransformerVariant::Dev
+        && (engages(MemoryStrategy::BoundedTransformerResidency)
+            || parameters.transformer_window_size.is_some()
+            || parameters.transformer_window_component.is_some())
+    {
         return Err(format!(
-            "{LABEL} requires attentionChunkSize={ATTENTION_CHUNK_SIZE}"
+            "{LABEL} dev must not claim transformer streaming while its refinement adapter is installed"
         ));
     }
-    match target.decoder {
-        Decoder::Conv
-            if parameters.decode_tile_edge == Some(DECODE_TILE_EDGE)
-                && parameters.decode_overlap == Some(DECODE_OVERLAP) => {}
-        Decoder::Conv => {
-            return Err(format!(
-                "{LABEL} conv requires decode tile {DECODE_TILE_EDGE}/{DECODE_OVERLAP}"
-            ));
-        }
-        Decoder::DiffVae
-            if parameters.decode_tile_edge.is_none() && parameters.decode_overlap.is_none() => {}
-        Decoder::DiffVae => {
-            return Err(format!(
-                "{LABEL} diffvae must omit conv-only decode tile parameters"
-            ));
-        }
-    }
-    match target.variant {
-        TransformerVariant::Distilled
-            if selection.strategy == MemoryStrategy::BoundedTransformerResidency
-                && parameters.transformer_window_size == Some(TRANSFORMER_WINDOW_SIZE)
-                && parameters.transformer_window_component == Some(TransformerComponent::Dit) => {}
-        TransformerVariant::Distilled => {
-            return Err(format!(
+    let streaming = engages(MemoryStrategy::BoundedTransformerResidency);
+    let expected_window = streaming.then_some(TRANSFORMER_WINDOW_SIZE);
+    let expected_component = streaming.then_some(TransformerComponent::Dit);
+    if parameters.transformer_window_size != expected_window
+        || parameters.transformer_window_component != expected_component
+    {
+        return Err(if streaming {
+            format!(
                 "{LABEL} distilled requires bounded_transformer_residency with DiT window {TRANSFORMER_WINDOW_SIZE}"
-            ));
-        }
-        TransformerVariant::Dev
-            if selection.strategy == MemoryStrategy::BoundedAttention
-                && parameters.transformer_window_size.is_none()
-                && parameters.transformer_window_component.is_none() => {}
-        TransformerVariant::Dev => {
-            return Err(format!(
-                "{LABEL} dev requires bounded_attention and must not claim transformer streaming while its refinement adapter is installed"
-            ));
-        }
+            )
+        } else {
+            format!(
+                "{LABEL} must omit the transformer window unless the selection engages bounded_transformer_residency"
+            )
+        });
     }
     Ok(())
 }
@@ -1456,6 +1494,139 @@ mod tests {
                 "modelLoadGroup": null,
             }
         })
+    }
+
+    /// sc-22738. The capture-time agreement the campaign actually needs: the request
+    /// `scripts/memory-calibration-harness.mjs#planAnchor` builds for every checked-in
+    /// `ltx_2_5:*:mlx` plan row must satisfy this arm's real validators — no hand-written sample,
+    /// and no re-spelling of the composition the harness applies.
+    ///
+    /// Both halves are read from the files that own them: the row's target, geometry, load shape,
+    /// fingerprint and fixture from `config/memory-calibration-plan.json`, and the composition from
+    /// `config/anchor-lane-default-strategy.json` — the ONE declaration of the per-lane default
+    /// that `planAnchor` applies to any row carrying no `strategy` override, and that
+    /// `sceneworks-worker`'s lane walk reads through the same `include_str!`. A row's own override
+    /// wins where it has one, exactly as `planAnchor` does. `parameters` is what `planAnchor`
+    /// emits, which is why the whole campaign refused these three cells: the arm demanded the
+    /// ladder-era deepest composition, and no anchor row can carry it.
+    #[test]
+    fn every_planned_ltx25_mlx_row_satisfies_the_arm_at_the_composition_the_harness_plans() {
+        let plan: Value = serde_json::from_str(include_str!(
+            "../../../../config/memory-calibration-plan.json"
+        ))
+        .expect("the anchor plan parses");
+        let lanes: Value = serde_json::from_str(include_str!(
+            "../../../../config/anchor-lane-default-strategy.json"
+        ))
+        .expect("the lane default composition parses");
+        let default = &lanes["lanes"]["mlx"];
+        assert!(
+            default["rung"].is_string(),
+            "config/anchor-lane-default-strategy.json declares no mlx rung"
+        );
+        let mut seen = std::collections::BTreeSet::new();
+        for (key, entry) in plan["anchors"].as_object().expect("anchors object") {
+            if !key.ends_with(":mlx") || entry["provider"].as_str() != Some(LTX25_PROVIDER) {
+                continue;
+            }
+            seen.insert(key.clone());
+            let (_, rest) = key.split_once(':').unwrap();
+            let tier = rest.split_once(':').unwrap().0;
+            let strategy = entry.get("strategy").unwrap_or(default);
+            let request = json!({ "planned": {
+                "target": {
+                    "provider": entry["provider"].clone(),
+                    "modelId": "ltx_2_5",
+                    "tier": tier,
+                    "mode": entry["mode"].clone(),
+                    "overlay": entry["overlay"].clone(),
+                    "transformerVariant": entry["transformerVariant"].clone(),
+                    "decoder": entry["decoder"].clone(),
+                    "geometry": entry["geometry"].clone(),
+                },
+                "loadShape": entry["loadShape"].clone(),
+                "strategy": {
+                    "rung": strategy["rung"].clone(),
+                    "engagedRungs": strategy["engagedRungs"].clone(),
+                    // `planAnchor` emits no parameters for a row that declares none.
+                    "parameters": strategy.get("parameters").cloned().unwrap_or_else(|| json!({})),
+                },
+                "calibrationFingerprint": entry["calibrationFingerprint"].clone(),
+                "fixture": entry["fixture"].clone(),
+                "expectedResult": "passed",
+                "negative": false,
+                "modelLoadPolicy": "fresh_per_case",
+                "modelLoadGroup": null,
+            }});
+            let target = validate_target(&request).unwrap_or_else(|error| panic!("{key}: {error}"));
+            let selection =
+                planned_selection(&request).unwrap_or_else(|error| panic!("{key}: {error}"));
+            validate_selection_shape(&selection, target)
+                .unwrap_or_else(|error| panic!("{key}: {error}"));
+        }
+        // The exact cell set, not a count: the three shipped tiers, each named once.
+        let expected: std::collections::BTreeSet<String> = ["bf16", "q4", "q8"]
+            .iter()
+            .map(|tier| format!("ltx_2_5:{tier}:mlx"))
+            .collect();
+        assert_eq!(seen, expected);
+    }
+
+    /// The other direction of the same law: a control the planned rung does not engage is refused,
+    /// so widening the harness to volunteer parameters is not a way past this arm either. The
+    /// engine says the same thing — `attention_chunk_size requires chunk_attention=true`.
+    #[test]
+    fn a_resident_row_that_volunteers_a_bounded_control_is_refused() {
+        let mut dev = request("bf16", "dev", "conv", 768, 512, BASE_FRAMES);
+        dev["planned"]["strategy"]["rung"] = json!("resident");
+        dev["planned"]["strategy"]["engagedRungs"] = json!(["resident"]);
+        dev["planned"]["strategy"]["parameters"] = json!({});
+        let target = validate_target(&dev).unwrap();
+        validate_selection_shape(&planned_selection(&dev).unwrap(), target)
+            .expect("the lane default composition is accepted");
+
+        for (parameter, value, expected) in [
+            (
+                "attentionChunkSize",
+                json!(ATTENTION_CHUNK_SIZE),
+                "must omit attentionChunkSize",
+            ),
+            (
+                "decodeTileEdge",
+                json!(DECODE_TILE_EDGE),
+                "must omit decode tile parameters",
+            ),
+            (
+                // Dev keeps its own refusal: its refinement adapter makes the rung unreachable at
+                // any composition, so the arm names that rather than the generic omission.
+                "transformerWindowSize",
+                json!(TRANSFORMER_WINDOW_SIZE),
+                "must not claim transformer streaming",
+            ),
+        ] {
+            let mut volunteered = dev.clone();
+            volunteered["planned"]["strategy"]["parameters"][parameter] = value;
+            let selection = planned_selection(&volunteered).unwrap();
+            let error = validate_selection_shape(&selection, target)
+                .expect_err("a control no engaged rung authorizes must be refused");
+            assert!(error.contains(expected), "{parameter}: {error}");
+        }
+
+        // …and the generic omission refusal is the one a distilled row gets, where the rung is
+        // reachable but this composition does not engage it.
+        let mut distilled = request("bf16", "distilled", "conv", 768, 512, BASE_FRAMES);
+        distilled["planned"]["strategy"]["rung"] = json!("resident");
+        distilled["planned"]["strategy"]["engagedRungs"] = json!(["resident"]);
+        distilled["planned"]["strategy"]["parameters"] =
+            json!({ "transformerWindowSize": TRANSFORMER_WINDOW_SIZE });
+        let distilled_target = validate_target(&distilled).unwrap();
+        let error =
+            validate_selection_shape(&planned_selection(&distilled).unwrap(), distilled_target)
+                .expect_err("a window no engaged rung authorizes must be refused");
+        assert!(
+            error.contains("must omit the transformer window"),
+            "{error}"
+        );
     }
 
     #[test]

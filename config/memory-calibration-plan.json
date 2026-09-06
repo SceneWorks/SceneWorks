@@ -2,6 +2,36 @@
   "$schema": "../packages/schemas/memory-anchor-plan.schema.json",
   "schemaVersion": 1,
   "anchors": {
+    "flux2_dev:bf16:candle": {
+      "provider": "flux2_dev",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "deferred_materialization",
+      "calibrationFingerprint": "flux2-dev-cuda-caption-upsample-staged-host-full-edge-decode-bounded-attention-device-format-blocks-v3",
+      "fixture": "fresh-five-rung-flux2-dev-bf16-1024-seed16402-step2"
+    },
+    "flux2_dev:bf16:mlx": {
+      "provider": "flux2_dev",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 512,
+        "height": 512,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "eager_materialization",
+      "calibrationFingerprint": "sc-18218-flux2-dev-t2i-resident-evidence-v1",
+      "fixture": "flux2-dev-mlx-bf16-512-seed18218-step2"
+    },
     "flux2_dev:q4:candle": {
       "provider": "flux2_dev",
       "mode": "text_to_image",
@@ -14,8 +44,8 @@
       },
       "evidenceScope": "authoritative",
       "loadShape": "deferred_materialization",
-      "calibrationFingerprint": "flux2-dev-cuda-staged-host-full-edge-decode-bounded-attention-device-format-blocks-v2",
-      "fixture": "flux2-dev-q4-seed42-1024x1024-output-1e284e748f8da7321950c03e2516fcfe148282645740bdf32db7c8fbd0c28977"
+      "calibrationFingerprint": "flux2-dev-cuda-caption-upsample-staged-host-full-edge-decode-bounded-attention-device-format-blocks-v3",
+      "fixture": "fresh-five-rung-flux2-dev-q4-1024-seed16402-step2"
     },
     "flux2_dev:q4:mlx": {
       "provider": "flux2_dev",
@@ -32,6 +62,21 @@
       "calibrationFingerprint": "sc-18218-flux2-dev-t2i-resident-evidence-v1",
       "fixture": "flux2-dev-mlx-q4-768-seed18218-step2"
     },
+    "flux2_dev:q8:candle": {
+      "provider": "flux2_dev",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "deferred_materialization",
+      "calibrationFingerprint": "flux2-dev-cuda-caption-upsample-staged-host-full-edge-decode-bounded-attention-device-format-blocks-v3",
+      "fixture": "fresh-five-rung-flux2-dev-q8-1024-seed16402-step2"
+    },
     "flux2_dev:q8:mlx": {
       "provider": "flux2_dev",
       "mode": "text_to_image",
@@ -47,6 +92,216 @@
       "calibrationFingerprint": "sc-18218-flux2-dev-t2i-resident-evidence-v1",
       "fixture": "flux2-dev-mlx-q8-768-seed18218-step2"
     },
+    "flux2_klein_9b:bf16:candle": {
+      "provider": "flux2_klein_9b",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "deferred_materialization",
+      "calibrationFingerprint": "flux2-klein-cuda-shared-ladder-provider-abi-v2",
+      "fixture": "fresh-five-rung-flux2-klein-9b-bf16-1024-seed16402-step2"
+    },
+    "flux2_klein_9b:bf16:mlx": {
+      "provider": "flux2_klein_9b",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 768,
+        "height": 768,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "eager_materialization",
+      "calibrationFingerprint": "flux2-klein-9b-bf16-mlx-shared-ladder-rehost-t2i-v1",
+      "fixture": "flux2-klein-9b-mlx-bf16-768-seed22727-step2"
+    },
+    "flux2_klein_9b:q4:candle": {
+      "provider": "flux2_klein_9b",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "deferred_materialization",
+      "calibrationFingerprint": "flux2-klein-cuda-shared-ladder-provider-abi-v2",
+      "fixture": "fresh-five-rung-flux2-klein-9b-q4-1024-seed16402-step2"
+    },
+    "flux2_klein_9b:q4:mlx": {
+      "provider": "flux2_klein_9b",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 768,
+        "height": 768,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "eager_materialization",
+      "calibrationFingerprint": "flux2-klein-9b-q4-mlx-shared-ladder-rehost-t2i-v1",
+      "fixture": "flux2-klein-9b-mlx-q4-768-seed22727-step2"
+    },
+    "flux2_klein_9b:q8:candle": {
+      "provider": "flux2_klein_9b",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "deferred_materialization",
+      "calibrationFingerprint": "flux2-klein-cuda-shared-ladder-provider-abi-v2",
+      "fixture": "fresh-five-rung-flux2-klein-9b-q8-1024-seed16402-step2"
+    },
+    "flux2_klein_9b:q8:mlx": {
+      "provider": "flux2_klein_9b",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 768,
+        "height": 768,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "eager_materialization",
+      "calibrationFingerprint": "flux2-klein-9b-q8-mlx-shared-ladder-rehost-t2i-v1",
+      "fixture": "flux2-klein-9b-mlx-q8-768-seed22727-step2"
+    },
+    "flux2_klein_9b_kv:bf16:candle": {
+      "provider": "flux2_klein_9b",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "deferred_materialization",
+      "calibrationFingerprint": "flux2-klein-cuda-shared-ladder-provider-abi-v2",
+      "fixture": "fresh-five-rung-flux2-klein-9b-kv-bf16-1024-seed16402-step2"
+    },
+    "flux2_klein_9b_kv:bf16:mlx": {
+      "provider": "flux2_klein_9b",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 768,
+        "height": 768,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "eager_materialization",
+      "calibrationFingerprint": "flux2-klein-9b-bf16-mlx-shared-ladder-kv-rehost-t2i-v1",
+      "fixture": "flux2-klein-9b-kv-mlx-bf16-768-seed22727-step2"
+    },
+    "flux2_klein_9b_kv:q4:candle": {
+      "provider": "flux2_klein_9b",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "deferred_materialization",
+      "calibrationFingerprint": "flux2-klein-cuda-shared-ladder-provider-abi-v2",
+      "fixture": "fresh-five-rung-flux2-klein-9b-kv-q4-1024-seed16402-step2"
+    },
+    "flux2_klein_9b_kv:q4:mlx": {
+      "provider": "flux2_klein_9b",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 768,
+        "height": 768,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "eager_materialization",
+      "calibrationFingerprint": "flux2-klein-9b-q4-mlx-shared-ladder-kv-rehost-t2i-v1",
+      "fixture": "flux2-klein-9b-kv-mlx-q4-768-seed22727-step2"
+    },
+    "flux2_klein_9b_kv:q8:candle": {
+      "provider": "flux2_klein_9b",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "deferred_materialization",
+      "calibrationFingerprint": "flux2-klein-cuda-shared-ladder-provider-abi-v2",
+      "fixture": "fresh-five-rung-flux2-klein-9b-kv-q8-1024-seed16402-step2"
+    },
+    "flux2_klein_9b_kv:q8:mlx": {
+      "provider": "flux2_klein_9b",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 768,
+        "height": 768,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "eager_materialization",
+      "calibrationFingerprint": "flux2-klein-9b-q8-mlx-shared-ladder-kv-rehost-t2i-v1",
+      "fixture": "flux2-klein-9b-kv-mlx-q8-768-seed22727-step2"
+    },
+    "flux_dev:bf16:candle": {
+      "provider": "flux1_dev",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "deferred_materialization",
+      "calibrationFingerprint": "flux1-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v1",
+      "fixture": "fresh-five-rung-flux1-dev-bf16-1024-seed16402-step2"
+    },
+    "flux_dev:bf16:mlx": {
+      "provider": "flux1_dev",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "deferred_materialization",
+      "calibrationFingerprint": "flux1-dev-bf16-mlx-shared-ladder-v1",
+      "fixture": "flux1-dev-mlx-bf16-1024-seed22726-step2"
+    },
     "flux_dev:q4:candle": {
       "provider": "flux1_dev",
       "mode": "text_to_image",
@@ -58,9 +313,84 @@
         "frames": 1
       },
       "evidenceScope": "authoritative",
-      "loadShape": "eager_materialization",
+      "loadShape": "deferred_materialization",
       "calibrationFingerprint": "flux1-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v1",
-      "fixture": "flux_dev-q4-seed42-1024x1024-output-009e11f9bbcaca6edebe3658e221589bd7404d7a4c9db8ee251c0eae57801964"
+      "fixture": "fresh-five-rung-flux1-dev-q4-1024-seed16402-step2"
+    },
+    "flux_dev:q4:mlx": {
+      "provider": "flux1_dev",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "deferred_materialization",
+      "calibrationFingerprint": "flux1-dev-q4-mlx-shared-ladder-2026-08-03-v1",
+      "fixture": "flux1-dev-mlx-q4-1024-seed22726-step2"
+    },
+    "flux_dev:q8:candle": {
+      "provider": "flux1_dev",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "deferred_materialization",
+      "calibrationFingerprint": "flux1-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v1",
+      "fixture": "fresh-five-rung-flux1-dev-q8-1024-seed16402-step2"
+    },
+    "flux_dev:q8:mlx": {
+      "provider": "flux1_dev",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "deferred_materialization",
+      "calibrationFingerprint": "flux1-dev-q8-mlx-shared-ladder-v1",
+      "fixture": "flux1-dev-mlx-q8-1024-seed22726-step2"
+    },
+    "flux_schnell:bf16:candle": {
+      "provider": "flux1_schnell",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "deferred_materialization",
+      "calibrationFingerprint": "flux1-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v1",
+      "fixture": "fresh-five-rung-flux1-schnell-bf16-1024-seed16402-step2"
+    },
+    "flux_schnell:bf16:mlx": {
+      "provider": "flux1_schnell",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "deferred_materialization",
+      "calibrationFingerprint": "flux1-schnell-bf16-mlx-shared-ladder-v1",
+      "fixture": "flux1-schnell-mlx-bf16-1024-seed22726-step2"
     },
     "flux_schnell:q4:candle": {
       "provider": "flux1_schnell",
@@ -73,9 +403,414 @@
         "frames": 1
       },
       "evidenceScope": "authoritative",
-      "loadShape": "eager_materialization",
+      "loadShape": "deferred_materialization",
       "calibrationFingerprint": "flux1-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v1",
-      "fixture": "flux_schnell-q4-seed42-1024x1024-output-fe0e5ff1a022da5cefe4be7dfeb2bac51bc3870bbfd9bb36949ab8381ba3d9e0"
+      "fixture": "fresh-five-rung-flux1-schnell-q4-1024-seed16402-step2"
+    },
+    "flux_schnell:q4:mlx": {
+      "provider": "flux1_schnell",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "deferred_materialization",
+      "calibrationFingerprint": "flux1-schnell-q4-mlx-shared-ladder-v1",
+      "fixture": "flux1-schnell-mlx-q4-1024-seed22726-step2"
+    },
+    "flux_schnell:q8:candle": {
+      "provider": "flux1_schnell",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "deferred_materialization",
+      "calibrationFingerprint": "flux1-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v1",
+      "fixture": "fresh-five-rung-flux1-schnell-q8-1024-seed16402-step2"
+    },
+    "flux_schnell:q8:mlx": {
+      "provider": "flux1_schnell",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "deferred_materialization",
+      "calibrationFingerprint": "flux1-schnell-q8-mlx-shared-ladder-v1",
+      "fixture": "flux1-schnell-mlx-q8-1024-seed22726-step2"
+    },
+    "ideogram_4:bf16:candle": {
+      "provider": "ideogram_4",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "deferred_materialization",
+      "calibrationFingerprint": "ideogram4-candle-request-scoped-staged-residency-v1-base-bf16",
+      "fixture": "fresh-five-rung-ideogram-4-bf16-1024-seed16402-step2"
+    },
+    "ideogram_4:bf16:mlx": {
+      "provider": "ideogram_4",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "eager_materialization",
+      "calibrationFingerprint": "ideogram-4-bf16-mlx-shared-ladder-v1",
+      "fixture": "ideogram-4-mlx-bf16-1024-seed22732-step2"
+    },
+    "ideogram_4:q4:candle": {
+      "provider": "ideogram_4",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "deferred_materialization",
+      "calibrationFingerprint": "ideogram4-candle-request-scoped-staged-residency-v1-base-q4",
+      "fixture": "fresh-five-rung-ideogram-4-q4-1024-seed16402-step2"
+    },
+    "ideogram_4:q4:mlx": {
+      "provider": "ideogram_4",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "eager_materialization",
+      "calibrationFingerprint": "ideogram-4-q4-mlx-shared-ladder-v1",
+      "fixture": "ideogram-4-mlx-q4-1024-seed22732-step2"
+    },
+    "ideogram_4:q8:candle": {
+      "provider": "ideogram_4",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "deferred_materialization",
+      "calibrationFingerprint": "ideogram4-candle-request-scoped-staged-residency-v1-base-q8",
+      "fixture": "fresh-five-rung-ideogram-4-q8-1024-seed16402-step2"
+    },
+    "ideogram_4:q8:mlx": {
+      "provider": "ideogram_4",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "eager_materialization",
+      "calibrationFingerprint": "ideogram-4-q8-mlx-shared-ladder-v1",
+      "fixture": "ideogram-4-mlx-q8-1024-seed22732-step2"
+    },
+    "ideogram_4_turbo:bf16:candle": {
+      "provider": "ideogram_4_turbo",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "deferred_materialization",
+      "calibrationFingerprint": "ideogram4-candle-request-scoped-staged-residency-v1-turbo-bf16",
+      "fixture": "fresh-five-rung-ideogram-4-turbo-bf16-1024-seed16402-step2"
+    },
+    "ideogram_4_turbo:bf16:mlx": {
+      "provider": "ideogram_4_turbo",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "eager_materialization",
+      "calibrationFingerprint": "ideogram-4-turbo-bf16-mlx-shared-ladder-v1",
+      "fixture": "ideogram-4-turbo-mlx-bf16-1024-seed22732-step2"
+    },
+    "ideogram_4_turbo:q4:candle": {
+      "provider": "ideogram_4_turbo",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "deferred_materialization",
+      "calibrationFingerprint": "ideogram4-candle-request-scoped-staged-residency-v1-turbo-q4",
+      "fixture": "fresh-five-rung-ideogram-4-turbo-q4-1024-seed16402-step2"
+    },
+    "ideogram_4_turbo:q4:mlx": {
+      "provider": "ideogram_4_turbo",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "eager_materialization",
+      "calibrationFingerprint": "ideogram-4-turbo-q4-mlx-shared-ladder-v1",
+      "fixture": "ideogram-4-turbo-mlx-q4-1024-seed22732-step2"
+    },
+    "ideogram_4_turbo:q8:candle": {
+      "provider": "ideogram_4_turbo",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "deferred_materialization",
+      "calibrationFingerprint": "ideogram4-candle-request-scoped-staged-residency-v1-turbo-q8",
+      "fixture": "fresh-five-rung-ideogram-4-turbo-q8-1024-seed16402-step2"
+    },
+    "ideogram_4_turbo:q8:mlx": {
+      "provider": "ideogram_4_turbo",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "eager_materialization",
+      "calibrationFingerprint": "ideogram-4-turbo-q8-mlx-shared-ladder-v1",
+      "fixture": "ideogram-4-turbo-mlx-q8-1024-seed22732-step2"
+    },
+    "kolors:bf16:candle": {
+      "provider": "kolors",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "deferred_materialization",
+      "calibrationFingerprint": "kolors-candle-kolors-bf16-staged-chatglm-unet-f32-vae-v1",
+      "fixture": "fresh-five-rung-kolors-bf16-1024-seed16402-step2"
+    },
+    "kolors:bf16:mlx": {
+      "provider": "kolors",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "eager_materialization",
+      "calibrationFingerprint": "kolors-bf16-mlx-shared-ladder-v1",
+      "fixture": "kolors-mlx-bf16-1024-seed22732-step2"
+    },
+    "kolors:q4:candle": {
+      "provider": "kolors",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "deferred_materialization",
+      "calibrationFingerprint": "kolors-candle-kolors-q4-staged-chatglm-unet-f32-vae-v1",
+      "fixture": "fresh-five-rung-kolors-q4-1024-seed16402-step2"
+    },
+    "kolors:q4:mlx": {
+      "provider": "kolors",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "eager_materialization",
+      "calibrationFingerprint": "kolors-mlx-chatglm3-sdxl-unet-ladder-v1",
+      "fixture": "kolors-mlx-q4-1024-seed22732-step2"
+    },
+    "kolors:q8:candle": {
+      "provider": "kolors",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "deferred_materialization",
+      "calibrationFingerprint": "kolors-candle-kolors-q8-staged-chatglm-unet-f32-vae-v1",
+      "fixture": "fresh-five-rung-kolors-q8-1024-seed16402-step2"
+    },
+    "kolors:q8:mlx": {
+      "provider": "kolors",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "eager_materialization",
+      "calibrationFingerprint": "kolors-q8-mlx-shared-ladder-v1",
+      "fixture": "kolors-mlx-q8-1024-seed22732-step2"
+    },
+    "krea_2_raw:bf16:candle": {
+      "provider": "krea_2_raw",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 768,
+        "height": 768,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "deferred_materialization",
+      "calibrationFingerprint": "krea-2-raw-bf16-cuda-staged-residency-v1",
+      "fixture": "fresh-five-rung-krea-raw-bf16-768-seed22735-step2"
+    },
+    "krea_2_raw:bf16:mlx": {
+      "provider": "krea_2_raw",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 768,
+        "height": 768,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "eager_materialization",
+      "calibrationFingerprint": "krea-2-raw-bf16-mlx-shared-ladder-v1",
+      "fixture": "krea-raw-mlx-bf16-768-seed22735-step2"
+    },
+    "krea_2_raw:q4:candle": {
+      "provider": "krea_2_raw",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 768,
+        "height": 768,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "deferred_materialization",
+      "calibrationFingerprint": "krea-2-raw-q4-cuda-staged-residency-v1",
+      "fixture": "fresh-five-rung-krea-raw-q4-768-seed22735-step2"
+    },
+    "krea_2_raw:q4:mlx": {
+      "provider": "krea_2_raw",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 768,
+        "height": 768,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "eager_materialization",
+      "calibrationFingerprint": "krea-2-raw-q4-mlx-shared-ladder-v1",
+      "fixture": "krea-raw-mlx-q4-768-seed22735-step2"
+    },
+    "krea_2_raw:q8:candle": {
+      "provider": "krea_2_raw",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 768,
+        "height": 768,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "deferred_materialization",
+      "calibrationFingerprint": "krea-2-raw-q8-cuda-staged-residency-v1",
+      "fixture": "fresh-five-rung-krea-raw-q8-768-seed22735-step2"
+    },
+    "krea_2_raw:q8:mlx": {
+      "provider": "krea_2_raw",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 768,
+        "height": 768,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "eager_materialization",
+      "calibrationFingerprint": "krea-2-raw-q8-mlx-shared-ladder-v1",
+      "fixture": "krea-raw-mlx-q8-768-seed22735-step2"
     },
     "krea_2_turbo:bf16:candle": {
       "provider": "krea_2_turbo",
@@ -89,7 +824,7 @@
       },
       "evidenceScope": "authoritative",
       "loadShape": "deferred_materialization",
-      "calibrationFingerprint": "krea-turbo-cuda-phase-curves-v1",
+      "calibrationFingerprint": "krea-2-turbo-bf16-cuda-phase-curves-v1",
       "fixture": "fresh-five-rung-krea-bf16-768-seed16402-step2"
     },
     "krea_2_turbo:bf16:mlx": {
@@ -104,7 +839,7 @@
       },
       "evidenceScope": "authoritative",
       "loadShape": "deferred_materialization",
-      "calibrationFingerprint": "krea-2-mlx-full-ladder-native-pid-attn64m-window1-2026-08-03-v3",
+      "calibrationFingerprint": "krea-2-turbo-bf16-mlx-shared-ladder-v1",
       "fixture": "krea-base-mlx-bf16-1024-seed18377-step2"
     },
     "krea_2_turbo:q4:candle": {
@@ -134,7 +869,7 @@
       },
       "evidenceScope": "authoritative",
       "loadShape": "deferred_materialization",
-      "calibrationFingerprint": "krea-2-mlx-full-ladder-native-pid-attn64m-window1-2026-08-03-v3",
+      "calibrationFingerprint": "krea-2-turbo-q4-mlx-shared-ladder-v1",
       "fixture": "krea-base-mlx-q4-768-seed18377-step2"
     },
     "krea_2_turbo:q8:candle": {
@@ -149,7 +884,7 @@
       },
       "evidenceScope": "authoritative",
       "loadShape": "deferred_materialization",
-      "calibrationFingerprint": "krea-turbo-cuda-phase-curves-v1",
+      "calibrationFingerprint": "krea-2-turbo-q8-cuda-phase-curves-v1",
       "fixture": "fresh-five-rung-krea-q8-768-seed16402-step2"
     },
     "krea_2_turbo:q8:mlx": {
@@ -164,8 +899,256 @@
       },
       "evidenceScope": "authoritative",
       "loadShape": "deferred_materialization",
-      "calibrationFingerprint": "krea-2-mlx-full-ladder-native-pid-attn64m-window1-2026-08-03-v3",
+      "calibrationFingerprint": "krea-2-turbo-q8-mlx-shared-ladder-v1",
       "fixture": "krea-base-mlx-q8-1024-seed18377-step2"
+    },
+    "lens:bf16:candle": {
+      "provider": "lens",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "deferred_materialization",
+      "calibrationFingerprint": "lens-base-bf16-candle-cuda-shared-ladder-v1",
+      "fixture": "fresh-five-rung-lens-bf16-1024-seed16402-step2"
+    },
+    "lens:bf16:mlx": {
+      "provider": "lens",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "eager_materialization",
+      "calibrationFingerprint": "lens-bf16-mlx-shared-ladder-v1",
+      "fixture": "lens-mlx-bf16-1024-seed22732-step2"
+    },
+    "lens:q4:candle": {
+      "provider": "lens",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "deferred_materialization",
+      "calibrationFingerprint": "lens-base-q4-candle-cuda-shared-ladder-v1",
+      "fixture": "fresh-five-rung-lens-q4-1024-seed16402-step2"
+    },
+    "lens:q4:mlx": {
+      "provider": "lens",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "eager_materialization",
+      "calibrationFingerprint": "lens-mlx-shared-ladder-2026-08-03-v1",
+      "fixture": "lens-mlx-q4-1024-seed22732-step2"
+    },
+    "lens:q8:candle": {
+      "provider": "lens",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "deferred_materialization",
+      "calibrationFingerprint": "lens-base-q8-candle-cuda-shared-ladder-v1",
+      "fixture": "fresh-five-rung-lens-q8-1024-seed16402-step2"
+    },
+    "lens:q8:mlx": {
+      "provider": "lens",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "eager_materialization",
+      "calibrationFingerprint": "lens-q8-mlx-shared-ladder-v1",
+      "fixture": "lens-mlx-q8-1024-seed22732-step2"
+    },
+    "lens_turbo:bf16:candle": {
+      "provider": "lens_turbo",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "deferred_materialization",
+      "calibrationFingerprint": "lens-turbo-bf16-candle-cuda-shared-ladder-v1",
+      "fixture": "fresh-five-rung-lens-turbo-bf16-1024-seed16402-step2"
+    },
+    "lens_turbo:bf16:mlx": {
+      "provider": "lens_turbo",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "eager_materialization",
+      "calibrationFingerprint": "lens-turbo-bf16-mlx-shared-ladder-v1",
+      "fixture": "lens-turbo-mlx-bf16-1024-seed22732-step2"
+    },
+    "lens_turbo:q4:candle": {
+      "provider": "lens_turbo",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "deferred_materialization",
+      "calibrationFingerprint": "lens-candle-cuda-shared-ladder-device-format-blocks-v1",
+      "fixture": "fresh-five-rung-lens-turbo-q4-1024-seed16402-step2"
+    },
+    "lens_turbo:q4:mlx": {
+      "provider": "lens_turbo",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "eager_materialization",
+      "calibrationFingerprint": "lens-turbo-q4-mlx-shared-ladder-v1",
+      "fixture": "lens-turbo-mlx-q4-1024-seed22732-step2"
+    },
+    "lens_turbo:q8:candle": {
+      "provider": "lens_turbo",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "deferred_materialization",
+      "calibrationFingerprint": "lens-turbo-q8-candle-cuda-shared-ladder-v1",
+      "fixture": "fresh-five-rung-lens-turbo-q8-1024-seed16402-step2"
+    },
+    "lens_turbo:q8:mlx": {
+      "provider": "lens_turbo",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "eager_materialization",
+      "calibrationFingerprint": "lens-turbo-q8-mlx-shared-ladder-v1",
+      "fixture": "lens-turbo-mlx-q8-1024-seed22732-step2"
+    },
+    "krea_realtime_14b:bf16:mlx": {
+      "provider": "krea_realtime_14b",
+      "mode": "text_to_video",
+      "overlay": "none",
+      "geometry": {
+        "width": 832,
+        "height": 480,
+        "batch": 1,
+        "frames": 45
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "eager_materialization",
+      "calibrationFingerprint": "krea-realtime-14b-bf16-mlx-resident-ladder-v1",
+      "fixture": "krea-realtime-14b-mlx-bf16-832x480-f45-fps24-seed22735"
+    },
+    "krea_realtime_14b:q4:mlx": {
+      "provider": "krea_realtime_14b",
+      "mode": "text_to_video",
+      "overlay": "none",
+      "geometry": {
+        "width": 832,
+        "height": 480,
+        "batch": 1,
+        "frames": 45
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "eager_materialization",
+      "calibrationFingerprint": "krea-realtime-14b-q4-mlx-resident-ladder-v1",
+      "fixture": "krea-realtime-14b-mlx-q4-832x480-f45-fps24-seed22735"
+    },
+    "krea_realtime_14b:q8:mlx": {
+      "provider": "krea_realtime_14b",
+      "mode": "text_to_video",
+      "overlay": "none",
+      "geometry": {
+        "width": 832,
+        "height": 480,
+        "batch": 1,
+        "frames": 45
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "eager_materialization",
+      "calibrationFingerprint": "krea-realtime-14b-q8-mlx-resident-ladder-v1",
+      "fixture": "krea-realtime-14b-mlx-q8-832x480-f45-fps24-seed22735"
+    },
+    "ltx_2_5:bf16:candle": {
+      "provider": "ltx_2_5_distilled",
+      "mode": "text_to_video",
+      "overlay": "none",
+      "transformerVariant": "distilled",
+      "decoder": "conv",
+      "geometry": {
+        "width": 768,
+        "height": 512,
+        "batch": 1,
+        "frames": 145
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "deferred_materialization",
+      "calibrationFingerprint": "sc-18797-ltx-2-5-candle-ladder-v1",
+      "fixture": "ltx-2-5-candle-bf16-768x512-f145-fps24-seed18755",
+      "strategy": {
+        "rung": "resident",
+        "engagedRungs": [
+          "resident"
+        ]
+      }
     },
     "ltx_2_5:bf16:mlx": {
       "provider": "ltx_2_5",
@@ -199,7 +1182,13 @@
       "evidenceScope": "authoritative",
       "loadShape": "deferred_materialization",
       "calibrationFingerprint": "sc-18797-ltx-2-5-candle-ladder-v1",
-      "fixture": "ltx-2-5-candle-q4-768x512-f145-fps24-seed18755"
+      "fixture": "ltx-2-5-candle-q4-768x512-f145-fps24-seed18755",
+      "strategy": {
+        "rung": "resident",
+        "engagedRungs": [
+          "resident"
+        ]
+      }
     },
     "ltx_2_5:q4:mlx": {
       "provider": "ltx_2_5",
@@ -218,6 +1207,29 @@
       "calibrationFingerprint": "sc-18797-ltx-2-5-mlx-ladder-v1",
       "fixture": "ltx-2-5-mlx-q4-dev-conv-512x768-f145-fps24-seed18755"
     },
+    "ltx_2_5:q8:candle": {
+      "provider": "ltx_2_5_distilled",
+      "mode": "text_to_video",
+      "overlay": "none",
+      "transformerVariant": "distilled",
+      "decoder": "conv",
+      "geometry": {
+        "width": 768,
+        "height": 512,
+        "batch": 1,
+        "frames": 145
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "deferred_materialization",
+      "calibrationFingerprint": "sc-18797-ltx-2-5-candle-ladder-v1",
+      "fixture": "ltx-2-5-candle-q8-768x512-f145-fps24-seed18755",
+      "strategy": {
+        "rung": "resident",
+        "engagedRungs": [
+          "resident"
+        ]
+      }
+    },
     "ltx_2_5:q8:mlx": {
       "provider": "ltx_2_5",
       "mode": "text_to_video",
@@ -234,6 +1246,546 @@
       "loadShape": "eager_materialization",
       "calibrationFingerprint": "sc-18797-ltx-2-5-mlx-ladder-v1",
       "fixture": "ltx-2-5-mlx-q8-dev-conv-512x768-f145-fps24-seed18755"
+    },
+    "mage_flow:bf16:candle": {
+      "provider": "mage_flow",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 768,
+        "height": 768,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "deferred_materialization",
+      "calibrationFingerprint": "mage-flow-cuda-mage-flow-bf16-shared-ladder-v3",
+      "fixture": "mage-flow-candle-bf16-768-seed22733-step2"
+    },
+    "mage_flow:bf16:mlx": {
+      "provider": "mage_flow",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 768,
+        "height": 768,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "deferred_materialization",
+      "calibrationFingerprint": "mage-flow-mage-flow-bf16-mlx-shared-ladder-v1",
+      "fixture": "mage-flow-mlx-bf16-768-seed22733-step2"
+    },
+    "mage_flow:q4:candle": {
+      "provider": "mage_flow",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 768,
+        "height": 768,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "eager_materialization",
+      "calibrationFingerprint": "mage-flow-cuda-mage-flow-q4-shared-ladder-v3",
+      "fixture": "mage-flow-candle-q4-768-seed22733-step2"
+    },
+    "mage_flow:q4:mlx": {
+      "provider": "mage_flow",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 768,
+        "height": 768,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "deferred_materialization",
+      "calibrationFingerprint": "mage-flow-mage-flow-q4-mlx-shared-ladder-v1",
+      "fixture": "mage-flow-mlx-q4-768-seed22733-step2"
+    },
+    "mage_flow:q8:candle": {
+      "provider": "mage_flow",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 768,
+        "height": 768,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "eager_materialization",
+      "calibrationFingerprint": "mage-flow-cuda-mage-flow-q8-shared-ladder-v3",
+      "fixture": "mage-flow-candle-q8-768-seed22733-step2"
+    },
+    "mage_flow:q8:mlx": {
+      "provider": "mage_flow",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 768,
+        "height": 768,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "deferred_materialization",
+      "calibrationFingerprint": "mage-flow-mage-flow-q8-mlx-shared-ladder-v1",
+      "fixture": "mage-flow-mlx-q8-768-seed22733-step2"
+    },
+    "mage_flow_base:bf16:candle": {
+      "provider": "mage_flow_base",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 768,
+        "height": 768,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "deferred_materialization",
+      "calibrationFingerprint": "mage-flow-cuda-mage-flow-base-bf16-shared-ladder-v3",
+      "fixture": "mage-flow-base-candle-bf16-768-seed22733-step2"
+    },
+    "mage_flow_base:bf16:mlx": {
+      "provider": "mage_flow_base",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 768,
+        "height": 768,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "deferred_materialization",
+      "calibrationFingerprint": "mage-flow-mage-flow-base-bf16-mlx-shared-ladder-v1",
+      "fixture": "mage-flow-base-mlx-bf16-768-seed22733-step2"
+    },
+    "mage_flow_base:q4:candle": {
+      "provider": "mage_flow_base",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 768,
+        "height": 768,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "eager_materialization",
+      "calibrationFingerprint": "mage-flow-cuda-mage-flow-base-q4-shared-ladder-v3",
+      "fixture": "mage-flow-base-candle-q4-768-seed22733-step2"
+    },
+    "mage_flow_base:q4:mlx": {
+      "provider": "mage_flow_base",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 768,
+        "height": 768,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "deferred_materialization",
+      "calibrationFingerprint": "mage-flow-mage-flow-base-q4-mlx-shared-ladder-v1",
+      "fixture": "mage-flow-base-mlx-q4-768-seed22733-step2"
+    },
+    "mage_flow_base:q8:candle": {
+      "provider": "mage_flow_base",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 768,
+        "height": 768,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "eager_materialization",
+      "calibrationFingerprint": "mage-flow-cuda-mage-flow-base-q8-shared-ladder-v3",
+      "fixture": "mage-flow-base-candle-q8-768-seed22733-step2"
+    },
+    "mage_flow_base:q8:mlx": {
+      "provider": "mage_flow_base",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 768,
+        "height": 768,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "deferred_materialization",
+      "calibrationFingerprint": "mage-flow-mage-flow-base-q8-mlx-shared-ladder-v1",
+      "fixture": "mage-flow-base-mlx-q8-768-seed22733-step2"
+    },
+    "mage_flow_edit:bf16:candle": {
+      "provider": "mage_flow_edit",
+      "mode": "edit_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 768,
+        "height": 768,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "deferred_materialization",
+      "calibrationFingerprint": "mage-flow-cuda-mage-flow-edit-bf16-shared-ladder-v3",
+      "fixture": "mage-flow-edit-candle-bf16-768-seed22733-step2"
+    },
+    "mage_flow_edit:bf16:mlx": {
+      "provider": "mage_flow_edit",
+      "mode": "edit_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 768,
+        "height": 768,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "deferred_materialization",
+      "calibrationFingerprint": "mage-flow-mage-flow-edit-bf16-mlx-shared-ladder-v1",
+      "fixture": "mage-flow-edit-mlx-bf16-768-seed22733-step2"
+    },
+    "mage_flow_edit:q4:candle": {
+      "provider": "mage_flow_edit",
+      "mode": "edit_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 768,
+        "height": 768,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "eager_materialization",
+      "calibrationFingerprint": "mage-flow-cuda-mage-flow-edit-q4-shared-ladder-v3",
+      "fixture": "mage-flow-edit-candle-q4-768-seed22733-step2"
+    },
+    "mage_flow_edit:q4:mlx": {
+      "provider": "mage_flow_edit",
+      "mode": "edit_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 768,
+        "height": 768,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "deferred_materialization",
+      "calibrationFingerprint": "mage-flow-mage-flow-edit-q4-mlx-shared-ladder-v1",
+      "fixture": "mage-flow-edit-mlx-q4-768-seed22733-step2"
+    },
+    "mage_flow_edit:q8:candle": {
+      "provider": "mage_flow_edit",
+      "mode": "edit_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 768,
+        "height": 768,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "eager_materialization",
+      "calibrationFingerprint": "mage-flow-cuda-mage-flow-edit-q8-shared-ladder-v3",
+      "fixture": "mage-flow-edit-candle-q8-768-seed22733-step2"
+    },
+    "mage_flow_edit:q8:mlx": {
+      "provider": "mage_flow_edit",
+      "mode": "edit_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 768,
+        "height": 768,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "deferred_materialization",
+      "calibrationFingerprint": "mage-flow-mage-flow-edit-q8-mlx-shared-ladder-v1",
+      "fixture": "mage-flow-edit-mlx-q8-768-seed22733-step2"
+    },
+    "mage_flow_edit_base:bf16:candle": {
+      "provider": "mage_flow_edit_base",
+      "mode": "edit_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 768,
+        "height": 768,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "deferred_materialization",
+      "calibrationFingerprint": "mage-flow-cuda-mage-flow-edit-base-bf16-shared-ladder-v3",
+      "fixture": "mage-flow-edit-base-candle-bf16-768-seed22733-step2"
+    },
+    "mage_flow_edit_base:bf16:mlx": {
+      "provider": "mage_flow_edit_base",
+      "mode": "edit_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 768,
+        "height": 768,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "deferred_materialization",
+      "calibrationFingerprint": "mage-flow-mage-flow-edit-base-bf16-mlx-shared-ladder-v1",
+      "fixture": "mage-flow-edit-base-mlx-bf16-768-seed22733-step2"
+    },
+    "mage_flow_edit_base:q4:candle": {
+      "provider": "mage_flow_edit_base",
+      "mode": "edit_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 768,
+        "height": 768,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "eager_materialization",
+      "calibrationFingerprint": "mage-flow-cuda-mage-flow-edit-base-q4-shared-ladder-v3",
+      "fixture": "mage-flow-edit-base-candle-q4-768-seed22733-step2"
+    },
+    "mage_flow_edit_base:q4:mlx": {
+      "provider": "mage_flow_edit_base",
+      "mode": "edit_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 768,
+        "height": 768,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "deferred_materialization",
+      "calibrationFingerprint": "mage-flow-mage-flow-edit-base-q4-mlx-shared-ladder-v1",
+      "fixture": "mage-flow-edit-base-mlx-q4-768-seed22733-step2"
+    },
+    "mage_flow_edit_base:q8:candle": {
+      "provider": "mage_flow_edit_base",
+      "mode": "edit_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 768,
+        "height": 768,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "eager_materialization",
+      "calibrationFingerprint": "mage-flow-cuda-mage-flow-edit-base-q8-shared-ladder-v3",
+      "fixture": "mage-flow-edit-base-candle-q8-768-seed22733-step2"
+    },
+    "mage_flow_edit_base:q8:mlx": {
+      "provider": "mage_flow_edit_base",
+      "mode": "edit_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 768,
+        "height": 768,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "deferred_materialization",
+      "calibrationFingerprint": "mage-flow-mage-flow-edit-base-q8-mlx-shared-ladder-v1",
+      "fixture": "mage-flow-edit-base-mlx-q8-768-seed22733-step2"
+    },
+    "mage_flow_edit_turbo:bf16:candle": {
+      "provider": "mage_flow_edit_turbo",
+      "mode": "edit_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 768,
+        "height": 768,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "deferred_materialization",
+      "calibrationFingerprint": "mage-flow-cuda-mage-flow-edit-turbo-bf16-shared-ladder-v3",
+      "fixture": "mage-flow-edit-turbo-candle-bf16-768-seed22733-step4"
+    },
+    "mage_flow_edit_turbo:bf16:mlx": {
+      "provider": "mage_flow_edit_turbo",
+      "mode": "edit_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 768,
+        "height": 768,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "deferred_materialization",
+      "calibrationFingerprint": "mage-flow-mage-flow-edit-turbo-bf16-mlx-shared-ladder-v1",
+      "fixture": "mage-flow-edit-turbo-mlx-bf16-768-seed22733-step4"
+    },
+    "mage_flow_edit_turbo:q4:candle": {
+      "provider": "mage_flow_edit_turbo",
+      "mode": "edit_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 768,
+        "height": 768,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "eager_materialization",
+      "calibrationFingerprint": "mage-flow-cuda-mage-flow-edit-turbo-q4-shared-ladder-v3",
+      "fixture": "mage-flow-edit-turbo-candle-q4-768-seed22733-step4"
+    },
+    "mage_flow_edit_turbo:q4:mlx": {
+      "provider": "mage_flow_edit_turbo",
+      "mode": "edit_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 768,
+        "height": 768,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "deferred_materialization",
+      "calibrationFingerprint": "mage-flow-mage-flow-edit-turbo-q4-mlx-shared-ladder-v1",
+      "fixture": "mage-flow-edit-turbo-mlx-q4-768-seed22733-step4"
+    },
+    "mage_flow_edit_turbo:q8:candle": {
+      "provider": "mage_flow_edit_turbo",
+      "mode": "edit_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 768,
+        "height": 768,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "eager_materialization",
+      "calibrationFingerprint": "mage-flow-cuda-mage-flow-edit-turbo-q8-shared-ladder-v3",
+      "fixture": "mage-flow-edit-turbo-candle-q8-768-seed22733-step4"
+    },
+    "mage_flow_edit_turbo:q8:mlx": {
+      "provider": "mage_flow_edit_turbo",
+      "mode": "edit_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 768,
+        "height": 768,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "deferred_materialization",
+      "calibrationFingerprint": "mage-flow-mage-flow-edit-turbo-q8-mlx-shared-ladder-v1",
+      "fixture": "mage-flow-edit-turbo-mlx-q8-768-seed22733-step4"
+    },
+    "mage_flow_turbo:bf16:candle": {
+      "provider": "mage_flow_turbo",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 768,
+        "height": 768,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "deferred_materialization",
+      "calibrationFingerprint": "mage-flow-cuda-mage-flow-turbo-bf16-shared-ladder-v3",
+      "fixture": "mage-flow-turbo-candle-bf16-768-seed22733-step4"
+    },
+    "mage_flow_turbo:bf16:mlx": {
+      "provider": "mage_flow_turbo",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 768,
+        "height": 768,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "deferred_materialization",
+      "calibrationFingerprint": "mage-flow-mage-flow-turbo-bf16-mlx-shared-ladder-v1",
+      "fixture": "mage-flow-turbo-mlx-bf16-768-seed22733-step4"
+    },
+    "mage_flow_turbo:q4:candle": {
+      "provider": "mage_flow_turbo",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 768,
+        "height": 768,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "eager_materialization",
+      "calibrationFingerprint": "mage-flow-cuda-mage-flow-turbo-q4-shared-ladder-v3",
+      "fixture": "mage-flow-turbo-candle-q4-768-seed22733-step4"
+    },
+    "mage_flow_turbo:q4:mlx": {
+      "provider": "mage_flow_turbo",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 768,
+        "height": 768,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "deferred_materialization",
+      "calibrationFingerprint": "mage-flow-mage-flow-turbo-q4-mlx-shared-ladder-v1",
+      "fixture": "mage-flow-turbo-mlx-q4-768-seed22733-step4"
+    },
+    "mage_flow_turbo:q8:candle": {
+      "provider": "mage_flow_turbo",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 768,
+        "height": 768,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "eager_materialization",
+      "calibrationFingerprint": "mage-flow-cuda-mage-flow-turbo-q8-shared-ladder-v3",
+      "fixture": "mage-flow-turbo-candle-q8-768-seed22733-step4"
+    },
+    "mage_flow_turbo:q8:mlx": {
+      "provider": "mage_flow_turbo",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 768,
+        "height": 768,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "deferred_materialization",
+      "calibrationFingerprint": "mage-flow-mage-flow-turbo-q8-mlx-shared-ladder-v1",
+      "fixture": "mage-flow-turbo-mlx-q8-768-seed22733-step4"
     },
     "minimax_h3:bf16:mlx": {
       "provider": "minimax_h3",
@@ -262,7 +1814,7 @@
       },
       "evidenceScope": "authoritative",
       "loadShape": "eager_materialization",
-      "calibrationFingerprint": "minimax-h3-mlx-staged-joint-av-eager-abi3-v1",
+      "calibrationFingerprint": "minimax-h3-q4-mlx-staged-joint-av-eager-abi3-v1",
       "fixture": "minimax-h3-mlx-q4-576x320-f124-fps24-seed17137"
     },
     "minimax_h3:q8:mlx": {
@@ -277,8 +1829,113 @@
       },
       "evidenceScope": "authoritative",
       "loadShape": "eager_materialization",
-      "calibrationFingerprint": "minimax-h3-mlx-staged-joint-av-eager-abi3-v1",
+      "calibrationFingerprint": "minimax-h3-q8-mlx-staged-joint-av-eager-abi3-v1",
       "fixture": "minimax-h3-mlx-q8-576x320-f124-fps24-seed17137"
+    },
+    "pulid_flux_dev:bf16:candle": {
+      "provider": "pulid_flux",
+      "mode": "character_image",
+      "overlay": "identity",
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "deferred_materialization",
+      "calibrationFingerprint": "pulid-flux-cuda-identity-stack-staged-decode-attention-block-window-v1",
+      "fixture": "pulid-flux-candle-bf16-1024-seed22726-step2"
+    },
+    "pulid_flux_dev:bf16:mlx": {
+      "provider": "pulid_flux",
+      "mode": "character_image",
+      "overlay": "identity",
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "deferred_materialization",
+      "calibrationFingerprint": "pulid-flux-dev-bf16-mlx-shared-ladder-v1",
+      "fixture": "pulid-flux-mlx-bf16-1024-seed22726-step2"
+    },
+    "pulid_flux_dev:q4:candle": {
+      "provider": "pulid_flux",
+      "mode": "character_image",
+      "overlay": "identity",
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "deferred_materialization",
+      "calibrationFingerprint": "pulid-flux-cuda-identity-stack-staged-decode-attention-block-window-v1",
+      "fixture": "pulid-flux-candle-q4-1024-seed22726-step2"
+    },
+    "pulid_flux_dev:q4:mlx": {
+      "provider": "pulid_flux",
+      "mode": "character_image",
+      "overlay": "identity",
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "deferred_materialization",
+      "calibrationFingerprint": "pulid-flux-dev-q4-mlx-shared-ladder-2026-08-04-v1",
+      "fixture": "pulid-flux-mlx-q4-1024-seed22726-step2"
+    },
+    "pulid_flux_dev:q8:candle": {
+      "provider": "pulid_flux",
+      "mode": "character_image",
+      "overlay": "identity",
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "deferred_materialization",
+      "calibrationFingerprint": "pulid-flux-cuda-identity-stack-staged-decode-attention-block-window-v1",
+      "fixture": "pulid-flux-candle-q8-1024-seed22726-step2"
+    },
+    "pulid_flux_dev:q8:mlx": {
+      "provider": "pulid_flux",
+      "mode": "character_image",
+      "overlay": "identity",
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "deferred_materialization",
+      "calibrationFingerprint": "pulid-flux-dev-q8-mlx-shared-ladder-v1",
+      "fixture": "pulid-flux-mlx-q8-1024-seed22726-step2"
+    },
+    "qwen_image:bf16:candle": {
+      "provider": "qwen_image",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "deferred_materialization",
+      "calibrationFingerprint": "qwen-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v1",
+      "fixture": "qwen-image-candle-bf16-seed15817-step2"
     },
     "qwen_image:bf16:mlx": {
       "provider": "qwen_image",
@@ -306,7 +1963,7 @@
         "batch": 1,
         "frames": 1
       },
-      "evidenceScope": "candidate",
+      "evidenceScope": "authoritative",
       "loadShape": "deferred_materialization",
       "calibrationFingerprint": "qwen-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v1",
       "fixture": "qwen-image-candle-q4-seed15817-step2"
@@ -327,6 +1984,21 @@
       "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1",
       "fixture": "qwen-image-q4-seed16353-step2"
     },
+    "qwen_image:q8:candle": {
+      "provider": "qwen_image",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "deferred_materialization",
+      "calibrationFingerprint": "qwen-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v1",
+      "fixture": "qwen-image-candle-q8-seed15817-step2"
+    },
     "qwen_image:q8:mlx": {
       "provider": "qwen_image",
       "mode": "text_to_image",
@@ -342,6 +2014,36 @@
       "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1",
       "fixture": "qwen-image-q8-seed16353-step2"
     },
+    "qwen_image_edit_2511:bf16:candle": {
+      "provider": "qwen_image_edit",
+      "mode": "edit_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "candidate",
+      "loadShape": "deferred_materialization",
+      "calibrationFingerprint": "qwen-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2",
+      "fixture": "qwen-edit-candle-bf16-seed15817-step2"
+    },
+    "qwen_image_edit_2511:bf16:mlx": {
+      "provider": "qwen_image_edit",
+      "mode": "edit_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 768,
+        "height": 768,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "candidate",
+      "loadShape": "deferred_materialization",
+      "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1",
+      "fixture": "qwen-edit-mlx-bf16-seed16353-step2"
+    },
     "qwen_image_edit_2511:q4:candle": {
       "provider": "qwen_image_edit",
       "mode": "edit_image",
@@ -354,8 +2056,83 @@
       },
       "evidenceScope": "candidate",
       "loadShape": "deferred_materialization",
-      "calibrationFingerprint": "qwen-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v1",
+      "calibrationFingerprint": "qwen-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2",
       "fixture": "qwen-edit-candle-q4-seed15817-step2"
+    },
+    "qwen_image_edit_2511:q4:mlx": {
+      "provider": "qwen_image_edit",
+      "mode": "edit_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 768,
+        "height": 768,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "candidate",
+      "loadShape": "deferred_materialization",
+      "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1",
+      "fixture": "qwen-edit-mlx-q4-seed16353-step2"
+    },
+    "qwen_image_edit_2511:q8:candle": {
+      "provider": "qwen_image_edit",
+      "mode": "edit_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "candidate",
+      "loadShape": "deferred_materialization",
+      "calibrationFingerprint": "qwen-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2",
+      "fixture": "qwen-edit-candle-q8-seed15817-step2"
+    },
+    "qwen_image_edit_2511:q8:mlx": {
+      "provider": "qwen_image_edit",
+      "mode": "edit_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 768,
+        "height": 768,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "candidate",
+      "loadShape": "deferred_materialization",
+      "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1",
+      "fixture": "qwen-edit-mlx-q8-seed16353-step2"
+    },
+    "qwen_image_edit_2511_lightning:bf16:candle": {
+      "provider": "qwen_image_edit",
+      "mode": "edit_image",
+      "overlay": "lora",
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "candidate",
+      "loadShape": "eager_materialization",
+      "calibrationFingerprint": "qwen-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2",
+      "fixture": "qwen-edit-lightning-candle-bf16-seed15817-step4"
+    },
+    "qwen_image_edit_2511_lightning:bf16:mlx": {
+      "provider": "qwen_image_edit",
+      "mode": "edit_image",
+      "overlay": "lora",
+      "geometry": {
+        "width": 768,
+        "height": 768,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "candidate",
+      "loadShape": "deferred_materialization",
+      "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1",
+      "fixture": "qwen-edit-lightning-mlx-bf16-seed16353-step4"
     },
     "qwen_image_edit_2511_lightning:q4:candle": {
       "provider": "qwen_image_edit",
@@ -369,8 +2146,323 @@
       },
       "evidenceScope": "candidate",
       "loadShape": "eager_materialization",
-      "calibrationFingerprint": "qwen-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v1",
-      "fixture": "qwen-edit-lightning-candle-q4-seed15817-step2"
+      "calibrationFingerprint": "qwen-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2",
+      "fixture": "qwen-edit-lightning-candle-q4-seed15817-step4"
+    },
+    "qwen_image_edit_2511_lightning:q4:mlx": {
+      "provider": "qwen_image_edit",
+      "mode": "edit_image",
+      "overlay": "lora",
+      "geometry": {
+        "width": 768,
+        "height": 768,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "candidate",
+      "loadShape": "deferred_materialization",
+      "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1",
+      "fixture": "qwen-edit-lightning-mlx-q4-seed16353-step4"
+    },
+    "qwen_image_edit_2511_lightning:q8:candle": {
+      "provider": "qwen_image_edit",
+      "mode": "edit_image",
+      "overlay": "lora",
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "candidate",
+      "loadShape": "eager_materialization",
+      "calibrationFingerprint": "qwen-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2",
+      "fixture": "qwen-edit-lightning-candle-q8-seed15817-step4"
+    },
+    "qwen_image_edit_2511_lightning:q8:mlx": {
+      "provider": "qwen_image_edit",
+      "mode": "edit_image",
+      "overlay": "lora",
+      "geometry": {
+        "width": 768,
+        "height": 768,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "candidate",
+      "loadShape": "deferred_materialization",
+      "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1",
+      "fixture": "qwen-edit-lightning-mlx-q8-seed16353-step4"
+    },
+    "sd3_5_large:bf16:candle": {
+      "provider": "sd3_5_large",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "deferred_materialization",
+      "calibrationFingerprint": "sd35-large-candle-resident-staged-v1",
+      "fixture": "fresh-five-rung-sd3-5-large-bf16-1024-seed16402-step2"
+    },
+    "sd3_5_large:bf16:mlx": {
+      "provider": "sd3_5_large",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "eager_materialization",
+      "calibrationFingerprint": "sd3-5-large-bf16-mlx-shared-ladder-v1",
+      "fixture": "sd3-5-large-mlx-bf16-1024-seed22730-step2"
+    },
+    "sd3_5_large:q4:candle": {
+      "provider": "sd3_5_large",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "deferred_materialization",
+      "calibrationFingerprint": "sd35-large-candle-resident-staged-v1",
+      "fixture": "fresh-five-rung-sd3-5-large-q4-1024-seed16402-step2"
+    },
+    "sd3_5_large:q4:mlx": {
+      "provider": "sd3_5_large",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "eager_materialization",
+      "calibrationFingerprint": "sd3-5-large-q4-mlx-shared-ladder-v1",
+      "fixture": "sd3-5-large-mlx-q4-1024-seed22730-step2"
+    },
+    "sd3_5_large:q8:candle": {
+      "provider": "sd3_5_large",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "deferred_materialization",
+      "calibrationFingerprint": "sd35-large-candle-resident-staged-v1",
+      "fixture": "fresh-five-rung-sd3-5-large-q8-1024-seed16402-step2"
+    },
+    "sd3_5_large:q8:mlx": {
+      "provider": "sd3_5_large",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "eager_materialization",
+      "calibrationFingerprint": "sd3-5-large-q8-mlx-shared-ladder-v1",
+      "fixture": "sd3-5-large-mlx-q8-1024-seed22730-step2"
+    },
+    "sd3_5_large_turbo:bf16:candle": {
+      "provider": "sd3_5_large_turbo",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "deferred_materialization",
+      "calibrationFingerprint": "sd35-large-turbo-candle-resident-staged-v1",
+      "fixture": "fresh-five-rung-sd3-5-large-turbo-bf16-1024-seed16402-step2"
+    },
+    "sd3_5_large_turbo:bf16:mlx": {
+      "provider": "sd3_5_large_turbo",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "eager_materialization",
+      "calibrationFingerprint": "sd3-5-large-turbo-bf16-mlx-shared-ladder-v1",
+      "fixture": "sd3-5-large-turbo-mlx-bf16-1024-seed22730-step2"
+    },
+    "sd3_5_large_turbo:q4:candle": {
+      "provider": "sd3_5_large_turbo",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "deferred_materialization",
+      "calibrationFingerprint": "sd35-large-turbo-candle-resident-staged-v1",
+      "fixture": "fresh-five-rung-sd3-5-large-turbo-q4-1024-seed16402-step2"
+    },
+    "sd3_5_large_turbo:q4:mlx": {
+      "provider": "sd3_5_large_turbo",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "eager_materialization",
+      "calibrationFingerprint": "sd3-5-large-turbo-q4-mlx-shared-ladder-v1",
+      "fixture": "sd3-5-large-turbo-mlx-q4-1024-seed22730-step2"
+    },
+    "sd3_5_large_turbo:q8:candle": {
+      "provider": "sd3_5_large_turbo",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "deferred_materialization",
+      "calibrationFingerprint": "sd35-large-turbo-candle-resident-staged-v1",
+      "fixture": "fresh-five-rung-sd3-5-large-turbo-q8-1024-seed16402-step2"
+    },
+    "sd3_5_large_turbo:q8:mlx": {
+      "provider": "sd3_5_large_turbo",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "eager_materialization",
+      "calibrationFingerprint": "sd3-5-large-turbo-q8-mlx-shared-ladder-v1",
+      "fixture": "sd3-5-large-turbo-mlx-q8-1024-seed22730-step2"
+    },
+    "sd3_5_medium:bf16:candle": {
+      "provider": "sd3_5_medium",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "deferred_materialization",
+      "calibrationFingerprint": "sd35-medium-candle-resident-staged-v1",
+      "fixture": "fresh-five-rung-sd3-5-medium-bf16-1024-seed16402-step2"
+    },
+    "sd3_5_medium:bf16:mlx": {
+      "provider": "sd3_5_medium",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "eager_materialization",
+      "calibrationFingerprint": "sd3-5-medium-bf16-mlx-shared-ladder-v1",
+      "fixture": "sd3-5-medium-mlx-bf16-1024-seed22730-step2"
+    },
+    "sd3_5_medium:q4:candle": {
+      "provider": "sd3_5_medium",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "deferred_materialization",
+      "calibrationFingerprint": "sd35-medium-candle-resident-staged-v1",
+      "fixture": "fresh-five-rung-sd3-5-medium-q4-1024-seed16402-step2"
+    },
+    "sd3_5_medium:q4:mlx": {
+      "provider": "sd3_5_medium",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "eager_materialization",
+      "calibrationFingerprint": "sd3-5-medium-q4-mlx-shared-ladder-v1",
+      "fixture": "sd3-5-medium-mlx-q4-1024-seed22730-step2"
+    },
+    "sd3_5_medium:q8:candle": {
+      "provider": "sd3_5_medium",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "deferred_materialization",
+      "calibrationFingerprint": "sd35-medium-candle-resident-staged-v1",
+      "fixture": "fresh-five-rung-sd3-5-medium-q8-1024-seed16402-step2"
+    },
+    "sd3_5_medium:q8:mlx": {
+      "provider": "sd3_5_medium",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "eager_materialization",
+      "calibrationFingerprint": "sd3-5-medium-q8-mlx-shared-ladder-v1",
+      "fixture": "sd3-5-medium-mlx-q8-1024-seed22730-step2"
     },
     "sdxl:bf16:mlx": {
       "provider": "sdxl",
@@ -417,6 +2509,1140 @@
       "calibrationFingerprint": "sdxl-mlx-unet-shared-ladder-v3",
       "fixture": "sdxl-base-mlx-q8-1024-seed18379-step2"
     },
+    "sensenova_u1_8b:bf16:candle": {
+      "provider": "sensenova_u1_8b",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "eager_materialization",
+      "strategy": {
+        "rung": "resident",
+        "engagedRungs": [
+          "resident"
+        ]
+      },
+      "calibrationFingerprint": "sensenova-u1-quality-bf16-candle-request-memory-ladder-v1",
+      "fixture": "quality-candle-bf16-1024-seed22734-step2"
+    },
+    "sensenova_u1_8b:bf16:mlx": {
+      "provider": "sensenova_u1_8b",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "eager_materialization",
+      "strategy": {
+        "rung": "resident",
+        "engagedRungs": [
+          "resident"
+        ]
+      },
+      "calibrationFingerprint": "sensenova-u1-quality-bf16-mlx-shared-ladder-v1",
+      "fixture": "quality-mlx-bf16-1024-seed22734-step2"
+    },
+    "sensenova_u1_8b:q4:candle": {
+      "provider": "sensenova_u1_8b",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "eager_materialization",
+      "strategy": {
+        "rung": "resident",
+        "engagedRungs": [
+          "resident"
+        ]
+      },
+      "calibrationFingerprint": "sensenova-u1-quality-q4-candle-request-memory-ladder-v1",
+      "fixture": "quality-candle-q4-1024-seed22734-step2"
+    },
+    "sensenova_u1_8b:q4:mlx": {
+      "provider": "sensenova_u1_8b",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "eager_materialization",
+      "strategy": {
+        "rung": "resident",
+        "engagedRungs": [
+          "resident"
+        ]
+      },
+      "calibrationFingerprint": "sensenova-u1-quality-q4-mlx-shared-ladder-v1",
+      "fixture": "quality-mlx-q4-1024-seed22734-step2"
+    },
+    "sensenova_u1_8b:q8:candle": {
+      "provider": "sensenova_u1_8b",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "eager_materialization",
+      "strategy": {
+        "rung": "resident",
+        "engagedRungs": [
+          "resident"
+        ]
+      },
+      "calibrationFingerprint": "sensenova-u1-quality-q8-candle-request-memory-ladder-v1",
+      "fixture": "quality-candle-q8-1024-seed22734-step2"
+    },
+    "sensenova_u1_8b:q8:mlx": {
+      "provider": "sensenova_u1_8b",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "eager_materialization",
+      "strategy": {
+        "rung": "resident",
+        "engagedRungs": [
+          "resident"
+        ]
+      },
+      "calibrationFingerprint": "sensenova-u1-quality-q8-mlx-shared-ladder-2026-08-03-v1",
+      "fixture": "quality-mlx-q8-1024-seed22734-step2"
+    },
+    "sensenova_u1_8b_fast:bf16:candle": {
+      "provider": "sensenova_u1_8b_fast",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "eager_materialization",
+      "strategy": {
+        "rung": "resident",
+        "engagedRungs": [
+          "resident"
+        ]
+      },
+      "calibrationFingerprint": "sensenova-u1-fast-bf16-candle-request-memory-ladder-v1",
+      "fixture": "fast-candle-bf16-1024-seed22734-step2"
+    },
+    "sensenova_u1_8b_fast:bf16:mlx": {
+      "provider": "sensenova_u1_8b_fast",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "eager_materialization",
+      "strategy": {
+        "rung": "resident",
+        "engagedRungs": [
+          "resident"
+        ]
+      },
+      "calibrationFingerprint": "sensenova-u1-fast-bf16-mlx-shared-ladder-v1",
+      "fixture": "fast-mlx-bf16-1024-seed22734-step2"
+    },
+    "sensenova_u1_8b_fast:q4:candle": {
+      "provider": "sensenova_u1_8b_fast",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "eager_materialization",
+      "strategy": {
+        "rung": "resident",
+        "engagedRungs": [
+          "resident"
+        ]
+      },
+      "calibrationFingerprint": "sensenova-u1-fast-q4-candle-request-memory-ladder-v1",
+      "fixture": "fast-candle-q4-1024-seed22734-step2"
+    },
+    "sensenova_u1_8b_fast:q4:mlx": {
+      "provider": "sensenova_u1_8b_fast",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "eager_materialization",
+      "strategy": {
+        "rung": "resident",
+        "engagedRungs": [
+          "resident"
+        ]
+      },
+      "calibrationFingerprint": "sensenova-u1-fast-q4-mlx-shared-ladder-v1",
+      "fixture": "fast-mlx-q4-1024-seed22734-step2"
+    },
+    "sensenova_u1_8b_fast:q8:candle": {
+      "provider": "sensenova_u1_8b_fast",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "eager_materialization",
+      "strategy": {
+        "rung": "resident",
+        "engagedRungs": [
+          "resident"
+        ]
+      },
+      "calibrationFingerprint": "sensenova-u1-fast-q8-candle-request-memory-ladder-v1",
+      "fixture": "fast-candle-q8-1024-seed22734-step2"
+    },
+    "sensenova_u1_8b_fast:q8:mlx": {
+      "provider": "sensenova_u1_8b_fast",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "eager_materialization",
+      "strategy": {
+        "rung": "resident",
+        "engagedRungs": [
+          "resident"
+        ]
+      },
+      "calibrationFingerprint": "sensenova-u1-fast-q8-mlx-shared-ladder-2026-08-03-v1",
+      "fixture": "fast-mlx-q8-1024-seed22734-step2"
+    },
+    "sensenova_u1_8b_infographic_v2:bf16:candle": {
+      "provider": "sensenova_u1_8b",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "eager_materialization",
+      "strategy": {
+        "rung": "resident",
+        "engagedRungs": [
+          "resident"
+        ]
+      },
+      "calibrationFingerprint": "sensenova-u1-infographic-v2-bf16-candle-request-memory-ladder-v1",
+      "fixture": "infographic-v2-candle-bf16-1024-seed22734-step2"
+    },
+    "sensenova_u1_8b_infographic_v2:bf16:mlx": {
+      "provider": "sensenova_u1_8b",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "eager_materialization",
+      "strategy": {
+        "rung": "resident",
+        "engagedRungs": [
+          "resident"
+        ]
+      },
+      "calibrationFingerprint": "sensenova-u1-infographic-v2-bf16-mlx-shared-ladder-v1",
+      "fixture": "infographic-v2-mlx-bf16-1024-seed22734-step2"
+    },
+    "sensenova_u1_8b_infographic_v2:q4:candle": {
+      "provider": "sensenova_u1_8b",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "eager_materialization",
+      "strategy": {
+        "rung": "resident",
+        "engagedRungs": [
+          "resident"
+        ]
+      },
+      "calibrationFingerprint": "sensenova-u1-infographic-v2-q4-candle-request-memory-ladder-v1",
+      "fixture": "infographic-v2-candle-q4-1024-seed22734-step2"
+    },
+    "sensenova_u1_8b_infographic_v2:q4:mlx": {
+      "provider": "sensenova_u1_8b",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "eager_materialization",
+      "strategy": {
+        "rung": "resident",
+        "engagedRungs": [
+          "resident"
+        ]
+      },
+      "calibrationFingerprint": "sensenova-u1-infographic-v2-q4-mlx-shared-ladder-v1",
+      "fixture": "infographic-v2-mlx-q4-1024-seed22734-step2"
+    },
+    "sensenova_u1_8b_infographic_v2:q8:candle": {
+      "provider": "sensenova_u1_8b",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "eager_materialization",
+      "strategy": {
+        "rung": "resident",
+        "engagedRungs": [
+          "resident"
+        ]
+      },
+      "calibrationFingerprint": "sensenova-u1-infographic-v2-q8-candle-request-memory-ladder-v1",
+      "fixture": "infographic-v2-candle-q8-1024-seed22734-step2"
+    },
+    "sensenova_u1_8b_infographic_v2:q8:mlx": {
+      "provider": "sensenova_u1_8b",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "eager_materialization",
+      "strategy": {
+        "rung": "resident",
+        "engagedRungs": [
+          "resident"
+        ]
+      },
+      "calibrationFingerprint": "sensenova-u1-infographic-v2-q8-mlx-shared-ladder-v1",
+      "fixture": "infographic-v2-mlx-q8-1024-seed22734-step2"
+    },
+    "sensenova_u1_8b_infographic_v2_fast:bf16:candle": {
+      "provider": "sensenova_u1_8b_fast",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "eager_materialization",
+      "strategy": {
+        "rung": "resident",
+        "engagedRungs": [
+          "resident"
+        ]
+      },
+      "calibrationFingerprint": "sensenova-u1-infographic-v2-fast-bf16-candle-request-memory-ladder-v1",
+      "fixture": "infographic-v2-fast-candle-bf16-1024-seed22734-step2"
+    },
+    "sensenova_u1_8b_infographic_v2_fast:bf16:mlx": {
+      "provider": "sensenova_u1_8b_fast",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "eager_materialization",
+      "strategy": {
+        "rung": "resident",
+        "engagedRungs": [
+          "resident"
+        ]
+      },
+      "calibrationFingerprint": "sensenova-u1-infographic-v2-fast-bf16-mlx-shared-ladder-v1",
+      "fixture": "infographic-v2-fast-mlx-bf16-1024-seed22734-step2"
+    },
+    "sensenova_u1_8b_infographic_v2_fast:q4:candle": {
+      "provider": "sensenova_u1_8b_fast",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "eager_materialization",
+      "strategy": {
+        "rung": "resident",
+        "engagedRungs": [
+          "resident"
+        ]
+      },
+      "calibrationFingerprint": "sensenova-u1-infographic-v2-fast-q4-candle-request-memory-ladder-v1",
+      "fixture": "infographic-v2-fast-candle-q4-1024-seed22734-step2"
+    },
+    "sensenova_u1_8b_infographic_v2_fast:q4:mlx": {
+      "provider": "sensenova_u1_8b_fast",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "eager_materialization",
+      "strategy": {
+        "rung": "resident",
+        "engagedRungs": [
+          "resident"
+        ]
+      },
+      "calibrationFingerprint": "sensenova-u1-infographic-v2-fast-q4-mlx-shared-ladder-v1",
+      "fixture": "infographic-v2-fast-mlx-q4-1024-seed22734-step2"
+    },
+    "sensenova_u1_8b_infographic_v2_fast:q8:candle": {
+      "provider": "sensenova_u1_8b_fast",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "eager_materialization",
+      "strategy": {
+        "rung": "resident",
+        "engagedRungs": [
+          "resident"
+        ]
+      },
+      "calibrationFingerprint": "sensenova-u1-infographic-v2-fast-q8-candle-request-memory-ladder-v1",
+      "fixture": "infographic-v2-fast-candle-q8-1024-seed22734-step2"
+    },
+    "sensenova_u1_8b_infographic_v2_fast:q8:mlx": {
+      "provider": "sensenova_u1_8b_fast",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "eager_materialization",
+      "strategy": {
+        "rung": "resident",
+        "engagedRungs": [
+          "resident"
+        ]
+      },
+      "calibrationFingerprint": "sensenova-u1-infographic-v2-fast-q8-mlx-shared-ladder-v1",
+      "fixture": "infographic-v2-fast-mlx-q8-1024-seed22734-step2"
+    },
+    "sensenova_u1_8b_infographic_v3:bf16:candle": {
+      "provider": "sensenova_u1_8b",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "eager_materialization",
+      "strategy": {
+        "rung": "resident",
+        "engagedRungs": [
+          "resident"
+        ]
+      },
+      "calibrationFingerprint": "sensenova-u1-infographic-v3-bf16-candle-request-memory-ladder-v1",
+      "fixture": "infographic-v3-candle-bf16-1024-seed22734-step2"
+    },
+    "sensenova_u1_8b_infographic_v3:bf16:mlx": {
+      "provider": "sensenova_u1_8b",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "eager_materialization",
+      "strategy": {
+        "rung": "resident",
+        "engagedRungs": [
+          "resident"
+        ]
+      },
+      "calibrationFingerprint": "sensenova-u1-infographic-v3-bf16-mlx-shared-ladder-v1",
+      "fixture": "infographic-v3-mlx-bf16-1024-seed22734-step2"
+    },
+    "sensenova_u1_8b_infographic_v3:q4:candle": {
+      "provider": "sensenova_u1_8b",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "eager_materialization",
+      "strategy": {
+        "rung": "resident",
+        "engagedRungs": [
+          "resident"
+        ]
+      },
+      "calibrationFingerprint": "sensenova-u1-infographic-v3-q4-candle-request-memory-ladder-v1",
+      "fixture": "infographic-v3-candle-q4-1024-seed22734-step2"
+    },
+    "sensenova_u1_8b_infographic_v3:q4:mlx": {
+      "provider": "sensenova_u1_8b",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "eager_materialization",
+      "strategy": {
+        "rung": "resident",
+        "engagedRungs": [
+          "resident"
+        ]
+      },
+      "calibrationFingerprint": "sensenova-u1-infographic-v3-q4-mlx-shared-ladder-v1",
+      "fixture": "infographic-v3-mlx-q4-1024-seed22734-step2"
+    },
+    "sensenova_u1_8b_infographic_v3:q8:candle": {
+      "provider": "sensenova_u1_8b",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "eager_materialization",
+      "strategy": {
+        "rung": "resident",
+        "engagedRungs": [
+          "resident"
+        ]
+      },
+      "calibrationFingerprint": "sensenova-u1-infographic-v3-q8-candle-request-memory-ladder-v1",
+      "fixture": "infographic-v3-candle-q8-1024-seed22734-step2"
+    },
+    "sensenova_u1_8b_infographic_v3:q8:mlx": {
+      "provider": "sensenova_u1_8b",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "eager_materialization",
+      "strategy": {
+        "rung": "resident",
+        "engagedRungs": [
+          "resident"
+        ]
+      },
+      "calibrationFingerprint": "sensenova-u1-infographic-v3-q8-mlx-shared-ladder-v1",
+      "fixture": "infographic-v3-mlx-q8-1024-seed22734-step2"
+    },
+    "sensenova_u1_8b_infographic_v3_fast:bf16:candle": {
+      "provider": "sensenova_u1_8b_fast",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "eager_materialization",
+      "strategy": {
+        "rung": "resident",
+        "engagedRungs": [
+          "resident"
+        ]
+      },
+      "calibrationFingerprint": "sensenova-u1-infographic-v3-fast-bf16-candle-request-memory-ladder-v1",
+      "fixture": "infographic-v3-fast-candle-bf16-1024-seed22734-step2"
+    },
+    "sensenova_u1_8b_infographic_v3_fast:bf16:mlx": {
+      "provider": "sensenova_u1_8b_fast",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "eager_materialization",
+      "strategy": {
+        "rung": "resident",
+        "engagedRungs": [
+          "resident"
+        ]
+      },
+      "calibrationFingerprint": "sensenova-u1-infographic-v3-fast-bf16-mlx-shared-ladder-v1",
+      "fixture": "infographic-v3-fast-mlx-bf16-1024-seed22734-step2"
+    },
+    "sensenova_u1_8b_infographic_v3_fast:q4:candle": {
+      "provider": "sensenova_u1_8b_fast",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "eager_materialization",
+      "strategy": {
+        "rung": "resident",
+        "engagedRungs": [
+          "resident"
+        ]
+      },
+      "calibrationFingerprint": "sensenova-u1-infographic-v3-fast-q4-candle-request-memory-ladder-v1",
+      "fixture": "infographic-v3-fast-candle-q4-1024-seed22734-step2"
+    },
+    "sensenova_u1_8b_infographic_v3_fast:q4:mlx": {
+      "provider": "sensenova_u1_8b_fast",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "eager_materialization",
+      "strategy": {
+        "rung": "resident",
+        "engagedRungs": [
+          "resident"
+        ]
+      },
+      "calibrationFingerprint": "sensenova-u1-infographic-v3-fast-q4-mlx-shared-ladder-v1",
+      "fixture": "infographic-v3-fast-mlx-q4-1024-seed22734-step2"
+    },
+    "sensenova_u1_8b_infographic_v3_fast:q8:candle": {
+      "provider": "sensenova_u1_8b_fast",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "eager_materialization",
+      "strategy": {
+        "rung": "resident",
+        "engagedRungs": [
+          "resident"
+        ]
+      },
+      "calibrationFingerprint": "sensenova-u1-infographic-v3-fast-q8-candle-request-memory-ladder-v1",
+      "fixture": "infographic-v3-fast-candle-q8-1024-seed22734-step2"
+    },
+    "sensenova_u1_8b_infographic_v3_fast:q8:mlx": {
+      "provider": "sensenova_u1_8b_fast",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "eager_materialization",
+      "strategy": {
+        "rung": "resident",
+        "engagedRungs": [
+          "resident"
+        ]
+      },
+      "calibrationFingerprint": "sensenova-u1-infographic-v3-fast-q8-mlx-shared-ladder-v1",
+      "fixture": "infographic-v3-fast-mlx-q8-1024-seed22734-step2"
+    },
+    "scail2_14b:bf16:candle": {
+      "provider": "scail2_14b",
+      "mode": "animation",
+      "overlay": "none",
+      "geometry": {
+        "width": 832,
+        "height": 480,
+        "batch": 1,
+        "frames": 77
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "eager_materialization",
+      "calibrationFingerprint": "scail2-14b-bf16-candle-resident-eager-v1",
+      "fixture": "scail2-14b-candle-bf16-832x480-f77-fps16-seed22736",
+      "strategy": {
+        "rung": "resident",
+        "engagedRungs": [
+          "resident"
+        ]
+      }
+    },
+    "scail2_14b:bf16:mlx": {
+      "provider": "scail2_14b",
+      "mode": "animation",
+      "overlay": "none",
+      "geometry": {
+        "width": 832,
+        "height": 480,
+        "batch": 1,
+        "frames": 77
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "eager_materialization",
+      "calibrationFingerprint": "scail2-14b-bf16-mlx-resident-eager-v1",
+      "fixture": "scail2-14b-mlx-bf16-832x480-f77-fps16-seed22736"
+    },
+    "scail2_14b:q4:candle": {
+      "provider": "scail2_14b",
+      "mode": "animation",
+      "overlay": "none",
+      "geometry": {
+        "width": 832,
+        "height": 480,
+        "batch": 1,
+        "frames": 77
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "eager_materialization",
+      "calibrationFingerprint": "scail2-14b-q4-candle-resident-eager-v1",
+      "fixture": "scail2-14b-candle-q4-832x480-f77-fps16-seed22736",
+      "strategy": {
+        "rung": "resident",
+        "engagedRungs": [
+          "resident"
+        ]
+      }
+    },
+    "scail2_14b:q4:mlx": {
+      "provider": "scail2_14b",
+      "mode": "animation",
+      "overlay": "none",
+      "geometry": {
+        "width": 832,
+        "height": 480,
+        "batch": 1,
+        "frames": 77
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "eager_materialization",
+      "calibrationFingerprint": "scail2-14b-q4-mlx-resident-eager-v1",
+      "fixture": "scail2-14b-mlx-q4-832x480-f77-fps16-seed22736"
+    },
+    "scail2_14b:q8:candle": {
+      "provider": "scail2_14b",
+      "mode": "animation",
+      "overlay": "none",
+      "geometry": {
+        "width": 832,
+        "height": 480,
+        "batch": 1,
+        "frames": 77
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "eager_materialization",
+      "calibrationFingerprint": "scail2-14b-q8-candle-resident-eager-v1",
+      "fixture": "scail2-14b-candle-q8-832x480-f77-fps16-seed22736",
+      "strategy": {
+        "rung": "resident",
+        "engagedRungs": [
+          "resident"
+        ]
+      }
+    },
+    "scail2_14b:q8:mlx": {
+      "provider": "scail2_14b",
+      "mode": "animation",
+      "overlay": "none",
+      "geometry": {
+        "width": 832,
+        "height": 480,
+        "batch": 1,
+        "frames": 77
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "eager_materialization",
+      "calibrationFingerprint": "scail2-14b-q8-mlx-resident-eager-v1",
+      "fixture": "scail2-14b-mlx-q8-832x480-f77-fps16-seed22736"
+    },
+    "wan_2_2:bf16:candle": {
+      "provider": "wan2_2_ti2v_5b",
+      "mode": "text_to_video",
+      "overlay": "none",
+      "geometry": {
+        "width": 832,
+        "height": 480,
+        "batch": 1,
+        "frames": 121
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "eager_materialization",
+      "calibrationFingerprint": "sc-19223-wan2-2-ti2v-5b-candle-sequential-load-v1",
+      "fixture": "wan-2-2-ti2v-5b-candle-bf16-832x480-f121-fps24-seed22736"
+    },
+    "wan_2_2:bf16:mlx": {
+      "provider": "wan2_2_ti2v_5b",
+      "mode": "text_to_video",
+      "overlay": "none",
+      "geometry": {
+        "width": 832,
+        "height": 480,
+        "batch": 1,
+        "frames": 121
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "eager_materialization",
+      "calibrationFingerprint": "sc-19236-wan2-2-ti2v-5b-mlx-dense-v1",
+      "fixture": "wan-2-2-ti2v-5b-mlx-bf16-832x480-f121-fps24-seed22736"
+    },
+    "wan_2_2:q4:candle": {
+      "provider": "wan2_2_ti2v_5b",
+      "mode": "text_to_video",
+      "overlay": "none",
+      "geometry": {
+        "width": 832,
+        "height": 480,
+        "batch": 1,
+        "frames": 121
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "eager_materialization",
+      "calibrationFingerprint": "sc-19223-wan2-2-ti2v-5b-candle-q4-sequential-load-v1",
+      "fixture": "wan-2-2-ti2v-5b-candle-q4-832x480-f121-fps24-seed22736"
+    },
+    "wan_2_2:q4:mlx": {
+      "provider": "wan2_2_ti2v_5b",
+      "mode": "text_to_video",
+      "overlay": "none",
+      "geometry": {
+        "width": 832,
+        "height": 480,
+        "batch": 1,
+        "frames": 121
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "eager_materialization",
+      "calibrationFingerprint": "sc-19236-wan2-2-ti2v-5b-mlx-q4-g64-teq8-v1",
+      "fixture": "wan-2-2-ti2v-5b-mlx-q4-832x480-f121-fps24-seed22736"
+    },
+    "wan_2_2:q8:candle": {
+      "provider": "wan2_2_ti2v_5b",
+      "mode": "text_to_video",
+      "overlay": "none",
+      "geometry": {
+        "width": 832,
+        "height": 480,
+        "batch": 1,
+        "frames": 121
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "eager_materialization",
+      "calibrationFingerprint": "sc-19223-wan2-2-ti2v-5b-candle-q8-sequential-load-v1",
+      "fixture": "wan-2-2-ti2v-5b-candle-q8-832x480-f121-fps24-seed22736"
+    },
+    "wan_2_2:q8:mlx": {
+      "provider": "wan2_2_ti2v_5b",
+      "mode": "text_to_video",
+      "overlay": "none",
+      "geometry": {
+        "width": 832,
+        "height": 480,
+        "batch": 1,
+        "frames": 121
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "eager_materialization",
+      "calibrationFingerprint": "sc-19236-wan2-2-ti2v-5b-mlx-q8-g64-teq8-v1",
+      "fixture": "wan-2-2-ti2v-5b-mlx-q8-832x480-f121-fps24-seed22736"
+    },
+    "wan_2_2_i2v_14b:bf16:candle": {
+      "provider": "wan2_2_i2v_14b",
+      "mode": "image_to_video",
+      "overlay": "none",
+      "geometry": {
+        "width": 1280,
+        "height": 720,
+        "batch": 1,
+        "frames": 77
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "eager_materialization",
+      "calibrationFingerprint": "sc-22736-wan2-2-i2v-a14b-candle-dense-v1",
+      "fixture": "wan-2-2-i2v-a14b-candle-bf16-1280x720-f77-fps16-seed22736"
+    },
+    "wan_2_2_i2v_14b:bf16:mlx": {
+      "provider": "wan2_2_i2v_14b",
+      "mode": "image_to_video",
+      "overlay": "none",
+      "geometry": {
+        "width": 1280,
+        "height": 720,
+        "batch": 1,
+        "frames": 77
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "eager_materialization",
+      "calibrationFingerprint": "sc-22736-wan2-2-i2v-a14b-mlx-dense-v1",
+      "fixture": "wan-2-2-i2v-a14b-mlx-bf16-1280x720-f77-fps16-seed22736"
+    },
+    "wan_2_2_i2v_14b:q4:candle": {
+      "provider": "wan2_2_i2v_14b",
+      "mode": "image_to_video",
+      "overlay": "none",
+      "geometry": {
+        "width": 1280,
+        "height": 720,
+        "batch": 1,
+        "frames": 77
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "eager_materialization",
+      "calibrationFingerprint": "sc-22736-wan2-2-i2v-a14b-candle-q4-v1",
+      "fixture": "wan-2-2-i2v-a14b-candle-q4-1280x720-f77-fps16-seed22736"
+    },
+    "wan_2_2_i2v_14b:q4:mlx": {
+      "provider": "wan2_2_i2v_14b",
+      "mode": "image_to_video",
+      "overlay": "none",
+      "geometry": {
+        "width": 1280,
+        "height": 720,
+        "batch": 1,
+        "frames": 77
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "eager_materialization",
+      "calibrationFingerprint": "sc-22736-wan2-2-i2v-a14b-mlx-q4-v1",
+      "fixture": "wan-2-2-i2v-a14b-mlx-q4-1280x720-f77-fps16-seed22736"
+    },
+    "wan_2_2_i2v_14b:q8:candle": {
+      "provider": "wan2_2_i2v_14b",
+      "mode": "image_to_video",
+      "overlay": "none",
+      "geometry": {
+        "width": 1280,
+        "height": 720,
+        "batch": 1,
+        "frames": 77
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "eager_materialization",
+      "calibrationFingerprint": "sc-22736-wan2-2-i2v-a14b-candle-q8-v1",
+      "fixture": "wan-2-2-i2v-a14b-candle-q8-1280x720-f77-fps16-seed22736"
+    },
+    "wan_2_2_i2v_14b:q8:mlx": {
+      "provider": "wan2_2_i2v_14b",
+      "mode": "image_to_video",
+      "overlay": "none",
+      "geometry": {
+        "width": 1280,
+        "height": 720,
+        "batch": 1,
+        "frames": 77
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "eager_materialization",
+      "calibrationFingerprint": "sc-22736-wan2-2-i2v-a14b-mlx-q8-v1",
+      "fixture": "wan-2-2-i2v-a14b-mlx-q8-1280x720-f77-fps16-seed22736"
+    },
+    "wan_2_2_t2v_14b:bf16:candle": {
+      "provider": "wan2_2_t2v_14b",
+      "mode": "text_to_video",
+      "overlay": "none",
+      "geometry": {
+        "width": 1280,
+        "height": 720,
+        "batch": 1,
+        "frames": 77
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "eager_materialization",
+      "calibrationFingerprint": "sc-22736-wan2-2-t2v-a14b-candle-dense-v1",
+      "fixture": "wan-2-2-t2v-a14b-candle-bf16-1280x720-f77-fps16-seed22736"
+    },
+    "wan_2_2_t2v_14b:bf16:mlx": {
+      "provider": "wan2_2_t2v_14b",
+      "mode": "text_to_video",
+      "overlay": "none",
+      "geometry": {
+        "width": 1280,
+        "height": 720,
+        "batch": 1,
+        "frames": 77
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "eager_materialization",
+      "calibrationFingerprint": "sc-22736-wan2-2-t2v-a14b-mlx-dense-v1",
+      "fixture": "wan-2-2-t2v-a14b-mlx-bf16-1280x720-f77-fps16-seed22736"
+    },
+    "wan_2_2_t2v_14b:q4:candle": {
+      "provider": "wan2_2_t2v_14b",
+      "mode": "text_to_video",
+      "overlay": "none",
+      "geometry": {
+        "width": 1280,
+        "height": 720,
+        "batch": 1,
+        "frames": 77
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "eager_materialization",
+      "calibrationFingerprint": "sc-22736-wan2-2-t2v-a14b-candle-q4-v1",
+      "fixture": "wan-2-2-t2v-a14b-candle-q4-1280x720-f77-fps16-seed22736"
+    },
+    "wan_2_2_t2v_14b:q4:mlx": {
+      "provider": "wan2_2_t2v_14b",
+      "mode": "text_to_video",
+      "overlay": "none",
+      "geometry": {
+        "width": 1280,
+        "height": 720,
+        "batch": 1,
+        "frames": 77
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "eager_materialization",
+      "calibrationFingerprint": "sc-22736-wan2-2-t2v-a14b-mlx-q4-v1",
+      "fixture": "wan-2-2-t2v-a14b-mlx-q4-1280x720-f77-fps16-seed22736"
+    },
+    "wan_2_2_t2v_14b:q8:candle": {
+      "provider": "wan2_2_t2v_14b",
+      "mode": "text_to_video",
+      "overlay": "none",
+      "geometry": {
+        "width": 1280,
+        "height": 720,
+        "batch": 1,
+        "frames": 77
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "eager_materialization",
+      "calibrationFingerprint": "sc-22736-wan2-2-t2v-a14b-candle-q8-v1",
+      "fixture": "wan-2-2-t2v-a14b-candle-q8-1280x720-f77-fps16-seed22736"
+    },
+    "wan_2_2_t2v_14b:q8:mlx": {
+      "provider": "wan2_2_t2v_14b",
+      "mode": "text_to_video",
+      "overlay": "none",
+      "geometry": {
+        "width": 1280,
+        "height": 720,
+        "batch": 1,
+        "frames": 77
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "eager_materialization",
+      "calibrationFingerprint": "sc-22736-wan2-2-t2v-a14b-mlx-q8-v1",
+      "fixture": "wan-2-2-t2v-a14b-mlx-q8-1280x720-f77-fps16-seed22736"
+    },
     "z_image:bf16:candle": {
       "provider": "z_image",
       "mode": "text_to_image",
@@ -431,6 +3657,21 @@
       "loadShape": "deferred_materialization",
       "calibrationFingerprint": "z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2",
       "fixture": "sc-16170-z-image-bf16-1024-text_to_image-none-seed16170"
+    },
+    "z_image:bf16:mlx": {
+      "provider": "z_image",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 768,
+        "height": 768,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "eager_materialization",
+      "calibrationFingerprint": "z-image-mlx-independent-materialization-v4",
+      "fixture": "fresh-five-rung-z-image-base-bf16-768-seed16402-step2"
     },
     "z_image:q4:candle": {
       "provider": "z_image",
@@ -447,6 +3688,21 @@
       "calibrationFingerprint": "z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2",
       "fixture": "sc-16170-z-image-q4-1024-text_to_image-none-seed16170"
     },
+    "z_image:q4:mlx": {
+      "provider": "z_image",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 768,
+        "height": 768,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "eager_materialization",
+      "calibrationFingerprint": "z-image-mlx-independent-materialization-v4",
+      "fixture": "fresh-five-rung-z-image-base-q4-768-seed16402-step2"
+    },
     "z_image:q8:candle": {
       "provider": "z_image",
       "mode": "text_to_image",
@@ -462,6 +3718,111 @@
       "calibrationFingerprint": "z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2",
       "fixture": "sc-16170-z-image-q8-1024-text_to_image-none-seed16170"
     },
+    "z_image:q8:mlx": {
+      "provider": "z_image",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 768,
+        "height": 768,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "eager_materialization",
+      "calibrationFingerprint": "z-image-mlx-independent-materialization-v4",
+      "fixture": "fresh-five-rung-z-image-base-q8-768-seed16402-step2"
+    },
+    "z_image_edit:bf16:candle": {
+      "provider": "z_image_turbo",
+      "mode": "edit_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "deferred_materialization",
+      "calibrationFingerprint": "z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2",
+      "fixture": "fresh-five-rung-z-image-edit-bf16-1024-seed16402-step4"
+    },
+    "z_image_edit:bf16:mlx": {
+      "provider": "z_image_turbo",
+      "mode": "edit_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 768,
+        "height": 768,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "eager_materialization",
+      "calibrationFingerprint": "z-image-mlx-independent-materialization-v4",
+      "fixture": "fresh-five-rung-z-image-edit-bf16-768-seed16402-step4"
+    },
+    "z_image_edit:q4:candle": {
+      "provider": "z_image_turbo",
+      "mode": "edit_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "deferred_materialization",
+      "calibrationFingerprint": "z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2",
+      "fixture": "fresh-five-rung-z-image-edit-q4-1024-seed16402-step4"
+    },
+    "z_image_edit:q4:mlx": {
+      "provider": "z_image_turbo",
+      "mode": "edit_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 768,
+        "height": 768,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "eager_materialization",
+      "calibrationFingerprint": "z-image-mlx-independent-materialization-v4",
+      "fixture": "fresh-five-rung-z-image-edit-q4-768-seed16402-step4"
+    },
+    "z_image_edit:q8:candle": {
+      "provider": "z_image_turbo",
+      "mode": "edit_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "deferred_materialization",
+      "calibrationFingerprint": "z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2",
+      "fixture": "fresh-five-rung-z-image-edit-q8-1024-seed16402-step4"
+    },
+    "z_image_edit:q8:mlx": {
+      "provider": "z_image_turbo",
+      "mode": "edit_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 768,
+        "height": 768,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "eager_materialization",
+      "calibrationFingerprint": "z-image-mlx-independent-materialization-v4",
+      "fixture": "fresh-five-rung-z-image-edit-q8-768-seed16402-step4"
+    },
     "z_image_turbo:bf16:candle": {
       "provider": "z_image_turbo",
       "mode": "text_to_image",
@@ -476,6 +3837,21 @@
       "loadShape": "deferred_materialization",
       "calibrationFingerprint": "z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2",
       "fixture": "fresh-five-rung-z-image-turbo-bf16-1024-seed16402-step2"
+    },
+    "z_image_turbo:bf16:mlx": {
+      "provider": "z_image_turbo",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 768,
+        "height": 768,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "eager_materialization",
+      "calibrationFingerprint": "z-image-mlx-independent-materialization-v4",
+      "fixture": "fresh-five-rung-z-image-bf16-768-seed16402-step2"
     },
     "z_image_turbo:q4:candle": {
       "provider": "z_image_turbo",
@@ -521,6 +3897,1350 @@
       "loadShape": "deferred_materialization",
       "calibrationFingerprint": "z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2",
       "fixture": "fresh-five-rung-z-image-turbo-q8-1024-seed16402-step2"
+    },
+    "z_image_turbo:q8:mlx": {
+      "provider": "z_image_turbo",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 768,
+        "height": 768,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "eager_materialization",
+      "calibrationFingerprint": "z-image-mlx-independent-materialization-v4",
+      "fixture": "fresh-five-rung-z-image-q8-768-seed16402-step2"
+    },
+    "sdxl:q4:candle": {
+      "provider": "sdxl",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 768,
+        "height": 768,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "deferred_materialization",
+      "calibrationFingerprint": "sdxl-candle-sdxl-staged-decode-attention-v1",
+      "fixture": "sdxl-base-candle-q4-768-seed18379-step2"
+    },
+    "sdxl:q8:candle": {
+      "provider": "sdxl",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "deferred_materialization",
+      "calibrationFingerprint": "sdxl-candle-sdxl-staged-decode-attention-v1",
+      "fixture": "sdxl-base-candle-q8-1024-seed18379-step2"
+    },
+    "sdxl:bf16:candle": {
+      "provider": "sdxl",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "deferred_materialization",
+      "calibrationFingerprint": "sdxl-candle-sdxl-staged-decode-attention-v1",
+      "fixture": "sdxl-base-candle-bf16-1024-seed18379-step2"
+    },
+    "realvisxl:q4:mlx": {
+      "provider": "sdxl",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 768,
+        "height": 768,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "deferred_materialization",
+      "calibrationFingerprint": "sdxl-mlx-unet-shared-ladder-v3",
+      "fixture": "realvisxl-mlx-q4-768-seed18379-step2"
+    },
+    "realvisxl:q8:mlx": {
+      "provider": "sdxl",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "deferred_materialization",
+      "calibrationFingerprint": "sdxl-mlx-unet-shared-ladder-v3",
+      "fixture": "realvisxl-mlx-q8-1024-seed18379-step2"
+    },
+    "realvisxl:bf16:mlx": {
+      "provider": "sdxl",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "deferred_materialization",
+      "calibrationFingerprint": "sdxl-mlx-unet-shared-ladder-v3",
+      "fixture": "realvisxl-mlx-bf16-1024-seed18379-step2"
+    },
+    "realvisxl:q4:candle": {
+      "provider": "sdxl",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 768,
+        "height": 768,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "deferred_materialization",
+      "calibrationFingerprint": "sdxl-candle-realvisxl-staged-decode-attention-v1",
+      "fixture": "realvisxl-candle-q4-768-seed18379-step2"
+    },
+    "realvisxl:q8:candle": {
+      "provider": "sdxl",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "deferred_materialization",
+      "calibrationFingerprint": "sdxl-candle-realvisxl-staged-decode-attention-v1",
+      "fixture": "realvisxl-candle-q8-1024-seed18379-step2"
+    },
+    "realvisxl:bf16:candle": {
+      "provider": "sdxl",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "deferred_materialization",
+      "calibrationFingerprint": "sdxl-candle-realvisxl-staged-decode-attention-v1",
+      "fixture": "realvisxl-candle-bf16-1024-seed18379-step2"
+    },
+    "realvisxl_lightning:q4:mlx": {
+      "provider": "sdxl",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 768,
+        "height": 768,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "deferred_materialization",
+      "calibrationFingerprint": "sdxl-mlx-unet-shared-ladder-v3",
+      "fixture": "realvisxl-lightning-mlx-q4-768-seed18379-step2"
+    },
+    "realvisxl_lightning:q8:mlx": {
+      "provider": "sdxl",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "deferred_materialization",
+      "calibrationFingerprint": "sdxl-mlx-unet-shared-ladder-v3",
+      "fixture": "realvisxl-lightning-mlx-q8-1024-seed18379-step2"
+    },
+    "realvisxl_lightning:bf16:mlx": {
+      "provider": "sdxl",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "deferred_materialization",
+      "calibrationFingerprint": "sdxl-mlx-unet-shared-ladder-v3",
+      "fixture": "realvisxl-lightning-mlx-bf16-1024-seed18379-step2"
+    },
+    "realvisxl_lightning:q4:candle": {
+      "provider": "sdxl",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 768,
+        "height": 768,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "deferred_materialization",
+      "calibrationFingerprint": "sdxl-candle-realvisxl-lightning-staged-decode-attention-v1",
+      "fixture": "realvisxl-lightning-candle-q4-768-seed18379-step2"
+    },
+    "realvisxl_lightning:q8:candle": {
+      "provider": "sdxl",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "deferred_materialization",
+      "calibrationFingerprint": "sdxl-candle-realvisxl-lightning-staged-decode-attention-v1",
+      "fixture": "realvisxl-lightning-candle-q8-1024-seed18379-step2"
+    },
+    "realvisxl_lightning:bf16:candle": {
+      "provider": "sdxl",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "deferred_materialization",
+      "calibrationFingerprint": "sdxl-candle-realvisxl-lightning-staged-decode-attention-v1",
+      "fixture": "realvisxl-lightning-candle-bf16-1024-seed18379-step2"
+    },
+    "illustrious_xl_v1:q4:mlx": {
+      "provider": "sdxl",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 768,
+        "height": 768,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "deferred_materialization",
+      "calibrationFingerprint": "sdxl-mlx-unet-shared-ladder-v3",
+      "fixture": "illustrious-xl-v1-mlx-q4-768-seed18379-step2"
+    },
+    "illustrious_xl_v1:q8:mlx": {
+      "provider": "sdxl",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "deferred_materialization",
+      "calibrationFingerprint": "sdxl-mlx-unet-shared-ladder-v3",
+      "fixture": "illustrious-xl-v1-mlx-q8-1024-seed18379-step2"
+    },
+    "illustrious_xl_v1:bf16:mlx": {
+      "provider": "sdxl",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "deferred_materialization",
+      "calibrationFingerprint": "sdxl-mlx-unet-shared-ladder-v3",
+      "fixture": "illustrious-xl-v1-mlx-bf16-1024-seed18379-step2"
+    },
+    "illustrious_xl_v1:q4:candle": {
+      "provider": "sdxl",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 768,
+        "height": 768,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "deferred_materialization",
+      "calibrationFingerprint": "sdxl-candle-illustrious-xl-rev1-staged-decode-attention-v1",
+      "fixture": "illustrious-xl-v1-candle-q4-768-seed18379-step2"
+    },
+    "illustrious_xl_v1:q8:candle": {
+      "provider": "sdxl",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "deferred_materialization",
+      "calibrationFingerprint": "sdxl-candle-illustrious-xl-rev1-staged-decode-attention-v1",
+      "fixture": "illustrious-xl-v1-candle-q8-1024-seed18379-step2"
+    },
+    "illustrious_xl_v1:bf16:candle": {
+      "provider": "sdxl",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "deferred_materialization",
+      "calibrationFingerprint": "sdxl-candle-illustrious-xl-rev1-staged-decode-attention-v1",
+      "fixture": "illustrious-xl-v1-candle-bf16-1024-seed18379-step2"
+    },
+    "illustrious_xl_v2:q4:mlx": {
+      "provider": "sdxl",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 768,
+        "height": 768,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "deferred_materialization",
+      "calibrationFingerprint": "sdxl-mlx-unet-shared-ladder-v3",
+      "fixture": "illustrious-xl-v2-mlx-q4-768-seed18379-step2"
+    },
+    "illustrious_xl_v2:q8:mlx": {
+      "provider": "sdxl",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "deferred_materialization",
+      "calibrationFingerprint": "sdxl-mlx-unet-shared-ladder-v3",
+      "fixture": "illustrious-xl-v2-mlx-q8-1024-seed18379-step2"
+    },
+    "illustrious_xl_v2:bf16:mlx": {
+      "provider": "sdxl",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "deferred_materialization",
+      "calibrationFingerprint": "sdxl-mlx-unet-shared-ladder-v3",
+      "fixture": "illustrious-xl-v2-mlx-bf16-1024-seed18379-step2"
+    },
+    "illustrious_xl_v2:q4:candle": {
+      "provider": "sdxl",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 768,
+        "height": 768,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "deferred_materialization",
+      "calibrationFingerprint": "sdxl-candle-illustrious-xl-rev2-staged-decode-attention-v1",
+      "fixture": "illustrious-xl-v2-candle-q4-768-seed18379-step2"
+    },
+    "illustrious_xl_v2:q8:candle": {
+      "provider": "sdxl",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "deferred_materialization",
+      "calibrationFingerprint": "sdxl-candle-illustrious-xl-rev2-staged-decode-attention-v1",
+      "fixture": "illustrious-xl-v2-candle-q8-1024-seed18379-step2"
+    },
+    "illustrious_xl_v2:bf16:candle": {
+      "provider": "sdxl",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "deferred_materialization",
+      "calibrationFingerprint": "sdxl-candle-illustrious-xl-rev2-staged-decode-attention-v1",
+      "fixture": "illustrious-xl-v2-candle-bf16-1024-seed18379-step2"
+    },
+    "instantid_realvisxl:q4:mlx": {
+      "provider": "instantid",
+      "mode": "character_image",
+      "overlay": "identity",
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "eager_materialization",
+      "calibrationFingerprint": "instantid-request-contract-v1",
+      "fixture": "instantid-realvisxl-mlx-q4-1024-seed18381-step2"
+    },
+    "instantid_realvisxl:q8:mlx": {
+      "provider": "instantid",
+      "mode": "character_image",
+      "overlay": "identity",
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "eager_materialization",
+      "calibrationFingerprint": "instantid-request-contract-v1",
+      "fixture": "instantid-realvisxl-mlx-q8-1024-seed18381-step2"
+    },
+    "instantid_realvisxl:bf16:mlx": {
+      "provider": "instantid",
+      "mode": "character_image",
+      "overlay": "identity",
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "eager_materialization",
+      "calibrationFingerprint": "instantid-request-contract-v1",
+      "fixture": "instantid-realvisxl-mlx-bf16-1024-seed18381-step2"
+    },
+    "instantid_realvisxl:bf16:candle": {
+      "provider": "instantid",
+      "mode": "character_image",
+      "overlay": "identity",
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "eager_materialization",
+      "calibrationFingerprint": "instantid-candle-staged-conditioning-v1",
+      "fixture": "instantid-realvisxl-candle-bf16-1024-seed18381-step2"
+    },
+    "chroma1_base:bf16:candle": {
+      "provider": "chroma1_base",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "deferred_materialization",
+      "calibrationFingerprint": "chroma1-base-bf16-cuda-request-scoped-staged-residency-v1",
+      "fixture": "fresh-five-rung-chroma1-base-bf16-1024-seed16402-step2"
+    },
+    "chroma1_base:bf16:mlx": {
+      "provider": "chroma1_base",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "deferred_materialization",
+      "calibrationFingerprint": "chroma1-base-bf16-mlx-shared-ladder-v1",
+      "fixture": "chroma1-base-mlx-bf16-1024-seed22731-step2"
+    },
+    "chroma1_base:q4:candle": {
+      "provider": "chroma1_base",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "deferred_materialization",
+      "calibrationFingerprint": "chroma1-base-q4-cuda-request-scoped-staged-residency-v1",
+      "fixture": "fresh-five-rung-chroma1-base-q4-1024-seed16402-step2"
+    },
+    "chroma1_base:q4:mlx": {
+      "provider": "chroma1_base",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "deferred_materialization",
+      "calibrationFingerprint": "chroma1-base-q4-mlx-shared-ladder-2026-08-05-v1",
+      "fixture": "chroma1-base-mlx-q4-1024-seed22731-step2"
+    },
+    "chroma1_base:q8:candle": {
+      "provider": "chroma1_base",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "deferred_materialization",
+      "calibrationFingerprint": "chroma1-base-q8-cuda-request-scoped-staged-residency-v1",
+      "fixture": "fresh-five-rung-chroma1-base-q8-1024-seed16402-step2"
+    },
+    "chroma1_base:q8:mlx": {
+      "provider": "chroma1_base",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "deferred_materialization",
+      "calibrationFingerprint": "chroma1-base-q8-mlx-shared-ladder-v1",
+      "fixture": "chroma1-base-mlx-q8-1024-seed22731-step2"
+    },
+    "chroma1_flash:bf16:candle": {
+      "provider": "chroma1_flash",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "deferred_materialization",
+      "calibrationFingerprint": "chroma1-flash-bf16-cuda-request-scoped-staged-residency-v1",
+      "fixture": "fresh-five-rung-chroma1-flash-bf16-1024-seed16402-step2"
+    },
+    "chroma1_flash:bf16:mlx": {
+      "provider": "chroma1_flash",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "deferred_materialization",
+      "calibrationFingerprint": "chroma1-flash-bf16-mlx-shared-ladder-v1",
+      "fixture": "chroma1-flash-mlx-bf16-1024-seed22731-step2"
+    },
+    "chroma1_flash:q4:candle": {
+      "provider": "chroma1_flash",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "deferred_materialization",
+      "calibrationFingerprint": "chroma1-flash-q4-cuda-request-scoped-staged-residency-v1",
+      "fixture": "fresh-five-rung-chroma1-flash-q4-1024-seed16402-step2"
+    },
+    "chroma1_flash:q4:mlx": {
+      "provider": "chroma1_flash",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "deferred_materialization",
+      "calibrationFingerprint": "chroma1-flash-q4-mlx-shared-ladder-v1",
+      "fixture": "chroma1-flash-mlx-q4-1024-seed22731-step2"
+    },
+    "chroma1_flash:q8:candle": {
+      "provider": "chroma1_flash",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "deferred_materialization",
+      "calibrationFingerprint": "chroma1-flash-q8-cuda-request-scoped-staged-residency-v1",
+      "fixture": "fresh-five-rung-chroma1-flash-q8-1024-seed16402-step2"
+    },
+    "chroma1_flash:q8:mlx": {
+      "provider": "chroma1_flash",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "deferred_materialization",
+      "calibrationFingerprint": "chroma1-flash-q8-mlx-shared-ladder-v1",
+      "fixture": "chroma1-flash-mlx-q8-1024-seed22731-step2"
+    },
+    "chroma1_hd:bf16:candle": {
+      "provider": "chroma1_hd",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "deferred_materialization",
+      "calibrationFingerprint": "chroma1-hd-bf16-cuda-request-scoped-staged-residency-v1",
+      "fixture": "fresh-five-rung-chroma1-hd-bf16-1024-seed16402-step2"
+    },
+    "chroma1_hd:bf16:mlx": {
+      "provider": "chroma1_hd",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "deferred_materialization",
+      "calibrationFingerprint": "chroma1-hd-bf16-mlx-shared-ladder-v1",
+      "fixture": "chroma1-hd-mlx-bf16-1024-seed22731-step2"
+    },
+    "chroma1_hd:q4:candle": {
+      "provider": "chroma1_hd",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "deferred_materialization",
+      "calibrationFingerprint": "chroma1-hd-q4-cuda-request-scoped-staged-residency-v1",
+      "fixture": "fresh-five-rung-chroma1-hd-q4-1024-seed16402-step2"
+    },
+    "chroma1_hd:q4:mlx": {
+      "provider": "chroma1_hd",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "deferred_materialization",
+      "calibrationFingerprint": "chroma1-hd-q4-mlx-shared-ladder-v1",
+      "fixture": "chroma1-hd-mlx-q4-1024-seed22731-step2"
+    },
+    "chroma1_hd:q8:candle": {
+      "provider": "chroma1_hd",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "deferred_materialization",
+      "calibrationFingerprint": "chroma1-hd-q8-cuda-request-scoped-staged-residency-v1",
+      "fixture": "fresh-five-rung-chroma1-hd-q8-1024-seed16402-step2"
+    },
+    "chroma1_hd:q8:mlx": {
+      "provider": "chroma1_hd",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "deferred_materialization",
+      "calibrationFingerprint": "chroma1-hd-q8-mlx-shared-ladder-v1",
+      "fixture": "chroma1-hd-mlx-q8-1024-seed22731-step2"
+    },
+    "sana_1600m:bf16:candle": {
+      "provider": "sana_1600m",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "deferred_materialization",
+      "calibrationFingerprint": "sana-candle-dense-base-full-ladder-v1",
+      "fixture": "fresh-five-rung-sana-1600m-bf16-1024-seed16402-step2"
+    },
+    "sana_1600m:bf16:mlx": {
+      "provider": "sana_1600m",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "eager_materialization",
+      "calibrationFingerprint": "sana-base-bf16-mlx-full-ladder-v1-resident",
+      "fixture": "sana-1600m-mlx-bf16-1024-seed22731-step2"
+    },
+    "sana_1600m:q4:mlx": {
+      "provider": "sana_1600m",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "eager_materialization",
+      "calibrationFingerprint": "sana-mlx-full-ladder-2026-08-06-v1-resident",
+      "fixture": "sana-1600m-mlx-q4-1024-seed22731-step2"
+    },
+    "sana_1600m:q8:mlx": {
+      "provider": "sana_1600m",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "eager_materialization",
+      "calibrationFingerprint": "sana-base-q8-mlx-full-ladder-v1-resident",
+      "fixture": "sana-1600m-mlx-q8-1024-seed22731-step2"
+    },
+    "sana_sprint_1600m:bf16:candle": {
+      "provider": "sana_sprint_1600m",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "deferred_materialization",
+      "calibrationFingerprint": "sana-candle-dense-sprint-full-ladder-v1",
+      "fixture": "fresh-five-rung-sana-sprint-bf16-1024-seed16402-step2"
+    },
+    "sana_sprint_1600m:bf16:mlx": {
+      "provider": "sana_sprint_1600m",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "eager_materialization",
+      "calibrationFingerprint": "sana-sprint-bf16-mlx-full-ladder-v1-resident",
+      "fixture": "sana-sprint-mlx-bf16-1024-seed22731-step2"
+    },
+    "sana_sprint_1600m:q4:mlx": {
+      "provider": "sana_sprint_1600m",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "eager_materialization",
+      "calibrationFingerprint": "sana-sprint-q4-mlx-full-ladder-v1-resident",
+      "fixture": "sana-sprint-mlx-q4-1024-seed22731-step2"
+    },
+    "sana_sprint_1600m:q8:mlx": {
+      "provider": "sana_sprint_1600m",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "eager_materialization",
+      "calibrationFingerprint": "sana-sprint-q8-mlx-full-ladder-v1-resident",
+      "fixture": "sana-sprint-mlx-q8-1024-seed22731-step2"
+    },
+    "bernini:bf16:candle": {
+      "provider": "bernini",
+      "mode": "text_to_video",
+      "overlay": "none",
+      "geometry": {
+        "width": 848,
+        "height": 480,
+        "batch": 1,
+        "frames": 49
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "deferred_materialization",
+      "calibrationFingerprint": "bernini-image-bf16-candle-dual-expert-ladder-v1",
+      "fixture": "bernini-video-candle-bf16-848x480-f49-fps16-seed22737",
+      "strategy": {
+        "rung": "resident",
+        "engagedRungs": [
+          "resident"
+        ]
+      }
+    },
+    "bernini:bf16:mlx": {
+      "provider": "bernini",
+      "mode": "text_to_video",
+      "overlay": "none",
+      "geometry": {
+        "width": 848,
+        "height": 480,
+        "batch": 1,
+        "frames": 49
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "eager_materialization",
+      "calibrationFingerprint": "bernini-image-bf16-mlx-dual-expert-ladder-v1",
+      "fixture": "bernini-video-mlx-bf16-848x480-f49-fps16-seed22737"
+    },
+    "bernini:q4:candle": {
+      "provider": "bernini",
+      "mode": "text_to_video",
+      "overlay": "none",
+      "geometry": {
+        "width": 848,
+        "height": 480,
+        "batch": 1,
+        "frames": 49
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "deferred_materialization",
+      "calibrationFingerprint": "bernini-image-q4-candle-dual-expert-ladder-v1",
+      "fixture": "bernini-video-candle-q4-848x480-f49-fps16-seed22737",
+      "strategy": {
+        "rung": "resident",
+        "engagedRungs": [
+          "resident"
+        ]
+      }
+    },
+    "bernini:q4:mlx": {
+      "provider": "bernini",
+      "mode": "text_to_video",
+      "overlay": "none",
+      "geometry": {
+        "width": 848,
+        "height": 480,
+        "batch": 1,
+        "frames": 49
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "eager_materialization",
+      "calibrationFingerprint": "bernini-image-q4-mlx-dual-expert-ladder-v1",
+      "fixture": "bernini-video-mlx-q4-848x480-f49-fps16-seed22737"
+    },
+    "bernini:q8:candle": {
+      "provider": "bernini",
+      "mode": "text_to_video",
+      "overlay": "none",
+      "geometry": {
+        "width": 848,
+        "height": 480,
+        "batch": 1,
+        "frames": 49
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "deferred_materialization",
+      "calibrationFingerprint": "bernini-image-q8-candle-dual-expert-ladder-v1",
+      "fixture": "bernini-video-candle-q8-848x480-f49-fps16-seed22737",
+      "strategy": {
+        "rung": "resident",
+        "engagedRungs": [
+          "resident"
+        ]
+      }
+    },
+    "bernini:q8:mlx": {
+      "provider": "bernini",
+      "mode": "text_to_video",
+      "overlay": "none",
+      "geometry": {
+        "width": 848,
+        "height": 480,
+        "batch": 1,
+        "frames": 49
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "eager_materialization",
+      "calibrationFingerprint": "bernini-image-q8-mlx-dual-expert-ladder-v1",
+      "fixture": "bernini-video-mlx-q8-848x480-f49-fps16-seed22737"
+    },
+    "bernini_image:bf16:candle": {
+      "provider": "bernini",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 848,
+        "height": 480,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "deferred_materialization",
+      "calibrationFingerprint": "bernini-image-bf16-candle-dual-expert-ladder-v1",
+      "fixture": "fresh-five-rung-bernini-image-bf16-848-seed16402-step2",
+      "strategy": {
+        "rung": "resident",
+        "engagedRungs": [
+          "resident"
+        ]
+      }
+    },
+    "bernini_image:bf16:mlx": {
+      "provider": "bernini",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 848,
+        "height": 480,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "eager_materialization",
+      "calibrationFingerprint": "bernini-image-bf16-mlx-dual-expert-ladder-v1",
+      "fixture": "bernini-image-mlx-bf16-848x480-f1-fps16-seed22737"
+    },
+    "bernini_image:q4:candle": {
+      "provider": "bernini",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 848,
+        "height": 480,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "deferred_materialization",
+      "calibrationFingerprint": "bernini-image-q4-candle-dual-expert-ladder-v1",
+      "fixture": "fresh-five-rung-bernini-image-q4-848-seed16402-step2",
+      "strategy": {
+        "rung": "resident",
+        "engagedRungs": [
+          "resident"
+        ]
+      }
+    },
+    "bernini_image:q4:mlx": {
+      "provider": "bernini",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 848,
+        "height": 480,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "eager_materialization",
+      "calibrationFingerprint": "bernini-image-q4-mlx-dual-expert-ladder-v1",
+      "fixture": "bernini-image-mlx-q4-848x480-f1-fps16-seed22737"
+    },
+    "bernini_image:q8:candle": {
+      "provider": "bernini",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 848,
+        "height": 480,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "deferred_materialization",
+      "calibrationFingerprint": "bernini-image-q8-candle-dual-expert-ladder-v1",
+      "fixture": "fresh-five-rung-bernini-image-q8-848-seed16402-step2",
+      "strategy": {
+        "rung": "resident",
+        "engagedRungs": [
+          "resident"
+        ]
+      }
+    },
+    "bernini_image:q8:mlx": {
+      "provider": "bernini",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 848,
+        "height": 480,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "eager_materialization",
+      "calibrationFingerprint": "bernini-image-q8-mlx-dual-expert-ladder-v1",
+      "fixture": "bernini-image-mlx-q8-848x480-f1-fps16-seed22737"
+    },
+    "ltx_2_3:bf16:mlx": {
+      "provider": "ltx_2_3",
+      "mode": "text_to_video",
+      "overlay": "none",
+      "geometry": {
+        "width": 768,
+        "height": 512,
+        "batch": 1,
+        "frames": 121
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "eager_materialization",
+      "calibrationFingerprint": "sc-20772-ltx-2-3-bf16-mlx-memory-ladder-v2",
+      "fixture": "ltx-2-3-mlx-bf16-768x512-f121-fps30-seed18946"
+    },
+    "ltx_2_3:q4:candle": {
+      "provider": "ltx_2_3_distilled",
+      "mode": "text_to_video",
+      "overlay": "none",
+      "geometry": {
+        "width": 768,
+        "height": 512,
+        "batch": 1,
+        "frames": 97
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "deferred_materialization",
+      "calibrationFingerprint": "sc-20772-ltx-2-3-candle-q4-i2v-v1",
+      "fixture": "ltx-2-3-candle-q4-768x512-f97-fps24-seed22737",
+      "strategy": {
+        "rung": "resident",
+        "engagedRungs": [
+          "resident"
+        ]
+      }
+    },
+    "ltx_2_3:q4:mlx": {
+      "provider": "ltx_2_3",
+      "mode": "text_to_video",
+      "overlay": "none",
+      "geometry": {
+        "width": 768,
+        "height": 512,
+        "batch": 1,
+        "frames": 121
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "eager_materialization",
+      "calibrationFingerprint": "sc-20772-ltx-2-3-q4-mlx-memory-ladder-v2",
+      "fixture": "ltx-2-3-mlx-q4-768x512-f121-fps30-seed18946"
+    },
+    "ltx_2_3:q8:candle": {
+      "provider": "ltx_2_3_distilled",
+      "mode": "text_to_video",
+      "overlay": "none",
+      "geometry": {
+        "width": 768,
+        "height": 512,
+        "batch": 1,
+        "frames": 97
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "deferred_materialization",
+      "calibrationFingerprint": "sc-20772-ltx-2-3-candle-q8-i2v-v1",
+      "fixture": "ltx-2-3-candle-q8-768x512-f97-fps24-seed22737",
+      "strategy": {
+        "rung": "resident",
+        "engagedRungs": [
+          "resident"
+        ]
+      }
+    },
+    "ltx_2_3:q8:mlx": {
+      "provider": "ltx_2_3",
+      "mode": "text_to_video",
+      "overlay": "none",
+      "geometry": {
+        "width": 768,
+        "height": 512,
+        "batch": 1,
+        "frames": 121
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "eager_materialization",
+      "calibrationFingerprint": "sc-20772-ltx-2-3-mlx-memory-ladder-v2",
+      "fixture": "ltx-2-3-mlx-q8-768x512-f121-fps30-seed18946"
+    },
+    "minimax_h3:bf16:candle": {
+      "provider": "minimax_h3",
+      "mode": "text_to_video",
+      "overlay": "none",
+      "geometry": {
+        "width": 576,
+        "height": 320,
+        "batch": 1,
+        "frames": 124
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "deferred_materialization",
+      "calibrationFingerprint": "minimax-h3-bf16-candle-staged-joint-av-v1",
+      "fixture": "minimax-h3-candle-bf16-576x320-f124-fps24-seed22737",
+      "strategy": {
+        "rung": "resident",
+        "engagedRungs": [
+          "resident"
+        ]
+      }
+    },
+    "minimax_h3:q4:candle": {
+      "provider": "minimax_h3",
+      "mode": "text_to_video",
+      "overlay": "none",
+      "geometry": {
+        "width": 576,
+        "height": 320,
+        "batch": 1,
+        "frames": 124
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "deferred_materialization",
+      "calibrationFingerprint": "minimax-h3-q4-candle-staged-joint-av-v1",
+      "fixture": "minimax-h3-candle-q4-576x320-f124-fps24-seed22737",
+      "strategy": {
+        "rung": "resident",
+        "engagedRungs": [
+          "resident"
+        ]
+      }
+    },
+    "minimax_h3:q8:candle": {
+      "provider": "minimax_h3",
+      "mode": "text_to_video",
+      "overlay": "none",
+      "geometry": {
+        "width": 576,
+        "height": 320,
+        "batch": 1,
+        "frames": 124
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "deferred_materialization",
+      "calibrationFingerprint": "minimax-h3-q8-candle-staged-joint-av-v1",
+      "fixture": "minimax-h3-candle-q8-576x320-f124-fps24-seed22737",
+      "strategy": {
+        "rung": "resident",
+        "engagedRungs": [
+          "resident"
+        ]
+      }
+    },
+    "minimax_h3_ref:bf16:candle": {
+      "provider": "minimax_h3",
+      "mode": "reference_to_video",
+      "overlay": "none",
+      "geometry": {
+        "width": 576,
+        "height": 320,
+        "batch": 1,
+        "frames": 124
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "deferred_materialization",
+      "calibrationFingerprint": "minimax-h3-bf16-candle-staged-joint-av-v1",
+      "fixture": "minimax-h3-ref-candle-bf16-576x320-f124-fps24-seed22737",
+      "strategy": {
+        "rung": "resident",
+        "engagedRungs": [
+          "resident"
+        ]
+      }
+    },
+    "minimax_h3_ref:bf16:mlx": {
+      "provider": "minimax_h3",
+      "mode": "reference_to_video",
+      "overlay": "none",
+      "geometry": {
+        "width": 576,
+        "height": 320,
+        "batch": 1,
+        "frames": 124
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "eager_materialization",
+      "calibrationFingerprint": "minimax-h3-mlx-staged-joint-av-eager-abi3-v1",
+      "fixture": "minimax-h3-ref-mlx-bf16-576x320-f124-fps24-seed17137"
+    },
+    "minimax_h3_ref:q4:candle": {
+      "provider": "minimax_h3",
+      "mode": "reference_to_video",
+      "overlay": "none",
+      "geometry": {
+        "width": 576,
+        "height": 320,
+        "batch": 1,
+        "frames": 124
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "deferred_materialization",
+      "calibrationFingerprint": "minimax-h3-q4-candle-staged-joint-av-v1",
+      "fixture": "minimax-h3-ref-candle-q4-576x320-f124-fps24-seed22737",
+      "strategy": {
+        "rung": "resident",
+        "engagedRungs": [
+          "resident"
+        ]
+      }
+    },
+    "minimax_h3_ref:q4:mlx": {
+      "provider": "minimax_h3",
+      "mode": "reference_to_video",
+      "overlay": "none",
+      "geometry": {
+        "width": 576,
+        "height": 320,
+        "batch": 1,
+        "frames": 124
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "eager_materialization",
+      "calibrationFingerprint": "minimax-h3-q4-mlx-staged-joint-av-eager-abi3-v1",
+      "fixture": "minimax-h3-ref-mlx-q4-576x320-f124-fps24-seed17137"
+    },
+    "minimax_h3_ref:q8:candle": {
+      "provider": "minimax_h3",
+      "mode": "reference_to_video",
+      "overlay": "none",
+      "geometry": {
+        "width": 576,
+        "height": 320,
+        "batch": 1,
+        "frames": 124
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "deferred_materialization",
+      "calibrationFingerprint": "minimax-h3-q8-candle-staged-joint-av-v1",
+      "fixture": "minimax-h3-ref-candle-q8-576x320-f124-fps24-seed22737",
+      "strategy": {
+        "rung": "resident",
+        "engagedRungs": [
+          "resident"
+        ]
+      }
+    },
+    "minimax_h3_ref:q8:mlx": {
+      "provider": "minimax_h3",
+      "mode": "reference_to_video",
+      "overlay": "none",
+      "geometry": {
+        "width": 576,
+        "height": 320,
+        "batch": 1,
+        "frames": 124
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "eager_materialization",
+      "calibrationFingerprint": "minimax-h3-q8-mlx-staged-joint-av-eager-abi3-v1",
+      "fixture": "minimax-h3-ref-mlx-q8-576x320-f124-fps24-seed17137"
     }
   }
 }

@@ -887,6 +887,102 @@ def test_builtin_models_manifest_satisfies_authoring_schema():
     )
 
 
+def _measured_contract_rows():
+    """Every hand-authored (non engine-projected) memoryStrategyContract row in the catalog."""
+    manifest = _load_builtin_models_manifest()
+    for model in manifest["models"]:
+        for backend in ("mlx", "candle"):
+            contract = (model.get(backend) or {}).get("memoryStrategyContract")
+            if not contract:
+                continue
+            for index, row in enumerate(contract["implementations"]):
+                if str(row.get("source", "")).startswith("config/engine-capabilities/"):
+                    continue
+                yield model["id"], backend, index, row
+
+
+def test_only_overlay_bearing_rows_may_omit_their_calibration_identity():
+    """sc-22730: an absent `fingerprint` is an ENGINE WITHHOLDING, never an authoring oversight.
+
+    `candle-gen-sd3`'s `production_calibration_identity` returns `None` whenever
+    `!receipt.adapters.is_empty()` (inference
+    `crates/media/candle-gen/candle-gen-sd3/src/memory_strategy.rs:876-886`), so the six SD3.5 lora
+    rows CANNOT name an identity: the engine never publishes one for that load shape. The schema
+    therefore admits an overlay-bearing measured row with no `fingerprint`, and that permission is
+    wider than the truth.
+
+    STRUCTURAL HALF ONLY (sc-22738). This test used to pin the exact six-row set
+    `{sd3_5_*:candle[1|3]}`, which is a frozen-corpus gate: it reds on any new overlay-bearing row,
+    including a correct one, and it says nothing about WHY a row may omit its identity. The derived
+    rule — which model/crate pairs actually withhold, read from the engine source when
+    `INFERENCE_REPO` points at a checkout that carries it — already lives in
+    `scripts/manifest-memory-declarations.test.mjs`
+    ("no overlay-bearing manifest row promises an identity its candle engine withholds under
+    adapters"). What survives here is the SHAPE claim that file does not make: an omission implies
+    the row is overlay-bearing, over every measured contract row in the catalog.
+
+    The clean-base half is enforced structurally, and asserted below against the real schema.
+    """
+    omitted = [
+        (model_id, backend, index, row)
+        for model_id, backend, index, row in _measured_contract_rows()
+        if "fingerprint" not in row
+    ]
+    # Not a count: the claim is only that the population is non-empty, so the loop below is not
+    # vacuous. A catalog in which every measured row named its identity would make this test
+    # meaningless rather than wrong, and that is what this says.
+    assert omitted, (
+        "no measured contract row omits its calibration identity, so the omission rule below "
+        "guards nothing — has the engine started publishing under adapters?"
+    )
+    # An omission is earned ONLY by being overlay-bearing: a clean base row that drops its
+    # fingerprint is an authoring oversight, and this is what catches it.
+    for model_id, backend, index, row in omitted:
+        assert [
+            overlay for overlay in row["overlays"] if overlay != "none"
+        ] or row.get("providerOverlay", "none") != "none", (
+            f"{model_id}:{backend}[{index}] omits fingerprint but declares no overlay; only an "
+            "engine that withholds the identity under adapters may leave it out"
+        )
+
+
+def test_schema_requires_a_calibration_identity_on_clean_base_rows_only():
+    """sc-22730: the schema's own two-sided behaviour, exercised on the real manifest.
+
+    Mutating the catalog rather than a hand-built document keeps the assertion where the rows live:
+    a schema that stopped distinguishing the two shapes would pass a synthetic fixture built to the
+    same (wrong) rule.
+    """
+    validator = jsonschema.Draft202012Validator(_load_schema(SCHEMA_PATH))
+
+    def errors_after(mutate):
+        manifest = _load_builtin_models_manifest()
+        model = next(m for m in manifest["models"] if m["id"] == "sd3_5_large")
+        rows = model["candle"]["memoryStrategyContract"]["implementations"]
+        mutate(rows)
+        return list(validator.iter_errors(manifest))
+
+    # Bind the two fixture rows by shape, so a reordered contract cannot leave this testing the
+    # wrong pair while still passing.
+    fixture = next(m for m in _load_builtin_models_manifest()["models"] if m["id"] == "sd3_5_large")
+    fixture_rows = fixture["candle"]["memoryStrategyContract"]["implementations"]
+    assert fixture_rows[0]["overlays"] == ["none"] and "fingerprint" in fixture_rows[0]
+    assert fixture_rows[1]["overlays"] == ["lora"] and "fingerprint" not in fixture_rows[1]
+
+    # Row 0 is the clean base (overlays ["none"]): dropping its identity must be REJECTED.
+    assert errors_after(lambda rows: rows[0].pop("fingerprint")), (
+        "the schema no longer requires a fingerprint on a clean base row"
+    )
+    # Row 1 is the lora row: it is already fingerprint-free and must validate. Putting one back is
+    # legal to the schema (which cannot see the engine) — the test above is what forbids it.
+    assert not errors_after(lambda rows: None), "the committed lora rows must validate as authored"
+    # The other measured requirements survive the relaxation on the overlay-bearing row.
+    for field in ("engagedRungs", "parameters", "parameterRanges"):
+        assert errors_after(lambda rows, field=field: rows[1].pop(field)), (
+            f"an overlay-bearing measured row may still omit {field}"
+        )
+
+
 def test_memory_request_provider_mode_schema_admits_public_character_image():
     """SC-20798: provider-owned Character routes keep their public typed coordinate."""
     schema = _load_schema(SCHEMA_PATH)

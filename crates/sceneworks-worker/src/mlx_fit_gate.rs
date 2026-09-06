@@ -62,10 +62,57 @@ use crate::{WorkerError, WorkerResult};
 
 const REQUEST_EVIDENCE_REVISION: &str = "sc-15507-request-scope-v1";
 const INFERENCE_CONTRACT_REVISION: &str = "1c4354b4b22d7f2cf5c4ea5fe17a83ab6c655e82";
-// Must remain identical to mlx-gen-mage's loaded provider contract. The prior generation-peak
-// token predated the shared ladder and caused every exact Mage request to fail the provider/gate
-// handshake before selection.
-const MAGE_CALIBRATION_FINGERPRINT: &str = "mage-flow-mlx-shared-ladder-2026-08-03-v1";
+// Must remain identical to mlx-gen-mage's loaded provider contract. sc-22733 (inference #953,
+// epic sc-22723) retired the single string `mage-flow-mlx-shared-ladder-2026-08-03-v1` for a
+// table keyed on (route, PROVEN artifact tier) — `mage-flow-<route>-<tier>-mlx-shared-ladder-v1`,
+// eighteen cells — because the three tiers of one route are three different resident sets and one
+// anchor cannot price all three. The engine binds a cell only when the tier is proven off the
+// `quantization.bits` marker of the component directories the loader itself opened (DiT and text
+// encoder agreeing) and equals `LoadSpec::quantize`, so the plan's `tier.quant` IS the tier axis.
+// The worker mirrors the table here rather than calling the engine because the Resident-path
+// handshake below is compiled on every platform; the macOS test
+// `mage_estimator_fingerprint_matches_the_linked_provider_contract` pins every cell to the linked
+// engine's `production_calibration_fingerprint`, so a move on either side is red at test time.
+// The prior generation-peak token predated the shared ladder and caused every exact Mage request
+// to fail the provider/gate handshake before selection.
+const MAGE_CALIBRATION_FINGERPRINT_SUFFIX: &str = "-mlx-shared-ladder-v1";
+
+/// The route label inside a Mage-Flow calibration string, mirroring
+/// `mlx_gen_mage::model::MageVariant::route_label` over the six registered ids. `None` for any id
+/// the engine does not serve: a plan naming one could only reach an unpaired estimator.
+fn mage_calibration_route_label(engine_id: &str) -> Option<&'static str> {
+    Some(match engine_id {
+        "mage_flow" => "mage-flow",
+        "mage_flow_base" => "mage-flow-base",
+        "mage_flow_turbo" => "mage-flow-turbo",
+        "mage_flow_edit" => "mage-flow-edit",
+        "mage_flow_edit_base" => "mage-flow-edit-base",
+        "mage_flow_edit_turbo" => "mage-flow-edit-turbo",
+        _ => return None,
+    })
+}
+
+/// The tier label inside a Mage-Flow calibration string, mirroring
+/// `mlx_gen_mage::model::calibration_tier_label`. `None` for a tier the family does not ship, so an
+/// unshipped tier is unnameable rather than collapsed onto a neighbour.
+fn mage_calibration_tier_label(quant: Option<gen_core::Quant>) -> Option<&'static str> {
+    match quant {
+        None => Some("bf16"),
+        Some(gen_core::Quant::Q4) => Some("q4"),
+        Some(gen_core::Quant::Q8) => Some("q8"),
+        Some(_) => None,
+    }
+}
+
+/// The production calibration identity the loaded `mlx-gen-mage` route publishes for one
+/// (route, tier) cell, or `None` when no cell exists for the pair.
+fn mage_calibration_fingerprint(engine_id: &str, quant: Option<gen_core::Quant>) -> Option<String> {
+    let route = mage_calibration_route_label(engine_id)?;
+    let tier = mage_calibration_tier_label(quant)?;
+    Some(format!(
+        "mage-flow-{route}-{tier}{MAGE_CALIBRATION_FINGERPRINT_SUFFIX}"
+    ))
+}
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -3784,21 +3831,31 @@ fn evaluate_request_with_budget_using_bundle(
         count = inputs.count.max(1),
         "selected MLX memory-admission path"
     );
-    if plan.engine_id.starts_with("mage_flow")
-        && !matches!(
+    if plan.engine_id.starts_with("mage_flow") {
+        // The expected identity is the (route, tier) cell of THIS plan: a loaded q8 contract must
+        // not admit a q4 request, and a route or tier the engine never ships names no cell at all.
+        let expected_fingerprint = mage_calibration_fingerprint(plan.engine_id, plan.tier.quant)
+            .ok_or_else(|| {
+                WorkerError::InvalidPayload(format!(
+                    "{} {:?} names no Mage-Flow calibration cell; refusing request admission \
+                     against an unpaired estimator",
+                    plan.engine_id, plan.tier.quant
+                ))
+            })?;
+        if !matches!(
             contract.calibration.as_ref(),
             Some(identity)
                 if identity.abi == gen_core::MEMORY_CALIBRATION_ABI
-                    && identity.fingerprint == MAGE_CALIBRATION_FINGERPRINT
-        )
-    {
-        return Err(WorkerError::InvalidPayload(format!(
-            "{} loaded provider calibration does not match ABI {} / fingerprint {}; refusing \
-             request admission against an unpaired estimator",
-            plan.engine_id,
-            gen_core::MEMORY_CALIBRATION_ABI,
-            MAGE_CALIBRATION_FINGERPRINT
-        )));
+                    && identity.fingerprint == expected_fingerprint
+        ) {
+            return Err(WorkerError::InvalidPayload(format!(
+                "{} loaded provider calibration does not match ABI {} / fingerprint {}; refusing \
+                 request admission against an unpaired estimator",
+                plan.engine_id,
+                gen_core::MEMORY_CALIBRATION_ABI,
+                expected_fingerprint
+            )));
+        }
     }
     // The caller estimates the base-model pipeline. Let the provider's canonical contract seam add
     // any separately declared auxiliary networks before either fit selection or warm-cache credit.
@@ -7109,120 +7166,15 @@ mod tests {
     }
 
     /// sc-18408 item (d): every MLX plan row must resolve through the shipped registry to a
-    /// weights-free provider contract. This is deliberately derived from the plan rather than a
-    /// hand-maintained provider list: adding a planned lane without registering its contract must
-    /// fail in CI before the calibration adapter reaches a physical capture. Provider-owned
-    /// contract fixtures avoid filesystem-shaped test doubles where providers expose them;
-    /// SDXL and FLUX.2-dev intentionally fall back to their normal registrations, whose contract
-    /// builders are themselves weights-free.
+    /// weights-free provider contract that IMPLEMENTS its planned anchor rung. The walk itself is
+    /// lane-generic and lives in `inference_runtime` (sc-22736) so the candle lane runs the same
+    /// one under its own cfg; this is the MLX call.
     #[test]
     #[cfg(target_os = "macos")]
     fn every_planned_mlx_lane_resolves_a_weights_free_provider_contract() {
-        let plan: Value =
-            serde_json::from_str(include_str!("../../../config/memory-calibration-plan.json"))
-                .expect("memory calibration plan parses");
-        // sc-22514: the plan is an ANCHOR plan — an object keyed `<modelId>:<tier>:<backend>` with
-        // exactly one entry per cell — so the tier and the lane come out of the KEY and everything
-        // else out of the entry. One anchor per cell is the whole measurement obligation; this
-        // guard is unchanged in what it asks, only in where it reads the coordinates from.
-        let anchors = plan["anchors"].as_object().expect("plan anchors object");
-        let registry = crate::inference_runtime::media();
-        let mut checked = 0_usize;
-
-        for (key, row) in anchors.iter() {
-            let coordinates: Vec<&str> = key.split(':').collect();
-            let [model_id, tier, backend] = coordinates.as_slice() else {
-                panic!("anchor key {key} must be <modelId>:<tier>:<backend>")
-            };
-            if *backend != "mlx" {
-                continue;
-            }
-            let _ = model_id;
-            let provider = row["provider"].as_str().expect("anchor provider");
-            let mode = row["mode"].as_str().expect("anchor mode");
-            let overlay = row["overlay"].as_str().expect("anchor overlay");
-            let load_shape = match row["loadShape"].as_str().expect("anchor loadShape") {
-                "eager_materialization" => gen_core::LoadShape::EagerMaterialization,
-                "deferred_materialization" => gen_core::LoadShape::DeferredMaterialization,
-                other => {
-                    panic!("planned MLX lane {provider}/{mode} names unknown load shape {other}")
-                }
-            };
-
-            let mut spec = LoadSpec::new(WeightsSource::Dir(std::path::PathBuf::from("fixture")))
-                .with_load_shape(load_shape);
-            spec = match *tier {
-                "q4" => spec.with_quant(gen_core::Quant::Q4),
-                "q8" => spec.with_quant(gen_core::Quant::Q8),
-                "bf16" => spec,
-                other => panic!("planned MLX lane {provider}/{mode} names unknown tier {other}"),
-            };
-            match overlay {
-                "none" => {}
-                "control:1" => {
-                    spec = spec.with_control(WeightsSource::File(std::path::PathBuf::from(
-                        "fixture-control",
-                    )));
-                }
-                other => panic!(
-                    "planned MLX lane {provider}/{mode} names unmapped overlay {other}; teach the \
-                     generic contract guard how production represents it"
-                ),
-            }
-
-            let registration = registry
-                .memory_strategy_registrations()
-                .find(|registration| registration.provider_id == provider)
-                .unwrap_or_else(|| {
-                    panic!(
-                        "planned MLX lane {provider}/{mode} has no memory-strategy registration in \
-                         the shipped runtime registry"
-                    )
-                });
-            let contract = match registry
-                .memory_contract_fixture_registrations()
-                .find(|fixture| fixture.provider_id == provider)
-            {
-                Some(fixture) => (fixture.contract)(&spec),
-                None => (registration.contract)(&spec),
-            }
-            .unwrap_or_else(|error| {
-                panic!(
-                    "planned MLX lane {provider}/{mode} cannot build a weights-free memory \
-                     contract: {error}"
-                )
-            });
-
-            assert_eq!(
-                contract.provider_id, provider,
-                "planned MLX lane {provider}/{mode} resolved another provider's contract"
-            );
-            assert_eq!(
-                contract.backend.backend_kind(),
-                gen_core::MemoryBackend::Mlx,
-                "planned MLX lane {provider}/{mode} resolved a non-MLX contract"
-            );
-            assert_eq!(
-                contract.load_shape, load_shape,
-                "planned MLX lane {provider}/{mode} contract does not preserve its load shape"
-            );
-            let calibration = contract.calibration.as_ref().unwrap_or_else(|| {
-                panic!(
-                    "planned MLX lane {provider}/{mode} resolves only an uncalibratable \
-                     compatibility contract"
-                )
-            });
-            assert_eq!(
-                calibration.load_shape, load_shape,
-                "planned MLX lane {provider}/{mode} calibration identity does not preserve its \
-                 load shape"
-            );
-            checked += 1;
-        }
-
-        assert!(
-            checked > 0,
-            "the shipped plan must contain at least one MLX anchor"
+        crate::inference_runtime::every_planned_lane_row_resolves_a_weights_free_contract_implementing_its_rung(
+            "mlx",
+            gen_core::MemoryBackend::Mlx,
         );
     }
 
@@ -8136,12 +8088,18 @@ mod tests {
             },
         );
         contract.calibration = Some(MemoryCalibrationIdentity::new(
-            MAGE_CALIBRATION_FINGERPRINT,
+            mage_request_fingerprint(),
             gen_core::LoadShape::EagerMaterialization,
         ));
         contract.asset_facts.base_bytes = gib_to_bytes(6.0);
         contract.asset_facts.transformer_bytes = gib_to_bytes(6.0);
         contract
+    }
+
+    /// The (route, tier) cell `request_plan()` names: `mage_flow` at q4.
+    fn mage_request_fingerprint() -> String {
+        mage_calibration_fingerprint("mage_flow", Some(gen_core::Quant::Q4))
+            .expect("mage_flow q4 is a shipped Mage-Flow cell")
     }
 
     fn request_inputs(width: u32, height: u32, count: u32) -> MlxRequestInputs {
@@ -17433,18 +17391,117 @@ mod tests {
         .unwrap_err()
         .to_string();
         assert!(
-            error.contains(MAGE_CALIBRATION_FINGERPRINT),
+            error.contains(&mage_request_fingerprint()),
             "the production Resident path must compare the loaded provider fingerprint: {error}"
         );
+    }
+
+    #[test]
+    fn mage_resident_path_refuses_a_contract_from_another_tier() {
+        // A loaded q8 Mage contract carries a real production identity — but not the cell the q4
+        // plan names. The handshake must key on the plan's tier, not merely on "some Mage cell".
+        let q8_fingerprint = mage_calibration_fingerprint("mage_flow", Some(gen_core::Quant::Q8))
+            .expect("mage_flow q8 is a shipped Mage-Flow cell");
+        assert_ne!(q8_fingerprint, mage_request_fingerprint());
+        let mut contract = mage_request_contract();
+        contract.calibration = Some(gen_core::MemoryCalibrationIdentity::new(
+            q8_fingerprint.clone(),
+            gen_core::LoadShape::EagerMaterialization,
+        ));
+        let evaluate = |contract: MemoryProviderContract| {
+            evaluate_request_with_budget(
+                &request_generator(Some(contract)),
+                &request_plan(),
+                &request_inputs(512, 512, 1),
+                MemoryCacheState::Cold,
+                OffloadPolicy::Resident,
+                MemoryBudget {
+                    total_bytes: gib_to_bytes(64.0),
+                    committed_bytes: 0,
+                    reclaimable_bytes: 0,
+                    reserved_headroom_bytes: 0,
+                },
+                gib_to_bytes(8.0),
+                0,
+                &[],
+            )
+        };
+        let error = evaluate(contract).unwrap_err().to_string();
+        assert!(
+            error.contains("does not match") && error.contains(&mage_request_fingerprint()),
+            "a q8 identity must be refused against a q4 plan by naming the q4 cell: {error}"
+        );
+        assert!(
+            !error.contains(&q8_fingerprint),
+            "the refusal names the EXPECTED cell, not the loaded one: {error}"
+        );
+        // Positive control: the same contract carrying the plan's own cell is admitted.
+        evaluate(mage_request_contract())
+            .expect("the matching (route, tier) identity passes the Resident-path handshake");
+    }
+
+    #[test]
+    fn mage_calibration_cells_are_the_eighteen_distinct_shipped_pairs() {
+        let routes = [
+            "mage_flow",
+            "mage_flow_base",
+            "mage_flow_turbo",
+            "mage_flow_edit",
+            "mage_flow_edit_base",
+            "mage_flow_edit_turbo",
+        ];
+        let tiers = [None, Some(gen_core::Quant::Q4), Some(gen_core::Quant::Q8)];
+        let mut cells = std::collections::BTreeSet::new();
+        for route in routes {
+            for tier in tiers {
+                let cell = mage_calibration_fingerprint(route, tier)
+                    .unwrap_or_else(|| panic!("{route} {tier:?} is a shipped cell"));
+                assert!(
+                    cells.insert(cell),
+                    "{route} {tier:?} collides with another cell"
+                );
+            }
+            assert_eq!(
+                mage_calibration_fingerprint(route, Some(gen_core::Quant::Nvfp4)),
+                None,
+                "{route}: NVFP4 is not a Mage-Flow MLX tier and must stay unnameable"
+            );
+        }
+        assert_eq!(cells.len(), 18);
+        assert_eq!(
+            mage_calibration_fingerprint("mage_flow_lora", Some(gen_core::Quant::Q4)),
+            None,
+            "an id the engine does not serve names no cell"
+        );
+        assert!(!cells.contains("mage-flow-mlx-shared-ladder-2026-08-03-v1"));
     }
 
     #[cfg(target_os = "macos")]
     #[test]
     fn mage_estimator_fingerprint_matches_the_linked_provider_contract() {
+        use runtime_macos::providers::mage::model::{
+            production_calibration_fingerprint, MODEL_IDS,
+        };
+        let tiers = [
+            None,
+            Some(gen_core::Quant::Q4),
+            Some(gen_core::Quant::Q8),
+            Some(gen_core::Quant::Nvfp4),
+        ];
+        for engine_id in MODEL_IDS {
+            for tier in tiers {
+                assert_eq!(
+                    mage_calibration_fingerprint(engine_id, tier),
+                    production_calibration_fingerprint(engine_id, tier),
+                    "{engine_id} {tier:?}: the worker's Mage peak estimator must fail at test time \
+                     when the linked provider identity table moves",
+                );
+            }
+        }
         assert_eq!(
-            MAGE_CALIBRATION_FINGERPRINT,
-            runtime_macos::providers::mage::model::MEMORY_CALIBRATION_FINGERPRINT,
-            "the worker's Mage peak estimator must fail at compile/test time when the linked provider identity moves",
+            production_calibration_fingerprint("mage_flow_lora", None),
+            None,
+            "the engine serves exactly MODEL_IDS; the worker table must not name more"
         );
     }
 
@@ -17600,7 +17657,7 @@ mod tests {
             },
         );
         contract.calibration = Some(MemoryCalibrationIdentity::new(
-            MAGE_CALIBRATION_FINGERPRINT,
+            mage_request_fingerprint(),
             gen_core::LoadShape::EagerMaterialization,
         ));
         contract.asset_facts.base_bytes = gib_to_bytes(6.0);
@@ -18620,7 +18677,33 @@ mod tests {
         // into a unified MoT (`footprint` te=0) — no separable text encoder to drop, so residency buys
         // nothing and Sequential would be a no-op that OOMs. This proves the query reads the descriptor
         // BIT, not mere registry membership.
-        assert!(!engine_supports_sequential("sensenova_u1_8b"));
+        //
+        // BOTH SenseNova engine ids, and REGISTRATION IS ASSERTED FIRST (sc-22734 review):
+        // `engine_supports_sequential` is `is_some_and`, so it answers `false` for an id that is not
+        // in the registry at all. Asserting only the `false` would therefore stay green if the
+        // provider were renamed, dropped from the pinned bundle, or misspelled here — the exact
+        // failure this case claims to rule out. Look the descriptor up by name, prove BOTH bits are
+        // clear on it, and only then ask the predicate.
+        //
+        // The 8-step distill (`sensenova_u1_8b_fast`) is a separate registration with the same fused
+        // MoT encoder, so it must answer the same way; the adapter's Candle spec builder cites this
+        // fact for BOTH ids to justify `OffloadPolicy::Resident`.
+        for id in ["sensenova_u1_8b", "sensenova_u1_8b_fast"] {
+            let capabilities = crate::inference_runtime::media()
+                .generators()
+                .find(|reg| (reg.descriptor)().id == id)
+                .map(|reg| (reg.descriptor)().capabilities)
+                .unwrap_or_else(|| panic!("{id} is registered in the pinned bundle"));
+            assert!(
+                !capabilities.supports_sequential_offload,
+                "{id}: the fused MoT exposes no separable text encoder to offload"
+            );
+            assert!(
+                !capabilities.unconditionally_engages_staged_residency,
+                "{id}: nor does it stage unconditionally — neither bit of the disjunction is set"
+            );
+            assert!(!engine_supports_sequential(id));
+        }
 
         // sc-19721: WHICH engines reach `true` through the second bit rather than the first, pinned
         // as a set so the disjunction cannot quietly widen. Every one of these declares

@@ -1,4 +1,4 @@
-# Anchor currency attestations at inference `c6d6a4db`, extended to `1cd0e393` (sc-22667 / sc-22765, epic sc-22657)
+# Anchor currency attestations at inference `c6d6a4db`, extended to `1cd0e393` / `8a65db2a` / `563c44e1` (sc-22667 / sc-22765 / sc-22723 / sc-22738, epic sc-22657)
 
 Terminal-story close-out of the memory-anchor currency question the sc-22667 review raised as a
 blocker: at the landed pin `c6d6a4dbd61ab09c26ff5526632cae2cefea60ed`, none of the five anchors the
@@ -82,12 +82,12 @@ the anchor; the E6 test documents the same band ("cold staged control lands betw
   re-stamp: flipping the packaged digest reds them. `mlx_fit_gate::flux2_live_anchor_store` remains
   and says why (the flux2 MLX rows are not attested and honestly stale).
 
-## Extension to inference `1cd0e393` (sc-22765, 2026-09-05)
+## Extension to inference `1cd0e393` (sc-22765, main-line pin, 2026-09-05)
 
-The pin moved `c6d6a4db` → `1cd0e393` (the sc-22760 FLUX.2 Klein rehost fix). Under the bound
-stated above that would stale all five attested anchors, so each entry was re-read for the new
-range and re-keyed to the new pin. The reading is mechanical and exhaustive rather than a judgement
-call:
+On `main`, in parallel with the epic sc-22723 feature branch, the pin moved `c6d6a4db` → `1cd0e393`
+(the sc-22760 FLUX.2 Klein rehost fix). Under the bound stated above that would stale all five
+attested anchors, so each entry was re-read for the new range and re-keyed to the new pin. The
+reading is mechanical and exhaustive rather than a judgement call:
 
 * `c6d6a4db..1cd0e393` changes 20 inference files — the sc-19699 / sc-22261 StarVector work
   (`core-llm` contracts and testkit, `candle-llm` StarVector plus its decode streaming, `mlx-llm`
@@ -107,3 +107,78 @@ call:
 Three closures DID move on this bump — `flux2_dev:mlx`, `ltx_2_3:mlx` and `ltx_2_5:mlx`, all of
 which reach `mlx-gen-flux2`'s artifact inventory. Those anchors were already honestly stale and
 unattested before this bump, and they stay that way: nothing here re-keys them.
+
+The two pin lines (`1cd0e393` on main, `8a65db2a` on the feature branch) rejoin at `563c44e1`, the
+inference merge of the feature branch over `1cd0e393`; the final section below reads
+`8a65db2a..563c44e1`, which is exactly the main-side content this section covers plus inference
+PR #961's removal of the stale-marker tolerance.
+
+## Extension to inference `8a65db2a` (sc-22723 feature pin, 2026-09-05)
+
+The epic sc-22723 feature pin (`c6d6a4db` → `8a65db2aad0b54581794127f5c3f5621e107e321`, inference
+PRs #946–#958) moved all three closures and staled the five attested anchors, as the bound above
+says it must. The `c6d6a4db..8a65db2a` segment was read file by file with the same per-crate `src/`
+rule and the five entries were **extended** (`attestedRevision` → `8a65db2a`, `story` → sc-22723,
+the reading appended to `why`) rather than re-written: every earlier segment and witness still
+holds, and nothing in the new segment is a load or device path.
+
+| Closure | Files changed in `c6d6a4db..8a65db2a` | Reading |
+| --- | --- | --- |
+| `krea_2_turbo:candle` | gen-core `encoder_contract.rs`, `lib.rs`, `wan_i2v_memory.rs`; `candle-gen-krea/src/lib.rs` | accounting-only. `encoder_contract.rs`: `ValidatedEncoderSource` keeps the whole `PackedQuantization` marker (same-value accessors), a stale-packed-marker allowance only `mlx-gen-flux2` calls, and `hf_cache_discovery_roots` (a source-authorization helper) plus tests; `lib.rs`: its re-export; `wan_i2v_memory.rs`: Wan A14B identity tokens. `candle-gen-krea/src/lib.rs`: the per-(route, proven tier) identity table and weights-free registry-behavior surfaces — the q4 turbo identity this anchor is keyed to (`krea-turbo-cuda-phase-curves-v1`) is unchanged and `krea_provable_artifact_tier` reads the marker `validate_load_spec` / `actual_quant_tier` already consulted. `loader.rs`, `pipeline.rs`, `transformer/`, `control*.rs` and `candle-gen` `quant/` untouched. The class stays `witnessed-unchanged` for the earlier load-path range. |
+| `z_image_turbo:candle` (q4 / q8 / bf16) | the same three gen-core files; `candle-gen-z-image/src/memory_strategy.rs` | accounting-only. `selected_encoder_discovery_roots` now delegates to `gen_core::hf_cache_discovery_roots`, widening the text-encoder discovery confinement to the HF-cache repository directory — a validation gate consumed only by the planning-facts readers in that file; the same bytes reach the same device the same way. `pipeline.rs`, `model.rs`, the loader and the device-format paths untouched. |
+| `z_image_turbo:mlx` (q4) | `core-llm/src/starvector.rs`; the same three gen-core files | accounting-only. `starvector.rs` adds a StarVector decode `Progress` event the Z-Image encoder never executes; `mlx-gen-z-image`, `mlx-gen-pid` and `mlx-gen/src` untouched. |
+
+No re-measure was taken for the new segment — the doctrine allows the diff alone when it carries
+no load-or-device-path change, which is the case here. Matrix after `--stamp-anchors`:
+`15 anchors, 10 stale, 5 current by attestation` (unchanged set).
+
+## Extension to inference `563c44e1` (sc-22738, the epic's final pin, 2026-09-06)
+
+The epic sc-22738 terminal pin (`8a65db2a` → `563c44e1652043bf8bd018de79cadadc393f91f2`, inference
+`main` = the merge of feature PR #960 over main `1cd0e393`, synchronized through PR #961) moved
+every loader closure in `config/anchor-loader-closures.json` and staled the five attested anchors
+again. The `8a65db2a..563c44e1` range changes nine inference files; exactly two are in the attested
+closures, and they are the same two for all three: gen-core `encoder_contract.rs` and `lib.rs`. The
+five entries were **extended** (`attestedRevision` → `563c44e1`, `story` → `sc-22738`, the reading
+appended to `why` and to the two files' `filesChangedSinceMeasurement` classes).
+
+| Closure | Files changed in `8a65db2a..563c44e1` | Reading |
+| --- | --- | --- |
+| `krea_2_turbo:candle`, `z_image_turbo:candle` (q4 / q8 / bf16), `z_image_turbo:mlx` (q4) | gen-core `encoder_contract.rs`, `lib.rs` | accounting-only, and strictly a REMOVAL. Inference PR #961 drops the sc-22727 stale-packed-marker tolerance that sc-22760's corrected Klein rehosts made unnecessary: the two entry points `source_for_load_with_stale_packed_marker` / `validate_source_for_discovery_with_stale_packed_marker`, the `RequiredWithStalePackedMarker` policy arm and its `stale_packed_marker()` reader, the `declared_quant` rewrite in `validate_source_with_policy` (the identity for `Required` and `ProviderOwnedComfyUi`, the only policies these closures use), `PackedQuantization` back to crate-private, and the allowance test; `lib.rs` drops the matching re-export. The removed surface's only production caller was `mlx-gen-flux2`'s Klein turnkey inventory, which none of the three closures reaches. `source_for_load`, `validate_source_for_discovery`, `requires_config` for `Required` and every shard/header/quantization-evidence check these models execute are the same code path before and after. |
+
+The other seven files in the range — `mlx-gen-flux2` `artifact_inventory.rs` / `loader.rs` /
+`memory_strategy.rs` / `model.rs`, its two test files and `release/real-weight-models.toml` — are
+outside every attested closure (they move `flux2_dev:mlx`, `flux2_klein_9b*:mlx`, `ideogram_4*:mlx`
+and `lens*:mlx`, none of which is attested; those stay honestly stale as before).
+
+No re-measure was taken for the new segment — the doctrine allows the diff alone when it carries no
+load-or-device-path change, which is the case here. Matrix after `--stamp-anchors`:
+`15 anchors, 10 stale, 5 current by attestation` (unchanged set).
+
+## Extension to inference `3b922bac` (sc-22738, third terminal pin, 2026-09-06)
+
+The sc-22738 pin moved once more (`563c44e1` → `3b922bac6094e06f98bb2598a6d6fe10dc92739e`, inference
+`main` = the merge of PR #962 `fix/sc-22738-krea-calibration-fault-hooks` over `563c44e1`, its first
+parent) so the krea re-runs measure on an engine whose MLX krea and krea-realtime generators honour
+the harness-authorized `calibration_fault` at every phase exit. The `563c44e1..3b922bac` range
+changes fourteen inference files, every one under `crates/media/mlx-gen/mlx-gen-krea` or
+`crates/media/mlx-gen/mlx-gen-krea-realtime` (`memory_strategy.rs` fault helpers + unit tests,
+`model.rs` / `model_control.rs` / `pipeline.rs` / `generate.rs` / `t2v.rs` hook sites, and their
+integration tests). The bump script's remediation is the closure intersection, and for all five
+attested anchors it is **empty**:
+
+| Closure | `closureFiles` ∩ `563c44e1..3b922bac` | Reading |
+| --- | --- | --- |
+| `krea_2_turbo:candle` | ∅ | the candle krea closure (`candle-gen-krea`, `candle-gen`, gen-core) never links `mlx-gen-krea` or `mlx-gen-krea-realtime`; its digest is unchanged in `config/anchor-loader-closures.json`. |
+| `z_image_turbo:candle` (q4 / q8 / bf16) | ∅ | `candle-gen-z-image` never links either krea crate; digest unchanged. |
+| `z_image_turbo:mlx` (q4) | ∅ | `mlx-gen-z-image` / `mlx-gen-pid` / `mlx-gen/src` never link either krea crate; digest unchanged. |
+
+Only `krea_2_raw:mlx` and `krea_2_turbo:mlx` moved in the anchor-loader closures (and
+`mlx:krea_2_raw` / `mlx:krea_2_turbo` / `mlx:krea_2_turbo_control` / `mlx:krea_realtime_14b` in the
+provider closures); none of those is attested, and they are exactly the closures the pending krea
+re-runs re-capture. The five entries were **extended** (`attestedRevision` → `3b922bac`, the reading
+appended to `why`); no file is added to any `filesChangedSinceMeasurement`, because none changed.
+
+No re-measure was taken — an empty intersection is the byte-identical case the doctrine names as the
+trivial extension. Matrix after `--stamp-anchors`: `15 anchors, 10 stale, 5 current by attestation`
+(unchanged set).
