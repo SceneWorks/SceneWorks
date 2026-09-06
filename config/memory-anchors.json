@@ -2281,6 +2281,52 @@
       "underivedReason": "the anchor render engaged bounded rungs (or deferred materialization), so it does not measure the widest composition the MLX image law upper-bounds the ladder from; this anchor validates its measured point and prices nothing beyond it"
     },
     {
+      "id": "qwen_image_edit_2511:mlx:q4:base:base:qwen-image-mlx-shared-ladder-2026-08-01-v1:imc-4583aa876304458a3e69",
+      "modelId": "qwen_image_edit_2511",
+      "modelFamily": "qwen-image",
+      "route": "qwen_image_edit",
+      "provider": "qwen_image_edit",
+      "backend": "mlx",
+      "tier": "q4",
+      "transformerVariant": null,
+      "decoder": null,
+      "mode": "edit_image",
+      "overlay": null,
+      "referenceCount": 0,
+      "loadShape": "deferred_materialization",
+      "measuredRegime": {
+        "decodeTiled": false,
+        "transformerWindowed": false,
+        "staged": false,
+        "attentionChunked": false
+      },
+      "source": {
+        "path": "docs/calibration/sc-22738/qwen-image-edit-2511-q4-mlx-evidence.json",
+        "sha256": "9efb0b09a03f305d166f40fa730602a4e24201197dbb666dabfba0db79fa950d",
+        "recordId": "imc-4583aa876304458a3e69",
+        "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1",
+        "loaderClosureDigest": "ad438aa1a5fd74fe00963d50884fb804443e76c79634ca4860e67f779f4ea0ed"
+      },
+      "geometry": {
+        "width": 768,
+        "height": 768,
+        "frames": 1,
+        "fps": null
+      },
+      "phaseActivePeakBytes": {
+        "conditioning": 17905093396,
+        "denoise": 28997302188,
+        "decode": 31960536592
+      },
+      "phaseAllocatorEnvelopeBytes": {
+        "conditioning": 21497509168,
+        "denoise": 39685214868,
+        "decode": 31960536592
+      },
+      "overallAllocatorEnvelopeBytes": 42648449272,
+      "underivedReason": "the anchor render engaged bounded rungs (or deferred materialization), so it does not measure the widest composition the MLX image law upper-bounds the ladder from; this anchor validates its measured point and prices nothing beyond it"
+    },
+    {
       "id": "z_image_turbo:candle:bf16:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-3cd69f2fee9e91e83b58",
       "modelId": "z_image_turbo",
       "modelFamily": "z-image",
@@ -4715,17 +4761,6 @@
           "vramGbByTier": "69"
         }
       }
-    },
-    {
-      "id": "analytic:qwen_image_edit_2511:mlx:q4",
-      "modelId": "qwen_image_edit_2511",
-      "modelFamily": "qwen-image",
-      "route": "qwen_image_edit",
-      "backend": "mlx",
-      "tier": "q4",
-      "basis": "no_retained_evidence",
-      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
-      "evidence": null
     },
     {
       "id": "analytic:qwen_image_edit_2511:mlx:q8",
