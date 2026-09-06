@@ -1232,6 +1232,51 @@
       "overallAllocatorEnvelopeBytes": 78298117688
     },
     {
+      "id": "ideogram_4_turbo:mlx:q8:base:base:ideogram-4-turbo-q8-mlx-shared-ladder-v1:imc-471102ed84970781e4c4",
+      "modelId": "ideogram_4_turbo",
+      "modelFamily": "ideogram",
+      "route": "ideogram_4_turbo",
+      "provider": "ideogram_4_turbo",
+      "backend": "mlx",
+      "tier": "q8",
+      "transformerVariant": null,
+      "decoder": null,
+      "mode": "text_to_image",
+      "overlay": null,
+      "referenceCount": 0,
+      "loadShape": "eager_materialization",
+      "measuredRegime": {
+        "decodeTiled": false,
+        "transformerWindowed": false,
+        "staged": false,
+        "attentionChunked": false
+      },
+      "source": {
+        "path": "docs/calibration/sc-22738/ideogram-4-turbo-q8-mlx-evidence.json",
+        "sha256": "868344926719a7291e39592827352e4ea841ecb501ad54e4665833675ed30612",
+        "recordId": "imc-471102ed84970781e4c4",
+        "calibrationFingerprint": "ideogram-4-turbo-q8-mlx-shared-ladder-v1",
+        "loaderClosureDigest": "39e2caf1d59f8a370e64b1870e828f57926de3edaff82b9a848dc48a1c649052"
+      },
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "frames": 1,
+        "fps": null
+      },
+      "phaseActivePeakBytes": {
+        "conditioning": 22487816244,
+        "denoise": 22709430364,
+        "decode": 37561154204
+      },
+      "phaseAllocatorEnvelopeBytes": {
+        "conditioning": 28173370812,
+        "denoise": 28322103776,
+        "decode": 86684652600
+      },
+      "overallAllocatorEnvelopeBytes": 86684652600
+    },
+    {
       "id": "krea_2_turbo:candle:q4:base:base:krea-turbo-cuda-phase-curves-v1:imc-7f1a63e5459300aed47c",
       "modelId": "krea_2_turbo",
       "modelFamily": "krea_2",
@@ -2956,17 +3001,6 @@
           "sequentialPeakGb": "39"
         }
       }
-    },
-    {
-      "id": "analytic:ideogram_4_turbo:mlx:q8",
-      "modelId": "ideogram_4_turbo",
-      "modelFamily": "ideogram",
-      "route": "ideogram_4_turbo",
-      "backend": "mlx",
-      "tier": "q8",
-      "basis": "no_retained_evidence",
-      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
-      "evidence": null
     },
     {
       "id": "analytic:illustrious_xl_v1:candle:bf16",
