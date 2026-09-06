@@ -42,6 +42,19 @@ pub const FLUX2_KLEIN_REPOSITORY: &str = "SceneWorks/flux2-klein-9b-mlx";
 /// `engine_id: flux2_klein_9b`) from its own artifact, through `SCENEWORKS_FLUX2_KLEIN_KV_*`.
 pub const FLUX2_KLEIN_KV_REPOSITORY: &str = "SceneWorks/flux2-klein-9b-kv-mlx";
 pub const KREA_REPOSITORY: &str = "SceneWorks/krea-2-turbo-mlx";
+/// The UNDISTILLED Krea 2 base rehost (sc-22735) — the `krea_2_raw` provider's own artifact, on
+/// BOTH lanes. Bound through the separate `SCENEWORKS_KREA_RAW_*` family for the same reason
+/// `z_image` does not ride the Turbo family: Raw runs TRUE classifier-free guidance (two DiT
+/// forwards per step) over its own 12B checkpoint, so a Raw plan satisfied by Turbo weights would
+/// file Turbo's peaks under the base model's name.
+pub const KREA_RAW_REPOSITORY: &str = "SceneWorks/krea-2-raw-mlx";
+/// The Krea Realtime 14B rehost (sc-22735) — the autoregressive VIDEO member of the family, and
+/// MLX-only: `mlx-gen-krea-realtime` is the only engine that registers the provider, the worker
+/// refuses the job off macOS by name (`video_jobs/mod.rs`), and every shipped download is
+/// `platforms: ["macos"]`. Each `<tier>/` subdir is a complete, self-contained tree — the Krea DiT
+/// at that tier plus the stock Wan 2.1 z16 VAE, UMT5 encoder and tokenizer — so the capture binds
+/// one root, not a tier root plus co-requisites.
+pub const KREA_REALTIME_REPOSITORY: &str = "SceneWorks/krea-realtime-14b-mlx";
 /// The FLUX.1 [dev] tiered rehost (sc-22726). It serves BOTH the `flux1_dev` text-to-image provider
 /// and the `pulid_flux` character route, on both lanes: the worker resolves the PuLID backbone from
 /// exactly this repo (`image_jobs/pulid.rs` `PULID_FLUX_REPO`, `image_jobs/pulid_candle.rs`
