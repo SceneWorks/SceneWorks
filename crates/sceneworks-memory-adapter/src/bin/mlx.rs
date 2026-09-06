@@ -222,10 +222,49 @@ const LTX_PLAIN_EXECUTION_PATH: &str = "the MLX LTX-2.3 base-only text-to-video 
 /// verbatim from that function's own messages when the second video arm made the label a parameter
 /// (sc-18663), so LTX's refusals are unchanged.
 const LTX_VIDEO_LABEL: &str = "MLX LTX-2.3";
-/// Expected provider-owned identity at the permanent inference pin. The adapter always reads the
-/// loaded registry contract and refuses any mismatch; this local expectation merely prevents a
-/// provider re-fingerprint from silently reusing SC-18946's plan and fixtures.
-const LTX_CALIBRATION_FINGERPRINT: &str = "sc-19109-ltx-2-3-mlx-memory-ladder-v1";
+/// Every numeric tier the `mlx:ltx_2_3` family ships, and therefore every tier that has a
+/// production calibration identity. Kept beside [`ltx_calibration_fingerprint`] so the identity
+/// family and the plan parser cannot disagree about the inventory.
+const LTX_TIERS: [&str; 3] = ["bf16", "q4", "q8"];
+/// The tier the engine's retained [`mlx_gen_ltx::memory_strategy::CALIBRATION_FINGERPRINT`] names,
+/// READ off the pinned crate rather than spelled here.
+///
+/// LTX's retained key carries no tier token (`sc-20772-ltx-2-3-mlx-memory-ladder-v2`), so nothing
+/// in the string itself says which tier it belongs to; the engine's `CALIBRATED_TIER` is the only
+/// source of that fact. Binding to it means a re-tiered engine moves this family's bare member
+/// with it, and `every_planned_ltx_mlx_row_names_the_identity_this_arm_mints_for_its_tier` then
+/// reds until the plan follows — the plan is bound to the same source, so the two cannot drift
+/// apart silently. `the_ltx_identity_family_is_the_engines_retained_key_with_a_tier_token` binds
+/// every member to the engine's own weights-free minting function, byte for byte.
+const LTX_CALIBRATED_TIER: &str = mlx_gen_ltx::memory_strategy::CALIBRATED_TIER;
+
+/// The production calibration identity `mlx-gen-ltx` mints for one `mlx:ltx_2_3` numeric tier.
+///
+/// The engine keys on `(provider, ARTIFACT-proven tier)`: the calibrated tier retains the bare
+/// `CALIBRATION_FINGERPRINT` and every other shipped tier receives that same key with its tier
+/// token inserted after the family stem. The calibrated cell reproduces
+/// [`mlx_gen_ltx::memory_strategy::CALIBRATION_FINGERPRINT`] byte-for-byte — read off the engine
+/// rather than spelled, so the two copies cannot drift — which is what keeps the retained key of
+/// the family's existing record valid.
+///
+/// Written here as well as in the engine so the plan/arm binding is weights-free and provable on a
+/// CPU-only host. The capture then refuses a loaded contract whose identity differs from this
+/// table, so a drift is caught at the pin bump rather than in a record.
+///
+/// A tier outside [`LTX_TIERS`] is refused BY NAME rather than interpolated into a plausible
+/// identity no production load can return.
+fn ltx_calibration_fingerprint(tier: &str) -> Result<String, String> {
+    if !LTX_TIERS.contains(&tier) {
+        return Err(format!(
+            "the MLX LTX-2.3 calibration family ships {LTX_TIERS:?}; tier {tier:?} has no \
+             production identity"
+        ));
+    }
+    if tier == LTX_CALIBRATED_TIER {
+        return Ok(mlx_gen_ltx::memory_strategy::CALIBRATION_FINGERPRINT.to_owned());
+    }
+    Ok(format!("sc-20772-ltx-2-3-{tier}-mlx-memory-ladder-v2"))
+}
 /// One fixed seed for every `mlx:ltx_2_3` fixture
 /// (`ltx-2-3-mlx-<tier>-<width>x<height>-f<frames>-fps<fps>-seed18946`). Historical SC-18810
 /// evidence remains bound to seed 18808 and is never relabelled.
@@ -525,14 +564,50 @@ const MINIMAX_PLAIN_EXECUTION_PATH: &str =
 const MINIMAX_LABEL: &str = "MLX MiniMax-H3 calibration";
 /// How [`diagnostic_video_frames`] names this lane when it refuses a non-video output.
 const MINIMAX_VIDEO_LABEL: &str = "MLX MiniMax-H3";
-/// Expected provider-owned identity at the permanent inference pin
-/// (`mlx_gen_minimax_h3::memory_strategy::MEMORY_CALIBRATION_FINGERPRINT`). The arm always reads the
-/// loaded registry contract and refuses any mismatch; this local expectation additionally prevents a
-/// provider re-fingerprint from silently reusing the epic's plan and fixtures. The string names
-/// `eager` because the provider chose that spelling before it grew a deferred loader — the RESOLVED
-/// shape travels beside it in `MemoryCalibrationIdentity::load_shape`, not in the fingerprint, and
-/// this arm attests the resolved one.
-const MINIMAX_CALIBRATION_FINGERPRINT: &str = "minimax-h3-mlx-staged-joint-av-eager-abi3-v1";
+/// Every numeric tier the `mlx:minimax_h3` family ships, and therefore every tier that has a
+/// production calibration identity. Kept beside [`minimax_calibration_fingerprint`] so the identity
+/// family and the plan parser cannot disagree about the inventory.
+const MINIMAX_TIERS: [&str; 3] = ["bf16", "q4", "q8"];
+/// The tier the engine's retained
+/// [`mlx_gen_minimax_h3::memory_strategy::MEMORY_CALIBRATION_FINGERPRINT`] names, read off the
+/// pinned crate: that key carries no tier token, so the engine is the only source of which tier
+/// keeps it.
+const MINIMAX_CALIBRATED_TIER: &str = mlx_gen_minimax_h3::memory_strategy::CALIBRATED_TIER;
+
+/// The production calibration identity `mlx-gen-minimax-h3` mints for one `mlx:minimax_h3` numeric
+/// tier — on BOTH catalog entries, because they are one provider loaded from one `LoadSpec`
+/// (`video_jobs/minimax_h3.rs` stages the base `transformer` even for a ref2va job and the engine
+/// resolves `transformer_ref` per render), so the loaded contract can only ever publish one
+/// identity per tier and the anchors are told apart by their own `(modelId, mode)` key.
+///
+/// The engine keys on `(provider, ARTIFACT-proven tier)`: the calibrated tier retains the bare
+/// `MEMORY_CALIBRATION_FINGERPRINT` and every other shipped tier receives that same key with its
+/// tier token inserted after the family stem. The string names `eager` because the provider chose
+/// that spelling before it grew a deferred loader — the RESOLVED shape travels beside it in
+/// `MemoryCalibrationIdentity::load_shape`, not in the fingerprint, and this arm attests the
+/// resolved one.
+///
+/// Written here as well as in the engine so the plan/arm binding is weights-free and provable on a
+/// CPU-only host; the capture then refuses a loaded contract whose identity differs from this
+/// table. It used to be ONE literal for all six MLX cells (sc-22737 review), which the engine
+/// never mints for q4 or q8: four of the six cells could not return a record.
+///
+/// A tier outside [`MINIMAX_TIERS`] is refused BY NAME rather than interpolated into a plausible
+/// identity no production load can return.
+fn minimax_calibration_fingerprint(tier: &str) -> Result<String, String> {
+    if !MINIMAX_TIERS.contains(&tier) {
+        return Err(format!(
+            "the MLX MiniMax-H3 calibration family ships {MINIMAX_TIERS:?}; tier {tier:?} has no \
+             production identity"
+        ));
+    }
+    if tier == MINIMAX_CALIBRATED_TIER {
+        return Ok(mlx_gen_minimax_h3::memory_strategy::MEMORY_CALIBRATION_FINGERPRINT.to_owned());
+    }
+    Ok(format!(
+        "minimax-h3-{tier}-mlx-staged-joint-av-eager-abi3-v1"
+    ))
+}
 /// One fixed seed for every `mlx:minimax_h3` fixture
 /// (`minimax-h3-mlx-<tier>-<width>x<height>-f<frames>-fps<fps>-seed17137`).
 const MINIMAX_SEED: u64 = 17137;
@@ -12695,9 +12770,11 @@ fn validate_ltx_campaign_entry(
         &json!(["resident", "staged_residency"]),
     )?;
     exact("/strategy/parameters", &json!({}))?;
+    // `tier` is the plan's own `target.tier`, which the pinned check above already fixed to the
+    // frozen q4 row, so the identity this row must name is derived rather than transcribed.
     exact(
         "/calibrationFingerprint",
-        &json!(LTX_CALIBRATION_FINGERPRINT),
+        &json!(ltx_calibration_fingerprint(tier)?),
     )?;
     exact("/fixture", &json!(LTX_CAMPAIGN_ENTRY_FIXTURE))?;
     exact("/negative", &json!(false))?;
@@ -12820,9 +12897,10 @@ fn validate_ltx_bounded_carrier_proof(
             "decodeOverlap": LTX_CANARY_OVERLAP,
         }),
     )?;
+    // Plan-derived, and pinned to the frozen q4 carrier by the `/target/tier` check above.
     exact(
         "/calibrationFingerprint",
-        &json!(LTX_CALIBRATION_FINGERPRINT),
+        &json!(ltx_calibration_fingerprint(tier)?),
     )?;
     exact("/fixture", &json!(LTX_BOUNDED_CARRIER_FIXTURE))?;
     exact("/negative", &json!(false))?;
@@ -12973,9 +13051,11 @@ fn validate_ltx_bounded_campaign_entry(
             "decodeOverlap": LTX_CANARY_OVERLAP,
         }),
     )?;
+    // The three bounded campaign rows span q4, q8 and bf16, so the identity is resolved from the
+    // row's own tier: a bf16 row may not name the q4 cell's fingerprint.
     exact(
         "/calibrationFingerprint",
-        &json!(LTX_CALIBRATION_FINGERPRINT),
+        &json!(ltx_calibration_fingerprint(spec.tier)?),
     )?;
     exact("/fixture", &json!(spec.fixture))?;
     exact("/negative", &json!(false))?;
@@ -14316,12 +14396,17 @@ fn validate_ltx_canary_plan_for(
             profile.fixture()
         ));
     }
-    if planned
+    // The canary is the frozen q4 row — the `target.tier` check above refuses anything else — so
+    // the identity it must name is the q4 member of the family, never the calibrated tier's key.
+    let expected_fingerprint = ltx_calibration_fingerprint("q4")?;
+    let planned_fingerprint = planned
         .get("calibrationFingerprint")
         .and_then(Value::as_str)
-        != Some(LTX_CALIBRATION_FINGERPRINT)
-    {
-        return Err("LTX safety canary fingerprint does not match the pinned provider".to_owned());
+        .ok_or_else(|| "planned.calibrationFingerprint must be a string".to_owned())?;
+    if planned_fingerprint != expected_fingerprint {
+        return Err(format!(
+            "LTX safety canary fingerprint does not match the pinned provider: plan={planned_fingerprint}, q4 identity={expected_fingerprint}"
+        ));
     }
     if planned_load_shape(request)? != LoadShape::EagerMaterialization {
         return Err("LTX safety canary requires eager_materialization".to_owned());
@@ -14824,9 +14909,12 @@ fn run_ltx_canary_for(request: &Value, profile: LtxCanaryProfile) -> Result<Valu
         .calibration
         .as_ref()
         .ok_or_else(|| "pinned LTX-2.3 contract has no calibration identity".to_owned())?;
-    if calibration.fingerprint != LTX_CALIBRATION_FINGERPRINT {
+    // The canary loads the frozen q4 artifact (`ltx_load_spec(request, "q4", ..)` above), so the
+    // loaded contract must publish the q4 member of the identity family.
+    let expected_fingerprint = ltx_calibration_fingerprint("q4")?;
+    if calibration.fingerprint != expected_fingerprint {
         return Err(format!(
-            "pinned LTX-2.3 contract fingerprint changed: expected {LTX_CALIBRATION_FINGERPRINT}, got {}",
+            "pinned LTX-2.3 contract fingerprint changed: expected {expected_fingerprint}, got {}",
             calibration.fingerprint
         ));
     }
@@ -15053,14 +15141,17 @@ fn run_ltx_with_admission(
         ));
     }
     let (fps, seed) = planned_ltx_capture(request, tier, geometry)?;
+    // The identity is derived from the PLANNED tier: the engine keys calibration on
+    // `(provider, artifact-proven tier)`, so a q4 plan may not name the q8 cell's key.
+    let expected_fingerprint = ltx_calibration_fingerprint(tier)?;
     let planned_fingerprint = protocol::planned(request)?
         .get("calibrationFingerprint")
         .and_then(Value::as_str)
         .ok_or_else(|| "planned.calibrationFingerprint must be a string".to_owned())?;
-    if planned_fingerprint != LTX_CALIBRATION_FINGERPRINT {
+    if planned_fingerprint != expected_fingerprint {
         return Err(format!(
             "plan/adapter calibration mismatch: plan={planned_fingerprint}, MLX LTX-2.3 arm \
-             implements {LTX_CALIBRATION_FINGERPRINT}"
+             implements {expected_fingerprint} for tier {tier}"
         ));
     }
     match admission {
@@ -15106,9 +15197,9 @@ fn run_ltx_with_admission(
         .calibration
         .as_ref()
         .ok_or_else(|| "pinned LTX-2.3 contract has no calibration identity".to_owned())?;
-    if calibration.fingerprint != LTX_CALIBRATION_FINGERPRINT {
+    if calibration.fingerprint != expected_fingerprint {
         return Err(format!(
-            "pinned LTX-2.3 contract fingerprint changed: expected {LTX_CALIBRATION_FINGERPRINT}, got {}",
+            "pinned LTX-2.3 contract fingerprint changed for tier {tier}: expected {expected_fingerprint}, got {}",
             calibration.fingerprint
         ));
     }
@@ -15741,8 +15832,12 @@ fn prevalidate_ltx_campaign_entry(request: &Value) -> Result<(), String> {
         .get("calibrationFingerprint")
         .and_then(Value::as_str)
         .ok_or_else(|| "planned.calibrationFingerprint must be a string".to_owned())?;
-    if planned_fingerprint != LTX_CALIBRATION_FINGERPRINT {
-        return Err("SC-20191 campaign entry calibration fingerprint changed".to_owned());
+    let expected_fingerprint = ltx_calibration_fingerprint(tier)?;
+    if planned_fingerprint != expected_fingerprint {
+        return Err(format!(
+            "SC-20191 campaign entry calibration fingerprint changed: plan={planned_fingerprint}, \
+             tier {tier} identity={expected_fingerprint}"
+        ));
     }
     validate_ltx_campaign_entry(request, tier, geometry, &selection)
 }
@@ -15759,8 +15854,12 @@ fn prevalidate_ltx_bounded_campaign_entry(request: &Value) -> Result<(), String>
         .get("calibrationFingerprint")
         .and_then(Value::as_str)
         .ok_or_else(|| "planned.calibrationFingerprint must be a string".to_owned())?;
-    if planned_fingerprint != LTX_CALIBRATION_FINGERPRINT {
-        return Err("SC-20318 bounded campaign calibration fingerprint changed".to_owned());
+    let expected_fingerprint = ltx_calibration_fingerprint(tier)?;
+    if planned_fingerprint != expected_fingerprint {
+        return Err(format!(
+            "SC-20318 bounded campaign calibration fingerprint changed: plan={planned_fingerprint}, \
+             tier {tier} identity={expected_fingerprint}"
+        ));
     }
     validate_ltx_bounded_campaign_entry(request, tier, geometry, &selection)
 }
@@ -15779,8 +15878,12 @@ fn prevalidate_ltx_bounded_carrier_proof(
         .get("calibrationFingerprint")
         .and_then(Value::as_str)
         .ok_or_else(|| "planned.calibrationFingerprint must be a string".to_owned())?;
-    if planned_fingerprint != LTX_CALIBRATION_FINGERPRINT {
-        return Err("SC-20254 bounded-carrier calibration fingerprint changed".to_owned());
+    let expected_fingerprint = ltx_calibration_fingerprint(tier)?;
+    if planned_fingerprint != expected_fingerprint {
+        return Err(format!(
+            "SC-20254 bounded-carrier calibration fingerprint changed: plan={planned_fingerprint}, \
+             tier {tier} identity={expected_fingerprint}"
+        ));
     }
     validate_ltx_bounded_carrier_proof(request, tier, geometry, &selection)?;
     let host_memory = request
@@ -15825,8 +15928,14 @@ fn run_ltx_bounded_carrier_proof(request: &Value) -> Result<Value, String> {
         .calibration
         .as_ref()
         .ok_or_else(|| "pinned LTX-2.3 contract has no calibration identity".to_owned())?;
-    if calibration.fingerprint != LTX_CALIBRATION_FINGERPRINT {
-        return Err("SC-20254 pinned provider calibration identity changed".to_owned());
+    // The carrier proof loads the frozen q4 artifact above, so the loaded contract must publish the
+    // q4 member of the identity family.
+    let expected_fingerprint = ltx_calibration_fingerprint("q4")?;
+    if calibration.fingerprint != expected_fingerprint {
+        return Err(format!(
+            "SC-20254 pinned provider calibration identity changed: expected {expected_fingerprint}, got {}",
+            calibration.fingerprint
+        ));
     }
     let decode_plan = LtxDecodePlan::resolve_for_selection(&selection, geometry)?;
     decode_plan.validate_selected_strategy(&selection)?;
@@ -16248,14 +16357,73 @@ fn minimax_target_geometry(request: &Value) -> Result<MinimaxGeometry, String> {
     validate_minimax_geometry(axis("width")?, axis("height")?, axis("frames")?)
 }
 
-/// Defense-in-depth mirror of `validate_ltx_target`, plus the t2va-specific target shape.
+/// Which MiniMax-H3 catalog entry — that is, which DiT PARTITION — a plan row measures.
+///
+/// `minimax_h3` and `minimax_h3_ref` are NOT two providers (`video_jobs/minimax_h3.rs`, fact 1):
+/// `mlx-gen-minimax-h3` registers one `MODEL_ID`, and the two entries are two partition directories
+/// of it. The engine picks between them from the CONDITIONING — upstream's
+/// `MiniMaxH3Task::resolve(has_keyframes, has_references)` maps `(false, false)` to t2va on
+/// `transformer/` and `(false, true)` to ref2va on `transformer_ref/` — so the request's reference
+/// set is the only thing that selects the checkpoint a capture actually denoises on.
+///
+/// That is why this is a table rather than a boolean: the two checkpoints ship the SAME
+/// `config.json` and the SAME 638 tensor names, so a capture routed at the wrong one RUNS, produces
+/// plausible video, and files a record for a partition it never touched. The member fixes the mode
+/// key, the reference count and the fixture slug together, and [`minimax_request`] builds the
+/// conditioning from the same row — so the three cannot disagree.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct MinimaxMember {
+    model_id: &'static str,
+    /// The DiT partition the engine resolves for this member's conditioning. Recorded in the
+    /// loadability fingerprint so two records over one artifact triple stay distinguishable.
+    partition: &'static str,
+    /// The `MemoryMode` key the runtime asks admission under for this member.
+    mode: &'static str,
+    /// The fixture name's leading token: `<fixture_prefix>-<tier>-<w>x<h>-f<frames>-fps<fps>-seed…`.
+    ///
+    /// Spelled per member rather than composed from a slug so the BASE entry keeps the exact
+    /// `minimax-h3-mlx-…` names its plan rows already carry (sc-18663). A composed slug would have
+    /// renamed three committed fixtures for no measurement reason.
+    fixture_prefix: &'static str,
+    /// How many references the measured request carries. `0` selects t2va, `1` selects ref2va.
+    reference_count: u32,
+}
+
+/// The base t2va entry, on `transformer/`.
+const MINIMAX_BASE_MEMBER: MinimaxMember = MinimaxMember {
+    model_id: "minimax_h3",
+    partition: "transformer",
+    mode: "text_to_video",
+    fixture_prefix: "minimax-h3-mlx",
+    reference_count: 0,
+};
+
+/// The reference-to-video entry, on `transformer_ref/` (sc-19508).
+///
+/// ONE image reference, which is the smallest set `classify_reference_set` calls
+/// `Conditionable`: an empty set would resolve t2va on the base checkpoint (the wrong partition for
+/// this record), and an audio-only set is refused by the worker, the API and the MCP tool alike
+/// because an audio reference never reaches the reference conditioner.
+const MINIMAX_REFERENCE_MEMBER: MinimaxMember = MinimaxMember {
+    model_id: "minimax_h3_ref",
+    partition: "transformer_ref",
+    mode: "reference_to_video",
+    fixture_prefix: "minimax-h3-ref-mlx",
+    reference_count: 1,
+};
+
+const MINIMAX_MEMBERS: [MinimaxMember; 2] = [MINIMAX_BASE_MEMBER, MINIMAX_REFERENCE_MEMBER];
+
+/// Defense-in-depth mirror of `validate_ltx_target`, plus the per-member target shape.
 ///
 /// `run` dispatches by provider id today, but this arm hardcodes the MiniMax-H3 contract, so a
 /// foreign caller must be refused BY NAME here — before any environment variable is read, any path
-/// canonicalized, or any weight file opened. The reference surfaces are refused for a sharper
-/// reason than tidiness: `ref2va` is a DIFFERENT CHECKPOINT (`transformer_ref/`), so a record
-/// measured on the base partition may never be filed against a reference-carrying target.
-fn validate_minimax_target(request: &Value) -> Result<MinimaxGeometry, String> {
+/// canonicalized, or any weight file opened. The reference surfaces are checked against the
+/// MEMBER's declared count rather than pinned to zero: `ref2va` is a different checkpoint, so a
+/// base record may never be filed against a reference-carrying target, and a `minimax_h3_ref`
+/// record may never be filed against a reference-free one — which would silently be a second base
+/// measurement wearing the reference entry's key.
+fn validate_minimax_target(request: &Value) -> Result<(MinimaxMember, MinimaxGeometry), String> {
     let target = protocol::planned(request)?
         .get("target")
         .and_then(Value::as_object)
@@ -16273,41 +16441,51 @@ fn validate_minimax_target(request: &Value) -> Result<MinimaxGeometry, String> {
         .get("modelId")
         .and_then(Value::as_str)
         .ok_or_else(|| "planned.target.modelId must be a string".to_owned())?;
-    if model_id != MINIMAX_PROVIDER {
-        return Err(format!(
-            "{MINIMAX_LABEL} requires modelId {MINIMAX_PROVIDER:?}, got {model_id:?}"
-        ));
-    }
+    let member = MINIMAX_MEMBERS
+        .iter()
+        .copied()
+        .find(|member| member.model_id == model_id)
+        .ok_or_else(|| {
+            format!(
+                "{MINIMAX_LABEL} serves catalog entries {:?}, got modelId {model_id:?}",
+                MINIMAX_MEMBERS.map(|member| member.model_id)
+            )
+        })?;
     let mode = target
         .get("mode")
         .and_then(Value::as_str)
         .ok_or_else(|| "planned.target.mode must be a string".to_owned())?;
-    if mode != "text_to_video" {
+    if mode != member.mode {
         return Err(format!(
-            "{MINIMAX_LABEL} requires reference-free text_to_video (t2va) mode, got {mode:?}"
+            "{MINIMAX_LABEL} measures {model_id} in {:?} mode, got {mode:?}",
+            member.mode
         ));
     }
     for field in ["referenceCount", "reference_count"] {
         if let Some(value) = target.get(field) {
-            if value.as_u64() != Some(0) {
+            if value.as_u64() != Some(u64::from(member.reference_count)) {
                 return Err(format!(
-                    "{MINIMAX_LABEL} requires {field} == 0 when declared; ref2va runs a different \
-                     DiT partition and cannot be recorded from this one"
+                    "{MINIMAX_LABEL} requires {field} == {} for {model_id}; the two catalog \
+                     entries denoise on different DiT partitions and a record measured on one \
+                     cannot be filed against the other",
+                    member.reference_count
                 ));
             }
         }
     }
     for field in ["hasReference", "has_reference"] {
         if let Some(value) = target.get(field) {
-            if value.as_bool() != Some(false) {
+            if value.as_bool() != Some(member.reference_count > 0) {
                 return Err(format!(
-                    "{MINIMAX_LABEL} requires {field} == false when declared; ref2va runs a \
-                     different DiT partition and cannot be recorded from this one"
+                    "{MINIMAX_LABEL} requires {field} == {} for {model_id}; the two catalog \
+                     entries denoise on different DiT partitions and a record measured on one \
+                     cannot be filed against the other",
+                    member.reference_count > 0
                 ));
             }
         }
     }
-    minimax_target_geometry(request)
+    Ok((member, minimax_target_geometry(request)?))
 }
 
 /// Bind the fixture to the planned tier AND the full rendered geometry, recovering the cadence and
@@ -16315,6 +16493,7 @@ fn validate_minimax_target(request: &Value) -> Result<MinimaxGeometry, String> {
 /// declare a cadence the engine would refuse.
 fn planned_minimax_capture(
     request: &Value,
+    member: MinimaxMember,
     tier: &str,
     geometry: MinimaxGeometry,
 ) -> Result<(u32, u64), String> {
@@ -16323,8 +16502,8 @@ fn planned_minimax_capture(
         .and_then(Value::as_str)
         .ok_or_else(|| "planned.fixture must be a string".to_owned())?;
     let prefix = format!(
-        "minimax-h3-mlx-{tier}-{}x{}-f{}-fps",
-        geometry.width, geometry.height, geometry.frames
+        "{}-{tier}-{}x{}-f{}-fps",
+        member.fixture_prefix, geometry.width, geometry.height, geometry.frames
     );
     let remainder = fixture
         .strip_prefix(&prefix)
@@ -16389,11 +16568,18 @@ impl MinimaxArtifact {
     /// record CANNOT be identified by the rehost triple alone: two captures at the same
     /// repository, revision and tier differ materially if one took its conditioning stage from the
     /// packed tier and the other from the dense upstream snapshot.
-    fn resolved_path_fingerprint(&self, tier: &str) -> String {
+    ///
+    /// The PARTITION is part of it too (sc-22737): `minimax_h3` and `minimax_h3_ref` are two
+    /// checkpoints inside one tier tree that ship identical `config.json` files and identical
+    /// tensor names, so two records over the same repository, revision and tier are otherwise
+    /// indistinguishable — and the engine picks between them from the conditioning rather than from
+    /// anything the artifact triple can show.
+    fn resolved_path_fingerprint(&self, member: MinimaxMember, tier: &str) -> String {
         format!(
-            "{}@{}:{tier}+text_encoder:{}+shared:{}@{}",
+            "{}@{}:{tier}+partition:{}+text_encoder:{}+shared:{}@{}",
             self.repository,
             self.revision,
+            member.partition,
             self.text_encoder_source,
             self.upstream_repository,
             self.upstream_revision
@@ -16535,6 +16721,7 @@ fn minimax_load_spec(
 /// would measure under one key and the runtime ask under the other, silently. Pinned by
 /// `the_minimax_capture_context_binds_the_mode_key_the_runtime_video_route_sends`.
 fn minimax_context(
+    member: MinimaxMember,
     selection: MemorySelection,
     calibration: &MemoryCalibrationIdentity,
     fingerprint: &str,
@@ -16550,8 +16737,11 @@ fn minimax_context(
         // call site passes `calibration.fingerprint`.
         calibration_fingerprint: fingerprint.to_owned(),
         load_shape: calibration.load_shape,
-        mode: MemoryMode::Other("text_to_video".to_owned()),
-        has_reference: false,
+        // Both members' keys go through `MemoryMode::Other`: `video_admission` types every video
+        // mode key with `memory_mode_from_mode_key`, which maps every non-canonical key — both
+        // `text_to_video` and `reference_to_video` — to this variant.
+        mode: MemoryMode::Other(member.mode.to_owned()),
+        has_reference: member.reference_count > 0,
         use_pid: false,
         has_phases: true,
         geometry: MemoryGeometry {
@@ -16559,7 +16749,7 @@ fn minimax_context(
             height: geometry.height,
             batch: 1,
             frames: geometry.frames,
-            reference_count: 0,
+            reference_count: member.reference_count,
         },
         overlay: None,
         budget: MemoryBudget {
@@ -16574,8 +16764,20 @@ fn minimax_context(
     }
 }
 
-fn minimax_request(geometry: MinimaxGeometry, fps: u32, seed: u64) -> GenerationRequest {
-    GenerationRequest {
+/// The measured request.
+///
+/// The CONDITIONING is what selects the DiT partition (upstream `MiniMaxH3Task::resolve`), so the
+/// reference member carries exactly one image reference and the base member carries none. The
+/// reference is synthetic and content-independent by construction — this measures residency, not
+/// fidelity — and it is presented at the target geometry, which is the shape a real
+/// reference-to-video request carries after the worker's own decode.
+fn minimax_request(
+    member: MinimaxMember,
+    geometry: MinimaxGeometry,
+    fps: u32,
+    seed: u64,
+) -> GenerationRequest {
+    let mut request = GenerationRequest {
         prompt: "a slow dolly along a rain-slick harbour wall at dusk, gulls calling, cinematic"
             .to_owned(),
         width: geometry.width,
@@ -16586,7 +16788,20 @@ fn minimax_request(geometry: MinimaxGeometry, fps: u32, seed: u64) -> Generation
         fps: Some(fps),
         steps: Some(MINIMAX_STEPS),
         ..Default::default()
+    };
+    if member.reference_count > 0 {
+        request.conditioning = vec![Conditioning::Reference {
+            image: Image {
+                width: geometry.width,
+                height: geometry.height,
+                pixels: protocol::synthetic_reference_rgb(geometry.width, geometry.height),
+            },
+            // The engine owns the ref2va conditioning strength; the request-level lever stays
+            // unset, exactly as `resolve_minimax_h3_conditioning` leaves it.
+            strength: None,
+        }];
     }
+    request
 }
 
 fn minimax_quality_passes(maximum: f64, mean: f64, rms: f64) -> bool {
@@ -16621,28 +16836,25 @@ fn minimax_complete_sweep(request: &Value) -> Result<Value, String> {
 /// `validate_selection` decides which rungs are capturable, and it answers differently for the two
 /// load shapes (rung 4 is `Implemented` only under `deferred_materialization`).
 fn run_minimax_h3(request: &Value) -> Result<Value, String> {
-    let geometry = validate_minimax_target(request)?;
+    let (member, geometry) = validate_minimax_target(request)?;
     protocol::validate_plain_overlay_target(request, MINIMAX_PLAIN_EXECUTION_PATH)?;
     let load_shape = planned_load_shape(request)?;
     let selection = planned_selection(request)?;
     let tier = planned_qwen_tier(request)?; // shared numeric-tier parser
-    if !matches!(tier, "q4" | "q8" | "bf16") {
-        return Err(format!(
-            "the MLX MiniMax-H3 plan supports only the manifest's q4, q8 and bf16 tiers; tier \
-             {tier:?} is not capturable"
-        ));
-    }
-    let (fps, seed) = planned_minimax_capture(request, tier, geometry)?;
+                                            // The identity is the PLAN's tier's, and an unshipped tier is refused by name here — before the
+                                            // fixture, the environment or any weight work.
+    let expected_fingerprint = minimax_calibration_fingerprint(tier)?;
+    let (fps, seed) = planned_minimax_capture(request, member, tier, geometry)?;
     // Fingerprint check 1 of 3: the PLAN against this arm's own expectation, before any environment
     // or weight work. A provider re-fingerprint must not silently reuse the epic's plan.
     let planned_fingerprint = protocol::planned(request)?
         .get("calibrationFingerprint")
         .and_then(Value::as_str)
         .ok_or_else(|| "planned.calibrationFingerprint must be a string".to_owned())?;
-    if planned_fingerprint != MINIMAX_CALIBRATION_FINGERPRINT {
+    if planned_fingerprint != expected_fingerprint {
         return Err(format!(
             "plan/adapter calibration mismatch: plan={planned_fingerprint}, MLX MiniMax-H3 arm \
-             implements {MINIMAX_CALIBRATION_FINGERPRINT}"
+             implements {expected_fingerprint} for tier {tier}"
         ));
     }
     let artifact = minimax_load_spec(request, tier, &selection, load_shape)?;
@@ -16676,11 +16888,14 @@ fn run_minimax_h3(request: &Value) -> Result<Value, String> {
         .calibration
         .as_ref()
         .ok_or_else(|| "pinned MiniMax-H3 contract has no calibration identity".to_owned())?;
-    // Fingerprint check 2 of 3: the PROVIDER contract against this arm's expectation.
-    if calibration.fingerprint != MINIMAX_CALIBRATION_FINGERPRINT {
+    // Fingerprint check 2 of 3: the PROVIDER contract against this arm's expectation for the
+    // plan's tier. The engine proves the tier from the DiT's own packed marker, so a mismatch here
+    // is a staged root of another tier or a re-fingerprinted provider — never a plan typo, which
+    // check 1 already caught.
+    if calibration.fingerprint != expected_fingerprint {
         return Err(format!(
-            "pinned MiniMax-H3 contract fingerprint changed: expected \
-             {MINIMAX_CALIBRATION_FINGERPRINT}, got {}",
+            "pinned MiniMax-H3 contract fingerprint changed: expected {expected_fingerprint} for \
+             tier {tier}, got {}",
             calibration.fingerprint
         ));
     }
@@ -16718,6 +16933,7 @@ fn run_minimax_h3(request: &Value) -> Result<Value, String> {
             spec,
             &contract,
             &minimax_context(
+                member,
                 selection,
                 calibration,
                 fingerprint,
@@ -16799,7 +17015,7 @@ fn run_minimax_h3(request: &Value) -> Result<Value, String> {
     let (measured, output_fps, audio) = diagnostic_video_frames(
         generator
             .generate(
-                &minimax_request(geometry, fps, seed),
+                &minimax_request(member, geometry, fps, seed),
                 &mut |progress| match progress {
                     Progress::Loading(LoadPhase::TextEncoder) => {
                         pre_generate.set(PhaseMemory::capture());
@@ -16885,6 +17101,7 @@ fn run_minimax_h3(request: &Value) -> Result<Value, String> {
     // Probe 4 of 4, on the LOADED generator and against the measured evidence: the calibrated
     // budget admits a request predicted to consume exactly it.
     let exact_fit = minimax_context(
+        member,
         selection,
         calibration,
         &calibration.fingerprint,
@@ -16922,7 +17139,7 @@ fn run_minimax_h3(request: &Value) -> Result<Value, String> {
     reset_peak_memory();
     let (baseline, _, _) = diagnostic_video_frames(
         generator
-            .generate(&minimax_request(geometry, fps, seed), &mut |_| {})
+            .generate(&minimax_request(member, geometry, fps, seed), &mut |_| {})
             .map_err(|error| format!("generate warm MiniMax-H3 control: {error}"))?,
         MINIMAX_VIDEO_LABEL,
     )?;
@@ -16941,7 +17158,7 @@ fn run_minimax_h3(request: &Value) -> Result<Value, String> {
     reset_peak_memory();
     let (warm, _, _) = diagnostic_video_frames(
         generator
-            .generate(&minimax_request(geometry, fps, seed), &mut |_| {})
+            .generate(&minimax_request(member, geometry, fps, seed), &mut |_| {})
             .map_err(|error| format!("generate warm MiniMax-H3 repeat: {error}"))?,
         MINIMAX_VIDEO_LABEL,
     )?;
@@ -17030,7 +17247,7 @@ fn run_minimax_h3(request: &Value) -> Result<Value, String> {
         "negativeMutation": null,
         "loadability": {
             "result": "passed",
-            "resolvedPathFingerprint": artifact.resolved_path_fingerprint(tier),
+            "resolvedPathFingerprint": artifact.resolved_path_fingerprint(member, tier),
         },
         "output": {
             "frames": geometry.frames,
@@ -17087,6 +17304,990 @@ fn run_minimax_h3(request: &Value) -> Result<Value, String> {
         "capturedAt": protocol::captured_at(),
     });
     protocol::settle_plain_overlay_scenario(request, &mut fragment, MINIMAX_PLAIN_EXECUTION_PATH)?;
+    Ok(fragment)
+}
+
+// ==== mlx:bernini (sc-22737) ====================================================================
+//
+// The THIRD video arm, and the first that also serves a STILL catalog entry from the same engine
+// provider. Three facts shape the whole block:
+//
+//  1. **ONE engine id, TWO catalog entries.** `mlx-gen-bernini` registers the full pipeline under
+//     `crate::bernini::MODEL_ID == "bernini"`, and BOTH shipped SceneWorks entries resolve to it:
+//     `video_jobs/bernini.rs#bernini_engine_id` maps the video entry `bernini`, and
+//     `engines.rs`'s MODEL_TABLE maps the still entry `bernini_image` (`engine_id: "bernini"`).
+//     The renderer-only sibling `bernini_renderer` (`crate::pipeline::MODEL_ID`) is registered by
+//     the engine and published as its own identity family, but NO SceneWorks load path names it —
+//     `video_jobs/bernini.rs` calls `inference_runtime::load("bernini")` — so this arm binds the
+//     `image` identity route on both members and never the `renderer` one.
+//
+//  2. **The geometry envelope is the ENGINE's, and it is shared by both members.**
+//     `memory_strategy::validate_geometry` admits exactly `ADVERTISED_GEOMETRIES` for either
+//     provider id, so a still anchor is constrained to the same four canvases the video route
+//     publishes rather than to `bernini_image`'s wider manifest resolution list. Read off the
+//     engine constant, never transcribed.
+//
+//  3. **The tier is proven by the ARTIFACT, not asked for.** The rehost ships pre-packed `q4/`,
+//     `q8/` and `bf16/` sub-directories, so the worker loads a resolved tier with `quant = None`
+//     (`video_jobs/bernini.rs#resolve_bernini_tier_dir_and_quant`: "a pre-packed tier loads with
+//     `quant = None`; config sidecars authoritative"). This arm does the same, and the engine's
+//     `production_calibration_fingerprint` then reads the tier back out of the renderer/planner
+//     manifests and the safetensors headers — which is what makes the published identity a claim
+//     about the bytes on disk rather than about the plan row.
+/// The engine provider id. Spelled as a LITERAL because the dispatch arm below is parsed out of
+/// this source by `stale-lane-report.mjs#adapterCapturableProviders`, which resolves an arm only to
+/// a bare literal or to a `const NAME: &str = "…";` — a const bound to an engine path is a value it
+/// cannot read, and it refuses to guess rather than reporting this lane as having no Bernini arm.
+///
+/// The literal is still not a transcription that can drift: the const assertion below compares it,
+/// byte for byte at COMPILE time, against the id `mlx-gen-bernini` keys its calibration route on
+/// (`calibration_route(FULL_ID)`). A rename in the engine fails the build here instead of silently
+/// mis-dispatching, which is the property reading `FULL_ID` directly was buying.
+const BERNINI_PROVIDER: &str = "bernini";
+const _: () = {
+    let ours = BERNINI_PROVIDER.as_bytes();
+    let engine = runtime_macos::providers::bernini::memory_strategy::FULL_ID.as_bytes();
+    assert!(
+        ours.len() == engine.len(),
+        "BERNINI_PROVIDER no longer spells mlx-gen-bernini's memory_strategy::FULL_ID"
+    );
+    let mut index = 0;
+    while index < ours.len() {
+        assert!(
+            ours[index] == engine[index],
+            "BERNINI_PROVIDER no longer spells mlx-gen-bernini's memory_strategy::FULL_ID"
+        );
+        index += 1;
+    }
+};
+/// The video catalog entry (`VideoModelCaps::new("bernini", …)`).
+const BERNINI_VIDEO_MODEL_ID: &str = "bernini";
+/// The still catalog entry, which loads [`BERNINI_PROVIDER`] with `frames == 1`.
+const BERNINI_IMAGE_MODEL_ID: &str = "bernini_image";
+/// One fixed seed for every `mlx:bernini` fixture, on both members. The fixture binds the member,
+/// tier and full geometry, so the seed does not also have to carry the route.
+const BERNINI_SEED: u64 = 22737;
+/// The single cadence the manifest publishes for the video entry (`limits.fps: [16]`). Bernini has
+/// no second legal rate, so — like MiniMax-H3 and unlike LTX — the fixture's declared cadence is
+/// checked against one value and cannot silently vary a record.
+const BERNINI_FPS: u32 = 16;
+/// The video anchor's frame count: 3 s at [`BERNINI_FPS`] coerced onto the Wan `1 mod 4` lattice
+/// the renderer requires (`video_jobs/wan.rs#wan_frame_count`, which the Bernini video path calls
+/// because the renderer IS Wan2.2-A14B). The manifest's shortest published duration, because this
+/// is the cell's ONE capture and a dual-expert A14B render is the most expensive in the catalog.
+const BERNINI_VIDEO_FRAMES: u32 = 49;
+const BERNINI_VIDEO_LABEL: &str = "Bernini";
+/// Warm-repeat determinism envelope, shared with the other MLX video arms: an identical seed,
+/// prompt, geometry and loaded provider must reproduce the clip, and the mandatory output mutation
+/// must breach the same bound.
+const BERNINI_MAX_THRESHOLD: f64 = 3e-2;
+const BERNINI_MEAN_THRESHOLD: f64 = 3e-3;
+const BERNINI_RMS_THRESHOLD: f64 = 3e-3;
+
+/// Which Bernini catalog entry the plan asks for. Both members load the SAME engine provider from
+/// the SAME artifact family; they differ only in the modality of the render and therefore in the
+/// mode key the record is filed under.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct BerniniArm {
+    model_id: &'static str,
+    /// The `MemoryMode` key the runtime asks admission under for this member — an EVIDENCE KEY, not
+    /// a label, for the reason [`minimax_context`] documents at length.
+    mode: &'static str,
+    execution_path: &'static str,
+    /// `<slug>` in the fixture name `bernini-<slug>-mlx-<tier>-<w>x<h>-f<frames>-fps<fps>-seed…`.
+    slug: &'static str,
+    /// `frames` this member renders. The still entry is `1`; the video entry is the Wan lattice.
+    frames: u32,
+}
+
+const BERNINI_VIDEO_ARM: BerniniArm = BerniniArm {
+    model_id: BERNINI_VIDEO_MODEL_ID,
+    mode: "text_to_video",
+    execution_path: "the MLX Bernini dual-expert text-to-video path",
+    slug: "video",
+    frames: BERNINI_VIDEO_FRAMES,
+};
+
+const BERNINI_IMAGE_ARM: BerniniArm = BerniniArm {
+    model_id: BERNINI_IMAGE_MODEL_ID,
+    mode: "text_to_image",
+    execution_path: "the MLX Bernini still text-to-image path",
+    slug: "image",
+    frames: 1,
+};
+
+/// Every member this arm serves, in one place so the tables and the tests cannot disagree about
+/// which two catalog entries exist.
+const BERNINI_ARMS: [BerniniArm; 2] = [BERNINI_VIDEO_ARM, BERNINI_IMAGE_ARM];
+
+/// Every numeric tier the `mlx:bernini` family ships, and therefore every tier that has a
+/// production calibration identity. Kept beside [`bernini_calibration_fingerprint`] so the identity
+/// family and the plan parser cannot disagree about the inventory.
+const BERNINI_TIERS: [&str; 3] = ["bf16", "q4", "q8"];
+
+/// The tier the engine's retained
+/// [`MEMORY_CALIBRATION_FINGERPRINT`](runtime_macos::providers::bernini::memory_strategy::MEMORY_CALIBRATION_FINGERPRINT)
+/// names, read off the pinned crate rather than spelled: a re-tiered retained key moves this
+/// family's bare member with it, and `the_bernini_identity_family_reproduces_the_engines_retained_key`
+/// proves the retained string IS the `(route, CALIBRATED_TIER)` member the format below mints.
+const BERNINI_CALIBRATED_TIER: &str =
+    runtime_macos::providers::bernini::memory_strategy::CALIBRATED_TIER;
+
+/// The production calibration identity `mlx-gen-bernini` mints for one `(route, tier)` cell.
+///
+/// The engine keys on `(provider, ARTIFACT-proven tier)` and interpolates
+/// `bernini-{route}-{tier}-mlx-dual-expert-ladder-v1`. The route token is the ENGINE's
+/// (`calibration_route`), resolved for [`BERNINI_PROVIDER`] — every SceneWorks load resolves the
+/// full planner+renderer pipeline (see the block comment above), which the engine names `image`,
+/// as opposed to the renderer-only sibling `RENDERER_ID` it names `renderer`. Deriving it rather
+/// than spelling `image` keeps the token from drifting from the crate that mints it.
+///
+/// The calibrated tier reproduces
+/// [`MEMORY_CALIBRATION_FINGERPRINT`](runtime_macos::providers::bernini::memory_strategy::MEMORY_CALIBRATION_FINGERPRINT)
+/// byte-for-byte, which is what keeps the retained key of the family's existing record valid.
+///
+/// Written here as well as in the engine so the plan/arm binding is weights-free and provable on a
+/// CPU-only host. The capture then refuses a loaded contract whose identity differs from this
+/// table, so a drift is caught at the pin bump rather than in a record.
+///
+/// A tier outside [`BERNINI_TIERS`] is refused BY NAME rather than interpolated into a plausible
+/// identity no production load can return.
+fn bernini_calibration_fingerprint(tier: &str) -> Result<String, String> {
+    use runtime_macos::providers::bernini::memory_strategy as engine;
+    if !BERNINI_TIERS.contains(&tier) {
+        return Err(format!(
+            "the MLX Bernini calibration family ships {BERNINI_TIERS:?}; tier {tier:?} has no \
+             production identity"
+        ));
+    }
+    let route = engine::calibration_route(BERNINI_PROVIDER).ok_or_else(|| {
+        format!(
+            "the pinned mlx-gen-bernini crate mints no calibration route for {BERNINI_PROVIDER:?}"
+        )
+    })?;
+    if tier == BERNINI_CALIBRATED_TIER {
+        return Ok(engine::MEMORY_CALIBRATION_FINGERPRINT.to_owned());
+    }
+    Ok(format!("bernini-{route}-{tier}-mlx-dual-expert-ladder-v1"))
+}
+
+/// The exact target geometry a `mlx:bernini` calibration case renders.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct BerniniGeometry {
+    width: u32,
+    height: u32,
+    frames: u32,
+}
+
+/// Bernini's own geometry envelope, replacing the image arms' blanket `frames == 1` refusal.
+///
+/// The canvas half is the engine's `validate_geometry` — an exact membership test against
+/// [`ADVERTISED_GEOMETRIES`](runtime_macos::providers::bernini::memory_strategy::ADVERTISED_GEOMETRIES),
+/// read off the crate rather than transcribed — and it is PROVIDER-WIDE: `memory_strategy` applies
+/// it to the still route and the video route alike, so a `bernini_image` anchor may not use one of
+/// that entry's wider manifest resolutions (512², 768², 1024²) either. The temporal half is the
+/// member's: the still entry renders exactly one frame, and the video entry renders the Wan
+/// `1 mod 4` lattice count this arm plans.
+fn validate_bernini_geometry(
+    arm: BerniniArm,
+    width: u32,
+    height: u32,
+    frames: u32,
+) -> Result<BerniniGeometry, String> {
+    let advertised = runtime_macos::providers::bernini::memory_strategy::ADVERTISED_GEOMETRIES;
+    if !advertised.contains(&(width, height)) {
+        return Err(format!(
+            "{BERNINI_VIDEO_LABEL} memory evidence requires one of the advertised geometries \
+             {advertised:?}, got {width}x{height}"
+        ));
+    }
+    if frames != arm.frames {
+        return Err(format!(
+            "{BERNINI_VIDEO_LABEL} {} renders {} frame(s); got geometry.frames {frames}",
+            arm.model_id, arm.frames
+        ));
+    }
+    Ok(BerniniGeometry {
+        width,
+        height,
+        frames,
+    })
+}
+
+/// Resolve the member and its geometry, refusing a foreign target BY NAME before any environment
+/// variable is read, any path canonicalized, or any weight file opened.
+///
+/// `run` already dispatches by provider id, so the provider check here is defense in depth — but
+/// the MODEL ID check is not: one provider serves two catalog entries whose records are filed
+/// separately, and nothing else in this arm distinguishes them.
+fn bernini_target(request: &Value) -> Result<(BerniniArm, BerniniGeometry), String> {
+    let target = protocol::planned(request)?
+        .get("target")
+        .and_then(Value::as_object)
+        .ok_or_else(|| "planned.target must be an object".to_owned())?;
+    let string = |field: &str| {
+        target
+            .get(field)
+            .and_then(Value::as_str)
+            .ok_or_else(|| format!("planned.target.{field} must be a string"))
+    };
+    let provider = string("provider")?;
+    if provider != BERNINI_PROVIDER {
+        return Err(format!(
+            "the MLX Bernini arm does not implement provider {provider:?}"
+        ));
+    }
+    let model_id = string("modelId")?;
+    let arm = BERNINI_ARMS
+        .iter()
+        .copied()
+        .find(|arm| arm.model_id == model_id)
+        .ok_or_else(|| {
+            format!(
+                "the MLX Bernini arm serves catalog entries {:?}, got modelId {model_id:?}",
+                BERNINI_ARMS.map(|arm| arm.model_id)
+            )
+        })?;
+    let mode = string("mode")?;
+    if mode != arm.mode {
+        return Err(format!(
+            "{model_id} is measured in {:?} mode, got {mode:?}",
+            arm.mode
+        ));
+    }
+    // The published ladder is the PLAIN one. A reference-carrying Bernini target loads the same
+    // block stack but seals its sources into a different evidence identity
+    // (`R2V_REFERENCE_RECEIPT_DOMAIN` and its MV2V/ADS2V siblings), so a plain anchor may never be
+    // filed against one.
+    for field in ["referenceCount", "reference_count"] {
+        if let Some(value) = target.get(field) {
+            if value.as_u64() != Some(0) {
+                return Err(format!(
+                    "{model_id}: this arm measures the reference-free ladder; a non-zero {field} \
+                     seals a different Bernini evidence identity and cannot be recorded from it"
+                ));
+            }
+        }
+    }
+    let geometry = target
+        .get("geometry")
+        .and_then(Value::as_object)
+        .ok_or_else(|| "planned.target.geometry must be an object".to_owned())?;
+    let axis = |name: &str| {
+        geometry
+            .get(name)
+            .and_then(Value::as_u64)
+            .and_then(|value| u32::try_from(value).ok())
+            .ok_or_else(|| format!("planned.target.geometry.{name} must fit u32"))
+    };
+    let batch = axis("batch")?;
+    if batch != 1 {
+        return Err(format!(
+            "{BERNINI_VIDEO_LABEL} requires geometry.batch == 1, got {batch}"
+        ));
+    }
+    let geometry =
+        validate_bernini_geometry(arm, axis("width")?, axis("height")?, axis("frames")?)?;
+    Ok((arm, geometry))
+}
+
+/// Bind the fixture to the member, the planned tier and the full rendered geometry, recovering the
+/// cadence and the seed. Like MiniMax-H3's, this arm's `fps` has exactly one legal value, so the
+/// fixture cannot declare a cadence the engine would refuse.
+fn planned_bernini_capture(
+    request: &Value,
+    arm: BerniniArm,
+    tier: &str,
+    geometry: BerniniGeometry,
+) -> Result<(u32, u64), String> {
+    let fixture = protocol::planned(request)?
+        .get("fixture")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "planned.fixture must be a string".to_owned())?;
+    let prefix = format!(
+        "bernini-{}-mlx-{tier}-{}x{}-f{}-fps",
+        arm.slug, geometry.width, geometry.height, geometry.frames
+    );
+    let remainder = fixture
+        .strip_prefix(&prefix)
+        .ok_or_else(|| format!("planned.fixture {fixture:?} must start with {prefix:?}"))?;
+    let (fps, seed) = remainder
+        .split_once("-seed")
+        .ok_or_else(|| format!("planned.fixture {fixture:?} must end with -seed<seed>"))?;
+    let fps = fps
+        .parse::<u32>()
+        .map_err(|error| format!("parse Bernini fixture fps {fps:?}: {error}"))?;
+    if fps != BERNINI_FPS {
+        return Err(format!(
+            "planned.fixture declares fps {fps}, but the shipped Bernini manifest publishes \
+             {BERNINI_FPS} fps only"
+        ));
+    }
+    let seed = seed
+        .parse::<u64>()
+        .map_err(|error| format!("parse Bernini fixture seed {seed:?}: {error}"))?;
+    if seed != BERNINI_SEED {
+        return Err(format!(
+            "planned.fixture seed {seed} does not match the Bernini calibration seed {BERNINI_SEED}"
+        ));
+    }
+    Ok((fps, seed))
+}
+
+/// Everything a Bernini capture resolved, kept together so the record's provenance is built from
+/// the values the load actually used rather than from the plan.
+struct BerniniArtifact {
+    repository: String,
+    revision: String,
+    tier_root: PathBuf,
+    spec: LoadSpec,
+}
+
+impl BerniniArtifact {
+    fn resolved_path_fingerprint(&self, arm: BerniniArm, tier: &str) -> String {
+        format!(
+            "{}@{}:{tier}+route:{}",
+            self.repository, self.revision, arm.slug
+        )
+    }
+}
+
+/// Resolve and validate the `SCENEWORKS_BERNINI_*` environment family into a tier-exact load spec.
+///
+/// ONE triple, unlike MiniMax-H3's two: the `SceneWorks/bernini-mlx` rehost is self-contained
+/// (`video_jobs/bernini.rs`: "the turnkey `SceneWorks/bernini-mlx` snapshot is self-contained"), so
+/// `_ROOT` is the tier directory and nothing is redirected onto a second tree.
+///
+/// **`Resident` + `EagerMaterialization`, and no `quantize`.** All three are the worker's own
+/// shape, not a choice made here:
+///
+/// * the tiers ship PRE-PACKED, so `resolve_bernini_tier_dir_and_quant` returns `quant = None` for
+///   a resolved tier subdir and only a legacy flat snapshot keeps a load-time quant. Passing the
+///   planned tier's `Quant` would ask the engine to re-quantize already-packed weights;
+/// * the still lane builds its spec with no adapters and the MLX route rule
+///   (`memory_route_registry.rs`, `backend: Mlx`, `provider: "bernini"`) declares `PLAIN`, so no
+///   overlay is in scope;
+/// * `structurally_streamable` — the engine's own gate on the deferred block stream — requires
+///   `DeferredMaterialization`, which the registry rule reaches only through the worker's
+///   declaration evaluator. The ANCHOR is the plain resident cell, so this arm executes the eager
+///   resident shape the cold load actually takes and attests the loaded contract's own
+///   `load_shape` back against it.
+fn bernini_load_spec(
+    request: &Value,
+    tier: &str,
+    load_shape: LoadShape,
+) -> Result<BerniniArtifact, String> {
+    bernini_load_spec_at(
+        request,
+        tier,
+        load_shape,
+        protocol::required_env("SCENEWORKS_BERNINI_REPOSITORY")?,
+        protocol::required_env("SCENEWORKS_BERNINI_REVISION")?,
+        PathBuf::from(protocol::required_env("SCENEWORKS_BERNINI_ROOT")?),
+    )
+}
+
+/// The environment-free half of [`bernini_load_spec`]: the same validations over caller-supplied
+/// identity and root, so a test can hand it a root of the WRONG tier and read the refusal — the
+/// sc-17097 defect class — without touching the process environment.
+fn bernini_load_spec_at(
+    request: &Value,
+    tier: &str,
+    load_shape: LoadShape,
+    repository: String,
+    revision: String,
+    root: PathBuf,
+) -> Result<BerniniArtifact, String> {
+    protocol::validate_artifact_identity(&repository, &revision, protocol::BERNINI_REPOSITORY)?;
+    let tier_root = std::fs::canonicalize(&root)
+        .map_err(|error| format!("canonicalize SCENEWORKS_BERNINI_ROOT: {error}"))?;
+    protocol::validate_huggingface_snapshot_root(
+        &tier_root,
+        &repository,
+        &revision,
+        tier,
+        protocol::BERNINI_REPOSITORY,
+    )?;
+    protocol::validate_plain_overlay_target(request, bernini_target(request)?.0.execution_path)?;
+    let spec = LoadSpec::new(WeightsSource::Dir(tier_root.clone()))
+        .with_offload_policy(OffloadPolicy::Resident)
+        .with_load_shape(load_shape);
+    Ok(BerniniArtifact {
+        repository,
+        revision,
+        tier_root,
+        spec,
+    })
+}
+
+/// The admission context for the Bernini safety scenarios.
+///
+/// `mode` IS AN EVIDENCE KEY: gen-core's `standard_memory_strategy_safety_check` matches
+/// `context.mode.as_key()` against each adopted decode-geometry record's own mode, so a probe run
+/// under one spelling cannot answer a request asked under another. The two members ask under the
+/// two keys their runtime funnels use — `video_admission` types the video route's `text_to_video`
+/// through `memory_mode_from_mode_key` (which maps every non-canonical key to
+/// [`MemoryMode::Other`]), and the still route asks under the canonical
+/// [`MemoryMode::TextToImage`].
+fn bernini_context(
+    arm: BerniniArm,
+    selection: MemorySelection,
+    calibration: &MemoryCalibrationIdentity,
+    fingerprint: &str,
+    geometry: BerniniGeometry,
+    total_bytes: u64,
+    predicted_peak_bytes: u64,
+) -> MemoryRunContext {
+    MemoryRunContext {
+        selection,
+        optimization_authority: MemoryOptimizationAuthority::Calibrated,
+        calibration_abi: calibration.abi,
+        // A parameter only so the stale-evidence probe can pass a deliberate mismatch; every real
+        // call site passes `calibration.fingerprint`.
+        calibration_fingerprint: fingerprint.to_owned(),
+        load_shape: calibration.load_shape,
+        mode: if arm.model_id == BERNINI_IMAGE_MODEL_ID {
+            MemoryMode::TextToImage
+        } else {
+            MemoryMode::Other(arm.mode.to_owned())
+        },
+        has_reference: false,
+        use_pid: false,
+        has_phases: true,
+        geometry: MemoryGeometry {
+            width: geometry.width,
+            height: geometry.height,
+            batch: 1,
+            frames: geometry.frames,
+            reference_count: 0,
+        },
+        overlay: None,
+        budget: MemoryBudget {
+            total_bytes,
+            committed_bytes: 0,
+            reclaimable_bytes: 0,
+            reserved_headroom_bytes: 0,
+        },
+        predicted_peak_bytes,
+        cache_state: MemoryCacheState::Cold,
+        evidence_revision: format!("sc-22737@{}", protocol::INFERENCE_PIN),
+    }
+}
+
+/// The measured request.
+///
+/// `steps` and `guidance` are left UNSET on purpose. `mlx-gen-bernini`'s `FullDefaults` is private,
+/// so a literal here would be a second, unbindable copy of the engine's own default that could
+/// drift silently at a pin bump; `None` executes exactly what the worker's cold render executes
+/// (`video_jobs/bernini.rs` leaves both at the engine defaults too) and is identical across the
+/// measured render and its warm repeats, which is all the determinism comparison needs.
+fn bernini_request(
+    arm: BerniniArm,
+    geometry: BerniniGeometry,
+    fps: u32,
+    seed: u64,
+) -> GenerationRequest {
+    GenerationRequest {
+        prompt:
+            "a slow crane over a terracotta rooftop at golden hour, swallows turning, cinematic"
+                .to_owned(),
+        width: geometry.width,
+        height: geometry.height,
+        count: 1,
+        seed: Some(seed),
+        frames: Some(geometry.frames),
+        fps: (arm.model_id == BERNINI_VIDEO_MODEL_ID).then_some(fps),
+        ..Default::default()
+    }
+}
+
+fn bernini_quality_passes(maximum: f64, mean: f64, rms: f64) -> bool {
+    maximum <= BERNINI_MAX_THRESHOLD
+        && mean <= BERNINI_MEAN_THRESHOLD
+        && rms <= BERNINI_RMS_THRESHOLD
+}
+
+/// Unwrap the member's own output shape into the frame list every downstream comparison uses. The
+/// still member returns `Images`; the video member returns `Video` and its cadence is asserted
+/// against the fixture's, so a record can never claim a rate the engine did not produce.
+fn bernini_output_frames(
+    arm: BerniniArm,
+    output: GenerationOutput,
+    fps: u32,
+) -> Result<Vec<Image>, String> {
+    match (arm.model_id, output) {
+        (BERNINI_IMAGE_MODEL_ID, GenerationOutput::Images(images)) => {
+            if images.len() != 1 {
+                return Err(format!(
+                    "{BERNINI_IMAGE_MODEL_ID} returned {} images for a count=1 request",
+                    images.len()
+                ));
+            }
+            Ok(images)
+        }
+        (
+            BERNINI_VIDEO_MODEL_ID,
+            GenerationOutput::Video {
+                frames,
+                fps: rendered,
+                ..
+            },
+        ) => {
+            if rendered != fps {
+                return Err(format!(
+                    "{BERNINI_VIDEO_MODEL_ID} returned {rendered} fps for a {fps} fps request"
+                ));
+            }
+            if frames.is_empty() {
+                return Err(format!("{BERNINI_VIDEO_MODEL_ID} returned no frames"));
+            }
+            Ok(frames)
+        }
+        (model_id, other) => Err(format!(
+            "{model_id} returned an output shape this arm cannot record: {other:?}"
+        )),
+    }
+}
+
+/// The `mlx:bernini` arm — one measured render plus two warm repeats on the loaded provider, with
+/// the four admission probes taken against the provider's own registered `safety_check`.
+///
+/// Structurally the MiniMax-H3 arm without the audio half: same three fingerprint checks (plan vs
+/// arm, provider vs arm, plan vs provider), same pre-load admission hygiene, same three phase peaks
+/// cut on the boundaries the shipped `generate` already emits.
+fn run_bernini(request: &Value) -> Result<Value, String> {
+    let (arm, geometry) = bernini_target(request)?;
+    protocol::validate_plain_overlay_target(request, arm.execution_path)?;
+    let load_shape = planned_load_shape(request)?;
+    let selection = planned_selection(request)?;
+    let tier = planned_qwen_tier(request)?; // shared numeric-tier parser
+    let (fps, seed) = planned_bernini_capture(request, arm, tier, geometry)?;
+    let expected_fingerprint = bernini_calibration_fingerprint(tier)?;
+    // Fingerprint check 1 of 3: the PLAN against this arm's own expectation, before any environment
+    // or weight work. A provider re-fingerprint must not silently reuse the epic's plan.
+    let planned_fingerprint = protocol::planned(request)?
+        .get("calibrationFingerprint")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "planned.calibrationFingerprint must be a string".to_owned())?;
+    if planned_fingerprint != expected_fingerprint {
+        return Err(format!(
+            "plan/adapter calibration mismatch: plan={planned_fingerprint}, MLX Bernini arm \
+             implements {expected_fingerprint}"
+        ));
+    }
+    let artifact = bernini_load_spec(request, tier, load_shape)?;
+    let spec = &artifact.spec;
+    // The on-disk footprint of the staged tier, read BEFORE the load for the reason the LTX and
+    // MiniMax arms do it: a mis-staged directory fails here, before any GPU work, rather than after
+    // three full dual-expert renders.
+    let staged_tier_bytes = safetensors_bytes(&artifact.tier_root)?;
+
+    let registry = runtime_macos::providers::bernini::provider_registry()
+        .map_err(|error| format!("build Bernini registry: {error}"))?;
+    let contract = registry
+        .memory_strategy_contract(BERNINI_PROVIDER, spec)
+        .map_err(|error| format!("read {BERNINI_PROVIDER} memory-strategy contract: {error}"))?
+        .ok_or_else(|| "pinned MLX Bernini provider has no memory-strategy contract".to_owned())?;
+    contract
+        .validate_selection(&selection)
+        .map_err(|error| format!("pinned Bernini contract rejected planned selection: {error}"))?;
+    let strategy = attested_strategy(
+        request,
+        &selection,
+        &contract.engaged_composition(selection.strategy),
+    )?;
+    let calibration = contract
+        .calibration
+        .as_ref()
+        .ok_or_else(|| "pinned Bernini contract has no calibration identity".to_owned())?;
+    // Fingerprint check 2 of 3: the PROVIDER contract against this arm's expectation.
+    if calibration.fingerprint != expected_fingerprint {
+        return Err(format!(
+            "pinned Bernini contract fingerprint changed: expected {expected_fingerprint}, got {}",
+            calibration.fingerprint
+        ));
+    }
+    // Fingerprint check 3 of 3: the plan against the provider, so the two cannot agree with the arm
+    // separately while disagreeing with each other.
+    if planned_fingerprint != calibration.fingerprint {
+        return Err(format!(
+            "plan/provider calibration mismatch: plan={planned_fingerprint}, pinned provider={}",
+            calibration.fingerprint
+        ));
+    }
+    if calibration.load_shape != load_shape {
+        return Err(format!(
+            "pinned Bernini contract resolved load shape {:?} for a plan that declares {:?}",
+            calibration.load_shape, load_shape
+        ));
+    }
+
+    let hardware_bytes = request
+        .pointer("/hardware/memoryBytes")
+        .and_then(Value::as_u64)
+        .ok_or_else(|| "run request.hardware.memoryBytes must be an integer".to_owned())?;
+    let wired_limit_bytes = request
+        .pointer("/hardware/wiredLimitBytes")
+        .and_then(Value::as_u64)
+        .ok_or_else(|| "run request.hardware.wiredLimitBytes must be an integer".to_owned())?;
+
+    // Admission mutation hygiene BEFORE the expensive load, through the provider's OWN registered
+    // check: it must accept a fitting request (so the two rejections below are not a blanket
+    // refusal), reject an unknown/zero budget, and reject a mutated calibration fingerprint.
+    //
+    // Through `loaded_safety_check` and not the crate-private `safety_check`: the public entry
+    // point is the one the loaded generator's own check delegates to, and it takes the snapshot's
+    // expert depth so a rung-4 plan row would be gated on the real block count. `trunk_blocks() / 2`
+    // is the engine's OWN declared per-expert depth (`trunk_blocks() == 2 * expert_blocks()`),
+    // derived from the public symbol rather than written as a literal. On this arm's resident
+    // anchor the depth is never consulted — `check_loaded_expert_depth` runs only when the contract
+    // engages bounded transformer residency — so passing the declared value asserts nothing the
+    // load has not already proven.
+    let expert_blocks = runtime_macos::providers::bernini::memory_strategy::trunk_blocks() / 2;
+    let safety = |fingerprint: &str, total_bytes: u64, predicted: u64| {
+        runtime_macos::providers::bernini::memory_strategy::loaded_safety_check(
+            BERNINI_PROVIDER,
+            spec,
+            &contract,
+            &bernini_context(
+                arm,
+                selection,
+                calibration,
+                fingerprint,
+                geometry,
+                total_bytes,
+                predicted,
+            ),
+            expert_blocks,
+        )
+    };
+    if !matches!(
+        safety(&calibration.fingerprint, hardware_bytes, 1),
+        MemorySafetyDecision::Accept
+    ) {
+        return Err(
+            "Bernini admission rejected a fitting probe budget; the scenario rejections below \
+             would be a blanket refusal, not evidence"
+                .to_owned(),
+        );
+    }
+    if !matches!(
+        safety(&calibration.fingerprint, 0, 1),
+        MemorySafetyDecision::Reject { .. }
+    ) {
+        return Err("Bernini admission accepted an unknown/zero memory budget".to_owned());
+    }
+    if !matches!(
+        safety("stale-bernini-fingerprint", hardware_bytes, 1),
+        MemorySafetyDecision::Reject { .. }
+    ) {
+        return Err("Bernini admission accepted stale calibration evidence".to_owned());
+    }
+
+    let generator = registry
+        .load(BERNINI_PROVIDER, spec)
+        .map_err(|error| format!("load real Bernini {tier} provider: {error}"))?;
+    let loaded_contract = generator
+        .memory_strategy_contract()
+        .ok_or_else(|| "loaded Bernini generator exposed no memory contract".to_owned())?;
+    if loaded_contract != &contract {
+        return Err(
+            "loaded Bernini generator contract differs from the registry contract".to_owned(),
+        );
+    }
+
+    // Three phase peaks cut on the boundaries the shipped `generate` already emits, in the ordering
+    // the engine's own staged tests use: read the peak AND the footprint first, reset only after.
+    let pre_generate = Cell::new(PhaseMemory {
+        active: 0,
+        cache: 0,
+    });
+    let conditioning = Cell::new(PhaseMemory {
+        active: 0,
+        cache: 0,
+    });
+    let denoise = Cell::new(PhaseMemory {
+        active: 0,
+        cache: 0,
+    });
+    let conditioning_close = Cell::new(AllocatorState::default());
+    let denoise_close = Cell::new(AllocatorState::default());
+    clear_cache();
+    reset_peak_memory();
+    let pre_rung_active = get_active_memory() as u64;
+    let pre_rung_cache = get_cache_memory() as u64;
+    let measured = bernini_output_frames(
+        arm,
+        generator
+            .generate(
+                &bernini_request(arm, geometry, fps, seed),
+                &mut |progress| match progress {
+                    Progress::Loading(LoadPhase::TextEncoder) => {
+                        pre_generate.set(PhaseMemory::capture());
+                        reset_peak_memory();
+                    }
+                    Progress::Loading(LoadPhase::Renderer) => {
+                        conditioning.set(PhaseMemory::capture());
+                        conditioning_close.set(AllocatorState::capture_current());
+                        reset_peak_memory();
+                    }
+                    Progress::Decoding => {
+                        denoise.set(PhaseMemory::capture());
+                        denoise_close.set(AllocatorState::capture_current());
+                        reset_peak_memory();
+                    }
+                    _ => {}
+                },
+            )
+            .map_err(|error| format!("generate measured Bernini render: {error}"))?,
+        fps,
+    )?;
+    let decode = PhaseMemory::capture();
+    let decode_close = AllocatorState::capture_current();
+    let pre_generate = pre_generate.get();
+    let conditioning = conditioning.get();
+    let denoise = denoise.get();
+    let conditioning_close = conditioning_close.get();
+    let denoise_close = denoise_close.get();
+    if [conditioning.active, denoise.active, decode.active].contains(&0) {
+        return Err(
+            "a synchronized Bernini lifecycle phase reported a zero active peak; the engine \
+             stopped emitting a boundary and the attribution collapsed"
+                .to_owned(),
+        );
+    }
+    if measured.len() as u64 != u64::from(geometry.frames) {
+        return Err(format!(
+            "Bernini rendered {} frames for a {}-frame request",
+            measured.len(),
+            geometry.frames
+        ));
+    }
+    let first = measured
+        .first()
+        .ok_or_else(|| "Bernini render returned no first frame".to_owned())?;
+    if first.pixels.is_empty() || first.pixels.iter().all(|pixel| *pixel == first.pixels[0]) {
+        return Err("Bernini render returned a degenerate first frame".to_owned());
+    }
+
+    let overall = PhaseMemory::overall(&[conditioning, denoise, decode]);
+    // The video member charges the RESIDENT ACTIVE peak for the reason every video lane does; the
+    // still member keeps the historical componentwise image bound, so a `bernini_image` record is
+    // admissible under exactly the arithmetic shipped image admission already applies. Each member
+    // binds its receipt through its OWN lane wrapper — the source-text guard
+    // `every_receipt_builder_is_bound_to_its_lane_prediction_wrapper` reads every `predicted_peaks`
+    // binding in this file, and a binding that merely selects between the two wrappers is not one
+    // it can tell from a bypass.
+    let (predicted_peaks_json, predicted) = if arm.model_id == BERNINI_IMAGE_MODEL_ID {
+        let predicted_peaks = image_predicted_peak_bytes(conditioning, denoise, decode);
+        (predicted_peaks.json(), predicted_peaks.overall)
+    } else {
+        let predicted_peaks = video_predicted_peak_bytes(conditioning, denoise, decode);
+        (predicted_peaks.json(), predicted_peaks.overall)
+    };
+    // The same two ceilings `memory-calibration-harness.mjs#assertResidencyFitsHardware` applies —
+    // checked HERE so a capture that cannot be admitted fails loudly during the campaign rather
+    // than producing a well-formed record the harness rejects afterwards.
+    if overall.active > hardware_bytes {
+        return Err(format!(
+            "Bernini observed overall active {} bytes above the probed hardware memory \
+             {hardware_bytes} bytes",
+            overall.active
+        ));
+    }
+    if overall.active > wired_limit_bytes {
+        return Err(format!(
+            "Bernini observed overall active {} bytes above the probed wired ceiling \
+             {wired_limit_bytes} bytes",
+            overall.active
+        ));
+    }
+    // Probe 4 of 4, on the LOADED generator and against the measured evidence.
+    let exact_fit = bernini_context(
+        arm,
+        selection,
+        calibration,
+        &calibration.fingerprint,
+        geometry,
+        predicted,
+        predicted,
+    );
+    if !matches!(
+        generator.memory_strategy_safety_check(&exact_fit),
+        MemorySafetyDecision::Accept
+    ) {
+        return Err("Bernini admission rejected an exact-fit calibrated budget".to_owned());
+    }
+    // THE EXACT-FIT ACCEPT IS NOT SELF-VALIDATING: the same loaded generator must REJECT a zero
+    // budget, or its accept is a blanket accept rather than admission evidence.
+    let mut unknown_budget = exact_fit.clone();
+    unknown_budget.budget.total_bytes = 0;
+    if !matches!(
+        generator.memory_strategy_safety_check(&unknown_budget),
+        MemorySafetyDecision::Reject { .. }
+    ) {
+        return Err(
+            "the loaded Bernini generator accepted a zero/unknown budget, so its exact-fit accept \
+             is a blanket accept rather than admission evidence"
+                .to_owned(),
+        );
+    }
+
+    // Warm repeat determinism + cleanup bounds on this exact loaded provider.
+    clear_cache();
+    reset_peak_memory();
+    let baseline = bernini_output_frames(
+        arm,
+        generator
+            .generate(&bernini_request(arm, geometry, fps, seed), &mut |_| {})
+            .map_err(|error| format!("generate warm Bernini control: {error}"))?,
+        fps,
+    )?;
+    let clean_warm_peak = get_peak_memory() as u64;
+    clear_cache();
+    let clean_post_cleanup = AllocatorState::capture_current();
+    let cleanup_bounds =
+        LifecycleMemoryBounds::from_clean_warm(clean_warm_peak, clean_post_cleanup);
+    let (maximum_error, mean_error, rms_error) = video_max_mean_rms_abs(&measured, &baseline)?;
+    if !bernini_quality_passes(maximum_error, mean_error, rms_error) {
+        return Err(format!(
+            "Bernini warm repeat exceeded the determinism envelope: max={maximum_error:.6}, \
+             mean={mean_error:.6}, rms={rms_error:.6}"
+        ));
+    }
+    reset_peak_memory();
+    let warm = bernini_output_frames(
+        arm,
+        generator
+            .generate(&bernini_request(arm, geometry, fps, seed), &mut |_| {})
+            .map_err(|error| format!("generate warm Bernini repeat: {error}"))?,
+        fps,
+    )?;
+    let warm_peak = get_peak_memory() as u64;
+    if !cleanup_bounds.allows_warm_peak(warm_peak) {
+        return Err(format!(
+            "Bernini warm repeat peaked at {warm_peak} bytes, above the clean warm control \
+             {clean_warm_peak} bytes plus 2%"
+        ));
+    }
+    clear_cache();
+    let warm_post_cleanup = AllocatorState::capture_current();
+    if !cleanup_bounds.allows_retained(warm_post_cleanup) {
+        return Err(format!(
+            "Bernini warm repeat retained active/cache bytes {warm_post_cleanup:?} above the \
+             clean warm cleanup {clean_post_cleanup:?} plus {} bytes",
+            cleanup_bounds.tolerance_bytes,
+        ));
+    }
+    let (warm_maximum, warm_mean, warm_rms) = video_max_mean_rms_abs(&measured, &warm)?;
+    if !bernini_quality_passes(warm_maximum, warm_mean, warm_rms) {
+        return Err("Bernini second warm repeat changed the deterministic output".to_owned());
+    }
+
+    // Arm-internal negative-mutation falsifiability check: a runtime_complete record keeps
+    // `negativeMutation` null, so the breach is verified here and the numbers land in diagnostics.
+    let mutated = measured
+        .iter()
+        .map(qwen_negative_mutation)
+        .collect::<Vec<_>>();
+    let (mutated_maximum, mutated_mean, mutated_rms) = video_max_mean_rms_abs(&mutated, &baseline)?;
+    if bernini_quality_passes(mutated_maximum, mutated_mean, mutated_rms) {
+        return Err("Bernini output mutation did not breach the determinism envelope".to_owned());
+    }
+
+    let lifecycle_blocker = concat!(
+        "this arm executes the measured render plus two unscoped warm repeats on the loaded ",
+        "provider; it opens no memory-strategy request scope and injects no calibration fault, so ",
+        "the scoped cancellation and authorized-error scenarios and their recovery renders are ",
+        "unexecuted. The pinned provider does register begin_request, so they are implementable — ",
+        "they are not run here, and this record claims nothing about them"
+    );
+    let mut fragment = json!({
+        "status": "runtime_complete",
+        "strategy": strategy,
+        // From the CONTRACT's own calibration identity, never copied from the plan (sc-16482).
+        "loadShape": load_shape_key(calibration.load_shape),
+        "artifact": {
+            "repository": artifact.repository,
+            "resolvedRevision": artifact.revision,
+            "variant": tier,
+        },
+        "sweep": minimax_complete_sweep(request)?,
+        "scenarios": [
+            { "name": "exact_fit", "result": "passed", "predictedBytes": predicted, "effectiveBudgetBytes": predicted },
+            { "name": "unknown_budget", "result": "passed", "reason": "the registered Bernini admission check rejected a zero/unknown budget before load" },
+            { "name": "stale_evidence", "result": "passed", "reason": "the registered Bernini admission check rejected a mutated calibration fingerprint before load" },
+            { "name": "warm_repeat", "result": "passed", "reason": "two warm repeats on the loaded provider reproduced the measured output frame-for-frame inside the declared envelope, within the clean warm peak and cleanup bounds" },
+            { "name": "cancel", "result": "not_run", "reason": lifecycle_blocker },
+            { "name": "error", "result": "not_run", "reason": lifecycle_blocker },
+            { "name": "loadability", "result": "passed" },
+            { "name": "overlay", "result": "not_applicable", "reason": "settled below from the declared reference-free target" }
+        ],
+        "predictedPeakBytes": predicted_peaks_json,
+        "observedMemory": {
+            "conditioning": conditioning.json(),
+            "denoise": denoise.json(),
+            "decode": decode.json(),
+            "overall": overall.json(),
+        },
+        "quality": {
+            "contract": "identical artifact, prompt, seed, geometry, frames, fps, tier and loaded provider contract; cold measured output versus two warm unscoped repeats, compared over every frame",
+            "identicalInputs": true,
+            "result": "passed",
+            "maximumError": maximum_error,
+            "meanError": mean_error,
+            "rootMeanSquareError": rms_error,
+            "maximumErrorThreshold": BERNINI_MAX_THRESHOLD,
+            "meanErrorThreshold": BERNINI_MEAN_THRESHOLD,
+            "rootMeanSquareErrorThreshold": BERNINI_RMS_THRESHOLD,
+        },
+        "negativeMutation": null,
+        "loadability": {
+            "result": "passed",
+            "resolvedPathFingerprint": artifact.resolved_path_fingerprint(arm, tier),
+        },
+        "output": {
+            "modelId": arm.model_id,
+            "frames": geometry.frames,
+            "fps": fps,
+            "firstFrameNondegenerate": true,
+        },
+        "diagnostics": protocol::diagnostics(
+            "memory-mlx-adapter:bernini-dual-expert",
+            "executed",
+            [lifecycle_blocker.to_owned()],
+            [
+                ("preRungActiveAfterClear", "bytes", pre_rung_active),
+                ("preRungCacheAfterClear", "bytes", pre_rung_cache),
+                ("preGenerateActivePeak", "bytes", pre_generate.active),
+                ("conditioningActivePeak", "bytes", conditioning.active),
+                ("conditioningCloseActive", "bytes", conditioning_close.active),
+                ("conditioningCloseCache", "bytes", conditioning_close.cache),
+                ("denoiseActivePeak", "bytes", denoise.active),
+                ("denoiseCloseActive", "bytes", denoise_close.active),
+                ("denoiseCloseCache", "bytes", denoise_close.cache),
+                ("decodeActivePeak", "bytes", decode.active),
+                ("decodeCloseActive", "bytes", decode_close.active),
+                ("decodeCloseCache", "bytes", decode_close.cache),
+                ("overallAllocatorEnvelope", "bytes", overall.allocator_bytes()),
+                ("predictedOverallCeiling", "bytes", predicted),
+                ("lifecycleCleanWarmPeak", "bytes", clean_warm_peak),
+                ("lifecycleCleanPostCleanupActive", "bytes", clean_post_cleanup.active),
+                ("lifecycleCleanPostCleanupCache", "bytes", clean_post_cleanup.cache),
+                ("lifecycleCleanupTolerance", "bytes", cleanup_bounds.tolerance_bytes),
+                ("lifecycleWarmRepeatPeak", "bytes", warm_peak),
+                ("lifecycleWarmRepeatPostCleanupActive", "bytes", warm_post_cleanup.active),
+                ("lifecycleWarmRepeatPostCleanupCache", "bytes", warm_post_cleanup.cache),
+                ("negativeMutationMaximumErrorPer255", "count", (mutated_maximum * 255.0).round() as u64),
+                ("negativeMutationMeanErrorPer255", "count", (mutated_mean * 255.0).round() as u64),
+                ("negativeMutationRootMeanSquareErrorPer255", "count", (mutated_rms * 255.0).round() as u64),
+                ("loadShapeDeferred", "count", u64::from(load_shape == LoadShape::DeferredMaterialization)),
+                ("stagedTierBytes", "bytes", staged_tier_bytes),
+            ],
+        ),
+        "capturedAt": protocol::captured_at(),
+    });
+    protocol::settle_plain_overlay_scenario(request, &mut fragment, arm.execution_path)?;
     Ok(fragment)
 }
 
@@ -19225,6 +20426,12 @@ fn run(request: &Value) -> Result<Value, String> {
         WAN_T2V_A14B_PROVIDER => mlx_wan_scail2::run(request),
         WAN_I2V_A14B_PROVIDER => mlx_wan_scail2::run(request),
         SCAIL2_PROVIDER => mlx_wan_scail2::run(request),
+        // sc-22737: the third video arm, and the only one that also serves a STILL catalog entry —
+        // `bernini` and `bernini_image` are two SceneWorks entries on ONE engine provider id, and
+        // `bernini_target` resolves which from `(provider, modelId)` and refuses an unknown pair by
+        // name. Validates against Bernini's own advertised canvases rather than refusing multi-frame
+        // geometry, exactly as the two video arms above it do.
+        BERNINI_PROVIDER => run_bernini(request),
         other => Err(format!(
             "MLX five-rung calibration does not implement provider {other:?}"
         )),
@@ -22960,7 +24167,8 @@ mod ltx_tests {
                     "engagedRungs": ["resident", "staged_residency"],
                     "parameters": {}
                 },
-                "calibrationFingerprint": LTX_CALIBRATION_FINGERPRINT,
+                "calibrationFingerprint": ltx_calibration_fingerprint("q8")
+                    .expect("q8 is a shipped LTX tier"),
                 "_measurementSafety": {
                     "disposition": LTX_SAFETY_REFUSED_OPEN,
                     "tierInventoryBytes": LTX_Q8_INVENTORY_BYTES,
@@ -23007,7 +24215,8 @@ mod ltx_tests {
                         "decodeOverlap": LTX_CANARY_OVERLAP,
                     },
                 },
-                "calibrationFingerprint": LTX_CALIBRATION_FINGERPRINT,
+                "calibrationFingerprint": ltx_calibration_fingerprint("q4")
+                    .expect("q4 is a shipped LTX tier"),
                 "fixture": LTX_CANARY_FIXTURE,
                 "_watchdog": {
                     "maxFootprintBytes": LTX_CANARY_MAX_FOOTPRINT_BYTES,
@@ -23066,6 +24275,9 @@ mod ltx_tests {
         request["planned"]["logicalCaseId"] = json!(LTX_CAMPAIGN_ENTRY_LOGICAL_CASE_ID);
         request["planned"]["evidenceScope"] = json!("authoritative");
         request["planned"]["target"]["tier"] = json!("q4");
+        // The identity is per tier (sc-22737), so retargeting the row retargets its key too.
+        request["planned"]["calibrationFingerprint"] =
+            json!(ltx_calibration_fingerprint("q4").expect("q4 is a shipped LTX tier"));
         request["planned"]["fixture"] = json!(LTX_CAMPAIGN_ENTRY_FIXTURE);
         request["planned"]["negative"] = json!(false);
         request["planned"]["expectedResult"] = json!("passed");
@@ -23189,6 +24401,10 @@ mod ltx_tests {
         let mut request = ltx_bounded_campaign_request_json();
         let spec = ltx_bounded_campaign_spec(tier).expect("test tier must be allowlisted");
         request["planned"]["target"]["tier"] = json!(spec.tier);
+        // The identity is keyed on (provider, tier): a q8 or bf16 row carries its OWN member of the
+        // family, never the q4 key the base carrier request was built with.
+        request["planned"]["calibrationFingerprint"] =
+            json!(ltx_calibration_fingerprint(spec.tier).expect("allowlisted tier"));
         request["planned"]["logicalCaseId"] = json!(spec.logical_case_id);
         request["planned"]["fixture"] = json!(spec.fixture);
         request["planned"]["_boundedCampaignEntry"]["identity"] = json!(spec.identity);
@@ -23297,6 +24513,13 @@ mod ltx_tests {
             for (pointer, mutation) in [
                 ("/action", json!("run")),
                 ("/planned/target/tier", json!("q4")),
+                // The q4 cell's identity is FOREIGN to a q8 or bf16 row: calibration is keyed on
+                // (provider, artifact-proven tier), so borrowing the calibrated family's other
+                // member must be refused before the row can cost a load.
+                (
+                    "/planned/calibrationFingerprint",
+                    json!(ltx_calibration_fingerprint("q4").unwrap()),
+                ),
                 (
                     "/planned/logicalCaseId",
                     json!(LTX_BOUNDED_CAMPAIGN_LOGICAL_CASE_ID),
@@ -24261,6 +25484,9 @@ mod ltx_tests {
 
     fn set_ltx_request_tier(request: &mut Value, tier: &str, inventory: u64) {
         request["planned"]["target"]["tier"] = json!(tier);
+        // The identity is per tier (sc-22737), so retargeting the row retargets its key too.
+        request["planned"]["calibrationFingerprint"] =
+            json!(ltx_calibration_fingerprint(tier).expect("a shipped LTX tier"));
         request["planned"]["fixture"] = json!(format!(
             "ltx-2-3-mlx-{tier}-768x512-f97-fps24-seed{LTX_SEED}"
         ));
@@ -24286,6 +25512,9 @@ mod ltx_tests {
         disposition: &str,
     ) {
         request["planned"]["target"]["tier"] = json!(tier);
+        // The identity is per tier (sc-22737), so retargeting the row retargets its key too.
+        request["planned"]["calibrationFingerprint"] =
+            json!(ltx_calibration_fingerprint(tier).expect("a shipped LTX tier"));
         request["planned"]["target"]["geometry"] =
             json!({ "width": 1280, "height": 704, "batch": 1, "frames": frames });
         request["planned"]["fixture"] = json!(format!(
@@ -24414,6 +25643,141 @@ mod ltx_tests {
         let error = run_ltx(&ltx_request_json(768, 512, 1))
             .expect_err("a video arm must not capture a still");
         assert!(error.contains("duration/fps envelope"), "{error}");
+    }
+
+    /// The three `mlx:ltx_2_3` identities are ONE family minted off the engine's retained key: the
+    /// calibrated tier IS that key byte-for-byte, and each other shipped tier is the same stem and
+    /// version with its own tier token. Every member is compared with what the ENGINE's own
+    /// weights-free minting function (`production_calibration_fingerprint`) returns for that
+    /// artifact tier, so a re-spelled format on either side reds here rather than in a capture; and
+    /// the calibrated tier is the engine's `CALIBRATED_TIER`, not a local spelling.
+    #[test]
+    fn the_ltx_identity_family_is_the_engines_retained_key_with_a_tier_token() {
+        let retained = mlx_gen_ltx::memory_strategy::CALIBRATION_FINGERPRINT;
+        assert_eq!(
+            LTX_CALIBRATED_TIER,
+            mlx_gen_ltx::memory_strategy::CALIBRATED_TIER,
+            "the calibrated tier is read off the engine, never spelled"
+        );
+        assert!(
+            LTX_TIERS.contains(&LTX_CALIBRATED_TIER),
+            "the engine's calibrated tier {LTX_CALIBRATED_TIER:?} must be a shipped tier"
+        );
+        assert_eq!(
+            ltx_calibration_fingerprint(LTX_CALIBRATED_TIER).unwrap(),
+            retained,
+            "the calibrated cell must reproduce the engine's retained key byte-for-byte"
+        );
+        let (stem, version) = retained
+            .rsplit_once("-mlx-memory-ladder-")
+            .unwrap_or_else(|| panic!("{retained} is not an LTX memory-ladder key"));
+        assert!(
+            !stem.ends_with(&format!("-{LTX_CALIBRATED_TIER}")),
+            "the retained key carries no tier token, so it is the family's bare member: {retained}"
+        );
+        let mut identities = std::collections::BTreeSet::new();
+        for tier in LTX_TIERS {
+            let minted = ltx_calibration_fingerprint(tier).unwrap();
+            let quant = match tier {
+                "q4" => Some(Quant::Q4),
+                "q8" => Some(Quant::Q8),
+                _ => None,
+            };
+            let engine = mlx_gen_ltx::memory_strategy::production_calibration_fingerprint(
+                &MemoryNumericTier {
+                    precision: Precision::Bf16,
+                    quant,
+                    component_precision_floors: &[],
+                },
+            )
+            .unwrap_or_else(|| panic!("the engine mints no identity for shipped tier {tier}"));
+            assert_eq!(
+                minted, engine,
+                "the {tier} cell must be byte-for-byte what the pinned engine mints for that tier"
+            );
+            if tier != LTX_CALIBRATED_TIER {
+                assert_eq!(
+                    minted,
+                    format!("{stem}-{tier}-mlx-memory-ladder-{version}"),
+                    "the {tier} cell must be the engine's key carrying its own tier token"
+                );
+            }
+            assert!(
+                identities.insert(minted),
+                "{tier} reuses another tier's identity"
+            );
+        }
+        assert_eq!(identities.len(), LTX_TIERS.len());
+    }
+
+    /// The shipped plan names, for every `mlx:ltx_2_3` row, exactly the identity this arm mints
+    /// for that row's tier — and the arm mints it off the engine's `CALIBRATED_TIER`. This is the
+    /// binding that reds when the ENGINE re-tiers its retained key: the family above follows the
+    /// engine, the plan does not, and a capture would otherwise be the first place to notice.
+    #[test]
+    fn every_planned_ltx_mlx_row_names_the_identity_this_arm_mints_for_its_tier() {
+        let plan: Value = serde_json::from_str(include_str!(
+            "../../../../config/memory-calibration-plan.json"
+        ))
+        .expect("the anchor plan is valid JSON");
+        let mut planned_tiers = std::collections::BTreeSet::new();
+        for (key, row) in plan["anchors"].as_object().expect("anchors is an object") {
+            let parts: Vec<&str> = key.split(':').collect();
+            if parts.len() != 3 || parts[0] != LTX_PROVIDER || parts[2] != "mlx" {
+                continue;
+            }
+            let tier = parts[1];
+            assert_eq!(row["provider"].as_str(), Some(LTX_PROVIDER), "{key}");
+            assert_eq!(
+                row["calibrationFingerprint"]
+                    .as_str()
+                    .expect("fingerprint is a string"),
+                ltx_calibration_fingerprint(tier).unwrap(),
+                "{key} names an identity the pinned provider does not mint for tier {tier}"
+            );
+            assert!(
+                planned_tiers.insert(tier.to_owned()),
+                "{key} is planned twice"
+            );
+        }
+        assert_eq!(
+            planned_tiers,
+            LTX_TIERS.iter().map(|tier| (*tier).to_owned()).collect(),
+            "every shipped tier has exactly one planned MLX row"
+        );
+    }
+
+    /// A tier the family does not ship has no identity and is refused BY NAME, rather than
+    /// interpolated into a plausible key no production load can return.
+    #[test]
+    fn a_tier_the_ltx_family_does_not_ship_has_no_identity() {
+        for tier in ["fp8", "q6", "", "Q4"] {
+            let error = ltx_calibration_fingerprint(tier)
+                .expect_err("an unshipped tier must not mint an identity");
+            assert!(
+                error.contains(&format!("{tier:?}")) && error.contains("no production identity"),
+                "{error}"
+            );
+        }
+    }
+
+    /// The plan's tier chooses the identity: a q8 plan naming the q4 cell's key is refused before
+    /// any environment or weight work, naming both strings and the tier.
+    #[test]
+    fn a_plan_naming_another_tiers_ltx_identity_is_refused_before_the_load() {
+        let mut request = ltx_request_json(768, 512, 97);
+        let foreign = ltx_calibration_fingerprint("q4").unwrap();
+        request["planned"]["calibrationFingerprint"] = json!(foreign);
+        let error = run_ltx(&request).expect_err("a foreign tier identity is not capturable");
+        assert!(
+            error.contains("plan/adapter calibration mismatch")
+                && error.contains(&foreign)
+                && error.contains(&ltx_calibration_fingerprint("q8").unwrap())
+                && error.contains("tier q8"),
+            "{error}"
+        );
+        // Not an env error: the refusal fired before `SCENEWORKS_LTX_*` was read.
+        assert!(!error.contains("required environment variable"), "{error}");
     }
 
     #[test]
@@ -25321,7 +26685,8 @@ mod minimax_tests {
                 "backend": "mlx",
                 "loadShape": protocol::LOAD_SHAPE_EAGER,
                 "strategy": { "rung": "resident", "engagedRungs": ["resident"], "parameters": {} },
-                "calibrationFingerprint": MINIMAX_CALIBRATION_FINGERPRINT,
+                "calibrationFingerprint": minimax_calibration_fingerprint("q4")
+                    .expect("q4 is a shipped MiniMax-H3 tier"),
                 "fixture": "minimax-h3-mlx-q4-1344x768-f124-fps24-seed17137"
             }
         })
@@ -25393,6 +26758,7 @@ mod minimax_tests {
         let contract = fixture_contract(Some(Quant::Q4), LoadShape::EagerMaterialization);
         let calibration = contract.calibration.as_ref().unwrap();
         let context = minimax_context(
+            MINIMAX_BASE_MEMBER,
             planned_selection(&minimal_request(MINIMAX_PROVIDER)).unwrap(),
             calibration,
             &calibration.fingerprint,
@@ -25534,6 +26900,10 @@ mod minimax_tests {
         );
     }
 
+    /// A base (`minimax_h3`) plan row must not carry a reference surface: the reference-carrying
+    /// entry is `minimax_h3_ref`, which denoises on the `transformer_ref` partition, and a record
+    /// measured on one partition may never be filed against the other. The refusal names the field,
+    /// the entry and the partition fact, so a reader of the failure knows which row to fix.
     #[test]
     fn a_reference_carrying_or_wrong_mode_target_is_refused_because_ref2va_is_another_checkpoint() {
         for (field, value) in [
@@ -25546,7 +26916,12 @@ mod minimax_tests {
             request["planned"]["target"][field] = value;
             let error = validate_minimax_target(&request)
                 .expect_err("a reference surface must be refused by this arm");
-            assert!(error.contains(field) && error.contains("ref2va"), "{error}");
+            assert!(
+                error.contains(field)
+                    && error.contains(MINIMAX_BASE_MEMBER.model_id)
+                    && error.contains("different DiT partitions"),
+                "{error}"
+            );
         }
         for mode in [
             "text_to_image",
@@ -25579,29 +26954,30 @@ mod minimax_tests {
     #[test]
     fn the_fixture_binds_the_tier_geometry_cadence_and_seed() {
         let request = minimal_request(MINIMAX_PROVIDER);
-        let geometry = validate_minimax_target(&request).unwrap();
+        let (member, geometry) = validate_minimax_target(&request).unwrap();
+        assert_eq!(member, MINIMAX_BASE_MEMBER);
         assert_eq!(
-            planned_minimax_capture(&request, "q4", geometry).unwrap(),
+            planned_minimax_capture(&request, member, "q4", geometry).unwrap(),
             (24, MINIMAX_SEED)
         );
         // The tier and every geometry axis are part of the binding.
         for tier in ["q8", "bf16"] {
-            assert!(planned_minimax_capture(&request, tier, geometry)
+            assert!(planned_minimax_capture(&request, member, tier, geometry)
                 .unwrap_err()
                 .contains("must start with"));
         }
         let mut off = request.clone();
         off["planned"]["fixture"] = json!("minimax-h3-mlx-q4-1344x768-f141-fps24-seed17137");
-        assert!(planned_minimax_capture(&off, "q4", geometry)
+        assert!(planned_minimax_capture(&off, member, "q4", geometry)
             .unwrap_err()
             .contains("must start with"));
         // The cadence axis the geometry envelope cannot carry has exactly one legal value here.
         off["planned"]["fixture"] = json!("minimax-h3-mlx-q4-1344x768-f124-fps30-seed17137");
-        assert!(planned_minimax_capture(&off, "q4", geometry)
+        assert!(planned_minimax_capture(&off, member, "q4", geometry)
             .unwrap_err()
             .contains("24 fps only"));
         off["planned"]["fixture"] = json!("minimax-h3-mlx-q4-1344x768-f124-fps24-seed1234");
-        assert!(planned_minimax_capture(&off, "q4", geometry)
+        assert!(planned_minimax_capture(&off, member, "q4", geometry)
             .unwrap_err()
             .contains("does not match the MiniMax-H3 calibration seed"));
     }
@@ -25635,11 +27011,10 @@ mod minimax_tests {
     /// tier-shaped assumption cannot survive here either.
     #[test]
     fn the_pinned_minimax_contract_declares_rung_support_by_load_shape_not_by_tier() {
-        assert_eq!(
-            MINIMAX_CALIBRATION_FINGERPRINT,
-            mlx_gen_minimax_h3::memory_strategy::MEMORY_CALIBRATION_FINGERPRINT,
-            "the plan entries pin this fingerprint; regenerate them with the provider"
-        );
+        let production: Vec<String> = MINIMAX_TIERS
+            .iter()
+            .map(|tier| minimax_calibration_fingerprint(tier).unwrap())
+            .collect();
         for quant in [Some(Quant::Q4), Some(Quant::Q8), None] {
             for (load_shape, rung4_implemented) in [
                 (LoadShape::EagerMaterialization, false),
@@ -25696,11 +27071,20 @@ mod minimax_tests {
                 let decode = contract.capability(MemoryStrategy::BoundedDecode).unwrap();
                 assert_eq!(decode.parameters.decode_tile_edges, vec![256]);
                 assert_eq!(decode.parameters.decode_overlaps, vec![64]);
-                // The calibration identity carries the RESOLVED shape, which is what
-                // `run_minimax_h3` refuses a mismatch against and what the record's `loadShape`
-                // is taken from.
+                // The weights-free fixture publishes the engine's DECLARATION key, never a
+                // production identity (sc-22737): a contract that read no weights must not be able
+                // to satisfy a plan row naming a measured cell. Its identity still carries the
+                // RESOLVED shape, which is what the record's `loadShape` is taken from.
                 let calibration = contract.calibration.as_ref().unwrap();
-                assert_eq!(calibration.fingerprint, MINIMAX_CALIBRATION_FINGERPRINT);
+                assert_eq!(
+                    calibration.fingerprint,
+                    mlx_gen_minimax_h3::memory_strategy::STATIC_CALIBRATION_FINGERPRINT,
+                    "{where_we_are}"
+                );
+                assert!(
+                    !production.contains(&calibration.fingerprint),
+                    "{where_we_are}: the weights-free fixture published a production identity"
+                );
                 assert_eq!(calibration.load_shape, load_shape, "{where_we_are}");
             }
         }
@@ -25795,33 +27179,148 @@ mod minimax_tests {
         );
     }
 
-    /// **The provider contract, pinned in code.** At the permanent inference pin the MiniMax-H3
-    /// provider publishes `memory_strategy_contract` and its admission check is non-vacuous in both
-    /// directions. The registry contract and loaded-provider checks must continue to agree; a future
-    /// contract/check drift fails here rather than producing evidence.
+    /// A snapshot root whose DiT carries the packed marker the engine's `resolved_artifact_tier`
+    /// reads (`transformer/config.json`, the same file `mlx_gen::quant::packed_quant_bits_at`
+    /// parses on the load path). `None` writes a DENSE marker — a real `config.json` with no
+    /// `quantization` block — which is what makes a bf16 root distinguishable from an absent one.
+    fn minimax_marked_root(bits: Option<u32>) -> PathBuf {
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "sc-22737-minimax-{}-{nonce}-{bits:?}",
+            std::process::id()
+        ));
+        let dit = root.join(mlx_gen_minimax_h3::model::DIT_COMPONENT);
+        std::fs::create_dir_all(&dit).unwrap();
+        let body = match bits {
+            Some(bits) => format!("{{\"quantization\":{{\"bits\":{bits},\"group_size\":64}}}}"),
+            None => "{}".to_owned(),
+        };
+        std::fs::write(dit.join("config.json"), body).unwrap();
+        root
+    }
+
+    /// The pinned engine mints exactly this arm's identity family, and withholds it where the
+    /// artifact cannot prove a tier (sc-22737, epic 22723 E4).
+    ///
+    /// * A weights-free spec publishes NO calibration identity: the contract resolves, but its
+    ///   `calibration` is `None` rather than a fabricated production key, so a runner that loaded
+    ///   nothing can never satisfy a plan row naming a measured cell.
+    /// * A root whose DiT carries a real tier marker publishes, per tier, byte-for-byte the key
+    ///   [`minimax_calibration_fingerprint`] expects — fingerprint check 2 of 3, proven for all
+    ///   three tiers on a CPU-only host — and a `spec.quantize` that disagrees with the marker is
+    ///   withheld too, never re-labelled.
     #[test]
-    fn the_minimax_h3_memory_strategy_contract_enforces_non_vacuous_admission() {
+    fn the_pinned_minimax_engine_mints_this_arms_identity_family_per_artifact_tier() {
         let registry = mlx_gen_minimax_h3::provider_registry().unwrap();
-        let contract = registry
+        let withheld = registry
             .memory_strategy_contract(
                 MINIMAX_PROVIDER,
                 &weights_free_spec(Some(Quant::Q4), LoadShape::EagerMaterialization),
             )
             .expect("the registry resolves a MiniMax-H3 memory-strategy contract")
             .expect("the MiniMax-H3 memory-strategy registration is present at the pin");
-        assert_eq!(contract.provider_id, MINIMAX_PROVIDER);
-        assert_eq!(
-            contract.calibration.as_ref().unwrap().fingerprint,
-            MINIMAX_CALIBRATION_FINGERPRINT
+        assert_eq!(withheld.provider_id, MINIMAX_PROVIDER);
+        assert!(
+            withheld.calibration.is_none(),
+            "a spec whose weights nobody can see must publish no identity, got {:?}",
+            withheld.calibration
         );
-        // The registered admission check is non-vacuous in BOTH directions, weights-free — the
-        // same property the loaded generator must enforce at the permanent pin.
-        let spec = weights_free_spec(Some(Quant::Q4), LoadShape::EagerMaterialization);
+        for (tier, bits, quant) in [
+            ("q4", Some(4), Some(Quant::Q4)),
+            ("q8", Some(8), Some(Quant::Q8)),
+            ("bf16", None, None),
+        ] {
+            let root = minimax_marked_root(bits);
+            let spec = |quant: Option<Quant>| {
+                let mut spec = LoadSpec::new(WeightsSource::Dir(root.clone()))
+                    .with_offload_policy(OffloadPolicy::Resident)
+                    .with_load_shape(LoadShape::EagerMaterialization);
+                if let Some(quant) = quant {
+                    spec = spec.with_quant(quant);
+                }
+                spec
+            };
+            let contract = registry
+                .memory_strategy_contract(MINIMAX_PROVIDER, &spec(quant))
+                .unwrap()
+                .unwrap();
+            let calibration = contract
+                .calibration
+                .as_ref()
+                .unwrap_or_else(|| panic!("{tier}: a marked artifact publishes its identity"));
+            assert_eq!(
+                calibration.fingerprint,
+                minimax_calibration_fingerprint(tier).unwrap(),
+                "{tier}: the pinned engine mints a key this arm would refuse"
+            );
+            assert_eq!(
+                calibration.load_shape,
+                LoadShape::EagerMaterialization,
+                "{tier}"
+            );
+            // The tier is the ARTIFACT's: asking a marked root for ANOTHER packed width — or a
+            // dense root for a packed one — is a load-time requantization whose peak no anchor
+            // measured, and it publishes nothing. (`quantize: None` on a packed root is not a
+            // disagreement: it loads whatever the sidecars prove, which is the production shape.)
+            let disagreeing = match quant {
+                Some(Quant::Q4) => Some(Quant::Q8),
+                _ => Some(Quant::Q4),
+            };
+            let mismatch = registry
+                .memory_strategy_contract(MINIMAX_PROVIDER, &spec(disagreeing))
+                .unwrap()
+                .unwrap();
+            assert!(
+                mismatch.calibration.is_none(),
+                "{tier}: a spec.quantize that disagrees with the marker must be withheld, got {:?}",
+                mismatch.calibration
+            );
+            std::fs::remove_dir_all(&root).unwrap();
+        }
+    }
+
+    /// **The provider contract, pinned in code.** At the permanent inference pin the MiniMax-H3
+    /// provider publishes `memory_strategy_contract` and its admission check is non-vacuous in both
+    /// directions — INCLUDING the calibration handshake, which is only asked when the contract
+    /// carries an identity (sc-22737): the check is driven from a marked q4 root, the same contract
+    /// shape `run_minimax_h3` reads, so the handshake this arm relies on is proven rather than
+    /// skipped over a weights-free contract that publishes none.
+    #[test]
+    fn the_minimax_h3_memory_strategy_contract_enforces_non_vacuous_admission() {
+        let registry = mlx_gen_minimax_h3::provider_registry().unwrap();
+        let root = minimax_marked_root(Some(4));
+        let spec = LoadSpec::new(WeightsSource::Dir(root.clone()))
+            .with_offload_policy(OffloadPolicy::Resident)
+            .with_load_shape(LoadShape::EagerMaterialization)
+            .with_quant(Quant::Q4);
+        let contract = registry
+            .memory_strategy_contract(MINIMAX_PROVIDER, &spec)
+            .expect("the registry resolves a MiniMax-H3 memory-strategy contract")
+            .expect("the MiniMax-H3 memory-strategy registration is present at the pin");
+        assert_eq!(contract.provider_id, MINIMAX_PROVIDER);
+        let calibration = contract
+            .calibration
+            .as_ref()
+            .expect("a marked q4 root publishes the q4 identity");
+        assert_eq!(
+            calibration.fingerprint,
+            minimax_calibration_fingerprint("q4").unwrap()
+        );
         let selection = planned_selection(&minimal_request(MINIMAX_PROVIDER)).unwrap();
-        let calibration = contract.calibration.as_ref().unwrap();
         let geometry = validate_minimax_geometry(1344, 768, 124).unwrap();
         let context = |fingerprint: &str, total: u64| {
-            minimax_context(selection, calibration, fingerprint, geometry, total, 1)
+            minimax_context(
+                MINIMAX_BASE_MEMBER,
+                selection,
+                calibration,
+                fingerprint,
+                geometry,
+                total,
+                1,
+            )
         };
         assert!(matches!(
             mlx_gen_minimax_h3::memory_strategy::safety_check(
@@ -25839,22 +27338,141 @@ mod minimax_tests {
             ),
             MemorySafetyDecision::Reject { .. }
         ));
-        assert!(matches!(
-            mlx_gen_minimax_h3::memory_strategy::safety_check(
-                &spec,
-                &contract,
-                &context("stale-minimax-h3-fingerprint", 1 << 40)
-            ),
-            MemorySafetyDecision::Reject { .. }
-        ));
-        // The route gate is real too: an off-lattice geometry the arm would never send is refused
-        // by the PROVIDER, so the accept above is not a blanket accept.
-        let mut off_lattice = context(&calibration.fingerprint, 1 << 40);
-        off_lattice.geometry.frames = 97;
-        assert!(matches!(
-            mlx_gen_minimax_h3::memory_strategy::safety_check(&spec, &contract, &off_lattice),
-            MemorySafetyDecision::Reject { .. }
-        ));
+        // The handshake is REAL: another tier's identity — a plausible member of this very family,
+        // not a garbage string — is refused against the loaded q4 contract.
+        let stale = minimax_calibration_fingerprint("q8").unwrap();
+        match mlx_gen_minimax_h3::memory_strategy::safety_check(
+            &spec,
+            &contract,
+            &context(&stale, 1 << 40),
+        ) {
+            MemorySafetyDecision::Reject { reason } => {
+                assert!(
+                    reason.contains("calibration handshake mismatch"),
+                    "{reason}"
+                );
+            }
+            other => panic!("a foreign identity must be refused, got {other:?}"),
+        }
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    /// The three `mlx:minimax_h3` identities are ONE family minted off the engine's retained key
+    /// (`MEMORY_CALIBRATION_FINGERPRINT`, kept by the engine's `CALIBRATED_TIER`), and each other
+    /// shipped tier is that key with its own tier token — distinct per tier, so a q4 record can
+    /// never be matched against a bf16 load. A tier the family does not ship is refused by name.
+    #[test]
+    fn the_minimax_identity_family_reproduces_the_engines_retained_key_with_a_tier_token() {
+        use mlx_gen_minimax_h3::memory_strategy as engine;
+        assert_eq!(MINIMAX_CALIBRATED_TIER, engine::CALIBRATED_TIER);
+        assert!(MINIMAX_TIERS.contains(&MINIMAX_CALIBRATED_TIER));
+        let retained = engine::MEMORY_CALIBRATION_FINGERPRINT;
+        assert_eq!(
+            minimax_calibration_fingerprint(MINIMAX_CALIBRATED_TIER).unwrap(),
+            retained,
+            "the calibrated cell must reproduce the engine's retained key byte-for-byte"
+        );
+        let (stem, remainder) = retained
+            .split_once("-mlx-")
+            .unwrap_or_else(|| panic!("{retained} carries no lane token"));
+        assert_eq!(
+            stem, "minimax-h3",
+            "the retained key carries no tier token: {retained}"
+        );
+        let mut identities = std::collections::BTreeSet::new();
+        for tier in MINIMAX_TIERS {
+            let minted = minimax_calibration_fingerprint(tier).unwrap();
+            if tier != MINIMAX_CALIBRATED_TIER {
+                assert_eq!(
+                    minted,
+                    format!("{stem}-{tier}-mlx-{remainder}"),
+                    "the {tier} cell must be the engine's key carrying its own tier token"
+                );
+            }
+            assert!(
+                identities.insert(minted),
+                "{tier} reuses another tier's identity"
+            );
+        }
+        assert_eq!(identities.len(), MINIMAX_TIERS.len());
+        assert_ne!(
+            retained,
+            engine::STATIC_CALIBRATION_FINGERPRINT,
+            "the weights-free declaration key is never a production identity"
+        );
+        let error = minimax_calibration_fingerprint("fp8").unwrap_err();
+        assert!(
+            error.contains("\"fp8\"") && error.contains("bf16"),
+            "{error}"
+        );
+    }
+
+    /// Both catalog entries share the loaded provider's per-tier identity (see
+    /// [`minimax_calibration_fingerprint`]), so every planned MLX row of either member must name
+    /// exactly the key this arm mints for the row's tier — the binding that reds when the plan
+    /// carries the bare key on a tier the engine mints a tokened one for (sc-22737 review).
+    #[test]
+    fn every_planned_minimax_mlx_row_names_the_identity_this_arm_mints_for_its_tier() {
+        let plan: Value = serde_json::from_str(include_str!(
+            "../../../../config/memory-calibration-plan.json"
+        ))
+        .expect("the anchor plan is valid JSON");
+        let mut planned = std::collections::BTreeSet::new();
+        for (key, row) in plan["anchors"].as_object().expect("anchors is an object") {
+            let parts: Vec<&str> = key.split(':').collect();
+            if parts.len() != 3 || parts[2] != "mlx" {
+                continue;
+            }
+            let Some(member) = MINIMAX_MEMBERS
+                .iter()
+                .find(|member| member.model_id == parts[0])
+            else {
+                continue;
+            };
+            let tier = parts[1];
+            assert_eq!(row["provider"].as_str(), Some(MINIMAX_PROVIDER), "{key}");
+            assert_eq!(row["mode"].as_str(), Some(member.mode), "{key}");
+            assert_eq!(
+                row["calibrationFingerprint"]
+                    .as_str()
+                    .expect("fingerprint is a string"),
+                minimax_calibration_fingerprint(tier).unwrap(),
+                "{key} names an identity the pinned provider does not mint for tier {tier}"
+            );
+            assert!(
+                planned.insert((member.model_id, tier.to_owned())),
+                "{key} is planned twice"
+            );
+        }
+        let expected: std::collections::BTreeSet<(&str, String)> = MINIMAX_MEMBERS
+            .iter()
+            .flat_map(|member| MINIMAX_TIERS.map(|tier| (member.model_id, tier.to_owned())))
+            .collect();
+        assert_eq!(
+            planned, expected,
+            "every member has one planned MLX row per shipped tier"
+        );
+    }
+
+    /// A plan row naming ANOTHER TIER's identity — a plausible member of this family — is refused
+    /// before any environment work, naming both the plan's key and the tier's, so a copied row
+    /// cannot re-label one tier's peaks as another's.
+    #[test]
+    fn a_plan_naming_another_tiers_identity_is_refused_before_any_environment_work() {
+        let mut request = minimal_request(MINIMAX_PROVIDER);
+        request["planned"]["calibrationFingerprint"] =
+            json!(minimax_calibration_fingerprint("bf16").unwrap());
+        let error = run_minimax_h3(&request).expect_err("a q4 row may not carry the bf16 key");
+        assert!(
+            error.starts_with("plan/adapter calibration mismatch"),
+            "{error}"
+        );
+        assert!(error.contains("for tier q4"), "{error}");
+        assert!(
+            error.contains(&minimax_calibration_fingerprint("q4").unwrap()),
+            "{error}"
+        );
+        assert!(!error.contains("SCENEWORKS_"), "{error}");
     }
 
     /// The runtime-complete sweep contract the harness checks: `rangeVerified`, exactly one passed
@@ -25994,6 +27612,337 @@ mod minimax_tests {
 /// (member resolution, tier, root suffix, load composition, request shape) is decided before a
 /// single weight file is opened, so it can be proven on a CPU-only host. The measured render
 /// belongs to the terminal capture campaign.
+#[cfg(test)]
+mod bernini_tests {
+    use super::*;
+    use runtime_macos::providers::bernini::memory_strategy as engine;
+
+    const REVISION: &str = "0123456789abcdef0123456789abcdef01234567";
+
+    fn advertised() -> (u32, u32) {
+        engine::ADVERTISED_GEOMETRIES[0]
+    }
+
+    /// A plan row for one member at one tier on the engine's first advertised canvas.
+    fn request(arm: BerniniArm, tier: &str) -> Value {
+        let (width, height) = advertised();
+        let frames = arm.frames;
+        json!({
+            "hardware": {
+                "memoryBytes": 137_438_953_472_u64,
+                "wiredLimitBytes": 96_000_000_000_u64,
+            },
+            "planned": {
+                "target": {
+                    "provider": BERNINI_PROVIDER,
+                    "modelId": arm.model_id,
+                    "tier": tier,
+                    "mode": arm.mode,
+                    "overlay": "none",
+                    "geometry": { "width": width, "height": height, "batch": 1, "frames": frames }
+                },
+                "backend": "mlx",
+                "loadShape": protocol::LOAD_SHAPE_EAGER,
+                "strategy": { "rung": "resident", "engagedRungs": ["resident"], "parameters": {} },
+                "calibrationFingerprint": bernini_calibration_fingerprint(tier)
+                    .expect("a shipped Bernini tier"),
+                "fixture": format!(
+                    "bernini-{}-mlx-{tier}-{width}x{height}-f{frames}-fps{BERNINI_FPS}-seed{BERNINI_SEED}",
+                    arm.slug
+                )
+            }
+        })
+    }
+
+    /// The identity family is the ENGINE's, byte for byte: the provider id, the calibrated tier
+    /// and the route token are all read off the pinned crate, and the retained key is the
+    /// `(route, CALIBRATED_TIER)` member the format mints rather than a special case.
+    #[test]
+    fn the_bernini_identity_family_reproduces_the_engines_retained_key() {
+        assert_eq!(
+            BERNINI_PROVIDER,
+            engine::FULL_ID,
+            "the provider id is the engine's"
+        );
+        assert_eq!(BERNINI_CALIBRATED_TIER, engine::CALIBRATED_TIER);
+        assert!(BERNINI_TIERS.contains(&BERNINI_CALIBRATED_TIER));
+        let route = engine::calibration_route(engine::FULL_ID)
+            .expect("the engine mints a route token for the full pipeline");
+        let renderer_route = engine::calibration_route(engine::RENDERER_ID)
+            .expect("the engine mints a route token for the renderer-only sibling");
+        assert_ne!(
+            route, renderer_route,
+            "the route token discriminates the two provider ids"
+        );
+        let retained = engine::MEMORY_CALIBRATION_FINGERPRINT;
+        assert_eq!(
+            bernini_calibration_fingerprint(BERNINI_CALIBRATED_TIER).unwrap(),
+            retained,
+            "the calibrated cell must reproduce the engine's retained key byte-for-byte"
+        );
+        let (stem, version) = retained
+            .rsplit_once("-mlx-dual-expert-ladder-")
+            .unwrap_or_else(|| panic!("{retained} is not a Bernini dual-expert-ladder key"));
+        assert_eq!(
+            stem,
+            format!("bernini-{route}-{BERNINI_CALIBRATED_TIER}"),
+            "the retained key is the (route, calibrated tier) member of the family: {retained}"
+        );
+        let mut identities = std::collections::BTreeSet::new();
+        for tier in BERNINI_TIERS {
+            let minted = bernini_calibration_fingerprint(tier).unwrap();
+            assert_eq!(
+                minted,
+                format!("bernini-{route}-{tier}-mlx-dual-expert-ladder-{version}"),
+                "the {tier} cell must be the engine's stem, route and version with its own tier"
+            );
+            assert!(
+                identities.insert(minted),
+                "{tier} reuses another tier's identity"
+            );
+        }
+        assert_eq!(identities.len(), BERNINI_TIERS.len());
+    }
+
+    /// A tier the family does not ship has no identity and is refused BY NAME — from the family
+    /// directly, and through the arm before any environment work.
+    #[test]
+    fn an_unshipped_tier_is_refused_by_name() {
+        let error = bernini_calibration_fingerprint("fp8").unwrap_err();
+        assert!(
+            error.contains("\"fp8\"") && error.contains("bf16"),
+            "{error}"
+        );
+        let mut request = request(BERNINI_VIDEO_ARM, "q4");
+        request["planned"]["target"]["tier"] = json!("fp8");
+        let error = run_bernini(&request).expect_err("an unshipped tier has no cell");
+        assert!(error.contains("\"fp8\""), "{error}");
+        assert!(!error.contains("SCENEWORKS_"), "{error}");
+    }
+
+    /// A plan row naming ANOTHER TIER's identity — a plausible member of this family — is refused
+    /// before any environment work, naming both keys, so a copied row cannot re-label one tier's
+    /// peaks as another's. Both members.
+    #[test]
+    fn a_plan_naming_another_tiers_identity_is_refused_before_any_environment_work() {
+        // A q8 row carrying the CALIBRATED tier's retained key is the copy a reader is likeliest
+        // to make, and the one a single-literal arm would wave through.
+        for arm in BERNINI_ARMS {
+            let mut request = request(arm, "q8");
+            request["planned"]["calibrationFingerprint"] =
+                json!(bernini_calibration_fingerprint(BERNINI_CALIBRATED_TIER).unwrap());
+            let error = run_bernini(&request).expect_err("a q8 row may not carry the retained key");
+            assert!(
+                error.starts_with("plan/adapter calibration mismatch"),
+                "{error}"
+            );
+            assert!(
+                error.contains(&bernini_calibration_fingerprint("q8").unwrap()),
+                "{error}"
+            );
+            assert!(
+                error.contains(&bernini_calibration_fingerprint(BERNINI_CALIBRATED_TIER).unwrap()),
+                "{error}"
+            );
+            assert!(!error.contains("SCENEWORKS_"), "{}: {error}", arm.model_id);
+        }
+    }
+
+    fn snapshot_root(tier: &str) -> PathBuf {
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir()
+            .join(format!("sc-22737-bernini-{}-{nonce}", std::process::id()))
+            .join(format!(
+                "models--{}",
+                protocol::BERNINI_REPOSITORY.replace('/', "--")
+            ))
+            .join("snapshots")
+            .join(REVISION)
+            .join(tier);
+        std::fs::create_dir_all(&root).unwrap();
+        root
+    }
+
+    /// The tier is the PLAN's, the root must carry it, and the `LoadSpec` binds the root with NO
+    /// load-time `quantize` (the tier is proven by the artifact's own sidecars) — a q4 plan against
+    /// a q8 export is refused NAMING the tier it wanted, the sc-17097 defect class.
+    #[test]
+    fn a_root_of_another_tier_is_refused_naming_the_planned_tier() {
+        let q8_root = snapshot_root("q8");
+        let error = bernini_load_spec_at(
+            &request(BERNINI_VIDEO_ARM, "q4"),
+            "q4",
+            LoadShape::EagerMaterialization,
+            protocol::BERNINI_REPOSITORY.to_owned(),
+            REVISION.to_owned(),
+            q8_root.clone(),
+        )
+        .err()
+        .expect("a q4 plan must not be satisfied by a q8 root");
+        assert!(
+            error.ends_with(&format!("/snapshots/{REVISION}/q4")),
+            "{error}"
+        );
+        for tier in BERNINI_TIERS {
+            let root = snapshot_root(tier);
+            let artifact = bernini_load_spec_at(
+                &request(BERNINI_IMAGE_ARM, tier),
+                tier,
+                LoadShape::EagerMaterialization,
+                protocol::BERNINI_REPOSITORY.to_owned(),
+                REVISION.to_owned(),
+                root.clone(),
+            )
+            .unwrap_or_else(|error| panic!("{tier}: {error}"));
+            assert_eq!(
+                artifact.tier_root,
+                std::fs::canonicalize(&root).unwrap(),
+                "{tier}"
+            );
+            assert!(
+                matches!(&artifact.spec.weights, WeightsSource::Dir(dir) if *dir == artifact.tier_root),
+                "{tier}: the spec loads the resolved tier directory"
+            );
+            assert_eq!(
+                artifact.spec.quantize, None,
+                "{tier}: a pre-packed tier loads with quant = None"
+            );
+            assert_eq!(artifact.repository, protocol::BERNINI_REPOSITORY);
+        }
+        let error = bernini_load_spec_at(
+            &request(BERNINI_VIDEO_ARM, "q4"),
+            "q4",
+            LoadShape::EagerMaterialization,
+            "SceneWorks/not-bernini".to_owned(),
+            REVISION.to_owned(),
+            q8_root,
+        )
+        .err()
+        .expect("a foreign repository is refused by name");
+        assert!(error.contains("SceneWorks/not-bernini"), "{error}");
+    }
+
+    /// The video/still split is resolved from `(provider, modelId)` — one provider, two catalog
+    /// entries filed separately — and every other axis of the target is refused by name.
+    #[test]
+    fn the_member_is_resolved_from_provider_and_model_id() {
+        let (width, height) = advertised();
+        let (arm, geometry) = bernini_target(&request(BERNINI_VIDEO_ARM, "q4")).unwrap();
+        assert_eq!(arm, BERNINI_VIDEO_ARM);
+        assert_eq!(
+            geometry,
+            BerniniGeometry {
+                width,
+                height,
+                frames: BERNINI_VIDEO_FRAMES
+            }
+        );
+        let (arm, geometry) = bernini_target(&request(BERNINI_IMAGE_ARM, "q4")).unwrap();
+        assert_eq!(arm, BERNINI_IMAGE_ARM);
+        assert_eq!(
+            geometry,
+            BerniniGeometry {
+                width,
+                height,
+                frames: 1
+            }
+        );
+
+        // The member's frame count is its own: a one-frame video row and a 49-frame still row are
+        // both refused naming the member and the count it renders.
+        for (arm, frames) in [
+            (BERNINI_VIDEO_ARM, 1),
+            (BERNINI_IMAGE_ARM, BERNINI_VIDEO_FRAMES),
+        ] {
+            let mut request = request(arm, "q4");
+            request["planned"]["target"]["geometry"]["frames"] = json!(frames);
+            let error = bernini_target(&request).expect_err("the member's frame count is fixed");
+            assert!(
+                error.contains(arm.model_id) && error.contains(&format!("frames {frames}")),
+                "{error}"
+            );
+        }
+        // The mode is the member's evidence key, so swapping the two is refused.
+        let mut swapped = request(BERNINI_IMAGE_ARM, "q4");
+        swapped["planned"]["target"]["mode"] = json!(BERNINI_VIDEO_ARM.mode);
+        let error = bernini_target(&swapped).expect_err("a still row is filed under its own mode");
+        assert!(
+            error.contains(BERNINI_IMAGE_MODEL_ID) && error.contains(BERNINI_VIDEO_ARM.mode),
+            "{error}"
+        );
+        // A foreign provider and an unknown entry are refused by name — the entry refusal lists
+        // exactly the two members this arm serves.
+        let mut foreign = request(BERNINI_VIDEO_ARM, "q4");
+        foreign["planned"]["target"]["provider"] = json!("wan2_2_t2v_14b");
+        let error = bernini_target(&foreign).expect_err("a foreign provider is refused");
+        assert!(error.contains("wan2_2_t2v_14b"), "{error}");
+        let mut unknown = request(BERNINI_VIDEO_ARM, "q4");
+        unknown["planned"]["target"]["modelId"] = json!("bernini_renderer");
+        let error = bernini_target(&unknown).expect_err("an unknown entry is refused");
+        assert!(
+            error.contains("bernini_renderer")
+                && error.contains(BERNINI_VIDEO_MODEL_ID)
+                && error.contains(BERNINI_IMAGE_MODEL_ID),
+            "{error}"
+        );
+        // A canvas outside the engine's advertised set is refused for either member.
+        let mut off_canvas = request(BERNINI_VIDEO_ARM, "q4");
+        off_canvas["planned"]["target"]["geometry"]["width"] = json!(width + 8);
+        let error = bernini_target(&off_canvas).expect_err("the canvas is the engine's");
+        assert!(error.contains("advertised geometries"), "{error}");
+    }
+
+    /// The shipped plan names, for every `mlx` row of either member, exactly the identity this
+    /// arm mints for the row's tier, under the member's own mode and frame count.
+    #[test]
+    fn every_planned_bernini_mlx_row_names_the_identity_this_arm_mints_for_its_tier() {
+        let plan: Value = serde_json::from_str(include_str!(
+            "../../../../config/memory-calibration-plan.json"
+        ))
+        .expect("the anchor plan is valid JSON");
+        let mut planned = std::collections::BTreeSet::new();
+        for (key, row) in plan["anchors"].as_object().expect("anchors is an object") {
+            let parts: Vec<&str> = key.split(':').collect();
+            if parts.len() != 3 || parts[2] != "mlx" {
+                continue;
+            }
+            let Some(arm) = BERNINI_ARMS.iter().find(|arm| arm.model_id == parts[0]) else {
+                continue;
+            };
+            let tier = parts[1];
+            assert_eq!(row["provider"].as_str(), Some(BERNINI_PROVIDER), "{key}");
+            assert_eq!(row["mode"].as_str(), Some(arm.mode), "{key}");
+            assert_eq!(
+                row["geometry"]["frames"].as_u64(),
+                Some(u64::from(arm.frames)),
+                "{key}"
+            );
+            assert_eq!(
+                row["calibrationFingerprint"]
+                    .as_str()
+                    .expect("fingerprint is a string"),
+                bernini_calibration_fingerprint(tier).unwrap(),
+                "{key} names an identity the pinned provider does not mint for tier {tier}"
+            );
+            assert!(
+                planned.insert((arm.model_id, tier.to_owned())),
+                "{key} is planned twice"
+            );
+        }
+        let expected: std::collections::BTreeSet<(&str, String)> = BERNINI_ARMS
+            .iter()
+            .flat_map(|arm| BERNINI_TIERS.map(|tier| (arm.model_id, tier.to_owned())))
+            .collect();
+        assert_eq!(
+            planned, expected,
+            "every member has one planned MLX row per shipped tier"
+        );
+    }
+}
+
 #[cfg(test)]
 mod sensenova_tests {
     use super::*;

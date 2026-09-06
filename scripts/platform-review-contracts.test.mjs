@@ -548,6 +548,10 @@ test("windows-candle captures and schema-checks the SC-21714 Krea anchor record"
       ["run_pulid_flux_capture", "certifying_vram_probe()"],
       // The Qwen edit bespoke arm (sc-22728).
       ["run_qwen_edit", "certifying_vram_probe()"],
+      // The sc-22737 video block: Bernini's video entry, LTX-2.3 and both MiniMax-H3 entries share
+      // ONE capture, so one probe owner covers all four. It certifies an idle GPU BEFORE it samples
+      // — unlike LTX-2.5 above, which cannot because that arm renders first.
+      ["run_sc22737_video_capture", "certifying_vram_probe()"],
       // The SenseNova family arm (sc-22734).
       ["run_sensenova_capture", "certifying_vram_probe()"],
     ],
@@ -625,7 +629,7 @@ function assertEveryVramProbeIsCertifying(adapter) {
     "a function constructing a VRAM probe must sample a phase with it",
   );
   // The certifying arms are exactly the capture sites: the InstantID arm (sc-22729), the Mage-Flow
-  // loader (sc-22733) and the SenseNova arm (sc-22734) are all among them.
+  // loader (sc-22733), the SenseNova arm (sc-22734) and the sc-22737 video block are all among them.
   assert.deepEqual(
     [...certifying].sort(),
     [
@@ -635,6 +639,7 @@ function assertEveryVramProbeIsCertifying(adapter) {
       "run_instantid_candle",
       "run_pulid_flux_capture",
       "run_qwen_edit",
+      "run_sc22737_video_capture",
       "run_sensenova_capture",
     ],
   );

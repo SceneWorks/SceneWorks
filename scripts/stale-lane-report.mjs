@@ -184,13 +184,20 @@ export function recommendedMlxT2iLanes(manifest) {
  * refusal IS a dispatch gate, and the union of its non-fallback arms is the provider set it admits.
  * A provider counts as capturable only if every such gate admits it (the candle adapter has two —
  * entry dispatch and generator loading — and a provider missing from either cannot complete a
- * capture). The one exception is a BESPOKE PRE-GATE (sc-22736): an arm that `run()` routes to
+ * capture). The one exception is a BESPOKE PRE-GATE (sc-22736): an arm the run entry routes to
  * BEFORE the shared gates — `if provider == LTX25_ID { return run_ltx25_capture(request); }`, or
  * `if matches!(provider, A | B) { return module::run(request); }` — never reaches those gates at
- * all, so the providers it names are capturable on that arm alone. Only that exact shape is
- * recognized (a bare const or literal, or a `matches!` over them, returning a call on `request`);
- * a guard that hides its ids behind a helper call is invisible here, which is why `candle.rs`
- * spells its Wan/SCAIL-2 ids in the guard. Parsing the adapter source is the same discipline `generate-memory-matrix.mjs` applies
+ * all, so the providers it names are capturable on that arm alone.
+ *
+ * sc-22737: the pre-gate scan is now EXHAUSTIVE over the run entry's pre-gate region rather than a
+ * best-effort regex sweep. Ignoring a guard shape it did not recognize was silent and wrong in both
+ * directions at once — four working candle lanes (`ltx_2_3_distilled`, `minimax_h3`, and the
+ * SenseNova pair) read "uncapturable" because their guards spell `provider == A || provider == B`
+ * and `if let Some(arm) = sc22737_video_arm(request)?`, neither of which the old sweep matched. An
+ * unrecognized guard now THROWS: it is the only way an operator finds out the parser has fallen
+ * behind the adapter instead of being told a shipped arm does not exist. `bespokePreGateProviders`
+ * lists the four shapes read, including how the `if let` form follows the arm table to its ids.
+ * Parsing the adapter source is the same discipline `generate-memory-matrix.mjs` applies
  * to `image_jobs/base.rs`: a hand-maintained provider list here would be a new false green, going
  * stale the day an arm is added or retired. Every anchor below throws rather than degrades — a
  * refactor that moves the dispatch out of reach must red the tests, not silently report nothing
@@ -381,6 +388,10 @@ export function adapterCapturableProviders(source, label) {
     ),
   );
   const gates = [];
+  // Where each shared gate begins, and which function it lives in: `preGateRegion` needs both to
+  // decide how much of `fn run` executes BEFORE any gate.
+  const gateStarts = [];
+  const gateFns = [];
   let from = 0;
   for (;;) {
     const refusal = cleaned.indexOf(DISPATCH_REFUSAL, from);
@@ -390,6 +401,10 @@ export function adapterCapturableProviders(source, label) {
     if (matchStart === -1) {
       throw new Error(`${label}: the dispatch refusal phrase appears outside any match block`);
     }
+    gateStarts.push(matchStart);
+    const owner = [...cleaned.slice(0, matchStart).matchAll(/^fn\s+([a-z_][A-Za-z0-9_]*)\s*\(/gm)].at(-1);
+    if (!owner) throw new Error(`${label}: a dispatch gate lives outside any top-level fn`);
+    gateFns.push(owner[1]);
     const block = matchBlockBody(cleaned, matchStart);
     if (block.end <= refusal) {
       throw new Error(`${label}: the dispatch refusal phrase escaped its own match block`);
@@ -433,16 +448,81 @@ export function adapterCapturableProviders(source, label) {
     );
   }
   const gated = gates.reduce((acc, gate) => new Set([...acc].filter((id) => gate.has(id))));
-  return [...new Set([...gated, ...bespokePreGateProviders(cleaned, consts, label)])].sort();
+  return [...new Set([...gated, ...bespokePreGateProviders(cleaned, consts, label, gateStarts, gateFns)])].sort();
 }
 
 /**
- * The providers a bespoke pre-gate routes before the shared dispatch gates (sc-22736) — see the
- * block comment above. Returns the provider ids named by every
- * `if provider == <id> { return <call>(request); }` and
- * `if matches!(provider, <id> | <id> …) { return <call>(request); }` in the cleaned source.
+ * The function `main` routes the `"run"` action to, or `null` when the source declares no `main` at
+ * all (a fragment, which has no binary entry and therefore no pre-gates).
+ *
+ * Derived rather than named, because WHICH function is the entry is the whole basis for saying a
+ * dispatch runs before the gates: `run_qwen_provider` opens with a `return run_qwen_vae_probe(request)`
+ * guard that looks exactly like a pre-gate and is not one — it is reached only THROUGH the gate.
  */
-export function bespokePreGateProviders(cleaned, consts, label) {
+export function runEntryName(cleaned, label) {
+  const main = /\bfn\s+main\s*\(\s*\)\s*\{/.exec(cleaned);
+  if (!main) return null;
+  const body = matchBlockBody(cleaned, main.index + main[0].length - 1).inner;
+  const arm = /"run"\s*=>\s*([a-z_][A-Za-z0-9_]*)\s*\(\s*&\s*request\s*\)/.exec(body);
+  if (!arm) {
+    throw new Error(
+      `${label}: fn main declares no "run" => <entry>(&request) arm, so the bespoke pre-gate scan has ` +
+        "no entry point to be exhaustive over",
+    );
+  }
+  return arm[1];
+}
+
+/**
+ * The slice of the adapter's run entry that executes BEFORE any shared dispatch gate — the only
+ * place a bespoke pre-gate can live, and therefore the only place this parser has to be exhaustive.
+ *
+ * The boundary is derived, not named: a gate is a `match` block carrying the refusal phrase, so the
+ * region ends at whichever comes first inside `run` — such a block written into `run` itself (the
+ * MLX adapter's one big `match provider`), or the first call to a function that contains one (the
+ * Candle adapter's `plain_execution_path`). Everything after that point has already been refused or
+ * admitted by a gate, so a dispatch there adds no capturability and is not scanned.
+ */
+function preGateRegion(cleaned, label, gateStarts, gateFns) {
+  const entryName = runEntryName(cleaned, label);
+  if (entryName === null) return "";
+  const entry = new RegExp(String.raw`\bfn\s+${entryName}\s*\(`).exec(cleaned);
+  if (!entry) throw new Error(`${label}: main dispatches "run" to ${entryName}, which is not defined here`);
+  const { inner, end } = matchBlockBody(cleaned, entry.index + entry[0].length);
+  const bodyStart = end - 1 - inner.length;
+  let cut = inner.length;
+  for (const start of gateStarts) {
+    if (start >= bodyStart && start < end) cut = Math.min(cut, start - bodyStart);
+  }
+  for (const name of gateFns) {
+    if (name === "run") continue;
+    const call = new RegExp(`\\b${name}\\s*\\(`).exec(inner);
+    if (call) cut = Math.min(cut, call.index);
+  }
+  return inner.slice(0, cut);
+}
+
+/**
+ * The providers a bespoke pre-gate routes before the shared dispatch gates (sc-22736, sc-22737) —
+ * see the block comment above.
+ *
+ * Four guard shapes ship in the two adapter bins, and all four are read here:
+ *
+ *   - `if provider == <id> { return <call>(request); }` — LTX-2.5, PuLID, Qwen-Edit, InstantID;
+ *   - `if provider == <id> || provider == <id> … { return <call>(request); }` — the SenseNova pair;
+ *   - `if matches!(provider, <id> | <id> …) { return <module>::run(request); }` — Wan 2.2 + SCAIL-2;
+ *   - `if let Some(<b>) = <helper>(request)? { return <call>(request, <b>); }` — sc-22737's video
+ *     block, whose ids live in the `[Arm; N]` table the helper iterates. The table is FOLLOWED:
+ *     each element const's `engine_id` field is resolved through the same `&str` const map the
+ *     match arms use, so the ids stay derived from the adapter rather than transcribed here.
+ *
+ * FAIL CLOSED. Every top-level `if` in the pre-gate region whose block returns a dispatch call —
+ * `return <path>(request …)`, as opposed to a `return Err(…)` refusal — must be one of those four.
+ * A fifth shape THROWS: silently ignoring it is exactly the bug this function is fixing, and it
+ * reads as "no adapter arm can serve this lane", which sends an operator to book a capture host for
+ * a lane that is already implemented (or, worse, retires an arm as unreachable).
+ */
+export function bespokePreGateProviders(cleaned, consts, label, gateStarts = [], gateFns = []) {
   const providers = new Set();
   const resolve = (pattern) => {
     const literal = /^"((?:\\.|[^"\\])*)"$/.exec(pattern);
@@ -455,12 +535,108 @@ export function bespokePreGateProviders(cleaned, consts, label) {
     }
     throw new Error(`${label}: unrecognized bespoke pre-gate pattern ${JSON.stringify(pattern)}`);
   };
-  const guard = /\bif\s+(?:provider\s*==\s*("(?:\\.|[^"\\])*"|[A-Z][A-Z0-9_]*)|matches!\(\s*provider\s*,\s*([^)]+?)\s*\))\s*\{\s*return\s+[A-Za-z_][A-Za-z0-9_:]*\s*\(\s*request\s*\)\s*;?\s*\}/g;
-  for (const match of cleaned.matchAll(guard)) {
-    const patterns = match[1] ? [match[1]] : match[2].split("|").map((part) => part.trim());
-    for (const pattern of patterns) providers.add(resolve(pattern));
+  const region = preGateRegion(cleaned, label, gateStarts, gateFns);
+  const ID = String.raw`"(?:\\.|[^"\\])*"|[A-Z][A-Z0-9_]*`;
+  const CALL = String.raw`(?!Err\b|Ok\b)[A-Za-z_][A-Za-z0-9_:]*`;
+  // `return <path>(request);` — the whole guarded block, nothing else in it. `return Err(…)` is a
+  // refusal, and a call carrying MORE than the request is a validator, not a dispatch.
+  const DISPATCH = String.raw`return\s+${CALL}\s*\(\s*request\s*\)\s*;?`;
+  const guards = [
+    // `provider == A`, optionally `|| provider == B || …`.
+    {
+      re: new RegExp(String.raw`^if\s+provider\s*==\s*(${ID})((?:\s*\|\|\s*provider\s*==\s*(?:${ID}))*)\s*\{\s*${DISPATCH}\s*\}$`),
+      ids: (m) => [m[1], ...[...m[2].matchAll(new RegExp(String.raw`provider\s*==\s*(${ID})`, "g"))].map((x) => x[1])],
+    },
+    // `matches!(provider, A | B | …)`.
+    {
+      re: new RegExp(String.raw`^if\s+matches!\(\s*provider\s*,\s*([\s\S]+?)\s*,?\s*\)\s*\{\s*${DISPATCH}\s*\}$`),
+      ids: (m) => m[1].split("|").map((part) => part.trim()).filter(Boolean),
+    },
+    // `if let Some(<binding>) = <helper>(request)? { return <call>(request, <binding>); }` — the one
+    // shape whose dispatch carries a second argument, and only ever the guard's own binding.
+    {
+      re: new RegExp(String.raw`^if\s+let\s+Some\(\s*([a-z_][A-Za-z0-9_]*)\s*\)\s*=\s*([a-z_][A-Za-z0-9_]*)\s*\(\s*request\s*\)\s*\?\s*\{\s*return\s+${CALL}\s*\(\s*request\s*,\s*\1\s*\)\s*;?\s*\}$`),
+      ids: (m) => armTableEngineIds(cleaned, m[2], label),
+    },
+  ];
+  // A statement is a candidate pre-gate when it dispatches: either the plain `return <call>(request);`
+  // shape, or the `if let Some(…)` shape above. Everything else in the region is ordinary code.
+  const candidate = new RegExp(String.raw`\{\s*${DISPATCH}\s*\}$|^if\s+let\s+Some\(`);
+  for (const statement of topLevelIfStatements(region)) {
+    if (!candidate.test(statement)) continue;
+    const guard = guards.map((shape) => ({ shape, match: shape.re.exec(statement) })).find((hit) => hit.match);
+    if (!guard) {
+      throw new Error(
+        `${label}: a bespoke pre-gate in fn run returns a dispatch through a guard shape this parser ` +
+          `does not read — ${JSON.stringify(statement.replace(/\s+/g, " ").slice(0, 120))}. Teach ` +
+          "bespokePreGateProviders the shape; an unread pre-gate reports its lanes as uncapturable.",
+      );
+    }
+    for (const pattern of guard.shape.ids(guard.match)) providers.add(resolve(pattern));
   }
   return providers;
+}
+
+/** Top-level `if …` statements of a function body, brace-balanced, in source order. */
+function topLevelIfStatements(body) {
+  const statements = [];
+  let i = 0;
+  while (i < body.length) {
+    const skipped = skipStringLike(body, i);
+    if (skipped !== i) { i = skipped; continue; }
+    if (/\bif$/.test(body.slice(0, i + 2).slice(-2)) && /^if\b/.test(body.slice(i))) {
+      // Only an `if` that STARTS a statement: preceded by `{`, `}` or `;` (whitespace aside).
+      const before = body.slice(0, i).replace(/\s+$/, "");
+      if (before === "" || "{};".includes(before.at(-1))) {
+        const open = body.indexOf("{", i);
+        if (open !== -1) {
+          const block = matchBlockBody(body, i);
+          statements.push(body.slice(i, block.end).trim());
+          i = block.end;
+          continue;
+        }
+      }
+    }
+    i += 1;
+  }
+  return statements;
+}
+
+/**
+ * The provider ids the `[Arm; N]` table a pre-gate helper iterates names in its `engine_id` fields.
+ *
+ * `sc22737_video_arm` answers `Some` exactly for the engine ids in `SC22737_VIDEO_ARMS`, so those
+ * ids ARE the pre-gate's provider set. Every step is derived off the adapter source and throws when
+ * it cannot be: the helper, the table it iterates, the table's element consts, and each element's
+ * `engine_id`.
+ */
+function armTableEngineIds(cleaned, helper, label) {
+  const fn = new RegExp(String.raw`\bfn\s+${helper}\s*\(`).exec(cleaned);
+  if (!fn) throw new Error(`${label}: bespoke pre-gate calls ${helper}(request), which this file does not define`);
+  const body = matchBlockBody(cleaned, fn.index + fn[0].length).inner;
+  const tables = [...new Set([...body.matchAll(/\b([A-Z][A-Z0-9_]{2,})\s*\.\s*iter\s*\(/g)].map((m) => m[1]))];
+  if (tables.length !== 1) {
+    throw new Error(
+      `${label}: ${helper} iterates ${tables.length} const arm tables (${tables.join(", ") || "none"}); ` +
+        "this parser reads a pre-gate helper only when exactly one table decides which providers it serves",
+    );
+  }
+  const table = new RegExp(String.raw`\bconst\s+${tables[0]}\s*:\s*\[[^\]]*\]\s*=\s*\[([\s\S]*?)\]\s*;`).exec(cleaned);
+  if (!table) throw new Error(`${label}: ${helper} iterates ${tables[0]}, which is not a const array literal here`);
+  const elements = table[1].split(",").map((part) => part.trim()).filter(Boolean);
+  const ids = new Set();
+  for (const element of elements) {
+    if (!/^[A-Z][A-Z0-9_]*$/.test(element)) {
+      throw new Error(`${label}: ${tables[0]} names an element ${JSON.stringify(element)} this parser cannot resolve`);
+    }
+    const declaration = new RegExp(String.raw`\bconst\s+${element}\s*:[^=]*=\s*[A-Za-z_][A-Za-z0-9_]*\s*\{([\s\S]*?)\n\}\s*;`).exec(cleaned);
+    if (!declaration) throw new Error(`${label}: ${tables[0]} element ${element} is not a struct-literal const here`);
+    const engine = /\bengine_id\s*:\s*("(?:\\.|[^"\\])*"|[A-Z][A-Z0-9_]*)\s*,/.exec(declaration[1]);
+    if (!engine) throw new Error(`${label}: ${tables[0]} element ${element} declares no engine_id`);
+    ids.add(engine[1]);
+  }
+  if (ids.size === 0) throw new Error(`${label}: ${tables[0]} names no engine id at all`);
+  return [...ids];
 }
 
 /**

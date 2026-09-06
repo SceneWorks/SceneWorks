@@ -247,6 +247,19 @@ pub const WAN22_I2V_A14B_DENSE_REPOSITORY: &str = "Wan-AI/Wan2.2-I2V-A14B-Diffus
 /// lanes open it — which is exactly why the two lanes' calibration identities carry a backend
 /// token. Named `-mlx` upstream and consumed by Candle too, like the Mage components rehost above.
 pub const SCAIL2_REPOSITORY: &str = "SceneWorks/scail2-mlx";
+/// The Bernini MLX artifact (sc-22737). ONE tiered rehost serves BOTH shipped catalog entries —
+/// `bernini` (the Wan2.2-A14B video renderer) and `bernini_image` (the still route over the same
+/// block stack) — because they are not two providers: `crates/sceneworks-worker/src/engines.rs`
+/// maps `bernini_image` onto the engine id `bernini`, and `video_jobs/bernini.rs`'s
+/// `bernini_engine_id` maps the video entry onto the same one. The tier sub-directories
+/// (`q4/`, `q8/`, `bf16/`) live inside this snapshot, so a capture's `_ROOT` is the tier dir.
+pub const BERNINI_REPOSITORY: &str = "SceneWorks/bernini-mlx";
+/// The Bernini CANDLE artifact (sc-22737). A DIFFERENT repository from [`BERNINI_REPOSITORY`], and
+/// the one manifest download either Bernini entry ships for `platforms: ["windows", "linux"]`. It
+/// is UNTIERED at the download level and carries the same three tier sub-directories inside it,
+/// which is why `memory_route_registry.rs` declares `BF16_Q4_Q8` for `candle:bernini` while the
+/// off-Mac download row names no `variant` at all.
+pub const BERNINI_CANDLE_REPOSITORY: &str = "SceneWorks/bernini";
 pub const COMPARISON_OUTPUT_BIAS_PARAMETER: &str = "comparisonOutputBias";
 /// Persisted-JSON spellings of `gen_core::LoadShape`. Every emitted fragment must state the
 /// materialization shape its run actually used; the harness rejects a fragment that omits it, and

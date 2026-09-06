@@ -7,7 +7,9 @@ import path from "node:path";
 import test from "node:test";
 
 import {
+  OUT_OF_MATRIX_CATALOG_ENTRIES,
   parseBackendTierOverrides,
+  parseInternalCandleVideoRoutes,
   parseRouteRegistryLaneTiers,
 } from "./generate-memory-matrix.mjs";
 import {
@@ -823,14 +825,15 @@ test("LTX25_LANE_PROVIDERS and PROVIDER_FAMILIES agree on which lane serves whic
 test("classification refuses what no adapter arm or the harness cannot serve, and skips what is done", async () => {
   const hub = await fakeHub([["SceneWorks/z-image-turbo-mlx", REVISION, "q4"]]);
   const base = { models: fakeModels(), backend: "candle", hubs: [hub], current: new Map(), captured: new Map() };
-  // sc-22727 gave `flux2_dev` a Candle arm and sc-22729 gave the whole `sdxl` family one, so the
-  // no-arm probe moved again — to `minimax_h3`, which is still declared `arms: ["mlx"]`. Asserted
+  // sc-22727 gave `flux2_dev` a Candle arm, sc-22729 gave the whole `sdxl` family one and sc-22737
+  // gave MiniMax-H3 one, so the no-arm probe moved again — to `ltx_2_3`, whose Candle lane loads
+  // under its OWN engine id (`ltx_2_3_distilled`) and so is declared `arms: ["mlx"]`. Asserted
   // rather than assumed, so this probe cannot silently stop asking its question the next time a
   // lane is added.
-  assert.deepEqual(PROVIDER_FAMILIES.minimax_h3.arms, ["mlx"], "the no-arm probe needs an mlx-only family");
-  const noArm = await classifyAnchor("minimax_h3:q4:candle", { provider: "minimax_h3" }, base);
+  assert.deepEqual(PROVIDER_FAMILIES.ltx_2_3.arms, ["mlx"], "the no-arm probe needs an mlx-only family");
+  const noArm = await classifyAnchor("ltx_2_3:q4:candle", { provider: "ltx_2_3" }, base);
   assert.equal(noArm.status, "no_adapter_arm");
-  assert.match(noArm.reason, /candle adapter implements no provider arm for minimax_h3/);
+  assert.match(noArm.reason, /candle adapter implements no provider arm for ltx_2_3/);
   // `harness_unsupported` is the refusal for a provider whose adapter arm exists but whose
   // artifacts the harness cannot bind. No SHIPPED family is in that state since sc-22725 gave
   // LTX-2.5's candle engine id a real row, so the branch is driven through a synthetic family.
@@ -1033,6 +1036,33 @@ function downloadServesLane(download, backend) {
   return !download.platforms || download.platforms.includes(LANE_PLATFORM[backend]);
 }
 
+/**
+ * Whether this lane's host fetches an untiered TIER BUNDLE for `model` — one repository whose tier
+ * subdirectories live inside it, so it serves every tier the model ships.
+ *
+ * **A co-requisite is not a bundle (sc-22737).** This test used to be `variant` alone, and that let
+ * a model's SIDE artifact decide its tier axis: LTX-2.3's only untiered download is its dense Gemma
+ * text encoder (`coRequisite: true`), which the Candle host does fetch — and which contains no tier
+ * subdirectory at all. That claimed `ltx_2_3:bf16:candle`, a cell no lane can open: the manifest
+ * ships LTX-2.3's `bf16` download as `platforms: ["macos"]`, and the worker's Candle tier resolver
+ * (`crates/sceneworks-worker/src/video_jobs/candle.rs#candle_ltx_bundle_tier_across_revisions`)
+ * returns `None` for `CandleLtxTier::Bf16` — there is no dense off-Mac tier to resolve.
+ *
+ * Excluding co-requisites is the same filter `shipped` already applies to the tiered rows, and it is
+ * NARROW: across the whole catalog it changes exactly that one cell (every other model whose
+ * untiered downloads are all co-requisites reaches its tiers through the downloads' own `platforms`
+ * instead). `SceneWorks/bernini` — a real off-Mac bundle carrying q4/q8/bf16 subdirs and no
+ * `coRequisite` flag — is unaffected, which is what keeps Bernini's six Candle cells claimed.
+ */
+function laneHasTierBundle(model, backend) {
+  return (model.downloads ?? []).some(
+    (download) =>
+      typeof download.variant !== "string" &&
+      !download.coRequisite &&
+      downloadServesLane(download, backend),
+  );
+}
+
 let routeLaneTiersPromise;
 /** The registry's per-lane tier FLOOR, from the generator's own parser — never a second spelling. */
 function routeLaneTiers() {
@@ -1069,12 +1099,10 @@ async function computeShippedTieredCells() {
     );
     if (shipped.length === 0) continue;
     for (const backend of routed.get(model.id) ?? []) {
-      // An untiered download this lane's host fetches is a BUNDLE whose tiers live inside it, so it
-      // serves every tier the model ships. `SceneWorks/bernini` is that repo; LTX-2.3's dense
-      // co-requisite is another.
-      const bundled = (model.downloads ?? []).some(
-        (download) => typeof download.variant !== "string" && downloadServesLane(download, backend),
-      );
+      // An untiered NON-co-requisite download this lane's host fetches is a BUNDLE whose tiers live
+      // inside it, so it serves every tier the model ships — `SceneWorks/bernini` is that repo. See
+      // `laneHasTierBundle` for why a co-requisite is not one.
+      const bundled = laneHasTierBundle(model, backend);
       const floor = laneTiers.get(`${backend}:${model.id}`) ?? new Set();
       const tiers = [...new Set(
         shipped
@@ -1238,9 +1266,7 @@ test("a lane only claims the tiers whose downloads that lane's host would fetch"
       (download) => !download.coRequisite && ["q4", "q8", "bf16"].includes(download.variant),
     );
     for (const backend of routed.get(model.id) ?? []) {
-      const bundled = (model.downloads ?? []).some(
-        (download) => typeof download.variant !== "string" && downloadServesLane(download, backend),
-      );
+      const bundled = laneHasTierBundle(model, backend);
       const floor = laneTiers.get(`${backend}:${model.id}`) ?? new Set();
       // sc-22729: and the lane's own code must be able to LOAD the tier — see
       // `codeDerivedTierOverrides`, the only other narrowing this denominator admits.
@@ -1261,6 +1287,75 @@ test("a lane only claims the tiers whose downloads that lane's host would fetch"
       }
     }
   }
+});
+
+// sc-22737. The ONE cell of this story's table that is deliberately not claimed, and the reason,
+// asserted against the two sources that decide it rather than against a hand-kept exemption list.
+//
+// `ltx_2_3:bf16:candle` is an unrouted (lane, tier), which is epic 22723 E1's one exemption:
+//
+//   1. the manifest ships LTX-2.3's `bf16` download as `platforms: ["macos"]`, so no Candle host
+//      ever fetches it, and LTX-2.3's only untiered download is a co-requisite rather than a tier
+//      bundle (see `laneHasTierBundle`);
+//   2. the worker resolves no dense off-Mac tier —
+//      `video_jobs/candle.rs#candle_ltx_bundle_tier_across_revisions` returns `None` for
+//      `CandleLtxTier::Bf16`, while its q4 and q8 arms return a subdirectory.
+//
+// Both halves are read here, so the exemption cannot outlive either reason: shipping a Candle-served
+// bf16 download, or teaching the worker to resolve one, turns this case RED and demands the cell.
+test("ltx_2_3 claims q4 and q8 on candle, and bf16 only on mlx", async () => {
+  const models = await readManifestModels();
+  const ltx = models.find((model) => model.id === "ltx_2_3");
+  assert.ok(ltx, "the catalog still carries ltx_2_3");
+
+  // (1) The manifest half.
+  const bf16 = (ltx.downloads ?? []).filter(
+    (download) => download.variant === "bf16" && !download.coRequisite,
+  );
+  assert.equal(bf16.length, 1, "ltx_2_3 ships exactly one bf16 row");
+  assert.equal(
+    downloadServesLane(bf16[0], "candle"),
+    false,
+    "ltx_2_3's bf16 download is macOS-only; a Candle-served one would make the cell real",
+  );
+  assert.equal(
+    laneHasTierBundle(ltx, "candle"),
+    false,
+    "ltx_2_3's only untiered download is a co-requisite, not a tier bundle",
+  );
+
+  // (2) The worker half, read off the source that decides it.
+  const worker = await readFile(
+    path.join(ROOT, "crates/sceneworks-worker/src/video_jobs/candle.rs"),
+    "utf8",
+  );
+  const resolver = worker.match(
+    /fn candle_ltx_bundle_tier_across_revisions\([\s\S]*?\n\}/,
+  )?.[0];
+  assert.ok(resolver, "the Candle LTX tier resolver must still be findable");
+  assert.match(
+    resolver,
+    /CandleLtxTier::Bf16 => return None/,
+    "the Candle lane resolves no dense LTX-2.3 tier; if it does now, bf16:candle is a real cell",
+  );
+  for (const tier of ["q4", "q8"]) {
+    assert.ok(resolver.includes(`"${tier}"`), `the Candle lane resolves the ${tier} tier subdir`);
+  }
+
+  // And therefore the claimed key set is exactly five cells.
+  assert.deepEqual(
+    (await shippedTieredCells())
+      .filter((cell) => cell.modelId === "ltx_2_3")
+      .map((cell) => cell.key)
+      .sort(),
+    [
+      "ltx_2_3:bf16:mlx",
+      "ltx_2_3:q4:candle",
+      "ltx_2_3:q4:mlx",
+      "ltx_2_3:q8:candle",
+      "ltx_2_3:q8:mlx",
+    ],
+  );
 });
 
 // Epic 22723 E1/E2: measurability is a SHAPE claim over the manifest and the plan — no weights, no
@@ -1953,6 +2048,197 @@ test("the engine's strategy declaration is parsed per rung, and an unreadable sh
   assert.equal(await readDeclaredStrategySupport("not_a_model", "candle", closures), null);
 });
 
+// sc-22737. The inline `if strategy == … { } else { }` above is ONE of the shapes shipped at the
+// pin, and the story's own crate does not use it: `candle-gen-bernini` hoists the declaration into a
+// file-local `fn strategies()` whose `support:` is a `match strategy { … }` with `|`-alternatives.
+// The parser refused that, so the override rule could not say which rungs Bernini implements and the
+// whole suite died on the refusal. These pin the shapes that actually ship, and every one of them is
+// read out of a fixture that mirrors the real crate — not the crate itself, so a re-slice upstream
+// reds `the engine's own declaration parses for every provider the override rule can reach` below
+// rather than silently rewriting what this test claims.
+test("the strategy declaration parses through a file-local helper and a match arm", () => {
+  // `candle-gen-bernini/src/memory_strategy.rs`, verbatim in shape: a helper call, a match, and a
+  // multi-variant `|` arm. Bernini implements resident and bounded decode; staged residency is
+  // Missing, which is exactly why its candle anchor rows plan `resident`.
+  const bernini = `
+fn strategies() -> Vec<MemoryStrategyCapability> {
+    MemoryStrategy::ALL
+        .into_iter()
+        .map(|strategy| MemoryStrategyCapability {
+            strategy,
+            support: match strategy {
+                MemoryStrategy::Resident | MemoryStrategy::BoundedDecode => {
+                    MemoryStrategySupport::Implemented
+                }
+                MemoryStrategy::StagedResidency => MemoryStrategySupport::Missing,
+                MemoryStrategy::BoundedAttention | MemoryStrategy::BoundedTransformerResidency => {
+                    MemoryStrategySupport::Missing
+                }
+            },
+            parameters: MemoryParameterRanges::default(),
+        })
+        .collect()
+}
+
+fn build_contract() -> MemoryContract {
+    MemoryContract {
+        strategies: strategies(),
+    }
+}
+`;
+  const support = parseDeclaredStrategySupport(bernini, "bernini.rs");
+  assert.equal(support("resident"), "Implemented");
+  assert.equal(support("staged_residency"), "Missing");
+  assert.equal(support("bounded_decode"), "Implemented");
+  assert.equal(support("bounded_attention"), "Missing");
+  assert.equal(support("bounded_transformer_residency"), "Missing");
+
+  // MUTATION: mangle the shape the parser was taught — the helper is no longer a `fn` in this file,
+  // so the call resolves to nothing. It must refuse BY NAME rather than fall back to "no evidence".
+  assert.throws(
+    () => parseDeclaredStrategySupport(bernini.replace("fn strategies()", "fn strategies_v2()"), "bernini.rs"),
+    /bernini\.rs .*cannot\s+read/s,
+  );
+  // MUTATION: the match itself replaced by an expression this parser has not been taught.
+  assert.throws(
+    () =>
+      parseDeclaredStrategySupport(
+        bernini.replace(/support: match strategy \{[\s\S]*?\n            \},/, "support: support_for(strategy),"),
+        "bernini.rs",
+      ),
+    /bernini\.rs .*cannot\s+read/s,
+  );
+
+  // Prose is not code: `candle-gen-minimax-h3` carries paragraphs of `//` commentary between the
+  // arms, mentioning the very variants and supports the parser is scanning for. A scanner that reads
+  // comments reads the wrong arm — and would report rung 1 Implemented when it is deliberately
+  // under-declared Missing.
+  const commented = `
+        strategies: MemoryStrategy::ALL
+            .into_iter()
+            .map(|strategy| MemoryStrategyCapability {
+                strategy,
+                support: match strategy {
+                    MemoryStrategy::Resident => MemoryStrategySupport::Implemented,
+                    // MemoryStrategy::StagedResidency => MemoryStrategySupport::Implemented, one day
+                    // Rung 1 is implemented in code but stays Missing here: no behavior seam.
+                    _ => MemoryStrategySupport::Missing,
+                },
+                parameters: MemoryParameterRanges::default(),
+            })
+            .collect(),
+  `;
+  const minimax = parseDeclaredStrategySupport(commented, "minimax.rs");
+  assert.equal(minimax("resident"), "Implemented");
+  assert.equal(minimax("staged_residency"), "Missing");
+
+  // A struct-variant support carries a payload and still names its variant.
+  const notApplicable = parseDeclaredStrategySupport(
+    `
+        strategies: MemoryStrategy::ALL.into_iter().map(|strategy| MemoryStrategyCapability {
+                strategy,
+                support: match strategy {
+                    MemoryStrategy::BoundedAttention => {
+                        MemoryStrategySupport::StructurallyNotApplicable { reason: reason() }
+                    }
+                    _ => MemoryStrategySupport::Implemented,
+                },
+                parameters: MemoryParameterRanges::default(),
+            }).collect(),
+  `,
+    "na.rs",
+  );
+  assert.equal(notApplicable("bounded_attention"), "StructurallyNotApplicable");
+  assert.equal(notApplicable("resident"), "Implemented");
+
+  // A rung the source text does not DECIDE is refused rather than guessed. `mlx-gen-minimax-h3`
+  // gates rung 4 on `streamable`, and `candle-gen-sdxl` gates staged residency on the surface; both
+  // are runtime values. Picking either side would state a rung's support as a fact.
+  const guarded = parseDeclaredStrategySupport(
+    `
+        strategies: MemoryStrategy::ALL.into_iter().map(|strategy| MemoryStrategyCapability {
+                strategy,
+                support: match strategy {
+                    MemoryStrategy::BoundedTransformerResidency if streamable => {
+                        MemoryStrategySupport::Implemented
+                    }
+                    MemoryStrategy::BoundedTransformerResidency => MemoryStrategySupport::Missing,
+                    _ => MemoryStrategySupport::Implemented,
+                },
+                parameters: MemoryParameterRanges::default(),
+            }).collect(),
+  `,
+    "guarded.rs",
+  );
+  assert.equal(guarded("resident"), "Implemented");
+  assert.throws(() => guarded("bounded_transformer_residency"), /runtime condition/);
+
+  // The same for the if/else form with a compound condition (`candle-gen-sdxl`): the rungs the
+  // condition decides statically still resolve, and only the gated one refuses.
+  const surfaceGated = parseDeclaredStrategySupport(
+    `
+        strategies: MemoryStrategy::ALL.into_iter().map(|strategy| MemoryStrategyCapability {
+                strategy,
+                support: if strategy == MemoryStrategy::BoundedTransformerResidency
+                    || (surface == SdxlSurface::Bespoke
+                        && strategy == MemoryStrategy::StagedResidency)
+                {
+                    MemoryStrategySupport::Missing
+                } else {
+                    MemoryStrategySupport::Implemented
+                },
+                parameters: MemoryParameterRanges::default(),
+            }).collect(),
+  `,
+    "sdxl.rs",
+  );
+  assert.equal(surfaceGated("bounded_transformer_residency"), "Missing");
+  assert.equal(surfaceGated("resident"), "Implemented");
+  assert.equal(surfaceGated("bounded_decode"), "Implemented");
+  assert.throws(() => surfaceGated("staged_residency"), /runtime condition|not about the strategy/);
+});
+
+// The fixtures above are shapes; this is the pin. EVERY memory-strategy entry point the anchor
+// loader closure names must parse at 8a65db2a — not just the handful the override rule happens to
+// reach today, because which provider it reaches moves whenever a dump surface appears or a plan row
+// changes, and a parse refusal is a hard failure at that moment rather than a diagnostic.
+test("the engine's own declaration parses for every provider the override rule can reach", async (t) => {
+  const closures = JSON.parse(await readFile(path.join(ROOT, "config/anchor-loader-closures.json"), "utf8"));
+  if (!process.env.INFERENCE_REPO) {
+    assert.ok(!process.env.CI, "on CI the pinned inference checkout must be reachable ($INFERENCE_REPO)");
+    t.diagnostic("no pinned inference checkout ($INFERENCE_REPO); the per-provider parse was not run");
+    return;
+  }
+  let read = 0;
+  let declared = 0;
+  for (const key of Object.keys(closures.models ?? {})) {
+    const [modelId, backend] = key.split(":");
+    // A refusal throws out of here with the offending path in its message, which is the whole point.
+    const support = await readDeclaredStrategySupport(modelId, backend, closures);
+    read += 1;
+    if (support === null) continue;
+    declared += 1;
+    // Every rung must come back as a named support or as the DELIBERATE ambiguity refusal — never
+    // as "this shape cannot be read", which is the failure mode that broke the suite. `candle-gen-
+    // sdxl` and `mlx-gen-krea` genuinely gate a rung on a runtime value, and for those the dump is
+    // the source that answers; what must not happen is the parser losing the shape entirely.
+    for (const rung of ["resident", "staged_residency", "bounded_decode", "bounded_attention", "bounded_transformer_residency"]) {
+      try {
+        assert.match(support(rung), /^[A-Z]\w+$/, `${key}: ${rung} support`);
+      } catch (error) {
+        assert.doesNotMatch(
+          error.message,
+          /cannot\s+read/s,
+          `${key}: ${rung} is refused as an unreadable shape rather than answered or named ambiguous`,
+        );
+        assert.match(error.message, /runtime condition|not about the strategy/, `${key}: ${rung}`);
+      }
+    }
+  }
+  assert.ok(read > 50, `the closure names ${read} (model, lane) pairs; expected the full catalog`);
+  assert.ok(declared > 0, "no closure entry point declares a strategies: field at all");
+});
+
 // Each Mage variant binds TWO artifact triples: its OWN tiered rehost (never a sibling's — the six
 // checkpoints are architecturally identical, so a crossed root would be caught by nothing else) and
 // the ONE shared components snapshot. This asserts the derivation produces exactly that.
@@ -2054,6 +2340,188 @@ test("the wan candle dense leg binds the upstream snapshot flat and unpinned", a
       assert.match(mlx.repo, /^SceneWorks\/.*-mlx$/, `${id}:${tier}:mlx`);
       assert.equal(mlx.layout, "tiered", `${id}:${tier}:mlx`);
     }
+  }
+});
+
+// sc-22737. Bernini: ONE engine provider (`bernini`) serves the video entry `bernini` and the still
+// entry `bernini_image` — twelve cells over both lanes. The MLX lane opens the per-tier
+// `SceneWorks/bernini-mlx` rehost; the Candle lane opens the untiered `SceneWorks/bernini` bundle
+// whose tier subdirs live inside it (see `laneHasTierBundle`). Bernini VIDEO is Candle-routed OFF
+// THE MODEL ID, ahead of the generic `candle_video_engine_id` arm
+// (`crates/sceneworks-worker/src/video_jobs/mod.rs#resolve_candle_video_route` →
+// `CandleVideoRoute::Bernini` → `generate_candle_bernini`), which is why the generator — and so the
+// routed-lane set `shippedTieredCells` reads — lists both lanes for it.
+test("the bernini family is measurable on every shipped tier of every routed lane", async () => {
+  const family = ["bernini", "bernini_image"];
+  const cells = (await shippedTieredCells()).filter((cell) => family.includes(cell.modelId));
+  const expected = family.flatMap((id) =>
+    ["bf16", "q4", "q8"].flatMap((tier) => [`${id}:${tier}:candle`, `${id}:${tier}:mlx`]),
+  );
+  assert.deepEqual(cells.map((cell) => cell.key).sort(), expected.sort());
+  const gaps = (await measurabilityGaps()).filter((gap) => family.includes(gap.modelId));
+  assert.equal(gaps.length, 0, gapReport(gaps));
+});
+
+// `ltx_2_3 claims q4 and q8 on candle, and bf16 only on mlx` derives the five-cell key set from the
+// manifest and the worker's Candle tier resolver; this is the other half of the claim — every one
+// of those five cells is planned, armed and closed over.
+test("ltx_2_3 is measurable on every shipped tier of every routed lane", async () => {
+  const cells = (await shippedTieredCells()).filter((cell) => cell.modelId === "ltx_2_3");
+  assert.equal(cells.length, 5, "the five-cell set the sibling case derives");
+  const gaps = (await measurabilityGaps()).filter((gap) => gap.modelId === "ltx_2_3");
+  assert.equal(gaps.length, 0, gapReport(gaps));
+});
+
+// sc-22737. MiniMax-H3 is the one family `shippedTieredCells` cannot see: `generate-memory-matrix.mjs`
+// subtracts `minimax_h3` / `minimax_h3_ref` from the matrix universe (`OUT_OF_MATRIX_CATALOG_ENTRIES`
+// — the MLX resolver is a prefix predicate the generator cannot enumerate), and the gap set is keyed
+// off the matrix's routed lanes. Epic 22723 E2 names `--list` as the oracle, so the family is asked
+// there directly. Both lanes are DERIVED from the worker's dispatch, through the same
+// `parseInternalCandleVideoRoutes` read the generator makes — it throws if the Candle
+// `CandleVideoRoute::MiniMaxH3` arm (`video_jobs/mod.rs#resolve_candle_video_route`) or the shared
+// `minimax_h3_engine_id` resolver both lanes consult is gone — the tier axis from the manifest, and
+// every (member, tier, lane) must be planned and classify runnable / weights_missing.
+test("the minimax-h3 family is measurable on every shipped tier of every routed lane, through --list", async () => {
+  const family = ["minimax_h3", "minimax_h3_ref"];
+  // The subtraction is recorded, never silent: the family is absent from the gap universe BECAUSE
+  // it is listed there. If the generator ever admits it, the sibling gap cases take over.
+  assert.deepEqual([...OUT_OF_MATRIX_CATALOG_ENTRIES.keys()].sort(), family);
+  assert.equal((await shippedTieredCells()).filter((cell) => family.includes(cell.modelId)).length, 0);
+  const routed = parseInternalCandleVideoRoutes(
+    await readFile(path.join(ROOT, "crates/sceneworks-worker/src/video_jobs/mod.rs"), "utf8"),
+    await readFile(path.join(ROOT, "crates/sceneworks-worker/src/video_jobs/minimax_h3.rs"), "utf8"),
+  );
+  assert.deepEqual([...routed.keys()].sort(), family, "both entries ride the one engine id on both lanes");
+  const models = await readManifestModels();
+  const expected = [];
+  for (const id of family) {
+    const tiers = [...new Set(
+      (models.find((model) => model.id === id)?.downloads ?? [])
+        .filter((download) => !download.coRequisite && ["q4", "q8", "bf16"].includes(download.variant))
+        .map((download) => download.variant),
+    )].sort();
+    assert.deepEqual(tiers, ["bf16", "q4", "q8"], `${id} ships three tiers`);
+    for (const tier of tiers) for (const backend of ["candle", "mlx"]) expected.push(`${id}:${tier}:${backend}`);
+  }
+  expected.sort();
+  const plan = await readPlan();
+  assert.deepEqual(
+    Object.keys(plan.anchors).filter((key) => family.includes(anchorParts(key).modelId)).sort(),
+    expected,
+    "every (member, tier, lane) has exactly one plan anchor",
+  );
+  const rows = new Map();
+  for (const backend of ["mlx", "candle"]) {
+    const run = await planRun({ backend, anchors: null, campaign: "sc-catalog-test", hfCache: [], skipCurrent: false });
+    for (const row of run.rows) rows.set(row.key, row);
+  }
+  const gaps = expected
+    .filter((key) => !["runnable", "weights_missing"].includes(rows.get(key)?.status))
+    .map((key) => `${key} ${rows.get(key)?.status ?? "unclassified"} ${rows.get(key)?.reason ?? ""}`);
+  assert.deepEqual(gaps, [], "--list must classify every MiniMax-H3 cell as measurable");
+});
+
+// sc-22737. The plan's fingerprints for the three video families are the one claim a capture cannot
+// re-derive on a host with no weights, so each row is bound here to the (route, tier, lane) shape
+// its lane's engine mints — as sd3.5 and mage-flow are above — and the Rust adapters refuse a plan
+// row naming anything else BEFORE the load (`ltx_calibration_fingerprint`,
+// `minimax_calibration_fingerprint`, `bernini_calibration_fingerprint` in `mlx.rs`, and their
+// candle twins):
+//
+// * Bernini — `bernini-image-<tier>-<lane>-dual-expert-ladder-v1`. The route token is the FULL
+//   pipeline's (`mlx-gen-bernini` `calibration_route(FULL_ID)` → `image`; the renderer-only sibling
+//   mints `renderer`), and both catalog entries load that pipeline, so the two entries share each
+//   (tier, lane) identity and are told apart by their own (modelId, mode) key.
+// * LTX-2.3 — MLX `sc-20772-ltx-2-3-<tier>-mlx-memory-ladder-v2`, except that the engine's
+//   CALIBRATED tier keeps the retained bare key `sc-20772-ltx-2-3-mlx-memory-ladder-v2`; Candle
+//   `sc-20772-ltx-2-3-candle-<tier>-i2v-v1` under the distilled engine id.
+// * MiniMax-H3 — MLX `minimax-h3-<tier>-mlx-staged-joint-av-eager-abi3-v1` with the same bare
+//   exception (`minimax-h3-mlx-staged-joint-av-eager-abi3-v1`); Candle
+//   `minimax-h3-<tier>-candle-staged-joint-av-v1`. Both entries load ONE `LoadSpec`
+//   (`video_jobs/minimax_h3.rs` stages the base `transformer` even for a ref2va job; the engine
+//   resolves `transformer_ref` per render), so the loaded contract publishes one identity per
+//   (tier, lane) and the two entries' rows must carry the SAME key.
+//
+// WHICH tier keeps the bare key is the engines' `CALIBRATED_TIER`, bound byte-for-byte by the
+// adapter's own tests; here it is held as a SHAPE — exactly one bare MLX member per family, every
+// other member tokened with its own tier — and as the literal tier in the case below when an
+// inference checkout is reachable.
+const LTX_MLX_BARE_KEY = "sc-20772-ltx-2-3-mlx-memory-ladder-v2";
+const MINIMAX_MLX_BARE_KEY = "minimax-h3-mlx-staged-joint-av-eager-abi3-v1";
+
+async function videoFamilyBareTiers() {
+  const plan = await readPlan();
+  const shipped = await shippedTieredCells();
+  const rows = (predicate) => Object.entries(plan.anchors).filter(([key, row]) => predicate(anchorParts(key), row));
+  const keys = (entries) => entries.map(([key]) => key).sort();
+  const bare = { ltx_2_3: [], minimax_h3: [] };
+
+  const bernini = rows(({ modelId }) => ["bernini", "bernini_image"].includes(modelId));
+  assert.deepEqual(keys(bernini), shipped.filter((cell) => ["bernini", "bernini_image"].includes(cell.modelId)).map((cell) => cell.key).sort());
+  for (const [key, row] of bernini) {
+    const { modelId, tier, backend } = anchorParts(key);
+    assert.equal(row.provider, "bernini", key);
+    assert.equal(row.calibrationFingerprint, `bernini-image-${tier}-${backend}-dual-expert-ladder-v1`, key);
+    assert.equal(row.mode, modelId === "bernini" ? "text_to_video" : "text_to_image", key);
+    assert.equal(row.geometry.frames, modelId === "bernini" ? 49 : 1, key);
+  }
+
+  const ltx = rows(({ modelId }) => modelId === "ltx_2_3");
+  assert.deepEqual(keys(ltx), shipped.filter((cell) => cell.modelId === "ltx_2_3").map((cell) => cell.key).sort());
+  for (const [key, row] of ltx) {
+    const { tier, backend } = anchorParts(key);
+    if (backend === "candle") {
+      assert.equal(row.provider, "ltx_2_3_distilled", key);
+      assert.equal(row.calibrationFingerprint, `sc-20772-ltx-2-3-candle-${tier}-i2v-v1`, key);
+    } else {
+      assert.equal(row.provider, "ltx_2_3", key);
+      if (row.calibrationFingerprint === LTX_MLX_BARE_KEY) bare.ltx_2_3.push(tier);
+      else assert.equal(row.calibrationFingerprint, `sc-20772-ltx-2-3-${tier}-mlx-memory-ladder-v2`, key);
+    }
+  }
+  assert.equal(bare.ltx_2_3.length, 1, "exactly one MLX LTX-2.3 tier keeps the engine's retained bare key");
+
+  const minimax = rows(({ modelId }) => ["minimax_h3", "minimax_h3_ref"].includes(modelId));
+  assert.equal(minimax.length, 12, "two members x three tiers x two lanes");
+  for (const [key, row] of minimax) {
+    const { modelId, tier, backend } = anchorParts(key);
+    assert.equal(row.provider, "minimax_h3", key);
+    assert.equal(row.mode, modelId === "minimax_h3" ? "text_to_video" : "reference_to_video", key);
+    if (backend === "candle") {
+      assert.equal(row.calibrationFingerprint, `minimax-h3-${tier}-candle-staged-joint-av-v1`, key);
+    } else if (row.calibrationFingerprint === MINIMAX_MLX_BARE_KEY) {
+      if (modelId === "minimax_h3") bare.minimax_h3.push(tier);
+    } else {
+      assert.equal(row.calibrationFingerprint, `minimax-h3-${tier}-mlx-staged-joint-av-eager-abi3-v1`, key);
+    }
+    // One loaded provider, one identity per (tier, lane): the reference entry's row carries the
+    // base entry's key, never a partition-tokened one the contract cannot publish.
+    const sibling = plan.anchors[`${modelId === "minimax_h3" ? "minimax_h3_ref" : "minimax_h3"}:${tier}:${backend}`];
+    assert.ok(sibling, `${key} has its sibling entry planned`);
+    assert.equal(sibling.calibrationFingerprint, row.calibrationFingerprint, `${key}: the two entries share the loaded identity`);
+  }
+  assert.equal(bare.minimax_h3.length, 1, "exactly one MLX MiniMax-H3 tier keeps the engine's retained bare key");
+  return bare;
+}
+
+test("every planned bernini, ltx_2_3 and minimax-h3 fingerprint is one its lane's engine can mint", async () => {
+  await videoFamilyBareTiers();
+});
+
+// The literal half of the bare-key claim, read off the pinned engines when a checkout is reachable
+// (CI always supplies one — see `skipWithoutRoutes`): the one bare MLX row per family is the tier
+// the engine's `CALIBRATED_TIER` names, so a re-tiered engine reds the plan here as well as in
+// the adapter's own tests.
+test("the bare MLX LTX-2.3 and MiniMax-H3 plan rows are the engines' calibrated tiers", { skip: skipWithoutRoutes }, async () => {
+  const bare = await videoFamilyBareTiers();
+  for (const [family, crate] of [
+    ["ltx_2_3", "crates/media/mlx-gen/mlx-gen-ltx/src/memory_strategy.rs"],
+    ["minimax_h3", "crates/media/mlx-gen/mlx-gen-minimax-h3/src/memory_strategy.rs"],
+  ]) {
+    const source = await readFile(path.join(process.env.INFERENCE_REPO, crate), "utf8");
+    const calibrated = /pub const CALIBRATED_TIER: &str = "([a-z0-9]+)";/.exec(source)?.[1];
+    assert.ok(calibrated, `${crate} declares CALIBRATED_TIER`);
+    assert.deepEqual(bare[family], [calibrated], `${family}: the bare MLX row is the engine's calibrated tier`);
   }
 });
 

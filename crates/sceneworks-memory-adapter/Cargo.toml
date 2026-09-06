@@ -21,8 +21,8 @@ mlx-gen-krea = { git = "https://github.com/SceneWorks/inference", rev = "8a65db2
 mlx-gen-krea-realtime = { git = "https://github.com/SceneWorks/inference", rev = "8a65db2aad0b54581794127f5c3f5621e107e321", optional = true }
 mlx-gen-ltx = { git = "https://github.com/SceneWorks/inference", rev = "8a65db2aad0b54581794127f5c3f5621e107e321", optional = true }
 mlx-gen-minimax-h3 = { git = "https://github.com/SceneWorks/inference", rev = "8a65db2aad0b54581794127f5c3f5621e107e321", optional = true }
-mlx-gen-scail2 = { git = "https://github.com/SceneWorks/inference", rev = "8a65db2aad0b54581794127f5c3f5621e107e321", optional = true }
 mlx-gen-instantid = { git = "https://github.com/SceneWorks/inference", rev = "8a65db2aad0b54581794127f5c3f5621e107e321", optional = true }
+mlx-gen-scail2 = { git = "https://github.com/SceneWorks/inference", rev = "8a65db2aad0b54581794127f5c3f5621e107e321", optional = true }
 mlx-gen-sdxl = { git = "https://github.com/SceneWorks/inference", rev = "8a65db2aad0b54581794127f5c3f5621e107e321", optional = true }
 mlx-gen-wan = { git = "https://github.com/SceneWorks/inference", rev = "8a65db2aad0b54581794127f5c3f5621e107e321", optional = true }
 mlx-rs = { package = "pmetal-mlx-rs", git = "https://github.com/michaeltrefry/mlx-rs", rev = "bd8f0e3c757195b17b2c34fae3073ab826fb7bc1", optional = true }

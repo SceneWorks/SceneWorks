@@ -50,6 +50,8 @@ export const HARNESS = "scripts/memory-calibration-harness.mjs";
 
 // LTX-2.5 is bound by the harness itself (`--ltx25-snapshot-root`), at the revision it hard-codes.
 export const LTX25_REPOSITORY = "SceneWorks/ltx-2.5-mlx";
+/** The ONE LTX-2.3 rehost, which the manifest ships to all three platforms (sc-22737). */
+export const LTX_2_3_REPOSITORY = "SceneWorks/ltx-2.3-mlx";
 
 /**
  * The three caller-staged SDXL components, as `{ env, repo }` pairs. Declared once: every SDXL-family
@@ -163,28 +165,293 @@ function strategyVariant(rung) {
   return rung.split("_").map((part) => part.charAt(0).toUpperCase() + part.slice(1)).join("");
 }
 
+function unreadable(sourcePath, detail) {
+  return fail(
+    `${sourcePath} declares a strategies: field in a shape scripts/measure-memory-catalog.mjs cannot `
+      + "read, so it cannot say which rungs the contract implements. Teach parseDeclaredStrategySupport "
+      + `the new shape — an unreadable declaration must never be treated as 'no evidence'. (${detail})`,
+  );
+}
+
+/**
+ * Rust source with line and block comments blanked out (newlines kept so offsets and line breaks
+ * survive). Every scan below runs over this, because the declarations carry paragraphs of prose that
+ * contain `=>`, `MemoryStrategy::…`, braces and quotes, and a scanner that reads them as code is a
+ * scanner that reads the wrong arm.
+ */
+function stripRustComments(source) {
+  let out = "";
+  let i = 0;
+  while (i < source.length) {
+    const two = source.slice(i, i + 2);
+    if (two === "//") {
+      while (i < source.length && source[i] !== "\n") { out += " "; i += 1; }
+      continue;
+    }
+    if (two === "/*") {
+      let depth = 0;
+      while (i < source.length) {
+        if (source.slice(i, i + 2) === "/*") { depth += 1; out += "  "; i += 2; continue; }
+        if (source.slice(i, i + 2) === "*/") {
+          depth -= 1; out += "  "; i += 2;
+          if (depth === 0) break;
+          continue;
+        }
+        out += source[i] === "\n" ? "\n" : " ";
+        i += 1;
+      }
+      continue;
+    }
+    if (source[i] === '"') {
+      out += source[i]; i += 1;
+      while (i < source.length && source[i] !== '"') {
+        if (source[i] === "\\") { out += source.slice(i, i + 2); i += 2; continue; }
+        out += source[i]; i += 1;
+      }
+      out += source[i] ?? ""; i += 1;
+      continue;
+    }
+    out += source[i]; i += 1;
+  }
+  return out;
+}
+
+/** The text from `start` up to the first depth-0 occurrence of any `stops` character, or `null`. */
+function scanTo(source, start, stops) {
+  let depth = 0;
+  for (let i = start; i < source.length; i += 1) {
+    const ch = source[i];
+    if (ch === "(" || ch === "[" || ch === "{") depth += 1;
+    else if (ch === ")" || ch === "]" || ch === "}") {
+      if (depth === 0) return stops.includes(ch) ? source.slice(start, i) : null;
+      depth -= 1;
+    } else if (depth === 0 && stops.includes(ch)) return source.slice(start, i);
+  }
+  return null;
+}
+
+/** The `{ … }` block that opens at or after `from`, contents only, or `null`. */
+function braceBody(source, from) {
+  const open = source.indexOf("{", from);
+  if (open === -1) return null;
+  let depth = 0;
+  for (let i = open; i < source.length; i += 1) {
+    if (source[i] === "{") depth += 1;
+    else if (source[i] === "}") {
+      depth -= 1;
+      if (depth === 0) return source.slice(open + 1, i);
+    }
+  }
+  return null;
+}
+
+/** `MemoryStrategySupport::Variant` (struct-variant payload allowed) as a bare variant name. */
+function supportVariant(body, sourcePath) {
+  let text = body.trim();
+  if (text.startsWith("{")) text = (braceBody(text, 0) ?? "").trim();
+  const named = /^MemoryStrategySupport::(\w+)\s*/.exec(text);
+  if (!named) return unreadable(sourcePath, `support arm "${body.trim().slice(0, 60)}" names no MemoryStrategySupport variant`);
+  const rest = text.slice(named[0].length).trim();
+  // `StructurallyNotApplicable { reason: … }` carries a payload; anything else trailing is a shape
+  // this parser has not been taught, and guessing at it would invent evidence.
+  if (rest !== "" && !(rest.startsWith("{") && braceBody(rest, 0) !== null && rest.slice(rest.lastIndexOf("}") + 1).trim() === "")) {
+    return unreadable(sourcePath, `support arm "${body.trim().slice(0, 60)}" carries an expression this parser cannot read`);
+  }
+  return named[1];
+}
+
+/**
+ * Whether an `if` condition holds for `variant`: `true`, `false`, or `null` when the source text
+ * does not decide it.
+ *
+ * The conditions that ship are disjunctions of conjunctions over `strategy == MemoryStrategy::X`
+ * and non-strategy terms (`candle-gen-sdxl` gates `StagedResidency` on `surface ==
+ * SdxlSurface::Bespoke`). A conjunct naming a DIFFERENT variant makes its term statically false, so
+ * most rungs still resolve; only the rung the runtime term actually gates comes back `null`.
+ */
+function evaluateStrategyCondition(condition, variant) {
+  let unknown = false;
+  for (const term of condition.split("||")) {
+    let text = term.trim();
+    if (text.startsWith("(") && text.endsWith(")")) text = text.slice(1, -1).trim();
+    let termFalse = false;
+    let termUnknown = false;
+    for (const conjunct of text.split("&&")) {
+      const named = /^\s*\(?\s*strategy\s*==\s*MemoryStrategy::(\w+)\s*\)?\s*$/.exec(conjunct);
+      if (named) {
+        if (named[1] !== variant) termFalse = true;
+      } else {
+        termUnknown = true;
+      }
+    }
+    if (termFalse) continue;
+    if (termUnknown) { unknown = true; continue; }
+    return true;
+  }
+  return unknown ? null : false;
+}
+
+/**
+ * `match strategy { … }` arms as `{ variants, guarded, support }`, in source order. `variants` is
+ * `null` for the `_` catch-all.
+ */
+function parseMatchArms(armsText, sourcePath) {
+  const arms = [];
+  let i = 0;
+  while (i < armsText.length) {
+    if (/\s/.test(armsText[i])) { i += 1; continue; }
+    const pattern = scanTo(armsText, i, "=");
+    if (pattern === null || armsText[i + pattern.length + 1] !== ">") {
+      return unreadable(sourcePath, `match arm near "${armsText.slice(i, i + 60).trim()}" has no => `);
+    }
+    i += pattern.length + 2;
+    while (i < armsText.length && /\s/.test(armsText[i])) i += 1;
+    let body;
+    if (armsText[i] === "{") {
+      const inner = braceBody(armsText, i);
+      if (inner === null) return unreadable(sourcePath, "unbalanced match-arm block");
+      body = inner;
+      i += 1 + inner.length + 1;
+      while (i < armsText.length && /[\s,]/.test(armsText[i])) i += 1;
+    } else {
+      const value = scanTo(armsText, i, ",");
+      body = value ?? armsText.slice(i);
+      i += body.length + 1;
+    }
+    const [patterns, ...guard] = pattern.split(/\bif\b/);
+    const variants = [];
+    let catchAll = false;
+    for (const alternative of patterns.split("|")) {
+      const text = alternative.trim();
+      if (text === "_") { catchAll = true; continue; }
+      const variant = /^MemoryStrategy::(\w+)$/.exec(text);
+      if (!variant) return unreadable(sourcePath, `match pattern "${text}" is not a MemoryStrategy variant`);
+      variants.push(variant[1]);
+    }
+    arms.push({
+      variants: catchAll && variants.length === 0 ? null : variants,
+      guarded: guard.length > 0,
+      support: supportVariant(body, sourcePath),
+    });
+  }
+  return arms;
+}
+
 /**
  * `rung → MemoryStrategySupport` for a provider whose contract declares support over
  * `MemoryStrategy::ALL`, or `null` when the file declares no `strategies:` field at all.
  *
  * Throws when a `strategies:` field IS declared in a shape this parser cannot read: an unrecognized
  * declaration is NOT evidence that a rung is unimplemented.
+ *
+ * Three shapes are read, because all three ship at the pin (sc-22737):
+ *
+ *   - `strategies: MemoryStrategy::ALL … .map(…)` — the declaration inline in `build_contract`
+ *     (`candle-gen-scail2`, `candle-gen-sdxl`, `mlx-gen-krea`, `mlx-gen-z-image`, …);
+ *   - `strategies: strategies()` / `strategies(spec)` / `strategies(streamable)` — the SAME
+ *     expression hoisted into a file-local helper (`candle-gen-bernini`, both LTX modules, both
+ *     MiniMax-H3 modules, both Wan modules). The call is followed to that `fn`'s body; a call whose
+ *     helper is not in the file is unreadable, not "no evidence";
+ *   - inside the closure, `support:` as either the `if strategy == … { … } else { … }` form or a
+ *     `match strategy { … }` with `|`-alternatives, `_`, and guarded arms.
+ *
+ * A rung whose FIRST matching arm carries an `if` guard is condition-dependent — `mlx-gen-minimax-h3`
+ * declares `BoundedTransformerResidency` `Implemented` only when `streamable` — so asking for it
+ * throws rather than picking one side. Guessing either way would state a rung's support as fact when
+ * the source text does not decide it.
  */
-export function parseDeclaredStrategySupport(source, sourcePath) {
-  if (!/\bstrategies:/.test(source)) return null;
-  // The shipped shape: every variant gets one support, except one named variant.
-  const uniform =
-    /\bstrategies:\s*MemoryStrategy::ALL[\s\S]{0,200}?\.map\(\s*\|\s*strategy\s*\|\s*MemoryStrategyCapability\s*\{[\s\S]{0,120}?support:\s*if\s+strategy\s*==\s*MemoryStrategy::(\w+)\s*\{\s*MemoryStrategySupport::(\w+)\s*\}\s*else\s*\{\s*MemoryStrategySupport::(\w+)\s*\}/
-      .exec(source);
-  if (uniform) {
-    const [, named, namedSupport, otherSupport] = uniform;
-    return (rung) => (strategyVariant(rung) === named ? namedSupport : otherSupport);
+export function parseDeclaredStrategySupport(rawSource, sourcePath) {
+  const source = stripRustComments(rawSource);
+  const field = /\bstrategies:/.exec(source);
+  if (!field) return null;
+  const valueStart = field.index + field[0].length;
+  const value = scanTo(source, valueStart, ",") ?? source.slice(valueStart);
+  // A helper call (`strategies(spec)`) is followed to the file-local `fn` it names; the inline form
+  // is its own body. Anything else — a const, a method call, a builder — is refused.
+  let body;
+  const call = /^\s*(\w+)\s*\(/.exec(value);
+  if (/^\s*MemoryStrategy::ALL\b/.test(value)) {
+    body = value;
+  } else if (call) {
+    const helper = new RegExp(`\\bfn\\s+${call[1]}\\s*\\(`).exec(source);
+    if (!helper) {
+      return unreadable(sourcePath, `strategies: calls ${call[1]}(…), which this file does not define`);
+    }
+    body = braceBody(source, helper.index + helper[0].length);
+    if (body === null) return unreadable(sourcePath, `fn ${call[1]} has no readable body`);
+  } else {
+    return unreadable(sourcePath, `strategies: value "${value.trim().slice(0, 60)}" is neither MemoryStrategy::ALL nor a local helper call`);
   }
-  return fail(
-    `${sourcePath} declares a strategies: field in a shape scripts/measure-memory-catalog.mjs cannot `
-      + "read, so it cannot say which rungs the contract implements. Teach parseDeclaredStrategySupport "
-      + "the new shape — an unreadable declaration must never be treated as 'no evidence'.",
-  );
+
+  const closure = /\.map\(\s*\|\s*strategy\s*\|\s*MemoryStrategyCapability\s*\{/.exec(body);
+  if (!closure) return unreadable(sourcePath, "no .map(|strategy| MemoryStrategyCapability { … }) over MemoryStrategy::ALL");
+  const fields = body.slice(closure.index + closure[0].length);
+  const supportAt = /\bsupport:\s*/.exec(fields);
+  if (!supportAt) return unreadable(sourcePath, "the capability closure declares no support: field");
+  const supportStart = supportAt.index + supportAt[0].length;
+  const supportExpr = (scanTo(fields, supportStart, ",") ?? fields.slice(supportStart)).trim();
+
+  // The `if <condition over strategy> { A } else { B }` form.
+  if (/^if\b/.test(supportExpr)) {
+    let depth = 0;
+    let condEnd = -1;
+    for (let i = 2; i < supportExpr.length; i += 1) {
+      const ch = supportExpr[i];
+      if (ch === "(" || ch === "[") depth += 1;
+      else if (ch === ")" || ch === "]") depth -= 1;
+      else if (ch === "{" && depth === 0) { condEnd = i; break; }
+    }
+    if (condEnd === -1) return unreadable(sourcePath, "support: if with no block");
+    const condition = supportExpr.slice(2, condEnd);
+    const thenBody = braceBody(supportExpr, condEnd);
+    if (thenBody === null) return unreadable(sourcePath, "support: if has an unbalanced then-block");
+    const afterThen = supportExpr.slice(condEnd + 1 + thenBody.length + 1);
+    if (!/^\s*else\s*\{/.test(afterThen)) {
+      return unreadable(sourcePath, "support: if has no plain else block (an else-if chain is not read)");
+    }
+    const elseBody = braceBody(afterThen, 0);
+    if (elseBody === null) return unreadable(sourcePath, "support: else has an unbalanced block");
+    if (afterThen.slice(afterThen.indexOf("{") + elseBody.length + 2).trim() !== "") {
+      return unreadable(sourcePath, "support: if/else is followed by an expression this parser cannot read");
+    }
+    const thenSupport = supportVariant(thenBody, sourcePath);
+    const elseSupport = supportVariant(elseBody, sourcePath);
+    return (rung) => {
+      const variant = strategyVariant(rung);
+      const holds = evaluateStrategyCondition(condition, variant);
+      if (holds === null) {
+        return fail(
+          `${sourcePath} gates MemoryStrategy::${variant} on a condition that is not about the strategy `
+            + "itself, so its support is a runtime value rather than a fact this source text states. Read "
+            + "the rung from the engine capability dump instead of guessing which side of the branch holds.",
+        );
+      }
+      return holds ? thenSupport : elseSupport;
+    };
+  }
+
+  if (/^match\s+strategy\s*\{/.test(supportExpr)) {
+    const armsText = braceBody(supportExpr, 0);
+    if (armsText === null) return unreadable(sourcePath, "unbalanced match strategy { … }");
+    const arms = parseMatchArms(armsText, sourcePath);
+    return (rung) => {
+      const variant = strategyVariant(rung);
+      const arm = arms.find((candidate) => candidate.variants === null || candidate.variants.includes(variant));
+      if (!arm) {
+        return unreadable(sourcePath, `match strategy { … } has no arm for MemoryStrategy::${variant}`);
+      }
+      if (arm.guarded) {
+        return fail(
+          `${sourcePath} declares MemoryStrategy::${variant} behind an \`if\` guard, so its support is a `
+            + "runtime condition rather than a fact this source text states. Read the rung from the engine "
+            + "capability dump instead of guessing which side of the guard holds.",
+        );
+      }
+      return arm.support;
+    };
+  }
+
+  return unreadable(sourcePath, `support: expression "${supportExpr.slice(0, 60)}" is neither the if/else nor the match form`);
 }
 
 /**
@@ -456,9 +723,37 @@ export const PROVIDER_FAMILIES = Object.freeze({
   chroma1_hd: { env: "CHROMA1_HD", repo: "SceneWorks/chroma1-hd-mlx", arms: ["mlx", "candle"] },
   chroma1_base: { env: "CHROMA1_BASE", repo: "SceneWorks/chroma1-base-mlx", arms: ["mlx", "candle"] },
   chroma1_flash: { env: "CHROMA1_FLASH", repo: "SceneWorks/chroma1-flash-mlx", arms: ["mlx", "candle"] },
+  // MiniMax-H3 (sc-18663; the Candle lane and the reference entry added by sc-22737). ONE engine
+  // provider id serves BOTH catalog entries — `mlx-gen-minimax-h3` and `candle-gen-minimax-h3` each
+  // register a single `MODEL_ID`, and the two entries are two DiT partitions of it (`transformer/`
+  // and `transformer_ref/`) which the engine selects from the CONDITIONING, not from the spec. So
+  // one family row keyed on the provider, with the reference entry as a `variants` override.
+  //
+  // `upstream` is the dense `MiniMaxAI/MiniMax-H3` snapshot the manifest ships as a co-requisite:
+  // it is the only tree carrying `vae/`, `audio_vae/`, `tokenizer/` and the `FL2VA/` documents, and
+  // BOTH adapters make it the load ROOT while redirecting `transformer/` and `text_encoder/` onto
+  // the packed rehost.
+  //
+  // The candle `bf16` leg of the BASE entry is the one cell that binds no rehost tier at all: the
+  // manifest ships `SceneWorks/minimax-h3-mlx` `bf16` as `platforms: ["macos"]`, and the off-Mac
+  // dense leg is `MiniMaxAI/MiniMax-H3` `bf16` shipped for `["windows","linux"]` with the weights
+  // at the snapshot ROOT. `candle_load_plan` stages nothing for it (`quant.is_some() || is_reference`
+  // is false), so declaring the rehost here would report `weights_missing` for a cell that is in
+  // fact stageable from the upstream snapshot alone — wrong in the direction that hides work.
   minimax_h3: {
-    env: "MINIMAX_H3", repo: "SceneWorks/minimax-h3-mlx", arms: ["mlx"],
+    env: "MINIMAX_H3", repo: "SceneWorks/minimax-h3-mlx", arms: ["mlx", "candle"],
     upstream: { env: "MINIMAX_H3_UPSTREAM", repo: "MiniMaxAI/MiniMax-H3" },
+    artifacts: {
+      candle: {
+        bf16: { env: "MINIMAX_H3_UPSTREAM", repo: "MiniMaxAI/MiniMax-H3", layout: "flat" },
+      },
+    },
+    // The reference entry stages the tier tree at EVERY tier, on both lanes, because
+    // `transformer_ref/` is published only in the rehost — which is why the manifest ships its
+    // `bf16` rehost download for `["macos","windows","linux"]` while the base entry's is macOS-only.
+    // Dropping the base entry's candle-bf16 override is therefore not a tidy-up: it is the whole
+    // difference between the two entries' artifact axes.
+    variants: { minimax_h3_ref: { artifacts: undefined } },
   },
   // The harness prepares and binds the LTX-2.5 snapshot itself (`--ltx25-snapshot-root`), for
   // whichever lane the plan routes: BOTH engine ids below are served from the same public snapshot,
@@ -536,6 +831,45 @@ export const PROVIDER_FAMILIES = Object.freeze({
   // `platforms: ["macos", "windows", "linux"]`, and BOTH engine lanes open that same per-tier
   // turnkey — which is exactly why the two lanes' calibration identities carry a backend token.
   scail2_14b: { env: "SCAIL2", repo: "SceneWorks/scail2-mlx", arms: ["mlx", "candle"] },
+  // Bernini (sc-22737). ONE engine provider id (`bernini`) serves BOTH shipped catalog entries —
+  // the video entry `bernini` and the still entry `bernini_image` — because they are not two
+  // providers: `crates/sceneworks-worker/src/engines.rs` maps `bernini_image` onto `engine_id:
+  // "bernini"`, and `video_jobs/bernini.rs` calls `inference_runtime::load("bernini")` for the
+  // video entry. The plan row's `provider` is what selects the family, so ONE row serves both, and
+  // no `variants` override is needed: the two entries load the SAME artifact at the same tier and
+  // differ only in the modality of the render.
+  //
+  // The two lanes load DIFFERENT repositories, which is why this needs the per-lane override: the
+  // manifest ships `SceneWorks/bernini-mlx` per-tier on `["macos"]` and `SceneWorks/bernini` — a
+  // single untiered download — on `["windows","linux"]`. The off-Mac download names no `variant`
+  // because the tier subtrees (`q4/`, `q8/`, `bf16/`) live INSIDE that one snapshot, so the load
+  // root is still the tier directory and the layout stays `tiered`.
+  bernini: {
+    env: "BERNINI", repo: "SceneWorks/bernini-mlx", arms: ["mlx", "candle"],
+    artifacts: { candle: { "*": { env: "BERNINI_CANDLE", repo: "SceneWorks/bernini" } } },
+  },
+  // LTX-2.3 (sc-22737). Like LTX-2.5 above, the Candle arm loads this family under its OWN engine
+  // id (`candle-gen-ltx`'s distilled `MODEL_ID`, spelled `ltx_2_3_distilled` in candle.rs), so the
+  // Candle plan rows name that provider while the anchor key — and therefore the manifest download
+  // the root resolves through — stays `ltx_2_3`. Both rows point at the ONE rehost the manifest
+  // ships for all three platforms.
+  //
+  // The Candle lane additionally binds the DENSE GEMMA text encoder, which is a sibling directory
+  // of the same snapshot rather than a separate repository (`SCENEWORKS_LTX_TEXT_ENCODER_ROOT`,
+  // validated by candle.rs against `<snapshot>/gemma`). That is what `siblingRoots` declares — see
+  // its use in `describeAnchor`. The MLX arm reads no such root, so its row declares none.
+  //
+  // There is no `ltx_2_3:bf16:candle` cell, and its absence is a ROUTING fact rather than an
+  // omission: the manifest ships LTX-2.3's `bf16` download as `platforms: ["macos"]`, and the
+  // worker's own Candle tier resolver
+  // (`video_jobs/candle.rs#candle_ltx_bundle_tier_across_revisions`) returns `None` for
+  // `CandleLtxTier::Bf16`. `measure-memory-catalog.test.mjs` asserts that exemption against BOTH
+  // of those sources, so it cannot outlive either reason.
+  ltx_2_3: { env: "LTX", repo: LTX_2_3_REPOSITORY, arms: ["mlx"] },
+  ltx_2_3_distilled: {
+    env: "LTX", repo: LTX_2_3_REPOSITORY, arms: ["candle"],
+    siblingRoots: [{ env: "LTX_TEXT_ENCODER", dir: "gemma" }],
+  },
   // sc-22734. The SenseNova-U1 FAMILY: six catalog models the worker routes onto TWO engine ids on
   // both lanes — `sensenova_u1_8b` (the 50-step quality path) and `sensenova_u1_8b_fast` (the
   // 8-step distill), each carrying a base id and two infographic finetunes.
@@ -979,13 +1313,13 @@ export async function classifyAnchor(key, planned, { models, backend, hubs, curr
   const missingTierFiles = [];
   for (const file of requiredTierFiles) {
     try {
-      if (!(await stat(path.join(tierRoot, file))).isFile()) missingTierFiles.push(file);
+      if (!(await stat(path.join(resolved.root, file))).isFile()) missingTierFiles.push(file);
     } catch { missingTierFiles.push(file); }
   }
   if (missingTierFiles.length > 0) {
     return {
       ...row, status: "weights_missing",
-      reason: `tier root ${tierRoot} is missing ${missingTierFiles.join(", ")}, which the engine requires before it will publish this cell's calibration identity`,
+      reason: `tier root ${resolved.root} is missing ${missingTierFiles.join(", ")}, which the engine requires before it will publish this cell's calibration identity`,
     };
   }
   if (family.bundle) {
@@ -1011,6 +1345,28 @@ export async function classifyAnchor(key, planned, { models, backend, hubs, curr
       return { ...row, status: "weights_missing", reason: `${family.bundle.env} bundle ${bundleRoot} is missing ${missing.join(", ")}` };
     }
     row.env[family.bundle.env] = bundleRoot;
+  }
+  // A directory of the artifact's OWN snapshot that the adapter binds through its own env var,
+  // beside the tier root (sc-22737, LTX-2.3's dense Gemma text encoder). Unlike `upstream` it is
+  // not a second repository and unlike `components` it is not a co-requisite download: it is a
+  // SIBLING of `<snapshot>/<tier>`, shipped inside the same snapshot at the same revision, which
+  // is exactly how candle.rs validates it (`validate_huggingface_snapshot_root(root, repo, rev,
+  // "gemma", …)`). Absent is `weights_missing` for the same reason a missing tier root is: the
+  // load cannot open, and calling the cell `runnable` would send an operator to book a capture
+  // that fails on its text encoder.
+  for (const sibling of family.siblingRoots ?? []) {
+    const siblingRoot = await firstExistingDirectory([path.join(path.dirname(resolved.root), sibling.dir)]);
+    row.roots.push({
+      label: `${sibling.dir} root`,
+      path: siblingRoot ?? path.join(path.dirname(resolved.root), sibling.dir),
+    });
+    if (!siblingRoot) {
+      return {
+        ...row, status: "weights_missing",
+        reason: `no ${sibling.dir}/ beside ${artifact.repo}@${resolved.revision.slice(0, 8)}/${parts.tier} on this host`,
+      };
+    }
+    row.env[`SCENEWORKS_${sibling.env}_ROOT`] = siblingRoot;
   }
   if (family.upstream) {
     const upstream = tierDownload(models, parts.modelId, family.upstream.repo, parts.tier);
