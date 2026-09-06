@@ -905,10 +905,11 @@ export async function classifyAnchor(key, planned, { models, backend, hubs, curr
   if (!resolved.root) {
     return { ...row, status: "weights_missing", reason: resolved.reason };
   }
+  const tierRoot = resolved.root;
   row.env[`SCENEWORKS_${artifact.env}_REPOSITORY`] = artifact.repo;
   row.env[`SCENEWORKS_${artifact.env}_REVISION`] = resolved.revision;
-  row.env[`SCENEWORKS_${artifact.env}_ROOT`] = resolved.root;
-  row.tierRoot = resolved.root;
+  row.env[`SCENEWORKS_${artifact.env}_ROOT`] = tierRoot;
+  row.tierRoot = tierRoot;
   // A converter-written file the ENGINE requires INSIDE the resolved tier root, beyond the weights
   // the manifest download ships (sc-22734 review). The SenseNova `_fast` rehosts are the live case:
   // `mlx-gen-sensenova`'s `production_calibration_identity` and `candle-gen-sensenova`'s

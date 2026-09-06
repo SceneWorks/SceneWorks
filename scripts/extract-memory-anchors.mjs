@@ -422,6 +422,10 @@ export function isDerivable(candidate, stagedExemptLanes = EMPTY_LANE_SET) {
     return true;
   }
   if (candidate.backend === "candle") {
+    // sc-22736: the still law below is exactly that — a STILL law. A candle VIDEO record (Wan 2.2,
+    // SCAIL-2, LTX-2.5) is priced by the video law, whose regime guards are all anchor-vs-request
+    // and which carries no backend gate, so every candle video composition is a usable anchor —
+    // exactly as on MLX. `?? 1` because an axis-free record is the still it is, not a video.
     if ((candidate.geometry?.frames ?? 1) > 1) return true;
     // sc-22734: a provider whose contract classifies `staged_residency` STRUCTURALLY NOT
     // APPLICABLE has no staged composition to have been measured in, so for those cells the law's
@@ -676,12 +680,27 @@ function anchorRow(
  * to withhold derivation from a single-geometry anchor. The regime guard below is unaffected: it
  * is about WHICH composition was measured, not about fitting anything.
  *
- * Candle anchors take no reason here: `isDerivable` already refuses to ANCHOR a candle cell from
- * a composition the candle law rejects, so every candle anchor that exists is derivable. That
- * stays true after sc-22734 widened WHICH composition the law accepts on a structurally
- * staging-free lane: `isDerivable` was widened in lockstep, so the two still agree exactly.
+ * Candle STILL anchors take no reason here: `isDerivable` already refuses to ANCHOR a candle image
+ * cell from a composition the candle law rejects, so every candle image anchor that exists is
+ * derivable. That stays true after sc-22734 widened WHICH composition the law accepts on a
+ * structurally staging-free lane: `isDerivable` was widened in lockstep, so the two still agree
+ * exactly. Candle VIDEO anchors are a different matter (sc-22736): `isDerivable` admits every
+ * candle video composition, and the video law refuses an axis-free row on BOTH lanes
+ * (`memory_anchor.rs` `derive_video_phase_estimates_raw` prices only at and below the measured point
+ * without `(transformerVariant, decoder)`), so the axis-free reason is stated lane-blind, before
+ * the MLX-only image branch.
  */
 export function underivedReasonFor(candidate) {
+  if ((candidate.geometry.frames ?? 1) > 1) {
+    if (candidate.transformerVariant === null || candidate.decoder === null) {
+      return (
+        "the source record states no (transformer variant, decoder) pipeline axes and the video " +
+        "law's per-token coefficients are keyed on them; this anchor validates its measured point " +
+        "and prices nothing beyond it"
+      );
+    }
+    return null;
+  }
   if (candidate.backend !== "mlx") return null;
   if (candidate.geometry.frames === 1) {
     const regime = candidate.measuredRegime;
@@ -699,13 +718,6 @@ export function underivedReasonFor(candidate) {
       );
     }
     return null;
-  }
-  if (candidate.transformerVariant === null || candidate.decoder === null) {
-    return (
-      "the source record states no (transformer variant, decoder) pipeline axes and the video " +
-      "law's per-token coefficients are keyed on them; this anchor validates its measured point " +
-      "and prices nothing beyond it"
-    );
   }
   return null;
 }

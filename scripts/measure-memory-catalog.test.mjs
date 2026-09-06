@@ -1697,18 +1697,56 @@ test("every sensenova env family and repository is the one the adapter binaries 
 test("an anchor row plans the lane's default rung unless the manifest exempts it", async () => {
   const plan = await readPlan();
   const models = new Map((await readManifestModels()).map((model) => [model.id, model]));
+  // sc-22736: the SECOND derived source. A provider whose contract simply does not IMPLEMENT the
+  // lane default — Candle SCAIL-2 publishes `Resident` alone, `Missing` rather than structurally
+  // inapplicable, so no manifest exemption is honest — is read off the checked-in engine
+  // capability dump, which records every contract's `implementedRungs` per (tier, load shape) at
+  // the pin. Absence from the dump is NOT evidence: a row that overrides a provider the dump does
+  // not know fails here until the dump is regenerated at a pin that ships the contract.
+  const dumps = new Map();
+  for (const backend of ["mlx", "candle"]) {
+    const dump = JSON.parse(
+      await readFile(path.join(ROOT, `config/engine-capabilities/capabilities.${backend}.json`), "utf8"),
+    );
+    dumps.set(backend, new Map(dump.memoryContracts.map((contract) => [contract.id, contract])));
+  }
+  const dumpRefusesDefault = (backend, anchor, tier, fallbackRung) => {
+    const contract = dumps.get(backend).get(anchor.provider);
+    if (!contract) return null;
+    const loadShape = anchor.loadShape;
+    const surfaces = contract.surfaces.filter(
+      (surface) => surface.selector.tier === tier && surface.selector.loadShape === loadShape,
+    );
+    if (surfaces.length === 0) return null;
+    return surfaces.every((surface) => !surface.implementedRungs.includes(fallbackRung));
+  };
   let overridden = 0;
   let candleExempt = 0;
   for (const [key, anchor] of Object.entries(plan.anchors)) {
-    const { modelId, backend } = anchorParts(key);
+    const { modelId, tier, backend } = anchorParts(key);
     const model = models.get(modelId);
     // A plan row for a model the manifest does not ship cannot be judged against manifest evidence;
     // `validatePlan` already refuses an invented model id, so this only skips fixture rows.
     if (!model) continue;
     const exemptions = model[backend]?.memoryStrategyStructuralExemptions ?? {};
-    const exempt = Object.hasOwn(exemptions, "staged_residency");
+    const manifestExempt = Object.hasOwn(exemptions, "staged_residency");
+    const fallbackForDump = ANCHOR_STRATEGY[backend].rung;
+    const contractRefusesDefault =
+      !manifestExempt && fallbackForDump === "staged_residency"
+        ? dumpRefusesDefault(backend, anchor, tier, fallbackForDump)
+        : false;
+    if (anchor.strategy && !manifestExempt && fallbackForDump === "staged_residency") {
+      assert.notEqual(
+        contractRefusesDefault,
+        null,
+        `${key}: overrides the lane default but config/engine-capabilities/capabilities.${backend}.json ` +
+          `records no ${anchor.provider} contract surface at ${tier}/${anchor.loadShape}; regenerate the ` +
+          "dump at a pin that ships the contract (cargo run -p sceneworks-worker --bin dump-engine-capabilities)",
+      );
+    }
+    const exempt = manifestExempt || contractRefusesDefault === true;
     // The exemption is scoped to the overlays it names, and an anchor renders exactly one.
-    if (exempt) {
+    if (manifestExempt) {
       assert.ok(
         (exemptions.staged_residency.overlays ?? []).includes(anchor.overlay),
         `${key}: the manifest exempts staged_residency only for overlays ` +
@@ -1723,8 +1761,9 @@ test("an anchor row plans the lane's default rung unless the manifest exempts it
     assert.equal(
       effective.rung,
       expected.rung,
-      `${key}: manifest ${backend}.memoryStrategyStructuralExemptions ${exempt ? "declares" : "does not declare"} ` +
-        `staged_residency, so the anchor must plan rung ${JSON.stringify(expected.rung)}`,
+      `${key}: manifest ${backend}.memoryStrategyStructuralExemptions ${manifestExempt ? "declares" : "does not declare"} ` +
+        `staged_residency and the capability dump ${contractRefusesDefault ? "records the contract refusing" : "does not record the contract refusing"} ` +
+        `it, so the anchor must plan rung ${JSON.stringify(expected.rung)}`,
     );
     assert.deepEqual([...effective.engagedRungs], expected.engagedRungs, `${key}: engaged rung set`);
     if (anchor.strategy) overridden += 1;

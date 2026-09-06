@@ -6536,8 +6536,15 @@ fn run(request: &Value) -> Result<Value, String> {
     }
     // sc-22736: the Wan 2.2 family and SCAIL-2 dispatch ABOVE the shared still gate, like LTX-2.5 —
     // they are VIDEO arms, and `validate_still_geometry` would refuse the multi-frame geometry they
-    // exist to measure.
-    if candle_wan_scail2::implements(provider) {
+    // exist to measure. The four ids are spelled HERE, as consts, rather than asked of the module:
+    // `scripts/stale-lane-report.mjs::adapterCapturableProviders` reads this bespoke pre-gate
+    // (`if matches!(provider, …) { return …(request); }`) off the source, and a call into the
+    // module would hide them from it. `candle_wan_scail2::implements` is held to the same four by
+    // `the_pre_gate_names_exactly_the_providers_the_module_implements`.
+    if matches!(
+        provider,
+        WAN_TI2V_5B_ID | WAN_T2V_A14B_ID | WAN_I2V_A14B_ID | SCAIL2_ID
+    ) {
         return candle_wan_scail2::run(request);
     }
     // sc-22737: Bernini's VIDEO entry, LTX-2.3 and both MiniMax-H3 entries dispatch above the
@@ -9135,6 +9142,24 @@ mod tests {
         assert_eq!(context.overlay.as_deref(), Some("identity"));
         assert!(!context.use_pid);
         assert!(!context.has_phases);
+    }
+
+    /// The Wan 2.2 / SCAIL-2 pre-gate in `run` spells its four ids as consts so
+    /// `scripts/stale-lane-report.mjs` can read them off the source (sc-22736); this pins the
+    /// spelled set to the set the module actually implements, in both directions.
+    #[test]
+    fn the_pre_gate_names_exactly_the_providers_the_module_implements() {
+        let spelled = [WAN_TI2V_5B_ID, WAN_T2V_A14B_ID, WAN_I2V_A14B_ID, SCAIL2_ID];
+        for provider in spelled {
+            assert!(candle_wan_scail2::implements(provider), "{provider}");
+        }
+        let mut implemented = candle_wan_scail2::providers().to_vec();
+        implemented.sort_unstable();
+        let mut spelled = spelled.to_vec();
+        spelled.sort_unstable();
+        assert_eq!(implemented, spelled);
+        assert!(!candle_wan_scail2::implements(LTX25_ID));
+        assert!(!candle_wan_scail2::implements(KREA_ID));
     }
 
     /// Every FLUX.1 cell the committed plan declares for this lane must name a provider this
