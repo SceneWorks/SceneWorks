@@ -4,6 +4,11 @@
 Defense in depth only: this monitor never makes a safety-refused row admissible. Production Darwin
 telemetry is the kernel-maintained phys_footprint from /usr/bin/footprint. Synthetic telemetry is
 available only behind an explicit test-only flag.
+
+Fail-closed is about the CEILINGS, not about every sample: a guarded capture spawns and reaps
+short-lived helpers constantly, and a tick that fails because one of them raced its own exit is not
+evidence that the group is unobserved. Such a tick is dropped and re-enumerated
+(`TELEMETRY_FAULT_TOLERANCE`); losing the guarded ROOT process is telemetry loss immediately.
 """
 
 from __future__ import annotations
@@ -23,6 +28,11 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 HARD_STOP_EXIT = 97
+# Consecutive failed telemetry ticks before the guard declares telemetry lost. A single failed
+# sample is not evidence that the group is unobserved: `footprint` can lose a race with an exiting
+# process, time out under load, or return a short payload. Losing the guarded ROOT process is
+# telemetry loss immediately (`RootTelemetryLost`), never tolerated.
+TELEMETRY_FAULT_TOLERANCE = 3
 PROVIDER_PHASE_PROTOCOL = "sceneworks-provider-phase-v1"
 CAMPAIGN_ENTRY_PROVIDER_PHASES = (
     "common_load",
@@ -98,6 +108,37 @@ def identity_is_live(identity: Identity) -> bool:
     return bool(current and current.pgid == identity.pgid and current.started == identity.started)
 
 
+def parent_pids(timeout: float = 1.0) -> dict[int, int]:
+    """pid → ppid for every live process, or `{}` when the census is unavailable.
+
+    Used only to resolve the guarded ROOT process (the sentinel's one non-anchor child). An
+    unavailable census leaves the root unresolved, which only widens tolerance — it never makes a
+    sample admissible that the ceilings would refuse.
+    """
+    try:
+        result = subprocess.run(
+            ["/bin/ps", "-axo", "pid=,ppid="], capture_output=True, text=True,
+            timeout=timeout, check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return {}
+    if result.returncode != 0:
+        return {}
+    parents: dict[int, int] = {}
+    for line in result.stdout.splitlines():
+        fields = line.split()
+        if len(fields) == 2:
+            try:
+                parents[int(fields[0])] = int(fields[1])
+            except ValueError:
+                continue
+    return parents
+
+
+class RootTelemetryLost(RuntimeError):
+    """The guarded root process was enumerated live but absent from its own footprint sample."""
+
+
 def anchor_main() -> int:
     """TERM-resistant exact-identity anchor retained if the launch sentinel crashes."""
     signal.signal(signal.SIGTERM, signal.SIG_IGN)
@@ -169,7 +210,16 @@ def sentinel_main(
 
 class DarwinFootprintSampler:
     @staticmethod
-    def parse_processes(pids: list[int], payload: object) -> int:
+    def parse_processes(pids: list[int], payload: object, required: object = ()) -> int:
+        """Sum the guarded group's phys_footprint over the PIDs the sample actually described.
+
+        A requested PID absent from the payload EXITED between the group census and the sample —
+        compilers, `xcrun`, and other short-lived helpers do this constantly under a real capture.
+        Its exit is not lost telemetry: it is dropped here and the next tick re-enumerates the
+        group. Absence of a `required` PID (the guarded root) is `RootTelemetryLost`. A payload PID
+        that was never requested is outside the enumerated group and remains a hard anomaly, as is
+        a payload that describes none of the live PIDs.
+        """
         requested = set(pids)
         if len(requested) != len(pids):
             raise RuntimeError("footprint request contains duplicate PIDs")
@@ -188,13 +238,18 @@ class DarwinFootprintSampler:
             if pid in observed:
                 raise RuntimeError(f"footprint returned duplicate PID {pid}")
             observed[pid] = value
-        if set(observed) != requested:
-            missing = sorted(requested - set(observed))
-            extra = sorted(set(observed) - requested)
-            raise RuntimeError(f"footprint PID set mismatch: missing={missing}, extra={extra}")
+        extra = sorted(set(observed) - requested)
+        if extra:
+            raise RuntimeError(f"footprint reported PIDs outside the owned group: extra={extra}")
+        lost_required = sorted(set(required) - set(observed))
+        if lost_required:
+            raise RootTelemetryLost(
+                f"footprint lost the guarded root PIDs: missing={lost_required}")
+        if not observed:
+            raise RuntimeError("footprint described none of the live owned PIDs")
         return sum(observed.values())
 
-    def sample(self, pids: list[int], timeout: float) -> int:
+    def sample(self, pids: list[int], timeout: float, required: object = ()) -> int:
         if sys.platform != "darwin":
             raise RuntimeError("Darwin phys_footprint telemetry is unavailable")
         if not pids:
@@ -211,7 +266,8 @@ class DarwinFootprintSampler:
             )
             if result.returncode != 0:
                 raise RuntimeError(f"footprint exited {result.returncode}: {result.stderr.strip()}")
-            return self.parse_processes(pids, json.loads(Path(output).read_text()))
+            return self.parse_processes(
+                pids, json.loads(Path(output).read_text()), required)
         finally:
             Path(output).unlink(missing_ok=True)
 
@@ -220,8 +276,8 @@ class SyntheticFileSampler:
     def __init__(self, path: Path):
         self.path = path
 
-    def sample(self, pids: list[int], timeout: float) -> int:
-        del pids, timeout
+    def sample(self, pids: list[int], timeout: float, required: object = ()) -> int:
+        del pids, timeout, required
         value = int(self.path.read_text().strip())
         if value < 0:
             raise RuntimeError("synthetic footprint must be non-negative")
@@ -320,6 +376,9 @@ class SyntheticHostPressureSampler:
 
 
 class OwnedGroup:
+    # Bypass-constructed instances (tests build the group with `__new__`) read the class default.
+    root = None
+
     def __init__(
             self, command: list[str], spawn_delay: float = 0.0,
             attestation_path: str | None = None):
@@ -406,6 +465,23 @@ class OwnedGroup:
         if any(identity_is_live(anchor) for anchor in self.anchors):
             self.retained.update(group_identities(self.pgid))
         return [identity for identity in self.retained if identity_is_live(identity)]
+
+    def root_pids(self, live: list[Identity]) -> list[int]:
+        """The guarded root's PID while it is live: the sentinel's one non-anchor child.
+
+        The root is the guarded command itself. Every other group member is a descendant it may
+        spawn and reap at will, so only the root's disappearance from a sample it was enumerated
+        for is telemetry loss. Resolved once and then held by exact identity; before the sentinel
+        has spawned it, and after it exits, the required set is empty.
+        """
+        if self.root is None:
+            anchors = {item.pid for item in self.anchors}
+            parents = parent_pids()
+            for identity in live:
+                if identity.pid not in anchors and parents.get(identity.pid) == self.leader.pid:
+                    self.root = identity
+                    break
+        return [self.root.pid] if self.root is not None and self.root in live else []
 
     def terminate(self, grace: float) -> None:
         if hasattr(self, "control") and not self.released:
@@ -518,7 +594,8 @@ def observe_group(
     live = group.refresh()
     if not live:
         raise RuntimeError("owned group has no live identities")
-    footprint = sampler.sample([item.pid for item in live], remaining())
+    footprint = sampler.sample(
+        [item.pid for item in live], remaining(), group.root_pids(live))
     pressure = host_sampler.sample(remaining()) if host_sampler is not None else None
     elapsed = time.monotonic() - started
     if elapsed > timeout:
@@ -628,6 +705,10 @@ def guard(args: argparse.Namespace) -> int:
     attestation_buffer = bytearray()
     child_reported_done = False
     completion_released = False
+    telemetry_faults = 0
+    # The first failure of an unrecovered fault run, kept so a deadline reached while that run is
+    # still open cannot relabel a failure that started before it.
+    telemetry_fault_reason: str | None = None
     provider_phase: dict[str, object] | None = None
     provider_phase_sequence = 0
 
@@ -746,6 +827,31 @@ def guard(args: argparse.Namespace) -> int:
             })
         events.emit(event)
 
+    def tolerate_telemetry_fault(error: BaseException, phase: str) -> bool:
+        """Whether this failed tick is a transient sampling fault rather than telemetry loss.
+
+        A sample can fail because a short-lived group member raced its own exit, because
+        `footprint` timed out under load, or because the payload was short. None of that means the
+        group is unobserved, and a hard stop here SIGKILLs a live render. Only losing the guarded
+        root, or `TELEMETRY_FAULT_TOLERANCE` consecutive failures, is telemetry loss.
+        """
+        nonlocal telemetry_faults, telemetry_fault_reason
+        if isinstance(error, RootTelemetryLost):
+            return False
+        telemetry_faults += 1
+        if telemetry_faults == 1:
+            telemetry_fault_reason = f"telemetry_lost:{type(error).__name__}:{error}"
+        if telemetry_faults >= TELEMETRY_FAULT_TOLERANCE:
+            return False
+        events.emit({
+            "event": "telemetry_fault", "phase": phase,
+            "consecutiveFaults": telemetry_faults,
+            "toleranceTicks": TELEMETRY_FAULT_TOLERANCE,
+            "reason": f"{type(error).__name__}:{error}",
+            "providerPhase": provider_phase,
+        })
+        return True
+
     def bounded_telemetry_timeout() -> float:
         if runtime_deadline is None:
             return args.telemetry_timeout
@@ -820,6 +926,7 @@ def guard(args: argparse.Namespace) -> int:
 
                 def observe_startup() -> tuple[
                         str | None, int | None, HostPressure | None]:
+                    nonlocal telemetry_faults, telemetry_fault_reason
                     stopped = startup_deadline_reason()
                     if stopped is not None:
                         return stopped, None, None
@@ -858,10 +965,14 @@ def guard(args: argparse.Namespace) -> int:
                             )
                         if failed_at_or_after_startup_deadline:
                             return startup_deadline_reason(), None, None
+                        if tolerate_telemetry_fault(error, "awaiting_child_attestation"):
+                            return None, None, None
                         return (
                             "child_attestation_telemetry_lost:"
                             f"{type(error).__name__}:{error}", None, None,
                         )
+                    telemetry_faults = 0
+                    telemetry_fault_reason = None
                     stopped = startup_deadline_reason()
                     if stopped is None:
                         stopped = check_initial_observation(
@@ -954,7 +1065,11 @@ def guard(args: argparse.Namespace) -> int:
             if hard_stop is not None:
                 break
             if runtime_deadline is not None and time.monotonic() >= runtime_deadline:
-                hard_stop = f"runtime_at_or_above_{args.max_runtime_seconds}s"
+                # An open fault run predates the deadline: the deadline does not relabel it.
+                hard_stop = (
+                    telemetry_fault_reason
+                    or f"runtime_at_or_above_{args.max_runtime_seconds}s"
+                )
                 break
             live = group.refresh()
             status = group.child.poll()
@@ -1019,10 +1134,23 @@ def guard(args: argparse.Namespace) -> int:
                 if not group.refresh() and group.child.poll() is not None:
                     return group.child.returncode
                 if failed_at_or_after_deadline:
-                    hard_stop = f"runtime_at_or_above_{args.max_runtime_seconds}s"
-                else:
-                    hard_stop = f"telemetry_lost:{type(error).__name__}:{error}"
+                    hard_stop = (
+                        telemetry_fault_reason
+                        or f"runtime_at_or_above_{args.max_runtime_seconds}s"
+                    )
+                    break
+                if tolerate_telemetry_fault(error, "runtime"):
+                    sleep_seconds = args.sample_interval
+                    if runtime_deadline is not None:
+                        sleep_seconds = min(
+                            sleep_seconds, max(0.0, runtime_deadline - time.monotonic()))
+                    if sleep_seconds > 0:
+                        time.sleep(sleep_seconds)
+                    continue
+                hard_stop = f"telemetry_lost:{type(error).__name__}:{error}"
                 break
+            telemetry_faults = 0
+            telemetry_fault_reason = None
             if runtime_deadline is not None and time.monotonic() >= runtime_deadline:
                 hard_stop = f"runtime_at_or_above_{args.max_runtime_seconds}s"
                 break

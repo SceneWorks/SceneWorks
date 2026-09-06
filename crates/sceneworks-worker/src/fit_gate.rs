@@ -31,7 +31,12 @@ pub(crate) enum FitDecision {
 /// number: their foreign demand is derived from captured MLX/wired limits. Keeping the old 2 GiB
 /// fallback is Decision 2's promise that no-record/out-of-envelope/stale requests take legacy rather
 /// than silently adopting a new policy during the calibration transition.
-pub(crate) const LEGACY_UNIFIED_FALLBACK_RESERVE_GB: f64 = 2.0;
+///
+/// Declared in `sceneworks_core::memory_anchor` since sc-22738 so the memory adapter's LTX-2.3
+/// admission presents the SAME reserve this gate presents (`live_request_budget`); this is the
+/// worker's read of it, not a second declaration.
+pub(crate) const LEGACY_UNIFIED_FALLBACK_RESERVE_GB: f64 =
+    sceneworks_core::memory_anchor::LEGACY_UNIFIED_FALLBACK_RESERVE_GB;
 
 /// Dedicated-VRAM allocator/context slack. The operating system does not consume this pool, so this
 /// is different in kind from MLX's foreign resident demand even when historical numbers happened to
@@ -125,7 +130,7 @@ pub(crate) fn resolve_offload(decision: FitDecision, sequential_capable: bool) -
 
 /// Bytes in a GiB. The one definition both gates divide by, so "GB" in a user-facing fit message means
 /// the same thing on both lanes (it is GiB throughout — see [`mochi_decode_peak_gb`]'s note on units).
-pub(crate) const BYTES_PER_GIB: f64 = 1_073_741_824.0;
+pub(crate) const BYTES_PER_GIB: f64 = sceneworks_core::memory_anchor::BYTES_PER_GIB;
 
 /// The AsymmVAE decoder's final-stage channel count — `decoder_block_out_channels[0]` (config default
 /// `[128, 256, 512, 768]`). The last `block_out` mid-block runs THIS many channels at FULL output

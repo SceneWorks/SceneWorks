@@ -821,6 +821,21 @@ SCENEWORKS_FLUX2_REVISION=<exact artifact revision>
 SCENEWORKS_FLUX2_ROOT=/abs/path/.../snapshots/<rev>/<tier>   # q4 | q8 — tier DERIVED from the plan target
 
 # memory-mlx-adapter — ltx_2_3   (sc-18808; the only VIDEO arm. FOUR vars, not three)
+# sc-22738: `ltx_2_3:{bf16,q4,q8}:mlx` are ORDINARY catalog anchors. The arm admits a `run` through
+# the production budget — the worker's weights floor + the engine's conservative decode profile
+# against the probed `hardware.memoryBytes`, decided by gen-core's shared predicate, then the
+# pinned provider's own check on the loaded generator — and returns the budget's refusal verbatim
+# or measures. SC-19642's unconditional pre-load refusal (and its `_measurementSafety` demand,
+# which the anchor-plan schema cannot carry) is gone; the SC-18946 records keep their dispositions
+# as history. Containment is `scripts/measure-memory-catalog.mjs`, which runs EVERY MLX capture
+# under `scripts/memory-calibration-watchdog.py`. Its footprint hard stop is
+# `min(incident − 2 GiB, hardware.memoryBytes − 2 GiB)` and its whole-host free floor is the flat
+# 2 GiB reserve. `hardware.wiredLimitBytes` is NOT a term in either: it caps Metal buffers, while
+# the guard samples the kernel `phys_footprint`, which counts non-Metal pages too — as a hard stop
+# it killed a `flux2_dev:bf16` render this host completes (sc-22738, measured 2026-09-06). The
+# guard also tolerates a group member that exits between the process census and the footprint
+# sample; only losing the guarded ROOT process, or three consecutive failed ticks, is telemetry
+# loss.
 SCENEWORKS_LTX_REPOSITORY=SceneWorks/ltx-2.3-mlx             # fixed; validated against LTX_REPOSITORY
 SCENEWORKS_LTX_REVISION=<exact artifact revision>
 SCENEWORKS_LTX_ROOT=/abs/path/.../snapshots/<rev>/<tier>     # bf16 | q4 | q8, derived from the plan target

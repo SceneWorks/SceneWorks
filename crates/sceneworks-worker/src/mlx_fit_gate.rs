@@ -1317,7 +1317,7 @@ pub(crate) struct MlxRequestEvaluation {
 }
 
 fn gib_to_bytes(gib: f64) -> u64 {
-    (gib * BYTES_PER_GIB).round().clamp(0.0, u64::MAX as f64) as u64
+    sceneworks_core::memory_anchor::gib_to_bytes(gib)
 }
 
 fn decimal_gb_to_bytes(gb: f64) -> u64 {
@@ -2655,39 +2655,18 @@ pub(crate) fn image_floor_weights_bytes(
 /// The shared arithmetic: `resident_window_bytes` is what rung 4 keeps resident of the
 /// transformer once the rung has removed it (0 on the video lane, the law's share on the image
 /// lane), clamped at the load-exact transformer so no lane can state more than it loads.
+///
+/// Since sc-22738 the arithmetic itself is `sceneworks_core::memory_anchor::floor_weights_bytes`,
+/// which the memory adapter's LTX-2.3 admission calls with the same facts; this is the worker's
+/// lift of the contract onto that function's inputs. The staged/rung-4 exclusivity and the
+/// sc-19721 eviction clamp are documented on the shared function.
 fn floor_weights_bytes(
     contract: &MemoryProviderContract,
     engaged: &[MemoryStrategy],
     resident_window_bytes: u64,
 ) -> u64 {
     let facts = contract.asset_facts;
-    let conditioning = facts.conditioning_bytes;
-    let staged = engaged.contains(&MemoryStrategy::StagedResidency);
-    // The load-exact non-conditioning working set: what the transformer's own phase holds while the
-    // evictable sub-stack is still materialized.
-    let heavy_load_exact = facts.base_bytes.saturating_sub(conditioning);
-    let bounded_transformer = engaged.contains(&MemoryStrategy::BoundedTransformerResidency);
-    // The two reductions are EXCLUSIVE, not sequential. The staged reduction's clamp holds the lump
-    // at `transformer_bytes` precisely so the precompute instant stays covered — and rung 4 then
-    // removes that same `transformer_bytes`, sub-stack included. Applying both leaves
-    // `max(0, decoder − evicted)` where the answer is `decoder`.
-    let heavy = if staged && !bounded_transformer {
-        heavy_load_exact
-            .saturating_sub(intra_transformer_evicted_bytes(contract))
-            .max(facts.transformer_bytes)
-    } else if bounded_transformer {
-        heavy_load_exact
-            .saturating_sub(facts.transformer_bytes)
-            .saturating_add(resident_window_bytes.min(facts.transformer_bytes))
-    } else {
-        heavy_load_exact
-    };
-    let base = if staged {
-        conditioning.max(heavy)
-    } else {
-        conditioning.saturating_add(heavy)
-    };
-    let auxiliary = contract
+    let auxiliary_resident_bytes = contract
         .resident_components()
         .iter()
         .filter(|component| component.kind.is_auxiliary())
@@ -2698,7 +2677,20 @@ fn floor_weights_bytes(
         .fold(0_u64, |total, component| {
             total.saturating_add(component.resident_bytes)
         });
-    base.saturating_add(auxiliary)
+    sceneworks_core::memory_anchor::floor_weights_bytes(
+        sceneworks_core::memory_anchor::FloorWeightsFacts {
+            conditioning_bytes: facts.conditioning_bytes,
+            base_bytes: facts.base_bytes,
+            transformer_bytes: facts.transformer_bytes,
+            intra_transformer_evicted_bytes: intra_transformer_evicted_bytes(contract),
+            auxiliary_resident_bytes,
+        },
+        sceneworks_core::memory_anchor::FloorWeightsComposition {
+            staged: engaged.contains(&MemoryStrategy::StagedResidency),
+            bounded_transformer: engaged.contains(&MemoryStrategy::BoundedTransformerResidency),
+            resident_window_bytes,
+        },
+    )
 }
 
 /// The smallest declared value for every numeric knob the engaged composition requires — the most
@@ -4608,7 +4600,12 @@ pub(crate) const MLX_MEMORY_CAP_ENV: &str = "SCENEWORKS_MLX_MEMORY_CAP_GB";
 /// transient term, backed by bf16 measurements across models.) Tracked in sc-11924. (2) Output
 /// RESOLUTION > 1024² grows the VAE-decode transient past 14 GiB — all four points are 1024², so 18 is
 /// a 1024²-worst-case; a higher-res campaign is a follow-up.
-const HEADROOM_GB: f64 = 18.0;
+///
+/// Declared in `sceneworks_core::memory_anchor` since sc-22738 so the memory adapter's LTX-2.3
+/// admission floors its projection with the SAME allowance the video gate floors with
+/// (`video_admission::floor_phase_peaks`); this is the worker's read of it, not a second
+/// declaration.
+const HEADROOM_GB: f64 = sceneworks_core::memory_anchor::MLX_GENERIC_HEADROOM_GB;
 /// Lens dense/bf16's measured 1024² activation transient. Its gpt-oss encoder is the only current
 /// MLX family whose architecture-bound transient exceeds the generic calibration (sc-11924).
 const LENS_DENSE_HEADROOM_GB: f64 = 29.88;

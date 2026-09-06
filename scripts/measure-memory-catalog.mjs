@@ -1733,9 +1733,10 @@ export async function capturedInCampaign(root, campaignDir) {
 // Process plumbing
 // ---------------------------------------------------------------------------------------------
 
-function run(command, args, { cwd = ROOT, env = process.env, log = null, detached = false } = {}) {
+function run(command, args, { cwd = ROOT, env = process.env, log = null, detached = false, input = null } = {}) {
   return new Promise((resolve, reject) => {
-    const child = spawn(command, args, { cwd, env, stdio: ["ignore", "pipe", "pipe"], detached });
+    const child = spawn(command, args, { cwd, env, stdio: [input === null ? "ignore" : "pipe", "pipe", "pipe"], detached });
+    if (input !== null) child.stdin.end(input);
     let stdout = "";
     let stderr = "";
     child.stdout.on("data", (chunk) => { stdout += chunk; log?.write(chunk); });
@@ -1771,6 +1772,143 @@ class Log {
 
 function stamp() {
   return new Date().toISOString().replace(/[:.]/g, "-");
+}
+
+// ---------------------------------------------------------------------------------------------
+// Physical containment (sc-22738)
+// ---------------------------------------------------------------------------------------------
+
+export const WATCHDOG = "scripts/memory-calibration-watchdog.py";
+
+/**
+ * The SC-18946 incident: the kernel-maintained physical footprint the q4 f305 LTX-2.3 provider
+ * reached on a 128 GiB host before the host watchdog panicked. The one place this runner states
+ * it; the MLX adapter declares the same figure as `LTX_Q4_F305_CRASH_FOOTPRINT_BYTES`
+ * (`crates/sceneworks-memory-adapter/src/bin/mlx.rs`), and a test binds the two.
+ */
+export const LTX_Q4_F305_CRASH_FOOTPRINT_BYTES = 96_970_084_480;
+
+/**
+ * The MLX lane's fixed unified-memory reserve, 2 GiB
+ * (`sceneworks_core::memory_anchor::LEGACY_UNIFIED_FALLBACK_RESERVE_GB`, the reserve the worker's
+ * `live_request_budget` and the adapter's LTX admission both present as `reserved_headroom_bytes`).
+ * The guard uses it twice: as the margin under the incident footprint and as the absolute OS floor
+ * on whole-host free memory. Bound to the Rust declaration by a test.
+ */
+export const UNIFIED_RESERVE_BYTES = 2 * 1024 * 1024 * 1024;
+
+/**
+ * The adapter's own host probe — the same `probe` action the harness runs first inside every
+ * capture — so the ceilings below come from the figures the record will carry, not from a second
+ * reading of the host. `memoryBytes` is required of every adapter; `wiredLimitBytes` is what the
+ * MLX adapter resolves from host policy and is required when the anchor is an MLX one — the candle
+ * adapter reports none, and on Darwin its capture is guarded from the host figure alone.
+ */
+export async function probeAdapter(command, { cwd = ROOT, env = process.env, wiredLimitRequired = true } = {}) {
+  const { stdout } = await run(command[0], command.slice(1), { cwd, env, input: `${JSON.stringify({ action: "probe" })}\n` });
+  const hardware = JSON.parse(stdout).hardware;
+  const positive = (field) => Number.isSafeInteger(hardware?.[field]) && hardware[field] > 0;
+  if (!positive("memoryBytes")) fail("adapter probe reported no positive hardware.memoryBytes");
+  if (hardware.wiredLimitBytes !== undefined || wiredLimitRequired) {
+    if (!positive("wiredLimitBytes")) fail("adapter probe reported no positive hardware.wiredLimitBytes");
+    if (hardware.wiredLimitBytes > hardware.memoryBytes) fail("adapter probe reported a wired ceiling above host memory");
+  }
+  return hardware;
+}
+
+/**
+ * The two ceilings the guard runs with, derived from the probe and the incident:
+ *
+ * * `maxFootprintBytes` — the guarded group's physical-footprint hard stop — is the SMALLER of the
+ *   incident footprint less the unified reserve and host memory less the unified reserve. The
+ *   incident term is what keeps the kill line under 96,970,084,480 bytes on any host large enough
+ *   to reach it (sc-22738 review).
+ * * `minMemoryFreeBytes` — the whole-host free floor — is the unified reserve, an ABSOLUTE OS
+ *   reserve independent of the wired limit. The watchdog compares it against `memory_pressure`'s
+ *   whole-host free reading, which the guarded group's own footprint reduces: a floor of
+ *   `memoryBytes − wiredLimitBytes` would have turned the per-group ceiling into a cap on TOTAL
+ *   host use and killed a group at the ceiling less the host baseline (sc-22738 review).
+ *
+ * `wiredLimitBytes` is NOT a term in either ceiling. It is a Metal-buffer ceiling; the watchdog
+ * samples the kernel's `phys_footprint`, which counts every non-Metal page the process owns too,
+ * so the two quantities are not comparable. On this 128 GiB host the wired limit (87,044,670,532)
+ * as a hard stop killed `flux2_dev:bf16` at 87,140,069,928 bytes and 660 s — an anchor the same
+ * host had already rendered to completion unguarded. The probe still reports and records it (it is
+ * how the MLX lane's own admission reasons about device memory); it is advisory here, never a kill
+ * line (sc-22738, measured 2026-09-06).
+ */
+export function watchdogCeilings({ memoryBytes }) {
+  const bounds = [LTX_Q4_F305_CRASH_FOOTPRINT_BYTES - UNIFIED_RESERVE_BYTES, memoryBytes - UNIFIED_RESERVE_BYTES];
+  return { maxFootprintBytes: Math.min(...bounds), minMemoryFreeBytes: UNIFIED_RESERVE_BYTES };
+}
+
+/**
+ * The footprint hard stop every Darwin capture runs under: `scripts/memory-calibration-watchdog.py`
+ * wrapped around the harness, the same guard `scripts/run-ltx-safety-canary.mjs` puts around its
+ * contained runs, minus the nonce-authenticated child attestation and provider-phase channel that
+ * only the frozen canary profiles speak. Without those the guard still does the one thing the
+ * SC-18946 incident needed: it samples the guarded group's kernel `phys_footprint` every quarter
+ * second and terminates the whole group the instant it reaches the ceiling, before the host
+ * watchdog can panic.
+ *
+ * Both ceilings are DERIVED (`watchdogCeilings`) from the adapter's probed host memory and the
+ * incident, never chosen here; the probe's wired limit is validated but is not a kill line. No wall-time ceiling: a runtime-complete video anchor runs six renders, and time is
+ * not the hazard this guard exists for. Darwin-only by construction — the footprint sampler is
+ * `/usr/bin/footprint`.
+ */
+export function watchdogGuard({ hardware, eventFile }) {
+  const { memoryBytes, wiredLimitBytes } = hardware;
+  if (!Number.isSafeInteger(memoryBytes) || memoryBytes <= 0) fail("watchdog guard needs a positive hardware.memoryBytes");
+  if (wiredLimitBytes !== undefined) {
+    if (!Number.isSafeInteger(wiredLimitBytes) || wiredLimitBytes <= 0) fail("watchdog guard needs a positive hardware.wiredLimitBytes");
+    if (wiredLimitBytes > memoryBytes) fail("watchdog guard: wired ceiling above host memory");
+  }
+  const { maxFootprintBytes, minMemoryFreeBytes } = watchdogCeilings({ memoryBytes });
+  if (maxFootprintBytes <= 0) fail(`watchdog guard: no positive footprint ceiling on a ${memoryBytes}-byte host`);
+  return [
+    // This runner's own tool, resolved against ITS checkout: the guard is not an artifact of the
+    // tree being measured.
+    path.join(ROOT, WATCHDOG),
+    "--max-footprint-bytes", String(maxFootprintBytes),
+    "--host-memory-bytes", String(memoryBytes),
+    "--min-memory-free-bytes", String(minMemoryFreeBytes),
+    "--sample-interval", "0.25",
+    "--telemetry-timeout", "1",
+    "--term-grace", "1",
+    "--event-file", eventFile,
+  ];
+}
+
+/**
+ * The guard's `hard_stop` reason from its event log, or `null` when the log carries none (the
+ * capture failed for a reason of its own, or never ran under the guard). A missing log is `null`,
+ * never a throw: it is read on the failure path, where the ORIGINAL error must still surface.
+ */
+export async function watchdogHardStop(eventFile) {
+  let body;
+  try {
+    body = await readFile(eventFile, "utf8");
+  } catch (error) {
+    if (error.code === "ENOENT") return null;
+    throw error;
+  }
+  for (const line of body.split("\n")) {
+    if (!line.trim()) continue;
+    const event = JSON.parse(line);
+    if (event.event === "hard_stop") return `watchdog hard stop: ${event.reason}`;
+  }
+  return null;
+}
+
+/**
+ * Whether a capture of this anchor runs under the footprint guard: EVERY capture on Darwin. A
+ * candle capture running on a Mac draws from the same unified pool the sampler measures, so the
+ * host-RAM hazard is the same whichever adapter is under the harness (sc-22738 review); the guard
+ * exists on no other platform.
+ */
+export function guardsCapture(key, platform = process.platform) {
+  anchorParts(key);
+  return platform === "darwin";
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -1849,11 +1987,26 @@ export async function measureAnchor(row, context) {
   ];
   if (row.physical) captureArgs.push("--raw-log-dir", rawLogDir, "--source-path-prefix", campaignPrefix);
   if (row.ltx25SnapshotRoot) captureArgs.push("--ltx25-snapshot-root", row.ltx25SnapshotRoot);
+  const watchdogEvents = path.join(workDir, "logs", `${slug}-watchdog.jsonl`);
   try {
-    log.write(`$ node ${captureArgs.join(" ")}\n`);
-    await exec(process.execPath, captureArgs, { env, log, detached: true });
+    if (guardsCapture(row.key)) {
+      // sc-22738: every Darwin capture runs inside the footprint hard stop, with ceilings derived
+      // from the adapter's own probe for this host and the incident — see `watchdogGuard`.
+      const hardware = await probeAdapter(providerCommand(args.adapter), {
+        cwd: root, env, wiredLimitRequired: anchorParts(row.key).backend === "mlx",
+      });
+      const guard = watchdogGuard({ hardware, eventFile: watchdogEvents });
+      // The guard APPENDS to its event log; this capture's verdict must not read an earlier one's.
+      await rm(watchdogEvents, { force: true });
+      log.write(`$ /usr/bin/python3 ${guard.join(" ")} -- node ${captureArgs.join(" ")}\n`);
+      await exec("/usr/bin/python3", [...guard, "--", process.execPath, ...captureArgs], { env, log, detached: true });
+    } else {
+      log.write(`$ node ${captureArgs.join(" ")}\n`);
+      await exec(process.execPath, captureArgs, { env, log, detached: true });
+    }
   } catch (error) {
-    return finish("capture_failed", failureReason(error));
+    // A hard stop is recorded in the guard's event log, not on stderr: name it on the row.
+    return finish("capture_failed", (await watchdogHardStop(watchdogEvents)) ?? failureReason(error));
   }
 
   // 2. check the raw bundle before touching the tree.
