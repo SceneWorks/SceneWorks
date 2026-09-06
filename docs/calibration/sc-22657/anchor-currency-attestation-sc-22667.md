@@ -154,3 +154,31 @@ and `lens*:mlx`, none of which is attested; those stay honestly stale as before)
 No re-measure was taken for the new segment — the doctrine allows the diff alone when it carries no
 load-or-device-path change, which is the case here. Matrix after `--stamp-anchors`:
 `15 anchors, 10 stale, 5 current by attestation` (unchanged set).
+
+## Extension to inference `3b922bac` (sc-22738, third terminal pin, 2026-09-06)
+
+The sc-22738 pin moved once more (`563c44e1` → `3b922bac6094e06f98bb2598a6d6fe10dc92739e`, inference
+`main` = the merge of PR #962 `fix/sc-22738-krea-calibration-fault-hooks` over `563c44e1`, its first
+parent) so the krea re-runs measure on an engine whose MLX krea and krea-realtime generators honour
+the harness-authorized `calibration_fault` at every phase exit. The `563c44e1..3b922bac` range
+changes fourteen inference files, every one under `crates/media/mlx-gen/mlx-gen-krea` or
+`crates/media/mlx-gen/mlx-gen-krea-realtime` (`memory_strategy.rs` fault helpers + unit tests,
+`model.rs` / `model_control.rs` / `pipeline.rs` / `generate.rs` / `t2v.rs` hook sites, and their
+integration tests). The bump script's remediation is the closure intersection, and for all five
+attested anchors it is **empty**:
+
+| Closure | `closureFiles` ∩ `563c44e1..3b922bac` | Reading |
+| --- | --- | --- |
+| `krea_2_turbo:candle` | ∅ | the candle krea closure (`candle-gen-krea`, `candle-gen`, gen-core) never links `mlx-gen-krea` or `mlx-gen-krea-realtime`; its digest is unchanged in `config/anchor-loader-closures.json`. |
+| `z_image_turbo:candle` (q4 / q8 / bf16) | ∅ | `candle-gen-z-image` never links either krea crate; digest unchanged. |
+| `z_image_turbo:mlx` (q4) | ∅ | `mlx-gen-z-image` / `mlx-gen-pid` / `mlx-gen/src` never link either krea crate; digest unchanged. |
+
+Only `krea_2_raw:mlx` and `krea_2_turbo:mlx` moved in the anchor-loader closures (and
+`mlx:krea_2_raw` / `mlx:krea_2_turbo` / `mlx:krea_2_turbo_control` / `mlx:krea_realtime_14b` in the
+provider closures); none of those is attested, and they are exactly the closures the pending krea
+re-runs re-capture. The five entries were **extended** (`attestedRevision` → `3b922bac`, the reading
+appended to `why`); no file is added to any `filesChangedSinceMeasurement`, because none changed.
+
+No re-measure was taken — an empty intersection is the byte-identical case the doctrine names as the
+trivial extension. Matrix after `--stamp-anchors`: `15 anchors, 10 stale, 5 current by attestation`
+(unchanged set).

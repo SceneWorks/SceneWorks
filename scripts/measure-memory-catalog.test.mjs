@@ -66,6 +66,12 @@ import {
   MINIMAX_TEXT_ENCODER_CONFIG,
   MINIMAX_TIER_DIT_FILES,
   requiredFilesFor,
+  QWEN_EDIT_LIGHTNING_LORA,
+  LTX25_REPOSITORY,
+  LTX25_DEV_REFINEMENT_LORA,
+  LTX25_ENHANCER_DIR,
+  INSTANTID_IDENTITY_BUNDLE_FILES,
+  INSTANTID_CONTROLNET_WEIGHT_FILE,
 } from "./measure-memory-catalog.mjs";
 import {
   ANCHOR_LANE_DEFAULT_STRATEGY_PATH,
@@ -140,6 +146,15 @@ function fakeModels() {
       ],
     },
     { id: "chroma1_hd", downloads: [{ repo: "SceneWorks/chroma1-hd-mlx", revision: REVISION, variant: "q4", files: ["q4/*"] }] },
+    // sc-22738: the InstantID route — the plain RealVisXL rehost plus the three caller-staged SDXL
+    // components, and an identity stack that is no download at all but two staged directories.
+    {
+      id: "instantid_realvisxl",
+      downloads: [
+        { repo: "SceneWorks/realvisxl-mlx", revision: REVISION, variant: "q4", files: ["q4/*"] },
+        ...SDXL_COMPONENTS.map(({ repo }) => ({ repo, revision: UPSTREAM, coRequisite: true, files: ["*"] })),
+      ],
+    },
     // The turnkey still family (sc-22732). Kolors and the two Lens models each ship every tier from
     // one repository; the two Ideogram models ship q4/q8 from the packed turnkey and bf16 from a
     // SECOND repository at a SECOND revision, which is the case the family's `tiers` override
@@ -197,6 +212,26 @@ async function stageMinimaxFiles(hub, tier, { omit = [] } = {}) {
       await writeFile(path.join(root, file), "{}\n");
     }
   }
+}
+
+/**
+ * The two artifacts the LTX-2.5 arms open BESIDE `<variant>/<tier>` (sc-22738), staged into the
+ * snapshot root. `omit` names the one a test wants absent.
+ */
+async function stageLtx25SnapshotEntries(hub, { omit = [] } = {}) {
+  const snapshot = snapshotPath(hub, LTX25_REPOSITORY, REVISION);
+  if (!omit.includes(LTX25_DEV_REFINEMENT_LORA)) {
+    await mkdir(path.join(snapshot, path.dirname(LTX25_DEV_REFINEMENT_LORA)), { recursive: true });
+    await writeFile(path.join(snapshot, LTX25_DEV_REFINEMENT_LORA), "lora");
+  }
+  if (!omit.includes(LTX25_ENHANCER_DIR)) await mkdir(path.join(snapshot, LTX25_ENHANCER_DIR), { recursive: true });
+}
+
+/** The pinned Lightning distill LoRA file inside its already-staged snapshot (sc-22738). */
+async function stageQwenLightningLora(hub, file = QWEN_EDIT_LIGHTNING_LORA.file) {
+  const root = snapshotPath(hub, QWEN_EDIT_LIGHTNING_LORA.repo, QWEN_EDIT_LIGHTNING_LORA.revision);
+  await mkdir(root, { recursive: true });
+  await writeFile(path.join(root, file), "lora");
 }
 
 async function fakeHub(layout) {
@@ -333,6 +368,7 @@ test("classification: runnable anchors carry the adapter env family and the cano
   // documents in the upstream one. A bare directory tree is what this host really had, and what
   // `--list` used to call runnable.
   await stageMinimaxFiles(hub, "q4");
+  await stageLtx25SnapshotEntries(hub);
   const context = { models: fakeModels(), backend: "mlx", hubs: [hub], current: new Map(), captured: new Map() };
   const qwen = await classifyAnchor("qwen_image:q4:mlx", { provider: "qwen_image" }, context);
   assert.equal(qwen.status, "runnable");
@@ -596,6 +632,7 @@ test("the qwen edit family derives the tier root on both lanes, and Lightning al
     ["SceneWorks/qwen-image-edit-2511-mlx", REVISION, "q4"],
     [lora.repo, lora.revision],
   ]);
+  await stageQwenLightningLora(hub);
   for (const backend of ["mlx", "candle"]) {
     const context = { models: fakeModels(), backend, hubs: [hub], current: new Map(), captured: new Map() };
     const planned = { provider: "qwen_image_edit", mode: "edit_image" };
@@ -628,6 +665,133 @@ test("the qwen edit family derives the tier root on both lanes, and Lightning al
   const missing = await classifyAnchor("qwen_image_edit_2511_lightning:q4:mlx", planned, context);
   assert.equal(missing.status, "weights_missing");
   assert.match(missing.reason, /Qwen-Image-Edit-2511-Lightning@/);
+});
+
+// sc-22738. The campaign lost all three `qwen_image_edit_2511_lightning:*:mlx` captures to
+// `memory-strategy provider adapter: the Lightning distill LoRA is not at …-4steps-V1.0-bf16.safetensors`.
+// `--list` had called them runnable because the side-artifact probe asked only whether the SNAPSHOT
+// existed — and the snapshot staged on that host carries the 8-step distill, not the pinned 4-step
+// one the arm joins. A present snapshot is not the pinned file.
+test("a Lightning cell whose distill snapshot lacks the pinned LoRA file is weights_missing, by name", async () => {
+  const lora = QWEN_EDIT_LIGHTNING_LORA;
+  const planned = { provider: "qwen_image_edit", mode: "edit_image" };
+  const layout = [
+    ["SceneWorks/qwen-image-edit-2511-mlx", REVISION, "q4"],
+    [lora.repo, lora.revision],
+  ];
+  // The exact host condition: the snapshot is there, holding the WRONG step count.
+  const holed = await fakeHub(layout);
+  await stageQwenLightningLora(holed, "Qwen-Image-Edit-2511-Lightning-8steps-V1.0-bf16.safetensors");
+  const context = (hub) => ({ models: fakeModels(), backend: "mlx", hubs: [hub], current: new Map(), captured: new Map() });
+  const refused = await classifyAnchor("qwen_image_edit_2511_lightning:q4:mlx", planned, context(holed));
+  assert.equal(refused.status, "weights_missing", refused.reason);
+  assert.match(refused.reason, new RegExp(lora.file.replaceAll(".", "\\.")), "the reason names the file the arm opens");
+  assert.match(refused.reason, new RegExp(snapshotPath(holed, lora.repo, lora.revision)), "and the root it looked in");
+  // The base id shares the tier root and attaches no LoRA, so it is untouched by the refusal.
+  assert.equal((await classifyAnchor("qwen_image_edit_2511:q4:mlx", planned, context(holed))).status, "runnable");
+  // And with the pinned file staged, the same cell is runnable — the probe is the file, not the name.
+  const complete = await fakeHub(layout);
+  await stageQwenLightningLora(complete);
+  const row = await classifyAnchor("qwen_image_edit_2511_lightning:q4:mlx", planned, context(complete));
+  assert.equal(row.status, "runnable", row.reason);
+});
+
+// sc-22738. The same class of miss on the other two families whose arms open something the tier or
+// snapshot probe never looked at: the LTX-2.5 stage-two refinement LoRA and stock enhancer, and the
+// InstantID identity stack's staged files. A directory that exists but is half-staged is exactly as
+// unloadable as an absent one, and calling either `runnable` books a capture that cannot open.
+test("an LTX-2.5 snapshot missing what the arm opens beside the load root is weights_missing, by name", async () => {
+  const context = (hub, backend) => ({ models: fakeModels(), backend, hubs: [hub], current: new Map(), captured: new Map() });
+  // MLX needs both; Candle attaches the LoRA and never opens the enhancer.
+  const noLora = await fakeHub([[LTX25_REPOSITORY, REVISION, "distilled"]]);
+  await stageLtx25SnapshotEntries(noLora, { omit: [LTX25_DEV_REFINEMENT_LORA] });
+  for (const [backend, provider] of [["mlx", "ltx_2_5"], ["candle", "ltx_2_5_distilled"]]) {
+    const row = await classifyAnchor(`ltx_2_5:q4:${backend}`, { provider }, context(noLora, backend));
+    assert.equal(row.status, "weights_missing", `${backend}: ${row.reason}`);
+    assert.match(row.reason, /distilled_lora\/ltx-2\.5-22b-distilled-lora-450-bf16\.safetensors/);
+  }
+  const noEnhancer = await fakeHub([[LTX25_REPOSITORY, REVISION, "distilled"]]);
+  await stageLtx25SnapshotEntries(noEnhancer, { omit: [LTX25_ENHANCER_DIR] });
+  const mlx = await classifyAnchor("ltx_2_5:q4:mlx", { provider: "ltx_2_5" }, context(noEnhancer, "mlx"));
+  assert.equal(mlx.status, "weights_missing", mlx.reason);
+  assert.match(mlx.reason, /enhancer/);
+  const candle = await classifyAnchor("ltx_2_5:q4:candle", { provider: "ltx_2_5_distilled" }, context(noEnhancer, "candle"));
+  assert.equal(candle.status, "runnable", "the Candle arm never opens the enhancer, so it must not be required of it");
+});
+
+test("an InstantID cell whose staged identity stack is missing a file is weights_missing, by name", async () => {
+  const hub = await fakeHub([
+    ["SceneWorks/realvisxl-mlx", REVISION, "q4"],
+    ...SDXL_COMPONENTS.map(({ repo }) => [repo, UPSTREAM]),
+  ]);
+  const weights = await mkdtemp(path.join(tmpdir(), "instantid-weights-"));
+  const controlnet = await mkdtemp(path.join(tmpdir(), "instantid-controlnet-"));
+  const previous = { ...process.env };
+  process.env.SCENEWORKS_INSTANTID_WEIGHTS = weights;
+  process.env.SCENEWORKS_INSTANTID_CONTROLNET = controlnet;
+  try {
+    const planned = { provider: "instantid" };
+    const context = { models: fakeModels(), backend: "mlx", hubs: [hub], current: new Map(), captured: new Map() };
+    // Two empty directories: what `--list` used to call a staged identity stack.
+    const bare = await classifyAnchor("instantid_realvisxl:q4:mlx", planned, context);
+    assert.equal(bare.status, "weights_missing", bare.reason);
+    assert.match(bare.reason, new RegExp(INSTANTID_IDENTITY_BUNDLE_FILES[0].replaceAll(".", "\\.")));
+    // The bundle complete, the IdentityNet directory still empty: refused on its own file.
+    for (const file of INSTANTID_IDENTITY_BUNDLE_FILES) await writeFile(path.join(weights, file), "weights");
+    const half = await classifyAnchor("instantid_realvisxl:q4:mlx", planned, context);
+    assert.equal(half.status, "weights_missing", half.reason);
+    assert.match(half.reason, new RegExp(INSTANTID_CONTROLNET_WEIGHT_FILE.replaceAll(".", "\\.")));
+    await writeFile(path.join(controlnet, INSTANTID_CONTROLNET_WEIGHT_FILE), "weights");
+    const row = await classifyAnchor("instantid_realvisxl:q4:mlx", planned, context);
+    assert.equal(row.status, "runnable", row.reason);
+    assert.equal(row.env.SCENEWORKS_INSTANTID_WEIGHTS, weights);
+    assert.equal(row.env.SCENEWORKS_INSTANTID_CONTROLNET, controlnet);
+  } finally {
+    process.env = previous;
+  }
+});
+
+// The three declarations above are the ADAPTER's own constants, not this script's opinion of them.
+// A drift on either side would send a capture at an artifact the arm does not open (or refuse one it
+// does), so each is read out of the Rust source and compared.
+test("the extra artifacts declared per family are the ones the adapter source names", async () => {
+  const lib = await readFile(path.join(ROOT, "crates/sceneworks-memory-adapter/src/lib.rs"), "utf8");
+  const bundleFiles = /pub const INSTANTID_IDENTITY_BUNDLE_FILES: \[&str; 3\] = \[([\s\S]*?)\];/.exec(lib);
+  assert.ok(bundleFiles, "lib.rs still declares INSTANTID_IDENTITY_BUNDLE_FILES");
+  const named = [...bundleFiles[1].matchAll(/INSTANTID_([A-Z_]+)_FILE/g)].map(([, stem]) => {
+    const value = new RegExp(`pub const INSTANTID_${stem}_FILE: &str = "([^"]+)"`).exec(lib);
+    assert.ok(value, `lib.rs still declares INSTANTID_${stem}_FILE`);
+    return value[1];
+  });
+  assert.deepEqual([...INSTANTID_IDENTITY_BUNDLE_FILES], named, "the staged bundle list is the adapter's own");
+  assert.equal(
+    /pub const INSTANTID_CONTROLNET_WEIGHT_FILE: &str = "([^"]+)"/.exec(lib)?.[1],
+    INSTANTID_CONTROLNET_WEIGHT_FILE,
+  );
+  const instantid = PROVIDER_FAMILIES.instantid_realvisxl.stagedEnv;
+  assert.deepEqual(instantid.map((entry) => entry.env), [
+    /pub const INSTANTID_IDENTITY_BUNDLE_ENV: &str = "([^"]+)"/.exec(lib)?.[1],
+    /pub const INSTANTID_CONTROLNET_ENV: &str = "([^"]+)"/.exec(lib)?.[1],
+  ], "each staged directory is bound to the env var the adapter reads");
+  assert.ok(instantid.every((entry) => (entry.files ?? []).length > 0), "and each declares what it must carry");
+
+  const mlxLtx25 = await readFile(path.join(ROOT, "crates/sceneworks-memory-adapter/src/bin/mlx_ltx25.rs"), "utf8");
+  const candle = await readFile(path.join(ROOT, "crates/sceneworks-memory-adapter/src/bin/candle.rs"), "utf8");
+  assert.equal(/const DEV_ADAPTER: &str = "([^"]+)"/.exec(mlxLtx25)?.[1], LTX25_DEV_REFINEMENT_LORA);
+  assert.equal(
+    /const LTX25_DISTILL_LORA_RELATIVE_PATH: &str =\s*"([^"]+)"/.exec(candle)?.[1],
+    LTX25_DEV_REFINEMENT_LORA,
+    "both lanes attach the same file, so one declaration serves both families",
+  );
+  assert.match(mlxLtx25, new RegExp(`join\\("${LTX25_ENHANCER_DIR}"\\)`), "the MLX arm still opens the enhancer by that name");
+
+  const mlx = await readFile(path.join(ROOT, "crates/sceneworks-memory-adapter/src/bin/mlx.rs"), "utf8");
+  assert.equal(
+    /pub const QWEN_EDIT_LIGHTNING_FILE: &str =\s*"([^"]+)"/.exec(lib)?.[1],
+    QWEN_EDIT_LIGHTNING_LORA.file,
+    "the declared distill LoRA is the file the arm joins",
+  );
+  assert.match(mlx, /join\(protocol::QWEN_EDIT_LIGHTNING_FILE\)/);
 });
 
 // The catalog's `physical` flag and the harness's receipt predicate are two spellings of one rule,
@@ -900,6 +1064,7 @@ test("every sana/chroma env family and repository is the one the adapter binarie
 // families must therefore derive the same snapshot root, on their own lane and on no other.
 test("the LTX-2.5 family derives the same snapshot root on both lanes, under each lane's engine id", async () => {
   const hub = await fakeHub([["SceneWorks/ltx-2.5-mlx", REVISION, "distilled"]]);
+  await stageLtx25SnapshotEntries(hub);
   const expected = snapshotPath(hub, "SceneWorks/ltx-2.5-mlx", REVISION);
   for (const [backend, provider] of [["mlx", "ltx_2_5"], ["candle", "ltx_2_5_distilled"]]) {
     const context = { models: fakeModels(), backend, hubs: [hub], current: new Map(), captured: new Map() };
