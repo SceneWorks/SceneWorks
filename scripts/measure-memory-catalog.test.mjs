@@ -46,6 +46,8 @@ import {
   parseSdxlRoutes,
   readSdxlCandleRoutes,
   sdxlCandleRouteDrift,
+  parseDeclaredStrategySupport,
+  readDeclaredStrategySupport,
   SDXL_ROUTES_PATH,
   SDXL_ROUTES_UNCHECKED,
 } from "./measure-memory-catalog.mjs";
@@ -1281,17 +1283,34 @@ test("qwen_image and ltx_2_5 are measurable on every shipped tier of every route
 // both asserted here so neither can silently widen:
 //   * `instantid_realvisxl` q4/q8 on candle are not CELLS at all — the candle InstantID stack is
 //     dense-only, which the worker's own `instantid.rs` says, so the universe never produces them.
-//   * all three tiers of `illustrious_xl_v1`/`v2` on candle are cells the engine cannot SEAL at
-//     inference c6d6a4db: `candle-gen-sdxl`'s `SDXL_ROUTES` pins revisions this repository no
-//     longer ships. The classification is derived from both sources, so it clears itself when the
-//     inference-side fix (`story/sc-22729-sdxl-route-revisions`) lands and the pin moves.
+//   * a candle cell the engine cannot SEAL, because `candle-gen-sdxl`'s `SDXL_ROUTES` pins a
+//     revision this repository no longer ships. At inference c6d6a4db that was all three tiers of
+//     `illustrious_xl_v1`/`v2`; at 8a65db2a the inference-side fix
+//     (`story/sc-22729-sdxl-route-revisions`) has landed and the set is EMPTY. sc-22736: the
+//     expectation below is now derived from the same two sources the classification reads, so the
+//     set follows the pin on its own — the hard-coded Illustrious list it replaces would have gone
+//     stale in exactly this way, and did.
 const SDXL_FAMILY = [
   "sdxl", "realvisxl", "realvisxl_lightning", "illustrious_xl_v1", "illustrious_xl_v2",
   "instantid_realvisxl",
 ];
-/** Every candle cell the route drift blocks: both Illustrious models × all three shipped tiers. */
-const SDXL_CANDLE_ROUTE_DRIFT = ["illustrious_xl_v1", "illustrious_xl_v2"]
-  .flatMap((modelId) => ["q4", "q8", "bf16"].map((tier) => `${modelId}:${tier}:candle`));
+
+/**
+ * Every candle cell the route drift blocks at the live pin, derived — never enumerated. Empty when
+ * no inference checkout is reachable, because with nothing to compare the refusal cannot arise.
+ */
+async function sdxlCandleRouteDriftCells() {
+  const routes = await readSdxlCandleRoutes();
+  if (!routes) return [];
+  const models = await readManifestModels();
+  return (await shippedTieredCells())
+    // The same predicate `classifyAnchor` uses: only the members `candle-gen-sdxl` seals through
+    // `SDXL_ROUTES` are compared, so the bespoke InstantID route is not judged against the table.
+    .filter((cell) => cell.backend === "candle" && PROVIDER_FAMILIES[cell.modelId]?.sdxlRoute)
+    .filter((cell) => sdxlCandleRouteDrift(cell.modelId, cell.tier, routes, models) !== null)
+    .map((cell) => cell.key)
+    .sort();
+}
 
 test("the sdxl family is measurable on every shipped tier of every routed lane", async () => {
   const cells = (await shippedTieredCells()).filter((cell) => SDXL_FAMILY.includes(cell.modelId));
@@ -1307,15 +1326,12 @@ test("the sdxl family is measurable on every shipped tier of every routed lane",
     ["bf16"],
     "the candle InstantID stack is dense-only; a packed candle cell would measure bf16 weights",
   );
-  // Every family cell is measurable except the Illustrious candle routes the engine cannot seal —
-  // and with no inference checkout to read, there are none of those either, because the refusal is
-  // DERIVED. Both directions are asserted so neither mode can quietly assert nothing.
+  // Every family cell is measurable except the candle routes the engine cannot seal — and with no
+  // inference checkout to read, there are none of those either, because the refusal is DERIVED.
+  // Both sides of the comparison are derived from the same two sources, so a pin that repairs the
+  // engine empties them together instead of leaving a stale expectation behind.
   const gaps = (await measurabilityGaps()).filter((gap) => SDXL_FAMILY.includes(gap.modelId));
-  assert.deepEqual(
-    gaps.map((gap) => gap.key).sort(),
-    (await readSdxlCandleRoutes()) ? [...SDXL_CANDLE_ROUTE_DRIFT].sort() : [],
-    gapReport(gaps),
-  );
+  assert.deepEqual(gaps.map((gap) => gap.key).sort(), await sdxlCandleRouteDriftCells(), gapReport(gaps));
   // …and those are refused for the engine's own reason, not as missing plan or adapter work.
   for (const gap of gaps) {
     assert.equal(gap.status, "harness_unsupported", `${gap.key}: ${gap.reason}`);
@@ -1376,27 +1392,43 @@ const skipWithoutRoutes = sdxlRoutesAvailable
   ? false
   : `no inference checkout supplies ${SDXL_ROUTES_PATH}`;
 
-test("the illustrious candle refusal is derived from the engine's own route revision", { skip: skipWithoutRoutes }, async () => {
+// sc-22736, pin 8a65db2a: the inference-side repair landed, so the LIVE answer for every routed
+// model is now "no refusal". The claim this test makes was never "Illustrious drifts" — it was that
+// the refusal TRACKS the two revisions in both directions. So the live tree is asserted to agree
+// everywhere, and the refusing direction is exercised by SYNTHESIZING a disagreement on a real
+// route rather than by depending on one model still being broken upstream.
+test("the sdxl candle refusal is derived from the engine's own route revision", { skip: skipWithoutRoutes }, async () => {
   const models = await readManifestModels();
   const routes = await readSdxlCandleRoutes();
-  for (const modelId of ["sdxl", "realvisxl", "realvisxl_lightning"]) {
-    assert.equal(sdxlCandleRouteDrift(modelId, "q4", routes, models), null, `${modelId} must not be excluded`);
-  }
-  for (const modelId of ["illustrious_xl_v1", "illustrious_xl_v2"]) {
-    const route = routes.get(modelId);
-    const shipped = tierDownload(models, modelId, route.repository, "q4").revision;
-    assert.notEqual(route.revision, shipped, `${modelId}: the engine and the manifest agree — drop the exclusion`);
+  // Every model the engine seals through SDXL_ROUTES agrees with what this repository ships.
+  const sealed = SDXL_FAMILY.filter((id) => PROVIDER_FAMILIES[id]?.sdxlRoute && routes.has(id));
+  assert.ok(sealed.length > 0, "no sdxl-family model is sealed through SDXL_ROUTES");
+  for (const modelId of sealed) {
     for (const tier of ["q4", "q8", "bf16"]) {
-      assert.match(sdxlCandleRouteDrift(modelId, tier, routes, models), /candle-gen-sdxl pins route/);
+      assert.equal(
+        sdxlCandleRouteDrift(modelId, tier, routes, models),
+        null,
+        `${modelId}:${tier}: the engine and the manifest disagree at this pin`,
+      );
     }
-    // The same model, against an engine that ships what the manifest ships: no refusal at all.
-    const agreed = new Map(routes).set(modelId, { ...route, revision: shipped });
-    assert.equal(sdxlCandleRouteDrift(modelId, "q4", agreed, models), null, `${modelId}: equal revisions must clear it`);
   }
+  // MUTATION, on a real route: one changed character in the engine's revision must refuse every
+  // tier of that model, for the engine's own reason.
+  const [modelId] = [...sealed].sort();
+  const route = routes.get(modelId);
+  const flipped = `${route.revision.slice(0, -1)}${route.revision.endsWith("0") ? "1" : "0"}`;
+  const drifted = new Map(routes).set(modelId, { ...route, revision: flipped });
+  for (const tier of ["q4", "q8", "bf16"]) {
+    assert.match(sdxlCandleRouteDrift(modelId, tier, drifted, models), /candle-gen-sdxl pins route/, `${modelId}:${tier}`);
+  }
+  // …and restoring the shipped revision clears it, so the refusal is the comparison and not the id.
+  const shipped = tierDownload(models, modelId, route.repository, "q4").revision;
+  assert.equal(route.revision, shipped, `${modelId}: the live engine revision IS the shipped one`);
+  assert.equal(sdxlCandleRouteDrift(modelId, "q4", routes, models), null, `${modelId}: equal revisions must clear it`);
   // A route the engine does not declare AT ALL is refused for that reason, not silently admitted.
   const without = new Map(routes);
-  without.delete("illustrious_xl_v1");
-  assert.match(sdxlCandleRouteDrift("illustrious_xl_v1", "q4", without, models), /declares no route/);
+  without.delete(modelId);
+  assert.match(sdxlCandleRouteDrift(modelId, "q4", without, models), /declares no route/);
 });
 
 test("SDXL_ROUTES is parsed from the engine source, and an unreadable checkout refuses nothing", async () => {
@@ -1599,7 +1631,7 @@ test("every sensenova env family and repository is the one the adapter binaries 
  * resident, so an exemption moves nothing. No list of model ids and no count lives here: a newly
  * exempt model, or a withdrawn exemption, moves the requirement on its own.
  */
-test("an anchor row plans the lane's default rung unless the manifest exempts it", async () => {
+test("an anchor row plans the lane's default rung unless the manifest exempts it", async (t) => {
   const plan = await readPlan();
   const models = new Map((await readManifestModels()).map((model) => [model.id, model]));
   // sc-22736: the SECOND derived source. A provider whose contract simply does not IMPLEMENT the
@@ -1607,7 +1639,7 @@ test("an anchor row plans the lane's default rung unless the manifest exempts it
   // inapplicable, so no manifest exemption is honest — is read off the checked-in engine
   // capability dump, which records every contract's `implementedRungs` per (tier, load shape) at
   // the pin. Absence from the dump is NOT evidence: a row that overrides a provider the dump does
-  // not know fails here until the dump is regenerated at a pin that ships the contract.
+  // not know falls through to the third source below, and is refused if that cannot speak either.
   const dumps = new Map();
   for (const backend of ["mlx", "candle"]) {
     const dump = JSON.parse(
@@ -1625,8 +1657,22 @@ test("an anchor row plans the lane's default rung unless the manifest exempts it
     if (surfaces.length === 0) return null;
     return surfaces.every((surface) => !surface.implementedRungs.includes(fallbackRung));
   };
+  // sc-22736, pin 8a65db2a: the THIRD derived source, consulted only where the dump has no surface
+  // to offer. `candle-gen-scail2` registers a memory strategy WITHOUT a weights-free surface
+  // resolver, so `memory_contract_surfaces()` — and therefore capabilities.candle.json — never sees
+  // it; no regeneration at any pin would change that. Its `build_contract` does declare the support
+  // per rung, and the anchor loader closure already names that file as this (model, lane)'s
+  // memory-strategy entry point, derived at the pin and `--check`ed. See
+  // `readDeclaredStrategySupport`: an unreadable `strategies:` shape THROWS, and a provider that
+  // declares nothing yields null, which is refused below.
+  const closures = JSON.parse(await readFile(path.join(ROOT, "config/anchor-loader-closures.json"), "utf8"));
+  const declaredRefusesDefault = async (backend, modelId, fallbackRung) => {
+    const support = await readDeclaredStrategySupport(modelId, backend, closures);
+    return support === null ? null : support(fallbackRung) !== "Implemented";
+  };
   let overridden = 0;
   let candleExempt = 0;
+  let declaredEvidence = 0;
   for (const [key, anchor] of Object.entries(plan.anchors)) {
     const { modelId, tier, backend } = anchorParts(key);
     const model = models.get(modelId);
@@ -1636,17 +1682,34 @@ test("an anchor row plans the lane's default rung unless the manifest exempts it
     const exemptions = model[backend]?.memoryStrategyStructuralExemptions ?? {};
     const manifestExempt = Object.hasOwn(exemptions, "staged_residency");
     const fallbackForDump = ANCHOR_STRATEGY[backend].rung;
-    const contractRefusesDefault =
-      !manifestExempt && fallbackForDump === "staged_residency"
-        ? dumpRefusesDefault(backend, anchor, tier, fallbackForDump)
-        : false;
-    if (anchor.strategy && !manifestExempt && fallbackForDump === "staged_residency") {
+    const judged = !manifestExempt && fallbackForDump === "staged_residency";
+    let contractRefusesDefault = judged ? dumpRefusesDefault(backend, anchor, tier, fallbackForDump) : false;
+    if (judged && contractRefusesDefault === null) {
+      const declared = await declaredRefusesDefault(backend, modelId, fallbackForDump);
+      if (declared !== null) declaredEvidence += 1;
+      contractRefusesDefault = declared;
+    }
+    // Two different absences. A reachable checkout that declares nothing is REFUSED below. No
+    // checkout at all is a property of the RUN, not of the override: the module-level guard above
+    // already turns that into a hard failure on CI (where check.yml supplies the clone), so locally
+    // it degrades to a diagnostic rather than a red that says nothing about this repository.
+    if (anchor.strategy && judged && contractRefusesDefault === null && !sdxlRoutesAvailable) {
+      t.diagnostic(
+        `${key}: not judged — no pinned inference checkout ($INFERENCE_REPO) to read the engine's ` +
+          "own strategy declaration from. On CI this run would already have failed.",
+      );
+      continue;
+    }
+    if (anchor.strategy && judged) {
       assert.notEqual(
         contractRefusesDefault,
         null,
-        `${key}: overrides the lane default but config/engine-capabilities/capabilities.${backend}.json ` +
-          `records no ${anchor.provider} contract surface at ${tier}/${anchor.loadShape}; regenerate the ` +
-          "dump at a pin that ships the contract (cargo run -p sceneworks-worker --bin dump-engine-capabilities)",
+        `${key}: overrides the lane default, but config/engine-capabilities/capabilities.${backend}.json ` +
+          `records no ${anchor.provider} contract surface at ${tier}/${anchor.loadShape} AND the engine's own ` +
+          `memory-strategy entry point for ${modelId}:${backend} (config/anchor-loader-closures.json) declares ` +
+          "no per-rung support that can be read at the pinned inference checkout. Set $INFERENCE_REPO to a " +
+          "checkout of the pin (check.yml's parity-scaffold job does), or drop the override: an override with " +
+          "no derived architecture evidence is refused, never assumed.",
       );
     }
     const exempt = manifestExempt || contractRefusesDefault === true;
@@ -1667,7 +1730,7 @@ test("an anchor row plans the lane's default rung unless the manifest exempts it
       effective.rung,
       expected.rung,
       `${key}: manifest ${backend}.memoryStrategyStructuralExemptions ${manifestExempt ? "declares" : "does not declare"} ` +
-        `staged_residency and the capability dump ${contractRefusesDefault ? "records the contract refusing" : "does not record the contract refusing"} ` +
+        `staged_residency and the derived contract evidence ${contractRefusesDefault ? "records the contract refusing" : "does not record the contract refusing"} ` +
         `it, so the anchor must plan rung ${JSON.stringify(expected.rung)}`,
     );
     assert.deepEqual([...effective.engagedRungs], expected.engagedRungs, `${key}: engaged rung set`);
@@ -1676,6 +1739,61 @@ test("an anchor row plans the lane's default rung unless the manifest exempts it
   }
   assert.ok(overridden > 0, "the plan exercises the override at least once");
   assert.ok(candleExempt > 0, "at least one candle row is exempted from the lane's default rung");
+  // …and the third source is genuinely load-bearing today, not dead code kept warm: the SCAIL-2
+  // candle rows have no dump surface and are legitimate only because the engine's own declaration
+  // is read. A count, not a list — a provider that grows a dump surface simply lowers it.
+  if (sdxlRoutesAvailable) {
+    assert.ok(
+      declaredEvidence > 0,
+      "no override rested on the engine's own strategy declaration; if every provider now carries a " +
+        "dump surface, delete readDeclaredStrategySupport rather than leaving an unexercised source",
+    );
+  }
+});
+
+// sc-22736. The third source read three ways: the shipped shape yields per-rung support, a file
+// with no declaration yields null (which the rule above refuses), and a declaration this parser
+// cannot read THROWS. That last case is the one that matters — the cheap failure mode for a
+// source-text derivation is to silently stop matching and re-admit every override.
+test("the engine's strategy declaration is parsed per rung, and an unreadable shape is refused", async () => {
+  const shipped = `
+        strategies: MemoryStrategy::ALL
+            .into_iter()
+            .map(|strategy| MemoryStrategyCapability {
+                strategy,
+                support: if strategy == MemoryStrategy::Resident {
+                    MemoryStrategySupport::Implemented
+                } else {
+                    MemoryStrategySupport::Missing
+                },
+                parameters: MemoryParameterRanges::default(),
+            })
+            .collect(),
+  `;
+  const support = parseDeclaredStrategySupport(shipped, "fixture.rs");
+  assert.equal(support("resident"), "Implemented");
+  assert.equal(support("staged_residency"), "Missing");
+  assert.equal(support("bounded_decode"), "Missing");
+  // No declaration at all: null, never "implements everything".
+  assert.equal(parseDeclaredStrategySupport("fn build_contract() {}", "fixture.rs"), null);
+  // MUTATION: the same file after an upstream refactor this parser does not know. It must throw —
+  // returning null here would make the override rule fall back to "no evidence" and, worse,
+  // returning a default would admit it.
+  assert.throws(
+    () => parseDeclaredStrategySupport("    strategies: strategies(spec),\n", "fixture.rs"),
+    /cannot\s+read/,
+  );
+  // And the live wiring: candle SCAIL-2's real declaration, when a pinned checkout is reachable.
+  const closures = JSON.parse(await readFile(path.join(ROOT, "config/anchor-loader-closures.json"), "utf8"));
+  const live = await readDeclaredStrategySupport("scail2_14b", "candle", closures);
+  if (live === null) {
+    assert.ok(!process.env.CI, "on CI the pinned inference checkout must supply the SCAIL-2 declaration");
+  } else {
+    assert.equal(live("resident"), "Implemented");
+    assert.equal(live("staged_residency"), "Missing");
+  }
+  // A model the closure does not declare has no entry point to read, so it yields null.
+  assert.equal(await readDeclaredStrategySupport("not_a_model", "candle", closures), null);
 });
 
 // Each Mage variant binds TWO artifact triples: its OWN tiered rehost (never a sibling's — the six
