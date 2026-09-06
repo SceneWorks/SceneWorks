@@ -129,6 +129,9 @@ jobs:
       CARGO_NET_OFFLINE: "true"
       BACKEND: mlx
       DEFAULT_HF_CACHE: /Volumes/Models/huggingface/hub
+      # No INFERENCE_CLONE_DIR here: a job-level `env:` cannot expand $HOME, and the Macs want
+      # exactly the script's default, `$HOME/memory-catalog-inference`. The candle lane sets it
+      # because its clone belongs on D: rather than in the runner user's profile.
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -172,6 +175,13 @@ jobs:
             exit "$rc"
           fi
 
+      # BEFORE `cargo fetch`, ON PURPOSE. This is the ONE network fetch of the ~650 MB inference repo
+      # the job makes: it lands a persistent, shallow clone and exports the GIT_CONFIG_* rewrite that
+      # makes cargo's git transport read from THAT clone instead of pulling the repo a second time.
+      # See the header of scripts/ci/memory-catalog/inference.sh.
+      - name: Clone the pinned inference revision
+        run: bash scripts/ci/memory-catalog/inference.sh
+
       - name: Fetch the pinned inference release
         env:
           CARGO_NET_OFFLINE: "false"
@@ -182,9 +192,6 @@ jobs:
           cargo build --release --locked -p sceneworks-memory-adapter \
             --features mlx --bin memory-mlx-adapter
           echo "ADAPTER=$CARGO_TARGET_DIR/release/memory-mlx-adapter" >> "$GITHUB_ENV"
-
-      - name: Clone the pinned inference revision
-        run: bash scripts/ci/memory-catalog/inference.sh
 
       - name: Plan the walk
         run: bash scripts/ci/memory-catalog/plan.sh
@@ -235,6 +242,10 @@ jobs:
       CARGO_NET_OFFLINE: "true"
       BACKEND: candle
       DEFAULT_HF_CACHE: 'E:\huggingface\hub'
+      # The persistent inference clone, on the drive this runner already keeps its per-runner caches
+      # on. Deliberately NOT under $GITHUB_WORKSPACE or $RUNNER_TEMP: both are wiped between jobs,
+      # which is what made every dispatch re-pull ~650 MB over this box's slow link.
+      INFERENCE_CLONE_DIR: 'D:\memory-catalog-inference'
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -327,6 +338,14 @@ jobs:
       - name: Prepare the Rust toolchain
         uses: ./.github/actions/prepare-rust-runner
 
+      # BEFORE `cargo fetch`, ON PURPOSE -- and this lane is why. Run 34044786385 spent 70 minutes at
+      # ~150 KB/s in cargo's git fetch of the inference repo, died with `fetch-pack: unexpected
+      # disconnect`, and started over. This step does the ONE fetch, shallow, into a clone on D: that
+      # outlives the job, and exports the GIT_CONFIG_* rewrite pointing cargo at it. See the header
+      # of scripts/ci/memory-catalog/inference.sh.
+      - name: Clone the pinned inference revision
+        run: bash scripts/ci/memory-catalog/inference.sh
+
       - name: Fetch the pinned inference release
         env:
           CARGO_NET_OFFLINE: "false"
@@ -342,9 +361,6 @@ jobs:
           cargo build --release --locked -p sceneworks-memory-adapter --features candle --bin memory-candle-adapter
           if errorlevel 1 exit /b 1
           echo ADAPTER=%GITHUB_WORKSPACE%\target\release\memory-candle-adapter.exe>>%GITHUB_ENV%
-
-      - name: Clone the pinned inference revision
-        run: bash scripts/ci/memory-catalog/inference.sh
 
       - name: Plan the walk
         run: bash scripts/ci/memory-catalog/plan.sh
