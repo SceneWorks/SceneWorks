@@ -1909,8 +1909,8 @@ export function watchdogGuard({ hardware, eventFile }) {
     "--max-footprint-bytes", String(maxFootprintBytes),
     "--host-memory-bytes", String(memoryBytes),
     "--min-memory-free-bytes", String(minMemoryFreeBytes),
-    "--sample-interval", "0.25",
-    "--telemetry-timeout", "1",
+    "--sample-interval", "2",
+    "--telemetry-timeout", "10",
     "--term-grace", "1",
     "--event-file", eventFile,
   ];

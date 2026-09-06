@@ -30379,10 +30379,6 @@ mod exceeded_bound_tests {
         );
     }
 
-    /// The shipped store carries the stop this story recorded. A SHAPE assertion, not a count: the
-    /// claim is that `bernini:bf16:mlx` at 848x480x49 has a measured lower bound on file, which is
-    /// what makes the refusal above reachable in production.
-    #[test]
     /// THE WIRING, not the predicate. `exceeded_bound_capture_refusal_in` can be perfectly correct
     /// and reach nothing: deleting the two lines that call it out of `fn run` left every other test
     /// in this module green, because they all drive the predicate directly. This test drives `run`
@@ -30399,6 +30395,9 @@ mod exceeded_bound_tests {
         );
     }
 
+    /// The shipped store carries the stop this story recorded. A SHAPE assertion, not a count: the
+    /// claim is that `bernini:bf16:mlx` at 848x480x49 has a measured lower bound on file, which is
+    /// what makes both refusals above reachable at all.
     #[test]
     fn the_packaged_store_carries_the_bernini_bf16_mlx_stop() {
         let store = sceneworks_core::memory_anchor::packaged_memory_anchors()
