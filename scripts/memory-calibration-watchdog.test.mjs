@@ -21,6 +21,10 @@ const WATCHDOG = path.join(ROOT, "scripts/memory-calibration-watchdog.py");
 // stays as a floor so runs configured with a tight telemetry timeout keep their slack.
 const ATTESTATION_HANDSHAKE_BARRIERS = 6;
 const MIN_MAX_RUNTIME_SECONDS = 2;
+// The production tolerance window is 60 s of wall clock (sc-22738). A suite cannot wait that out,
+// so every harness that drives a fault to its escalation passes an explicit short window; the
+// property under test is the WINDOW, never its production length.
+const TEST_TELEMETRY_FAULT_WINDOW = "0.25";
 
 async function fixture() {
   const root = await mkdtemp(path.join(tmpdir(), "sc19642-watchdog-"));
@@ -81,6 +85,7 @@ async function run(
       "--max-footprint-bytes", `${ceiling}`,
       "--sample-interval", sampleInterval,
       "--telemetry-timeout", "0.2",
+      "--telemetry-fault-window", TEST_TELEMETRY_FAULT_WINDOW,
       "--term-grace", "0.1",
       "--event-file", files.events,
       "--telemetry-file", files.telemetry,
@@ -126,6 +131,7 @@ async function controlled(mode, action) {
     "--max-footprint-bytes", "100",
     "--sample-interval", "0.02",
     "--telemetry-timeout", "0.2",
+    "--telemetry-fault-window", TEST_TELEMETRY_FAULT_WINDOW,
     "--term-grace", "0.1",
     "--event-file", files.events,
     "--telemetry-file", files.telemetry,
@@ -151,6 +157,7 @@ async function runWithMockedProductionTelemetry(files, childCommand, options = {
   const {
     telemetryTimeout = 0.5, actualHostMemory = 1000, requestedHostMemory = 1000,
     childAttestationTimeout = 1, maxRuntimeSeconds = null,
+    telemetryFaultWindow = TEST_TELEMETRY_FAULT_WINDOW,
     requireProviderPhases = false,
     providerPhaseProfile = "campaign-entry",
     memoryFreePercent = 90, memoryFreeBytes = 900, swapFreeBytes = 900,
@@ -202,6 +209,7 @@ sys.argv = [${JSON.stringify(WATCHDOG)},
     "--min-memory-free-bytes", "100",
     "--sample-interval", "0.02",
     "--telemetry-timeout", ${JSON.stringify(String(telemetryTimeout))},
+    "--telemetry-fault-window", ${JSON.stringify(String(telemetryFaultWindow))},
     "--child-attestation-timeout", ${JSON.stringify(String(childAttestationTimeout))},
     "--term-grace", "0.1", "--event-file", ${JSON.stringify(files.events)},
     "--require-child-attestation", ${requireProviderPhases
@@ -980,25 +988,46 @@ print("host pressure parsers fail closed")
   assert.match(probe.stdout, /host pressure parsers fail closed/);
 });
 
-test("footprint plus host pressure share one aggregate telemetry deadline", async () => {
+test("every telemetry probe gets its own full budget under an aggregate staleness deadline", async () => {
+  // sc-22738, measured 2026-09-06: the census, the footprint sample and the host-pressure sample
+  // drew from ONE `--telemetry-timeout`, so a slow census handed `/usr/bin/footprint` an arbitrary
+  // residue of it — 0.31 s of a 1 s budget on a 38 GB process — and starved the host-pressure
+  // probe to zero, manufacturing both fault kinds that then hard-stopped a 57-minute render.
   const probe = await execFileAsync("python3", ["-c", String.raw`
 import importlib.util, os, sys, time
 spec = importlib.util.spec_from_file_location("watchdog", ${JSON.stringify(WATCHDOG)})
 module = importlib.util.module_from_spec(spec); sys.modules[spec.name] = module; spec.loader.exec_module(module)
 identity = module.process_identity(os.getpid())
-class Group:
-    def refresh(self): return [identity]
+budgets = []
+class SlowCensusGroup:
+    def refresh(self): time.sleep(0.06); return [identity]
     def root_pids(self, live): return [identity.pid]
 class Footprint:
-    def sample(self, pids, timeout, required=()): time.sleep(0.06); return 1
+    def sample(self, pids, timeout, required=()):
+        budgets.append(timeout); time.sleep(0.06); return 1
 class Pressure:
-    def sample(self, timeout): time.sleep(0.06); return module.HostPressure(90, 900, 900)
-try: module.observe_group(Group(), Footprint(), Pressure(), 0.1)
+    def sample(self, timeout):
+        budgets.append(timeout); time.sleep(0.06); return module.HostPressure(90, 900, 900)
+# Three probes at 0.06s each cross a 0.1s per-probe budget in aggregate, and each still received
+# the WHOLE budget: a slow census never shortens the probes that follow it.
+live, footprint, pressure, elapsed = module.observe_group(
+    SlowCensusGroup(), Footprint(), Pressure(), 0.1)
+assert footprint == 1, footprint
+assert budgets == [0.1, 0.1], budgets
+assert elapsed > 0.1, elapsed
+# The aggregate remains a real staleness deadline: it is exactly TELEMETRY_PROBE_BUDGETS full
+# budgets, so it can never be shorter than one full sample.
+assert module.TELEMETRY_PROBE_BUDGETS == 3
+class Stalled:
+    def sample(self, pids, timeout, required=()): time.sleep(0.2); return 1
+class StalledPressure:
+    def sample(self, timeout): time.sleep(0.2); return module.HostPressure(90, 900, 900)
+try: module.observe_group(SlowCensusGroup(), Stalled(), StalledPressure(), 0.1)
 except TimeoutError: pass
-else: raise AssertionError("sequential samplers received independent deadlines")
-print("aggregate telemetry deadline enforced")
+else: raise AssertionError("the aggregate staleness deadline was not enforced")
+print("independent probe budgets under one staleness deadline")
 `]);
-  assert.match(probe.stdout, /aggregate telemetry deadline enforced/);
+  assert.match(probe.stdout, /independent probe budgets under one staleness deadline/);
 });
 
 test("SIGINT and SIGTERM preserve shell status while cleaning the exact owned group", async () => {
@@ -1197,50 +1226,228 @@ print("transient child tolerated, root loss stops")
   assert.match(probe.stdout, /transient child tolerated, root loss stops/);
 });
 
-test("a transient sampling fault is re-enumerated; a persistent one is telemetry loss", async () => {
-  const files = await fixture();
-  const launcher = `${files.program}.transient-fault.py`;
-  // Two consecutive failed ticks then a recovery, followed by a permanent failure: the guard rides
-  // out the first run (no hard stop, no SIGKILL of a live render) and stops only once a fault run
-  // reaches the tolerance.
-  await writeFile(launcher, String.raw`import importlib.util, sys
+/**
+ * Drive the guard with a scripted footprint sampler. `outcome` is the body of a Python
+ * `def outcome(n)` called with the 1-based sample number: it returns a footprint or raises.
+ * Everything else is production code — the real group, the real loop, the real escalation rule.
+ */
+async function runWithScriptedFootprint(files, name, outcome, options = {}) {
+  const {
+    mode = "hold", ceiling = 100, maxRuntimeSeconds = "30",
+    telemetryFaultWindow = null, timeoutMs = 20_000,
+  } = options;
+  const launcher = `${files.program}.${name}.py`;
+  const windowArgument = telemetryFaultWindow === null
+    ? "" : `"--telemetry-fault-window", ${JSON.stringify(String(telemetryFaultWindow))},`;
+  await writeFile(launcher, String.raw`import importlib.util, subprocess, sys, time
 spec = importlib.util.spec_from_file_location("watchdog", ${JSON.stringify(WATCHDOG)})
 module = importlib.util.module_from_spec(spec); sys.modules[spec.name] = module; spec.loader.exec_module(module)
-assert module.TELEMETRY_FAULT_TOLERANCE == 3
+def footprint_timeout():
+    return subprocess.TimeoutExpired(cmd=["/usr/bin/footprint", "-p", "1"], timeout=10.0)
+def aggregate_deadline():
+    return TimeoutError("aggregate host-pressure telemetry deadline expired")
+${outcome}
 state = {"samples": 0}
 class Footprint:
     def sample(self, pids, timeout, required=()):
         state["samples"] += 1
-        if state["samples"] in (2, 3) or state["samples"] >= 5:
-            raise RuntimeError("transient_source_failure")
-        return 1
+        return outcome(state["samples"])
 module.DarwinFootprintSampler = Footprint
 sys.argv = [${JSON.stringify(WATCHDOG)},
-    "--max-footprint-bytes", "100", "--max-runtime-seconds", "30",
+    "--max-footprint-bytes", ${JSON.stringify(String(ceiling))},
+    "--max-runtime-seconds", ${JSON.stringify(String(maxRuntimeSeconds))},
     "--sample-interval", "0.02", "--telemetry-timeout", "0.2",
+    ${windowArgument}
     "--term-grace", "0.1", "--event-file", ${JSON.stringify(files.events)},
-    "--", "python3", ${JSON.stringify(files.program)}, "hold",
+    "--", "python3", ${JSON.stringify(files.program)}, ${JSON.stringify(mode)},
     ${JSON.stringify(files.pids)}, ${JSON.stringify(files.telemetry)},
     ${JSON.stringify(files.events)}]
 raise SystemExit(module.guard(module.parse_args()))
 `);
   let status = 0;
   try {
-    await execFileAsync("python3", [launcher], { timeout: 20_000 });
+    await execFileAsync("python3", [launcher], { timeout: timeoutMs });
   } catch (error) {
     status = error.code;
   }
-  assert.equal(status, 97);
   const events = (await readFile(files.events, "utf8")).trim().split("\n").map(JSON.parse);
-  const faults = events.filter((event) => event.event === "telemetry_fault");
-  assert.deepEqual(faults.map((event) => event.consecutiveFaults), [1, 2, 1, 2],
-    "two tolerated ticks, a recovery that resets the run, then two more");
-  assert.ok(faults.every((event) => event.reason === "RuntimeError:transient_source_failure"));
-  const samplesAfterFirstFault = events.filter((event) =>
-    event.event === "sample" && event.eventSequence > faults[0].eventSequence);
-  assert.ok(samplesAfterFirstFault.length > 0, "the guard kept sampling across the tolerated run");
-  const stopped = events.find((event) => event.event === "hard_stop");
-  assert.match(stopped.reason, /^telemetry_lost:RuntimeError:transient_source_failure$/);
+  return {
+    status,
+    events,
+    faults: events.filter((event) => event.event === "telemetry_fault"),
+    stopped: events.find((event) => event.event === "hard_stop") ?? null,
+  };
+}
+
+test("a footprint timeout followed by a good sample is never telemetry loss", async () => {
+  // sc-22738, measured 2026-09-06: `bernini:q4:mlx` rendered 56.8 minutes at a steady 38 GB
+  // against a 94.8 GB ceiling and was SIGKILLed by a `/usr/bin/footprint` timeout. One failed
+  // probe is not a reading, and a false process-group SIGKILL through a live Metal command buffer
+  // is strictly worse for this host than a late stop.
+  const files = await fixture();
+  const result = await runWithScriptedFootprint(files, "single-footprint-timeout", String.raw`
+def outcome(n):
+    if n == 2: raise footprint_timeout()
+    return 1
+`, { maxRuntimeSeconds: "1.5" });
+  // The guard runs to its own wall-time ceiling: the tolerated fault left no mark on the stop.
+  assert.equal(result.status, 97);
+  assert.equal(result.stopped.reason, "runtime_at_or_above_1.5s");
+  assert.equal(result.faults.length, 1);
+  assert.equal(result.faults[0].consecutiveFaults, 1);
+  assert.match(result.faults[0].reason, /^TimeoutExpired:/);
+  const samplesAfter = result.events.filter((event) =>
+    event.event === "sample" && event.eventSequence > result.faults[0].eventSequence);
+  assert.ok(samplesAfter.length > 0, "the guard stopped sampling after the tolerated fault");
+});
+
+test("heterogeneous sampler faults in one run share the window; none escalates on its own", async () => {
+  // The measured escalation: ONE `/usr/bin/footprint` timeout plus the SEPARATE aggregate
+  // host-pressure deadline inside the same fault run exhausted a three-TICK tolerance in 1.2 s.
+  // Five alternating faults well inside the window must all be tolerated, whatever their kind.
+  const files = await fixture();
+  const result = await runWithScriptedFootprint(files, "mixed-fault-run", String.raw`
+def outcome(n):
+    if n in (2, 4, 6): raise footprint_timeout()
+    if n in (3, 5): raise aggregate_deadline()
+    return 1
+`, { maxRuntimeSeconds: "1.5" });
+  assert.equal(result.status, 97);
+  assert.equal(result.stopped.reason, "runtime_at_or_above_1.5s",
+    "a tolerated fault run must not become the stop reason");
+  assert.deepEqual(result.faults.map((event) => event.consecutiveFaults), [1, 2, 3, 4, 5],
+    "one unbroken fault run of five, tolerated on wall clock rather than tick count");
+  assert.deepEqual(
+    [...new Set(result.faults.map((event) => event.reason.split(":")[0]))],
+    ["TimeoutExpired", "TimeoutError"],
+    "both measured fault kinds went through the one tolerance",
+  );
+  assert.ok(result.faults.every((event) => event.faultElapsedSeconds < event.faultWindowSeconds));
+});
+
+test("a transient sampling fault is re-enumerated; one past the wall-clock window is telemetry loss", async () => {
+  const files = await fixture();
+  // A short run then a recovery that resets the window, followed by a permanent failure: the
+  // guard rides out the first run and stops only once a run occupies the whole window.
+  const result = await runWithScriptedFootprint(files, "transient-fault", String.raw`
+def outcome(n):
+    if n in (2, 3) or n >= 5: raise RuntimeError("transient_source_failure")
+    return 1
+`, { telemetryFaultWindow: 1 });
+  assert.equal(result.status, 97);
+  const runs = result.faults.map((event) => event.consecutiveFaults);
+  assert.deepEqual(runs.slice(0, 3), [1, 2, 1],
+    "two tolerated ticks, a recovery that resets the run, then a fresh run");
+  // A tick COUNT cannot be what stopped it: the surviving run had to occupy a full second of wall
+  // clock, which is many more ticks than any fixed tolerance would have allowed.
+  assert.ok(runs.at(-1) > 3, `the final fault run was only ${runs.at(-1)} ticks`);
+  assert.ok(result.faults.every((event) =>
+    event.reason === "RuntimeError:transient_source_failure"));
+  assert.ok(result.faults.every((event) => event.lastGoodPhysicalFootprintBytes === 1),
+    "a tolerated fault must keep the previous good sample as the current reading");
+  assert.match(result.stopped.reason, /^telemetry_lost:RuntimeError:transient_source_failure$/);
+  assert.equal(result.stopped.telemetryFaultHistory.windowSeconds, 1);
+  assert.ok(result.stopped.telemetryFaultHistory.elapsedSeconds >= 1,
+    `stopped after ${result.stopped.telemetryFaultHistory.elapsedSeconds}s`);
+  assert.equal(result.stopped.telemetryFaultHistory.faults, runs.at(-1) + 1);
+  const pids = (await readFile(files.pids, "utf8")).trim().split("\n").map(Number);
+  pids.forEach(assertGone);
+});
+
+test("a good sample re-anchors the window, so a later fault gets the whole window again", async () => {
+  // The window is measured from the first fault of the CURRENT run, never from an ancient one: a
+  // capture that sampled cleanly for minutes must not be one unlucky probe away from a SIGKILL.
+  const files = await fixture();
+  const result = await runWithScriptedFootprint(files, "window-reanchored", String.raw`
+start = time.monotonic()
+def outcome(n):
+    elapsed = time.monotonic() - start
+    if 0.05 < elapsed < 0.20: raise footprint_timeout()
+    if 1.00 < elapsed < 1.15: raise footprint_timeout()
+    return 1
+`, { telemetryFaultWindow: 0.3, maxRuntimeSeconds: "2.0" });
+  assert.equal(result.status, 97);
+  assert.equal(result.stopped.reason, "runtime_at_or_above_2.0s",
+    "the second fault burst inherited the first burst's window anchor");
+  assert.equal(result.faults.filter((event) => event.consecutiveFaults === 1).length, 2,
+    "the healthy stretch between the bursts did not close the first fault run");
+});
+
+test("the pre-release observation takes the same tolerance as every other sampler path", async () => {
+  const files = await fixture();
+  const tolerated = await runWithScriptedFootprint(files, "initial-fault-tolerated", String.raw`
+def outcome(n):
+    if n == 1: raise footprint_timeout()
+    return 1
+`, { maxRuntimeSeconds: "1.5" });
+  assert.equal(tolerated.stopped.reason, "runtime_at_or_above_1.5s",
+    "a single failed pre-release probe must not refuse the capture");
+  assert.deepEqual(tolerated.faults.map((event) => event.phase), ["before_child_release"]);
+
+  const lost = await fixture();
+  const stopped = await runWithScriptedFootprint(lost, "initial-fault-persistent", String.raw`
+def outcome(n): raise footprint_timeout()
+`, { telemetryFaultWindow: 0.3 });
+  assert.equal(stopped.status, 97);
+  assert.match(stopped.stopped.reason, /^initial_telemetry_lost:TimeoutExpired:/);
+  assert.ok(stopped.faults.length >= 1, "the tolerated pre-release faults were never recorded");
+  assert.ok(stopped.stopped.telemetryFaultHistory.elapsedSeconds >= 0.3);
+});
+
+test("the guard's production cadence and telemetry budgets are the documented ones", async () => {
+  // sc-22738: the measured false positive ran `/usr/bin/footprint` over a 38 GB process ~2.5x a
+  // second on a 1 s budget it did not even get to keep. These constants are the fix's other half.
+  const probe = await execFileAsync("python3", ["-c", String.raw`
+import importlib.util, sys
+spec = importlib.util.spec_from_file_location("watchdog", ${JSON.stringify(WATCHDOG)})
+module = importlib.util.module_from_spec(spec); sys.modules[spec.name] = module; spec.loader.exec_module(module)
+assert module.SAMPLE_INTERVAL_SECONDS == 2.0, module.SAMPLE_INTERVAL_SECONDS
+assert module.TELEMETRY_TIMEOUT_SECONDS >= 10.0, module.TELEMETRY_TIMEOUT_SECONDS
+assert module.TELEMETRY_FAULT_WINDOW_SECONDS == 60.0, module.TELEMETRY_FAULT_WINDOW_SECONDS
+# The aggregate deadline is derived from the per-probe budget and is never shorter than one sample.
+assert module.TELEMETRY_PROBE_BUDGETS >= 1, module.TELEMETRY_PROBE_BUDGETS
+# A cold child must be allowed to import its framework, and its window must clear a whole tick.
+assert module.CHILD_ATTESTATION_TIMEOUT_SECONDS > (
+    module.TELEMETRY_TIMEOUT_SECONDS * module.TELEMETRY_PROBE_BUDGETS)
+sys.argv = [${JSON.stringify(WATCHDOG)}, "--max-footprint-bytes", "1", "--", "true"]
+args = module.parse_args()
+assert args.sample_interval == module.SAMPLE_INTERVAL_SECONDS
+assert args.telemetry_timeout == module.TELEMETRY_TIMEOUT_SECONDS
+assert args.telemetry_fault_window == module.TELEMETRY_FAULT_WINDOW_SECONDS
+assert args.child_attestation_timeout == module.CHILD_ATTESTATION_TIMEOUT_SECONDS
+print("production cadence and budgets asserted")
+`]);
+  assert.match(probe.stdout, /production cadence and budgets asserted/);
+});
+
+test("losing the guarded root stops immediately, even inside a tolerated fault run", async () => {
+  const files = await fixture();
+  const result = await runWithScriptedFootprint(files, "root-loss-mid-run", String.raw`
+def outcome(n):
+    if n == 2: raise footprint_timeout()
+    if n == 3: raise module.RootTelemetryLost("footprint lost the guarded root PIDs: missing=[1]")
+    return 1
+`);
+  assert.equal(result.status, 97);
+  assert.equal(result.faults.length, 1, "root loss must not be absorbed by the open fault run");
+  assert.match(result.stopped.reason, /^telemetry_lost:RootTelemetryLost:/);
+  const pids = (await readFile(files.pids, "utf8")).trim().split("\n").map(Number);
+  pids.forEach(assertGone);
+});
+
+test("the ceiling still stops on the first good sample that breaches it after tolerated faults", async () => {
+  const files = await fixture();
+  const result = await runWithScriptedFootprint(files, "breach-after-faults", String.raw`
+def outcome(n):
+    if n in (2, 3): raise footprint_timeout()
+    if n >= 4: return 150
+    return 1
+`);
+  assert.equal(result.status, 97);
+  assert.equal(result.faults.length, 2);
+  assert.equal(result.stopped.reason,
+    "physical_footprint_at_or_above_100:observed_150",
+    "the stop must carry the good sample's value, never a tolerated fault");
   const pids = (await readFile(files.pids, "utf8")).trim().split("\n").map(Number);
   pids.forEach(assertGone);
 });

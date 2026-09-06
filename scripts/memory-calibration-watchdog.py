@@ -6,9 +6,21 @@ telemetry is the kernel-maintained phys_footprint from /usr/bin/footprint. Synth
 available only behind an explicit test-only flag.
 
 Fail-closed is about the CEILINGS, not about every sample: a guarded capture spawns and reaps
-short-lived helpers constantly, and a tick that fails because one of them raced its own exit is not
-evidence that the group is unobserved. Such a tick is dropped and re-enumerated
-(`TELEMETRY_FAULT_TOLERANCE`); losing the guarded ROOT process is telemetry loss immediately.
+short-lived helpers constantly, and a tick that fails because one of them raced its own exit — or
+because `footprint` took longer than its budget on a 100 GB process — is not evidence that the
+group is unobserved.
+
+A hard stop therefore has exactly THREE triggers:
+
+  a. a GOOD sample at or above the footprint ceiling, or below the free-memory/free-swap floor;
+  b. loss of the guarded ROOT child from a sample it was enumerated for (`RootTelemetryLost`);
+  c. sampler faults that persist for `--telemetry-fault-window` of WALL CLOCK with no good sample.
+
+Every sampler failure path — a per-PID `footprint` timeout, a `footprint` non-zero exit, a parse
+failure, the aggregate telemetry deadline, and the host free-memory/swap probe — is routed through
+that one window (`tolerate_telemetry_fault`). None of them may escalate on its own: a false hard
+stop is a process-group SIGKILL through a live Metal command buffer, which is strictly worse for
+this host than a late stop.
 """
 
 from __future__ import annotations
@@ -28,11 +40,37 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 HARD_STOP_EXIT = 97
-# Consecutive failed telemetry ticks before the guard declares telemetry lost. A single failed
-# sample is not evidence that the group is unobserved: `footprint` can lose a race with an exiting
-# process, time out under load, or return a short payload. Losing the guarded ROOT process is
-# telemetry loss immediately (`RootTelemetryLost`), never tolerated.
-TELEMETRY_FAULT_TOLERANCE = 3
+# WALL-CLOCK window a run of sampler faults may occupy before the guard declares telemetry lost.
+# WHY wall clock and not a tick count: a tick count is a duration only if the cadence is known, and
+# under load the cadence collapses — the sc-22738 false positive burned a three-tick tolerance in
+# 1.2 seconds and SIGKILLed a 57-minute render that was sitting at 38 GB against a 94.8 GB ceiling.
+# WHY 60 s: at a 2 s cadence with a 10 s per-probe budget, one fault costs at most ~12 s, so 60 s
+# means the sampler failed on at least five full, independently budgeted attempts. That is a
+# telemetry outage; anything shorter is a loaded host.
+TELEMETRY_FAULT_WINDOW_SECONDS = 60.0
+# Independently budgeted probes inside ONE telemetry tick: the process-group census, the
+# `footprint` sample, and the host-pressure sample. Each gets a full `--telemetry-timeout`, so the
+# aggregate staleness deadline is this multiple of it. WHY this is not one shared budget: when the
+# census and the footprint sample drew from a single `--telemetry-timeout`, a slow census left
+# `footprint` an arbitrary residue (0.31 s of a 1 s budget on the sc-22738 capture) and starved the
+# host-pressure probe to zero, manufacturing the very faults the window then had to absorb. The
+# aggregate is therefore a post-hoc staleness assertion and can never be shorter than one full
+# sample.
+TELEMETRY_PROBE_BUDGETS = 3
+# Seconds between runtime ceiling checks. WHY 2 s: the guard exists to catch a footprint climbing
+# toward a multi-GB ceiling, which no render crosses inside one interval, and every tick costs a
+# whole-system `ps` census plus a `/usr/bin/footprint` walk of a 100 GB process. The sc-22738
+# capture ran that at ~2.5 Hz, which is pure contention on the host being measured.
+SAMPLE_INTERVAL_SECONDS = 2.0
+# Per-probe telemetry budget. WHY 10 s: `/usr/bin/footprint` walks the VM map of every guarded PID,
+# and on a 40-100 GB Metal process under load that measured well past one second. The budget must
+# bound a hung probe, not a slow one.
+TELEMETRY_TIMEOUT_SECONDS = 10.0
+# How long a guarded child may take to connect and attest before it allocates. WHY 60 s: the child
+# is a cold interpreter importing a generation framework before it says anything, and this window
+# must comfortably exceed one full telemetry tick (`TELEMETRY_PROBE_BUDGETS` x the per-probe
+# budget) so a single slow tick can never consume the whole startup allowance.
+CHILD_ATTESTATION_TIMEOUT_SECONDS = 60.0
 PROVIDER_PHASE_PROTOCOL = "sceneworks-provider-phase-v1"
 CAMPAIGN_ENTRY_PROVIDER_PHASES = (
     "common_load",
@@ -582,24 +620,24 @@ def recv_line(sock: socket.socket, limit: int = 4096) -> str:
 def observe_group(
         group: OwnedGroup, sampler: object, host_sampler: object | None,
         timeout: float) -> tuple[list[Identity], int, HostPressure | None, float]:
+    """One telemetry tick. `timeout` is the PER-PROBE budget, never a budget shared across probes.
+
+    The census, the footprint sample and the host-pressure sample each get the full budget, so a
+    slow census can no longer hand `footprint` a residue of it and a slow footprint can no longer
+    starve the host-pressure probe to zero. The aggregate is a staleness assertion applied after
+    the fact — `TELEMETRY_PROBE_BUDGETS` full budgets, so it is never shorter than one full sample.
+    """
     started = time.monotonic()
-    deadline = started + timeout
-
-    def remaining() -> float:
-        value = deadline - time.monotonic()
-        if value <= 0:
-            raise TimeoutError("aggregate footprint and host-pressure deadline expired")
-        return value
-
     live = group.refresh()
     if not live:
         raise RuntimeError("owned group has no live identities")
-    footprint = sampler.sample(
-        [item.pid for item in live], remaining(), group.root_pids(live))
-    pressure = host_sampler.sample(remaining()) if host_sampler is not None else None
+    footprint = sampler.sample([item.pid for item in live], timeout, group.root_pids(live))
+    pressure = host_sampler.sample(timeout) if host_sampler is not None else None
     elapsed = time.monotonic() - started
-    if elapsed > timeout:
-        raise TimeoutError(f"aggregate telemetry stale after {elapsed:.3f}s")
+    aggregate = timeout * TELEMETRY_PROBE_BUDGETS
+    if elapsed > aggregate:
+        raise TimeoutError(
+            f"aggregate telemetry stale after {elapsed:.3f}s of a {aggregate:.3f}s deadline")
     return live, footprint, pressure, elapsed
 
 
@@ -706,9 +744,19 @@ def guard(args: argparse.Namespace) -> int:
     child_reported_done = False
     completion_released = False
     telemetry_faults = 0
+    # Monotonic time of the FIRST failure of the current unrecovered fault run: the wall-clock
+    # anchor the tolerance window is measured from. `None` means the last tick produced a good
+    # sample.
+    telemetry_fault_since: float | None = None
     # The first failure of an unrecovered fault run, kept so a deadline reached while that run is
     # still open cannot relabel a failure that started before it.
     telemetry_fault_reason: str | None = None
+    # Fault run that reached the window, attached to the `hard_stop` event as its evidence.
+    telemetry_fault_history: dict[str, object] | None = None
+    # The most recent GOOD sample. A tolerated fault does not blank the guard's reading: this stays
+    # the current reading for the ceiling test until a new good sample replaces it.
+    last_good_footprint: int | None = None
+    last_good_pressure: HostPressure | None = None
     provider_phase: dict[str, object] | None = None
     provider_phase_sequence = 0
 
@@ -830,27 +878,58 @@ def guard(args: argparse.Namespace) -> int:
     def tolerate_telemetry_fault(error: BaseException, phase: str) -> bool:
         """Whether this failed tick is a transient sampling fault rather than telemetry loss.
 
-        A sample can fail because a short-lived group member raced its own exit, because
-        `footprint` timed out under load, or because the payload was short. None of that means the
-        group is unobserved, and a hard stop here SIGKILLs a live render. Only losing the guarded
-        root, or `TELEMETRY_FAULT_TOLERANCE` consecutive failures, is telemetry loss.
+        THE single escalation decision for every sampler failure path — a per-PID `footprint`
+        timeout, a `footprint` non-zero exit, a parse failure, the aggregate telemetry deadline,
+        and the host free-memory/swap probe all arrive here. None of them may escalate on its own,
+        and no one of them may spend a budget the others share: only losing the guarded root
+        (`RootTelemetryLost`, which is not a sampling fault but the loss of the thing being
+        guarded) or a fault run that occupies `--telemetry-fault-window` of WALL CLOCK with no good
+        sample is telemetry loss.
+
+        A tolerated fault leaves the last good sample standing as the current reading, so the
+        ceiling test never sees an unknown footprint.
         """
         nonlocal telemetry_faults, telemetry_fault_reason
+        nonlocal telemetry_fault_since, telemetry_fault_history
         if isinstance(error, RootTelemetryLost):
             return False
+        now = time.monotonic()
         telemetry_faults += 1
-        if telemetry_faults == 1:
+        if telemetry_fault_since is None:
+            telemetry_fault_since = now
             telemetry_fault_reason = f"telemetry_lost:{type(error).__name__}:{error}"
-        if telemetry_faults >= TELEMETRY_FAULT_TOLERANCE:
+        elapsed = now - telemetry_fault_since
+        history: dict[str, object] = {
+            "faults": telemetry_faults,
+            "elapsedSeconds": round(elapsed, 3),
+            "windowSeconds": args.telemetry_fault_window,
+            "firstReason": telemetry_fault_reason,
+        }
+        if elapsed >= args.telemetry_fault_window:
+            telemetry_fault_history = history
             return False
         events.emit({
             "event": "telemetry_fault", "phase": phase,
             "consecutiveFaults": telemetry_faults,
-            "toleranceTicks": TELEMETRY_FAULT_TOLERANCE,
+            "faultElapsedSeconds": history["elapsedSeconds"],
+            "faultWindowSeconds": args.telemetry_fault_window,
+            "lastGoodPhysicalFootprintBytes": last_good_footprint,
+            "lastGoodMemoryFreeBytes": (
+                last_good_pressure.memory_free_bytes if last_good_pressure is not None else None),
             "reason": f"{type(error).__name__}:{error}",
             "providerPhase": provider_phase,
         })
         return True
+
+    def record_good_sample(footprint: int, pressure: HostPressure | None) -> None:
+        """A good sample closes any open fault run and becomes the guard's current reading."""
+        nonlocal telemetry_faults, telemetry_fault_reason, telemetry_fault_since
+        nonlocal last_good_footprint, last_good_pressure
+        telemetry_faults = 0
+        telemetry_fault_since = None
+        telemetry_fault_reason = None
+        last_good_footprint = footprint
+        last_good_pressure = pressure
 
     def bounded_telemetry_timeout() -> float:
         if runtime_deadline is None:
@@ -870,16 +949,26 @@ def guard(args: argparse.Namespace) -> int:
             "processIdentities": [identity_json(item) for item in sorted(
                 group.retained, key=lambda item: item.pid)],
         })
-        try:
-            _, footprint, pressure, _ = observe_group(
-                group, sampler, host_sampler, args.telemetry_timeout,
-            )
-        except MonitorSignal:
-            raise
-        except Exception as error:
-            hard_stop = f"initial_telemetry_lost:{type(error).__name__}:{error}"
-        if hard_stop is None:
+        # The pre-release observation takes the SAME tolerance as every other sampler failure path.
+        # Nothing is rendering yet, but a `footprint` that timed out once is still not evidence
+        # about this host's memory, and refusing a capture on it is the same false negative as
+        # killing one.
+        while hard_stop is None:
+            try:
+                _, footprint, pressure, _ = observe_group(
+                    group, sampler, host_sampler, args.telemetry_timeout,
+                )
+            except MonitorSignal:
+                raise
+            except Exception as error:
+                if tolerate_telemetry_fault(error, "before_child_release"):
+                    time.sleep(args.sample_interval)
+                    continue
+                hard_stop = f"initial_telemetry_lost:{type(error).__name__}:{error}"
+                break
+            record_good_sample(footprint, pressure)
             hard_stop = check_initial_observation(footprint, pressure)
+            break
         if hard_stop is None:
             emit_sample(footprint, pressure, "before_child_release")
             group.release()
@@ -926,7 +1015,6 @@ def guard(args: argparse.Namespace) -> int:
 
                 def observe_startup() -> tuple[
                         str | None, int | None, HostPressure | None]:
-                    nonlocal telemetry_faults, telemetry_fault_reason
                     stopped = startup_deadline_reason()
                     if stopped is not None:
                         return stopped, None, None
@@ -971,8 +1059,7 @@ def guard(args: argparse.Namespace) -> int:
                             "child_attestation_telemetry_lost:"
                             f"{type(error).__name__}:{error}", None, None,
                         )
-                    telemetry_faults = 0
-                    telemetry_fault_reason = None
+                    record_good_sample(current_footprint, current_pressure)
                     stopped = startup_deadline_reason()
                     if stopped is None:
                         stopped = check_initial_observation(
@@ -1149,8 +1236,7 @@ def guard(args: argparse.Namespace) -> int:
                     continue
                 hard_stop = f"telemetry_lost:{type(error).__name__}:{error}"
                 break
-            telemetry_faults = 0
-            telemetry_fault_reason = None
+            record_good_sample(footprint, pressure)
             if runtime_deadline is not None and time.monotonic() >= runtime_deadline:
                 hard_stop = f"runtime_at_or_above_{args.max_runtime_seconds}s"
                 break
@@ -1215,6 +1301,9 @@ def guard(args: argparse.Namespace) -> int:
                 events.emit({
                     "event": "hard_stop", "reason": hard_stop,
                     "providerPhase": provider_phase,
+                    # Present only when a fault run reached the window: the evidence that this stop
+                    # is telemetry loss and not a single unlucky probe.
+                    "telemetryFaultHistory": telemetry_fault_history,
                     "processIdentities": [identity_json(item) for item in sorted(
                         group.retained, key=lambda item: item.pid)],
                 })
@@ -1250,9 +1339,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--host-memory-bytes", type=int)
     parser.add_argument("--min-memory-free-bytes", type=int)
     parser.add_argument("--min-swap-free-bytes", type=int)
-    parser.add_argument("--sample-interval", type=float, default=0.25)
-    parser.add_argument("--telemetry-timeout", type=float, default=1.0)
-    parser.add_argument("--child-attestation-timeout", type=float, default=5.0)
+    parser.add_argument("--sample-interval", type=float, default=SAMPLE_INTERVAL_SECONDS)
+    parser.add_argument("--telemetry-timeout", type=float, default=TELEMETRY_TIMEOUT_SECONDS)
+    parser.add_argument(
+        "--telemetry-fault-window", type=float, default=TELEMETRY_FAULT_WINDOW_SECONDS)
+    parser.add_argument(
+        "--child-attestation-timeout", type=float,
+        default=CHILD_ATTESTATION_TIMEOUT_SECONDS)
     parser.add_argument("--term-grace", type=float, default=0.5)
     parser.add_argument("--event-file", type=Path)
     parser.add_argument("--telemetry-file", type=Path)
@@ -1271,7 +1364,7 @@ def parse_args() -> argparse.Namespace:
         parser.error("a guarded command is required after --")
     for name in [
             "max_footprint_bytes", "sample_interval", "telemetry_timeout",
-            "child_attestation_timeout", "term_grace"]:
+            "telemetry_fault_window", "child_attestation_timeout", "term_grace"]:
         if getattr(args, name) <= 0:
             parser.error(f"--{name.replace('_', '-')} must be positive")
     if args.max_runtime_seconds is not None and args.max_runtime_seconds <= 0:

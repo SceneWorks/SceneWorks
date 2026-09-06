@@ -832,10 +832,22 @@ SCENEWORKS_FLUX2_ROOT=/abs/path/.../snapshots/<rev>/<tier>   # q4 | q8 — tier 
 # `min(incident − 2 GiB, hardware.memoryBytes − 2 GiB)` and its whole-host free floor is the flat
 # 2 GiB reserve. `hardware.wiredLimitBytes` is NOT a term in either: it caps Metal buffers, while
 # the guard samples the kernel `phys_footprint`, which counts non-Metal pages too — as a hard stop
-# it killed a `flux2_dev:bf16` render this host completes (sc-22738, measured 2026-09-06). The
-# guard also tolerates a group member that exits between the process census and the footprint
-# sample; only losing the guarded ROOT process, or three consecutive failed ticks, is telemetry
-# loss.
+# it killed a `flux2_dev:bf16` render this host completes (sc-22738, measured 2026-09-06). A hard
+# stop has exactly THREE triggers: a GOOD sample at or above the footprint ceiling (or below the
+# free-memory/swap floor); loss of the guarded ROOT process from a sample it was enumerated for;
+# and sampler faults that persist for `--telemetry-fault-window` (60 s) of WALL CLOCK with no good
+# sample, which stops as `telemetry_lost` carrying its `telemetryFaultHistory`. Every sampler
+# failure path — a `/usr/bin/footprint` timeout or non-zero exit, a parse failure, the aggregate
+# telemetry deadline, the host free-memory probe — shares that one window, and NONE of them
+# escalates on its own: a tolerated tick emits `telemetry_fault` and keeps the previous good sample
+# as the current reading. A false hard stop is a process-group SIGKILL through a live Metal command
+# buffer, which has wedged this host's GPU; a late stop is the cheaper failure. The cadence is one
+# tick per `--sample-interval` (2 s) and each probe inside a tick — census, footprint, host
+# pressure — gets its own full `--telemetry-timeout` (10 s), with the aggregate staleness deadline
+# derived as three of those, never shorter than one full sample. Both defaults matter: at 0.25 s /
+# 1 s shared across the probes, `footprint` on a 38 GB process received 0.31 s of budget and
+# `bernini:q4:mlx` was SIGKILLed 56.8 minutes in, at 87% memory free, by three unlucky ticks inside
+# 1.2 s.
 SCENEWORKS_LTX_REPOSITORY=SceneWorks/ltx-2.3-mlx             # fixed; validated against LTX_REPOSITORY
 SCENEWORKS_LTX_REVISION=<exact artifact revision>
 SCENEWORKS_LTX_ROOT=/abs/path/.../snapshots/<rev>/<tier>     # bf16 | q4 | q8, derived from the plan target
