@@ -133,9 +133,15 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ inputs.ref }}
-          # The campaign pushes a NEW branch. A shallow clone cannot do that ("shallow update not
-          # allowed"), and the harness reads history to decide what is already current.
-          fetch-depth: 0
+          # The job only ever needs the tip of `ref`: branch.sh cuts a brand-new branch from HEAD
+          # (`git switch -c`), the harness commits per anchor on top of that, and push.sh pushes
+          # that new branch -- a new branch whose base commit already exists on the remote pushes
+          # fine from a shallow clone. Nothing in scripts/ci/memory-catalog/*.sh or
+          # measure-memory-catalog.mjs reads history beyond HEAD (no `git log`, `merge-base`,
+          # `describe`, or history-dependent `rev-list`). A depth-0 clone here was pulling the
+          # repo's full 2+ GiB history pack on every dispatch -- 27+ minutes on the Windows CUDA
+          # runner vs 8 seconds shallow -- for no benefit.
+          fetch-depth: 1
 
       - name: Cut the campaign branch
         id: branch
@@ -233,7 +239,8 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ inputs.ref }}
-          fetch-depth: 0
+          # See the mlx job's checkout step for why a shallow clone is sufficient here too.
+          fetch-depth: 1
 
       - name: Cut the campaign branch
         id: branch
