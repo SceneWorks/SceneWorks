@@ -21,6 +21,7 @@
 //! provider's own request scope.
 
 use super::*;
+use candle_gen::gen_core::tiling::VaeTiling;
 use runtime_cuda::gen_core::wan_i2v_memory::WanI2vRoute;
 use runtime_cuda::gen_core::{MemoryCalibrationIdentity, ReplacementMode};
 
@@ -319,6 +320,34 @@ fn validate_geometry(arm: Arm, geometry: Geometry) -> Result<(), String> {
         }
     }
     Ok(())
+}
+
+/// How many frames this arm's engine RENDERS for its planned request (sc-22738).
+///
+/// The MLX sibling learned this the expensive way: its z16 `VaeTiling` is NON-causal, so a 77-frame
+/// SCAIL-2 / A14B request decodes to 80 output frames and an equality against the requested count
+/// refused a completed 2h25m capture. Every Candle VAE here declares a CAUSAL temporal decode, so
+/// this resolves to the requested count today — but it is derived from the engine's own geometry
+/// through the shared rule [`protocol::vae_decoded_frame_count`] rather than assumed, so a pin that
+/// changes a decoder's causality reds a unit test instead of a campaign render.
+fn rendered_frame_count(arm: Arm, geometry: Geometry) -> Result<u32, String> {
+    let vae = engine_vae(arm)?;
+    protocol::vae_decoded_frame_count(geometry.frames, vae.temporal_scale, vae.causal_temporal)
+        .map_err(|error| format!("{}: {error}", arm.provider))
+}
+
+/// The concrete VAE geometry this arm's engine decodes through, resolved BY PROVIDER ID from the
+/// engine's own resolver rather than tabled here — the same way this file asks the engine for its
+/// buckets and rates.
+fn engine_vae(arm: Arm) -> Result<VaeTiling, String> {
+    candle_gen_wan::vae_tiling(arm.provider)
+        .or_else(|| candle_gen_scail2::vae_tiling(arm.provider))
+        .ok_or_else(|| {
+            format!(
+                "{} publishes no VAE geometry; its decoded frame count cannot be derived",
+                arm.provider
+            )
+        })
 }
 
 fn target_geometry(request: &Value, arm: Arm) -> Result<Geometry, String> {
@@ -841,12 +870,22 @@ pub(super) fn run(request: &Value) -> Result<Value, String> {
             arm.provider, arm.fps
         ));
     }
-    if frames.len() as u64 != u64::from(geometry.frames) {
+    // The engine's own decoded depth for this request, not the requested count (sc-22738): a
+    // non-causal temporal decode materializes `temporal_scale` output frames per latent frame, and
+    // production keeps whatever clip the engine returns.
+    let expected_frames = rendered_frame_count(arm, geometry)?;
+    if frames.len() as u64 != u64::from(expected_frames) {
         return Err(format!(
-            "{} rendered {} frames for a {}-frame request",
+            "{} rendered {} frames for a {}-frame request; its {} VAE decodes that request \
+             to {expected_frames} frames",
             arm.provider,
             frames.len(),
-            geometry.frames
+            geometry.frames,
+            if engine_vae(arm)?.causal_temporal {
+                "causal"
+            } else {
+                "non-causal"
+            }
         ));
     }
     let first = frames
@@ -904,7 +943,8 @@ pub(super) fn run(request: &Value) -> Result<Value, String> {
                     ("denoiseDevicePeakDelta", "bytes", denoise_bytes),
                     ("decodeDevicePeakDelta", "bytes", decode_bytes),
                     ("overallDevicePeakDelta", "bytes", overall_bytes),
-                    ("renderedFrames", "count", u64::from(geometry.frames)),
+                    ("renderedFrames", "count", u64::from(expected_frames)),
+                    ("requestedFrames", "count", u64::from(geometry.frames)),
                     ("renderedFps", "fps", u64::from(fps)),
                     (
                         "referenceCount",
@@ -959,6 +999,49 @@ mod tests {
             assert!(
                 validate_geometry(arm, crossed).is_err(),
                 "{}: an off-menu frame count must be refused",
+                arm.provider
+            );
+        }
+    }
+
+    /// sc-22738 — the rendered frame count is the ENGINE's decoded depth, not the requested count.
+    ///
+    /// Every Candle VAE on this arm declares a CAUSAL temporal decode, so the decoded depth equals
+    /// the requested count — the opposite of the MLX lane, whose non-causal z16 renders 80 frames
+    /// for a 77-frame request and refused a completed capture over it. Both halves are asserted:
+    /// the causality comes from each engine's own resolved geometry, and the shared rule's
+    /// non-causal branch is pinned on the same numbers so the equality here is a derived result
+    /// rather than an assumption.
+    ///
+    /// Mutations that fail this: returning `geometry.frames` from `rendered_frame_count`; flipping
+    /// the causal branch in `protocol::vae_decoded_frame_count`.
+    #[test]
+    fn the_rendered_frame_count_is_the_engines_own_decoded_depth() {
+        let geometry = Geometry {
+            width: 832,
+            height: 480,
+            frames: 77,
+        };
+        for arm in ARMS {
+            let vae = engine_vae(arm).unwrap_or_else(|error| panic!("{error}"));
+            assert!(
+                vae.causal_temporal,
+                "{}: this arm's decoded-frame expectation rests on a causal decode",
+                arm.provider
+            );
+            assert_eq!(
+                rendered_frame_count(arm, geometry).unwrap(),
+                geometry.frames,
+                "{}",
+                arm.provider
+            );
+            // Not vacuous: the same rule over a NON-causal decode of the same scale over-delivers,
+            // which is exactly what the MLX siblings of these engines do.
+            assert_eq!(
+                protocol::vae_decoded_frame_count(geometry.frames, vae.temporal_scale, false)
+                    .unwrap(),
+                geometry.frames + 3,
+                "{}",
                 arm.provider
             );
         }

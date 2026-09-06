@@ -5905,6 +5905,26 @@ fn run_sc22737_video_capture(request: &Value, arm: Sc22737VideoArm) -> Result<Va
     }
     let rendered = u32::try_from(frames.len())
         .map_err(|_| format!("{} frame count does not fit u32", arm.model_id))?;
+    // sc-22738 sweep: a bare equality is correct for all four members of this table, and each for a
+    // reason read off the pinned engines rather than assumed.
+    //
+    //  - **Bernini (49 frames)**: the CANDLE z16 is causal — `candle_gen_wan::vae16::WanVae16`
+    //    declares `causal_temporal: true` as its own literal
+    //    (`candle-gen-wan/src/vae16.rs:344-349`), deliberately distinct from the shared
+    //    `VaeTiling::WAN` the MLX z16 binds, and `candle-gen-bernini/src/lib.rs:73` inherits it. So
+    //    `out_f = 1 + (f_lat−1)·4 = 49` for a `1 mod 4` count. This is the one place the two lanes
+    //    genuinely disagree about the same VAE: the MLX Bernini arm had to stop using an equality
+    //    for exactly this reason, and this arm must not copy that change.
+    //  - **LTX-2.3 (97 frames)**: `VaeTiling::LTX` is causal at ×8 and the engine refuses any
+    //    request off the `1 + 8k` lattice (`candle-gen-ltx/src/lib.rs:1584-1588`); 97 is on it.
+    //  - **MiniMax-H3 (124 frames)**: publishes no `VaeTiling` at all, and asserts this same
+    //    equality itself immediately before returning
+    //    (`candle-gen-minimax-h3/src/model.rs:1042-1047`, `:1338-1343`), on a `17n+5` lattice it
+    //    refuses to leave.
+    //
+    // None of the four is a non-causal, non-trimming decode, so none needs
+    // `protocol::vae_decoded_frame_count`; the SCAIL-2/Wan arms that do carry it in
+    // `candle_wan_scail2`.
     if rendered != target.frames {
         return Err(format!(
             "{} rendered {rendered} frames for a {}-frame request",

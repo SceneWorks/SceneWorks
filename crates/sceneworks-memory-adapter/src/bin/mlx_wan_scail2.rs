@@ -279,6 +279,35 @@ fn validate_geometry(arm: Arm, geometry: Geometry) -> Result<(), String> {
     Ok(())
 }
 
+/// How many frames this arm's engine RENDERS for its planned request (sc-22738).
+///
+/// Not always `geometry.frames`: the shared rule [`protocol::vae_decoded_frame_count`] is applied
+/// to THIS arm's own `VaeTiling`, so the non-causal z16 routes (SCAIL-2 and both A14B experts)
+/// answer `t_lat · 4` — 80 for a 77-frame request — while the causal z48 TI2V-5B answers the
+/// requested count. The plan keeps asking for the count production asks for (`wan_frame_count`
+/// leaves 77 at 77, and nothing on the worker's path trims the engine's longer clip), and the
+/// record's `renderedFrames` receipt reports what actually came back.
+fn rendered_frame_count(arm: Arm, geometry: Geometry) -> Result<u32, String> {
+    let vae = engine_vae(arm)?;
+    protocol::vae_decoded_frame_count(geometry.frames, vae.temporal_scale, vae.causal_temporal)
+        .map_err(|error| format!("{}: {error}", arm.provider))
+}
+
+/// The concrete VAE geometry this arm's engine decodes through, resolved BY PROVIDER ID from the
+/// engine's own registry-facing resolver rather than tabled here — the same way this file asks the
+/// engine for its buckets and rates. It carries the two facts the decoded-frame rule needs: the
+/// temporal scale and whether the temporal decode is causal.
+fn engine_vae(arm: Arm) -> Result<VaeTiling, String> {
+    mlx_gen_wan::vae_tiling(arm.provider)
+        .or_else(|| mlx_gen_scail2::vae_tiling(arm.provider))
+        .ok_or_else(|| {
+            format!(
+                "{} publishes no VAE geometry; its decoded frame count cannot be derived",
+                arm.provider
+            )
+        })
+}
+
 /// Read the four declared geometry axes and validate them against the engine.
 fn target_geometry(request: &Value, arm: Arm) -> Result<Geometry, String> {
     let geometry = protocol::planned(request)?
@@ -809,12 +838,23 @@ pub(super) fn run(request: &Value) -> Result<Value, String> {
             arm.provider
         ));
     }
-    if measured.len() as u64 != u64::from(geometry.frames) {
+    // The engine's own decoded depth for this request, NOT the requested count: a non-causal z16
+    // decode materializes four output frames per latent frame, so a 77-frame SCAIL-2 / A14B request
+    // renders 80 (sc-22738). Production asks for the same count and keeps the clip it gets, so the
+    // adapter measures the same path instead of refusing it.
+    let expected_frames = rendered_frame_count(arm, geometry)?;
+    if measured.len() as u64 != u64::from(expected_frames) {
         return Err(format!(
-            "{} rendered {} frames for a {}-frame request",
+            "{} rendered {} frames for a {}-frame request; its {} VAE decodes that request \
+             to {expected_frames} frames",
             arm.provider,
             measured.len(),
-            geometry.frames
+            geometry.frames,
+            if engine_vae(arm)?.causal_temporal {
+                "causal"
+            } else {
+                "non-causal"
+            }
         ));
     }
     if output_fps != arm.fps {
@@ -980,7 +1020,8 @@ pub(super) fn run(request: &Value) -> Result<Value, String> {
                 ("negativeMutationMaximumErrorPer255", "count", (mutated_maximum * 255.0).round() as u64),
                 ("negativeMutationMeanErrorPer255", "count", (mutated_mean * 255.0).round() as u64),
                 ("negativeMutationRootMeanSquareErrorPer255", "count", (mutated_rms * 255.0).round() as u64),
-                ("renderedFrames", "count", u64::from(geometry.frames)),
+                ("renderedFrames", "count", u64::from(expected_frames)),
+                ("requestedFrames", "count", u64::from(geometry.frames)),
                 ("renderedFps", "count", u64::from(output_fps)),
                 // sc-22738. The carrier's reference count was the one fact the dropped top-level
                 // `output` object published that these measurements did not: the record schema is
@@ -1073,6 +1114,100 @@ mod tests {
                 arm.provider
             );
         }
+    }
+
+    /// sc-22738 — the rendered frame count is the ENGINE's decoded depth, not the requested count.
+    ///
+    /// The campaign's `scail2_14b:bf16:mlx` anchor rendered 77 requested frames as 80 and the arm
+    /// refused the capture after 2h25m. The engine is right: `VaeTiling::WAN` is NON-causal, so the
+    /// z16 decode materializes `t_lat * temporal_scale` output frames, and 77 frames are 20 latent
+    /// frames. This binds the arm's rule to the engines' OWN functions rather than to a second
+    /// literal — gen-core's `TilingConfig::plan` publishes the same `out_f`, and `latent_shape` the
+    /// same latent depth — so a pin that changed either would red here in milliseconds instead of
+    /// after a multi-hour render.
+    ///
+    /// Mutations that fail this: flipping the causal branch in
+    /// `protocol::vae_decoded_frame_count`; using `requested` as the latent depth.
+    #[test]
+    fn the_rendered_frame_rule_is_the_engines_own_decoded_depth() {
+        for arm in ARMS {
+            let vae = engine_vae(arm).unwrap_or_else(|error| panic!("{error}"));
+            for geometry in [
+                Geometry {
+                    width: 832,
+                    height: 480,
+                    frames: 77,
+                },
+                Geometry {
+                    width: 832,
+                    height: 480,
+                    frames: 121,
+                },
+            ] {
+                let latent = mlx_gen_wan::pipeline::latent_shape(
+                    geometry.frames as usize,
+                    geometry.height,
+                    geometry.width,
+                    1,
+                    (
+                        vae.temporal_scale as usize,
+                        vae.spatial_scale as usize,
+                        vae.spatial_scale as usize,
+                    ),
+                )
+                .expect("the wan latent rule accepts a planned frame count");
+                let engine_out_f = TilingConfig {
+                    spatial: None,
+                    temporal: None,
+                }
+                .plan(vae, latent[1], latent[2], latent[3])
+                .out_f;
+                assert_eq!(
+                    i64::from(rendered_frame_count(arm, geometry).unwrap()),
+                    i64::from(engine_out_f),
+                    "{} at {} frames",
+                    arm.provider,
+                    geometry.frames
+                );
+            }
+        }
+    }
+
+    /// The concrete sc-22738 consequence, per arm, so the rule cannot silently become an identity.
+    ///
+    /// SCAIL-2 and both A14B experts decode through the non-causal z16 VAE and over-deliver by one
+    /// temporal stride minus one; the causal z48 TI2V-5B returns exactly what was asked for. The
+    /// worker asks for the same counts (`wan_frame_count` leaves a `4k + 1` request alone) and keeps
+    /// the clip the engine returns, so the adapter must accept the same clip.
+    ///
+    /// Mutation that fails this: returning `geometry.frames` from [`rendered_frame_count`] — the
+    /// equality that refused the campaign's SCAIL-2 anchor — or resolving every arm to the causal
+    /// z48 geometry.
+    #[test]
+    fn the_non_causal_routes_render_three_frames_more_than_requested() {
+        let geometry = Geometry {
+            width: 832,
+            height: 480,
+            frames: 77,
+        };
+        for arm in [SCAIL2, T2V_A14B, I2V_A14B] {
+            assert!(
+                !engine_vae(arm).unwrap().causal_temporal,
+                "{}",
+                arm.provider
+            );
+            assert_eq!(
+                rendered_frame_count(arm, geometry).unwrap(),
+                geometry.frames + 3,
+                "{}",
+                arm.provider
+            );
+        }
+        assert!(engine_vae(TI2V_5B).unwrap().causal_temporal);
+        assert_eq!(
+            rendered_frame_count(TI2V_5B, geometry).unwrap(),
+            geometry.frames
+        );
     }
 
     /// An unrecognized tier is refused BY NAME on every arm, never minted into a plausible identity
