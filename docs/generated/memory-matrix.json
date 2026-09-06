@@ -1,7 +1,7 @@
 {
   "schemaVersion": 11,
   "generatedFrom": {
-    "sceneWorksRevision": "source-tree:7b38e8d6040ed0dc696d8d6fb6ef4988e61f93ed2ba4630d961c7d29cc258d5e",
+    "sceneWorksRevision": "source-tree:abbaebae5b0d4b0d7a8210cd452fa7d1fb80082fc0c9e3e1676c3eb08e1881a7",
     "sources": {
       "manifest": {
         "path": "config/manifests/builtin.models.jsonc",
@@ -69,7 +69,7 @@
       },
       "anchorStore": {
         "path": "config/memory-anchors.json",
-        "sha256": "308bea4c8f162234fc1e229c94be8e883fd4fbc1e7c9c6c64bb788ae4f9d023b"
+        "sha256": "098e4471152234e0cd8a706d8ca2c0a91b0ba3935de3975e2b41f15068fcfd37"
       },
       "anchorLoaderClosures": {
         "path": "config/anchor-loader-closures.json",
@@ -77,7 +77,7 @@
       },
       "anchorDerivation": {
         "path": "crates/sceneworks-core/src/memory_anchor.rs",
-        "sha256": "65e571d0596da6dab45e72985bd4e86852e603a1624986055193da1b2a107a9c"
+        "sha256": "b5ffdf3372da92c623ce3f34a8601a7e21f39bb2091783e12f2e29f913f2a220"
       },
       "anchorAdmission": {
         "path": "crates/sceneworks-worker/src/video_admission.rs",
@@ -138,10 +138,10 @@
       "video": 11
     },
     "cells": 9265,
-    "publishedCells": 1072,
-    "elidedCells": 8193,
+    "publishedCells": 1106,
+    "elidedCells": 8159,
     "elidedByState": {
-      "Implemented": 3819,
+      "Implemented": 3785,
       "Missing": 4374
     },
     "publicationPredicate": "A coordinate is published when it carries a claim a per-lane census cannot: a measured memory anchor covers its (model, tier, backend lane), or it is structurally exempt. A bare `Implemented` or `Missing` state is a property of the whole lane, replicated across every tier x mode x overlay, and is counted in `summary.elidedByState` and the per-(entry, backend, rung) `coverage` census instead of restated thousands of times.",
@@ -162,9 +162,9 @@
         "reason": "both lanes ARE routed (VideoModelCaps mlx+candle, resolve_candle_video_route's MiniMaxH3 arm), but this generator's route parsers cannot enumerate either: the MLX resolver is a PREFIX PREDICATE and the Candle arm lives outside candle_video_engine_id. Matrix-only — the E1 measurability burndown reads the routing catalog and DOES claim these cells"
       }
     ],
-    "anchors": 42,
-    "analyticOnlyCells": 295,
-    "anchoredCells": 609,
+    "anchors": 43,
+    "analyticOnlyCells": 294,
+    "anchoredCells": 643,
     "staleAnchors": 10,
     "attestedAnchors": 5,
     "fullModels": 0
@@ -5188,6 +5188,24 @@
       "cells": 30
     },
     {
+      "id": "kolors:mlx:q4:base:base:kolors-mlx-chatglm3-sdxl-unet-ladder-v1:imc-0bd84dd1c97631eaf2b1",
+      "modelId": "kolors",
+      "backend": "mlx",
+      "tier": "q4",
+      "provider": "kolors",
+      "mode": "text_to_image",
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "frames": 1,
+        "fps": null
+      },
+      "source": "docs/calibration/sc-22738/kolors-q4-mlx-evidence.json",
+      "current": true,
+      "currencyAttestation": null,
+      "cells": 34
+    },
+    {
       "id": "krea_2_turbo:candle:q4:base:base:krea-turbo-cuda-phase-curves-v1:imc-7f1a63e5459300aed47c",
       "modelId": "krea_2_turbo",
       "backend": "candle",
@@ -9386,11 +9404,11 @@
       "backend": "mlx",
       "rung": "bounded_decode",
       "coordinates": 36,
-      "published": 0,
-      "elided": 36,
+      "published": 1,
+      "elided": 35,
       "implemented": 1,
       "states": {
-        "Implemented": 1,
+        "Anchored": 1,
         "Missing": 35
       },
       "implementedBy": {
@@ -9417,12 +9435,12 @@
       "backend": "mlx",
       "rung": "bounded_transformer_residency",
       "coordinates": 36,
-      "published": 6,
-      "elided": 30,
+      "published": 15,
+      "elided": 21,
       "implemented": 24,
       "states": {
-        "Anchored": 6,
-        "Implemented": 18,
+        "Anchored": 15,
+        "Implemented": 9,
         "Missing": 12
       },
       "implementedBy": {
@@ -9449,12 +9467,12 @@
       "backend": "mlx",
       "rung": "resident",
       "coordinates": 36,
-      "published": 12,
-      "elided": 24,
+      "published": 24,
+      "elided": 12,
       "implemented": 36,
       "states": {
-        "Anchored": 12,
-        "Implemented": 24
+        "Anchored": 24,
+        "Implemented": 12
       }
     },
     {
@@ -9462,12 +9480,12 @@
       "backend": "mlx",
       "rung": "staged_residency",
       "coordinates": 36,
-      "published": 12,
-      "elided": 24,
+      "published": 24,
+      "elided": 12,
       "implemented": 36,
       "states": {
-        "Anchored": 12,
-        "Implemented": 24
+        "Anchored": 24,
+        "Implemented": 12
       }
     },
     {
@@ -34292,6 +34310,1822 @@
         "anchor": [
           {
             "source": "config/memory-anchors.json#kolors:mlx:bf16:base:base:kolors-bf16-mlx-shared-ladder-v1:imc-95a91671619b4e40f246"
+          }
+        ]
+      }
+    },
+    {
+      "id": "kolors:kolors:mlx:q4:character_image:control:resident",
+      "modelId": "kolors",
+      "resolvedRoute": "kolors",
+      "provider": "kolors",
+      "backend": "mlx",
+      "tier": "q4",
+      "mode": "character_image",
+      "overlay": "control",
+      "rung": "resident",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "768x768",
+          "1024x1024",
+          "1280x768",
+          "768x1280"
+        ]
+      },
+      "strategyParameters": {},
+      "implementation": "implemented",
+      "anchor": {
+        "id": "kolors:mlx:q4:base:base:kolors-mlx-chatglm3-sdxl-unet-ladder-v1:imc-0bd84dd1c97631eaf2b1",
+        "tier": "q4",
+        "source": "config/memory-anchors.json#kolors:mlx:q4:base:base:kolors-mlx-chatglm3-sdxl-unet-ladder-v1:imc-0bd84dd1c97631eaf2b1",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 15521,
+      "owningModelStory": 15486,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "crates/sceneworks-worker/src/engines.rs#MODEL_TABLE"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#kolors:mlx:q4:base:base:kolors-mlx-chatglm3-sdxl-unet-ladder-v1:imc-0bd84dd1c97631eaf2b1"
+          }
+        ]
+      }
+    },
+    {
+      "id": "kolors:kolors:mlx:q4:character_image:control:staged_residency",
+      "modelId": "kolors",
+      "resolvedRoute": "kolors",
+      "provider": "kolors",
+      "backend": "mlx",
+      "tier": "q4",
+      "mode": "character_image",
+      "overlay": "control",
+      "rung": "staged_residency",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "768x768",
+          "1024x1024",
+          "1280x768",
+          "768x1280"
+        ]
+      },
+      "strategyParameters": {
+        "phaseOrder": [
+          "conditioning",
+          "denoise",
+          "decode"
+        ]
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "kolors:mlx:q4:base:base:kolors-mlx-chatglm3-sdxl-unet-ladder-v1:imc-0bd84dd1c97631eaf2b1",
+        "tier": "q4",
+        "source": "config/memory-anchors.json#kolors:mlx:q4:base:base:kolors-mlx-chatglm3-sdxl-unet-ladder-v1:imc-0bd84dd1c97631eaf2b1",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 15521,
+      "owningModelStory": 15486,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "crates/sceneworks-worker/src/mlx_fit_gate.rs#engine_engages_staged_residency"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#kolors:mlx:q4:base:base:kolors-mlx-chatglm3-sdxl-unet-ladder-v1:imc-0bd84dd1c97631eaf2b1"
+          }
+        ]
+      }
+    },
+    {
+      "id": "kolors:kolors:mlx:q4:character_image:identity:bounded_transformer_residency",
+      "modelId": "kolors",
+      "resolvedRoute": "kolors",
+      "provider": "kolors",
+      "backend": "mlx",
+      "tier": "q4",
+      "mode": "character_image",
+      "overlay": "identity",
+      "rung": "bounded_transformer_residency",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "768x768",
+          "1024x1024",
+          "1280x768",
+          "768x1280"
+        ]
+      },
+      "strategyParameters": {
+        "transformerWindowSize": 1,
+        "transformerWindowComponent": "Dit",
+        "publishedRanges": {
+          "transformerWindowSizes": [
+            1,
+            2,
+            5,
+            10
+          ],
+          "transformerWindowComponents": [
+            "Dit",
+            "TextEncoder",
+            "Both"
+          ]
+        }
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "kolors:mlx:q4:base:base:kolors-mlx-chatglm3-sdxl-unet-ladder-v1:imc-0bd84dd1c97631eaf2b1",
+        "tier": "q4",
+        "source": "config/memory-anchors.json#kolors:mlx:q4:base:base:kolors-mlx-chatglm3-sdxl-unet-ladder-v1:imc-0bd84dd1c97631eaf2b1",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 15521,
+      "owningModelStory": 15486,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "inference:crates/media/mlx-gen/mlx-gen-kolors/src/memory_strategy.rs"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#kolors:mlx:q4:base:base:kolors-mlx-chatglm3-sdxl-unet-ladder-v1:imc-0bd84dd1c97631eaf2b1"
+          }
+        ]
+      }
+    },
+    {
+      "id": "kolors:kolors:mlx:q4:character_image:identity:resident",
+      "modelId": "kolors",
+      "resolvedRoute": "kolors",
+      "provider": "kolors",
+      "backend": "mlx",
+      "tier": "q4",
+      "mode": "character_image",
+      "overlay": "identity",
+      "rung": "resident",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "768x768",
+          "1024x1024",
+          "1280x768",
+          "768x1280"
+        ]
+      },
+      "strategyParameters": {},
+      "implementation": "implemented",
+      "anchor": {
+        "id": "kolors:mlx:q4:base:base:kolors-mlx-chatglm3-sdxl-unet-ladder-v1:imc-0bd84dd1c97631eaf2b1",
+        "tier": "q4",
+        "source": "config/memory-anchors.json#kolors:mlx:q4:base:base:kolors-mlx-chatglm3-sdxl-unet-ladder-v1:imc-0bd84dd1c97631eaf2b1",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 15521,
+      "owningModelStory": 15486,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "crates/sceneworks-worker/src/engines.rs#MODEL_TABLE"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#kolors:mlx:q4:base:base:kolors-mlx-chatglm3-sdxl-unet-ladder-v1:imc-0bd84dd1c97631eaf2b1"
+          }
+        ]
+      }
+    },
+    {
+      "id": "kolors:kolors:mlx:q4:character_image:identity:staged_residency",
+      "modelId": "kolors",
+      "resolvedRoute": "kolors",
+      "provider": "kolors",
+      "backend": "mlx",
+      "tier": "q4",
+      "mode": "character_image",
+      "overlay": "identity",
+      "rung": "staged_residency",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "768x768",
+          "1024x1024",
+          "1280x768",
+          "768x1280"
+        ]
+      },
+      "strategyParameters": {
+        "phaseOrder": [
+          "conditioning",
+          "denoise",
+          "decode"
+        ]
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "kolors:mlx:q4:base:base:kolors-mlx-chatglm3-sdxl-unet-ladder-v1:imc-0bd84dd1c97631eaf2b1",
+        "tier": "q4",
+        "source": "config/memory-anchors.json#kolors:mlx:q4:base:base:kolors-mlx-chatglm3-sdxl-unet-ladder-v1:imc-0bd84dd1c97631eaf2b1",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 15521,
+      "owningModelStory": 15486,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "crates/sceneworks-worker/src/mlx_fit_gate.rs#engine_engages_staged_residency"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#kolors:mlx:q4:base:base:kolors-mlx-chatglm3-sdxl-unet-ladder-v1:imc-0bd84dd1c97631eaf2b1"
+          }
+        ]
+      }
+    },
+    {
+      "id": "kolors:kolors:mlx:q4:character_image:lora:bounded_transformer_residency",
+      "modelId": "kolors",
+      "resolvedRoute": "kolors",
+      "provider": "kolors",
+      "backend": "mlx",
+      "tier": "q4",
+      "mode": "character_image",
+      "overlay": "lora",
+      "rung": "bounded_transformer_residency",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "768x768",
+          "1024x1024",
+          "1280x768",
+          "768x1280"
+        ]
+      },
+      "strategyParameters": {
+        "transformerWindowSize": 1,
+        "transformerWindowComponent": "Dit",
+        "publishedRanges": {
+          "transformerWindowSizes": [
+            1,
+            2,
+            5,
+            10
+          ],
+          "transformerWindowComponents": [
+            "Dit",
+            "TextEncoder",
+            "Both"
+          ]
+        }
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "kolors:mlx:q4:base:base:kolors-mlx-chatglm3-sdxl-unet-ladder-v1:imc-0bd84dd1c97631eaf2b1",
+        "tier": "q4",
+        "source": "config/memory-anchors.json#kolors:mlx:q4:base:base:kolors-mlx-chatglm3-sdxl-unet-ladder-v1:imc-0bd84dd1c97631eaf2b1",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 15521,
+      "owningModelStory": 15486,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "inference:crates/media/mlx-gen/mlx-gen-kolors/src/memory_strategy.rs"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#kolors:mlx:q4:base:base:kolors-mlx-chatglm3-sdxl-unet-ladder-v1:imc-0bd84dd1c97631eaf2b1"
+          }
+        ]
+      }
+    },
+    {
+      "id": "kolors:kolors:mlx:q4:character_image:lora:resident",
+      "modelId": "kolors",
+      "resolvedRoute": "kolors",
+      "provider": "kolors",
+      "backend": "mlx",
+      "tier": "q4",
+      "mode": "character_image",
+      "overlay": "lora",
+      "rung": "resident",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "768x768",
+          "1024x1024",
+          "1280x768",
+          "768x1280"
+        ]
+      },
+      "strategyParameters": {},
+      "implementation": "implemented",
+      "anchor": {
+        "id": "kolors:mlx:q4:base:base:kolors-mlx-chatglm3-sdxl-unet-ladder-v1:imc-0bd84dd1c97631eaf2b1",
+        "tier": "q4",
+        "source": "config/memory-anchors.json#kolors:mlx:q4:base:base:kolors-mlx-chatglm3-sdxl-unet-ladder-v1:imc-0bd84dd1c97631eaf2b1",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 15521,
+      "owningModelStory": 15486,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "crates/sceneworks-worker/src/engines.rs#MODEL_TABLE"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#kolors:mlx:q4:base:base:kolors-mlx-chatglm3-sdxl-unet-ladder-v1:imc-0bd84dd1c97631eaf2b1"
+          }
+        ]
+      }
+    },
+    {
+      "id": "kolors:kolors:mlx:q4:character_image:lora:staged_residency",
+      "modelId": "kolors",
+      "resolvedRoute": "kolors",
+      "provider": "kolors",
+      "backend": "mlx",
+      "tier": "q4",
+      "mode": "character_image",
+      "overlay": "lora",
+      "rung": "staged_residency",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "768x768",
+          "1024x1024",
+          "1280x768",
+          "768x1280"
+        ]
+      },
+      "strategyParameters": {
+        "phaseOrder": [
+          "conditioning",
+          "denoise",
+          "decode"
+        ]
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "kolors:mlx:q4:base:base:kolors-mlx-chatglm3-sdxl-unet-ladder-v1:imc-0bd84dd1c97631eaf2b1",
+        "tier": "q4",
+        "source": "config/memory-anchors.json#kolors:mlx:q4:base:base:kolors-mlx-chatglm3-sdxl-unet-ladder-v1:imc-0bd84dd1c97631eaf2b1",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 15521,
+      "owningModelStory": 15486,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "crates/sceneworks-worker/src/mlx_fit_gate.rs#engine_engages_staged_residency"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#kolors:mlx:q4:base:base:kolors-mlx-chatglm3-sdxl-unet-ladder-v1:imc-0bd84dd1c97631eaf2b1"
+          }
+        ]
+      }
+    },
+    {
+      "id": "kolors:kolors:mlx:q4:character_image:none:bounded_transformer_residency",
+      "modelId": "kolors",
+      "resolvedRoute": "kolors",
+      "provider": "kolors",
+      "backend": "mlx",
+      "tier": "q4",
+      "mode": "character_image",
+      "overlay": "none",
+      "rung": "bounded_transformer_residency",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "768x768",
+          "1024x1024",
+          "1280x768",
+          "768x1280"
+        ]
+      },
+      "strategyParameters": {
+        "transformerWindowSize": 1,
+        "transformerWindowComponent": "Dit",
+        "publishedRanges": {
+          "transformerWindowSizes": [
+            1,
+            2,
+            5,
+            10
+          ],
+          "transformerWindowComponents": [
+            "Dit",
+            "TextEncoder",
+            "Both"
+          ]
+        }
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "kolors:mlx:q4:base:base:kolors-mlx-chatglm3-sdxl-unet-ladder-v1:imc-0bd84dd1c97631eaf2b1",
+        "tier": "q4",
+        "source": "config/memory-anchors.json#kolors:mlx:q4:base:base:kolors-mlx-chatglm3-sdxl-unet-ladder-v1:imc-0bd84dd1c97631eaf2b1",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 15521,
+      "owningModelStory": 15486,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "inference:crates/media/mlx-gen/mlx-gen-kolors/src/memory_strategy.rs"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#kolors:mlx:q4:base:base:kolors-mlx-chatglm3-sdxl-unet-ladder-v1:imc-0bd84dd1c97631eaf2b1"
+          }
+        ]
+      }
+    },
+    {
+      "id": "kolors:kolors:mlx:q4:character_image:none:resident",
+      "modelId": "kolors",
+      "resolvedRoute": "kolors",
+      "provider": "kolors",
+      "backend": "mlx",
+      "tier": "q4",
+      "mode": "character_image",
+      "overlay": "none",
+      "rung": "resident",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "768x768",
+          "1024x1024",
+          "1280x768",
+          "768x1280"
+        ]
+      },
+      "strategyParameters": {},
+      "implementation": "implemented",
+      "anchor": {
+        "id": "kolors:mlx:q4:base:base:kolors-mlx-chatglm3-sdxl-unet-ladder-v1:imc-0bd84dd1c97631eaf2b1",
+        "tier": "q4",
+        "source": "config/memory-anchors.json#kolors:mlx:q4:base:base:kolors-mlx-chatglm3-sdxl-unet-ladder-v1:imc-0bd84dd1c97631eaf2b1",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 15521,
+      "owningModelStory": 15486,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "crates/sceneworks-worker/src/engines.rs#MODEL_TABLE"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#kolors:mlx:q4:base:base:kolors-mlx-chatglm3-sdxl-unet-ladder-v1:imc-0bd84dd1c97631eaf2b1"
+          }
+        ]
+      }
+    },
+    {
+      "id": "kolors:kolors:mlx:q4:character_image:none:staged_residency",
+      "modelId": "kolors",
+      "resolvedRoute": "kolors",
+      "provider": "kolors",
+      "backend": "mlx",
+      "tier": "q4",
+      "mode": "character_image",
+      "overlay": "none",
+      "rung": "staged_residency",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "768x768",
+          "1024x1024",
+          "1280x768",
+          "768x1280"
+        ]
+      },
+      "strategyParameters": {
+        "phaseOrder": [
+          "conditioning",
+          "denoise",
+          "decode"
+        ]
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "kolors:mlx:q4:base:base:kolors-mlx-chatglm3-sdxl-unet-ladder-v1:imc-0bd84dd1c97631eaf2b1",
+        "tier": "q4",
+        "source": "config/memory-anchors.json#kolors:mlx:q4:base:base:kolors-mlx-chatglm3-sdxl-unet-ladder-v1:imc-0bd84dd1c97631eaf2b1",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 15521,
+      "owningModelStory": 15486,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "crates/sceneworks-worker/src/mlx_fit_gate.rs#engine_engages_staged_residency"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#kolors:mlx:q4:base:base:kolors-mlx-chatglm3-sdxl-unet-ladder-v1:imc-0bd84dd1c97631eaf2b1"
+          }
+        ]
+      }
+    },
+    {
+      "id": "kolors:kolors:mlx:q4:edit_image:control:resident",
+      "modelId": "kolors",
+      "resolvedRoute": "kolors",
+      "provider": "kolors",
+      "backend": "mlx",
+      "tier": "q4",
+      "mode": "edit_image",
+      "overlay": "control",
+      "rung": "resident",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "768x768",
+          "1024x1024",
+          "1280x768",
+          "768x1280"
+        ]
+      },
+      "strategyParameters": {},
+      "implementation": "implemented",
+      "anchor": {
+        "id": "kolors:mlx:q4:base:base:kolors-mlx-chatglm3-sdxl-unet-ladder-v1:imc-0bd84dd1c97631eaf2b1",
+        "tier": "q4",
+        "source": "config/memory-anchors.json#kolors:mlx:q4:base:base:kolors-mlx-chatglm3-sdxl-unet-ladder-v1:imc-0bd84dd1c97631eaf2b1",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 15521,
+      "owningModelStory": 15486,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "crates/sceneworks-worker/src/engines.rs#MODEL_TABLE"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#kolors:mlx:q4:base:base:kolors-mlx-chatglm3-sdxl-unet-ladder-v1:imc-0bd84dd1c97631eaf2b1"
+          }
+        ]
+      }
+    },
+    {
+      "id": "kolors:kolors:mlx:q4:edit_image:control:staged_residency",
+      "modelId": "kolors",
+      "resolvedRoute": "kolors",
+      "provider": "kolors",
+      "backend": "mlx",
+      "tier": "q4",
+      "mode": "edit_image",
+      "overlay": "control",
+      "rung": "staged_residency",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "768x768",
+          "1024x1024",
+          "1280x768",
+          "768x1280"
+        ]
+      },
+      "strategyParameters": {
+        "phaseOrder": [
+          "conditioning",
+          "denoise",
+          "decode"
+        ]
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "kolors:mlx:q4:base:base:kolors-mlx-chatglm3-sdxl-unet-ladder-v1:imc-0bd84dd1c97631eaf2b1",
+        "tier": "q4",
+        "source": "config/memory-anchors.json#kolors:mlx:q4:base:base:kolors-mlx-chatglm3-sdxl-unet-ladder-v1:imc-0bd84dd1c97631eaf2b1",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 15521,
+      "owningModelStory": 15486,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "crates/sceneworks-worker/src/mlx_fit_gate.rs#engine_engages_staged_residency"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#kolors:mlx:q4:base:base:kolors-mlx-chatglm3-sdxl-unet-ladder-v1:imc-0bd84dd1c97631eaf2b1"
+          }
+        ]
+      }
+    },
+    {
+      "id": "kolors:kolors:mlx:q4:edit_image:identity:bounded_transformer_residency",
+      "modelId": "kolors",
+      "resolvedRoute": "kolors",
+      "provider": "kolors",
+      "backend": "mlx",
+      "tier": "q4",
+      "mode": "edit_image",
+      "overlay": "identity",
+      "rung": "bounded_transformer_residency",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "768x768",
+          "1024x1024",
+          "1280x768",
+          "768x1280"
+        ]
+      },
+      "strategyParameters": {
+        "transformerWindowSize": 1,
+        "transformerWindowComponent": "Dit",
+        "publishedRanges": {
+          "transformerWindowSizes": [
+            1,
+            2,
+            5,
+            10
+          ],
+          "transformerWindowComponents": [
+            "Dit",
+            "TextEncoder",
+            "Both"
+          ]
+        }
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "kolors:mlx:q4:base:base:kolors-mlx-chatglm3-sdxl-unet-ladder-v1:imc-0bd84dd1c97631eaf2b1",
+        "tier": "q4",
+        "source": "config/memory-anchors.json#kolors:mlx:q4:base:base:kolors-mlx-chatglm3-sdxl-unet-ladder-v1:imc-0bd84dd1c97631eaf2b1",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 15521,
+      "owningModelStory": 15486,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "inference:crates/media/mlx-gen/mlx-gen-kolors/src/memory_strategy.rs"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#kolors:mlx:q4:base:base:kolors-mlx-chatglm3-sdxl-unet-ladder-v1:imc-0bd84dd1c97631eaf2b1"
+          }
+        ]
+      }
+    },
+    {
+      "id": "kolors:kolors:mlx:q4:edit_image:identity:resident",
+      "modelId": "kolors",
+      "resolvedRoute": "kolors",
+      "provider": "kolors",
+      "backend": "mlx",
+      "tier": "q4",
+      "mode": "edit_image",
+      "overlay": "identity",
+      "rung": "resident",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "768x768",
+          "1024x1024",
+          "1280x768",
+          "768x1280"
+        ]
+      },
+      "strategyParameters": {},
+      "implementation": "implemented",
+      "anchor": {
+        "id": "kolors:mlx:q4:base:base:kolors-mlx-chatglm3-sdxl-unet-ladder-v1:imc-0bd84dd1c97631eaf2b1",
+        "tier": "q4",
+        "source": "config/memory-anchors.json#kolors:mlx:q4:base:base:kolors-mlx-chatglm3-sdxl-unet-ladder-v1:imc-0bd84dd1c97631eaf2b1",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 15521,
+      "owningModelStory": 15486,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "crates/sceneworks-worker/src/engines.rs#MODEL_TABLE"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#kolors:mlx:q4:base:base:kolors-mlx-chatglm3-sdxl-unet-ladder-v1:imc-0bd84dd1c97631eaf2b1"
+          }
+        ]
+      }
+    },
+    {
+      "id": "kolors:kolors:mlx:q4:edit_image:identity:staged_residency",
+      "modelId": "kolors",
+      "resolvedRoute": "kolors",
+      "provider": "kolors",
+      "backend": "mlx",
+      "tier": "q4",
+      "mode": "edit_image",
+      "overlay": "identity",
+      "rung": "staged_residency",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "768x768",
+          "1024x1024",
+          "1280x768",
+          "768x1280"
+        ]
+      },
+      "strategyParameters": {
+        "phaseOrder": [
+          "conditioning",
+          "denoise",
+          "decode"
+        ]
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "kolors:mlx:q4:base:base:kolors-mlx-chatglm3-sdxl-unet-ladder-v1:imc-0bd84dd1c97631eaf2b1",
+        "tier": "q4",
+        "source": "config/memory-anchors.json#kolors:mlx:q4:base:base:kolors-mlx-chatglm3-sdxl-unet-ladder-v1:imc-0bd84dd1c97631eaf2b1",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 15521,
+      "owningModelStory": 15486,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "crates/sceneworks-worker/src/mlx_fit_gate.rs#engine_engages_staged_residency"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#kolors:mlx:q4:base:base:kolors-mlx-chatglm3-sdxl-unet-ladder-v1:imc-0bd84dd1c97631eaf2b1"
+          }
+        ]
+      }
+    },
+    {
+      "id": "kolors:kolors:mlx:q4:edit_image:lora:bounded_transformer_residency",
+      "modelId": "kolors",
+      "resolvedRoute": "kolors",
+      "provider": "kolors",
+      "backend": "mlx",
+      "tier": "q4",
+      "mode": "edit_image",
+      "overlay": "lora",
+      "rung": "bounded_transformer_residency",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "768x768",
+          "1024x1024",
+          "1280x768",
+          "768x1280"
+        ]
+      },
+      "strategyParameters": {
+        "transformerWindowSize": 1,
+        "transformerWindowComponent": "Dit",
+        "publishedRanges": {
+          "transformerWindowSizes": [
+            1,
+            2,
+            5,
+            10
+          ],
+          "transformerWindowComponents": [
+            "Dit",
+            "TextEncoder",
+            "Both"
+          ]
+        }
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "kolors:mlx:q4:base:base:kolors-mlx-chatglm3-sdxl-unet-ladder-v1:imc-0bd84dd1c97631eaf2b1",
+        "tier": "q4",
+        "source": "config/memory-anchors.json#kolors:mlx:q4:base:base:kolors-mlx-chatglm3-sdxl-unet-ladder-v1:imc-0bd84dd1c97631eaf2b1",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 15521,
+      "owningModelStory": 15486,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "inference:crates/media/mlx-gen/mlx-gen-kolors/src/memory_strategy.rs"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#kolors:mlx:q4:base:base:kolors-mlx-chatglm3-sdxl-unet-ladder-v1:imc-0bd84dd1c97631eaf2b1"
+          }
+        ]
+      }
+    },
+    {
+      "id": "kolors:kolors:mlx:q4:edit_image:lora:resident",
+      "modelId": "kolors",
+      "resolvedRoute": "kolors",
+      "provider": "kolors",
+      "backend": "mlx",
+      "tier": "q4",
+      "mode": "edit_image",
+      "overlay": "lora",
+      "rung": "resident",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "768x768",
+          "1024x1024",
+          "1280x768",
+          "768x1280"
+        ]
+      },
+      "strategyParameters": {},
+      "implementation": "implemented",
+      "anchor": {
+        "id": "kolors:mlx:q4:base:base:kolors-mlx-chatglm3-sdxl-unet-ladder-v1:imc-0bd84dd1c97631eaf2b1",
+        "tier": "q4",
+        "source": "config/memory-anchors.json#kolors:mlx:q4:base:base:kolors-mlx-chatglm3-sdxl-unet-ladder-v1:imc-0bd84dd1c97631eaf2b1",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 15521,
+      "owningModelStory": 15486,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "crates/sceneworks-worker/src/engines.rs#MODEL_TABLE"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#kolors:mlx:q4:base:base:kolors-mlx-chatglm3-sdxl-unet-ladder-v1:imc-0bd84dd1c97631eaf2b1"
+          }
+        ]
+      }
+    },
+    {
+      "id": "kolors:kolors:mlx:q4:edit_image:lora:staged_residency",
+      "modelId": "kolors",
+      "resolvedRoute": "kolors",
+      "provider": "kolors",
+      "backend": "mlx",
+      "tier": "q4",
+      "mode": "edit_image",
+      "overlay": "lora",
+      "rung": "staged_residency",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "768x768",
+          "1024x1024",
+          "1280x768",
+          "768x1280"
+        ]
+      },
+      "strategyParameters": {
+        "phaseOrder": [
+          "conditioning",
+          "denoise",
+          "decode"
+        ]
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "kolors:mlx:q4:base:base:kolors-mlx-chatglm3-sdxl-unet-ladder-v1:imc-0bd84dd1c97631eaf2b1",
+        "tier": "q4",
+        "source": "config/memory-anchors.json#kolors:mlx:q4:base:base:kolors-mlx-chatglm3-sdxl-unet-ladder-v1:imc-0bd84dd1c97631eaf2b1",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 15521,
+      "owningModelStory": 15486,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "crates/sceneworks-worker/src/mlx_fit_gate.rs#engine_engages_staged_residency"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#kolors:mlx:q4:base:base:kolors-mlx-chatglm3-sdxl-unet-ladder-v1:imc-0bd84dd1c97631eaf2b1"
+          }
+        ]
+      }
+    },
+    {
+      "id": "kolors:kolors:mlx:q4:edit_image:none:bounded_transformer_residency",
+      "modelId": "kolors",
+      "resolvedRoute": "kolors",
+      "provider": "kolors",
+      "backend": "mlx",
+      "tier": "q4",
+      "mode": "edit_image",
+      "overlay": "none",
+      "rung": "bounded_transformer_residency",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "768x768",
+          "1024x1024",
+          "1280x768",
+          "768x1280"
+        ]
+      },
+      "strategyParameters": {
+        "transformerWindowSize": 1,
+        "transformerWindowComponent": "Dit",
+        "publishedRanges": {
+          "transformerWindowSizes": [
+            1,
+            2,
+            5,
+            10
+          ],
+          "transformerWindowComponents": [
+            "Dit",
+            "TextEncoder",
+            "Both"
+          ]
+        }
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "kolors:mlx:q4:base:base:kolors-mlx-chatglm3-sdxl-unet-ladder-v1:imc-0bd84dd1c97631eaf2b1",
+        "tier": "q4",
+        "source": "config/memory-anchors.json#kolors:mlx:q4:base:base:kolors-mlx-chatglm3-sdxl-unet-ladder-v1:imc-0bd84dd1c97631eaf2b1",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 15521,
+      "owningModelStory": 15486,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "inference:crates/media/mlx-gen/mlx-gen-kolors/src/memory_strategy.rs"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#kolors:mlx:q4:base:base:kolors-mlx-chatglm3-sdxl-unet-ladder-v1:imc-0bd84dd1c97631eaf2b1"
+          }
+        ]
+      }
+    },
+    {
+      "id": "kolors:kolors:mlx:q4:edit_image:none:resident",
+      "modelId": "kolors",
+      "resolvedRoute": "kolors",
+      "provider": "kolors",
+      "backend": "mlx",
+      "tier": "q4",
+      "mode": "edit_image",
+      "overlay": "none",
+      "rung": "resident",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "768x768",
+          "1024x1024",
+          "1280x768",
+          "768x1280"
+        ]
+      },
+      "strategyParameters": {},
+      "implementation": "implemented",
+      "anchor": {
+        "id": "kolors:mlx:q4:base:base:kolors-mlx-chatglm3-sdxl-unet-ladder-v1:imc-0bd84dd1c97631eaf2b1",
+        "tier": "q4",
+        "source": "config/memory-anchors.json#kolors:mlx:q4:base:base:kolors-mlx-chatglm3-sdxl-unet-ladder-v1:imc-0bd84dd1c97631eaf2b1",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 15521,
+      "owningModelStory": 15486,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "crates/sceneworks-worker/src/engines.rs#MODEL_TABLE"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#kolors:mlx:q4:base:base:kolors-mlx-chatglm3-sdxl-unet-ladder-v1:imc-0bd84dd1c97631eaf2b1"
+          }
+        ]
+      }
+    },
+    {
+      "id": "kolors:kolors:mlx:q4:edit_image:none:staged_residency",
+      "modelId": "kolors",
+      "resolvedRoute": "kolors",
+      "provider": "kolors",
+      "backend": "mlx",
+      "tier": "q4",
+      "mode": "edit_image",
+      "overlay": "none",
+      "rung": "staged_residency",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "768x768",
+          "1024x1024",
+          "1280x768",
+          "768x1280"
+        ]
+      },
+      "strategyParameters": {
+        "phaseOrder": [
+          "conditioning",
+          "denoise",
+          "decode"
+        ]
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "kolors:mlx:q4:base:base:kolors-mlx-chatglm3-sdxl-unet-ladder-v1:imc-0bd84dd1c97631eaf2b1",
+        "tier": "q4",
+        "source": "config/memory-anchors.json#kolors:mlx:q4:base:base:kolors-mlx-chatglm3-sdxl-unet-ladder-v1:imc-0bd84dd1c97631eaf2b1",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 15521,
+      "owningModelStory": 15486,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "crates/sceneworks-worker/src/mlx_fit_gate.rs#engine_engages_staged_residency"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#kolors:mlx:q4:base:base:kolors-mlx-chatglm3-sdxl-unet-ladder-v1:imc-0bd84dd1c97631eaf2b1"
+          }
+        ]
+      }
+    },
+    {
+      "id": "kolors:kolors:mlx:q4:text_to_image:control:resident",
+      "modelId": "kolors",
+      "resolvedRoute": "kolors",
+      "provider": "kolors",
+      "backend": "mlx",
+      "tier": "q4",
+      "mode": "text_to_image",
+      "overlay": "control",
+      "rung": "resident",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "768x768",
+          "1024x1024",
+          "1280x768",
+          "768x1280"
+        ]
+      },
+      "strategyParameters": {},
+      "implementation": "implemented",
+      "anchor": {
+        "id": "kolors:mlx:q4:base:base:kolors-mlx-chatglm3-sdxl-unet-ladder-v1:imc-0bd84dd1c97631eaf2b1",
+        "tier": "q4",
+        "source": "config/memory-anchors.json#kolors:mlx:q4:base:base:kolors-mlx-chatglm3-sdxl-unet-ladder-v1:imc-0bd84dd1c97631eaf2b1",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 15521,
+      "owningModelStory": 15486,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "crates/sceneworks-worker/src/engines.rs#MODEL_TABLE"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#kolors:mlx:q4:base:base:kolors-mlx-chatglm3-sdxl-unet-ladder-v1:imc-0bd84dd1c97631eaf2b1"
+          }
+        ]
+      }
+    },
+    {
+      "id": "kolors:kolors:mlx:q4:text_to_image:control:staged_residency",
+      "modelId": "kolors",
+      "resolvedRoute": "kolors",
+      "provider": "kolors",
+      "backend": "mlx",
+      "tier": "q4",
+      "mode": "text_to_image",
+      "overlay": "control",
+      "rung": "staged_residency",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "768x768",
+          "1024x1024",
+          "1280x768",
+          "768x1280"
+        ]
+      },
+      "strategyParameters": {
+        "phaseOrder": [
+          "conditioning",
+          "denoise",
+          "decode"
+        ]
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "kolors:mlx:q4:base:base:kolors-mlx-chatglm3-sdxl-unet-ladder-v1:imc-0bd84dd1c97631eaf2b1",
+        "tier": "q4",
+        "source": "config/memory-anchors.json#kolors:mlx:q4:base:base:kolors-mlx-chatglm3-sdxl-unet-ladder-v1:imc-0bd84dd1c97631eaf2b1",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 15521,
+      "owningModelStory": 15486,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "crates/sceneworks-worker/src/mlx_fit_gate.rs#engine_engages_staged_residency"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#kolors:mlx:q4:base:base:kolors-mlx-chatglm3-sdxl-unet-ladder-v1:imc-0bd84dd1c97631eaf2b1"
+          }
+        ]
+      }
+    },
+    {
+      "id": "kolors:kolors:mlx:q4:text_to_image:identity:bounded_transformer_residency",
+      "modelId": "kolors",
+      "resolvedRoute": "kolors",
+      "provider": "kolors",
+      "backend": "mlx",
+      "tier": "q4",
+      "mode": "text_to_image",
+      "overlay": "identity",
+      "rung": "bounded_transformer_residency",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "768x768",
+          "1024x1024",
+          "1280x768",
+          "768x1280"
+        ]
+      },
+      "strategyParameters": {
+        "transformerWindowSize": 1,
+        "transformerWindowComponent": "Dit",
+        "publishedRanges": {
+          "transformerWindowSizes": [
+            1,
+            2,
+            5,
+            10
+          ],
+          "transformerWindowComponents": [
+            "Dit",
+            "TextEncoder",
+            "Both"
+          ]
+        }
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "kolors:mlx:q4:base:base:kolors-mlx-chatglm3-sdxl-unet-ladder-v1:imc-0bd84dd1c97631eaf2b1",
+        "tier": "q4",
+        "source": "config/memory-anchors.json#kolors:mlx:q4:base:base:kolors-mlx-chatglm3-sdxl-unet-ladder-v1:imc-0bd84dd1c97631eaf2b1",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 15521,
+      "owningModelStory": 15486,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "inference:crates/media/mlx-gen/mlx-gen-kolors/src/memory_strategy.rs"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#kolors:mlx:q4:base:base:kolors-mlx-chatglm3-sdxl-unet-ladder-v1:imc-0bd84dd1c97631eaf2b1"
+          }
+        ]
+      }
+    },
+    {
+      "id": "kolors:kolors:mlx:q4:text_to_image:identity:resident",
+      "modelId": "kolors",
+      "resolvedRoute": "kolors",
+      "provider": "kolors",
+      "backend": "mlx",
+      "tier": "q4",
+      "mode": "text_to_image",
+      "overlay": "identity",
+      "rung": "resident",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "768x768",
+          "1024x1024",
+          "1280x768",
+          "768x1280"
+        ]
+      },
+      "strategyParameters": {},
+      "implementation": "implemented",
+      "anchor": {
+        "id": "kolors:mlx:q4:base:base:kolors-mlx-chatglm3-sdxl-unet-ladder-v1:imc-0bd84dd1c97631eaf2b1",
+        "tier": "q4",
+        "source": "config/memory-anchors.json#kolors:mlx:q4:base:base:kolors-mlx-chatglm3-sdxl-unet-ladder-v1:imc-0bd84dd1c97631eaf2b1",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 15521,
+      "owningModelStory": 15486,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "crates/sceneworks-worker/src/engines.rs#MODEL_TABLE"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#kolors:mlx:q4:base:base:kolors-mlx-chatglm3-sdxl-unet-ladder-v1:imc-0bd84dd1c97631eaf2b1"
+          }
+        ]
+      }
+    },
+    {
+      "id": "kolors:kolors:mlx:q4:text_to_image:identity:staged_residency",
+      "modelId": "kolors",
+      "resolvedRoute": "kolors",
+      "provider": "kolors",
+      "backend": "mlx",
+      "tier": "q4",
+      "mode": "text_to_image",
+      "overlay": "identity",
+      "rung": "staged_residency",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "768x768",
+          "1024x1024",
+          "1280x768",
+          "768x1280"
+        ]
+      },
+      "strategyParameters": {
+        "phaseOrder": [
+          "conditioning",
+          "denoise",
+          "decode"
+        ]
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "kolors:mlx:q4:base:base:kolors-mlx-chatglm3-sdxl-unet-ladder-v1:imc-0bd84dd1c97631eaf2b1",
+        "tier": "q4",
+        "source": "config/memory-anchors.json#kolors:mlx:q4:base:base:kolors-mlx-chatglm3-sdxl-unet-ladder-v1:imc-0bd84dd1c97631eaf2b1",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 15521,
+      "owningModelStory": 15486,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "crates/sceneworks-worker/src/mlx_fit_gate.rs#engine_engages_staged_residency"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#kolors:mlx:q4:base:base:kolors-mlx-chatglm3-sdxl-unet-ladder-v1:imc-0bd84dd1c97631eaf2b1"
+          }
+        ]
+      }
+    },
+    {
+      "id": "kolors:kolors:mlx:q4:text_to_image:lora:bounded_transformer_residency",
+      "modelId": "kolors",
+      "resolvedRoute": "kolors",
+      "provider": "kolors",
+      "backend": "mlx",
+      "tier": "q4",
+      "mode": "text_to_image",
+      "overlay": "lora",
+      "rung": "bounded_transformer_residency",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "768x768",
+          "1024x1024",
+          "1280x768",
+          "768x1280"
+        ]
+      },
+      "strategyParameters": {
+        "transformerWindowSize": 1,
+        "transformerWindowComponent": "Dit",
+        "publishedRanges": {
+          "transformerWindowSizes": [
+            1,
+            2,
+            5,
+            10
+          ],
+          "transformerWindowComponents": [
+            "Dit",
+            "TextEncoder",
+            "Both"
+          ]
+        }
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "kolors:mlx:q4:base:base:kolors-mlx-chatglm3-sdxl-unet-ladder-v1:imc-0bd84dd1c97631eaf2b1",
+        "tier": "q4",
+        "source": "config/memory-anchors.json#kolors:mlx:q4:base:base:kolors-mlx-chatglm3-sdxl-unet-ladder-v1:imc-0bd84dd1c97631eaf2b1",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 15521,
+      "owningModelStory": 15486,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "inference:crates/media/mlx-gen/mlx-gen-kolors/src/memory_strategy.rs"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#kolors:mlx:q4:base:base:kolors-mlx-chatglm3-sdxl-unet-ladder-v1:imc-0bd84dd1c97631eaf2b1"
+          }
+        ]
+      }
+    },
+    {
+      "id": "kolors:kolors:mlx:q4:text_to_image:lora:resident",
+      "modelId": "kolors",
+      "resolvedRoute": "kolors",
+      "provider": "kolors",
+      "backend": "mlx",
+      "tier": "q4",
+      "mode": "text_to_image",
+      "overlay": "lora",
+      "rung": "resident",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "768x768",
+          "1024x1024",
+          "1280x768",
+          "768x1280"
+        ]
+      },
+      "strategyParameters": {},
+      "implementation": "implemented",
+      "anchor": {
+        "id": "kolors:mlx:q4:base:base:kolors-mlx-chatglm3-sdxl-unet-ladder-v1:imc-0bd84dd1c97631eaf2b1",
+        "tier": "q4",
+        "source": "config/memory-anchors.json#kolors:mlx:q4:base:base:kolors-mlx-chatglm3-sdxl-unet-ladder-v1:imc-0bd84dd1c97631eaf2b1",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 15521,
+      "owningModelStory": 15486,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "crates/sceneworks-worker/src/engines.rs#MODEL_TABLE"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#kolors:mlx:q4:base:base:kolors-mlx-chatglm3-sdxl-unet-ladder-v1:imc-0bd84dd1c97631eaf2b1"
+          }
+        ]
+      }
+    },
+    {
+      "id": "kolors:kolors:mlx:q4:text_to_image:lora:staged_residency",
+      "modelId": "kolors",
+      "resolvedRoute": "kolors",
+      "provider": "kolors",
+      "backend": "mlx",
+      "tier": "q4",
+      "mode": "text_to_image",
+      "overlay": "lora",
+      "rung": "staged_residency",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "768x768",
+          "1024x1024",
+          "1280x768",
+          "768x1280"
+        ]
+      },
+      "strategyParameters": {
+        "phaseOrder": [
+          "conditioning",
+          "denoise",
+          "decode"
+        ]
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "kolors:mlx:q4:base:base:kolors-mlx-chatglm3-sdxl-unet-ladder-v1:imc-0bd84dd1c97631eaf2b1",
+        "tier": "q4",
+        "source": "config/memory-anchors.json#kolors:mlx:q4:base:base:kolors-mlx-chatglm3-sdxl-unet-ladder-v1:imc-0bd84dd1c97631eaf2b1",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 15521,
+      "owningModelStory": 15486,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "crates/sceneworks-worker/src/mlx_fit_gate.rs#engine_engages_staged_residency"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#kolors:mlx:q4:base:base:kolors-mlx-chatglm3-sdxl-unet-ladder-v1:imc-0bd84dd1c97631eaf2b1"
+          }
+        ]
+      }
+    },
+    {
+      "id": "kolors:kolors:mlx:q4:text_to_image:none:bounded_decode",
+      "modelId": "kolors",
+      "resolvedRoute": "kolors",
+      "provider": "kolors",
+      "backend": "mlx",
+      "tier": "q4",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "rung": "bounded_decode",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "768x768",
+          "1024x1024",
+          "1280x768",
+          "768x1280"
+        ]
+      },
+      "strategyParameters": {
+        "publishedRanges": {}
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "kolors:mlx:q4:base:base:kolors-mlx-chatglm3-sdxl-unet-ladder-v1:imc-0bd84dd1c97631eaf2b1",
+        "tier": "q4",
+        "source": "config/memory-anchors.json#kolors:mlx:q4:base:base:kolors-mlx-chatglm3-sdxl-unet-ladder-v1:imc-0bd84dd1c97631eaf2b1",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 15521,
+      "owningModelStory": 15486,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "inference:crates/media/mlx-gen/mlx-gen-kolors/src/memory_strategy.rs"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#kolors:mlx:q4:base:base:kolors-mlx-chatglm3-sdxl-unet-ladder-v1:imc-0bd84dd1c97631eaf2b1"
+          }
+        ]
+      }
+    },
+    {
+      "id": "kolors:kolors:mlx:q4:text_to_image:none:bounded_transformer_residency",
+      "modelId": "kolors",
+      "resolvedRoute": "kolors",
+      "provider": "kolors",
+      "backend": "mlx",
+      "tier": "q4",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "rung": "bounded_transformer_residency",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "768x768",
+          "1024x1024",
+          "1280x768",
+          "768x1280"
+        ]
+      },
+      "strategyParameters": {
+        "transformerWindowSize": 1,
+        "transformerWindowComponent": "Dit",
+        "publishedRanges": {
+          "transformerWindowSizes": [
+            1,
+            2,
+            5,
+            10
+          ],
+          "transformerWindowComponents": [
+            "Dit",
+            "TextEncoder",
+            "Both"
+          ]
+        }
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "kolors:mlx:q4:base:base:kolors-mlx-chatglm3-sdxl-unet-ladder-v1:imc-0bd84dd1c97631eaf2b1",
+        "tier": "q4",
+        "source": "config/memory-anchors.json#kolors:mlx:q4:base:base:kolors-mlx-chatglm3-sdxl-unet-ladder-v1:imc-0bd84dd1c97631eaf2b1",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 15521,
+      "owningModelStory": 15486,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "inference:crates/media/mlx-gen/mlx-gen-kolors/src/memory_strategy.rs"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#kolors:mlx:q4:base:base:kolors-mlx-chatglm3-sdxl-unet-ladder-v1:imc-0bd84dd1c97631eaf2b1"
+          }
+        ]
+      }
+    },
+    {
+      "id": "kolors:kolors:mlx:q4:text_to_image:none:resident",
+      "modelId": "kolors",
+      "resolvedRoute": "kolors",
+      "provider": "kolors",
+      "backend": "mlx",
+      "tier": "q4",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "rung": "resident",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "768x768",
+          "1024x1024",
+          "1280x768",
+          "768x1280"
+        ]
+      },
+      "strategyParameters": {},
+      "implementation": "implemented",
+      "anchor": {
+        "id": "kolors:mlx:q4:base:base:kolors-mlx-chatglm3-sdxl-unet-ladder-v1:imc-0bd84dd1c97631eaf2b1",
+        "tier": "q4",
+        "source": "config/memory-anchors.json#kolors:mlx:q4:base:base:kolors-mlx-chatglm3-sdxl-unet-ladder-v1:imc-0bd84dd1c97631eaf2b1",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 15521,
+      "owningModelStory": 15486,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "crates/sceneworks-worker/src/engines.rs#MODEL_TABLE"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#kolors:mlx:q4:base:base:kolors-mlx-chatglm3-sdxl-unet-ladder-v1:imc-0bd84dd1c97631eaf2b1"
+          }
+        ]
+      }
+    },
+    {
+      "id": "kolors:kolors:mlx:q4:text_to_image:none:staged_residency",
+      "modelId": "kolors",
+      "resolvedRoute": "kolors",
+      "provider": "kolors",
+      "backend": "mlx",
+      "tier": "q4",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "rung": "staged_residency",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "768x768",
+          "1024x1024",
+          "1280x768",
+          "768x1280"
+        ]
+      },
+      "strategyParameters": {
+        "phaseOrder": [
+          "conditioning",
+          "denoise",
+          "decode"
+        ]
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "kolors:mlx:q4:base:base:kolors-mlx-chatglm3-sdxl-unet-ladder-v1:imc-0bd84dd1c97631eaf2b1",
+        "tier": "q4",
+        "source": "config/memory-anchors.json#kolors:mlx:q4:base:base:kolors-mlx-chatglm3-sdxl-unet-ladder-v1:imc-0bd84dd1c97631eaf2b1",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 15521,
+      "owningModelStory": 15486,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "crates/sceneworks-worker/src/mlx_fit_gate.rs#engine_engages_staged_residency"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#kolors:mlx:q4:base:base:kolors-mlx-chatglm3-sdxl-unet-ladder-v1:imc-0bd84dd1c97631eaf2b1"
           }
         ]
       }
@@ -72551,7 +74385,41 @@
       "kolors:kolors:mlx:bf16:text_to_image:lora:staged_residency",
       "kolors:kolors:mlx:bf16:text_to_image:none:bounded_transformer_residency",
       "kolors:kolors:mlx:bf16:text_to_image:none:resident",
-      "kolors:kolors:mlx:bf16:text_to_image:none:staged_residency"
+      "kolors:kolors:mlx:bf16:text_to_image:none:staged_residency",
+      "kolors:kolors:mlx:q4:character_image:control:resident",
+      "kolors:kolors:mlx:q4:character_image:control:staged_residency",
+      "kolors:kolors:mlx:q4:character_image:identity:bounded_transformer_residency",
+      "kolors:kolors:mlx:q4:character_image:identity:resident",
+      "kolors:kolors:mlx:q4:character_image:identity:staged_residency",
+      "kolors:kolors:mlx:q4:character_image:lora:bounded_transformer_residency",
+      "kolors:kolors:mlx:q4:character_image:lora:resident",
+      "kolors:kolors:mlx:q4:character_image:lora:staged_residency",
+      "kolors:kolors:mlx:q4:character_image:none:bounded_transformer_residency",
+      "kolors:kolors:mlx:q4:character_image:none:resident",
+      "kolors:kolors:mlx:q4:character_image:none:staged_residency",
+      "kolors:kolors:mlx:q4:edit_image:control:resident",
+      "kolors:kolors:mlx:q4:edit_image:control:staged_residency",
+      "kolors:kolors:mlx:q4:edit_image:identity:bounded_transformer_residency",
+      "kolors:kolors:mlx:q4:edit_image:identity:resident",
+      "kolors:kolors:mlx:q4:edit_image:identity:staged_residency",
+      "kolors:kolors:mlx:q4:edit_image:lora:bounded_transformer_residency",
+      "kolors:kolors:mlx:q4:edit_image:lora:resident",
+      "kolors:kolors:mlx:q4:edit_image:lora:staged_residency",
+      "kolors:kolors:mlx:q4:edit_image:none:bounded_transformer_residency",
+      "kolors:kolors:mlx:q4:edit_image:none:resident",
+      "kolors:kolors:mlx:q4:edit_image:none:staged_residency",
+      "kolors:kolors:mlx:q4:text_to_image:control:resident",
+      "kolors:kolors:mlx:q4:text_to_image:control:staged_residency",
+      "kolors:kolors:mlx:q4:text_to_image:identity:bounded_transformer_residency",
+      "kolors:kolors:mlx:q4:text_to_image:identity:resident",
+      "kolors:kolors:mlx:q4:text_to_image:identity:staged_residency",
+      "kolors:kolors:mlx:q4:text_to_image:lora:bounded_transformer_residency",
+      "kolors:kolors:mlx:q4:text_to_image:lora:resident",
+      "kolors:kolors:mlx:q4:text_to_image:lora:staged_residency",
+      "kolors:kolors:mlx:q4:text_to_image:none:bounded_decode",
+      "kolors:kolors:mlx:q4:text_to_image:none:bounded_transformer_residency",
+      "kolors:kolors:mlx:q4:text_to_image:none:resident",
+      "kolors:kolors:mlx:q4:text_to_image:none:staged_residency"
     ],
     "krea_2_raw": [],
     "krea_2_turbo": [
