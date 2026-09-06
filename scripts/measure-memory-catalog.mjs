@@ -134,6 +134,87 @@ export function sdxlCandleRouteDrift(modelId, tier, routes, models) {
 }
 
 /**
+ * sc-22736 (pin 8a65db2a). A plan row may override the lane's default anchor rung only where the
+ * provider CONTRACT refuses that rung, and the evidence for the refusal must be DERIVED. Two derived
+ * sources already exist — the manifest's `memoryStrategyStructuralExemptions` and the checked-in
+ * capability dump's `implementedRungs` — and neither can speak for candle SCAIL-2:
+ *
+ *   - the manifest key means `StructurallyNotApplicable`, and `candle-gen-scail2` classifies every
+ *     non-resident rung as `Missing` (not implemented yet), so an exemption there would be a lie;
+ *   - `config/engine-capabilities/capabilities.candle.json` carries no `scail2_14b` contract at all,
+ *     because the dump enumerates `ProviderRegistry::memory_contract_surfaces()` and the crate
+ *     registers a strategy without a weights-free surface resolver. That is an inference-side gap;
+ *     regenerating the dump at this pin (or any pin) would not conjure the surface.
+ *
+ * So the THIRD derived source is the engine's own declaration, read as source text out of the
+ * pinned inference checkout at the path the anchor loader closure already names as that
+ * (model, lane)'s memory-strategy entry point — a path that is itself derived at the pin and
+ * `--check`ed by `scripts/anchor-loader-closure.mjs`. Nothing here is a curated list of model ids:
+ * a provider that grows a dump surface stops consulting this, and a provider that stops declaring
+ * the rung as unimplemented moves the requirement on its own.
+ *
+ * It is fail-closed in both directions. A `strategies:` expression this parser does not recognize
+ * THROWS rather than returning "no evidence", so a refactor upstream reds the rule instead of
+ * quietly re-admitting every override; and a provider whose declaration is absent yields `null`,
+ * which the caller refuses.
+ */
+const STRATEGY_ENTRY_POINT_RE = /memory_strategy[^/]*\.rs$/;
+
+/** snake_case rung (`staged_residency`) → the Rust `MemoryStrategy` variant (`StagedResidency`). */
+function strategyVariant(rung) {
+  return rung.split("_").map((part) => part.charAt(0).toUpperCase() + part.slice(1)).join("");
+}
+
+/**
+ * `rung → MemoryStrategySupport` for a provider whose contract declares support over
+ * `MemoryStrategy::ALL`, or `null` when the file declares no `strategies:` field at all.
+ *
+ * Throws when a `strategies:` field IS declared in a shape this parser cannot read: an unrecognized
+ * declaration is NOT evidence that a rung is unimplemented.
+ */
+export function parseDeclaredStrategySupport(source, sourcePath) {
+  if (!/\bstrategies:/.test(source)) return null;
+  // The shipped shape: every variant gets one support, except one named variant.
+  const uniform =
+    /\bstrategies:\s*MemoryStrategy::ALL[\s\S]{0,200}?\.map\(\s*\|\s*strategy\s*\|\s*MemoryStrategyCapability\s*\{[\s\S]{0,120}?support:\s*if\s+strategy\s*==\s*MemoryStrategy::(\w+)\s*\{\s*MemoryStrategySupport::(\w+)\s*\}\s*else\s*\{\s*MemoryStrategySupport::(\w+)\s*\}/
+      .exec(source);
+  if (uniform) {
+    const [, named, namedSupport, otherSupport] = uniform;
+    return (rung) => (strategyVariant(rung) === named ? namedSupport : otherSupport);
+  }
+  return fail(
+    `${sourcePath} declares a strategies: field in a shape scripts/measure-memory-catalog.mjs cannot `
+      + "read, so it cannot say which rungs the contract implements. Teach parseDeclaredStrategySupport "
+      + "the new shape — an unreadable declaration must never be treated as 'no evidence'.",
+  );
+}
+
+/**
+ * The support declaration for one `(modelId, backend)` from the pinned inference checkout, or `null`
+ * when no checkout is reachable, the closure names no memory-strategy entry point, or the file
+ * declares no `strategies:` field. `null` is a REFUSAL at every call site, never an assumption.
+ */
+export async function readDeclaredStrategySupport(
+  modelId,
+  backend,
+  closures,
+  inferenceRepo = process.env.INFERENCE_REPO,
+) {
+  if (!inferenceRepo) return null;
+  const entryPoints = closures.models?.[`${modelId}:${backend}`]?.entryPoints ?? [];
+  const entry = entryPoints.find((candidate) => STRATEGY_ENTRY_POINT_RE.test(candidate));
+  if (!entry) return null;
+  let source;
+  try {
+    source = await readFile(path.join(inferenceRepo, entry), "utf8");
+  } catch (error) {
+    if (error.code === "ENOENT" || error.code === "ENOTDIR") return null;
+    throw error;
+  }
+  return parseDeclaredStrategySupport(source, entry);
+}
+
+/**
  * The built-in Qwen-Image-Edit-2511 Lightning distill LoRA (sc-22728). It is NOT a manifest
  * download — the worker fetches it lazily into the HF cache on first use — so its repository,
  * revision and file are pinned in the worker's own source on both lanes

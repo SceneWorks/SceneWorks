@@ -48,6 +48,8 @@ import {
   parseSdxlRoutes,
   readSdxlCandleRoutes,
   sdxlCandleRouteDrift,
+  parseDeclaredStrategySupport,
+  readDeclaredStrategySupport,
   SDXL_ROUTES_PATH,
   SDXL_ROUTES_UNCHECKED,
 } from "./measure-memory-catalog.mjs";
@@ -1488,7 +1490,12 @@ const skipWithoutRoutes = sdxlRoutesAvailable
   ? false
   : `no inference checkout supplies ${SDXL_ROUTES_PATH}`;
 
-test("the illustrious candle refusal is derived from the engine's own route revision", { skip: skipWithoutRoutes }, async () => {
+// sc-22736, pin 8a65db2a: the inference-side repair landed, so the LIVE answer for every routed
+// model is now "no refusal". The claim this test makes was never "Illustrious drifts" — it was that
+// the refusal TRACKS the two revisions in both directions. So the live tree is asserted to agree
+// everywhere, and the refusing direction is exercised by SYNTHESIZING a disagreement on a real
+// route rather than by depending on one model still being broken upstream.
+test("the sdxl candle refusal is derived from the engine's own route revision", { skip: skipWithoutRoutes }, async () => {
   const models = await readManifestModels();
   const routes = await readSdxlCandleRoutes();
   assert.ok(routes.size >= 5, "the engine declares the whole routed family");
@@ -1712,7 +1719,7 @@ test("every sensenova env family and repository is the one the adapter binaries 
  * resident, so an exemption moves nothing. No list of model ids and no count lives here: a newly
  * exempt model, or a withdrawn exemption, moves the requirement on its own.
  */
-test("an anchor row plans the lane's default rung unless the manifest exempts it", async () => {
+test("an anchor row plans the lane's default rung unless the manifest exempts it", async (t) => {
   const plan = await readPlan();
   const models = new Map((await readManifestModels()).map((model) => [model.id, model]));
   // sc-22736: the SECOND derived source. A provider whose contract simply does not IMPLEMENT the
@@ -1720,8 +1727,7 @@ test("an anchor row plans the lane's default rung unless the manifest exempts it
   // inapplicable, so no manifest exemption is honest — is read off the checked-in engine
   // capability dump, which records every contract's `implementedRungs` per (tier, load shape) at
   // the pin. Absence from the dump is NOT evidence: a row that overrides a provider the dump does
-  // not know falls through to the THIRD source below, and fails here if that one cannot speak
-  // either.
+  // not know falls through to the third source below, and is refused if that cannot speak either.
   const dumps = new Map();
   for (const backend of ["mlx", "candle"]) {
     const dump = JSON.parse(
@@ -1739,61 +1745,22 @@ test("an anchor row plans the lane's default rung unless the manifest exempts it
     if (surfaces.length === 0) return null;
     return surfaces.every((surface) => !surface.implementedRungs.includes(fallbackRung));
   };
-
-  // sc-22737: the THIRD derived source, and the one that actually speaks for Candle SCAIL-2. At the
-  // 8a65db2a pin `candle-gen-scail2` registers a memory STRATEGY and a resident-only witness but no
-  // surface RESOLVER, so it publishes no `memoryContracts[]` entry at all and `dumpRefusesDefault`
-  // returns `null` for every scail2 row — the dump cannot be regenerated into an answer, because
-  // there is no contract at that pin to dump.
-  //
-  // The residency a Candle VIDEO route loads under is not the engine's to choose anyway: the WORKER
-  // picks it, in `video_jobs/candle.rs::candle_video_offload_policy`, which names the `Sequential`
-  // (staged) engine ids explicitly and returns `Resident` for everything else. A route the worker
-  // only ever loads `Resident` has no staged composition for an anchor to be measured in, so its
-  // plan row must override to `resident` — exactly the SenseNova argument, sourced from the worker
-  // instead of the manifest.
-  //
-  // Both halves are checked-in SceneWorks sources that exist for scail2: the Sequential id list is
-  // read out of the worker's own Rust, and modelId → engine ids out of the runtime capability dump.
-  // Neither is a curated list here, so adding a route to `Sequential`, or retiring one, moves this
-  // requirement on its own. `every` rather than `some`: a model whose modes route to BOTH a staged
-  // and a resident engine (`wan_2_2` → `wan2_2_ti2v_5b` + `wan_vace`) can still be measured staged,
-  // so it is not exempt and keeps the lane default — which is what those rows plan.
-  const candleVideoSource = await readFile(
-    path.join(ROOT, "crates/sceneworks-worker/src/video_jobs/candle.rs"),
-    "utf8",
-  );
-  const sequentialArm = candleVideoSource.match(
-    /fn candle_video_offload_policy\(engine_id: &str\) -> OffloadPolicy \{\s*match engine_id \{\s*([^=]*?)=>\s*\{?\s*OffloadPolicy::Sequential/,
-  );
-  assert.ok(sequentialArm, "candle_video_offload_policy no longer spells its Sequential arm as a literal id list");
-  const sequentialEngineIds = new Set([...sequentialArm[1].matchAll(/"([a-z0-9_]+)"/g)].map((m) => m[1]));
-  assert.ok(sequentialEngineIds.size > 0, "the Sequential arm names at least one engine id");
-  const runtimeCandle = JSON.parse(
-    await readFile(path.join(ROOT, "config/engine-capabilities/runtime/capabilities.candle.json"), "utf8"),
-  );
-  const candleVideoEngineIds = new Map();
-  for (const row of runtimeCandle.videoModelMappings ?? []) {
-    const ids = candleVideoEngineIds.get(row.modelId) ?? new Set();
-    for (const id of row.engineIds ?? []) ids.add(id);
-    candleVideoEngineIds.set(row.modelId, ids);
-  }
-  const workerLoadsResidentOnly = (backend, anchor, modelId) => {
-    if (backend !== "candle") return null;
-    // Strictly a LAST resort, and only where the dump is silent because the provider registered no
-    // contract at all. A provider the dump DOES know keeps the dump as its single authority: if it
-    // records no surface at this (tier, load shape) — Bernini's candle contract is published only
-    // at `eager_materialization`, while its plan rows are `deferred_materialization` — that silence
-    // is the dump's answer and must not be overwritten by a coarser worker-side fact.
-    if (dumps.get(backend).has(anchor.provider)) return null;
-    const ids = candleVideoEngineIds.get(modelId);
-    // Not a candle video model at all: this source has no opinion, so the caller keeps `null` and
-    // the assertion below still fires for an override with no evidence anywhere.
-    if (!ids || ids.size === 0) return null;
-    return [...ids].every((id) => !sequentialEngineIds.has(id));
+  // sc-22736, pin 8a65db2a: the THIRD derived source, consulted only where the dump has no surface
+  // to offer. `candle-gen-scail2` registers a memory strategy WITHOUT a weights-free surface
+  // resolver, so `memory_contract_surfaces()` — and therefore capabilities.candle.json — never sees
+  // it; no regeneration at any pin would change that. Its `build_contract` does declare the support
+  // per rung, and the anchor loader closure already names that file as this (model, lane)'s
+  // memory-strategy entry point, derived at the pin and `--check`ed. See
+  // `readDeclaredStrategySupport`: an unreadable `strategies:` shape THROWS, and a provider that
+  // declares nothing yields null, which is refused below.
+  const closures = JSON.parse(await readFile(path.join(ROOT, "config/anchor-loader-closures.json"), "utf8"));
+  const declaredRefusesDefault = async (backend, modelId, fallbackRung) => {
+    const support = await readDeclaredStrategySupport(modelId, backend, closures);
+    return support === null ? null : support(fallbackRung) !== "Implemented";
   };
   let overridden = 0;
   let candleExempt = 0;
+  let declaredEvidence = 0;
   for (const [key, anchor] of Object.entries(plan.anchors)) {
     const { modelId, tier, backend } = anchorParts(key);
     const model = models.get(modelId);
@@ -1803,20 +1770,34 @@ test("an anchor row plans the lane's default rung unless the manifest exempts it
     const exemptions = model[backend]?.memoryStrategyStructuralExemptions ?? {};
     const manifestExempt = Object.hasOwn(exemptions, "staged_residency");
     const fallbackForDump = ANCHOR_STRATEGY[backend].rung;
-    const contractRefusesDefault =
-      !manifestExempt && fallbackForDump === "staged_residency"
-        ? dumpRefusesDefault(backend, anchor, tier, fallbackForDump) ??
-          workerLoadsResidentOnly(backend, anchor, modelId)
-        : false;
-    if (anchor.strategy && !manifestExempt && fallbackForDump === "staged_residency") {
+    const judged = !manifestExempt && fallbackForDump === "staged_residency";
+    let contractRefusesDefault = judged ? dumpRefusesDefault(backend, anchor, tier, fallbackForDump) : false;
+    if (judged && contractRefusesDefault === null) {
+      const declared = await declaredRefusesDefault(backend, modelId, fallbackForDump);
+      if (declared !== null) declaredEvidence += 1;
+      contractRefusesDefault = declared;
+    }
+    // Two different absences. A reachable checkout that declares nothing is REFUSED below. No
+    // checkout at all is a property of the RUN, not of the override: the module-level guard above
+    // already turns that into a hard failure on CI (where check.yml supplies the clone), so locally
+    // it degrades to a diagnostic rather than a red that says nothing about this repository.
+    if (anchor.strategy && judged && contractRefusesDefault === null && !sdxlRoutesAvailable) {
+      t.diagnostic(
+        `${key}: not judged — no pinned inference checkout ($INFERENCE_REPO) to read the engine's ` +
+          "own strategy declaration from. On CI this run would already have failed.",
+      );
+      continue;
+    }
+    if (anchor.strategy && judged) {
       assert.notEqual(
         contractRefusesDefault,
         null,
-        `${key}: overrides the lane default but config/engine-capabilities/capabilities.${backend}.json ` +
-          `records no ${anchor.provider} contract surface at ${tier}/${anchor.loadShape}, and ${modelId} is ` +
-          "not a candle video model whose residency video_jobs/candle.rs::candle_video_offload_policy " +
-          "decides; either regenerate the dump at a pin that ships the contract (cargo run -p " +
-          "sceneworks-worker --bin dump-engine-capabilities) or drop the override",
+        `${key}: overrides the lane default, but config/engine-capabilities/capabilities.${backend}.json ` +
+          `records no ${anchor.provider} contract surface at ${tier}/${anchor.loadShape} AND the engine's own ` +
+          `memory-strategy entry point for ${modelId}:${backend} (config/anchor-loader-closures.json) declares ` +
+          "no per-rung support that can be read at the pinned inference checkout. Set $INFERENCE_REPO to a " +
+          "checkout of the pin (check.yml's parity-scaffold job does), or drop the override: an override with " +
+          "no derived architecture evidence is refused, never assumed.",
       );
     }
     const exempt = manifestExempt || contractRefusesDefault === true;
@@ -1837,7 +1818,7 @@ test("an anchor row plans the lane's default rung unless the manifest exempts it
       effective.rung,
       expected.rung,
       `${key}: manifest ${backend}.memoryStrategyStructuralExemptions ${manifestExempt ? "declares" : "does not declare"} ` +
-        `staged_residency and the capability dump ${contractRefusesDefault ? "records the contract refusing" : "does not record the contract refusing"} ` +
+        `staged_residency and the derived contract evidence ${contractRefusesDefault ? "records the contract refusing" : "does not record the contract refusing"} ` +
         `it, so the anchor must plan rung ${JSON.stringify(expected.rung)}`,
     );
     assert.deepEqual([...effective.engagedRungs], expected.engagedRungs, `${key}: engaged rung set`);
@@ -1846,6 +1827,61 @@ test("an anchor row plans the lane's default rung unless the manifest exempts it
   }
   assert.ok(overridden > 0, "the plan exercises the override at least once");
   assert.ok(candleExempt > 0, "at least one candle row is exempted from the lane's default rung");
+  // …and the third source is genuinely load-bearing today, not dead code kept warm: the SCAIL-2
+  // candle rows have no dump surface and are legitimate only because the engine's own declaration
+  // is read. A count, not a list — a provider that grows a dump surface simply lowers it.
+  if (sdxlRoutesAvailable) {
+    assert.ok(
+      declaredEvidence > 0,
+      "no override rested on the engine's own strategy declaration; if every provider now carries a " +
+        "dump surface, delete readDeclaredStrategySupport rather than leaving an unexercised source",
+    );
+  }
+});
+
+// sc-22736. The third source read three ways: the shipped shape yields per-rung support, a file
+// with no declaration yields null (which the rule above refuses), and a declaration this parser
+// cannot read THROWS. That last case is the one that matters — the cheap failure mode for a
+// source-text derivation is to silently stop matching and re-admit every override.
+test("the engine's strategy declaration is parsed per rung, and an unreadable shape is refused", async () => {
+  const shipped = `
+        strategies: MemoryStrategy::ALL
+            .into_iter()
+            .map(|strategy| MemoryStrategyCapability {
+                strategy,
+                support: if strategy == MemoryStrategy::Resident {
+                    MemoryStrategySupport::Implemented
+                } else {
+                    MemoryStrategySupport::Missing
+                },
+                parameters: MemoryParameterRanges::default(),
+            })
+            .collect(),
+  `;
+  const support = parseDeclaredStrategySupport(shipped, "fixture.rs");
+  assert.equal(support("resident"), "Implemented");
+  assert.equal(support("staged_residency"), "Missing");
+  assert.equal(support("bounded_decode"), "Missing");
+  // No declaration at all: null, never "implements everything".
+  assert.equal(parseDeclaredStrategySupport("fn build_contract() {}", "fixture.rs"), null);
+  // MUTATION: the same file after an upstream refactor this parser does not know. It must throw —
+  // returning null here would make the override rule fall back to "no evidence" and, worse,
+  // returning a default would admit it.
+  assert.throws(
+    () => parseDeclaredStrategySupport("    strategies: strategies(spec),\n", "fixture.rs"),
+    /cannot\s+read/,
+  );
+  // And the live wiring: candle SCAIL-2's real declaration, when a pinned checkout is reachable.
+  const closures = JSON.parse(await readFile(path.join(ROOT, "config/anchor-loader-closures.json"), "utf8"));
+  const live = await readDeclaredStrategySupport("scail2_14b", "candle", closures);
+  if (live === null) {
+    assert.ok(!process.env.CI, "on CI the pinned inference checkout must supply the SCAIL-2 declaration");
+  } else {
+    assert.equal(live("resident"), "Implemented");
+    assert.equal(live("staged_residency"), "Missing");
+  }
+  // A model the closure does not declare has no entry point to read, so it yields null.
+  assert.equal(await readDeclaredStrategySupport("not_a_model", "candle", closures), null);
 });
 
 // Each Mage variant binds TWO artifact triples: its OWN tiered rehost (never a sibling's — the six
