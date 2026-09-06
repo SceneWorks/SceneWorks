@@ -731,6 +731,52 @@
       "overallAllocatorEnvelopeBytes": 66623825544
     },
     {
+      "id": "flux_dev:mlx:bf16:base:base:flux1-dev-bf16-mlx-shared-ladder-v1:imc-466e6b74605c1148188d",
+      "modelId": "flux_dev",
+      "modelFamily": "flux",
+      "route": "flux1_dev",
+      "provider": "flux1_dev",
+      "backend": "mlx",
+      "tier": "bf16",
+      "transformerVariant": null,
+      "decoder": null,
+      "mode": "text_to_image",
+      "overlay": null,
+      "referenceCount": 0,
+      "loadShape": "deferred_materialization",
+      "measuredRegime": {
+        "decodeTiled": false,
+        "transformerWindowed": false,
+        "staged": false,
+        "attentionChunked": false
+      },
+      "source": {
+        "path": "docs/calibration/sc-22738/flux-dev-bf16-mlx-evidence.json",
+        "sha256": "6e31ab244aa64eb7f373f85a07816506aec52dffc209895b6f5bec52513c0953",
+        "recordId": "imc-466e6b74605c1148188d",
+        "calibrationFingerprint": "flux1-dev-bf16-mlx-shared-ladder-v1",
+        "loaderClosureDigest": "d7c4be259300301df9135f56ca83a70d5e31de752718418914de607ff00be6ae"
+      },
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "frames": 1,
+        "fps": null
+      },
+      "phaseActivePeakBytes": {
+        "conditioning": 1051960,
+        "denoise": 35966460476,
+        "decode": 49030500432
+      },
+      "phaseAllocatorEnvelopeBytes": {
+        "conditioning": 1054060,
+        "denoise": 42500343448,
+        "decode": 92513952452
+      },
+      "overallAllocatorEnvelopeBytes": 92513952452,
+      "underivedReason": "the anchor render engaged bounded rungs (or deferred materialization), so it does not measure the widest composition the MLX image law upper-bounds the ladder from; this anchor validates its measured point and prices nothing beyond it"
+    },
+    {
       "id": "krea_2_turbo:candle:q4:base:base:krea-turbo-cuda-phase-curves-v1:imc-7f1a63e5459300aed47c",
       "modelId": "krea_2_turbo",
       "modelFamily": "krea_2",
@@ -2278,17 +2324,6 @@
           "vramGbByTier": "31.8"
         }
       }
-    },
-    {
-      "id": "analytic:flux_dev:mlx:bf16",
-      "modelId": "flux_dev",
-      "modelFamily": "flux",
-      "route": "flux1_dev",
-      "backend": "mlx",
-      "tier": "bf16",
-      "basis": "no_retained_evidence",
-      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
-      "evidence": null
     },
     {
       "id": "analytic:flux_dev:mlx:q4",

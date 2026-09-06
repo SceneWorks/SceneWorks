@@ -1,7 +1,7 @@
 {
   "schemaVersion": 11,
   "generatedFrom": {
-    "sceneWorksRevision": "source-tree:b6fbcb4978d9be9c26ce8ac487a8eaca58edaa05992a540d20f079bbae310583",
+    "sceneWorksRevision": "source-tree:8b761074484dfd81a205fa42376bcd2dbe73c1b6debe45d8de386dffc42f6d25",
     "sources": {
       "manifest": {
         "path": "config/manifests/builtin.models.jsonc",
@@ -69,7 +69,7 @@
       },
       "anchorStore": {
         "path": "config/memory-anchors.json",
-        "sha256": "ffe1fc3312e862499f7b0c11267d557bbb59807ba6aa4ad415d8789bedb51194"
+        "sha256": "2528983ce4c1ed08187f2eda683c9ff53646f94bbb193339cda193dc18a2bc4d"
       },
       "anchorLoaderClosures": {
         "path": "config/anchor-loader-closures.json",
@@ -77,7 +77,7 @@
       },
       "anchorDerivation": {
         "path": "crates/sceneworks-core/src/memory_anchor.rs",
-        "sha256": "654f6385afd2c28065fc6634f93d4b4af76e488180f3b7f6217c7bdf023316c6"
+        "sha256": "fb26e1ced1ea1f31c9ca421be1b152e5b716a3a42e968c9d5123cf03788aec73"
       },
       "anchorAdmission": {
         "path": "crates/sceneworks-worker/src/video_admission.rs",
@@ -138,10 +138,10 @@
       "video": 11
     },
     "cells": 9265,
-    "publishedCells": 910,
-    "elidedCells": 8355,
+    "publishedCells": 923,
+    "elidedCells": 8342,
     "elidedByState": {
-      "Implemented": 3981,
+      "Implemented": 3968,
       "Missing": 4374
     },
     "publicationPredicate": "A coordinate is published when it carries a claim a per-lane census cannot: a measured memory anchor covers its (model, tier, backend lane), or it is structurally exempt. A bare `Implemented` or `Missing` state is a property of the whole lane, replicated across every tier x mode x overlay, and is counted in `summary.elidedByState` and the per-(entry, backend, rung) `coverage` census instead of restated thousands of times.",
@@ -162,9 +162,9 @@
         "reason": "both lanes ARE routed (VideoModelCaps mlx+candle, resolve_candle_video_route's MiniMaxH3 arm), but this generator's route parsers cannot enumerate either: the MLX resolver is a PREFIX PREDICATE and the Candle arm lives outside candle_video_engine_id. Matrix-only — the E1 measurability burndown reads the routing catalog and DOES claim these cells"
       }
     ],
-    "anchors": 29,
-    "analyticOnlyCells": 308,
-    "anchoredCells": 447,
+    "anchors": 30,
+    "analyticOnlyCells": 307,
+    "anchoredCells": 460,
     "staleAnchors": 10,
     "attestedAnchors": 5,
     "fullModels": 0
@@ -4828,6 +4828,24 @@
       "cells": 5
     },
     {
+      "id": "flux_dev:mlx:bf16:base:base:flux1-dev-bf16-mlx-shared-ladder-v1:imc-466e6b74605c1148188d",
+      "modelId": "flux_dev",
+      "backend": "mlx",
+      "tier": "bf16",
+      "provider": "flux1_dev",
+      "mode": "text_to_image",
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "frames": 1,
+        "fps": null
+      },
+      "source": "docs/calibration/sc-22738/flux-dev-bf16-mlx-evidence.json",
+      "current": true,
+      "currencyAttestation": null,
+      "cells": 13
+    },
+    {
       "id": "flux2_dev:mlx:q4:base:base:sc-18218-flux2-dev-t2i-resident-evidence-v1:imc-b6537074420d51413b38",
       "modelId": "flux2_dev",
       "backend": "mlx",
@@ -6900,11 +6918,12 @@
       "backend": "mlx",
       "rung": "bounded_attention",
       "coordinates": 24,
-      "published": 0,
-      "elided": 24,
+      "published": 1,
+      "elided": 23,
       "implemented": 3,
       "states": {
-        "Implemented": 3,
+        "Anchored/underived": 1,
+        "Implemented": 2,
         "Missing": 21
       },
       "implementedBy": {
@@ -6930,11 +6949,12 @@
       "backend": "mlx",
       "rung": "bounded_decode",
       "coordinates": 24,
-      "published": 0,
-      "elided": 24,
+      "published": 1,
+      "elided": 23,
       "implemented": 3,
       "states": {
-        "Implemented": 3,
+        "Anchored/underived": 1,
+        "Implemented": 2,
         "Missing": 21
       },
       "implementedBy": {
@@ -6960,11 +6980,12 @@
       "backend": "mlx",
       "rung": "bounded_transformer_residency",
       "coordinates": 24,
-      "published": 0,
-      "elided": 24,
+      "published": 1,
+      "elided": 23,
       "implemented": 3,
       "states": {
-        "Implemented": 3,
+        "Anchored/underived": 1,
+        "Implemented": 2,
         "Missing": 21
       },
       "implementedBy": {
@@ -6990,11 +7011,12 @@
       "backend": "mlx",
       "rung": "resident",
       "coordinates": 24,
-      "published": 0,
-      "elided": 24,
+      "published": 5,
+      "elided": 19,
       "implemented": 15,
       "states": {
-        "Implemented": 15,
+        "Anchored/underived": 5,
+        "Implemented": 10,
         "Missing": 9
       },
       "implementedBy": {
@@ -7020,11 +7042,12 @@
       "backend": "mlx",
       "rung": "staged_residency",
       "coordinates": 24,
-      "published": 0,
-      "elided": 24,
+      "published": 5,
+      "elided": 19,
       "implemented": 15,
       "states": {
-        "Implemented": 15,
+        "Anchored/underived": 5,
+        "Implemented": 10,
         "Missing": 9
       },
       "implementedBy": {
@@ -17727,6 +17750,705 @@
         "anchor": [
           {
             "source": "config/memory-anchors.json#chroma1_hd:mlx:q8:base:base:chroma1-hd-q8-mlx-shared-ladder-v1:imc-9ed2c70605a4f150ba66"
+          }
+        ]
+      }
+    },
+    {
+      "id": "flux_dev:flux1_dev_control:mlx:bf16:character_image:control:resident",
+      "modelId": "flux_dev",
+      "resolvedRoute": "flux1_dev_control",
+      "provider": "flux1_dev_control",
+      "backend": "mlx",
+      "tier": "bf16",
+      "mode": "character_image",
+      "overlay": "control",
+      "rung": "resident",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "768x768",
+          "1024x1024",
+          "1280x720",
+          "720x1280"
+        ]
+      },
+      "strategyParameters": {
+        "publishedRanges": {}
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "flux_dev:mlx:bf16:base:base:flux1-dev-bf16-mlx-shared-ladder-v1:imc-466e6b74605c1148188d",
+        "tier": "bf16",
+        "source": "config/memory-anchors.json#flux_dev:mlx:bf16:base:base:flux1-dev-bf16-mlx-shared-ladder-v1:imc-466e6b74605c1148188d",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": false,
+        "underivedReason": "the anchor render engaged bounded rungs (or deferred materialization), so it does not measure the widest composition the MLX image law upper-bounds the ladder from; this anchor validates its measured point and prices nothing beyond it"
+      },
+      "derivationDefined": true,
+      "state": "Anchored/underived",
+      "owningFamilyStory": 15514,
+      "owningModelStory": 15471,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "inference:crates/media/mlx-gen/mlx-gen-flux/src/memory_strategy.rs"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#flux_dev:mlx:bf16:base:base:flux1-dev-bf16-mlx-shared-ladder-v1:imc-466e6b74605c1148188d"
+          }
+        ]
+      }
+    },
+    {
+      "id": "flux_dev:flux1_dev_control:mlx:bf16:character_image:control:staged_residency",
+      "modelId": "flux_dev",
+      "resolvedRoute": "flux1_dev_control",
+      "provider": "flux1_dev_control",
+      "backend": "mlx",
+      "tier": "bf16",
+      "mode": "character_image",
+      "overlay": "control",
+      "rung": "staged_residency",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "768x768",
+          "1024x1024",
+          "1280x720",
+          "720x1280"
+        ]
+      },
+      "strategyParameters": {
+        "publishedRanges": {}
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "flux_dev:mlx:bf16:base:base:flux1-dev-bf16-mlx-shared-ladder-v1:imc-466e6b74605c1148188d",
+        "tier": "bf16",
+        "source": "config/memory-anchors.json#flux_dev:mlx:bf16:base:base:flux1-dev-bf16-mlx-shared-ladder-v1:imc-466e6b74605c1148188d",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": false,
+        "underivedReason": "the anchor render engaged bounded rungs (or deferred materialization), so it does not measure the widest composition the MLX image law upper-bounds the ladder from; this anchor validates its measured point and prices nothing beyond it"
+      },
+      "derivationDefined": true,
+      "state": "Anchored/underived",
+      "owningFamilyStory": 15514,
+      "owningModelStory": 15471,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "inference:crates/media/mlx-gen/mlx-gen-flux/src/memory_strategy.rs"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#flux_dev:mlx:bf16:base:base:flux1-dev-bf16-mlx-shared-ladder-v1:imc-466e6b74605c1148188d"
+          }
+        ]
+      }
+    },
+    {
+      "id": "flux_dev:flux1_dev_control:mlx:bf16:text_to_image:control:resident",
+      "modelId": "flux_dev",
+      "resolvedRoute": "flux1_dev_control",
+      "provider": "flux1_dev_control",
+      "backend": "mlx",
+      "tier": "bf16",
+      "mode": "text_to_image",
+      "overlay": "control",
+      "rung": "resident",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "768x768",
+          "1024x1024",
+          "1280x720",
+          "720x1280"
+        ]
+      },
+      "strategyParameters": {
+        "publishedRanges": {}
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "flux_dev:mlx:bf16:base:base:flux1-dev-bf16-mlx-shared-ladder-v1:imc-466e6b74605c1148188d",
+        "tier": "bf16",
+        "source": "config/memory-anchors.json#flux_dev:mlx:bf16:base:base:flux1-dev-bf16-mlx-shared-ladder-v1:imc-466e6b74605c1148188d",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": false,
+        "underivedReason": "the anchor render engaged bounded rungs (or deferred materialization), so it does not measure the widest composition the MLX image law upper-bounds the ladder from; this anchor validates its measured point and prices nothing beyond it"
+      },
+      "derivationDefined": true,
+      "state": "Anchored/underived",
+      "owningFamilyStory": 15514,
+      "owningModelStory": 15471,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "inference:crates/media/mlx-gen/mlx-gen-flux/src/memory_strategy.rs"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#flux_dev:mlx:bf16:base:base:flux1-dev-bf16-mlx-shared-ladder-v1:imc-466e6b74605c1148188d"
+          }
+        ]
+      }
+    },
+    {
+      "id": "flux_dev:flux1_dev_control:mlx:bf16:text_to_image:control:staged_residency",
+      "modelId": "flux_dev",
+      "resolvedRoute": "flux1_dev_control",
+      "provider": "flux1_dev_control",
+      "backend": "mlx",
+      "tier": "bf16",
+      "mode": "text_to_image",
+      "overlay": "control",
+      "rung": "staged_residency",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "768x768",
+          "1024x1024",
+          "1280x720",
+          "720x1280"
+        ]
+      },
+      "strategyParameters": {
+        "publishedRanges": {}
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "flux_dev:mlx:bf16:base:base:flux1-dev-bf16-mlx-shared-ladder-v1:imc-466e6b74605c1148188d",
+        "tier": "bf16",
+        "source": "config/memory-anchors.json#flux_dev:mlx:bf16:base:base:flux1-dev-bf16-mlx-shared-ladder-v1:imc-466e6b74605c1148188d",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": false,
+        "underivedReason": "the anchor render engaged bounded rungs (or deferred materialization), so it does not measure the widest composition the MLX image law upper-bounds the ladder from; this anchor validates its measured point and prices nothing beyond it"
+      },
+      "derivationDefined": true,
+      "state": "Anchored/underived",
+      "owningFamilyStory": 15514,
+      "owningModelStory": 15471,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "inference:crates/media/mlx-gen/mlx-gen-flux/src/memory_strategy.rs"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#flux_dev:mlx:bf16:base:base:flux1-dev-bf16-mlx-shared-ladder-v1:imc-466e6b74605c1148188d"
+          }
+        ]
+      }
+    },
+    {
+      "id": "flux_dev:flux1_dev:mlx:bf16:character_image:identity:resident",
+      "modelId": "flux_dev",
+      "resolvedRoute": "flux1_dev",
+      "provider": "flux1_dev",
+      "backend": "mlx",
+      "tier": "bf16",
+      "mode": "character_image",
+      "overlay": "identity",
+      "rung": "resident",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "768x768",
+          "1024x1024",
+          "1280x720",
+          "720x1280"
+        ]
+      },
+      "strategyParameters": {
+        "publishedRanges": {}
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "flux_dev:mlx:bf16:base:base:flux1-dev-bf16-mlx-shared-ladder-v1:imc-466e6b74605c1148188d",
+        "tier": "bf16",
+        "source": "config/memory-anchors.json#flux_dev:mlx:bf16:base:base:flux1-dev-bf16-mlx-shared-ladder-v1:imc-466e6b74605c1148188d",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": false,
+        "underivedReason": "the anchor render engaged bounded rungs (or deferred materialization), so it does not measure the widest composition the MLX image law upper-bounds the ladder from; this anchor validates its measured point and prices nothing beyond it"
+      },
+      "derivationDefined": true,
+      "state": "Anchored/underived",
+      "owningFamilyStory": 15514,
+      "owningModelStory": 15471,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "inference:crates/media/mlx-gen/mlx-gen-flux/src/memory_strategy.rs"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#flux_dev:mlx:bf16:base:base:flux1-dev-bf16-mlx-shared-ladder-v1:imc-466e6b74605c1148188d"
+          }
+        ]
+      }
+    },
+    {
+      "id": "flux_dev:flux1_dev:mlx:bf16:character_image:identity:staged_residency",
+      "modelId": "flux_dev",
+      "resolvedRoute": "flux1_dev",
+      "provider": "flux1_dev",
+      "backend": "mlx",
+      "tier": "bf16",
+      "mode": "character_image",
+      "overlay": "identity",
+      "rung": "staged_residency",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "768x768",
+          "1024x1024",
+          "1280x720",
+          "720x1280"
+        ]
+      },
+      "strategyParameters": {
+        "publishedRanges": {}
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "flux_dev:mlx:bf16:base:base:flux1-dev-bf16-mlx-shared-ladder-v1:imc-466e6b74605c1148188d",
+        "tier": "bf16",
+        "source": "config/memory-anchors.json#flux_dev:mlx:bf16:base:base:flux1-dev-bf16-mlx-shared-ladder-v1:imc-466e6b74605c1148188d",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": false,
+        "underivedReason": "the anchor render engaged bounded rungs (or deferred materialization), so it does not measure the widest composition the MLX image law upper-bounds the ladder from; this anchor validates its measured point and prices nothing beyond it"
+      },
+      "derivationDefined": true,
+      "state": "Anchored/underived",
+      "owningFamilyStory": 15514,
+      "owningModelStory": 15471,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "inference:crates/media/mlx-gen/mlx-gen-flux/src/memory_strategy.rs"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#flux_dev:mlx:bf16:base:base:flux1-dev-bf16-mlx-shared-ladder-v1:imc-466e6b74605c1148188d"
+          }
+        ]
+      }
+    },
+    {
+      "id": "flux_dev:flux1_dev:mlx:bf16:text_to_image:lora:resident",
+      "modelId": "flux_dev",
+      "resolvedRoute": "flux1_dev",
+      "provider": "flux1_dev",
+      "backend": "mlx",
+      "tier": "bf16",
+      "mode": "text_to_image",
+      "overlay": "lora",
+      "rung": "resident",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "768x768",
+          "1024x1024",
+          "1280x720",
+          "720x1280"
+        ]
+      },
+      "strategyParameters": {
+        "publishedRanges": {}
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "flux_dev:mlx:bf16:base:base:flux1-dev-bf16-mlx-shared-ladder-v1:imc-466e6b74605c1148188d",
+        "tier": "bf16",
+        "source": "config/memory-anchors.json#flux_dev:mlx:bf16:base:base:flux1-dev-bf16-mlx-shared-ladder-v1:imc-466e6b74605c1148188d",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": false,
+        "underivedReason": "the anchor render engaged bounded rungs (or deferred materialization), so it does not measure the widest composition the MLX image law upper-bounds the ladder from; this anchor validates its measured point and prices nothing beyond it"
+      },
+      "derivationDefined": true,
+      "state": "Anchored/underived",
+      "owningFamilyStory": 15514,
+      "owningModelStory": 15471,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "inference:crates/media/mlx-gen/mlx-gen-flux/src/memory_strategy.rs"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#flux_dev:mlx:bf16:base:base:flux1-dev-bf16-mlx-shared-ladder-v1:imc-466e6b74605c1148188d"
+          }
+        ]
+      }
+    },
+    {
+      "id": "flux_dev:flux1_dev:mlx:bf16:text_to_image:lora:staged_residency",
+      "modelId": "flux_dev",
+      "resolvedRoute": "flux1_dev",
+      "provider": "flux1_dev",
+      "backend": "mlx",
+      "tier": "bf16",
+      "mode": "text_to_image",
+      "overlay": "lora",
+      "rung": "staged_residency",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "768x768",
+          "1024x1024",
+          "1280x720",
+          "720x1280"
+        ]
+      },
+      "strategyParameters": {
+        "publishedRanges": {}
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "flux_dev:mlx:bf16:base:base:flux1-dev-bf16-mlx-shared-ladder-v1:imc-466e6b74605c1148188d",
+        "tier": "bf16",
+        "source": "config/memory-anchors.json#flux_dev:mlx:bf16:base:base:flux1-dev-bf16-mlx-shared-ladder-v1:imc-466e6b74605c1148188d",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": false,
+        "underivedReason": "the anchor render engaged bounded rungs (or deferred materialization), so it does not measure the widest composition the MLX image law upper-bounds the ladder from; this anchor validates its measured point and prices nothing beyond it"
+      },
+      "derivationDefined": true,
+      "state": "Anchored/underived",
+      "owningFamilyStory": 15514,
+      "owningModelStory": 15471,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "inference:crates/media/mlx-gen/mlx-gen-flux/src/memory_strategy.rs"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#flux_dev:mlx:bf16:base:base:flux1-dev-bf16-mlx-shared-ladder-v1:imc-466e6b74605c1148188d"
+          }
+        ]
+      }
+    },
+    {
+      "id": "flux_dev:flux1_dev:mlx:bf16:text_to_image:none:bounded_attention",
+      "modelId": "flux_dev",
+      "resolvedRoute": "flux1_dev",
+      "provider": "flux1_dev",
+      "backend": "mlx",
+      "tier": "bf16",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "rung": "bounded_attention",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "768x768",
+          "1024x1024",
+          "1280x720",
+          "720x1280"
+        ]
+      },
+      "strategyParameters": {
+        "decodeTileEdge": 512,
+        "decodeOverlap": 64,
+        "attentionChunkSize": 67108864,
+        "publishedRanges": {
+          "decodeTileEdges": [
+            768,
+            640,
+            512
+          ],
+          "decodeOverlaps": [
+            64
+          ],
+          "attentionChunkSizes": [
+            67108864
+          ]
+        }
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "flux_dev:mlx:bf16:base:base:flux1-dev-bf16-mlx-shared-ladder-v1:imc-466e6b74605c1148188d",
+        "tier": "bf16",
+        "source": "config/memory-anchors.json#flux_dev:mlx:bf16:base:base:flux1-dev-bf16-mlx-shared-ladder-v1:imc-466e6b74605c1148188d",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": false,
+        "underivedReason": "the anchor render engaged bounded rungs (or deferred materialization), so it does not measure the widest composition the MLX image law upper-bounds the ladder from; this anchor validates its measured point and prices nothing beyond it"
+      },
+      "derivationDefined": true,
+      "state": "Anchored/underived",
+      "owningFamilyStory": 15514,
+      "owningModelStory": 15471,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "inference:crates/media/mlx-gen/mlx-gen-flux/src/memory_strategy.rs"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#flux_dev:mlx:bf16:base:base:flux1-dev-bf16-mlx-shared-ladder-v1:imc-466e6b74605c1148188d"
+          }
+        ]
+      }
+    },
+    {
+      "id": "flux_dev:flux1_dev:mlx:bf16:text_to_image:none:bounded_decode",
+      "modelId": "flux_dev",
+      "resolvedRoute": "flux1_dev",
+      "provider": "flux1_dev",
+      "backend": "mlx",
+      "tier": "bf16",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "rung": "bounded_decode",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "768x768",
+          "1024x1024",
+          "1280x720",
+          "720x1280"
+        ]
+      },
+      "strategyParameters": {
+        "decodeTileEdge": 512,
+        "decodeOverlap": 64,
+        "publishedRanges": {
+          "decodeTileEdges": [
+            768,
+            640,
+            512
+          ],
+          "decodeOverlaps": [
+            64
+          ]
+        }
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "flux_dev:mlx:bf16:base:base:flux1-dev-bf16-mlx-shared-ladder-v1:imc-466e6b74605c1148188d",
+        "tier": "bf16",
+        "source": "config/memory-anchors.json#flux_dev:mlx:bf16:base:base:flux1-dev-bf16-mlx-shared-ladder-v1:imc-466e6b74605c1148188d",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": false,
+        "underivedReason": "the anchor render engaged bounded rungs (or deferred materialization), so it does not measure the widest composition the MLX image law upper-bounds the ladder from; this anchor validates its measured point and prices nothing beyond it"
+      },
+      "derivationDefined": true,
+      "state": "Anchored/underived",
+      "owningFamilyStory": 15514,
+      "owningModelStory": 15471,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "inference:crates/media/mlx-gen/mlx-gen-flux/src/memory_strategy.rs"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#flux_dev:mlx:bf16:base:base:flux1-dev-bf16-mlx-shared-ladder-v1:imc-466e6b74605c1148188d"
+          }
+        ]
+      }
+    },
+    {
+      "id": "flux_dev:flux1_dev:mlx:bf16:text_to_image:none:bounded_transformer_residency",
+      "modelId": "flux_dev",
+      "resolvedRoute": "flux1_dev",
+      "provider": "flux1_dev",
+      "backend": "mlx",
+      "tier": "bf16",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "rung": "bounded_transformer_residency",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "768x768",
+          "1024x1024",
+          "1280x720",
+          "720x1280"
+        ]
+      },
+      "strategyParameters": {
+        "decodeTileEdge": 512,
+        "decodeOverlap": 64,
+        "attentionChunkSize": 67108864,
+        "transformerWindowSize": 1,
+        "transformerWindowComponent": "Dit",
+        "publishedRanges": {
+          "decodeTileEdges": [
+            768,
+            640,
+            512
+          ],
+          "decodeOverlaps": [
+            64
+          ],
+          "attentionChunkSizes": [
+            67108864
+          ],
+          "transformerWindowSizes": [
+            1
+          ],
+          "transformerWindowComponents": [
+            "Dit"
+          ]
+        }
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "flux_dev:mlx:bf16:base:base:flux1-dev-bf16-mlx-shared-ladder-v1:imc-466e6b74605c1148188d",
+        "tier": "bf16",
+        "source": "config/memory-anchors.json#flux_dev:mlx:bf16:base:base:flux1-dev-bf16-mlx-shared-ladder-v1:imc-466e6b74605c1148188d",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": false,
+        "underivedReason": "the anchor render engaged bounded rungs (or deferred materialization), so it does not measure the widest composition the MLX image law upper-bounds the ladder from; this anchor validates its measured point and prices nothing beyond it"
+      },
+      "derivationDefined": true,
+      "state": "Anchored/underived",
+      "owningFamilyStory": 15514,
+      "owningModelStory": 15471,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "inference:crates/media/mlx-gen/mlx-gen-flux/src/memory_strategy.rs"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#flux_dev:mlx:bf16:base:base:flux1-dev-bf16-mlx-shared-ladder-v1:imc-466e6b74605c1148188d"
+          }
+        ]
+      }
+    },
+    {
+      "id": "flux_dev:flux1_dev:mlx:bf16:text_to_image:none:resident",
+      "modelId": "flux_dev",
+      "resolvedRoute": "flux1_dev",
+      "provider": "flux1_dev",
+      "backend": "mlx",
+      "tier": "bf16",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "rung": "resident",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "768x768",
+          "1024x1024",
+          "1280x720",
+          "720x1280"
+        ]
+      },
+      "strategyParameters": {
+        "publishedRanges": {}
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "flux_dev:mlx:bf16:base:base:flux1-dev-bf16-mlx-shared-ladder-v1:imc-466e6b74605c1148188d",
+        "tier": "bf16",
+        "source": "config/memory-anchors.json#flux_dev:mlx:bf16:base:base:flux1-dev-bf16-mlx-shared-ladder-v1:imc-466e6b74605c1148188d",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": false,
+        "underivedReason": "the anchor render engaged bounded rungs (or deferred materialization), so it does not measure the widest composition the MLX image law upper-bounds the ladder from; this anchor validates its measured point and prices nothing beyond it"
+      },
+      "derivationDefined": true,
+      "state": "Anchored/underived",
+      "owningFamilyStory": 15514,
+      "owningModelStory": 15471,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "inference:crates/media/mlx-gen/mlx-gen-flux/src/memory_strategy.rs"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#flux_dev:mlx:bf16:base:base:flux1-dev-bf16-mlx-shared-ladder-v1:imc-466e6b74605c1148188d"
+          }
+        ]
+      }
+    },
+    {
+      "id": "flux_dev:flux1_dev:mlx:bf16:text_to_image:none:staged_residency",
+      "modelId": "flux_dev",
+      "resolvedRoute": "flux1_dev",
+      "provider": "flux1_dev",
+      "backend": "mlx",
+      "tier": "bf16",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "rung": "staged_residency",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "768x768",
+          "1024x1024",
+          "1280x720",
+          "720x1280"
+        ]
+      },
+      "strategyParameters": {
+        "publishedRanges": {}
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "flux_dev:mlx:bf16:base:base:flux1-dev-bf16-mlx-shared-ladder-v1:imc-466e6b74605c1148188d",
+        "tier": "bf16",
+        "source": "config/memory-anchors.json#flux_dev:mlx:bf16:base:base:flux1-dev-bf16-mlx-shared-ladder-v1:imc-466e6b74605c1148188d",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": false,
+        "underivedReason": "the anchor render engaged bounded rungs (or deferred materialization), so it does not measure the widest composition the MLX image law upper-bounds the ladder from; this anchor validates its measured point and prices nothing beyond it"
+      },
+      "derivationDefined": true,
+      "state": "Anchored/underived",
+      "owningFamilyStory": 15514,
+      "owningModelStory": 15471,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "inference:crates/media/mlx-gen/mlx-gen-flux/src/memory_strategy.rs"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#flux_dev:mlx:bf16:base:base:flux1-dev-bf16-mlx-shared-ladder-v1:imc-466e6b74605c1148188d"
           }
         ]
       }
@@ -63454,7 +64176,21 @@
       "chroma1_hd:chroma1_hd:mlx:q8:text_to_image:none:resident",
       "chroma1_hd:chroma1_hd:mlx:q8:text_to_image:none:staged_residency"
     ],
-    "flux_dev": [],
+    "flux_dev": [
+      "flux_dev:flux1_dev_control:mlx:bf16:character_image:control:resident",
+      "flux_dev:flux1_dev_control:mlx:bf16:character_image:control:staged_residency",
+      "flux_dev:flux1_dev_control:mlx:bf16:text_to_image:control:resident",
+      "flux_dev:flux1_dev_control:mlx:bf16:text_to_image:control:staged_residency",
+      "flux_dev:flux1_dev:mlx:bf16:character_image:identity:resident",
+      "flux_dev:flux1_dev:mlx:bf16:character_image:identity:staged_residency",
+      "flux_dev:flux1_dev:mlx:bf16:text_to_image:lora:resident",
+      "flux_dev:flux1_dev:mlx:bf16:text_to_image:lora:staged_residency",
+      "flux_dev:flux1_dev:mlx:bf16:text_to_image:none:bounded_attention",
+      "flux_dev:flux1_dev:mlx:bf16:text_to_image:none:bounded_decode",
+      "flux_dev:flux1_dev:mlx:bf16:text_to_image:none:bounded_transformer_residency",
+      "flux_dev:flux1_dev:mlx:bf16:text_to_image:none:resident",
+      "flux_dev:flux1_dev:mlx:bf16:text_to_image:none:staged_residency"
+    ],
     "flux_schnell": [],
     "flux2_dev": [
       "flux2_dev:flux2_dev_control:mlx:q4:text_to_image:control:resident",
