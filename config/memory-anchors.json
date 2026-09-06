@@ -370,6 +370,52 @@
       "underivedReason": "the anchor render engaged bounded rungs (or deferred materialization), so it does not measure the widest composition the MLX image law upper-bounds the ladder from; this anchor validates its measured point and prices nothing beyond it"
     },
     {
+      "id": "chroma1_hd:mlx:q8:base:base:chroma1-hd-q8-mlx-shared-ladder-v1:imc-9ed2c70605a4f150ba66",
+      "modelId": "chroma1_hd",
+      "modelFamily": "chroma",
+      "route": "chroma1_hd",
+      "provider": "chroma1_hd",
+      "backend": "mlx",
+      "tier": "q8",
+      "transformerVariant": null,
+      "decoder": null,
+      "mode": "text_to_image",
+      "overlay": null,
+      "referenceCount": 0,
+      "loadShape": "deferred_materialization",
+      "measuredRegime": {
+        "decodeTiled": false,
+        "transformerWindowed": false,
+        "staged": false,
+        "attentionChunked": false
+      },
+      "source": {
+        "path": "docs/calibration/sc-22738/chroma1-hd-q8-mlx-evidence.json",
+        "sha256": "bb317c616e2c8d5e64cccf3c3c3e3856a12be6bff94ccb630d8bea294e79ec1d",
+        "recordId": "imc-9ed2c70605a4f150ba66",
+        "calibrationFingerprint": "chroma1-hd-q8-mlx-shared-ladder-v1",
+        "loaderClosureDigest": "bf2402de76e9bfdd4eafac40a06a76ad7a1f0cecbd1220e42e45c96339192ec9"
+      },
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "frames": 1,
+        "fps": null
+      },
+      "phaseActivePeakBytes": {
+        "conditioning": 2174124,
+        "denoise": 17913584396,
+        "decode": 30552219188
+      },
+      "phaseAllocatorEnvelopeBytes": {
+        "conditioning": 2174140,
+        "denoise": 27238841888,
+        "decode": 76594606080
+      },
+      "overallAllocatorEnvelopeBytes": 76594606080,
+      "underivedReason": "the anchor render engaged bounded rungs (or deferred materialization), so it does not measure the widest composition the MLX image law upper-bounds the ladder from; this anchor validates its measured point and prices nothing beyond it"
+    },
+    {
       "id": "flux2_dev:mlx:q4:base:base:sc-18218-flux2-dev-t2i-resident-evidence-v1:imc-b6537074420d51413b38",
       "modelId": "flux2_dev",
       "modelFamily": "flux2-dev",
@@ -1757,17 +1803,6 @@
       "modelFamily": "chroma",
       "route": "chroma1_hd",
       "backend": "candle",
-      "tier": "q8",
-      "basis": "no_retained_evidence",
-      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
-      "evidence": null
-    },
-    {
-      "id": "analytic:chroma1_hd:mlx:q8",
-      "modelId": "chroma1_hd",
-      "modelFamily": "chroma",
-      "route": "chroma1_hd",
-      "backend": "mlx",
       "tier": "q8",
       "basis": "no_retained_evidence",
       "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
