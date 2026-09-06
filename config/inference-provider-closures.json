@@ -1,7 +1,7 @@
 {
   "_comment": "Per-provider inference compile-closure digests (sc-17774). Calibration currency compares a record's captured closureDigest against the entry here for the SAME provider, so a change to one model's code path can no longer demote another's. Regenerate on every inference pin bump: node scripts/inference-closure-digest.mjs --repo <inference> --write. Derivation, and what this unit deliberately does NOT see, are documented in scripts/inference-closure-digest.mjs.",
   "digestVersion": "inference-closure-digest v4",
-  "inferenceRevision": "563c44e1652043bf8bd018de79cadadc393f91f2",
+  "inferenceRevision": "3b922bac6094e06f98bb2598a6d6fe10dc92739e",
   "providers": {
     "candle:bernini": {
       "crate": "crates/media/candle-gen/candle-gen-bernini",
@@ -1184,7 +1184,7 @@
     },
     "mlx:krea_2_raw": {
       "crate": "crates/media/mlx-gen/mlx-gen-krea",
-      "digest": "a1dbe185fae33c9fd3b90aabc97428db0b3df19899090ba28712ebfec6a5ec4a",
+      "digest": "4d1eaa8acab8710d3831f17abc3de62622a0f93b48f09e039da4f48f84be3f58",
       "sharedContractDigest": "f2a49d5a373b4c55ea42b12de3880a548ab13bd012f0fd0bc724e4048d5cfb50",
       "closureCrates": [
         "crates/contracts/core-llm",
@@ -1207,7 +1207,7 @@
     },
     "mlx:krea_2_turbo": {
       "crate": "crates/media/mlx-gen/mlx-gen-krea",
-      "digest": "be74d7a79f244a5ae8ad28020569b42372a974547a0cf44f742bd9578333c109",
+      "digest": "b95cc52a64370ad2bfb8e2254a210053f159bb47cd28a5c62308e1d2ce763a94",
       "sharedContractDigest": "f2a49d5a373b4c55ea42b12de3880a548ab13bd012f0fd0bc724e4048d5cfb50",
       "closureCrates": [
         "crates/contracts/core-llm",
@@ -1230,7 +1230,7 @@
     },
     "mlx:krea_2_turbo_control": {
       "crate": "crates/media/mlx-gen/mlx-gen-krea",
-      "digest": "4c92fa24d122674e73f47a7f95b01658b86e1a0931e306053707b59b6af3ba14",
+      "digest": "a20e674640889e4c83cb94e98ec05b04fd3c8b11719d95351faebd5facf1a413",
       "sharedContractDigest": "f2a49d5a373b4c55ea42b12de3880a548ab13bd012f0fd0bc724e4048d5cfb50",
       "closureCrates": [
         "crates/contracts/core-llm",
@@ -1253,7 +1253,7 @@
     },
     "mlx:krea_realtime_14b": {
       "crate": "crates/media/mlx-gen/mlx-gen-krea-realtime",
-      "digest": "bff0373ca479b069935282243e8eb04a736b5671e8cd189ff75ab614c7d1d453",
+      "digest": "7c00cf73346a4f6777075421ba1ca58abdc123673c819c1bb302426f7d5f3608",
       "sharedContractDigest": "f2a49d5a373b4c55ea42b12de3880a548ab13bd012f0fd0bc724e4048d5cfb50",
       "closureCrates": [
         "crates/contracts/core-llm",

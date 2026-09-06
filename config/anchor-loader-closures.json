@@ -1,7 +1,7 @@
 {
   "_comment": "Per-model loader-closure digests: the memory anchor currency key (sc-22511). An anchor is CURRENT while the digest it recorded still equals the digest here for its (model, backend lane). The unit is the source files the model's loader reaches, and nothing else — not the pin, not sibling models, not shared crates the loader never reaches. Regenerate when the pinned inference revision changes: node scripts/anchor-loader-closure.mjs --repo <inference> --write. A regeneration that leaves the digests unchanged is the expected case. A catalog alias (a model id the inference tree never names, such as z_image_edit) declares the engine id it resolves to as engineId; the alias is part of its hashed closure text.",
   "digestVersion": "anchor-loader-closure v2",
-  "inferenceRevision": "563c44e1652043bf8bd018de79cadadc393f91f2",
+  "inferenceRevision": "3b922bac6094e06f98bb2598a6d6fe10dc92739e",
   "models": {
     "bernini:candle": {
       "entryPoints": [
@@ -5002,7 +5002,7 @@
         "crates/media/mlx-gen/mlx-gen-krea/src/block_memory_strategy.rs",
         "crates/media/mlx-gen/mlx-gen-krea/src/model.rs"
       ],
-      "digest": "2764df2524aa946ab788546226072352b0dba7956fbbeb8434fc4e06126dd477",
+      "digest": "469220ca0dc2d0a6b65d685ae3f72efb4034351ff244c39ddc4f5bbaaa7f5463",
       "closureFileCount": 247,
       "closureFiles": [
         "crates/contracts/core-llm/src/constraint.rs",
@@ -5411,7 +5411,7 @@
         "crates/media/mlx-gen/mlx-gen-krea/src/memory_strategy.rs",
         "crates/media/mlx-gen/mlx-gen-krea/src/model.rs"
       ],
-      "digest": "bea959ff2f42a12f97a36a4a18988d43c45bfcbf2a05eb04276c72a51890159d",
+      "digest": "858b28715ccc2d45a9446b4caf49e19901f50e16c00fc97aaaf4630bc10387f0",
       "closureFileCount": 247,
       "closureFiles": [
         "crates/contracts/core-llm/src/constraint.rs",
@@ -5669,7 +5669,7 @@
         "crates/media/mlx-gen/mlx-gen-krea-realtime/src/memory_strategy.rs",
         "crates/media/mlx-gen/mlx-gen-krea-realtime/src/pipeline.rs"
       ],
-      "digest": "50c85bba0800777ce1dec907c81f6ef2606641782220f5dc97e357ef3d5f0891",
+      "digest": "af81efd3813101f61f90861c065d7749235b5874fcfac975aff2b3ee3578d088",
       "closureFileCount": 105,
       "closureFiles": [
         "crates/contracts/core-llm/src/constraint.rs",
