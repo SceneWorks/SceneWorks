@@ -62,10 +62,57 @@ use crate::{WorkerError, WorkerResult};
 
 const REQUEST_EVIDENCE_REVISION: &str = "sc-15507-request-scope-v1";
 const INFERENCE_CONTRACT_REVISION: &str = "1c4354b4b22d7f2cf5c4ea5fe17a83ab6c655e82";
-// Must remain identical to mlx-gen-mage's loaded provider contract. The prior generation-peak
-// token predated the shared ladder and caused every exact Mage request to fail the provider/gate
-// handshake before selection.
-const MAGE_CALIBRATION_FINGERPRINT: &str = "mage-flow-mlx-shared-ladder-2026-08-03-v1";
+// Must remain identical to mlx-gen-mage's loaded provider contract. sc-22733 (inference #953,
+// epic sc-22723) retired the single string `mage-flow-mlx-shared-ladder-2026-08-03-v1` for a
+// table keyed on (route, PROVEN artifact tier) — `mage-flow-<route>-<tier>-mlx-shared-ladder-v1`,
+// eighteen cells — because the three tiers of one route are three different resident sets and one
+// anchor cannot price all three. The engine binds a cell only when the tier is proven off the
+// `quantization.bits` marker of the component directories the loader itself opened (DiT and text
+// encoder agreeing) and equals `LoadSpec::quantize`, so the plan's `tier.quant` IS the tier axis.
+// The worker mirrors the table here rather than calling the engine because the Resident-path
+// handshake below is compiled on every platform; the macOS test
+// `mage_estimator_fingerprint_matches_the_linked_provider_contract` pins every cell to the linked
+// engine's `production_calibration_fingerprint`, so a move on either side is red at test time.
+// The prior generation-peak token predated the shared ladder and caused every exact Mage request
+// to fail the provider/gate handshake before selection.
+const MAGE_CALIBRATION_FINGERPRINT_SUFFIX: &str = "-mlx-shared-ladder-v1";
+
+/// The route label inside a Mage-Flow calibration string, mirroring
+/// `mlx_gen_mage::model::MageVariant::route_label` over the six registered ids. `None` for any id
+/// the engine does not serve: a plan naming one could only reach an unpaired estimator.
+fn mage_calibration_route_label(engine_id: &str) -> Option<&'static str> {
+    Some(match engine_id {
+        "mage_flow" => "mage-flow",
+        "mage_flow_base" => "mage-flow-base",
+        "mage_flow_turbo" => "mage-flow-turbo",
+        "mage_flow_edit" => "mage-flow-edit",
+        "mage_flow_edit_base" => "mage-flow-edit-base",
+        "mage_flow_edit_turbo" => "mage-flow-edit-turbo",
+        _ => return None,
+    })
+}
+
+/// The tier label inside a Mage-Flow calibration string, mirroring
+/// `mlx_gen_mage::model::calibration_tier_label`. `None` for a tier the family does not ship, so an
+/// unshipped tier is unnameable rather than collapsed onto a neighbour.
+fn mage_calibration_tier_label(quant: Option<gen_core::Quant>) -> Option<&'static str> {
+    match quant {
+        None => Some("bf16"),
+        Some(gen_core::Quant::Q4) => Some("q4"),
+        Some(gen_core::Quant::Q8) => Some("q8"),
+        Some(_) => None,
+    }
+}
+
+/// The production calibration identity the loaded `mlx-gen-mage` route publishes for one
+/// (route, tier) cell, or `None` when no cell exists for the pair.
+fn mage_calibration_fingerprint(engine_id: &str, quant: Option<gen_core::Quant>) -> Option<String> {
+    let route = mage_calibration_route_label(engine_id)?;
+    let tier = mage_calibration_tier_label(quant)?;
+    Some(format!(
+        "mage-flow-{route}-{tier}{MAGE_CALIBRATION_FINGERPRINT_SUFFIX}"
+    ))
+}
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -3784,21 +3831,31 @@ fn evaluate_request_with_budget_using_bundle(
         count = inputs.count.max(1),
         "selected MLX memory-admission path"
     );
-    if plan.engine_id.starts_with("mage_flow")
-        && !matches!(
+    if plan.engine_id.starts_with("mage_flow") {
+        // The expected identity is the (route, tier) cell of THIS plan: a loaded q8 contract must
+        // not admit a q4 request, and a route or tier the engine never ships names no cell at all.
+        let expected_fingerprint = mage_calibration_fingerprint(plan.engine_id, plan.tier.quant)
+            .ok_or_else(|| {
+                WorkerError::InvalidPayload(format!(
+                    "{} {:?} names no Mage-Flow calibration cell; refusing request admission \
+                     against an unpaired estimator",
+                    plan.engine_id, plan.tier.quant
+                ))
+            })?;
+        if !matches!(
             contract.calibration.as_ref(),
             Some(identity)
                 if identity.abi == gen_core::MEMORY_CALIBRATION_ABI
-                    && identity.fingerprint == MAGE_CALIBRATION_FINGERPRINT
-        )
-    {
-        return Err(WorkerError::InvalidPayload(format!(
-            "{} loaded provider calibration does not match ABI {} / fingerprint {}; refusing \
-             request admission against an unpaired estimator",
-            plan.engine_id,
-            gen_core::MEMORY_CALIBRATION_ABI,
-            MAGE_CALIBRATION_FINGERPRINT
-        )));
+                    && identity.fingerprint == expected_fingerprint
+        ) {
+            return Err(WorkerError::InvalidPayload(format!(
+                "{} loaded provider calibration does not match ABI {} / fingerprint {}; refusing \
+                 request admission against an unpaired estimator",
+                plan.engine_id,
+                gen_core::MEMORY_CALIBRATION_ABI,
+                expected_fingerprint
+            )));
+        }
     }
     // The caller estimates the base-model pipeline. Let the provider's canonical contract seam add
     // any separately declared auxiliary networks before either fit selection or warm-cache credit.
@@ -8031,12 +8088,18 @@ mod tests {
             },
         );
         contract.calibration = Some(MemoryCalibrationIdentity::new(
-            MAGE_CALIBRATION_FINGERPRINT,
+            mage_request_fingerprint(),
             gen_core::LoadShape::EagerMaterialization,
         ));
         contract.asset_facts.base_bytes = gib_to_bytes(6.0);
         contract.asset_facts.transformer_bytes = gib_to_bytes(6.0);
         contract
+    }
+
+    /// The (route, tier) cell `request_plan()` names: `mage_flow` at q4.
+    fn mage_request_fingerprint() -> String {
+        mage_calibration_fingerprint("mage_flow", Some(gen_core::Quant::Q4))
+            .expect("mage_flow q4 is a shipped Mage-Flow cell")
     }
 
     fn request_inputs(width: u32, height: u32, count: u32) -> MlxRequestInputs {
@@ -17328,18 +17391,117 @@ mod tests {
         .unwrap_err()
         .to_string();
         assert!(
-            error.contains(MAGE_CALIBRATION_FINGERPRINT),
+            error.contains(&mage_request_fingerprint()),
             "the production Resident path must compare the loaded provider fingerprint: {error}"
         );
+    }
+
+    #[test]
+    fn mage_resident_path_refuses_a_contract_from_another_tier() {
+        // A loaded q8 Mage contract carries a real production identity — but not the cell the q4
+        // plan names. The handshake must key on the plan's tier, not merely on "some Mage cell".
+        let q8_fingerprint = mage_calibration_fingerprint("mage_flow", Some(gen_core::Quant::Q8))
+            .expect("mage_flow q8 is a shipped Mage-Flow cell");
+        assert_ne!(q8_fingerprint, mage_request_fingerprint());
+        let mut contract = mage_request_contract();
+        contract.calibration = Some(gen_core::MemoryCalibrationIdentity::new(
+            q8_fingerprint.clone(),
+            gen_core::LoadShape::EagerMaterialization,
+        ));
+        let evaluate = |contract: MemoryProviderContract| {
+            evaluate_request_with_budget(
+                &request_generator(Some(contract)),
+                &request_plan(),
+                &request_inputs(512, 512, 1),
+                MemoryCacheState::Cold,
+                OffloadPolicy::Resident,
+                MemoryBudget {
+                    total_bytes: gib_to_bytes(64.0),
+                    committed_bytes: 0,
+                    reclaimable_bytes: 0,
+                    reserved_headroom_bytes: 0,
+                },
+                gib_to_bytes(8.0),
+                0,
+                &[],
+            )
+        };
+        let error = evaluate(contract).unwrap_err().to_string();
+        assert!(
+            error.contains("does not match") && error.contains(&mage_request_fingerprint()),
+            "a q8 identity must be refused against a q4 plan by naming the q4 cell: {error}"
+        );
+        assert!(
+            !error.contains(&q8_fingerprint),
+            "the refusal names the EXPECTED cell, not the loaded one: {error}"
+        );
+        // Positive control: the same contract carrying the plan's own cell is admitted.
+        evaluate(mage_request_contract())
+            .expect("the matching (route, tier) identity passes the Resident-path handshake");
+    }
+
+    #[test]
+    fn mage_calibration_cells_are_the_eighteen_distinct_shipped_pairs() {
+        let routes = [
+            "mage_flow",
+            "mage_flow_base",
+            "mage_flow_turbo",
+            "mage_flow_edit",
+            "mage_flow_edit_base",
+            "mage_flow_edit_turbo",
+        ];
+        let tiers = [None, Some(gen_core::Quant::Q4), Some(gen_core::Quant::Q8)];
+        let mut cells = std::collections::BTreeSet::new();
+        for route in routes {
+            for tier in tiers {
+                let cell = mage_calibration_fingerprint(route, tier)
+                    .unwrap_or_else(|| panic!("{route} {tier:?} is a shipped cell"));
+                assert!(
+                    cells.insert(cell),
+                    "{route} {tier:?} collides with another cell"
+                );
+            }
+            assert_eq!(
+                mage_calibration_fingerprint(route, Some(gen_core::Quant::Nvfp4)),
+                None,
+                "{route}: NVFP4 is not a Mage-Flow MLX tier and must stay unnameable"
+            );
+        }
+        assert_eq!(cells.len(), 18);
+        assert_eq!(
+            mage_calibration_fingerprint("mage_flow_lora", Some(gen_core::Quant::Q4)),
+            None,
+            "an id the engine does not serve names no cell"
+        );
+        assert!(!cells.contains("mage-flow-mlx-shared-ladder-2026-08-03-v1"));
     }
 
     #[cfg(target_os = "macos")]
     #[test]
     fn mage_estimator_fingerprint_matches_the_linked_provider_contract() {
+        use runtime_macos::providers::mage::model::{
+            production_calibration_fingerprint, MODEL_IDS,
+        };
+        let tiers = [
+            None,
+            Some(gen_core::Quant::Q4),
+            Some(gen_core::Quant::Q8),
+            Some(gen_core::Quant::Nvfp4),
+        ];
+        for engine_id in MODEL_IDS {
+            for tier in tiers {
+                assert_eq!(
+                    mage_calibration_fingerprint(engine_id, tier),
+                    production_calibration_fingerprint(engine_id, tier),
+                    "{engine_id} {tier:?}: the worker's Mage peak estimator must fail at test time \
+                     when the linked provider identity table moves",
+                );
+            }
+        }
         assert_eq!(
-            MAGE_CALIBRATION_FINGERPRINT,
-            runtime_macos::providers::mage::model::MEMORY_CALIBRATION_FINGERPRINT,
-            "the worker's Mage peak estimator must fail at compile/test time when the linked provider identity moves",
+            production_calibration_fingerprint("mage_flow_lora", None),
+            None,
+            "the engine serves exactly MODEL_IDS; the worker table must not name more"
         );
     }
 
@@ -17495,7 +17657,7 @@ mod tests {
             },
         );
         contract.calibration = Some(MemoryCalibrationIdentity::new(
-            MAGE_CALIBRATION_FINGERPRINT,
+            mage_request_fingerprint(),
             gen_core::LoadShape::EagerMaterialization,
         ));
         contract.asset_facts.base_bytes = gib_to_bytes(6.0);
