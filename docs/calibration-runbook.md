@@ -729,6 +729,75 @@ Flag notes, all from the `capture` arm of `main`:
   optimized one (`staged_residency`, nothing deeper) on candle, fixed by the harness to match what
   `scripts/extract-memory-anchors.mjs` can actually price.
 
+### 6a-bis. The whole catalog on a runner — `memory-catalog-campaign.yml` (sc-22738)
+
+The same `measure-memory-catalog.mjs` walk as §6a, run on the self-hosted GPU boxes instead of an
+interactive shell, so a multi-hour campaign does not tie up a terminal (and, on the MLX side, does
+not have to run on the dev Mac at all).
+
+**Trigger.** Actions → *Memory catalog campaign* → *Run workflow*, or:
+
+```bash
+gh workflow run memory-catalog-campaign.yml -R SceneWorks/SceneWorks \
+  --ref feature/sc-22723-memory-anchor-measurability \
+  -f backend=mlx -f campaign=sc-22738 \
+  -f ref=feature/sc-22723-memory-anchor-measurability \
+  -f 'runner_label=rw-krea (nax-macos-2, the second Mac)'
+```
+
+It is `workflow_dispatch`-ONLY — no `push`, no `pull_request`, no `schedule`. It gates nothing and
+can never become a required check; per the *Gate teardown* note in FEATURE_DEVELOPMENT.md,
+measurement runs at epic end or on explicit request, never per code change.
+
+**Inputs.** `backend` (`mlx` | `candle`), `campaign` (one path segment, e.g. `sc-22738`), `anchors`
+(comma-separated keys), `models` (space-separated ids), `skip_current` (default true),
+`hf_cache_roots`, `ref` (the branch to walk from and the PR base), `runner_label` (mlx only),
+`push_every`. `anchors`, `models`, `skip_current` and `hf_cache_roots` map one-for-one onto the
+script's `--anchors` / `--model` / `--skip-current` / `--hf-cache` flags.
+
+**Where each lane runs.**
+
+| backend | `runs-on` | box |
+|---|---|---|
+| `mlx` (default) | `[self-hosted, macOS, ARM64, rw-krea]` | `nax-macos-2`, the second Mac |
+| `mlx` (other choice) | `[self-hosted, macOS, ARM64, nax]` | `nax-macos`, the dev Mac |
+| `candle` | `[self-hosted, Windows, X64, cuda]` | the RTX PRO 6000 Windows box |
+
+🔴 Weight-set labels move between the two Macs — they name a weight set, not a machine. Both label
+sets above were confirmed against the `runner_name` of jobs that actually served them, which is the
+only way to check (`gh api /orgs/SceneWorks/actions/runners` 403s without `admin:org`). Re-confirm
+before assuming `rw-krea` is still the second Mac, and remember that a label no runner carries does
+not fail the dispatch: the job queues silently until the run is cancelled.
+
+**What the job does.** Checks out `ref` at full depth, cuts a NEW branch
+`story/<campaign>-<backend>-campaign-<run_id>` (the walk commits on the current branch and refuses a
+detached HEAD, and this keeps it off `feature/*` and `main`), builds the release adapter
+(`--features mlx --bin memory-mlx-adapter`, or `--features candle --bin memory-candle-adapter` under
+`vcvars64`), clones inference at the pin into a sibling of the workspace, prints the `--list` table
+as the job summary, runs `--dry-run`, then walks for real with `--work-dir` under `$RUNNER_TEMP`.
+
+**The inference pin is derived, never typed.** The job reads `pub const INFERENCE_PIN` out of
+`crates/sceneworks-memory-adapter/src/lib.rs` — the same constant `compiledInferencePin()` reads —
+and hard-fails unless the clone's HEAD equals it and the tree is clean. `npm run bump:inference`
+moves both at once; this workflow needs no edit on a pin bump and writes to no pin site.
+
+**Partial results survive.** The walk runs in the background while a poller pushes the branch every
+`push_every` landed anchor commits, and a further `if: always()` push runs after success, failure,
+timeout and cancellation alike — so a cancelled campaign still ships every anchor it finished. The
+work dir (summary JSON, per-anchor logs, retained raw bundles) is uploaded as a run artifact on
+every outcome, and a final step opens `chore(<campaign>): <backend> catalog campaign results` into
+`ref` when the branch has commits. Nothing is merged automatically.
+
+Each job takes a `concurrency` group keyed on (backend, runner) with `cancel-in-progress: false`, so
+two campaigns queue rather than share a GPU. `timeout-minutes` is a wedge ceiling (2880 mlx / 1440
+candle), not a measured budget.
+
+**Hugging Face roots.** `hf_cache_roots` (newline- or `;`-separated) wins; otherwise the runner-level
+`$SCENEWORKS_MEMORY_CAMPAIGN_HF_CACHE`; otherwise the lane default (`/Volumes/Models/huggingface/hub`
+on macOS, `E:\huggingface\hub` on the CUDA box). A root that does not exist is a warning, not an
+error — `hubRoots()` still falls back to the HF env convention and the app cache, and an anchor whose
+snapshot is under none of them plans as `weights_missing` rather than failing the run.
+
 ### 6b. Through the guarded dispatch
 
 > Provenance: transcribed from the workflow files and **not** dispatched while writing this runbook —
