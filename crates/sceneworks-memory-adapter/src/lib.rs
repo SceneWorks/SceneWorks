@@ -527,6 +527,48 @@ pub fn validate_ltx25_rgb_frames(
     Ok(())
 }
 
+/// The frame count a VAE-decoding video engine actually RENDERS for a `requested`-frame clip.
+///
+/// Both inputs are read by the caller from the engine's own `gen_core::tiling::VaeTiling` constant
+/// (`mlx_gen_wan::WAN_Z16_VAE_TILING`, `mlx_gen_scail2::VAE_TILING`, …), so nothing here restates a
+/// per-model number. The rule itself is gen-core's own decoded-depth contract
+/// (`crates/contracts/gen-core/src/tiling.rs`, `TilingConfig::plan`'s `out_f`): a request first
+/// becomes `t_lat = (requested − 1) / temporal_scale + 1` latent frames — the wan family's
+/// `pipeline::latent_shape` and the z16 encoder's `1 + (T − 1)/4` chunking — and the decoder then
+/// emits `1 + (t_lat − 1)·scale` when its temporal decode is **causal**, or the full `t_lat·scale`
+/// when it is **not**.
+///
+/// sc-22738: this is why an MLX SCAIL-2 or Wan-A14B 77-frame request comes back as **80** frames —
+/// `VaeTiling::WAN` is non-causal (`mlx-gen-wan`'s own
+/// `conservative_video_decode_memory_profile_for_vae` prices the same over-delivery), and the
+/// worker's production path neither snaps the request away from it (`wan_frame_count(77) == 77`)
+/// nor rejects the longer clip. The causal z48 TI2V-5B and the causal candle z16 return exactly the
+/// requested count. Each lane's arm binds this rule back to the engines' own symbols in its tests.
+pub fn vae_decoded_frame_count(
+    requested: u32,
+    temporal_scale: i32,
+    causal_temporal: bool,
+) -> Result<u32, String> {
+    if requested == 0 {
+        return Err("a video request must ask for at least one frame".to_owned());
+    }
+    let scale = u32::try_from(temporal_scale)
+        .ok()
+        .filter(|scale| *scale > 0)
+        .ok_or_else(|| format!("a VAE temporal scale must be positive, got {temporal_scale}"))?;
+    let latent_frames = (requested - 1) / scale + 1;
+    let decoded = if causal_temporal {
+        (latent_frames - 1)
+            .checked_mul(scale)
+            .and_then(|frames| frames.checked_add(1))
+    } else {
+        latent_frames.checked_mul(scale)
+    };
+    decoded.ok_or_else(|| {
+        format!("the decoded frame count for {requested} frames at scale {scale} overflowed u32")
+    })
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ReferencePhase {
     Conditioning,

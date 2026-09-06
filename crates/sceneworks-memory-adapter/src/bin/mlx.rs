@@ -15619,6 +15619,13 @@ fn run_ltx_with_admission(
             "a synchronized LTX-2.3 lifecycle phase reported a zero active peak".to_owned(),
         );
     }
+    // sc-22738 sweep: an equality here is CORRECT for LTX, and it is not a coincidence.
+    // `VaeTiling::LTX` is CAUSAL at ×8, and the engine refuses any request off the `1 + 8k` lattice
+    // (`mlx-gen-ltx/src/model.rs:2755-2760`) rather than snapping it, so `out_f = 1 + (f_lat−1)·8`
+    // is exactly the requested count and the engine has no clip to trim. The non-causal families
+    // (Bernini, SCAIL-2, the Wan A14B experts) cannot use a bare equality and do not;
+    // `the_arms_that_keep_a_bare_frame_equality_render_exactly_what_they_request` holds this apart
+    // at every pin.
     if measured.len() as u32 != geometry.frames {
         return Err(format!(
             "LTX-2.3 rendered {} frames for a {}-frame request",
@@ -17360,6 +17367,14 @@ fn run_minimax_h3(request: &Value) -> Result<Value, String> {
                 .to_owned(),
         );
     }
+    // sc-22738 sweep: MiniMax-H3 is the one video family that publishes NO `VaeTiling` at all — it
+    // is absent from `mlx_gen_catalog::vae_tiling`'s chain and from `vae_tiling_unmodelled_reason`
+    // — so the shared decoded-frame rule has nothing to resolve here and is deliberately not
+    // applied. The equality is still right, and for a stronger reason than arithmetic: the engine
+    // asserts the same equality ITSELF immediately before returning
+    // (`mlx-gen-minimax-h3/src/model.rs:1368-1373` and `:1589-1594`), its VAE strips the repeat-pad
+    // tail in `decode_temporal` (`.../vae.rs:654-658`), and an off-`17n+5` request is refused
+    // rather than snapped (`.../pipeline.rs:188-235`). This family cannot over-deliver.
     if measured.len() as u64 != u64::from(geometry.frames) {
         return Err(format!(
             "MiniMax-H3 rendered {} frames for a {}-frame request",
@@ -17819,6 +17834,41 @@ fn validate_bernini_geometry(
         height,
         frames,
     })
+}
+
+/// The concrete VAE geometry the pinned Bernini provider decodes through, resolved BY PROVIDER ID
+/// from the engine's OWN registry-facing resolver
+/// ([`mlx_gen_bernini::vae_tiling`](runtime_macos::providers::bernini::vae_tiling)) rather than
+/// tabled here — the same way this arm reads [`ADVERTISED_GEOMETRIES`] and the retained calibration
+/// key off the crate. It carries the two facts the decoded-frame rule needs: the temporal scale and
+/// whether the temporal decode is causal.
+fn bernini_engine_vae() -> Result<VaeTiling, String> {
+    runtime_macos::providers::bernini::vae_tiling(BERNINI_PROVIDER).ok_or_else(|| {
+        format!(
+            "{BERNINI_PROVIDER} publishes no VAE geometry; its decoded frame count cannot be \
+             derived"
+        )
+    })
+}
+
+/// How many frames this member's engine RENDERS for its planned request (sc-22738).
+///
+/// Not `geometry.frames` on the video route: Bernini decodes through the NON-causal Wan z16 VAE
+/// (`mlx-gen-bernini/src/lib.rs:45-47`, `ProviderVae = mlx_gen_wan::WanVae`; the crate's own
+/// `provider_ids_are_bound_to_the_wan_z16_geometry` asserts `!causal_temporal`), so the shared rule
+/// [`protocol::vae_decoded_frame_count`] answers `t_lat · 4` — 52 for the 49-frame video member —
+/// and neither `bernini.rs`'s `generate_impl` nor the worker trims the longer clip back down.
+///
+/// The still member is the engine's own exception, applied on the engine's own predicate: for
+/// `frames == 1` `bernini.rs` takes the FIRST decoded image out of the temporal chunk and returns a
+/// one-image `GenerationOutput::Images`, so this arm expects exactly one frame there.
+fn bernini_rendered_frame_count(geometry: BerniniGeometry) -> Result<u32, String> {
+    let vae = bernini_engine_vae()?;
+    if geometry.frames == 1 {
+        return Ok(1);
+    }
+    protocol::vae_decoded_frame_count(geometry.frames, vae.temporal_scale, vae.causal_temporal)
+        .map_err(|error| format!("{BERNINI_PROVIDER}: {error}"))
 }
 
 /// Resolve the member and its geometry, refusing a foreign target BY NAME before any environment
@@ -18351,11 +18401,23 @@ fn run_bernini(request: &Value) -> Result<Value, String> {
                 .to_owned(),
         );
     }
-    if measured.len() as u64 != u64::from(geometry.frames) {
+    // The engine's own decoded depth for this request, NOT the requested count: Bernini's z16
+    // decode is NON-causal, so it materializes four output frames per latent frame and a 49-frame
+    // video request renders 52 (sc-22738 — the same defect that refused the SCAIL-2 anchor after a
+    // completed render). Production asks for the same count and keeps the clip it gets, so the
+    // adapter measures the same path instead of refusing it.
+    let expected_frames = bernini_rendered_frame_count(geometry)?;
+    if measured.len() as u64 != u64::from(expected_frames) {
         return Err(format!(
-            "Bernini rendered {} frames for a {}-frame request",
+            "Bernini rendered {} frames for a {}-frame request; its {} VAE decodes that request \
+             to {expected_frames} frames",
             measured.len(),
-            geometry.frames
+            geometry.frames,
+            if bernini_engine_vae()?.causal_temporal {
+                "causal"
+            } else {
+                "non-causal"
+            }
         ));
     }
     let first = measured
@@ -18562,7 +18624,8 @@ fn run_bernini(request: &Value) -> Result<Value, String> {
                 // sc-22738: the render receipts, published as measurements rather than as a
                 // top-level `output` object the record schema rejects. The member this record is
                 // filed under is `target.modelId`, so the dropped `output.modelId` is not lost.
-                ("renderedFrames", "count", u64::from(geometry.frames)),
+                ("renderedFrames", "count", u64::from(expected_frames)),
+                ("requestedFrames", "count", u64::from(geometry.frames)),
                 ("outputFps", "count", u64::from(fps)),
             ],
         ),
@@ -20368,6 +20431,12 @@ fn run_krea_realtime(request: &Value) -> Result<Value, String> {
                 .to_owned(),
         );
     }
+    // sc-22738 sweep: Krea Realtime decodes through the SAME non-causal Wan z16 VAE that makes
+    // Bernini and SCAIL-2 over-deliver — but it is the one engine that TRIMS. `t2v.rs:348-353`
+    // drains the leading excess (`frames.drain(0..excess)`) against the request's own
+    // `out_frames`, wired from the job at `t2v.rs:926`, before returning `GenerationOutput::Video`.
+    // So the equality here is what production produces and must stay an equality; applying the
+    // decoded-depth rule would over-predict by three frames and refuse a correct render.
     if measured.len() as u64 != u64::from(geometry.frames) {
         return Err(format!(
             "Krea Realtime rendered {} frames for a {}-frame request",
@@ -28027,6 +28096,86 @@ mod bernini_tests {
         }
     }
 
+    /// sc-22738 — the video member's rendered frame count is the ENGINE's decoded depth, not the
+    /// requested count.
+    ///
+    /// Bernini decodes through the same NON-causal Wan z16 VAE that made the campaign's SCAIL-2
+    /// anchor render 77 requested frames as 80 and then refused the capture after the render had
+    /// completed. This arm carried the identical equality against a 49-frame request, which the
+    /// engine decodes to 52. The expectation is bound to the engines' OWN symbols — `latent_shape`
+    /// for the latent depth (Bernini calls exactly that, through `PROVIDER_VAE_STRIDE`, which is
+    /// derived from this same `VAE_TILING`) and gen-core's `TilingConfig::plan` for `out_f` — so a
+    /// pin that changed either reds here in milliseconds instead of after a multi-hour render.
+    ///
+    /// Mutations that fail this: returning `geometry.frames` from [`bernini_rendered_frame_count`];
+    /// flipping the causal branch in `protocol::vae_decoded_frame_count`.
+    #[test]
+    fn the_video_members_rendered_frame_count_is_the_engines_own_decoded_depth() {
+        let (width, height) = advertised();
+        let vae = bernini_engine_vae().expect("the pinned Bernini provider publishes a VAE");
+        assert!(
+            !vae.causal_temporal,
+            "Bernini's z16 decode is non-causal at this pin"
+        );
+        let geometry = BerniniGeometry {
+            width,
+            height,
+            frames: BERNINI_VIDEO_FRAMES,
+        };
+        let latent = mlx_gen_wan::pipeline::latent_shape(
+            geometry.frames as usize,
+            geometry.height,
+            geometry.width,
+            1,
+            (
+                vae.temporal_scale as usize,
+                vae.spatial_scale as usize,
+                vae.spatial_scale as usize,
+            ),
+        )
+        .expect("the wan latent rule accepts Bernini's planned frame count");
+        let engine_out_f = TilingConfig {
+            spatial: None,
+            temporal: None,
+        }
+        .plan(vae, latent[1], latent[2], latent[3])
+        .out_f;
+        assert_eq!(
+            i64::from(bernini_rendered_frame_count(geometry).unwrap()),
+            i64::from(engine_out_f)
+        );
+        // The concrete consequence, so the rule cannot silently become an identity: the non-causal
+        // decode over-delivers by one temporal stride minus one.
+        assert_eq!(
+            bernini_rendered_frame_count(geometry).unwrap(),
+            geometry.frames + 3
+        );
+    }
+
+    /// The still member is the engine's own exception, and it is keyed on the engine's own
+    /// predicate. `bernini.rs`'s `generate_impl` takes the FIRST image of the decoded temporal
+    /// chunk when `frames == 1`, so a one-frame request renders exactly one frame even though the
+    /// same non-causal VAE decodes that single latent frame to four.
+    ///
+    /// Mutation that fails this: dropping the `frames == 1` branch from
+    /// [`bernini_rendered_frame_count`] so the still member expects the untrimmed chunk.
+    #[test]
+    fn the_still_member_renders_the_one_frame_the_engine_returns() {
+        let (width, height) = advertised();
+        let vae = bernini_engine_vae().unwrap();
+        let geometry = BerniniGeometry {
+            width,
+            height,
+            frames: 1,
+        };
+        assert_eq!(bernini_rendered_frame_count(geometry).unwrap(), 1);
+        // ... and the shared rule alone would NOT say 1 here, which is why the branch exists.
+        assert_eq!(
+            protocol::vae_decoded_frame_count(1, vae.temporal_scale, vae.causal_temporal).unwrap(),
+            u32::try_from(vae.temporal_scale).unwrap()
+        );
+    }
+
     fn snapshot_root(tier: &str) -> PathBuf {
         let nonce = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -29313,5 +29462,83 @@ mod turnkey_still_tests {
             // Not an env error: the refusal fired before `SCENEWORKS_<MEMBER>_*` was read.
             assert!(!error.contains("required environment variable"), "{error}");
         }
+    }
+}
+
+/// sc-22738 — the rendered-vs-requested frame equality, swept across EVERY MLX video arm.
+///
+/// The campaign's `scail2_14b:bf16:mlx` anchor refused a completed 2h25m render because a bare
+/// `measured.len() == geometry.frames` equality does not hold for a non-causal VAE decode. That
+/// equality was copied into every video arm in this file, so the fix is only real if each remaining
+/// copy is shown to be right for a stated reason rather than left unexamined. Three reasons appear
+/// here, and this module pins the fact each one rests on so a pin bump reds in milliseconds instead
+/// of after a multi-hour render:
+///
+///  - **Causal decode on a matching lattice** (LTX-2.3, LTX-2.5): the equality IS the shared rule.
+///  - **The engine trims** (Krea Realtime): the equality is what production produces even though
+///    the raw decode over-delivers, so the rule must NOT be applied.
+///  - **No published VAE geometry** (MiniMax-H3): there is no rule to apply, and the engine asserts
+///    the equality itself.
+///
+/// The non-causal, non-trimming families — Bernini here, SCAIL-2 and the Wan A14B experts in
+/// `mlx_wan_scail2` — are the ones that had to change, and they carry their own tests.
+#[cfg(test)]
+mod video_frame_equality_sweep {
+    use super::*;
+
+    /// The two LTX arms keep a bare equality because their decode is CAUSAL at ×8 and every frame
+    /// count they can plan sits on the `1 + 8k` lattice the engine refuses to leave. Both halves
+    /// are asserted: a pin that made the LTX VAE non-causal, or a plan lattice that drifted off
+    /// `1 + 8k`, breaks the equality and reds here.
+    #[test]
+    fn the_arms_that_keep_a_bare_frame_equality_render_exactly_what_they_request() {
+        for (provider, frames) in [
+            (LTX_PROVIDER, LTX_CAMPAIGN_ENTRY_FRAMES),
+            (LTX_PROVIDER, LTX_CANARY_FRAMES),
+            (LTX25_PROVIDER, mlx_ltx25::BASE_FRAMES),
+            (LTX25_PROVIDER, mlx_ltx25::MAX_FRAMES),
+        ] {
+            let vae = runtime_macos::vae_tiling(provider)
+                .unwrap_or_else(|| panic!("{provider} publishes a VAE geometry"));
+            assert!(vae.causal_temporal, "{provider}");
+            assert_eq!(
+                protocol::vae_decoded_frame_count(frames, vae.temporal_scale, vae.causal_temporal)
+                    .unwrap(),
+                frames,
+                "{provider} at {frames} frames"
+            );
+        }
+    }
+
+    /// Krea Realtime is the counter-example that proves the sweep is not vacuous: it decodes
+    /// through the SAME non-causal z16 VAE as Bernini and SCAIL-2, so its raw decode over-delivers
+    /// by one temporal stride minus one — and its arm still keeps a bare equality, because
+    /// `t2v.rs:348-353` drains that leading excess before returning. Applying the decoded-depth
+    /// rule to this arm would refuse a correct render.
+    ///
+    /// Mutation that fails this: making the sweep apply the rule uniformly.
+    #[test]
+    fn the_krea_realtime_equality_rests_on_the_engines_trim_not_on_arithmetic() {
+        let vae = runtime_macos::vae_tiling(KREA_REALTIME_PROVIDER)
+            .expect("krea realtime publishes a VAE geometry");
+        assert!(!vae.causal_temporal);
+        let frames = 77;
+        assert_ne!(
+            protocol::vae_decoded_frame_count(frames, vae.temporal_scale, vae.causal_temporal)
+                .unwrap(),
+            frames
+        );
+    }
+
+    /// MiniMax-H3 publishes no VAE geometry on either resolver, so the shared rule has nothing to
+    /// resolve and its arm's equality is deliberately left alone. Pinned so a pin that STARTS
+    /// publishing one forces this sweep to be re-read rather than silently leaving the arm out.
+    #[test]
+    fn minimax_h3_publishes_no_vae_geometry_for_the_rule_to_resolve() {
+        assert_eq!(runtime_macos::vae_tiling(MINIMAX_PROVIDER), None);
+        assert_eq!(
+            runtime_macos::vae_tiling_unmodelled_reason(MINIMAX_PROVIDER),
+            None
+        );
     }
 }
