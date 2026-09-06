@@ -1161,21 +1161,37 @@ test("qwen_image and ltx_2_5 are measurable on every shipped tier of every route
 // plus the bespoke `instantid` route — on every shipped tier of every lane that routes them.
 //
 // Every cell is DECLARED — a plan anchor and both closure declarations on both lanes. Two facts
-// keep some of them from being capturable today, both engine-side rather than adapter gaps, and
-// both asserted here so neither can silently widen:
+// keep some of them from being capturable, both engine-side rather than adapter gaps, and both
+// asserted here so neither can silently widen:
 //   * `instantid_realvisxl` q4/q8 on candle are not CELLS at all — the candle InstantID stack is
 //     dense-only, which the worker's own `instantid.rs` says, so the universe never produces them.
-//   * all three tiers of `illustrious_xl_v1`/`v2` on candle are cells the engine cannot SEAL at
-//     inference c6d6a4db: `candle-gen-sdxl`'s `SDXL_ROUTES` pins revisions this repository no
-//     longer ships. The classification is derived from both sources, so it clears itself when the
-//     inference-side fix (`story/sc-22729-sdxl-route-revisions`) lands and the pin moves.
+//   * any candle cell whose `SDXL_ROUTES` revision is not the one this repository ships cannot be
+//     SEALED by the engine. At inference c6d6a4db that was all three tiers of
+//     `illustrious_xl_v1`/`v2`; `ea4118b6a` (sc-22729, inference-side) repinned those routes, so at
+//     the pin this branch carries the set is EMPTY. Nothing about that set is written down here —
+//     it is derived from the pinned engine source against the manifest on every run, so it
+//     repopulates by itself the moment a pin reintroduces a divergence.
 const SDXL_FAMILY = [
   "sdxl", "realvisxl", "realvisxl_lightning", "illustrious_xl_v1", "illustrious_xl_v2",
   "instantid_realvisxl",
 ];
-/** Every candle cell the route drift blocks: both Illustrious models × all three shipped tiers. */
-const SDXL_CANDLE_ROUTE_DRIFT = ["illustrious_xl_v1", "illustrious_xl_v2"]
-  .flatMap((modelId) => ["q4", "q8", "bf16"].map((tier) => `${modelId}:${tier}:candle`));
+
+/**
+ * Every candle cell of `cells` the engine's own route table blocks at the pinned inference
+ * checkout, derived exactly as `classifyAnchor` derives it: the `sdxlRoute` families only, on the
+ * candle lane only, refused only when `sdxlCandleRouteDrift` says so. With no checkout to read,
+ * nothing is refused — that is `SDXL_ROUTES_UNCHECKED`, not a gap.
+ */
+async function sdxlCandleRouteDriftCells(cells) {
+  const routes = await readSdxlCandleRoutes();
+  if (!routes) return [];
+  const [plan, models] = [await readPlan(), await readManifestModels()];
+  return cells
+    .filter((cell) => cell.backend === "candle"
+      && familyFor(cell.modelId, plan.anchors[cell.key]?.provider)?.sdxlRoute
+      && sdxlCandleRouteDrift(cell.modelId, cell.tier, routes, models) !== null)
+    .map((cell) => cell.key);
+}
 
 test("the sdxl family is measurable on every shipped tier of every routed lane", async () => {
   const cells = (await shippedTieredCells()).filter((cell) => SDXL_FAMILY.includes(cell.modelId));
@@ -1191,13 +1207,13 @@ test("the sdxl family is measurable on every shipped tier of every routed lane",
     ["bf16"],
     "the candle InstantID stack is dense-only; a packed candle cell would measure bf16 weights",
   );
-  // Every family cell is measurable except the Illustrious candle routes the engine cannot seal —
-  // and with no inference checkout to read, there are none of those either, because the refusal is
-  // DERIVED. Both directions are asserted so neither mode can quietly assert nothing.
+  // Every family cell is measurable except the candle routes the engine cannot seal — and with no
+  // inference checkout to read, there are none of those either, because the refusal is DERIVED.
+  // Both sides of the comparison are read, so neither mode can quietly assert nothing.
   const gaps = (await measurabilityGaps()).filter((gap) => SDXL_FAMILY.includes(gap.modelId));
   assert.deepEqual(
     gaps.map((gap) => gap.key).sort(),
-    (await readSdxlCandleRoutes()) ? [...SDXL_CANDLE_ROUTE_DRIFT].sort() : [],
+    (await sdxlCandleRouteDriftCells(cells)).sort(),
     gapReport(gaps),
   );
   // …and those are refused for the engine's own reason, not as missing plan or adapter work.
@@ -1243,9 +1259,10 @@ test("every sdxl-family cell carries a plan anchor and a loader-closure declarat
   }
 });
 
-// sc-22729 review: the exclusion is DERIVED from both revisions, never written down. Two directions:
-// the pinned tree really does disagree today (so the refusal is live and not a leftover), and an
-// engine that agrees clears it with no edit to this repository.
+// sc-22729 review: the exclusion is DERIVED from both revisions, never written down. Three
+// directions, none of which depends on which way the pinned tree happens to sit: every route the
+// engine declares is compared (at this pin they all agree, so nothing is excluded), a route one
+// revision off refuses every shipped tier, and a route the engine drops is refused for THAT reason.
 // Needs the pinned inference source: the whole claim is about what the ENGINE declares. On CI the
 // parity-scaffold job fetches it and sets INFERENCE_REPO, so a missing clone there is a failure and
 // not a skip — the same rule `anchor-loader-closure.test.mjs` follows for the same reason.
@@ -1263,19 +1280,20 @@ const skipWithoutRoutes = sdxlRoutesAvailable
 test("the illustrious candle refusal is derived from the engine's own route revision", { skip: skipWithoutRoutes }, async () => {
   const models = await readManifestModels();
   const routes = await readSdxlCandleRoutes();
-  for (const modelId of ["sdxl", "realvisxl", "realvisxl_lightning"]) {
-    assert.equal(sdxlCandleRouteDrift(modelId, "q4", routes, models), null, `${modelId} must not be excluded`);
-  }
-  for (const modelId of ["illustrious_xl_v1", "illustrious_xl_v2"]) {
-    const route = routes.get(modelId);
+  assert.ok(routes.size >= 5, "the engine declares the whole routed family");
+  for (const [modelId, route] of routes) {
+    // An engine that ships what the manifest ships refuses nothing…
     const shipped = tierDownload(models, modelId, route.repository, "q4").revision;
-    assert.notEqual(route.revision, shipped, `${modelId}: the engine and the manifest agree — drop the exclusion`);
-    for (const tier of ["q4", "q8", "bf16"]) {
-      assert.match(sdxlCandleRouteDrift(modelId, tier, routes, models), /candle-gen-sdxl pins route/);
-    }
-    // The same model, against an engine that ships what the manifest ships: no refusal at all.
     const agreed = new Map(routes).set(modelId, { ...route, revision: shipped });
     assert.equal(sdxlCandleRouteDrift(modelId, "q4", agreed, models), null, `${modelId}: equal revisions must clear it`);
+    // …and one revision off refuses every shipped tier of that model, with no edit to this
+    // repository either way. Both directions are synthetic, so the case proves the DERIVATION
+    // rather than whichever way the pinned engine happens to sit — that is `the sdxl family is
+    // measurable…`'s job, and it reads the same two sources.
+    const drifted = new Map(routes).set(modelId, { ...route, revision: REVISION });
+    for (const tier of ["q4", "q8", "bf16"]) {
+      assert.match(sdxlCandleRouteDrift(modelId, tier, drifted, models), /candle-gen-sdxl pins route/, `${modelId}:${tier}`);
+    }
   }
   // A route the engine does not declare AT ALL is refused for that reason, not silently admitted.
   const without = new Map(routes);

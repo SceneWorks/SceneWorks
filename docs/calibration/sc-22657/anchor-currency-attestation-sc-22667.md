@@ -81,3 +81,22 @@ the anchor; the E6 test documents the same band ("cold staged control lands betw
   **unmodified** and assert `anchor_currency_matches` on the packaged row, so they cannot pass on a
   re-stamp: flipping the packaged digest reds them. `mlx_fit_gate::flux2_live_anchor_store` remains
   and says why (the flux2 MLX rows are not attested and honestly stale).
+
+## Extension to inference `8a65db2a` (sc-22723 feature pin, 2026-09-05)
+
+The epic sc-22723 feature pin (`c6d6a4db` → `8a65db2aad0b54581794127f5c3f5621e107e321`, inference
+PRs #946–#958) moved all three closures and staled the five attested anchors, as the bound above
+says it must. The `c6d6a4db..8a65db2a` segment was read file by file with the same per-crate `src/`
+rule and the five entries were **extended** (`attestedRevision` → `8a65db2a`, `story` → sc-22723,
+the reading appended to `why`) rather than re-written: every earlier segment and witness still
+holds, and nothing in the new segment is a load or device path.
+
+| Closure | Files changed in `c6d6a4db..8a65db2a` | Reading |
+| --- | --- | --- |
+| `krea_2_turbo:candle` | gen-core `encoder_contract.rs`, `lib.rs`, `wan_i2v_memory.rs`; `candle-gen-krea/src/lib.rs` | accounting-only. `encoder_contract.rs`: `ValidatedEncoderSource` keeps the whole `PackedQuantization` marker (same-value accessors), a stale-packed-marker allowance only `mlx-gen-flux2` calls, and `hf_cache_discovery_roots` (a source-authorization helper) plus tests; `lib.rs`: its re-export; `wan_i2v_memory.rs`: Wan A14B identity tokens. `candle-gen-krea/src/lib.rs`: the per-(route, proven tier) identity table and weights-free registry-behavior surfaces — the q4 turbo identity this anchor is keyed to (`krea-turbo-cuda-phase-curves-v1`) is unchanged and `krea_provable_artifact_tier` reads the marker `validate_load_spec` / `actual_quant_tier` already consulted. `loader.rs`, `pipeline.rs`, `transformer/`, `control*.rs` and `candle-gen` `quant/` untouched. The class stays `witnessed-unchanged` for the earlier load-path range. |
+| `z_image_turbo:candle` (q4 / q8 / bf16) | the same three gen-core files; `candle-gen-z-image/src/memory_strategy.rs` | accounting-only. `selected_encoder_discovery_roots` now delegates to `gen_core::hf_cache_discovery_roots`, widening the text-encoder discovery confinement to the HF-cache repository directory — a validation gate consumed only by the planning-facts readers in that file; the same bytes reach the same device the same way. `pipeline.rs`, `model.rs`, the loader and the device-format paths untouched. |
+| `z_image_turbo:mlx` (q4) | `core-llm/src/starvector.rs`; the same three gen-core files | accounting-only. `starvector.rs` adds a StarVector decode `Progress` event the Z-Image encoder never executes; `mlx-gen-z-image`, `mlx-gen-pid` and `mlx-gen/src` untouched. |
+
+No re-measure was taken for the new segment — the doctrine allows the diff alone when it carries
+no load-or-device-path change, which is the case here. Matrix after `--stamp-anchors`:
+`15 anchors, 10 stale, 5 current by attestation` (unchanged set).
