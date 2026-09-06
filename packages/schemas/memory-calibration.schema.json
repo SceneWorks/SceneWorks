@@ -8,7 +8,8 @@
     "schemaVersion": { "const": 6 },
     "harnessVersion": { "const": "sceneworks-memory-v5" },
     "sourceSessions": { "type": "array", "items": { "$ref": "#/$defs/sourceSession" } },
-    "records": { "type": "array", "items": { "$ref": "#/$defs/record" } }
+    "records": { "type": "array", "items": { "$ref": "#/$defs/record" } },
+    "exceededBounds": { "type": "array", "items": { "$ref": "#/$defs/exceededBound" } }
   },
   "allOf": [
     {
@@ -412,6 +413,116 @@
         "justification": { "type": "string", "minLength": 1 }
       }
     },
+    "repositories": {
+        "type": "object", "additionalProperties": false, "required": ["sceneWorks", "inference"],
+        "properties": {
+          "sceneWorks": {
+            "allOf": [
+              { "$ref": "#/$defs/gitState" },
+              { "required": ["matrixSourceRevision"] }
+            ]
+          },
+          "inference": { "$ref": "#/$defs/gitState" }
+        }
+      },
+    "hardware": {
+        "oneOf": [
+          {
+            "allOf": [
+              { "$ref": "#/$defs/hardwareBase" },
+              {
+                "type": "object", "additionalProperties": false,
+                "required": ["probe", "memoryBytes", "deviceId", "name", "computeCapability", "driverVersion", "runtimeVersion"],
+                "properties": {
+                  "probe": { "type": "string", "minLength": 1 }, "memoryBytes": { "type": "integer", "exclusiveMinimum": 0 },
+                  "deviceId": { "type": "string", "minLength": 1 }, "name": { "type": "string", "minLength": 1 },
+                  "computeCapability": { "type": "string", "minLength": 1 }, "driverVersion": { "type": "string", "minLength": 1 },
+                  "runtimeVersion": { "type": "string", "minLength": 1 }
+                }
+              }
+            ]
+          },
+          {
+            "allOf": [
+              { "$ref": "#/$defs/hardwareBase" },
+              {
+                "type": "object", "additionalProperties": false,
+                "required": ["probe", "memoryBytes", "model", "chip", "osVersion", "metalDevice", "mlxMemoryLimitBytes", "wiredLimitBytes"],
+                "properties": {
+                  "probe": { "type": "string", "minLength": 1 }, "memoryBytes": { "type": "integer", "exclusiveMinimum": 0 },
+                  "model": { "type": "string", "minLength": 1 }, "chip": { "type": "string", "minLength": 1 },
+                  "osVersion": { "type": "string", "minLength": 1 }, "metalDevice": { "type": "string", "minLength": 1 },
+                  "mlxMemoryLimitBytes": { "type": "integer", "exclusiveMinimum": 0 },
+                  "wiredLimitBytes": { "type": "integer", "exclusiveMinimum": 0 }
+                }
+              }
+            ]
+          }
+        ]
+      },
+    "target": {
+        "type": "object", "additionalProperties": false,
+        "required": ["modelId", "provider", "tier", "mode", "overlay", "geometry"],
+        "allOf": [
+          {
+            "$comment": "SC-18783: LTX-2.5 transformer and decoder choices change both the executed pipeline and its memory profile, so neither may be inferred from provider, tier, or fixture text.",
+            "if": {
+              "properties": { "modelId": { "const": "ltx_2_5" } },
+              "required": ["modelId"]
+            },
+            "then": { "required": ["transformerVariant", "decoder"] }
+          }
+        ],
+        "properties": {
+          "modelId": { "type": "string", "minLength": 1 }, "provider": { "type": "string", "minLength": 1 },
+          "tier": { "type": "string", "minLength": 1 }, "mode": { "type": "string", "minLength": 1 },
+          "overlay": { "type": "string", "minLength": 1 },
+          "transformerVariant": { "enum": ["distilled", "dev"] },
+          "decoder": { "enum": ["conv", "diffvae"] },
+          "geometry": {
+            "type": "object", "additionalProperties": false, "required": ["width", "height", "batch", "frames"],
+            "properties": {
+              "width": { "type": "integer", "minimum": 1 }, "height": { "type": "integer", "minimum": 1 },
+              "batch": { "type": "integer", "minimum": 1 }, "frames": { "type": "integer", "minimum": 1 }
+            }
+          }
+        }
+      },
+    "exceededBound": {
+      "$comment": "sc-22738 (epic 22723): a MEASURED LOWER BOUND. The capture reached observedFootprintBytes of kernel physical footprint on a host of hardware.memoryBytes and was terminated by scripts/memory-calibration-watchdog.py before it completed, so the cell's peak is AT LEAST that at this geometry. It is not a record: there is no phase decomposition, no quality comparison and no admission scenario, because the render never got that far. It carries exactly the identity a record carries plus the figures the inequality is made of, so config/memory-anchors.json can bind it byte-for-byte the way it binds an anchor. Additive and OPTIONAL, which is why schemaVersion does not move: every bundle written before this def is still valid, and no consumer that partitions a bundle by record status sees a new status.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id", "logicalCaseId", "backend", "loadShape", "repositories", "hardware", "artifact",
+        "target", "referenceCount", "observedFootprintBytes", "ceilingBytes", "reason",
+        "calibrationFingerprint", "capturedAt", "harnessVersion"
+      ],
+      "properties": {
+        "id": { "type": "string", "pattern": "^exc-[0-9a-f]{20}$" },
+        "logicalCaseId": { "type": "string", "pattern": "^implan-[0-9a-f]{20}$" },
+        "backend": { "enum": ["mlx", "candle"] },
+        "loadShape": { "enum": ["eager_materialization", "deferred_materialization"] },
+        "repositories": { "$ref": "#/$defs/repositories" },
+        "hardware": { "$ref": "#/$defs/hardware" },
+        "artifact": {
+          "type": "object", "additionalProperties": false, "required": ["repository", "resolvedRevision", "variant"],
+          "properties": {
+            "repository": { "type": "string", "minLength": 1 }, "resolvedRevision": { "type": "string", "minLength": 1 },
+            "variant": { "type": "string", "minLength": 1 },
+            "inventorySha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
+          }
+        },
+        "target": { "$ref": "#/$defs/target" },
+        "referenceCount": { "type": "integer", "minimum": 0 },
+        "observedFootprintBytes": { "type": "integer", "exclusiveMinimum": 0 },
+        "ceilingBytes": { "type": "integer", "exclusiveMinimum": 0 },
+        "reason": { "type": "string", "minLength": 1 },
+        "eventFileSha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+        "calibrationFingerprint": { "type": "string", "minLength": 1 },
+        "capturedAt": { "type": "string", "format": "date-time" },
+        "harnessVersion": { "const": "sceneworks-memory-v5" }
+      }
+    },
     "record": {
       "type": "object",
       "additionalProperties": false,
@@ -472,53 +583,8 @@
         "evidenceScope": { "enum": ["authoritative", "candidate", "fixture"] },
         "backend": { "enum": ["mlx", "candle"] },
         "loadShape": { "enum": ["eager_materialization", "deferred_materialization"] },
-        "repositories": {
-          "type": "object", "additionalProperties": false, "required": ["sceneWorks", "inference"],
-          "properties": {
-            "sceneWorks": {
-              "allOf": [
-                { "$ref": "#/$defs/gitState" },
-                { "required": ["matrixSourceRevision"] }
-              ]
-            },
-            "inference": { "$ref": "#/$defs/gitState" }
-          }
-        },
-        "hardware": {
-          "oneOf": [
-            {
-              "allOf": [
-                { "$ref": "#/$defs/hardwareBase" },
-                {
-                  "type": "object", "additionalProperties": false,
-                  "required": ["probe", "memoryBytes", "deviceId", "name", "computeCapability", "driverVersion", "runtimeVersion"],
-                  "properties": {
-                    "probe": { "type": "string", "minLength": 1 }, "memoryBytes": { "type": "integer", "exclusiveMinimum": 0 },
-                    "deviceId": { "type": "string", "minLength": 1 }, "name": { "type": "string", "minLength": 1 },
-                    "computeCapability": { "type": "string", "minLength": 1 }, "driverVersion": { "type": "string", "minLength": 1 },
-                    "runtimeVersion": { "type": "string", "minLength": 1 }
-                  }
-                }
-              ]
-            },
-            {
-              "allOf": [
-                { "$ref": "#/$defs/hardwareBase" },
-                {
-                  "type": "object", "additionalProperties": false,
-                  "required": ["probe", "memoryBytes", "model", "chip", "osVersion", "metalDevice", "mlxMemoryLimitBytes", "wiredLimitBytes"],
-                  "properties": {
-                    "probe": { "type": "string", "minLength": 1 }, "memoryBytes": { "type": "integer", "exclusiveMinimum": 0 },
-                    "model": { "type": "string", "minLength": 1 }, "chip": { "type": "string", "minLength": 1 },
-                    "osVersion": { "type": "string", "minLength": 1 }, "metalDevice": { "type": "string", "minLength": 1 },
-                    "mlxMemoryLimitBytes": { "type": "integer", "exclusiveMinimum": 0 },
-                    "wiredLimitBytes": { "type": "integer", "exclusiveMinimum": 0 }
-                  }
-                }
-              ]
-            }
-          ]
-        },
+        "repositories": { "$ref": "#/$defs/repositories" },
+        "hardware": { "$ref": "#/$defs/hardware" },
         "artifact": {
           "type": "object", "additionalProperties": false, "required": ["repository", "resolvedRevision", "variant"],
           "properties": {
@@ -527,34 +593,7 @@
             "inventorySha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
           }
         },
-        "target": {
-          "type": "object", "additionalProperties": false,
-          "required": ["modelId", "provider", "tier", "mode", "overlay", "geometry"],
-          "allOf": [
-            {
-              "$comment": "SC-18783: LTX-2.5 transformer and decoder choices change both the executed pipeline and its memory profile, so neither may be inferred from provider, tier, or fixture text.",
-              "if": {
-                "properties": { "modelId": { "const": "ltx_2_5" } },
-                "required": ["modelId"]
-              },
-              "then": { "required": ["transformerVariant", "decoder"] }
-            }
-          ],
-          "properties": {
-            "modelId": { "type": "string", "minLength": 1 }, "provider": { "type": "string", "minLength": 1 },
-            "tier": { "type": "string", "minLength": 1 }, "mode": { "type": "string", "minLength": 1 },
-            "overlay": { "type": "string", "minLength": 1 },
-            "transformerVariant": { "enum": ["distilled", "dev"] },
-            "decoder": { "enum": ["conv", "diffvae"] },
-            "geometry": {
-              "type": "object", "additionalProperties": false, "required": ["width", "height", "batch", "frames"],
-              "properties": {
-                "width": { "type": "integer", "minimum": 1 }, "height": { "type": "integer", "minimum": 1 },
-                "batch": { "type": "integer", "minimum": 1 }, "frames": { "type": "integer", "minimum": 1 }
-              }
-            }
-          }
-        },
+        "target": { "$ref": "#/$defs/target" },
         "fixture": { "type": "string", "minLength": 1 },
         "strategy": {
           "type": "object", "additionalProperties": false, "required": ["rung", "engagedRungs", "parameters"],

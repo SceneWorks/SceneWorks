@@ -5573,5 +5573,39 @@
         "sha256": "2d7e66ec2d659a843a306b3fb5577bd7de1356207e69c5ee44594f07fc1b5384"
       }
     }
+  ],
+  "exceededBounds": [
+    {
+      "id": "exceeded:bernini:mlx:bf16:base:base:bernini-image-bf16-mlx-dual-expert-ladder-v1:exc-15a6249c248c324c0fab",
+      "modelId": "bernini",
+      "modelFamily": "bernini",
+      "route": "bernini",
+      "provider": "bernini",
+      "backend": "mlx",
+      "tier": "bf16",
+      "transformerVariant": null,
+      "decoder": null,
+      "mode": "text_to_video",
+      "overlay": null,
+      "referenceCount": 0,
+      "loadShape": "eager_materialization",
+      "geometry": {
+        "width": 848,
+        "height": 480,
+        "frames": 49,
+        "fps": null
+      },
+      "observedFootprintBytes": 97147294328,
+      "ceilingBytes": 94822600832,
+      "hostMemoryBytes": 137438953472,
+      "reason": "physical_footprint_at_or_above_94822600832:observed_97147294328",
+      "source": {
+        "path": "docs/calibration/sc-22738/bernini-bf16-mlx-exceeded-evidence.json",
+        "sha256": "b76b8a0a895926a2386cbaf24016d2a986617035ac9fe13df5a509bbc1d252d2",
+        "recordId": "exc-15a6249c248c324c0fab",
+        "calibrationFingerprint": "bernini-image-bf16-mlx-dual-expert-ladder-v1",
+        "loaderClosureDigest": "bd65cb057e738526eefe1947868fa2c8c05549c261ef8fea5deafc8508398132"
+      }
+    }
   ]
 }

@@ -101,6 +101,10 @@ const PACKAGED_MEMORY_ANCHOR_SOURCES: &[(&str, &str)] = &[
         include_str!("../../../docs/calibration/sc-18791/ltx25-mlx-evidence.seed.json"),
     ),
     (
+        "docs/calibration/sc-22738/bernini-bf16-mlx-exceeded-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/bernini-bf16-mlx-exceeded-evidence.json"),
+    ),
+    (
         "docs/generated/krea-candle-five-rung-sc-11045.json",
         include_str!("../../../docs/generated/krea-candle-five-rung-sc-11045.json"),
     ),
@@ -634,6 +638,160 @@ pub struct MemoryAnchorStore {
     /// cell. `default` so a store written before the migration still parses.
     #[serde(default)]
     pub component_deltas: Vec<ComponentDelta>,
+    /// Measured LOWER BOUNDS from captures a physical-footprint hard stop ended (sc-22738, epic
+    /// 22723). This is the store's THIRD entry kind and the only one whose evidence is a render
+    /// that did NOT complete: see [`ExceededBound`]. `default` so a store written before the
+    /// migration still parses.
+    #[serde(default)]
+    pub exceeded_bounds: Vec<ExceededBound>,
+}
+
+/// A MEASURED LOWER BOUND on one cell's peak: the request reached `observed_footprint_bytes` of
+/// kernel physical footprint on a host of `host_memory_bytes` and was terminated by the capture
+/// guard before it finished (sc-22738, epic 22723 E4/E5).
+///
+/// WHY THIS IS EVIDENCE AND NOT A DROPPED CAPTURE. Before this row existed a footprint hard stop
+/// stamped nothing at all: `measure-memory-catalog.mjs` recorded `capture_failed`, the store kept
+/// no trace, and production kept admitting the very request that had just been killed — the
+/// `bernini:bf16:mlx` 848x480x49 render that ran 72 minutes and reached 97,147,294,328 bytes
+/// before the guard stopped it mid-decode. The run learned the single most decision-relevant fact
+/// about the cell (its peak is AT LEAST that), and the pipeline threw it away.
+///
+/// WHAT IT CLAIMS, AND WHAT IT DELIBERATELY DOES NOT. It claims one inequality — `peak >=
+/// observed_footprint_bytes` at this geometry — and nothing else. It is NOT a phase decomposition,
+/// NOT a point a law may fit, and NOT a substitute for a [`MemoryAnchor`]: it prices no estimate,
+/// widens no envelope and enters no derivation. Its ONLY consumer is the pre-load refusal
+/// ([`ExceededBound::required_bytes`]), which is why every field it carries is either identity or
+/// the inequality's own terms. A completed capture of the same cell later adds a real anchor
+/// beside it; the bound stays, because it stays true.
+///
+/// CURRENCY IS THE SAME KEY AS AN ANCHOR'S. The bound describes what a particular loader did with
+/// a particular set of weights, so it goes stale exactly as a measured point does — see
+/// [`AnchorSource::loader_closure_digest`] and [`ExceededBound::is_current`]. A stale bound
+/// refuses nothing; the cell falls back to whatever it had before.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ExceededBound {
+    pub id: String,
+    pub model_id: String,
+    pub model_family: String,
+    pub route: String,
+    pub provider: String,
+    pub backend: AnchorBackend,
+    pub tier: String,
+    pub transformer_variant: Option<Ltx25TransformerVariant>,
+    pub decoder: Option<Ltx25Decoder>,
+    pub mode: String,
+    pub overlay: Option<String>,
+    pub reference_count: u32,
+    pub load_shape: AnchorLoadShape,
+    pub geometry: AnchorGeometry,
+    /// The kernel `phys_footprint` of the guarded process group at the sample that tripped the
+    /// hard stop. The cell's true peak is at or above this: the render was still allocating.
+    pub observed_footprint_bytes: u64,
+    /// The guard's hard-stop ceiling for that run, carried so a reader can see how far past it the
+    /// group had already gone in one sampling interval.
+    pub ceiling_bytes: u64,
+    /// Whole-host memory of the capture host. Recorded because the inequality is only interesting
+    /// relative to a budget, and a bound measured on a smaller host must not read as a claim about
+    /// a larger one.
+    pub host_memory_bytes: u64,
+    /// The guard's own hard-stop reason, verbatim.
+    pub reason: String,
+    pub source: AnchorSource,
+}
+
+impl ExceededBound {
+    /// Same currency question, same key, same answer shape as [`MemoryAnchor::is_current`].
+    pub fn is_current(&self, closures: &AnchorLoaderClosures) -> bool {
+        closures.digest_for(&self.model_id, self.backend)
+            == Some(self.source.loader_closure_digest.as_str())
+    }
+
+    /// Whether a request at `(width, height, frames)` is at or above the geometry this bound was
+    /// measured at, on every axis. Monotonicity is the whole claim: a render that already needed
+    /// at least X bytes at this geometry cannot need less at a strictly larger one. A request
+    /// SMALLER on any axis is outside the bound and takes no refusal from it.
+    pub const fn covers_geometry(&self, width: u32, height: u32, frames: u32) -> bool {
+        width >= self.geometry.width
+            && height >= self.geometry.height
+            && frames >= self.geometry.frames
+    }
+
+    /// What a host must be able to give this request before it may be admitted: the measured lower
+    /// bound plus the lane's activation headroom.
+    ///
+    /// The headroom term is not padding. The footprint reading is a LOWER bound taken at the
+    /// instant the guard fired — for the Bernini capture, mid-VAE-decode on a curve that had just
+    /// climbed 18 GiB in under a second — so admitting at exactly the bound would admit a render
+    /// already known to want more. Charging the lane's ordinary activation allowance on top is the
+    /// same term every floor candidate already carries, applied to a peak the measurement proved
+    /// rather than to one an estimate guessed.
+    pub const fn required_bytes(&self, headroom_bytes: u64) -> u64 {
+        self.observed_footprint_bytes.saturating_add(headroom_bytes)
+    }
+
+    /// Whether this bound refuses a host — the whole decision, stated once so production and the
+    /// capture-side mirror cannot drift.
+    ///
+    /// TWO disjuncts, and the FIRST is the load-bearing one:
+    ///
+    /// * **A host no larger than the one that failed.** This is what the measurement literally
+    ///   says: a machine of `host_memory_bytes` ran this render and could not finish it. Nothing
+    ///   about a same-sized machine makes it likelier to succeed, so it is refused outright. This
+    ///   disjunct is the reason the fix bites at all — the Bernini stop was taken on the same
+    ///   128 GiB Mac that would otherwise queue the render again, and a footprint-versus-budget
+    ///   comparison alone would have re-admitted it: 90.5 GiB plus the lane's 16 GiB allowance is
+    ///   106.5 GiB, which an idle 128 GiB host appears to have.
+    /// * **A larger host that cannot currently carry the requirement.** A bigger machine MIGHT
+    ///   finish this render, so it is graded on what it can actually offer right now rather than
+    ///   refused on the strength of a smaller host's failure.
+    ///
+    /// `host_total_bytes` is the budget's own physical ceiling, which on the MLX lane can be the
+    /// allocator's limit rather than `hw.memsize` — i.e. at or below the figure a bound records.
+    /// The comparison is deliberately left inclusive-and-conservative there: erring towards
+    /// refusal on a host of ambiguous size is the direction that does not take the machine down.
+    pub const fn refuses_host(
+        &self,
+        host_total_bytes: u64,
+        effective_bytes: u64,
+        headroom_bytes: u64,
+    ) -> bool {
+        host_total_bytes <= self.host_memory_bytes
+            || effective_bytes < self.required_bytes(headroom_bytes)
+    }
+}
+
+/// The identity a request presents to [`MemoryAnchorStore::exceeded_bound_for`]. Every conjunct is
+/// an axis a [`MemoryAnchor`] lookup also keys on, for the same reason: a bound measured on one
+/// provider, mode or pipeline cell says nothing about another's.
+#[derive(Debug, Clone, Copy)]
+pub struct ExceededBoundQuery<'a> {
+    pub model_id: &'a str,
+    /// The two axes only a CATALOG resolution can state. Production always states both — the
+    /// worker has resolved the catalog family and the engine route before it asks — and the
+    /// capture-side mirror in the memory adapter states neither, because a capture plan names a
+    /// provider and a model id and there is no catalog inside the adapter binary to resolve them
+    /// from.
+    ///
+    /// `None` is therefore "this caller cannot state the axis", not a wildcard for anyone: both
+    /// are redundant with axes already graded — the catalog family is a function of `model_id`,
+    /// and the route of `provider` — so omitting them narrows nothing that `model_id`, `provider`,
+    /// `backend` and `tier` have not already pinned. A caller that CAN state them must, so a
+    /// mis-resolved route cannot borrow another cell's bound.
+    pub model_family: Option<&'a str>,
+    pub route: Option<&'a str>,
+    pub provider: &'a str,
+    pub backend: AnchorBackend,
+    pub tier: &'a str,
+    pub transformer_variant: Option<Ltx25TransformerVariant>,
+    pub decoder: Option<Ltx25Decoder>,
+    pub mode: &'a str,
+    pub overlay: Option<&'a str>,
+    pub reference_count: u32,
+    pub width: u32,
+    pub height: u32,
+    pub frames: u32,
 }
 
 /// Why a cell is analytic-only, strongest evidence first. The variant names the BEST evidence that
@@ -1009,7 +1167,150 @@ pub fn load_memory_anchors(raw: &str) -> Result<MemoryAnchorStore, String> {
     }
     validate_analytic_only(&store)?;
     validate_component_deltas(&store)?;
+    validate_exceeded_bounds(&store)?;
     Ok(store)
+}
+
+/// The exceeded-bound half of the store's invariants (sc-22738).
+///
+/// The handshake is the anchor's, narrowed to the fields the inequality is made of: the cited
+/// corpus must be compiled in, hash to what the row recorded, and carry an `exceededBounds` entry
+/// whose identity, geometry and byte figures are the row's. The store may not drift from the
+/// retained evidence it cites, and a bound is the one row kind where drift would turn a refusal on.
+fn validate_exceeded_bounds(store: &MemoryAnchorStore) -> Result<(), String> {
+    let mut seen = BTreeMap::new();
+    for bound in &store.exceeded_bounds {
+        if let Some(previous) = seen.insert(bound.id.clone(), &bound.id) {
+            return Err(format!("duplicate exceeded bound {previous}"));
+        }
+        if bound.geometry.width == 0 || bound.geometry.height == 0 || bound.geometry.frames == 0 {
+            return Err(format!(
+                "exceeded bound {} has a degenerate geometry",
+                bound.id
+            ));
+        }
+        if bound.reason.trim().is_empty() {
+            return Err(format!(
+                "exceeded bound {} states no hard-stop reason — an unexplained refusal is a gap \
+                 wearing a row's clothes",
+                bound.id
+            ));
+        }
+        // The guard samples and terminates at or above its ceiling, so a row claiming a footprint
+        // BELOW the ceiling it cites did not come from a hard stop at all.
+        if bound.ceiling_bytes == 0 || bound.observed_footprint_bytes < bound.ceiling_bytes {
+            return Err(format!(
+                "exceeded bound {} records footprint {} under its own hard-stop ceiling {} — that \
+                 is not a run the guard stopped",
+                bound.id, bound.observed_footprint_bytes, bound.ceiling_bytes
+            ));
+        }
+        if bound.host_memory_bytes < bound.observed_footprint_bytes {
+            return Err(format!(
+                "exceeded bound {} records a footprint larger than the whole capture host",
+                bound.id
+            ));
+        }
+        if !is_sha256(&bound.source.loader_closure_digest) {
+            return Err(format!(
+                "exceeded bound {} loader closure digest {} is not a sha256",
+                bound.id, bound.source.loader_closure_digest
+            ));
+        }
+        let Some((_, source_raw)) = PACKAGED_MEMORY_ANCHOR_SOURCES
+            .iter()
+            .find(|(path, _)| *path == bound.source.path)
+        else {
+            return Err(format!(
+                "exceeded bound {} cites source {} which is not a compiled retained-evidence file",
+                bound.id, bound.source.path
+            ));
+        };
+        let digest = format!("{:x}", Sha256::digest(source_raw.as_bytes()));
+        if digest != bound.source.sha256 {
+            return Err(format!(
+                "exceeded bound {} source digest mismatch for {}: recorded {} actual {digest}",
+                bound.id, bound.source.path, bound.source.sha256
+            ));
+        }
+        let source: serde_json::Value = serde_json::from_str(source_raw).map_err(|error| {
+            format!(
+                "retained evidence {} does not parse: {error}",
+                bound.source.path
+            )
+        })?;
+        let entry = source
+            .get("exceededBounds")
+            .and_then(|entries| entries.as_array())
+            .and_then(|entries| {
+                entries.iter().find(|entry| {
+                    entry.get("id").and_then(|id| id.as_str())
+                        == Some(bound.source.record_id.as_str())
+                })
+            })
+            .ok_or_else(|| {
+                format!(
+                    "exceeded bound {} cites entry {} absent from the exceededBounds of {}",
+                    bound.id, bound.source.record_id, bound.source.path
+                )
+            })?;
+        let target = entry.get("target").unwrap_or(&serde_json::Value::Null);
+        let str_at = |value: &serde_json::Value, key: &str| {
+            value
+                .get(key)
+                .and_then(|value| value.as_str())
+                .map(str::to_owned)
+        };
+        let u64_at = |value: &serde_json::Value, key: &str| value.get(key).and_then(|v| v.as_u64());
+        let entry_route = str_at(target, "route").or_else(|| str_at(target, "provider"));
+        let load_shape_key = match bound.load_shape {
+            AnchorLoadShape::EagerMaterialization => "eager_materialization",
+            AnchorLoadShape::DeferredMaterialization => "deferred_materialization",
+        };
+        let geometry = target.get("geometry").unwrap_or(&serde_json::Value::Null);
+        let entry_overlay = str_at(target, "overlay")
+            .filter(|overlay| overlay != "none")
+            .filter(|overlay| !overlay.is_empty());
+        if str_at(target, "modelId").as_deref() != Some(bound.model_id.as_str())
+            || str_at(target, "tier").as_deref() != Some(bound.tier.as_str())
+            || str_at(entry, "backend").as_deref() != Some(bound.backend.as_key())
+            || str_at(target, "mode").as_deref() != Some(bound.mode.as_str())
+            || str_at(target, "provider").as_deref() != Some(bound.provider.as_str())
+            || entry_route.as_deref() != Some(bound.route.as_str())
+            || optional_axis_key(str_at(target, "transformerVariant").as_deref())
+                != variant_key_opt(bound.transformer_variant)
+            || optional_axis_key(str_at(target, "decoder").as_deref())
+                != decoder_key_opt(bound.decoder)
+            || str_at(entry, "loadShape").as_deref() != Some(load_shape_key)
+            || str_at(entry, "calibrationFingerprint").as_deref()
+                != Some(bound.source.calibration_fingerprint.as_str())
+            || entry_overlay != bound.overlay
+            || u64_at(entry, "referenceCount") != Some(u64::from(bound.reference_count))
+        {
+            return Err(format!(
+                "exceeded bound {} identity disagrees with its source entry {}",
+                bound.id, bound.source.record_id
+            ));
+        }
+        if u64_at(geometry, "width") != Some(u64::from(bound.geometry.width))
+            || u64_at(geometry, "height") != Some(u64::from(bound.geometry.height))
+            || u64_at(geometry, "frames") != Some(u64::from(bound.geometry.frames))
+            || u64_at(entry, "observedFootprintBytes") != Some(bound.observed_footprint_bytes)
+            || u64_at(entry, "ceilingBytes") != Some(bound.ceiling_bytes)
+            || entry
+                .get("hardware")
+                .and_then(|hardware| u64_at(hardware, "memoryBytes"))
+                != Some(bound.host_memory_bytes)
+            || str_at(entry, "reason").as_deref() != Some(bound.reason.as_str())
+        {
+            return Err(format!(
+                "exceeded bound {} figures disagree with its source entry {} — the store may not \
+                 drift from the retained evidence it cites",
+                bound.id, bound.source.record_id
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// The analytic-only half of the store's invariants (sc-22510).
@@ -1656,6 +1957,44 @@ pub fn packaged_memory_anchors() -> Option<&'static MemoryAnchorStore> {
 }
 
 impl MemoryAnchorStore {
+    /// The BINDING measured lower bound for one request, or `None` (sc-22738).
+    ///
+    /// Binding means: same identity on every axis a measured point is keyed on, request geometry
+    /// at or above the bound's on every axis, and a currency key that still matches the packaged
+    /// loader closures. Among the survivors the LARGEST footprint wins — several bounds may cover
+    /// one request once a cell has been stopped at more than one geometry, and the strongest true
+    /// inequality is the useful one.
+    ///
+    /// Currency is checked HERE rather than by the caller because a stale bound must refuse
+    /// nothing at all: the loader moved, so the measurement no longer describes what would run.
+    pub fn binding_exceeded_bound(
+        &self,
+        query: ExceededBoundQuery<'_>,
+        closures: Option<&AnchorLoaderClosures>,
+    ) -> Option<&ExceededBound> {
+        let closures = closures?;
+        self.exceeded_bounds
+            .iter()
+            .filter(|bound| {
+                bound.model_id == query.model_id
+                    && query
+                        .model_family
+                        .is_none_or(|family| bound.model_family == family)
+                    && query.route.is_none_or(|route| bound.route == route)
+                    && bound.provider == query.provider
+                    && bound.backend == query.backend
+                    && bound.tier == query.tier
+                    && bound.transformer_variant == query.transformer_variant
+                    && bound.decoder == query.decoder
+                    && bound.mode == query.mode
+                    && bound.overlay.as_deref() == query.overlay
+                    && bound.reference_count == query.reference_count
+                    && bound.covers_geometry(query.width, query.height, query.frames)
+                    && bound.is_current(closures)
+            })
+            .max_by_key(|bound| bound.observed_footprint_bytes)
+    }
+
     /// The unique anchor for one `(model, backend lane, tier, transformer variant, decoder)`
     /// coordinate. The pipeline axes are part of the key, not a post-filter: the corpus measures no
     /// dev-vs-distilled pair at a common regime, so one variant's anchor may not price the other's
@@ -2781,9 +3120,16 @@ mod tests {
             assert!(paths.insert(*path), "{path} is compiled in twice");
             let parsed: serde_json::Value =
                 serde_json::from_str(raw).unwrap_or_else(|error| panic!("{path}: {error}"));
+            // sc-22738: a corpus carries retained RECORDS, measured lower BOUNDS, or both. A
+            // footprint hard stop produces a bundle with no record at all — the render never got
+            // far enough to decompose — and it is retained evidence all the same.
+            let records = parsed["records"].as_array().is_some_and(|r| !r.is_empty());
+            let bounds = parsed["exceededBounds"]
+                .as_array()
+                .is_some_and(|r| !r.is_empty());
             assert!(
-                parsed["records"].as_array().is_some_and(|r| !r.is_empty()),
-                "{path} carries no retained records, so it is not a corpus"
+                records || bounds,
+                "{path} carries neither retained records nor measured bounds, so it is not a corpus"
             );
         }
         let sorted: Vec<&str> = paths.iter().copied().collect();
@@ -2794,12 +3140,20 @@ mod tests {
         assert_eq!(sorted, declared, "the compiled-in list must stay sorted");
 
         let store = packaged_memory_anchors().expect("the packaged anchor store must load");
-        for anchor in &store.anchors {
+        for (id, cited) in store
+            .anchors
+            .iter()
+            .map(|anchor| (&anchor.id, &anchor.source.path))
+            .chain(
+                store
+                    .exceeded_bounds
+                    .iter()
+                    .map(|bound| (&bound.id, &bound.source.path)),
+            )
+        {
             assert!(
-                paths.contains(anchor.source.path.as_str()),
-                "{} cites {}, which is not compiled in",
-                anchor.id,
-                anchor.source.path
+                paths.contains(cited.as_str()),
+                "{id} cites {cited}, which is not compiled in",
             );
         }
     }
@@ -5187,6 +5541,351 @@ mod tests {
         assert_eq!(gib_to_bytes(1.5), 1_610_612_736);
     }
 
+    /// The Bernini stop, as a fixture: `bernini:bf16:mlx` text_to_video at 848x480x49, stopped at
+    /// 97,147,294,328 bytes of physical footprint on a 128 GiB host (sc-22738, measured 2026-09-06).
+    fn bernini_bound() -> ExceededBound {
+        ExceededBound {
+            id: "exceeded:bernini:mlx:bf16:base:base:fp:exc-0".to_owned(),
+            model_id: "bernini".to_owned(),
+            model_family: "bernini".to_owned(),
+            route: "bernini".to_owned(),
+            provider: "bernini".to_owned(),
+            backend: AnchorBackend::Mlx,
+            tier: "bf16".to_owned(),
+            transformer_variant: None,
+            decoder: None,
+            mode: "text_to_video".to_owned(),
+            overlay: None,
+            reference_count: 0,
+            load_shape: AnchorLoadShape::EagerMaterialization,
+            geometry: AnchorGeometry {
+                width: 848,
+                height: 480,
+                frames: 49,
+                fps: None,
+            },
+            observed_footprint_bytes: 97_147_294_328,
+            ceiling_bytes: 94_822_600_832,
+            host_memory_bytes: 137_438_953_472,
+            reason: "physical_footprint_at_or_above_94822600832:observed_97147294328".to_owned(),
+            source: AnchorSource {
+                path: "docs/calibration/sc-22738/bernini-bf16-mlx-exceeded-evidence.json"
+                    .to_owned(),
+                sha256: "0".repeat(64),
+                record_id: "exc-0".to_owned(),
+                calibration_fingerprint: "fp".to_owned(),
+                loader_closure_digest: "b".repeat(64),
+                currency_attestation: None,
+            },
+        }
+    }
+
+    fn bound_store(bounds: Vec<ExceededBound>) -> MemoryAnchorStore {
+        MemoryAnchorStore {
+            schema_version: MEMORY_ANCHOR_SCHEMA_VERSION,
+            anchors: Vec::new(),
+            analytic_only: Vec::new(),
+            component_deltas: Vec::new(),
+            exceeded_bounds: bounds,
+        }
+    }
+
+    fn bernini_closures(digest: &str) -> AnchorLoaderClosures {
+        AnchorLoaderClosures {
+            comment: String::new(),
+            digest_version: ANCHOR_LOADER_CLOSURE_VERSION.to_owned(),
+            inference_revision: "a".repeat(40),
+            models: BTreeMap::from([(
+                "bernini:mlx".to_owned(),
+                AnchorLoaderClosure {
+                    engine_id: None,
+                    entry_points: vec!["mlx-gen-bernini/src/bernini.rs".to_owned()],
+                    digest: digest.to_owned(),
+                    closure_file_count: 1,
+                    closure_files: vec!["mlx-gen-bernini/src/bernini.rs".to_owned()],
+                },
+            )]),
+        }
+    }
+
+    fn bernini_query(width: u32, height: u32, frames: u32) -> ExceededBoundQuery<'static> {
+        ExceededBoundQuery {
+            model_id: "bernini",
+            model_family: Some("bernini"),
+            route: Some("bernini"),
+            provider: "bernini",
+            backend: AnchorBackend::Mlx,
+            tier: "bf16",
+            transformer_variant: None,
+            decoder: None,
+            mode: "text_to_video",
+            overlay: None,
+            reference_count: 0,
+            width,
+            height,
+            frames,
+        }
+    }
+
+    /// sc-22738: a measured lower bound binds at and above its own geometry, on the identity it was
+    /// measured on, and only while its currency key still matches.
+    #[test]
+    fn a_measured_lower_bound_binds_at_and_above_its_geometry_on_its_own_identity() {
+        let store = bound_store(vec![bernini_bound()]);
+        let current = bernini_closures(&"b".repeat(64));
+        let bind = |query| {
+            store
+                .binding_exceeded_bound(query, Some(&current))
+                .map(|bound| bound.observed_footprint_bytes)
+        };
+        // The measured point itself, and every request at or above it on all three axes.
+        assert_eq!(bind(bernini_query(848, 480, 49)), Some(97_147_294_328));
+        assert_eq!(bind(bernini_query(848, 480, 97)), Some(97_147_294_328));
+        assert_eq!(bind(bernini_query(1280, 720, 49)), Some(97_147_294_328));
+        // SMALLER on any single axis is outside the claim: the inequality was measured at one
+        // geometry and monotonicity only runs upwards.
+        assert_eq!(bind(bernini_query(848, 480, 25)), None);
+        assert_eq!(bind(bernini_query(640, 480, 49)), None);
+        assert_eq!(bind(bernini_query(848, 256, 49)), None);
+        // Every identity axis is a conjunct — a foreign tier, mode, provider, lane, overlay or
+        // reference surface must not borrow this cell's measurement.
+        for foreign in [
+            ExceededBoundQuery {
+                tier: "q4",
+                ..bernini_query(848, 480, 49)
+            },
+            ExceededBoundQuery {
+                mode: "image_to_video",
+                ..bernini_query(848, 480, 49)
+            },
+            ExceededBoundQuery {
+                provider: "bernini_image",
+                ..bernini_query(848, 480, 49)
+            },
+            ExceededBoundQuery {
+                backend: AnchorBackend::Candle,
+                ..bernini_query(848, 480, 49)
+            },
+            ExceededBoundQuery {
+                overlay: Some("control"),
+                ..bernini_query(848, 480, 49)
+            },
+            ExceededBoundQuery {
+                reference_count: 1,
+                ..bernini_query(848, 480, 49)
+            },
+            ExceededBoundQuery {
+                model_family: Some("wan"),
+                ..bernini_query(848, 480, 49)
+            },
+            ExceededBoundQuery {
+                route: Some("wan_2_2_t2v_a14b"),
+                ..bernini_query(848, 480, 49)
+            },
+        ] {
+            assert_eq!(bind(foreign), None, "a foreign identity borrowed the bound");
+        }
+        // A caller that cannot state the catalog axes still binds: both are functions of axes
+        // already graded, and the capture-side mirror has no catalog to resolve them from.
+        assert_eq!(
+            bind(ExceededBoundQuery {
+                model_family: None,
+                route: None,
+                ..bernini_query(848, 480, 49)
+            }),
+            Some(97_147_294_328),
+        );
+        // A MOVED loader closure stales the bound exactly as it stales an anchor: the measurement
+        // no longer describes what would run, so it refuses nothing.
+        let moved = bernini_closures(&"c".repeat(64));
+        assert_eq!(
+            store.binding_exceeded_bound(bernini_query(848, 480, 49), Some(&moved)),
+            None,
+        );
+        assert_eq!(
+            store.binding_exceeded_bound(bernini_query(848, 480, 49), None),
+            None,
+            "no packaged closures at all is fail-open, never a refusal",
+        );
+    }
+
+    /// sc-22738: several bounds can cover one request once a cell has been stopped more than once.
+    /// The STRONGEST true inequality is the useful one.
+    #[test]
+    fn the_largest_covering_bound_wins() {
+        let smaller = ExceededBound {
+            id: "exceeded:bernini:mlx:bf16:base:base:fp:exc-small".to_owned(),
+            observed_footprint_bytes: 80_000_000_000,
+            geometry: AnchorGeometry {
+                width: 848,
+                height: 480,
+                frames: 25,
+                fps: None,
+            },
+            ..bernini_bound()
+        };
+        let store = bound_store(vec![smaller, bernini_bound()]);
+        let current = bernini_closures(&"b".repeat(64));
+        assert_eq!(
+            store
+                .binding_exceeded_bound(bernini_query(848, 480, 49), Some(&current))
+                .map(|bound| bound.observed_footprint_bytes),
+            Some(97_147_294_328),
+        );
+        // At a geometry only the smaller bound covers, the smaller one is the whole claim.
+        assert_eq!(
+            store
+                .binding_exceeded_bound(bernini_query(848, 480, 25), Some(&current))
+                .map(|bound| bound.observed_footprint_bytes),
+            Some(80_000_000_000),
+        );
+    }
+
+    /// sc-22738: the requirement a host is graded against is the measured footprint PLUS the lane's
+    /// activation allowance — never the bare reading, which was taken mid-climb.
+    #[test]
+    fn the_requirement_is_the_measured_footprint_plus_the_lanes_headroom() {
+        let bound = bernini_bound();
+        assert_eq!(bound.required_bytes(0), 97_147_294_328);
+        assert_eq!(
+            bound.required_bytes(gib_to_bytes(16.0)),
+            97_147_294_328 + 17_179_869_184
+        );
+        assert_eq!(
+            bound.required_bytes(u64::MAX),
+            u64::MAX,
+            "the sum saturates rather than wrapping into a requirement of nearly zero",
+        );
+    }
+
+    /// sc-22738: THE predicate, and the disjunct that makes the Bernini fix bite.
+    ///
+    /// A host no larger than the one the render failed on is refused outright. Grading such a host
+    /// on footprint-versus-budget alone would re-admit it — 90.5 GiB plus the lane's 16 GiB
+    /// allowance is 106.5 GiB, and an idle 128 GiB Mac appears to have that — which is exactly the
+    /// re-admission this story exists to stop.
+    #[test]
+    fn a_host_no_larger_than_the_one_that_failed_is_refused_outright() {
+        let bound = bernini_bound();
+        let headroom = gib_to_bytes(16.0);
+        let host = 137_438_953_472_u64;
+        assert!(
+            bound.required_bytes(headroom) < host,
+            "the requirement alone does NOT exceed an idle 128 GiB host; the host-size disjunct \
+             is what refuses it",
+        );
+        assert!(
+            bound.refuses_host(host, host, headroom),
+            "the same 128 GiB machine that could not finish this render must not be given it again",
+        );
+        assert!(
+            bound.refuses_host(host - 1, u64::MAX, headroom),
+            "a SMALLER host is refused even with an impossible budget",
+        );
+        // A larger host is graded on what it can actually offer.
+        let bigger = host * 4;
+        assert!(
+            !bound.refuses_host(bigger, bigger, headroom),
+            "a machine four times the size may still run it",
+        );
+        assert!(
+            bound.refuses_host(bigger, bound.required_bytes(headroom) - 1, headroom),
+            "a larger but busy host that cannot offer the requirement is refused",
+        );
+        assert!(
+            !bound.refuses_host(bigger, bound.required_bytes(headroom), headroom),
+            "exact equality fits",
+        );
+    }
+
+    /// sc-22738: the store refuses a bound that is not a hard stop's reading — one under its own
+    /// ceiling, one above the whole capture host, or one that states no reason.
+    #[test]
+    fn a_bound_that_is_not_a_hard_stops_reading_fails_the_load() {
+        let refuse = |bound: ExceededBound, fragment: &str| {
+            let error = validate_exceeded_bounds(&bound_store(vec![bound]))
+                .expect_err("the store accepted a bound that is not a hard stop's reading");
+            assert!(error.contains(fragment), "unexpected error: {error}");
+        };
+        refuse(
+            ExceededBound {
+                observed_footprint_bytes: 94_822_600_831,
+                ..bernini_bound()
+            },
+            "under its own hard-stop ceiling",
+        );
+        refuse(
+            ExceededBound {
+                host_memory_bytes: 97_147_294_327,
+                ..bernini_bound()
+            },
+            "larger than the whole capture host",
+        );
+        refuse(
+            ExceededBound {
+                reason: "  ".to_owned(),
+                ..bernini_bound()
+            },
+            "states no hard-stop reason",
+        );
+        refuse(
+            ExceededBound {
+                geometry: AnchorGeometry {
+                    frames: 0,
+                    ..bernini_bound().geometry
+                },
+                ..bernini_bound()
+            },
+            "degenerate geometry",
+        );
+        refuse(
+            ExceededBound {
+                source: AnchorSource {
+                    loader_closure_digest: "not-a-digest".to_owned(),
+                    ..bernini_bound().source
+                },
+                ..bernini_bound()
+            },
+            "is not a sha256",
+        );
+        // The corpus handshake, both halves: a bound may only cite a compiled-in retained-evidence
+        // file, and it must hash to what the row recorded — the store may not drift from the
+        // evidence a refusal is drawn from.
+        refuse(
+            ExceededBound {
+                source: AnchorSource {
+                    path: "docs/calibration/sc-22738/not-compiled-in.json".to_owned(),
+                    ..bernini_bound().source
+                },
+                ..bernini_bound()
+            },
+            "not a compiled retained-evidence file",
+        );
+        refuse(bernini_bound(), "source digest mismatch");
+    }
+
+    /// sc-22738: the packaged Bernini bound is bound BYTE-EXACTLY to the corpus it cites — this is
+    /// the row a production refusal is drawn from, so a store that drifted from its evidence would
+    /// refuse renders on a number nothing measured.
+    #[test]
+    fn the_packaged_bernini_bound_agrees_with_its_retained_evidence() {
+        let store = packaged_memory_anchors().expect("the packaged anchor store must load");
+        let bound = store
+            .exceeded_bounds
+            .iter()
+            .find(|bound| bound.model_id == "bernini" && bound.tier == "bf16")
+            .expect("the bernini:bf16:mlx footprint hard stop is retained");
+        assert_eq!(bound.backend, AnchorBackend::Mlx);
+        assert_eq!(bound.mode, "text_to_video");
+        assert_eq!(bound.geometry.frames, 49);
+        assert_eq!(bound.observed_footprint_bytes, 97_147_294_328);
+        assert_eq!(bound.host_memory_bytes, 137_438_953_472);
+        // `validate_exceeded_bounds` re-derived every one of those figures from the compiled-in
+        // bundle at load; asserting the load succeeded plus the row's own content is the whole of
+        // the handshake, stated without a second copy of the comparison.
+        assert!(validate_exceeded_bounds(store).is_ok());
+    }
+
     /// AC 3: `ArchitectureFacts::default()` leaves every residue unscaled, so the estimate is
     /// never smaller than with full facts — for the whole set and for each fact dropped alone.
     #[test]
@@ -6358,6 +7057,7 @@ mod tests {
             anchors: vec![anchor.clone(), image],
             analytic_only: Vec::new(),
             component_deltas: Vec::new(),
+            exceeded_bounds: Vec::new(),
         };
         assert_eq!(
             store

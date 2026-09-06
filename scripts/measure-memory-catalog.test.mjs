@@ -1223,16 +1223,41 @@ test("appending to PACKAGED_MEMORY_ANCHOR_SOURCES is idempotent and keeps the ru
   const relative = "docs/calibration/sc-99999/qwen-image-q4-mlx-evidence.json";
   const once = appendPackagedSource(source, relative);
   assert.equal(appendPackagedSource(once, relative), once);
-  const expected = [
+  const tuple = [
     "    (",
     `        "${relative}",`,
     `        include_str!("../../../${relative}"),`,
     "    ),",
-    "];",
   ].join("\n");
-  assert.ok(once.includes(expected), "new tuple is the last entry before the closing bracket");
-  assert.equal(once.length - source.length, expected.length - "];".length);
+  assert.ok(once.includes(`${tuple}\n`), "the tuple keeps its rustfmt shape");
+  assert.equal(once.length - source.length, tuple.length + 1);
+  // sc-22738: IN SORTED POSITION, because `memory_anchor.rs` asserts the compiled-in list stays
+  // sorted. A blind append only happened to hold while every new corpus landed under
+  // `docs/generated/`; a `docs/calibration/` one — which is where every campaign's corpora go —
+  // sorts before all of those, and appending it reds `cargo test -p sceneworks-core` on a commit
+  // the runner has already made.
+  const paths = [...once.matchAll(/^ {8}"([^"]+)",$/gm)].map((match) => match[1]);
+  assert.deepEqual(paths, [...paths].sort(), "the list is still sorted after the insert");
+  assert.ok(paths.includes(relative));
+  // A corpus that DOES sort last still lands last.
+  const last = "zz/last-of-all.json";
+  const lastPaths = [...appendPackagedSource(source, last).matchAll(/^ {8}"([^"]+)",$/gm)].map(
+    (match) => match[1],
+  );
+  assert.equal(lastPaths.at(-1), last);
   assert.throws(() => appendPackagedSource("const OTHER: &[u8] = &[];", relative), /no longer declares/);
+  // sc-22738: idempotence is decided INSIDE the list. A mention of the path ELSEWHERE in the file
+  // — a doc comment, a test fixture that cites the corpus it exercises — used to read as "already
+  // packaged", so the append silently did nothing and every store row derived from that corpus
+  // then failed its own handshake. This story's adapter fixture names the corpus it packages, which
+  // is exactly how the defect surfaced.
+  const mentioned = `${source}\n// see ${JSON.stringify(relative)} for the retained evidence\n`;
+  assert.ok(
+    appendPackagedSource(mentioned, relative).includes(
+      `include_str!("../../../${relative}")`,
+    ),
+    "a mention outside the list must not suppress the append",
+  );
 });
 
 test("a campaign directory's ingested bundles mark their anchors as already captured", async () => {
@@ -3409,6 +3434,18 @@ async function stubCheckout() {
     if (command === "capture") {
       if (process.env.STUB_CAPTURE_FAILS) { console.error("Error: stub capture refused"); process.exit(1); }
       await writeFile(value("--output"), JSON.stringify({ records: [{ backend: "mlx", target: { modelId: "z_image_turbo", tier: "q4" }, env: process.env.SCENEWORKS_Z_IMAGE_ROOT ?? null }] }));
+    } else if (command === "record-exceeded") {
+      const events = (await readFile(value("--watchdog-events"), "utf8")).trim().split("\\n").map(JSON.parse);
+      const stop = events.find((event) => event.event === "hard_stop");
+      const [, ceiling, observed] = /^physical_footprint_at_or_above_(\\d+):observed_(\\d+)$/.exec(stop.reason);
+      await writeFile(value("--output"), JSON.stringify({
+        records: [],
+        exceededBounds: [{
+          id: "exc-stub", backend: "mlx", artifact: JSON.parse(value("--artifact")),
+          target: { modelId: "z_image_turbo", tier: "q4" },
+          observedFootprintBytes: Number(observed), ceilingBytes: Number(ceiling), reason: stop.reason,
+        }],
+      }));
     } else if (command === "ingest") {
       await writeFile(value("--output"), await readFile(value("--input")));
     } else if (command !== "check") { process.exit(2); }
@@ -3790,7 +3827,76 @@ test("every Darwin anchor capture runs inside the footprint watchdog with the de
   }
 });
 
-test("a footprint hard stop surfaces as capture_failed naming the stop, with the tree left clean", { skip: process.platform !== "darwin" && "the footprint sampler is Darwin-only" }, async () => {
+test("a footprint hard stop is COMMITTED as a measured lower bound, through the same ingest path a capture takes", { skip: process.platform !== "darwin" && "the footprint sampler is Darwin-only" }, async () => {
+  const checkout = await stubCheckout();
+  const tierRoot = await mkdtemp(path.join(tmpdir(), "catalog-tier-"));
+  await writeFile(path.join(tierRoot, "w.safetensors"), "weights");
+  process.env.GIT_AUTHOR_NAME = process.env.GIT_COMMITTER_NAME = "t";
+  process.env.GIT_AUTHOR_EMAIL = process.env.GIT_COMMITTER_EMAIL = "t@t";
+  process.env.STUB_PROBE_MEMORY_BYTES = String(2 * 1024 * 1024 * 1024 + 1);
+  try {
+    const row = {
+      key: "z_image_turbo:q4:mlx", physical: false, tierRoot,
+      env: { SCENEWORKS_Z_IMAGE_ROOT: tierRoot },
+      artifact: { repository: "SceneWorks/z-image-turbo-mlx", resolvedRevision: REVISION, variant: "q4" },
+    };
+    const context = stubContext(checkout);
+    const stopped = await measureAnchor(row, context);
+    // THE defect this story fixes: the run reached a footprint the host could not carry, and until
+    // now that fact was dropped on the floor while production kept admitting the same request.
+    assert.equal(stopped.status, "committed_exceeded", stopped.reason);
+    assert.equal(context.state.commits.length, 1, "the bound is one commit, like an anchor");
+    const { stdout: status } = await checkout.git("status", "--porcelain");
+    assert.equal(status, "", "the tree is clean again for the next capture");
+    const { stdout: shown } = await checkout.git("show", "--stat", "--format=%s%n%b", "HEAD");
+    assert.match(shown, /chore\(sc-stub\): record the z_image_turbo:q4:mlx footprint hard stop as a measured bound/);
+    assert.match(shown, /watchdog hard stop: physical_footprint_at_or_above_1:observed_\d+/);
+    for (const file of [
+      "docs/calibration/sc-stub/z-image-turbo-q4-mlx-exceeded-evidence.json",
+      PACKAGED_SOURCES_PATH, "config/memory-anchors.json", "docs/generated/memory-matrix.json",
+    ]) {
+      assert.ok(shown.includes(file), `${file} is in the commit`);
+    }
+    const rust = await readFile(path.join(checkout.root, PACKAGED_SOURCES_PATH), "utf8");
+    assert.ok(
+      rust.includes('"docs/calibration/sc-stub/z-image-turbo-q4-mlx-exceeded-evidence.json"'),
+      "the bound's corpus is compiled into the Rust loader, exactly as an anchor's is",
+    );
+    const bundle = JSON.parse(await readFile(
+      path.join(checkout.root, "docs/calibration/sc-stub/z-image-turbo-q4-mlx-exceeded-evidence.json"), "utf8",
+    ));
+    assert.equal(bundle.exceededBounds.length, 1);
+    assert.equal(bundle.exceededBounds[0].ceilingBytes, 1);
+    assert.ok(bundle.exceededBounds[0].observedFootprintBytes > 0);
+    assert.deepEqual(
+      bundle.exceededBounds[0].artifact,
+      { repository: "SceneWorks/z-image-turbo-mlx", resolvedRevision: REVISION, variant: "q4", inventorySha256: bundle.exceededBounds[0].artifact.inventorySha256 },
+      "the bound names the weights the guarded render had open",
+    );
+    assert.match(bundle.exceededBounds[0].artifact.inventorySha256, /^[0-9a-f]{64}$/);
+  } finally {
+    delete process.env.STUB_PROBE_MEMORY_BYTES;
+  }
+});
+
+test("a footprint hard stop with no artifact binding is still a capture_failed, never a bound over unnamed weights", { skip: process.platform !== "darwin" && "the footprint sampler is Darwin-only" }, async () => {
+  const checkout = await stubCheckout();
+  process.env.STUB_PROBE_MEMORY_BYTES = String(2 * 1024 * 1024 * 1024 + 1);
+  try {
+    const stopped = await measureAnchor(
+      { key: "z_image_turbo:q4:mlx", physical: false, env: {} },
+      stubContext(checkout),
+    );
+    assert.equal(stopped.status, "capture_failed");
+    assert.match(stopped.reason, /no artifact binding for this row to bound it against/);
+    const { stdout: status } = await checkout.git("status", "--porcelain");
+    assert.equal(status, "", "nothing was committed");
+  } finally {
+    delete process.env.STUB_PROBE_MEMORY_BYTES;
+  }
+});
+
+test("a footprint hard stop on a no-commit run surfaces as `exceeded` naming the stop, with the tree left clean", { skip: process.platform !== "darwin" && "the footprint sampler is Darwin-only" }, async () => {
   const checkout = await stubCheckout();
   const context = stubContext(checkout, { args: { ...stubContext(checkout).args, commit: false } });
   // A ceiling every process is already above: the guard's initial observation of the held group
@@ -3799,8 +3905,15 @@ test("a footprint hard stop surfaces as capture_failed naming the stop, with the
   // drives it to 1 — the wired limit cannot do this any more, and is not a hard-stop term.
   process.env.STUB_PROBE_MEMORY_BYTES = String(2 * 1024 * 1024 * 1024 + 1);
   try {
-    const stopped = await measureAnchor({ key: "z_image_turbo:q4:mlx", physical: false, env: {} }, context);
-    assert.equal(stopped.status, "capture_failed");
+    const stopped = await measureAnchor({
+      key: "z_image_turbo:q4:mlx", physical: false, env: {},
+      artifact: { repository: "SceneWorks/z-image-turbo-mlx", resolvedRevision: REVISION, variant: "q4" },
+    }, context);
+    // sc-22738: the stop is no longer a dropped capture. On a NO-COMMIT run there is nowhere to
+    // put the evidence — ingesting would dirty the tree — so it is named and carried out as its
+    // own outcome rather than as a failure; the committing run below turns the same stop into a
+    // packaged bound.
+    assert.equal(stopped.status, "exceeded");
     assert.match(stopped.reason, /^watchdog hard stop: physical_footprint_at_or_above_1:observed_\d+$/);
     const log = await readFile(stopped.log, "utf8");
     assert.match(log, /memory-calibration-watchdog\.py --max-footprint-bytes 1 --host-memory-bytes 2147483649 --min-memory-free-bytes 2147483648 /);

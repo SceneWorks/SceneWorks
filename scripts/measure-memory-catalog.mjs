@@ -1450,6 +1450,15 @@ export async function classifyAnchor(key, planned, { models, backend, hubs, curr
     }
     row.ltx25SnapshotRoot = snapshot;
     row.physical = false;
+    // sc-22738: the weights identity a footprint hard stop would be bound against. It is the
+    // runner's binding of what it set up for the capture, not a provider attestation — a killed
+    // run attests nothing — so it names exactly the snapshot the row resolved above. LTX-2.5 rows
+    // carry no inventory digest because the harness seals the snapshot itself.
+    row.artifact = {
+      repository: family.repo,
+      resolvedRevision: download.revision,
+      variant: parts.tier,
+    };
     return row;
   }
 
@@ -1683,23 +1692,51 @@ export async function classifyAnchor(key, planned, { models, backend, hubs, curr
     row.env[`SCENEWORKS_${side.env}_ROOT`] = sideRoot;
   }
   row.physical = backend === "mlx" && family.physical === true;
+  // sc-22738: see the LTX-2.5 branch — the tier root this row resolved, named so a hard stop can
+  // state WHICH weights reached the footprint it bounds. `measureAnchor` fills the inventory digest
+  // in from the same hash it exports to the adapter.
+  row.artifact = {
+    repository: artifact.repo,
+    resolvedRevision: resolved.revision,
+    variant: parts.tier,
+  };
   return row;
 }
 
 /** Append one evidence corpus to the Rust loader's compiled-in list, idempotently. */
 export function appendPackagedSource(source, relativePath) {
-  if (source.includes(`"${relativePath}"`)) return source;
   const start = source.indexOf("PACKAGED_MEMORY_ANCHOR_SOURCES: &[(&str, &str)] = &[");
   if (start === -1) fail(`${PACKAGED_SOURCES_PATH} no longer declares PACKAGED_MEMORY_ANCHOR_SOURCES`);
   const end = source.indexOf("\n];", start);
   if (end === -1) fail("PACKAGED_MEMORY_ANCHOR_SOURCES is not terminated by `];`");
+  // Idempotence is decided INSIDE the list, not over the whole file (sc-22738). Scanning the file
+  // made any other mention of the path — a doc comment, a test fixture that cites the corpus it
+  // exercises — read as "already packaged", and the append then silently did nothing: the corpus
+  // stayed out of the Rust loader while the run reported success, and the store's own handshake
+  // rejected every row derived from it. Caught by this story's own adapter fixture, which names
+  // the very corpus it was about to package.
+  const block = source.slice(start, end);
+  if (block.includes(`"${relativePath}"`)) return source;
   const entry = [
     "    (",
     `        "${relativePath}",`,
     `        include_str!("../../../${relativePath}"),`,
     "    ),",
   ].join("\n");
-  return `${source.slice(0, end)}\n${entry}${source.slice(end)}`;
+  // IN SORTED POSITION, not at the end (sc-22738). `memory_anchor.rs` asserts the compiled-in list
+  // stays sorted, and appending blindly only happened to hold while every new corpus landed under
+  // `docs/generated/`. This campaign's corpora live under `docs/calibration/sc-22738/`, which sorts
+  // BEFORE every `docs/generated/` entry — so an append put the list out of order and the next
+  // `cargo test -p sceneworks-core` reds on a commit the runner had already made.
+  const successor = [...block.matchAll(/^ {8}"([^"]+)",$/gm)].find(
+    (match) => match[1] > relativePath,
+  );
+  if (!successor) return `${source.slice(0, end)}\n${entry}${source.slice(end)}`;
+  // Back up from the successor's path line to the `    (` that opens its tuple.
+  const opener = block.lastIndexOf("    (\n", successor.index);
+  if (opener === -1) fail("PACKAGED_MEMORY_ANCHOR_SOURCES entry is not a `    (` tuple");
+  const at = start + opener;
+  return `${source.slice(0, at)}${entry}\n${source.slice(at)}`;
 }
 
 /** Anchors already ingested under the campaign directory, keyed by anchor key. */
@@ -1934,8 +1971,14 @@ export async function extractSeedingNewAnchors(exec, root, log, limit = 8) {
       if (!match || attempt >= limit) throw error;
       const storePath = path.join(root, ANCHOR_STORE_PATH);
       const store = JSON.parse(await readFile(storePath, "utf8"));
-      if (store.anchors.some((anchor) => anchor.id === match[1])) throw error;
-      store.anchors.push({ id: match[1], source: { loaderClosureDigest: SEED_DIGEST } });
+      // sc-22738: a measured lower bound is seeded into ITS OWN array. The extractor reads the
+      // currency key out of whichever array the row lives in, so seeding a bound among the anchors
+      // would leave the extractor still refusing it on the next attempt and burn the retry budget.
+      const rows = match[1].startsWith("exceeded:")
+        ? (store.exceededBounds ??= [])
+        : store.anchors;
+      if (rows.some((row) => row.id === match[1])) throw error;
+      rows.push({ id: match[1], source: { loaderClosureDigest: SEED_DIGEST } });
       await writeFile(storePath, `${JSON.stringify(store, null, 2)}\n`);
       log?.write(`seeded new anchor ${match[1]} for extraction; --stamp-anchors derives its key next\n`);
     }
@@ -1956,6 +1999,11 @@ export async function measureAnchor(row, context) {
   const captureOutput = path.join(workDir, "captures", `${slug}.json`);
   const rawLogDir = path.join(workDir, "raw", slug);
   const evidenceRelative = `${campaignDir}/${slug}-evidence.json`;
+  // sc-22738: a hard stop's bundle is a SEPARATE file from a completed capture's. The two state
+  // different things about the same cell and a later completed capture must be able to land beside
+  // the bound rather than overwrite it.
+  const exceededOutput = path.join(workDir, "captures", `${slug}-exceeded.json`);
+  const exceededEvidenceRelative = `${campaignDir}/${slug}-exceeded-evidence.json`;
   const started = Date.now();
   const touched = [ANCHOR_STORE_PATH, MATRIX_PATH, MATRIX_MD_PATH, PACKAGED_SOURCES_PATH];
   const exec = (command, commandArgs, options = {}) => run(command, commandArgs, { cwd: root, ...options });
@@ -1971,11 +2019,75 @@ export async function measureAnchor(row, context) {
     const inventory = await hashArtifactInventory(row.tierRoot);
     env.SCENEWORKS_MEMORY_MODEL_BYTES = String(inventory.bytes);
     env.SCENEWORKS_MEMORY_MODEL_INVENTORY_SHA256 = inventory.sha256;
+    // The same digest a hard stop's artifact binding cites, so a bound names the exact weight files
+    // the guarded render had open rather than a revision that could resolve to several trees.
+    if (row.artifact) row.artifact = { ...row.artifact, inventorySha256: inventory.sha256 };
   }
   if (row.physical) {
     env.SCENEWORKS_MEMORY_CAPTURE_DIR = rawLogDir;
     env.SCENEWORKS_MEMORY_SOURCE_PATH_PREFIX = campaignPrefix;
   }
+
+  // 3..7. ingest + derive + commit — the SAME path for a completed capture and for a footprint
+  //        hard stop's measured lower bound (sc-22738). Both put a bundle under the campaign
+  //        directory, compile it into the Rust loader's source list, re-derive the store, stamp
+  //        every currency key and regenerate the matrix; only the bundle's contents and the commit
+  //        subject differ. Any failure rolls the tree back to HEAD so the next anchor still starts
+  //        clean; the raw capture stays in the work dir for a by-hand ingest.
+  const ingestAndCommit = async ({ captureOutput: input, evidenceRelative: target, sourceRoot, status, subject, message }) => {
+    try {
+      await mkdir(path.join(root, campaignDir), { recursive: true });
+      created.push(target);
+      await exec(process.execPath, [
+        HARNESS, "ingest", "--input", input, ...sourceRoot, "--output", target,
+      ], { log });
+      if (row.physical && status === "committed") {
+        const receipts = path.join(rawLogDir, campaignDir);
+        try {
+          for (const name of await readdir(receipts)) {
+            created.push(`${campaignDir}/${name}`);
+            await cp(path.join(receipts, name), path.join(root, campaignDir, name), { recursive: true, force: false, errorOnExist: true });
+          }
+        } catch (error) {
+          fail(`copy physical receipts from ${receipts}: ${error.message}`);
+        }
+      }
+      const rust = await readFile(path.join(root, PACKAGED_SOURCES_PATH), "utf8");
+      await writeFile(path.join(root, PACKAGED_SOURCES_PATH), appendPackagedSource(rust, target));
+      await extractSeedingNewAnchors(exec, root, log);
+      await exec(process.execPath, [
+        "scripts/anchor-loader-closure.mjs", "--repo", path.resolve(args.inferenceRepo), "--stamp-anchors",
+      ], { log });
+      const stamped = JSON.parse(await readFile(path.join(root, ANCHOR_STORE_PATH), "utf8"));
+      const seeded = [...stamped.anchors, ...(stamped.exceededBounds ?? [])]
+        .some((entry) => entry.source?.loaderClosureDigest === SEED_DIGEST);
+      if (seeded) {
+        fail("a seeded placeholder currency key survived --stamp-anchors; refusing to commit it");
+      }
+      await exec(process.execPath, ["scripts/generate-memory-matrix.mjs"], { log });
+
+      // `-f`: the harness's `<session>.log` receipt matches the blanket `*.log` ignore rule.
+      await gitAt(["add", "-f", "--", ...touched, ...created]);
+      const stray = await gitAt(["status", "--porcelain"]);
+      const unstaged = stray.split("\n").filter((line) => line && line[1] !== " ");
+      if (unstaged.length > 0) fail(`post-steps changed paths this run does not own:\n${unstaged.join("\n")}`);
+      await gitAt(["commit", "--quiet", "-m", message]);
+      state.commits.push(await gitAt(["rev-parse", "--short", "HEAD"]));
+      return finish(status);
+    } catch (error) {
+      log.write(`\nROLLBACK (${subject}): ${error.message}\n`);
+      try {
+        // Unstage first: `checkout --` restores from the INDEX, which already holds the staged edits.
+        await exec("git", ["reset", "--quiet", "--", ...touched, ...created], { log }).catch(() => {});
+        await exec("git", ["checkout", "--quiet", "--", ...touched], { log });
+        for (const relative of created) await rm(path.join(root, relative), { recursive: true, force: true });
+        if (!(await gitIsClean(root))) fail("tree is still dirty after rollback; stop here");
+      } catch (rollbackError) {
+        state.halt = `rollback failed for ${row.key}: ${rollbackError.message}`;
+      }
+      return finish("ingest_failed", failureReason(error));
+    }
+  };
 
   // 1. capture — detached from the terminal's process group so a Ctrl-C here does not reach the
   //    adapter mid-command-buffer; the loop stops after the anchor in flight instead.
@@ -2006,7 +2118,40 @@ export async function measureAnchor(row, context) {
     }
   } catch (error) {
     // A hard stop is recorded in the guard's event log, not on stderr: name it on the row.
-    return finish("capture_failed", (await watchdogHardStop(watchdogEvents)) ?? failureReason(error));
+    const hardStop = await watchdogHardStop(watchdogEvents);
+    if (!hardStop) return finish("capture_failed", failureReason(error));
+    // sc-22738: the run established one fact — this cell's peak is AT LEAST the footprint the
+    // guard saw — and until now that fact died with the process. Record it as evidence through
+    // the same check → ingest → extract → stamp → matrix → commit path a completed capture takes,
+    // so production stops admitting the request the host had to kill.
+    if (!row.artifact) {
+      return finish("capture_failed", `${hardStop}; no artifact binding for this row to bound it against`);
+    }
+    if (!args.commit) return finish("exceeded", hardStop);
+    try {
+      await exec(process.execPath, [
+        HARNESS, "record-exceeded", "--plan", PLAN_PATH, "--anchor", row.key,
+        "--provider-command", JSON.stringify(providerCommand(args.adapter)),
+        "--sceneworks-repo", root, "--inference-repo", path.resolve(args.inferenceRepo),
+        "--watchdog-events", watchdogEvents,
+        "--artifact", JSON.stringify(row.artifact),
+        "--output", exceededOutput,
+      ], { env, log });
+    } catch (recordError) {
+      return finish("capture_failed", `${hardStop}; recording it failed: ${failureReason(recordError)}`);
+    }
+    return ingestAndCommit({
+      captureOutput: exceededOutput,
+      evidenceRelative: exceededEvidenceRelative,
+      sourceRoot: [],
+      status: "committed_exceeded",
+      subject: `exceeded bound for ${row.key}`,
+      message:
+        `chore(${args.campaign}): record the ${row.key} footprint hard stop as a measured bound\n\n` +
+        `Captured by scripts/measure-memory-catalog.mjs at inference ${inferencePin}. ` +
+        `${hardStop}. Evidence: ${exceededEvidenceRelative}; anchor store, currency stamp and ` +
+        "matrix regenerated.",
+    });
   }
 
   // 2. check the raw bundle before touching the tree.
@@ -2020,63 +2165,17 @@ export async function measureAnchor(row, context) {
   // later anchor in the same run (`complete evidence cannot come from a dirty repository`).
   if (!args.commit) return finish("captured");
 
-  // 3..7. ingest + derive + commit. Any failure rolls the tree back to HEAD so the next anchor
-  //       still starts clean; the raw capture stays in the work dir for a by-hand ingest.
-  try {
-    await mkdir(path.join(root, campaignDir), { recursive: true });
-    created.push(evidenceRelative);
-    await exec(process.execPath, [
-      HARNESS, "ingest", "--input", captureOutput, ...sourceRoot, "--output", evidenceRelative,
-    ], { log });
-    if (row.physical) {
-      const receipts = path.join(rawLogDir, campaignDir);
-      try {
-        for (const name of await readdir(receipts)) {
-          created.push(`${campaignDir}/${name}`);
-          await cp(path.join(receipts, name), path.join(root, campaignDir, name), { recursive: true, force: false, errorOnExist: true });
-        }
-      } catch (error) {
-        fail(`copy physical receipts from ${receipts}: ${error.message}`);
-      }
-    }
-    const rust = await readFile(path.join(root, PACKAGED_SOURCES_PATH), "utf8");
-    await writeFile(path.join(root, PACKAGED_SOURCES_PATH), appendPackagedSource(rust, evidenceRelative));
-    await extractSeedingNewAnchors(exec, root, log);
-    await exec(process.execPath, [
-      "scripts/anchor-loader-closure.mjs", "--repo", path.resolve(args.inferenceRepo), "--stamp-anchors",
-    ], { log });
-    const stamped = JSON.parse(await readFile(path.join(root, ANCHOR_STORE_PATH), "utf8"));
-    if (stamped.anchors.some((anchor) => anchor.source?.loaderClosureDigest === SEED_DIGEST)) {
-      fail("a seeded placeholder currency key survived --stamp-anchors; refusing to commit it");
-    }
-    await exec(process.execPath, ["scripts/generate-memory-matrix.mjs"], { log });
-
-    if (args.commit) {
-      // `-f`: the harness's `<session>.log` receipt matches the blanket `*.log` ignore rule.
-      await gitAt(["add", "-f", "--", ...touched, ...created]);
-      const stray = await gitAt(["status", "--porcelain"]);
-      const unstaged = stray.split("\n").filter((line) => line && line[1] !== " ");
-      if (unstaged.length > 0) fail(`post-steps changed paths this run does not own:\n${unstaged.join("\n")}`);
-      await gitAt(["commit", "--quiet", "-m",
-        `chore(${args.campaign}): measure ${row.key} memory anchor\n\n` +
-        `Captured by scripts/measure-memory-catalog.mjs at inference ${inferencePin}. ` +
-        `Evidence: ${evidenceRelative}; anchor store, currency stamp and matrix regenerated.`]);
-      state.commits.push(await gitAt(["rev-parse", "--short", "HEAD"]));
-    }
-    return finish("committed");
-  } catch (error) {
-    log.write(`\nROLLBACK: ${error.message}\n`);
-    try {
-      // Unstage first: `checkout --` restores from the INDEX, which already holds the staged edits.
-      await exec("git", ["reset", "--quiet", "--", ...touched, ...created], { log }).catch(() => {});
-      await exec("git", ["checkout", "--quiet", "--", ...touched], { log });
-      for (const relative of created) await rm(path.join(root, relative), { recursive: true, force: true });
-      if (!(await gitIsClean(root))) fail("tree is still dirty after rollback; stop here");
-    } catch (rollbackError) {
-      state.halt = `rollback failed for ${row.key}: ${rollbackError.message}`;
-    }
-    return finish("ingest_failed", failureReason(error));
-  }
+  return ingestAndCommit({
+    captureOutput,
+    evidenceRelative,
+    sourceRoot,
+    status: "committed",
+    subject: `anchor ${row.key}`,
+    message:
+      `chore(${args.campaign}): measure ${row.key} memory anchor\n\n` +
+      `Captured by scripts/measure-memory-catalog.mjs at inference ${inferencePin}. ` +
+      `Evidence: ${evidenceRelative}; anchor store, currency stamp and matrix regenerated.`,
+  });
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -2204,7 +2303,7 @@ export async function main(argv = process.argv.slice(2)) {
   process.stdout.write(`\n${table(results, ["key", "status", "seconds", "reason"])}\n`);
   process.stdout.write(`\ncommits: ${state.commits.length ? state.commits.join(" ") : "none"}\nsummary: ${summaryPath}\n`);
   if (state.halt) fail(state.halt);
-  const failed = results.filter((result) => !["committed", "captured"].includes(result.status));
+  const failed = results.filter((result) => !["committed", "committed_exceeded", "captured", "exceeded"].includes(result.status));
   if (failed.length > 0) process.exitCode = 2;
 }
 
