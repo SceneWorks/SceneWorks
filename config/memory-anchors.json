@@ -116,14 +116,14 @@
         "sha256": "a890d20e0236702535c6701d22ce8db7aa87ed42820490901bdc003c232fc18b",
         "recordId": "imc-7f1a63e5459300aed47c",
         "calibrationFingerprint": "krea-turbo-cuda-phase-curves-v1",
-        "loaderClosureDigest": "378423928b015a45831c0a3ed497eb68bbee37abb125a0a29cc2db9e22c29d44",
+        "loaderClosureDigest": "bbb716a75d71adc09fc1cab8b4a02c95160c9c69fe3f0b4fdf569b54caad8882",
         "currencyAttestation": {
           "measuredRevision": "3cd86ba2165f35db7c4fceecbeb7fbd12bca1c0c",
-          "attestedRevision": "8a65db2aad0b54581794127f5c3f5621e107e321",
-          "attestedAt": "2026-09-05",
-          "story": "sc-22723",
+          "attestedRevision": "563c44e1652043bf8bd018de79cadadc393f91f2",
+          "attestedAt": "2026-09-06",
+          "story": "sc-22723, sc-22738",
           "class": "witnessed-unchanged",
-          "why": "3cd86ba2..c6d6a4db DOES touch the Krea loader path (candle-gen-krea loader.rs / pipeline.rs / transformer/mod.rs / control*.rs, candle-gen quant/mod.rs + quant/adapt.rs, candle-gen-boogu, candle-gen-qwen-image and candle-gen-pid files the closure reaches), so the diff alone cannot classify this anchor. It is attested on a MEASURED witness instead: the E6 falsification fixture re-measured krea_2_turbo q4 at a5f643ae (22 first-parent merges after 3cd86ba2) on the same GPU and the cold staged control reproduces the packaged anchor per phase. The remaining a5f643ae..c6d6a4db range is accounting-only: gen-core lib.rs (re-export), memory_strategy.rs (contract types), weightsmeta.rs (walker hidden-cache skip) and candle-gen quant/sidecar.rs (CACHE_DIR constant re-homed, same value). Extended to 8a65db2a (sc-22723 feature pin, inference PRs #946-#958): c6d6a4db..8a65db2a touches four files of this closure and none is a load or device path - gen-core encoder_contract.rs (packed-marker struct kept whole, a stale-marker allowance only mlx-gen-flux2 calls, the hf_cache_discovery_roots authorization helper, tests), gen-core lib.rs (its re-export), gen-core wan_i2v_memory.rs (Wan-only identity tokens) and candle-gen-krea lib.rs (the per-(route, proven tier) identity table and weights-free surfaces; the q4 turbo identity this anchor is keyed to is unchanged, and the new provable-tier read consults the marker the loader already validated). loader.rs, pipeline.rs, transformer/, control*.rs, candle-gen quant/ and every device path are untouched.",
+          "why": "3cd86ba2..c6d6a4db DOES touch the Krea loader path (candle-gen-krea loader.rs / pipeline.rs / transformer/mod.rs / control*.rs, candle-gen quant/mod.rs + quant/adapt.rs, candle-gen-boogu, candle-gen-qwen-image and candle-gen-pid files the closure reaches), so the diff alone cannot classify this anchor. It is attested on a MEASURED witness instead: the E6 falsification fixture re-measured krea_2_turbo q4 at a5f643ae (22 first-parent merges after 3cd86ba2) on the same GPU and the cold staged control reproduces the packaged anchor per phase. The remaining a5f643ae..c6d6a4db range is accounting-only: gen-core lib.rs (re-export), memory_strategy.rs (contract types), weightsmeta.rs (walker hidden-cache skip) and candle-gen quant/sidecar.rs (CACHE_DIR constant re-homed, same value). Extended to 8a65db2a (sc-22723 feature pin, inference PRs #946-#958): c6d6a4db..8a65db2a touches four files of this closure and none is a load or device path - gen-core encoder_contract.rs (packed-marker struct kept whole, a stale-marker allowance only mlx-gen-flux2 calls, the hf_cache_discovery_roots authorization helper, tests), gen-core lib.rs (its re-export), gen-core wan_i2v_memory.rs (Wan-only identity tokens) and candle-gen-krea lib.rs (the per-(route, proven tier) identity table and weights-free surfaces; the q4 turbo identity this anchor is keyed to is unchanged, and the new provable-tier read consults the marker the loader already validated). loader.rs, pipeline.rs, transformer/, control*.rs, candle-gen quant/ and every device path are untouched. Extended to 563c44e1 (sc-22738, the epic final pin = inference main, merge of feature PR #960 over main 1cd0e393): 8a65db2a..563c44e1 changes nine inference files and exactly two are in this closure, gen-core encoder_contract.rs and lib.rs. Both are a REMOVAL, not a change of behaviour: inference PR #961 (sync of main into the feature branch) drops the sc-22727 stale-packed-marker tolerance that sc-22760 made unnecessary - the two entry points `source_for_load_with_stale_packed_marker` / `validate_source_for_discovery_with_stale_packed_marker`, the `RequiredWithStalePackedMarker` policy arm and its `stale_packed_marker()` reader, the `declared_quant` rewrite in `validate_source_with_policy` that was the identity for every other policy, `PackedQuantization` back to crate-private, and the allowance test; lib.rs drops the matching re-export. The only production caller of the removed surface was mlx-gen-flux2 (the FLUX.2 Klein turnkey inventory), which this closure does not reach; `source_for_load`, `validate_source_for_discovery`, `requires_config` for `Required` and every shard/header/quantization-evidence check this model executes are byte-for-byte the same code path before and after. The remaining seven files (mlx-gen-flux2 artifact_inventory.rs / loader.rs / memory_strategy.rs / model.rs, its two test files, release/real-weight-models.toml) are outside this closure. No load or device path this anchor reaches changed.",
           "witness": "docs/calibration/sc-22657/candle-five-rung-falsification-sc-22667.json krea_2_turbo q4 coldStagedControl at a5f643ae against the packaged anchor: conditioning 3.694 GB vs 3.828 (-3.5%, under), denoise 15.099 vs 15.103 (-0.02%), decode 22.349 vs 22.352 (-0.01%). The batch's resident rung (12.73 GB conditioning) also brackets the contract's 11.73 GB component total, as the E6 test asserts. No re-measure for c6d6a4db..8a65db2a: that segment carries no load or device path change (files listed), so the classification stands on the diff, as the doctrine allows."
         }
       },
@@ -668,14 +668,14 @@
         "sha256": "124f7d4f9988c1626d3e914edfa3faa620115f8775781e2456dc130f6c482e5b",
         "recordId": "imc-3cd69f2fee9e91e83b58",
         "calibrationFingerprint": "z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2",
-        "loaderClosureDigest": "06bcc2181887b8aa3bd1efaee14b202008b1483c4ca71a4e13355b20cf42b003",
+        "loaderClosureDigest": "32b3fa2d11de3e52d9860fb5556a01d2827a97717d800ad388b58115560c103c",
         "currencyAttestation": {
           "measuredRevision": "670dc1f4418859cf241471987a0a050fedc108c5",
-          "attestedRevision": "8a65db2aad0b54581794127f5c3f5621e107e321",
-          "attestedAt": "2026-09-05",
-          "story": "sc-22723",
+          "attestedRevision": "563c44e1652043bf8bd018de79cadadc393f91f2",
+          "attestedAt": "2026-09-06",
+          "story": "sc-22723, sc-22738",
           "class": "accounting-only",
-          "why": "Every file the z_image_turbo:candle loader closure changed in 670dc1f4..c6d6a4db carries contract ACCOUNTING, not load or device behaviour: candle-gen-z-image/src/memory_strategy.rs grew the per-component asset facts, architecture facts and loaded-path pricing the sc-22657 law reads; candle-gen/src/architecture_facts.rs is a new snapshot-config reader for those facts; gen-core's memory_strategy.rs / weightsmeta.rs / wan_i2v_memory.rs carry the contract types and the tensor-free byte walkers (materialized_* readers; the .candle-device-format-v1 hidden-cache skip) that price the checkpoint without touching the loader; gen-core lib.rs and candle-gen lib.rs are re-export / `pub mod` lines for those; gen-core registry.rs and runtime.rs move a #[cfg(test)] helper and fix a Windows-only test fixture; candle-gen-pid/src/engine.rs names the f32 load dtype and merged-file constants it already used (same values, and PiD is not on the Z-Image path); candle-gen/src/quant/sidecar.rs re-homes the `.candle-device-format-v1` CACHE_DIR literal to gen-core's constant with the same value. No loader, pipeline, weights, kernel, quant or device-format code path changed. Extended to 8a65db2a (sc-22723 feature pin, inference PRs #946-#958): c6d6a4db..8a65db2a touches four files of this closure and none is a load or device path - gen-core encoder_contract.rs (packed-marker struct kept whole with same-value accessors, a stale-marker allowance only mlx-gen-flux2 calls, the hf_cache_discovery_roots authorization helper, tests), gen-core lib.rs (its re-export), gen-core wan_i2v_memory.rs (Wan-only identity tokens) and candle-gen-z-image memory_strategy.rs, whose selected_encoder_discovery_roots now authorizes the HF-cache repository dir as a symlink target for the text-encoder planning-facts readers - a validation gate, not a load: the same bytes reach the same device the same way. pipeline.rs, model.rs, the loader and every device-format path are untouched.",
+          "why": "Every file the z_image_turbo:candle loader closure changed in 670dc1f4..c6d6a4db carries contract ACCOUNTING, not load or device behaviour: candle-gen-z-image/src/memory_strategy.rs grew the per-component asset facts, architecture facts and loaded-path pricing the sc-22657 law reads; candle-gen/src/architecture_facts.rs is a new snapshot-config reader for those facts; gen-core's memory_strategy.rs / weightsmeta.rs / wan_i2v_memory.rs carry the contract types and the tensor-free byte walkers (materialized_* readers; the .candle-device-format-v1 hidden-cache skip) that price the checkpoint without touching the loader; gen-core lib.rs and candle-gen lib.rs are re-export / `pub mod` lines for those; gen-core registry.rs and runtime.rs move a #[cfg(test)] helper and fix a Windows-only test fixture; candle-gen-pid/src/engine.rs names the f32 load dtype and merged-file constants it already used (same values, and PiD is not on the Z-Image path); candle-gen/src/quant/sidecar.rs re-homes the `.candle-device-format-v1` CACHE_DIR literal to gen-core's constant with the same value. No loader, pipeline, weights, kernel, quant or device-format code path changed. Extended to 8a65db2a (sc-22723 feature pin, inference PRs #946-#958): c6d6a4db..8a65db2a touches four files of this closure and none is a load or device path - gen-core encoder_contract.rs (packed-marker struct kept whole with same-value accessors, a stale-marker allowance only mlx-gen-flux2 calls, the hf_cache_discovery_roots authorization helper, tests), gen-core lib.rs (its re-export), gen-core wan_i2v_memory.rs (Wan-only identity tokens) and candle-gen-z-image memory_strategy.rs, whose selected_encoder_discovery_roots now authorizes the HF-cache repository dir as a symlink target for the text-encoder planning-facts readers - a validation gate, not a load: the same bytes reach the same device the same way. pipeline.rs, model.rs, the loader and every device-format path are untouched. Extended to 563c44e1 (sc-22738, the epic final pin = inference main, merge of feature PR #960 over main 1cd0e393): 8a65db2a..563c44e1 changes nine inference files and exactly two are in this closure, gen-core encoder_contract.rs and lib.rs. Both are a REMOVAL, not a change of behaviour: inference PR #961 (sync of main into the feature branch) drops the sc-22727 stale-packed-marker tolerance that sc-22760 made unnecessary - the two entry points `source_for_load_with_stale_packed_marker` / `validate_source_for_discovery_with_stale_packed_marker`, the `RequiredWithStalePackedMarker` policy arm and its `stale_packed_marker()` reader, the `declared_quant` rewrite in `validate_source_with_policy` that was the identity for every other policy, `PackedQuantization` back to crate-private, and the allowance test; lib.rs drops the matching re-export. The only production caller of the removed surface was mlx-gen-flux2 (the FLUX.2 Klein turnkey inventory), which this closure does not reach; `source_for_load`, `validate_source_for_discovery`, `requires_config` for `Required` and every shard/header/quantization-evidence check this model executes are byte-for-byte the same code path before and after. The remaining seven files (mlx-gen-flux2 artifact_inventory.rs / loader.rs / memory_strategy.rs / model.rs, its two test files, release/real-weight-models.toml) are outside this closure. No load or device path this anchor reaches changed.",
           "witness": "No hardware re-measure of the bf16 tier itself; the classification stands on the diff alone, which is the same file set as the q4 anchor's (the closure is per model, not per tier) and carries no load or device path change. The q4 tier's cold-staged re-measure at a5f643ae (docs/calibration/sc-22657/candle-five-rung-falsification-sc-22667.json) witnesses that the shared loader's memory behaviour did not move across the larger half of this range. No re-measure for c6d6a4db..8a65db2a: that segment carries no load or device path change (files listed), so the classification stands on the diff, as the doctrine allows."
         }
       },
@@ -722,14 +722,14 @@
         "sha256": "1732064045f417bb421de01e1379cf15a3322653e21e8515ff751d654b0a35d6",
         "recordId": "imc-b8064416c974b5008509",
         "calibrationFingerprint": "z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2",
-        "loaderClosureDigest": "06bcc2181887b8aa3bd1efaee14b202008b1483c4ca71a4e13355b20cf42b003",
+        "loaderClosureDigest": "32b3fa2d11de3e52d9860fb5556a01d2827a97717d800ad388b58115560c103c",
         "currencyAttestation": {
           "measuredRevision": "670dc1f4418859cf241471987a0a050fedc108c5",
-          "attestedRevision": "8a65db2aad0b54581794127f5c3f5621e107e321",
-          "attestedAt": "2026-09-05",
-          "story": "sc-22723",
+          "attestedRevision": "563c44e1652043bf8bd018de79cadadc393f91f2",
+          "attestedAt": "2026-09-06",
+          "story": "sc-22723, sc-22738",
           "class": "accounting-only",
-          "why": "Every file the z_image_turbo:candle loader closure changed in 670dc1f4..c6d6a4db carries contract ACCOUNTING, not load or device behaviour: candle-gen-z-image/src/memory_strategy.rs grew the per-component asset facts, architecture facts and loaded-path pricing the sc-22657 law reads; candle-gen/src/architecture_facts.rs is a new snapshot-config reader for those facts; gen-core's memory_strategy.rs / weightsmeta.rs / wan_i2v_memory.rs carry the contract types and the tensor-free byte walkers (materialized_* readers; the .candle-device-format-v1 hidden-cache skip) that price the checkpoint without touching the loader; gen-core lib.rs and candle-gen lib.rs are re-export / `pub mod` lines for those; gen-core registry.rs and runtime.rs move a #[cfg(test)] helper and fix a Windows-only test fixture; candle-gen-pid/src/engine.rs names the f32 load dtype and merged-file constants it already used (same values, and PiD is not on the Z-Image path); candle-gen/src/quant/sidecar.rs re-homes the `.candle-device-format-v1` CACHE_DIR literal to gen-core's constant with the same value. No loader, pipeline, weights, kernel, quant or device-format code path changed. Extended to 8a65db2a (sc-22723 feature pin, inference PRs #946-#958): c6d6a4db..8a65db2a touches four files of this closure and none is a load or device path - gen-core encoder_contract.rs (packed-marker struct kept whole with same-value accessors, a stale-marker allowance only mlx-gen-flux2 calls, the hf_cache_discovery_roots authorization helper, tests), gen-core lib.rs (its re-export), gen-core wan_i2v_memory.rs (Wan-only identity tokens) and candle-gen-z-image memory_strategy.rs, whose selected_encoder_discovery_roots now authorizes the HF-cache repository dir as a symlink target for the text-encoder planning-facts readers - a validation gate, not a load: the same bytes reach the same device the same way. pipeline.rs, model.rs, the loader and every device-format path are untouched.",
+          "why": "Every file the z_image_turbo:candle loader closure changed in 670dc1f4..c6d6a4db carries contract ACCOUNTING, not load or device behaviour: candle-gen-z-image/src/memory_strategy.rs grew the per-component asset facts, architecture facts and loaded-path pricing the sc-22657 law reads; candle-gen/src/architecture_facts.rs is a new snapshot-config reader for those facts; gen-core's memory_strategy.rs / weightsmeta.rs / wan_i2v_memory.rs carry the contract types and the tensor-free byte walkers (materialized_* readers; the .candle-device-format-v1 hidden-cache skip) that price the checkpoint without touching the loader; gen-core lib.rs and candle-gen lib.rs are re-export / `pub mod` lines for those; gen-core registry.rs and runtime.rs move a #[cfg(test)] helper and fix a Windows-only test fixture; candle-gen-pid/src/engine.rs names the f32 load dtype and merged-file constants it already used (same values, and PiD is not on the Z-Image path); candle-gen/src/quant/sidecar.rs re-homes the `.candle-device-format-v1` CACHE_DIR literal to gen-core's constant with the same value. No loader, pipeline, weights, kernel, quant or device-format code path changed. Extended to 8a65db2a (sc-22723 feature pin, inference PRs #946-#958): c6d6a4db..8a65db2a touches four files of this closure and none is a load or device path - gen-core encoder_contract.rs (packed-marker struct kept whole with same-value accessors, a stale-marker allowance only mlx-gen-flux2 calls, the hf_cache_discovery_roots authorization helper, tests), gen-core lib.rs (its re-export), gen-core wan_i2v_memory.rs (Wan-only identity tokens) and candle-gen-z-image memory_strategy.rs, whose selected_encoder_discovery_roots now authorizes the HF-cache repository dir as a symlink target for the text-encoder planning-facts readers - a validation gate, not a load: the same bytes reach the same device the same way. pipeline.rs, model.rs, the loader and every device-format path are untouched. Extended to 563c44e1 (sc-22738, the epic final pin = inference main, merge of feature PR #960 over main 1cd0e393): 8a65db2a..563c44e1 changes nine inference files and exactly two are in this closure, gen-core encoder_contract.rs and lib.rs. Both are a REMOVAL, not a change of behaviour: inference PR #961 (sync of main into the feature branch) drops the sc-22727 stale-packed-marker tolerance that sc-22760 made unnecessary - the two entry points `source_for_load_with_stale_packed_marker` / `validate_source_for_discovery_with_stale_packed_marker`, the `RequiredWithStalePackedMarker` policy arm and its `stale_packed_marker()` reader, the `declared_quant` rewrite in `validate_source_with_policy` that was the identity for every other policy, `PackedQuantization` back to crate-private, and the allowance test; lib.rs drops the matching re-export. The only production caller of the removed surface was mlx-gen-flux2 (the FLUX.2 Klein turnkey inventory), which this closure does not reach; `source_for_load`, `validate_source_for_discovery`, `requires_config` for `Required` and every shard/header/quantization-evidence check this model executes are byte-for-byte the same code path before and after. The remaining seven files (mlx-gen-flux2 artifact_inventory.rs / loader.rs / memory_strategy.rs / model.rs, its two test files, release/real-weight-models.toml) are outside this closure. No load or device path this anchor reaches changed.",
           "witness": "docs/calibration/sc-22657/candle-five-rung-falsification-sc-22667.json: the same tier re-measured at a5f643ae on the same GPU (memory-candle-adapter run_batch, coldStagedControl) lands on the packaged anchor within the lane's recapture spread - denoise +0.07%, decode +0.04%, conditioning -3.5% (the phase's own cold-start jitter, under the anchor). a5f643ae..c6d6a4db then touches only gen-core lib.rs / memory_strategy.rs / weightsmeta.rs, candle-gen quant/sidecar.rs (constant re-home) and candle-gen-z-image memory_strategy.rs. No re-measure for c6d6a4db..8a65db2a: that segment carries no load or device path change (files listed), so the classification stands on the diff, as the doctrine allows."
         }
       },
@@ -776,14 +776,14 @@
         "sha256": "1291f34ddfbb84de15327a814121a9f622bbaf342e52c95296e6b5870ae93581",
         "recordId": "imc-8cda4f70f78dd33f5330",
         "calibrationFingerprint": "z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2",
-        "loaderClosureDigest": "06bcc2181887b8aa3bd1efaee14b202008b1483c4ca71a4e13355b20cf42b003",
+        "loaderClosureDigest": "32b3fa2d11de3e52d9860fb5556a01d2827a97717d800ad388b58115560c103c",
         "currencyAttestation": {
           "measuredRevision": "670dc1f4418859cf241471987a0a050fedc108c5",
-          "attestedRevision": "8a65db2aad0b54581794127f5c3f5621e107e321",
-          "attestedAt": "2026-09-05",
-          "story": "sc-22723",
+          "attestedRevision": "563c44e1652043bf8bd018de79cadadc393f91f2",
+          "attestedAt": "2026-09-06",
+          "story": "sc-22723, sc-22738",
           "class": "accounting-only",
-          "why": "Every file the z_image_turbo:candle loader closure changed in 670dc1f4..c6d6a4db carries contract ACCOUNTING, not load or device behaviour: candle-gen-z-image/src/memory_strategy.rs grew the per-component asset facts, architecture facts and loaded-path pricing the sc-22657 law reads; candle-gen/src/architecture_facts.rs is a new snapshot-config reader for those facts; gen-core's memory_strategy.rs / weightsmeta.rs / wan_i2v_memory.rs carry the contract types and the tensor-free byte walkers (materialized_* readers; the .candle-device-format-v1 hidden-cache skip) that price the checkpoint without touching the loader; gen-core lib.rs and candle-gen lib.rs are re-export / `pub mod` lines for those; gen-core registry.rs and runtime.rs move a #[cfg(test)] helper and fix a Windows-only test fixture; candle-gen-pid/src/engine.rs names the f32 load dtype and merged-file constants it already used (same values, and PiD is not on the Z-Image path); candle-gen/src/quant/sidecar.rs re-homes the `.candle-device-format-v1` CACHE_DIR literal to gen-core's constant with the same value. No loader, pipeline, weights, kernel, quant or device-format code path changed. Extended to 8a65db2a (sc-22723 feature pin, inference PRs #946-#958): c6d6a4db..8a65db2a touches four files of this closure and none is a load or device path - gen-core encoder_contract.rs (packed-marker struct kept whole with same-value accessors, a stale-marker allowance only mlx-gen-flux2 calls, the hf_cache_discovery_roots authorization helper, tests), gen-core lib.rs (its re-export), gen-core wan_i2v_memory.rs (Wan-only identity tokens) and candle-gen-z-image memory_strategy.rs, whose selected_encoder_discovery_roots now authorizes the HF-cache repository dir as a symlink target for the text-encoder planning-facts readers - a validation gate, not a load: the same bytes reach the same device the same way. pipeline.rs, model.rs, the loader and every device-format path are untouched.",
+          "why": "Every file the z_image_turbo:candle loader closure changed in 670dc1f4..c6d6a4db carries contract ACCOUNTING, not load or device behaviour: candle-gen-z-image/src/memory_strategy.rs grew the per-component asset facts, architecture facts and loaded-path pricing the sc-22657 law reads; candle-gen/src/architecture_facts.rs is a new snapshot-config reader for those facts; gen-core's memory_strategy.rs / weightsmeta.rs / wan_i2v_memory.rs carry the contract types and the tensor-free byte walkers (materialized_* readers; the .candle-device-format-v1 hidden-cache skip) that price the checkpoint without touching the loader; gen-core lib.rs and candle-gen lib.rs are re-export / `pub mod` lines for those; gen-core registry.rs and runtime.rs move a #[cfg(test)] helper and fix a Windows-only test fixture; candle-gen-pid/src/engine.rs names the f32 load dtype and merged-file constants it already used (same values, and PiD is not on the Z-Image path); candle-gen/src/quant/sidecar.rs re-homes the `.candle-device-format-v1` CACHE_DIR literal to gen-core's constant with the same value. No loader, pipeline, weights, kernel, quant or device-format code path changed. Extended to 8a65db2a (sc-22723 feature pin, inference PRs #946-#958): c6d6a4db..8a65db2a touches four files of this closure and none is a load or device path - gen-core encoder_contract.rs (packed-marker struct kept whole with same-value accessors, a stale-marker allowance only mlx-gen-flux2 calls, the hf_cache_discovery_roots authorization helper, tests), gen-core lib.rs (its re-export), gen-core wan_i2v_memory.rs (Wan-only identity tokens) and candle-gen-z-image memory_strategy.rs, whose selected_encoder_discovery_roots now authorizes the HF-cache repository dir as a symlink target for the text-encoder planning-facts readers - a validation gate, not a load: the same bytes reach the same device the same way. pipeline.rs, model.rs, the loader and every device-format path are untouched. Extended to 563c44e1 (sc-22738, the epic final pin = inference main, merge of feature PR #960 over main 1cd0e393): 8a65db2a..563c44e1 changes nine inference files and exactly two are in this closure, gen-core encoder_contract.rs and lib.rs. Both are a REMOVAL, not a change of behaviour: inference PR #961 (sync of main into the feature branch) drops the sc-22727 stale-packed-marker tolerance that sc-22760 made unnecessary - the two entry points `source_for_load_with_stale_packed_marker` / `validate_source_for_discovery_with_stale_packed_marker`, the `RequiredWithStalePackedMarker` policy arm and its `stale_packed_marker()` reader, the `declared_quant` rewrite in `validate_source_with_policy` that was the identity for every other policy, `PackedQuantization` back to crate-private, and the allowance test; lib.rs drops the matching re-export. The only production caller of the removed surface was mlx-gen-flux2 (the FLUX.2 Klein turnkey inventory), which this closure does not reach; `source_for_load`, `validate_source_for_discovery`, `requires_config` for `Required` and every shard/header/quantization-evidence check this model executes are byte-for-byte the same code path before and after. The remaining seven files (mlx-gen-flux2 artifact_inventory.rs / loader.rs / memory_strategy.rs / model.rs, its two test files, release/real-weight-models.toml) are outside this closure. No load or device path this anchor reaches changed.",
           "witness": "No hardware re-measure of the q8 tier itself; the classification stands on the diff alone, which is the same file set as the q4 anchor's (the closure is per model, not per tier) and carries no load or device path change. The q4 tier's cold-staged re-measure at a5f643ae (docs/calibration/sc-22657/candle-five-rung-falsification-sc-22667.json) witnesses that the shared loader's memory behaviour did not move across the larger half of this range. No re-measure for c6d6a4db..8a65db2a: that segment carries no load or device path change (files listed), so the classification stands on the diff, as the doctrine allows."
         }
       },
@@ -830,14 +830,14 @@
         "sha256": "e8b3474d0c05c3d91f309ac75c1bc38eeaad99baa20c36bedca4233a5be49359",
         "recordId": "imc-2284d75c08c2a13f1b7e",
         "calibrationFingerprint": "z-image-mlx-independent-materialization-v4",
-        "loaderClosureDigest": "8a8efac876682a5e58225a93fd5c012503778602f38a1c557e391722fe945aaf",
+        "loaderClosureDigest": "dca26897a1c16f2ad36924a0aa3366e8c9908db8b815c581d323a62281e17edd",
         "currencyAttestation": {
           "measuredRevision": "a5f643ae58a4ed81e6be8280afbf29750da5ffe2",
-          "attestedRevision": "8a65db2aad0b54581794127f5c3f5621e107e321",
-          "attestedAt": "2026-09-05",
-          "story": "sc-22723",
+          "attestedRevision": "563c44e1652043bf8bd018de79cadadc393f91f2",
+          "attestedAt": "2026-09-06",
+          "story": "sc-22723, sc-22738",
           "class": "accounting-only",
-          "why": "a5f643ae..c6d6a4db changes four files in the z_image_turbo:mlx closure and none is a load or device path: gen-core lib.rs adds the CANDLE_DEVICE_FORMAT_CACHE_DIR re-export; gen-core memory_strategy.rs carries contract types; gen-core weightsmeta.rs makes the tensor-free byte walkers skip hidden directories (a pricing read, never a tensor load - and MLX never writes that cache); mlx-gen-z-image memory_strategy.rs re-prices the contract's asset facts. mlx-gen-z-image model.rs, the loader, and mlx-gen/src are untouched. Extended to 8a65db2a (sc-22723 feature pin, inference PRs #946-#958): c6d6a4db..8a65db2a touches four files of this closure and none is a load or device path - core-llm starvector.rs (a StarVector decode progress event the Z-Image encoder never executes), gen-core encoder_contract.rs (packed-marker struct kept whole with same-value accessors, a stale-marker allowance only mlx-gen-flux2 calls, the hf_cache_discovery_roots helper, tests), gen-core lib.rs (its re-export) and gen-core wan_i2v_memory.rs (Wan-only identity tokens). mlx-gen-z-image, mlx-gen-pid and mlx-gen/src are untouched.",
+          "why": "a5f643ae..c6d6a4db changes four files in the z_image_turbo:mlx closure and none is a load or device path: gen-core lib.rs adds the CANDLE_DEVICE_FORMAT_CACHE_DIR re-export; gen-core memory_strategy.rs carries contract types; gen-core weightsmeta.rs makes the tensor-free byte walkers skip hidden directories (a pricing read, never a tensor load - and MLX never writes that cache); mlx-gen-z-image memory_strategy.rs re-prices the contract's asset facts. mlx-gen-z-image model.rs, the loader, and mlx-gen/src are untouched. Extended to 8a65db2a (sc-22723 feature pin, inference PRs #946-#958): c6d6a4db..8a65db2a touches four files of this closure and none is a load or device path - core-llm starvector.rs (a StarVector decode progress event the Z-Image encoder never executes), gen-core encoder_contract.rs (packed-marker struct kept whole with same-value accessors, a stale-marker allowance only mlx-gen-flux2 calls, the hf_cache_discovery_roots helper, tests), gen-core lib.rs (its re-export) and gen-core wan_i2v_memory.rs (Wan-only identity tokens). mlx-gen-z-image, mlx-gen-pid and mlx-gen/src are untouched. Extended to 563c44e1 (sc-22738, the epic final pin = inference main, merge of feature PR #960 over main 1cd0e393): 8a65db2a..563c44e1 changes nine inference files and exactly two are in this closure, gen-core encoder_contract.rs and lib.rs. Both are a REMOVAL, not a change of behaviour: inference PR #961 (sync of main into the feature branch) drops the sc-22727 stale-packed-marker tolerance that sc-22760 made unnecessary - the two entry points `source_for_load_with_stale_packed_marker` / `validate_source_for_discovery_with_stale_packed_marker`, the `RequiredWithStalePackedMarker` policy arm and its `stale_packed_marker()` reader, the `declared_quant` rewrite in `validate_source_with_policy` that was the identity for every other policy, `PackedQuantization` back to crate-private, and the allowance test; lib.rs drops the matching re-export. The only production caller of the removed surface was mlx-gen-flux2 (the FLUX.2 Klein turnkey inventory), which this closure does not reach; `source_for_load`, `validate_source_for_discovery`, `requires_config` for `Required` and every shard/header/quantization-evidence check this model executes are byte-for-byte the same code path before and after. The remaining seven files (mlx-gen-flux2 artifact_inventory.rs / loader.rs / memory_strategy.rs / model.rs, its two test files, release/real-weight-models.toml) are outside this closure. No load or device path this anchor reaches changed.",
           "witness": "The anchor itself was captured at a5f643ae on the nax-macos runner (macos-mlx.yml run_five_rung_reference, run 33817079839), i.e. after every loader-path change in the store's history; the range to the pin is the accounting diff listed here and carries nothing the MLX loader executes. No re-measure for c6d6a4db..8a65db2a: that segment carries no load or device path change (files listed), so the classification stands on the diff, as the doctrine allows."
         }
       },
@@ -1138,7 +1138,7 @@
         "repo": null,
         "revision": null,
         "path": "config/manifests/builtin.models.jsonc#models/boogu_image/candle",
-        "sha256": "f3d3523b22286011242749d73ce7feba72aa5dfffb17871e6b175a067143d44b",
+        "sha256": "9d650bf46c636a62ceeca65341488aca7eb502c54a54ed54be82e130ad51da6c",
         "recordId": null,
         "envelopeBytes": null,
         "values": {
@@ -1159,7 +1159,7 @@
         "repo": null,
         "revision": null,
         "path": "config/manifests/builtin.models.jsonc#models/boogu_image/candle",
-        "sha256": "f3d3523b22286011242749d73ce7feba72aa5dfffb17871e6b175a067143d44b",
+        "sha256": "9d650bf46c636a62ceeca65341488aca7eb502c54a54ed54be82e130ad51da6c",
         "recordId": null,
         "envelopeBytes": null,
         "values": {
@@ -1180,7 +1180,7 @@
         "repo": null,
         "revision": null,
         "path": "config/manifests/builtin.models.jsonc#models/boogu_image/candle",
-        "sha256": "f3d3523b22286011242749d73ce7feba72aa5dfffb17871e6b175a067143d44b",
+        "sha256": "9d650bf46c636a62ceeca65341488aca7eb502c54a54ed54be82e130ad51da6c",
         "recordId": null,
         "envelopeBytes": null,
         "values": {
@@ -1234,7 +1234,7 @@
         "repo": null,
         "revision": null,
         "path": "config/manifests/builtin.models.jsonc#models/boogu_image_turbo/candle",
-        "sha256": "f3d3523b22286011242749d73ce7feba72aa5dfffb17871e6b175a067143d44b",
+        "sha256": "9d650bf46c636a62ceeca65341488aca7eb502c54a54ed54be82e130ad51da6c",
         "recordId": null,
         "envelopeBytes": null,
         "values": {
@@ -1255,7 +1255,7 @@
         "repo": null,
         "revision": null,
         "path": "config/manifests/builtin.models.jsonc#models/boogu_image_turbo/candle",
-        "sha256": "f3d3523b22286011242749d73ce7feba72aa5dfffb17871e6b175a067143d44b",
+        "sha256": "9d650bf46c636a62ceeca65341488aca7eb502c54a54ed54be82e130ad51da6c",
         "recordId": null,
         "envelopeBytes": null,
         "values": {
@@ -1276,7 +1276,7 @@
         "repo": null,
         "revision": null,
         "path": "config/manifests/builtin.models.jsonc#models/boogu_image_turbo/candle",
-        "sha256": "f3d3523b22286011242749d73ce7feba72aa5dfffb17871e6b175a067143d44b",
+        "sha256": "9d650bf46c636a62ceeca65341488aca7eb502c54a54ed54be82e130ad51da6c",
         "recordId": null,
         "envelopeBytes": null,
         "values": {
@@ -1506,7 +1506,7 @@
         "repo": null,
         "revision": null,
         "path": "config/manifests/builtin.models.jsonc#models/flux2_dev/candle/memoryStrategyContract",
-        "sha256": "f3d3523b22286011242749d73ce7feba72aa5dfffb17871e6b175a067143d44b",
+        "sha256": "9d650bf46c636a62ceeca65341488aca7eb502c54a54ed54be82e130ad51da6c",
         "recordId": null,
         "envelopeBytes": null,
         "values": {
@@ -1530,7 +1530,7 @@
         "repo": null,
         "revision": null,
         "path": "config/manifests/builtin.models.jsonc#models/flux2_dev/candle/memoryStrategyContract",
-        "sha256": "f3d3523b22286011242749d73ce7feba72aa5dfffb17871e6b175a067143d44b",
+        "sha256": "9d650bf46c636a62ceeca65341488aca7eb502c54a54ed54be82e130ad51da6c",
         "recordId": null,
         "envelopeBytes": null,
         "values": {
@@ -1565,7 +1565,7 @@
         "repo": null,
         "revision": null,
         "path": "config/manifests/builtin.models.jsonc#models/flux2_klein_9b/candle/memoryStrategyContract",
-        "sha256": "f3d3523b22286011242749d73ce7feba72aa5dfffb17871e6b175a067143d44b",
+        "sha256": "9d650bf46c636a62ceeca65341488aca7eb502c54a54ed54be82e130ad51da6c",
         "recordId": null,
         "envelopeBytes": null,
         "values": {
@@ -1590,7 +1590,7 @@
         "repo": null,
         "revision": null,
         "path": "config/manifests/builtin.models.jsonc#models/flux2_klein_9b/candle/memoryStrategyContract",
-        "sha256": "f3d3523b22286011242749d73ce7feba72aa5dfffb17871e6b175a067143d44b",
+        "sha256": "9d650bf46c636a62ceeca65341488aca7eb502c54a54ed54be82e130ad51da6c",
         "recordId": null,
         "envelopeBytes": null,
         "values": {
@@ -1615,7 +1615,7 @@
         "repo": null,
         "revision": null,
         "path": "config/manifests/builtin.models.jsonc#models/flux2_klein_9b/candle/memoryStrategyContract",
-        "sha256": "f3d3523b22286011242749d73ce7feba72aa5dfffb17871e6b175a067143d44b",
+        "sha256": "9d650bf46c636a62ceeca65341488aca7eb502c54a54ed54be82e130ad51da6c",
         "recordId": null,
         "envelopeBytes": null,
         "values": {
@@ -1782,7 +1782,7 @@
         "repo": null,
         "revision": null,
         "path": "config/manifests/builtin.models.jsonc#models/flux_dev/candle/memoryStrategyContract",
-        "sha256": "f3d3523b22286011242749d73ce7feba72aa5dfffb17871e6b175a067143d44b",
+        "sha256": "9d650bf46c636a62ceeca65341488aca7eb502c54a54ed54be82e130ad51da6c",
         "recordId": null,
         "envelopeBytes": null,
         "values": {
@@ -1861,7 +1861,7 @@
         "repo": null,
         "revision": null,
         "path": "config/manifests/builtin.models.jsonc#models/flux_schnell/candle/memoryStrategyContract",
-        "sha256": "f3d3523b22286011242749d73ce7feba72aa5dfffb17871e6b175a067143d44b",
+        "sha256": "9d650bf46c636a62ceeca65341488aca7eb502c54a54ed54be82e130ad51da6c",
         "recordId": null,
         "envelopeBytes": null,
         "values": {
@@ -1918,7 +1918,7 @@
         "repo": null,
         "revision": null,
         "path": "config/manifests/builtin.models.jsonc#models/ideogram_4/candle",
-        "sha256": "f3d3523b22286011242749d73ce7feba72aa5dfffb17871e6b175a067143d44b",
+        "sha256": "9d650bf46c636a62ceeca65341488aca7eb502c54a54ed54be82e130ad51da6c",
         "recordId": null,
         "envelopeBytes": null,
         "values": {
@@ -1940,7 +1940,7 @@
         "repo": null,
         "revision": null,
         "path": "config/manifests/builtin.models.jsonc#models/ideogram_4/candle",
-        "sha256": "f3d3523b22286011242749d73ce7feba72aa5dfffb17871e6b175a067143d44b",
+        "sha256": "9d650bf46c636a62ceeca65341488aca7eb502c54a54ed54be82e130ad51da6c",
         "recordId": null,
         "envelopeBytes": null,
         "values": {
@@ -1962,7 +1962,7 @@
         "repo": null,
         "revision": null,
         "path": "config/manifests/builtin.models.jsonc#models/ideogram_4/candle",
-        "sha256": "f3d3523b22286011242749d73ce7feba72aa5dfffb17871e6b175a067143d44b",
+        "sha256": "9d650bf46c636a62ceeca65341488aca7eb502c54a54ed54be82e130ad51da6c",
         "recordId": null,
         "envelopeBytes": null,
         "values": {
@@ -2017,7 +2017,7 @@
         "repo": null,
         "revision": null,
         "path": "config/manifests/builtin.models.jsonc#models/ideogram_4_turbo/candle",
-        "sha256": "f3d3523b22286011242749d73ce7feba72aa5dfffb17871e6b175a067143d44b",
+        "sha256": "9d650bf46c636a62ceeca65341488aca7eb502c54a54ed54be82e130ad51da6c",
         "recordId": null,
         "envelopeBytes": null,
         "values": {
@@ -2039,7 +2039,7 @@
         "repo": null,
         "revision": null,
         "path": "config/manifests/builtin.models.jsonc#models/ideogram_4_turbo/candle",
-        "sha256": "f3d3523b22286011242749d73ce7feba72aa5dfffb17871e6b175a067143d44b",
+        "sha256": "9d650bf46c636a62ceeca65341488aca7eb502c54a54ed54be82e130ad51da6c",
         "recordId": null,
         "envelopeBytes": null,
         "values": {
@@ -2061,7 +2061,7 @@
         "repo": null,
         "revision": null,
         "path": "config/manifests/builtin.models.jsonc#models/ideogram_4_turbo/candle",
-        "sha256": "f3d3523b22286011242749d73ce7feba72aa5dfffb17871e6b175a067143d44b",
+        "sha256": "9d650bf46c636a62ceeca65341488aca7eb502c54a54ed54be82e130ad51da6c",
         "recordId": null,
         "envelopeBytes": null,
         "values": {
@@ -2116,7 +2116,7 @@
         "repo": null,
         "revision": null,
         "path": "config/manifests/builtin.models.jsonc#models/illustrious_xl_v1/candle/memoryStrategyContract",
-        "sha256": "f3d3523b22286011242749d73ce7feba72aa5dfffb17871e6b175a067143d44b",
+        "sha256": "9d650bf46c636a62ceeca65341488aca7eb502c54a54ed54be82e130ad51da6c",
         "recordId": null,
         "envelopeBytes": null,
         "values": {
@@ -2140,7 +2140,7 @@
         "repo": null,
         "revision": null,
         "path": "config/manifests/builtin.models.jsonc#models/illustrious_xl_v1/candle/memoryStrategyContract",
-        "sha256": "f3d3523b22286011242749d73ce7feba72aa5dfffb17871e6b175a067143d44b",
+        "sha256": "9d650bf46c636a62ceeca65341488aca7eb502c54a54ed54be82e130ad51da6c",
         "recordId": null,
         "envelopeBytes": null,
         "values": {
@@ -2164,7 +2164,7 @@
         "repo": null,
         "revision": null,
         "path": "config/manifests/builtin.models.jsonc#models/illustrious_xl_v1/candle/memoryStrategyContract",
-        "sha256": "f3d3523b22286011242749d73ce7feba72aa5dfffb17871e6b175a067143d44b",
+        "sha256": "9d650bf46c636a62ceeca65341488aca7eb502c54a54ed54be82e130ad51da6c",
         "recordId": null,
         "envelopeBytes": null,
         "values": {
@@ -2221,7 +2221,7 @@
         "repo": null,
         "revision": null,
         "path": "config/manifests/builtin.models.jsonc#models/illustrious_xl_v2/candle/memoryStrategyContract",
-        "sha256": "f3d3523b22286011242749d73ce7feba72aa5dfffb17871e6b175a067143d44b",
+        "sha256": "9d650bf46c636a62ceeca65341488aca7eb502c54a54ed54be82e130ad51da6c",
         "recordId": null,
         "envelopeBytes": null,
         "values": {
@@ -2245,7 +2245,7 @@
         "repo": null,
         "revision": null,
         "path": "config/manifests/builtin.models.jsonc#models/illustrious_xl_v2/candle/memoryStrategyContract",
-        "sha256": "f3d3523b22286011242749d73ce7feba72aa5dfffb17871e6b175a067143d44b",
+        "sha256": "9d650bf46c636a62ceeca65341488aca7eb502c54a54ed54be82e130ad51da6c",
         "recordId": null,
         "envelopeBytes": null,
         "values": {
@@ -2269,7 +2269,7 @@
         "repo": null,
         "revision": null,
         "path": "config/manifests/builtin.models.jsonc#models/illustrious_xl_v2/candle/memoryStrategyContract",
-        "sha256": "f3d3523b22286011242749d73ce7feba72aa5dfffb17871e6b175a067143d44b",
+        "sha256": "9d650bf46c636a62ceeca65341488aca7eb502c54a54ed54be82e130ad51da6c",
         "recordId": null,
         "envelopeBytes": null,
         "values": {
@@ -2370,7 +2370,7 @@
         "repo": null,
         "revision": null,
         "path": "config/manifests/builtin.models.jsonc#models/kolors/candle",
-        "sha256": "f3d3523b22286011242749d73ce7feba72aa5dfffb17871e6b175a067143d44b",
+        "sha256": "9d650bf46c636a62ceeca65341488aca7eb502c54a54ed54be82e130ad51da6c",
         "recordId": null,
         "envelopeBytes": null,
         "values": {
@@ -2391,7 +2391,7 @@
         "repo": null,
         "revision": null,
         "path": "config/manifests/builtin.models.jsonc#models/kolors/candle",
-        "sha256": "f3d3523b22286011242749d73ce7feba72aa5dfffb17871e6b175a067143d44b",
+        "sha256": "9d650bf46c636a62ceeca65341488aca7eb502c54a54ed54be82e130ad51da6c",
         "recordId": null,
         "envelopeBytes": null,
         "values": {
@@ -2412,7 +2412,7 @@
         "repo": null,
         "revision": null,
         "path": "config/manifests/builtin.models.jsonc#models/kolors/candle",
-        "sha256": "f3d3523b22286011242749d73ce7feba72aa5dfffb17871e6b175a067143d44b",
+        "sha256": "9d650bf46c636a62ceeca65341488aca7eb502c54a54ed54be82e130ad51da6c",
         "recordId": null,
         "envelopeBytes": null,
         "values": {
@@ -2532,7 +2532,7 @@
         "repo": null,
         "revision": null,
         "path": "config/manifests/builtin.models.jsonc#models/krea_2_turbo/candle/memoryStrategyContract",
-        "sha256": "f3d3523b22286011242749d73ce7feba72aa5dfffb17871e6b175a067143d44b",
+        "sha256": "9d650bf46c636a62ceeca65341488aca7eb502c54a54ed54be82e130ad51da6c",
         "recordId": null,
         "envelopeBytes": null,
         "values": {
@@ -2557,7 +2557,7 @@
         "repo": null,
         "revision": null,
         "path": "config/manifests/builtin.models.jsonc#models/krea_2_turbo/candle/memoryStrategyContract",
-        "sha256": "f3d3523b22286011242749d73ce7feba72aa5dfffb17871e6b175a067143d44b",
+        "sha256": "9d650bf46c636a62ceeca65341488aca7eb502c54a54ed54be82e130ad51da6c",
         "recordId": null,
         "envelopeBytes": null,
         "values": {
@@ -3352,7 +3352,7 @@
         "repo": null,
         "revision": null,
         "path": "config/manifests/builtin.models.jsonc#models/qwen_image/candle/memoryStrategyContract",
-        "sha256": "f3d3523b22286011242749d73ce7feba72aa5dfffb17871e6b175a067143d44b",
+        "sha256": "9d650bf46c636a62ceeca65341488aca7eb502c54a54ed54be82e130ad51da6c",
         "recordId": null,
         "envelopeBytes": null,
         "values": {
@@ -3377,7 +3377,7 @@
         "repo": null,
         "revision": null,
         "path": "config/manifests/builtin.models.jsonc#models/qwen_image/candle/memoryStrategyContract",
-        "sha256": "f3d3523b22286011242749d73ce7feba72aa5dfffb17871e6b175a067143d44b",
+        "sha256": "9d650bf46c636a62ceeca65341488aca7eb502c54a54ed54be82e130ad51da6c",
         "recordId": null,
         "envelopeBytes": null,
         "values": {
@@ -3402,7 +3402,7 @@
         "repo": null,
         "revision": null,
         "path": "config/manifests/builtin.models.jsonc#models/qwen_image_edit_2511/candle/memoryStrategyContract",
-        "sha256": "f3d3523b22286011242749d73ce7feba72aa5dfffb17871e6b175a067143d44b",
+        "sha256": "9d650bf46c636a62ceeca65341488aca7eb502c54a54ed54be82e130ad51da6c",
         "recordId": null,
         "envelopeBytes": null,
         "values": {
@@ -3427,7 +3427,7 @@
         "repo": null,
         "revision": null,
         "path": "config/manifests/builtin.models.jsonc#models/qwen_image_edit_2511/candle/memoryStrategyContract",
-        "sha256": "f3d3523b22286011242749d73ce7feba72aa5dfffb17871e6b175a067143d44b",
+        "sha256": "9d650bf46c636a62ceeca65341488aca7eb502c54a54ed54be82e130ad51da6c",
         "recordId": null,
         "envelopeBytes": null,
         "values": {
@@ -3452,7 +3452,7 @@
         "repo": null,
         "revision": null,
         "path": "config/manifests/builtin.models.jsonc#models/qwen_image_edit_2511/candle/memoryStrategyContract",
-        "sha256": "f3d3523b22286011242749d73ce7feba72aa5dfffb17871e6b175a067143d44b",
+        "sha256": "9d650bf46c636a62ceeca65341488aca7eb502c54a54ed54be82e130ad51da6c",
         "recordId": null,
         "envelopeBytes": null,
         "values": {
@@ -3510,7 +3510,7 @@
         "repo": null,
         "revision": null,
         "path": "config/manifests/builtin.models.jsonc#models/qwen_image_edit_2511_lightning/candle/memoryStrategyContract",
-        "sha256": "f3d3523b22286011242749d73ce7feba72aa5dfffb17871e6b175a067143d44b",
+        "sha256": "9d650bf46c636a62ceeca65341488aca7eb502c54a54ed54be82e130ad51da6c",
         "recordId": null,
         "envelopeBytes": null,
         "values": {
@@ -3535,7 +3535,7 @@
         "repo": null,
         "revision": null,
         "path": "config/manifests/builtin.models.jsonc#models/qwen_image_edit_2511_lightning/candle/memoryStrategyContract",
-        "sha256": "f3d3523b22286011242749d73ce7feba72aa5dfffb17871e6b175a067143d44b",
+        "sha256": "9d650bf46c636a62ceeca65341488aca7eb502c54a54ed54be82e130ad51da6c",
         "recordId": null,
         "envelopeBytes": null,
         "values": {
@@ -3560,7 +3560,7 @@
         "repo": null,
         "revision": null,
         "path": "config/manifests/builtin.models.jsonc#models/qwen_image_edit_2511_lightning/candle/memoryStrategyContract",
-        "sha256": "f3d3523b22286011242749d73ce7feba72aa5dfffb17871e6b175a067143d44b",
+        "sha256": "9d650bf46c636a62ceeca65341488aca7eb502c54a54ed54be82e130ad51da6c",
         "recordId": null,
         "envelopeBytes": null,
         "values": {
@@ -3618,7 +3618,7 @@
         "repo": null,
         "revision": null,
         "path": "config/manifests/builtin.models.jsonc#models/realvisxl/candle/memoryStrategyContract",
-        "sha256": "f3d3523b22286011242749d73ce7feba72aa5dfffb17871e6b175a067143d44b",
+        "sha256": "9d650bf46c636a62ceeca65341488aca7eb502c54a54ed54be82e130ad51da6c",
         "recordId": null,
         "envelopeBytes": null,
         "values": {
@@ -3642,7 +3642,7 @@
         "repo": null,
         "revision": null,
         "path": "config/manifests/builtin.models.jsonc#models/realvisxl/candle/memoryStrategyContract",
-        "sha256": "f3d3523b22286011242749d73ce7feba72aa5dfffb17871e6b175a067143d44b",
+        "sha256": "9d650bf46c636a62ceeca65341488aca7eb502c54a54ed54be82e130ad51da6c",
         "recordId": null,
         "envelopeBytes": null,
         "values": {
@@ -3666,7 +3666,7 @@
         "repo": null,
         "revision": null,
         "path": "config/manifests/builtin.models.jsonc#models/realvisxl/candle/memoryStrategyContract",
-        "sha256": "f3d3523b22286011242749d73ce7feba72aa5dfffb17871e6b175a067143d44b",
+        "sha256": "9d650bf46c636a62ceeca65341488aca7eb502c54a54ed54be82e130ad51da6c",
         "recordId": null,
         "envelopeBytes": null,
         "values": {
@@ -3723,7 +3723,7 @@
         "repo": null,
         "revision": null,
         "path": "config/manifests/builtin.models.jsonc#models/realvisxl_lightning/candle/memoryStrategyContract",
-        "sha256": "f3d3523b22286011242749d73ce7feba72aa5dfffb17871e6b175a067143d44b",
+        "sha256": "9d650bf46c636a62ceeca65341488aca7eb502c54a54ed54be82e130ad51da6c",
         "recordId": null,
         "envelopeBytes": null,
         "values": {
@@ -3747,7 +3747,7 @@
         "repo": null,
         "revision": null,
         "path": "config/manifests/builtin.models.jsonc#models/realvisxl_lightning/candle/memoryStrategyContract",
-        "sha256": "f3d3523b22286011242749d73ce7feba72aa5dfffb17871e6b175a067143d44b",
+        "sha256": "9d650bf46c636a62ceeca65341488aca7eb502c54a54ed54be82e130ad51da6c",
         "recordId": null,
         "envelopeBytes": null,
         "values": {
@@ -3771,7 +3771,7 @@
         "repo": null,
         "revision": null,
         "path": "config/manifests/builtin.models.jsonc#models/realvisxl_lightning/candle/memoryStrategyContract",
-        "sha256": "f3d3523b22286011242749d73ce7feba72aa5dfffb17871e6b175a067143d44b",
+        "sha256": "9d650bf46c636a62ceeca65341488aca7eb502c54a54ed54be82e130ad51da6c",
         "recordId": null,
         "envelopeBytes": null,
         "values": {
@@ -3916,7 +3916,7 @@
         "repo": null,
         "revision": null,
         "path": "config/manifests/builtin.models.jsonc#models/scail2_14b/candle",
-        "sha256": "f3d3523b22286011242749d73ce7feba72aa5dfffb17871e6b175a067143d44b",
+        "sha256": "9d650bf46c636a62ceeca65341488aca7eb502c54a54ed54be82e130ad51da6c",
         "recordId": null,
         "envelopeBytes": null,
         "values": {
@@ -3937,7 +3937,7 @@
         "repo": null,
         "revision": null,
         "path": "config/manifests/builtin.models.jsonc#models/scail2_14b/candle",
-        "sha256": "f3d3523b22286011242749d73ce7feba72aa5dfffb17871e6b175a067143d44b",
+        "sha256": "9d650bf46c636a62ceeca65341488aca7eb502c54a54ed54be82e130ad51da6c",
         "recordId": null,
         "envelopeBytes": null,
         "values": {
@@ -3958,7 +3958,7 @@
         "repo": null,
         "revision": null,
         "path": "config/manifests/builtin.models.jsonc#models/scail2_14b/candle",
-        "sha256": "f3d3523b22286011242749d73ce7feba72aa5dfffb17871e6b175a067143d44b",
+        "sha256": "9d650bf46c636a62ceeca65341488aca7eb502c54a54ed54be82e130ad51da6c",
         "recordId": null,
         "envelopeBytes": null,
         "values": {
@@ -4012,7 +4012,7 @@
         "repo": null,
         "revision": null,
         "path": "config/manifests/builtin.models.jsonc#models/sd3_5_large/candle",
-        "sha256": "f3d3523b22286011242749d73ce7feba72aa5dfffb17871e6b175a067143d44b",
+        "sha256": "9d650bf46c636a62ceeca65341488aca7eb502c54a54ed54be82e130ad51da6c",
         "recordId": null,
         "envelopeBytes": null,
         "values": {
@@ -4033,7 +4033,7 @@
         "repo": null,
         "revision": null,
         "path": "config/manifests/builtin.models.jsonc#models/sd3_5_large/candle",
-        "sha256": "f3d3523b22286011242749d73ce7feba72aa5dfffb17871e6b175a067143d44b",
+        "sha256": "9d650bf46c636a62ceeca65341488aca7eb502c54a54ed54be82e130ad51da6c",
         "recordId": null,
         "envelopeBytes": null,
         "values": {
@@ -4197,7 +4197,7 @@
         "repo": null,
         "revision": null,
         "path": "config/manifests/builtin.models.jsonc#models/sdxl/candle/memoryStrategyContract",
-        "sha256": "f3d3523b22286011242749d73ce7feba72aa5dfffb17871e6b175a067143d44b",
+        "sha256": "9d650bf46c636a62ceeca65341488aca7eb502c54a54ed54be82e130ad51da6c",
         "recordId": null,
         "envelopeBytes": null,
         "values": {
@@ -4221,7 +4221,7 @@
         "repo": null,
         "revision": null,
         "path": "config/manifests/builtin.models.jsonc#models/sdxl/candle/memoryStrategyContract",
-        "sha256": "f3d3523b22286011242749d73ce7feba72aa5dfffb17871e6b175a067143d44b",
+        "sha256": "9d650bf46c636a62ceeca65341488aca7eb502c54a54ed54be82e130ad51da6c",
         "recordId": null,
         "envelopeBytes": null,
         "values": {
@@ -4245,7 +4245,7 @@
         "repo": null,
         "revision": null,
         "path": "config/manifests/builtin.models.jsonc#models/sdxl/candle/memoryStrategyContract",
-        "sha256": "f3d3523b22286011242749d73ce7feba72aa5dfffb17871e6b175a067143d44b",
+        "sha256": "9d650bf46c636a62ceeca65341488aca7eb502c54a54ed54be82e130ad51da6c",
         "recordId": null,
         "envelopeBytes": null,
         "values": {
@@ -4302,7 +4302,7 @@
         "repo": null,
         "revision": null,
         "path": "config/manifests/builtin.models.jsonc#models/sensenova_u1_8b/candle",
-        "sha256": "f3d3523b22286011242749d73ce7feba72aa5dfffb17871e6b175a067143d44b",
+        "sha256": "9d650bf46c636a62ceeca65341488aca7eb502c54a54ed54be82e130ad51da6c",
         "recordId": null,
         "envelopeBytes": null,
         "values": {
@@ -4323,7 +4323,7 @@
         "repo": null,
         "revision": null,
         "path": "config/manifests/builtin.models.jsonc#models/sensenova_u1_8b/candle",
-        "sha256": "f3d3523b22286011242749d73ce7feba72aa5dfffb17871e6b175a067143d44b",
+        "sha256": "9d650bf46c636a62ceeca65341488aca7eb502c54a54ed54be82e130ad51da6c",
         "recordId": null,
         "envelopeBytes": null,
         "values": {
@@ -4344,7 +4344,7 @@
         "repo": null,
         "revision": null,
         "path": "config/manifests/builtin.models.jsonc#models/sensenova_u1_8b/candle",
-        "sha256": "f3d3523b22286011242749d73ce7feba72aa5dfffb17871e6b175a067143d44b",
+        "sha256": "9d650bf46c636a62ceeca65341488aca7eb502c54a54ed54be82e130ad51da6c",
         "recordId": null,
         "envelopeBytes": null,
         "values": {
@@ -4398,7 +4398,7 @@
         "repo": null,
         "revision": null,
         "path": "config/manifests/builtin.models.jsonc#models/sensenova_u1_8b_fast/candle",
-        "sha256": "f3d3523b22286011242749d73ce7feba72aa5dfffb17871e6b175a067143d44b",
+        "sha256": "9d650bf46c636a62ceeca65341488aca7eb502c54a54ed54be82e130ad51da6c",
         "recordId": null,
         "envelopeBytes": null,
         "values": {
@@ -4419,7 +4419,7 @@
         "repo": null,
         "revision": null,
         "path": "config/manifests/builtin.models.jsonc#models/sensenova_u1_8b_fast/candle",
-        "sha256": "f3d3523b22286011242749d73ce7feba72aa5dfffb17871e6b175a067143d44b",
+        "sha256": "9d650bf46c636a62ceeca65341488aca7eb502c54a54ed54be82e130ad51da6c",
         "recordId": null,
         "envelopeBytes": null,
         "values": {
@@ -4440,7 +4440,7 @@
         "repo": null,
         "revision": null,
         "path": "config/manifests/builtin.models.jsonc#models/sensenova_u1_8b_fast/candle",
-        "sha256": "f3d3523b22286011242749d73ce7feba72aa5dfffb17871e6b175a067143d44b",
+        "sha256": "9d650bf46c636a62ceeca65341488aca7eb502c54a54ed54be82e130ad51da6c",
         "recordId": null,
         "envelopeBytes": null,
         "values": {
@@ -4494,7 +4494,7 @@
         "repo": null,
         "revision": null,
         "path": "config/manifests/builtin.models.jsonc#models/sensenova_u1_8b_infographic_v2/candle",
-        "sha256": "f3d3523b22286011242749d73ce7feba72aa5dfffb17871e6b175a067143d44b",
+        "sha256": "9d650bf46c636a62ceeca65341488aca7eb502c54a54ed54be82e130ad51da6c",
         "recordId": null,
         "envelopeBytes": null,
         "values": {
@@ -4515,7 +4515,7 @@
         "repo": null,
         "revision": null,
         "path": "config/manifests/builtin.models.jsonc#models/sensenova_u1_8b_infographic_v2/candle",
-        "sha256": "f3d3523b22286011242749d73ce7feba72aa5dfffb17871e6b175a067143d44b",
+        "sha256": "9d650bf46c636a62ceeca65341488aca7eb502c54a54ed54be82e130ad51da6c",
         "recordId": null,
         "envelopeBytes": null,
         "values": {
@@ -4536,7 +4536,7 @@
         "repo": null,
         "revision": null,
         "path": "config/manifests/builtin.models.jsonc#models/sensenova_u1_8b_infographic_v2/candle",
-        "sha256": "f3d3523b22286011242749d73ce7feba72aa5dfffb17871e6b175a067143d44b",
+        "sha256": "9d650bf46c636a62ceeca65341488aca7eb502c54a54ed54be82e130ad51da6c",
         "recordId": null,
         "envelopeBytes": null,
         "values": {
@@ -4590,7 +4590,7 @@
         "repo": null,
         "revision": null,
         "path": "config/manifests/builtin.models.jsonc#models/sensenova_u1_8b_infographic_v2_fast/candle",
-        "sha256": "f3d3523b22286011242749d73ce7feba72aa5dfffb17871e6b175a067143d44b",
+        "sha256": "9d650bf46c636a62ceeca65341488aca7eb502c54a54ed54be82e130ad51da6c",
         "recordId": null,
         "envelopeBytes": null,
         "values": {
@@ -4611,7 +4611,7 @@
         "repo": null,
         "revision": null,
         "path": "config/manifests/builtin.models.jsonc#models/sensenova_u1_8b_infographic_v2_fast/candle",
-        "sha256": "f3d3523b22286011242749d73ce7feba72aa5dfffb17871e6b175a067143d44b",
+        "sha256": "9d650bf46c636a62ceeca65341488aca7eb502c54a54ed54be82e130ad51da6c",
         "recordId": null,
         "envelopeBytes": null,
         "values": {
@@ -4632,7 +4632,7 @@
         "repo": null,
         "revision": null,
         "path": "config/manifests/builtin.models.jsonc#models/sensenova_u1_8b_infographic_v2_fast/candle",
-        "sha256": "f3d3523b22286011242749d73ce7feba72aa5dfffb17871e6b175a067143d44b",
+        "sha256": "9d650bf46c636a62ceeca65341488aca7eb502c54a54ed54be82e130ad51da6c",
         "recordId": null,
         "envelopeBytes": null,
         "values": {
@@ -4686,7 +4686,7 @@
         "repo": null,
         "revision": null,
         "path": "config/manifests/builtin.models.jsonc#models/sensenova_u1_8b_infographic_v3/candle",
-        "sha256": "f3d3523b22286011242749d73ce7feba72aa5dfffb17871e6b175a067143d44b",
+        "sha256": "9d650bf46c636a62ceeca65341488aca7eb502c54a54ed54be82e130ad51da6c",
         "recordId": null,
         "envelopeBytes": null,
         "values": {
@@ -4707,7 +4707,7 @@
         "repo": null,
         "revision": null,
         "path": "config/manifests/builtin.models.jsonc#models/sensenova_u1_8b_infographic_v3/candle",
-        "sha256": "f3d3523b22286011242749d73ce7feba72aa5dfffb17871e6b175a067143d44b",
+        "sha256": "9d650bf46c636a62ceeca65341488aca7eb502c54a54ed54be82e130ad51da6c",
         "recordId": null,
         "envelopeBytes": null,
         "values": {
@@ -4728,7 +4728,7 @@
         "repo": null,
         "revision": null,
         "path": "config/manifests/builtin.models.jsonc#models/sensenova_u1_8b_infographic_v3/candle",
-        "sha256": "f3d3523b22286011242749d73ce7feba72aa5dfffb17871e6b175a067143d44b",
+        "sha256": "9d650bf46c636a62ceeca65341488aca7eb502c54a54ed54be82e130ad51da6c",
         "recordId": null,
         "envelopeBytes": null,
         "values": {
@@ -4782,7 +4782,7 @@
         "repo": null,
         "revision": null,
         "path": "config/manifests/builtin.models.jsonc#models/sensenova_u1_8b_infographic_v3_fast/candle",
-        "sha256": "f3d3523b22286011242749d73ce7feba72aa5dfffb17871e6b175a067143d44b",
+        "sha256": "9d650bf46c636a62ceeca65341488aca7eb502c54a54ed54be82e130ad51da6c",
         "recordId": null,
         "envelopeBytes": null,
         "values": {
@@ -4803,7 +4803,7 @@
         "repo": null,
         "revision": null,
         "path": "config/manifests/builtin.models.jsonc#models/sensenova_u1_8b_infographic_v3_fast/candle",
-        "sha256": "f3d3523b22286011242749d73ce7feba72aa5dfffb17871e6b175a067143d44b",
+        "sha256": "9d650bf46c636a62ceeca65341488aca7eb502c54a54ed54be82e130ad51da6c",
         "recordId": null,
         "envelopeBytes": null,
         "values": {
@@ -4824,7 +4824,7 @@
         "repo": null,
         "revision": null,
         "path": "config/manifests/builtin.models.jsonc#models/sensenova_u1_8b_infographic_v3_fast/candle",
-        "sha256": "f3d3523b22286011242749d73ce7feba72aa5dfffb17871e6b175a067143d44b",
+        "sha256": "9d650bf46c636a62ceeca65341488aca7eb502c54a54ed54be82e130ad51da6c",
         "recordId": null,
         "envelopeBytes": null,
         "values": {
@@ -4900,7 +4900,7 @@
         "repo": null,
         "revision": null,
         "path": "config/manifests/builtin.models.jsonc#models/wan_2_2/candle",
-        "sha256": "f3d3523b22286011242749d73ce7feba72aa5dfffb17871e6b175a067143d44b",
+        "sha256": "9d650bf46c636a62ceeca65341488aca7eb502c54a54ed54be82e130ad51da6c",
         "recordId": null,
         "envelopeBytes": null,
         "values": {
@@ -4921,7 +4921,7 @@
         "repo": null,
         "revision": null,
         "path": "config/manifests/builtin.models.jsonc#models/wan_2_2/candle",
-        "sha256": "f3d3523b22286011242749d73ce7feba72aa5dfffb17871e6b175a067143d44b",
+        "sha256": "9d650bf46c636a62ceeca65341488aca7eb502c54a54ed54be82e130ad51da6c",
         "recordId": null,
         "envelopeBytes": null,
         "values": {
@@ -4942,7 +4942,7 @@
         "repo": null,
         "revision": null,
         "path": "config/manifests/builtin.models.jsonc#models/wan_2_2/candle",
-        "sha256": "f3d3523b22286011242749d73ce7feba72aa5dfffb17871e6b175a067143d44b",
+        "sha256": "9d650bf46c636a62ceeca65341488aca7eb502c54a54ed54be82e130ad51da6c",
         "recordId": null,
         "envelopeBytes": null,
         "values": {
@@ -4996,7 +4996,7 @@
         "repo": null,
         "revision": null,
         "path": "config/manifests/builtin.models.jsonc#models/wan_2_2_i2v_14b/candle",
-        "sha256": "f3d3523b22286011242749d73ce7feba72aa5dfffb17871e6b175a067143d44b",
+        "sha256": "9d650bf46c636a62ceeca65341488aca7eb502c54a54ed54be82e130ad51da6c",
         "recordId": null,
         "envelopeBytes": null,
         "values": {
@@ -5017,7 +5017,7 @@
         "repo": null,
         "revision": null,
         "path": "config/manifests/builtin.models.jsonc#models/wan_2_2_i2v_14b/candle",
-        "sha256": "f3d3523b22286011242749d73ce7feba72aa5dfffb17871e6b175a067143d44b",
+        "sha256": "9d650bf46c636a62ceeca65341488aca7eb502c54a54ed54be82e130ad51da6c",
         "recordId": null,
         "envelopeBytes": null,
         "values": {
@@ -5038,7 +5038,7 @@
         "repo": null,
         "revision": null,
         "path": "config/manifests/builtin.models.jsonc#models/wan_2_2_i2v_14b/candle",
-        "sha256": "f3d3523b22286011242749d73ce7feba72aa5dfffb17871e6b175a067143d44b",
+        "sha256": "9d650bf46c636a62ceeca65341488aca7eb502c54a54ed54be82e130ad51da6c",
         "recordId": null,
         "envelopeBytes": null,
         "values": {
@@ -5092,7 +5092,7 @@
         "repo": null,
         "revision": null,
         "path": "config/manifests/builtin.models.jsonc#models/wan_2_2_t2v_14b/candle",
-        "sha256": "f3d3523b22286011242749d73ce7feba72aa5dfffb17871e6b175a067143d44b",
+        "sha256": "9d650bf46c636a62ceeca65341488aca7eb502c54a54ed54be82e130ad51da6c",
         "recordId": null,
         "envelopeBytes": null,
         "values": {
@@ -5113,7 +5113,7 @@
         "repo": null,
         "revision": null,
         "path": "config/manifests/builtin.models.jsonc#models/wan_2_2_t2v_14b/candle",
-        "sha256": "f3d3523b22286011242749d73ce7feba72aa5dfffb17871e6b175a067143d44b",
+        "sha256": "9d650bf46c636a62ceeca65341488aca7eb502c54a54ed54be82e130ad51da6c",
         "recordId": null,
         "envelopeBytes": null,
         "values": {
@@ -5134,7 +5134,7 @@
         "repo": null,
         "revision": null,
         "path": "config/manifests/builtin.models.jsonc#models/wan_2_2_t2v_14b/candle",
-        "sha256": "f3d3523b22286011242749d73ce7feba72aa5dfffb17871e6b175a067143d44b",
+        "sha256": "9d650bf46c636a62ceeca65341488aca7eb502c54a54ed54be82e130ad51da6c",
         "recordId": null,
         "envelopeBytes": null,
         "values": {
@@ -5199,7 +5199,7 @@
         "repo": null,
         "revision": null,
         "path": "config/manifests/builtin.models.jsonc#models/z_image/candle/memoryStrategyContract",
-        "sha256": "f3d3523b22286011242749d73ce7feba72aa5dfffb17871e6b175a067143d44b",
+        "sha256": "9d650bf46c636a62ceeca65341488aca7eb502c54a54ed54be82e130ad51da6c",
         "recordId": null,
         "envelopeBytes": null,
         "values": {
@@ -5224,7 +5224,7 @@
         "repo": null,
         "revision": null,
         "path": "config/manifests/builtin.models.jsonc#models/z_image/candle/memoryStrategyContract",
-        "sha256": "f3d3523b22286011242749d73ce7feba72aa5dfffb17871e6b175a067143d44b",
+        "sha256": "9d650bf46c636a62ceeca65341488aca7eb502c54a54ed54be82e130ad51da6c",
         "recordId": null,
         "envelopeBytes": null,
         "values": {
@@ -5249,7 +5249,7 @@
         "repo": null,
         "revision": null,
         "path": "config/manifests/builtin.models.jsonc#models/z_image/candle/memoryStrategyContract",
-        "sha256": "f3d3523b22286011242749d73ce7feba72aa5dfffb17871e6b175a067143d44b",
+        "sha256": "9d650bf46c636a62ceeca65341488aca7eb502c54a54ed54be82e130ad51da6c",
         "recordId": null,
         "envelopeBytes": null,
         "values": {

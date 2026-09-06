@@ -207,7 +207,7 @@ test("current and legacy Illustrious download selectors fail closed independentl
   const evidenceBytes = await readFile("config/download-pattern-evidence.json", "utf8");
   const current = expectedCurrentArtifactFilesFromEvidenceBytes(checked, evidenceBytes);
   assert.equal(current.downloadEvidenceSha256,
-    "d85bf16aea1411b12ddb1b1a6a5675220235f6e0141c1298ecfe7c3f50309ab6");
+    "75b4331ac83915f1c63cabc26d145ed612b75112035236517ead82b97fe20499");
   assert.equal(current.artifactExpectedFiles["illustrious-v1-q4"].length, 19);
   assert.equal(current.artifactExpectedFiles["illustrious-v2-q4"].length, 19);
 

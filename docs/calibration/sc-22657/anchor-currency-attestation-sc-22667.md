@@ -1,4 +1,4 @@
-# Anchor currency attestations at inference `c6d6a4db` (sc-22667, epic sc-22657)
+# Anchor currency attestations at inference `c6d6a4db`, extended to `1cd0e393` / `8a65db2a` / `563c44e1` (sc-22667 / sc-22765 / sc-22723 / sc-22738, epic sc-22657)
 
 Terminal-story close-out of the memory-anchor currency question the sc-22667 review raised as a
 blocker: at the landed pin `c6d6a4dbd61ab09c26ff5526632cae2cefea60ed`, none of the five anchors the
@@ -82,6 +82,37 @@ the anchor; the E6 test documents the same band ("cold staged control lands betw
   re-stamp: flipping the packaged digest reds them. `mlx_fit_gate::flux2_live_anchor_store` remains
   and says why (the flux2 MLX rows are not attested and honestly stale).
 
+## Extension to inference `1cd0e393` (sc-22765, main-line pin, 2026-09-05)
+
+On `main`, in parallel with the epic sc-22723 feature branch, the pin moved `c6d6a4db` → `1cd0e393`
+(the sc-22760 FLUX.2 Klein rehost fix). Under the bound stated above that would stale all five
+attested anchors, so each entry was re-read for the new range and re-keyed to the new pin. The
+reading is mechanical and exhaustive rather than a judgement call:
+
+* `c6d6a4db..1cd0e393` changes 20 inference files — the sc-19699 / sc-22261 StarVector work
+  (`core-llm` contracts and testkit, `candle-llm` StarVector plus its decode streaming, `mlx-llm`
+  StarVector), the sc-22760 `mlx-gen-flux2` artifact inventory and its tests, and `release/` +
+  `scripts/release/` tooling.
+* **None of those files appears in any of the five anchors' loader closures.** Intersecting each
+  anchor's `closureFiles` in `config/anchor-loader-closures.json` with the range's changed-file list
+  is empty for `krea_2_turbo:candle` (143 files), `z_image_turbo:candle` (109) and
+  `z_image_turbo:mlx` (137). The closures are byte-identical across the range, and their digests are
+  unchanged in the regenerated config.
+* So there was no file left to classify: the extension adds nothing to either the accounting-only
+  reading or the measured witness the four/one entries already rest on, and each entry keeps its
+  original `class`, `witness` and `filesChangedSinceMeasurement` (that list still covers
+  `measuredRevision..attestedRevision` exactly, because the widened range contributed no closure
+  file).
+
+Three closures DID move on this bump — `flux2_dev:mlx`, `ltx_2_3:mlx` and `ltx_2_5:mlx`, all of
+which reach `mlx-gen-flux2`'s artifact inventory. Those anchors were already honestly stale and
+unattested before this bump, and they stay that way: nothing here re-keys them.
+
+The two pin lines (`1cd0e393` on main, `8a65db2a` on the feature branch) rejoin at `563c44e1`, the
+inference merge of the feature branch over `1cd0e393`; the final section below reads
+`8a65db2a..563c44e1`, which is exactly the main-side content this section covers plus inference
+PR #961's removal of the stale-marker tolerance.
+
 ## Extension to inference `8a65db2a` (sc-22723 feature pin, 2026-09-05)
 
 The epic sc-22723 feature pin (`c6d6a4db` → `8a65db2aad0b54581794127f5c3f5621e107e321`, inference
@@ -99,4 +130,27 @@ holds, and nothing in the new segment is a load or device path.
 
 No re-measure was taken for the new segment — the doctrine allows the diff alone when it carries
 no load-or-device-path change, which is the case here. Matrix after `--stamp-anchors`:
+`15 anchors, 10 stale, 5 current by attestation` (unchanged set).
+
+## Extension to inference `563c44e1` (sc-22738, the epic's final pin, 2026-09-06)
+
+The epic sc-22738 terminal pin (`8a65db2a` → `563c44e1652043bf8bd018de79cadadc393f91f2`, inference
+`main` = the merge of feature PR #960 over main `1cd0e393`, synchronized through PR #961) moved
+every loader closure in `config/anchor-loader-closures.json` and staled the five attested anchors
+again. The `8a65db2a..563c44e1` range changes nine inference files; exactly two are in the attested
+closures, and they are the same two for all three: gen-core `encoder_contract.rs` and `lib.rs`. The
+five entries were **extended** (`attestedRevision` → `563c44e1`, `story` → `sc-22738`, the reading
+appended to `why` and to the two files' `filesChangedSinceMeasurement` classes).
+
+| Closure | Files changed in `8a65db2a..563c44e1` | Reading |
+| --- | --- | --- |
+| `krea_2_turbo:candle`, `z_image_turbo:candle` (q4 / q8 / bf16), `z_image_turbo:mlx` (q4) | gen-core `encoder_contract.rs`, `lib.rs` | accounting-only, and strictly a REMOVAL. Inference PR #961 drops the sc-22727 stale-packed-marker tolerance that sc-22760's corrected Klein rehosts made unnecessary: the two entry points `source_for_load_with_stale_packed_marker` / `validate_source_for_discovery_with_stale_packed_marker`, the `RequiredWithStalePackedMarker` policy arm and its `stale_packed_marker()` reader, the `declared_quant` rewrite in `validate_source_with_policy` (the identity for `Required` and `ProviderOwnedComfyUi`, the only policies these closures use), `PackedQuantization` back to crate-private, and the allowance test; `lib.rs` drops the matching re-export. The removed surface's only production caller was `mlx-gen-flux2`'s Klein turnkey inventory, which none of the three closures reaches. `source_for_load`, `validate_source_for_discovery`, `requires_config` for `Required` and every shard/header/quantization-evidence check these models execute are the same code path before and after. |
+
+The other seven files in the range — `mlx-gen-flux2` `artifact_inventory.rs` / `loader.rs` /
+`memory_strategy.rs` / `model.rs`, its two test files and `release/real-weight-models.toml` — are
+outside every attested closure (they move `flux2_dev:mlx`, `flux2_klein_9b*:mlx`, `ideogram_4*:mlx`
+and `lens*:mlx`, none of which is attested; those stay honestly stale as before).
+
+No re-measure was taken for the new segment — the doctrine allows the diff alone when it carries no
+load-or-device-path change, which is the case here. Matrix after `--stamp-anchors`:
 `15 anchors, 10 stale, 5 current by attestation` (unchanged set).
