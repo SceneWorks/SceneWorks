@@ -777,6 +777,52 @@
       "underivedReason": "the anchor render engaged bounded rungs (or deferred materialization), so it does not measure the widest composition the MLX image law upper-bounds the ladder from; this anchor validates its measured point and prices nothing beyond it"
     },
     {
+      "id": "flux_dev:mlx:q4:base:base:flux1-dev-q4-mlx-shared-ladder-2026-08-03-v1:imc-4cd8238201e0179ab82d",
+      "modelId": "flux_dev",
+      "modelFamily": "flux",
+      "route": "flux1_dev",
+      "provider": "flux1_dev",
+      "backend": "mlx",
+      "tier": "q4",
+      "transformerVariant": null,
+      "decoder": null,
+      "mode": "text_to_image",
+      "overlay": null,
+      "referenceCount": 0,
+      "loadShape": "deferred_materialization",
+      "measuredRegime": {
+        "decodeTiled": false,
+        "transformerWindowed": false,
+        "staged": false,
+        "attentionChunked": false
+      },
+      "source": {
+        "path": "docs/calibration/sc-22738/flux-dev-q4-mlx-evidence.json",
+        "sha256": "48857f0cdfe6734692bbb78448583b8823d198c633bd2ae9cdceebf8c05c43af",
+        "recordId": "imc-4cd8238201e0179ab82d",
+        "calibrationFingerprint": "flux1-dev-q4-mlx-shared-ladder-2026-08-03-v1",
+        "loaderClosureDigest": "d7c4be259300301df9135f56ca83a70d5e31de752718418914de607ff00be6ae"
+      },
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "frames": 1,
+        "fps": null
+      },
+      "phaseActivePeakBytes": {
+        "conditioning": 1051956,
+        "denoise": 11460184788,
+        "decode": 24904956136
+      },
+      "phaseAllocatorEnvelopeBytes": {
+        "conditioning": 1054052,
+        "denoise": 16655857464,
+        "decode": 67111725924
+      },
+      "overallAllocatorEnvelopeBytes": 67111725924,
+      "underivedReason": "the anchor render engaged bounded rungs (or deferred materialization), so it does not measure the widest composition the MLX image law upper-bounds the ladder from; this anchor validates its measured point and prices nothing beyond it"
+    },
+    {
       "id": "krea_2_turbo:candle:q4:base:base:krea-turbo-cuda-phase-curves-v1:imc-7f1a63e5459300aed47c",
       "modelId": "krea_2_turbo",
       "modelFamily": "krea_2",
@@ -2324,17 +2370,6 @@
           "vramGbByTier": "31.8"
         }
       }
-    },
-    {
-      "id": "analytic:flux_dev:mlx:q4",
-      "modelId": "flux_dev",
-      "modelFamily": "flux",
-      "route": "flux1_dev",
-      "backend": "mlx",
-      "tier": "q4",
-      "basis": "no_retained_evidence",
-      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
-      "evidence": null
     },
     {
       "id": "analytic:flux_dev:mlx:q8",
