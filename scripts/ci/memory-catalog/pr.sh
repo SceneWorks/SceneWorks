@@ -43,11 +43,15 @@ BODY_FILE="${WORK_DIR}/pr-body.md"
   echo '```'
 } > "$BODY_FILE"
 
+# `gh` is a NATIVE Windows binary on the candle lane, so it is handed the native spelling of the
+# body file rather than the `/d/a/_temp/...` form bash writes it under. Git Bash's argv mangling
+# usually converts an absolute POSIX path on the way to a non-MSYS program, but that is a heuristic
+# on the argument's shape -- not a guarantee -- and `native_path` is a no-op everywhere else.
 URL="$(gh pr create \
   --base "$BASE_REF" \
   --head "$CAMPAIGN_BRANCH" \
   --title "chore(${CAMPAIGN}): ${BACKEND} catalog campaign results" \
-  --body-file "$BODY_FILE")"
+  --body-file "$(native_path "$BODY_FILE")")"
 
 echo "opened $URL"
 {
