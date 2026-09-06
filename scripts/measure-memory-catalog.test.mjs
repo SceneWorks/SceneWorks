@@ -54,6 +54,10 @@ import {
   readDeclaredStrategySupport,
   SDXL_ROUTES_PATH,
   SDXL_ROUTES_UNCHECKED,
+  WATCHDOG,
+  guardsCapture,
+  probeAdapter,
+  watchdogGuard,
 } from "./measure-memory-catalog.mjs";
 import {
   ANCHOR_LANE_DEFAULT_STRATEGY_PATH,
@@ -3113,6 +3117,16 @@ async function stubCheckout() {
     await writeFile("docs/generated/memory-matrix.md", "# matrix " + Date.now() + "\\n");
     if (process.env.STUB_STRAY) await writeFile("docs/generated/stray.json", "{}");
   `);
+  // The stub adapter answers the one action the runner itself sends — `probe`, for the watchdog
+  // ceilings (sc-22738) — with a 128 GiB host whose wired ceiling is 96 GiB, the SC-18946 shape.
+  await writeFile(path.join(root, "stub-adapter.mjs"), `
+    let input = "";
+    for await (const chunk of process.stdin) input += chunk;
+    const request = JSON.parse(input);
+    if (request.action !== "probe") { console.error("Error: stub adapter only probes"); process.exit(2); }
+    if (process.env.STUB_PROBE_FAILS) { console.error("Error: stub probe refused"); process.exit(1); }
+    process.stdout.write(JSON.stringify({ hardware: { memoryBytes: 137438953472, wiredLimitBytes: 103079215104 } }));
+  `);
   await writeFile(path.join(root, "config/memory-anchors.json"), JSON.stringify({ anchors: [] }) + "\n");
   await writeFile(path.join(root, "docs/generated/memory-matrix.json"), "{}\n");
   await writeFile(path.join(root, "docs/generated/memory-matrix.md"), "# matrix\n");
@@ -3138,7 +3152,7 @@ function stubContext({ root, workDir }, overrides = {}) {
   return {
     root, workDir, inferencePin: REVISION, campaignDir: "docs/calibration/sc-stub",
     campaignPrefix: "docs/calibration/sc-stub", state: { commits: [], halt: null },
-    args: { adapter: JSON.stringify([process.execPath, "unused-adapter.mjs"]), inferenceRepo: root, commit: true, campaign: "sc-stub" },
+    args: { adapter: JSON.stringify([process.execPath, "stub-adapter.mjs"]), inferenceRepo: root, commit: true, campaign: "sc-stub" },
     ...overrides,
   };
 }
@@ -3272,4 +3286,114 @@ test("--model selects every tier of one model and refuses a model the plan does 
     planRun({ ...args, models: ["not_a_model"], anchors: null, campaign: "sc-catalog-test", hfCache: [] }),
     /--model not_a_model matches no plan anchor/,
   );
+});
+
+// ---------------------------------------------------------------------------------------------
+// sc-22738: the three MLX LTX-2.3 cells are driven by THIS runner, through production admission
+// ---------------------------------------------------------------------------------------------
+
+// The campaign found the old shape the expensive way: three anchors, three model-load-free
+// failures, one per tier — `SC-18946 row is missing required _measurementSafety; refusing before
+// model load`. The arm routed the harness's one action (`run`) to `LtxRunAdmission::Ordinary`,
+// whose whole body was `refuse_unsafe_ltx_capture`: a demand for a block the anchor-plan schema
+// (`additionalProperties: false`) cannot carry, followed by an unconditional `Err`. A guard with no
+// success path is not a safety check; it is a hard-coded "never measure", and E4 requires the
+// record to measure what ships. PR #2745 answered by classifying the cells `harness_unsupported`
+// and delegating them to the safety canary; this supersedes that. The cells are ordinary anchors:
+// the arm admits them through the production budget and the runner contains them with the same
+// footprint hard stop it puts around every MLX capture.
+test("the MLX LTX-2.3 cells are ordinary anchors: admitted by the production budget, classified runnable or weights_missing", async () => {
+  const adapter = await readFile(path.join(ROOT, ADAPTER_BIN_PATHS.mlx), "utf8");
+  const harness = await readFile(path.join(ROOT, "scripts/memory-calibration-harness.mjs"), "utf8");
+  // 1. The generic runner still sends exactly one provider action for a capture...
+  assert.deepEqual(
+    [...harness.matchAll(/action: "(\w+)",\n\s*planned/g)].map((match) => match[1]),
+    ["run"],
+    "the harness's capture action moved; the assertions below read the wrong dispatch arm",
+  );
+  // 2. ...and the arm's ordinary path carries no refusal of its own between the plan and the load:
+  //    the unconditional guard is gone, the Ordinary admission arm is empty, and what stands before
+  //    the load is the production admission (`ltx_ordinary_admission`), which returns the budget's
+  //    own refusal or proceeds.
+  // Assembled so the adapter's own source-shape test literal cannot satisfy the search.
+  assert.equal(adapter.includes(["fn", "refuse_unsafe_ltx_capture("].join(" ")), false, "the SC-19642 unconditional refusal is back");
+  const arm = adapter.slice(adapter.indexOf("fn run_ltx_with_admission("));
+  const preLoad = arm.slice(0, arm.indexOf(".load(LTX_PROVIDER, &spec)"));
+  assert.match(preLoad, /LtxRunAdmission::Ordinary => \{\}/, "the Ordinary admission arm must be empty");
+  assert.ok(preLoad.indexOf("ltx_ordinary_admission(") > preLoad.indexOf("LtxRunAdmission::Ordinary => {}"), "the production admission stands before the load");
+  assert.doesNotMatch(preLoad, /_measurementSafety/, "the ordinary path must not demand a block the plan schema cannot carry");
+  // 3. Every planned MLX LTX-2.3 cell classifies as an ordinary anchor on this lane. There are
+  //    exactly the manifest's three tiers, and none is delegated anywhere.
+  const plan = await readPlan();
+  const keys = Object.keys(plan.anchors).filter((key) => key.startsWith("ltx_2_3:") && key.endsWith(":mlx")).sort();
+  assert.deepEqual(keys, ["ltx_2_3:bf16:mlx", "ltx_2_3:q4:mlx", "ltx_2_3:q8:mlx"]);
+  const { rows } = await planRun({ backend: "mlx", anchors: null, campaign: "sc-catalog-test", hfCache: [], skipCurrent: false });
+  const byKey = new Map(rows.map((row) => [row.key, row]));
+  for (const key of keys) {
+    const row = byKey.get(key);
+    assert.ok(["runnable", "weights_missing"].includes(row.status), `${key}: ${row.status} (${row.reason})`);
+    assert.ok(guardsCapture(key, "darwin"), `${key} runs under the footprint guard`);
+  }
+  // 4. The plan carries no composition override for them: the lane default (`resident`) is what
+  //    the worker's selector ships for this cell on a host that fits it, and the adapter's own
+  //    plan-driven test proves the pinned contract admits it.
+  for (const key of keys) assert.equal(plan.anchors[key].strategy, undefined, `${key} plans the lane default composition`);
+});
+
+// ---------------------------------------------------------------------------------------------
+// sc-22738: physical containment — every MLX capture runs under the footprint hard stop
+// ---------------------------------------------------------------------------------------------
+
+test("the watchdog guard derives both ceilings from the adapter's probe and nothing else", () => {
+  const hardware = { memoryBytes: 137_438_953_472, wiredLimitBytes: 103_079_215_104 };
+  const guard = watchdogGuard({ hardware, eventFile: "/tmp/events.jsonl" });
+  assert.equal(guard[0], path.join(ROOT, WATCHDOG));
+  const flag = (name) => guard[guard.indexOf(name) + 1];
+  assert.equal(flag("--max-footprint-bytes"), "103079215104", "the ceiling is the device wired limit, the line SC-18946 crossed");
+  assert.equal(flag("--host-memory-bytes"), "137438953472");
+  assert.equal(flag("--min-memory-free-bytes"), String(137_438_953_472 - 103_079_215_104), "the host floor is its own non-wired reserve");
+  assert.equal(flag("--event-file"), "/tmp/events.jsonl");
+  // The generic guard speaks no attestation or phase protocol — those belong to the frozen canary
+  // profiles — and sets no wall-time ceiling.
+  for (const absent of ["--require-child-attestation", "--require-provider-phases", "--provider-phase-profile", "--max-runtime-seconds"]) {
+    assert.equal(guard.includes(absent), false, absent);
+  }
+  assert.throws(() => watchdogGuard({ hardware: { memoryBytes: 1, wiredLimitBytes: 2 }, eventFile: "x" }), /above host memory/);
+  assert.throws(() => watchdogGuard({ hardware: { memoryBytes: 1 }, eventFile: "x" }), /wiredLimitBytes/);
+  // Guarded set: every MLX anchor on Darwin; the CUDA lane's hazard is VRAM, which this sampler
+  // cannot see, and the footprint sampler exists on no other platform.
+  assert.equal(guardsCapture("z_image_turbo:q4:mlx", "darwin"), true);
+  assert.equal(guardsCapture("z_image_turbo:q4:candle", "darwin"), false);
+  assert.equal(guardsCapture("z_image_turbo:q4:mlx", "linux"), false);
+});
+
+test("an MLX anchor capture runs inside the footprint watchdog with the probed ceilings; a candle capture does not", async () => {
+  const checkout = await stubCheckout();
+  const context = stubContext(checkout, { args: { ...stubContext(checkout).args, commit: false } });
+  const hardware = await probeAdapter([process.execPath, "stub-adapter.mjs"], { cwd: checkout.root });
+  assert.deepEqual(hardware, { memoryBytes: 137438953472, wiredLimitBytes: 103079215104 });
+  const mlx = await measureAnchor({ key: "z_image_turbo:q4:mlx", physical: false, env: {} }, context);
+  const mlxLog = await readFile(mlx.log, "utf8");
+  if (process.platform === "darwin") {
+    assert.equal(mlx.status, "captured", mlx.reason);
+    assert.match(mlxLog, /\/usr\/bin\/python3 \S+\/scripts\/memory-calibration-watchdog\.py --max-footprint-bytes 103079215104 --host-memory-bytes 137438953472 --min-memory-free-bytes 34359738368 /);
+    const events = (await readFile(path.join(checkout.workDir, "logs", "z-image-turbo-q4-mlx-watchdog.jsonl"), "utf8")).trim().split("\n").map(JSON.parse);
+    assert.ok(events.some((event) => event.event === "started"), "the guard owned the capture's process group");
+    assert.ok(events.some((event) => event.event === "sample" && Number.isSafeInteger(event.physicalFootprintBytes)), "the guard sampled the capture's physical footprint");
+    assert.ok(!events.some((event) => event.event === "hard_stop"), "a stub capture stays under the ceiling");
+    // A refused probe is a refused capture: no ceiling, no run.
+    process.env.STUB_PROBE_FAILS = "1";
+    try {
+      const refused = await measureAnchor({ key: "z_image_turbo:q4:mlx", physical: false, env: {} }, context);
+      assert.equal(refused.status, "capture_failed");
+      assert.match(refused.reason, /stub probe refused/);
+    } finally {
+      delete process.env.STUB_PROBE_FAILS;
+    }
+  } else {
+    assert.doesNotMatch(mlxLog, /memory-calibration-watchdog/, "the footprint sampler is Darwin-only");
+  }
+  const candle = await measureAnchor({ key: "z_image_turbo:q4:candle", physical: false, env: {} }, context);
+  assert.equal(candle.status, "captured", candle.reason);
+  assert.doesNotMatch(await readFile(candle.log, "utf8"), /memory-calibration-watchdog/);
 });

@@ -12610,15 +12610,23 @@ fn planned_ltx_capture(
     Ok((fps, seed))
 }
 
-/// Fail closed before any model path, provider registry, or MLX allocation is touched.
+/// The SC-18946 incident EVIDENCE a frozen canary row must carry, checked before any model path,
+/// provider registry, or MLX allocation is touched.
 ///
-/// The q4 f305 incident forbids that exact case. It also invalidates the former assumption that a
-/// smaller geometry is safe: every SC-18946 row first loads its complete numeric tier and the same
-/// Gemma stack. q8/bf16 carry strictly larger immutable tier inventories, but there is no proved
-/// relationship from inventory bytes to a safe physical-footprint upper bound. Consequently every
-/// row is refused; only rows supported by incident or monotonic evidence are called unmeasurable,
-/// while the rest remain explicitly safety-refused/open. External polling is defense in depth,
-/// not admission.
+/// The q4 f305 incident (a 96,970,084,480-byte physical footprint that panicked the host watchdog)
+/// forbids that exact case, and the frozen SC-20191/20318/20430 identities carry its arithmetic —
+/// tier inventory, crash footprint, incident-calibrated projection — as the record of what was
+/// known when they were minted. This validator is what keeps those private canary profiles
+/// byte-bound to that evidence.
+///
+/// sc-22738: it is NOT an admission gate for the ordinary `run` action. SC-19642 froze every
+/// ordinary LTX-2.3 MLX capture behind this block plus an unconditional refusal with no success
+/// path, which is a hard-coded "never measure", not a safety check — and the epic's E4 requires
+/// the record to measure what ships. The ordinary path now runs the production admission the
+/// worker runs ([`ltx_ordinary_admission`]) and lets the budget accept or refuse; the SC-18946
+/// records under `docs/calibration/sc-18946` keep their `safety_refused_open` dispositions as
+/// history. Physical containment is the harness's footprint watchdog, which the catalog runner
+/// wraps around every MLX capture.
 fn validate_ltx_safety_evidence(
     request: &Value,
     tier: &str,
@@ -12712,25 +12720,11 @@ fn validate_ltx_safety_evidence(
     Ok((expected_disposition, inventory_bytes, projection))
 }
 
-fn refuse_unsafe_ltx_capture(
-    request: &Value,
-    tier: &str,
-    geometry: LtxGeometry,
-    selection: &MemorySelection,
-) -> Result<(), String> {
-    let (expected_disposition, inventory_bytes, projection) =
-        validate_ltx_safety_evidence(request, tier, geometry, selection)?;
-    Err(format!(
-        "SC-19642 pre-load safety refusal: SC-18946 {tier} is {expected_disposition}; exact tier inventory={inventory_bytes} bytes, incident q4 f305 physical footprint={} bytes, incident-calibrated projection={projection} bytes, and every geometry shares the complete tier plus Gemma load without a proved safe upper bound",
-        LTX_Q4_F305_CRASH_FOOTPRINT_BYTES
-    ))
-}
-
-/// The sole supervised entry into SC-18946. The ordinary `run` action continues through
-/// [`refuse_unsafe_ltx_capture`]; this private action additionally requires the live watchdog
-/// channel and may reach only the first frozen q4 staged row. The runner injects the two private
-/// objects after the canonical harness has constructed the row, so neither object participates in
-/// the campaign logical-case identity.
+/// The first supervised entry into SC-18946. Unlike the ordinary `run` action — which admits
+/// through the production budget ([`ltx_ordinary_admission`]) — this private action requires the
+/// live watchdog channel and may reach only the first frozen q4 staged row. The runner injects the
+/// two private objects after the canonical harness has constructed the row, so neither object
+/// participates in the campaign logical-case identity.
 fn validate_ltx_campaign_entry(
     request: &Value,
     tier: &str,
@@ -13997,7 +13991,13 @@ fn ltx_context(
         mode: MemoryMode::Other("text_to_video".to_owned()),
         has_reference: false,
         use_pid: false,
-        has_phases: true,
+        // As the worker admits it (`video_admission.rs`, "Phase-resolved evidence is not a
+        // multi-phase request modifier. LTX's canonical reference-free T2V scope carries this
+        // false."). The pinned provider's route gate REJECTS a context carrying `has_phases`
+        // (`mlx-gen-ltx/src/memory_strategy.rs` `safety_check`: `|| context.has_phases`), so the
+        // `true` this arm used to carry would have failed every capture at the provider's own
+        // admission — masked until sc-22738 by the unconditional pre-load refusal.
+        has_phases: false,
         geometry: MemoryGeometry {
             width: geometry.width,
             height: geometry.height,
@@ -14015,6 +14015,142 @@ fn ltx_context(
         predicted_peak_bytes,
         cache_state: MemoryCacheState::Cold,
         evidence_revision: format!("sc-18946@{}", protocol::INFERENCE_PIN),
+    }
+}
+
+/// What the ordinary LTX-2.3 capture projects and presents to the production admission before the
+/// load, so a refusal names the same figures the worker's gate would.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct LtxOrdinaryProjection {
+    /// The worker's floor WEIGHTS term for the planned composition
+    /// (`mlx_fit_gate::floor_weights_bytes`, sc-18096), from the contract's own asset facts.
+    weights_bytes: u64,
+    /// The engine's conservative single-pass VAE decode working set for this geometry
+    /// (`mlx_gen_ltx::conservative_video_decode_memory_profile`), the same profile the worker's
+    /// `packaged_video_decode_profile` resolves for a non-bounded MLX candidate.
+    decode_working_set_bytes: u64,
+    /// The peak presented as `predicted_peak_bytes`: the profile composed onto the weights
+    /// (`VideoDecodeMemoryProfile::checked_composed_peak`, as `profiled_floor_phase_peaks` does),
+    /// never below the weights alone.
+    predicted_peak_bytes: u64,
+}
+
+/// The worker's floor weights term for one engaged composition, restated for the two compositions
+/// an LTX-2.3 anchor can plan (`resident`, `staged_residency`; the provider declares no rung 4).
+/// Mirrors `crates/sceneworks-worker/src/mlx_fit_gate.rs` `floor_weights_bytes`: under staging the
+/// resident working set is the larger of the conditioning stack and the post-eviction heavy
+/// stack, otherwise their sum; auxiliary resident components are charged unless an engaged rung
+/// bounds them.
+fn ltx_floor_weights_bytes(
+    contract: &mlx_gen::gen_core::MemoryProviderContract,
+    engaged: &[MemoryStrategy],
+) -> u64 {
+    let facts = contract.asset_facts;
+    let conditioning = facts.conditioning_bytes;
+    let heavy_load_exact = facts.base_bytes.saturating_sub(conditioning);
+    let heavy = if engaged.contains(&MemoryStrategy::StagedResidency) {
+        let evicted = facts
+            .transformer_bytes
+            .saturating_sub(contract.steady_state_transformer_bytes());
+        heavy_load_exact
+            .saturating_sub(evicted)
+            .max(facts.transformer_bytes)
+    } else {
+        heavy_load_exact
+    };
+    let base = if engaged.contains(&MemoryStrategy::StagedResidency) {
+        conditioning.max(heavy)
+    } else {
+        conditioning.saturating_add(heavy)
+    };
+    contract
+        .resident_components()
+        .iter()
+        .filter(|component| component.kind.is_auxiliary())
+        .filter(|component| match component.bounded_by {
+            Some(bounding) => !engaged.contains(&bounding),
+            None => true,
+        })
+        .fold(base, |total, component| {
+            total.saturating_add(component.resident_bytes)
+        })
+}
+
+/// The ordinary LTX-2.3 capture's PRODUCTION admission, run before the load (sc-22738).
+///
+/// This is the path the worker takes for an unmeasured `(ltx_2_3, tier, mlx)` cell, in the same
+/// order and against the same figures: the contract's asset facts give the weights floor, the
+/// engine's own decode profile gives the geometry term, and gen-core's shared safety predicate
+/// (`default_memory_strategy_safety_check`, the budget half of the provider's registered
+/// `safety_check`) decides whether `predicted_peak_bytes` fits `hardware.memoryBytes`. The
+/// provider's full check — the route gate on top of the same predicate — runs again on the loaded
+/// generator, so a refusal here is the budget's refusal and a refusal there is the provider's;
+/// neither is this arm's opinion. There is deliberately no other exit: a request the budget admits
+/// proceeds to the load, and a request it refuses is refused in the budget's own words.
+///
+/// The budget is presented as every other MLX arm presents it — the probed host memory as
+/// `total_bytes`, the allocator's live active/cache readings after a `clear_cache` as the
+/// committed/reclaimable pair (what `mlx_fit_gate::live_request_budget` reads), no reserved
+/// headroom. Physical containment of the run itself is the harness's footprint watchdog, not
+/// this predicate.
+fn ltx_ordinary_admission(
+    contract: &mlx_gen::gen_core::MemoryProviderContract,
+    calibration: &MemoryCalibrationIdentity,
+    selection: MemorySelection,
+    geometry: LtxGeometry,
+    hardware_bytes: u64,
+) -> Result<(MemoryRunContext, LtxOrdinaryProjection), String> {
+    let engaged = contract.engaged_composition(selection.strategy);
+    let weights_bytes = ltx_floor_weights_bytes(contract, &engaged);
+    let profile = mlx_gen_ltx::conservative_video_decode_memory_profile(
+        LTX_PROVIDER,
+        geometry.width,
+        geometry.height,
+        geometry.frames,
+    )
+    .ok_or_else(|| {
+        format!(
+            "the pinned MLX LTX-2.3 provider has no conservative decode profile for {}x{} x {} frames",
+            geometry.width, geometry.height, geometry.frames
+        )
+    })?;
+    let decode_working_set_bytes = profile.working_set_bytes();
+    let predicted_peak_bytes = profile
+        .checked_composed_peak(weights_bytes, contract.asset_facts.decoder_bytes)
+        .ok_or_else(|| {
+            format!(
+                "the pinned MLX LTX-2.3 decode profile cannot compose contract weights {weights_bytes} with decoder bytes {}",
+                contract.asset_facts.decoder_bytes
+            )
+        })?
+        .max(weights_bytes);
+    clear_cache();
+    let mut context = ltx_context(
+        selection,
+        calibration,
+        &calibration.fingerprint,
+        geometry,
+        hardware_bytes,
+        predicted_peak_bytes,
+    );
+    context.budget.committed_bytes = get_active_memory() as u64;
+    context.budget.reclaimable_bytes = get_cache_memory() as u64;
+    match mlx_gen::gen_core::default_memory_strategy_safety_check(contract, &context) {
+        MemorySafetyDecision::Accept => Ok((
+            context,
+            LtxOrdinaryProjection {
+                weights_bytes,
+                decode_working_set_bytes,
+                predicted_peak_bytes,
+            },
+        )),
+        MemorySafetyDecision::Reject { reason } => Err(format!(
+            "LTX-2.3 admission refused by the production budget before load: {reason} \
+             (weights floor {weights_bytes} bytes + engine decode working set \
+             {decode_working_set_bytes} bytes for {}x{} x {} frames against hardware.memoryBytes \
+             {hardware_bytes})",
+            geometry.width, geometry.height, geometry.frames
+        )),
     }
 }
 
@@ -15155,9 +15291,9 @@ fn run_ltx_with_admission(
         ));
     }
     match admission {
-        LtxRunAdmission::Ordinary => {
-            refuse_unsafe_ltx_capture(request, tier, geometry, &selection)?
-        }
+        // sc-22738: no arm-local gate. The ordinary capture is admitted or refused by the
+        // production budget below (`ltx_ordinary_admission`), never by this arm's opinion.
+        LtxRunAdmission::Ordinary => {}
         LtxRunAdmission::CampaignEntry => {
             validate_ltx_campaign_entry(request, tier, geometry, &selection)?
         }
@@ -15165,6 +15301,12 @@ fn run_ltx_with_admission(
             validate_ltx_bounded_campaign_entry(request, tier, geometry, &selection)?
         }
     }
+    // Read after every plan check and before any environment, model-path or provider work: the
+    // budget is a fact about the host, not the plan, and a malformed plan must name its own error.
+    let hardware_bytes = request
+        .pointer("/hardware/memoryBytes")
+        .and_then(Value::as_u64)
+        .ok_or_else(|| "run request.hardware.memoryBytes must be an integer".to_owned())?;
     let (repository, revision, root, text_encoder_root, spec) =
         ltx_load_spec(request, tier, &selection)?;
     // Read BEFORE the load so the staging bound below is grounded in the artifact on disk rather
@@ -15223,6 +15365,17 @@ fn run_ltx_with_admission(
     {
         return Err("SC-20318 did not resolve the exact 24-tile 192/64 carrier".to_owned());
     }
+    // THE PRODUCTION ADMISSION, before the load: the worker's projection for this cell against
+    // this host's budget, decided by gen-core's shared predicate. Accept proceeds to the load;
+    // Reject is returned in the budget's own words. Every admission mode runs it — the canary
+    // profiles add their own tighter ceilings on top, they do not replace the production one.
+    let (context, projection) = ltx_ordinary_admission(
+        &contract,
+        calibration,
+        selection,
+        geometry,
+        hardware_bytes,
+    )?;
     let generator = registry
         .load(LTX_PROVIDER, &spec)
         .map_err(|error| format!("load real LTX-2.3 {tier} provider: {error}"))?;
@@ -15234,23 +15387,13 @@ fn run_ltx_with_admission(
             "loaded LTX-2.3 generator contract differs from the registry contract".to_owned(),
         );
     }
-    let hardware_bytes = request
-        .pointer("/hardware/memoryBytes")
-        .and_then(Value::as_u64)
-        .ok_or_else(|| "run request.hardware.memoryBytes must be an integer".to_owned())?;
-    let context = ltx_context(
-        selection,
-        calibration,
-        &calibration.fingerprint,
-        geometry,
-        hardware_bytes,
-        1,
-    );
-    if !matches!(
-        generator.memory_strategy_safety_check(&context),
-        MemorySafetyDecision::Accept
-    ) {
-        return Err("LTX-2.3 admission rejected a fitting pre-measurement budget".to_owned());
+    // The provider's OWN registered check on the loaded generator — the same predicate plus its
+    // route gate — with the same context. A rejection is the provider's, quoted verbatim.
+    if let MemorySafetyDecision::Reject { reason } = generator.memory_strategy_safety_check(&context)
+    {
+        return Err(format!(
+            "LTX-2.3 admission refused by the pinned provider after load: {reason}"
+        ));
     }
     let mut unknown = context.clone();
     unknown.budget.total_bytes = 0;
@@ -15422,9 +15565,18 @@ fn run_ltx_with_admission(
                 Some(warm),
             )
         }
-        LtxRunAdmission::Ordinary => {
-            return Err("ordinary SC-18946 execution escaped its pre-load refusal".to_owned())
-        }
+        // The ordinary capture executes the same runtime-complete lifecycle the supervised entry
+        // does; only the phase sink differs (the catalog runner's watchdog needs no phase channel).
+        LtxRunAdmission::Ordinary => (
+            verify_ltx_lifecycle(
+                generator.as_ref(),
+                &context,
+                &measured,
+                lifecycle_input,
+                phase_sink,
+            )?,
+            None,
+        ),
     };
     let maximum_error = lifecycle.maximum_error;
     let mean_error = lifecycle.mean_error;
@@ -15485,6 +15637,22 @@ fn run_ltx_with_admission(
         ("stagedTransformerBytes", "bytes", transformer_bytes),
         ("costagedGiantsBytes", "bytes", costaged_bytes),
         ("tierArtifactBytes", "bytes", tier_bytes),
+        (
+            "admissionWeightsFloorBytes",
+            "bytes",
+            projection.weights_bytes,
+        ),
+        (
+            "admissionDecodeWorkingSetBytes",
+            "bytes",
+            projection.decode_working_set_bytes,
+        ),
+        (
+            "admissionPredictedPeakBytes",
+            "bytes",
+            projection.predicted_peak_bytes,
+        ),
+        ("admissionHardwareBytes", "bytes", hardware_bytes),
         ("renderedFrames", "count", u64::from(geometry.frames)),
         (
             "latentTemporalDepth",
@@ -24123,9 +24291,8 @@ mod ltx_tests {
     /// environment or the weights is present, so a test that mutates exactly one axis is testing
     /// that axis.
     fn ltx_request_json(width: u32, height: u32, frames: u32) -> Value {
-        let predicted_decode_bytes =
-            3_300_000_000_u64 + 340 * u64::from(width) * u64::from(height) * u64::from(frames);
         json!({
+            "hardware": { "memoryBytes": 128_u64 * 1024 * 1024 * 1024 },
             "planned": {
                 "target": {
                     "provider": LTX_PROVIDER,
@@ -24144,17 +24311,6 @@ mod ltx_tests {
                 },
                 "calibrationFingerprint": ltx_calibration_fingerprint("q8")
                     .expect("q8 is a shipped LTX tier"),
-                "_measurementSafety": {
-                    "disposition": LTX_SAFETY_REFUSED_OPEN,
-                    "tierInventoryBytes": LTX_Q8_INVENTORY_BYTES,
-                    "incidentCrashFootprintBytes": LTX_Q4_F305_CRASH_FOOTPRINT_BYTES,
-                    "predictedDecodeBytes": predicted_decode_bytes,
-                    "incidentPredictedDecodeBytes": LTX_INCIDENT_PREDICTED_DECODE_BYTES,
-                    "incidentCalibratedProjectionBytes": i128::from(LTX_Q4_F305_CRASH_FOOTPRINT_BYTES)
-                        + (i128::from(LTX_Q8_INVENTORY_BYTES) - i128::from(LTX_Q4_INVENTORY_BYTES))
-                        + (i128::from(predicted_decode_bytes)
-                            - i128::from(LTX_INCIDENT_PREDICTED_DECODE_BYTES)),
-                },
                 "fixture": format!("ltx-2-3-mlx-q8-{width}x{height}-f{frames}-fps24-seed{LTX_SEED}")
             }
         })
@@ -24468,15 +24624,16 @@ mod ltx_tests {
             "{direct}"
         );
 
+        // sc-22738: through the ordinary action the same row is an ordinary capture — admitted
+        // by the production budget, not refused by a disposition — so it reaches the environment
+        // read that precedes the load.
         let mut ordinary = request.clone();
         ordinary["action"] = json!("run");
         ordinary["planned"]
             .as_object_mut()
             .unwrap()
             .remove("_boundedCampaignEntry");
-        let refusal = run_ltx(&ordinary)
-            .expect_err("the new row must remain refused by the ordinary campaign action");
-        assert!(refusal.contains("safety_refused_open"), "{refusal}");
+        assert_ordinary_ltx_run_reaches_the_environment(&ordinary);
     }
 
     #[test]
@@ -24524,15 +24681,15 @@ mod ltx_tests {
                 direct.contains("live external watchdog channel"),
                 "{direct}"
             );
+            // sc-22738: the ordinary action admits every tier's row through the production
+            // budget rather than refusing it by disposition.
             let mut ordinary = request.clone();
             ordinary["action"] = json!("run");
             ordinary["planned"]
                 .as_object_mut()
                 .unwrap()
                 .remove("_boundedCampaignEntry");
-            let refusal = run_ltx(&ordinary)
-                .expect_err("the ordinary 73-row action must refuse every new tier");
-            assert!(refusal.contains("safety_refused_open"), "{refusal}");
+            assert_ordinary_ltx_run_reaches_the_environment(&ordinary);
         }
         assert!(ltx_bounded_campaign_spec("fp16").is_err());
     }
@@ -25457,63 +25614,6 @@ mod ltx_tests {
         assert_eq!(get_memory_limit(), previous);
     }
 
-    fn set_ltx_request_tier(request: &mut Value, tier: &str, inventory: u64) {
-        request["planned"]["target"]["tier"] = json!(tier);
-        // The identity is per tier (sc-22737), so retargeting the row retargets its key too.
-        request["planned"]["calibrationFingerprint"] =
-            json!(ltx_calibration_fingerprint(tier).expect("a shipped LTX tier"));
-        request["planned"]["fixture"] = json!(format!(
-            "ltx-2-3-mlx-{tier}-768x512-f97-fps24-seed{LTX_SEED}"
-        ));
-        request["planned"]["_measurementSafety"]["tierInventoryBytes"] = json!(inventory);
-
-        let predicted_decode_bytes = request["planned"]["_measurementSafety"]
-            ["predictedDecodeBytes"]
-            .as_u64()
-            .expect("fixture predicted decode bytes");
-        request["planned"]["_measurementSafety"]["incidentCalibratedProjectionBytes"] = json!(
-            i128::from(LTX_Q4_F305_CRASH_FOOTPRINT_BYTES)
-                + (i128::from(inventory) - i128::from(LTX_Q4_INVENTORY_BYTES))
-                + (i128::from(predicted_decode_bytes)
-                    - i128::from(LTX_INCIDENT_PREDICTED_DECODE_BYTES))
-        );
-    }
-
-    fn set_ltx_bounded_case(
-        request: &mut Value,
-        tier: &str,
-        inventory: u64,
-        frames: u32,
-        disposition: &str,
-    ) {
-        request["planned"]["target"]["tier"] = json!(tier);
-        // The identity is per tier (sc-22737), so retargeting the row retargets its key too.
-        request["planned"]["calibrationFingerprint"] =
-            json!(ltx_calibration_fingerprint(tier).expect("a shipped LTX tier"));
-        request["planned"]["target"]["geometry"] =
-            json!({ "width": 1280, "height": 704, "batch": 1, "frames": frames });
-        request["planned"]["fixture"] = json!(format!(
-            "ltx-2-3-mlx-{tier}-1280x704-f{frames}-fps30-seed{LTX_SEED}"
-        ));
-        request["planned"]["strategy"] = json!({
-            "rung": "bounded_decode",
-            "engagedRungs": ["resident", "staged_residency", "bounded_decode"],
-            "parameters": { "decodeTileEdge": 384, "decodeOverlap": 64 },
-        });
-        let predicted_decode_bytes =
-            3_300_000_000_u64 + 40 * 1280 * 704 * u64::from(frames) + 300 * 384 * 384 * 96;
-        let safety = &mut request["planned"]["_measurementSafety"];
-        safety["disposition"] = json!(disposition);
-        safety["tierInventoryBytes"] = json!(inventory);
-        safety["predictedDecodeBytes"] = json!(predicted_decode_bytes);
-        safety["incidentCalibratedProjectionBytes"] = json!(
-            i128::from(LTX_Q4_F305_CRASH_FOOTPRINT_BYTES)
-                + (i128::from(inventory) - i128::from(LTX_Q4_INVENTORY_BYTES))
-                + (i128::from(predicted_decode_bytes)
-                    - i128::from(LTX_INCIDENT_PREDICTED_DECODE_BYTES))
-        );
-    }
-
     /// The port of the shipped LTX frame ladder must reproduce these 18 transcribed values, one per
     /// point the declared limits can reach. These 18 values ARE the envelope, so an unnoticed drift
     /// would silently widen or narrow what this arm accepts.
@@ -25886,99 +25986,273 @@ mod ltx_tests {
         assert!(error.to_string().contains("decode"), "{error}");
     }
 
-    #[test]
-    fn sc_19642_refuses_every_tier_before_environment_registry_or_weights() {
-        for (tier, inventory) in [
-            ("q4", LTX_Q4_INVENTORY_BYTES),
-            ("q8", LTX_Q8_INVENTORY_BYTES),
-            ("bf16", LTX_BF16_INVENTORY_BYTES),
-        ] {
-            let mut request = ltx_request_json(768, 512, 97);
-            set_ltx_request_tier(&mut request, tier, inventory);
-            let error =
-                run_ltx(&request).expect_err("every current SC-18946 tier must fail closed");
-            assert!(
-                error.contains("SC-19642 pre-load safety refusal"),
-                "{error}"
-            );
-            assert!(error.contains(&format!("inventory={inventory}")), "{error}");
-            assert!(error.contains(LTX_SAFETY_REFUSED_OPEN), "{error}");
-            assert!(
-                !error.contains("SCENEWORKS_LTX_ROOT") && !error.contains("build LTX registry"),
-                "refusal happened after environment or registry work: {error}"
-            );
+    const LTX_TEST_HOST_BYTES: u64 = 128 * 1024 * 1024 * 1024;
+
+    /// The request the harness's `planAnchor` would send for one plan row: the row's own fields,
+    /// the lane's default composition where the row carries no `strategy` override (read from the
+    /// same `config/anchor-lane-default-strategy.json` the harness and the worker read), and the
+    /// probed host memory.
+    fn ltx_plan_row_request(key: &str, row: &Value) -> Value {
+        let lane_defaults: Value = serde_json::from_str(include_str!(
+            "../../../../config/anchor-lane-default-strategy.json"
+        ))
+        .expect("the lane default strategy declaration is valid JSON");
+        let parts: Vec<&str> = key.split(':').collect();
+        let strategy = row
+            .get("strategy")
+            .cloned()
+            .unwrap_or_else(|| lane_defaults["lanes"]["mlx"].clone());
+        json!({
+            "hardware": { "memoryBytes": LTX_TEST_HOST_BYTES },
+            "planned": {
+                "target": {
+                    "provider": row["provider"],
+                    "modelId": parts[0],
+                    "tier": parts[1],
+                    "mode": row["mode"],
+                    "overlay": row["overlay"],
+                    "geometry": row["geometry"],
+                },
+                "backend": "mlx",
+                "loadShape": row["loadShape"],
+                "strategy": {
+                    "rung": strategy["rung"],
+                    "engagedRungs": strategy["engagedRungs"],
+                    "parameters": {},
+                },
+                "calibrationFingerprint": row["calibrationFingerprint"],
+                "fixture": row["fixture"],
+            }
+        })
+    }
+
+    fn ltx_tier_quant(tier: &str) -> Option<Quant> {
+        match tier {
+            "q4" => Some(Quant::Q4),
+            "q8" => Some(Quant::Q8),
+            "bf16" => None,
+            other => panic!("unplanned LTX tier {other:?}"),
         }
     }
 
-    #[test]
-    fn sc_19642_preserves_incident_monotonic_and_open_refusal_terminals() {
-        for (tier, inventory, frames, disposition) in [
-            ("q4", LTX_Q4_INVENTORY_BYTES, 305, LTX_INCIDENT_FORBIDDEN),
-            (
-                "q4",
-                LTX_Q4_INVENTORY_BYTES,
-                449,
-                LTX_ARITHMETIC_UNMEASURABLE,
-            ),
-            ("q8", LTX_Q8_INVENTORY_BYTES, 305, LTX_SAFETY_REFUSED_OPEN),
-            (
-                "bf16",
-                LTX_BF16_INVENTORY_BYTES,
-                449,
-                LTX_SAFETY_REFUSED_OPEN,
-            ),
-        ] {
-            let mut request = ltx_request_json(1280, 704, frames);
-            set_ltx_bounded_case(&mut request, tier, inventory, frames, disposition);
-            let error = run_ltx(&request).expect_err("SC-18946 case must refuse before load");
+    /// An ordinary `run` of this request passes every plan check and reaches the first
+    /// environment read that precedes the load — the proof that no arm-local refusal stands in
+    /// its way. Refuses to run with a real LTX root configured in the process, because past the
+    /// environment read the next thing is a weights load.
+    fn assert_ordinary_ltx_run_reaches_the_environment(request: &Value) {
+        for name in ["SCENEWORKS_LTX_REPOSITORY", "SCENEWORKS_LTX_ROOT"] {
             assert!(
-                error.contains("SC-19642 pre-load safety refusal"),
-                "{error}"
+                std::env::var_os(name).is_none(),
+                "{name} is set in this test process; this assertion proves the plan reaches the \
+                 environment read WITHOUT loading weights, so it refuses to run with a real root \
+                 configured"
             );
-            assert!(error.contains(disposition), "{error}");
-            assert!(!error.contains("SCENEWORKS_LTX_ROOT"), "{error}");
         }
-
-        let mut wrong_carrier = ltx_request_json(1280, 704, 449);
-        set_ltx_bounded_case(
-            &mut wrong_carrier,
-            "q4",
-            LTX_Q4_INVENTORY_BYTES,
-            449,
-            LTX_ARITHMETIC_UNMEASURABLE,
+        let error = run_ltx(request).expect_err("no LTX root is configured in this process");
+        assert!(
+            error.contains("required environment variable SCENEWORKS_LTX_REPOSITORY"),
+            "the ordinary run was refused before the environment read: {error}"
         );
-        wrong_carrier["planned"]["strategy"]["parameters"]["decodeTileEdge"] = json!(256);
-        let error = run_ltx(&wrong_carrier)
-            .expect_err("a different carrier cannot inherit the q4 f449 arithmetic proof");
-        assert!(error.contains(LTX_SAFETY_REFUSED_OPEN), "{error}");
-        assert!(!error.contains("SCENEWORKS_LTX_ROOT"), "{error}");
+        assert!(
+            !error.contains("safety_refused_open") && !error.contains("SC-19642"),
+            "an SC-19642 disposition refusal is back: {error}"
+        );
     }
 
+    /// sc-22738. Every planned `ltx_2_3:*:mlx` row — exactly as the harness sends it — passes
+    /// the arm's whole request validation and reaches the environment read that precedes the
+    /// load, and its planned composition is one the pinned contract admits at the production
+    /// budget. SC-19642 used to stop every one of these rows at a plan-supplied block the plan
+    /// schema cannot carry, before any of this was asked.
     #[test]
-    fn sc_19642_safety_metadata_mutations_fail_closed_before_weight_work() {
-        for (pointer, value, expected) in [
-            (
-                "/planned/_measurementSafety/disposition",
-                json!("capturable"),
-                "safety disposition",
-            ),
-            (
-                "/planned/_measurementSafety/tierInventoryBytes",
-                json!(LTX_Q8_INVENTORY_BYTES - 1),
-                "tierInventoryBytes",
-            ),
-            (
-                "/planned/_measurementSafety/incidentCrashFootprintBytes",
-                json!(LTX_Q4_F305_CRASH_FOOTPRINT_BYTES - 1),
-                "incidentCrashFootprintBytes",
-            ),
-        ] {
-            let mut request = ltx_request_json(768, 512, 97);
-            *request.pointer_mut(pointer).unwrap() = value;
-            let error = run_ltx(&request).expect_err("mutated safety metadata must fail closed");
-            assert!(error.contains(expected), "{pointer}: {error}");
-            assert!(!error.contains("SCENEWORKS_LTX_ROOT"), "{pointer}: {error}");
+    fn every_planned_ltx_mlx_row_passes_the_arms_request_validation_up_to_the_load() {
+        let plan: Value = serde_json::from_str(include_str!(
+            "../../../../config/memory-calibration-plan.json"
+        ))
+        .expect("the anchor plan is valid JSON");
+        let mut rows = 0;
+        for (key, row) in plan["anchors"].as_object().expect("anchors is an object") {
+            let parts: Vec<&str> = key.split(':').collect();
+            if parts.len() != 3 || parts[0] != LTX_PROVIDER || parts[2] != "mlx" {
+                continue;
+            }
+            rows += 1;
+            let request = ltx_plan_row_request(key, row);
+            // Everything before the load, in the arm's own order: target, load shape, selection,
+            // tier, fixture, identity, host budget — then the first environment read.
+            assert_ordinary_ltx_run_reaches_the_environment(&request);
+            // And the planned composition is admissible by the pinned contract at the production
+            // budget, so the load is the next thing that happens on a host with the weights.
+            let tier = parts[1];
+            let geometry =
+                ltx_target_geometry(&request).unwrap_or_else(|error| panic!("{key}: {error}"));
+            let selection =
+                planned_selection(&request).unwrap_or_else(|error| panic!("{key}: {error}"));
+            let contract = ltx_fixture_contract(ltx_tier_quant(tier));
+            contract.validate_selection(&selection).unwrap_or_else(|error| {
+                panic!("{key}: the pinned contract refuses the planned composition: {error}")
+            });
+            let calibration = contract.calibration.as_ref().expect("fixture calibration");
+            let (context, projection) = ltx_ordinary_admission(
+                &contract,
+                calibration,
+                selection,
+                geometry,
+                LTX_TEST_HOST_BYTES,
+            )
+            .unwrap_or_else(|error| panic!("{key}: {error}"));
+            assert_eq!(
+                context.predicted_peak_bytes, projection.predicted_peak_bytes,
+                "{key}"
+            );
+            assert_eq!(context.budget.total_bytes, LTX_TEST_HOST_BYTES, "{key}");
+            assert!(!context.has_phases, "{key}");
         }
+        assert_eq!(
+            rows,
+            LTX_TIERS.len(),
+            "every shipped tier has one planned MLX row"
+        );
+    }
+
+    /// sc-22738. The ordinary `run` path has NO arm-local refusal between the plan checks and the
+    /// load: the admission match's `Ordinary` arm is empty, the production admission is what
+    /// stands before the load, and the post-load lifecycle arm executes rather than returning.
+    /// Reintroducing an `Err` in either arm, or dropping the admission call, reds this.
+    #[test]
+    fn the_ordinary_ltx_path_has_no_unconditional_refusal_between_the_plan_and_the_load() {
+        let source = include_str!("mlx.rs");
+        // Assembled so this test's own literal cannot satisfy the search.
+        let refusal = format!("fn {}(", "refuse_unsafe_ltx_capture");
+        assert!(
+            !source.contains(&refusal),
+            "the SC-19642 unconditional refusal is back"
+        );
+        let body = &source[source.find("fn run_ltx_with_admission(").unwrap()..];
+        let load_at = body
+            .find(".load(LTX_PROVIDER, &spec)")
+            .expect("the arm loads the provider");
+        let pre_load = &body[..load_at];
+        let arm_at = pre_load
+            .find("LtxRunAdmission::Ordinary =>")
+            .expect("the admission match has an Ordinary arm");
+        let arm = &pre_load[arm_at..];
+        let arm = &arm[..arm
+            .find("LtxRunAdmission::CampaignEntry =>")
+            .expect("the CampaignEntry arm follows")];
+        assert!(
+            !arm.contains("Err(") && !arm.contains("return") && !arm.contains('?'),
+            "the Ordinary admission arm refuses or exits: {arm}"
+        );
+        let admission_at = pre_load
+            .find("ltx_ordinary_admission(")
+            .expect("the production admission is called before the load");
+        assert!(
+            admission_at > arm_at,
+            "the production admission must stand between the plan checks and the load"
+        );
+        let post_load = &body[load_at..];
+        let lifecycle = &post_load[..post_load
+            .find("let maximum_error = lifecycle.maximum_error;")
+            .expect("the lifecycle match precedes the quality figures")];
+        let ordinary = &lifecycle[lifecycle
+            .rfind("LtxRunAdmission::Ordinary =>")
+            .expect("the lifecycle match has an Ordinary arm")..];
+        assert!(
+            !ordinary.contains("Err(") && !ordinary.contains("return"),
+            "the Ordinary lifecycle arm refuses or exits: {ordinary}"
+        );
+        assert!(
+            ordinary.contains("verify_ltx_lifecycle("),
+            "the Ordinary lifecycle arm must execute the runtime-complete lifecycle"
+        );
+    }
+
+    /// sc-22738. A request whose projection exceeds the host budget is refused BY THE BUDGET —
+    /// gen-core's shared predicate, in its own words, carrying the engine's own decode figure —
+    /// and the same request fits a real host. Bypassing the admission, or replacing the engine's
+    /// profile with a number of this arm's own, reds this.
+    #[test]
+    fn an_ltx_request_beyond_the_host_budget_is_refused_by_the_budget_in_its_own_words() {
+        let request = ltx_plan_row_request(
+            "ltx_2_3:q8:mlx",
+            &json!({
+                "provider": LTX_PROVIDER,
+                "mode": "text_to_video",
+                "overlay": "none",
+                "geometry": { "width": 768, "height": 512, "batch": 1, "frames": 121 },
+                "loadShape": "eager_materialization",
+                "calibrationFingerprint": ltx_calibration_fingerprint("q8").unwrap(),
+                "fixture": format!("ltx-2-3-mlx-q8-768x512-f121-fps30-seed{LTX_SEED}"),
+            }),
+        );
+        let geometry = ltx_target_geometry(&request).unwrap();
+        let selection = planned_selection(&request).unwrap();
+        let contract = ltx_fixture_contract(Some(Quant::Q8));
+        let calibration = contract.calibration.as_ref().unwrap();
+        // The weights-free fixture declares zero asset facts, so the projection IS the engine's
+        // conservative decode working set for this geometry — the figure the worker's
+        // `packaged_video_decode_profile` resolves for a non-bounded MLX candidate.
+        let engine_decode =
+            mlx_gen_ltx::conservative_video_decode_memory_profile(LTX_PROVIDER, 768, 512, 121)
+                .expect("the pinned provider profiles the anchor geometry")
+                .working_set_bytes();
+        let small_host = 8 * 1024 * 1024 * 1024;
+        let error = ltx_ordinary_admission(
+            &contract,
+            calibration,
+            selection,
+            geometry,
+            small_host,
+        )
+        .expect_err("a projection above the host budget must be refused");
+        assert!(
+            error.starts_with("LTX-2.3 admission refused by the production budget before load: "),
+            "{error}"
+        );
+        assert!(
+            error.contains(&format!(
+                "incremental live demand {engine_decode} exceeds effective budget"
+            )),
+            "the refusal must be the shared predicate's own, carrying the engine's figure: {error}"
+        );
+        assert!(
+            error.contains(&format!("hardware.memoryBytes {small_host}")),
+            "{error}"
+        );
+        let (context, projection) = ltx_ordinary_admission(
+            &contract,
+            calibration,
+            selection,
+            geometry,
+            LTX_TEST_HOST_BYTES,
+        )
+        .expect("the same request fits a 128 GiB host");
+        assert_eq!(projection.decode_working_set_bytes, engine_decode);
+        assert_eq!(projection.predicted_peak_bytes, engine_decode);
+        assert_eq!(projection.weights_bytes, 0, "weights-free fixture");
+        assert_eq!(context.predicted_peak_bytes, engine_decode);
+        assert!(context.budget.fits(engine_decode));
+    }
+
+    /// The weights term follows the worker's floor for the two compositions an LTX anchor can plan:
+    /// resident sums the stacks, staged residency takes the larger of the conditioning stack and
+    /// the post-eviction heavy stack.
+    #[test]
+    fn the_ltx_admission_weights_floor_follows_the_workers_composition_rule() {
+        let contract = ltx_fixture_contract(Some(Quant::Q8));
+        let resident = contract.engaged_composition(MemoryStrategy::Resident);
+        let staged = contract.engaged_composition(MemoryStrategy::StagedResidency);
+        assert_eq!(ltx_floor_weights_bytes(&contract, &resident), 0);
+        assert_eq!(ltx_floor_weights_bytes(&contract, &staged), 0);
+        let mut declared = contract.clone();
+        declared.asset_facts.conditioning_bytes = 26;
+        declared.asset_facts.transformer_bytes = 20;
+        declared.asset_facts.decoder_bytes = 4;
+        declared.asset_facts.base_bytes = 50;
+        assert_eq!(ltx_floor_weights_bytes(&declared, &resident), 50);
+        // Staged: max(conditioning 26, heavy 24 with nothing evicted below the transformer) = 26.
+        assert_eq!(ltx_floor_weights_bytes(&declared, &staged), 26);
     }
 
     /// The exact composition the record claims, pinned so a silent widening of `engagedRungs` would
@@ -26597,7 +26871,9 @@ mod ltx_tests {
             1,
         );
         assert_eq!(context.mode.as_key(), "text_to_video");
-        assert!(context.has_phases);
+        // The worker's video context (`video_admission.rs`) carries `false`; the pinned provider's
+        // route gate rejects `true` outright.
+        assert!(!context.has_phases);
         assert_eq!(context.geometry.frames, 305);
         assert_eq!(context.selection.strategy, MemoryStrategy::StagedResidency);
         assert_eq!(

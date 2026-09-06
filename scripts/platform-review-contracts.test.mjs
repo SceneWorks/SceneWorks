@@ -3376,10 +3376,20 @@ test("the LTX real-weight safety canary cannot relax or masquerade as campaign e
     ordinary,
     /run_ltx_with_admission\(request, LtxRunAdmission::Ordinary, &mut phases\)/,
   );
-  assert.ok(campaign.indexOf("refuse_unsafe_ltx_capture(") >= 0);
+  // sc-22738: the ordinary path no longer carries an arm-local refusal (SC-19642's unconditional
+  // `refuse_unsafe_ltx_capture` had no success path). What stands before the load now is the
+  // PRODUCTION admission — the worker's projection against the probed host budget, decided by
+  // gen-core's shared predicate — and the frozen canary profiles keep their own validators.
+  assert.equal(adapter.includes(["fn", "refuse_unsafe_ltx_capture("].join(" ")), false);
   assert.ok(
-    campaign.indexOf("refuse_unsafe_ltx_capture(") < campaign.indexOf("ltx_load_spec("),
-    "the campaign must still refuse before model-path/provider/weights access",
+    campaign.indexOf("ltx_ordinary_admission(") >= 0
+      && campaign.indexOf("ltx_ordinary_admission(") < campaign.indexOf(".load(LTX_PROVIDER, &spec)"),
+    "the production admission must decide before provider/weights load",
+  );
+  assert.match(campaign, /LtxRunAdmission::Ordinary => \{\}/, "the ordinary admission arm is empty");
+  assert.ok(
+    campaign.indexOf("validate_ltx_campaign_entry(") < campaign.indexOf("ltx_load_spec("),
+    "the supervised entries must still validate before model-path/provider/weights access",
   );
   const campaignRows = (await Promise.all(LTX_CAMPAIGN_PLANS.map(async (name) =>
     JSON.parse(await source(`docs/calibration/sc-18946/${name}`)).providers))).flat();

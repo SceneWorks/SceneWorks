@@ -821,6 +821,15 @@ SCENEWORKS_FLUX2_REVISION=<exact artifact revision>
 SCENEWORKS_FLUX2_ROOT=/abs/path/.../snapshots/<rev>/<tier>   # q4 | q8 — tier DERIVED from the plan target
 
 # memory-mlx-adapter — ltx_2_3   (sc-18808; the only VIDEO arm. FOUR vars, not three)
+# sc-22738: `ltx_2_3:{bf16,q4,q8}:mlx` are ORDINARY catalog anchors. The arm admits a `run` through
+# the production budget — the worker's weights floor + the engine's conservative decode profile
+# against the probed `hardware.memoryBytes`, decided by gen-core's shared predicate, then the
+# pinned provider's own check on the loaded generator — and returns the budget's refusal verbatim
+# or measures. SC-19642's unconditional pre-load refusal (and its `_measurementSafety` demand,
+# which the anchor-plan schema cannot carry) is gone; the SC-18946 records keep their dispositions
+# as history. Containment is `scripts/measure-memory-catalog.mjs`, which runs EVERY MLX capture
+# under `scripts/memory-calibration-watchdog.py` with ceilings from the adapter probe
+# (footprint = wired limit, host free floor = memory − wired limit).
 SCENEWORKS_LTX_REPOSITORY=SceneWorks/ltx-2.3-mlx             # fixed; validated against LTX_REPOSITORY
 SCENEWORKS_LTX_REVISION=<exact artifact revision>
 SCENEWORKS_LTX_ROOT=/abs/path/.../snapshots/<rev>/<tier>     # bf16 | q4 | q8, derived from the plan target

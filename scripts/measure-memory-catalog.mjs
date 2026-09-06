@@ -1537,9 +1537,10 @@ export async function capturedInCampaign(root, campaignDir) {
 // Process plumbing
 // ---------------------------------------------------------------------------------------------
 
-function run(command, args, { cwd = ROOT, env = process.env, log = null, detached = false } = {}) {
+function run(command, args, { cwd = ROOT, env = process.env, log = null, detached = false, input = null } = {}) {
   return new Promise((resolve, reject) => {
-    const child = spawn(command, args, { cwd, env, stdio: ["ignore", "pipe", "pipe"], detached });
+    const child = spawn(command, args, { cwd, env, stdio: [input === null ? "ignore" : "pipe", "pipe", "pipe"], detached });
+    if (input !== null) child.stdin.end(input);
     let stdout = "";
     let stderr = "";
     child.stdout.on("data", (chunk) => { stdout += chunk; log?.write(chunk); });
@@ -1575,6 +1576,75 @@ class Log {
 
 function stamp() {
   return new Date().toISOString().replace(/[:.]/g, "-");
+}
+
+// ---------------------------------------------------------------------------------------------
+// Physical containment (sc-22738)
+// ---------------------------------------------------------------------------------------------
+
+export const WATCHDOG = "scripts/memory-calibration-watchdog.py";
+
+/**
+ * The adapter's own host probe — the same `probe` action the harness runs first inside every
+ * capture — so the ceilings below come from the figures the record will carry, not from a second
+ * reading of the host.
+ */
+export async function probeAdapter(command, { cwd = ROOT, env = process.env } = {}) {
+  const { stdout } = await run(command[0], command.slice(1), { cwd, env, input: `${JSON.stringify({ action: "probe" })}\n` });
+  const hardware = JSON.parse(stdout).hardware;
+  for (const field of ["memoryBytes", "wiredLimitBytes"]) {
+    if (!Number.isSafeInteger(hardware?.[field]) || hardware[field] <= 0) fail(`adapter probe reported no positive hardware.${field}`);
+  }
+  if (hardware.wiredLimitBytes > hardware.memoryBytes) fail("adapter probe reported a wired ceiling above host memory");
+  return hardware;
+}
+
+/**
+ * The footprint hard stop every MLX capture runs under: `scripts/memory-calibration-watchdog.py`
+ * wrapped around the harness, the same guard `scripts/run-ltx-safety-canary.mjs` puts around its
+ * contained runs, minus the nonce-authenticated child attestation and provider-phase channel that
+ * only the frozen canary profiles speak. Without those the guard still does the one thing the
+ * SC-18946 incident needed: it samples the guarded group's kernel `phys_footprint` every quarter
+ * second and terminates the whole group the instant it reaches the ceiling, before the host
+ * watchdog can panic.
+ *
+ * Both ceilings are DERIVED from the adapter's probe, never chosen here:
+ *
+ * * `--max-footprint-bytes` is `hardware.wiredLimitBytes` — the device wired ceiling the probe
+ *   resolves the way the worker does (`iogpu.wired_limit_mb`, else the kernel limit, else MLX's
+ *   default memory limit / 1.5). It is the exact line SC-18946 crossed: a 96,970,084,480-byte
+ *   footprint on a 128 GiB host whose wired ceiling is ~96 GiB.
+ * * `--min-memory-free-bytes` is `memoryBytes - wiredLimitBytes`: the host's own non-wired
+ *   reserve. While the guarded group stays under its ceiling that much stays free unless a
+ *   FOREIGN load takes it, which is the other half of the incident's hazard.
+ *
+ * No wall-time ceiling: a runtime-complete video anchor runs six renders, and time is not the
+ * hazard this guard exists for. Darwin-only by construction — the footprint sampler is
+ * `/usr/bin/footprint`, and MLX captures run nowhere else.
+ */
+export function watchdogGuard({ hardware, eventFile }) {
+  const { memoryBytes, wiredLimitBytes } = hardware;
+  for (const [name, value] of [["memoryBytes", memoryBytes], ["wiredLimitBytes", wiredLimitBytes]]) {
+    if (!Number.isSafeInteger(value) || value <= 0) fail(`watchdog guard needs a positive hardware.${name}`);
+  }
+  if (wiredLimitBytes > memoryBytes) fail("watchdog guard: wired ceiling above host memory");
+  return [
+    // This runner's own tool, resolved against ITS checkout: the guard is not an artifact of the
+    // tree being measured.
+    path.join(ROOT, WATCHDOG),
+    "--max-footprint-bytes", String(wiredLimitBytes),
+    "--host-memory-bytes", String(memoryBytes),
+    "--min-memory-free-bytes", String(memoryBytes - wiredLimitBytes),
+    "--sample-interval", "0.25",
+    "--telemetry-timeout", "1",
+    "--term-grace", "1",
+    "--event-file", eventFile,
+  ];
+}
+
+/** Whether a capture of this anchor runs under the footprint guard: every MLX anchor, on the only host kind MLX runs on. */
+export function guardsCapture(key, platform = process.platform) {
+  return anchorParts(key).backend === "mlx" && platform === "darwin";
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -1654,8 +1724,17 @@ export async function measureAnchor(row, context) {
   if (row.physical) captureArgs.push("--raw-log-dir", rawLogDir, "--source-path-prefix", campaignPrefix);
   if (row.ltx25SnapshotRoot) captureArgs.push("--ltx25-snapshot-root", row.ltx25SnapshotRoot);
   try {
-    log.write(`$ node ${captureArgs.join(" ")}\n`);
-    await exec(process.execPath, captureArgs, { env, log, detached: true });
+    if (guardsCapture(row.key)) {
+      // sc-22738: every MLX capture runs inside the footprint hard stop, with ceilings the
+      // adapter's own probe resolved for this host — see `watchdogGuard`.
+      const hardware = await probeAdapter(providerCommand(args.adapter), { cwd: root, env });
+      const guard = watchdogGuard({ hardware, eventFile: path.join(workDir, "logs", `${slug}-watchdog.jsonl`) });
+      log.write(`$ /usr/bin/python3 ${guard.join(" ")} -- node ${captureArgs.join(" ")}\n`);
+      await exec("/usr/bin/python3", [...guard, "--", process.execPath, ...captureArgs], { env, log, detached: true });
+    } else {
+      log.write(`$ node ${captureArgs.join(" ")}\n`);
+      await exec(process.execPath, captureArgs, { env, log, detached: true });
+    }
   } catch (error) {
     return finish("capture_failed", failureReason(error));
   }
