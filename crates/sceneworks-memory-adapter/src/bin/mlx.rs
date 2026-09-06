@@ -15924,7 +15924,34 @@ fn run_ltx_with_admission(
             "result": "passed",
             "resolvedPathFingerprint": format!("{repository}@{revision}:{tier}+gemma"),
         },
-        "output": {
+        "diagnostics": protocol::diagnostics(
+            "memory-mlx-adapter:ltx-2-3-provider-contract-video",
+            "executed",
+            [],
+            diagnostic_measurements,
+        ),
+        "capturedAt": protocol::captured_at(),
+    });
+    // sc-22738. The `output` descriptor belongs to the CAMPAIGN CARRIERS and to nothing else.
+    //
+    // A calibration fragment becomes a `records[]` member verbatim (the harness spreads it —
+    // `capturePlannedCase`'s `{ ...fragment }`), and `memory-calibration.schema.json`'s record is
+    // `additionalProperties: false` with no `output` property: every committed video record —
+    // `docs/generated/ltx-mlx-video-sc-18808.json` included — publishes the same four facts as
+    // `renderedFrames` / `outputFps` / `audioTrackDecoded` / `latentTemporalDepth` diagnostic
+    // measurements, which is where the harness and the derivations read them from. Emitting the
+    // block on an ordinary capture therefore does not enrich the record, it makes the bundle
+    // unschedulable — `schema validation failed: $.records[0].output: unexpected property`, AFTER
+    // the render, which is the most expensive place in the system to fail.
+    //
+    // The campaign entries are not calibration records: `run_ltx_campaign_entry` and
+    // `run_ltx_bounded_campaign_entry` stamp their own `_campaignEntry` / `_boundedCampaignEntry`
+    // keys (which the record schema would reject just as flatly) and their fragments are consumed
+    // by `validate_ltx_campaign_entry_fragment` / `validate_ltx_bounded_campaign_fragment`, which
+    // cross-check `/output/*` AGAINST the diagnostics of the same run. That redundancy is the whole
+    // point of the carrier check, so it is kept exactly where it is read.
+    if !matches!(admission, LtxRunAdmission::Ordinary) {
+        fragment["output"] = json!({
             "frames": geometry.frames,
             "fps": fps,
             "audio": {
@@ -15934,15 +15961,8 @@ fn run_ltx_with_admission(
                 "channels": audio.channels,
             },
             "firstFrameNondegenerate": true,
-        },
-        "diagnostics": protocol::diagnostics(
-            "memory-mlx-adapter:ltx-2-3-provider-contract-video",
-            "executed",
-            [],
-            diagnostic_measurements,
-        ),
-        "capturedAt": protocol::captured_at(),
-    });
+        });
+    }
     protocol::settle_plain_overlay_scenario(request, &mut fragment, LTX_PLAIN_EXECUTION_PATH)?;
     Ok(fragment)
 }
@@ -17538,19 +17558,6 @@ fn run_minimax_h3(request: &Value) -> Result<Value, String> {
             "result": "passed",
             "resolvedPathFingerprint": artifact.resolved_path_fingerprint(member, tier),
         },
-        "output": {
-            "frames": geometry.frames,
-            "fps": fps,
-            "videoLatentFrames": geometry.video_latent_frames,
-            "audioLatentFrames": geometry.audio_latent_frames,
-            "audio": {
-                "present": true,
-                "samples": audio.samples,
-                "sampleRate": audio.sample_rate,
-                "channels": audio.channels,
-            },
-            "firstFrameNondegenerate": true,
-        },
         "diagnostics": protocol::diagnostics(
             "memory-mlx-adapter:minimax-h3-joint-av",
             "executed",
@@ -17582,6 +17589,17 @@ fn run_minimax_h3(request: &Value) -> Result<Value, String> {
                 ("negativeMutationRootMeanSquareErrorPer255", "count", (mutated_rms * 255.0).round() as u64),
                 ("videoLatentFrames", "count", u64::from(geometry.video_latent_frames)),
                 ("audioLatentFrames", "count", u64::from(geometry.audio_latent_frames)),
+                // sc-22738. The render receipts, in the ONE place the record schema has for them.
+                // They were a top-level `output` object until the catalog campaign proved the
+                // record is `additionalProperties: false` and rejected the whole bundle after the
+                // render; `docs/generated/ltx-mlx-video-sc-18808.json` is the committed precedent
+                // for publishing them here, under these names.
+                ("renderedFrames", "count", u64::from(geometry.frames)),
+                ("outputFps", "count", u64::from(fps)),
+                ("audioTrackDecoded", "count", 1),
+                ("audioSamples", "count", audio.samples),
+                ("audioSampleRate", "count", u64::from(audio.sample_rate)),
+                ("audioChannels", "count", u64::from(audio.channels)),
                 ("loadShapeDeferred", "count", u64::from(load_shape == LoadShape::DeferredMaterialization)),
                 ("textEncoderFromTierTree", "count", u64::from(artifact.text_encoder_source == MINIMAX_TIERED_TEXT_ENCODER)),
                 ("stagedDitBytes", "bytes", staged_dit_bytes),
@@ -18510,12 +18528,6 @@ fn run_bernini(request: &Value) -> Result<Value, String> {
             "result": "passed",
             "resolvedPathFingerprint": artifact.resolved_path_fingerprint(arm, tier),
         },
-        "output": {
-            "modelId": arm.model_id,
-            "frames": geometry.frames,
-            "fps": fps,
-            "firstFrameNondegenerate": true,
-        },
         "diagnostics": protocol::diagnostics(
             "memory-mlx-adapter:bernini-dual-expert",
             "executed",
@@ -18547,6 +18559,11 @@ fn run_bernini(request: &Value) -> Result<Value, String> {
                 ("negativeMutationRootMeanSquareErrorPer255", "count", (mutated_rms * 255.0).round() as u64),
                 ("loadShapeDeferred", "count", u64::from(load_shape == LoadShape::DeferredMaterialization)),
                 ("stagedTierBytes", "bytes", staged_tier_bytes),
+                // sc-22738: the render receipts, published as measurements rather than as a
+                // top-level `output` object the record schema rejects. The member this record is
+                // filed under is `target.modelId`, so the dropped `output.modelId` is not lost.
+                ("renderedFrames", "count", u64::from(geometry.frames)),
+                ("outputFps", "count", u64::from(fps)),
             ],
         ),
         "capturedAt": protocol::captured_at(),
@@ -20519,14 +20536,6 @@ fn run_krea_realtime(request: &Value) -> Result<Value, String> {
             "result": "passed",
             "resolvedPathFingerprint": artifact.resolved_path_fingerprint(tier),
         },
-        "output": {
-            "frames": geometry.frames,
-            "fps": fps,
-            "latentFrames": geometry.latent_frames,
-            "autoregressiveBlocks": geometry.autoregressive_blocks,
-            "audio": { "present": false },
-            "firstFrameNondegenerate": true,
-        },
         "diagnostics": protocol::diagnostics(
             &format!("memory-mlx-adapter:krea-realtime-{}", tier),
             "executed",
@@ -20558,6 +20567,12 @@ fn run_krea_realtime(request: &Value) -> Result<Value, String> {
                 ("negativeMutationRootMeanSquareErrorPer255", "count", (mutated_rms * 255.0).round() as u64),
                 ("latentFrames", "count", u64::from(geometry.latent_frames)),
                 ("autoregressiveBlocks", "count", u64::from(geometry.autoregressive_blocks)),
+                // sc-22738: the render receipts, published as measurements rather than as a
+                // top-level `output` object the record schema rejects. This route decodes no audio
+                // track, so `audioTrackDecoded` is a measured 0 rather than an absent claim.
+                ("renderedFrames", "count", u64::from(geometry.frames)),
+                ("outputFps", "count", u64::from(fps)),
+                ("audioTrackDecoded", "count", 0),
                 ("loadSpecCarriesQuant", "count", u64::from(spec.quantize.is_some())),
                 ("stagedTierBytes", "bytes", staged_tier_bytes),
             ],
