@@ -1,7 +1,7 @@
 {
   "schemaVersion": 11,
   "generatedFrom": {
-    "sceneWorksRevision": "source-tree:170f0f8a06b21b17d27cb7653c0449c4c4707fab8eabd4184ab04ac2c36ce4de",
+    "sceneWorksRevision": "source-tree:b6fbcb4978d9be9c26ce8ac487a8eaca58edaa05992a540d20f079bbae310583",
     "sources": {
       "manifest": {
         "path": "config/manifests/builtin.models.jsonc",
@@ -69,7 +69,7 @@
       },
       "anchorStore": {
         "path": "config/memory-anchors.json",
-        "sha256": "d32b78e7d771683ea162a4951ee3657a941966f28b16e8886814df14b1a6988a"
+        "sha256": "ffe1fc3312e862499f7b0c11267d557bbb59807ba6aa4ad415d8789bedb51194"
       },
       "anchorLoaderClosures": {
         "path": "config/anchor-loader-closures.json",
@@ -77,7 +77,7 @@
       },
       "anchorDerivation": {
         "path": "crates/sceneworks-core/src/memory_anchor.rs",
-        "sha256": "d51594d2dac79701c0d0a4a60bd2eb48c289569ed45d72f09d8d1baa806114cb"
+        "sha256": "654f6385afd2c28065fc6634f93d4b4af76e488180f3b7f6217c7bdf023316c6"
       },
       "anchorAdmission": {
         "path": "crates/sceneworks-worker/src/video_admission.rs",
@@ -138,10 +138,10 @@
       "video": 11
     },
     "cells": 9265,
-    "publishedCells": 890,
-    "elidedCells": 8375,
+    "publishedCells": 910,
+    "elidedCells": 8355,
     "elidedByState": {
-      "Implemented": 4001,
+      "Implemented": 3981,
       "Missing": 4374
     },
     "publicationPredicate": "A coordinate is published when it carries a claim a per-lane census cannot: a measured memory anchor covers its (model, tier, backend lane), or it is structurally exempt. A bare `Implemented` or `Missing` state is a property of the whole lane, replicated across every tier x mode x overlay, and is counted in `summary.elidedByState` and the per-(entry, backend, rung) `coverage` census instead of restated thousands of times.",
@@ -162,9 +162,9 @@
         "reason": "both lanes ARE routed (VideoModelCaps mlx+candle, resolve_candle_video_route's MiniMaxH3 arm), but this generator's route parsers cannot enumerate either: the MLX resolver is a PREFIX PREDICATE and the Candle arm lives outside candle_video_engine_id. Matrix-only — the E1 measurability burndown reads the routing catalog and DOES claim these cells"
       }
     ],
-    "anchors": 28,
-    "analyticOnlyCells": 309,
-    "anchoredCells": 427,
+    "anchors": 29,
+    "analyticOnlyCells": 308,
+    "anchoredCells": 447,
     "staleAnchors": 10,
     "attestedAnchors": 5,
     "fullModels": 0
@@ -4900,6 +4900,24 @@
       "cells": 20
     },
     {
+      "id": "flux2_klein_9b_kv:mlx:q8:base:base:flux2-klein-9b-q8-mlx-shared-ladder-kv-rehost-t2i-v1:imc-df82dbbe7f28b2f0fadc",
+      "modelId": "flux2_klein_9b_kv",
+      "backend": "mlx",
+      "tier": "q8",
+      "provider": "flux2_klein_9b",
+      "mode": "text_to_image",
+      "geometry": {
+        "width": 768,
+        "height": 768,
+        "frames": 1,
+        "fps": null
+      },
+      "source": "docs/calibration/sc-22738/flux2-klein-9b-kv-q8-mlx-evidence.json",
+      "current": true,
+      "currencyAttestation": null,
+      "cells": 20
+    },
+    {
       "id": "flux2_klein_9b:mlx:bf16:base:base:flux2-klein-9b-bf16-mlx-shared-ladder-rehost-t2i-v1:imc-674fc134cc94d24ef3a3",
       "modelId": "flux2_klein_9b",
       "backend": "mlx",
@@ -7579,12 +7597,11 @@
       "backend": "mlx",
       "rung": "bounded_attention",
       "coordinates": 36,
-      "published": 8,
-      "elided": 28,
+      "published": 12,
+      "elided": 24,
       "implemented": 12,
       "states": {
-        "Anchored": 8,
-        "Implemented": 4,
+        "Anchored": 12,
         "Missing": 24
       },
       "implementedBy": {
@@ -7611,12 +7628,11 @@
       "backend": "mlx",
       "rung": "bounded_decode",
       "coordinates": 36,
-      "published": 8,
-      "elided": 28,
+      "published": 12,
+      "elided": 24,
       "implemented": 12,
       "states": {
-        "Anchored": 8,
-        "Implemented": 4,
+        "Anchored": 12,
         "Missing": 24
       },
       "implementedBy": {
@@ -7643,12 +7659,11 @@
       "backend": "mlx",
       "rung": "bounded_transformer_residency",
       "coordinates": 36,
-      "published": 8,
-      "elided": 28,
+      "published": 12,
+      "elided": 24,
       "implemented": 12,
       "states": {
-        "Anchored": 8,
-        "Implemented": 4,
+        "Anchored": 12,
         "Missing": 24
       },
       "implementedBy": {
@@ -7675,12 +7690,11 @@
       "backend": "mlx",
       "rung": "resident",
       "coordinates": 36,
-      "published": 8,
-      "elided": 28,
+      "published": 12,
+      "elided": 24,
       "implemented": 12,
       "states": {
-        "Anchored": 8,
-        "Implemented": 4,
+        "Anchored": 12,
         "Missing": 24
       },
       "implementedBy": {
@@ -7707,12 +7721,11 @@
       "backend": "mlx",
       "rung": "staged_residency",
       "coordinates": 36,
-      "published": 8,
-      "elided": 28,
+      "published": 12,
+      "elided": 24,
       "implemented": 12,
       "states": {
-        "Anchored": 8,
-        "Implemented": 4,
+        "Anchored": 12,
         "Missing": 24
       },
       "implementedBy": {
@@ -20703,6 +20716,606 @@
       }
     },
     {
+      "id": "flux2_klein_9b_kv:flux2_klein_9b_kv_edit:mlx:q8:character_image:none:bounded_attention",
+      "modelId": "flux2_klein_9b_kv",
+      "resolvedRoute": "flux2_klein_9b_kv_edit",
+      "provider": "flux2_klein_9b_kv_edit",
+      "backend": "mlx",
+      "tier": "q8",
+      "mode": "character_image",
+      "overlay": "none",
+      "rung": "bounded_attention",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "768x768",
+          "1024x1024",
+          "1280x720",
+          "720x1280"
+        ]
+      },
+      "strategyParameters": {
+        "decodeTileEdge": 512,
+        "decodeOverlap": 128,
+        "attentionChunkSize": 67108864,
+        "publishedRanges": {
+          "decodeTileEdges": [
+            2048,
+            768,
+            640,
+            512
+          ],
+          "decodeOverlaps": [
+            256,
+            128
+          ],
+          "attentionChunkSizes": [
+            67108864
+          ]
+        }
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "flux2_klein_9b_kv:mlx:q8:base:base:flux2-klein-9b-q8-mlx-shared-ladder-kv-rehost-t2i-v1:imc-df82dbbe7f28b2f0fadc",
+        "tier": "q8",
+        "source": "config/memory-anchors.json#flux2_klein_9b_kv:mlx:q8:base:base:flux2-klein-9b-q8-mlx-shared-ladder-kv-rehost-t2i-v1:imc-df82dbbe7f28b2f0fadc",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 15518,
+      "owningModelStory": 15480,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "inference:crates/media/mlx-gen/mlx-gen-flux2/src/memory_strategy.rs"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#flux2_klein_9b_kv:mlx:q8:base:base:flux2-klein-9b-q8-mlx-shared-ladder-kv-rehost-t2i-v1:imc-df82dbbe7f28b2f0fadc"
+          }
+        ]
+      }
+    },
+    {
+      "id": "flux2_klein_9b_kv:flux2_klein_9b_kv_edit:mlx:q8:character_image:none:bounded_decode",
+      "modelId": "flux2_klein_9b_kv",
+      "resolvedRoute": "flux2_klein_9b_kv_edit",
+      "provider": "flux2_klein_9b_kv_edit",
+      "backend": "mlx",
+      "tier": "q8",
+      "mode": "character_image",
+      "overlay": "none",
+      "rung": "bounded_decode",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "768x768",
+          "1024x1024",
+          "1280x720",
+          "720x1280"
+        ]
+      },
+      "strategyParameters": {
+        "decodeTileEdge": 512,
+        "decodeOverlap": 128,
+        "publishedRanges": {
+          "decodeTileEdges": [
+            2048,
+            768,
+            640,
+            512
+          ],
+          "decodeOverlaps": [
+            256,
+            128
+          ]
+        }
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "flux2_klein_9b_kv:mlx:q8:base:base:flux2-klein-9b-q8-mlx-shared-ladder-kv-rehost-t2i-v1:imc-df82dbbe7f28b2f0fadc",
+        "tier": "q8",
+        "source": "config/memory-anchors.json#flux2_klein_9b_kv:mlx:q8:base:base:flux2-klein-9b-q8-mlx-shared-ladder-kv-rehost-t2i-v1:imc-df82dbbe7f28b2f0fadc",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 15518,
+      "owningModelStory": 15480,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "inference:crates/media/mlx-gen/mlx-gen-flux2/src/memory_strategy.rs"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#flux2_klein_9b_kv:mlx:q8:base:base:flux2-klein-9b-q8-mlx-shared-ladder-kv-rehost-t2i-v1:imc-df82dbbe7f28b2f0fadc"
+          }
+        ]
+      }
+    },
+    {
+      "id": "flux2_klein_9b_kv:flux2_klein_9b_kv_edit:mlx:q8:character_image:none:bounded_transformer_residency",
+      "modelId": "flux2_klein_9b_kv",
+      "resolvedRoute": "flux2_klein_9b_kv_edit",
+      "provider": "flux2_klein_9b_kv_edit",
+      "backend": "mlx",
+      "tier": "q8",
+      "mode": "character_image",
+      "overlay": "none",
+      "rung": "bounded_transformer_residency",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "768x768",
+          "1024x1024",
+          "1280x720",
+          "720x1280"
+        ]
+      },
+      "strategyParameters": {
+        "decodeTileEdge": 512,
+        "decodeOverlap": 128,
+        "attentionChunkSize": 67108864,
+        "transformerWindowSize": 1,
+        "transformerWindowComponent": "Dit",
+        "publishedRanges": {
+          "decodeTileEdges": [
+            2048,
+            768,
+            640,
+            512
+          ],
+          "decodeOverlaps": [
+            256,
+            128
+          ],
+          "attentionChunkSizes": [
+            67108864
+          ],
+          "transformerWindowSizes": [
+            1
+          ],
+          "transformerWindowComponents": [
+            "Dit"
+          ]
+        }
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "flux2_klein_9b_kv:mlx:q8:base:base:flux2-klein-9b-q8-mlx-shared-ladder-kv-rehost-t2i-v1:imc-df82dbbe7f28b2f0fadc",
+        "tier": "q8",
+        "source": "config/memory-anchors.json#flux2_klein_9b_kv:mlx:q8:base:base:flux2-klein-9b-q8-mlx-shared-ladder-kv-rehost-t2i-v1:imc-df82dbbe7f28b2f0fadc",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 15518,
+      "owningModelStory": 15480,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "inference:crates/media/mlx-gen/mlx-gen-flux2/src/memory_strategy.rs"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#flux2_klein_9b_kv:mlx:q8:base:base:flux2-klein-9b-q8-mlx-shared-ladder-kv-rehost-t2i-v1:imc-df82dbbe7f28b2f0fadc"
+          }
+        ]
+      }
+    },
+    {
+      "id": "flux2_klein_9b_kv:flux2_klein_9b_kv_edit:mlx:q8:character_image:none:resident",
+      "modelId": "flux2_klein_9b_kv",
+      "resolvedRoute": "flux2_klein_9b_kv_edit",
+      "provider": "flux2_klein_9b_kv_edit",
+      "backend": "mlx",
+      "tier": "q8",
+      "mode": "character_image",
+      "overlay": "none",
+      "rung": "resident",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "768x768",
+          "1024x1024",
+          "1280x720",
+          "720x1280"
+        ]
+      },
+      "strategyParameters": {
+        "publishedRanges": {}
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "flux2_klein_9b_kv:mlx:q8:base:base:flux2-klein-9b-q8-mlx-shared-ladder-kv-rehost-t2i-v1:imc-df82dbbe7f28b2f0fadc",
+        "tier": "q8",
+        "source": "config/memory-anchors.json#flux2_klein_9b_kv:mlx:q8:base:base:flux2-klein-9b-q8-mlx-shared-ladder-kv-rehost-t2i-v1:imc-df82dbbe7f28b2f0fadc",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 15518,
+      "owningModelStory": 15480,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "inference:crates/media/mlx-gen/mlx-gen-flux2/src/memory_strategy.rs"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#flux2_klein_9b_kv:mlx:q8:base:base:flux2-klein-9b-q8-mlx-shared-ladder-kv-rehost-t2i-v1:imc-df82dbbe7f28b2f0fadc"
+          }
+        ]
+      }
+    },
+    {
+      "id": "flux2_klein_9b_kv:flux2_klein_9b_kv_edit:mlx:q8:character_image:none:staged_residency",
+      "modelId": "flux2_klein_9b_kv",
+      "resolvedRoute": "flux2_klein_9b_kv_edit",
+      "provider": "flux2_klein_9b_kv_edit",
+      "backend": "mlx",
+      "tier": "q8",
+      "mode": "character_image",
+      "overlay": "none",
+      "rung": "staged_residency",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "768x768",
+          "1024x1024",
+          "1280x720",
+          "720x1280"
+        ]
+      },
+      "strategyParameters": {
+        "publishedRanges": {}
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "flux2_klein_9b_kv:mlx:q8:base:base:flux2-klein-9b-q8-mlx-shared-ladder-kv-rehost-t2i-v1:imc-df82dbbe7f28b2f0fadc",
+        "tier": "q8",
+        "source": "config/memory-anchors.json#flux2_klein_9b_kv:mlx:q8:base:base:flux2-klein-9b-q8-mlx-shared-ladder-kv-rehost-t2i-v1:imc-df82dbbe7f28b2f0fadc",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 15518,
+      "owningModelStory": 15480,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "inference:crates/media/mlx-gen/mlx-gen-flux2/src/memory_strategy.rs"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#flux2_klein_9b_kv:mlx:q8:base:base:flux2-klein-9b-q8-mlx-shared-ladder-kv-rehost-t2i-v1:imc-df82dbbe7f28b2f0fadc"
+          }
+        ]
+      }
+    },
+    {
+      "id": "flux2_klein_9b_kv:flux2_klein_9b_kv_edit:mlx:q8:edit_image:none:bounded_attention",
+      "modelId": "flux2_klein_9b_kv",
+      "resolvedRoute": "flux2_klein_9b_kv_edit",
+      "provider": "flux2_klein_9b_kv_edit",
+      "backend": "mlx",
+      "tier": "q8",
+      "mode": "edit_image",
+      "overlay": "none",
+      "rung": "bounded_attention",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "768x768",
+          "1024x1024",
+          "1280x720",
+          "720x1280"
+        ]
+      },
+      "strategyParameters": {
+        "decodeTileEdge": 512,
+        "decodeOverlap": 128,
+        "attentionChunkSize": 67108864,
+        "publishedRanges": {
+          "decodeTileEdges": [
+            2048,
+            768,
+            640,
+            512
+          ],
+          "decodeOverlaps": [
+            256,
+            128
+          ],
+          "attentionChunkSizes": [
+            67108864
+          ]
+        }
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "flux2_klein_9b_kv:mlx:q8:base:base:flux2-klein-9b-q8-mlx-shared-ladder-kv-rehost-t2i-v1:imc-df82dbbe7f28b2f0fadc",
+        "tier": "q8",
+        "source": "config/memory-anchors.json#flux2_klein_9b_kv:mlx:q8:base:base:flux2-klein-9b-q8-mlx-shared-ladder-kv-rehost-t2i-v1:imc-df82dbbe7f28b2f0fadc",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 15518,
+      "owningModelStory": 15480,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "inference:crates/media/mlx-gen/mlx-gen-flux2/src/memory_strategy.rs"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#flux2_klein_9b_kv:mlx:q8:base:base:flux2-klein-9b-q8-mlx-shared-ladder-kv-rehost-t2i-v1:imc-df82dbbe7f28b2f0fadc"
+          }
+        ]
+      }
+    },
+    {
+      "id": "flux2_klein_9b_kv:flux2_klein_9b_kv_edit:mlx:q8:edit_image:none:bounded_decode",
+      "modelId": "flux2_klein_9b_kv",
+      "resolvedRoute": "flux2_klein_9b_kv_edit",
+      "provider": "flux2_klein_9b_kv_edit",
+      "backend": "mlx",
+      "tier": "q8",
+      "mode": "edit_image",
+      "overlay": "none",
+      "rung": "bounded_decode",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "768x768",
+          "1024x1024",
+          "1280x720",
+          "720x1280"
+        ]
+      },
+      "strategyParameters": {
+        "decodeTileEdge": 512,
+        "decodeOverlap": 128,
+        "publishedRanges": {
+          "decodeTileEdges": [
+            2048,
+            768,
+            640,
+            512
+          ],
+          "decodeOverlaps": [
+            256,
+            128
+          ]
+        }
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "flux2_klein_9b_kv:mlx:q8:base:base:flux2-klein-9b-q8-mlx-shared-ladder-kv-rehost-t2i-v1:imc-df82dbbe7f28b2f0fadc",
+        "tier": "q8",
+        "source": "config/memory-anchors.json#flux2_klein_9b_kv:mlx:q8:base:base:flux2-klein-9b-q8-mlx-shared-ladder-kv-rehost-t2i-v1:imc-df82dbbe7f28b2f0fadc",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 15518,
+      "owningModelStory": 15480,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "inference:crates/media/mlx-gen/mlx-gen-flux2/src/memory_strategy.rs"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#flux2_klein_9b_kv:mlx:q8:base:base:flux2-klein-9b-q8-mlx-shared-ladder-kv-rehost-t2i-v1:imc-df82dbbe7f28b2f0fadc"
+          }
+        ]
+      }
+    },
+    {
+      "id": "flux2_klein_9b_kv:flux2_klein_9b_kv_edit:mlx:q8:edit_image:none:bounded_transformer_residency",
+      "modelId": "flux2_klein_9b_kv",
+      "resolvedRoute": "flux2_klein_9b_kv_edit",
+      "provider": "flux2_klein_9b_kv_edit",
+      "backend": "mlx",
+      "tier": "q8",
+      "mode": "edit_image",
+      "overlay": "none",
+      "rung": "bounded_transformer_residency",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "768x768",
+          "1024x1024",
+          "1280x720",
+          "720x1280"
+        ]
+      },
+      "strategyParameters": {
+        "decodeTileEdge": 512,
+        "decodeOverlap": 128,
+        "attentionChunkSize": 67108864,
+        "transformerWindowSize": 1,
+        "transformerWindowComponent": "Dit",
+        "publishedRanges": {
+          "decodeTileEdges": [
+            2048,
+            768,
+            640,
+            512
+          ],
+          "decodeOverlaps": [
+            256,
+            128
+          ],
+          "attentionChunkSizes": [
+            67108864
+          ],
+          "transformerWindowSizes": [
+            1
+          ],
+          "transformerWindowComponents": [
+            "Dit"
+          ]
+        }
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "flux2_klein_9b_kv:mlx:q8:base:base:flux2-klein-9b-q8-mlx-shared-ladder-kv-rehost-t2i-v1:imc-df82dbbe7f28b2f0fadc",
+        "tier": "q8",
+        "source": "config/memory-anchors.json#flux2_klein_9b_kv:mlx:q8:base:base:flux2-klein-9b-q8-mlx-shared-ladder-kv-rehost-t2i-v1:imc-df82dbbe7f28b2f0fadc",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 15518,
+      "owningModelStory": 15480,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "inference:crates/media/mlx-gen/mlx-gen-flux2/src/memory_strategy.rs"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#flux2_klein_9b_kv:mlx:q8:base:base:flux2-klein-9b-q8-mlx-shared-ladder-kv-rehost-t2i-v1:imc-df82dbbe7f28b2f0fadc"
+          }
+        ]
+      }
+    },
+    {
+      "id": "flux2_klein_9b_kv:flux2_klein_9b_kv_edit:mlx:q8:edit_image:none:resident",
+      "modelId": "flux2_klein_9b_kv",
+      "resolvedRoute": "flux2_klein_9b_kv_edit",
+      "provider": "flux2_klein_9b_kv_edit",
+      "backend": "mlx",
+      "tier": "q8",
+      "mode": "edit_image",
+      "overlay": "none",
+      "rung": "resident",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "768x768",
+          "1024x1024",
+          "1280x720",
+          "720x1280"
+        ]
+      },
+      "strategyParameters": {
+        "publishedRanges": {}
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "flux2_klein_9b_kv:mlx:q8:base:base:flux2-klein-9b-q8-mlx-shared-ladder-kv-rehost-t2i-v1:imc-df82dbbe7f28b2f0fadc",
+        "tier": "q8",
+        "source": "config/memory-anchors.json#flux2_klein_9b_kv:mlx:q8:base:base:flux2-klein-9b-q8-mlx-shared-ladder-kv-rehost-t2i-v1:imc-df82dbbe7f28b2f0fadc",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 15518,
+      "owningModelStory": 15480,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "inference:crates/media/mlx-gen/mlx-gen-flux2/src/memory_strategy.rs"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#flux2_klein_9b_kv:mlx:q8:base:base:flux2-klein-9b-q8-mlx-shared-ladder-kv-rehost-t2i-v1:imc-df82dbbe7f28b2f0fadc"
+          }
+        ]
+      }
+    },
+    {
+      "id": "flux2_klein_9b_kv:flux2_klein_9b_kv_edit:mlx:q8:edit_image:none:staged_residency",
+      "modelId": "flux2_klein_9b_kv",
+      "resolvedRoute": "flux2_klein_9b_kv_edit",
+      "provider": "flux2_klein_9b_kv_edit",
+      "backend": "mlx",
+      "tier": "q8",
+      "mode": "edit_image",
+      "overlay": "none",
+      "rung": "staged_residency",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "768x768",
+          "1024x1024",
+          "1280x720",
+          "720x1280"
+        ]
+      },
+      "strategyParameters": {
+        "publishedRanges": {}
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "flux2_klein_9b_kv:mlx:q8:base:base:flux2-klein-9b-q8-mlx-shared-ladder-kv-rehost-t2i-v1:imc-df82dbbe7f28b2f0fadc",
+        "tier": "q8",
+        "source": "config/memory-anchors.json#flux2_klein_9b_kv:mlx:q8:base:base:flux2-klein-9b-q8-mlx-shared-ladder-kv-rehost-t2i-v1:imc-df82dbbe7f28b2f0fadc",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 15518,
+      "owningModelStory": 15480,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "inference:crates/media/mlx-gen/mlx-gen-flux2/src/memory_strategy.rs"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#flux2_klein_9b_kv:mlx:q8:base:base:flux2-klein-9b-q8-mlx-shared-ladder-kv-rehost-t2i-v1:imc-df82dbbe7f28b2f0fadc"
+          }
+        ]
+      }
+    },
+    {
       "id": "flux2_klein_9b_kv:flux2_klein_9b:mlx:bf16:image_to_image:none:bounded_attention",
       "modelId": "flux2_klein_9b_kv",
       "resolvedRoute": "flux2_klein_9b",
@@ -21898,6 +22511,606 @@
         "anchor": [
           {
             "source": "config/memory-anchors.json#flux2_klein_9b_kv:mlx:q4:base:base:flux2-klein-9b-q4-mlx-shared-ladder-kv-rehost-t2i-v1:imc-65523a87f176ffd6aa59"
+          }
+        ]
+      }
+    },
+    {
+      "id": "flux2_klein_9b_kv:flux2_klein_9b:mlx:q8:image_to_image:none:bounded_attention",
+      "modelId": "flux2_klein_9b_kv",
+      "resolvedRoute": "flux2_klein_9b",
+      "provider": "flux2_klein_9b",
+      "backend": "mlx",
+      "tier": "q8",
+      "mode": "image_to_image",
+      "overlay": "none",
+      "rung": "bounded_attention",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "768x768",
+          "1024x1024",
+          "1280x720",
+          "720x1280"
+        ]
+      },
+      "strategyParameters": {
+        "decodeTileEdge": 512,
+        "decodeOverlap": 128,
+        "attentionChunkSize": 67108864,
+        "publishedRanges": {
+          "decodeTileEdges": [
+            2048,
+            768,
+            640,
+            512
+          ],
+          "decodeOverlaps": [
+            256,
+            128
+          ],
+          "attentionChunkSizes": [
+            67108864
+          ]
+        }
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "flux2_klein_9b_kv:mlx:q8:base:base:flux2-klein-9b-q8-mlx-shared-ladder-kv-rehost-t2i-v1:imc-df82dbbe7f28b2f0fadc",
+        "tier": "q8",
+        "source": "config/memory-anchors.json#flux2_klein_9b_kv:mlx:q8:base:base:flux2-klein-9b-q8-mlx-shared-ladder-kv-rehost-t2i-v1:imc-df82dbbe7f28b2f0fadc",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 15518,
+      "owningModelStory": 15480,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "inference:crates/media/mlx-gen/mlx-gen-flux2/src/memory_strategy.rs"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#flux2_klein_9b_kv:mlx:q8:base:base:flux2-klein-9b-q8-mlx-shared-ladder-kv-rehost-t2i-v1:imc-df82dbbe7f28b2f0fadc"
+          }
+        ]
+      }
+    },
+    {
+      "id": "flux2_klein_9b_kv:flux2_klein_9b:mlx:q8:image_to_image:none:bounded_decode",
+      "modelId": "flux2_klein_9b_kv",
+      "resolvedRoute": "flux2_klein_9b",
+      "provider": "flux2_klein_9b",
+      "backend": "mlx",
+      "tier": "q8",
+      "mode": "image_to_image",
+      "overlay": "none",
+      "rung": "bounded_decode",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "768x768",
+          "1024x1024",
+          "1280x720",
+          "720x1280"
+        ]
+      },
+      "strategyParameters": {
+        "decodeTileEdge": 512,
+        "decodeOverlap": 128,
+        "publishedRanges": {
+          "decodeTileEdges": [
+            2048,
+            768,
+            640,
+            512
+          ],
+          "decodeOverlaps": [
+            256,
+            128
+          ]
+        }
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "flux2_klein_9b_kv:mlx:q8:base:base:flux2-klein-9b-q8-mlx-shared-ladder-kv-rehost-t2i-v1:imc-df82dbbe7f28b2f0fadc",
+        "tier": "q8",
+        "source": "config/memory-anchors.json#flux2_klein_9b_kv:mlx:q8:base:base:flux2-klein-9b-q8-mlx-shared-ladder-kv-rehost-t2i-v1:imc-df82dbbe7f28b2f0fadc",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 15518,
+      "owningModelStory": 15480,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "inference:crates/media/mlx-gen/mlx-gen-flux2/src/memory_strategy.rs"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#flux2_klein_9b_kv:mlx:q8:base:base:flux2-klein-9b-q8-mlx-shared-ladder-kv-rehost-t2i-v1:imc-df82dbbe7f28b2f0fadc"
+          }
+        ]
+      }
+    },
+    {
+      "id": "flux2_klein_9b_kv:flux2_klein_9b:mlx:q8:image_to_image:none:bounded_transformer_residency",
+      "modelId": "flux2_klein_9b_kv",
+      "resolvedRoute": "flux2_klein_9b",
+      "provider": "flux2_klein_9b",
+      "backend": "mlx",
+      "tier": "q8",
+      "mode": "image_to_image",
+      "overlay": "none",
+      "rung": "bounded_transformer_residency",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "768x768",
+          "1024x1024",
+          "1280x720",
+          "720x1280"
+        ]
+      },
+      "strategyParameters": {
+        "decodeTileEdge": 512,
+        "decodeOverlap": 128,
+        "attentionChunkSize": 67108864,
+        "transformerWindowSize": 1,
+        "transformerWindowComponent": "Dit",
+        "publishedRanges": {
+          "decodeTileEdges": [
+            2048,
+            768,
+            640,
+            512
+          ],
+          "decodeOverlaps": [
+            256,
+            128
+          ],
+          "attentionChunkSizes": [
+            67108864
+          ],
+          "transformerWindowSizes": [
+            1
+          ],
+          "transformerWindowComponents": [
+            "Dit"
+          ]
+        }
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "flux2_klein_9b_kv:mlx:q8:base:base:flux2-klein-9b-q8-mlx-shared-ladder-kv-rehost-t2i-v1:imc-df82dbbe7f28b2f0fadc",
+        "tier": "q8",
+        "source": "config/memory-anchors.json#flux2_klein_9b_kv:mlx:q8:base:base:flux2-klein-9b-q8-mlx-shared-ladder-kv-rehost-t2i-v1:imc-df82dbbe7f28b2f0fadc",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 15518,
+      "owningModelStory": 15480,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "inference:crates/media/mlx-gen/mlx-gen-flux2/src/memory_strategy.rs"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#flux2_klein_9b_kv:mlx:q8:base:base:flux2-klein-9b-q8-mlx-shared-ladder-kv-rehost-t2i-v1:imc-df82dbbe7f28b2f0fadc"
+          }
+        ]
+      }
+    },
+    {
+      "id": "flux2_klein_9b_kv:flux2_klein_9b:mlx:q8:image_to_image:none:resident",
+      "modelId": "flux2_klein_9b_kv",
+      "resolvedRoute": "flux2_klein_9b",
+      "provider": "flux2_klein_9b",
+      "backend": "mlx",
+      "tier": "q8",
+      "mode": "image_to_image",
+      "overlay": "none",
+      "rung": "resident",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "768x768",
+          "1024x1024",
+          "1280x720",
+          "720x1280"
+        ]
+      },
+      "strategyParameters": {
+        "publishedRanges": {}
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "flux2_klein_9b_kv:mlx:q8:base:base:flux2-klein-9b-q8-mlx-shared-ladder-kv-rehost-t2i-v1:imc-df82dbbe7f28b2f0fadc",
+        "tier": "q8",
+        "source": "config/memory-anchors.json#flux2_klein_9b_kv:mlx:q8:base:base:flux2-klein-9b-q8-mlx-shared-ladder-kv-rehost-t2i-v1:imc-df82dbbe7f28b2f0fadc",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 15518,
+      "owningModelStory": 15480,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "inference:crates/media/mlx-gen/mlx-gen-flux2/src/memory_strategy.rs"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#flux2_klein_9b_kv:mlx:q8:base:base:flux2-klein-9b-q8-mlx-shared-ladder-kv-rehost-t2i-v1:imc-df82dbbe7f28b2f0fadc"
+          }
+        ]
+      }
+    },
+    {
+      "id": "flux2_klein_9b_kv:flux2_klein_9b:mlx:q8:image_to_image:none:staged_residency",
+      "modelId": "flux2_klein_9b_kv",
+      "resolvedRoute": "flux2_klein_9b",
+      "provider": "flux2_klein_9b",
+      "backend": "mlx",
+      "tier": "q8",
+      "mode": "image_to_image",
+      "overlay": "none",
+      "rung": "staged_residency",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "768x768",
+          "1024x1024",
+          "1280x720",
+          "720x1280"
+        ]
+      },
+      "strategyParameters": {
+        "publishedRanges": {}
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "flux2_klein_9b_kv:mlx:q8:base:base:flux2-klein-9b-q8-mlx-shared-ladder-kv-rehost-t2i-v1:imc-df82dbbe7f28b2f0fadc",
+        "tier": "q8",
+        "source": "config/memory-anchors.json#flux2_klein_9b_kv:mlx:q8:base:base:flux2-klein-9b-q8-mlx-shared-ladder-kv-rehost-t2i-v1:imc-df82dbbe7f28b2f0fadc",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 15518,
+      "owningModelStory": 15480,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "inference:crates/media/mlx-gen/mlx-gen-flux2/src/memory_strategy.rs"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#flux2_klein_9b_kv:mlx:q8:base:base:flux2-klein-9b-q8-mlx-shared-ladder-kv-rehost-t2i-v1:imc-df82dbbe7f28b2f0fadc"
+          }
+        ]
+      }
+    },
+    {
+      "id": "flux2_klein_9b_kv:flux2_klein_9b:mlx:q8:text_to_image:none:bounded_attention",
+      "modelId": "flux2_klein_9b_kv",
+      "resolvedRoute": "flux2_klein_9b",
+      "provider": "flux2_klein_9b",
+      "backend": "mlx",
+      "tier": "q8",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "rung": "bounded_attention",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "768x768",
+          "1024x1024",
+          "1280x720",
+          "720x1280"
+        ]
+      },
+      "strategyParameters": {
+        "decodeTileEdge": 512,
+        "decodeOverlap": 128,
+        "attentionChunkSize": 67108864,
+        "publishedRanges": {
+          "decodeTileEdges": [
+            2048,
+            768,
+            640,
+            512
+          ],
+          "decodeOverlaps": [
+            256,
+            128
+          ],
+          "attentionChunkSizes": [
+            67108864
+          ]
+        }
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "flux2_klein_9b_kv:mlx:q8:base:base:flux2-klein-9b-q8-mlx-shared-ladder-kv-rehost-t2i-v1:imc-df82dbbe7f28b2f0fadc",
+        "tier": "q8",
+        "source": "config/memory-anchors.json#flux2_klein_9b_kv:mlx:q8:base:base:flux2-klein-9b-q8-mlx-shared-ladder-kv-rehost-t2i-v1:imc-df82dbbe7f28b2f0fadc",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 15518,
+      "owningModelStory": 15480,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "inference:crates/media/mlx-gen/mlx-gen-flux2/src/memory_strategy.rs"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#flux2_klein_9b_kv:mlx:q8:base:base:flux2-klein-9b-q8-mlx-shared-ladder-kv-rehost-t2i-v1:imc-df82dbbe7f28b2f0fadc"
+          }
+        ]
+      }
+    },
+    {
+      "id": "flux2_klein_9b_kv:flux2_klein_9b:mlx:q8:text_to_image:none:bounded_decode",
+      "modelId": "flux2_klein_9b_kv",
+      "resolvedRoute": "flux2_klein_9b",
+      "provider": "flux2_klein_9b",
+      "backend": "mlx",
+      "tier": "q8",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "rung": "bounded_decode",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "768x768",
+          "1024x1024",
+          "1280x720",
+          "720x1280"
+        ]
+      },
+      "strategyParameters": {
+        "decodeTileEdge": 512,
+        "decodeOverlap": 128,
+        "publishedRanges": {
+          "decodeTileEdges": [
+            2048,
+            768,
+            640,
+            512
+          ],
+          "decodeOverlaps": [
+            256,
+            128
+          ]
+        }
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "flux2_klein_9b_kv:mlx:q8:base:base:flux2-klein-9b-q8-mlx-shared-ladder-kv-rehost-t2i-v1:imc-df82dbbe7f28b2f0fadc",
+        "tier": "q8",
+        "source": "config/memory-anchors.json#flux2_klein_9b_kv:mlx:q8:base:base:flux2-klein-9b-q8-mlx-shared-ladder-kv-rehost-t2i-v1:imc-df82dbbe7f28b2f0fadc",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 15518,
+      "owningModelStory": 15480,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "inference:crates/media/mlx-gen/mlx-gen-flux2/src/memory_strategy.rs"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#flux2_klein_9b_kv:mlx:q8:base:base:flux2-klein-9b-q8-mlx-shared-ladder-kv-rehost-t2i-v1:imc-df82dbbe7f28b2f0fadc"
+          }
+        ]
+      }
+    },
+    {
+      "id": "flux2_klein_9b_kv:flux2_klein_9b:mlx:q8:text_to_image:none:bounded_transformer_residency",
+      "modelId": "flux2_klein_9b_kv",
+      "resolvedRoute": "flux2_klein_9b",
+      "provider": "flux2_klein_9b",
+      "backend": "mlx",
+      "tier": "q8",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "rung": "bounded_transformer_residency",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "768x768",
+          "1024x1024",
+          "1280x720",
+          "720x1280"
+        ]
+      },
+      "strategyParameters": {
+        "decodeTileEdge": 512,
+        "decodeOverlap": 128,
+        "attentionChunkSize": 67108864,
+        "transformerWindowSize": 1,
+        "transformerWindowComponent": "Dit",
+        "publishedRanges": {
+          "decodeTileEdges": [
+            2048,
+            768,
+            640,
+            512
+          ],
+          "decodeOverlaps": [
+            256,
+            128
+          ],
+          "attentionChunkSizes": [
+            67108864
+          ],
+          "transformerWindowSizes": [
+            1
+          ],
+          "transformerWindowComponents": [
+            "Dit"
+          ]
+        }
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "flux2_klein_9b_kv:mlx:q8:base:base:flux2-klein-9b-q8-mlx-shared-ladder-kv-rehost-t2i-v1:imc-df82dbbe7f28b2f0fadc",
+        "tier": "q8",
+        "source": "config/memory-anchors.json#flux2_klein_9b_kv:mlx:q8:base:base:flux2-klein-9b-q8-mlx-shared-ladder-kv-rehost-t2i-v1:imc-df82dbbe7f28b2f0fadc",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 15518,
+      "owningModelStory": 15480,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "inference:crates/media/mlx-gen/mlx-gen-flux2/src/memory_strategy.rs"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#flux2_klein_9b_kv:mlx:q8:base:base:flux2-klein-9b-q8-mlx-shared-ladder-kv-rehost-t2i-v1:imc-df82dbbe7f28b2f0fadc"
+          }
+        ]
+      }
+    },
+    {
+      "id": "flux2_klein_9b_kv:flux2_klein_9b:mlx:q8:text_to_image:none:resident",
+      "modelId": "flux2_klein_9b_kv",
+      "resolvedRoute": "flux2_klein_9b",
+      "provider": "flux2_klein_9b",
+      "backend": "mlx",
+      "tier": "q8",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "rung": "resident",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "768x768",
+          "1024x1024",
+          "1280x720",
+          "720x1280"
+        ]
+      },
+      "strategyParameters": {
+        "publishedRanges": {}
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "flux2_klein_9b_kv:mlx:q8:base:base:flux2-klein-9b-q8-mlx-shared-ladder-kv-rehost-t2i-v1:imc-df82dbbe7f28b2f0fadc",
+        "tier": "q8",
+        "source": "config/memory-anchors.json#flux2_klein_9b_kv:mlx:q8:base:base:flux2-klein-9b-q8-mlx-shared-ladder-kv-rehost-t2i-v1:imc-df82dbbe7f28b2f0fadc",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 15518,
+      "owningModelStory": 15480,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "inference:crates/media/mlx-gen/mlx-gen-flux2/src/memory_strategy.rs"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#flux2_klein_9b_kv:mlx:q8:base:base:flux2-klein-9b-q8-mlx-shared-ladder-kv-rehost-t2i-v1:imc-df82dbbe7f28b2f0fadc"
+          }
+        ]
+      }
+    },
+    {
+      "id": "flux2_klein_9b_kv:flux2_klein_9b:mlx:q8:text_to_image:none:staged_residency",
+      "modelId": "flux2_klein_9b_kv",
+      "resolvedRoute": "flux2_klein_9b",
+      "provider": "flux2_klein_9b",
+      "backend": "mlx",
+      "tier": "q8",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "rung": "staged_residency",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "768x768",
+          "1024x1024",
+          "1280x720",
+          "720x1280"
+        ]
+      },
+      "strategyParameters": {
+        "publishedRanges": {}
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "flux2_klein_9b_kv:mlx:q8:base:base:flux2-klein-9b-q8-mlx-shared-ladder-kv-rehost-t2i-v1:imc-df82dbbe7f28b2f0fadc",
+        "tier": "q8",
+        "source": "config/memory-anchors.json#flux2_klein_9b_kv:mlx:q8:base:base:flux2-klein-9b-q8-mlx-shared-ladder-kv-rehost-t2i-v1:imc-df82dbbe7f28b2f0fadc",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 15518,
+      "owningModelStory": 15480,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "inference:crates/media/mlx-gen/mlx-gen-flux2/src/memory_strategy.rs"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#flux2_klein_9b_kv:mlx:q8:base:base:flux2-klein-9b-q8-mlx-shared-ladder-kv-rehost-t2i-v1:imc-df82dbbe7f28b2f0fadc"
           }
         ]
       }
@@ -62344,6 +63557,16 @@
       "flux2_klein_9b_kv:flux2_klein_9b_kv_edit:mlx:q4:edit_image:none:bounded_transformer_residency",
       "flux2_klein_9b_kv:flux2_klein_9b_kv_edit:mlx:q4:edit_image:none:resident",
       "flux2_klein_9b_kv:flux2_klein_9b_kv_edit:mlx:q4:edit_image:none:staged_residency",
+      "flux2_klein_9b_kv:flux2_klein_9b_kv_edit:mlx:q8:character_image:none:bounded_attention",
+      "flux2_klein_9b_kv:flux2_klein_9b_kv_edit:mlx:q8:character_image:none:bounded_decode",
+      "flux2_klein_9b_kv:flux2_klein_9b_kv_edit:mlx:q8:character_image:none:bounded_transformer_residency",
+      "flux2_klein_9b_kv:flux2_klein_9b_kv_edit:mlx:q8:character_image:none:resident",
+      "flux2_klein_9b_kv:flux2_klein_9b_kv_edit:mlx:q8:character_image:none:staged_residency",
+      "flux2_klein_9b_kv:flux2_klein_9b_kv_edit:mlx:q8:edit_image:none:bounded_attention",
+      "flux2_klein_9b_kv:flux2_klein_9b_kv_edit:mlx:q8:edit_image:none:bounded_decode",
+      "flux2_klein_9b_kv:flux2_klein_9b_kv_edit:mlx:q8:edit_image:none:bounded_transformer_residency",
+      "flux2_klein_9b_kv:flux2_klein_9b_kv_edit:mlx:q8:edit_image:none:resident",
+      "flux2_klein_9b_kv:flux2_klein_9b_kv_edit:mlx:q8:edit_image:none:staged_residency",
       "flux2_klein_9b_kv:flux2_klein_9b:mlx:bf16:image_to_image:none:bounded_attention",
       "flux2_klein_9b_kv:flux2_klein_9b:mlx:bf16:image_to_image:none:bounded_decode",
       "flux2_klein_9b_kv:flux2_klein_9b:mlx:bf16:image_to_image:none:bounded_transformer_residency",
@@ -62363,7 +63586,17 @@
       "flux2_klein_9b_kv:flux2_klein_9b:mlx:q4:text_to_image:none:bounded_decode",
       "flux2_klein_9b_kv:flux2_klein_9b:mlx:q4:text_to_image:none:bounded_transformer_residency",
       "flux2_klein_9b_kv:flux2_klein_9b:mlx:q4:text_to_image:none:resident",
-      "flux2_klein_9b_kv:flux2_klein_9b:mlx:q4:text_to_image:none:staged_residency"
+      "flux2_klein_9b_kv:flux2_klein_9b:mlx:q4:text_to_image:none:staged_residency",
+      "flux2_klein_9b_kv:flux2_klein_9b:mlx:q8:image_to_image:none:bounded_attention",
+      "flux2_klein_9b_kv:flux2_klein_9b:mlx:q8:image_to_image:none:bounded_decode",
+      "flux2_klein_9b_kv:flux2_klein_9b:mlx:q8:image_to_image:none:bounded_transformer_residency",
+      "flux2_klein_9b_kv:flux2_klein_9b:mlx:q8:image_to_image:none:resident",
+      "flux2_klein_9b_kv:flux2_klein_9b:mlx:q8:image_to_image:none:staged_residency",
+      "flux2_klein_9b_kv:flux2_klein_9b:mlx:q8:text_to_image:none:bounded_attention",
+      "flux2_klein_9b_kv:flux2_klein_9b:mlx:q8:text_to_image:none:bounded_decode",
+      "flux2_klein_9b_kv:flux2_klein_9b:mlx:q8:text_to_image:none:bounded_transformer_residency",
+      "flux2_klein_9b_kv:flux2_klein_9b:mlx:q8:text_to_image:none:resident",
+      "flux2_klein_9b_kv:flux2_klein_9b:mlx:q8:text_to_image:none:staged_residency"
     ],
     "flux2_klein_9b_true_v2": [],
     "ideogram_4": [],
