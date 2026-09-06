@@ -133,9 +133,15 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ inputs.ref }}
-          # The campaign pushes a NEW branch. A shallow clone cannot do that ("shallow update not
-          # allowed"), and the harness reads history to decide what is already current.
-          fetch-depth: 0
+          # The job only ever needs the tip of `ref`: branch.sh cuts a brand-new branch from HEAD
+          # (`git switch -c`), the harness commits per anchor on top of that, and push.sh pushes
+          # that new branch -- a new branch whose base commit already exists on the remote pushes
+          # fine from a shallow clone. Nothing in scripts/ci/memory-catalog/*.sh or
+          # measure-memory-catalog.mjs reads history beyond HEAD (no `git log`, `merge-base`,
+          # `describe`, or history-dependent `rev-list`). A depth-0 clone here was pulling the
+          # repo's full 2+ GiB history pack on every dispatch -- 27+ minutes on the Windows CUDA
+          # runner vs 8 seconds shallow -- for no benefit.
+          fetch-depth: 1
 
       - name: Cut the campaign branch
         id: branch
@@ -233,7 +239,80 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ inputs.ref }}
-          fetch-depth: 0
+          # See the mlx job's checkout step for why a shallow clone is sufficient here too.
+          fetch-depth: 1
+
+      # WHY THIS STEP EXISTS: `bash` ON THIS BOX IS THE WSL RELAY, NOT GIT BASH.
+      # ------------------------------------------------------------------------------------------
+      # Every `run:` step below inherits the workflow-level `shell: bash`, which makes the runner
+      # resolve `bash` off the job's PATH. On this self-hosted Windows runner that resolved to
+      # C:\Windows\System32\bash.exe -- the WSL relay, with no distro installed -- so the FIRST bash
+      # step ("Cut the campaign branch") died before executing a single line:
+      #
+      #   <3>WSL (11 - Relay) ERROR: CreateProcessCommon:818: execvpe(/bin/bash) failed:
+      #   No such file or directory                                         (run 34041687689)
+      #
+      # GitHub-HOSTED windows images put Git's bin ahead of System32, which is why the same
+      # `shell: bash` default is fine for desktop-windows.yml's `windows-2022` job. This box is not
+      # that image: every other step this repo runs on the `[self-hosted, Windows, X64, cuda]` pool
+      # is `shell: cmd` or `shell: powershell` (windows-candle.yml, desktop-windows.yml's
+      # package-windows job, .github/actions/prepare-rust-runner), so nothing had exercised bash
+      # here before this campaign.
+      #
+      # WHY $GITHUB_PATH AND NOT AN EXPLICIT `shell:` LINE. The obvious fix is a per-step
+      # `shell: 'C:\Program Files\Git\bin\bash.exe -eo pipefail {0}'`, but the runner splits a
+      # custom `shell:` string on its FIRST SPACE to separate the interpreter from its arguments,
+      # so a path under "C:\Program Files\..." is torn in half and never resolves. Prepending the
+      # directory to $GITHUB_PATH fixes the same problem without that trap, and fixes it in one
+      # place: it repoints the step shell AND the `bash scripts/...` each step invokes AND the
+      # `git`/`sed`/`tr`/`tail`/`cygpath` those scripts reach for.
+      #
+      # It is Git's `bin\bash.exe` (NOT `usr\bin\bash.exe`) on purpose: the `bin` wrapper is the one
+      # that puts /usr/bin and /mingw64/bin on PATH for its children. `bin\` holds only bash/sh/git,
+      # so prepending it cannot shadow a Windows tool the way prepending `usr\bin\` would.
+      #
+      # The mlx job deliberately keeps the plain workflow-level `shell: bash`.
+      - name: Put Git Bash ahead of the WSL relay on PATH
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+
+          # Prefer the Git that actually served the checkout (…\Git\cmd\git.exe -> …\Git\bin), then
+          # the two standard install roots. Resolved rather than hard-coded so a relocated Git is
+          # found instead of producing a second cryptic failure.
+          $candidates = New-Object System.Collections.Generic.List[string]
+          $git = Get-Command git.exe -CommandType Application -ErrorAction SilentlyContinue
+          if ($git) {
+            $candidates.Add((Join-Path (Split-Path -Parent (Split-Path -Parent $git.Source)) 'bin'))
+          }
+          $candidates.Add('C:\Program Files\Git\bin')
+          $candidates.Add('C:\Program Files (x86)\Git\bin')
+
+          $binDir = $null
+          foreach ($candidate in $candidates) {
+            if (Test-Path -LiteralPath (Join-Path $candidate 'bash.exe') -PathType Leaf) {
+              $binDir = $candidate
+              break
+            }
+          }
+          if (-not $binDir) {
+            $where = if ($git) { $git.Source } else { 'git.exe is not on PATH either' }
+            Write-Host "::error title=Git Bash not found::this lane needs Git for Windows' bash.exe; none of [$($candidates -join '; ')] has one (git.exe: $where). Without it every bash step falls through to C:\Windows\System32\bash.exe, the WSL relay, and dies with 'execvpe(/bin/bash) failed'. Install Git for Windows on this runner."
+            exit 1
+          }
+
+          # Prove it launches before betting a day-long walk on it (same posture as
+          # prepare-rust-runner verifying cargo, sc-13166).
+          $bash = Join-Path $binDir 'bash.exe'
+          $probe = & $bash -c 'echo ok'
+          if ($LASTEXITCODE -ne 0 -or $probe -ne 'ok') {
+            Write-Host "::error title=Git Bash is not usable::'$bash' exists but did not run 'echo ok' (exit $LASTEXITCODE, output '$probe')."
+            exit 1
+          }
+
+          # $GITHUB_PATH PREPENDS, so this wins over C:\Windows\System32 for every later step.
+          Add-Content -Path $env:GITHUB_PATH -Value $binDir
+          Write-Host "bash for this job: $bash"
 
       - name: Cut the campaign branch
         id: branch
