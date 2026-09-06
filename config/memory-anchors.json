@@ -1007,6 +1007,51 @@
       "underivedReason": "the anchor render engaged bounded rungs (or deferred materialization), so it does not measure the widest composition the MLX image law upper-bounds the ladder from; this anchor validates its measured point and prices nothing beyond it"
     },
     {
+      "id": "ideogram_4:mlx:bf16:base:base:ideogram-4-bf16-mlx-shared-ladder-v1:imc-4a7972af13364c485a83",
+      "modelId": "ideogram_4",
+      "modelFamily": "ideogram",
+      "route": "ideogram_4",
+      "provider": "ideogram_4",
+      "backend": "mlx",
+      "tier": "bf16",
+      "transformerVariant": null,
+      "decoder": null,
+      "mode": "text_to_image",
+      "overlay": null,
+      "referenceCount": 0,
+      "loadShape": "eager_materialization",
+      "measuredRegime": {
+        "decodeTiled": false,
+        "transformerWindowed": false,
+        "staged": false,
+        "attentionChunked": false
+      },
+      "source": {
+        "path": "docs/calibration/sc-22738/ideogram-4-bf16-mlx-evidence.json",
+        "sha256": "9cf097ee9837f3304a4d4bcf79aff3f346cace801deb8a4eee263756d3337156",
+        "recordId": "imc-4a7972af13364c485a83",
+        "calibrationFingerprint": "ideogram-4-bf16-mlx-shared-ladder-v1",
+        "loaderClosureDigest": "be223b1bca1506ea73bfe33f72a2ea8aa173909260fc936ae9d7b4290302f7a5"
+      },
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "frames": 1,
+        "fps": null
+      },
+      "phaseActivePeakBytes": {
+        "conditioning": 57711761696,
+        "denoise": 57726610864,
+        "decode": 71068354432
+      },
+      "phaseAllocatorEnvelopeBytes": {
+        "conditioning": 73099580484,
+        "denoise": 73114648784,
+        "decode": 127896868204
+      },
+      "overallAllocatorEnvelopeBytes": 127896868204
+    },
+    {
       "id": "krea_2_turbo:candle:q4:base:base:krea-turbo-cuda-phase-curves-v1:imc-7f1a63e5459300aed47c",
       "modelId": "krea_2_turbo",
       "modelFamily": "krea_2",
@@ -2665,17 +2710,6 @@
           "sequentialPeakGb": "50"
         }
       }
-    },
-    {
-      "id": "analytic:ideogram_4:mlx:bf16",
-      "modelId": "ideogram_4",
-      "modelFamily": "ideogram",
-      "route": "ideogram_4",
-      "backend": "mlx",
-      "tier": "bf16",
-      "basis": "no_retained_evidence",
-      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
-      "evidence": null
     },
     {
       "id": "analytic:ideogram_4:mlx:q4",
