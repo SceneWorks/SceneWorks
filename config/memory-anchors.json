@@ -1556,6 +1556,51 @@
       "overallAllocatorEnvelopeBytes": 81167819508
     },
     {
+      "id": "lens:mlx:q8:base:base:lens-q8-mlx-shared-ladder-v1:imc-f97b85b5230220ae96ee",
+      "modelId": "lens",
+      "modelFamily": "lens",
+      "route": "lens",
+      "provider": "lens",
+      "backend": "mlx",
+      "tier": "q8",
+      "transformerVariant": null,
+      "decoder": null,
+      "mode": "text_to_image",
+      "overlay": null,
+      "referenceCount": 0,
+      "loadShape": "eager_materialization",
+      "measuredRegime": {
+        "decodeTiled": false,
+        "transformerWindowed": false,
+        "staged": false,
+        "attentionChunked": false
+      },
+      "source": {
+        "path": "docs/calibration/sc-22738/lens-q8-mlx-evidence.json",
+        "sha256": "49b6cd74a4d9aa1be688dcdd046bb802fa2c905f81255daa8cf0d057b9ea9295",
+        "recordId": "imc-f97b85b5230220ae96ee",
+        "calibrationFingerprint": "lens-q8-mlx-shared-ladder-v1",
+        "loaderClosureDigest": "8d87a25ca7e531584a566ed9af8ad0158f2d5dd311fbd1d96d894e0383d2c38f"
+      },
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "frames": 1,
+        "fps": null
+      },
+      "phaseActivePeakBytes": {
+        "conditioning": 23085537676,
+        "denoise": 22767516276,
+        "decode": 47195888772
+      },
+      "phaseAllocatorEnvelopeBytes": {
+        "conditioning": 23414234868,
+        "denoise": 23095132108,
+        "decode": 92080257780
+      },
+      "overallAllocatorEnvelopeBytes": 92080257780
+    },
+    {
       "id": "ltx_2_3:mlx:q8:base:base:sc-18808-ltx-2-3-mlx-t2v-staged-capture-v1:imc-5aff3e74b46b30fb797c",
       "modelId": "ltx_2_3",
       "modelFamily": "ltx-video",
@@ -3765,17 +3810,6 @@
       "modelFamily": "lens",
       "route": "lens",
       "backend": "candle",
-      "tier": "q8",
-      "basis": "no_retained_evidence",
-      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
-      "evidence": null
-    },
-    {
-      "id": "analytic:lens:mlx:q8",
-      "modelId": "lens",
-      "modelFamily": "lens",
-      "route": "lens",
-      "backend": "mlx",
       "tier": "q8",
       "basis": "no_retained_evidence",
       "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
