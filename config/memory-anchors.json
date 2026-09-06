@@ -232,6 +232,52 @@
       "underivedReason": "the anchor render engaged bounded rungs (or deferred materialization), so it does not measure the widest composition the MLX image law upper-bounds the ladder from; this anchor validates its measured point and prices nothing beyond it"
     },
     {
+      "id": "chroma1_flash:mlx:q8:base:base:chroma1-flash-q8-mlx-shared-ladder-v1:imc-c653440d6db895d51c01",
+      "modelId": "chroma1_flash",
+      "modelFamily": "chroma",
+      "route": "chroma1_flash",
+      "provider": "chroma1_flash",
+      "backend": "mlx",
+      "tier": "q8",
+      "transformerVariant": null,
+      "decoder": null,
+      "mode": "text_to_image",
+      "overlay": null,
+      "referenceCount": 0,
+      "loadShape": "deferred_materialization",
+      "measuredRegime": {
+        "decodeTiled": false,
+        "transformerWindowed": false,
+        "staged": false,
+        "attentionChunked": false
+      },
+      "source": {
+        "path": "docs/calibration/sc-22738/chroma1-flash-q8-mlx-evidence.json",
+        "sha256": "3b0a8befc3613df35a75b352b3bc6e702085c847864f5f3dea0213c10a751850",
+        "recordId": "imc-c653440d6db895d51c01",
+        "calibrationFingerprint": "chroma1-flash-q8-mlx-shared-ladder-v1",
+        "loaderClosureDigest": "d382cab48fd3db0783dd52f5c837b5d509d3917361ae944f9a84e2705852f891"
+      },
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "frames": 1,
+        "fps": null
+      },
+      "phaseActivePeakBytes": {
+        "conditioning": 1112376,
+        "denoise": 17591022164,
+        "decode": 30543767092
+      },
+      "phaseAllocatorEnvelopeBytes": {
+        "conditioning": 1112392,
+        "denoise": 25333324704,
+        "decode": 75229232692
+      },
+      "overallAllocatorEnvelopeBytes": 75229232692,
+      "underivedReason": "the anchor render engaged bounded rungs (or deferred materialization), so it does not measure the widest composition the MLX image law upper-bounds the ladder from; this anchor validates its measured point and prices nothing beyond it"
+    },
+    {
       "id": "flux2_dev:mlx:q4:base:base:sc-18218-flux2-dev-t2i-resident-evidence-v1:imc-b6537074420d51413b38",
       "modelId": "flux2_dev",
       "modelFamily": "flux2-dev",
@@ -1586,17 +1632,6 @@
       "modelFamily": "chroma",
       "route": "chroma1_flash",
       "backend": "candle",
-      "tier": "q8",
-      "basis": "no_retained_evidence",
-      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
-      "evidence": null
-    },
-    {
-      "id": "analytic:chroma1_flash:mlx:q8",
-      "modelId": "chroma1_flash",
-      "modelFamily": "chroma",
-      "route": "chroma1_flash",
-      "backend": "mlx",
       "tier": "q8",
       "basis": "no_retained_evidence",
       "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
