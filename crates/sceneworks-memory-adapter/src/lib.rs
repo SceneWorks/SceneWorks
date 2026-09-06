@@ -42,6 +42,19 @@ pub const FLUX2_KLEIN_REPOSITORY: &str = "SceneWorks/flux2-klein-9b-mlx";
 /// `engine_id: flux2_klein_9b`) from its own artifact, through `SCENEWORKS_FLUX2_KLEIN_KV_*`.
 pub const FLUX2_KLEIN_KV_REPOSITORY: &str = "SceneWorks/flux2-klein-9b-kv-mlx";
 pub const KREA_REPOSITORY: &str = "SceneWorks/krea-2-turbo-mlx";
+/// The UNDISTILLED Krea 2 base rehost (sc-22735) — the `krea_2_raw` provider's own artifact, on
+/// BOTH lanes. Bound through the separate `SCENEWORKS_KREA_RAW_*` family for the same reason
+/// `z_image` does not ride the Turbo family: Raw runs TRUE classifier-free guidance (two DiT
+/// forwards per step) over its own 12B checkpoint, so a Raw plan satisfied by Turbo weights would
+/// file Turbo's peaks under the base model's name.
+pub const KREA_RAW_REPOSITORY: &str = "SceneWorks/krea-2-raw-mlx";
+/// The Krea Realtime 14B rehost (sc-22735) — the autoregressive VIDEO member of the family, and
+/// MLX-only: `mlx-gen-krea-realtime` is the only engine that registers the provider, the worker
+/// refuses the job off macOS by name (`video_jobs/mod.rs`), and every shipped download is
+/// `platforms: ["macos"]`. Each `<tier>/` subdir is a complete, self-contained tree — the Krea DiT
+/// at that tier plus the stock Wan 2.1 z16 VAE, UMT5 encoder and tokenizer — so the capture binds
+/// one root, not a tier root plus co-requisites.
+pub const KREA_REALTIME_REPOSITORY: &str = "SceneWorks/krea-realtime-14b-mlx";
 /// The FLUX.1 [dev] tiered rehost (sc-22726). It serves BOTH the `flux1_dev` text-to-image provider
 /// and the `pulid_flux` character route, on both lanes: the worker resolves the PuLID backbone from
 /// exactly this repo (`image_jobs/pulid.rs` `PULID_FLUX_REPO`, `image_jobs/pulid_candle.rs`
@@ -158,6 +171,32 @@ pub const MINIMAX_REPOSITORY: &str = "SceneWorks/minimax-h3-mlx";
 /// [`validate_huggingface_revision_root`] rather than being forced through the rehost's
 /// variant-suffixed validator.
 pub const MINIMAX_UPSTREAM_REPOSITORY: &str = "MiniMaxAI/MiniMax-H3";
+/// The Kolors tiered rehost (sc-22732) — the `kolors` provider's own artifact on BOTH lanes. The
+/// ChatGLM3-6B text encoder is packed INSIDE each tier subdir alongside the SDXL-style U-Net and the
+/// dense SDXL VAE, and the derived fast tokenizer is baked in too
+/// (`crates/sceneworks-worker/src/engines.rs`, `image_jobs/base.rs`), so this one root is the whole
+/// load: the arm binds no second repository. Kolors' IP-Adapter and strict-pose ControlNet stacks
+/// live in their own upstream repos, but those are the two BESPOKE routes, and no anchor measures
+/// them.
+pub const KOLORS_REPOSITORY: &str = "SceneWorks/kolors-mlx";
+/// The base Lens tiered rehost (sc-22732). The gpt-oss-20b MoE text encoder and the FLUX.2
+/// autoencoder are packed per tier, so a Lens capture opens exactly one root.
+pub const LENS_REPOSITORY: &str = "SceneWorks/lens-mlx";
+/// The distilled Lens-Turbo tiered rehost (sc-22732) — a DIFFERENT repository at a DIFFERENT
+/// revision from [`LENS_REPOSITORY`], bound through its own `SCENEWORKS_LENS_TURBO_*` family the way
+/// `flux1_schnell` is split from `flux1_dev`, so a turbo plan can never be satisfied by base weights.
+pub const LENS_TURBO_REPOSITORY: &str = "SceneWorks/lens-turbo-mlx";
+/// The PACKED Ideogram 4 turnkey (sc-22732). It carries the `q4/` and `q8/` tiers ONLY, and it
+/// serves both catalog models — `ideogram_4` and `ideogram_4_turbo` share this repo AND this
+/// revision, differing by the `turbo_lora.safetensors` the turbo tier ships beside the glob.
+pub const IDEOGRAM_REPOSITORY: &str = "SceneWorks/ideogram-4-mlx";
+/// The Ideogram 4 bf16 tier, which lives in a SEPARATE repository at a separate revision
+/// (`crates/sceneworks-worker/src/image_jobs/base.rs` `IDEOGRAM_BF16_REPO`) because the MLX-quantized
+/// turnkey above is not bf16. Bound through its own `SCENEWORKS_IDEOGRAM_BF16_*` family: a bf16 plan
+/// resolved against the packed family would name the wrong artifact and the wrong revision, and the
+/// record's loadability fingerprint is the one claim about the snapshot nothing downstream can
+/// re-derive.
+pub const IDEOGRAM_BF16_REPOSITORY: &str = "SceneWorks/ideogram-4";
 /// The six Mage-Flow variant rehosts (sc-22733). Unlike every other image family in this file, a
 /// Mage variant repository ships the DiT ALONE: `<snapshot>/<tier>/transformer/`. The text encoder
 /// and the VAE are bit-identical across all six variants and are hosted ONCE in

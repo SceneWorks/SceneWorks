@@ -6760,6 +6760,7 @@ dependencies = [
  "mlx-gen-flux2",
  "mlx-gen-instantid",
  "mlx-gen-krea",
+ "mlx-gen-krea-realtime",
  "mlx-gen-ltx",
  "mlx-gen-minimax-h3",
  "mlx-gen-scail2",

@@ -560,6 +560,16 @@
           "pattern": "^[a-z0-9][a-z0-9._-]*$",
           "description": "Stable provider/calibration identity. It must exactly match the provider contract before any optimized fit may be selected."
         },
+        "calibrationFingerprintByTier": {
+          "type": "object",
+          "description": "Optional per-tier override of calibrationFingerprint (sc-22735). The engine keys a provider's calibration identity on the ARTIFACT-PROVEN tier, so a fit priced at bf16 or q8 must be graded against that tier's identity rather than against the scalar. The worker reads this map for the requested tier first and falls back to calibrationFingerprint, which stays the measured cell's identity.",
+          "additionalProperties": false,
+          "properties": {
+            "bf16": { "type": "string", "pattern": "^[a-z0-9][a-z0-9._-]*$" },
+            "q4": { "type": "string", "pattern": "^[a-z0-9][a-z0-9._-]*$" },
+            "q8": { "type": "string", "pattern": "^[a-z0-9][a-z0-9._-]*$" }
+          }
+        },
         "sceneWorksRevision": {
           "const": "sc-15449-contract-v1",
           "description": "SceneWorks selector/calibration contract revision. The worker rejects evidence from any other revision."
