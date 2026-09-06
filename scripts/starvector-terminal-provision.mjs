@@ -600,8 +600,11 @@ export async function installUpstreamPackages(python, lock, execute = runUpstrea
   // pip's timeout is a socket timeout, independent of the bounded process time.
   // Do not restart a failed multi-gigabyte install or discard its reusable cache.
   const base = ["-m", "pip", "install", "--disable-pip-version-check", "--progress-bar", "raw", "--timeout", "120", "--retries", "3"];
+  // Run 33997430725 transferred 1.60 of 3.27 GB in 60 minutes with continuous
+  // progress. Allow 150 minutes for the CUDA wheel stage; the independent
+  // five-minute no-progress watchdog still stops a stalled acquisition.
   const bounds = { timeout: 60 * 60 * 1000, maxBuffer: 4 * 1024 * 1024 };
-  await execute(python, [...base, "--index-url", lock.torch_index_url, ...["torch", "torchvision"].map(name => `${name}==${lock.required_packages[name]}`)], bounds);
+  await execute(python, [...base, "--index-url", lock.torch_index_url, ...["torch", "torchvision"].map(name => `${name}==${lock.required_packages[name]}`)], { ...bounds, timeout: 150 * 60 * 1000 });
   await execute(python, [...base, ...Object.entries(lock.required_packages).map(([name, version]) => `${name}==${version}`)], bounds);
 }
 

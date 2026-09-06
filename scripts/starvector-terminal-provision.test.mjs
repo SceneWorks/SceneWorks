@@ -1086,11 +1086,21 @@ test("upstream pip downloads retain exact CUDA builds and stop within finite ret
     assert.equal(args[args.indexOf("--progress-bar") + 1], "raw");
     assert.equal(args[args.indexOf("--timeout") + 1], "120");
     assert.equal(args[args.indexOf("--retries") + 1], "3");
-    assert.equal(bounds.timeout, 60 * 60 * 1000);
+    assert.ok(Number.isInteger(bounds.timeout) && bounds.timeout > 0);
     assert.ok(args.includes("torch==2.7.1+cu128"));
     assert.ok(args.includes("torchvision==0.22.1+cu128"));
     assert.ok(!args.includes("--no-cache-dir"));
   }
+  assert.equal(calls[0][2].timeout, 150 * 60 * 1000);
+  assert.equal(calls[1][2].timeout, 60 * 60 * 1000);
+  const windows = workflow.split("  provision-windows:")[1];
+  const jobMinutes = Number(/timeout-minutes: (\d+)/.exec(windows)[1]);
+  const upstream = windows.split("- name: Provision audited upstream validation closure without executing models")[1];
+  const stepMinutes = Number(/timeout-minutes: (\d+)/.exec(upstream)[1]);
+  assert.equal(stepMinutes, 225);
+  assert.equal(jobMinutes, 270);
+  assert.ok(stepMinutes * 60 * 1000 > calls.reduce((sum, call) => sum + call[2].timeout, 0), "workflow step must contain both bounded installs and validation");
+  assert.ok(jobMinutes > stepMinutes, "workflow job must also contain checkout, input setup, and readiness");
   assert.equal(calls[0][1][calls[0][1].indexOf("--index-url") + 1], "https://download.pytorch.org/whl/cu128");
   assert.deepEqual(calls[1][1].filter(arg => arg.includes("==")), Object.entries(lock.required_packages).map(([name, version]) => `${name}==${version}`));
   for (const failAt of [1, 2]) {

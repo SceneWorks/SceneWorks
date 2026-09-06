@@ -174,7 +174,7 @@ jobs:
 
   provision-windows:
     runs-on: [self-hosted, Windows, X64, cuda, real-weights]
-    timeout-minutes: 120
+    timeout-minutes: 270
     defaults:
       run:
         working-directory: ${{ github.workspace }}\sceneworks
@@ -306,7 +306,7 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw 'component bundle identity or readback failed' }
       - name: Provision audited upstream validation closure without executing models
         shell: powershell
-        timeout-minutes: 75
+        timeout-minutes: 225
         run: |
           cargo build --release --locked -p sceneworks-worker --bin starvector_terminal_sanitize
           if ($LASTEXITCODE -ne 0) { throw 'sanitizer build failed' }
