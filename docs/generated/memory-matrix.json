@@ -1,7 +1,7 @@
 {
   "schemaVersion": 11,
   "generatedFrom": {
-    "sceneWorksRevision": "source-tree:0001ca6f394f655938f175568a0f0beec5561b9fdf3c7812caca74b1026bbbad",
+    "sceneWorksRevision": "source-tree:d73151ce5c40bfe7f2cf2e7dc171cd8c1cd08e30b1015e72ce0649e1f0935e98",
     "sources": {
       "manifest": {
         "path": "config/manifests/builtin.models.jsonc",
@@ -69,7 +69,7 @@
       },
       "anchorStore": {
         "path": "config/memory-anchors.json",
-        "sha256": "ad8fc7f05f5ab60d384151d352e93e823342ea67f49b2d0a68ffb4759168f090"
+        "sha256": "49526805f36a5250c305fd93f4fc9b58e664699f70ed41c7827db8a0fb656b30"
       },
       "anchorLoaderClosures": {
         "path": "config/anchor-loader-closures.json",
@@ -77,7 +77,7 @@
       },
       "anchorDerivation": {
         "path": "crates/sceneworks-core/src/memory_anchor.rs",
-        "sha256": "d63fe481db7441b12f49b9eeeaca4f3d0b74b76264b031fbb405cf7db414ee3c"
+        "sha256": "f9bb89e8b9117df54360f507191757dc3af33ea9864bb3b539a4f50c62d72633"
       },
       "anchorAdmission": {
         "path": "crates/sceneworks-worker/src/video_admission.rs",
@@ -138,10 +138,10 @@
       "video": 11
     },
     "cells": 9265,
-    "publishedCells": 1169,
-    "elidedCells": 8096,
+    "publishedCells": 1197,
+    "elidedCells": 8068,
     "elidedByState": {
-      "Implemented": 3722,
+      "Implemented": 3694,
       "Missing": 4374
     },
     "publicationPredicate": "A coordinate is published when it carries a claim a per-lane census cannot: a measured memory anchor covers its (model, tier, backend lane), or it is structurally exempt. A bare `Implemented` or `Missing` state is a property of the whole lane, replicated across every tier x mode x overlay, and is counted in `summary.elidedByState` and the per-(entry, backend, rung) `coverage` census instead of restated thousands of times.",
@@ -162,9 +162,9 @@
         "reason": "both lanes ARE routed (VideoModelCaps mlx+candle, resolve_candle_video_route's MiniMaxH3 arm), but this generator's route parsers cannot enumerate either: the MLX resolver is a PREFIX PREDICATE and the Candle arm lives outside candle_video_engine_id. Matrix-only — the E1 measurability burndown reads the routing catalog and DOES claim these cells"
       }
     ],
-    "anchors": 50,
-    "analyticOnlyCells": 287,
-    "anchoredCells": 706,
+    "anchors": 51,
+    "analyticOnlyCells": 286,
+    "anchoredCells": 734,
     "staleAnchors": 7,
     "attestedAnchors": 5,
     "fullModels": 0
@@ -5428,6 +5428,24 @@
       "current": false,
       "currencyAttestation": null,
       "cells": 42
+    },
+    {
+      "id": "qwen_image_edit_2511:mlx:bf16:base:base:qwen-image-mlx-shared-ladder-2026-08-01-v1:imc-21d4598981a319a41bd4",
+      "modelId": "qwen_image_edit_2511",
+      "backend": "mlx",
+      "tier": "bf16",
+      "provider": "qwen_image_edit",
+      "mode": "edit_image",
+      "geometry": {
+        "width": 768,
+        "height": 768,
+        "frames": 1,
+        "fps": null
+      },
+      "source": "docs/calibration/sc-22738/qwen-image-edit-2511-bf16-mlx-evidence.json",
+      "current": true,
+      "currencyAttestation": null,
+      "cells": 28
     },
     {
       "id": "qwen_image:candle:q4:base:base:qwen-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v1:imc-48b48f5179e387bc2841",
@@ -12376,11 +12394,12 @@
       "backend": "mlx",
       "rung": "bounded_attention",
       "coordinates": 18,
-      "published": 0,
-      "elided": 18,
+      "published": 6,
+      "elided": 12,
       "implemented": 18,
       "states": {
-        "Implemented": 18
+        "Anchored/underived": 6,
+        "Implemented": 12
       }
     },
     {
@@ -12388,11 +12407,12 @@
       "backend": "mlx",
       "rung": "bounded_decode",
       "coordinates": 18,
-      "published": 0,
-      "elided": 18,
+      "published": 6,
+      "elided": 12,
       "implemented": 18,
       "states": {
-        "Implemented": 18
+        "Anchored/underived": 6,
+        "Implemented": 12
       }
     },
     {
@@ -12400,11 +12420,12 @@
       "backend": "mlx",
       "rung": "bounded_transformer_residency",
       "coordinates": 18,
-      "published": 0,
-      "elided": 18,
+      "published": 4,
+      "elided": 14,
       "implemented": 12,
       "states": {
-        "Implemented": 12,
+        "Anchored/underived": 4,
+        "Implemented": 8,
         "Missing": 6
       },
       "implementedBy": {
@@ -12429,11 +12450,12 @@
       "backend": "mlx",
       "rung": "resident",
       "coordinates": 18,
-      "published": 0,
-      "elided": 18,
+      "published": 6,
+      "elided": 12,
       "implemented": 18,
       "states": {
-        "Implemented": 18
+        "Anchored/underived": 6,
+        "Implemented": 12
       }
     },
     {
@@ -12441,11 +12463,12 @@
       "backend": "mlx",
       "rung": "staged_residency",
       "coordinates": 18,
-      "published": 0,
-      "elided": 18,
+      "published": 6,
+      "elided": 12,
       "implemented": 18,
       "states": {
-        "Implemented": 18
+        "Anchored/underived": 6,
+        "Implemented": 12
       }
     },
     {
@@ -51902,6 +51925,1730 @@
       }
     },
     {
+      "id": "qwen_image_edit_2511:qwen_image_edit:mlx:bf16:character_image:identity:bounded_attention",
+      "modelId": "qwen_image_edit_2511",
+      "resolvedRoute": "qwen_image_edit",
+      "provider": "qwen_image_edit",
+      "backend": "mlx",
+      "tier": "bf16",
+      "mode": "character_image",
+      "overlay": "identity",
+      "rung": "bounded_attention",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "768x768",
+          "1024x1024",
+          "1280x720",
+          "720x1280"
+        ]
+      },
+      "strategyParameters": {
+        "decodeTileEdge": 512,
+        "decodeOverlap": 64,
+        "attentionChunkSize": 67108864,
+        "publishedRanges": {
+          "decodeTileEdges": [
+            768,
+            640,
+            512,
+            448,
+            384,
+            320,
+            256
+          ],
+          "decodeOverlaps": [
+            64
+          ],
+          "attentionChunkSizes": [
+            67108864
+          ]
+        }
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "qwen_image_edit_2511:mlx:bf16:base:base:qwen-image-mlx-shared-ladder-2026-08-01-v1:imc-21d4598981a319a41bd4",
+        "tier": "bf16",
+        "source": "config/memory-anchors.json#qwen_image_edit_2511:mlx:bf16:base:base:qwen-image-mlx-shared-ladder-2026-08-01-v1:imc-21d4598981a319a41bd4",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": false,
+        "underivedReason": "the anchor render engaged bounded rungs (or deferred materialization), so it does not measure the widest composition the MLX image law upper-bounds the ladder from; this anchor validates its measured point and prices nothing beyond it"
+      },
+      "derivationDefined": true,
+      "state": "Anchored/underived",
+      "owningFamilyStory": 15511,
+      "owningModelStory": 15460,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "inference:crates/media/mlx-gen/mlx-gen-qwen-image/src/memory_strategy.rs"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#qwen_image_edit_2511:mlx:bf16:base:base:qwen-image-mlx-shared-ladder-2026-08-01-v1:imc-21d4598981a319a41bd4"
+          }
+        ]
+      }
+    },
+    {
+      "id": "qwen_image_edit_2511:qwen_image_edit:mlx:bf16:character_image:identity:bounded_decode",
+      "modelId": "qwen_image_edit_2511",
+      "resolvedRoute": "qwen_image_edit",
+      "provider": "qwen_image_edit",
+      "backend": "mlx",
+      "tier": "bf16",
+      "mode": "character_image",
+      "overlay": "identity",
+      "rung": "bounded_decode",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "768x768",
+          "1024x1024",
+          "1280x720",
+          "720x1280"
+        ]
+      },
+      "strategyParameters": {
+        "decodeTileEdge": 512,
+        "decodeOverlap": 64,
+        "publishedRanges": {
+          "decodeTileEdges": [
+            768,
+            640,
+            512,
+            448,
+            384,
+            320,
+            256
+          ],
+          "decodeOverlaps": [
+            64
+          ]
+        }
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "qwen_image_edit_2511:mlx:bf16:base:base:qwen-image-mlx-shared-ladder-2026-08-01-v1:imc-21d4598981a319a41bd4",
+        "tier": "bf16",
+        "source": "config/memory-anchors.json#qwen_image_edit_2511:mlx:bf16:base:base:qwen-image-mlx-shared-ladder-2026-08-01-v1:imc-21d4598981a319a41bd4",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": false,
+        "underivedReason": "the anchor render engaged bounded rungs (or deferred materialization), so it does not measure the widest composition the MLX image law upper-bounds the ladder from; this anchor validates its measured point and prices nothing beyond it"
+      },
+      "derivationDefined": true,
+      "state": "Anchored/underived",
+      "owningFamilyStory": 15511,
+      "owningModelStory": 15460,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "inference:crates/media/mlx-gen/mlx-gen-qwen-image/src/memory_strategy.rs"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#qwen_image_edit_2511:mlx:bf16:base:base:qwen-image-mlx-shared-ladder-2026-08-01-v1:imc-21d4598981a319a41bd4"
+          }
+        ]
+      }
+    },
+    {
+      "id": "qwen_image_edit_2511:qwen_image_edit:mlx:bf16:character_image:identity:resident",
+      "modelId": "qwen_image_edit_2511",
+      "resolvedRoute": "qwen_image_edit",
+      "provider": "qwen_image_edit",
+      "backend": "mlx",
+      "tier": "bf16",
+      "mode": "character_image",
+      "overlay": "identity",
+      "rung": "resident",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "768x768",
+          "1024x1024",
+          "1280x720",
+          "720x1280"
+        ]
+      },
+      "strategyParameters": {},
+      "implementation": "implemented",
+      "anchor": {
+        "id": "qwen_image_edit_2511:mlx:bf16:base:base:qwen-image-mlx-shared-ladder-2026-08-01-v1:imc-21d4598981a319a41bd4",
+        "tier": "bf16",
+        "source": "config/memory-anchors.json#qwen_image_edit_2511:mlx:bf16:base:base:qwen-image-mlx-shared-ladder-2026-08-01-v1:imc-21d4598981a319a41bd4",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": false,
+        "underivedReason": "the anchor render engaged bounded rungs (or deferred materialization), so it does not measure the widest composition the MLX image law upper-bounds the ladder from; this anchor validates its measured point and prices nothing beyond it"
+      },
+      "derivationDefined": true,
+      "state": "Anchored/underived",
+      "owningFamilyStory": 15511,
+      "owningModelStory": 15460,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "crates/sceneworks-worker/src/engines.rs#MODEL_TABLE"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#qwen_image_edit_2511:mlx:bf16:base:base:qwen-image-mlx-shared-ladder-2026-08-01-v1:imc-21d4598981a319a41bd4"
+          }
+        ]
+      }
+    },
+    {
+      "id": "qwen_image_edit_2511:qwen_image_edit:mlx:bf16:character_image:identity:staged_residency",
+      "modelId": "qwen_image_edit_2511",
+      "resolvedRoute": "qwen_image_edit",
+      "provider": "qwen_image_edit",
+      "backend": "mlx",
+      "tier": "bf16",
+      "mode": "character_image",
+      "overlay": "identity",
+      "rung": "staged_residency",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "768x768",
+          "1024x1024",
+          "1280x720",
+          "720x1280"
+        ]
+      },
+      "strategyParameters": {
+        "phaseOrder": [
+          "conditioning",
+          "denoise",
+          "decode"
+        ]
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "qwen_image_edit_2511:mlx:bf16:base:base:qwen-image-mlx-shared-ladder-2026-08-01-v1:imc-21d4598981a319a41bd4",
+        "tier": "bf16",
+        "source": "config/memory-anchors.json#qwen_image_edit_2511:mlx:bf16:base:base:qwen-image-mlx-shared-ladder-2026-08-01-v1:imc-21d4598981a319a41bd4",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": false,
+        "underivedReason": "the anchor render engaged bounded rungs (or deferred materialization), so it does not measure the widest composition the MLX image law upper-bounds the ladder from; this anchor validates its measured point and prices nothing beyond it"
+      },
+      "derivationDefined": true,
+      "state": "Anchored/underived",
+      "owningFamilyStory": 15511,
+      "owningModelStory": 15460,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "crates/sceneworks-worker/src/mlx_fit_gate.rs#engine_engages_staged_residency"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#qwen_image_edit_2511:mlx:bf16:base:base:qwen-image-mlx-shared-ladder-2026-08-01-v1:imc-21d4598981a319a41bd4"
+          }
+        ]
+      }
+    },
+    {
+      "id": "qwen_image_edit_2511:qwen_image_edit:mlx:bf16:character_image:lora:bounded_attention",
+      "modelId": "qwen_image_edit_2511",
+      "resolvedRoute": "qwen_image_edit",
+      "provider": "qwen_image_edit",
+      "backend": "mlx",
+      "tier": "bf16",
+      "mode": "character_image",
+      "overlay": "lora",
+      "rung": "bounded_attention",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "768x768",
+          "1024x1024",
+          "1280x720",
+          "720x1280"
+        ]
+      },
+      "strategyParameters": {
+        "decodeTileEdge": 512,
+        "decodeOverlap": 64,
+        "attentionChunkSize": 67108864,
+        "publishedRanges": {
+          "decodeTileEdges": [
+            768,
+            640,
+            512,
+            448,
+            384,
+            320,
+            256
+          ],
+          "decodeOverlaps": [
+            64
+          ],
+          "attentionChunkSizes": [
+            67108864
+          ]
+        }
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "qwen_image_edit_2511:mlx:bf16:base:base:qwen-image-mlx-shared-ladder-2026-08-01-v1:imc-21d4598981a319a41bd4",
+        "tier": "bf16",
+        "source": "config/memory-anchors.json#qwen_image_edit_2511:mlx:bf16:base:base:qwen-image-mlx-shared-ladder-2026-08-01-v1:imc-21d4598981a319a41bd4",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": false,
+        "underivedReason": "the anchor render engaged bounded rungs (or deferred materialization), so it does not measure the widest composition the MLX image law upper-bounds the ladder from; this anchor validates its measured point and prices nothing beyond it"
+      },
+      "derivationDefined": true,
+      "state": "Anchored/underived",
+      "owningFamilyStory": 15511,
+      "owningModelStory": 15460,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "inference:crates/media/mlx-gen/mlx-gen-qwen-image/src/memory_strategy.rs"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#qwen_image_edit_2511:mlx:bf16:base:base:qwen-image-mlx-shared-ladder-2026-08-01-v1:imc-21d4598981a319a41bd4"
+          }
+        ]
+      }
+    },
+    {
+      "id": "qwen_image_edit_2511:qwen_image_edit:mlx:bf16:character_image:lora:bounded_decode",
+      "modelId": "qwen_image_edit_2511",
+      "resolvedRoute": "qwen_image_edit",
+      "provider": "qwen_image_edit",
+      "backend": "mlx",
+      "tier": "bf16",
+      "mode": "character_image",
+      "overlay": "lora",
+      "rung": "bounded_decode",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "768x768",
+          "1024x1024",
+          "1280x720",
+          "720x1280"
+        ]
+      },
+      "strategyParameters": {
+        "decodeTileEdge": 512,
+        "decodeOverlap": 64,
+        "publishedRanges": {
+          "decodeTileEdges": [
+            768,
+            640,
+            512,
+            448,
+            384,
+            320,
+            256
+          ],
+          "decodeOverlaps": [
+            64
+          ]
+        }
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "qwen_image_edit_2511:mlx:bf16:base:base:qwen-image-mlx-shared-ladder-2026-08-01-v1:imc-21d4598981a319a41bd4",
+        "tier": "bf16",
+        "source": "config/memory-anchors.json#qwen_image_edit_2511:mlx:bf16:base:base:qwen-image-mlx-shared-ladder-2026-08-01-v1:imc-21d4598981a319a41bd4",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": false,
+        "underivedReason": "the anchor render engaged bounded rungs (or deferred materialization), so it does not measure the widest composition the MLX image law upper-bounds the ladder from; this anchor validates its measured point and prices nothing beyond it"
+      },
+      "derivationDefined": true,
+      "state": "Anchored/underived",
+      "owningFamilyStory": 15511,
+      "owningModelStory": 15460,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "inference:crates/media/mlx-gen/mlx-gen-qwen-image/src/memory_strategy.rs"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#qwen_image_edit_2511:mlx:bf16:base:base:qwen-image-mlx-shared-ladder-2026-08-01-v1:imc-21d4598981a319a41bd4"
+          }
+        ]
+      }
+    },
+    {
+      "id": "qwen_image_edit_2511:qwen_image_edit:mlx:bf16:character_image:lora:bounded_transformer_residency",
+      "modelId": "qwen_image_edit_2511",
+      "resolvedRoute": "qwen_image_edit",
+      "provider": "qwen_image_edit",
+      "backend": "mlx",
+      "tier": "bf16",
+      "mode": "character_image",
+      "overlay": "lora",
+      "rung": "bounded_transformer_residency",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "768x768",
+          "1024x1024",
+          "1280x720",
+          "720x1280"
+        ]
+      },
+      "strategyParameters": {
+        "decodeTileEdge": 512,
+        "decodeOverlap": 64,
+        "attentionChunkSize": 67108864,
+        "transformerWindowSize": 1,
+        "transformerWindowComponent": "Dit",
+        "publishedRanges": {
+          "decodeTileEdges": [
+            768,
+            640,
+            512,
+            448,
+            384,
+            320,
+            256
+          ],
+          "decodeOverlaps": [
+            64
+          ],
+          "attentionChunkSizes": [
+            67108864
+          ],
+          "transformerWindowSizes": [
+            1
+          ],
+          "transformerWindowComponents": [
+            "Dit"
+          ]
+        }
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "qwen_image_edit_2511:mlx:bf16:base:base:qwen-image-mlx-shared-ladder-2026-08-01-v1:imc-21d4598981a319a41bd4",
+        "tier": "bf16",
+        "source": "config/memory-anchors.json#qwen_image_edit_2511:mlx:bf16:base:base:qwen-image-mlx-shared-ladder-2026-08-01-v1:imc-21d4598981a319a41bd4",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": false,
+        "underivedReason": "the anchor render engaged bounded rungs (or deferred materialization), so it does not measure the widest composition the MLX image law upper-bounds the ladder from; this anchor validates its measured point and prices nothing beyond it"
+      },
+      "derivationDefined": true,
+      "state": "Anchored/underived",
+      "owningFamilyStory": 15511,
+      "owningModelStory": 15460,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "inference:crates/media/mlx-gen/mlx-gen-qwen-image/src/memory_strategy.rs"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#qwen_image_edit_2511:mlx:bf16:base:base:qwen-image-mlx-shared-ladder-2026-08-01-v1:imc-21d4598981a319a41bd4"
+          }
+        ]
+      }
+    },
+    {
+      "id": "qwen_image_edit_2511:qwen_image_edit:mlx:bf16:character_image:lora:resident",
+      "modelId": "qwen_image_edit_2511",
+      "resolvedRoute": "qwen_image_edit",
+      "provider": "qwen_image_edit",
+      "backend": "mlx",
+      "tier": "bf16",
+      "mode": "character_image",
+      "overlay": "lora",
+      "rung": "resident",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "768x768",
+          "1024x1024",
+          "1280x720",
+          "720x1280"
+        ]
+      },
+      "strategyParameters": {},
+      "implementation": "implemented",
+      "anchor": {
+        "id": "qwen_image_edit_2511:mlx:bf16:base:base:qwen-image-mlx-shared-ladder-2026-08-01-v1:imc-21d4598981a319a41bd4",
+        "tier": "bf16",
+        "source": "config/memory-anchors.json#qwen_image_edit_2511:mlx:bf16:base:base:qwen-image-mlx-shared-ladder-2026-08-01-v1:imc-21d4598981a319a41bd4",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": false,
+        "underivedReason": "the anchor render engaged bounded rungs (or deferred materialization), so it does not measure the widest composition the MLX image law upper-bounds the ladder from; this anchor validates its measured point and prices nothing beyond it"
+      },
+      "derivationDefined": true,
+      "state": "Anchored/underived",
+      "owningFamilyStory": 15511,
+      "owningModelStory": 15460,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "crates/sceneworks-worker/src/engines.rs#MODEL_TABLE"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#qwen_image_edit_2511:mlx:bf16:base:base:qwen-image-mlx-shared-ladder-2026-08-01-v1:imc-21d4598981a319a41bd4"
+          }
+        ]
+      }
+    },
+    {
+      "id": "qwen_image_edit_2511:qwen_image_edit:mlx:bf16:character_image:lora:staged_residency",
+      "modelId": "qwen_image_edit_2511",
+      "resolvedRoute": "qwen_image_edit",
+      "provider": "qwen_image_edit",
+      "backend": "mlx",
+      "tier": "bf16",
+      "mode": "character_image",
+      "overlay": "lora",
+      "rung": "staged_residency",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "768x768",
+          "1024x1024",
+          "1280x720",
+          "720x1280"
+        ]
+      },
+      "strategyParameters": {
+        "phaseOrder": [
+          "conditioning",
+          "denoise",
+          "decode"
+        ]
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "qwen_image_edit_2511:mlx:bf16:base:base:qwen-image-mlx-shared-ladder-2026-08-01-v1:imc-21d4598981a319a41bd4",
+        "tier": "bf16",
+        "source": "config/memory-anchors.json#qwen_image_edit_2511:mlx:bf16:base:base:qwen-image-mlx-shared-ladder-2026-08-01-v1:imc-21d4598981a319a41bd4",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": false,
+        "underivedReason": "the anchor render engaged bounded rungs (or deferred materialization), so it does not measure the widest composition the MLX image law upper-bounds the ladder from; this anchor validates its measured point and prices nothing beyond it"
+      },
+      "derivationDefined": true,
+      "state": "Anchored/underived",
+      "owningFamilyStory": 15511,
+      "owningModelStory": 15460,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "crates/sceneworks-worker/src/mlx_fit_gate.rs#engine_engages_staged_residency"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#qwen_image_edit_2511:mlx:bf16:base:base:qwen-image-mlx-shared-ladder-2026-08-01-v1:imc-21d4598981a319a41bd4"
+          }
+        ]
+      }
+    },
+    {
+      "id": "qwen_image_edit_2511:qwen_image_edit:mlx:bf16:character_image:none:bounded_attention",
+      "modelId": "qwen_image_edit_2511",
+      "resolvedRoute": "qwen_image_edit",
+      "provider": "qwen_image_edit",
+      "backend": "mlx",
+      "tier": "bf16",
+      "mode": "character_image",
+      "overlay": "none",
+      "rung": "bounded_attention",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "768x768",
+          "1024x1024",
+          "1280x720",
+          "720x1280"
+        ]
+      },
+      "strategyParameters": {
+        "decodeTileEdge": 512,
+        "decodeOverlap": 64,
+        "attentionChunkSize": 67108864,
+        "publishedRanges": {
+          "decodeTileEdges": [
+            768,
+            640,
+            512,
+            448,
+            384,
+            320,
+            256
+          ],
+          "decodeOverlaps": [
+            64
+          ],
+          "attentionChunkSizes": [
+            67108864
+          ]
+        }
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "qwen_image_edit_2511:mlx:bf16:base:base:qwen-image-mlx-shared-ladder-2026-08-01-v1:imc-21d4598981a319a41bd4",
+        "tier": "bf16",
+        "source": "config/memory-anchors.json#qwen_image_edit_2511:mlx:bf16:base:base:qwen-image-mlx-shared-ladder-2026-08-01-v1:imc-21d4598981a319a41bd4",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": false,
+        "underivedReason": "the anchor render engaged bounded rungs (or deferred materialization), so it does not measure the widest composition the MLX image law upper-bounds the ladder from; this anchor validates its measured point and prices nothing beyond it"
+      },
+      "derivationDefined": true,
+      "state": "Anchored/underived",
+      "owningFamilyStory": 15511,
+      "owningModelStory": 15460,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "inference:crates/media/mlx-gen/mlx-gen-qwen-image/src/memory_strategy.rs"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#qwen_image_edit_2511:mlx:bf16:base:base:qwen-image-mlx-shared-ladder-2026-08-01-v1:imc-21d4598981a319a41bd4"
+          }
+        ]
+      }
+    },
+    {
+      "id": "qwen_image_edit_2511:qwen_image_edit:mlx:bf16:character_image:none:bounded_decode",
+      "modelId": "qwen_image_edit_2511",
+      "resolvedRoute": "qwen_image_edit",
+      "provider": "qwen_image_edit",
+      "backend": "mlx",
+      "tier": "bf16",
+      "mode": "character_image",
+      "overlay": "none",
+      "rung": "bounded_decode",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "768x768",
+          "1024x1024",
+          "1280x720",
+          "720x1280"
+        ]
+      },
+      "strategyParameters": {
+        "decodeTileEdge": 512,
+        "decodeOverlap": 64,
+        "publishedRanges": {
+          "decodeTileEdges": [
+            768,
+            640,
+            512,
+            448,
+            384,
+            320,
+            256
+          ],
+          "decodeOverlaps": [
+            64
+          ]
+        }
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "qwen_image_edit_2511:mlx:bf16:base:base:qwen-image-mlx-shared-ladder-2026-08-01-v1:imc-21d4598981a319a41bd4",
+        "tier": "bf16",
+        "source": "config/memory-anchors.json#qwen_image_edit_2511:mlx:bf16:base:base:qwen-image-mlx-shared-ladder-2026-08-01-v1:imc-21d4598981a319a41bd4",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": false,
+        "underivedReason": "the anchor render engaged bounded rungs (or deferred materialization), so it does not measure the widest composition the MLX image law upper-bounds the ladder from; this anchor validates its measured point and prices nothing beyond it"
+      },
+      "derivationDefined": true,
+      "state": "Anchored/underived",
+      "owningFamilyStory": 15511,
+      "owningModelStory": 15460,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "inference:crates/media/mlx-gen/mlx-gen-qwen-image/src/memory_strategy.rs"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#qwen_image_edit_2511:mlx:bf16:base:base:qwen-image-mlx-shared-ladder-2026-08-01-v1:imc-21d4598981a319a41bd4"
+          }
+        ]
+      }
+    },
+    {
+      "id": "qwen_image_edit_2511:qwen_image_edit:mlx:bf16:character_image:none:bounded_transformer_residency",
+      "modelId": "qwen_image_edit_2511",
+      "resolvedRoute": "qwen_image_edit",
+      "provider": "qwen_image_edit",
+      "backend": "mlx",
+      "tier": "bf16",
+      "mode": "character_image",
+      "overlay": "none",
+      "rung": "bounded_transformer_residency",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "768x768",
+          "1024x1024",
+          "1280x720",
+          "720x1280"
+        ]
+      },
+      "strategyParameters": {
+        "decodeTileEdge": 512,
+        "decodeOverlap": 64,
+        "attentionChunkSize": 67108864,
+        "transformerWindowSize": 1,
+        "transformerWindowComponent": "Dit",
+        "publishedRanges": {
+          "decodeTileEdges": [
+            768,
+            640,
+            512,
+            448,
+            384,
+            320,
+            256
+          ],
+          "decodeOverlaps": [
+            64
+          ],
+          "attentionChunkSizes": [
+            67108864
+          ],
+          "transformerWindowSizes": [
+            1
+          ],
+          "transformerWindowComponents": [
+            "Dit"
+          ]
+        }
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "qwen_image_edit_2511:mlx:bf16:base:base:qwen-image-mlx-shared-ladder-2026-08-01-v1:imc-21d4598981a319a41bd4",
+        "tier": "bf16",
+        "source": "config/memory-anchors.json#qwen_image_edit_2511:mlx:bf16:base:base:qwen-image-mlx-shared-ladder-2026-08-01-v1:imc-21d4598981a319a41bd4",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": false,
+        "underivedReason": "the anchor render engaged bounded rungs (or deferred materialization), so it does not measure the widest composition the MLX image law upper-bounds the ladder from; this anchor validates its measured point and prices nothing beyond it"
+      },
+      "derivationDefined": true,
+      "state": "Anchored/underived",
+      "owningFamilyStory": 15511,
+      "owningModelStory": 15460,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "inference:crates/media/mlx-gen/mlx-gen-qwen-image/src/memory_strategy.rs"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#qwen_image_edit_2511:mlx:bf16:base:base:qwen-image-mlx-shared-ladder-2026-08-01-v1:imc-21d4598981a319a41bd4"
+          }
+        ]
+      }
+    },
+    {
+      "id": "qwen_image_edit_2511:qwen_image_edit:mlx:bf16:character_image:none:resident",
+      "modelId": "qwen_image_edit_2511",
+      "resolvedRoute": "qwen_image_edit",
+      "provider": "qwen_image_edit",
+      "backend": "mlx",
+      "tier": "bf16",
+      "mode": "character_image",
+      "overlay": "none",
+      "rung": "resident",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "768x768",
+          "1024x1024",
+          "1280x720",
+          "720x1280"
+        ]
+      },
+      "strategyParameters": {},
+      "implementation": "implemented",
+      "anchor": {
+        "id": "qwen_image_edit_2511:mlx:bf16:base:base:qwen-image-mlx-shared-ladder-2026-08-01-v1:imc-21d4598981a319a41bd4",
+        "tier": "bf16",
+        "source": "config/memory-anchors.json#qwen_image_edit_2511:mlx:bf16:base:base:qwen-image-mlx-shared-ladder-2026-08-01-v1:imc-21d4598981a319a41bd4",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": false,
+        "underivedReason": "the anchor render engaged bounded rungs (or deferred materialization), so it does not measure the widest composition the MLX image law upper-bounds the ladder from; this anchor validates its measured point and prices nothing beyond it"
+      },
+      "derivationDefined": true,
+      "state": "Anchored/underived",
+      "owningFamilyStory": 15511,
+      "owningModelStory": 15460,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "crates/sceneworks-worker/src/engines.rs#MODEL_TABLE"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#qwen_image_edit_2511:mlx:bf16:base:base:qwen-image-mlx-shared-ladder-2026-08-01-v1:imc-21d4598981a319a41bd4"
+          }
+        ]
+      }
+    },
+    {
+      "id": "qwen_image_edit_2511:qwen_image_edit:mlx:bf16:character_image:none:staged_residency",
+      "modelId": "qwen_image_edit_2511",
+      "resolvedRoute": "qwen_image_edit",
+      "provider": "qwen_image_edit",
+      "backend": "mlx",
+      "tier": "bf16",
+      "mode": "character_image",
+      "overlay": "none",
+      "rung": "staged_residency",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "768x768",
+          "1024x1024",
+          "1280x720",
+          "720x1280"
+        ]
+      },
+      "strategyParameters": {
+        "phaseOrder": [
+          "conditioning",
+          "denoise",
+          "decode"
+        ]
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "qwen_image_edit_2511:mlx:bf16:base:base:qwen-image-mlx-shared-ladder-2026-08-01-v1:imc-21d4598981a319a41bd4",
+        "tier": "bf16",
+        "source": "config/memory-anchors.json#qwen_image_edit_2511:mlx:bf16:base:base:qwen-image-mlx-shared-ladder-2026-08-01-v1:imc-21d4598981a319a41bd4",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": false,
+        "underivedReason": "the anchor render engaged bounded rungs (or deferred materialization), so it does not measure the widest composition the MLX image law upper-bounds the ladder from; this anchor validates its measured point and prices nothing beyond it"
+      },
+      "derivationDefined": true,
+      "state": "Anchored/underived",
+      "owningFamilyStory": 15511,
+      "owningModelStory": 15460,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "crates/sceneworks-worker/src/mlx_fit_gate.rs#engine_engages_staged_residency"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#qwen_image_edit_2511:mlx:bf16:base:base:qwen-image-mlx-shared-ladder-2026-08-01-v1:imc-21d4598981a319a41bd4"
+          }
+        ]
+      }
+    },
+    {
+      "id": "qwen_image_edit_2511:qwen_image_edit:mlx:bf16:edit_image:identity:bounded_attention",
+      "modelId": "qwen_image_edit_2511",
+      "resolvedRoute": "qwen_image_edit",
+      "provider": "qwen_image_edit",
+      "backend": "mlx",
+      "tier": "bf16",
+      "mode": "edit_image",
+      "overlay": "identity",
+      "rung": "bounded_attention",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "768x768",
+          "1024x1024",
+          "1280x720",
+          "720x1280"
+        ]
+      },
+      "strategyParameters": {
+        "decodeTileEdge": 512,
+        "decodeOverlap": 64,
+        "attentionChunkSize": 67108864,
+        "publishedRanges": {
+          "decodeTileEdges": [
+            768,
+            640,
+            512,
+            448,
+            384,
+            320,
+            256
+          ],
+          "decodeOverlaps": [
+            64
+          ],
+          "attentionChunkSizes": [
+            67108864
+          ]
+        }
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "qwen_image_edit_2511:mlx:bf16:base:base:qwen-image-mlx-shared-ladder-2026-08-01-v1:imc-21d4598981a319a41bd4",
+        "tier": "bf16",
+        "source": "config/memory-anchors.json#qwen_image_edit_2511:mlx:bf16:base:base:qwen-image-mlx-shared-ladder-2026-08-01-v1:imc-21d4598981a319a41bd4",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": false,
+        "underivedReason": "the anchor render engaged bounded rungs (or deferred materialization), so it does not measure the widest composition the MLX image law upper-bounds the ladder from; this anchor validates its measured point and prices nothing beyond it"
+      },
+      "derivationDefined": true,
+      "state": "Anchored/underived",
+      "owningFamilyStory": 15511,
+      "owningModelStory": 15460,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "inference:crates/media/mlx-gen/mlx-gen-qwen-image/src/memory_strategy.rs"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#qwen_image_edit_2511:mlx:bf16:base:base:qwen-image-mlx-shared-ladder-2026-08-01-v1:imc-21d4598981a319a41bd4"
+          }
+        ]
+      }
+    },
+    {
+      "id": "qwen_image_edit_2511:qwen_image_edit:mlx:bf16:edit_image:identity:bounded_decode",
+      "modelId": "qwen_image_edit_2511",
+      "resolvedRoute": "qwen_image_edit",
+      "provider": "qwen_image_edit",
+      "backend": "mlx",
+      "tier": "bf16",
+      "mode": "edit_image",
+      "overlay": "identity",
+      "rung": "bounded_decode",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "768x768",
+          "1024x1024",
+          "1280x720",
+          "720x1280"
+        ]
+      },
+      "strategyParameters": {
+        "decodeTileEdge": 512,
+        "decodeOverlap": 64,
+        "publishedRanges": {
+          "decodeTileEdges": [
+            768,
+            640,
+            512,
+            448,
+            384,
+            320,
+            256
+          ],
+          "decodeOverlaps": [
+            64
+          ]
+        }
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "qwen_image_edit_2511:mlx:bf16:base:base:qwen-image-mlx-shared-ladder-2026-08-01-v1:imc-21d4598981a319a41bd4",
+        "tier": "bf16",
+        "source": "config/memory-anchors.json#qwen_image_edit_2511:mlx:bf16:base:base:qwen-image-mlx-shared-ladder-2026-08-01-v1:imc-21d4598981a319a41bd4",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": false,
+        "underivedReason": "the anchor render engaged bounded rungs (or deferred materialization), so it does not measure the widest composition the MLX image law upper-bounds the ladder from; this anchor validates its measured point and prices nothing beyond it"
+      },
+      "derivationDefined": true,
+      "state": "Anchored/underived",
+      "owningFamilyStory": 15511,
+      "owningModelStory": 15460,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "inference:crates/media/mlx-gen/mlx-gen-qwen-image/src/memory_strategy.rs"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#qwen_image_edit_2511:mlx:bf16:base:base:qwen-image-mlx-shared-ladder-2026-08-01-v1:imc-21d4598981a319a41bd4"
+          }
+        ]
+      }
+    },
+    {
+      "id": "qwen_image_edit_2511:qwen_image_edit:mlx:bf16:edit_image:identity:resident",
+      "modelId": "qwen_image_edit_2511",
+      "resolvedRoute": "qwen_image_edit",
+      "provider": "qwen_image_edit",
+      "backend": "mlx",
+      "tier": "bf16",
+      "mode": "edit_image",
+      "overlay": "identity",
+      "rung": "resident",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "768x768",
+          "1024x1024",
+          "1280x720",
+          "720x1280"
+        ]
+      },
+      "strategyParameters": {},
+      "implementation": "implemented",
+      "anchor": {
+        "id": "qwen_image_edit_2511:mlx:bf16:base:base:qwen-image-mlx-shared-ladder-2026-08-01-v1:imc-21d4598981a319a41bd4",
+        "tier": "bf16",
+        "source": "config/memory-anchors.json#qwen_image_edit_2511:mlx:bf16:base:base:qwen-image-mlx-shared-ladder-2026-08-01-v1:imc-21d4598981a319a41bd4",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": false,
+        "underivedReason": "the anchor render engaged bounded rungs (or deferred materialization), so it does not measure the widest composition the MLX image law upper-bounds the ladder from; this anchor validates its measured point and prices nothing beyond it"
+      },
+      "derivationDefined": true,
+      "state": "Anchored/underived",
+      "owningFamilyStory": 15511,
+      "owningModelStory": 15460,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "crates/sceneworks-worker/src/engines.rs#MODEL_TABLE"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#qwen_image_edit_2511:mlx:bf16:base:base:qwen-image-mlx-shared-ladder-2026-08-01-v1:imc-21d4598981a319a41bd4"
+          }
+        ]
+      }
+    },
+    {
+      "id": "qwen_image_edit_2511:qwen_image_edit:mlx:bf16:edit_image:identity:staged_residency",
+      "modelId": "qwen_image_edit_2511",
+      "resolvedRoute": "qwen_image_edit",
+      "provider": "qwen_image_edit",
+      "backend": "mlx",
+      "tier": "bf16",
+      "mode": "edit_image",
+      "overlay": "identity",
+      "rung": "staged_residency",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "768x768",
+          "1024x1024",
+          "1280x720",
+          "720x1280"
+        ]
+      },
+      "strategyParameters": {
+        "phaseOrder": [
+          "conditioning",
+          "denoise",
+          "decode"
+        ]
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "qwen_image_edit_2511:mlx:bf16:base:base:qwen-image-mlx-shared-ladder-2026-08-01-v1:imc-21d4598981a319a41bd4",
+        "tier": "bf16",
+        "source": "config/memory-anchors.json#qwen_image_edit_2511:mlx:bf16:base:base:qwen-image-mlx-shared-ladder-2026-08-01-v1:imc-21d4598981a319a41bd4",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": false,
+        "underivedReason": "the anchor render engaged bounded rungs (or deferred materialization), so it does not measure the widest composition the MLX image law upper-bounds the ladder from; this anchor validates its measured point and prices nothing beyond it"
+      },
+      "derivationDefined": true,
+      "state": "Anchored/underived",
+      "owningFamilyStory": 15511,
+      "owningModelStory": 15460,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "crates/sceneworks-worker/src/mlx_fit_gate.rs#engine_engages_staged_residency"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#qwen_image_edit_2511:mlx:bf16:base:base:qwen-image-mlx-shared-ladder-2026-08-01-v1:imc-21d4598981a319a41bd4"
+          }
+        ]
+      }
+    },
+    {
+      "id": "qwen_image_edit_2511:qwen_image_edit:mlx:bf16:edit_image:lora:bounded_attention",
+      "modelId": "qwen_image_edit_2511",
+      "resolvedRoute": "qwen_image_edit",
+      "provider": "qwen_image_edit",
+      "backend": "mlx",
+      "tier": "bf16",
+      "mode": "edit_image",
+      "overlay": "lora",
+      "rung": "bounded_attention",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "768x768",
+          "1024x1024",
+          "1280x720",
+          "720x1280"
+        ]
+      },
+      "strategyParameters": {
+        "decodeTileEdge": 512,
+        "decodeOverlap": 64,
+        "attentionChunkSize": 67108864,
+        "publishedRanges": {
+          "decodeTileEdges": [
+            768,
+            640,
+            512,
+            448,
+            384,
+            320,
+            256
+          ],
+          "decodeOverlaps": [
+            64
+          ],
+          "attentionChunkSizes": [
+            67108864
+          ]
+        }
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "qwen_image_edit_2511:mlx:bf16:base:base:qwen-image-mlx-shared-ladder-2026-08-01-v1:imc-21d4598981a319a41bd4",
+        "tier": "bf16",
+        "source": "config/memory-anchors.json#qwen_image_edit_2511:mlx:bf16:base:base:qwen-image-mlx-shared-ladder-2026-08-01-v1:imc-21d4598981a319a41bd4",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": false,
+        "underivedReason": "the anchor render engaged bounded rungs (or deferred materialization), so it does not measure the widest composition the MLX image law upper-bounds the ladder from; this anchor validates its measured point and prices nothing beyond it"
+      },
+      "derivationDefined": true,
+      "state": "Anchored/underived",
+      "owningFamilyStory": 15511,
+      "owningModelStory": 15460,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "inference:crates/media/mlx-gen/mlx-gen-qwen-image/src/memory_strategy.rs"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#qwen_image_edit_2511:mlx:bf16:base:base:qwen-image-mlx-shared-ladder-2026-08-01-v1:imc-21d4598981a319a41bd4"
+          }
+        ]
+      }
+    },
+    {
+      "id": "qwen_image_edit_2511:qwen_image_edit:mlx:bf16:edit_image:lora:bounded_decode",
+      "modelId": "qwen_image_edit_2511",
+      "resolvedRoute": "qwen_image_edit",
+      "provider": "qwen_image_edit",
+      "backend": "mlx",
+      "tier": "bf16",
+      "mode": "edit_image",
+      "overlay": "lora",
+      "rung": "bounded_decode",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "768x768",
+          "1024x1024",
+          "1280x720",
+          "720x1280"
+        ]
+      },
+      "strategyParameters": {
+        "decodeTileEdge": 512,
+        "decodeOverlap": 64,
+        "publishedRanges": {
+          "decodeTileEdges": [
+            768,
+            640,
+            512,
+            448,
+            384,
+            320,
+            256
+          ],
+          "decodeOverlaps": [
+            64
+          ]
+        }
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "qwen_image_edit_2511:mlx:bf16:base:base:qwen-image-mlx-shared-ladder-2026-08-01-v1:imc-21d4598981a319a41bd4",
+        "tier": "bf16",
+        "source": "config/memory-anchors.json#qwen_image_edit_2511:mlx:bf16:base:base:qwen-image-mlx-shared-ladder-2026-08-01-v1:imc-21d4598981a319a41bd4",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": false,
+        "underivedReason": "the anchor render engaged bounded rungs (or deferred materialization), so it does not measure the widest composition the MLX image law upper-bounds the ladder from; this anchor validates its measured point and prices nothing beyond it"
+      },
+      "derivationDefined": true,
+      "state": "Anchored/underived",
+      "owningFamilyStory": 15511,
+      "owningModelStory": 15460,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "inference:crates/media/mlx-gen/mlx-gen-qwen-image/src/memory_strategy.rs"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#qwen_image_edit_2511:mlx:bf16:base:base:qwen-image-mlx-shared-ladder-2026-08-01-v1:imc-21d4598981a319a41bd4"
+          }
+        ]
+      }
+    },
+    {
+      "id": "qwen_image_edit_2511:qwen_image_edit:mlx:bf16:edit_image:lora:bounded_transformer_residency",
+      "modelId": "qwen_image_edit_2511",
+      "resolvedRoute": "qwen_image_edit",
+      "provider": "qwen_image_edit",
+      "backend": "mlx",
+      "tier": "bf16",
+      "mode": "edit_image",
+      "overlay": "lora",
+      "rung": "bounded_transformer_residency",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "768x768",
+          "1024x1024",
+          "1280x720",
+          "720x1280"
+        ]
+      },
+      "strategyParameters": {
+        "decodeTileEdge": 512,
+        "decodeOverlap": 64,
+        "attentionChunkSize": 67108864,
+        "transformerWindowSize": 1,
+        "transformerWindowComponent": "Dit",
+        "publishedRanges": {
+          "decodeTileEdges": [
+            768,
+            640,
+            512,
+            448,
+            384,
+            320,
+            256
+          ],
+          "decodeOverlaps": [
+            64
+          ],
+          "attentionChunkSizes": [
+            67108864
+          ],
+          "transformerWindowSizes": [
+            1
+          ],
+          "transformerWindowComponents": [
+            "Dit"
+          ]
+        }
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "qwen_image_edit_2511:mlx:bf16:base:base:qwen-image-mlx-shared-ladder-2026-08-01-v1:imc-21d4598981a319a41bd4",
+        "tier": "bf16",
+        "source": "config/memory-anchors.json#qwen_image_edit_2511:mlx:bf16:base:base:qwen-image-mlx-shared-ladder-2026-08-01-v1:imc-21d4598981a319a41bd4",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": false,
+        "underivedReason": "the anchor render engaged bounded rungs (or deferred materialization), so it does not measure the widest composition the MLX image law upper-bounds the ladder from; this anchor validates its measured point and prices nothing beyond it"
+      },
+      "derivationDefined": true,
+      "state": "Anchored/underived",
+      "owningFamilyStory": 15511,
+      "owningModelStory": 15460,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "inference:crates/media/mlx-gen/mlx-gen-qwen-image/src/memory_strategy.rs"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#qwen_image_edit_2511:mlx:bf16:base:base:qwen-image-mlx-shared-ladder-2026-08-01-v1:imc-21d4598981a319a41bd4"
+          }
+        ]
+      }
+    },
+    {
+      "id": "qwen_image_edit_2511:qwen_image_edit:mlx:bf16:edit_image:lora:resident",
+      "modelId": "qwen_image_edit_2511",
+      "resolvedRoute": "qwen_image_edit",
+      "provider": "qwen_image_edit",
+      "backend": "mlx",
+      "tier": "bf16",
+      "mode": "edit_image",
+      "overlay": "lora",
+      "rung": "resident",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "768x768",
+          "1024x1024",
+          "1280x720",
+          "720x1280"
+        ]
+      },
+      "strategyParameters": {},
+      "implementation": "implemented",
+      "anchor": {
+        "id": "qwen_image_edit_2511:mlx:bf16:base:base:qwen-image-mlx-shared-ladder-2026-08-01-v1:imc-21d4598981a319a41bd4",
+        "tier": "bf16",
+        "source": "config/memory-anchors.json#qwen_image_edit_2511:mlx:bf16:base:base:qwen-image-mlx-shared-ladder-2026-08-01-v1:imc-21d4598981a319a41bd4",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": false,
+        "underivedReason": "the anchor render engaged bounded rungs (or deferred materialization), so it does not measure the widest composition the MLX image law upper-bounds the ladder from; this anchor validates its measured point and prices nothing beyond it"
+      },
+      "derivationDefined": true,
+      "state": "Anchored/underived",
+      "owningFamilyStory": 15511,
+      "owningModelStory": 15460,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "crates/sceneworks-worker/src/engines.rs#MODEL_TABLE"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#qwen_image_edit_2511:mlx:bf16:base:base:qwen-image-mlx-shared-ladder-2026-08-01-v1:imc-21d4598981a319a41bd4"
+          }
+        ]
+      }
+    },
+    {
+      "id": "qwen_image_edit_2511:qwen_image_edit:mlx:bf16:edit_image:lora:staged_residency",
+      "modelId": "qwen_image_edit_2511",
+      "resolvedRoute": "qwen_image_edit",
+      "provider": "qwen_image_edit",
+      "backend": "mlx",
+      "tier": "bf16",
+      "mode": "edit_image",
+      "overlay": "lora",
+      "rung": "staged_residency",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "768x768",
+          "1024x1024",
+          "1280x720",
+          "720x1280"
+        ]
+      },
+      "strategyParameters": {
+        "phaseOrder": [
+          "conditioning",
+          "denoise",
+          "decode"
+        ]
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "qwen_image_edit_2511:mlx:bf16:base:base:qwen-image-mlx-shared-ladder-2026-08-01-v1:imc-21d4598981a319a41bd4",
+        "tier": "bf16",
+        "source": "config/memory-anchors.json#qwen_image_edit_2511:mlx:bf16:base:base:qwen-image-mlx-shared-ladder-2026-08-01-v1:imc-21d4598981a319a41bd4",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": false,
+        "underivedReason": "the anchor render engaged bounded rungs (or deferred materialization), so it does not measure the widest composition the MLX image law upper-bounds the ladder from; this anchor validates its measured point and prices nothing beyond it"
+      },
+      "derivationDefined": true,
+      "state": "Anchored/underived",
+      "owningFamilyStory": 15511,
+      "owningModelStory": 15460,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "crates/sceneworks-worker/src/mlx_fit_gate.rs#engine_engages_staged_residency"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#qwen_image_edit_2511:mlx:bf16:base:base:qwen-image-mlx-shared-ladder-2026-08-01-v1:imc-21d4598981a319a41bd4"
+          }
+        ]
+      }
+    },
+    {
+      "id": "qwen_image_edit_2511:qwen_image_edit:mlx:bf16:edit_image:none:bounded_attention",
+      "modelId": "qwen_image_edit_2511",
+      "resolvedRoute": "qwen_image_edit",
+      "provider": "qwen_image_edit",
+      "backend": "mlx",
+      "tier": "bf16",
+      "mode": "edit_image",
+      "overlay": "none",
+      "rung": "bounded_attention",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "768x768",
+          "1024x1024",
+          "1280x720",
+          "720x1280"
+        ]
+      },
+      "strategyParameters": {
+        "decodeTileEdge": 512,
+        "decodeOverlap": 64,
+        "attentionChunkSize": 67108864,
+        "publishedRanges": {
+          "decodeTileEdges": [
+            768,
+            640,
+            512,
+            448,
+            384,
+            320,
+            256
+          ],
+          "decodeOverlaps": [
+            64
+          ],
+          "attentionChunkSizes": [
+            67108864
+          ]
+        }
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "qwen_image_edit_2511:mlx:bf16:base:base:qwen-image-mlx-shared-ladder-2026-08-01-v1:imc-21d4598981a319a41bd4",
+        "tier": "bf16",
+        "source": "config/memory-anchors.json#qwen_image_edit_2511:mlx:bf16:base:base:qwen-image-mlx-shared-ladder-2026-08-01-v1:imc-21d4598981a319a41bd4",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": false,
+        "underivedReason": "the anchor render engaged bounded rungs (or deferred materialization), so it does not measure the widest composition the MLX image law upper-bounds the ladder from; this anchor validates its measured point and prices nothing beyond it"
+      },
+      "derivationDefined": true,
+      "state": "Anchored/underived",
+      "owningFamilyStory": 15511,
+      "owningModelStory": 15460,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "inference:crates/media/mlx-gen/mlx-gen-qwen-image/src/memory_strategy.rs"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#qwen_image_edit_2511:mlx:bf16:base:base:qwen-image-mlx-shared-ladder-2026-08-01-v1:imc-21d4598981a319a41bd4"
+          }
+        ]
+      }
+    },
+    {
+      "id": "qwen_image_edit_2511:qwen_image_edit:mlx:bf16:edit_image:none:bounded_decode",
+      "modelId": "qwen_image_edit_2511",
+      "resolvedRoute": "qwen_image_edit",
+      "provider": "qwen_image_edit",
+      "backend": "mlx",
+      "tier": "bf16",
+      "mode": "edit_image",
+      "overlay": "none",
+      "rung": "bounded_decode",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "768x768",
+          "1024x1024",
+          "1280x720",
+          "720x1280"
+        ]
+      },
+      "strategyParameters": {
+        "decodeTileEdge": 512,
+        "decodeOverlap": 64,
+        "publishedRanges": {
+          "decodeTileEdges": [
+            768,
+            640,
+            512,
+            448,
+            384,
+            320,
+            256
+          ],
+          "decodeOverlaps": [
+            64
+          ]
+        }
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "qwen_image_edit_2511:mlx:bf16:base:base:qwen-image-mlx-shared-ladder-2026-08-01-v1:imc-21d4598981a319a41bd4",
+        "tier": "bf16",
+        "source": "config/memory-anchors.json#qwen_image_edit_2511:mlx:bf16:base:base:qwen-image-mlx-shared-ladder-2026-08-01-v1:imc-21d4598981a319a41bd4",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": false,
+        "underivedReason": "the anchor render engaged bounded rungs (or deferred materialization), so it does not measure the widest composition the MLX image law upper-bounds the ladder from; this anchor validates its measured point and prices nothing beyond it"
+      },
+      "derivationDefined": true,
+      "state": "Anchored/underived",
+      "owningFamilyStory": 15511,
+      "owningModelStory": 15460,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "inference:crates/media/mlx-gen/mlx-gen-qwen-image/src/memory_strategy.rs"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#qwen_image_edit_2511:mlx:bf16:base:base:qwen-image-mlx-shared-ladder-2026-08-01-v1:imc-21d4598981a319a41bd4"
+          }
+        ]
+      }
+    },
+    {
+      "id": "qwen_image_edit_2511:qwen_image_edit:mlx:bf16:edit_image:none:bounded_transformer_residency",
+      "modelId": "qwen_image_edit_2511",
+      "resolvedRoute": "qwen_image_edit",
+      "provider": "qwen_image_edit",
+      "backend": "mlx",
+      "tier": "bf16",
+      "mode": "edit_image",
+      "overlay": "none",
+      "rung": "bounded_transformer_residency",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "768x768",
+          "1024x1024",
+          "1280x720",
+          "720x1280"
+        ]
+      },
+      "strategyParameters": {
+        "decodeTileEdge": 512,
+        "decodeOverlap": 64,
+        "attentionChunkSize": 67108864,
+        "transformerWindowSize": 1,
+        "transformerWindowComponent": "Dit",
+        "publishedRanges": {
+          "decodeTileEdges": [
+            768,
+            640,
+            512,
+            448,
+            384,
+            320,
+            256
+          ],
+          "decodeOverlaps": [
+            64
+          ],
+          "attentionChunkSizes": [
+            67108864
+          ],
+          "transformerWindowSizes": [
+            1
+          ],
+          "transformerWindowComponents": [
+            "Dit"
+          ]
+        }
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "qwen_image_edit_2511:mlx:bf16:base:base:qwen-image-mlx-shared-ladder-2026-08-01-v1:imc-21d4598981a319a41bd4",
+        "tier": "bf16",
+        "source": "config/memory-anchors.json#qwen_image_edit_2511:mlx:bf16:base:base:qwen-image-mlx-shared-ladder-2026-08-01-v1:imc-21d4598981a319a41bd4",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": false,
+        "underivedReason": "the anchor render engaged bounded rungs (or deferred materialization), so it does not measure the widest composition the MLX image law upper-bounds the ladder from; this anchor validates its measured point and prices nothing beyond it"
+      },
+      "derivationDefined": true,
+      "state": "Anchored/underived",
+      "owningFamilyStory": 15511,
+      "owningModelStory": 15460,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "inference:crates/media/mlx-gen/mlx-gen-qwen-image/src/memory_strategy.rs"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#qwen_image_edit_2511:mlx:bf16:base:base:qwen-image-mlx-shared-ladder-2026-08-01-v1:imc-21d4598981a319a41bd4"
+          }
+        ]
+      }
+    },
+    {
+      "id": "qwen_image_edit_2511:qwen_image_edit:mlx:bf16:edit_image:none:resident",
+      "modelId": "qwen_image_edit_2511",
+      "resolvedRoute": "qwen_image_edit",
+      "provider": "qwen_image_edit",
+      "backend": "mlx",
+      "tier": "bf16",
+      "mode": "edit_image",
+      "overlay": "none",
+      "rung": "resident",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "768x768",
+          "1024x1024",
+          "1280x720",
+          "720x1280"
+        ]
+      },
+      "strategyParameters": {},
+      "implementation": "implemented",
+      "anchor": {
+        "id": "qwen_image_edit_2511:mlx:bf16:base:base:qwen-image-mlx-shared-ladder-2026-08-01-v1:imc-21d4598981a319a41bd4",
+        "tier": "bf16",
+        "source": "config/memory-anchors.json#qwen_image_edit_2511:mlx:bf16:base:base:qwen-image-mlx-shared-ladder-2026-08-01-v1:imc-21d4598981a319a41bd4",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": false,
+        "underivedReason": "the anchor render engaged bounded rungs (or deferred materialization), so it does not measure the widest composition the MLX image law upper-bounds the ladder from; this anchor validates its measured point and prices nothing beyond it"
+      },
+      "derivationDefined": true,
+      "state": "Anchored/underived",
+      "owningFamilyStory": 15511,
+      "owningModelStory": 15460,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "crates/sceneworks-worker/src/engines.rs#MODEL_TABLE"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#qwen_image_edit_2511:mlx:bf16:base:base:qwen-image-mlx-shared-ladder-2026-08-01-v1:imc-21d4598981a319a41bd4"
+          }
+        ]
+      }
+    },
+    {
+      "id": "qwen_image_edit_2511:qwen_image_edit:mlx:bf16:edit_image:none:staged_residency",
+      "modelId": "qwen_image_edit_2511",
+      "resolvedRoute": "qwen_image_edit",
+      "provider": "qwen_image_edit",
+      "backend": "mlx",
+      "tier": "bf16",
+      "mode": "edit_image",
+      "overlay": "none",
+      "rung": "staged_residency",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "768x768",
+          "1024x1024",
+          "1280x720",
+          "720x1280"
+        ]
+      },
+      "strategyParameters": {
+        "phaseOrder": [
+          "conditioning",
+          "denoise",
+          "decode"
+        ]
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "qwen_image_edit_2511:mlx:bf16:base:base:qwen-image-mlx-shared-ladder-2026-08-01-v1:imc-21d4598981a319a41bd4",
+        "tier": "bf16",
+        "source": "config/memory-anchors.json#qwen_image_edit_2511:mlx:bf16:base:base:qwen-image-mlx-shared-ladder-2026-08-01-v1:imc-21d4598981a319a41bd4",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": false,
+        "underivedReason": "the anchor render engaged bounded rungs (or deferred materialization), so it does not measure the widest composition the MLX image law upper-bounds the ladder from; this anchor validates its measured point and prices nothing beyond it"
+      },
+      "derivationDefined": true,
+      "state": "Anchored/underived",
+      "owningFamilyStory": 15511,
+      "owningModelStory": 15460,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "crates/sceneworks-worker/src/mlx_fit_gate.rs#engine_engages_staged_residency"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#qwen_image_edit_2511:mlx:bf16:base:base:qwen-image-mlx-shared-ladder-2026-08-01-v1:imc-21d4598981a319a41bd4"
+          }
+        ]
+      }
+    },
+    {
       "id": "qwen_image:qwen_image:candle:q4:text_to_image:control:resident",
       "modelId": "qwen_image",
       "resolvedRoute": "qwen_image",
@@ -78185,7 +79932,36 @@
       "qwen_image:qwen_image:mlx:q8:text_to_image:none:resident",
       "qwen_image:qwen_image:mlx:q8:text_to_image:none:staged_residency"
     ],
-    "qwen_image_edit_2511": [],
+    "qwen_image_edit_2511": [
+      "qwen_image_edit_2511:qwen_image_edit:mlx:bf16:character_image:identity:bounded_attention",
+      "qwen_image_edit_2511:qwen_image_edit:mlx:bf16:character_image:identity:bounded_decode",
+      "qwen_image_edit_2511:qwen_image_edit:mlx:bf16:character_image:identity:resident",
+      "qwen_image_edit_2511:qwen_image_edit:mlx:bf16:character_image:identity:staged_residency",
+      "qwen_image_edit_2511:qwen_image_edit:mlx:bf16:character_image:lora:bounded_attention",
+      "qwen_image_edit_2511:qwen_image_edit:mlx:bf16:character_image:lora:bounded_decode",
+      "qwen_image_edit_2511:qwen_image_edit:mlx:bf16:character_image:lora:bounded_transformer_residency",
+      "qwen_image_edit_2511:qwen_image_edit:mlx:bf16:character_image:lora:resident",
+      "qwen_image_edit_2511:qwen_image_edit:mlx:bf16:character_image:lora:staged_residency",
+      "qwen_image_edit_2511:qwen_image_edit:mlx:bf16:character_image:none:bounded_attention",
+      "qwen_image_edit_2511:qwen_image_edit:mlx:bf16:character_image:none:bounded_decode",
+      "qwen_image_edit_2511:qwen_image_edit:mlx:bf16:character_image:none:bounded_transformer_residency",
+      "qwen_image_edit_2511:qwen_image_edit:mlx:bf16:character_image:none:resident",
+      "qwen_image_edit_2511:qwen_image_edit:mlx:bf16:character_image:none:staged_residency",
+      "qwen_image_edit_2511:qwen_image_edit:mlx:bf16:edit_image:identity:bounded_attention",
+      "qwen_image_edit_2511:qwen_image_edit:mlx:bf16:edit_image:identity:bounded_decode",
+      "qwen_image_edit_2511:qwen_image_edit:mlx:bf16:edit_image:identity:resident",
+      "qwen_image_edit_2511:qwen_image_edit:mlx:bf16:edit_image:identity:staged_residency",
+      "qwen_image_edit_2511:qwen_image_edit:mlx:bf16:edit_image:lora:bounded_attention",
+      "qwen_image_edit_2511:qwen_image_edit:mlx:bf16:edit_image:lora:bounded_decode",
+      "qwen_image_edit_2511:qwen_image_edit:mlx:bf16:edit_image:lora:bounded_transformer_residency",
+      "qwen_image_edit_2511:qwen_image_edit:mlx:bf16:edit_image:lora:resident",
+      "qwen_image_edit_2511:qwen_image_edit:mlx:bf16:edit_image:lora:staged_residency",
+      "qwen_image_edit_2511:qwen_image_edit:mlx:bf16:edit_image:none:bounded_attention",
+      "qwen_image_edit_2511:qwen_image_edit:mlx:bf16:edit_image:none:bounded_decode",
+      "qwen_image_edit_2511:qwen_image_edit:mlx:bf16:edit_image:none:bounded_transformer_residency",
+      "qwen_image_edit_2511:qwen_image_edit:mlx:bf16:edit_image:none:resident",
+      "qwen_image_edit_2511:qwen_image_edit:mlx:bf16:edit_image:none:staged_residency"
+    ],
     "qwen_image_edit_2511_lightning": [],
     "realvisxl": [],
     "realvisxl_lightning": [],
