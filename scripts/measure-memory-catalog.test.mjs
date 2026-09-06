@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, mkdir, writeFile, readFile, stat } from "node:fs/promises";
+import { mkdtemp, mkdir, readdir, writeFile, readFile, stat } from "node:fs/promises";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { tmpdir } from "node:os";
@@ -41,9 +41,13 @@ import {
   readPlan,
   snapshotPath,
   tierDownload,
+  familyArtifact,
+  resolveArtifactRoot,
   parseSdxlRoutes,
   readSdxlCandleRoutes,
   sdxlCandleRouteDrift,
+  parseDeclaredStrategySupport,
+  readDeclaredStrategySupport,
   SDXL_ROUTES_PATH,
   SDXL_ROUTES_UNCHECKED,
 } from "./measure-memory-catalog.mjs";
@@ -126,6 +130,19 @@ function fakeModels() {
         { repo: "SceneWorks/ideogram-4", revision: UPSTREAM, variant: "bf16", files: ["bf16/*"] },
       ],
     },
+    // sc-22736: the first family whose ARTIFACT is per (lane, tier). The MLX rehost carries all
+    // three tiers under one revision; the candle rehost carries the packed two; the candle bf16
+    // leg is the UPSTREAM Diffusers checkpoint, which the manifest ships with NO revision and
+    // whose weights sit at the snapshot root rather than under a `bf16/` subtree.
+    {
+      id: "wan_2_2",
+      downloads: [
+        { repo: "SceneWorks/wan2.2-ti2v-5b-mlx", revision: REVISION, variant: "q4", files: ["q4/*"] },
+        { repo: "SceneWorks/wan2.2-ti2v-5b-mlx", revision: REVISION, variant: "bf16", files: ["bf16/*"] },
+        { repo: "SceneWorks/wan2.2-ti2v-5b-candle", revision: UPSTREAM, variant: "q4", files: ["q4/*"] },
+        { repo: "Wan-AI/Wan2.2-TI2V-5B-Diffusers", variant: "bf16", files: [] },
+      ],
+    },
   ];
 }
 
@@ -171,6 +188,84 @@ test("the tier download is the non-corequisite entry for the tier, so its revisi
   assert.equal(tierDownload(models, "minimax_h3", "MiniMaxAI/MiniMax-H3", "q4").revision, UPSTREAM);
   assert.throws(() => tierDownload(models, "qwen_image", "SceneWorks/nope", "q4"), /no download from/);
   assert.throws(() => tierDownload(models, "absent", "SceneWorks/qwen-image-mlx", "q4"), /no model absent/);
+});
+
+/**
+ * sc-22736. Before the Wan 2.2 family every row rehosted all three tiers of both lanes in ONE
+ * repository under a `<tier>/` subtree, so the family's `repo`/`env` was the whole answer. Wan
+ * ships three shapes at once, and the worker selects between them the same way
+ * (`crates/sceneworks-worker/src/video_jobs/candle.rs` `candle_wan_tier_repo_from_downloads`).
+ *
+ * Mutations this kills:
+ * - dropping the `artifacts[backend][tier]` lookup (a candle bf16 plan would probe the packed
+ *   rehost's non-existent `bf16/` subtree and report a stageable cell `weights_missing`);
+ * - dropping `layout: "flat"` (the upstream Diffusers snapshot would be probed at `<root>/bf16`);
+ * - resolving the unpinned upstream download through `tierDownload`'s any-revision fallback (which
+ *   would name the PACKED rehost's revision for a dense checkpoint);
+ * - reporting the unpinned-and-unstaged case with the ordinary "no repo@rev/tier" sentence, which
+ *   sends an operator to fetch a revision the manifest never pinned.
+ */
+test("an artifact is resolved per (lane, tier), including the flat upstream leg the manifest leaves unpinned", async () => {
+  const models = fakeModels();
+  // A LOCAL family literal, not a `PROVIDER_FAMILIES` row: this test owns the mechanism, and the
+  // mechanism must be provable before any family declares an arm that consumes it. The shape is
+  // the one the Wan 2.2 manifest entries have — a per-lane rehost, packed tiers on the Candle
+  // rehost, and the upstream unpinned Diffusers checkpoint as the Candle bf16 leg.
+  const family = {
+    env: "WAN_TI2V_5B",
+    repo: "SceneWorks/wan2.2-ti2v-5b-mlx",
+    arms: ["mlx", "candle"],
+    artifacts: {
+      candle: {
+        q4: { repo: "SceneWorks/wan2.2-ti2v-5b-candle" },
+        q8: { repo: "SceneWorks/wan2.2-ti2v-5b-candle" },
+        bf16: { repo: "Wan-AI/Wan2.2-TI2V-5B-Diffusers", layout: "flat" },
+      },
+    },
+  };
+  assert.deepEqual(familyArtifact(family, "mlx", "bf16"), {
+    env: "WAN_TI2V_5B", repo: "SceneWorks/wan2.2-ti2v-5b-mlx", layout: "tiered",
+  });
+  assert.deepEqual(familyArtifact(family, "candle", "q4"), {
+    env: "WAN_TI2V_5B", repo: "SceneWorks/wan2.2-ti2v-5b-candle", layout: "tiered",
+  });
+  assert.deepEqual(familyArtifact(family, "candle", "bf16"), {
+    env: "WAN_TI2V_5B", repo: "Wan-AI/Wan2.2-TI2V-5B-Diffusers", layout: "flat",
+  });
+  // A family with no `artifacts` block is unchanged: the row itself, tiered. Asserted against a
+  // real shipped row so the override stays a per-family opt-in rather than a global change.
+  assert.deepEqual(familyArtifact(PROVIDER_FAMILIES.qwen_image, "candle", "q8"), {
+    env: PROVIDER_FAMILIES.qwen_image.env,
+    repo: PROVIDER_FAMILIES.qwen_image.repo,
+    layout: "tiered",
+  });
+
+  const hub = await fakeHub([
+    ["SceneWorks/wan2.2-ti2v-5b-mlx", REVISION, "bf16"],
+    ["SceneWorks/wan2.2-ti2v-5b-candle", UPSTREAM, "q4"],
+    ["Wan-AI/Wan2.2-TI2V-5B-Diffusers", REVISION],
+  ]);
+  const mlx = await resolveArtifactRoot(models, "wan_2_2", "bf16", familyArtifact(family, "mlx", "bf16"), [hub]);
+  assert.equal(mlx.root, snapshotPath(hub, "SceneWorks/wan2.2-ti2v-5b-mlx", REVISION, "bf16"));
+  assert.equal(mlx.revision, REVISION);
+
+  const packed = await resolveArtifactRoot(models, "wan_2_2", "q4", familyArtifact(family, "candle", "q4"), [hub]);
+  assert.equal(packed.root, snapshotPath(hub, "SceneWorks/wan2.2-ti2v-5b-candle", UPSTREAM, "q4"));
+  assert.equal(packed.revision, UPSTREAM, "the candle rehost's own revision, never the MLX one's");
+
+  // The unpinned upstream leg: the revision is READ off whatever snapshot is staged, and the root
+  // is the snapshot itself — there is no `bf16/` subtree in a Diffusers checkpoint.
+  const flat = await resolveArtifactRoot(models, "wan_2_2", "bf16", familyArtifact(family, "candle", "bf16"), [hub]);
+  assert.equal(flat.root, snapshotPath(hub, "Wan-AI/Wan2.2-TI2V-5B-Diffusers", REVISION));
+  assert.equal(flat.revision, REVISION);
+
+  const bare = await fakeHub([]);
+  const missing = await resolveArtifactRoot(models, "wan_2_2", "bf16", familyArtifact(family, "candle", "bf16"), [bare]);
+  assert.equal(missing.root, null);
+  assert.match(missing.reason, /shipped without a pinned revision/);
+  const missingTier = await resolveArtifactRoot(models, "wan_2_2", "q4", familyArtifact(family, "candle", "q4"), [bare]);
+  assert.equal(missingTier.root, null);
+  assert.match(missingTier.reason, /^no SceneWorks\/wan2\.2-ti2v-5b-candle@[0-9a-f]{8}\/q4 on this host$/);
 });
 
 test("classification: runnable anchors carry the adapter env family and the canonical tier root", async () => {
@@ -468,11 +563,23 @@ test("the pinned Lightning distill LoRA matches the worker constants on both lan
 // in both files green and fails only mid-campaign, after the weights are staged. This is that
 // binding, per family, per declared arm, including the `upstream` and `sideArtifact` sub-families.
 test("every family's derived env names are read back by each arm it declares", async () => {
+  // A lane's SOURCE SET, not just its bin: an arm may live in a `#[path]` sibling module
+  // (`mlx_ltx25.rs`, `mlx_wan_scail2.rs`, `candle_wan_scail2.rs`), and reading only `<backend>.rs`
+  // would report a real arm's env family as unread. The sibling files are exactly the ones the bin
+  // pulls in, and the directory holds nothing else.
+  const binDir = path.join(ROOT, "crates/sceneworks-memory-adapter/src/bin");
   const lanes = new Map();
+  const binFiles = (await readdir(binDir)).filter((name) => name.endsWith(".rs"));
   for (const backend of ["mlx", "candle"]) {
+    const members = binFiles.filter(
+      (name) => name === `${backend}.rs` || name.startsWith(`${backend}_`),
+    );
+    assert.ok(members.length >= 2, `${backend}: expected the bin plus its arm modules`);
     lanes.set(
       backend,
-      await readFile(path.join(ROOT, `crates/sceneworks-memory-adapter/src/bin/${backend}.rs`), "utf8"),
+      (await Promise.all(members.map((name) => readFile(path.join(binDir, name), "utf8")))).join(
+        "\n",
+      ),
     );
   }
   let checked = 0;
@@ -497,14 +604,25 @@ test("every family's derived env names are read back by each arm it declares", a
     for (const arm of family.arms) {
       const source = lanes.get(arm);
       assert.ok(source, `${id} declares an unknown adapter arm ${arm}`);
-      // Per LANE (sc-22731): a family may bind a DIFFERENT artifact on each arm, and then only that
-      // arm's env family is the one that arm reads. The two SANA routes are the case — MLX opens
-      // the packed `SceneWorks/*_mlx` turnkey through `SCENEWORKS_SANA_*`, Candle the upstream
-      // dense diffusers snapshot through `SCENEWORKS_SANA_DENSE_*` — so asserting the shared
-      // `family.env` against candle.rs would demand an env that binary must never read.
-      const laneEnvFamilies = family.lanes?.[arm]
-        ? [family.lanes[arm].env].filter(Boolean)
-        : envFamilies;
+      // Per (LANE, TIER), through the one function that already knows the rule (sc-22736). A family
+      // may bind a different artifact on each arm — the two SANA routes do, MLX opening the packed
+      // `SceneWorks/*_mlx` turnkey through `SCENEWORKS_SANA_*` and Candle the upstream dense
+      // diffusers snapshot through `SCENEWORKS_SANA_DENSE_*` — and, since the Wan 2.2 family, on
+      // each (lane, TIER): its candle q4/q8 open a `SceneWorks/…-candle` rehost while its candle
+      // bf16 opens the upstream `Wan-AI/…-Diffusers` checkpoint. Asserting the shared `family.env`
+      // against candle.rs would demand env names that binary must never read, and asserting only
+      // the lane override would miss the second family entirely.
+      //
+      // `familyArtifact` is the production resolver, so this cannot drift from what a capture
+      // actually exports: a new override shape is covered the moment that function honours it.
+      const laneEnvFamilies = [
+        ...new Set(
+          ["bf16", "q4", "q8"]
+            .map((tier) => familyArtifact(family, arm, tier).env)
+            .filter(Boolean),
+        ),
+        ...envFamilies.filter((env) => env !== family.env),
+      ];
       for (const env of laneEnvFamilies) {
         for (const suffix of ["REPOSITORY", "REVISION", "ROOT"]) {
           const name = `SCENEWORKS_${env}_${suffix}`;
@@ -1298,7 +1416,12 @@ const skipWithoutRoutes = sdxlRoutesAvailable
   ? false
   : `no inference checkout supplies ${SDXL_ROUTES_PATH}`;
 
-test("the illustrious candle refusal is derived from the engine's own route revision", { skip: skipWithoutRoutes }, async () => {
+// sc-22736, pin 8a65db2a: the inference-side repair landed, so the LIVE answer for every routed
+// model is now "no refusal". The claim this test makes was never "Illustrious drifts" — it was that
+// the refusal TRACKS the two revisions in both directions. So the live tree is asserted to agree
+// everywhere, and the refusing direction is exercised by SYNTHESIZING a disagreement on a real
+// route rather than by depending on one model still being broken upstream.
+test("the sdxl candle refusal is derived from the engine's own route revision", { skip: skipWithoutRoutes }, async () => {
   const models = await readManifestModels();
   const routes = await readSdxlCandleRoutes();
   assert.ok(routes.size >= 5, "the engine declares the whole routed family");
@@ -1665,21 +1788,90 @@ test("every sensenova env family and repository is the one the adapter binaries 
  * resident, so an exemption moves nothing. No list of model ids and no count lives here: a newly
  * exempt model, or a withdrawn exemption, moves the requirement on its own.
  */
-test("an anchor row plans the lane's default rung unless the manifest exempts it", async () => {
+test("an anchor row plans the lane's default rung unless the manifest exempts it", async (t) => {
   const plan = await readPlan();
   const models = new Map((await readManifestModels()).map((model) => [model.id, model]));
+  // sc-22736: the SECOND derived source. A provider whose contract simply does not IMPLEMENT the
+  // lane default — Candle SCAIL-2 publishes `Resident` alone, `Missing` rather than structurally
+  // inapplicable, so no manifest exemption is honest — is read off the checked-in engine
+  // capability dump, which records every contract's `implementedRungs` per (tier, load shape) at
+  // the pin. Absence from the dump is NOT evidence: a row that overrides a provider the dump does
+  // not know falls through to the third source below, and is refused if that cannot speak either.
+  const dumps = new Map();
+  for (const backend of ["mlx", "candle"]) {
+    const dump = JSON.parse(
+      await readFile(path.join(ROOT, `config/engine-capabilities/capabilities.${backend}.json`), "utf8"),
+    );
+    dumps.set(backend, new Map(dump.memoryContracts.map((contract) => [contract.id, contract])));
+  }
+  const dumpRefusesDefault = (backend, anchor, tier, fallbackRung) => {
+    const contract = dumps.get(backend).get(anchor.provider);
+    if (!contract) return null;
+    const loadShape = anchor.loadShape;
+    const surfaces = contract.surfaces.filter(
+      (surface) => surface.selector.tier === tier && surface.selector.loadShape === loadShape,
+    );
+    if (surfaces.length === 0) return null;
+    return surfaces.every((surface) => !surface.implementedRungs.includes(fallbackRung));
+  };
+  // sc-22736, pin 8a65db2a: the THIRD derived source, consulted only where the dump has no surface
+  // to offer. `candle-gen-scail2` registers a memory strategy WITHOUT a weights-free surface
+  // resolver, so `memory_contract_surfaces()` — and therefore capabilities.candle.json — never sees
+  // it; no regeneration at any pin would change that. Its `build_contract` does declare the support
+  // per rung, and the anchor loader closure already names that file as this (model, lane)'s
+  // memory-strategy entry point, derived at the pin and `--check`ed. See
+  // `readDeclaredStrategySupport`: an unreadable `strategies:` shape THROWS, and a provider that
+  // declares nothing yields null, which is refused below.
+  const closures = JSON.parse(await readFile(path.join(ROOT, "config/anchor-loader-closures.json"), "utf8"));
+  const declaredRefusesDefault = async (backend, modelId, fallbackRung) => {
+    const support = await readDeclaredStrategySupport(modelId, backend, closures);
+    return support === null ? null : support(fallbackRung) !== "Implemented";
+  };
   let overridden = 0;
   let candleExempt = 0;
+  let declaredEvidence = 0;
   for (const [key, anchor] of Object.entries(plan.anchors)) {
-    const { modelId, backend } = anchorParts(key);
+    const { modelId, tier, backend } = anchorParts(key);
     const model = models.get(modelId);
     // A plan row for a model the manifest does not ship cannot be judged against manifest evidence;
     // `validatePlan` already refuses an invented model id, so this only skips fixture rows.
     if (!model) continue;
     const exemptions = model[backend]?.memoryStrategyStructuralExemptions ?? {};
-    const exempt = Object.hasOwn(exemptions, "staged_residency");
+    const manifestExempt = Object.hasOwn(exemptions, "staged_residency");
+    const fallbackForDump = ANCHOR_STRATEGY[backend].rung;
+    const judged = !manifestExempt && fallbackForDump === "staged_residency";
+    let contractRefusesDefault = judged ? dumpRefusesDefault(backend, anchor, tier, fallbackForDump) : false;
+    if (judged && contractRefusesDefault === null) {
+      const declared = await declaredRefusesDefault(backend, modelId, fallbackForDump);
+      if (declared !== null) declaredEvidence += 1;
+      contractRefusesDefault = declared;
+    }
+    // Two different absences. A reachable checkout that declares nothing is REFUSED below. No
+    // checkout at all is a property of the RUN, not of the override: the module-level guard above
+    // already turns that into a hard failure on CI (where check.yml supplies the clone), so locally
+    // it degrades to a diagnostic rather than a red that says nothing about this repository.
+    if (anchor.strategy && judged && contractRefusesDefault === null && !sdxlRoutesAvailable) {
+      t.diagnostic(
+        `${key}: not judged — no pinned inference checkout ($INFERENCE_REPO) to read the engine's ` +
+          "own strategy declaration from. On CI this run would already have failed.",
+      );
+      continue;
+    }
+    if (anchor.strategy && judged) {
+      assert.notEqual(
+        contractRefusesDefault,
+        null,
+        `${key}: overrides the lane default, but config/engine-capabilities/capabilities.${backend}.json ` +
+          `records no ${anchor.provider} contract surface at ${tier}/${anchor.loadShape} AND the engine's own ` +
+          `memory-strategy entry point for ${modelId}:${backend} (config/anchor-loader-closures.json) declares ` +
+          "no per-rung support that can be read at the pinned inference checkout. Set $INFERENCE_REPO to a " +
+          "checkout of the pin (check.yml's parity-scaffold job does), or drop the override: an override with " +
+          "no derived architecture evidence is refused, never assumed.",
+      );
+    }
+    const exempt = manifestExempt || contractRefusesDefault === true;
     // The exemption is scoped to the overlays it names, and an anchor renders exactly one.
-    if (exempt) {
+    if (manifestExempt) {
       assert.ok(
         (exemptions.staged_residency.overlays ?? []).includes(anchor.overlay),
         `${key}: the manifest exempts staged_residency only for overlays ` +
@@ -1694,8 +1886,9 @@ test("an anchor row plans the lane's default rung unless the manifest exempts it
     assert.equal(
       effective.rung,
       expected.rung,
-      `${key}: manifest ${backend}.memoryStrategyStructuralExemptions ${exempt ? "declares" : "does not declare"} ` +
-        `staged_residency, so the anchor must plan rung ${JSON.stringify(expected.rung)}`,
+      `${key}: manifest ${backend}.memoryStrategyStructuralExemptions ${manifestExempt ? "declares" : "does not declare"} ` +
+        `staged_residency and the derived contract evidence ${contractRefusesDefault ? "records the contract refusing" : "does not record the contract refusing"} ` +
+        `it, so the anchor must plan rung ${JSON.stringify(expected.rung)}`,
     );
     assert.deepEqual([...effective.engagedRungs], expected.engagedRungs, `${key}: engaged rung set`);
     if (anchor.strategy) overridden += 1;
@@ -1703,6 +1896,61 @@ test("an anchor row plans the lane's default rung unless the manifest exempts it
   }
   assert.ok(overridden > 0, "the plan exercises the override at least once");
   assert.ok(candleExempt > 0, "at least one candle row is exempted from the lane's default rung");
+  // …and the third source is genuinely load-bearing today, not dead code kept warm: the SCAIL-2
+  // candle rows have no dump surface and are legitimate only because the engine's own declaration
+  // is read. A count, not a list — a provider that grows a dump surface simply lowers it.
+  if (sdxlRoutesAvailable) {
+    assert.ok(
+      declaredEvidence > 0,
+      "no override rested on the engine's own strategy declaration; if every provider now carries a " +
+        "dump surface, delete readDeclaredStrategySupport rather than leaving an unexercised source",
+    );
+  }
+});
+
+// sc-22736. The third source read three ways: the shipped shape yields per-rung support, a file
+// with no declaration yields null (which the rule above refuses), and a declaration this parser
+// cannot read THROWS. That last case is the one that matters — the cheap failure mode for a
+// source-text derivation is to silently stop matching and re-admit every override.
+test("the engine's strategy declaration is parsed per rung, and an unreadable shape is refused", async () => {
+  const shipped = `
+        strategies: MemoryStrategy::ALL
+            .into_iter()
+            .map(|strategy| MemoryStrategyCapability {
+                strategy,
+                support: if strategy == MemoryStrategy::Resident {
+                    MemoryStrategySupport::Implemented
+                } else {
+                    MemoryStrategySupport::Missing
+                },
+                parameters: MemoryParameterRanges::default(),
+            })
+            .collect(),
+  `;
+  const support = parseDeclaredStrategySupport(shipped, "fixture.rs");
+  assert.equal(support("resident"), "Implemented");
+  assert.equal(support("staged_residency"), "Missing");
+  assert.equal(support("bounded_decode"), "Missing");
+  // No declaration at all: null, never "implements everything".
+  assert.equal(parseDeclaredStrategySupport("fn build_contract() {}", "fixture.rs"), null);
+  // MUTATION: the same file after an upstream refactor this parser does not know. It must throw —
+  // returning null here would make the override rule fall back to "no evidence" and, worse,
+  // returning a default would admit it.
+  assert.throws(
+    () => parseDeclaredStrategySupport("    strategies: strategies(spec),\n", "fixture.rs"),
+    /cannot\s+read/,
+  );
+  // And the live wiring: candle SCAIL-2's real declaration, when a pinned checkout is reachable.
+  const closures = JSON.parse(await readFile(path.join(ROOT, "config/anchor-loader-closures.json"), "utf8"));
+  const live = await readDeclaredStrategySupport("scail2_14b", "candle", closures);
+  if (live === null) {
+    assert.ok(!process.env.CI, "on CI the pinned inference checkout must supply the SCAIL-2 declaration");
+  } else {
+    assert.equal(live("resident"), "Implemented");
+    assert.equal(live("staged_residency"), "Missing");
+  }
+  // A model the closure does not declare has no entry point to read, so it yields null.
+  assert.equal(await readDeclaredStrategySupport("not_a_model", "candle", closures), null);
 });
 
 // Each Mage variant binds TWO artifact triples: its OWN tiered rehost (never a sibling's — the six
@@ -1749,6 +1997,62 @@ test("MAGE_COMPONENT_IDS are the adapter's own component-id constants", async ()
     const arm = await readFile(path.join(ROOT, `crates/sceneworks-memory-adapter/src/bin/${backend}.rs`), "utf8");
     for (const [name] of declared) {
       assert.ok(arm.includes(`protocol::${name}`), `${backend}.rs never stages ${name}`);
+    }
+  }
+});
+
+// sc-22736. Same shape claim, for the Wan 2.2 family and SCAIL-2 — the first families whose
+// ARTIFACT is per (lane, TIER) rather than per lane. Each Wan route ships a `SceneWorks/…-mlx`
+// rehost on macOS and a separate `SceneWorks/…-candle` rehost on Windows/Linux, and the candle
+// rehosts carry `q4` and `q8` only: the candle dense leg is the upstream `Wan-AI/…-Diffusers`
+// checkpoint, at the snapshot ROOT and with no pinned revision. SCAIL-2 is the opposite shape —
+// ONE repository, all three tiers, both lanes — which is why every one of its 24 sibling cells is
+// still claimed on both lanes. The KEY SET is spelled out for the sc-22731 reason: a count alone
+// would stay green if one route silently lost a lane while another gained one.
+test("the wan 2.2 family and scail-2 are measurable on every shipped tier of every routed lane", async () => {
+  const family = ["wan_2_2", "wan_2_2_t2v_14b", "wan_2_2_i2v_14b", "scail2_14b"];
+  const cells = (await shippedTieredCells()).filter((cell) => family.includes(cell.modelId));
+  const expected = family.flatMap((id) =>
+    ["bf16", "q4", "q8"].flatMap((tier) => [`${id}:${tier}:candle`, `${id}:${tier}:mlx`]),
+  );
+  assert.deepEqual(cells.map((cell) => cell.key).sort(), expected.sort());
+  const gaps = (await measurabilityGaps()).filter((gap) => family.includes(gap.modelId));
+  assert.equal(gaps.length, 0, gapReport(gaps));
+});
+
+// The Wan candle bf16 leg is the one cell in the whole table whose repository the manifest ships
+// WITHOUT a revision, so `resolveArtifactRoot` reads the revision off whatever snapshot is staged
+// instead of probing a pinned one. That is a real difference in how a root is bound, and it is
+// asserted here rather than left to the sibling case above, which would report only "measurable".
+test("the wan candle dense leg binds the upstream snapshot flat and unpinned", async () => {
+  const models = await readManifestModels();
+  for (const [id, repo] of [
+    ["wan_2_2", "Wan-AI/Wan2.2-TI2V-5B-Diffusers"],
+    ["wan_2_2_t2v_14b", "Wan-AI/Wan2.2-T2V-A14B-Diffusers"],
+    ["wan_2_2_i2v_14b", "Wan-AI/Wan2.2-I2V-A14B-Diffusers"],
+  ]) {
+    const provider = id === "wan_2_2" ? "wan2_2_ti2v_5b" : id.replace("wan_2_2", "wan2_2");
+    const artifact = familyArtifact(PROVIDER_FAMILIES[provider], "candle", "bf16");
+    assert.equal(artifact.repo, repo, `${id}: the candle dense leg is the upstream checkpoint`);
+    assert.equal(artifact.layout, "flat", `${id}: the upstream checkpoint has no tier subtree`);
+    // ...and the manifest really does ship it unpinned, which is what makes the flat, host-read
+    // binding necessary rather than a convenience.
+    const download = (models.find((model) => model.id === id)?.downloads ?? []).find(
+      (entry) => entry.repo === repo,
+    );
+    assert.ok(download, `${id} ships ${repo}`);
+    assert.equal(download.revision, undefined, `${id}: ${repo} is shipped without a revision`);
+    // The packed siblings are the opposite: a pinned, tier-suffixed SceneWorks rehost.
+    for (const tier of ["q4", "q8"]) {
+      const packed = familyArtifact(PROVIDER_FAMILIES[provider], "candle", tier);
+      assert.match(packed.repo, /^SceneWorks\/.*-candle$/, `${id}:${tier}`);
+      assert.equal(packed.layout, "tiered", `${id}:${tier}`);
+    }
+    // And the MLX lane opens its own rehost for every tier.
+    for (const tier of ["bf16", "q4", "q8"]) {
+      const mlx = familyArtifact(PROVIDER_FAMILIES[provider], "mlx", tier);
+      assert.match(mlx.repo, /^SceneWorks\/.*-mlx$/, `${id}:${tier}:mlx`);
+      assert.equal(mlx.layout, "tiered", `${id}:${tier}:mlx`);
     }
   }
 });
@@ -1995,10 +2299,22 @@ test("PROVIDER_FAMILIES repos are the adapter's *_REPOSITORY constants", async (
     // LTX-2.5 is bound by the harness itself rather than by an adapter env family, so its repo
     // literal lives in this module (`LTX25_REPOSITORY`) and not in lib.rs.
     if (family.ltx25) continue;
-    assert.ok(
-      declared.has(family.repo),
-      `${provider}: ${family.repo} is not declared as a *_REPOSITORY const in ${ADAPTER_LIB_PATH}`,
-    );
+    // Through `familyArtifact`, so the per-(lane, TIER) overrides are covered too (sc-22736): the
+    // Wan candle q4/q8 rehost and its upstream dense leg are repositories an arm validates the
+    // operator's env against exactly as it does `family.repo`, and reading only the top-level key
+    // would have left six of them bound in one language alone.
+    const repos = new Set([
+      family.repo,
+      ...(family.arms ?? []).flatMap((arm) =>
+        ["bf16", "q4", "q8"].map((tier) => familyArtifact(family, arm, tier).repo),
+      ),
+    ]);
+    for (const repo of repos) {
+      assert.ok(
+        declared.has(repo),
+        `${provider}: ${repo} is not declared as a *_REPOSITORY const in ${ADAPTER_LIB_PATH}`,
+      );
+    }
   }
 });
 // The catalog-wide burndown. `todo` until the terminal story of epic 22723 (sc-22738) promotes it:

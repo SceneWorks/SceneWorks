@@ -132,6 +132,87 @@ export function sdxlCandleRouteDrift(modelId, tier, routes, models) {
 }
 
 /**
+ * sc-22736 (pin 8a65db2a). A plan row may override the lane's default anchor rung only where the
+ * provider CONTRACT refuses that rung, and the evidence for the refusal must be DERIVED. Two derived
+ * sources already exist — the manifest's `memoryStrategyStructuralExemptions` and the checked-in
+ * capability dump's `implementedRungs` — and neither can speak for candle SCAIL-2:
+ *
+ *   - the manifest key means `StructurallyNotApplicable`, and `candle-gen-scail2` classifies every
+ *     non-resident rung as `Missing` (not implemented yet), so an exemption there would be a lie;
+ *   - `config/engine-capabilities/capabilities.candle.json` carries no `scail2_14b` contract at all,
+ *     because the dump enumerates `ProviderRegistry::memory_contract_surfaces()` and the crate
+ *     registers a strategy without a weights-free surface resolver. That is an inference-side gap;
+ *     regenerating the dump at this pin (or any pin) would not conjure the surface.
+ *
+ * So the THIRD derived source is the engine's own declaration, read as source text out of the
+ * pinned inference checkout at the path the anchor loader closure already names as that
+ * (model, lane)'s memory-strategy entry point — a path that is itself derived at the pin and
+ * `--check`ed by `scripts/anchor-loader-closure.mjs`. Nothing here is a curated list of model ids:
+ * a provider that grows a dump surface stops consulting this, and a provider that stops declaring
+ * the rung as unimplemented moves the requirement on its own.
+ *
+ * It is fail-closed in both directions. A `strategies:` expression this parser does not recognize
+ * THROWS rather than returning "no evidence", so a refactor upstream reds the rule instead of
+ * quietly re-admitting every override; and a provider whose declaration is absent yields `null`,
+ * which the caller refuses.
+ */
+const STRATEGY_ENTRY_POINT_RE = /memory_strategy[^/]*\.rs$/;
+
+/** snake_case rung (`staged_residency`) → the Rust `MemoryStrategy` variant (`StagedResidency`). */
+function strategyVariant(rung) {
+  return rung.split("_").map((part) => part.charAt(0).toUpperCase() + part.slice(1)).join("");
+}
+
+/**
+ * `rung → MemoryStrategySupport` for a provider whose contract declares support over
+ * `MemoryStrategy::ALL`, or `null` when the file declares no `strategies:` field at all.
+ *
+ * Throws when a `strategies:` field IS declared in a shape this parser cannot read: an unrecognized
+ * declaration is NOT evidence that a rung is unimplemented.
+ */
+export function parseDeclaredStrategySupport(source, sourcePath) {
+  if (!/\bstrategies:/.test(source)) return null;
+  // The shipped shape: every variant gets one support, except one named variant.
+  const uniform =
+    /\bstrategies:\s*MemoryStrategy::ALL[\s\S]{0,200}?\.map\(\s*\|\s*strategy\s*\|\s*MemoryStrategyCapability\s*\{[\s\S]{0,120}?support:\s*if\s+strategy\s*==\s*MemoryStrategy::(\w+)\s*\{\s*MemoryStrategySupport::(\w+)\s*\}\s*else\s*\{\s*MemoryStrategySupport::(\w+)\s*\}/
+      .exec(source);
+  if (uniform) {
+    const [, named, namedSupport, otherSupport] = uniform;
+    return (rung) => (strategyVariant(rung) === named ? namedSupport : otherSupport);
+  }
+  return fail(
+    `${sourcePath} declares a strategies: field in a shape scripts/measure-memory-catalog.mjs cannot `
+      + "read, so it cannot say which rungs the contract implements. Teach parseDeclaredStrategySupport "
+      + "the new shape — an unreadable declaration must never be treated as 'no evidence'.",
+  );
+}
+
+/**
+ * The support declaration for one `(modelId, backend)` from the pinned inference checkout, or `null`
+ * when no checkout is reachable, the closure names no memory-strategy entry point, or the file
+ * declares no `strategies:` field. `null` is a REFUSAL at every call site, never an assumption.
+ */
+export async function readDeclaredStrategySupport(
+  modelId,
+  backend,
+  closures,
+  inferenceRepo = process.env.INFERENCE_REPO,
+) {
+  if (!inferenceRepo) return null;
+  const entryPoints = closures.models?.[`${modelId}:${backend}`]?.entryPoints ?? [];
+  const entry = entryPoints.find((candidate) => STRATEGY_ENTRY_POINT_RE.test(candidate));
+  if (!entry) return null;
+  let source;
+  try {
+    source = await readFile(path.join(inferenceRepo, entry), "utf8");
+  } catch (error) {
+    if (error.code === "ENOENT" || error.code === "ENOTDIR") return null;
+    throw error;
+  }
+  return parseDeclaredStrategySupport(source, entry);
+}
+
+/**
  * The built-in Qwen-Image-Edit-2511 Lightning distill LoRA (sc-22728). It is NOT a manifest
  * download — the worker fetches it lazily into the HF cache on first use — so its repository,
  * revision and file are pinned in the worker's own source on both lanes
@@ -413,6 +494,48 @@ export const PROVIDER_FAMILIES = Object.freeze({
     env: "IDEOGRAM", repo: "SceneWorks/ideogram-4-mlx", arms: ["mlx", "candle"],
     tiers: { bf16: { env: "IDEOGRAM_BF16", repo: "SceneWorks/ideogram-4" } },
   },
+  // The Wan 2.2 family (sc-22736). The FIRST families whose artifact is per (lane, TIER) rather
+  // than per lane, which is why `familyArtifact` exists: each route ships a `SceneWorks/…-mlx`
+  // rehost on macOS and a separate `SceneWorks/…-candle` rehost on Windows/Linux, and the candle
+  // rehosts carry `q4` and `q8` ONLY — the candle dense leg is the upstream `Wan-AI/…-Diffusers`
+  // checkpoint, which the manifest ships with no pinned revision and with the weights at the
+  // snapshot ROOT rather than under a `bf16/` subtree (`layout: "flat"`).
+  //
+  // One env family per (route, lane, layout), never one shared `WAN22`: the three routes are three
+  // different checkpoints, and a plan for one satisfied by another's weights would re-label its
+  // peaks.
+  wan2_2_ti2v_5b: {
+    env: "WAN22_TI2V_5B_MLX", repo: "SceneWorks/wan2.2-ti2v-5b-mlx", arms: ["mlx", "candle"],
+    artifacts: {
+      candle: {
+        "*": { env: "WAN22_TI2V_5B_CANDLE", repo: "SceneWorks/wan2.2-ti2v-5b-candle" },
+        bf16: { env: "WAN22_TI2V_5B_DENSE", repo: "Wan-AI/Wan2.2-TI2V-5B-Diffusers", layout: "flat" },
+      },
+    },
+  },
+  wan2_2_t2v_14b: {
+    env: "WAN22_T2V_A14B_MLX", repo: "SceneWorks/wan2.2-t2v-a14b-mlx", arms: ["mlx", "candle"],
+    artifacts: {
+      candle: {
+        "*": { env: "WAN22_T2V_A14B_CANDLE", repo: "SceneWorks/wan2.2-t2v-a14b-candle" },
+        bf16: { env: "WAN22_T2V_A14B_DENSE", repo: "Wan-AI/Wan2.2-T2V-A14B-Diffusers", layout: "flat" },
+      },
+    },
+  },
+  wan2_2_i2v_14b: {
+    env: "WAN22_I2V_A14B_MLX", repo: "SceneWorks/wan2.2-i2v-a14b-mlx", arms: ["mlx", "candle"],
+    artifacts: {
+      candle: {
+        "*": { env: "WAN22_I2V_A14B_CANDLE", repo: "SceneWorks/wan2.2-i2v-a14b-candle" },
+        bf16: { env: "WAN22_I2V_A14B_DENSE", repo: "Wan-AI/Wan2.2-I2V-A14B-Diffusers", layout: "flat" },
+      },
+    },
+  },
+  // SCAIL-2 (sc-22736) is the opposite shape and the reason `artifacts` is an override rather than
+  // the rule: the manifest ships ONE `SceneWorks/scail2-mlx` repository, with all three tiers, on
+  // `platforms: ["macos", "windows", "linux"]`, and BOTH engine lanes open that same per-tier
+  // turnkey — which is exactly why the two lanes' calibration identities carry a backend token.
+  scail2_14b: { env: "SCAIL2", repo: "SceneWorks/scail2-mlx", arms: ["mlx", "candle"] },
   // sc-22734. The SenseNova-U1 FAMILY: six catalog models the worker routes onto TWO engine ids on
   // both lanes — `sensenova_u1_8b` (the 50-step quality path) and `sensenova_u1_8b_fast` (the
   // 8-step distill), each carrying a base id and two infographic finetunes.
@@ -608,6 +731,134 @@ export function tierDownload(models, modelId, repo, tier) {
   return any;
 }
 
+/**
+ * The manifest download that ships EXACTLY `tier` of `repo` for `modelId`, or `undefined`.
+ *
+ * [`tierDownload`] deliberately falls back to any pinned download of the repository, because every
+ * family before sc-22736 rehosted all three tiers under ONE revision and the fallback merely names
+ * that revision. A per-(lane, tier) artifact cannot use it: the question there is whether this
+ * repository ships this tier at all, and the fallback answers "yes" for every tier of every
+ * repository that ships one.
+ */
+export function tierVariantDownload(models, modelId, repo, tier) {
+  const model = models.find((entry) => entry.id === modelId);
+  if (!model) fail(`manifest has no model ${modelId}`);
+  return (model.downloads ?? []).find(
+    (download) => download.repo === repo && download.variant === tier && !download.coRequisite,
+  );
+}
+
+/**
+ * The ARTIFACT one anchor binds, resolved per (lane, tier).
+ *
+ * Every family before sc-22736 rehosts all three tiers of both lanes in ONE repository under a
+ * `<tier>/` subtree, so the family row's `env`/`repo` is the whole answer. The Wan 2.2 family is
+ * not shaped that way, and the manifest is where that shows:
+ *
+ * * each model ships a `SceneWorks/…-mlx` rehost on `platforms: ["macos"]` and a separate
+ *   `SceneWorks/…-candle` rehost on `["windows","linux"]`, so the two lanes load DIFFERENT
+ *   repositories at different revisions, and
+ * * the candle rehosts ship `q4` and `q8` only — the candle bf16 leg is the UPSTREAM
+ *   `Wan-AI/Wan2.2-*-Diffusers` checkpoint, which the manifest ships with NO pinned revision and
+ *   with the weights at the snapshot root rather than under a `bf16/` subtree.
+ *
+ * A row therefore declares `artifacts[backend][tier]`, or `artifacts[backend]["*"]` for a whole
+ * lane; anything an override omits falls back to the row itself. `layout: "flat"` marks the second
+ * shape above — probing `<snapshot>/bf16` there would report `weights_missing` for a cell that is
+ * staged, which is the wrong answer in the direction that hides work.
+ */
+export function familyArtifact(family, backend, tier) {
+  // Two override shapes stack, narrowest last:
+  //
+  // * `lanes[backend]` (sc-22731) — a whole lane loads a different repository, and `tiered: false`
+  //   there means the load root is the snapshot ITSELF, with no `<tier>` component.
+  // * `artifacts[backend][tier]`, or `artifacts[backend]["*"]` (sc-22736) — one CELL loads a
+  //   different repository, which is what the Wan 2.2 candle bf16 leg needs.
+  // * `tiers[tier]` (sc-22732) — one TIER loads a different repository on BOTH lanes, which is what
+  //   `ideogram_4`'s bf16 leg needs: it ships from `SceneWorks/ideogram-4` at its own revision while
+  //   its q4/q8 siblings come from the packed `SceneWorks/ideogram-4-mlx` turnkey.
+  //
+  // Anything an override omits falls back to the family row.
+  const lane = family.lanes?.[backend];
+  const perTier = family.artifacts?.[backend];
+  const override = perTier?.[tier] ?? perTier?.["*"];
+  const merged = {
+    env: family.env,
+    repo: family.repo,
+    ...(lane ?? {}),
+    ...(family.tiers?.[tier] ?? {}),
+    ...(override ?? {}),
+  };
+  // `layout: "flat"` and `tiered: false` say the same thing; the first is this function's word for
+  // it and the second is the family table's.
+  return { ...merged, layout: merged.layout ?? (merged.tiered === false ? "flat" : "tiered") };
+}
+
+/** Snapshot revision directories of `repo` staged under one hub root. */
+async function hostSnapshotRevisions(hub, repo) {
+  try {
+    return await readdir(path.join(hub, `models--${repo.replaceAll("/", "--")}`, "snapshots"));
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Where `tier` of `artifact` lives on this host, the revision that names it, and why it is absent.
+ *
+ * A download the manifest pins resolves the way every family always has. A download the manifest
+ * ships WITHOUT a revision (the upstream Wan Diffusers checkpoints) has no revision to probe with,
+ * so the revision is read off whatever snapshot of that repository is staged here. That is not a
+ * weaker binding than the pinned case in the only place it matters — the adapter arm still
+ * validates the repository it was handed and the resolved revision is written into the record —
+ * but it IS host-dependent, so the reason string says so rather than reporting a missing pin as a
+ * missing snapshot.
+ */
+export async function resolveArtifactRoot(models, modelId, tier, artifact, hubs) {
+  const suffix = artifact.layout === "flat" ? [] : [tier];
+  const label = suffix.length > 0 ? `/${tier}` : "";
+  const declared = tierVariantDownload(models, modelId, artifact.repo, tier);
+  const revision = tierDownloadRevision(models, modelId, artifact.repo, tier, declared);
+  if (revision) {
+    const root = await firstExistingDirectory(
+      hubs.map((hub) => snapshotPath(hub, artifact.repo, revision, ...suffix)),
+    );
+    return {
+      root,
+      revision,
+      expected: snapshotPath(hubs[0], artifact.repo, revision, ...suffix),
+      reason: `no ${artifact.repo}@${revision.slice(0, 8)}${label} on this host`,
+    };
+  }
+  for (const hub of hubs) {
+    for (const candidate of await hostSnapshotRevisions(hub, artifact.repo)) {
+      const root = snapshotPath(hub, artifact.repo, candidate, ...suffix);
+      if (await firstExistingDirectory([root])) return { root, revision: candidate, expected: root, reason: null };
+    }
+  }
+  return {
+    root: null,
+    revision: null,
+    expected: snapshotPath(hubs[0], artifact.repo, "<revision>", ...suffix),
+    reason:
+      `${artifact.repo} is shipped without a pinned revision and no snapshot of it is staged on ` +
+      `this host, so ${modelId}:${tier} has no root to bind`,
+  };
+}
+
+/**
+ * The revision of a pinned rehost that ships this tier under one revision for all of them.
+ *
+ * Only consulted when the manifest declares no download for exactly `(repo, tier)`: a rehost that
+ * ships `q4`, `q8` and `bf16` under one revision is still resolvable through [`tierDownload`], and
+ * a repository that ships NO tier of this model at all is a declaration error rather than a host
+ * one, so it fails loudly here instead of reporting `weights_missing`.
+ */
+function tierDownloadRevision(models, modelId, repo, tier, declared) {
+  if (declared) return declared.revision ?? null;
+  return tierDownload(models, modelId, repo, tier).revision ?? null;
+}
+
 export function hubRoots(hfCache = []) {
   // Explicit --hf-cache roots first (repeatable), then the HF env convention, then the app cache.
   const roots = [
@@ -699,28 +950,21 @@ export async function classifyAnchor(key, planned, { models, backend, hubs, curr
     return row;
   }
 
-  // Which artifact THIS lane and THIS tier open. Almost every family loads one repository on both
-  // lanes at every tier, so the family row IS the artifact. `lanes[backend]` overrides it for a
-  // family whose lanes load different artifacts (sc-22731: SANA's MLX turnkey vs its upstream dense
-  // Candle snapshot), and `tiers[tier]` overrides it again for a family whose tiers span more than
-  // one repository (sc-22732: `ideogram_4`'s bf16 tier ships from a different repo at a different
-  // revision than its packed q4/q8 tiers) — so the revision is looked up against the repository the
-  // tier actually comes from and the harness exports the env family the adapter arm binds for it.
-  // The tier override is applied last, because it is the narrower claim.
-  // `tiered: false` means the load root is the snapshot ITSELF — no `<tier>` component — which is
-  // what the worker resolves for such a repository and what the adapter validates against
-  // (`validate_huggingface_revision_root`).
-  const artifact = { ...family, ...(family.lanes?.[backend] ?? {}), ...(family.tiers?.[parts.tier] ?? {}) };
-  const tiered = artifact.tiered !== false;
-  const download = tierDownload(models, parts.modelId, artifact.repo, parts.tier);
-  const suffix = tiered ? [parts.tier] : [];
-  const tierRoot = await firstExistingDirectory(hubs.map((hub) => snapshotPath(hub, artifact.repo, download.revision, ...suffix)));
-  row.roots.push({ label: tiered ? "tier root" : "snapshot root", path: tierRoot ?? snapshotPath(hubs[0], artifact.repo, download.revision, ...suffix) });
-  if (!tierRoot) {
-    return { ...row, status: "weights_missing", reason: `no ${artifact.repo}@${download.revision.slice(0, 8)}${tiered ? `/${parts.tier}` : ""} on this host` };
+  // The artifact is resolved per (lane, tier), not per family: SANA's two lanes load different
+  // repositories (sc-22731) and a Wan 2.2 candle bf16 cell loads the upstream Diffusers checkpoint
+  // rather than the packed rehost its q4/q8 siblings live in (sc-22736).
+  const artifact = familyArtifact(family, backend, parts.tier);
+  const resolved = await resolveArtifactRoot(models, parts.modelId, parts.tier, artifact, hubs);
+  row.roots.push({
+    label: artifact.layout === "flat" ? "snapshot root" : "tier root",
+    path: resolved.root ?? resolved.expected,
+  });
+  if (!resolved.root) {
+    return { ...row, status: "weights_missing", reason: resolved.reason };
   }
+  const tierRoot = resolved.root;
   row.env[`SCENEWORKS_${artifact.env}_REPOSITORY`] = artifact.repo;
-  row.env[`SCENEWORKS_${artifact.env}_REVISION`] = download.revision;
+  row.env[`SCENEWORKS_${artifact.env}_REVISION`] = resolved.revision;
   row.env[`SCENEWORKS_${artifact.env}_ROOT`] = tierRoot;
   row.tierRoot = tierRoot;
   // A converter-written file the ENGINE requires INSIDE the resolved tier root, beyond the weights
