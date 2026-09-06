@@ -2468,6 +2468,124 @@ fn positive(bytes: i128) -> Option<u64> {
     (bytes > 0).then(|| u64::try_from(bytes).ok()).flatten()
 }
 
+// ---------------------------------------------------------------------------------------------
+// MLX admission policy shared by the worker's fit gate and the memory adapter (sc-22738)
+// ---------------------------------------------------------------------------------------------
+//
+// The memory adapter's ordinary LTX-2.3 capture admits through the SAME projection the worker's
+// gate would build for the cell (epic 22723 sc-22738, review round 2). The three inputs that
+// projection needs beyond the provider contract — the fixed unified-memory reserve, the generic
+// activation allowance and the floor's weights arithmetic — were private to
+// `crates/sceneworks-worker/src/{fit_gate,mlx_fit_gate}.rs`, and the adapter's first cut restated
+// two of them as fresh literals and the third as a hand transcription. They are declared ONCE here;
+// the worker reads its constants from these and both crates call [`floor_weights_bytes`]. A
+// change to any of them therefore moves the worker's admission and the adapter's projection
+// together, or not at all.
+
+/// Bytes per binary gigabyte (GiB) — `hw.memsize / 1024³`, the unit every MLX budget figure is
+/// stated in (`gpu::total_unified_memory_gb`, the epic's measured on-disk tables).
+pub const BYTES_PER_GIB: f64 = 1_073_741_824.0;
+
+/// The MLX lane's fixed unified-memory reserve: `mlx_fit_gate::live_request_budget` presents it as
+/// `MemoryBudget::reserved_headroom_bytes` for every non-Mage engine, and
+/// `MemoryBudget::effective_bytes` subtracts it before the shared predicate compares. Exact
+/// verified cells do not use this number for their foreign demand (that is derived from captured
+/// MLX/wired limits); it is Decision 2's promise that no-record/out-of-envelope/stale requests
+/// take the legacy reserve rather than silently adopting a new policy.
+pub const LEGACY_UNIFIED_FALLBACK_RESERVE_GB: f64 = 2.0;
+
+/// The MLX lane's generic flat activation allowance (`HEADROOM_GB`, sc-10863): the max
+/// common-case measured 1024² transient (14.04 GiB) plus a ~4 GiB OS/app reserve. The video
+/// lane's estimate floor is `floor weights + this` (`video_admission::floor_phase_peaks`), and a
+/// provider decode profile only ever RAISES that floor (`profiled_floor_phase_peaks`).
+pub const MLX_GENERIC_HEADROOM_GB: f64 = 18.0;
+
+/// GiB to bytes, rounded to the nearest byte and clamped into `u64` — the worker's own conversion
+/// (`mlx_fit_gate::gib_to_bytes`), so an allowance stated in GiB means the same byte count on both
+/// sides of the seam.
+pub fn gib_to_bytes(gib: f64) -> u64 {
+    (gib * BYTES_PER_GIB).round().clamp(0.0, u64::MAX as f64) as u64
+}
+
+/// The contract facts the floor's weights term reads, lifted off `gen_core::MemoryProviderContract`
+/// by each caller (this crate does not see gen-core's types). Every field is a declaration the
+/// provider makes about itself; nothing here is a tuned coefficient.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct FloorWeightsFacts {
+    /// `asset_facts.conditioning_bytes` — the conditioning encoder stack.
+    pub conditioning_bytes: u64,
+    /// `asset_facts.base_bytes` — every resident weight of a plain render.
+    pub base_bytes: u64,
+    /// `asset_facts.transformer_bytes` — the load-exact transformer, evictable sub-stack included.
+    pub transformer_bytes: u64,
+    /// Bytes the provider declares it drops from INSIDE `transformer_bytes` before the declaring
+    /// phase reaches steady state: `transformer_bytes - steady_state_transformer_bytes()`. Zero for
+    /// every provider that has not adopted the sub-stack vocabulary.
+    pub intra_transformer_evicted_bytes: u64,
+    /// The sum of every auxiliary resident component (control branches, adapter stacks, …) the
+    /// composition does NOT bound: `resident_components()` filtered to `kind.is_auxiliary()` and
+    /// to `bounded_by` either absent or naming a rung the composition leaves disengaged.
+    pub auxiliary_resident_bytes: u64,
+}
+
+/// Which reductions the engaged composition applies to [`FloorWeightsFacts`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct FloorWeightsComposition {
+    /// `StagedResidency` engaged.
+    pub staged: bool,
+    /// `BoundedTransformerResidency` engaged.
+    pub bounded_transformer: bool,
+    /// What rung 4 keeps resident of the transformer once it has removed it: 0 on the video lane,
+    /// the law's window share on the image lane. Ignored unless `bounded_transformer`.
+    pub resident_window_bytes: u64,
+}
+
+/// The floor's per-rung WEIGHTS term (sc-18096), derived only from the provider's own
+/// declarations:
+///
+/// * `staged` ⇒ the co-residency drop the rung exists for: the resident working set is the larger
+///   of the conditioning stack and everything else (the `staged_weights_gb` split the load-time
+///   gate has always used).
+/// * `bounded_transformer` ⇒ the transformer's declared bytes leave the resident floor and the
+///   rung's RESIDENT WINDOW comes back in, clamped at the load-exact transformer so no lane can
+///   state more than it loads.
+/// * The two reductions are EXCLUSIVE, not sequential. The staged reduction's clamp holds the lump
+///   at `transformer_bytes` precisely so the precompute instant stays covered — and rung 4 then
+///   removes that same `transformer_bytes`, sub-stack included. Applying both would leave
+///   `max(0, decoder − evicted)` where the answer is `decoder`.
+/// * A declared intra-transformer eviction leaves the floor only on the STAGED branch, and only
+///   down to the load-exact transformer (sc-19721): the drop lowers the steady state, not the
+///   peak, so it may only cancel against bytes provably NOT co-resident with the precompute instant.
+/// * Rungs 2 and 3 bound TRANSIENTS, not weights, and take no reduction here.
+/// * Unbounded auxiliary components stay resident.
+pub fn floor_weights_bytes(facts: FloorWeightsFacts, composition: FloorWeightsComposition) -> u64 {
+    let conditioning = facts.conditioning_bytes;
+    // The load-exact non-conditioning working set: what the transformer's own phase holds while the
+    // evictable sub-stack is still materialized.
+    let heavy_load_exact = facts.base_bytes.saturating_sub(conditioning);
+    let heavy = if composition.staged && !composition.bounded_transformer {
+        heavy_load_exact
+            .saturating_sub(facts.intra_transformer_evicted_bytes)
+            .max(facts.transformer_bytes)
+    } else if composition.bounded_transformer {
+        heavy_load_exact
+            .saturating_sub(facts.transformer_bytes)
+            .saturating_add(
+                composition
+                    .resident_window_bytes
+                    .min(facts.transformer_bytes),
+            )
+    } else {
+        heavy_load_exact
+    };
+    let base = if composition.staged {
+        conditioning.max(heavy)
+    } else {
+        conditioning.saturating_add(heavy)
+    };
+    base.saturating_add(facts.auxiliary_resident_bytes)
+}
+
 /// The workload axes of [`MemoryAnchor::derive_mlx_image_phase_peaks`]: geometry only. The lane
 /// entry point prices the resident composition, which upper-bounds every composition the lane can
 /// execute.
@@ -4995,6 +5113,78 @@ mod tests {
             windowed_transformer_bytes(3_470_000_000, Some(0), Some(30)),
             3_470_000_000
         );
+    }
+
+    /// sc-22738: the shared floor weights arithmetic, one assertion per branch the worker's
+    /// `mlx_fit_gate::floor_weights_bytes` used to carry privately. Facts: conditioning 26,
+    /// transformer 20 (of which 6 evictable), decoder 4, base 50, one unbounded auxiliary of 3.
+    #[test]
+    fn the_shared_floor_weights_term_prices_every_composition_the_worker_prices() {
+        let facts = FloorWeightsFacts {
+            conditioning_bytes: 26,
+            base_bytes: 50,
+            transformer_bytes: 20,
+            intra_transformer_evicted_bytes: 6,
+            auxiliary_resident_bytes: 3,
+        };
+        let composition = |staged: bool, bounded_transformer: bool, resident_window_bytes: u64| {
+            FloorWeightsComposition {
+                staged,
+                bounded_transformer,
+                resident_window_bytes,
+            }
+        };
+        // Resident: conditioning + heavy (24) + auxiliary.
+        assert_eq!(floor_weights_bytes(facts, composition(false, false, 0)), 53);
+        // Staged: max(conditioning 26, heavy 24 − 6 evicted clamped at the transformer 20 = 20)
+        // = 26, plus the auxiliary.
+        assert_eq!(floor_weights_bytes(facts, composition(true, false, 0)), 29);
+        // Staged with a drop smaller than the clamp room: heavy 24 − 2 = 22 ≥ 20.
+        let small_drop = FloorWeightsFacts {
+            intra_transformer_evicted_bytes: 2,
+            ..facts
+        };
+        assert_eq!(
+            floor_weights_bytes(small_drop, composition(true, false, 0)),
+            29
+        );
+        let tall_heavy = FloorWeightsFacts {
+            base_bytes: 60,
+            ..facts
+        };
+        // heavy 34 − 6 = 28 > conditioning 26.
+        assert_eq!(
+            floor_weights_bytes(tall_heavy, composition(true, false, 0)),
+            31
+        );
+        // Rung 4 alone: the transformer leaves (24 − 20 = 4), the window comes back clamped at the
+        // load-exact transformer; the eviction is NOT applied on top.
+        assert_eq!(floor_weights_bytes(facts, composition(false, true, 0)), 33);
+        assert_eq!(floor_weights_bytes(facts, composition(false, true, 5)), 38);
+        assert_eq!(floor_weights_bytes(facts, composition(false, true, 99)), 53);
+        // Staged + rung 4: exclusive — the rung-4 branch, then the staged max. heavy = 4 + 5 = 9;
+        // max(26, 9) = 26; + 3.
+        assert_eq!(floor_weights_bytes(facts, composition(true, true, 5)), 29);
+        // The weights-free contract prices zero everywhere.
+        assert_eq!(
+            floor_weights_bytes(FloorWeightsFacts::default(), composition(true, true, 7)),
+            0
+        );
+    }
+
+    /// sc-22738: the byte forms of the two shared allowances are the worker's own conversion of
+    /// the GiB declarations, and nothing else — the adapter's admission budget and floor read
+    /// these, so a drift here is a drift in what ships.
+    #[test]
+    fn the_shared_allowances_convert_to_the_bytes_the_worker_presents() {
+        assert_eq!(
+            gib_to_bytes(LEGACY_UNIFIED_FALLBACK_RESERVE_GB),
+            2_147_483_648
+        );
+        assert_eq!(gib_to_bytes(MLX_GENERIC_HEADROOM_GB), 19_327_352_832);
+        assert_eq!(gib_to_bytes(0.0), 0);
+        assert_eq!(gib_to_bytes(-1.0), 0);
+        assert_eq!(gib_to_bytes(1.5), 1_610_612_736);
     }
 
     /// AC 3: `ArchitectureFacts::default()` leaves every residue unscaled, so the estimate is

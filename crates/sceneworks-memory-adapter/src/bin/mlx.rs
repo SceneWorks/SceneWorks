@@ -497,9 +497,10 @@ const LTX_FPS: [u32; 3] = [24, 25, 30];
 const MIB: u64 = 1024 * 1024;
 
 /// Port of `sceneworks_core::video_request::ltx_frame_count` — frames snap to the NEAREST `8k + 1`,
-/// minimum 9, ties to the lower. Duplicated rather than depended on: `sceneworks-core` pulls a
-/// bundled SQLite, an image codec stack and a trash binding into what is otherwise a calibration-only
-/// binary with two dependencies.
+/// minimum 9, ties to the lower. Ported before `sceneworks-core` became a dependency of this binary
+/// (sc-22738 made it one, for the worker's shared admission policy in `memory_anchor`); the port
+/// stays because its two-sided pin below is what binds this arm to the shipped ladder, and it is
+/// `const`.
 ///
 /// Because it is a port and NOT a call, the binding to the shipped ladder is by transcription, and
 /// it takes TWO tests to close: `ltx_frame_ladder_port_matches_the_transcribed_shipped_ladder` here
@@ -12915,7 +12916,7 @@ fn planned_ltx_capture(
 /// worker runs ([`ltx_ordinary_admission`]) and lets the budget accept or refuse; the SC-18946
 /// records under `docs/calibration/sc-18946` keep their `safety_refused_open` dispositions as
 /// history. Physical containment is the harness's footprint watchdog, which the catalog runner
-/// wraps around every MLX capture.
+/// wraps around every Darwin capture.
 fn validate_ltx_safety_evidence(
     request: &Value,
     tier: &str,
@@ -14318,41 +14319,56 @@ struct LtxOrdinaryProjection {
     /// (`mlx_gen_ltx::conservative_video_decode_memory_profile`), the same profile the worker's
     /// `packaged_video_decode_profile` resolves for a non-bounded MLX candidate.
     decode_working_set_bytes: u64,
-    /// The peak presented as `predicted_peak_bytes`: the profile composed onto the weights
-    /// (`VideoDecodeMemoryProfile::checked_composed_peak`, as `profiled_floor_phase_peaks` does),
-    /// never below the weights alone.
+    /// The peak presented as `predicted_peak_bytes`, exactly the worker's
+    /// `profiled_floor_phase_peaks`: the larger of the generic floor (weights +
+    /// [`LTX_GENERIC_HEADROOM_BYTES`], `floor_phase_peaks`) and the profile composed onto the
+    /// weights (`VideoDecodeMemoryProfile::checked_composed_peak`). The generic allowance remains
+    /// a lower bound: a decode-only profile cannot prove that conditioning or denoise need less.
     predicted_peak_bytes: u64,
 }
 
-/// The worker's floor weights term for one engaged composition, restated for the two compositions
-/// an LTX-2.3 anchor can plan (`resident`, `staged_residency`; the provider declares no rung 4).
-/// Mirrors `crates/sceneworks-worker/src/mlx_fit_gate.rs` `floor_weights_bytes`: under staging the
-/// resident working set is the larger of the conditioning stack and the post-eviction heavy
-/// stack, otherwise their sum; auxiliary resident components are charged unless an engaged rung
-/// bounds them.
+/// The worker's generic activation allowance in bytes — `HeadroomAllowance::GENERIC.total_gb`
+/// converted the way `mlx_fit_gate` converts it — read from the shared declaration, never
+/// restated here (sc-22738 review). 19,327,352,832 bytes at the current declaration.
+fn ltx_generic_headroom_bytes() -> u64 {
+    sceneworks_core::memory_anchor::gib_to_bytes(
+        sceneworks_core::memory_anchor::MLX_GENERIC_HEADROOM_GB,
+    )
+}
+
+/// The worker's fixed unified-memory reserve in bytes — what `mlx_fit_gate::live_request_budget`
+/// presents as `MemoryBudget::reserved_headroom_bytes` for every non-Mage engine — read from the
+/// shared declaration, never restated here (sc-22738 review). 2,147,483,648 bytes at the current
+/// declaration.
+fn ltx_unified_reserve_bytes() -> u64 {
+    sceneworks_core::memory_anchor::gib_to_bytes(
+        sceneworks_core::memory_anchor::LEGACY_UNIFIED_FALLBACK_RESERVE_GB,
+    )
+}
+
+/// The worker's floor weights term for one engaged LTX-2.3 composition: the contract's own asset
+/// facts lifted onto the SHARED arithmetic (`sceneworks_core::memory_anchor::floor_weights_bytes`,
+/// which `mlx_fit_gate::floor_weights_bytes` calls with the same lift), on the video lane's terms
+/// (`estimate_floor_weights_bytes`: a zero resident window).
+///
+/// The pinned LTX-2.3 provider implements `resident`, `staged_residency` and the transient-only
+/// `bounded_decode`; it declares `bounded_transformer_residency` UNIMPLEMENTED
+/// (`MemoryStrategySupport::Missing`). A composition that engages rung 4 here is therefore a
+/// contract or plan drift this arm has no measured basis to price, and it is refused explicitly
+/// rather than priced by an arm that was never asked to (sc-22738 review).
 fn ltx_floor_weights_bytes(
     contract: &mlx_gen::gen_core::MemoryProviderContract,
     engaged: &[MemoryStrategy],
-) -> u64 {
+) -> Result<u64, String> {
+    if engaged.contains(&MemoryStrategy::BoundedTransformerResidency) {
+        return Err(format!(
+            "LTX-2.3 admission cannot price a composition engaging bounded_transformer_residency \
+             (engaged {engaged:?}): the pinned provider declares rung 4 unimplemented and this \
+             arm plans only resident/staged_residency"
+        ));
+    }
     let facts = contract.asset_facts;
-    let conditioning = facts.conditioning_bytes;
-    let heavy_load_exact = facts.base_bytes.saturating_sub(conditioning);
-    let heavy = if engaged.contains(&MemoryStrategy::StagedResidency) {
-        let evicted = facts
-            .transformer_bytes
-            .saturating_sub(contract.steady_state_transformer_bytes());
-        heavy_load_exact
-            .saturating_sub(evicted)
-            .max(facts.transformer_bytes)
-    } else {
-        heavy_load_exact
-    };
-    let base = if engaged.contains(&MemoryStrategy::StagedResidency) {
-        conditioning.max(heavy)
-    } else {
-        conditioning.saturating_add(heavy)
-    };
-    contract
+    let auxiliary_resident_bytes = contract
         .resident_components()
         .iter()
         .filter(|component| component.kind.is_auxiliary())
@@ -14360,28 +14376,64 @@ fn ltx_floor_weights_bytes(
             Some(bounding) => !engaged.contains(&bounding),
             None => true,
         })
-        .fold(base, |total, component| {
+        .fold(0_u64, |total, component| {
             total.saturating_add(component.resident_bytes)
-        })
+        });
+    Ok(sceneworks_core::memory_anchor::floor_weights_bytes(
+        sceneworks_core::memory_anchor::FloorWeightsFacts {
+            conditioning_bytes: facts.conditioning_bytes,
+            base_bytes: facts.base_bytes,
+            transformer_bytes: facts.transformer_bytes,
+            intra_transformer_evicted_bytes: facts
+                .transformer_bytes
+                .saturating_sub(contract.steady_state_transformer_bytes()),
+            auxiliary_resident_bytes,
+        },
+        sceneworks_core::memory_anchor::FloorWeightsComposition {
+            staged: engaged.contains(&MemoryStrategy::StagedResidency),
+            bounded_transformer: false,
+            resident_window_bytes: 0,
+        },
+    ))
+}
+
+/// The worker's projected peak for one LTX-2.3 cell (`video_admission::profiled_floor_phase_peaks`):
+/// `max(weights + generic headroom, decode profile composed onto the weights)`. Pure, so the table
+/// tests can drive it over every shipped frame count without an allocator.
+fn ltx_projected_peak_bytes(
+    contract: &mlx_gen::gen_core::MemoryProviderContract,
+    weights_bytes: u64,
+    profile: mlx_gen::VideoDecodeMemoryProfile,
+) -> Result<u64, String> {
+    let composed = profile
+        .checked_composed_peak(weights_bytes, contract.asset_facts.decoder_bytes)
+        .ok_or_else(|| {
+            format!(
+                "the pinned MLX LTX-2.3 decode profile cannot compose contract weights {weights_bytes} with decoder bytes {}",
+                contract.asset_facts.decoder_bytes
+            )
+        })?;
+    Ok(composed.max(weights_bytes.saturating_add(ltx_generic_headroom_bytes())))
 }
 
 /// The ordinary LTX-2.3 capture's PRODUCTION admission, run before the load (sc-22738).
 ///
 /// This is the path the worker takes for an unmeasured `(ltx_2_3, tier, mlx)` cell, in the same
 /// order and against the same figures: the contract's asset facts give the weights floor, the
-/// engine's own decode profile gives the geometry term, and gen-core's shared safety predicate
+/// generic allowance and the engine's own decode profile give the activation term
+/// (`profiled_floor_phase_peaks`: the larger of the two), and gen-core's shared safety predicate
 /// (`default_memory_strategy_safety_check`, the budget half of the provider's registered
-/// `safety_check`) decides whether `predicted_peak_bytes` fits `hardware.memoryBytes`. The
-/// provider's full check — the route gate on top of the same predicate — runs again on the loaded
-/// generator, so a refusal here is the budget's refusal and a refusal there is the provider's;
-/// neither is this arm's opinion. There is deliberately no other exit: a request the budget admits
-/// proceeds to the load, and a request it refuses is refused in the budget's own words.
+/// `safety_check`) decides whether `predicted_peak_bytes` fits the budget. The provider's full
+/// check — the route gate on top of the same predicate — runs again on the loaded generator, so a
+/// refusal here is the budget's refusal and a refusal there is the provider's; neither is this
+/// arm's opinion. There is deliberately no other exit: a request the budget admits proceeds to the
+/// load, and a request it refuses is refused in the budget's own words.
 ///
-/// The budget is presented as every other MLX arm presents it — the probed host memory as
-/// `total_bytes`, the allocator's live active/cache readings after a `clear_cache` as the
-/// committed/reclaimable pair (what `mlx_fit_gate::live_request_budget` reads), no reserved
-/// headroom. Physical containment of the run itself is the harness's footprint watchdog, not
-/// this predicate.
+/// The budget is presented as `mlx_fit_gate::live_request_budget` presents it for a non-Mage
+/// engine: the probed host memory as `total_bytes`, the allocator's live active/cache readings
+/// after a `clear_cache` as the committed/reclaimable pair, and the fixed unified-memory reserve
+/// as `reserved_headroom_bytes` (which `MemoryBudget::effective_bytes` subtracts). Physical
+/// containment of the run itself is the harness's footprint watchdog, not this predicate.
 fn ltx_ordinary_admission(
     contract: &mlx_gen::gen_core::MemoryProviderContract,
     calibration: &MemoryCalibrationIdentity,
@@ -14390,7 +14442,7 @@ fn ltx_ordinary_admission(
     hardware_bytes: u64,
 ) -> Result<(MemoryRunContext, LtxOrdinaryProjection), String> {
     let engaged = contract.engaged_composition(selection.strategy);
-    let weights_bytes = ltx_floor_weights_bytes(contract, &engaged);
+    let weights_bytes = ltx_floor_weights_bytes(contract, &engaged)?;
     let profile = mlx_gen_ltx::conservative_video_decode_memory_profile(
         LTX_PROVIDER,
         geometry.width,
@@ -14404,15 +14456,7 @@ fn ltx_ordinary_admission(
         )
     })?;
     let decode_working_set_bytes = profile.working_set_bytes();
-    let predicted_peak_bytes = profile
-        .checked_composed_peak(weights_bytes, contract.asset_facts.decoder_bytes)
-        .ok_or_else(|| {
-            format!(
-                "the pinned MLX LTX-2.3 decode profile cannot compose contract weights {weights_bytes} with decoder bytes {}",
-                contract.asset_facts.decoder_bytes
-            )
-        })?
-        .max(weights_bytes);
+    let predicted_peak_bytes = ltx_projected_peak_bytes(contract, weights_bytes, profile)?;
     clear_cache();
     let mut context = ltx_context(
         selection,
@@ -14424,6 +14468,7 @@ fn ltx_ordinary_admission(
     );
     context.budget.committed_bytes = get_active_memory() as u64;
     context.budget.reclaimable_bytes = get_cache_memory() as u64;
+    context.budget.reserved_headroom_bytes = ltx_unified_reserve_bytes();
     match mlx_gen::gen_core::default_memory_strategy_safety_check(contract, &context) {
         MemorySafetyDecision::Accept => Ok((
             context,
@@ -14435,10 +14480,15 @@ fn ltx_ordinary_admission(
         )),
         MemorySafetyDecision::Reject { reason } => Err(format!(
             "LTX-2.3 admission refused by the production budget before load: {reason} \
-             (weights floor {weights_bytes} bytes + engine decode working set \
-             {decode_working_set_bytes} bytes for {}x{} x {} frames against hardware.memoryBytes \
-             {hardware_bytes})",
-            geometry.width, geometry.height, geometry.frames
+             (weights floor {weights_bytes} bytes, generic headroom {} bytes, engine decode \
+             working set {decode_working_set_bytes} bytes for {}x{} x {} frames; projected peak \
+             {predicted_peak_bytes} bytes against hardware.memoryBytes {hardware_bytes} less the \
+             {} byte unified reserve)",
+            ltx_generic_headroom_bytes(),
+            geometry.width,
+            geometry.height,
+            geometry.frames,
+            ltx_unified_reserve_bytes(),
         )),
     }
 }
@@ -15658,13 +15708,8 @@ fn run_ltx_with_admission(
     // this host's budget, decided by gen-core's shared predicate. Accept proceeds to the load;
     // Reject is returned in the budget's own words. Every admission mode runs it — the canary
     // profiles add their own tighter ceilings on top, they do not replace the production one.
-    let (context, projection) = ltx_ordinary_admission(
-        &contract,
-        calibration,
-        selection,
-        geometry,
-        hardware_bytes,
-    )?;
+    let (context, projection) =
+        ltx_ordinary_admission(&contract, calibration, selection, geometry, hardware_bytes)?;
     let generator = registry
         .load(LTX_PROVIDER, &spec)
         .map_err(|error| format!("load real LTX-2.3 {tier} provider: {error}"))?;
@@ -15678,7 +15723,8 @@ fn run_ltx_with_admission(
     }
     // The provider's OWN registered check on the loaded generator — the same predicate plus its
     // route gate — with the same context. A rejection is the provider's, quoted verbatim.
-    if let MemorySafetyDecision::Reject { reason } = generator.memory_strategy_safety_check(&context)
+    if let MemorySafetyDecision::Reject { reason } =
+        generator.memory_strategy_safety_check(&context)
     {
         return Err(format!(
             "LTX-2.3 admission refused by the pinned provider after load: {reason}"
@@ -26393,9 +26439,11 @@ mod ltx_tests {
             let selection =
                 planned_selection(&request).unwrap_or_else(|error| panic!("{key}: {error}"));
             let contract = ltx_fixture_contract(ltx_tier_quant(tier));
-            contract.validate_selection(&selection).unwrap_or_else(|error| {
-                panic!("{key}: the pinned contract refuses the planned composition: {error}")
-            });
+            contract
+                .validate_selection(&selection)
+                .unwrap_or_else(|error| {
+                    panic!("{key}: the pinned contract refuses the planned composition: {error}")
+                });
             let calibration = contract.calibration.as_ref().expect("fixture calibration");
             let (context, projection) = ltx_ordinary_admission(
                 &contract,
@@ -26410,6 +26458,22 @@ mod ltx_tests {
                 "{key}"
             );
             assert_eq!(context.budget.total_bytes, LTX_TEST_HOST_BYTES, "{key}");
+            // The budget carries the worker's fixed unified-memory reserve
+            // (`live_request_budget`, non-Mage branch: `legacy_unified_reserve` = 2 GiB), read
+            // from the shared declaration — `effective_bytes` subtracts it, so a zero here is a
+            // budget 2,147,483,648 bytes more permissive than the worker's (sc-22738 review).
+            assert_eq!(
+                context.budget.reserved_headroom_bytes,
+                2 * 1024 * 1024 * 1024,
+                "{key}"
+            );
+            assert_eq!(
+                context.budget.reserved_headroom_bytes,
+                sceneworks_core::memory_anchor::gib_to_bytes(
+                    sceneworks_core::memory_anchor::LEGACY_UNIFIED_FALLBACK_RESERVE_GB
+                ),
+                "{key}"
+            );
             assert!(!context.has_phases, "{key}");
         }
         assert_eq!(
@@ -26502,14 +26566,8 @@ mod ltx_tests {
                 .expect("the pinned provider profiles the anchor geometry")
                 .working_set_bytes();
         let small_host = 8 * 1024 * 1024 * 1024;
-        let error = ltx_ordinary_admission(
-            &contract,
-            calibration,
-            selection,
-            geometry,
-            small_host,
-        )
-        .expect_err("a projection above the host budget must be refused");
+        let error = ltx_ordinary_admission(&contract, calibration, selection, geometry, small_host)
+            .expect_err("a projection above the host budget must be refused");
         assert!(
             error.starts_with("LTX-2.3 admission refused by the production budget before load: "),
             "{error}"
@@ -26539,24 +26597,220 @@ mod ltx_tests {
         assert!(context.budget.fits(engine_decode));
     }
 
-    /// The weights term follows the worker's floor for the two compositions an LTX anchor can plan:
-    /// resident sums the stacks, staged residency takes the larger of the conditioning stack and
-    /// the post-eviction heavy stack.
+    /// The weights term IS the worker's floor for the two compositions an LTX anchor can plan —
+    /// the shared `sceneworks_core::memory_anchor::floor_weights_bytes` over the same lift of the
+    /// contract: resident sums the stacks, staged residency takes the larger of the conditioning
+    /// stack and the post-eviction heavy stack.
     #[test]
     fn the_ltx_admission_weights_floor_follows_the_workers_composition_rule() {
         let contract = ltx_fixture_contract(Some(Quant::Q8));
         let resident = contract.engaged_composition(MemoryStrategy::Resident);
         let staged = contract.engaged_composition(MemoryStrategy::StagedResidency);
-        assert_eq!(ltx_floor_weights_bytes(&contract, &resident), 0);
-        assert_eq!(ltx_floor_weights_bytes(&contract, &staged), 0);
+        assert_eq!(ltx_floor_weights_bytes(&contract, &resident).unwrap(), 0);
+        assert_eq!(ltx_floor_weights_bytes(&contract, &staged).unwrap(), 0);
         let mut declared = contract.clone();
         declared.asset_facts.conditioning_bytes = 26;
         declared.asset_facts.transformer_bytes = 20;
         declared.asset_facts.decoder_bytes = 4;
         declared.asset_facts.base_bytes = 50;
-        assert_eq!(ltx_floor_weights_bytes(&declared, &resident), 50);
+        assert_eq!(ltx_floor_weights_bytes(&declared, &resident).unwrap(), 50);
         // Staged: max(conditioning 26, heavy 24 with nothing evicted below the transformer) = 26.
-        assert_eq!(ltx_floor_weights_bytes(&declared, &staged), 26);
+        assert_eq!(ltx_floor_weights_bytes(&declared, &staged).unwrap(), 26);
+        // And the lift agrees with the shared function called directly with the same facts.
+        assert_eq!(
+            ltx_floor_weights_bytes(&declared, &staged).unwrap(),
+            sceneworks_core::memory_anchor::floor_weights_bytes(
+                sceneworks_core::memory_anchor::FloorWeightsFacts {
+                    conditioning_bytes: 26,
+                    base_bytes: 50,
+                    transformer_bytes: 20,
+                    intra_transformer_evicted_bytes: 0,
+                    auxiliary_resident_bytes: 0,
+                },
+                sceneworks_core::memory_anchor::FloorWeightsComposition {
+                    staged: true,
+                    bounded_transformer: false,
+                    resident_window_bytes: 0,
+                },
+            )
+        );
+    }
+
+    /// sc-22738 review. The pinned provider declares rung 4 UNIMPLEMENTED (`support: Missing`);
+    /// a composition engaging `bounded_transformer_residency` is refused EXPLICITLY, not priced
+    /// by an arm that carries no window for it and not `debug_assert`ed away in release.
+    #[test]
+    fn a_rung_4_ltx_composition_is_refused_explicitly_rather_than_priced() {
+        let contract = ltx_fixture_contract(Some(Quant::Q8));
+        assert!(
+            matches!(
+                contract
+                    .capability(MemoryStrategy::BoundedTransformerResidency)
+                    .expect("every rung is declared")
+                    .support,
+                mlx_gen::gen_core::MemoryStrategySupport::Missing
+            ),
+            "the pinned LTX-2.3 provider declares bounded_transformer_residency unimplemented"
+        );
+        let rung4 = [
+            MemoryStrategy::Resident,
+            MemoryStrategy::StagedResidency,
+            MemoryStrategy::BoundedTransformerResidency,
+        ];
+        let error = ltx_floor_weights_bytes(&contract, &rung4)
+            .expect_err("a rung-4 composition must be refused");
+        assert!(
+            error.contains("bounded_transformer_residency")
+                && error.contains("declares rung 4 unimplemented"),
+            "{error}"
+        );
+        let resident = contract.engaged_composition(MemoryStrategy::Resident);
+        assert!(ltx_floor_weights_bytes(&contract, &resident).is_ok());
+    }
+
+    /// sc-22738 review. The projection is the worker's `profiled_floor_phase_peaks`, not the
+    /// composed profile alone: `max(weights + 18 GiB generic headroom, composed)`. Over every
+    /// shipped frame count (the declared durations × fps through the shipped ladder, at the
+    /// planned 768×512) the identity holds with the headroom read from the shared declaration —
+    /// and it is LOAD-BEARING below f121: at f97 the engine's decode term is under the generic
+    /// allowance, so dropping the floor under-predicts by exactly the gap.
+    #[test]
+    fn the_ltx_projection_never_falls_below_the_workers_generic_floor_at_any_shipped_frame_count() {
+        let headroom = ltx_generic_headroom_bytes();
+        assert_eq!(
+            headroom, 19_327_352_832,
+            "HeadroomAllowance::GENERIC, 18 GiB"
+        );
+        let mut contract = ltx_fixture_contract(Some(Quant::Q8));
+        // A declared weights term so the identity is exercised with a non-zero floor too.
+        contract.asset_facts.base_bytes = LTX_Q8_INVENTORY_BYTES;
+        contract.asset_facts.transformer_bytes = LTX_Q8_INVENTORY_BYTES;
+        let weights_free = ltx_fixture_contract(Some(Quant::Q8));
+        let mut floor_bound = Vec::new();
+        let mut profile_bound = Vec::new();
+        for duration in LTX_DURATIONS_SECONDS {
+            for fps in LTX_FPS {
+                let frames = ltx_snapped_frame_count(duration * fps);
+                let profile = mlx_gen_ltx::conservative_video_decode_memory_profile(
+                    LTX_PROVIDER,
+                    768,
+                    512,
+                    frames,
+                )
+                .unwrap_or_else(|| panic!("the pinned provider profiles 768x512 f{frames}"));
+                let decode = profile.working_set_bytes();
+                for (label, contract) in [("declared", &contract), ("weights-free", &weights_free)]
+                {
+                    let engaged = contract.engaged_composition(MemoryStrategy::Resident);
+                    let weights = ltx_floor_weights_bytes(contract, &engaged).unwrap();
+                    let composed = profile
+                        .checked_composed_peak(weights, contract.asset_facts.decoder_bytes)
+                        .unwrap();
+                    let predicted = ltx_projected_peak_bytes(contract, weights, profile).unwrap();
+                    assert_eq!(
+                        predicted,
+                        composed.max(weights + headroom),
+                        "{label} f{frames}: predicted = max(weights + 18 GiB, composed)"
+                    );
+                    assert!(predicted >= weights + headroom, "{label} f{frames}");
+                    assert!(predicted >= composed, "{label} f{frames}");
+                }
+                if decode < headroom {
+                    floor_bound.push(frames);
+                } else {
+                    profile_bound.push(frames);
+                }
+            }
+        }
+        // The decode term grows with frames, so the generic floor binds exactly the short end of
+        // the ladder: f97 (the SC-18808 calibration geometry) is floor-bound, f121 (the planned
+        // anchor geometry) and everything longer is profile-bound.
+        assert_eq!(floor_bound, vec![97, 97], "4s at 24/25 fps");
+        assert!(profile_bound.contains(&121) && !floor_bound.contains(&121));
+        let f97 = mlx_gen_ltx::conservative_video_decode_memory_profile(LTX_PROVIDER, 768, 512, 97)
+            .unwrap()
+            .working_set_bytes();
+        let f121 =
+            mlx_gen_ltx::conservative_video_decode_memory_profile(LTX_PROVIDER, 768, 512, 121)
+                .unwrap()
+                .working_set_bytes();
+        assert_eq!(
+            f121, 19_476_906_240,
+            "the planned anchor's engine decode term"
+        );
+        assert_eq!(
+            headroom - f97,
+            3_059_089_152,
+            "the under-prediction the composed-only projection carried at f97"
+        );
+    }
+
+    /// sc-22738 review. What the three planned cells PROJECT, derived from checked-in
+    /// declarations only — each tier's immutable inventory (`LTX_*_INVENTORY_BYTES`, the SC-18946
+    /// tier roots) as the resident weights, the engine's decode profile at the planned 768×512 f121
+    /// — pinned against the incident footprint. Derivation: weights = inventory (the resident
+    /// composition sums conditioning + heavy = `base_bytes`, and the weights-free fixture declares
+    /// no decoder to substitute), composed = inventory + decode term, predicted =
+    /// max(inventory + 18 GiB, composed) = composed here because the f121 decode term exceeds the
+    /// generic allowance; budget = 128 GiB host − 2 GiB reserve with nothing committed. These are
+    /// NOT machine measurements. The production contract at capture adds its projected
+    /// `conditioning_bytes` (the Gemma co-requisite root, which no checked-in constant declares)
+    /// on top of every figure here, and the record's `admissionPredictedPeakBytes` carries that.
+    #[test]
+    fn the_planned_ltx_tiers_project_below_the_incident_footprint_from_declared_inventories_alone()
+    {
+        let decode = 19_476_906_240_u64;
+        assert_eq!(
+            mlx_gen_ltx::conservative_video_decode_memory_profile(LTX_PROVIDER, 768, 512, 121)
+                .unwrap()
+                .working_set_bytes(),
+            decode
+        );
+        let budget = MemoryBudget {
+            total_bytes: LTX_TEST_HOST_BYTES,
+            committed_bytes: 0,
+            reclaimable_bytes: 0,
+            reserved_headroom_bytes: ltx_unified_reserve_bytes(),
+        };
+        assert_eq!(budget.effective_bytes(), 135_291_469_824, "128 GiB − 2 GiB");
+        for (tier, inventory, composed, headroom_vs_incident) in [
+            (
+                "q4",
+                LTX_Q4_INVENTORY_BYTES,
+                39_944_596_700_u64,
+                57_025_487_780_u64,
+            ),
+            ("q8", LTX_Q8_INVENTORY_BYTES, 49_205_626_956, 47_764_457_524),
+            (
+                "bf16",
+                LTX_BF16_INVENTORY_BYTES,
+                66_569_718_232,
+                30_400_366_248,
+            ),
+        ] {
+            let mut contract = ltx_fixture_contract(ltx_tier_quant(tier));
+            contract.asset_facts.base_bytes = inventory;
+            contract.asset_facts.transformer_bytes = inventory;
+            let engaged = contract.engaged_composition(MemoryStrategy::Resident);
+            let weights = ltx_floor_weights_bytes(&contract, &engaged).unwrap();
+            assert_eq!(weights, inventory, "{tier}: resident floor = the inventory");
+            let profile =
+                mlx_gen_ltx::conservative_video_decode_memory_profile(LTX_PROVIDER, 768, 512, 121)
+                    .unwrap();
+            let predicted = ltx_projected_peak_bytes(&contract, weights, profile).unwrap();
+            assert_eq!(predicted, composed, "{tier}: composed = inventory + decode");
+            assert_eq!(predicted, inventory + decode, "{tier}");
+            assert!(
+                predicted > weights + ltx_generic_headroom_bytes(),
+                "{tier}: the f121 decode term, not the generic floor, binds"
+            );
+            assert_eq!(
+                LTX_Q4_F305_CRASH_FOOTPRINT_BYTES - predicted,
+                headroom_vs_incident,
+                "{tier}: headroom below the SC-18946 footprint"
+            );
+            assert!(budget.fits(predicted), "{tier} fits a 128 GiB host");
+        }
     }
 
     /// The exact composition the record claims, pinned so a silent widening of `engagedRungs` would

@@ -55,9 +55,13 @@ import {
   SDXL_ROUTES_PATH,
   SDXL_ROUTES_UNCHECKED,
   WATCHDOG,
+  LTX_Q4_F305_CRASH_FOOTPRINT_BYTES,
+  UNIFIED_RESERVE_BYTES,
   guardsCapture,
   probeAdapter,
+  watchdogCeilings,
   watchdogGuard,
+  watchdogHardStop,
   MINIMAX_UPSTREAM_ROOT_FILES,
   MINIMAX_TEXT_ENCODER_CONFIG,
   MINIMAX_TIER_DIT_FILES,
@@ -3271,14 +3275,18 @@ async function stubCheckout() {
     if (process.env.STUB_STRAY) await writeFile("docs/generated/stray.json", "{}");
   `);
   // The stub adapter answers the one action the runner itself sends — `probe`, for the watchdog
-  // ceilings (sc-22738) — with a 128 GiB host whose wired ceiling is 96 GiB, the SC-18946 shape.
+  // ceilings (sc-22738) — with a 128 GiB host whose wired ceiling is the one this Mac resolves
+  // (87,044,670,532 bytes, below the SC-18946 footprint), overridable per test; a candle-shaped
+  // probe (no wired limit) is selectable too.
   await writeFile(path.join(root, "stub-adapter.mjs"), `
     let input = "";
     for await (const chunk of process.stdin) input += chunk;
     const request = JSON.parse(input);
     if (request.action !== "probe") { console.error("Error: stub adapter only probes"); process.exit(2); }
     if (process.env.STUB_PROBE_FAILS) { console.error("Error: stub probe refused"); process.exit(1); }
-    process.stdout.write(JSON.stringify({ hardware: { memoryBytes: 137438953472, wiredLimitBytes: 103079215104 } }));
+    const hardware = { memoryBytes: 137438953472 };
+    if (!process.env.STUB_PROBE_NO_WIRED_LIMIT) hardware.wiredLimitBytes = Number(process.env.STUB_PROBE_WIRED_LIMIT_BYTES ?? 87044670532);
+    process.stdout.write(JSON.stringify({ hardware }));
   `);
   await writeFile(path.join(root, "config/memory-anchors.json"), JSON.stringify({ anchors: [] }) + "\n");
   await writeFile(path.join(root, "docs/generated/memory-matrix.json"), "{}\n");
@@ -3454,7 +3462,7 @@ test("--model selects every tier of one model and refuses a model the plan does 
 // record to measure what ships. PR #2745 answered by classifying the cells `harness_unsupported`
 // and delegating them to the safety canary; this supersedes that. The cells are ordinary anchors:
 // the arm admits them through the production budget and the runner contains them with the same
-// footprint hard stop it puts around every MLX capture.
+// footprint hard stop it puts around every Darwin capture.
 test("the MLX LTX-2.3 cells are ordinary anchors: admitted by the production budget, classified runnable or weights_missing", async () => {
   const adapter = await readFile(path.join(ROOT, ADAPTER_BIN_PATHS.mlx), "utf8");
   const harness = await readFile(path.join(ROOT, "scripts/memory-calibration-harness.mjs"), "utf8");
@@ -3494,42 +3502,88 @@ test("the MLX LTX-2.3 cells are ordinary anchors: admitted by the production bud
 });
 
 // ---------------------------------------------------------------------------------------------
-// sc-22738: physical containment — every MLX capture runs under the footprint hard stop
+// sc-22738: physical containment — every Darwin capture runs under the footprint hard stop
 // ---------------------------------------------------------------------------------------------
 
 test("the watchdog guard derives both ceilings from the adapter's probe and nothing else", () => {
-  const hardware = { memoryBytes: 137_438_953_472, wiredLimitBytes: 103_079_215_104 };
+  // This Mac's probe: 128 GiB, wired ceiling 87,044,670,532 (below the incident footprint).
+  const hardware = { memoryBytes: 137_438_953_472, wiredLimitBytes: 87_044_670_532 };
   const guard = watchdogGuard({ hardware, eventFile: "/tmp/events.jsonl" });
   assert.equal(guard[0], path.join(ROOT, WATCHDOG));
-  const flag = (name) => guard[guard.indexOf(name) + 1];
-  assert.equal(flag("--max-footprint-bytes"), "103079215104", "the ceiling is the device wired limit, the line SC-18946 crossed");
-  assert.equal(flag("--host-memory-bytes"), "137438953472");
-  assert.equal(flag("--min-memory-free-bytes"), String(137_438_953_472 - 103_079_215_104), "the host floor is its own non-wired reserve");
-  assert.equal(flag("--event-file"), "/tmp/events.jsonl");
+  const flag = (name) => Number(guard[guard.indexOf(name) + 1]);
+  assert.equal(flag("--max-footprint-bytes"), 87_044_670_532, "the wired ceiling binds when it is the smallest bound");
+  assert.equal(flag("--host-memory-bytes"), 137_438_953_472);
+  assert.equal(flag("--min-memory-free-bytes"), UNIFIED_RESERVE_BYTES, "the whole-host floor is the absolute 2 GiB reserve, not the non-wired remainder");
+  assert.equal(guard[guard.indexOf("--event-file") + 1], "/tmp/events.jsonl");
+  // The footprint ceiling is below the incident, and the two ceilings together leave room for
+  // the host's own baseline: the guarded group can reach its ceiling without the whole-host floor
+  // firing first (sc-22738 review: `memoryBytes − wiredLimitBytes` as the floor turned the
+  // per-group ceiling into a cap on total host use).
+  assert.ok(flag("--max-footprint-bytes") < LTX_Q4_F305_CRASH_FOOTPRINT_BYTES);
+  assert.ok(flag("--min-memory-free-bytes") + flag("--max-footprint-bytes") <= hardware.memoryBytes - 32 * 1024 * 1024 * 1024, "≥ 32 GiB of baseline room");
   // The generic guard speaks no attestation or phase protocol — those belong to the frozen canary
   // profiles — and sets no wall-time ceiling.
   for (const absent of ["--require-child-attestation", "--require-provider-phases", "--provider-phase-profile", "--max-runtime-seconds"]) {
     assert.equal(guard.includes(absent), false, absent);
   }
+  // The ceiling is the SMALLEST of the wired limit, the incident less the reserve, and host RAM
+  // less the reserve — so host policy raising the wired limit (env override, `iogpu.wired_limit_mb`)
+  // cannot raise the kill line to or above the incident.
+  const incidentBound = LTX_Q4_F305_CRASH_FOOTPRINT_BYTES - UNIFIED_RESERVE_BYTES;
+  assert.equal(incidentBound, 94_822_600_832);
+  assert.deepEqual(watchdogCeilings({ memoryBytes: 137_438_953_472, wiredLimitBytes: 87_044_670_532 }), { maxFootprintBytes: 87_044_670_532, minMemoryFreeBytes: UNIFIED_RESERVE_BYTES });
+  assert.deepEqual(watchdogCeilings({ memoryBytes: 137_438_953_472, wiredLimitBytes: 103_079_215_104 }), { maxFootprintBytes: incidentBound, minMemoryFreeBytes: UNIFIED_RESERVE_BYTES }, "the PR's former fixture: a 96 GiB wired limit is ABOVE the incident and is clamped");
+  assert.deepEqual(watchdogCeilings({ memoryBytes: 137_438_953_472, wiredLimitBytes: 137_438_953_472 }), { maxFootprintBytes: incidentBound, minMemoryFreeBytes: UNIFIED_RESERVE_BYTES }, "wired limit raised to host RAM");
+  assert.deepEqual(watchdogCeilings({ memoryBytes: 137_438_953_472 }), { maxFootprintBytes: incidentBound, minMemoryFreeBytes: UNIFIED_RESERVE_BYTES }, "a candle-shaped probe reports no wired limit");
+  assert.deepEqual(watchdogCeilings({ memoryBytes: 68_719_476_736 }), { maxFootprintBytes: 68_719_476_736 - UNIFIED_RESERVE_BYTES, minMemoryFreeBytes: UNIFIED_RESERVE_BYTES }, "a 64 GiB host is bound by its own RAM less the reserve");
+  for (const ceilings of [
+    watchdogCeilings({ memoryBytes: 137_438_953_472, wiredLimitBytes: 137_438_953_472 }),
+    watchdogCeilings({ memoryBytes: 137_438_953_472 }),
+    watchdogCeilings({ memoryBytes: 68_719_476_736 }),
+  ]) {
+    assert.ok(ceilings.maxFootprintBytes < LTX_Q4_F305_CRASH_FOOTPRINT_BYTES);
+    assert.ok(ceilings.maxFootprintBytes + ceilings.minMemoryFreeBytes <= 137_438_953_472);
+  }
   assert.throws(() => watchdogGuard({ hardware: { memoryBytes: 1, wiredLimitBytes: 2 }, eventFile: "x" }), /above host memory/);
-  assert.throws(() => watchdogGuard({ hardware: { memoryBytes: 1 }, eventFile: "x" }), /wiredLimitBytes/);
-  // Guarded set: every MLX anchor on Darwin; the CUDA lane's hazard is VRAM, which this sampler
-  // cannot see, and the footprint sampler exists on no other platform.
+  assert.throws(() => watchdogGuard({ hardware: { memoryBytes: 1, wiredLimitBytes: 0 }, eventFile: "x" }), /wiredLimitBytes/);
+  assert.throws(() => watchdogGuard({ hardware: { wiredLimitBytes: 2 }, eventFile: "x" }), /memoryBytes/);
+  assert.throws(() => watchdogGuard({ hardware: { memoryBytes: UNIFIED_RESERVE_BYTES }, eventFile: "x" }), /no positive footprint ceiling/);
+  // Guarded set: EVERY capture on Darwin — a candle capture on a Mac draws from the same unified
+  // pool the sampler measures — and none elsewhere, where the footprint sampler does not exist.
   assert.equal(guardsCapture("z_image_turbo:q4:mlx", "darwin"), true);
-  assert.equal(guardsCapture("z_image_turbo:q4:candle", "darwin"), false);
+  assert.equal(guardsCapture("z_image_turbo:q4:candle", "darwin"), true);
   assert.equal(guardsCapture("z_image_turbo:q4:mlx", "linux"), false);
+  assert.equal(guardsCapture("z_image_turbo:q4:candle", "linux"), false);
+  assert.throws(() => guardsCapture("not-an-anchor", "darwin"), /not an anchor key/);
 });
 
-test("an MLX anchor capture runs inside the footprint watchdog with the probed ceilings; a candle capture does not", async () => {
+test("the runner's incident footprint and unified reserve are the Rust declarations, not second literals", async () => {
+  const adapter = await readFile(path.join(ROOT, "crates/sceneworks-memory-adapter/src/bin/mlx.rs"), "utf8");
+  const crash = /const LTX_Q4_F305_CRASH_FOOTPRINT_BYTES: u64 = ([\d_]+);/.exec(adapter);
+  assert.ok(crash, "the adapter declares the incident footprint");
+  assert.equal(LTX_Q4_F305_CRASH_FOOTPRINT_BYTES, Number(crash[1].replaceAll("_", "")));
+  assert.equal(LTX_Q4_F305_CRASH_FOOTPRINT_BYTES, 96_970_084_480);
+  const core = await readFile(path.join(ROOT, "crates/sceneworks-core/src/memory_anchor.rs"), "utf8");
+  const reserve = /pub const LEGACY_UNIFIED_FALLBACK_RESERVE_GB: f64 = ([\d.]+);/.exec(core);
+  assert.ok(reserve, "sceneworks-core declares the unified reserve the worker and the adapter read");
+  assert.equal(UNIFIED_RESERVE_BYTES, Number(reserve[1]) * 1024 * 1024 * 1024);
+  // And the worker READS it rather than restating it.
+  const fitGate = await readFile(path.join(ROOT, "crates/sceneworks-worker/src/fit_gate.rs"), "utf8");
+  assert.match(fitGate, /LEGACY_UNIFIED_FALLBACK_RESERVE_GB: f64 =\s*sceneworks_core::memory_anchor::LEGACY_UNIFIED_FALLBACK_RESERVE_GB;/);
+  const mlxFitGate = await readFile(path.join(ROOT, "crates/sceneworks-worker/src/mlx_fit_gate.rs"), "utf8");
+  assert.match(mlxFitGate, /const HEADROOM_GB: f64 = sceneworks_core::memory_anchor::MLX_GENERIC_HEADROOM_GB;/);
+});
+
+test("every Darwin anchor capture runs inside the footprint watchdog with the derived ceilings", async () => {
   const checkout = await stubCheckout();
   const context = stubContext(checkout, { args: { ...stubContext(checkout).args, commit: false } });
   const hardware = await probeAdapter([process.execPath, "stub-adapter.mjs"], { cwd: checkout.root });
-  assert.deepEqual(hardware, { memoryBytes: 137438953472, wiredLimitBytes: 103079215104 });
+  assert.deepEqual(hardware, { memoryBytes: 137438953472, wiredLimitBytes: 87044670532 });
   const mlx = await measureAnchor({ key: "z_image_turbo:q4:mlx", physical: false, env: {} }, context);
   const mlxLog = await readFile(mlx.log, "utf8");
   if (process.platform === "darwin") {
     assert.equal(mlx.status, "captured", mlx.reason);
-    assert.match(mlxLog, /\/usr\/bin\/python3 \S+\/scripts\/memory-calibration-watchdog\.py --max-footprint-bytes 103079215104 --host-memory-bytes 137438953472 --min-memory-free-bytes 34359738368 /);
+    assert.match(mlxLog, /\/usr\/bin\/python3 \S+\/scripts\/memory-calibration-watchdog\.py --max-footprint-bytes 87044670532 --host-memory-bytes 137438953472 --min-memory-free-bytes 2147483648 /);
     const events = (await readFile(path.join(checkout.workDir, "logs", "z-image-turbo-q4-mlx-watchdog.jsonl"), "utf8")).trim().split("\n").map(JSON.parse);
     assert.ok(events.some((event) => event.event === "started"), "the guard owned the capture's process group");
     assert.ok(events.some((event) => event.event === "sample" && Number.isSafeInteger(event.physicalFootprintBytes)), "the guard sampled the capture's physical footprint");
@@ -3543,10 +3597,54 @@ test("an MLX anchor capture runs inside the footprint watchdog with the probed c
     } finally {
       delete process.env.STUB_PROBE_FAILS;
     }
+    // A candle-shaped probe (no wired limit) is refused for an MLX anchor: the MLX adapter always
+    // resolves one, so its absence is a broken probe, not a smaller bound set.
+    process.env.STUB_PROBE_NO_WIRED_LIMIT = "1";
+    try {
+      const refused = await measureAnchor({ key: "z_image_turbo:q4:mlx", physical: false, env: {} }, context);
+      assert.equal(refused.status, "capture_failed");
+      assert.match(refused.reason, /no positive hardware\.wiredLimitBytes/);
+      // The same probe guards a candle anchor from the host figure alone: the ceiling is the
+      // incident less the reserve.
+      const candle = await measureAnchor({ key: "z_image_turbo:q4:candle", physical: false, env: {} }, context);
+      assert.equal(candle.status, "captured", candle.reason);
+      assert.match(await readFile(candle.log, "utf8"), /memory-calibration-watchdog\.py --max-footprint-bytes 94822600832 --host-memory-bytes 137438953472 --min-memory-free-bytes 2147483648 /);
+      const candleEvents = (await readFile(path.join(checkout.workDir, "logs", "z-image-turbo-q4-candle-watchdog.jsonl"), "utf8")).trim().split("\n").map(JSON.parse);
+      assert.ok(candleEvents.some((event) => event.event === "started"), "the candle capture ran under the guard too");
+    } finally {
+      delete process.env.STUB_PROBE_NO_WIRED_LIMIT;
+    }
   } else {
     assert.doesNotMatch(mlxLog, /memory-calibration-watchdog/, "the footprint sampler is Darwin-only");
+    const candle = await measureAnchor({ key: "z_image_turbo:q4:candle", physical: false, env: {} }, context);
+    assert.equal(candle.status, "captured", candle.reason);
+    assert.doesNotMatch(await readFile(candle.log, "utf8"), /memory-calibration-watchdog/);
   }
-  const candle = await measureAnchor({ key: "z_image_turbo:q4:candle", physical: false, env: {} }, context);
-  assert.equal(candle.status, "captured", candle.reason);
-  assert.doesNotMatch(await readFile(candle.log, "utf8"), /memory-calibration-watchdog/);
+});
+
+test("a footprint hard stop surfaces as capture_failed naming the stop, with the tree left clean", { skip: process.platform !== "darwin" && "the footprint sampler is Darwin-only" }, async () => {
+  const checkout = await stubCheckout();
+  const context = stubContext(checkout, { args: { ...stubContext(checkout).args, commit: false } });
+  // A ceiling every process is already above: the guard's initial observation of the held group
+  // fires before the child is released, exactly the path a runaway load takes at the ceiling.
+  process.env.STUB_PROBE_WIRED_LIMIT_BYTES = "1";
+  try {
+    const stopped = await measureAnchor({ key: "z_image_turbo:q4:mlx", physical: false, env: {} }, context);
+    assert.equal(stopped.status, "capture_failed");
+    assert.match(stopped.reason, /^watchdog hard stop: physical_footprint_at_or_above_1:observed_\d+$/);
+    const log = await readFile(stopped.log, "utf8");
+    assert.match(log, /memory-calibration-watchdog\.py --max-footprint-bytes 1 --host-memory-bytes 137438953472 --min-memory-free-bytes 2147483648 /);
+    const eventFile = path.join(checkout.workDir, "logs", "z-image-turbo-q4-mlx-watchdog.jsonl");
+    const events = (await readFile(eventFile, "utf8")).trim().split("\n").map(JSON.parse);
+    const hardStop = events.find((event) => event.event === "hard_stop");
+    assert.ok(hardStop, "the guard recorded the hard stop");
+    assert.match(hardStop.reason, /^physical_footprint_at_or_above_1:observed_\d+$/);
+    assert.ok(events.some((event) => event.event === "terminated"), "the guard terminated the group");
+    assert.equal(await watchdogHardStop(eventFile), `watchdog hard stop: ${hardStop.reason}`);
+    assert.equal(await watchdogHardStop(path.join(checkout.workDir, "logs", "never-written.jsonl")), null);
+    const { stdout: status } = await checkout.git("status", "--porcelain");
+    assert.equal(status, "", "a stopped capture leaves the checkout clean for the next anchor");
+  } finally {
+    delete process.env.STUB_PROBE_WIRED_LIMIT_BYTES;
+  }
 });
