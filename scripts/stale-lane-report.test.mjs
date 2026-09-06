@@ -22,6 +22,7 @@ import {
   planLaneCoverage,
   rankLanes,
   recommendedMlxT2iLanes,
+  runEntryName,
 } from "./stale-lane-report.mjs";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -68,8 +69,13 @@ function record({
  * the surrounding match arms, so this fixture exercises the REAL parser end to end — string-literal
  * arms, an ALL_CAPS const arm when a provider is spelled `NAME=value`, and a lowercase fallback
  * binding carrying the refusal.
+ *
+ * sc-22737: the fixture also carries a `main`, because the bespoke pre-gate scan derives WHICH
+ * function is the run entry from `main`'s `"run"` arm rather than trusting a name — a guard that
+ * looks like a pre-gate inside a function reached THROUGH a gate (`run_qwen_provider`'s VAE probe)
+ * is not one. `entry` names the function `main` routes to when the pre-gates live outside `run`.
  */
-function adapterSource(providers, { extra = "" } = {}) {
+function adapterSource(providers, { extra = "", entry = "run" } = {}) {
   const consts = [];
   const arms = providers.map((provider) => {
     const named = /^([A-Z][A-Z0-9_]*)=(.+)$/.exec(provider);
@@ -85,6 +91,13 @@ ${arms.join("\n")}
             "synthetic five-rung calibration does not implement provider {other:?}"
         )),
     }
+}
+fn main() {
+    let response = match protocol::action(&request).unwrap() {
+        "probe" => probe(),
+        "run" => ${entry}(&request),
+        other => Err(format!("unsupported action {other:?}")),
+    };
 }
 ${extra}`;
 }
@@ -758,6 +771,12 @@ fn load(request: &Value) -> Result<Loaded, String> {
         }
     }
 }
+fn main() {
+    let response = match protocol::action(&request).unwrap() {
+        "run" => run(&request),
+        other => Err(format!("unsupported action {other:?}")),
+    };
+}
 `;
   assert.deepEqual(adapterCapturableProviders(source, "synthetic"), ["alpha", "delta", "gamma"]);
   // An unresolvable bespoke id is loud, exactly as an unresolvable gate arm is — never guessed.
@@ -884,6 +903,7 @@ fn entry(request: &Value) -> Result<&'static str, String> {
 // `if provider == X { … }` branch is not a dispatch); hiding the ids behind a helper call.
 test("a bespoke pre-gate routed before the shared gates makes its providers capturable", () => {
   const source = adapterSource(["alpha"], {
+    entry: "run_entry",
     extra: `
 const VIDEO_ID: &str = "video";
 const WAN_A_ID: &str = "wan_a";
@@ -911,12 +931,14 @@ fn run_entry(request: &Value) -> Result<Value, String> {
     adapterCapturableProviders(source, "synthetic"),
     ["alpha", "literal_arm", "video", "wan_a", "wan_b"],
   );
-  // A guard whose ids live behind a helper call names nothing — and says nothing, because the
-  // parser cannot see through it; `candle.rs` therefore spells its ids in the guard.
-  assert.deepEqual(
-    adapterCapturableProviders(
-      adapterSource(["alpha"], {
-        extra: `
+  // sc-22737, MUTATION and behaviour change: a guard whose ids live behind a helper call used to be
+  // silently skipped, which reported a shipped arm's lanes as uncapturable. It now THROWS by shape.
+  assert.throws(
+    () =>
+      adapterCapturableProviders(
+        adapterSource(["alpha"], {
+          entry: "run_entry",
+          extra: `
 fn run_entry(request: &Value) -> Result<Value, String> {
     if wan_module::implements(provider) {
         return wan_module::run(request);
@@ -924,16 +946,17 @@ fn run_entry(request: &Value) -> Result<Value, String> {
     plain(request)
 }
 `,
-      }),
-      "synthetic",
-    ),
-    ["alpha"],
+        }),
+        "synthetic",
+      ),
+    /guard shape this parser does not read/,
   );
   // An unresolved const in a pre-gate is loud, like an unresolved match arm.
   assert.throws(
     () =>
       adapterCapturableProviders(
         adapterSource(["alpha"], {
+          entry: "run_entry",
           extra: `
 fn run_entry(request: &Value) -> Result<Value, String> {
     if provider == GHOST_ID {
@@ -947,6 +970,121 @@ fn run_entry(request: &Value) -> Result<Value, String> {
       ),
     /bespoke dispatch on GHOST_ID does not resolve to a &str const/,
   );
+});
+
+// sc-22737. Two more guard shapes ship in `candle.rs` and neither was read, so four working candle
+// lanes — `ltx_2_3_distilled`, `minimax_h3`, `sensenova_u1_8b`, `sensenova_u1_8b_fast` — were
+// reported "no adapter arm can serve these", the exact false negative the pre-gate union exists to
+// prevent. Each mutation below (drop the `||` chain, drop the `if let` form, break the arm table)
+// puts those lanes back to uncapturable or reds the parse.
+test("an ||-chained guard and an arm-table pre-gate both name their providers", () => {
+  const source = adapterSource(["alpha"], {
+    entry: "run_entry",
+    extra: `
+const SENSENOVA_ID: &str = "sensenova";
+const SENSENOVA_FAST_ID: &str = "sensenova_fast";
+const LTX23_ID: &str = "ltx_2_3_distilled";
+const MINIMAX_ID: &str = "minimax_h3";
+const LTX23_ARM: Arm = Arm {
+    engine_id: LTX23_ID,
+    model_id: "ltx_2_3",
+};
+const MINIMAX_ARM: Arm = Arm {
+    engine_id: MINIMAX_ID,
+    model_id: "minimax_h3",
+};
+const VIDEO_ARMS: [Arm; 2] = [LTX23_ARM, MINIMAX_ARM];
+fn video_arm(request: &Value) -> Result<Option<Arm>, String> {
+    let provider = planned_provider(request)?;
+    if !VIDEO_ARMS.iter().any(|arm| arm.engine_id == provider) {
+        return Ok(None);
+    }
+    VIDEO_ARMS.iter().copied().find(|arm| arm.engine_id == provider).map(Some).ok_or_else(|| "no".to_owned())
+}
+fn run_entry(request: &Value) -> Result<Value, String> {
+    let provider = planned_provider(request)?;
+    if provider == SENSENOVA_ID || provider == SENSENOVA_FAST_ID {
+        return run_sensenova_capture(request);
+    }
+    if let Some(arm) = video_arm(request)? {
+        return run_video_capture(request, arm);
+    }
+    plain(request)
+}
+`,
+  });
+  assert.deepEqual(
+    adapterCapturableProviders(source, "synthetic"),
+    ["alpha", "ltx_2_3_distilled", "minimax_h3", "sensenova", "sensenova_fast"],
+  );
+  // MUTATION: the arm table loses an element's `engine_id`. The pre-gate can no longer say which
+  // providers it serves, and refuses rather than reporting the survivors.
+  assert.throws(
+    () => adapterCapturableProviders(source.replace("    engine_id: MINIMAX_ID,\n", ""), "synthetic"),
+    /element MINIMAX_ARM declares no engine_id/,
+  );
+  // MUTATION: the helper stops iterating a single const table, so which providers it answers `Some`
+  // for is no longer derivable from the source.
+  assert.throws(
+    () => adapterCapturableProviders(source.replaceAll("VIDEO_ARMS.iter()", "arm_table().iter()"), "synthetic"),
+    /iterates 0 const arm tables/,
+  );
+  // The `if let` binding must be the one the dispatch forwards; anything else is a shape this
+  // parser has not been taught, not a pre-gate to guess about.
+  assert.throws(
+    () => adapterCapturableProviders(source.replace("run_video_capture(request, arm)", "run_video_capture(request, other)"), "synthetic"),
+    /guard shape this parser does not read/,
+  );
+});
+
+// A guard that opens `run_qwen_provider` (`if protocol::expected_failure(request) { return
+// run_qwen_vae_probe(request); }`) has the exact shape of a pre-gate and is NOT one — that function
+// is reached only through the shared gate. The scan is therefore bounded by the run entry `main`
+// names, and by the first gate inside it.
+test("the pre-gate scan is bounded by the run entry main names and by the first gate", () => {
+  const withDownstreamGuard = adapterSource(["alpha"], {
+    extra: `
+fn run_downstream(request: &Value) -> Result<Value, String> {
+    if protocol::expected_failure(request) {
+        return run_probe(request);
+    }
+    plain(request)
+}
+`,
+  });
+  // `main` routes "run" to `run`, so the guard inside `run_downstream` is never scanned.
+  assert.deepEqual(adapterCapturableProviders(withDownstreamGuard, "synthetic"), ["alpha"]);
+  // MUTATION: make it the entry, and the same guard is refused by shape.
+  assert.throws(
+    () => adapterCapturableProviders(withDownstreamGuard.replace('"run" => run(&request)', '"run" => run_downstream(&request)'), "synthetic"),
+    /guard shape this parser does not read/,
+  );
+  // A `main` with no "run" arm leaves the scan with no entry to be exhaustive over: loud, not empty.
+  assert.throws(
+    () => adapterCapturableProviders(withDownstreamGuard.replace('"run" => run(&request),', ""), "synthetic"),
+    /declares no "run" => <entry>\(&request\) arm/,
+  );
+});
+
+// The shapes above are fixtures; this is the shipped source. Both adapter bins must expose a run
+// entry the scan can find, and every pre-gate in it must parse — a rename or a new guard shape reds
+// here rather than quietly shrinking the capturable set.
+test("both shipped adapter bins expose a resolvable run entry whose pre-gates all parse", async () => {
+  for (const bin of ["mlx", "candle"]) {
+    const source = await readFile(path.join(ROOT, `crates/sceneworks-memory-adapter/src/bin/${bin}.rs`), "utf8");
+    const providers = adapterCapturableProviders(source, `${bin}.rs`);
+    assert.ok(providers.length > 20, `${bin}.rs dispatches ${providers.length} providers`);
+    assert.equal(runEntryName(source, `${bin}.rs`), "run");
+  }
+  // The four lanes sc-22737 unblocked, named: each is served by a pre-gate shape the parser now
+  // reads, and each read "uncapturable" before it did.
+  const candle = adapterCapturableProviders(
+    await readFile(path.join(ROOT, "crates/sceneworks-memory-adapter/src/bin/candle.rs"), "utf8"),
+    "candle.rs",
+  );
+  for (const provider of ["ltx_2_3_distilled", "minimax_h3", "sensenova_u1_8b", "sensenova_u1_8b_fast"]) {
+    assert.ok(candle.includes(provider), `candle.rs dispatches ${provider} through a bespoke pre-gate`);
+  }
 });
 
 test("losing the dispatch anchor is loud, never an empty (or full) capturable set", () => {

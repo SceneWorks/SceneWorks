@@ -4781,7 +4781,13 @@
       "evidenceScope": "authoritative",
       "loadShape": "deferred_materialization",
       "calibrationFingerprint": "bernini-image-bf16-candle-dual-expert-ladder-v1",
-      "fixture": "bernini-video-candle-bf16-848x480-f49-fps16-seed22737"
+      "fixture": "bernini-video-candle-bf16-848x480-f49-fps16-seed22737",
+      "strategy": {
+        "rung": "resident",
+        "engagedRungs": [
+          "resident"
+        ]
+      }
     },
     "bernini:bf16:mlx": {
       "provider": "bernini",
@@ -4811,7 +4817,13 @@
       "evidenceScope": "authoritative",
       "loadShape": "deferred_materialization",
       "calibrationFingerprint": "bernini-image-q4-candle-dual-expert-ladder-v1",
-      "fixture": "bernini-video-candle-q4-848x480-f49-fps16-seed22737"
+      "fixture": "bernini-video-candle-q4-848x480-f49-fps16-seed22737",
+      "strategy": {
+        "rung": "resident",
+        "engagedRungs": [
+          "resident"
+        ]
+      }
     },
     "bernini:q4:mlx": {
       "provider": "bernini",
@@ -4841,7 +4853,13 @@
       "evidenceScope": "authoritative",
       "loadShape": "deferred_materialization",
       "calibrationFingerprint": "bernini-image-q8-candle-dual-expert-ladder-v1",
-      "fixture": "bernini-video-candle-q8-848x480-f49-fps16-seed22737"
+      "fixture": "bernini-video-candle-q8-848x480-f49-fps16-seed22737",
+      "strategy": {
+        "rung": "resident",
+        "engagedRungs": [
+          "resident"
+        ]
+      }
     },
     "bernini:q8:mlx": {
       "provider": "bernini",
@@ -4871,7 +4889,13 @@
       "evidenceScope": "authoritative",
       "loadShape": "deferred_materialization",
       "calibrationFingerprint": "bernini-image-bf16-candle-dual-expert-ladder-v1",
-      "fixture": "fresh-five-rung-bernini-image-bf16-848-seed16402-step2"
+      "fixture": "fresh-five-rung-bernini-image-bf16-848-seed16402-step2",
+      "strategy": {
+        "rung": "resident",
+        "engagedRungs": [
+          "resident"
+        ]
+      }
     },
     "bernini_image:bf16:mlx": {
       "provider": "bernini",
@@ -4901,7 +4925,13 @@
       "evidenceScope": "authoritative",
       "loadShape": "deferred_materialization",
       "calibrationFingerprint": "bernini-image-q4-candle-dual-expert-ladder-v1",
-      "fixture": "fresh-five-rung-bernini-image-q4-848-seed16402-step2"
+      "fixture": "fresh-five-rung-bernini-image-q4-848-seed16402-step2",
+      "strategy": {
+        "rung": "resident",
+        "engagedRungs": [
+          "resident"
+        ]
+      }
     },
     "bernini_image:q4:mlx": {
       "provider": "bernini",
@@ -4931,7 +4961,13 @@
       "evidenceScope": "authoritative",
       "loadShape": "deferred_materialization",
       "calibrationFingerprint": "bernini-image-q8-candle-dual-expert-ladder-v1",
-      "fixture": "fresh-five-rung-bernini-image-q8-848-seed16402-step2"
+      "fixture": "fresh-five-rung-bernini-image-q8-848-seed16402-step2",
+      "strategy": {
+        "rung": "resident",
+        "engagedRungs": [
+          "resident"
+        ]
+      }
     },
     "bernini_image:q8:mlx": {
       "provider": "bernini",
@@ -4976,7 +5012,13 @@
       "evidenceScope": "authoritative",
       "loadShape": "deferred_materialization",
       "calibrationFingerprint": "sc-20772-ltx-2-3-candle-q4-i2v-v1",
-      "fixture": "ltx-2-3-candle-q4-768x512-f97-fps24-seed22737"
+      "fixture": "ltx-2-3-candle-q4-768x512-f97-fps24-seed22737",
+      "strategy": {
+        "rung": "resident",
+        "engagedRungs": [
+          "resident"
+        ]
+      }
     },
     "ltx_2_3:q4:mlx": {
       "provider": "ltx_2_3",
@@ -5006,7 +5048,13 @@
       "evidenceScope": "authoritative",
       "loadShape": "deferred_materialization",
       "calibrationFingerprint": "sc-20772-ltx-2-3-candle-q8-i2v-v1",
-      "fixture": "ltx-2-3-candle-q8-768x512-f97-fps24-seed22737"
+      "fixture": "ltx-2-3-candle-q8-768x512-f97-fps24-seed22737",
+      "strategy": {
+        "rung": "resident",
+        "engagedRungs": [
+          "resident"
+        ]
+      }
     },
     "ltx_2_3:q8:mlx": {
       "provider": "ltx_2_3",

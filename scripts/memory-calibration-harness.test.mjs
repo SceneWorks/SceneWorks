@@ -1254,19 +1254,37 @@ test("the candle SCAIL-2 rows plan the resident composition through the strategy
   // the same grounds: at the 8a65db2a pin the candle capability dump publishes `minimax_h3` with
   // `implementedRungs: ["resident"]` at every (tier, load shape), so the lane default is a rung the
   // contract does not implement.
+  //
+  // …and Bernini's six plus LTX-2.3's two on the THIRD derived source, because the dump cannot speak
+  // for them: both plan a `deferred_materialization` load shape and the dump publishes only
+  // `eager_materialization` surfaces for those contracts, so it has no surface to answer with. Their
+  // engine declarations do — `candle-gen-bernini` and `candle-gen-ltx`'s `memory_strategy.rs` both
+  // publish `StagedResidency` as `Missing` — and `readDeclaredStrategySupport` reads exactly that off
+  // the pinned checkout. This was invisible until sc-22737 taught the parser Bernini's declaration
+  // shape: before that the rule died on the unreadable shape instead of judging these eight rows.
   const plan = JSON.parse(await readFile(new URL("../config/memory-calibration-plan.json", import.meta.url)));
-  for (const key of ["bf16", "q4", "q8"].flatMap((tier) => [
-    `scail2_14b:${tier}:candle`,
-    `ltx_2_5:${tier}:candle`,
-    `minimax_h3:${tier}:candle`,
-    `minimax_h3_ref:${tier}:candle`,
-  ])) {
+  for (const key of [
+    ...["bf16", "q4", "q8"].flatMap((tier) => [
+      `scail2_14b:${tier}:candle`,
+      `ltx_2_5:${tier}:candle`,
+      `minimax_h3:${tier}:candle`,
+      `minimax_h3_ref:${tier}:candle`,
+      `bernini:${tier}:candle`,
+      `bernini_image:${tier}:candle`,
+    ]),
+    // LTX-2.3 ships only the two quantized tiers on candle.
+    "ltx_2_3:q4:candle",
+    "ltx_2_3:q8:candle",
+  ]) {
     assert.deepEqual(plan.anchors[key].strategy, { rung: "resident", engagedRungs: ["resident"] }, key);
     assert.deepEqual(planAnchor(plan, key).strategy, { rung: "resident", engagedRungs: ["resident"], parameters: {} }, key);
   }
   // …and no other candle row overrides on contract grounds today: SenseNova's six ride the manifest exemption.
   const residentCandle = Object.keys(plan.anchors).filter((key) => key.endsWith(":candle") && plan.anchors[key].strategy?.rung === "resident").sort();
   assert.deepEqual(residentCandle.filter((key) => !key.startsWith("sensenova_u1_8b")), [
+    "bernini:bf16:candle", "bernini:q4:candle", "bernini:q8:candle",
+    "bernini_image:bf16:candle", "bernini_image:q4:candle", "bernini_image:q8:candle",
+    "ltx_2_3:q4:candle", "ltx_2_3:q8:candle",
     "ltx_2_5:bf16:candle", "ltx_2_5:q4:candle", "ltx_2_5:q8:candle",
     "minimax_h3:bf16:candle", "minimax_h3:q4:candle", "minimax_h3:q8:candle",
     "minimax_h3_ref:bf16:candle", "minimax_h3_ref:q4:candle", "minimax_h3_ref:q8:candle",

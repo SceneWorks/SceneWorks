@@ -2048,6 +2048,197 @@ test("the engine's strategy declaration is parsed per rung, and an unreadable sh
   assert.equal(await readDeclaredStrategySupport("not_a_model", "candle", closures), null);
 });
 
+// sc-22737. The inline `if strategy == … { } else { }` above is ONE of the shapes shipped at the
+// pin, and the story's own crate does not use it: `candle-gen-bernini` hoists the declaration into a
+// file-local `fn strategies()` whose `support:` is a `match strategy { … }` with `|`-alternatives.
+// The parser refused that, so the override rule could not say which rungs Bernini implements and the
+// whole suite died on the refusal. These pin the shapes that actually ship, and every one of them is
+// read out of a fixture that mirrors the real crate — not the crate itself, so a re-slice upstream
+// reds `the engine's own declaration parses for every provider the override rule can reach` below
+// rather than silently rewriting what this test claims.
+test("the strategy declaration parses through a file-local helper and a match arm", () => {
+  // `candle-gen-bernini/src/memory_strategy.rs`, verbatim in shape: a helper call, a match, and a
+  // multi-variant `|` arm. Bernini implements resident and bounded decode; staged residency is
+  // Missing, which is exactly why its candle anchor rows plan `resident`.
+  const bernini = `
+fn strategies() -> Vec<MemoryStrategyCapability> {
+    MemoryStrategy::ALL
+        .into_iter()
+        .map(|strategy| MemoryStrategyCapability {
+            strategy,
+            support: match strategy {
+                MemoryStrategy::Resident | MemoryStrategy::BoundedDecode => {
+                    MemoryStrategySupport::Implemented
+                }
+                MemoryStrategy::StagedResidency => MemoryStrategySupport::Missing,
+                MemoryStrategy::BoundedAttention | MemoryStrategy::BoundedTransformerResidency => {
+                    MemoryStrategySupport::Missing
+                }
+            },
+            parameters: MemoryParameterRanges::default(),
+        })
+        .collect()
+}
+
+fn build_contract() -> MemoryContract {
+    MemoryContract {
+        strategies: strategies(),
+    }
+}
+`;
+  const support = parseDeclaredStrategySupport(bernini, "bernini.rs");
+  assert.equal(support("resident"), "Implemented");
+  assert.equal(support("staged_residency"), "Missing");
+  assert.equal(support("bounded_decode"), "Implemented");
+  assert.equal(support("bounded_attention"), "Missing");
+  assert.equal(support("bounded_transformer_residency"), "Missing");
+
+  // MUTATION: mangle the shape the parser was taught — the helper is no longer a `fn` in this file,
+  // so the call resolves to nothing. It must refuse BY NAME rather than fall back to "no evidence".
+  assert.throws(
+    () => parseDeclaredStrategySupport(bernini.replace("fn strategies()", "fn strategies_v2()"), "bernini.rs"),
+    /bernini\.rs .*cannot\s+read/s,
+  );
+  // MUTATION: the match itself replaced by an expression this parser has not been taught.
+  assert.throws(
+    () =>
+      parseDeclaredStrategySupport(
+        bernini.replace(/support: match strategy \{[\s\S]*?\n            \},/, "support: support_for(strategy),"),
+        "bernini.rs",
+      ),
+    /bernini\.rs .*cannot\s+read/s,
+  );
+
+  // Prose is not code: `candle-gen-minimax-h3` carries paragraphs of `//` commentary between the
+  // arms, mentioning the very variants and supports the parser is scanning for. A scanner that reads
+  // comments reads the wrong arm — and would report rung 1 Implemented when it is deliberately
+  // under-declared Missing.
+  const commented = `
+        strategies: MemoryStrategy::ALL
+            .into_iter()
+            .map(|strategy| MemoryStrategyCapability {
+                strategy,
+                support: match strategy {
+                    MemoryStrategy::Resident => MemoryStrategySupport::Implemented,
+                    // MemoryStrategy::StagedResidency => MemoryStrategySupport::Implemented, one day
+                    // Rung 1 is implemented in code but stays Missing here: no behavior seam.
+                    _ => MemoryStrategySupport::Missing,
+                },
+                parameters: MemoryParameterRanges::default(),
+            })
+            .collect(),
+  `;
+  const minimax = parseDeclaredStrategySupport(commented, "minimax.rs");
+  assert.equal(minimax("resident"), "Implemented");
+  assert.equal(minimax("staged_residency"), "Missing");
+
+  // A struct-variant support carries a payload and still names its variant.
+  const notApplicable = parseDeclaredStrategySupport(
+    `
+        strategies: MemoryStrategy::ALL.into_iter().map(|strategy| MemoryStrategyCapability {
+                strategy,
+                support: match strategy {
+                    MemoryStrategy::BoundedAttention => {
+                        MemoryStrategySupport::StructurallyNotApplicable { reason: reason() }
+                    }
+                    _ => MemoryStrategySupport::Implemented,
+                },
+                parameters: MemoryParameterRanges::default(),
+            }).collect(),
+  `,
+    "na.rs",
+  );
+  assert.equal(notApplicable("bounded_attention"), "StructurallyNotApplicable");
+  assert.equal(notApplicable("resident"), "Implemented");
+
+  // A rung the source text does not DECIDE is refused rather than guessed. `mlx-gen-minimax-h3`
+  // gates rung 4 on `streamable`, and `candle-gen-sdxl` gates staged residency on the surface; both
+  // are runtime values. Picking either side would state a rung's support as a fact.
+  const guarded = parseDeclaredStrategySupport(
+    `
+        strategies: MemoryStrategy::ALL.into_iter().map(|strategy| MemoryStrategyCapability {
+                strategy,
+                support: match strategy {
+                    MemoryStrategy::BoundedTransformerResidency if streamable => {
+                        MemoryStrategySupport::Implemented
+                    }
+                    MemoryStrategy::BoundedTransformerResidency => MemoryStrategySupport::Missing,
+                    _ => MemoryStrategySupport::Implemented,
+                },
+                parameters: MemoryParameterRanges::default(),
+            }).collect(),
+  `,
+    "guarded.rs",
+  );
+  assert.equal(guarded("resident"), "Implemented");
+  assert.throws(() => guarded("bounded_transformer_residency"), /runtime condition/);
+
+  // The same for the if/else form with a compound condition (`candle-gen-sdxl`): the rungs the
+  // condition decides statically still resolve, and only the gated one refuses.
+  const surfaceGated = parseDeclaredStrategySupport(
+    `
+        strategies: MemoryStrategy::ALL.into_iter().map(|strategy| MemoryStrategyCapability {
+                strategy,
+                support: if strategy == MemoryStrategy::BoundedTransformerResidency
+                    || (surface == SdxlSurface::Bespoke
+                        && strategy == MemoryStrategy::StagedResidency)
+                {
+                    MemoryStrategySupport::Missing
+                } else {
+                    MemoryStrategySupport::Implemented
+                },
+                parameters: MemoryParameterRanges::default(),
+            }).collect(),
+  `,
+    "sdxl.rs",
+  );
+  assert.equal(surfaceGated("bounded_transformer_residency"), "Missing");
+  assert.equal(surfaceGated("resident"), "Implemented");
+  assert.equal(surfaceGated("bounded_decode"), "Implemented");
+  assert.throws(() => surfaceGated("staged_residency"), /runtime condition|not about the strategy/);
+});
+
+// The fixtures above are shapes; this is the pin. EVERY memory-strategy entry point the anchor
+// loader closure names must parse at 8a65db2a — not just the handful the override rule happens to
+// reach today, because which provider it reaches moves whenever a dump surface appears or a plan row
+// changes, and a parse refusal is a hard failure at that moment rather than a diagnostic.
+test("the engine's own declaration parses for every provider the override rule can reach", async (t) => {
+  const closures = JSON.parse(await readFile(path.join(ROOT, "config/anchor-loader-closures.json"), "utf8"));
+  if (!process.env.INFERENCE_REPO) {
+    assert.ok(!process.env.CI, "on CI the pinned inference checkout must be reachable ($INFERENCE_REPO)");
+    t.diagnostic("no pinned inference checkout ($INFERENCE_REPO); the per-provider parse was not run");
+    return;
+  }
+  let read = 0;
+  let declared = 0;
+  for (const key of Object.keys(closures.models ?? {})) {
+    const [modelId, backend] = key.split(":");
+    // A refusal throws out of here with the offending path in its message, which is the whole point.
+    const support = await readDeclaredStrategySupport(modelId, backend, closures);
+    read += 1;
+    if (support === null) continue;
+    declared += 1;
+    // Every rung must come back as a named support or as the DELIBERATE ambiguity refusal — never
+    // as "this shape cannot be read", which is the failure mode that broke the suite. `candle-gen-
+    // sdxl` and `mlx-gen-krea` genuinely gate a rung on a runtime value, and for those the dump is
+    // the source that answers; what must not happen is the parser losing the shape entirely.
+    for (const rung of ["resident", "staged_residency", "bounded_decode", "bounded_attention", "bounded_transformer_residency"]) {
+      try {
+        assert.match(support(rung), /^[A-Z]\w+$/, `${key}: ${rung} support`);
+      } catch (error) {
+        assert.doesNotMatch(
+          error.message,
+          /cannot\s+read/s,
+          `${key}: ${rung} is refused as an unreadable shape rather than answered or named ambiguous`,
+        );
+        assert.match(error.message, /runtime condition|not about the strategy/, `${key}: ${rung}`);
+      }
+    }
+  }
+  assert.ok(read > 50, `the closure names ${read} (model, lane) pairs; expected the full catalog`);
+  assert.ok(declared > 0, "no closure entry point declares a strategies: field at all");
+});
+
 // Each Mage variant binds TWO artifact triples: its OWN tiered rehost (never a sibling's — the six
 // checkpoints are architecturally identical, so a crossed root would be caught by nothing else) and
 // the ONE shared components snapshot. This asserts the derivation produces exactly that.
