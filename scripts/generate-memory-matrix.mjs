@@ -2373,24 +2373,39 @@ export const IMAGE_MLX_DERIVATION_ENTRY_POINTS = Object.freeze([
  *    against the manifest, not merely a `VIDEO_ROUTE_RESOLVERS` row; adding the row alone throws
  *    `minimax_h3_engine_id declared no model -> engine arm`, which is how this was measured.
  *
- * 2. **Candle — the lane is not routed at all.** `video_jobs/candle.rs#candle_video_engine_id` has
- *    no `minimax_h3` arm, so no Candle MiniMax job resolves an engine, and
- *    `memory_route_registry.rs` declares no MiniMax row on either lane. Claiming Candle MiniMax
- *    cells would claim cells no lane can open — the SAME class sc-22737 removed for
- *    `ltx_2_3:bf16:candle`, re-introduced. So the Candle half is an UNROUTED (lane, tier), which is
- *    epic 22723 E1's one exemption, and routing it is a production behaviour change (a missing arm
- *    falls through to `CandleVideoRoute::Stub`, which hands the user a procedural fake video) that
- *    does not belong to a measurability story.
+ * 2. **Candle — the generator's PUBLIC route parser cannot see the arm either.** `parseVideoRoutes`
+ *    reads `video_jobs/candle.rs#candle_video_engine_id`, which has no `minimax_h3` arm; the Candle
+ *    dispatch is deliberately kept OUT of it, in `video_jobs/mod.rs#resolve_candle_video_route`
+ *    (`} else if let Some(engine_id) = minimax_h3_engine_id(&request.model) { CandleVideoRoute::
+ *    MiniMaxH3(engine_id) }`), and is parsed separately by `parseInternalCandleVideoRoutes` for
+ *    exactly that reason. So this half is the SAME parser fact as (1), on the other lane.
  *
- * The `mlx:minimax_h3` and `mlx:minimax_h3_ref` ANCHORS are nonetheless planned, armed and closed
- * over by sc-22737 (`config/memory-calibration-plan.json`,
- * `crates/sceneworks-memory-adapter/src/bin/mlx.rs`), so the cells are measurable through
- * `measure-memory-catalog.mjs` — which is the oracle epic 22723 E2 names — even while this
- * generator still subtracts them from the MATRIX universe.
+ * ## sc-22738: reason 2 used to claim the Candle LANE was unrouted. It is not.
+ *
+ * The previous wording read "Candle — the lane is not routed at all", and cited the absent
+ * `candle_video_engine_id` arm as proof. That confused this generator's parser with the ROUTER:
+ * `resolve_candle_video_route` has selected `CandleVideoRoute::MiniMaxH3` since sc-19508, and the
+ * routing catalog declares `VideoModelCaps::new("minimax_h3", true, true, …)` and the same for
+ * `minimax_h3_ref` (`crates/sceneworks-core/src/jobs_store/routing/catalog.rs`), so BOTH lanes are
+ * routed and neither is epic 22723 E1's unrouted-lane exemption.
+ *
+ * That mattered beyond the comment: `measure-memory-catalog.test.mjs` used to take its routed-lane
+ * axis from this generator's `models[].backends`, so the subtraction below silently removed all
+ * twelve MiniMax-H3 cells from the E1 burndown — deleting their plan rows left the measurability
+ * test green. The burndown now reads the routing catalog directly (`routedCatalogLanes`), so this
+ * subtraction is scoped to the MATRIX and cannot exempt a cell from measurability.
+ *
+ * The `minimax_h3` / `minimax_h3_ref` ANCHORS are planned, armed and closed over on BOTH lanes by
+ * sc-22737 (`config/memory-calibration-plan.json`,
+ * `crates/sceneworks-memory-adapter/src/bin/{mlx,candle}.rs`), so the cells are measurable through
+ * `measure-memory-catalog.mjs` — the oracle epic 22723 E2 names — even while this generator still
+ * subtracts them from the MATRIX universe.
  */
 const MINIMAX_OUT_OF_MATRIX_REASON =
-  "the MLX resolver is a PREFIX PREDICATE this generator cannot enumerate, and no Candle video " +
-  "route arm exists at all";
+  "both lanes ARE routed (VideoModelCaps mlx+candle, resolve_candle_video_route's MiniMaxH3 arm), " +
+  "but this generator's route parsers cannot enumerate either: the MLX resolver is a PREFIX " +
+  "PREDICATE and the Candle arm lives outside candle_video_engine_id. Matrix-only — the E1 " +
+  "measurability burndown reads the routing catalog and DOES claim these cells";
 
 export const OUT_OF_MATRIX_CATALOG_ENTRIES = new Map([
   ["minimax_h3", { epic: 17137, reason: MINIMAX_OUT_OF_MATRIX_REASON }],

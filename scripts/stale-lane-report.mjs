@@ -83,7 +83,53 @@ export const SOURCE_PATHS = Object.freeze({
   plan: "config/memory-calibration-plan.json",
   mlxAdapter: "crates/sceneworks-memory-adapter/src/bin/mlx.rs",
   candleAdapter: "crates/sceneworks-memory-adapter/src/bin/candle.rs",
+  controlWeights: "crates/sceneworks-core/src/control_weights.rs",
 });
+
+/**
+ * Provenance for the OVERLAY-PROVIDER partition (sc-22738), printed like {@link MARGIN_SOURCE}.
+ */
+export const OVERLAY_PROVIDER_SOURCE =
+  "SHIPPED_CONTROL_WEIGHTS[].engine_id in crates/sceneworks-core/src/control_weights.rs that is not" +
+  " a catalog model id — a strict-control overlay of a base entry, so it is a PROVIDER lane and" +
+  " never an epic 22723 E1 (model, tier, lane) cell";
+
+/**
+ * The strict-control OVERLAY provider ids (sc-22738).
+ *
+ * A closure lane like `mlx:z_image_turbo_control` names an engine provider that exists only as the
+ * strict-control overlay of a base catalog entry: `z_image_turbo` is the manifest model, and the
+ * `_control` engine is the same model loaded with a ControlNet attached. It ships no tiered
+ * downloads of its own — it is not a manifest model at all — so it can never be one of epic 22723
+ * E1's `<modelId>:<tier>:<backend>` cells, and `measure-memory-catalog.mjs --list` correctly never
+ * asks about it. Grading such a lane "uncapturable" told the reader an adapter arm was MISSING,
+ * which sent them to adapter work for a lane that is out of scope by construction. The declarations
+ * must nonetheless STAY: production route currency is graded per (backend, provider), and a control
+ * render loads under the `_control` provider id.
+ *
+ * DERIVED, never hand-kept: the ids come from the production allow-list the render path itself
+ * consults (`SHIPPED_CONTROL_WEIGHTS`), minus every id the catalog ships as a model — which is what
+ * keeps `sdxl` (a control engine_id AND a manifest model) out of this set. Fails closed: an
+ * unparseable or empty table throws rather than yielding an empty partition.
+ */
+export function shippedControlOverlayProviders(source, manifest, label) {
+  const table =
+    /pub const SHIPPED_CONTROL_WEIGHTS:\s*&\[ShippedControlWeight\]\s*=\s*&\[([\s\S]*?)\n\];/.exec(
+      typeof source === "string" ? source : "",
+    );
+  if (!table) {
+    throw new Error(
+      `${label}: SHIPPED_CONTROL_WEIGHTS is no longer a parseable table, so the control-overlay ` +
+        "provider partition cannot be derived",
+    );
+  }
+  const engines = new Set([...table[1].matchAll(/engine_id:\s*"([^"]+)"/g)].map((item) => item[1]));
+  if (engines.size === 0) {
+    throw new Error(`${label}: SHIPPED_CONTROL_WEIGHTS names no engine_id at all`);
+  }
+  const catalogIds = new Set((manifest?.models ?? []).map((model) => model.id));
+  return new Set([...engines].filter((id) => !catalogIds.has(id)).sort());
+}
 
 /**
  * The provider closure ledger, validated (sc-17774).
@@ -818,6 +864,7 @@ export function buildStaleLaneReport({
   manifestBody,
   plan,
   adapterSources,
+  controlWeightsSource,
   meta = {},
 }) {
   if (typeof adapterSources?.mlx !== "string" || typeof adapterSources?.candle !== "string") {
@@ -825,6 +872,13 @@ export function buildStaleLaneReport({
       "buildStaleLaneReport needs both adapter sources — capturability cannot be reported without them",
     );
   }
+  // Required, not defaulted: an absent source would silently collapse the overlay partition back
+  // into "uncapturable", which is the mis-grading sc-22738 removed.
+  const overlayProviders = shippedControlOverlayProviders(
+    controlWeightsSource,
+    manifest,
+    SOURCE_PATHS.controlWeights,
+  );
   const arms = {
     mlx: adapterCapturableProviders(adapterSources.mlx, SOURCE_PATHS.mlxAdapter),
     candle: adapterCapturableProviders(adapterSources.candle, SOURCE_PATHS.candleAdapter),
@@ -945,7 +999,16 @@ export function buildStaleLaneReport({
     });
 
   const stale = rankLanes(lanes.filter((lane) => lane.status === "stale" || lane.status === "partially-stale"));
-  const uncapturable = [...lanes, ...undeclaredLanes].filter((lane) => !lane.capturable);
+  // sc-22738: an OVERLAY-provider lane is reported under its own heading and is NOT "uncapturable".
+  // See `shippedControlOverlayProviders` — it is out of the E1 cell universe by construction, not
+  // waiting on adapter work, so booking a capture host for it is not the wasted booking the
+  // uncapturable heading warns about. Its measurement status (stale / current / unmeasured) is
+  // unchanged and it still appears in those partitions, exactly as any other declared lane does.
+  const isOverlayLane = (lane) => overlayProviders.has(lane.provider);
+  const overlayProviderLanes = [...lanes, ...undeclaredLanes].filter(isOverlayLane);
+  const uncapturable = [...lanes, ...undeclaredLanes].filter(
+    (lane) => !lane.capturable && !isOverlayLane(lane),
+  );
   return {
     generatedAgainst: {
       inferenceRevision: meta.inferenceRevision ?? null,
@@ -957,6 +1020,9 @@ export function buildStaleLaneReport({
       source: CAPTURABILITY_SOURCE,
       arms,
       uncapturableLanes: uncapturable.map((lane) => lane.lane),
+      overlayProviderSource: OVERLAY_PROVIDER_SOURCE,
+      overlayProviders: [...overlayProviders],
+      overlayProviderLanes: overlayProviderLanes.map((lane) => lane.lane),
     },
     flagshipApparatusCoverage: {
       source:
@@ -970,6 +1036,7 @@ export function buildStaleLaneReport({
       currentLanes: lanes.filter((lane) => lane.status === "current").length,
       unmeasuredLanes: lanes.filter((lane) => lane.status === "unmeasured").length,
       uncapturableLanes: uncapturable.length,
+      overlayProviderLanes: overlayProviderLanes.length,
       undeclaredLanes: undeclaredLanes.length,
       staleBindings: lanes.reduce((sum, lane) => sum + lane.bindings.stale, 0),
       staleRecords: lanes.reduce((sum, lane) => sum + lane.records.stale, 0),
@@ -978,13 +1045,22 @@ export function buildStaleLaneReport({
     currentLanes: lanes.filter((lane) => lane.status === "current"),
     unmeasuredLanes: lanes.filter((lane) => lane.status === "unmeasured"),
     uncapturableLanes: uncapturable,
+    overlayProviderLanes,
     undeclaredLanes,
   };
 }
 
 export async function loadSources(root = ROOT) {
-  const [closuresBody, evidenceBody, manifestBody, cargoBody, planBody, mlxAdapter, candleAdapter] =
-    await Promise.all(
+  const [
+    closuresBody,
+    evidenceBody,
+    manifestBody,
+    cargoBody,
+    planBody,
+    mlxAdapter,
+    candleAdapter,
+    controlWeightsSource,
+  ] = await Promise.all(
       Object.values(SOURCE_PATHS).map((relative) => readFile(path.join(root, relative), "utf8")),
     );
   const closures = JSON.parse(closuresBody);
@@ -1000,6 +1076,7 @@ export async function loadSources(root = ROOT) {
     manifestBody,
     plan: JSON.parse(planBody),
     adapterSources: { mlx: mlxAdapter, candle: candleAdapter },
+    controlWeightsSource,
     meta: { inferenceRevision: closures.inferenceRevision, digestVersion: closures.digestVersion },
   };
 }
@@ -1028,7 +1105,9 @@ export function formatReport(report) {
   out.push(
     `${totals.declaredLanes} declared lanes: ${totals.staleLanes} stale, ${totals.currentLanes} current, ` +
       `${totals.unmeasuredLanes} pending capture; ${totals.uncapturableLanes} lanes (declared or ` +
-      `planned) have no adapter arm, and ${totals.undeclaredLanes} planned lanes were never declared.`,
+      `planned) have no adapter arm, ${totals.overlayProviderLanes} are strict-control overlay ` +
+      `providers outside the E1 cell universe, and ${totals.undeclaredLanes} planned lanes were ` +
+      "never declared.",
   );
   out.push(
     `${totals.staleBindings} shipped calibration bindings are serving under a widened margin; ` +
@@ -1101,6 +1180,30 @@ export function formatReport(report) {
           `records=${lane.records.total ?? 0} eligible  status=${lane.status}`,
       );
     }
+  }
+  if (report.overlayProviderLanes?.length) {
+    out.push("");
+    out.push(
+      "STRICT-CONTROL OVERLAY PROVIDERS — OUT OF THE E1 CELL UNIVERSE, not uncapturable. These lanes",
+    );
+    out.push(
+      "name a ControlNet overlay of a base catalog entry, not a manifest model with tiered downloads,",
+    );
+    out.push(
+      "so `measure-memory-catalog.mjs --list` has no `<modelId>:<tier>:<backend>` cell to ask about and",
+    );
+    out.push(
+      "epic 22723 E1 never claimed one. The declarations STAY: production control renders load under",
+    );
+    out.push("these provider ids, and their route currency is graded per (backend, provider):");
+    for (const lane of report.overlayProviderLanes) {
+      out.push(
+        `  ${lane.lane}  declared=${lane.declared ? "yes" : "NO"}  adapter=${lane.capturable ? "yes" : "NO ARM"}  ` +
+          `plan=${lane.plan.entries} entries  bindings=${lane.bindings.total ?? 0} shipped  ` +
+          `records=${lane.records.total ?? 0} eligible  status=${lane.status}`,
+      );
+    }
+    out.push(`  source: ${report.capturability.overlayProviderSource}`);
   }
   if (report.undeclaredLanes.some((lane) => lane.capturable)) {
     out.push("");

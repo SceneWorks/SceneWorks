@@ -12,6 +12,8 @@ import {
   parseInternalCandleVideoRoutes,
   parseRouteRegistryLaneTiers,
 } from "./generate-memory-matrix.mjs";
+import { routedLanes } from "./check-tier-integrity.mjs";
+import { adapterCapturableProviders } from "./stale-lane-report.mjs";
 import {
   ROOT,
   ADAPTER_LIB_PATH,
@@ -53,7 +55,11 @@ import {
   SDXL_ROUTES_PATH,
   SDXL_ROUTES_UNCHECKED,
 } from "./measure-memory-catalog.mjs";
-import { ANCHOR_STRATEGY, LTX25_LANE_PROVIDERS } from "./memory-calibration-harness.mjs";
+import {
+  ANCHOR_LANE_DEFAULT_STRATEGY_PATH,
+  ANCHOR_STRATEGY,
+  LTX25_LANE_PROVIDERS,
+} from "./memory-calibration-harness.mjs";
 
 const execFileAsync = promisify(execFile);
 const REVISION = "0123456789abcdef0123456789abcdef01234567";
@@ -995,11 +1001,22 @@ test("every provider the committed plan declares is either served by a family ro
  * - SHIPPED tier: a non-corequisite manifest download whose `variant` is a numeric tier. The
  *   manifest (`config/manifests/builtin.models.jsonc`) is the only artifact that says what a user
  *   can download, so it is the only source for the tier axis.
- * - ROUTED lane: `models[].backends` in `docs/generated/memory-matrix.json`, which
- *   `generate-memory-matrix.mjs` derives from the worker's route resolvers
- *   (`crates/sceneworks-worker/src/memory_route_registry.rs`, the same `CANDLE_BESPOKE_REQUEST_PROVIDERS`
- *   and per-family engine tables the worker dispatches with). A lane that does not route the
- *   model is the ONLY exemption; a "structurally N/A" matrix cell is not one (epic 22723 E1).
+ * - ROUTED lane: `routedLanes()` (scripts/check-tier-integrity.mjs) over the ROUTING CATALOG
+ *   itself — `crates/sceneworks-core/src/jobs_store/routing/{catalog,candle,mlx}.rs`. A lane that
+ *   does not route the model is the ONLY exemption; a "structurally N/A" matrix cell is not one
+ *   (epic 22723 E1).
+ *
+ *   **Not `models[].backends` from `docs/generated/memory-matrix.json` (sc-22738).** That column is
+ *   the same `routedLanes()` oracle, but restricted to the matrix's own universe, and the matrix
+ *   subtracts `OUT_OF_MATRIX_CATALOG_ENTRIES` (`minimax_h3`, `minimax_h3_ref`) before emitting
+ *   `models` — a SECOND exemption source, which E1 admits exactly one of. Reading the matrix let
+ *   all twelve MiniMax-H3 cells leave the denominator for a fact about the GENERATOR's parser
+ *   (`minimax_h3_engine_id` is a prefix predicate it cannot enumerate) rather than about routing:
+ *   the catalog routes both entries on both lanes (`VideoModelCaps::new("minimax_h3", true, true,
+ *   …)`), so deleting their twelve plan rows left this test green. Reading the routing catalog
+ *   directly removes the second exemption instead of documenting it; `the denominator's routed-lane
+ *   oracle is the routing catalog, not the matrix` asserts the two agree everywhere the matrix has
+ *   an opinion, so this is a widening and never a divergence.
  * - ROUTED tier: the per-lane rule below, narrowed further by `parseBackendTierOverrides` — and
  *   NOTHING else. See `computeShippedTieredCells`.
  *
@@ -1063,6 +1080,42 @@ function laneHasTierBundle(model, backend) {
   );
 }
 
+const ROUTING_SOURCES = Object.freeze({
+  routingCatalog: "crates/sceneworks-core/src/jobs_store/routing/catalog.rs",
+  routingCandle: "crates/sceneworks-core/src/jobs_store/routing/candle.rs",
+  routingMlx: "crates/sceneworks-core/src/jobs_store/routing/mlx.rs",
+});
+
+let routedCatalogLanesPromise;
+/**
+ * `Map<modelId, Set<lane>>` — the lane-existence oracle, read off the ROUTING CATALOG (sc-22738).
+ *
+ * The same `routedLanes()` the matrix generator itself calls, applied to the whole catalog instead
+ * of to the matrix's post-subtraction universe. Fails closed: `routedLanes` throws nothing but
+ * returns no entry for an id nothing routes, and every consumer here treats an absent id as "no
+ * lane", which is E1's one exemption and is asserted to be a routing fact by the case below.
+ */
+function routedCatalogLanes() {
+  routedCatalogLanesPromise ??= (async () =>
+    routedLanes(
+      Object.fromEntries(
+        await Promise.all(
+          Object.entries(ROUTING_SOURCES).map(async ([key, relative]) => [
+            key,
+            await readFile(path.join(ROOT, relative), "utf8"),
+          ]),
+        ),
+      ),
+    ))();
+  return routedCatalogLanesPromise;
+}
+
+/** The lanes the routing catalog serves `modelId` on, in a stable order. */
+function lanesOf(routed, modelId) {
+  const served = routed.get(modelId) ?? new Set();
+  return ["mlx", "candle"].filter((backend) => served.has(backend));
+}
+
 let routeLaneTiersPromise;
 /** The registry's per-lane tier FLOOR, from the generator's own parser — never a second spelling. */
 function routeLaneTiers() {
@@ -1087,8 +1140,7 @@ async function codeDerivedTierOverrides() {
 
 async function computeShippedTieredCells() {
   const models = await readManifestModels();
-  const matrix = JSON.parse(await readFile(path.join(ROOT, MATRIX_PATH), "utf8"));
-  const routed = new Map(matrix.models.map((model) => [model.id, model.backends ?? []]));
+  const routed = await routedCatalogLanes();
   const laneTiers = await routeLaneTiers();
   const overrides = await codeDerivedTierOverrides();
   const cells = [];
@@ -1098,7 +1150,7 @@ async function computeShippedTieredCells() {
       (download) => !download.coRequisite && ["q4", "q8", "bf16"].includes(download.variant),
     );
     if (shipped.length === 0) continue;
-    for (const backend of routed.get(model.id) ?? []) {
+    for (const backend of lanesOf(routed, model.id)) {
       // An untiered NON-co-requisite download this lane's host fetches is a BUNDLE whose tiers live
       // inside it, so it serves every tier the model ships — `SceneWorks/bernini` is that repo. See
       // `laneHasTierBundle` for why a co-requisite is not one.
@@ -1195,6 +1247,68 @@ const MANIFEST_ONLY_DECLARED_CELLS = [
   "sd3_5_large:q8:candle", "sd3_5_large_turbo:q8:candle", "sd3_5_medium:q8:candle",
 ];
 
+// sc-22738 (feature-end round 1). The denominator's LANE axis, and E1's one exemption.
+//
+// Three claims, all mechanical:
+//
+//  1. Everywhere the matrix has an opinion, its `models[].backends` column equals the routing
+//     catalog's answer — so moving the denominator off the matrix (see `computeShippedTieredCells`)
+//     widened the universe and changed nothing else. A drift here means the generator's own
+//     `routedLanes` join has moved and one of the two readers is stale.
+//  2. Every `OUT_OF_MATRIX_CATALOG_ENTRIES` id the catalog still ships is ROUTED on at least one
+//     lane and IS in the denominator. The matrix subtracts them for a fact about its parser, and
+//     that is not an E1 exemption; this is the assertion that makes the subtraction unable to
+//     silence a cell.
+//  3. The general rule: a tiered manifest model is missing from the denominator on EVERY lane only
+//     when the routing catalog routes it nowhere. Nothing else may remove a model.
+test("the denominator's routed-lane oracle is the routing catalog, not the matrix", async () => {
+  const routed = await routedCatalogLanes();
+  const matrix = JSON.parse(await readFile(path.join(ROOT, MATRIX_PATH), "utf8"));
+  assert.ok(matrix.models.length > 0, "the matrix still publishes models");
+  for (const model of matrix.models) {
+    assert.deepEqual(
+      model.backends ?? [],
+      lanesOf(routed, model.id),
+      `${model.id}: the matrix's routed lanes disagree with the routing catalog`,
+    );
+  }
+
+  const models = await readManifestModels();
+  const byId = new Map(models.map((model) => [model.id, model]));
+  const universe = new Set((await shippedTieredCells()).map((cell) => cell.modelId));
+  for (const [id, entry] of OUT_OF_MATRIX_CATALOG_ENTRIES) {
+    if (!byId.has(id)) continue; // `assertOutOfMatrixEntriesAreStillUnroutable` owns the stale case.
+    assert.ok(
+      !matrix.models.some((model) => model.id === id),
+      `${id} is subtracted from the matrix universe (epic ${entry.epic})`,
+    );
+    assert.ok(
+      lanesOf(routed, id).length > 0,
+      `${id} is subtracted from the matrix but the routing catalog routes it nowhere`,
+    );
+    assert.ok(
+      universe.has(id),
+      `${id} is routed and ships tiers, but the burndown denominator does not ask about it`,
+    );
+  }
+
+  // The rule itself, over the whole catalog.
+  const absent = [];
+  for (const model of models) {
+    const tiered = (model.downloads ?? []).some(
+      (download) => !download.coRequisite && ["q4", "q8", "bf16"].includes(download.variant),
+    );
+    if (!tiered) continue;
+    if (!universe.has(model.id) && lanesOf(routed, model.id).length > 0) absent.push(model.id);
+  }
+  assert.deepEqual(
+    absent,
+    [],
+    "a tiered manifest model may leave the denominator on every lane ONLY because the routing " +
+      "catalog routes it nowhere (epic 22723 E1)",
+  );
+});
+
 test("the gap-set denominator is narrowed only by code-derived tier overrides", async () => {
   const { cells, dropped } = await tieredCellUniverse();
   const overrides = await codeDerivedTierOverrides();
@@ -1257,15 +1371,14 @@ test("a lane only claims the tiers whose downloads that lane's host would fetch"
   // something on this lane can open — a download the host fetches, an untiered bundle it fetches,
   // or a route rule that declares the tier — and an unclaimed (routed model, shipped tier) has none
   // of the three.
-  const matrix = JSON.parse(await readFile(path.join(ROOT, MATRIX_PATH), "utf8"));
-  const routed = new Map(matrix.models.map((model) => [model.id, model.backends ?? []]));
+  const routed = await routedCatalogLanes();
   const laneTiers = await routeLaneTiers();
   const overrides = await codeDerivedTierOverrides();
   for (const model of models) {
     const shipped = (model.downloads ?? []).filter(
       (download) => !download.coRequisite && ["q4", "q8", "bf16"].includes(download.variant),
     );
-    for (const backend of routed.get(model.id) ?? []) {
+    for (const backend of lanesOf(routed, model.id)) {
       const bundled = laneHasTierBundle(model, backend);
       const floor = laneTiers.get(`${backend}:${model.id}`) ?? new Set();
       // sc-22729: and the lane's own code must be able to LOAD the tier — see
@@ -2372,21 +2485,29 @@ test("ltx_2_3 is measurable on every shipped tier of every routed lane", async (
   assert.equal(gaps.length, 0, gapReport(gaps));
 });
 
-// sc-22737. MiniMax-H3 is the one family `shippedTieredCells` cannot see: `generate-memory-matrix.mjs`
-// subtracts `minimax_h3` / `minimax_h3_ref` from the matrix universe (`OUT_OF_MATRIX_CATALOG_ENTRIES`
-// — the MLX resolver is a prefix predicate the generator cannot enumerate), and the gap set is keyed
-// off the matrix's routed lanes. Epic 22723 E2 names `--list` as the oracle, so the family is asked
-// there directly. Both lanes are DERIVED from the worker's dispatch, through the same
-// `parseInternalCandleVideoRoutes` read the generator makes — it throws if the Candle
-// `CandleVideoRoute::MiniMaxH3` arm (`video_jobs/mod.rs#resolve_candle_video_route`) or the shared
-// `minimax_h3_engine_id` resolver both lanes consult is gone — the tier axis from the manifest, and
-// every (member, tier, lane) must be planned and classify runnable / weights_missing.
+// sc-22737, re-derived by sc-22738. `generate-memory-matrix.mjs` subtracts `minimax_h3` /
+// `minimax_h3_ref` from the MATRIX universe (`OUT_OF_MATRIX_CATALOG_ENTRIES` — the MLX resolver is a
+// prefix predicate the generator cannot enumerate). That is a fact about the generator's parser, and
+// E1 admits exactly one exemption — an unrouted lane — so the burndown denominator no longer reads
+// the matrix at all and the twelve cells are IN it (`the denominator's routed-lane oracle is the
+// routing catalog, not the matrix`). This case is the second, independent reading: epic 22723 E2
+// names `--list` as the oracle, so the family is asked there directly, with both lanes DERIVED from
+// the worker's dispatch through the same `parseInternalCandleVideoRoutes` read the generator makes
+// — it throws if the Candle `CandleVideoRoute::MiniMaxH3` arm
+// (`video_jobs/mod.rs#resolve_candle_video_route`) or the shared `minimax_h3_engine_id` resolver
+// both lanes consult is gone — the tier axis from the manifest, and every (member, tier, lane) must
+// be planned and classify runnable / weights_missing.
 test("the minimax-h3 family is measurable on every shipped tier of every routed lane, through --list", async () => {
   const family = ["minimax_h3", "minimax_h3_ref"];
-  // The subtraction is recorded, never silent: the family is absent from the gap universe BECAUSE
-  // it is listed there. If the generator ever admits it, the sibling gap cases take over.
+  // The subtraction is recorded, never silent — and it no longer removes the family from the
+  // burndown: every one of the twelve cells is in the gap universe, so the sibling gap cases and
+  // this one now ask the same question through two different derivations.
   assert.deepEqual([...OUT_OF_MATRIX_CATALOG_ENTRIES.keys()].sort(), family);
-  assert.equal((await shippedTieredCells()).filter((cell) => family.includes(cell.modelId)).length, 0);
+  assert.equal(
+    (await shippedTieredCells()).filter((cell) => family.includes(cell.modelId)).length,
+    12,
+    "the routing catalog routes both entries on both lanes, so all six tiers per entry are claimed",
+  );
   const routed = parseInternalCandleVideoRoutes(
     await readFile(path.join(ROOT, "crates/sceneworks-worker/src/video_jobs/mod.rs"), "utf8"),
     await readFile(path.join(ROOT, "crates/sceneworks-worker/src/video_jobs/minimax_h3.rs"), "utf8"),
@@ -2785,11 +2906,128 @@ test("PROVIDER_FAMILIES repos are the adapter's *_REPOSITORY constants", async (
     }
   }
 });
-// The catalog-wide burndown. `todo` until the terminal story of epic 22723 (sc-22738) promotes it:
-// node:test reports a failing todo without failing the run, so the gap set is printed on every
-// `npm run check` while the other families are brought in, and the assertion itself is already
-// the one that will gate. Remove the `todo` option to promote; do not add a count.
-test("every shipped tiered model is measurable", { todo: "epic 22723 burndown; sc-22738 promotes this to a hard assertion" }, async () => {
+const ADAPTER_BIN_PATHS = Object.freeze({
+  mlx: "crates/sceneworks-memory-adapter/src/bin/mlx.rs",
+  candle: "crates/sceneworks-memory-adapter/src/bin/candle.rs",
+});
+
+let adapterArmsPromise;
+/** `{mlx, candle}` -> the provider ids each adapter binary's dispatch admits, parsed from Rust. */
+function adapterArms() {
+  adapterArmsPromise ??= (async () =>
+    Object.fromEntries(
+      await Promise.all(
+        Object.entries(ADAPTER_BIN_PATHS).map(async ([backend, relative]) => [
+          backend,
+          adapterCapturableProviders(
+            await readFile(path.join(ROOT, relative), "utf8"),
+            relative,
+          ),
+        ]),
+      ),
+    ))();
+  return adapterArmsPromise;
+}
+
+// sc-22738 (feature-end round 1). `classifyAnchor`'s `no_adapter_arm` verdict is graded off
+// `PROVIDER_FAMILIES[].arms` — a hand-kept table — and NOTHING tied that table to the Rust the arms
+// live in. Deleting `KOLORS_ID => Ok(KOLORS_PLAIN_EXECUTION_PATH)` from `candle.rs` left this file,
+// `stale-lane-report.test.mjs` and the whole `npm run check` green: the adapter could no longer
+// serve `candle:kolors`, and the measurability oracle went on saying it could.
+//
+// So `arms` is DERIVED here, through `adapterCapturableProviders` — the stale-lane report's own
+// parser, which reads the `match provider` blocks able to refuse with "five-rung calibration does
+// not implement provider" and admits a provider only when EVERY such dispatch does. It throws if
+// the dispatch shape moves, so this cannot degrade to an empty set and pass vacuously.
+//
+// Two directions, because either one alone is a false green:
+//
+//  * every declared `(family, arm)` is a provider that lane's adapter dispatches — a deleted Rust
+//    arm reds instead of becoming a silent `runnable`;
+//  * every PLAN row's `<backend>:<provider>` is dispatched too — a plan row can name a provider no
+//    family row covers, and `--list` would classify it off a family lookup that never happened.
+test("every declared adapter arm is a provider that lane's adapter really dispatches", async () => {
+  const arms = await adapterArms();
+  for (const backend of Object.keys(ADAPTER_BIN_PATHS)) {
+    assert.ok(arms[backend].length > 0, `${backend}: the dispatch parse admits no provider at all`);
+  }
+
+  let checked = 0;
+  for (const [key, family] of Object.entries(PROVIDER_FAMILIES)) {
+    // Model-keyed rows (sc-22729/sc-22734) name the engine provider they ride; provider-keyed rows
+    // ARE the provider id. `familyFor` resolves both the same way.
+    const provider = family.provider ?? key;
+    assert.ok((family.arms ?? []).length > 0, `${key} declares no arm at all`);
+    for (const backend of family.arms) {
+      assert.ok(
+        arms[backend].includes(provider),
+        `${key}: PROVIDER_FAMILIES declares a ${backend} arm, but ${ADAPTER_BIN_PATHS[backend]} ` +
+          `dispatches no ${provider} provider — classifyAnchor would call this cell runnable`,
+      );
+      checked += 1;
+    }
+  }
+  assert.ok(checked > 0, "no family arm was checked; this test guards nothing");
+
+  const plan = await readPlan();
+  const unbacked = [];
+  for (const [key, row] of Object.entries(plan.anchors)) {
+    const { backend } = anchorParts(key);
+    if (!arms[backend].includes(row.provider)) unbacked.push(`${key} -> ${backend}:${row.provider}`);
+  }
+  assert.deepEqual(
+    unbacked,
+    [],
+    "every plan anchor names a provider its lane's adapter dispatch admits",
+  );
+});
+
+// sc-22738 (feature-end round 1). The lane-default anchor composition has ONE spelling.
+//
+// `crates/sceneworks-worker/src/inference_runtime.rs` walks the same plan and asks each row's
+// contract to `validate_selection` the rung it will be captured at. Its `lane_default_rung` used to
+// respell `ANCHOR_STRATEGY` in Rust — mlx -> "resident", candle -> "staged_residency" — with nothing
+// binding the two, so changing a default here left the Rust walk asserting the old rung and green.
+// Both sides now read `config/anchor-lane-default-strategy.json`. This case holds that shape:
+// `ANCHOR_STRATEGY` really is that file, and the Rust really reads it rather than a literal.
+test("the lane default anchor composition is one declaration both lanes' walkers read", async () => {
+  const declared = JSON.parse(
+    await readFile(path.join(ROOT, ANCHOR_LANE_DEFAULT_STRATEGY_PATH), "utf8"),
+  );
+  assert.deepEqual(Object.keys(declared.lanes).sort(), ["candle", "mlx"]);
+  for (const [backend, entry] of Object.entries(declared.lanes)) {
+    assert.equal(ANCHOR_STRATEGY[backend].rung, entry.rung, backend);
+    assert.deepEqual([...ANCHOR_STRATEGY[backend].engagedRungs], entry.engagedRungs, backend);
+    assert.ok(entry.engagedRungs.includes(entry.rung), `${backend}: the default rung is engaged`);
+  }
+
+  const rust = await readFile(
+    path.join(ROOT, "crates/sceneworks-worker/src/inference_runtime.rs"),
+    "utf8",
+  );
+  assert.match(
+    rust,
+    /include_str!\(\s*"\.\.\/\.\.\/\.\.\/config\/anchor-lane-default-strategy\.json"\s*\)/,
+    "inference_runtime.rs no longer reads the shared lane-default declaration",
+  );
+  // …and it does not carry a second spelling of the values. `"mlx" => "resident"` was the defect.
+  const walk = /fn every_planned_lane_row_resolves_a_weights_free_contract_implementing_its_rung[\s\S]*?\n\}\n/.exec(rust);
+  assert.ok(walk, "the planned-rung walk is still where the lane default is applied");
+  assert.doesNotMatch(
+    walk[0],
+    /"(?:mlx|candle)"\s*=>\s*"(?:resident|staged_residency)"/,
+    "the planned-rung walk respells a lane default instead of reading the shared declaration",
+  );
+});
+
+// The catalog-wide burndown, and epic 22723's E1/E2 gate. PROMOTED to a hard assertion by sc-22738
+// (it was `todo` while the families were brought in, so the gap set printed on every `npm run check`
+// without failing it). It is a SHAPE claim and carries no count: `measurabilityGaps()` walks every
+// `<modelId>:<tier>:<backend>` the routing catalog and the manifest between them claim, on BOTH
+// lanes, and demands `--list` classify each one `runnable` or `weights_missing`. `weights_missing`
+// is a host condition, never a gap (E5), so this needs no weights, no GPU and no inference
+// checkout.
+test("every shipped tiered model is measurable", async () => {
   const gaps = await measurabilityGaps();
   assert.equal(gaps.length, 0, gapReport(gaps));
 });

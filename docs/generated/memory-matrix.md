@@ -4,7 +4,7 @@
 
 - SceneWorks revision: `source-tree:942b55e64d4e3cc5c94e46461082f6ca244e25302b45e2a9619c2d669299f430`
 - Catalog entries: 64 (image 53, video 11)
-- Out-of-matrix entries (subtracted from the universe): `minimax_h3` — the MLX resolver is a PREFIX PREDICATE this generator cannot enumerate, and no Candle video route arm exists at all (sc-17137); `minimax_h3_ref` — the MLX resolver is a PREFIX PREDICATE this generator cannot enumerate, and no Candle video route arm exists at all (sc-17137)
+- Out-of-matrix entries (subtracted from the universe): `minimax_h3` — both lanes ARE routed (VideoModelCaps mlx+candle, resolve_candle_video_route's MiniMaxH3 arm), but this generator's route parsers cannot enumerate either: the MLX resolver is a PREFIX PREDICATE and the Candle arm lives outside candle_video_engine_id. Matrix-only — the E1 measurability burndown reads the routing catalog and DOES claim these cells (sc-17137); `minimax_h3_ref` — both lanes ARE routed (VideoModelCaps mlx+candle, resolve_candle_video_route's MiniMaxH3 arm), but this generator's route parsers cannot enumerate either: the MLX resolver is a PREFIX PREDICATE and the Candle arm lives outside candle_video_engine_id. Matrix-only — the E1 measurability burndown reads the routing catalog and DOES claim these cells (sc-17137)
 - Resolved coordinates: 9265
 - Published cells: 762
 - Elided coordinates: 8503 (Implemented 4129, Missing 4374)

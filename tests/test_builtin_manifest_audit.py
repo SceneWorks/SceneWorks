@@ -909,36 +909,40 @@ def test_only_overlay_bearing_rows_may_omit_their_calibration_identity():
     `crates/media/candle-gen/candle-gen-sd3/src/memory_strategy.rs:876-886`), so the six SD3.5 lora
     rows CANNOT name an identity: the engine never publishes one for that load shape. The schema
     therefore admits an overlay-bearing measured row with no `fingerprint`, and that permission is
-    wider than the truth — no other shipped engine withholds today. This test is the narrow half:
-    it pins the exact committed set, so a fingerprint dropped from any other row reds here.
+    wider than the truth.
+
+    STRUCTURAL HALF ONLY (sc-22738). This test used to pin the exact six-row set
+    `{sd3_5_*:candle[1|3]}`, which is a frozen-corpus gate: it reds on any new overlay-bearing row,
+    including a correct one, and it says nothing about WHY a row may omit its identity. The derived
+    rule — which model/crate pairs actually withhold, read from the engine source when
+    `INFERENCE_REPO` points at a checkout that carries it — already lives in
+    `scripts/manifest-memory-declarations.test.mjs`
+    ("no overlay-bearing manifest row promises an identity its candle engine withholds under
+    adapters"). What survives here is the SHAPE claim that file does not make: an omission implies
+    the row is overlay-bearing, over every measured contract row in the catalog.
 
     The clean-base half is enforced structurally, and asserted below against the real schema.
     """
-    omitted = {
-        (model_id, backend, index)
+    omitted = [
+        (model_id, backend, index, row)
         for model_id, backend, index, row in _measured_contract_rows()
         if "fingerprint" not in row
-    }
-    assert omitted == {
-        ("sd3_5_large", "candle", 1),
-        ("sd3_5_large", "candle", 3),
-        ("sd3_5_large_turbo", "candle", 1),
-        ("sd3_5_large_turbo", "candle", 3),
-        ("sd3_5_medium", "candle", 1),
-        ("sd3_5_medium", "candle", 3),
-    }, (
-        "the set of rows without a production calibration identity changed; a row may omit "
-        "`fingerprint` ONLY because its engine withholds one under adapters: "
-        f"{sorted(omitted)}"
+    ]
+    # Not a count: the claim is only that the population is non-empty, so the loop below is not
+    # vacuous. A catalog in which every measured row named its identity would make this test
+    # meaningless rather than wrong, and that is what this says.
+    assert omitted, (
+        "no measured contract row omits its calibration identity, so the omission rule below "
+        "guards nothing — has the engine started publishing under adapters?"
     )
-    # Every one of them is overlay-bearing, which is what earns the omission.
-    for model_id, backend, index, row in _measured_contract_rows():
-        if (model_id, backend, index) not in omitted:
-            continue
+    # An omission is earned ONLY by being overlay-bearing: a clean base row that drops its
+    # fingerprint is an authoring oversight, and this is what catches it.
+    for model_id, backend, index, row in omitted:
         assert [
             overlay for overlay in row["overlays"] if overlay != "none"
         ] or row.get("providerOverlay", "none") != "none", (
-            f"{model_id}:{backend}[{index}] omits fingerprint but declares no overlay"
+            f"{model_id}:{backend}[{index}] omits fingerprint but declares no overlay; only an "
+            "engine that withholds the identity under adapters may leave it out"
         )
 
 
