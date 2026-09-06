@@ -2,6 +2,52 @@
   "schemaVersion": 1,
   "anchors": [
     {
+      "id": "chroma1_base:mlx:bf16:base:base:chroma1-base-bf16-mlx-shared-ladder-v1:imc-443609035e88f1ee5bf9",
+      "modelId": "chroma1_base",
+      "modelFamily": "chroma",
+      "route": "chroma1_base",
+      "provider": "chroma1_base",
+      "backend": "mlx",
+      "tier": "bf16",
+      "transformerVariant": null,
+      "decoder": null,
+      "mode": "text_to_image",
+      "overlay": null,
+      "referenceCount": 0,
+      "loadShape": "deferred_materialization",
+      "measuredRegime": {
+        "decodeTiled": false,
+        "transformerWindowed": false,
+        "staged": false,
+        "attentionChunked": false
+      },
+      "source": {
+        "path": "docs/calibration/sc-22738/chroma1-base-bf16-mlx-evidence.json",
+        "sha256": "daec960050ae78d0d3a0c56eb2ac95fcd410033e8208bdd109ee04fbd87636c5",
+        "recordId": "imc-443609035e88f1ee5bf9",
+        "calibrationFingerprint": "chroma1-base-bf16-mlx-shared-ladder-v1",
+        "loaderClosureDigest": "2796e69f30b4583553488e8a674b3c393b0d6668bceac5efefa43cae73aec131"
+      },
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "frames": 1,
+        "fps": null
+      },
+      "phaseActivePeakBytes": {
+        "conditioning": 2174124,
+        "denoise": 35756184660,
+        "decode": 42789020980
+      },
+      "phaseAllocatorEnvelopeBytes": {
+        "conditioning": 2174124,
+        "denoise": 52482762588,
+        "decode": 96484550388
+      },
+      "overallAllocatorEnvelopeBytes": 96484550388,
+      "underivedReason": "the anchor render engaged bounded rungs (or deferred materialization), so it does not measure the widest composition the MLX image law upper-bounds the ladder from; this anchor validates its measured point and prices nothing beyond it"
+    },
+    {
       "id": "flux2_dev:mlx:q4:base:base:sc-18218-flux2-dev-t2i-resident-evidence-v1:imc-b6537074420d51413b38",
       "modelId": "flux2_dev",
       "modelFamily": "flux2-dev",
@@ -1324,17 +1370,6 @@
       "route": "chroma1_base",
       "backend": "candle",
       "tier": "q8",
-      "basis": "no_retained_evidence",
-      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
-      "evidence": null
-    },
-    {
-      "id": "analytic:chroma1_base:mlx:bf16",
-      "modelId": "chroma1_base",
-      "modelFamily": "chroma",
-      "route": "chroma1_base",
-      "backend": "mlx",
-      "tier": "bf16",
       "basis": "no_retained_evidence",
       "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
       "evidence": null
