@@ -498,6 +498,32 @@ export const PROVIDER_FAMILIES = Object.freeze({
   // `MODEL_25_ID`), so the candle plan rows name `ltx_2_5_distilled` while the anchor key — and
   // therefore the manifest download the snapshot root resolves through — stays `ltx_2_5`.
   ltx_2_5_distilled: { ltx25: true, repo: LTX25_REPOSITORY, arms: ["candle"] },
+  // The turnkey still family (sc-22732). Five catalog models over three engine crates, each a plain
+  // reference-free text-to-image route with its text encoder, transformer and decoder packed inside
+  // the per-tier snapshot — so one root is the whole load and no `upstream` or `bundle` is needed.
+  // The engine id equals the catalog model id for all five, so the family key, the plan row's
+  // `provider` and the anchor key's modelId are the same token.
+  kolors: { env: "KOLORS", repo: "SceneWorks/kolors-mlx", arms: ["mlx", "candle"] },
+  lens: { env: "LENS", repo: "SceneWorks/lens-mlx", arms: ["mlx", "candle"] },
+  // Its OWN rehost at its OWN revision, split from base Lens the way `flux1_schnell` is split from
+  // `flux1_dev`: a turbo plan satisfied by base weights would re-label the base model's peaks.
+  lens_turbo: { env: "LENS_TURBO", repo: "SceneWorks/lens-turbo-mlx", arms: ["mlx", "candle"] },
+  // Ideogram is the only shipped family whose tiers do NOT all come from one repository, which is
+  // what `tiers` exists for: `q4`/`q8` are the packed `SceneWorks/ideogram-4-mlx` turnkey, and
+  // `bf16` is the separate `SceneWorks/ideogram-4` repo at a separate revision (worker
+  // `image_jobs/base.rs` `IDEOGRAM_BF16_REPO`, and the manifest's own third `downloads[]` entry).
+  // Without the override `tierDownload` would fall back to the packed repo's q4 download — its
+  // "any download from this repo" arm — and bind bf16 to the wrong repository AND the wrong
+  // revision, which the record's loadability fingerprint is the only place that would ever show.
+  // Both Ideogram members share both repositories at both revisions and differ by provider.
+  ideogram_4: {
+    env: "IDEOGRAM", repo: "SceneWorks/ideogram-4-mlx", arms: ["mlx", "candle"],
+    tiers: { bf16: { env: "IDEOGRAM_BF16", repo: "SceneWorks/ideogram-4" } },
+  },
+  ideogram_4_turbo: {
+    env: "IDEOGRAM", repo: "SceneWorks/ideogram-4-mlx", arms: ["mlx", "candle"],
+    tiers: { bf16: { env: "IDEOGRAM_BF16", repo: "SceneWorks/ideogram-4" } },
+  },
   // The Wan 2.2 family (sc-22736). The FIRST families whose artifact is per (lane, TIER) rather
   // than per lane, which is why `familyArtifact` exists: each route ships a `SceneWorks/…-mlx`
   // rehost on macOS and a separate `SceneWorks/…-candle` rehost on Windows/Linux, and the candle
@@ -817,12 +843,21 @@ export function familyArtifact(family, backend, tier) {
   //   there means the load root is the snapshot ITSELF, with no `<tier>` component.
   // * `artifacts[backend][tier]`, or `artifacts[backend]["*"]` (sc-22736) — one CELL loads a
   //   different repository, which is what the Wan 2.2 candle bf16 leg needs.
+  // * `tiers[tier]` (sc-22732) — one TIER loads a different repository on BOTH lanes, which is what
+  //   `ideogram_4`'s bf16 leg needs: it ships from `SceneWorks/ideogram-4` at its own revision while
+  //   its q4/q8 siblings come from the packed `SceneWorks/ideogram-4-mlx` turnkey.
   //
   // Anything an override omits falls back to the family row.
   const lane = family.lanes?.[backend];
   const perTier = family.artifacts?.[backend];
   const override = perTier?.[tier] ?? perTier?.["*"];
-  const merged = { env: family.env, repo: family.repo, ...(lane ?? {}), ...(override ?? {}) };
+  const merged = {
+    env: family.env,
+    repo: family.repo,
+    ...(lane ?? {}),
+    ...(family.tiers?.[tier] ?? {}),
+    ...(override ?? {}),
+  };
   // `layout: "flat"` and `tiered: false` say the same thing; the first is this function's word for
   // it and the second is the family table's.
   return { ...merged, layout: merged.layout ?? (merged.tiered === false ? "flat" : "tiered") };

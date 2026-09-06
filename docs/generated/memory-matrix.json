@@ -1,11 +1,11 @@
 {
   "schemaVersion": 11,
   "generatedFrom": {
-    "sceneWorksRevision": "source-tree:a14ce60074d5ea8ee39216c9fc5e607af183c624019a70efc66f158dc844e9fb",
+    "sceneWorksRevision": "source-tree:942b55e64d4e3cc5c94e46461082f6ca244e25302b45e2a9619c2d669299f430",
     "sources": {
       "manifest": {
         "path": "config/manifests/builtin.models.jsonc",
-        "sha256": "b27c08a47ec1841db601b5eb7efc736fb8b77a441c51bc7baeee96839607a6c3"
+        "sha256": "e83aa3e665d6a8ff0c56e4304a81cf085b1a4ff394955f4156c1b8f29557ab04"
       },
       "routingCatalog": {
         "path": "crates/sceneworks-core/src/jobs_store/routing/catalog.rs",
@@ -25,7 +25,7 @@
       },
       "imageRouting": {
         "path": "crates/sceneworks-worker/src/image_jobs/base.rs",
-        "sha256": "c1812623a86ed45785f392dbd6fe7c730a4590b7f88954f522889d031e1896a5"
+        "sha256": "637e22b579ddd77e21865a5a419cd55fef2ebc27272c61f61f38c04ec5ae7daa"
       },
       "videoRouteWan": {
         "path": "crates/sceneworks-worker/src/video_jobs/wan.rs",
@@ -61,7 +61,7 @@
       },
       "memoryRouteRegistry": {
         "path": "crates/sceneworks-worker/src/memory_route_registry.rs",
-        "sha256": "9a5be7c81ff5f03c7430db2d9814701177ec5ae7b797eb8d24885a28aa7fae1b"
+        "sha256": "1d75b1304d63fb34fa283c47adb5301f4d793acf53d26bfac725adadedd00f3c"
       },
       "instantId": {
         "path": "crates/sceneworks-worker/src/image_jobs/instantid.rs",
@@ -69,11 +69,11 @@
       },
       "anchorStore": {
         "path": "config/memory-anchors.json",
-        "sha256": "7ad4e277def16df3342c8babed4609fd550dab01f335f3d0b9ca4babbd6a3e40"
+        "sha256": "d9f078a3c2ce5d43ef0556d04665ee3a72f1ace07b8586ee51e4bce1c61be8f5"
       },
       "anchorLoaderClosures": {
         "path": "config/anchor-loader-closures.json",
-        "sha256": "5e229f7af80e96993e49e139a486af0893b595ba55f4cd94ba417eb7b1921e18"
+        "sha256": "dfd1540c100662b18fa9f0d4ee0906a80f36bf09e2ccf81a1599074b6e0ca77e"
       },
       "anchorDerivation": {
         "path": "crates/sceneworks-core/src/memory_anchor.rs",
@@ -141,8 +141,8 @@
     "publishedCells": 762,
     "elidedCells": 8503,
     "elidedByState": {
-      "Implemented": 4122,
-      "Missing": 4381
+      "Implemented": 4129,
+      "Missing": 4374
     },
     "publicationPredicate": "A coordinate is published when it carries a claim a per-lane census cannot: a measured memory anchor covers its (model, tier, backend lane), or it is structurally exempt. A bare `Implemented` or `Missing` state is a property of the whole lane, replicated across every tier x mode x overlay, and is counted in `summary.elidedByState` and the per-(entry, backend, rung) `coverage` census instead of restated thousands of times.",
     "mlxStagedStaticCoverage": 47,
@@ -9473,23 +9473,23 @@
       "coordinates": 6,
       "published": 0,
       "elided": 6,
-      "implemented": 2,
+      "implemented": 3,
       "states": {
-        "Implemented": 2,
-        "Missing": 4
+        "Implemented": 3,
+        "Missing": 3
       },
       "implementedBy": {
         "tier": {
-          "bf16": 0,
+          "bf16": 1,
           "q4": 1,
           "q8": 1
         },
         "mode": {
-          "text_to_image": 2
+          "text_to_image": 3
         },
         "overlay": {
           "lora": 0,
-          "none": 2
+          "none": 3
         }
       }
     },
@@ -9500,23 +9500,23 @@
       "coordinates": 6,
       "published": 0,
       "elided": 6,
-      "implemented": 2,
+      "implemented": 3,
       "states": {
-        "Implemented": 2,
-        "Missing": 4
+        "Implemented": 3,
+        "Missing": 3
       },
       "implementedBy": {
         "tier": {
-          "bf16": 0,
+          "bf16": 1,
           "q4": 1,
           "q8": 1
         },
         "mode": {
-          "text_to_image": 2
+          "text_to_image": 3
         },
         "overlay": {
           "lora": 0,
-          "none": 2
+          "none": 3
         }
       }
     },
@@ -9527,23 +9527,23 @@
       "coordinates": 6,
       "published": 0,
       "elided": 6,
-      "implemented": 2,
+      "implemented": 3,
       "states": {
-        "Implemented": 2,
-        "Missing": 4
+        "Implemented": 3,
+        "Missing": 3
       },
       "implementedBy": {
         "tier": {
-          "bf16": 0,
+          "bf16": 1,
           "q4": 1,
           "q8": 1
         },
         "mode": {
-          "text_to_image": 2
+          "text_to_image": 3
         },
         "overlay": {
           "lora": 0,
-          "none": 2
+          "none": 3
         }
       }
     },
@@ -9683,23 +9683,23 @@
       "coordinates": 6,
       "published": 0,
       "elided": 6,
-      "implemented": 2,
+      "implemented": 3,
       "states": {
-        "Implemented": 2,
-        "Missing": 4
+        "Implemented": 3,
+        "Missing": 3
       },
       "implementedBy": {
         "tier": {
-          "bf16": 0,
+          "bf16": 1,
           "q4": 1,
           "q8": 1
         },
         "mode": {
-          "text_to_image": 2
+          "text_to_image": 3
         },
         "overlay": {
           "lora": 0,
-          "none": 2
+          "none": 3
         }
       }
     },
@@ -9710,23 +9710,23 @@
       "coordinates": 6,
       "published": 0,
       "elided": 6,
-      "implemented": 2,
+      "implemented": 3,
       "states": {
-        "Implemented": 2,
-        "Missing": 4
+        "Implemented": 3,
+        "Missing": 3
       },
       "implementedBy": {
         "tier": {
-          "bf16": 0,
+          "bf16": 1,
           "q4": 1,
           "q8": 1
         },
         "mode": {
-          "text_to_image": 2
+          "text_to_image": 3
         },
         "overlay": {
           "lora": 0,
-          "none": 2
+          "none": 3
         }
       }
     },
@@ -9737,23 +9737,23 @@
       "coordinates": 6,
       "published": 0,
       "elided": 6,
-      "implemented": 2,
+      "implemented": 3,
       "states": {
-        "Implemented": 2,
-        "Missing": 4
+        "Implemented": 3,
+        "Missing": 3
       },
       "implementedBy": {
         "tier": {
-          "bf16": 0,
+          "bf16": 1,
           "q4": 1,
           "q8": 1
         },
         "mode": {
-          "text_to_image": 2
+          "text_to_image": 3
         },
         "overlay": {
           "lora": 0,
-          "none": 2
+          "none": 3
         }
       }
     },
@@ -9776,23 +9776,23 @@
       "coordinates": 6,
       "published": 0,
       "elided": 6,
-      "implemented": 2,
+      "implemented": 3,
       "states": {
-        "Implemented": 2,
-        "Missing": 4
+        "Implemented": 3,
+        "Missing": 3
       },
       "implementedBy": {
         "tier": {
-          "bf16": 0,
+          "bf16": 1,
           "q4": 1,
           "q8": 1
         },
         "mode": {
-          "text_to_image": 2
+          "text_to_image": 3
         },
         "overlay": {
           "lora": 0,
-          "none": 2
+          "none": 3
         }
       }
     },
