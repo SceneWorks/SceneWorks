@@ -176,6 +176,10 @@ const PACKAGED_MEMORY_ANCHOR_SOURCES: &[(&str, &str)] = &[
         "docs/calibration/sc-22738/flux2-klein-9b-kv-bf16-mlx-evidence.json",
         include_str!("../../../docs/calibration/sc-22738/flux2-klein-9b-kv-bf16-mlx-evidence.json"),
     ),
+    (
+        "docs/calibration/sc-22738/flux2-klein-9b-kv-q4-mlx-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/flux2-klein-9b-kv-q4-mlx-evidence.json"),
+    ),
 ];
 
 // ---------------------------------------------------------------------------------------------
