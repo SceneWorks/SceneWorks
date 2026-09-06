@@ -1383,3 +1383,24 @@ test("persistent exact wheel is installed locally within the shared CUDA budget"
   await assert.rejects(() => installUpstreamPackages("python", lock, async () => installs++, { now: () => clock, acquireWheel: async () => { clock = 9000000; return "/fixture/verified.whl"; } }), /budget exhausted/);
   assert.equal(installs, 0);
 });
+
+
+test("Windows provisioning selects the reviewed persistent listener cache before every possible Cargo build", async () => {
+  const windows = workflow.split("  provision-windows:")[1];
+  const setup = windows.indexOf("- name: Set up Node for Cargo cache selection");
+  const selection = windows.indexOf("- name: Isolate persistent Cargo dependency cache");
+  const firstCargo = windows.indexOf("cargo run --release --locked");
+  const sanitizer = windows.indexOf("cargo build --release --locked -p sceneworks-worker --bin starvector_terminal_sanitize");
+  assert.ok(setup >= 0 && selection > setup && firstCargo > selection && sanitizer > selection);
+  assert.match(windows.slice(setup, selection), /actions\/setup-node@820762786026740c76f36085b0efc47a31fe5020/);
+  assert.match(windows.slice(setup, selection), /node-version: 22/);
+  const selected = windows.slice(selection, windows.indexOf("- name: Resolve immutable pin-keyed terminal inputs", selection));
+  assert.match(selected, /shell: powershell/);
+  assert.match(selected, /node scripts\/select-windows-cargo-cache\.mjs/);
+  assert.match(selected, /if \(\$LASTEXITCODE -ne 0\) \{ throw/);
+  assert.doesNotMatch(selected, /RUNNER_TEMP|USERPROFILE|continue-on-error/);
+  assert.equal((windows.match(/select-windows-cargo-cache\.mjs/g) ?? []).length, 1);
+  assert.match(await readFile(".cargo/config.toml", "utf8"), /git-fetch-with-cli = true/);
+  const { PRODUCTION_CLOSURE_PATHS } = await import("./starvector-production-closure.mjs");
+  assert.ok(PRODUCTION_CLOSURE_PATHS.includes("scripts/select-windows-cargo-cache.mjs"));
+});

@@ -39,6 +39,7 @@ export const PRODUCTION_CLOSURE_PATHS = Object.freeze([
   "scripts/lib/starvector-terminal-upstream-reference.mjs",
   "scripts/lib/starvector-terminal-pin-paths.mjs",
   "scripts/lib/terminal-tree-identity.mjs",
+  "scripts/select-windows-cargo-cache.mjs",
   "scripts/starvector-production-closure.mjs",
   "scripts/starvector-terminal-assets.mjs",
   "scripts/starvector-terminal-campaign.mjs",
