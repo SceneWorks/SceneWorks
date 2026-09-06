@@ -515,27 +515,132 @@ test("windows-candle captures and schema-checks the SC-21714 Krea anchor record"
 
   const adapter = await source("crates/sceneworks-memory-adapter/src/bin/candle.rs");
   assert.match(adapter, /StableIdleConfig::new\(2\.0, 5, 64, 200\)/);
-  // Every `vram` binding the adapter builds, as a MULTISET against an explicit allowlist
-  // (sc-22726 review): a set-of-distinct-spellings claim let a probe be deleted, a raw
-  // `VramProbe::new()` be added alongside, and the one known non-certifying probe hide, all green.
-  // Each entry is a probe expression and the number of arms that build it; the only probe that does
-  // not certify an idle GPU BEFORE it samples is the LTX-2.5 capture's, which proves idleness on
-  // its own rendered baseline instead because that arm renders first.
-  const probes = [...adapter.matchAll(/let mut vram\s*=\s*([^;]+);/g)].map((match) => match[1].trim());
-  const counts = new Map();
-  for (const probe of probes) counts.set(probe, (counts.get(probe) ?? 0) + 1);
+  assertEveryVramProbeIsCertifying(adapter);
+  // Every `vram` binding the adapter builds, keyed by the ARM (the enclosing `fn`) that builds it,
+  // against an explicit allowlist (sc-22726 review, sc-22733 review): a set-of-distinct-spellings
+  // claim let a probe be deleted, a raw `VramProbe::new()` be added alongside, and the one known
+  // non-certifying probe hide, all green; a frozen per-spelling tally then let one arm lose its
+  // probe while another gained a second, still green. Naming the owner closes both. The only probe
+  // that does not certify an idle GPU BEFORE it samples is the LTX-2.5 capture's, which proves
+  // idleness on its own rendered baseline instead because that arm renders first.
+  const owners = [];
+  let owner = null;
+  for (const line of adapter.split("\n")) {
+    const fn = /^(?:pub(?:\([a-z]+\))? )?fn ([a-z_0-9]+)/.exec(line);
+    if (fn) owner = fn[1];
+    const probe = /let mut vram\s*=\s*([^;]+);/.exec(line);
+    if (probe) owners.push([owner, probe[1].trim()]);
+  }
   assert.deepEqual(
-    [...counts.entries()].sort(([a], [b]) => a.localeCompare(b)),
+    owners.sort(([a], [b]) => a.localeCompare(b)),
     [
-      // Krea five-rung reference, PuLID-FLUX bespoke, the Qwen edit bespoke arm (sc-22728), and the
-      // inline Krea arm.
-      ["certifying_vram_probe()", 4],
+      // Krea five-rung reference (and the registry-loaded providers that ride it).
+      ["load_five_rung_generator", "certifying_vram_probe()"],
+      // The Mage-Flow loader (sc-22733 — its own loader because a Mage load binds two artifact triples).
+      ["load_mage_generator", "certifying_vram_probe()"],
+      // The inline Krea arm.
+      ["run", "certifying_vram_probe()"],
+      // The InstantID bespoke arm (sc-22729).
+      ["run_instantid_candle", "certifying_vram_probe()"],
       // LTX-2.5: renders first, then proves idle on the rendered baseline.
-      ["VramProbe::start_rendered().assert_idle(1.0)", 1],
+      ["run_ltx25_capture", "VramProbe::start_rendered().assert_idle(1.0)"],
+      // PuLID-FLUX bespoke.
+      ["run_pulid_flux_capture", "certifying_vram_probe()"],
+      // The Qwen edit bespoke arm (sc-22728).
+      ["run_qwen_edit", "certifying_vram_probe()"],
+      // The SenseNova family arm (sc-22734).
+      ["run_sensenova_capture", "certifying_vram_probe()"],
     ],
-    "every Candle VRAM probe must be an allowlisted certifying spelling, at its expected count",
+    "every Candle VRAM probe must be an allowlisted certifying spelling, built once by its named arm",
   );
 });
+
+/**
+ * Every VRAM probe the Candle adapter constructs, mapped to the function that constructs it.
+ *
+ * sc-22729 review replaced a frozen occurrence count (`… === 3`) with this. The count did not
+ * discriminate: it was equally satisfied by three certifying probes in the right arms and by two
+ * plus one in a helper nothing captures through, and it had to be hand-renewed 2 → 3 for a new arm,
+ * which is exactly the moment the guard should have been asking a question instead.
+ */
+const NON_CERTIFYING_PROBE_SITES = new Map([
+  // The LTX-2.5 arm is the ONE documented exception. It asserts a plain 1.0 GB idle ceiling rather
+  // than the WDDM stable-idle proof: `certifying_wddm_idle_config` is calibrated against GPU 1's
+  // 1.6 GB idle graphics residency on the Windows capture host, and the LTX-2.5 capture runs the
+  // ladder the harness pins itself. Widening it here would change what that anchor certifies, so
+  // the exception is named rather than quietly folded in.
+  ["run_ltx25_capture", /VramProbe::start_rendered\(\)\.assert_idle\(1\.0\)/],
+]);
+
+function enclosingFunctions(source) {
+  const starts = [...source.matchAll(/^(?:pub )?fn ([a-z_][a-z0-9_]*)/gm)]
+    .map((match) => ({ name: match[1], at: match.index }));
+  return (index) => starts.filter((entry) => entry.at <= index).at(-1)?.name ?? "(top level)";
+}
+
+function assertEveryVramProbeIsCertifying(adapter) {
+  const nameAt = enclosingFunctions(adapter);
+  // Every probe CONSTRUCTION in the file, whichever spelling it uses.
+  const constructions = [...adapter.matchAll(/VramProbe::start_rendered\(\)[^;]*|certifying_vram_probe\(\)/g)]
+    .map((match) => ({ text: match[0], fn: nameAt(match.index) }));
+  assert.ok(constructions.length > 0, "the adapter constructs no VRAM probe at all");
+
+  const certifying = new Set();
+  for (const site of constructions) {
+    // The certifying constructor's own definition is the one place `start_rendered` may appear
+    // without being a capture arm's ad-hoc probe.
+    if (site.fn === "certifying_vram_probe") continue;
+    if (site.text.startsWith("certifying_vram_probe")) {
+      certifying.add(site.fn);
+      continue;
+    }
+    const allowed = NON_CERTIFYING_PROBE_SITES.get(site.fn);
+    assert.ok(
+      allowed,
+      `${site.fn} constructs a VRAM probe directly (${site.text.trim()}) instead of calling ` +
+        "certifying_vram_probe(); a capture arm must not mint its own idle policy",
+    );
+    assert.match(site.text, allowed, `${site.fn}'s documented non-certifying probe changed shape`);
+  }
+
+  // …and every function that SAMPLES a phase either OWNS a probe or is HANDED one it did not mint,
+  // so a new capture arm cannot appear sampling a probe with no policy behind it.
+  const samplers = new Set(
+    [...adapter.matchAll(/vram\.phase\(\)/g)].map((match) => nameAt(match.index)),
+  );
+  const owners = new Set([...certifying, ...NON_CERTIFYING_PROBE_SITES.keys()]);
+  for (const sampler of samplers) {
+    if (owners.has(sampler)) continue;
+    const signature = new RegExp(`fn ${sampler}\\(([\\s\\S]*?)\\) -> `).exec(adapter)?.[1] ?? "";
+    assert.match(
+      signature,
+      /vram: &mut VramProbe/,
+      `${sampler} samples vram.phase() without constructing a probe or being handed one`,
+    );
+  }
+  // No owner may be a function that never samples: a probe minted and dropped certifies nothing.
+  assert.deepEqual(
+    [...owners].filter((owner) => !samplers.has(owner)),
+    [],
+    "a function constructing a VRAM probe must sample a phase with it",
+  );
+  // The certifying arms are exactly the capture sites: the InstantID arm (sc-22729), the Mage-Flow
+  // loader (sc-22733) and the SenseNova arm (sc-22734) are all among them.
+  assert.deepEqual(
+    [...certifying].sort(),
+    [
+      "load_five_rung_generator",
+      "load_mage_generator",
+      "run",
+      "run_instantid_candle",
+      "run_pulid_flux_capture",
+      "run_qwen_edit",
+      "run_sensenova_capture",
+    ],
+  );
+  // The exception list is not allowed to quietly grow: exactly one site, and it is the LTX-2.5 arm.
+  assert.deepEqual([...NON_CERTIFYING_PROBE_SITES.keys()], ["run_ltx25_capture"]);
+}
 
 test("windows-candle routes weights dispatches to a real-weights runner, like the MLX lane", async () => {
   const candle = await source(".github/workflows/windows-candle.yml");
@@ -1521,21 +1626,26 @@ test("memory adapters bind every emitted overlay verdict to the requested target
   assert.match(mlxQwenEdit, /\("builtInAdapters", "count", loaded_adapters as u64\)/);
   assert.match(mlxQwenEdit, /if loaded_adapters == 0 \{\s*protocol::settle_plain_overlay_scenario\(/);
   // A hand-rolled `"status": "gated"` object is what must not silently ship with `overlay` left at
-  // `not_run`. One arm builds its fragment by hand for a real reason — sc-22726's bespoke PuLID
-  // capture, whose route opens no memory-strategy request scope — so the claim is named rather than
-  // blanket: that arm and no other, and it must still settle its own overlay scenario.
+  // `not_run`. Two arms build their fragment by hand for a real reason — sc-22726's bespoke PuLID
+  // capture, whose route opens no memory-strategy request scope, and sc-22734's SenseNova resident
+  // anchor, which is not a five-rung record at all — so the claim is named rather than blanket:
+  // those arms and no others, and each must still SETTLE its own overlay verdict. Settling is what
+  // is checked, not the spelling: PuLID writes the verdict into the object it builds, SenseNova
+  // hands the finished fragment to `settle_plain_overlay_scenario`. An arm that does neither leaves
+  // `overlay` at `not_run`, which is the failure this gate exists for.
   const handRolled = [...candleFunctions]
     .filter(([, body]) => /"status":\s*"gated"/.test(body))
     .map(([name]) => name);
   assert.deepEqual(
-    handRolled,
-    ["run_pulid_flux_capture"],
+    handRolled.sort(),
+    ["run_pulid_flux_capture", "run_sensenova_capture"],
     "a hand-rolled gated fragment bypasses the overlay-settling builders",
   );
   for (const name of handRolled) {
-    assert.match(
-      candleFunctions.get(name),
-      /\{ "name": "overlay", "result": "(passed|failed)"/,
+    const body = candleFunctions.get(name);
+    assert.ok(
+      /\{ "name": "overlay", "result": "(passed|failed)"/.test(body) ||
+        /protocol::settle_plain_overlay_scenario\(/.test(body),
       `${name} hand-rolls a gated fragment and leaves its overlay verdict unsettled`,
     );
   }

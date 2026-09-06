@@ -52,6 +52,86 @@ export const HARNESS = "scripts/memory-calibration-harness.mjs";
 export const LTX25_REPOSITORY = "SceneWorks/ltx-2.5-mlx";
 
 /**
+ * The three caller-staged SDXL components, as `{ env, repo }` pairs. Declared once: every SDXL-family
+ * model — and InstantID, which composes the same SDXL base — stages exactly these, and the Rust side
+ * declares the same three ids in `candle.rs` `SDXL_COMPONENTS`. `sdxl_component_env_matches_the_catalog`
+ * proves the two lists agree.
+ */
+export const SDXL_COMPONENTS = Object.freeze([
+  { env: "SCENEWORKS_SDXL_COMPONENT_TOKENIZER_CLIP_L", repo: "openai/clip-vit-large-patch14" },
+  { env: "SCENEWORKS_SDXL_COMPONENT_TOKENIZER_CLIP_BIGG", repo: "laion/CLIP-ViT-bigG-14-laion2B-39B-b160k" },
+  { env: "SCENEWORKS_SDXL_COMPONENT_VAE_FP16_FIX", repo: "madebyollin/sdxl-vae-fp16-fix" },
+]);
+
+/**
+ * sc-22729. `candle-gen-sdxl`'s `SDXL_ROUTES` pins each route's repository AND revision, and its
+ * `path_has_snapshot` matches a staged root against that literal before `SdxlArtifactSeal::capture`
+ * will seal a contract. When the pinned revision is not the one this repository ships, no root the
+ * manifest can resolve can ever seal — `candle_gen_sdxl::load` errors before reading a weight. That
+ * is an INFERENCE-side divergence, not adapter work.
+ *
+ * NOTHING here is a literal: both halves of the comparison are READ (the engine revision out of the
+ * pinned inference checkout, the shipped revision out of the manifest), so the refusal disappears by
+ * itself the moment the engine agrees — no edit to this file, and no stale exclusion outliving the
+ * fix. The inference-side repair lives on `story/sc-22729-sdxl-route-revisions`.
+ */
+export const SDXL_ROUTES_PATH = "crates/media/candle-gen/candle-gen-sdxl/src/memory_strategy.rs";
+
+/** `SDXL_ROUTES` as `id → { repository, revision }`. Throws if the table can no longer be read. */
+export function parseSdxlRoutes(source) {
+  const table = /pub const SDXL_ROUTES: &\[SdxlRoute\] = &\[([\s\S]*?)\n\];/.exec(source);
+  if (!table) fail(`${SDXL_ROUTES_PATH} no longer declares a parsable SDXL_ROUTES table`);
+  const routes = new Map();
+  for (const entry of table[1].matchAll(/SdxlRoute\s*\{([\s\S]*?)\}/g)) {
+    const field = (name) => new RegExp(`\\b${name}:\\s*"([^"]+)"`).exec(entry[1])?.[1];
+    const [id, repository, revision] = [field("id"), field("repository"), field("revision")];
+    if (!id || !repository || !revision) fail(`an SDXL_ROUTES entry declares no id/repository/revision: ${entry[0]}`);
+    routes.set(id, { repository, revision });
+  }
+  if (routes.size === 0) fail(`${SDXL_ROUTES_PATH} declares an empty SDXL_ROUTES table`);
+  return routes;
+}
+
+/**
+ * The engine's route table at `inferenceRepo`, or `null` when no inference checkout is reachable.
+ * `null` is NOT a refusal: with nothing to compare against, a cell classifies as it would if the
+ * engine agreed, and says so.
+ */
+export async function readSdxlCandleRoutes(inferenceRepo = process.env.INFERENCE_REPO) {
+  if (!inferenceRepo) return null;
+  try {
+    return parseSdxlRoutes(await readFile(path.join(inferenceRepo, SDXL_ROUTES_PATH), "utf8"));
+  } catch (error) {
+    if (error.code === "ENOENT" || error.code === "ENOTDIR") return null;
+    throw error;
+  }
+}
+
+export const SDXL_ROUTES_UNCHECKED =
+  `no inference checkout (--inference-repo / $INFERENCE_REPO) supplies ${SDXL_ROUTES_PATH}, so the `
+  + "engine's route revision was not compared with the shipped one; classified as if the engine agrees";
+
+/**
+ * Why the candle lane cannot route `modelId` today, or `null` when it can.
+ *
+ * Both revisions are derived: the engine's from `SDXL_ROUTES` at the pinned inference checkout, the
+ * shipped one from the manifest download the route's own repository names.
+ */
+export function sdxlCandleRouteDrift(modelId, tier, routes, models) {
+  const route = routes.get(modelId);
+  if (!route) {
+    return `candle-gen-sdxl's SDXL_ROUTES (${SDXL_ROUTES_PATH}) declares no route ${modelId}, so the `
+      + "candle lane has no artifact identity to seal for it";
+  }
+  const shipped = tierDownload(models, modelId, route.repository, tier).revision;
+  if (shipped === route.revision) return null;
+  return `candle-gen-sdxl pins route ${modelId} at ${route.revision.slice(0, 8)} `
+    + `(${SDXL_ROUTES_PATH} SDXL_ROUTES), but this repository ships ${shipped.slice(0, 8)}; `
+    + "path_has_snapshot matches that literal, so no staged root can seal the contract and the load "
+    + "fails before any weight is read. The candle lane does not route this model at this pin.";
+}
+
+/**
  * The built-in Qwen-Image-Edit-2511 Lightning distill LoRA (sc-22728). It is NOT a manifest
  * download — the worker fetches it lazily into the HF cache on first use — so its repository,
  * revision and file are pinned in the worker's own source on both lanes
@@ -69,11 +149,45 @@ export const QWEN_EDIT_LIGHTNING_LORA = Object.freeze({
 });
 
 /**
+ * The converter-written marker every SenseNova `_fast` rehost tier subdir carries (sc-22734). Both
+ * engines read it by this exact name (`DISTILL_MERGED_MARKER` in `mlx-gen-sensenova` and
+ * `candle-gen-sensenova`), and both WITHHOLD the production calibration identity when it is absent —
+ * so a `_fast` tier root without it is not a capturable cell, it is a cell whose capture would fail
+ * on an identity mismatch after the load. Declared as `requiredTierFiles` on the three `_fast`
+ * family rows so `classifyAnchor` refuses it by name.
+ */
+export const SENSENOVA_DISTILL_MERGED_MARKER = "distill_merged.json";
+
+/**
+ * The shared Mage-Flow text-encoder + VAE rehost (sc-22733). Declared once and referenced by all six
+ * Mage family rows: it is the SAME repository and the SAME revision for every variant and both
+ * lanes, and both adapters read it through one `SCENEWORKS_MAGE_FLOW_COMPONENTS_*` family. The
+ * revision is NOT pinned here — it is read from the manifest's own `coRequisite` download rows, so
+ * a components re-host lands by editing the manifest alone.
+ */
+export const MAGE_COMPONENTS = Object.freeze({
+  env: "MAGE_FLOW_COMPONENTS",
+  repo: "SceneWorks/Mage-Flow-Components-mlx",
+});
+
+/**
+ * The two component ids both Mage engines advertise, in descriptor order. Bound to the adapter's own
+ * `MAGE_COMPONENT_TEXT_ENCODER` / `MAGE_COMPONENT_VAE` constants by a test, so the directories this
+ * script probes are the ones the adapters actually stage.
+ */
+export const MAGE_COMPONENT_IDS = Object.freeze(["text_encoder", "vae"]);
+
+/**
  * One row per provider arm an adapter implements, mirroring `match provider` in
  * crates/sceneworks-memory-adapter/src/bin/{mlx,candle}.rs and the env families the runbook lists
  * under "Adapter environment". `physical` marks the one arm that emits a provider `sourceCapture`
  * (the Qwen MLX source capture, mlx.rs `qwen_source_capture`): the harness REQUIRES a sourceCapture
  * whenever `--raw-log-dir` is given, so the raw-log pair and `SCENEWORKS_MEMORY_CAPTURE_DIR` must be
+ * passed for that arm and for no other.
+ *
+ * Rows are keyed by PROVIDER by default; sc-22729 adds MODEL-keyed rows (which must declare their
+ * `provider`) for the case where several catalog models ride one engine id. See `familyFor`.
+ *
  * passed for that arm and for no other. `physical` is NOT inherited by a sibling family: the harness
  * scopes the receipt requirement to `modelId === "qwen_image"` alone
  * (`requiresPhysicalMlxProvenanceForCurrency`, memory-calibration-harness.mjs), and a test below
@@ -82,6 +196,10 @@ export const QWEN_EDIT_LIGHTNING_LORA = Object.freeze({
  * `sideArtifact` is a second root a family member needs that the MANIFEST does not ship — today only
  * the Qwen edit Lightning distill LoRA, which the worker fetches lazily at a pinned revision. It is
  * keyed by model id because it belongs to one member of a shared-provider family, not to the family.
+ *
+ * Rows are keyed by PROVIDER by default; sc-22734 adds MODEL-keyed rows (which must declare their
+ * `provider`) for the case where several catalog models ride one engine id but ship their own
+ * independently pinned artifacts. See `familyFor`.
  */
 export const PROVIDER_FAMILIES = Object.freeze({
   qwen_image: { env: "QWEN_IMAGE", repo: "SceneWorks/qwen-image-mlx", arms: ["mlx", "candle"], physical: true },
@@ -103,7 +221,52 @@ export const PROVIDER_FAMILIES = Object.freeze({
   // (sc-22724). Never the Turbo env: a base plan satisfied by Turbo weights re-labels Turbo's peaks.
   z_image: { env: "Z_IMAGE_BASE", repo: "SceneWorks/z-image-mlx", arms: ["mlx", "candle"] },
   krea_2_turbo: { env: "KREA", repo: "SceneWorks/krea-2-turbo-mlx", arms: ["mlx", "candle"] },
-  sdxl: { env: "SDXL", repo: "SceneWorks/sdxl-base-mlx", arms: ["mlx"] },
+  // sc-22729. The SDXL FAMILY: five catalog models the worker routes onto ONE engine id (`sdxl`)
+  // on both lanes, each with its own independently pinned tiered rehost. These rows are keyed by
+  // MODEL id rather than provider id — `classifyAnchor` prefers a model-keyed family — because the
+  // engine id is not an artifact identity: `candle-gen-sdxl` seals a per-route repository and mints
+  // a per-route calibration fingerprint, so a `realvisxl` anchor bound to the base-SDXL env family
+  // would re-label base SDXL's peaks as the finetune's.
+  //
+  // `components` are the three caller-staged SDXL corequisites (`tokenizer_clip_l`,
+  // `tokenizer_clip_bigg`, `vae_fp16_fix`). `candle-gen-sdxl`'s `validate_shared_component_revisions`
+  // REQUIRES all three at exact upstream revisions, so a candle capture stages the same corequisite
+  // snapshots the worker's `attach_required_components` stages. The MLX turnkey is self-contained
+  // and ignores them, so they are bound on both lanes and simply unused on one.
+  //
+  // `sdxlRoute` marks the members `candle-gen-sdxl` seals through `SDXL_ROUTES`. It is carried by
+  // ALL FIVE, not only the two that disagree today: the check is over the engine's declaration, so
+  // a future revision drift on any member is caught the same way rather than needing a new entry.
+  sdxl: { provider: "sdxl", env: "SDXL", repo: "SceneWorks/sdxl-base-mlx", arms: ["mlx", "candle"], components: SDXL_COMPONENTS, sdxlRoute: true },
+  realvisxl: { provider: "sdxl", env: "REALVISXL", repo: "SceneWorks/realvisxl-mlx", arms: ["mlx", "candle"], components: SDXL_COMPONENTS, sdxlRoute: true },
+  realvisxl_lightning: {
+    provider: "sdxl", env: "REALVISXL_LIGHTNING", repo: "SceneWorks/realvisxl-lightning-mlx",
+    arms: ["mlx", "candle"], components: SDXL_COMPONENTS, sdxlRoute: true,
+  },
+  // The candle lane routes all five `sdxl` members (`routing/candle.rs` `is_sdxl_family_candle_model`
+  // / `SDXL_CONTROL_MODELS`), so all five are DECLARED on both lanes. Whether a member's candle cell
+  // is capturable TODAY is a derived fact, not a table entry: `sdxlRoute` asks `sdxlCandleRouteDrift`
+  // to compare the engine's own `SDXL_ROUTES` revision with the one the manifest ships. Only the two
+  // Illustrious routes disagree at inference c6d6a4db, and only for as long as they disagree.
+  illustrious_xl_v1: {
+    provider: "sdxl", env: "ILLUSTRIOUS_XL_V1", repo: "SceneWorks/illustrious-xl-v1-mlx",
+    arms: ["mlx", "candle"], components: SDXL_COMPONENTS, sdxlRoute: true,
+  },
+  illustrious_xl_v2: {
+    provider: "sdxl", env: "ILLUSTRIOUS_XL_V2", repo: "SceneWorks/illustrious-xl-v2-mlx",
+    arms: ["mlx", "candle"], components: SDXL_COMPONENTS, sdxlRoute: true,
+  },
+  // The InstantID backbone IS the plain RealVisXL rehost (`image_jobs/instantid.rs`
+  // `INSTANTID_SDXL_REPO`), bound through its own env family so an InstantID plan can never be
+  // satisfied by a plain `realvisxl` root and vice versa. `stagedEnv` is the identity stack: the
+  // worker fetches it on first use from a pinned repo rather than declaring it as a manifest
+  // download, so there is nothing for the harness to resolve — the operator stages it and the
+  // capture binds the staged copy through the same env seams the worker reads.
+  instantid_realvisxl: {
+    provider: "instantid", env: "INSTANTID_REALVISXL", repo: "SceneWorks/realvisxl-mlx", arms: ["mlx", "candle"],
+    components: SDXL_COMPONENTS,
+    stagedEnv: ["SCENEWORKS_INSTANTID_WEIGHTS", "SCENEWORKS_INSTANTID_CONTROLNET"],
+  },
   flux2_dev: { env: "FLUX2", repo: "SceneWorks/flux2-dev-mlx", arms: ["mlx", "candle"] },
   // sc-22727. TWO catalog models ride this ONE engine provider id (worker engines.rs:
   // `flux2_klein_9b_kv` declares `engine_id: flux2_klein_9b`), and they load DIFFERENT artifacts.
@@ -149,6 +312,29 @@ export const PROVIDER_FAMILIES = Object.freeze({
       ],
     },
   },
+  // The Mage-Flow family (sc-22733). SIX registered engine providers whose catalog ids are
+  // identical to their engine ids (worker `engines.rs` MODEL_TABLE), each with its OWN tiered
+  // rehost — so six rows rather than one shared family. What they DO share is the text encoder and
+  // the VAE: those are bit-identical across all six variants and are hosted once in
+  // `SceneWorks/Mage-Flow-Components-mlx`, which every Mage manifest entry declares as per-tier
+  // `coRequisite` downloads. Both engines resolve that split through `LoadSpec::components`
+  // (`mlx-gen-mage` `resolve_component_dirs`, `candle-gen-mage` `resolved_component_dirs`), so a
+  // Mage anchor binds TWO roots: the variant's tier root and the components SNAPSHOT (the tier is
+  // the first path element INSIDE it, which is why `components` resolves the snapshot rather than a
+  // tier root).
+  ...Object.fromEntries(
+    [
+      ["mage_flow", "MAGE_FLOW", "SceneWorks/Mage-Flow"],
+      ["mage_flow_base", "MAGE_FLOW_BASE", "SceneWorks/Mage-Flow-Base"],
+      ["mage_flow_turbo", "MAGE_FLOW_TURBO", "SceneWorks/Mage-Flow-Turbo"],
+      ["mage_flow_edit", "MAGE_FLOW_EDIT", "SceneWorks/Mage-Flow-Edit"],
+      ["mage_flow_edit_base", "MAGE_FLOW_EDIT_BASE", "SceneWorks/Mage-Flow-Edit-Base"],
+      ["mage_flow_edit_turbo", "MAGE_FLOW_EDIT_TURBO", "SceneWorks/Mage-Flow-Edit-Turbo"],
+    ].map(([provider, env, repo]) => [
+      provider,
+      { env, repo, arms: ["mlx", "candle"], components: MAGE_COMPONENTS },
+    ]),
+  ),
   // The SD3.5 family (sc-22730). Three DISTINCT engine providers, each with its own tiered rehost
   // and therefore its own env family — unlike `z_image_edit`/`pulid_flux`, none of them is an alias
   // for another's backbone, so serving one from another's artifact would re-label that route's
@@ -216,8 +402,62 @@ export const PROVIDER_FAMILIES = Object.freeze({
   ideogram_4_turbo: {
     env: "IDEOGRAM", repo: "SceneWorks/ideogram-4-mlx", arms: ["mlx", "candle"],
     tiers: { bf16: { env: "IDEOGRAM_BF16", repo: "SceneWorks/ideogram-4" } },
+  // sc-22734. The SenseNova-U1 FAMILY: six catalog models the worker routes onto TWO engine ids on
+  // both lanes — `sensenova_u1_8b` (the 50-step quality path) and `sensenova_u1_8b_fast` (the
+  // 8-step distill), each carrying a base id and two infographic finetunes.
+  //
+  // These rows are keyed by MODEL id rather than provider id — `familyFor` prefers a model-keyed
+  // row that declares the plan's provider — because the engine id is NOT the artifact identity
+  // here. The six models ship six INDEPENDENTLY PINNED tiered rehosts (six repositories, six
+  // revisions), and both engines mint a per-ROUTE calibration fingerprint, so an infographic anchor
+  // bound to the base SenseNova env family would load base weights and re-label base SenseNova's
+  // peaks as the finetune's. A provider-keyed table cannot express that: it has one repo per engine
+  // id, and `tierDownload` would be asked for a base-repo download the finetune's manifest entry
+  // does not ship.
+  sensenova_u1_8b: {
+    provider: "sensenova_u1_8b", env: "SENSENOVA_U1_8B",
+    repo: "SceneWorks/sensenova-u1-8b-mlx", arms: ["mlx", "candle"],
+  },
+  sensenova_u1_8b_infographic_v2: {
+    provider: "sensenova_u1_8b", env: "SENSENOVA_U1_8B_INFOGRAPHIC_V2",
+    repo: "SceneWorks/sensenova-u1-8b-infographic-v2-mlx", arms: ["mlx", "candle"],
+  },
+  sensenova_u1_8b_infographic_v3: {
+    provider: "sensenova_u1_8b", env: "SENSENOVA_U1_8B_INFOGRAPHIC_V3",
+    repo: "SceneWorks/sensenova-u1-8b-infographic-v3-mlx", arms: ["mlx", "candle"],
+  },
+  sensenova_u1_8b_fast: {
+    requiredTierFiles: [SENSENOVA_DISTILL_MERGED_MARKER],
+    provider: "sensenova_u1_8b_fast", env: "SENSENOVA_U1_8B_FAST",
+    repo: "SceneWorks/sensenova-u1-8b-fast-mlx", arms: ["mlx", "candle"],
+  },
+  sensenova_u1_8b_infographic_v2_fast: {
+    requiredTierFiles: [SENSENOVA_DISTILL_MERGED_MARKER],
+    provider: "sensenova_u1_8b_fast", env: "SENSENOVA_U1_8B_INFOGRAPHIC_V2_FAST",
+    repo: "SceneWorks/sensenova-u1-8b-infographic-v2-fast-mlx", arms: ["mlx", "candle"],
+  },
+  sensenova_u1_8b_infographic_v3_fast: {
+    requiredTierFiles: [SENSENOVA_DISTILL_MERGED_MARKER],
+    provider: "sensenova_u1_8b_fast", env: "SENSENOVA_U1_8B_INFOGRAPHIC_V3_FAST",
+    repo: "SceneWorks/sensenova-u1-8b-infographic-v3-fast-mlx", arms: ["mlx", "candle"],
   },
 });
+
+/**
+ * The family row that serves one anchor.
+ *
+ * The default key is the PROVIDER, so a catalog alias rides its engine's row (`z_image_edit` on
+ * `z_image_turbo`) and a lane-specific engine id keeps selecting the family (LTX-2.5's two ids).
+ * sc-22729 and sc-22734 add the inverse case: several catalog models on ONE engine id, each with its own
+ * artifact family. A MODEL-keyed row wins for those — but ONLY when it declares the provider it
+ * belongs to and that provider is the one the plan named, so a model-keyed row can never capture
+ * an anchor that some other engine serves.
+ */
+export function familyFor(modelId, provider, families = PROVIDER_FAMILIES) {
+  // Model-keyed resolution — and the provider-keyed `variants` override (sc-22727's FLUX.2 klein
+  // pair) — both live in `providerFamily`, so this is a single delegation.
+  return providerFamily(provider, modelId, families);
+}
 
 export function fail(message) {
   throw new Error(message);
@@ -229,6 +469,11 @@ export function fail(message) {
  * declares the divergent members under `variants`; everything else is the row itself.
  */
 export function providerFamily(provider, modelId, families = PROVIDER_FAMILIES) {
+  // sc-22729/sc-22734's MODEL-keyed rows win first, but ONLY when the row declares the provider it belongs
+  // to and that provider is the one the plan named — so a model-keyed row can never capture an
+  // anchor some other engine serves.
+  const scoped = families[modelId];
+  if (scoped?.provider !== undefined && scoped.provider === provider) return scoped;
   const family = families[provider];
   if (!family) return undefined;
   const variant = family.variants?.[modelId];
@@ -383,11 +628,11 @@ async function firstExistingDirectory(candidates) {
  * Decide what the run can do with one plan anchor: which adapter arm serves it, which weights
  * root it loads, and why it would be skipped. Pure apart from the directory probes.
  */
-export async function classifyAnchor(key, planned, { models, backend, hubs, current, captured, declaredLanes, declaredProviders, families = PROVIDER_FAMILIES }) {
+export async function classifyAnchor(key, planned, { models, backend, hubs, current, captured, declaredLanes, declaredProviders, sdxlRoutes = null, families = PROVIDER_FAMILIES }) {
   const parts = anchorParts(key);
   const row = { key, ...parts, provider: planned.provider, status: "runnable", reason: null, env: {}, roots: [] };
   if (parts.backend !== backend) return { ...row, status: "other_backend", reason: `${parts.backend} lane` };
-  const family = providerFamily(planned.provider, parts.modelId, families);
+  const family = familyFor(parts.modelId, planned.provider, families);
   // No shipped family carries `harnessUnsupported` today (sc-22725 gave LTX-2.5's candle engine id
   // a real row). The status stays for the next provider whose adapter arm exists but whose
   // artifacts the harness cannot bind: it is the one refusal that is neither a missing arm nor a
@@ -399,6 +644,19 @@ export async function classifyAnchor(key, planned, { models, backend, hubs, curr
   // deleting the branch and the parameter together; that would make the next unbindable provider
   // report as `no_adapter_arm`, which is the wrong diagnosis and sends the reader to adapter work.
   if (family?.harnessUnsupported) return { ...row, status: "harness_unsupported", reason: family.harnessUnsupported };
+  // sc-22729: the same refusal, scoped to ONE lane and DERIVED. A model whose engine cannot seal an
+  // artifact identity for it on a lane is not a missing arm and not a missing declaration — the arm
+  // exists and the plan declares the cell — so it reports the engine-side reason rather than
+  // sending the reader to adapter work. With no inference checkout to read, there is no refusal at
+  // all: the cell classifies normally and carries the note saying the comparison did not happen.
+  if (family?.sdxlRoute && backend === "candle") {
+    if (sdxlRoutes === null) {
+      row.routeCheck = SDXL_ROUTES_UNCHECKED;
+    } else {
+      const drift = sdxlCandleRouteDrift(parts.modelId, parts.tier, sdxlRoutes, models);
+      if (drift) return { ...row, status: "harness_unsupported", reason: drift };
+    }
+  }
   if (!family || !family.arms.includes(backend)) {
     return {
       ...row, status: "no_adapter_arm",
@@ -454,6 +712,27 @@ export async function classifyAnchor(key, planned, { models, backend, hubs, curr
   row.env[`SCENEWORKS_${artifact.env}_REVISION`] = download.revision;
   row.env[`SCENEWORKS_${artifact.env}_ROOT`] = tierRoot;
   row.tierRoot = tierRoot;
+  // A converter-written file the ENGINE requires INSIDE the resolved tier root, beyond the weights
+  // the manifest download ships (sc-22734 review). The SenseNova `_fast` rehosts are the live case:
+  // `mlx-gen-sensenova`'s `production_calibration_identity` and `candle-gen-sensenova`'s
+  // `fast_spec_is_the_premerged_turnkey` both WITHHOLD the production identity when a `_fast` tier
+  // root carries no `distill_merged.json`, because without the marker the loader merges the distill
+  // LoRA at load and the resident shape is not the one the anchor prices. Nine `_fast` MLX cells
+  // would therefore hard-fail at capture with an identity mismatch, hours into a booked session,
+  // over a fact this probe can read in a millisecond. Classified by name instead.
+  const requiredTierFiles = artifact.requiredTierFiles ?? family.requiredTierFiles ?? [];
+  const missingTierFiles = [];
+  for (const file of requiredTierFiles) {
+    try {
+      if (!(await stat(path.join(tierRoot, file))).isFile()) missingTierFiles.push(file);
+    } catch { missingTierFiles.push(file); }
+  }
+  if (missingTierFiles.length > 0) {
+    return {
+      ...row, status: "weights_missing",
+      reason: `tier root ${tierRoot} is missing ${missingTierFiles.join(", ")}, which the engine requires before it will publish this cell's calibration identity`,
+    };
+  }
   if (family.bundle) {
     // A pre-staged loose-file bundle rather than an HF snapshot, so it is probed through the
     // operator env the worker itself honours. Absent or incomplete is `weights_missing` — the same
@@ -488,6 +767,82 @@ export async function classifyAnchor(key, planned, { models, backend, hubs, curr
     row.env[`SCENEWORKS_${family.upstream.env}_REPOSITORY`] = family.upstream.repo;
     row.env[`SCENEWORKS_${family.upstream.env}_REVISION`] = upstream.revision;
     row.env[`SCENEWORKS_${family.upstream.env}_ROOT`] = upstreamRoot;
+  }
+  // sc-22729: the caller-staged SDXL components. Their revisions come from the model's own
+  // corequisite downloads, which are exactly the revisions `candle-gen-sdxl` validates against.
+  for (const component of Array.isArray(family.components) ? family.components : []) {
+    const download = tierDownload(models, parts.modelId, component.repo, parts.tier);
+    const root = await firstExistingDirectory(hubs.map((hub) => snapshotPath(hub, component.repo, download.revision)));
+    row.roots.push({ label: `component ${component.env}`, path: root ?? snapshotPath(hubs[0], component.repo, download.revision) });
+    if (!root) {
+      return { ...row, status: "weights_missing", reason: `no ${component.repo}@${download.revision.slice(0, 8)} snapshot on this host` };
+    }
+    row.env[component.env] = root;
+  }
+  // The shared component snapshot a split-layout family stages its text encoder and VAE from
+  // (sc-22733, Mage-Flow). Unlike `upstream`, this root is a co-requisite the MANIFEST ships, and
+  // unlike the tier root above it is the SNAPSHOT: the tier is the first path element inside it,
+  // and the adapters join `<tier>/text_encoder` and `<tier>/vae` themselves. Absent is
+  // `weights_missing` — a Mage load whose components are not staged cannot open at all, because the
+  // variant rehost carries no `text_encoder/` or `vae/` sibling for the loader to fall back to.
+  if (family.components && !Array.isArray(family.components)) {
+    // The components are declared PER TIER (one co-requisite row per component per tier), so the
+    // row for THIS tier is what says the tier's text encoder and VAE are shipped at all. No row is
+    // `weights_missing` — the cell is planned and the arm exists, the host merely cannot bind the
+    // artifact — never a thrown error that aborts the whole `--list` (sc-22733 review).
+    const download = (models.find((entry) => entry.id === parts.modelId)?.downloads ?? []).find(
+      (row) => row.repo === family.components.repo && row.coRequisite && row.variant === parts.tier,
+    );
+    if (!download) {
+      row.roots.push({ label: "components snapshot", path: `$SCENEWORKS_${family.components.env}_ROOT` });
+      return {
+        ...row, status: "weights_missing",
+        reason: `manifest ${parts.modelId} declares no ${family.components.repo} components row for tier ${parts.tier}`,
+      };
+    }
+    const root = await firstExistingDirectory(
+      hubs.map((hub) => snapshotPath(hub, family.components.repo, download.revision)),
+    );
+    row.roots.push({
+      label: "components snapshot",
+      path: root ?? snapshotPath(hubs[0], family.components.repo, download.revision),
+    });
+    if (!root) {
+      return {
+        ...row, status: "weights_missing",
+        reason: `no ${family.components.repo}@${download.revision.slice(0, 8)} snapshot on this host`,
+      };
+    }
+    // The tier's own two component directories, not just the snapshot: a partially-fetched
+    // components mirror is exactly as unloadable as an absent one, and reporting the cell
+    // `runnable` would send an operator to book a capture that cannot open its text encoder.
+    const missing = [];
+    for (const component of MAGE_COMPONENT_IDS) {
+      if (!(await firstExistingDirectory([path.join(root, parts.tier, component)]))) {
+        missing.push(`${parts.tier}/${component}`);
+      }
+    }
+    if (missing.length > 0) {
+      return {
+        ...row, status: "weights_missing",
+        reason: `${family.components.repo} snapshot ${root} is missing ${missing.join(", ")}`,
+      };
+    }
+    row.env[`SCENEWORKS_${family.components.env}_REPOSITORY`] = family.components.repo;
+    row.env[`SCENEWORKS_${family.components.env}_REVISION`] = download.revision;
+    row.env[`SCENEWORKS_${family.components.env}_ROOT`] = root;
+  }
+  // An identity stack the worker fetches on first use rather than declaring as a manifest download
+  // has nothing for the harness to resolve, so the operator stages it and names it here. An unset
+  // or absent path is `weights_missing` — the host simply lacks the artifact — not a gap.
+  for (const name of family.stagedEnv ?? []) {
+    const staged = process.env[name];
+    const root = staged ? await firstExistingDirectory([staged]) : null;
+    row.roots.push({ label: `staged ${name}`, path: staged ?? `(${name} unset)` });
+    if (!root) {
+      return { ...row, status: "weights_missing", reason: `${name} is unset or names no directory on this host` };
+    }
+    row.env[name] = root;
   }
   // A member-specific artifact the manifest does not ship (the Qwen edit Lightning distill LoRA):
   // its repository and revision are pinned in the family row, so the root is the snapshot itself.
@@ -760,6 +1115,9 @@ export async function planRun(args, root = ROOT) {
   const declaredLanes = await readDeclaredLanes(root);
   const declaredProviders = await readDeclaredProviders(root);
   const hubs = hubRoots(args.hfCache);
+  // sc-22729: the engine's own SDXL route table, read from the pinned inference checkout. `null`
+  // when there is none to read — see `SDXL_ROUTES_UNCHECKED`.
+  const sdxlRoutes = await readSdxlCandleRoutes(args.inferenceRepo ?? process.env.INFERENCE_REPO);
   const keys = Object.keys(plan.anchors).sort();
   if (args.anchors) {
     for (const key of args.anchors) if (!plan.anchors[key]) fail(`--anchors names ${key}, which the plan does not declare`);
@@ -771,8 +1129,13 @@ export async function planRun(args, root = ROOT) {
   for (const key of keys) {
     if (args.anchors && !args.anchors.includes(key)) continue;
     if ((args.models ?? []).length > 0 && !args.models.includes(anchorParts(key).modelId)) continue;
-    const row = await classifyAnchor(key, plan.anchors[key], { models, backend: args.backend, hubs, current, captured, declaredLanes, declaredProviders });
+    const row = await classifyAnchor(key, plan.anchors[key], { models, backend: args.backend, hubs, current, captured, declaredLanes, declaredProviders, sdxlRoutes });
     if (row.status === "other_backend" && !args.anchors) continue;
+    // An unperformed route-revision comparison is reported on the row it did not happen for, so a
+    // run without an inference checkout cannot silently look like a run that proved the engine agrees.
+    if (row.routeCheck && ["runnable", "weights_missing"].includes(row.status)) {
+      row.reason = row.reason ? `${row.reason}; ${row.routeCheck}` : row.routeCheck;
+    }
     if (row.status === "runnable" && args.skipCurrent && row.current) {
       row.status = "current";
       row.reason = "anchor is current at the pinned inference revision (--skip-current)";

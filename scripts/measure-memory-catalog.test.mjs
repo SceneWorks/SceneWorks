@@ -6,7 +6,10 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
 
-import { parseRouteRegistryLaneTiers } from "./generate-memory-matrix.mjs";
+import {
+  parseBackendTierOverrides,
+  parseRouteRegistryLaneTiers,
+} from "./generate-memory-matrix.mjs";
 import {
   ROOT,
   ADAPTER_LIB_PATH,
@@ -14,6 +17,9 @@ import {
   PLAN_PATH,
   PACKAGED_SOURCES_PATH,
   PROVIDER_FAMILIES,
+  SDXL_COMPONENTS,
+  MAGE_COMPONENTS,
+  MAGE_COMPONENT_IDS,
   providerFamily,
   anchorParts,
   anchorSlug,
@@ -21,10 +27,12 @@ import {
   capturedInCampaign,
   classifyAnchor,
   compiledInferencePin,
+  familyFor,
   hubRoots,
   failureReason,
   extractSeedingNewAnchors,
   SEED_DIGEST,
+  SENSENOVA_DISTILL_MERGED_MARKER,
   measureAnchor,
   parseArgs,
   providerCommand,
@@ -33,8 +41,13 @@ import {
   readPlan,
   snapshotPath,
   tierDownload,
+  parseSdxlRoutes,
+  readSdxlCandleRoutes,
+  sdxlCandleRouteDrift,
+  SDXL_ROUTES_PATH,
+  SDXL_ROUTES_UNCHECKED,
 } from "./measure-memory-catalog.mjs";
-import { LTX25_LANE_PROVIDERS } from "./memory-calibration-harness.mjs";
+import { ANCHOR_STRATEGY, LTX25_LANE_PROVIDERS } from "./memory-calibration-harness.mjs";
 
 const execFileAsync = promisify(execFile);
 const REVISION = "0123456789abcdef0123456789abcdef01234567";
@@ -261,6 +274,67 @@ test("each SD3.5 member binds its OWN artifact family on both lanes", async () =
   }
 });
 
+// sc-22734 review. Nine `_fast` MLX cells hard-fail at capture — after the load, hours into a
+// booked session — when a `_fast` tier root carries no `distill_merged.json`: both engines withhold
+// the production calibration identity without it, so the harness sees an identity mismatch rather
+// than a classification. `classifyAnchor` now reads the marker off the resolved tier root and
+// refuses the cell by name before anything is scheduled.
+test("a _fast sensenova tier root without the pre-merge marker is refused by name, not scheduled", async () => {
+  const REPO = "SceneWorks/sensenova-u1-8b-fast-mlx";
+  const models = [
+    { id: "sensenova_u1_8b_fast", downloads: [{ repo: REPO, revision: REVISION, variant: "q4", files: ["q4/*"] }] },
+    { id: "sensenova_u1_8b", downloads: [{ repo: "SceneWorks/sensenova-u1-8b-mlx", revision: REVISION, variant: "q4", files: ["q4/*"] }] },
+  ];
+  const hub = await fakeHub([
+    [REPO, REVISION, "q4"],
+    ["SceneWorks/sensenova-u1-8b-mlx", REVISION, "q4"],
+  ]);
+  const planned = { provider: "sensenova_u1_8b_fast" };
+  for (const backend of ["mlx", "candle"]) {
+    const context = { models, backend, hubs: [hub], current: new Map(), captured: new Map() };
+
+    // The marker is absent: refused by NAME, and the reason cites the file and the root.
+    const refused = await classifyAnchor(`sensenova_u1_8b_fast:q4:${backend}`, planned, context);
+    assert.equal(refused.status, "weights_missing", `${backend}: ${refused.reason}`);
+    assert.match(refused.reason, new RegExp(SENSENOVA_DISTILL_MERGED_MARKER.replace(".", "\\.")));
+    assert.match(refused.reason, /calibration identity/);
+    assert.ok(
+      refused.reason.includes(snapshotPath(hub, REPO, REVISION, "q4")),
+      `${backend}: the refusal names the tier root it probed`,
+    );
+
+    // The QUALITY route declares no marker requirement, so the same hub runs it — proving the
+    // probe is scoped to the `_fast` rows and is not a new blanket requirement.
+    const quality = await classifyAnchor(
+      `sensenova_u1_8b:q4:${backend}`,
+      { provider: "sensenova_u1_8b" },
+      context,
+    );
+    assert.equal(quality.status, "runnable", `${backend}: ${quality.reason}`);
+  }
+
+  // Write the marker and the same cell becomes runnable on both lanes.
+  await writeFile(path.join(snapshotPath(hub, REPO, REVISION, "q4"), SENSENOVA_DISTILL_MERGED_MARKER), "{}\n");
+  for (const backend of ["mlx", "candle"]) {
+    const context = { models, backend, hubs: [hub], current: new Map(), captured: new Map() };
+    const runnable = await classifyAnchor(`sensenova_u1_8b_fast:q4:${backend}`, planned, context);
+    assert.equal(runnable.status, "runnable", `${backend}: ${runnable.reason}`);
+    assert.equal(runnable.env.SCENEWORKS_SENSENOVA_U1_8B_FAST_ROOT, snapshotPath(hub, REPO, REVISION, "q4"));
+  }
+});
+
+// Every `_fast` family row declares the marker requirement, and no quality row does — derived from
+// the table, so a seventh route added to either half is covered with no edit here.
+test("the marker requirement is declared on exactly the _fast sensenova family rows", () => {
+  const sensenova = Object.entries(PROVIDER_FAMILIES).filter(([, row]) =>
+    typeof row.provider === "string" && row.provider.startsWith("sensenova_u1_8b"));
+  assert.ok(sensenova.length > 0, "the table declares SenseNova rows");
+  for (const [modelId, row] of sensenova) {
+    const expected = row.provider === "sensenova_u1_8b_fast" ? [SENSENOVA_DISTILL_MERGED_MARKER] : undefined;
+    assert.deepEqual(row.requiredTierFiles, expected, modelId);
+  }
+});
+
 test("the flux2-klein family: two catalog models on one provider id resolve their OWN artifacts", async () => {
   const hub = await fakeHub([
     ["SceneWorks/flux2-klein-9b-mlx", REVISION, "q8"],
@@ -408,6 +482,9 @@ test("every family's derived env names are read back by each arm it declares", a
     const envFamilies = [
       family.env,
       family.upstream?.env,
+      // sc-22733: the shared component snapshot a split-layout family stages its text encoder and
+      // VAE from is exported the same way and must be read back the same way.
+      family.components?.env,
       // sc-22727: a per-modelId variant is a derived env family too — the KV klein row exports
       // `SCENEWORKS_FLUX2_KLEIN_KV_*` and each declared arm must read those names back.
       ...Object.values(family.variants ?? {}).map((variant) => variant.env),
@@ -628,11 +705,14 @@ test("LTX25_LANE_PROVIDERS and PROVIDER_FAMILIES agree on which lane serves whic
 test("classification refuses what no adapter arm or the harness cannot serve, and skips what is done", async () => {
   const hub = await fakeHub([["SceneWorks/z-image-turbo-mlx", REVISION, "q4"]]);
   const base = { models: fakeModels(), backend: "candle", hubs: [hub], current: new Map(), captured: new Map() };
-  // sc-22727 gave `flux2_dev` a Candle arm, so the no-arm probe moved to a provider that still
-  // has none: `sdxl` is declared `arms: ["mlx"]`.
-  const sdxl = await classifyAnchor("sdxl:q4:candle", { provider: "sdxl" }, base);
-  assert.equal(sdxl.status, "no_adapter_arm");
-  assert.match(sdxl.reason, /candle adapter implements no provider arm for sdxl/);
+  // sc-22727 gave `flux2_dev` a Candle arm and sc-22729 gave the whole `sdxl` family one, so the
+  // no-arm probe moved again — to `minimax_h3`, which is still declared `arms: ["mlx"]`. Asserted
+  // rather than assumed, so this probe cannot silently stop asking its question the next time a
+  // lane is added.
+  assert.deepEqual(PROVIDER_FAMILIES.minimax_h3.arms, ["mlx"], "the no-arm probe needs an mlx-only family");
+  const noArm = await classifyAnchor("minimax_h3:q4:candle", { provider: "minimax_h3" }, base);
+  assert.equal(noArm.status, "no_adapter_arm");
+  assert.match(noArm.reason, /candle adapter implements no provider arm for minimax_h3/);
   // `harness_unsupported` is the refusal for a provider whose adapter arm exists but whose
   // artifacts the harness cannot bind. No SHIPPED family is in that state since sc-22725 gave
   // LTX-2.5's candle engine id a real row, so the branch is driven through a synthetic family.
@@ -772,11 +852,15 @@ test("every provider the committed plan declares is either served by a family ro
       assert.ok(["runnable", "weights_missing", "no_adapter_arm", "harness_unsupported", "lane_undeclared", "provider_undeclared"].includes(row.status), `${row.key}: ${row.status}`);
       if (row.status === "lane_undeclared") assert.match(row.reason, /anchor-loader-closures\.json/);
       if (row.status === "provider_undeclared") assert.match(row.reason, /inference-provider-closures\.json/);
+      // sc-22729/sc-22734: the family is resolved by the SAME rule classification uses — model-keyed when
+      // the row declares the plan's provider, provider-keyed otherwise — so this coverage check
+      // cannot drift from what `--list` actually did.
+      const family = familyFor(row.modelId, row.provider);
       if (row.status === "no_adapter_arm") {
-        assert.equal(PROVIDER_FAMILIES[row.provider]?.arms.includes(backend) ?? false, false);
+        assert.equal(family?.arms.includes(backend) ?? false, false);
       } else if (!["harness_unsupported", "lane_undeclared", "provider_undeclared"].includes(row.status)) {
         // A served provider must resolve a manifest download, or the classification could not name a root.
-        tierDownload(models, row.modelId, providerFamily(row.provider, row.modelId).repo, row.tier);
+        tierDownload(models, row.modelId, family.repo, row.tier);
         assert.ok(row.roots.length > 0, `${row.key} names the root it would load`);
       }
     }
@@ -793,7 +877,10 @@ test("every provider the committed plan declares is either served by a family ro
  * - ROUTED lane: `models[].backends` in `docs/generated/memory-matrix.json`, which
  *   `generate-memory-matrix.mjs` derives from the worker's route resolvers
  *   (`crates/sceneworks-worker/src/memory_route_registry.rs`, the same `CANDLE_BESPOKE_REQUEST_PROVIDERS`
- *   and per-family engine tables the worker dispatches with).
+ *   and per-family engine tables the worker dispatches with). A lane that does not route the
+ *   model is the ONLY exemption; a "structurally N/A" matrix cell is not one (epic 22723 E1).
+ * - ROUTED tier: the per-lane rule below, narrowed further by `parseBackendTierOverrides` — and
+ *   NOTHING else. See `computeShippedTieredCells`.
  *
  * **The tier axis is per LANE (sc-22731).** It used to be per model: every tier any download ships
  * was claimed on every routed lane. That over-claimed cells no lane can ever load — `sana_1600m`
@@ -838,12 +925,26 @@ function routeLaneTiers() {
   return routeLaneTiersPromise;
 }
 
+
+/**
+ * The tier overrides that come from CODE, read out of the worker source the matrix generator itself
+ * reads. `parseBackendTierOverrides` throws if the shape it parses is gone, so this cannot silently
+ * degrade to "no overrides" and quietly widen the denominator either.
+ */
+async function codeDerivedTierOverrides() {
+  return parseBackendTierOverrides(
+    await readFile(path.join(ROOT, "crates/sceneworks-worker/src/image_jobs/instantid.rs"), "utf8"),
+  );
+}
+
 async function computeShippedTieredCells() {
   const models = await readManifestModels();
   const matrix = JSON.parse(await readFile(path.join(ROOT, MATRIX_PATH), "utf8"));
   const routed = new Map(matrix.models.map((model) => [model.id, model.backends ?? []]));
   const laneTiers = await routeLaneTiers();
+  const overrides = await codeDerivedTierOverrides();
   const cells = [];
+  const dropped = [];
   for (const model of models) {
     const shipped = (model.downloads ?? []).filter(
       (download) => !download.coRequisite && ["q4", "q8", "bf16"].includes(download.variant),
@@ -865,10 +966,28 @@ async function computeShippedTieredCells() {
           )
           .map((download) => download.variant),
       )];
-      for (const tier of tiers) cells.push({ modelId: model.id, tier, backend, key: `${model.id}:${tier}:${backend}` });
+      // sc-22729: a shipped tier that this lane CAN fetch is still only a CELL if the lane's CODE
+      // can load that tier at all. `instantid_realvisxl` ships q4/q8/bf16 but its candle stack is
+      // dense-only and always loads `bf16/` (`image_jobs/instantid.rs`
+      // instantid_memory_backend_keys / instantid_tier_subdir on the non-macOS branch), so a q4
+      // candle anchor could only ever measure bf16 weights and file the peaks under a packed tier.
+      //
+      // The narrowing source is `parseBackendTierOverrides` — the SAME worker-source derivation the
+      // matrix generator uses — and deliberately NOT the matrix's `axes.<backend>.tiers`. That list
+      // falls back to `model.<backend>.vramGbByTier`, a MEASUREMENT declaration: a missing key there
+      // means "no peak recorded yet", which is precisely the gap this set exists to count. Reading
+      // it here let the manifest delete six real cells (flux_dev / flux_schnell / flux2_dev candle
+      // bf16; sd3_5_large / sd3_5_large_turbo / sd3_5_medium candle q8) with no routing fact behind
+      // it — see `the gap-set denominator is narrowed only by code-derived tier overrides`.
+      const override = overrides.get(`${model.id}:${backend}`);
+      for (const tier of tiers) {
+        const cell = { modelId: model.id, tier, backend, key: `${model.id}:${tier}:${backend}` };
+        if (override && !override.includes(tier)) dropped.push({ ...cell, override });
+        else cells.push(cell);
+      }
     }
   }
-  return cells;
+  return { cells, dropped };
 }
 
 /**
@@ -877,9 +996,12 @@ async function computeShippedTieredCells() {
  * probes. Memoized as module-level promises so the whole file pays for each exactly once.
  */
 let shippedTieredCellsPromise;
-function shippedTieredCells() {
+function tieredCellUniverse() {
   shippedTieredCellsPromise ??= computeShippedTieredCells();
   return shippedTieredCellsPromise;
+}
+async function shippedTieredCells() {
+  return (await tieredCellUniverse()).cells;
 }
 
 let measurabilityGapsPromise;
@@ -916,6 +1038,48 @@ function gapReport(gaps) {
   ].join("\n");
 }
 
+// sc-22729 review: the burndown DENOMINATOR. A cell leaves the universe only for a ROUTING fact
+// read out of worker source — never for a manifest MEASUREMENT declaration.
+//
+// The hazard is concrete and was live: intersecting against the matrix's `axes.<backend>.tiers`
+// (whose `tiersFor` falls back to `model.candle.vramGbByTier` keys) silently deleted six real cells
+// whose only crime was carrying no recorded peak yet — the exact thing the gap set counts.
+const MANIFEST_ONLY_DECLARED_CELLS = [
+  "flux_dev:bf16:candle", "flux_schnell:bf16:candle", "flux2_dev:bf16:candle",
+  "sd3_5_large:q8:candle", "sd3_5_large_turbo:q8:candle", "sd3_5_medium:q8:candle",
+];
+
+test("the gap-set denominator is narrowed only by code-derived tier overrides", async () => {
+  const { cells, dropped } = await tieredCellUniverse();
+  const overrides = await codeDerivedTierOverrides();
+  // Every drop names an override key the WORKER SOURCE produced, and drops only tiers that key omits.
+  for (const drop of dropped) {
+    const key = `${drop.modelId}:${drop.backend}`;
+    assert.ok(overrides.has(key), `${drop.key} was dropped with no code-derived override for ${key}`);
+    assert.deepEqual(drop.override, overrides.get(key), drop.key);
+    assert.ok(!drop.override.includes(drop.tier), `${drop.key} is inside its own override`);
+  }
+  // The only lane whose code narrows a shipped tier axis today.
+  assert.deepEqual(
+    dropped.map((drop) => drop.key).sort(),
+    ["instantid_realvisxl:q4:candle", "instantid_realvisxl:q8:candle"],
+    "a new drop must come with the worker source that justifies it",
+  );
+
+  // …and the six cells a manifest-declaration intersection would have deleted are all present.
+  const universe = new Set(cells.map((cell) => cell.key));
+  const manifest = await readManifestModels();
+  const byId = new Map(manifest.map((model) => [model.id, model]));
+  for (const key of MANIFEST_ONLY_DECLARED_CELLS) {
+    const [modelId, tier] = key.split(":");
+    assert.ok(universe.has(key), `${key} left the denominator with no routing fact behind it`);
+    assert.ok(
+      !Object.keys(byId.get(modelId)?.candle?.vramGbByTier ?? {}).includes(tier),
+      `${key} no longer exercises the hazard: the manifest now declares a ${tier} candle peak for it`,
+    );
+  }
+});
+
 // sc-22731: the tier axis is per LANE, and the rule is the manifest's own `platforms` selection —
 // not a hand-kept list of exempt cells. Asserted as a KEY SET on the one family that instantiates
 // it today, plus the invariant that drives it, so a new platform-gated download is covered without
@@ -950,6 +1114,7 @@ test("a lane only claims the tiers whose downloads that lane's host would fetch"
   const matrix = JSON.parse(await readFile(path.join(ROOT, MATRIX_PATH), "utf8"));
   const routed = new Map(matrix.models.map((model) => [model.id, model.backends ?? []]));
   const laneTiers = await routeLaneTiers();
+  const overrides = await codeDerivedTierOverrides();
   for (const model of models) {
     const shipped = (model.downloads ?? []).filter(
       (download) => !download.coRequisite && ["q4", "q8", "bf16"].includes(download.variant),
@@ -959,11 +1124,17 @@ test("a lane only claims the tiers whose downloads that lane's host would fetch"
         (download) => typeof download.variant !== "string" && downloadServesLane(download, backend),
       );
       const floor = laneTiers.get(`${backend}:${model.id}`) ?? new Set();
+      // sc-22729: and the lane's own code must be able to LOAD the tier — see
+      // `codeDerivedTierOverrides`, the only other narrowing this denominator admits.
+      const override = overrides.get(`${model.id}:${backend}`);
       for (const tier of new Set(shipped.map((download) => download.variant))) {
         const serves =
-          bundled ||
-          floor.has(tier) ||
-          shipped.some((download) => download.variant === tier && downloadServesLane(download, backend));
+          (bundled ||
+            floor.has(tier) ||
+            shipped.some(
+              (download) => download.variant === tier && downloadServesLane(download, backend),
+            )) &&
+          (!override || override.includes(tier));
         assert.equal(
           keys.has(`${model.id}:${tier}:${backend}`),
           serves,
@@ -1007,6 +1178,186 @@ test("qwen_image and ltx_2_5 are measurable on every shipped tier of every route
   assert.equal(gaps.length, 0, gapReport(gaps));
 });
 
+// sc-22729: the SDXL family — five catalog models the worker routes onto ONE engine id (`sdxl`)
+// plus the bespoke `instantid` route — on every shipped tier of every lane that routes them.
+//
+// Every cell is DECLARED — a plan anchor and both closure declarations on both lanes. Two facts
+// keep some of them from being capturable today, both engine-side rather than adapter gaps, and
+// both asserted here so neither can silently widen:
+//   * `instantid_realvisxl` q4/q8 on candle are not CELLS at all — the candle InstantID stack is
+//     dense-only, which the worker's own `instantid.rs` says, so the universe never produces them.
+//   * all three tiers of `illustrious_xl_v1`/`v2` on candle are cells the engine cannot SEAL at
+//     inference c6d6a4db: `candle-gen-sdxl`'s `SDXL_ROUTES` pins revisions this repository no
+//     longer ships. The classification is derived from both sources, so it clears itself when the
+//     inference-side fix (`story/sc-22729-sdxl-route-revisions`) lands and the pin moves.
+const SDXL_FAMILY = [
+  "sdxl", "realvisxl", "realvisxl_lightning", "illustrious_xl_v1", "illustrious_xl_v2",
+  "instantid_realvisxl",
+];
+/** Every candle cell the route drift blocks: both Illustrious models × all three shipped tiers. */
+const SDXL_CANDLE_ROUTE_DRIFT = ["illustrious_xl_v1", "illustrious_xl_v2"]
+  .flatMap((modelId) => ["q4", "q8", "bf16"].map((tier) => `${modelId}:${tier}:candle`));
+
+test("the sdxl family is measurable on every shipped tier of every routed lane", async () => {
+  const cells = (await shippedTieredCells()).filter((cell) => SDXL_FAMILY.includes(cell.modelId));
+  const perModel = new Map();
+  for (const cell of cells) perModel.set(cell.modelId, (perModel.get(cell.modelId) ?? 0) + 1);
+  for (const modelId of SDXL_FAMILY) {
+    assert.ok(perModel.get(modelId) > 0, `${modelId} ships no tiered cell at all`);
+  }
+  // The candle InstantID lane is bf16-only, so its packed tiers are not cells.
+  assert.deepEqual(
+    cells.filter((cell) => cell.modelId === "instantid_realvisxl" && cell.backend === "candle")
+      .map((cell) => cell.tier),
+    ["bf16"],
+    "the candle InstantID stack is dense-only; a packed candle cell would measure bf16 weights",
+  );
+  // Every family cell is measurable except the Illustrious candle routes the engine cannot seal —
+  // and with no inference checkout to read, there are none of those either, because the refusal is
+  // DERIVED. Both directions are asserted so neither mode can quietly assert nothing.
+  const gaps = (await measurabilityGaps()).filter((gap) => SDXL_FAMILY.includes(gap.modelId));
+  assert.deepEqual(
+    gaps.map((gap) => gap.key).sort(),
+    (await readSdxlCandleRoutes()) ? [...SDXL_CANDLE_ROUTE_DRIFT].sort() : [],
+    gapReport(gaps),
+  );
+  // …and those are refused for the engine's own reason, not as missing plan or adapter work.
+  for (const gap of gaps) {
+    assert.equal(gap.status, "harness_unsupported", `${gap.key}: ${gap.reason}`);
+    assert.match(gap.reason, /candle-gen-sdxl pins route/, gap.key);
+    assert.match(gap.reason, /path_has_snapshot/, gap.key);
+    assert.doesNotMatch(gap.reason, /declares no anchor/, `${gap.key} IS planned`);
+  }
+});
+
+// sc-22729 review: all 33 cells the family ships are DECLARED — a plan anchor plus both closure
+// declarations on every routed lane. A cell an engine defect blocks today is still declared: the
+// defect blocks CAPTURE, never DECLARATION (epic 22723 E1), and a dropped declaration would erase
+// the only record that the cell is owed a measurement.
+test("every sdxl-family cell carries a plan anchor and a loader-closure declaration on its lane", async () => {
+  const plan = await readPlan();
+  const closures = JSON.parse(await readFile(path.join(ROOT, "config/anchor-loader-closures.json"), "utf8"));
+  const cells = (await shippedTieredCells()).filter((cell) => SDXL_FAMILY.includes(cell.modelId));
+  // The SHAPE, not a total: the five `sdxl` members carry all three tiers on both lanes, and the
+  // bespoke InstantID route carries three on MLX and only its dense tier on candle. (34 cells; the
+  // story text's "33" predates the derivation and undercounts by one.)
+  const shape = new Map();
+  for (const cell of cells) {
+    const key = `${cell.modelId}:${cell.backend}`;
+    shape.set(key, [...(shape.get(key) ?? []), cell.tier].sort());
+  }
+  assert.deepEqual(
+    Object.fromEntries([...shape].sort()),
+    Object.fromEntries([
+      ...["sdxl", "realvisxl", "realvisxl_lightning", "illustrious_xl_v1", "illustrious_xl_v2"]
+        .flatMap((id) => ["candle", "mlx"].map((lane) => [`${id}:${lane}`, ["bf16", "q4", "q8"]])),
+      ["instantid_realvisxl:candle", ["bf16"]],
+      ["instantid_realvisxl:mlx", ["bf16", "q4", "q8"]],
+    ].sort()),
+  );
+  for (const cell of cells) {
+    assert.ok(plan.anchors[cell.key], `${PLAN_PATH} declares no anchor ${cell.key}`);
+    assert.ok(
+      closures.models[`${cell.modelId}:${cell.backend}`],
+      `config/anchor-loader-closures.json declares no loader closure ${cell.modelId}:${cell.backend}`,
+    );
+  }
+});
+
+// sc-22729 review: the exclusion is DERIVED from both revisions, never written down. Two directions:
+// the pinned tree really does disagree today (so the refusal is live and not a leftover), and an
+// engine that agrees clears it with no edit to this repository.
+// Needs the pinned inference source: the whole claim is about what the ENGINE declares. On CI the
+// parity-scaffold job fetches it and sets INFERENCE_REPO, so a missing clone there is a failure and
+// not a skip — the same rule `anchor-loader-closure.test.mjs` follows for the same reason.
+const sdxlRoutesAvailable = (await readSdxlCandleRoutes()) !== null;
+if (!sdxlRoutesAvailable && process.env.CI) {
+  throw new Error(
+    `no inference checkout supplies ${SDXL_ROUTES_PATH}. On CI this is a FAILURE, not a skip: ` +
+      "check.yml's parity-scaffold job fetches the pinned revision and sets INFERENCE_REPO.",
+  );
+}
+const skipWithoutRoutes = sdxlRoutesAvailable
+  ? false
+  : `no inference checkout supplies ${SDXL_ROUTES_PATH}`;
+
+test("the illustrious candle refusal is derived from the engine's own route revision", { skip: skipWithoutRoutes }, async () => {
+  const models = await readManifestModels();
+  const routes = await readSdxlCandleRoutes();
+  for (const modelId of ["sdxl", "realvisxl", "realvisxl_lightning"]) {
+    assert.equal(sdxlCandleRouteDrift(modelId, "q4", routes, models), null, `${modelId} must not be excluded`);
+  }
+  for (const modelId of ["illustrious_xl_v1", "illustrious_xl_v2"]) {
+    const route = routes.get(modelId);
+    const shipped = tierDownload(models, modelId, route.repository, "q4").revision;
+    assert.notEqual(route.revision, shipped, `${modelId}: the engine and the manifest agree — drop the exclusion`);
+    for (const tier of ["q4", "q8", "bf16"]) {
+      assert.match(sdxlCandleRouteDrift(modelId, tier, routes, models), /candle-gen-sdxl pins route/);
+    }
+    // The same model, against an engine that ships what the manifest ships: no refusal at all.
+    const agreed = new Map(routes).set(modelId, { ...route, revision: shipped });
+    assert.equal(sdxlCandleRouteDrift(modelId, "q4", agreed, models), null, `${modelId}: equal revisions must clear it`);
+  }
+  // A route the engine does not declare AT ALL is refused for that reason, not silently admitted.
+  const without = new Map(routes);
+  without.delete("illustrious_xl_v1");
+  assert.match(sdxlCandleRouteDrift("illustrious_xl_v1", "q4", without, models), /declares no route/);
+});
+
+test("SDXL_ROUTES is parsed from the engine source, and an unreadable checkout refuses nothing", async () => {
+  const routes = parseSdxlRoutes(`
+pub const SDXL_ROUTES: &[SdxlRoute] = &[
+    SdxlRoute { id: "a", repository: "Org/a", revision: "aa", edit: true, lightning: false },
+    SdxlRoute { id: "b", repository: "Org/b", revision: "bb", edit: false, lightning: true },
+];
+`);
+  assert.deepEqual([...routes.keys()], ["a", "b"]);
+  assert.deepEqual(routes.get("b"), { repository: "Org/b", revision: "bb" });
+  assert.throws(() => parseSdxlRoutes("// no table here"), /no longer declares a parsable SDXL_ROUTES/);
+  assert.equal(await readSdxlCandleRoutes(path.join(ROOT, "no", "such", "checkout")), null);
+  assert.equal(await readSdxlCandleRoutes(""), null, "no inference checkout is not a refusal");
+
+  // With nothing to compare against, the cell classifies as it otherwise would and SAYS so.
+  const plan = await readPlan();
+  const key = "illustrious_xl_v1:q4:candle";
+  const row = await classifyAnchor(key, plan.anchors[key], {
+    models: await readManifestModels(),
+    backend: "candle",
+    hubs: [path.join(ROOT, "no", "such", "hub")],
+    current: new Map(),
+    captured: new Map(),
+    declaredLanes: new Set(["illustrious_xl_v1:candle"]),
+    declaredProviders: new Set(["candle:sdxl"]),
+    sdxlRoutes: null,
+  });
+  assert.equal(row.status, "weights_missing");
+  assert.equal(row.routeCheck, SDXL_ROUTES_UNCHECKED);
+});
+
+// sc-22729: the three caller-staged SDXL components are declared in TWO places — the catalog's
+// `SDXL_COMPONENTS` and the candle adapter's own `SDXL_COMPONENTS` — and `candle-gen-sdxl`
+// validates all three at exact upstream revisions. A rename on one side would leave a capture
+// binding a component the engine never sees, so the two lists are proven equal here.
+test("the staged SDXL component env vars agree between the catalog and the candle adapter", async () => {
+  const source = await readFile(path.join(ROOT, "crates/sceneworks-memory-adapter/src/bin/candle.rs"), "utf8");
+  const declared = [...source.matchAll(/"(SCENEWORKS_SDXL_COMPONENT_[A-Z0-9_]+)"/g)].map((match) => match[1]);
+  assert.deepEqual(
+    [...new Set(declared)].sort(),
+    SDXL_COMPONENTS.map((component) => component.env).sort(),
+    "candle.rs SDXL_COMPONENTS and the catalog's SDXL_COMPONENTS must name the same env vars",
+  );
+  // Every component repo is a real corequisite of every SDXL-family model, so `tierDownload`
+  // resolves a revision for it rather than falling back to an unrelated download.
+  const models = await readManifestModels();
+  for (const modelId of SDXL_FAMILY) {
+    for (const component of SDXL_COMPONENTS) {
+      const download = tierDownload(models, modelId, component.repo, "q4");
+      assert.match(download.revision, /^[0-9a-f]{40}$/, `${modelId}/${component.repo}`);
+      assert.equal(download.coRequisite, true, `${modelId}/${component.repo} must be a corequisite`);
+    }
+  }
+});
+
 // sc-22728: the Qwen EDIT family — two catalog ids on one engine provider, one of which loads a
 // built-in distill LoRA — on every shipped tier of every routed lane. Same shape claim as the two
 // cases above: manifest tiers + matrix lanes + plan anchors + both closure declarations.
@@ -1044,6 +1395,20 @@ test("the kolors, ideogram and lens families are measurable on every shipped tie
     ["bf16", "q4", "q8"].flatMap((tier) => [`${id}:${tier}:candle`, `${id}:${tier}:mlx`]),
   );
   assert.deepEqual(cells.map((cell) => cell.key).sort(), expected.sort());
+  const gaps = (await measurabilityGaps()).filter((gap) => family.includes(gap.modelId));
+  assert.equal(gaps.length, 0, gapReport(gaps));
+});
+
+// sc-22733. Same shape claim, for the Mage-Flow family: SIX registered engine providers (three
+// text-to-image checkpoints and three instruction editors), each with its own tiered rehost, all
+// sharing ONE text-encoder/VAE components snapshot. Key sets, never a frozen count.
+test("the mage-flow family is measurable on every shipped tier of every routed lane", async () => {
+  const family = [
+    "mage_flow", "mage_flow_base", "mage_flow_turbo",
+    "mage_flow_edit", "mage_flow_edit_base", "mage_flow_edit_turbo",
+  ];
+  const cells = (await shippedTieredCells()).filter((cell) => family.includes(cell.modelId));
+  assert.equal(cells.length, 6 * 3 * 2, "six models x three shipped tiers x two routed lanes");
   const gaps = (await measurabilityGaps()).filter((gap) => family.includes(gap.modelId));
   assert.equal(gaps.length, 0, gapReport(gaps));
 });
@@ -1153,6 +1518,270 @@ test("the turnkey still family binds one artifact per member, and Ideogram's bf1
     assert.equal(missing.status, "weights_missing");
     assert.match(missing.reason, /ideogram-4-mlx@.*\/q8 on this host/);
   }
+});
+
+// sc-22734. Same shape claim, for the SenseNova-U1 family: six catalog models on TWO engine ids
+// (`sensenova_u1_8b` and its 8-step distill `sensenova_u1_8b_fast`), each shipping its own
+// independently pinned tiered rehost, all six routed on both lanes.
+const SENSENOVA_FAMILY = Object.freeze([
+  "sensenova_u1_8b",
+  "sensenova_u1_8b_infographic_v2",
+  "sensenova_u1_8b_infographic_v3",
+  "sensenova_u1_8b_fast",
+  "sensenova_u1_8b_infographic_v2_fast",
+  "sensenova_u1_8b_infographic_v3_fast",
+]);
+
+test("the sensenova family is measurable on every shipped tier of every routed lane", async () => {
+  const family = SENSENOVA_FAMILY;
+  const cells = (await shippedTieredCells()).filter((cell) => family.includes(cell.modelId));
+  assert.equal(cells.length, family.length * 3 * 2, "six routes x three shipped tiers x two routed lanes");
+  const gaps = (await measurabilityGaps()).filter((gap) => family.includes(gap.modelId));
+  assert.equal(gaps.length, 0, gapReport(gaps));
+});
+
+// The JS table and the Rust adapters are two spellings of ONE binding. A drift between them sends a
+// capture at the wrong artifact family — the infographic ids all ride a shared engine id, so a wrong
+// env would silently load the base SenseNova rehost and re-label its peaks — and nothing downstream
+// would notice, because the record would be well-formed. Bound here rather than trusted.
+test("every sensenova env family and repository is the one the adapter binaries actually read", async () => {
+  const lib = await readFile(path.join(ROOT, ADAPTER_LIB_PATH), "utf8");
+  const repositories = new Map(
+    [...lib.matchAll(/pub const ([A-Z0-9_]+_REPOSITORY): &str =\s*"([^"]+)";/g)].map((match) => [match[2], match[1]]),
+  );
+  const binaries = {
+    mlx: await readFile(path.join(ROOT, "crates/sceneworks-memory-adapter/src/bin/mlx.rs"), "utf8"),
+    candle: await readFile(path.join(ROOT, "crates/sceneworks-memory-adapter/src/bin/candle.rs"), "utf8"),
+  };
+  let checked = 0;
+  for (const id of SENSENOVA_FAMILY) {
+    const family = PROVIDER_FAMILIES[id];
+    assert.ok(family, `${id} has no PROVIDER_FAMILIES row`);
+    for (const backend of family.arms) {
+      assert.ok(
+        repositories.has(family.repo),
+        `${id}:${backend}: ${family.repo} is not a *_REPOSITORY const in ${ADAPTER_LIB_PATH}`,
+      );
+      for (const suffix of ["REPOSITORY", "REVISION", "ROOT"]) {
+        const name = `SCENEWORKS_${family.env}_${suffix}`;
+        assert.ok(
+          binaries[backend].includes(`"${name}"`),
+          `${id}:${backend}: the ${backend} adapter never reads ${name}`,
+        );
+      }
+      checked += 1;
+    }
+  }
+  assert.equal(checked, SENSENOVA_FAMILY.length * 2, "six routes, two lanes each");
+});
+
+/**
+ * sc-22734. The anchor composition is fixed per lane by the harness (`ANCHOR_STRATEGY`), and a plan
+ * row may override it only where the provider CONTRACT refuses the lane default: SenseNova
+ * classifies `StagedResidency` as `StructurallyNotApplicable` on both lanes, so
+ * `contract.validate_selection` would reject the candle default rung before any weight is read.
+ *
+ * The override is therefore DERIVED, not curated: the manifest's own
+ * `<lane>.memoryStrategyStructuralExemptions` is the architecture evidence, and the rule below
+ * reads the whole plan against it — a row's effective rung must be the lane default UNLESS the
+ * manifest exempts that default, in which case it must be `resident`. On the candle lane that is
+ * exactly "resident if and only if `staged_residency` is exempted"; on MLX the default is already
+ * resident, so an exemption moves nothing. No list of model ids and no count lives here: a newly
+ * exempt model, or a withdrawn exemption, moves the requirement on its own.
+ */
+test("an anchor row plans the lane's default rung unless the manifest exempts it", async () => {
+  const plan = await readPlan();
+  const models = new Map((await readManifestModels()).map((model) => [model.id, model]));
+  let overridden = 0;
+  let candleExempt = 0;
+  for (const [key, anchor] of Object.entries(plan.anchors)) {
+    const { modelId, backend } = anchorParts(key);
+    const model = models.get(modelId);
+    // A plan row for a model the manifest does not ship cannot be judged against manifest evidence;
+    // `validatePlan` already refuses an invented model id, so this only skips fixture rows.
+    if (!model) continue;
+    const exemptions = model[backend]?.memoryStrategyStructuralExemptions ?? {};
+    const exempt = Object.hasOwn(exemptions, "staged_residency");
+    // The exemption is scoped to the overlays it names, and an anchor renders exactly one.
+    if (exempt) {
+      assert.ok(
+        (exemptions.staged_residency.overlays ?? []).includes(anchor.overlay),
+        `${key}: the manifest exempts staged_residency only for overlays ` +
+          `${JSON.stringify(exemptions.staged_residency.overlays)}, not ${JSON.stringify(anchor.overlay)}`,
+      );
+    }
+    const fallback = ANCHOR_STRATEGY[backend];
+    const expected = exempt && fallback.rung === "staged_residency"
+      ? { rung: "resident", engagedRungs: ["resident"] }
+      : { rung: fallback.rung, engagedRungs: [...fallback.engagedRungs] };
+    const effective = anchor.strategy ?? fallback;
+    assert.equal(
+      effective.rung,
+      expected.rung,
+      `${key}: manifest ${backend}.memoryStrategyStructuralExemptions ${exempt ? "declares" : "does not declare"} ` +
+        `staged_residency, so the anchor must plan rung ${JSON.stringify(expected.rung)}`,
+    );
+    assert.deepEqual([...effective.engagedRungs], expected.engagedRungs, `${key}: engaged rung set`);
+    if (anchor.strategy) overridden += 1;
+    if (exempt && backend === "candle") candleExempt += 1;
+  }
+  assert.ok(overridden > 0, "the plan exercises the override at least once");
+  assert.ok(candleExempt > 0, "at least one candle row is exempted from the lane's default rung");
+});
+
+// Each Mage variant binds TWO artifact triples: its OWN tiered rehost (never a sibling's — the six
+// checkpoints are architecturally identical, so a crossed root would be caught by nothing else) and
+// the ONE shared components snapshot. This asserts the derivation produces exactly that.
+test("every mage-flow member binds its own rehost plus the one shared components snapshot", async () => {
+  const models = await readManifestModels();
+  const seenComponents = new Set();
+  for (const [modelId, family] of Object.entries(PROVIDER_FAMILIES)) {
+    if (!modelId.startsWith("mage_flow")) continue;
+    assert.deepEqual(family.arms, ["mlx", "candle"], `${modelId} is routed on both lanes`);
+    assert.equal(family.components, MAGE_COMPONENTS, `${modelId} shares the one components row`);
+    // The variant repo is this member's own, and it is the repo the manifest ships the tiers from.
+    const download = tierDownload(models, modelId, family.repo, "q4");
+    assert.equal(download.variant, "q4", `${modelId} ships a q4 tier from ${family.repo}`);
+    assert.ok(!download.coRequisite, `${modelId}'s tier download is the primary, not a co-requisite`);
+    // The components repo is shared: same repo AND same revision for every member.
+    const components = tierDownload(models, modelId, MAGE_COMPONENTS.repo, "q4");
+    assert.ok(components.coRequisite, "the components rows are declared as co-requisites");
+    seenComponents.add(components.revision);
+    // No two members may claim the same variant rehost.
+    const others = Object.entries(PROVIDER_FAMILIES).filter(
+      ([id, other]) => id !== modelId && id.startsWith("mage_flow") && other.repo === family.repo,
+    );
+    assert.deepEqual(others, [], `${modelId} shares its variant rehost with ${others.map(([id]) => id).join(", ")}`);
+  }
+  assert.equal(seenComponents.size, 1, "every Mage entry co-requires the SAME components revision");
+});
+
+// The component directory names this script probes must be the ones the adapters actually stage, or
+// a cell reports `runnable` while the load cannot open its text encoder.
+test("MAGE_COMPONENT_IDS are the adapter's own component-id constants", async () => {
+  const source = await readFile(path.join(ROOT, "crates/sceneworks-memory-adapter/src/lib.rs"), "utf8");
+  const declared = [
+    ["MAGE_COMPONENT_TEXT_ENCODER", "text_encoder"],
+    ["MAGE_COMPONENT_VAE", "vae"],
+  ];
+  for (const [name, value] of declared) {
+    assert.match(source, new RegExp(`pub const ${name}: &str =\\s*"${value}"`));
+  }
+  assert.deepEqual(MAGE_COMPONENT_IDS, declared.map(([, value]) => value));
+  // And both adapter arms stage exactly those two components rather than composing a path.
+  for (const backend of ["mlx", "candle"]) {
+    const arm = await readFile(path.join(ROOT, `crates/sceneworks-memory-adapter/src/bin/${backend}.rs`), "utf8");
+    for (const [name] of declared) {
+      assert.ok(arm.includes(`protocol::${name}`), `${backend}.rs never stages ${name}`);
+    }
+  }
+});
+
+// Every Mage plan row's `calibrationFingerprint` must be the string the PRODUCTION contract emits
+// for that cell, and every row's `loadShape` the shape the WORKER loads that cell under. Both are
+// per (lane, tier) tables, bound here as the adapters bind them (`mage_calibration_fingerprint` in
+// both `mlx.rs` and `candle.rs`, which refuse a plan row naming anything else BEFORE the load):
+//
+// * MLX: `mlx-gen-mage` `production_calibration_fingerprint` (inference PR 953) —
+//   `mage-flow-<route>-<tier>-mlx-shared-ladder-v1`, 18 cells; the registry-conformance family
+//   (`mage-flow-mlx-registry-behavior-v1-<route>-<tier>`) and the retired single string
+//   (`mage-flow-mlx-shared-ladder-2026-08-03-v1`) are never production identities.
+// * Candle: `candle-gen-mage` `production_calibration_fingerprint` —
+//   `mage-flow-cuda-<provider>-<tier>-shared-ladder-v3`, 18 cells.
+// * Shape: the worker's MLX stream evaluates Mage `Applied + Deferred` on every tier (typed rules,
+//   BTR declared on all three tiers), while its Candle stream matches the generated BTR row's own
+//   `tiers` (`["bf16"]`) — deferred on bf16, refused (eager) on q4/q8. The worker's
+//   `memory_route_registry` Mage tests drive both evaluators over the real manifest entries and pin
+//   these rows to them.
+//
+// The cell set is derived (family x shipped tiers x routed lanes), never a frozen count.
+test("every mage-flow plan row names its cell's production identity and the worker's load shape", async () => {
+  const plan = await readPlan();
+  const family = [
+    "mage_flow", "mage_flow_base", "mage_flow_turbo",
+    "mage_flow_edit", "mage_flow_edit_base", "mage_flow_edit_turbo",
+  ];
+  const expectedKeys = (await shippedTieredCells()).filter((cell) => family.includes(cell.modelId)).map((cell) => cell.key).sort();
+  const mage = Object.entries(plan.anchors).filter(([, row]) => family.includes(row.provider));
+  assert.deepEqual(mage.map(([key]) => key).sort(), expectedKeys, "the planned Mage cells are exactly the shipped ones");
+  const route = (provider) => provider.replaceAll("_", "-");
+  const identities = new Set();
+  for (const [key, row] of mage) {
+    const { modelId, tier, backend } = anchorParts(key);
+    assert.equal(row.provider, modelId, `${key}: catalog id and engine provider id are equal on every Mage row`);
+    const expected = backend === "mlx"
+      ? `mage-flow-${route(row.provider)}-${tier}-mlx-shared-ladder-v1`
+      : `mage-flow-cuda-${route(row.provider)}-${tier}-shared-ladder-v3`;
+    assert.equal(row.calibrationFingerprint, expected, `${key} names a fingerprint ${backend} cannot emit`);
+    assert.ok(!row.calibrationFingerprint.startsWith("mage-flow-mlx-registry-behavior-v1"), `${key} names a weights-free conformance string`);
+    assert.notEqual(row.calibrationFingerprint, "mage-flow-mlx-shared-ladder-2026-08-03-v1", `${key} names the retired single string`);
+    assert.ok(!identities.has(row.calibrationFingerprint), `${key} shares its identity with another cell`);
+    identities.add(row.calibrationFingerprint);
+    const shape = backend === "mlx" || tier === "bf16" ? "deferred_materialization" : "eager_materialization";
+    assert.equal(row.loadShape, shape, `${key} must plan the shape the worker loads`);
+    assert.equal(row.overlay, "none", `${key} carries no overlay`);
+  }
+  assert.equal(identities.size, expectedKeys.length, "one identity per cell");
+});
+
+// The manifest's six MLX Mage contract blocks carry the ENGINE'S weights-free conformance identity
+// per row, as every declared MLX family does (FLUX.1: `flux-one-static-registry-behavior-v2-dev`).
+// `mlx-gen-mage` publishes that identity per (route, tier), so the rows are split per tier and no
+// row may carry a production string, the retired single string, or a multi-tier `tiers` list.
+test("every mage-flow MLX manifest row declares its own per-tier registry-conformance identity", async () => {
+  const models = await readManifestModels();
+  for (const modelId of Object.keys(PROVIDER_FAMILIES).filter((id) => id.startsWith("mage_flow"))) {
+    const contract = models.find((model) => model.id === modelId)?.mlx?.memoryStrategyContract;
+    assert.ok(contract, `${modelId} declares an MLX memory contract`);
+    assert.equal(contract.provider, modelId);
+    const cells = new Set();
+    for (const row of contract.implementations) {
+      assert.deepEqual(Object.keys(row).filter((k) => k === "tiers"), ["tiers"], `${modelId}/${row.rung} declares tiers`);
+      assert.equal(row.tiers.length, 1, `${modelId}/${row.rung} rows are split per tier, got ${JSON.stringify(row.tiers)}`);
+      const [tier] = row.tiers;
+      assert.equal(row.fingerprint, `mage-flow-mlx-registry-behavior-v1-${modelId.replaceAll("_", "-")}-${tier}`, `${modelId}/${row.rung}/${tier}`);
+      cells.add(`${row.rung}:${tier}`);
+    }
+    assert.deepEqual(
+      [...cells].sort(),
+      ["bounded_attention", "bounded_decode", "bounded_transformer_residency", "resident", "staged_residency"]
+        .flatMap((rung) => ["bf16", "q4", "q8"].map((tier) => `${rung}:${tier}`)).sort(),
+      `${modelId} declares every rung on every shipped tier exactly once`,
+    );
+  }
+});
+
+// A Mage cell whose components row for THIS tier is not declared (or whose components repo has no
+// rows at all) is `weights_missing` — planned and armed, merely not bindable on this host — and
+// never a thrown error, which would abort the whole `--list` for every other cell (sc-22733 review).
+test("a mage-flow cell with no components row for its tier is weights_missing, not an error", async () => {
+  const family = PROVIDER_FAMILIES.mage_flow;
+  const variant = (tier) => ({ repo: family.repo, revision: REVISION, variant: tier, files: [`${tier}/*`] });
+  const component = (tier, componentId) => ({
+    repo: MAGE_COMPONENTS.repo, revision: UPSTREAM, coRequisite: true, componentId, variant: tier,
+    subdir: `${tier}/${componentId}`, files: [`${tier}/${componentId}/*`],
+  });
+  const models = [
+    { id: "mage_flow", downloads: [variant("q4"), variant("bf16"), ...MAGE_COMPONENT_IDS.map((id) => component("q4", id))] },
+    { id: "mage_flow_base", downloads: [{ ...variant("q4"), repo: PROVIDER_FAMILIES.mage_flow_base.repo }] },
+  ];
+  const hub = await fakeHub([
+    [family.repo, REVISION, "q4"],
+    [family.repo, REVISION, "bf16"],
+    [PROVIDER_FAMILIES.mage_flow_base.repo, REVISION, "q4"],
+    ...MAGE_COMPONENT_IDS.map((id) => [MAGE_COMPONENTS.repo, UPSTREAM, "q4", id]),
+  ]);
+  const context = { models, backend: "mlx", hubs: [hub], current: new Map(), captured: new Map() };
+  const runnable = await classifyAnchor("mage_flow:q4:mlx", { provider: "mage_flow" }, context);
+  assert.equal(runnable.status, "runnable", runnable.reason);
+  assert.equal(runnable.env[`SCENEWORKS_${MAGE_COMPONENTS.env}_ROOT`], snapshotPath(hub, MAGE_COMPONENTS.repo, UPSTREAM));
+  const noTierRow = await classifyAnchor("mage_flow:bf16:mlx", { provider: "mage_flow" }, context);
+  assert.equal(noTierRow.status, "weights_missing");
+  assert.match(noTierRow.reason, /declares no .*Mage-Flow-Components-mlx components row for tier bf16/);
+  assert.ok(noTierRow.roots.some((root) => root.label === "components snapshot"), "the missing root is named");
+  const noRows = await classifyAnchor("mage_flow_base:q4:mlx", { provider: "mage_flow_base" }, context);
+  assert.equal(noRows.status, "weights_missing");
+  assert.match(noRows.reason, /mage_flow_base declares no .* components row for tier q4/);
 });
 
 // sc-22730. The plan's SD3.5 fingerprints are the one claim a capture cannot re-derive on a host
@@ -1278,7 +1907,11 @@ test("every planned turnkey-still fingerprint is one its lane's declaration can 
 test("PROVIDER_FAMILIES repos are the adapter's *_REPOSITORY constants", async () => {
   const lib = await readFile(path.join(ROOT, ADAPTER_LIB_PATH), "utf8");
   const declared = new Set();
-  for (const match of lib.matchAll(/pub const [A-Z0-9_]+_REPOSITORY: &str = "([^"]+)";/g)) {
+  // `\s*` after the `=`, not a space (sc-22734): rustfmt wraps the initializer onto its own line
+  // whenever the declaration exceeds the width, which four of the six SenseNova repository consts
+  // do. A single-space pattern reads those four as UNDECLARED and fails a lane that is in fact
+  // bound — the binding this case exists to check is the const's VALUE, not its line breaks.
+  for (const match of lib.matchAll(/pub const [A-Z0-9_]+_REPOSITORY: &str =\s*"([^"]+)";/g)) {
     declared.add(match[1]);
   }
   assert.ok(declared.size > 0, "lib.rs declares repository constants");

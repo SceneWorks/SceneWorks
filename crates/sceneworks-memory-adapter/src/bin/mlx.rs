@@ -69,6 +69,22 @@ const SDXL_SEED: u64 = 18379;
 // harness's runtime-complete quality contract explicit and mutation-sensitive.
 const SDXL_RMS_THRESHOLD: f64 = MAX_THRESHOLD;
 const SDXL_PLAIN_EXECUTION_PATH: &str = "the MLX SDXL base-only text-to-image path";
+/// sc-22729. The InstantID identity route — a BESPOKE provider, not a registry id. `mlx-gen-catalog`
+/// lists `instantid` in `BESPOKE_UTILITY_CRATES` and registers no `ModelDescriptor` for it, so this
+/// arm loads through the crate's own production entry point (`InstantId::load_with_memory_context`,
+/// the one `image_jobs/instantid.rs` calls) rather than through `registry.load`.
+const INSTANTID_PROVIDER: &str = "instantid";
+const INSTANTID_MODEL_ID: &str = "instantid_realvisxl";
+/// `mlx-gen-instantid` publishes its request-contract revision AS the calibration fingerprint
+/// (`memory_strategy.rs:16,88` at the pin) — unlike the candle twin, which mints a separate string.
+const INSTANTID_CALIBRATION_FINGERPRINT: &str = "instantid-request-contract-v1";
+const INSTANTID_EXECUTION_PATH: &str = "the MLX InstantID identity-conditioned character path";
+const INSTANTID_STILL_CALIBRATION: &str = "MLX InstantID identity calibration";
+/// The worker's production identity-route defaults (`image_jobs/instantid.rs`
+/// `INSTANTID_IP_SCALE` / `INSTANTID_CONTROLNET_SCALE`).
+const INSTANTID_IP_SCALE: f32 = 0.8;
+const INSTANTID_CONTROLNET_SCALE: f32 = 0.8;
+const INSTANTID_SEED: u64 = 18381;
 const KREA_PROVIDER: &str = "krea_2_turbo_control";
 const KREA_OVERLAY_REPOSITORY: &str = "SceneWorks/krea2-pose-controlnet-beta";
 const KREA_OVERLAY_FILE: &str = "control_step5000.safetensors";
@@ -1154,6 +1170,8 @@ mod tests {
             "z_image",
             "krea_2_turbo",
             "sdxl",
+            // sc-22729: the bespoke InstantID route is its own provider id on its own arm.
+            "instantid",
             "krea_2_turbo_control",
             "flux2_dev",
             // sc-22727: both klein catalog models ride this ONE registry id.
@@ -1186,6 +1204,7 @@ mod tests {
         assert_eq!(Z_IMAGE_BASE_PROVIDER, "z_image");
         assert_eq!(KREA_BASE_PROVIDER, "krea_2_turbo");
         assert_eq!(SDXL_PROVIDER, "sdxl");
+        assert_eq!(INSTANTID_PROVIDER, "instantid");
         assert_eq!(KREA_PROVIDER, "krea_2_turbo_control");
         assert_eq!(FLUX2_PROVIDER, "flux2_dev");
         assert_eq!(FLUX2_KLEIN_PROVIDER, "flux2_klein_9b");
@@ -1197,6 +1216,441 @@ mod tests {
         assert_eq!(CHROMA1_HD_PROVIDER, "chroma1_hd");
         assert_eq!(CHROMA1_BASE_PROVIDER, "chroma1_base");
         assert_eq!(CHROMA1_FLASH_PROVIDER, "chroma1_flash");
+    }
+
+    fn sdxl_planned(model_id: &str, tier: &str, width: u32) -> Value {
+        json!({
+            "planned": {
+                "target": {
+                    "provider": "sdxl",
+                    "modelId": model_id,
+                    "tier": tier,
+                    "mode": "text_to_image",
+                    "overlay": "none",
+                    "geometry": { "width": width, "height": width, "batch": 1, "frames": 1 }
+                },
+                "backend": "mlx",
+                "loadShape": "deferred_materialization",
+                "strategy": { "rung": "resident", "engagedRungs": ["resident"], "parameters": {} },
+                "calibrationFingerprint": SDXL_CALIBRATION_FINGERPRINT,
+                "fixture": "unused"
+            }
+        })
+    }
+
+    fn sdxl_snapshot_root(repository: &str, revision: &str, tier: &str) -> PathBuf {
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir()
+            .join(format!("sc-22729-sdxl-{}-{nonce}", std::process::id()))
+            .join(format!("models--{}", repository.replace('/', "--")))
+            .join("snapshots")
+            .join(revision)
+            .join(tier);
+        std::fs::create_dir_all(&root).unwrap();
+        root
+    }
+
+    /// sc-22729: the family member is read off the plan's `modelId`, and a model id no member
+    /// serves is refused BY NAME rather than measured as base SDXL. The engine id alone is not an
+    /// artifact identity — all five load through the same `sdxl` provider.
+    #[test]
+    fn sdxl_arm_is_resolved_from_the_plans_model_id() {
+        for (model_id, repository, prefix) in [
+            ("sdxl", protocol::SDXL_REPOSITORY, "sdxl-base-mlx"),
+            ("realvisxl", protocol::REALVISXL_REPOSITORY, "realvisxl-mlx"),
+            (
+                "realvisxl_lightning",
+                protocol::REALVISXL_LIGHTNING_REPOSITORY,
+                "realvisxl-lightning-mlx",
+            ),
+            (
+                "illustrious_xl_v1",
+                protocol::ILLUSTRIOUS_XL_V1_REPOSITORY,
+                "illustrious-xl-v1-mlx",
+            ),
+            (
+                "illustrious_xl_v2",
+                protocol::ILLUSTRIOUS_XL_V2_REPOSITORY,
+                "illustrious-xl-v2-mlx",
+            ),
+        ] {
+            let arm = sdxl_arm(&sdxl_planned(model_id, "q4", 768)).unwrap();
+            assert_eq!(arm.model_id, model_id);
+            assert_eq!(arm.expected_repository, repository);
+            assert_eq!(arm.fixture_prefix, prefix);
+        }
+        // Every arm's env family, execution path, calibration label and slug is its OWN, so one
+        // member's plan can never be satisfied by another member's staged weights.
+        for field in [
+            SDXL_FAMILY.map(|arm| arm.repository_env).to_vec(),
+            SDXL_FAMILY.map(|arm| arm.revision_env).to_vec(),
+            SDXL_FAMILY.map(|arm| arm.root_env).to_vec(),
+            SDXL_FAMILY.map(|arm| arm.expected_repository).to_vec(),
+            SDXL_FAMILY.map(|arm| arm.execution_path).to_vec(),
+            SDXL_FAMILY.map(|arm| arm.still_calibration).to_vec(),
+            SDXL_FAMILY.map(|arm| arm.fixture_prefix).to_vec(),
+            SDXL_FAMILY.map(|arm| arm.slug).to_vec(),
+        ] {
+            let mut unique = field.clone();
+            unique.sort_unstable();
+            unique.dedup();
+            assert_eq!(unique.len(), field.len(), "collision in {field:?}");
+        }
+        for absent in ["instantid_realvisxl", "sdxl_turbo", "z_image"] {
+            let error = sdxl_arm(&sdxl_planned(absent, "q4", 768)).unwrap_err();
+            assert!(error.contains(&format!("modelId {absent:?}")), "{error}");
+        }
+        let error = sdxl_arm(&json!({
+            "planned": { "target": { "provider": "krea_2_turbo", "modelId": "sdxl" } }
+        }))
+        .unwrap_err();
+        assert!(error.contains("does not implement provider"), "{error}");
+    }
+
+    /// sc-22729: the LoadSpec mirrors the worker's MLX still-image shape — the resolved catalog
+    /// route (`image_jobs/base.rs:8785`), the deferred load shape the registry's legacy shaper
+    /// applies to every MLX `sdxl` rule, and the tier's advisory quant
+    /// (`mlx_load_quant_for_resolved_artifact` forwards it for `sdxl`). A q8 plan is never
+    /// satisfied by a q4 export.
+    #[test]
+    fn sdxl_spec_binds_the_route_the_tier_and_the_worker_load_shape() {
+        const REVISION: &str = "36699bb8a6353e61c920e3bf19f0e6f8e4151c55";
+        for arm in SDXL_FAMILY {
+            for (tier, quant) in [
+                ("q4", Some(Quant::Q4)),
+                ("q8", Some(Quant::Q8)),
+                ("bf16", None),
+            ] {
+                let root = sdxl_snapshot_root(arm.expected_repository, REVISION, tier);
+                let selection = MemorySelection {
+                    strategy: MemoryStrategy::Resident,
+                    parameters: MemoryStrategyParameters::default(),
+                    tier: MemoryNumericTier {
+                        precision: Precision::Bf16,
+                        quant,
+                        component_precision_floors: &[],
+                    },
+                };
+                let spec = sdxl_spec_at(arm, root, tier, &selection)
+                    .unwrap_or_else(|error| panic!("{}/{tier}: {error}", arm.model_id));
+                assert_eq!(spec.quantize, quant, "{}/{tier} load quant", arm.model_id);
+                assert_eq!(spec.load_shape, LoadShape::DeferredMaterialization);
+                assert_eq!(spec.offload_policy, OffloadPolicy::Resident);
+                assert_eq!(
+                    spec.resolved_route.as_deref(),
+                    Some(arm.model_id),
+                    "the capture must bind the CATALOG route, not the engine id"
+                );
+            }
+            // A selection whose quant disagrees with the planned tier is refused, so a q8 plan can
+            // never be satisfied by a q4 selection that merely reused the tier string.
+            let root = sdxl_snapshot_root(arm.expected_repository, REVISION, "q8");
+            let mismatched = MemorySelection {
+                strategy: MemoryStrategy::Resident,
+                parameters: MemoryStrategyParameters::default(),
+                tier: MemoryNumericTier {
+                    precision: Precision::Bf16,
+                    quant: Some(Quant::Q4),
+                    component_precision_floors: &[],
+                },
+            };
+            let error = sdxl_spec_at(arm, root, "q8", &mismatched).unwrap_err();
+            assert!(error.contains("q8"), "{}: {error}", arm.model_id);
+        }
+        // A non-resident rung asks the loader to release components in phase order, exactly as the
+        // fit gate's `apply_residency_policy` would settle it.
+        let root = sdxl_snapshot_root(protocol::REALVISXL_REPOSITORY, REVISION, "bf16");
+        let staged = MemorySelection {
+            strategy: MemoryStrategy::StagedResidency,
+            parameters: MemoryStrategyParameters::default(),
+            tier: MemoryNumericTier {
+                precision: Precision::Bf16,
+                quant: None,
+                component_precision_floors: &[],
+            },
+        };
+        let spec = sdxl_spec_at(REALVISXL_ARM, root, "bf16", &staged).unwrap();
+        assert_eq!(spec.offload_policy, OffloadPolicy::Sequential);
+    }
+
+    /// sc-22729: the fixture stem names the MODEL. Reusing base SDXL's fixture on a `realvisxl`
+    /// plan is refused, which is the only thing that keeps a finetune's peaks from being filed
+    /// under the base model when both load through the same provider id.
+    #[test]
+    fn sdxl_fixture_binds_the_family_member_not_just_the_engine() {
+        let fixture = |name: &str| json!({ "planned": { "target": { "provider": "sdxl", "modelId": "realvisxl" }, "fixture": name } });
+        assert_eq!(
+            planned_sdxl_seed(
+                &fixture("realvisxl-mlx-q4-768-seed18379-step2"),
+                REALVISXL_ARM,
+                "q4",
+                768
+            )
+            .unwrap(),
+            SDXL_SEED
+        );
+        for wrong in [
+            "sdxl-base-mlx-q4-768-seed18379-step2",
+            "realvisxl-mlx-q8-768-seed18379-step2",
+            "realvisxl-mlx-q4-1024-seed18379-step2",
+        ] {
+            assert!(
+                planned_sdxl_seed(&fixture(wrong), REALVISXL_ARM, "q4", 768).is_err(),
+                "{wrong} was accepted for realvisxl/q4/768"
+            );
+        }
+        assert!(planned_sdxl_seed(
+            &fixture("realvisxl-mlx-q4-768-seed18379-step30"),
+            REALVISXL_ARM,
+            "q4",
+            768
+        )
+        .is_err());
+    }
+
+    /// sc-22729: the InstantID arm is the bespoke identity route and refuses every other identity
+    /// — a different provider, a different catalog model, a non-character mode, or a plan that
+    /// asks for the deferred shape the pinned provider can never publish.
+    #[test]
+    fn instantid_target_binds_the_bespoke_identity_route() {
+        let planned = |provider: &str, model_id: &str, mode: &str, overlay: &str| {
+            json!({
+                "planned": {
+                    "target": {
+                        "provider": provider, "modelId": model_id, "tier": "bf16", "mode": mode,
+                        "overlay": overlay,
+                        "geometry": { "width": 1024, "height": 1024, "batch": 1, "frames": 1 }
+                    },
+                    "backend": "mlx",
+                    "loadShape": "eager_materialization",
+                    "strategy": { "rung": "resident", "engagedRungs": ["resident"], "parameters": {} },
+                    "calibrationFingerprint": INSTANTID_CALIBRATION_FINGERPRINT,
+                    "fixture": "instantid-realvisxl-mlx-bf16-1024-seed18381-step2"
+                }
+            })
+        };
+        validate_instantid_target(&planned(
+            "instantid",
+            "instantid_realvisxl",
+            "character_image",
+            "identity",
+        ))
+        .unwrap();
+        for (provider, model_id, mode, overlay, needle) in [
+            (
+                "sdxl",
+                "instantid_realvisxl",
+                "character_image",
+                "identity",
+                "does not implement provider",
+            ),
+            (
+                "instantid",
+                "realvisxl",
+                "character_image",
+                "identity",
+                "requires modelId",
+            ),
+            (
+                "instantid",
+                "instantid_realvisxl",
+                "text_to_image",
+                "identity",
+                "character_image mode",
+            ),
+            (
+                "instantid",
+                "instantid_realvisxl",
+                "character_image",
+                "none",
+                "identity",
+            ),
+        ] {
+            let error =
+                validate_instantid_target(&planned(provider, model_id, mode, overlay)).unwrap_err();
+            assert!(
+                error.contains(needle),
+                "{provider}/{model_id}/{mode}/{overlay}: {error}"
+            );
+        }
+        // The provider hard-codes `LoadShape::EagerMaterialization` on its calibration identity, so
+        // a deferred plan is refused before any weight is opened.
+        let mut deferred = planned(
+            "instantid",
+            "instantid_realvisxl",
+            "character_image",
+            "identity",
+        );
+        deferred["planned"]["loadShape"] = json!("deferred_materialization");
+        let error = run_instantid(&deferred).unwrap_err();
+        assert!(error.contains("eager_materialization"), "{error}");
+        // The MLX lane honours all three packed tiers (the candle lane is dense-only).
+        assert_eq!(instantid_numeric_tier("q4").quant, Some(Quant::Q4));
+        assert_eq!(instantid_numeric_tier("q8").quant, Some(Quant::Q8));
+        assert_eq!(instantid_numeric_tier("bf16").quant, None);
+    }
+
+    /// sc-22729: the artifact digest is over the ORDERED paths with a record separator, so a swap
+    /// between two roles changes it and two different splits of the same text cannot collide. This
+    /// is the axis the provider's `overlay_key()` carries, so it is what stops one InstantID
+    /// artifact set from pricing another.
+    #[test]
+    fn instantid_artifact_fingerprint_is_ordered_and_separated() {
+        let a = Path::new("/w/a");
+        let b = Path::new("/w/b");
+        assert_ne!(
+            instantid_artifact_fingerprint(&[a, b]),
+            instantid_artifact_fingerprint(&[b, a]),
+            "role order must be part of the digest"
+        );
+        assert_ne!(
+            instantid_artifact_fingerprint(&[Path::new("/ab"), Path::new("/c")]),
+            instantid_artifact_fingerprint(&[Path::new("/a"), Path::new("/bc")]),
+            "the record separator must stop a split collision"
+        );
+        let digest = instantid_artifact_fingerprint(&[a, b]);
+        assert_eq!(digest.len(), 64);
+        assert!(digest.chars().all(|c| c.is_ascii_hexdigit()));
+        assert!(
+            !digest.contains('='),
+            "the shared safety gate rejects = in an overlay"
+        );
+    }
+
+    /// sc-22729 review: the MLX identity arm driven END TO END on a synthetic tree — the twin of
+    /// `candle.rs`'s `instantid_candle_identity_names_the_missing_identitynet_weight`, which can
+    /// only be COMPILE-checked on this host. Nothing used to reach past the environment reads, so
+    /// deleting `protocol::instantid_controlnet_dir()?`, or a file out of the identity bundle, or a
+    /// path out of the digest, reddened nothing.
+    #[test]
+    fn instantid_binding_names_the_missing_identitynet_weight_and_covers_five_ordered_paths() {
+        use protocol::staging::StagedInstantId;
+
+        let staged =
+            StagedInstantId::install("mlx-instantid", protocol::REALVISXL_REPOSITORY, "bf16");
+        let error = match instantid_binding("bf16") {
+            Err(error) => error,
+            Ok(_) => panic!("an IdentityNet directory carrying no weight file must be refused"),
+        };
+        assert!(
+            error.contains(protocol::INSTANTID_CONTROLNET_WEIGHT_FILE),
+            "{error}"
+        );
+
+        staged.stage_identitynet_weight();
+        let binding = match instantid_binding("bf16") {
+            Ok(binding) => binding,
+            Err(error) => panic!("a complete staged tree must bind: {error}"),
+        };
+        assert_eq!(binding.repository, protocol::REALVISXL_REPOSITORY);
+        assert_eq!(binding.revision, StagedInstantId::REVISION);
+
+        let digest_of = |paths: &[PathBuf]| {
+            instantid_artifact_fingerprint(&paths.iter().map(PathBuf::as_path).collect::<Vec<_>>())
+        };
+        // The digest covers EXACTLY these five, in exactly this order: a permutation and every
+        // four-path subset both differ.
+        let ordered = staged.ordered_paths();
+        assert_eq!(binding.artifact_fingerprint, digest_of(&ordered));
+        let mut swapped = ordered.clone();
+        swapped.swap(3, 4);
+        assert_ne!(
+            binding.artifact_fingerprint,
+            digest_of(&swapped),
+            "the digest must be order-sensitive across the face stack"
+        );
+        for dropped in 0..ordered.len() {
+            let mut short = ordered.clone();
+            short.remove(dropped);
+            assert_ne!(
+                binding.artifact_fingerprint,
+                digest_of(&short),
+                "path {dropped} is not covered by the digest"
+            );
+        }
+        // …and the bundle the binding resolved is the staged one, so a missing bundle file would
+        // have refused above rather than silently binding an empty face stack.
+        assert_eq!(
+            binding.bundle.face_dir,
+            std::fs::canonicalize(&staged.bundle).unwrap()
+        );
+    }
+
+    /// sc-22729: the calibration fingerprints the plan may cite are exactly the strings the pinned
+    /// crates publish — never a hand-written label. `mlx-gen-sdxl` mints ONE route-independent
+    /// string for the whole family; `mlx-gen-instantid` reuses its request-contract revision.
+    ///
+    /// The second half walks the COMMITTED plan: every MLX SDXL-family and InstantID row must cite
+    /// the string its crate can actually emit, and must declare the load shape that crate publishes
+    /// (SDXL takes it from the spec — the worker's deferred shape; InstantID hard-codes eager). A
+    /// plan row that cites a registry-conformance label or the wrong shape would be refused at
+    /// capture time, on a booked host, instead of here.
+    #[test]
+    fn planned_fingerprints_are_the_pinned_crates_own_strings() {
+        assert_eq!(
+            SDXL_CALIBRATION_FINGERPRINT,
+            mlx_gen_sdxl::memory_strategy::MEMORY_CALIBRATION_FINGERPRINT
+        );
+        assert_eq!(
+            INSTANTID_CALIBRATION_FINGERPRINT,
+            mlx_gen_instantid::memory_strategy::REQUEST_EVIDENCE_REVISION
+        );
+        let plan: Value = serde_json::from_str(include_str!(
+            "../../../../config/memory-calibration-plan.json"
+        ))
+        .expect("the anchor plan is valid JSON");
+        let mut checked: Vec<String> = Vec::new();
+        for (key, anchor) in plan["anchors"].as_object().expect("anchors is an object") {
+            if !key.ends_with(":mlx") {
+                continue;
+            }
+            let (fingerprint, load_shape, mode) = match anchor["provider"].as_str() {
+                Some(SDXL_PROVIDER) => (
+                    SDXL_CALIBRATION_FINGERPRINT,
+                    protocol::LOAD_SHAPE_DEFERRED,
+                    "text_to_image",
+                ),
+                Some(INSTANTID_PROVIDER) => (
+                    INSTANTID_CALIBRATION_FINGERPRINT,
+                    protocol::LOAD_SHAPE_EAGER,
+                    "character_image",
+                ),
+                _ => continue,
+            };
+            assert_eq!(
+                anchor["calibrationFingerprint"],
+                json!(fingerprint),
+                "{key}"
+            );
+            assert_eq!(anchor["loadShape"], json!(load_shape), "{key}");
+            assert_eq!(anchor["mode"], json!(mode), "{key}");
+            let model_id = key.split(':').next().expect("anchor key shape");
+            assert!(
+                SDXL_FAMILY.iter().any(|arm| arm.model_id == model_id)
+                    || model_id == INSTANTID_MODEL_ID,
+                "{key} names a model no arm serves"
+            );
+            checked.push(key.clone());
+        }
+        // Not a floor (the candle twin's `>= 6` had the same defect, sc-22729 review): the EXACT
+        // set of MLX keys the family plans. A floor stayed green with a whole member deleted from
+        // the plan, which is the one thing this case is here to notice.
+        checked.sort();
+        let mut expected = SDXL_FAMILY
+            .iter()
+            .map(|arm| arm.model_id)
+            .chain(std::iter::once(INSTANTID_MODEL_ID))
+            .flat_map(|model_id| {
+                ["bf16", "q4", "q8"]
+                    .into_iter()
+                    .map(move |tier| format!("{model_id}:{tier}:mlx"))
+            })
+            .collect::<Vec<_>>();
+        expected.sort();
+        assert_eq!(checked, expected);
     }
 
     #[test]
@@ -7366,7 +7820,104 @@ fn run_krea_base(request: &Value) -> Result<Value, String> {
     Ok(fragment)
 }
 
-fn validate_sdxl_target(request: &Value) -> Result<(), String> {
+/// One member of the MLX SDXL family (sc-22729).
+///
+/// The worker routes five catalog models onto the single `sdxl` engine id
+/// (`crates/sceneworks-worker/src/engines.rs` `MODEL_TABLE`), each with its own independently
+/// pinned tiered rehost. `mlx-gen-sdxl` registers only `MODEL_ID = "sdxl"` and mints ONE
+/// route-independent fingerprint, so the arm is keyed on `(provider, modelId)`: the provider names
+/// the engine, the model id names the artifact family the capture must actually open. Binding the
+/// engine id alone would let a `realvisxl` plan be satisfied by base-SDXL weights and re-label base
+/// SDXL's peaks as the finetune's.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct SdxlArm {
+    /// The catalog model id — `planned.target.modelId`, and the spec's `resolved_route` (the
+    /// worker binds exactly this at `image_jobs/base.rs:8785`).
+    model_id: &'static str,
+    execution_path: &'static str,
+    still_calibration: &'static str,
+    repository_env: &'static str,
+    revision_env: &'static str,
+    root_env: &'static str,
+    expected_repository: &'static str,
+    /// The `planned.fixture` stem, so a capture of one family member can never be attributed to
+    /// another (`<prefix>-<tier>-<width>-seed<n>-step2`).
+    fixture_prefix: &'static str,
+    /// The record's diagnostics source, `memory-mlx-adapter:<slug>-shared-ladder`.
+    slug: &'static str,
+}
+
+const SDXL_BASE_ARM: SdxlArm = SdxlArm {
+    model_id: "sdxl",
+    execution_path: SDXL_PLAIN_EXECUTION_PATH,
+    still_calibration: "MLX SDXL base calibration",
+    repository_env: "SCENEWORKS_SDXL_REPOSITORY",
+    revision_env: "SCENEWORKS_SDXL_REVISION",
+    root_env: "SCENEWORKS_SDXL_ROOT",
+    expected_repository: protocol::SDXL_REPOSITORY,
+    fixture_prefix: "sdxl-base-mlx",
+    slug: "sdxl",
+};
+
+const REALVISXL_ARM: SdxlArm = SdxlArm {
+    model_id: "realvisxl",
+    execution_path: "the MLX RealVisXL base-only text-to-image path",
+    still_calibration: "MLX RealVisXL base calibration",
+    repository_env: "SCENEWORKS_REALVISXL_REPOSITORY",
+    revision_env: "SCENEWORKS_REALVISXL_REVISION",
+    root_env: "SCENEWORKS_REALVISXL_ROOT",
+    expected_repository: protocol::REALVISXL_REPOSITORY,
+    fixture_prefix: "realvisxl-mlx",
+    slug: "realvisxl",
+};
+
+const REALVISXL_LIGHTNING_ARM: SdxlArm = SdxlArm {
+    model_id: "realvisxl_lightning",
+    execution_path: "the MLX RealVisXL Lightning base-only text-to-image path",
+    still_calibration: "MLX RealVisXL Lightning base calibration",
+    repository_env: "SCENEWORKS_REALVISXL_LIGHTNING_REPOSITORY",
+    revision_env: "SCENEWORKS_REALVISXL_LIGHTNING_REVISION",
+    root_env: "SCENEWORKS_REALVISXL_LIGHTNING_ROOT",
+    expected_repository: protocol::REALVISXL_LIGHTNING_REPOSITORY,
+    fixture_prefix: "realvisxl-lightning-mlx",
+    slug: "realvisxl-lightning",
+};
+
+const ILLUSTRIOUS_XL_V1_ARM: SdxlArm = SdxlArm {
+    model_id: "illustrious_xl_v1",
+    execution_path: "the MLX Illustrious-XL v1 base-only text-to-image path",
+    still_calibration: "MLX Illustrious-XL v1 base calibration",
+    repository_env: "SCENEWORKS_ILLUSTRIOUS_XL_V1_REPOSITORY",
+    revision_env: "SCENEWORKS_ILLUSTRIOUS_XL_V1_REVISION",
+    root_env: "SCENEWORKS_ILLUSTRIOUS_XL_V1_ROOT",
+    expected_repository: protocol::ILLUSTRIOUS_XL_V1_REPOSITORY,
+    fixture_prefix: "illustrious-xl-v1-mlx",
+    slug: "illustrious-xl-v1",
+};
+
+const ILLUSTRIOUS_XL_V2_ARM: SdxlArm = SdxlArm {
+    model_id: "illustrious_xl_v2",
+    execution_path: "the MLX Illustrious-XL v2 base-only text-to-image path",
+    still_calibration: "MLX Illustrious-XL v2 base calibration",
+    repository_env: "SCENEWORKS_ILLUSTRIOUS_XL_V2_REPOSITORY",
+    revision_env: "SCENEWORKS_ILLUSTRIOUS_XL_V2_REVISION",
+    root_env: "SCENEWORKS_ILLUSTRIOUS_XL_V2_ROOT",
+    expected_repository: protocol::ILLUSTRIOUS_XL_V2_REPOSITORY,
+    fixture_prefix: "illustrious-xl-v2-mlx",
+    slug: "illustrious-xl-v2",
+};
+
+const SDXL_FAMILY: [SdxlArm; 5] = [
+    SDXL_BASE_ARM,
+    REALVISXL_ARM,
+    REALVISXL_LIGHTNING_ARM,
+    ILLUSTRIOUS_XL_V1_ARM,
+    ILLUSTRIOUS_XL_V2_ARM,
+];
+
+/// Which family member the plan asks for. Refuses by name — a model id no member serves must not
+/// be measured as its nearest neighbour, and the engine id alone is NOT an artifact identity.
+fn sdxl_arm(request: &Value) -> Result<SdxlArm, String> {
     let target = protocol::planned(request)?
         .get("target")
         .and_then(Value::as_object)
@@ -7384,26 +7935,45 @@ fn validate_sdxl_target(request: &Value) -> Result<(), String> {
         .get("modelId")
         .and_then(Value::as_str)
         .ok_or_else(|| "planned.target.modelId must be a string".to_owned())?;
-    if model_id != SDXL_PROVIDER {
-        return Err(format!(
-            "MLX SDXL base calibration requires modelId {SDXL_PROVIDER:?}, got {model_id:?}"
-        ));
-    }
+    SDXL_FAMILY
+        .into_iter()
+        .find(|arm| arm.model_id == model_id)
+        .ok_or_else(|| {
+            format!(
+                "the MLX SDXL arm does not implement modelId {model_id:?} on provider \
+                 {SDXL_PROVIDER:?} (family: {})",
+                SDXL_FAMILY
+                    .iter()
+                    .map(|arm| arm.model_id)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )
+        })
+}
+
+fn validate_sdxl_target(request: &Value) -> Result<SdxlArm, String> {
+    let arm = sdxl_arm(request)?;
+    let target = protocol::planned(request)?
+        .get("target")
+        .and_then(Value::as_object)
+        .ok_or_else(|| "planned.target must be an object".to_owned())?;
     let mode = target
         .get("mode")
         .and_then(Value::as_str)
         .ok_or_else(|| "planned.target.mode must be a string".to_owned())?;
     if mode != "text_to_image" {
         return Err(format!(
-            "MLX SDXL base calibration requires reference-free text_to_image mode, got {mode:?}"
+            "{} requires reference-free text_to_image mode, got {mode:?}",
+            arm.still_calibration
         ));
     }
-    protocol::validate_still_geometry(request, "MLX SDXL base calibration")?;
+    protocol::validate_still_geometry(request, arm.still_calibration)?;
     for field in ["referenceCount", "reference_count"] {
         if let Some(value) = target.get(field) {
             if value.as_u64() != Some(0) {
                 return Err(format!(
-                    "MLX SDXL base calibration requires {field} == 0 when declared"
+                    "{} requires {field} == 0 when declared",
+                    arm.still_calibration
                 ));
             }
         }
@@ -7412,12 +7982,14 @@ fn validate_sdxl_target(request: &Value) -> Result<(), String> {
         if let Some(value) = target.get(field) {
             if value.as_bool() != Some(false) {
                 return Err(format!(
-                    "MLX SDXL base calibration requires {field} == false when declared"
+                    "{} requires {field} == false when declared",
+                    arm.still_calibration
                 ));
             }
         }
     }
-    protocol::validate_plain_overlay_target(request, SDXL_PLAIN_EXECUTION_PATH)
+    protocol::validate_plain_overlay_target(request, arm.execution_path)?;
+    Ok(arm)
 }
 
 fn validate_sdxl_selection_parameters(
@@ -7462,12 +8034,14 @@ fn validate_sdxl_selection_parameters(
     Ok(())
 }
 
-fn planned_sdxl_seed(request: &Value, tier: &str, width: u32) -> Result<u64, String> {
+fn planned_sdxl_seed(request: &Value, arm: SdxlArm, tier: &str, width: u32) -> Result<u64, String> {
     let fixture = protocol::planned(request)?
         .get("fixture")
         .and_then(Value::as_str)
         .ok_or_else(|| "planned.fixture must be a string".to_owned())?;
-    let prefix = format!("sdxl-base-mlx-{tier}-{width}-seed");
+    // sc-22729: the fixture stem names the MODEL, not the engine, so a `realvisxl` capture can
+    // never be attributed to `sdxl` (both load through the same `sdxl` provider id).
+    let prefix = format!("{}-{tier}-{width}-seed", arm.fixture_prefix);
     let remainder = fixture
         .strip_prefix(&prefix)
         .ok_or_else(|| format!("planned.fixture {fixture:?} must start with {prefix:?}"))?;
@@ -7517,25 +8091,52 @@ fn sdxl_request(width: u32, height: u32, seed: u64) -> GenerationRequest {
 }
 
 fn sdxl_load_spec(
-    request: &Value,
+    arm: SdxlArm,
     tier: &str,
     selection: &MemorySelection,
 ) -> Result<(String, String, LoadSpec), String> {
-    validate_sdxl_target(request)?;
-    let repository = protocol::required_env("SCENEWORKS_SDXL_REPOSITORY")?;
-    let revision = protocol::required_env("SCENEWORKS_SDXL_REVISION")?;
-    protocol::validate_artifact_identity(&repository, &revision, protocol::SDXL_REPOSITORY)?;
-    let root = std::fs::canonicalize(PathBuf::from(protocol::required_env(
-        "SCENEWORKS_SDXL_ROOT",
-    )?))
-    .map_err(|error| format!("canonicalize SCENEWORKS_SDXL_ROOT: {error}"))?;
+    let repository = protocol::required_env(arm.repository_env)?;
+    let revision = protocol::required_env(arm.revision_env)?;
+    protocol::validate_artifact_identity(&repository, &revision, arm.expected_repository)?;
+    let root = std::fs::canonicalize(PathBuf::from(protocol::required_env(arm.root_env)?))
+        .map_err(|error| format!("canonicalize {}: {error}", arm.root_env))?;
     protocol::validate_huggingface_snapshot_root(
         &root,
         &repository,
         &revision,
         tier,
-        protocol::SDXL_REPOSITORY,
+        arm.expected_repository,
     )?;
+    Ok((
+        repository,
+        revision,
+        sdxl_spec_at(arm, root, tier, selection)?,
+    ))
+}
+
+/// The env-free half of [`sdxl_load_spec`], so the tier and route binding are unit-testable.
+///
+/// Mirrors the worker's still-image MLX shape: `load_spec` + the resolved tier's advisory quant
+/// (`mlx_load_quant_for_resolved_artifact` returns the quant for `sdxl` — it suppresses it only for
+/// the krea/klein turnkeys), `DeferredMaterialization` from the registry's legacy shaper
+/// (`memory_route_registry.rs` MLX `sdxl` rules are `legacy_shaping: true`), and
+/// `with_resolved_route(request.model)` (`image_jobs/base.rs:8785`, "a shared engine such as `sdxl`
+/// serves several independently pinned catalog routes"). The offload policy is not set on the
+/// worker's MLX branch — it is decided later by `mlx_fit_gate::apply_residency_policy` — so the arm
+/// binds the policy the SELECTED rung implies, which is what that gate would settle on.
+fn sdxl_spec_at(
+    arm: SdxlArm,
+    root: PathBuf,
+    tier: &str,
+    selection: &MemorySelection,
+) -> Result<LoadSpec, String> {
+    let (_, expected_quant) = tier_precision_quant(tier);
+    if selection.tier.quant != expected_quant {
+        return Err(format!(
+            "{}: planned tier {tier} implies quant {expected_quant:?}, selection carries {:?}",
+            arm.still_calibration, selection.tier.quant
+        ));
+    }
     let offload = if selection.strategy == MemoryStrategy::Resident {
         OffloadPolicy::Resident
     } else {
@@ -7543,11 +8144,12 @@ fn sdxl_load_spec(
     };
     let mut spec = LoadSpec::new(WeightsSource::Dir(root))
         .with_offload_policy(offload)
-        .with_load_shape(LoadShape::DeferredMaterialization);
-    if let Some(quant) = selection.tier.quant {
+        .with_load_shape(LoadShape::DeferredMaterialization)
+        .with_resolved_route(arm.model_id);
+    if let Some(quant) = expected_quant {
         spec = spec.with_quant(quant);
     }
-    Ok((repository, revision, spec))
+    Ok(spec)
 }
 
 fn sdxl_context(
@@ -7592,7 +8194,7 @@ fn sdxl_context(
 /// Real capture arm for the exact recommended `mlx:sdxl` base T2I identity. It deliberately does
 /// not expose SDXL edit/reference/adapter surfaces or the provider's measured-Missing rungs 2/3.
 fn run_sdxl(request: &Value) -> Result<Value, String> {
-    validate_sdxl_target(request)?;
+    let arm = validate_sdxl_target(request)?;
     let planned_shape = planned_load_shape(request)?;
     if planned_shape != LoadShape::DeferredMaterialization {
         return Err(
@@ -7604,13 +8206,13 @@ fn run_sdxl(request: &Value) -> Result<Value, String> {
     validate_sdxl_selection_parameters(request, &selection)?;
     let tier = planned_qwen_tier(request)?;
     let (width, height) = protocol::target_geometry(request)?;
-    let seed = planned_sdxl_seed(request, tier, width)?;
+    let seed = planned_sdxl_seed(request, arm, tier, width)?;
     if seed != SDXL_SEED {
         return Err(format!(
             "planned.fixture seed {seed} does not match the SDXL calibration seed {SDXL_SEED}"
         ));
     }
-    let (repository, revision, spec) = sdxl_load_spec(request, tier, &selection)?;
+    let (repository, revision, spec) = sdxl_load_spec(arm, tier, &selection)?;
     let registry = mlx_gen_sdxl::provider_registry()
         .map_err(|error| format!("build SDXL registry: {error}"))?;
     let contract = registry
@@ -7819,7 +8421,7 @@ fn run_sdxl(request: &Value) -> Result<Value, String> {
             "resolvedPathFingerprint": format!("{repository}@{revision}:{tier}"),
         },
         "diagnostics": protocol::diagnostics(
-            "memory-mlx-adapter:sdxl-shared-ladder",
+            &format!("memory-mlx-adapter:{}-shared-ladder", arm.slug),
             "executed",
             [lifecycle_blocker.to_owned()],
             [
@@ -7837,7 +8439,514 @@ fn run_sdxl(request: &Value) -> Result<Value, String> {
         ),
         "capturedAt": protocol::captured_at(),
     });
-    protocol::settle_plain_overlay_scenario(request, &mut fragment, SDXL_PLAIN_EXECUTION_PATH)?;
+    protocol::settle_plain_overlay_scenario(request, &mut fragment, arm.execution_path)?;
+    Ok(fragment)
+}
+
+// ----------------------------------------------------------------------------------------------
+// InstantID (sc-22729)
+// ----------------------------------------------------------------------------------------------
+
+/// The ORDERED artifact set one InstantID capture consumes, hashed exactly as the worker hashes it
+/// (`crates/sceneworks-worker/src/image_jobs/instantid.rs` `instantid_artifact_entries` /
+/// `instantid_artifact_fingerprint`): the paths in role order, record-separated, hex sha256. The
+/// role tag is positional, so it is not part of the hashed stream. The digest lands verbatim inside
+/// the provider's `overlay_key()`, which is the axis `validate_context` checks — two different
+/// artifact sets can therefore never price each other.
+fn instantid_artifact_fingerprint(paths: &[&Path]) -> String {
+    let mut hasher = Sha256::new();
+    for path in paths {
+        hasher.update(path.to_string_lossy().as_bytes());
+        hasher.update(b"\x1e");
+    }
+    format!("{:x}", hasher.finalize())
+}
+
+/// The plan's InstantID target: the bespoke `instantid` provider on the `instantid_realvisxl`
+/// catalog model, in the only mode the worker's route serves (`character_image`), under the
+/// `identity` overlay the provider's own `overlay_key()` names.
+fn validate_instantid_target(request: &Value) -> Result<(), String> {
+    let target = protocol::planned(request)?
+        .get("target")
+        .and_then(Value::as_object)
+        .ok_or_else(|| "planned.target must be an object".to_owned())?;
+    let provider = target
+        .get("provider")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "planned.target.provider must be a string".to_owned())?;
+    if provider != INSTANTID_PROVIDER {
+        return Err(format!(
+            "{INSTANTID_STILL_CALIBRATION} does not implement provider {provider:?}"
+        ));
+    }
+    let model_id = target
+        .get("modelId")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "planned.target.modelId must be a string".to_owned())?;
+    if model_id != INSTANTID_MODEL_ID {
+        return Err(format!(
+            "{INSTANTID_STILL_CALIBRATION} requires modelId {INSTANTID_MODEL_ID:?}, got {model_id:?}"
+        ));
+    }
+    let mode = target
+        .get("mode")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "planned.target.mode must be a string".to_owned())?;
+    if mode != "character_image" {
+        return Err(format!(
+            "{INSTANTID_STILL_CALIBRATION} requires character_image mode, got {mode:?}"
+        ));
+    }
+    protocol::validate_still_geometry(request, INSTANTID_STILL_CALIBRATION)?;
+    protocol::validate_exact_overlay_target(request, "identity", INSTANTID_EXECUTION_PATH)
+}
+
+/// Everything one InstantID capture loads, resolved from the environment. The backbone is the
+/// PLAIN `realvisxl` tiered rehost (`image_jobs/instantid.rs` `INSTANTID_SDXL_REPO`); the identity
+/// stack is fetched on first use by the worker rather than declared as a manifest download, so both
+/// halves are bound through the same env seams the worker itself reads.
+struct InstantIdBinding {
+    repository: String,
+    revision: String,
+    paths: mlx_gen_instantid::InstantIdPaths,
+    bundle: protocol::InstantIdIdentityBundle,
+    artifact_fingerprint: String,
+}
+
+fn instantid_binding(tier: &str) -> Result<InstantIdBinding, String> {
+    let repository = protocol::required_env("SCENEWORKS_INSTANTID_REALVISXL_REPOSITORY")?;
+    let revision = protocol::required_env("SCENEWORKS_INSTANTID_REALVISXL_REVISION")?;
+    protocol::validate_artifact_identity(&repository, &revision, protocol::REALVISXL_REPOSITORY)?;
+    let root = std::fs::canonicalize(PathBuf::from(protocol::required_env(
+        "SCENEWORKS_INSTANTID_REALVISXL_ROOT",
+    )?))
+    .map_err(|error| format!("canonicalize SCENEWORKS_INSTANTID_REALVISXL_ROOT: {error}"))?;
+    protocol::validate_huggingface_snapshot_root(
+        &root,
+        &repository,
+        &revision,
+        tier,
+        protocol::REALVISXL_REPOSITORY,
+    )?;
+    let bundle = protocol::instantid_identity_bundle()?;
+    let identitynet = protocol::instantid_controlnet_dir()?;
+    let artifact_fingerprint = instantid_artifact_fingerprint(&[
+        root.as_path(),
+        identitynet.as_path(),
+        bundle.ip_adapter.as_path(),
+        bundle.scrfd.as_path(),
+        bundle.arcface.as_path(),
+    ]);
+    Ok(InstantIdBinding {
+        repository,
+        revision,
+        paths: mlx_gen_instantid::InstantIdPaths {
+            sdxl_base: root,
+            identitynet: WeightsSource::Dir(identitynet),
+            ip_adapter: bundle.ip_adapter.clone(),
+            adapters: Vec::new(),
+        },
+        bundle,
+        artifact_fingerprint,
+    })
+}
+
+/// The MLX InstantID numeric tier, mirroring the worker's `instantid_memory_tier`: the crate's own
+/// dense sentinel with the packed quant the resolved tier selected (MLX honours q4/q8/bf16 —
+/// `image_jobs/instantid.rs` `instantid_memory_backend_keys`).
+fn instantid_numeric_tier(tier: &str) -> MemoryNumericTier {
+    MemoryNumericTier {
+        quant: tier_precision_quant(tier).1,
+        ..mlx_gen_instantid::memory_strategy::dense_numeric_tier()
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn instantid_context(
+    selection: MemorySelection,
+    calibration: &MemoryCalibrationIdentity,
+    fingerprint: &str,
+    overlay: String,
+    width: u32,
+    height: u32,
+    total_bytes: u64,
+    predicted_peak_bytes: u64,
+) -> MemoryRunContext {
+    MemoryRunContext {
+        selection,
+        optimization_authority: MemoryOptimizationAuthority::Calibrated,
+        calibration_abi: calibration.abi,
+        calibration_fingerprint: fingerprint.to_owned(),
+        load_shape: calibration.load_shape,
+        mode: MemoryMode::Other("character_image".into()),
+        has_reference: true,
+        use_pid: false,
+        has_phases: false,
+        geometry: MemoryGeometry {
+            width,
+            height,
+            batch: 1,
+            frames: 1,
+            reference_count: 1,
+        },
+        overlay: Some(overlay),
+        budget: MemoryBudget {
+            total_bytes,
+            committed_bytes: 0,
+            reclaimable_bytes: 0,
+            reserved_headroom_bytes: 0,
+        },
+        predicted_peak_bytes,
+        cache_state: MemoryCacheState::Cold,
+        evidence_revision: mlx_gen_instantid::memory_strategy::REQUEST_EVIDENCE_REVISION.to_owned(),
+    }
+}
+
+/// A deterministic 512-d ArcFace-shaped embedding. `InstantId::generate_with` is the engine's own
+/// "face-stack-independent path": the identity VALUE never changes what the denoise and decode
+/// phases materialize, so a fixed embedding makes the capture reproducible without needing a real
+/// face photograph on the capture host. The face stack itself is still attached and resident (the
+/// worker attaches it too), so the composition the peaks describe is production's.
+fn instantid_reference_embedding() -> Vec<f32> {
+    (0..512)
+        .map(|index| ((index as f32) * 0.017_f32).sin() * 0.05)
+        .collect()
+}
+
+/// Five landmarks in the canonical `draw_kps` order (both eyes, nose, both mouth corners), scaled
+/// from the normalized square the worker's angle presets use to output-canvas pixels.
+fn instantid_kps(side: u32) -> Vec<(f32, f32)> {
+    let side = side as f32;
+    [
+        (0.37_f32, 0.42_f32),
+        (0.63, 0.42),
+        (0.50, 0.55),
+        (0.40, 0.68),
+        (0.60, 0.68),
+    ]
+    .into_iter()
+    .map(|(x, y)| (x * side, y * side))
+    .collect()
+}
+
+fn instantid_request(width: u32, height: u32, seed: u64) -> mlx_gen_instantid::InstantIdRequest {
+    mlx_gen_instantid::InstantIdRequest {
+        prompt: "a studio portrait of a person, soft key light".to_owned(),
+        negative: "low quality, blurry, distorted".to_owned(),
+        width,
+        height,
+        // Two executed denoise steps — the same conditioning/denoise/decode phase split every other
+        // still arm captures at.
+        steps: 2,
+        guidance: 3.0,
+        ip_adapter_scale: INSTANTID_IP_SCALE,
+        controlnet_scale: INSTANTID_CONTROLNET_SCALE,
+        seed,
+        ..Default::default()
+    }
+}
+
+fn planned_instantid_seed(request: &Value, tier: &str, width: u32) -> Result<u64, String> {
+    let fixture = protocol::planned(request)?
+        .get("fixture")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "planned.fixture must be a string".to_owned())?;
+    let prefix = format!("instantid-realvisxl-mlx-{tier}-{width}-seed");
+    let remainder = fixture
+        .strip_prefix(&prefix)
+        .ok_or_else(|| format!("planned.fixture {fixture:?} must start with {prefix:?}"))?;
+    let (seed, steps) = remainder
+        .split_once("-step")
+        .ok_or_else(|| format!("planned.fixture {fixture:?} must end with -step<count>"))?;
+    if steps != "2" {
+        return Err(format!(
+            "planned.fixture {fixture:?} must use the two-step calibration request"
+        ));
+    }
+    seed.parse::<u64>()
+        .map_err(|error| format!("parse InstantID fixture seed {seed:?}: {error}"))
+}
+
+/// Real capture arm for the `mlx:instantid` identity route on `instantid_realvisxl`.
+///
+/// InstantID is a BESPOKE crate: `mlx-gen-catalog` lists it in `BESPOKE_UTILITY_CRATES` and
+/// registers no `ModelDescriptor`, so there is no `registry.load` to call. The production loader is
+/// `InstantId::load_with_memory_context` — literally the call `image_jobs/instantid.rs` makes — and
+/// that is what this arm drives. The pinned provider implements only Resident and StagedResidency
+/// (`memory_strategy.rs` declares the three bounded rungs Missing), and publishes its calibration
+/// identity with a HARD-CODED `LoadShape::EagerMaterialization` that no spec can move.
+fn run_instantid(request: &Value) -> Result<Value, String> {
+    validate_instantid_target(request)?;
+    let planned_shape = planned_load_shape(request)?;
+    if planned_shape != LoadShape::EagerMaterialization {
+        return Err(
+            "InstantID calibration must use the eager_materialization load shape the pinned \
+             provider publishes"
+                .to_owned(),
+        );
+    }
+    let selection = planned_selection(request)?;
+    if !matches!(
+        selection.strategy,
+        MemoryStrategy::Resident | MemoryStrategy::StagedResidency
+    ) {
+        return Err(format!(
+            "MLX InstantID {:?} is declared Missing at the pinned provider and is not capturable",
+            selection.strategy
+        ));
+    }
+    let parameters = protocol::strategy_parameters(request)?;
+    if !parameters.is_empty() {
+        return Err(format!(
+            "MLX InstantID calibration requires no strategy parameters, got {parameters:?}"
+        ));
+    }
+    let tier = planned_qwen_tier(request)?;
+    let (width, height) = protocol::target_geometry(request)?;
+    if width != height {
+        return Err(format!(
+            "the InstantID identity route renders a SQUARE canvas (kps are normalized to a square); \
+             planned geometry is {width}x{height}"
+        ));
+    }
+    let seed = planned_instantid_seed(request, tier, width)?;
+    if seed != INSTANTID_SEED {
+        return Err(format!(
+            "planned.fixture seed {seed} does not match the InstantID calibration seed {INSTANTID_SEED}"
+        ));
+    }
+    let binding = instantid_binding(tier)?;
+    let numeric_tier = instantid_numeric_tier(tier);
+    if selection.tier.quant != numeric_tier.quant {
+        return Err(format!(
+            "planned tier {tier} implies quant {:?}, selection carries {:?}",
+            numeric_tier.quant, selection.tier.quant
+        ));
+    }
+    let identity = mlx_gen_instantid::memory_strategy::InstantIdMemoryIdentity {
+        route: mlx_gen_instantid::memory_strategy::InstantIdRoute::Identity,
+        adapter_count: 0,
+        use_pid: false,
+        face_restore: false,
+        artifact_fingerprint: binding.artifact_fingerprint.clone(),
+    };
+    let overlay = identity.overlay_key();
+    let contract = mlx_gen_instantid::memory_strategy::provider_contract_for_paths(
+        &binding.paths,
+        numeric_tier,
+    );
+    contract.validate_selection(&selection).map_err(|error| {
+        format!("pinned InstantID contract rejected planned selection: {error}")
+    })?;
+    let strategy = attested_strategy(
+        request,
+        &selection,
+        &contract.engaged_composition(selection.strategy),
+    )?;
+    let calibration = contract
+        .calibration
+        .as_ref()
+        .ok_or_else(|| "pinned InstantID contract has no calibration identity".to_owned())?;
+    if calibration.fingerprint != INSTANTID_CALIBRATION_FINGERPRINT {
+        return Err(format!(
+            "pinned InstantID fingerprint changed: expected {INSTANTID_CALIBRATION_FINGERPRINT}, got {}",
+            calibration.fingerprint
+        ));
+    }
+    let planned_fingerprint = protocol::planned(request)?
+        .get("calibrationFingerprint")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "planned.calibrationFingerprint must be a string".to_owned())?;
+    if planned_fingerprint != calibration.fingerprint {
+        return Err(format!(
+            "plan/provider calibration mismatch: plan={planned_fingerprint}, pinned provider={}",
+            calibration.fingerprint
+        ));
+    }
+    if calibration.load_shape != planned_shape {
+        return Err(format!(
+            "plan/provider load-shape mismatch: plan={}, pinned provider={}",
+            load_shape_key(planned_shape),
+            load_shape_key(calibration.load_shape)
+        ));
+    }
+    let hardware_bytes = request
+        .pointer("/hardware/memoryBytes")
+        .and_then(Value::as_u64)
+        .ok_or_else(|| "run request.hardware.memoryBytes must be an integer".to_owned())?;
+
+    // Admission hygiene BEFORE the expensive load: the gate must accept a fitting request (so the
+    // refusals below are evidence rather than a blanket no), reject a zero budget, and reject a
+    // mutated calibration fingerprint.
+    let safety = |fingerprint: &str, total_bytes: u64, predicted: u64| {
+        mlx_gen_instantid::memory_strategy::safety_check(
+            &contract,
+            numeric_tier,
+            &identity,
+            &instantid_context(
+                selection,
+                calibration,
+                fingerprint,
+                overlay.clone(),
+                width,
+                height,
+                total_bytes,
+                predicted,
+            ),
+        )
+    };
+    if !matches!(
+        safety(&calibration.fingerprint, hardware_bytes, 1),
+        MemorySafetyDecision::Accept
+    ) {
+        return Err(
+            "InstantID admission rejected a fitting probe budget; the rejections below would be a \
+             blanket refusal, not evidence"
+                .to_owned(),
+        );
+    }
+    if !matches!(
+        safety(&calibration.fingerprint, 0, 1),
+        MemorySafetyDecision::Reject { .. }
+    ) {
+        return Err("InstantID admission accepted an unknown/zero memory budget".to_owned());
+    }
+    if !matches!(
+        safety("stale-instantid-fingerprint", hardware_bytes, 1),
+        MemorySafetyDecision::Reject { .. }
+    ) {
+        return Err("InstantID admission accepted stale calibration evidence".to_owned());
+    }
+
+    clear_cache();
+    reset_peak_memory();
+    let pre_rung_active = get_active_memory() as u64;
+    let pre_rung_cache = get_cache_memory() as u64;
+    let load_context = instantid_context(
+        selection,
+        calibration,
+        &calibration.fingerprint,
+        overlay.clone(),
+        width,
+        height,
+        hardware_bytes,
+        1,
+    );
+    // THE production loader: the exact call `image_jobs/instantid.rs` makes.
+    let model = mlx_gen_instantid::InstantId::load_with_memory_context(
+        &binding.paths,
+        numeric_tier,
+        identity.clone(),
+        load_context,
+    )
+    .map_err(|error| format!("load real InstantID {tier} stack: {error}"))?;
+    // The worker attaches the SCRFD/ArcFace stack too; `with_face_paths` is the reloadable seam
+    // staged residency requires, so the same call serves both rungs.
+    let mut model = model
+        .with_face_paths(&binding.bundle.scrfd, &binding.bundle.arcface)
+        .map_err(|error| format!("attach the InstantID face stack: {error}"))?;
+
+    let conditioning = Cell::new(PhaseMemory {
+        active: 0,
+        cache: 0,
+    });
+    let denoise = Cell::new(PhaseMemory {
+        active: 0,
+        cache: 0,
+    });
+    reset_peak_memory();
+    let embedding = instantid_reference_embedding();
+    let kps = instantid_kps(width);
+    model
+        .generate_with(
+            &instantid_request(width, height, seed),
+            &embedding,
+            &kps,
+            &mut |progress| match progress {
+                Progress::Step { current: 1, .. } => {
+                    conditioning.set(PhaseMemory::capture());
+                    reset_peak_memory();
+                }
+                Progress::Decoding => {
+                    denoise.set(PhaseMemory::capture());
+                    reset_peak_memory();
+                }
+                _ => {}
+            },
+        )
+        .map_err(|error| format!("generate measured InstantID render: {error}"))?;
+    let decode = PhaseMemory::capture();
+    let conditioning = conditioning.get();
+    let denoise = denoise.get();
+    if [conditioning.active, denoise.active, decode.active].contains(&0) {
+        return Err(
+            "a synchronized InstantID lifecycle phase reported a zero active peak".to_owned(),
+        );
+    }
+    let overall = PhaseMemory::overall(&[conditioning, denoise, decode]);
+    let predicted_peaks = image_predicted_peak_bytes(conditioning, denoise, decode);
+
+    // The pinned InstantID crates expose no calibration error injection and no request-scope
+    // handle, so the runtime-complete and fault-injection scenarios stay unexecuted rather than
+    // being reported as passed.
+    let blocker = concat!(
+        "the pinned mlx-gen-instantid provider is a bespoke crate with no registered generator, no ",
+        "calibration error injection and no synchronized request scope, so the runtime-complete ",
+        "sweep and the fault-injection lifecycle scenarios are not executable at this pin"
+    );
+    let mut fragment = json!({
+        "strategy": strategy,
+        "loadShape": protocol::LOAD_SHAPE_EAGER,
+        "memory": {
+            "conditioningPeakBytes": conditioning.active,
+            "denoisePeakBytes": denoise.active,
+            "decodePeakBytes": decode.active,
+            "overallPeakBytes": overall.active,
+            "predictedPeakBytes": predicted_peaks.overall,
+        },
+        "sweep": null,
+        "quality": null,
+        "negativeMutation": null,
+        "loadability": {
+            "result": "passed",
+            "resolvedPathFingerprint": format!(
+                "{}@{}:{tier}+identity:{}",
+                binding.repository, binding.revision, binding.artifact_fingerprint
+            ),
+        },
+        "diagnostics": protocol::diagnostics(
+            "memory-mlx-adapter:instantid-identity-ladder",
+            "executed",
+            [blocker.to_owned()],
+            [
+                ("preRungActiveAfterClear", "bytes", pre_rung_active),
+                ("preRungCacheAfterClear", "bytes", pre_rung_cache),
+                ("conditioningActivePeak", "bytes", conditioning.active),
+                ("denoiseActivePeak", "bytes", denoise.active),
+                ("decodeActivePeak", "bytes", decode.active),
+                ("overallAllocatorEnvelope", "bytes", overall.allocator_bytes()),
+                ("loadShapeEager", "count", 1),
+            ],
+        ),
+        "capturedAt": protocol::captured_at(),
+    });
+    // The identity overlay is MATERIAL, so the plain-overlay settler (which only ever settles an
+    // `overlay: none` target) must not run here. `validate_instantid_target` already proved the
+    // declared overlay is exactly `identity`, and the overlay key the provider admitted is its own
+    // artifact-bound `overlay_key()`, so the scenario is settled from that instead.
+    fragment["scenarios"] = json!([
+        { "name": "exact_fit", "result": "passed", "predictedBytes": predicted_peaks.overall },
+        { "name": "unknown_budget", "result": "passed" },
+        { "name": "stale_evidence", "result": "passed" },
+        { "name": "loadability", "result": "passed" },
+        {
+            "name": "overlay",
+            "result": "passed",
+            "reason": "the identity overlay is the declared target, and the pinned provider admitted \
+                       the composition under its own artifact-bound overlay key",
+            "overlayKey": overlay,
+        }
+    ]);
     Ok(fragment)
 }
 
@@ -9486,6 +10595,1377 @@ fn run_qwen_edit_provider(request: &Value) -> Result<Value, String> {
         protocol::settle_plain_overlay_scenario(request, &mut fragment, arm.execution_path)?;
     }
     Ok(fragment)
+}
+
+// ---------------------------------------------------------------------------------------------
+// Mage-Flow (sc-22733) — six registered engine providers on ONE arm
+// ---------------------------------------------------------------------------------------------
+
+/// The square edge every checked-in `mage_flow*:*:mlx` plan row declares, restated here so the
+/// tests can drive the arm at the geometry the campaign will.
+///
+/// It is NOT a production input: [`run_mage_provider`] takes width and height from the plan row
+/// (`protocol::target_geometry`) and never from a constant, so an anchor re-planned at another
+/// legal edge is measured at that edge rather than silently relabelled.
+///
+/// 768 is what the plan declares because `mlx-gen-mage`'s `config::MIN_SIZE` is 512 and both sides
+/// must be multiples of `SIZE_MULTIPLE` (16), so 768 is a legal native resolution — and it is the
+/// edge the family's retired SC-15509 identity was measured at (`model.rs`
+/// `production_calibration_fingerprint` doc: "At 768²/one step, …"), kept so the per-tier cells
+/// this arm measures are comparable with that record.
+/// `every_planned_mage_mlx_row_names_the_production_identity_and_is_checked_before_the_load` binds
+/// this constant to all 18 plan rows, so the claim cannot go stale in prose.
+#[cfg(test)]
+const MAGE_EDGE: u32 = 768;
+/// The seed every checked-in `mage_flow*:*:mlx` plan row spells into its fixture
+/// (`<prefix>-<tier>-768-seed22733-step<n>`), bound to those rows by the same test.
+///
+/// Also not a production input: [`planned_mage_seed`] PARSES the seed out of the plan's own
+/// fixture name — the fixture is the single source — and only checks that the fixture's prefix
+/// names this member, this tier and the rendered edge, and that its step count is the arm's recipe.
+#[cfg(test)]
+const MAGE_SEED: u64 = 22733;
+/// Mage's quality claim is the same KIND as FLUX.2-dev's: the resident anchor selects no alternate
+/// code path, so the selected render and the unselected reference are the same computation on one
+/// loaded provider and must agree to within Metal allocator jitter. The envelope is restated under
+/// Mage names because the record embeds it as `maximumErrorThreshold`/`meanErrorThreshold` — a
+/// `mage_flow` receipt must not be traceable to a constant asserting a FLUX.2 provenance.
+const MAGE_MAX_THRESHOLD: f64 = 3.0 / 255.0;
+const MAGE_MEAN_THRESHOLD: f64 = 1.0 / 255.0;
+
+fn mage_quality_passes(maximum: f64, mean: f64) -> bool {
+    maximum <= MAGE_MAX_THRESHOLD && mean <= MAGE_MEAN_THRESHOLD
+}
+
+/// One member of the Mage-Flow family this arm measures.
+///
+/// Unlike the Qwen edit family (one engine provider, two catalog ids), Mage is SIX registered
+/// engine providers — `mlx-gen-mage` `model::MODEL_IDS`, registered one `Generator` each in
+/// `lib.rs::register_providers` — each publishing its own per-tier production identity
+/// ([`mage_calibration_fingerprint`], bound by the engine only to a tier PROVEN off the component
+/// directories it opened), and whose catalog ids are identical to their provider ids
+/// (`crates/sceneworks-worker/src/engines.rs` `MODEL_TABLE`: `sceneworks_id == engine_id` on all
+/// six rows). The arm still resolves from `(provider, modelId)` and refuses any other pair by name:
+/// the two are separate namespaces, and a plan that crossed them would measure one checkpoint under
+/// another's anchor key.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct MageArm {
+    /// The engine provider id AND the catalog model id — asserted equal, never assumed.
+    provider: &'static str,
+    execution_path: &'static str,
+    /// The still-geometry refusal label (sc-18808).
+    still_calibration: &'static str,
+    /// The `<prefix>-<tier>-<edge>-seed<n>-step<n>` fixture spelling this member's plan rows must
+    /// use, so a Turbo capture can never be recorded under the Base id's fixture.
+    fixture_prefix: &'static str,
+    /// The variant's OWN tiered rehost. Each of the six ships only the DiT; the shared text encoder
+    /// and VAE come from [`protocol::MAGE_COMPONENTS_REPOSITORY`].
+    repository: &'static str,
+    /// The `SCENEWORKS_<env>_{REPOSITORY,REVISION,ROOT}` family naming that rehost. Spelled out as
+    /// three literals rather than composed from a prefix: `measure-memory-catalog.mjs`
+    /// `PROVIDER_FAMILIES` derives these exact names and exports them into this process, and its
+    /// test binds the two sides by searching THIS source for each literal — a `format!`-composed
+    /// name would leave a renamed family green here and fail mid-campaign, after the weights are
+    /// staged.
+    repository_env: &'static str,
+    revision_env: &'static str,
+    root_env: &'static str,
+    /// The instruction-editing checkpoints consume exactly one reference image
+    /// (`model.rs` `MageVariant::is_edit`, `edit_references`).
+    edit: bool,
+    /// The engine's own published default step count for this variant (`MageVariant::default_steps`)
+    /// for the distilled members, whose 4-step Decoupled-DMD schedule IS the recipe the product
+    /// issues; two steps for the undistilled members, the shape every other image arm here uses
+    /// (the first `Step` closes conditioning, the second gives denoise its own measured interval).
+    steps: u32,
+    /// `MageVariant::default_cfg`: 1.0 on the distilled members, at which the reference builds no
+    /// unconditional branch at all, and 5.0 on the rest. Passed explicitly so a capture cannot
+    /// silently measure a CFG branch the product does not run (or omit one it does).
+    guidance: f32,
+    /// The record's diagnostics source, `memory-mlx-adapter:<slug>-shared-ladder`.
+    slug: &'static str,
+}
+
+const MAGE_ARMS: [MageArm; 6] = [
+    MageArm {
+        provider: "mage_flow",
+        execution_path: "the pinned MLX Mage-Flow RL text-to-image path",
+        still_calibration: "MLX Mage-Flow calibration",
+        fixture_prefix: "mage-flow-mlx",
+        repository: protocol::MAGE_FLOW_REPOSITORY,
+        repository_env: "SCENEWORKS_MAGE_FLOW_REPOSITORY",
+        revision_env: "SCENEWORKS_MAGE_FLOW_REVISION",
+        root_env: "SCENEWORKS_MAGE_FLOW_ROOT",
+        edit: false,
+        steps: 2,
+        guidance: 5.0,
+        slug: "mage-flow",
+    },
+    MageArm {
+        provider: "mage_flow_base",
+        execution_path: "the pinned MLX Mage-Flow-Base text-to-image path",
+        still_calibration: "MLX Mage-Flow-Base calibration",
+        fixture_prefix: "mage-flow-base-mlx",
+        repository: protocol::MAGE_FLOW_BASE_REPOSITORY,
+        repository_env: "SCENEWORKS_MAGE_FLOW_BASE_REPOSITORY",
+        revision_env: "SCENEWORKS_MAGE_FLOW_BASE_REVISION",
+        root_env: "SCENEWORKS_MAGE_FLOW_BASE_ROOT",
+        edit: false,
+        steps: 2,
+        guidance: 5.0,
+        slug: "mage-flow-base",
+    },
+    MageArm {
+        provider: "mage_flow_turbo",
+        execution_path: "the pinned MLX Mage-Flow-Turbo distilled text-to-image path",
+        still_calibration: "MLX Mage-Flow-Turbo calibration",
+        fixture_prefix: "mage-flow-turbo-mlx",
+        repository: protocol::MAGE_FLOW_TURBO_REPOSITORY,
+        repository_env: "SCENEWORKS_MAGE_FLOW_TURBO_REPOSITORY",
+        revision_env: "SCENEWORKS_MAGE_FLOW_TURBO_REVISION",
+        root_env: "SCENEWORKS_MAGE_FLOW_TURBO_ROOT",
+        edit: false,
+        steps: 4,
+        guidance: 1.0,
+        slug: "mage-flow-turbo",
+    },
+    MageArm {
+        provider: "mage_flow_edit",
+        execution_path: "the pinned MLX Mage-Flow-Edit instruction-editing path",
+        still_calibration: "MLX Mage-Flow-Edit calibration",
+        fixture_prefix: "mage-flow-edit-mlx",
+        repository: protocol::MAGE_FLOW_EDIT_REPOSITORY,
+        repository_env: "SCENEWORKS_MAGE_FLOW_EDIT_REPOSITORY",
+        revision_env: "SCENEWORKS_MAGE_FLOW_EDIT_REVISION",
+        root_env: "SCENEWORKS_MAGE_FLOW_EDIT_ROOT",
+        edit: true,
+        steps: 2,
+        guidance: 5.0,
+        slug: "mage-flow-edit",
+    },
+    MageArm {
+        provider: "mage_flow_edit_base",
+        execution_path: "the pinned MLX Mage-Flow-Edit-Base instruction-editing path",
+        still_calibration: "MLX Mage-Flow-Edit-Base calibration",
+        fixture_prefix: "mage-flow-edit-base-mlx",
+        repository: protocol::MAGE_FLOW_EDIT_BASE_REPOSITORY,
+        repository_env: "SCENEWORKS_MAGE_FLOW_EDIT_BASE_REPOSITORY",
+        revision_env: "SCENEWORKS_MAGE_FLOW_EDIT_BASE_REVISION",
+        root_env: "SCENEWORKS_MAGE_FLOW_EDIT_BASE_ROOT",
+        edit: true,
+        steps: 2,
+        guidance: 5.0,
+        slug: "mage-flow-edit-base",
+    },
+    MageArm {
+        provider: "mage_flow_edit_turbo",
+        execution_path: "the pinned MLX Mage-Flow-Edit-Turbo distilled instruction-editing path",
+        still_calibration: "MLX Mage-Flow-Edit-Turbo calibration",
+        fixture_prefix: "mage-flow-edit-turbo-mlx",
+        repository: protocol::MAGE_FLOW_EDIT_TURBO_REPOSITORY,
+        repository_env: "SCENEWORKS_MAGE_FLOW_EDIT_TURBO_REPOSITORY",
+        revision_env: "SCENEWORKS_MAGE_FLOW_EDIT_TURBO_REVISION",
+        root_env: "SCENEWORKS_MAGE_FLOW_EDIT_TURBO_ROOT",
+        edit: true,
+        steps: 4,
+        guidance: 1.0,
+        slug: "mage-flow-edit-turbo",
+    },
+];
+
+/// The prompt every Mage text-to-image capture renders, and the edit instruction every Mage edit
+/// capture applies. Fixed with the seed, the geometry and (on the edit members) the reference, so
+/// two captures of one anchor are the same request.
+const MAGE_PROMPT: &str = "a weathered brass astrolabe on a linen cloth, soft window light";
+const MAGE_EDIT_PROMPT: &str = "replace the background with a plain grey studio backdrop";
+
+/// The production calibration identity the loaded MLX Mage generator publishes for one
+/// `(member, tier)` cell — the table `mlx-gen-mage::model::production_calibration_fingerprint`
+/// mints (inference PR 953): `mage-flow-<route>-<tier>-mlx-shared-ladder-v1`, eighteen distinct
+/// strings. The engine binds one only when the tier is PROVEN off the `quantization.bits` marker of
+/// the component directories the loader itself opened (DiT and text encoder agreeing) and equals
+/// the request knob; a dense snapshot requantized at load withholds it, which the capture reports
+/// as a plan/provider mismatch rather than measuring under a borrowed name. Written here as well so
+/// the plan/arm binding is weights-free and holds at inference `c6d6a4db`, whose engine still
+/// publishes the retired single string; the capture refuses a loaded contract whose identity
+/// differs from the plan, so the two copies cannot drift unnoticed once the epic's pin bump lands.
+fn mage_calibration_fingerprint(arm: MageArm, tier: &str) -> String {
+    format!("mage-flow-{}-{tier}-mlx-shared-ladder-v1", arm.slug)
+}
+
+/// The weights-free conformance identities `mlx-gen-mage` publishes for a registry surface that
+/// loaded no weights (`model.rs` `STATIC_BEHAVIOR_FINGERPRINT` = `mage-flow-mlx-registry-behavior-v1`,
+/// suffixed `-<route>-<tier>`), and the retired pre-sc-22733 single string. A plan row naming one
+/// of these could never be satisfied by a production load. Test-only: the sole caller is the
+/// plan-identity conformance test in `mage_tests`.
+#[cfg(test)]
+fn is_mage_weights_free_fingerprint(fingerprint: &str) -> bool {
+    fingerprint.starts_with("mage-flow-mlx-registry-behavior-v1")
+        || fingerprint == "mage-flow-mlx-shared-ladder-2026-08-03-v1"
+}
+
+/// The plan row must name the production identity this cell's loaded generator publishes —
+/// checked against the weights-free table BEFORE the load, so a row still carrying the retired
+/// single string (or a conformance string) fails in milliseconds rather than after a
+/// multi-gigabyte load.
+fn validate_mage_plan_identity(request: &Value, arm: MageArm, tier: &str) -> Result<(), String> {
+    let planned_fingerprint = protocol::planned(request)?
+        .get("calibrationFingerprint")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "planned.calibrationFingerprint must be a string".to_owned())?;
+    let expected_fingerprint = mage_calibration_fingerprint(arm, tier);
+    if planned_fingerprint != expected_fingerprint {
+        return Err(format!(
+            "plan/provider calibration mismatch: plan={planned_fingerprint}, the {} {tier} \
+             production identity is {expected_fingerprint}",
+            arm.provider
+        ));
+    }
+    Ok(())
+}
+
+/// Which family member the plan asks for. Refuses by name: the six checkpoints are
+/// architecturally identical (byte-identical configs and tensor schemas — `model.rs`
+/// `verify_checkpoint_identity` exists precisely because of that), so nothing downstream of a
+/// mis-keyed plan row could notice that Turbo's peaks had been recorded as Base's.
+fn mage_arm(request: &Value) -> Result<MageArm, String> {
+    let planned = protocol::planned(request)?;
+    let provider = planned
+        .pointer("/target/provider")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "planned.target.provider must be a string".to_owned())?;
+    let model_id = planned
+        .pointer("/target/modelId")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "planned.target.modelId must be a string".to_owned())?;
+    MAGE_ARMS
+        .into_iter()
+        .find(|arm| arm.provider == provider && arm.provider == model_id)
+        .ok_or_else(|| {
+            format!(
+                "the MLX Mage-Flow arm does not implement provider {provider:?} for model \
+                 {model_id:?}"
+            )
+        })
+}
+
+/// The seed and step count this member's fixture binds, checked against the arm's own prefix, the
+/// planned tier, the rendered edge and the recipe's step count.
+fn planned_mage_seed(request: &Value, arm: MageArm, tier: &str) -> Result<u64, String> {
+    let fixture = protocol::planned(request)?
+        .get("fixture")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "planned.fixture must be a string".to_owned())?;
+    let (width, _) = protocol::target_geometry(request)?;
+    let prefix = format!("{}-{tier}-{width}-seed", arm.fixture_prefix);
+    let remainder = fixture
+        .strip_prefix(&prefix)
+        .ok_or_else(|| format!("planned.fixture {fixture:?} must start with {prefix:?}"))?;
+    let (seed, steps) = remainder
+        .split_once("-step")
+        .ok_or_else(|| format!("planned.fixture {fixture:?} must end with -step<count>"))?;
+    let seed = seed
+        .parse::<u64>()
+        .map_err(|error| format!("parse Mage-Flow fixture seed {seed:?}: {error}"))?;
+    let steps = steps
+        .parse::<u32>()
+        .map_err(|error| format!("parse Mage-Flow fixture step count {steps:?}: {error}"))?;
+    if steps != arm.steps {
+        return Err(format!(
+            "planned.fixture {fixture:?} must use this arm's {}-step calibration request",
+            arm.steps
+        ));
+    }
+    Ok(seed)
+}
+
+/// The mode the ARM will actually render — `edit_image` on the three instruction editors and
+/// `text_to_image` on the other three, from `MageVariant::is_edit`.
+fn mage_mode(arm: MageArm) -> &'static str {
+    if arm.edit {
+        "edit_image"
+    } else {
+        "text_to_image"
+    }
+}
+
+/// The plan's declared mode must be the one this member renders.
+///
+/// The record's `mode` comes from the PLAN, while the reference this arm attaches and the
+/// `MemoryMode` it admits under come from the ARM. Left unchecked, a row declaring `text_to_image`
+/// for an edit member would emit a reference-conditioned render's peaks under a reference-free
+/// label — and the pinned provider would not object, because the context it grades is built from the
+/// arm and is internally consistent.
+fn validate_mage_mode(request: &Value, arm: MageArm) -> Result<(), String> {
+    let declared = protocol::planned(request)?
+        .pointer("/target/mode")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "planned.target.mode must be a string".to_owned())?;
+    let expected = mage_mode(arm);
+    if declared != expected {
+        return Err(format!(
+            "{} renders {expected:?}, but the plan declares mode {declared:?}",
+            arm.provider
+        ));
+    }
+    Ok(())
+}
+
+/// The two artifact triples one Mage capture opens: the variant's own tier root, and the shared
+/// text-encoder/VAE components snapshot.
+#[derive(Clone, Debug)]
+struct MageArtifactSource {
+    repository: String,
+    revision: String,
+    root: PathBuf,
+    components_repository: String,
+    components_revision: String,
+    components_root: PathBuf,
+}
+
+fn mage_artifact_source(arm: MageArm) -> Result<MageArtifactSource, String> {
+    Ok(MageArtifactSource {
+        repository: protocol::required_env(arm.repository_env)?,
+        revision: protocol::required_env(arm.revision_env)?,
+        root: PathBuf::from(protocol::required_env(arm.root_env)?),
+        components_repository: protocol::required_env(
+            "SCENEWORKS_MAGE_FLOW_COMPONENTS_REPOSITORY",
+        )?,
+        components_revision: protocol::required_env("SCENEWORKS_MAGE_FLOW_COMPONENTS_REVISION")?,
+        components_root: PathBuf::from(protocol::required_env(
+            "SCENEWORKS_MAGE_FLOW_COMPONENTS_ROOT",
+        )?),
+    })
+}
+
+/// The artifact one Mage capture loads: the canonical variant tier root, and the `LoadSpec` that
+/// opens it.
+#[derive(Debug)]
+struct MageArtifact {
+    root: PathBuf,
+    spec: LoadSpec,
+}
+
+/// The env-free half of the Mage load, so every load-time binding is unit-testable:
+///
+/// * the variant root must end in `<repository>/snapshots/<revision>/<PLANNED tier>`, so a stale
+///   `…/q4` export cannot satisfy a q8 or bf16 plan and quietly re-label another tier's peaks;
+/// * the components root must be the components snapshot ITSELF (it has no tier component of its
+///   own at the root — the tier is the FIRST path element inside it), and both component dirs are
+///   staged EXPLICITLY rather than left to `resolve_component_dirs`'s flat-layout fallback: the
+///   variant rehost has no `text_encoder/` or `vae/` sibling at all, so the fallback would resolve
+///   two directories that do not exist; and
+/// * `spec.quantize` carries the planned tier. It packs nothing at load — every shipped Mage tier is
+///   PREPACKED under `<snapshot>/<tier>/` and `pipeline::load_time_quant_bits` returns `None` — but
+///   the provider's declaration surface requires the selector and the spec to agree
+///   (`model.rs` `surface_selector_matches_spec`), so it is an assertion about the directory on
+///   disk rather than a conversion request.
+fn mage_load_spec(
+    arm: MageArm,
+    tier: &str,
+    source: &MageArtifactSource,
+    selection: &MemorySelection,
+    offload: OffloadPolicy,
+    load_shape: LoadShape,
+) -> Result<MageArtifact, String> {
+    protocol::validate_artifact_identity(&source.repository, &source.revision, arm.repository)?;
+    protocol::validate_artifact_identity(
+        &source.components_repository,
+        &source.components_revision,
+        protocol::MAGE_COMPONENTS_REPOSITORY,
+    )?;
+    let root = std::fs::canonicalize(&source.root)
+        .map_err(|error| format!("canonicalize {}: {error}", arm.root_env))?;
+    protocol::validate_huggingface_snapshot_root(
+        &root,
+        &source.repository,
+        &source.revision,
+        tier,
+        arm.repository,
+    )?;
+    let components_root = std::fs::canonicalize(&source.components_root)
+        .map_err(|error| format!("canonicalize SCENEWORKS_MAGE_FLOW_COMPONENTS_ROOT: {error}"))?;
+    protocol::validate_huggingface_revision_root(
+        &components_root,
+        &source.components_repository,
+        &source.components_revision,
+        protocol::MAGE_COMPONENTS_REPOSITORY,
+    )?;
+    let tier_components = components_root.join(tier);
+    let mut spec = LoadSpec::new(WeightsSource::Dir(root.clone()))
+        .with_offload_policy(offload)
+        .with_load_shape(load_shape)
+        .with_component(
+            protocol::MAGE_COMPONENT_TEXT_ENCODER,
+            WeightsSource::Dir(tier_components.join(protocol::MAGE_COMPONENT_TEXT_ENCODER)),
+        )
+        .with_component(
+            protocol::MAGE_COMPONENT_VAE,
+            WeightsSource::Dir(tier_components.join(protocol::MAGE_COMPONENT_VAE)),
+        );
+    if let Some(quant) = selection.tier.quant {
+        spec = spec.with_quant(quant);
+    }
+    Ok(MageArtifact { root, spec })
+}
+
+/// The generation request one Mage capture renders: the worker's request shape for this member.
+///
+/// The edit members REFUSE a reference-free request (`model.rs` `edit_references`), so the single
+/// `Conditioning::Reference` is what makes an edit capture measure the multimodal conditioning path
+/// and the encode half of the CoD autoencoder (`assemble` selects `VaePart::Both` on an edit
+/// variant) rather than text-to-image under an edit label. The reference is fitted to the target
+/// geometry, exactly as `image_jobs/base.rs` `fit_engine_image` fits it in production.
+fn mage_request(arm: MageArm, width: u32, height: u32, seed: u64) -> GenerationRequest {
+    GenerationRequest {
+        prompt: if arm.edit {
+            MAGE_EDIT_PROMPT.to_owned()
+        } else {
+            MAGE_PROMPT.to_owned()
+        },
+        // The distilled members run with CFG genuinely off (`default_cfg` 1.0), at which the engine
+        // builds no unconditional branch — a negative prompt there would be a claim about a branch
+        // the render does not execute.
+        negative_prompt: (arm.guidance > 1.0).then(|| "blurry, distorted, text".to_owned()),
+        width,
+        height,
+        count: 1,
+        seed: Some(seed),
+        steps: Some(arm.steps),
+        guidance: Some(arm.guidance),
+        conditioning: if arm.edit {
+            vec![Conditioning::Reference {
+                image: Image {
+                    width,
+                    height,
+                    pixels: protocol::synthetic_reference_rgb(width, height),
+                },
+                strength: None,
+            }]
+        } else {
+            Vec::new()
+        },
+        ..Default::default()
+    }
+}
+
+/// The `MemoryRunContext` the pinned Mage provider admits this member under.
+///
+/// `mode`, `has_reference` and `reference_count` are derived from the ARM, and the provider gates on
+/// exactly those (`model.rs` `request_context_error`: the request mode must equal the variant's own
+/// `MemoryMode`). `has_phases` is false on every Mage route — Mage has no multi-phase request shape
+/// — and `overlay` is `None`, which is what a plain load carries and what the provider's
+/// declaration surface publishes for it.
+#[allow(clippy::too_many_arguments)]
+fn mage_run_context(
+    arm: MageArm,
+    selection: MemorySelection,
+    calibration: &MemoryCalibrationIdentity,
+    width: u32,
+    height: u32,
+    total_bytes: u64,
+    predicted_peak_bytes: u64,
+) -> MemoryRunContext {
+    MemoryRunContext {
+        selection,
+        optimization_authority: MemoryOptimizationAuthority::Calibrated,
+        calibration_abi: calibration.abi,
+        calibration_fingerprint: calibration.fingerprint.clone(),
+        // From the LOADED provider's own identity, never the plan: the safety check compares abi,
+        // fingerprint AND load shape.
+        load_shape: calibration.load_shape,
+        mode: if arm.edit {
+            MemoryMode::Edit
+        } else {
+            MemoryMode::TextToImage
+        },
+        has_reference: arm.edit,
+        use_pid: false,
+        has_phases: false,
+        geometry: MemoryGeometry {
+            width,
+            height,
+            batch: 1,
+            frames: 1,
+            reference_count: u32::from(arm.edit),
+        },
+        overlay: None,
+        budget: MemoryBudget {
+            total_bytes,
+            committed_bytes: 0,
+            reclaimable_bytes: 0,
+            reserved_headroom_bytes: 0,
+        },
+        predicted_peak_bytes,
+        cache_state: MemoryCacheState::Cold,
+        evidence_revision: format!("sc-22733@{}", protocol::INFERENCE_PIN),
+    }
+}
+
+fn mage_complete_sweep(request: &Value) -> Result<Value, String> {
+    let mut sweep = protocol::reference_sweep(request, "passed")?;
+    sweep["rangeVerified"] = json!(true);
+    Ok(sweep)
+}
+
+/// One Mage-Flow anchor capture, on any of the six catalog ids, at any shipped tier.
+///
+/// E4: the generator comes from `catalog.media().load(arm.provider, &spec)` — the same registry load
+/// the worker performs for this lane (`engines.rs` `MODEL_TABLE` maps each catalog id onto the
+/// identically-named engine id, and the generic MLX stream hands the registry a `LoadSpec` carrying
+/// the tier quant plus the two staged component dirs) — never a re-implementation of the loader.
+fn run_mage_provider(request: &Value) -> Result<Value, String> {
+    let arm = mage_arm(request)?;
+    validate_mage_mode(request, arm)?;
+    protocol::validate_plain_overlay_target(request, arm.execution_path)?;
+    protocol::validate_still_geometry(request, arm.still_calibration)?;
+    let selection = planned_selection(request)?;
+    let tier = planned_qwen_tier(request)?;
+    let seed = planned_mage_seed(request, arm, tier)?;
+    validate_mage_plan_identity(request, arm, tier)?;
+    // The plan's shape is the worker's: the six MLX Mage `memory_route_registry::RULES` are typed
+    // (`requires_sequential_selection: false`), every Mage manifest entry's MLX BTR row matches
+    // the anchor's exact request context, and `mlx-gen-mage` publishes BTR `Implemented` for a
+    // streamable Deferred candidate, so `image_jobs/base.rs` evaluates `Applied + Deferred` before
+    // any rung is selected — the resident anchor rows bind `deferred_materialization` (the
+    // worker's `mage_mlx_production_load_shape_is_deferred_and_sequential_for_the_resident_selection`
+    // drives that evaluator over the real manifest entries and pins the 18 `mage_flow*:*:mlx` plan
+    // rows to it). The capture executes that shape and re-asserts it against the loaded identity.
+    let load_shape = planned_load_shape(request)?;
+    // Mage never reads `LoadSpec::offload_policy` — `assemble` builds a `Residency::request_scoped`
+    // pipeline and staging is selected per request by `GenerationRequest::memory` — but the spec
+    // still records which policy the worker asked for, and the resident anchor asks for Resident.
+    let offload = if matches!(
+        selection.strategy,
+        MemoryStrategy::StagedResidency | MemoryStrategy::BoundedTransformerResidency
+    ) {
+        OffloadPolicy::Sequential
+    } else {
+        OffloadPolicy::Resident
+    };
+    let (width, height) = protocol::target_geometry(request)?;
+    let source = mage_artifact_source(arm)?;
+    let repository = source.repository.clone();
+    let revision = source.revision.clone();
+    let components_repository = source.components_repository.clone();
+    let components_revision = source.components_revision.clone();
+    let MageArtifact { root: _root, spec } =
+        mage_load_spec(arm, tier, &source, &selection, offload, load_shape)?;
+    let catalog =
+        runtime_macos::catalog().map_err(|error| format!("build MLX catalog: {error}"))?;
+    let generator = catalog
+        .media()
+        .load(arm.provider, &spec)
+        .map_err(|error| format!("load real {} {tier} provider: {error}", arm.provider))?;
+    let contract = generator
+        .memory_strategy_contract()
+        .ok_or_else(|| format!("loaded {} has no memory-strategy contract", arm.provider))?;
+    contract.validate_selection(&selection).map_err(|error| {
+        format!(
+            "pinned {} provider rejected planned selection: {error}",
+            arm.provider
+        )
+    })?;
+    let strategy = attested_strategy(
+        request,
+        &selection,
+        &contract.engaged_composition(selection.strategy),
+    )?;
+    let calibration = contract.calibration.as_ref().ok_or_else(|| {
+        format!(
+            "pinned {} provider has no calibration identity",
+            arm.provider
+        )
+    })?;
+    let planned_fingerprint = protocol::planned(request)?
+        .get("calibrationFingerprint")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "planned.calibrationFingerprint must be a string".to_owned())?;
+    if planned_fingerprint != calibration.fingerprint {
+        return Err(format!(
+            "plan/provider calibration mismatch: plan={planned_fingerprint}, pinned provider={}",
+            calibration.fingerprint
+        ));
+    }
+    if load_shape != calibration.load_shape {
+        return Err(format!(
+            "plan/provider load-shape mismatch: plan={}, pinned provider={}",
+            load_shape_key(load_shape),
+            load_shape_key(calibration.load_shape)
+        ));
+    }
+    let hardware_bytes = request
+        .pointer("/hardware/memoryBytes")
+        .and_then(Value::as_u64)
+        .ok_or_else(|| "run request.hardware.memoryBytes must be an integer".to_owned())?;
+    let context = mage_run_context(
+        arm,
+        selection,
+        calibration,
+        width,
+        height,
+        hardware_bytes,
+        1,
+    );
+
+    let conditioning = Cell::new(PhaseMemory {
+        active: 0,
+        cache: 0,
+    });
+    let denoise = Cell::new(PhaseMemory {
+        active: 0,
+        cache: 0,
+    });
+    clear_cache();
+    reset_peak_memory();
+    let selected = one_image(scoped_generate(
+        generator.as_ref(),
+        mage_request(arm, width, height, seed),
+        &context,
+        None,
+        &mut |progress| match progress {
+            Progress::Step { current: 1, .. } => {
+                conditioning.set(PhaseMemory::capture());
+                reset_peak_memory();
+            }
+            Progress::Decoding => {
+                denoise.set(PhaseMemory::capture());
+                reset_peak_memory();
+            }
+            _ => {}
+        },
+    )?)?;
+    let decode = PhaseMemory::capture();
+    let conditioning = conditioning.get();
+    let denoise = denoise.get();
+    if [conditioning.active, denoise.active, decode.active].contains(&0) {
+        return Err(
+            "a synchronized Mage-Flow lifecycle phase reported a zero active peak".to_owned(),
+        );
+    }
+    let phases = [conditioning, denoise, decode];
+    let overall = PhaseMemory::overall(&phases);
+    let predicted_peaks = image_predicted_peak_bytes(conditioning, denoise, decode);
+    let predicted = predicted_peaks.overall;
+
+    let mut exact = context.clone();
+    exact.predicted_peak_bytes = predicted;
+    exact.budget.total_bytes = predicted;
+    if !matches!(
+        generator.memory_strategy_safety_check(&exact),
+        MemorySafetyDecision::Accept
+    ) {
+        return Err("Mage-Flow provider rejected an exact-fit calibrated budget".to_owned());
+    }
+    let mut unknown = context.clone();
+    unknown.budget.total_bytes = 0;
+    if !matches!(
+        generator.memory_strategy_safety_check(&unknown),
+        MemorySafetyDecision::Reject { .. }
+    ) {
+        return Err("Mage-Flow provider accepted an unknown/zero memory budget".to_owned());
+    }
+    let mut stale = context.clone();
+    stale.calibration_fingerprint = "stale-mage-flow-fingerprint".to_owned();
+    if !matches!(
+        generator.memory_strategy_safety_check(&stale),
+        MemorySafetyDecision::Reject { .. }
+    ) {
+        return Err("Mage-Flow provider accepted stale calibration evidence".to_owned());
+    }
+    // The six checkpoints are architecturally identical, so the provider's own route gate is the
+    // only thing standing between an edit anchor and a text-to-image render recorded under it.
+    // Prove it is live on THIS loaded generator rather than trusting the contract's declaration.
+    let mut crossed = context.clone();
+    crossed.mode = if arm.edit {
+        MemoryMode::TextToImage
+    } else {
+        MemoryMode::Edit
+    };
+    crossed.has_reference = !arm.edit;
+    crossed.geometry.reference_count = u32::from(!arm.edit);
+    if !matches!(
+        generator.memory_strategy_safety_check(&crossed),
+        MemorySafetyDecision::Reject { .. }
+    ) {
+        return Err(format!(
+            "pinned {} provider accepted the opposite request mode",
+            arm.provider
+        ));
+    }
+
+    let baseline = one_image(
+        generator
+            .generate(&mage_request(arm, width, height, seed), &mut |_| {})
+            .map_err(|error| format!("generate unselected Mage-Flow reference: {error}"))?,
+    )?;
+    let (maximum_error, mean_error) = image_max_mean_abs(&selected, &baseline)?;
+    if !mage_quality_passes(maximum_error, mean_error) {
+        return Err(format!(
+            "Mage-Flow selected rung exceeded unselected parity: max={maximum_error:.6}, \
+             mean={mean_error:.6}"
+        ));
+    }
+    let warm = one_image(scoped_generate(
+        generator.as_ref(),
+        mage_request(arm, width, height, seed),
+        &context,
+        None,
+        &mut |_| {},
+    )?)?;
+    let (warm_maximum, warm_mean) = image_max_mean_abs(&selected, &warm)?;
+    if !mage_quality_passes(warm_maximum, warm_mean) {
+        return Err("Mage-Flow warm repeat changed the deterministic output".to_owned());
+    }
+
+    let cancelled = mage_request(arm, width, height, seed);
+    let cancel_signal = cancelled.cancel.clone();
+    let mut cancel_triggered = false;
+    let cancel_error = scoped_generate(
+        generator.as_ref(),
+        cancelled,
+        &context,
+        None,
+        &mut |progress| {
+            if cancel_triggered {
+                return;
+            }
+            if let Progress::Step { current: 1, .. } = progress {
+                cancel_triggered = true;
+                cancel_signal.cancel();
+            }
+        },
+    )
+    .expect_err("in-flight Mage-Flow cancellation must fail");
+    if !cancel_triggered {
+        return Err(
+            "Mage-Flow cancellation probe never reached the active rung boundary".to_owned(),
+        );
+    }
+    if !cancel_error.to_ascii_lowercase().contains("cancel") {
+        return Err(format!(
+            "Mage-Flow cancellation returned the wrong error: {cancel_error}"
+        ));
+    }
+    let cancel_recovery = one_image(scoped_generate(
+        generator.as_ref(),
+        mage_request(arm, width, height, seed),
+        &context,
+        None,
+        &mut |_| {},
+    )?)?;
+    let (cancel_maximum, cancel_mean) = image_max_mean_abs(&selected, &cancel_recovery)?;
+    if !mage_quality_passes(cancel_maximum, cancel_mean) {
+        return Err("Mage-Flow cancellation cleanup changed the warm follow-up".to_owned());
+    }
+
+    let injected = scoped_generate(
+        generator.as_ref(),
+        mage_request(arm, width, height, seed),
+        &context,
+        Some(MemoryPhase::Denoise),
+        &mut |_| {},
+    )
+    .expect_err("injected Mage-Flow error must fail");
+    if !injected.contains("authorized calibration fault") {
+        return Err(format!(
+            "Mage-Flow error injection returned the wrong error: {injected}"
+        ));
+    }
+    let error_recovery = one_image(scoped_generate(
+        generator.as_ref(),
+        mage_request(arm, width, height, seed),
+        &context,
+        None,
+        &mut |_| {},
+    )?)?;
+    let (recovery_maximum, recovery_mean) = image_max_mean_abs(&selected, &error_recovery)?;
+    if !mage_quality_passes(recovery_maximum, recovery_mean) {
+        return Err("Mage-Flow error cleanup changed the warm follow-up".to_owned());
+    }
+
+    let mutated = qwen_negative_mutation(&selected);
+    let (mutated_maximum, mutated_mean) = image_max_mean_abs(&mutated, &baseline)?;
+    if mage_quality_passes(mutated_maximum, mutated_mean) {
+        return Err(
+            "Mage-Flow output mutation did not breach the production parity envelope".to_owned(),
+        );
+    }
+
+    let mut fragment = json!({
+        "status": "complete",
+        "strategy": strategy,
+        "loadShape": load_shape_key(calibration.load_shape),
+        "artifact": {
+            "repository": repository,
+            "resolvedRevision": revision,
+            "variant": tier,
+        },
+        "sweep": mage_complete_sweep(request)?,
+        "scenarios": [
+            { "name": "exact_fit", "result": "passed", "predictedBytes": predicted, "effectiveBudgetBytes": predicted },
+            { "name": "unknown_budget", "result": "passed" },
+            { "name": "stale_evidence", "result": "passed" },
+            { "name": "warm_repeat", "result": "passed" },
+            { "name": "cancel", "result": "passed", "cleanupVerified": true, "warmFollowUpPassed": true },
+            { "name": "error", "result": "passed", "cleanupVerified": true, "warmFollowUpPassed": true },
+            { "name": "loadability", "result": "passed" }
+        ],
+        "predictedPeakBytes": predicted_peaks.json(),
+        "observedMemory": {
+            "conditioning": conditioning.json(),
+            "denoise": denoise.json(),
+            "decode": decode.json(),
+            "overall": overall.json(),
+        },
+        "quality": {
+            "contract": "same seed, prompt, sampling, precision, staged components, and loaded provider; selected rung versus unselected request",
+            "identicalInputs": true,
+            "identicalLatents": false,
+            "result": "passed",
+            "maximumError": maximum_error,
+            "meanError": mean_error,
+            "maximumErrorThreshold": MAGE_MAX_THRESHOLD,
+            "meanErrorThreshold": MAGE_MEAN_THRESHOLD,
+        },
+        "negativeMutation": {
+            "parameters": protocol::strategy_parameters(request)?,
+            "measured": true,
+            "result": "failed_as_expected",
+            "maximumError": mutated_maximum,
+            "meanError": mutated_mean,
+        },
+        "loadability": {
+            "result": "passed",
+            // BOTH artifact triples: a Mage load that resolved the DiT from the planned variant
+            // but the text encoder from another tier's components would otherwise leave no trace.
+            "resolvedPathFingerprint": format!(
+                "{repository}@{revision}:{tier}+{components_repository}@{components_revision}:{tier}"
+            ),
+        },
+        "diagnostics": protocol::diagnostics(
+            &format!("memory-mlx-adapter:{}-shared-ladder", arm.slug),
+            "executed",
+            [],
+            [
+                ("conditioningActivePeak", "bytes", conditioning.active),
+                ("denoiseActivePeak", "bytes", denoise.active),
+                ("decodeActivePeak", "bytes", decode.active),
+                ("overallAllocatorEnvelope", "bytes", overall.allocator_bytes()),
+                // An edit capture conditions on exactly one reference image; a text-to-image
+                // capture on none. Read off the arm the LOAD resolved, so a record can never claim
+                // a reference the request did not carry.
+                ("referenceImages", "count", u64::from(arm.edit)),
+                // Both shared components are staged explicitly — never left to the loader's
+                // flat-layout fallback, which the split rehost cannot satisfy.
+                ("stagedComponents", "count", 2),
+            ],
+        ),
+        "capturedAt": protocol::captured_at(),
+    });
+    protocol::settle_plain_overlay_scenario(request, &mut fragment, arm.execution_path)?;
+    Ok(fragment)
+}
+
+#[cfg(test)]
+mod mage_tests {
+    use super::*;
+
+    fn mage_planned(provider: &str, model_id: &str, tier: &str, steps: u32) -> Value {
+        let mode = if provider.contains("edit") {
+            "edit_image"
+        } else {
+            "text_to_image"
+        };
+        let slug = provider.replace('_', "-");
+        json!({
+            "planned": {
+                "target": {
+                    "provider": provider,
+                    "modelId": model_id,
+                    "tier": tier,
+                    "mode": mode,
+                    "overlay": "none",
+                    "geometry": { "width": MAGE_EDGE, "height": MAGE_EDGE, "batch": 1, "frames": 1 }
+                },
+                "backend": "mlx",
+                "loadShape": "deferred_materialization",
+                "strategy": { "rung": "resident", "engagedRungs": ["resident"], "parameters": {} },
+                "calibrationFingerprint": format!("mage-flow-{slug}-{tier}-mlx-shared-ladder-v1"),
+                "fixture": format!("{slug}-mlx-{tier}-{}-seed{MAGE_SEED}-step{steps}", MAGE_EDGE),
+            }
+        })
+    }
+
+    /// Every registered Mage id reaches the arm, and a foreign one is refused BY NAME rather than
+    /// misrouted into it (the sc-18104 defect class).
+    #[test]
+    fn run_dispatches_every_mage_id_and_still_refuses_a_foreign_one() {
+        for arm in MAGE_ARMS {
+            let error = run(&mage_planned(arm.provider, arm.provider, "q4", arm.steps))
+                .expect_err("the weights-free plan cannot complete a real capture");
+            assert!(
+                !error.contains("does not implement provider"),
+                "{} was not dispatched into the Mage arm: {error}",
+                arm.provider
+            );
+        }
+        for provider in ["mage_flow_lora", "mage_flow_edit_rl"] {
+            let error = run(&mage_planned(provider, provider, "q4", 2)).unwrap_err();
+            assert_eq!(
+                error,
+                format!("MLX five-rung calibration does not implement provider {provider:?}")
+            );
+        }
+    }
+
+    /// The six checkpoints are architecturally identical, so a plan whose `modelId` names a
+    /// different member than its `provider` must be refused before anything is loaded — nothing
+    /// downstream could notice that one variant's peaks had been recorded as another's.
+    #[test]
+    fn a_crossed_provider_and_model_pair_is_refused_by_name() {
+        let request = mage_planned("mage_flow_turbo", "mage_flow_base", "q4", 4);
+        let error = mage_arm(&request).unwrap_err();
+        assert_eq!(
+            error,
+            "the MLX Mage-Flow arm does not implement provider \"mage_flow_turbo\" for model \
+             \"mage_flow_base\""
+        );
+    }
+
+    /// Every arm's table row is self-consistent, and no two rows share an artifact, an env family, a
+    /// fixture prefix or an execution path — the four things that keep two members' captures apart.
+    #[test]
+    fn every_mage_arm_row_is_unique_on_every_identifying_axis() {
+        assert_eq!(MAGE_ARMS.len(), 6);
+        for axis in [
+            MAGE_ARMS.map(|arm| arm.provider),
+            MAGE_ARMS.map(|arm| arm.repository),
+            MAGE_ARMS.map(|arm| arm.repository_env),
+            MAGE_ARMS.map(|arm| arm.fixture_prefix),
+            MAGE_ARMS.map(|arm| arm.execution_path),
+            MAGE_ARMS.map(|arm| arm.still_calibration),
+            MAGE_ARMS.map(|arm| arm.slug),
+        ] {
+            let mut sorted = axis.to_vec();
+            sorted.sort_unstable();
+            sorted.dedup();
+            assert_eq!(
+                sorted.len(),
+                6,
+                "an identifying axis is shared by two Mage arms"
+            );
+        }
+        for arm in MAGE_ARMS {
+            assert_eq!(arm.edit, arm.provider.contains("edit"));
+            // The distilled members run the distill's own four-step CFG-off recipe.
+            let distilled = arm.provider.ends_with("turbo");
+            assert_eq!(arm.steps, if distilled { 4 } else { 2 });
+            assert_eq!(arm.guidance, if distilled { 1.0 } else { 5.0 });
+            assert!(arm.repository_env.ends_with("_REPOSITORY"));
+            assert!(arm.revision_env.ends_with("_REVISION"));
+            assert!(arm.root_env.ends_with("_ROOT"));
+        }
+    }
+
+    /// The fixture binds member, tier, edge and the recipe's step count. A fixture naming another
+    /// member's prefix, another tier, or another step count is refused.
+    #[test]
+    fn the_fixture_binds_the_member_the_tier_and_the_step_count() {
+        let arm = MAGE_ARMS[2];
+        let good = mage_planned(arm.provider, arm.provider, "q8", arm.steps);
+        assert_eq!(planned_mage_seed(&good, arm, "q8").unwrap(), MAGE_SEED);
+        // Another member's fixture prefix.
+        let crossed = mage_planned(MAGE_ARMS[1].provider, arm.provider, "q8", arm.steps);
+        let mut request = good.clone();
+        request["planned"]["fixture"] = crossed["planned"]["fixture"].clone();
+        assert!(planned_mage_seed(&request, arm, "q8")
+            .unwrap_err()
+            .contains("must start with"));
+        // Another tier.
+        assert!(planned_mage_seed(&good, arm, "q4")
+            .unwrap_err()
+            .contains("must start with"));
+        // Another step count.
+        let wrong_steps = mage_planned(arm.provider, arm.provider, "q8", 2);
+        let error = planned_mage_seed(&wrong_steps, arm, "q8").unwrap_err();
+        assert!(
+            error.contains("4-step calibration request"),
+            "the refusal must name the recipe this member renders, got: {error}"
+        );
+    }
+
+    /// A plan row declaring the OTHER mode for a member is refused before any environment work: the
+    /// record's `mode` comes from the plan while the reference comes from the arm, so an unchecked
+    /// mismatch would label a reference-conditioned render reference-free.
+    #[test]
+    fn a_plan_declaring_the_wrong_mode_for_a_member_is_refused() {
+        for arm in MAGE_ARMS {
+            let mut request = mage_planned(arm.provider, arm.provider, "q4", arm.steps);
+            let wrong = if arm.edit {
+                "text_to_image"
+            } else {
+                "edit_image"
+            };
+            request["planned"]["target"]["mode"] = json!(wrong);
+            let error = run(&request).expect_err("a crossed mode must be refused");
+            assert_eq!(
+                error,
+                format!(
+                    "{} renders {:?}, but the plan declares mode {wrong:?}",
+                    arm.provider,
+                    mage_mode(arm)
+                )
+            );
+        }
+    }
+
+    /// The still-geometry guard fires under each member's own label, before any environment work.
+    #[test]
+    fn every_mage_member_refuses_a_multi_frame_geometry_under_its_own_label() {
+        for arm in MAGE_ARMS {
+            for frames in [0_u64, 2, 145] {
+                let mut request = mage_planned(arm.provider, arm.provider, "q4", arm.steps);
+                request["planned"]["target"]["geometry"]["frames"] = json!(frames);
+                let error = run(&request).expect_err("a video geometry must be refused");
+                assert_eq!(
+                    error,
+                    format!(
+                        "{} requires geometry.frames == 1, got {frames}",
+                        arm.still_calibration
+                    )
+                );
+            }
+        }
+    }
+
+    fn mage_temp_root(label: &str) -> PathBuf {
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        std::env::temp_dir().join(format!("sc-22733-{label}-{}-{nonce}", std::process::id()))
+    }
+
+    fn staged_snapshot(repository: &str, revision: &str, tier: &str, components: bool) -> PathBuf {
+        let root = mage_temp_root(&repository.replace('/', "-"))
+            .join(format!("models--{}", repository.replace('/', "--")))
+            .join("snapshots")
+            .join(revision);
+        if components {
+            for component in [
+                protocol::MAGE_COMPONENT_TEXT_ENCODER,
+                protocol::MAGE_COMPONENT_VAE,
+            ] {
+                std::fs::create_dir_all(root.join(tier).join(component)).unwrap();
+            }
+            root
+        } else {
+            let tier_root = root.join(tier);
+            std::fs::create_dir_all(tier_root.join("transformer")).unwrap();
+            tier_root
+        }
+    }
+
+    const MAGE_TEST_REVISION: &str = "5f6455818d8ca80ce780e9c01b9e0de1d8c5f9db";
+    const MAGE_TEST_COMPONENTS_REVISION: &str = "c936de2a107ee8d0869137e73943f6414f23adaa";
+
+    fn mage_source(arm: MageArm, tier: &str) -> MageArtifactSource {
+        MageArtifactSource {
+            repository: arm.repository.to_owned(),
+            revision: MAGE_TEST_REVISION.to_owned(),
+            root: staged_snapshot(arm.repository, MAGE_TEST_REVISION, tier, false),
+            components_repository: protocol::MAGE_COMPONENTS_REPOSITORY.to_owned(),
+            components_revision: MAGE_TEST_COMPONENTS_REVISION.to_owned(),
+            components_root: staged_snapshot(
+                protocol::MAGE_COMPONENTS_REPOSITORY,
+                MAGE_TEST_COMPONENTS_REVISION,
+                tier,
+                true,
+            ),
+        }
+    }
+
+    fn resident_selection(tier: &str) -> MemorySelection {
+        MemorySelection {
+            strategy: MemoryStrategy::Resident,
+            parameters: MemoryStrategyParameters::default(),
+            tier: MemoryNumericTier {
+                precision: Precision::Bf16,
+                quant: match tier {
+                    "q4" => Some(Quant::Q4),
+                    "q8" => Some(Quant::Q8),
+                    _ => None,
+                },
+                component_precision_floors: &[],
+            },
+        }
+    }
+
+    /// Every MLX Mage plan row names the per-(member, tier) production identity the loaded
+    /// generator publishes (inference PR 953's table), the 18 identities are distinct, no row
+    /// names a weights-free conformance string or the retired single string, every row binds the
+    /// deferred shape the worker loads, and the pre-load check refuses a row that names anything
+    /// else — before any env or weights are touched.
+    ///
+    /// It also binds [`MAGE_EDGE`] and [`MAGE_SEED`] to those rows: the arm reads geometry and seed
+    /// from the PLAN, so the two constants are only true of the campaign while every checked-in row
+    /// declares them, and `planned_mage_seed` must accept each row as written.
+    #[test]
+    fn every_planned_mage_mlx_row_names_the_production_identity_and_is_checked_before_the_load() {
+        let plan: Value = serde_json::from_str(include_str!(
+            "../../../../config/memory-calibration-plan.json"
+        ))
+        .expect("the anchor plan parses");
+        let anchors = plan["anchors"].as_object().expect("anchors object");
+        let mut identities = std::collections::BTreeSet::new();
+        let mut seen = std::collections::BTreeSet::new();
+        for arm in MAGE_ARMS {
+            for tier in ["bf16", "q4", "q8"] {
+                let key = format!("{}:{tier}:mlx", arm.provider);
+                let row = &anchors[&key];
+                let expected = mage_calibration_fingerprint(arm, tier);
+                assert_eq!(
+                    row["calibrationFingerprint"].as_str(),
+                    Some(expected.as_str()),
+                    "{key}"
+                );
+                assert!(!is_mage_weights_free_fingerprint(&expected), "{expected}");
+                assert!(expected.contains(&format!("-{tier}-mlx-")), "{expected}");
+                assert!(
+                    identities.insert(expected),
+                    "{key}: identity shared with another cell"
+                );
+                assert_eq!(
+                    row["loadShape"].as_str(),
+                    Some(protocol::LOAD_SHAPE_DEFERRED),
+                    "{key}: the worker loads Mage deferred on MLX"
+                );
+                assert_eq!(
+                    row["geometry"]["width"].as_u64(),
+                    Some(u64::from(MAGE_EDGE)),
+                    "{key}: every Mage anchor is planned at MAGE_EDGE²"
+                );
+                assert_eq!(
+                    row["geometry"]["height"].as_u64(),
+                    Some(u64::from(MAGE_EDGE)),
+                    "{key}: every Mage anchor is planned at MAGE_EDGE²"
+                );
+                assert_eq!(
+                    row["fixture"].as_str(),
+                    Some(
+                        format!(
+                            "{}-{tier}-{MAGE_EDGE}-seed{MAGE_SEED}-step{}",
+                            arm.fixture_prefix, arm.steps
+                        )
+                        .as_str()
+                    ),
+                    "{key}: the row's fixture must be the member/tier/edge/seed/step spelling"
+                );
+                // …and `planned_mage_seed` must accept the row exactly as it is written, so the
+                // spelling asserted above is the one the arm parses rather than a parallel claim.
+                let planned_row = json!({ "planned": {
+                    "target": { "provider": arm.provider, "modelId": arm.provider, "tier": tier,
+                                "geometry": row["geometry"].clone() },
+                    "fixture": row["fixture"].clone(),
+                }});
+                assert_eq!(
+                    planned_mage_seed(&planned_row, arm, tier).unwrap(),
+                    MAGE_SEED,
+                    "{key}"
+                );
+                seen.insert(key.clone());
+                let request = json!({ "planned": {
+                    "target": { "provider": arm.provider, "modelId": arm.provider, "tier": tier },
+                    "calibrationFingerprint": row["calibrationFingerprint"].clone(),
+                }});
+                validate_mage_plan_identity(&request, arm, tier).unwrap();
+                for stale in [
+                    "mage-flow-mlx-shared-ladder-2026-08-03-v1".to_owned(),
+                    format!("mage-flow-mlx-registry-behavior-v1-{}-{tier}", arm.slug),
+                    format!("mage-flow-cuda-{}-{tier}-shared-ladder-v3", arm.slug),
+                ] {
+                    assert!(
+                        is_mage_weights_free_fingerprint(&stale) || stale.contains("-cuda-"),
+                        "{stale}"
+                    );
+                    let mut wrong = request.clone();
+                    wrong["planned"]["calibrationFingerprint"] = json!(stale);
+                    let error = validate_mage_plan_identity(&wrong, arm, tier).unwrap_err();
+                    assert!(error.contains("calibration mismatch"), "{key}: {error}");
+                    assert!(error.contains(&stale), "{key}: {error}");
+                }
+            }
+        }
+        let expected: std::collections::BTreeSet<String> = MAGE_ARMS
+            .iter()
+            .flat_map(|arm| {
+                ["bf16", "q4", "q8"]
+                    .iter()
+                    .map(move |tier| format!("{}:{tier}:mlx", arm.provider))
+            })
+            .collect();
+        assert_eq!(seen, expected);
+        assert_eq!(identities.len(), 18);
+    }
+
+    /// The composed `LoadSpec` is the shape the WORKER loads at the planned rung: the variant's own
+    /// tier root, both shared components staged EXPLICITLY (the variant rehost has no
+    /// `text_encoder/` or `vae/` sibling for the loader's flat-layout fallback to find), the planned
+    /// tier's quant, and the offload policy and load shape the caller passed through unchanged
+    /// (the capture passes the plan's deferred shape; the arguments here are the eager/resident
+    /// pair so the pass-through itself is what is asserted).
+    #[test]
+    fn the_load_spec_binds_the_tier_root_both_components_and_the_planned_quant() {
+        for arm in MAGE_ARMS {
+            for tier in ["bf16", "q4", "q8"] {
+                let source = mage_source(arm, tier);
+                let selection = resident_selection(tier);
+                let MageArtifact { root, spec } = mage_load_spec(
+                    arm,
+                    tier,
+                    &source,
+                    &selection,
+                    OffloadPolicy::Resident,
+                    LoadShape::EagerMaterialization,
+                )
+                .unwrap();
+                assert_eq!(
+                    spec.weights,
+                    WeightsSource::Dir(root.clone()),
+                    "the DiT root is the variant's own tier directory"
+                );
+                assert!(root.ends_with(tier));
+                assert_eq!(spec.offload_policy, OffloadPolicy::Resident);
+                assert_eq!(spec.load_shape, LoadShape::EagerMaterialization);
+                assert_eq!(spec.quantize, selection.tier.quant);
+                for component in [
+                    protocol::MAGE_COMPONENT_TEXT_ENCODER,
+                    protocol::MAGE_COMPONENT_VAE,
+                ] {
+                    let Some(WeightsSource::Dir(dir)) = spec.components.get(component) else {
+                        panic!("{} did not stage the {component} component", arm.provider);
+                    };
+                    assert!(
+                        dir.ends_with(std::path::Path::new(tier).join(component)),
+                        "the {component} component must come from the components snapshot's own \
+                         {tier} directory, got {}",
+                        dir.display()
+                    );
+                    // And never from the variant rehost, which does not ship it.
+                    assert!(!dir.starts_with(&root));
+                }
+            }
+        }
+    }
+
+    /// A stale export of ANOTHER tier cannot satisfy this plan: the root suffix is checked against
+    /// the planned tier before the load is paid for (the sc-17097 defect class).
+    #[test]
+    fn another_tiers_root_cannot_satisfy_the_planned_tier() {
+        let arm = MAGE_ARMS[0];
+        let mut source = mage_source(arm, "q4");
+        source.root = staged_snapshot(arm.repository, MAGE_TEST_REVISION, "q8", false);
+        let error = mage_load_spec(
+            arm,
+            "q4",
+            &source,
+            &resident_selection("q4"),
+            OffloadPolicy::Resident,
+            LoadShape::EagerMaterialization,
+        )
+        .unwrap_err();
+        assert!(error.contains("q4"), "{error}");
+    }
+
+    /// Each member binds its OWN rehost. A components root pointing at a variant repository — or a
+    /// variant root pointing at a sibling's — is refused by repository name.
+    #[test]
+    fn each_member_refuses_another_repositorys_root() {
+        let arm = MAGE_ARMS[3];
+        let mut crossed = mage_source(arm, "q4");
+        crossed.repository = MAGE_ARMS[4].repository.to_owned();
+        let error = mage_load_spec(
+            arm,
+            "q4",
+            &crossed,
+            &resident_selection("q4"),
+            OffloadPolicy::Resident,
+            LoadShape::EagerMaterialization,
+        )
+        .unwrap_err();
+        assert!(error.contains(arm.repository), "{error}");
+
+        let mut crossed_components = mage_source(arm, "q4");
+        crossed_components.components_repository = arm.repository.to_owned();
+        let error = mage_load_spec(
+            arm,
+            "q4",
+            &crossed_components,
+            &resident_selection("q4"),
+            OffloadPolicy::Resident,
+            LoadShape::EagerMaterialization,
+        )
+        .unwrap_err();
+        assert!(
+            error.contains(protocol::MAGE_COMPONENTS_REPOSITORY),
+            "{error}"
+        );
+    }
+
+    /// The edit members condition on exactly one reference and the text-to-image members on none —
+    /// the one thing that makes an edit capture measure the edit path (`edit_references` refuses a
+    /// reference-free edit request outright).
+    #[test]
+    fn only_the_edit_members_carry_a_reference_and_only_the_undistilled_a_negative_prompt() {
+        for arm in MAGE_ARMS {
+            let request = mage_request(arm, MAGE_EDGE, MAGE_EDGE, MAGE_SEED);
+            assert_eq!(request.conditioning.len(), usize::from(arm.edit));
+            if arm.edit {
+                assert!(matches!(
+                    request.conditioning[0],
+                    Conditioning::Reference { .. }
+                ));
+            }
+            assert_eq!(request.steps, Some(arm.steps));
+            assert_eq!(request.guidance, Some(arm.guidance));
+            assert_eq!(request.negative_prompt.is_some(), arm.guidance > 1.0);
+            assert_eq!(request.seed, Some(MAGE_SEED));
+        }
+    }
+
+    /// The run context is the coordinate the provider's own route gate admits this member under
+    /// (`model.rs` `request_context_error`), and never the opposite one.
+    #[test]
+    fn the_run_context_carries_each_members_own_mode_and_reference_count() {
+        for arm in MAGE_ARMS {
+            let calibration = MemoryCalibrationIdentity::new(
+                "mage-flow-mlx-shared-ladder-2026-08-03-v1",
+                LoadShape::EagerMaterialization,
+            );
+            let context = mage_run_context(
+                arm,
+                resident_selection("q4"),
+                &calibration,
+                MAGE_EDGE,
+                MAGE_EDGE,
+                1_024,
+                1,
+            );
+            let expected = if arm.edit {
+                MemoryMode::Edit
+            } else {
+                MemoryMode::TextToImage
+            };
+            assert_eq!(context.mode, expected);
+            assert_eq!(context.has_reference, arm.edit);
+            assert_eq!(context.geometry.reference_count, u32::from(arm.edit));
+            assert_eq!(context.overlay, None);
+            assert!(!context.has_phases);
+            assert!(!context.use_pid);
+            assert_eq!(context.load_shape, LoadShape::EagerMaterialization);
+        }
+    }
 }
 
 /// The exact target geometry an `mlx:ltx_2_3` calibration case renders. `fps` is NOT part of it:
@@ -14238,6 +16718,674 @@ fn run_minimax_h3(request: &Value) -> Result<Value, String> {
     Ok(fragment)
 }
 
+// ---------------------------------------------------------------------------------------------
+// The SenseNova-U1 family arm (sc-22734): six catalog models over two engine ids.
+// ---------------------------------------------------------------------------------------------
+
+/// One member of the MLX SenseNova-U1 family.
+///
+/// The worker routes SIX catalog models onto TWO engine ids (`crates/sceneworks-worker/src/
+/// engines.rs` `MODEL_TABLE`): the quality trio on `sensenova_u1_8b` and the 8-step distilled trio
+/// on `sensenova_u1_8b_fast`. Each of the six has its OWN independently pinned tiered rehost, so
+/// the arm is keyed on `(provider, modelId)`: the provider names the engine to load through, the
+/// model id names the artifact family the capture must actually open and the route the engine
+/// mints its per-route identity for. Binding the engine id alone would let an
+/// `sensenova_u1_8b_infographic_v3` plan be satisfied by base-SenseNova weights and re-label the
+/// base model's peaks as the finetune's.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct SenseNovaArm {
+    /// The catalog model id — `planned.target.modelId`, and the spec's `resolved_route`. The
+    /// worker binds exactly this (`image_jobs/base.rs` `.with_resolved_route(request.model)`), and
+    /// `mlx-gen-sensenova`'s `validate_resolved_artifact_binding` refuses a route whose repository
+    /// identity the weights path does not carry.
+    model_id: &'static str,
+    /// The registry id handed to `catalog.media().load` — the production loader (E4), the same id
+    /// the worker passes to `inference_runtime::load`.
+    provider: &'static str,
+    /// The route slug the engine's per-route calibration identity is spelled with, and the
+    /// record's diagnostics source (`memory-mlx-adapter:sensenova-u1-<slug>-shared-ladder`).
+    slug: &'static str,
+    execution_path: &'static str,
+    /// The still-geometry refusal label (sc-18808).
+    still_calibration: &'static str,
+    repository_env: &'static str,
+    revision_env: &'static str,
+    root_env: &'static str,
+    expected_repository: &'static str,
+}
+
+/// The quality engine id (`mlx_gen_sensenova::MODEL_ID`).
+const SENSENOVA_PROVIDER: &str = "sensenova_u1_8b";
+/// The 8-step distilled engine id (`mlx_gen_sensenova::MODEL_ID_FAST`). A SEPARATE registry id, not
+/// a mode of the quality one: the distill LoRA is pre-merged into each `_fast` rehost at convert
+/// time and the tier subdir carries the `distill_merged.json` marker `load_fast` reads, so the
+/// worker attaches nothing and selects the engine instead (`engines.rs`, `image_jobs/sensenova.rs`
+/// "No user adapters by design").
+const SENSENOVA_FAST_PROVIDER: &str = "sensenova_u1_8b_fast";
+/// The family seed. The fixture binds tier and edge, so the seed does not also carry the route.
+const SENSENOVA_SEED: u64 = 22734;
+
+const SENSENOVA_BASE_ARM: SenseNovaArm = SenseNovaArm {
+    model_id: "sensenova_u1_8b",
+    provider: SENSENOVA_PROVIDER,
+    slug: "quality",
+    execution_path: "the MLX SenseNova-U1 8B base text-to-image path",
+    still_calibration: "MLX SenseNova-U1 8B calibration",
+    repository_env: "SCENEWORKS_SENSENOVA_U1_8B_REPOSITORY",
+    revision_env: "SCENEWORKS_SENSENOVA_U1_8B_REVISION",
+    root_env: "SCENEWORKS_SENSENOVA_U1_8B_ROOT",
+    expected_repository: protocol::SENSENOVA_U1_8B_REPOSITORY,
+};
+
+const SENSENOVA_INFOGRAPHIC_V2_ARM: SenseNovaArm = SenseNovaArm {
+    model_id: "sensenova_u1_8b_infographic_v2",
+    provider: SENSENOVA_PROVIDER,
+    slug: "infographic-v2",
+    execution_path: "the MLX SenseNova-U1 Infographic V2 text-to-image path",
+    still_calibration: "MLX SenseNova-U1 Infographic V2 calibration",
+    repository_env: "SCENEWORKS_SENSENOVA_U1_8B_INFOGRAPHIC_V2_REPOSITORY",
+    revision_env: "SCENEWORKS_SENSENOVA_U1_8B_INFOGRAPHIC_V2_REVISION",
+    root_env: "SCENEWORKS_SENSENOVA_U1_8B_INFOGRAPHIC_V2_ROOT",
+    expected_repository: protocol::SENSENOVA_U1_8B_INFOGRAPHIC_V2_REPOSITORY,
+};
+
+const SENSENOVA_INFOGRAPHIC_V3_ARM: SenseNovaArm = SenseNovaArm {
+    model_id: "sensenova_u1_8b_infographic_v3",
+    provider: SENSENOVA_PROVIDER,
+    slug: "infographic-v3",
+    execution_path: "the MLX SenseNova-U1 Infographic V3 text-to-image path",
+    still_calibration: "MLX SenseNova-U1 Infographic V3 calibration",
+    repository_env: "SCENEWORKS_SENSENOVA_U1_8B_INFOGRAPHIC_V3_REPOSITORY",
+    revision_env: "SCENEWORKS_SENSENOVA_U1_8B_INFOGRAPHIC_V3_REVISION",
+    root_env: "SCENEWORKS_SENSENOVA_U1_8B_INFOGRAPHIC_V3_ROOT",
+    expected_repository: protocol::SENSENOVA_U1_8B_INFOGRAPHIC_V3_REPOSITORY,
+};
+
+const SENSENOVA_FAST_ARM: SenseNovaArm = SenseNovaArm {
+    model_id: "sensenova_u1_8b_fast",
+    provider: SENSENOVA_FAST_PROVIDER,
+    slug: "fast",
+    execution_path: "the MLX SenseNova-U1 8B distilled text-to-image path",
+    still_calibration: "MLX SenseNova-U1 8B distilled calibration",
+    repository_env: "SCENEWORKS_SENSENOVA_U1_8B_FAST_REPOSITORY",
+    revision_env: "SCENEWORKS_SENSENOVA_U1_8B_FAST_REVISION",
+    root_env: "SCENEWORKS_SENSENOVA_U1_8B_FAST_ROOT",
+    expected_repository: protocol::SENSENOVA_U1_8B_FAST_REPOSITORY,
+};
+
+const SENSENOVA_INFOGRAPHIC_V2_FAST_ARM: SenseNovaArm = SenseNovaArm {
+    model_id: "sensenova_u1_8b_infographic_v2_fast",
+    provider: SENSENOVA_FAST_PROVIDER,
+    slug: "infographic-v2-fast",
+    execution_path: "the MLX SenseNova-U1 Infographic V2 distilled text-to-image path",
+    still_calibration: "MLX SenseNova-U1 Infographic V2 distilled calibration",
+    repository_env: "SCENEWORKS_SENSENOVA_U1_8B_INFOGRAPHIC_V2_FAST_REPOSITORY",
+    revision_env: "SCENEWORKS_SENSENOVA_U1_8B_INFOGRAPHIC_V2_FAST_REVISION",
+    root_env: "SCENEWORKS_SENSENOVA_U1_8B_INFOGRAPHIC_V2_FAST_ROOT",
+    expected_repository: protocol::SENSENOVA_U1_8B_INFOGRAPHIC_V2_FAST_REPOSITORY,
+};
+
+const SENSENOVA_INFOGRAPHIC_V3_FAST_ARM: SenseNovaArm = SenseNovaArm {
+    model_id: "sensenova_u1_8b_infographic_v3_fast",
+    provider: SENSENOVA_FAST_PROVIDER,
+    slug: "infographic-v3-fast",
+    execution_path: "the MLX SenseNova-U1 Infographic V3 distilled text-to-image path",
+    still_calibration: "MLX SenseNova-U1 Infographic V3 distilled calibration",
+    repository_env: "SCENEWORKS_SENSENOVA_U1_8B_INFOGRAPHIC_V3_FAST_REPOSITORY",
+    revision_env: "SCENEWORKS_SENSENOVA_U1_8B_INFOGRAPHIC_V3_FAST_REVISION",
+    root_env: "SCENEWORKS_SENSENOVA_U1_8B_INFOGRAPHIC_V3_FAST_ROOT",
+    expected_repository: protocol::SENSENOVA_U1_8B_INFOGRAPHIC_V3_FAST_REPOSITORY,
+};
+
+const SENSENOVA_FAMILY: [SenseNovaArm; 6] = [
+    SENSENOVA_BASE_ARM,
+    SENSENOVA_INFOGRAPHIC_V2_ARM,
+    SENSENOVA_INFOGRAPHIC_V3_ARM,
+    SENSENOVA_FAST_ARM,
+    SENSENOVA_INFOGRAPHIC_V2_FAST_ARM,
+    SENSENOVA_INFOGRAPHIC_V3_FAST_ARM,
+];
+
+/// Which family member the plan asks for. Refuses by name — a model id no member serves must not be
+/// measured as its nearest neighbour, and the engine id alone is NOT an artifact identity, so a
+/// `(provider, modelId)` pair that crosses the quality/fast split is refused too.
+fn sensenova_arm(request: &Value) -> Result<SenseNovaArm, String> {
+    let planned = protocol::planned(request)?;
+    let provider = planned
+        .pointer("/target/provider")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "planned.target.provider must be a string".to_owned())?;
+    let model_id = planned
+        .pointer("/target/modelId")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "planned.target.modelId must be a string".to_owned())?;
+    SENSENOVA_FAMILY
+        .into_iter()
+        .find(|arm| arm.model_id == model_id && arm.provider == provider)
+        .ok_or_else(|| {
+            format!(
+                "the MLX SenseNova arm does not implement modelId {model_id:?} on provider \
+                 {provider:?} (family: {})",
+                SENSENOVA_FAMILY
+                    .iter()
+                    .map(|arm| format!("{}:{}", arm.provider, arm.model_id))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )
+        })
+}
+
+/// The production calibration identity `mlx-gen-sensenova` publishes for one `(route, tier)` cell.
+///
+/// The engine keys the identity on the resolved route and the ARTIFACT-PROVEN tier (never
+/// `spec.quantize` alone), and deliberately not on the offload policy: SenseNova's rung 4 keys off
+/// `LoadSpec::load_shape`, which `MemoryCalibrationIdentity::load_shape` already carries. The two
+/// q8 cells of the two base routes keep the strings their `2026-08-03` campaign measured, bound
+/// here to the engine's own constants rather than re-spelled, so a rename cannot drift the plan.
+/// The capture refuses a loaded contract whose identity differs from this table, so the two copies
+/// cannot drift unnoticed.
+fn sensenova_calibration_fingerprint(arm: SenseNovaArm, tier: &str) -> String {
+    match (arm.model_id, tier) {
+        ("sensenova_u1_8b", "q8") => {
+            runtime_macos::providers::sensenova::memory_strategy::QUALITY_CALIBRATION_FINGERPRINT
+                .to_owned()
+        }
+        ("sensenova_u1_8b_fast", "q8") => {
+            runtime_macos::providers::sensenova::memory_strategy::FAST_CALIBRATION_FINGERPRINT
+                .to_owned()
+        }
+        (_, tier) => format!("sensenova-u1-{}-{tier}-mlx-shared-ladder-v1", arm.slug),
+    }
+}
+
+/// Bind the fixture to the planned tier AND geometry edge, so a bf16 record can never be emitted
+/// against a q4 capture that merely reused the fixture string.
+fn validate_sensenova_fixture(
+    request: &Value,
+    arm: SenseNovaArm,
+    tier: &str,
+) -> Result<(), String> {
+    let fixture = protocol::planned(request)?
+        .get("fixture")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "planned.fixture must be a string".to_owned())?;
+    let (width, _) = protocol::target_geometry(request)?;
+    let prefix = format!("{}-mlx-{tier}-{width}-seed", arm.slug);
+    let remainder = fixture
+        .strip_prefix(&prefix)
+        .ok_or_else(|| format!("planned.fixture {fixture:?} must start with {prefix:?}"))?;
+    let (seed, steps) = remainder
+        .split_once("-step")
+        .ok_or_else(|| format!("planned.fixture {fixture:?} must end with -step<count>"))?;
+    let seed = seed
+        .parse::<u64>()
+        .map_err(|error| format!("parse SenseNova fixture seed {seed:?}: {error}"))?;
+    if seed != SENSENOVA_SEED {
+        return Err(format!(
+            "planned.fixture seed {seed} does not match the SenseNova calibration seed \
+             {SENSENOVA_SEED}"
+        ));
+    }
+    let steps = steps
+        .parse::<u32>()
+        .map_err(|error| format!("parse SenseNova fixture step count {steps:?}: {error}"))?;
+    if steps != 2 {
+        return Err(format!(
+            "planned.fixture {fixture:?} must use the two-step calibration request"
+        ));
+    }
+    Ok(())
+}
+
+/// The env-free half of [`sensenova_load_spec`], so the tier and route bindings are unit-testable
+/// without weights. The root must end in the PLANNED tier's directory
+/// (`.../snapshots/<revision>/<tier>`), so a stale `…/q4` export can never satisfy a q8 or bf16 plan
+/// and quietly re-label another tier's peaks.
+fn sensenova_load_spec_at(
+    arm: SenseNovaArm,
+    repository: &str,
+    revision: &str,
+    root: PathBuf,
+    tier: &str,
+) -> Result<LoadSpec, String> {
+    protocol::validate_artifact_identity(repository, revision, arm.expected_repository)?;
+    protocol::validate_huggingface_snapshot_root(
+        &root,
+        repository,
+        revision,
+        tier,
+        arm.expected_repository,
+    )?;
+    // Exactly the worker's MLX still-image shape for this family. `Resident` + eager is what
+    // `image_jobs/base.rs` settles on: SenseNova is off the shared `Residency` seam
+    // (`engine_supports_sequential("sensenova_u1_8b")` is false), so nothing ever moves it to
+    // `Sequential`, and no SenseNova manifest declares a `requiredOffloadPolicy`. The quant is the
+    // RESOLVED tier's — `reconcile_resolved_tier_quant` rewrites the requested quant to the tier
+    // the directory actually is, and the engine's `validate_artifact_tier` hard-errors on any other
+    // pairing — so bf16 carries no quant at all and the packed tiers carry theirs.
+    let mut spec = LoadSpec::new(WeightsSource::Dir(root))
+        .with_offload_policy(OffloadPolicy::Resident)
+        .with_load_shape(LoadShape::EagerMaterialization)
+        .with_resolved_route(arm.model_id);
+    if let (_, Some(quant)) = tier_precision_quant(tier) {
+        spec = spec.with_quant(quant);
+    }
+    Ok(spec)
+}
+
+fn sensenova_load_spec(
+    arm: SenseNovaArm,
+    tier: &str,
+) -> Result<(String, String, LoadSpec), String> {
+    let repository = protocol::required_env(arm.repository_env)?;
+    let revision = protocol::required_env(arm.revision_env)?;
+    let root = std::fs::canonicalize(PathBuf::from(protocol::required_env(arm.root_env)?))
+        .map_err(|error| format!("canonicalize {}: {error}", arm.root_env))?;
+    let spec = sensenova_load_spec_at(arm, &repository, &revision, root, tier)?;
+    Ok((repository, revision, spec))
+}
+
+/// The one fresh planned request every SenseNova capture renders. Two steps: the first Step
+/// callback closes a conservative conditioning envelope and the second gives denoise its own
+/// measured interval before Decoding — the shared z_image/qwen/flux phase-boundary pattern. The
+/// family takes a guidance scale and no negative prompt (`image.supportsNegativePrompt: false`).
+fn sensenova_request(width: u32, height: u32) -> GenerationRequest {
+    GenerationRequest {
+        prompt: "an annotated infographic of a coastal lighthouse, crisp dense labels".to_owned(),
+        width,
+        height,
+        count: 1,
+        seed: Some(SENSENOVA_SEED),
+        steps: Some(2),
+        ..Default::default()
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn sensenova_context(
+    selection: &MemorySelection,
+    calibration: &MemoryCalibrationIdentity,
+    fingerprint: &str,
+    width: u32,
+    height: u32,
+    total_bytes: u64,
+    predicted_peak_bytes: u64,
+) -> MemoryRunContext {
+    MemoryRunContext {
+        selection: *selection,
+        optimization_authority: MemoryOptimizationAuthority::Calibrated,
+        calibration_abi: calibration.abi,
+        // A parameter only so the stale-evidence probe can pass a deliberate mismatch; the real
+        // call sites pass `calibration.fingerprint`.
+        calibration_fingerprint: fingerprint.to_owned(),
+        load_shape: calibration.load_shape,
+        mode: MemoryMode::TextToImage,
+        has_reference: false,
+        use_pid: false,
+        // The pinned SenseNova route gate fails a phase-bearing context closed on the registry
+        // fixture surface; the anchor is the plain single-phase text-to-image route.
+        has_phases: false,
+        geometry: MemoryGeometry {
+            width,
+            height,
+            batch: 1,
+            frames: 1,
+            reference_count: 0,
+        },
+        overlay: None,
+        budget: MemoryBudget {
+            total_bytes,
+            committed_bytes: 0,
+            reclaimable_bytes: 0,
+            reserved_headroom_bytes: 0,
+        },
+        predicted_peak_bytes,
+        cache_state: MemoryCacheState::Cold,
+        evidence_revision: format!("sc-22734@{}", protocol::INFERENCE_PIN),
+    }
+}
+
+/// The `mlx:sensenova_u1_8b` / `mlx:sensenova_u1_8b_fast` family arm (sc-22734).
+///
+/// Loads through the SAME seam the worker loads all six routes through —
+/// `runtime_macos::catalog().media().load(engine_id, &spec)`, which is what
+/// `crates/sceneworks-worker/src/inference_runtime.rs` wraps — reads the LOADED generator's own
+/// contract, and measures the resident anchor composition against it. `StagedResidency` and
+/// `BoundedDecode` are structurally not applicable on this family (one flat fused dual-path
+/// checkpoint, no separable conditioning component and no VAE decode phase), which is why the
+/// anchor is the resident rung on this lane AND on Candle rather than the usual staged one.
+fn run_sensenova(request: &Value) -> Result<Value, String> {
+    // Before the load, not inside it: a non-still target must be refused without paying for
+    // weights. The arm is resolved first so the refusal carries the member's own label.
+    let arm = sensenova_arm(request)?;
+    protocol::validate_still_geometry(request, arm.still_calibration)?;
+    protocol::validate_plain_overlay_target(request, arm.execution_path)?;
+    let planned_shape = planned_load_shape(request)?;
+    if planned_shape != LoadShape::EagerMaterialization {
+        return Err(format!(
+            "{} must use the eager_materialization load shape the worker loads this family under; \
+             deferred materialization is the rung-4 (bounded transformer residency) shape, not the \
+             resident anchor's",
+            arm.still_calibration
+        ));
+    }
+    let selection = planned_selection(request)?;
+    if selection.strategy != MemoryStrategy::Resident {
+        return Err(format!(
+            "{} measures the resident anchor: the pinned SenseNova contract classifies \
+             StagedResidency and BoundedDecode StructurallyNotApplicable, so no other rung is a \
+             capturable anchor on this family",
+            arm.still_calibration
+        ));
+    }
+    let tier = planned_qwen_tier(request)?;
+    validate_sensenova_fixture(request, arm, tier)?;
+    let (width, height) = protocol::target_geometry(request)?;
+    // The plan row must name the production identity this cell's loaded generator publishes —
+    // checked against the table BEFORE the load, so a row still carrying a conformance string
+    // fails in milliseconds rather than after a multi-gigabyte load.
+    let planned_fingerprint = protocol::planned(request)?
+        .get("calibrationFingerprint")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "planned.calibrationFingerprint must be a string".to_owned())?
+        .to_owned();
+    let expected_fingerprint = sensenova_calibration_fingerprint(arm, tier);
+    if planned_fingerprint != expected_fingerprint {
+        return Err(format!(
+            "plan/provider calibration mismatch: plan={planned_fingerprint}, the {} {tier} \
+             production identity is {expected_fingerprint}",
+            arm.model_id
+        ));
+    }
+    let (repository, revision, spec) = sensenova_load_spec(arm, tier)?;
+
+    let catalog =
+        runtime_macos::catalog().map_err(|error| format!("build MLX catalog: {error}"))?;
+    let generator = catalog.media().load(arm.provider, &spec).map_err(|error| {
+        format!(
+            "load real {} {tier} provider on {}: {error}",
+            arm.provider, arm.model_id
+        )
+    })?;
+    let contract = generator.memory_strategy_contract().ok_or_else(|| {
+        format!(
+            "loaded {} exposed no memory-strategy contract",
+            arm.provider
+        )
+    })?;
+    contract.validate_selection(&selection).map_err(|error| {
+        format!(
+            "pinned {} provider rejected planned selection: {error}",
+            arm.provider
+        )
+    })?;
+    let strategy = attested_strategy(
+        request,
+        &selection,
+        &contract.engaged_composition(selection.strategy),
+    )?;
+    // The LOADED generator's own identity is what the record attests. An absent one is refused by
+    // name — an anchor recorded against no identity would claim measured authority the engine
+    // never granted — and so is one that differs from the table the plan was bound to above.
+    let calibration = contract.calibration.as_ref().ok_or_else(|| {
+        format!(
+            "the loaded {} provider at inference {} published no calibration identity for the {} \
+             {tier} artifact; the production identity for this cell is {expected_fingerprint} \
+             (the engines publish one per (route, artifact-proven tier)), so this cell captures \
+             only at a pin that carries it",
+            arm.provider,
+            protocol::INFERENCE_PIN,
+            arm.model_id,
+        )
+    })?;
+    if calibration.fingerprint != expected_fingerprint {
+        return Err(format!(
+            "plan/provider calibration mismatch: plan={planned_fingerprint}, pinned provider={}",
+            calibration.fingerprint
+        ));
+    }
+    if calibration.load_shape != planned_shape {
+        return Err(format!(
+            "plan/provider load-shape mismatch: plan={}, pinned provider={}",
+            load_shape_key(planned_shape),
+            load_shape_key(calibration.load_shape)
+        ));
+    }
+    let hardware_bytes = request
+        .pointer("/hardware/memoryBytes")
+        .and_then(Value::as_u64)
+        .ok_or_else(|| "run request.hardware.memoryBytes must be an integer".to_owned())?;
+    let safety = |fingerprint: &str, total_bytes: u64, predicted: u64| {
+        generator.memory_strategy_safety_check(&sensenova_context(
+            &selection,
+            calibration,
+            fingerprint,
+            width,
+            height,
+            total_bytes,
+            predicted,
+        ))
+    };
+    // Admission mutation hygiene: the gate must ACCEPT a fitting request, so the two rejections
+    // below cannot pass through a blanket refusal.
+    if !matches!(
+        safety(&calibration.fingerprint, hardware_bytes, 1),
+        MemorySafetyDecision::Accept
+    ) {
+        return Err(format!(
+            "{} admission rejected a fitting probe budget; the scenario rejections below would be \
+             a blanket refusal, not evidence",
+            arm.provider
+        ));
+    }
+    if !matches!(
+        safety(&calibration.fingerprint, 0, 1),
+        MemorySafetyDecision::Reject { .. }
+    ) {
+        return Err(format!(
+            "{} admission accepted an unknown/zero memory budget",
+            arm.provider
+        ));
+    }
+    if !matches!(
+        safety("stale-sensenova-fingerprint", hardware_bytes, 1),
+        MemorySafetyDecision::Reject { .. }
+    ) {
+        return Err(format!(
+            "{} admission accepted stale calibration evidence",
+            arm.provider
+        ));
+    }
+
+    let conditioning = Cell::new(PhaseMemory {
+        active: 0,
+        cache: 0,
+    });
+    let denoise = Cell::new(PhaseMemory {
+        active: 0,
+        cache: 0,
+    });
+    clear_cache();
+    reset_peak_memory();
+    let pre_rung_active = get_active_memory() as u64;
+    let pre_rung_cache = get_cache_memory() as u64;
+    let selected = one_image(
+        generator
+            .generate(
+                &sensenova_request(width, height),
+                &mut |progress| match progress {
+                    Progress::Step { current: 1, .. } => {
+                        conditioning.set(PhaseMemory::capture());
+                        reset_peak_memory();
+                    }
+                    Progress::Decoding => {
+                        denoise.set(PhaseMemory::capture());
+                        reset_peak_memory();
+                    }
+                    _ => {}
+                },
+            )
+            .map_err(|error| format!("generate measured {} render: {error}", arm.model_id))?,
+    )?;
+    let decode = PhaseMemory::capture();
+    let conditioning = conditioning.get();
+    let denoise = denoise.get();
+    if [conditioning.active, denoise.active, decode.active].contains(&0) {
+        return Err(format!(
+            "a synchronized {} lifecycle phase reported a zero active peak",
+            arm.model_id
+        ));
+    }
+    let overall = PhaseMemory::overall(&[conditioning, denoise, decode]);
+    let predicted_peaks = image_predicted_peak_bytes(conditioning, denoise, decode);
+    let predicted = predicted_peaks.overall;
+    if !matches!(
+        safety(&calibration.fingerprint, predicted, predicted),
+        MemorySafetyDecision::Accept
+    ) {
+        return Err(format!(
+            "{} admission rejected an exact-fit calibrated budget",
+            arm.provider
+        ));
+    }
+
+    // Warm-repeat determinism and allocator cleanup bounds on this exact loaded provider.
+    clear_cache();
+    reset_peak_memory();
+    let baseline = one_image(
+        generator
+            .generate(&sensenova_request(width, height), &mut |_| {})
+            .map_err(|error| format!("generate warm {} control: {error}", arm.model_id))?,
+    )?;
+    let clean_warm_peak = get_peak_memory() as u64;
+    clear_cache();
+    let clean_post_cleanup = AllocatorState::capture_current();
+    let cleanup_bounds =
+        LifecycleMemoryBounds::from_clean_warm(clean_warm_peak, clean_post_cleanup);
+    let (maximum_error, mean_error, rms_error) = image_max_mean_rms_abs(&selected, &baseline)?;
+    if !flux2_quality_passes(maximum_error, mean_error, rms_error) {
+        return Err(format!(
+            "{} warm repeat exceeded the determinism envelope: max={maximum_error:.6}, \
+             mean={mean_error:.6}, rms={rms_error:.6}",
+            arm.model_id
+        ));
+    }
+    reset_peak_memory();
+    let warm = one_image(
+        generator
+            .generate(&sensenova_request(width, height), &mut |_| {})
+            .map_err(|error| format!("generate warm {} repeat: {error}", arm.model_id))?,
+    )?;
+    let warm_peak = get_peak_memory() as u64;
+    if !cleanup_bounds.allows_warm_peak(warm_peak) {
+        return Err(format!(
+            "{} warm repeat peaked at {warm_peak} bytes, above the clean warm control \
+             {clean_warm_peak} bytes plus 2%",
+            arm.model_id
+        ));
+    }
+    clear_cache();
+    let warm_post_cleanup = AllocatorState::capture_current();
+    if !cleanup_bounds.allows_retained(warm_post_cleanup) {
+        return Err(format!(
+            "{} warm repeat retained active/cache bytes {warm_post_cleanup:?} above the clean warm \
+             cleanup {clean_post_cleanup:?} plus {} bytes",
+            arm.model_id, cleanup_bounds.tolerance_bytes,
+        ));
+    }
+    let (warm_maximum, warm_mean, warm_rms) = image_max_mean_rms_abs(&selected, &warm)?;
+    if !flux2_quality_passes(warm_maximum, warm_mean, warm_rms) {
+        return Err(format!(
+            "{} second warm repeat changed the deterministic output",
+            arm.model_id
+        ));
+    }
+
+    // Arm-internal negative-mutation falsifiability check: a runtime_complete record must keep
+    // `negativeMutation` null, so the breach is verified here and the numbers land in diagnostics.
+    let mutated = qwen_negative_mutation(&selected);
+    let (mutated_maximum, mutated_mean, mutated_rms) = image_max_mean_rms_abs(&mutated, &baseline)?;
+    if flux2_quality_passes(mutated_maximum, mutated_mean, mutated_rms) {
+        return Err(format!(
+            "{} output mutation did not breach the determinism envelope",
+            arm.model_id
+        ));
+    }
+
+    let lifecycle_blocker = concat!(
+        "the pinned SenseNova crate opens no memory-strategy request scope for the resident anchor ",
+        "composition and exposes no calibration fault-injection site, so the scoped lifecycle ",
+        "scenarios cannot execute; unscoped repeat determinism and allocator cleanup bounds are ",
+        "attested in quality and diagnostics instead"
+    );
+    let mut fragment = json!({
+        "status": "runtime_complete",
+        "strategy": strategy,
+        "loadShape": load_shape_key(calibration.load_shape),
+        "artifact": { "repository": repository, "resolvedRevision": revision, "variant": tier },
+        "sweep": flux_one_complete_sweep(request)?,
+        "scenarios": [
+            { "name": "exact_fit", "result": "passed", "predictedBytes": predicted, "effectiveBudgetBytes": predicted },
+            { "name": "unknown_budget", "result": "passed" },
+            { "name": "stale_evidence", "result": "passed" },
+            { "name": "warm_repeat", "result": "not_run", "reason": lifecycle_blocker },
+            { "name": "cancel", "result": "not_run", "reason": lifecycle_blocker },
+            { "name": "error", "result": "not_run", "reason": lifecycle_blocker },
+            { "name": "loadability", "result": "passed" },
+            { "name": "overlay", "result": "not_applicable", "reason": "settled below from the declared target" }
+        ],
+        "predictedPeakBytes": predicted_peaks.json(),
+        "observedMemory": {
+            "conditioning": conditioning.json(),
+            "denoise": denoise.json(),
+            "decode": decode.json(),
+            "overall": overall.json(),
+        },
+        "quality": {
+            "contract": "identical artifact, prompt, guidance, seed, geometry, steps, tier, and loaded provider; cold measured render versus warm unscoped repeats",
+            "identicalInputs": true,
+            "result": "passed",
+            "maximumError": maximum_error,
+            "meanError": mean_error,
+            "rootMeanSquareError": rms_error,
+            "maximumErrorThreshold": FLUX2_MAX_THRESHOLD,
+            "meanErrorThreshold": FLUX2_MEAN_THRESHOLD,
+            "rootMeanSquareErrorThreshold": FLUX2_RMS_THRESHOLD,
+        },
+        "negativeMutation": null,
+        "loadability": {
+            "result": "passed",
+            "resolvedPathFingerprint": format!("{repository}@{revision}:{tier}"),
+        },
+        "diagnostics": protocol::diagnostics(
+            &format!("memory-mlx-adapter:sensenova-u1-{}-shared-ladder", arm.slug),
+            "executed",
+            [lifecycle_blocker.to_owned()],
+            [
+                ("preRungActiveAfterClear", "bytes", pre_rung_active),
+                ("preRungCacheAfterClear", "bytes", pre_rung_cache),
+                ("conditioningActivePeak", "bytes", conditioning.active),
+                ("denoiseActivePeak", "bytes", denoise.active),
+                ("decodeActivePeak", "bytes", decode.active),
+                ("overallAllocatorEnvelope", "bytes", overall.allocator_bytes()),
+                ("lifecycleCleanWarmPeak", "bytes", clean_warm_peak),
+                ("lifecycleCleanPostCleanupActive", "bytes", clean_post_cleanup.active),
+                ("lifecycleCleanPostCleanupCache", "bytes", clean_post_cleanup.cache),
+                ("lifecycleCleanupTolerance", "bytes", cleanup_bounds.tolerance_bytes),
+                ("lifecycleWarmRepeatPeak", "bytes", warm_peak),
+                ("lifecycleWarmRepeatPostCleanupActive", "bytes", warm_post_cleanup.active),
+                ("lifecycleWarmRepeatPostCleanupCache", "bytes", warm_post_cleanup.cache),
+                ("negativeMutationMaximumErrorPer255", "count", (mutated_maximum * 255.0).round() as u64),
+                ("negativeMutationMeanErrorPer255", "count", (mutated_mean * 255.0).round() as u64),
+                ("loadShapeDeferred", "count", u64::from(calibration.load_shape == LoadShape::DeferredMaterialization)),
+            ],
+        ),
+        "capturedAt": protocol::captured_at(),
+    });
+    protocol::settle_plain_overlay_scenario(request, &mut fragment, arm.execution_path)?;
+    Ok(fragment)
+}
+
 // -------------------------------------------------------------------------------------------
 // SD3.5 family (sc-22730, epic 22723 S7)
 // -------------------------------------------------------------------------------------------
@@ -14790,7 +17938,11 @@ fn run(request: &Value) -> Result<Value, String> {
         // family and execution path; the arm resolves which member from `(provider, mode)`.
         Z_IMAGE_BASE_PROVIDER => run_z_image_reference(request),
         KREA_BASE_PROVIDER => run_krea_base(request),
+        // sc-22729: the whole SDXL family rides one engine id; the arm resolves the member from
+        // `planned.target.modelId` and refuses an id no member serves.
         SDXL_PROVIDER => run_sdxl(request),
+        // sc-22729: the bespoke identity route — its own crate, its own loader, no registry entry.
+        INSTANTID_PROVIDER => run_instantid(request),
         KREA_PROVIDER => run_krea_control(request),
         QWEN_PROVIDER => run_qwen_provider(request),
         // sc-22728: the Qwen edit lane. One engine provider serves both shipped catalog ids, so the
@@ -14801,6 +17953,12 @@ fn run(request: &Value) -> Result<Value, String> {
         // this ONE engine provider id; `flux2_arm` resolves which from `(provider, modelId)` and
         // refuses an unknown pair by name.
         FLUX2_KLEIN_PROVIDER => run_flux2(request),
+        // sc-22734: the SenseNova-U1 family. Six catalog models over two registry ids; the arm
+        // resolves which member from `(provider, modelId)` and refuses any other pair by name.
+        // One arm per line: `stale-lane-report.mjs#adapterCapturableProviders` parses these arms
+        // and accepts only a bare literal or a single `&str` const per arm.
+        SENSENOVA_PROVIDER => run_sensenova(request),
+        SENSENOVA_FAST_PROVIDER => run_sensenova(request),
         // sc-22726: the FLUX.1 family. Three registry ids on one arm — the two base text-to-image
         // providers of `mlx-gen-flux`, and `mlx-gen-pulid`'s identity route over the same
         // FLUX.1-dev backbone. The arm resolves which member from `(provider, mode)`.
@@ -14810,6 +17968,18 @@ fn run(request: &Value) -> Result<Value, String> {
         FLUX1_DEV_PROVIDER => run_flux_one(request),
         FLUX1_SCHNELL_PROVIDER => run_flux_one(request),
         PULID_FLUX_PROVIDER => run_flux_one(request),
+        // sc-22733: the Mage-Flow family. SIX registered engine providers on one arm — the three
+        // text-to-image checkpoints and the three instruction editors of `mlx-gen-mage`
+        // (`model::MODEL_IDS`) — each with its own tiered rehost, all sharing one text-encoder/VAE
+        // components snapshot. The arm resolves which member from `(provider, modelId)`.
+        // One arm per line, bare literals: see the FLUX.1 note above — the derived capturable set
+        // in `stale-lane-report.mjs#adapterCapturableProviders` parses these arms.
+        "mage_flow" => run_mage_provider(request),
+        "mage_flow_base" => run_mage_provider(request),
+        "mage_flow_turbo" => run_mage_provider(request),
+        "mage_flow_edit" => run_mage_provider(request),
+        "mage_flow_edit_base" => run_mage_provider(request),
+        "mage_flow_edit_turbo" => run_mage_provider(request),
         // sc-22731: the SANA and Chroma1 families. Five registry ids on one arm — the two
         // `mlx-gen-sana` routes and the three `mlx-gen-chroma` ones. One arm per line, for the
         // same reason the FLUX.1 block above is: `stale-lane-report.mjs#adapterCapturableProviders`
@@ -17633,7 +20803,9 @@ mod sdxl_tests {
         let base = minimal_request(SDXL_PROVIDER);
         assert!(validate_sdxl_target(&base).is_ok());
         for (pointer, value) in [
-            ("/planned/target/modelId", json!("realvisxl")),
+            // sc-22729: `realvisxl` used to be the mutation here, and it is now a REAL family
+            // member with its own artifact family. A model id no member serves is still refused.
+            ("/planned/target/modelId", json!("sdxl_turbo")),
             ("/planned/target/mode", json!("image_to_image")),
             ("/planned/target/geometry/batch", json!(2)),
             ("/planned/target/geometry/frames", json!(2)),
@@ -20989,6 +24161,308 @@ mod minimax_tests {
             ),
             (3, 1, 2)
         );
+    }
+}
+
+/// sc-22734 — the SenseNova-U1 family arm: six catalog models over the `sensenova_u1_8b` and
+/// `sensenova_u1_8b_fast` registry ids.
+///
+/// Everything here is env-free and weights-free, which is the point: the arm's plan binding
+/// (member resolution, tier, root suffix, load composition, request shape) is decided before a
+/// single weight file is opened, so it can be proven on a CPU-only host. The measured render
+/// belongs to the terminal capture campaign.
+#[cfg(test)]
+mod sensenova_tests {
+    use super::*;
+
+    fn sensenova_planned(provider: &str, model_id: &str, tier: &str) -> Value {
+        json!({
+            "planned": {
+                "target": {
+                    "provider": provider,
+                    "modelId": model_id,
+                    "tier": tier,
+                    "mode": "text_to_image",
+                    "overlay": "none",
+                    "geometry": { "width": 1024, "height": 1024, "batch": 1, "frames": 1 }
+                },
+                "backend": "mlx",
+                "loadShape": "eager_materialization",
+                "strategy": { "rung": "resident", "engagedRungs": ["resident"], "parameters": {} },
+                "calibrationFingerprint": "unused",
+                "fixture": "unused"
+            }
+        })
+    }
+
+    /// The member is resolved from the PAIR, and every per-member field is unique across the
+    /// family — two members sharing an env family, a repository or a slug would let one member's
+    /// capture be recorded as another's.
+    #[test]
+    fn sensenova_arm_is_resolved_from_the_plans_provider_and_model_id() {
+        for arm in SENSENOVA_FAMILY {
+            let resolved =
+                sensenova_arm(&sensenova_planned(arm.provider, arm.model_id, "q4")).unwrap();
+            assert_eq!(resolved, arm);
+        }
+        for field in [
+            SENSENOVA_FAMILY.map(|arm| arm.model_id).to_vec(),
+            SENSENOVA_FAMILY.map(|arm| arm.slug).to_vec(),
+            SENSENOVA_FAMILY.map(|arm| arm.repository_env).to_vec(),
+            SENSENOVA_FAMILY.map(|arm| arm.revision_env).to_vec(),
+            SENSENOVA_FAMILY.map(|arm| arm.root_env).to_vec(),
+            SENSENOVA_FAMILY.map(|arm| arm.expected_repository).to_vec(),
+            SENSENOVA_FAMILY.map(|arm| arm.execution_path).to_vec(),
+            SENSENOVA_FAMILY.map(|arm| arm.still_calibration).to_vec(),
+        ] {
+            let mut unique = field.clone();
+            unique.sort_unstable();
+            unique.dedup();
+            assert_eq!(unique.len(), field.len(), "collision in {field:?}");
+        }
+        // A model id no member serves is refused BY NAME, never measured as its neighbour.
+        for absent in ["sensenova_u1_8b_infographic_v4", "z_image", "qwen_image"] {
+            let error = sensenova_arm(&sensenova_planned(SENSENOVA_PROVIDER, absent, "q4"))
+                .expect_err("an unserved model id must be refused");
+            assert!(error.contains(&format!("modelId {absent:?}")), "{error}");
+        }
+        // And so is a pair that crosses the quality/fast split: the distilled trio is a separate
+        // engine over separate weights, not a mode of the quality one.
+        let crossed = sensenova_arm(&sensenova_planned(
+            SENSENOVA_FAST_PROVIDER,
+            "sensenova_u1_8b",
+            "q4",
+        ))
+        .expect_err("a crossed (provider, modelId) pair must be refused");
+        assert!(crossed.contains("sensenova_u1_8b"), "{crossed}");
+        assert!(crossed.contains(SENSENOVA_FAST_PROVIDER), "{crossed}");
+    }
+
+    /// The spec is the shape the WORKER loads: resident, eagerly materialized, the resolved route
+    /// bound, and the tier's own quant (none at bf16).
+    #[test]
+    fn sensenova_load_spec_binds_the_worker_shape_and_the_planned_tier() {
+        let revision = "0123456789abcdef0123456789abcdef01234567";
+        for arm in SENSENOVA_FAMILY {
+            for (tier, expected) in [
+                ("bf16", None),
+                ("q4", Some(Quant::Q4)),
+                ("q8", Some(Quant::Q8)),
+            ] {
+                let repository = arm.expected_repository;
+                let root = PathBuf::from(format!(
+                    "/cache/models--{}/snapshots/{revision}/{tier}",
+                    repository.replace('/', "--")
+                ));
+                let spec =
+                    sensenova_load_spec_at(arm, repository, revision, root.clone(), tier).unwrap();
+                assert_eq!(spec.offload_policy, OffloadPolicy::Resident, "{repository}");
+                assert_eq!(
+                    spec.load_shape,
+                    LoadShape::EagerMaterialization,
+                    "{repository}"
+                );
+                assert_eq!(spec.quantize, expected, "{repository}:{tier}");
+                assert_eq!(spec.resolved_route.as_deref(), Some(arm.model_id));
+                assert!(matches!(&spec.weights, WeightsSource::Dir(dir) if dir == &root));
+                assert!(spec.adapters.is_empty(), "SenseNova attaches no adapters");
+                assert!(spec.components.is_empty(), "the distill LoRA is pre-merged");
+                assert!(
+                    spec.text_encoder.is_none(),
+                    "the MoT backbone has no external TE"
+                );
+            }
+            // A root at another tier cannot satisfy this plan, and neither can another repository.
+            let root = PathBuf::from(format!(
+                "/cache/models--{}/snapshots/{revision}/q4",
+                arm.expected_repository.replace('/', "--")
+            ));
+            assert!(
+                sensenova_load_spec_at(arm, arm.expected_repository, revision, root.clone(), "q8")
+                    .is_err(),
+                "a q4 root must not satisfy a q8 plan"
+            );
+            assert!(
+                sensenova_load_spec_at(arm, "sensenova/SenseNova-U1-8B-MoT", revision, root, "q4")
+                    .is_err(),
+                "the upstream snapshot must not satisfy the tiered rehost plan"
+            );
+        }
+    }
+
+    /// Every SenseNova cell the committed plan declares resolves to an implemented member, and its
+    /// fixture satisfies the same binding a capture would apply. The expected set is DERIVED from
+    /// the family and the shipped tiers, never a count.
+    #[test]
+    fn every_planned_sensenova_mlx_cell_resolves_to_an_implemented_member() {
+        let plan: Value = serde_json::from_str(include_str!(
+            "../../../../config/memory-calibration-plan.json"
+        ))
+        .expect("the anchor plan parses");
+        let mut seen = std::collections::BTreeSet::new();
+        for (key, entry) in plan["anchors"].as_object().expect("anchors object") {
+            let provider = entry["provider"].as_str().unwrap();
+            if !key.ends_with(":mlx")
+                || !matches!(provider, SENSENOVA_PROVIDER | SENSENOVA_FAST_PROVIDER)
+            {
+                continue;
+            }
+            seen.insert(key.clone());
+            let model_id = key.split(':').next().unwrap();
+            let tier = key.split(':').nth(1).unwrap();
+            let request = json!({ "planned": {
+                "target": {
+                    "provider": provider,
+                    "modelId": model_id,
+                    "tier": tier,
+                    "mode": entry["mode"].clone(),
+                    "overlay": entry["overlay"].clone(),
+                    "geometry": entry["geometry"].clone(),
+                },
+                "loadShape": entry["loadShape"].clone(),
+                "fixture": entry["fixture"].clone(),
+            }});
+            let arm = sensenova_arm(&request).unwrap_or_else(|error| panic!("{key}: {error}"));
+            validate_sensenova_fixture(&request, arm, tier)
+                .unwrap_or_else(|error| panic!("{key}: {error}"));
+            assert_eq!(
+                planned_load_shape(&request).unwrap(),
+                LoadShape::EagerMaterialization,
+                "{key}: the worker loads this family eagerly; deferred is the rung-4 shape"
+            );
+        }
+        let expected: std::collections::BTreeSet<String> = SENSENOVA_FAMILY
+            .iter()
+            .flat_map(|arm| {
+                ["bf16", "q4", "q8"]
+                    .iter()
+                    .map(move |tier| format!("{}:{tier}:mlx", arm.model_id))
+            })
+            .collect();
+        assert_eq!(
+            seen, expected,
+            "every shipped SenseNova MLX cell, exactly once"
+        );
+    }
+
+    /// Every SenseNova MLX plan row names the production identity its loaded generator publishes.
+    /// The two measured keys are the engine's own constants byte-for-byte, no row names the
+    /// weights-free conformance namespace, and every cell's identity is distinct — a shared string
+    /// would let one cell's anchor bind another's measured evidence.
+    #[test]
+    fn every_planned_sensenova_mlx_cell_names_the_identity_its_loaded_generator_publishes() {
+        let plan: Value = serde_json::from_str(include_str!(
+            "../../../../config/memory-calibration-plan.json"
+        ))
+        .expect("the anchor plan parses");
+        let mut identities = std::collections::BTreeMap::new();
+        for (key, entry) in plan["anchors"].as_object().expect("anchors object") {
+            let provider = entry["provider"].as_str().unwrap();
+            if !key.ends_with(":mlx")
+                || !matches!(provider, SENSENOVA_PROVIDER | SENSENOVA_FAST_PROVIDER)
+            {
+                continue;
+            }
+            let model_id = key.split(':').next().unwrap();
+            let tier = key.split(':').nth(1).unwrap();
+            let arm = sensenova_arm(&sensenova_planned(provider, model_id, tier)).unwrap();
+            let planned = entry["calibrationFingerprint"]
+                .as_str()
+                .unwrap_or_else(|| panic!("{key}: calibrationFingerprint must be a string"));
+            assert!(
+                !planned.starts_with("sensenova-static-registry-behavior"),
+                "{key}: {planned} is the weights-free registry-behaviour identity, which no \
+                 production load returns"
+            );
+            assert_eq!(
+                planned,
+                sensenova_calibration_fingerprint(arm, tier),
+                "{key}: the plan row must name the loaded generator's production identity"
+            );
+            assert!(
+                identities.insert(planned.to_owned(), key.clone()).is_none(),
+                "{key}: {planned} is already claimed by {}",
+                identities[planned]
+            );
+        }
+        assert_eq!(
+            identities.len(),
+            SENSENOVA_FAMILY.len() * 3,
+            "one distinct identity per (route, shipped tier)"
+        );
+        // The preserved measured keys, bound to the engine's constants so the table cannot drift.
+        assert_eq!(
+            identities[runtime_macos::providers::sensenova::memory_strategy::
+                QUALITY_CALIBRATION_FINGERPRINT],
+            "sensenova_u1_8b:q8:mlx"
+        );
+        assert_eq!(
+            identities
+                [runtime_macos::providers::sensenova::memory_strategy::FAST_CALIBRATION_FINGERPRINT],
+            "sensenova_u1_8b_fast:q8:mlx"
+        );
+    }
+
+    /// The anchor is the RESIDENT rung under the eager load shape. The pinned contract classifies
+    /// `StagedResidency` and `BoundedDecode` structurally not applicable on this family, and rung 4
+    /// keys off the deferred load shape, so neither is a capturable anchor here — both are refused
+    /// before any weights are opened.
+    #[test]
+    fn sensenova_refuses_a_non_resident_rung_and_a_deferred_load_shape() {
+        let mut deferred = sensenova_planned(SENSENOVA_PROVIDER, "sensenova_u1_8b", "q8");
+        deferred["planned"]["loadShape"] = json!("deferred_materialization");
+        let error = run_sensenova(&deferred).expect_err("the deferred shape is not the anchor's");
+        assert!(error.contains("eager_materialization"), "{error}");
+
+        let mut staged = sensenova_planned(SENSENOVA_PROVIDER, "sensenova_u1_8b", "q8");
+        staged["planned"]["strategy"] = json!({
+            "rung": "staged_residency",
+            "engagedRungs": ["resident", "staged_residency"],
+            "parameters": {}
+        });
+        let error = run_sensenova(&staged).expect_err("staged residency is structurally N/A here");
+        assert!(error.contains("StructurallyNotApplicable"), "{error}");
+    }
+
+    /// The fixture is bound to the member, the tier and the geometry edge.
+    #[test]
+    fn sensenova_fixture_is_bound_to_the_member_tier_and_edge() {
+        let request = sensenova_planned(SENSENOVA_PROVIDER, "sensenova_u1_8b", "q4");
+        let bind = |fixture: &str, arm, tier| {
+            validate_sensenova_fixture(
+                &json!({ "planned": {
+                    "fixture": fixture,
+                    "target": request["planned"]["target"].clone(),
+                }}),
+                arm,
+                tier,
+            )
+        };
+        assert!(bind(
+            "quality-mlx-q4-1024-seed22734-step2",
+            SENSENOVA_BASE_ARM,
+            "q4"
+        )
+        .is_ok());
+        for (fixture, expected) in [
+            // another member's stem
+            (
+                "infographic-v2-mlx-q4-1024-seed22734-step2",
+                "must start with",
+            ),
+            // another tier
+            ("quality-mlx-q8-1024-seed22734-step2", "must start with"),
+            // another edge
+            ("quality-mlx-q4-768-seed22734-step2", "must start with"),
+            // another seed
+            ("quality-mlx-q4-1024-seed1-step2", "does not match"),
+            // another step count
+            ("quality-mlx-q4-1024-seed22734-step4", "two-step"),
+        ] {
+            let error = bind(fixture, SENSENOVA_BASE_ARM, "q4")
+                .expect_err("the fixture must be bound to its cell");
+            assert!(error.contains(expected), "{fixture}: {error}");
+        }
     }
 }
 
